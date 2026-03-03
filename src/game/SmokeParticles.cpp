@@ -8,6 +8,22 @@
 
 static const char *smokeParticle_SnapshotName = "_SmokeParticle_Snapshot_";
 
+static ID_INLINE bool SmokePointerInPool( const singleSmoke_t *smoke, const singleSmoke_t *pool, const int poolCount ) {
+	if ( smoke == NULL ) {
+		return true;
+	}
+
+	const size_t smokeAddress = reinterpret_cast<size_t>( smoke );
+	const size_t poolStart = reinterpret_cast<size_t>( pool );
+	const size_t poolEnd = poolStart + static_cast<size_t>( poolCount ) * sizeof( pool[0] );
+
+	if ( smokeAddress < poolStart || smokeAddress >= poolEnd ) {
+		return false;
+	}
+
+	return ( ( smokeAddress - poolStart ) % sizeof( pool[0] ) ) == 0;
+}
+
 /*
 ================
 idSmokeParticles::idSmokeParticles
@@ -110,12 +126,31 @@ idSmokeParticles::FreeSmokes
 void idSmokeParticles::FreeSmokes( void ) {
 	for ( int activeStageNum = 0; activeStageNum < activeStages.Num(); activeStageNum++ ) {
 		singleSmoke_t *smoke, *next, *last;
+		int traversed = 0;
 
 		activeSmokeStage_t *active = &activeStages[activeStageNum];
 		const idParticleStage *stage = active->stage;
 
 		for ( last = NULL, smoke = active->smokes; smoke; smoke = next ) {
+			if ( !SmokePointerInPool( smoke, smokes, MAX_SMOKE_PARTICLES ) ) {
+				gameLocal.Warning( "idSmokeParticles::FreeSmokes: invalid smoke node %p, clearing stage list", smoke );
+				active->smokes = NULL;
+				break;
+			}
+
 			next = smoke->next;
+			if ( !SmokePointerInPool( next, smokes, MAX_SMOKE_PARTICLES ) ) {
+				gameLocal.Warning( "idSmokeParticles::FreeSmokes: invalid smoke next %p, clearing stage list", next );
+				active->smokes = NULL;
+				break;
+			}
+
+			traversed++;
+			if ( traversed > MAX_SMOKE_PARTICLES ) {
+				gameLocal.Warning( "idSmokeParticles::FreeSmokes: detected cyclic smoke list, clearing stage list" );
+				active->smokes = NULL;
+				break;
+			}
 
 			float frac = (float)( gameLocal.time - smoke->privateStartTime ) / ( stage->particleLife * 1000 );
 			if ( frac >= 1.0f ) {
@@ -359,19 +394,45 @@ bool idSmokeParticles::UpdateRenderEntity( renderEntity_s *renderEntity, const r
 
 	for ( int activeStageNum = 0; activeStageNum < activeStages.Num(); activeStageNum++ ) {
 		singleSmoke_t *smoke, *next, *last;
+		int count = 0;
+		int traversed = 0;
 
 		activeSmokeStage_t *active = &activeStages[activeStageNum];
 		const idParticleStage *stage = active->stage;
+
+		if ( !stage ) {
+			gameLocal.Warning( "idSmokeParticles::UpdateRenderEntity: null stage pointer, removing active stage" );
+			activeStages.RemoveIndex( activeStageNum );
+			activeStageNum--;
+			continue;
+		}
 
 		if ( !stage->material ) {
 			continue;
 		}
 
 		// allocate a srfTriangles that can hold all the particles
-		int count = 0;
 		for ( smoke = active->smokes; smoke; smoke = smoke->next ) {
+			if ( !SmokePointerInPool( smoke, smokes, MAX_SMOKE_PARTICLES ) ) {
+				gameLocal.Warning( "idSmokeParticles::UpdateRenderEntity: invalid smoke node %p, clearing stage list", smoke );
+				active->smokes = NULL;
+				break;
+			}
+
 			count++;
+			if ( count > MAX_SMOKE_PARTICLES ) {
+				gameLocal.Warning( "idSmokeParticles::UpdateRenderEntity: detected cyclic smoke list, clearing stage list" );
+				active->smokes = NULL;
+				break;
+			}
 		}
+
+		if ( !active->smokes ) {
+			activeStages.RemoveIndex( activeStageNum );
+			activeStageNum--;
+			continue;
+		}
+
 		int	quads = count * stage->NumQuadsPerParticle();
 		srfTriangles_t *tri = renderEntity->hModel->AllocSurfaceTriangles( quads * 4, quads * 6 );
 		tri->numIndexes = quads * 6;
@@ -396,7 +457,25 @@ bool idSmokeParticles::UpdateRenderEntity( renderEntity_s *renderEntity, const r
 
 		tri->numVerts = 0;
 		for ( last = NULL, smoke = active->smokes; smoke; smoke = next ) {
+			if ( !SmokePointerInPool( smoke, smokes, MAX_SMOKE_PARTICLES ) ) {
+				gameLocal.Warning( "idSmokeParticles::UpdateRenderEntity: invalid smoke node %p during build, clearing stage list", smoke );
+				active->smokes = NULL;
+				break;
+			}
+
 			next = smoke->next;
+			if ( !SmokePointerInPool( next, smokes, MAX_SMOKE_PARTICLES ) ) {
+				gameLocal.Warning( "idSmokeParticles::UpdateRenderEntity: invalid smoke next %p during build, clearing stage list", next );
+				active->smokes = NULL;
+				break;
+			}
+
+			traversed++;
+			if ( traversed > MAX_SMOKE_PARTICLES ) {
+				gameLocal.Warning( "idSmokeParticles::UpdateRenderEntity: detected cyclic smoke list during build, clearing stage list" );
+				active->smokes = NULL;
+				break;
+			}
 
 			g.frac = (float)( gameLocal.time - smoke->privateStartTime ) / ( stage->particleLife * 1000 );
 			if ( g.frac >= 1.0f ) {
@@ -426,6 +505,14 @@ bool idSmokeParticles::UpdateRenderEntity( renderEntity_s *renderEntity, const r
 
 			last = smoke;
 		}
+
+		if ( !active->smokes ) {
+			renderEntity->hModel->FreeSurfaceTriangles( tri );
+			activeStages.RemoveIndex( activeStageNum );
+			activeStageNum--;
+			continue;
+		}
+
 		if ( tri->numVerts > quads * 4 ) {
 			gameLocal.Error( "idSmokeParticles::UpdateRenderEntity: miscounted verts" );
 		}
@@ -468,6 +555,7 @@ bool idSmokeParticles::UpdateRenderEntity( renderEntity_s *renderEntity, const r
 			renderEntity->hModel->AddSurface( surf );
 		}
 	}
+
 	return true;
 }
 

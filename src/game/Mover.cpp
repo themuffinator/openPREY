@@ -1078,7 +1078,9 @@ idMover::Event_SetMoveTime
 */
 void idMover::Event_SetMoveTime( float time ) {
 	if ( time <= 0 ) {
-		gameLocal.Error( "Cannot set time less than or equal to 0." );
+		// Some shipped scripts (for example feedingtowera slab timings) can
+		// transiently compute 0 during time tweaks. Clamp to a minimal positive value.
+		time = MS2SEC( 1 );
 	}
 
 	move_speed = 0;

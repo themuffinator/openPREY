@@ -4869,7 +4869,7 @@ void idGameLocal::SpreadLocations() {
 			Error( "idGameLocal::SpreadLocations: areaNum >= gameRenderWorld->NumAreas()" );
 		}
 		if ( locationEntities[areaNum] ) {
-			Warning( "location entity '%s' overlaps '%s'", ent->spawnArgs.GetString( "name" ),
+			DPrintf( "location entity '%s' overlaps '%s'\n", ent->spawnArgs.GetString( "name" ),
 				locationEntities[areaNum]->spawnArgs.GetString( "name" ) );
 			continue;
 		}
