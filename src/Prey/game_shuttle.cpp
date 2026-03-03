@@ -621,7 +621,7 @@ void hhShuttle::ClientPredictionThink( void ) {
 
 // These for model based thrusters ------------------------------------------------
 
-hhVehicleThruster *hhShuttle::SpawnThruster(idVec3 &offset, idVec3 &dir, const char *thrusterName, bool master) {
+hhVehicleThruster *hhShuttle::SpawnThruster(const idVec3 &offset, const idVec3 &dir, const char *thrusterName, bool master) {
 	idVec3 pos = GetOrigin() + offset * GetAxis();
 	idVec3 direction = dir * GetAxis();
 	idMat3 axis = direction.ToMat3();

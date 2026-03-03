@@ -136,8 +136,8 @@ public:
 	virtual void	LockedGuiReleased(hhPlayer *player);
 
 	void			StartGame();
-	bool			MoveIsValid(idVec2 &move, MovingGamePiece &piece);
-	bool			DoMove(idVec2 &move, MovingGamePiece &piece);
+	bool			MoveIsValid( const idVec2 &move, MovingGamePiece &piece );
+	bool			DoMove( const idVec2 &move, MovingGamePiece &piece );
 	void			CheckForCollisions(MovingGamePiece &piece);
 	void			ResetMap();
 	void			ResetPlayerAndMonsters();

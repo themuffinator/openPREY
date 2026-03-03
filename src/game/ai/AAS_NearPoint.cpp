@@ -24,7 +24,7 @@ idVec3 idAASLocal::FindNearestPoint(const idVec3 &ally,
 
 
 	FindNearestPointInArea(nearPoint, 
-						   PointReachableAreaNum(follower),
+						   PointReachableAreaNum( follower, DefaultSearchBounds(), ( AREA_REACHABLE_WALK | AREA_REACHABLE_FLY ) ),
 						   areasEntered);
 
 	

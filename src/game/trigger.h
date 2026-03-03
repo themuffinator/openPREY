@@ -69,7 +69,7 @@ private:
 	float				delay;
 	float				random_delay;
 	int					nextTriggerTime;
-	idStr				requires;
+	idStr				requiredItem;
 	int					removeItem;
 	bool				touchClient;
 	bool				touchOther;

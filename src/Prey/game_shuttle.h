@@ -124,7 +124,7 @@ public:
 	int						noTractorTime; //HUMANHEAD rww
 protected:
 	virtual void			Ticker();
-	hhVehicleThruster *		SpawnThruster( idVec3 &offset, idVec3 &dir, const char *thrusterName, bool master );
+	hhVehicleThruster *		SpawnThruster( const idVec3 &offset, const idVec3 &dir, const char *thrusterName, bool master );
 	void					UpdateEffects( const idVec3& impulse );
 
 	virtual void			SetConsoleModel();

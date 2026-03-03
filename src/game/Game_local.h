@@ -233,6 +233,10 @@ private:
 
 //============================================================================
 
+int						OpenPrey_GetSpawnId( int index );
+idEntity *				OpenPrey_GetEntity( int index );
+int						OpenPrey_GetSpawnIdForEntity( const idEntity *ent );
+
 template< class type >
 class idEntityPtr {
 public:
@@ -339,7 +343,7 @@ ID_INLINE idEntityPtr<type> &idEntityPtr<type>::Assign( const idEntity *ent ) {
 		spawnId = 0;
 	} else {
 		//HUMANHEAD rww - take cent bits into account
-		spawnId = ( gameLocal.spawnIds[ent->entityNumber] << GENTITYNUM_BITS_PLUSCENT ) | ent->entityNumber;
+		spawnId = OpenPrey_GetSpawnIdForEntity( ent );
 	}
 	return *this;
 }
@@ -359,7 +363,7 @@ ID_INLINE idEntityPtr<type> &idEntityPtr<type>::operator=( type *ent ) {
 	if ( ent == NULL ) {
 		spawnId = 0;
 	} else {
-		spawnId = ( gameLocal.spawnIds[ent->entityNumber] << GENTITYNUM_BITS ) | ent->entityNumber;
+		spawnId = ( OpenPrey_GetSpawnId( ent->entityNumber ) << GENTITYNUM_BITS ) | ent->entityNumber;
 	}
 	return *this;
 }
@@ -372,7 +376,7 @@ ID_INLINE bool idEntityPtr<type>::SetSpawnId( int id ) {
 		return false;
 	}
 	//HUMANHEAD rww - take cent bits into account
-	if ( ( id >> GENTITYNUM_BITS_PLUSCENT ) == gameLocal.spawnIds[ id & ( ( 1 << GENTITYNUM_BITS_PLUSCENT ) - 1 ) ] ) {
+	if ( ( id >> GENTITYNUM_BITS_PLUSCENT ) == OpenPrey_GetSpawnId( id & ( ( 1 << GENTITYNUM_BITS_PLUSCENT ) - 1 ) ) ) {
 		spawnId = id;
 		return true;
 	}
@@ -382,15 +386,15 @@ ID_INLINE bool idEntityPtr<type>::SetSpawnId( int id ) {
 template< class type >
 ID_INLINE bool idEntityPtr<type>::IsValid( void ) const {
 	//HUMANHEAD rww - take cent bits into account
-	return ( gameLocal.spawnIds[ spawnId & ( ( 1 << GENTITYNUM_BITS_PLUSCENT ) - 1 ) ] == ( spawnId >> GENTITYNUM_BITS_PLUSCENT ) );
+	return ( OpenPrey_GetSpawnId( spawnId & ( ( 1 << GENTITYNUM_BITS_PLUSCENT ) - 1 ) ) == ( spawnId >> GENTITYNUM_BITS_PLUSCENT ) );
 }
 
 template< class type >
 ID_INLINE type *idEntityPtr<type>::GetEntity( void ) const {
 	//HUMANHEAD rww - take cent bits into account
 	int entityNum = spawnId & ( ( 1 << GENTITYNUM_BITS_PLUSCENT ) - 1 );
-	if ( ( gameLocal.spawnIds[ entityNum ] == ( spawnId >> GENTITYNUM_BITS_PLUSCENT ) ) ) {
-		return static_cast<type *>( gameLocal.entities[ entityNum ] );
+	if ( ( OpenPrey_GetSpawnId( entityNum ) == ( spawnId >> GENTITYNUM_BITS_PLUSCENT ) ) ) {
+		return static_cast<type *>( OpenPrey_GetEntity( entityNum ) );
 	}
 	return NULL;
 }
@@ -587,7 +591,7 @@ public:
 	void					RegisterEntity( idEntity *ent );
 	void					UnregisterEntity( idEntity *ent );
 
-	bool					RequirementMet( idEntity *activator, const idStr &requires, int removeItem );
+	bool					RequirementMet( idEntity *activator, const idStr &requiredItem, int removeItem );
 
 	virtual					//HUMANHEAD jsh made virtual
 	void					AlertAI( idEntity *ent );
@@ -888,6 +892,14 @@ protected:	// HUMANHEAD
 //#else	// HUMANHEAD
 //extern idGameLocal			gameLocal;
 //#endif	// HUMANHEAD
+
+ID_INLINE int OpenPrey_GetSpawnId( int index ) {
+	return gameLocal.spawnIds[ index ];
+}
+
+ID_INLINE idEntity *OpenPrey_GetEntity( int index ) {
+	return gameLocal.entities[ index ];
+}
 
 extern idAnimManager		animationLib;
 

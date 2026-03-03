@@ -402,7 +402,7 @@ void hhTrigger::Activate( idEntity *activator ) {
 	}
 
 	// see if this trigger requires an item
-	if ( !gameLocal.RequirementMet( activator, requires, removeItem ) ) {
+	if ( !gameLocal.RequirementMet( activator, requiredItem, removeItem ) ) {
 		return;
 	}
 
@@ -431,7 +431,7 @@ void hhTrigger::Spawn(void) {
 	spawnArgs.GetFloat( "random", "0", random );
 	spawnArgs.GetFloat( "delay", "0", delay );
 	spawnArgs.GetFloat( "randomeDelay", "0", randomDelay );
-	spawnArgs.GetString( "requires", "", requires );
+	spawnArgs.GetString( "requires", "", requiredItem );
 	spawnArgs.GetInt( "removeItem", "0", removeItem );
 	triggerBehavior = (triggerBehavior_t)spawnArgs.GetInt( "triggerBehavior" );
 	spawnArgs.GetBool( "noTouch", "0", noTouch );
@@ -476,7 +476,7 @@ void hhTrigger::Save( idSaveGame *savefile ) const {
 	savefile->WriteStaticObject( unfuncRefInfo );
 	savefile->WriteStaticObject( funcRefActivatorInfo );
 	savefile->WriteStaticObject( unfuncRefActivatorInfo );
-	savefile->WriteString( requires );
+	savefile->WriteString( requiredItem );
 	savefile->WriteInt( removeItem );
 	savefile->WriteBool( noTouch );
 	savefile->WriteBool( initiallyEnabled );
@@ -512,7 +512,7 @@ void hhTrigger::Restore( idRestoreGame *savefile ) {
 	savefile->ReadStaticObject( unfuncRefInfo );
 	savefile->ReadStaticObject( funcRefActivatorInfo );
 	savefile->ReadStaticObject( unfuncRefActivatorInfo );
-	savefile->ReadString( requires );
+	savefile->ReadString( requiredItem );
 	savefile->ReadInt( removeItem );
 	savefile->ReadBool( noTouch );
 	savefile->ReadBool( initiallyEnabled );
@@ -1312,7 +1312,7 @@ void hhTrigger_Count::Activate( idEntity *activator ) {
 	}
 
 	// see if this trigger requires an item
-	if ( !gameLocal.RequirementMet( activator, requires, removeItem ) ) {
+	if ( !gameLocal.RequirementMet( activator, requiredItem, removeItem ) ) {
 		return;
 	}
 

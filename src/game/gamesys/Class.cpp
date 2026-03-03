@@ -884,7 +884,7 @@ idClass::ProcessEventArgs
 bool idClass::ProcessEventArgs( const idEventDef *ev, int numargs, ... ) {
 	idTypeInfo	*c;
 	int			num;
-	int			data[ D_EVENT_MAXARGS ];
+	intptr_t	data[ D_EVENT_MAXARGS ];
 	va_list		args;
 	
 	assert( ev );
@@ -992,7 +992,7 @@ bool idClass::ProcessEvent( const idEventDef *ev, idEventArg arg1, idEventArg ar
 idClass::ProcessEventArgPtr
 ================
 */
-bool idClass::ProcessEventArgPtr( const idEventDef *ev, int *data ) {
+bool idClass::ProcessEventArgPtr( const idEventDef *ev, intptr_t *data ) {
 	idTypeInfo	*c;
 	int			num;
 	eventCallback_t	callback;
@@ -1001,7 +1001,7 @@ bool idClass::ProcessEventArgPtr( const idEventDef *ev, int *data ) {
 	assert( idEvent::initialized );
 
 	if ( g_debugTriggers.GetBool() && ( ev == &EV_Activate ) && IsType( idEntity::Type ) ) {
-		const idEntity *ent = *reinterpret_cast<idEntity **>( data );
+		const idEntity *ent = reinterpret_cast<idEntity *>( data[ 0 ] );
 		gameLocal.Printf( "%d: '%s' activated by '%s'\n", gameLocal.framenum, static_cast<idEntity *>( this )->GetName(), ent ? ent->GetName() : "NULL" );
 	}
 

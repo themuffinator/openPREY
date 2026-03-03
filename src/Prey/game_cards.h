@@ -51,7 +51,7 @@
 		void			Restore( idRestoreGame *savefile );
 		void			Generate();
 		void			Shuffle();
-		bool			HasCard(hhCard &card);
+		bool			HasCard(const hhCard &card);
 		hhCard			GetCard();
 		hhCard			GetCard(int value, int suit);
 		void			ReturnCard(hhCard card);

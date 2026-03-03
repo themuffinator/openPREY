@@ -123,8 +123,8 @@ public:
 	virtual void				Test( const idVec3 &origin );
 	virtual const idAASSettings *GetSettings( void ) const;
 	virtual int					PointAreaNum( const idVec3 &origin ) const;
-	virtual int					PointReachableAreaNum( const idVec3 &origin, const idBounds &searchBounds, const int areaFlags ) const;
-	virtual int					BoundsReachableAreaNum( const idBounds &bounds, const int areaFlags ) const;
+	virtual int					PointReachableAreaNum( const idVec3 &origin, const idBounds &searchBounds, const int areaFlags, const int excludeTravelFlags = TFL_INVALID ) const;
+	virtual int					BoundsReachableAreaNum( const idBounds &bounds, const int areaFlags, const int excludeTravelFlags = TFL_INVALID ) const;
 	virtual void				PushPointIntoAreaNum( int areaNum, idVec3 &origin ) const;
 	virtual idVec3				AreaCenter( int areaNum ) const;
 	virtual int					AreaFlags( int areaNum ) const;
@@ -148,9 +148,13 @@ public:
 	virtual void				ShowWalkPath( const idVec3 &origin, int goalAreaNum, const idVec3 &goalOrigin ) const;
 	virtual void				ShowFlyPath( const idVec3 &origin, int goalAreaNum, const idVec3 &goalOrigin ) const;
 	virtual bool				FindNearestGoal( aasGoal_t &goal, int areaNum, const idVec3 origin, const idVec3 &target, int travelFlags, aasObstacle_t *obstacles, int numObstacles, idAASCallback &callback ) const;
+	idVec3						FindNearestPoint( const idVec3 &ally, const idVec3 &follower, float distance );
 	const char *				GetName( void ) const { return file ? file->GetName() : NULL; }
 
 private:
+	bool						FindNearestPointInArea( hhNearPoint &nearPoint, int currentArea, idList<int> &areasEntered );
+	findAreaType_t				CheckPointsInArea( hhNearPoint &nearPoint, int areaNum );
+	findPointType_t				CheckPoint( idVec3 &point, hhNearPoint &nearPoint );
 	idAASFile *					file;
 	idStr						name;
 

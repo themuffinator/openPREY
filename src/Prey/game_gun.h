@@ -18,7 +18,7 @@ public:
 	bool			ValidEnemy();
 
 protected:
-	void			Fire(idMat3 &axis);
+	void			Fire( const idMat3 &axis );
 
 	void			Event_Activate(idEntity *activator);
 	void			Event_SetEnemy(idEntity *newEnemy);

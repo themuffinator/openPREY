@@ -21,7 +21,7 @@ class hhThread : public idThread {
 		bool						ParseAndPushArgsOntoStack( const idList<idStr>& args, const function_t* function );
 
 	protected:
-		void						PushParm( int value );
+		void						PushParm( intptr_t value );
 };
 
 #endif

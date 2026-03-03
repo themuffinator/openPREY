@@ -121,12 +121,12 @@ int idAASLocal::PointAreaNum( const idVec3 &origin ) const {
 idAASLocal::PointReachableAreaNum
 ============
 */
-int idAASLocal::PointReachableAreaNum( const idVec3 &origin, const idBounds &searchBounds, const int areaFlags ) const {
+int idAASLocal::PointReachableAreaNum( const idVec3 &origin, const idBounds &searchBounds, const int areaFlags, const int excludeTravelFlags ) const {
 	if ( !file ) {
 		return 0;
 	}
 
-	return file->PointReachableAreaNum( origin, searchBounds, areaFlags, TFL_INVALID );
+	return file->PointReachableAreaNum( origin, searchBounds, areaFlags, excludeTravelFlags );
 }
 
 /*
@@ -134,12 +134,12 @@ int idAASLocal::PointReachableAreaNum( const idVec3 &origin, const idBounds &sea
 idAASLocal::BoundsReachableAreaNum
 ============
 */
-int idAASLocal::BoundsReachableAreaNum( const idBounds &bounds, const int areaFlags ) const {
+int idAASLocal::BoundsReachableAreaNum( const idBounds &bounds, const int areaFlags, const int excludeTravelFlags ) const {
 	if ( !file ) {
 		return 0;
 	}
 	
-	return file->BoundsReachableAreaNum( bounds, areaFlags, TFL_INVALID );
+	return file->BoundsReachableAreaNum( bounds, areaFlags, excludeTravelFlags );
 }
 
 /*

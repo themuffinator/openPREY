@@ -156,7 +156,7 @@ void hhForce_Converge::SetRestoreTime( float time ) {
 	restoreTime = idMath::ClampFloat(0.02f, time, time);
 }
 
-void hhForce_Converge::SetTarget(idVec3 &newTarget) {
+void hhForce_Converge::SetTarget(const idVec3 &newTarget) {
 	target = newTarget;
 }
 

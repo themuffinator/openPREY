@@ -34,9 +34,10 @@ private:
 	idThread			*thread;
 
 	void				PopParms( int numParms );
-	void				PushString( const char *string );
 	public://HUMANHEAD: aob - so we can pass parms in manually
-	void				Push( int value );
+	void				PushString( const char *string );
+	void				PushVector( const idVec3 &vector );
+	void				Push( intptr_t value );
 	private://HUMANHEAD: aob - undo the public declaration
 	const char			*FloatToString( float value );
 	void				AppendString( idVarDef *def, const char *from );
@@ -115,12 +116,25 @@ ID_INLINE void idInterpreter::PopParms( int numParms ) {
 idInterpreter::Push
 ====================
 */
-ID_INLINE void idInterpreter::Push( int value ) {
-	if ( localstackUsed + sizeof( int ) > LOCALSTACK_SIZE ) {
+ID_INLINE void idInterpreter::Push( intptr_t value ) {
+	if ( localstackUsed + sizeof( intptr_t ) > LOCALSTACK_SIZE ) {
 		Error( "Push: locals stack overflow\n" );
 	}
-	*( int * )&localstack[ localstackUsed ]	= value;
-	localstackUsed += sizeof( int );
+	*( intptr_t * )&localstack[ localstackUsed ]	= value;
+	localstackUsed += sizeof( intptr_t );
+}
+
+/*
+====================
+idInterpreter::PushVector
+====================
+*/
+ID_INLINE void idInterpreter::PushVector( const idVec3 &vector ) {
+	if ( localstackUsed + E_EVENT_SIZEOF_VEC > LOCALSTACK_SIZE ) {
+		Error( "Push: locals stack overflow\n" );
+	}
+	*( idVec3 * )&localstack[ localstackUsed ] = vector;
+	localstackUsed += E_EVENT_SIZEOF_VEC;
 }
 
 /*
@@ -212,11 +226,11 @@ idInterpreter::GetEntity
 ================
 */
 ID_INLINE idEntity *idInterpreter::GetEntity( int entnum ) const{
-	assert( entnum <= MAX_GENTITIES );
-	if ( ( entnum > 0 ) && ( entnum <= MAX_GENTITIES ) ) {
-		return gameLocal.entities[ entnum - 1 ];
+	const int maxEntitySlots = MAX_GENTITIES + MAX_CENTITIES;
+	if ( ( entnum <= 0 ) || ( entnum > maxEntitySlots ) ) {
+		return NULL;
 	}
-	return NULL;
+	return gameLocal.entities[ entnum - 1 ];
 }
 
 /*
@@ -227,13 +241,16 @@ idInterpreter::GetScriptObject
 ID_INLINE idScriptObject *idInterpreter::GetScriptObject( int entnum ) const {
 	idEntity *ent;
 
-	assert( entnum <= MAX_GENTITIES );
-	if ( ( entnum > 0 ) && ( entnum <= MAX_GENTITIES ) ) {
-		ent = gameLocal.entities[ entnum - 1 ];
-		if ( ent && ent->scriptObject.data ) {
-			return &ent->scriptObject;
-		}
+	const int maxEntitySlots = MAX_GENTITIES + MAX_CENTITIES;
+	if ( ( entnum <= 0 ) || ( entnum > maxEntitySlots ) ) {
+		return NULL;
 	}
+
+	ent = gameLocal.entities[ entnum - 1 ];
+	if ( ent && ent->scriptObject.data ) {
+		return &ent->scriptObject;
+	}
+
 	return NULL;
 }
 

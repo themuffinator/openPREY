@@ -68,8 +68,6 @@ extern idCVar	developer;
 extern idCVar	g_cinematic;
 extern idCVar	g_cinematicMaxSkipTime;
 
-extern idCVar	r_aspectRatio;
-
 extern idCVar	g_monsters;
 extern idCVar	g_decals;
 extern idCVar	g_knockback;

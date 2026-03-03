@@ -1,8 +1,8 @@
-// Copyright (C) 2004 Id Software, Inc.
-//
 
 #ifndef __MATH_INTERPOLATE_H__
 #define __MATH_INTERPOLATE_H__
+
+class idTypeInfoTools;
 
 /*
 ==============================================================================================
@@ -16,6 +16,7 @@ template< class type >
 class idInterpolate {
 public:
 						idInterpolate();
+						virtual ~idInterpolate() { }
 
 	void				Init( const float startTime, const float duration, const type &startValue, const type &endValue );
 	void				SetStartTime( float time ) { this->startTime = time; }
@@ -23,7 +24,11 @@ public:
 	void				SetStartValue( const type &startValue ) { this->startValue = startValue; }
 	void				SetEndValue( const type &endValue ) { this->endValue = endValue; }
 
-	type				GetCurrentValue( float time ) const;
+// RAVEN BEGIN
+// abahr: made virtual
+	virtual type		GetCurrentValue( float time ) const;
+	virtual type		GetDeltaValue( float startTime, float endTime ) const;
+// RAVEN END
 	bool				IsDone( float time ) const { return ( time >= startTime + duration ); }
 
 	float				GetStartTime( void ) const { return startTime; }
@@ -31,8 +36,16 @@ public:
 	float				GetDuration( void ) const { return duration; }
 	const type &		GetStartValue( void ) const { return startValue; }
 	const type &		GetEndValue( void ) const { return endValue; }
+	const float *		GetStartTimePtr( void ) const { return &startTime; }
+	const float *		GetDurationPtr( void ) const { return &duration; }
+	const type *		GetStartValuePtr( void ) const { return &startValue; }
+	const type *		GetEndValuePtr( void ) const { return &endValue; }
 
-private:
+// RAVEN BEGIN
+// abahr: changed to protected
+protected:
+	friend class idTypeInfoTools;
+// RAVEN END
 	float				startTime;
 	float				duration;
 	type				startValue;
@@ -91,6 +104,75 @@ ID_INLINE type idInterpolate<type>::GetCurrentValue( float time ) const {
 	return currentValue;
 }
 
+// RAVEN BEGIN
+// abahr
+/*
+====================
+idInterpolate::GetDeltaValue
+====================
+*/
+template< class type >
+ID_INLINE type idInterpolate<type>::GetDeltaValue( float startTime, float endTime ) const {
+	return GetCurrentValue(endTime) - GetCurrentValue(startTime);
+}
+
+ID_INLINE float Linear( float frac ) {
+	return frac;
+}
+
+ID_INLINE float SinusoidalMidPoint( float frac ) {
+	return idMath::Sin( DEG2RAD(idMath::MidPointLerp(0.0f, 60.0f, 90.0f, frac)) ); 
+}
+
+/*
+==============================================================================================
+
+	Spherical interpolation.
+
+==============================================================================================
+*/
+typedef float (*TimeManipFunc) ( float );
+class rvSphericalInterpolate : public idInterpolate<idQuat> {
+public:
+						rvSphericalInterpolate();
+	virtual idQuat		GetCurrentValue( float time ) const;
+
+	void				SetTimeFunction( TimeManipFunc func ) { timeFunc = func; }
+
+protected:
+	TimeManipFunc		timeFunc;
+};
+
+/*
+====================
+rvSphericalInterpolate::rvSphericalInterpolate
+====================
+*/
+ID_INLINE rvSphericalInterpolate::rvSphericalInterpolate() :
+	idInterpolate<idQuat>() {
+	SetTimeFunction( SinusoidalMidPoint );
+}
+
+/*
+====================
+rvSphericalInterpolate::GetCurrentValue
+====================
+*/
+ID_INLINE idQuat rvSphericalInterpolate::GetCurrentValue( float time ) const {
+	float deltaTime;
+
+	deltaTime = time - startTime;
+	if ( time != currentTime ) {
+		currentTime = time;
+		if( duration == 0.0f ) {
+			currentValue = endValue;
+		} else {
+			currentValue.Slerp( startValue, endValue, timeFunc((float)deltaTime / duration) );
+		}
+	}
+	return currentValue;
+}
+// RAVEN END
 
 /*
 ==============================================================================================
@@ -120,10 +202,18 @@ public:
 	float				GetDuration( void ) const { return accelTime + linearTime + decelTime; }
 	float				GetAcceleration( void ) const { return accelTime; }
 	float				GetDeceleration( void ) const { return decelTime; }
+	float				GetLinearTime( void ) const { return linearTime; }
 	const type &		GetStartValue( void ) const { return startValue; }
 	const type &		GetEndValue( void ) const { return endValue; }
+	const float *		GetStartTimePtr( void ) const { return &startTime; }
+	const float *		GetAccelerationPtr( void ) const { return &accelTime; }
+	const float *		GetDecelerationPtr( void ) const { return &decelTime; }
+	const float *		GetLinearTimePtr( void ) const { return &linearTime; }
+	const type *		GetStartValuePtr( void ) const { return &startValue; }
+	const type *		GetEndValuePtr( void ) const { return &endValue; }
 
 private:
+	friend class idTypeInfoTools;
 	float				startTime;
 	float				accelTime;
 	float				linearTime;
@@ -269,10 +359,18 @@ public:
 	float				GetDuration( void ) const { return accelTime + linearTime + decelTime; }
 	float				GetAcceleration( void ) const { return accelTime; }
 	float				GetDeceleration( void ) const { return decelTime; }
+	float				GetLinearTime( void ) const { return linearTime; }
 	const type &		GetStartValue( void ) const { return startValue; }
 	const type &		GetEndValue( void ) const { return endValue; }
+	const float *		GetStartTimePtr( void ) const { return &startTime; }
+	const float *		GetAccelerationPtr( void ) const { return &accelTime; }
+	const float *		GetDecelerationPtr( void ) const { return &decelTime; }
+	const float *		GetLinearTimePtr( void ) const { return &linearTime; }
+	const type *		GetStartValuePtr( void ) const { return &startValue; }
+	const type *		GetEndValuePtr( void ) const { return &endValue; }
 
 private:
+	friend class idTypeInfoTools;
 	float				startTime;
 	float				accelTime;
 	float				linearTime;

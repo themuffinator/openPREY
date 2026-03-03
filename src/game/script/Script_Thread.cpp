@@ -1373,7 +1373,7 @@ void idThread::Event_GetEntity( const char *name ) {
 
 	if ( name[ 0 ] == '*' ) {
 		entnum = atoi( &name[ 1 ] );
-		if ( ( entnum < 0 ) || ( entnum >= MAX_GENTITIES ) ) {
+		if ( ( entnum < 0 ) || ( entnum >= ( MAX_GENTITIES + MAX_CENTITIES ) ) ) {
 			Error( "Entity number in string out of range." );
 		}
 		ReturnEntity( gameLocal.entities[ entnum ] );

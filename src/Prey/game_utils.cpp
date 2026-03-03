@@ -235,7 +235,7 @@ float hhUtils::RandomSign() {
 	return gameLocal.random.RandomFloat() < 0.5f ? -1.0f : 1.0f;
 }
 
-idVec3 hhUtils::RandomPointInBounds(idBounds &bounds) {
+idVec3 hhUtils::RandomPointInBounds( const idBounds &bounds ) {
 	idVec3 point;
 	point.x = bounds[0].x + (bounds[1].x - bounds[0].x) * gameLocal.random.RandomFloat();
 	point.y = bounds[0].y + (bounds[1].y - bounds[0].y) * gameLocal.random.RandomFloat();
@@ -746,4 +746,6 @@ void hhUtils::PassArgs( const idDict &source, idDict &dest, const char *passPref
 		dest.Set( indexStr, kv->GetValue() );
 	}
 }
+
+
 

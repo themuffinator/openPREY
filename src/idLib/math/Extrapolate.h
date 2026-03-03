@@ -1,5 +1,3 @@
-// Copyright (C) 2004 Id Software, Inc.
-//
 
 #ifndef __MATH_EXTRAPOLATE_H__
 #define __MATH_EXTRAPOLATE_H__
@@ -22,6 +20,8 @@ typedef enum {
 	EXTRAPOLATION_NOSTOP		= 0x40	// do not stop at startTime + duration
 } extrapolation_t;
 
+class idTypeInfoTools;
+
 template< class type >
 class idExtrapolate {
 public:
@@ -40,8 +40,16 @@ public:
 	const type &		GetBaseSpeed( void ) const { return baseSpeed; }
 	const type &		GetSpeed( void ) const { return speed; }
 	extrapolation_t		GetExtrapolationType( void ) const { return extrapolationType; }
+	const extrapolation_t *GetExtrapolationTypePtr( void ) const { return &extrapolationType; }
+	const float *		GetStartTimePtr( void ) const { return &startTime; }
+	const float *		GetDurationPtr( void ) const { return &duration; }
+	const type *			GetStartValuePtr( void ) const { return &startValue; }
+	const type *			GetBaseSpeedPtr( void ) const { return &baseSpeed; }
+	const type *			GetSpeedPtr( void ) const { return &speed; }
 
 private:
+	friend class idTypeInfoTools;
+
 	extrapolation_t		extrapolationType;
 	float				startTime;
 	float				duration;

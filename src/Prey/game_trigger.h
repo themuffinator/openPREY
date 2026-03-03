@@ -126,7 +126,7 @@ public:
 	hhFuncParmAccessor	funcRefActivatorInfo;
 	hhFuncParmAccessor	unfuncRefActivatorInfo;
 
-	idStr			requires;						// item that the trigger requires of the player
+	idStr			requiredItem;					// item that the trigger requires of the player
 	int				removeItem;						// whether to remove the required item from players inventory
 	bool			noTouch;						// whether to disregard touch as triggering mechanism
 	bool			initiallyEnabled;				// whether the trigger is initially triggerable

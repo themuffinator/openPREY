@@ -383,7 +383,7 @@ void idClipModel::Save( idSaveGame *savefile ) const {
 	savefile->WriteBounds( absBounds );
 	savefile->WriteMaterial( material );
 	savefile->WriteInt( contents );
-	if ( collisionModelHandle >= 0 ) {
+	if ( collisionModelHandle != NULL ) {
 		savefile->WriteString( collisionModelManager->GetModelName( collisionModelHandle ) );
 	} else {
 		savefile->WriteString( "" );
@@ -421,7 +421,7 @@ void idClipModel::Restore( idRestoreGame *savefile ) {
 	if ( collisionModelName.Length() ) {
 		collisionModelHandle = collisionModelManager->LoadModel( collisionModelName, false );
 	} else {
-		collisionModelHandle = -1;
+		collisionModelHandle = NULL;
 	}
 	savefile->ReadInt( traceModelIndex );
 	if ( traceModelIndex >= 0 ) {
@@ -472,7 +472,7 @@ cmHandle_t idClipModel::Handle( void ) const {
 	} else {
 		// this happens in multiplayer on the combat models
 		gameLocal.Warning( "idClipModel::Handle: clip model %d on '%s' (%x) is not a collision or trace model", id, entity->name.c_str(), entity->entityNumber );
-		return 0;
+		return NULL;
 	}
 }
 
@@ -1955,7 +1955,7 @@ bool idClip::GetModelContactFeature( const contactInfo_t &contact, const idClipM
 	cmHandle_t handle;
 	idVec3 start, end;
 
-	handle = -1;
+	handle = NULL;
 	winding.Clear();
 
 	if ( clipModel == NULL ) {
@@ -1972,7 +1972,7 @@ bool idClip::GetModelContactFeature( const contactInfo_t &contact, const idClipM
 	}
 
 	// if contact with a collision model
-	if ( handle != -1 ) {
+	if ( handle != NULL ) {
 		switch( contact.type ) {
 			case CONTACT_EDGE: {
 				// the model contact feature is a collision model edge

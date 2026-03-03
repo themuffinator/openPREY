@@ -141,7 +141,7 @@ int hhSoundLeadInController::StartSound( const s_channelType leadChannel, const 
 
 	if( leadInShader ) {
 		owner->StartSoundShader( leadInShader, leadChannel, 0, broadcast, &length );
-		StartFade( leadInShader, leadChannel, endTime, startTime, leadInShader->GetVolume(), length );
+		StartFade( leadInShader, leadChannel, endTime, startTime, static_cast<int>( leadInShader->GetParms() ? leadInShader->GetParms()->volume : 0.0f ), length );
 
 		startTime = gameLocal.GetTime();
 		endTime = startTime + length;
@@ -149,7 +149,7 @@ int hhSoundLeadInController::StartSound( const s_channelType leadChannel, const 
 
 	if (iLoopOnlyOnLocal == -1 || iLoopOnlyOnLocal == gameLocal.localClientNum) { //rww - for spirit music and whatever else needs it
 		owner->StartSoundShader( loopShader, loopChannel, 0, broadcast, NULL );
-		StartFade( loopShader, loopChannel, startTime, endTime, loopShader->GetVolume(), length );
+		StartFade( loopShader, loopChannel, startTime, endTime, static_cast<int>( loopShader->GetParms() ? loopShader->GetParms()->volume : 0.0f ), length );
 	}
 
 	//rww - for networking

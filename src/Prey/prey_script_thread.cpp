@@ -16,7 +16,7 @@ hhThread::hhThread( idInterpreter *source, const function_t *func, int args ) : 
 hhThread::PushParm
 ================
 */
-void hhThread::PushParm( int value ) {
+void hhThread::PushParm( intptr_t value ) {
 	interpreter.Push( value );
 }
 
@@ -26,7 +26,7 @@ hhThread::PushString
 ================
 */
 void hhThread::PushString( const char *text ) {
-	PushParm( (int)new idStr(text) );
+	interpreter.PushString( text );
 }
 
 /*
@@ -35,7 +35,7 @@ hhThread::PushFloat
 ================
 */
 void hhThread::PushFloat( float value ) {
-	PushParm( *(int*)&value );
+	PushParm( *reinterpret_cast<int *>( &value ) );
 }
 
 /*
@@ -44,7 +44,7 @@ hhThread::PushInt
 ================
 */
 void hhThread::PushInt( int value ) {
-	PushParm( value );
+	PushParm( static_cast<intptr_t>( value ) );
 }
 
 /*
@@ -53,11 +53,7 @@ hhThread::PushVector
 ================
 */
 void hhThread::PushVector( const idVec3 &vec ) {
-	float val = 0.0f;
-	for( int ix = 0; ix < vec.GetDimension(); ++ix ) {
-		val = vec[ ix ];
-		PushParm( *(int*)&val );
-	}
+	interpreter.PushVector( vec );
 }
 
 /*
@@ -66,9 +62,7 @@ hhThread::PushEntity
 ================
 */
 void hhThread::PushEntity( const idEntity *ent ) {
-	HH_ASSERT( ent );
-
-	PushParm( ent->entityNumber + 1 );
+	PushParm( ent ? ( ent->entityNumber + 1 ) : 0 );
 }
 
 /*

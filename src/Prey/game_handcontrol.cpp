@@ -84,7 +84,7 @@ void hhControlHand::PutAway( void ) {
 	SetShaderParm(5, -1.0f);						// Dir
 }
 
-void hhControlHand::UpdateControlDirection(idVec3 &dir) {
+void hhControlHand::UpdateControlDirection(const idVec3 &dir) {
 	int anim;
 
 	int curStatus = dir.DirectionMask();

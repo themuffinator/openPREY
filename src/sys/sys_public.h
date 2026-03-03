@@ -19,7 +19,11 @@
 #define	BUILD_STRING					"win-x86"
 #define BUILD_OS_ID						0
 #define	CPUSTRING						"x86"
+#if defined(_WIN64)
+#define CPU_EASYARGS					0
+#else
 #define CPU_EASYARGS					1
+#endif
 
 #define ALIGN16( x )					__declspec(align(16)) x
 #define PACKED

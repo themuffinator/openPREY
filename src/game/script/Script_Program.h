@@ -261,7 +261,7 @@ template<class type, etype_t etype, class returnType>
 ID_INLINE void idScriptVariable<type, etype, returnType>::LinkTo( idScriptObject &obj, const char *name ) {
 	data = ( type * )obj.GetVariable( name, etype );
 	if ( !data ) {
-		gameLocal.Error( "Missing '%s' field in script object '%s'", name, obj.GetTypeName() );
+		idLib::Error( "Missing '%s' field in script object '%s'", name, obj.GetTypeName() );
 	}
 }
 

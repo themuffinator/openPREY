@@ -55,6 +55,13 @@ hhGameLocal					gameLocal;
 //#endif
 idGame *					game = &gameLocal;	// statically pointed at an idGameLocal
 
+int OpenPrey_GetSpawnIdForEntity( const idEntity *ent ) {
+	if ( ent == NULL ) {
+		return 0;
+	}
+	return ( OpenPrey_GetSpawnId( ent->entityNumber ) << GENTITYNUM_BITS_PLUSCENT ) | ent->entityNumber;
+}
+
 #ifdef HUMANHEAD
 //NOTE: Duplicated in tr_rendertools and CamWnd, make any changes there also
 const char *idGameLocal::sufaceTypeNames[ MAX_SURFACE_TYPES ] = {
@@ -313,7 +320,6 @@ void idGameLocal::Init( void ) {
 
 	// register game specific decl types
 	declManager->RegisterDeclType( "model",				DECL_MODELDEF,		idDeclAllocator<idDeclModelDef> );
-	declManager->RegisterDeclType( "export",			DECL_MODELEXPORT,	idDeclAllocator<idDecl> );
 
 	// register game specific decl folders
 	declManager->RegisterDeclFolder( "def",				".def",				DECL_ENTITYDEF );
@@ -1459,7 +1465,7 @@ bool idGameLocal::InitFromSaveGame( const char *mapName, idRenderWorld *renderWo
 		if ( !idGameLocal::InhibitEntitySpawn( mapEnt->epairs ) ) { // HUMANHEAD mdl:  Need this to call the original function
 			CacheDictionaryMedia( &mapEnt->epairs );
 			const char *classname = mapEnt->epairs.GetString( "classname" );
-			if ( classname != '\0' ) {
+			if ( classname[0] != '\0' ) {
 				FindEntityDef( classname, false );
 			}
 		}
@@ -1921,7 +1927,7 @@ void idGameLocal::GetShakeSounds( const idDict *dict ) {
 	idStr soundName;
 
 	soundShaderName = dict->GetString( "s_shader" );
-	if ( soundShaderName != '\0' && dict->GetFloat( "s_shakes" ) != 0.0f ) {
+	if ( soundShaderName[0] != '\0' && dict->GetFloat( "s_shakes" ) != 0.0f ) {
 		soundShader = declManager->FindSound( soundShaderName );
 
 		for ( int i = 0; i < soundShader->GetNumSounds(); i++ ) {
@@ -2851,7 +2857,7 @@ gameReturn_t idGameLocal::RunFrame( const usercmd_t *clientCmds ) {
 ====================
 idGameLocal::CalcFov
 
-Calculates the horizontal and vertical field of view based on a horizontal field of view and custom aspect ratio
+Calculates the horizontal and vertical field of view based on a horizontal field of view and current render aspect ratio.
 ====================
 */
 void idGameLocal::CalcFov( float base_fov, float &fov_x, float &fov_y ) const {
@@ -2860,11 +2866,6 @@ void idGameLocal::CalcFov( float base_fov, float &fov_x, float &fov_y ) const {
 	float	ratio_x;
 	float	ratio_y;
 	
-	if ( !sys->FPU_StackIsEmpty() ) {
-		Printf( sys->FPU_GetState() );
-		Error( "idGameLocal::CalcFov: FPU stack not empty" );
-	}
-
 	// first, calculate the vertical fov based on a 640x480 view
 	x = 640.0f / tan( base_fov / 360.0f * idMath::PI );
 	y = atan2( 480.0f, x );
@@ -2877,25 +2878,12 @@ void idGameLocal::CalcFov( float base_fov, float &fov_x, float &fov_y ) const {
 		Error( "idGameLocal::CalcFov: bad result" );
 	}
 
-	switch( r_aspectRatio.GetInteger() ) {
-	default :
-	case 0 :
-		// 4:3
-		fov_x = base_fov;
-		return;
-		break;
-
-	case 1 :
-		// 16:9
-		ratio_x = 16.0f;
-		ratio_y = 9.0f;
-		break;
-
-	case 2 :
-		// 16:10
-		ratio_x = 16.0f;
-		ratio_y = 10.0f;
-		break;
+	ratio_x = ( renderSystem != NULL ) ? static_cast<float>( renderSystem->GetScreenWidth() ) : 0.0f;
+	ratio_y = ( renderSystem != NULL ) ? static_cast<float>( renderSystem->GetScreenHeight() ) : 0.0f;
+	if ( ratio_x <= 0.0f || ratio_y <= 0.0f ) {
+		// Dedicated server and early init paths can report 0x0; assume the 4:3 gameplay baseline.
+		ratio_x = 4.0f;
+		ratio_y = 3.0f;
 	}
 
 	y = ratio_y / tan( fov_y / 360.0f * idMath::PI );
@@ -4347,11 +4335,11 @@ void idGameLocal::KillBoxMasked( idEntity *ent, int clipMask, bool catch_telepor
 idGameLocal::RequirementMet
 ================
 */
-bool idGameLocal::RequirementMet( idEntity *activator, const idStr &requires, int removeItem ) {
-	if ( requires.Length() ) {
+bool idGameLocal::RequirementMet( idEntity *activator, const idStr &requiredItem, int removeItem ) {
+	if ( requiredItem.Length() ) {
 		if ( activator->IsType( idPlayer::Type ) ) {
 			idPlayer *player = static_cast<idPlayer *>(activator);
-			idDict *item = player->FindInventoryItem( requires );
+			idDict *item = player->FindInventoryItem( requiredItem );
 			if ( item ) {
 				if ( removeItem ) {
 					player->RemoveInventoryItem( item );

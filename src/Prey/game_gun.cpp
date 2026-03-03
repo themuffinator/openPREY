@@ -181,7 +181,7 @@ Let:
 (5)		s = |Vm|
 
 	  Substituting and simplifying yields a quadratic function in terms of t, Ve, d, & s:
-	  At² + Bt + C = 0
+	  Atï¿½ + Bt + C = 0
 */
 	const idDict *projectileDef = gameLocal.FindEntityDefDict( spawnArgs.GetString("def_projectile") );
 	if ( !projectileDef ) {
@@ -215,7 +215,7 @@ bool hhGun::ValidEnemy() {
 	return (enemy.IsValid()) ? enemy->GetHealth() > 0 : false;
 }
 
-void hhGun::Fire(idMat3 &axis) {
+void hhGun::Fire( const idMat3 &axis ) {
 	if (health > 0) {
 		hhUtils::LaunchProjectile(this, spawnArgs.GetString("def_projectile"), axis, GetOrigin());
 		StartSound( "snd_fire", SND_CHANNEL_ANY );
@@ -293,3 +293,5 @@ void hhGun::Event_FireAt(idEntity *victim) {
 	dir.Normalize();
 	Fire(dir.ToMat3());
 }
+
+

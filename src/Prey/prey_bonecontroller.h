@@ -11,23 +11,23 @@ class hhBoneController {
 	public:
 							hhBoneController();
 
-		void				SetTurnRate( idAngles& Rate ) { m_TurnRate = Rate; }
+		void				SetTurnRate( const idAngles& Rate ) { m_TurnRate = Rate; }
 		const idAngles&		GetTurnRate() const { return m_TurnRate; }
 
-		void				SetRotationFactor( idAngles& RotationFactor );
+		void				SetRotationFactor( const idAngles& RotationFactor );
 		const idAngles&		GetRotationFactor() const { return m_Factor; }
 
-		void				Setup( idEntity *pOwner, const char *pJointname, idAngles &MinAngles, idAngles &MaxAngles, idAngles& Rate, idAngles& Factor );
-		void				Setup( idEntity *pOwner, jointHandle_t Joint, idAngles &MinAngles, idAngles &MaxAngles, idAngles& Rate, idAngles& Factor );
+		void				Setup( idEntity *pOwner, const char *pJointname, const idAngles &MinAngles, const idAngles &MaxAngles, const idAngles &Rate, const idAngles &Factor );
+		void				Setup( idEntity *pOwner, jointHandle_t Joint, const idAngles &MinAngles, const idAngles &MaxAngles, const idAngles &Rate, const idAngles &Factor );
 		void				Update( int iCurrentTime );
-		bool				TurnTo( idAngles &Target );
-		bool				AimAt( idVec3 &Target );
+		bool				TurnTo( const idAngles &Target );
+		bool				AimAt( const idVec3 &Target );
 		bool				IsFinishedMoving( int iAxis );
 		bool				IsFinishedMoving();
 
 		void				AdjustScanRateToLinearizeBonePath( float fLinearScanRate );
 
-		bool				Add( idAngles &Ang ) { return TurnTo( Ang + m_IdealAng ); };
+		bool				Add( const idAngles &Ang ) { return TurnTo( Ang + m_IdealAng ); };
 		void				Clear( void ) { m_IdealAng.Zero(); };
 		const idAngles		&CurrentAngles() const { return m_CurrentAng; };
 
@@ -55,3 +55,5 @@ class hhBoneController {
 };
 
 #endif
+
+

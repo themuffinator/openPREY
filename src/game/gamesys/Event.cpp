@@ -275,7 +275,7 @@ idEvent *idEvent::Alloc( const idEventDef *evdef, int numargs, va_list args ) {
 		switch( format[ i ] ) {
 		case D_EVENT_FLOAT :
 		case D_EVENT_INTEGER :
-			*reinterpret_cast<int *>( dataPtr ) = arg->value;
+			*reinterpret_cast<int *>( dataPtr ) = static_cast<int>( arg->value );
 			break;
 
 		case D_EVENT_VECTOR :
@@ -326,7 +326,7 @@ idEvent *idEvent::Alloc( const idEventDef *evdef, int numargs, va_list args ) {
 idEvent::CopyArgs
 ================
 */
-void idEvent::CopyArgs( const idEventDef *evdef, int numargs, va_list args, int data[ D_EVENT_MAXARGS ] ) {
+void idEvent::CopyArgs( const idEventDef *evdef, int numargs, va_list args, intptr_t data[ D_EVENT_MAXARGS ] ) {
 	int			i;
 	const char	*format;
 	idEventArg	*arg;
@@ -455,7 +455,7 @@ idEvent::ServiceEvents
 void idEvent::ServiceEvents( void ) {
 	idEvent		*event;
 	int			num;
-	int			args[ D_EVENT_MAXARGS ];
+	intptr_t	args[ D_EVENT_MAXARGS ];
 	int			offset;
 	int			i;
 	int			numargs;
@@ -484,7 +484,7 @@ void idEvent::ServiceEvents( void ) {
 			switch( formatspec[ i ] ) {
 			case D_EVENT_FLOAT :
 			case D_EVENT_INTEGER :
-				args[ i ] = *reinterpret_cast<int *>( &data[ offset ] );
+				args[ i ] = static_cast<intptr_t>( *reinterpret_cast<int *>( &data[ offset ] ) );
 				break;
 
 			case D_EVENT_VECTOR :

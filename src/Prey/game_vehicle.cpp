@@ -127,7 +127,7 @@ void hhVehicleThruster::ClientPredictionThink( void ) {
 	Think();
 }
 
-void hhVehicleThruster::SetSmoker(bool bSmoker, idVec3 &offset, idVec3 &dir) {
+void hhVehicleThruster::SetSmoker(bool bSmoker, const idVec3 &offset, const idVec3 &dir) {
 	localOffset = offset;
 	localDirection = dir;
 	if ( bSmoker && (!fxSmoke.IsValid() || !fxSmoke.GetEntity()) ) {

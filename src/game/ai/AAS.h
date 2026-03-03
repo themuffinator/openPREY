@@ -64,9 +64,9 @@ public:
 								// Returns the number of the area the origin is in.
 	virtual int					PointAreaNum( const idVec3 &origin ) const = 0;
 								// Returns the number of the nearest reachable area for the given point.
-	virtual int					PointReachableAreaNum( const idVec3 &origin, const idBounds &bounds, const int areaFlags ) const = 0;
+	virtual int					PointReachableAreaNum( const idVec3 &origin, const idBounds &bounds, const int areaFlags, const int excludeTravelFlags = TFL_INVALID ) const = 0;
 								// Returns the number of the first reachable area in or touching the bounds.
-	virtual int					BoundsReachableAreaNum( const idBounds &bounds, const int areaFlags ) const = 0;
+	virtual int					BoundsReachableAreaNum( const idBounds &bounds, const int areaFlags, const int excludeTravelFlags = TFL_INVALID ) const = 0;
 								// Push the point into the area.
 	virtual void				PushPointIntoAreaNum( int areaNum, idVec3 &origin ) const = 0;
 								// Returns a reachable point inside the given area.

@@ -44,10 +44,6 @@ protected:
 	void				Event_ClearFx( void );
 
 protected:
-	// HUMANHEAD nla
-	enum fxAxis { AXIS_CURRENT, AXIS_NORMAL, AXIS_BOUNCE, AXIS_INCOMING, AXIS_CUSTOMLOCAL };
-	// HUMANHEAD END
-
 	// HUMANHEAD 
 	hhFxInfo				fxInfo;
 	bool					setFxInfo;

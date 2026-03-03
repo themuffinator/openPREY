@@ -34,7 +34,7 @@ hhBoneController::hhBoneController() {
 hhBoneController::Setup
 ================
 */
-void hhBoneController::Setup( idEntity *pOwner, const char *pJointname, idAngles &MinAngles, idAngles &MaxAngles, idAngles& Rate, idAngles& Factor ) {
+void hhBoneController::Setup( idEntity *pOwner, const char *pJointname, const idAngles &MinAngles, const idAngles &MaxAngles, const idAngles &Rate, const idAngles &Factor ) {
 	jointHandle_t Joint = ( pOwner ) ? pOwner->GetAnimator()->GetJointHandle( pJointname ) : INVALID_JOINT;
 
 	Setup( pOwner, Joint, MinAngles, MaxAngles, Rate, Factor );
@@ -45,7 +45,7 @@ void hhBoneController::Setup( idEntity *pOwner, const char *pJointname, idAngles
 hhBoneController::Setup
 ================
 */
-void hhBoneController::Setup( idEntity *pOwner, jointHandle_t Joint, idAngles &MinAngles, idAngles &MaxAngles, idAngles& Rate, idAngles& Factor ) {
+void hhBoneController::Setup( idEntity *pOwner, jointHandle_t Joint, const idAngles &MinAngles, const idAngles &MaxAngles, const idAngles &Rate, const idAngles &Factor ) {
 	m_IdealAng.Zero();
 	m_CurrentAng.Zero();
 	m_Fraction.Zero();
@@ -104,7 +104,7 @@ void hhBoneController::Update( int iCurrentTime ) {
 hhBoneController::TurnTo
 ================
 */
-bool hhBoneController::TurnTo( idAngles &Target ) {
+bool hhBoneController::TurnTo( const idAngles &Target ) {
 	m_IdealAng = Target;
 	bool bClampAngles = !ClampAngles();
 
@@ -120,7 +120,7 @@ bool hhBoneController::TurnTo( idAngles &Target ) {
 hhBoneController::AimAt
 ================
 */
-bool hhBoneController::AimAt( idVec3 &Target ) {
+bool hhBoneController::AimAt( const idVec3 &Target ) {
 	idVec3 dir;
 	idVec3 localDir;
 
@@ -173,7 +173,7 @@ bool hhBoneController::ClampAngles( void ) {
 hhBoneController::SetRotationFactor
 =====================
 */
-void hhBoneController::SetRotationFactor(idAngles& RotationFactor) {
+void hhBoneController::SetRotationFactor( const idAngles& RotationFactor ) {
 	m_Factor = RotationFactor;
 }
 
@@ -244,4 +244,6 @@ void hhBoneController::Restore( idRestoreGame *savefile ) {
 	savefile->ReadAngles( m_TurnRate );
 	savefile->ReadObject( reinterpret_cast<idClass *&> ( m_pOwner ) );
 }
+
+
 
