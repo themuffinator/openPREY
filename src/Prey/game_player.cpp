@@ -52,6 +52,26 @@ const idEventDef EV_RespawnCleanup( "<respawncleanup>" ); //rww
 const idEventDef EV_ReturnToWeapon( "returnToWeapon", "", 'd' ); //bjk
 const idEventDef EV_CanAnimateTorso( "canAnimateTorso", "", 'd' ); //rww
 
+static idAI *hhResolveTalkTarget( idEntity *ent ) {
+	if ( ent == NULL ) {
+		return NULL;
+	}
+
+	if ( ent->IsType( idAFAttachment::Type ) ) {
+		idEntity *body = static_cast<idAFAttachment *>( ent )->GetBody();
+		if ( body && body->IsType( idAI::Type ) ) {
+			return static_cast<idAI *>( body );
+		}
+		return NULL;
+	}
+
+	if ( ent->IsType( idAI::Type ) ) {
+		return static_cast<idAI *>( ent );
+	}
+
+	return NULL;
+}
+
 CLASS_DECLARATION( idPlayer, hhPlayer )
 	EVENT( EV_PlayWeaponAnim,				hhPlayer::Event_PlayWeaponAnim )
 	EVENT( EV_RechargeHealth,				hhPlayer::Event_RechargeHealth )
@@ -1575,6 +1595,85 @@ void hhPlayer::Weapon_Combat( void ) {
 		hand->RemoveHand();
 	}	
 	// HUMANHEAD END
+
+	// Preserve retail "press fire to interact" behavior for nearby talk/use targets.
+	if ( !gameLocal.isMultiplayer ) {
+		const idVec3 start = GetEyePosition();
+		const idVec3 viewDir = ( untransformedViewAngles.ToMat3() * GetEyeAxis() )[0];
+		const idVec3 end = start + viewDir * 80.0f;
+		trace_t interactionTrace;
+		gameLocal.clip.TracePoint( interactionTrace, start, end, MASK_SHOT_RENDERMODEL, this );
+		if ( interactionTrace.fraction < 1.0f ) {
+			idEntity *interactionEntity = gameLocal.entities[ interactionTrace.c.entityNum ];
+			idAI *talkAI = hhResolveTalkTarget( interactionEntity );
+			if ( talkAI && ( talkAI->GetTalkState() >= TALK_OK ) ) {
+				StopFiring();
+				weapon.GetEntity()->LowerWeapon();
+				if ( ( usercmd.buttons & BUTTON_ATTACK ) && !( oldButtons & BUTTON_ATTACK ) ) {
+					talkAI->TalkTo( this );
+				}
+				return;
+			}
+
+			if ( interactionEntity && ( usercmd.buttons & BUTTON_ATTACK ) && !( oldButtons & BUTTON_ATTACK ) && !ActiveGui() ) {
+				renderEntity_t *interactionRender = interactionEntity->GetRenderEntity();
+				int interactiveMask = 0;
+				if ( interactionRender ) {
+					for ( int ix = 0; ix < MAX_RENDERENTITY_GUI; ix++ ) {
+						if ( interactionRender->gui[ ix ] && interactionRender->gui[ ix ]->IsInteractive() ) {
+							interactiveMask |= ( 1 << ix );
+						}
+					}
+				}
+
+				if ( interactionRender && interactiveMask != 0 ) {
+					guiPoint_t pt = gameRenderWorld->GuiTrace( interactionEntity->GetModelDefHandle(), start, end, interactiveMask );
+					if ( interactionEntity->fl.accurateGuiTrace ) {
+						trace_t tr;
+						gameLocal.clip.TracePoint( tr, start, end, CONTENTS_SOLID, this );
+						if ( tr.fraction < pt.frac ) {
+							pt.x = -1;
+						}
+					}
+
+					if ( pt.x != -1 && pt.guiId >= 1 && pt.guiId <= MAX_RENDERENTITY_GUI ) {
+						idUserInterface *ui = interactionRender->gui[ pt.guiId - 1 ];
+						if ( ui ) {
+							sysEvent_t ev;
+							const char *command = NULL;
+							bool updateVisuals = false;
+
+							StopFiring();
+							weapon.GetEntity()->LowerWeapon();
+
+							ClearFocus();
+							focusGUIent = interactionEntity;
+							focusUI = ui;
+							focusTime = gameLocal.time + FOCUS_GUI_TIME;
+
+							// Match focus update + GUI click flow for useables (for example item cabinets).
+							ev = sys->GenerateMouseMoveEvent( -2000, -2000 );
+							command = focusUI->HandleEvent( &ev, gameLocal.time );
+							HandleGuiCommands( focusGUIent, command );
+
+							ev = sys->GenerateMouseMoveEvent( pt.x * SCREEN_WIDTH, pt.y * SCREEN_HEIGHT );
+							command = focusUI->HandleEvent( &ev, gameLocal.time );
+							HandleGuiCommands( focusGUIent, command );
+
+							ev = sys->GenerateMouseButtonEvent( 1, true );
+							command = focusUI->HandleEvent( &ev, gameLocal.time, &updateVisuals );
+							if ( updateVisuals && focusGUIent ) {
+								focusGUIent->UpdateVisuals();
+							}
+							HandleGuiCommands( focusGUIent, command );
+
+							return;
+						}
+					}
+				}
+			}
+		}
+	}
 
 	if( idealWeapon != 0 && IsLocked(idealWeapon) ) {		//HUMANHEAD bjk PCF (4-30-06) - fix wrench up in roadhouse
 		NextWeapon();

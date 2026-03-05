@@ -356,22 +356,28 @@ void hhPlayerView::DamageImpulse( idVec3 localKickDir, const idDict *damageDef )
 			blob->s2 = 1;
 			blob->t2 = 1;
 
+			bool placedBlob = false;
 			if (damageDef->GetBool("blob_projected") && player->renderView) {
 				//rww - renderView null check added. I am not clear on when this may be null, but it apparently was. however, if a player were
 				//to take damage before thinking, it seems very possible this would occur. the renderView will not be initialized until after
 				//the first think.
-				// Project hit location onto screen
+				// Project hit location onto the virtual 640x480 screen used by DrawStretchPic.
 				idVec3 localDamageLocation = hhUtils::ProjectOntoScreen(lastDamageLocation, *player->renderView);
-				blob->x = localDamageLocation.x - blob->w * 0.5f;
-				blob->y = localDamageLocation.y - blob->h * 0.5f;
+				if ( localDamageLocation.z > 0.0f ) {
+					const float xScale = 640.0f / Max( 1.0f, static_cast<float>( player->renderView->width ) );
+					const float yScale = 480.0f / Max( 1.0f, static_cast<float>( player->renderView->height ) );
+					blob->x = localDamageLocation.x * xScale - blob->w * 0.5f;
+					blob->y = localDamageLocation.y * yScale - blob->h * 0.5f;
+					placedBlob = true;
+				}
 			}
-			else if (damageDef->GetBool("blob_directional")) {
+			if ( !placedBlob && damageDef->GetBool("blob_directional")) {
 				// Directional blobs to show where damage is coming from (360 degree)
 				float dirDist = damageDef->GetFloat("blob_dirdistance");
 				blob->x = 320.0f + (dirDist * 320.0f * localKickDir.y) - (blob->w * 0.5f);
 				blob->y = 240.0f + (dirDist * 240.0f * localKickDir.x) - (blob->h * 0.5f);
 			}
-			else {
+			else if ( !placedBlob ) {
 				// Place blob centered at (blob_x,blob_y)
 				blob->x =  damageDef->GetFloat( "blob_x" ) - blob->w * 0.5f;
 				blob->y =  damageDef->GetFloat( "blob_y" ) - blob->h * 0.5f;
@@ -559,7 +565,10 @@ void hhPlayerView::SingleView( idUserInterface *hud, const renderView_t *view ) 
 		}
 
 		//HUMANHEAD: aob
-		if( viewOverlayMaterial ) {		
+		if( viewOverlayMaterial ) {
+			if ( voRequiresScratchBuffer ) {
+				renderSystem->CaptureRenderToImage( "_scratch" );
+			}
 			renderSystem->SetColor4( viewOverlayColor[0], viewOverlayColor[1], viewOverlayColor[2], viewOverlayColor[3] );
 			renderSystem->DrawStretchPic(0, 0, 640, 480, 0, 1, 1, 0, viewOverlayMaterial);
 		}
