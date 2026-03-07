@@ -614,6 +614,33 @@ float Hermite(float t, float N1, float N2, float S1, float S2) {
 			(tCubed - tSquared)*S2;
 }
 
+static void HH_GetMotionBlurCaptureSize( const renderView_t *view, int &captureWidth, int &captureHeight, bool &forceDimensions ) {
+	captureWidth = SCREEN_WIDTH;
+	captureHeight = SCREEN_HEIGHT;
+	forceDimensions = false;
+
+	// Retail PREY.exe requests a full-view scratch capture before damage blur.
+	// Keep that by default and only downsample when explicitly requested.
+	if ( !g_lowresFullscreenFX.GetBool() || view == NULL ) {
+		return;
+	}
+
+	const int lowResMaxDimension = 512;
+	const int viewWidth = Max( 1, view->width );
+	const int viewHeight = Max( 1, view->height );
+	const float aspect = static_cast<float>( viewWidth ) / static_cast<float>( viewHeight );
+
+	if ( aspect >= 1.0f ) {
+		captureWidth = lowResMaxDimension;
+		captureHeight = Max( 1, idMath::FtoiFast( ( static_cast<float>( lowResMaxDimension ) / aspect ) + 0.5f ) );
+	} else {
+		captureHeight = lowResMaxDimension;
+		captureWidth = Max( 1, idMath::FtoiFast( ( static_cast<float>( lowResMaxDimension ) * aspect ) + 0.5f ) );
+	}
+
+	forceDimensions = true;
+}
+
 
 //------------------------------------------------------
 // MotionBlurVision
@@ -635,10 +662,15 @@ void hhPlayerView::MotionBlurVision(idUserInterface *hud, const renderView_t *vi
 	float remainingTime = mbFinishTime - gameLocal.time;
 	float elapsedTime = mbTotalTime - remainingTime;
 	float scale = remainingTime / mbTotalTime;
+	int captureWidth = SCREEN_WIDTH;
+	int captureHeight = SCREEN_HEIGHT;
+	bool forceCaptureDimensions = false;
+
+	HH_GetMotionBlurCaptureSize( view, captureWidth, captureHeight, forceCaptureDimensions );
 
 	// Render to a texture
 	RENDER_DEMO_VIEWRENDER(view, this); //HUMANHEAD rww
-	renderSystem->CropRenderSize( 512, 256, true );
+	renderSystem->CropRenderSize( captureWidth, captureHeight, false, forceCaptureDimensions );
 	SingleView( hud, view );
 	renderSystem->CaptureRenderToImage( "_scratch" );
 	renderSystem->UnCrop();

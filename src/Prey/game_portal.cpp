@@ -194,6 +194,17 @@ void hhPortal::PostSpawn( void ) {
 	CheckForBuddy();
 }
 
+renderView_t *hhPortal::GetRenderView() {
+	renderView_t *view = idEntity::GetRenderView();
+
+	// Retail portal subviews use a small forward buffer instead of placing the
+	// remote eye exactly on the portal entity origin.
+	const float portalEyeOffset = ( GetPhysics()->GetBounds()[0].x < 0.0f ) ? -GetPhysics()->GetBounds()[0].x : 0.0f;
+	view->vieworg += view->viewaxis[0] * portalEyeOffset;
+
+	return view;
+}
+
 void hhPortal::Save(idSaveGame *savefile) const {
 #if GAMEPORTAL_PVS
 	savefile->WriteInt( areaPortal );

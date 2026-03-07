@@ -46,6 +46,7 @@ public:
 	void			Spawn(void);
 	void			Save( idSaveGame *savefile ) const;
 	void			Restore( idRestoreGame *savefile );
+	virtual renderView_t *	GetRenderView();
 
 	//rww - network code
 	virtual void	WriteToSnapshot( idBitMsgDelta &msg ) const;
