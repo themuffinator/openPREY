@@ -1587,15 +1587,8 @@ bool hhHunterSimple::StartSound( const char *soundName, const s_channelType chan
 		*length = 0;
 	}
 
-	// we should ALWAYS be playing sounds from the def.
-	// hardcoded sounds MUST be avoided at all times because they won't get precached.
-	assert( idStr::Icmpn( soundName, "snd_", 4 ) == 0 );
-
-	if ( !spawnArgs.GetString( soundName, "", &sound ) ) {
-		return false;
-	}
-
-	if ( sound[0] == '\0' ) {
+	// Mirror idEntity::StartSound so hunter speech also accepts direct sound names.
+	if ( !ResolveSoundName( soundName, sound ) ) {
 		return false;
 	}
 

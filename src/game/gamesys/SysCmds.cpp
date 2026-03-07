@@ -733,23 +733,52 @@ static void Cmd_Kick_f( const idCmdArgs &args ) {
 Cmd_GetViewpos_f
 ==================
 */
-void Cmd_GetViewpos_f( const idCmdArgs &args ) {
+static bool Cmd_GetCurrentViewPose( idVec3 &origin, idAngles &angles ) {
 	idPlayer	*player;
-	idVec3		origin;
 	idMat3		axis;
 
 	player = gameLocal.GetLocalPlayer();
 	if ( !player ) {
-		return;
+		return false;
 	}
 
 	const renderView_t *view = player->GetRenderView();
 	if ( view ) {
-		gameLocal.Printf( "(%s) %.1f\n", view->vieworg.ToString(), view->viewaxis[0].ToYaw() );
+		origin = view->vieworg;
+		angles = view->viewaxis.ToAngles();
 	} else {
 		player->GetViewPos( origin, axis );
-		gameLocal.Printf( "(%s) %.1f\n", origin.ToString(), axis[0].ToYaw() );
+		angles = axis.ToAngles();
 	}
+
+	return true;
+}
+
+void Cmd_GetViewpos_f( const idCmdArgs &args ) {
+	idVec3		origin;
+	idAngles	angles;
+
+	if ( !Cmd_GetCurrentViewPose( origin, angles ) ) {
+		return;
+	}
+
+	gameLocal.Printf( "(%s) %.1f\n", origin.ToString(), angles.yaw );
+}
+
+/*
+=================
+Cmd_Viewpos_f
+=================
+*/
+static void Cmd_Viewpos_f( const idCmdArgs &args ) {
+	idVec3		origin;
+	idAngles	angles;
+
+	if ( !Cmd_GetCurrentViewPose( origin, angles ) ) {
+		return;
+	}
+
+	gameLocal.Printf( "setviewpos %f %f %f %f\n", origin.x, origin.y, origin.z, angles.yaw );
 }
 
 /*
@@ -2735,6 +2764,7 @@ void idGameLocal::InitConsoleCommands( void ) {
 	cmdSystem->AddCommand( "kill",					Cmd_Kill_f,					CMD_FL_GAME,				"kills the player" );
 	cmdSystem->AddCommand( "where",					Cmd_GetViewpos_f,			CMD_FL_GAME|CMD_FL_CHEAT,	"prints the current view position" );
 	cmdSystem->AddCommand( "getviewpos",			Cmd_GetViewpos_f,			CMD_FL_GAME|CMD_FL_CHEAT,	"prints the current view position" );
+	cmdSystem->AddCommand( "viewpos",				Cmd_Viewpos_f,				CMD_FL_GAME|CMD_FL_CHEAT,	"prints the current view position as a setviewpos command" );
 	cmdSystem->AddCommand( "setviewpos",			Cmd_SetViewpos_f,			CMD_FL_GAME|CMD_FL_CHEAT,	"sets the current view position" );
 	cmdSystem->AddCommand( "teleport",				Cmd_Teleport_f,				CMD_FL_GAME|CMD_FL_CHEAT,	"teleports the player to an entity location", idGameLocal::ArgCompletion_EntityName );
 //	cmdSystem->AddCommand( "trigger",				Cmd_Trigger_f,				CMD_FL_GAME|CMD_FL_CHEAT,	"triggers an entity", idGameLocal::ArgCompletion_EntityName );// HUMANHEAD CJRPERSISTENTMERGE:  our version of this is better

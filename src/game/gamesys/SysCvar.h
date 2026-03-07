@@ -118,6 +118,7 @@ extern idCVar	g_artificialPlayerCount; //HUMANHEAD rww
 
 extern idCVar	g_frametime;
 extern idCVar	g_timeentities;
+extern idCVar	g_lowresFullscreenFX;
 
 extern idCVar	ai_debugScript;
 extern idCVar	ai_debugMove;

@@ -56,7 +56,7 @@ idCVar ai_hideSkipThink(			"ai_hideSkipThink",				"1",			CVAR_GAME | CVAR_INTEGE
 idCVar g_debugAFs(					"g_debugAFs",					"0",			CVAR_GAME | CVAR_INTEGER,		"print out info on what the ragdolls are doing" );
 idCVar g_debugFX(					"g_debugFX",					"0",			CVAR_GAME | CVAR_BOOL,			"" );
 idCVar g_showDormant(				"g_showDormant",				"0",			CVAR_GAME | CVAR_BOOL,			"1= Prints out msgs when an entity goes dormant" );
-idCVar ai_showNoAAS(				"ai_showNoAAS",					"1",			CVAR_GAME | CVAR_BOOL | CVAR_ARCHIVE,	"1= Show when monsters do not have AAS available (shows a ?)" );
+idCVar ai_showNoAAS(				"ai_showNoAAS",					"0",			CVAR_GAME | CVAR_BOOL,	"1= Show when monsters do not have AAS available (shows a ?), developer only" );
 idCVar ai_printSpeech(				"ai_printSpeech",				"0",			CVAR_GAME | CVAR_BOOL | CVAR_ARCHIVE,	"1= Draw hunter speech sounds" );
 idCVar ai_skipSpeech(				"ai_skipSpeech",				"0",			CVAR_GAME | CVAR_BOOL,			"1= Do not use the AI speech system" );
 idCVar ai_skipThink(				"ai_skipThink",					"0",			CVAR_GAME | CVAR_BOOL,			"1= Do not execute hhAI::Think() fxn" );
@@ -117,7 +117,7 @@ idCVar si_name(						"si_name",					"Prey Server",	CVAR_GAME | CVAR_SERVERINFO |
 //HUMANHEAD rww - removed unsupported game types from description
 idCVar si_gameType(					"si_gameType",				si_gameTypeArgs[ 0 ],	CVAR_GAME | CVAR_SERVERINFO | CVAR_ARCHIVE, "game type - singleplayer, deathmatch, or Team DM", si_gameTypeArgs, idCmdSystem::ArgCompletion_String<si_gameTypeArgs> );
 idCVar si_map(						"si_map",					"dmshuttle2",CVAR_GAME | CVAR_SERVERINFO | CVAR_ARCHIVE, "map to be played next on server", idCmdSystem::ArgCompletion_MapName );
-idCVar si_maxPlayers(				"si_maxPlayers",			"8",			CVAR_GAME | CVAR_SERVERINFO | CVAR_ARCHIVE | CVAR_INTEGER, "max number of players allowed on the server", 1, 8 );
+idCVar si_maxPlayers(				"si_maxPlayers",			"8",			CVAR_GAME | CVAR_SERVERINFO | CVAR_ARCHIVE | CVAR_INTEGER, "max number of players allowed on the server", 1, MAX_CLIENTS );
 idCVar si_fragLimit(				"si_fragLimit",				"10",			CVAR_GAME | CVAR_SERVERINFO | CVAR_ARCHIVE | CVAR_INTEGER, "frag limit", 1, MP_PLAYER_MAXFRAGS );
 idCVar si_timeLimit(				"si_timeLimit",				"10",			CVAR_GAME | CVAR_SERVERINFO | CVAR_ARCHIVE | CVAR_INTEGER, "time limit in minutes", 0, 60 );
 idCVar si_teamDamage(				"si_teamDamage",			"0",			CVAR_GAME | CVAR_SERVERINFO | CVAR_ARCHIVE | CVAR_BOOL, "enable team damage" );
@@ -203,6 +203,7 @@ idCVar g_artificialPlayerCount(		"g_artificialPlayerCount",	"0",			CVAR_GAME | C
 
 idCVar g_frametime(					"g_frametime",				"0",			CVAR_GAME | CVAR_BOOL, "displays timing information for each game frame" );
 idCVar g_timeentities(				"g_timeEntities",			"0",			CVAR_GAME | CVAR_FLOAT, "when non-zero, shows entities whose think functions exceeded the # of milliseconds specified" );
+idCVar g_lowresFullscreenFX(		"g_lowresFullscreenFX",		"0",			CVAR_GAME | CVAR_BOOL, "enable lores mode for fullscreen fx" );
 	
 idCVar ai_debugScript(				"ai_debugScript",			"-1",			CVAR_GAME | CVAR_INTEGER, "displays script calls for the specified monster entity number" );
 idCVar ai_debugMove(				"ai_debugMove",				"0",			CVAR_GAME | CVAR_BOOL, "draws movement information for monsters" );

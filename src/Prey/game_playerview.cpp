@@ -727,6 +727,11 @@ void hhPlayerView::SetLetterBox(bool on) {
 //------------------------------------------------------
 void hhPlayerView::RenderPlayerView( idUserInterface *hud ) {
 	const renderView_t *view = player->GetRenderView();
+	const bool previousUseUIViewportFor2D = renderSystem->GetUseUIViewportFor2D();
+
+	// Retail PREY.exe emits view damage/effect overlays as fullscreen 2D passes,
+	// not HUD quads constrained to the UI viewport safe-area.
+	renderSystem->SetUseUIViewportFor2D( false );
 
 	if ( g_skipViewEffects.GetBool() ) {
 		SingleView( hud, view );
@@ -743,6 +748,8 @@ void hhPlayerView::RenderPlayerView( idUserInterface *hud ) {
 		// HUMANHEAD pdm: letterbox
 		ApplyLetterBox(view);
 	}
+
+	renderSystem->SetUseUIViewportFor2D( previousUseUIViewportFor2D );
 
 	// HUMANHEAD: Draw the HUD after all over overlay effects.
 	if (hud) {

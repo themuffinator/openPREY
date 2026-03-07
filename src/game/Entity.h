@@ -621,6 +621,7 @@ protected://HUMANHEAD
 
 protected://HUMANHEAD
 	void					FixupLocalizedStrings();
+	bool					ResolveSoundName( const char *soundName, const char *&sound ) const;
 
 	bool					DoDormantTests( void );				// dormant == on the active list, but out of PVS
 
