@@ -81,12 +81,12 @@ void hhEntitySpawner::Event_SpawnEntity( void ) {
 			gameLocal.Error("NULL entDefName in hhEntitySpawner::Event_SpawnEntity\n");
 		}
 		else {
-			gameLocal.Warning( "Unknown Def '%s'", entDefName );
+			gameLocal.Warning( "Unknown Def '%s'", entDefName.c_str() );
 		}
 		return;
 	}
 	entDef->GetVector( "size", "0", entSize );
-	idBounds bounds = idBounds( GetPhysics()->GetOrigin() ).Expand( max( entSize.x, entSize.y ) );
+	idBounds bounds = idBounds( GetPhysics()->GetOrigin() ).Expand( Max( entSize.x, entSize.y ) );
 	idEntity* ents[MAX_GENTITIES];
 	int numModels = gameLocal.clip.EntitiesTouchingBounds( bounds, -1, ents, MAX_GENTITIES );
 	for ( int i = 0; i < numModels ; i++ ) {
@@ -99,7 +99,7 @@ void hhEntitySpawner::Event_SpawnEntity( void ) {
 	idEntity *e = gameLocal.SpawnObject(entDefName, &args);
 	
 	if(!e) {
-		gameLocal.Error("hhEntitySpawner: Failed to spawn entity def named: %s", entDefName);
+		gameLocal.Error("hhEntitySpawner: Failed to spawn entity def named: %s", entDefName.c_str());
 		return;
 	}		
 	
