@@ -1764,10 +1764,18 @@ idElevator::Restore
 */
 void idElevator::Restore( idRestoreGame *savefile ) {
 	int i, num;
+	int savedState;
 
-	savefile->ReadInt( (int &)state );
+	savefile->ReadInt( savedState );
+	if ( savedState < INIT || savedState > WAITING_ON_DOORS ) {
+		savefile->Error( "idElevator::Restore: invalid elevator state %d", savedState );
+	}
+	state = static_cast<elevatorState_t>( savedState );
 
 	savefile->ReadInt( num );
+	if ( num < 0 || num > MAX_SAVEGAME_ELEVATOR_FLOORS ) {
+		savefile->Error( "idElevator::Restore: invalid floor count %d", num );
+	}
 	for ( i = 0; i < num; i++ ) {
 		floorInfo_s floor;
 

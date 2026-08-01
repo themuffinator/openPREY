@@ -8,6 +8,55 @@
 
 #include "TypeInfo.h"
 
+// Win64 passes float arguments in a different register class from integer and
+// pointer arguments. Keep a runtime smoke command for the exact mixed signature
+// that requires CPU_EASYARGS=0 and the generated callback table.
+static const idEventDef EV_EventDispatchSmoke( "<eventDispatchSmoke>", "fe" );
+
+class idEventDispatchSmokeTarget : public idClass {
+public:
+	CLASS_PROTOTYPE( idEventDispatchSmokeTarget );
+
+	idEventDispatchSmokeTarget() : callbackRan( false ), receivedValue( 0.0f ), receivedEntity( NULL ) {}
+
+	void Event_CheckArgs( float value, idEntity *entity ) {
+		callbackRan = true;
+		receivedValue = value;
+		receivedEntity = entity;
+	}
+
+	bool Passed( float expectedValue, const idEntity *expectedEntity ) const {
+		return callbackRan && idMath::Fabs( receivedValue - expectedValue ) < 0.0001f && receivedEntity == expectedEntity;
+	}
+
+private:
+	bool			callbackRan;
+	float			receivedValue;
+	const idEntity *receivedEntity;
+};
+
+CLASS_DECLARATION( idClass, idEventDispatchSmokeTarget )
+	EVENT( EV_EventDispatchSmoke, idEventDispatchSmokeTarget::Event_CheckArgs )
+END_CLASS
+
+static void Cmd_TestEventDispatch_f( const idCmdArgs &args ) {
+	const float expectedValue = 1234.25f;
+	idEntity *expectedEntity = gameLocal.GetLocalPlayer();
+	if ( expectedEntity == NULL ) {
+		gameLocal.Error( "testEventDispatch requires a loaded map and local player" );
+		return;
+	}
+
+	idEventDispatchSmokeTarget target;
+	if ( !target.ProcessEvent( &EV_EventDispatchSmoke, expectedValue, expectedEntity ) ||
+		 !target.Passed( expectedValue, expectedEntity ) ) {
+		gameLocal.Error( "eventDispatchSmoke: FAIL (mixed float/entity callback marshalling)" );
+		return;
+	}
+
+	gameLocal.Printf( "eventDispatchSmoke: PASS (CPU_EASYARGS=%d, float+entity)\n", CPU_EASYARGS );
+}
+
 /*
 ==================
 Cmd_GetFloatArg
@@ -2743,6 +2792,7 @@ so it can perform tab completion
 =================
 */
 void idGameLocal::InitConsoleCommands( void ) {
+	cmdSystem->AddCommand( "testEventDispatch", Cmd_TestEventDispatch_f, CMD_FL_GAME | CMD_FL_CHEAT, "tests mixed float/entity event callback marshalling" );
 	cmdSystem->AddCommand( "listTypeInfo",			ListTypeInfo_f,				CMD_FL_GAME,				"list type info" );
 	cmdSystem->AddCommand( "writeGameState",		WriteGameState_f,			CMD_FL_GAME,				"write game state" );
 	cmdSystem->AddCommand( "testSaveGame",			TestSaveGame_f,				CMD_FL_GAME|CMD_FL_CHEAT,	"test a save game for a level" );

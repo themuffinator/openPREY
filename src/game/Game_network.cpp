@@ -718,8 +718,9 @@ void idGameLocal::ServerWriteSnapshot( int clientNum, int sequence, idBitMsg &ms
 	WriteGameStateToSnapshot( deltaMsg );
 
 	// copy the client PVS string
-	NET_MEMCPY( clientInPVS, snapshot->pvs, ( numPVSClients + 7 ) >> 3 ); //HUMANHEAD rww - testing out performance for simd memcpy
-	LittleRevBytes( clientInPVS, sizeof( int ), sizeof( clientInPVS ) / sizeof ( int ) );
+	const int clientPVSBytes = ( numPVSClients + 7 ) >> 3;
+	NET_MEMCPY( clientInPVS, snapshot->pvs, clientPVSBytes ); //HUMANHEAD rww - testing out performance for simd memcpy
+	LittleRevBytes( clientInPVS, sizeof( int ), clientPVSBytes / sizeof( int ) );
 }
 
 /*

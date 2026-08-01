@@ -79,6 +79,10 @@ class idLocationEntity;
 #define	ENTITYNUM_WORLD			(MAX_GENTITIES-2)
 #define	ENTITYNUM_MAX_NORMAL	(MAX_GENTITIES-2)
 
+const int MAX_SAVEGAME_ELEVATOR_FLOORS = 256;
+const int MAX_SAVEGAME_ACTOR_ATTACHMENTS = 256;
+const int MAX_SAVEGAME_ANIMATED_ANIMS = 256;
+
 //HUMANHEAD: aob - put here it can be used anywhere.  hhSafeEntity wouldn't compile otherwise.
 #if GOLD
 // mdl:  Disable if we're gold
@@ -679,12 +683,14 @@ public:
 	virtual void			PrintMemInfo( MemInfo_t *mi );
 
 // HUMANHEAD pdm: Support for level appending
-	bool					DeathwalkMapLoaded() const	{	return bShouldAppend;	}
 #if DEATHWALK_AUTOLOAD
+	bool					DeathwalkMapLoaded() const	{	return bShouldAppend;	}
 	bool					bShouldAppend;			// Taken from serverinfo
 protected:
 	idMapFile *				additionalMapFile;
 	virtual void			SpawnAppendedMapEntities() {}
+#else
+	bool					DeathwalkMapLoaded() const	{	return false;	}
 #endif
 // HUMANHEAD END
 

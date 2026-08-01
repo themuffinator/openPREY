@@ -84,6 +84,9 @@ void idAnimState::Restore( idRestoreGame *savefile ) {
 	savefile->ReadInt( animBlendFrames );
 	savefile->ReadInt( lastAnimBlendFrames );
 	savefile->ReadInt( channel );
+	if ( channel < ANIMCHANNEL_ALL || channel >= ANIM_NumAnimChannels ) {
+		savefile->Error( "idAnimState::Restore: invalid animation channel %d", channel );
+	}
 	savefile->ReadBool( idleAnim );
 	savefile->ReadBool( disabled );
 }
@@ -1038,10 +1041,16 @@ void idActor::Restore( idRestoreGame *savefile ) {
 	savefile->ReadInt( painTime );
 
 	savefile->ReadInt( num );
+	if ( num < 0 || num > MAX_SAVEGAME_ACTOR_ATTACHMENTS ) {
+		savefile->Error( "idActor::Restore: invalid attachment count %d", num );
+	}
 	for ( i = 0; i < num; i++ ) {
 		idAttachInfo &attach = attachments.Alloc();
 		attach.ent.Restore( savefile );
 		savefile->ReadInt( attach.channel );
+		if ( attach.channel < ANIMCHANNEL_ALL || attach.channel >= ANIM_NumAnimChannels ) {
+			savefile->Error( "idActor::Restore: invalid attachment animation channel %d", attach.channel );
+		}
 	}
 
 	savefile->ReadBool( finalBoss );

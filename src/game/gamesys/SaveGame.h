@@ -11,6 +11,25 @@ Save game related helper classes.
 */
 
 const int INITIAL_RELEASE_BUILD_NUMBER = 1262;
+const int OPENQ4_SAVEGAME_COMPATIBILITY_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'S' << 24 );
+const int OPENQ4_SAVEGAME_COMPATIBILITY_VERSION = 2;
+const int OPENQ4_SAVEGAME_SYNC_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'Y' << 24 );
+const int OPENQ4_SAVEGAME_FOOTER_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'F' << 24 );
+const int OPENQ4_SAVEGAME_FOOTER_VERSION = 1;
+
+#if defined( __has_include )
+#if __has_include( "openq4_savegame_compat_generated.h" )
+#include "openq4_savegame_compat_generated.h"
+#endif
+#endif
+
+#ifndef OPENQ4_SAVEGAME_COMPAT_SOURCE_HASH
+#define OPENQ4_SAVEGAME_COMPAT_SOURCE_HASH "standalone-openprey-game"
+#endif
+
+#ifndef OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT
+#define OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT 0
+#endif
 
 class idSaveGame {
 public:
@@ -73,8 +92,14 @@ private:
 	idFile *				file;
 
 	idList<const idClass *>	objects;
+	idHashIndex				objectHash;
+	int						openQ4SaveGameNextSyncId;
+	bool					openQ4SaveGameSyncMarkersEnabled;
 
+	void					WriteChecked( int bytesWritten, int expected, const char *detail, int offset );
+	void					WriteSyncId( void );
 	void					CallSave_r( const idTypeInfo *cls, const idClass *obj );
+	void					WriteSaveGameFooter( int numObjects );
 };
 
 class idRestoreGame {
@@ -134,17 +159,29 @@ public:
 	// HUMANHEAD END
 
 	void					ReadBuildNumber( void );
+	void					ReadSyncId( const char *detail = "unspecified", const char *classname = NULL );
+	void					ReadSaveGameFooter( void );
 
 	//						Used to retrieve the saved game buildNumber from within class Restore methods
 	int						GetBuildNumber( void );
+	bool					IsOpenQ4SaveGameCompatible( void ) const;
+	const char *			GetOpenQ4SaveGameCompatibilityError( void ) const;
 
 private:
 	int						buildNumber;
+	int						openQ4SaveGameCompatibilityVersion;
+	int						openQ4SaveGameCompatibilitySourceFileCount;
+	int						openQ4SaveGameNextSyncId;
+	bool					openQ4SaveGameCompatible;
+	bool					openQ4SaveGameSyncMarkersEnabled;
+	idStr					openQ4SaveGameCompatibilityStamp;
+	idStr					openQ4SaveGameCompatibilityError;
 
 	idFile *				file;
 
 	idList<idClass *>		objects;
 
+	void					ReadChecked( void *buffer, int len, const char *detail );
 	void					CallRestore_r( const idTypeInfo *cls, idClass *obj );
 };
 

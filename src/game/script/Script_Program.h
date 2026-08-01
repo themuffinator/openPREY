@@ -549,6 +549,7 @@ public:
 	function_t									&AllocFunction( idVarDef *def );
 	function_t									*GetFunction( int index );
 	int											GetFunctionIndex( const function_t *func );
+	int											NumFunctions( void ) { return functions.Num(); }
 
 	void										SetEntity( const char *name, idEntity *ent );
 

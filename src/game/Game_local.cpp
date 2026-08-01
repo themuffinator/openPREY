@@ -132,9 +132,10 @@ TestGameAPI
 ============
 */
 void TestGameAPI( void ) {
-	gameImport_t testImport;
-	gameExport_t testExport;
+	gameImport_t testImport = {};
+	gameExport_t testExport = {};
 
+	testImport.version					= GAME_API_VERSION;
 	testImport.sys						= ::sys;
 	testImport.common					= ::common;
 	testImport.cmdSystem				= ::cmdSystem;
@@ -1408,6 +1409,12 @@ bool idGameLocal::InitFromSaveGame( const char *mapName, idRenderWorld *renderWo
 	idRestoreGame savegame( saveGameFile );
 
 	savegame.ReadBuildNumber();
+	if ( !savegame.IsOpenQ4SaveGameCompatible() ) {
+		Warning( "Savegame payload is not compatible with this openPREY build: %s",
+			savegame.GetOpenQ4SaveGameCompatibilityError() );
+		program.Restart();
+		return false;
+	}
 
 	// HUMANHEAD pdm: Support for level appending
 #if DEATHWALK_AUTOLOAD

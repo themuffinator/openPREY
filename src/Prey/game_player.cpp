@@ -7738,7 +7738,7 @@ void hhArtificialPlayer::WriteToSnapshot( idBitMsgDelta &msg ) const {
 
 	usercmd_t &cmd = gameLocal.usercmds[entityNumber];
 	msg.WriteLong( cmd.gameTime );
-	msg.WriteByte( cmd.buttons );
+	msg.WriteShort( cmd.buttons );
     msg.WriteShort( cmd.mx );
 	msg.WriteShort( cmd.my );
 	msg.WriteChar( cmd.forwardmove );
@@ -7764,7 +7764,7 @@ void hhArtificialPlayer::ReadFromSnapshot( const idBitMsgDelta &msg ) {
 
 	usercmd_t &cmd = lastAICmd;
 	cmd.gameTime = msg.ReadLong();
-    cmd.buttons = msg.ReadByte();
+    cmd.buttons = msg.ReadShort();
     cmd.mx = msg.ReadShort();
 	cmd.my = msg.ReadShort();
 	cmd.forwardmove = msg.ReadChar();
