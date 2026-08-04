@@ -123,6 +123,7 @@ const int MAX_SAVEGAME_ANIMATED_ANIMS = 256;
 
 #include "Pvs.h"
 #include "MultiplayerGame.h"
+#include "bots/BotCharacter.h"
 
 // HUMANHEAD
 #include "../Prey/prey_camerainterpolator.h"	// HUMANHEAD
@@ -425,6 +426,7 @@ public:
 	idDict					serverInfo;				// all the tunable parameters, like numclients, etc
 	int						numClients;				// pulled from serverInfo and verified
 	idDict					userInfo[MAX_CLIENTS];	// client specific settings
+	bool					clientConnectionPending[MAX_CLIENTS]; // async slot reserved between connect and begin
 	usercmd_t				usercmds[MAX_CLIENTS];	// client input commands
 	idDict					persistentPlayerInfo[MAX_CLIENTS];
 	//HUMANHEAD rww - introducing client entities.
@@ -748,8 +750,15 @@ public:
 	bool					EntInClientSnapshot(int entNum) { return (!isClient || (clientPVS[localClientNum][entNum >> 5] & ( 1 << ( entNum & 31 ) ))); }
 	int						GetMapSpawnCount(void) { return mapSpawnCount; }
 
-	void					GetAPUserInfo(idDict &dict, int clientNum);
-	void					SpawnArtificialPlayer(void);
+	void					GetAPUserInfo( idDict &dict, int clientNum,
+							const rvBotCharacter *character = NULL, int skillLevel = -1 );
+	bool					SpawnArtificialPlayer( const char *characterName = NULL,
+							int skillLevel = -1 );
+	bool					RemoveArtificialPlayer( const char *name = NULL );
+	int					RemoveArtificialPlayers( void );
+	int					NumArtificialPlayers( void ) const;
+	void					ListArtificialPlayers( void ) const;
+	void					RebindArtificialPlayers( void );
 	//HUMANHEAD END
 
 	//HUMANHEAD rww - keep track of layered spawning

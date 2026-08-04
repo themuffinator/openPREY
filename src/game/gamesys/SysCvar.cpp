@@ -200,7 +200,17 @@ idCVar g_showTestModelFrame(		"g_showTestModelFrame",		"0",			CVAR_GAME | CVAR_B
 idCVar g_showActiveEntities(		"g_showActiveEntities",		"0",			CVAR_GAME | CVAR_BOOL, "draws boxes around thinking entities.  dormant entities (outside of pvs) are drawn yellow.  non-dormant are green." );
 idCVar g_showEnemies(				"g_showEnemies",			"0",			CVAR_GAME | CVAR_BOOL, "draws boxes around monsters that have targeted the the player" );
 
-idCVar g_artificialPlayerCount(		"g_artificialPlayerCount",	"0",			CVAR_GAME | CVAR_INTEGER, "spawns artificial players" ); //HUMANHEAD rww
+idCVar g_artificialPlayerCount(		"g_artificialPlayerCount",	"0",			CVAR_GAME | CVAR_INTEGER | CVAR_NOCHEAT, "spawns artificial players" ); //HUMANHEAD rww
+
+// A named character layers its play style and voice over the baseline skill
+// curve, so bots at the same difficulty can still feel distinct.
+idCVar bot_skill(							"bot_skill",						"3",			CVAR_GAME | CVAR_INTEGER | CVAR_ARCHIVE, "bot difficulty, 1 (easiest) to 5 (hardest)", 1, 5 );
+idCVar bot_characters(						"bot_characters",					"1",			CVAR_GAME | CVAR_BOOL | CVAR_ARCHIVE, "give bots named characters with their own play style and voice; 0 leaves them on the plain skill curve" );
+idCVar bot_forceCharacter(					"bot_forceCharacter",				"",				CVAR_GAME, "put every bot on this one character, by name; for tuning a single personality" );
+idCVar bot_skillVariance(					"bot_skillVariance",				"0",			CVAR_GAME | CVAR_FLOAT | CVAR_ARCHIVE, "spread bot skill this many levels either side of bot_skill, so a match is not all one difficulty", 0, 2 );
+idCVar bot_chat(							"bot_chat",							"1",			CVAR_GAME | CVAR_INTEGER | CVAR_ARCHIVE, "bot chat: 0 silent, 1 normal, 2 chatty", 0, 2 );
+idCVar bot_chatDelay(						"bot_chatDelay",					"600",			CVAR_GAME | CVAR_INTEGER | CVAR_ARCHIVE, "initial thinking pause before a bot starts typing, in milliseconds" );
+idCVar bot_chatCPM(							"bot_chatCPM",						"900",			CVAR_GAME | CVAR_INTEGER | CVAR_ARCHIVE, "base bot typing speed in visible characters per minute", 60, 6000 );
 
 idCVar g_frametime(					"g_frametime",				"0",			CVAR_GAME | CVAR_BOOL, "displays timing information for each game frame" );
 idCVar g_timeentities(				"g_timeEntities",			"0",			CVAR_GAME | CVAR_FLOAT, "when non-zero, shows entities whose think functions exceeded the # of milliseconds specified" );

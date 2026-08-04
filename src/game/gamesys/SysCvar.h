@@ -117,6 +117,15 @@ extern idCVar	g_showEnemies;
 
 extern idCVar	g_artificialPlayerCount; //HUMANHEAD rww
 
+// Data-driven multiplayer bot personalities.
+extern idCVar	bot_skill;
+extern idCVar	bot_characters;
+extern idCVar	bot_forceCharacter;
+extern idCVar	bot_skillVariance;
+extern idCVar	bot_chat;
+extern idCVar	bot_chatDelay;
+extern idCVar	bot_chatCPM;
+
 extern idCVar	g_frametime;
 extern idCVar	g_timeentities;
 extern idCVar	g_lowresFullscreenFX;

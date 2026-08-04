@@ -1214,6 +1214,22 @@ void idMultiplayerGame::PlayerDeath( idPlayer *dead, idPlayer *killer, idEntity 
 		}
 	}
 	//HUMANHEAD END
+
+	// Named artificial players share the ordinary player/death path, so this
+	// is the single authoritative place to turn combat results into dialogue.
+	const char *weaponName = NULL;
+	if ( killer && killer->IsType( hhPlayer::Type ) ) {
+		hhPlayer *preyKiller = static_cast<hhPlayer *>( killer );
+		weaponName = preyKiller->GetWeaponName( preyKiller->GetCurrentWeapon() );
+	}
+	if ( killer && killer != dead && killer->IsType( hhArtificialPlayer::Type ) &&
+		( gameLocal.gameType != GAME_TDM || killer->team != dead->team ) ) {
+		static_cast<hhArtificialPlayer *>( killer )->OnBotKill( dead, weaponName );
+	}
+	if ( dead->IsType( hhArtificialPlayer::Type ) ) {
+		static_cast<hhArtificialPlayer *>( dead )->OnBotDeath(
+			killer, weaponName, !killer || killer == dead );
+	}
 }
 
 /*
@@ -1403,6 +1419,20 @@ void idMultiplayerGame::NewState( gameState_t news, idPlayer *player ) {
 	}
 
 	gameState = news;
+	if ( news == GAMEON || news == GAMEREVIEW ) {
+		for ( i = 0; i < gameLocal.numClients; ++i ) {
+			idEntity *entity = gameLocal.entities[i];
+			if ( !entity || !entity->IsType( hhArtificialPlayer::Type ) ) {
+				continue;
+			}
+			hhArtificialPlayer *bot = static_cast<hhArtificialPlayer *>( entity );
+			if ( news == GAMEON ) {
+				bot->OnBotMatchStart();
+			} else {
+				bot->OnBotMatchEnd( player == bot || bot->IsLeader() );
+			}
+		}
+	}
 }
 
 /*
@@ -4174,6 +4204,67 @@ void idMultiplayerGame::ProcessChatMessage( int clientNum, bool team, const char
 			}
 		}
 	}
+
+	// Offer an accepted visible message to at most one eligible bot.  A reply
+	// marks its own delivery through ReplyDispatchSuppressed(), which is the
+	// recursion brake; ordinary event banter may still prompt a natural answer.
+	if ( clientNum >= 0 && send_to != 1 &&
+		!hhArtificialPlayer::ReplyDispatchSuppressed() && p ) {
+		idStr normalizedText;
+		botCharacterManager.NormalizeReplyText( text, normalizedText );
+		if ( !normalizedText.IsEmpty() ) {
+			idList<hhArtificialPlayer *> addressedCandidates;
+			idList<hhArtificialPlayer *> generalCandidates;
+			int longestAddressedName = 0;
+			bool foundAddressedName = false;
+			const bool sourceIsBot = p->IsType( hhArtificialPlayer::Type );
+			for ( i = 0; i < gameLocal.numClients; ++i ) {
+				idEntity *candidateEntity = gameLocal.entities[i];
+				if ( !candidateEntity || i == clientNum ||
+					!candidateEntity->IsType( hhArtificialPlayer::Type ) ) {
+					continue;
+				}
+				hhArtificialPlayer *candidate =
+					static_cast<hhArtificialPlayer *>( candidateEntity );
+				if ( candidate->IsHidden() || ( team && candidate->team != p->team ) ||
+					!candidate->GetBotCharacter() ) {
+					continue;
+				}
+				const bool addressed = rvBotCharacterManager::ReplyNameMatches(
+					candidate->GetBotCharacterName(), normalizedText );
+				if ( addressed ) {
+					idStr normalizedName;
+					botCharacterManager.NormalizeReplyText(
+						candidate->GetBotCharacterName(), normalizedName );
+					if ( normalizedName.Length() > longestAddressedName ) {
+						// "Elite Hunter" owns a message that also contains "Hunter".
+						addressedCandidates.Clear();
+						longestAddressedName = normalizedName.Length();
+					}
+					if ( normalizedName.Length() < longestAddressedName ) {
+						continue;
+					}
+					foundAddressedName = true;
+					if ( botCharacterManager.HasReply( candidate->GetBotCharacter(),
+						normalizedText, sourceIsBot, true ) ) {
+						addressedCandidates.Append( candidate );
+					}
+				} else if ( botCharacterManager.HasReply( candidate->GetBotCharacter(),
+					normalizedText, sourceIsBot, false ) ) {
+						generalCandidates.Append( candidate );
+				}
+			}
+
+			idList<hhArtificialPlayer *> *candidates = foundAddressedName ?
+				&addressedCandidates : &generalCandidates;
+			if ( candidates->Num() ) {
+				hhArtificialPlayer *responder =
+					( *candidates )[gameLocal.random.RandomInt( candidates->Num() )];
+				responder->TryQueueBotReply( normalizedText, sourceIsBot,
+					foundAddressedName, p, team );
+			}
+		}
+	}
 }
 
 /*
@@ -4192,6 +4283,22 @@ void idMultiplayerGame::Precache( void ) {
 #else
 	gameLocal.FindEntityDefDict( "player_doommarine", false );;
 #endif
+	// Named bots instantiate this multiplayer player class directly rather than
+	// through a map reference, so warm it before the first addbot command.
+	gameLocal.FindEntityDef( "player_artificial_mp", false );
+
+	// These are created or resolved directly by multiplayer runtime code rather
+	// than through conventional model/snd/gui entityDef keys.
+	declManager->FindMaterial( "textures/decals/painview", false );
+	// _scratch is an intrinsic render target rather than a declared material;
+	// allow FindMaterial to create its implicit material during level load.
+	declManager->FindMaterial( "_scratch", true );
+	declManager->FindMaterial( "textures/decals/hurtview", false );
+	declManager->FindMaterial( LAGO_MATERIAL, false );
+	declManager->FindMaterial( "textures/interface/directionalDamageLeft", false );
+	declManager->FindMaterial( "textures/interface/directionalDamageFront", false );
+	gameLocal.FindEntityDef( "ammo_types", false );
+	gameLocal.FindEntityDef( "func_fx", false );
 	
 	// skins
 /* HUMANHEAD pdm: removed

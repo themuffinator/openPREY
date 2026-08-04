@@ -103,6 +103,7 @@ const idEventDef EV_StartSoundShader( "startSoundShader", "sd", 'f' );
 const idEventDef EV_StartSound( "startSound", "sdd", 'f' );
 const idEventDef EV_StopSound( "stopSound", "dd" );
 const idEventDef EV_FadeSound( "fadeSound", "dff" );
+static const idEventDef EV_OpenPreyScriptSilenceDone( "<openprey_script_silence_done>", NULL );
 const idEventDef EV_SetGuiParm( "setGuiParm", "ss" );
 const idEventDef EV_SetGuiFloat( "setGuiFloat", "sf" );
 const idEventDef EV_GetNextKey( "getNextKey", "ss", 's' );
@@ -185,6 +186,7 @@ ABSTRACT_DECLARATION( idClass, idEntity )
 	EVENT( EV_StartSound,			idEntity::Event_StartSound )
 	EVENT( EV_StopSound,			idEntity::Event_StopSound )
 	EVENT( EV_FadeSound,			idEntity::Event_FadeSound )
+	EVENT( EV_OpenPreyScriptSilenceDone,	idEntity::Event_ScriptSilenceDone )
 	EVENT( EV_GetWorldOrigin,		idEntity::Event_GetWorldOrigin )
 	EVENT( EV_SetWorldOrigin,		idEntity::Event_SetWorldOrigin )
 	EVENT( EV_GetOrigin,			idEntity::Event_GetOrigin )
@@ -526,6 +528,9 @@ idEntity::idEntity() : reactions(1) { // HUMANHEAD JRM
 	memset( &renderEntity, 0, sizeof( renderEntity ) );
 	modelDefHandle	= -1;
 	memset( &refSound, 0, sizeof( refSound ) );
+	scriptSilenceWaitingThread = 0;
+	scriptSilenceSilentTimeOffset = 0;
+	scriptSilenceNextSilentTime = 0;
 
 	mpGUIState = -1;
 
@@ -732,6 +737,11 @@ idEntity::~idEntity( void ) {
 
 	DeconstructScriptObject();
 	scriptObject.Free();
+	if ( scriptSilenceWaitingThread ) {
+		idThread::ObjectMoveDone( scriptSilenceWaitingThread, this );
+		scriptSilenceWaitingThread = 0;
+	}
+	CancelEvents( &EV_OpenPreyScriptSilenceDone );
 
 	if ( thinkFlags ) {
 		BecomeInactive( thinkFlags );
@@ -822,6 +832,9 @@ void idEntity::Save( idSaveGame *savefile ) const {
 	savefile->WriteRenderEntity( renderEntity );
 	savefile->WriteInt( modelDefHandle );
 	savefile->WriteRefSound( refSound );
+	savefile->WriteInt( scriptSilenceWaitingThread );
+	savefile->WriteInt( scriptSilenceSilentTimeOffset );
+	savefile->WriteInt( scriptSilenceNextSilentTime );
 
 	savefile->WriteObject( bindMaster );
 	savefile->WriteJoint( bindJoint );
@@ -909,6 +922,9 @@ void idEntity::Restore( idRestoreGame *savefile ) {
 	savefile->ReadRenderEntity( renderEntity );
 	savefile->ReadInt( modelDefHandle );
 	savefile->ReadRefSound( refSound );
+	savefile->ReadInt( scriptSilenceWaitingThread );
+	savefile->ReadInt( scriptSilenceSilentTimeOffset );
+	savefile->ReadInt( scriptSilenceNextSilentTime );
 
 	savefile->ReadObject( reinterpret_cast<idClass *&>( bindMaster ) );
 	savefile->ReadJoint( bindJoint );
@@ -1991,11 +2007,76 @@ bool idEntity::StartSoundShader( const idSoundShader *shader, const s_channelTyp
 	if ( length ) {
 		*length = len;
 	}
+	TrackScriptVoiceSilence( channel, len );
 
 	// set reference to the sound for shader synced effects
 	renderEntity.referenceSound = refSound.referenceSound;
 
 	return true;
+}
+
+/*
+================
+idEntity::TrackScriptVoiceSilence
+
+Prey scripts use waitForSilence() on the entity that owns voice playback. Several
+retail maps wait on $player1, so this support must live on idEntity rather than
+only on Prey-specific animated-entity subclasses.
+================
+*/
+void idEntity::TrackScriptVoiceSilence( const s_channelType channel, int length ) {
+	if ( channel != SND_CHANNEL_VOICE || length <= 0 ) {
+		return;
+	}
+
+	const int endTime = gameLocal.time + length;
+	if ( endTime <= scriptSilenceNextSilentTime ) {
+		return;
+	}
+
+	scriptSilenceNextSilentTime = endTime;
+
+	if ( scriptSilenceWaitingThread ) {
+		int time = length + scriptSilenceSilentTimeOffset;
+		time = idMath::ClampInt( 1, time, time );
+		CancelEvents( &EV_OpenPreyScriptSilenceDone );
+		PostEventMS( &EV_OpenPreyScriptSilenceDone, time );
+	}
+}
+
+/*
+================
+idEntity::SetSilenceCallbackForCurrentThread
+================
+*/
+bool idEntity::SetSilenceCallbackForCurrentThread( float plusOrMinusSeconds ) {
+	if ( scriptSilenceWaitingThread ) {
+		return false;
+	}
+
+	scriptSilenceWaitingThread = idThread::CurrentThreadNum();
+	scriptSilenceSilentTimeOffset = SEC2MS( plusOrMinusSeconds );
+
+	if ( scriptSilenceNextSilentTime > gameLocal.time ) {
+		int time = ( scriptSilenceNextSilentTime - gameLocal.time ) + scriptSilenceSilentTimeOffset;
+		time = idMath::ClampInt( 1, time, time );
+		CancelEvents( &EV_OpenPreyScriptSilenceDone );
+		PostEventMS( &EV_OpenPreyScriptSilenceDone, time );
+	}
+
+	return true;
+}
+
+/*
+================
+idEntity::Event_ScriptSilenceDone
+================
+*/
+void idEntity::Event_ScriptSilenceDone( void ) {
+	if ( scriptSilenceWaitingThread ) {
+		idThread::ObjectMoveDone( scriptSilenceWaitingThread, this );
+		scriptSilenceWaitingThread = 0;
+	}
 }
 
 /*

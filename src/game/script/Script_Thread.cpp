@@ -7,7 +7,7 @@
 #include "../Game_local.h"
 
 const idEventDef EV_Thread_Execute( "<execute>", NULL );
-const idEventDef EV_Thread_SetCallback( "<script_setcallback>", NULL );
+const idEventDef EV_Thread_SetCallback( "<script_setcallback>", NULL, 'd' );
 																	
 // script callable events
 const idEventDef EV_Thread_TerminateThread( "terminate", "d" );
@@ -87,7 +87,7 @@ const idEventDef EV_Thread_DrawText( "drawText", "svfvdf" );
 const idEventDef EV_Thread_InfluenceActive( "influenceActive", NULL, 'd' );
 
 // HUMANHEAD
-const idEventDef EV_Thread_SetSilenceCallback( "<script_setsilencecallback>", "f" );	// pdm
+const idEventDef EV_Thread_SetSilenceCallback( "<script_setsilencecallback>", "f", 'd' );	// pdm
 const idEventDef EV_Thread_WaitSilence( "waitForSilence", "ef" );		// pdm
 const idEventDef EV_Thread_WaitPVS( "waitPVS", "e" );		// pdm
 const idEventDef EV_Thread_Precache( "precache", "s" );		// pdm
@@ -1081,9 +1081,8 @@ idThread::Event_WaitForSilence
 ================
 */
 void idThread::Event_WaitForSilence( idEntity *ent, float plusOrMinusSeconds ) {
-	if ( ent && ent->RespondsTo( EV_Thread_SetSilenceCallback ) ) {
-		ent->ProcessEvent( &EV_Thread_SetSilenceCallback, plusOrMinusSeconds );
-		if ( gameLocal.program.GetReturnedInteger() ) {
+	if ( ent ) {
+		if ( ent->SetSilenceCallbackForCurrentThread( plusOrMinusSeconds ) ) {
 			Pause();
 			waitingFor = ent->entityNumber;
 		}
@@ -1415,6 +1414,20 @@ idThread::Event_SetSpawnArg
 */
 void idThread::Event_SetSpawnArg( const char *key, const char *value ) {
 	spawnArgs.Set( key, value );
+
+	// Map scripts can assemble spawn dictionaries across waits.  Treat each
+	// media-bearing assignment as an intentional precache, including scripts
+	// that run after EndLevelLoad but before a delayed spawn.
+	idDict mediaArg;
+	mediaArg.Set( key, value );
+	const bool wasInsideLoad = declManager->GetInsideLoad();
+	if ( !wasInsideLoad ) {
+		declManager->SetInsideLoad( true );
+	}
+	gameLocal.CacheDictionaryMedia( &mediaArg );
+	if ( !wasInsideLoad ) {
+		declManager->SetInsideLoad( false );
+	}
 }
 
 /*

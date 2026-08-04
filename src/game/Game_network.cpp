@@ -275,8 +275,33 @@ idGameLocal::ServerClientConnect
 ================
 */
 void idGameLocal::ServerClientConnect( int clientNum ) {
+	// The async layer has claimed this slot, but its player entity is not born
+	// until ServerClientBegin.  Keep game-side bot spawning out of that gap.
+	clientConnectionPending[ clientNum ] = true;
+
 	// make sure no parasite entity is left
 	if ( entities[ clientNum ] ) {
+		if ( entities[ clientNum ]->IsType( hhArtificialPlayer::Type ) ) {
+			// A real connection is claiming a synthetic client's slot.  Lower the
+			// desired count before deletion so the per-frame reconciler cannot put
+			// a bot straight back into this SCS_CONNECTED handshake slot.
+			const int remainingBots = Max( 0, NumArtificialPlayers() - 1 );
+			g_artificialPlayerCount.SetInteger(
+				Min( Max( 0, g_artificialPlayerCount.GetInteger() ), remainingBots ) );
+
+			// Client-slot entities do not emit the normal idEntity destructor delete.
+			// Retire the old AP explicitly so existing clients discard its concrete
+			// type before the later SPAWN_PLAYER for this human reuses the slot.  The
+			// joining client is excluded because INIT_DECL_REMAP must be its first
+			// reliable game message.
+			idBitMsg deleteMsg;
+			byte deleteMsgBuf[MAX_GAME_MESSAGE_SIZE];
+			deleteMsg.Init( deleteMsgBuf, sizeof( deleteMsgBuf ) );
+			deleteMsg.BeginWriting();
+			deleteMsg.WriteByte( GAME_RELIABLE_MESSAGE_DELETE_ENT );
+			deleteMsg.WriteBits( GetSpawnId( entities[ clientNum ] ), 32 );
+			networkSystem->ServerSendReliableMessageExcluding( clientNum, deleteMsg );
+		}
 		common->DPrintf( "ServerClientConnect: remove old player entity\n" );
 		delete entities[ clientNum ];
 	}
@@ -307,6 +332,7 @@ void idGameLocal::ServerClientBegin( int clientNum ) {
 
 	// spawn the player
 	SpawnPlayer( clientNum );
+	clientConnectionPending[ clientNum ] = false;
 	if ( clientNum == localClientNum ) {
 		mpGame.EnterGame( clientNum );
 	}
@@ -329,6 +355,7 @@ void idGameLocal::ServerClientDisconnect( int clientNum ) {
 	int			i;
 	idBitMsg	outMsg;
 	byte		msgBuf[MAX_GAME_MESSAGE_SIZE];
+	clientConnectionPending[ clientNum ] = false;
 
 	outMsg.Init( msgBuf, sizeof( msgBuf ) );
 	outMsg.BeginWriting();
@@ -375,6 +402,11 @@ void idGameLocal::ServerWriteInitialReliableMessages( int clientNum ) {
 	for ( i = 0; i < MAX_CLIENTS; i++ ) {
 		if ( entities[i] == NULL || i == clientNum ) {
 			continue;
+		}
+		if ( entities[i]->IsType( hhArtificialPlayer::Type ) ) {
+			// AP slots are not async clients, so publish their canonical userinfo
+			// explicitly.  FIFO reliable ordering puts it ahead of SPAWN_PLAYER.
+			cmdSystem->BufferCommandText( CMD_EXEC_NOW, va( "updateUI %d\n", i ) );
 		}
 		outMsg.Init( msgBuf, sizeof( msgBuf ) );
 		outMsg.BeginWriting( );
@@ -1155,8 +1187,21 @@ void idGameLocal::ClientReadSnapshot( int clientNum, int sequence, const int gam
 		if ( !ent || ent->GetType()->typeNum != typeNum || ent->entityDefNumber != entityDefNumber || spawnId != spawnIds[ i ] ) {
 
 			if ( i < MAX_CLIENTS && ent ) {
-				// SPAWN_PLAYER should be taking care of spawning the entity with the right spawnId
-				common->Warning( "ClientReadSnapshot: recycling client entity %d\n", i );
+				// Reliable SPAWN_PLAYER creates the ordinary player placeholder that
+				// Prey's v7 protocol knows about.  A named AP's authoritative first
+				// snapshot then upgrades it to the concrete artificial-player type.
+				// Keep unexpected client-slot recycling loud, but do not report that
+				// intentional upgrade as a warning.
+				const bool expectedArtificialPlayerRecycle =
+					typeNum == hhArtificialPlayer::Type.typeNum &&
+					ent->IsType( idPlayer::Type ) &&
+					userInfo[i].GetString( "bot_character" )[0];
+				if ( expectedArtificialPlayerRecycle ) {
+					common->DPrintf( "ClientReadSnapshot: upgrading client entity %d to artificial player\n", i );
+				} else {
+					// SPAWN_PLAYER should normally provide the right type and spawnId.
+					common->Warning( "ClientReadSnapshot: recycling client entity %d\n", i );
+				}
 			}
 
 			delete ent;

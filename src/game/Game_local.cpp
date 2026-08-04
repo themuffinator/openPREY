@@ -182,6 +182,7 @@ void idGameLocal::Clear( void ) {
 		userInfo[i].Clear();
 		persistentPlayerInfo[i].Clear();
 	}
+	memset( clientConnectionPending, 0, sizeof( clientConnectionPending ) );
 	memset( usercmds, 0, sizeof( usercmds ) );
 	memset( entities, 0, sizeof( entities ) );
 	memset( spawnIds, -1, sizeof( spawnIds ) );
@@ -343,6 +344,9 @@ void idGameLocal::Init( void ) {
 
 	InitConsoleCommands();
 
+	// Personalities are game-module data and outlive individual maps.
+	botCharacterManager.Init();
+
 	// load default scripts
 	program.Startup( SCRIPT_DEFAULT );
 	
@@ -400,6 +404,8 @@ void idGameLocal::Shutdown( void ) {
 	mpGame.Shutdown();
 
 	MapShutdown();
+
+	botCharacterManager.Shutdown();
 
 	aasList.DeleteContents( true );
 	aasNames.Clear();
@@ -1065,6 +1071,7 @@ void idGameLocal::LocalMapRestart( ) {
 	int i, latchSpawnCount;
 
 	Printf( "----------- Game Map Restart ------------\n" );
+	botCharacterManager.ResetChatThrottle();
 
 	gamestate = GAMESTATE_SHUTDOWN;
 
@@ -1314,6 +1321,7 @@ void idGameLocal::InitFromNewMap( const char *mapName, idRenderWorld *renderWorl
 	this->isServer = isServer;
 	this->isClient = isClient;
 	this->isMultiplayer = isServer || isClient;
+	botCharacterManager.ResetChatThrottle();
 
 	// HUMANHEAD mdl:  Playtime
 	if ( playTimeStart != -1 ) {
@@ -1994,6 +2002,11 @@ void idGameLocal::CacheDictionaryMedia( const idDict *dict ) {
 		kv = dict->MatchPrefix( "model", kv );
 	}
 
+	kv = dict->FindKey( "ragdoll" );
+	if ( kv && kv->GetValue().Length() ) {
+		declManager->FindType( DECL_AF, kv->GetValue() );
+	}
+
 	kv = dict->FindKey( "s_shader" );
 	if ( kv && kv->GetValue().Length() ) {
 		declManager->FindType( DECL_SOUND, kv->GetValue() );
@@ -2029,6 +2042,16 @@ void idGameLocal::CacheDictionaryMedia( const idDict *dict ) {
 			}
 		}
 		kv = dict->MatchPrefix( "gui", kv );
+	}
+
+	// Player HUD and cursor keys do not use the normal gui* naming convention.
+	kv = dict->FindKey( "hud" );
+	if ( kv && kv->GetValue().Length() ) {
+		uiManager->FindGui( kv->GetValue().c_str(), true, false, false );
+	}
+	kv = dict->FindKey( "cursor" );
+	if ( kv && kv->GetValue().Length() ) {
+		uiManager->FindGui( kv->GetValue().c_str(), true, false, false );
 	}
 
 	kv = dict->FindKey( "texture" );
@@ -2107,6 +2130,25 @@ void idGameLocal::CacheDictionaryMedia( const idDict *dict ) {
 			FindEntityDef( kv->GetValue().c_str(), false );
 		}
 		kv = dict->MatchPrefix( "def", kv );
+	}
+
+	// Inventory item lists and Prey proximity-door sections are entityDef
+	// dependencies even though their keys do not use the def* convention.
+	kv = dict->FindKey( "item" );
+	if ( kv && kv->GetValue().Length() ) {
+		strList.Clear();
+		hhUtils::SplitString( kv->GetValue(), strList, ',' );
+		for ( int i = 0; i < strList.Num(); i++ ) {
+			FindEntityDef( strList[ i ].c_str(), false );
+		}
+	}
+
+	kv = dict->MatchPrefix( "doorobject", NULL );
+	while ( kv ) {
+		if ( kv->GetValue().Length() ) {
+			FindEntityDef( kv->GetValue().c_str(), false );
+		}
+		kv = dict->MatchPrefix( "doorobject", kv );
 	}
 
 /*	HUMANHEAD pdm: not used
@@ -3107,29 +3149,32 @@ void idGameLocal::ShowTargets( void ) {
 }
 
 //HUMANHEAD rww
-void idGameLocal::GetAPUserInfo(idDict &dict, int clientNum) {
-	static const char *apNames[8] = {
-		"i have spaces in my name",
-		"DIX",
-		"j0sh",
-		"mpl",
-		"Boris",
-		"Big H",
-		"fr3d",
-		"sho"
-	};
-	if (clientNum >= 0 && clientNum < 8) {
-		dict.Set("ui_name", apNames[clientNum]);
+void idGameLocal::GetAPUserInfo( idDict &dict, int clientNum,
+	const rvBotCharacter *character, int skillLevel ) {
+	dict.Set( "ui_name", character ? character->GetName() : va( "Bot %d", clientNum + 1 ) );
+	dict.Set( "ui_ready", "Ready" );
+	dict.Set( "ui_spectate", "Play" );
+	dict.Set( "bot_character", character ? character->GetName() : "" );
+	dict.SetInt( "bot_skill", idMath::ClampInt( 1, BOT_SKILL_LEVELS,
+		skillLevel < 0 ? bot_skill.GetInteger() : skillLevel ) );
+	if ( gameType == GAME_TDM && !dict.FindKey( "ui_team" ) ) {
+		int teamCount[2] = { 0, 0 };
+		for ( int i = 0; i < numClients; ++i ) {
+			if ( i == clientNum || !entities[i] || !entities[i]->IsType( idPlayer::Type ) ) {
+				continue;
+			}
+			const int playerTeam = idStr::Icmp( userInfo[i].GetString( "ui_team" ), "Blue" ) == 0;
+			++teamCount[playerTeam];
+		}
+		// Assign once, before EnterGame; copied userinfo keeps the team on reload.
+		dict.Set( "ui_team", teamCount[1] < teamCount[0] ? "Blue" : "Red" );
 	}
-	else {
-		dict.Set("ui_name", va("Johnny McMuffins %i", clientNum));
-	}
-	dict.Set("ui_ready", "Ready");
-	dict.Set("ui_spectate", "Play");
-	dict.SetInt("ui_modelNum", clientNum);
+	const int modelNum = character && character->GetModelNum() >= 0 ?
+		character->GetModelNum() : clientNum % 19;
+	dict.SetInt( "ui_modelNum", idMath::ClampInt( 0, 18, modelNum ) );
 }
 
-void idGameLocal::SpawnArtificialPlayer(void) {
+bool idGameLocal::SpawnArtificialPlayer( const char *characterName, int skillLevel ) {
 	idEntity	*ent;
 	idDict		dict;
 	idDict		apUI;
@@ -3137,32 +3182,159 @@ void idGameLocal::SpawnArtificialPlayer(void) {
 	const char	*classname = "player_artificial_mp";
 	int			clientNum;
 
+	if ( !isMultiplayer || !isServer ) {
+		Printf( "Bots can only be added by a multiplayer server.\n" );
+		return false;
+	}
+
+	skillLevel = skillLevel < 0 ? bot_skill.GetInteger() : skillLevel;
+	skillLevel = idMath::ClampInt( 1, BOT_SKILL_LEVELS, skillLevel );
+	const rvBotCharacter *character = NULL;
+	if ( bot_characters.GetBool() ) {
+		if ( bot_forceCharacter.GetString()[0] ) {
+			character = botCharacterManager.PickCharacter( skillLevel, false );
+			if ( !character ) {
+				return false;
+			}
+		} else if ( characterName && characterName[0] ) {
+			character = botCharacterManager.FindCharacter( characterName );
+			if ( !character ) {
+				Printf( "Unknown bot character '%s'. Use botcharacters to list the roster.\n", characterName );
+				return false;
+			}
+			if ( character->IsInUse() && idStr::Icmp( bot_forceCharacter.GetString(), character->GetName() ) ) {
+				Printf( "Bot character '%s' is already in the match.\n", character->GetName() );
+				return false;
+			}
+		} else {
+			character = botCharacterManager.PickCharacter( skillLevel, false );
+		}
+	}
+
 	for (clientNum = 0; clientNum < maxClients; clientNum++) {
-		if (!entities[clientNum]) {
+		if (!entities[clientNum] && !clientConnectionPending[clientNum]) {
 			break;
 		}
 	}
 	if (clientNum == maxClients) {
 		Printf("No free player slots.\n");
-		return;
+		return false;
 	}
 
 	dict.Set( "classname", "player_artificial_mp" );
 	dict.SetInt( "spawn_entnum", clientNum );
 	dict.Set( "name", va( "player%d", clientNum + 1 ) );
+	dict.SetInt( "bot_skill", skillLevel );
+	if ( character ) {
+		dict.Set( "bot_character", character->GetName() );
+	}
 
 	if (!SpawnEntityDef( dict, &ent )) {
 		Warning("Couldn't spawn entityDef '%s' for artificial player.\n", classname);
-		return;
+		return false;
 	}
 
 	if ( clientNum >= numClients ) {
 		numClients = clientNum + 1;
 	}
 
-	GetAPUserInfo(apUI, clientNum);
+	hhArtificialPlayer *bot = static_cast<hhArtificialPlayer *>( ent );
+	const idDict *spawnedUI = GetUserInfo( clientNum );
+	if ( spawnedUI ) {
+		apUI.Copy( *spawnedUI );
+	}
+	GetAPUserInfo( apUI, clientNum, bot->GetBotCharacter(), bot->GetBotSkill() );
 	SetUserInfo(clientNum, apUI, false, false);
 	mpGame.SpawnPlayer( clientNum );
+	// Synthetic clients have no async connection to originate CLIENTINFO.
+	cmdSystem->BufferCommandText( CMD_EXEC_NOW, va( "updateUI %d\n", clientNum ) );
+	Printf( "Added bot %s at skill %d in client slot %d.\n",
+		bot->GetBotCharacter() ? bot->GetBotCharacter()->GetName() : apUI.GetString( "ui_name" ),
+		bot->GetBotSkill(), clientNum );
+	return true;
+}
+
+int idGameLocal::NumArtificialPlayers( void ) const {
+	int count = 0;
+	const int maxClients = serverInfo.GetInt( "si_maxPlayers" );
+	for ( int i = 0; i < maxClients; ++i ) {
+		if ( entities[i] && entities[i]->IsType( hhArtificialPlayer::Type ) ) {
+			++count;
+		}
+	}
+	return count;
+}
+
+bool idGameLocal::RemoveArtificialPlayer( const char *name ) {
+	const int maxClients = serverInfo.GetInt( "si_maxPlayers" );
+	for ( int i = maxClients - 1; i >= 0; --i ) {
+		if ( !entities[i] || !entities[i]->IsType( hhArtificialPlayer::Type ) ) {
+			continue;
+		}
+		hhArtificialPlayer *bot = static_cast<hhArtificialPlayer *>( entities[i] );
+		const idDict *info = GetUserInfo( i );
+		const char *displayName = info ? info->GetString( "ui_name" ) : bot->GetBotCharacterName();
+		if ( name && name[0] && idStr::Icmp( name, displayName ) &&
+			idStr::Icmp( name, bot->GetBotCharacterName() ) ) {
+			continue;
+		}
+		idStr removedName = displayName;
+		bot->SayBotFarewell();
+		ServerClientDisconnect( i );
+		while ( numClients > 0 && !entities[numClients - 1] ) {
+			--numClients;
+		}
+		Printf( "Removed bot %s.\n", removedName.c_str() );
+		return true;
+	}
+	if ( name && name[0] ) {
+		Printf( "No bot named '%s' is in the match.\n", name );
+	}
+	return false;
+}
+
+int idGameLocal::RemoveArtificialPlayers( void ) {
+	int removed = 0;
+	while ( RemoveArtificialPlayer() ) {
+		++removed;
+	}
+	return removed;
+}
+
+void idGameLocal::ListArtificialPlayers( void ) const {
+	Printf( "client  skill  effective  character/style\n" );
+	const int maxClients = serverInfo.GetInt( "si_maxPlayers" );
+	for ( int i = 0; i < maxClients; ++i ) {
+		if ( !entities[i] || !entities[i]->IsType( hhArtificialPlayer::Type ) ) {
+			continue;
+		}
+		const hhArtificialPlayer *bot = static_cast<const hhArtificialPlayer *>( entities[i] );
+		const rvBotCharacter *character = bot->GetBotCharacter();
+		Printf( "%6d  %5d  %9.2f  %s/%s\n", i, bot->GetBotSkill(),
+			bot->GetEffectiveBotSkill(), character ? character->GetName() : "baseline",
+			character ? character->GetStyleName() : "none" );
+	}
+}
+
+void idGameLocal::RebindArtificialPlayers( void ) {
+	botCharacterManager.ReleaseAllCharacters();
+	const int maxClients = serverInfo.GetInt( "si_maxPlayers" );
+	for ( int i = 0; i < maxClients; ++i ) {
+		if ( !entities[i] || !entities[i]->IsType( hhArtificialPlayer::Type ) ) {
+			continue;
+		}
+		hhArtificialPlayer *bot = static_cast<hhArtificialPlayer *>( entities[i] );
+		bot->RebindBotCharacter();
+		idDict apUI;
+		const idDict *oldUI = GetUserInfo( i );
+		if ( oldUI ) {
+			apUI.Copy( *oldUI );
+		}
+		GetAPUserInfo( apUI, i, bot->GetBotCharacter(), bot->GetBotSkill() );
+		SetUserInfo( i, apUI, false, false );
+		bot->SetPlayerModel( false );
+		cmdSystem->BufferCommandText( CMD_EXEC_NOW, va( "updateUI %d\n", i ) );
+	}
 }
 //HUMANHEAD END
 
@@ -3179,28 +3351,34 @@ void idGameLocal::RunDebugInfo( void ) {
 #endif //HUMANHEAD END
 
 	//HUMANHEAD rww
-	if (isMultiplayer && isServer && g_artificialPlayerCount.GetInteger() > 0) {
+	if (isMultiplayer && isServer) {
 		int numExistingAP = 0;
-		int numClients = 0;
-		bool anyNonAP = false;
+		int numPlayerSlots = 0;
 		const int maxClients = serverInfo.GetInt( "si_maxPlayers" );
+		const int desiredBots = idMath::ClampInt( 0, maxClients,
+			g_artificialPlayerCount.GetInteger() );
 
 		for (int i = 0; i < maxClients; i++) {
+			if ( clientConnectionPending[i] ) {
+				++numPlayerSlots;
+				continue;
+			}
 			if (entities[i]) {
 				if (entities[i]->IsType(hhPlayer::Type)) {
 					if (entities[i]->IsType(hhArtificialPlayer::Type)) {
 						numExistingAP++;
 					}
-					else {
-						anyNonAP = true;
-					}
-					numClients++;
+					numPlayerSlots++;
 				}
 			}
 		}
 
-		if (anyNonAP && numClients < maxClients && numExistingAP < g_artificialPlayerCount.GetInteger()) { //if we have room and want more, spawn one this frame
+		// Reconcile one slot per frame so joins, leaves and cvar edits cannot cause
+		// a burst of entity/snapshot churn in one server tick.
+		if ( numExistingAP < desiredBots && numPlayerSlots < maxClients ) {
 			SpawnArtificialPlayer();
+		} else if ( numExistingAP > desiredBots ) {
+			RemoveArtificialPlayer();
 		}
 	}
 	//HUMANHEAD END

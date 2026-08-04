@@ -387,7 +387,7 @@ void idPhysics_RigidBody::DropToFloorAndRest( void ) {
 		testSolid = false;
 
 		if ( gameLocal.clip.Contents( current.i.position, clipModel, current.i.orientation, clipMask, self ) ) {
-			gameLocal.DWarning( "rigid body in solid for entity '%s' type '%s' at (%s)",
+			gameLocal.DPrintf( "rigid body in solid for entity '%s' type '%s' at (%s)\n",
 								self->name.c_str(), self->GetType()->classname, current.i.position.ToString(0) );
 			Rest();
 			dropToFloor = false;
@@ -406,7 +406,7 @@ void idPhysics_RigidBody::DropToFloorAndRest( void ) {
 		// test if we are really at rest
 		EvaluateContacts();
 		if ( !TestIfAtRest() ) {
-			gameLocal.DWarning( "rigid body not at rest for entity '%s' type '%s' at (%s)",
+			gameLocal.DPrintf( "rigid body not at rest for entity '%s' type '%s' at (%s)\n",
 								self->name.c_str(), self->GetType()->classname, current.i.position.ToString(0) );
 		}
 		Rest();
@@ -658,7 +658,7 @@ void idPhysics_RigidBody::SetClipModel( idClipModel *model, const float density,
 	inertiaScale[2][2] = inertiaTensor[2][2] / inertiaTensor[minIndex][minIndex];
 
 	if ( inertiaScale[0][0] > MAX_INERTIA_SCALE || inertiaScale[1][1] > MAX_INERTIA_SCALE || inertiaScale[2][2] > MAX_INERTIA_SCALE ) {
-		gameLocal.DWarning( "idPhysics_RigidBody::SetClipModel: unbalanced inertia tensor for entity '%s' type '%s'",
+		gameLocal.DPrintf( "idPhysics_RigidBody::SetClipModel: unbalanced inertia tensor for entity '%s' type '%s'\n",
 							self->name.c_str(), self->GetType()->classname );
 		float min = inertiaTensor[minIndex][minIndex] * MAX_INERTIA_SCALE;
 		inertiaScale[(minIndex+1)%3][(minIndex+1)%3] = min / inertiaTensor[(minIndex+1)%3][(minIndex+1)%3];

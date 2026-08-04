@@ -439,6 +439,8 @@ public:
 	bool					StartSound( const char *soundName, const s_channelType channel, int soundShaderFlags = 0, bool broadcast = false, int *length = NULL );
 	virtual//HUMANHEAD: aob
 	bool					StartSoundShader( const idSoundShader *shader, const s_channelType channel, int soundShaderFlags = 0, bool broadcast = false, int *length = NULL );
+	void					TrackScriptVoiceSilence( const s_channelType channel, int length );
+	bool					SetSilenceCallbackForCurrentThread( float plusOrMinusSeconds );
 	virtual//HUMANHEAD: aob
 	void					StopSound( const s_channelType channel, bool broadcast = false);	// pass SND_CHANNEL_ANY to stop all sounds
 	void					SetSoundVolume( float volume );
@@ -599,6 +601,9 @@ protected:
 	renderEntity_t			renderEntity;						// used to present a model to the renderer
 	int						modelDefHandle;						// handle to static renderer model
 	refSound_t				refSound;							// used to present sound to the audio engine
+	int						scriptSilenceWaitingThread;			// Prey waitForSilence support for any speaking entity
+	int						scriptSilenceSilentTimeOffset;		// +/- offset applied to the tracked voice end time
+	int						scriptSilenceNextSilentTime;			// time at which this entity's voice channel should be silent
 
 	//HUMANHEAD: aob
 	void					BroadcastEventReroute( int eventId, const idBitMsg *msg, bool saveEvent = false, int excludeClient = -1 );
@@ -671,6 +676,7 @@ protected://HUMANHEAD
 	void					Event_StopSound( int channel, int netSync );
 	void					Event_StartSound( const char *soundName, int channel, int netSync );
 	void					Event_FadeSound( int channel, float to, float over );
+	void					Event_ScriptSilenceDone( void );
 	void					Event_GetWorldOrigin( void );
 	void					Event_SetWorldOrigin( idVec3 const &org );
 	void					Event_GetOrigin( void );

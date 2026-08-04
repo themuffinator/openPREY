@@ -54,6 +54,12 @@ bool idAASLocal::Init( const idStr &mapName, unsigned int mapFileCRC ) {
 	else {
 		Shutdown();
 
+		// Prey maps only ship the AAS variants used by their resident AI.  The
+		// registered type list is a superset, so an absent variant is optional.
+		if ( fileSystem->ReadFile( mapName, NULL, NULL ) < 0 ) {
+			return false;
+		}
+
 		file = AASFileManager->LoadAAS( mapName, mapFileCRC );
 		if ( !file ) {
 			common->DWarning( "Couldn't load AAS file: '%s'", mapName.c_str() );
