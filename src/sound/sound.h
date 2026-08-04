@@ -42,6 +42,7 @@ static const int	SSF_NOPORTALFLOW =		BIT(13);// don't allow sounds to flow throu
 typedef struct soundSubtitle_s {
 	idStr			subText;
 	float			subTime;
+	int				subNum;
 	int				subChannel;
 } soundSub_t;
 

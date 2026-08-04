@@ -617,9 +617,9 @@ idTypeDefBool::idTypeDefBool( etype_t etype, idVarDef *edef, const char *ename, 
 	idTypeDef( etype, edef, ename, esize, aux ) {}
 
 void idTypeDefBool::PushOntoStack( const char* parm, hhThread* thread ) const {
-	bool b = false;
-	sscanf( parm, "%d", &b );
-	thread->PushInt( (int)b );
+	int value = 0;
+	sscanf( parm, "%d", &value );
+	thread->PushInt( value != 0 );
 }
 	
 const char* idTypeDefBool::GetReturnValueAsString( idProgram& program ) const {
@@ -1001,7 +1001,7 @@ idScriptObject::Restore
 */
 void idScriptObject::Restore( idRestoreGame *savefile ) {
 	idStr typeName;
-	size_t size;
+	int savedSize;
 
 	savefile->ReadString( typeName );
 
@@ -1014,12 +1014,15 @@ void idScriptObject::Restore( idRestoreGame *savefile ) {
 		savefile->Error( "idScriptObject::Restore: failed to restore object of type '%s'.", typeName.c_str() );
 	}
 
-	savefile->ReadInt( (int &)size );
-	if ( size != type->Size() ) {
+	savefile->ReadInt( savedSize );
+	if ( savedSize < 0 ) {
+		savefile->Error( "idScriptObject::Restore: invalid negative size %d for object '%s'.", savedSize, typeName.c_str() );
+	}
+	if ( static_cast<size_t>( savedSize ) != type->Size() ) {
 		savefile->Error( "idScriptObject::Restore: size of object '%s' doesn't match size in save game.", typeName.c_str() );
 	}
 
-	savefile->Read( data, size );
+	savefile->Read( data, savedSize );
 }
 
 /*
@@ -2093,6 +2096,9 @@ bool idProgram::Restore( idRestoreGame *savefile ) {
 	idStr scriptname;
 
 	savefile->ReadInt( num );
+	if ( num < 0 || num > 4096 ) {
+		savefile->Error( "idProgram::Restore: invalid additional script file count %d", num );
+	}
 	for ( i = 0; i < num; i++ ) {
 		savefile->ReadString( scriptname );
 		CompileFile( scriptname );
@@ -2100,14 +2106,24 @@ bool idProgram::Restore( idRestoreGame *savefile ) {
 
 	savefile->ReadInt( index );
 	while( index >= 0 ) {
+		if ( index >= variableDefaults.Num() || index >= MAX_GLOBALS ) {
+			savefile->Error( "idProgram::Restore: invalid default variable index %d", index );
+		}
 		savefile->ReadByte( variables[index] );
 		savefile->ReadInt( index );
 	}
+	if ( index != -1 ) {
+		savefile->Error( "idProgram::Restore: invalid default-variable terminator %d", index );
+	}
 
 	savefile->ReadInt( num );
+	if ( num < variableDefaults.Num() || num > MAX_GLOBALS ) {
+		savefile->Error( "idProgram::Restore: invalid variable byte count %d", num );
+	}
 	for ( i = variableDefaults.Num(); i < num; i++ ) {
 		savefile->ReadByte( variables[i] );
 	}
+	numVariables = num;
 
 	int saved_checksum, checksum;
 

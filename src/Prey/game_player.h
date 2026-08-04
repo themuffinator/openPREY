@@ -14,9 +14,7 @@ extern const idEventDef EV_StopSpiritWalk; //rww
 extern const idEventDef EV_DamagePlayer; //rww
 
 // HUMANHEAD IMPULSES SHOULD START AT 50
-const int IMPULSE_50 = 50;				// Unused
-const int IMPULSE_51 = 51;				// Unused
-const int IMPULSE_52 = 52;				// Unused
+// IMPULSE_50 through IMPULSE_52 come from the shared rebased UsercmdGen.h.
 const int IMPULSE_53 = 53;				// Unused
 const int IMPULSE_54 = 54;				// Spirit power toggle
 
@@ -754,6 +752,7 @@ class hhArtificialPlayer : public hhPlayer {
 	CLASS_PROTOTYPE(hhArtificialPlayer);
 public:
 						hhArtificialPlayer(void);
+	virtual				~hhArtificialPlayer(void);
 
 	void				Spawn( void );
 	virtual	void		Think( void );
@@ -762,11 +761,92 @@ public:
 	virtual void		WriteToSnapshot( idBitMsgDelta &msg ) const;
 	virtual void		ReadFromSnapshot( const idBitMsgDelta &msg );
 
+	// The artificial-player entity is Prey's network-compatible bot slot.
+	// Character state stays game-side so GAME_API_VERSION remains unchanged.
+	void				BindBotCharacter( const rvBotCharacter *character, int skillLevel );
+	void				RebindBotCharacter( void );
+	const rvBotCharacter *GetBotCharacter( void ) const { return botCharacter; }
+	const char *		GetBotCharacterName( void ) const { return botCharacterName.c_str(); }
+	int					GetBotSkill( void ) const { return botSkill; }
+	float				GetEffectiveBotSkill( void ) const { return effectiveBotSkill; }
+
+	bool				QueueBotChat( rvBotChatEvent event, const idPlayer *other = NULL,
+							const char *weaponName = NULL, const char *itemName = NULL );
+	bool				TryQueueBotReply( const idStr &normalizedText, bool sourceIsBot,
+							bool addressed, const idPlayer *other, bool teamChat );
+	void				OnBotKill( idPlayer *victim, const char *weaponName );
+	void				OnBotDeath( idPlayer *killer, const char *weaponName, bool accident );
+	void				OnBotItemPickedUp( const idEntity *item, idPlayer *picker );
+	void				OnBotMatchStart( void );
+	void				OnBotMatchEnd( bool won );
+	void				SayBotFarewell( void );
+
+	// True only while delivering a generated reply.  This allows event banter
+	// without permitting conversational reply loops.
+	static bool			ReplyDispatchSuppressed( void );
+
 protected:
 	usercmd_t			lastAICmd;
 
-	bool				testCrouchActive;
-	int					testCrouchTime;
+	void				ResolveBotTraits( void );
+	void				ApplyBotUserInfo( const idDict &botUI );
+	hhPlayer *			FindBotEnemy( bool &visible, float &distance );
+	bool				BotCanSee( const hhPlayer *player, float &distance, float &offAxis ) const;
+	void				UpdateBotWeapon( float enemyDistance );
+	void				UpdateBotMovement( usercmd_t &cmd, const hhPlayer *enemy,
+							bool enemyVisible, float enemyDistance );
+	void				UpdateBotAimAndFire( usercmd_t &cmd, const hhPlayer *enemy,
+							bool enemyVisible, float enemyDistance );
+	void				UpdateBotChat( void );
+	const char *		BotDisplayName( const idPlayer *player ) const;
+	float				BotWeaponRangeScore( const char *weaponName, float distance ) const;
+
+	const rvBotCharacter *botCharacter;
+	idStr				botCharacterName;
+	botTraits_t			botTraits;
+	int					botSkill;
+	float				effectiveBotSkill;
+
+	idEntityPtr<hhPlayer>	botEnemy;
+	idEntityPtr<idEntity>	botItemGoal;
+	idEntityPtr<idEntity>	botIgnoredItem;
+	idVec3				botLastSeenPosition;
+	idVec3				botBelievedTarget;
+	idVec3				botLastTargetPosition;
+	int					botTargetAcquiredTime;
+	int					botLastSeenTime;
+	int					botNextTargetScanTime;
+	int					botAimSettledTime;
+	float				botCurrentTurnSpeed;
+
+	int					botStrafeDirection;
+	int					botNextStrafeTime;
+	int					botDodgeStartTime;
+	int					botLastDamageTime;
+	int					botNextJumpTime;
+	int					botNextWanderTime;
+	int					botNextItemScanTime;
+	int					botItemCloseTime;
+	int					botItemIgnoreUntil;
+	int					botItemLastProgressTime;
+	float				botItemBestDistance;
+	float				botWanderYaw;
+
+	int					botNextWeaponTime;
+	int					botBurstEndTime;
+	int					botNextBurstTime;
+	int					botMistakeEndTime;
+	int					botLastKiller;
+	int					botKillStreak;
+	bool				botLeadKnown;
+	bool				botHadLead;
+
+	idStr				botPendingChat;
+	int					botPendingChatTime;
+	bool				botPendingChatTeam;
+	bool				botPendingChatIsReply;
+
+	static bool			botReplyDispatchSuppressed;
 };
 //HUMANHEAD END
 #endif /* __PREY_GAME_PLAYER_H__ */

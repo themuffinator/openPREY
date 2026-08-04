@@ -5022,7 +5022,7 @@ void hhPlayer::Think( void ) {
 	buttonMask &= usercmd.buttons;
 	usercmd.buttons &= ~buttonMask;
 
-	if ( gameLocal.inCinematic && gameLocal.skipCinematic ) {
+	if ( gameLocal.skipCinematic && ( gameLocal.inCinematic || InCinematic() ) ) {
 		return;
 	}
 
@@ -7614,111 +7614,904 @@ void hhPlayer::Event_GetDDAValue() {
 }
 
 //HUMANHEAD rww
+bool hhArtificialPlayer::botReplyDispatchSuppressed = false;
+
+static const float BOT_ITEM_PROGRESS_DISTANCE = 16.0f;
+static const int BOT_ITEM_PROGRESS_TIMEOUT = 4000;
+static const int BOT_ITEM_IGNORE_TIME = 5000;
+
+static bool BotUserInfoMatches( const idDict *current, const idDict &incoming ) {
+	if ( !current || current->GetNumKeyVals() != incoming.GetNumKeyVals() ) {
+		return false;
+	}
+	for ( int i = 0; i < incoming.GetNumKeyVals(); ++i ) {
+		const idKeyValue *incomingKey = incoming.GetKeyVal( i );
+		const idKeyValue *currentKey = current->FindKey( incomingKey->GetKey() );
+		if ( !currentKey || idStr::Cmp( currentKey->GetValue(), incomingKey->GetValue() ) ) {
+			return false;
+		}
+	}
+	return true;
+}
+
 hhArtificialPlayer::hhArtificialPlayer(void) {
-	memset(&lastAICmd, 0, sizeof(lastAICmd));
-	testCrouchActive = false;
-	testCrouchTime = 0;
+	memset( &lastAICmd, 0, sizeof( lastAICmd ) );
+	// botTraits_t owns idStr weapon names, so byte-zeroing it would corrupt
+	// those already-constructed strings.  Start from the complete neutral
+	// skill curve; Spawn resolves the selected character over it.
+	rvBotCharacterManager::BaselineTraits( 3.0f, botTraits );
+	botCharacter = NULL;
+	botSkill = 3;
+	effectiveBotSkill = 3.0f;
+	botLastSeenPosition = vec3_origin;
+	botBelievedTarget = vec3_origin;
+	botLastTargetPosition = vec3_origin;
+	botTargetAcquiredTime = 0;
+	botLastSeenTime = 0;
+	botNextTargetScanTime = 0;
+	botAimSettledTime = 0;
+	botCurrentTurnSpeed = 0.0f;
+	botStrafeDirection = 1;
+	botNextStrafeTime = 0;
+	botDodgeStartTime = 0;
+	botLastDamageTime = 0;
+	botNextJumpTime = 0;
+	botNextWanderTime = 0;
+	botNextItemScanTime = 0;
+	botItemCloseTime = 0;
+	botItemIgnoreUntil = 0;
+	botItemLastProgressTime = -1;
+	botItemBestDistance = idMath::INFINITY;
+	botWanderYaw = 0.0f;
+	botNextWeaponTime = 0;
+	botBurstEndTime = 0;
+	botNextBurstTime = 0;
+	botMistakeEndTime = 0;
+	botLastKiller = -1;
+	botKillStreak = 0;
+	botLeadKnown = false;
+	botHadLead = false;
+	botPendingChatTime = 0;
+	botPendingChatTeam = false;
+	botPendingChatIsReply = false;
+}
+
+hhArtificialPlayer::~hhArtificialPlayer(void) {
+	if ( botCharacter && botCharacterManager.IsLoaded() ) {
+		botCharacterManager.ReleaseCharacter( botCharacter );
+	}
+	botCharacter = NULL;
+}
+
+void hhArtificialPlayer::ResolveBotTraits( void ) {
+	botSkill = idMath::ClampInt( 1, BOT_SKILL_LEVELS, botSkill );
+	effectiveBotSkill = rvBotCharacterManager::EffectiveSkill(
+		botSkill, bot_skillVariance.GetFloat(), entityNumber );
+	botCharacterManager.ResolveTraits(
+		botCharacter, botSkill, bot_skillVariance.GetFloat(), entityNumber, botTraits );
+}
+
+void hhArtificialPlayer::ApplyBotUserInfo( const idDict &botUI ) {
+	const char *characterName = botUI.GetString( "bot_character" );
+	const int skillLevel = idMath::ClampInt( 1, BOT_SKILL_LEVELS,
+		botUI.GetInt( "bot_skill", va( "%d", bot_skill.GetInteger() ) ) );
+	if ( !idStr::Icmp( botCharacterName.c_str(), characterName ) && botSkill == skillLevel ) {
+		return;
+	}
+
+	const rvBotCharacter *character = NULL;
+	if ( bot_characters.GetBool() && characterName[0] ) {
+		character = botCharacterManager.FindCharacter( characterName );
+	}
+	if ( character ) {
+		BindBotCharacter( character, skillLevel );
+		return;
+	}
+
+	if ( botCharacter && botCharacterManager.IsLoaded() ) {
+		botCharacterManager.ReleaseCharacter( botCharacter );
+	}
+	botCharacter = NULL;
+	// Preserve the server's identity even when this client lacks the local
+	// character definition; the replicated display name/model still work.
+	botCharacterName = characterName;
+	botSkill = skillLevel;
+	ResolveBotTraits();
+}
+
+void hhArtificialPlayer::BindBotCharacter( const rvBotCharacter *character, int skillLevel ) {
+	if ( botCharacter != character ) {
+		if ( botCharacter && botCharacterManager.IsLoaded() ) {
+			botCharacterManager.ReleaseCharacter( botCharacter );
+		}
+		botCharacter = character;
+		if ( botCharacter ) {
+			botCharacterManager.MarkCharacterUsed( botCharacter );
+		}
+	}
+	botCharacterName = character ? character->GetName() : "";
+	botSkill = idMath::ClampInt( 1, BOT_SKILL_LEVELS, skillLevel );
+	ResolveBotTraits();
+}
+
+void hhArtificialPlayer::RebindBotCharacter( void ) {
+	const rvBotCharacter *character = NULL;
+	if ( bot_characters.GetBool() && !botCharacterName.IsEmpty() ) {
+		character = botCharacterManager.FindCharacter( botCharacterName.c_str() );
+	}
+	if ( !character && bot_characters.GetBool() ) {
+		character = botCharacterManager.PickCharacter( botSkill, false );
+	}
+	botCharacter = character;
+	if ( character ) {
+		botCharacterName = character->GetName();
+		botCharacterManager.MarkCharacterUsed( character );
+	} else {
+		botCharacterName.Clear();
+	}
+	ResolveBotTraits();
 }
 
 void hhArtificialPlayer::Spawn( void ) {
-	idDict apUI;
-	gameLocal.GetAPUserInfo(apUI, entityNumber);
-	gameLocal.SetUserInfo(entityNumber, apUI, gameLocal.isClient, false);
+	if ( gameLocal.isClient ) {
+		// CLIENTINFO normally arrives first; the leading snapshot dict is the
+		// fallback.  Never make an independent random roster choice here.
+		const idDict *apUI = gameLocal.GetUserInfo( entityNumber );
+		if ( apUI ) {
+			ApplyBotUserInfo( *apUI );
+		}
+		SetPlayerModel( false );
+		botWanderYaw = GetUntransformedViewAngles().yaw;
+		return;
+	}
 
-	SetPlayerModel(false); //force an update on the player model
+	const int requestedSkill = spawnArgs.GetInt( "bot_skill", va( "%d", bot_skill.GetInteger() ) );
+	const char *requestedName = spawnArgs.GetString( "bot_character" );
+	const rvBotCharacter *character = NULL;
+
+	if ( bot_characters.GetBool() && requestedName[0] ) {
+		character = botCharacterManager.FindCharacter( requestedName );
+	}
+	if ( bot_characters.GetBool() && !character ) {
+		character = botCharacterManager.PickCharacter( requestedSkill, false );
+	}
+	BindBotCharacter( character, requestedSkill );
+
+	idDict apUI;
+	gameLocal.GetAPUserInfo( apUI, entityNumber, botCharacter, botSkill );
+	gameLocal.SetUserInfo( entityNumber, apUI, gameLocal.isClient, false );
+	SetPlayerModel( false );
+
+	botWanderYaw = GetUntransformedViewAngles().yaw;
+	QueueBotChat( BOTCHAT_ENTERGAME );
 }
 
-void hhArtificialPlayer::Think( void ) {
-	PROFILE_START("hhArtificialPlayer::Think", PROFMASK_NORMAL);
-	bool iFeelHoppy = false;
-	usercmd_t *nextCmd = &gameLocal.usercmds[ entityNumber ];
-	idAngles idealAngles = GetViewAngles();
+const char *hhArtificialPlayer::BotDisplayName( const idPlayer *player ) const {
+	if ( !player || player->entityNumber < 0 || player->entityNumber >= MAX_CLIENTS ) {
+		return "";
+	}
+	const idDict *info = gameLocal.GetUserInfo( player->entityNumber );
+	return info ? info->GetString( "ui_name" ) : "";
+}
 
-	nextCmd->gameFrame = gameLocal.framenum;
-	nextCmd->gameTime = gameLocal.time;
+bool hhArtificialPlayer::BotCanSee( const hhPlayer *player, float &distance, float &offAxis ) const {
+	if ( !player || player == this || player->health <= 0 || player->IsHidden() ) {
+		return false;
+	}
+	if ( gameLocal.gameType == GAME_TDM && player->team == team ) {
+		return false;
+	}
 
-	nextCmd->forwardmove = idMath::ClampChar(127);
+	idVec3 direction = player->GetEyePosition() - GetEyePosition();
+	distance = direction.Normalize();
+	if ( distance > botTraits.sightRange ) {
+		return false;
+	}
 
-	//this is not meant to resemble proper ai logic, it's just for testing.
-	idEntity *closestEnt = NULL;
-	float closestDist = idMath::INFINITY;	
+	// Untransformed angles are local to the interpolated eye axis.  GetViewAngles
+	// is already in world space and multiplying it by gravity rotates it twice.
+	const idMat3 worldViewAxis = GetUntransformedViewAngles().ToMat3() * GetEyeAxis();
+	const float dot = idMath::ClampFloat( -1.0f, 1.0f, direction * worldViewAxis[0] );
+	offAxis = RAD2DEG( idMath::ACos( dot ) );
+	if ( offAxis > botTraits.fov * 0.5f ) {
+		return false;
+	}
 
-	int numSourceAreas, sourceAreas[ idEntity::MAX_PVS_AREAS ];
-	numSourceAreas = gameRenderWorld->BoundsInAreas( GetPlayerPhysics()->GetAbsBounds(), sourceAreas, idEntity::MAX_PVS_AREAS );
+	trace_t trace;
+	gameLocal.clip.TracePoint( trace, GetEyePosition(), player->GetEyePosition(),
+		GetPhysics()->GetClipMask(), this );
+	return trace.fraction >= 1.0f || trace.c.entityNum == player->entityNumber;
+}
+
+hhPlayer *hhArtificialPlayer::FindBotEnemy( bool &visible, float &distance ) {
+	visible = false;
+	distance = idMath::INFINITY;
+
+	if ( gameLocal.time < botNextTargetScanTime && botEnemy.IsValid() ) {
+		float offAxis = 0.0f;
+		visible = BotCanSee( botEnemy.GetEntity(), distance, offAxis );
+		if ( visible ) {
+			botLastSeenTime = gameLocal.time;
+			botLastSeenPosition = botEnemy->GetEyePosition();
+			return botEnemy.GetEntity();
+		}
+		if ( gameLocal.time - botLastSeenTime < 500 + idMath::Ftoi( 5000.0f * botTraits.pursuit ) ) {
+			distance = ( botLastSeenPosition - GetEyePosition() ).Length();
+			return botEnemy.GetEntity();
+		}
+	}
+
+	botNextTargetScanTime = gameLocal.time + 100;
+	hhPlayer *best = NULL;
+	hhPlayer *closest = NULL;
+	float bestScore = -idMath::INFINITY;
+	float closestDistance = idMath::INFINITY;
+	float bestDistance = idMath::INFINITY;
+	float bestOffAxis = 0.0f;
+
+	int sourceAreas[idEntity::MAX_PVS_AREAS];
+	const int numSourceAreas = gameRenderWorld->BoundsInAreas(
+		GetPlayerPhysics()->GetAbsBounds(), sourceAreas, idEntity::MAX_PVS_AREAS );
 	pvsHandle_t pvsHandle = gameLocal.pvs.SetupCurrentPVS( sourceAreas, numSourceAreas, PVS_NORMAL );
 
-	for(int i=0;i<gameLocal.numClients;i++) {
-		idEntity *ent = gameLocal.entities[i];		
-		if(ent) {
-			HH_ASSERT(ent->IsType(hhPlayer::Type));
-			hhPlayer *plEnt = static_cast<hhPlayer *>(ent);
+	for ( int i = 0; i < gameLocal.numClients; ++i ) {
+		idEntity *entity = gameLocal.entities[i];
+		if ( !entity || !entity->IsType( hhPlayer::Type ) || !entity->PhysicsTeamInPVS( pvsHandle ) ) {
+			continue;
+		}
+		hhPlayer *candidate = static_cast<hhPlayer *>( entity );
+		float candidateDistance = 0.0f;
+		float candidateOffAxis = 0.0f;
+		if ( !BotCanSee( candidate, candidateDistance, candidateOffAxis ) ) {
+			continue;
+		}
 
-			float l = (ent->GetOrigin()-GetOrigin()).Length();
-			if(l < 4096.0f && (l < closestDist || !closestEnt) && ent->PhysicsTeamInPVS(pvsHandle)) {
-				trace_t tr;
+		if ( candidateDistance < closestDistance ) {
+			closest = candidate;
+			closestDistance = candidateDistance;
+		}
 
-				gameLocal.clip.TracePoint(tr, GetOrigin(), ent->GetOrigin(), GetPhysics()->GetClipMask(), this);
-				if (tr.c.entityNum == ent->entityNumber) { //if we hit the thing then it's visible.
-					if (ent->health > 0) {
-						if (gameLocal.gameType != GAME_TDM || plEnt->team != team) {
-							closestDist = l;
-							closestEnt  = ent;
-						}
+		const float healthFraction = idMath::ClampFloat( 0.0f, 1.0f,
+			candidate->health / (float)Max( 1, static_cast<idEntity *>( candidate )->GetMaxHealth() ) );
+		float score = 4096.0f / ( 128.0f + candidateDistance );
+		score *= 1.0f + botTraits.opportunism * ( 1.0f - healthFraction ) * 2.0f;
+		if ( candidate == botEnemy.GetEntity() ) {
+			score *= 1.0f + botTraits.targetStickiness * 2.0f;
+		}
+		if ( candidate->entityNumber == botLastKiller ) {
+			score *= 1.0f + botTraits.vengefulness * 2.0f;
+		}
+		if ( score > bestScore ) {
+			best = candidate;
+			bestScore = score;
+			bestDistance = candidateDistance;
+			bestOffAxis = candidateOffAxis;
+		}
+	}
+	gameLocal.pvs.FreeCurrentPVS( pvsHandle );
+
+	if ( closest && gameLocal.random.RandomFloat() > botTraits.targetSelection ) {
+		best = closest;
+		bestDistance = closestDistance;
+		float ignored = 0.0f;
+		BotCanSee( best, bestDistance, ignored );
+		bestOffAxis = ignored;
+	}
+
+	if ( best ) {
+		const bool changedTarget = best != botEnemy.GetEntity();
+		const int timeSinceContact = gameLocal.time - botLastSeenTime;
+		const bool contactWasLost = !changedTarget && timeSinceContact > 200;
+		const bool quickReacquire = contactWasLost &&
+			timeSinceContact <= idMath::Ftoi( botTraits.reacquireMsec );
+		botEnemy = best;
+		visible = true;
+		distance = bestDistance;
+		botLastSeenTime = gameLocal.time;
+		botLastSeenPosition = best->GetEyePosition();
+		if ( changedTarget || contactWasLost || botTargetAcquiredTime == 0 ) {
+			float reaction = botTraits.reactionMsec;
+			if ( quickReacquire ) {
+				reaction *= botTraits.reacquireFraction;
+			}
+			reaction += gameLocal.random.CRandomFloat() * botTraits.reactionVarianceMsec;
+			if ( bestOffAxis > 0.0f && botTraits.peripheralAngle > 0.0f ) {
+				reaction += botTraits.peripheralPenaltyMsec *
+					idMath::ClampFloat( 0.0f, 1.0f, bestOffAxis / botTraits.peripheralAngle );
+			}
+			botTargetAcquiredTime = gameLocal.time + idMath::Ftoi( Max( 0.0f, reaction ) );
+			botAimSettledTime = 0;
+			botBelievedTarget = botLastSeenPosition;
+			botLastTargetPosition = botLastSeenPosition;
+		}
+		return best;
+	}
+
+	if ( botEnemy.IsValid() &&
+		gameLocal.time - botLastSeenTime < 500 + idMath::Ftoi( 5000.0f * botTraits.pursuit ) ) {
+		distance = ( botLastSeenPosition - GetEyePosition() ).Length();
+		return botEnemy.GetEntity();
+	}
+	botEnemy = NULL;
+	return NULL;
+}
+
+float hhArtificialPlayer::BotWeaponRangeScore( const char *weaponName, float distance ) const {
+	if ( !weaponName || !weaponName[0] ) {
+		return 0.0f;
+	}
+	idStr name = weaponName;
+	name.ToLower();
+	float idealRange = 600.0f;
+	if ( name.Find( "wrench" ) >= 0 ) {
+		idealRange = 80.0f;
+	} else if ( name.Find( "crawler" ) >= 0 ) {
+		idealRange = 420.0f;
+	} else if ( name.Find( "soulstripper" ) >= 0 ) {
+		idealRange = 520.0f;
+	} else if ( name.Find( "hiderweapon" ) >= 0 ) {
+		idealRange = 650.0f;
+	} else if ( name.Find( "autocannon" ) >= 0 ) {
+		idealRange = 700.0f;
+	} else if ( name.Find( "rocket" ) >= 0 ) {
+		idealRange = 850.0f;
+	} else if ( name.Find( "rifle" ) >= 0 ) {
+		idealRange = 950.0f;
+	} else if ( name.Find( "bow" ) >= 0 ) {
+		idealRange = 1200.0f;
+	}
+	const float difference = idMath::Fabs( distance - idealRange );
+	return 1.0f / ( 1.0f + difference / Max( 100.0f, idealRange ) );
+}
+
+void hhArtificialPlayer::UpdateBotWeapon( float enemyDistance ) {
+	if ( gameLocal.time < botNextWeaponTime || health <= 0 || !weaponEnabled ||
+		spectating || gameLocal.inCinematic || bFrozen || ActiveGui() ||
+		IsSpiritOrDeathwalking() ) {
+		return;
+	}
+	botNextWeaponTime = gameLocal.time + idMath::Ftoi( botTraits.weaponSwitchMsec );
+
+	int bestWeapon = GetCurrentWeapon();
+	float bestScore = -1.0f;
+	int firstUsable = 0;
+	for ( int weaponNum = 1; weaponNum < MAX_WEAPONS; ++weaponNum ) {
+		if ( !( weaponFlags & ( 1 << ( weaponNum - 1 ) ) ) ||
+			!( inventory.weapons & ( 1 << weaponNum ) ) || SkipWeapon( weaponNum ) ) {
+			continue;
+		}
+		const char *weaponName = GetWeaponName( weaponNum );
+		if ( !weaponName || !weaponName[0] ) {
+			continue;
+		}
+		// Match SelectWeapon's fireability check so an owned but empty weapon
+		// cannot win the personality score and block a usable fallback.
+		if ( !inventory.HasAmmo( weaponName ) && !inventory.HasAltAmmo( weaponName ) &&
+			!spawnArgs.GetBool( va( "weapon%d_allowempty", weaponNum ) ) ) {
+			continue;
+		}
+		if ( !firstUsable ) {
+			firstUsable = weaponNum;
+		}
+		float score = BotWeaponRangeScore( weaponName, enemyDistance );
+		score *= rvBotCharacterManager::WeaponBias( botTraits, weaponName );
+		if ( weaponNum == GetCurrentWeapon() ) {
+			score *= 1.08f;
+		}
+		if ( score > bestScore ) {
+			bestScore = score;
+			bestWeapon = weaponNum;
+		}
+	}
+	if ( firstUsable && gameLocal.random.RandomFloat() > botTraits.weaponSkill ) {
+		bestWeapon = firstUsable;
+	}
+	if ( bestWeapon > 0 && bestWeapon != GetCurrentWeapon() ) {
+		SelectWeapon( bestWeapon, false );
+	}
+}
+
+void hhArtificialPlayer::UpdateBotMovement( usercmd_t &cmd, const hhPlayer *enemy,
+	bool enemyVisible, float enemyDistance ) {
+	if ( health <= 0 || spectating ) {
+		return;
+	}
+
+	const float healthFraction = idMath::ClampFloat( 0.0f, 1.0f,
+		health / (float)Max( 1, inventory.maxHealth ) );
+	float forward = 0.0f;
+	float strafe = 0.0f;
+
+	if ( enemy ) {
+		botItemCloseTime = 0;
+		// Combat suspends item pursuit; do not count that time as pathing failure.
+		botItemLastProgressTime = -1;
+		botItemBestDistance = idMath::INFINITY;
+		if ( healthFraction < botTraits.retreatHealth ) {
+			forward = -1.0f;
+		} else {
+			const float lowRange = botTraits.combatRange * ( 0.70f + 0.20f * ( 1.0f - botTraits.rangeDiscipline ) );
+			const float highRange = botTraits.combatRange * ( 1.15f + 0.45f * ( 1.0f - botTraits.rangeDiscipline ) );
+			if ( enemyDistance > highRange ) {
+				forward = 0.45f + 0.55f * botTraits.aggression;
+			} else if ( enemyDistance < lowRange ) {
+				forward = -( 0.35f + 0.65f * botTraits.rangeDiscipline );
+			} else {
+				forward = ( botTraits.aggression - 0.5f ) * 0.45f;
+			}
+		}
+
+		if ( gameLocal.time >= botNextStrafeTime ) {
+			const int variance = idMath::Ftoi( botTraits.strafeRhythmVarianceMsec );
+			botNextStrafeTime = gameLocal.time + idMath::Ftoi( botTraits.strafeRhythmMsec ) +
+				( variance > 0 ? gameLocal.random.RandomInt( variance + 1 ) : 0 );
+			botStrafeDirection = gameLocal.random.RandomInt( 2 ) ? 1 : -1;
+		}
+		if ( gameLocal.random.RandomFloat() < botTraits.strafeChance ) {
+			strafe = (float)botStrafeDirection;
+		}
+	} else {
+		if ( botIgnoredItem.IsValid() && gameLocal.time >= botItemIgnoreUntil ) {
+			botIgnoredItem = NULL;
+			botItemIgnoreUntil = 0;
+		}
+		if ( gameLocal.time >= botNextItemScanTime ) {
+			botNextItemScanTime = gameLocal.time + 500 + gameLocal.random.RandomInt( 400 );
+			idEntity *oldItemGoal = botItemGoal.GetEntity();
+			botItemGoal = NULL;
+			if ( botTraits.itemFocus > 0.05f ) {
+				const float itemRange = 500.0f + 1500.0f * botTraits.itemFocus;
+				float bestItemScore = -1.0f;
+				for ( int entityNum = MAX_CLIENTS; entityNum < gameLocal.num_entities; ++entityNum ) {
+					idEntity *item = gameLocal.entities[entityNum];
+					if ( !item || !item->IsType( idItem::Type ) || item->IsHidden() ||
+						( item == botIgnoredItem.GetEntity() && gameLocal.time < botItemIgnoreUntil ) ) {
+						continue;
+					}
+					const float itemDistance = ( item->GetOrigin() - GetOrigin() ).Length();
+					if ( itemDistance > itemRange ) {
+						continue;
+					}
+					trace_t itemTrace;
+					gameLocal.clip.TracePoint( itemTrace, GetEyePosition(), item->GetOrigin(),
+						GetPhysics()->GetClipMask(), this );
+					if ( itemTrace.fraction < 1.0f && itemTrace.c.entityNum != item->entityNumber ) {
+						continue;
+					}
+					const float score = botTraits.itemFocus / ( 64.0f + itemDistance );
+					if ( score > bestItemScore ) {
+						bestItemScore = score;
+						botItemGoal = item;
 					}
 				}
+			}
+			if ( oldItemGoal != botItemGoal.GetEntity() ) {
+				botItemCloseTime = 0;
+				botItemLastProgressTime = botItemGoal.IsValid() ? gameLocal.time : -1;
+				botItemBestDistance = idMath::INFINITY;
+			}
+		}
+		if ( botItemGoal.IsValid() && botItemGoal->IsHidden() ) {
+			botItemGoal = NULL;
+			botItemCloseTime = 0;
+			botItemLastProgressTime = -1;
+			botItemBestDistance = idMath::INFINITY;
+		}
+		if ( botItemGoal.IsValid() && !botItemGoal->IsHidden() ) {
+			idVec3 itemDirection = botItemGoal->GetOrigin() - GetOrigin();
+			const float itemDistance = itemDirection.Normalize();
+			if ( botItemBestDistance == idMath::INFINITY ||
+				itemDistance + BOT_ITEM_PROGRESS_DISTANCE < botItemBestDistance ) {
+				botItemBestDistance = itemDistance;
+				botItemLastProgressTime = gameLocal.time;
+			}
+
+			if ( botItemLastProgressTime >= 0 &&
+				gameLocal.time - botItemLastProgressTime >= BOT_ITEM_PROGRESS_TIMEOUT ) {
+				// Visibility does not prove reachability.  Give up after bounded time
+				// without net progress so a ledge or sealed room cannot trap the bot.
+				botIgnoredItem = botItemGoal;
+				botItemIgnoreUntil = gameLocal.time + BOT_ITEM_IGNORE_TIME;
+				botItemGoal = NULL;
+				botItemCloseTime = 0;
+				botItemLastProgressTime = -1;
+				botItemBestDistance = idMath::INFINITY;
+			} else {
+				idVec3 localItemDirection;
+				GetEyeAxis().ProjectVector( itemDirection, localItemDirection );
+				botWanderYaw = localItemDirection.ToAngles().yaw;
+				if ( itemDistance > 48.0f ) {
+					forward = 0.35f + 0.65f * botTraits.itemFocus;
+					botItemCloseTime = 0;
+				} else if ( botItemCloseTime == 0 ) {
+					botItemCloseTime = gameLocal.time;
+				} else if ( gameLocal.time - botItemCloseTime >= 1000 ) {
+					// A usable pickup clears the goal through OnBotItemPickedUp.  If it
+					// remains here, leave it alone briefly instead of camping forever.
+					botIgnoredItem = botItemGoal;
+					botItemIgnoreUntil = gameLocal.time + BOT_ITEM_IGNORE_TIME;
+					botItemGoal = NULL;
+					botItemCloseTime = 0;
+					botItemLastProgressTime = -1;
+					botItemBestDistance = idMath::INFINITY;
+				}
+			}
+		}
+		if ( gameLocal.time >= botNextWanderTime ) {
+			botNextWanderTime = gameLocal.time + 900 + gameLocal.random.RandomInt( 1800 );
+			botWanderYaw = idMath::AngleNormalize180(
+				botWanderYaw + gameLocal.random.CRandomFloat() * ( 50.0f + 100.0f * botTraits.initiative ) );
+		}
+		if ( !botItemGoal.IsValid() && gameLocal.random.RandomFloat() > botTraits.patience ) {
+			forward = 0.45f + botTraits.initiative * 0.45f;
+		}
+	}
+
+	if ( lastDmgTime != botLastDamageTime ) {
+		botLastDamageTime = lastDmgTime;
+		botDodgeStartTime = gameLocal.time + idMath::Ftoi( botTraits.dodgeReactMsec );
+		botStrafeDirection = -botStrafeDirection;
+	}
+	if ( botDodgeStartTime > 0 && gameLocal.time >= botDodgeStartTime &&
+		gameLocal.time < botDodgeStartTime + 700 ) {
+		strafe = (float)botStrafeDirection;
+	}
+
+	const idMat3 worldViewAxis = GetUntransformedViewAngles().ToMat3() * GetEyeAxis();
+	idVec3 moveDirection = worldViewAxis[0] * forward + worldViewAxis[1] * strafe;
+	if ( moveDirection.Normalize() > 0.0f ) {
+		trace_t trace;
+		gameLocal.clip.TraceBounds( trace, GetOrigin(), GetOrigin() + moveDirection * 72.0f,
+			GetPhysics()->GetBounds(), GetPhysics()->GetClipMask(), this );
+		if ( trace.fraction < 0.65f ) {
+			strafe = (float)-botStrafeDirection;
+			forward *= 0.2f;
+			botWanderYaw = idMath::AngleNormalize180( botWanderYaw + 80.0f * botStrafeDirection );
+			if ( gameLocal.time >= botNextJumpTime &&
+				gameLocal.random.RandomFloat() < botTraits.jumpChance ) {
+				cmd.upmove = idMath::ClampChar( 127 );
+				botNextJumpTime = gameLocal.time + 900;
 			}
 		}
 	}
 
-	gameLocal.pvs.FreeCurrentPVS( pvsHandle );
+	cmd.forwardmove = idMath::ClampChar( idMath::Ftoi( forward * 127.0f ) );
+	cmd.rightmove = idMath::ClampChar( idMath::Ftoi( strafe * 127.0f ) );
+	cmd.buttons |= BUTTON_RUN;
+}
 
-	if (closestEnt) {
-		idealAngles = (closestEnt->GetOrigin()-GetOrigin()).ToAngles();
+void hhArtificialPlayer::UpdateBotAimAndFire( usercmd_t &cmd, const hhPlayer *enemy,
+	bool enemyVisible, float enemyDistance ) {
+	idAngles currentAngles = GetUntransformedViewAngles();
+	idAngles desiredAngles = currentAngles;
+	bool haveAimPoint = false;
+
+	if ( enemy ) {
+		idVec3 target = enemyVisible ? enemy->GetEyePosition() : botLastSeenPosition;
+		if ( enemyVisible ) {
+			const idBounds &targetBounds = enemy->GetPhysics()->GetAbsBounds();
+			float targetMin = 0.0f;
+			float targetMax = 0.0f;
+			targetBounds.AxisProjection( -enemy->GetPhysics()->GetGravityNormal(),
+				targetMin, targetMax );
+			const float targetHeight = targetMax - targetMin;
+			target -= enemy->GetPhysics()->GetGravityNormal() * ( targetHeight * botTraits.aimHeight );
+			const float flightTime = idMath::ClampFloat( 0.0f, 1.2f, enemyDistance / 1200.0f );
+			idVec3 lead = enemy->GetPhysics()->GetLinearVelocity() * flightTime * botTraits.aimLead;
+			lead *= 1.0f + gameLocal.random.CRandomFloat() * botTraits.aimLeadError;
+			target += lead;
+
+			const float dt = Max( 0.001f, MS2SEC( gameLocal.msec ) );
+			const float timeConstant = Max( 0.001f, botTraits.aimTrackTimeConst );
+			const float alpha = idMath::ClampFloat( 0.0f, 1.0f, dt / ( timeConstant + dt ) );
+			if ( botBelievedTarget == vec3_origin ) {
+				botBelievedTarget = target;
+			}
+			botBelievedTarget += ( target - botBelievedTarget ) * alpha;
+			if ( botLastTargetPosition != vec3_origin ) {
+				const idVec3 frameMotion = target - botLastTargetPosition;
+				botBelievedTarget -= frameMotion *
+					idMath::ClampFloat( 0.0f, 1.0f, botTraits.aimTrackError / 8.0f );
+			}
+			botLastTargetPosition = target;
+			target = botBelievedTarget;
+		}
+
+		idVec3 worldDirection = target - GetEyePosition();
+		worldDirection.Normalize();
+		idVec3 localDirection;
+		GetEyeAxis().ProjectVector( worldDirection, localDirection );
+		desiredAngles = localDirection.ToAngles();
+		haveAimPoint = true;
+	} else {
+		desiredAngles.yaw = botWanderYaw;
+		desiredAngles.pitch = 0.0f;
 	}
-	else { //if no one to run mindlessly at, do some stuff.
-		const float testDist = 64.0f;
-		idVec3 fwd = GetOrigin()+(idealAngles.ToForward()*testDist);
 
-		trace_t tr;
-		gameLocal.clip.TraceBounds(tr, GetOrigin(), fwd, GetPhysics()->GetBounds(), GetPhysics()->GetClipMask(), this);
-		if (tr.fraction != 1.0f) { //if we hit something set the yaw to a new random angle.
-			iFeelHoppy = true;
+	const float timeSeconds = MS2SEC( gameLocal.time );
+	desiredAngles.yaw += idMath::Sin( timeSeconds * idMath::TWO_PI * botTraits.aimTremorRateHz ) * botTraits.aimTremorDeg;
+	desiredAngles.pitch += idMath::Sin( timeSeconds * idMath::TWO_PI * botTraits.aimTremorRateHz * 0.73f + 1.7f ) * botTraits.aimTremorDeg;
 
-			idealAngles.yaw = rand()%360;
+	const float frameSeconds = Max( 0.001f, MS2SEC( gameLocal.msec ) );
+	botCurrentTurnSpeed = Min( botTraits.turnSpeed,
+		botCurrentTurnSpeed + botTraits.turnAccel * frameSeconds );
+	const float dampingFactor = idMath::ClampFloat( 0.25f, 1.0f, botTraits.turnDamping );
+	const float maxStep = Max( 1.0f, botCurrentTurnSpeed ) * frameSeconds * dampingFactor;
+	idAngles remaining = desiredAngles - currentAngles;
+	remaining.Normalize180();
+	idAngles newAngles = currentAngles;
+	newAngles.pitch += idMath::ClampFloat( -maxStep, maxStep, remaining.pitch );
+	newAngles.yaw += idMath::ClampFloat( -maxStep, maxStep, remaining.yaw );
+	newAngles.roll = 0.0f;
+	newAngles.Normalize180();
+
+	UpdateDeltaViewAngles( newAngles );
+	UpdateOrientation( newAngles );
+
+	const float angularError = Max( idMath::Fabs( remaining.pitch ), idMath::Fabs( remaining.yaw ) );
+	const float actualTurnRate = angularError / frameSeconds;
+	if ( haveAimPoint && angularError <= botTraits.fireConeDeg ) {
+		if ( botAimSettledTime == 0 ) {
+			botAimSettledTime = gameLocal.time;
+		}
+	} else {
+		botAimSettledTime = 0;
+	}
+
+	const bool reactionReady = gameLocal.time >= botTargetAcquiredTime;
+	const bool settled = botAimSettledTime > 0 &&
+		gameLocal.time - botAimSettledTime >= idMath::Ftoi( botTraits.aimSettleMsec );
+	const bool suppressionShot = !enemyVisible && enemy &&
+		gameLocal.time - botLastSeenTime <= idMath::Ftoi( botTraits.suppressionMsec );
+	bool wantsFire = enemy && ( enemyVisible || suppressionShot ) && reactionReady && settled &&
+		actualTurnRate <= botTraits.holdFireTurnRate;
+	const bool mayStartBurst = gameLocal.time >= botBurstEndTime &&
+		gameLocal.time >= botNextBurstTime;
+	if ( wantsFire && mayStartBurst && gameLocal.time >= botMistakeEndTime &&
+		gameLocal.random.RandomFloat() < botTraits.mistakeChance ) {
+		botMistakeEndTime = gameLocal.time + idMath::Ftoi( botTraits.mistakeMsec );
+	}
+	if ( gameLocal.time < botMistakeEndTime ) {
+		wantsFire = false;
+	}
+
+	if ( wantsFire ) {
+		if ( mayStartBurst ) {
+			const int burstMin = idMath::Ftoi( botTraits.burstMinMsec );
+			const int burstRange = Max( 0,
+				idMath::Ftoi( botTraits.burstMaxMsec - botTraits.burstMinMsec ) );
+			botBurstEndTime = gameLocal.time + burstMin +
+				( burstRange ? gameLocal.random.RandomInt( burstRange + 1 ) : 0 );
+			botNextBurstTime = botBurstEndTime + idMath::Ftoi( botTraits.burstPauseMsec );
+		}
+		if ( gameLocal.time < botBurstEndTime ) {
+			cmd.buttons |= BUTTON_ATTACK;
+		}
+	}
+}
+
+bool hhArtificialPlayer::QueueBotChat( rvBotChatEvent event, const idPlayer *other,
+	const char *weaponName, const char *itemName ) {
+	if ( !bot_chat.GetInteger() || !botCharacter || !botPendingChat.IsEmpty() ) {
+		return false;
+	}
+	// ResolveTraits already folds chatty mode into this value; applying another
+	// multiplier here would make bot_chat 2 count the same preference twice.
+	const float chance = botTraits.chatiness;
+	if ( gameLocal.random.RandomFloat() > idMath::ClampFloat( 0.0f, 1.0f, chance ) ) {
+		return false;
+	}
+
+	botChatTokens_t tokens;
+	tokens.self = BotDisplayName( this );
+	tokens.other = BotDisplayName( other );
+	const char *currentWeaponName = GetWeaponName( GetCurrentWeapon() );
+	tokens.weapon = weaponName && weaponName[0] ? weaponName :
+		( currentWeaponName ? currentWeaponName : "weapon" );
+	tokens.map = gameLocal.serverInfo.GetString( "si_map" );
+	tokens.item = itemName ? itemName : "item";
+	idStr line;
+	if ( !botCharacterManager.ChatLine( botCharacter, event, tokens, line ) ) {
+		return false;
+	}
+	if ( !botCharacterManager.AllowChat( entityNumber ) ) {
+		return false;
+	}
+
+	botPendingChat = line;
+	const int cpm = Max( 60, bot_chatCPM.GetInteger() );
+	const int typingTime = line.Length() * 60000 / cpm;
+	botPendingChatTime = gameLocal.time + idMath::Ftoi(
+		( bot_chatDelay.GetInteger() + typingTime ) * botTraits.chatDelayScale );
+	botPendingChatTeam = false;
+	botPendingChatIsReply = false;
+	return true;
+}
+
+bool hhArtificialPlayer::TryQueueBotReply( const idStr &normalizedText, bool sourceIsBot,
+	bool addressed, const idPlayer *other, bool teamChat ) {
+	if ( !bot_chat.GetInteger() || !botCharacter || !botPendingChat.IsEmpty() ) {
+		return false;
+	}
+	botChatTokens_t tokens;
+	tokens.self = BotDisplayName( this );
+	tokens.other = BotDisplayName( other );
+	tokens.weapon = "";
+	tokens.map = gameLocal.serverInfo.GetString( "si_map" );
+	tokens.item = "";
+	idStr line;
+	if ( !botCharacterManager.ReplyLine( botCharacter, normalizedText, sourceIsBot,
+		addressed, tokens, line ) ) {
+		return false;
+	}
+	if ( !botCharacterManager.AllowChat( entityNumber ) ) {
+		return false;
+	}
+	botPendingChat = line;
+	const int cpm = Max( 60, bot_chatCPM.GetInteger() );
+	const int typingTime = line.Length() * 60000 / cpm;
+	botPendingChatTime = gameLocal.time + idMath::Ftoi(
+		( bot_chatDelay.GetInteger() + typingTime ) * botTraits.chatDelayScale );
+	botPendingChatTeam = teamChat;
+	botPendingChatIsReply = true;
+	return true;
+}
+
+void hhArtificialPlayer::UpdateBotChat( void ) {
+	if ( botPendingChat.IsEmpty() || gameLocal.time < botPendingChatTime ) {
+		return;
+	}
+	const idDict *info = gameLocal.GetUserInfo( entityNumber );
+	const char *name = info ? info->GetString( "ui_name" ) : botCharacterName.c_str();
+	const bool wasReply = botPendingChatIsReply;
+	botReplyDispatchSuppressed = wasReply;
+	gameLocal.mpGame.ProcessChatMessage( entityNumber, botPendingChatTeam,
+		name, botPendingChat.c_str(), NULL );
+	botReplyDispatchSuppressed = false;
+	botPendingChat.Clear();
+	botPendingChatTime = 0;
+	botPendingChatTeam = false;
+	botPendingChatIsReply = false;
+}
+
+bool hhArtificialPlayer::ReplyDispatchSuppressed( void ) {
+	return botReplyDispatchSuppressed;
+}
+
+void hhArtificialPlayer::OnBotKill( idPlayer *victim, const char *weaponName ) {
+	++botKillStreak;
+	rvBotChatEvent event = BOTCHAT_KILL;
+	if ( weaponName && idStr::FindText( weaponName, "wrench", false ) >= 0 ) {
+		event = BOTCHAT_KILL_WRENCH;
+	} else if ( victim && victim->entityNumber == botLastKiller ) {
+		event = BOTCHAT_KILL_REVENGE;
+	} else if ( botKillStreak >= 3 ) {
+		event = BOTCHAT_KILL_STREAK;
+	}
+	QueueBotChat( event, victim, weaponName );
+}
+
+void hhArtificialPlayer::OnBotDeath( idPlayer *killer, const char *weaponName, bool accident ) {
+	botKillStreak = 0;
+	botLastKiller = killer && killer != this ? killer->entityNumber : -1;
+	QueueBotChat( accident ? BOTCHAT_DEATH_ACCIDENT : BOTCHAT_DEATH, killer, weaponName );
+}
+
+void hhArtificialPlayer::OnBotItemPickedUp( const idEntity *item, idPlayer *picker ) {
+	if ( !item || botItemGoal.GetEntity() != item ) {
+		return;
+	}
+
+	// Reaching our own goal is success, not denial.  In either case, stop
+	// steering toward the pickup immediately instead of waiting for the next
+	// periodic item scan to notice that it has disappeared.
+	botItemGoal = NULL;
+	botItemCloseTime = 0;
+	botItemLastProgressTime = -1;
+	botItemBestDistance = idMath::INFINITY;
+	if ( picker == this ) {
+		return;
+	}
+
+	idStr itemName = item->spawnArgs.GetString( "inv_name" );
+	if ( itemName.IsEmpty() ) {
+		itemName = item->spawnArgs.GetString( "classname", "item" );
+	}
+	QueueBotChat( BOTCHAT_ITEM_DENIED, picker, NULL, itemName.c_str() );
+}
+
+void hhArtificialPlayer::OnBotMatchStart( void ) {
+	// Revenge and target memory belong to a round, not to the client slot.
+	botLastKiller = -1;
+	botKillStreak = 0;
+	botEnemy = NULL;
+	botItemGoal = NULL;
+	botIgnoredItem = NULL;
+	botLastSeenPosition = vec3_origin;
+	botBelievedTarget = vec3_origin;
+	botLastTargetPosition = vec3_origin;
+	botTargetAcquiredTime = 0;
+	botLastSeenTime = 0;
+	botNextTargetScanTime = 0;
+	botAimSettledTime = 0;
+	botCurrentTurnSpeed = 0.0f;
+	botDodgeStartTime = 0;
+	botLastDamageTime = lastDmgTime;
+	botNextWeaponTime = 0;
+	botBurstEndTime = 0;
+	botNextBurstTime = 0;
+	botMistakeEndTime = 0;
+	botItemCloseTime = 0;
+	botItemIgnoreUntil = 0;
+	botItemLastProgressTime = -1;
+	botItemBestDistance = idMath::INFINITY;
+	botLeadKnown = false;
+	// Dialogue queued in the previous round must not suppress or leak past the
+	// new round's level-start line.
+	botPendingChat.Clear();
+	botPendingChatTime = 0;
+	botPendingChatTeam = false;
+	botPendingChatIsReply = false;
+	QueueBotChat( BOTCHAT_LEVELSTART );
+}
+
+void hhArtificialPlayer::OnBotMatchEnd( bool won ) {
+	QueueBotChat( won ? BOTCHAT_MATCH_WIN : BOTCHAT_MATCH_LOSE );
+}
+
+void hhArtificialPlayer::SayBotFarewell( void ) {
+	QueueBotChat( BOTCHAT_FAREWELL );
+	if ( !botPendingChat.IsEmpty() ) {
+		botPendingChatTime = gameLocal.time;
+		UpdateBotChat();
+	}
+}
+
+void hhArtificialPlayer::Think( void ) {
+	PROFILE_START( "hhArtificialPlayer::Think", PROFMASK_NORMAL );
+	usercmd_t &cmd = gameLocal.usercmds[entityNumber];
+	memset( &cmd, 0, sizeof( cmd ) );
+	cmd.gameFrame = gameLocal.framenum;
+	cmd.gameTime = gameLocal.time;
+
+	bool enemyVisible = false;
+	float enemyDistance = idMath::INFINITY;
+	hhPlayer *enemy = NULL;
+	if ( health > 0 && !spectating ) {
+		enemy = FindBotEnemy( enemyVisible, enemyDistance );
+		UpdateBotWeapon( enemyDistance );
+		UpdateBotMovement( cmd, enemy, enemyVisible, enemyDistance );
+		UpdateBotAimAndFire( cmd, enemy, enemyVisible, enemyDistance );
+	} else if ( health <= 0 ) {
+		// A press/release pair satisfies the normal multiplayer respawn path.
+		if ( ( gameLocal.time / 250 ) & 1 ) {
+			cmd.buttons |= BUTTON_ATTACK;
 		}
 	}
 
-	if ((closestEnt || health <= 0) && rand()%2 == 1) {
-		nextCmd->buttons |= BUTTON_ATTACK;
-	}
-	else {
-		nextCmd->buttons &= ~BUTTON_ATTACK;
-	}
-
-	if (testCrouchTime < gameLocal.time) {
-		testCrouchTime = gameLocal.time + rand()%4000;
-		testCrouchActive = !testCrouchActive;
-	}
-
-	if (iFeelHoppy) {
-		nextCmd->upmove = idMath::ClampChar(127);
-	}
-	else {
-		if (testCrouchActive) {
-			nextCmd->upmove = idMath::ClampChar(-127);
+	if ( !spectating ) {
+		const bool isLeader = IsLeader();
+		if ( botLeadKnown && isLeader != botHadLead ) {
+			idPlayer *newLeader = NULL;
+			if ( !isLeader ) {
+				for ( int i = 0; i < gameLocal.numClients; ++i ) {
+					if ( gameLocal.entities[i] && gameLocal.entities[i]->IsType( idPlayer::Type ) ) {
+						idPlayer *candidate = static_cast<idPlayer *>( gameLocal.entities[i] );
+						if ( candidate != this && candidate->IsLeader() ) {
+							newLeader = candidate;
+							break;
+						}
+					}
+				}
+			}
+			QueueBotChat( isLeader ? BOTCHAT_LEAD_TAKEN : BOTCHAT_LEAD_LOST, newLeader );
 		}
-		else {
-			nextCmd->upmove = 0;
-		}
+		botLeadKnown = true;
+		botHadLead = isLeader;
 	}
+	UpdateBotChat();
 
-	idealAngles.pitch = idMath::AngleNormalize180(idealAngles.pitch);
-	idealAngles.yaw = idMath::AngleNormalize180(idealAngles.yaw);
-	idealAngles.roll = idMath::AngleNormalize180(idealAngles.roll);
-	SetUntransformedViewAngles(idAngles(0.0f, 0.0f, 0.0f));
-	UpdateDeltaViewAngles(idealAngles);
-	UpdateOrientation(idealAngles);
-	PROFILE_STOP("hhArtificialPlayer::Think", PROFMASK_NORMAL);
+	PROFILE_STOP( "hhArtificialPlayer::Think", PROFMASK_NORMAL );
 	hhPlayer::Think();
 }
 
@@ -7728,17 +8521,22 @@ void hhArtificialPlayer::ClientPredictionThink( void ) {
 }
 
 void hhArtificialPlayer::WriteToSnapshot( idBitMsgDelta &msg ) const {
-	//instead of sync'ing, just mirror what the server has in ::Spawn
-	/*
-	msg.WriteDict(*gameLocal.GetUserInfo(entityNumber));	//ap's don't broadcast their info to the server, so the server otherwise
-															//will never broadcast it out to other clients
-	*/
+	// Keep the dict first: idBitMsgDelta::WriteDict assigns its changed flag,
+	// while later fields only promote it.  This also carries synthetic-client
+	// identity to clients that never received ordinary CLIENTINFO traffic.
+	const idDict *apUI = gameLocal.GetUserInfo( entityNumber );
+	if ( apUI ) {
+		msg.WriteDict( *apUI );
+	} else {
+		idDict emptyUI;
+		msg.WriteDict( emptyUI );
+	}
 
 	hhPlayer::WriteToSnapshot(msg);
 
 	usercmd_t &cmd = gameLocal.usercmds[entityNumber];
 	msg.WriteLong( cmd.gameTime );
-	msg.WriteByte( cmd.buttons );
+	msg.WriteShort( cmd.buttons );
     msg.WriteShort( cmd.mx );
 	msg.WriteShort( cmd.my );
 	msg.WriteChar( cmd.forwardmove );
@@ -7752,29 +8550,39 @@ void hhArtificialPlayer::WriteToSnapshot( idBitMsgDelta &msg ) const {
 }
 
 void hhArtificialPlayer::ReadFromSnapshot( const idBitMsgDelta &msg ) {
-	/*
-	((idBitMsgDelta)msg).ReadDict(*((idDict *)gameLocal.GetUserInfo(entityNumber)));
-	if (!clientReceivedUI) {
-		UserInfoChanged( false );
-		clientReceivedUI = true;
+	// Read through a local delta wrapper because ReadDict predates the const
+	// read API.  It shares the underlying cursors with the supplied wrapper.
+	idBitMsgDelta readMsg = msg;
+	idDict snapshotUI;
+	readMsg.ReadDict( snapshotUI );
+	const idDict *currentUI = gameLocal.GetUserInfo( entityNumber );
+	const bool identityChanged = !currentUI ||
+		idStr::Icmp( botCharacterName.c_str(), snapshotUI.GetString( "bot_character" ) ) ||
+		botSkill != idMath::ClampInt( 1, BOT_SKILL_LEVELS,
+			snapshotUI.GetInt( "bot_skill", va( "%d", bot_skill.GetInteger() ) ) );
+	if ( identityChanged ) {
+		ApplyBotUserInfo( snapshotUI );
 	}
-	*/
+	if ( !BotUserInfoMatches( currentUI, snapshotUI ) ) {
+		gameLocal.SetUserInfo( entityNumber, snapshotUI, true, false );
+		SetPlayerModel( false );
+	}
 
-	hhPlayer::ReadFromSnapshot(msg);
+	hhPlayer::ReadFromSnapshot(readMsg);
 
 	usercmd_t &cmd = lastAICmd;
-	cmd.gameTime = msg.ReadLong();
-    cmd.buttons = msg.ReadByte();
-    cmd.mx = msg.ReadShort();
-	cmd.my = msg.ReadShort();
-	cmd.forwardmove = msg.ReadChar();
-	cmd.rightmove = msg.ReadChar();
-	cmd.upmove = msg.ReadChar();
-	cmd.angles[0] = msg.ReadShort();
-	cmd.angles[1] = msg.ReadShort();
-	cmd.angles[2] = msg.ReadShort();
+	cmd.gameTime = readMsg.ReadLong();
+	cmd.buttons = readMsg.ReadShort();
+	cmd.mx = readMsg.ReadShort();
+	cmd.my = readMsg.ReadShort();
+	cmd.forwardmove = readMsg.ReadChar();
+	cmd.rightmove = readMsg.ReadChar();
+	cmd.upmove = readMsg.ReadChar();
+	cmd.angles[0] = readMsg.ReadShort();
+	cmd.angles[1] = readMsg.ReadShort();
+	cmd.angles[2] = readMsg.ReadShort();
 
-	bool spec = !!msg.ReadBits(1);	//doesn't go through right for ap's or something based on events sometimes, hack fix
+	bool spec = !!readMsg.ReadBits(1);	//doesn't go through right for ap's or something based on events sometimes, hack fix
 	if (spec != spectating) {
 		Spectate(spec);
 	}

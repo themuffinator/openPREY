@@ -10,6 +10,7 @@
 
 #include "../Game_local.h"
 #include "../../Prey/prey_local.h"	// HUMANHEAD tmj: Prey types should be included in parse
+#include <stdint.h>
 
 #ifdef ID_DEBUG_MEMORY
 #include "GameTypeInfo.h"				// Make sure this is up to date!
@@ -548,9 +549,11 @@ int idTypeInfoTools::WriteVariable_r( const void *varPtr, const char *varName, c
 	}
 
 	// if this is a pointer
+	const uintptr_t uninitializedPointer = ( ~static_cast<uintptr_t>( 0 ) / 0xffU ) * 0xcdU;
 	isPointer = 0;
 	for ( i = typeString.Length(); i > 0 && typeString[i - 1] == '*'; i -= 2 ) {
-		if ( varPtr == (void *)0xcdcdcdcd || ( varPtr != NULL && *((unsigned long *)varPtr) == 0xcdcdcdcd ) ) {
+		if ( reinterpret_cast<uintptr_t>( varPtr ) == uninitializedPointer ||
+				( varPtr != NULL && *reinterpret_cast<const unsigned int *>( varPtr ) == 0xcdcdcdcdU ) ) {
 			common->Warning( "%s%s::%s%s references uninitialized memory", prefix, scope, varName, "" );
 			return typeSize;
 		}
@@ -1116,7 +1119,7 @@ int idTypeInfoTools::WriteVariable_r( const void *varPtr, const char *varName, c
 
 	i = 0;
 	do {
-		if ( *((unsigned long *)varPtr) == 0xcdcdcdcd ) {
+		if ( *reinterpret_cast<const unsigned int *>( varPtr ) == 0xcdcdcdcdU ) {
 			common->Warning( "%s%s::%s%s uses uninitialized memory", prefix, scope, varName, "" );
 			break;
 		}

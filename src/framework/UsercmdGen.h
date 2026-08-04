@@ -14,7 +14,7 @@
 
 const int USERCMD_HZ			= 60;			// 60 frames per second
 const int USERCMD_MSEC			= 1000 / USERCMD_HZ;
-const float	USERCMD_ONE_OVER_HZ	= (1.0f / USERCMD_HZ); // HUMANHEAD JRM
+const float USERCMD_ONE_OVER_HZ	= ( 1.0f / USERCMD_HZ ); // HUMANHEAD JRM
 
 // usercmd_t->button bits
 // HUMANHEAD
@@ -26,6 +26,13 @@ const int BUTTON_SCORES			= BIT(4);
 const int BUTTON_MLOOK			= BIT(5);
 const int BUTTON_6				= BIT(6);
 const int BUTTON_7				= BIT(7);
+// The rebased engine keeps the widened openQ4 usercmd wire layout.  Preserve
+// Prey's first six bits and place the upstream-only actions above them.
+const int BUTTON_INGAMESTATS		= BUTTON_6;
+const int BUTTON_VOICECHAT		= BUTTON_7;
+const int BUTTON_TOURNEY			= BIT(8);
+const int BUTTON_STRAFE			= BIT(9);
+const int BUTTON_WEAPONWHEEL		= BIT(10);
 /*
 const int BUTTON_ATTACK			= BIT(0);
 const int BUTTON_RUN			= BIT(1);
@@ -70,6 +77,11 @@ const int IMPULSE_27			= 27;			// <unused>
 const int IMPULSE_28			= 28;			// vote yes
 const int IMPULSE_29			= 29;			// vote no
 const int IMPULSE_40			= 40;			// use vehicle
+const int IMPULSE_50			= 50;			// toggle flashlight
+const int IMPULSE_51			= 51;			// switch to last weapon
+const int IMPULSE_52			= 52;			// multiplayer stats
+const int IMPULSE_100			= 100;			// buy menu impulse range
+const int IMPULSE_127			= 127;			// buy menu impulse range
 
 // usercmd_t->flags
 const int UCF_IMPULSE_SEQUENCE	= 0x0001;		// toggled every time an impulse command is sent
@@ -79,7 +91,7 @@ public:
 	int			gameFrame;						// frame number
 	int			gameTime;						// game time
 	int			duplicateCount;					// duplication count for networking
-	byte		buttons;						// buttons
+	short		buttons;						// buttons (shared 16-bit engine/game wire contract)
 	signed char	forwardmove;					// forward/backward movement
 	signed char	rightmove;						// left/right movement
 	signed char	upmove;							// up/down movement

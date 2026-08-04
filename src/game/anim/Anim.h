@@ -236,6 +236,10 @@ protected:
 	idVec3					totaldelta;
 	mutable int				ref_count;
 
+private:
+	bool					LoadGeneratedAnim( const char *filename );
+	void					WriteGeneratedAnim( const char *filename ) const;
+
 public:
 							idMD5Anim();
 							~idMD5Anim();
@@ -341,6 +345,7 @@ public:
 	virtual size_t				Size( void ) const;
 	virtual const char *		DefaultDefinition( void ) const;
 	virtual bool				Parse( const char *text, const int textLength );
+	virtual bool				Parse( const char *text, const int textLength, bool noCaching );
 	virtual void				FreeData( void );
 
 	void						Touch( void ) const;
