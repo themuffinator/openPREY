@@ -153,6 +153,18 @@ jobs:
             sleep 10
           done
 
+      # Staging bundles OpenAL32.dll beside the client. The runner has no local
+      # src/external/openal-soft runtime, so prepare one as upstream openQ4 does.
+      - name: Prepare OpenAL Soft (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $outputRoot = Join-Path $env:GITHUB_WORKSPACE ".tmp/openal-soft-x64"
+          $env:OPENPREY_VS_TARGET_ARCH = "x64"
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/build/prepare_windows_openal.ps1 -Architecture "x64" -OutputRoot $outputRoot
+          "OPENPREY_OPENAL_ROOT=$outputRoot" >> $env:GITHUB_ENV
+
       - name: Configure, build, and stage (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
