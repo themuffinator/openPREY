@@ -2620,6 +2620,18 @@ void R_AddDrawSurf( const srfTriangles_t *tri, const viewEntity_t *space, const 
 					const idMaterial *shader, const idScreenRect &scissor, int extraDrawSurfFlags ) {
 	drawSurf_t		*drawSurf;
 
+	// renderEntity may be NULL; the geometry, space and material may not.
+	// Drop such a surface rather than crash, and say so once.
+	if ( tri == NULL || space == NULL || shader == NULL ) {
+		static bool warnedIncompleteSurface = false;
+		if ( !warnedIncompleteSurface ) {
+			warnedIncompleteSurface = true;
+			common->Warning( "R_AddDrawSurf: dropped a surface with no %s",
+				tri == NULL ? "geometry" : ( space == NULL ? "view entity" : "material" ) );
+		}
+		return;
+	}
+
 	drawSurf = (drawSurf_t *)R_FrameAlloc( sizeof( *drawSurf ) );
 	drawSurf->geo = tri;
 	drawSurf->pbrLightGeo = NULL;
