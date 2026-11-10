@@ -12,6 +12,7 @@ static bool R_GLDebug_HasDebugOutput( void ) {
 static bool rg_glDebugOutputRegistered = false;
 static bool rg_glDebugOutputUsesCoreCallback = false;
 static bool rg_glDebugOutputSynchronous = false;
+static thread_local const char *rg_glDebugCurrentScope = NULL;
 
 static const int RENDERER_GL_DEBUG_MESSAGE_CAPACITY = 64;
 static const int RENDERER_GL_DEBUG_MESSAGE_TEXT = 512;
@@ -23,6 +24,7 @@ typedef struct glDebugQueuedMessage_s {
 	GLuint id;
 	GLenum severity;
 	char message[RENDERER_GL_DEBUG_MESSAGE_TEXT];
+	char scope[256];
 } glDebugQueuedMessage_t;
 
 static glDebugQueuedMessage_t rg_glDebugOutputMessages[RENDERER_GL_DEBUG_MESSAGE_CAPACITY];
@@ -98,6 +100,10 @@ static void R_GLDebug_QueueMessage( GLenum source, GLenum type, GLuint id, GLenu
 		queued.id = id;
 		queued.severity = severity;
 		R_GLDebug_CopyMessageText( queued.message, sizeof( queued.message ), length, message );
+		// Only synchronous callbacks have a reliable submitting scope. Driver
+		// worker callbacks must not report whichever pass happens to run later.
+		idStr::Copynz( queued.scope, rg_glDebugOutputSynchronous && rg_glDebugCurrentScope
+			? rg_glDebugCurrentScope : "", sizeof( queued.scope ) );
 		rg_glDebugOutputMessageCount++;
 	} else {
 		rg_glDebugOutputDroppedMessages++;
@@ -185,11 +191,12 @@ void R_GLDebugOutput_FlushMessages( void ) {
 	for ( int i = 0; i < messageCount; ++i ) {
 		const glDebugQueuedMessage_t &queued = messages[i];
 		common->Printf(
-			"GL debug callback [source=%s type=%s severity=%s id=%u] %s\n",
+			"GL debug callback [source=%s type=%s severity=%s id=%u scope='%s'] %s\n",
 			R_GLDebug_SourceName( queued.source ),
 			R_GLDebug_TypeName( queued.type ),
 			R_GLDebug_SeverityName( queued.severity ),
 			queued.id,
+			queued.scope,
 			queued.message );
 	}
 	if ( droppedMessages > 0 ) {
@@ -302,8 +309,13 @@ void R_GLDebug_LabelSampler( GLuint name, const char *label ) {
 
 idGLDebugScope::idGLDebugScope( const char *name, unsigned int id ) {
 	active = false;
+	previousScope = rg_glDebugCurrentScope;
 	if ( name == NULL || name[0] == '\0' || !R_GLDebugScope_Available() ) {
 		return;
+	}
+	if ( rg_glDebugOutputSynchronous ) {
+		idStr::Copynz( scopeName, name, sizeof( scopeName ) );
+		rg_glDebugCurrentScope = scopeName;
 	}
 	glPushDebugGroup( GL_DEBUG_SOURCE_APPLICATION, static_cast<GLuint>( id ), static_cast<GLsizei>( idStr::Length( name ) ), name );
 	active = true;
@@ -313,4 +325,5 @@ idGLDebugScope::~idGLDebugScope() {
 	if ( active && glPopDebugGroup != NULL ) {
 		glPopDebugGroup();
 	}
+	rg_glDebugCurrentScope = previousScope;
 }

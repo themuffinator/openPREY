@@ -42,9 +42,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GAME_LIBS_ROOT = Path(
-    os.environ.get("OPENPREY_GAMELIBS_REPO", ROOT.parent / "OpenPrey-game")
-).resolve()
+GAME_LIBS_ROOT = Path(os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT)).resolve()
 
 BOTFILES = ROOT / "content" / "basepr" / "pak0" / "botfiles"
 DOC = ROOT / "docs" / "dev" / "mp-bots.md"
@@ -90,6 +88,7 @@ TRAIT_DIRECTION = {
     "turnAccel": +1,
     "turnDamping": +1,
     "aimTrackTimeConst": -1,
+    "aimAnticipation": +1,
     "aimTremorDeg": -1,
     "aimTrackError": -1,
     "aimSettleMsec": -1,
@@ -102,6 +101,8 @@ TRAIT_DIRECTION = {
     "dodgeReactMsec": -1,
     "weaponSkill": +1,
     "targetSelection": +1,
+    "hearing": +1,
+    "itemTiming": +1,
 }
 
 # Deliberately flat across the whole curve: these are the axes a style or a
@@ -241,6 +242,24 @@ def braced_body(source: str, start: int, context: str) -> str:
             if depth == 0:
                 return source[open_at + 1 : i]
     raise AssertionError(f"Unterminated brace section for {context}")
+
+
+def void_method_body(source: str, qualified_name: str, context: str) -> str:
+    """Return a void method body, including sources with #ifdef signatures."""
+
+    definitions = list(
+        re.finditer(
+            rf"\bvoid\s+{re.escape(qualified_name)}\s*\([^;{{}}]*\)\s*\{{",
+            source,
+        )
+    )
+    if not definitions:
+        raise AssertionError(f"Missing definition for {context}")
+
+    # RV_UNIFIED_ALLOCATOR selects between two adjacent Init signatures.  The
+    # final textual definition owns the shared body and therefore has balanced
+    # braces when the inactive preprocessor branch is still present.
+    return braced_body(source, definitions[-1].start(), context)
 
 
 # ----------------------------------------------------------------------------
@@ -647,6 +666,33 @@ def chat_event_enum(header: str) -> list[str]:
     return [name for name in re.findall(r"\b(BOTCHAT_\w+)\b", body) if name != "BOTCHAT_NUM"]
 
 
+def validate_bot_manager_lifecycle(game_local: str) -> None:
+    init = void_method_body(game_local, "idGameLocal::Init", "idGameLocal::Init")
+    require(init, "botCharacterManager.Init();", "idGameLocal::Init")
+
+    shutdown = void_method_body(
+        game_local,
+        "idGameLocal::Shutdown",
+        "idGameLocal::Shutdown",
+    )
+    require(shutdown, "botCharacterManager.Shutdown();", "idGameLocal::Shutdown")
+
+
+def require_bot_lifecycle_mutation_rejected(
+    game_local: str,
+    removed_call: str,
+    context: str,
+) -> None:
+    mutant = game_local.replace(removed_call, "", 1)
+    if mutant == game_local:
+        raise AssertionError(f"Mutation setup could not remove {removed_call!r}")
+    try:
+        validate_bot_manager_lifecycle(mutant)
+    except AssertionError:
+        return
+    raise AssertionError(f"Bot lifecycle validator accepted missing {context}")
+
+
 def validate_wiring() -> None:
     if not GAME_SOURCE.is_dir():
         print(f"mp_bot_characters: skipped game checks (no GameLibs checkout at {GAME_LIBS_ROOT})")
@@ -679,10 +725,17 @@ def validate_wiring() -> None:
 
     # The manager owns loaded style, character and chat data.
     game_local = read(GAME_SOURCE / "Game_local.cpp")
-    init = game_local[game_local.index("void idGameLocal::Init") :][:6000]
-    require(init, "botCharacterManager.Init();", "idGameLocal::Init")
-    shutdown = game_local[game_local.index("void idGameLocal::Shutdown") :][:6000]
-    require(shutdown, "botCharacterManager.Shutdown();", "idGameLocal::Shutdown")
+    validate_bot_manager_lifecycle(game_local)
+    require_bot_lifecycle_mutation_rejected(
+        game_local,
+        "botCharacterManager.Init();",
+        "bot character initialization",
+    )
+    require_bot_lifecycle_mutation_rejected(
+        game_local,
+        "botCharacterManager.Shutdown();",
+        "bot character shutdown",
+    )
 
     # A bot speaks through the same server call as a human, so the line is
     # indistinguishable from an ordinary player chat line.
@@ -1026,6 +1079,22 @@ def validate_baseline(curve: dict[str, list[float]], levels: int) -> None:
                 "character axis and must stay flat, or every high-skill bot plays the same"
             )
 
+    # The composites Bot.cpp actually fires with: initiative bends the raw
+    # reaction and cone rows, and the bend is bounded so the effective curve
+    # still improves with skill.  Before the bound the raw rows passed while a
+    # skill-1 rusher reacted faster than a plain skill-4 bot.
+    initiative = curve["initiative"]
+    reaction = [value * (1.25 - 0.5 * min(1.0, max(0.0, eager)))
+                for value, eager in zip(curve["reactionMsec"], initiative)]
+    cone = [value * (0.5 + eager) for value, eager in zip(curve["fireConeDeg"], initiative)]
+    for name, values in (("effective reaction", reaction), ("effective fire cone", cone)):
+        for level in range(1, levels):
+            if values[level] >= values[level - 1]:
+                raise AssertionError(
+                    f"The {name} is {[round(v, 1) for v in values]}, which does not shrink "
+                    f"from skill 1 to skill {levels}"
+                )
+
 
 def validate_content() -> None:
     header_path = GAME_SOURCE / "bots" / "BotCharacter.h"
@@ -1164,6 +1233,7 @@ def validate_content() -> None:
         allowed_tokens[word].update(("$other", "$weapon"))
     allowed_tokens["itemDenied"].update(("$other", "$item"))
     allowed_tokens["leadLost"].add("$other")
+    allowed_tokens["order"].add("$other")
 
     chats_by_owner: dict[str, Block] = {}
     normalized_lines: dict[str, tuple[str, str, int]] = {}

@@ -30,6 +30,10 @@ public:
 	void				SetTranscribeText( const char *text ) { mTranscribeText = text; }
 	const char			*GetTranscribeText( int langIndex = -1 ) const { return( common->GetLocalizedString( mTranscribeText, langIndex ) ); }
 	const char			*GetRawTranscribeText( void ) const { return( mTranscribeText.c_str() ); }
+	const char* GetSubtitleText( void ) const {
+		return idStr::Cmpn(mTranscribeText.c_str(), "#str_", 5) == 0 ?
+			common->GetLanguageDict()->FindString(mTranscribeText.c_str()) : mTranscribeText.c_str();
+	}
 
 	void				SetLipSyncData( const char *lsd, const char *lang );
 	const char			*GetLipSyncData( int langIdx = -1 ) const;

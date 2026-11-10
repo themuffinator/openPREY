@@ -107,7 +107,7 @@ def validate_process_launch_policy() -> None:
             if pattern.search(source):
                 raise AssertionError(f"Unsafe macOS process helper {name!r} found in {relative_path}")
 
-    misc = read("src/sys/osx/macosx_misc.mm")
+    misc = read("src/sys/macos/macos_misc.mm")
     start_process = function_body(misc, "static bool OSX_StartProcessArgs( char *const argv[], bool dofork ) {")
     do_start_process = function_body(misc, "void Sys_DoStartProcess( const char *exeName, bool dofork ) {")
     filtered_environment = function_body(misc, "static char **OSX_CreateFilteredProcessEnvironment() {")
@@ -132,22 +132,22 @@ def validate_process_launch_policy() -> None:
 
 def validate_url_open_policy() -> None:
     open_url_hits = files_containing("openURL:")
-    expected_hits = ["src/sys/osx/macosx_misc.mm"]
+    expected_hits = ["src/sys/macos/macos_misc.mm"]
     if open_url_hits != expected_hits:
         raise AssertionError(f"Unexpected macOS openURL callsites: {open_url_hits!r}")
 
-    misc = read("src/sys/osx/macosx_misc.mm")
+    misc = read("src/sys/macos/macos_misc.mm")
     open_url = function_body(misc, "void idSysLocal::OpenURL( const char *url, bool doexit ) {")
     allowed_url = function_body(misc, "static bool OSX_IsAllowedURL( NSURL *url ) {")
-    file_url = function_body(misc, "static bool OSX_FileURLIsLocalRuntimeFile( NSURL *url ) {")
 
-    require(misc, "MAX_OSX_URL_LENGTH", "macOS URL length guard")
-    require(open_url, "OpenURL rejected: expected a bounded URL with a safe scheme", "macOS unsafe URL diagnostic")
+    require(misc, '#include "../URLPolicy.h"', "shared macOS URL policy")
+    require(open_url, "idURLPolicy::IsAllowedHTTPURL( url )", "macOS HTTP(S)-only URL guard")
+    require(open_url, "OpenURL rejected: expected a bounded HTTP or HTTPS URL with a host", "macOS unsafe URL diagnostic")
     require(open_url, "OpenURL rejected: URL is not valid UTF-8", "macOS unsafe URL diagnostic")
     require(open_url, "OpenURL rejected: Foundation could not parse URL", "macOS unsafe URL diagnostic")
-    require(open_url, "OpenURL rejected: scheme is not allowed", "macOS unsafe URL diagnostic")
+    require(open_url, "OpenURL rejected: Foundation did not preserve the required HTTP(S) host", "macOS unsafe URL diagnostic")
     require(open_url, "OpenURL failed after validation", "macOS URL handoff diagnostic")
-    require_before(open_url, "OSX_URLHasSafeSchemeSyntax( url )", 'NSString *urlString = [ NSString stringWithUTF8String: url ];', "macOS URL syntax before UTF-8 bridge")
+    require_before(open_url, "idURLPolicy::IsAllowedHTTPURL( url )", 'NSString *urlString = [ NSString stringWithUTF8String: url ];', "macOS URL policy before UTF-8 bridge")
     require_before(open_url, "OSX_IsAllowedURL( nsURL )", 'common->Printf( "Open URL: %s\\n", url );', "macOS URL logging after allowlist guard")
     require_before(open_url, 'common->Printf( "Open URL: %s\\n", url );', "openURL: nsURL", "macOS approved URL logging before AppKit handoff")
     require_before(open_url, "OSX_IsAllowedURL( nsURL )", "openURL: nsURL", "macOS URL allowlist before AppKit handoff")
@@ -156,12 +156,9 @@ def validate_url_open_policy() -> None:
     require(allowed_url, '[scheme caseInsensitiveCompare:@"https"]', "macOS URL scheme allowlist")
     require(allowed_url, '[scheme caseInsensitiveCompare:@"http"]', "macOS URL scheme allowlist")
     require(allowed_url, "return host != nil && [host length] > 0;", "macOS HTTP URL host guard")
-    require(allowed_url, '[scheme caseInsensitiveCompare:@"file"]', "macOS URL scheme allowlist")
-    require(file_url, "OSX_StringHasControlCharacters( path )", "macOS file URL path control-character guard")
-    require(file_url, 'GetCVarString( "fs_savepath" )', "macOS file URL runtime-root policy")
-    require(file_url, 'GetCVarString( "fs_basepath" )', "macOS file URL runtime-root policy")
-    require(file_url, "OSX_ResolvedPathIsUnderDirectory( path, savePath )", "macOS file URL runtime-root policy")
-    reject(misc, "static bool OSX_IsSafeURL", "macOS broad URL syntax-only policy")
+    reject(allowed_url, '[scheme caseInsensitiveCompare:@"file"]', "macOS file URL policy")
+    reject(misc, "OSX_FileURLIsLocalRuntimeFile", "macOS file URL launcher")
+    reject(misc, "OSX_URLHasSafeSchemeSyntax", "macOS broad URL syntax-only policy")
 
 
 def validate_deprecated_api_boundaries() -> None:
@@ -170,27 +167,27 @@ def validate_deprecated_api_boundaries() -> None:
         raise AssertionError(f"Deprecated NSRunAlertPanel found in active macOS sources: {nsrun_hits!r}")
 
     nsopengl_hits = files_containing("NSOpenGL")
-    if nsopengl_hits != ["src/sys/osx/macosx_glimp.mm"]:
+    if nsopengl_hits != ["src/sys/macos/macos_glimp.mm"]:
         raise AssertionError(f"NSOpenGL escaped the native fallback boundary: {nsopengl_hits!r}")
 
     carbon_hits = files_containing("Carbon")
-    if carbon_hits != ["src/sys/osx/macosx_event.mm"]:
+    if carbon_hits != ["src/sys/macos/macos_event.mm"]:
         raise AssertionError(f"Carbon escaped the native fallback boundary: {carbon_hits!r}")
 
     sources = read("tools/build/meson_sources.py")
     sdl3_darwin = assignment_block(sources, "SDL3_DARWIN_SOURCES")
     native_darwin = assignment_block(sources, "DARWIN_PLATFORM_SOURCES")
-    require(native_darwin, '"sys/osx/macosx_event.mm"', "native macOS source list")
-    require(native_darwin, '"sys/osx/macosx_glimp.mm"', "native macOS source list")
-    reject(sdl3_darwin, "macosx_event.mm", "SDL3 macOS source list")
-    reject(sdl3_darwin, "macosx_glimp.mm", "SDL3 macOS source list")
+    require(native_darwin, '"sys/macos/macos_event.mm"', "native macOS source list")
+    require(native_darwin, '"sys/macos/macos_glimp.mm"', "native macOS source list")
+    reject(sdl3_darwin, "macos_event.mm", "SDL3 macOS source list")
+    reject(sdl3_darwin, "macos_glimp.mm", "SDL3 macOS source list")
 
     meson = read("meson.build")
     require(meson, "macos_framework_modules = ['Cocoa', 'OpenGL', 'ApplicationServices']", "macOS SDL3 framework policy")
     require(meson, "if not use_sdl3_backend\n      macos_framework_modules += ['Carbon']", "macOS Carbon native-only policy")
     reject(meson, "modules: ['Cocoa', 'OpenGL', 'ApplicationServices', 'Carbon']", "macOS unconditional Carbon framework policy")
     require_before(meson, "if macos_openal_provider == 'apple_framework'", "dependency('appleframeworks', modules: ['OpenAL'], required: true)", "macOS OpenAL provider policy")
-    require(meson, "dependency('openal', required: true)", "macOS system OpenAL migration policy")
+    require(meson, "dependency('openal', required: true, method: 'pkg-config')", "macOS system OpenAL migration policy")
 
 
 def validate_release_distribution_policy() -> None:
@@ -208,7 +205,7 @@ def validate_release_distribution_policy() -> None:
 
 
 def validate_package_root_runtime_policy() -> None:
-    compat = read("src/sys/osx/macosx_compat.mm")
+    compat = read("src/sys/macos/macos_compat.mm")
     package_directory = function_body(compat, "static void Sys_RequireMacOSPackageRootDirectory( const idStr &packageDirectory, const char *entry, idStr &missingEntries ) {")
     package_executable = function_body(compat, "static void Sys_RequireMacOSPackageRootExecutable( const idStr &packageDirectory, const char *entry, idStr &missingEntries ) {")
     executable_exists = function_body(compat, "static bool Sys_ExecutableFileExists( const char *path ) {")

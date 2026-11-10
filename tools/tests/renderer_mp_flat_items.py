@@ -23,7 +23,7 @@ RENDERER = ROOT / "src" / "renderer"
 GLPROGS = ROOT / "content" / "baseoq4" / "pak0" / "glprogs"
 VK_SHADERS = RENDERER / "Vulkan" / "shaders"
 GAME_LIBS_ROOT = Path(
-    os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT.parent / "openQ4-game")
+    os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT)
 ).resolve()
 
 GL_INTERACTIONS = (
@@ -535,10 +535,10 @@ def test_render_entity_render_demo_and_module_abi_are_versioned():
         assert_true(match is not None, f"{owner} renderEntity_t must append colour then flags")
 
     session = read(ROOT / "src" / "framework" / "Session.h")
-    require(
-        session,
-        "OPENQ4_RENDERDEMO_CURRENT_VERSION = 10",
-        "new render demos must advertise the flat-diffuse payload",
+    current = re.search(r"OPENQ4_RENDERDEMO_CURRENT_VERSION = (\d+);", session)
+    assert_true(
+        current is not None and int(current.group(1)) >= 10,
+        "new render demos must advertise the flat-diffuse payload (v10) and later",
     )
     require(
         session,
@@ -570,7 +570,7 @@ def test_render_entity_render_demo_and_module_abi_are_versioned():
     require(gate, "ent.flatDiffuseFlags", "version 10 demos must restore flat flags")
 
     api = read(RENDERER / "RenderModuleAPI.h")
-    require(api, "#define RENDER_API_VERSION\t\t\t7", "the extended renderEntity ABI must be version 7")
+    require(api, "#define RENDER_API_VERSION\t\t\t33", "the current renderer ABI must be version 33")
 
     loader = read(RENDERER / "RendererModule.cpp")
     require(
@@ -762,19 +762,33 @@ def test_held_weapon_effect_is_opponent_only_world_model_without_sweep():
             "weaponRenderEnt->flatDiffuseFlags=0;",
             f"{copy} must clear stale per-view weapon state before every early return",
         )
+        if "Player_VisibilityReference(" in player:
+            require(
+                visibility_compact,
+                "reference==this",
+                f"{copy} must exclude the player whose view a spectator is following",
+            )
+            require(
+                visibility_compact,
+                "instanceOwner->GetInstance()!=instance",
+                f"{copy} must exclude players outside the spectator-aware viewer instance",
+            )
+            opponent_classification = "!teamColor"
+        else:
+            require(
+                visibility_compact,
+                "viewer==this",
+                f"{copy} must exclude the local player's own held weapon",
+            )
+            require(
+                visibility_compact,
+                "viewer->GetInstance()!=instance",
+                f"{copy} must exclude players outside the viewer's multiplayer instance",
+            )
+            opponent_classification = "!teammate"
         require(
             visibility_compact,
-            "viewer==this",
-            f"{copy} must exclude the local player's own held weapon",
-        )
-        require(
-            visibility_compact,
-            "viewer->GetInstance()!=instance",
-            f"{copy} must exclude players outside the viewer's multiplayer instance",
-        )
-        require(
-            visibility_compact,
-            "g_mpFlatOpponentWeapons.GetBool()&&!teammate&&weaponRenderEnt!=NULL",
+            "g_mpFlatOpponentWeapons.GetBool()&&" + opponent_classification + "&&weaponRenderEnt!=NULL",
             f"{copy} must require both the client option and opponent classification",
         )
         require(

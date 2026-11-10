@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GAME_LIBS_ROOT = Path(os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT.parent / "openQ4-game")).resolve()
+GAME_LIBS_ROOT = Path(os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT)).resolve()
 
 
 def read(relative_path: str) -> str:
@@ -66,7 +66,11 @@ def validate_push_workflow() -> None:
     require(source, "libgl1-mesa-dri", "push verification software GL runtime dependency")
     require(source, "libglx-mesa0", "push verification GLX runtime dependency")
     require(source, "xvfb-run -a bash tools/validation/validate_push.sh", "push verification runtime smoke")
-    require(source, 'runtime_cases="renderer-default-safety-selftest"', "push verification runtime smoke")
+    require(
+        source,
+        'runtime_cases="renderer-foundation-selftests,renderer-pbr-visible-selftest,renderer-cluster-grid-selftest,renderer-default-safety-selftest"',
+        "push verification runtime smoke",
+    )
     require(source, '--runtime-cases "${runtime_cases}"', "push verification runtime smoke")
     require(source, "sdl3-x11-display-diagnostics", "push verification X11 display diagnostics case")
     require(source, "OPENQ4_FORCE_X11=1 xvfb-run -a python tools/tests/renderer_validation_matrix.py", "push verification OPENQ4_FORCE_X11 runtime smoke")
@@ -90,7 +94,11 @@ def validate_commit_workflow() -> None:
     require(source, "libgl1-mesa-dri", "commit validation software GL runtime dependency")
     require(source, "libglx-mesa0", "commit validation GLX runtime dependency")
     require(source, "xvfb-run -a bash tools/validation/validate_pr.sh", "commit validation runtime smoke")
-    require(source, "--runtime-cases renderer-default-safety-selftest", "commit validation runtime smoke")
+    require(
+        source,
+        "--runtime-cases renderer-foundation-selftests,renderer-pbr-visible-selftest,renderer-cluster-grid-selftest,renderer-default-safety-selftest",
+        "commit validation runtime smoke",
+    )
     require(source, "sdl3-x11-display-diagnostics", "commit validation X11 display diagnostics case")
     require(source, "OPENQ4_FORCE_X11=1 xvfb-run -a python tools/tests/renderer_validation_matrix.py", "commit validation OPENQ4_FORCE_X11 runtime smoke")
     require(source, "--cases sdl3-force-x11-display-diagnostics", "commit validation OPENQ4_FORCE_X11 runtime smoke")
@@ -136,10 +144,9 @@ def validate_commit_workflow() -> None:
         "  linux-arm64:\n"
         "    name: Linux ARM64 Commit Validation\n"
         "    runs-on: ubuntu-24.04-arm\n"
-        "    needs: script-smoke\n"
-        "    timeout-minutes: 90\n"
+        "    timeout-minutes: 150\n"
         "    env:\n"
-        "      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game\n"
+        "      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}\n"
         "      CC: gcc\n"
         "      CXX: g++",
         "commit validation native ARM64 GCC dedicated job",
@@ -183,9 +190,10 @@ def validate_linux_hardening_contract() -> None:
     require(validator, '["--wide", "--dyn-syms"]', "Linux dynamic module export validation")
     require(validator, 'fields[4] in {"GLOBAL", "WEAK", "UNIQUE"}', "Linux public symbol binding validation")
     require(validator, 'fields[5] in {"DEFAULT", "PROTECTED"}', "Linux public symbol visibility validation")
-    require(validator, "len(public_symbols) == 1", "single public Linux module export")
-    require(validator, 'public_symbols[0][4] == "GetGameAPI"', "Linux exact game module export validation")
-    require(validator, "Linux game module must expose exactly one GLOBAL/DEFAULT/FUNC", "Linux game module export validation")
+    require(validator, 'expected_game_exports = {"GetGameAPI", "openQ4_Mem_GetModuleStats"}', "Linux exact game module export set")
+    require(validator, "len(public_symbols) == len(expected_game_exports)", "no extra public Linux module export")
+    require(validator, 'symbol[:3] == ("FUNC", "GLOBAL", "DEFAULT")', "Linux game module export binding validation")
+    require(validator, "Linux game module must expose exactly the GLOBAL/DEFAULT/FUNC GetGameAPI", "Linux game module export validation")
 
 
 def validate_runtime_flags() -> None:
@@ -377,7 +385,7 @@ def validate_linux_arm64_release_claim_policy() -> None:
             path.write_text(contents, encoding="utf-8")
 
         base_environment = os.environ.copy()
-        base_environment["OPENQ4_MACOS_SUPPORT_TIER"] = "experimental"
+        base_environment["OPENQ4_MACOS_SUPPORT_TIER"] = "preview"
         base_environment["OPENQ4_RELEASE_VERSION_TAG"] = "9.9.9-test"
         base_environment["OPENQ4_ARM64_EVIDENCE_CANDIDATE"] = "false"
 
@@ -524,10 +532,41 @@ def validate_linux_arm64_release_claim_policy() -> None:
             "user-facing preview claims still remain",
             "stale curated Linux ARM64 preview-note rejection",
         )
+        # macOS is a preview too, so the scan skips "preview" when macOS or
+        # Apple follows it, but a preview claim that still reaches Linux ARM64
+        # must keep failing.
         for path in preview_docs:
             path.write_text("first-class Linux ARM64 support\n", encoding="utf-8")
         selected_release_notes.write_text(
-            "# Synthetic release\n\nLinux ARM64 first-class support.\n",
+            "# Synthetic release\n\nLinux ARM64 and macOS packages are preview builds.\n",
+            encoding="utf-8",
+        )
+        shared_preview_result = subprocess.run(
+            [sys.executable, "-c", embedded_python],
+            cwd=temp_root,
+            env=first_class_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if shared_preview_result.returncode == 0:
+            raise AssertionError(
+                "first-class Linux ARM64 release accepted a preview claim shared with macOS"
+            )
+        require(
+            shared_preview_result.stdout + shared_preview_result.stderr,
+            "user-facing preview claims still remain",
+            "shared Linux ARM64/macOS preview-claim rejection",
+        )
+
+        for path in preview_docs:
+            path.write_text(
+                "first-class Linux ARM64 support beside preview Apple Silicon/arm64 macOS\n",
+                encoding="utf-8",
+            )
+        selected_release_notes.write_text(
+            "# Synthetic release\n\nLinux ARM64 first-class support. The preview macOS "
+            "packages stay unsigned.\n",
             encoding="utf-8",
         )
 

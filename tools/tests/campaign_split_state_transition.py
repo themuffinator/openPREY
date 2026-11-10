@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GAME_LIBS = Path(os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT.parent / "openQ4-game"))
+GAME_LIBS = Path(os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT))
 
 
 def read(path: Path) -> str:

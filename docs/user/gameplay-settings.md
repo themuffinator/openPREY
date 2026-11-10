@@ -12,11 +12,16 @@ The auto-skip cinematics, corpse cleanup, and corpse sink controls are also avai
 
 | Setting | Default | Scope | What it does |
 |---|---:|---|---|
+| `ui_weaponWheelOffset` | `27` | SP and MP client | Horizontal wheel offset as a percentage of screen width from center, −40 to +40. `0` centers it; `27` preserves the usual right-side position. Also in Game Options > Controller, beside wheel sensitivity. |
 | `g_autoSkipCinematics` | `0` | SP and MP game code | Automatically skips cinematics as soon as they begin. Disabled by default. |
 | `g_corpseRemoveDelaySP` | `0` | Single-player | Controls how long SP corpses remain before disappearing. `0` uses stock timing, `-1` disables corpse removal. |
 | `g_corpseRemoveDelayMP` | `0` | Multiplayer | Controls how long MP corpses remain before disappearing. `0` uses stock timing, `-1` disables corpse removal. |
 | `g_corpseSink` | `0` | SP and MP game code | Selects corpse sink mode instead of the normal dissolve or burn-away behavior. |
 | `s_musicVolume` | `0.5` | Client audio | Controls music volume independently of the main sound mix. |
+| `s_dialogueVolume` | `1` | Client audio | Spoken dialogue volume, from `0` (mute) to `1` (full), independently of effects and music. |
+| `s_useEAXReverb` | `1` | Client audio | The map's per-area room reverb, as the level designers set it up. See [Room Reverb](#room-reverb). |
+| `s_useEAXOcclusion` | `1` | Client audio | Closed doors muffle the sounds behind them. Works while `s_useEAXReverb` is on. |
+| `s_numberOfSpeakers` | `0` | Client audio | Speaker layout. `0` follows your output device, `2` forces stereo, `6` forces 5.1. See [Speaker Layout](#speaker-layout). |
 | `hud_damageNumbers` | `0` | Multiplayer client | Floating damage numbers over the players you hit. `0` off, `1` opponents only, `2` all damage you deal. |
 | `hud_damageNumberStyle` | `1` | Multiplayer client | How damage numbers are coloured. `1` white through red, `2` one colour per damage band, `3` one colour per weapon. |
 | `hud_damageNumberScale` | `1` | Multiplayer client | Damage number size multiplier, `0.25` to `4`. |
@@ -128,6 +133,91 @@ seta s_musicVolume 0.2
 ```cfg
 seta s_musicVolume 0
 ```
+
+## Dialogue Volume
+
+**Settings > Audio > Dialogue Volume** changes spoken dialogue without lowering
+weapons or music. The setting takes effect immediately and is saved.
+`seta s_dialogueVolume 0.6` sets it to 60% of the authored level; `0` mutes
+dialogue. Master volume still affects everything.
+
+NPC lip-sync speech, radio lines and sounds using the game's voice-over asset
+paths share this control, including English audio fallback in other text
+languages. Multiplayer microphone audio has its own settings. A mod that mixes
+speech and music into one recording cannot separate those parts with this slider.
+
+## Room Reverb
+
+A map's reverb table tells the game which reverb each of its rooms, corridors and outdoor areas uses: a
+tiled bathroom rings, a hangar booms, a canyon sounds open. openPREY plays these the way EAX sound
+hardware did:
+
+- the reverb follows you from area to area, and the areas next to you keep their own reverb, so a
+  gunshot in the hangar next door still sounds like the hangar;
+- each nearby area's reverb comes from the doorway that leads to it;
+- closed doors muffle the sounds behind them, and their reverb with them;
+- radio chatter stays dry and voice-over sits a little further back, as in the original mix.
+
+It needs OpenAL's EFX extension. OpenAL Soft provides it: openPREY ships it on Windows and macOS, and
+Linux distributions install it as their OpenAL. Apple's own OpenAL framework has no EFX, so a build
+using it plays without reverb.
+
+Behavior:
+- `s_useEAXReverb 1` (default): room reverb on, in every performance preset. `0` turns it off, along with door muffling, as in
+  the original game. Changing it from the console takes effect after `s_restart`.
+- `s_useEAXOcclusion 1` (default): closed doors muffle sound while reverb is on.
+- `s_muteEAXReverb 1`: silences the reverb of the area you are standing in, for comparison.
+
+Notes:
+- Maps without a reverb table use the Generic reverb everywhere.
+- `listReverbs` lists the reverbs, the current map's areas and the reverbs playing around you.
+  `s_showReverb 1` prints a line whenever they change.
+
+## Speaker Layout
+
+openPREY now follows your audio device by default. Headphones and stereo speakers get stereo, with
+OpenAL Soft's 3D headphone audio (HRTF) switching on by itself when the system reports headphones,
+and a 5.1 or 7.1 system gets all of its channels.
+
+The in-game menu exposes this as `Settings -> Audio -> Surround Speakers`: `Auto`, `Off` (stereo)
+or `On` (5.1).
+
+Behavior:
+- `s_numberOfSpeakers 0` (default, `Auto`): use the output device's own layout.
+- `s_numberOfSpeakers 2` (`Off`): always stereo, as the original game's default.
+- `s_numberOfSpeakers 6` (`On`): always 5.1. On a stereo device the system downmixes it, and
+  headphone HRTF cannot engage, so pick this only for a 5.1 system that misreports its layout.
+
+Notes:
+- Earlier openPREY builds asked for 5.1 on every device. A saved `6` from those builds moves to `0`
+  once. A saved `2` is kept.
+- `s_openALHRTF` chooses headphone HRTF: `0` automatic (default), `1` off, `2` on. Earlier builds
+  could not turn it off on headphones; `1` now does.
+- Unplugging a headset or switching the default device keeps the sound going, including music
+  and looping ambience, and keeps your speaker and HRTF choices. Dialogue and other sounds that
+  were playing pick up where the scene is when audio returns, instead of being cut off, and a
+  line paused in a menu continues from where it stopped.
+- Changing `s_numberOfSpeakers`, `s_openALHRTF` or `s_outputLimiter` applies to the open device
+  in place: sounds keep playing without reloading, and a line that is playing moves to or from
+  the centre speaker at its current point.
+
+## Audio Quality
+
+These are on by default and rarely need changing. Each takes effect after `s_restart`.
+
+- `s_sourceRadiusScale 0.5`: a sound has a size, half of its shader's `minDistance`. Standing next
+  to a machine or a fire, it surrounds you instead of jumping from ear to ear as you turn, and
+  your own footsteps and weapons play evenly instead of from straight ahead. `0` makes every
+  positioned sound a point.
+- `s_directStereo 1`: music and other stereo sounds play straight to your speakers or headphones.
+  With 3D headphone audio on, they used to pass through it as two virtual speakers, which
+  narrowed the stereo and made them quieter.
+- `s_resampler auto`: sounds recorded at a low rate such as 22 kHz are upsampled with a sinc
+  filter for cleaner high frequencies. `default` keeps OpenAL's own, and `listResamplers`
+  lists the choices.
+- `s_outputLimiter 1`: loud scenes compress instead of clipping.
+- `s_airAbsorption 1`: distant sounds lose a little treble, by the air absorption each room's
+  reverb preset sets.
 
 ## Hit Marker
 

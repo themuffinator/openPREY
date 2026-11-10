@@ -1,6 +1,7 @@
 #ifndef __LIB_H__
 #define __LIB_H__
 
+#include <stddef.h>
 
 /*
 ===============================================================================
@@ -37,6 +38,9 @@ public:
 	static void					FatalError(const char* fmt, ...);
 	static void					Warning(const char* fmt, ...);
 	static void					WarningIf(const bool test, const char* fmt, ...);
+	// Converts byte/string/container sizes at legacy int API boundaries.
+	// Oversized inputs are rejected instead of being silently truncated.
+	static int					SizeToInt( size_t value, const char *context );
 };
 
 

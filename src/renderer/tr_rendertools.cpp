@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "tr_local.h"
+#include "LevelShotDepth.h"
 #include "Model_local.h"
 #include "simplex.h"	// line font definition
 
@@ -78,6 +79,14 @@ int				rb_numDebugPolygons = 0;
 int				rb_debugPolygonTime = 0;
 
 static void RB_DrawText( const char *text, const idVec3 &origin, float scale, const idVec4 &color, const idMat3 &viewAxis, const int align );
+
+#if defined( OPENQ4_RENDERER_VK_MODULE )
+// Vulkan cannot read pixels back in the middle of a frame; the module's
+// versions of these (and RB_ScanStencilBuffer) are in Vulkan/vk_DebugTools.cpp
+void RB_CountStencilBuffer( void );
+void RB_ShowIntensity( void );
+void RB_ShowDepthBuffer( void );
+#endif
 
 /*
 ================
@@ -378,23 +387,301 @@ void RB_ShowDestinationAlpha( void ) {
 }
 
 /*
+===============================================================================
+
+	Framebuffer readback for the stencil counts, r_showIntensity and r_showDepth
+
+	glReadPixels cannot read a multisampled framebuffer object: it raises
+	GL_INVALID_OPERATION and returns nothing. The view draws into one whenever
+	r_multiSamples puts the scene render target in MSAA, so these readbacks
+	resolve it into a single-sample copy with glBlitFramebuffer and read that.
+	A depth or stencil blit needs GL_NEAREST and a destination of exactly the
+	source's format, so the copy takes the source attachment's internal format.
+	The resolve keeps one sample's depth or stencil value per pixel.
+
+	OpenGL only, like the tools that use it: the Vulkan module has its own
+	versions of them in Vulkan/vk_DebugTools.cpp.
+
+===============================================================================
+*/
+#if !defined( OPENQ4_RENDERER_VK_MODULE )
+
+// The single-sample copies: [0] color, [1] depth/stencil. The names belong to
+// the GL context generation that made them; a new context forgets them.
+typedef struct debugResolveCopy_s {
+	GLuint		framebuffer;
+	GLuint		renderbuffer;
+	GLenum		internalFormat;
+	GLenum		attachment;
+	int			width;
+	int			height;
+	int			contextGeneration;
+} debugResolveCopy_t;
+
+static debugResolveCopy_t	rb_debugResolveCopies[2];
+static int					rb_debugResolveWarned[3] = { -1, -1, -1 };	// per buffer: the context generation it last warned in
+
+struct debugReadbackArea_t {
+	GLuint framebuffer;
+	int targetWidth, targetHeight;
+	int x, y, width, height;
+};
+
+// Colour/depth tools redraw the active viewport. Stencil statistics describe
+// the complete attachment, as Vulkan's deferred readback does. Neither may
+// use the window extent for a scaled game target or a VR stand-in.
+static bool RB_GetDebugReadbackArea( bool viewport, debugReadbackArea_t &area ) {
+	GLint framebuffer = 0;
+	if ( glBindFramebuffer != NULL ) {
+		glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer );
+	}
+	area.framebuffer = static_cast<GLuint>( framebuffer );
+	area.targetWidth = glConfig.vidWidth;
+	area.targetHeight = glConfig.vidHeight;
+	if ( framebuffer != 0 ) {
+		idRenderTexture *target = backEnd.renderTexture;
+		if ( target == NULL || target->GetDeviceHandle() != area.framebuffer ) {
+			target = R_GetDefaultRenderTarget();
+		}
+		if ( target == NULL || target->GetDeviceHandle() != area.framebuffer ) {
+			return false;
+		}
+		area.targetWidth = target->GetWidth();
+		area.targetHeight = target->GetHeight();
+	}
+	// All callers allocate at most four bytes per pixel through the renderer's
+	// signed-size allocator. Check before either multiplication or allocation.
+	if ( area.targetWidth <= 0 || area.targetHeight <= 0
+		|| area.targetWidth > idMath::INT_MAX / 4 / area.targetHeight ) {
+		return false;
+	}
+	area.x = area.y = 0;
+	area.width = area.targetWidth;
+	area.height = area.targetHeight;
+	if ( viewport ) {
+		GLint rectangle[4];
+		glGetIntegerv( GL_VIEWPORT, rectangle );
+		area.x = rectangle[0]; area.y = rectangle[1];
+		area.width = rectangle[2]; area.height = rectangle[3];
+	}
+	return area.x >= 0 && area.y >= 0 && area.width > 0 && area.height > 0
+		&& area.x <= area.targetWidth && area.y <= area.targetHeight
+		&& area.width <= area.targetWidth - area.x
+		&& area.height <= area.targetHeight - area.y;
+}
+
+// 0 color, 1 depth, 2 stencil
+static int RB_ReadbackBuffer( GLenum format ) {
+	if ( format == GL_DEPTH_COMPONENT ) {
+		return 1;
+	}
+	if ( format == GL_STENCIL_INDEX ) {
+		return 2;
+	}
+	return 0;
+}
+
+static void RB_WarnReadbackResolve( GLenum format, const char *reason ) {
+	static const char * const bufferNames[3] = { "color", "depth", "stencil" };
+	const int buffer = RB_ReadbackBuffer( format );
+	if ( rb_debugResolveWarned[buffer] == tr.glContextGeneration ) {
+		return;
+	}
+	rb_debugResolveWarned[buffer] = tr.glContextGeneration;
+	common->Warning( "RB_ReadFramebufferPixels: can't resolve the multisampled %s buffer (%s); the debug tool that reads it is skipped, set r_multiSamples 0 to use it",
+		bufferNames[buffer], reason );
+}
+
+/*
+===================
+RB_ResolveForReadback
+
+Blits the buffer that format reads from the multisampled framebuffer object
+source into its single-sample copy, and returns the copy's framebuffer, or 0
+after a one-time warning. The caller restores the framebuffer bindings.
+===================
+*/
+static GLuint RB_ResolveForReadback( GLuint source, GLenum format, int width, int height ) {
+	static const GLenum attachments[3] = { GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT };
+	static const GLbitfield masks[3] = { GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_STENCIL_BUFFER_BIT };
+	const int buffer = RB_ReadbackBuffer( format );
+
+	if ( glBlitFramebuffer == NULL || glGenRenderbuffers == NULL || glBindRenderbuffer == NULL
+		|| glRenderbufferStorage == NULL || glFramebufferRenderbuffer == NULL
+		|| glGetFramebufferAttachmentParameteriv == NULL || glCheckFramebufferStatus == NULL ) {
+		RB_WarnReadbackResolve( format, "no framebuffer blits" );
+		return 0;
+	}
+
+	// the source's internal format; the engine's multisampled render targets
+	// attach 2D multisample textures (idRenderTexture::InitRenderTexture)
+	glBindFramebuffer( GL_READ_FRAMEBUFFER, source );
+	GLint objectType = GL_NONE;
+	glGetFramebufferAttachmentParameteriv( GL_READ_FRAMEBUFFER, attachments[buffer], GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &objectType );
+	if ( objectType != GL_TEXTURE ) {
+		RB_WarnReadbackResolve( format, objectType == GL_NONE ? "the render target has none" : "it is not a texture" );
+		return 0;
+	}
+	GLint texture = 0;
+	GLint previousTexture = 0;
+	GLint internalFormat = 0;
+	glGetFramebufferAttachmentParameteriv( GL_READ_FRAMEBUFFER, attachments[buffer], GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &texture );
+	glGetIntegerv( GL_TEXTURE_BINDING_2D_MULTISAMPLE, &previousTexture );
+	glBindTexture( GL_TEXTURE_2D_MULTISAMPLE, static_cast<GLuint>( texture ) );
+	glGetTexLevelParameteriv( GL_TEXTURE_2D_MULTISAMPLE, 0, GL_TEXTURE_INTERNAL_FORMAT, &internalFormat );
+	glBindTexture( GL_TEXTURE_2D_MULTISAMPLE, static_cast<GLuint>( previousTexture ) );
+
+	// packed depth/stencil sits on both attachment points, as in the source
+	GLenum copyAttachment = attachments[buffer];
+	if ( internalFormat == GL_DEPTH24_STENCIL8 || internalFormat == GL_DEPTH32F_STENCIL8 || internalFormat == GL_DEPTH_STENCIL ) {
+		copyAttachment = GL_DEPTH_STENCIL_ATTACHMENT;
+	}
+
+	debugResolveCopy_t &copy = rb_debugResolveCopies[ buffer == 0 ? 0 : 1 ];
+	if ( copy.contextGeneration != tr.glContextGeneration ) {
+		memset( &copy, 0, sizeof( copy ) );
+		copy.contextGeneration = tr.glContextGeneration;
+	}
+	if ( copy.framebuffer == 0 ) {
+		glGenFramebuffers( 1, &copy.framebuffer );
+		glGenRenderbuffers( 1, &copy.renderbuffer );
+		if ( copy.framebuffer == 0 || copy.renderbuffer == 0 ) {
+			RB_WarnReadbackResolve( format, "no framebuffer object for the copy" );
+			return 0;
+		}
+	}
+	glBindFramebuffer( GL_FRAMEBUFFER, copy.framebuffer );
+	if ( copy.internalFormat != static_cast<GLenum>( internalFormat ) || copy.attachment != copyAttachment
+		|| copy.width != width || copy.height != height ) {
+		if ( copy.attachment != GL_NONE ) {
+			glFramebufferRenderbuffer( GL_FRAMEBUFFER, copy.attachment, GL_RENDERBUFFER, 0 );
+		}
+		glBindRenderbuffer( GL_RENDERBUFFER, copy.renderbuffer );
+		glRenderbufferStorage( GL_RENDERBUFFER, static_cast<GLenum>( internalFormat ), width, height );
+		glBindRenderbuffer( GL_RENDERBUFFER, 0 );
+		glFramebufferRenderbuffer( GL_FRAMEBUFFER, copyAttachment, GL_RENDERBUFFER, copy.renderbuffer );
+		// a copy without color must not name a color buffer, or it is incomplete
+		const GLenum colorBuffer = ( buffer == 0 ) ? GL_COLOR_ATTACHMENT0 : GL_NONE;
+		glDrawBuffer( colorBuffer );
+		glReadBuffer( colorBuffer );
+		copy.internalFormat = static_cast<GLenum>( internalFormat );
+		copy.attachment = copyAttachment;
+		copy.width = width;
+		copy.height = height;
+	}
+	const GLenum status = glCheckFramebufferStatus( GL_FRAMEBUFFER );
+	if ( status != GL_FRAMEBUFFER_COMPLETE ) {
+		RB_WarnReadbackResolve( format, va( "its copy is incomplete, status 0x%04x", status ) );
+		return 0;
+	}
+
+	glBindFramebuffer( GL_READ_FRAMEBUFFER, source );
+	GLint sourceReadBuffer = GL_NONE;
+	if ( buffer == 0 ) {
+		glGetIntegerv( GL_READ_BUFFER, &sourceReadBuffer );
+		glReadBuffer( GL_COLOR_ATTACHMENT0 );
+	}
+	// blits are scissored, and the copy has to be whole
+	const GLboolean scissorWasEnabled = glIsEnabled( GL_SCISSOR_TEST );
+	if ( scissorWasEnabled ) {
+		glDisable( GL_SCISSOR_TEST );
+	}
+	glBlitFramebuffer( 0, 0, width, height, 0, 0, width, height, masks[buffer], GL_NEAREST );
+	if ( scissorWasEnabled ) {
+		glEnable( GL_SCISSOR_TEST );
+	}
+	if ( buffer == 0 ) {
+		glReadBuffer( static_cast<GLenum>( sourceReadBuffer ) );
+	}
+	return copy.framebuffer;
+}
+
+/*
+===================
+RB_ReadFramebufferPixels
+
+glReadPixels of the validated rectangle in the framebuffer the view draws into,
+resolved at the attachment's full extent when multisampled. Returns false, after a
+one-time warning, when the resolve failed and there is nothing to read.
+===================
+*/
+static bool RB_ReadFramebufferPixels( const debugReadbackArea_t &area, GLenum format, GLenum type, void *pixels ) {
+	GLint readFramebuffer = 0;
+	GLint drawFramebuffer = 0;
+	GLint sampleBuffers = 0;
+	if ( glBindFramebuffer != NULL ) {
+		glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer );
+		glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebuffer );
+		glGetIntegerv( GL_SAMPLE_BUFFERS, &sampleBuffers );		// the draw framebuffer's
+	}
+	if ( static_cast<GLuint>( drawFramebuffer ) != area.framebuffer ) {
+		return false;
+	}
+
+	// Read what the tools draw into. The default framebuffer reads back
+	// resolved even when it is multisampled; a framebuffer object has to be
+	// resolved into a single-sample copy first.
+	GLuint source = static_cast<GLuint>( drawFramebuffer );
+	const bool resolve = ( source != 0 && sampleBuffers > 0 );
+	if ( resolve ) {
+		GL_CheckErrors();	// report what is pending, so an error below is the resolve's
+		source = RB_ResolveForReadback( source, format, area.targetWidth, area.targetHeight );
+	}
+
+	const bool read = ( !resolve || source != 0 );
+	if ( read ) {
+		if ( glBindFramebuffer != NULL ) {
+			glBindFramebuffer( GL_READ_FRAMEBUFFER, source );
+		}
+		GLint packAlignment = 4;
+		glGetIntegerv( GL_PACK_ALIGNMENT, &packAlignment );
+		glPixelStorei( GL_PACK_ALIGNMENT, 1 );	// stencil rows are not padded to 4 bytes
+		glReadPixels( area.x, area.y, area.width, area.height, format, type, pixels );
+		glPixelStorei( GL_PACK_ALIGNMENT, packAlignment );
+	}
+	if ( glBindFramebuffer != NULL ) {
+		glBindFramebuffer( GL_READ_FRAMEBUFFER, static_cast<GLuint>( readFramebuffer ) );
+		glBindFramebuffer( GL_DRAW_FRAMEBUFFER, static_cast<GLuint>( drawFramebuffer ) );
+	}
+	if ( read && resolve ) {
+		const GLenum error = glGetError();
+		if ( error != GL_NO_ERROR ) {
+			RB_WarnReadbackResolve( format, va( "GL error 0x%04x", error ) );
+			return false;
+		}
+	}
+	return read;
+}
+#endif
+
+/*
 ===================
 RB_ScanStencilBuffer
 
 Debugging tool to see what values are in the stencil buffer
 ===================
 */
+#if !defined( OPENQ4_RENDERER_VK_MODULE )	// Vulkan: Vulkan/vk_DebugTools.cpp
 void RB_ScanStencilBuffer( void ) {
 	int		counts[256];
 	int		i;
 	byte	*stencilReadback;
+	debugReadbackArea_t area;
+	if ( !RB_GetDebugReadbackArea( false, area ) ) {
+		common->Printf( "stencil values: the active framebuffer extent is unavailable\n" );
+		return;
+	}
 
 	memset( counts, 0, sizeof( counts ) );
 
-	stencilReadback = (byte *)R_StaticAlloc( glConfig.vidWidth * glConfig.vidHeight );
-	glReadPixels( 0, 0, glConfig.vidWidth, glConfig.vidHeight, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencilReadback );
+	stencilReadback = (byte *)R_StaticAlloc( area.width * area.height );
+	if ( !RB_ReadFramebufferPixels( area, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencilReadback ) ) {
+		R_StaticFree( stencilReadback );
+		common->Printf( "stencil values: the stencil buffer could not be read back\n" );
+		return;
+	}
 
-	for ( i = 0; i < glConfig.vidWidth * glConfig.vidHeight; i++ ) {
+	for ( i = 0; i < area.width * area.height; i++ ) {
 		counts[ stencilReadback[i] ]++;
 	}
 
@@ -408,6 +695,7 @@ void RB_ScanStencilBuffer( void ) {
 		}
 	}
 }
+#endif
 
 
 /*
@@ -417,25 +705,35 @@ RB_CountStencilBuffer
 Print an overdraw count based on stencil index values
 ===================
 */
+#if !defined( OPENQ4_RENDERER_VK_MODULE )	// Vulkan: Vulkan/vk_DebugTools.cpp
 void RB_CountStencilBuffer( void ) {
-	int		count;
+	double	count;
 	int		i;
 	byte	*stencilReadback;
+	debugReadbackArea_t area;
+	if ( !RB_GetDebugReadbackArea( false, area ) ) {
+		common->Printf( "overdraw: the active framebuffer extent is unavailable\n" );
+		return;
+	}
 
-
-	stencilReadback = (byte *)R_StaticAlloc( glConfig.vidWidth * glConfig.vidHeight );
-	glReadPixels( 0, 0, glConfig.vidWidth, glConfig.vidHeight, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencilReadback );
+	stencilReadback = (byte *)R_StaticAlloc( area.width * area.height );
+	if ( !RB_ReadFramebufferPixels( area, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencilReadback ) ) {
+		R_StaticFree( stencilReadback );
+		common->Printf( "overdraw: the stencil buffer could not be read back\n" );
+		return;
+	}
 
 	count = 0;
-	for ( i = 0; i < glConfig.vidWidth * glConfig.vidHeight; i++ ) {
+	for ( i = 0; i < area.width * area.height; i++ ) {
 		count += stencilReadback[i];
 	}
 
 	R_StaticFree( stencilReadback );
 
 	// print some stats (not supposed to do from back end in SMP...)
-	common->Printf( "overdraw: %5.1f\n", (float)count/(glConfig.vidWidth * glConfig.vidHeight)  );
+	common->Printf( "overdraw: %5.1f\n", (float)( count / ( area.width * area.height ) ) );
 }
+#endif
 
 /*
 ===================
@@ -700,7 +998,7 @@ static void RB_DrawCachedViewLightDebugVisuals( void ) {
 	RB_SimpleWorldSetup();
 
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 	glDisable( GL_DEPTH_TEST );
 	GL_Cull( CT_TWO_SIDED );
@@ -870,6 +1168,7 @@ The greatest of the rgb values at each pixel will be used, with
 the resulting color shading from red at 0 to green at 128 to blue at 255
 ===================
 */
+#if !defined( OPENQ4_RENDERER_VK_MODULE )	// Vulkan: Vulkan/vk_DebugTools.cpp
 void RB_ShowIntensity( void ) {
 	byte	*colorReadback;
 	int		i, j, c;
@@ -877,11 +1176,18 @@ void RB_ShowIntensity( void ) {
 	if ( !r_showIntensity.GetBool() ) {
 		return;
 	}
+	debugReadbackArea_t area;
+	if ( !RB_GetDebugReadbackArea( true, area ) ) {
+		return;
+	}
 
-	colorReadback = (byte *)R_StaticAlloc( glConfig.vidWidth * glConfig.vidHeight * 4 );
-	glReadPixels( 0, 0, glConfig.vidWidth, glConfig.vidHeight, GL_RGBA, GL_UNSIGNED_BYTE, colorReadback );
+	colorReadback = (byte *)R_StaticAlloc( area.width * area.height * 4 );
+	if ( !RB_ReadFramebufferPixels( area, GL_RGBA, GL_UNSIGNED_BYTE, colorReadback ) ) {
+		R_StaticFree( colorReadback );
+		return;
+	}
 
-	c = glConfig.vidWidth * glConfig.vidHeight * 4;
+	c = area.width * area.height * 4;
 	for ( i = 0; i < c ; i+=4 ) {
 		j = colorReadback[i];
 		if ( colorReadback[i+1] > j ) {
@@ -911,13 +1217,14 @@ void RB_ShowIntensity( void ) {
 	glRasterPos2f( 0, 0 );
 	glPopMatrix();
 	glColor3f( 1, 1, 1 );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glMatrixMode( GL_MODELVIEW );
 
-	glDrawPixels( glConfig.vidWidth, glConfig.vidHeight, GL_RGBA , GL_UNSIGNED_BYTE, colorReadback );
+	glDrawPixels( area.width, area.height, GL_RGBA , GL_UNSIGNED_BYTE, colorReadback );
 
 	R_StaticFree( colorReadback );
 }
+#endif
 
 
 /*
@@ -927,10 +1234,15 @@ RB_ShowDepthBuffer
 Draw the depth buffer as colors
 ===================
 */
+#if !defined( OPENQ4_RENDERER_VK_MODULE )	// Vulkan: Vulkan/vk_DebugTools.cpp
 void RB_ShowDepthBuffer( void ) {
 	void	*depthReadback;
 
 	if ( !r_showDepth.GetBool() ) {
+		return;
+	}
+	debugReadbackArea_t area;
+	if ( !RB_GetDebugReadbackArea( true, area ) ) {
 		return;
 	}
 
@@ -947,25 +1259,30 @@ void RB_ShowDepthBuffer( void ) {
 
 	GL_State( GLS_DEPTHFUNC_ALWAYS );
 	glColor3f( 1, 1, 1 );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
-	depthReadback = R_StaticAlloc( glConfig.vidWidth * glConfig.vidHeight*4 );
-	memset( depthReadback, 0, glConfig.vidWidth * glConfig.vidHeight*4 );
+	depthReadback = R_StaticAlloc( area.width * area.height*4 );
+	memset( depthReadback, 0, area.width * area.height*4 );
 
-	glReadPixels( 0, 0, glConfig.vidWidth, glConfig.vidHeight, GL_DEPTH_COMPONENT , GL_FLOAT, depthReadback );
-
-#if 0
-	for ( i = 0 ; i < glConfig.vidWidth * glConfig.vidHeight ; i++ ) {
-		((byte *)depthReadback)[i*4] = 
-		((byte *)depthReadback)[i*4+1] = 
-		((byte *)depthReadback)[i*4+2] = 255 * ((float *)depthReadback)[i];
-		((byte *)depthReadback)[i*4+3] = 1;
+	if ( !RB_ReadFramebufferPixels( area, GL_DEPTH_COMPONENT, GL_FLOAT, depthReadback ) ) {
+		R_StaticFree( depthReadback );
+		return;
 	}
-#endif
 
-	glDrawPixels( glConfig.vidWidth, glConfig.vidHeight, GL_RGBA , GL_UNSIGNED_BYTE, depthReadback );
+	// each depth becomes a grey level, in place: the four bytes of float i
+	// turn into the RGBA of pixel i
+	for ( int i = 0 ; i < area.width * area.height ; i++ ) {
+		const byte grey = idMath::Ftob( 255.0f * ((float *)depthReadback)[i] + 0.5f );
+		((byte *)depthReadback)[i*4+0] = grey;
+		((byte *)depthReadback)[i*4+1] = grey;
+		((byte *)depthReadback)[i*4+2] = grey;
+		((byte *)depthReadback)[i*4+3] = 255;
+	}
+
+	glDrawPixels( area.width, area.height, GL_RGBA , GL_UNSIGNED_BYTE, depthReadback );
 	R_StaticFree( depthReadback );
 }
+#endif
 
 /*
 =================
@@ -1001,7 +1318,7 @@ void RB_ShowLightCount( void ) {
 
 	glStencilFunc( GL_ALWAYS, 1, 255 );
 
-	globalImages->defaultImage->Bind();
+	RB_BindDebugImage( globalImages->defaultImage );
 
 	for ( vLight = backEnd.viewDef->viewLights ; vLight ; vLight = vLight->next ) {
 		for ( i = 0 ; i < 2 ; i++ ) {
@@ -1042,7 +1359,7 @@ void RB_ShowSilhouette( void ) {
 	// clear all triangle edges to black
 	//
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_TEXTURE_2D );
 	glDisable( GL_STENCIL_TEST );
 
@@ -1133,7 +1450,7 @@ static void RB_ShowShadowCount( void ) {
 
 	glStencilFunc( GL_ALWAYS, 1, 255 );
 
-	globalImages->defaultImage->Bind();
+	RB_BindDebugImage( globalImages->defaultImage );
 
 	// draw both sides
 	GL_Cull( CT_TWO_SIDED );
@@ -1235,7 +1552,7 @@ static void RB_ShowTris( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	}
 
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_TEXTURE_2D );
 	glDisable( GL_STENCIL_TEST );
 
@@ -1294,7 +1611,7 @@ static void RB_ShowSurfaceInfo( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	}
 
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_TEXTURE_2D );
 	glDisable( GL_STENCIL_TEST );
 
@@ -1346,7 +1663,7 @@ static void RB_ShowViewEntitys( viewEntity_t *vModels ) {
 	}
 
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_TEXTURE_2D );
 	glDisable( GL_STENCIL_TEST );
 
@@ -1409,7 +1726,7 @@ static void RB_ShowTexturePolarity( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		return;
 	}
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 
 	GL_State( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
@@ -1480,7 +1797,7 @@ static void RB_ShowUnsmoothedTangents( drawSurf_t **drawSurfs, int numDrawSurfs 
 		return;
 	}
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 
 	GL_State( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
@@ -1540,7 +1857,7 @@ static void RB_ShowTangentSpace( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		return;
 	}
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 
 	GL_State( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
@@ -1596,7 +1913,7 @@ static void RB_ShowVertexColor( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		return;
 	}
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 
 	GL_State( GLS_DEPTHFUNC_LESS );
@@ -1650,7 +1967,7 @@ static void RB_ShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	GL_State( GLS_POLYMODE_LINE );
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 	if ( !r_debugLineDepthTest.GetBool() ) {
 		glDisable( GL_DEPTH_TEST );
@@ -1727,88 +2044,6 @@ static void RB_ShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 /*
 =====================
-RB_ShowNormals
-
-Debugging tool
-=====================
-*/
-static void RB_AltShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
-	int			i, j, k;
-	drawSurf_t	*drawSurf;
-	idVec3		end;
-	const srfTriangles_t	*tri;
-
-	if ( r_showNormals.GetFloat() == 0.0f ) {
-		return;
-	}
-
-	GL_State( GLS_DEFAULT );
-	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-
-	globalImages->BindNull();
-	glDisable( GL_STENCIL_TEST );
-	glDisable( GL_DEPTH_TEST );
-
-	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
-		drawSurf = drawSurfs[i];
-
-		RB_SimpleSurfaceSetup( drawSurf );
-
-		tri = drawSurf->geo;
-		const idDrawVert *verts = NULL;
-		const glIndex_t *indexes = NULL;
-		if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) || tri->facePlanes == NULL ) {
-			continue;
-		}
-		glBegin( GL_LINES );
-		for ( j = 0 ; j < tri->numIndexes ; j += 3 ) {
-			const idDrawVert *v[3];
-			idVec3		mid;
-
-			v[0] = &verts[indexes[j+0]];
-			v[1] = &verts[indexes[j+1]];
-			v[2] = &verts[indexes[j+2]];
-
-			// make the midpoint slightly above the triangle
-			mid = ( v[0]->xyz + v[1]->xyz + v[2]->xyz ) * ( 1.0f / 3.0f );
-			mid += 0.1f * tri->facePlanes[ j / 3 ].Normal();
-
-			for ( k = 0 ; k < 3 ; k++ ) {
-				idVec3	pos;
-
-				pos = ( mid + v[k]->xyz * 3.0f ) * 0.25f;
-
-				glColor3f( 0, 0, 1 );
-				glVertex3fv( pos.ToFloatPtr() );
-				VectorMA( pos, r_showNormals.GetFloat(), v[k]->normal, end );
-				glVertex3fv( end.ToFloatPtr() );
-
-				glColor3f( 1, 0, 0 );
-				glVertex3fv( pos.ToFloatPtr() );
-				VectorMA( pos, r_showNormals.GetFloat(), v[k]->tangents[0], end );
-				glVertex3fv( end.ToFloatPtr() );
-
-				glColor3f( 0, 1, 0 );
-				glVertex3fv( pos.ToFloatPtr() );
-				VectorMA( pos, r_showNormals.GetFloat(), v[k]->tangents[1], end );
-				glVertex3fv( end.ToFloatPtr() );
-
-				glColor3f( 1, 1, 1 );
-				glVertex3fv( pos.ToFloatPtr() );
-				glVertex3fv( v[k]->xyz.ToFloatPtr() );
-			}
-		}
-		glEnd();
-	}
-
-	glEnable( GL_DEPTH_TEST );
-	glEnable( GL_STENCIL_TEST );
-}
-
-
-
-/*
-=====================
 RB_ShowTextureVectors
 
 Draw texture vectors in the center of each triangle
@@ -1826,7 +2061,7 @@ static void RB_ShowTextureVectors( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	GL_State( GLS_DEPTHFUNC_LESS );
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
 	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
 		drawSurf = drawSurfs[i];
@@ -1927,7 +2162,7 @@ static void RB_ShowDominantTris( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	glPolygonOffset( -1, -2 );
 	glEnable( GL_POLYGON_OFFSET_LINE );
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
 	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
 		drawSurf = drawSurfs[i];
@@ -1989,7 +2224,7 @@ static void RB_ShowEdges( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	GL_State( GLS_DEFAULT );
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_DEPTH_TEST );
 
 	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
@@ -2092,7 +2327,7 @@ void RB_ShowLights( void ) {
 	RB_SimpleWorldSetup();
 
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 
 
@@ -2161,7 +2396,7 @@ void RB_ShowPortals( void ) {
 	// all portals are expressed in world coordinates
 	RB_SimpleWorldSetup();
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_DEPTH_TEST );
 
 	GL_State( GLS_DEFAULT );
@@ -2188,7 +2423,7 @@ static void RB_ShowLightGrid( void ) {
 	}
 
 	RB_SimpleWorldSetup();
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	GL_State( GLS_DEFAULT );
 	GL_Cull( CT_TWO_SIDED );
 
@@ -2242,6 +2477,15 @@ RB_ClearDebugText
 ================
 */
 void RB_ClearDebugText( int time ) {
+	if ( rb_numDebugText == 0 && time != 0 ) {
+		rb_debugTextTime = time;
+		return;
+	}
+	// Even a time-zero clear can release retained strings without waiting when
+	// there is no active text: the backend returns before reading the array.
+	if ( rb_numDebugText != 0 ) {
+		R_RenderThread_Sync( "debug text" );
+	}
 	int			i;
 	int			num;
 	debugText_t	*text;
@@ -2278,6 +2522,7 @@ RB_AddDebugText
 ================
 */
 void RB_AddDebugText( const char *text, const idVec3 &origin, float scale, const idVec4 &color, const idMat3 &viewAxis, const int align, const int lifetime, const bool depthTest ) {
+	R_RenderThread_Sync( "debug text" );
 	debugText_t *debugText;
 
 	if ( rb_numDebugText < MAX_DEBUG_TEXT ) {
@@ -2306,7 +2551,7 @@ float RB_DrawTextLength( const char *text, float scale, int len ) {
 
 	if ( text && *text ) {
 		if ( !len ) {
-			len = strlen(text);
+			len = idLib::SizeToInt( strlen( text ), "RB_DrawTextLength" );
 		}
 		for ( i = 0; i < len; i++ ) {
 			charIndex = text[i] - 32;
@@ -2357,7 +2602,7 @@ static void RB_DrawText( const char *text, const idVec3 &origin, float scale, co
 			line = 0;
 		}
 
-		len = strlen( text );
+		len = idLib::SizeToInt( strlen( text ), "RB_DrawText" );
 		for ( i = 0; i < len; i++ ) {
 
 			if ( i == 0 || text[i] == '\n' ) {
@@ -2428,7 +2673,7 @@ void RB_ShowDebugText( void ) {
 	// all lines are expressed in world coordinates
 	RB_SimpleWorldSetup();
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
 	width = r_debugLineWidth.GetInteger();
 	if ( width < 1 ) {
@@ -2473,6 +2718,13 @@ RB_ClearDebugLines
 ================
 */
 void RB_ClearDebugLines( int time ) {
+	// Empty lists are common during ordinary gameplay. Only the main-thread
+	// lifetime clock changes; do not turn every game tic into an early sync.
+	if ( rb_numDebugLines == 0 ) {
+		rb_debugLineTime = time;
+		return;
+	}
+	R_RenderThread_Sync( "debug lines" );
 	int			i;
 	int			num;
 	debugLine_t	*line;
@@ -2504,6 +2756,7 @@ RB_AddDebugLine
 ================
 */
 void RB_AddDebugLine( const idVec4 &color, const idVec3 &start, const idVec3 &end, const int lifeTime, const bool depthTest ) {
+	R_RenderThread_Sync( "debug lines" );
 	debugLine_t *line;
 
 	if ( rb_numDebugLines < MAX_DEBUG_LINES ) {
@@ -2533,7 +2786,7 @@ void RB_ShowDebugLines( void ) {
 	// all lines are expressed in world coordinates
 	RB_SimpleWorldSetup();
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
 	width = r_debugLineWidth.GetInteger();
 	if ( width < 1 ) {
@@ -2589,6 +2842,11 @@ RB_ClearDebugPolygons
 ================
 */
 void RB_ClearDebugPolygons( int time ) {
+	if ( rb_numDebugPolygons == 0 ) {
+		rb_debugPolygonTime = time;
+		return;
+	}
+	R_RenderThread_Sync( "debug polygons" );
 	int				i;
 	int				num;
 	debugPolygon_t	*poly;
@@ -2621,6 +2879,7 @@ RB_AddDebugPolygon
 ================
 */
 void RB_AddDebugPolygon( const idVec4 &color, const idWinding &winding, const int lifeTime, const bool depthTest ) {
+	R_RenderThread_Sync( "debug polygons" );
 	debugPolygon_t *poly;
 
 	if ( rb_numDebugPolygons < MAX_DEBUG_POLYGONS ) {
@@ -2648,7 +2907,7 @@ void RB_ShowDebugPolygons( void ) {
 	// all lines are expressed in world coordinates
 	RB_SimpleWorldSetup();
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
 	glDisable( GL_TEXTURE_2D );
 	glDisable( GL_STENCIL_TEST );
@@ -2885,7 +3144,7 @@ void RB_TestImage( void ) {
 	glLoadIdentity(); 
     glOrtho( 0, 1, 0, 1, -1, 1 );
 
-	tr.testImage->Bind();
+	RB_BindDebugImage( tr.testImage );
 	glBegin( GL_QUADS );
 	
 	glTexCoord2f( 0, 1 );
@@ -2908,6 +3167,82 @@ void RB_TestImage( void ) {
 
 /*
 =================
+RB_CaptureLevelshotDepth
+
+Copies the main view's depth buffer out for levelshotProbe. Runs before the debug
+tools draw, so nothing but the scene has touched depth yet. OpenGL only: in the
+Vulkan module the GL calls below are stubs, and LevelShotDepth.h promises that
+only the GL backend fills the capture.
+=================
+*/
+#if !defined( OPENQ4_RENDERER_VK_MODULE )
+static void RB_CaptureLevelshotDepth( void ) {
+	levelshotDepthCapture_t &capture = tr_levelshotDepthCapture;
+	if ( capture.linearDepth == NULL || capture.captured ) {
+		return;
+	}
+	if ( backEnd.viewDef->isSubview || ( backEnd.viewDef->renderFlags & RF_PORTAL_SKY ) != 0 ) {
+		return;
+	}
+
+	const idScreenRect &viewport = backEnd.viewDef->viewport;
+	const int width = viewport.x2 - viewport.x1 + 1;
+	const int height = viewport.y2 - viewport.y1 + 1;
+	if ( width != capture.width || height != capture.height ) {
+		common->Warning( "levelshotProbe: depth viewport is %dx%d, expected %dx%d", width, height, capture.width, capture.height );
+		return;
+	}
+
+	// The scene may be drawing into a render texture that is bound for draw only.
+	// Bind with raw GL and restore the exact previous binding afterwards: the
+	// state cache can hold a stale read binding and would skip the bind.
+	GLint previousReadFramebuffer = 0;
+	GLint drawFramebuffer = 0;
+	if ( glBindFramebuffer != NULL ) {
+		glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &previousReadFramebuffer );
+		glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebuffer );
+		if ( previousReadFramebuffer != drawFramebuffer ) {
+			glBindFramebuffer( GL_READ_FRAMEBUFFER, static_cast<GLuint>( drawFramebuffer ) );
+		}
+	}
+
+	idTempArray<float> windowDepth( width * height );
+	while ( glGetError() != GL_NO_ERROR ) {
+	}
+	GLint sampleBuffers = 0;
+	glGetIntegerv( GL_SAMPLE_BUFFERS, &sampleBuffers );
+	glPixelStorei( GL_PACK_ALIGNMENT, 4 );
+	glReadPixels( viewport.x1, viewport.y1, width, height, GL_DEPTH_COMPONENT, GL_FLOAT, windowDepth.Ptr() );
+	const GLenum readError = glGetError();
+
+	if ( glBindFramebuffer != NULL && previousReadFramebuffer != drawFramebuffer ) {
+		glBindFramebuffer( GL_READ_FRAMEBUFFER, static_cast<GLuint>( previousReadFramebuffer ) );
+	}
+
+	if ( readError != GL_NO_ERROR ) {
+		common->Warning( "levelshotProbe: depth readback failed (GL error 0x%x, draw fbo %d, read fbo %d, sample buffers %d)",
+			readError, drawFramebuffer, previousReadFramebuffer, sampleBuffers );
+		return;
+	}
+
+	// Invert the infinite-far projection: ndc = B / d - A with A = P[10], B = P[14].
+	const float *projection = backEnd.viewDef->projectionMatrix;
+	for ( int y = 0; y < height; y++ ) {
+		const float *srcRow = windowDepth.Ptr() + ( height - 1 - y ) * width;
+		float *dstRow = capture.linearDepth + y * width;
+		for ( int x = 0; x < width; x++ ) {
+			const float ndc = 2.0f * srcRow[ x ] - 1.0f;
+			const float denominator = ndc + projection[ 10 ];
+			const float distance = ( idMath::Fabs( denominator ) > 1e-9f ) ? projection[ 14 ] / denominator : -1.0f;
+			dstRow[ x ] = ( distance > 0.0f && distance < MAX_WORLD_SIZE * 4.0f ) ? distance : -1.0f;
+		}
+	}
+	capture.captured = true;
+}
+#endif
+
+/*
+=================
 RB_RenderDebugTools
 =================
 */
@@ -2916,6 +3251,10 @@ void RB_RenderDebugTools( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	if ( !backEnd.viewDef->viewEntitys ) {
 		return;
 	}
+
+#if !defined( OPENQ4_RENDERER_VK_MODULE )
+	RB_CaptureLevelshotDepth();
+#endif
 
 	RB_LogComment( "---------- RB_RenderDebugTools ----------\n" );
 
@@ -2926,6 +3265,12 @@ void RB_RenderDebugTools( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
 		backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 
+
+	// The tools clip to the view and to each surface's scissor (as the
+	// original backend kept the test on). Earlier passes leave the test in
+	// either state, SMAA among them disabling it, so set it here; the Vulkan
+	// translation sees the same call. R_ColorByStencilBuffer turns it off.
+	glEnable( GL_SCISSOR_TEST );
 
 	RB_ShowLightCount();
 	RB_ShowShadowCount();

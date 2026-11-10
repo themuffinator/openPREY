@@ -112,7 +112,8 @@ def validate_vulkan_lazy_residency_contract() -> None:
     require_order(
         ambient_stages,
         (
-            "stageImage = pStage->texture.image;",
+            # native emission replaces the authored glow image before residency
+            ": pStage->texture.image;",
             "VK_GuiExecutor_GetResidentImageDescriptor( stageImage )",
             "vkCmdBindDescriptorSets(",
             "vkCmdDrawIndexed(",

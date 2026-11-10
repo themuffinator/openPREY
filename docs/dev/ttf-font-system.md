@@ -89,6 +89,78 @@ The console and loading paths do not use `RegisterFont`; they directly slice
 sheet from `bigchars.ttf` at display resolution and retargets the existing
 `textures/bigchars` material, preserving its blend and UV behaviour.
 
+Font atlases follow the renderer restart lifecycle. A full `vid_restart`
+releases cached TrueType faces before image purge, retains atlas coverage while
+generated images rebuild with the new context, reinitialises the font reader, and immediately
+rebuilds the console sheet. A successful partial restart keeps the context,
+faces, and images alive, but still refreshes the resolution-dependent console
+sheet. Cached GUI fonts notice the renderer restart generation on their next
+lookup or selection and re-register in place, preserving the integer indices
+stored by parsed GUIs as well as the active font and size selection.
+
+GUI, extended-character and console atlases retain one byte of coverage per
+texel in CPU memory. Their image generator expands that coverage to white RGB
+with alpha when storage is recreated, including `reloadImages all`. A scratch
+allocation alone loses the glyph pixels and can leave Vulkan sampling an
+undefined image. Re-registering a font replaces the retained coverage for its
+new scale/codepage; final renderer shutdown frees it. This cache adds one
+quarter of the atlas's RGBA8 GPU footprint in CPU memory.
+
+### Keeping the atlas materials alive
+
+Each atlas is bound through a material this module generates at registration
+time. Those declarations have no `.mtr` behind them, which makes them fragile in
+a way a shipped material is not.
+
+The material and its intrinsic generated image intentionally use the same
+`_ttfatlas...` identity. The declaration manager parses a newly requested
+implicit material before the font module can replace its source, and that
+implicit stage maps an image named after the material. Sharing the already
+uploaded atlas identity makes this first parse valid and prevents spurious
+missing-image warnings and redundant defaulted image records. The font module
+then installs its full generated stage unconditionally so the required blend,
+linear filtering, clamp, and no-picmip state remains explicit.
+
+`idDeclManagerLocal::BeginLevelLoad` purges every declaration that is not marked
+as parsed outside a level load, and `FindType` clears that mark on anything it
+resolves *during* a load. A face a map's own GUIs are the first to name is
+registered inside that window, so it ends up classified as level media. For a
+shipped material that costs nothing: the next reference reparses it from its
+file. For a generated one there is no file, and the implicit text the manager
+synthesises for a declaration with no source maps an image named after the
+material itself, which nothing is registered under. That resolves to the default
+image, which is **fully transparent outside developer builds**, so the failure
+is not a missing-texture box — every glyph in the face silently draws nothing,
+with no warning, and nothing short of a restart brings it back.
+
+Two things close that off:
+
+- `R_TTFInstallAtlasStage` calls `SetText` before parsing, so the declaration
+  carries the generated source itself and a purge becomes recoverable. Implicit
+  declarations are excluded from the network decl checksum, so this stays
+  process local — a graphical client does not gain a declaration a dedicated
+  server can never create.
+- `idRenderSystemLocal::BeginLevelLoad` calls `R_TTFRestoreAtlasMaterials`,
+  which runs immediately after the declaration purge and before the loading
+  screen draws its first frame of text. It looks each material up *without*
+  parsing first, so a healthy declaration costs nothing and is not demoted by
+  the lookup itself.
+
+Registration is also self-healing: `R_TTFCreateAtlasMaterial` always reinstalls
+the complete generated stage. This is intentionally stronger than comparing
+the old stage's image name, because a full renderer restart can recreate the
+image manager while leaving a generated declaration carrying a stale image
+pointer.
+
+A related hazard sits on the GUI side. `idDeviceContext` holds `activeFont` and
+`useFont` as pointers into its `fonts` list, and that list has granularity 1, so
+`FindFont` reallocates it on every registration. `idWindow::SetFont` re-points
+`activeFont` before each draw, but nothing re-points `useFont`, and `DrawText`
+reads it through `MaxCharWidth`/`MaxCharHeight` *before* `SetFontByScale`
+reselects it — so the character cell and line skip the whole layout is built
+from would be read out of a freed allocation. `FindFont` reseats both pointers
+by index across the append.
+
 | Cvar | Default | Meaning |
 | --- | --- | --- |
 | `r_useTrueTypeFonts` | `0` | Enable TTF GUI and console atlases; `0` keeps retail bitmaps authoritative. |
@@ -108,6 +180,48 @@ the normal Meson `pak0.pk4` target. For a renderer check, launch windowed with
 the generated engine-side `ttfatlas` images, then repeat with the cvar at `0`
 to confirm the bitmap fallback and `uiFontParitySelfTest` still pass.
 
-The current GUI text loop indexes byte codepoints only. The TTF files carry
-wider coverage, but fully displaying UTF-8 and shaping Arabic still needs a
-separate codepoint-aware text-path update.
+## Text background
+
+Independent of which font path is active, `gui_textBackground` draws a solid
+black backing behind each line of text so contrast no longer depends on what
+happens to be underneath.
+
+| Cvar | Default | Meaning |
+| --- | --- | --- |
+| `gui_textBackground` | `0` | Backing opacity; 0 off, 1 opaque |
+| `gui_textBackgroundPadding` | `2` | Padding past the text, in virtual units |
+
+The box is drawn once per line before any glyph, so it never shows through the
+gaps between characters, and colour escapes inside a line change the text colour
+without affecting the backing.
+
+Its height comes from the font's **measured glyph ink extents**, not from
+`fontInfo_t`'s `ascender`/`descender`. Those fields do not reliably describe where
+the ink is, so the box is sized from the glyphs themselves. Measuring the glyphs
+also means every line of a given font gets the same box height whatever
+characters it contains, so a wrapped paragraph does not come out ragged. `uiFontParitySelfTest` covers both the extent measurement and
+the rect placement.
+
+## Known limitations
+
+The TTF files carry wider coverage than the retail atlases. The engine text
+path inherited from upstream draws by code point (see
+[text-encoding-and-localization.md](text-encoding-and-localization.md)); Prey
+GUI coverage of that path remains runtime-validation pending.
+
+- **Text input above ASCII is not wired up.** Engine text is UTF-8 and the text
+  path draws by code point, but `idEditField` and the
+  platform scan tables are still byte-oriented, so typing Cyrillic into the
+  console or a chat box does not work.
+- **No Arabic shaping or bidi.** The faces include the Presentation Forms-B
+  joined shapes precisely so a shaper can use them, but no shaper exists yet.
+  Until one does, Arabic coverage is not usable text.
+- **The code-point page directory stops at the BMP.** Nothing the GUI draws
+  lives above U+FFFF, and stopping there keeps the directory to 256 pointers per
+  font size.
+- Atlases are rebuilt only when fonts are registered; a resolution change does
+  not currently re-rasterise them at the new upscale factor, so changing
+  resolution wants a restart for text to be pixel-exact again.
+- `FMT_ALPHA` would quarter atlas memory and is swizzled to RGB=1/A=R on both
+  backends, but a `ScratchImage` in that format renders nothing through the GUI
+  blend path. Unresolved; RGBA8 is used instead.

@@ -11,7 +11,9 @@ sweep:
   extension) must stay presence-gated -- hardcoding either way breaks one of the
   two supported MoltenVK loading shapes.
 * The engine (SDL) and the renderer module (volk) must resolve the SAME Vulkan
-  library, in the same order, or a VkInstance crosses two images.
+  library, in the same order, or a VkInstance crosses two images. The
+  module's bring-up probe, which decides whether the module activates at all,
+  must resolve it the same way too.
 * The macOS module must export only its entry point, because the macOS client
   still links a full second copy of the renderer statically.
 * Shadow-map and depth-writing shaders must avoid the two GLSL constructs whose
@@ -65,15 +67,22 @@ def validate_portability_negotiation() -> None:
     # The Khronos loader REQUIRES both the extension and the flag before it will
     # enumerate MoltenVK; a directly loaded libMoltenVK.dylib does not advertise
     # the extension at all and fails instance creation if it is requested. Only a
-    # presence check is correct for both, so the probe must stay.
-    require(source, "VK_Device_InstanceExtensionSupported", context)
+    # presence check is correct for both, so the probe must stay. It reads the
+    # complete instance inventory: a failed list must fail the start rather than
+    # read as "absent" and hide MoltenVK.
+    require(source, "VK_Device_FindInstanceExtensions", context)
     require(source, "VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME", context)
     require(source, "VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR", context)
 
-    init_body = function_body(source, "bool VK_Device_Init( const renderWindowServices_s *windowServices ) {")
+    init_body = function_body(source, "bool VK_Device_Init( const renderWindowServices_s *windowServices, uint32_t firstCandidate,")
     require(
         init_body,
-        "const bool portabilityEnumeration =\n\t\t\tVK_Device_InstanceExtensionSupported( VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME );",
+        "if ( !VK_Device_FindInstanceExtensions( NULL, optionalInstanceExtensions, 2, loaderExtensions ) ) {\n\t\treturn false;",
+        "instance-extension inventory failure fails the start",
+    )
+    require(
+        init_body,
+        "const bool portabilityEnumeration = loaderExtensions[ 0 ];",
         "portability enumeration presence gate",
     )
     require(
@@ -84,10 +93,17 @@ def validate_portability_negotiation() -> None:
 
     # VUID-VkDeviceCreateInfo-pProperties-04451: the subset extension must be
     # enabled when advertised, and must not be requested when it is not.
-    require(source, "VK_Device_DeviceExtensionSupported", context)
+    # Admission reads it from the same complete device-extension list in which
+    # it finds the swapchain extension.
+    selection_source = read("src/renderer/Vulkan/VulkanDeviceSelection.cpp")
+    require(
+        selection_source,
+        "if ( std::strcmp( extension.extensionName, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME ) == 0 ) { candidate.hasPortabilitySubset = true; }",
+        "portability subset recorded during admission",
+    )
     require(
         init_body,
-        "vkCtx.portabilitySubset = VK_Device_DeviceExtensionSupported(\n\t\t\tvkCtx.physicalDevice, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME );",
+        "vkCtx.portabilitySubset = selected.hasPortabilitySubset;",
         "portability subset device-extension probe",
     )
     require(init_body, "deviceExtensions[ deviceExtensionCount++ ] = VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME;", context)
@@ -105,16 +121,18 @@ def validate_portability_negotiation() -> None:
     # Hard 1.3 floor: ~135 core-1.3 entry points are called unconditionally, so a
     # device below the floor must fail closed with a readable message instead of
     # faulting on a NULL volk pointer during the first frame.
-    require(init_body, "vkCtx.deviceProperties.apiVersion < VK_API_VERSION_1_3", "Vulkan 1.3 floor check")
-    require(init_body, "this renderer requires Vulkan 1.3", "Vulkan 1.3 floor diagnostic")
+    selection = read("src/renderer/Vulkan/VulkanDeviceSelection.cpp")
+    require(init_body, "VK_SelectPhysicalDevice( selectionApi, vkCtx.instance, vkCtx.surface,", "device admission before creation")
+    require(selection, "properties.apiVersion < VK_API_VERSION_1_3", "Vulkan 1.3 floor check")
+    require(selection, "this renderer requires Vulkan 1.3", "Vulkan 1.3 floor diagnostic")
 
     # 8 bound descriptor sets is exactly the ceiling on Metal-backed devices.
     require(
-        read("src/renderer/Vulkan/VulkanDevice.h"),
+        read("src/renderer/Vulkan/VulkanDeviceSelection.h"),
         "VK_REQUIRED_BOUND_DESCRIPTOR_SETS = 8",
         "bound descriptor set requirement",
     )
-    require(init_body, "limits.maxBoundDescriptorSets < VK_REQUIRED_BOUND_DESCRIPTOR_SETS", "descriptor set ceiling check")
+    require(selection, "limits.maxBoundDescriptorSets < VK_REQUIRED_BOUND_DESCRIPTOR_SETS", "descriptor set ceiling check")
 
 
 def validate_loader_agreement() -> None:
@@ -122,19 +140,42 @@ def validate_loader_agreement() -> None:
     # instance through volk. If they resolve different Vulkan libraries the
     # VkInstance is handed across two images, which is undefined. They agree
     # because both consult SDL_VULKAN_LIBRARY first, then the bundled dylib at
-    # the same two bundle-relative paths, then the system loader.
+    # the same app-bundle and two loose-package paths, then the system loader.
     device = read("src/renderer/Vulkan/VulkanDevice.cpp")
-    loader = function_body(device, "static bool VK_Device_InitLoader( void ) {")
+    loader = function_body(device, "bool VK_Device_InitLoader( void ) {")
     require(loader, 'getenv( "SDL_VULKAN_LIBRARY" )', "module honors the SDL Vulkan library pin")
     require(loader, '"/../Frameworks/libMoltenVK.dylib"', "module bundle-relative MoltenVK path")
+    require(loader, '"/Frameworks/libMoltenVK.dylib"', "module loose Frameworks MoltenVK path")
     require(loader, '"/libMoltenVK.dylib"', "module adjacent MoltenVK path")
     require(loader, "return volkInitialize() == VK_SUCCESS;", "module falls back to the system Vulkan loader")
     require(device, "volkInitializeCustom( getInstanceProcAddr );", "module adopts the resolved loader through volk")
+
+    # The engine runs the bring-up probe before it activates the module and
+    # falls back to OpenGL when the probe fails, so the probe has to resolve
+    # the same library. volk's own search never looks inside the app bundle;
+    # a probe relying on it would send every packaged Mac back to OpenGL.
+    bringup = read("src/renderer/Vulkan/VulkanBringup.cpp")
+    probe = function_body(
+        bringup,
+        "static bool VK_Bringup_RunProbeInternal(",
+    )
+    require(
+        probe,
+        "result = vk_loaderInit() ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;",
+        "probe resolves the renderer's Vulkan library",
+    )
+    module = read("src/renderer/Vulkan/VulkanModule.cpp")
+    require(
+        module,
+        "VK_Bringup_SetLoaderInit( VK_Device_InitLoader );",
+        "module hands the device loader to the probe",
+    )
 
     backend = read("src/sys/sdl3/sdl3_backend.cpp")
     pin = function_body(backend, "static void SDL3_PinBundledMoltenVKLibrary(void) {")
     require(pin, "SDL_GetHint(SDL_HINT_VULKAN_LIBRARY)", "engine defers to an existing Vulkan library pin")
     require(pin, '"/../Frameworks/libMoltenVK.dylib"', "engine bundle-relative MoltenVK path")
+    require(pin, '"/Frameworks/libMoltenVK.dylib"', "engine loose Frameworks MoltenVK path")
     require(pin, '"/libMoltenVK.dylib"', "engine adjacent MoltenVK path")
     require(pin, "SDL_SetHint(SDL_HINT_VULKAN_LIBRARY", "engine pins the bundled MoltenVK for SDL")
 
@@ -161,12 +202,17 @@ def validate_module_link_contract() -> None:
     require(meson, "-Wl,-install_name,@loader_path/", "macOS renderer module install name")
     require(meson, "name_suffix: 'dylib',", "macOS renderer module dylib suffix")
 
-    # The darwin carve-out is gone; the remaining gate is the SDL3 seam only.
-    require(
-        meson,
-        "if build_renderer_vk and platform_backend != 'sdl3'",
-        "Vulkan module gate no longer excludes darwin",
-    )
+    # Test the supported-host matrix, rather than pinning how the condition is
+    # formatted. Android has its own GLES-only target; Darwin SDL3 must remain
+    # eligible for the MoltenVK renderer.
+    gate = re.search(r"if build_renderer_vk and ([^\n]+)\n\s*build_renderer_vk = false", meson)
+    if gate is None:
+        raise AssertionError("Missing Vulkan module platform/backend gate")
+    for host in ("windows", "linux", "darwin", "android"):
+        for backend in ("sdl3", "native", "legacy_win32"):
+            disabled = eval(gate.group(1), {"__builtins__": {}}, {"host_system": host, "platform_backend": backend})
+            if disabled != (host == "android" or backend != "sdl3"):
+                raise AssertionError(f"Unexpected Vulkan module gate for {host}/{backend}: disabled={disabled}")
     require(meson, "MoltenVK is not a native Metal renderer", "meson MoltenVK policy note")
 
 

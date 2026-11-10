@@ -35,9 +35,14 @@ struct idGSWinVar {
 	idGSWinVar() {
 		var = NULL;
 		own = false;
+		live = NULL;
 	}
 	idWinVar* var;
 	bool own;
+	// A transition operand written as a non-rect "$var" is read from this var
+	// when the transition starts; var still holds the parse-time copy, which
+	// keeps the saved script layout unchanged.
+	idWinVar* live;
 };
 
 class idGuiScriptList;
@@ -58,14 +63,14 @@ public:
 	}
 	void FixupParms(idWindow *win);
 	size_t Size() {
-		int sz = sizeof(*this);
+		size_t sz = sizeof(*this);
 		for (int i = 0; i < parms.Num(); i++) {
 			sz += parms[i].var->Size();
 		}
 		return sz;
 	}
 
-	void WriteToSaveGame( idFile *savefile );
+	void WriteToSaveGame( idFile *savefile, const char *context );
 	void ReadFromSaveGame( idFile *savefile );
 
 protected:
@@ -89,7 +94,7 @@ public:
 		list.Append(gs);
 	}
 	size_t Size() {
-		int sz = sizeof(*this);
+		size_t sz = sizeof(*this);
 		for (int i = 0; i < list.Num(); i++) {
 			sz += list[i]->Size();
 		}
@@ -99,7 +104,7 @@ public:
 	void ReadFromDemoFile( class idDemoFile *f ) {};
 	void WriteToDemoFile( class idDemoFile *f ) {};
 
-	void WriteToSaveGame( idFile *savefile );
+	void WriteToSaveGame( idFile *savefile, const char *context );
 	void ReadFromSaveGame( idFile *savefile );
 };
 

@@ -107,8 +107,12 @@ static void Posix_WriteSignalText( const char *text ) {
 
 static void Posix_WriteSignalNumber( int value ) {
 	char buffer[ 16 ];
-	int pos = sizeof( buffer );
+	// filled back to front, so reserve the last byte for the terminator
+	// Posix_WriteSignalText needs
+	int pos = sizeof( buffer ) - 1;
 	unsigned int number;
+
+	buffer[ pos ] = '\0';
 
 	if ( value < 0 ) {
 		Posix_WriteSignalText( "-" );
@@ -122,7 +126,7 @@ static void Posix_WriteSignalNumber( int value ) {
 		number /= 10;
 	} while ( number > 0 && pos > 0 );
 
-	write( STDERR_FILENO, buffer + pos, sizeof( buffer ) - pos );
+	Posix_WriteSignalText( buffer + pos );
 }
 
 /*
@@ -139,6 +143,13 @@ void Posix_ClearSigs( ) {
 	action.sa_flags = 0;
 
 	for ( int i = 0; signalRoutes[ i ].signum != -1; ++i ) {
+#if defined( __ANDROID__ )
+		// Android's runtime owns fatal signal handlers, including deliberate
+		// faults used by ART. Install/reset only our graceful quit routes.
+		if ( !signalRoutes[ i ].graceful ) {
+			continue;
+		}
+#endif
 		if ( sigaction( signalRoutes[ i ].signum, &action, NULL ) != 0 ) {
 			Sys_Printf( "Failed to reset %s handler: %s\n", signalRoutes[ i ].name, strerror( errno ) );
 		}
@@ -181,6 +192,19 @@ static void sig_handler( int signum, siginfo_t *info, void *context ) {
 	Posix_WriteSignalText( " (" );
 	Posix_WriteSignalNumber( signum );
 	Posix_WriteSignalText( "), exiting without unsafe engine shutdown\n" );
+
+	// idCommonLocal::FatalError parks its message here before it runs engine
+	// teardown, and that teardown can fault long before Sys_Error gets to print
+	// it -- a renderer that fails to bring up its device tears the session down
+	// from a startup state the shutdown path never expected. Reporting the
+	// parked message turns an unexplained signal death back into the actionable
+	// cause (issue #96). Reading a static buffer stays async-signal-safe.
+	if ( fatalError[0] != '\0' ) {
+		Posix_WriteSignalText( "openPREY: fatal error being reported: " );
+		Posix_WriteSignalText( fatalError );
+		Posix_WriteSignalText( "\n" );
+	}
+
 	Posix_WriteSignalText( "openPREY: last renderer startup phase: " );
 	Posix_WriteSignalText( Posix_RendererStartupPhaseName() );
 	Posix_WriteSignalText( "\n" );
@@ -199,6 +223,17 @@ static void sig_handler( int signum, siginfo_t *info, void *context ) {
 	strcat( breadcrumb, "; last game module phase: " );
 	strcat( breadcrumb, Com_GameModuleLoadPhaseSignalName() );
 	Posix_AppendFatalBreadcrumbRaw( breadcrumb );
+
+	// Its own line so the fatal message keeps a bounded stack buffer of its own;
+	// every FatalError message in the engine is a single short line, and the
+	// untruncated text has already gone to stderr above.
+	if ( fatalError[0] != '\0' ) {
+		char fatalBreadcrumb[ 512 ];
+		strcpy( fatalBreadcrumb, "fatal error being reported: " );
+		strncat( fatalBreadcrumb, fatalError,
+			sizeof( fatalBreadcrumb ) - strlen( fatalBreadcrumb ) - 1 );
+		Posix_AppendFatalBreadcrumbRaw( fatalBreadcrumb );
+	}
 
 	_exit( 128 + signum );
 }
@@ -222,6 +257,13 @@ void Posix_InitSigs( ) {
 	action.sa_flags = SA_SIGINFO;
 
 	for ( int i = 0; signalRoutes[ i ].signum != -1; ++i ) {
+#if defined( __ANDROID__ )
+		// Android's runtime owns fatal signal handlers, including deliberate
+		// faults used by ART. Install/reset only our graceful quit routes.
+		if ( !signalRoutes[ i ].graceful ) {
+			continue;
+		}
+#endif
 		if ( sigaction( signalRoutes[ i ].signum, &action, NULL ) != 0 ) {
 			Sys_Printf( "Failed to set %s handler: %s\n", signalRoutes[ i ].name, strerror( errno ) );
 		}

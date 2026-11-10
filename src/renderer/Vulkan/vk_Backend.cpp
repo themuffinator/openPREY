@@ -5,7 +5,7 @@
 ===============================================================================
 
 	Vulkan backend for the shared renderer front-end (Phase C,
-	docs/dev/plans/2026-07-17-vulkan-phase-c.md).
+	docs/dev/archive/2026-10-18/plans/2026-07-17-vulkan-phase-c.md).
 
 	Phase C scope: the real game loop runs against the module's
 	idRenderSystem (the shared front-end), and every frame ends in an
@@ -31,9 +31,26 @@
 #include "../ModernGLShaderLibrary.h"
 #include "../RendererUpload.h"
 #include "../ModernGLExecutor.h"
+#include "../ModernLightImageAtlas.h"
 #include "../RenderGraphResources.h"
+#include "../RendererMetrics.h"
+#include "../MaterialResourceTable.h"
+#include "../ClassicGuiDomain.h"
+#include "../ClassicCinematicPostDomain.h"
+#include "../ClassicSpecialFrameDomain.h"
+#include "../ClassicWorldAmbientDomain.h"
+#include "../ClassicInteractionDomain.h"
+#include "../ClassicFogBlendDomain.h"
+#include "../ClassicSubviewDomain.h"
 #include "VulkanDevice.h"
+#include "VulkanBringup.h"
 #include "vk_Image.h"
+#include "vk_ExecutorHooks.h"
+#include "vk_HDRScene.h"
+#include "vk_PBRProbes.h"
+#include "vk_MaterialPrograms.h"
+#include <chrono>
+#include <thread>
 
 // the back-end state object normally defined by tr_backend.cpp
 backEndState_t	backEnd;
@@ -43,12 +60,61 @@ bool R_GetInitialWindowSize( bool fullScreen, int *width, int *height );
 
 static const renderWindowServices_t *vkBackendServices = NULL;
 static float vkClearColor[ 4 ] = { 0.0f, 0.0f, 0.0f, 1.0f };
+// The Vulkan backend does not otherwise build the GL render graph.  Keep one
+// backend-owned packet frame for the shared classic-GUI domain when front-end
+// capture was not requested for metrics.
+static idScenePacketFrame vkClassicDomainPacketFrame;
+
+static const classicSubviewDomainView_t *VK_ClassicSubview_Preflight(
+		const viewDef_t *viewDef ) {
+	if ( !r_rendererSharedSubview.GetBool() || viewDef == NULL
+			|| !viewDef->isSubview ) {
+		return NULL;
+	}
+	const classicSubviewDomainView_t *view =
+		R_ClassicSubviewDomain_FindView( viewDef );
+	if ( view == NULL ) {
+		R_ClassicSubviewDomain_RecordBackendFallback( viewDef,
+			CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN,
+			CLASSIC_SUBVIEW_DOMAIN_FAILURE_BACKEND_NOT_READY, 0 );
+		return NULL;
+	}
+	if ( view->backendOutcome[CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN]
+			!= CLASSIC_SUBVIEW_DOMAIN_BACKEND_UNRECORDED ) {
+		// A rejected nested member returns its entire sealed transaction to the
+		// established walker, including every later parent command.
+		return NULL;
+	}
+	const bool nestedDynamicReady =
+		R_ClassicCinematicPostDomain_SubviewTransactionReady( viewDef,
+			CLASSIC_CINEMATIC_POST_BACKEND_VULKAN );
+	if ( !view->ready || !R_ClassicSubviewDomain_ViewSemanticsMatch( *view )
+			|| ( R_ClassicSubviewDomain_IsCaptureBacked( *view )
+				&& ( view->captureImage == NULL || !view->captureImage->IsLoaded() ) )
+			|| !R_ClassicSubviewDomain_ReadyForBackend( *view,
+				CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN ) ) {
+		R_ClassicSubviewDomain_RecordBackendFallback( viewDef,
+			CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN,
+			!view->ready ? view->failure
+				: ( !R_ClassicSubviewDomain_ViewSemanticsMatch( *view )
+					? CLASSIC_SUBVIEW_DOMAIN_FAILURE_VIEW_SEMANTICS_MISMATCH
+					: ( !nestedDynamicReady
+						? CLASSIC_SUBVIEW_DOMAIN_FAILURE_BACKEND_NESTED_CINEMATIC_POST_INCOMPLETE
+						: ( !R_ClassicSubviewDomain_ReadyForBackend( *view,
+						CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN )
+						? CLASSIC_SUBVIEW_DOMAIN_FAILURE_BACKEND_NESTING_INCOMPLETE
+						: CLASSIC_SUBVIEW_DOMAIN_FAILURE_BACKEND_REJECTED ) ) ),
+			!view->ready ? view->failureDetail : 1 );
+		return NULL;
+	}
+	return view;
+}
 
 // vk_GuiExecutor.cpp
 void VK_GuiExecutor_SetClearColor( const float color[ 4 ] );
 void VK_GuiExecutor_Draw2DView( const viewDef_t *viewDef );
 void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef );
-void VK_GuiExecutor_PrepareSpecialEffects( const viewDef_t *viewDef );
+void VK_GuiExecutor_PrepareSpecialEffects( const drawSpecialEffectsCommand_t *cmd );
 bool VK_GuiExecutor_SpecialEffectsAwaitResolve(
 		idRenderTexture *sourceRenderTexture );
 void VK_GuiExecutor_DrawResolvedSpecialEffects(
@@ -56,14 +122,29 @@ void VK_GuiExecutor_DrawResolvedSpecialEffects(
 		idRenderTexture *destinationRenderTexture );
 bool VK_GuiExecutor_EnsureFrameOpen( void );
 bool VK_GuiExecutor_EndFrameAndPresent( void );
+void VK_PostProcess_ApplyBackBuffer( void );
 bool VK_GuiExecutor_FrameIsOpen( void );
-bool VK_Exec_SetRenderTarget( idRenderTexture *renderTexture );
-void VK_Exec_ClearRenderTarget( bool clearColor, bool clearDepth, float depthValue,
-		const float colorValue[ 4 ] );
-bool VK_Exec_CopyRender( idImage *image, int x, int y, int width, int height,
-		int cubeFace, bool copyDepth );
-bool VK_Exec_ResolveRenderTargets( idRenderTexture *sourceRenderTexture,
-		idRenderTexture *destinationRenderTexture, bool resolveDepth );
+bool VK_GuiExecutor_ResolveTemporalPresentation(
+		const resolveTemporalPresentationCommand_t &command );
+bool VK_GuiExecutor_PresentScaledScene(
+		const presentScaledSceneCommand_t &command );
+
+static void VK_DrawSharedDirectSubview( const classicSubviewDomainView_t &view ) {
+	// Direct SS_SUBVIEW mirrors compose into the parent target and therefore
+	// have no capture command. Keep the mature 3D executor, but publish only
+	// after its complete sealed child-view coverage has returned.
+	VK_GuiExecutor_Draw3DView( view.viewDef );
+	if ( view.backendOutcome[CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN]
+			!= CLASSIC_SUBVIEW_DOMAIN_BACKEND_UNRECORDED ) {
+		// A nested cinematic/post range rejected while the mature child-view
+		// executor was active. Its rollback already covered this complete tree.
+		return;
+	}
+	if ( !R_ClassicSubviewDomain_RecordDirectOwned( view.viewDef,
+			CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN ) ) {
+		common->Warning( "Vulkan: shared direct subview coverage rejected after committed view" );
+	}
+}
 
 /*
 ====================
@@ -73,6 +154,66 @@ The front-end keys nearly all behavior off glConfig; describe the Vulkan
 device conservatively so CPU-side logic stays on portable paths.
 ====================
 */
+/*
+====================
+VK_Backend_ApplyTileOffset
+
+A larger-than-window capture (R_ReadTiledPixels) renders the whole capture
+once per tile with tr.viewportOffset moved to the tile, and reads the window
+back. OpenGL adds that offset to every view's glViewport/glScissor. Vulkan's
+executor builds its viewports and scissors from viewDef->viewport in many
+places, so the frame's views are moved by the offset once, here, before any
+of them is planned or drawn; every tile then shows its own part of the
+capture instead of repeating the first. Only views drawn to the window move:
+a view drawn into a render texture (a game-owned post target sized to the
+whole capture) stays at the texture's origin, and the view that composites
+the texture to the window moves instead, as RB_TileOffsetX does on OpenGL.
+Scissors cut at the attachment edge (vkCmdSetScissorClamped). Ordinary frames
+have a zero offset and are untouched.
+====================
+*/
+static void VK_Backend_ApplyTileOffset( const emptyCommand_t *cmds ) {
+	const int offsetX = tr.viewportOffset[ 0 ];
+	const int offsetY = tr.viewportOffset[ 1 ];
+	if ( offsetX == 0 && offsetY == 0 ) {
+		return;
+	}
+	// A view can be named by more than one command; move each one once.
+	static const int maxViews = 256;
+	const viewDef_t *moved[ maxViews ];
+	int numMoved = 0;
+	// The frame starts on the window (the backend clears backEnd.renderTexture).
+	const idRenderTexture *target = NULL;
+	for ( ; cmds != NULL; cmds = (const emptyCommand_t *)cmds->next ) {
+		if ( cmds->commandId == RC_SET_RENDERTEXTURE ) {
+			target = ( (const setRenderTargetCommand_t *)cmds )->renderTexture;
+			continue;
+		}
+		if ( cmds->commandId != RC_DRAW_VIEW || target != NULL ) {
+			continue;
+		}
+		viewDef_t *viewDef = ( (const drawSurfsCommand_t *)cmds )->viewDef;
+		if ( viewDef == NULL ) {
+			continue;
+		}
+		bool seen = false;
+		for ( int i = 0; i < numMoved && !seen; ++i ) {
+			seen = moved[ i ] == viewDef;
+		}
+		if ( seen ) {
+			continue;
+		}
+		if ( numMoved == maxViews ) {
+			break;
+		}
+		moved[ numMoved++ ] = viewDef;
+		viewDef->viewport.x1 += offsetX;
+		viewDef->viewport.x2 += offsetX;
+		viewDef->viewport.y1 += offsetY;
+		viewDef->viewport.y2 += offsetY;
+	}
+}
+
 static void VK_FillGLConfigFromDevice( void ) {
 	static char vendorString[ 128 ];
 	static char rendererString[ 256 ];
@@ -90,6 +231,28 @@ static void VK_FillGLConfigFromDevice( void ) {
 	glConfig.version_string = versionString;
 	glConfig.extensions_string = "";
 	glConfig.wgl_extensions_string = "";
+	glConfig.gpuClass = RendererGpuClass::Unknown;
+	glConfig.dedicatedVideoMemoryMB = 0;
+	switch ( vkCtx.deviceProperties.deviceType ) {
+		case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: glConfig.gpuClass = RendererGpuClass::Discrete; break;
+		case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: glConfig.gpuClass = RendererGpuClass::Integrated; break;
+		case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: glConfig.gpuClass = RendererGpuClass::Virtual; break;
+		case VK_PHYSICAL_DEVICE_TYPE_CPU: glConfig.gpuClass = RendererGpuClass::Software; break;
+		default: break;
+	}
+	if ( glConfig.gpuClass == RendererGpuClass::Discrete ) {
+		VkPhysicalDeviceMemoryProperties memory;
+		vkGetPhysicalDeviceMemoryProperties( vkCtx.physicalDevice, &memory );
+		// Largest local heap is conservative; do not sum mirrored device heaps or
+		// call host-visible/reBAR memory an additional pool of VRAM.
+		VkDeviceSize largest = 0;
+		for ( uint32_t i = 0; i < memory.memoryHeapCount; ++i ) {
+			if ( ( memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ) && memory.memoryHeaps[i].size > largest )
+				largest = memory.memoryHeaps[i].size;
+		}
+		const VkDeviceSize mib = largest / (1024 * 1024);
+		if ( mib <= 256 * 1024 ) glConfig.dedicatedVideoMemoryMB = static_cast<int>(mib);
+	}
 
 	glConfig.maxTextureSize = (int)vkCtx.deviceProperties.limits.maxImageDimension2D;
 	glConfig.maxTextureUnits = 8;
@@ -142,24 +305,46 @@ engine window for a Vulkan surface, bring up the device + swapchain, fill
 glConfig, and hand input to the engine.
 ====================
 */
-bool VK_InitRenderDevice( void ) {
+static bool VK_ApplyRequestedScreenParms( const renderWindowParms_t& parms ) {
+	if ( !R_IsRecoverableRendererRestart() ) return vkBackendServices->ApplyScreenParms( &parms );
+	const auto* request = R_GetRecoverableWindowRequest();
+	renderWindowState_t observed; char error[512] = {};
+	if ( !request || !vkBackendServices->ApplyScreenParmsStrict ||
+			!vkBackendServices->ApplyScreenParmsStrict( request, &observed, error, sizeof(error) ) ) {
+		common->Warning( "Vulkan: strict screen parameter application failed: %s", error );
+		R_DisplayPresentationFailed( RDP_SCREEN_FAILED ); return false;
+	}
+	return true;
+}
+
+static const char *vkStartupDeviceStage = "window system";
+void VK_ShutdownRenderDevice( void );
+bool VK_GuiExecutor_PrepareStartup( void );
+
+static bool VK_PrepareRenderDevice( void ) {
 	common->Printf( "----- VK_InitRenderDevice -----\n" );
 
+	vkStartupDeviceStage = "window system";
 	vkBackendServices = Sys_GetRenderWindowServices();
 	if ( vkBackendServices == NULL ) {
+		R_DisplayPresentationFailed( RDP_INIT_FAILED );
 		common->Warning( "Vulkan: no window services on this platform backend" );
 		return false;
 	}
 	if ( !vkBackendServices->PrepareWindowSystem() ) {
+		R_DisplayPresentationFailed( RDP_INIT_FAILED );
 		common->Warning( "Vulkan: window system preparation failed" );
 		return false;
 	}
 
 	glimpParms_t parms;
 	memset( &parms, 0, sizeof( parms ) );
-	parms.fullScreen = r_fullscreen.GetBool();
-	R_GetInitialWindowSize( parms.fullScreen, &parms.width, &parms.height );
-	parms.borderless = !parms.fullScreen && r_borderless.GetBool();
+	parms.hiddenWindow = r_hiddenWindow.GetBool();
+	parms.fullScreen = !parms.hiddenWindow && r_fullscreen.GetBool() && !R_ForceWindowForRendererRestart();
+	if ( !R_GetInitialWindowSize( parms.fullScreen, &parms.width, &parms.height ) ) {
+		R_DisplayPresentationFailed( RDP_INIT_FAILED ); return false;
+	}
+	parms.borderless = !parms.hiddenWindow && !parms.fullScreen && r_borderless.GetBool();
 	parms.displayHz = r_displayRefresh.GetInteger();
 	parms.multiSamples = 0;
 	parms.stereo = false;
@@ -170,8 +355,18 @@ bool VK_InitRenderDevice( void ) {
 	windowParms.height = parms.height;
 	windowParms.fullScreen = parms.fullScreen;
 	windowParms.borderless = parms.borderless;
-	windowParms.hiddenWindow = r_hiddenWindow.GetBool();
+	windowParms.hiddenWindow = parms.hiddenWindow;
 	windowParms.displayHz = parms.displayHz;
+	if ( R_IsRecoverableRendererRestart() ) {
+		const auto* request = R_GetRecoverableWindowRequest();
+		// The swapchain is single-sample; r_multiSamples reaches only the scene
+		// targets. A strict window request must not claim multisampling.
+		if ( !request || request->parms.multiSamples != 0 || request->parms.stereo ) {
+			common->Warning( "Vulkan: strict framebuffer request is unsupported" );
+			R_DisplayPresentationFailed( RDP_INIT_FAILED ); return false;
+		}
+		windowParms = request->parms;
+	}
 
 	renderFramebufferDesc_t desc;
 	memset( &desc, 0, sizeof( desc ) );
@@ -187,25 +382,96 @@ bool VK_InitRenderDevice( void ) {
 	renderModuleWindowInfo_t windowInfo;
 	memset( &windowInfo, 0, sizeof( windowInfo ) );
 	bool reusedPreserved = false;
-	if ( !vkBackendServices->CreateWindowForFramebuffer( &desc, &windowParms, &windowInfo, &reusedPreserved ) ) {
+	vkStartupDeviceStage = "window creation";
+	if ( VK_Device_InjectStartupFailure( 1 )
+			|| !vkBackendServices->CreateWindowForFramebuffer( &desc, &windowParms, &windowInfo, &reusedPreserved ) ) {
+		R_DisplayPresentationFailed( RDP_INIT_FAILED );
 		common->Warning( "Vulkan: window creation failed" );
 		return false;
 	}
 
-	if ( !VK_Device_Init( vkBackendServices ) ) {
-		vkBackendServices->DestroyAttemptWindow();
+	// A failure after admission belongs to that adapter: automatic selection
+	// resumes after it, a bounded number of times. An explicit r_vkDevice choice,
+	// and anything not specific to one GPU (loader, instance, surface, screen
+	// parameters), still fails over to OpenGL as before.
+	bool screenParmsApplied = false;
+	uint32_t firstCandidate = 0;
+	for ( int adapterAttempt = 1; ; adapterAttempt++ ) {
+		vkDeviceAttempt_t attempt;
+		vkStartupDeviceStage = "device, surface or swapchain creation";
+		bool ready = VK_Device_Init( vkBackendServices, firstCandidate, attempt );
+		// the loader's gate probe kept its instance so the drivers stayed loaded
+		// for this one; it has served its purpose either way
+		VK_Bringup_ReleaseHeldInstance();
+
+		if ( ready && !screenParmsApplied ) {
+			vkStartupDeviceStage = "screen parameters";
+			if ( !VK_ApplyRequestedScreenParms( windowParms ) ) {
+				R_DisplayPresentationFailed( RDP_SCREEN_FAILED );
+				return false;
+			}
+			screenParmsApplied = true;
+		}
+		if ( ready ) {
+			vkBackendServices->RefreshNativeWindowHandles( &windowInfo );
+			if ( windowInfo.pixelWidth > 0 && windowInfo.pixelHeight > 0
+					&& ( (uint32_t)windowInfo.pixelWidth != vkCtx.swapchainExtent.width
+						|| (uint32_t)windowInfo.pixelHeight != vkCtx.swapchainExtent.height ) ) {
+				// fullscreen/mode application changed the drawable size; a
+				// failure here belongs to the window, not to the adapter
+				vkStartupDeviceStage = "resized swapchain creation";
+				if ( !VK_Device_RecreateSwapchain() ) {
+					return false;
+				}
+			}
+			vkStartupDeviceStage = "renderer resources";
+			ready = VK_GuiExecutor_PrepareStartup();
+		}
+		if ( ready ) {
+			if ( adapterAttempt > 1 ) {
+				common->Printf( "Vulkan: started on device %u '%s' after %d failed adapter attempt%s\n",
+						attempt.index, attempt.deviceName, adapterAttempt - 1, adapterAttempt > 2 ? "s" : "" );
+			}
+			return true;
+		}
+		if ( !attempt.admitted || !attempt.automatic || adapterAttempt >= VK_MAX_STARTUP_ADAPTER_ATTEMPTS ) {
+			if ( attempt.admitted && attempt.automatic ) {
+				common->Warning( "Vulkan: giving up after %d adapter attempts", adapterAttempt );
+			}
+			return false;
+		}
+		common->Warning( "Vulkan: device %u '%s' failed during %s; trying the next compatible device",
+				attempt.index, attempt.deviceName, vkStartupDeviceStage );
+		VK_Device_AbandonAdapter();
+		++firstCandidate; // Preference rank, not enumeration index.
+	}
+}
+
+bool VK_PrepareStartupDevice( char *outReason, int reasonLength ) {
+	if ( outReason != NULL && reasonLength > 0 ) {
+		outReason[ 0 ] = '\0';
+	}
+	if ( vkCtx.initialized || VK_PrepareRenderDevice() ) {
+		return true;
+	}
+	if ( outReason != NULL && reasonLength > 0 ) {
+		idStr::snPrintf( outReason, reasonLength, "Vulkan startup failed during %s", vkStartupDeviceStage );
+	}
+	// The CPU renderer remains alive for normal engine owner teardown. Only
+	// partial GPU/window state is released here, before returning to its caller.
+	VK_Bringup_ReleaseHeldInstance();
+	VK_ShutdownRenderDevice();
+	return false;
+}
+
+bool VK_InitRenderDevice( void ) {
+	char reason[ 256 ];
+	if ( !VK_PrepareStartupDevice( reason, sizeof( reason ) ) ) {
+		common->Warning( "%s", reason );
 		return false;
 	}
-
-	(void)vkBackendServices->ApplyScreenParms( &windowParms );
+	renderModuleWindowInfo_t windowInfo = {};
 	vkBackendServices->RefreshNativeWindowHandles( &windowInfo );
-	if ( windowInfo.pixelWidth > 0 && windowInfo.pixelHeight > 0
-			&& ( (uint32_t)windowInfo.pixelWidth != vkCtx.swapchainExtent.width
-				|| (uint32_t)windowInfo.pixelHeight != vkCtx.swapchainExtent.height ) ) {
-		// fullscreen/mode application changed the drawable size
-		(void)VK_Device_RecreateSwapchain();
-	}
-
 	VK_FillGLConfigFromDevice();
 	glConfig.uiViewportX = windowInfo.uiViewportX;
 	glConfig.uiViewportY = windowInfo.uiViewportY;
@@ -226,7 +492,12 @@ VK_ShutdownRenderDevice
 ====================
 */
 void VK_ShutdownRenderDevice( void ) {
+	R_RendererMetrics_ShutdownGpuTimers();
 	VK_Device_Shutdown();
+	// The module owns a separate backend state from the engine. Its view,
+	// space and light pointers refer to frame memory retired by video restart;
+	// console GPU work can run before another view replaces those pointers.
+	memset( &backEnd, 0, sizeof( backEnd ) );
 	if ( vkBackendServices != NULL ) {
 		vkBackendServices->BeginWindowTeardown();
 		vkBackendServices->FinishWindowTeardown();
@@ -247,7 +518,17 @@ void GLimp_Shutdown( void ) {
 }
 
 bool GLimp_SetScreenParms( glimpParms_t parms ) {
+	R_RenderThread_Sync( "screen parms" );
 	if ( vkBackendServices == NULL ) {
+		R_DisplayPresentationFailed( RDP_SCREEN_FAILED );
+		return false;
+	}
+	// Screenshot readback resumes recording on the acquired image so an
+	// ordinary frame can replace a save-preview crop. A following vid_restart
+	// can run in the same command batch, before that frame is presented.
+	// Submit it before changing the window or retiring its swapchain views;
+	// device-idle alone cannot retire an unsubmitted command buffer.
+	if ( VK_GuiExecutor_FrameIsOpen() && !VK_GuiExecutor_EndFrameAndPresent() ) {
 		return false;
 	}
 	renderWindowParms_t windowParms;
@@ -258,26 +539,79 @@ bool GLimp_SetScreenParms( glimpParms_t parms ) {
 	windowParms.borderless = parms.borderless;
 	windowParms.hiddenWindow = parms.hiddenWindow;
 	windowParms.displayHz = parms.displayHz;
-	if ( !vkBackendServices->ApplyScreenParms( &windowParms ) ) {
+	if ( R_IsRecoverableRendererRestart() ) {
+		const auto* request = R_GetRecoverableWindowRequest();
+		if ( !request || request->parms.multiSamples != 0 || request->parms.stereo ) {
+			R_DisplayPresentationFailed( RDP_SCREEN_FAILED ); return false;
+		}
+		windowParms = request->parms;
+	}
+	if ( !VK_ApplyRequestedScreenParms( windowParms ) ) {
+		R_DisplayPresentationFailed( RDP_SCREEN_FAILED );
 		return false;
 	}
-	(void)VK_Device_RecreateSwapchain();
+	if ( !VK_Device_RecreateSwapchain() ) {
+		return false;
+	}
 	glConfig.vidWidth = (int)vkCtx.swapchainExtent.width;
 	glConfig.vidHeight = (int)vkCtx.swapchainExtent.height;
-	glConfig.isFullscreen = parms.fullScreen;
+	glConfig.isFullscreen = windowParms.fullScreen;
 	return true;
 }
 
+/*
+====================
+VK_Backend_PollWindowState
+
+Recovery servicing and the window poll belong to the main thread: recovery
+sets cvars and buffers commands, and the window services call SDL. A frame on
+the render thread (r_vkRenderThread) uses the state its hand-off polled.
+====================
+*/
+static renderModuleWindowInfo_t	vkThreadedWindowInfo;
+static bool						vkThreadedWindowInfoValid = false;
+
+static bool VK_Backend_PollWindowState( renderModuleWindowInfo_t &info ) {
+	if ( vkBackendServices == NULL || vkBackendServices->RefreshNativeWindowHandles == NULL ) {
+		return false;
+	}
+	memset( &info, 0, sizeof( info ) );
+	vkBackendServices->RefreshNativeWindowHandles( &info );
+	glConfig.uiViewportX = info.uiViewportX;
+	glConfig.uiViewportY = info.uiViewportY;
+	glConfig.uiViewportWidth = info.uiViewportWidth;
+	glConfig.uiViewportHeight = info.uiViewportHeight;
+	R_VR_PublishUIViewport( info.uiViewportX, info.uiViewportY, info.uiViewportWidth, info.uiViewportHeight );
+	return true;
+}
+
+void VK_Backend_PrepareThreadedFrame( void ) {
+	VK_Device_ServicePresentationRecovery();
+	vkThreadedWindowInfoValid = VK_Backend_PollWindowState( vkThreadedWindowInfo );
+}
+
+void VK_Backend_CompleteThreadedFrame( void ) {
+	VK_Device_CompleteThreadedRecovery();
+	// a device the render thread latched queues its recovery restart here
+	VK_Device_ServicePresentationRecovery();
+}
+
 void GLimp_SwapBuffers( void ) {
+	const bool threaded = R_RenderThread_OnRenderThread();
+	if ( !threaded ) {
+		// A latched device queues its own recovery restart (VulkanDevice.cpp).
+		VK_Device_ServicePresentationRecovery();
+	}
 	// live window-state poll, mirroring the GL seam
-	if ( vkBackendServices != NULL && vkBackendServices->RefreshNativeWindowHandles != NULL ) {
+	if ( threaded ? vkThreadedWindowInfoValid
+			: ( vkBackendServices != NULL && vkBackendServices->RefreshNativeWindowHandles != NULL ) ) {
+		const unsigned long long windowBegin = r_rendererMetrics.GetInteger() > 0 ? R_RendererMetrics_CpuClock() : 0;
 		renderModuleWindowInfo_t info;
-		memset( &info, 0, sizeof( info ) );
-		vkBackendServices->RefreshNativeWindowHandles( &info );
-		glConfig.uiViewportX = info.uiViewportX;
-		glConfig.uiViewportY = info.uiViewportY;
-		glConfig.uiViewportWidth = info.uiViewportWidth;
-		glConfig.uiViewportHeight = info.uiViewportHeight;
+		if ( threaded ) {
+			info = vkThreadedWindowInfo;
+		} else {
+			VK_Backend_PollWindowState( info );
+		}
 		if ( info.pixelWidth > 0 && info.pixelHeight > 0
 				&& ( (uint32_t)info.pixelWidth != vkCtx.swapchainExtent.width
 					|| (uint32_t)info.pixelHeight != vkCtx.swapchainExtent.height ) ) {
@@ -287,19 +621,28 @@ void GLimp_SwapBuffers( void ) {
 				if ( VK_Device_RecreateSwapchain() ) {
 					glConfig.vidWidth = (int)vkCtx.swapchainExtent.width;
 					glConfig.vidHeight = (int)vkCtx.swapchainExtent.height;
-				}
+				} else return;
 			}
 		}
+		R_RendererMetrics_EndPresentPhase( RENDERER_PRESENT_WINDOW_STATE, windowBegin );
 	}
 
 	// present whatever the frame holds; a frame with no draws still clears
 	VK_GuiExecutor_SetClearColor( vkClearColor );
+	if ( vkCtx.surfaceExtentZero && !VK_GuiExecutor_FrameIsOpen() && !VK_Device_RecreateSwapchain() ) {
+		// Minimized: there is nothing to present into. Pace the loop the way a
+		// blocking vsync present would instead of spinning at com_maxfps.
+		std::this_thread::sleep_for( std::chrono::milliseconds( 16 ) );
+		return;
+	}
 	if ( VK_GuiExecutor_EnsureFrameOpen() ) {
 		// Screenshot/capture readback consumes the completed swapchain image
 		// before presentation.  The GL backend observes the same
-		// tr.takingScreenshot contract in RB_SwapBuffers.
-		if ( !tr.takingScreenshot ) {
+		// R_SubmittedTakingScreenshot() contract in RB_SwapBuffers.
+		if ( !R_SubmittedTakingScreenshot() ) {
+			const unsigned long long swapBegin = r_rendererMetrics.GetInteger() > 0 ? R_RendererMetrics_CpuClock() : 0;
 			VK_GuiExecutor_EndFrameAndPresent();
+			R_RendererMetrics_EndPresentPhase( RENDERER_PRESENT_SWAP, swapBegin );
 		}
 	}
 }
@@ -363,23 +706,99 @@ views arrive with Phase E; RC_SWAP_BUFFERS closes and presents the frame.
 ====================
 */
 void RB_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
+	RB_BeginCommandFrame( cmds );
 	if ( !glConfig.isInitialized ) {
 		return;
+	}
+	// a VR frame moves onto its targets with RC_VR_TARGET (vk_VRPresentation.cpp)
+	RB_VR_BeginBackEnd();
+
+	R_ClassicGuiDomain_ResetFrame();
+	R_ClassicCinematicPostDomain_ResetFrame();
+	R_ClassicSpecialFrameDomain_ResetFrame();
+	R_ClassicWorldAmbientDomain_ResetFrame();
+	R_ClassicInteractionDomain_ResetFrame();
+	R_ClassicFogBlendDomain_ResetFrame();
+	R_ClassicSubviewDomain_ResetFrame();
+	// PBR needs the packets, material table and probes only for a frame
+	// that draws a PBR-authored material (stock content has none).
+	if ( ( r_rendererModernQuality.GetBool() && r_pbrMaterials.GetBool()
+				&& R_ScenePackets_CommandStreamHasPBR( cmds ) )
+			|| r_rendererSharedGui.GetBool()
+			|| r_rendererSharedInWorldGui.GetBool()
+			|| r_rendererSharedCinematicPost.GetBool()
+			|| r_rendererSharedSpecialFrame.GetBool()
+			|| r_rendererSharedWorldAmbient.GetBool()
+			|| r_rendererSharedWorldInteraction.GetBool()
+			|| r_rendererSharedWorldFogBlend.GetBool()
+			|| r_rendererSharedSubview.GetBool() ) {
+		const idScenePacketFrame *scenePackets = NULL;
+		if ( R_ScenePackets_FrontEndFrameAvailable() ) {
+			scenePackets = &R_ScenePackets_FrontEndFrame();
+		} else {
+			R_ScenePackets_BuildLegacyCommandStream( cmds, vkClassicDomainPacketFrame );
+			scenePackets = &vkClassicDomainPacketFrame;
+		}
+		R_MaterialResourceTable_PrepareFrame( *scenePackets );
+		VK_PBRProbes_PrepareFrame( *scenePackets );
+		if ( r_rendererSharedGui.GetBool()
+				|| r_rendererSharedInWorldGui.GetBool() ) {
+			R_ClassicGuiDomain_PrepareFrame( *scenePackets );
+		}
+		// Special-view topology must be sealed before cinematic/post ranges can
+		// join one of its atomic root transactions.
+		if ( r_rendererSharedSubview.GetBool() ) {
+			R_ClassicSubviewDomain_PrepareFrame( *scenePackets );
+		}
+		if ( r_rendererSharedCinematicPost.GetBool() ) {
+			R_ClassicCinematicPostDomain_PrepareFrame( *scenePackets );
+		}
+		if ( r_rendererSharedSpecialFrame.GetBool() ) {
+			R_ClassicSpecialFrameDomain_PrepareFrame( *scenePackets );
+		}
+		if ( r_rendererSharedWorldAmbient.GetBool() ) {
+			R_ClassicWorldAmbientDomain_PrepareFrame( *scenePackets );
+		}
+		if ( r_rendererSharedWorldInteraction.GetBool() ) {
+			R_ClassicInteractionDomain_PrepareFrame( *scenePackets );
+		}
+		if ( r_rendererSharedWorldFogBlend.GetBool() ) {
+			R_ClassicFogBlendDomain_PrepareFrame( *scenePackets );
+		}
 	}
 
 	backEnd.renderTexture = NULL;
 	backEnd.feedbackRenderTexture = NULL;
+	if ( !R_RenderThread_OnRenderThread() ) {
 	backEnd.postProcessTexelSize = tr.postProcessTexelSize;
 	backEnd.postProcessSourceColorSpace = tr.postProcessSourceColorSpace;
 	backEnd.postProcessSMAAQuality = tr.postProcessSMAAQuality;
+	}
+	const classicSubviewDomainView_t *pendingSharedSubview = NULL;
+	VK_Backend_ApplyTileOffset( cmds );
+	VK_PostProcess_PlanPortalSkyMask( cmds );
 
 	for ( ; cmds != NULL; cmds = (const emptyCommand_t *)cmds->next ) {
+		if ( pendingSharedSubview != NULL
+				&& cmds->commandId != RC_COPY_RENDER ) {
+			if ( pendingSharedSubview->backendOutcome[
+					CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN]
+					== CLASSIC_SUBVIEW_DOMAIN_BACKEND_UNRECORDED ) {
+				R_ClassicSubviewDomain_RecordBackendFallback(
+					pendingSharedSubview->viewDef,
+					CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN,
+					CLASSIC_SUBVIEW_DOMAIN_FAILURE_BACKEND_CAPTURE_MISMATCH,
+					static_cast<int>( cmds->commandId ) );
+			}
+			pendingSharedSubview = NULL;
+		}
 		switch ( cmds->commandId ) {
 			case RC_NOP:
 				break;
 			case RC_SET_BUFFER: {
 				const setBufferCommand_t *cmd = (const setBufferCommand_t *)cmds;
 				backEnd.frameCount = cmd->frameCount;
+				VK_PostProcess_ResetLinearCapture();
 				// clear-color policy mirrors the GL RB_SetBuffer; black
 				// otherwise (the swapchain load op always clears)
 				float c[ 3 ];
@@ -401,9 +820,21 @@ void RB_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 			case RC_DRAW_VIEW: {
 				const drawSurfsCommand_t *cmd = (const drawSurfsCommand_t *)cmds;
 				if ( cmd->viewDef != NULL ) {
+					// RB_DrawView accounts this for OpenGL, and the Vulkan backend does
+					// not route through it, so the renderer metrics would otherwise read
+					// zero surfaces on this backend.
+					backEnd.pc.c_surfaces += cmd->viewDef->numDrawSurfs;
+					const classicSubviewDomainView_t *sharedSubview =
+						VK_ClassicSubview_Preflight( cmd->viewDef );
+					pendingSharedSubview = sharedSubview != NULL
+						&& R_ClassicSubviewDomain_IsCaptureBacked( *sharedSubview )
+						? sharedSubview : NULL;
 					if ( cmd->viewDef->viewEntitys == NULL ) {
 						// 2D view (GUI/console/cinematics)
 						VK_GuiExecutor_Draw2DView( cmd->viewDef );
+					} else if ( sharedSubview != NULL
+							&& R_ClassicSubviewDomain_IsDirect( *sharedSubview ) ) {
+						VK_DrawSharedDirectSubview( *sharedSubview );
 					} else {
 						// world view: depth prepass + ambient walks (Phase E)
 						VK_GuiExecutor_Draw3DView( cmd->viewDef );
@@ -425,8 +856,8 @@ void RB_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 				break;
 			}
 			case RC_DRAW_SPECIAL_EFFECTS: {
-				const drawSurfsCommand_t *cmd = (const drawSurfsCommand_t *)cmds;
-				VK_GuiExecutor_PrepareSpecialEffects( cmd->viewDef );
+				const drawSpecialEffectsCommand_t *cmd = (const drawSpecialEffectsCommand_t *)cmds;
+				VK_GuiExecutor_PrepareSpecialEffects( cmd );
 				break;
 			}
 			case RC_CLEAR_RENDERTARGET: {
@@ -449,6 +880,24 @@ void RB_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 				}
 				break;
 			}
+			case RC_RESOLVE_TEMPORAL_PRESENTATION: {
+				resolveTemporalPresentationCommand_t executionCommand =
+					*reinterpret_cast<const resolveTemporalPresentationCommand_t *>( cmds );
+				// Save previews can enter their capture scope after the front end
+				// queued this command. Never let that late flush read or advance
+				// gameplay history.
+				if ( R_SubmittedTakingScreenshot() ) {
+					executionCommand.captureFrame = true;
+					executionCommand.historyValid = false;
+				}
+				(void)VK_GuiExecutor_ResolveTemporalPresentation(
+					executionCommand );
+				break;
+			}
+			case RC_PRESENT_SCALED_SCENE:
+				(void)VK_GuiExecutor_PresentScaledScene(
+					*reinterpret_cast<const presentScaledSceneCommand_t *>( cmds ) );
+				break;
 			case RC_SET_POSTPROCESS_SOURCE_SIZE:
 				backEnd.postProcessTexelSize =
 						((const setPostProcessSourceSizeCommand_t *)cmds)->texelSize;
@@ -461,29 +910,107 @@ void RB_ExecuteBackEndCommands( const emptyCommand_t *cmds ) {
 				backEnd.postProcessSMAAQuality =
 						((const setPostProcessSMAAQualityCommand_t *)cmds)->quality;
 				break;
+			case RC_VR_TARGET:
+				RB_VR_SetTarget( cmds );
+				break;
 			case RC_COPY_RENDER: {
 				const copyRenderCommand_t *cmd = (const copyRenderCommand_t *)cmds;
+				const bool sharedCaptureMatches = pendingSharedSubview != NULL
+					&& pendingSharedSubview->backendOutcome[
+						CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN]
+						== CLASSIC_SUBVIEW_DOMAIN_BACKEND_UNRECORDED
+					&& !r_skipCopyTexture.GetBool()
+					&& R_ClassicSubviewDomain_CaptureMatches( *pendingSharedSubview,
+						cmd->image, cmd->x, cmd->y, cmd->imageWidth,
+						cmd->imageHeight, cmd->cubeFace, cmd->copyDepth );
+				bool copied = false;
 				if ( !r_skipCopyTexture.GetBool() ) {
-					(void)VK_Exec_CopyRender( cmd->image, cmd->x, cmd->y,
+					if ( sharedCaptureMatches ) {
+						copied = VK_Exec_CopyRender(
+							pendingSharedSubview->captureImage,
+							pendingSharedSubview->captureX,
+							pendingSharedSubview->captureY,
+							pendingSharedSubview->captureWidth,
+							pendingSharedSubview->captureHeight,
+							pendingSharedSubview->captureCubeFace,
+							pendingSharedSubview->captureCopyDepth );
+					} else {
+						copied = VK_Exec_CopyRender( cmd->image, cmd->x, cmd->y,
 							cmd->imageWidth, cmd->imageHeight, cmd->cubeFace, cmd->copyDepth );
+					}
 				}
+				if ( pendingSharedSubview != NULL
+						&& pendingSharedSubview->backendOutcome[
+							CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN]
+							== CLASSIC_SUBVIEW_DOMAIN_BACKEND_UNRECORDED ) {
+					if ( sharedCaptureMatches && copied ) {
+						R_ClassicSubviewDomain_RecordOwned(
+							pendingSharedSubview->viewDef,
+							CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN,
+							pendingSharedSubview->captureImage,
+							pendingSharedSubview->captureX,
+							pendingSharedSubview->captureY,
+							pendingSharedSubview->captureWidth,
+							pendingSharedSubview->captureHeight,
+							pendingSharedSubview->captureCubeFace,
+							pendingSharedSubview->captureCopyDepth );
+					} else {
+						R_ClassicSubviewDomain_RecordBackendFallback(
+							pendingSharedSubview->viewDef,
+							CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN,
+							r_skipCopyTexture.GetBool() || !copied
+								? CLASSIC_SUBVIEW_DOMAIN_FAILURE_BACKEND_REJECTED
+								: CLASSIC_SUBVIEW_DOMAIN_FAILURE_BACKEND_CAPTURE_MISMATCH,
+							r_skipCopyTexture.GetBool() ? 2 : 3 );
+					}
+				}
+				pendingSharedSubview = NULL;
 				break;
 			}
-			case RC_SWAP_BUFFERS:
+			case RC_SWAP_BUFFERS: {
+				const bool timingEnabled = r_rendererMetrics.GetInteger() > 0;
+				const int presentBegin = timingEnabled ? Sys_Milliseconds() : 0;
+				const unsigned long long postBegin = timingEnabled ? R_RendererMetrics_CpuClock() : 0;
+				// RB_SwapBuffers runs the back-buffer passes (CRT, then
+				// r_brightness/r_gamma) before presenting, and screenshots read
+				// the result. CRT runs here whether or not this frame is a
+				// capture; the display mapping that applies r_brightness/r_gamma
+				// follows exactly once, in VK_GuiExecutor_EndFrameAndPresent or
+				// VK_GuiExecutor_ReadPixels. A VR frame gives each of its
+				// targets both as the frame leaves it, then copies them out and
+				// mirrors one into the window (vk_VRPresentation.cpp).
+				if ( !RB_VR_PresentFrame() ) {
+					VK_PostProcess_ApplyBackBuffer();
+				}
+				R_RendererMetrics_EndPresentPhase( RENDERER_PRESENT_FINAL_POST, postBegin );
 				// CaptureRenderToFile flushes a cropped save-preview frame with
-				// tr.takingScreenshot set. Match RB_SwapBuffers: retain that
+				// R_SubmittedTakingScreenshot() set. Match RB_SwapBuffers: retain that
 				// back-buffer work for readback so it can be replaced by the real
 				// frame instead of presenting the crop by itself.
-				if ( !tr.takingScreenshot ) {
-					GLimp_SwapBuffers();
+				if ( !R_SubmittedTakingScreenshot() ) {
+					R_SwapBuffersWithInputTiming();
 				}
+				if ( timingEnabled ) { R_RendererMetrics_AddPresentMsec( Sys_Milliseconds() - presentBegin ); }
 				break;
+			}
 			default:
 				// Debug-only command families remain part of the later
 				// long-tail parity phase.
 				break;
 		}
 	}
+	if ( pendingSharedSubview != NULL ) {
+		if ( pendingSharedSubview->backendOutcome[
+				CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN]
+				== CLASSIC_SUBVIEW_DOMAIN_BACKEND_UNRECORDED ) {
+			R_ClassicSubviewDomain_RecordBackendFallback(
+				pendingSharedSubview->viewDef,
+				CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN,
+				CLASSIC_SUBVIEW_DOMAIN_FAILURE_BACKEND_CAPTURE_MISMATCH, 4 );
+		}
+	}
+	R_ClassicSpecialFrameDomain_FinalizeBackendFrame(
+		CLASSIC_SPECIAL_FRAME_BACKEND_VULKAN );
 }
 
 
@@ -519,17 +1046,31 @@ idRenderTexture::idRenderTexture( idImage *colorImage, idImage *depthImage ) {
 }
 
 idRenderTexture::~idRenderTexture() {
+	R_RenderThread_Sync( "render texture" );
 	ReleaseDeviceHandle();
 }
 
 bool idRenderTexture::Resize( int width, int height ) {
-	if ( width <= 0 || height <= 0 || colorImages.Num() <= 0 ) {
+	R_RenderThread_Sync( "render texture" );
+	if ( width <= 0 || height <= 0 || ( colorImages.Num() == 0 && depthImage == NULL ) ) {
+		return false;
+	}
+	// Validate every attachment before unbinding or resizing any of them.
+	// Cube-compatible Vulkan images must stay square.
+	for ( int i = 0; i < colorImages.Num(); i++ ) {
+		if ( colorImages[ i ] == NULL
+				|| ( width != height && colorImages[ i ]->GetOpts().textureType == TT_CUBIC ) ) {
+			return false;
+		}
+	}
+	if ( depthImage != NULL && width != height && depthImage->GetOpts().textureType == TT_CUBIC ) {
+		return false;
+	}
+	// End any rendering that references the old image before replacing it.
+	if ( VK_Exec_ActiveRenderTexture() == this && !VK_Exec_SetRenderTarget( NULL ) ) {
 		return false;
 	}
 	for ( int i = 0; i < colorImages.Num(); i++ ) {
-		if ( colorImages[ i ] == NULL ) {
-			return false;
-		}
 		colorImages[ i ]->Resize( width, height );
 	}
 	if ( depthImage != NULL ) {
@@ -555,15 +1096,8 @@ bool idRenderTexture::MakeCurrent( void ) {
 }
 
 bool idRenderTexture::MakeCurrent( int cubeFace ) {
-	if ( cubeFace == 0 ) {
-		return MakeCurrent();
-	}
-	static bool warnedCubeTargets = false;
-	if ( !warnedCubeTargets ) {
-		warnedCubeTargets = true;
-		common->Warning( "Vulkan: cubemap render-target faces are not yet supported" );
-	}
-	return false;
+	return cubeFace >= 0 && cubeFace < 6 && EnsureDeviceHandle()
+		&& VK_Exec_SetRenderTarget( this, cubeFace );
 }
 
 void idRenderTexture::BindNull( void ) {
@@ -589,23 +1123,8 @@ void idRenderTexture::AddRenderImage( idImage *image ) {
 }
 
 bool idRenderTexture::InitRenderTexture( void ) {
-	if ( !vkCtx.initialized || colorImages.Num() != 1 || colorImages[ 0 ] == NULL ) {
-		knownIncomplete = true;
-		incompleteGeneration = tr.glContextGeneration;
-		return false;
-	}
-
-	vkImageEntry_t *colorEntry = VK_Image_GetEntry( colorImages[ 0 ]->GetDeviceHandle() );
-	vkImageEntry_t *depthEntry = depthImage != NULL
-			? VK_Image_GetEntry( depthImage->GetDeviceHandle() ) : NULL;
-	if ( colorEntry == NULL || colorEntry->attachmentView == VK_NULL_HANDLE
-			|| ( colorEntry->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT ) == 0
-			|| ( depthImage != NULL && ( depthEntry == NULL
-				|| depthEntry->attachmentView == VK_NULL_HANDLE
-				|| ( depthEntry->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT ) == 0
-				|| depthEntry->width != colorEntry->width
-				|| depthEntry->height != colorEntry->height
-				|| depthEntry->samples != colorEntry->samples ) ) ) {
+	vkRenderTargetAttachments_t attachments;
+	if ( !VK_Image_GetRenderTargetAttachments( this, 0, attachments ) ) {
 		knownIncomplete = true;
 		incompleteGeneration = tr.glContextGeneration;
 		return false;
@@ -613,7 +1132,7 @@ bool idRenderTexture::InitRenderTexture( void ) {
 
 	// The public handle remains an opaque non-zero token. Vulkan attachment
 	// objects live on idImage entries, so no framebuffer object is required.
-	deviceHandle = colorImages[ 0 ]->GetDeviceHandle() + 1;
+	deviceHandle = ( colorImages.Num() != 0 ? colorImages[ 0 ] : depthImage )->GetDeviceHandle() + 1;
 	deviceHandleGeneration = tr.glContextGeneration;
 	knownIncomplete = false;
 	incompleteGeneration = -1;
@@ -733,10 +1252,14 @@ void RB_GetShaderTextureMatrix( const float *shaderRegisters, const textureStage
 }
 
 // --- draw_arb2 surface ---
-static const int VK_MAX_MATERIAL_PROGRAMS = 256;
+// Distinct ARB program names the loaded materials declare. Past this the
+// declaring stage loses that program (see R_FindARBProgram) instead of the
+// whole session ending, as it does on OpenGL at its smaller fixed table.
+static const int VK_MAX_MATERIAL_PROGRAMS = 1024;
 typedef struct vkMaterialProgramRecord_s {
 	unsigned int	target;
-	char			name[ MAX_OSPATH ];
+	char			name[ MAX_OSPATH ];		// extension stripped, for matching
+	char			fileName[ MAX_OSPATH ];	// as declared, for loading
 	vkMaterialProgramFamily_t family;
 	bool			interactionProgram;
 	bool			interactionScanned;
@@ -759,79 +1282,7 @@ static const char *VK_MaterialProgramBaseName( const char *name ) {
 }
 
 vkGLSLProgramFamily_t R_GetGLSLProgramFamily( const char *program ) {
-	idStr base = VK_MaterialProgramBaseName( program );
-	idStr extension;
-	base.ExtractFileExtension( extension );
-	base.StripFileExtension();
-
-	// openQ4's live depth-aware postprocess uses the split-source token
-	// `blur.fs`; all retail Quake 4 families use canonical `.glsl` tokens.
-	// Reject other extensions before comparing basenames so an unrelated
-	// split shader cannot silently inherit a stock-family ABI.
-	if ( !base.Icmp( "Blur" ) && !extension.Icmp( "fs" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_DEPTH_AWARE_BLUR;
-	}
-	if ( !extension.Icmp( "fs" ) ) {
-		if ( !base.Icmp( "smaa_edge" ) ) {
-			return VK_GLSL_PROGRAM_FAMILY_SMAA_EDGE;
-		}
-		if ( !base.Icmp( "smaa_weights" ) ) {
-			return VK_GLSL_PROGRAM_FAMILY_SMAA_WEIGHTS;
-		}
-		if ( !base.Icmp( "smaa_blend" ) ) {
-			return VK_GLSL_PROGRAM_FAMILY_SMAA_BLEND;
-		}
-	}
-	if ( extension.Icmp( "glsl" ) != 0 ) {
-		return VK_GLSL_PROGRAM_FAMILY_UNKNOWN;
-	}
-
-	if ( !base.Icmp( "Displacement" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_DISPLACEMENT;
-	}
-	if ( !base.Icmp( "DisplacementTwoStage" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_DISPLACEMENT_TWO_STAGE;
-	}
-	if ( !base.Icmp( "GhostPulling" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_GHOST_PULLING;
-	}
-	if ( !base.Icmp( "Displacement2" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_DISPLACEMENT2;
-	}
-	if ( !base.Icmp( "MultiplyBlend" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_MULTIPLY_BLEND;
-	}
-	if ( !base.Icmp( "DisplacementCube" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_DISPLACEMENT_CUBE;
-	}
-	if ( !base.Icmp( "SniperStretch2" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_SNIPER_STRETCH2;
-	}
-	if ( !base.Icmp( "DepthTexture" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_DEPTH_TEXTURE;
-	}
-	if ( !base.Icmp( "Blur" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_BLUR;
-	}
-	if ( !base.Icmp( "MedLabs" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_MEDLABS;
-	}
-	if ( !base.Icmp( "DepthTexture2" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_DEPTH_TEXTURE2;
-	}
-	if ( !base.Icmp( "AL" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_AL;
-	}
-	if ( !base.Icmp( "Parallaxbump" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_PARALLAX_BUMP;
-	}
-	if ( !base.Icmp( "Customlit" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_CUSTOM_LIT;
-	}
-	if ( !base.Icmp( "Water" ) ) {
-		return VK_GLSL_PROGRAM_FAMILY_WATER;
-	}
-	return VK_GLSL_PROGRAM_FAMILY_UNKNOWN;
+    return VK_MaterialPrograms_NativeFamily( program );
 }
 
 static vkMaterialProgramFamily_t VK_MaterialProgramCanonicalFamily( const char *name ) {
@@ -937,18 +1388,26 @@ int R_FindARBProgram( unsigned int target, const char *program ) {
 		}
 	}
 	if ( vkNumMaterialPrograms >= VK_MAX_MATERIAL_PROGRAMS ) {
-		common->Error( "Vulkan R_FindARBProgram: VK_MAX_MATERIAL_PROGRAMS" );
-		return 0;
+		// Material parsing, not drawing. Zero would drop the program stage and
+		// draw it as a plain one, so return a nonzero handle that names no
+		// record: every lookup bounds-checks it, and the draw path skips the
+		// stage like any other unavailable program.
+		common->Warning( "Vulkan: ARB program table full (%d programs); '%s' is unavailable and its stages are skipped",
+				VK_MAX_MATERIAL_PROGRAMS, program );
+		return VK_MAX_MATERIAL_PROGRAMS + 1;
 	}
 	vkMaterialProgramRecord_t &record = vkMaterialPrograms[ vkNumMaterialPrograms ];
 	memset( &record, 0, sizeof( record ) );
 	record.target = target;
 	idStr::Copynz( record.name, normalized.c_str(), sizeof( record.name ) );
+	idStr fileName = program;
+	fileName.BackSlashesToSlashes();
+	idStr::Copynz( record.fileName, fileName.c_str(), sizeof( record.fileName ) );
 	record.family = VK_MaterialProgramCanonicalFamily( record.name );
 	record.supported = VK_MaterialProgramHasNativeImplementation( target, record.name );
 	vkNumMaterialPrograms++;
 	// A stable nonzero identity preserves newShaderStage_t in the material
-	// parser even when the native implementation is still pending.
+	// parser; programs without a native implementation are translated.
 	return vkNumMaterialPrograms;
 }
 
@@ -973,8 +1432,97 @@ bool R_ARBProgramUsesInteractionInputs( unsigned int target, const char *program
 	return record.interactionProgram;
 }
 
+const char *VK_MaterialProgramFileName( unsigned int target, unsigned int handle ) {
+	if ( handle == 0 || handle > (unsigned int)vkNumMaterialPrograms ) {
+		return NULL;
+	}
+	const vkMaterialProgramRecord_t &record = vkMaterialPrograms[ handle - 1 ];
+	return record.target == target ? record.fileName : NULL;
+}
+
+/*
+====================
+Soft particles
+
+The contract of RB_SoftParticleStageContractSupported and
+RB_DrawSurfHasSoftParticleStage (draw_common.cpp): BSE sprite and oriented
+segments with one plain textured ambient stage, alpha or additive blend,
+sorted between SS_FAR and SS_POST_PROCESS, and not bolted to a depth-hacked
+space. VK_Exec_DrawAmbientStages draws such stages with soft_particle.frag.
+OpenGL also requires GLSL; every Vulkan device has the shader.
+====================
+*/
+static bool VK_SoftParticleBlendSupported( int drawStateBits ) {
+	const int blendBits = drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS );
+	return blendBits == ( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA )
+		|| blendBits == ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE );
+}
+
+bool VK_SoftParticleStageSupported( const drawSurf_t *surf, const shaderStage_t *pStage ) {
+	if ( !r_softParticles.GetBool() || surf == NULL || pStage == NULL || surf->geo == NULL ) {
+		return false;
+	}
+	if ( ( surf->dsFlags & DSF_BSE_EFFECT ) == 0 || ( surf->geo->surfaceFlags & STF_SOFT_PARTICLE_CANDIDATE ) == 0 ) {
+		return false;
+	}
+	if ( surf->space == NULL || surf->space->weaponDepthHack || surf->space->modelDepthHack != 0.0f ) {
+		return false;
+	}
+	if ( R_TriHasPrimBatchMesh( surf->geo ) || pStage->newStage != NULL ) {
+		return false;
+	}
+	if ( pStage->lighting != SL_AMBIENT || pStage->hasAlphaTest ) {
+		return false;
+	}
+	if ( pStage->texture.image == NULL && pStage->texture.cinematic == NULL ) {
+		return false;
+	}
+	if ( pStage->texture.texgen != TG_EXPLICIT && pStage->texture.texgen != TG_POT_CORRECTION ) {
+		return false;
+	}
+	if ( !VK_SoftParticleBlendSupported( pStage->drawStateBits ) ) {
+		return false;
+	}
+	const idMaterial *shader = surf->material;
+	return shader != NULL && shader->GetSort() >= SS_FAR && shader->GetSort() < SS_POST_PROCESS;
+}
+
+// RB_SoftParticleStageVisible
+static bool VK_SoftParticleStageVisible( const shaderStage_t *pStage, const float *regs ) {
+	if ( regs != NULL && regs[ pStage->conditionRegister ] == 0.0f ) {
+		return false;
+	}
+	const int blendBits = pStage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS );
+	if ( regs != NULL ) {
+		const float r = regs[ pStage->color.registers[0] ];
+		const float g = regs[ pStage->color.registers[1] ];
+		const float b = regs[ pStage->color.registers[2] ];
+		const float a = regs[ pStage->color.registers[3] ];
+		if ( blendBits == ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) && r <= 0.0f && g <= 0.0f && b <= 0.0f ) {
+			return false;
+		}
+		if ( blendBits == ( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA ) && a <= 0.0f ) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool RB_DrawSurfHasSoftParticleStage( const drawSurf_t *surf ) {
-	(void)surf;
+	if ( !r_softParticles.GetBool() || surf == NULL || surf->material == NULL || surf->geo == NULL ) {
+		return false;
+	}
+	const idMaterial *shader = surf->material;
+	if ( !shader->HasAmbient() ) {
+		return false;
+	}
+	for ( int stage = 0; stage < shader->GetNumStages(); ++stage ) {
+		const shaderStage_t *pStage = shader->GetStage( stage );
+		if ( VK_SoftParticleStageSupported( surf, pStage )
+				&& VK_SoftParticleStageVisible( pStage, surf->shaderRegisters ) ) {
+			return true;
+		}
+	}
 	return false;
 }
 
@@ -990,15 +1538,36 @@ bool RB_ShadowMapEstimateArb2CacheOwnership( const viewLight_t *vLight, const vi
 	return false;
 }
 
-bool RB_ShadowMapProjectedAtlasSlotForLight( int lightDefIndex, shadowMapArb2AtlasSlot_t &slot ) {
-	(void)lightDefIndex;
+bool RB_ShadowMapProjectedAtlasSlotForLight( const viewLight_t *vLight,
+		const viewDef_t *viewDef, shadowMapArb2AtlasSlot_t &slot ) {
+	(void)vLight; (void)viewDef;
 	memset( &slot, 0, sizeof( slot ) );
 	return false;
 }
 
-void RB_ShadowMapProjectedAtlasSlotMarkUsed( int lightDefIndex ) {
+bool RB_ShadowMapProjectedAtlasSlotMarkUsed( int lightDefIndex,
+		int signature, std::uint64_t storageGeneration,
+		int cellX, int cellY, int cellSpan ) {
+	(void)lightDefIndex; (void)signature; (void)cellX; (void)cellY;
+	(void)storageGeneration; (void)cellSpan;
+	return false;
+}
+
+bool RB_ShadowMapPointCubeForLight( const viewLight_t *vLight,
+		const viewDef_t *viewDef, shadowMapArb2PointCube_t &cube ) {
+	(void)vLight; (void)viewDef;
+	memset( &cube, 0, sizeof( cube ) );
+	return false;
+}
+
+void RB_ShadowMapPointCubeMarkUsed( int lightDefIndex ) {
 	(void)lightDefIndex;
 }
+
+bool RB_ModernShadowMapsBegin( const viewDef_t *, int, int, int, int ) { return false; }
+bool RB_ModernShadowMapRender( const viewDef_t *, struct modernShadowLightDescriptor_s & ) { return false; }
+bool RB_ModernShadowMapBindings( rendererShadowTextureBindings_t & ) { return false; }
+void RB_ModernShadowMapsShutdown() {}
 
 bool RB_ShadowMapArb2ReceiverFallbackSelfTest( void ) {
 	// no ARB2 receiver path exists under the Vulkan backend yet
@@ -1073,6 +1642,8 @@ const modernGLShaderProgramInfo_t *R_ModernGLShaderLibrary_FindProgram( modernGL
 }
 
 // --- upload ring stats (Vulkan staging ring replaces it in Phase D) ---
+bool R_RendererUpload_QueryStorage(rendererUploadStorage_t&) { return false; }
+
 const rendererUploadStats_t &R_RendererUpload_Stats( void ) {
 	static rendererUploadStats_t stats;
 	memset( &stats, 0, sizeof( stats ) );
@@ -1084,9 +1655,10 @@ const rendererUploadStats_t &R_RendererUpload_Stats( void ) {
 ===============================================================================
 	Residual link surface (complete enumeration, link cycle 6).
 
-	R_InitOpenGL and the GL vid-restart flow stay compiled but unreachable
-	under the Vulkan seam; their callees plus the per-frame upload hooks,
-	GL self-test commands, and debug-tool entry points resolve here.
+	R_InitOpenGL stays compiled but unreachable; full vid_restart uses the
+	backend-dispatched idRenderSystemLocal::InitOpenGL seam.
+	The remaining GL callees, per-frame upload hooks and GL self-test commands
+	resolve here without creating an OpenGL context.
 ===============================================================================
 */
 
@@ -1111,39 +1683,60 @@ void RB_ReportAppleGL21RouteCounters( void ) {
 }
 
 void R_ReloadARBPrograms_f( const idCmdArgs &args ) {
+	R_ReloadGLSLPrograms_f( args );
+}
+
+void R_ReloadGLSLPrograms_f( const idCmdArgs &args ) {
 	(void)args;
-	common->Printf( "reloadARBprograms: not applicable under the Vulkan backend\n" );
+	VK_MaterialPrograms_Reload();
 }
 
 void R_LoadARBProgramsForStartup( void ) {
 }
 
 void R_ReportShaderPrograms_f( const idCmdArgs &args ) {
-	(void)args;
-	common->Printf( "Vulkan material programs: %d registered\n", vkNumMaterialPrograms );
+	R_RenderThread_Sync( "material program stats" );
+	const bool detailed = args.Argc() < 2 || idStr::Icmp( args.Argv( 1 ), "summary" ) != 0;
+	common->Printf( "Vulkan material programs: %d of %d registered (r_vkARBTranslation %d)\n", vkNumMaterialPrograms,
+			VK_MAX_MATERIAL_PROGRAMS, cvarSystem->GetCVarInteger( "r_vkARBTranslation" ) );
+	VK_MaterialPrograms_Report( detailed );
+	if ( !detailed ) { return; }
+	// "translatable" means the program translates on its own; whether its
+	// pair compiles and draws is in the version list above.
 	for ( int i = 0; i < vkNumMaterialPrograms; i++ ) {
 		const vkMaterialProgramRecord_t &record = vkMaterialPrograms[ i ];
 		common->Printf( "  %3d  %s  %s  %s\n", i + 1,
 				record.target == GL_VERTEX_PROGRAM_ARB ? "vertex  " : "fragment",
-				record.supported ? "native     " : "unsupported",
+				record.supported ? "native      "
+					: VK_MaterialPrograms_ARBTranslatable( record.target, record.fileName ) ? "translatable"
+					: "unsupported ",
 				record.name );
 	}
 }
 
 bool R_ValidateGLSLProgram( newShaderStage_t *stage ) {
+	// The preceding handoff validated this immutable material. During full
+	// overlap the worker never rewrites these fields, so a producer lookup can
+	// use the result without joining. New/reloaded programs still join first.
+	if ( !R_RenderThread_OnRenderThread() && R_RenderThread_FrontEndMayOverlap()
+		&& stage != NULL && stage->glslProgramLoaded && stage->glslProgramGeneration == tr.glContextGeneration ) {
+		return stage->glslProgramValid;
+	}
+	R_RenderThread_Sync( "material program validation" );
 	if ( stage == NULL || !stage->glslProgram ) {
 		return false;
 	}
 
 	const vkGLSLProgramFamily_t family =
 			R_GetGLSLProgramFamily( stage->glslProgramName );
-	const bool supported = family > VK_GLSL_PROGRAM_FAMILY_UNKNOWN
-			&& family < VK_GLSL_PROGRAM_FAMILY_COUNT;
+	const bool supported = ( family > VK_GLSL_PROGRAM_FAMILY_UNKNOWN
+			&& family < VK_GLSL_PROGRAM_FAMILY_COUNT ) || VK_MaterialPrograms_Validate( stage );
 
+	if ( R_RenderThread_OnRenderThread() && R_RenderThread_FrontEndMayOverlap() ) return supported;
 	stage->glslProgramLoaded = true;
 	stage->glslProgramValid = supported;
 	stage->glslProgramGeneration = tr.glContextGeneration;
-	// Vulkan pipelines are selected by the stable family enum. Keep all GL
+	// Vulkan pipelines belong to the native caches. Keep all GL
 	// object handles zero so material teardown cannot mistake native Vulkan
 	// identities for live OpenGL resources.
 	stage->glslProgramObject = 0;
@@ -1176,6 +1769,10 @@ idImage *RB_ResolveGLSLShaderTextureImage( const newShaderStage_t *stage,
 					? globalImages->specularTableImage : globalImages->defaultImage;
 		case GLSL_SHADERTEXTURE_IMAGE:
 		default:
+			if ( din != NULL && RB_FlatDiffuseSurfaceActive( din->surf )
+					&& idStr::Icmp( stage->shaderTextureNames[ slot ], "DiffuseMap" ) == 0 ) {
+				return globalImages->whiteImage;
+			}
 			return stage->shaderTextureImages[ slot ];
 	}
 }
@@ -1185,7 +1782,10 @@ bool R_IsARBProgramValid( unsigned int target, unsigned int handle ) {
 		return false;
 	}
 	const vkMaterialProgramRecord_t &record = vkMaterialPrograms[ handle - 1 ];
-	return record.target == target && record.supported;
+	if ( record.target != target ) {
+		return false;
+	}
+	return record.supported || VK_MaterialPrograms_ARBTranslatable( target, record.fileName );
 }
 
 vkMaterialProgramFamily_t R_GetARBProgramFamily( unsigned int target, unsigned int handle ) {
@@ -1199,13 +1799,17 @@ vkMaterialProgramFamily_t R_GetARBProgramFamily( unsigned int target, unsigned i
 	return record.family;
 }
 
-// GL state wrappers (cold)
+// GL state wrappers: cold, except that the debug tools' emulation
+// (vk_DebugTools.cpp) tracks them while it draws
+void VK_DebugGL_State( int stateBits );
+void VK_DebugGL_Cull( int cullType );
+
 void GL_State( int stateBits ) {
-	(void)stateBits;
+	VK_DebugGL_State( stateBits );
 }
 
 void GL_Cull( int cullType ) {
-	(void)cullType;
+	VK_DebugGL_Cull( cullType );
 }
 
 void GL_SelectTexture( int unit ) {
@@ -1234,6 +1838,16 @@ void R_GLDebugOutput_Shutdown( void ) {
 void R_GLDebugOutput_FlushMessages( void ) {
 }
 
+// The shared clustered-lighting TU acquires per-light atlas cells; the atlas
+// itself is a GL-backend TU, so the Vulkan module reports no residency.
+modernLightAtlasReject_t R_ModernLightImageAtlas_Acquire( const idImage *image, float rect[4] ) {
+	(void)image;
+	if ( rect != NULL ) {
+		rect[0] = rect[1] = rect[2] = rect[3] = 0.0f;
+	}
+	return MODERN_LIGHT_ATLAS_REJECT_UNAVAILABLE;
+}
+
 // modern GL executor (the Vulkan executor replaces it from Phase E)
 void R_ModernGLExecutor_Init( const renderBackendCaps_t &caps, const renderFeatureSet_t &features ) {
 	(void)caps; (void)features;
@@ -1246,11 +1860,20 @@ void R_ModernGLExecutor_InvalidatePlans( void ) {
 }
 
 void R_ModernGLExecutor_PrintGfxInfo( void ) {
+	VK_PBR_PrintGfxInfo();
+	VK_PBRProbes_PrintGfxInfo();
+	VK_HDRScene_PrintInfo();
+}
+
+bool R_ModernGLExecutor_LinearScreenshot( const char *fileName ) {
+	return VK_PostProcess_LinearScreenshot( fileName );
 }
 
 bool R_ModernGLExecutor_ModernVisibleRequestedForPost( void ) {
 	return false;
 }
+
+bool R_ModernGLExecutor_PBRLinearSceneActive( void ) { return VK_HDRScene_LinearActive(); }
 
 const modernGLExecutorStats_t &R_ModernGLExecutor_Stats( void ) {
 	static modernGLExecutorStats_t stats;
@@ -1270,7 +1893,21 @@ void R_RenderGraphResources_Init( const renderBackendCaps_t &caps, const renderF
 void R_RenderGraphResources_Shutdown( void ) {
 }
 
+// The Vulkan module's GPU resources live in VMA heaps rather than GL's
+// render-graph pool, so report those instead.
 void R_RenderGraphResources_PrintGfxInfo( void ) {
+	R_RenderThread_Sync( "resource profile" );
+	VK_Device_PrintMemoryInfo();
+	common->Printf( "Vulkan images: resident=%d capacity=%d\n", VK_Image_GetResidentCount(), VK_MAX_IMAGES );
+	VK_Device_PrintPipelineInfo();
+}
+
+void R_RendererVulkanMemoryInfo_f( const idCmdArgs &args ) {
+	R_RenderThread_Sync( "resource profile" );
+	VK_Device_PrintMemoryInfo();
+	common->Printf( "Vulkan images: resident=%d capacity=%d\n", VK_Image_GetResidentCount(), VK_MAX_IMAGES );
+	VK_Device_PrintPipelineInfo();
+	VK_Exec_PrintResourceInfo( args.Argc() > 1 && idStr::Icmp( args.Argv( 1 ), "reset" ) == 0 );
 }
 
 void R_RenderGraphResources_DumpLatest( void ) {
@@ -1327,9 +1964,10 @@ void R_RendererUpload_RecordLegacyUpload( int bytes ) {
 bool VK_ShadowMap_ResourcesKnownGood( bool pointLight );
 
 // Phase F3 hook for the front-end stencil-volume elision gate
-// (R_ShadowMapLightWillUseShadowMaps, tr_light.cpp). Vulkan deliberately
-// remains conservative until per-view atlas/cube/material admission can be
-// proven before front-end submission, preserving same-frame stencil fallback.
+// (R_ShadowMapLightWillUseShadowMaps, tr_light.cpp). Vulkan reports the same
+// per-light-class generation truth OpenGL does; a later per-view admission
+// miss degrades to one unshadowed frame plus a sticky volume restore rather
+// than to a dropped receiver.
 bool RB_ShadowMapResourcesKnownGood( bool pointLight ) {
 	return VK_ShadowMap_ResourcesKnownGood( pointLight );
 }
@@ -1342,48 +1980,10 @@ void RB_ShutdownShadowMapResources( void ) {
 void RB_ShutdownScenePostProcess( void ) {
 }
 
-// buffered debug-tool surface (Phase I implements as buffered-line draws)
-void RB_AddDebugLine( const idVec4 &color, const idVec3 &start, const idVec3 &end, const int lifeTime, const bool depthTest ) {
-	(void)color; (void)start; (void)end; (void)lifeTime; (void)depthTest;
-}
-
-void RB_AddDebugPolygon( const idVec4 &color, const idWinding &winding, const int lifeTime, const bool depthTest ) {
-	(void)color; (void)winding; (void)lifeTime; (void)depthTest;
-}
-
-void RB_AddDebugText( const char *text, const idVec3 &origin, float scale, const idVec4 &color, const idMat3 &viewAxis, const int align, const int lifetime, bool depthTest ) {
-	(void)text; (void)origin; (void)scale; (void)color; (void)viewAxis; (void)align; (void)lifetime; (void)depthTest;
-}
-
-void RB_ClearDebugLines( int time ) {
-	(void)time;
-}
-
-void RB_ClearDebugPolygons( int time ) {
-	(void)time;
-}
-
-void RB_ClearDebugText( int time ) {
-	(void)time;
-}
-
-void RB_DrawBounds( const idBounds &bounds ) {
-	(void)bounds;
-}
-
-float RB_DrawTextLength( const char *text, float scale, int len ) {
-	(void)text; (void)scale; (void)len;
-	return 0.0f;
-}
-
-void RB_DrawElementsImmediate( const srfTriangles_t *tri ) {
-	(void)tri;
-}
-
+// The debug-tool buffers, RB_DrawBounds and RB_ShutdownDebugTools come from
+// tr_rendertools.cpp and RB_DrawElementsImmediate from vk_DebugTools.cpp.
+// RB_ShowImages is empty on OpenGL too (tr_backend.cpp).
 void RB_ShowImages( void ) {
-}
-
-void RB_ShutdownDebugTools( void ) {
 }
 
 // GL-subsystem self-test commands: honest skips under the Vulkan backend
@@ -1396,8 +1996,10 @@ void RB_ShutdownDebugTools( void ) {
 VK_GL_SELFTEST_STUB( RendererDeferredResolve_RunSelfTest )
 VK_GL_SELFTEST_STUB( RendererForwardPlus_RunSelfTest )
 VK_GL_SELFTEST_STUB( RendererGBuffer_RunSelfTest )
+VK_GL_SELFTEST_STUB( RendererPBRVisible_RunSelfTest )
 VK_GL_SELFTEST_STUB( RendererGLStateCache_RunSelfTest )
 VK_GL_SELFTEST_STUB( RendererGpuDriven_RunSelfTest )
+VK_GL_SELFTEST_STUB( RendererLightImageAtlas_RunSelfTest )
 VK_GL_SELFTEST_STUB( RendererLowOverhead_RunSelfTest )
 VK_GL_SELFTEST_STUB( RendererModernCompatibility_RunSelfTest )
 VK_GL_SELFTEST_STUB( RendererModernGLExecutor_RunSelfTest )
@@ -1410,5 +2012,3 @@ VK_GL_SELFTEST_STUB( RendererUpload_RunSelfTest )
 VK_GL_SELFTEST_STUB( RendererVisiblePath_RunSelfTest )
 
 #endif /* OPENQ4_RENDERER_VK_MODULE */
-
-

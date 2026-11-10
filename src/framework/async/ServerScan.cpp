@@ -29,18 +29,161 @@ If you have questions concerning this license or the applicable additional terms
 
 
 
+#include "../../ui/ListGUILocal.h"
+
 idCVar gui_filter_password( "gui_filter_password", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARCHIVE, "Password filter" );
-idCVar gui_filter_players( "gui_filter_players", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARCHIVE, "Players filter" );
+idCVar gui_filter_players( "gui_filter_players", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARCHIVE, "Players filter: 0 shows every server, 1 hides full ones, 2 empty ones, 3 both" );
 idCVar gui_filter_gameType( "gui_filter_gameType", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARCHIVE, "Gametype filter" );
 idCVar gui_filter_idle( "gui_filter_idle", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARCHIVE, "Idle servers filter" );
 idCVar gui_filter_game( "gui_filter_game", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARCHIVE, "Game filter" );
+idCVar gui_filter_mod( "gui_filter_mod", "", CVAR_GUI | CVAR_ARCHIVE, "Server browser mod filter; empty shows every mod" );
+
+static const int MAX_BROWSER_SERVERS = 4096;
+static const int MAX_BROWSER_FAVORITES = 256;
+static const char *BROWSER_FAVORITES_FILE = "server_favorites.list";
+
+// Network text is data, never a row delimiter, a material escape or GUI code.
+// Retain printable localized text, but strip color/image escapes and controls.
+static idStr ServerBrowserText( const char *text, int limit = 96 ) {
+	idStr result;
+	if ( text == NULL ) {
+		return result;
+	}
+	for ( int i = 0; text[i] && result.Length() < limit; ++i ) {
+		const unsigned char ch = static_cast<unsigned char>( text[i] );
+		if ( ch >= 128 ) {
+			const int bytes = ch >= 0xc2 && ch <= 0xdf ? 2 : ch >= 0xe0 && ch <= 0xef ? 3 : ch >= 0xf0 && ch <= 0xf4 ? 4 : 0;
+			bool valid = bytes != 0;
+			for ( int j = 1; valid && j < bytes; ++j ) {
+				const unsigned char next = static_cast<unsigned char>( text[i+j] );
+				valid = next >= 0x80 && next <= 0xbf;
+				if ( j == 1 ) {
+					valid = valid && !( ( ch == 0xe0 && next < 0xa0 ) || ( ch == 0xed && next >= 0xa0 ) ||
+						( ch == 0xf0 && next < 0x90 ) || ( ch == 0xf4 && next >= 0x90 ) );
+				}
+			}
+			if ( !valid ) {
+				result += '?';
+				continue;
+			}
+			if ( result.Length() + bytes > limit ) {
+				break;
+			}
+			for ( int j = 0; j < bytes; ++j ) {
+				result += text[i+j];
+			}
+			i += bytes - 1;
+			continue;
+		}
+		if ( ch == '^' ) {
+			if ( text[i + 1] >= '0' && text[i + 1] <= '9' ) {
+				++i;
+			}
+			continue;
+		}
+		result += ( ch < 32 || ch == 127 ) ? ' ' : text[i];
+	}
+	return result;
+}
+
+// A mod's identity must survive display, selection and filtering unchanged.
+// Reject malformed folder identifiers rather than inventing a sanitized token.
+static idStr ServerBrowserMod( const char *mod ) {
+	if ( !mod || !mod[0] ) {
+		return "baseoq4";
+	}
+	if ( strlen( mod ) > 64 || !strcmp( mod, "." ) || !strcmp( mod, ".." ) ) {
+		return "";
+	}
+	for ( const char *p = mod; *p; ++p ) {
+		if ( !( ( *p >= 'a' && *p <= 'z' ) || ( *p >= 'A' && *p <= 'Z' ) ||
+			( *p >= '0' && *p <= '9' ) || *p == '_' || *p == '-' || *p == '.' ) ) {
+			return "";
+		}
+	}
+	idStr result = mod;
+	result.ToLower();
+	return result;
+}
+
+static bool ServerBrowserMapPath( const char *path ) {
+	if ( path == NULL || !path[0] || strlen( path ) > 128 || strstr( path, ".." ) || path[0] == '/' ) {
+		return false;
+	}
+	for ( const char *p = path; *p; ++p ) {
+		if ( !( ( *p >= 'a' && *p <= 'z' ) || ( *p >= 'A' && *p <= 'Z' ) ||
+			( *p >= '0' && *p <= '9' ) || *p == '/' || *p == '_' || *p == '-' ) ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// A favorite's endpoint as the favorites keep it: as Sys_NetAdrToString
+// writes it, except a loopback endpoint, which it writes as "localhost:port",
+// a name only a DNS lookup parses again (AddServer parses without one); the
+// numeric form lists and round-trips through the favorites file.
+static idStr ServerBrowserEndpoint( const netadr_t &adr ) {
+	if ( adr.type == NA_LOOPBACK ) {
+		return va( "127.0.0.1:%i", adr.port );
+	}
+	return Sys_NetAdrToString( adr );
+}
+
+// The limit each public game type ends on, as the game's descriptor table
+// flags it (mp/GameTypes.cpp: GTF_CAPTURELIMIT, GTF_ROUNDLIMIT, DeadZone's
+// control time; every other public type GTF_FRAGLIMIT): the label and the
+// serverinfo key the browser's details name it by.
+static void ServerBrowserMatchLimit( const char *type, const char *&label, const char *&key ) {
+	static const char *capture[] = { "CTF", "One Flag CTF", "Arena CTF", "Arena One Flag CTF" };
+	static const char *rounds[] = { "Clan Arena", "Freeze Tag", "Red Rover" };
+	label = "#str_107660";
+	key = "si_fragLimit";
+	for ( int i = 0; i < static_cast<int>( sizeof( capture ) / sizeof( capture[0] ) ); ++i ) {
+		if ( !idStr::Icmp( type, capture[i] ) ) {
+			label = "#str_107661";
+			key = "si_captureLimit";
+		}
+	}
+	for ( int i = 0; i < static_cast<int>( sizeof( rounds ) / sizeof( rounds[0] ) ); ++i ) {
+		if ( !idStr::Icmp( type, rounds[i] ) ) {
+			label = "#str_41404";
+			key = "si_roundLimit";
+		}
+	}
+	if ( !idStr::Icmp( type, "DeadZone" ) ) {
+		label = "#str_122008";
+		key = "si_controlTime";
+	}
+}
+
+static const char *ServerBrowserGameType( const char *type ) {
+	static const char *tokens[] = { "DM", "Tourney", "Team DM", "CTF", "Arena CTF", "DeadZone",
+		"Duel", "Clan Arena", "Freeze Tag", "Red Rover", "One Flag CTF", "Arena One Flag CTF" };
+	static const char *labels[] = { "#str_107679", "#str_107676", "#str_107677", "#str_107678",
+		"#str_107681", "#str_42860", "#str_41300", "#str_41301", "#str_41302", "#str_41303",
+		"#str_107680", "#str_107682" };
+	for ( int i = 0; i < static_cast<int>( sizeof( tokens ) / sizeof( tokens[0] ) ); ++i ) {
+		if ( !idStr::Icmp( type, tokens[i] ) ) {
+			return common->GetLanguageDict()->GetString( labels[i] );
+		}
+	}
+	return type;
+}
 
 const char* l_gameTypes[] = {
-	"Deathmatch",
+	"DM",
 	"Tourney",
 	"Team DM",
-	"Last Man",
 	"CTF",
+	"Arena CTF",
+	"DeadZone",
+	"Duel",
+	"Clan Arena",
+	"Freeze Tag",
+	"Red Rover",
+	"One Flag CTF",
+	"Arena One Flag CTF",
 	NULL
 };
 
@@ -53,9 +196,17 @@ idServerScan::idServerScan
 */
 idServerScan::idServerScan( ) {
 	m_pGUI = NULL;
+	listGUI = NULL;
+	favoritesLoaded = false;
 	m_sort = SORT_PING;
 	m_sortAscending = true;
 	challenge = 0;
+	revision = 0;
+	loadPct = 0.0f;
+	scanned = -1;
+	hoverOverride = -1;
+	tooltipServer = -2;
+	tooltipRevision = -1;
 	LocalClear();
 }
 
@@ -65,17 +216,23 @@ idServerScan::LocalClear
 ================
 */
 void idServerScan::LocalClear( ) {
+	++revision;
 	scan_state = IDLE;
 	incoming_net = false;
 	lan_pingtime = -1;
 	net_info.Clear();
 	net_servers.Clear();
 	cur_info = 0;
-	if ( listGUI ) {
+	if ( listGUI && listGUI->IsConfigured() ) {
 		listGUI->Clear();
+		listGUI->SetSelection( -1 );
+		m_pGUI->SetStateInt( "serverList_selid_0", -1 );
 	}
 	incoming_useTimeout = false;
 	m_sortedServers.Clear();
+	lastResponder.Clear();
+	scanned = -1;
+	SetLoadProgress( "", 0.0f );
 }
 
 /*
@@ -108,12 +265,13 @@ void idServerScan::Shutdown( ) {
 idServerScan::SetupLANScan
 ================
 */
-void idServerScan::SetupLANScan( ) {	
+void idServerScan::SetupLANScan( ) {
 	Clear();
 	GUIUpdateSelected();
 	scan_state = LAN_SCAN;
 	challenge++;
 	lan_pingtime = Sys_Milliseconds();
+	UpdateBrowserStatus();
 	common->DPrintf( "SetupLANScan with challenge %d\n", challenge );
 }
 
@@ -123,8 +281,9 @@ idServerScan::InfoResponse
 ================
 */
 int idServerScan::InfoResponse( networkServer_t &server ) {
-	if ( scan_state == IDLE ) {
-		return false;
+	if ( ( scan_state != LAN_SCAN && scan_state != NET_SCAN ) ||
+		server.clients < 0 || server.clients > MAX_ASYNC_CLIENTS || Num() >= MAX_BROWSER_SERVERS ) {
+		return -1;
 	}
 
 	idStr serv = Sys_NetAdrToString( server.adr );
@@ -151,7 +310,7 @@ int idServerScan::InfoResponse( networkServer_t &server ) {
 
 		// check for duplicate servers
 		for ( int i = 0; i < Num() ; i++ ) {
-			if ( memcmp( &(*this)[ i ].adr, &server.adr, sizeof(netadr_t) ) == 0 ) {
+			if ( Sys_CompareNetAdrBase( (*this)[ i ].adr, server.adr ) && (*this)[ i ].adr.port == server.adr.port ) {
 				common->DPrintf( "idServerScan::InfoResponse LAN_SCAN: duplicate server %s\n", serv.c_str() );
 				return true;
 			}
@@ -159,7 +318,7 @@ int idServerScan::InfoResponse( networkServer_t &server ) {
 	}
 
 	const char *si_map = server.serverInfo.GetString( "si_map" );
-	const idDecl *mapDecl = declManager->FindType( DECL_MAPDEF, si_map, false );
+	const idDecl *mapDecl = ServerBrowserMapPath( si_map ) ? declManager->FindType( DECL_MAPDEF, si_map, false ) : NULL;
 	const idDeclEntityDef *mapDef = static_cast< const idDeclEntityDef * >( mapDecl );
 	if ( mapDef ) {
 		const char *mapName = common->GetLanguageDict()->GetString( mapDef->dict.GetString( "name", si_map ) );
@@ -168,15 +327,16 @@ int idServerScan::InfoResponse( networkServer_t &server ) {
 		server.serverInfo.Set( "si_mapName", si_map );
 	}
 
+	lastResponder = ServerBrowserText( server.serverInfo.GetString( "si_name" ) );
+	if ( lastResponder.Length() == 0 ) {
+		lastResponder = serv;
+	}
+
 	int index = Append( server );
-	// for now, don't maintain sorting when adding new info response servers
 	m_sortedServers.Append( Num()-1 );
-	if ( listGUI->IsConfigured( ) && !IsFiltered( server ) ) {
-		GUIAdd( Num()-1, server );
-	}
-	if ( listGUI->GetSelection( NULL, 0 ) == ( Num()-1 ) ) {
-		GUIUpdateSelected();
-	}
+	l_serverScan = this;
+	m_sortedServers.Sort( idServerScan::Cmp );
+	ApplyFilter();
 
 	return index;
 }
@@ -188,6 +348,9 @@ idServerScan::AddServer
 */
 void idServerScan::AddServer( int id, const char *srv ) {
 	inServer_t s;
+	if ( net_servers.Num() >= MAX_BROWSER_SERVERS ) {
+		return;
+	}
 	
 	incoming_net = true;
 	incoming_lastTime = Sys_Milliseconds() + INCOMING_TIMEOUT;
@@ -201,7 +364,16 @@ void idServerScan::AddServer( int id, const char *srv ) {
 	if ( !s.adr.port ) {
 		s.adr.port = PORT_SERVER;
 	}
-	
+
+	// A master that answers both the legacy and the extended list request names
+	// the same server twice, and a dual-stack LAN host answers both sweeps.
+	// Listing an endpoint once keeps the ping accounting and the browser honest.
+	for ( int i = 0; i < net_servers.Num(); i++ ) {
+		if ( Sys_CompareNetAdrBase( net_servers[ i ].adr, s.adr ) && net_servers[ i ].adr.port == s.adr.port ) {
+			return;
+		}
+	}
+
 	net_servers.Append( s );
 }
 
@@ -259,6 +431,9 @@ void idServerScan::NetScan( ) {
 		// start the scan one second from now...
 		scan_state = WAIT_ON_INIT;
 		endWaitTime = Sys_Milliseconds() + 1000;
+		lastResponder.Clear();
+		scanned = -1;
+		UpdateBrowserStatus();
 		return;
 	}
 
@@ -267,13 +442,20 @@ void idServerScan::NetScan( ) {
 
 	scan_state = NET_SCAN;
 	challenge++;
-	
+	++revision;
+
 	idList<networkServer_t>::Clear();
 	m_sortedServers.Clear();
 	cur_info = 0;
 	net_info.Clear();
-	listGUI->Clear();
+	if ( listGUI && listGUI->IsConfigured() ) {
+		listGUI->Clear();
+		listGUI->SetSelection( -1 );
+	}
 	GUIUpdateSelected();
+	lastResponder.Clear();
+	scanned = -1;
+	UpdateBrowserStatus();
 	common->DPrintf( "NetScan with challenge %d\n", challenge );
 	
 	while ( cur_info < Min( net_servers.Num(), MAX_PINGREQUESTS ) ) {
@@ -297,9 +479,11 @@ void idServerScan::RunFrame( ) {
 	
 	if ( scan_state == WAIT_ON_INIT ) {
 		if ( Sys_Milliseconds() >= endWaitTime ) {
-				scan_state = IDLE;
-				NetScan();
-			}
+			scan_state = IDLE;
+			NetScan();
+		} else {
+			UpdateLoadProgress();
+		}
 		return;
 	} 
 	
@@ -309,6 +493,10 @@ void idServerScan::RunFrame( ) {
 		if ( timeout_limit > lan_pingtime ) {
 			common->Printf( "Scanned for servers on the LAN\n" );
 			scan_state = IDLE;
+			scanned = Num();
+			EndServers();
+		} else {
+			UpdateLoadProgress();
 		}
 		return;
 	}
@@ -337,11 +525,13 @@ void idServerScan::RunFrame( ) {
 	
 	// update state
 	if ( ( !incoming_net || ( incoming_useTimeout && Sys_Milliseconds() > incoming_lastTime ) ) && net_info.GetNumKeyVals() == 0 ) {
-		EndServers();
 		// the list is complete, we are no longer waiting for any getInfo replies
 		common->Printf( "Scanned %d servers.\n", cur_info );
 		scan_state = IDLE;
+		scanned = cur_info;
+		EndServers();
 	}
+	UpdateBrowserStatus();
 }
 
 /*
@@ -375,6 +565,12 @@ void idServerScan::GUIConfig( idUserInterface *pGUI, const char *name ) {
 		listGUI = uiManager->AllocListGUI();
 	}
 	listGUI->Config( pGUI, name );
+	listName = name != NULL ? name : "";
+	tooltipServer = -2;
+	if ( m_pGUI ) {
+		m_pGUI->SetStateString( "loadNotice", loadNotice.c_str() );
+		m_pGUI->SetStateFloat( "loadPct", loadPct );
+	}
 }
 
 /*
@@ -383,13 +579,15 @@ idServerScan::GUIUpdateSelected
 ================
 */
 void idServerScan::GUIUpdateSelected( void ) {
-	char screenshot[ MAX_STRING_CHARS ];
-
-	if ( !m_pGUI ) {
+	if ( !m_pGUI || !listGUI || !listGUI->IsConfigured() ) {
 		return;
 	}
-	int i = listGUI->GetSelection( NULL, 0 );
-	if ( i == -1 || i >= Num() ) {
+	idStr address;
+	const bool selected = GetSelectedAddress( address );
+	m_pGUI->SetStateBool( "browser_selected", selected );
+	m_pGUI->SetStateString( "favoriteStatus", common->GetLanguageDict()->GetString( "#str_200292" ) );
+	m_pGUI->SetStateString( "server_IP", address.c_str() );
+	if ( !selected ) {
 		m_pGUI->SetStateString( "server_name", "" );
 		m_pGUI->SetStateString( "player1", "" );
 		m_pGUI->SetStateString( "player2", "" );
@@ -405,25 +603,386 @@ void idServerScan::GUIUpdateSelected( void ) {
 		m_pGUI->SetStateString( "server_IP", "" );
 		m_pGUI->SetStateString( "server_passworded", "" );
 	} else {
-		m_pGUI->SetStateString( "server_name", (*this)[ i ].serverInfo.GetString( "si_name" ) );
+		const int i = listGUI->GetSelection( NULL, 0 );
+		const networkServer_t &server = (*this)[i];
+		m_pGUI->SetStateString( "server_name", ServerBrowserText( server.serverInfo.GetString( "si_name" ) ).c_str() );
 		for ( int j = 0; j < 8; j++ ) {
-			if ( (*this)[i].clients > j ) {
-				m_pGUI->SetStateString( va( "player%i", j + 1 ) , (*this)[ i ].nickname[ j ] );
+			if ( server.clients > j ) {
+				m_pGUI->SetStateString( va( "player%i", j + 1 ) , ServerBrowserText( server.nickname[j], MAX_NICKLEN - 1 ).c_str() );
 			} else {
 				m_pGUI->SetStateString( va( "player%i", j + 1 ) , "" );
 			}
 		}
-		m_pGUI->SetStateString( "server_map", (*this)[ i ].serverInfo.GetString( "si_mapName" ) );
-		fileSystem->FindMapScreenshot( (*this)[ i ].serverInfo.GetString( "si_map" ), screenshot, MAX_STRING_CHARS );
-		m_pGUI->SetStateString( "browser_levelshot", screenshot );
-		m_pGUI->SetStateString( "server_gameType", (*this)[ i ].serverInfo.GetString( "si_gameType" ) );
-		m_pGUI->SetStateString( "server_IP", Sys_NetAdrToString( (*this)[ i ].adr ) );
-		if ( (*this)[ i ].serverInfo.GetBool( "si_usePass" ) ) {
-			m_pGUI->SetStateString( "server_passworded", "PASSWORD REQUIRED" );
-		} else {
-			m_pGUI->SetStateString( "server_passworded", "" );
+		m_pGUI->SetStateString( "server_map", ServerBrowserText( server.serverInfo.GetString( "si_mapName" ) ).c_str() );
+		char levelshot[ MAX_STRING_CHARS ] = "";
+		const char *map = server.serverInfo.GetString( "si_map" );
+		if ( ServerBrowserMapPath( map ) ) {
+			fileSystem->FindMapScreenshot( map, levelshot, sizeof( levelshot ) );
+		}
+		m_pGUI->SetStateString( "browser_levelshot", levelshot );
+		m_pGUI->SetStateString( "server_gameType", ServerBrowserText( ServerBrowserGameType( server.serverInfo.GetString( "si_gameType" ) ) ).c_str() );
+		m_pGUI->SetStateString( "server_passworded", server.serverInfo.GetBool( "si_usePass" ) ? common->GetLanguageDict()->GetString( "#str_200933" ) : "" );
+		m_pGUI->SetStateString( "favoriteStatus", common->GetLanguageDict()->GetString( IsFavorite( server.adr ) ? "#str_200293" : "#str_200292" ) );
+	}
+	m_pGUI->StateChanged( common->GetPresentationTime() );
+}
+
+bool idServerScan::GetSelectedAddress( idStr &address ) {
+	address.Clear();
+	if ( !m_pGUI || !listGUI || !listGUI->IsConfigured() ||
+		m_pGUI->State().GetInt( "serverList_sel_0", "-1" ) < 0 ) {
+		return false;
+	}
+	const int selected = listGUI->GetSelection( NULL, 0 );
+	if ( selected < 0 || selected >= Num() || IsFiltered( (*this)[selected] ) ) {
+		m_pGUI->SetStateInt( "serverList_selid_0", -1 );
+		return false;
+	}
+	address = Sys_NetAdrToString( (*this)[selected].adr );
+	return true;
+}
+
+void idServerScan::GUIInit() {
+	LoadFavorites();
+	UpdateFilterByMod( 0 );
+}
+
+void idServerScan::LoadFavorites() {
+	if ( favoritesLoaded ) {
+		return;
+	}
+	favoritesLoaded = true;
+	const int size = fileSystem->ReadFile( BROWSER_FAVORITES_FILE, NULL );
+	if ( size <= 0 || size > 32768 ) {
+		return;
+	}
+	void *buffer = NULL;
+	const int read = fileSystem->ReadFile( BROWSER_FAVORITES_FILE, &buffer );
+	if ( buffer == NULL ) {
+		return;
+	}
+	if ( read > 0 && read <= 32768 ) {
+		const char *bytes = static_cast<const char *>( buffer );
+		idStr line;
+		for ( int i = 0; i <= read && favorites.Num() < MAX_BROWSER_FAVORITES; ++i ) {
+			if ( i == read || bytes[i] == '\n' ) {
+				// A loopback favorite saved before the numeric form reads as one.
+				if ( !idStr::Icmpn( line.c_str(), "localhost:", 10 ) ) {
+					line = idStr( "127.0.0.1" ) + ( line.c_str() + 9 );
+				}
+				netadr_t endpoint;
+				if ( line.Length() && line.Length() < 128 && Sys_StringToNetAdr( line.c_str(), &endpoint, false ) &&
+					( endpoint.type == NA_IP || endpoint.type == NA_IP6 || endpoint.type == NA_LOOPBACK ) ) {
+					if ( !endpoint.port ) {
+						endpoint.port = PORT_SERVER;
+					}
+					favorites.AddUnique( ServerBrowserEndpoint( endpoint ) );
+				}
+				line.Clear();
+			} else if ( bytes[i] != '\r' && line.Length() < 128 ) {
+				line += bytes[i];
+			}
 		}
 	}
+	fileSystem->FreeFile( buffer );
+}
+
+bool idServerScan::IsFavorite( const netadr_t &address ) const {
+	return favorites.FindIndex( ServerBrowserEndpoint( address ) ) >= 0;
+}
+
+void idServerScan::ToggleFavorite() {
+	LoadFavorites();
+	idStr selected;
+	if ( !GetSelectedAddress( selected ) ) {
+		return;
+	}
+	ToggleFavoriteServer( listGUI->GetSelection( NULL, 0 ) );
+}
+
+bool idServerScan::ToggleFavoriteServer( int index ) {
+	LoadFavorites();
+	if ( index < 0 || index >= Num() ) {
+		return false;
+	}
+	const idStr address = ServerBrowserEndpoint( (*this)[ index ].adr );
+	idStrList updated = favorites;
+	const int old = updated.FindIndex( address );
+	if ( old >= 0 ) {
+		updated.RemoveIndex( old );
+	} else if ( updated.Num() < MAX_BROWSER_FAVORITES ) {
+		updated.Append( address );
+	} else {
+		common->Warning( "Server favorites limit reached (%d)", MAX_BROWSER_FAVORITES );
+		return false;
+	}
+	idStr contents;
+	for ( int i = 0; i < updated.Num(); ++i ) {
+		contents += updated[i];
+		contents += '\n';
+	}
+	const char *pending = "server_favorites.pending";
+	if ( fileSystem->WriteFile( pending, contents.c_str(), contents.Length() ) != contents.Length() ||
+		!fileSystem->PromoteFile( pending, BROWSER_FAVORITES_FILE ) ) {
+		fileSystem->RemoveFile( pending );
+		common->Warning( "Could not save server favorites" );
+		return false;
+	}
+	favorites = updated;
+	l_serverScan = this;
+	m_sortedServers.Sort( idServerScan::Cmp );
+	ApplyFilter();
+	return true;
+}
+
+void idServerScan::AddFavoriteServers() {
+	LoadFavorites();
+	for ( int i = 0; i < favorites.Num(); ++i ) {
+		AddServer( i, favorites[i].c_str() );
+	}
+}
+
+void idServerScan::UpdateFilterByMod( int direction ) {
+	idStrList mods;
+	mods.Append( "" );
+	mods.Append( "baseoq4" );
+	for ( int i = 0; i < Num(); ++i ) {
+		const idStr mod = ServerBrowserMod( (*this)[i].serverInfo.GetString( "fs_game" ) );
+		if ( mod.Length() ) {
+			mods.AddUnique( mod );
+		}
+	}
+	mods.Sort();
+	const idStr archived = gui_filter_mod.GetString()[0] ? ServerBrowserMod( gui_filter_mod.GetString() ) : idStr( "" );
+	int index = mods.FindIndex( archived );
+	if ( index < 0 && direction == 0 ) {
+		// Keep an archived mod filter while its servers are still being queried.
+		mods.Append( archived );
+		index = mods.Num() - 1;
+	} else {
+		index = ( Max( 0, index ) + ( direction < 0 ? mods.Num() - 1 : direction > 0 ? 1 : 0 ) ) % mods.Num();
+	}
+	gui_filter_mod.SetString( mods[index].c_str() );
+	if ( m_pGUI ) {
+		m_pGUI->SetStateString( "filterMod", mods[index].Length() ? ServerBrowserText( mods[index].c_str(), 64 ).c_str() : common->GetLanguageDict()->GetString( "#str_41502" ) );
+	}
+	ApplyFilter();
+}
+
+void idServerScan::UpdateBrowserStatus() {
+	UpdateLoadProgress();
+	if ( !m_pGUI || !listGUI || !listGUI->IsConfigured() ) {
+		return;
+	}
+	int visible = 0;
+	for ( int i = 0; i < Num(); ++i ) {
+		visible += !IsFiltered( (*this)[i] );
+	}
+	idStr status;
+	if ( scan_state == LAN_SCAN ) {
+		status = common->GetLanguageDict()->GetString( "#str_107293" );
+	} else if ( scan_state != IDLE ) {
+		const idStr count = va( "%d", visible );
+		status = va( common->GetLanguageDict()->GetString( "#str_107298" ), count.c_str() );
+	} else {
+		status = va( common->GetLanguageDict()->GetString( "#str_42861" ), visible, Num() );
+	}
+	m_pGUI->SetStateInt( "browser_count", visible );
+	m_pGUI->SetStateInt( "browser_total", Num() );
+	m_pGUI->SetStateBool( "browser_scanning", scan_state != IDLE );
+	// The status names the scan's state and counts, so a new one is news
+	// for a menu drawing its own list too.
+	if ( status.Icmp( m_pGUI->State().GetString( "sortNotice" ) ) ) {
+		++revision;
+		m_pGUI->SetStateString( "sortNotice", status.c_str() );
+		m_pGUI->StateChanged( common->GetPresentationTime() );
+	}
+}
+
+/*
+================
+idServerScan::UpdateLoadProgress
+
+The scan's progress as retail's browser showed it under the list: a new
+list's request ("Getting list of servers...") or the LAN's sweep ("Scanning
+for LAN servers..."), then the server that answered last with the count of
+listed servers heard from or given up on ("Scanning %d/%d: %s"; on the LAN,
+"Scanning - Found: %s" across its reply window), and once the scan completes,
+how many it covered ("Scanned %d Quake 4 Servers") on a full bar. A refresh
+says nothing until a server answers, as retail's did.
+================
+*/
+void idServerScan::UpdateLoadProgress() {
+	if ( scan_state == LAN_SCAN ) {
+		const float elapsed = static_cast<float>( Sys_Milliseconds() - lan_pingtime ) / static_cast<float>( REPLY_TIMEOUT );
+		if ( lastResponder.Length() > 0 ) {
+			SetLoadProgress( va( common->GetLanguageDict()->GetString( "#str_107298" ), lastResponder.c_str() ), elapsed );
+		} else {
+			SetLoadProgress( common->GetLanguageDict()->GetString( "#str_107293" ), elapsed );
+		}
+		return;
+	}
+	if ( scan_state == NET_SCAN || scan_state == WAIT_ON_INIT ) {
+		const int listed = net_servers.Num();
+		const int covered = scan_state == NET_SCAN ? Max( 0, cur_info - net_info.GetNumKeyVals() ) : 0;
+		const float fraction = listed > 0 ? static_cast<float>( covered ) / static_cast<float>( listed ) : 0.0f;
+		if ( lastResponder.Length() > 0 ) {
+			SetLoadProgress( va( common->GetLanguageDict()->GetString( "#str_107297" ), covered, listed, lastResponder.c_str() ), fraction );
+		} else {
+			SetLoadProgress( incoming_net ? common->GetLanguageDict()->GetString( "#str_107736" ) : "", fraction );
+		}
+		return;
+	}
+	if ( scanned >= 0 ) {
+		SetLoadProgress( va( common->GetLanguageDict()->GetString( "#str_107294" ), scanned ), 1.0f );
+	} else {
+		SetLoadProgress( "", 0.0f );
+	}
+}
+
+/*
+================
+idServerScan::SetLoadProgress
+
+Publishes the progress to the stock browser and, through the revision, to a
+menu that draws its own list. The fraction moves in whole percents: a LAN
+sweep's changes every frame, and each change republishes that menu's list.
+================
+*/
+void idServerScan::SetLoadProgress( const char *notice, float pct ) {
+	pct = static_cast<float>( static_cast<int>( Max( 0.0f, Min( 1.0f, pct ) ) * 100.0f + 0.5f ) ) / 100.0f;
+	if ( pct == loadPct && !loadNotice.Cmp( notice ) ) {
+		return;
+	}
+	loadNotice = notice;
+	loadPct = pct;
+	++revision;
+	if ( m_pGUI ) {
+		m_pGUI->SetStateString( "loadNotice", loadNotice.c_str() );
+		m_pGUI->SetStateFloat( "loadPct", loadPct );
+		m_pGUI->StateChanged( common->GetPresentationTime() );
+	}
+}
+
+/*
+================
+idServerScan::GetServerDetails
+================
+*/
+bool idServerScan::GetServerDetails( int index, idStr &address, idStrList &players, idStrList &settings ) const {
+	if ( index < 0 || index >= Num() ) {
+		return false;
+	}
+	const networkServer_t &server = (*this)[ index ];
+	const idDict &info = server.serverInfo;
+	address = Sys_NetAdrToString( server.adr );
+	players.Clear();
+	for ( int i = 0; i < Min( server.clients, MAX_ASYNC_CLIENTS ); ++i ) {
+		players.Append( ServerBrowserText( server.nickname[ i ], MAX_NICKLEN - 1 ) );
+	}
+	const char *limitLabel = NULL;
+	const char *limitKey = NULL;
+	ServerBrowserMatchLimit( info.GetString( "si_gameType" ), limitLabel, limitKey );
+	const char *yes = common->GetLanguageDict()->GetString( "#str_107703" );
+	const char *no = common->GetLanguageDict()->GetString( "#str_107704" );
+	const struct { const char *label; idStr value; } lines[] = {
+		{ "#str_107702", ServerBrowserText( info.GetString( "si_mapName" ) ) },
+		{ "#str_107659", ServerBrowserText( info.GetString( "si_timeLimit" ), 16 ) },
+		{ limitLabel, ServerBrowserText( info.GetString( limitKey ), 16 ) },
+		{ "#str_107664", info.GetBool( "si_teamDamage" ) ? yes : no },
+		{ "#str_107666", info.GetBool( "si_autobalance" ) ? yes : no },
+		{ "#str_107662", info.GetBool( "si_pure" ) ? yes : no },
+		{ "#str_104254", info.GetBool( "si_spectators" ) ? yes : no },
+	};
+	settings.Clear();
+	for ( int i = 0; i < static_cast<int>( sizeof( lines ) / sizeof( lines[0] ) ); ++i ) {
+		settings.Append( va( "%s: %s", common->GetLanguageDict()->GetString( lines[i].label ), lines[i].value.c_str() ) );
+	}
+	return true;
+}
+
+/*
+================
+idServerScan::GUIUpdateHover
+================
+*/
+void idServerScan::GUIUpdateHover() {
+	if ( !m_pGUI || !listGUI || !listGUI->IsConfigured() ) {
+		return;
+	}
+	const int row = hoverOverride >= 0 ? hoverOverride : m_pGUI->State().GetInt( va( "%s_hover", listName.c_str() ), "-1" );
+	idList<int> visible;
+	VisibleServers( visible );
+	const int index = row >= 0 && row < visible.Num() ? visible[ row ] : -1;
+	if ( index == tooltipServer && ( index < 0 || tooltipRevision == revision ) ) {
+		return;
+	}
+	tooltipServer = index;
+	tooltipRevision = revision;
+	idStr address;
+	idStrList players, settings;
+	const bool shown = GetServerDetails( index, address, players, settings );
+	m_pGUI->SetStateBool( "serverinfo_visible", shown );
+	m_pGUI->SetStateString( "server_tooltip_ip", address.c_str() );
+	// The lists read their items until one is missing.
+	for ( int i = 0; i < MAX_ASYNC_CLIENTS; ++i ) {
+		if ( i < players.Num() ) {
+			m_pGUI->SetStateString( va( "server_tooltip_playerlist_item_%d", i ), players[ i ].c_str() );
+		} else {
+			m_pGUI->DeleteStateVar( va( "server_tooltip_playerlist_item_%d", i ) );
+		}
+	}
+	for ( int i = 0; i < 8; ++i ) {
+		if ( i < settings.Num() ) {
+			m_pGUI->SetStateString( va( "server_tooltip_settingslist_item_%d", i ), settings[ i ].c_str() );
+		} else {
+			m_pGUI->DeleteStateVar( va( "server_tooltip_settingslist_item_%d", i ) );
+		}
+	}
+	m_pGUI->StateChanged( common->GetPresentationTime() );
+}
+
+/*
+================
+idServerScan::VisibleServers
+================
+*/
+void idServerScan::VisibleServers( idList<int> &out ) {
+	out.Clear();
+	for ( int i = m_sortAscending ? 0 : m_sortedServers.Num() - 1;
+			m_sortAscending ? i < m_sortedServers.Num() : i >= 0;
+			m_sortAscending ? i++ : i-- ) {
+		if ( !IsFiltered( (*this)[ m_sortedServers[ i ] ] ) ) {
+			out.Append( m_sortedServers[ i ] );
+		}
+	}
+}
+
+/*
+================
+idServerScan::IsFavoriteServer
+================
+*/
+bool idServerScan::IsFavoriteServer( int index ) const {
+	return index >= 0 && index < Num() && IsFavorite( (*this)[ index ].adr );
+}
+
+/*
+================
+idServerScan::GameTypeName
+================
+*/
+const char *idServerScan::GameTypeName( const char *type ) {
+	return ServerBrowserGameType( type != NULL ? type : "" );
+}
+
+/*
+================
+idServerScan::ValidMapPath
+================
+*/
+bool idServerScan::ValidMapPath( const char *path ) {
+	return ServerBrowserMapPath( path );
 }
 
 /*
@@ -431,8 +990,23 @@ void idServerScan::GUIUpdateSelected( void ) {
 idServerScan::GUIAdd
 ================
 */
-void idServerScan::GUIAdd( int id, const networkServer_t server ) {
-	
+void idServerScan::GUIAdd( int id, const networkServer_t &server ) {
+	const idStr name = ServerBrowserText( server.serverInfo.GetString( "si_name" ) );
+	const idStr map = ServerBrowserText( server.serverInfo.GetString( "si_mapName" ), 64 );
+	const idStr type = ServerBrowserText( ServerBrowserGameType( server.serverInfo.GetString( "si_gameType" ) ), 64 );
+	const idStr row = va( "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d/%d\t%s\t%s",
+		IsFavorite( server.adr ) ? "mtr_favorite" : "",
+		server.serverInfo.GetBool( "si_usePass" ) ? "mtr_locked" : "",
+		server.serverInfo.GetInt( "net_serverDedicated" ) != 0 ? "mtr_dedicated" : "",
+		server.serverInfo.GetBool( "sv_punkbuster" ) ? "mtr_pb" : "",
+		name.Length() ? name.c_str() : Sys_NetAdrToString( server.adr ), Max( 0, server.ping ),
+		server.serverInfo.GetBool( "si_repeater" ) ? "mtr_repeater" : "",
+		idMath::ClampInt( 0, MAX_ASYNC_CLIENTS, server.clients ),
+		idMath::ClampInt( 0, MAX_ASYNC_CLIENTS, server.serverInfo.GetInt( "si_maxPlayers" ) ),
+		type.c_str(), map.c_str() );
+	// AllocListGUI creates the concrete engine feeder; the public game-module
+	// interface intentionally has no Add method. Keep its ABI unchanged.
+	static_cast<idListGUILocal *>( listGUI )->Add( id, row );
 }
 
 /*
@@ -441,22 +1015,32 @@ idServerScan::ApplyFilter
 ================
 */
 void idServerScan::ApplyFilter( ) {
-	int i;
-	networkServer_t serv;
-	idStr s;
-
+	++revision;
+	if ( !listGUI || !listGUI->IsConfigured() || !m_pGUI ) {
+		return;
+	}
+	const int oldSelection = m_pGUI->State().GetInt( "serverList_sel_0", "-1" ) >= 0 ? listGUI->GetSelection( NULL, 0 ) : -1;
+	int row = 0;
+	int newSelection = -1;
 	listGUI->SetStateChanges( false );
 	listGUI->Clear();
-	for ( i = m_sortAscending ? 0 : m_sortedServers.Num() - 1;
+	for ( int i = m_sortAscending ? 0 : m_sortedServers.Num() - 1;
 			m_sortAscending ? i < m_sortedServers.Num() : i >= 0;
 			m_sortAscending ? i++ : i-- ) {
-		serv = (*this)[ m_sortedServers[ i ] ];
+		const networkServer_t &serv = (*this)[ m_sortedServers[ i ] ];
 		if ( !IsFiltered( serv ) ) {
 			GUIAdd( m_sortedServers[ i ], serv );
+			if ( m_sortedServers[i] == oldSelection ) {
+				newSelection = row;
+			}
+			++row;
 		}
 	}
-	GUIUpdateSelected();
+	listGUI->SetSelection( newSelection );
+	m_pGUI->SetStateInt( "serverList_selid_0", -1 );
 	listGUI->SetStateChanges( true );
+	GUIUpdateSelected();
+	UpdateBrowserStatus();
 }
 
 /*
@@ -464,24 +1048,15 @@ void idServerScan::ApplyFilter( ) {
 idServerScan::IsFiltered
 ================
 */
-bool idServerScan::IsFiltered( const networkServer_t server ) {
+bool idServerScan::IsFiltered( const networkServer_t &server ) {
 	int i;
 	const idKeyValue *keyval;
 
-	// OS support filter
-#if 0
-	// filter out pure servers that won't provide checksumed game code for client OS
-	keyval = server.serverInfo.FindKey( "si_pure" );
-	if ( keyval && !idStr::Cmp( keyval->GetValue(), "1" ) ) {
-		if ( ( server.OSMask & ( 1 << BUILD_OS_ID ) ) == 0 ) {
-			return true;
-		}
-	}
-#else
-	if ( ( server.OSMask & ( 1 << BUILD_OS_ID ) ) == 0 ) {
+	// openQ4 supplies its own game modules on each platform. The legacy mask
+	// describes downloadable proprietary game DLLs, not protocol compatibility.
+	if ( server.clients < 0 || server.clients > MAX_ASYNC_CLIENTS ) {
 		return true;
 	}
-#endif
 	// password filter
 	keyval = server.serverInfo.FindKey( "si_usePass" );
 	if ( keyval && gui_filter_password.GetInteger() == 1 ) {
@@ -495,18 +1070,27 @@ bool idServerScan::IsFiltered( const networkServer_t server ) {
 			return true;
 		}
 	}
-	// players filter
+	// players filter: its bits hide full and empty servers, in the order of
+	// the stock choices (#str_200306: Show All; Hide Full; Hide Empty; Hide
+	// Full and Empty)
+	const int players = gui_filter_players.GetInteger();
 	keyval = server.serverInfo.FindKey( "si_maxPlayers" );
-	if ( keyval ) {
-		if ( gui_filter_players.GetInteger() == 1 && server.clients == atoi( keyval->GetValue() ) ) {
-			return true;
-		} else if ( gui_filter_players.GetInteger() == 2 && ( !server.clients || server.clients == atoi( keyval->GetValue() ) ) ) {
+	if ( keyval && ( players & 1 ) ) {
+		const int capacity = atoi( keyval->GetValue() );
+		if ( capacity > 0 && server.clients >= capacity ) {
 			return true;
 		}
 	}
+	if ( ( players & 2 ) && server.clients == 0 ) {
+		return true;
+	}
 	// gametype filter
 	keyval = server.serverInfo.FindKey( "si_gameType" );
-	if ( keyval && gui_filter_gameType.GetInteger() ) {
+	if ( gui_filter_gameType.GetInteger() ) {
+		if ( keyval == NULL ) {
+			return true;
+		}
+		const int requestedGameType = gui_filter_gameType.GetInteger() - 1;
 		i = 0;
 		while ( l_gameTypes[ i ] ) {
 			if ( !keyval->GetValue().Icmp( l_gameTypes[ i ] ) ) {
@@ -514,7 +1098,9 @@ bool idServerScan::IsFiltered( const networkServer_t server ) {
 			}
 			i++;
 		}
-		if ( l_gameTypes[ i ] && i != gui_filter_gameType.GetInteger() -1 ) {
+		// Unknown/hidden tokens fail closed.  The inherited implementation let
+		// every unrecognized modern gametype bypass an active filter.
+		if ( l_gameTypes[ i ] == NULL || i != requestedGameType ) {
 			return true;
 		}
 	}
@@ -526,18 +1112,22 @@ bool idServerScan::IsFiltered( const networkServer_t server ) {
 		}
 	}
 
-	// autofilter D3XP games if the user does not has the XP installed
-	if(!fileSystem->HasD3XP() && !idStr::Icmp(server.serverInfo.GetString( "fs_game" ), "d3xp")) {
+	const idStr mod = ServerBrowserMod( server.serverInfo.GetString( "fs_game" ) );
+	if ( gui_filter_mod.GetString()[0] && idStr::Icmp( gui_filter_mod.GetString(), mod.c_str() ) ) {
 		return true;
 	}
 
-	// filter based on the game doom or XP
-	if(gui_filter_game.GetInteger() == 1) { //Only Doom
-		if(idStr::Icmp(server.serverInfo.GetString("fs_game"), "")) {
-			return true;
+	// player search
+	if ( playerSearch.Length() > 0 ) {
+		const int clients = idMath::ClampInt( 0, MAX_ASYNC_CLIENTS, server.clients );
+		for ( i = 0; i < clients; i++ ) {
+			idStr name = ServerBrowserText( server.nickname[i], MAX_NICKLEN - 1 );
+			name.RemoveColors();
+			if ( name.Find( playerSearch.c_str(), false ) >= 0 ) {
+				break;
+			}
 		}
-	} else if(gui_filter_game.GetInteger() == 2) { //Only D3XP
-		if(idStr::Icmp(server.serverInfo.GetString("fs_game"), "d3xp")) {
+		if ( i == clients ) {
 			return true;
 		}
 	}
@@ -547,24 +1137,141 @@ bool idServerScan::IsFiltered( const networkServer_t server ) {
 
 /*
 ================
+idServerScan::IsFilterSet
+================
+*/
+bool idServerScan::IsFilterSet( browserFilter_t filter ) const {
+	switch ( filter ) {
+		case BROWSER_FILTER_FULL:
+			return ( gui_filter_players.GetInteger() & 1 ) != 0;
+		case BROWSER_FILTER_EMPTY:
+			return ( gui_filter_players.GetInteger() & 2 ) != 0;
+		case BROWSER_FILTER_PASSWORD:
+			return gui_filter_password.GetInteger() == 2;
+	}
+	return false;
+}
+
+/*
+================
+idServerScan::ToggleFilter
+================
+*/
+void idServerScan::ToggleFilter( browserFilter_t filter ) {
+	if ( filter == BROWSER_FILTER_PASSWORD ) {
+		gui_filter_password.SetInteger( IsFilterSet( filter ) ? 0 : 2 );
+	} else {
+		gui_filter_players.SetInteger( ( gui_filter_players.GetInteger() & 3 ) ^ ( filter == BROWSER_FILTER_FULL ? 1 : 2 ) );
+	}
+	ApplyFilter();
+}
+
+/*
+================
+idServerScan::ClearFilters
+================
+*/
+void idServerScan::ClearFilters() {
+	gui_filter_players.SetInteger( 0 );
+	gui_filter_password.SetInteger( 0 );
+	gui_filter_gameType.SetInteger( 0 );
+	gui_filter_mod.SetString( "" );
+	playerSearch.Clear();
+	if ( m_pGUI ) {
+		m_pGUI->SetStateString( "filterMod", common->GetLanguageDict()->GetString( "#str_41502" ) );
+	}
+	ApplyFilter();
+}
+
+/*
+================
+idServerScan::GetGameTypeFilter
+================
+*/
+int idServerScan::GetGameTypeFilter() const {
+	return gui_filter_gameType.GetInteger();
+}
+
+/*
+================
+idServerScan::StepGameTypeFilter
+================
+*/
+void idServerScan::StepGameTypeFilter( int direction ) {
+	int types = 0;
+	while ( l_gameTypes[ types ] ) {
+		types++;
+	}
+	int filter = gui_filter_gameType.GetInteger();
+	if ( filter < 0 || filter > types ) {
+		filter = 0;
+	}
+	gui_filter_gameType.SetInteger( ( filter + ( direction < 0 ? types : direction > 0 ? 1 : 0 ) ) % ( types + 1 ) );
+	ApplyFilter();
+}
+
+/*
+================
+idServerScan::GameTypeFilterName
+================
+*/
+const char *idServerScan::GameTypeFilterName( int filter ) {
+	for ( int i = 0; l_gameTypes[ i ] && filter > 0; ++i ) {
+		if ( i == filter - 1 ) {
+			return ServerBrowserGameType( l_gameTypes[ i ] );
+		}
+	}
+	return "";
+}
+
+/*
+================
+idServerScan::SetPlayerSearch
+================
+*/
+void idServerScan::SetPlayerSearch( const char *text ) {
+	idStr search = ServerBrowserText( text, MAX_NICKLEN - 1 );
+	search.RemoveColors();
+	search.StripLeading( ' ' );
+	search.StripTrailing( ' ' );
+	if ( !search.Cmp( playerSearch ) ) {
+		return;
+	}
+	playerSearch = search;
+	ApplyFilter();
+}
+
+/*
+================
 idServerScan::Cmp
 ================
 */
 
 int idServerScan::Cmp( const int *a, const int *b ) {
-	networkServer_t serv1, serv2;
+	const networkServer_t &serv1 = (*l_serverScan)[ *a ];
+	const networkServer_t &serv2 = (*l_serverScan)[ *b ];
 	idStr s1, s2;
 	int ret;
 
-	serv1 = (*l_serverScan)[ *a ];
-	serv2 = (*l_serverScan)[ *b ];
 	switch ( l_serverScan->m_sort ) {
+		case SORT_NONE:
+			return ( *a > *b ) - ( *a < *b );
+		case SORT_FAVORITE:
+			return static_cast<int>( l_serverScan->IsFavorite( serv2.adr ) ) - static_cast<int>( l_serverScan->IsFavorite( serv1.adr ) );
+		case SORT_PASSWORD:
+			return static_cast<int>( serv2.serverInfo.GetBool( "si_usePass" ) ) - static_cast<int>( serv1.serverInfo.GetBool( "si_usePass" ) );
+		case SORT_DEDICATED:
+			return static_cast<int>( serv2.serverInfo.GetInt( "net_serverDedicated" ) != 0 ) - static_cast<int>( serv1.serverInfo.GetInt( "net_serverDedicated" ) != 0 );
+		case SORT_PUNKBUSTER:
+			return static_cast<int>( serv2.serverInfo.GetBool( "sv_punkbuster" ) ) - static_cast<int>( serv1.serverInfo.GetBool( "sv_punkbuster" ) );
+		case SORT_REPEATER:
+			return static_cast<int>( serv2.serverInfo.GetBool( "si_repeater" ) ) - static_cast<int>( serv1.serverInfo.GetBool( "si_repeater" ) );
 		case SORT_PING:
 			ret = serv1.ping < serv2.ping ? -1 : ( serv1.ping > serv2.ping ? 1 : 0 );
 			return ret;
 		case SORT_SERVERNAME:
-			serv1.serverInfo.GetString( "si_name", "", s1 );
-			serv2.serverInfo.GetString( "si_name", "", s2 );
+			s1 = ServerBrowserText( serv1.serverInfo.GetString( "si_name" ) );
+			s2 = ServerBrowserText( serv2.serverInfo.GetString( "si_name" ) );
 			return s1.Icmp( s2 );
 		case SORT_PLAYERS:
 			ret = serv1.clients < serv2.clients ? -1 : ( serv1.clients > serv2.clients ? 1 : 0 );
@@ -600,6 +1307,14 @@ void idServerScan::SetSorting( serverSort_t sort ) {
 		m_sortedServers.Sort( idServerScan::Cmp );
 	}
 	// trigger a redraw
+	ApplyFilter();
+}
+
+void idServerScan::ResetSorting() {
+	m_sort = SORT_NONE;
+	m_sortAscending = true;
+	l_serverScan = this;
+	m_sortedServers.Sort( idServerScan::Cmp );
 	ApplyFilter();
 }
 

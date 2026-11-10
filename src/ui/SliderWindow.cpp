@@ -235,6 +235,17 @@ void idSliderWindow::SetBuddy(idWindow *buddy) {
 	buddyWin = buddy;
 }
 
+void idSliderWindow::RefreshForLevelLoad() {
+    idWindow::RefreshForLevelLoad();
+    if (thumbMat) {
+        const idStr materialName = thumbMat->GetName();
+        thumbMat = declManager->FindMaterial(materialName);
+        thumbMat->SetSort(SS_GUI);
+        thumbWidth = thumbMat->GetImageWidth();
+        thumbHeight = thumbMat->GetImageHeight();
+    }
+}
+
 void idSliderWindow::PostParse() {
 	idWindow::PostParse();
 	value = 0.0;

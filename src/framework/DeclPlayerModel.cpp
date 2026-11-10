@@ -7,6 +7,16 @@ rvDeclPlayerModel::rvDeclPlayerModel() {
 	FreeData();
 }
 
+static int declPlayerModelMediaCachingSuppressed = 0;
+
+idSuppressPlayerModelMediaCaching::idSuppressPlayerModelMediaCaching() {
+	declPlayerModelMediaCachingSuppressed++;
+}
+
+idSuppressPlayerModelMediaCaching::~idSuppressPlayerModelMediaCaching() {
+	declPlayerModelMediaCachingSuppressed--;
+}
+
 static void DeclPlayerModel_CacheMedia(const rvDeclPlayerModel* decl) {
 	idDict media;
 
@@ -123,11 +133,25 @@ bool rvDeclPlayerModel::Parse(const char* text, const int textLength, bool noCac
 		MakeDefault();
 	}
 
-	if ( !noCaching ) {
+	if ( !noCaching && declPlayerModelMediaCachingSuppressed == 0 ) {
 		DeclPlayerModel_CacheMedia(this);
 	}
 
 	return parsed;
+}
+
+/*
+===================
+DeclPlayerModel_CacheMediaForDecl
+
+Precache a decl that was parsed while caching was suppressed.
+===================
+*/
+void DeclPlayerModel_CacheMediaForDecl( const rvDeclPlayerModel *decl ) {
+	if ( decl == NULL ) {
+		return;
+	}
+	DeclPlayerModel_CacheMedia( decl );
 }
 
 /*
@@ -151,7 +175,7 @@ void rvDeclPlayerModel::FreeData(void) {
 rvDeclPlayerModel::DefaultDefinition
 ===================
 */
-void rvDeclPlayerModel::Print(void) {
+void rvDeclPlayerModel::Print(void) const {
 	common->Printf("model = %s\n", model.c_str());
 	common->Printf("head = %s\n", head.c_str());
 	common->Printf("ui head = %s\n", uiHead.c_str());

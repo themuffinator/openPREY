@@ -3,6 +3,7 @@
 
 #include "tr_local.h"
 #include "ModernShadowPlanner.h"
+#include "ModernShadowMaps.h"
 #include "RendererBenchmarks.h"
 #include "RendererMetrics.h"
 #include "ShadowMapClassification.h"
@@ -69,8 +70,17 @@ static renderBackendCaps_t rg_modernShadowPlannerCaps;
 static renderFeatureSet_t rg_modernShadowPlannerFeatures;
 static modernShadowPlannerStats_t rg_modernShadowPlannerStats;
 static idList<modernShadowLightDescriptor_t> rg_modernShadowPlannerDescriptors;
+// Index of descriptor slots by viewLight pointer, rebuilt in lockstep with the
+// list each PrepareFrame so per-light lookups from the hot draw paths are O(1)
+// instead of a linear scan.
+static idHashIndex rg_modernShadowPlannerDescriptorHash;
+
+static ID_INLINE int R_ModernShadowPlanner_DescriptorKey( const viewLight_t *viewLight ) {
+	return ( int )( ( ( uintptr_t )viewLight ) >> 4 );
+}
 static modernShadowPlannerFairnessHistory_t rg_modernShadowPlannerFairnessHistory[MODERN_SHADOW_FAIRNESS_HISTORY_SLOTS];
 static int rg_modernShadowPlannerFairnessEpoch = 0;
+static int rg_modernShadowPlannerFairnessHighWater = 0;	// count of ever-allocated (valid) fairness slots; valid slots always form the prefix [0, highWater)
 static bool rg_modernShadowPlannerInitialized = false;
 
 static void R_ModernShadowPlanner_SetStatus( modernShadowPlannerStats_t &stats, const char *status ) {
@@ -80,6 +90,7 @@ static void R_ModernShadowPlanner_SetStatus( modernShadowPlannerStats_t &stats, 
 static void R_ModernShadowPlanner_ResetFairnessHistory( void ) {
 	memset( rg_modernShadowPlannerFairnessHistory, 0, sizeof( rg_modernShadowPlannerFairnessHistory ) );
 	rg_modernShadowPlannerFairnessEpoch = 0;
+	rg_modernShadowPlannerFairnessHighWater = 0;
 }
 
 static const idRenderLightLocal *R_ModernShadowPlanner_FairnessLightDef( const modernShadowLightDescriptor_t &descriptor ) {
@@ -102,14 +113,22 @@ static modernShadowPlannerFairnessHistory_t *R_ModernShadowPlanner_FindFairnessH
 		return NULL;
 	}
 
+	// Valid slots always form the prefix [0, highWater): slots become valid only
+	// via allocation, which reuses a stale slot inside the prefix or claims the
+	// slot at the prefix end, and only ResetFairnessHistory clears slots. The
+	// scan is therefore bounded by the high-water mark and stays byte-for-byte
+	// equivalent to a full scan over all MODERN_SHADOW_FAIRNESS_HISTORY_SLOTS.
+	const int scanLimit = Min( rg_modernShadowPlannerFairnessHighWater, MODERN_SHADOW_FAIRNESS_HISTORY_SLOTS );
 	modernShadowPlannerFairnessHistory_t *oldest = &rg_modernShadowPlannerFairnessHistory[0];
-	for ( int historyIndex = 0; historyIndex < MODERN_SHADOW_FAIRNESS_HISTORY_SLOTS; ++historyIndex ) {
+	bool oldestFromFreeSlot = false;
+	for ( int historyIndex = 0; historyIndex < scanLimit; ++historyIndex ) {
 		modernShadowPlannerFairnessHistory_t &history = rg_modernShadowPlannerFairnessHistory[historyIndex];
 		if ( R_ModernShadowPlanner_FairnessHistoryMatches( history, descriptor ) ) {
 			return &history;
 		}
 		if ( allocate && ( !history.valid || rg_modernShadowPlannerFairnessEpoch - history.lastSeenEpoch > MODERN_SHADOW_FAIRNESS_STALE_EPOCHS ) ) {
 			oldest = &history;
+			oldestFromFreeSlot = true;
 			break;
 		}
 		if ( history.lastSeenEpoch < oldest->lastSeenEpoch ) {
@@ -121,6 +140,11 @@ static modernShadowPlannerFairnessHistory_t *R_ModernShadowPlanner_FindFairnessH
 		return NULL;
 	}
 
+	if ( !oldestFromFreeSlot && scanLimit < MODERN_SHADOW_FAIRNESS_HISTORY_SLOTS ) {
+		// the first invalid slot sits exactly at the prefix end; this is where the
+		// original full scan's first-free-slot break would have landed
+		oldest = &rg_modernShadowPlannerFairnessHistory[scanLimit];
+	}
 	memset( oldest, 0, sizeof( *oldest ) );
 	oldest->valid = true;
 	oldest->lightDef = R_ModernShadowPlanner_FairnessLightDef( descriptor );
@@ -129,6 +153,10 @@ static modernShadowPlannerFairnessHistory_t *R_ModernShadowPlanner_FindFairnessH
 	oldest->lastPolicy = -1;
 	oldest->lastFallbackReason = -1;
 	oldest->lastSeenEpoch = rg_modernShadowPlannerFairnessEpoch;
+	const int oldestIndex = static_cast<int>( oldest - rg_modernShadowPlannerFairnessHistory );
+	if ( oldestIndex >= rg_modernShadowPlannerFairnessHighWater ) {
+		rg_modernShadowPlannerFairnessHighWater = oldestIndex + 1;
+	}
 	return oldest;
 }
 
@@ -293,6 +321,7 @@ static void R_ModernShadowPlanner_ApplyArb2CacheEstimate( modernShadowLightDescr
 	descriptor.arb2UnshadowedPasses = estimate.unshadowedPasses;
 	descriptor.arb2CacheablePassMask = estimate.cacheablePassMask;
 	descriptor.arb2CacheHitPassMask = estimate.cacheHitPassMask;
+	descriptor.arb2CacheKeyHitMask = estimate.cacheKeyHitMask;
 	descriptor.arb2CacheMissPassMask = estimate.cacheMissPassMask;
 	descriptor.arb2FreshUpdatePassMask = estimate.freshUpdatePassMask;
 	descriptor.arb2BudgetFallbackPassMask = estimate.budgetFallbackPassMask;
@@ -304,29 +333,90 @@ static void R_ModernShadowPlanner_ApplyArb2CacheEstimate( modernShadowLightDescr
 		estimate.cacheMissPasses == 0;
 }
 
-// Resolves the light's persistent-atlas placement (5c). The slot is
-// consumable by modern receivers only when the GLOBAL-pass cache entry's
-// signature matches this frame's content (the estimate replayed it) and the
-// static tiles are the light's complete content - dynamic casters are
-// composed over scratch per frame (5b) and never reach the atlas cell.
-static void R_ModernShadowPlanner_ResolveArb2AtlasSlot( modernShadowLightDescriptor_t &descriptor, const viewLight_t *vLight ) {
+// Modern clustered lighting owns one shadow resource per light, not separate
+// LOCAL/GLOBAL receiver passes and not a stencil-composited hybrid. A cached
+// GLOBAL map is therefore consumable only when it represents every active
+// receiver exactly and contains every parity-relevant caster by itself.
+static bool R_ModernShadowPlanner_Arb2SingleResourceComplete(
+		const viewLight_t *vLight ) {
+	if ( vLight == NULL ) {
+		return false;
+	}
+	unsigned int activeReceiverMask = 0;
+	if ( vLight->localInteractions != NULL ) {
+		activeReceiverMask |= SHADOWMAP_RECEIVER_MASK_LOCAL;
+	}
+	if ( vLight->globalInteractions != NULL
+			|| vLight->translucentInteractions != NULL ) {
+		activeReceiverMask |= SHADOWMAP_RECEIVER_MASK_GLOBAL;
+	}
+	const unsigned int incompleteMapMask = static_cast<unsigned int>(
+		vLight->shadowMapIncompleteMapMask
+		| vLight->shadowMapHybridIncompleteMask
+		| vLight->shadowMapPrelightMapMissingMask );
+	if ( ( incompleteMapMask & activeReceiverMask ) != 0 ) {
+		return false;
+	}
+	if ( ( activeReceiverMask & SHADOWMAP_RECEIVER_MASK_LOCAL ) != 0
+			&& ( vLight->localShadowMapCasters != NULL
+				|| vLight->localShadowMapDynamicCasters != NULL
+				|| vLight->localTranslucentShadowMapCasters != NULL ) ) {
+		return false;
+	}
+	// Supplement chains should imply an incomplete-map bit. Keep this
+	// independent check fail-closed if frontend bookkeeping ever diverges.
+	if ( ( activeReceiverMask & SHADOWMAP_RECEIVER_MASK_LOCAL ) != 0
+			&& vLight->globalShadowMapStencilSupplements != NULL ) {
+		return false;
+	}
+	if ( ( activeReceiverMask & SHADOWMAP_RECEIVER_MASK_GLOBAL ) != 0
+			&& ( vLight->globalShadowMapStencilSupplements != NULL
+				|| vLight->localShadowMapStencilSupplements != NULL ) ) {
+		return false;
+	}
+	return activeReceiverMask != 0;
+}
+
+// Resolves the physical ARB2 resource which a modern receiver can sample.
+// Projected lights reference a persistent-atlas cell; point lights reference
+// the one exact cache cube currently selected by classic GL.  Both require a
+// current GLOBAL-pass signature and complete static content.
+static void R_ModernShadowPlanner_ResolveArb2AtlasSlot( modernShadowLightDescriptor_t &descriptor, const viewLight_t *vLight, const viewDef_t *viewDef ) {
 	descriptor.arb2AtlasSlotReady = false;
 	descriptor.arb2AtlasCellX = -1;
 	descriptor.arb2AtlasCellY = -1;
 	descriptor.arb2AtlasCellSpan = 0;
+	descriptor.arb2AtlasSignature = 0;
+	descriptor.arb2AtlasStorageGeneration = 0;
 	descriptor.arb2AtlasContentFrame = -1;
+	descriptor.arb2PointCubeReady = false;
+	descriptor.arb2PointCubeSignature = 0;
+	descriptor.arb2PointCubeContentFrame = -1;
 	memset( descriptor.arb2AtlasCascadeRect, 0, sizeof( descriptor.arb2AtlasCascadeRect ) );
-	if ( descriptor.pointLight || vLight == NULL || descriptor.lightDefIndex < 0 ) {
-		return;
-	}
-	shadowMapArb2AtlasSlot_t slot;
-	if ( !RB_ShadowMapProjectedAtlasSlotForLight( descriptor.lightDefIndex, slot ) ) {
+	if ( vLight == NULL || descriptor.lightDefIndex < 0 ) {
 		return;
 	}
 	const bool contentCurrent = descriptor.arb2CacheEstimateValid
-		&& ( descriptor.arb2CacheHitPassMask & SHADOWMAP_ARB2_CACHE_PASS_GLOBAL ) != 0;
+		&& ( descriptor.arb2CacheKeyHitMask & SHADOWMAP_ARB2_CACHE_PASS_GLOBAL ) != 0;
 	const bool staticContentComplete = vLight->shadowMapDynamicCasterCount == 0;
-	if ( !contentCurrent || !staticContentComplete ) {
+	if ( !contentCurrent || !staticContentComplete
+			|| !R_ModernShadowPlanner_Arb2SingleResourceComplete( vLight ) ) {
+		return;
+	}
+	if ( descriptor.pointLight ) {
+		shadowMapArb2PointCube_t cube;
+		if ( !RB_ShadowMapPointCubeForLight( vLight, viewDef, cube )
+				|| !cube.valid || cube.size != descriptor.resolution
+				|| cube.lastUpdatedFrame < 0 || cube.lastUpdatedFrame > tr.frameCount ) {
+			return;
+		}
+		descriptor.arb2PointCubeSignature = cube.signature;
+		descriptor.arb2PointCubeContentFrame = cube.lastUpdatedFrame;
+		descriptor.arb2PointCubeReady = true;
+		return;
+	}
+	shadowMapArb2AtlasSlot_t slot;
+	if ( !RB_ShadowMapProjectedAtlasSlotForLight( vLight, viewDef, slot ) ) {
 		return;
 	}
 	if ( slot.cascadeCount != Max( 1, descriptor.cascadeCount ) ) {
@@ -335,6 +425,8 @@ static void R_ModernShadowPlanner_ResolveArb2AtlasSlot( modernShadowLightDescrip
 	descriptor.arb2AtlasCellX = slot.cellX;
 	descriptor.arb2AtlasCellY = slot.cellY;
 	descriptor.arb2AtlasCellSpan = slot.cellSpan;
+	descriptor.arb2AtlasSignature = slot.signature;
+	descriptor.arb2AtlasStorageGeneration = slot.storageGeneration;
 	descriptor.arb2AtlasContentFrame = slot.lastUpdatedFrame;
 	const int cascadeLimit = Min( MODERN_SHADOW_DESCRIPTOR_MAX_CASCADES, SHADOWMAP_PROJECTED_MAX_CASCADES );
 	for ( int i = 0; i < cascadeLimit; ++i ) {
@@ -353,9 +445,12 @@ static void R_ModernShadowPlanner_ResolveArb2AtlasSlot( modernShadowLightDescrip
 static bool R_ModernShadowPlanner_CanIsolateArb2CacheOwnership( const modernShadowLightDescriptor_t &descriptor ) {
 	// With modern receiver sampling live, cache reuse stays budget-exempt
 	// only when the receivers can actually consume the cached tiles - the
-	// persistent-atlas slot (5c) makes that possible; without it the light
-	// must compete for a mapped update instead of silently losing shadows.
-	if ( descriptor.modernReceiverSamplingReady && !descriptor.arb2AtlasSlotReady ) {
+	// persistent projected-atlas slot or exact point cube makes that possible;
+	// without it the light must compete for an update instead of silently
+	// sampling another light's resource.
+	const bool physicalResourceReady = descriptor.pointLight
+		? descriptor.arb2PointCubeReady : descriptor.arb2AtlasSlotReady;
+	if ( descriptor.modernReceiverSamplingReady && !physicalResourceReady ) {
 		return false;
 	}
 	return descriptor.arb2CacheEstimateValid
@@ -850,14 +945,53 @@ static void R_ModernShadowPlanner_InitDescriptorContract( modernShadowLightDescr
 	descriptor.compareMode = descriptor.pointLight ? MODERN_SHADOW_COMPARE_MANUAL_PACKED_DEPTH : MODERN_SHADOW_COMPARE_MANUAL_DEPTH;
 	descriptor.biasModel = descriptor.pointLight ? MODERN_SHADOW_BIAS_POINT_VECTOR : ( descriptor.mapType == MODERN_SHADOW_MAP_CASCADE ? MODERN_SHADOW_BIAS_CASCADE_SCALED : MODERN_SHADOW_BIAS_CONSTANT_NORMAL );
 	const shadowMapProjectedFilterSettings_t projectedFilterSettings = R_ShadowMapProjectedFilterSettings( vLight );
+	// Modern receivers filter every pixel with one fixed kernel of this
+	// radius and size their atlas guard from it. Under PCSS-lite the effective
+	// radius is the classic shader's blocker-search and maximum-penumbra bound,
+	// not a blur width: as a fixed kernel it was 8 texels and shadowed grazing
+	// walls that nothing occludes. The modern path has no blocker search, so it
+	// keeps the contact radius.
 	descriptor.pcfKernel = static_cast<int>( idMath::Ceil( descriptor.pointLight
 		? r_shadowMapPointFilterRadius.GetFloat()
-		: projectedFilterSettings.effectiveFilterRadius ) );
+		: projectedFilterSettings.filterRadius ) );
 	descriptor.updateFrame = tr.frameCount;
 	descriptor.casterCount = R_ModernShadowPlanner_TotalCasterCount( descriptor );
 	descriptor.receiverCount = R_ModernShadowPlanner_TotalReceiverCount( descriptor );
-	descriptor.bias[0] = descriptor.pointLight ? r_shadowMapPointBias.GetFloat() : r_shadowMapBias.GetFloat();
-	descriptor.bias[1] = descriptor.pointLight ? r_shadowMapPointNormalBias.GetFloat() : r_shadowMapNormalBias.GetFloat();
+	if ( descriptor.pointLight ) {
+		const float pointFar = R_ShadowMapPointFarDistance( vLight );
+		const shadowMapPointReceiverSettings_t basePointReceiverSettings =
+			R_ClampShadowMapPointReceiverSettings(
+				pointFar, descriptor.resolution,
+				r_shadowMapPointBias.GetFloat(),
+				r_shadowMapPointNormalBias.GetFloat(),
+				r_shadowMapTexelBiasScale.GetFloat(),
+				r_shadowMapNormalOffsetScale.GetFloat(),
+				r_shadowMapPointMaxWorldBias.GetFloat() );
+		shadowMapPointReceiverSettings_t pointReceiverSettings =
+			basePointReceiverSettings;
+#ifndef OPENQ4_RENDERER_VK_MODULE
+		// Modern GL always samples the manual color-depth cube, even when the
+		// classic receiver requested and obtained a hardware comparison cube.
+		// Preserve its storage-quantization floor as well as the shared
+		// world-space cap so mixed classic/modern materials cannot disagree.
+		pointReceiverSettings =
+			R_ShadowMapPointStorageAdjustedReceiverSettings(
+				basePointReceiverSettings, pointFar,
+				descriptor.resolution,
+				false,
+				r_shadowMapPointHighPrecision.GetBool() );
+#endif
+		descriptor.bias[0] = pointReceiverSettings.constantBias;
+		descriptor.bias[1] = pointReceiverSettings.normalBias;
+		descriptor.texelDepthBias[0] =
+			pointReceiverSettings.texelBiasScale
+				/ static_cast<float>( Max( 1, descriptor.resolution ) );
+		descriptor.normalOffsetScale = pointReceiverSettings.normalOffsetScale;
+	} else {
+		descriptor.bias[0] = r_shadowMapBias.GetFloat();
+		descriptor.bias[1] = r_shadowMapNormalBias.GetFloat();
+		descriptor.normalOffsetScale = Max( 0.0f, r_shadowMapNormalOffsetScale.GetFloat() );
+	}
 	descriptor.bias[2] = r_shadowMapPolygonFactor.GetFloat();
 	descriptor.bias[3] = r_shadowMapPolygonOffset.GetFloat();
 	descriptor.casterPassReady = descriptor.casterCount > 0;
@@ -919,13 +1053,12 @@ static bool R_ModernShadowPlanner_ValidateProjectedDescriptor( modernShadowLight
 	}
 
 	if ( descriptor.arb2AtlasSlotReady ) {
-		valid &= R_ModernShadowPlanner_CheckDescriptorInvariant( descriptor, MODERN_SHADOW_DESCRIPTOR_INVARIANT_ATLAS_SLOT, descriptor.arb2AtlasCellSpan > 0 && descriptor.arb2AtlasCellX >= 0 && descriptor.arb2AtlasCellY >= 0, stage, "persistent-atlas slot cell placement is invalid" );
+		valid &= R_ModernShadowPlanner_CheckDescriptorInvariant( descriptor, MODERN_SHADOW_DESCRIPTOR_INVARIANT_ATLAS_SLOT, descriptor.arb2AtlasCellSpan > 0 && descriptor.arb2AtlasCellX >= 0 && descriptor.arb2AtlasCellY >= 0 && descriptor.arb2AtlasStorageGeneration != 0, stage, "persistent-atlas slot provenance is invalid" );
 		for ( int cascadeIndex = 0; cascadeIndex < activeCascadeCount; ++cascadeIndex ) {
 			valid &= R_ModernShadowPlanner_CheckDescriptorInvariant( descriptor, MODERN_SHADOW_DESCRIPTOR_INVARIANT_ATLAS_SLOT, R_ModernShadowPlanner_AtlasRectMinMaxReady( descriptor.arb2AtlasCascadeRect[cascadeIndex] ), stage, "persistent-atlas slot rectangle is outside normalized bounds" );
 		}
 		valid &= R_ModernShadowPlanner_CheckDescriptorInvariant( descriptor, MODERN_SHADOW_DESCRIPTOR_INVARIANT_FRESHNESS, descriptor.arb2AtlasContentFrame >= 0 && descriptor.arb2AtlasContentFrame <= tr.frameCount, stage, "persistent-atlas slot content frame is invalid" );
 	}
-
 	return valid;
 }
 
@@ -951,6 +1084,10 @@ static bool R_ModernShadowPlanner_ValidateDescriptor( modernShadowLightDescripto
 		valid &= R_ModernShadowPlanner_CheckDescriptorInvariant( descriptor, MODERN_SHADOW_DESCRIPTOR_INVARIANT_PROJECTED_STATE, !descriptor.projectedStateReady, stage, "point light must not carry projected-light state" );
 	} else {
 		valid &= R_ModernShadowPlanner_ValidateProjectedDescriptor( descriptor, classification, stage );
+	}
+	if ( descriptor.arb2PointCubeReady ) {
+		valid &= R_ModernShadowPlanner_CheckDescriptorInvariant( descriptor, MODERN_SHADOW_DESCRIPTOR_INVARIANT_ATLAS_SLOT, descriptor.pointLight, stage, "point-cube provenance attached to a projected light" );
+		valid &= R_ModernShadowPlanner_CheckDescriptorInvariant( descriptor, MODERN_SHADOW_DESCRIPTOR_INVARIANT_FRESHNESS, descriptor.arb2PointCubeContentFrame >= 0 && descriptor.arb2PointCubeContentFrame <= tr.frameCount, stage, "point-cube content frame is invalid" );
 	}
 
 	if ( descriptor.mapType == MODERN_SHADOW_MAP_CASCADE ) {
@@ -980,6 +1117,12 @@ static void R_ModernShadowPlanner_SetDescriptorInvariantPolicy( modernShadowLigh
 	descriptor.cacheReuseCandidate = false;
 	descriptor.atlasTileReady = false;
 	descriptor.arb2AtlasSlotReady = false;
+	descriptor.arb2PointCubeReady = false;
+	descriptor.arb2AtlasSignature = 0;
+	descriptor.arb2AtlasStorageGeneration = 0;
+	descriptor.arb2PointCubeSignature = 0;
+	descriptor.arb2AtlasContentFrame = -1;
+	descriptor.arb2PointCubeContentFrame = -1;
 }
 
 static modernShadowFallbackReason_t R_ModernShadowPlanner_SupportReason( const viewLight_t *vLight ) {
@@ -1060,8 +1203,8 @@ static void R_ModernShadowPlanner_InitDescriptor( modernShadowLightDescriptor_t 
 	descriptor.requestedCascadeCount = classification.cascadeCount;
 	descriptor.atlasDiv = classification.atlasDiv;
 	descriptor.updateModulo = Max( 1, RendererBenchmarks_CurrentBudget().shadowUpdateRate );
-	descriptor.localCasterCount = vLight != NULL ? R_ModernShadowPlanner_CountDrawSurfChain( vLight->localShadowMapCasters ) + R_ModernShadowPlanner_CountDrawSurfChain( vLight->localShadows ) : 0;
-	descriptor.globalCasterCount = vLight != NULL ? R_ModernShadowPlanner_CountDrawSurfChain( vLight->globalShadowMapCasters ) + R_ModernShadowPlanner_CountDrawSurfChain( vLight->globalShadows ) : 0;
+	descriptor.localCasterCount = vLight != NULL ? R_ModernShadowPlanner_CountDrawSurfChain( vLight->localShadowMapCasters ) + R_ModernShadowPlanner_CountDrawSurfChain( vLight->localShadowMapDynamicCasters ) + R_ModernShadowPlanner_CountDrawSurfChain( vLight->localShadows ) : 0;
+	descriptor.globalCasterCount = vLight != NULL ? R_ModernShadowPlanner_CountDrawSurfChain( vLight->globalShadowMapCasters ) + R_ModernShadowPlanner_CountDrawSurfChain( vLight->globalShadowMapDynamicCasters ) + R_ModernShadowPlanner_CountDrawSurfChain( vLight->globalShadows ) : 0;
 	descriptor.translucentCasterCount = vLight != NULL ? R_ModernShadowPlanner_CountDrawSurfChain( vLight->localTranslucentShadowMapCasters ) + R_ModernShadowPlanner_CountDrawSurfChain( vLight->globalTranslucentShadowMapCasters ) : 0;
 	descriptor.localReceiverCount = vLight != NULL ? R_ModernShadowPlanner_CountDrawSurfChain( vLight->localInteractions ) : 0;
 	descriptor.globalReceiverCount = vLight != NULL ? R_ModernShadowPlanner_CountDrawSurfChain( vLight->globalInteractions ) : 0;
@@ -1085,7 +1228,7 @@ static void R_ModernShadowPlanner_InitDescriptor( modernShadowLightDescriptor_t 
 	descriptor.budgetClass = R_ModernShadowPlanner_BudgetClassForDescriptor( descriptor );
 	R_ModernShadowPlanner_InitDescriptorContract( descriptor, vLight, viewDef );
 	R_ModernShadowPlanner_ApplyArb2CacheEstimate( descriptor, vLight, viewDef );
-	R_ModernShadowPlanner_ResolveArb2AtlasSlot( descriptor, vLight );
+	R_ModernShadowPlanner_ResolveArb2AtlasSlot( descriptor, vLight, viewDef );
 	descriptor.estimatedPixels = descriptor.resolution * descriptor.resolution * Max( 1, descriptor.tileCount );
 	const int scissorArea = vLight != NULL ? R_ModernShadowPlanner_ScissorArea( vLight->scissorRect ) : 0;
 	descriptor.priority =
@@ -1123,21 +1266,20 @@ static bool R_ModernShadowPlanner_CandidateBetter( const modernShadowLightDescri
 	return candidate.lightDefIndex < best.lightDefIndex;
 }
 
-static int R_ModernShadowPlanner_FindBestCandidate( const bool *selected ) {
-	int best = -1;
-	for ( int i = 0; i < rg_modernShadowPlannerDescriptors.Num(); ++i ) {
-		if ( selected[i] ) {
-			continue;
-		}
-		const modernShadowLightDescriptor_t &candidate = rg_modernShadowPlannerDescriptors[i];
-		if ( candidate.fallbackReason != MODERN_SHADOW_FALLBACK_NONE ) {
-			continue;
-		}
-		if ( best < 0 || R_ModernShadowPlanner_CandidateBetter( candidate, rg_modernShadowPlannerDescriptors[best] ) ) {
-			best = i;
-		}
+// Total order over descriptor indices matching the repeated best-candidate
+// rescan: strictly-better wins, and a full tie keeps the lower descriptor index
+// (what the linear scan's "only replace on strictly better" produces). The
+// explicit index tie-break makes the result independent of the unstable sort.
+static int R_ModernShadowPlanner_CompareCandidateIndices( const int *a, const int *b ) {
+	const modernShadowLightDescriptor_t &A = rg_modernShadowPlannerDescriptors[*a];
+	const modernShadowLightDescriptor_t &B = rg_modernShadowPlannerDescriptors[*b];
+	if ( R_ModernShadowPlanner_CandidateBetter( A, B ) ) {
+		return -1;
 	}
-	return best;
+	if ( R_ModernShadowPlanner_CandidateBetter( B, A ) ) {
+		return 1;
+	}
+	return *a - *b;
 }
 
 static void R_ModernShadowPlanner_AssignAtlasTiles( modernShadowLightDescriptor_t &descriptor, int firstTile, int tilesPerRow ) {
@@ -1183,8 +1325,6 @@ static void R_ModernShadowPlanner_SetBudgetMissPolicy( modernShadowLightDescript
 }
 
 static void R_ModernShadowPlanner_SelectMappedLights( modernShadowPlannerStats_t &stats ) {
-	bool selected[MODERN_SHADOW_PLAN_MAX_LIGHTS];
-	memset( selected, 0, sizeof( selected ) );
 	modernShadowPlannerBudgetUse_t budgetUse;
 	memset( &budgetUse, 0, sizeof( budgetUse ) );
 	int mappedLights = 0;
@@ -1192,12 +1332,22 @@ static void R_ModernShadowPlanner_SelectMappedLights( modernShadowPlannerStats_t
 	int usedPixels = 0;
 	const int tilePixels = Max( 1, stats.shadowMapSize ) * Max( 1, stats.shadowMapSize );
 	const int atlasSlotsPerRow = Max( 1, static_cast<int>( idMath::Ceil( idMath::Sqrt( static_cast<float>( stats.maxAtlasTiles ) ) ) ) );
-	for ( ;; ) {
-		const int candidateIndex = R_ModernShadowPlanner_FindBestCandidate( selected );
-		if ( candidateIndex < 0 ) {
-			break;
+
+	// Collect the selectable candidates once and order them exactly as the
+	// repeated best-candidate rescan would, then process in that fixed order.
+	// Processing a candidate only mutates that candidate's own keys, so a
+	// pre-sorted order is identical to the O(selectable * total) rescan.
+	static idList<int> selectionOrder;
+	selectionOrder.SetNum( 0, false );
+	for ( int i = 0; i < rg_modernShadowPlannerDescriptors.Num(); ++i ) {
+		if ( rg_modernShadowPlannerDescriptors[i].fallbackReason == MODERN_SHADOW_FALLBACK_NONE ) {
+			selectionOrder.Append( i );
 		}
-		selected[candidateIndex] = true;
+	}
+	selectionOrder.Sort( R_ModernShadowPlanner_CompareCandidateIndices );
+
+	for ( int orderIndex = 0; orderIndex < selectionOrder.Num(); ++orderIndex ) {
+		const int candidateIndex = selectionOrder[orderIndex];
 		modernShadowLightDescriptor_t &candidate = rg_modernShadowPlannerDescriptors[candidateIndex];
 		const modernShadowBudgetClass_t budgetClass = R_ModernShadowPlanner_BudgetClassForDescriptor( candidate );
 		candidate.budgetClass = budgetClass;
@@ -1642,6 +1792,7 @@ void R_ModernShadowPlanner_PrepareFrame( const idScenePacketFrame &packetFrame, 
 	const bool initialized = rg_modernShadowPlannerInitialized;
 	const bool available = initialized && rg_modernShadowPlannerFeatures.scenePackets;
 	rg_modernShadowPlannerDescriptors.SetNum( 0, false );
+	rg_modernShadowPlannerDescriptorHash.Clear();
 	memset( &rg_modernShadowPlannerStats, 0, sizeof( rg_modernShadowPlannerStats ) );
 	rg_modernShadowPlannerStats.initialized = initialized;
 	rg_modernShadowPlannerStats.available = available;
@@ -1694,20 +1845,32 @@ void R_ModernShadowPlanner_PrepareFrame( const idScenePacketFrame &packetFrame, 
 				rg_modernShadowPlannerStats.overflow = true;
 				break;
 			}
-			modernShadowLightDescriptor_t descriptor;
+			// Build the descriptor in place. idList::Alloc grows by granularity
+			// and returns a reference to the new slot, avoiding the ~1.4KB stack
+			// temporary and the whole-struct Append copy (InitDescriptor memsets
+			// the slot first, so a recycled slot cannot leak stale bytes).
+			const int descriptorIndex = rg_modernShadowPlannerDescriptors.Num();
+			modernShadowLightDescriptor_t &descriptor = rg_modernShadowPlannerDescriptors.Alloc();
 			R_ModernShadowPlanner_InitDescriptor(
 				descriptor,
 				vLight,
 				scene.viewDef,
 				sceneIndex,
-				rg_modernShadowPlannerDescriptors.Num(),
+				descriptorIndex,
 				rg_modernShadowPlannerStats.shadowMapSize,
 				rg_modernShadowPlannerStats.translucentEnabled );
-			rg_modernShadowPlannerDescriptors.Append( descriptor );
 		}
 		if ( rg_modernShadowPlannerStats.overflow ) {
 			break;
 		}
+	}
+
+	// Index the finalized descriptor list by viewLight pointer for the O(1)
+	// DescriptorForLight lookups the hot draw paths make; the slots are appended
+	// once above and never reordered afterward.
+	for ( int i = 0; i < rg_modernShadowPlannerDescriptors.Num(); ++i ) {
+		rg_modernShadowPlannerDescriptorHash.Add(
+			R_ModernShadowPlanner_DescriptorKey( rg_modernShadowPlannerDescriptors[i].viewLight ), i );
 	}
 
 	R_ModernShadowPlanner_SelectMappedLights( rg_modernShadowPlannerStats );
@@ -1825,6 +1988,35 @@ void R_ModernShadowPlanner_PrepareFrame( const idScenePacketFrame &packetFrame, 
 	}
 }
 
+void R_ModernShadowPlanner_PrepareReceiverMaps( const viewDef_t *viewDef ) {
+	int pointFaces = 0, projectedTiles = 0, pointSize = 128, projectedSize = 128;
+	const auto belongsToView = [viewDef]( const viewLight_t *light ) {
+		if ( viewDef == NULL ) { return false; }
+		for ( const viewLight_t *cursor = viewDef->viewLights; cursor != NULL; cursor = cursor->next ) {
+			if ( cursor == light ) { return true; }
+		}
+		return false;
+	};
+	for ( int i = 0; i < rg_modernShadowPlannerDescriptors.Num(); ++i ) {
+		modernShadowLightDescriptor_t &d = rg_modernShadowPlannerDescriptors[i];
+		if ( d.policy != MODERN_SHADOW_POLICY_MAPPED && d.policy != MODERN_SHADOW_POLICY_CACHE_REUSE ) { continue; }
+		// One binding must never mix old cache cells with current-frame cells.
+		d.arb2PointCubeReady = d.arb2AtlasSlotReady = d.currentFrameMapReady = false;
+		if ( !belongsToView( d.viewLight ) ) { continue; }
+		if ( d.pointLight ) { pointFaces += 6; pointSize = Max( pointSize, d.resolution ); }
+		else { projectedTiles += d.cascadeCount; projectedSize = Max( projectedSize, d.resolution ); }
+	}
+	if ( !RB_ModernShadowMapsBegin( viewDef, pointSize, pointFaces, projectedSize, projectedTiles ) ) { return; }
+	for ( int i = 0; i < rg_modernShadowPlannerDescriptors.Num(); ++i ) {
+		modernShadowLightDescriptor_t &d = rg_modernShadowPlannerDescriptors[i];
+		if ( ( d.policy != MODERN_SHADOW_POLICY_MAPPED && d.policy != MODERN_SHADOW_POLICY_CACHE_REUSE )
+				|| !belongsToView( d.viewLight ) || !d.modernReceiverSamplingReady
+				|| !R_ModernShadowPlanner_Arb2SingleResourceComplete( d.viewLight )
+				|| d.translucentCasterCount != 0 ) { continue; }
+		RB_ModernShadowMapRender( viewDef, d );
+	}
+}
+
 const modernShadowPlannerStats_t &R_ModernShadowPlanner_Stats( void ) {
 	return rg_modernShadowPlannerStats;
 }
@@ -1833,8 +2025,13 @@ const modernShadowLightDescriptor_t *R_ModernShadowPlanner_DescriptorForLight( c
 	if ( viewLight == NULL ) {
 		return NULL;
 	}
-	for ( int i = 0; i < rg_modernShadowPlannerDescriptors.Num(); ++i ) {
-		if ( rg_modernShadowPlannerDescriptors[i].viewLight == viewLight ) {
+	// The hash is rebuilt in lockstep with the descriptor list each PrepareFrame,
+	// so a lookup here is exact; the index guard is defensive only.
+	const int key = R_ModernShadowPlanner_DescriptorKey( viewLight );
+	for ( int i = rg_modernShadowPlannerDescriptorHash.First( key ); i != -1;
+			i = rg_modernShadowPlannerDescriptorHash.Next( i ) ) {
+		if ( i < rg_modernShadowPlannerDescriptors.Num()
+				&& rg_modernShadowPlannerDescriptors[i].viewLight == viewLight ) {
 			return &rg_modernShadowPlannerDescriptors[i];
 		}
 	}
@@ -1853,6 +2050,17 @@ int R_ModernShadowPlanner_NumDescriptors( void ) {
 }
 
 void R_ModernShadowPlanner_PrintGfxInfo( void ) {
+	for ( int i = 0; i < rg_modernShadowPlannerDescriptors.Num(); ++i ) {
+		const modernShadowLightDescriptor_t &d = rg_modernShadowPlannerDescriptors[i];
+		if ( d.policy != MODERN_SHADOW_POLICY_MAPPED && d.policy != MODERN_SHADOW_POLICY_CACHE_REUSE ) { continue; }
+		common->Printf( "Modern current shadow map: light=%d point=%d ready=%d frame=%d dynamic=%d casters=%d complete=%d firstTile=%d columns=%d\n",
+			d.lightDefIndex, d.pointLight ? 1 : 0, d.currentFrameMapReady ? 1 : 0,
+			d.pointLight ? d.arb2PointCubeContentFrame : d.arb2AtlasContentFrame,
+			d.viewLight != NULL ? d.viewLight->shadowMapDynamicCasterCount : 0,
+			d.viewLight != NULL ? d.viewLight->shadowMapCasterCount : 0,
+			R_ModernShadowPlanner_Arb2SingleResourceComplete( d.viewLight ) ? 1 : 0,
+			d.currentPointFirstTile, d.currentPointAtlasColumns );
+	}
 	common->Printf(
 		"Modern shadow plan: %s, requested=%d valid=%d scenes=%d lights=%d descriptors=%d mapped=%d fallback=%d skipped=%d projected=%d ordinary=%d point=%d csm=%d/%d projectedCSM=%d/%d/%d/%d casters(local=%d global=%d translucent=%d visibility=%d/%d saved=%d receiverCull=%d noQueryStall=%d lod(tests=%d rejected=%d alpha=%d translucent=%d lights=%d budget=%d unmapped=%d)) receivers(local=%d global=%d translucent=%d guarded=%d sampling=%d blocked=%d cutout=%d) budget(lights=%d class=%d/%d/%d atlasTiles=%d/%d classTiles=%d/%d/%d quotas=%d/%d/%d pixels=%d size=%d update=%d used=%d throttled=%d classThrottle=%d/%d/%d reasonMask=0x%02x reasons(class=%d/%d/%d global=%d/%d/%d) miss(fallback=%d stencil=%d cache=%d skipped=%d)) fairness(tracked=%d aged=%d boosted=%d mapped=%d maxAge=%d maxBoost=%d) throttleHistory(tracked=%d repeated=%d recovered=%d maxStreak=%d maxTotal=%d maxLight=%d lastMiss=%d lastReason=0x%02x lastClass=%d) cvars(shadows=%d shadowMap=%d csm=%d projectedCSM=%d translucent=%d/%d debug=%d report=%d) invariants=%d mask=0x%08x build=%dms\n",
 		rg_modernShadowPlannerStats.available ? "available" : "unavailable",
@@ -2208,6 +2416,10 @@ const idMaterial *R_ModernShadowPlanner_SelfTestLightShader( const char *materia
 }
 
 bool RendererShadowPlanner_RunSelfTest( void ) {
+	// Admission is shared by both backends and does not need scene packets.
+	if ( !R_ShadowMapLODAdmissionSelfTest() ) {
+		return false;
+	}
 	if ( !rg_modernShadowPlannerInitialized || !rg_modernShadowPlannerFeatures.scenePackets ) {
 		common->Printf( "RendererShadowPlanner self-test passed (planner unavailable)\n" );
 		return true;
@@ -2263,6 +2475,7 @@ bool RendererShadowPlanner_RunSelfTest( void ) {
 	rendererShadowPlannerIntCVarRestore_t restoreShadowMapSize( r_shadowMapSize );
 	rendererShadowPlannerIntCVarRestore_t restoreProjectedCacheSize( r_shadowMapProjectedCacheSize );
 	rendererShadowPlannerIntCVarRestore_t restorePointCacheSize( r_shadowMapPointCacheSize );
+	rendererShadowPlannerIntCVarRestore_t restoreUpdateBudget( r_shadowMapMaxUpdatesPerView );
 	rendererShadowPlannerFloatCVarRestore_t restoreProjectionPad( r_shadowMapProjectionPad );
 	rendererShadowPlannerStringCVarRestore_t restoreBenchmarkPreset( r_rendererBenchmarkPreset );
 	r_shadows.SetBool( true );
@@ -2277,11 +2490,11 @@ bool RendererShadowPlanner_RunSelfTest( void ) {
 	r_shadowMapProjectionPad.SetFloat( 0.20f );
 	r_shadowMapProjectedCacheSize.SetInteger( 4 );
 	r_shadowMapPointCacheSize.SetInteger( 4 );
+	// The cache-estimate fixture isolates planner budgets from backend pass
+	// throttling, including limits selected by automatic performance presets.
+	r_shadowMapMaxUpdatesPerView.SetInteger( 0 );
 	r_rendererBenchmarkPreset.SetString( "baseline" );
 	if ( !R_ShadowMapCasterAdmissionSelfTest() ) {
-		return false;
-	}
-	if ( !R_ShadowMapLODAdmissionSelfTest() ) {
 		return false;
 	}
 	if ( !RB_ShadowMapArb2ReceiverFallbackSelfTest() ) {
@@ -2836,7 +3049,83 @@ bool RendererShadowPlanner_RunSelfTest( void ) {
 	return true;
 }
 
+static bool R_ShadowMapPointFaceBoundsSelfTest( void ) {
+	viewLight_t light;
+	memset( &light, 0, sizeof( light ) );
+	const idVec3 minimum( -6.0f, -3.0f, -1.0f );
+	const idVec3 maximum( 6.0f, 3.0f, 1.0f );
+	int rejected = 0;
+	for ( int sample = 0; sample < 160; ++sample ) {
+		float matrix[16] = { 0 };
+		matrix[15] = 1.0f;
+		// Rotated, mirrored, scaled, and sheared bounds, including singular
+		// transforms and casters that straddle cube seams or enclose the light.
+		const float angle = sample * 0.37f;
+		matrix[0] = idMath::Cos( angle ) * ( ( sample % 7 ) - 3 );
+		matrix[1] = idMath::Sin( angle ) * ( ( sample % 7 ) - 3 );
+		matrix[4] = -idMath::Sin( angle ) * 2.0f + 0.4f;
+		matrix[5] = idMath::Cos( angle ) * 2.0f;
+		matrix[8] = 0.75f;
+		matrix[10] = ( sample % 5 ) - 2.0f;
+		matrix[12] = ( ( sample * 17 ) % 101 ) - 50.0f;
+		matrix[13] = ( ( sample * 29 ) % 103 ) - 51.0f;
+		matrix[14] = ( ( sample * 37 ) % 107 ) - 53.0f;
+		for ( int face = 0; face < 6; ++face ) {
+			if ( !R_ShadowMapCasterOutsidePointFace( &light, matrix,
+					minimum.ToFloatPtr(), maximum.ToFloatPtr(), face ) ) {
+				continue;
+			}
+			++rejected;
+			const int axis = face >> 1;
+			const float sign = ( face & 1 ) ? -1.0f : 1.0f;
+			bool separatingPlane = false;
+			// Independent reference: transform all eight corners, then require
+			// a single face plane to exclude every corner of the convex box.
+			for ( int plane = 0; plane < 4; ++plane ) {
+				const int other = ( axis + 1 + ( plane >> 1 ) ) % 3;
+				const float side = ( plane & 1 ) ? -1.0f : 1.0f;
+				bool allOutside = true;
+				for ( int corner = 0; corner < 8; ++corner ) {
+					idVec3 local, world;
+					for ( int component = 0; component < 3; ++component ) {
+						local[component] = ( corner & ( 1 << component ) ) ? maximum[component] : minimum[component];
+					}
+					R_LocalPointToGlobal( matrix, local, world );
+					allOutside &= sign * world[axis] + side * world[other] < 0.0f;
+				}
+				separatingPlane |= allOutside;
+			}
+			if ( !separatingPlane ) {
+				common->Printf( "Point-face bounds self-test FAILED sample=%d face=%d\n", sample, face );
+				return false;
+			}
+		}
+	}
+	float identity[16] = { 0 };
+	identity[0] = identity[5] = identity[10] = identity[15] = 1.0f;
+	for ( int face = 0; face < 6; ++face ) {
+		if ( R_ShadowMapCasterOutsidePointFace( &light, identity, minimum.ToFloatPtr(), maximum.ToFloatPtr(), face ) ||
+				R_ShadowMapCasterOutsidePointFace( &light, identity, maximum.ToFloatPtr(), minimum.ToFloatPtr(), face ) ) {
+			return false;
+		}
+	}
+	common->Printf( "Point-face bounds self-test %s: 960 affine cases, %d conservative rejections\n",
+		rejected > 0 ? "passed" : "FAILED", rejected );
+	return rejected > 0;
+}
+
 bool RendererShadowProjectedDiagnostic_RunSelfTest( void ) {
+	if ( !R_ShadowMapDistantPointProjectionSelfTest() ) {
+		common->Printf( "RendererShadowProjectedDiagnostic self-test failed (distant point projection)\n" );
+		return false;
+	}
+	if ( !R_ShadowMapPointFaceBoundsSelfTest() ) {
+		return false;
+	}
+	if ( !R_ShadowMapCachePolicySelfTest() ) {
+		common->Printf( "RendererShadowProjectedDiagnostic self-test failed (cache policy)\n" );
+		return false;
+	}
 	// pure-math stabilization pins run regardless of planner availability
 	if ( !R_ShadowMapCascadeStabilitySelfTest() ) {
 		common->Printf( "RendererShadowProjectedDiagnostic self-test failed (cascade stability)\n" );

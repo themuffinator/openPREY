@@ -21,6 +21,7 @@ This file is part of the Doom 3 GPL Source Code. See docs/legal for details.
 #if defined( USE_SDL3 )
 #include <SDL3/SDL.h>
 #include <cmath>
+#include <atomic>
 
 // sdl3_backend.cpp; applies platform SDL hint defaults (including the macOS
 // Metal bridge render-driver selection) before the first SDL video use.
@@ -168,6 +169,16 @@ struct posixConsoleWindow_t {
 	int scrollLines;
 	int hotButton;
 	int pressedButton;
+#if defined( __ANDROID__ )
+	struct {
+		bool active = false;
+		bool cancelled = false;
+		SDL_TouchID device = 0;
+		SDL_FingerID finger = 0;
+		float startX = 0.0f;
+		float startY = 0.0f;
+	} touch;
+#endif
 	idEditField inputField;
 	idEditField history[ POSIX_CONSOLE_HISTORY ];
 	int nextHistoryLine;
@@ -198,6 +209,16 @@ struct posixConsoleWindow_t {
 
 static posixSplashWindow_t s_splashWindow;
 static posixConsoleWindow_t s_consoleWindow;
+
+#if defined( __ANDROID__ )
+static void Posix_ConsoleCancelTouch( void ) {
+	if ( s_consoleWindow.touch.active ) {
+		s_consoleWindow.hotButton = POSIX_CONSOLE_BUTTON_NONE;
+		s_consoleWindow.pressedButton = POSIX_CONSOLE_BUTTON_NONE;
+	}
+	s_consoleWindow.touch = {};
+}
+#endif
 
 static const char *Posix_ConsoleInputState( int &inputLength, int &inputCursor ) {
 	const char *inputBuffer = s_consoleWindow.inputField.GetBuffer();
@@ -613,6 +634,17 @@ static void Posix_ConsoleUpdateLayout( void ) {
 		(void)SDL_GetWindowSize( s_consoleWindow.window, &width, &height );
 	}
 
+#if defined( __ANDROID__ )
+	// Android reports window coordinates in pixels. Use a density-independent
+	// logical presentation so text and 48 dp touch targets remain readable.
+	const float displayScale = SDL_GetWindowDisplayScale( s_consoleWindow.window );
+	const float pixelDensity = SDL_GetWindowPixelDensity( s_consoleWindow.window );
+	const float contentScale = displayScale / pixelDensity;
+	if ( std::isfinite( contentScale ) && contentScale >= 0.25f && contentScale <= 16.0f ) {
+		width = Max( 1, static_cast<int>( width / contentScale ) );
+		height = Max( 1, static_cast<int>( height / contentScale ) );
+	}
+#else
 	// The window itself is clamped to the same minimum, but a compositor can
 	// still hand us a smaller size during a resize; clamp so the fixed rows
 	// never overlap the log pane.
@@ -622,13 +654,20 @@ static void Posix_ConsoleUpdateLayout( void ) {
 	if ( height < POSIX_CONSOLE_MIN_HEIGHT ) {
 		height = POSIX_CONSOLE_MIN_HEIGHT;
 	}
+#endif
 	Posix_ConsoleApplyLogicalPresentation( width, height );
 
 	const float margin = static_cast<float>( POSIX_CONSOLE_MARGIN );
+#if defined( __ANDROID__ )
+	const float gutter = Max( 8.0f, static_cast<float>( POSIX_CONSOLE_GUTTER ) );
+	const float buttonHeight = Max( 48.0f, static_cast<float>( POSIX_CONSOLE_BUTTON_HEIGHT ) );
+	const float inputHeight = Max( 48.0f, static_cast<float>( POSIX_CONSOLE_INPUT_HEIGHT ) );
+#else
 	const float gutter = static_cast<float>( POSIX_CONSOLE_GUTTER );
-	const float buttonWidth = static_cast<float>( POSIX_CONSOLE_BUTTON_WIDTH );
 	const float buttonHeight = static_cast<float>( POSIX_CONSOLE_BUTTON_HEIGHT );
 	const float inputHeight = static_cast<float>( POSIX_CONSOLE_INPUT_HEIGHT );
+#endif
+	const float buttonWidth = static_cast<float>( POSIX_CONSOLE_BUTTON_WIDTH );
 	const float statusHeight = static_cast<float>( POSIX_CONSOLE_STATUS_HEIGHT );
 	const float contentWidth = static_cast<float>( width ) - margin * 2.0f;
 
@@ -702,8 +741,12 @@ static bool Posix_ConsoleCreateWindow( void ) {
 	// Fatal errors reach this path after common->Shutdown() has released the
 	// registered cvar storage. A forced fatal window must therefore avoid every
 	// cvar access; normal console creation still requires a live cvar system.
+	// A console that quits on close is a dedicated server's only interface (a
+	// client that turned into one has no game window left), so the
+	// sys_consoleWindow opt-out does not apply to it.
 	if ( !s_consoleWindow.forceFatalWindow &&
-		 ( cvarSystem == NULL || !cvarSystem->IsInitialized() || !sys_consoleWindow.GetBool() ) ) {
+		 ( cvarSystem == NULL || !cvarSystem->IsInitialized() ||
+		   ( !sys_consoleWindow.GetBool() && !s_consoleWindow.quitOnClose ) ) ) {
 		return false;
 	}
 	if ( !Posix_ConsoleEnsureVideo() ) {
@@ -756,7 +799,11 @@ static bool Posix_ConsoleCreateWindow( void ) {
 	}
 
 	// Below this the fixed status/input/button rows would eat the log pane.
+#if !defined( __ANDROID__ )
 	(void)SDL_SetWindowMinimumSize( s_consoleWindow.window, POSIX_CONSOLE_MIN_WIDTH, POSIX_CONSOLE_MIN_HEIGHT );
+#else
+	Posix_ConsoleCancelTouch();
+#endif
 
 	s_consoleWindow.inputField.Clear();
 	for ( int i = 0; i < POSIX_CONSOLE_HISTORY; ++i ) {
@@ -776,6 +823,14 @@ static void Posix_ConsoleStartTextInput( void ) {
 	if ( s_consoleWindow.window == NULL || !s_consoleWindow.visible ) {
 		return;
 	}
+#if defined( __ANDROID__ )
+	// A fatal console cannot execute commands. Do not cover its report and
+	// dismissal buttons with the on-screen keyboard on focus or resize.
+	if ( s_consoleWindow.forceFatalWindow ) {
+		(void)SDL_StopTextInput( s_consoleWindow.window );
+		return;
+	}
+#endif
 
 	const SDL_Rect inputRect = {
 		static_cast<int>( s_consoleWindow.layout.inputRect.x ),
@@ -804,6 +859,9 @@ static void Posix_ConsoleStopTextInput( void ) {
 }
 
 static void Posix_ConsoleHide( void ) {
+#if defined( __ANDROID__ )
+	Posix_ConsoleCancelTouch();
+#endif
 	if ( s_consoleWindow.window == NULL ) {
 		s_consoleWindow.visible = false;
 		return;
@@ -825,12 +883,20 @@ static void Posix_ConsoleSubmitInput( void ) {
 		return;
 	}
 
-	Sys_Printf( "]%s\n", command );
+	const bool privateCommand = cvarSystem != NULL && cvarSystem->IsInitialized() &&
+		cvarSystem->CommandContainsPrivateCVar( command );
+	if ( privateCommand ) {
+		Sys_Printf( "]<private command redacted>\n" );
+	} else {
+		Sys_Printf( "]%s\n", command );
+	}
 	Posix_ConsoleQueueCommand( command );
 
-	s_consoleWindow.history[ s_consoleWindow.nextHistoryLine % POSIX_CONSOLE_HISTORY ] = s_consoleWindow.inputField;
-	s_consoleWindow.nextHistoryLine++;
-	s_consoleWindow.historyLine = s_consoleWindow.nextHistoryLine;
+	if ( !privateCommand ) {
+		s_consoleWindow.history[ s_consoleWindow.nextHistoryLine % POSIX_CONSOLE_HISTORY ] = s_consoleWindow.inputField;
+		s_consoleWindow.nextHistoryLine++;
+		s_consoleWindow.historyLine = s_consoleWindow.nextHistoryLine;
+	}
 	s_consoleWindow.inputField.Clear();
 	s_consoleWindow.scrollLines = 0;
 }
@@ -937,6 +1003,22 @@ static void Posix_ConsoleBeginPress( float x, float y ) {
 }
 
 /*
+** Posix_ConsoleRequestQuit
+**
+** The fatal-error window runs its own event loop until exitRequested is set.
+** Anywhere else the engine is still running (a dedicated server's console, or
+** the console the Quit button sits on), so quit through the command buffer;
+** nothing outside the fatal loop reads exitRequested.
+*/
+static void Posix_ConsoleRequestQuit( void ) {
+	if ( s_consoleWindow.forceFatalWindow ) {
+		s_consoleWindow.exitRequested = true;
+		return;
+	}
+	Posix_ConsoleQueueCommand( "quit" );
+}
+
+/*
 ** Posix_ConsoleClickButton
 **
 ** Runs on button release over the rect the press started in, matching the
@@ -962,20 +1044,73 @@ static void Posix_ConsoleClickButton( float x, float y ) {
 			Posix_ConsoleClearBuffer();
 			return;
 		case POSIX_CONSOLE_BUTTON_QUIT:
-			if ( s_consoleWindow.quitOnClose ) {
-				s_consoleWindow.exitRequested = true;
-				return;
-			}
-			Posix_ConsoleQueueCommand( "quit" );
+			Posix_ConsoleRequestQuit();
 			return;
 		default:
 			return;
 	}
 }
 
+#if defined( __ANDROID__ )
+static void Posix_ConsoleHandleTouch( const SDL_TouchFingerEvent &event ) {
+	auto &touch = s_consoleWindow.touch;
+	const bool down = event.type == SDL_EVENT_FINGER_DOWN;
+	if ( touch.active ) {
+		if ( down || touch.device != event.touchID || touch.finger != event.fingerID ) {
+			return;
+		}
+	} else if ( !down ) {
+		return;
+	}
+	if ( event.type == SDL_EVENT_FINGER_CANCELED ) {
+		Posix_ConsoleCancelTouch();
+		return;
+	}
+	int width = 0, height = 0;
+	(void)SDL_GetWindowSize( s_consoleWindow.window, &width, &height );
+	const bool valid = width > 0 && height > 0 && std::isfinite( event.x ) && std::isfinite( event.y ) &&
+		event.x >= 0.0f && event.x <= 1.0f && event.y >= 0.0f && event.y <= 1.0f;
+	if ( !valid ) {
+		if ( touch.active ) {
+			touch.cancelled = true;
+			s_consoleWindow.pressedButton = POSIX_CONSOLE_BUTTON_NONE;
+			if ( event.type == SDL_EVENT_FINGER_UP ) Posix_ConsoleCancelTouch();
+		}
+		return;
+	}
+	const float windowX = event.x * width, windowY = event.y * height;
+	float x = windowX, y = windowY;
+	Posix_ConsoleWindowToRenderCoordinates( x, y );
+	if ( !std::isfinite( x ) || !std::isfinite( y ) ) {
+		Posix_ConsoleCancelTouch();
+		return;
+	}
+	if ( down ) {
+		touch.active = true;
+		touch.device = event.touchID;
+		touch.finger = event.fingerID;
+		touch.startX = x;
+		touch.startY = y;
+		Posix_ConsoleBeginPress( windowX, windowY );
+		return;
+	}
+	const float dx = x - touch.startX, dy = y - touch.startY;
+	if ( dx * dx + dy * dy > 8.0f * 8.0f ) {
+		touch.cancelled = true;
+		s_consoleWindow.pressedButton = POSIX_CONSOLE_BUTTON_NONE;
+	}
+	if ( event.type == SDL_EVENT_FINGER_UP ) {
+		if ( !touch.cancelled ) Posix_ConsoleClickButton( windowX, windowY );
+		Posix_ConsoleCancelTouch();
+	} else {
+		Posix_ConsoleTrackPointer( windowX, windowY );
+	}
+}
+#endif
+
 static void Posix_ConsoleHandleClose( void ) {
 	if ( s_consoleWindow.quitOnClose ) {
-		s_consoleWindow.exitRequested = true;
+		Posix_ConsoleRequestQuit();
 	} else {
 		Posix_ConsoleHide();
 	}
@@ -1003,6 +1138,14 @@ static bool Posix_ConsoleHandleKey( const SDL_KeyboardEvent &keyEvent ) {
 	}
 
 	switch ( keyEvent.key ) {
+#if defined( __ANDROID__ )
+		case SDLK_AC_BACK:
+			if ( !keyEvent.repeat ) {
+				Posix_ConsoleCancelTouch();
+				Posix_ConsoleHandleClose();
+			}
+			return true;
+#endif
 		case SDLK_ESCAPE:
 			if ( !s_consoleWindow.quitOnClose ) {
 				Posix_ConsoleHide();
@@ -1414,13 +1557,17 @@ void Posix_ConsoleLateInit( void ) {
 		return;
 	}
 
+	const bool viewlog = sys_viewlog.GetInteger() != 0 || sys_winViewlogAlias.GetInteger() != 0;
 	const bool shouldShow =
-		sys_viewlog.GetInteger() != 0 ||
-		sys_winViewlogAlias.GetInteger() != 0 ||
+		viewlog ||
 		com_skipRenderer.GetBool() ||
 		idAsyncNetwork::serverDedicated.GetInteger() != 0;
+	// A dedicated server launched with a hidden game window keeps its console
+	// hidden too, as a client that turns into one does.
+	const bool hidden = !viewlog && idAsyncNetwork::serverDedicated.GetInteger() == 1 &&
+		cvarSystem->GetCVarBool( "r_hiddenWindow" );
 
-	Sys_ShowConsole( shouldShow ? 1 : 0, shouldShow );
+	Sys_ShowConsole( shouldShow && !hidden ? 1 : 0, shouldShow );
 #endif
 }
 
@@ -1442,8 +1589,24 @@ bool Posix_ConsoleProcessEvent( const void *eventData ) {
 	const SDL_WindowID windowID = Posix_ConsoleWindowID();
 
 	switch ( event.type ) {
+#if defined( __ANDROID__ )
+		case SDL_EVENT_WILL_ENTER_BACKGROUND:
+		case SDL_EVENT_DID_ENTER_BACKGROUND:
+			Posix_ConsoleCancelTouch();
+			return false;
+		case SDL_EVENT_WINDOW_HIDDEN:
+			if ( event.window.windowID == windowID ) {
+				Posix_ConsoleCancelTouch();
+				Posix_ConsoleStopTextInput();
+				return true;
+			}
+			return false;
+#endif
 		case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
 			if ( event.window.windowID == windowID ) {
+#if defined( __ANDROID__ )
+				Posix_ConsoleCancelTouch();
+#endif
 				Posix_ConsoleHandleClose();
 				return true;
 			}
@@ -1457,6 +1620,9 @@ bool Posix_ConsoleProcessEvent( const void *eventData ) {
 			return false;
 		case SDL_EVENT_WINDOW_FOCUS_LOST:
 			if ( event.window.windowID == windowID ) {
+#if defined( __ANDROID__ )
+				Posix_ConsoleCancelTouch();
+#endif
 				s_consoleWindow.inputFocused = false;
 				// A press that ends outside our focus never becomes a click, so
 				// drop the highlight instead of leaving a button stuck lit.
@@ -1474,7 +1640,13 @@ bool Posix_ConsoleProcessEvent( const void *eventData ) {
 			return false;
 		case SDL_EVENT_WINDOW_RESIZED:
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+#if defined( __ANDROID__ )
+		case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+#endif
 			if ( event.window.windowID == windowID ) {
+#if defined( __ANDROID__ )
+				Posix_ConsoleCancelTouch();
+#endif
 				Posix_ConsoleUpdateLayout();
 				Posix_ConsoleStartTextInput();
 				return true;
@@ -1504,22 +1676,45 @@ bool Posix_ConsoleProcessEvent( const void *eventData ) {
 			return event.edit.windowID == windowID;
 		case SDL_EVENT_MOUSE_MOTION:
 			if ( event.motion.windowID == windowID ) {
+#if defined( __ANDROID__ )
+				if ( event.motion.which == SDL_TOUCH_MOUSEID ) return true;
+#endif
 				Posix_ConsoleTrackPointer( event.motion.x, event.motion.y );
 				return true;
 			}
 			return false;
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
 			if ( event.button.windowID == windowID && event.button.button == SDL_BUTTON_LEFT ) {
+#if defined( __ANDROID__ )
+				// Early fatal startup can precede the backend's touch/mouse hints.
+				// A synthetic mouse duplicate must not bypass touch cancellation.
+				if ( event.button.which == SDL_TOUCH_MOUSEID ) return true;
+				Posix_ConsoleCancelTouch();
+#endif
 				Posix_ConsoleBeginPress( event.button.x, event.button.y );
 				return true;
 			}
 			return event.button.windowID == windowID;
 		case SDL_EVENT_MOUSE_BUTTON_UP:
 			if ( event.button.windowID == windowID && event.button.button == SDL_BUTTON_LEFT ) {
+#if defined( __ANDROID__ )
+				if ( event.button.which == SDL_TOUCH_MOUSEID ) return true;
+				Posix_ConsoleCancelTouch();
+#endif
 				Posix_ConsoleClickButton( event.button.x, event.button.y );
 				return true;
 			}
 			return event.button.windowID == windowID;
+#if defined( __ANDROID__ )
+		case SDL_EVENT_FINGER_DOWN:
+		case SDL_EVENT_FINGER_MOTION:
+		case SDL_EVENT_FINGER_UP:
+		case SDL_EVENT_FINGER_CANCELED:
+			if ( event.tfinger.windowID != windowID ) return false;
+			if ( event.tfinger.touchID == SDL_MOUSE_TOUCHID ) return true;
+			Posix_ConsoleHandleTouch( event.tfinger );
+			return true;
+#endif
 		case SDL_EVENT_MOUSE_WHEEL:
 			if ( event.wheel.windowID == windowID ) {
 				if ( !std::isfinite( event.wheel.y ) ) {
@@ -1570,6 +1765,42 @@ void Posix_ConsoleFrame( void ) {
 #endif
 }
 
+#if defined( __ANDROID__ )
+/*
+===============
+Posix_ConsoleFatalErrorActive
+
+True once the fatal-error console has taken the screen. Read from the touch
+overlay through Quake4_GetScreenMode, which runs on the host's UI thread, so
+this is written once and never cleared -- the process is on its way out.
+===============
+*/
+static std::atomic<bool> s_androidFatalConsoleActive(false);
+static std::atomic<bool> s_androidFatalDismissRequested(false);
+
+bool Posix_ConsoleFatalErrorActive( void ) {
+	return s_androidFatalConsoleActive;
+}
+
+/*
+===============
+Posix_ConsoleRequestFatalDismiss
+
+The fatal window's own close button is a desktop affordance: on a phone the
+only things the player has are the screen and the back key, and neither reaches
+this loop through SDL. The touch overlay feeds a ring buffer that only
+Sys_SDL_PumpEvents drains, and the fatal loop polls SDL directly instead, so
+without this the error window can only be left by killing the app.
+
+Called from the host input thread, so the loop below re-reads the flag rather
+than being signalled.
+===============
+*/
+void Posix_ConsoleRequestFatalDismiss( void ) {
+	s_androidFatalDismissRequested = true;
+}
+#endif
+
 void Posix_ConsoleFatalErrorWait( void ) {
 #ifdef ID_DEDICATED
 	// Headless servers already preserve fatal diagnostics on stderr, in the
@@ -1587,6 +1818,27 @@ void Posix_ConsoleFatalErrorWait( void ) {
 		return;
 	}
 
+	// The window below waits for a human to close it, and the loop has no other
+	// exit. Under an automation harness there is no human, so a fatal error
+	// stops being a failure and becomes a hang: the harness kills the process
+	// on its own timeout and reports that, while the actual message sits in a
+	// window nobody ever saw. That is exactly how a missing-asset error on the
+	// macOS release runner presented as an unexplained 90 second timeout.
+	//
+	// CI is the near-universal convention for "no interactive session" and
+	// every harness this project runs under sets it. The diagnostics are not
+	// lost by skipping the window: the message has already gone to stdout, the
+	// engine log and the fatal breadcrumb before this is called.
+	const char *ciEnvironment = getenv( "CI" );
+	if ( ciEnvironment != NULL && ciEnvironment[0] != '\0' &&
+		 idStr::Icmp( ciEnvironment, "0" ) != 0 && idStr::Icmp( ciEnvironment, "false" ) != 0 ) {
+		Sys_Printf( "CI environment detected; skipping the interactive fatal error window\n" );
+		return;
+	}
+
+#if defined( __ANDROID__ )
+	s_androidFatalConsoleActive = true;
+#endif
 	s_consoleWindow.forceFatalWindow = true;
 	// An earlier transient console-window failure must not permanently
 	// suppress the forced fatal-error window; give it one fresh attempt.
@@ -1601,7 +1853,13 @@ void Posix_ConsoleFatalErrorWait( void ) {
 		return;
 	}
 
-	while ( !s_consoleWindow.exitRequested ) {
+	while ( !s_consoleWindow.exitRequested
+#if defined( __ANDROID__ )
+			// A tap or the back key ends the wait; Posix_Exit below then takes
+			// the process down and the host activity comes back to the front.
+			&& !s_androidFatalDismissRequested
+#endif
+			) {
 		SDL_Event event;
 		while ( SDL_PollEvent( &event ) ) {
 			if ( event.type == SDL_EVENT_QUIT ) {
@@ -1618,6 +1876,9 @@ void Posix_ConsoleFatalErrorWait( void ) {
 
 void Posix_ShutdownConsole( void ) {
 #if defined( USE_SDL3 )
+#if defined( __ANDROID__ )
+	Posix_ConsoleCancelTouch();
+#endif
 	Posix_SplashDestroy();
 	Posix_ConsoleStopTextInput();
 	if ( s_consoleWindow.renderer != NULL ) {
@@ -1641,7 +1902,9 @@ void Posix_ShutdownConsole( void ) {
 }
 
 void Sys_ShowSplash( void ) {
-#if defined( USE_SDL3 ) && !defined( ID_DEDICATED )
+// Android's Activity owns the launch screen. SDL permits only one Android
+// window, which must remain available for the game's graphics context.
+#if defined( USE_SDL3 ) && !defined( ID_DEDICATED ) && !defined( __ANDROID__ )
 	if ( s_splashWindow.window != NULL || s_splashWindow.createFailed ) {
 		return;
 	}

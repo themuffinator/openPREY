@@ -55,6 +55,7 @@ void idDict::Copy( const idDict &other ) {
 	}
 
 	n = other.args.Num();
+	contentIdentity.Invalidate();
 
 	if ( args.Num() ) {
 		found = (int *) _alloca16( other.args.Num() * sizeof( int ) );
@@ -112,6 +113,7 @@ void idDict::TransferKeyValues( idDict &other ) {
 	}
 	argHash = other.argHash;
 
+	other.contentIdentity.Invalidate();
 	other.args.Clear();
 	other.argHash.Free();
 }
@@ -168,6 +170,7 @@ void idDict::SetDefaults( const idDict *dict ) {
 		def = &dict->args[i];
 		kv = FindKey( def->GetKey() );
 		if ( !kv ) {
+			contentIdentity.Invalidate();
 			newkv.key = globalKeys.CopyString( def->key );
 			newkv.value = globalValues.CopyString( def->value );
 			argHash.Add( argHash.GenerateKey( newkv.GetKey(), false ), args.Append( newkv ) );
@@ -182,6 +185,7 @@ idDict::Clear
 */
 void idDict::Clear( void ) {
 	int i;
+	contentIdentity.Invalidate();
 
 	if ( !globalPoolsShutdown ) {
 		for( i = 0; i < args.Num(); i++ ) {
@@ -269,6 +273,7 @@ void idDict::Set( const char *key, const char *value ) {
 	}
 
 	i = FindKeyIndex( key );
+	contentIdentity.Invalidate();
 	if ( i != -1 ) {
 		// first set the new value and then free the old value to allow proper self copying
 		const idPoolStr *oldValue = args[i].value;
@@ -436,7 +441,7 @@ static void WriteString( const char *s, idFile *f ) {
 	if ( s == NULL ) {
 		s = "";
 	}
-	int	len = strlen( s );
+	int	len = idLib::SizeToInt( strlen( s ), "WriteString" );
 	if ( len >= MAX_STRING_CHARS-1 ) {
 		idLib::common->Error( "idDict::WriteToFileHandle: bad string" );
 	}
@@ -476,7 +481,7 @@ int idDict::FindKeyIndex( const char *key ) const {
 
 	if ( key == NULL || key[0] == '\0' ) {
 		idLib::common->DWarning( "idDict::FindKeyIndex: empty key" );
-		return NULL;
+		return -1;
 	}
 
 	int hash = argHash.GenerateKey( key, false );
@@ -500,6 +505,7 @@ void idDict::Delete( const char *key ) {
 	hash = argHash.GenerateKey( key, false );
 	for ( i = argHash.First( hash ); i != -1; i = argHash.Next( i ) ) {
 		if ( args[i].GetKey().Icmp( key ) == 0 ) {
+			contentIdentity.Invalidate();
 			globalKeys.FreeString( args[i].key );
 			globalValues.FreeString( args[i].value );
 			args.RemoveIndex( i );
@@ -527,7 +533,7 @@ const idKeyValue *idDict::MatchPrefix( const char *prefix, const idKeyValue *las
 	int start;
 
 	assert( prefix );
-	len = strlen( prefix );
+	len = idLib::SizeToInt( strlen( prefix ), "idDict::MatchPrefix" );
 
 	start = -1;
 	if ( lastMatch ) {

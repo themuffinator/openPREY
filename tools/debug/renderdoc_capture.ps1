@@ -98,6 +98,7 @@ if ($Mode -eq "SP") {
 } else {
     $gameArgs += @(
         "+set", "net_serverDedicated", "0",
+        "+set", "ui_autoJoin", "1",
         "+seta", "si_pure", "0",
         "+set", "net_serverAllowServerMod", "1",
         "+set", "sv_cheats", "1",

@@ -26,6 +26,7 @@ uniform vec2 uShadowTexelSize;
 uniform float uShadowBias;
 uniform float uShadowNormalBias;
 uniform float uShadowTexelDepthBias[4];
+uniform float uShadowTexelDepthStep[4];
 uniform float uShadowReceiverPlaneBias;
 uniform float uShadowFilterRadius;
 uniform float uShadowFilterTaps;
@@ -240,18 +241,22 @@ float NormalCdf( float x ) {
 	return 0.5 * ( 1.0 + ApproxErf( x * 0.70710678 ) );
 }
 
+// Two of the four ring taps of the five-tap kernel; the others mirror them.
+const vec2 kShadowFiveTapRingA = vec2( 0.670820, 0.223607 );
+const vec2 kShadowFiveTapRingB = vec2( -0.223607, 0.670820 );
+
 float StableShadowHash( vec3 value ) {
 	return fract( sin( dot( value, vec3( 12.9898, 78.233, 37.719 ) ) ) * 43758.5453 );
 }
 
-vec2 RotateShadowOffset( vec2 offset, vec2 uv, float depth ) {
+mat2 ShadowOffsetRotation( vec2 uv, float depth ) {
 	if ( uShadowFilterMode < 0.5 ) {
-		return offset;
+		return mat2( 1.0, 0.0, 0.0, 1.0 );
 	}
 	float angle = StableShadowHash( vec3( floor( uv / max( uShadowTexelSize.x, 1.0e-6 ) ), floor( depth * 1024.0 ) ) ) * 6.2831853;
 	float s = sin( angle );
 	float c = cos( angle );
-	return vec2( c * offset.x - s * offset.y, s * offset.x + c * offset.y );
+	return mat2( c, s, -s, c );
 }
 
 float TranslucentFilterRadius() {
@@ -337,6 +342,19 @@ float CascadeTexelDepthBias( int cascadeIndex ) {
 	return uShadowTexelDepthBias[3];
 }
 
+float CascadeTexelDepthStep( int cascadeIndex ) {
+	if ( cascadeIndex <= 0 ) {
+		return uShadowTexelDepthStep[0];
+	}
+	if ( cascadeIndex == 1 ) {
+		return uShadowTexelDepthStep[1];
+	}
+	if ( cascadeIndex == 2 ) {
+		return uShadowTexelDepthStep[2];
+	}
+	return uShadowTexelDepthStep[3];
+}
+
 float ShadowDepthGradient( int cascadeIndex ) {
 	if ( cascadeIndex <= 0 ) {
 		return gShadowDepthGradients.x;
@@ -369,8 +387,25 @@ float ShadowReceiverBias( int cascadeIndex, float depth ) {
 	return max( max( scalarBias, 0.0 ), max( texelAwareBias, 0.0 ) );
 }
 
-float SampleShadowCompare( vec2 uv, float depth, int cascadeIndex ) {
-	float bias = ShadowReceiverBias( cascadeIndex, depth );
+// Off-centre PCF taps and PCSS blocker probes read the map several texels
+// away from the receiver. A receiver at an angle to the light changes depth by
+// texelDepthStep * slope per texel, so a tap on the side nearer the light
+// would compare the receiver with its own surface and speckle it, more as the
+// filter widens. Each tap therefore adds this bias per texel of its distance
+// from the centre. The centre sample keeps the plain receiver bias, so contact
+// shadows keep their reach.
+float ShadowFootprintBias( int cascadeIndex ) {
+	if ( ShadowDebugModeIs( kShadowDebugBiasOff ) ) {
+		return 0.0;
+	}
+	float lightCos = clamp( vShadowLightCos, kShadowBiasMinLightCos, 1.0 );
+	float sinTheta = sqrt( max( 1.0 - lightCos * lightCos, 0.0 ) );
+	float slopeBias = min( sinTheta / lightCos, kShadowBiasMaxSlope );
+	return max( CascadeTexelDepthStep( cascadeIndex ), 0.0 ) * slopeBias;
+}
+
+float SampleShadowCompare( vec2 uv, float depth, int cascadeIndex, float tapBias ) {
+	float bias = ShadowReceiverBias( cascadeIndex, depth ) + tapBias;
 #ifdef OPENQ4_SHADOW_COMPARE
 	return shadow2D( uShadowMap, vec3( uv, depth - bias ) ).r;
 #else
@@ -388,42 +423,62 @@ float RawShadowDepth( vec2 uv ) {
 }
 
 #ifndef OPENQ4_SHADOW_COMPARE
-float ProjectedPCSSRadius( vec2 uv, float depth, int cascadeIndex, vec2 clampMin, vec2 clampMax ) {
+float ProjectedPCSSRadius( vec2 uv, float depth, int cascadeIndex, vec2 clampMin, vec2 clampMax, mat2 rotation ) {
+	// The CPU already applies the distant-source scale to every radius. Keep
+	// the contact floor at the configured PCF radius; the larger PCSS search and
+	// maximum radii are guard/search bounds, not minimum blur.
+	float baseRadius = max( uShadowFilterRadius, 0.0 );
 	if ( uShadowFilterMode < 1.5 || uShadowPCSSLightRadius <= 0.0 || uShadowPCSSMaxRadius <= 0.0 ) {
-		return uShadowFilterRadius;
+		return baseRadius;
 	}
 
-	float bias = ShadowReceiverBias( cascadeIndex, depth );
-	vec2 searchTap = uShadowTexelSize * max( uShadowPCSSLightRadius, 0.5 );
+	float compareDepth = depth - ShadowReceiverBias( cascadeIndex, depth );
+	float searchRadius = max( uShadowPCSSLightRadius, 0.5 );
+	vec2 searchTap = uShadowTexelSize * searchRadius;
+	// Without the footprint bias a tilted receiver finds itself as a blocker.
+	float searchBias = ShadowFootprintBias( cascadeIndex ) * searchRadius;
 	float blockerDepth = 0.0;
 	float blockerCount = 0.0;
 	float d0 = RawShadowDepth( uv );
-	if ( d0 < depth - bias ) {
+	if ( d0 < compareDepth ) {
 		blockerDepth += d0;
 		blockerCount += 1.0;
 	}
-	vec2 o1 = RotateShadowOffset( vec2( -0.5, -0.5 ), uv, depth );
-	vec2 o2 = RotateShadowOffset( vec2( 0.5, -0.5 ), uv, depth );
-	vec2 o3 = RotateShadowOffset( vec2( -0.5, 0.5 ), uv, depth );
-	vec2 o4 = RotateShadowOffset( vec2( 0.5, 0.5 ), uv, depth );
+	vec2 o1 = rotation * vec2( -0.326212, -0.405805 );
+	vec2 o2 = rotation * vec2( -0.840144, -0.073580 );
+	vec2 o3 = rotation * vec2( -0.695914, 0.457137 );
+	vec2 o4 = rotation * vec2( -0.203345, 0.620716 );
+	vec2 o5 = rotation * vec2( 0.962340, -0.194983 );
+	vec2 o6 = rotation * vec2( 0.473434, -0.480026 );
+	vec2 o7 = rotation * vec2( 0.519456, 0.767022 );
+	vec2 o8 = rotation * vec2( 0.185461, -0.893124 );
 	float d1 = RawShadowDepth( clamp( uv + o1 * searchTap, clampMin, clampMax ) );
 	float d2 = RawShadowDepth( clamp( uv + o2 * searchTap, clampMin, clampMax ) );
 	float d3 = RawShadowDepth( clamp( uv + o3 * searchTap, clampMin, clampMax ) );
 	float d4 = RawShadowDepth( clamp( uv + o4 * searchTap, clampMin, clampMax ) );
-	if ( d1 < depth - bias ) { blockerDepth += d1; blockerCount += 1.0; }
-	if ( d2 < depth - bias ) { blockerDepth += d2; blockerCount += 1.0; }
-	if ( d3 < depth - bias ) { blockerDepth += d3; blockerCount += 1.0; }
-	if ( d4 < depth - bias ) { blockerDepth += d4; blockerCount += 1.0; }
+	float d5 = RawShadowDepth( clamp( uv + o5 * searchTap, clampMin, clampMax ) );
+	float d6 = RawShadowDepth( clamp( uv + o6 * searchTap, clampMin, clampMax ) );
+	float d7 = RawShadowDepth( clamp( uv + o7 * searchTap, clampMin, clampMax ) );
+	float d8 = RawShadowDepth( clamp( uv + o8 * searchTap, clampMin, clampMax ) );
+	if ( d1 < compareDepth - length( o1 ) * searchBias ) { blockerDepth += d1; blockerCount += 1.0; }
+	if ( d2 < compareDepth - length( o2 ) * searchBias ) { blockerDepth += d2; blockerCount += 1.0; }
+	if ( d3 < compareDepth - length( o3 ) * searchBias ) { blockerDepth += d3; blockerCount += 1.0; }
+	if ( d4 < compareDepth - length( o4 ) * searchBias ) { blockerDepth += d4; blockerCount += 1.0; }
+	if ( d5 < compareDepth - length( o5 ) * searchBias ) { blockerDepth += d5; blockerCount += 1.0; }
+	if ( d6 < compareDepth - length( o6 ) * searchBias ) { blockerDepth += d6; blockerCount += 1.0; }
+	if ( d7 < compareDepth - length( o7 ) * searchBias ) { blockerDepth += d7; blockerCount += 1.0; }
+	if ( d8 < compareDepth - length( o8 ) * searchBias ) { blockerDepth += d8; blockerCount += 1.0; }
 	if ( blockerCount <= 0.0 ) {
-		return uShadowFilterRadius;
+		return 0.0;
 	}
 
 	float averageBlocker = blockerDepth / blockerCount;
-	float penumbra = ( depth - averageBlocker ) / max( averageBlocker, 1.0e-4 );
+	float separation = max( compareDepth - averageBlocker, 0.0 );
+	float penumbra = separation / max( averageBlocker, 1.0e-4 );
 	// Keep the clamp ordered when a user deliberately sets a PCSS maximum
 	// below the base PCF radius.  A zero maximum still disables PCSS above.
-	float maxRadius = max( uShadowFilterRadius, uShadowPCSSMaxRadius );
-	return clamp( max( uShadowFilterRadius, penumbra * uShadowPCSSLightRadius ), uShadowFilterRadius, maxRadius );
+	float maxRadius = max( baseRadius, uShadowPCSSMaxRadius );
+	return clamp( max( baseRadius, penumbra * uShadowPCSSLightRadius ), baseRadius, maxRadius );
 }
 #endif
 
@@ -459,53 +514,67 @@ vec4 SampleShadowCascade( vec4 shadowCoord, vec4 atlasRect, int cascadeIndex ) {
 	vec2 clampMax = atlasMax - guardBand;
 	clampMin = min( clampMin, clampMax );
 	uv = clamp( uv, clampMin, clampMax );
+	// Blocker search and PCF use the same stable kernel orientation. Computing
+	// the hash/trigonometry once also keeps PCSS cost bounded per receiver.
+	mat2 rotation = ShadowOffsetRotation( uv, depth );
 
 	float filterRadius = EffectiveShadowFilterRadius();
 #ifndef OPENQ4_SHADOW_COMPARE
 	if ( !ShadowDebugModeIs( kShadowDebugPCFOff ) ) {
-		filterRadius = ProjectedPCSSRadius( uv, depth, cascadeIndex, clampMin, clampMax );
+		filterRadius = ProjectedPCSSRadius( uv, depth, cascadeIndex, clampMin, clampMax, rotation );
 	}
 #endif
 	if ( filterRadius <= 0.0 ) {
-		return vec4( SampleShadowCompare( uv, depth, cascadeIndex ), localUv.x, localUv.y, depth );
+		return vec4( SampleShadowCompare( uv, depth, cascadeIndex, 0.0 ), localUv.x, localUv.y, depth );
 	}
 
 	vec2 tap = uShadowTexelSize * filterRadius;
+	// Each tap's bias grows with its distance from the centre, filterRadius * |o|.
+	float tapBias = ShadowFootprintBias( cascadeIndex ) * filterRadius;
 	float shadow = 0.0;
-	shadow += SampleShadowCompare( uv, depth, cascadeIndex );
+	shadow += SampleShadowCompare( uv, depth, cascadeIndex, 0.0 );
 	if ( uShadowFilterTaps <= 1.0 ) {
 		return vec4( shadow, localUv.x, localUv.y, depth );
 	}
-	vec2 o1 = RotateShadowOffset( vec2( -0.326212, -0.405805 ), uv, depth );
-	vec2 o2 = RotateShadowOffset( vec2( -0.840144, -0.073580 ), uv, depth );
-	vec2 o3 = RotateShadowOffset( vec2( -0.695914, 0.457137 ), uv, depth );
-	vec2 o4 = RotateShadowOffset( vec2( -0.203345, 0.620716 ), uv, depth );
-	shadow += SampleShadowCompare( clamp( uv + o1 * tap, clampMin, clampMax ), depth, cascadeIndex );
-	shadow += SampleShadowCompare( clamp( uv + o2 * tap, clampMin, clampMax ), depth, cascadeIndex );
-	shadow += SampleShadowCompare( clamp( uv + o3 * tap, clampMin, clampMax ), depth, cascadeIndex );
-	shadow += SampleShadowCompare( clamp( uv + o4 * tap, clampMin, clampMax ), depth, cascadeIndex );
+	// The first four taps of the nine- and thirteen-tap sets all lie to one
+	// side of the centre. Alone they pull the shadow 0.4 radius sideways and
+	// soften one side of its edge only, so the five-tap kernel uses a ring.
+	vec2 o1 = rotation * vec2( -0.326212, -0.405805 );
+	vec2 o2 = rotation * vec2( -0.840144, -0.073580 );
+	vec2 o3 = rotation * vec2( -0.695914, 0.457137 );
+	vec2 o4 = rotation * vec2( -0.203345, 0.620716 );
+	if ( uShadowFilterTaps <= 5.0 ) {
+		o1 = rotation * kShadowFiveTapRingA;
+		o2 = rotation * kShadowFiveTapRingB;
+		o3 = -o1;
+		o4 = -o2;
+	}
+	shadow += SampleShadowCompare( clamp( uv + o1 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o1 ) * tapBias );
+	shadow += SampleShadowCompare( clamp( uv + o2 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o2 ) * tapBias );
+	shadow += SampleShadowCompare( clamp( uv + o3 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o3 ) * tapBias );
+	shadow += SampleShadowCompare( clamp( uv + o4 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o4 ) * tapBias );
 	if ( uShadowFilterTaps <= 5.0 ) {
 		return vec4( shadow * ( 1.0 / 5.0 ), localUv.x, localUv.y, depth );
 	}
-	vec2 o5 = RotateShadowOffset( vec2( 0.962340, -0.194983 ), uv, depth );
-	vec2 o6 = RotateShadowOffset( vec2( 0.473434, -0.480026 ), uv, depth );
-	vec2 o7 = RotateShadowOffset( vec2( 0.519456, 0.767022 ), uv, depth );
-	vec2 o8 = RotateShadowOffset( vec2( 0.185461, -0.893124 ), uv, depth );
-	shadow += SampleShadowCompare( clamp( uv + o5 * tap, clampMin, clampMax ), depth, cascadeIndex );
-	shadow += SampleShadowCompare( clamp( uv + o6 * tap, clampMin, clampMax ), depth, cascadeIndex );
-	shadow += SampleShadowCompare( clamp( uv + o7 * tap, clampMin, clampMax ), depth, cascadeIndex );
-	shadow += SampleShadowCompare( clamp( uv + o8 * tap, clampMin, clampMax ), depth, cascadeIndex );
+	vec2 o5 = rotation * vec2( 0.962340, -0.194983 );
+	vec2 o6 = rotation * vec2( 0.473434, -0.480026 );
+	vec2 o7 = rotation * vec2( 0.519456, 0.767022 );
+	vec2 o8 = rotation * vec2( 0.185461, -0.893124 );
+	shadow += SampleShadowCompare( clamp( uv + o5 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o5 ) * tapBias );
+	shadow += SampleShadowCompare( clamp( uv + o6 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o6 ) * tapBias );
+	shadow += SampleShadowCompare( clamp( uv + o7 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o7 ) * tapBias );
+	shadow += SampleShadowCompare( clamp( uv + o8 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o8 ) * tapBias );
 	if ( uShadowFilterTaps <= 9.0 ) {
 		return vec4( shadow * ( 1.0 / 9.0 ), localUv.x, localUv.y, depth );
 	}
-	vec2 o9 = RotateShadowOffset( vec2( 0.507431, 0.064425 ), uv, depth );
-	vec2 o10 = RotateShadowOffset( vec2( 0.896420, 0.412458 ), uv, depth );
-	vec2 o11 = RotateShadowOffset( vec2( -0.321940, -0.932615 ), uv, depth );
-	vec2 o12 = RotateShadowOffset( vec2( -0.791559, -0.597705 ), uv, depth );
-	shadow += SampleShadowCompare( clamp( uv + o9 * tap, clampMin, clampMax ), depth, cascadeIndex );
-	shadow += SampleShadowCompare( clamp( uv + o10 * tap, clampMin, clampMax ), depth, cascadeIndex );
-	shadow += SampleShadowCompare( clamp( uv + o11 * tap, clampMin, clampMax ), depth, cascadeIndex );
-	shadow += SampleShadowCompare( clamp( uv + o12 * tap, clampMin, clampMax ), depth, cascadeIndex );
+	vec2 o9 = rotation * vec2( 0.507431, 0.064425 );
+	vec2 o10 = rotation * vec2( 0.896420, 0.412458 );
+	vec2 o11 = rotation * vec2( -0.321940, -0.932615 );
+	vec2 o12 = rotation * vec2( -0.791559, -0.597705 );
+	shadow += SampleShadowCompare( clamp( uv + o9 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o9 ) * tapBias );
+	shadow += SampleShadowCompare( clamp( uv + o10 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o10 ) * tapBias );
+	shadow += SampleShadowCompare( clamp( uv + o11 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o11 ) * tapBias );
+	shadow += SampleShadowCompare( clamp( uv + o12 * tap, clampMin, clampMax ), depth, cascadeIndex, length( o12 ) * tapBias );
 	return vec4( shadow * ( 1.0 / 13.0 ), localUv.x, localUv.y, depth );
 }
 
@@ -854,7 +923,36 @@ vec3 SampleTranslucentShadow() {
 	return mix( shadow, nextShadow, blend );
 }
 
+#ifdef OPENQ4_PBR
+// Native PBR shading for one light, given its shadow visibility; draw_pbr.cpp
+// appends the library that defines it to this source.
+vec3 OpenQ4PBRDirect( vec3 shadow );
+// The coverage of a translucent owner's replayed light; zero otherwise.
+float OpenQ4PBRAlpha();
+#endif
+
 void main() {
+#ifdef OPENQ4_PBR
+	gShadowDebugState = 0.0;
+#ifdef OPENQ4_PBR_UNSHADOWED
+	gl_FragColor = vec4( OpenQ4PBRDirect( vec3( 1.0 ) ), OpenQ4PBRAlpha() );
+#else
+	if ( uShadowReceiverPlaneBias > 0.5 ) {
+		gShadowDepthGradients = vec4(
+			abs( dFdx( vShadowCoord0.z ) ) + abs( dFdy( vShadowCoord0.z ) ),
+			abs( dFdx( vShadowCoord1.z ) ) + abs( dFdy( vShadowCoord1.z ) ),
+			abs( dFdx( vShadowCoord2.z ) ) + abs( dFdy( vShadowCoord2.z ) ),
+			abs( dFdx( vShadowCoord3.z ) ) + abs( dFdy( vShadowCoord3.z ) ) );
+	}
+	vec4 pbrShadowInfo = SampleShadow();
+	if ( ShadowVisualDebugMode() ) {
+		gl_FragColor = ShadowDebugOutput( pbrShadowInfo );
+		return;
+	}
+	gl_FragColor = vec4( OpenQ4PBRDirect( pbrShadowInfo.x * SampleTranslucentShadow() ), OpenQ4PBRAlpha() );
+#endif
+	return;
+#endif
 	vec4 bumpSample = texture2D( uBumpMap, vBumpTexCoord );
 	vec3 localNormal = DecodeLocalNormal( bumpSample );
 
@@ -873,9 +971,15 @@ void main() {
 	vec3 light = vec3( ndotl );
 	light *= texture2DProj( uLightFalloffMap, vLightFalloffTexCoord ).rgb;
 	light *= texture2DProj( uLightProjectionMap, vLightProjectionTexCoord ).rgb;
-	vec4 shadowInfo = SampleShadow();
-	light *= shadowInfo.x;
-	light *= SampleTranslucentShadow();
+	// A fragment the light does not reach (outside the projected image, past
+	// the falloff, turned away) has no shadow to resolve, and the filter is
+	// most of this shader's cost. The debug views still show every fragment.
+	vec4 shadowInfo = vec4( 1.0, 0.0, 0.0, 0.0 );
+	if ( max( light.r, max( light.g, light.b ) ) > 0.0 || ShadowVisualDebugMode() ) {
+		shadowInfo = SampleShadow();
+		light *= shadowInfo.x;
+		light *= SampleTranslucentShadow();
+	}
 
 	vec3 diffuse = texture2D( uDiffuseMap, vDiffuseTexCoord ).rgb * uDiffuseColor.rgb;
 	diffuse = ApplyFlatDiffuseSweep( diffuse, vLightFalloffTexCoord.z );

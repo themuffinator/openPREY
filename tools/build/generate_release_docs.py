@@ -10,7 +10,7 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -19,13 +19,20 @@ ROOT_DOCS = (
     Path("README.md"),
     Path("BUILDING.md"),
     Path("TECHNICAL.md"),
-    Path("TODO.md"),
+    Path("LICENSING.md"),
+)
+COMMUNITY_DOCS = (
+    Path(".github") / "CONTRIBUTING.md",
+    Path(".github") / "CODE_OF_CONDUCT.md",
 )
 SAFE_LINK_SCHEMES = {
     "http",
     "https",
     "mailto",
 }
+REPOSITORY_BLOB_BASE = "https://github.com/themuffinator/openQ4/blob/main/"
+REPOSITORY_TREE_BASE = "https://github.com/themuffinator/openQ4/tree/main/"
+DEVELOPMENT_ROADMAP = Path("docs/dev/roadmap.md")
 
 
 SITE_CSS = r"""
@@ -683,7 +690,7 @@ def collect_doc_sources(source_root: Path) -> list[Path]:
     docs: list[Path] = []
     seen: set[str] = set()
 
-    for relative in ROOT_DOCS:
+    for relative in (*ROOT_DOCS, *COMMUNITY_DOCS):
         candidate = source_root / relative
         if candidate.exists() or candidate.is_symlink():
             require_regular_doc_source(candidate, relative)
@@ -714,8 +721,12 @@ def collect_doc_sources(source_root: Path) -> list[Path]:
 def classify_group(relative: Path) -> str:
     if relative.parent == Path("."):
         return "Project"
+    if relative.parts[0] == ".github":
+        return "Project"
     if len(relative.parts) >= 2 and relative.parts[0] == "docs" and relative.parts[1] == "user":
         return "User Guides"
+    if relative.parts[:3] == ("docs", "dev", "archive"):
+        return "Planning Archive"
     if len(relative.parts) >= 3 and relative.parts[0] == "docs" and relative.parts[1] == "dev" and relative.parts[2] == "proposals":
         return "Research and Proposals"
     if len(relative.parts) >= 3 and relative.parts[0] == "docs" and relative.parts[1] == "dev" and relative.parts[2] == "legacy":
@@ -724,14 +735,18 @@ def classify_group(relative: Path) -> str:
 
 
 def default_nav_title(relative: Path) -> str:
+    if relative == DEVELOPMENT_ROADMAP:
+        return "Development roadmap"
     if relative == Path("README.md"):
         return "Overview"
     if relative == Path("BUILDING.md"):
         return "Build Guide"
     if relative == Path("TECHNICAL.md"):
         return "Technical Reference"
-    if relative == Path("TODO.md"):
-        return "TODO"
+    if relative == Path(".github") / "CONTRIBUTING.md":
+        return "Contributing"
+    if relative == Path(".github") / "CODE_OF_CONDUCT.md":
+        return "Code of Conduct"
 
     stem = relative.stem.replace("-", " ").replace("_", " ").strip()
     if not stem:
@@ -739,8 +754,33 @@ def default_nav_title(relative: Path) -> str:
     return " ".join(part.capitalize() if part.islower() else part for part in stem.split())
 
 
-def rewrite_markdown_links(text: str) -> str:
-    pattern = re.compile(r"(!?\[[^\]]+\]\()([^)]+)(\))")
+def resolve_site_relative(source_relative: Path, target: str) -> str | None:
+    """Resolve a relative link target against a document's site location.
+
+    Returns the normalized root-relative posix path, or None when the target
+    escapes the documentation root.
+    """
+    parts: list[str] = []
+    combined = PurePosixPath(source_relative.parent.as_posix()) / target
+    for part in combined.parts:
+        if part == ".":
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+        else:
+            parts.append(part)
+    return "/".join(parts)
+
+
+def rewrite_markdown_links(
+    text: str,
+    *,
+    source_relative: Path | None = None,
+    rendered_sources: set[str] | None = None,
+) -> str:
+    pattern = re.compile(r"(!?\[(?:[^\[\]]|!\[[^\]]*\]\([^)]+\))+\]\()([^)]+)(\))")
 
     def replace(match: re.Match[str]) -> str:
         prefix, target, suffix = match.groups()
@@ -762,7 +802,22 @@ def rewrite_markdown_links(text: str) -> str:
             hash_suffix = "#" + fragment
 
         if stripped_target.lower().endswith(".md"):
+            if rendered_sources is not None and source_relative is not None:
+                resolved = resolve_site_relative(source_relative, stripped_target)
+                if resolved is None or resolved.lower() not in rendered_sources:
+                    # The target exists in the repository but is not part of the
+                    # generated site; keep the link alive by pointing at the
+                    # repository copy instead of a dead local page.
+                    repo_target = resolved if resolved is not None else stripped_target
+                    return prefix + REPOSITORY_BLOB_BASE + repo_target + hash_suffix + suffix
             stripped_target = stripped_target[:-3] + ".html"
+
+        elif stripped_target.endswith("/") and source_relative is not None:
+            # Source directories are browsed in the repository, rather than
+            # copied into player documentation with compiler inputs.
+            resolved = resolve_site_relative(source_relative, stripped_target)
+            if resolved is not None:
+                return prefix + REPOSITORY_TREE_BASE + resolved + hash_suffix + suffix
 
         return prefix + stripped_target + hash_suffix + suffix
 
@@ -846,7 +901,12 @@ def convert_task_lists(text: str) -> str:
     return "\n".join(result)
 
 
-def prepare_markdown(text: str) -> str:
+def prepare_markdown(
+    text: str,
+    *,
+    source_relative: Path | None = None,
+    rendered_sources: set[str] | None = None,
+) -> str:
     normalized = text.replace("\r\n", "\n")
     normalized = re.sub(
         r"(?m)^<details(?![^>]*markdown=)",
@@ -858,7 +918,11 @@ def prepare_markdown(text: str) -> str:
         '<div markdown="1"',
         normalized,
     )
-    normalized = rewrite_markdown_links(normalized)
+    normalized = rewrite_markdown_links(
+        normalized,
+        source_relative=source_relative,
+        rendered_sources=rendered_sources,
+    )
     normalized = convert_task_lists(normalized)
     normalized = convert_github_callouts(normalized)
     return normalized
@@ -939,10 +1003,13 @@ def build_doc_specs(source_root: Path) -> list[DocSpec]:
                 output_relative=relative.with_suffix(".html"),
                 group=classify_group(relative),
                 title=title,
-                nav_title=default_nav_title(relative) if relative.parent == Path(".") else title,
+                nav_title=default_nav_title(relative) if relative == DEVELOPMENT_ROADMAP or relative.parent in (Path("."), Path(".github")) else title,
                 summary=summary,
             )
         )
+    # Keep the active plan first within developer navigation; retain the
+    # established relative order of all other documents.
+    specs.sort(key=lambda spec: spec.source_relative != DEVELOPMENT_ROADMAP)
     return specs
 
 
@@ -961,6 +1028,7 @@ def render_sidebar(specs: list[DocSpec], current_output: Path) -> str:
         "Developer Guides",
         "Research and Proposals",
         "Legacy Notes",
+        "Planning Archive",
     )
 
     sections: list[str] = []
@@ -1145,6 +1213,7 @@ def render_index_page(
         render_group("Developer Guides", "Implementation notes, audits, and current engineering references."),
         render_group("Research and Proposals", "Long-form technical investigations and design proposals."),
         render_group("Legacy Notes", "Historical context and archived notes kept for reference."),
+        render_group("Planning Archive", "Historical plans and proposals, superseded by the development roadmap."),
     ]
     cards = [card for card in cards if card]
 
@@ -1182,7 +1251,7 @@ def render_index_page(
             '      <div class="hero-actions">',
             '        <a class="button primary" href="README.html">Open Project Overview</a>',
             '        <a class="button" href="docs/user/light-grids.html">User Guide Example</a>',
-            '        <a class="button" href="docs/dev/platform-support.html">Platform Roadmap</a>',
+            '        <a class="button" href="docs/dev/roadmap.html">Development roadmap</a>',
             '      </div>',
             '      <div class="hero-meta">',
             f'        <span class="chip">Release {html.escape(version)}</span>',
@@ -1237,12 +1306,73 @@ def generate_release_docs_site(
         docs_assets_dest = output_root / "assets" / "docs" / "img"
         copy_docs_asset_tree(docs_assets_source, docs_assets_dest)
 
-    for auxiliary in (Path("LICENSE"),):
-        copy_docs_auxiliary_file(source_root, auxiliary, output_root / auxiliary.name)
+    for auxiliary in (
+        Path("LICENSE"),
+        Path("LICENSES/QUAKE-4-SDK-EULA.rtf"),
+        Path("LICENSES/DOOM-3-ADDITIONAL-TERMS.txt"),
+        Path("LICENSES/DOOM-3-BFG-ADDITIONAL-TERMS.txt"),
+        Path("src/game/LICENSE"),
+        Path("src/mpgame/LICENSE"),
+    ):
+        copy_docs_auxiliary_file(source_root, auxiliary, output_root / auxiliary)
+    khronos_notice = Path("LICENSES") / "KHRONOS-GLES-MIT.txt"
+    copy_docs_auxiliary_file(source_root, khronos_notice, output_root / khronos_notice)
 
+    # Keep linked requirement/archive records, UI sources and licence notices
+    # available offline. These are authored records/fixtures, not extracted art.
+    for relative in (
+        "LICENSES/RmlUi.txt", "LICENSES/JsonCpp.txt", "LICENSES/libtess2.txt",
+        "LICENSES/openxr-sdk.txt", "subprojects/openxr.wrap",
+        "docs/dev/ui/migration-manifest.json",
+        "docs/dev/ui/product-requirements.json",
+        "docs/dev/ui/inventory-sources.json",
+        "docs/dev/game-test-coverage.json",
+        "docs/dev/performance-budgets.json",
+        "docs/dev/android-device-budgets.json",
+        "docs/dev/retail-overlay-audit.csv",
+        "docs/dev/archive/2026-10-18/manifest.json",
+        # The editable atlas sheet the visual specification links (14.19).
+        "docs/dev/ui/atlas/medlabs-implant.html",
+        "subprojects/rmlui.wrap", "subprojects/packagefiles/libtess2/double-precision.patch",
+        "subprojects/packagefiles/rmlui/masked-hit-test.patch",
+        "subprojects/packagefiles/jsoncpp/subnormal-numbers.patch",
+        "tools/ui/retained_system.py",
+        "tools/ui/capture_legacy_baseline.py",
+        "tools/ui/system_settings_probe.py",
+        "tools/ui/fixtures/system-settings-smoke.q4ui",
+        "tools/ui/fixtures/system-settings-smoke.cfg",
+        "tools/ui/fixtures/system-settings-smoke-resume.cfg",
+        "tools/ui/fixtures/managed-settings-smoke.q4ui",
+        "tools/ui/fixtures/managed-settings-smoke.cfg",
+        "tools/ui/fixtures/managed-settings-smoke-resume.cfg",
+        "tools/ui/fixtures/presentation-alias-smoke.q4ui",
+        "tools/ui/fixtures/presentation-alias-smoke.cfg",
+        "tools/ui/fixtures/presentation-alias-smoke-resume.cfg",
+        "tools/ui/fixtures/event-program-smoke.q4ui",
+        "tools/ui/fixtures/event-program-smoke.cfg",
+        "tools/ui/fixtures/event-program-smoke-resume.cfg",
+        "tools/ui/legacy_import.py", "tools/ui/legacy_inventory.py", "tools/ui/legacy_syntax.py",
+        "tools/ui/verify_composition_capture.py", "tools/ui/verify_interaction_capture.py",
+        "tools/ui/verify_mask_capture.py",
+        "tools/ui/verify_binding_capture.py",
+        "tools/ui/fixtures/binding-smoke.q4ui", "tools/ui/fixtures/binding-smoke.cfg",
+        "tools/ui/fixtures/binding-first.json", "tools/ui/fixtures/binding-final.json",
+        "tools/ui/fixtures/presentation-smoke.gui", "tools/ui/fixtures/presentation-smoke.cfg",
+        "tools/ui/fixtures/composition-smoke.q4ui", "tools/ui/fixtures/document-smoke.q4ui",
+        "tools/ui/fixtures/interaction-smoke.q4ui", "tools/ui/fixtures/interaction-smoke.cfg",
+        "tools/ui/fixtures/mask-smoke.q4ui", "tools/ui/fixtures/vector-smoke.q4ui",
+    ):
+        auxiliary = Path(relative)
+        copy_docs_auxiliary_file(source_root, auxiliary, output_root / auxiliary)
+
+    rendered_sources = {spec.source_relative.as_posix().lower() for spec in specs}
     for spec in specs:
         raw_text = (source_root / spec.source_relative).read_text(encoding="utf-8")
-        prepared_text = prepare_markdown(raw_text)
+        prepared_text = prepare_markdown(
+            raw_text,
+            source_relative=spec.source_relative,
+            rendered_sources=rendered_sources,
+        )
         markdown_engine = markdown_lib.Markdown(
             extensions=[
                 "extra",

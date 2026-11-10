@@ -1,0 +1,92 @@
+<section class="sheet" id="medlabs-implant">
+  <h2>Medical Labs · implant activation</h2>
+  <p>The temporary Strogg interface at the end of stroggification. Measured from <code>guis/vehicles/medchange.gui</code>; see visual specification 14.19. The 38 original cells retain their positions and sequence. Extra cells fill the side and portrait bands; readouts and edge pieces follow the virtual screen edges.</p>
+  <div class="viz-controls">
+    <label class="form-label">View <select class="form-select" id="implant-aspect"><option value="1.333333">4:3</option><option value="1.777778" selected>16:9</option><option value="2.37037">21:9</option><option value="3.555556">32:9</option><option value="0.5625">9:16</option></select></label>
+    <label class="form-label">Time <output id="implant-time-label">1.00 s</output><input class="form-range" id="implant-time" type="range" min="0" max="4650" step="10" value="1000"></label>
+    <button class="btn" type="button" id="implant-play">Replay activation</button>
+    <button class="btn" type="button" id="implant-hurt">Preview hurt</button>
+  </div>
+  <svg id="implant-view" role="img" aria-label="Strogg implant overlay with a full-view hexagon field and readouts at opposite corners" style="display:block;width:100%;max-height:680px;margin:18px auto" viewBox="0 0 853.333 480"></svg>
+  <p class="text-small">Gold #FFD06F · 86 u cells · 50 ms stagger · 500 ms decay · two passes · hidden at 4.65 s. Hurt uses a separate red edge pulse for 1 s. Reduced motion keeps the activation and hurt cues without travelling noise or cell flashes.</p>
+</section>
+<script>
+(() => {
+  const root = document.getElementById('medlabs-implant');
+  const svg = root.querySelector('#implant-view'), time = root.querySelector('#implant-time');
+  const aspect = root.querySelector('#implant-aspect'), label = root.querySelector('#implant-time-label');
+  const ns = 'http://www.w3.org/2000/svg';
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const order = [10,24,14,32,30,4,8,15,9,34,28,21,1,38,20,2,12,26,18,33,16,23,6,13,35,27,11,22,7,31,3,17,25,36,19,5,29];
+  const cells = [[1,67,118],[2,67,198],[3,67,278],[4,137,0],[5,137,78],[6,137,158],[7,137,238],[8,137,318],[9,137,398],[10,207,-39],[11,207,38],[12,207,118],[13,207,198],[14,207,278],[15,207,358],[16,207,438],[17,277,0],[18,277,78],[19,277,158],[20,277,238],[21,277,318],[22,277,398],[23,347,-39],[24,347,38],[25,347,118],[26,347,198],[27,347,278],[28,347,358],[29,347,438],[30,417,1],[31,417,78],[32,417,158],[33,417,238],[34,417,318],[35,417,398],[36,487,117],[37,487,198],[38,487,278]];
+  let running = 0, hurt = false;
+  const add = (tag, attrs, parent=svg) => { const node=document.createElementNS(ns,tag); for (const [key,value] of Object.entries(attrs)) node.setAttribute(key,value); parent.append(node); return node; };
+  const clamp = x => Math.min(1,Math.max(0,x));
+  const pulse = (t,start) => t >= start ? clamp(1-(t-start)/500) : 0;
+  const text = (x,y,value,size=15,align='start') => {
+    const node=add('text',{x,y,fill:'#FFD06F',opacity:.2,'font-family':'Oxanium, monospace','font-size':size,'text-anchor':align}); node.textContent=value; return node;
+  };
+  const draw = () => {
+    const ratio = Number(aspect.value), w=Math.max(640,480*ratio), h=Math.max(480,640/ratio);
+    const ex=(w-640)/2, ey=(h-480)/2, t=Number(time.value), shown=t<4650;
+    label.textContent=(t/1000).toFixed(2)+' s'; svg.setAttribute('viewBox',`0 0 ${w} ${h}`); svg.style.aspectRatio=String(ratio); svg.replaceChildren();
+    add('rect',{width:w,height:h,fill:'#151914'});
+    // A neutral reference field makes additive coverage legible, without embedding retail art.
+    for(let x=0;x<w;x+=40) add('path',{d:`M${x} 0V${h}`,stroke:'#31372c','stroke-width':.5});
+    for(let y=0;y<h;y+=40) add('path',{d:`M0 ${y}H${w}`,stroke:'#31372c','stroke-width':.5});
+    const defs=add('defs',{}), glow=add('filter',{id:'implant-soft',x:'-30%',y:'-30%',width:'160%',height:'160%'},defs);
+    add('feGaussianBlur',{stdDeviation:4},glow);
+    const gradient=add('radialGradient',{id:'implant-edge',cx:'.5',cy:'.5',r:'.7'},defs);
+    add('stop',{offset:'.45','stop-color':hurt?'#990000':'#FF8000','stop-opacity':0},gradient);
+    add('stop',{offset:1,'stop-color':hurt?'#990000':'#FF8000','stop-opacity':hurt?clamp(1-t/1000):shown*.45*clamp(1-t/6000)},gradient);
+    if(!hurt && shown) {
+      const field=add('g',{fill:'none',stroke:'#FFD06F','stroke-linejoin':'round'});
+      const hex=(x,y,index) => {
+        const phase=order.indexOf(index), intensity=reduced?.08:(phase<0?0:Math.max(pulse(t,500+phase*50),pulse(t,2350+phase*50)));
+        if(intensity<=0) return;
+        const d=`M${x+1} ${y+43}L${x+22} ${y+7}H${x+64}L${x+85} ${y+43}L${x+64} ${y+79}H${x+22}Z`;
+        add('path',{d,opacity:intensity*.55,'stroke-width':12,filter:'url(#implant-soft)'},field);
+        add('path',{d,opacity:intensity,'stroke-width':1.2},field);
+      };
+      cells.forEach(([index,x,y])=>hex(x+ex,y+ey,index));
+      // Extend the lattice without stretching or repositioning the authored center.
+      for(let col=Math.floor((-ex-153)/70); col<=Math.ceil((640+ex)/70); ++col) {
+        const x=67+col*70;
+        for(let row=Math.floor((-ey-126)/80); row<=Math.ceil((480+ey)/80); ++row) {
+          const y=38+(Math.abs(col)%2?40:0)+row*80;
+          if(x>=0 && x+86<=640 && y>=-40 && y<=438) continue;
+          if(x+86< -ex || x>640+ex || y+86< -ey || y>480+ey) continue;
+          hex(x+ex,y+ey,order[((col*11+row*7)%37+37)%37]);
+        }
+      }
+      const decay=t<4150?1:clamp(1-(t-4150)/500);
+      const edges=add('g',{fill:'none',stroke:'#FFD06F',opacity:decay*.8,'stroke-width':1.4});
+      for(const [x,y,sx,sy] of [[0,1,1,1],[w,1,-1,1],[0,h,1,-1],[w,h,-1,-1]])
+        add('path',{d:'M0 234H18L154 0',transform:`translate(${x} ${y}) scale(${sx} ${sy})`},edges);
+      const readouts=add('g',{opacity:decay});
+      const number=Math.floor((reduced?0:t)/100)%6, series=['84278.324','43536.832','76245.003','57452.659','35945.202','94320.953'];
+      for(let i=0;i<3;i++) readouts.append(text(w-6,22+i*22,['X','Y','Z'][i]+'> '+series[(number+i)%6].slice(0,6),19,'end'));
+      for(let i=0;i<2;i++) {
+        readouts.append(text(54,h-28+i*18,series[(number+i)%6],12));
+        for(let j=0;j<9;j++) add('rect',{x:3+j*5.5,y:h-43+i*18,width:3.4,height:12,fill:'#FFD06F',opacity:.4},readouts);
+      }
+      // Editable rune strokes replace scrolling texture strips in the new design.
+      for(const [x,y] of [[w-66,70],[2,h-130]]) for(let row=0;row<6;row++) {
+        const shift=reduced?0:Math.floor(t/(x>100?100:200))%5;
+        for(let col=0;col<5;col++) add('path',{d:`M${x+col*11} ${y+row*12}v7h6v-7l-3 3`,stroke:'#FFD06F','stroke-width':.8,fill:'none',opacity:(row+col+shift)%4===0?.05:.2},readouts);
+      }
+      if(!reduced) {
+        const noise=add('g',{opacity:.13*clamp(1-t/5000),fill:'#FFC4C4'});
+        for(let i=0;i<160;i++) { const x=(i*197+Math.floor(t/80)*61)%w,y=(i*137+Math.floor(t/80)*29)%h; add('rect',{x,y,width:2+i%7,height:1},noise); }
+      }
+    }
+    add('rect',{width:w,height:h,fill:'url(#implant-edge)'});
+  };
+  const play = damage => { cancelAnimationFrame(running); hurt=damage; const start=performance.now(); const frame=now=>{ time.value=String(Math.min(damage?1000:4650,now-start)); draw(); if(now-start<(damage?1000:4650)) running=requestAnimationFrame(frame); }; running=requestAnimationFrame(frame); };
+  time.addEventListener('input',()=>{cancelAnimationFrame(running);draw();});
+  aspect.addEventListener('change',draw);
+  root.querySelector('#implant-play').addEventListener('click',()=>play(false));
+  root.querySelector('#implant-hurt').addEventListener('click',()=>play(true));
+  draw();
+})();
+</script>

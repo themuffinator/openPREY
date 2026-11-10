@@ -111,8 +111,13 @@ typedef struct renderGraphResourceManagerStats_s {
 
 void R_RenderGraphResources_Init( const renderBackendCaps_t &caps, const renderFeatureSet_t &features );
 void R_RenderGraphResources_Shutdown( void );
-void R_RenderGraphResources_PrepareFrame( const idRenderGraph &graph );
+// Scene attachments may differ from the native presentation size. Imported
+// window resources and shadow atlases retain their own dimensions.
+void R_RenderGraphResources_PrepareFrame( const idRenderGraph &graph,
+	int sceneWidth = 0, int sceneHeight = 0 );
 const renderGraphResourceManagerStats_t &R_RenderGraphResources_Stats( void );
+// Changes when cached GL objects retire; object names alone are not identities.
+unsigned int R_RenderGraphResources_AllocationRevision( void );
 const renderGraphResourceHandle_t *R_RenderGraphResources_FindHandle( const char *name );
 const renderGraphResourceHandle_t *R_RenderGraphResources_HandleForGraphResource( int graphResourceIndex );
 void R_RenderGraphResources_PrintGfxInfo( void );

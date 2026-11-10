@@ -1,0 +1,9 @@
+[wrap-file]
+directory = OpenXR-SDK-release-1.1.65
+source_url = https://codeload.github.com/KhronosGroup/OpenXR-SDK/tar.gz/refs/tags/release-1.1.65
+source_filename = OpenXR-SDK-release-1.1.65.tar.gz
+source_hash = 27aa797baf680c5f836b6138e78e59e2f72d6becfef6d4587ed9a57756d6d3b3
+patch_directory = openxr
+
+[provide]
+dependency_names = openxr_loader

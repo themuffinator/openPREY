@@ -13,6 +13,7 @@ from pathlib import Path
 STALE_LOOSE_ROOT_FILES = (
     "default.cfg",
     "openq4_defaults.cfg",
+    "openq4_profile_couch.cfg",
     "openq4_profile_steamdeck.cfg",
 )
 

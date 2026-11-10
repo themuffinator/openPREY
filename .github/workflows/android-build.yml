@@ -1,0 +1,118 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Engine release version to package (for example 0.14.001)
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      content_packs_artifact:
+        description: Artifact holding the release's prebuilt content packs and content-packs.json
+        required: false
+        type: string
+        default: ''
+    secrets:
+      ANDROID_RELEASE_KEYSTORE_BASE64:
+        required: true
+      ANDROID_RELEASE_STORE_PASSWORD:
+        required: true
+      ANDROID_RELEASE_KEY_PASSWORD:
+        required: true
+      ANDROID_RELEASE_KEY_ALIAS:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    name: Android ARM64 (experimental)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      OPENQ4_ANDROID_VERSION: ${{ inputs.version }}
+      ANDROID_NDK_VERSION: 30.0.16248370
+      GRADLE_USER_HOME: ${{ github.workspace }}/.tmp/android-release/gradle-home
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.12'
+          cache-disabled: true
+      - name: Install native and Android toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install meson ninja
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;${ANDROID_NDK_VERSION}" 'platforms;android-35' 'build-tools;35.0.0'
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "${GITHUB_ENV}"
+      - name: Download the release's content packs
+        if: inputs.content_packs_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.content_packs_artifact }}
+          path: ${{ runner.temp }}/content-packs
+      - name: Build native modules and unsigned release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.content_packs_artifact }}" ]; then
+            export OPENQ4_PREBUILT_CONTENT_PACKS="${RUNNER_TEMP}/content-packs"
+          fi
+          bash tools/build/build_android_release.sh
+      - name: Sign and verify release APK
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          key_file="${GITHUB_WORKSPACE}/.tmp/android-release/release.p12"
+          trap 'rm -f -- "${key_file}"' EXIT
+          printf '%s' "${ANDROID_RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${key_file}"
+          tools_dir="${ANDROID_HOME}/build-tools/35.0.0"
+          apk="${GITHUB_WORKSPACE}/.tmp/android-release/output/openq4-${OPENQ4_ANDROID_VERSION}-android-arm64-experimental.apk"
+          "${tools_dir}/zipalign" -P 16 -f 4 \
+            builddir/android-apk/app/outputs/apk/release/app-release-unsigned.apk "${apk}"
+          "${tools_dir}/apksigner" sign --ks "${key_file}" \
+            --ks-key-alias "${ANDROID_RELEASE_KEY_ALIAS}" \
+            --ks-pass env:ANDROID_RELEASE_STORE_PASSWORD --key-pass env:ANDROID_RELEASE_KEY_PASSWORD \
+            --v4-signing-enabled false "${apk}"
+          python tools/build/verify_android_apk.py --apk "${apk}" \
+            --stage .install/android/arm64-v8a --version "${OPENQ4_ANDROID_VERSION}" \
+            --build-tools "${tools_dir}" --certificate mobile/android/release-signing-cert.pem
+      - name: Upload signed APK and corresponding dependency sources
+        uses: actions/upload-artifact@v7
+        with:
+          name: openq4-release-${{ inputs.version }}-android-arm64
+          path: |
+            .tmp/android-release/output/*.apk
+            .tmp/android-release/output/*-dependency-sources.tar.xz
+          if-no-files-found: error
+          compression-level: 0

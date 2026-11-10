@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -322,6 +323,36 @@ def validate_save_files(home: Path, save_slot: str) -> dict[str, Any]:
             "sha256": sha256_file(path),
             "valid": size >= minimum_bytes[suffix],
         }
+        if suffix == ".save":
+            data = path.read_bytes()
+            integrity: dict[str, Any] = {"status": "invalid"}
+            if len(data) >= 16:
+                marker, trailer_version, protected_length, stored_crc = struct.unpack_from(
+                    "<4I", data, len(data) - 16
+                )
+                expected_marker = int.from_bytes(b"OQ4I", "little")
+                length_valid = protected_length == len(data) - 16
+                calculated_crc = (
+                    zlib.crc32(data[:protected_length]) & 0xFFFFFFFF
+                    if 0 <= protected_length <= len(data) - 16
+                    else None
+                )
+                integrity = {
+                    "status": "pass"
+                    if marker == expected_marker
+                    and trailer_version == 1
+                    and length_valid
+                    and calculated_crc == stored_crc
+                    else "invalid",
+                    "marker": marker.to_bytes(4, "little").decode("ascii", errors="replace"),
+                    "version": trailer_version,
+                    "protectedBytes": protected_length,
+                    "storedCrc32": f"{stored_crc:08x}",
+                    "calculatedCrc32": f"{calculated_crc:08x}" if calculated_crc is not None else "",
+                    "lengthValid": length_valid,
+                }
+            file_result["integrity"] = integrity
+            file_result["valid"] = file_result["valid"] and integrity["status"] == "pass"
         result["files"][suffix.removeprefix(".")] = file_result
         valid = valid and file_result["valid"]
     temporary_files = sorted(str(path) for path in save_dir.glob(f"{save_slot}.*.tmp") if path.is_file())

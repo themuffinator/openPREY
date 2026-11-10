@@ -176,16 +176,16 @@ function buildDownloadLinks(release) {
   const assets = release.assets || [];
   const desired = [
     ["windows-x64-setup.exe", "Windows x64 Installer"],
-    ["windows-arm64-setup.exe", "Windows ARM64 Installer"],
+    ["windows-arm64-setup.exe", "Windows ARM64 Installer (experimental)"],
     ["x86_64.appimage", "Linux x64 AppImage"],
     ["linux-x64.tar.xz", "Linux x64"],
     ["aarch64.appimage", "Linux ARM64 AppImage"],
     ["linux-arm64.tar.xz", "Linux ARM64"],
     ["macos-arm64-opengl.dmg", "macOS ARM64 OpenGL"],
-    ["macos-arm64-opengl-unsigned.tar.gz", "macOS ARM64 OpenGL unsigned"],
+    ["macos-arm64-opengl-unsigned.tar.gz", "macOS ARM64 OpenGL preview (unsigned)"],
     ["macos-arm64-opengl.tar.gz", "macOS ARM64 OpenGL"],
     ["macos-arm64-metal.dmg", "macOS ARM64 Metal"],
-    ["macos-arm64-metal-unsigned.tar.gz", "macOS ARM64 Metal unsigned"],
+    ["macos-arm64-metal-unsigned.tar.gz", "macOS ARM64 Metal preview (unsigned)"],
     ["macos-arm64-metal.tar.gz", "macOS ARM64 Metal"],
   ];
 
@@ -227,6 +227,12 @@ async function postDiscordPayload(payload) {
 
 async function main() {
   const release = await loadRelease();
+  if (release.draft) {
+    // A draft is not published: it has no git tag, no permanent download URLs,
+    // and no audience yet. Announcing one would link a release nobody can see.
+    console.log(`Refusing to announce draft release ${release.tag_name || releaseTag}.`);
+    return;
+  }
   const releaseUrl = validateHttpsUrl(release.html_url, "release html_url", new Set(["github.com"]));
   const safeAvatarUrl = validateHttpsUrl(avatarUrl, "DISCORD_RELEASE_AVATAR_URL");
   const displayName = cleanReleaseName(release);

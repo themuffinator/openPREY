@@ -19,7 +19,7 @@ param(
     [ValidateSet("opengl", "metal", "both")]
     [string]$MacOSGraphicsBridge = "opengl",
     [ValidateSet("apple_framework", "system")]
-    [string]$MacOSOpenALProvider = "apple_framework",
+    [string]$MacOSOpenALProvider = "system",
     [ValidateSet("current-manual-signoff", "current-hosted-ci-runner", "floor-candidate", "latest-public-macos")]
     [string]$MacOSOSMatrixRole = "current-manual-signoff",
     [ValidateSet("plain", "debug", "debugoptimized", "release", "minsize", "custom")]
@@ -837,26 +837,6 @@ function Sync-SourceTrees {
     Copy-ToMac -Source $repoArchive -RemotePath $remoteRepoArchive
     Expand-RemoteArchive -RemoteArchive $remoteRepoArchive -RemoteTarget (Join-RemotePosixPath -Base $MacWorkspace -Child "openQ4")
 
-    if (Test-Path -LiteralPath $HostGameLibsPath) {
-        $gameLibsArchive = New-TransferArchive `
-            -SourceDir $HostGameLibsPath `
-            -ArchivePath (Join-Path $transferRoot "openQ4-game.tar") `
-            -Exclude @(
-                "openQ4-game/.git",
-                "openQ4-game/.claude",
-                "openQ4-game/.codex",
-                "openQ4-game/.tmp",
-                "openQ4-game/.vscode",
-                "openQ4-game/builddir",
-                "openQ4-game/builddir_*",
-                "openQ4-game/builddir-*"
-        )
-        $remoteGameLibsArchive = "$script:RemoteTempRoot/openQ4-game.tar"
-        Copy-ToMac -Source $gameLibsArchive -RemotePath $remoteGameLibsArchive
-        Expand-RemoteArchive -RemoteArchive $remoteGameLibsArchive -RemoteTarget (Join-RemotePosixPath -Base $MacWorkspace -Child "openQ4-game")
-    } else {
-        Write-Warning "openQ4-game was not found at $HostGameLibsPath; macOS build may fail until the companion repo is synced."
-    }
 }
 
 function Install-Assets {
@@ -1205,9 +1185,12 @@ function Invoke-MacOSWorkflowMain {
     Invoke-MacSsh -Command "umask 077 && mkdir -p $(Quote-Sh $script:RemoteTempRoot)"
 
     if (-not $HostGameLibsPath) {
-        $HostGameLibsPath = Join-Path (Split-Path -Parent $repoRoot) "openQ4-game"
+        $HostGameLibsPath = $repoRoot
     }
     $HostGameLibsPath = Get-FullPath $HostGameLibsPath
+    if ($HostGameLibsPath -ine $repoRoot) {
+        throw "Game sources now travel with openQ4. HostGameLibsPath must name this checkout."
+    }
 
     $shouldCollectResults = $false
     foreach ($item in $Action) {

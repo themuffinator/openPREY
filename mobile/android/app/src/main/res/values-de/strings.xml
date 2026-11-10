@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name_emulator">openQ4-Emulator</string>
+    <string name="setup_title">openQ4-Einrichtung</string>
+    <string name="setup_language">Sprache</string>
+    <string name="setup_sample">Bereite deine Spieldateien vor und kehre an die Front zurück.</string>
+    <string name="setup_continue">Weiter</string>
+    <string name="setup_data">Spieldaten</string>
+    <string name="setup_data_help">Wähle den Ordner q4base deiner eigenen Installation von Quake 4 1.4.2. openQ4 kopiert und prüft die Archive; die Originale bleiben unverändert. Geeignet ist ein Unterordner von Downloads oder ein angeschlossenes USB-Laufwerk. Diese App enthält keine Spieldaten.</string>
+    <string name="setup_choose">Spielordner wählen</string>
+    <string name="setup_check">Installierte Dateien prüfen</string>
+    <string name="setup_retry">Letzten Vorgang wiederholen</string>
+    <string name="setup_cancel">Abbrechen</string>
+    <string name="setup_stopping">Wird sicher beendet…</string>
+    <string name="setup_cancelled">Angehalten. Fertige Archive bleiben erhalten. Wiederhole den Vorgang, um fortzufahren; das unvollständige Archiv wird erneut kopiert.</string>
+    <string name="setup_interrupted">Die Einrichtung wurde unterbrochen. Wiederhole den Vorgang, um fertige Dateien zu prüfen und fortzufahren, oder wähle den Spielordner erneut.</string>
+    <string name="setup_ready">Die Spieldateien sind bereit.</string>
+    <string name="setup_needs_data">Die Spieldateien müssen geprüft werden. Beachte die folgenden Hinweise und prüfe sie erneut.</string>
+    <string name="setup_idle">Wähle einen Ordner zum Importieren oder prüfe bereits in die App kopierte Dateien.</string>
+    <string name="setup_no_data">Installierte Spieldateien sind nicht verfügbar. Wähle deinen Quake-4-Ordner q4base zum Importieren oder verbinde den Speicher mit den installierten Dateien erneut.</string>
+    <string name="setup_size_bytes">%1$,d B</string>
+    <string name="setup_issue_problem">Erforderlich: %1$s</string>
+    <string name="setup_issue_warning">Warnung: %1$s</string>
+    <string name="setup_game_active">Das Spiel läuft oder wird beendet. Kehre zum Spiel zurück; Dateien können nach dessen Ende geändert werden.</string>
+    <string name="setup_return">Zurück zum Spiel</string>
+    <string name="setup_play_sp">Einzelspieler</string>
+    <string name="setup_play_mp">Mehrspieler</string>
+    <string name="setup_change_language">Sprache ändern</string>
+    <string name="setup_no_picker">Die System-Ordnerauswahl ist nicht verfügbar. Aktiviere die Android-App Dateien und versuche es erneut.</string>
+    <string name="setup_no_grant">Der gewählte Ordner konnte nicht geöffnet werden. Wähle ihn erneut und erlaube Lesezugriff.</string>
+    <string name="setup_temporary_grant">Der Anbieter hat den Ordnerzugriff nicht gespeichert. Der aktuelle Import kann fortgesetzt werden; wähle den Ordner nach einem App-Neustart erneut.</string>
+    <string name="setup_picker_cancelled">Kein Ordner gewählt. Deine Dateien sind unverändert.</string>
+    <string name="setup_checking_data">Spielarchive werden geprüft…</string>
+    <string name="setup_checking_existing">Installiertes Archiv wird geprüft…</string>
+    <string name="setup_copying_data">Spielarchiv wird kopiert…</string>
+    <string name="setup_verifying_data">Spieldaten werden verifiziert…</string>
+    <string name="setup_checking_package">Mitgelieferte Dateien werden geprüft…</string>
+    <string name="setup_copying_package">Mitgelieferte Dateien werden vorbereitet…</string>
+    <string name="setup_exporting">Wird exportiert…</string>
+    <string name="setup_file_count">Fertige Archive: %1$d / %2$d</string>
+    <string name="setup_bytes">%1$s von %2$s</string>
+    <string name="setup_eta">Geschätzte Restzeit für diesen Schritt: %1$d s</string>
+    <string name="setup_missing_required">%1$s fehlt. Kopiere es aus deiner Installation von Quake 4 1.4.2.</string>
+    <string name="setup_missing_optional">Das optionale Archiv %1$s fehlt. Zugehörige Inhalte sind möglicherweise nicht verfügbar.</string>
+    <string name="setup_missing_language">Kein Basis-Spracharchiv gefunden. Kopiere die zpak-Sprachdateien deiner Installation, um Dialoge zu hören.</string>
+    <string name="setup_wrong_version">%1$s weicht vom offiziellen Archiv ab. Ersetze es durch eine geprüfte Kopie aus Quake 4 1.4.2.</string>
+    <string name="setup_unknown_archive">%1$s besteht die Integritätsprüfung, steht aber nicht im offiziellen Prüfsummenkatalog.</string>
+    <string name="setup_damaged_archive">%1$s ist beschädigt oder wird nicht unterstützt. Kopiere ein neues, unverändertes Archiv und versuche es erneut.</string>
+    <string name="setup_duplicate">Mehrere Archive heißen %1$s. Behalte eine geprüfte Kopie und versuche es erneut.</string>
+    <string name="setup_changed">%1$s wurde während der Prüfung verändert. Beende den Kopiervorgang und versuche es erneut.</string>
+    <string name="setup_unreadable">%1$s konnte nicht gelesen werden. Verbinde den Speicher erneut oder wähle eine zugängliche Kopie und versuche es erneut.</string>
+    <string name="setup_limits">Der Ordner oder das Archiv überschreitet die unterstützten Grenzen. Wähle einen Ordner mit den Originalarchiven von Quake 4.</string>
+    <string name="setup_storage_unavailable">Der App-Speicher ist nicht verfügbar. Verbinde den Speicher erneut, prüfe die Android-Speichereinstellungen der App und versuche es erneut.</string>
+    <string name="setup_no_space">Mehr Speicherplatz nötig: %1$s erforderlich, %2$s für die nächste Datei verfügbar. Schaffe freien Speicherplatz und versuche es erneut.</string>
+    <string name="setup_invalid_name">%1$s hat einen nicht unterstützten Dateinamen. Wähle den ursprünglichen Ordner q4base.</string>
+    <string name="setup_copy_failed">%1$s konnte nicht kopiert werden. Prüfe die Verbindung zur Quelle und den freien Speicherplatz und versuche es erneut.</string>
+    <string name="setup_commit_failed">%1$s konnte nicht ersetzt werden. Prüfe den App-Speicher und versuche es erneut. Das bisherige Archiv blieb erhalten.</string>
+    <string name="setup_prepare_failed">Mitgelieferte Dateien konnten nicht vorbereitet werden. Schaffe Speicherplatz und versuche es erneut. Wenn das Problem bleibt, aktualisiere die App mit demselben Installationspaketanbieter oder Signaturzertifikat; lasse die App installiert, um Spielstände zu behalten.</string>
+    <string name="setup_launch_failed">Das Spiel konnte nicht starten. Prüfe die Dateien und versuche es erneut.</string>
+    <string name="setup_exports">Sicherungen und Diagnose</string>
+    <string name="setup_export_help">Sichere deine Spielstände samt Beschreibungen und Vorschaubildern als ZIP oder exportiere Diagnoseprotokolle. Wähle den Speicherort in der Android-Dateiauswahl. Die Originaldateien bleiben in der App. Protokolle können lokale Pfade und Serveradressen enthalten; prüfe sie vor dem Teilen.</string>
+    <string name="setup_export_saves">Spielstände sichern</string>
+    <string name="setup_export_logs">Protokolle exportieren</string>
+    <string name="setup_saves_filename">openQ4-Spielstaende.zip</string>
+    <string name="setup_logs_filename">openQ4-Protokolle.zip</string>
+    <string name="setup_no_document_picker">Die System-Dateiauswahl ist nicht verfügbar. Aktiviere die Android-App Dateien und versuche es erneut.</string>
+    <string name="setup_export_picker_cancelled">Es wurde kein Exportziel gewählt. Deine Dateien sind unverändert.</string>
+    <string name="setup_export_no_grant">Das Ziel konnte nicht zum Schreiben geöffnet werden. Versuche es erneut mit einem zugänglichen Speicherort. Deine Originaldateien sind unverändert.</string>
+    <string name="setup_packing_export">Exportarchiv wird vorbereitet…</string>
+    <string name="setup_export_file_count">Dateien vorbereitet: %1$d / %2$d</string>
+    <string name="setup_export_done">Dateien exportiert: %1$d. ZIP-Größe: %2$s. Bei einem Cloud-Speicher muss der Upload abgeschlossen sein, bevor du dich auf die Sicherung verlässt.</string>
+    <string name="setup_export_cancelled">Export gestoppt. Deine Originaldateien sind unverändert. Am Ziel kann eine leere oder unvollständige ZIP-Datei liegen; entferne diese Kopie in Dateien und wähle beim nächsten Versuch ein neues Ziel.</string>
+    <string name="setup_export_interrupted">Der Export wurde unterbrochen. Deine Originaldateien sind unverändert. Am Ziel kann eine unvollständige ZIP-Datei liegen. Wähle beim nächsten Versuch ein neues Ziel, um neu zu beginnen.</string>
+    <string name="setup_export_empty">Für diesen Export sind noch keine Dateien vorhanden.</string>
+    <string name="setup_export_unreadable">%1$s konnte nicht gelesen werden. Starte die App neu und versuche es erneut. Deine Originaldateien sind unverändert.</string>
+    <string name="setup_export_unsafe">Der Pfad %1$s kann nicht in eine portable Sicherung aufgenommen werden. Deine Dateien sind unverändert. Exportiere bei anhaltendem Problem die Protokolle zur Diagnose.</string>
+    <string name="setup_export_limit">Der Export überschreitet die unterstützten Grenzen: 2 GiB, 4.096 Einträge oder die zulässige Pfadlänge oder Ordnertiefe. Deine Dateien sind unverändert.</string>
+    <string name="setup_export_changed">Während der Archivvorbereitung haben sich Dateien geändert. Warte, bis alle Dateivorgänge beendet sind, und versuche es erneut.</string>
+    <string name="setup_export_cache">Die temporäre ZIP-Datei konnte im App-Speicher nicht erstellt werden. Schaffe Speicherplatz und versuche es erneut. Lasse die App installiert und behalte ihre Daten, um deine Spielstände zu erhalten.</string>
+    <string name="setup_export_write">Das Ziel hat die ZIP-Datei nicht vollständig angenommen. Prüfe Verbindung und Speicherplatz und wähle ein neues Ziel. Die fehlgeschlagene Kopie kann unvollständig sein; deine Originaldateien sind unverändert.</string>
+    <string name="setup_export_no_space">Die temporäre ZIP-Datei benötigt %1$s freien App-Speicher; verfügbar sind %2$s. Schaffe Speicherplatz und versuche es erneut. Deine Originaldateien sind unverändert.</string>
+    <string name="setup_export_failed">Der Export konnte nicht abgeschlossen werden. Versuche es mit einem neuen Ziel erneut. Am bisherigen Ziel kann eine unvollständige ZIP-Datei liegen; deine Originaldateien sind unverändert.</string>
+    <string name="setup_open_failed">Die Android-Einrichtung konnte nicht geöffnet werden. Kehre zum Spiel zurück und versuche es erneut.</string>
+    <string name="setup_controls">Steuerung</string>
+    <string name="setup_controls_help">Wähle Touch-Layout, Tastengröße und Blickgeschwindigkeit. Anwenden speichert die Auswahl für den nächsten Spielstart oder die Rückkehr ins Spiel.</string>
+    <string name="setup_controller_none">Kein Controller erkannt. Die Touch-Steuerung bleibt verfügbar.</string>
+    <string name="setup_controller_detected">Controller erkannt: %1$s. Bei seiner Verwendung wird die Touch-Steuerung ausgeblendet; berühre das Spiel, um sie wieder anzuzeigen.</string>
+    <string name="setup_touch_preset">Touch-Layout</string>
+    <string name="setup_touch_default_help">Standard: links bewegen; rechts umsehen und feuern.</string>
+    <string name="setup_touch_compact_help">Kompakt: kleinere Bedienelemente mit mindestens 48 dp breiten Touch-Flächen.</string>
+    <string name="setup_touch_left_help">Linkshändig: rechts bewegen; links umsehen und feuern.</string>
+    <string name="setup_touch_sensitivity">Blickempfindlichkeit: %1$.1f×</string>
+    <string name="setup_touch_sensitivity_label">Blickempfindlichkeit</string>
+    <string name="setup_touch_size">Tastengröße: %1$d%%</string>
+    <string name="setup_touch_size_label">Tastengröße</string>
+    <string name="setup_look_test_help">Blicktest: Ziehe hier, um das Raster zu drehen. Passe oben die Empfindlichkeit an; dieser Test steuert das Spiel nicht.</string>
+    <string name="setup_touch_apply">Steuerung anwenden</string>
+    <string name="setup_touch_discard">Änderungen verwerfen</string>
+    <string name="setup_touch_applied">Steuerung gespeichert. Sie gilt bei der Rückkehr ins Spiel oder beim nächsten Spielstart.</string>
+    <string name="setup_touch_save_failed">Die Steuerung konnte nicht gespeichert werden. Die bisherigen Einstellungen bleiben erhalten; prüfe den freien App-Speicher und versuche es erneut.</string>
+    <string-array name="setup_touch_presets">
+        <item>Standard</item>
+        <item>Kompakt</item>
+        <item>Linkshändig</item>
+    </string-array>
+    <string name="setup_layout_edit">Layout bearbeiten</string>
+    <string name="setup_layout">Touch-Layout-Editor</string>
+    <string name="setup_layout_help">Ziehe ein Bedienelement, um es zu verschieben. Es rastet in einem 8-dp-Raster ein und hält Abstand zu den anderen Bedienelementen, den Bildschirmrändern und dem Fadenkreuz. Wähle ein Bedienelement, um seine Größe, Deckkraft oder Sichtbarkeit zu ändern. Quer- und Hochformat haben eigene Layouts. Anwenden speichert das Layout für den nächsten Spielstart oder die Rückkehr ins Spiel.</string>
+    <string name="setup_layout_orientation">Ausrichtung</string>
+    <string name="setup_layout_control">Bedienelement</string>
+    <string name="setup_layout_size">Größe: %1$d %%</string>
+    <string name="setup_layout_size_label">Größe des Bedienelements</string>
+    <string name="setup_layout_opacity">Deckkraft: %1$d %%</string>
+    <string name="setup_layout_opacity_label">Deckkraft des Bedienelements</string>
+    <string name="setup_layout_hide">Dieses Bedienelement ausblenden</string>
+    <string name="setup_layout_pause_note">Pause bleibt immer sichtbar: Damit werden auch Zwischensequenzen übersprungen.</string>
+    <string name="setup_layout_multiplayer_note">Dieses Bedienelement erscheint nur im Mehrspielermodus.</string>
+    <string name="setup_layout_reset_control">Dieses Bedienelement zurücksetzen</string>
+    <string name="setup_layout_reset">Diese Ausrichtung zurücksetzen</string>
+    <string name="setup_layout_no_fit">Das passt nicht. Versuche eine kleinere Größe oder eine andere Stelle.</string>
+    <string name="setup_layout_apply">Layout anwenden</string>
+    <string name="setup_layout_applied">Layout gespeichert. Es gilt bei der Rückkehr ins Spiel oder beim nächsten Spielstart.</string>
+    <string name="setup_layout_save_failed">Das Layout konnte nicht gespeichert werden. Das bisherige Layout bleibt erhalten; prüfe den freien App-Speicher und versuche es erneut.</string>
+    <string name="setup_layout_preview">Layout-Vorschau. Ziehe ein Bedienelement, um es zu verschieben, oder wähle es unten aus.</string>
+    <string-array name="setup_layout_orientations">
+        <item>Querformat</item>
+        <item>Hochformat</item>
+    </string-array>
+    <string-array name="setup_layout_controls">
+        <item>Feuern</item>
+        <item>Springen</item>
+        <item>Ducken</item>
+        <item>Waffe</item>
+        <item>Nachladen</item>
+        <item>Zoom</item>
+        <item>Pause</item>
+        <item>Punktestand</item>
+        <item>Chat</item>
+    </string-array>
+    <string name="setup_interface">Oberfläche</string>
+    <string name="setup_interface_help">Wähle die Größe von Menüs und Text im Spiel. Automatisch wählt Telefon oder Tablet passend zu diesem Gerät. Text für Telefon und Tablet beginnt bei deiner Android-Schriftgröße. Anwenden setzt diese Größen einmal beim nächsten Spielstart oder bei der Rückkehr ins Spiel; spätere Änderungen in den Spieleinstellungen bleiben erhalten.</string>
+    <string name="setup_viewing_profile">Anzeigeprofil</string>
+    <string name="setup_interface_size">Oberflächengröße</string>
+    <string name="setup_profile_size">Profilstandard</string>
+    <string name="setup_text_size">Textgröße</string>
+    <string name="setup_profile_text_size">Profilstandard</string>
+    <string name="setup_interface_effective">Spielmenüs: %1$d %% Größe, %2$d %% Text</string>
+    <string name="setup_interface_sample_title">Ziel aktualisiert</string>
+    <string name="setup_interface_sample_body">Triff Rhino Squad im Hangar. Dieses Beispiel zeigt die Textgröße der Spielmenüs.</string>
+    <string name="setup_interface_apply">Oberfläche anwenden</string>
+    <string name="setup_interface_applied">Oberfläche gespeichert. Sie gilt bei der Rückkehr ins Spiel oder beim nächsten Spielstart.</string>
+    <string name="setup_interface_save_failed">Die Oberflächeneinstellungen konnten nicht gespeichert werden. Die bisherigen Einstellungen bleiben erhalten; prüfe den freien App-Speicher und versuche es erneut.</string>
+    <string name="setup_interface_percent">%1$d %%</string>
+    <string name="setup_orientation">Bildschirmausrichtung</string>
+    <string name="setup_orientation_help">Mit Quer- und Hochformat dreht sich das Spiel mit dem Gerät, sofern die Android-Drehsperre aus ist. Im Hochformat liegen die Touch-Steuerelemente im Streifen unter dem Bild.</string>
+    <string-array name="setup_orientations">
+        <item>Querformat</item>
+        <item>Quer- und Hochformat</item>
+    </string-array>
+    <string-array name="setup_viewing_profiles">
+        <item>Automatisch (dieses Gerät)</item>
+        <item>Schreibtisch (Monitor)</item>
+        <item>Sofa (Fernseher)</item>
+        <item>Handheld</item>
+        <item>Telefon</item>
+        <item>Tablet</item>
+    </string-array>
+</resources>

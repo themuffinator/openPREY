@@ -29,8 +29,15 @@ If you have questions concerning this license or the applicable additional terms
 
 
 
+#include "NativeInputDispatch.h"
 #include "Session_local.h"
+#include "PreyGameCompat.h"
+#include "NativeInputPublications.h"
+#include "ArenaCampaign.h"
 #include "BuildVersion.h"
+#include "SaveGameReleases.h"
+#include "VRSystemLocal.h"
+#include "../sys/NetworkEndpoint.h"
 #if defined( __has_include )
 #if __has_include( "openq4_savegame_compat_generated.h" )
 #include "openq4_savegame_compat_generated.h"
@@ -43,6 +50,33 @@ If you have questions concerning this license or the applicable additional terms
 #define OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT -1
 #endif
 #include "../imagetools/ImageTools.h"
+#include "../ui/RetainedUI.h"
+#include "../ui/SettingsService.h"
+#include "../ui/UserInterfaceManaged.h"
+#include "../ui/UserInterfaceRetained.h"
+#include <functional>
+#include <memory>
+#include <chrono>
+#include "DurableFile.h"
+#include "SaveGameTransaction.h"
+#include <filesystem>
+#if defined( USE_SDL3 )
+#include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_error.h>
+#endif
+#include "ParallelJobSystem.h"
+
+struct sessionSaveStorageJob_t;
+struct sessionSavePreviewJob_t;
+struct sessionSaveCommitJob_t;
+static std::function<bool()> sessionPendingCheckpoint;
+static std::shared_ptr<sessionSaveStorageJob_t> sessionPendingCheckpointStorage;
+static std::shared_ptr<sessionSavePreviewJob_t> sessionPendingCheckpointPreviewStorage;
+static std::shared_ptr<sessionSaveCommitJob_t> sessionPendingCheckpointCommit;
+static bool sessionFinishingPendingSave = false;
+static idStr sessionPendingCheckpointPreview;
+static int sessionPendingCheckpointSince = 0;
+static bool sessionPendingCheckpointPreviewReady = false;
 
 idCVar	idSessionLocal::com_showAngles( "com_showAngles", "0", CVAR_SYSTEM | CVAR_BOOL, "" );
 idCVar	idSessionLocal::com_minTics( "com_minTics", "1", CVAR_SYSTEM, "" );
@@ -59,14 +93,25 @@ idCVar	idSessionLocal::com_guid( "com_guid", "", CVAR_SYSTEM | CVAR_ARCHIVE | CV
 idCVar	idSessionLocal::com_lastQuicksave( "com_lastQuicksave", "Quicksave0", CVAR_SYSTEM | CVAR_ARCHIVE, "last quicksave slot" );
 idCVar	com_loadingContinueAutoAdvance( "com_loadingContinueAutoAdvance", "0", CVAR_SYSTEM | CVAR_INTEGER, "auto-accept the single-player loading-screen continue gate after N msec (testing), 0 = off", 0, 60000, idCmdSystem::ArgCompletion_Integer<0,60000> );
 idCVar	com_skipLoadingContinue( "com_skipLoadingContinue", "1", CVAR_SYSTEM | CVAR_BOOL, "skip the single-player loading-screen continue gate (Prey default)" );
+static idCVar com_captureLoadingScreen( "com_captureLoadingScreen", "0", CVAR_SYSTEM | CVAR_BOOL | CVAR_NOCHEAT, "diagnostic: capture each map's finished loading screen with the engine screenshot command, as screenshots/loading_<n>.tga" );
+static idCVar ui_testGuiInGame( "ui_testGuiInGame", "0", CVAR_SYSTEM | CVAR_BOOL | CVAR_CHEAT, "draw the loaded game behind testGUI for transparent overlay validation" );
 idCVar	com_minLoadingGuiMsec( "com_minLoadingGuiMsec", "250", CVAR_SYSTEM | CVAR_INTEGER, "minimum time to show the loading GUI before blocking map work starts", 0, 2000, idCmdSystem::ArgCompletion_Integer<0,2000> );
 idCVar	com_showLevelLoadTimes( "com_showLevelLoadTimes", "1", CVAR_SYSTEM | CVAR_BOOL, "print detailed phase timings for level loads" );
+static idCVar com_saveGameProfile( "com_saveGameProfile", "0", CVAR_SYSTEM | CVAR_INTEGER, "save profiling: 0 off, 1 phase timings, 2 per-class detail, 3 dictionary and commit detail", 0, 3 );
+static idCVar com_saveGameCommitOnWorker( "com_saveGameCommitOnWorker", "0", CVAR_SYSTEM | CVAR_BOOL, "experimental checkpoint file transaction on a worker; frame-time qualification pending" );
+static idCVar com_saveGameCopyOnWorker( "com_saveGameCopyOnWorker", "0", CVAR_SYSTEM | CVAR_BOOL, "experimental checkpoint copy on storage worker; overall frame-time qualification pending" );
 idCVar	com_skipLogoVideos( "com_skipLogoVideos", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "skip startup logo videos and go straight to the main menu" );
 idCVar	com_showLevelshotBounds( "com_showLevelshotBounds", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "draw a centered 4:3 frame guide for levelshot composition" );
 idCVar	s_muteUnfocused( "s_muteUnfocused", "1", CVAR_ARCHIVE | CVAR_BOOL, "mute all audio when the application is out of focus" );
 
 #if defined( USE_SDL3 )
 bool Sys_SDL_IsGameWindowFocused( void );
+float Sys_SDL_GetWindowRefreshHz( void );
+#if defined( __ANDROID__ )
+#include "../sys/android/android_public.h"
+bool Sys_SDL_ConsumeAppSuspension( void );
+void S_SetDevicePaused( bool paused );
+#endif
 #elif defined( _WIN32 )
 bool Sys_IsGameWindowFocused( void );
 #endif
@@ -102,20 +147,21 @@ static const idMaterial *Session_FindCompatibleWipeMaterial( const char *request
 	return material;
 }
 
-static bool Session_ModuleSupportsSingleplayer( const char *moduleName ) {
+// Dedicated builds compile without the menu paths that use these.
+[[maybe_unused]] static bool Session_ModuleSupportsSingleplayer( const char *moduleName ) {
 	return moduleName != NULL && moduleName[0] != '\0' && (
 		idStr::Icmp( moduleName, "game" ) == 0 ||
 		idStr::Icmp( moduleName, "game_sp" ) == 0 ||
 		idStr::Icmp( moduleName, "game_mp" ) == 0 );
 }
 
-static bool Session_ModuleSupportsMultiplayer( const char *moduleName ) {
+[[maybe_unused]] static bool Session_ModuleSupportsMultiplayer( const char *moduleName ) {
 	return moduleName != NULL && moduleName[0] != '\0' && (
 		idStr::Icmp( moduleName, "game" ) == 0 ||
 		idStr::Icmp( moduleName, "game_mp" ) == 0 );
 }
 
-static bool Session_IsMultiplayerGameType( const char *gameType ) {
+[[maybe_unused]] static bool Session_IsMultiplayerGameType( const char *gameType ) {
 	return gameType != NULL && gameType[0] != '\0' && idStr::Icmp( gameType, "singleplayer" ) != 0;
 }
 
@@ -146,6 +192,10 @@ static void Session_ServiceLoadingSound() {
 	}
 }
 
+// Implemented by FileSystem.cpp as an engine-only coordinator hook; this is
+// intentionally not part of the public module-facing idFileSystem ABI.
+void FS_ReleaseLevelLoadCache( void );
+
 static float Session_UpdateMetricAverage( float currentAverage, float sample, int sampleCount ) {
 	const int averagingWindow = idMath::ClampInt( 1, 120, sampleCount );
 	if ( averagingWindow <= 1 ) {
@@ -159,18 +209,37 @@ static int Session_FindPresentationCap( void ) {
 		return 0;
 	}
 
-	return Max( 0, cvarSystem->GetCVarInteger( "com_maxfps" ) );
+	// Must match the cap Common_ThrottlePresentationFrame actually paces to, not raw
+	// com_maxfps: when the two disagree the pacifier admits frames faster than the
+	// throttle will release them and each one sleeps away the difference.
+	return openQ4_GetRequestedPresentationCap();
 }
 
+// A blocking-load progress animation gains nothing from redrawing at the gameplay
+// presentation cap, and every redraw is wall clock stolen from the load itself.
+// Never redraw the loading screen faster than this, however high com_maxfps goes.
+static const float SESSION_MAX_BLOCKING_LOAD_REDRAW_HZ = 60.0f;
+
+// Back the pacifier interval off to at least this multiple of the last redraw's
+// measured cost, bounding loading-screen presentation at 1/(1+ratio) of load wall
+// clock on any present path.
+static const float SESSION_PACIFIER_DRAW_BUDGET_RATIO = 4.0f;
+
 static float Session_GetBlockingLoadFrameIntervalMsec( void ) {
+	// Honour a *lower* gameplay cap - the user asked for fewer frames - but never let
+	// a high cap drive the loading screen faster than the ceiling above. Tying this
+	// directly to com_maxfps made load wall clock scale as W / (1 - R/P), which
+	// diverges as the cap rises and stops converging entirely once one redraw costs
+	// more than the interval it is throttled by.
+	const float ceilingMsec = 1000.0f / SESSION_MAX_BLOCKING_LOAD_REDRAW_HZ;
 	const int presentationCap = Session_FindPresentationCap();
 	if ( presentationCap > 0 ) {
-		return 1000.0f / static_cast<float>( presentationCap );
+		return Max( ceilingMsec, 1000.0f / static_cast<float>( presentationCap ) );
 	}
 
 	// Uncapped blocking load hooks can fire extremely often during asset I/O.
 	// Keep the legacy one-tic pacing as the conservative fallback in that mode.
-	return common->GetUserCmdMsecFloat();
+	return Max( ceilingMsec, common->GetUserCmdMsecFloat() );
 }
 
 static void Session_BeginBlockingLoadPresentationFrame( void ) {
@@ -190,32 +259,21 @@ static const char *Session_GetFramePacingBoundName( openq4FramePacingBound_t bou
 		case OPENQ4_FRAME_BOUND_PRESENTATION_CAP:
 			return "presentation-cap";
 		case OPENQ4_FRAME_BOUND_UNCAPPED:
-			return "uncapped";
+			return "frame-work";
 		default:
 			return "collecting";
 	}
 }
 
-static int Session_GetFramePacingPercentileMsec( const openq4FramePacingStats_t &stats, int percentile ) {
-	if ( stats.frameSampleCount <= 0 ) {
-		return 0;
-	}
-
-	const int target = Max( 1, ( stats.frameSampleCount * percentile + 99 ) / 100 );
-	int accumulated = 0;
-	for ( int i = 0; i < OPENQ4_FRAME_PACING_HISTOGRAM_BINS; ++i ) {
-		accumulated += stats.frameMsecHistogram[i];
-		if ( accumulated >= target ) {
-			return i == OPENQ4_FRAME_PACING_HISTOGRAM_OVERFLOW ? stats.maxFrameMsec : i;
-		}
-	}
-
-	return stats.maxFrameMsec;
+// Sub-millisecond: the 240 Hz budget (p95 4.6 ms, p99 6.3 ms) cannot be
+// judged from whole-millisecond bins (PresentationPacing.h).
+float Session_GetFramePacingPercentileMsec( const openq4FramePacingStats_t &stats, int percentile ) {
+	return openq4::FramePacingPercentileMsec( stats.frameIntervalBins, stats.frameSampleCount, percentile, stats.maxFrameMsec );
 }
 
 static void Session_PrintFramePacingSummary( const openq4FramePacingStats_t &stats, const char *reason ) {
 	common->Printf(
-		"Frame pacing%s (%s): bound=%s, samples=%d, present=%.2f ms (%.1f Hz), p50=%d ms, p95=%d ms, p99=%d ms, max=%d ms, async=%.2f ms (%.1f Hz), ticDelta/frame=%.2f, gameTics/frame=%.2f, wait overshoot=%.2f ms, wake jitter=%.2f ms\n",
+		"Frame pacing%s (%s): bound=%s, samples=%d, present=%.2f ms (%.1f Hz), p50=%.2f ms, p95=%.2f ms, p99=%.2f ms, max=%.2f ms, async=%.2f ms (%.1f Hz), ticDelta/frame=%.2f, gameTics/frame=%.2f, wait overshoot=%.2f ms, wake jitter=%.2f ms, swapInterval=%d, cap=%d, refresh=%.1f Hz\n",
 		reason != NULL ? reason : "",
 		stats.multiplayer ? "MP" : "SP",
 		Session_GetFramePacingBoundName( stats.boundMode ),
@@ -231,8 +289,17 @@ static void Session_PrintFramePacingSummary( const openq4FramePacingStats_t &sta
 		stats.avgTicsPerFrame,
 		stats.avgGameTicsPerFrame,
 		stats.avgWaitOvershootMsec,
-		stats.avgWakeJitterMsec );
+		stats.avgWakeJitterMsec,
+		stats.swapInterval,
+		stats.presentationCap,
+		stats.refreshHz );
 }
+
+#ifndef ID_DEDICATED
+void openQ4_PrintPresentationThrottleStats( const char *reason );
+void openQ4_ResetPresentationThrottleStats( void );
+void openQ4_PrintPresentationLatencyStats( const char *reason );
+void openQ4_ResetPresentationLatencyStats( void );
 
 static void Session_FramePacingSnapshot_f( const idCmdArgs &args ) {
 	const char *reason = NULL;
@@ -243,11 +310,57 @@ static void Session_FramePacingSnapshot_f( const idCmdArgs &args ) {
 	}
 
 	sessLocal.PrintFramePacingSnapshot( reason );
+	openQ4_PrintPresentationThrottleStats( reasonText.Length() ? va( " snapshot %s", reasonText.c_str() ) : " snapshot" );
+	openQ4_PrintPresentationLatencyStats( reasonText.Length() ? va( " snapshot %s", reasonText.c_str() ) : " snapshot" );
 }
 
 static void Session_FramePacingReset_f( const idCmdArgs &args ) {
 	sessLocal.ResetFramePacingStats();
+	openQ4_ResetPresentationThrottleStats();
+	openQ4_ResetPresentationLatencyStats();
 	common->Printf( "Frame pacing stats reset\n" );
+}
+
+/*
+================
+Session_TestControllerLoss_f
+
+openQ4: testControllerLoss 1|0 stands in for a controller's loss or return
+for the menus' notices (section 13.7), touching no device.
+================
+*/
+static void Session_TestControllerLoss_f( const idCmdArgs &args ) {
+	if ( args.Argc() > 1 && atoi( args.Argv( 1 ) ) == 0 ) {
+		sessLocal.ResolveRetainedNotices( RETAINED_NOTICE_CONTROLLER );
+	} else {
+		sessLocal.PushRetainedNotice( "#str_231541", RETAINED_NOTICE_CONTROLLER, "", "", RETAINED_NOTICE_UNDO_NONE, true );
+	}
+}
+
+/*
+================
+Session_TestControlsKey_f
+
+openQ4: testControlsKey <key> stands in for a key pressed and released on
+the retained CONTROLS page (a wait for a key, or Delete on a row), touching
+no device.
+================
+*/
+static void Session_TestControlsKey_f( const idCmdArgs &args ) {
+	const int key = args.Argc() == 2 ? idKeyInput::StringToKeyNum( args.Argv( 1 ) ) : -1;
+	if ( key < 0 ) {
+		common->Printf( "usage: testControlsKey <key>\n" );
+		return;
+	}
+	sysEvent_t event;
+	memset( &event, 0, sizeof( event ) );
+	event.evType = SE_KEY;
+	event.evValue = key;
+	event.evValue2 = 1;
+	const bool taken = sessLocal.RetainedControlsKey( &event );
+	event.evValue2 = 0;
+	sessLocal.RetainedControlsKey( &event );
+	common->Printf( "testControlsKey %s taken=%d\n", args.Argv( 1 ), taken ? 1 : 0 );
 }
 
 static void Session_TestWaitBox_f( const idCmdArgs &args ) {
@@ -289,29 +402,36 @@ static void Session_TestMessageBox_f( const idCmdArgs &args ) {
 
 	sessLocal.RunTimedMessageBoxPacingTest( durationMsec, network, reason );
 }
+#endif
 
+// What holds the frame rate (PresentationPacing.h): a cap that is met at any
+// rate, the display's refresh under vsync, game tics, or the frame's own work.
 static openq4FramePacingBound_t Session_ClassifyFramePacing( const openq4FramePacingStats_t &stats ) {
-	if ( !stats.valid || stats.avgFrameMsec <= 0.0f ) {
+	if ( !stats.valid ) {
 		return OPENQ4_FRAME_BOUND_UNKNOWN;
 	}
 
-	const float ticMsec = 1000.0f / static_cast<float>( USERCMD_HZ );
-	if ( stats.presentationCap > 0 ) {
-		const float capMsec = 1000.0f / static_cast<float>( stats.presentationCap );
-		if ( capMsec > ticMsec * 1.10f && stats.avgFrameMsec >= capMsec * 0.95f ) {
+	openq4::FramePacingBoundInput input;
+	input.avgFrameMsec = stats.avgFrameMsec;
+	input.presentationCap = stats.presentationCap;
+	input.swapInterval = stats.swapInterval;
+	input.refreshHz = stats.refreshHz;
+	input.ticMsec = 1000.0f / static_cast<float>( USERCMD_HZ );
+	input.avgTicsPerFrame = stats.avgTicsPerFrame;
+	input.avgGameTicsPerFrame = stats.avgGameTicsPerFrame;
+	input.waitedForTic = stats.lastRequestedWaitMsec > 0;
+	switch ( openq4::ClassifyFramePacing( input ) ) {
+		case openq4::FramePacingBound::Simulation:
+			return OPENQ4_FRAME_BOUND_SIMULATION;
+		case openq4::FramePacingBound::Vsync:
+			return OPENQ4_FRAME_BOUND_VSYNC;
+		case openq4::FramePacingBound::PresentationCap:
 			return OPENQ4_FRAME_BOUND_PRESENTATION_CAP;
-		}
+		case openq4::FramePacingBound::FrameWork:
+			return OPENQ4_FRAME_BOUND_UNCAPPED;
+		default:
+			return OPENQ4_FRAME_BOUND_UNKNOWN;
 	}
-
-	if ( stats.swapInterval > 0 && stats.avgFrameMsec > ticMsec * 1.10f ) {
-		return OPENQ4_FRAME_BOUND_VSYNC;
-	}
-
-	if ( stats.avgTicsPerFrame >= 0.90f || stats.avgGameTicsPerFrame >= 0.90f || stats.lastRequestedWaitMsec > 0 ) {
-		return OPENQ4_FRAME_BOUND_SIMULATION;
-	}
-
-	return OPENQ4_FRAME_BOUND_UNCAPPED;
 }
 
 // these must be kept up to date with window Levelshot in guis/mainmenu.gui
@@ -320,6 +440,7 @@ const int PREVIEW_Y = 31;
 const int PREVIEW_WIDTH = 398;
 const int PREVIEW_HEIGHT = 298;
 
+#ifndef ID_DEDICATED
 static bool Session_IsRetailSaveGameName( const idStr &gameName ) {
 	return gameName.Icmp( SAVEGAME_GAME_NAME_RETAIL ) == 0;
 }
@@ -375,20 +496,109 @@ static idFile *Session_OpenSaveGameReadHandle( const char *relativePath, const c
 }
 
 static bool Session_IsCompatibleSaveGameVersion( const int version );
+#endif
 static const int SESSION_MAX_SAVEGAME_DICT_KV = 16384;
 static const int SESSION_MAX_CMD_DEMO_DICT_KV = 16384;
 static const int SESSION_MAX_CMD_DEMO_TOTAL_KV = 65536;
 static const int SESSION_MAX_CMD_DEMO_HEADER_BYTES = 16 * 1024 * 1024;
+static const int SESSION_MAX_SAVEGAME_BYTES = 512 * 1024 * 1024;
 static const int SESSION_MAX_SAVE_DESCRIPTION_BYTES = 8192;
 static const int SESSION_MAX_SAVE_PREVIEW_BYTES = 64 * 1024 * 1024;
+static const int SESSION_SAVE_PREVIEW_DELETE_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'D' << 24 );
+static const int SESSION_SAVE_PREVIEW_DELETE_VERSION = 1;
 static const char *SESSION_SAVEGAME_NO_OVERWRITE_TOKEN = "nooverwrite";
 static const int SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'S' << 24 );
-static const int SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_VERSION = 2;
+static const int SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_VERSION = 5;
+// Wire-ABI stamps and integrity trailers were introduced in v3.
+static const int SESSION_OPENQ4_SAVEGAME_TYPED_COMPATIBILITY_VERSION = 3;
+static_assert( SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_VERSION == OPENQ4_SAVEGAME_PORTABLE_VERSION,
+	"the current payload is the portable one" );
+// Oldest v3 layout this build has a verified decoder for: the build that
+// introduced v3. A payload's layout build is the build it carries, or for a
+// release that stamped build 1, its release's build (SaveGameReleases.h); the
+// fields added within v3 are then read by the build that added each. Refuse
+// anything below the floor during preflight, while the session is intact.
+static const int SESSION_OPENQ4_SAVEGAME_MINIMUM_SUPPORTED_BUILD = 640;
 static const int SESSION_OPENQ4_SAVEGAME_FOOTER_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'F' << 24 );
 static const int SESSION_OPENQ4_SAVEGAME_FOOTER_VERSION = 1;
 static const int SESSION_OPENQ4_SAVEGAME_FOOTER_BYTES = 5 * static_cast<int>( sizeof( int ) );
+static const int SESSION_OPENQ4_SAVEGAME_INTEGRITY_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'I' << 24 );
+static const int SESSION_OPENQ4_SAVEGAME_INTEGRITY_VERSION = 1;
+static const int SESSION_OPENQ4_SAVEGAME_INTEGRITY_BYTES = 4 * static_cast<int>( sizeof( int ) );
 static const int SESSION_OPENQ4_SAVEGAME_SOURCE_STAMP_MAX_BYTES = 128;
+static const int SESSION_OPENQ4_SAVEGAME_ABI_STAMP_MAX_BYTES = 96;
+static const char *SESSION_LEGACY_SAVEGAME_WIRE_ABI = "windows-msvcabi-x64-le-raw1";
 
+#ifndef ID_DEDICATED
+static const char *Session_GetSaveGameWireABI( void );
+
+static const char *Session_GetSaveGameWireABI( void ) {
+#if defined( _WIN32 )
+	#define SESSION_SAVEGAME_ABI_OS "windows"
+	#define SESSION_SAVEGAME_ABI_COMPILER "msvcabi"
+#elif defined( __APPLE__ )
+	#define SESSION_SAVEGAME_ABI_OS "macos"
+	#define SESSION_SAVEGAME_ABI_COMPILER "itaniumabi"
+#elif defined( __linux__ )
+	#define SESSION_SAVEGAME_ABI_OS "linux"
+	#define SESSION_SAVEGAME_ABI_COMPILER "itaniumabi"
+#else
+	#define SESSION_SAVEGAME_ABI_OS "unknownos"
+	#define SESSION_SAVEGAME_ABI_COMPILER "unknownabi"
+#endif
+
+#if defined( _M_X64 ) || defined( __x86_64__ )
+	#define SESSION_SAVEGAME_ABI_ARCH "x64"
+#elif defined( _M_ARM64 ) || defined( __aarch64__ )
+	#define SESSION_SAVEGAME_ABI_ARCH "arm64"
+#elif defined( _M_IX86 ) || defined( __i386__ )
+	#define SESSION_SAVEGAME_ABI_ARCH "x86"
+#elif defined( _M_ARM ) || defined( __arm__ )
+	#define SESSION_SAVEGAME_ABI_ARCH "arm32"
+#else
+	#define SESSION_SAVEGAME_ABI_ARCH "unknownarch"
+#endif
+
+#if defined( __BYTE_ORDER__ ) && defined( __ORDER_BIG_ENDIAN__ ) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+	#define SESSION_SAVEGAME_ABI_ENDIAN "be"
+#else
+	#define SESSION_SAVEGAME_ABI_ENDIAN "le"
+#endif
+
+	return SESSION_SAVEGAME_ABI_OS "-" SESSION_SAVEGAME_ABI_COMPILER "-" SESSION_SAVEGAME_ABI_ARCH "-" SESSION_SAVEGAME_ABI_ENDIAN "-raw1";
+
+#undef SESSION_SAVEGAME_ABI_ENDIAN
+#undef SESSION_SAVEGAME_ABI_ARCH
+#undef SESSION_SAVEGAME_ABI_COMPILER
+#undef SESSION_SAVEGAME_ABI_OS
+}
+#endif
+
+// Every slot rename is a write-through/directory-synced step, so the commit
+// order survives a power loss: backups before publication, payload last. A
+// filesystem that cannot confirm the barrier still gets the rename; the caller
+// is told the weaker guarantee instead of rolling back a completed move. Runs
+// on the checkpoint worker too: no console, VFS, game or CVar access. Inline:
+// dedicated builds compile the commit operations but never call them.
+static inline bool Session_MoveSaveFileDurably( const std::string &from, const std::string &to,
+	std::string &durabilityUnconfirmed, std::string &error ) {
+	// fs_savepath may be relative to the working directory.
+	const auto native = []( const std::string &path ) {
+		std::error_code code;
+		const auto absolute = std::filesystem::absolute( std::filesystem::u8path( path ), code );
+		if ( code ) return path;
+		const auto bytes = absolute.lexically_normal().u8string();
+		return std::string( reinterpret_cast<const char *>( bytes.data() ), bytes.size() );
+	};
+	bool moved = false;
+	if ( openq4::DurableMoveExact( native( from ), native( to ), moved, error ) ) return true;
+	if ( !moved ) return false;
+	durabilityUnconfirmed = error;
+	error.clear();
+	return true;
+}
+
+#ifndef ID_DEDICATED
 static bool Session_IsSafeSaveMaterialPath( const idStr &path ) {
 	if ( path.IsEmpty() ) {
 		return true;
@@ -453,6 +663,21 @@ static bool Session_WriteSaveGameInt( idFile *file, int value, const char *field
 		common->Warning( "Savegame '%s' failed while writing %s at offset %d (wrote %d of %d)",
 			savePath ? savePath : "<unknown>",
 			fieldName ? fieldName : "integer",
+			offset,
+			bytesWritten,
+			static_cast<int>( sizeof( value ) ) );
+		return false;
+	}
+	return true;
+}
+
+static bool Session_WriteSaveGameUnsignedInt( idFile *file, unsigned int value, const char *fieldName, const char *savePath ) {
+	const int offset = file->Tell();
+	const int bytesWritten = file->WriteUnsignedInt( value );
+	if ( bytesWritten != sizeof( value ) ) {
+		common->Warning( "Savegame '%s' failed while writing %s at offset %d (wrote %d of %d)",
+			savePath ? savePath : "<unknown>",
+			fieldName ? fieldName : "unsigned integer",
 			offset,
 			bytesWritten,
 			static_cast<int>( sizeof( value ) ) );
@@ -648,6 +873,21 @@ static bool Session_ReadSaveGameInt( idFile *file, int &value, const char *field
 	return true;
 }
 
+static bool Session_ReadSaveGameUnsignedInt( idFile *file, unsigned int &value, const char *fieldName, const char *savePath ) {
+	const int offset = file->Tell();
+	const int bytesRead = file->ReadUnsignedInt( value );
+	if ( bytesRead != sizeof( value ) ) {
+		common->Warning( "Savegame '%s' is truncated while reading %s at offset %d (read %d of %d)",
+			savePath ? savePath : "<unknown>",
+			fieldName ? fieldName : "unsigned integer",
+			offset,
+			bytesRead,
+			static_cast<int>( sizeof( value ) ) );
+		return false;
+	}
+	return true;
+}
+
 static bool Session_ReadSaveGameString( idFile *file, idStr &string, int maxLength, const char *fieldName, const char *savePath ) {
 	int len = 0;
 	const int lengthOffset = file->Tell();
@@ -740,10 +980,85 @@ static bool Session_ReadSaveGameDict( idFile *file, idDict &dict, const char *fi
 	return true;
 }
 
-static bool Session_ValidateSaveGamePayload( idFile *file, const idStr &savePath, bool allowLegacyPayload ) {
+static bool Session_GetBoundedSaveGameLength( idFile *file, const idStr &savePath, const char *operation, int &fileLength ) {
+	fileLength = file != NULL ? file->Length() : -1;
+	if ( fileLength <= 0 || fileLength > SESSION_MAX_SAVEGAME_BYTES ) {
+		common->Warning( "Savegame '%s' has invalid %s size %d bytes (maximum total .save size %d bytes)",
+			savePath.c_str(), operation != NULL ? operation : "file", fileLength, SESSION_MAX_SAVEGAME_BYTES );
+		return false;
+	}
+	return true;
+}
+
+static bool Session_CalculateSaveGameChecksum( idFile *file, int protectedLength, unsigned int &checksum, const idStr &savePath ) {
+	int fileLength = -1;
+	if ( !Session_GetBoundedSaveGameLength( file, savePath, "checksum input", fileLength ) ) {
+		return false;
+	}
+	if ( protectedLength < 0 || protectedLength > fileLength ) {
+		common->Warning( "Savegame '%s' has invalid checksum length %d (file length %d)",
+			savePath.c_str(), protectedLength, fileLength );
+		return false;
+	}
+	if ( file->Seek( 0, FS_SEEK_SET ) != 0 ) {
+		common->Warning( "Savegame '%s' failed to seek to the checksum start", savePath.c_str() );
+		return false;
+	}
+
+	static const int CHECKSUM_CHUNK_BYTES = 64 * 1024;
+	byte *buffer = new byte[ CHECKSUM_CHUNK_BYTES ];
+	uint32_t crc = 0;
+	CRC32_InitChecksum( crc );
+	int remaining = protectedLength;
+	while ( remaining > 0 ) {
+		const int chunkBytes = Min( remaining, CHECKSUM_CHUNK_BYTES );
+		const int bytesRead = file->Read( buffer, chunkBytes );
+		if ( bytesRead != chunkBytes ) {
+			common->Warning( "Savegame '%s' is truncated while checksumming offset %d (read %d of %d)",
+				savePath.c_str(), protectedLength - remaining, bytesRead, chunkBytes );
+			delete[] buffer;
+			return false;
+		}
+		CRC32_UpdateChecksum( crc, buffer, chunkBytes );
+		remaining -= chunkBytes;
+	}
+	delete[] buffer;
+	CRC32_FinishChecksum( crc );
+	checksum = static_cast<unsigned int>( crc );
+	return true;
+}
+
+// layoutBuild, when given, receives the build the payload's layout is read as.
+// A joined checkpoint worker supplies this only for the immutable memory view
+// of the exact bytes it wrote and read back. Bind the checksum to that view and
+// length; loads, recovery and synchronous saves always calculate their own CRC.
+struct sessionVerifiedSaveChecksum_t {
+	const idFile *file;
+	int protectedLength;
+	unsigned int checksum;
+};
+
+// What payload preflight read, for the restore and the Load Game page.
+struct sessionSaveGamePayload_t {
+	int		version;		// payload version; 0 for an unstamped payload
+	int		layoutBuild;
+	bool	otherPlatform;	// refused because another platform's build wrote it
+};
+
+static bool Session_ValidateSaveGamePayload( idFile *file, const idStr &savePath, bool allowLegacyPayload, sessionSaveGamePayload_t *payloadOut = NULL,
+		const sessionVerifiedSaveChecksum_t *verifiedChecksum = NULL ) {
+	if ( payloadOut != NULL ) {
+		payloadOut->version = 0;
+		payloadOut->layoutBuild = BUILD_NUMBER;
+		payloadOut->otherPlatform = false;
+	}
+	int fileLength = -1;
+	if ( !Session_GetBoundedSaveGameLength( file, savePath, "payload preflight", fileLength ) ) {
+		return false;
+	}
 	const int payloadOffset = file->Tell();
-	const int fileLength = file->Length();
-	if ( fileLength <= 0 || payloadOffset < 0 || fileLength < payloadOffset + static_cast<int>( sizeof( int ) ) ) {
+	if ( payloadOffset < 0 || payloadOffset > fileLength ||
+		 fileLength - payloadOffset < static_cast<int>( sizeof( int ) ) ) {
 		common->Warning( "Savegame '%s' is too short for a game payload (payload offset %d, length %d)",
 			savePath.c_str(), payloadOffset, fileLength );
 		return false;
@@ -756,7 +1071,8 @@ static bool Session_ValidateSaveGamePayload( idFile *file, const idStr &savePath
 	}
 
 	if ( marker != SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_MAGIC ) {
-		const bool legacyCompatible = allowLegacyPayload && marker == BUILD_NUMBER;
+		const bool legacyCompatible = allowLegacyPayload && marker == BUILD_NUMBER &&
+			idStr::Icmp( Session_GetSaveGameWireABI(), SESSION_LEGACY_SAVEGAME_WIRE_ABI ) == 0;
 		if ( !legacyCompatible ) {
 			common->Warning( "Savegame '%s' has unsupported legacy payload build/marker %d (expected build %d or marker 0x%08x)",
 				savePath.c_str(), marker, BUILD_NUMBER, SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_MAGIC );
@@ -769,7 +1085,7 @@ static bool Session_ValidateSaveGamePayload( idFile *file, const idStr &savePath
 	}
 
 	const int minimumStampedBytes = 5 * static_cast<int>( sizeof( int ) ) + SESSION_OPENQ4_SAVEGAME_FOOTER_BYTES;
-	if ( fileLength < payloadOffset + minimumStampedBytes ) {
+	if ( fileLength - payloadOffset < minimumStampedBytes ) {
 		common->Warning( "Savegame '%s' is too short for a stamped game payload/footer (payload offset %d, length %d)",
 			savePath.c_str(), payloadOffset, fileLength );
 		file->Seek( payloadOffset, FS_SEEK_SET );
@@ -780,41 +1096,127 @@ static bool Session_ValidateSaveGamePayload( idFile *file, const idStr &savePath
 	int payloadBuild = 0;
 	idStr payloadSourceStamp;
 	int payloadSourceFileCount = 0;
+	idStr payloadWireABI;
 	bool valid =
 		Session_ReadSaveGameInt( file, payloadVersion, "payload version", savePath.c_str() ) &&
 		Session_ReadSaveGameInt( file, payloadBuild, "payload build", savePath.c_str() ) &&
 		Session_ReadSaveGameString( file, payloadSourceStamp, SESSION_OPENQ4_SAVEGAME_SOURCE_STAMP_MAX_BYTES, "payload source stamp", savePath.c_str() ) &&
 		Session_ReadSaveGameInt( file, payloadSourceFileCount, "payload source file count", savePath.c_str() );
 
-	if ( valid && payloadVersion != SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_VERSION ) {
-		common->Warning( "Savegame '%s' has payload version %d, expected %d",
-			savePath.c_str(), payloadVersion, SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_VERSION );
+	if ( valid && ( payloadVersion < OPENQ4_SAVEGAME_V2_VERSION ||
+		 payloadVersion > SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_VERSION ) ) {
+		common->Warning( "Savegame '%s' has unsupported payload version %d (supported %d to %d)",
+			savePath.c_str(), payloadVersion,
+			OPENQ4_SAVEGAME_V2_VERSION,
+			SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_VERSION );
 		valid = false;
 	}
-	if ( valid && payloadBuild != BUILD_NUMBER ) {
-		common->Warning( "Savegame '%s' has payload build %d, expected %d",
-			savePath.c_str(), payloadBuild, BUILD_NUMBER );
-		valid = false;
+	if ( valid && payloadVersion >= SESSION_OPENQ4_SAVEGAME_TYPED_COMPATIBILITY_VERSION ) {
+		valid = Session_ReadSaveGameString( file, payloadWireABI, SESSION_OPENQ4_SAVEGAME_ABI_STAMP_MAX_BYTES,
+			"payload wire ABI", savePath.c_str() );
+	} else if ( valid ) {
+		// Version 2 predates the stamp; it is the layout v2 shipped.
+		payloadWireABI = OPENQ4_SAVEGAME_V2_WIRE_ABI;
 	}
-	if ( valid && payloadSourceFileCount < 0 ) {
+	if ( valid && ( payloadSourceStamp.IsEmpty() || payloadSourceFileCount < 0 ) ) {
 		common->Warning( "Savegame '%s' has invalid payload source file count %d",
 			savePath.c_str(), payloadSourceFileCount );
 		valid = false;
 	}
-	if ( valid && OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT >= 0 &&
-		 ( payloadSourceStamp.Icmp( OPENQ4_SAVEGAME_COMPAT_SOURCE_HASH ) != 0 ||
-		   payloadSourceFileCount != OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT ) ) {
-		common->Warning( "Savegame '%s' source snapshot %s (%d files) does not match current snapshot %s (%d files)",
-			savePath.c_str(),
-			payloadSourceStamp.c_str(), payloadSourceFileCount,
-			OPENQ4_SAVEGAME_COMPAT_SOURCE_HASH, OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT );
-		valid = false;
+
+	if ( valid ) {
+		const openQ4SaveGameRelease_t *release = OpenQ4_FindSaveGameRelease( payloadBuild, payloadSourceStamp.c_str(), payloadSourceFileCount );
+		const int layoutBuild = OpenQ4_SaveGameLayoutBuild( payloadVersion, payloadBuild, payloadSourceStamp.c_str(), payloadSourceFileCount );
+		const int minimumBuild = payloadVersion == OPENQ4_SAVEGAME_V2_VERSION ?
+			OPENQ4_SAVEGAME_V2_FIRST_RELEASE_BUILD : SESSION_OPENQ4_SAVEGAME_MINIMUM_SUPPORTED_BUILD;
+		// Version 5 loads on every build in the portable family; earlier
+		// versions only on the wire ABI that wrote them.
+		const char *wireABI = payloadVersion >= OPENQ4_SAVEGAME_PORTABLE_VERSION ?
+			OpenQ4_SaveGamePortableWireABI( Session_GetSaveGameWireABI() ) : Session_GetSaveGameWireABI();
+		if ( payloadOut != NULL ) {
+			payloadOut->version = payloadVersion;
+			payloadOut->layoutBuild = layoutBuild;
+		}
+		if ( payloadWireABI.Icmp( wireABI ) != 0 ) {
+			common->Warning( "Savegame '%s' wire ABI '%s' is incompatible with this '%s' build",
+				savePath.c_str(), payloadWireABI.c_str(), wireABI );
+			if ( payloadOut != NULL ) {
+				payloadOut->otherPlatform = true;
+			}
+			valid = false;
+		} else if ( layoutBuild < minimumBuild ) {
+			common->Warning( "Savegame '%s' was written by an older openQ4 (build %d, below build %d, the oldest this build can restore)",
+				savePath.c_str(), layoutBuild, minimumBuild );
+			valid = false;
+		} else if ( release != NULL ) {
+			common->DPrintf( "Savegame '%s' was written by openQ4 %s; reading it as build %d\n",
+				savePath.c_str(), release->version, release->build );
+		} else if ( payloadBuild != BUILD_NUMBER ||
+				OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT < 0 ||
+				payloadSourceStamp.Icmp( OPENQ4_SAVEGAME_COMPAT_SOURCE_HASH ) != 0 ||
+				payloadSourceFileCount != OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT ) {
+			common->DPrintf( "Savegame '%s' was produced by build/source %d/%s (%d files); current schema-compatible build/source is %d/%s (%d files)\n",
+				savePath.c_str(), payloadBuild, payloadSourceStamp.c_str(), payloadSourceFileCount,
+				BUILD_NUMBER, OPENQ4_SAVEGAME_COMPAT_SOURCE_HASH, OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT );
+		}
 	}
 
-	const int footerOffset = fileLength - SESSION_OPENQ4_SAVEGAME_FOOTER_BYTES;
-	if ( valid && ( footerOffset <= file->Tell() || file->Seek( footerOffset, FS_SEEK_SET ) != 0 ) ) {
+	const int compatibilityHeaderEnd = file->Tell();
+	int protectedLength = fileLength;
+	if ( valid && payloadVersion >= SESSION_OPENQ4_SAVEGAME_TYPED_COMPATIBILITY_VERSION ) {
+		const int integrityOffset = fileLength - SESSION_OPENQ4_SAVEGAME_INTEGRITY_BYTES;
+		if ( integrityOffset <= compatibilityHeaderEnd + SESSION_OPENQ4_SAVEGAME_FOOTER_BYTES ||
+			 file->Seek( integrityOffset, FS_SEEK_SET ) != 0 ) {
+			common->Warning( "Savegame '%s' has invalid integrity trailer offset %d", savePath.c_str(), integrityOffset );
+			valid = false;
+		}
+
+		int integrityMarker = 0;
+		int integrityVersion = 0;
+		int savedProtectedLength = 0;
+		unsigned int savedChecksum = 0;
+		if ( valid && ( !Session_ReadSaveGameInt( file, integrityMarker, "integrity marker", savePath.c_str() ) ||
+			 !Session_ReadSaveGameInt( file, integrityVersion, "integrity version", savePath.c_str() ) ||
+			 !Session_ReadSaveGameInt( file, savedProtectedLength, "integrity protected length", savePath.c_str() ) ||
+			 !Session_ReadSaveGameUnsignedInt( file, savedChecksum, "integrity checksum", savePath.c_str() ) ) ) {
+			valid = false;
+		}
+		if ( valid && integrityMarker != SESSION_OPENQ4_SAVEGAME_INTEGRITY_MAGIC ) {
+			common->Warning( "Savegame '%s' has invalid integrity marker 0x%08x", savePath.c_str(), integrityMarker );
+			valid = false;
+		}
+		if ( valid && integrityVersion != SESSION_OPENQ4_SAVEGAME_INTEGRITY_VERSION ) {
+			common->Warning( "Savegame '%s' has integrity version %d, expected %d",
+				savePath.c_str(), integrityVersion, SESSION_OPENQ4_SAVEGAME_INTEGRITY_VERSION );
+			valid = false;
+		}
+		if ( valid && savedProtectedLength != integrityOffset ) {
+			common->Warning( "Savegame '%s' integrity length %d does not match trailer offset %d",
+				savePath.c_str(), savedProtectedLength, integrityOffset );
+			valid = false;
+		}
+
+		unsigned int calculatedChecksum = 0;
+		if ( valid ) {
+			if ( verifiedChecksum != NULL && verifiedChecksum->file == file &&
+					verifiedChecksum->protectedLength == savedProtectedLength ) {
+				calculatedChecksum = verifiedChecksum->checksum;
+			} else if ( !Session_CalculateSaveGameChecksum( file, savedProtectedLength, calculatedChecksum, savePath ) ) {
+				valid = false;
+			}
+		}
+		if ( valid && calculatedChecksum != savedChecksum ) {
+			common->Warning( "Savegame '%s' failed its integrity check (stored 0x%08x, calculated 0x%08x)",
+				savePath.c_str(), savedChecksum, calculatedChecksum );
+			valid = false;
+		}
+		protectedLength = savedProtectedLength;
+	}
+
+	const int footerOffset = protectedLength - SESSION_OPENQ4_SAVEGAME_FOOTER_BYTES;
+	if ( valid && ( footerOffset <= compatibilityHeaderEnd || file->Seek( footerOffset, FS_SEEK_SET ) != 0 ) ) {
 		common->Warning( "Savegame '%s' has invalid payload footer offset %d (payload offset %d, length %d)",
-			savePath.c_str(), footerOffset, payloadOffset, fileLength );
+			savePath.c_str(), footerOffset, payloadOffset, protectedLength );
 		valid = false;
 	}
 
@@ -912,15 +1314,117 @@ static bool Session_ValidateStagedSavePreview( const idStr &previewPath ) {
 	return true;
 }
 
+static bool Session_IsSavePreviewDeletionMarker( const idStr &relativePath ) {
+	idStr osPath = fileSystem->RelativePathToOSPath( relativePath.c_str(), "fs_savepath" );
+	idFile *file = fileSystem->OpenExplicitFileRead( osPath.c_str() );
+	if ( file == NULL || file->Length() != 2 * static_cast<int>( sizeof( int ) ) ) {
+		if ( file != NULL ) {
+			fileSystem->CloseFile( file );
+		}
+		return false;
+	}
+
+	int marker = 0;
+	int version = 0;
+	const bool matches = file->ReadInt( marker ) == sizeof( marker ) &&
+		file->ReadInt( version ) == sizeof( version ) &&
+		marker == SESSION_SAVE_PREVIEW_DELETE_MAGIC && version == SESSION_SAVE_PREVIEW_DELETE_VERSION;
+	fileSystem->CloseFile( file );
+	return matches;
+}
+
+static bool Session_CreateSavePreviewDeletionMarker( const idStr &relativePath ) {
+	idFile *file = fileSystem->OpenFileWrite( relativePath.c_str(), "fs_savepath" );
+	if ( file == NULL ) {
+		return false;
+	}
+
+	const bool written =
+		Session_WriteSaveGameInt( file, SESSION_SAVE_PREVIEW_DELETE_MAGIC, "preview deletion marker", relativePath.c_str() ) &&
+		Session_WriteSaveGameInt( file, SESSION_SAVE_PREVIEW_DELETE_VERSION, "preview deletion version", relativePath.c_str() );
+	const bool synced = written && file->Sync();
+	fileSystem->CloseFile( file );
+	return written && synced;
+}
+
 static void Session_RemoveRelativeSaveFile( const idStr &relativePath ) {
 	idStr osPath = fileSystem->RelativePathToOSPath( relativePath.c_str(), "fs_savepath" );
 	fileSystem->RemoveExplicitFile( osPath.c_str() );
 }
 
+static void Session_WarnSaveDurabilityUnconfirmed( const std::string &reason ) {
+	static bool warned = false;
+	if ( !warned ) {
+		warned = true;
+		common->Warning( "Saved files were renamed, but this filesystem did not confirm the change is on disk: %s", reason.c_str() );
+	}
+}
+
 static bool Session_RenameRelativeSaveFile( const idStr &from, const idStr &to ) {
 	idStr fromOSPath = fileSystem->RelativePathToOSPath( from.c_str(), "fs_savepath" );
 	idStr toOSPath = fileSystem->RelativePathToOSPath( to.c_str(), "fs_savepath" );
-	return rename( fromOSPath.c_str(), toOSPath.c_str() ) == 0;
+	std::string unconfirmed, error;
+	if ( !Session_MoveSaveFileDurably( fromOSPath.c_str(), toOSPath.c_str(), unconfirmed, error ) ) {
+		common->DPrintf( "Save rename '%s' -> '%s' failed: %s\n", from.c_str(), to.c_str(), error.c_str() );
+		return false;
+	}
+	if ( !unconfirmed.empty() ) Session_WarnSaveDurabilityUnconfirmed( unconfirmed );
+	return true;
+}
+
+static bool Session_AppendSaveGameIntegrityTrailer( const idStr &relativePath ) {
+	idStr osPath = fileSystem->RelativePathToOSPath( relativePath.c_str(), "fs_savepath" );
+	idFile *readFile = fileSystem->OpenExplicitFileRead( osPath.c_str() );
+	if ( readFile == NULL ) {
+		common->Warning( "Failed to reopen savegame '%s' for integrity protection", relativePath.c_str() );
+		return false;
+	}
+
+	int protectedLength = -1;
+	if ( !Session_GetBoundedSaveGameLength( readFile, relativePath, "staged write", protectedLength ) ) {
+		fileSystem->CloseFile( readFile );
+		return false;
+	}
+	if ( protectedLength > SESSION_MAX_SAVEGAME_BYTES - SESSION_OPENQ4_SAVEGAME_INTEGRITY_BYTES ) {
+		common->Warning( "Staged savegame '%s' is %d bytes before its %d-byte integrity trailer (maximum total .save size %d bytes)",
+			relativePath.c_str(), protectedLength, SESSION_OPENQ4_SAVEGAME_INTEGRITY_BYTES, SESSION_MAX_SAVEGAME_BYTES );
+		fileSystem->CloseFile( readFile );
+		return false;
+	}
+	unsigned int checksum = 0;
+	const bool checksumReady = Session_CalculateSaveGameChecksum( readFile, protectedLength, checksum, relativePath );
+	fileSystem->CloseFile( readFile );
+	if ( !checksumReady ) {
+		return false;
+	}
+
+	idFile *appendFile = fileSystem->OpenFileAppend( relativePath.c_str(), true, "fs_savepath" );
+	if ( appendFile == NULL ) {
+		common->Warning( "Failed to open savegame '%s' for its integrity trailer", relativePath.c_str() );
+		return false;
+	}
+
+	const bool written =
+		Session_WriteSaveGameInt( appendFile, SESSION_OPENQ4_SAVEGAME_INTEGRITY_MAGIC, "integrity marker", relativePath.c_str() ) &&
+		Session_WriteSaveGameInt( appendFile, SESSION_OPENQ4_SAVEGAME_INTEGRITY_VERSION, "integrity version", relativePath.c_str() ) &&
+		Session_WriteSaveGameInt( appendFile, protectedLength, "integrity protected length", relativePath.c_str() ) &&
+		Session_WriteSaveGameUnsignedInt( appendFile, checksum, "integrity checksum", relativePath.c_str() );
+	const bool synced = written && appendFile->Sync();
+	fileSystem->CloseFile( appendFile );
+	if ( written && !synced ) {
+		common->Warning( "Failed to persist savegame integrity trailer '%s'", relativePath.c_str() );
+	}
+	return written && synced;
+}
+
+static bool Session_SyncRelativeSaveFile( const idStr &relativePath ) {
+	idFile *file = fileSystem->OpenFileAppend( relativePath.c_str(), true, "fs_savepath" );
+	if ( file == NULL ) {
+		return false;
+	}
+	const bool synced = file->Sync();
+	fileSystem->CloseFile( file );
+	return synced;
 }
 
 struct sessionStagedSaveFile_t {
@@ -1002,16 +1506,15 @@ static bool Session_CommitStagedSaveFiles( sessionStagedSaveFile_t *files, int n
 	return true;
 }
 
-static bool Session_ValidateStagedSaveGameHeader( const idStr &savePath ) {
+static bool Session_ValidateSaveGameHeader( idFile *file, const idStr &savePath,
+		const sessionVerifiedSaveChecksum_t *verifiedChecksum = NULL ) {
 	idStr gamename;
 	idStr saveMap;
 	idStr entityFilter;
 	int version = 0;
 
-	idStr gameDir = cvarSystem->GetCVarString( "fs_game" );
-	idFile *file = fileSystem->OpenFileRead( savePath.c_str(), true, gameDir.Length() ? gameDir.c_str() : NULL );
-	if ( file == NULL ) {
-		common->Warning( "Failed to reopen staged savegame '%s' for validation", savePath.c_str() );
+	int stagedFileLength = -1;
+	if ( !Session_GetBoundedSaveGameLength( file, savePath, "staged validation", stagedFileLength ) ) {
 		return false;
 	}
 
@@ -1033,11 +1536,108 @@ static bool Session_ValidateStagedSaveGameHeader( const idStr &savePath ) {
 		valid = false;
 	}
 	if ( valid ) {
-		valid = Session_ValidateSaveGamePayload( file, savePath, false );
+		valid = Session_ValidateSaveGamePayload( file, savePath, false, NULL, verifiedChecksum );
 	}
 
+	return valid;
+}
+
+static bool Session_ValidateStagedSaveGameHeader( const idStr &savePath ) {
+	idStr gameDir = cvarSystem->GetCVarString( "fs_game" );
+	idFile *file = fileSystem->OpenFileRead( savePath.c_str(), true, gameDir.Length() ? gameDir.c_str() : NULL );
+	if ( file == NULL ) {
+		common->Warning( "Failed to reopen staged savegame '%s' for validation", savePath.c_str() );
+		return false;
+	}
+	const bool valid = Session_ValidateSaveGameHeader( file, savePath );
 	fileSystem->CloseFile( file );
 	return valid;
+}
+
+struct sessionRecoverSaveFile_t {
+	idStr finalName;
+	idStr tempName;
+	idStr backupName;
+};
+
+static void Session_InitRecoverSaveFile( sessionRecoverSaveFile_t &file, const idStr &finalName ) {
+	file.finalName = finalName;
+	file.tempName = finalName;
+	file.tempName += ".tmp";
+	file.backupName = finalName;
+	file.backupName += ".prev";
+}
+
+static bool Session_RecoverInterruptedSaveFiles( const idStr &gameFile, const idStr &descriptionFile, const idStr &previewFile ) {
+	sessionRecoverSaveFile_t files[3];
+	Session_InitRecoverSaveFile( files[0], gameFile );
+	Session_InitRecoverSaveFile( files[1], descriptionFile );
+	Session_InitRecoverSaveFile( files[2], previewFile );
+
+	const bool tempGameExists = Session_RelativeSaveFileExists( files[0].tempName );
+	bool anyBackupExists = false;
+	bool anyTempExists = tempGameExists;
+	for ( int i = 0; i < 3; i++ ) {
+		anyBackupExists |= Session_RelativeSaveFileExists( files[i].backupName );
+		anyTempExists |= Session_RelativeSaveFileExists( files[i].tempName );
+	}
+
+	if ( !tempGameExists && !anyBackupExists ) {
+		// Description/preview temporaries alone cannot represent a commit. They
+		// may remain after a failed capture or description write.
+		if ( anyTempExists ) {
+			Session_RemoveRelativeSaveFile( files[1].tempName );
+			Session_RemoveRelativeSaveFile( files[2].tempName );
+		}
+		if ( Session_IsSavePreviewDeletionMarker( previewFile ) ) {
+			Session_RemoveRelativeSaveFile( previewFile );
+		}
+		return true;
+	}
+
+	// The payload is committed last. A valid final payload with no payload
+	// temporary therefore proves that every required sidecar rename completed.
+	if ( !tempGameExists && Session_RelativeSaveFileExists( gameFile ) &&
+		 Session_ValidateStagedSaveGameHeader( gameFile ) ) {
+		for ( int i = 0; i < 3; i++ ) {
+			Session_RemoveRelativeSaveFile( files[i].tempName );
+			Session_RemoveRelativeSaveFile( files[i].backupName );
+		}
+		if ( Session_IsSavePreviewDeletionMarker( previewFile ) ) {
+			Session_RemoveRelativeSaveFile( previewFile );
+		}
+		common->Printf( "Recovered committed savegame '%s' after interrupted cleanup\n", gameFile.c_str() );
+		return true;
+	}
+
+	// A commit starts only once every component is staged, and it backs up each
+	// existing final before publishing any temporary. With no backups, a payload
+	// final beside its own temporary therefore proves no commit began: the save
+	// was interrupted while staging, and a sidecar temporary that was never
+	// written must not be mistaken for one already published.
+	const bool commitMayHavePublished = anyBackupExists || !Session_RelativeSaveFileExists( gameFile );
+	bool recovered = true;
+	for ( int i = 0; i < 3; i++ ) {
+		const bool tempExists = Session_RelativeSaveFileExists( files[i].tempName );
+		const bool backupExists = Session_RelativeSaveFileExists( files[i].backupName );
+		if ( backupExists ) {
+			Session_RemoveRelativeSaveFile( files[i].finalName );
+			if ( !Session_RenameRelativeSaveFile( files[i].backupName, files[i].finalName ) ) {
+				common->Warning( "Failed to restore interrupted save backup '%s' to '%s'",
+					files[i].backupName.c_str(), files[i].finalName.c_str() );
+				recovered = false;
+			}
+		} else if ( ( tempGameExists && !tempExists && commitMayHavePublished ) || ( !tempGameExists && anyBackupExists ) ) {
+			// This component was committed without replacing an older file.
+			Session_RemoveRelativeSaveFile( files[i].finalName );
+		}
+		Session_RemoveRelativeSaveFile( files[i].tempName );
+	}
+
+	if ( recovered ) {
+		common->Printf( "Rolled back interrupted savegame '%s'\n", gameFile.c_str() );
+	}
+	return recovered;
 }
 
 static void Session_RemoveStagedSaveFiles( const idStr &gameFile, const idStr &descriptionFile, const idStr &previewFile ) {
@@ -1060,10 +1660,79 @@ static void Session_RestoreGeneratedSaveState( idSessionLocal &session, bool gen
 	}
 }
 
+class sessionSaveOperationGuard_t {
+public:
+	sessionSaveOperationGuard_t( idSessionLocal &session, const std::shared_ptr<idFile *> &openFileOwner,
+		const idStr &tempGameFile, const idStr &tempDescriptionFile, const idStr &tempPreviewFile,
+		bool generatedSaveName, saveType_t saveType, const idStr &previousLastQuicksave, int previousLastCheckPoint ) :
+		session( session ), openFileOwner( openFileOwner ), openFile( *openFileOwner ), tempGameFile( tempGameFile ),
+		tempDescriptionFile( tempDescriptionFile ), tempPreviewFile( tempPreviewFile ),
+		generatedSaveName( generatedSaveName ), saveType( saveType ),
+		previousLastQuicksave( previousLastQuicksave ), previousLastCheckPoint( previousLastCheckPoint ), complete( false ), preserveRecovery( false ) {
+	}
+
+	~sessionSaveOperationGuard_t() {
+		if ( openFile != NULL ) {
+			fileSystem->CloseFile( openFile );
+			openFile = NULL;
+		}
+		if ( !complete ) {
+			if ( renderSystem != NULL ) renderSystem->CancelSavePreview();
+			if ( !preserveRecovery ) Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
+			Session_RestoreGeneratedSaveState( session, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
+			session.syncNextGameFrame = true;
+			if ( soundSystem != NULL ) {
+				soundSystem->SetMute( session.insideExecuteMapChange );
+			}
+		}
+	}
+
+	void Complete( void ) {
+		complete = true;
+	}
+
+	void PreserveRecovery() { preserveRecovery = true; }
+
+private:
+	idSessionLocal &session;
+	std::shared_ptr<idFile *> openFileOwner;
+	idFile *&openFile;
+	idStr tempGameFile;
+	idStr tempDescriptionFile;
+	idStr tempPreviewFile;
+	bool generatedSaveName;
+	saveType_t saveType;
+	idStr previousLastQuicksave;
+	int previousLastCheckPoint;
+	bool complete;
+	bool preserveRecovery;
+};
+
+class sessionRenderCropGuard_t {
+public:
+	sessionRenderCropGuard_t( int width, int height ) : active( false ) {
+		if ( renderSystem != NULL && renderSystem->IsOpenGLRunning() && width > 0 && height > 0 ) {
+			renderSystem->CropRenderSize( width, height, false, true );
+			active = true;
+		}
+	}
+
+	~sessionRenderCropGuard_t() {
+		if ( active && renderSystem != NULL ) {
+			renderSystem->UnCrop();
+		}
+	}
+
+private:
+	bool active;
+};
+#endif
+
 void idSessionLocal::ResetFramePacingStats( void ) {
 	memset( &framePacingStats, 0, sizeof( framePacingStats ) );
+	framePacingWindowMsec = 0.0;
 	framePacingStats.boundMode = OPENQ4_FRAME_BOUND_UNKNOWN;
-	framePacingLastFrameMsec = 0;
+	framePacingLastFrameClock = 0.0;
 	framePacingLastLatchedTic = -1;
 	framePacingLastLoggedBound = OPENQ4_FRAME_BOUND_UNKNOWN;
 	framePacingLastLoggedSampleCount = 0;
@@ -1082,40 +1751,55 @@ void idSessionLocal::PrintFramePacingSnapshot( const char *reason ) const {
 	}
 
 	Session_PrintFramePacingSummary( framePacingStats, reasonText.c_str() );
+	// The HUD's avgFrameMsec is an exponential moving average after 120
+	// samples. Benchmarks need the arithmetic mean of every interval since
+	// reset, including stalls; keep that separate from the live diagnostic.
+	if ( framePacingStats.frameSampleCount > 0 ) {
+		common->Printf( "Frame timing window (%s): samples=%d, span_ms=%llu, mean_ms=%.6f\n",
+			framePacingStats.multiplayer ? "MP" : "SP", framePacingStats.frameSampleCount,
+			static_cast<unsigned long long>( framePacingWindowMsec + 0.5 ), framePacingWindowMsec / framePacingStats.frameSampleCount );
+	}
 }
 
-void idSessionLocal::SampleMultiplayerFramePacing( int frameStartMsec ) {
+void idSessionLocal::SampleMultiplayerFramePacing( void ) {
 	latchedTicNumber = com_ticNumber;
-	UpdateFramePacingStats( frameStartMsec, 0, 0, 0 );
+	UpdateFramePacingStats( 0, 0, 0 );
 }
 
 void openQ4_PrintFramePacingSnapshot( const char *reason ) {
 	sessLocal.PrintFramePacingSnapshot( reason );
 }
 
-void openQ4_RecordMultiplayerFramePacing( int frameStartMsec ) {
-	sessLocal.SampleMultiplayerFramePacing( frameStartMsec );
+void openQ4_RecordMultiplayerFramePacing( void ) {
+	sessLocal.SampleMultiplayerFramePacing();
 }
 
-void idSessionLocal::UpdateFramePacingStats( int frameStartMsec, int requestedWaitMsec, int actualWaitMsec, int gameTicsToRun ) {
+void idSessionLocal::UpdateFramePacingStats( int requestedWaitMsec, int actualWaitMsec, int gameTicsToRun ) {
 	openq4AsyncTimingStats_t asyncStats;
 	openQ4_GetAsyncTimingStats( asyncStats, 120 );
 
 	const int sampleCount = Max( framePacingStats.frameSampleCount, 1 );
 
-	if ( framePacingLastFrameMsec > 0 ) {
-		const int frameDeltaMsec = Max( 0, frameStartMsec - framePacingLastFrameMsec );
-		framePacingStats.lastFrameMsec = frameDeltaMsec;
+	// One interval per presentation frame, from the high-resolution stamp the
+	// frame limiter takes as it releases the frame.
+	const double frameStartMsec = openQ4_GetPresentationFrameStartMsec();
+	if ( framePacingLastFrameClock > 0.0 && frameStartMsec > framePacingLastFrameClock ) {
+		const double frameDeltaMsec = frameStartMsec - framePacingLastFrameClock;
+		const float frameDelta = static_cast<float>( frameDeltaMsec );
+		framePacingStats.lastFrameMsec = frameDelta;
 		++framePacingStats.frameSampleCount;
-		framePacingStats.avgFrameMsec = Session_UpdateMetricAverage( framePacingStats.avgFrameMsec, static_cast<float>( frameDeltaMsec ), framePacingStats.frameSampleCount );
+		framePacingWindowMsec += frameDeltaMsec;
+		framePacingStats.avgFrameMsec = Session_UpdateMetricAverage( framePacingStats.avgFrameMsec, frameDelta, framePacingStats.frameSampleCount );
 		framePacingStats.avgFrameHz = framePacingStats.avgFrameMsec > 0.0f ? 1000.0f / framePacingStats.avgFrameMsec : 0.0f;
-		if ( framePacingStats.frameSampleCount == 1 || frameDeltaMsec < framePacingStats.minFrameMsec ) {
-			framePacingStats.minFrameMsec = frameDeltaMsec;
+		if ( framePacingStats.frameSampleCount == 1 || frameDelta < framePacingStats.minFrameMsec ) {
+			framePacingStats.minFrameMsec = frameDelta;
 		}
-		framePacingStats.maxFrameMsec = Max( framePacingStats.maxFrameMsec, frameDeltaMsec );
-		++framePacingStats.frameMsecHistogram[Min( frameDeltaMsec, static_cast<int>( OPENQ4_FRAME_PACING_HISTOGRAM_OVERFLOW ) )];
+		framePacingStats.maxFrameMsec = Max( framePacingStats.maxFrameMsec, frameDelta );
+		++framePacingStats.frameIntervalBins[ openq4::FramePacingBin( frameDeltaMsec ) ];
 	}
-	framePacingLastFrameMsec = frameStartMsec;
+	if ( frameStartMsec > 0.0 ) {
+		framePacingLastFrameClock = frameStartMsec;
+	}
 
 	if ( framePacingLastLatchedTic >= 0 ) {
 		const int ticDelta = Max( 0, latchedTicNumber - framePacingLastLatchedTic );
@@ -1137,6 +1821,11 @@ void idSessionLocal::UpdateFramePacingStats( int frameStartMsec, int requestedWa
 
 	framePacingStats.swapInterval = cvarSystem != NULL ? cvarSystem->GetCVarInteger( "r_swapInterval" ) : 0;
 	framePacingStats.presentationCap = Session_FindPresentationCap();
+#if defined( USE_SDL3 )
+	framePacingStats.refreshHz = Sys_SDL_GetWindowRefreshHz();
+#else
+	framePacingStats.refreshHz = 0.0f;
+#endif
 	framePacingStats.asyncStats = asyncStats;
 	framePacingStats.valid = ( framePacingStats.frameSampleCount > 0 ) || asyncStats.valid;
 	framePacingStats.boundMode = Session_ClassifyFramePacing( framePacingStats );
@@ -1152,11 +1841,13 @@ void idSessionLocal::UpdateFramePacingStats( int frameStartMsec, int requestedWa
 	}
 }
 
+#ifndef ID_DEDICATED
 static bool Session_IsCompatibleSaveGameVersion( const int version ) {
 	return version == SAVEGAME_VERSION ||
 		version == LEGACY_OPENQ4_SAVEGAME_VERSION ||
 		version == LEGACY_OPENQ4_SAVEGAME_VERSION_ALT;
 }
+#endif
 
 static int Session_CountVisibleSmallChars( const char *string ) {
 	if ( !( string && *string ) ) {
@@ -1261,6 +1952,25 @@ static void Session_NormalizeMapDeclPath( const char *mapPath, idStr &normalized
 		normalizedPath = normalizedPath.c_str() + 5;
 	}
 }
+
+#ifndef ID_DEDICATED
+static bool Session_IsSafeNormalizedMapPath( const idStr &path ) {
+	if ( path.IsEmpty() || path.Length() >= MAX_STRING_CHARS || path[0] == '/' || path[0] == '\\' ) {
+		return false;
+	}
+	if ( idStr::FindText( path.c_str(), ".." ) >= 0 ) {
+		return false;
+	}
+
+	for ( int i = 0; i < path.Length(); i++ ) {
+		const unsigned char ch = static_cast<unsigned char>( path[i] );
+		if ( ch <= ' ' || ch >= 128 || ch == '\\' || ch == ':' || ch == '"' || ch == '<' || ch == '>' || ch == '|' ) {
+			return false;
+		}
+	}
+	return true;
+}
+#endif
 
 static bool Session_IsMapFilterWhitespace( const char ch ) {
 	return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
@@ -1450,6 +2160,64 @@ static bool Session_GetMapDeclDict( const char *mapPath, const char *entityFilte
 	return false;
 }
 
+/*
+===============
+Session_LevelDisplayName
+===============
+*/
+idStr Session_LevelDisplayName( const char *map, const char *entityFilter ) {
+	idStr mapPath = map != NULL ? map : "";
+	if ( idStr::Icmpn( mapPath.c_str(), "maps/", 5 ) == 0 ) {
+		mapPath = mapPath.c_str() + 5;
+	}
+	mapPath.StripFileExtension();
+	if ( mapPath.IsEmpty() ) {
+		return "";
+	}
+	idDict mapDecl;
+	if ( Session_GetMapDeclDict( mapPath.c_str(), entityFilter != NULL ? entityFilter : "", mapDecl ) ) {
+		const char *name = mapDecl.GetString( "name", "" );
+		if ( name[0] != '\0' ) {
+			return common->GetLanguageDict()->GetString( name );
+		}
+	}
+	idStr shortName = mapPath;
+	shortName.StripPath();
+	return shortName;
+}
+
+#ifndef ID_DEDICATED
+static bool Session_SaveGameMapExists( const idStr &normalizedPath, const idStr &normalizedEntityFilter ) {
+	if ( !Session_IsSafeNormalizedMapPath( normalizedPath ) ) {
+		return false;
+	}
+
+	idStr mapFile = "maps/";
+	mapFile += normalizedPath;
+	mapFile.SetFileExtension( ".map" );
+	if ( Session_FileExistsInSearchPaths( mapFile.c_str() ) ) {
+		return true;
+	}
+
+	// Segmented maps may resolve through an entity-filter-specific mapDef.
+	idDict mapDecl;
+	if ( Session_GetMapDeclDict( normalizedPath.c_str(), normalizedEntityFilter.c_str(), mapDecl ) ) {
+		idStr declaredPath;
+		Session_NormalizeMapDeclPath( mapDecl.GetString( "path", normalizedPath.c_str() ), declaredPath );
+		if ( Session_IsSafeNormalizedMapPath( declaredPath ) ) {
+			mapFile = "maps/";
+			mapFile += declaredPath;
+			mapFile.SetFileExtension( ".map" );
+			if ( Session_FileExistsInSearchPaths( mapFile.c_str() ) ) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+#endif
+
 static const char *SESSION_SAVE_DESC_AUTOSAVE_LABEL = "#str_107240";
 static const char *SESSION_SAVE_DESC_QUICKSAVE_LABEL = "#str_107241";
 static const char *SESSION_SAVE_DESC_CHECKPOINT_LABEL = "#str_107656";
@@ -1468,6 +2236,7 @@ static bool Session_GetTrailingDigit( const idStr &value, int &digit ) {
 	return true;
 }
 
+#ifndef ID_DEDICATED
 static void Session_GenerateSaveFileName( idSessionLocal &session, idStr &saveName, saveType_t saveType ) {
 	switch ( saveType ) {
 		case ST_AUTO: {
@@ -1534,6 +2303,7 @@ static void Session_EscapeSaveDescription( idStr &description ) {
 	description.Replace( "\\", "\\\\" );
 	description.Replace( "\"", "\\\"" );
 }
+#endif
 
 static bool Session_ResolveImageFilePath( const idStr &imagePath, idStr &resolvedPath ) {
 	if ( imagePath.Length() <= 0 ) {
@@ -1683,10 +2453,12 @@ static bool openQ4_IsSingleplayerGameType( void ) {
 	return !( gameType && gameType[ 0 ] && idStr::Icmp( gameType, "singleplayer" ) != 0 );
 }
 
+#ifndef ID_DEDICATED
 static void Session_IAmTheDuke_f( const idCmdArgs &args ) {
 	(void)args;
 	sessLocal.ToggleIAmTheDuke();
 }
+#endif
 
 static void Session_ReplicateColumnIntoRect( byte *dest, int destWidth, int destHeight,
 	int sourceX, int rectX, int rectY, int rectWidth, int rectHeight ) {
@@ -1731,10 +2503,13 @@ static void Session_ReplicateRowIntoRect( byte *dest, int destWidth, int destHei
 	}
 }
 
-static bool Session_GetLoadingCanvasExpansion( float &windowAspect, bool &expandHorizontally, bool &expandVertically ) {
+static bool Session_GetLoadingCanvasExpansion( float &windowAspect, bool &expandHorizontally, bool &expandVertically,
+	int &viewportPixelWidth, int &viewportPixelHeight ) {
 	windowAspect = static_cast<float>( SCREEN_WIDTH ) / static_cast<float>( SCREEN_HEIGHT );
 	expandHorizontally = false;
 	expandVertically = false;
+	viewportPixelWidth = 0;
+	viewportPixelHeight = 0;
 
 	if ( !cvarSystem->GetCVarBool( "ui_aspectCorrection" ) ) {
 		return false;
@@ -1754,6 +2529,8 @@ static bool Session_GetLoadingCanvasExpansion( float &windowAspect, bool &expand
 	const float targetAspect = static_cast<float>( SCREEN_WIDTH ) / static_cast<float>( SCREEN_HEIGHT );
 	const float aspectEpsilon = 0.0001f;
 
+	viewportPixelWidth = idMath::Ftoi( viewportWidth );
+	viewportPixelHeight = idMath::Ftoi( viewportHeight );
 	windowAspect = viewportWidth / viewportHeight;
 	if ( windowAspect > targetAspect + aspectEpsilon ) {
 		expandHorizontally = true;
@@ -1764,23 +2541,114 @@ static bool Session_GetLoadingCanvasExpansion( float &windowAspect, bool &expand
 	return expandHorizontally || expandVertically;
 }
 
-static idStr Session_MakeExpandedLoadingBackgroundPath( const char *mapName, int width, int height ) {
-	idStr safeName = mapName;
-	safeName.BackSlashesToSlashes();
-	safeName.StripPath();
-	safeName.StripFileExtension();
-	if ( safeName.Length() <= 0 ) {
-		safeName = "generated";
-	}
+/*
+================
+Expanded loading background
 
-	return va( "guis/assets/generated/loadscreens/%s_%dx%d.tga", safeName.c_str(), width, height );
+In a window that is not 4:3 the session widens the loading screen: it composes
+the map's levelshot, and any _left/_right/_top/_bottom art beside it, into one
+picture of the window's shape. The picture exists only in memory. The renderer
+holds it as a scratch image whose name starts with '_', so the stock GUI's
+implicit material and the retained screen's _retained/ material both find it by
+name whatever their image options. The session keeps the pixels too, because a
+video restart reallocates scratch images without their contents.
+
+Nothing is written under fs_savepath or read back through the search paths, so
+a pure lock has nothing to refuse and a pure server's clients see the wide
+background as well: its sources are VFS reads that the lock already admits (the
+loadscreen pack is client-only and allowed). Builds until 9 November 2026
+published the picture as guis/assets/generated/loadscreens/<map>_<w>x<h>.tga;
+this build never names those files (see FS_IsGeneratedLoadscreenPath).
+================
+*/
+#define SESSION_LOADING_BACKGROUND_IMAGE	"_expandedLoadingBackground"
+
+struct sessionLoadingBackground_t {
+	// SESSION_LOADING_BACKGROUND_IMAGE_<w>x<h>, empty while none is held. The
+	// size is part of the name because the retained interface keeps an image's
+	// dimensions by its name, and a picture of another shape must not reuse them.
+	idStr			imageName;
+	idList<byte>	pixels;				// RGBA, top row first, exactly as uploaded
+	int				width = 0;
+	int				height = 0;
+	int				restartCount = 0;	// renderSystem->GetVideoRestartCount() at the upload
+};
+static sessionLoadingBackground_t sessionLoadingBackground;
+
+// Allocates the held image at the pixels' size and uploads them.
+static bool Session_UploadLoadingBackground( void ) {
+	sessionLoadingBackground_t &background = sessionLoadingBackground;
+	idImageOpts options;
+	options.width = background.width;
+	options.height = background.height;
+	options.format = FMT_RGBA8;
+	options.numLevels = 1;
+	options.isPersistant = true;
+	idImage *image = renderSystem->CreateImage( background.imageName.c_str(), &options, TF_LINEAR );
+	if ( image == NULL ) {
+		return false;
+	}
+	int width = 0;
+	int height = 0;
+	renderSystem->GetImageSize( image, width, height );
+	if ( width != background.width || height != background.height ||
+		!renderSystem->UploadImage( background.imageName.c_str(), background.pixels.Ptr(), background.width, background.height ) ) {
+		return false;
+	}
+	background.restartCount = renderSystem->GetVideoRestartCount();
+	return true;
 }
 
-static bool Session_PrepareExpandedLoadingBackground( const idStr &backgroundPath, const char *mapName, idStr &generatedPath ) {
+// A load that shows the stock levelshot keeps no picture. The held image shrinks
+// to one black pixel, so a GUI that still names it draws nothing stale. During
+// shutdown the renderer's own teardown owns the image; only the pixels go.
+static void Session_ReleaseLoadingBackground( bool shrinkImage ) {
+	sessionLoadingBackground_t &background = sessionLoadingBackground;
+	if ( shrinkImage && background.imageName.Length() > 0 && renderSystem != NULL ) {
+		static const byte black[4] = { 0, 0, 0, 255 };
+		idImageOpts options;
+		options.width = 1;
+		options.height = 1;
+		options.format = FMT_RGBA8;
+		options.numLevels = 1;
+		options.isPersistant = true;
+		if ( renderSystem->CreateImage( background.imageName.c_str(), &options, TF_LINEAR ) != NULL ) {
+			renderSystem->UploadImage( background.imageName.c_str(), black, 1, 1 );
+		}
+	}
+	background.imageName.Clear();
+	background.pixels.Clear();
+	background.width = 0;
+	background.height = 0;
+	background.restartCount = 0;
+}
+
+// Each session frame, before any GUI draws: a video restart reallocated the held
+// image empty, so put its pixels back. A loading screen can outlive one, as the
+// retained screen held over a multiplayer join does.
+static void Session_RestoreLoadingBackground( void ) {
+	sessionLoadingBackground_t &background = sessionLoadingBackground;
+	if ( background.pixels.Num() == 0 || renderSystem == NULL ||
+		renderSystem->GetVideoRestartCount() == background.restartCount ) {
+		return;
+	}
+	if ( !Session_UploadLoadingBackground() ) {
+		common->Warning( "Could not restore expanded loading background '%s' after a video restart",
+			background.imageName.c_str() );
+		Session_ReleaseLoadingBackground( true );
+		return;
+	}
+	common->DPrintf( "Expanded loading background '%s' restored after a video restart\n", background.imageName.c_str() );
+}
+
+static bool Session_PrepareExpandedLoadingBackground( const idStr &backgroundPath, idStr &imageName ) {
 	float windowAspect = 0.0f;
 	bool expandHorizontally = false;
 	bool expandVertically = false;
-	if ( !Session_GetLoadingCanvasExpansion( windowAspect, expandHorizontally, expandVertically ) ) {
+	int viewportWidth = 0;
+	int viewportHeight = 0;
+	if ( !Session_GetLoadingCanvasExpansion( windowAspect, expandHorizontally, expandVertically, viewportWidth, viewportHeight ) ||
+		renderSystem == NULL || !renderSystem->IsOpenGLRunning() ) {
 		return false;
 	}
 
@@ -1943,9 +2811,6 @@ static bool Session_PrepareExpandedLoadingBackground( const idStr &backgroundPat
 		}
 	}
 
-	generatedPath = Session_MakeExpandedLoadingBackgroundPath( mapName, outputWidth, outputHeight );
-	R_WriteTGA( generatedPath.c_str(), composite.Ptr(), outputWidth, outputHeight, false, "fs_savepath" );
-
 	R_StaticFree( centerPic );
 	if ( leftPic ) {
 		R_StaticFree( leftPic );
@@ -1960,6 +2825,63 @@ static bool Session_PrepareExpandedLoadingBackground( const idStr &backgroundPat
 		R_StaticFree( bottomPic );
 	}
 
+	idList<byte> pixels;
+	pixels.SetNum( outputWidth * outputHeight * 4 );
+	memcpy( pixels.Ptr(), composite.Ptr(), pixels.Num() );
+
+	// The picture is composed at the levelshot's resolution and held without
+	// mipmaps. Halve it, as a mip chain would, while it is at least twice the
+	// window, so drawing it minifies by less than two and stays smooth, and
+	// while it exceeds the device's texture size.
+	const int maxTextureSize = renderSystem->GetGLConfig().maxTextureSize;
+	while ( outputWidth >= 2 && outputHeight >= 2 &&
+		( ( outputWidth >= 2 * viewportWidth && outputHeight >= 2 * viewportHeight ) ||
+			( maxTextureSize > 0 && ( outputWidth > maxTextureSize || outputHeight > maxTextureSize ) ) ) ) {
+		const int halfWidth = outputWidth / 2;
+		const int halfHeight = outputHeight / 2;
+		byte *halved = R_ResampleTexture( pixels.Ptr(), outputWidth, outputHeight, halfWidth, halfHeight );
+		if ( halved == NULL ) {
+			break;
+		}
+		pixels.SetNum( halfWidth * halfHeight * 4 );
+		memcpy( pixels.Ptr(), halved, pixels.Num() );
+		R_StaticFree( halved );
+		outputWidth = halfWidth;
+		outputHeight = halfHeight;
+	}
+	if ( maxTextureSize > 0 && ( outputWidth > maxTextureSize || outputHeight > maxTextureSize ) ) {
+		common->DPrintf( "Expanded loading background for '%s' exceeds the texture size; using the source levelshot\n",
+			backgroundPath.c_str() );
+		return false;
+	}
+
+	sessionLoadingBackground_t &background = sessionLoadingBackground;
+	const idStr name = va( SESSION_LOADING_BACKGROUND_IMAGE "_%dx%d", outputWidth, outputHeight );
+	if ( background.imageName.Icmp( name ) != 0 ) {
+		Session_ReleaseLoadingBackground( true );
+	}
+	background.imageName = name;
+	background.pixels.Swap( pixels );
+	background.width = outputWidth;
+	background.height = outputHeight;
+
+	bool uploaded = Session_UploadLoadingBackground();
+	if ( !uploaded ) {
+		common->Warning( "Could not upload expanded loading background '%s'; using the source levelshot", name.c_str() );
+	} else {
+		const idMaterial *material = declManager->FindMaterial( name.c_str() );
+		if ( material == NULL || material->TestMaterialFlag( MF_DEFAULTED ) ) {
+			common->DPrintf( "Expanded loading background '%s' has no usable material; using the source levelshot\n",
+				name.c_str() );
+			uploaded = false;
+		}
+	}
+	if ( !uploaded ) {
+		Session_ReleaseLoadingBackground( true );
+		return false;
+	}
+	common->DPrintf( "Expanded loading background '%s' composed in memory from '%s'\n", name.c_str(), resolvedCenterPath.c_str() );
+	imageName = name;
 	return true;
 }
 
@@ -1995,6 +2917,7 @@ void idSessionLocal::SetMainMenuBackgroundMontageGuiVars( void ) {
 			material->SetSort( SS_GUI );
 		}
 		renderSystem->PreloadImage( resolvedPath.c_str() );
+		openQ4_UpdateInitialization();
 	}
 
 	idMaterial *maskMaterial = const_cast<idMaterial *>( declManager->FindMaterial( menuBackgroundMask ) );
@@ -2057,6 +2980,28 @@ static void Session_SetLoadingBackgroundExpansionStates( idUserInterface *gui, c
 		gui->SetStateString( imageStates[i], materialName.c_str() );
 		gui->SetStateString( backgroundStates[i], materialName.c_str() );
 	}
+}
+
+void idSessionLocal::PrimeMainMenuGuiResources( void ) {
+	static const char *fallbackLevelshot = "gfx/guis/loadscreens/generic";
+
+	if ( guiMainMenu == NULL ) {
+		return;
+	}
+
+	SetMainMenuBackgroundMontageGuiVars();
+	guiMainMenu->SetStateString( "browser_levelshot", fallbackLevelshot );
+
+	idMaterial *fallbackMaterial = const_cast<idMaterial *>( declManager->FindMaterial( fallbackLevelshot ) );
+	if ( fallbackMaterial != NULL ) {
+		fallbackMaterial->EnsureNotPurged();
+		fallbackMaterial->SetSort( SS_GUI );
+	}
+	renderSystem->PreloadImage( fallbackLevelshot );
+
+	// The GUI buffers this command when it activates. Resolve the shader during
+	// startup/level load so the first in-game menu never parses it on demand.
+	declManager->FindSound( "main_menu_gameplay" );
 }
 
 static void Session_DrawFallbackLoadingScreen() {
@@ -2165,6 +3110,39 @@ static void Session_DrawLevelshotBounds() {
 	renderSystem->SetUseUIViewportFor2D( previousUIViewportMode );
 }
 
+// A difficulty's localized name, as the retained screens show it: the names
+// the difficulty pages give, Warlord the fifth (the Arena's NIGHTMARE is
+// another ladder's).
+const char *Session_SkillName( int skill ) {
+	static const char *skills[] = { "#str_200014", "#str_200015", "#str_200016", "#str_200017", "#str_41117" };
+	return common->GetLanguageDict()->GetString( skills[ idMath::ClampInt( 0, 4, skill ) ] );
+}
+
+// The current difficulty's name, as the retained pause and loading screens
+// show it.
+static const char *Session_GetSkillName( void ) {
+	return Session_SkillName( cvarSystem->GetCVarInteger( "g_skill" ) );
+}
+
+// A play time as the retained screens show it: hours, minutes and seconds.
+idStr Session_RetainedPlayTime( int seconds ) {
+	seconds = Max( 0, seconds );
+	return va( "%d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60 );
+}
+
+// Two parts of a line the retained screens show, joined as the language
+// joins a list (#str_231533: in English the two around a middle dot);
+// either alone when the other is empty.
+idStr Session_RetainedList( const char *first, const char *second ) {
+	if ( first == NULL || first[0] == '\0' ) {
+		return second != NULL ? second : "";
+	}
+	if ( second == NULL || second[0] == '\0' ) {
+		return first;
+	}
+	return va( common->GetLanguageDict()->GetString( "#str_231533" ), first, second );
+}
+
 static const char *Session_GetLongMPGameTypeName( const char *gametype ) {
 	if ( !gametype || !gametype[ 0 ] ) {
 		return "";
@@ -2193,6 +3171,16 @@ static const char *Session_GetLongMPGameTypeName( const char *gametype ) {
 	}
 	if ( !idStr::Icmp( gametype, "DeadZone" ) ) {
 		return common->GetLocalizedString( "#str_122001" );
+	}
+	// openQ4's own modes, by the names mp/GameTypes.cpp gives them.
+	static const char *const openQ4Modes[][2] = {
+		{ "Duel", "#str_41300" }, { "Clan Arena", "#str_41301" }, { "Freeze Tag", "#str_41302" }, { "Red Rover", "#str_41303" },
+		{ "Overload", "#str_41304" }, { "Harvester", "#str_41305" }, { "Domination", "#str_41306" }, { "Attack Defend", "#str_41307" }
+	};
+	for ( int i = 0; i < static_cast<int>( sizeof( openQ4Modes ) / sizeof( openQ4Modes[0] ) ); ++i ) {
+		if ( !idStr::Icmp( gametype, openQ4Modes[i][0] ) ) {
+			return common->GetLocalizedString( openQ4Modes[i][1] );
+		}
 	}
 
 	return gametype;
@@ -2237,7 +3225,11 @@ static bool Session_IsLoadingContinueChar( int ch ) {
 	return ch >= K_SPACE;
 }
 
-static bool Session_ShouldMuteForFocus() {
+static bool Session_ShouldSilenceAudioWhenUnfocused() {
+	// in a headset the desktop window is rarely focused
+	if ( vrSystem != NULL && vrSystem->IsActive() ) {
+		return false;
+	}
 #if defined( USE_SDL3 )
 	return s_muteUnfocused.GetBool() && !Sys_SDL_IsGameWindowFocused();
 #elif defined( _WIN32 )
@@ -2270,6 +3262,7 @@ void Session_RescanSI_f( const idCmdArgs &args ) {
 	}
 }
 
+#ifndef ID_DEDICATED
 static bool Session_IsLightGridBakeMultiplayerMap( const idStr &mapName ) {
 	return idStr::Icmpn( mapName.c_str(), "mp/", 3 ) == 0;
 }
@@ -2718,7 +3711,7 @@ static void Session_BuildLightGridBakeResumeArgs( const lightGridBakeOptions_t &
 
 static void Session_ReloadLightGridBakeBatch( const lightGridBakeOptions_t &options, const idList<idStr> &mapTargets,
 	bool bakeAll, bool bakeAllMultiplayer, bool forceBake, bool autoQuit, int resumeIndex, bool useMultiplayerModule ) {
-	cvarSystem->SetCVarString( "si_gameType", useMultiplayerModule ? "dm" : "singleplayer" );
+	cvarSystem->SetCVarString( "si_gameType", useMultiplayerModule ? "deathmatch" : "singleplayer" );
 	cvarSystem->SetCVarString( "com_nextGameModule", "game" );
 
 	idCmdArgs reloadArgs;
@@ -2761,7 +3754,7 @@ static bool Session_LoadLightGridBakeMap( const idStr &mapName ) {
 			cvarSystem->SetCVarInteger( "net_serverDedicated", 0 );
 		}
 
-		cvarSystem->SetCVarString( "si_gameType", "dm" );
+		cvarSystem->SetCVarString( "si_gameType", "DM" );
 		cvarSystem->SetCVarString( "si_map", mapName.c_str() );
 
 		idCmdArgs spawnArgs;
@@ -2829,8 +3822,9 @@ static bool Session_BakeLightGridCurrentMap( const lightGridBakeOptions_t &optio
 		Session_RemoveLightGridBakeOutputsForMap( mapName );
 	}
 
-	const char *jobName = cvarSystem->GetCVarString( "si_map" );
-	return renderSystem->BakeCurrentLightGrids( options, ( jobName != NULL && jobName[ 0 ] != '\0' ) ? jobName : NULL );
+	// Console-loaded SP maps need not update the archived multiplayer si_map.
+	// Label the bake with the same active-world identity used for its outputs.
+	return renderSystem->BakeCurrentLightGrids( options, mapName.IsEmpty() ? NULL : mapName.c_str() );
 }
 
 static void Session_RunLightGridBake( const idCmdArgs &args ) {
@@ -2940,6 +3934,27 @@ Session_Map_f
 Restart the server on a different map
 ==================
 */
+static void Session_CampaignSelect_f( const idCmdArgs &args ) {
+    const bool start = args.Argc() == 3 && !idStr::Icmp( args.Argv( 2 ), "start" );
+    const bool chapters = args.Argc() == 3 && !idStr::Icmp( args.Argv( 2 ), "chapters" );
+    if ( args.Argc() < 2 || args.Argc() > 3 || ( args.Argc() == 3 && !start && !chapters ) ) {
+        common->Printf( "usage: campaignSelect quake4|awakening|arena [start|chapters]\n" ); return;
+    }
+    sessLocal.SelectCampaign( args.Argv( 1 ), start, chapters );
+}
+
+static void Session_CampaignMenu_f( const idCmdArgs &args ) {
+    if ( args.Argc() > 2 || ( args.Argc() == 2 && idStr::Icmp( args.Argv( 1 ), "campaigns" ) ) ) return;
+    sessLocal.OpenCampaignSelector( args.Argc() == 2 );
+}
+
+static void Session_CampaignList_f( const idCmdArgs &args ) {
+    const idCampaignContentInfo info = fileSystem->GetAwakeningContentInfo();
+    common->Printf( "CAMPAIGN quake4 available=1 gameDir=baseoq4 module=game_sp\n" );
+    common->Printf( "CAMPAIGN awakening present=%d available=%d gameDir=q4xbase module=game_sp missing=%s\n", info.present, info.ready, info.missing.c_str() );
+    common->Printf( "CAMPAIGN arena available=1 gameDir=baseoq4 module=game_mp active=%s\n", cvarSystem->GetCVarString( "fs_game" ) );
+}
+
 static void Session_Map_f( const idCmdArgs &args ) {
 	idStr		map, string;
 	idStr		entityFilter;
@@ -2977,6 +3992,30 @@ static void Session_Map_f( const idCmdArgs &args ) {
 
 	const bool developerMapStart = cvarSystem->GetCVarBool( "developer" );
 	sessLocal.StartNewGame( map, developerMapStart, entityFilter.c_str() );
+}
+
+/*
+==================
+Session_RestartLevel_f
+
+Restart the current single-player level from its beginning, at the current
+difficulty or the one given
+==================
+*/
+static void Session_RestartLevel_f( const idCmdArgs &args ) {
+	int skill = cvarSystem->GetCVarInteger( "g_skill" );
+	if ( args.Argc() == 2 ) {
+		const char *value = args.Argv( 1 );
+		if ( value[0] < '0' || value[0] > '4' || value[1] != '\0' ) {
+			common->Printf( "usage: restartLevel [skill 0-4]\n" );
+			return;
+		}
+		skill = value[0] - '0';
+	} else if ( args.Argc() > 2 ) {
+		common->Printf( "usage: restartLevel [skill 0-4]\n" );
+		return;
+	}
+	sessLocal.RestartLevelAtSkill( skill );
 }
 
 /*
@@ -3077,6 +4116,12 @@ static void Session_openQ4StartSingleplayer_f( const idCmdArgs &args ) {
 
 	const bool devmap = args.Argc() > 2 && atoi( args.Argv( 2 ) ) != 0;
 	const char *entityFilter = ( args.Argc() > 3 ) ? args.Argv( 3 ) : "";
+	// InitGame replays archived configuration and startup arguments during a
+	// module swap. Apply the new-game selection after that replay, before spawn.
+	if ( args.Argc() > 5 ) {
+		cvarSystem->SetCVarInteger( "g_skill", idMath::ClampInt( 0, 4, atoi( args.Argv( 4 ) ) ) );
+		cvarSystem->SetCVarBool( "g_turboMode", atoi( args.Argv( 5 ) ) != 0 );
+	}
 	sessLocal.StartNewGame( args.Argv( 1 ), devmap, entityFilter );
 }
 
@@ -3123,6 +4168,67 @@ static void Session_openQ4AssertMapState_f( const idCmdArgs &args ) {
 
 /*
 ==================
+Session_openQ4AssertMPGameplayView_f
+==================
+*/
+static void Session_openQ4AssertMPGameplayView_f( const idCmdArgs &args ) {
+	if ( !sessLocal.IsMapSpawned() || !sessLocal.IsMultiplayer() ||
+			sessLocal.GetActiveGUI() != NULL ) {
+		common->Error( "openq4_assertMPGameplayView failed: map=%d multiplayer=%d gui=%d",
+			sessLocal.IsMapSpawned() ? 1 : 0,
+			sessLocal.IsMultiplayer() ? 1 : 0,
+			sessLocal.GetActiveGUI() != NULL ? 1 : 0 );
+		return;
+	}
+
+	common->Printf( "OPENQ4_STOCK_BASELINE_MP_CLIENT_VIEW gui=0\n" );
+}
+
+/*
+==================
+Session_openQ4AssertMenuActivation_f
+==================
+*/
+static void Session_openQ4AssertMenuActivation_f( const idCmdArgs &args ) {
+	const int maxMsec = args.Argc() > 1 ? atoi( args.Argv( 1 ) ) : 50;
+	const bool gameMenuRequested = args.Argc() > 2 && idStr::Icmp( args.Argv( 2 ), "game" ) == 0;
+	if ( gameMenuRequested && args.Argc() == 4 && idStr::Icmp( args.Argv( 3 ), "reopen" ) == 0 &&
+		maxMsec > 0 && sessLocal.IsMapSpawned() && game != NULL && sessLocal.GetActiveGUI() != NULL ) {
+		// A review screen can remain open into the next warmup. Exercise the
+		// game's ordinary close handler before measuring a fresh menu opening;
+		// this is a semantic GUI action, with no injected keyboard/mouse event.
+		game->HandleGuiCommands( "close" );
+		sessLocal.SetGUI( NULL, NULL );
+	}
+	if ( maxMsec < 1 || !sessLocal.IsMapSpawned() || sessLocal.GetActiveGUI() != NULL ) {
+		common->Error( "openq4_assertMenuActivation requires active gameplay with no GUI and a positive millisecond limit" );
+		return;
+	}
+
+	const int startMsec = Sys_Milliseconds();
+	if ( gameMenuRequested ) {
+		idUserInterface *gameMenu = NULL;
+		if ( game == NULL || game->HandleESC( &gameMenu ) != ESC_GUI || gameMenu == NULL ) {
+			common->Error( "openq4_assertMenuActivation: game did not provide its in-game menu" );
+			return;
+		}
+		sessLocal.SetGUI( gameMenu, NULL );
+	} else {
+		sessLocal.StartMenu( false );
+	}
+	const int elapsedMsec = Max( 0, Sys_Milliseconds() - startMsec );
+	if ( sessLocal.GetActiveMenu() == NULL || elapsedMsec > maxMsec ) {
+		common->Error( "openq4_assertMenuActivation failed: active=%d elapsed=%dms limit=%dms",
+			sessLocal.GetActiveMenu() != NULL ? 1 : 0, elapsedMsec, maxMsec );
+		return;
+	}
+
+	common->Printf( "OPENQ4_MENU_ACTIVATION PASS elapsed=%dms limit=%dms\n", elapsedMsec, maxMsec );
+}
+#endif
+
+/*
+==================
 Sess_WritePrecache_f
 ==================
 */
@@ -3166,8 +4272,13 @@ idSessionLocal::Clear
 void idSessionLocal::Clear() {
 	
 	insideUpdateScreen = false;
+	insidePacifierUpdate = false;
+	openq4::NativeInputBeforeSessionChange();
 	insideExecuteMapChange = false;
+	stopDepth = 0;
+	preserveWipeDuringStop = false;
 
+	openq4::NativeInputBeforeSessionChange();
 	loadingSaveGame = false;
 	savegameFile = NULL;
 	savegameVersion = 0;
@@ -3186,6 +4297,7 @@ void idSessionLocal::Clear() {
 	rw = NULL;
 	sw = NULL;
 	menuSoundWorld = NULL;
+	requestedSoundWorld = NULL;
 	readDemo = NULL;
 	writeDemo = NULL;
 	renderdemoVersion = 0;
@@ -3207,13 +4319,143 @@ void idSessionLocal::Clear() {
 	renderDemoKnownDurationMS = -1;
 	renderDemoSeekTargetMS = 0;
 	renderDemoSeekDeadlineMS = 0;
+	renderDemoRecordState = RENDER_DEMO_RECORD_IDLE;
+	renderDemoRecordFile = NULL;
+	renderDemoRecordPath.Clear();
+	renderDemoRecordFrames = 0;
+	renderDemoRecordStartMsec = 0;
+	renderDemoRecordSegments.Clear();
+	renderDemoNextSegmentReason.Clear();
+	renderDemoFrameClock = false;
+	renderDemoUserCmdHz = 0;
+	renderDemoPlayHeader.Clear();
+	renderDemoPlaySegments.Clear();
+	renderDemoPlaySegment = -1;
+	renderDemoPlayMap.Clear();
+	renderDemoLevelLoadOpen = false;
 
 	syncNextGameFrame = false;
 	syncNextGameFrameAwaitingAsyncTicLog = false;
 	cinematicStateValid = false;
 	cinematicActive = false;
 	mapSpawned = false;
+	openq4::NativeInputBeforeSessionChange();
 	guiActive = NULL;
+	// uiManager owns and frees these, and an engine reload frees them with it.
+	// Init finds them again; a dedicated server's session leaves them NULL.
+	guiMainMenu = guiRestartMenu = guiGameOver = guiMsg = guiTakeNotes = guiIntro = NULL;
+	guiInGame = guiLoading = guiTest = NULL;
+	guiSystem = guiSystemParent = NULL;
+	guiSystemParentHandle = NULL;
+	systemGuiTransition = systemGuiBackEvent = false;
+	guiRetainedHome = guiRetainedTitle = guiRetainedPause = guiRetainedPauseStrogg = NULL;
+	retainedPauseStrogg = -1;
+	retainedNewestSave = 0;
+	guiRetainedReleasing = NULL;
+	retainedReleaseUntil = 0;
+	retainedSubpageFrom = NULL;
+	retainedDetailTarget = 0;
+	retainedDetailCampaign.Clear();
+	retainedSubpageDeeper = false;
+	retainedSubpageBegan = 0;
+	retainedSubpageUntil = 0;
+	retainedSubpageKind = RETAINED_SUBPAGE_CAMPAIGN;
+	retainedHomeReturning = false;
+	retainedHomeUnderMessage = false;
+	retainedJoinReturn = false;
+	guiRetainedLoad = NULL;
+	retainedPageHome = NULL;
+	retainedPagePending = NULL;
+	retainedPageAt = 0;
+	retainedPageReturn = false;
+	retainedLoadSlots.Clear();
+	retainedLoadTimes.Clear();
+	retainedLoadNames.Clear();
+	retainedLoadLocations.Clear();
+	retainedSaveGeneration = 0;
+	retainedLoadFirst = 0;
+	retainedLoadSelected = -1;
+	guiRetainedSave = NULL;
+	retainedSaveTarget.Clear();
+	guiRetainedRestart = NULL;
+	guiRetainedLoadStrogg = NULL;
+	guiRetainedSaveStrogg = NULL;
+	guiRetainedRestartStrogg = NULL;
+	guiRetainedDemos = NULL;
+	retainedModSelected = -1;
+	guiRetainedRestartMenu = NULL;
+	guiRetainedCredits = NULL;
+	guiRetainedArena = NULL;
+	guiRetainedMpPage = NULL;
+	retainedMpPageDest = 0;
+	retainedMpPageLeft = 0;
+	retainedMpPageAt = 0;
+	retainedSetupModels.Clear(); retainedSetupNames.Clear();
+	retainedSetupCvar.Clear(); retainedSetupValue.Clear(); retainedSetupLanguage.Clear();
+	retainedSetupCatalog = 0; retainedSetupFirst = 0; retainedSetupDeclCount = -1; retainedSetupRotation = 200;
+	guiRetainedSettingsPage = NULL;
+	retainedSettingsDest = 0;
+	retainedSettingsLeft = 0;
+	retainedSettingsAt = 0;
+	guiRetainedCreate = NULL;
+	retainedLevelshots.Clear();
+	retainedLevelshotsFrom = 0;
+	retainedCreateMaps.Clear();
+	retainedCreateMapFirst = 0;
+	retainedCreateMapSelected = -1;
+	retainedCreateBanGuids.Clear();
+	retainedCreateBanSelected = -1;
+	guiRetainedJoin = NULL;
+	retainedJoinServers.Clear();
+	retainedJoinFirst = 0;
+	retainedJoinAddress.Clear();
+	retainedJoinRevision = -1;
+	retainedJoinShotMap.Clear();
+	retainedJoinShot.Clear();
+	retainedJoinDetailRow = -1;
+	guiRetainedAudio = NULL;
+	retainedAudioParent = NULL;
+	retainedAudioParentHandle = NULL;
+	guiRetainedGame = NULL;
+	retainedGameParent = NULL;
+	retainedGameParentHandle = NULL;
+	guiRetainedControls = NULL;
+	retainedControlsParent = NULL;
+	retainedControlsParentHandle = NULL;
+	retainedControlsCapture = -1;
+	retainedControlsCaptured = -1;
+	retainedNotices.Clear();
+	retainedNoticesDirty = false;
+	retainedNoticesGui = NULL;
+	retainedNoticeGamepad.Clear();
+	retainedDemoRows.Clear();
+	retainedDemoFirst = 0;
+	retainedDemoSelected = -1;
+	retainedDemoFilter = 0;
+	loadGameFailure = LOADGAME_FAILURE_NONE;
+	guiRetainedEscape = guiRetainedWelcome = guiRetainedMultiplayer = NULL;
+	guiRetainedSummary = guiRetainedArenaPause = retainedMultiplayerTarget = NULL;
+	retainedMultiplayerSummary = false;
+	retainedSummaryTyping = false;
+	retainedSummaryCaret = 0;
+	retainedMultiplayerWelcome = false;
+	retainedMultiplayerUncovered = false;
+	retainedMultiplayerRevision = -1;
+	retainedMultiplayerHandoff = -1;
+	retainedMultiplayerHandoffUntil = 0;
+	retainedStock.Clear();
+	retainedHandoffUntil = 0;
+	retainedPointerX = retainedPointerY = 0.0f;
+	retainedLoadingActive = false;
+	retainedLoadingPhase = 0;
+	retainedLoadingLoaded = retainedLoadingTotal = -1;
+	retainedLoadingTip = -1;
+	retainedLoadingTipSlot = 0;
+	retainedLoadingTipAt = 0;
+	ClearRetainedLoadingHold();
+	retainedRosterCount = 0;
+	retainedRosterConnecting = 0;
+	retainedRosterKnown = false;
 	demoReturnGui = NULL;
 	demoOverlayVisible = false;
 	demoBrowserMode = true;
@@ -3226,6 +4468,7 @@ void idSessionLocal::Clear() {
 	saveGuiExpireTime = 0;
 	quickLoadConfirmTime = 0;
 	lastPacifierTime = 0;
+	lastPacifierDrawMsec = 0;
 	loadingAssetQueueActive = false;
 	loadingAssetQueueTotal = 0;
 	loadingAssetQueueLoaded = 0;
@@ -3270,6 +4513,7 @@ idSessionLocal::idSessionLocal
 ===============
 */
 idSessionLocal::idSessionLocal() {
+	openq4::NativeInputBeforeSessionChange();
 	guiInGame = guiMainMenu = guiIntro \
 		= guiRestartMenu = guiLoading = guiGameOver = guiActive \
 		= guiTest = guiMsg = guiMsgRestore = guiTakeNotes = guiDemoMenu = guiSubtitles = guiSave = NULL;
@@ -3296,28 +4540,90 @@ called on errors and game exits
 ===============
 */
 void idSessionLocal::Stop() {
-	ClearWipe();
+	StopInternal( false );
+}
 
-	idAsyncNetwork::multiViewDemo.SessionStop();
+/*
+===============
+idSessionLocal::StopPreservingWipe
 
-	// clear mapSpawned and demo playing flags
-	UnloadMap();
+Used for a completed scene-to-menu fade whose held black frame must survive
+world teardown until the destination GUI has received its reveal event.
+===============
+*/
+void idSessionLocal::StopPreservingWipe() {
+	StopInternal( true );
+}
 
-	// disconnect async client
-	idAsyncNetwork::client.DisconnectFromServer();
+/*
+===============
+idSessionLocal::StopInternal
 
-	// kill async server
-	idAsyncNetwork::server.Kill();
+idAsyncServer::Kill re-enters Stop after marking the server inactive. Preserve
+the outer stop's wipe policy across that nested call.
+===============
+*/
+void idSessionLocal::StopInternal( bool preserveWipe ) {
+	const bool outermostStop = stopDepth == 0;
+	if ( outermostStop ) {
+		preserveWipeDuringStop = preserveWipe;
+	}
+	stopDepth++;
+	const auto finishStopPolicy = [this, outermostStop]() {
+		stopDepth--;
+		if ( outermostStop ) {
+			preserveWipeDuringStop = false;
+		}
+	};
 
-	if ( sw ) {
-		sw->StopAllSounds();
+	try {
+		if ( !preserveWipeDuringStop ) {
+			ClearWipe();
+		}
+		if ( outermostStop && savegameFile != NULL ) {
+			fileSystem->CloseFile( savegameFile );
+			savegameFile = NULL;
+			openq4::NativeInputBeforeSessionChange();
+			loadingSaveGame = false;
+		}
+
+		idAsyncNetwork::multiViewDemo.SessionStop();
+
+		// clear mapSpawned and demo playing flags
+		UnloadMap();
+
+		// Leaving the game ends a campaign recording. One still waiting for its
+		// first level survives, as the title's new game may reload the game module.
+		if ( renderDemoRecordState == RENDER_DEMO_RECORD_SUSPENDED ) {
+			StopRecordingRenderDemo();
+		}
+
+		// disconnect async client
+		idAsyncNetwork::client.DisconnectFromServer();
+
+		// kill async server
+		idAsyncNetwork::server.Kill();
+
+		if ( sw ) {
+			sw->StopAllSounds();
+		}
+
+		insideUpdateScreen = false;
+		openq4::NativeInputBeforeSessionChange();
+		insideExecuteMapChange = false;
+		ClearRetainedLoadingHold();
+
+		// drop all guis
+		SetGUI( NULL, NULL );
+	}
+	catch( ... ) {
+		// A recoverable drop during MapShutdown must not poison the policy for
+		// later Stop calls after the outer exception is handled.
+		finishStopPolicy();
+		throw;
 	}
 
-	insideUpdateScreen = false;
-	insideExecuteMapChange = false;
-
-	// drop all guis
-	SetGUI( NULL, NULL );
+	finishStopPolicy();
 }
 
 /*
@@ -3326,6 +4632,7 @@ idSessionLocal::Shutdown
 ===============
 */
 void idSessionLocal::Shutdown() {
+	FinishPendingSave( true );
 	int i;
 
 	if ( aviCaptureMode ) {
@@ -3333,6 +4640,9 @@ void idSessionLocal::Shutdown() {
 	}
 
 	Stop();
+	if ( IsRenderDemoRecording() ) {
+		StopRecordingRenderDemo();
+	}
 
 	// Sound worlds must be released through soundSystem so the internal
 	// soundWorlds registry is updated before soundSystem shutdown walks it.
@@ -3365,7 +4675,11 @@ void idSessionLocal::Shutdown() {
 		uiManager->FreeListGUI( guiMainMenu_MapList );
 		guiMainMenu_MapList = NULL;
 	}
+#ifndef ID_DEDICATED
+	arenaCampaign.Shutdown();
+#endif
 	ShutdownDemoSystem();
+	Session_ReleaseLoadingBackground( false );
 
 	Clear();
 }
@@ -3377,6 +4691,25 @@ idSessionLocal::IsMultiplayer
 */
 bool	idSessionLocal::IsMultiplayer() {
 	return idAsyncNetwork::IsActive();
+}
+
+/*
+===============
+idSessionLocal::IsDedicatedServer
+
+The client's renderer starts only with net_serverDedicated 0, and SpawnServer_f
+shuts it down when the client turns into a dedicated server, so 1 without a
+device is a dedicated server. While a client converts, its device is still
+running.
+===============
+*/
+bool idSessionLocal::IsDedicatedServer() const {
+#ifdef ID_DEDICATED
+	return true;
+#else
+	return idAsyncNetwork::serverDedicated.GetInteger() == 1 &&
+		( renderSystem == NULL || !renderSystem->IsOpenGLRunning() );
+#endif
 }
 
 bool idSessionLocal::IsIAmTheDukeActive( void ) const {
@@ -3451,17 +4784,60 @@ void idSessionLocal::DrawIAmTheDukeOverlay( void ) const {
 
 /*
 ================
+sessionCaptureDrawGuard_t
+
+The wipe capture and the save preview draw outside UpdateScreen, into a render
+crop they push themselves. That is drawing code all the same. Any print inside
+it (an fs_debug file lookup, a developer DPrintf, a non-precached decl warning)
+offers PacifierUpdate a loading-screen redraw, or refresh-on-print an
+UpdateScreen. That frame's BeginFrame resets the crop stack under the capture,
+which then copies the wrong rect, and the capture's UnCrop drops the map with
+"currentRenderCrop < 1". Holding insideUpdateScreen keeps both out until the
+crop is popped, and clears it again if the draw throws.
+================
+*/
+class sessionCaptureDrawGuard_t {
+public:
+	explicit sessionCaptureDrawGuard_t( idSessionLocal &session ) :
+		session( session ), owner( !session.insideUpdateScreen ) {
+		session.insideUpdateScreen = true;
+	}
+
+	~sessionCaptureDrawGuard_t() {
+		// a capture nested in a screen update leaves the flag to that update
+		if ( owner ) {
+			session.insideUpdateScreen = false;
+		}
+	}
+
+private:
+	idSessionLocal &session;
+	bool owner;
+};
+
+/*
+================
 idSessionLocal::StartWipe
 
 Draws and captures the current state, then starts a wipe with that image
 ================
 */
 void idSessionLocal::StartWipe( const char *_wipeMaterial, bool hold ) {
-#ifdef ID_DEDICATED
-	// Dedicated servers never own a presentation surface to capture for wipes.
-	return;
-#endif
+	if ( IsDedicatedServer() ) {
+		// Dedicated servers never own a presentation surface to capture for wipes.
+		return;
+	}
 	console->Close();
+	wipeToBlack = cvarSystem->GetCVarBool( "ui_retained" ) && !idStr::Icmp( _wipeMaterial, "gfx/wipes/fade" );
+	if ( wipeToBlack ) {
+		// Keep the live menu/world at native resolution and close it to black
+		// before any assets or GUI owners are torn down. No 640x480 capture.
+		wipeFadeStarted = Sys_Milliseconds();
+		wipeFadeDuration = cvarSystem->GetCVarBool( "ui_retainedReducedMotion" ) ? 80 : 240;
+		wipeHold = hold;
+		return;
+	}
+
 	wipeMaterial = Session_FindCompatibleWipeMaterial( _wipeMaterial );
 	if ( wipeMaterial == NULL ) {
 		common->Warning( "idSessionLocal::StartWipe: could not find wipe material '%s'", _wipeMaterial != NULL ? _wipeMaterial : "<null>" );
@@ -3469,13 +4845,18 @@ void idSessionLocal::StartWipe( const char *_wipeMaterial, bool hold ) {
 		return;
 	}
 
-	// render the current screen into a texture for the wipe model
-	renderSystem->CropRenderSize( 640, 480, true );
+	{
+		// ExecuteMapChange captures while the loading screen still redraws on prints
+		sessionCaptureDrawGuard_t captureDraw( *this );
 
-	Draw();
+		// render the current screen into a texture for the wipe model
+		renderSystem->CropRenderSize( 640, 480, true );
 
-	renderSystem->CaptureRenderToImage( "_scratch");
-	renderSystem->UnCrop();
+		Draw();
+
+		renderSystem->CaptureRenderToImage( "_scratch");
+		renderSystem->UnCrop();
+	}
 
 	wipeStartTic = com_ticNumber;
 	const int wipeDurationMsec = idMath::Ftoi( com_wipeSeconds.GetFloat() * 1000.0f + 0.5f );
@@ -3489,9 +4870,29 @@ idSessionLocal::CompleteWipe
 ================
 */
 void idSessionLocal::CompleteWipe() {
-#ifdef ID_DEDICATED
-	return;
-#endif
+	if ( IsDedicatedServer() ) {
+		return;
+	}
+	if ( wipeToBlack ) {
+		bool capturedMiddle = false;
+		do {
+			Session_BeginBlockingLoadPresentationFrame();
+			UpdateScreen( true );
+			if ( !capturedMiddle && cvarSystem->GetCVarBool( "ui_retainedCaptureLoadFade" ) &&
+				 Sys_Milliseconds() - wipeFadeStarted >= wipeFadeDuration / 2 ) {
+				capturedMiddle = true;
+				cmdSystem->BufferCommandText( CMD_EXEC_NOW, "screenshot \"screenshots/loading-fade-middle.tga\"" );
+			}
+			Sys_Sleep( 1 );
+		} while ( Sys_Milliseconds() - wipeFadeStarted < wipeFadeDuration );
+		// Present the terminal black frame; the loop's previous frame may have
+		// been just short of the deadline. Loading starts only after this swap.
+		Session_BeginBlockingLoadPresentationFrame();
+		UpdateScreen( true );
+		if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) common->Printf( "RETAINED_LOAD_FADE duration=%d terminal=black\n", wipeFadeDuration );
+		if ( cvarSystem->GetCVarBool( "ui_retainedCaptureLoadFade" ) ) cmdSystem->BufferCommandText( CMD_EXEC_NOW, "screenshot \"screenshots/loading-fade-black.tga\"" );
+		return;
+	}
 	if ( com_ticNumber == 0 ) {
 		// if the async thread hasn't started, we would hang here
 		wipeStopTic = 0;
@@ -3513,11 +4914,11 @@ idSessionLocal::ShowLoadingGui
 ================
 */
 void idSessionLocal::ShowLoadingGui() {
-#ifdef ID_DEDICATED
-	// Dedicated servers have no loading GUI or initialized renderer. Map loads
-	// must continue directly instead of entering the client presentation loop.
-	return;
-#endif
+	if ( IsDedicatedServer() ) {
+		// Dedicated servers have no loading GUI or initialized renderer. Map loads
+		// must continue directly instead of entering the client presentation loop.
+		return;
+	}
 	if ( com_ticNumber == 0 ) {
 		return;
 	}
@@ -3555,6 +4956,7 @@ idSessionLocal::ClearWipe
 */
 void idSessionLocal::ClearWipe( void ) {
 	wipeMaterial = NULL;
+	wipeToBlack = false;
 	wipeHold = false;
 	wipeStopTic = 0;
 	wipeStartTic = wipeStopTic + 1;
@@ -3570,6 +4972,307 @@ static void Session_TestGUI_f( const idCmdArgs &args ) {
 }
 
 #ifndef ID_DEDICATED
+// This diagnostic exercises the same semantic browser actions as the menu.
+// It neither synthesizes input events nor accepts arbitrary console commands.
+static idStr Session_BrowserDiagnosticText( const char *source ) {
+	idStr text = source != NULL ? source : "";
+	for ( int i = 0; i < text.Length(); ++i ) {
+		const unsigned char value = static_cast<unsigned char>( text[ i ] );
+		if ( ( value < 32 && value != '\t' ) || value == 127 ) {
+			text[ i ] = ' ';
+		}
+	}
+	return text;
+}
+
+static void Session_OpenQ4Browser_f( const idCmdArgs &args ) {
+	idUserInterface *gui = session->GetActiveGUI();
+	if ( gui == NULL || gui != sessLocal.guiMainMenu || gui != sessLocal.guiActive ) {
+		common->Printf( "openq4_browser requires the active main menu\n" );
+		return;
+	}
+	const char *verb = args.Argv( 1 );
+	if ( args.Argc() == 2 && !idStr::Icmp( verb, "open" ) ) {
+		gui->HandleNamedEvent( "main_to_browser" );
+		return;
+	}
+	if ( args.Argc() == 2 && !idStr::Icmp( verb, "report" ) ) {
+		int visible = 0;
+		const int maximumRows = Min( idAsyncNetwork::client.serverList.Num(), 4096 );
+		while ( visible < maximumRows && gui->State().GetString(
+			va( "serverList_item_%d", visible ) )[ 0 ] != '\0' ) {
+			++visible;
+		}
+		idStr selectedAddress;
+		const bool selected = idAsyncNetwork::client.serverList.GetSelectedAddress( selectedAddress );
+		const int reportRows = Min( visible, 256 );
+		common->Printf( "BROWSER_STATE discovered=%d visible=%d selected=%d selected_row=%d lan=%d scan=%d truncated=%d\n",
+			idAsyncNetwork::client.serverList.Num(), visible, selected,
+			gui->State().GetInt( "serverList_sel_0", "-1" ),
+			gui->State().GetBool( "lanSet" ),
+			static_cast<int>( idAsyncNetwork::client.serverList.GetState() ), visible > reportRows );
+		for ( int i = 0; i < reportRows; ++i ) {
+			const idStr row = Session_BrowserDiagnosticText(
+				gui->State().GetString( va( "serverList_item_%d", i ) ) );
+			common->Printf( "BROWSER_ROW index=%d text=%s\n", i, row.c_str() );
+		}
+		static const char *const details[] = {
+			"browser_selected", "server_IP", "server_name", "server_map",
+			"server_gameType", "server_passworded", "browser_levelshot",
+			"loadNotice", "loadPct", "sortNotice", "filterMod", "browser_count"
+		};
+		for ( int i = 0; i < static_cast<int>( sizeof( details ) / sizeof( details[ 0 ] ) ); ++i ) {
+			const idStr value = Session_BrowserDiagnosticText( gui->State().GetString( details[ i ] ) );
+			common->Printf( "BROWSER_DETAIL key=%s value=%s\n", details[ i ], value.c_str() );
+		}
+		// The server tooltip: whether it shows, its address, and its lists'
+		// items, which the lists read until one is missing.
+		common->Printf( "BROWSER_TOOLTIP visible=%d ip=%s\n", gui->State().GetBool( "serverinfo_visible" ),
+			Session_BrowserDiagnosticText( gui->State().GetString( "server_tooltip_ip" ) ).c_str() );
+		static const char *const tooltipLists[] = { "server_tooltip_playerlist", "server_tooltip_settingslist" };
+		for ( int list = 0; list < 2; ++list ) {
+			for ( int i = 0; i < MAX_ASYNC_CLIENTS; ++i ) {
+				const idKeyValue *item = gui->State().FindKey( va( "%s_item_%d", tooltipLists[ list ], i ) );
+				if ( item == NULL ) {
+					break;
+				}
+				common->Printf( "BROWSER_TOOLTIP list=%s item=%d value=%s\n", tooltipLists[ list ], i,
+					Session_BrowserDiagnosticText( item->GetValue().c_str() ).c_str() );
+			}
+		}
+		static const char *const windows[] = {
+			"desktop::curr", "desktop::dest", "desktop::active", "desktop::blockBrowser",
+			"p_main::visible", "p_mp_browse::visible", "p_mp_browse::rect",
+			"anim_mainOut::notime", "anim_mpBrowseIn::notime"
+		};
+		for ( int i = 0; i < static_cast<int>( sizeof( windows ) / sizeof( windows[ 0 ] ) ); ++i ) {
+			idStr presentation;
+			const bool found = gui->GetPresentationValue( windows[ i ], presentation );
+			const idStr value = Session_BrowserDiagnosticText( presentation.c_str() );
+			common->Printf( "BROWSER_WINDOW key=%s found=%d value=%s\n",
+				windows[ i ], found, value.c_str() );
+		}
+		return;
+	}
+	if ( args.Argc() == 3 && !idStr::Icmp( verb, "source" ) ) {
+		if ( idStr::Icmp( args.Argv( 2 ), "lan" ) && idStr::Icmp( args.Argv( 2 ), "internet" ) ) {
+			common->Printf( "openq4_browser source requires lan or internet\n" );
+			return;
+		}
+		gui->SetStateBool( "lanSet", !idStr::Icmp( args.Argv( 2 ), "lan" ) );
+		gui->HandleNamedEvent( "showMpBrowse" );
+		gui->StateChanged( common->GetPresentationTime() );
+		return;
+	}
+	if ( args.Argc() == 3 && !idStr::Icmp( verb, "select" ) ) {
+		const char *number = args.Argv( 2 );
+		int row = -1;
+		bool valid = !idStr::Cmp( number, "-1" );
+		if ( !valid && number[ 0 ] != '\0' ) {
+			row = 0;
+			valid = true;
+			for ( int i = 0; number[ i ] != '\0'; ++i ) {
+				if ( number[ i ] < '0' || number[ i ] > '9' || row > 409 ) {
+					valid = false;
+					break;
+				}
+				row = row * 10 + number[ i ] - '0';
+			}
+		}
+		if ( !valid || row >= 4096 || ( row >= 0 &&
+			( row >= idAsyncNetwork::client.serverList.Num() ||
+			  gui->State().GetString( va( "serverList_item_%d", row ) )[ 0 ] == '\0' ) ) ) {
+			common->Printf( "openq4_browser select requires an existing visible row or -1\n" );
+			return;
+		}
+		gui->SetStateInt( "serverList_sel_0", row );
+		idAsyncNetwork::client.serverList.GUIUpdateSelected();
+		gui->StateChanged( common->GetPresentationTime() );
+		return;
+	}
+	if ( args.Argc() == 3 && !idStr::Icmp( verb, "hover" ) ) {
+		// The server tooltip without a pointer: a visible row treated as the
+		// hovered one, or -1 to follow the pointer again.
+		const char *number = args.Argv( 2 );
+		int row = -1;
+		bool valid = !idStr::Cmp( number, "-1" );
+		if ( !valid && number[ 0 ] != '\0' ) {
+			row = 0;
+			valid = true;
+			for ( int i = 0; number[ i ] != '\0'; ++i ) {
+				if ( number[ i ] < '0' || number[ i ] > '9' || row > 409 ) {
+					valid = false;
+					break;
+				}
+				row = row * 10 + number[ i ] - '0';
+			}
+		}
+		if ( !valid || row >= 4096 ) {
+			common->Printf( "openq4_browser hover requires a visible row or -1\n" );
+			return;
+		}
+		idAsyncNetwork::client.serverList.SetHoverOverride( row );
+		return;
+	}
+	if ( args.Argc() == 3 && !idStr::Icmp( verb, "action" ) ) {
+		static const char *const actions[] = {
+			"InitServerBrowser", "updateServers", "refreshServers", "FilterServers",
+			"click_serverList", "connect", "toggleFavorite", "sortFavorite",
+			"sortServerName", "sortPlayers", "sortPing", "sortGameType", "sortMap",
+			"sortGame", "sortLocked", "sortDed", "sortPB", "sortRepeater",
+			"server_clearSort", "filterByNextMod", "filterByPrevMod", "updateFilterByMod"
+		};
+		for ( int i = 0; i < static_cast<int>( sizeof( actions ) / sizeof( actions[ 0 ] ) ); ++i ) {
+			if ( !idStr::Icmp( args.Argv( 2 ), actions[ i ] ) ) {
+				sessLocal.HandleMainMenuCommands( actions[ i ] );
+				return;
+			}
+		}
+		common->Printf( "openq4_browser action is not a supported browser operation\n" );
+		return;
+	}
+	common->Printf( "usage: openq4_browser open | report | source <lan|internet> | select <visible-row|-1> | hover <visible-row|-1> | action <browser-operation>\n" );
+}
+
+static void Session_OpenQ4GuiGet_f( const idCmdArgs &args ) {
+	idUserInterface *gui = session->GetActiveGUI();
+	if ( args.Argc() != 2 || gui == NULL ) {
+		common->Printf( "usage: openq4_guiGet <window::variable> with an active GUI\n" );
+		return;
+	}
+	idStr value;
+	if ( !gui->GetPresentationValue( args.Argv( 1 ), value ) ) {
+		common->Printf( "openq4_guiGet: unknown GUI variable\n" );
+		return;
+	}
+	common->Printf( "GUI_VALUE %s=%s\n", args.Argv( 1 ), value.c_str() );
+}
+
+// Runs a classic GUI window's onAction (or onBackAction with "back") and
+// dispatches the command it issues, as a click on the window would, so a
+// harness can drive a menu without device input.
+static void Session_OpenQ4GuiAction_f( const idCmdArgs &args ) {
+	idUserInterface *gui = session->GetActiveGUI();
+	const bool back = args.Argc() == 3 && !idStr::Icmp( args.Argv( 2 ), "back" );
+	if ( gui == NULL || ( args.Argc() != 2 && !back ) ) {
+		common->Printf( "usage: openq4_guiAction <window> [back] with an active classic GUI\n" );
+		return;
+	}
+	idStr command;
+	if ( !UI_RunLegacyWindowAction( gui, args.Argv( 1 ), back, command ) ) {
+		common->Printf( "openq4_guiAction: %s has no reachable %s\n", args.Argv( 1 ), back ? "onBackAction" : "onAction" );
+		return;
+	}
+	common->Printf( "GUI_ACTION %s%s cmd=%s\n", args.Argv( 1 ), back ? " back" : "", command.c_str() );
+	if ( command.Length() ) {
+		sessLocal.DispatchCommand( gui, command.c_str() );
+	}
+}
+
+static void Session_RetainedGui_f( const idCmdArgs &args ) {
+#ifndef ID_DEDICATED
+	// While a retained home screen covers the legacy menu, or the multiplayer
+	// card the game's menu, it is the GUI that receives input, so the semantic
+	// diagnostics address it.
+	idUserInterface* gui = sessLocal.GetActiveGUI();
+	if ( sessLocal.guiRetainedHome != NULL && gui == sessLocal.guiMainMenu ) {
+		gui = sessLocal.guiRetainedHome;
+	} else if ( sessLocal.RetainedMultiplayerCovers() ) {
+		gui = sessLocal.guiRetainedMultiplayer;
+	}
+	// The right stick held at x,y for the given milliseconds: the session turns
+	// Player Setup's preview here, and the view scrolls its detail area below.
+	if ( args.Argc() == 5 && !idStr::Cmp( args.Argv( 1 ), "stick" ) ) {
+		const bool turned = sessLocal.TurnRetainedPlayerSetup( gui, atof( args.Argv( 2 ) ), atof( args.Argv( 4 ) ) * 0.001f );
+		common->Printf( "RETAINED_GUI_STICK turned=%d rotation=%.2f\n", turned ? 1 : 0, sessLocal.retainedSetupRotation );
+	}
+	if ( UI_RetainedDiagnostic( gui, args ) ) {
+		sessLocal.DispatchCommand( gui, "openq4-retained-actions" );
+		return;
+	}
+#endif
+	common->Printf( "openq4_retainedGui: requires a retained test/active GUI and report | inspect <id> | textfit <id> <text> | widget <id> | focus <id> | menu <action> <0|1> | stick <x> <y> <msec> | number <begin|replace|select|preedit|input|undo|redo|commit|keep|reload|cancel> <id> [text or offsets] | state <id> <value> | pending <key> <value> | lines <key> <line> [line ...] | presentation <alias> <value> <override:0|1> | event <name> | trigger | update | save | restore\n" );
+}
+
+// The summary card's chat field without device input: "<text>" types it with
+// the caret at its end, "caret <n>" moves the caret, "stop" stops typing and
+// keeps the entry, "send" sends it through the game's chatmessage.
+static void Session_SummaryChat_f( const idCmdArgs &args ) {
+#ifndef ID_DEDICATED
+	if ( !sessLocal.RetainedSummaryCovers() || args.Argc() < 2 ) {
+		common->Printf( "usage: openq4_summaryChat <text> | caret <n> | stop | send (while the summary card covers the match summary)\n" );
+		return;
+	}
+	idUserInterface *summary = sessLocal.GetActiveGUI();
+	if ( !idStr::Icmp( args.Argv( 1 ), "stop" ) ) {
+		sessLocal.EndRetainedSummaryChat( false );
+	} else if ( !idStr::Icmp( args.Argv( 1 ), "send" ) ) {
+		sessLocal.DispatchCommand( summary, "chatmessage" );
+		sessLocal.retainedSummaryCaret = 0;
+		sessLocal.PublishRetainedSummaryChat();
+	} else if ( !idStr::Icmp( args.Argv( 1 ), "caret" ) && args.Argc() == 3 ) {
+		sessLocal.BeginRetainedSummaryChat( false );
+		sessLocal.retainedSummaryCaret = atoi( args.Argv( 2 ) );
+		sessLocal.PublishRetainedSummaryChat();
+	} else {
+		sessLocal.BeginRetainedSummaryChat( false );
+		idStr text = args.Args( 1, -1 );
+		text = text.Left( idSessionLocal::RETAINED_SUMMARY_CHAT_LIMIT );
+		summary->SetStateString( "chattext", text.c_str() );
+		sessLocal.retainedSummaryCaret = text.Length();
+		sessLocal.PublishRetainedSummaryChat();
+	}
+	common->Printf( "SUMMARY_CHAT typing=%d entry=\"%s\" caret=%d\n", sessLocal.retainedSummaryTyping ? 1 : 0,
+		summary->State().GetString( "chattext" ), sessLocal.retainedSummaryCaret );
+#endif
+}
+
+static void Session_SystemSettings_f( const idCmdArgs &args ) {
+	if ( args.Argc() == 2 ) {
+		if ( !idStr::Icmp( args.Argv( 1 ), "open" ) ) {
+			common->Printf( "OPENQ4_SYSTEM operation=open result=%d\n", sessLocal.OpenSystemSettings() ? 1 : 0 );
+			sessLocal.ReportSystemSettings();
+			return;
+		}
+		if ( !idStr::Icmp( args.Argv( 1 ), "back" ) ) {
+			common->Printf( "OPENQ4_SYSTEM operation=back result=%d\n", sessLocal.ReturnSystemSettings() ? 1 : 0 );
+			sessLocal.ReportSystemSettings();
+			return;
+		}
+		if ( !idStr::Icmp( args.Argv( 1 ), "report" ) ) {
+			sessLocal.ReportSystemSettings();
+			return;
+		}
+	}
+	common->Printf( "usage: openq4_system open | report | back (requires ui_retainedSystem 1, or ui_retained 1 once every stock setting works on the retained page, and the normal main menu)\n" );
+}
+
+// Reports the ui_retained gate, the retained screen presenting now and the
+// number of live retained views; with the gate off that number stays zero.
+static void Session_RetainedStatus_f( const idCmdArgs & ) {
+	sessLocal.ReportRetainedScreens();
+}
+
+static void Session_OpenQ4GuiSet_f( const idCmdArgs &args ) {
+	idUserInterface *gui = session->GetActiveGUI();
+	if ( args.Argc() != 3 || gui == NULL ) {
+		common->Printf( "usage: openq4_guiSet <window::variable|gui::key> <value> with an active GUI\n" );
+		return;
+	}
+	// gui::<key> is the GUI's own state, a stock list's selection
+	// (<list>_sel_0) among it.
+	if ( !idStr::Icmpn( args.Argv( 1 ), "gui::", 5 ) && args.Argv( 1 )[5] != '\0' ) {
+		gui->SetStateString( args.Argv( 1 ) + 5, args.Argv( 2 ) );
+		gui->StateChanged( common->GetPresentationTime() );
+		return;
+	}
+	if ( !gui->SetPresentationValue( args.Argv( 1 ), args.Argv( 2 ) ) ) {
+		common->Printf( "openq4_guiSet: unknown GUI variable\n" );
+		return;
+	}
+	gui->StateChanged( common->GetPresentationTime() );
+}
+
 static void Session_GuiEvent_f( const idCmdArgs &args ) {
 	if ( args.Argc() < 2 ) {
 		return;
@@ -3586,6 +5289,7 @@ static void Session_GuiEvent_f( const idCmdArgs &args ) {
 	}
 
 	activeGui->HandleNamedEvent( eventName );
+	sessLocal.PumpApplicationActions( activeGui );
 }
 #endif
 
@@ -3595,10 +5299,27 @@ idSessionLocal::TestGUI
 ================
 */
 void idSessionLocal::TestGUI( const char *guiName ) {
-	if ( guiName && *guiName ) {
-		guiTest = uiManager->FindGui( guiName, true, false, true );
-	} else {
-		guiTest = NULL;
+	// The name can point into the current test instance. Stage a distinct view
+	// before releasing it, and retain the live test if replacement fails.
+	const idStr path( guiName != NULL ? guiName : "" );
+	idUserInterface *next = NULL;
+	if ( !path.IsEmpty() ) {
+		next = uiManager->FindGui( path, true, true, false );
+		if ( next == NULL ) { return; }
+	}
+	idUserInterface *previous = guiTest;
+	openq4::NativeInputBeforeSessionChange();
+	guiTest = NULL;
+	if ( previous != NULL && previous != guiActive ) {
+		previous->Activate( false, common->GetPresentationTime() );
+		PumpApplicationActions( previous );
+		uiManager->DeAlloc( previous );
+	}
+	openq4::NativeInputBeforeSessionChange();
+	guiTest = next;
+	if ( guiTest != NULL ) {
+		guiTest->Activate( true, common->GetPresentationTime() );
+		PumpApplicationActions( guiTest );
 	}
 }
 
@@ -3636,6 +5357,7 @@ static void Session_DemoShot_f( const idCmdArgs &args ) {
 	}
 }
 
+#ifndef ID_DEDICATED
 /*
 ================
 Session_RecordDemo_f
@@ -3769,6 +5491,7 @@ Session_TimeCmdDemo_f
 static void Session_TimeCmdDemo_f( const idCmdArgs &args ) {
 	sessLocal.TimeCmdDemo( args.Argv(1) );
 }
+#endif
 
 /*
 ================
@@ -3776,10 +5499,22 @@ Session_Disconnect_f
 ================
 */
 static void Session_Disconnect_f( const idCmdArgs &args ) {
+	// An Arena match left during its end-of-match ceremony was already decided:
+	// record and report that result, as skipping the ceremony would.
+	if ( arenaCampaign.FinishDecidedResult() ) {
+		return;
+	}
+	// An Arena match left part way through returns to its own browser with a
+	// report, not to the title screen. Read the token before AbortMatch clears it.
+	const int arenaToken = arenaCampaign.ActiveMatchToken();
+	arenaCampaign.AbortMatch();
 	sessLocal.Stop();
 	sessLocal.StartMenu();
 	if ( soundSystem ) {
 		soundSystem->SetMute( false );
+	}
+	if ( arenaToken != 0 ) {
+		arenaCampaign.ReportAbandoned( arenaToken );
 	}
 }
 
@@ -3801,6 +5536,7 @@ static void Session_EndOfDemo_f( const idCmdArgs &args ) {
 }
 #endif
 
+#ifndef ID_DEDICATED
 /*
 ================
 Session_ExitCmdDemo_f
@@ -3815,6 +5551,7 @@ static void Session_ExitCmdDemo_f( const idCmdArgs &args ) {
 	common->Printf( "Command demo exited at logIndex %i\n", sessLocal.logIndex );
 	sessLocal.cmdDemoFile = NULL;
 }
+#endif
 
 /*
 ================
@@ -3822,7 +5559,7 @@ idSessionLocal::StartRecordingRenderDemo
 ================
 */
 void idSessionLocal::StartRecordingRenderDemo( const char *demoName ) {
-	if ( writeDemo ) {
+	if ( IsRenderDemoRecording() ) {
 		// allow it to act like a toggle
 		StopRecordingRenderDemo();
 		return;
@@ -3832,44 +5569,144 @@ void idSessionLocal::StartRecordingRenderDemo( const char *demoName ) {
 		common->Printf( "idSessionLocal::StartRecordingRenderDemo: no name specified\n" );
 		return;
 	}
-
-	console->Close();
-
-	writeDemo = new idDemoFile;
-	if ( !writeDemo->OpenForWriting( demoName ) ) {
-		common->Printf( "error opening %s\n", demoName );
-		delete writeDemo;
-		writeDemo = NULL;
+	if ( IsDedicatedServer() ) {
+		common->Printf( "Dedicated servers cannot record render demos.\n" );
+		return;
+	}
+	if ( readDemo != NULL || cmdDemoFile != NULL ) {
+		common->Printf( "Stop demo playback before recording a demo.\n" );
 		return;
 	}
 
-	common->Printf( "recording to %s\n", writeDemo->GetName() );
+	console->Close();
 
-	writeDemo->WriteInt( DS_VERSION );
-	writeDemo->WriteInt( OPENQ4_RENDERDEMO_CURRENT_VERSION );
+	renderDemoRecordPath = demoName;
+	renderDemoRecordFrames = 0;
+	renderDemoRecordStartMsec = Sys_Milliseconds();
+	renderDemoRecordSegments.Clear();
+	renderDemoNextSegmentReason.Clear();
 
-	// if we are in a map already, dump the current state
-	sw->StartWritingDemo( writeDemo );
-	rw->StartWritingDemo( writeDemo );
+	if ( mapSpawned && !insideExecuteMapChange ) {
+		// if we are in a map already, dump the current state
+		BeginRenderDemoSegment( "start" );
+	} else {
+		// From the title or between levels: the next single-player level starts
+		// the recording, so a campaign can be recorded from its first frame. The
+		// file opens with that level, so nothing is left behind if none comes.
+		renderDemoRecordState = RENDER_DEMO_RECORD_ARMED;
+		renderDemoNextSegmentReason = "start";
+		common->Printf( "will record to %s once the next level loads\n", renderDemoRecordPath.c_str() );
+	}
+}
+
+/*
+================
+idSessionLocal::OpenRenderDemoRecordFile
+
+Opens the recording's file with its first level: the stream version and the
+header that tells playback which content to load and how long a frame is.
+================
+*/
+bool idSessionLocal::OpenRenderDemoRecordFile() {
+	renderDemoRecordFile = new idDemoFile;
+	if ( !renderDemoRecordFile->OpenForWriting( renderDemoRecordPath.c_str() ) ) {
+		common->Printf( "error opening %s\n", renderDemoRecordPath.c_str() );
+		delete renderDemoRecordFile;
+		renderDemoRecordFile = NULL;
+		return false;
+	}
+
+	renderDemoRecordFile->WriteInt( DS_VERSION );
+	renderDemoRecordFile->WriteInt( OPENQ4_RENDERDEMO_CURRENT_VERSION );
+
+	// What playback needs to find the right content and keep time across levels.
+	idDict header;
+	header.Set( "game", fileSystem->GetActiveGameDir() );
+	header.Set( "campaign", !idStr::Icmp( fileSystem->GetActiveGameDir(), "q4xbase" ) ? "awakening" : "quake4" );
+	header.Set( "mode", idAsyncNetwork::IsActive() ? "multiplayer" : "singleplayer" );
+	header.SetInt( "userCmdHz", common->GetUserCmdHz() );
+	header.SetInt( "skill", cvarSystem->GetCVarInteger( "g_skill" ) );
+	header.Set( "build", ENGINE_VERSION );
+	renderDemoRecordFile->WriteInt( DS_SESSION );
+	renderDemoRecordFile->WriteInt( DSC_HEADER );
+	renderDemoRecordFile->WriteDict( header );
+
+	common->Printf( "recording to %s\n", renderDemoRecordFile->GetName() );
+	return true;
 }
 
 /*
 ================
 idSessionLocal::StopRecordingRenderDemo
+
+Ends a recording cleanly: the stream's DSC_END record, then the raw summary
+the demo library reads. A recording that never reached a level holds no
+frames, so its file is removed instead of left unplayable.
 ================
 */
 void idSessionLocal::StopRecordingRenderDemo() {
-	if ( !writeDemo ) {
+	if ( !IsRenderDemoRecording() ) {
 		common->Printf( "idSessionLocal::StopRecordingRenderDemo: not recording\n" );
 		return;
 	}
-	sw->StopWritingDemo();
-	rw->StopWritingDemo();
-
-	writeDemo->Close();
-	common->Printf( "stopped recording %s.\n", writeDemo->GetName() );
-	delete writeDemo;
+	if ( renderDemoRecordFile == NULL ) {
+		// still armed: no level began, so no file was ever opened
+		common->Printf( "cancelled recording %s before any level loaded.\n", renderDemoRecordPath.c_str() );
+		renderDemoRecordState = RENDER_DEMO_RECORD_IDLE;
+		renderDemoRecordPath.Clear();
+		renderDemoNextSegmentReason.Clear();
+		renderDemoRecordSegments.Clear();
+		renderDemoRecordFrames = 0;
+		return;
+	}
+	if ( renderDemoRecordState == RENDER_DEMO_RECORD_RECORDING ) {
+		sw->StopWritingDemo();
+		rw->StopWritingDemo();
+	}
 	writeDemo = NULL;
+	renderDemoRecordState = RENDER_DEMO_RECORD_IDLE;
+
+	idDemoFile *file = renderDemoRecordFile;
+	renderDemoRecordFile = NULL;
+	const idStr path = renderDemoRecordPath;
+	renderDemoRecordPath.Clear();
+	renderDemoNextSegmentReason.Clear();
+
+	if ( renderDemoRecordSegments.Num() == 0 || renderDemoRecordFrames <= 0 ) {
+		file->Close();
+		delete file;
+		fileSystem->RemoveFile( path.c_str() );
+		renderDemoRecordSegments.Clear();
+		common->Printf( "stopped recording %s: no level was recorded, so the file was removed.\n", path.c_str() );
+		return;
+	}
+
+	idDict end;
+	end.SetInt( "frames", renderDemoRecordFrames );
+	end.SetInt( "segments", renderDemoRecordSegments.Num() );
+	file->WriteInt( DS_SESSION );
+	file->WriteInt( DSC_END );
+	file->WriteDict( end );
+
+	idDict summary;
+	summary.SetInt( "version", OPENQ4_RENDERDEMO_CURRENT_VERSION );
+	summary.SetInt( "frames", renderDemoRecordFrames );
+	summary.SetInt( "userCmdHz", common->GetUserCmdHz() );
+	summary.SetInt( "segments", renderDemoRecordSegments.Num() );
+	summary.Set( "game", fileSystem->GetActiveGameDir() );
+	for ( int i = 0; i < renderDemoRecordSegments.Num(); i++ ) {
+		const renderDemoSegment_t &segment = renderDemoRecordSegments[i];
+		summary.Set( va( "segment%d", i ), va( "%d %s %s %s", segment.startFrame, segment.reason.c_str(),
+			segment.map.c_str(), segment.entityFilter.IsEmpty() ? "-" : segment.entityFilter.c_str() ) );
+	}
+	const bool summarized = file->CloseWithTrailer( summary );
+	delete file;
+	common->Printf( "stopped recording %s: %d frames, %d s over %d segment%s%s.\n", path.c_str(),
+		renderDemoRecordFrames, Session_RenderDemoFramesToMS( renderDemoRecordFrames, common->GetUserCmdHz() ) / 1000,
+		renderDemoRecordSegments.Num(), renderDemoRecordSegments.Num() == 1 ? "" : "s",
+		summarized ? "" : "; its summary could not be written" );
+	renderDemoRecordSegments.Clear();
+	renderDemoRecordFrames = 0;
 }
 
 /*
@@ -3896,9 +5733,14 @@ void idSessionLocal::StopPlayingRenderDemo() {
 	sw->StopAllSounds();
 	SetPlayingSoundWorld( menuSoundWorld );
 
-	common->Printf( "stopped playing %s.\n", readDemo->GetName() );
+	// the file is already closed, so name it from the session
+	common->Printf( "stopped playing %s.\n", activeRenderDemoName.c_str() );
 	delete readDemo;
 	readDemo = NULL;
+	CloseRenderDemoLevelLoad();
+	renderDemoFrameClock = false;
+	renderDemoPlaySegments.Clear();
+	renderDemoPlaySegment = -1;
 	activeRenderDemoName.Clear();
 	renderDemoPaused = false;
 	renderDemoSeeking = false;
@@ -3953,12 +5795,30 @@ idSessionLocal::StartPlayingRenderDemo
 ================
 */
 void idSessionLocal::StartPlayingRenderDemo( idStr demoName ) {
+	if ( IsDedicatedServer() ) {
+		// Nothing would show it, and the playback stops the server.
+		common->Printf( "Dedicated servers cannot play demos.\n" );
+		return;
+	}
 	if ( !demoName[0] ) {
 		common->Printf( "idSessionLocal::StartPlayingRenderDemo: no name specified\n" );
 		return;
 	}
 	demoName.DefaultFileExtension( ".demo" );
-	const int cachedDuration =
+
+	// A campaign demo needs the content of the campaign it was recorded in;
+	// refuse before tearing down whatever is running.
+	idStr refusal;
+	if ( !Session_RenderDemoContentMatches( demoName.c_str(), refusal ) ) {
+		common->Warning( "Render demo '%s' cannot play here: %s", demoName.c_str(), refusal.c_str() );
+		return;
+	}
+	if ( IsRenderDemoRecording() ) {
+		// One file cannot be recorded while another plays into the same worlds.
+		StopRecordingRenderDemo();
+	}
+
+	int cachedDuration =
 		!renderDemoDurationName.IsEmpty() && !renderDemoDurationName.Icmp( demoName )
 			? renderDemoKnownDurationMS : -1;
 	const bool restoreDemoMenu = guiDemoMenu != NULL && guiActive == guiDemoMenu;
@@ -3993,6 +5853,12 @@ void idSessionLocal::StartPlayingRenderDemo( idStr demoName ) {
 		return;
 	}
 	activeRenderDemoName = demoName;
+	// A campaign demo's summary gives its duration and level starts up front.
+	ResetRenderDemoPlaybackSession();
+	if ( renderDemoUserCmdHz > 0 && renderDemoPlayHeader.GetInt( "frames" ) > 0 ) {
+		cachedDuration = RenderDemoFramesToMS( renderDemoPlayHeader.GetInt( "frames" ) - 1 );
+		renderDemoDurationName = demoName;
+	}
 	renderDemoPaused = false;
 	renderDemoSeekRestartPending = false;
 	renderDemoSeekRestartPresentationPending = false;
@@ -4012,8 +5878,10 @@ void idSessionLocal::StartPlayingRenderDemo( idStr demoName ) {
 		}
 	}
 
+	openq4::NativeInputBeforeSessionChange();
 	insideExecuteMapChange = true;
 	UpdateScreen();
+	openq4::NativeInputBeforeSessionChange();
 	insideExecuteMapChange = false;
 	guiLoading->SetStateString( "demo", "" );
 
@@ -4044,6 +5912,9 @@ void idSessionLocal::StartPlayingRenderDemo( idStr demoName ) {
 	lastDemoTic = -1;
 	timeDemoStartTime = Sys_Milliseconds();
 	if ( restoreDemoMenu && guiDemoMenu != NULL ) {
+		// The menu chooses its visual mode in onActivate, so publish the current
+		// playback state before the synchronous SetGUI activation.
+		UpdateDemoMenuGui();
 		SetGUI( guiDemoMenu, NULL );
 		UpdateDemoMenuGui();
 	}
@@ -4068,8 +5939,10 @@ void idSessionLocal::TimeRenderDemo( const char *demoName, bool twice ) {
 		guiLoading->SetStateString( "demo", common->GetLanguageDict()->GetString( "#str_04852" ) );
 		guiLoading->StateChanged( common->GetPresentationTime() );
 		while ( readDemo ) {
+			openq4::NativeInputBeforeSessionChange();
 			insideExecuteMapChange = true;
 			UpdateScreen();
+			openq4::NativeInputBeforeSessionChange();
 			insideExecuteMapChange = false;
 			AdvanceRenderDemo( true );
 		}
@@ -4230,7 +6103,14 @@ void idSessionLocal::CompressDemoFile( const char *scheme, const char *demoName 
 	}
 
 	demoread.Close();
-	demowrite.Close();
+	// A campaign demo's summary sits outside its compressed stream; carry it
+	// over so the library still describes the recompressed copy.
+	idDict summary;
+	if ( idDemoFile::ReadTrailer( fullDemoName.c_str(), summary ) ) {
+		demowrite.CloseWithTrailer( summary );
+	} else {
+		demowrite.Close();
+	}
 
 	cvarSystem->SetCVarBool( "com_preloadDemos", savedPreload );
 	cvarSystem->SetCVarInteger("com_compressDemos", savedCompression);
@@ -4251,6 +6131,10 @@ void idSessionLocal::StartNewGame( const char *mapName, bool devmap, const char 
 	common->Printf( "Dedicated servers cannot start singleplayer games.\n" );
 	return;
 #else
+	if ( IsDedicatedServer() ) {
+		common->Printf( "Dedicated servers cannot start singleplayer games.\n" );
+		return;
+	}
 	idStr normalizedMapName;
 	idStr normalizedEntityFilter;
 	Session_NormalizeMapPathAndEntityFilter( mapName, entityFilter, normalizedMapName, normalizedEntityFilter );
@@ -4275,9 +6159,9 @@ void idSessionLocal::StartNewGame( const char *mapName, bool devmap, const char 
 		reloadArgs.AppendArg( "openq4_startSingleplayer" );
 		reloadArgs.AppendArg( normalizedMapName.c_str() );
 		reloadArgs.AppendArg( devmap ? "1" : "0" );
-		if ( normalizedEntityFilter.Length() > 0 ) {
-			reloadArgs.AppendArg( normalizedEntityFilter.c_str() );
-		}
+		reloadArgs.AppendArg( normalizedEntityFilter.c_str() );
+		reloadArgs.AppendArg( va( "%d", cvarSystem->GetCVarInteger( "g_skill" ) ) );
+		reloadArgs.AppendArg( cvarSystem->GetCVarBool( "g_turboMode" ) ? "1" : "0" );
 		cmdSystem->SetupReloadGameModule( reloadArgs );
 		return;
 	}
@@ -4323,6 +6207,104 @@ idStr idSessionLocal::GetAutoSaveName( const char *mapName ) const {
 	return va( "Autosave %s", mapName );
 }
 
+#ifndef ID_DEDICATED
+/*
+===============
+Session_ReadSaveGameLoadout
+
+Reads only a savegame's header: the loadout each player carried when it was
+written. Fails unless the save belongs to expectedMap.
+===============
+*/
+static bool Session_ReadSaveGameLoadout( const idStr &savePath, const char *expectedMap, idDict loadout[MAX_ASYNC_CLIENTS] ) {
+	const idStr game = cvarSystem->GetCVarString( "fs_game" );
+	idFile *file = fileSystem->OpenFileRead( savePath, true, game.Length() ? game.c_str() : NULL );
+	if ( file == NULL ) {
+		return false;
+	}
+
+	idStr gameName, saveMap, entityFilter;
+	int version = 0;
+	bool valid = Session_ReadSaveGameString( file, gameName, MAX_STRING_CHARS, "game name", savePath.c_str() ) &&
+		Session_IsSupportedSaveGameName( gameName ) &&
+		Session_ReadSaveGameInt( file, version, "version", savePath.c_str() ) &&
+		Session_IsCompatibleSaveGameVersion( version ) &&
+		Session_ReadSaveGameString( file, saveMap, MAX_STRING_CHARS, "map name", savePath.c_str() );
+	if ( valid && Session_SaveGameHeaderUsesEntityFilter( gameName ) ) {
+		valid = Session_ReadSaveGameString( file, entityFilter, MAX_STRING_CHARS, "entity filter", savePath.c_str() );
+	}
+	for ( int i = 0; valid && i < MAX_ASYNC_CLIENTS; i++ ) {
+		valid = Session_ReadSaveGameDict( file, loadout[i], va( "persistent player info %d", i ), savePath.c_str() );
+	}
+	fileSystem->CloseFile( file );
+
+	if ( valid ) {
+		idStr normalizedSaveMap, normalizedExpectedMap, unusedFilter;
+		Session_NormalizeMapPathAndEntityFilter( saveMap.c_str(), "", normalizedSaveMap, unusedFilter, false );
+		Session_NormalizeMapPathAndEntityFilter( expectedMap, "", normalizedExpectedMap, unusedFilter, false );
+		valid = normalizedSaveMap.Icmp( normalizedExpectedMap ) == 0;
+	}
+	return valid;
+}
+#endif
+
+/*
+===============
+idSessionLocal::RestartLevelAtSkill
+
+Restarts the running single-player level from its beginning at a difficulty.
+Loading a save would bring back the difficulty it was written with, and a map
+picks its enemies, items and their health as it spawns, so only a fresh spawn
+gives a new difficulty its full effect. The player gets back the loadout they
+entered the level with, read from the level's start autosave - the slot the
+death screen's Restart loads. Without one, the loadout from the last save or
+level start is kept.
+===============
+*/
+bool idSessionLocal::RestartLevelAtSkill( int skill ) {
+#ifdef ID_DEDICATED
+	common->Printf( "Dedicated servers cannot restart single-player levels.\n" );
+	return false;
+#else
+	if ( !mapSpawned || IsMultiplayer() || IsDemoPlaybackActive() ) {
+		common->Printf( "restartLevel: only a running single-player level can be restarted\n" );
+		return false;
+	}
+	const idStr mapName = mapSpawnData.serverInfo.GetString( "si_map" );
+	if ( mapName.IsEmpty() ) {
+		common->Printf( "restartLevel: no current map\n" );
+		return false;
+	}
+	skill = idMath::ClampInt( 0, 4, skill );
+
+	idStr autoSave = GetAutoSaveName( mapName.c_str() );
+	ScrubSaveGameFileName( autoSave );
+	autoSave.SetFileExtension( ".save" );
+	const idStr autoSavePath = idStr( "savegames/" ) + autoSave;
+	idDict loadout[MAX_ASYNC_CLIENTS];
+	if ( Session_ReadSaveGameLoadout( autoSavePath, mapName.c_str(), loadout ) ) {
+		for ( int i = 0; i < MAX_ASYNC_CLIENTS; i++ ) {
+			mapSpawnData.persistentPlayerInfo[i] = loadout[i];
+		}
+		common->Printf( "restartLevel: %s at skill %d with the loadout from %s\n", mapName.c_str(), skill, autoSavePath.c_str() );
+	} else {
+		common->Printf( "restartLevel: %s at skill %d; no usable %s, so the loadout from the last save or level start is kept\n",
+			mapName.c_str(), skill, autoSavePath.c_str() );
+	}
+
+	cvarSystem->SetCVarInteger( "g_skill", skill );
+	// Reloading the same map keeps lastCheckPoint, and a checkpoint written
+	// before now holds the old difficulty. Dying should reload the fresh start
+	// autosave instead.
+	lastCheckPoint = -1;
+	if ( renderDemoRecordState == RENDER_DEMO_RECORD_RECORDING ) {
+		renderDemoNextSegmentReason = "restart";
+	}
+	MoveToNewMap( mapName.c_str() );
+	return true;
+#endif
+}
+
 /*
 ===============
 idSessionLocal::MoveToNewMap
@@ -4349,6 +6331,8 @@ void idSessionLocal::MoveToNewMap( const char *mapName ) {
 		// Autosave at the beginning of the level
 		SaveGame( NULL, ST_AUTO );
 	}
+	// openQ4: the level is a reached chapter of its campaign.
+	RecordCampaignChapter();
 
 	SetGUI( NULL, NULL );
 }
@@ -4586,6 +6570,11 @@ idSessionLocal::StartPlayingCmdDemo
 ===============
 */
 void idSessionLocal::StartPlayingCmdDemo(const char *demoName) {
+	if ( IsDedicatedServer() ) {
+		// A command demo replays a single-player game.
+		common->Printf( "Dedicated servers cannot play demos.\n" );
+		return;
+	}
 	// exit any current game
 	Stop();
 
@@ -4681,7 +6670,33 @@ Exits with mapSpawned = false
 ===============
 */
 void idSessionLocal::UnloadMap() {
+	FinishPendingSave( true );
+	RetainedUI_Close();
+	// Parses a level's loads never took.
+	UI_RetainedPrefetchClear();
+	CloseSystemSettings();
+	UI_SettingsLevelUnloaded();
+	// A level-load generation owns worker-visible file handles and immutable
+	// staging buffers. Join it before any game, render-world, renderer-module,
+	// or filesystem state used by the outgoing map can be destroyed.
+	fileSystem->CancelLevelLoadCache();
+	if ( renderSystem != NULL ) {
+		renderSystem->ResetGpuFrameTiming( "session unload" );
+	}
 	StopPlayingRenderDemo();
+
+	// Before teardown, so the outgoing level's deletions are not recorded.
+	if ( renderDemoRecordState == RENDER_DEMO_RECORD_RECORDING ) {
+		if ( idAsyncNetwork::IsActive() ) {
+			// A multiplayer recording keeps its historical one-map scope.
+			StopRecordingRenderDemo();
+		} else {
+			// A single-player recording runs on through level transitions,
+			// save loads, death reloads and restarts; the next level starts a
+			// new segment, and Stop() ends it at the menu.
+			SuspendRenderDemoRecording();
+		}
+	}
 
 	if ( com_showFramePacing.GetInteger() >= 2 && framePacingStats.valid ) {
 		Session_PrintFramePacingSummary( framePacingStats, " final" );
@@ -4712,10 +6727,6 @@ void idSessionLocal::UnloadMap() {
 		cmdDemoFile = NULL;
 	}
 
-	if ( writeDemo ) {
-		StopRecordingRenderDemo();
-	}
-
 	// drop every render entity/light the outgoing session registered, matching
 	// the original engine's teardown order; InitFromMap's same-map retain path
 	// frees them too, but only after the next map has already begun loading
@@ -4730,14 +6741,377 @@ void idSessionLocal::UnloadMap() {
 
 /*
 ===============
+Session_BuildLevelLoadCacheSettings
+
+Only settings that can alter source selection, decoded CPU data, image/sample
+policy, or renderer-owned cache payloads belong here.  Display-only settings
+must not cause manifest churn.
+===============
+*/
+static void Session_BuildLevelLoadCacheSettings( idStr &settings ) {
+	static const char *const settingNames[] = {
+		"com_binaryRead",
+		"r_renderer",
+		"r_actualRenderer",
+		"r_mergeModelSurfaces",
+		"r_slopVertex",
+		"r_slopTexCoord",
+		"r_slopNormal",
+		"r_useNewSkinning",
+		"r_useFastSkinning",
+		"r_forceConvertMD5R",
+		"r_convertMD5toMD5R",
+		"r_convertStaticToMD5R",
+		"r_convertProcToMD5R",
+		"r_pbrMaterials",
+		"image_downSize",
+		"image_downSizeLimit",
+		"image_downSizeSpecular",
+		"image_downSizeSpecularLimit",
+		"image_downSizeBump",
+		"image_downSizeBumpLimit",
+		"image_ignoreHighQuality",
+		"image_picmip",
+		"image_picmipFilter",
+		"image_picmipMinSize",
+		"image_usePrecompressedTextures",
+		"s_useCompression",
+		"sys_lang"
+	};
+	settings = "level-load-settings-v2;";
+	for ( unsigned int i = 0; i < sizeof( settingNames ) / sizeof( settingNames[ 0 ] ); i++ ) {
+		settings += settingNames[ i ];
+		settings += '=';
+		settings += cvarSystem->GetCVarString( settingNames[ i ] );
+		settings += ';';
+	}
+}
+
+/*
+===============
+The retained loading screen's phase line (section 14.17)
+
+The loader's phases in order, each shown with its place among them. While the
+renderer loads its model and image queues, the queue's own count replaces the
+place, and Ready reports the load time.
+===============
+*/
+enum {
+	RETAINED_LOAD_IDLE,
+	RETAINED_LOAD_MAP,
+	RETAINED_LOAD_WORLD,
+	RETAINED_LOAD_ASSETS,
+	RETAINED_LOAD_FINISHING,
+	RETAINED_LOAD_READY
+};
+static const int RETAINED_LOAD_PHASES = RETAINED_LOAD_FINISHING;
+static const char *const retainedLoadPhaseNames[] = { "", "#str_200040", "#str_230032", "#str_230033", "#str_230034", "#str_230035" };
+
+void idSessionLocal::SetRetainedLoadingPhase( int phase, const char *count ) {
+	if ( !retainedLoadingActive || guiLoading == NULL || phase < RETAINED_LOAD_IDLE || phase > RETAINED_LOAD_READY ) {
+		return;
+	}
+	retainedLoadingPhase = phase;
+	retainedLoadingLoaded = retainedLoadingTotal = -1;
+	idStr place;
+	if ( count != NULL ) {
+		place = count;
+	} else if ( phase != RETAINED_LOAD_IDLE && phase <= RETAINED_LOAD_PHASES ) {
+		place = va( "%d/%d", phase, RETAINED_LOAD_PHASES );
+	}
+	guiLoading->SetStateString( "loading_phase", phase != RETAINED_LOAD_IDLE ?
+		common->GetLanguageDict()->GetString( retainedLoadPhaseNames[ phase ] ) : "" );
+	guiLoading->SetStateString( "loading_count", place.c_str() );
+	guiLoading->StateChanged( common->GetPresentationTime() );
+	if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+		common->Printf( "RETAINED_LOADING_PHASE phase=%d count=%s\n", phase, place.c_str() );
+	}
+}
+
+void idSessionLocal::PublishRetainedLoadingCount() {
+	if ( !retainedLoadingActive || guiLoading == NULL || !loadingAssetQueueActive ) {
+		return;
+	}
+	if ( retainedLoadingPhase != RETAINED_LOAD_ASSETS ) {
+		SetRetainedLoadingPhase( RETAINED_LOAD_ASSETS );
+	}
+	if ( loadingAssetQueueLoaded == retainedLoadingLoaded && loadingAssetQueueTotal == retainedLoadingTotal ) {
+		return;
+	}
+	retainedLoadingLoaded = loadingAssetQueueLoaded;
+	retainedLoadingTotal = loadingAssetQueueTotal;
+	guiLoading->SetStateString( "loading_count", va( "%d/%d", loadingAssetQueueLoaded, loadingAssetQueueTotal ) );
+}
+
+// The multiplayer arsenal holds this many kinds of item, as the stock row does.
+static const int RETAINED_ARSENAL_ICONS = 20;
+
+// The item icons are colour-coded materials (hud.mtr's icon guides): one stage
+// drawing the icon image tinted by constant red, green and blue. The retained
+// screen draws images, not materials, so it takes the stage's image and tint;
+// anything else is drawn by its own name, untinted.
+static void Session_ResolveTintedIcon( const char *icon, idStr &image, float tint[3] ) {
+	image = icon;
+	image.StripFileExtension();
+	tint[0] = tint[1] = tint[2] = 1.0f;
+	const idMaterial *material = declManager->FindMaterial( icon, false );
+	if ( material == NULL || material->GetState() == DS_DEFAULTED || material->GetTextLength() <= 0 ) {
+		return;
+	}
+	const int length = material->GetTextLength();
+	idTempArray<char> text( length + 1 );
+	material->GetText( text.Ptr() );
+	idLexer src( text.Ptr(), static_cast<int>( strlen( text.Ptr() ) ), icon,
+		LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS | LEXFL_ALLOWPATHNAMES | LEXFL_NOWARNINGS );
+	idToken token;
+	idStr map;
+	float colour[3] = { 1.0f, 1.0f, 1.0f };
+	int depth = 0;
+	int stages = 0;
+	while ( src.ReadToken( &token ) ) {
+		if ( token == "{" ) {
+			stages += ++depth == 2 ? 1 : 0;
+		} else if ( token == "}" ) {
+			--depth;
+		} else if ( depth == 2 && ( !token.Icmp( "map" ) ) ) {
+			if ( src.ReadTokenOnLine( &token ) ) {
+				map = token;
+			}
+		} else if ( depth == 2 && ( !token.Icmp( "red" ) || !token.Icmp( "green" ) || !token.Icmp( "blue" ) ) ) {
+			const int channel = !token.Icmp( "red" ) ? 0 : !token.Icmp( "green" ) ? 1 : 2;
+			idToken value;
+			if ( src.ReadTokenOnLine( &value ) && value.type == TT_NUMBER ) {
+				colour[channel] = idMath::ClampFloat( 0.0f, 1.0f, value.GetFloatValue() );
+			}
+		}
+	}
+	if ( stages != 1 || map.Length() == 0 || !UI_RetainedImageSource( map.c_str() ) ) {
+		return;
+	}
+	image = map;
+	image.StripFileExtension();
+	tint[0] = colour[0];
+	tint[1] = colour[1];
+	tint[2] = colour[2];
+}
+
+void idSessionLocal::PublishRetainedLoadingIcon( int index, const char *icon ) {
+	// The multiplayer arsenal (section 14.17): each kind of item as it spawns,
+	// fading in over 150 ms in its color code.
+	if ( !retainedLoadingActive || guiLoading == NULL || icon == NULL || icon[0] == '\0' || index < 1 ||
+			index > RETAINED_ARSENAL_ICONS ) {
+		return;
+	}
+	idStr image;
+	float tint[3];
+	Session_ResolveTintedIcon( icon, image, tint );
+	guiLoading->SetStateString( va( "load_icon_src_%d", index ), UI_RetainedImageSource( image.c_str() ) ? image.c_str() : "" );
+	guiLoading->SetStateFloat( va( "load_icon_r_%d", index ), tint[0] );
+	guiLoading->SetStateFloat( va( "load_icon_g_%d", index ), tint[1] );
+	guiLoading->SetStateFloat( va( "load_icon_b_%d", index ), tint[2] );
+	guiLoading->StateChanged( common->GetPresentationTime() );
+	guiLoading->HandleNamedEvent( va( "arsenal%d", index ) );
+	if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+		common->Printf( "RETAINED_LOADING_ARSENAL %d %s %.2f %.2f %.2f\n", index, image.c_str(), tint[0], tint[1], tint[2] );
+	}
+}
+
+// Single player loading tips (section 14.17): localized one- or two-line
+// tips run under a TIP tag in the band's leading part while the level loads,
+// changing every 6 s; the continue prompt takes the band once it is ready.
+// The document cross-fades its two slots over 250 ms (tipA, tipB).
+static const char *const RETAINED_LOADING_TIPS[] = {
+	"#str_230052", "#str_230053", "#str_230054", "#str_230055", "#str_230056", "#str_230057", "#str_230058", "#str_230059", "#str_230060", "#str_230061", "#str_230062", "#str_230063", "#str_230064", "#str_230065", "#str_230066", "#str_230067", "#str_230068", "#str_230069"
+};
+static const int RETAINED_LOADING_TIP_MSEC = 6000;
+
+void idSessionLocal::PublishRetainedLoadingTip( bool first ) {
+	if ( !retainedLoadingActive || guiLoading == NULL || guiLoading->State().GetBool( "loading_mp" ) ) {
+		return;
+	}
+	const int now = common->GetPresentationTime();
+	const int count = static_cast<int>( sizeof( RETAINED_LOADING_TIPS ) / sizeof( RETAINED_LOADING_TIPS[0] ) );
+	if ( first ) {
+		// Each load starts somewhere else in the list.
+		retainedLoadingTip = static_cast<int>( static_cast<unsigned>( Sys_Milliseconds() ) % static_cast<unsigned>( count ) );
+		retainedLoadingTipSlot = 0;
+		guiLoading->SetStateString( "loading_tip_b", "" );
+	} else {
+		if ( retainedLoadingTip < 0 || now - retainedLoadingTipAt < RETAINED_LOADING_TIP_MSEC ) {
+			return;
+		}
+		retainedLoadingTip = ( retainedLoadingTip + 1 ) % count;
+		retainedLoadingTipSlot ^= 1;
+	}
+	retainedLoadingTipAt = now;
+	guiLoading->SetStateString( retainedLoadingTipSlot ? "loading_tip_b" : "loading_tip_a", RETAINED_LOADING_TIPS[ retainedLoadingTip ] );
+	guiLoading->StateChanged( now );
+	guiLoading->HandleNamedEvent( retainedLoadingTipSlot ? "tipB" : "tipA" );
+	if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+		common->Printf( "RETAINED_LOADING_TIP index=%d key=%s\n", retainedLoadingTip, RETAINED_LOADING_TIPS[ retainedLoadingTip ] );
+	}
+}
+
+// Player- or server-supplied text for a retained screen: Quake 4's ^ color,
+// icon and command escapes, control bytes and malformed UTF-8 are dropped, a
+// line break past maxLines lines reads as a space, at most maxBytes bytes are
+// kept (never splitting a character), and text that would read as a #str_ key
+// stays literal. The console turns backslashes into slashes, so a cvar can
+// carry no typed line break; the card wraps the text itself. The Join Game
+// page's server rows read the same way.
+idStr Session_RetainedPlayerText( const char *text, int maxBytes, int maxLines ) {
+	idStr plain = text != NULL ? text : "";
+	plain.RemoveEscapes();
+	idStr out;
+	int lines = 1;
+	for ( int i = 0; i < plain.Length(); i++ ) {
+		const unsigned char c = static_cast<unsigned char>( plain[ i ] );
+		// A break past the last line, and a tab, read as a space.
+		if ( c == '\n' || c == '\t' ) {
+			const char last = out.Length() > 0 ? out[ out.Length() - 1 ] : '\n';
+			if ( c != '\t' && lines < maxLines && last != '\n' ) {
+				lines++;
+				out += '\n';
+			} else if ( last != '\n' && last != ' ' && out.Length() < maxBytes ) {
+				out += ' ';
+			}
+			continue;
+		}
+		// Controls, stray continuation bytes and malformed sequences are
+		// dropped, and so are spaces that would start a line.
+		if ( c < 0x20 || c == 0x7f || ( c >= 0x80 && c < 0xc0 ) || c >= 0xf8 ||
+			( c == ' ' && ( out.Length() == 0 || out[ out.Length() - 1 ] == '\n' ) ) ) {
+			continue;
+		}
+		const int length = c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : c >= 0xc0 ? 2 : 1;
+		bool whole = i + length <= plain.Length();
+		for ( int byte = 1; whole && byte < length; byte++ ) {
+			whole = ( static_cast<unsigned char>( plain[ i + byte ] ) & 0xc0 ) == 0x80;
+		}
+		if ( !whole ) {
+			continue;
+		}
+		if ( out.Length() + length > maxBytes ) {
+			break;
+		}
+		out.Append( plain.c_str() + i, length );
+		i += length - 1;
+	}
+	while ( out.Length() > 0 && ( out[ out.Length() - 1 ] == '\n' || out[ out.Length() - 1 ] == ' ' ) ) {
+		out.CapLength( out.Length() - 1 );
+	}
+	if ( idStr::Icmpn( out.c_str(), "#str_", 5 ) == 0 ) {
+		out.Insert( ' ', 0 );
+	}
+	return out;
+}
+
+// The loading server card's rows: six names per list, then "+N more".
+static const int RETAINED_ROSTER_ROWS = 7;
+
+void idSessionLocal::ClearRetainedLoadingRoster() {
+	retainedRosterCount = 0;
+	retainedRosterConnecting = 0;
+	retainedRosterKnown = false;
+}
+
+void idSessionLocal::NoteRetainedLoadingPlayer( const idDict &userInfo ) {
+	retainedRosterKnown = true;
+	const idStr name = Session_RetainedPlayerText( userInfo.GetString( "ui_name" ), 48, 1 );
+	if ( retainedRosterCount >= RETAINED_ROSTER_SLOTS || name.Length() == 0 ) {
+		return;
+	}
+	retainedRosterName[ retainedRosterCount ] = name;
+	retainedRosterTeam[ retainedRosterCount ] = !idStr::Icmp( userInfo.GetString( "ui_spectate" ), "Spectate" ) ? -1 :
+		!idStr::Icmp( userInfo.GetString( "ui_team" ), "Strogg" ) ? 1 : 0;
+	retainedRosterCount++;
+}
+
+void idSessionLocal::NoteRetainedLoadingConnecting( int count ) {
+	retainedRosterKnown = true;
+	retainedRosterConnecting = count > 0 ? count : 0;
+}
+
+// The multiplayer loading card (section 14.17): the game module names the
+// mode, its enforced limits and whether it has teams from the server info
+// (gameLocal's own copy is set only when the map spawns); the session adds
+// the players known as the load starts and the server's message.
+void idSessionLocal::PublishRetainedLoadingServer( const idDict &serverInfo ) {
+	static const char *const queried[] = { "si_gameType", "si_fragLimit", "si_captureLimit", "si_controlTime", "si_roundLimit",
+		"si_scoreLimit", "si_timeLimit" };
+	for ( int i = 0; i < static_cast<int>( sizeof( queried ) / sizeof( queried[0] ) ); i++ ) {
+		guiLoading->SetStateString( va( "query_%s", queried[ i ] ), serverInfo.GetString( queried[ i ] ) );
+	}
+	guiLoading->SetStateBool( "server_answered", false );
+	guiLoading->SetStateBool( "server_team_mode", false );
+	if ( game != NULL ) {
+		PreyGame_HandleMainMenuCommands( "retainedLoadingServer", guiLoading );
+	}
+	const bool answered = guiLoading->State().GetBool( "server_answered" );
+	const bool teams = answered && guiLoading->State().GetBool( "server_team_mode" );
+
+	// The card wraps the message and clips it at three lines.
+	const idStr message = Session_RetainedPlayerText( serverInfo.GetString( "si_motd" ), 256, 3 );
+	guiLoading->SetStateString( "server_message", message.c_str() );
+
+	idStr lists[ 3 ];
+	int counts[ 3 ] = { 0, 0, 0 };
+	int spectators = 0;
+	for ( int i = 0; i < retainedRosterCount; i++ ) {
+		if ( retainedRosterTeam[ i ] < 0 ) {
+			spectators++;
+			continue;
+		}
+		const int list = teams ? retainedRosterTeam[ i ] : 2;
+		if ( counts[ list ] < RETAINED_ROSTER_ROWS - 1 ) {
+			lists[ list ] += lists[ list ].Length() ? "\n" : "";
+			lists[ list ] += retainedRosterName[ i ];
+		}
+		counts[ list ]++;
+	}
+	int rows = 0;
+	for ( int list = 0; list < 3; list++ ) {
+		int shown = counts[ list ] < RETAINED_ROSTER_ROWS - 1 ? counts[ list ] : RETAINED_ROSTER_ROWS - 1;
+		if ( counts[ list ] > shown ) {
+			lists[ list ] += va( "\n%s", va( common->GetLanguageDict()->GetString( "#str_230070" ), counts[ list ] - shown ) );
+			shown++;
+		}
+		rows = shown > rows ? shown : rows;
+	}
+	idStr extra;
+	if ( spectators > 0 ) {
+		extra = va( common->GetLanguageDict()->GetString( "#str_230072" ), spectators );
+	}
+	if ( retainedRosterConnecting > 0 ) {
+		extra = Session_RetainedList( extra.c_str(), va( common->GetLanguageDict()->GetString( "#str_230071" ), retainedRosterConnecting ) );
+	}
+	guiLoading->SetStateBool( "server_roster_known", retainedRosterKnown );
+	guiLoading->SetStateBool( "server_team_mode", teams );
+	guiLoading->SetStateInt( "server_roster_rows", rows );
+	guiLoading->SetStateString( "server_team_a", lists[ 0 ].c_str() );
+	guiLoading->SetStateString( "server_team_b", lists[ 1 ].c_str() );
+	guiLoading->SetStateString( "server_players", lists[ 2 ].c_str() );
+	guiLoading->SetStateString( "server_roster_extra", extra.c_str() );
+	guiLoading->StateChanged( common->GetPresentationTime() );
+	if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+		common->Printf( "RETAINED_LOADING_SERVER answered=%d teams=%d players=%d spectators=%d connecting=%d rows=%d message=%d\n",
+			answered ? 1 : 0, teams ? 1 : 0, retainedRosterCount - spectators, spectators, retainedRosterConnecting, rows,
+			message.Length() );
+	}
+	// Each load captures its own roster.
+	ClearRetainedLoadingRoster();
+}
+
+/*
+===============
 idSessionLocal::LoadLoadingGui
 ===============
 */
 void idSessionLocal::LoadLoadingGui( const char *mapName ) {
-#ifdef ID_DEDICATED
-	guiLoading = NULL;
-	return;
-#endif
+	if ( IsDedicatedServer() ) {
+		guiLoading = NULL;
+		return;
+	}
 	// load / program a gui to stay up on the screen while loading
 	idStr stripped = mapName;
 	stripped.StripFileExtension();
@@ -4754,6 +7128,7 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 	const char *spawnEntityFilter = mapSpawnData.serverInfo.GetString( "si_entityFilter", "" );
 	const bool mapLooksMultiplayer = !idStr::Icmpn( spawnMapPath, "mp/", 3 );
 	const bool isMultiplayerLoad = mapLooksMultiplayer || ( spawnGameType[ 0 ] != '\0' && idStr::Icmp( spawnGameType, "singleplayer" ) != 0 );
+	PrepareRetainedLevel( spawnMapPath, isMultiplayerLoad );
 
 	idDict mapDeclDict;
 	const idDict *mapDef = Session_GetMapDeclDict( spawnMapPath, spawnEntityFilter, mapDeclDict ) ? &mapDeclDict : NULL;
@@ -4789,9 +7164,11 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 	}
 
 	idStr expandedLoadingBackground;
-	if ( Session_PrepareExpandedLoadingBackground( loadingBackground, stripped.c_str(), expandedLoadingBackground ) ) {
+	if ( Session_PrepareExpandedLoadingBackground( loadingBackground, expandedLoadingBackground ) ) {
 		loadingBackground = expandedLoadingBackground;
 		loadingBackgroundCanvasFill = true;
+	} else {
+		Session_ReleaseLoadingBackground( true );
 	}
 
 	char guiMap[ MAX_STRING_CHARS ];
@@ -4810,6 +7187,10 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 	} else {
 		guiLoading = Session_FindFallbackLoadingGui();
 	}
+	// ui_retained replaces the stock loading screens; map-specific GUIs stay.
+	idUserInterface *legacyLoading = guiLoading;
+	guiLoading = SelectRetainedLoadingGui( guiLoading, isMultiplayerLoad );
+	const bool retainedLoading = guiLoading != legacyLoading;
 
 	if ( guiLoading ) {
 		guiLoading->SetStateFloat( "map_loading", 0.0f );
@@ -4838,12 +7219,10 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 			const char *serverName = mapSpawnData.serverInfo.GetString( "si_name", cvarSystem->GetCVarString( "si_name" ) );
 			idStr serverAddress = networkSystem->GetServerAddress();
 			if ( !serverAddress.Length() ) {
-				const char *netIP = cvarSystem->GetCVarString( "net_ip" );
-				const int netPort = cvarSystem->GetCVarInteger( "net_port" );
-				if ( netIP && netIP[ 0 ] ) {
-					serverAddress = va( "%s:%d", idStr::Icmp( netIP, "0.0.0.0" ) ? netIP : "127.0.0.1", netPort );
-				} else if ( netPort > 0 ) {
-					serverAddress = va( "127.0.0.1:%d", netPort );
+				char localEndpoint[idNetworkEndpoint::LOCAL_ENDPOINT_TEXT_SIZE];
+				if ( idNetworkEndpoint::FormatLocalServerEndpoint( cvarSystem->GetCVarString( "net_ip" ),
+						cvarSystem->GetCVarInteger( "net_port" ), localEndpoint, sizeof( localEndpoint ) ) ) {
+					serverAddress = localEndpoint;
 				}
 			}
 			const char *gameType = mapSpawnData.serverInfo.GetString( "si_gameType", cvarSystem->GetCVarString( "si_gameType" ) );
@@ -4851,7 +7230,8 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 			const idStr limitText = Session_GetMPLoadLimitString( mapSpawnData.serverInfo );
 
 			if ( serverName && serverName[ 0 ] ) {
-				guiLoading->SetStateString( "server_name", serverName );
+				guiLoading->SetStateString( "server_name", retainedLoading ?
+					Session_RetainedPlayerText( serverName, 96, 1 ).c_str() : serverName );
 			}
 			if ( serverAddress.Length() ) {
 				guiLoading->SetStateString( "server_ip", serverAddress.c_str() );
@@ -4861,6 +7241,11 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 			}
 			if ( limitText.Length() ) {
 				guiLoading->SetStateString( "server_limit", limitText.c_str() );
+			}
+			// The retained card asks the game for its mode, limits and teams,
+			// and adds the players known now and the server's message.
+			if ( retainedLoading ) {
+				PublishRetainedLoadingServer( mapSpawnData.serverInfo );
 			}
 		}
 
@@ -4894,8 +7279,513 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 		if ( mat != NULL && !mat->TestMaterialFlag( MF_DEFAULTED ) ) {
 			mat->SetSort( SS_GUI );
 		}
+		if ( retainedLoading ) {
+			// The retained screen draws the levelshot as an image node. Its source
+			// must be a plain VFS image name; anything else keeps the generic art.
+			guiLoading->SetStateString( "loading_levelshot", UI_RetainedImageSource( loadingBackground.c_str() ) ?
+				loadingBackground.c_str() : fallbackLoadingBackground );
+			// The message line under the level name: the game type in
+			// multiplayer, the difficulty in single player (section 14.17).
+			const char *entryDetail = isMultiplayerLoad ? Session_GetLongMPGameTypeName(
+				mapSpawnData.serverInfo.GetString( "si_gameType", cvarSystem->GetCVarString( "si_gameType" ) ) ) : Session_GetSkillName();
+			guiLoading->SetStateString( "loading_detail", entryDetail ? entryDetail : "" );
+			guiLoading->StateChanged( common->GetPresentationTime() );
+			// The shared document keeps its last load's line until reset.
+			retainedLoadingActive = true;
+			SetRetainedLoadingPhase( RETAINED_LOAD_IDLE );
+			PublishRetainedLoadingTip( true );
+		}
 	}
 }
+
+// Whether an image the renderer would load by this name is installed: the
+// name itself, or the name with one of the image formats it tries.
+static bool Session_ImageInstalled( const char *name ) {
+	static const char *const extensions[] = { "", ".tga", ".dds", ".jpg", ".png" };
+	for ( int i = 0; i < static_cast<int>( sizeof( extensions ) / sizeof( extensions[0] ) ); ++i ) {
+		if ( Session_FileExistsInSearchPaths( va( "%s%s", name, extensions[i] ) ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+===============
+idSessionLocal::PrecacheRetainedLevelImages
+
+Every objective screenshot this level can show on the retained pause
+screen's Objectives page resolves inside the level load, as the levelshot
+does, so opening the page reads no picture mid-frame. Only while a retained
+pause document is loaded; a game module that does not answer lists none.
+===============
+*/
+void idSessionLocal::PrecacheRetainedLevelImages() {
+#ifndef ID_DEDICATED
+	if ( ( guiRetainedPause == NULL && guiRetainedPauseStrogg == NULL ) || game == NULL || guiMainMenu == NULL ) {
+		return;
+	}
+	guiMainMenu->SetStateInt( "level_image_count", 0 );
+	PreyGame_HandleMainMenuCommands( "retainedLevelImages", guiMainMenu );
+	const int count = guiMainMenu->State().GetInt( "level_image_count", "0" );
+	for ( int i = 0; i < count; i++ ) {
+		const idStr image = guiMainMenu->State().GetString( va( "level_image_%d", i ), "" );
+		if ( UI_RetainedImageSource( image.c_str() ) && Session_ImageInstalled( image.c_str() ) ) {
+			UI_RetainedPrecacheImage( image.c_str() );
+		}
+	}
+#endif
+}
+
+#ifndef ID_DEDICATED
+// How long ago the newest save was written, for the pause screen's time
+// line: just now within a minute, then in minutes, then in hours.
+static idStr Session_RetainedSaveAge( ID_TIME_T saved, ID_TIME_T now ) {
+	const long long seconds = now > saved ? static_cast<long long>( now - saved ) : 0;
+	if ( seconds < 60 ) {
+		return common->GetLanguageDict()->GetString( "#str_230050" );
+	}
+	if ( seconds < 3600 ) {
+		return va( common->GetLanguageDict()->GetString( "#str_230048" ), static_cast<int>( seconds / 60 ) );
+	}
+	return va( common->GetLanguageDict()->GetString( "#str_230049" ), static_cast<int>( seconds / 3600 ) );
+}
+#endif
+
+/*
+===============
+idSessionLocal::PublishRetainedPauseState
+
+The retained pause screen's level block and Objectives page: the level,
+difficulty, the map's objectives summary and its levelshot, and what the
+game publishes (the objectives with their descriptions and screenshots, the
+completed ones, the time in the mission and the run's play time).
+===============
+*/
+void idSessionLocal::PublishRetainedPauseState( idUserInterface *gui ) {
+#ifndef ID_DEDICATED
+	if ( gui == NULL ) {
+		return;
+	}
+	const char *mapPath = mapSpawnData.serverInfo.GetString( "si_map", currentMapName.c_str() );
+	const char *entityFilter = mapSpawnData.serverInfo.GetString( "si_entityFilter", "" );
+	idDict mapDeclDict;
+	const bool known = Session_GetMapDeclDict( mapPath, entityFilter, mapDeclDict );
+	const char *level = known ? common->GetLanguageDict()->GetString( mapDeclDict.GetString( "name", mapPath ) ) : mapPath;
+	const char *objectives = known ? common->GetLanguageDict()->GetString( mapDeclDict.GetString( "objectives", "" ) ) : "";
+	gui->SetStateString( "pause_level", level );
+	gui->SetStateString( "pause_detail", Session_GetSkillName() );
+	gui->SetStateString( "pause_objectives", objectives );
+	gui->SetStateString( "pause_shot", RetainedPauseShot( mapPath ).c_str() );
+	// The game publishes the objectives the player holds, the time in the
+	// mission and the run's play time. A game module that does not leaves the
+	// map's own summary and no time lines.
+	gui->SetStateInt( "pause_objective_count", 0 );
+	gui->SetStateInt( "pause_mission_seconds", -1 );
+	gui->SetStateInt( "pause_total_seconds", -1 );
+	if ( game != NULL && mapSpawned ) {
+		PreyGame_HandleMainMenuCommands( "retainedPauseState", gui );
+	}
+	// An objective's screenshot shows only when it is a plain image name that
+	// is installed; any other leaves its frame empty. The Objectives page
+	// lists eight (OBJECTIVE_PAGE_ROWS in build_retained_screens.py).
+	const int pageRows = 8;
+	const int held = gui->State().GetInt( "pause_objective_count", "0" );
+	for ( int i = 0; i < held && i < pageRows; i++ ) {
+		const idStr shot = gui->State().GetString( va( "pause_objective_shot_%d", i ), "" );
+		if ( shot.Length() > 0 && ( !UI_RetainedImageSource( shot.c_str() ) || !Session_ImageInstalled( shot.c_str() ) ) ) {
+			gui->SetStateString( va( "pause_objective_shot_%d", i ), "" );
+		}
+	}
+	// The time in the mission and the run's play time, unless a save from an
+	// earlier build began the run; under them, how long ago the newest save
+	// was written.
+	const int seconds = gui->State().GetInt( "pause_mission_seconds", "-1" );
+	const int total = gui->State().GetInt( "pause_total_seconds", "-1" );
+	idStr stats, saved;
+	if ( seconds >= 0 ) {
+		stats = va( common->GetLanguageDict()->GetString( "#str_231532" ), Session_RetainedPlayTime( seconds ).c_str() );
+		if ( total >= 0 ) {
+			stats = Session_RetainedList( stats.c_str(), va( common->GetLanguageDict()->GetString( "#str_231524" ),
+				Session_RetainedPlayTime( total ).c_str() ) );
+		}
+		if ( retainedNewestSave > 0 ) {
+			saved = Session_RetainedSaveAge( retainedNewestSave, time( NULL ) );
+		}
+	}
+	gui->SetStateString( "pause_stats", stats.c_str() );
+	gui->SetStateString( "pause_saved", saved.c_str() );
+	gui->StateChanged( common->GetPresentationTime() );
+#endif
+}
+
+// The level block's levelshot, chosen as the loading screen chooses its
+// picture: the map's loadimage, the intro art for a map that loads through
+// the intro screen, then its menu levelshot. A candidate that is not an
+// installed, plain image name falls through, ending at the generic art. The
+// map's segment is the running one's unless an entity filter names another.
+idStr idSessionLocal::RetainedPauseShot( const char *mapPath, const char *entityFilter ) const {
+	idStrList candidates;
+	idDict mapDeclDict;
+	if ( entityFilter == NULL ) {
+		entityFilter = mapSpawnData.serverInfo.GetString( "si_entityFilter", "" );
+	}
+	if ( Session_GetMapDeclDict( mapPath, entityFilter, mapDeclDict ) ) {
+		candidates.Append( mapDeclDict.GetString( "loadimage", "" ) );
+		if ( !idStr::Icmp( mapDeclDict.GetString( "loadgui", "" ), "guis/loading/intro.gui" ) ) {
+			candidates.Append( "gfx/guis/loadscreens/e3_load" );
+		}
+	}
+	char screenshot[ MAX_STRING_CHARS ];
+	fileSystem->FindMapScreenshot( mapPath, screenshot, sizeof( screenshot ) );
+	candidates.Append( screenshot );
+	for ( int i = 0; i < candidates.Num(); ++i ) {
+		if ( candidates[i].Length() > 0 && UI_RetainedImageSource( candidates[i].c_str() ) && Session_ImageInstalled( candidates[i].c_str() ) ) {
+			return candidates[i];
+		}
+	}
+	return "gfx/guis/loadscreens/generic";
+}
+
+/*
+===============================================================================
+
+Campaign chapters
+
+Every level of a campaign is a chapter, listed in the order the campaign
+plays it (the levels' nextMap keys; Quake 4 plays storage1 and process1 twice,
+once for each entity filter). A chapter unlocks when the player reaches its
+level: every level start outside devmap records it in the campaign's archived
+mask, and a level start autosave on disk counts too, so progress made before
+the list existed shows, and deleting saves keeps what was reached. Configs
+are per game directory, so each campaign keeps its own mask.
+
+Starting a chapter loads its level's start autosave, with the arsenal and the
+difficulty the player reached it with. Without one the level starts fresh at
+the chosen difficulty, with the map's devmap arsenal where it has one, and
+writes the start autosave a normal level start would.
+
+===============================================================================
+*/
+
+#ifndef ID_DEDICATED
+struct sessionChapter_t {
+	const char *	map;
+	const char *	entityFilter;
+};
+
+static const sessionChapter_t SESSION_QUAKE4_CHAPTERS[] = {
+	{ "game/airdefense1", "" }, { "game/airdefense2", "" }, { "game/hangar1", "" }, { "game/hangar2", "" },
+	{ "game/mcc_landing", "" }, { "game/mcc_1", "" }, { "game/convoy1", "" }, { "game/building_b", "" },
+	{ "game/convoy2", "" }, { "game/convoy2b", "" }, { "game/hub1", "" }, { "game/hub2", "" },
+	{ "game/medlabs", "" }, { "game/walker", "" }, { "game/dispersal", "" }, { "game/recomp", "" },
+	{ "game/putra", "" }, { "game/waste", "" }, { "game/mcc_2", "" }, { "game/storage1", "first" },
+	{ "game/storage2", "" }, { "game/storage1", "second" }, { "game/tram1", "" }, { "game/tram1b", "" },
+	{ "game/process1", "first" }, { "game/process2", "" }, { "game/process1", "second" }, { "game/network1", "" },
+	{ "game/network2", "" }, { "game/core1", "" }, { "game/core2", "" }
+};
+
+static const sessionChapter_t SESSION_AWAKENING_CHAPTERS[] = {
+	{ "game/m01_stranarus_trench1", "" }, { "game/m01_stranarus_trench2", "" }, { "game/m02_trianfac", "" },
+	{ "game/m03_airassault", "" }, { "game/m04_prison", "" }, { "game/m05_bio", "" }, { "game/m06_mcc", "" },
+	{ "game/m06_mcc_invasion", "" }, { "game/m07_race", "" }, { "game/m07_race1", "" }, { "game/m07_race2", "" },
+	{ "game/m08_cryofac", "" }, { "game/m09_valkaryne", "" }
+};
+
+static idCVar ui_chaptersQuake4( "ui_chaptersQuake4", "1", CVAR_GUI | CVAR_ARCHIVE | CVAR_INTEGER | CVAR_NOCHEAT,
+	"the Quake 4 campaign's chapters reached: bit n is its (n+1)th level in campaign order" );
+static idCVar ui_chaptersAwakening( "ui_chaptersAwakening", "1", CVAR_GUI | CVAR_ARCHIVE | CVAR_INTEGER | CVAR_NOCHEAT,
+	"the Awakening campaign's chapters reached: bit n is its (n+1)th level in campaign order" );
+
+// The chapter labels and their explanations (the *_openq4.lang tables).
+static const char *const SESSION_CHAPTER_STATUS_SAVED = "#str_231283";
+static const char *const SESSION_CHAPTER_STATUS_FRESH = "#str_231284";
+static const char *const SESSION_CHAPTER_STATUS_LOCKED = "#str_231285";
+static const char *const SESSION_CHAPTER_DETAIL_SAVED = "#str_231286";
+static const char *const SESSION_CHAPTER_DETAIL_FRESH = "#str_231287";
+// A fresh start from a page with no difficulty of its own (the retained CHAPTERS page).
+static const char *const SESSION_CHAPTER_DETAIL_FRESH_CURRENT = "#str_231551";
+static const char *const SESSION_CHAPTER_DETAIL_LOCKED = "#str_231288";
+
+static bool Session_AwakeningCampaignActive() {
+	return !idStr::Icmp( fileSystem->GetActiveGameDir(), "q4xbase" );
+}
+
+static const sessionChapter_t *Session_CampaignChapters( int &count ) {
+	if ( Session_AwakeningCampaignActive() ) {
+		count = static_cast<int>( sizeof( SESSION_AWAKENING_CHAPTERS ) / sizeof( SESSION_AWAKENING_CHAPTERS[0] ) );
+		return SESSION_AWAKENING_CHAPTERS;
+	}
+	count = static_cast<int>( sizeof( SESSION_QUAKE4_CHAPTERS ) / sizeof( SESSION_QUAKE4_CHAPTERS[0] ) );
+	return SESSION_QUAKE4_CHAPTERS;
+}
+
+static idCVar &Session_CampaignChapterMask() {
+	return Session_AwakeningCampaignActive() ? ui_chaptersAwakening : ui_chaptersQuake4;
+}
+
+// The active campaign's chapter for a level start, or -1. A segmented level
+// is its filter's chapter; the others ignore the filter a level transition
+// leaves behind.
+static int Session_CampaignChapterIndex( const char *map, const char *entityFilter ) {
+	int count = 0;
+	const sessionChapter_t *chapters = Session_CampaignChapters( count );
+	idStr normalizedMap;
+	idStr normalizedFilter;
+	Session_NormalizeMapPathAndEntityFilter( map, entityFilter, normalizedMap, normalizedFilter );
+	for ( int i = 0; i < count; i++ ) {
+		if ( !normalizedMap.Icmp( chapters[i].map ) &&
+			 ( chapters[i].entityFilter[0] == '\0' || !normalizedFilter.Icmp( chapters[i].entityFilter ) ) ) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+// The chapters reached, with each one's start autosave as the save list names
+// it ("" when there is none). A start autosave on disk counts as reached and
+// is recorded, so the unlock outlives the save.
+static int Session_CampaignChaptersReached( idSessionLocal &session, idStrList &saves ) {
+	int count = 0;
+	const sessionChapter_t *chapters = Session_CampaignChapters( count );
+	idStrList slots;
+	idList<fileTIME_T> times;
+	session.GetSaveGameList( slots, times );
+	idCVar &mask = Session_CampaignChapterMask();
+	int reached = mask.GetInteger() | 1;
+	saves.SetNum( count );
+	for ( int i = 0; i < count; i++ ) {
+		// The name GetAutoSaveName gives the level's start autosave. Saves are
+		// matched without case: a level transition may spell the map's name
+		// in its own case (game/M02_TrianFac), and so does the file.
+		idStr slot = chapters[i].entityFilter[0] != '\0' ? va( "Autosave %s %s", chapters[i].map, chapters[i].entityFilter ) :
+			va( "Autosave %s", chapters[i].map );
+		session.ScrubSaveGameFileName( slot );
+		saves[i].Clear();
+		for ( int j = 0; j < slots.Num(); j++ ) {
+			if ( !slots[j].Icmp( slot ) ) {
+				saves[i] = slots[j];
+				reached |= 1 << i;
+				break;
+			}
+		}
+	}
+	if ( reached != mask.GetInteger() ) {
+		mask.SetInteger( reached );
+	}
+	return reached;
+}
+#endif
+
+/*
+===============
+idSessionLocal::RecordCampaignChapter
+
+The level that just started is reached (MoveToNewMap): not under devmap, as
+its start autosave is not written then.
+===============
+*/
+void idSessionLocal::RecordCampaignChapter() {
+#ifndef ID_DEDICATED
+	if ( IsMultiplayer() || mapSpawnData.serverInfo.GetBool( "devmap" ) ) {
+		return;
+	}
+	const char *map = mapSpawnData.serverInfo.GetString( "si_map" );
+	const int chapter = Session_CampaignChapterIndex( map, mapSpawnData.serverInfo.GetString( "si_entityFilter", "" ) );
+	if ( chapter < 0 ) {
+		return;
+	}
+	idCVar &mask = Session_CampaignChapterMask();
+	const int reached = mask.GetInteger() | 1 | ( 1 << chapter );
+	if ( reached != mask.GetInteger() ) {
+		mask.SetInteger( reached );
+		common->Printf( "CAMPAIGN_CHAPTER reached %d %s\n", chapter + 1, map );
+	}
+#endif
+}
+
+/*
+===============
+idSessionLocal::PublishCampaignChapters
+
+The active campaign's chapters into the campaign page: the retained page's
+chapter.* rows, or the stock page's list items. `select` chooses a chapter;
+otherwise the page's choice stays while it is reached, else the furthest one
+reached is chosen. The chosen chapter's levelshot, name, explanation and
+whether it can start follow.
+===============
+*/
+void idSessionLocal::PublishCampaignChapters( idUserInterface *gui, int select ) {
+#ifndef ID_DEDICATED
+	if ( gui == NULL ) {
+		return;
+	}
+	const bool retained = idStr::CheckExtension( gui->Name(), ".q4ui" );
+	int count = 0;
+	const sessionChapter_t *chapters = Session_CampaignChapters( count );
+	idStrList saves;
+	const int reached = Session_CampaignChaptersReached( *this, saves );
+	const idLangDict *language = common->GetLanguageDict();
+
+	idStrList names;
+	names.SetNum( count );
+	int furthest = 0;
+	for ( int i = 0; i < count; i++ ) {
+		idDict mapDecl;
+		const char *name = Session_GetMapDeclDict( chapters[i].map, chapters[i].entityFilter, mapDecl ) ?
+			language->GetString( mapDecl.GetString( "name", chapters[i].map ) ) : chapters[i].map;
+		names[i] = va( "%02d  %s", i + 1, name );
+		const bool open = ( reached & ( 1 << i ) ) != 0;
+		if ( open ) {
+			furthest = i;
+		}
+		const char *status = !open ? SESSION_CHAPTER_STATUS_LOCKED : saves[i].Length() ? SESSION_CHAPTER_STATUS_SAVED : SESSION_CHAPTER_STATUS_FRESH;
+		if ( retained ) {
+			gui->SetStateString( va( "chapter.row%d.name", i ), names[i].c_str() );
+			gui->SetStateString( va( "chapter.row%d.location", i ), language->GetString( status ) );
+			gui->SetStateBool( va( "chapter.row%d.open", i ), open );
+		} else {
+			// A locked row reads gray: the stock list cannot disable one.
+			gui->SetStateString( va( "chapters_item_%d", i ), va( open ? "%s\t%s" : S_COLOR_GRAY "%s\t" S_COLOR_GRAY "%s",
+				names[i].c_str(), language->GetString( status ) ) );
+			gui->SetStateBool( va( "chapters_item_%d_greyed", i ), !open );
+		}
+	}
+
+	// A chapter the page picks stays chosen, locked or not (the stock list
+	// cannot refuse a row); one kept from before must still be reached.
+	int chosen = select;
+	if ( chosen < 0 || chosen >= count ) {
+		chosen = retained ? gui->State().GetInt( "chapter.selected", "-1" ) : gui->State().GetInt( "chapters_sel_0", "-1" );
+		if ( chosen < 0 || chosen >= count || !( reached & ( 1 << chosen ) ) ) {
+			chosen = furthest;
+		}
+	}
+	const bool open = ( reached & ( 1 << chosen ) ) != 0;
+	const bool saved = open && saves[chosen].Length() > 0;
+	const idStr shot = open ? RetainedPauseShot( chapters[chosen].map, chapters[chosen].entityFilter ) : idStr( "gfx/guis/loadscreens/generic" );
+	const char *fresh = gui->State().FindKey( "skill" ) != NULL ? SESSION_CHAPTER_DETAIL_FRESH : SESSION_CHAPTER_DETAIL_FRESH_CURRENT;
+	const char *detail = language->GetString( !open ? SESSION_CHAPTER_DETAIL_LOCKED : saved ? SESSION_CHAPTER_DETAIL_SAVED : fresh );
+	if ( retained ) {
+		gui->SetStateInt( "chapter.count", count );
+		gui->SetStateInt( "chapter.first", 0 );
+		gui->SetStateInt( "chapter.selected", chosen );
+		gui->SetStateBool( "chapter.open", open );
+		gui->SetStateString( "chapter.shot", shot.c_str() );
+		gui->SetStateString( "chapter.name", names[chosen].c_str() );
+		gui->SetStateString( "chapter.detail", detail );
+		UI_RetainedPrecacheImage( shot.c_str() );
+	} else {
+		gui->DeleteStateVar( va( "chapters_item_%d", count ) );
+		gui->SetStateInt( "chapter_count", count );
+		gui->SetStateString( "chapters_sel_0", va( "%d", chosen ) );
+		gui->SetStateBool( "chapter_open", open );
+		gui->SetStateString( "chapter_shot", shot.c_str() );
+		gui->SetStateString( "chapter_name", names[chosen].c_str() );
+		gui->SetStateString( "chapter_detail", detail );
+	}
+	gui->StateChanged( common->GetPresentationTime() );
+#endif
+}
+
+/*
+===============
+idSessionLocal::CampaignSummaryShots
+
+The active campaign's levelshots for the retained Campaign page's summaries
+(section 13.7): its first level's, for NEW GAME, and the furthest reached
+one's, for CHAPTERS.
+===============
+*/
+void idSessionLocal::CampaignSummaryShots( idStr &first, idStr &furthest ) {
+#ifndef ID_DEDICATED
+	int count = 0;
+	const sessionChapter_t *chapters = Session_CampaignChapters( count );
+	idStrList saves;
+	const int reached = Session_CampaignChaptersReached( *this, saves );
+	int last = 0;
+	for ( int i = 0; i < count; i++ ) {
+		if ( reached & ( 1 << i ) ) {
+			last = i;
+		}
+	}
+	first = RetainedPauseShot( chapters[0].map, chapters[0].entityFilter );
+	furthest = RetainedPauseShot( chapters[last].map, chapters[last].entityFilter );
+#endif
+}
+
+/*
+===============
+idSessionLocal::StartCampaignChapter
+
+Starts a reached chapter of the active campaign: from its level's start
+autosave, else fresh (see Campaign chapters above). False leaves the menu as
+it was: the chapter is locked or unknown.
+===============
+*/
+bool idSessionLocal::StartCampaignChapter( int chapter ) {
+#ifdef ID_DEDICATED
+	return false;
+#else
+	int count = 0;
+	const sessionChapter_t *chapters = Session_CampaignChapters( count );
+	idStrList saves;
+	const int reached = Session_CampaignChaptersReached( *this, saves );
+	if ( chapter < 0 || chapter >= count || !( reached & ( 1 << chapter ) ) ) {
+		common->Printf( "CAMPAIGN_CHAPTER refused %d: locked\n", chapter + 1 );
+		return false;
+	}
+	if ( saves[chapter].Length() ) {
+		common->Printf( "CAMPAIGN_CHAPTER start %d from %s\n", chapter + 1, saves[chapter].c_str() );
+		// Preflight refusals preserve the menu; deeper failures rebuild it.
+		if ( LoadGame( saves[chapter].c_str() ) ) {
+			return true;
+		}
+		common->Printf( "CAMPAIGN_CHAPTER %s refused; starting the level fresh\n", saves[chapter].c_str() );
+	} else {
+		common->Printf( "CAMPAIGN_CHAPTER start %d fresh\n", chapter + 1 );
+	}
+	// The first level is the campaign's own start. A later one takes the
+	// map's devmap arsenal, then drops the key so this start writes its
+	// autosave and is reached, and the next level transition plays on as
+	// normal.
+	StartNewGame( chapters[chapter].map, chapter > 0, chapters[chapter].entityFilter );
+	if ( mapSpawned && mapSpawnData.serverInfo.GetBool( "devmap" ) ) {
+		mapSpawnData.serverInfo.Delete( "devmap" );
+		SaveGame( NULL, ST_AUTO );
+		RecordCampaignChapter();
+	}
+	return true;
+#endif
+}
+/*
+===============
+Session_CampaignChapters_f / Session_CampaignChapter_f
+
+The active campaign's chapters, one CAMPAIGN_CHAPTER line each, and starting
+one by its number, as the campaign page does.
+===============
+*/
+#ifndef ID_DEDICATED
+static void Session_CampaignChapters_f( const idCmdArgs &args ) {
+	int count = 0;
+	const sessionChapter_t *chapters = Session_CampaignChapters( count );
+	idStrList saves;
+	const int reached = Session_CampaignChaptersReached( sessLocal, saves );
+	for ( int i = 0; i < count; i++ ) {
+		common->Printf( "CAMPAIGN_CHAPTER %d map=%s filter=%s reached=%d save=%s\n", i + 1, chapters[i].map,
+			chapters[i].entityFilter[0] ? chapters[i].entityFilter : "-", ( reached >> i ) & 1, saves[i].Length() ? saves[i].c_str() : "-" );
+	}
+}
+
+static void Session_CampaignChapter_f( const idCmdArgs &args ) {
+	if ( args.Argc() != 2 ) {
+		common->Printf( "usage: campaignChapter <number>\n" );
+		return;
+	}
+	sessLocal.StartCampaignChapter( atoi( args.Argv( 1 ) ) - 1 );
+}
+#endif
 
 /*
 ===============
@@ -4973,19 +7863,33 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		g_levelloadmusic.GetBool();
 	idStr loadMusic;
 
+	// Why the next segment of a campaign recording begins: the first level of
+	// an armed recording, a save load, a restart (RestartLevelAtSkill) or a level.
+	if ( IsRenderDemoRecording() ) {
+		if ( renderDemoRecordState == RENDER_DEMO_RECORD_ARMED ) {
+			renderDemoNextSegmentReason = "start";
+		} else if ( loadingSaveGame && savegameFile != NULL ) {
+			renderDemoNextSegmentReason = "load";
+		} else if ( renderDemoNextSegmentReason.IsEmpty() ) {
+			renderDemoNextSegmentReason = "level";
+		}
+	}
+
 	loadingAssetQueueActive = false;
 	loadingAssetQueueTotal = 0;
 	loadingAssetQueueLoaded = 0;
 	loadingAssetQueueStartPct = 0.0f;
+	// LoadLoadingGui turns it on when the retained loading screen presents.
+	retainedLoadingActive = false;
+	// The last load's screen may still be held over its join.
+	ClearRetainedLoadingHold();
+
+	// Start each load from a clean pacifier budget so a hitch recorded during the
+	// previous map change cannot keep throttling this one.
+	lastPacifierDrawMsec = 0;
 
 	// close console and remove any prints from the notify lines
 	console->Close();
-
-	if ( IsMultiplayer() ) {
-		// make sure the mp GUI isn't up, or when players get back in the
-		// map, mpGame's menu and the gui will be out of sync.
-		SetGUI( NULL, NULL );
-	}
 
 	// mute sound
 	soundSystem->SetMute( true );
@@ -5022,6 +7926,10 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		// run the wipe to completion
 		CompleteWipe();
 	}
+	if ( IsMultiplayer() ) {
+		// Retire the menu after its final black frame has been presented.
+		SetGUI( NULL, NULL );
+	}
 
 	// extract the map name from serverinfo
 	idStr mapString = mapSpawnData.serverInfo.GetString( "si_map" );
@@ -5034,6 +7942,8 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	// shut down the existing game if it is running
 	UnloadMap();
 	console->SetProcFileOutOfDate( false );
+	// The level's retained documents parse on workers while the level loads.
+	PrefetchRetainedLevel();
 
 	// don't do the deferred caching if we are reloading the same map
 	if ( fullMapName == currentMapName && filterString == currentFilterString ) {
@@ -5045,7 +7955,21 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		lastCheckPoint = -1;
 	}
 	fileSystem->SetAssetLogName( fullMapName.c_str() );
+	// Reset before BeginLevelLoadCache can publish work.  Preload workers add
+	// their reads to this counter, so resetting after the generation starts can
+	// nondeterministically discard bytes already read by a worker.
+	fileSystem->ResetReadCount();
+	idStr levelLoadCacheSettings;
+	Session_BuildLevelLoadCacheSettings( levelLoadCacheSettings );
+#ifdef ID_DEDICATED
+	const char *levelLoadGameMode = "dedicated";
+#else
+	const char *levelLoadGameMode = IsMultiplayer() ? "multiplayer" : "singleplayer";
+#endif
+	fileSystem->BeginLevelLoadCache( fullMapName.c_str(), levelLoadGameMode,
+		filterString.c_str(), levelLoadCacheSettings.c_str() );
 
+	RetainedUI_ClearModelWorlds();
 	if ( !reloadingSameMap && com_SingleDeclFile.GetBool() ) {
 		declManager->FlushDecls();
 		declManager->StartLoadingDecls();
@@ -5064,19 +7988,28 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		}
 	}
 
+	if ( com_showLevelLoadTimes.GetBool() ) common->Printf( "GUI_LEVEL_PURGE_DONE\n" );
 	uiManager->BeginLevelLoad();
-	uiManager->Reload( true );
+	// Every GUI's media resolve again inside the load; an unchanged retained
+	// document keeps its view instead of re-initializing.
+	UI_ReloadForLevelLoad();
+#ifndef ID_DEDICATED
+	// Level-load purging clears media-use marks established at session startup.
+	// Re-reference every in-game menu resource while the normal precache window
+	// is active, keeping the first Escape press free of filesystem work.
+	PrimeMainMenuGuiResources();
+#endif
 
 	// set the loading gui that we will wipe to
 	LoadLoadingGui( mapString );
 
 	// cause prints to force screen updates as a pacifier,
 	// and draw the loading gui instead of game draws
+	openq4::NativeInputBeforeSessionChange();
 	insideExecuteMapChange = true;
 
 	// if this works out we will probably want all the sizes in a def file although this solution will 
 	// work for new maps etc. after the first load. we can also drop the sizes into the default.cfg
-	fileSystem->ResetReadCount();
 	if ( !reloadingSameMap  ) {
 		bytesNeededForMapLoad = GetBytesNeededForMapLoad( mapString.c_str() );
 	} else {
@@ -5105,6 +8038,7 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	int renderWorldMsec = 0;
 	int gameInitMsec = 0;
 	int playerSpawnMsec = 0;
+	int cacheJoinMsec = 0;
 	int mediaFinishMsec = 0;
 	int mediaRenderMsec = 0;
 	int mediaSoundMsec = 0;
@@ -5119,6 +8053,7 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	common->Printf( "Map: %s\n", mapString.c_str() );
 
 	// let the renderSystem load all the geometry
+	SetRetainedLoadingPhase( RETAINED_LOAD_MAP );
 	if ( !rw->InitFromMap( fullMapName ) ) {
 		common->Error( "couldn't load %s", fullMapName.c_str() );
 	}
@@ -5137,9 +8072,11 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	}
 
 	// load and spawn all other entities ( from a savegame possibly )
+	SetRetainedLoadingPhase( RETAINED_LOAD_WORLD );
 	if ( loadingSaveGame && savegameFile ) {
 		if ( game->InitFromSaveGame( fullMapName, rw, sw, savegameFile ) == false ) {
 			// If the loadgame failed, restart the map with the player persistent data
+			openq4::NativeInputBeforeSessionChange();
 			loadingSaveGame = false;
 			fileSystem->CloseFile( savegameFile );
 			savegameFile = NULL;
@@ -5162,14 +8099,21 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	}
 	playerSpawnMsec = Sys_Milliseconds() - phaseStart;
 	phaseStart = Sys_Milliseconds();
+	// The single-player spawn took its HUD and weapon wheel documents.
+	SettleRetainedLevelPrefetch();
+	PrecacheRetainedLevelImages();
+	fileSystem->FinishLevelLoadCache( true );
+	cacheJoinMsec = Sys_Milliseconds() - phaseStart;
+	phaseStart = Sys_Milliseconds();
 
 	// actually purge/load the media
 	int mediaPhaseStart = phaseStart;
 	if ( !reloadingSameMap ) {
 		renderSystem->EndLevelLoad();
+		SetRetainedLoadingPhase( RETAINED_LOAD_FINISHING );
 		mediaRenderMsec = Sys_Milliseconds() - mediaPhaseStart;
 		mediaPhaseStart = Sys_Milliseconds();
-		soundSystem->EndLevelLoad();
+		soundSystem->EndLevelLoad( fullMapName.c_str() );
 		mediaSoundMsec = Sys_Milliseconds() - mediaPhaseStart;
 		mediaPhaseStart = Sys_Milliseconds();
 		declManager->EndLevelLoad();
@@ -5186,6 +8130,7 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	}
 	uiManager->EndLevelLoad();
 	mediaUiMsec = Sys_Milliseconds() - mediaPhaseStart;
+	FS_ReleaseLevelLoadCache();
 	mediaFinishMsec = Sys_Milliseconds() - phaseStart;
 	phaseStart = Sys_Milliseconds();
 
@@ -5199,16 +8144,23 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	}
 	settleMsec = Sys_Milliseconds() - phaseStart;
 
+	// hand back what the load allocated and freed (on glibc it sits in the job
+	// workers' malloc arenas) before play starts
+	phaseStart = Sys_Milliseconds();
+	Sys_ReleaseFreeHeapMemory();
+	const int heapReleaseMsec = Sys_Milliseconds() - phaseStart;
+
 	common->Printf ("-----------------------------------\n");
 
 	int	msec = Sys_Milliseconds() - start;
 	common->Printf( "%6d msec to load %s\n", msec, mapString.c_str() );
 	if ( com_showLevelLoadTimes.GetBool() ) {
 		common->Printf(
-			"Map load phases: renderWorld=%d gameInit=%d playerSpawn=%d mediaFinish=%d settle=%d total=%d msec\n",
+			"Map load phases: renderWorld=%d gameInit=%d playerSpawn=%d cacheJoin=%d mediaFinish=%d settle=%d total=%d msec\n",
 			renderWorldMsec,
 			gameInitMsec,
 			playerSpawnMsec,
+			cacheJoinMsec,
 			mediaFinishMsec,
 			settleMsec,
 			msec );
@@ -5235,6 +8187,7 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 				settleFrameMsec[8],
 				settleFrameMsec[9] );
 		}
+		common->Printf( "Map heap release: %d msec\n", heapReleaseMsec );
 	}
 
 	// let the game trigger interaction generation after the first game frame
@@ -5242,6 +8195,11 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 
 	common->PrintWarnings();
 
+	// The phase line reports the load time once the level is ready, in tenths
+	// of a second as the language writes them (#str_231534, "%d.%d s").
+	const int loadTenths = Max( 0, msec + 50 ) / 100;
+	SetRetainedLoadingPhase( RETAINED_LOAD_READY,
+		va( common->GetLanguageDict()->GetString( "#str_231534" ), loadTenths / 10, loadTenths % 10 ) );
 	if ( guiLoading ) {
 		float pct = idMath::ClampFloat( 0.0f, 1.0f, guiLoading->State().GetFloat( "map_loading" ) );
 		while ( pct < 1.0f ) {
@@ -5256,6 +8214,13 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 			guiLoading->StateChanged( common->GetPresentationTime() );
 			Sys_GenerateEvents();
 			UpdateScreen();
+		}
+		// Diagnostic: the finished loading screen, as the screenshot command
+		// draws it while the load still owns the screen. Console commands do
+		// not run inside a load, so nothing else can capture it.
+		if ( com_captureLoadingScreen.GetBool() ) {
+			static int loadingScreenCaptures = 0;
+			cmdSystem->BufferCommandText( CMD_EXEC_NOW, va( "screenshot \"screenshots/loading_%d.tga\"", ++loadingScreenCaptures ) );
 		}
 	}
 
@@ -5302,6 +8267,10 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 
 				if ( ev.evType == SE_KEY ) {
 					idKeyInput::PreliminaryKeyEvent( ev.evValue, ( ev.evValue2 != 0 ) );
+				} else if ( ev.evType == SE_MOUSE ) {
+					idKeyInput::PreliminaryMouseEvent( ev.evValue, ev.evValue2 );
+				} else if ( ev.evType == SE_JOYSTICK_AXIS ) {
+					idKeyInput::PreliminaryJoystickEvent( ev.evValue2 );
 				}
 
 				if ( ev.evType == SE_CONSOLE ) {
@@ -5330,6 +8299,8 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 				if ( Session_FindPresentationCap() > 0 ) {
 					Session_BeginBlockingLoadPresentationFrame();
 				}
+				// Touching a controller, or the mouse, switches the prompt: the
+				// retained screen's adapter publishes prompt.glyphs as it redraws.
 				UpdateScreen();
 				if ( Session_FindPresentationCap() <= 0 ) {
 					Sys_Sleep( static_cast<int>( idMath::Ceil( common->GetUserCmdMsecFloat() ) ) );
@@ -5352,8 +8323,11 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		Sys_ClearInputEvents();
 	}
 
-	// capture the current screen and start a wipe
-	StartWipe( "gfx/wipes/fade_blend" );
+	// capture the current screen and start a wipe, unless a multiplayer join
+	// keeps the loading screen up for the Welcome card: its fade replaces it
+	if ( !BeginRetainedLoadingHold() ) {
+		StartWipe( "gfx/wipes/fade_blend" );
+	}
 
 	usercmdGen->Clear();
 
@@ -5364,12 +8338,15 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 
 	// don't bother spinning over all the tics we spent loading
 	lastGameTic = latchedTicNumber = com_ticNumber;
+	HandleAppResume( true );
 
 	// remove any prints from the notify lines
 	console->ClearNotifyLines();
 
 	// stop drawing the laoding screen
+	openq4::NativeInputBeforeSessionChange();
 	insideExecuteMapChange = false;
+	retainedLoadingActive = false;
 
 	Sys_SetPhysicalWorkMemory( -1, -1 );
 
@@ -5392,11 +8369,14 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 
 	// we are valid for game draws now
 	mapSpawned = true;
-#ifdef ID_DEDICATED
-	common->Printf( "Dedicated map ready: %s\n", mapString.c_str() );
-#endif
+	if ( IsDedicatedServer() ) {
+		common->Printf( "Dedicated map ready: %s\n", mapString.c_str() );
+	}
 	ResetFramePacingStats();
 	Sys_ClearEvents();
+
+	// A campaign recording resumes with this level as its next segment.
+	ContinueRenderDemoAfterMapChange();
 }
 
 /*
@@ -5474,6 +8454,19 @@ SaveGame_f
 void SaveGame_f( const idCmdArgs &args ) {
 	sessLocal.SaveGame( Session_CommandSaveGameName( args ), Session_CommandSaveGameType( args ) );
 }
+
+// Exercise the existing autosave serializer at a suspended cinematic beat.
+// Normal player saves still obey the cinematic restriction in SaveGame().
+#ifndef ID_DEDICATED
+static void TestAutoSave_f( const idCmdArgs &args ) {
+	if ( args.Argc() != 2 || !cvarSystem->GetCVarBool( "developer" ) ) {
+		common->Printf( "testAutoSave <slot> requires developer 1\n" );
+		return;
+	}
+	const bool saved = sessLocal.SaveGame( args.Argv( 1 ), ST_AUTO );
+	common->Printf( "TEST_AUTOSAVE slot=%s saved=%d\n", args.Argv( 1 ), saved ? 1 : 0 );
+}
+#endif
 
 /*
 ===============
@@ -5623,6 +8616,303 @@ void idSessionLocal::ScrubSaveGameFileName( idStr &saveFileName ) const {
 	}
 }
 
+struct sessionSaveStorageJob_t {
+	std::string path, payload, descriptionPath, description, error;
+	// Destroy/join jobs before releasing the immutable source. The worker only
+	// reads snapshotData; it never calls idFile, VFS or game interfaces.
+	std::unique_ptr<idFile> snapshot;
+	const char *snapshotData = nullptr;
+	bool success = false;
+	unsigned int protectedLength = 0;
+	unsigned int checksum = 0;
+	double msec = 0.0;
+	std::unique_ptr<idJobList> jobs;
+};
+
+// No game, VFS, console or CVar calls are made by commit workers. Renames are
+// durable (see Session_MoveSaveFileDurably) and SDL's exact remove is
+// thread-safe; metadata inspection also rejects nonregular leaf paths and
+// distinguishes a missing file from an access error.
+struct sessionSaveCommitFileOps_t {
+	// Set when a rename happened but its durability barrier was not confirmed.
+	std::string durabilityUnconfirmed;
+	bool Exists( const std::string& path, bool& exists, std::string& error ) {
+		std::error_code code;
+		const auto status = std::filesystem::symlink_status( std::filesystem::u8path( path ), code );
+		if ( status.type() == std::filesystem::file_type::not_found ) { exists = false; return true; }
+		if ( code || !std::filesystem::is_regular_file( status ) ) {
+			error = "cannot inspect regular save file: " + path;
+			return false;
+		}
+		exists = true;
+		return true;
+	}
+	bool Move( const std::string& from, const std::string& to, std::string& error ) {
+		return Session_MoveSaveFileDurably( from, to, durabilityUnconfirmed, error );
+	}
+	bool Remove( const std::string& path, std::string& error ) {
+		bool exists = false;
+		if ( !Exists( path, exists, error ) ) return false;
+		if ( !exists ) return true;
+#if defined( USE_SDL3 )
+		if ( SDL_RemovePath( path.c_str() ) ) return true;
+		error = SDL_GetError();
+#else
+		std::error_code code;
+		std::filesystem::remove( std::filesystem::u8path( path ), code );
+		if ( !code ) return true;
+		error = code.message();
+#endif
+		return false;
+	}
+};
+
+struct sessionSaveCommitJob_t {
+	std::array<openq4::SaveGameTransactionFile, 3> files;
+	openq4::SaveGameTransactionResult result;
+	std::string durabilityUnconfirmed;
+	bool removePreview = false;
+	double msec = 0.0;
+	// Join before releasing any strings/state read by the worker.
+	std::unique_ptr<idJobList> jobs;
+};
+
+#ifndef ID_DEDICATED
+static void Session_CommitCheckpointFiles( const idJobContext& context ) {
+	auto& commit = *static_cast<sessionSaveCommitJob_t*>( context.data );
+	const auto begin = std::chrono::steady_clock::now();
+	try {
+		sessionSaveCommitFileOps_t ops;
+		commit.result = openq4::CommitSaveGame( commit.files, ops, commit.removePreview );
+		commit.durabilityUnconfirmed = ops.durabilityUnconfirmed;
+	} catch ( const std::exception& error ) {
+		// The exact paths and recovery sentinels must survive an interrupted job.
+		commit.result.recoveryNeeded = true;
+		commit.result.error = error.what();
+	}
+	commit.msec = std::chrono::duration<double, std::milli>( std::chrono::steady_clock::now() - begin ).count();
+}
+
+static bool Session_QueueCheckpointCommit( sessionSaveCommitJob_t& commit ) {
+	commit.jobs = jobSystem.CreateJobList( "checkpoint-commit", 1, 0, idJobPriority::LOW );
+	if ( commit.jobs && commit.jobs->AddJob( Session_CommitCheckpointFiles, &commit ) ) {
+		const auto submitted = commit.jobs->Submit();
+		if ( submitted == idJobSubmitResult::ACCEPTED || submitted == idJobSubmitResult::EXECUTED_SYNCHRONOUSLY ) return true;
+	}
+	commit.jobs.reset();
+	return false;
+}
+#endif
+
+struct sessionSavePreviewJob_t {
+	std::string path, error;
+	std::unique_ptr<idJobList> jobs;
+	bool success = false;
+	double msec = 0.0;
+};
+
+// PollSavePreview has closed the renderer's small TGA before this job starts.
+// Persist and verify that exact image off the game thread; ordinary saves and
+// unavailable/disabled workers retain the existing checked synchronous path.
+static void Session_PersistCheckpointPreview( const idJobContext &context ) {
+	sessionSavePreviewJob_t &preview = *static_cast<sessionSavePreviewJob_t *>( context.data );
+	const auto begin = std::chrono::steady_clock::now();
+	constexpr size_t thumbnailBytes = 18 + 320 * 240 * 4;
+	std::string bytes;
+	if ( openq4::DurableReadExact( preview.path, thumbnailBytes, bytes, preview.error ) == openq4::DurableReadResult::Present &&
+		bytes.size() == thumbnailBytes ) {
+		const unsigned char *header = reinterpret_cast<const unsigned char *>( bytes.data() );
+		// This proof is deliberately limited to the renderer's uncompressed,
+		// bottom-up 320x240 BGRA output, not arbitrary save-menu images.
+		const bool valid = header[0] == 0 && header[1] == 0 && header[2] == 2 &&
+			( header[12] | ( header[13] << 8 ) ) == 320 &&
+			( header[14] | ( header[15] << 8 ) ) == 240 && header[16] == 32 && header[17] == 0;
+		if ( valid && openq4::DurableReplaceExact( preview.path, bytes, preview.error ) ) {
+			std::string verified;
+			preview.success = openq4::DurableReadExact( preview.path, thumbnailBytes, verified, preview.error ) == openq4::DurableReadResult::Present &&
+				verified == bytes;
+		}
+	}
+	if ( !preview.success && preview.error.empty() ) preview.error = "checkpoint preview validation or readback failed";
+	preview.msec = std::chrono::duration<double, std::milli>( std::chrono::steady_clock::now() - begin ).count();
+}
+
+static void Session_QueueCheckpointPreview( sessionSavePreviewJob_t &preview ) {
+	if ( !jobSystem.IsInitialized() || jobSystem.IsSynchronous() ) return;
+	preview.jobs = jobSystem.CreateJobList( "checkpoint-preview", 1, 0, idJobPriority::LOW );
+	if ( preview.jobs && preview.jobs->AddJob( Session_PersistCheckpointPreview, &preview ) ) {
+		const idJobSubmitResult submitted = preview.jobs->Submit();
+		if ( submitted == idJobSubmitResult::ACCEPTED || submitted == idJobSubmitResult::EXECUTED_SYNCHRONOUSLY ) return;
+	}
+	preview.jobs.reset();
+}
+
+// No VFS, console, game, renderer or CVar access on this worker. Its exact path
+// and immutable bytes are owned until the job is joined. DurableFile supplies
+// checked writes, sync and native Unicode paths on each supported platform.
+#ifndef ID_DEDICATED
+static void Session_WriteCheckpointPayload( const idJobContext &context ) {
+	sessionSaveStorageJob_t &storage = *static_cast<sessionSaveStorageJob_t *>( context.data );
+	const auto begin = std::chrono::steady_clock::now();
+	if ( storage.snapshotData != nullptr ) {
+		storage.payload.assign( storage.snapshotData, storage.protectedLength );
+	}
+	const unsigned int size = static_cast<unsigned int>( storage.payload.size() );
+	const unsigned int checksum = CRC32_BlockChecksum( storage.payload.data(), static_cast<int>( size ) );
+	storage.protectedLength = size;
+	storage.checksum = checksum;
+	const unsigned int trailer[] = { SESSION_OPENQ4_SAVEGAME_INTEGRITY_MAGIC,
+		SESSION_OPENQ4_SAVEGAME_INTEGRITY_VERSION, size, checksum };
+	for ( unsigned int value : trailer ) {
+		for ( int shift = 0; shift < 32; shift += 8 ) storage.payload.push_back( static_cast<char>( value >> shift ) );
+	}
+	if ( openq4::DurableReplaceExact( storage.path, storage.payload, storage.error ) ) {
+		std::string verified;
+		if ( openq4::DurableReadExact( storage.path, storage.payload.size(), verified, storage.error ) == openq4::DurableReadResult::Present ) {
+			storage.success = verified == storage.payload;
+			if ( !storage.success ) storage.error = "checkpoint payload readback differs from its snapshot";
+		}
+	}
+	if ( storage.success ) {
+		storage.success = openq4::DurableReplaceExact( storage.descriptionPath, storage.description, storage.error );
+		if ( storage.success ) {
+			std::string verified;
+			storage.success = openq4::DurableReadExact( storage.descriptionPath, storage.description.size(), verified, storage.error ) == openq4::DurableReadResult::Present &&
+				verified == storage.description;
+			if ( !storage.success && storage.error.empty() ) storage.error = "checkpoint description readback differs from its snapshot";
+		}
+	}
+	storage.msec = std::chrono::duration<double, std::milli>( std::chrono::steady_clock::now() - begin ).count();
+}
+
+static bool Session_QueueCheckpointStorage( sessionSaveStorageJob_t &storage, idFile *&fileOut, bool copyOnWorker ) {
+	storage.jobs = jobSystem.CreateJobList( "checkpoint-storage", 1, 0, idJobPriority::LOW );
+	if ( copyOnWorker ) {
+		storage.protectedLength = static_cast<unsigned int>( fileOut->Length() );
+		storage.snapshotData = fileOut->GetDataPtr();
+		storage.snapshot.reset( fileOut );
+		fileOut = NULL;
+	} else {
+		storage.payload.assign( fileOut->GetDataPtr(), fileOut->Length() );
+	}
+	if ( storage.jobs && storage.jobs->AddJob( Session_WriteCheckpointPayload, &storage ) ) {
+		const idJobSubmitResult submitted = storage.jobs->Submit();
+		if ( submitted == idJobSubmitResult::ACCEPTED || submitted == idJobSubmitResult::EXECUTED_SYNCHRONOUSLY ) return true;
+	}
+	// No job was accepted. Return ownership to the checked synchronous
+	// fallback without losing or copying the completed snapshot.
+	if ( storage.snapshot ) fileOut = storage.snapshot.release();
+	storage.snapshotData = nullptr;
+	return false;
+}
+#endif
+
+// Game serializers issue many small writes and query the offset for each field.
+// Keep those operations in memory; stdio ftell can query the OS even while its
+// write buffer is populated. The committed bytes and transaction stay identical.
+class sessionSaveSnapshot_t : public idFile_Memory {
+public:
+	explicit sessionSaveSnapshot_t( const char *name ) : idFile_Memory( name ) {
+		// Most checkpoints fit the bounded background-storage payload. Allocate
+		// that much on the first write instead of repeatedly copying live-state
+		// bytes while the game thread builds its snapshot.
+		SetGranularity( static_cast<int>( openq4::DurableFileMaxBytes ) );
+	}
+	virtual int Write( const void *buffer, int length ) {
+		const int limit = SESSION_MAX_SAVEGAME_BYTES - SESSION_OPENQ4_SAVEGAME_INTEGRITY_BYTES;
+		if ( length > 0 && length > limit - Tell() ) {
+			common->Error( "Savegame snapshot exceeds maximum size %d", limit );
+			return 0;
+		}
+		return idFile_Memory::Write( buffer, length );
+	}
+};
+
+class sessionSaveProfile_t {
+public:
+	sessionSaveProfile_t() : enabled( com_saveGameProfile.GetBool() ), count( 0 ), last( enabled ? Sys_GetClockTicks() : 0.0 ) {}
+	void Mark( const char *name ) {
+		if ( enabled && count < 24 ) {
+			const double now = Sys_GetClockTicks();
+			names[count] = name;
+			msec[count++] = ( now - last ) * 1000.0 / Sys_ClockTicksPerSecond();
+			last = now;
+		}
+	}
+	void Report( const char *slot ) const {
+		if ( !enabled ) return;
+		double total = 0.0;
+		for ( int i = 0; i < count; ++i ) {
+			common->Printf( "Save profile: slot=%s phase=%s ms=%.3f\n", slot, names[i], msec[i] );
+			total += msec[i];
+		}
+		common->Printf( "Save profile: slot=%s phase=total ms=%.3f\n", slot, total );
+	}
+	void Resume() { if ( enabled ) last = Sys_GetClockTicks(); }
+private:
+	bool enabled;
+	int count;
+	double last;
+	const char *names[24];
+	double msec[24];
+};
+
+/*
+===============
+idSessionLocal::SaveForSuspension
+
+Android may end a backgrounded app at any time without another call, so
+single player is saved as it leaves the foreground (ui-visual-design.md
+13.6: saves survive process death). The save is the "Suspended" autosave:
+it needs no screenshot, which a backgrounded window cannot draw, it rolls
+over each time and CONTINUE, which resumes the newest save, finds it after a
+restart. Nothing is saved, and no message is shown, where a save would be
+refused or would not resume cleanly: multiplayer, menus over a level that is
+not running, loading, demos, cinematics, death or a failed objective.
+===============
+*/
+static idCVar com_suspendSave( "com_suspendSave", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL,
+	"Android: save single player as 'Suspended' whenever the app goes to the background, so the system ending it there loses no progress" );
+
+bool idSessionLocal::SaveForSuspension( void ) {
+#if defined( __ANDROID__ ) && !defined( ID_DEDICATED )
+	if ( !com_suspendSave.GetBool() || !mapSpawned || insideExecuteMapChange || IsMultiplayer() || readDemo
+			|| IsDemoPlaybackActive() || com_editorActive || game == NULL || idAsyncNetwork::IsActive() ) {
+		return false;
+	}
+	if ( PreyGame_InCinematic() || objectiveFailed || game->GetPersistentPlayerInfo( 0 ).GetInt( "health" ) <= 0
+			|| Sys_GetDriveFreeSpace( cvarSystem->GetCVarString( "fs_savepath" ) ) < 25 ) {
+		common->Printf( "Not saving for the background: the game cannot be saved now\n" );
+		return false;
+	}
+	common->Printf( "Saving 'Suspended' as the app goes to the background\n" );
+	return SaveGame( "Suspended", ST_AUTO );
+#else
+	return false;
+#endif
+}
+
+void Session_SuspendSave( void ) {
+	sessLocal.SaveForSuspension();
+}
+
+/*
+===============
+Session_AppForeground
+
+The SDL pump's return from the Android background. A multiplayer client
+reconnects when the server has dropped it while the app was away, instead of
+waiting out the time-out (ui-visual-design.md 13.6). This runs before the
+frame's network processing: a disconnect the server queued meanwhile must not
+reach the client first, which would end the match behind a message box.
+===============
+*/
+void Session_AppForeground( int suspendedMs ) {
+	if ( idAsyncNetwork::client.IsActive() ) {
+		idAsyncNetwork::client.ApplicationResumed( suspendedMs );
+	}
+}
+
 /*
 ===============
 idSessionLocal::SaveGame
@@ -5633,8 +8923,12 @@ bool idSessionLocal::SaveGame( const char *saveName, saveType_t saveType ) {
 	common->Printf( "Dedicated servers cannot save games.\n" );
 	return false;
 #else
+	FinishPendingSave( true );
+	sessionSaveProfile_t profile;
 	int i;
 	idStr gameFile, previewFile, descriptionFile, tempGameFile, tempPreviewFile, tempDescriptionFile, mapName, saveSlotName, saveSlotFileName;
+	const std::shared_ptr<idFile *> fileState( new idFile *( NULL ) );
+	idFile *&fileOut = *fileState;
 	const idStr previousLastQuicksave = com_lastQuicksave.GetString();
 	const int previousLastCheckPoint = lastCheckPoint;
 	bool generatedSaveName = false;
@@ -5655,11 +8949,15 @@ bool idSessionLocal::SaveGame( const char *saveName, saveType_t saveType ) {
 		return false;
 	}
 
+	if ( com_saveGameProfile.GetInteger() >= 3 ) profile.Mark( "setup-health" );
+
 	if ( Sys_GetDriveFreeSpace( cvarSystem->GetCVarString( "fs_savepath" ) ) < 25 ) {
 		MessageBox( MSG_OK, common->GetLanguageDict()->GetString ( "#str_04313" ), common->GetLanguageDict()->GetString ( "#str_04314" ), true );
 		common->Printf( "Not enough drive space to save the game\n" );
 		return false;
 	}
+
+	if ( com_saveGameProfile.GetInteger() >= 3 ) profile.Mark( "setup-space" );
 
 	if ( objectiveFailed ) {
 		MessageBox( MSG_OK, common->GetLanguageDict()->GetString( "#str_107654" ), common->GetLanguageDict()->GetString( "#str_04312" ), true );
@@ -5702,11 +9000,26 @@ bool idSessionLocal::SaveGame( const char *saveName, saveType_t saveType ) {
 	tempPreviewFile += ".tmp";
 	tempDescriptionFile = descriptionFile;
 	tempDescriptionFile += ".tmp";
+	const std::shared_ptr<sessionSaveOperationGuard_t> operationGuard( new sessionSaveOperationGuard_t( *this, fileState,
+		tempGameFile, tempDescriptionFile, tempPreviewFile,
+		generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint ) );
 
+	if ( com_saveGameProfile.GetInteger() >= 3 ) profile.Mark( "setup-paths" );
+
+	if ( !Session_RecoverInterruptedSaveFiles( gameFile, descriptionFile, previewFile ) ) {
+		common->Warning( "Could not recover interrupted save files for '%s'", gameFile.c_str() );
+		Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
+		syncNextGameFrame = true;
+		soundSystem->SetMute( insideExecuteMapChange );
+		return false;
+	}
+	if ( com_saveGameProfile.GetInteger() >= 3 ) profile.Mark( "setup-recovery" );
 	Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
+	if ( com_saveGameProfile.GetInteger() >= 3 ) profile.Mark( "setup-cleanup" );
 
-	// Open savegame file
-	idFile *fileOut = fileSystem->OpenFileWrite( tempGameFile );
+	// Snapshot live game state on the game thread before touching the payload
+	// file. Only the completed, bounded snapshot is written to staged storage.
+	fileOut = new sessionSaveSnapshot_t( tempGameFile.c_str() );
 	if ( fileOut == NULL ) {
 		common->Warning( "Failed to open save file '%s'\n", tempGameFile.c_str() );
 		Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
@@ -5715,32 +9028,34 @@ bool idSessionLocal::SaveGame( const char *saveName, saveType_t saveType ) {
 		return false;
 	}
 
+	profile.Mark( "setup" );
 	// Write screenshot
-	if ( saveType != ST_AUTO ) {
-		renderSystem->CropRenderSize( 320, 240, false );
+	const bool deferredPreview = saveType == ST_CHECKPOINT && renderSystem->BeginSavePreview();
+	const auto previewStorage = deferredPreview ? std::make_shared<sessionSavePreviewJob_t>() : nullptr;
+	if ( previewStorage ) previewStorage->path = fileSystem->RelativePathToOSPath( tempPreviewFile.c_str(), "fs_savepath" );
+	if ( saveType != ST_AUTO && !deferredPreview ) {
 		if ( rw ) {
 			rw->PushMarkedDefs();
 		}
+		// Declared before the crop, so the crop is popped while still guarded.
+		sessionCaptureDrawGuard_t previewDraw( *this );
+		// The current crop can be smaller than the drawable in legacy
+		// r_screenFraction mode.  Push a physical-size crop so all screen-space
+		// feedback targets see one coherent frame, then restore the prior crop.
+		sessionRenderCropGuard_t previewCrop( renderSystem->GetScreenWidth(), renderSystem->GetScreenHeight() );
 		common->SetRenderableGameFrame( true );
 		game->Draw( 0 );
-		renderSystem->CaptureRenderToFile( tempPreviewFile, true );
-		renderSystem->UnCrop();
+		// The renderer reduces the coherent physical frame after readback.
+		renderSystem->CaptureRenderToFile( tempPreviewFile, true, 320, 240 );
 	}
 
+	profile.Mark( "preview" );
 	mapName = mapSpawnData.serverInfo.GetString( "si_map" );
 
 	// Write the retail-style description sidecar:
 	// slot name, menu display label, preview material, optional no-overwrite marker.
-	idFile *fileDesc = fileSystem->OpenFileWrite( tempDescriptionFile );
-	if ( fileDesc == NULL ) {
-		common->Warning( "Failed to open description file '%s'\n", tempDescriptionFile.c_str() );
-		fileSystem->CloseFile( fileOut );
-		Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
-		Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
-		syncNextGameFrame = true;
-		soundSystem->SetMute( insideExecuteMapChange );
-		return false;
-	}
+	const auto descriptionSnapshot = std::make_shared<idFile_Memory>( tempDescriptionFile.c_str() );
+	idFile *fileDesc = descriptionSnapshot.get();
 
 	idStr escapedSlotName = saveSlotName;
 	Session_EscapeSaveDescription( escapedSlotName );
@@ -5782,19 +9097,10 @@ bool idSessionLocal::SaveGame( const char *saveName, saveType_t saveType ) {
 		descriptionWritten = descriptionWritten && Session_WriteSaveTextLine( fileDesc, SESSION_SAVEGAME_NO_OVERWRITE_TOKEN, false, "description no-overwrite marker", tempDescriptionFile.c_str() );
 	}
 
-	fileSystem->CloseFile( fileDesc );
 	if ( !descriptionWritten ) {
 		common->Warning( "Failed to write description file '%s'\n", tempDescriptionFile.c_str() );
 		fileSystem->CloseFile( fileOut );
-		Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
-		Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
-		syncNextGameFrame = true;
-		soundSystem->SetMute( insideExecuteMapChange );
-		return false;
-	}
-	if ( !Session_ValidateStagedSaveDescription( tempDescriptionFile, saveSlotFileName, saveType ) ) {
-		common->Warning( "Staged save description '%s' failed validation", tempDescriptionFile.c_str() );
-		fileSystem->CloseFile( fileOut );
+		fileOut = NULL;
 		Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
 		Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
 		syncNextGameFrame = true;
@@ -5802,6 +9108,7 @@ bool idSessionLocal::SaveGame( const char *saveName, saveType_t saveType ) {
 		return false;
 	}
 
+	profile.Mark( "description" );
 	// Write SaveGame Header:
 	// Game Name / Version / Map Name / Entity Filter / Persistent Player Info
 	bool headerWritten = true;
@@ -5819,6 +9126,7 @@ bool idSessionLocal::SaveGame( const char *saveName, saveType_t saveType ) {
 	if ( !headerWritten ) {
 		common->Warning( "Failed to write savegame header '%s'\n", tempGameFile.c_str() );
 		fileSystem->CloseFile( fileOut );
+		fileOut = NULL;
 		Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
 		Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
 		syncNextGameFrame = true;
@@ -5827,53 +9135,308 @@ bool idSessionLocal::SaveGame( const char *saveName, saveType_t saveType ) {
 	}
 
 	game->SaveGame( fileOut );
-
-	// close the save game file
-	fileSystem->CloseFile( fileOut );
-
-	if ( !Session_ValidateStagedSaveGameHeader( tempGameFile ) ) {
-		common->Warning( "Staged savegame '%s' failed validation", tempGameFile.c_str() );
-		Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
-		Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
-		syncNextGameFrame = true;
-		soundSystem->SetMute( insideExecuteMapChange );
-		return false;
+	profile.Mark( "serialize" );
+	std::shared_ptr<sessionSaveStorageJob_t> storage;
+	if ( deferredPreview && jobSystem.IsInitialized() && !jobSystem.IsSynchronous() &&
+		fileOut->Length() > 0 && static_cast<size_t>( fileOut->Length() ) <=
+		openq4::DurableFileMaxBytes - SESSION_OPENQ4_SAVEGAME_INTEGRITY_BYTES ) {
+		storage = std::make_shared<sessionSaveStorageJob_t>();
+		storage->path = fileSystem->RelativePathToOSPath( tempGameFile.c_str(), "fs_savepath" );
+		// The former synchronous sidecar open created this directory. A fresh
+		// profile must have its save path before the worker attempts a replace.
+		fileSystem->CreateOSPath( storage->path.c_str() );
+		storage->descriptionPath = fileSystem->RelativePathToOSPath( tempDescriptionFile.c_str(), "fs_savepath" );
+		storage->description.assign( descriptionSnapshot->GetDataPtr(), descriptionSnapshot->Length() );
+		if ( !Session_QueueCheckpointStorage( *storage, fileOut, com_saveGameCopyOnWorker.GetBool() ) ) {
+			storage.reset();
+		}
 	}
+	profile.Mark( "queue-storage" );
 
-	const bool previewReady = ( saveType != ST_AUTO && Session_ValidateStagedSavePreview( tempPreviewFile ) );
-	if ( saveType != ST_AUTO && !previewReady ) {
-		Session_RemoveRelativeSaveFile( tempPreviewFile );
-	}
-	sessionStagedSaveFile_t stagedFiles[3];
-	int numStagedFiles = 0;
-	Session_InitStagedSaveFile( stagedFiles[numStagedFiles++], tempGameFile, gameFile, true );
-	Session_InitStagedSaveFile( stagedFiles[numStagedFiles++], tempDescriptionFile, descriptionFile, true );
-	if ( previewReady ) {
+	// The game thread owns the immutable snapshot and transaction guard across
+	// frames. A checkpoint preview comes from normal presentation; finalization
+	// runs only after readback completes, or after a bounded failure fallback.
+	auto finish = [=]() mutable -> bool {
+		idFile *&fileOut = *fileState;
+		profile.Resume();
+		int stagedProtectedLength = -1;
+		idFile *stagedSnapshot = storage && storage->snapshot ? storage->snapshot.get() : fileOut;
+		const bool stagedSizeValid = Session_GetBoundedSaveGameLength( stagedSnapshot, tempGameFile, "staged write", stagedProtectedLength ) &&
+			stagedProtectedLength <= SESSION_MAX_SAVEGAME_BYTES - SESSION_OPENQ4_SAVEGAME_INTEGRITY_BYTES;
+		if ( !stagedSizeValid ) {
+			if ( stagedProtectedLength > SESSION_MAX_SAVEGAME_BYTES - SESSION_OPENQ4_SAVEGAME_INTEGRITY_BYTES &&
+				 stagedProtectedLength <= SESSION_MAX_SAVEGAME_BYTES ) {
+				common->Warning( "Staged savegame '%s' is %d bytes before its %d-byte integrity trailer (maximum total .save size %d bytes)",
+					tempGameFile.c_str(), stagedProtectedLength, SESSION_OPENQ4_SAVEGAME_INTEGRITY_BYTES, SESSION_MAX_SAVEGAME_BYTES );
+			}
+			fileSystem->CloseFile( fileOut );
+			fileOut = NULL;
+			Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
+			Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
+			syncNextGameFrame = true;
+			soundSystem->SetMute( insideExecuteMapChange );
+			return false;
+		}
+
+		if ( storage ) {
+			fileSystem->CloseFile( fileOut );
+			fileOut = NULL;
+			storage->snapshot.reset();
+			storage->snapshotData = nullptr;
+			if ( !storage->success ) {
+				common->Warning( "Failed to persist checkpoint '%s': %s", gameFile.c_str(), storage->error.c_str() );
+				return false;
+			}
+			if ( com_saveGameProfile.GetBool() ) common->Printf( "Checkpoint storage worker: %.3f ms\n", storage->msec );
+		} else {
+			// Persist the complete snapshot in one bulk write. The existing validation
+			// and payload-last transaction below still gate publication of the slot.
+			idFile *payloadFile = fileSystem->OpenFileWrite( tempGameFile );
+			const bool payloadWritten = payloadFile != NULL &&
+				payloadFile->Write( fileOut->GetDataPtr(), stagedProtectedLength ) == stagedProtectedLength;
+			const bool payloadSynced = payloadWritten && payloadFile->Sync();
+			if ( payloadFile != NULL ) {
+				fileSystem->CloseFile( payloadFile );
+			}
+			fileSystem->CloseFile( fileOut );
+			fileOut = NULL;
+			if ( !payloadSynced ) {
+				common->Warning( "Failed to persist staged savegame '%s'", tempGameFile.c_str() );
+				Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
+				Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
+				syncNextGameFrame = true;
+				soundSystem->SetMute( insideExecuteMapChange );
+				return false;
+			}
+
+			profile.Mark( "payload-sync" );
+			if ( !Session_AppendSaveGameIntegrityTrailer( tempGameFile ) ) {
+				common->Warning( "Failed to protect staged savegame '%s' with an integrity trailer", tempGameFile.c_str() );
+				Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
+				Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
+				syncNextGameFrame = true;
+				soundSystem->SetMute( insideExecuteMapChange );
+				return false;
+			}
+
+		}
+		if ( !storage ) {
+			idFile *descriptionFile = fileSystem->OpenFileWrite( tempDescriptionFile );
+			const bool persisted = descriptionFile != NULL &&
+				descriptionFile->Write( descriptionSnapshot->GetDataPtr(), descriptionSnapshot->Length() ) == descriptionSnapshot->Length() && descriptionFile->Sync();
+			if ( descriptionFile != NULL ) fileSystem->CloseFile( descriptionFile );
+			if ( !persisted ) {
+				common->Warning( "Failed to persist description file '%s'", tempDescriptionFile.c_str() );
+				return false;
+			}
+		}
+		profile.Mark( "integrity" );
+		if ( !Session_ValidateStagedSaveDescription( tempDescriptionFile, saveSlotFileName, saveType ) ) {
+			common->Warning( "Staged save description '%s' failed validation", tempDescriptionFile.c_str() );
+			return false;
+		}
+		bool payloadValid;
+		if ( storage ) {
+			// The joined worker read the persisted file back and compared every
+			// byte with this immutable payload, including its integrity trailer.
+			// Validate the header/footer/trailer against those same bytes and the
+			// worker's calculated CRC, without hashing the full snapshot again on
+			// the game thread. No load or recovery path receives this proof.
+			idFile_Memory verifiedPayload( tempGameFile.c_str(),
+				static_cast<const char *>( storage->payload.data() ),
+				static_cast<int>( storage->payload.size() ) );
+			const sessionVerifiedSaveChecksum_t verifiedChecksum = { &verifiedPayload,
+				static_cast<int>( storage->protectedLength ), storage->checksum };
+			payloadValid = Session_ValidateSaveGameHeader( &verifiedPayload, tempGameFile, &verifiedChecksum );
+		} else {
+			payloadValid = Session_ValidateStagedSaveGameHeader( tempGameFile );
+		}
+		if ( !payloadValid ) {
+			common->Warning( "Staged savegame '%s' failed validation", tempGameFile.c_str() );
+			Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
+			Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
+			syncNextGameFrame = true;
+			soundSystem->SetMute( insideExecuteMapChange );
+			return false;
+		}
+
+		profile.Mark( "validation" );
+		// A joined preview worker has already synchronized and read back these
+		// exact staged bytes. Keep the normal header check, without a second
+		// disk barrier on the game thread. Failed/unsubmitted jobs use the old path.
+		const bool previewPersisted = previewStorage && previewStorage->jobs && previewStorage->success;
+		if ( previewStorage && previewStorage->jobs && com_saveGameProfile.GetBool() ) {
+			common->Printf( "Checkpoint preview worker: %.3f ms verified=%d\n", previewStorage->msec, previewPersisted ? 1 : 0 );
+		}
+		const bool previewReady = ( saveType != ST_AUTO && Session_ValidateStagedSavePreview( tempPreviewFile ) &&
+			( previewPersisted || Session_SyncRelativeSaveFile( tempPreviewFile ) ) );
+		if ( !previewReady ) {
+			Session_RemoveRelativeSaveFile( tempPreviewFile );
+			if ( !Session_CreateSavePreviewDeletionMarker( tempPreviewFile ) ) {
+				common->Warning( "Failed to stage preview deletion marker '%s'", tempPreviewFile.c_str() );
+				Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
+				Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
+				syncNextGameFrame = true;
+				soundSystem->SetMute( insideExecuteMapChange );
+				return false;
+			}
+		}
+		sessionStagedSaveFile_t stagedFiles[3];
+		int numStagedFiles = 0;
+		Session_InitStagedSaveFile( stagedFiles[numStagedFiles++], tempDescriptionFile, descriptionFile, true );
 		Session_InitStagedSaveFile( stagedFiles[numStagedFiles++], tempPreviewFile, previewFile, true );
-	}
+		// The payload is the commit point. Sidecars must be in place before its
+		// final rename so interrupted saves can be recovered deterministically.
+		Session_InitStagedSaveFile( stagedFiles[numStagedFiles++], tempGameFile, gameFile, true );
 
-	if ( !Session_CommitStagedSaveFiles( stagedFiles, numStagedFiles ) ) {
-		Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
-		Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
-		syncNextGameFrame = true;
+		profile.Mark( "preview-sync" );
+		std::shared_ptr<sessionSaveCommitJob_t> commit;
+		if ( deferredPreview && com_saveGameCommitOnWorker.GetBool() && jobSystem.IsInitialized() && !jobSystem.IsSynchronous() ) {
+			commit = std::make_shared<sessionSaveCommitJob_t>();
+			commit->removePreview = !previewReady;
+			for ( int n = 0; n < 3; ++n ) {
+				commit->files[n].temporary = fileSystem->RelativePathToOSPath( stagedFiles[n].tempName.c_str(), "fs_savepath" );
+				commit->files[n].final = fileSystem->RelativePathToOSPath( stagedFiles[n].finalName.c_str(), "fs_savepath" );
+				commit->files[n].backup = fileSystem->RelativePathToOSPath( stagedFiles[n].backupName.c_str(), "fs_savepath" );
+			}
+			if ( !Session_QueueCheckpointCommit( *commit ) ) commit.reset();
+		}
+		if ( commit ) {
+			profile.Mark( "queue-commit" );
+		} else if ( !Session_CommitStagedSaveFiles( stagedFiles, numStagedFiles ) ) {
+			Session_RemoveStagedSaveFiles( tempGameFile, tempDescriptionFile, tempPreviewFile );
+			Session_RestoreGeneratedSaveState( *this, generatedSaveName, saveType, previousLastQuicksave, previousLastCheckPoint );
+			syncNextGameFrame = true;
+			soundSystem->SetMute( insideExecuteMapChange );
+			return false;
+		} else if ( com_saveGameProfile.GetInteger() >= 3 ) {
+			profile.Mark( "commit-files" );
+		}
+
+		auto complete = [=]() mutable -> bool {
+			if ( commit ) {
+				profile.Resume();
+				if ( com_saveGameProfile.GetBool() ) common->Printf( "Checkpoint commit worker: %.3f ms committed=%d cleanup=%d recovery=%d\n",
+					commit->msec, commit->result.committed, commit->result.cleanupComplete, commit->result.recoveryNeeded );
+				if ( !commit->result.committed ) {
+					if ( commit->result.recoveryNeeded ) operationGuard->PreserveRecovery();
+					common->Warning( "Failed to commit checkpoint '%s': %s", gameFile.c_str(), commit->result.error.c_str() );
+					return false;
+				}
+				if ( !commit->result.cleanupComplete ) common->Warning( "Checkpoint cleanup deferred: %s", commit->result.error.c_str() );
+				if ( !commit->durabilityUnconfirmed.empty() ) Session_WarnSaveDurabilityUnconfirmed( commit->durabilityUnconfirmed );
+			}
+			if ( !previewReady && !commit ) Session_RemoveRelativeSaveFile( previewFile );
+			if ( com_saveGameProfile.GetInteger() >= 3 ) profile.Mark( "commit-preview" );
+
+			if ( !deferredPreview ) syncNextGameFrame = true;
+			soundSystem->SetMute( insideExecuteMapChange );
+			if ( com_saveGameProfile.GetInteger() >= 3 ) profile.Mark( "commit-sound" );
+
+			// Prey's v7 idGame has no save-completion notification.
+			if ( com_saveGameProfile.GetInteger() >= 3 ) profile.Mark( "commit-ui" );
+			common->Printf( "Saved '%s'\n", saveSlotName.c_str() );
+			if ( saveType != ST_AUTO && saveType != ST_CHECKPOINT ) {
+				ShowSaveGuiMessage( 1, 3000 );
+			}
+			operationGuard->Complete();
+			retainedNewestSave = time( NULL );
+			profile.Mark( "commit" );
+			profile.Report( saveSlotName.c_str() );
+			return true;
+		};
+		if ( commit ) {
+			// Build the continuation before publishing its job owner. Allocation
+			// failure then joins the local job before the guard cleans staged paths.
+			sessionPendingCheckpoint = std::move( complete );
+			sessionPendingCheckpointCommit = commit;
+			return true;
+		}
+		return complete();
+	};
+	if ( deferredPreview ) {
+		sessionPendingCheckpointPreview = tempPreviewFile;
+		sessionPendingCheckpointSince = Sys_Milliseconds();
+		sessionPendingCheckpointPreviewReady = false;
+		sessionPendingCheckpointStorage = storage;
+		sessionPendingCheckpointPreviewStorage = previewStorage;
+		sessionPendingCheckpoint = finish;
 		soundSystem->SetMute( insideExecuteMapChange );
+		return true;
+	}
+	return finish();
+#endif
+}
+
+bool idSessionLocal::FinishPendingSave( bool wait ) {
+	// UpdateScreen while waiting can refresh a save menu. Defer those reads
+	// instead of recursively entering the same transaction or exposing it.
+	if ( sessionFinishingPendingSave ) return false;
+	struct finishingGuard_t {
+		finishingGuard_t() { sessionFinishingPendingSave = true; }
+		~finishingGuard_t() { sessionFinishingPendingSave = false; }
+	} finishingGuard;
+	while ( sessionPendingCheckpoint ) {
+		if ( !sessionPendingCheckpointPreviewReady ) {
+			const int result = renderSystem->PollSavePreview( sessionPendingCheckpointPreview.c_str() );
+			if ( result != 0 || Sys_Milliseconds() - sessionPendingCheckpointSince >= 2000 ) {
+				sessionPendingCheckpointPreviewReady = true;
+				if ( result == 1 && sessionPendingCheckpointPreviewStorage ) {
+					Session_QueueCheckpointPreview( *sessionPendingCheckpointPreviewStorage );
+				} else if ( result != 1 ) {
+					renderSystem->CancelSavePreview();
+					common->Warning( "Checkpoint preview unavailable; preserving the game snapshot" );
+				}
+			}
+		}
+		const bool storageReady = !sessionPendingCheckpointStorage || sessionPendingCheckpointStorage->jobs->TryWait();
+		const bool previewStorageReady = !sessionPendingCheckpointPreviewStorage || !sessionPendingCheckpointPreviewStorage->jobs ||
+			sessionPendingCheckpointPreviewStorage->jobs->TryWait();
+		const bool commitReady = !sessionPendingCheckpointCommit || sessionPendingCheckpointCommit->jobs->TryWait();
+		if ( !sessionPendingCheckpointPreviewReady || !storageReady || !previewStorageReady || !commitReady ) {
+			if ( !wait ) return false;
+			UpdateScreen( false );
+			Sys_Sleep( 1 );
+			continue;
+		}
+		std::function<bool()> finish = std::move( sessionPendingCheckpoint );
+		sessionPendingCheckpoint = nullptr;
+		sessionPendingCheckpointStorage.reset();
+		sessionPendingCheckpointPreviewStorage.reset();
+		sessionPendingCheckpointCommit.reset();
+		if ( !finish() ) return false;
+		// Validation can enqueue a file transaction. Loading/quitting must wait
+		// through that second stage too; gameplay polling yields until next frame.
+		if ( sessionPendingCheckpoint && !wait ) return false;
+	}
+	return true;
+}
+
+void Session_FinishPendingSave() {
+	sessLocal.FinishPendingSave( true );
+}
+
+/*
+===============
+idSessionLocal::ExecuteSaveGameMapChange
+===============
+*/
+bool idSessionLocal::ExecuteSaveGameMapChange( const char *saveName ) {
+	try {
+		ExecuteMapChange();
+	} catch ( const idException &error ) {
+		// GameLib has unwound its owned restore objects. Stop the session with
+		// normal error policy again, close its file and present a fresh menu.
+		openQ4_saveGameRestore.file = NULL;
+		openQ4_saveGameRestore.layoutBuild = 0;
+		openQ4_saveGameRestore.version = 0;
+		common->Warning( "LoadGame '%s': could not restore saved state: %s", saveName, error.error );
+		Stop();
+		loadGameFailure = LOADGAME_FAILURE_RESTORE;
+		ShowSaveRestoreFailure( saveName );
 		return false;
 	}
-
-	if ( !previewReady ) {
-		Session_RemoveRelativeSaveFile( previewFile );
-	}
-
-	syncNextGameFrame = true;
-	soundSystem->SetMute( insideExecuteMapChange );
-
-	common->Printf( "Saved '%s'\n", saveSlotName.c_str() );
-	if ( saveType != ST_AUTO && saveType != ST_CHECKPOINT ) {
-		ShowSaveGuiMessage( 1, 3000 );
-	}
-
 	return true;
-#endif
 }
 
 /*
@@ -5882,15 +9445,22 @@ idSessionLocal::LoadGame
 ===============
 */
 bool idSessionLocal::LoadGame( const char *saveName, const char *preferredGameDir ) {
+	FinishPendingSave( true );
 #ifdef	ID_DEDICATED
 	common->Printf( "Dedicated servers cannot load games.\n" );
 	return false;
 #else
+	if ( IsDedicatedServer() ) {
+		common->Printf( "Dedicated servers cannot load games.\n" );
+		return false;
+	}
 	int i;
 	int loadedSavegameVersion = 0;
-	idStr in, loadFile, saveMap, gamename, entityFilter, requestedSaveName;
+	idStr in, loadFile, saveMap, gamename, entityFilter, requestedSaveName, normalizedSaveMap, normalizedEntityFilter;
 	idDict loadedPersistentPlayerInfo[MAX_ASYNC_CLIENTS];
 
+	// Each refusal below records why, for the Load Game page to say.
+	loadGameFailure = LOADGAME_FAILURE_UNREADABLE;
 	if ( IsMultiplayer() ) {
 		common->Printf( "Can't load during net play.\n" );
 		return false;
@@ -5929,6 +9499,14 @@ bool idSessionLocal::LoadGame( const char *saveName, const char *preferredGameDi
 
 	in = "savegames/";
 	in += loadFile;
+	idStr descriptionPath = in;
+	descriptionPath.SetFileExtension( ".txt" );
+	idStr previewPath = in;
+	previewPath.SetFileExtension( ".tga" );
+	if ( !Session_RecoverInterruptedSaveFiles( in, descriptionPath, previewPath ) ) {
+		common->Warning( "Could not recover interrupted save files for '%s'", in.c_str() );
+		return false;
+	}
 
 	// Search the active mod first, then openPREY's basepr and the retail base directory.
 	idFile *loadGameFile = Session_OpenSaveGameReadHandle( in.c_str(), preferredGameDir );
@@ -5937,7 +9515,14 @@ bool idSessionLocal::LoadGame( const char *saveName, const char *preferredGameDi
 		common->Warning( "Couldn't open savegame file %s", in.c_str() );
 		return false;
 	}
+	int loadGameFileLength = -1;
+	loadGameFailure = LOADGAME_FAILURE_DAMAGED;
+	if ( !Session_GetBoundedSaveGameLength( loadGameFile, in, "load preflight", loadGameFileLength ) ) {
+		fileSystem->CloseFile( loadGameFile );
+		return false;
+	}
 
+	openq4::NativeInputBeforeSessionChange();
 	loadingSaveGame = false;
 	savegameFile = NULL;
 
@@ -5954,6 +9539,10 @@ bool idSessionLocal::LoadGame( const char *saveName, const char *preferredGameDi
 
 	// version
 	headerValid = headerValid && Session_ReadSaveGameInt( loadGameFile, loadedSavegameVersion, "version", in.c_str() );
+	if ( headerValid && !Session_IsCompatibleSaveGameVersion( loadedSavegameVersion ) ) {
+		common->Warning( "Savegame '%s' has unsupported outer version %d", in.c_str(), loadedSavegameVersion );
+		headerValid = false;
+	}
 
 	// map
 	headerValid = headerValid && Session_ReadSaveGameString( loadGameFile, saveMap, MAX_STRING_CHARS, "map name", in.c_str() );
@@ -5970,48 +9559,65 @@ bool idSessionLocal::LoadGame( const char *saveName, const char *preferredGameDi
 	for ( i = 0; headerValid && i < MAX_ASYNC_CLIENTS; i++ ) {
 		headerValid = Session_ReadSaveGameDict( loadGameFile, loadedPersistentPlayerInfo[i], va( "persistent player info %d", i ), in.c_str() );
 	}
+	sessionSaveGamePayload_t payload = { 0, BUILD_NUMBER, false };
 	if ( headerValid ) {
 		// Reject truncated, stale, or source-incompatible payloads before
 		// ExecuteMapChange tears down the currently running map.
-		headerValid = Session_ValidateSaveGamePayload( loadGameFile, in, true );
+		headerValid = Session_ValidateSaveGamePayload( loadGameFile, in, true, &payload );
+		if ( payload.otherPlatform ) {
+			loadGameFailure = LOADGAME_FAILURE_PLATFORM;
+		}
 	}
 	if ( headerValid && saveMap.IsEmpty() ) {
 		common->Warning( "Savegame '%s' has an empty map name", in.c_str() );
 		headerValid = false;
 	}
+	if ( headerValid ) {
+		Session_NormalizeMapPathAndEntityFilter( saveMap.c_str(), entityFilter.c_str(), normalizedSaveMap, normalizedEntityFilter );
+		if ( !Session_IsSafeNormalizedMapPath( normalizedSaveMap ) ) {
+			common->Warning( "Savegame '%s' has unsafe map path '%s'", in.c_str(), saveMap.c_str() );
+			headerValid = false;
+		} else if ( !Session_SaveGameMapExists( normalizedSaveMap, normalizedEntityFilter ) ) {
+			common->Warning( "Savegame '%s' references unavailable map '%s'", in.c_str(), normalizedSaveMap.c_str() );
+			headerValid = false;
+			loadGameFailure = LOADGAME_FAILURE_MAP;
+		}
+	}
 	if ( !headerValid ) {
 		fileSystem->CloseFile( loadGameFile );
 		return false;
 	}
+	loadGameFailure = LOADGAME_FAILURE_NONE;
 
 	for ( i = 0; i < MAX_ASYNC_CLIENTS; i++ ) {
 		mapSpawnData.persistentPlayerInfo[i] = loadedPersistentPlayerInfo[i];
 	}
 	savegameVersion = loadedSavegameVersion;
 
-	// check the version, if it doesn't match, cancel the loadgame,
-	// but still load the map with the persistant playerInfo from the header
-	// so that the player doesn't lose too much progress.
-	if ( !Session_IsCompatibleSaveGameVersion( savegameVersion ) ) {
-		common->Warning( "Savegame Version mismatch: aborting loadgame and starting level with persistent data" );
-		fileSystem->CloseFile( loadGameFile );
-		loadGameFile = NULL;
-	} else {
-		loadingSaveGame = true;
-		savegameFile = loadGameFile;
-		loadGameFile = NULL;
-	}
+	openq4::NativeInputBeforeSessionChange();
+	loadingSaveGame = true;
+	savegameFile = loadGameFile;
+	loadGameFile = NULL;
 
 	common->DPrintf( "loading a v%d savegame\n", savegameVersion );
 
-	if ( saveMap.Length() > 0 ) {
-		idStr normalizedSaveMap;
-		idStr normalizedEntityFilter;
-		Session_NormalizeMapPathAndEntityFilter( saveMap.c_str(), entityFilter.c_str(), normalizedSaveMap, normalizedEntityFilter );
-		if ( normalizedSaveMap.Length() == 0 ) {
-			normalizedSaveMap = saveMap;
+	// The game reads the payload's GUI records through the engine, which reads
+	// them in the format and layout of the build that wrote it until the
+	// restore ends.
+	struct sessionSaveGameRestoreScope_t {
+		sessionSaveGameRestoreScope_t( const idFile *file, const sessionSaveGamePayload_t &payload ) {
+			openQ4_saveGameRestore.file = file;
+			openQ4_saveGameRestore.layoutBuild = payload.layoutBuild;
+			openQ4_saveGameRestore.version = payload.version;
 		}
+		~sessionSaveGameRestoreScope_t() {
+			openQ4_saveGameRestore.file = NULL;
+			openQ4_saveGameRestore.layoutBuild = 0;
+			openQ4_saveGameRestore.version = 0;
+		}
+	} saveGameRestoreScope( savegameFile, payload );
 
+	if ( saveMap.Length() > 0 ) {
 		// Start loading map
 		mapSpawnData.serverInfo.Clear();
 
@@ -6028,13 +9634,16 @@ bool idSessionLocal::LoadGame( const char *saveName, const char *preferredGameDi
 		// make sure no buttons are pressed
 		mapSpawnData.mapSpawnUsercmd[0].buttons = 0;
 
-		ExecuteMapChange();
+		if ( !ExecuteSaveGameMapChange( requestedSaveName.c_str() ) ) {
+			return false;
+		}
 
 		SetGUI( NULL, NULL );
 	}
 
 	if ( loadingSaveGame ) {
 		fileSystem->CloseFile( savegameFile );
+		openq4::NativeInputBeforeSessionChange();
 		loadingSaveGame = false;
 		savegameFile = NULL;
 	}
@@ -6049,6 +9658,7 @@ idSessionLocal::DeleteGame
 ===============
 */
 bool idSessionLocal::DeleteGame( const char *saveName, const char *preferredGameDir ) {
+	FinishPendingSave( true );
 	if ( saveName == NULL || saveName[0] == '\0' ) {
 		return false;
 	}
@@ -6089,6 +9699,9 @@ bool idSessionLocal::DeleteGame( const char *saveName, const char *preferredGame
 			}
 		}
 		fileSystem->RemoveFile( relativePath.c_str() );
+		// Upstream's staged writes leave .tmp and .prev siblings beside each file.
+		fileSystem->RemoveFile( va( "%s.tmp", relativePath.c_str() ) );
+		fileSystem->RemoveFile( va( "savegames/%s%s.prev", deleteFile.c_str(), extensions[i] ) );
 	}
 	return true;
 }
@@ -6098,11 +9711,33 @@ bool idSessionLocal::DeleteGame( const char *saveName, const char *preferredGame
 idSessionLocal::ProcessEvent
 ===============
 */
+bool idSessionLocal::QueryNativeInputPublication(openq4::NativeSessionPublication& out) const noexcept {
+    if (!Sys_EventDispositionBoundThread()) return false;
+    const auto transition = openq4::NativeInputSessionTransition();
+    openq4::NativeSessionPublication value;
+    value.current = reinterpret_cast<std::uintptr_t>(guiTest ? guiTest : guiActive);
+    value.transition = transition;
+    value.inputAllowed = transition && value.current && !insideExecuteMapChange && !loadingSaveGame &&
+        !com_asyncInput.GetBool() && !openq4::Console_BlocksNativeInput() && !RetainedUI_IsOpen();
+    out = value; return true;
+}
+bool openq4::Session_QueryNativeInputPublication(NativeSessionPublication& out) noexcept {
+    return sessLocal.QueryNativeInputPublication(out);
+}
+bool idSessionLocal::IsGUIActive() const {
+	return guiActive != NULL || guiTest != NULL || RetainedUI_IsOpen();
+}
+
 bool idSessionLocal::ProcessEvent( const sysEvent_t *event ) {
+    if (!NativeInput_SessionCurrent()) return false;
+	if ( event->evType == SE_RETAINED_UI ) return RetainedUI_ProcessEvent( event );
 	// hitting escape anywhere brings up the menu
-	if ( !guiActive && event->evType == SE_KEY && event->evValue2 == 1 &&
-		( event->evValue == K_ESCAPE || event->evValue == K_JOY7 || event->evValue == K_JOY8 ) ) {
+	// openQ4: except with the console down, where Escape first puts away the
+	// console (idConsoleLocal::KeyDownEvent); a second press brings up the menu
+	if ( !guiActive && !guiTest && !RetainedUI_IsOpen() && event->evType == SE_KEY && event->evValue2 == 1 &&
+		( ( event->evValue == K_ESCAPE && !console->Active() ) || event->evValue == K_JOY7 || event->evValue == K_JOY8 ) ) {
 		console->Close();
+		if (!NativeInput_SessionCurrent()) return true;
 		if ( IsDemoPlaybackActive() ) {
 			OpenDemoMenu( false );
 			return true;
@@ -6111,6 +9746,7 @@ bool idSessionLocal::ProcessEvent( const sysEvent_t *event ) {
 			idUserInterface	*gui = NULL;
 			escReply_t		op;
 			op = game->HandleESC( &gui );
+			if (!NativeInput_SessionCurrent()) return true;
 			if ( op == ESC_IGNORE ) {
 				return true;
 			} else if ( op == ESC_GUI ) {
@@ -6124,21 +9760,30 @@ bool idSessionLocal::ProcessEvent( const sysEvent_t *event ) {
 
 	// let the pull-down console take it if desired
 	if ( console->ProcessEvent( event, false ) ) {
+        if (!NativeInput_SessionCurrent()) return true;
+		RetainedUI_FrameInput();
 		return true;
 	}
+    if (!NativeInput_SessionCurrent()) return false;
+	if ( RetainedUI_IsOpen() ) return RetainedUI_ProcessEvent( event );
 
 	// if we are testing a GUI, send all events to it
 	if ( guiTest ) {
 		// hitting escape exits the testgui
 		if ( event->evType == SE_KEY && event->evValue2 == 1 && event->evValue == K_ESCAPE ) {
-			guiTest = NULL;
+			TestGUI( NULL );
 			return true;
 		}
 		
 		static const char *cmd;
 		cmd = guiTest->HandleEvent( event, common->GetPresentationTime() );
+        if (!NativeInput_SessionCurrent()) return true;
 		if ( cmd && cmd[0] ) {
-			common->Printf( "testGui event returned: '%s'\n", cmd );
+			bool closeRequested = false;
+			if ( UI_DispatchApplicationActions( guiTest, cmd, closeRequested ) ) {
+                if (!NativeInput_SessionCurrent()) return true;
+				if ( closeRequested ) TestGUI( NULL );
+			} else common->Printf( "testGui event returned: '%s'\n", cmd );
 		}
 		return true;
 	}
@@ -6172,6 +9817,16 @@ Draw the fade material over everything that has been drawn
 ===============
 */
 void	idSessionLocal::DrawWipeModel() {
+	if ( wipeToBlack ) {
+		const float t = idMath::ClampFloat( 0, 1, ( Sys_Milliseconds() - wipeFadeStarted ) / float( Max( 1, wipeFadeDuration ) ) );
+		if ( !wipeHold && t >= 1 ) return;
+		const bool viewport = renderSystem->GetUseUIViewportFor2D();
+		renderSystem->SetUseUIViewportFor2D( false );
+		renderSystem->SetColor4( 0, 0, 0, t * t * ( 3 - 2 * t ) );
+		renderSystem->DrawStretchPic( 0, 0, 640, 480, 0, 0, 1, 1, declManager->FindMaterial( "_white" ) );
+		renderSystem->SetUseUIViewportFor2D( viewport );
+		return;
+	}
 	int		latchedTic = com_ticNumber;
 
 	if (  wipeStartTic >= wipeStopTic ) {
@@ -6290,8 +9945,9 @@ void idSessionLocal::AdvanceRenderDemo( bool singleFrameOnly ) {
 				StartMenu( false );
 				break;
 			}
-			renderDemoKnownDurationMS = Max( 0,
-				currentDemoRenderView.time - renderDemoStartViewTime );
+			renderDemoKnownDurationMS = renderDemoFrameClock
+				? RenderDemoFramesToMS( numDemoFrames - 1 )
+				: Max( 0, currentDemoRenderView.time - renderDemoStartViewTime );
 			renderDemoDurationName = activeRenderDemoName;
 			if ( numDemoFrames != 1 ) {
 				// if the demo has a single frame (a demoShot), continuously replay
@@ -6318,6 +9974,46 @@ void idSessionLocal::AdvanceRenderDemo( bool singleFrameOnly ) {
 					activeRenderDemoName.c_str() );
 				Stop();
 				StartMenu( false );
+				break;
+			}
+			continue;
+		}
+		if ( ds == DS_SESSION && renderdemoVersion >= OPENQ4_RENDERDEMO_SESSION_VERSION ) {
+			// A campaign recording's header, a level's segment or its clean end.
+			bool finished = false;
+			if ( !ProcessRenderDemoSessionRecord( finished ) ) {
+				common->Warning( "Render demo '%s' contains a malformed session record; playback stopped safely",
+					activeRenderDemoName.c_str() );
+				Stop();
+				StartMenu( false );
+				break;
+			}
+			if ( readDemo == NULL ) {
+				break;
+			}
+			if ( finished ) {
+				// DSC_END: the summary trailer follows, so stop reading here
+				// exactly as the stream's end would. Commands the last game tic
+				// wrote after the last drawn frame are complete; they just have
+				// no frame left to show.
+				renderDemoFramePayloadPending = false;
+				if ( numDemoFrames <= 0 ) {
+					common->Warning( "Render demo '%s' ended without a complete frame; playback stopped safely",
+						activeRenderDemoName.c_str() );
+					Stop();
+					StartMenu( false );
+					break;
+				}
+				renderDemoKnownDurationMS = RenderDemoFramesToMS( numDemoFrames - 1 );
+				renderDemoDurationName = activeRenderDemoName;
+				if ( numDemoFrames != 1 ) {
+					Stop();
+					StartMenu();
+				} else {
+					// A one-frame recording (demoShot) keeps showing its frame,
+					// and never reads past its end again.
+					readDemo->Close();
+				}
 				break;
 			}
 			continue;
@@ -6442,9 +10138,18 @@ idSessionLocal::PacifierUpdate
 ===============
 */
 void idSessionLocal::PacifierUpdate() {
-	if ( !insideExecuteMapChange ) {
+	if ( openQ4_UpdateInitialization() ) return;
+	if ( !insideExecuteMapChange || insidePacifierUpdate ) {
 		return;
 	}
+	// Printing from a loading redraw or network send offers another pacifier
+	// update. The time gate alone cannot prevent recursion when that work takes
+	// longer than the interval: a nested send can mutate an unfinished fragment.
+	struct PacifierScope {
+		bool &active;
+		explicit PacifierScope( bool &flag ) : active( flag ) { active = true; }
+		~PacifierScope() { active = false; }
+	} scope( insidePacifierUpdate );
 
 #ifdef ID_DEDICATED
 	// Dedicated map loads have no client presentation path, but the server
@@ -6467,8 +10172,18 @@ void idSessionLocal::PacifierUpdate() {
 
 	const int time = Sys_Milliseconds();
 	const float minPacifierIntervalMs = Session_GetBlockingLoadFrameIntervalMsec();
+
+	// Charge the previous redraw's own cost against the interval. lastPacifierTime is
+	// stamped after the redraw completes, so this gate measures loading work only; a
+	// slow present path therefore stretches the gap between redraws instead of
+	// consuming the load. Without both halves the gate is already satisfied the
+	// instant a redraw finishes whenever a redraw outlasts its interval, and every
+	// asset read then presents a full frame.
+	const float pacifierIntervalMs = Max( minPacifierIntervalMs,
+		static_cast<float>( lastPacifierDrawMsec ) * SESSION_PACIFIER_DRAW_BUDGET_RATIO );
+
 	int elapsedMs = time - lastPacifierTime;
-	if ( lastPacifierTime != 0 && static_cast<float>( elapsedMs ) < minPacifierIntervalMs ) {
+	if ( lastPacifierTime != 0 && static_cast<float>( elapsedMs ) < pacifierIntervalMs ) {
 		return;
 	}
 
@@ -6476,10 +10191,9 @@ void idSessionLocal::PacifierUpdate() {
 
 	const int presentationTime = common->GetPresentationTime();
 	elapsedMs = presentationTime - lastPacifierTime;
-	if ( static_cast<float>( elapsedMs ) < minPacifierIntervalMs ) {
-		elapsedMs = static_cast<int>( idMath::Ceil( minPacifierIntervalMs ) );
+	if ( static_cast<float>( elapsedMs ) < pacifierIntervalMs ) {
+		elapsedMs = static_cast<int>( idMath::Ceil( pacifierIntervalMs ) );
 	}
-	lastPacifierTime = presentationTime;
 
 	if ( guiLoading ) {
 		float shownPct = idMath::ClampFloat( 0.0f, 1.0f, guiLoading->State().GetFloat( "map_loading" ) );
@@ -6514,6 +10228,8 @@ void idSessionLocal::PacifierUpdate() {
 
 		// Loading bars should be monotonic.
 		targetPct = Max( targetPct, shownPct );
+		PublishRetainedLoadingCount();
+		PublishRetainedLoadingTip( false );
 
 		// Keep progress accurate, but smooth visual jumps when read-count deltas arrive in bursts.
 		const float alpha = idMath::ClampFloat( 0.0f, 1.0f, ( elapsedMs * 0.001f ) * 20.0f );
@@ -6534,7 +10250,13 @@ void idSessionLocal::PacifierUpdate() {
 
 	Sys_GenerateEvents();
 
+	const int drawStartMsec = Sys_Milliseconds();
 	UpdateScreen();
+	lastPacifierDrawMsec = Max( 0, Sys_Milliseconds() - drawStartMsec );
+
+	// Stamp after the redraw, on the same clock the gate above reads, so the redraw's
+	// own cost is never counted as part of the interval it is throttled by.
+	lastPacifierTime = Sys_Milliseconds();
 
 	idAsyncNetwork::client.PacifierUpdate();
 	idAsyncNetwork::server.PacifierUpdate();
@@ -6577,6 +10299,8 @@ void idSessionLocal::ShowSaveGuiMessage( int messageType, int durationMsec, cons
 }
 
 void idSessionLocal::Draw() {
+	if ( guiActive != NULL || mapSpawned ) RetainedUI_EndInitialization();
+	Session_RestoreLoadingBackground();
 	static const int fallbackMenuDelayMs = 3000;
 	const int presentationTime = common->GetPresentationTime();
 	if ( guiDemoMenu != NULL && ( IsDemoPlaybackActive() || guiActive == guiDemoMenu ) ) {
@@ -6595,17 +10319,26 @@ void idSessionLocal::Draw() {
 			guiMsg->Redraw( presentationTime );
 		} 
 	} else if ( guiTest ) {
-		// if testing a gui, clear the screen and draw it
-		// clear the background, in case the tested gui is transparent
-		// NOTE that you can't use this for aviGame recording, it will tick at real presentation time between screenshots..
-		renderSystem->SetColor( colorBlack );
-		renderSystem->DrawStretchPic( 0, 0, 640, 480, 0, 0, 1, 1, declManager->FindMaterial( "_white" ) );
+		// Transparent optical overlays can be checked over a real render target
+		// without synthesizing zoom or other host input. Black remains default.
+		const bool scene = ui_testGuiInGame.GetBool() && mapSpawned && !com_skipGameDraw.GetBool() &&
+			GetLocalClientNum() >= 0 && game->Draw( GetLocalClientNum() );
+		if ( !scene ) {
+			renderSystem->SetColor( colorBlack );
+			renderSystem->DrawStretchPic( 0, 0, 640, 480, 0, 0, 1, 1, declManager->FindMaterial( "_white" ) );
+		}
 		guiTest->Redraw( presentationTime );
 	} else if ( guiActive ) {
 		
 		// draw the frozen gui in the background
 		if ( guiActive == guiMsg && guiMsgRestore ) {
-			guiMsgRestore->Redraw( presentationTime );
+			if ( guiMsgRestore == guiMainMenu && guiRetainedHome != NULL ) {
+				// The retained home that covers the legacy menu stays behind the
+				// box (UpdateRetainedHome), as the legacy menu would.
+				DrawRetainedHome( presentationTime );
+			} else {
+				guiMsgRestore->Redraw( presentationTime );
+			}
 		}
 		
 		// draw the menus full screen
@@ -6619,7 +10352,7 @@ void idSessionLocal::Draw() {
 			// ordinary in-game "gameDraw" path.
 			rw->RenderScene( &currentDemoRenderView );
 			renderSystem->DrawDemoPics();
-		} else if ( guiActive->State().GetBool( "gameDraw" ) ) {
+		} else if ( guiActive == guiSystem || guiActive->State().GetBool( "gameDraw" ) ) {
 			if ( mapSpawned && !com_skipGameDraw.GetBool() && GetLocalClientNum() >= 0 ) {
 				bool gameDraw = game->Draw( GetLocalClientNum() );
 				if ( !gameDraw ) {
@@ -6632,7 +10365,22 @@ void idSessionLocal::Draw() {
 			}
 		}
 
-		guiActive->Redraw( presentationTime );
+		if ( RetainedPageActive() ) {
+			// A retained page over the home that handed off to it.
+			DrawRetainedPageHome( presentationTime );
+		}
+		if ( guiRetainedHome != NULL && guiActive == guiMainMenu ) {
+			// ui_retained: the retained title or pause screen covers the legacy
+			// menu while it rests at home or hands a page over.
+			DrawRetainedHome( presentationTime );
+		} else if ( RetainedMultiplayerCovers() ) {
+			// The multiplayer card covers the game's menu, which keeps its
+			// timelines running unseen; the game view is drawn above.
+			UI_RunTimeEvents( guiActive, presentationTime );
+			guiRetainedMultiplayer->Redraw( presentationTime );
+		} else {
+			guiActive->Redraw( presentationTime );
+		}
 
 		if ( guiActive == guiMainMenu ) {
 			if ( menuIntroBlackoutActive ) {
@@ -6679,19 +10427,27 @@ void idSessionLocal::Draw() {
 			renderSystem->DrawStretchPic( 0, 0, 640, 480, 0, 0, 1, 1, declManager->FindMaterial( "_white" ) );
 		}
 
-		// save off the 2D drawing from the game
+		// save off the 2D drawing from the game, and end the recorded frame:
+		// only gameplay draws make frames, so a recording skips menus,
+		// pauses and loading screens
 		if ( writeDemo ) {
 			renderSystem->WriteDemoPics();
+			renderSystem->WriteDemoEndFrame();
+			renderDemoRecordFrames++;
+		}
+		// A pause screen that just closed releases the softened view.
+		if ( guiRetainedReleasing != NULL ) {
+			guiRetainedReleasing->Redraw( presentationTime );
 		}
 	} else {
 #if ID_CONSOLE_LOCK
 		if ( con_allowConsole.GetBool() ) {
 			drawingFallbackLoadingScreen = true;
-			if ( fallbackMenuStartTime < 0 ) {
-				fallbackMenuStartTime = Sys_Milliseconds();
-			}
+			const bool firstFallback = fallbackMenuStartTime < 0;
 			Session_DrawFallbackLoadingScreen();
-			if ( guiMainMenu != NULL && ( Sys_Milliseconds() - fallbackMenuStartTime ) >= fallbackMenuDelayMs ) {
+			if ( firstFallback ) {
+				fallbackMenuStartTime = Sys_Milliseconds();
+			} else if ( guiMainMenu != NULL && ( Sys_Milliseconds() - fallbackMenuStartTime ) >= fallbackMenuDelayMs ) {
 				StartMenu();
 			}
 		} else {
@@ -6709,11 +10465,15 @@ void idSessionLocal::Draw() {
 #else
 		// when this fallback branch is hit, show loading instead of a full-screen console
 		drawingFallbackLoadingScreen = true;
-		if ( fallbackMenuStartTime < 0 ) {
-			fallbackMenuStartTime = Sys_Milliseconds();
-		}
+		// The watchdog counts from the end of the first fallback frame. That
+		// frame can take seconds (after a renderer change it restores the
+		// menus' resources), and startup commands still waiting, such as a
+		// +devmap, must get a frame to run before the main menu opens.
+		const bool firstFallback = fallbackMenuStartTime < 0;
 		Session_DrawFallbackLoadingScreen();
-		if ( guiMainMenu != NULL && ( Sys_Milliseconds() - fallbackMenuStartTime ) >= fallbackMenuDelayMs ) {
+		if ( firstFallback ) {
+			fallbackMenuStartTime = Sys_Milliseconds();
+		} else if ( guiMainMenu != NULL && ( Sys_Milliseconds() - fallbackMenuStartTime ) >= fallbackMenuDelayMs ) {
 			StartMenu();
 		}
 #endif
@@ -6746,6 +10506,9 @@ void idSessionLocal::Draw() {
 	if ( mapSpawned && !insideExecuteMapChange && !guiActive && !readDemo ) {
 		DrawIAmTheDukeOverlay();
 		Session_DrawLevelshotBounds();
+#ifdef __ANDROID__
+		AndroidTouchControls_Draw();
+#endif
 	}
 
 	if ( guiSubtitles != NULL && mapSpawned && !insideExecuteMapChange && !readDemo ) {
@@ -6762,7 +10525,14 @@ void idSessionLocal::Draw() {
 		guiDemoMenu->Redraw( presentationTime );
 	}
 
+	// A loading screen held over a multiplayer join covers the game and its
+	// menu until the Welcome card presents, and fades out over the card.
+	if ( guiLoadingHold != NULL && !insideExecuteMapChange ) {
+		guiLoadingHold->Redraw( presentationTime );
+	}
+
 	// draw the wipe material on top of this if it hasn't completed yet
+	RetainedUI_Draw();
 	DrawWipeModel();
 	
 	// draw debug graphs
@@ -6781,9 +10551,9 @@ idSessionLocal::UpdateScreen
 */
 void idSessionLocal::UpdateScreen( bool outOfSequence ) {
 
-#ifdef ID_DEDICATED
-	return;
-#endif
+	if ( IsDedicatedServer() ) {
+		return;
+	}
 
 #ifdef _WIN32
 
@@ -6809,16 +10579,25 @@ void idSessionLocal::UpdateScreen( bool outOfSequence ) {
 
 	renderSystem->SetLoadingScreenSwapIntervalBypass( insideExecuteMapChange );
 
+	UI_SettingsRenderFrame settingsFrame;
+	// a running VR session paces this update on the headset and hands the
+	// renderer this frame's swapchain images
+	vrSystem->BeginFrame();
 	renderSystem->BeginFrame( renderSystem->GetScreenWidth(), renderSystem->GetScreenHeight() );
 
 	// draw everything
 	Draw();
+	vrSystem->DrawMenuPointer();
 
+	settingsFrame.Submitting();
 	if ( com_speeds.GetBool() ) {
 		renderSystem->EndFrame( &time_frontend, &time_backend );
 	} else {
 		renderSystem->EndFrame( NULL, NULL );
 	}
+	settingsFrame.Presented();
+	RetainedUI_FrameSubmitted();
+	vrSystem->EndFrame();
 
 	insideUpdateScreen = false;
 }
@@ -6828,22 +10607,60 @@ void idSessionLocal::UpdateScreen( bool outOfSequence ) {
 idSessionLocal::Frame
 ===============
 */
+void idSessionLocal::HandleAppResume( bool afterMapLoad ) {
+#if defined( USE_SDL3 ) && defined( __ANDROID__ )
+	if ( !Sys_SDL_ConsumeAppSuspension() ) return;
+	// Do this outside SDL's event watch: the renderer is current again, and
+	// opening the menu switches off the gameplay sound world before unmuting.
+	if ( !afterMapLoad && mapSpawned && !insideExecuteMapChange && !IsGUIActive() &&
+		 !readDemo && !com_editorActive && !idAsyncNetwork::IsActive() ) {
+		StartMenu();
+	}
+	S_SetDevicePaused( false );
+#else
+	(void)afterMapLoad;
+#endif
+}
+
+/*
+===============
+idSessionLocal::HandleVRFocusLoss
+
+A player whose headset came off, or whose runtime opened its own menu over
+the game, can neither see nor steer: single player pauses on the menu, as
+Escape would, and waits there for them. Multiplayer cannot pause.
+===============
+*/
+void idSessionLocal::HandleVRFocusLoss() {
+	if ( !VR_ConsumeFocusLoss() || !vr_pauseOnFocusLoss.GetBool() ) {
+		return;
+	}
+	if ( mapSpawned && !insideExecuteMapChange && !IsGUIActive() && !readDemo && !com_editorActive && !idAsyncNetwork::IsActive() ) {
+		common->Printf( "VR: the headset lost input focus; single player is paused on the menu\n" );
+		StartMenu();
+	}
+}
+
 void idSessionLocal::Frame() {
-	soundSystem->SetMuteForFocus( Session_ShouldMuteForFocus() );
+	FinishPendingSave( false );
+	HandleAppResume( false );
+	HandleVRFocusLoss();
+	// Re-derive the playing sound world from the current focus state before the
+	// mix runs, so s_muteUnfocused can never leave audio switched off once the
+	// window is back.
+	UpdateSoundWorldFocus();
 	if ( mapSpawned && !insideExecuteMapChange && !readDemo && !writeDemo &&
 		 timeDemo == TD_NO && soundSystem->IsMutedExplicitly() ) {
 		soundSystem->SetMute( false );
 		common->DPrintf( "Session: restored gameplay audio from stale explicit mute state.\n" );
 	}
-	SetPlayingSoundWorld();
+
 	soundSystem->Render();
 
 	// Editors that completely take over the game
 	if ( com_editorActive && ( com_editors & ( EDITOR_RADIANT | EDITOR_GUI ) ) ) {
 		return;
 	}
-
-	const int frameStartMsec = Sys_Milliseconds();
 
 	// if the console is down, we don't need to hold
 	// the mouse cursor
@@ -6958,14 +10775,14 @@ void idSessionLocal::Frame() {
 
 	// advance demos
 	if ( readDemo ) {
-		UpdateFramePacingStats( frameStartMsec, requestedWaitMsec, actualWaitMsec, 0 );
+		UpdateFramePacingStats( requestedWaitMsec, actualWaitMsec, 0 );
 		AdvanceRenderDemo( false );
 		return;
 	}
 
 	//------------ single player game tics --------------
 
-	if ( !mapSpawned || guiActive ) {
+	if ( !mapSpawned || IsGUIActive() ) {
 		if ( !com_asyncInput.GetBool() ) {
 			// early exit, won't do RunGameTic .. but still need to update mouse position for GUIs
 			usercmdGen->GetDirectUsercmd();
@@ -6973,7 +10790,7 @@ void idSessionLocal::Frame() {
 	}
 
 	if ( !mapSpawned ) {
-		UpdateFramePacingStats( frameStartMsec, requestedWaitMsec, actualWaitMsec, 0 );
+		UpdateFramePacingStats( requestedWaitMsec, actualWaitMsec, 0 );
 		return;
 	}
 
@@ -6983,16 +10800,16 @@ void idSessionLocal::Frame() {
 		ExitMenu();
 	}
 
-	if ( guiActive ) {
+	if ( IsGUIActive() ) {
 		lastGameTic = latchedTicNumber;
-		UpdateFramePacingStats( frameStartMsec, requestedWaitMsec, actualWaitMsec, 0 );
+		UpdateFramePacingStats( requestedWaitMsec, actualWaitMsec, 0 );
 		return;
 	}
 
 	// in message box / GUIFrame, idSessionLocal::Frame is used for GUI interactivity
 	// but we early exit to avoid running game frames
 	if ( idAsyncNetwork::IsActive() ) {
-		UpdateFramePacingStats( frameStartMsec, requestedWaitMsec, actualWaitMsec, 0 );
+		UpdateFramePacingStats( requestedWaitMsec, actualWaitMsec, 0 );
 		return;
 	}
 
@@ -7009,7 +10826,12 @@ void idSessionLocal::Frame() {
 		numCmdsToRun = 0;
 	}
 
-	// don't let a long onDemand sound load unsync everything
+	// don't let a long onDemand sound load unsync everything; a recording
+	// runs exactly USERCMD_PER_DEMO_FRAME tics a frame, and skipping tics
+	// under it would fail the fixed-tic check below
+	if ( timeHitch && writeDemo ) {
+		timeHitch = 0;
+	}
 	if ( timeHitch ) {
 		int	skip = common->GetUserCmdTicsForMsecFloor( timeHitch );
 		lastGameTic += skip;
@@ -7081,7 +10903,7 @@ void idSessionLocal::Frame() {
 		}
 	}
 
-	UpdateFramePacingStats( frameStartMsec, requestedWaitMsec, actualWaitMsec, i );
+	UpdateFramePacingStats( requestedWaitMsec, actualWaitMsec, i );
 }
 
 /*
@@ -7206,7 +11028,7 @@ void idSessionLocal::RunGameTic() {
 		} else if ( !idStr::Icmp( args.Argv(0), "died" ) ) {
 			// restart on the same map
 			UnloadMap();
-			SetGUI(guiRestartMenu, NULL);
+			OpenRestartMenu();
 		} else if ( !idStr::Icmp( args.Argv(0), "disconnect" ) ) {
 			cmdSystem->BufferCommandText( CMD_EXEC_INSERT, "stoprecording ; disconnect" );
 		} else if ( !idStr::Icmp( args.Argv(0), "endOfDemo" ) ) {
@@ -7222,6 +11044,44 @@ void idSessionLocal::RunGameTic() {
 		}
 	}
 }
+
+#ifndef ID_DEDICATED
+/*
+===============
+Session_DeclareMultiplayerMenuGameCVars
+
+The create-server menu edits multiplayer settings that only game_mp declares,
+but it is reachable while game_sp is loaded - the module is not swapped until
+spawnServer. A GUI widget resolves its cvar once, when the gui is parsed, and
+idChoiceWindow::InitVars warns and then does nothing at all when the name is
+absent, so those rows would be inert for anyone who reaches multiplayer from a
+cold start or straight out of single player.
+
+Declare them here instead, with the same defaults game_mp uses so its later
+static registration matches. That registration keeps the current value and only
+adopts the reset value and range, so whatever the player picked in the menu is
+what the match starts with.
+===============
+*/
+static void Session_DeclareMultiplayerMenuGameCVars( void ) {
+	struct menuGameCVar_t {
+		const char *name;
+		const char *value;
+	};
+	static const menuGameCVar_t menuGameCVars[] = {
+		{ "bot_minPlayers",	"0" },
+		{ "bot_skill",		"3" }
+	};
+
+	for ( int i = 0; i < (int)( sizeof( menuGameCVars ) / sizeof( menuGameCVars[0] ) ); i++ ) {
+		if ( cvarSystem->Find( menuGameCVars[i].name ) != NULL ) {
+			continue;
+		}
+		cvarSystem->SetCVarString( menuGameCVars[i].name, menuGameCVars[i].value,
+			CVAR_GAME | CVAR_INTEGER | CVAR_ARCHIVE );
+	}
+}
+#endif
 
 /*
 ===============
@@ -7240,15 +11100,25 @@ void idSessionLocal::Init() {
 #ifndef	ID_DEDICATED
 	cmdSystem->AddCommand( "openq4_startSingleplayer", Session_openQ4StartSingleplayer_f, CMD_FL_SYSTEM, "internal helper to start singleplayer after game-module switches" );
 	cmdSystem->AddCommand( "openq4_assertMapState", Session_openQ4AssertMapState_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "asserts the active map and entity filter for validation harnesses" );
+	cmdSystem->AddCommand( "openq4_assertMPGameplayView", Session_openQ4AssertMPGameplayView_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "asserts that multiplayer rendering is not covered by an active session GUI" );
+	cmdSystem->AddCommand( "openq4_assertMenuActivation", Session_openQ4AssertMenuActivation_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "opens the in-game menu and asserts a bounded activation time for validation harnesses" );
 	cmdSystem->AddCommand( "openq4_resumeBakeLightGrids", Session_openQ4ResumeBakeLightGrids_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "internal helper to continue light-grid baking after game-module switches" );
 	cmdSystem->AddCommand( "iamtheduke", Session_IAmTheDuke_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "toggles the SP-only iamtheduke cheat text overlay" );
 	cmdSystem->AddCommand( "bakeLightGrids", Session_BakeLightGrids_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "bakes openPREY-compatible lightgrid metadata and irradiance atlases for the current map or a batch of maps" );
+    cmdSystem->AddCommand( "campaignSelect", Session_CampaignSelect_f, CMD_FL_SYSTEM, "selects a built-in single-player campaign" );
+    cmdSystem->AddCommand( "campaignList", Session_CampaignList_f, CMD_FL_SYSTEM, "reports built-in campaign content readiness without mounting it" );
+    cmdSystem->AddCommand( "campaignMenu", Session_CampaignMenu_f, CMD_FL_SYSTEM, "opens the single-player or campaign selector" );
+    cmdSystem->AddCommand( "campaignChapters", Session_CampaignChapters_f, CMD_FL_SYSTEM, "lists the active campaign's chapters and which are reached" );
+    cmdSystem->AddCommand( "campaignChapter", Session_CampaignChapter_f, CMD_FL_SYSTEM, "starts a reached chapter of the active campaign by its number" );
 	cmdSystem->AddCommand( "map", Session_Map_f, CMD_FL_SYSTEM, "loads a map", idCmdSystem::ArgCompletion_MapName );
 	cmdSystem->AddCommand( "devmap", Session_DevMap_f, CMD_FL_SYSTEM, "loads a map in developer mode", idCmdSystem::ArgCompletion_MapName );
 	cmdSystem->AddCommand( "testmap", Session_TestMap_f, CMD_FL_SYSTEM, "tests a map", idCmdSystem::ArgCompletion_MapName );
+	cmdSystem->AddCommand( "restartLevel", Session_RestartLevel_f, CMD_FL_SYSTEM, "restarts the current single-player level from its beginning: restartLevel [skill 0-4]" );
 	cmdSystem->AddCommand( "framePacingSnapshot", Session_FramePacingSnapshot_f, CMD_FL_SYSTEM, "prints the current frame-pacing diagnostics summary" );
 	cmdSystem->AddCommand( "framePacingReset", Session_FramePacingReset_f, CMD_FL_SYSTEM, "resets frame-pacing diagnostics before a measured window" );
 	cmdSystem->AddCommand( "testWaitBox", Session_TestWaitBox_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "opens a timed wait box and prints frame-pacing stats: testWaitBox <msec> [network 0/1] [reason]" );
+	cmdSystem->AddCommand( "testControllerLoss", Session_TestControllerLoss_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "stands in for a controller's loss (1) or return (0) for the menus' notices" );
+	cmdSystem->AddCommand( "testControlsKey", Session_TestControlsKey_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "stands in for a key pressed on the retained CONTROLS page: testControlsKey <key>" );
 	cmdSystem->AddCommand( "testMessageBox", Session_TestMessageBox_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "opens a timed message box and prints frame-pacing stats: testMessageBox <msec> [network 0/1] [reason]" );
 
 	cmdSystem->AddCommand( "writeCmdDemo", Session_WriteCmdDemo_f, CMD_FL_SYSTEM, "writes a command demo" );
@@ -7275,10 +11145,20 @@ void idSessionLocal::Init() {
 
 	cmdSystem->AddCommand( "demoShot", Session_DemoShot_f, CMD_FL_SYSTEM, "writes a screenshot for a demo" );
 	cmdSystem->AddCommand( "testGUI", Session_TestGUI_f, CMD_FL_SYSTEM, "tests a gui" );
-
+#ifndef ID_DEDICATED
+	cmdSystem->AddCommand( "openq4_retainedGui", Session_RetainedGui_f, CMD_FL_SYSTEM, "inspect a normal retained GUI or submit semantic diagnostics without device input" );
+	cmdSystem->AddCommand( "openq4_summaryChat", Session_SummaryChat_f, CMD_FL_SYSTEM, "type, move the caret in, stop or send the match summary card's chat entry without device input" );
+	cmdSystem->AddCommand( "openq4_system", Session_SystemSettings_f, CMD_FL_SYSTEM, "open, return or inspect the opt-in normal SYSTEM child without device input" );
+	cmdSystem->AddCommand( "ui_retainedStatus", Session_RetainedStatus_f, CMD_FL_SYSTEM, "report the ui_retained gate and the live retained screens" );
+#endif
 #ifndef	ID_DEDICATED
 	cmdSystem->AddCommand( "GuiEvent", Session_GuiEvent_f, CMD_FL_SYSTEM, "sends a named event to the active gui" );
+	cmdSystem->AddCommand( "openq4_guiSet", Session_OpenQ4GuiSet_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "sets an existing active GUI variable for engine-scripted layout validation" );
+	cmdSystem->AddCommand( "openq4_guiGet", Session_OpenQ4GuiGet_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "reports an existing active GUI variable for engine-scripted layout validation" );
+	cmdSystem->AddCommand( "openq4_guiAction", Session_OpenQ4GuiAction_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "runs a classic GUI window's onAction, or onBackAction with back, as a click would, for engine-scripted validation" );
+	cmdSystem->AddCommand( "openq4_browser", Session_OpenQ4Browser_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "reports and exercises main-menu server-browser operations for engine-scripted validation" );
 	cmdSystem->AddCommand( "saveGame", SaveGame_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "saves a game" );
+	cmdSystem->AddCommand( "testAutoSave", TestAutoSave_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "writes a named autosave for developer lifecycle validation" );
 	cmdSystem->AddCommand( "loadGame", LoadGame_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "loads a game", idCmdSystem::ArgCompletion_SaveGame );
 #endif
 
@@ -7288,6 +11168,21 @@ void idSessionLocal::Init() {
 	cmdSystem->AddCommand( "rescanSI", Session_RescanSI_f, CMD_FL_SYSTEM, "internal - rescan serverinfo cvars and tell game" );
 
 	cmdSystem->AddCommand( "hitch", Session_Hitch_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "hitches the game" );
+
+#ifndef ID_DEDICATED
+	// A rejected recoverable restart can leave no device until the next safe
+	// settings frame restores it. Never issue drawing commands into that gap.
+	// The commands above draw nothing, so they register regardless; a
+	// dedicated server never has a device, and spawning a map needs its
+	// worlds below and rescanSI, which copies its settings into the map.
+	// This client is a dedicated server too when its engine starts with
+	// net_serverDedicated 1 (launched with it, or reloaded after turning into
+	// one): like openQ4-ded, it gets the worlds and none of the menus.
+	const bool dedicatedServer = IsDedicatedServer();
+	if ( !dedicatedServer ) {
+		if ( !renderSystem || !renderSystem->IsOpenGLRunning() ) return;
+	}
+#endif
 
 	// the same idRenderWorld will be used for all games
 	// and demos, insuring that level specific models
@@ -7301,33 +11196,63 @@ void idSessionLocal::Init() {
 #ifdef ID_DEDICATED
 	common->Printf( "Dedicated server: skipping client GUI preload.\n" );
 #else
+	if ( dedicatedServer ) {
+		// The menus stay NULL, as Clear() left them; StartMenu and the other
+		// menu paths check for that.
+		common->Printf( "Dedicated server: skipping client GUI preload.\n" );
+	} else {
+		Session_DeclareMultiplayerMenuGameCVars();
+		// The retained screens' documents parse on workers while the stock menus load.
+		PrefetchRetainedScreens();
 #ifndef ID_DEMO_BUILD
-	guiMainMenu = uiManager->FindGui( "guis/mainmenu.gui", true, false, true );
+		guiMainMenu = uiManager->FindGui( "guis/mainmenu.gui", true, false, true );
 #else
-	guiMainMenu = uiManager->FindGui( "guis/demo_mainmenu.gui", true, false, true );
+		guiMainMenu = uiManager->FindGui( "guis/demo_mainmenu.gui", true, false, true );
 #endif
-	guiMainMenu_MapList = uiManager->AllocListGUI();
-	guiMainMenu_MapList->Config( guiMainMenu, "mapList" );
-	idAsyncNetwork::client.serverList.GUIConfig( guiMainMenu, "serverList" );
-	guiRestartMenu = uiManager->FindGui( "guis/restart.gui", true, false, true );
-	guiGameOver = uiManager->CheckGui( "guis/gameover.gui" )
-		? uiManager->FindGui( "guis/gameover.gui", true, false, true )
-		: guiMainMenu;
-	guiMsg = uiManager->FindGui( "guis/msg.gui", true, false, true );
-	guiTakeNotes = uiManager->FindGui( "guis/takeNotes.gui", true, false, true );
-	guiIntro = uiManager->FindGui( "guis/intro.gui", true, false, true );
-	guiSubtitles = uiManager->CheckGui( "guis/subtitles.gui" ) ? uiManager->FindGui( "guis/subtitles.gui", true, false, true ) : NULL;
-	guiSave = uiManager->CheckGui( "guis/save.gui" ) ? uiManager->FindGui( "guis/save.gui", true, false, true ) : NULL;
-	HideSaveGuiMessage();
-	HideSubtitle();
-	InitDemoSystem();
+		// Resolve and retain menu media while the session is initialized. Doing
+		// this synchronously from StartMenu made the first ESC press wait on image,
+		// material, and sound lookup before the GUI could be activated.
+		PrimeMainMenuGuiResources();
+		// An engine reload (a campaign's game directory, an Arena match's module)
+		// preloads the retained screens again: their pictures precache as the
+		// first start's do, never as late loads.
+		const bool retainedInsideLoad = declManager->GetInsideLoad();
+		declManager->SetInsideLoad( true );
+		PreloadRetainedScreens();
+		UI_RetainedPrefetchClear();
+		declManager->SetInsideLoad( retainedInsideLoad );
+		guiMainMenu_MapList = uiManager->AllocListGUI();
+		guiMainMenu_MapList->Config( guiMainMenu, "mapList" );
+		idAsyncNetwork::client.serverList.GUIConfig( guiMainMenu, "serverList" );
+		guiRestartMenu = uiManager->FindGui( "guis/restart.gui", true, false, true );
+		guiGameOver = uiManager->CheckGui( "guis/gameover.gui" )
+			? uiManager->FindGui( "guis/gameover.gui", true, false, true )
+			: guiMainMenu;
+		guiMsg = uiManager->FindGui( "guis/msg.gui", true, false, true );
+		guiTakeNotes = uiManager->FindGui( "guis/takeNotes.gui", true, false, true );
+		guiIntro = uiManager->FindGui( "guis/intro.gui", true, false, true );
+		guiSubtitles = uiManager->CheckGui( "guis/subtitles.gui" ) ? uiManager->FindGui( "guis/subtitles.gui", true, false, true ) : NULL;
+		guiSave = uiManager->CheckGui( "guis/save.gui" ) ? uiManager->FindGui( "guis/save.gui", true, false, true ) : NULL;
+		HideSaveGuiMessage();
+		HideSubtitle();
+		InitDemoSystem();
+		arenaCampaign.Init();
+		// An engine reload (a campaign's game directory, an Arena match's module)
+		// is a load: its levelshots precache now, not on the front end's idle frames.
+		if ( common->IsInitialized() ) {
+			PrecacheRetainedLevelshots( true, true );
+			PrecacheRetainedLevelshots( true, false );
+		}
+	}
 #endif
 
 	whiteMaterial = declManager->FindMaterial( "_white" );
 
 	guiInGame = NULL;
+	openq4::NativeInputBeforeSessionChange();
 	guiTest = NULL;
 
+	openq4::NativeInputBeforeSessionChange();
 	guiActive = NULL;
 	guiHandle = NULL;
 
@@ -7397,15 +11322,51 @@ idSessionLocal::SetPlayingSoundWorld
 ===============
 */
 void idSessionLocal::SetPlayingSoundWorld( idSoundWorld *soundWorld ) {
-	// Focus muting is independent of explicit loading/gameplay mute state. Keep
-	// the selected world alive so a focus regain cannot strand stale silence.
-	soundSystem->SetMuteForFocus( Session_ShouldMuteForFocus() );
-	soundSystem->SetPlayingSoundWorld( soundWorld );
+	// Record what the session actually wants playing and let
+	// UpdateSoundWorldFocus() decide what reaches the sound system. Folding the
+	// focus test straight into the stored world used to latch: a call made while
+	// the window happened to be unfocused - most importantly the one that ends
+	// ExecuteMapChange() - handed the sound system NULL, and nothing re-derived
+	// it afterwards, so the level played out in silence.
+	requestedSoundWorld = soundWorld;
+	UpdateSoundWorldFocus();
+}
+
+/*
+===============
+idSessionLocal::UpdateSoundWorldFocus
+
+Applies the unfocused-silence preference on top of the world the session asked
+for. Called every frame so audio always comes back with the window, even when no
+focus event is delivered (the window was never focused to begin with, the video
+reference was being re-acquired when the world was selected, and so on).
+===============
+*/
+void idSessionLocal::UpdateSoundWorldFocus() {
+	if ( soundSystem == NULL ) {
+		return;
+	}
+
+	idSoundWorld *targetSoundWorld = requestedSoundWorld;
+
+	if ( targetSoundWorld != NULL && Session_ShouldSilenceAudioWhenUnfocused() ) {
+		targetSoundWorld = NULL;
+	}
+
+	soundSystem->SetPlayingSoundWorld( targetSoundWorld );
 }
 
 void idSessionLocal::SetPlayingSoundWorld() {
-	if ( insideExecuteMapChange ||
-		 ( guiActive && ( guiActive == guiMainMenu || guiActive == guiIntro || guiActive == guiLoading || ( guiActive == guiMsg && !mapSpawned ) ) ) ) {
+	const bool systemMenuActive = guiSystem != NULL &&
+		( guiActive == guiSystem || ( guiActive == guiMsg && guiMsgRestore == guiSystem ) );
+	const bool arenaPauseMenuActive = guiActive != NULL &&
+		idStr::Icmp( guiActive->Name(), "guis/arena_pause.gui" ) == 0;
+	// A retained page stands in for a main-menu page, and so does every
+	// retained front-end screen presented without a level: Single Player and
+	// its sub-pages, the Multiplayer page and its sub-pages.
+	if ( insideExecuteMapChange || ( guiActive && ( guiActive == guiMainMenu || systemMenuActive || arenaPauseMenuActive || guiActive == guiIntro || guiActive == guiLoading ||
+			RetainedPageActive() || ( guiActive == guiMsg && !mapSpawned ) ||
+			( !mapSpawned && UI_IsRetainedPath( guiActive->Name() ) ) ) ) ) {
 		SetPlayingSoundWorld( menuSoundWorld );
 	} else {
 		SetPlayingSoundWorld( sw );

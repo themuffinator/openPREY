@@ -217,6 +217,7 @@ public:
 	int						usedMemory;
 
 	bool					isTrmModel;
+	bool					fromGeneratedCache;	// decoded from the generated cache; see PurgeGeneratedCacheModels
 };
 
 /*
@@ -490,6 +491,7 @@ private:			// CollisionMap_load.cpp
 	void			EnsureModelTable( void );
 	void			AddToMapModelReferenceCounts( const char *mapName, int add );
 	void			FreeProcClipModels( void );
+	int				PurgeGeneratedCacheModels( void );
 	void			FreeTrmModelStructure( void );
 	void			DestroyModel( idCollisionModelLocal *model );
 					// model deallocation
@@ -591,12 +593,18 @@ private:			// CollisionMap_files.cpp
 	void			ParseVertices( Lexer *src, idCollisionModelLocal *model );
 	void			ParseEdges( Lexer *src, idCollisionModelLocal *model );
 	void			ParsePolygons( Lexer *src, idCollisionModelLocal *model );
-	void			ParseBrushes( Lexer *src, idCollisionModelLocal *model );
-	bool			ParseCollisionModel( Lexer *src, const char *fileName, unsigned int mapFileCRC );
+	void			ParseBrushes( Lexer *src, idCollisionModelLocal *model, bool retailContentsNames );
+	bool			ParseCollisionModel( Lexer *src, const char *fileName, unsigned int mapFileCRC, bool retailContentsNames );
 	bool			LoadCollisionModelFile( const char *name, unsigned int mapFileCRC );
+					// Private, source-authoritative generated caches.  These are deliberately
+					// separate from the retail-compatible .cm/.cmc authoring path above.
+	bool			LoadGeneratedCollisionCache( const char *sourcePath, unsigned int mapFileCRC,
+										const char *ownerSettings );
+	void			WriteGeneratedCollisionCache( const char *sourcePath, unsigned int mapFileCRC,
+										const char *ownerSettings );
 
 private:			// CollisionMap_debug
-	int				ContentsFromString( const char *string ) const;
+	int				ContentsFromString( const char *string, bool retailNames = false ) const;
 	const char *	StringFromContents( const int contents ) const;
 	void			DrawEdge( idCollisionModelLocal *model, int edgeNum, const idVec3 &origin, const idMat3 &axis );
 	void			DrawPolygon( idCollisionModelLocal *model, cm_polygon_t *p, const idVec3 &origin, const idMat3 &axis,

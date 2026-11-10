@@ -73,6 +73,13 @@ idSoundVoice_Base::idSoundVoice_Base() :
 	innerRadius( 32.0f ),
 	occlusion( 0.0f ),
 	environmentMuffle( 0.0f ),
+	reverbAreaSlot( -1 ),
+	eaxDirectGain( 1.0f ),
+	eaxDirectGainHF( 1.0f ),
+	eaxPrimaryGain( 0.0f ),
+	eaxPrimaryGainHF( 1.0f ),
+	eaxAreaGain( 0.0f ),
+	eaxAreaGainHF( 1.0f ),
 	channelMask( 0 ),
 	innerSampleRangeSqr( 0.0f ),
 	outerSampleRangeSqr( 0.0f )

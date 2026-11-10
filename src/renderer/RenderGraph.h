@@ -102,7 +102,7 @@ public:
 	void Clear( void );
 	bool AddPass( renderPassCategory_t category, const char *name, bool enabled, bool legacyWrapped );
 	bool AddPacketPass( renderPassCategory_t category, const char *name, int drawPackets, int commandPackets );
-	int AddResource( const char *name, renderGraphResourceType_t type, bool imported, bool transient, bool presentable, int aliasGroup );
+	int AddResource( const char *name, renderGraphResourceType_t type, bool imported, bool transient, bool presentable, int aliasGroup, int samples = 1 );
 	int FindResource( const char *name ) const;
 	bool AddPassResource( int passIndex, int resourceIndex, unsigned int access, const char *usage );
 	void SetPacketFrameStats( int scenePackets, int commandPackets, bool overflow );

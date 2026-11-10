@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PLAN_PATH = "docs/dev/plans/2026-06-30-apple-support-no-macos-access.md"
+PLAN_PATH = "docs/dev/archive/2026-10-18/plans/2026-06-30-apple-support-no-macos-access.md"
 
 
 def read(relative_path: str) -> str:
@@ -378,12 +378,12 @@ def validate_upload_and_vertex_cache_static_coverage() -> None:
         "if ( requestedPath == UPLOAD_PATH_DISABLED )",
         "frameBufferCount = 0;",
         "activeRingBytes = requestedPath == UPLOAD_PATH_DISABLED ? 0 : ringBytes",
-        "hasSync = requestedPath != UPLOAD_PATH_DISABLED",
+        "hasSync = requestedPath == UPLOAD_PATH_PERSISTENT && syncAvailable",
     ):
         require(upload_init, token, "disabled renderer upload bridge state")
 
     for token in (
-        "if ( glDeleteBuffersARB != NULL )",
+        "if ( glConfig.isInitialized && glDeleteBuffersARB != NULL )",
         "glDeleteBuffersARB( 1, &vbo )",
         "vbo = 0;",
     ):
@@ -497,13 +497,13 @@ def validate_corridor_lighting_contract() -> None:
     # deformedSurface is an ownership flag that every CPU-skinned MD5 surface
     # carries; it must not stand in for "GPU-posed".
     gpu_posed_body = function_body(source, "static bool RB_SurfaceUsesGPUPosedGeometry( const drawSurf_t *surf ) {")
-    for token in (
-        "primBatchMesh",
-        "skinToModelTransforms",
-        "numSkinToModelTransforms",
-    ):
-        require(gpu_posed_body, token, "GPU-posed geometry predicate")
+    require(gpu_posed_body, "tri->primBatchMesh != NULL || ambientTri->primBatchMesh != NULL",
+            "GPU-posed geometry predicate")
     reject(gpu_posed_body, "deformedSurface", "GPU-posed predicate must not read the ownership flag")
+    # A classicized MD5R surface keeps the skin-to-model table for GPU
+    # skinning's compute pass, but its vertex stream is already posed.
+    reject(gpu_posed_body, "tri->skinToModelTransforms != NULL",
+           "GPU-posed predicate must not treat the compute palette as packed batches")
 
     # The rebuilt self-test has to model the shape the engine really produces.
     receiver_self_test = function_body(source, "bool RB_ShadowMapArb2ReceiverFallbackSelfTest( void ) {")
@@ -511,6 +511,8 @@ def validate_corridor_lighting_contract() -> None:
         "cpuSkinnedGeo.deformedSurface = true;",
         "RB_SurfaceEligibleForShadowMapReceiver( &skinnedReceiver )",
         "gpuPosedGeo.numSkinToModelTransforms = 1;",
+        "gpuPosedGeo.primBatchMesh = reinterpret_cast<rvMesh *>( &gpuPosedBatchToken );",
+        "RB_SurfaceEligibleForShadowMapReceiver( &classicMD5RReceiver )",
         "expectedGeneratedReason",
     ):
         require(receiver_self_test, token, "CPU-skinned receiver self-test")
@@ -600,10 +602,109 @@ def validate_framebuffer_and_profile_diagnostics() -> None:
     )
 
 
+def validate_multisample_gates_ask_the_context() -> None:
+    """glewExperimental sets GLEW_VERSION_3_2 and GLEW_ARB_texture_multisample
+    whenever their entry points resolve, and macOS resolves them for its 2.1
+    legacy context. A limit query gated on them raised GL_INVALID_ENUM at every
+    Apple startup and failed the renderer matrix on both macOS legs, and
+    gfxInfo reported MSAA the context could not deliver."""
+
+    graph_source = read("src/renderer/RenderGraphResources.cpp")
+    graph_init = function_body(
+        graph_source,
+        "void R_RenderGraphResources_Init( const renderBackendCaps_t &caps, const renderFeatureSet_t &features ) {",
+    )
+    require(
+        graph_init,
+        '( caps.glVersion >= 3.2f || GLCapabilityProbe_HasExtension( "GL_ARB_texture_multisample" ) )',
+        "render graph multisample limit gate",
+    )
+
+    image_source = read("src/renderer/OpenGL/gl_Image.cpp")
+    alloc_image = function_body(image_source, "void idImage::AllocImage() {")
+    require(
+        alloc_image,
+        'GLCapabilityProbe_HasExtension( "GL_ARB_texture_multisample" )',
+        "multisample texture allocation gate",
+    )
+
+    # gfxInfo printed "MSAA ... effective=8 reason=active" on that context while
+    # the same log said every multisample texture had been refused.
+    init_source = read("src/renderer/RenderSystem_init.cpp")
+    gfxinfo_aa = function_body(init_source, "static void R_GfxInfoPrintAAState( void ) {")
+    gfxinfo_max_samples = function_body(init_source, "static int R_GfxInfoGLMaxSamples( bool &available ) {")
+    for token in (
+        "const bool textureMSAAAvailable = glTexImage2DMultisample != NULL",
+        "glConfig.backendCaps.glVersion >= 3.2f",
+        'GLCapabilityProbe_HasExtension( "GL_ARB_texture_multisample" )',
+    ):
+        require(gfxinfo_aa, token, "gfxInfo texture MSAA gate")
+    # GL_MAX_SAMPLES is a framebuffer-multisample limit; Apple's 2.1 context
+    # has it through EXT_framebuffer_multisample and ARB_framebuffer_object.
+    for token in (
+        "glConfig.backendCaps.glVersion >= 3.0f",
+        'GLCapabilityProbe_HasExtension( "GL_ARB_framebuffer_object" )',
+        'GLCapabilityProbe_HasExtension( "GL_EXT_framebuffer_multisample" )',
+    ):
+        require(gfxinfo_max_samples, token, "gfxInfo GL_MAX_SAMPLES gate")
+
+    for body, context in (
+        (graph_init, "render graph multisample limit gate"),
+        (alloc_image, "multisample texture allocation gate"),
+        (gfxinfo_aa, "gfxInfo texture MSAA gate"),
+        (gfxinfo_max_samples, "gfxInfo GL_MAX_SAMPLES gate"),
+    ):
+        reject(body, "GLEW_", context)
+
+
+def validate_post_aa_request_keeps_the_window_route() -> None:
+    """Without multisample textures the window is the scene's only multisampled
+    target on Apple's 2.1 context. SMAA needs GLSL 1.30, so a Post AA request
+    the balanced, quality and ultra presets make sent the scene offscreen for
+    nothing and cost it its MSAA. The offscreen route then raised
+    GL_INVALID_FRAMEBUFFER_OPERATION every frame: the soft-particle depth copy
+    blitted into a depth-only framebuffer whose read buffer still named a
+    colour attachment, which GL before 4.1 without ARB_ES2_compatibility
+    calls incomplete."""
+
+    game_render = read("src/game/Game_render.cpp")
+    render_scene = function_body(
+        game_render,
+        "void idGameLocal::RenderScene(const renderView_t *view, idRenderWorld *renderWorld, idCamera* portalSky, int renderFlags) {",
+    )
+    fast_no_post = source_section(render_scene, "const bool canUseFastNoPost =", ";")
+    require(fast_no_post, "!useSMAA", "direct-route Post AA gate")
+    reject(fast_no_post, "wantsSMAA", "direct-route Post AA gate")
+    require(
+        render_scene,
+        "const bool useSMAA = PostAAModeUsesSMAA( postAASchedule.effectiveMode );",
+        "direct-route Post AA gate",
+    )
+
+    image_source = read("src/renderer/Image_load.cpp")
+    depth_copy = function_body(
+        image_source,
+        "bool idImage::CopyDepthbuffer( int x, int y, int imageWidth, int imageHeight,",
+    )
+    depth_fbo_setup = source_section(
+        depth_copy,
+        "if ( r_copyDepthbufferFbo == 0 ) {",
+        "const GLuint copyDepthFbo = r_copyDepthbufferFbo;",
+    )
+    for token in (
+        "glGenFramebuffers( 1, &r_copyDepthbufferFbo );",
+        "glBindFramebuffer( GL_READ_FRAMEBUFFER, r_copyDepthbufferFbo );",
+        "glReadBuffer( GL_NONE );",
+    ):
+        require(depth_fbo_setup, token, "depth-copy framebuffer setup")
+
+
 def main() -> None:
     validate_context_aware_apple_gl21_quirk()
     validate_corridor_lighting_contract()
     validate_framebuffer_and_profile_diagnostics()
+    validate_multisample_gates_ask_the_context()
+    validate_post_aa_request_keeps_the_window_route()
     validate_simple_interaction_fail_closed()
     validate_arb_entrypoint_and_binding_audit()
     validate_upload_and_vertex_cache_static_coverage()

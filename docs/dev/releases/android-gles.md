@@ -1,0 +1,25 @@
+# Android/GLES — integration and release notes
+
+> **Unreleased development notes.** 0.13.2 has no Android APK; the 0.14.0 release was withdrawn. See [release status](../../user/release-status.md).
+
+## Highlights
+
+- **Experimental Android and OpenGL ES 3.0 support**, based on **[Emile Belanger (emileb)](https://github.com/emileb)'s original Android port and GLES renderer**. His contribution includes the SigmaTouch bridge, specialized material shaders, stencil shadows, ETC2/EAC texture compression, and mobile memory/loading improvements.
+- **Matching single-player and multiplayer modules** use the current official engine and game sources, retaining changes made since 0.12.0.
+- **Generated texture and audio caches can live separately from saves**, allowing a mobile host to reclaim cache space without removing player progress.
+- **Animated weapon and in-world displays stay visible** with GPU skinning enabled.
+- **GLES cutout edges and small texture mips render correctly**, including configurations carried over with vertex buffers disabled.
+- **Android upgrades reclaim obsolete extracted packages** after successful installation, while keeping saves separate. APK versions now follow the packaged engine version.
+- **Overlapping SigmaTouch controls retain held actions**, and touch-editor labels initialize after the engine's language data is ready.
+
+## Upgrade notes
+
+- Manual Releases includes an experimental release-signed ARM64 APK from the standalone SDLActivity host, with matching engine, renderer, game modules and runtime packs. The included Gradle project also supports source builds. Players must supply original Quake 4 assets. The standalone app supports ordinary SDL/gamepad input; the external SigmaTouch host library is not included.
+- The initial debug APK contains the complete current runtime packs and is approximately 660 MB, with additional private storage needed to extract those packs. Physical Android device and SigmaTouch host qualification remains open.
+- GLES remains experimental and does not yet provide every advanced effect from the desktop renderers. Desktop OpenGL remains the default; GLES must be selected explicitly on desktop.
+- Generated image caches rebuild once to apply corrected compression padding and cube-map mip headers. The first map load can take longer; saves are unaffected.
+- Read the [Android/GLES build guide](../android-build.md) for dependencies, host integration and validation limits. Do not mix modules or runtime packs from the fork's older 0.12.0-based build with this integration.
+
+## Credit
+
+Thank you to **Emile Belanger (emileb)** for the original [Android/SigmaTouch work](https://github.com/emileb/openQ4/tree/android) and [GLES shader variants](https://github.com/emileb/openQ4/tree/gles-shader-variants). The [integration record](../android-gles-integration.md) documents his contribution, exact source revisions and adaptations for official openQ4.

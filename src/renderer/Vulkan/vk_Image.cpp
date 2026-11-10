@@ -5,7 +5,7 @@
 ===============================================================================
 
 	Vulkan idImage backend (Phase D,
-	docs/dev/plans/2026-07-18-vulkan-phase-d.md).
+	docs/dev/archive/2026-10-18/plans/2026-07-18-vulkan-phase-d.md).
 
 	Implements the idImage GPU half the GL build keeps in
 	OpenGL/gl_Image.cpp. texnum indexes a module-side image table; every
@@ -21,6 +21,7 @@
 
 #include "../../idlib/precompiled.h"
 #pragma hdrstop
+#include "../RendererResourceSettings.h"
 
 #include "../tr_local.h"
 #include "../RenderModuleAPI.h"
@@ -42,6 +43,17 @@
 
 #include "VulkanDevice.h"
 #include "vk_Image.h"
+#include "vk_ExecutorHooks.h"
+
+bool idImage::ReadPixelsRGBA8( idList<byte> &pixels ) {
+	pixels.Clear();
+	if ( !IsLoaded() || opts.textureType != TT_2D || opts.format != FMT_RGBA8
+			|| opts.numMSAASamples != 0 || opts.width < 1 || opts.height < 1
+			|| opts.width > 8192 || opts.height > 8192 ) {
+		return false;
+	}
+	return VK_Exec_ReadImageScreenshot( this, pixels );
+}
 
 extern idCVar image_anisotropy;
 
@@ -52,6 +64,15 @@ Image table
 */
 static vkImageEntry_t vkImages[ VK_MAX_IMAGES ];
 static unsigned int vkImageGenerationCounter = 1;
+static bool vkImageTableWarned = false;
+
+int VK_Image_GetResidentCount( void ) {
+	int count = 0;
+	for ( int i = 0; i < VK_MAX_IMAGES; ++i ) {
+		if ( vkImages[ i ].inUse ) { ++count; }
+	}
+	return count;
+}
 
 vkImageEntry_t *VK_Image_GetEntry( unsigned int texnum ) {
 	if ( texnum == 0xFFFFFFFFu /* TEXTURE_NOT_LOADED */ || texnum >= VK_MAX_IMAGES || !vkImages[ texnum ].inUse ) {
@@ -63,10 +84,14 @@ vkImageEntry_t *VK_Image_GetEntry( unsigned int texnum ) {
 static int VK_Image_AllocSlot( void ) {
 	for ( int i = 0; i < VK_MAX_IMAGES; i++ ) {
 		if ( !vkImages[ i ].inUse ) {
+			vkImageTableWarned = false;
 			return i;
 		}
 	}
-	common->Warning( "Vulkan: image table exhausted (%d)", VK_MAX_IMAGES );
+	if ( !vkImageTableWarned ) {
+		vkImageTableWarned = true;
+		common->Warning( "Vulkan: image table exhausted (%d)", VK_MAX_IMAGES );
+	}
 	return -1;
 }
 
@@ -103,6 +128,10 @@ static bool VK_Image_GetFormatInfo( const idImageOpts &opts,
 	info.expandRgb565 = false;
 
 	switch ( opts.format ) {
+		case FMT_SRGBA8:
+			info.format = VK_FORMAT_R8G8B8A8_SRGB;
+			info.bytesPerBlock = 4;
+			break;
 		case FMT_RGBA8:
 		case FMT_XRGB8:
 			info.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -222,6 +251,8 @@ typedef struct vkSamplerKey_s {
 	textureRepeat_t	repeat;
 	bool			mips;
 	int				anisotropy;
+	int				defaultFilterMode;
+	bool			explicitMipChain;
 } vkSamplerKey_t;
 
 static const int VK_MAX_SAMPLERS = 64;
@@ -229,9 +260,21 @@ static vkSamplerKey_t vkSamplerKeys[ VK_MAX_SAMPLERS ];
 static VkSampler vkSamplers[ VK_MAX_SAMPLERS ];
 static int vkNumSamplers = 0;
 
-static VkSampler VK_Image_GetSampler( textureFilter_t filter, textureRepeat_t repeat, bool mips ) {
+static VkSampler VK_Image_GetSampler( textureFilter_t filter, textureRepeat_t repeat, bool mips,
+		bool explicitMipChain = false ) {
+	const imageFilterState_t defaultFilter = R_GetDefaultImageFilterState();
+	const int defaultFilterMode = filter == TF_DEFAULT ? static_cast<int>( defaultFilter.mode ) : -1;
+	// Explicit linear/nearest filters select the base level even if the image
+	// was uploaded with a mip chain before its sampler state changed. Match
+	// GL_LINEAR/GL_NEAREST so reloadImages cannot change which level is used.
+	// A generated data chain read with explicit LODs is the exception: its
+	// levels are separate data (prefiltered radiance), never a minification.
+	explicitMipChain = explicitMipChain && mips && filter == TF_LINEAR;
+	if ( !explicitMipChain && ( filter != TF_DEFAULT || !defaultFilter.usesMipmaps ) ) {
+		mips = false;
+	}
 	int anisotropy = 0;
-	if ( filter == TF_DEFAULT && mips ) {
+	if ( filter == TF_DEFAULT && mips && defaultFilter.minLinear ) {
 		anisotropy = image_anisotropy.GetInteger();
 		if ( anisotropy < 0 ) {
 			anisotropy = 0;
@@ -243,11 +286,14 @@ static VkSampler VK_Image_GetSampler( textureFilter_t filter, textureRepeat_t re
 
 	for ( int i = 0; i < vkNumSamplers; i++ ) {
 		if ( vkSamplerKeys[ i ].filter == filter && vkSamplerKeys[ i ].repeat == repeat
-				&& vkSamplerKeys[ i ].mips == mips && vkSamplerKeys[ i ].anisotropy == anisotropy ) {
+				&& vkSamplerKeys[ i ].mips == mips && vkSamplerKeys[ i ].anisotropy == anisotropy
+				&& vkSamplerKeys[ i ].defaultFilterMode == defaultFilterMode
+				&& vkSamplerKeys[ i ].explicitMipChain == explicitMipChain ) {
 			return vkSamplers[ i ];
 		}
 	}
 	if ( vkNumSamplers >= VK_MAX_SAMPLERS ) {
+		R_ImagePolicyObserveError( "Vulkan sampler cache exhausted" );
 		common->Warning( "Vulkan: sampler cache exhausted" );
 		return vkSamplers[ 0 ];
 	}
@@ -264,12 +310,12 @@ static VkSampler VK_Image_GetSampler( textureFilter_t filter, textureRepeat_t re
 		case TF_LINEAR:
 			sci.magFilter = VK_FILTER_LINEAR;
 			sci.minFilter = VK_FILTER_LINEAR;
-			sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+			sci.mipmapMode = explicitMipChain ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
 			break;
 		default:	// TF_DEFAULT
-			sci.magFilter = VK_FILTER_LINEAR;
-			sci.minFilter = VK_FILTER_LINEAR;
-			sci.mipmapMode = mips ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+			sci.magFilter = defaultFilter.magLinear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+			sci.minFilter = defaultFilter.minLinear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+			sci.mipmapMode = defaultFilter.mipLinear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
 			break;
 	}
 	sci.maxLod = mips ? VK_LOD_CLAMP_NONE : 0.25f;
@@ -305,7 +351,9 @@ static VkSampler VK_Image_GetSampler( textureFilter_t filter, textureRepeat_t re
 	}
 
 	VkSampler sampler = VK_NULL_HANDLE;
-	if ( vkCreateSampler( vkCtx.device, &sci, NULL, &sampler ) != VK_SUCCESS ) {
+	const VkResult samplerResult = vkCreateSampler( vkCtx.device, &sci, NULL, &sampler );
+	if ( samplerResult != VK_SUCCESS ) {
+		R_ImagePolicyObserveError( "Vulkan sampler creation failed", samplerResult );
 		common->Warning( "Vulkan: sampler creation failed" );
 		return vkNumSamplers > 0 ? vkSamplers[ 0 ] : VK_NULL_HANDLE;
 	}
@@ -313,9 +361,236 @@ static VkSampler VK_Image_GetSampler( textureFilter_t filter, textureRepeat_t re
 	vkSamplerKeys[ vkNumSamplers ].repeat = repeat;
 	vkSamplerKeys[ vkNumSamplers ].mips = mips;
 	vkSamplerKeys[ vkNumSamplers ].anisotropy = anisotropy;
+	vkSamplerKeys[ vkNumSamplers ].defaultFilterMode = defaultFilterMode;
+	vkSamplerKeys[ vkNumSamplers ].explicitMipChain = explicitMipChain;
 	vkSamplers[ vkNumSamplers ] = sampler;
 	vkNumSamplers++;
 	return sampler;
+}
+
+/*
+====================
+VK_Image_AcquireResolveScratch
+
+vkCmdBlitImage cannot read a multisampled source, so a _currentRender capture
+taken while the scene renders into an MSAA target has to be resolved first.
+vkCmdResolveImage demands a destination of the source's exact format with one
+sample, while the capture destination is the front-end's own format, so the
+resolve needs its own storage: this image. It is also the blit's source, hence
+TRANSFER_SRC as well as TRANSFER_DST. One image, reused every frame, recreated
+through the deferred-destroy queue when the render target changes size or
+format, and never entered in the image table because it is never sampled.
+====================
+*/
+static vkImageEntry_t vkResolveScratch;
+
+static void VK_Image_ReleaseResolveScratch( bool deferred ) {
+	if ( vkResolveScratch.image != VK_NULL_HANDLE ) {
+		if ( deferred ) {
+			// an in-flight frame may still be reading it
+			VK_Device_DeferDestroy( vkResolveScratch.image, VK_NULL_HANDLE,
+					VK_NULL_HANDLE, vkResolveScratch.allocation );
+		} else if ( vkCtx.allocator != NULL ) {
+			vmaDestroyImage( vkCtx.allocator, vkResolveScratch.image,
+					vkResolveScratch.allocation );
+		}
+	}
+	memset( &vkResolveScratch, 0, sizeof( vkResolveScratch ) );
+}
+
+/*
+====================
+VK_Image_AcquireDepthResolveScratch
+
+The depth counterpart of the resolve scratch. A multisampled depth attachment
+cannot be blitted or copied into single-sample storage; it has to be resolved
+by a render pass (VK_Exec_ResolveDepthImage), so this image is a depth
+attachment in the source's exact format, and the source of the flipped blit
+into the capture after that. The resolve leaves it shader-readable, hence
+SAMPLED.
+====================
+*/
+static vkImageEntry_t vkDepthResolveScratch;
+
+static void VK_Image_ReleaseDepthResolveScratch( bool deferred ) {
+	if ( vkDepthResolveScratch.image != VK_NULL_HANDLE ) {
+		if ( deferred ) {
+			VK_Device_DeferDestroy( vkDepthResolveScratch.image,
+					vkDepthResolveScratch.attachmentView, VK_NULL_HANDLE,
+					vkDepthResolveScratch.allocation );
+		} else {
+			if ( vkDepthResolveScratch.attachmentView != VK_NULL_HANDLE ) {
+				vkDestroyImageView( vkCtx.device, vkDepthResolveScratch.attachmentView, NULL );
+			}
+			if ( vkCtx.allocator != NULL ) {
+				vmaDestroyImage( vkCtx.allocator, vkDepthResolveScratch.image,
+						vkDepthResolveScratch.allocation );
+			}
+		}
+	}
+	memset( &vkDepthResolveScratch, 0, sizeof( vkDepthResolveScratch ) );
+}
+
+vkImageEntry_t *VK_Image_AcquireDepthResolveScratch( int width, int height,
+		VkFormat format ) {
+	if ( !vkCtx.initialized || width <= 0 || height <= 0
+			|| format == VK_FORMAT_UNDEFINED ) {
+		return NULL;
+	}
+	if ( vkDepthResolveScratch.image != VK_NULL_HANDLE
+			&& vkDepthResolveScratch.width == width
+			&& vkDepthResolveScratch.height == height
+			&& vkDepthResolveScratch.format == format ) {
+		return &vkDepthResolveScratch;
+	}
+	VK_Image_ReleaseDepthResolveScratch( true );
+
+	const VkImageUsageFlags usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+			| VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	const bool hasStencil = format == VK_FORMAT_D16_UNORM_S8_UINT
+			|| format == VK_FORMAT_D24_UNORM_S8_UINT
+			|| format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+
+	VkImageCreateInfo ici;
+	memset( &ici, 0, sizeof( ici ) );
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = format;
+	ici.extent.width = (uint32_t)width;
+	ici.extent.height = (uint32_t)height;
+	ici.extent.depth = 1;
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = usage;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	VmaAllocationCreateInfo vaci;
+	memset( &vaci, 0, sizeof( vaci ) );
+	vaci.usage = VMA_MEMORY_USAGE_AUTO;
+
+	VkImage newImage = VK_NULL_HANDLE;
+	VmaAllocation newAllocation = NULL;
+	if ( vmaCreateImage( vkCtx.allocator, &ici, &vaci,
+			&newImage, &newAllocation, NULL ) != VK_SUCCESS ) {
+		static bool warnedCreate = false;
+		if ( !warnedCreate ) {
+			warnedCreate = true;
+			common->Warning( "Vulkan: depth resolve scratch creation failed (%dx%d fmt %d)",
+					width, height, (int)format );
+		}
+		memset( &vkDepthResolveScratch, 0, sizeof( vkDepthResolveScratch ) );
+		return NULL;
+	}
+
+	VkImageViewCreateInfo vci;
+	memset( &vci, 0, sizeof( vci ) );
+	vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	vci.image = newImage;
+	vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vci.format = format;
+	vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT
+			| ( hasStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0 );
+	vci.subresourceRange.levelCount = 1;
+	vci.subresourceRange.layerCount = 1;
+	VkImageView attachmentView = VK_NULL_HANDLE;
+	if ( vkCreateImageView( vkCtx.device, &vci, NULL, &attachmentView ) != VK_SUCCESS ) {
+		vmaDestroyImage( vkCtx.allocator, newImage, newAllocation );
+		memset( &vkDepthResolveScratch, 0, sizeof( vkDepthResolveScratch ) );
+		return NULL;
+	}
+
+	vkDepthResolveScratch.image = newImage;
+	vkDepthResolveScratch.allocation = newAllocation;
+	vkDepthResolveScratch.view = VK_NULL_HANDLE;
+	vkDepthResolveScratch.attachmentView = attachmentView;
+	vkDepthResolveScratch.sampler = VK_NULL_HANDLE;
+	vkDepthResolveScratch.format = format;
+	vkDepthResolveScratch.usage = usage;
+	vkDepthResolveScratch.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	vkDepthResolveScratch.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+	vkDepthResolveScratch.samples = VK_SAMPLE_COUNT_1_BIT;
+	vkDepthResolveScratch.width = width;
+	vkDepthResolveScratch.height = height;
+	vkDepthResolveScratch.numMips = 1;
+	vkDepthResolveScratch.numLayers = 1;
+	vkDepthResolveScratch.isCube = false;
+	vkDepthResolveScratch.everUploaded = false;
+	vkDepthResolveScratch.inUse = false;
+	vkDepthResolveScratch.generation = 0;
+	return &vkDepthResolveScratch;
+}
+
+vkImageEntry_t *VK_Image_AcquireResolveScratch( int width, int height,
+		VkFormat format ) {
+	if ( !vkCtx.initialized || width <= 0 || height <= 0
+			|| format == VK_FORMAT_UNDEFINED ) {
+		return NULL;
+	}
+	if ( vkResolveScratch.image != VK_NULL_HANDLE
+			&& vkResolveScratch.width == width
+			&& vkResolveScratch.height == height
+			&& vkResolveScratch.format == format ) {
+		return &vkResolveScratch;
+	}
+	VK_Image_ReleaseResolveScratch( true );
+
+	const VkImageUsageFlags usage =
+			VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
+	VkImageCreateInfo ici;
+	memset( &ici, 0, sizeof( ici ) );
+	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.format = format;
+	ici.extent.width = (uint32_t)width;
+	ici.extent.height = (uint32_t)height;
+	ici.extent.depth = 1;
+	ici.mipLevels = 1;
+	ici.arrayLayers = 1;
+	ici.samples = VK_SAMPLE_COUNT_1_BIT;
+	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ici.usage = usage;
+	ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	VmaAllocationCreateInfo vaci;
+	memset( &vaci, 0, sizeof( vaci ) );
+	vaci.usage = VMA_MEMORY_USAGE_AUTO;
+
+	VkImage newImage = VK_NULL_HANDLE;
+	VmaAllocation newAllocation = NULL;
+	if ( vmaCreateImage( vkCtx.allocator, &ici, &vaci,
+			&newImage, &newAllocation, NULL ) != VK_SUCCESS ) {
+		static bool warnedCreate = false;
+		if ( !warnedCreate ) {
+			warnedCreate = true;
+			common->Warning( "Vulkan: capture resolve scratch creation failed (%dx%d fmt %d)",
+					width, height, (int)format );
+		}
+		memset( &vkResolveScratch, 0, sizeof( vkResolveScratch ) );
+		return NULL;
+	}
+
+	vkResolveScratch.image = newImage;
+	vkResolveScratch.allocation = newAllocation;
+	vkResolveScratch.view = VK_NULL_HANDLE;
+	vkResolveScratch.attachmentView = VK_NULL_HANDLE;
+	vkResolveScratch.sampler = VK_NULL_HANDLE;
+	vkResolveScratch.format = format;
+	vkResolveScratch.usage = usage;
+	vkResolveScratch.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	vkResolveScratch.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+	vkResolveScratch.samples = VK_SAMPLE_COUNT_1_BIT;
+	vkResolveScratch.width = width;
+	vkResolveScratch.height = height;
+	vkResolveScratch.numMips = 1;
+	vkResolveScratch.numLayers = 1;
+	vkResolveScratch.isCube = false;
+	vkResolveScratch.everUploaded = false;
+	vkResolveScratch.inUse = false;
+	vkResolveScratch.generation = 0;
+	return &vkResolveScratch;
 }
 
 /*
@@ -326,11 +601,107 @@ Device-shutdown hook: destroys every live image and sampler immediately
 (the device is idle by contract when this runs).
 ====================
 */
+static void VK_Image_ReleaseCubeAttachmentViews( vkImageEntry_t &entry, bool defer ) {
+	for ( int face = 0; face < 6; face++ ) {
+		if ( entry.cubeAttachmentViews[ face ] == VK_NULL_HANDLE ) {
+			continue;
+		}
+		if ( defer ) {
+			VK_Device_DeferDestroy( VK_NULL_HANDLE, entry.cubeAttachmentViews[ face ],
+					VK_NULL_HANDLE, NULL );
+		} else {
+			vkDestroyImageView( vkCtx.device, entry.cubeAttachmentViews[ face ], NULL );
+		}
+		entry.cubeAttachmentViews[ face ] = VK_NULL_HANDLE;
+	}
+}
+
+VkImageView VK_Image_GetAttachmentView( vkImageEntry_t *entry, int cubeFace ) {
+	if ( entry == NULL || !entry->inUse || entry->image == VK_NULL_HANDLE
+			|| cubeFace < 0 || cubeFace >= 6 ) {
+		return VK_NULL_HANDLE;
+	}
+	if ( !entry->isCube ) {
+		return entry->attachmentView;
+	}
+	if ( entry->cubeAttachmentViews[ cubeFace ] == VK_NULL_HANDLE ) {
+		VkImageViewCreateInfo info;
+		memset( &info, 0, sizeof( info ) );
+		info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		info.image = entry->image;
+		info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		info.format = entry->format;
+		info.subresourceRange.aspectMask = entry->aspectMask;
+		info.subresourceRange.levelCount = 1;
+		info.subresourceRange.baseArrayLayer = (uint32_t)cubeFace;
+		info.subresourceRange.layerCount = 1;
+		if ( vkCreateImageView( vkCtx.device, &info, NULL,
+				&entry->cubeAttachmentViews[ cubeFace ] ) != VK_SUCCESS ) {
+			common->Warning( "Vulkan: cubemap attachment view creation failed (face %d)", cubeFace );
+			return VK_NULL_HANDLE;
+		}
+	}
+	return entry->cubeAttachmentViews[ cubeFace ];
+}
+
+bool VK_Image_GetRenderTargetAttachments( const idRenderTexture *target, int cubeFace,
+		vkRenderTargetAttachments_t &attachments ) {
+	memset( &attachments, 0, sizeof( attachments ) );
+	if ( !vkCtx.initialized || target == NULL || cubeFace < 0 || cubeFace >= 6
+			|| target->GetNumColorImages() > VK_MAX_COLOR_ATTACHMENTS
+			|| (uint32_t)target->GetNumColorImages() > vkCtx.deviceProperties.limits.maxColorAttachments
+			|| ( target->GetNumColorImages() == 0 && target->GetDepthImage() == NULL ) ) {
+		return false;
+	}
+	attachments.colorCount = (uint32_t)target->GetNumColorImages();
+	for ( uint32_t i = 0; i <= attachments.colorCount; i++ ) {
+		const bool isDepth = i == attachments.colorCount;
+		idImage *image = isDepth ? target->GetDepthImage() : target->GetColorImage( (int)i );
+		if ( isDepth && image == NULL ) {
+			continue;
+		}
+		vkImageEntry_t *entry = image != NULL ? VK_Image_GetEntry( image->GetDeviceHandle() ) : NULL;
+		const VkImageUsageFlags usage = isDepth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+				: VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+		if ( entry == NULL || ( entry->usage & usage ) == 0 || entry->width <= 0 || entry->height <= 0 ) {
+			return false;
+		}
+		if ( i == 0 ) {
+			attachments.extent.width = (uint32_t)entry->width;
+			attachments.extent.height = (uint32_t)entry->height;
+			attachments.samples = entry->samples;
+		} else if ( attachments.extent.width != (uint32_t)entry->width
+				|| attachments.extent.height != (uint32_t)entry->height
+				|| attachments.samples != entry->samples ) {
+			return false;
+		}
+		for ( uint32_t previous = 0; previous < i; previous++ ) {
+			if ( attachments.colors[ previous ]->image == entry->image ) {
+				return false;
+			}
+		}
+		const VkImageView view = VK_Image_GetAttachmentView( entry, cubeFace );
+		if ( view == VK_NULL_HANDLE ) {
+			return false;
+		}
+		if ( isDepth ) {
+			attachments.depth = entry;
+			attachments.depthView = view;
+		} else {
+			attachments.colors[ i ] = entry;
+			attachments.colorViews[ i ] = view;
+		}
+	}
+	return true;
+}
+
 void VK_Image_ShutdownAll( void ) {
+	R_RenderThread_Sync( "image" );
 	for ( int i = 0; i < VK_MAX_IMAGES; i++ ) {
 		if ( !vkImages[ i ].inUse ) {
 			continue;
 		}
+		VK_Image_ReleaseCubeAttachmentViews( vkImages[ i ], false );
 		if ( vkImages[ i ].view != VK_NULL_HANDLE ) {
 			vkDestroyImageView( vkCtx.device, vkImages[ i ].view, NULL );
 		}
@@ -343,6 +714,8 @@ void VK_Image_ShutdownAll( void ) {
 		}
 		memset( &vkImages[ i ], 0, sizeof( vkImages[ i ] ) );
 	}
+	VK_Image_ReleaseResolveScratch( false );
+	VK_Image_ReleaseDepthResolveScratch( false );
 	for ( int i = 0; i < vkNumSamplers; i++ ) {
 		vkDestroySampler( vkCtx.device, vkSamplers[ i ], NULL );
 	}
@@ -355,9 +728,12 @@ idImage::PurgeImage
 ====================
 */
 void idImage::PurgeImage( void ) {
+	if ( !R_ImagePolicyContentMutation() ) return;
+	R_RenderThread_Sync( "image" );
 	vkImageEntry_t *entry = VK_Image_GetEntry( texnum );
 	if ( entry != NULL ) {
 		// the image may still be referenced by an in-flight frame
+		VK_Image_ReleaseCubeAttachmentViews( *entry, true );
 		VK_Device_DeferDestroy( entry->image, entry->view, VK_NULL_HANDLE, entry->allocation,
 				entry->attachmentView != entry->view ? entry->attachmentView : VK_NULL_HANDLE );
 		memset( entry, 0, sizeof( *entry ) );
@@ -440,6 +816,10 @@ exactly like the GL half without a context; the InitOpenGL seam reloads.
 ====================
 */
 void idImage::AllocImage( void ) {
+	renderImageOperation_t imageOperation( this );
+	if ( !imageOperation.Allowed() ) return;
+	R_RenderThread_Sync( "image" );
+
 	PurgeImage();
 	storageGeneration++;
 
@@ -478,11 +858,14 @@ void idImage::AllocImage( void ) {
 		imageUsage |= isDepth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
 				: VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 	}
-	const VkImageCreateFlags imageFlags =
+	VkImageCreateFlags imageFlags =
 			isCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
 	const VkSampleCountFlagBits samples = VK_Image_SelectSampleCount(
 			opts, info.format, attachmentAspect, imageUsage, imageFlags,
 			attachmentCapable );
+	if ( isDepth && ( vkCtx.sampleLocationCounts & samples ) != 0 ) {
+		imageFlags |= VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
+	}
 	opts.numMSAASamples = VK_Image_SampleCountInteger( samples );
 	const int numMips = samples == VK_SAMPLE_COUNT_1_BIT
 			? ( opts.numLevels > 0 ? opts.numLevels : 1 ) : 1;
@@ -514,7 +897,9 @@ void idImage::AllocImage( void ) {
 	vkImageEntry_t &entry = vkImages[ slot ];
 	memset( &entry, 0, sizeof( entry ) );
 
-	if ( vmaCreateImage( vkCtx.allocator, &ici, &vaci, &entry.image, &entry.allocation, NULL ) != VK_SUCCESS ) {
+	const VkResult imageResult = vmaCreateImage( vkCtx.allocator, &ici, &vaci, &entry.image, &entry.allocation, NULL );
+	if ( imageResult != VK_SUCCESS ) {
+		R_ImagePolicyObserveError( "Vulkan image resource creation failed", imageResult );
 		common->Warning( "Vulkan: image creation failed (%dx%d fmt %d)", opts.width, opts.height, (int)opts.format );
 		return;
 	}
@@ -529,7 +914,9 @@ void idImage::AllocImage( void ) {
 	ivci.subresourceRange.aspectMask = sampledAspect;
 	ivci.subresourceRange.levelCount = (uint32_t)numMips;
 	ivci.subresourceRange.layerCount = isCube ? 6 : 1;
-	if ( vkCreateImageView( vkCtx.device, &ivci, NULL, &entry.view ) != VK_SUCCESS ) {
+	const VkResult viewResult = vkCreateImageView( vkCtx.device, &ivci, NULL, &entry.view );
+	if ( viewResult != VK_SUCCESS ) {
+		R_ImagePolicyObserveError( "Vulkan image resource creation failed", viewResult );
 		common->Warning( "Vulkan: image view creation failed" );
 		vmaDestroyImage( vkCtx.allocator, entry.image, entry.allocation );
 		memset( &entry, 0, sizeof( entry ) );
@@ -538,7 +925,9 @@ void idImage::AllocImage( void ) {
 	entry.attachmentView = entry.view;
 	if ( attachmentAspect != sampledAspect ) {
 		ivci.subresourceRange.aspectMask = attachmentAspect;
-		if ( vkCreateImageView( vkCtx.device, &ivci, NULL, &entry.attachmentView ) != VK_SUCCESS ) {
+		const VkResult attachmentResult = vkCreateImageView( vkCtx.device, &ivci, NULL, &entry.attachmentView );
+	if ( attachmentResult != VK_SUCCESS ) {
+		R_ImagePolicyObserveError( "Vulkan image resource creation failed", attachmentResult );
 			common->Warning( "Vulkan: depth/stencil attachment view creation failed" );
 			vkDestroyImageView( vkCtx.device, entry.view, NULL );
 			vmaDestroyImage( vkCtx.allocator, entry.image, entry.allocation );
@@ -561,8 +950,11 @@ void idImage::AllocImage( void ) {
 	entry.everUploaded = false;
 	entry.generation = vkImageGenerationCounter++;
 	entry.sampler = VK_Image_GetSampler( filter, repeat, numMips > 1 );
+	if ( entry.sampler == VK_NULL_HANDLE ) R_ImagePolicyObserveError( "Vulkan image sampler creation failed" );
 
 	texnum = (unsigned int)slot;
+
+	imageOperation.Succeeded();
 }
 
 /*
@@ -581,6 +973,12 @@ bool VK_Image_MakeDepthCopyTarget( idImage *image, int width, int height,
 			|| depthFormat == VK_FORMAT_UNDEFINED ) {
 		return false;
 	}
+	const idImageOpts &imageOpts = image->GetOpts();
+	const bool isCube = imageOpts.textureType == TT_CUBIC;
+	if ( imageOpts.textureType != TT_2D && !isCube ) {
+		return false;
+	}
+	const uint32_t numLayers = isCube ? 6u : 1u;
 
 	if ( image->GetUploadWidth() != width || image->GetUploadHeight() != height ) {
 		image->Resize( width, height );
@@ -608,6 +1006,7 @@ bool VK_Image_MakeDepthCopyTarget( idImage *image, int width, int height,
 			&& entry->view != VK_NULL_HANDLE
 			&& entry->samples == VK_SAMPLE_COUNT_1_BIT
 			&& entry->aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT
+			&& entry->isCube == isCube && entry->numLayers == (int)numLayers
 			&& ( entry->usage & requiredUsage ) == requiredUsage ) {
 		return true;
 	}
@@ -616,12 +1015,13 @@ bool VK_Image_MakeDepthCopyTarget( idImage *image, int width, int height,
 	memset( &ici, 0, sizeof( ici ) );
 	ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	ici.imageType = VK_IMAGE_TYPE_2D;
+	ici.flags = isCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
 	ici.format = depthFormat;
 	ici.extent.width = (uint32_t)width;
 	ici.extent.height = (uint32_t)height;
 	ici.extent.depth = 1;
 	ici.mipLevels = 1;
-	ici.arrayLayers = 1;
+	ici.arrayLayers = numLayers;
 	ici.samples = VK_SAMPLE_COUNT_1_BIT;
 	ici.tiling = VK_IMAGE_TILING_OPTIMAL;
 	ici.usage = requiredUsage;
@@ -644,12 +1044,12 @@ bool VK_Image_MakeDepthCopyTarget( idImage *image, int width, int height,
 	memset( &ivci, 0, sizeof( ivci ) );
 	ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	ivci.image = newImage;
-	ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	ivci.viewType = isCube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D;
 	ivci.format = depthFormat;
 	ivci.components = VK_SWIZZLE_IDENTITY;
 	ivci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 	ivci.subresourceRange.levelCount = 1;
-	ivci.subresourceRange.layerCount = 1;
+	ivci.subresourceRange.layerCount = numLayers;
 
 	VkImageView newView = VK_NULL_HANDLE;
 	if ( vkCreateImageView( vkCtx.device, &ivci, NULL, &newView ) != VK_SUCCESS ) {
@@ -658,6 +1058,7 @@ bool VK_Image_MakeDepthCopyTarget( idImage *image, int width, int height,
 		return false;
 	}
 
+	VK_Image_ReleaseCubeAttachmentViews( *entry, true );
 	VK_Device_DeferDestroy( entry->image, entry->view, VK_NULL_HANDLE,
 			entry->allocation,
 			entry->attachmentView != entry->view ? entry->attachmentView : VK_NULL_HANDLE );
@@ -675,8 +1076,8 @@ bool VK_Image_MakeDepthCopyTarget( idImage *image, int width, int height,
 	entry->width = width;
 	entry->height = height;
 	entry->numMips = 1;
-	entry->numLayers = 1;
-	entry->isCube = false;
+	entry->numLayers = (int)numLayers;
+	entry->isCube = isCube;
 	entry->everUploaded = false;
 	entry->generation = vkImageGenerationCounter++;
 	return true;
@@ -752,15 +1153,55 @@ static void VK_Image_RecordUpload( VkCommandBuffer cmd, void *user ) {
 }
 
 void idImage::SubImageUpload( int mipLevel, int x, int y, int z, int width, int height, const void *pic, int pixelPitch ) const {
+	renderImageOperation_t imageOperation( this, true, mipLevel, z, x == 0 && y == 0 ? width : 0, height );
+	if ( !imageOperation.Allowed() ) return;
+	R_RenderThread_Sync( "image" );
+
 	vkImageEntry_t *entry = VK_Image_GetEntry( texnum );
+	if ( entry != NULL ) {
+		entry->lastUploadSucceeded = false;
+	}
 	if ( entry == NULL || pic == NULL || width <= 0 || height <= 0
 			|| entry->samples != VK_SAMPLE_COUNT_1_BIT
 			|| ( entry->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT ) == 0 ) {
 		return;
 	}
+	// Reject malformed regions before allocating or recording a GPU copy.
+	// In particular, a sixth-face admission bit must never come from a copy
+	// to a nonexistent layer, mip, or a region outside that mip's storage.
+	if ( mipLevel < 0 || mipLevel >= entry->numMips || mipLevel >= 31
+			|| z < 0 || z >= entry->numLayers || x < 0 || y < 0
+			|| pixelPitch < 0 || ( pixelPitch != 0 && pixelPitch < width ) ) {
+		return;
+	}
+	const int mipWidth = Max( 1, entry->width >> mipLevel );
+	const int mipHeight = Max( 1, entry->height >> mipLevel );
+	if ( x >= mipWidth || y >= mipHeight ) {
+		return;
+	}
 
 	vkFormatInfo_t info;
 	if ( !VK_Image_GetFormatInfo( opts, usage, info ) ) {
+		return;
+	}
+	int copyWidth = width, copyHeight = height;
+	if ( info.blockDim > 1 ) {
+		// BinaryImage supplies whole compressed blocks, including padded 4x4
+		// tails for a 2x2/1x1 cube mip. The byte payload includes that padding;
+		// VkBufferImageCopy's extent must still stay inside the physical mip.
+		const int block = info.blockDim;
+		const int remainingWidth = mipWidth - x, remainingHeight = mipHeight - y;
+		const int paddedWidth = ( remainingWidth + block - 1 ) / block * block;
+		const int paddedHeight = ( remainingHeight + block - 1 ) / block * block;
+		if ( x % block != 0 || y % block != 0 || pixelPitch != 0
+				|| width > paddedWidth || height > paddedHeight
+				|| ( width % block != 0 && width != remainingWidth )
+				|| ( height % block != 0 && height != remainingHeight ) ) {
+			return;
+		}
+		copyWidth = Min( width, remainingWidth );
+		copyHeight = Min( height, remainingHeight );
+	} else if ( width > mipWidth - x || height > mipHeight - y ) {
 		return;
 	}
 
@@ -777,7 +1218,7 @@ void idImage::SubImageUpload( int mipLevel, int x, int y, int z, int width, int 
 		dataBytes = (size_t)rowTexels * height * info.bytesPerBlock;
 	}
 
-	// transient staging buffer, freed via the deferred queue
+	// transient staging buffer; on success the upload batch takes ownership
 	VkBufferCreateInfo bci;
 	memset( &bci, 0, sizeof( bci ) );
 	bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -791,7 +1232,9 @@ void idImage::SubImageUpload( int mipLevel, int x, int y, int z, int width, int 
 	VkBuffer staging = VK_NULL_HANDLE;
 	VmaAllocation stagingAlloc = NULL;
 	VmaAllocationInfo stagingInfo;
-	if ( vmaCreateBuffer( vkCtx.allocator, &bci, &vaci, &staging, &stagingAlloc, &stagingInfo ) != VK_SUCCESS ) {
+	const VkResult stagingResult = vmaCreateBuffer( vkCtx.allocator, &bci, &vaci, &staging, &stagingAlloc, &stagingInfo );
+	if ( stagingResult != VK_SUCCESS ) {
+		R_ImagePolicyObserveError( "Vulkan image resource creation failed", stagingResult );
 		common->Warning( "Vulkan: staging buffer creation failed (%d bytes)", (int)dataBytes );
 		return;
 	}
@@ -829,6 +1272,7 @@ void idImage::SubImageUpload( int mipLevel, int x, int y, int z, int width, int 
 	const VkResult flushResult = vmaFlushAllocation(
 			vkCtx.allocator, stagingAlloc, 0, (VkDeviceSize)dataBytes );
 	if ( flushResult != VK_SUCCESS ) {
+		R_ImagePolicyObserveError( "Vulkan image staging flush failed", flushResult );
 		common->Warning( "Vulkan: staging buffer flush failed (%d)",
 				(int)flushResult );
 		VK_Device_DeferDestroy(
@@ -843,17 +1287,31 @@ void idImage::SubImageUpload( int mipLevel, int x, int y, int z, int width, int 
 	ctx.layer = entry->isCube ? z : 0;
 	ctx.x = x;
 	ctx.y = y;
-	ctx.width = width;
-	ctx.height = height;
+	ctx.width = copyWidth;
+	ctx.height = copyHeight;
 	ctx.bufferRowLengthTexels = rowLengthTexels;
 	ctx.oldLayout = entry->layout;
 
-	if ( VK_Device_ImmediateSubmit( VK_Image_RecordUpload, &ctx ) ) {
+	uint64_t consumedBatch = 0;
+	if ( VK_Device_BatchedUpload( VK_Image_RecordUpload, &ctx, staging, stagingAlloc,
+			(VkDeviceSize)dataBytes, &consumedBatch ) ) {
 		entry->everUploaded = true;
+		entry->lastUploadSucceeded = true;
+		entry->materialSampleFlipY = false;
+		if ( ++entry->uploadGeneration == 0 ) { ++entry->uploadGeneration; }
+		if ( entry->isCube && mipLevel == 0 && x == 0 && y == 0
+				&& copyWidth == entry->width && copyHeight == entry->height ) {
+			entry->uploadedCubeFaces |= 1u << z;
+		}
 		entry->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	} else {
+		// nothing recorded: release the staging buffer through the normal
+		// deferred path, matching the old no-device fallback
+		VK_Device_DeferDestroy( VK_NULL_HANDLE, VK_NULL_HANDLE, staging, stagingAlloc );
+		return;
 	}
 
-	VK_Device_DeferDestroy( VK_NULL_HANDLE, VK_NULL_HANDLE, staging, stagingAlloc );
+	imageOperation.Succeeded(consumedBatch);
 }
 
 /*
@@ -865,12 +1323,41 @@ executor's descriptor cache re-bind.
 ====================
 */
 void idImage::SetTexParameters( void ) {
+	R_RenderThread_Sync( "image" );
 	vkImageEntry_t *entry = VK_Image_GetEntry( texnum );
 	if ( entry == NULL ) {
 		return;
 	}
-	entry->sampler = VK_Image_GetSampler( filter, repeat, entry->numMips > 1 );
+	entry->sampler = VK_Image_GetSampler( filter, repeat, entry->numMips > 1, entry->explicitMipChain );
 	entry->generation = vkImageGenerationCounter++;
+}
+
+/*
+====================
+VK_Image_UseExplicitMipChain
+
+The PBR environment atlas stores roughness-prefiltered radiance in each level
+and selects levels with explicit textureLod. Its TF_LINEAR sampler otherwise
+clamps to the base level (matching GL_LINEAR), which silently replaced every
+rough reflection with the mirror level. Keep the chain addressable, including
+across later sampler refreshes; reallocation clears the flag again.
+====================
+*/
+bool VK_Image_UseExplicitMipChain( unsigned int texnum ) {
+	vkImageEntry_t *entry = VK_Image_GetEntry( texnum );
+	if ( entry == NULL || entry->numMips <= 1 ) {
+		return false;
+	}
+	entry->explicitMipChain = true;
+	entry->sampler = VK_Image_GetSampler( TF_LINEAR, TR_CLAMP, true, true );
+	entry->generation = vkImageGenerationCounter++;
+	return entry->sampler != VK_NULL_HANDLE;
+}
+
+void idImage::RefreshSamplerState() {
+	if ( IsLoaded() ) {
+		SetTexParameters();
+	}
 }
 
 /*
@@ -882,6 +1369,18 @@ void idImage::Resize( int width, int height ) {
 	if ( opts.width == width && opts.height == height ) {
 		return;
 	}
+	if ( !R_ImagePolicyContentMutation() ) return;
+	R_RenderThread_Sync( "image" );
+	opts.width = width;
+	opts.height = height;
+	AllocImage();
+}
+
+void idImage::RespecifyColorCopyTarget( int width, int height ) {
+	if ( width <= 0 || height <= 0 || !R_ImagePolicyContentMutation() ) return;
+	R_RenderThread_Sync( "image" );
+	opts.format = FMT_RGBA8;
+	opts.numLevels = 1;
 	opts.width = width;
 	opts.height = height;
 	AllocImage();

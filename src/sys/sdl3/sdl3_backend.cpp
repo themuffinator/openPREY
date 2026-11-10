@@ -22,24 +22,34 @@ along with Doom 3 Source Code.  If not, see <http://www.gnu.org/licenses/>.
 ===========================================================================
 */
 
-#if defined(OPENQ4_SDL3_LINUX_HOST) || defined(OPENQ4_SDL3_DARWIN_HOST)
+#if defined(OPENQ4_SDL3_LINUX_HOST) || defined(OPENQ4_SDL3_DARWIN_HOST) || defined(OPENQ4_SDL3_ANDROID_HOST)
 #define OPENQ4_SDL3_POSIX_HOST 1
 #endif
 
+#include "../../framework/NativeInputDispatch.h"
 #if defined(OPENQ4_SDL3_POSIX_HOST)
 #include "../posix/posix_public.h"
 #else
 #include "../win32/win_local.h"
 #endif
+#include "../../framework/NativeInputPublications.h"
 #include "../sys_public.h"
+#include "../WindowSettings.h"
+#include "../DisplayModeRule.h"
+#include "../KeyEventMetadata.h"
+#include "../EventQueueContinuity.h"
+#include "InputDisposition.h"
+#include <limits>
 #include "../../framework/Common.h"
 #include "../../framework/Console.h"
 #include "../../framework/FileSystem.h"
 #include "../../framework/licensee.h"
 #include "../../framework/Session.h"
+#include "../../ui/RetainedUI.h"
+#include "../../ui/Rectangle.h"
 #include "../../renderer/tr_local.h"
 #include "../../renderer/RenderModuleAPI.h"
-#include "../../ui/EditWindow.h"
+#include "../../renderer/RendererModule.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -48,7 +58,12 @@ along with Doom 3 Source Code.  If not, see <http://www.gnu.org/licenses/>.
 #include <cstdint>
 
 #if defined(OPENQ4_SDL3_DARWIN_HOST)
-extern "C" bool Sys_MacOSGetWindowChrome(void *nativeWindow, int *top, int *left, int *bottom, int *right);
+#include "../macos/macos_common.h"
+// SDL3_SetANGLEHintDefaults runs before SDL_Init, so it cannot use
+// SDL_GetBasePath to find a staged ANGLE beside the executable.
+#include <limits.h>
+#include <mach-o/dyld.h>
+#include <string.h>
 #endif
 
 #if defined(OPENQ4_SDL3_POSIX_HOST)
@@ -158,6 +173,15 @@ static float s_sdlRelativeMouseRemainderX = 0.0f;
 static float s_sdlRelativeMouseRemainderY = 0.0f;
 
 static idCVar in_joystick("in_joystick", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "enable joystick/gamepad input");
+// The active controller's face layout (section 13.5), from the label SDL
+// reports printed on its south button; menus confirm on the east button of
+// a Nintendo layout. The prompts' glyphs come from Sys_SDL_GamepadGlyphFamily.
+// CVAR_NOCHEAT: joining a server without cheats must not reset it to none
+// while the controller stays open.
+static idCVar in_gamepadFamily("in_gamepadFamily", "none", CVAR_SYSTEM | CVAR_ROM | CVAR_NOCHEAT,
+	"face layout of the active controller, which the automatic menu confirm follows: none, xbox, playstation, "
+	"nintendo, steamdeck or generic");
+int Sys_SDL_GamepadGlyphFamily(int faceLabels[4]);
 static idCVar in_joystickDeadZone("in_joystickDeadZone", "0.18", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_FLOAT, "joystick axis dead zone", 0.0f, 0.95f);
 static idCVar in_joystickTriggerThreshold("in_joystickTriggerThreshold", "0.35", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_FLOAT, "trigger button press threshold", 0.0f, 1.0f);
 static idCVar in_joystickLookSensitivity("in_joystickLookSensitivity", "0.75", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_FLOAT, "controller look sensitivity scale", 0.1f, 4.0f);
@@ -266,10 +290,49 @@ static sdlKeyboardEvent_t s_polledKeyboard[SDL3_INPUT_QUEUE_SIZE];
 static sdlMouseEvent_t s_polledMouse[SDL3_INPUT_QUEUE_SIZE];
 static int s_polledKeyboardCount = 0;
 static int s_polledMouseCount = 0;
+
+// Protected by CRITICAL_SECTION_ONE, including checked polled-slice ownership.
+static sysKeyboardDisposition_t s_keyboardDisposition[SDL3_INPUT_QUEUE_SIZE];
+static sysEventDispositionTag_t s_mouseDisposition[SDL3_INPUT_QUEUE_SIZE];
+static sysKeyboardDisposition_t s_polledKeyboardDisposition[SDL3_INPUT_QUEUE_SIZE];
+static sysEventDispositionTag_t s_polledMouseDisposition[SDL3_INPUT_QUEUE_SIZE];
+struct sdlInputDispositionState_t {
+    sysInputDispositionSlice_t slice;
+    unsigned next = 0;
+    bool checked = false;
+};
+static sdlInputDispositionState_t s_keyboardDispositionState, s_mouseDispositionState;
+static std::uint64_t s_inputDispositionHighwater = 0;
+// Ring admission and checked slice serials share one never-reset namespace.
+static std::uint64_t s_keyboardRetirementSerials[SDL3_INPUT_QUEUE_SIZE];
+static std::uint64_t s_mouseRetirementSerials[SDL3_INPUT_QUEUE_SIZE];
+class SDL3_InputStorageLock {
+public:
+    SDL3_InputStorageLock() { Sys_EnterCriticalSection(CRITICAL_SECTION_ONE); }
+    ~SDL3_InputStorageLock() { Sys_LeaveCriticalSection(CRITICAL_SECTION_ONE); }
+    SDL3_InputStorageLock(const SDL3_InputStorageLock&) = delete;
+    SDL3_InputStorageLock& operator=(const SDL3_InputStorageLock&) = delete;
+};
 static sdlJoystickAxisEvent_t s_polledJoystick[MAX_JOYSTICK_AXIS];
 static int s_polledJoystickCount = 0;
 
 static int s_joystickAxisState[MAX_JOYSTICK_AXIS] = { 0 };
+#if defined(OPENQ4_SIGMATOUCH)
+static int s_touchAxisState[MAX_JOYSTICK_AXIS] = { 0 };
+static int SDL3_ReadJoystickAxis(int axis) {
+	if (axis == AXIS_ROLL && (s_touchAxisState[AXIS_SIDE] != 0 ||
+		s_touchAxisState[AXIS_FORWARD] != 0 || s_touchAxisState[AXIS_YAW] != 0 ||
+		s_touchAxisState[AXIS_PITCH] != 0)) {
+		return 127;
+	}
+	if (axis != AXIS_ROLL && s_touchAxisState[axis] != 0) {
+		return s_touchAxisState[axis];
+	}
+	return s_joystickAxisState[axis];
+}
+#else
+static int SDL3_ReadJoystickAxis(int axis) { return s_joystickAxisState[axis]; }
+#endif
 static bool s_gamepadButtonsDown[SDL_GAMEPAD_BUTTON_COUNT] = { false };
 static bool s_gamepadLeftTriggerDown = false;
 static bool s_gamepadRightTriggerDown = false;
@@ -297,7 +360,96 @@ static float s_gamepadTouchpadRemainderX = 0.0f;
 static float s_gamepadTouchpadRemainderY = 0.0f;
 static bool s_touchscreenFingerActive = false;
 static SDL_FingerID s_touchscreenFingerId = 0;
+static SDL_TouchID s_touchscreenDeviceId = 0;
 static bool s_sdlAppInBackground = false;
+// Frees the audio a low-memory notice may take; main thread only.
+void S_TrimMemory(const char *reason);
+#if defined(__ANDROID__)
+// Main-thread state consumed outside SDL's pump, before gameplay/audio resume.
+static bool s_sdlAppSuspendedSinceQuery = false;
+static SDL_AtomicInt s_sdlAppBackgrounded = { 0 };
+static int s_sdlAppSuspendedAt = 0, s_sdlAppSuspendedMs = 0;
+void S_SetDevicePaused(bool paused);
+// Session.cpp: single player's "Suspended" save, written while the app goes to
+// the background, so the system ending the app in the background loses nothing.
+void Session_SuspendSave(void);
+// Session.cpp: tells a multiplayer client how long the app was away, from this
+// pump, before the frame's network processing can read what queued meanwhile.
+void Session_AppForeground(int suspendedMs);
+// How long the last completed background stay lasted, in milliseconds.
+int Sys_SDL_LastSuspensionMs(void) {
+	return s_sdlAppSuspendedMs;
+}
+bool Sys_SDL_IsAppBackgrounded(void) {
+	return SDL_GetAtomicInt(&s_sdlAppBackgrounded) != 0;
+}
+bool Sys_SDL_ConsumeAppSuspension(void) {
+	if (s_sdlAppInBackground) return false;
+	const bool suspended = s_sdlAppSuspendedSinceQuery;
+	s_sdlAppSuspendedSinceQuery = false;
+	return suspended;
+}
+#endif
+
+// This engine links one SDL module for its process lifetime; it never unloads
+// and replaces that module. Its identity is not regenerated by video shutdown.
+// Window and exclusive registration identities have independent saturating
+// counters. An old claim is retained across window loss until explicit release.
+static openq4::NativeWindowPublication s_nativeInputWindow, s_nativeInputClaim;
+static std::uint64_t s_nativeWindowHighwater=0, s_nativeClaimHighwater=0;
+static bool s_nativeWindowLive=false, s_nativeWindowExhausted=false;
+
+static void SDL3_RetireNativeWindowPublication() noexcept {
+    openq4::NativeInputBeforeWindowChange();
+    s_nativeWindowLive=false;
+}
+static void SDL3_PublishNativeWindowIdentity() noexcept {
+#if defined(_WIN32)
+    const auto handle=reinterpret_cast<std::uintptr_t>(win32.hWnd);
+    const auto window=s_sdlWindow ? static_cast<std::uint64_t>(SDL_GetWindowID(s_sdlWindow)) : 0;
+    if(!handle || !window){SDL3_RetireNativeWindowPublication();return;}
+    if(!s_nativeWindowLive || s_nativeInputWindow.handle!=handle || s_nativeInputWindow.window!=window){
+        openq4::NativeInputBeforeWindowChange();
+        if(s_nativeWindowHighwater==UINT64_MAX){s_nativeWindowExhausted=true;s_nativeWindowLive=false;return;}
+        s_nativeInputWindow={};s_nativeInputWindow.handle=handle;s_nativeInputWindow.window=window;
+        s_nativeInputWindow.lifetime=++s_nativeWindowHighwater;s_nativeInputWindow.module=1;
+    }
+    s_nativeWindowLive=!s_nativeWindowExhausted;
+#endif
+}
+static bool SDL3_SameNativeWindowClaim(const openq4::NativeWindowPublication& a,const openq4::NativeWindowPublication& b) noexcept {
+    return a.handle==b.handle && a.window==b.window && a.lifetime==b.lifetime && a.module==b.module &&
+        a.association==b.association && a.registration==b.registration;
+}
+bool openq4::Sys_QueryNativeInputWindow(NativeWindowPublication& out) noexcept {
+    if(!Sys_EventDispositionBoundThread())return false;
+    auto candidate=s_nativeInputWindow;
+    candidate.windowAllowed=!s_nativeWindowExhausted && s_nativeWindowLive && s_sdlWindow && s_sdlVideoReferenceHeld &&
+        win32.activeApp && !s_sdlAppInBackground;
+    candidate.providerOwned=s_nativeInputClaim.registration!=0;
+    candidate.module=s_nativeInputClaim.module ? s_nativeInputClaim.module : s_nativeInputWindow.module;
+    candidate.association=s_nativeInputClaim.association;candidate.registration=s_nativeInputClaim.registration;
+    out=candidate;return true;
+}
+bool openq4::Sys_AcquireNativeInputWindowClaim(NativeWindowPublication& out) noexcept {
+#if defined(_WIN32) && defined(OPENQ4_SDL3_CHECKED_NATIVE_QUEUE) && OPENQ4_SDL3_CHECKED_NATIVE_QUEUE
+    NativeWindowPublication current;
+    if(!NativeInputPublicationSlotEmpty() || s_nativeInputClaim.registration || !Sys_EventDispositionEpoch() ||
+        !Sys_QueryNativeInputWindow(current) || !current.windowAllowed || !current.handle || !current.window ||
+        !current.lifetime || !current.module || s_nativeClaimHighwater>UINT64_MAX-2)return false;
+    NativeInputBeforeWindowChange();
+    current.association=++s_nativeClaimHighwater;current.registration=++s_nativeClaimHighwater;current.providerOwned=true;
+    s_nativeInputClaim=current;out=current;return true;
+#else
+    (void)out;return false;
+#endif
+}
+bool openq4::Sys_ReleaseNativeInputWindowClaim(const NativeWindowPublication& expected) noexcept {
+    if(!Sys_EventDispositionBoundThread() || !s_nativeInputClaim.registration ||
+        !SDL3_SameNativeWindowClaim(expected,s_nativeInputClaim))return false;
+    NativeInputBeforeWindowChange();s_nativeInputClaim={};return true;
+}
+
 static bool s_haveAbsoluteMousePosition = false;
 static int s_absoluteMouseX = 0;
 static int s_absoluteMouseY = 0;
@@ -305,6 +457,7 @@ static bool s_menuMouseRouteActive = false;
 static idUserInterface *s_trackedMenuGui = NULL;
 static bool s_trackedConsoleActive = false;
 static bool s_haveMenuMousePosition = false;
+static idUserInterface *s_menuMouseGui = NULL;	// the menu GUI the tracked position belongs to
 static float s_menuMouseX = 0.0f;
 static float s_menuMouseY = 0.0f;
 static float s_menuMouseRemainderX = 0.0f;
@@ -335,21 +488,18 @@ static sdl3VideoDriver_t s_sdlVideoDriver = SDL3_VIDEO_DRIVER_UNKNOWN;
 static char s_sdlVideoDriverName[32] = "unknown";
 
 typedef struct {
-	int frameX;
-	int frameY;
+	int x;
+	int y;
 	int width;
 	int height;
 	bool valid;
 } sdl3WindowedPlacement_t;
 
 static sdl3WindowedPlacement_t s_windowedPlacement = { 0, 0, 0, 0, false };
-
-typedef struct {
-	int top;
-	int left;
-	int bottom;
-	int right;
-} sdl3WindowChrome_t;
+#ifndef ID_DEDICATED
+static uint64_t s_windowPlacementLease = 0;
+static sysWindowPlacementSnapshot_t s_windowPlacementBaseline;
+#endif
 
 void* GLimp_ExtensionPointer(const char* name);
 
@@ -371,6 +521,16 @@ static int SDL3_EventMilliseconds(Uint64 timestampNs) {
 
 static void SDL3_ClearInputQueues(void) {
 	Sys_EnterCriticalSection(CRITICAL_SECTION_ONE);
+	Sys_InvalidateEventQueue(); // Invalidate before clearing even an empty slice.
+	for (int i = 0; i < SDL3_INPUT_QUEUE_SIZE; ++i) {
+		s_keyboardQueue[i] = {}; s_mouseQueue[i] = {};
+		s_polledKeyboard[i] = {}; s_polledMouse[i] = {};
+		s_keyboardDisposition[i] = {}; s_mouseDisposition[i] = {};
+		s_polledKeyboardDisposition[i] = {}; s_polledMouseDisposition[i] = {};
+        s_keyboardRetirementSerials[i] = 0; s_mouseRetirementSerials[i] = 0;
+	}
+	s_keyboardDispositionState = {}; s_mouseDispositionState = {};
+	// s_inputDispositionHighwater deliberately survives clear/shutdown/re-init.
 	s_keyboardHead = s_keyboardTail = 0;
 	s_mouseHead = s_mouseTail = 0;
 	s_polledKeyboardCount = 0;
@@ -397,6 +557,7 @@ static void SDL3_ClearInputQueues(void) {
 	s_gamepadTouchpadRemainderY = 0.0f;
 	s_touchscreenFingerActive = false;
 	s_touchscreenFingerId = 0;
+	s_touchscreenDeviceId = 0;
 	s_ignoreNextMenuWarpMotion = false;
 	s_menuWarpWindowX = 0.0f;
 	s_menuWarpWindowY = 0.0f;
@@ -416,27 +577,36 @@ static bool SDL3_ShouldQueueMousePoll(int action, int value) {
 	return true;
 }
 
+#if defined(OPENQ4_SDL3_LINUX_HOST)
 static const char *SDL3_EnvString(const char *name) {
 	const char *value = getenv(name);
 	return (value != NULL && value[0] != '\0') ? value : "<unset>";
 }
+#endif
 
 static const char *SDL3_HintString(const char *name) {
 	const char *value = SDL_GetHint(name);
 	return (value != NULL && value[0] != '\0') ? value : "<unset>";
 }
 
+// Also needed on Darwin: SDL3_SetANGLEHintDefaults uses it to leave an ANGLE
+// path the user set in the environment alone.
+#if defined(OPENQ4_SDL3_LINUX_HOST) || defined(OPENQ4_SDL3_DARWIN_HOST)
 static bool SDL3_EnvHasValue(const char *name) {
 	const char *value = getenv(name);
 	return value != NULL && value[0] != '\0';
 }
+#endif
 
+#if defined(OPENQ4_SDL3_LINUX_HOST)
 static bool SDL3_EnvFlagEnabled(const char *name) {
 	const char *value = getenv(name);
 	return value != NULL && value[0] != '\0' && idStr::Icmp(value, "0") != 0 && idStr::Icmp(value, "false") != 0;
 }
+#endif
 
-static const char *SDL3_EnvValueWithLegacyAlias(const char *primaryName, const char *legacyName) {
+// The openPREY/openQ4 environment aliases are only read by the Linux host.
+[[maybe_unused]] static const char *SDL3_EnvValueWithLegacyAlias(const char *primaryName, const char *legacyName) {
 	const char *value = getenv(primaryName);
 	if (value == NULL || value[0] == '\0') {
 		value = getenv(legacyName);
@@ -444,12 +614,12 @@ static const char *SDL3_EnvValueWithLegacyAlias(const char *primaryName, const c
 	return value;
 }
 
-static const char *SDL3_EnvStringWithLegacyAlias(const char *primaryName, const char *legacyName) {
+[[maybe_unused]] static const char *SDL3_EnvStringWithLegacyAlias(const char *primaryName, const char *legacyName) {
 	const char *value = SDL3_EnvValueWithLegacyAlias(primaryName, legacyName);
 	return (value != NULL && value[0] != '\0') ? value : "<unset>";
 }
 
-static bool SDL3_EnvFlagEnabledWithLegacyAlias(const char *primaryName, const char *legacyName) {
+[[maybe_unused]] static bool SDL3_EnvFlagEnabledWithLegacyAlias(const char *primaryName, const char *legacyName) {
 	const char *value = SDL3_EnvValueWithLegacyAlias(primaryName, legacyName);
 	return value != NULL && value[0] != '\0' && idStr::Icmp(value, "0") != 0 && idStr::Icmp(value, "false") != 0;
 }
@@ -458,6 +628,7 @@ static bool SDL3_StringEquals(const char *a, const char *b) {
 	return a != NULL && b != NULL && idStr::Icmp(a, b) == 0;
 }
 
+#if defined(OPENQ4_SDL3_DARWIN_HOST)
 static void SDL3_SetHintDefaultLogged(const char *name, const char *value, const char *context) {
 	if (name == NULL || name[0] == '\0' || value == NULL) {
 		return;
@@ -468,6 +639,7 @@ static void SDL3_SetHintDefaultLogged(const char *name, const char *value, const
 		Sys_Printf("SDL3: failed to set %s hint %s=%s\n", context != NULL ? context : "default", name, value);
 	}
 }
+#endif
 
 static bool SDL3_IsMacOSMetalBridge(void) {
 #if defined(OPENQ4_SDL3_DARWIN_HOST) && defined(OPENQ4_MACOS_METAL_BRIDGE)
@@ -482,6 +654,168 @@ static const char *SDL3_GraphicsBridgeDescription(void) {
 		? "macOS Metal bridge (SDL3/Cocoa host, OpenGL renderer compatibility path)"
 		: "OpenGL";
 }
+
+#if defined(OPENQ4_SDL3_DARWIN_HOST)
+/*
+===============
+SDL3_SetANGLEHintDefaults
+
+macOS ships no OpenGL ES, so SDL's cocoa EGL path is only usable with a
+translation layer (ANGLE, GLES-on-Metal). SDL dlopens the bare leaf names
+"libEGL.dylib" and "libGLESv2.dylib", which dyld does not resolve from the
+executable's own directory, so a staged ANGLE would be invisible without an
+absolute path. Look bundle-relative first, then beside the executable -- the
+same order the Vulkan module uses to find MoltenVK.
+
+Applied only when the selected renderer is the GLES module. SDL_HINT_OPENGL_LIBRARY
+is consulted when creating *any* GL context, not just an ES one, so setting it
+process-wide on macOS points desktop context creation at ANGLE as well: every
+core-profile candidate then fails with "Failed getting OpenGL context version"
+and the ladder silently falls back to 2.1 compatibility. That fallback still
+reaches ARB2, so a desktop smoke test stays green while core 4.1 is quietly
+unreachable -- gate on the API rather than trusting the comment that nothing
+loads until an ES context is requested.
+
+An explicit environment override always wins.
+
+The executable directory comes from _NSGetExecutablePath, not SDL_GetBasePath:
+this runs from Sys_SDL_ApplyVideoHintDefaults *before* SDL_Init, and
+SDL_GetBasePath returns NULL until the video subsystem is up. Anchoring on the
+uninitialised SDL call made the whole search bail on its first line, which is
+why a staged ANGLE was invisible without SDL_EGL_LIBRARY set by hand.
+_NSGetExecutablePath has no such ordering dependency and is what the engine's
+own macOS Sys_EXEPath is built on.
+===============
+*/
+/*
+===============
+SDL3_LoadedAngleImagePath
+
+Returns the path of an already-loaded dylib with this leaf name, or NULL.
+
+The renderer module links libGLESv2 and is loaded before the window exists, so
+by the time the ES context is created ANGLE is already in the process -- and the
+module resolved it through its own rpath list, which meson populates from the
+staged ANGLE directory ahead of @loader_path. Handing SDL a path we merely
+*guessed* (the executable directory) pointed it at a second, byte-identical copy
+at a different path. dyld keys images by resolved path, so that is two ANGLE
+images: SDL creates the context in one while the module's linked entry points
+call into the other, which then reports no current context and returns NULL for
+GL_VERSION.
+
+Asking dyld what is actually loaded removes the guess.
+===============
+*/
+static const char *SDL3_LoadedAngleImagePath(const char *leafName) {
+	const uint32_t imageCount = _dyld_image_count();
+	for (uint32_t i = 0; i < imageCount; ++i) {
+		const char *imageName = _dyld_get_image_name(i);
+		if (imageName == NULL) {
+			continue;
+		}
+		const char *slash = strrchr(imageName, '/');
+		const char *leaf = (slash != NULL) ? slash + 1 : imageName;
+		if (idStr::Icmp(leaf, leafName) == 0) {
+			return imageName;
+		}
+	}
+	return NULL;
+}
+
+static const char *SDL3_DarwinExecutableDir(void) {
+	static char exeDir[PATH_MAX];
+
+	if (exeDir[0] != '\0') {
+		return exeDir;
+	}
+
+	uint32_t bufferSize = (uint32_t)sizeof(exeDir);
+	if (_NSGetExecutablePath(exeDir, &bufferSize) != 0) {
+		exeDir[0] = '\0';
+		return exeDir;
+	}
+
+	// Trim to the directory, keeping the trailing separator so callers can
+	// concatenate a leaf name directly.
+	char *lastSlash = strrchr(exeDir, '/');
+	if (lastSlash == NULL) {
+		exeDir[0] = '\0';
+		return exeDir;
+	}
+	lastSlash[1] = '\0';
+	return exeDir;
+}
+
+static void SDL3_SetANGLEHintDefaults(void) {
+	static const struct {
+		const char *hint;
+		const char *leafName;
+	} angleLibraries[] = {
+		{ SDL_HINT_EGL_LIBRARY, "libEGL.dylib" },
+		{ SDL_HINT_OPENGL_LIBRARY, "libGLESv2.dylib" },
+	};
+
+	// Sys_SDL_ApplyVideoHintDefaults is also called from the early splash/console
+	// path, before the renderer module is booted, where the API is not yet known.
+	// SDL3_WindowServices_PrepareWindowSystem calls it again before the game
+	// window is created, which is the call that matters for the GL context.
+	const rendererModuleStatus_t &moduleStatus = R_RendererModule_GetStatus();
+	if (moduleStatus.activeApi != RENDER_MODULE_API_GLES &&
+			moduleStatus.requestedApi != RENDER_MODULE_API_GLES) {
+		return;
+	}
+
+	const char *basePath = SDL3_DarwinExecutableDir();
+	if (basePath == NULL || basePath[0] == '\0') {
+		return;
+	}
+
+	// Whatever ANGLE the renderer module already loaded wins: matching its exact
+	// path is what keeps this to a single driver instance.
+	const char *loadedGLES = SDL3_LoadedAngleImagePath("libGLESv2.dylib");
+	char loadedAngleDir[1024] = { 0 };
+	if (loadedGLES != NULL) {
+		idStr::snPrintf(loadedAngleDir, sizeof(loadedAngleDir), "%s", loadedGLES);
+		char *lastSlash = strrchr(loadedAngleDir, '/');
+		if (lastSlash != NULL) {
+			lastSlash[1] = '\0';
+		} else {
+			loadedAngleDir[0] = '\0';
+		}
+	}
+
+	for (size_t i = 0; i < sizeof(angleLibraries) / sizeof(angleLibraries[0]); ++i) {
+		if (SDL3_EnvHasValue(angleLibraries[i].hint)) {
+			continue;
+		}
+
+		if (loadedAngleDir[0] != '\0') {
+			char loadedCandidate[1024];
+			SDL_PathInfo loadedInfo;
+			idStr::snPrintf(loadedCandidate, sizeof(loadedCandidate), "%s%s", loadedAngleDir, angleLibraries[i].leafName);
+			if (SDL_GetPathInfo(loadedCandidate, &loadedInfo)) {
+				SDL3_SetHintDefaultLogged(angleLibraries[i].hint, loadedCandidate, "loaded ANGLE (GLES on Metal)");
+				continue;
+			}
+		}
+
+		const char *searchDirs[] = { "../Frameworks/", "" };
+		for (size_t d = 0; d < sizeof(searchDirs) / sizeof(searchDirs[0]); ++d) {
+			char candidate[1024];
+			SDL_PathInfo info;
+
+			idStr::snPrintf(candidate, sizeof(candidate), "%s%s%s",
+				basePath, searchDirs[d], angleLibraries[i].leafName);
+			if (!SDL_GetPathInfo(candidate, &info)) {
+				continue;
+			}
+
+			SDL3_SetHintDefaultLogged(angleLibraries[i].hint, candidate, "staged ANGLE (GLES on Metal)");
+			break;
+		}
+	}
+}
+#endif
 
 static void SDL3_SetVideoHintDefaults(void) {
 	// openPREY consumes committed UTF-8 text but does not render composition or
@@ -518,6 +852,7 @@ static void SDL3_SetVideoHintDefaults(void) {
 		SDL3_SetHintDefaultLogged(SDL_HINT_GPU_DRIVER, "metal", "macOS Metal bridge");
 		SDL3_SetHintDefaultLogged(SDL_HINT_VIDEO_METAL_AUTO_RESIZE_DRAWABLE, "1", "macOS Metal bridge");
 	}
+	SDL3_SetANGLEHintDefaults();
 #endif
 }
 
@@ -584,6 +919,39 @@ bool Sys_SDL_IsGameWindowFocused(void) {
 	const SDL_WindowFlags flags = SDL_GetWindowFlags(s_sdlWindow);
 	return (flags & SDL_WINDOW_INPUT_FOCUS) != 0 &&
 		(flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED)) == 0;
+}
+
+// False while the game window shows nothing: hidden (r_hiddenWindow, batch
+// jobs), minimized, not created yet, or the app is in the background. The
+// frame limiter then presents at most 60 Hz on every platform (HF-07).
+bool Sys_SDL_IsGameWindowShown(void) {
+	if (s_sdlAppInBackground || !s_sdlVideoReferenceHeld || s_sdlWindow == NULL) {
+		return false;
+	}
+	return (SDL_GetWindowFlags(s_sdlWindow) & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED)) == 0;
+}
+
+// The refresh rate of the display the game window is on, 0 when unknown, for
+// the frame-pacing reports. Looked up at most twice a second.
+float Sys_SDL_GetWindowRefreshHz(void) {
+	static Uint64 lastLookupMsec = 0;
+	static float refreshHz = 0.0f;
+	if (!s_sdlVideoReferenceHeld || s_sdlWindow == NULL) {
+		lastLookupMsec = 0;
+		refreshHz = 0.0f;
+		return 0.0f;
+	}
+	const Uint64 nowMsec = SDL_GetTicks();
+	if (lastLookupMsec == 0 || nowMsec - lastLookupMsec >= 500) {
+		lastLookupMsec = nowMsec > 0 ? nowMsec : 1;
+		refreshHz = 0.0f;
+		const SDL_DisplayID display = SDL_GetDisplayForWindow(s_sdlWindow);
+		const SDL_DisplayMode *mode = display != 0 ? SDL_GetCurrentDisplayMode(display) : NULL;
+		if (mode != NULL && mode->refresh_rate > 0.0f) {
+			refreshHz = mode->refresh_rate;
+		}
+	}
+	return refreshHz;
 }
 
 static bool SDL3_UseAbsoluteWindowPlacement(void) {
@@ -666,8 +1034,13 @@ static void SDL3_QueueKeyboardInput(int key, bool down, int time) {
 	Sys_EnterCriticalSection(CRITICAL_SECTION_ONE);
 	const int next = (s_keyboardHead + 1) & SDL3_INPUT_QUEUE_MASK;
 	if (next == s_keyboardTail) {
+		Sys_InvalidateEventQueue(); // Legacy eviction is observable before loss.
+		s_keyboardDisposition[s_keyboardTail] = {};
+        s_keyboardRetirementSerials[s_keyboardTail] = 0;
 		s_keyboardTail = (s_keyboardTail + 1) & SDL3_INPUT_QUEUE_MASK;
 	}
+	s_keyboardDisposition[s_keyboardHead] = {};
+    s_keyboardRetirementSerials[s_keyboardHead] = 0;
 	s_keyboardQueue[s_keyboardHead].key = key;
 	s_keyboardQueue[s_keyboardHead].down = down;
 	s_keyboardQueue[s_keyboardHead].time = time;
@@ -682,8 +1055,13 @@ static void SDL3_QueueMouseInput(int action, int value, int time) {
 	Sys_EnterCriticalSection(CRITICAL_SECTION_ONE);
 	const int next = (s_mouseHead + 1) & SDL3_INPUT_QUEUE_MASK;
 	if (next == s_mouseTail) {
+		Sys_InvalidateEventQueue(); // Legacy eviction is observable before loss.
+		s_mouseDisposition[s_mouseTail] = {};
+        s_mouseRetirementSerials[s_mouseTail] = 0;
 		s_mouseTail = (s_mouseTail + 1) & SDL3_INPUT_QUEUE_MASK;
 	}
+	s_mouseDisposition[s_mouseHead] = {};
+    s_mouseRetirementSerials[s_mouseHead] = 0;
 	s_mouseQueue[s_mouseHead].action = action;
 	s_mouseQueue[s_mouseHead].value = value;
 	s_mouseQueue[s_mouseHead].time = time;
@@ -691,12 +1069,56 @@ static void SDL3_QueueMouseInput(int action, int value, int time) {
 	Sys_LeaveCriticalSection(CRITICAL_SECTION_ONE);
 }
 
+#ifndef ID_DEDICATED
+void RetainedUI_QueueInput(const retainedUIInput_t& event, int time) {
+	if (!RetainedUI_IsOpen()) return;
+	void* payload = Mem_Alloc(sizeof(event)); memcpy(payload,&event,sizeof(event));
+	Sys_QueEvent(time,SE_RETAINED_UI,static_cast<int>(RetainedUI_InputGeneration()),0,sizeof(event),payload);
+}
+#endif
+static bool s_retainedKeyOwners[K_LAST_KEY] = {};
+static bool SDL3_QueueRetainedKey(int key, bool down, bool repeated, int source, int time) {
+	if (key <= 0 || key >= K_LAST_KEY) return false;
+	const bool previouslyOwned = s_retainedKeyOwners[key];
+	if (!down) s_retainedKeyOwners[key] = false;
+	const bool reserved = key == Sys_GetConsoleKey(false) || key == Sys_GetConsoleKey(true);
+	if (RetainedUI_IsOpen() && !(console && console->Active()) && !reserved) {
+		s_retainedKeyOwners[key] = down;
+		retainedUIInput_t event;
+		event.kind = retainedUIInput_t::KEY; event.key = key; event.source = source;
+		event.down = down; event.repeated = repeated;
+		RetainedUI_QueueInput(event,time);
+		return true;
+	}
+	// A repeat belonging to the old menu must not run a gameplay binding.
+	return previouslyOwned && down;
+}
+static void SDL3_QueueRetainedPointer(float x, float y, int time) {
+	retainedUIInput_t event; event.kind = retainedUIInput_t::POINTER; event.x = x; event.y = y;
+	RetainedUI_QueueInput(event,time);
+}
+static void SDL3_QueueRetainedFocus(bool focused, int time) {
+	retainedUIInput_t event; event.kind = retainedUIInput_t::FOCUS; event.down = focused;
+	RetainedUI_QueueInput(event,time);
+}
+static void SDL3_QueueRetainedCancel(int time) {
+	retainedUIInput_t event; event.kind = retainedUIInput_t::CANCEL;
+	RetainedUI_QueueInput(event,time);
+}
 static bool SDL3_ShouldRouteMenuMouse(void) {
+	// Disabled input and hidden batch-render windows must never synchronize or
+	// warp the host cursor when a GUI becomes active.
+	if (!s_sdlWindow || !win32.in_mouse.GetBool() || (SDL_GetWindowFlags(s_sdlWindow) & SDL_WINDOW_HIDDEN)) {
+		return false;
+	}
 	return ( session != NULL && session->IsGUIActive() ) || ( console != NULL && console->Active() );
 }
 
 static idUserInterface *SDL3_GetActiveMenuGui(void) {
-	return ( session != NULL ) ? session->GetActiveGUI() : NULL;
+	if (RetainedUI_IsOpen()) return NULL;
+	// The GUI that receives menu input, which may be a retained screen covering
+	// the active one (the main menu's home screen); its cursor is the one drawn.
+	return ( session != NULL ) ? Session_MenuInputGUI() : NULL;
 }
 
 static bool SDL3_IsMouseCaptured(void) {
@@ -704,6 +1126,21 @@ static bool SDL3_IsMouseCaptured(void) {
 		return false;
 	}
 	return SDL_GetWindowRelativeMouseMode(s_sdlWindow) || SDL_GetWindowMouseGrab(s_sdlWindow);
+}
+
+// Warping or confining the pointer moves the *user's* cursor, not just ours.  A
+// window created hidden (r_hiddenWindow, used by batch renderer jobs and the
+// automated smokes) or one that is minimized has no pointer to own, and neither
+// does a run with mouse input disabled.  win32.activeApp starts out true and is
+// only corrected by a focus event, which a hidden window never receives, so the
+// focus guard below cannot catch this on its own.  Deliberately not a focus test:
+// that is already handled for the grab, and widening it here risks normal play.
+static bool SDL3_OwnsSystemPointer(void) {
+	if (!s_sdlWindow || !win32.in_mouse.GetBool()) {
+		return false;
+	}
+	const SDL_WindowFlags flags = SDL_GetWindowFlags(s_sdlWindow);
+	return (flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED)) == 0;
 }
 
 static void SDL3_SetMouseHintDefaults(void) {
@@ -751,6 +1188,7 @@ static void SDL3_ResetMenuMouseTracking(void) {
 
 static void SDL3_SetMenuMouseTrackingPosition(float cursorX, float cursorY) {
 	s_haveMenuMousePosition = true;
+	s_menuMouseGui = SDL3_GetActiveMenuGui();
 	s_menuMouseX = cursorX;
 	s_menuMouseY = cursorY;
 	s_menuMouseRemainderX = 0.0f;
@@ -773,7 +1211,8 @@ static void SDL3_UpdateCursorVisibility(void) {
 		return;
 	}
 
-	if (SDL3_ShouldRouteMenuMouse() && win32.activeApp && (win32.cdsFullscreen || s_menuMouseInsideWindow)) {
+	if (SDL3_ShouldRouteMenuMouse() && win32.activeApp && (win32.cdsFullscreen || s_menuMouseInsideWindow) &&
+		!(RetainedUI_IsOpen() && !(console && console->Active()))) {
 		(void)SDL_HideCursor();
 		return;
 	}
@@ -904,12 +1343,7 @@ static bool SDL3_BuildGuiMouseTransform(sdl3GuiMouseTransform_t &transform) {
 
 static bool SDL3_GetActiveGuiTextInputState(idRectangle &area, float &cursorOffset) {
 	idUserInterface *activeGui = SDL3_GetActiveMenuGui();
-	if (activeGui == NULL || activeGui->GetDesktop() == NULL) {
-		return false;
-	}
-
-	idEditWindow *editWindow = dynamic_cast<idEditWindow *>(activeGui->GetDesktop()->GetFocusedChild());
-	return editWindow != NULL && editWindow->GetTextInputState(area, cursorOffset);
+	return activeGui != NULL && activeGui->GetTextInputState(area, cursorOffset);
 }
 
 static void SDL3_UpdateTextInputArea(void) {
@@ -1045,22 +1479,40 @@ static bool SDL3_MapWindowMouseToRoutedCursor(float windowMouseX, float windowMo
 	return false;
 }
 
+// The same menu GUI can also miss steps: it ignores input while its view loads
+// or while one screen hands off to the next, and it clamps its cursor while the
+// pointer is outside the UI viewport. Once the event queue is empty every step
+// sent so far has been delivered, so a cursor more than a step's rounding away
+// from our tracking lost some.
+static bool SDL3_MenuCursorMissedSteps(idUserInterface *gui) {
+	if (!s_haveMenuMousePosition || (console != NULL && console->Active()) || Sys_HasQueuedEvents()) {
+		return false;
+	}
+	return fabsf(gui->CursorX() - s_menuMouseX) > 1.5f || fabsf(gui->CursorY() - s_menuMouseY) > 1.5f;
+}
+
 static bool SDL3_UpdateRoutedMouseDelta(float menuMouseX, float menuMouseY, int &dx, int &dy) {
+	// When the menu GUI changes (a retained screen opens centred over the main
+	// menu), or it missed steps, its cursor is not where the pointer is. Take the
+	// next step from that cursor so it lands on the pointer; otherwise the offset
+	// was kept for good and the drawn cursor's reach was a rectangle short of the
+	// screen's edges until the user swung against the other side. Later steps
+	// come from our own tracking: several motion events can arrive before the
+	// GUI applies any of them.
+	idUserInterface *activeGui = SDL3_GetActiveMenuGui();
+	if (activeGui != NULL && (!s_haveMenuMousePosition || activeGui != s_menuMouseGui ||
+			SDL3_MenuCursorMissedSteps(activeGui))) {
+		SDL3_SetMenuMouseTrackingPosition(activeGui->CursorX(), activeGui->CursorY());
+	}
+
 	float previousX = 0.0f;
 	float previousY = 0.0f;
-
-	if (s_haveMenuMousePosition) {
-		previousX = s_menuMouseX;
-		previousY = s_menuMouseY;
-	} else {
-		idUserInterface *activeGui = SDL3_GetActiveMenuGui();
-		if (activeGui == NULL) {
-			SDL3_SetMenuMouseTrackingPosition(menuMouseX, menuMouseY);
-			return true;
-		}
-		previousX = activeGui->CursorX();
-		previousY = activeGui->CursorY();
+	if (!s_haveMenuMousePosition) {
+		SDL3_SetMenuMouseTrackingPosition(menuMouseX, menuMouseY);
+		return true;
 	}
+	previousX = s_menuMouseX;
+	previousY = s_menuMouseY;
 
 	dx = SDL3_ConsumeMouseDelta(menuMouseX - previousX, s_menuMouseRemainderX);
 	dy = SDL3_ConsumeMouseDelta(menuMouseY - previousY, s_menuMouseRemainderY);
@@ -1085,18 +1537,34 @@ static void SDL3_QueueMouseDelta(int dx, int dy, int eventTime) {
 	}
 }
 
+static void SDL3_QueueControllerActivity(int eventTime, int value) {
+	// SE_JOYSTICK_AXIS is consumed by the framework's active-input tracker.  SDL
+	// keeps gameplay axes on the polled path, so this lightweight event carries
+	// only post-deadzone device activity and cannot alter a usercmd.
+	if (idMath::Abs(value) >= 16) {
+		Sys_QueEvent(eventTime, SE_JOYSTICK_AXIS, AXIS_SIDE, idMath::ClampChar(value), 0, NULL);
+	}
+}
+
 static void SDL3_QueueMouseButtonEvent(int key, bool down, int eventTime, bool pollState) {
 	if (key == 0) {
 		return;
 	}
 
-	Sys_QueEvent(eventTime, SE_KEY, key, down ? 1 : 0, 0, NULL);
+	if (!SDL3_QueueRetainedKey(key,down,false,4096+key,eventTime))
+		Sys_QueEvent(eventTime, SE_KEY, key, down ? 1 : 0, 0, NULL);
 	if (pollState) {
 		SDL3_QueueMouseInput(M_ACTION1 + (key - K_MOUSE1), down ? 1 : 0, eventTime);
 	}
 }
 
 static bool SDL3_SetRoutedCursorFromWindowPosition(float windowMouseX, float windowMouseY, int &dx, int &dy) {
+	if (RetainedUI_IsOpen() && !(console && console->Active())) {
+		if (!std::isfinite(windowMouseX) || !std::isfinite(windowMouseY)) return false;
+		dx = dy = 0;
+		SDL3_QueueRetainedPointer(windowMouseX,windowMouseY,Sys_Milliseconds());
+		return true;
+	}
 	float cursorX = 0.0f;
 	float cursorY = 0.0f;
 	if (!SDL3_MapWindowMouseToRoutedCursor(windowMouseX, windowMouseY, cursorX, cursorY)) {
@@ -1118,7 +1586,14 @@ static bool SDL3_SetRoutedCursorFromWindowPosition(float windowMouseX, float win
 }
 
 static void SDL3_SyncSystemMouseToActiveCursor(void) {
-	if (!SDL3_ShouldRouteMenuMouse() || !s_sdlWindow) {
+	if (!SDL3_ShouldRouteMenuMouse() || !win32.activeApp) {
+		return;
+	}
+	// Retained controls consume the absolute coordinates in queued SDL motion
+	// and button events. They never move the OS cursor to a 640x480 GUI cursor.
+	if (RetainedUI_IsOpen() && !(console && console->Active())) return;
+
+	if (!SDL3_OwnsSystemPointer()) {
 		return;
 	}
 
@@ -1280,6 +1755,14 @@ static float SDL3_NormalizeSignedAxisFloat(Sint16 value) {
 		normalized = 1.0f;
 	}
 	return normalized;
+}
+
+// A radial selector uses physical direction and its own 35% threshold. Keep
+// this sample before the configurable aiming dead zone, response curve and
+// inversion; applying those first would move the wheel's threshold.
+static void SDL3_PublishRadialStick(Sint16 rawX, Sint16 rawY) {
+	cvarSystem->SetCVarFloat("ui_radialStickX", SDL3_NormalizeSignedAxisFloat(rawX));
+	cvarSystem->SetCVarFloat("ui_radialStickY", SDL3_NormalizeSignedAxisFloat(rawY));
 }
 
 static int SDL3_AxisFloatToJoystickValue(float value) {
@@ -1500,6 +1983,7 @@ static bool SDL3_ShouldSkipRumbleUpdate(Uint16 low, Uint16 high, int now, int un
 
 static void SDL3_ClearJoystickAxisStateUnlocked(void) {
 	memset(s_joystickAxisState, 0, sizeof(s_joystickAxisState));
+	SDL3_PublishRadialStick(0, 0);
 }
 
 static void SDL3_ClearJoystickState(void) {
@@ -1528,7 +2012,8 @@ static void SDL3_PostControllerKeyEvent(int key, bool down, int eventTime) {
 		return;
 	}
 
-	Sys_QueEvent(eventTime, SE_KEY, key, down ? 1 : 0, 0, NULL);
+	if (!SDL3_QueueRetainedKey(key,down,false,2048+key,eventTime))
+		Sys_QueEvent(eventTime, SE_KEY, key, down ? 1 : 0, 0, NULL);
 	SDL3_QueueKeyboardInput(key, down, eventTime);
 }
 
@@ -1570,6 +2055,9 @@ static void SDL3_UpdateGamepadAxes(int eventTime) {
 	const SDL_GamepadAxis moveAxisY = southpaw ? SDL_GAMEPAD_AXIS_RIGHTY : SDL_GAMEPAD_AXIS_LEFTY;
 	const SDL_GamepadAxis lookAxisX = southpaw ? SDL_GAMEPAD_AXIS_LEFTX : SDL_GAMEPAD_AXIS_RIGHTX;
 	const SDL_GamepadAxis lookAxisY = southpaw ? SDL_GAMEPAD_AXIS_LEFTY : SDL_GAMEPAD_AXIS_RIGHTY;
+	const Sint16 rawLookX = SDL_GetGamepadAxis(s_sdlGamepad, lookAxisX);
+	const Sint16 rawLookY = SDL_GetGamepadAxis(s_sdlGamepad, lookAxisY);
+	SDL3_PublishRadialStick(rawLookX, rawLookY);
 	int moveX = 0;
 	int moveY = 0;
 	int lookX = 0;
@@ -1584,8 +2072,8 @@ static void SDL3_UpdateGamepadAxes(int eventTime) {
 		moveX,
 		moveY);
 	SDL3_NormalizeStickAxes(
-		SDL_GetGamepadAxis(s_sdlGamepad, lookAxisX),
-		SDL_GetGamepadAxis(s_sdlGamepad, lookAxisY),
+		rawLookX,
+		rawLookY,
 		deadZone,
 		in_joystickLookCurve.GetFloat(),
 		1.0f,
@@ -1612,6 +2100,8 @@ static void SDL3_UpdateGamepadAxes(int eventTime) {
 	Sys_LeaveCriticalSection(CRITICAL_SECTION_ONE);
 
 	SDL3_UpdateTriggerButtons(leftTrigger, rightTrigger, eventTime);
+	const int activity = Max(Max(idMath::Abs(moveX), idMath::Abs(moveY)), Max(idMath::Abs(lookX), idMath::Abs(lookY)));
+	SDL3_QueueControllerActivity(eventTime, activity);
 }
 
 static void SDL3_UpdateJoystickAxes(void) {
@@ -1644,6 +2134,9 @@ static void SDL3_UpdateJoystickAxes(void) {
 	int lookX = 0;
 	int lookY = 0;
 	int up = 0;
+	SDL3_PublishRadialStick(
+		SDL3_GetJoystickAxisOrZero(hasDedicatedLookAxis ? lookAxisX : moveAxisX),
+		SDL3_GetJoystickAxisOrZero(hasDedicatedLookAxis ? lookAxisY : moveAxisY));
 
 	SDL3_NormalizeJoystickAxisPair(
 		moveAxisX,
@@ -1687,6 +2180,10 @@ static void SDL3_UpdateJoystickAxes(void) {
 	s_joystickAxisState[AXIS_YAW] = moveX;
 	s_joystickAxisState[AXIS_PITCH] = moveY;
 	Sys_LeaveCriticalSection(CRITICAL_SECTION_ONE);
+
+	const int activity = Max(Max(idMath::Abs(moveX), idMath::Abs(moveY)),
+		Max(Max(idMath::Abs(lookX), idMath::Abs(lookY)), idMath::Abs(up)));
+	SDL3_QueueControllerActivity(Sys_Milliseconds(), activity);
 }
 
 static void SDL3_SetJoystickHat(Uint8 newHat, int eventTime) {
@@ -1717,6 +2214,7 @@ static void SDL3_SetJoystickHat(Uint8 newHat, int eventTime) {
 }
 
 static void SDL3_ReleaseGamepadState(int eventTime) {
+	SDL3_QueueRetainedCancel(eventTime);
 	for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i) {
 		if (!s_gamepadButtonsDown[i]) {
 			continue;
@@ -1736,6 +2234,7 @@ static void SDL3_ReleaseGamepadState(int eventTime) {
 }
 
 static void SDL3_ReleaseJoystickState(int eventTime) {
+	SDL3_QueueRetainedCancel(eventTime);
 	for (int i = 0; i < SDL3_MAX_JOYSTICK_BUTTONS; ++i) {
 		if (!s_joystickButtonsDown[i]) {
 			continue;
@@ -1760,6 +2259,7 @@ static void SDL3_CloseGamepad(int eventTime) {
 	SDL_CloseGamepad(s_sdlGamepad);
 	s_sdlGamepad = NULL;
 	s_sdlGamepadId = 0;
+	in_gamepadFamily.SetString("none");
 	s_gamepadGyroEnabled = false;
 	s_gamepadGyroLastTimestamp = 0;
 	s_gamepadTouchpadFingerActive = false;
@@ -1776,6 +2276,7 @@ static void SDL3_CloseJoystick(int eventTime) {
 	SDL_CloseJoystick(s_sdlJoystick);
 	s_sdlJoystick = NULL;
 	s_sdlJoystickId = 0;
+	in_gamepadFamily.SetString("none");
 	SDL3_ClearJoystickState();
 }
 
@@ -1897,6 +2398,9 @@ static void SDL3_HandleGamepadGyroEvent(const SDL_GamepadSensorEvent &event, int
 	const int dx = SDL3_ConsumeMouseDelta(yawCounts, s_gamepadGyroRemainderX);
 	const int dy = SDL3_ConsumeMouseDelta(pitchCounts, s_gamepadGyroRemainderY);
 	SDL3_QueueMouseDelta(dx, dy, eventTime);
+	if (dx != 0 || dy != 0) {
+		SDL3_QueueControllerActivity(eventTime, 127);
+	}
 }
 
 static bool SDL3_GamepadTouchpadEventMatchesTrackedFinger(const SDL_GamepadTouchpadEvent &event) {
@@ -1982,7 +2486,41 @@ static void SDL3_HandleGamepadTouchpadEvent(const SDL_GamepadTouchpadEvent &even
 	const int dx = SDL3_ConsumeMouseDelta(deltaX, s_gamepadTouchpadRemainderX);
 	const int dy = SDL3_ConsumeMouseDelta(deltaY, s_gamepadTouchpadRemainderY);
 	SDL3_QueueMouseDelta(dx, dy, eventTime);
+	if (dx != 0 || dy != 0) {
+		SDL3_QueueControllerActivity(eventTime, 127);
+	}
 }
+
+#if defined(__ANDROID__) && !defined(OPENQ4_SIGMATOUCH)
+static void SDL3_UpdateAndroidTouchControls() {
+	if (s_sdlWindow == NULL) return;
+	int width = 0, height = 0;
+	(void)SDL_GetWindowSize(s_sdlWindow, &width, &height);
+	AndroidTouchControls_Frame(width, height, SDL_GetWindowDisplayScale(s_sdlWindow),
+		win32.activeApp && !s_sdlFocusInputReleased);
+}
+
+static bool SDL3_IsNonTouchPlayEvent(const SDL_Event &event) {
+	switch (event.type) {
+		case SDL_EVENT_KEY_DOWN:
+			return !event.key.repeat && event.key.scancode != SDL_SCANCODE_AC_BACK &&
+				event.key.scancode != SDL_SCANCODE_VOLUMEUP && event.key.scancode != SDL_SCANCODE_VOLUMEDOWN &&
+				event.key.scancode != SDL_SCANCODE_POWER;
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+			return event.button.which != SDL_TOUCH_MOUSEID;
+		case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+		case SDL_EVENT_JOYSTICK_BUTTON_DOWN:
+		case SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN:
+			return in_joystick.GetBool();
+		case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+			return in_joystick.GetBool() && abs(static_cast<int>(event.gaxis.value)) > 16000;
+		case SDL_EVENT_JOYSTICK_AXIS_MOTION:
+			return in_joystick.GetBool() && abs(static_cast<int>(event.jaxis.value)) > 16000;
+		default:
+			return false;
+	}
+}
+#endif
 
 static void SDL3_HandleFingerEvent(const SDL_TouchFingerEvent &event, int eventTime) {
 	if (!in_touchscreen.GetBool() || !s_sdlWindow) {
@@ -1997,6 +2535,12 @@ static void SDL3_HandleFingerEvent(const SDL_TouchFingerEvent &event, int eventT
 	const bool down = event.type == SDL_EVENT_FINGER_DOWN;
 	const bool up = event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED;
 	const bool motion = event.type == SDL_EVENT_FINGER_MOTION;
+#if defined(__ANDROID__) && !defined(OPENQ4_SIGMATOUCH)
+	const androidTouchPhase_t phase = down ? ANDROID_TOUCH_DOWN :
+		event.type == SDL_EVENT_FINGER_CANCELED ? ANDROID_TOUCH_CANCEL : up ? ANDROID_TOUCH_UP : ANDROID_TOUCH_MOVE;
+	if (AndroidTouchControls_HandleFinger(phase, static_cast<long long>(event.touchID),
+			static_cast<long long>(event.fingerID), event.x, event.y)) return;
+#endif
 
 	if (down) {
 		if (s_touchscreenFingerActive) {
@@ -2004,9 +2548,11 @@ static void SDL3_HandleFingerEvent(const SDL_TouchFingerEvent &event, int eventT
 		}
 		s_touchscreenFingerActive = true;
 		s_touchscreenFingerId = event.fingerID;
-	} else if (!s_touchscreenFingerActive || event.fingerID != s_touchscreenFingerId) {
+		s_touchscreenDeviceId = event.touchID;
+	} else if (!s_touchscreenFingerActive || event.fingerID != s_touchscreenFingerId || event.touchID != s_touchscreenDeviceId) {
 		return;
 	}
+	idKeyInput::NotePointerSource(true);
 
 	int windowWidth = SCREEN_WIDTH;
 	int windowHeight = SCREEN_HEIGHT;
@@ -2024,17 +2570,29 @@ static void SDL3_HandleFingerEvent(const SDL_TouchFingerEvent &event, int eventT
 	int dy = 0;
 	const bool routed = SDL3_ShouldRouteMenuMouse() && SDL3_SetRoutedCursorFromWindowPosition(windowMouseX, windowMouseY, dx, dy);
 
-	(void)motion;
+	// The routed GUI took the finger's position above. A zero-delta pointer
+	// event lets a retained menu follow the finger as it moves (a list drag, a
+	// tab-strip swipe), not only where it pressed and lifted.
+	if (motion && routed && !RetainedUI_IsOpen() && !(console && console->Active())) {
+		Sys_QueEvent(eventTime, SE_MOUSE, 0, 0, 0, NULL);
+	}
 	if (down || up) {
 		const bool acceptsLoadingInput = openQ4_AcceptingLoadingContinueInput();
 		if (routed || acceptsLoadingInput) {
 			SDL3_QueueMouseButtonEvent(K_MOUSE1, down, eventTime, routed);
 		}
 	}
+	// A lifted finger leaves no pointer behind in the retained menus, so the
+	// control it touched does not stay lit as a hovered one (section 13.6).
+	if (up && routed && RetainedUI_IsOpen() && !(console && console->Active())) {
+		retainedUIInput_t leave; leave.kind = retainedUIInput_t::POINTER_LEAVE;
+		RetainedUI_QueueInput(leave,eventTime);
+	}
 
 	if (up) {
 		s_touchscreenFingerActive = false;
 		s_touchscreenFingerId = 0;
+		s_touchscreenDeviceId = 0;
 	}
 }
 
@@ -2043,11 +2601,19 @@ static void SDL3_ReleaseFocusInputState(int eventTime) {
 		return;
 	}
 	s_sdlFocusInputReleased = true;
+	SDL3_QueueRetainedFocus(false,eventTime);
+	memset(s_retainedKeyOwners,0,sizeof(s_retainedKeyOwners));
 
 	// Desktop focus changes do not necessarily produce the app-level
 	// background events used on handheld/mobile platforms. Release every
 	// latched input path here too so Alt+Tab cannot leave fullscreen relative
 	// mouse mode, controller buttons, triggers, hats, or axes stuck active.
+#if defined(OPENQ4_SIGMATOUCH)
+	Quake4_ClearTouchInput();
+	Quake4_ResetTouchState();
+#elif defined(__ANDROID__)
+	AndroidTouchControls_Release();
+#endif
 	SDL3_ClearInputQueues();
 	idKeyInput::ClearStates();
 	Sys_GrabMouseCursor(false);
@@ -2111,6 +2677,21 @@ static void SDL3_ClearLifecyclePendingFlag(int flag) {
 	}
 }
 
+// Clears the flag and reports whether it was set, so one notice is answered once.
+static bool SDL3_TakeLifecyclePendingFlag(int flag) {
+	for (;;) {
+		const int currentFlags = SDL_GetAtomicInt(&s_sdlLifecyclePending);
+		if ((currentFlags & flag) == 0) {
+			return false;
+		}
+		if (SDL_CompareAndSwapAtomicInt(&s_sdlLifecyclePending, currentFlags, currentFlags & ~flag)) {
+			return true;
+		}
+	}
+}
+
+static void SDL3_HandleAppBackgroundTransition(int eventTime, const char *reason);
+
 static bool SDLCALL SDL3_LifecycleEventWatch(void *userdata, SDL_Event *event) {
 	(void)userdata;
 
@@ -2123,6 +2704,14 @@ static bool SDLCALL SDL3_LifecycleEventWatch(void *userdata, SDL_Event *event) {
 		case SDL_EVENT_WILL_ENTER_BACKGROUND:
 		case SDL_EVENT_DID_ENTER_BACKGROUND:
 			SDL3_SetLifecyclePendingFlag(SDL3_LIFECYCLE_PENDING_BACKGROUND);
+#if defined(__ANDROID__)
+			// SDL's Android pump sends these on the engine thread, then blocks
+			// before returning the queued event. Release input and stop OpenAL
+			// now. Other-thread events retain the deferred main-thread path.
+			if (Posix_IsMainThread()) {
+				SDL3_HandleAppBackgroundTransition(Sys_Milliseconds(), "android pause");
+			}
+#endif
 			break;
 
 		case SDL_EVENT_WILL_ENTER_FOREGROUND:
@@ -2163,11 +2752,21 @@ static void SDL3_UnregisterLifecycleEventWatch(void) {
 }
 
 static void SDL3_HandleAppBackgroundTransition(int eventTime, const char *reason) {
+#if defined(__ANDROID__)
+	SDL_SetAtomicInt(&s_sdlAppBackgrounded, 1);
+	S_SetDevicePaused(true);
+#endif
 	if (s_sdlAppInBackground) {
 		return;
 	}
 
+	openq4::NativeInputBeforeWindowChange();
 	s_sdlAppInBackground = true;
+#if defined(__ANDROID__)
+	s_sdlAppSuspendedSinceQuery = true;
+	s_sdlAppSuspendedAt = Sys_Milliseconds();
+#endif
+	openq4::NativeInputBeforeWindowChange();
 	win32.activeApp = false;
 	win32.movingWindow = false;
 	s_menuMouseInsideWindow = false;
@@ -2189,6 +2788,11 @@ static void SDL3_HandleAppBackgroundTransition(int eventTime, const char *reason
 	}
 	if (common != NULL && common->IsInitialized() && fileSystem != NULL && fileSystem->IsInitialized()) {
 		common->WriteConfigToFile(CONFIG_FILE);
+#if defined(__ANDROID__)
+		// SDL blocks this thread once the event pump returns, and Android may
+		// then end the process without another call: save now (section 13.6).
+		Session_SuspendSave();
+#endif
 	}
 }
 
@@ -2197,8 +2801,16 @@ static void SDL3_HandleAppForegroundTransition(int eventTime, const char *reason
 		return;
 	}
 
+	openq4::NativeInputBeforeWindowChange();
 	s_sdlAppInBackground = false;
+#if defined(__ANDROID__)
+	SDL_SetAtomicInt(&s_sdlAppBackgrounded, 0);
+	s_sdlAppSuspendedMs = Sys_Milliseconds() - s_sdlAppSuspendedAt;
+	Session_AppForeground(s_sdlAppSuspendedMs);
+#endif
+	openq4::NativeInputBeforeWindowChange();
 	win32.activeApp = Sys_SDL_IsGameWindowFocused();
+	SDL3_QueueRetainedFocus(win32.activeApp,eventTime);
 	win32.movingWindow = false;
 	s_menuMouseInsideWindow = s_sdlWindow != NULL &&
 		(SDL_GetWindowFlags(s_sdlWindow) & SDL_WINDOW_MOUSE_FOCUS) != 0;
@@ -2232,12 +2844,29 @@ static void SDL3_ProcessPendingLifecycleEvents(int eventTime) {
 
 	if ((pendingFlags & SDL3_LIFECYCLE_PENDING_LOW_MEMORY) != 0) {
 		common->Printf("SDL3: low-memory event received from lifecycle event watch.\n");
+		S_TrimMemory("os low-memory");
 	}
 	if ((pendingFlags & SDL3_LIFECYCLE_PENDING_BACKGROUND) != 0) {
 		SDL3_HandleAppBackgroundTransition(eventTime, "event watch");
 	}
 	if ((pendingFlags & SDL3_LIFECYCLE_PENDING_FOREGROUND) != 0) {
 		SDL3_HandleAppForegroundTransition(eventTime, "event watch");
+	}
+}
+
+// The prompt glyph family of a gamepad: the label printed on its south button
+// tells Xbox (A), PlayStation (cross) and Nintendo (B) layouts apart; the
+// steamdeck profile's built-in controls print A as Xbox pads do.
+static const char *SDL3_GamepadFamily(SDL_Gamepad *pad) {
+	switch (SDL_GetGamepadButtonLabel(pad, SDL_GAMEPAD_BUTTON_SOUTH)) {
+		case SDL_GAMEPAD_BUTTON_LABEL_CROSS:
+			return "playstation";
+		case SDL_GAMEPAD_BUTTON_LABEL_B:
+			return "nintendo";
+		case SDL_GAMEPAD_BUTTON_LABEL_A:
+			return idStr::Icmp(cvarSystem->GetCVarString("com_platformProfile"), "steamdeck") == 0 ? "steamdeck" : "xbox";
+		default:
+			return "generic";
 	}
 }
 
@@ -2251,6 +2880,7 @@ static bool SDL3_OpenGamepad(SDL_JoystickID instanceId) {
 
 	s_sdlGamepad = pad;
 	s_sdlGamepadId = instanceId;
+	in_gamepadFamily.SetString(SDL3_GamepadFamily(pad));
 	SDL3_ClearControllerTrackingState();
 
 	SDL3_UpdateGamepadAxes(Sys_Milliseconds());
@@ -2277,6 +2907,8 @@ static bool SDL3_OpenJoystick(SDL_JoystickID instanceId) {
 
 	s_sdlJoystick = joystick;
 	s_sdlJoystickId = instanceId;
+	// A joystick SDL cannot map as a gamepad reports no labels.
+	in_gamepadFamily.SetString("generic");
 	SDL3_ClearControllerTrackingState();
 
 	SDL3_UpdateJoystickAxes();
@@ -2420,6 +3052,13 @@ static void SDL3_PrintActiveGamepadDetails(void) {
 		SDL3_NonEmptyString(typeName),
 		SDL3_NonEmptyString(realTypeName),
 		SDL_GetGamepadSteamHandle(s_sdlGamepad) != 0 ? "yes" : "no");
+	// What the HUD's and the menus' prompts draw, a forced in_promptStyle
+	// marked, and the face layout the automatic Confirm and Back swap follows.
+	static const char *const glyphFamilies[5] = { "generic", "xbox", "playstation", "nintendo", "steamdeck" };
+	int faceLabels[4];
+	const int glyphFamily = idMath::ClampInt(0, 4, Sys_SDL_GamepadGlyphFamily(faceLabels));
+	common->Printf("    prompt glyphs: %s%s, face layout: %s\n", glyphFamilies[glyphFamily],
+		cvarSystem->GetCVarInteger("in_promptStyle") > 0 ? " (in_promptStyle)" : "", in_gamepadFamily.GetString());
 
 	int powerPercent = -1;
 	const SDL_PowerState powerState = SDL_GetGamepadPowerInfo(s_sdlGamepad, &powerPercent);
@@ -2609,6 +3248,9 @@ static void SDL3_ShutdownControllerSubsystems(void) {
 
 static int SDL3_MapPhysicalScancode(SDL_Scancode scancode) {
 	switch (scancode) {
+#if defined( __ANDROID__ )
+		case SDL_SCANCODE_AC_BACK: return K_ESCAPE;
+#endif
 		case SDL_SCANCODE_ESCAPE: return K_ESCAPE;
 		case SDL_SCANCODE_RETURN: return K_ENTER;
 		case SDL_SCANCODE_TAB: return K_TAB;
@@ -2738,6 +3380,9 @@ static int SDL3_MapPhysicalScancode(SDL_Scancode scancode) {
 
 static int SDL3_MapKeycode(SDL_Keycode keycode) {
 	switch (keycode) {
+#if defined( __ANDROID__ )
+		case SDLK_AC_BACK: return K_ESCAPE;
+#endif
 		case SDLK_ESCAPE: return K_ESCAPE;
 		case SDLK_RETURN: return K_ENTER;
 		case SDLK_TAB: return K_TAB;
@@ -3062,6 +3707,7 @@ static sdl3DisplaySelection_t SDL3_ResolveTargetDisplay(bool warnOnInvalidScreen
 	return selection;
 }
 
+#if defined(OPENQ4_SDL3_POSIX_HOST)
 static bool SDL3_QueryDesktopResolution(int *width, int *height, const char *platformName) {
 	if (width == NULL || height == NULL) {
 		return false;
@@ -3098,6 +3744,7 @@ static bool SDL3_QueryDesktopResolution(int *width, int *height, const char *pla
 
 	return false;
 }
+#endif
 
 static bool SDL3_IsSteamDeckPlatformProfile(void) {
 	if (cvarSystem == NULL || !cvarSystem->IsInitialized()) {
@@ -3105,6 +3752,76 @@ static bool SDL3_IsSteamDeckPlatformProfile(void) {
 	}
 	const char *profile = cvarSystem->GetCVarString("com_platformProfile");
 	return profile != NULL && idStr::Icmp(profile, "steamdeck") == 0;
+}
+
+// openQ4: the HUD's and the menus' prompts draw a controller's buttons in the
+// glyph family of the controller SDL reports (ui-visual-design.md 13.5).
+// in_promptStyle forces a family when a remapping layer hides the real device
+// (a forced Nintendo family also confirms menus on the east button), and the
+// steamdeck platform profile selects Steam Deck glyphs for the built-in controls.
+static idCVar in_promptStyle("in_promptStyle", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER,
+	"controller prompt glyphs: 0 the controller's own, 1 Xbox, 2 PlayStation, 3 Nintendo, 4 Steam Deck, 5 generic", 0, 5);
+
+static int SDL3_FaceLabel(SDL_GamepadButtonLabel label) {
+	switch (label) {
+		case SDL_GAMEPAD_BUTTON_LABEL_A: return 1;
+		case SDL_GAMEPAD_BUTTON_LABEL_B: return 2;
+		case SDL_GAMEPAD_BUTTON_LABEL_X: return 3;
+		case SDL_GAMEPAD_BUTTON_LABEL_Y: return 4;
+		case SDL_GAMEPAD_BUTTON_LABEL_CROSS: return 5;
+		case SDL_GAMEPAD_BUTTON_LABEL_CIRCLE: return 6;
+		case SDL_GAMEPAD_BUTTON_LABEL_SQUARE: return 7;
+		case SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE: return 8;
+		default: return 0;
+	}
+}
+
+/*
+===============
+Sys_SDL_GamepadGlyphFamily
+
+The prompt glyph family: 0 generic, 1 Xbox, 2 PlayStation, 3 Nintendo,
+4 Steam Deck. faceLabels receives the label printed on the south, east, west
+and north buttons, as SDL reports it: 1 A, 2 B, 3 X, 4 Y, 5 cross, 6 circle,
+7 square, 8 triangle, 0 unknown.
+===============
+*/
+int Sys_SDL_GamepadGlyphFamily(int faceLabels[4]) {
+	static const int xbox[4] = { 1, 2, 3, 4 }, playstation[4] = { 5, 6, 7, 8 }, nintendo[4] = { 2, 1, 4, 3 }, unknown[4] = { 0, 0, 0, 0 };
+	int family = in_promptStyle.GetInteger();
+	if (family == 0) {
+		if (SDL3_IsSteamDeckPlatformProfile()) {
+			family = 4;
+		} else if (s_sdlGamepad != NULL) {
+			switch (SDL_GetGamepadType(s_sdlGamepad)) {
+				case SDL_GAMEPAD_TYPE_XBOX360: case SDL_GAMEPAD_TYPE_XBOXONE: family = 1; break;
+				case SDL_GAMEPAD_TYPE_PS3: case SDL_GAMEPAD_TYPE_PS4: case SDL_GAMEPAD_TYPE_PS5: family = 2; break;
+				case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+				case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: family = 3; break;
+				default: family = 5; break;
+			}
+		} else {
+			family = 5;
+		}
+		// The printed labels, which the forced families below assume.
+		if (family != 4 && family != 5 && s_sdlGamepad != NULL) {
+			static const SDL_GamepadButton positions[4] = { SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_WEST,
+				SDL_GAMEPAD_BUTTON_NORTH };
+			bool known = true;
+			for (int i = 0; i < 4; ++i) {
+				faceLabels[i] = SDL3_FaceLabel(SDL_GetGamepadButtonLabel(s_sdlGamepad, positions[i]));
+				known = known && faceLabels[i] != 0;
+			}
+			if (known) {
+				return family;
+			}
+		}
+	}
+	const int *labels = family == 2 ? playstation : family == 3 ? nintendo : family == 1 || family == 4 ? xbox : unknown;
+	for (int i = 0; i < 4; ++i) {
+		faceLabels[i] = labels[i];
+	}
+	return family == 5 ? 0 : family;
 }
 
 static int SDL3_DetectSteamDeckFrameCap(void) {
@@ -3146,6 +3863,67 @@ static void SDL3_ApplySteamDeckPerformanceDefaults(void) {
 	const int deckFrameCap = SDL3_DetectSteamDeckFrameCap();
 	com_maxfps.SetInteger(deckFrameCap);
 	common->Printf("Steam Deck performance defaults: setting com_maxfps to %d.\n", deckFrameCap);
+}
+
+struct sdl3WindowBorders_t {
+	int top;
+	int left;
+	int bottom;
+	int right;
+};
+
+static int SDL3_SaturateWindowCoordinate(int64_t value) {
+	if (value <= static_cast<int64_t>(idMath::INT_MIN)) {
+		return idMath::INT_MIN;
+	}
+	if (value >= static_cast<int64_t>(idMath::INT_MAX)) {
+		return idMath::INT_MAX;
+	}
+	return static_cast<int>(value);
+}
+
+static sdl3WindowBorders_t SDL3_GetWindowBorders(void) {
+	sdl3WindowBorders_t borders = { 0, 0, 0, 0 };
+	if (s_sdlWindow == NULL) {
+		return borders;
+	}
+	if ((SDL_GetWindowFlags(s_sdlWindow) & SDL_WINDOW_BORDERLESS) != 0) {
+		return borders;
+	}
+
+	bool haveBorders = SDL_GetWindowBordersSize(
+		s_sdlWindow, &borders.top, &borders.left, &borders.bottom, &borders.right);
+#if defined(OPENQ4_SDL3_DARWIN_HOST)
+	if (!haveBorders) {
+		haveBorders = Sys_SDL_GetNativeWindowBorders(
+			s_sdlWindow, &borders.top, &borders.left, &borders.bottom, &borders.right);
+		if (haveBorders) {
+			SDL_ClearError();
+		}
+	}
+#endif
+	(void)haveBorders;
+
+	// A backend that cannot report decorations is required by SDL to return
+	// zeroes. Also reject negative or implausibly large values before any frame
+	// arithmetic, since these dimensions come from the window server.
+	borders.top = idMath::ClampInt(0, 16384, borders.top);
+	borders.left = idMath::ClampInt(0, 16384, borders.left);
+	borders.bottom = idMath::ClampInt(0, 16384, borders.bottom);
+	borders.right = idMath::ClampInt(0, 16384, borders.right);
+	return borders;
+}
+
+static void SDL3_ClientOriginToFrameOrigin(int clientX, int clientY, int &frameX, int &frameY) {
+	const sdl3WindowBorders_t borders = SDL3_GetWindowBorders();
+	frameX = SDL3_SaturateWindowCoordinate(static_cast<int64_t>(clientX) - borders.left);
+	frameY = SDL3_SaturateWindowCoordinate(static_cast<int64_t>(clientY) - borders.top);
+}
+
+static void SDL3_FrameOriginToClientOrigin(int frameX, int frameY, int &clientX, int &clientY) {
+	const sdl3WindowBorders_t borders = SDL3_GetWindowBorders();
+	clientX = SDL3_SaturateWindowCoordinate(static_cast<int64_t>(frameX) + borders.left);
+	clientY = SDL3_SaturateWindowCoordinate(static_cast<int64_t>(frameY) + borders.top);
 }
 
 static bool SDL3_GetDisplayWindowedPlacementBounds(SDL_DisplayID display, SDL_Rect &bounds) {
@@ -3197,10 +3975,10 @@ static bool SDL3_GetVirtualDisplayBounds(SDL_Rect &bounds) {
 }
 
 static bool SDL3_RectsOverlap(const SDL_Rect &a, const SDL_Rect &b) {
-	const int64_t aRight = static_cast<int64_t>(a.x) + static_cast<int64_t>(a.w);
-	const int64_t aBottom = static_cast<int64_t>(a.y) + static_cast<int64_t>(a.h);
-	const int64_t bRight = static_cast<int64_t>(b.x) + static_cast<int64_t>(b.w);
-	const int64_t bBottom = static_cast<int64_t>(b.y) + static_cast<int64_t>(b.h);
+	const int64_t aRight = static_cast<int64_t>(a.x) + a.w;
+	const int64_t aBottom = static_cast<int64_t>(a.y) + a.h;
+	const int64_t bRight = static_cast<int64_t>(b.x) + b.w;
+	const int64_t bBottom = static_cast<int64_t>(b.y) + b.h;
 	const int64_t overlapLeft = (a.x > b.x) ? a.x : b.x;
 	const int64_t overlapTop = (a.y > b.y) ? a.y : b.y;
 	const int64_t overlapRight = (aRight < bRight) ? aRight : bRight;
@@ -3208,98 +3986,19 @@ static bool SDL3_RectsOverlap(const SDL_Rect &a, const SDL_Rect &b) {
 	return overlapRight > overlapLeft && overlapBottom > overlapTop;
 }
 
-static sdl3WindowChrome_t SDL3_GetWindowChrome(void) {
-	sdl3WindowChrome_t chrome = { 0, 0, 0, 0 };
-	if (!s_sdlWindow) {
-		return chrome;
-	}
-
-	const SDL_WindowFlags flags = SDL_GetWindowFlags(s_sdlWindow);
-	if ((flags & (SDL_WINDOW_BORDERLESS | SDL_WINDOW_FULLSCREEN)) != 0) {
-		return chrome;
-	}
-
-	int top = 0;
-	int left = 0;
-	int bottom = 0;
-	int right = 0;
-	bool haveChrome = SDL_GetWindowBordersSize(s_sdlWindow, &top, &left, &bottom, &right);
-#if defined(OPENQ4_SDL3_DARWIN_HOST)
-	if (!haveChrome) {
-		const SDL_PropertiesID props = SDL_GetWindowProperties(s_sdlWindow);
-		void *nativeWindow = props != 0
-			? SDL_GetPointerProperty(props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL)
-			: NULL;
-		haveChrome = nativeWindow != NULL &&
-			Sys_MacOSGetWindowChrome(nativeWindow, &top, &left, &bottom, &right);
-	}
-#endif
-	if (!haveChrome) {
-		// Some compositors do not report decorations until the window has been
-		// shown. The post-show reconciliation path queries them again.
-		return chrome;
-	}
-
-	chrome.top = (top > 0) ? top : 0;
-	chrome.left = (left > 0) ? left : 0;
-	chrome.bottom = (bottom > 0) ? bottom : 0;
-	chrome.right = (right > 0) ? right : 0;
-	return chrome;
-}
-
-static void SDL3_GetWindowFrameFromClient(
-	int clientX,
-	int clientY,
-	int clientWidth,
-	int clientHeight,
-	const sdl3WindowChrome_t &chrome,
-	SDL_Rect &frame) {
-	frame.x = clientX - chrome.left;
-	frame.y = clientY - chrome.top;
-	frame.w = clientWidth + chrome.left + chrome.right;
-	frame.h = clientHeight + chrome.top + chrome.bottom;
-}
-
-static void SDL3_GetWindowClientPosition(
-	int frameX,
-	int frameY,
-	const sdl3WindowChrome_t &chrome,
-	int &clientX,
-	int &clientY) {
-	clientX = frameX + chrome.left;
-	clientY = frameY + chrome.top;
-}
-
-static SDL_DisplayID SDL3_GetDisplayForWindowFrame(
-	int frameX,
-	int frameY,
-	int clientWidth,
-	int clientHeight,
-	const sdl3WindowChrome_t &chrome) {
+static bool SDL3_WindowRectIntersectsAnyDisplay(int frameX, int frameY, int clientWidth, int clientHeight) {
 	if (clientWidth <= 0 || clientHeight <= 0) {
-		return 0;
-	}
-
-	SDL_Rect frame;
-	frame.x = frameX;
-	frame.y = frameY;
-	frame.w = clientWidth + chrome.left + chrome.right;
-	frame.h = clientHeight + chrome.top + chrome.bottom;
-	return SDL_GetDisplayForRect(&frame);
-}
-
-static bool SDL3_WindowFrameIntersectsAnyDisplay(int frameX, int frameY, int clientWidth, int clientHeight, const sdl3WindowChrome_t &chrome) {
-	SDL_Rect windowFrame;
-	windowFrame.x = frameX;
-	windowFrame.y = frameY;
-	windowFrame.w = clientWidth + chrome.left + chrome.right;
-	windowFrame.h = clientHeight + chrome.top + chrome.bottom;
-
-	const int width = windowFrame.w;
-	const int height = windowFrame.h;
-	if (width <= 0 || height <= 0) {
 		return false;
 	}
+
+	const sdl3WindowBorders_t borders = SDL3_GetWindowBorders();
+	SDL_Rect windowRect;
+	windowRect.x = frameX;
+	windowRect.y = frameY;
+	windowRect.w = SDL3_SaturateWindowCoordinate(
+		static_cast<int64_t>(clientWidth) + borders.left + borders.right);
+	windowRect.h = SDL3_SaturateWindowCoordinate(
+		static_cast<int64_t>(clientHeight) + borders.top + borders.bottom);
 
 	int displayCount = 0;
 	SDL_DisplayID *displays = SDL_GetDisplays(&displayCount);
@@ -3313,7 +4012,7 @@ static bool SDL3_WindowFrameIntersectsAnyDisplay(int frameX, int frameY, int cli
 	bool intersects = false;
 	for (int i = 0; i < displayCount; ++i) {
 		SDL_Rect displayBounds;
-		if (SDL_GetDisplayBounds(displays[i], &displayBounds) && SDL3_RectsOverlap(windowFrame, displayBounds)) {
+		if (SDL_GetDisplayBounds(displays[i], &displayBounds) && SDL3_RectsOverlap(windowRect, displayBounds)) {
 			intersects = true;
 			break;
 		}
@@ -3325,68 +4024,89 @@ static bool SDL3_WindowFrameIntersectsAnyDisplay(int frameX, int frameY, int cli
 
 static int SDL3_ClampWindowDimension(int value, int minValue, int maxValue) {
 	if (maxValue <= 0) {
-		return minValue;
+		return 1;
 	}
 	const int effectiveMin = (minValue > maxValue) ? maxValue : minValue;
 	return idMath::ClampInt(effectiveMin, maxValue, value);
 }
 
-static void SDL3_ConstrainWindowFrameToBounds(
-	int &frameX,
-	int &frameY,
-	int &clientWidth,
-	int &clientHeight,
-	const sdl3WindowChrome_t &chrome,
-	const SDL_Rect &bounds,
-	bool recenterIfOutside) {
-	const int horizontalChrome = chrome.left + chrome.right;
-	const int verticalChrome = chrome.top + chrome.bottom;
-	const int maxClientWidth = (bounds.w > horizontalChrome) ? bounds.w - horizontalChrome : 1;
-	const int maxClientHeight = (bounds.h > verticalChrome) ? bounds.h - verticalChrome : 1;
-
+static void SDL3_ConstrainWindowRectToBounds(int &frameX, int &frameY, int &clientWidth, int &clientHeight, const SDL_Rect &bounds, bool recenterIfOutside) {
+	const sdl3WindowBorders_t borders = SDL3_GetWindowBorders();
+	const int64_t availableClientWidth = static_cast<int64_t>(bounds.w) - borders.left - borders.right;
+	const int64_t availableClientHeight = static_cast<int64_t>(bounds.h) - borders.top - borders.bottom;
+	const int maxClientWidth = availableClientWidth > 1 ? static_cast<int>(availableClientWidth) : 1;
+	const int maxClientHeight = availableClientHeight > 1 ? static_cast<int>(availableClientHeight) : 1;
 	clientWidth = SDL3_ClampWindowDimension(clientWidth, 320, maxClientWidth);
 	clientHeight = SDL3_ClampWindowDimension(clientHeight, 240, maxClientHeight);
 
-	const int frameWidth = clientWidth + horizontalChrome;
-	const int frameHeight = clientHeight + verticalChrome;
-	const int maxFrameX = bounds.x + bounds.w - frameWidth;
-	const int maxFrameY = bounds.y + bounds.h - frameHeight;
+	const int64_t frameWidth = static_cast<int64_t>(clientWidth) + borders.left + borders.right;
+	const int64_t frameHeight = static_cast<int64_t>(clientHeight) + borders.top + borders.bottom;
+	const int maxX = SDL3_SaturateWindowCoordinate(
+		static_cast<int64_t>(bounds.x) + bounds.w - frameWidth);
+	const int maxY = SDL3_SaturateWindowCoordinate(
+		static_cast<int64_t>(bounds.y) + bounds.h - frameHeight);
 
-	if (maxFrameX < bounds.x) {
+	if (maxX < bounds.x) {
 		frameX = bounds.x;
 	} else {
-		if (recenterIfOutside && (frameX < bounds.x || frameX > maxFrameX)) {
-			frameX = bounds.x + ((bounds.w - frameWidth) / 2);
+		if (recenterIfOutside && (frameX < bounds.x || frameX > maxX)) {
+			frameX = SDL3_SaturateWindowCoordinate(
+				static_cast<int64_t>(bounds.x) + (static_cast<int64_t>(bounds.w) - frameWidth) / 2);
 		}
-		frameX = idMath::ClampInt(bounds.x, maxFrameX, frameX);
+		frameX = idMath::ClampInt(bounds.x, maxX, frameX);
 	}
 
-	if (maxFrameY < bounds.y) {
+	if (maxY < bounds.y) {
 		frameY = bounds.y;
 	} else {
-		if (recenterIfOutside && (frameY < bounds.y || frameY > maxFrameY)) {
-			frameY = bounds.y + ((bounds.h - frameHeight) / 2);
+		if (recenterIfOutside && (frameY < bounds.y || frameY > maxY)) {
+			frameY = SDL3_SaturateWindowCoordinate(
+				static_cast<int64_t>(bounds.y) + (static_cast<int64_t>(bounds.h) - frameHeight) / 2);
 		}
-		frameY = idMath::ClampInt(bounds.y, maxFrameY, frameY);
+		frameY = idMath::ClampInt(bounds.y, maxY, frameY);
 	}
 }
 
 static void SDL3_GetWindowPositionOnDisplay(SDL_DisplayID display, int width, int height, int &targetX, int &targetY) {
-	int frameX = win32.win_xpos.GetInteger();
-	int frameY = win32.win_ypos.GetInteger();
-	const sdl3WindowChrome_t chrome = SDL3_GetWindowChrome();
+	targetX = win32.win_xpos.GetInteger();
+	targetY = win32.win_ypos.GetInteger();
 
-	if (display != 0 && r_screen.GetInteger() >= 0) {
-		SDL_Rect bounds;
-		if (SDL_GetDisplayBounds(display, &bounds)) {
-			SDL3_ConstrainWindowFrameToBounds(frameX, frameY, width, height, chrome, bounds, true);
-		}
+	if (display == 0) {
+		return;
 	}
 
-	SDL3_GetWindowClientPosition(frameX, frameY, chrome, targetX, targetY);
+	SDL_Rect bounds;
+	if (!SDL_GetDisplayBounds(display, &bounds)) {
+		return;
+	}
+
+	if (r_screen.GetInteger() >= 0) {
+		const int maxX = bounds.x + bounds.w - width;
+		const int maxY = bounds.y + bounds.h - height;
+
+		if (maxX < bounds.x) {
+			targetX = bounds.x;
+		} else {
+			targetX = idMath::ClampInt(bounds.x, maxX, targetX);
+		}
+
+		if (maxY < bounds.y) {
+			targetY = bounds.y;
+		} else {
+			targetY = idMath::ClampInt(bounds.y, maxY, targetY);
+		}
+	}
 }
 
-static bool SDL3_SetWindowPositionCompat(int x, int y, SDL_DisplayID display, bool centerOnWayland, const char *description) {
+// Since SDL 3.4.18, SDL_SetWindowBordered fails on video drivers without border
+// control (Android, KMSDRM, offscreen, dummy) even when nothing would change.
+// Ask SDL only for a real change, as earlier releases effectively did.
+static bool SDL3_SetWindowBorderedCompat(bool bordered) {
+	const bool borderless = (SDL_GetWindowFlags(s_sdlWindow) & SDL_WINDOW_BORDERLESS) != 0;
+	return bordered != borderless || SDL_SetWindowBordered(s_sdlWindow, bordered);
+}
+
+static bool SDL3_SetWindowPositionCompat(int frameX, int frameY, SDL_DisplayID display, bool centerOnWayland, const char *description) {
 	if (!s_sdlWindow) {
 		return false;
 	}
@@ -3405,13 +4125,77 @@ static bool SDL3_SetWindowPositionCompat(int x, int y, SDL_DisplayID display, bo
 		return true;
 	}
 
-	if (!SDL_SetWindowPosition(s_sdlWindow, x, y)) {
+	int clientX = frameX;
+	int clientY = frameY;
+	SDL3_FrameOriginToClientOrigin(frameX, frameY, clientX, clientY);
+	if (!SDL_SetWindowPosition(s_sdlWindow, clientX, clientY)) {
 		common->Printf("SDL3: failed to %s: %s\n",
 			description != NULL ? description : "move window", SDL_GetError());
 		return false;
 	}
 
 	return true;
+}
+
+// windowMinimizeTest (cheat): minimize the game window as leaving full screen
+// does, so the frame cap of a window that shows nothing (HF-07) can be
+// measured without input. The window stays minimized until it is restored.
+static void SDL3_WindowMinimizeTest_f(const idCmdArgs &args) {
+	(void)args;
+	if (s_sdlWindow == NULL) {
+		common->Printf("windowMinimizeTest: no game window\n");
+		return;
+	}
+	if (!SDL_MinimizeWindow(s_sdlWindow)) {
+		common->Printf("windowMinimizeTest: %s\n", SDL_GetError());
+		return;
+	}
+	(void)SDL_SyncWindow(s_sdlWindow);
+	common->Printf("windowMinimizeTest: minimized=%d shown=%d\n",
+		(SDL_GetWindowFlags(s_sdlWindow) & SDL_WINDOW_MINIMIZED) != 0 ? 1 : 0,
+		Sys_SDL_IsGameWindowShown() ? 1 : 0);
+}
+
+// Explicit, one-shot development request through the engine's own window.
+// A successful request is not proof of focus: the compositor may refuse it,
+// and pacing qualification must independently observe the whole interval.
+static void SDL3_WindowFocusTest_f(const idCmdArgs &args) {
+	const bool reportOnly = args.Argc() == 2 && strcmp(args.Argv(1), "report") == 0;
+	if ((!reportOnly && args.Argc() != 1) || s_sdlWindow == NULL) {
+		common->Printf("windowFocusTest: requires an existing visible windowed game window\n");
+		return;
+	}
+	const SDL_WindowFlags flags = SDL_GetWindowFlags(s_sdlWindow);
+	if ((flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_FULLSCREEN)) != 0) {
+		common->Printf("windowFocusTest: hidden, minimized or fullscreen window refused\n");
+		return;
+	}
+	// Bind external observations to the render window, not another window in
+	// the same process (such as the engine console). No native focus API is used.
+	void *nativeWindow = NULL;
+#if !defined(OPENQ4_SDL3_POSIX_HOST)
+	nativeWindow = win32.hWnd;
+#endif
+	common->Printf("windowFocusTest: nativeWindow=%p\n", nativeWindow);
+	if (reportOnly) return;
+	const bool requested = SDL_RaiseWindow(s_sdlWindow);
+	common->Printf("windowFocusTest: requestAccepted=%d focused=%d\n", requested ? 1 : 0,
+		(SDL_GetWindowFlags(s_sdlWindow) & SDL_WINDOW_INPUT_FOCUS) != 0 ? 1 : 0);
+	if (!requested) common->Printf("windowFocusTest: %s\n", SDL_GetError());
+}
+
+// Pushes the event an operating system sends under memory pressure (Android, iOS)
+// through SDL's queue and event watchers, so the response is testable anywhere.
+static void SDL3_TestLowMemoryNotice_f(const idCmdArgs &args) {
+	SDL_Event event;
+	SDL_zero(event);
+	event.type = SDL_EVENT_LOW_MEMORY;
+	event.common.timestamp = SDL_GetTicksNS();
+	if (!SDL_PushEvent(&event)) {
+		common->Printf("testLowMemoryNotice: %s\n", SDL_GetError());
+		return;
+	}
+	common->Printf("testLowMemoryNotice: low-memory event pushed\n");
 }
 
 static void SDL3_ListDisplays_f(const idCmdArgs &args) {
@@ -3605,11 +4389,31 @@ static int SDL3_ClampViewportPixel(double value, int minValue, int maxValue) {
 	return static_cast<int>(value);
 }
 
+// The window's safe area (SDL_GetWindowSafeArea, in window coordinates) as
+// framebuffer-pixel insets. Desktop windows report the whole window: no inset.
+static void SDL3_RefreshSafeArea( void ) {
+	engineWindowState.safeAreaLeft = engineWindowState.safeAreaTop = 0;
+	engineWindowState.safeAreaRight = engineWindowState.safeAreaBottom = 0;
+	int width = 0, height = 0, pixelWidth = 0, pixelHeight = 0;
+	SDL_Rect safe;
+	if (!s_sdlWindow || !SDL_GetWindowSize(s_sdlWindow, &width, &height) || !SDL_GetWindowSizeInPixels(s_sdlWindow, &pixelWidth, &pixelHeight) ||
+		width <= 0 || height <= 0 || pixelWidth <= 0 || pixelHeight <= 0 || !SDL_GetWindowSafeArea(s_sdlWindow, &safe) || safe.w <= 0 || safe.h <= 0) {
+		return;
+	}
+	const double scaleX = static_cast<double>(pixelWidth) / width, scaleY = static_cast<double>(pixelHeight) / height;
+	// Round each inset outward so the safe area never reaches into the unsafe edge.
+	engineWindowState.safeAreaLeft = SDL3_ClampViewportPixel(std::ceil(safe.x * scaleX), 0, pixelWidth);
+	engineWindowState.safeAreaTop = SDL3_ClampViewportPixel(std::ceil(safe.y * scaleY), 0, pixelHeight);
+	engineWindowState.safeAreaRight = SDL3_ClampViewportPixel(pixelWidth - std::floor((static_cast<double>(safe.x) + safe.w) * scaleX), 0, pixelWidth);
+	engineWindowState.safeAreaBottom = SDL3_ClampViewportPixel(pixelHeight - std::floor((static_cast<double>(safe.y) + safe.h) * scaleY), 0, pixelHeight);
+}
+
 static void SDL3_SetUIViewport( int x, int y, int width, int height ) {
 	engineWindowState.uiViewportX = x;
 	engineWindowState.uiViewportY = y;
 	engineWindowState.uiViewportWidth = width;
 	engineWindowState.uiViewportHeight = height;
+	SDL3_RefreshSafeArea();
 #ifndef OPENQ4_RENDERER_MODULE_ONLY
 	// mirrored for the statically linked renderer; module renderers poll
 	// this state through the window services each present
@@ -3700,84 +4504,26 @@ static void SDL3_UpdateFullWindowViewport(int pixelWidth, int pixelHeight) {
 	SDL3_SetUIViewport( 0, 0, pixelWidth, pixelHeight );
 }
 
-static bool SDL3_ConstrainCurrentWindowFrameToDisplay(SDL_DisplayID display, bool recenterIfOutside) {
-	if (!s_sdlWindow || display == 0 || !SDL3_UseAbsoluteWindowPlacement()) {
-		return false;
-	}
-
-	const SDL_WindowFlags flags = SDL_GetWindowFlags(s_sdlWindow);
-	if ((flags & (SDL_WINDOW_BORDERLESS | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_HIDDEN |
-		SDL_WINDOW_MINIMIZED | SDL_WINDOW_MAXIMIZED)) != 0) {
-		return false;
-	}
-
-	SDL_Rect bounds;
-	if (!SDL3_GetDisplayWindowedPlacementBounds(display, bounds)) {
-		return false;
-	}
-
-	int clientX = 0;
-	int clientY = 0;
-	int clientWidth = 0;
-	int clientHeight = 0;
-	if (!SDL_GetWindowPosition(s_sdlWindow, &clientX, &clientY) ||
-		!SDL_GetWindowSize(s_sdlWindow, &clientWidth, &clientHeight) ||
-		clientWidth <= 0 || clientHeight <= 0) {
-		return false;
-	}
-
-	const sdl3WindowChrome_t chrome = SDL3_GetWindowChrome();
-	SDL_Rect frame;
-	SDL3_GetWindowFrameFromClient(clientX, clientY, clientWidth, clientHeight, chrome, frame);
-
-	int constrainedClientWidth = clientWidth;
-	int constrainedClientHeight = clientHeight;
-	SDL3_ConstrainWindowFrameToBounds(
-		frame.x,
-		frame.y,
-		constrainedClientWidth,
-		constrainedClientHeight,
-		chrome,
-		bounds,
-		recenterIfOutside);
-
-	int constrainedClientX = 0;
-	int constrainedClientY = 0;
-	SDL3_GetWindowClientPosition(frame.x, frame.y, chrome, constrainedClientX, constrainedClientY);
-
-	const bool sizeChanged = constrainedClientWidth != clientWidth || constrainedClientHeight != clientHeight;
-	const bool positionChanged = constrainedClientX != clientX || constrainedClientY != clientY;
-	if (sizeChanged && !SDL_SetWindowSize(s_sdlWindow, constrainedClientWidth, constrainedClientHeight)) {
-		common->Printf("SDL3: failed to resize window within the display work area: %s\n", SDL_GetError());
-	}
-	if (positionChanged && !SDL_SetWindowPosition(s_sdlWindow, constrainedClientX, constrainedClientY)) {
-		common->Printf("SDL3: failed to move window frame within the display work area: %s\n", SDL_GetError());
-	}
-
-	return sizeChanged || positionChanged;
-}
-
-static void SDL3_RecordWindowedPlacement(int frameX, int frameY, int width, int height) {
-	if (width <= 0 || height <= 0) {
+static void SDL3_RecordWindowedPlacement(int x, int y, int width, int height) {
+	if (Sys_WindowPlacementLeaseActive() || width <= 0 || height <= 0) {
 		return;
 	}
 
-	s_windowedPlacement.frameX = frameX;
-	s_windowedPlacement.frameY = frameY;
+	s_windowedPlacement.x = x;
+	s_windowedPlacement.y = y;
 	s_windowedPlacement.width = width;
 	s_windowedPlacement.height = height;
 	s_windowedPlacement.valid = true;
 }
 
 static void SDL3_SnapshotCurrentWindowedPlacement(void) {
-	if (!s_sdlWindow || win32.cdsFullscreen || r_borderless.GetBool() || !SDL3_UseAbsoluteWindowPlacement()) {
+	if (!s_sdlWindow || win32.cdsFullscreen || !SDL3_UseAbsoluteWindowPlacement()) {
 		return;
 	}
-	const SDL_WindowFlags flags = SDL_GetWindowFlags(s_sdlWindow);
-	if ((flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_MAXIMIZED)) != 0) {
+	const SDL_WindowFlags windowFlags = SDL_GetWindowFlags(s_sdlWindow);
+	if ((windowFlags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_BORDERLESS)) != 0) {
 		// OS-initiated fullscreen (not tracked by win32.cdsFullscreen) must
-		// never be recorded as a windowed placement. Keep the normal frame
-		// while hidden, minimized, or maximized as well.
+		// never be recorded as a windowed placement.
 		return;
 	}
 
@@ -3786,10 +4532,10 @@ static void SDL3_SnapshotCurrentWindowedPlacement(void) {
 	int width = 0;
 	int height = 0;
 	if (SDL_GetWindowPosition(s_sdlWindow, &x, &y) && SDL_GetWindowSize(s_sdlWindow, &width, &height)) {
-		const sdl3WindowChrome_t chrome = SDL3_GetWindowChrome();
-		SDL_Rect frame;
-		SDL3_GetWindowFrameFromClient(x, y, width, height, chrome, frame);
-		SDL3_RecordWindowedPlacement(frame.x, frame.y, width, height);
+		int frameX = x;
+		int frameY = y;
+		SDL3_ClientOriginToFrameOrigin(x, y, frameX, frameY);
+		SDL3_RecordWindowedPlacement(frameX, frameY, width, height);
 	}
 }
 
@@ -3811,30 +4557,25 @@ static void SDL3_RefreshWindowPlacement(void) {
 	// button) never set win32.cdsFullscreen, and persisting the fullscreen
 	// space's forced move/resize would corrupt the saved windowed placement.
 	const bool windowIsFullscreen = (windowFlags & SDL_WINDOW_FULLSCREEN) != 0;
-	const bool windowIsMinimized = (windowFlags & SDL_WINDOW_MINIMIZED) != 0;
-	const bool windowIsMaximized = (windowFlags & SDL_WINDOW_MAXIMIZED) != 0;
-	const bool isWindowedResizable = !r_borderless.GetBool();
-	const bool canPersistWindowedPlacement = !windowIsHidden && !windowIsFullscreen &&
-		!windowIsMinimized && !windowIsMaximized && !win32.cdsFullscreen &&
-		!s_screenParmTransitionActive && isWindowedResizable;
+	const bool canPersistWindowedPlacement = !windowIsHidden && !windowIsFullscreen && !win32.cdsFullscreen && !s_screenParmTransitionActive && !Sys_WindowPlacementLeaseActive();
+	const bool isWindowedResizable = (windowFlags & SDL_WINDOW_BORDERLESS) == 0;
 
 	const bool haveWindowPosition = SDL_GetWindowPosition(s_sdlWindow, &x, &y);
-	const bool haveWindowSize = SDL_GetWindowSize(s_sdlWindow, &width, &height);
-	const sdl3WindowChrome_t chrome = SDL3_GetWindowChrome();
-	SDL_Rect frame = { x, y, width, height };
-	if (haveWindowPosition && haveWindowSize) {
-		SDL3_GetWindowFrameFromClient(x, y, width, height, chrome, frame);
+	int frameX = x;
+	int frameY = y;
+	if (haveWindowPosition && SDL3_UseAbsoluteWindowPlacement()) {
+		SDL3_ClientOriginToFrameOrigin(x, y, frameX, frameY);
 	}
-
 	if (haveWindowPosition && canPersistWindowedPlacement && SDL3_UseAbsoluteWindowPlacement()) {
-		win32.win_xpos.SetInteger(frame.x);
-		win32.win_ypos.SetInteger(frame.y);
+		win32.win_xpos.SetInteger(frameX);
+		win32.win_ypos.SetInteger(frameY);
 		win32.win_xpos.ClearModified();
 		win32.win_ypos.ClearModified();
 	}
 
+	const bool haveWindowSize = SDL_GetWindowSize(s_sdlWindow, &width, &height);
 	if (haveWindowSize && canPersistWindowedPlacement) {
-		if (width > 0 && height > 0) {
+		if (isWindowedResizable && width > 0 && height > 0) {
 			r_windowWidth.SetInteger(width);
 			r_windowHeight.SetInteger(height);
 			r_windowWidth.ClearModified();
@@ -3842,8 +4583,8 @@ static void SDL3_RefreshWindowPlacement(void) {
 		}
 	}
 
-	if (canPersistWindowedPlacement && haveWindowPosition && haveWindowSize && SDL3_UseAbsoluteWindowPlacement()) {
-		SDL3_RecordWindowedPlacement(frame.x, frame.y, width, height);
+	if (canPersistWindowedPlacement && isWindowedResizable && haveWindowPosition && haveWindowSize && SDL3_UseAbsoluteWindowPlacement()) {
+		SDL3_RecordWindowedPlacement(frameX, frameY, width, height);
 	}
 
 	if (!SDL_GetWindowSizeInPixels(s_sdlWindow, &pixelWidth, &pixelHeight)) {
@@ -3854,6 +4595,10 @@ static void SDL3_RefreshWindowPlacement(void) {
 	if (pixelWidth > 0 && pixelHeight > 0) {
 		SDL3_SetVidSize( pixelWidth, pixelHeight );
 	}
+	const float uiDisplayScale = SDL_GetWindowDisplayScale(s_sdlWindow);
+	engineWindowState.displayScale = std::isfinite(uiDisplayScale) && uiDisplayScale > 0 ? uiDisplayScale : 1.0f;
+	engineWindowState.pixelDensityX = width > 0 && pixelWidth > 0 ? static_cast<float>(pixelWidth) / width : 1.0f;
+	engineWindowState.pixelDensityY = height > 0 && pixelHeight > 0 ? static_cast<float>(pixelHeight) / height : 1.0f;
 
 	if (SDL3_UseAbsoluteWindowPlacement()) {
 		SDL3_UpdateDisplayViewport(SDL3_ResolveViewportDisplay(), x, y, width, height, pixelWidth, pixelHeight);
@@ -3945,11 +4690,9 @@ static bool SDL3_FindExactPixelFullscreenMode(SDL_DisplayID display, int pixelWi
 		if (candidatePixelWidth != pixelWidth || candidatePixelHeight != pixelHeight) {
 			continue;
 		}
-		// Nearest refresh to the request, or the highest available when no
-		// specific rate was requested.
-		const float score = requestedRefresh > 0.0f
-			? -fabsf(candidate->refresh_rate - requestedRefresh)
-			: candidate->refresh_rate;
+		// Nearest refresh to the request. Legacy calls this only for a nonzero
+		// rate its whole-hertz bucket lacks; Auto is decided by the shared rule.
+		const float score = -fabsf(candidate->refresh_rate - requestedRefresh);
 		if (!found || score > bestScore) {
 			found = true;
 			bestScore = score;
@@ -4013,13 +4756,27 @@ void Sys_SDL_EmergencyReleaseGameWindow(void) {
 	if (!s_sdlWindow) {
 		return;
 	}
+#if defined(__ANDROID__)
+	// Hiding the game does not release SDL's single Android window slot.
+	// Retire its published native handle before the fatal console replaces it.
+	SDL_StopTextInput(s_sdlWindow);
+	SDL_GL_MakeCurrent(s_sdlWindow, NULL);
+	SDL3_RetireNativeWindowPublication();
+	SDL_DestroyWindow(s_sdlWindow);
+	s_sdlWindow = NULL;
+#else
 	(void)SDL3_LeaveFullscreenAndRestoreDesktopMode();
 	SDL_HideWindow(s_sdlWindow);
+#endif
 }
 
 #if defined(_WIN32)
 static void SDL3_MinimizeOnFullscreenFocusLoss(void) {
-	if (!s_sdlWindow) {
+	// SDL's opt-out also applies to our Windows fallback. Otherwise a caller
+	// requesting a visible, unfocused fullscreen window still gets minimized
+	// here, even though SDL itself honored the hint. Keep the ordinary desktop
+	// behavior unless the caller explicitly disables it.
+	if (!s_sdlWindow || !SDL_GetHintBoolean(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, true)) {
 		return;
 	}
 
@@ -4033,6 +4790,9 @@ static void SDL3_MinimizeOnFullscreenFocusLoss(void) {
 	}
 }
 #endif
+
+// The SYSTEM page's exclusive rule, defined with the strict window service.
+static bool SDL3_StrictFullscreenMode(SDL_DisplayID display, int width, int height, int refresh, SDL_DisplayMode &selected);
 
 static bool SDL3_ApplyScreenParms(glimpParms_t parms) {
 	if (!s_sdlWindow) {
@@ -4055,6 +4815,12 @@ static bool SDL3_ApplyScreenParms(glimpParms_t parms) {
 	if (display == 0) {
 		display = SDL_GetPrimaryDisplay();
 	}
+	bool reapplyDecoratedWindowPlacement = false;
+	bool reapplyRecenterIfOutside = false;
+	int reapplyFrameX = 0;
+	int reapplyFrameY = 0;
+	int reapplyClientWidth = 0;
+	int reapplyClientHeight = 0;
 
 	if (spanDisplays && SDL3_IsNativeWaylandVideoDriver()) {
 		if (!s_waylandSpanWarningLogged) {
@@ -4068,7 +4834,7 @@ static bool SDL3_ApplyScreenParms(glimpParms_t parms) {
 	if (parms.fullScreen) {
 		SDL3_SnapshotCurrentWindowedPlacement();
 
-		if (!SDL_SetWindowBordered(s_sdlWindow, true)) {
+		if (!SDL3_SetWindowBorderedCompat(true)) {
 			common->Printf("SDL3: failed to restore window borders: %s\n", SDL_GetError());
 		}
 
@@ -4080,7 +4846,7 @@ static bool SDL3_ApplyScreenParms(glimpParms_t parms) {
 			if (!SDL_SetWindowFullscreen(s_sdlWindow, false)) {
 				common->Printf("SDL3: failed to leave fullscreen before spanned desktop mode: %s\n", SDL_GetError());
 			}
-			if (!SDL_SetWindowBordered(s_sdlWindow, false)) {
+			if (!SDL3_SetWindowBorderedCompat(false)) {
 				common->Printf("SDL3: failed to disable window borders for spanned desktop mode: %s\n", SDL_GetError());
 			}
 
@@ -4109,18 +4875,25 @@ static bool SDL3_ApplyScreenParms(glimpParms_t parms) {
 			SDL_DisplayMode mode;
 			memset(&mode, 0, sizeof(mode));
 			const float requestedRefresh = parms.displayHz > 0 ? static_cast<float>(parms.displayHz) : 0.0f;
-			bool hasClosestMode = false;
+			// The SYSTEM page's rule first, in pixels, so startup, vid_restart and
+			// Alt+Enter choose the mode an Apply chooses: the exact size, the
+			// highest rate of a whole-hertz choice, and for Auto the rate nearest
+			// the desktop's (src/sys/DisplayModeRule.h). glConfig dimensions are
+			// read back via SDL_GetWindowSizeInPixels.
+			bool hasClosestMode = display != 0 &&
+				SDL3_StrictFullscreenMode(display, parms.width, parms.height, parms.displayHz, mode);
 #if defined(OPENQ4_SDL3_DARWIN_HOST)
-			// The menu offers pixel resolutions, but Retina displays expose
-			// their native pixel sizes only as high-density modes whose w/h
-			// are points. Prefer an exact pixel-size match so the requested
-			// resolution is honored in pixels; glConfig dimensions stay
-			// correct because they are read back via SDL_GetWindowSizeInPixels.
-			hasClosestMode = display != 0 &&
-				SDL3_FindExactPixelFullscreenMode(display, parms.width, parms.height, requestedRefresh, mode);
+			// A rate the exact pixel size lacks keeps that size at the nearest
+			// rate: Retina displays expose their native pixel sizes only as
+			// high-density modes whose w/h are points, which the point-size
+			// fallback below would misread.
+			if (!hasClosestMode && parms.displayHz > 0) {
+				hasClosestMode = display != 0 &&
+					SDL3_FindExactPixelFullscreenMode(display, parms.width, parms.height, requestedRefresh, mode);
+			}
 #endif
-			// Point-size matching over the standard (1x-density) mode list;
-			// also the fallback when no exact Retina pixel match exists.
+			// Point-size matching over the standard (1x-density) mode list: the
+			// legacy tolerance for a size or rate the display does not offer.
 			if (!hasClosestMode) {
 				hasClosestMode = display != 0 &&
 					SDL_GetClosestFullscreenDisplayMode(display, parms.width, parms.height, requestedRefresh, false, &mode);
@@ -4160,7 +4933,7 @@ static bool SDL3_ApplyScreenParms(glimpParms_t parms) {
 		}
 		(void)SDL_SetWindowFullscreenMode(s_sdlWindow, NULL);
 
-		if (!SDL_SetWindowBordered(s_sdlWindow, !useBorderlessWindow)) {
+		if (!SDL3_SetWindowBorderedCompat(!useBorderlessWindow)) {
 			common->Printf("SDL3: failed to set border mode: %s\n", SDL_GetError());
 		}
 
@@ -4184,47 +4957,23 @@ static bool SDL3_ApplyScreenParms(glimpParms_t parms) {
 		} else {
 			int restoredWidth = parms.width;
 			int restoredHeight = parms.height;
-			int restoredFrameX = win32.win_xpos.GetInteger();
-			int restoredFrameY = win32.win_ypos.GetInteger();
+			int restoredX = win32.win_xpos.GetInteger();
+			int restoredY = win32.win_ypos.GetInteger();
 
 			if (s_windowedPlacement.valid) {
 				restoredWidth = s_windowedPlacement.width;
 				restoredHeight = s_windowedPlacement.height;
-				restoredFrameX = s_windowedPlacement.frameX;
-				restoredFrameY = s_windowedPlacement.frameY;
+				restoredX = s_windowedPlacement.x;
+				restoredY = s_windowedPlacement.y;
 			}
 
-			const sdl3WindowChrome_t chrome = SDL3_GetWindowChrome();
-			if (r_screen.GetInteger() < 0 && SDL3_UseAbsoluteWindowPlacement()) {
-				const SDL_DisplayID restoredDisplay = SDL3_GetDisplayForWindowFrame(
-					restoredFrameX,
-					restoredFrameY,
-					restoredWidth,
-					restoredHeight,
-					chrome);
-				if (restoredDisplay != 0) {
-					display = restoredDisplay;
-				}
-			}
-			const bool needsRecoveryPlacement = !SDL3_WindowFrameIntersectsAnyDisplay(
-				restoredFrameX,
-				restoredFrameY,
-				restoredWidth,
-				restoredHeight,
-				chrome);
+			const bool needsRecoveryPlacement = !SDL3_WindowRectIntersectsAnyDisplay(restoredX, restoredY, restoredWidth, restoredHeight);
 			bool constrainedToDisplay = false;
 			if (display != 0) {
 				SDL_Rect bounds;
 				if (SDL3_GetDisplayWindowedPlacementBounds(display, bounds)) {
 					const bool recenterIfOutside = (r_screen.GetInteger() >= 0) || needsRecoveryPlacement;
-					SDL3_ConstrainWindowFrameToBounds(
-						restoredFrameX,
-						restoredFrameY,
-						restoredWidth,
-						restoredHeight,
-						chrome,
-						bounds,
-						recenterIfOutside);
+					SDL3_ConstrainWindowRectToBounds(restoredX, restoredY, restoredWidth, restoredHeight, bounds, recenterIfOutside);
 					constrainedToDisplay = true;
 				}
 			}
@@ -4233,14 +4982,19 @@ static bool SDL3_ApplyScreenParms(glimpParms_t parms) {
 				restoredWidth = idMath::ClampInt(320, 16384, restoredWidth);
 				restoredHeight = idMath::ClampInt(240, 16384, restoredHeight);
 			}
+			reapplyDecoratedWindowPlacement = !parms.hiddenWindow && SDL3_UseAbsoluteWindowPlacement();
+			reapplyRecenterIfOutside = (r_screen.GetInteger() >= 0) || needsRecoveryPlacement;
+			reapplyFrameX = restoredX;
+			reapplyFrameY = restoredY;
+			reapplyClientWidth = restoredWidth;
+			reapplyClientHeight = restoredHeight;
 
 			if (!SDL_SetWindowSize(s_sdlWindow, restoredWidth, restoredHeight)) {
 				common->Printf("SDL3: failed to resize window: %s\n", SDL_GetError());
 			}
 
-			int targetX = 0;
-			int targetY = 0;
-			SDL3_GetWindowClientPosition(restoredFrameX, restoredFrameY, chrome, targetX, targetY);
+			int targetX = restoredX;
+			int targetY = restoredY;
 
 			(void)SDL3_SetWindowPositionCompat(
 				targetX,
@@ -4267,12 +5021,33 @@ static bool SDL3_ApplyScreenParms(glimpParms_t parms) {
 
 	if (!parms.hiddenWindow) {
 		SDL3_SyncWindowAfterScreenChange(parms.fullScreen ? "fullscreen change" : "windowed change");
-		if (!parms.fullScreen && !useBorderlessWindow &&
-			SDL3_ConstrainCurrentWindowFrameToDisplay(display, r_screen.GetInteger() >= 0)) {
-			// X11 decorations may not be known until the first show/composite.
-			// Reconcile once more now that the actual frame extents are available.
-			SDL3_SyncWindowAfterScreenChange("window chrome reconciliation");
+	}
+
+	// Some window servers cannot report decorations until the window has been
+	// shown and composited. Repeat decorated placement after the first sync so
+	// the requested frame origin and client size are corrected with the final
+	// title-bar/border extents before the renderer presents its first frame.
+	if (reapplyDecoratedWindowPlacement) {
+		SDL_Rect bounds;
+		if (display != 0 && SDL3_GetDisplayWindowedPlacementBounds(display, bounds)) {
+			SDL3_ConstrainWindowRectToBounds(
+				reapplyFrameX,
+				reapplyFrameY,
+				reapplyClientWidth,
+				reapplyClientHeight,
+				bounds,
+				reapplyRecenterIfOutside);
 		}
+		if (!SDL_SetWindowSize(s_sdlWindow, reapplyClientWidth, reapplyClientHeight)) {
+			common->Printf("SDL3: failed to apply chrome-aware client size: %s\n", SDL_GetError());
+		}
+		(void)SDL3_SetWindowPositionCompat(
+			reapplyFrameX,
+			reapplyFrameY,
+			display,
+			false,
+			"apply chrome-aware window placement");
+		SDL3_SyncWindowAfterScreenChange("chrome-aware window placement");
 	}
 	s_screenParmTransitionActive = false;
 	SDL3_RefreshWindowPlacement();
@@ -4299,6 +5074,7 @@ static void SDL3_InitDesktopMode(void) {
 }
 
 static void SDL3_UpdateNativeWindowHandles(void) {
+	SDL3_RetireNativeWindowPublication();
 #if defined(OPENQ4_SDL3_POSIX_HOST)
 	win32.hWnd = NULL;
 	win32.hDC = NULL;
@@ -4321,6 +5097,7 @@ static void SDL3_UpdateNativeWindowHandles(void) {
 
 	win32.hWnd = (HWND)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
 	win32.hDC = (HDC)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HDC_POINTER, NULL);
+	SDL3_PublishNativeWindowIdentity();
 #endif
 }
 
@@ -4338,6 +5115,13 @@ static const char *SDL3_DisplayEventName(SDL_EventType eventType) {
 	}
 }
 
+// Display lists cached by the settings service recapture when this moves.
+static unsigned long long sdl3DisplayTopologyGeneration = 1;
+
+unsigned long long Sys_DisplayTopologyGeneration( void ) {
+	return sdl3DisplayTopologyGeneration;
+}
+
 static void SDL3_HandleDisplayEvent(const SDL_DisplayEvent &event) {
 	// Display events are process-wide, not associated with one SDL window. A
 	// dock/undock, monitor hotplug, mode change, or compositor scale change can
@@ -4348,11 +5132,8 @@ static void SDL3_HandleDisplayEvent(const SDL_DisplayEvent &event) {
 		"SDL3: display %s (id %u); refreshing desktop, window, and input state.\n",
 		SDL3_DisplayEventName(event.type),
 		static_cast<unsigned int>(event.displayID));
+	++sdl3DisplayTopologyGeneration;
 	SDL3_InitDesktopMode();
-	const SDL_DisplayID targetDisplay = SDL3_ResolveTargetDisplay(false).id;
-	if (SDL3_ConstrainCurrentWindowFrameToDisplay(targetDisplay, false)) {
-		SDL3_SyncWindowAfterScreenChange("display work-area change");
-	}
 	SDL3_RefreshWindowPlacement();
 	SDL3_InvalidateMenuMouseRouting();
 	SDL3_UpdateCursorVisibility();
@@ -4366,7 +5147,9 @@ static void SDL3_HandleWindowEvent(const SDL_WindowEvent &event, int eventTime) 
 			break;
 
 		case SDL_EVENT_WINDOW_FOCUS_GAINED:
+			openq4::NativeInputBeforeWindowChange();
 			win32.activeApp = true;
+			SDL3_QueueRetainedFocus(true,eventTime);
 			s_sdlFocusInputReleased = false;
 #if !defined(OPENQ4_SDL3_POSIX_HOST)
 			win32.printScreenFocusReleaseUntil = 0;
@@ -4384,6 +5167,7 @@ static void SDL3_HandleWindowEvent(const SDL_WindowEvent &event, int eventTime) 
 			break;
 
 		case SDL_EVENT_WINDOW_FOCUS_LOST:
+			openq4::NativeInputBeforeWindowChange();
 			win32.activeApp = false;
 			win32.movingWindow = false;
 			s_menuMouseInsideWindow = false;
@@ -4419,10 +5203,8 @@ static void SDL3_HandleWindowEvent(const SDL_WindowEvent &event, int eventTime) 
 
 		case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
 		case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+			++sdl3DisplayTopologyGeneration;
 			SDL3_InitDesktopMode();
-			if (SDL3_ConstrainCurrentWindowFrameToDisplay(SDL3_ResolveTargetDisplay(false).id, false)) {
-				SDL3_SyncWindowAfterScreenChange("window display/scale change");
-			}
 			SDL3_RefreshWindowPlacement();
 			SDL3_InvalidateMenuMouseRouting();
 			SDL3_UpdateCursorVisibility();
@@ -4430,6 +5212,7 @@ static void SDL3_HandleWindowEvent(const SDL_WindowEvent &event, int eventTime) 
 
 		case SDL_EVENT_WINDOW_HIDDEN:
 		case SDL_EVENT_WINDOW_MINIMIZED:
+			openq4::NativeInputBeforeWindowChange();
 			win32.activeApp = false;
 			s_menuMouseInsideWindow = false;
 			SDL3_InvalidateMenuMouseRouting();
@@ -4442,7 +5225,9 @@ static void SDL3_HandleWindowEvent(const SDL_WindowEvent &event, int eventTime) 
 
 		case SDL_EVENT_WINDOW_SHOWN:
 		case SDL_EVENT_WINDOW_RESTORED:
+			openq4::NativeInputBeforeWindowChange();
 			win32.activeApp = Sys_SDL_IsGameWindowFocused();
+			SDL3_QueueRetainedFocus(win32.activeApp,eventTime);
 			s_menuMouseInsideWindow = s_sdlWindow != NULL &&
 				(SDL_GetWindowFlags(s_sdlWindow) & SDL_WINDOW_MOUSE_FOCUS) != 0;
 			SDL3_RefreshWindowPlacement();
@@ -4457,18 +5242,16 @@ static void SDL3_HandleWindowEvent(const SDL_WindowEvent &event, int eventTime) 
 			}
 			break;
 
-		case SDL_EVENT_WINDOW_MAXIMIZED:
-			// Update the drawable size, but SDL3_RefreshWindowPlacement keeps the
-			// normal frame/client geometry intact while maximized.
-			SDL3_RefreshWindowPlacement();
-			SDL3_InvalidateMenuMouseRouting();
-			break;
-
 		case SDL_EVENT_WINDOW_RESIZED:
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 			// Query the drawable size directly to avoid stale/asymmetric event payloads.
 			SDL3_RefreshWindowPlacement();
 			SDL3_InvalidateMenuMouseRouting();
+			break;
+
+		case SDL_EVENT_WINDOW_SAFE_AREA_CHANGED:
+			// A rotation, a shown or hidden system bar, a fold.
+			SDL3_RefreshSafeArea();
 			break;
 
 		case SDL_EVENT_WINDOW_MOUSE_ENTER:
@@ -4480,6 +5263,10 @@ static void SDL3_HandleWindowEvent(const SDL_WindowEvent &event, int eventTime) 
 			break;
 
 		case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+			{
+				retainedUIInput_t leave; leave.kind = retainedUIInput_t::POINTER_LEAVE;
+				RetainedUI_QueueInput(leave,eventTime);
+			}
 			s_menuMouseInsideWindow = false;
 			SDL3_ResetMenuMouseTracking();
 			SDL3_UpdateCursorVisibility();
@@ -4546,6 +5333,7 @@ static bool SDL3_EventTargetsGameWindow(const SDL_Event &event) {
 }
 
 bool Sys_SDL_PumpEvents(void) {
+    if (NativeInput_OwnsPump()) return true; // Before housekeeping and both legacy Poll loops.
 #if defined(OPENQ4_SDL3_POSIX_HOST)
 	if (!Posix_IsMainThread()) {
 		// The async timer thread reaches this through Sys_PollMouseInputEvents
@@ -4582,6 +5370,9 @@ bool Sys_SDL_PumpEvents(void) {
 
 	SDL3_ProcessPendingLifecycleEvents(Sys_Milliseconds());
 	SDL3_UpdateTextInputState();
+#if defined(__ANDROID__) && !defined(OPENQ4_SIGMATOUCH)
+	SDL3_UpdateAndroidTouchControls();
+#endif
 
 	if (in_joystick.IsModified()) {
 		if (in_joystick.GetBool()) {
@@ -4617,6 +5408,9 @@ bool Sys_SDL_PumpEvents(void) {
 		s_gamepadTouchpadRemainderY = 0.0f;
 		if (!in_touchscreen.GetBool()) {
 			s_touchscreenFingerActive = false;
+#if defined(__ANDROID__) && !defined(OPENQ4_SIGMATOUCH)
+			AndroidTouchControls_Release();
+#endif
 		}
 		in_gyro.ClearModified();
 		in_gyroSensitivity.ClearModified();
@@ -4690,6 +5484,9 @@ bool Sys_SDL_PumpEvents(void) {
 			// focus event. Do not relatch input until the game window is active.
 			continue;
 		}
+#if defined(__ANDROID__) && !defined(OPENQ4_SIGMATOUCH)
+		if (SDL3_IsNonTouchPlayEvent(event)) AndroidTouchControls_OtherInput();
+#endif
 
 		switch (event.type) {
 			case SDL_EVENT_QUIT:
@@ -4723,8 +5520,13 @@ bool Sys_SDL_PumpEvents(void) {
 				break;
 
 			case SDL_EVENT_LOW_MEMORY:
-				SDL3_ClearLifecyclePendingFlag(SDL3_LIFECYCLE_PENDING_LOW_MEMORY);
-				common->Printf("SDL3: low-memory event received from OS.\n");
+				// The event watch flags each notice as SDL queues it, and the pending pass
+				// at the top of this pump has usually answered it already; trimming again
+				// here ran every notice twice. Answer it only if that pass has not.
+				if (SDL3_TakeLifecyclePendingFlag(SDL3_LIFECYCLE_PENDING_LOW_MEMORY) || !s_sdlLifecycleEventWatchRegistered) {
+					common->Printf("SDL3: low-memory event received from OS.\n");
+					S_TrimMemory("os low-memory");
+				}
 				break;
 
 			case SDL_EVENT_KEY_DOWN:
@@ -4743,13 +5545,19 @@ bool Sys_SDL_PumpEvents(void) {
 				}
 
 				if (key != 0) {
+					const bool retained = SDL3_QueueRetainedKey(key,down,event.key.repeat,1024+static_cast<int>(event.key.scancode),eventTime);
 					// Keep parity with the old Win32 path: these are queued from keyboard polling.
-					if (key != K_PRINT_SCR && key != K_CTRL && key != K_ALT && key != K_RIGHT_ALT) {
-						Sys_QueEvent(eventTime, SE_KEY, key, down, 0, NULL);
+					if (!retained && key != K_PRINT_SCR && key != K_CTRL && key != K_ALT && key != K_RIGHT_ALT) {
+						const auto metadata = openq4::EncodeKeyEventMetadata({
+							(event.key.mod & SDL_KMOD_CTRL) != 0,(event.key.mod & SDL_KMOD_SHIFT) != 0,
+							(event.key.mod & SDL_KMOD_ALT) != 0,event.key.repeat});
+						void* payload = Mem_Alloc(static_cast<int>(metadata.size()));
+						memcpy(payload,metadata.data(),metadata.size());
+						Sys_QueEvent(eventTime, SE_KEY, key, down, static_cast<int>(metadata.size()), payload);
 					}
 
 					const int controlChar = SDL3_MapControlChar(key, down, event.key.mod);
-					if (controlChar != 0) {
+					if (!retained && controlChar != 0) {
 						Sys_QueEvent(eventTime, SE_CHAR, controlChar, 0, 0, NULL);
 					}
 
@@ -4797,6 +5605,13 @@ bool Sys_SDL_PumpEvents(void) {
 
 			case SDL_EVENT_MOUSE_MOTION:
 			{
+				// Touch synthesises no mouse events (SDL_HINT_TOUCH_MOUSE_EVENTS 0).
+				idKeyInput::NotePointerSource(false);
+				if (RetainedUI_IsOpen() && !(console && console->Active())) {
+					if (SDL3_ShouldRouteMenuMouse() && !SDL3_IsMouseCaptured())
+						SDL3_QueueRetainedPointer(event.motion.x,event.motion.y,eventTime);
+					break;
+				}
 				if (!std::isfinite(event.motion.x) || !std::isfinite(event.motion.y) ||
 						!std::isfinite(event.motion.xrel) || !std::isfinite(event.motion.yrel)) {
 					s_sdlRelativeMouseRemainderX = 0.0f;
@@ -4865,7 +5680,10 @@ bool Sys_SDL_PumpEvents(void) {
 
 			case SDL_EVENT_MOUSE_BUTTON_DOWN:
 			case SDL_EVENT_MOUSE_BUTTON_UP: {
+				idKeyInput::NotePointerSource(false);
 				const bool routedMouseInput = SDL3_IsMouseCaptured() || SDL3_ShouldRouteMenuMouse();
+				if (RetainedUI_IsOpen() && !(console && console->Active()) && SDL3_ShouldRouteMenuMouse())
+					SDL3_QueueRetainedPointer(event.button.x,event.button.y,eventTime);
 				if (routedMouseInput || openQ4_AcceptingLoadingContinueInput()) {
 					const int key = SDL3_MapMouseButton(event.button.button);
 					if (key != 0) {
@@ -5009,7 +5827,9 @@ bool Sys_SDL_PumpEvents(void) {
 			case SDL_EVENT_FINGER_MOTION:
 			case SDL_EVENT_FINGER_UP:
 			case SDL_EVENT_FINGER_CANCELED:
+#if !defined(OPENQ4_SIGMATOUCH)
 				SDL3_HandleFingerEvent(event.tfinger, eventTime);
+#endif
 				break;
 
 			default:
@@ -5021,6 +5841,19 @@ bool Sys_SDL_PumpEvents(void) {
 	SDL3_ProcessPendingLifecycleEvents(Sys_Milliseconds());
 	SDL3_RefreshWindowPlacement();
 	SDL3_UpdateWindowAspectSnap(sawResizeEvent);
+#if defined(OPENQ4_SIGMATOUCH)
+	// The POSIX guard above guarantees this runs on the engine thread. Process
+	// lifecycle transitions before accepting a batch from the UI thread.
+	window = s_sdlWindow;
+	Quake4_UpdateTouchScreenMode();
+	if (win32.activeApp && !s_sdlFocusInputReleased) {
+		Quake4_DrainTouchInput();
+	} else {
+		Quake4_ClearTouchInput();
+	}
+#elif defined(__ANDROID__)
+	SDL3_UpdateAndroidTouchControls();
+#endif
 
 	return true;
 }
@@ -5111,11 +5944,20 @@ void Sys_InitScanTable(void) {
 	}
 
 	// Keep legacy Win32 behavior: English maps RightAlt to K_ALT for bind compatibility.
+	// Polish joins the list because "Polish (Programmers)" carries the whole
+	// accented alphabet on the AltGr layer, and the Brazilian ABNT2, Czech,
+	// Hungarian, Turkish Q and Ukrainian layouts put characters there too.
 	s_rightAltKey = K_ALT;
 	if (lang.Icmp("spanish") == 0 ||
 		lang.Icmp("french") == 0 ||
 		lang.Icmp("german") == 0 ||
-		lang.Icmp("italian") == 0) {
+		lang.Icmp("italian") == 0 ||
+		lang.Icmp("polish") == 0 ||
+		lang.Icmp("brazilian") == 0 ||
+		lang.Icmp("czech") == 0 ||
+		lang.Icmp("hungarian") == 0 ||
+		lang.Icmp("turkish") == 0 ||
+		lang.Icmp("ukrainian") == 0) {
 		s_rightAltKey = K_RIGHT_ALT;
 	}
 }
@@ -5278,7 +6120,9 @@ void IN_Frame(void) {
 	}
 #endif
 
-	if (!win32.in_mouse.GetBool()) {
+	if (!SDL3_OwnsSystemPointer()) {
+		// Covers disabled mouse input and, beyond the focus test below, a window
+		// that is hidden or minimized and therefore has no pointer to confine.
 		shouldGrab = false;
 	}
 	if (routeMenuMouse) {
@@ -5346,6 +6190,7 @@ void Sys_GrabMouseCursor(bool grabIt) {
 
 void Sys_InitInput(void) {
 	common->Printf("\n------- Input Initialization -------\n");
+	openq4::NativeInputBeforeWindowChange();
 	win32.activeApp = true;
 	s_sdlFocusInputReleased = false;
 	win32.mouseReleased = false;
@@ -5399,6 +6244,7 @@ void Sys_InitInput(void) {
 }
 
 void Sys_ShutdownInput(void) {
+	openq4::NativeInputBeforeInputBlockerChange();
 	IN_DeactivateMouse();
 
 	if (s_sdlWindow && s_sdlTextInputActive) {
@@ -5415,83 +6261,332 @@ void Sys_ClearInputEvents(void) {
 	SDL3_ClearInputQueues();
 }
 
+// All checked methods acquire SDL storage first, then observe the disposition
+// mutex. No disposition method holds that mutex while acquiring SDL storage.
+static bool SDL3_DeferredKeyboardKey(int key) {
+    return key == K_PRINT_SCR || key == K_CTRL || key == K_ALT || key == K_RIGHT_ALT;
+}
+static bool SDL3_InputValid(const sdlKeyboardEvent_t& value, const sysKeyboardDisposition_t& tag) {
+    return value.key > 0 && value.key < K_LAST_KEY && value.time >= 0 &&
+        (tag.Empty() || (Sys_EventDispositionTagCurrent(tag.parent) &&
+        (!tag.deferredEmission || (SDL3_DeferredKeyboardKey(value.key) && tag.deferredEmission != tag.parent.emission))));
+}
+static bool SDL3_InputValid(const sdlMouseEvent_t& value, const sysEventDispositionTag_t& tag) {
+    return SDL3_ShouldQueueMousePoll(value.action, value.value) && value.time >= 0 &&
+        (tag.Empty() || Sys_EventDispositionTagCurrent(tag));
+}
+static sysKeyboardInputDisposition_t SDL3_TrackedInput(const sdlKeyboardEvent_t& value, const sysKeyboardDisposition_t& tag) {
+    return {value.key, value.down, value.time, tag};
+}
+static sysMouseInputDisposition_t SDL3_TrackedInput(const sdlMouseEvent_t& value, const sysEventDispositionTag_t& tag) {
+    return {value.action, value.value, value.time, tag};
+}
+
+bool Sys_QueKeyboardInputWithDisposition(sysKeyboardInputDisposition_t& input) noexcept {
+    SDL3_InputStorageLock lock;
+    const sdlKeyboardEvent_t value{input.key, input.down, input.time};
+    if (input.disposition.Empty() || !SDL3_InputValid(value, input.disposition)) return false;
+    const int next = (s_keyboardHead + 1) & SDL3_INPUT_QUEUE_MASK;
+    if (next == s_keyboardTail) {
+        Sys_InvalidateEventQueue(); return false; // Preserve full ring and caller.
+    }
+    if (s_inputDispositionHighwater == (std::numeric_limits<std::uint64_t>::max)()) return false;
+    s_keyboardQueue[s_keyboardHead] = value;
+    s_keyboardDisposition[s_keyboardHead] = input.disposition;
+    s_keyboardRetirementSerials[s_keyboardHead] = ++s_inputDispositionHighwater;
+    s_keyboardHead = next;
+    input = {};
+    return true;
+}
+bool Sys_QueMouseInputWithDisposition(sysMouseInputDisposition_t& input) noexcept {
+    SDL3_InputStorageLock lock;
+    const sdlMouseEvent_t value{input.action, input.value, input.time};
+    if (input.disposition.Empty() || !SDL3_InputValid(value, input.disposition)) return false;
+    const int next = (s_mouseHead + 1) & SDL3_INPUT_QUEUE_MASK;
+    if (next == s_mouseTail) {
+        Sys_InvalidateEventQueue(); return false; // Preserve full ring and caller.
+    }
+    if (s_inputDispositionHighwater == (std::numeric_limits<std::uint64_t>::max)()) return false;
+    s_mouseQueue[s_mouseHead] = value;
+    s_mouseDisposition[s_mouseHead] = input.disposition;
+    s_mouseRetirementSerials[s_mouseHead] = ++s_inputDispositionHighwater;
+    s_mouseHead = next;
+    input = {};
+    return true;
+}
+
+template<class Value, class Tag>
+static bool SDL3_PollInputWithDisposition(Value (&queue)[SDL3_INPUT_QUEUE_SIZE], Tag (&tags)[SDL3_INPUT_QUEUE_SIZE],
+    std::uint64_t (&serials)[SDL3_INPUT_QUEUE_SIZE], const int& head, int& tail, Value (&polled)[SDL3_INPUT_QUEUE_SIZE], Tag (&polledTags)[SDL3_INPUT_QUEUE_SIZE],
+    int& count, sdlInputDispositionState_t& state, sysInputDispositionLane_t lane, sysInputDispositionSlice_t& out) {
+    SDL3_InputStorageLock lock;
+    const auto epoch = Sys_EventDispositionEpoch(), token = Sys_EventQueueToken();
+    if (!epoch || !token || state.checked || count != 0 ||
+        s_inputDispositionHighwater == (std::numeric_limits<std::uint64_t>::max)()) return false;
+    // Preflight the entire queued inventory before moving any ownership.
+    for (int i = tail; i != head; i = (i + 1) & SDL3_INPUT_QUEUE_MASK) {
+        if (!SDL3_InputValid(queue[i], tags[i])) return false;
+    }
+    if (epoch != Sys_EventDispositionEpoch() || token != Sys_EventQueueToken()) return false;
+    while (tail != head) {
+        polled[count] = queue[tail]; polledTags[count] = tags[tail];
+        queue[tail] = {}; tags[tail] = {}; serials[tail] = 0;
+        ++count; tail = (tail + 1) & SDL3_INPUT_QUEUE_MASK;
+    }
+    state.slice = {epoch, token, ++s_inputDispositionHighwater, lane, static_cast<unsigned>(count)};
+    state.next = 0; state.checked = true;
+    out = state.slice;
+    return true;
+}
+bool Sys_PollKeyboardInputWithDisposition(sysInputDispositionSlice_t& out) noexcept {
+    return SDL3_PollInputWithDisposition(s_keyboardQueue, s_keyboardDisposition, s_keyboardRetirementSerials, s_keyboardHead, s_keyboardTail,
+        s_polledKeyboard, s_polledKeyboardDisposition, s_polledKeyboardCount, s_keyboardDispositionState,
+        sysInputDispositionLane_t::Keyboard, out);
+}
+bool Sys_PollMouseInputWithDisposition(sysInputDispositionSlice_t& out) noexcept {
+    return SDL3_PollInputWithDisposition(s_mouseQueue, s_mouseDisposition, s_mouseRetirementSerials, s_mouseHead, s_mouseTail,
+        s_polledMouse, s_polledMouseDisposition, s_polledMouseCount, s_mouseDispositionState,
+        sysInputDispositionLane_t::Mouse, out);
+}
+
+static bool SDL3_InputSliceCurrent(const sysInputDispositionSlice_t& expected, const sdlInputDispositionState_t& state) {
+    return state.checked && expected == state.slice && expected.serial &&
+        expected.epoch && expected.epoch == Sys_EventDispositionEpoch() &&
+        expected.streamToken && expected.streamToken == Sys_EventQueueToken();
+}
+template<class Value, class Tag, class Output>
+static sysEventTransfer_t SDL3_PeekInputWithDisposition(const sysInputDispositionSlice_t& expected,
+    const sdlInputDispositionState_t& state, const Value (&polled)[SDL3_INPUT_QUEUE_SIZE],
+    const Tag (&tags)[SDL3_INPUT_QUEUE_SIZE], sysInputDispositionSlot_t& slot, Output& out) {
+    SDL3_InputStorageLock lock;
+    if (!SDL3_InputSliceCurrent(expected, state)) return sysEventTransfer_t::Refused;
+    if (state.next == state.slice.count) return sysEventTransfer_t::Empty;
+    if (!SDL3_InputValid(polled[state.next], tags[state.next])) return sysEventTransfer_t::Refused;
+    out = SDL3_TrackedInput(polled[state.next], tags[state.next]);
+    slot = {state.slice, state.next};
+    return sysEventTransfer_t::Ready;
+}
+template<class Value, class Tag, class Output>
+static sysEventTransfer_t SDL3_TakeInputWithDisposition(const sysInputDispositionSlot_t& expected,
+    sdlInputDispositionState_t& state, Value (&polled)[SDL3_INPUT_QUEUE_SIZE],
+    Tag (&tags)[SDL3_INPUT_QUEUE_SIZE], Output& out) {
+    SDL3_InputStorageLock lock;
+    if (!SDL3_InputSliceCurrent(expected.slice, state) || expected.index != state.next ||
+        state.next >= state.slice.count || !SDL3_InputValid(polled[state.next], tags[state.next]))
+        return sysEventTransfer_t::Refused;
+    out = SDL3_TrackedInput(polled[state.next], tags[state.next]);
+    polled[state.next] = {}; tags[state.next] = {};
+    ++state.next;
+    return sysEventTransfer_t::Ready;
+}
+sysEventTransfer_t Sys_PeekKeyboardInputWithDisposition(const sysInputDispositionSlice_t& slice,
+    sysInputDispositionSlot_t& slot, sysKeyboardInputDisposition_t& out) noexcept {
+    return SDL3_PeekInputWithDisposition(slice, s_keyboardDispositionState, s_polledKeyboard, s_polledKeyboardDisposition, slot, out);
+}
+sysEventTransfer_t Sys_PeekMouseInputWithDisposition(const sysInputDispositionSlice_t& slice,
+    sysInputDispositionSlot_t& slot, sysMouseInputDisposition_t& out) noexcept {
+    return SDL3_PeekInputWithDisposition(slice, s_mouseDispositionState, s_polledMouse, s_polledMouseDisposition, slot, out);
+}
+sysEventTransfer_t Sys_TakeKeyboardInputWithDisposition(const sysInputDispositionSlot_t& slot,
+    sysKeyboardInputDisposition_t& out) noexcept {
+    return SDL3_TakeInputWithDisposition(slot, s_keyboardDispositionState, s_polledKeyboard, s_polledKeyboardDisposition, out);
+}
+sysEventTransfer_t Sys_TakeMouseInputWithDisposition(const sysInputDispositionSlot_t& slot,
+    sysMouseInputDisposition_t& out) noexcept {
+    return SDL3_TakeInputWithDisposition(slot, s_mouseDispositionState, s_polledMouse, s_polledMouseDisposition, out);
+}
+static bool SDL3_EndInputWithDisposition(const sysInputDispositionSlice_t& expected, sdlInputDispositionState_t& state, int& count) {
+    SDL3_InputStorageLock lock;
+    if (!SDL3_InputSliceCurrent(expected, state) || state.next != state.slice.count) return false;
+    state = {}; count = 0;
+    return true;
+}
+bool Sys_EndKeyboardInputWithDisposition(const sysInputDispositionSlice_t& expected) noexcept {
+    return SDL3_EndInputWithDisposition(expected, s_keyboardDispositionState, s_polledKeyboardCount);
+}
+bool Sys_EndMouseInputWithDisposition(const sysInputDispositionSlice_t& expected) noexcept {
+    return SDL3_EndInputWithDisposition(expected, s_mouseDispositionState, s_polledMouseCount);
+}
+
+
+static bool SDL3_RetirementValue(const sdlKeyboardEvent_t& value, const sysKeyboardDisposition_t& tag) {
+    return value.key > 0 && value.key < K_LAST_KEY && value.time >= 0 && tag.parent.ShapeValid() &&
+        (!tag.deferredEmission || (SDL3_DeferredKeyboardKey(value.key) && tag.deferredEmission != tag.parent.emission));
+}
+static bool SDL3_RetirementValue(const sdlMouseEvent_t& value, const sysEventDispositionTag_t& tag) {
+    return SDL3_ShouldQueueMousePoll(value.action, value.value) && value.time >= 0 && tag.ShapeValid();
+}
+static openq4::NativeInputHead SDL3_RetirementHead(const sdlKeyboardEvent_t& value, const sysKeyboardDisposition_t& tag,
+    openq4::NativeInputLane lane, std::uint64_t serial, unsigned slot) {
+    return {lane, serial, slot, tag.parent, {SE_KEY, value.key, value.down ? 1 : 0, value.time, 0, 0, tag.deferredEmission}};
+}
+static openq4::NativeInputHead SDL3_RetirementHead(const sdlMouseEvent_t& value, const sysEventDispositionTag_t& tag,
+    openq4::NativeInputLane lane, std::uint64_t serial, unsigned slot) {
+    return {lane, serial, slot, tag, {SE_MOUSE, value.action, value.value, value.time, 0, 0, 0}};
+}
+// Caller already owns SDL storage. No Source lookup, active epoch requirement,
+// native callback or mutation; legacy slices and untagged prefixes obstruct.
+template<class Value, class Tag>
+static sysEventTransfer_t SDL3_PeekRetirementInput(const sdlInputDispositionState_t& state, int count,
+    const Value (&polled)[SDL3_INPUT_QUEUE_SIZE], const Tag (&polledTags)[SDL3_INPUT_QUEUE_SIZE],
+    const Value (&queue)[SDL3_INPUT_QUEUE_SIZE], const Tag (&tags)[SDL3_INPUT_QUEUE_SIZE],
+    const std::uint64_t (&serials)[SDL3_INPUT_QUEUE_SIZE], int head, int tail,
+    openq4::NativeInputLane lane, openq4::NativeInputHead& out) {
+    if (!Sys_EventDispositionBoundThread()) return sysEventTransfer_t::Refused;
+    if (state.checked) {
+        if (count < 0 || state.slice.count != static_cast<unsigned>(count) || state.slice.count > SDL3_INPUT_QUEUE_SIZE ||
+            !state.slice.serial || state.next > state.slice.count) return sysEventTransfer_t::Refused;
+        if (state.next == state.slice.count) return sysEventTransfer_t::Empty; // Exact empty End precedes ring access.
+        if (!SDL3_RetirementValue(polled[state.next], polledTags[state.next])) return sysEventTransfer_t::Refused;
+        const auto candidate = SDL3_RetirementHead(polled[state.next], polledTags[state.next], lane, state.slice.serial, state.next);
+        const auto expectedLane = lane == openq4::NativeInputLane::Keyboard ? sysInputDispositionLane_t::Keyboard : sysInputDispositionLane_t::Mouse;
+        if (state.slice.lane != expectedLane || state.slice.epoch != candidate.tag.dispatchEpoch ||
+            state.slice.streamToken != candidate.tag.streamToken) return sysEventTransfer_t::Refused;
+        out = candidate;
+        return sysEventTransfer_t::Ready;
+    }
+    if (count != 0) return sysEventTransfer_t::Refused; // Unread legacy slice ownership is not inferred.
+    if (head == tail) return sysEventTransfer_t::Empty;
+    if (!serials[tail] || !SDL3_RetirementValue(queue[tail], tags[tail])) return sysEventTransfer_t::Refused;
+    out = SDL3_RetirementHead(queue[tail], tags[tail], lane, serials[tail], static_cast<unsigned>(tail));
+    return sysEventTransfer_t::Ready;
+}
+template<class Value, class Tag, class Output>
+static sysEventTransfer_t SDL3_TakeRetirementInput(sdlInputDispositionState_t& state, int count,
+    Value (&polled)[SDL3_INPUT_QUEUE_SIZE], Tag (&polledTags)[SDL3_INPUT_QUEUE_SIZE],
+    Value (&queue)[SDL3_INPUT_QUEUE_SIZE], Tag (&tags)[SDL3_INPUT_QUEUE_SIZE],
+    std::uint64_t (&serials)[SDL3_INPUT_QUEUE_SIZE], int head, int& tail, openq4::NativeInputLane lane,
+    openq4::NativeInputRoute& route, const openq4::NativeInputRoute::CancellationPermit& permit, Output& out) {
+    openq4::NativeInputHead actual;
+    const auto status = SDL3_PeekRetirementInput(state,count,polled,polledTags,queue,tags,serials,head,tail,lane,actual);
+    if (status != sysEventTransfer_t::Ready) return status;
+    if (!route.AllowsCancellation(permit,actual)) return sysEventTransfer_t::Refused;
+    if (state.checked) {
+        const auto owned = SDL3_TrackedInput(polled[state.next],polledTags[state.next]);
+        polled[state.next] = {}; polledTags[state.next] = {}; ++state.next;
+        out = owned;
+    } else {
+        const auto owned = SDL3_TrackedInput(queue[tail],tags[tail]);
+        queue[tail] = {}; tags[tail] = {}; serials[tail] = 0;
+        tail = (tail + 1) & SDL3_INPUT_QUEUE_MASK;
+        out = owned;
+    }
+    return sysEventTransfer_t::Ready;
+}
+sysEventTransfer_t Sys_PeekKeyboardInputForRetirement(openq4::NativeInputHead& out) noexcept {
+    SDL3_InputStorageLock lock;
+    return SDL3_PeekRetirementInput(s_keyboardDispositionState,s_polledKeyboardCount,s_polledKeyboard,s_polledKeyboardDisposition,
+        s_keyboardQueue,s_keyboardDisposition,s_keyboardRetirementSerials,s_keyboardHead,s_keyboardTail,openq4::NativeInputLane::Keyboard,out);
+}
+sysEventTransfer_t Sys_PeekMouseInputForRetirement(openq4::NativeInputHead& out) noexcept {
+    SDL3_InputStorageLock lock;
+    return SDL3_PeekRetirementInput(s_mouseDispositionState,s_polledMouseCount,s_polledMouse,s_polledMouseDisposition,
+        s_mouseQueue,s_mouseDisposition,s_mouseRetirementSerials,s_mouseHead,s_mouseTail,openq4::NativeInputLane::Mouse,out);
+}
+sysEventTransfer_t Sys_TakeKeyboardInputForRetirement(openq4::NativeInputRoute& route,
+    const openq4::NativeInputRoute::CancellationPermit& permit, sysKeyboardInputDisposition_t& out) noexcept {
+    SDL3_InputStorageLock lock;
+    return SDL3_TakeRetirementInput(s_keyboardDispositionState,s_polledKeyboardCount,s_polledKeyboard,s_polledKeyboardDisposition,
+        s_keyboardQueue,s_keyboardDisposition,s_keyboardRetirementSerials,s_keyboardHead,s_keyboardTail,openq4::NativeInputLane::Keyboard,route,permit,out);
+}
+sysEventTransfer_t Sys_TakeMouseInputForRetirement(openq4::NativeInputRoute& route,
+    const openq4::NativeInputRoute::CancellationPermit& permit, sysMouseInputDisposition_t& out) noexcept {
+    SDL3_InputStorageLock lock;
+    return SDL3_TakeRetirementInput(s_mouseDispositionState,s_polledMouseCount,s_polledMouse,s_polledMouseDisposition,
+        s_mouseQueue,s_mouseDisposition,s_mouseRetirementSerials,s_mouseHead,s_mouseTail,openq4::NativeInputLane::Mouse,route,permit,out);
+}
+static bool SDL3_EndRetirementInput(const sysInputDispositionSlice_t& expected, sdlInputDispositionState_t& state, int& count) {
+    SDL3_InputStorageLock lock;
+    if (!Sys_EventDispositionBoundThread() || !state.checked || !expected.serial || expected != state.slice ||
+        count < 0 || expected.count != static_cast<unsigned>(count) || state.next != expected.count) return false;
+    state = {}; count = 0;
+    return true; // Empty metadata only, never a receipt for queued input.
+}
+bool Sys_EndKeyboardInputForRetirement(const sysInputDispositionSlice_t& expected) noexcept {
+    return SDL3_EndRetirementInput(expected,s_keyboardDispositionState,s_polledKeyboardCount);
+}
+bool Sys_EndMouseInputForRetirement(const sysInputDispositionSlice_t& expected) noexcept {
+    return SDL3_EndRetirementInput(expected,s_mouseDispositionState,s_polledMouseCount);
+}
+
 int Sys_PollKeyboardInputEvents(void) {
-	Sys_EnterCriticalSection(CRITICAL_SECTION_ONE);
-
-	s_polledKeyboardCount = 0;
-	while (s_keyboardTail != s_keyboardHead && s_polledKeyboardCount < SDL3_INPUT_QUEUE_SIZE) {
-		s_polledKeyboard[s_polledKeyboardCount] = s_keyboardQueue[s_keyboardTail];
-		s_polledKeyboardCount++;
-		s_keyboardTail = (s_keyboardTail + 1) & SDL3_INPUT_QUEUE_MASK;
-	}
-
-	Sys_LeaveCriticalSection(CRITICAL_SECTION_ONE);
-	return s_polledKeyboardCount;
+    SDL3_InputStorageLock lock;
+    if (s_keyboardDispositionState.checked) { Sys_InvalidateEventQueue(); return 0; }
+    s_polledKeyboardCount = 0;
+    while (s_keyboardTail != s_keyboardHead && s_polledKeyboardCount < SDL3_INPUT_QUEUE_SIZE) {
+        if (!s_keyboardDisposition[s_keyboardTail].Empty()) { Sys_InvalidateEventQueue(); break; }
+        s_polledKeyboard[s_polledKeyboardCount] = s_keyboardQueue[s_keyboardTail];
+        s_polledKeyboardDisposition[s_polledKeyboardCount] = {};
+        s_keyboardQueue[s_keyboardTail] = {};
+        s_keyboardRetirementSerials[s_keyboardTail] = 0;
+        ++s_polledKeyboardCount;
+        s_keyboardTail = (s_keyboardTail + 1) & SDL3_INPUT_QUEUE_MASK;
+    }
+    return s_polledKeyboardCount;
 }
 
 int Sys_ReturnKeyboardInputEvent(const int n, int &ch, bool &state) {
-	if (n < 0 || n >= s_polledKeyboardCount) {
-		ch = 0;
-		state = false;
-		return 0;
-	}
-
-	ch = s_polledKeyboard[n].key;
-	state = s_polledKeyboard[n].down;
-
-	if (ch <= 0 || ch >= K_LAST_KEY) {
-		ch = 0;
-		state = false;
-		return 0;
-	}
-
-	if (ch == K_PRINT_SCR || ch == K_CTRL || ch == K_ALT || ch == K_RIGHT_ALT) {
-		Sys_QueEvent(s_polledKeyboard[n].time, SE_KEY, ch, state, 0, NULL);
-	}
-
-	return ch;
+    sdlKeyboardEvent_t value{};
+    {
+        SDL3_InputStorageLock lock;
+        if (s_keyboardDispositionState.checked) {
+            Sys_InvalidateEventQueue(); ch = 0; state = false; return 0;
+        }
+        if (n < 0 || n >= s_polledKeyboardCount) { ch = 0; state = false; return 0; }
+        if (!s_polledKeyboardDisposition[n].Empty()) {
+            Sys_InvalidateEventQueue(); ch = 0; state = false; return 0;
+        }
+        value = s_polledKeyboard[n];
+    }
+    ch = value.key; state = value.down;
+    if (ch <= 0 || ch >= K_LAST_KEY) { ch = 0; state = false; return 0; }
+    if (SDL3_DeferredKeyboardKey(ch)) Sys_QueEvent(value.time, SE_KEY, ch, state, 0, NULL);
+    return ch;
 }
 
 void Sys_EndKeyboardInputEvents(void) {
+    SDL3_InputStorageLock lock;
+    if (s_keyboardDispositionState.checked) { Sys_InvalidateEventQueue(); return; }
+    s_polledKeyboardCount = 0;
 }
 
 int Sys_PollMouseInputEvents(void) {
 #if defined(OPENQ4_SDL3_POSIX_HOST)
-	(void)Sys_SDL_PumpEvents();
+    (void)Sys_SDL_PumpEvents();
 #endif
-	Sys_EnterCriticalSection(CRITICAL_SECTION_ONE);
-
-	s_polledMouseCount = 0;
-	while (s_mouseTail != s_mouseHead && s_polledMouseCount < SDL3_INPUT_QUEUE_SIZE) {
-		s_polledMouse[s_polledMouseCount] = s_mouseQueue[s_mouseTail];
-		s_polledMouseCount++;
-		s_mouseTail = (s_mouseTail + 1) & SDL3_INPUT_QUEUE_MASK;
-	}
-
-	Sys_LeaveCriticalSection(CRITICAL_SECTION_ONE);
-	return s_polledMouseCount;
+    SDL3_InputStorageLock lock;
+    if (s_mouseDispositionState.checked) { Sys_InvalidateEventQueue(); return 0; }
+    s_polledMouseCount = 0;
+    while (s_mouseTail != s_mouseHead && s_polledMouseCount < SDL3_INPUT_QUEUE_SIZE) {
+        if (!s_mouseDisposition[s_mouseTail].Empty()) { Sys_InvalidateEventQueue(); break; }
+        s_polledMouse[s_polledMouseCount] = s_mouseQueue[s_mouseTail];
+        s_polledMouseDisposition[s_polledMouseCount] = {};
+        s_mouseQueue[s_mouseTail] = {};
+        s_mouseRetirementSerials[s_mouseTail] = 0;
+        ++s_polledMouseCount;
+        s_mouseTail = (s_mouseTail + 1) & SDL3_INPUT_QUEUE_MASK;
+    }
+    return s_polledMouseCount;
 }
 
 int Sys_ReturnMouseInputEvent(const int n, int &action, int &value) {
-	if (n < 0 || n >= s_polledMouseCount) {
-		action = 0;
-		value = 0;
-		return 0;
-	}
-
-	action = s_polledMouse[n].action;
-	value = s_polledMouse[n].value;
-
-	if (!SDL3_ShouldQueueMousePoll(action, value)) {
-		action = 0;
-		value = 0;
-		return 0;
-	}
-
-	return 1;
+    SDL3_InputStorageLock lock;
+    if (s_mouseDispositionState.checked) {
+        Sys_InvalidateEventQueue(); action = 0; value = 0; return 0;
+    }
+    if (n < 0 || n >= s_polledMouseCount) { action = 0; value = 0; return 0; }
+    if (!s_polledMouseDisposition[n].Empty()) {
+        Sys_InvalidateEventQueue(); action = 0; value = 0; return 0;
+    }
+    action = s_polledMouse[n].action; value = s_polledMouse[n].value;
+    if (!SDL3_ShouldQueueMousePoll(action, value)) { action = 0; value = 0; return 0; }
+    return 1;
 }
 
 void Sys_EndMouseInputEvents(void) {
+    SDL3_InputStorageLock lock;
+    if (s_mouseDispositionState.checked) { Sys_InvalidateEventQueue(); return; }
+    s_polledMouseCount = 0;
 }
 
 int Sys_PollJoystickInputEvents(void) {
@@ -5504,7 +6599,7 @@ int Sys_PollJoystickInputEvents(void) {
 	s_polledJoystickCount = 0;
 	for (int axis = 0; axis < MAX_JOYSTICK_AXIS; ++axis) {
 		s_polledJoystick[s_polledJoystickCount].axis = axis;
-		s_polledJoystick[s_polledJoystickCount].value = s_joystickAxisState[axis];
+		s_polledJoystick[s_polledJoystickCount].value = SDL3_ReadJoystickAxis(axis);
 		s_polledJoystickCount++;
 	}
 	Sys_LeaveCriticalSection(CRITICAL_SECTION_ONE);
@@ -5534,7 +6629,7 @@ bool Sys_GetJoystickAxisState(int axis, int &value) {
 	}
 
 	Sys_EnterCriticalSection(CRITICAL_SECTION_ONE);
-	value = s_joystickAxisState[axis];
+	value = SDL3_ReadJoystickAxis(axis);
 	Sys_LeaveCriticalSection(CRITICAL_SECTION_ONE);
 
 	return true;
@@ -5584,6 +6679,59 @@ bool Sys_SetJoystickRumble(float lowFrequency, float highFrequency, int duration
 	s_joystickRumbleLastUpdateTime = now;
 	return true;
 }
+
+#ifndef ID_DEDICATED
+void Sys_PostVRControllerKey(int key, bool down) {
+	const int eventTime = Sys_Milliseconds();
+	if (key >= K_MOUSE1 && key <= K_MOUSE8) {
+		// the menu pointer clicks like the mouse, never through the usercmd poll
+		SDL3_QueueMouseButtonEvent(key, down, eventTime, false);
+		return;
+	}
+	SDL3_PostControllerKeyEvent(key, down, eventTime);
+}
+
+// The virtual screen shows the window's whole 2D viewport, which menus lay out
+// for, so the pointer becomes the window position the mouse would have there.
+bool Sys_PostVRPointer(bool onScreen, float u, float v) {
+	const int eventTime = Sys_Milliseconds();
+	if (console != NULL && console->Active()) {
+		return false;
+	}
+	if (!onScreen || !std::isfinite(u) || !std::isfinite(v)) {
+		if (RetainedUI_IsOpen()) {
+			retainedUIInput_t leave;
+			leave.kind = retainedUIInput_t::POINTER_LEAVE;
+			RetainedUI_QueueInput(leave, eventTime);
+		}
+		return false;
+	}
+	sdl3GuiMouseTransform_t transform;
+	if (!SDL3_BuildGuiMouseTransform(transform)) {
+		return false;
+	}
+	const float windowX = (transform.drawAreaX + idMath::ClampFloat(0.0f, 1.0f, u) * transform.drawAreaWidth) * transform.pixelToWindowX;
+	const float windowY = (transform.drawAreaY + idMath::ClampFloat(0.0f, 1.0f, v) * transform.drawAreaHeight) * transform.pixelToWindowY;
+	if (RetainedUI_IsOpen()) {
+		SDL3_QueueRetainedPointer(windowX, windowY, eventTime);
+		return true;
+	}
+	idUserInterface *activeGui = SDL3_GetActiveMenuGui();
+	float cursorX = 0.0f;
+	float cursorY = 0.0f;
+	if (activeGui == NULL || !SDL3_MapWindowMouseToGuiCursor(windowX, windowY, cursorX, cursorY)) {
+		return false;
+	}
+	// a desktop mouse moved later starts from wherever the pointer left the cursor
+	SDL3_ResetMenuMouseTracking();
+	const int dx = static_cast<int>(roundf(cursorX - activeGui->CursorX()));
+	const int dy = static_cast<int>(roundf(cursorY - activeGui->CursorY()));
+	if (dx != 0 || dy != 0) {
+		Sys_QueEvent(eventTime, SE_MOUSE, dx, dy, 0, NULL);
+	}
+	return true;
+}
+#endif
 
 
 
@@ -5708,7 +6856,7 @@ void GLimp_WakeBackEnd(void *data) {
 ===============================================================================
 
 	Phase B5b window services: the engine-owned half of the window/context
-	seam (docs/dev/plans/2026-07-16-vulkan-renderer-phase-b.md). The context
+	seam (docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer-phase-b.md). The context
 	half lives in renderer/OpenGL/gl_ContextSDL3.cpp and drives these
 	callbacks; at Phase B8 they cross the renderer-module boundary through
 	renderImport_t.windowServices.
@@ -5762,7 +6910,15 @@ static void SDL3_ApplyFramebufferDesc(const renderFramebufferDesc_t *desc) {
 		(void)SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
 		(void)SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, desc->multiSamples);
 	}
-	if (desc->explicitGLVersion) {
+	if (desc->glESProfile) {
+		// An ES context is always an explicit version request: there is no
+		// meaningful "unversioned ES" and SDL must know before it picks a
+		// driver, because on desktop this routes through EGL/ANGLE rather
+		// than the platform's desktop-GL path.
+		(void)SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, desc->glMajor);
+		(void)SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, desc->glMinor);
+		(void)SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+	} else if (desc->explicitGLVersion) {
 		(void)SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, desc->glMajor);
 		(void)SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, desc->glMinor);
 		(void)SDL_GL_SetAttribute(
@@ -5786,6 +6942,7 @@ static bool SDL3_WindowServices_PrepareWindowSystem(void) {
 			common->Printf("SDL3: failed to initialize video subsystem: %s\n", SDL_GetError());
 			return false;
 		}
+		openq4::NativeInputBeforeWindowChange();
 		s_sdlVideoReferenceHeld = true;
 	}
 	SDL3_RegisterLifecycleEventWatch();
@@ -5799,6 +6956,9 @@ static bool SDL3_WindowServices_PrepareWindowSystem(void) {
 		cmdSystem->AddCommand("listDisplayModes", SDL3_ListDisplayModes_f, CMD_FL_SYSTEM, "lists SDL3 fullscreen display modes (optional display index)");
 		cmdSystem->AddCommand("listControllers", SDL3_ListControllers_f, CMD_FL_SYSTEM, "lists SDL3 controller, sensor, touchpad, and battery diagnostics");
 		cmdSystem->AddCommand("sdl3MouseCaptureDiagnostics", SDL3_MouseCaptureDiagnostics_f, CMD_FL_SYSTEM, "toggles SDL3 mouse capture and prints backend state; optional repeat count is clamped to 1..8");
+		cmdSystem->AddCommand("windowMinimizeTest", SDL3_WindowMinimizeTest_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "development: minimize the game window, as leaving full screen does, so the frame cap of a window that shows nothing can be measured without input; requires cheats");
+		cmdSystem->AddCommand("windowFocusTest", SDL3_WindowFocusTest_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "development: request foreground focus once for an already visible windowed game window, or use report to identify it without changing focus; requires cheats and separate permission when automated");
+		cmdSystem->AddCommand("testLowMemoryNotice", SDL3_TestLowMemoryNotice_f, CMD_FL_SYSTEM, "pushes an operating-system low-memory event through SDL, as Android and iOS deliver one");
 		s_sdlDiagnosticCommandsRegistered = true;
 	}
 
@@ -5819,11 +6979,11 @@ static int s_sdlWindowSurfaceKind = RENDER_SURFACE_GL;
 // macOS has no system Vulkan driver; the renderer runs on MoltenVK, a
 // Vulkan-on-Metal translation layer shipped inside the package. SDL's own
 // search list already starts at @executable_path/../Frameworks/libMoltenVK.dylib,
-// but the loose (non-app-bundle) binaries beside the package root would miss it,
-// and the renderer module must end up on the SAME image SDL creates the surface
-// with. Pinning the resolved path removes both hazards. A system Vulkan loader,
-// when the user has the SDK installed, still wins: the hint is only set when the
-// bundled dylib is actually present.
+// but loose (non-app-bundle) binaries may stage the library either beside the
+// executable or in a Frameworks child directory. The renderer module must end
+// up on the SAME image SDL creates the surface with. Pinning the resolved path
+// removes both hazards. A system Vulkan loader, when the user has the SDK
+// installed, still wins: the hint is only set when a bundled dylib is present.
 static void SDL3_PinBundledMoltenVKLibrary(void) {
 	if (SDL_GetHint(SDL_HINT_VULKAN_LIBRARY) != NULL) {
 		return;
@@ -5834,6 +6994,7 @@ static void SDL3_PinBundledMoltenVKLibrary(void) {
 
 	const char *relativeCandidates[] = {
 		"/../Frameworks/libMoltenVK.dylib",
+		"/Frameworks/libMoltenVK.dylib",
 		"/libMoltenVK.dylib",
 	};
 	for (int i = 0; i < (int)(sizeof(relativeCandidates) / sizeof(relativeCandidates[0])); i++) {
@@ -5867,6 +7028,7 @@ static bool SDL3_WindowServices_CreateWindowForFramebuffer(const renderFramebuff
 
 	if (s_sdlWindow != NULL && s_sdlWindowSurfaceKind != requestedSurfaceKind) {
 		common->Printf("SDL3: preserved window is for a different rendering API; recreating\n");
+		SDL3_RetireNativeWindowPublication();
 		SDL_DestroyWindow(s_sdlWindow);
 		s_sdlWindow = NULL;
 	}
@@ -5885,56 +7047,29 @@ static bool SDL3_WindowServices_CreateWindowForFramebuffer(const renderFramebuff
 			flags |= SDL_WINDOW_BORDERLESS;
 		}
 
-		s_sdlWindow = SDL_CreateWindow(GAME_NAME, parms->width, parms->height, flags);
+		s_sdlWindow = SDL_CreateWindow(GAME_WINDOW_TITLE, parms->width, parms->height, flags);
 		if (!s_sdlWindow) {
 			return false;
 		}
 		s_sdlWindowSurfaceKind = requestedSurfaceKind;
 
 		if (!parms->fullScreen && !parms->hiddenWindow) {
-			int targetFrameX = win32.win_xpos.GetInteger();
-			int targetFrameY = win32.win_ypos.GetInteger();
+			int targetX = win32.win_xpos.GetInteger();
+			int targetY = win32.win_ypos.GetInteger();
 			int targetWidth = parms->width;
 			int targetHeight = parms->height;
-			const sdl3WindowChrome_t chrome = SDL3_GetWindowChrome();
 
-			sdl3DisplaySelection_t selectedDisplay = SDL3_ResolveTargetDisplay(false);
-			if (r_screen.GetInteger() < 0 && SDL3_UseAbsoluteWindowPlacement()) {
-				const SDL_DisplayID savedDisplay = SDL3_GetDisplayForWindowFrame(
-					targetFrameX,
-					targetFrameY,
-					targetWidth,
-					targetHeight,
-					chrome);
-				if (savedDisplay != 0) {
-					selectedDisplay.id = savedDisplay;
-				}
-			}
+			const sdl3DisplaySelection_t selectedDisplay = SDL3_ResolveTargetDisplay(false);
 			if (selectedDisplay.id != 0) {
 				SDL_Rect bounds;
 				if (SDL3_GetDisplayWindowedPlacementBounds(selectedDisplay.id, bounds)) {
-					const bool needsRecoveryPlacement = !SDL3_WindowFrameIntersectsAnyDisplay(
-						targetFrameX,
-						targetFrameY,
-						targetWidth,
-						targetHeight,
-						chrome);
+					const bool needsRecoveryPlacement = !SDL3_WindowRectIntersectsAnyDisplay(targetX, targetY, targetWidth, targetHeight);
 					const bool recenterIfOutside = (r_screen.GetInteger() >= 0) || needsRecoveryPlacement;
-					SDL3_ConstrainWindowFrameToBounds(
-						targetFrameX,
-						targetFrameY,
-						targetWidth,
-						targetHeight,
-						chrome,
-						bounds,
-						recenterIfOutside);
+					SDL3_ConstrainWindowRectToBounds(targetX, targetY, targetWidth, targetHeight, bounds, recenterIfOutside);
 				}
 			}
 
 			(void)SDL_SetWindowSize(s_sdlWindow, targetWidth, targetHeight);
-			int targetX = 0;
-			int targetY = 0;
-			SDL3_GetWindowClientPosition(targetFrameX, targetFrameY, chrome, targetX, targetY);
 			(void)SDL3_SetWindowPositionCompat(
 				targetX,
 				targetY,
@@ -5950,6 +7085,7 @@ static bool SDL3_WindowServices_CreateWindowForFramebuffer(const renderFramebuff
 
 static void SDL3_WindowServices_DestroyAttemptWindow(void) {
 	if (s_sdlWindow != NULL) {
+		SDL3_RetireNativeWindowPublication();
 		SDL_DestroyWindow(s_sdlWindow);
 		s_sdlWindow = NULL;
 	}
@@ -5969,6 +7105,7 @@ static void SDL3_WindowServices_RefreshNativeWindowHandles(renderModuleWindowInf
 }
 
 static void SDL3_WindowServices_NotifyWindowReady(void) {
+	openq4::NativeInputBeforeWindowChange();
 	win32.activeApp = true;
 	s_sdlFocusInputReleased = false;
 	win32.wglErrors = 0;
@@ -5980,7 +7117,11 @@ static void SDL3_WindowServices_BeginWindowTeardown(void) {
 	SDL3_DisableWindowAspectSnap();
 	IN_DeactivateMouse();
 	SDL3_ShutdownControllerSubsystems();
+	openq4::NativeInputBeforeWindowChange();
 	s_sdlAppInBackground = false;
+#if defined(__ANDROID__)
+	SDL_SetAtomicInt(&s_sdlAppBackgrounded, 0);
+#endif
 	if (!s_teardownPreserveWindow) {
 		(void)SDL3_LeaveFullscreenAndRestoreDesktopMode();
 	}
@@ -5993,6 +7134,7 @@ static void SDL3_WindowServices_BeginWindowTeardown(void) {
 
 static void SDL3_WindowServices_FinishWindowTeardown(void) {
 	if (s_sdlWindow && !s_teardownPreserveWindow) {
+		SDL3_RetireNativeWindowPublication();
 		SDL_DestroyWindow(s_sdlWindow);
 		s_sdlWindow = NULL;
 	}
@@ -6000,6 +7142,7 @@ static void SDL3_WindowServices_FinishWindowTeardown(void) {
 	if (s_sdlVideoReferenceHeld && !s_teardownPreserveWindow) {
 		SDL3_UnregisterLifecycleEventWatch();
 		SDL_QuitSubSystem(SDL_INIT_VIDEO);
+		openq4::NativeInputBeforeWindowChange();
 		s_sdlVideoReferenceHeld = false;
 		s_sdlVideoDriver = SDL3_VIDEO_DRIVER_UNKNOWN;
 		idStr::snPrintf(s_sdlVideoDriverName, sizeof(s_sdlVideoDriverName), "unknown");
@@ -6173,6 +7316,375 @@ static bool SDL3_WindowServices_CreateVulkanSurface(void *vkInstance, unsigned l
 	return true;
 }
 
+#ifndef ID_DEDICATED
+static bool SDL3_PlacementError(const char* reason, char* error, int size) {
+	if (error && size>0) idStr::snPrintf(error,size,"%s",reason);
+	return false;
+}
+static sysWindowPlacementSnapshot_t SDL3_ReadPlacementSettings() {
+	sysWindowPlacementSnapshot_t value;
+	value.x=win32.win_xpos.GetInteger(); value.y=win32.win_ypos.GetInteger();
+	value.width=r_windowWidth.GetInteger(); value.height=r_windowHeight.GetInteger();
+	value.normalX=s_windowedPlacement.x; value.normalY=s_windowedPlacement.y;
+	value.normalWidth=s_windowedPlacement.width; value.normalHeight=s_windowedPlacement.height; value.normalValid=s_windowedPlacement.valid;
+	return value;
+}
+static bool SDL3_SamePlacement(const sysWindowPlacementSnapshot_t& a, const sysWindowPlacementSnapshot_t& b) {
+	return a.x==b.x && a.y==b.y && a.width==b.width && a.height==b.height &&
+		a.normalX==b.normalX && a.normalY==b.normalY && a.normalWidth==b.normalWidth && a.normalHeight==b.normalHeight && a.normalValid==b.normalValid;
+}
+bool Sys_WindowPlacementLeaseActive() { return s_windowPlacementLease!=0; }
+bool Sys_BeginWindowPlacementLease(uint64_t token, sysWindowPlacementSnapshot_t* baseline, char* error, int errorSize) {
+	if (!token || !baseline || s_windowPlacementLease) return SDL3_PlacementError("Window placement is already leased or the request is invalid",error,errorSize);
+	s_windowPlacementBaseline=SDL3_ReadPlacementSettings(); s_windowPlacementLease=token;
+	*baseline=s_windowPlacementBaseline; if (error && errorSize>0) error[0]='\0'; return true;
+}
+bool Sys_ReadWindowPlacementLease(uint64_t token, sysWindowPlacementSnapshot_t* current, char* error, int errorSize) {
+	if (!token || token!=s_windowPlacementLease || !current) return SDL3_PlacementError("Window placement lease is unavailable",error,errorSize);
+	*current=SDL3_ReadPlacementSettings(); if (error && errorSize>0) error[0]='\0'; return true;
+}
+bool Sys_BuildWindowPlacementCommit(uint64_t token, const sysWindowPlacementSnapshot_t* expectedCurrent,
+	const renderWindowState_s* actual, sysWindowPlacementSnapshot_t* committed, char* error, int errorSize) {
+	if (!token || token!=s_windowPlacementLease || !expectedCurrent || !actual || !committed || !s_sdlWindow)
+		return SDL3_PlacementError("Window placement commit requires a live lease and window",error,errorSize);
+	if (!SDL3_SamePlacement(SDL3_ReadPlacementSettings(),*expectedCurrent))
+		return SDL3_PlacementError("Window placement changed outside the settings attempt",error,errorSize);
+	if (actual->logicalWidth<=0 || actual->logicalHeight<=0 || actual->minimized)
+		return SDL3_PlacementError("Window placement commit requires valid actual dimensions",error,errorSize);
+	sysWindowPlacementSnapshot_t result=*expectedCurrent;
+	if (!actual->fullscreen && !actual->borderless && !actual->hidden && !actual->maximized) {
+		result.width=actual->logicalWidth; result.height=actual->logicalHeight;
+		if (actual->positionValid && SDL3_UseAbsoluteWindowPlacement()) {
+			int top=0,left=0,bottom=0,right=0;
+			bool borders=SDL_GetWindowBordersSize(s_sdlWindow,&top,&left,&bottom,&right);
+#if defined(OPENQ4_SDL3_DARWIN_HOST)
+			if (!borders) borders=Sys_SDL_GetNativeWindowBorders(s_sdlWindow,&top,&left,&bottom,&right);
+#endif
+			if (!borders || top<0 || left<0 || bottom<0 || right<0 || top>16384 || left>16384 || bottom>16384 || right>16384)
+				return SDL3_PlacementError("Actual window frame offsets are unavailable",error,errorSize);
+			result.x=SDL3_SaturateWindowCoordinate(int64_t(actual->windowX)-left);
+			result.y=SDL3_SaturateWindowCoordinate(int64_t(actual->windowY)-top);
+			result.normalX=result.x; result.normalY=result.y; result.normalWidth=result.width; result.normalHeight=result.height; result.normalValid=true;
+		}
+	}
+	// Maximized/fullscreen/borderless/hidden observations never overwrite the
+	// captured normal rectangle. SDL cannot expose its compositor-internal copy.
+	*committed=result; if (error && errorSize>0) error[0]='\0'; return true;
+}
+bool Sys_ApplyWindowPlacementLease(uint64_t token, const sysWindowPlacementSnapshot_t* expectedCurrent,
+	const sysWindowPlacementSnapshot_t* finalState, char* error, int errorSize) {
+	if (!token || token!=s_windowPlacementLease || !expectedCurrent || !finalState)
+		return SDL3_PlacementError("Window placement lease is unavailable",error,errorSize);
+	if (!SDL3_SamePlacement(SDL3_ReadPlacementSettings(),*expectedCurrent))
+		return SDL3_PlacementError("Window placement changed outside the settings attempt",error,errorSize);
+	if (finalState->normalValid && (finalState->normalWidth<=0 || finalState->normalHeight<=0))
+		return SDL3_PlacementError("The normal window restore rectangle is invalid",error,errorSize);
+	// Validate all ownership before the first setter; a later setter refusal
+	// remains a partial failure with the lease retained. No modified flags are
+	// cleared, so unrelated/archive persistence remains the coordinator's choice.
+	if (expectedCurrent->x!=finalState->x) win32.win_xpos.SetInteger(finalState->x);
+	if (expectedCurrent->y!=finalState->y) win32.win_ypos.SetInteger(finalState->y);
+	if (expectedCurrent->width!=finalState->width) r_windowWidth.SetInteger(finalState->width);
+	if (expectedCurrent->height!=finalState->height) r_windowHeight.SetInteger(finalState->height);
+	const auto observed=SDL3_ReadPlacementSettings();
+	if (observed.x!=finalState->x || observed.y!=finalState->y || observed.width!=finalState->width || observed.height!=finalState->height)
+		return SDL3_PlacementError("Window placement write was refused or normalized",error,errorSize);
+	s_windowedPlacement.x=finalState->normalX; s_windowedPlacement.y=finalState->normalY;
+	s_windowedPlacement.width=finalState->normalWidth; s_windowedPlacement.height=finalState->normalHeight; s_windowedPlacement.valid=finalState->normalValid;
+	if (error && errorSize>0) error[0]='\0'; return true;
+}
+bool Sys_FinishWindowPlacementLease(uint64_t token, const sysWindowPlacementSnapshot_t* expectedCurrent,
+	const sysWindowPlacementSnapshot_t* finalState, char* error, int errorSize) {
+	if (!Sys_ApplyWindowPlacementLease(token,expectedCurrent,finalState,error,errorSize)) return false;
+	s_windowPlacementLease=0; s_windowPlacementBaseline={}; return true;
+}
+#endif
+
+// Strict settings operations are separate from legacy startup negotiation.
+// Every observation comes from SDL; querying never persists placement CVars.
+struct sdl3StrictDisplayList_t {
+	int count = 0;
+	SDL_DisplayID *ids = SDL_GetDisplays(&count);
+	~sdl3StrictDisplayList_t() { if (ids) SDL_free(ids); }
+	bool Valid() const { return ids && count > 0 && count <= 1024; }
+	int Index(SDL_DisplayID display) const {
+		if (Valid()) for (int i = 0; i < count; ++i) if (ids[i] == display) return i;
+		return -1;
+	}
+};
+
+static bool SDL3_StrictModePixels(const SDL_DisplayMode *mode, int &width, int &height) {
+	if (!mode || mode->w <= 0 || mode->h <= 0 || !std::isfinite(mode->pixel_density) || mode->pixel_density <= 0) return false;
+	const double w = std::floor(static_cast<double>(mode->w) * mode->pixel_density + 0.5);
+	const double h = std::floor(static_cast<double>(mode->h) * mode->pixel_density + 0.5);
+	if (!std::isfinite(w) || !std::isfinite(h) || w < 1 || h < 1 || w > idMath::INT_MAX || h > idMath::INT_MAX) return false;
+	width = static_cast<int>(w); height = static_cast<int>(h);
+	return true;
+}
+
+static void SDL3_QueryDisplayViewport(renderWindowState_t &state) {
+	state.uiViewportX = state.uiViewportY = 0;
+	state.uiViewportWidth = state.pixelWidth; state.uiViewportHeight = state.pixelHeight;
+	if (!state.positionValid || !SDL3_UseAbsoluteWindowPlacement()) return;
+	SDL_Rect bounds;
+	const SDL_DisplayID display = SDL3_ResolveViewportDisplay();
+	if (!display || !SDL_GetDisplayBounds(display, &bounds) || bounds.w <= 0 || bounds.h <= 0) return;
+	// Same floor/ceil overlap policy as SDL3_UpdateDisplayViewport, evaluated
+	// without publishing engine state or falling back to stale cached sizes.
+	const int64_t left = state.windowX, top = state.windowY;
+	const int64_t right = left + state.logicalWidth, bottom = top + state.logicalHeight;
+	const int64_t displayRight = static_cast<int64_t>(bounds.x) + bounds.w;
+	const int64_t displayBottom = static_cast<int64_t>(bounds.y) + bounds.h;
+	const int64_t overlapLeft = left > bounds.x ? left : bounds.x;
+	const int64_t overlapTop = top > bounds.y ? top : bounds.y;
+	const int64_t overlapRight = right < displayRight ? right : displayRight;
+	const int64_t overlapBottom = bottom < displayBottom ? bottom : displayBottom;
+	if (overlapRight <= overlapLeft || overlapBottom <= overlapTop) return;
+	const double scaleX = static_cast<double>(state.pixelWidth) / state.logicalWidth;
+	const double scaleY = static_cast<double>(state.pixelHeight) / state.logicalHeight;
+	const int x = SDL3_ClampViewportPixel(std::floor((overlapLeft-left)*scaleX), 0, state.pixelWidth);
+	const int y = SDL3_ClampViewportPixel(std::floor((overlapTop-top)*scaleY), 0, state.pixelHeight);
+	const int r = SDL3_ClampViewportPixel(std::ceil((overlapRight-left)*scaleX), x, state.pixelWidth);
+	const int b = SDL3_ClampViewportPixel(std::ceil((overlapBottom-top)*scaleY), y, state.pixelHeight);
+	if (r > x && b > y) {
+		state.uiViewportX = x; state.uiViewportY = y;
+		state.uiViewportWidth = r-x; state.uiViewportHeight = b-y;
+	}
+}
+
+// SDL's Wayland driver emulates exclusive modes per window: it never switches
+// the output, so SDL_GetCurrentDisplayMode keeps the desktop, and the window's
+// buffer and viewport follow its own fullscreen mode, which
+// SDL_GetWindowFullscreenMode returns while it is fullscreen. Every other
+// driver, XWayland included, switches the display, whose current mode stays
+// authoritative.
+static const SDL_DisplayMode *SDL3_StrictObservedMode(const renderWindowState_t &state) {
+	if (SDL3_IsNativeWaylandVideoDriver() && state.fullscreen && !state.fullscreenDesktop) {
+		const SDL_DisplayMode *applied = SDL_GetWindowFullscreenMode(s_sdlWindow);
+		if (applied && (!applied->displayID || applied->displayID == state.displayId)) return applied;
+	}
+	return SDL_GetCurrentDisplayMode(state.displayId);
+}
+
+static bool SDL3_WindowServices_QueryWindowState(renderWindowState_t *outState) {
+	if (!outState || !s_sdlWindow) return SDL_SetError("No SDL window or window-state output");
+	renderWindowState_t state = {};
+	state.displayId = SDL_GetDisplayForWindow(s_sdlWindow);
+	sdl3StrictDisplayList_t displays;
+	state.displayIndex = displays.Index(state.displayId);
+	if (!state.displayId || state.displayIndex < 0) return SDL_SetError("The SDL window display is unavailable");
+	const SDL_WindowFlags flags = SDL_GetWindowFlags(s_sdlWindow);
+	state.windowFlags = static_cast<unsigned long long>(flags);
+	state.fullscreen = (flags & SDL_WINDOW_FULLSCREEN) != 0;
+	state.fullscreenDesktop = state.fullscreen && SDL_GetWindowFullscreenMode(s_sdlWindow) == NULL;
+	state.borderless = (flags & SDL_WINDOW_BORDERLESS) != 0;
+	state.hidden = (flags & SDL_WINDOW_HIDDEN) != 0;
+	state.minimized = (flags & SDL_WINDOW_MINIMIZED) != 0;
+	state.maximized = (flags & SDL_WINDOW_MAXIMIZED) != 0;
+	state.focused = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
+	state.positionValid = SDL3_UseAbsoluteWindowPlacement() && SDL_GetWindowPosition(s_sdlWindow, &state.windowX, &state.windowY);
+	if (!SDL_GetWindowSize(s_sdlWindow, &state.logicalWidth, &state.logicalHeight) ||
+		!SDL_GetWindowSizeInPixels(s_sdlWindow, &state.pixelWidth, &state.pixelHeight) ||
+		state.logicalWidth <= 0 || state.logicalHeight <= 0 || state.pixelWidth <= 0 || state.pixelHeight <= 0)
+		return SDL_SetError("The SDL window dimensions are unavailable or invalid");
+	state.displayScale = SDL_GetWindowDisplayScale(s_sdlWindow);
+	if (!std::isfinite(state.displayScale) || state.displayScale <= 0) return SDL_SetError("The SDL window display scale is invalid");
+	state.pixelDensityX = static_cast<float>(state.pixelWidth) / state.logicalWidth;
+	state.pixelDensityY = static_cast<float>(state.pixelHeight) / state.logicalHeight;
+	const SDL_DisplayMode *mode = SDL3_StrictObservedMode(state);
+	if (SDL3_StrictModePixels(mode, state.modePixelWidth, state.modePixelHeight) &&
+		std::isfinite(mode->refresh_rate) && mode->refresh_rate >= 0) {
+		state.currentModeValid = true; state.modeWidth = mode->w; state.modeHeight = mode->h;
+		state.refreshRate = mode->refresh_rate; state.modePixelDensity = mode->pixel_density;
+	}
+	SDL3_QueryDisplayViewport(state);
+	*outState = state;
+	return true;
+}
+
+static bool SDL3_StrictWindowFailure(const char *message, char *error, int errorSize, bool fromSDL = false) {
+	if (error && errorSize > 0) idStr::snPrintf(error, errorSize, "%s%s%s", message, fromSDL ? ": " : "", fromSDL ? SDL_GetError() : "");
+	return false;
+}
+
+static bool SDL3_StrictFullscreenMode(SDL_DisplayID display, int width, int height, int refresh, SDL_DisplayMode &selected) {
+	// The shared exclusive rule (src/sys/DisplayModeRule.h) over SDL's own list,
+	// which the SYSTEM capture copies in this order: 59.94 belongs to the 60-Hz
+	// choice, Auto takes the rate nearest the desktop's, and no neighbouring
+	// resolution or other rate bucket is used.
+	const SDL_DisplayMode *desktop = SDL_GetDesktopDisplayMode(display);
+	if (!desktop || !std::isfinite(desktop->refresh_rate) || desktop->refresh_rate < 0) return false;
+	int count = 0;
+	SDL_DisplayMode **modes = SDL_GetFullscreenDisplayModes(display, &count);
+	if (!modes) return false;
+	const int chosen = openq4::SelectDisplayMode(count, [&](int i, openq4::DisplayModeCandidate &mode) {
+		const SDL_DisplayMode *option = modes[i];
+		if (!option || (option->displayID && option->displayID != display) ||
+			!SDL3_StrictModePixels(option, mode.pixelWidth, mode.pixelHeight)) return false;
+		mode.refresh = option->refresh_rate;
+		return true;
+	}, width, height, refresh, desktop->refresh_rate);
+	if (chosen >= 0) { selected = *modes[chosen]; selected.displayID = display; }
+	SDL_free(modes);
+	return chosen >= 0;
+}
+
+static bool SDL3_StrictDisplayBounds(const sdl3StrictDisplayList_t &displays, SDL_DisplayID selected,
+	bool span, SDL_Rect &bounds) {
+	if (!span) return SDL_GetDisplayBounds(selected, &bounds) && bounds.w > 0 && bounds.h > 0;
+	int64_t left = 0, top = 0, right = 0, bottom = 0;
+	for (int i = 0; i < displays.count; ++i) {
+		SDL_Rect current;
+		if (!SDL_GetDisplayBounds(displays.ids[i], &current) || current.w <= 0 || current.h <= 0) return false;
+		const int64_t r = static_cast<int64_t>(current.x) + current.w;
+		const int64_t b = static_cast<int64_t>(current.y) + current.h;
+		if (i == 0 || current.x < left) left = current.x;
+		if (i == 0 || current.y < top) top = current.y;
+		if (i == 0 || r > right) right = r;
+		if (i == 0 || b > bottom) bottom = b;
+	}
+	if (right-left <= 0 || bottom-top <= 0 || right-left > 16384 || bottom-top > 16384) return false;
+	bounds = {static_cast<int>(left),static_cast<int>(top),static_cast<int>(right-left),static_cast<int>(bottom-top)};
+	return true;
+}
+
+static bool SDL3_WindowServices_ApplyScreenParmsStrict(const renderWindowRequest_t *request,
+	renderWindowState_t *outState, char *error, int errorSize) {
+	if (!request || !outState || !s_sdlWindow) return SDL3_StrictWindowFailure("No SDL window, request or result",error,errorSize);
+	const renderWindowParms_t parms = request->parms;
+	if (parms.width < 320 || parms.width > 16384 || parms.height < 240 || parms.height > 16384 ||
+		parms.displayHz < 0 || parms.displayHz > 1000 || (!request->displayId && request->displayIndex < -1) ||
+		(parms.hiddenWindow && (parms.fullScreen || parms.borderless)))
+		return SDL3_StrictWindowFailure("Invalid strict window dimensions, display or hidden-window policy",error,errorSize);
+	if (s_screenParmTransitionActive) return SDL3_StrictWindowFailure("A window transition is already active",error,errorSize);
+	if (request->restorePlacement && !SDL3_UseAbsoluteWindowPlacement())
+		return SDL3_StrictWindowFailure("Absolute restore placement is unavailable on this window system",error,errorSize);
+	sdl3StrictDisplayList_t displays;
+	if (!displays.Valid()) return SDL3_StrictWindowFailure("Display enumeration failed",error,errorSize,true);
+	SDL_DisplayID display = request->displayId;
+	if (!display && request->displayIndex >= 0) {
+		if (request->displayIndex >= displays.count) return SDL3_StrictWindowFailure("Requested display index is unavailable",error,errorSize);
+		display = displays.ids[request->displayIndex];
+	}
+	if (!display) {
+		display = SDL_GetDisplayForWindow(s_sdlWindow);
+		if (displays.Index(display) < 0) display = SDL_GetPrimaryDisplay();
+	}
+	if (displays.Index(display) < 0) return SDL3_StrictWindowFailure("Requested display identity is unavailable",error,errorSize);
+	const bool spannedDesktop = parms.fullScreen && request->fullscreenDesktop && request->spanDisplays;
+	const bool borderless = (!parms.fullScreen && parms.borderless) || spannedDesktop;
+	const bool span = borderless && request->spanDisplays;
+	if (span && !SDL3_UseAbsoluteWindowPlacement()) return SDL3_StrictWindowFailure("Spanned windows are unavailable on this window system",error,errorSize);
+	SDL_Rect bounds;
+	if (!SDL3_StrictDisplayBounds(displays,display,span,bounds)) return SDL3_StrictWindowFailure("Requested display bounds are unavailable",error,errorSize,true);
+	SDL_DisplayMode selectedMode = {};
+	const bool exclusive = parms.fullScreen && !request->fullscreenDesktop;
+	if (exclusive && !SDL3_StrictFullscreenMode(display,parms.width,parms.height,parms.displayHz,selectedMode))
+		return SDL3_StrictWindowFailure("No exact fullscreen pixel mode and refresh matches the request",error,errorSize);
+	int desktopPixelWidth = 0, desktopPixelHeight = 0;
+	const bool desktopFullscreen = parms.fullScreen && request->fullscreenDesktop && !span;
+	if (desktopFullscreen && !SDL3_StrictModePixels(SDL_GetDesktopDisplayMode(display),desktopPixelWidth,desktopPixelHeight))
+		return SDL3_StrictWindowFailure("The requested desktop fullscreen mode is unavailable",error,errorSize);
+	renderWindowState_t before = {};
+	if (!SDL3_WindowServices_QueryWindowState(&before)) return SDL3_StrictWindowFailure("Cannot observe the existing window",error,errorSize,true);
+	const int targetWidth = borderless ? bounds.w : parms.width;
+	const int targetHeight = borderless ? bounds.h : parms.height;
+	if (targetWidth > 16384 || targetHeight > 16384) return SDL3_StrictWindowFailure("Requested window exceeds supported dimensions",error,errorSize);
+	// Transition suppression prevents incidental SDL events from persisting
+	// partial geometry. All returns release it; a failure is not a rollback.
+	struct Transition {
+		Transition() { s_screenParmTransitionActive = true; }
+		~Transition() { s_screenParmTransitionActive = false; }
+	} transition;
+	if (s_windowAspectSnapActive) {
+		if (!SDL_SetWindowAspectRatio(s_sdlWindow,0,0)) return SDL3_StrictWindowFailure("Cannot clear the window aspect constraint",error,errorSize,true);
+		s_windowAspectSnapActive = false; s_windowAspectSnapRatio = 0;
+	}
+	if (before.fullscreen) {
+		if (!SDL_SetWindowFullscreen(s_sdlWindow,false) || !SDL_SyncWindow(s_sdlWindow))
+			return SDL3_StrictWindowFailure("Cannot leave the previous fullscreen mode",error,errorSize,true);
+	}
+	if (before.maximized || before.minimized) {
+		if (!SDL_RestoreWindow(s_sdlWindow) || !SDL_SyncWindow(s_sdlWindow))
+			return SDL3_StrictWindowFailure("Cannot restore the previous window state",error,errorSize,true);
+	}
+	if (!SDL_SetWindowFullscreenMode(s_sdlWindow,exclusive ? &selectedMode : NULL))
+		return SDL3_StrictWindowFailure("Cannot select the requested fullscreen mode",error,errorSize,true);
+	if (!SDL3_SetWindowBorderedCompat(!borderless)) return SDL3_StrictWindowFailure("Cannot apply window borders",error,errorSize,true);
+	int x = bounds.x, y = bounds.y;
+	if (!borderless && !parms.fullScreen) {
+		if (before.positionValid && before.displayId == display) { x = before.windowX; y = before.windowY; }
+		else {
+			x = SDL3_SaturateWindowCoordinate(static_cast<int64_t>(bounds.x) + (static_cast<int64_t>(bounds.w)-targetWidth)/2);
+			y = SDL3_SaturateWindowCoordinate(static_cast<int64_t>(bounds.y) + (static_cast<int64_t>(bounds.h)-targetHeight)/2);
+		}
+	}
+	if (request->restorePlacement) { x = request->windowX; y = request->windowY; }
+	else if (!SDL3_UseAbsoluteWindowPlacement()) x = y = SDL_WINDOWPOS_CENTERED_DISPLAY(display);
+	if (!SDL_SetWindowPosition(s_sdlWindow,x,y)) return SDL3_StrictWindowFailure("Cannot place the window on the requested display",error,errorSize,true);
+	if (parms.fullScreen && !spannedDesktop) {
+		if (!SDL_SetWindowFullscreen(s_sdlWindow,true)) return SDL3_StrictWindowFailure("Cannot enter the requested fullscreen mode",error,errorSize,true);
+	} else if (!SDL_SetWindowSize(s_sdlWindow,targetWidth,targetHeight)) {
+		return SDL3_StrictWindowFailure("Cannot apply the requested logical window size",error,errorSize,true);
+	}
+	if (parms.hiddenWindow ? !SDL_HideWindow(s_sdlWindow) : !SDL_ShowWindow(s_sdlWindow))
+		return SDL3_StrictWindowFailure("Cannot apply window visibility",error,errorSize,true);
+	if (request->maximized && !SDL_MaximizeWindow(s_sdlWindow))
+		return SDL3_StrictWindowFailure("Cannot restore the maximized window state",error,errorSize,true);
+	if (!SDL_SyncWindow(s_sdlWindow)) return SDL3_StrictWindowFailure("Requested window transition did not synchronize",error,errorSize,true);
+	renderWindowState_t actual = {};
+	if (!SDL3_WindowServices_QueryWindowState(&actual)) return SDL3_StrictWindowFailure("Cannot observe the applied window",error,errorSize,true);
+	const bool fullscreen = parms.fullScreen && !spannedDesktop;
+	if (actual.fullscreen != fullscreen || (fullscreen && actual.fullscreenDesktop != request->fullscreenDesktop) ||
+		(!fullscreen && actual.borderless != borderless) || actual.hidden != parms.hiddenWindow || actual.minimized || actual.maximized != request->maximized ||
+		(!span && actual.displayId != display))
+		return SDL3_StrictWindowFailure("Observed window flags or display do not match the request",error,errorSize);
+	if (!fullscreen && (actual.logicalWidth != targetWidth || actual.logicalHeight != targetHeight))
+		return SDL3_StrictWindowFailure("Observed logical window dimensions do not match the request",error,errorSize);
+	if (request->restorePlacement && (!actual.positionValid || actual.windowX != request->windowX || actual.windowY != request->windowY))
+		return SDL3_StrictWindowFailure("Observed window placement does not match the explicit restore coordinates",error,errorSize);
+	if (borderless && SDL3_UseAbsoluteWindowPlacement() && (!actual.positionValid || actual.windowX != bounds.x || actual.windowY != bounds.y))
+		return SDL3_StrictWindowFailure("Observed borderless placement does not match the requested bounds",error,errorSize);
+	if (exclusive && (!actual.currentModeValid || actual.modePixelWidth != parms.width || actual.modePixelHeight != parms.height ||
+		actual.pixelWidth != parms.width || actual.pixelHeight != parms.height ||
+		(parms.displayHz > 0 && std::floor(actual.refreshRate + 0.5f) != parms.displayHz)))
+		return SDL3_StrictWindowFailure("Observed exclusive display mode does not match the request",error,errorSize);
+	if (desktopFullscreen && (!actual.currentModeValid || actual.modePixelWidth != desktopPixelWidth || actual.modePixelHeight != desktopPixelHeight ||
+		actual.pixelWidth != desktopPixelWidth || actual.pixelHeight != desktopPixelHeight))
+		return SDL3_StrictWindowFailure("Observed desktop fullscreen mode does not match the display",error,errorSize);
+	win32.cdsFullscreen = parms.fullScreen;
+	SDL3_SetFullscreenState(parms.fullScreen);
+	SDL3_SetVidSize(actual.pixelWidth,actual.pixelHeight);
+	SDL3_SetUIViewport(actual.uiViewportX,actual.uiViewportY,actual.uiViewportWidth,actual.uiViewportHeight);
+	engineWindowState.displayScale = actual.displayScale;
+	engineWindowState.pixelDensityX = actual.pixelDensityX; engineWindowState.pixelDensityY = actual.pixelDensityY;
+	// SDL's observation exposes the current maximized size, not its hidden
+	// normal restore rectangle. Do not replace our normal placement cache with
+	// maximized geometry or claim that the typed snapshot preserves that cache.
+	if (!parms.fullScreen && !borderless && !parms.hiddenWindow && !actual.maximized && actual.positionValid) {
+		int frameX = actual.windowX, frameY = actual.windowY;
+		SDL3_ClientOriginToFrameOrigin(actual.windowX,actual.windowY,frameX,frameY);
+		SDL3_RecordWindowedPlacement(frameX,frameY,actual.logicalWidth,actual.logicalHeight);
+	}
+	if (error && errorSize > 0) error[0] = '\0';
+	*outState = actual;
+	return true;
+}
+
+// A recoverable renderer restart must keep SDL's display enumeration alive:
+// quitting its final video reference invalidates every saved SDL_DisplayID.
+// The engine caller owns one matching release for each successful retain,
+// including across failed attempts which temporarily have no renderer window.
+static bool SDL3_WindowServices_RetainVideoSystem() {
+	if ((SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO) == 0)
+		return SDL_SetError("Cannot retain an inactive SDL video system");
+	return SDL_InitSubSystem(SDL_INIT_VIDEO);
+}
+
+static void SDL3_WindowServices_ReleaseVideoSystem() {
+	SDL_QuitSubSystem(SDL_INIT_VIDEO);
+}
+
 static const renderWindowServices_t s_sdl3WindowServices = {
 	SDL3_WindowServices_PrepareWindowSystem,
 	SDL3_WindowServices_CreateWindowForFramebuffer,
@@ -6200,6 +7712,10 @@ static const renderWindowServices_t s_sdl3WindowServices = {
 	SDL3_WindowServices_GrabMouseCursor,
 	SDL3_WindowServices_GetVulkanInstanceExtensions,
 	SDL3_WindowServices_CreateVulkanSurface,
+	SDL3_WindowServices_QueryWindowState,
+	SDL3_WindowServices_ApplyScreenParmsStrict,
+	SDL3_WindowServices_RetainVideoSystem,
+	SDL3_WindowServices_ReleaseVideoSystem,
 };
 
 const renderWindowServices_t *Sys_GetRenderWindowServices(void) {

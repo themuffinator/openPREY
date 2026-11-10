@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "framebuffer_coords.glsl"
 
 // ABI-faithful reconstruction of Quake 4's unshipped refractive-glass CG
 // programs: offset normal + projected scene refraction + environment cube,
@@ -50,7 +52,7 @@ vec2 CurrentRenderCoord() {
     vec2 viewportOrigin = material.shaderParms[13].xy;
     vec2 viewportSize = max(material.shaderParms[14].xy, vec2(1.0));
     vec2 textureScale = max(material.shaderParms[15].xy, vec2(1.0e-6));
-    vec2 windowGL = vec2(gl_FragCoord.x, framebufferHeight - gl_FragCoord.y);
+    vec2 windowGL = vec2(gl_FragCoord.x, CanonicalWindowY(framebufferHeight));
     vec2 viewportCoord = (windowGL - viewportOrigin) / viewportSize;
     return clamp(viewportCoord * textureScale, vec2(0.0), textureScale);
 }

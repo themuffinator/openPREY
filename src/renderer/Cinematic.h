@@ -56,6 +56,7 @@ typedef struct {
 	int					imageWidth, imageHeight;	// will be a power of 2
 	const byte *		image;						// RGBA format, alpha will be 255
 	int					status;
+	int					frameSerial;				// globally monotonic serial of the decode that produced `image`; 0 = producer does not participate, consumers must treat every call as new pixels
 } cinData_t;
 
 class idCinematic {

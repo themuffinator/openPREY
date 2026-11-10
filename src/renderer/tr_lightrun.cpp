@@ -524,6 +524,7 @@ ReloadModels and RegenerateWorld call this
 ===================
 */
 void R_FreeDerivedData( void ) {
+	R_RenderThread_Sync( "derived world data" );
 	int i, j;
 	idRenderWorldLocal *rw;
 	idRenderEntityLocal *def;
@@ -594,6 +595,11 @@ void R_ReCreateWorldReferences( void ) {
 	// let the interaction generation code know this shouldn't be optimized for
 	// a particular view
 	tr.viewDef = NULL;
+
+	// entityRefs are about to be rebuilt without touching lastModifiedFrameNum,
+	// and memoized draw-surf areas can depend on the old ref chains through the
+	// solid-bounds fallback path
+	R_ClearDrawSurfAreaMemo();
 
 	for ( j = 0; j < tr.worlds.Num(); j++ ) {
 		rw = tr.worlds[j];

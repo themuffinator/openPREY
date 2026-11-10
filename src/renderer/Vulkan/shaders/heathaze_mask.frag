@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "framebuffer_coords.glsl"
 
 // Native Vulkan port of heatHazeWithMask.vfp. This is also the compatibility
 // implementation for Quake 4's dangling heatHazeGrayWithMask.vfp material
@@ -41,7 +43,7 @@ void main() {
 
     vec2 windowGL = vec2(
         gl_FragCoord.x - sp.parms[7].x,
-        sp.parms[6].z - gl_FragCoord.y - sp.parms[7].y);
+        CanonicalWindowY(sp.parms[6].z) - sp.parms[7].y);
     vec4 screenTexCoord = vec4(windowGL * sp.parms[6].xy, 0.0, 1.0);
     screenTexCoord = clamp(
         localNormal * vDeformScale + screenTexCoord,

@@ -15,13 +15,13 @@ weapon, or navigation assumptions.
 
 ## Architecture and API compatibility
 
-The canonical implementation lives in the companion GameLibs repository:
+The canonical implementation lives in the in-tree Prey game library:
 
 ```
-OpenPrey-game/src/game/bots/BotCharacter.h
-OpenPrey-game/src/game/bots/BotCharacter.cpp
-OpenPrey-game/src/Prey/game_player.h
-OpenPrey-game/src/Prey/game_player.cpp
+src/game/bots/BotCharacter.h
+src/game/bots/BotCharacter.cpp
+src/Prey/game_player.h
+src/Prey/game_player.cpp
 ```
 
 `rvBotCharacterManager` owns styles, named characters, skill resolution,
@@ -480,9 +480,8 @@ would unexpectedly fill later matches with clones.
 
 ## Packaging and validation
 
-Canonical game-library edits belong in `E:/Repositories/OpenPrey-game`.
-openPREY stages `src/game` and `src/Prey` from that repository at configure
-time; it must not grow an in-repository game-source mirror. The existing source
+Game-library edits are made in place under `src/game` and `src/Prey`; Meson
+builds the unified module from those trees directly. The existing source
 enumeration discovers new `.cpp` files recursively.
 
 Bot content belongs under `content/basepr/pak0/botfiles/`. The normal pak build
@@ -532,4 +531,4 @@ one room as evidence of general map navigation.
 - The roster intentionally stops at retail-selectable model slot 18.
 
 The implementation history and acceptance gates are recorded in
-[`plans/2026-08-02-prey-bot-characters.md`](plans/2026-08-02-prey-bot-characters.md).
+[`archive/2026-10-18/plans/2026-08-02-prey-bot-characters.md`](archive/2026-10-18/plans/2026-08-02-prey-bot-characters.md).

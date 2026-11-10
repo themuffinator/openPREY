@@ -137,12 +137,10 @@ Generated on 2026-04-19.
 | `s_minStereo` | idSoundSystemLocal::s_minStereo | sound/default/snd_system.cpp:2252 |
 | `s_minVolume2` | idSoundSystemLocal::s_minVolume2 | sound/default/snd_world.cpp:847<br>sound/default/snd_world.cpp:848<br>sound/default/snd_world.cpp:850<br>`+1 more` |
 | `s_minVolume6` | idSoundSystemLocal::s_minVolume6 | sound/default/snd_world.cpp:802<br>sound/default/snd_world.cpp:803<br>sound/default/snd_world.cpp:810<br>`+7 more` |
-| `s_muteEAXReverb` | idSoundSystemLocal::s_muteEAXReverb | sound/default/snd_world.cpp:2304<br>sound/default/snd_world.cpp:2563 |
 | `s_realTimeDecoding` | idSoundSystemLocal::s_realTimeDecoding | sound/default/snd_decoder.cpp:195 |
 | `s_reverse` | idSoundSystemLocal::s_reverse | sound/default/snd_system.cpp:747<br>sound/default/snd_system.cpp:822 |
 | `s_spatializationDecay` | idSoundSystemLocal::s_spatializationDecay | sound/default/snd_world.cpp:841 |
 | `s_useDeferredSettings` | idSoundSystemLocal::s_useDeferredSettings | sound/default/snd_system.cpp:719<br>sound/default/snd_system.cpp:734<br>sound/default/snd_system.cpp:798<br>`+1 more` |
-| `s_useEAXOcclusion` | idSoundSystemLocal::s_useEAXOcclusion | sound/default/snd_system.cpp:2005<br>sound/default/snd_system.cpp:2006<br>sound/default/snd_system.cpp:2060<br>`+8 more` |
 | `sys_country` | sys_country | framework/common.cpp:3908 |
 | `sys_language` | sys_language | framework/common.cpp:3910 |
 | `win_enableFPUExceptions` | __unnamed::win_enableFPUExceptions | sys/win32/win_main.cpp:905 |
@@ -273,8 +271,8 @@ Generated on 2026-04-19.
 | `r_lightGridBakeWorkers` | src/renderer/RenderSystem_init.cpp:230 |
 | `r_lightGridPreload` | src/renderer/RenderSystem_init.cpp:488 |
 | `r_logFile` | src/renderer/RenderSystem_init.cpp:258 |
-| `r_maxDisplayRefresh` | src/sys/osx/macosx_glimp.mm:47 |
-| `r_minDisplayRefresh` | src/sys/osx/macosx_glimp.mm:46 |
+| `r_maxDisplayRefresh` | src/sys/macos/macos_glimp.mm:47 |
+| `r_minDisplayRefresh` | src/sys/macos/macos_glimp.mm:46 |
 | `r_msaaAlphaToCoverage` | src/renderer/RenderSystem_init.cpp:148 |
 | `r_msaaResolveDepth` | src/renderer/RenderSystem_init.cpp:147 |
 | `r_multiScreen` | src/sys/sdl3/sdl3_backend.cpp:149 |
@@ -322,9 +320,10 @@ Generated on 2026-04-19.
 | `r_ssaoMaxDistance` | src/renderer/RenderSystem_init.cpp:115 |
 | `r_ssaoPower` | src/renderer/RenderSystem_init.cpp:114 |
 | `r_ssaoRadius` | src/renderer/RenderSystem_init.cpp:111 |
+| `r_ssaoResolution` | src/renderer/RenderSystem_init.cpp:304 |
 | `r_ssaoSamples` | src/renderer/RenderSystem_init.cpp:116 |
 | `r_stencilTranslucentShadows` | src/renderer/RenderSystem_init.cpp:184 |
-| `r_stretched` | src/sys/osx/PreferencesDialog.cpp:36 |
+| `r_stretched` | src/sys/macos/PreferencesDialog.cpp:36 |
 | `r_useInfiniteFarZ` | src/renderer/RenderSystem_init.cpp:193 |
 | `r_useInteractionTable` | src/renderer/RenderSystem_init.cpp:181 |
 | `r_useLightGrid` | src/renderer/RenderSystem_init.cpp:229 |
@@ -344,7 +343,7 @@ Generated on 2026-04-19.
 | `s_cushionFadeOver` | src/sound/snd_world.cpp:38 |
 | `s_cushionFadeRate` | src/sound/snd_world.cpp:36 |
 | `s_debugHardware` | src/sound/OpenAL/AL_SoundVoice.cpp:76 |
-| `s_device` | src/sound/OpenAL/AL_SoundHardware.cpp:39<br>src/sys/osx/macosx_sound.cpp:35 |
+| `s_device` | src/sound/OpenAL/AL_SoundHardware.cpp:39<br>src/sys/macos/macos_sound.cpp:35 |
 | `s_driver` | src/sys/linux/sound.cpp:47<br>src/sys/linux/sound.cpp:49 |
 | `s_dsp` | src/sys/linux/sound.cpp:147 |
 | `s_lockListener` | src/sound/snd_world.cpp:32 |
@@ -372,10 +371,12 @@ Generated on 2026-04-19.
 
 | CVar | openQ4 source(s) | Retail evidence | Note |
 | --- | --- | --- | --- |
-| `s_quadraticFalloff` | src/sound/snd_world.cpp:41 | sound/default/snd_world.cpp:1742<br>sound/default/snd_world.cpp:937 | Implemented for retail distance-falloff parity; full retail metadata should be re-extracted in the next cvar audit. |
-| `s_radioChatterFraction` | src/sound/snd_system.cpp:36 | sound/default/snd_world.cpp:952 | Implemented for the retail radio-chatter attenuation branch; full retail metadata should be re-extracted in the next cvar audit. |
+| `s_quadraticFalloff` | src/sound/snd_world.cpp:318 | sound/default/snd_world.cpp:1742<br>sound/default/snd_world.cpp:937 | Implemented for retail distance-falloff parity. Quake 4 1.4.2 (client and dedicated) defaults it to `0` (linear) with flags `SND ST`, not archived; openQ4 matches since 2026-10-06, and migrates the old archived `1` once. |
+| `s_radioChatterFraction` | src/sound/snd_system.cpp:37 | sound/default/snd_world.cpp:952 | Implemented for the retail radio-chatter attenuation branch. Quake 4 1.4.2 defaults it to `0.9` (flags `SND ST AR`); openQ4 matches since 2026-10-06, and migrates the old archived `0.5` once. |
 | `s_frequencyShift` | src/sound/snd_system.cpp:37 | sound/default/snd_world.cpp:1127 | Implemented for retail frequency-shift gating; full retail metadata should be re-extracted in the next cvar audit. |
 | `s_skipStartSound` | src/sound/snd_emitter.cpp:35 | sound/default/snd_emitter.cpp:534 | Implemented for retail start-sound suppression diagnostics; full retail metadata should be re-extracted in the next cvar audit. |
+| `s_useEAXOcclusion` | src/sound/snd_system.cpp:1007 | sound/default/snd_system.cpp:2005<br>sound/default/snd_world.cpp:2179 | Implemented with the retail area reverb (EAX source occlusion); retail flags `SND ST AR`, default `1`. See [retail-audio-reverb.md](retail-audio-reverb.md). |
+| `s_muteEAXReverb` | src/sound/snd_system.cpp:1008 | sound/default/snd_world.cpp:2304<br>sound/default/snd_world.cpp:2563 | Implemented with the retail area reverb (mutes the listener slot's room level); retail flags `SND ST`, default `0`. |
 
 ## 3. Shared Names With Metadata Differences
 
@@ -419,18 +420,17 @@ Generated on 2026-04-19.
 | `s_meterTopTime` | default, flags | `2000` | `1000` | `SND ST AR` | `ST AR` | `int` | `int` |
 | `s_musicVolume` | flags | `0.5` | `0.5` | `SND ST AR` | `ST AR` | `float [0, 1]` | `float [0, 1]` |
 | `s_noSound` | default, flags | `1` | `0` | `SND ST RO` | `ST CH` | `bool` | `bool` |
-| `s_numberOfSpeakers` | default, flags, type/range | `2` | `6` | `SND ST AR` | `ST AR` | `string` | `int` |
+| `s_numberOfSpeakers` | default, flags, type/range | `2` | `0` | `SND ST AR` | `ST AR` | `string` | `int` (`0` = device layout, `2`, `6`) |
 | `s_playDefaultSound` | flags | `1` | `1` | `SND ST AR` | `ST CH` | `bool` | `bool` |
-| `s_showLevelMeter` | flags | `0` | `0` | `SND ST CH` | `ST AR` | `bool` | `bool` |
+| `s_showLevelMeter` | flags | `0` | `0` | `SND ST CH` | `ST` | `bool` | `bool` |
 | `s_showStartSound` | flags, type/range | `0` | `0` | `SND ST CH` | `ST CH` | `int` | `bool` |
 | `s_singleEmitter` | default, flags | `-1` | `0` | `SND ST CH` | `ST CH` | `int` | `int` |
 | `s_speakerFraction` | flags | `0.65` | `0.65` | `SND ST AR` | `ST AR` | `float` | `float` |
 | `s_subFraction` | flags | `0.5` | `0.5` | `SND ST AR` | `ST AR` | `float` | `float` |
-| `s_useEAXReverb` | flags | `1` | `1` | `SND ST AR` | `ST AR` | `bool` | `bool` |
 | `s_useOcclusion` | flags | `1` | `1` | `SND ST AR` | `ST CH` | `bool` | `bool` |
 | `s_useOpenAL` | default, flags | `0` | `1` | `SND ST AR` | `ST AR` | `bool` | `bool` |
 | `s_volume` | flags, type/range | `0.5` | `0.5` | `SND ST AR` | `ST AR` | `float` | `float [0, 1]` |
-| `si_version` | default | `Quake4  V1.4.3 win-x86 Oct 20 2010` | `openQ4 0.1.010-nightly.20260319.1+g47f946e3.dirty` | `SYS SI ST RO` | `SYS SI ST RO` | `string` | `string` |
+| `si_version` | default | `Quake4  V1.4.3 win-x86 Oct 20 2010` | `openQ4 0.11.0-nightly.20260319.1+g47f946e3.dirty` | `SYS SI ST RO` | `SYS SI ST RO` | `string` | `string` |
 | `timescale` | type/range | `1` | `1` | `SYS ST CH` | `SYS ST CH` | `string` | `float [0.1, 10]` |
 
 ## Unresolved Retail Symbols

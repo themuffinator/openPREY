@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Vulkan port of openQ4's live smaa_weights.fs material program.
 
@@ -9,6 +10,8 @@ layout(set = 2, binding = 0) uniform sampler2D SearchTex;
 layout(set = 6, binding = 0, std140) uniform MaterialShaderParms {
     vec4 shaderParms[16];
 } material;
+
+#include "material_image_coords.glsl"
 
 layout(location = 0) in vec2 vTexCoord;
 layout(location = 0) out vec4 outColor;
@@ -34,14 +37,14 @@ float SampleSearchLength(vec2 e, float offsetValue) {
     bias += vec2(0.5, -0.5);
     scale /= kSearchTexPackedSize;
     bias /= kSearchTexPackedSize;
-    return texture(SearchTex, scale * e + bias).r;
+    return texture(SearchTex, MaterialImageCoord(scale * e + bias, 2u)).r;
 }
 
 float SearchXLeft(vec2 texcoord, float endValue) {
     vec2 invTexSize = material.shaderParms[0].xy;
     vec2 e = vec2(0.0, 1.0);
     while (texcoord.x > endValue && e.g > 0.8281 && e.r == 0.0) {
-        e = texture(EdgesTex, texcoord).rg;
+        e = texture(EdgesTex, MaterialImageCoord(texcoord, 0u)).rg;
         texcoord -= vec2(2.0 * invTexSize.x, 0.0);
     }
     float offsetValue =
@@ -53,7 +56,7 @@ float SearchXRight(vec2 texcoord, float endValue) {
     vec2 invTexSize = material.shaderParms[0].xy;
     vec2 e = vec2(0.0, 1.0);
     while (texcoord.x < endValue && e.g > 0.8281 && e.r == 0.0) {
-        e = texture(EdgesTex, texcoord).rg;
+        e = texture(EdgesTex, MaterialImageCoord(texcoord, 0u)).rg;
         texcoord += vec2(2.0 * invTexSize.x, 0.0);
     }
     float offsetValue =
@@ -65,7 +68,7 @@ float SearchYUp(vec2 texcoord, float endValue) {
     vec2 invTexSize = material.shaderParms[0].xy;
     vec2 e = vec2(1.0, 0.0);
     while (texcoord.y > endValue && e.r > 0.8281 && e.g == 0.0) {
-        e = texture(EdgesTex, texcoord).rg;
+        e = texture(EdgesTex, MaterialImageCoord(texcoord, 0u)).rg;
         texcoord -= vec2(0.0, 2.0 * invTexSize.y);
     }
     float offsetValue =
@@ -77,7 +80,7 @@ float SearchYDown(vec2 texcoord, float endValue) {
     vec2 invTexSize = material.shaderParms[0].xy;
     vec2 e = vec2(1.0, 0.0);
     while (texcoord.y < endValue && e.r > 0.8281 && e.g == 0.0) {
-        e = texture(EdgesTex, texcoord).rg;
+        e = texture(EdgesTex, MaterialImageCoord(texcoord, 0u)).rg;
         texcoord += vec2(0.0, 2.0 * invTexSize.y);
     }
     float offsetValue =
@@ -90,7 +93,7 @@ vec2 SampleArea(vec2 dist, float e1, float e2, float offsetValue) {
         vec2(kAreaMaxDistance) * RoundVec2(4.0 * vec2(e1, e2)) + dist;
     texcoord = kAreaTexPixelSize * texcoord + 0.5 * kAreaTexPixelSize;
     texcoord.y = kAreaTexSubtexSize * offsetValue + texcoord.y;
-    return texture(AreaTex, texcoord).rg;
+    return texture(AreaTex, MaterialImageCoord(texcoord, 1u)).rg;
 }
 
 void main() {
@@ -113,20 +116,20 @@ void main() {
         + vec4(offset0.x, offset0.z, offset1.y, offset1.w);
 
     vec4 weights = vec4(0.0);
-    vec2 e = texture(EdgesTex, texcoord).rg;
+    vec2 e = texture(EdgesTex, MaterialImageCoord(texcoord, 0u)).rg;
 
     if (e.g > 0.0) {
         vec3 coords;
         coords.x = SearchXLeft(offset0.xy, offset2.x);
         coords.y = offset1.y;
-        float leftEdge = texture(EdgesTex, coords.xy).r;
+        float leftEdge = texture(EdgesTex, MaterialImageCoord(coords.xy, 0u)).r;
 
         coords.z = SearchXRight(offset0.zw, offset2.y);
         vec2 d = abs(RoundVec2(
             rtSize.xx * vec2(coords.x, coords.z) - pixcoord.xx));
         vec2 sqrtD = sqrt(d);
         float rightEdge =
-            texture(EdgesTex, coords.zy + vec2(invTexSize.x, 0.0)).r;
+            texture(EdgesTex, MaterialImageCoord(coords.zy + vec2(invTexSize.x, 0.0), 0u)).r;
         weights.rg = SampleArea(sqrtD, leftEdge, rightEdge, 0.0);
     }
 
@@ -134,14 +137,14 @@ void main() {
         vec3 coords;
         coords.y = SearchYUp(offset1.xy, offset2.z);
         coords.x = offset0.x;
-        float topEdge = texture(EdgesTex, coords.xy).g;
+        float topEdge = texture(EdgesTex, MaterialImageCoord(coords.xy, 0u)).g;
 
         coords.z = SearchYDown(offset1.zw, offset2.w);
         vec2 d = abs(RoundVec2(
             rtSize.yy * vec2(coords.y, coords.z) - pixcoord.yy));
         vec2 sqrtD = sqrt(d);
         float bottomEdge =
-            texture(EdgesTex, coords.xz + vec2(0.0, invTexSize.y)).g;
+            texture(EdgesTex, MaterialImageCoord(coords.xz + vec2(0.0, invTexSize.y), 0u)).g;
         weights.ba = SampleArea(sqrtD, topEdge, bottomEdge, 0.0);
     }
 

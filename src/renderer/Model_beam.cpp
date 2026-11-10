@@ -55,7 +55,7 @@ dynamicModel_t idRenderModelBeam::IsDynamicModel() const {
 idRenderModelBeam::IsLoaded
 ===============
 */
-bool idRenderModelBeam::IsLoaded() const {
+bool idRenderModelBeam::IsLoaded() {
 	return true;	// don't ever need to load
 }
 
@@ -67,9 +67,12 @@ idRenderModelBeam::InstantiateDynamicModel
 idRenderModel *idRenderModelBeam::InstantiateDynamicModel( const struct renderEntity_s *renderEntity, const struct viewDef_s *viewDef, idRenderModel *cachedModel ) {
 	idRenderModelStatic *staticModel;
 	srfTriangles_t *tri;
-	modelSurface_t surf;
+	modelSurface_t surf = {};
 
-	if ( cachedModel ) {
+	// Match the sprite/md5 dynamic models: keep the cached snapshot for reuse
+	// unless caching is disabled. Deleting it unconditionally made the reuse
+	// branch below dead code and rebuilt the whole static model every view.
+	if ( cachedModel && !r_useCachedDynamicModels.GetBool() ) {
 		delete cachedModel;
 		cachedModel = NULL;
 	}
@@ -180,6 +183,12 @@ idRenderModel *idRenderModelBeam::InstantiateDynamicModel( const struct renderEn
 	tri->verts[3].color[3] = alpha;
 
 	R_BoundTriSurf( tri );
+
+	// The beam verts are recomputed every view from the camera, but the reused
+	// snapshot keeps its persistent static ambientCache, which R_CreateAmbientCache
+	// short-circuits on. Free the vertex caches so the rewritten verts re-upload;
+	// a no-op on a freshly allocated tri.
+	R_FreeStaticTriSurfVertexCaches( tri );
 
 	staticModel->bounds = tri->bounds;
 

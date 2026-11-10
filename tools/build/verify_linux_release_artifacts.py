@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools.validation import openq4_validate as staged_validator  # noqa: E402
+from tools.build.game_layer import PACKAGED_LAYER_GAME_DIRS, LayerError, read_layer_mod_json  # noqa: E402
 
 
 SUPPORTED_ARCHES = {
@@ -88,13 +89,43 @@ def require_native_arch(expected_arch: str) -> None:
         )
 
 
-def expected_runtime_binaries(runtime_root: Path, arch: str) -> list[tuple[Path, str, bool]]:
+def packaged_layer_dirs(runtime_root: Path) -> list[str]:
+    """The game-library layers (q4xbase) this payload carries beside baseoq4."""
     return [
+        name
+        for name in PACKAGED_LAYER_GAME_DIRS
+        if (runtime_root / name).exists() or (runtime_root / name).is_symlink()
+    ]
+
+
+def expected_runtime_binaries(runtime_root: Path, arch: str) -> list[tuple[Path, str, bool]]:
+    expected = [
         (runtime_root / f"openQ4-client_{arch}", "openQ4-client", False),
         (runtime_root / f"openQ4-ded_{arch}", "openQ4-ded", False),
         (runtime_root / "baseoq4" / f"game-sp_{arch}.so", "game-sp", True),
         (runtime_root / "baseoq4" / f"game-mp_{arch}.so", "game-mp", True),
     ]
+    # a layer's modules come after baseoq4's, so expected[2] and expected[3] stay baseoq4's
+    for name in packaged_layer_dirs(runtime_root):
+        expected.append((runtime_root / name / f"game-sp_{arch}.so", "game-sp", True))
+        expected.append((runtime_root / name / f"game-mp_{arch}.so", "game-mp", True))
+    return expected
+
+
+def validate_layer_game_dir(runtime_root: Path, name: str, arch: str) -> None:
+    """A layer game directory holds exactly its two modules and its layer mod.json."""
+    layer_dir = require_directory(runtime_root / name, f"Linux runtime {name} directory")
+    expected = {f"game-sp_{arch}.so", f"game-mp_{arch}.so", "mod.json"}
+    actual = {path.relative_to(layer_dir).as_posix() for path in layer_dir.rglob("*")}
+    if actual != expected:
+        raise ReleaseArtifactError(
+            f"Linux {name}/ must hold exactly {sorted(expected)}; "
+            f"missing {sorted(expected - actual)}, unexpected {sorted(actual - expected)}"
+        )
+    try:
+        read_layer_mod_json(layer_dir / "mod.json")
+    except LayerError as exc:
+        raise ReleaseArtifactError(str(exc)) from exc
 
 
 def reject_unexpected_binary_variants(
@@ -103,8 +134,9 @@ def reject_unexpected_binary_variants(
     game_dir = runtime_root / "baseoq4"
     candidates = set(runtime_root.glob("openQ4-client_*"))
     candidates.update(runtime_root.glob("openQ4-ded_*"))
-    candidates.update(game_dir.glob("game-sp_*"))
-    candidates.update(game_dir.glob("game-mp_*"))
+    for module_dir in (game_dir, *(runtime_root / name for name in packaged_layer_dirs(runtime_root))):
+        candidates.update(module_dir.glob("game-sp_*"))
+        candidates.update(module_dir.glob("game-mp_*"))
     actual = {path.resolve(strict=False) for path in candidates}
     expected_paths = {path.resolve(strict=False) for path, _, _ in expected}
     if actual != expected_paths:
@@ -202,6 +234,13 @@ def validate_linux_dependency_contract(
 def validate_linux_runtime_payload(runtime_root: Path, arch: str) -> list[tuple[Path, str, bool]]:
     require_native_arch(arch)
     runtime_root = require_directory(runtime_root, "Linux runtime root")
+    # Windows embeds the startup splash as an RC resource and the macOS bundle
+    # carries it under Contents/Resources, so Linux is the only package that ships
+    # it as a loose file - and the only one that can quietly lose it.
+    require_regular_file(
+        runtime_root / "assets" / "splash" / "quake4_rt_bitmap_4001.bmp",
+        "Linux startup splash bitmap",
+    )
     game_dir = require_directory(runtime_root / "baseoq4", "Linux runtime game directory")
     expected = expected_runtime_binaries(runtime_root, arch)
     for binary_path, stem, _ in expected:
@@ -240,6 +279,18 @@ def validate_linux_runtime_payload(runtime_root: Path, arch: str) -> list[tuple[
         runtime_root,
         [(dedicated[0], arch), (mp_modules[0], arch)],
     )
+    for name in packaged_layer_dirs(runtime_root):
+        validate_layer_game_dir(runtime_root, name, arch)
+        layer_dir = runtime_root / name
+        layer_sp = [layer_dir / f"game-sp_{arch}.so"]
+        layer_mp = [layer_dir / f"game-mp_{arch}.so"]
+        layer_arches = staged_validator.validate_staged_architecture_set(runtime_root, layer_dir, clients, dedicated)
+        if layer_arches != {arch}:
+            raise ReleaseArtifactError(
+                f"Linux {name} architecture set is {sorted(layer_arches)}, expected only {arch}"
+            )
+        staged_validator.validate_distinct_game_modules(runtime_root, layer_sp, layer_mp)
+        staged_validator.validate_linux_dedicated_runtime_dependencies(runtime_root, [(layer_mp[0], arch)])
     validate_linux_dependency_contract(runtime_root, binary_specs)
     return expected
 

@@ -4,10 +4,25 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
+import time
 from pathlib import Path
 
-from openq4_pak import OPENQ4_PACK_NAMES, copy_file_if_changed, create_game_pk4
+from openq4_pak import (
+    OPENQ4_CONTENT_PACKS,
+    OPENQ4_CONTENT_PACKS_BY_NAME,
+    OPENQ4_PACK_NAMES,
+    ContentPackSpec,
+    Pk4BuildResult,
+    advance_mtime_ns,
+    copy_file_if_changed,
+    create_game_pk4,
+    inspect_game_pk4,
+    pack_source_digest,
+    write_pk4_from_entries,
+)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -24,6 +39,40 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--stage-out",
         default="",
         help="Optional additional basepr/<pak>.pk4 path to copy for direct builddir launches.",
+    )
+    parser.add_argument(
+        "--source-root",
+        default="",
+        help=(
+            "Repository root. Needed for a pack with a content generation "
+            "(tools/build/content_packs.json) or an overlay: its git history holds "
+            "the generation's sources."
+        ),
+    )
+    parser.add_argument(
+        "--prebuilt-dir",
+        default="",
+        help=(
+            "Directory holding this pack prebuilt, with the content-packs.json that "
+            "tools/build/content_pack_release.py build wrote. The prebuilt file is "
+            "copied instead of packing, after its SHA-256 and recorded source digest "
+            "are checked against the file and the checked-out sources; any mismatch "
+            "is an error, never a silent repack."
+        ),
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help=(
+            "Drop archive paths matching this glob; repeatable, and the last "
+            "matching pattern wins so a later '!GLOB' puts a subtree back. '*' "
+            "spans '/', so 'env/*' covers a whole tree. Intended for platform "
+            "builds that cannot use some of the content -- the generated pak "
+            "header takes its MD5 from whatever is actually packed, so the "
+            "engine's integrity check follows automatically."
+        ),
     )
     return parser.parse_args(argv[1:])
 
@@ -50,7 +99,44 @@ def require_manifest_file(path: Path, pak_name: str) -> Path:
     return resolved
 
 
+def sha256_hex(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def copy_prebuilt_pack(prebuilt_dir: Path, pak_name: str, source_dir: Path, pak_out: Path) -> Pk4BuildResult:
+    """Use the release's one build of this pack, so every platform ships its bytes."""
+    manifest_path = prebuilt_dir / "content-packs.json"
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    record = next((pack for pack in document.get("packs", []) if pack.get("name") == pak_name), None)
+    if record is None:
+        raise RuntimeError(f"{manifest_path} does not list {pak_name}")
+    prebuilt = prebuilt_dir / pak_name
+    if prebuilt.is_symlink() or not prebuilt.is_file():
+        raise RuntimeError(f"prebuilt {pak_name} is missing or not a regular file: {prebuilt}")
+    if sha256_hex(prebuilt) != record["sha256"]:
+        raise RuntimeError(f"prebuilt {pak_name} does not have the SHA-256 its manifest records")
+    spec = OPENQ4_CONTENT_PACKS_BY_NAME[pak_name]
+    if spec.generation_commit:
+        from content_generations import effective_source_digest
+
+        digest, _count = effective_source_digest(source_dir.parents[len(Path(spec.source).parts) - 1], spec)
+    else:
+        digest, _count = pack_source_digest(source_dir, pak_name)
+    if digest != record["source_digest"]:
+        raise RuntimeError(
+            f"prebuilt {pak_name} was built from other sources (source digest {record['source_digest']}, "
+            f"checked-out sources {digest})"
+        )
+    copy_file_if_changed(prebuilt, pak_out)
+    return inspect_game_pk4(pak_out, pak_name=pak_name)
+
+
 def main(argv: list[str]) -> int:
+    started_ns = time.time_ns()
     args = parse_args(argv)
 
     pak_name = args.pak_name
@@ -69,8 +155,27 @@ def main(argv: list[str]) -> int:
             return 1
 
     try:
-        result = create_game_pk4(source_dir, pak_out, pak_name=pak_name)
-    except RuntimeError as exc:
+        spec = OPENQ4_CONTENT_PACKS_BY_NAME[pak_name]
+        if args.prebuilt_dir:
+            if args.exclude:
+                raise RuntimeError("--prebuilt-dir cannot be combined with --exclude")
+            result = copy_prebuilt_pack(Path(args.prebuilt_dir).resolve(), pak_name, source_dir, pak_out)
+            print(f"using prebuilt {pak_name} from {Path(args.prebuilt_dir).resolve()}")
+        elif spec.generation_commit and not args.source_root:
+            # Without the repository root there is no generation history to read;
+            # pack what the source directory holds, as a shallow checkout does.
+            print(f"warning: {pak_name} has a content generation but no --source-root; packing {source_dir} as it is",
+                  file=sys.stderr)
+            result = create_game_pk4(source_dir, pak_out, pak_name=pak_name, content_filters=args.exclude)
+        elif spec.generation_commit:
+            if args.exclude:
+                raise RuntimeError("--exclude cannot be combined with a content generation")
+            from content_generations import build_content_pack
+
+            result = build_content_pack(Path(args.source_root).resolve(), spec, pak_out)
+        else:
+            result = create_game_pk4(source_dir, pak_out, pak_name=pak_name, content_filters=args.exclude)
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -82,6 +187,15 @@ def main(argv: list[str]) -> int:
         for relative_path in result.missing_required:
             print(f"  - {relative_path}", file=sys.stderr)
         return 1
+
+    # An identical pack is left unwritten, so it keeps the timestamp of the build
+    # that last changed it, which can predate a newer pack script or manifest.
+    # Ninja copes because Meson custom targets are restat edges: the log keeps
+    # this command's start time. But Meson runs `ninja -t restat` after every
+    # reconfigure, which swaps in the file's own time, and the next build would
+    # repack the unchanged archive (minutes for pak1). Stamp the time this run
+    # began, so an input edited during the run still reads as newer.
+    advance_mtime_ns(pak_out, started_ns)
 
     if args.stage_out:
         copy_if_changed(pak_out, Path(args.stage_out).resolve())

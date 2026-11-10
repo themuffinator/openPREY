@@ -33,18 +33,21 @@
 
 # Debug folders
 /build/
-/builddir/
-/builddir_*/
+/builddir*/
 /build_meson/
 /build_meson_msvc/
 /build_meson_clangcl/
 /_save/
 /.tmp/meson_extref_test*/
+# Meson subprojects: ignore everything meson extracts/downloads here,
+# keep only the wrap files and the vendored subprojects we maintain in-tree.
 /subprojects/.wraplock
 /subprojects/packagecache/
-/subprojects/SDL3-*/
-/subprojects/libogg-*/
-/subprojects/libvorbis-*/
+/subprojects/*/
+!/subprojects/glew/
+!/subprojects/openal-soft-prebuilt/
+!/subprojects/packagefiles/
+!/subprojects/stb_vorbis/
 /.install/
 __pycache__/
 *.pyc
@@ -63,3 +66,6 @@ _tmp_*
 InstallationLog.txt
 logs/
 /.home-listen-server
+
+# Persistent local release credentials; never include these in packages or Git.
+/.private/

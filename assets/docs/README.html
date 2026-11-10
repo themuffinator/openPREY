@@ -37,7 +37,7 @@
 
   <section class="card">
     <h2>Development model</h2>
-    <p>The engine is built with Meson. SDK-derived game code is maintained canonically in the companion <a href="https://github.com/themuffinator/OpenPrey-GameLibs">OpenPrey-game</a> repository and staged directly at configure time. Engine headers come from this repository; companion SDK duplicates are not compiled.</p>
+    <p>The engine is built with Meson. SDK-derived game code is maintained in-tree under <code>src/game/</code>, <code>src/Prey/</code> and <code>src/preyengine/</code> and built in place into the unified game module. It remains under the Prey SDK terms in <a href="../../LICENSES/PREY-SDK-EULA.rtf"><code>LICENSES/PREY-SDK-EULA.rtf</code></a>; see <a href="../../LICENSING.md">LICENSING.md</a>.</p>
     <p class="muted">Always use windowed mode for automated validation: <code>+set r_fullscreen 0</code>.</p>
   </section>
 

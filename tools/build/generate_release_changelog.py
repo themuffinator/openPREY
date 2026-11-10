@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from openq4_release_status import is_withdrawn_release, require_available_release
+
 
 RELEASE_TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
 VERSION_TAG_RE = re.compile(r"^\d+\.\d+\.\d+$")
@@ -51,7 +53,7 @@ def find_previous_release_tag(source_root: Path, current_release_tag: str) -> st
         if not tag or tag == current_release_tag:
             continue
         version = parse_tag_version(tag)
-        if version is None or version >= current_version:
+        if version is None or version >= current_version or is_withdrawn_release(version):
             continue
         release_tags.append((version, tag))
 
@@ -298,6 +300,7 @@ def main(argv: list[str]) -> int:
     repo_slug = validate_repo_slug(args.repo)
     version_tag = validate_version_tag(args.version_tag)
     release_tag = validate_release_tag(args.release_tag)
+    require_available_release(parse_tag_version(release_tag))
     run_url = validate_optional_https_url(args.run_url, "workflow run URL")
 
     repo_url = f"https://github.com/{repo_slug}"

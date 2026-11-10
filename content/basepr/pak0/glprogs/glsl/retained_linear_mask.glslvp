@@ -1,0 +1,19 @@
+// Copyright (C) 2026 DarkMatter Productions. GPL-3.0-or-later.
+// A physical-pixel box; the other vertex attributes carry constant mask data.
+attribute vec3 attr_Tangent;
+attribute vec3 attr_Bitangent;
+attribute vec3 attr_Normal;
+uniform vec4 maskConfig;
+varying vec2 maskPoint;
+varying vec4 mask01;
+varying vec4 mask23;
+varying vec3 maskGradient;
+varying vec3 maskAlpha;
+void main(void) {
+	maskPoint=gl_Vertex.xy*maskConfig.xy/vec2(640.0,480.0);
+	mask01=vec4(attr_Tangent,attr_Bitangent.x);
+	mask23=vec4(attr_Bitangent.yz,gl_MultiTexCoord0.xy);
+	maskGradient=attr_Normal;
+	maskAlpha=gl_Color.rgb;
+	gl_Position=ftransform();
+}

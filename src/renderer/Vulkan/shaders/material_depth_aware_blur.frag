@@ -14,7 +14,7 @@
 //   2 focus
 //   3 approachColor (rgba)
 //   4 approachPercent
-//   5 distanceScale
+//   5 specialDepthZNear (controller distance scale is consumed at the C++ boundary)
 
 layout(set = 0, binding = 0) uniform sampler2D Scene;
 layout(set = 1, binding = 0) uniform sampler2D DepthTex;
@@ -77,6 +77,8 @@ void main() {
     float focus = material.shaderParms[2].x;
     vec4 approachColor = material.shaderParms[3];
     float approachPercent = material.shaderParms[4].x;
+    // The material ABI retains its historical slot; the C++ boundary now
+    // writes the special-depth near plane here after consuming distanceScale.
     float distanceScale = material.shaderParms[5].x;
 
     vec2 uv = vTexCoord;

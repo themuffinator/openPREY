@@ -84,6 +84,8 @@ def validate_profile_defaults() -> None:
         'seta com_steamDeckFrameCap "0"',
         'seta in_joystickLowBatteryRumbleThreshold "20"',
         'seta in_joystickLowBatteryRumbleScale "0.75"',
+        # Handheld starts the HUD at 125% (ui-visual-design.md 13.9).
+        'seta ui_hudScale "1.25"',
     ):
         require(profile, token, "Steam Deck platform profile")
 
@@ -354,6 +356,32 @@ def validate_packaging_metadata_checks() -> None:
     require(package_metadata, "validate_linux_steamdeck_launcher(steamdeck_launcher, client_binary)", "packaged Linux launch metadata validation")
 
 
+def validate_couch_profile() -> None:
+    """The Couch viewing profile (ui-visual-design.md 13.2) shares the platform
+    profile machinery: Big Picture (SteamTenfoot) picks it on anything but a
+    Steam Deck, and its config raises the interface, text and HUD scales."""
+    profile = read("content/baseoq4/pak0/openq4_profile_couch.cfg")
+    for token in (
+        'seta in_joystick "1"',
+        'seta ui_retainedScale "1.5"',
+        'seta ui_retainedTextScale "1.25"',
+        'seta ui_hudScale "1.25"',
+    ):
+        require(profile, token, "Couch platform profile")
+    source = read("src/framework/Common.cpp")
+    host_signal = function_body(source, "static bool Common_HasCouchHostSignal( void ) {")
+    automatic = function_body(source, "void idCommonLocal::ApplyAutomaticPlatformProfile( void ) {")
+    profile_name = function_body(source, "static idStr Common_BuildPlatformProfileConfigName( const char *profileName ) {")
+    for token in ('"OPENQ4_COUCH"', '"OPENQ4_AUTODETECT_COUCH"', '"SteamTenfoot"'):
+        require(host_signal, token, "Couch host signal detection")
+    require(automatic, 'com_platformProfile.SetString( "couch" );', "automatic Couch profile assignment")
+    require_order(automatic, 'com_platformProfile.SetString( "steamdeck" );', "Common_HasCouchHostSignal()",
+                  "a Steam Deck keeps the Handheld profile in Big Picture")
+    require(profile_name, 'sanitized.Icmp( "couch" )', "platform profile allow-list")
+    require(read("tools/build/check_staged_content_edits.py"), '"openq4_profile_couch.cfg"', "stale loose profile pruning")
+    require(read("docs/user/display-settings.md"), "com_platformProfile couch", "Couch profile player docs")
+
+
 def validate_ci_smoke() -> None:
     push = read(".github/workflows/push-verification.yml")
     commit = read(".github/workflows/commit-validation.yml")
@@ -370,6 +398,7 @@ def main() -> None:
     validate_launcher_templates()
     validate_profile_defaults()
     validate_common_profile_detection()
+    validate_couch_profile()
     validate_filesystem_discovery()
     validate_sdl3_input_and_lifecycle()
     validate_menu_and_docs()

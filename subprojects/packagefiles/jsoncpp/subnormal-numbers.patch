@@ -1,0 +1,52 @@
+diff --git a/src/lib_json/json_reader.cpp b/src/lib_json/json_reader.cpp
+--- a/src/lib_json/json_reader.cpp
++++ b/src/lib_json/json_reader.cpp
+@@ -13,6 +13,7 @@
+ #include <algorithm>
+ #include <cassert>
+ #include <cmath>
++#include <cstdint>
+ #include <cstring>
+ #include <iostream>
+ #include <istream>
+@@ -585,6 +586,22 @@ bool Reader::decodeDouble(Token& token) {
+   return true;
+ }
+ 
++// openQ4: libc++'s num_get sets failbit whenever strtod reports ERANGE, but it
++// still stores the value strtod returned. The gdtoa strtod in Apple's and
++// FreeBSD's libc reports ERANGE for every subnormal result (glibc's for every
++// inexact one), so under libc++ valid numbers such as 4.9406564584124654e-324
++// failed as "not a number", while libstdc++ and the MSVC STL accept them. A
++// failure that consumed the whole token and produced a nonzero subnormal is
++// therefore a correct parse. Underflow to zero and malformed tokens still fail.
++// Classify the value from its bits: under flush-to-zero or denormals-are-zero,
++// floating comparisons would see a subnormal as zero.
++static bool isSubnormal(double value) {
++  std::uint64_t bits;
++  std::memcpy(&bits, &value, sizeof(bits));
++  return (bits & 0x7ff0000000000000ULL) == 0 &&
++         (bits & 0x000fffffffffffffULL) != 0;
++}
++
+ bool Reader::decodeDouble(Token& token, Value& decoded) {
+   double value = 0;
+   IStringStream is(String(token.start_, token.end_));
+@@ -593,7 +610,7 @@ bool Reader::decodeDouble(Token& token, Value& decoded) {
+       value = std::numeric_limits<double>::infinity();
+     else if (value == std::numeric_limits<double>::lowest())
+       value = -std::numeric_limits<double>::infinity();
+-    else if (!std::isinf(value))
++    else if (!std::isinf(value) && !(is.eof() && isSubnormal(value)))
+       return addError(
+           "'" + String(token.start_, token.end_) + "' is not a number.", token);
+   }
+@@ -1627,7 +1644,7 @@ bool OurReader::decodeDouble(Token& token, Value& decoded) {
+       value = std::numeric_limits<double>::infinity();
+     else if (value == std::numeric_limits<double>::lowest())
+       value = -std::numeric_limits<double>::infinity();
+-    else if (!std::isinf(value))
++    else if (!std::isinf(value) && !(is.eof() && isSubnormal(value)))
+       return addError(
+           "'" + String(token.start_, token.end_) + "' is not a number.", token);
+   }

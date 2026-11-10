@@ -4,15 +4,21 @@
 #include "tr_local.h"
 #include "RenderModuleAPI.h"
 #include "RendererModule.h"
+#include "RendererDeviceCatalog.h"
+#include "../ui/SettingsService.h"
 #include "../framework/RenderDoc.h"
+#include "../framework/CVarCompletionSnapshot.h"
+#include "../framework/VRSystemLocal.h"
 #include "../bse/BSEInterface.h"
+
+#include <cstring>
 
 /*
 ===============================================================================
 
 	Renderer-module selection, loading, and fail-closed fallback.
 
-	See docs/dev/plans/2026-07-16-vulkan-renderer.md.
+	See docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer.md.
 
 ===============================================================================
 */
@@ -20,9 +26,24 @@
 // loader-owned cvars: defined here (not in a renderer TU) so they exist in
 // every build shape, including module-only clients that shed the static
 // renderer sources
-static const char *r_renderApiArgs[] = { "best", "gl", "vulkan", "gl-module", NULL };
-idCVar r_renderApi( "r_renderApi", "gl", CVAR_RENDERER | CVAR_ARCHIVE, "rendering API: best = platform default (currently gl), gl = OpenGL renderer (loaded as the renderer-gl module on module-only builds, statically linked elsewhere), vulkan = native Vulkan renderer module (bring-up; falls back to gl), gl-module = alias that always selects the OpenGL module. Module selections take effect on engine restart.", r_renderApiArgs, idCmdSystem::ArgCompletion_String<r_renderApiArgs> );
+static const char *r_renderApiArgs[] = { "best", "gl", "vulkan", "gl-module", "gles", NULL };
+#ifdef __ANDROID__
+// Android has no desktop GL at all; the ES module is the only renderer built.
+#define OPENQ4_DEFAULT_RENDER_API	"gles"
+static const rendererModuleApi_t rm_platformDefaultApi = RENDER_MODULE_API_GLES;
+#else
+// openPREY: retail Prey interaction stages are ARB programs that only the
+// OpenGL ARB2 path executes; Vulkan fails them closed. "best" therefore means
+// OpenGL on desktop until Vulkan parity lands (docs/dev/prey-rebase/plan.md, D2).
+#define OPENQ4_DEFAULT_RENDER_API	"best"
+static const rendererModuleApi_t rm_platformDefaultApi = RENDER_MODULE_API_GL;
+#endif
+idCVar r_renderApi( "r_renderApi", OPENQ4_DEFAULT_RENDER_API, CVAR_RENDERER | CVAR_ARCHIVE, "rendering API: best = OpenGL on desktop (Prey's ARB interaction stages), OpenGL ES on Android; gl = OpenGL; vulkan = Vulkan module; gl-module = OpenGL module alias; gles = OpenGL ES module. Changes take effect on engine restart.", r_renderApiArgs, idCmdSystem::ArgCompletion_String<r_renderApiArgs> );
+idCVar r_renderDevice("r_renderDevice","auto",CVAR_RENDERER | CVAR_ARCHIVE,
+	"rendering GPU: auto prefers compatible high-performance hardware; otherwise a Vulkan device UUID (32 lowercase hex digits). Explicit GPU selection requires Vulkan and engine restart; r_vkDevice is a temporary diagnostic override.");
 idCVar r_actualRenderApi( "r_actualRenderApi", "UNINITIALIZED", CVAR_RENDERER | CVAR_ROM, "rendering API actually active after request/fallback selection" );
+idCVar r_bootRenderDevice("r_bootRenderDevice","auto",CVAR_RENDERER | CVAR_ROM,
+	"GPU preference consumed at engine startup; pending saved changes do not affect vid_restart");
 
 // engine-side homes for window/gui cvars referenced by both the platform
 // backend (engine) and the renderer sources (module mirrors them in its
@@ -66,13 +87,62 @@ typedef struct rendererModuleState_s {
 	// to the active renderer instance
 	bool					activationAllowed;
 	bool					everBooted;
+	bool					startupDeviceFailed;
+	bool					startupRetryPending;
+	// cvar completion callbacks as they were before the loaded module's
+	// GetRenderAPI registered its static cvars; put back before it unloads
+	idCVarCompletionSnapshot	moduleCompletions;
 } rendererModuleState_t;
 
 static rendererModuleState_t rm_state;
+static idStr rm_bootDevicePreference;
+static bool rm_selectionReloadPending = false;
+
+static rendererModuleApi_t RM_AutomaticApi(bool vrRequested) {
+#if defined(OPENQ4_OPENXR) && !defined(__ANDROID__)
+	// Automatic keeps VR on OpenGL; Vulkan VR is an explicit r_renderApi choice.
+	if (vrRequested) return RENDER_MODULE_API_GL;
+#else
+	(void)vrRequested;
+#endif
+	return rm_platformDefaultApi;
+}
+
+// Deliberately outside rm_state and outside renderer modules: never reset when
+// their interface tables or local presentation counters are discarded.
+static uint64_t rm_displayModuleEpoch = 1;
+static const renderWindowServices_t *rm_displayVideoPin = NULL;
+// Main/video-thread synchronous code-lifetime pin. Reentrant loader work must
+// fail before unpublishing interfaces or unloading executing module code.
+static bool rm_imageServiceBusy=false,rm_imageServiceFailed=false;
+static rendererImageRecoveryLease_t rm_imageRecoveryLease{};
+static bool RM_AllowImageModuleChange() {
+    if(!rm_imageServiceBusy)return true;
+    rm_imageServiceFailed=true;return false;
+}
+static void RM_ReleaseDisplayVideoPin( void ) {
+	if ( rm_displayVideoPin != NULL ) {
+		rm_displayVideoPin->ReleaseVideoSystem();
+		rm_displayVideoPin = NULL;
+	}
+}
+// The latest settings reports (render API 20), stamped with an engine serial
+// and the module epoch they came from; a later epoch's queries refuse them.
+static renderRendererSelection_t rm_rendererSelection;
+static renderLightGridLoadReceipt_t rm_lightGridReceipt;
+static uint64_t rm_rendererSelectionSerial = 0, rm_rendererSelectionEpoch = 0;
+static uint64_t rm_lightGridReceiptSerial = 0, rm_lightGridReceiptEpoch = 0;
+static void RM_AdvanceDisplayEpoch( void ) {
+    rm_imageRecoveryLease={};
+	// Exhaustion permanently disables identity-dependent observations.
+	if ( rm_displayModuleEpoch != 0 ) {
+		rm_displayModuleEpoch = rm_displayModuleEpoch == UINT64_MAX ? 0 : rm_displayModuleEpoch + 1;
+	}
+}
 
 // module binary short tags; indexed by rendererModuleApi_t
-static const char *rm_moduleBinaryTags[ RENDER_MODULE_API_COUNT ] = { "gl", "vk", "gl" };
-static const char *rm_apiNames[ RENDER_MODULE_API_COUNT ] = { "gl", "vulkan", "gl-module" };
+static const char *rm_moduleBinaryTags[ RENDER_MODULE_API_COUNT ] = { "gl", "vk", "gl", "gles" };
+static const char *rm_apiNames[ RENDER_MODULE_API_COUNT ] = { "gl", "vulkan", "gl-module", "gles" };
 
 /*
 ====================
@@ -153,6 +223,42 @@ static int RM_Services_GetTimeGroupTime( int timeGroup, int fallbackTime ) {
 	return game != NULL ? game->GetTimeGroupTime( timeGroup ) : fallbackTime;
 }
 
+static bool RM_Services_ResetRenderApiAfterDeviceFailure( void ) {
+	return R_RendererModule_ResetApiAfterDeviceFailure();
+}
+
+static void RM_Services_PublishRendererSelection( const renderRendererSelection_t *selection ) {
+	R_RendererModule_PublishRendererSelection( selection );
+}
+
+static bool RM_Services_GetLightGridLoadPolicy( bool *preload, uint64_t *token ) {
+	return R_RendererModule_GetLightGridLoadPolicy( preload, token );
+}
+
+static void RM_Services_PublishLightGridLoadReceipt( const renderLightGridLoadReceipt_t *receipt ) {
+	R_RendererModule_PublishLightGridLoadReceipt( receipt );
+}
+
+static void RM_Services_RendererDeviceEvent( int event ) {
+	R_RendererModule_RendererDeviceEvent( event );
+}
+
+void Usercmd_TakeFrameInputClocks( double &lookSampleClock, double &flashPressClock );
+void Common_RecordFrameInputToSwap( double lookSampleClock, double flashPressClock, double swapClock );
+static bool RM_Services_CreateVulkanInstanceForVR( void *getInstanceProcAddr, const void *createInfo,
+		void **outInstance, int *outResult ) {
+	return R_RendererModule_CreateVulkanInstanceForVR( getInstanceProcAddr, createInfo, outInstance, outResult );
+}
+
+static bool RM_Services_GetVulkanPhysicalDeviceForVR( void *instance, void **outPhysicalDevice ) {
+	return R_RendererModule_GetVulkanPhysicalDeviceForVR( instance, outPhysicalDevice );
+}
+
+static bool RM_Services_CreateVulkanDeviceForVR( void *getInstanceProcAddr, void *physicalDevice, const void *createInfo,
+		void **outDevice, int *outResult ) {
+	return R_RendererModule_CreateVulkanDeviceForVR( getInstanceProcAddr, physicalDevice, createInfo, outDevice, outResult );
+}
+
 static const renderModuleServices_t rm_services = {
 	RM_Services_Printf,
 	RM_Services_Warning,
@@ -168,6 +274,16 @@ static const renderModuleServices_t rm_services = {
 	RM_Services_IsRenderDocInjected,
 	RM_Services_PrintRendererApiStatus,
 	RM_Services_GetTimeGroupTime,
+	RM_Services_ResetRenderApiAfterDeviceFailure,
+	RM_Services_PublishRendererSelection,
+	RM_Services_GetLightGridLoadPolicy,
+	RM_Services_PublishLightGridLoadReceipt,
+	RM_Services_RendererDeviceEvent,
+	Usercmd_TakeFrameInputClocks,
+	Common_RecordFrameInputToSwap,
+	RM_Services_CreateVulkanInstanceForVR,
+	RM_Services_GetVulkanPhysicalDeviceForVR,
+	RM_Services_CreateVulkanDeviceForVR,
 };
 
 /*
@@ -208,6 +324,7 @@ wired into the activation branch so the flip stays a one-line policy change.
 ====================
 */
 static void RM_PublishActiveModuleInterfaces( const renderExport_t &moduleExport ) {
+	RM_AdvanceDisplayEpoch();
 	rm_state.savedRenderSystem = ::renderSystem;
 	rm_state.savedRenderModelManager = ::renderModelManager;
 	rm_state.interfacesPublished = true;
@@ -228,6 +345,7 @@ static void RM_RestorePublishedInterfaces( void ) {
 	if ( !rm_state.interfacesPublished ) {
 		return;
 	}
+	RM_AdvanceDisplayEpoch();
 	::renderSystem = rm_state.savedRenderSystem;
 	::renderModelManager = rm_state.savedRenderModelManager;
 	rm_state.savedRenderSystem = NULL;
@@ -242,7 +360,7 @@ R_RendererModule_ParseApi
 */
 bool R_RendererModule_ParseApi( const char *value, rendererModuleApi_t &api ) {
 	if ( value == NULL || value[ 0 ] == '\0' ) {
-		api = RENDER_MODULE_API_GL;
+		api = rm_platformDefaultApi;
 		return false;
 	}
 	if ( idStr::Icmp( value, "gl" ) == 0 || idStr::Icmp( value, "opengl" ) == 0 ) {
@@ -257,12 +375,15 @@ bool R_RendererModule_ParseApi( const char *value, rendererModuleApi_t &api ) {
 		api = RENDER_MODULE_API_GL_MODULE;
 		return true;
 	}
-	if ( idStr::Icmp( value, "best" ) == 0 ) {
-		// the platform default stays GL until Vulkan promotion evidence lands
-		api = RENDER_MODULE_API_GL;
+	if ( idStr::Icmp( value, "gles" ) == 0 || idStr::Icmp( value, "es" ) == 0 ) {
+		api = RENDER_MODULE_API_GLES;
 		return true;
 	}
-	api = RENDER_MODULE_API_GL;
+	if ( idStr::Icmp( value, "best" ) == 0 ) {
+		api = rm_platformDefaultApi;
+		return true;
+	}
+	api = rm_platformDefaultApi;
 	return false;
 }
 
@@ -305,6 +426,12 @@ int R_RendererModule_BuildFallbackLadder( rendererModuleApi_t requested, rendere
 	if ( maxEntries <= 0 ) {
 		return 0;
 	}
+#ifdef __ANDROID__
+	// No desktop GL module is built, so falling back onto it would only trade a
+	// clear "gles module failed" for a misleading "renderer-gl not found".
+	outLadder[ numEntries++ ] = RENDER_MODULE_API_GLES;
+	return numEntries;
+#else
 	if ( requested != RENDER_MODULE_API_GL ) {
 		outLadder[ numEntries++ ] = requested;
 	}
@@ -312,6 +439,7 @@ int R_RendererModule_BuildFallbackLadder( rendererModuleApi_t requested, rendere
 		outLadder[ numEntries++ ] = RENDER_MODULE_API_GL;
 	}
 	return numEntries;
+#endif
 }
 
 /*
@@ -461,7 +589,56 @@ static bool RM_ExportCanRender( const renderExport_t *moduleExport, const char *
 		*reason = "module is bring-up/diagnostics only";
 		return false;
 	}
+	if ( moduleExport->TryDeviceRestart == NULL || moduleExport->GetDisplayPresentation == NULL || moduleExport->TryInitializeDisplay == NULL ) {
+		*reason = "module lacks version 15 device services";
+		return false;
+	}
 	return true;
+}
+
+/*
+====================
+RM_ExportDeviceReady
+
+A module that exports a device self-test must pass it before it activates.
+The Vulkan
+probe creates its own instance and device without touching a window, so it
+covers a missing loader or driver, no GPU, a device below the feature floor,
+and device creation. Later surface/swapchain/resource failures return through
+PrepareStartupDevice; the engine releases all startup owners before retrying
+the fallback renderer. Shared with the self-test so the policy cannot drift.
+====================
+*/
+static bool RM_ExportDeviceReady( const renderExport_t *moduleExport, char *outSummary, int summaryLength ) {
+	outSummary[ 0 ] = '\0';
+	if ( moduleExport->diagnostics == NULL || moduleExport->diagnostics->RunDeviceSelfTest == NULL ) {
+		return true;
+	}
+	if ( moduleExport->diagnostics->RunDeviceSelfTest( outSummary, summaryLength ) ) {
+		return true;
+	}
+	if ( outSummary[ 0 ] == '\0' ) {
+		idStr::Copynz( outSummary, "no failure detail recorded", summaryLength );
+	}
+	return false;
+}
+
+/*
+====================
+RM_UnloadModuleBinary
+
+Every renderer module unload goes through here. The module's GetRenderAPI
+pointed the value completion of each cvar it declares into the module, the
+ones it shares with the engine and the active renderer included
+(CVarCompletionSnapshot.h), so first put back the callbacks captured when it
+was loaded.
+====================
+*/
+static void RM_UnloadModuleBinary( intptr_t handle, idCVarCompletionSnapshot &completions ) {
+	completions.Restore();
+	completions.Clear();
+	Mem_UnregisterModuleStats( (memModuleStats_t) Sys_DLL_GetProcAddress( handle, MEM_MODULE_STATS_ENTRY_POINT ) );
+	Sys_DLL_Unload( handle );
 }
 
 /*
@@ -469,7 +646,8 @@ static bool RM_ExportCanRender( const renderExport_t *moduleExport, const char *
 RM_UnloadModule
 ====================
 */
-static void RM_UnloadModule( void ) {
+static bool RM_UnloadModule( void ) {
+	if (!RM_AllowImageModuleChange()) return false;
 	RM_RestorePublishedInterfaces();
 	if ( rm_state.moduleExportValid && rm_state.moduleExport.Shutdown != NULL ) {
 		rm_state.moduleExport.Shutdown();
@@ -477,9 +655,10 @@ static void RM_UnloadModule( void ) {
 	rm_state.moduleExportValid = false;
 	memset( &rm_state.moduleExport, 0, sizeof( rm_state.moduleExport ) );
 	if ( rm_state.moduleHandle != 0 ) {
-		Sys_DLL_Unload( rm_state.moduleHandle );
+		RM_UnloadModuleBinary( rm_state.moduleHandle, rm_state.moduleCompletions );
 		rm_state.moduleHandle = 0;
 	}
+    return true;
 }
 
 /*
@@ -516,10 +695,8 @@ static bool RM_TryLoadModuleApi( rendererModuleApi_t api, rendererModuleStatus_t
 
 	if ( !rm_state.activationAllowed ) {
 		// outside the first-boot activation window the engine has already
-		// bound decl/material/font state to the active renderer instance;
-		// don't even load the candidate — its GetRenderAPI would register
-		// module-side static cvars whose completion callbacks dangle after
-		// the unload
+		// bound decl/material/font state to the active renderer instance, so
+		// the candidate could never activate; don't even load it
 		common->Warning( "r_renderApi '%s': renderer modules can only activate at engine startup; restart to apply",
 				R_RendererModule_ApiName( api ) );
 		RM_AppendFallbackReason( status, "renderer module activation requires an engine restart" );
@@ -540,11 +717,13 @@ static bool RM_TryLoadModuleApi( rendererModuleApi_t api, rendererModuleStatus_t
 		RM_AppendFallbackReason( status, "module load failed" );
 		return false;
 	}
+	// kept with the module if it activates, spent by the unload otherwise
+	rm_state.moduleCompletions.Capture();
 
 	GetRenderAPI_t GetRenderAPI = ( GetRenderAPI_t )Sys_DLL_GetProcAddress( handle, RENDER_API_ENTRY_POINT );
 	if ( GetRenderAPI == NULL ) {
 		common->Warning( "renderer module '%s' has no %s entry point", modulePath, RENDER_API_ENTRY_POINT );
-		Sys_DLL_Unload( handle );
+		RM_UnloadModuleBinary( handle, rm_state.moduleCompletions );
 		RM_AppendFallbackReason( status, "missing GetRenderAPI entry point" );
 		return false;
 	}
@@ -564,10 +743,37 @@ static bool RM_TryLoadModuleApi( rendererModuleApi_t api, rendererModuleStatus_t
 		if ( moduleExport != NULL && moduleExport->version == RENDER_API_VERSION && moduleExport->Shutdown != NULL ) {
 			moduleExport->Shutdown();
 		}
-		Sys_DLL_Unload( handle );
+		RM_UnloadModuleBinary( handle, rm_state.moduleCompletions );
 		RM_AppendFallbackReason( status, reason );
 		return false;
 	}
+
+	// The early device gate costs
+	// a throwaway instance and device on top of the renderer's own, so the
+	// log records how long it took
+	char deviceSummary[ 192 ];
+	const int probeStartMsec = Sys_Milliseconds();
+	const bool deviceReady = RM_ExportDeviceReady( moduleExport, deviceSummary, sizeof( deviceSummary ) );
+	const int probeMsec = Sys_Milliseconds() - probeStartMsec;
+	if ( !deviceReady ) {
+		common->Warning( "renderer module '%s' found no usable device (%s) in %d ms; falling back to OpenGL. Use rendererVkProbe to inspect it.",
+				modulePath, deviceSummary, probeMsec );
+		if ( moduleExport->Shutdown != NULL ) {
+			moduleExport->Shutdown();
+		}
+		RM_UnloadModuleBinary( handle, rm_state.moduleCompletions );
+		char deviceReason[ 256 ];
+		idStr::snPrintf( deviceReason, sizeof( deviceReason ), "device probe failed: %s", deviceSummary );
+		RM_AppendFallbackReason( status, deviceReason );
+		return false;
+	}
+	if ( deviceSummary[ 0 ] != '\0' ) {
+		common->Printf( "Renderer module device probe: %s (%d ms)\n", deviceSummary, probeMsec );
+	}
+	// The module links its own idlib archive, so its allocations live in a
+	// separate set of counters. Optional symbol, looked up by name: a module
+	// built before this existed just does not contribute to the total.
+	Mem_RegisterModuleStats( ( memModuleStats_t )Sys_DLL_GetProcAddress( handle, MEM_MODULE_STATS_ENTRY_POINT ) );
 
 	rm_state.moduleHandle = handle;
 	rm_state.moduleExport = *moduleExport;
@@ -585,6 +791,7 @@ R_RendererModule_Boot
 ====================
 */
 void R_RendererModule_Boot( void ) {
+    if(!RM_AllowImageModuleChange())return;
 	rendererModuleStatus_t &status = rm_state.status;
 
 	if ( rm_state.interfacesPublished ) {
@@ -593,18 +800,25 @@ void R_RendererModule_Boot( void ) {
 		return;
 	}
 
-	rm_state.activationAllowed = !rm_state.everBooted;
+	const bool retryStartup = rm_state.startupRetryPending;
+	const rendererModuleStatus_t failedStatus = status;
+	rm_state.activationAllowed = !rm_state.everBooted || retryStartup;
 	rm_state.everBooted = true;
 
-	RM_UnloadModule();
+	if (!RM_UnloadModule()) return;
 	memset( &status, 0, sizeof( status ) );
 
-	const char *requestedValue = r_renderApi.GetString();
+	const char *requestedValue = retryStartup ? failedStatus.requestedValue : r_renderApi.GetString();
 	idStr::Copynz( status.requestedValue, requestedValue, sizeof( status.requestedValue ) );
+	rm_bootDevicePreference = r_renderDevice.GetString();
+	r_bootRenderDevice.SetString(rm_bootDevicePreference.c_str());
 
 	rendererModuleApi_t requestedApi;
 	if ( !R_RendererModule_ParseApi( requestedValue, requestedApi ) ) {
-		common->Warning( "r_renderApi '%s' is not a valid rendering API; using 'gl'", requestedValue );
+		common->Warning( "r_renderApi '%s' is not a valid rendering API; using the platform default", requestedValue );
+	}
+	if ( idStr::Icmp(requestedValue,"best")==0 ) {
+		requestedApi = RM_AutomaticApi(cvarSystem->GetCVarBool("vr_enable"));
 	}
 #ifdef ID_DEDICATED
 	// the dedicated server keeps the statically linked front-end until the
@@ -617,7 +831,16 @@ void R_RendererModule_Boot( void ) {
 	status.requestedApi = requestedApi;
 
 	rendererModuleApi_t ladder[ RENDER_MODULE_API_COUNT ];
-	const int numCandidates = R_RendererModule_BuildFallbackLadder( requestedApi, ladder, RENDER_MODULE_API_COUNT );
+	const int numCandidates = R_RendererModule_BuildFallbackLadder(
+			retryStartup ? RENDER_MODULE_API_GL : requestedApi, ladder, RENDER_MODULE_API_COUNT );
+	if ( retryStartup ) {
+		RM_AppendFallbackReason( status, failedStatus.fallbackReason );
+		// The retry flag is set only after unloading. Report it here, once
+		// the restarted filesystem can append to the original startup log.
+		common->Printf( "Renderer startup recovery: failed Vulkan module unloaded after owner teardown\n" );
+	}
+	// Consume the retry before loading: a failing GL tail cannot recurse.
+	rm_state.startupRetryPending = false;
 
 	bool activated = false;
 	for ( int i = 0; i < numCandidates; i++ ) {
@@ -646,6 +869,41 @@ void R_RendererModule_Boot( void ) {
 		common->Printf( "Renderer API: %s (%s)\n", R_RendererModule_ApiName( status.activeApi ),
 				status.disposition == RENDER_MODULE_DISPOSITION_MODULE ? "module" : "builtin" );
 	}
+	if ( retryStartup ) {
+		common->Printf( "Renderer startup recovery: OpenGL selected after complete owner teardown\n" );
+	}
+}
+
+bool R_RendererModule_PrepareStartupDevice( void ) {
+	if ( !rm_state.moduleExportValid || rm_state.moduleExport.PrepareStartupDevice == NULL ) {
+		return true;
+	}
+	char reason[ 256 ] = {};
+	if ( rm_state.moduleExport.PrepareStartupDevice( reason, sizeof( reason ) ) ) {
+		return true;
+	}
+	rm_state.startupDeviceFailed = rm_state.status.activeApi == RENDER_MODULE_API_VULKAN;
+	RM_AppendFallbackReason( rm_state.status,
+			reason[ 0 ] != '\0' ? reason : "renderer startup device preparation failed" );
+	common->Printf( "Renderer startup recovery: device preparation failed (%s); releasing startup owners\n",
+			rm_state.status.fallbackReason );
+	return false;
+}
+
+bool R_RendererModule_RetryFailedStartup( void ) {
+	if ( !rm_state.startupDeviceFailed || rm_state.status.activeApi != RENDER_MODULE_API_VULKAN
+			|| !rm_state.interfacesPublished ) {
+		return false;
+	}
+	// The caller has completed ShutdownGame, including renderer and decl
+	// destruction, and has returned from every module call. Retire console
+	// callbacks as well as cvar completions before unloading their code.
+	cmdSystem->RemoveFlaggedCommands( CMD_FL_RENDERER );
+	RM_UnloadModule();
+	rm_state.startupDeviceFailed = false;
+	rm_state.startupRetryPending = true;
+	r_actualRenderApi.SetString( "UNINITIALIZED" );
+	return true;
 }
 
 /*
@@ -658,7 +916,7 @@ last r_renderApi set/seta out of the config text; command-line +set overrides
 are applied on top by the caller.
 ====================
 */
-static bool RM_PeekConfigRenderApi( char *outValue, int maxLength ) {
+static bool RM_PeekConfigRendererSetting( const char *key, char *outValue, int maxLength ) {
 	char *buffer = NULL;
 	if ( fileSystem->ReadFile( CONFIG_FILE, ( void ** )&buffer, NULL ) < 0 || buffer == NULL ) {
 		return false;
@@ -673,7 +931,7 @@ static bool RM_PeekConfigRenderApi( char *outValue, int maxLength ) {
 			src.SkipRestOfLine();
 			continue;
 		}
-		if ( !src.ReadTokenOnLine( &name ) || name.Icmp( "r_renderApi" ) != 0 ) {
+		if ( !src.ReadTokenOnLine( &name ) || name.Icmp( key ) != 0 ) {
 			src.SkipRestOfLine();
 			continue;
 		}
@@ -686,6 +944,10 @@ static bool RM_PeekConfigRenderApi( char *outValue, int maxLength ) {
 
 	fileSystem->FreeFile( buffer );
 	return found;
+}
+
+static bool RM_PeekConfigRenderApi( char *outValue, int maxLength ) {
+	return RM_PeekConfigRendererSetting( "r_renderApi", outValue, maxLength );
 }
 
 /*
@@ -709,6 +971,21 @@ static void R_RendererVkProbe_f( const idCmdArgs &args ) {
 	R_RendererModule_RunVulkanProbe( verbose );
 }
 
+static void R_RendererDevices_f( const idCmdArgs &args ) {
+	(void)args;
+	renderDeviceCatalog_t catalog{};
+	if (!R_RendererModule_QueryRenderingDevices(catalog)) {
+		common->Printf("Rendering devices: Vulkan inventory unavailable\n"); return;
+	}
+	common->Printf("Rendering devices: count=%u active=%s preference=%s\n",catalog.count,
+		catalog.activeId[0]?catalog.activeId:"OS-managed",r_renderDevice.GetString());
+	for (unsigned i=0;i<catalog.count;++i) {
+		const auto& item=catalog.devices[i];
+		common->Printf("Rendering device %u: id=%s usable=%d preferred=%d name=%s\n",i,
+			item.id[0]?item.id:"unavailable",item.usable?1:0,item.preferred?1:0,item.name);
+	}
+}
+
 // implemented in ui/DeviceContext.cpp; declared here rather than through
 // ui/DeviceContext.h so this TU keeps no include edge into src/ui
 bool UI_FontParity_RunSelfTest( void );
@@ -720,9 +997,99 @@ static void R_UIFontParitySelfTest_f( const idCmdArgs &args ) {
 	}
 }
 
+// Bounded engine-command diagnostic: mutate only an already hidden, windowed
+// device. Save actual state rather than the unapplied archived CVar request.
+static bool rm_displayProbeSaved = false;
+static renderWindowRequest_t rm_displayProbeRestore = {};
+static uint64_t rm_displayProbeEpoch = 0;
+static bool RM_ParseProbeDimension( const char *text, int minimum, int maximum, int &value ) {
+	if ( text == NULL || *text == '\0' ) return false;
+	int parsed = 0;
+	for ( const char *digit = text; *digit != '\0'; ++digit ) {
+		if ( *digit < '0' || *digit > '9' || parsed > ( maximum - ( *digit - '0' ) ) / 10 ) return false;
+		parsed = parsed * 10 + ( *digit - '0' );
+	}
+	if ( parsed < minimum || parsed > maximum ) return false;
+	value = parsed;
+	return true;
+}
+static void R_RendererDisplayProbe_f( const idCmdArgs &args ) {
+	const char *operation = args.Argc() > 1 ? args.Argv( 1 ) : "report";
+	rendererDisplayState_t state = {};
+	const bool observed = R_RendererModule_QueryDisplay( &state );
+	bool result = observed;
+	char error[ 256 ] = {};
+	if ( idStr::Icmp( operation, "save" ) == 0 ) {
+		const uint32_t required = RDP_PARAMETER_SAMPLES | RDP_PARAMETER_SWAP_INTERVAL;
+		result = args.Argc() == 2 && observed && state.rendererReady && state.windowValid
+			&& state.window.hidden && !state.window.fullscreen && !state.window.minimized
+			&& ( state.presentation.parametersValid & required ) == required;
+		if ( result ) {
+			rm_displayProbeRestore = {};
+			rm_displayProbeRestore.parms.width = state.window.logicalWidth;
+			rm_displayProbeRestore.parms.height = state.window.logicalHeight;
+			rm_displayProbeRestore.parms.borderless = state.window.borderless;
+			rm_displayProbeRestore.parms.hiddenWindow = true;
+			rm_displayProbeRestore.parms.multiSamples = state.presentation.samples;
+			rm_displayProbeRestore.displayId = state.window.displayId;
+			rm_displayProbeRestore.displayIndex = state.window.displayIndex;
+			rm_displayProbeRestore.swapInterval = state.presentation.swapInterval;
+			rm_displayProbeRestore.restorePlacement = state.window.positionValid;
+			rm_displayProbeRestore.windowX = state.window.windowX;
+			rm_displayProbeRestore.windowY = state.window.windowY;
+			rm_displayProbeRestore.maximized = state.window.maximized;
+			rm_displayProbeEpoch = state.moduleEpoch;
+			rm_displayProbeSaved = true;
+		}
+	} else if ( idStr::Icmp( operation, "apply" ) == 0 || idStr::Icmp( operation, "restore" ) == 0
+		|| idStr::Icmp( operation, "missing-display" ) == 0 ) {
+		const bool applying = idStr::Icmp( operation, "apply" ) == 0;
+		const bool missingDisplay = idStr::Icmp( operation, "missing-display" ) == 0;
+		const bool restoring = !applying && !missingDisplay;
+		result = rm_displayProbeSaved && rm_displayProbeEpoch == rm_displayModuleEpoch
+			&& ( applying ? ( args.Argc() >= 4 && args.Argc() <= 6 ) : args.Argc() == 2 )
+			&& observed && ( state.windowValid ? state.window.hidden && !state.window.fullscreen && !state.window.minimized
+				: restoring && !state.rendererReady );
+		if ( result ) {
+			renderWindowRequest_t request = rm_displayProbeRestore;
+			if ( applying ) {
+				request.maximized = false;
+				result = RM_ParseProbeDimension( args.Argv( 2 ), 320, 16384, request.parms.width )
+					&& RM_ParseProbeDimension( args.Argv( 3 ), 240, 16384, request.parms.height );
+				if ( result && args.Argc() >= 5 ) {
+					result = RM_ParseProbeDimension( args.Argv( 4 ), 0, 1, request.swapInterval );
+				}
+				if ( result && args.Argc() == 6 ) {
+					result = RM_ParseProbeDimension( args.Argv( 5 ), 0, 16, request.parms.multiSamples )
+						&& ( request.parms.multiSamples == 0 || request.parms.multiSamples == 2
+							|| request.parms.multiSamples == 4 || request.parms.multiSamples == 8 || request.parms.multiSamples == 16 );
+				}
+			}
+			if ( missingDisplay ) request.displayId = UINT32_MAX;
+			if ( result ) result = R_RendererModule_TryDeviceRestart( &request, error, sizeof( error ) );
+		}
+	} else if ( idStr::Icmp( operation, "report" ) != 0 || args.Argc() > 2 ) result = false;
+	const bool after = R_RendererModule_QueryDisplay( &state );
+	common->Printf( "DISPLAY_PROBE operation=%s result=%d observed=%d epoch=%llu generation=%llu ready=%d window=%d "
+		"available=%u outcome=%u submitted=%llu presented=%llu failures=%llu native=%d restart=%d "
+		"logical=%dx%d pixel=%dx%d display=%u position=%d,%d hidden=%d fullscreen=%d maximized=%d samples=%d interval=%d valid=%u\n",
+		operation, result ? 1 : 0, after ? 1 : 0,
+		static_cast<unsigned long long>( state.moduleEpoch ), static_cast<unsigned long long>( state.presentation.generation ),
+		state.rendererReady ? 1 : 0, state.windowValid ? 1 : 0, state.presentation.available, state.presentation.outcome,
+		static_cast<unsigned long long>( state.presentation.submittedSequence ), static_cast<unsigned long long>( state.presentation.presentedSequence ),
+		static_cast<unsigned long long>( state.presentation.failureSequence ), state.presentation.nativeError, state.videoRestartCount,
+		state.window.logicalWidth, state.window.logicalHeight, state.window.pixelWidth, state.window.pixelHeight,
+		state.window.displayId, state.window.windowX, state.window.windowY, state.window.hidden ? 1 : 0,
+		state.window.fullscreen ? 1 : 0, state.window.maximized ? 1 : 0,
+		state.presentation.samples, state.presentation.swapInterval, state.presentation.parametersValid );
+	if ( error[ 0 ] ) common->Printf( "DISPLAY_PROBE_DETAIL %s\n", error );
+}
+
 static void RM_RegisterCommands( void ) {
+	cmdSystem->AddCommand( "rendererDisplayProbe", R_RendererDisplayProbe_f, CMD_FL_RENDERER, "observe or exercise a hidden windowed display: report/save/apply width height [interval 0 or 1] [samples 0/2/4/8/16]/restore/missing-display" );
 	cmdSystem->AddCommand( "rendererModuleSelfTest", R_RendererModuleSelfTest_f, CMD_FL_RENDERER, "run renderer module selection/loading self tests" );
 	cmdSystem->AddCommand( "rendererVkProbe", R_RendererVkProbe_f, CMD_FL_RENDERER, "load the Vulkan renderer module, run its device bring-up probe, and unload it" );
+	cmdSystem->AddCommand( "rendererDevices", R_RendererDevices_f, CMD_FL_RENDERER, "list detected rendering devices, stable IDs and the automatic preference" );
 	cmdSystem->AddCommand( "uiFontParitySelfTest", R_UIFontParitySelfTest_f, CMD_FL_RENDERER, "run GUI font retail parity self tests" );
 }
 
@@ -732,16 +1099,175 @@ R_RendererModule_BootEarly
 ====================
 */
 void R_RendererModule_BootEarly( void ) {
+    if(!RM_AllowImageModuleChange())return;
 	RM_RegisterCommands();
 
 	char configValue[ 64 ];
 	if ( RM_PeekConfigRenderApi( configValue, sizeof( configValue ) ) ) {
 		r_renderApi.SetString( configValue );
 	}
-	// command-line +set r_renderApi overrides the archived value
+	if ( RM_PeekConfigRendererSetting( "r_renderDevice", configValue, sizeof( configValue ) ) ) {
+		r_renderDevice.SetString( configValue );
+	}
+	if ( RM_PeekConfigRendererSetting( "vr_enable", configValue, sizeof( configValue ) ) ) {
+		cvarSystem->SetCVarString("vr_enable",configValue);
+	}
+	// These preferences must be available to the probe and initial device
+	// admission, before ordinary configuration execution. CLI still wins.
 	common->StartupVariable( "r_renderApi", false );
+	common->StartupVariable( "r_renderDevice", false );
+	common->StartupVariable( "r_vkDevice", false );
+	common->StartupVariable( "vr_enable", false );
 
 	R_RendererModule_Boot();
+}
+
+/*
+====================
+R_RendererModule_PublishRendererSelection
+
+The renderer resolved r_renderer. The settings service compares the report
+with what it asked for; the engine's serial proves the report is fresh.
+====================
+*/
+void R_RendererModule_PublishRendererSelection( const renderRendererSelection_t *selection ) {
+	if ( selection == NULL || rm_displayModuleEpoch == 0 || rm_rendererSelectionSerial == UINT64_MAX ) {
+		return;
+	}
+	rm_rendererSelection = *selection;
+	rm_rendererSelection.requested[ sizeof( rm_rendererSelection.requested ) - 1 ] = '\0';
+	rm_rendererSelectionSerial++;
+	rm_rendererSelectionEpoch = rm_displayModuleEpoch;
+	common->DPrintf( "renderer selection %llu: requested \"%s\", selected %d, automatic %d, fallback %d, promotion %d, upload %d/%u/%d\n",
+		static_cast<unsigned long long>( rm_rendererSelectionSerial ), rm_rendererSelection.requested, rm_rendererSelection.selected,
+		rm_rendererSelection.automatic, rm_rendererSelection.fallback, rm_rendererSelection.promotionActive ? 1 : 0,
+		rm_rendererSelection.uploadObserved ? 1 : 0, rm_rendererSelection.uploadPath, rm_rendererSelection.uploadPersistentFallback ? 1 : 0 );
+}
+
+bool R_RendererModule_GetLightGridLoadPolicy( bool *preload, uint64_t *token ) {
+	if ( preload == NULL || token == NULL ) {
+		return false;
+	}
+	return UI_SettingsLevelLoadPolicy( *preload, *token );
+}
+
+/*
+====================
+R_RendererModule_RendererDeviceEvent
+
+The engine's VR system binds its OpenXR session to the renderer's context.
+====================
+*/
+void R_RendererModule_RendererDeviceEvent( int event ) {
+	if ( vrSystem == NULL ) {
+		return;
+	}
+	if ( event == RENDER_DEVICE_READY ) {
+		vrSystem->RendererStarted();
+	} else if ( event == RENDER_DEVICE_STOPPING ) {
+		vrSystem->RendererStopping();
+	}
+}
+
+/*
+====================
+R_RendererModule_CreateVulkanInstanceForVR
+
+OpenXR on Vulkan: the runtime creates the Vulkan renderer's instance and
+device (src/sys/openxr), so the session can bind to them.
+====================
+*/
+bool R_RendererModule_CreateVulkanInstanceForVR( void *getInstanceProcAddr, const void *createInfo,
+		void **outInstance, int *outResult ) {
+	return VR_CreateVulkanInstance( getInstanceProcAddr, createInfo, outInstance, outResult );
+}
+
+bool R_RendererModule_GetVulkanPhysicalDeviceForVR( void *instance, void **outPhysicalDevice ) {
+	return VR_GetVulkanPhysicalDevice( instance, outPhysicalDevice );
+}
+
+bool R_RendererModule_CreateVulkanDeviceForVR( void *getInstanceProcAddr, void *physicalDevice, const void *createInfo,
+		void **outDevice, int *outResult ) {
+	return VR_CreateVulkanDevice( getInstanceProcAddr, physicalDevice, createInfo, outDevice, outResult );
+}
+
+void R_RendererModule_PublishLightGridLoadReceipt( const renderLightGridLoadReceipt_t *receipt ) {
+	if ( receipt == NULL || rm_displayModuleEpoch == 0 || rm_lightGridReceiptSerial == UINT64_MAX ) {
+		return;
+	}
+	rm_lightGridReceipt = *receipt;
+	rm_lightGridReceiptSerial++;
+	rm_lightGridReceiptEpoch = rm_displayModuleEpoch;
+}
+
+bool R_RendererModule_QueryRendererSelection( renderRendererSelection_t &selection, uint64_t &serial, uint64_t &epoch ) {
+	if ( rm_rendererSelectionEpoch == 0 || rm_rendererSelectionEpoch != rm_displayModuleEpoch ) {
+		return false;
+	}
+	selection = rm_rendererSelection;
+	serial = rm_rendererSelectionSerial;
+	epoch = rm_rendererSelectionEpoch;
+	return true;
+}
+
+bool R_RendererModule_QueryLightGridLoad( renderLightGridLoadReceipt_t &receipt, uint64_t &serial, uint64_t &epoch ) {
+	if ( rm_lightGridReceiptEpoch == 0 || rm_lightGridReceiptEpoch != rm_displayModuleEpoch ) {
+		return false;
+	}
+	receipt = rm_lightGridReceipt;
+	serial = rm_lightGridReceiptSerial;
+	epoch = rm_lightGridReceiptEpoch;
+	return true;
+}
+
+/*
+====================
+R_RendererModule_ResetApiAfterDeviceFailure
+
+The active module could not start its device. Decls and the render system
+already belong to it, so the ladder cannot fall back in-process any more; what
+is left is making sure the next launch does not stop the same way, which it
+would every time because r_renderApi is archived.
+
+The config is appended to, never rewritten: this runs before the game module
+registers its cvars, and WriteConfigToFile would drop every one of them. The
+appended line wins because RM_PeekConfigRenderApi and config execution both
+take the last set/seta. Only the fs_savepath config the engine itself writes is
+touched, and only when it is what selected vulkan; a selection made on the
+command line has nothing archived to undo.
+====================
+*/
+bool R_RendererModule_ResetApiAfterDeviceFailure( void ) {
+	r_renderApi.SetString( "gl" );
+
+	char configValue[ 64 ];
+	rendererModuleApi_t configApi;
+	if ( !RM_PeekConfigRenderApi( configValue, sizeof( configValue ) )
+			|| !R_RendererModule_ParseApi( configValue, configApi )
+			|| configApi != RENDER_MODULE_API_VULKAN ) {
+		return false;
+	}
+
+	// copied at once: the path lives in a buffer the next file call reuses
+	const idStr configPath = fileSystem->RelativePathToOSPath( CONFIG_FILE, "fs_savepath" );
+	idFile *existing = fileSystem->OpenExplicitFileRead( configPath.c_str() );
+	if ( existing == NULL ) {
+		return false;
+	}
+	fileSystem->CloseFile( existing );
+
+	idFile *config = fileSystem->OpenFileAppend( CONFIG_FILE, false, "fs_savepath" );
+	if ( config == NULL ) {
+		common->Warning( "could not reset r_renderApi to gl in %s", configPath.c_str() );
+		return false;
+	}
+	// the leading newline keeps a config that lacks a final newline from
+	// joining its last line onto this one
+	config->Printf( "\n// the Vulkan device could not start; the next launch uses OpenGL\nseta r_renderApi \"gl\"\n" );
+	fileSystem->CloseFile( config );
+	common->Printf( "r_renderApi reset to gl in %s; the next launch uses OpenGL unless a +set r_renderApi launch option selects vulkan again\n",
+			configPath.c_str() );
+	return true;
 }
 
 /*
@@ -750,8 +1276,283 @@ R_RendererModule_Shutdown
 ====================
 */
 void R_RendererModule_Shutdown( void ) {
-	RM_UnloadModule();
+	if (!RM_UnloadModule()) return;
+	RM_ReleaseDisplayVideoPin();
+	RM_AdvanceDisplayEpoch();
 	rm_state.status.disposition = RENDER_MODULE_DISPOSITION_NONE;
+}
+
+bool R_RendererModule_QueryDisplay( rendererDisplayState_t *outState ) {
+	if ( outState == NULL || renderSystem == NULL || rm_displayModuleEpoch == 0 ) {
+		return false;
+	}
+	void ( *query )( renderDisplayPresentation_t * ) = NULL;
+	if ( rm_state.interfacesPublished && rm_state.moduleExportValid ) {
+		query = rm_state.moduleExport.GetDisplayPresentation;
+	}
+#if !defined( OPENQ4_RENDERER_MODULE_ONLY ) && !defined( ID_DEDICATED )
+	else if ( rm_state.status.disposition != RENDER_MODULE_DISPOSITION_NONE ) {
+		query = R_GetDisplayPresentation;
+	}
+#endif
+	if ( query == NULL ) {
+		return false;
+	}
+	rendererDisplayState_t state = {};
+	state.moduleEpoch = rm_displayModuleEpoch;
+	renderDisplayPresentation_t before = {};
+	query( &before );
+	const renderWindowServices_t *windowServices = Sys_GetRenderWindowServices();
+	state.windowValid = windowServices != NULL && windowServices->QueryWindowState != NULL
+		&& windowServices->QueryWindowState( &state.window );
+	state.rendererReady = renderSystem->IsOpenGLRunning();
+	state.videoRestartCount = renderSystem->GetVideoRestartCount();
+	query( &state.presentation );
+	// A backend frame may finish during the window query. Its latest result is
+	// useful, but never pair a window observation with a different device epoch.
+	if ( state.moduleEpoch != rm_displayModuleEpoch || before.generation != state.presentation.generation ) {
+		return false;
+	}
+	*outState = state;
+	return true;
+}
+
+bool R_RendererModule_TryDeviceRestart( const renderWindowRequest_t *request, char *error, int errorSize ) {
+	if ( error != NULL && errorSize > 0 ) {
+		error[ 0 ] = '\0';
+	}
+	const renderWindowServices_t *windowServices = Sys_GetRenderWindowServices();
+	if ( request == NULL || renderSystem == NULL || rm_displayModuleEpoch == 0 || windowServices == NULL
+		|| windowServices->ApplyScreenParmsStrict == NULL || windowServices->QueryWindowState == NULL
+		|| windowServices->RetainVideoSystem == NULL || windowServices->ReleaseVideoSystem == NULL ) {
+		if ( error != NULL && errorSize > 0 ) {
+			idStr::Copynz( error, "strict display services are unavailable", errorSize );
+		}
+		return false;
+	}
+	bool ( *restart )( const renderWindowRequest_t *, char *, int ) = NULL;
+	if ( rm_state.interfacesPublished && rm_state.moduleExportValid ) restart = rm_state.moduleExport.TryDeviceRestart;
+#if !defined( OPENQ4_RENDERER_MODULE_ONLY ) && !defined( ID_DEDICATED )
+	else if ( rm_state.status.disposition != RENDER_MODULE_DISPOSITION_NONE ) {
+		restart = R_TryFullVidRestart;
+	}
+#endif
+	if ( restart != NULL ) {
+		if ( rm_displayVideoPin == NULL ) {
+			if ( !windowServices->RetainVideoSystem() ) {
+				if ( error != NULL && errorSize > 0 ) idStr::Copynz( error, "cannot retain the active video subsystem", errorSize );
+				return false;
+			}
+			rm_displayVideoPin = windowServices;
+		}
+		const bool result = restart( request, error, errorSize );
+		// A failed attempt with no context needs this identity lease until an
+		// explicit restore. Releasing the last SDL reference would invalidate
+		// its saved display ID. A live device already holds its own reference.
+		if ( result || renderSystem->IsOpenGLRunning() ) RM_ReleaseDisplayVideoPin();
+		return result;
+	}
+	if ( error != NULL && errorSize > 0 ) {
+		idStr::Copynz( error, "active renderer has no recoverable device service", errorSize );
+	}
+	return false;
+}
+
+bool R_RendererModule_TryImagePolicyRestart(const renderImagePolicyRequest_t* request,
+        rendererImagePolicyResult_t* output, char* error, int errorSize) {
+    if (error && errorSize > 0) error[0] = '\0';
+    if (!request || !output) {
+        if (error && errorSize > 0) idStr::Copynz(error, "image policy request and output are required", errorSize);
+        return false;
+    }
+    const renderImagePolicyRequest_t immutable = *request;
+    const uint64_t epoch = rm_displayModuleEpoch;
+    const renderWindowServices_t* services = Sys_GetRenderWindowServices();
+    if (!renderSystem || !epoch || !services || !services->ApplyScreenParmsStrict || !services->QueryWindowState ||
+        !services->RetainVideoSystem || !services->ReleaseVideoSystem) {
+        if (error && errorSize > 0) idStr::Copynz(error, "strict image policy services are unavailable", errorSize);
+        return false;
+    }
+    bool (*restart)(const renderImagePolicyRequest_t*, renderImagePolicyResult_t*, char*, int) = NULL;
+    if (rm_state.interfacesPublished && rm_state.moduleExportValid) restart = rm_state.moduleExport.TryImagePolicyRestart;
+#if !defined(OPENQ4_RENDERER_MODULE_ONLY) && !defined(ID_DEDICATED)
+    else if (rm_state.status.disposition != RENDER_MODULE_DISPOSITION_NONE) restart = R_TryImagePolicyRestart;
+#endif
+    if (!restart) {
+        if (error && errorSize > 0) idStr::Copynz(error, "renderer has no checked image policy service", errorSize);
+        return false;
+    }
+    // This wrapper is main/video-thread only, like module loading. Native calls
+    // never run under a lock. Reject recursion before retaining video services.
+    if (rm_imageServiceBusy) {
+        rm_imageServiceFailed=true;
+        if (error && errorSize > 0) idStr::Copynz(error, "image policy service is already active", errorSize);
+        return false;
+    }
+    struct Scope { Scope(){rm_imageServiceBusy=true;rm_imageServiceFailed=false;} ~Scope(){rm_imageServiceBusy=false;} } scope;
+    if(immutable.recovery.preparation && (rm_imageRecoveryLease.moduleEpoch!=epoch ||
+        immutable.recovery.owner!=rm_imageRecoveryLease.resources.owner || immutable.recovery.request!=rm_imageRecoveryLease.resources.request ||
+        immutable.recovery.preparation!=rm_imageRecoveryLease.resources.preparation)) {
+        if(error&&errorSize>0)idStr::Copynz(error,"image preparation belongs to another module lifetime",errorSize);return false;
+    }
+    if (!rm_displayVideoPin) {
+        if (!services->RetainVideoSystem()) {
+            if (error && errorSize > 0) idStr::Copynz(error, "cannot retain the active video subsystem", errorSize);
+            return false;
+        }
+        rm_displayVideoPin = services;
+    }
+    rendererImagePolicyResult_t result{}; result.moduleEpoch = epoch;
+    if (rm_imageServiceFailed || epoch != rm_displayModuleEpoch || services != Sys_GetRenderWindowServices()) {
+        if (error && errorSize > 0) idStr::Copynz(error, "renderer ownership changed during video retention", errorSize);
+        return false;
+    }
+    const bool succeeded = restart(&immutable, &result.resources, error, errorSize);
+    if (succeeded || (renderSystem && renderSystem->IsOpenGLRunning())) RM_ReleaseDisplayVideoPin();
+    if (!succeeded || rm_imageServiceFailed) return false;
+    if (epoch != rm_displayModuleEpoch || services != Sys_GetRenderWindowServices()) {
+        if (error && errorSize > 0) idStr::Copynz(error, "renderer ownership changed during image policy restart", errorSize);
+        return false;
+    }
+    *output = result;
+    return true;
+}
+
+namespace {
+bool RM_ImageError(char* error,int size,const char* text){if(error&&size>0)idStr::Copynz(error,text,size);return false;}
+bool RM_ImageLeaseMatches(const rendererImageRecoveryLease_t& lease) {
+    return lease.moduleEpoch && lease.moduleEpoch==rm_displayModuleEpoch && lease.moduleEpoch==rm_imageRecoveryLease.moduleEpoch &&
+        lease.resources.owner && lease.resources.request && lease.resources.preparation &&
+        lease.resources.owner==rm_imageRecoveryLease.resources.owner && lease.resources.request==rm_imageRecoveryLease.resources.request &&
+        lease.resources.preparation==rm_imageRecoveryLease.resources.preparation;
+}
+renderExport_t RM_ImageServices() {
+    if(rm_state.interfacesPublished&&rm_state.moduleExportValid)return rm_state.moduleExport;
+    renderExport_t table{};
+#if !defined(OPENQ4_RENDERER_MODULE_ONLY) && !defined(ID_DEDICATED)
+    if(rm_state.status.disposition!=RENDER_MODULE_DISPOSITION_NONE){
+        table.PrepareImagePolicyRecovery=R_PrepareImagePolicyRecovery;table.CaptureImagePolicyRecovery=R_CaptureImagePolicyRecovery;
+        table.PrepareColdImagePolicyRecovery=R_PrepareColdImagePolicyRecovery;table.CancelImagePolicyRecovery=R_CancelPreparedImagePolicyRecovery;
+        table.ReleaseImagePolicyRecovery=R_ReleaseCompletedImagePolicyRecovery;
+    }
+#endif
+    return table;
+}
+template<class Call> bool RM_ImageCall(Call call,char* error,int size,bool afterRelease=false) {
+    if(rm_imageServiceBusy){rm_imageServiceFailed=true;return RM_ImageError(error,size,"Reentrant image recovery service");}
+    const auto* services=Sys_GetRenderWindowServices();const uint64_t epoch=rm_displayModuleEpoch;
+    if(!epoch||!renderSystem||!services||!services->RetainVideoSystem||!services->ReleaseVideoSystem||!services->ApplyScreenParmsStrict||!services->QueryWindowState)
+        return RM_ImageError(error,size,"Checked image recovery services are unavailable");
+    struct Scope {Scope(){rm_imageServiceBusy=true;rm_imageServiceFailed=false;}~Scope(){rm_imageServiceBusy=false;}} scope;
+    if(!services->RetainVideoSystem())return RM_ImageError(error,size,"Cannot retain video for image recovery");
+    bool ok=false;
+    if(!afterRelease&&!rm_imageServiceFailed&&epoch==rm_displayModuleEpoch&&services==Sys_GetRenderWindowServices()){
+        try{ok=call(RM_ImageServices(),epoch);}catch(...){ok=false;}
+    }
+    services->ReleaseVideoSystem();
+    if(afterRelease&&!rm_imageServiceFailed&&epoch==rm_displayModuleEpoch&&services==Sys_GetRenderWindowServices()){
+        try{ok=call(RM_ImageServices(),epoch);}catch(...){ok=false;}
+    }
+    if(!ok||rm_imageServiceFailed||epoch!=rm_displayModuleEpoch||services!=Sys_GetRenderWindowServices())
+        return RM_ImageError(error,size,"Image recovery service failed or its owner changed");
+    return true;
+}
+}
+bool R_RendererModule_PrepareImageRecovery(uint64_t owner,uint64_t request,const char* attempt,const renderImagePolicy_t* target,
+    rendererImageRecoveryLease_t* output,char* error,int size) {
+    if(!attempt||!target||!output)return RM_ImageError(error,size,"Image preparation input is required");
+    const auto policy=*target;char id[33]{};size_t length=0;while(length<33&&attempt[length])++length;
+    if(length!=32)return RM_ImageError(error,size,"Invalid image attempt length");std::memcpy(id,attempt,32);
+    rendererImageRecoveryLease_t candidate{};
+    const bool ok=RM_ImageCall([&](const renderExport_t& api,uint64_t epoch){
+        candidate.moduleEpoch=epoch;return api.PrepareImagePolicyRecovery&&api.PrepareImagePolicyRecovery(owner,request,id,&policy,&candidate.resources,error,size);
+    },error,size);
+    if(!ok){
+        // The module pin refused unload. Retire a preparation published before a
+        // later retention callback invalidated the call; never expose that lease.
+        if(candidate.resources.preparation&&candidate.moduleEpoch==rm_displayModuleEpoch)
+            RM_ImageCall([&](const renderExport_t& api,uint64_t){return api.CancelImagePolicyRecovery&&api.CancelImagePolicyRecovery(&candidate.resources,error,size);},error,size);
+        return false;
+    }
+    rm_imageRecoveryLease=candidate;*output=candidate;return true;
+}
+bool R_RendererModule_PrepareColdImageRecovery(uint64_t owner,uint64_t request,const char* attempt,uint32_t direction,
+    const char* raw,uint32_t bytes,rendererImageRecoveryLease_t* output,char* error,int size) {
+    if(!attempt||!raw||!output||bytes>1152u*1024u)return RM_ImageError(error,size,"Cold image recovery input exceeds its bound");
+    try{
+        size_t length=0;while(length<33&&attempt[length])++length;if(length!=32)return RM_ImageError(error,size,"Invalid image attempt length");
+        const std::string id(attempt,length),copy(raw,bytes);rendererImageRecoveryLease_t candidate{};
+        const bool ok=RM_ImageCall([&](const renderExport_t& api,uint64_t epoch){candidate.moduleEpoch=epoch;
+            return api.PrepareColdImagePolicyRecovery&&api.PrepareColdImagePolicyRecovery(owner,request,id.c_str(),direction,copy.data(),bytes,&candidate.resources,error,size);
+        },error,size);
+        if(!ok){if(candidate.resources.preparation&&candidate.moduleEpoch==rm_displayModuleEpoch)
+            RM_ImageCall([&](const renderExport_t& api,uint64_t){return api.CancelImagePolicyRecovery&&api.CancelImagePolicyRecovery(&candidate.resources,error,size);},error,size);return false;}
+        rm_imageRecoveryLease=candidate;*output=candidate;return true;
+    }catch(...){return RM_ImageError(error,size,"Cold image recovery input allocation failed");}
+}
+bool R_RendererModule_CaptureImageRecovery(const rendererImageRecoveryLease_t* requested,uint32_t direction,char* output,uint32_t capacity,
+    uint32_t* bytes,char* error,int size) {
+    if(!requested||!output||!bytes||capacity>1152u*1024u)return RM_ImageError(error,size,"Image capture output is invalid");
+    const auto lease=*requested;if(!RM_ImageLeaseMatches(lease))return RM_ImageError(error,size,"Image capture module ownership changed");
+    try{
+        std::string candidate(capacity,'\0');uint32_t length=0;
+        if(!RM_ImageCall([&](const renderExport_t& api,uint64_t){return RM_ImageLeaseMatches(lease)&&api.CaptureImagePolicyRecovery&&
+            api.CaptureImagePolicyRecovery(&lease.resources,direction,candidate.data(),capacity,&length,error,size);},error,size)||!RM_ImageLeaseMatches(lease)||length>capacity)return false;
+        std::memcpy(output,candidate.data(),length);*bytes=length;return true;
+    }catch(...){return RM_ImageError(error,size,"Image capture allocation failed");}
+}
+bool R_RendererModule_CancelImageRecovery(const rendererImageRecoveryLease_t* requested,char* error,int size) {
+    if(!requested)return RM_ImageError(error,size,"Image cancellation lease is required");
+    const auto lease=*requested;if(!RM_ImageLeaseMatches(lease))return RM_ImageError(error,size,"Image cancellation module ownership changed");
+    if(!RM_ImageCall([&](const renderExport_t& api,uint64_t){return RM_ImageLeaseMatches(lease)&&api.CancelImagePolicyRecovery&&
+        api.CancelImagePolicyRecovery(&lease.resources,error,size);},error,size,true))return false;
+    rm_imageRecoveryLease={};return true;
+}
+bool R_RendererModule_ReleaseImageRecovery(const rendererImageRecoveryLease_t* requested,uint32_t direction,
+    const rendererImagePolicyResult_t* result,char* error,int size) {
+    if(!requested||!result)return RM_ImageError(error,size,"Completed image release inputs are required");
+    const auto lease=*requested;const auto receipt=*result;
+    if(!RM_ImageLeaseMatches(lease)||receipt.moduleEpoch!=lease.moduleEpoch)return RM_ImageError(error,size,"Completed image module ownership changed");
+    if(!RM_ImageCall([&](const renderExport_t& api,uint64_t){return RM_ImageLeaseMatches(lease)&&api.ReleaseImagePolicyRecovery&&
+        api.ReleaseImagePolicyRecovery(&lease.resources,direction,&receipt.resources,error,size);},error,size,true))return false;
+    rm_imageRecoveryLease={};return true;
+}
+
+bool R_RendererModule_TryInitializeDisplay( const renderWindowRequest_t *request, char *error, int errorSize ) {
+	if ( error != NULL && errorSize > 0 ) error[0] = '\0';
+	const renderWindowServices_t *windowServices = Sys_GetRenderWindowServices();
+	if ( request == NULL || renderSystem == NULL || rm_displayModuleEpoch == 0 || renderSystem->IsOpenGLRunning() || windowServices == NULL ||
+		windowServices->ApplyScreenParmsStrict == NULL || windowServices->QueryWindowState == NULL ||
+		windowServices->RetainVideoSystem == NULL || windowServices->ReleaseVideoSystem == NULL ) {
+		if ( error != NULL && errorSize > 0 ) idStr::Copynz( error, "strict initial display services are unavailable or the renderer is already running", errorSize );
+		return false;
+	}
+	bool ( *initialize )( const renderWindowRequest_t *, char *, int ) = NULL;
+	if ( rm_state.interfacesPublished && rm_state.moduleExportValid ) initialize = rm_state.moduleExport.TryInitializeDisplay;
+#if !defined( OPENQ4_RENDERER_MODULE_ONLY ) && !defined( ID_DEDICATED )
+	else if ( rm_state.status.disposition != RENDER_MODULE_DISPOSITION_NONE ) initialize = R_TryInitializeDisplay;
+#endif
+	if ( initialize == NULL ) {
+		if ( error != NULL && errorSize > 0 ) idStr::Copynz( error, "active renderer has no strict initial display service", errorSize );
+		return false;
+	}
+	// Startup prepares video before resolving portable monitor identities. Pin
+	// that same SDL lifetime across partial initialization cleanup and explicit
+	// retries, just as a failed live-device restart pins its original identity.
+	if ( rm_displayVideoPin == NULL ) {
+		if ( !windowServices->RetainVideoSystem() ) {
+			if ( error != NULL && errorSize > 0 ) idStr::Copynz( error, "cannot retain the prepared video subsystem", errorSize );
+			return false;
+		}
+		rm_displayVideoPin = windowServices;
+	}
+	const bool result = initialize( request, error, errorSize );
+	if ( result && renderSystem->IsOpenGLRunning() ) {
+		RM_ReleaseDisplayVideoPin();
+		return true;
+	}
+	if ( result && error != NULL && errorSize > 0 ) idStr::Copynz( error, "initial display service returned without a ready renderer", errorSize );
+	return false;
 }
 
 /*
@@ -798,10 +1599,23 @@ R_RendererModule_RunVulkanProbe
 Loads the Vulkan module for a diagnostics pass and unloads it afterwards.
 Never touches the live GL context or window; the probe is instance/device
 scoped only.
+
+Refused while Vulkan is the active renderer. Loading the module again then
+returns the live instance rather than a fresh one: GetRenderAPI would
+re-initialize its idlib under the running renderer, Shutdown would free its
+SIMD processor and clear its dict string pools while the renderer still uses
+both, and the probe's throwaway instance and device would repoint the volk
+function pointers the live device calls through.
 ====================
 */
 bool R_RendererModule_RunVulkanProbe( bool verbose ) {
+    if(!RM_AllowImageModuleChange())return false;
 	char modulePath[ 1024 ];
+
+	if ( rm_state.interfacesPublished && rm_state.status.activeApi == RENDER_MODULE_API_VULKAN ) {
+		common->Printf( "rendererVkProbe: the Vulkan renderer is active; restart with r_renderApi gl to probe\n" );
+		return false;
+	}
 
 	if ( !RM_ResolveModulePath( RENDER_MODULE_API_VULKAN, modulePath, sizeof( modulePath ) ) ) {
 		common->Printf( "rendererVkProbe: module path resolution failed\n" );
@@ -814,6 +1628,10 @@ bool R_RendererModule_RunVulkanProbe( bool verbose ) {
 		common->Printf( "rendererVkProbe: module not present or failed to load (build with -Dbuild_renderer_vk=true and stage it next to the executable)\n" );
 		return false;
 	}
+	// the unload puts back every cvar completion GetRenderAPI takes over,
+	// the active renderer's and the game's included
+	idCVarCompletionSnapshot completions;
+	completions.Capture();
 
 	bool probePassed = false;
 	GetRenderAPI_t GetRenderAPI = ( GetRenderAPI_t )Sys_DLL_GetProcAddress( handle, RENDER_API_ENTRY_POINT );
@@ -843,8 +1661,93 @@ bool R_RendererModule_RunVulkanProbe( bool verbose ) {
 		}
 	}
 
-	Sys_DLL_Unload( handle );
+	RM_UnloadModuleBinary( handle, completions );
 	return probePassed;
+}
+
+bool R_RendererModule_RenderSelectionPending(const char* api, const char* device) {
+	return idStr::Icmp(api,rm_state.status.requestedValue)!=0 ||
+		idStr::Cmp(device,rm_bootDevicePreference.c_str())!=0;
+}
+
+void R_RendererModule_UseSavedSelectionOnReload() {
+	// A deliberate menu restart supersedes only these original launch choices.
+	// StartupVariable consumes the old +set while applying it, so restore the
+	// just-persisted values before InitGame peeks the configuration again.
+	const idStr api = r_renderApi.GetString();
+	const idStr device = r_renderDevice.GetString();
+	common->StartupVariable( "r_renderApi", true );
+	common->StartupVariable( "r_renderDevice", true );
+	r_renderApi.SetString( api.c_str() );
+	r_renderDevice.SetString( device.c_str() );
+	rm_selectionReloadPending = true;
+}
+
+bool R_RendererModule_FinishSelectionReload() {
+	if (!rm_selectionReloadPending) return true;
+	if (!RM_AllowImageModuleChange()) return false;
+	// ShutdownGame has already retired the session, UI, game, declarations
+	// and renderer objects. Only now can their module code be unloaded.
+	cmdSystem->RemoveFlaggedCommands(CMD_FL_RENDERER);
+	if (!RM_UnloadModule()) return false;
+	RM_ReleaseDisplayVideoPin();
+	RM_AdvanceDisplayEpoch();
+	rm_state.everBooted = false;
+	rm_state.status.disposition = RENDER_MODULE_DISPOSITION_NONE;
+	rm_selectionReloadPending = false;
+	r_actualRenderApi.SetString("UNINITIALIZED");
+	return true;
+}
+
+void R_RendererModule_SyncConfiguration() {
+	if ( rm_state.interfacesPublished && rm_state.moduleExportValid && rm_state.moduleExport.SyncConfiguration != NULL ) {
+		rm_state.moduleExport.SyncConfiguration();
+	}
+}
+
+bool R_RendererModule_QueryRenderingDevices(renderDeviceCatalog_t& output) {
+	output = {};
+	if (!RM_AllowImageModuleChange()) return false;
+	// Calling GetRenderAPI/Shutdown on an already loaded Vulkan module would
+	// destroy its live idlib and dispatch tables. Use its read-only export.
+	if (rm_state.interfacesPublished && rm_state.status.activeApi==RENDER_MODULE_API_VULKAN)
+		return rm_state.moduleExportValid && rm_state.moduleExport.GetRenderingDevices &&
+			rm_state.moduleExport.GetRenderingDevices(&output);
+	char path[1024];
+	if (!RM_ResolveModulePath(RENDER_MODULE_API_VULKAN,path,sizeof(path))) return false;
+	const intptr_t handle = Sys_DLL_Load(path);
+	if (!handle) return false;
+	idCVarCompletionSnapshot completions; completions.Capture();
+	bool ok = false;
+	const auto entry = reinterpret_cast<GetRenderAPI_t>(Sys_DLL_GetProcAddress(handle,RENDER_API_ENTRY_POINT));
+	if (entry) {
+		renderImport_t imports; RM_BuildImport(imports);
+		renderExport_t* exports = entry(&imports);
+		bool diagnosticsOnly=false; const char* reason="";
+		if (RM_ValidateExport(exports,diagnosticsOnly,&reason) && exports->GetRenderingDevices)
+			ok = exports->GetRenderingDevices(&output);
+		if (exports && exports->version==RENDER_API_VERSION && exports->Shutdown) exports->Shutdown();
+	}
+	RM_UnloadModuleBinary(handle,completions);
+	if (!ok) output = {};
+	return ok;
+}
+
+// stand-ins for a module's device self-test, driving RM_ExportDeviceReady
+static bool RM_SelfTestDeviceReady( char *outSummary, int summaryLength ) {
+	idStr::Copynz( outSummary, "self-test device ready", summaryLength );
+	return true;
+}
+
+static bool RM_SelfTestDeviceMissing( char *outSummary, int summaryLength ) {
+	idStr::Copynz( outSummary, "self-test device missing", summaryLength );
+	return false;
+}
+
+static bool RM_SelfTestDeviceMissingSilently( char *outSummary, int summaryLength ) {
+	(void)outSummary;
+	(void)summaryLength;
+	return false;
 }
 
 /*
@@ -852,7 +1755,8 @@ bool R_RendererModule_RunVulkanProbe( bool verbose ) {
 RendererModule_RunSelfTest
 
 Pure-logic checks that need no window, device, or module binary: api-string
-parsing, module naming, ladder composition, and export validation rules.
+parsing, module naming, ladder composition, export validation rules, and the
+device gate in front of activation.
 ====================
 */
 bool RendererModule_RunSelfTest( void ) {
@@ -873,12 +1777,12 @@ bool RendererModule_RunSelfTest( void ) {
 			common->Warning( "rendererModuleSelfTest: parse 'vk' alias failed" );
 			numFailures++;
 		}
-		if ( !R_RendererModule_ParseApi( "best", api ) || api != RENDER_MODULE_API_GL ) {
-			common->Warning( "rendererModuleSelfTest: 'best' must resolve to gl until promotion evidence lands" );
+		if ( !R_RendererModule_ParseApi( "best", api ) || api != rm_platformDefaultApi ) {
+			common->Warning( "rendererModuleSelfTest: 'best' must resolve to the platform default" );
 			numFailures++;
 		}
-		if ( R_RendererModule_ParseApi( "glide", api ) || api != RENDER_MODULE_API_GL ) {
-			common->Warning( "rendererModuleSelfTest: invalid api must be rejected and select gl" );
+		if ( R_RendererModule_ParseApi( "glide", api ) || api != rm_platformDefaultApi ) {
+			common->Warning( "rendererModuleSelfTest: invalid api must be rejected and select the platform default" );
 			numFailures++;
 		}
 	}
@@ -966,11 +1870,58 @@ bool RendererModule_RunSelfTest( void ) {
 		}
 		static int dummyRenderSystemStorage;
 		testExport.renderSystem = reinterpret_cast<idRenderSystem *>( &dummyRenderSystemStorage );
+		if ( RM_ExportCanRender( &testExport, &reason ) ) {
+			common->Warning( "rendererModuleSelfTest: full export without device services must be rejected" );
+			numFailures++;
+		}
+		testExport.TryDeviceRestart = []( const renderWindowRequest_t *, char *, int ) { return false; };
+		testExport.GetDisplayPresentation = []( renderDisplayPresentation_t * ) {};
+		if ( RM_ExportCanRender( &testExport, &reason ) ) {
+			common->Warning( "rendererModuleSelfTest: full export without strict initial device service must be rejected" );
+			numFailures++;
+		}
+		testExport.TryInitializeDisplay = []( const renderWindowRequest_t *, char *, int ) { return false; };
 		if ( !RM_ExportCanRender( &testExport, &reason ) ) {
 			common->Warning( "rendererModuleSelfTest: full exports must be activatable with the Phase B8 seam landed" );
 			numFailures++;
 		}
 		testExport.renderSystem = NULL;
+	}
+
+	// device gate: a module that exports a device self-test activates only
+	// when it passes, and a failure always carries a reason for the fallback
+	{
+		renderModuleDiagnostics_t testDiagnostics;
+		memset( &testDiagnostics, 0, sizeof( testDiagnostics ) );
+		renderExport_t testExport;
+		memset( &testExport, 0, sizeof( testExport ) );
+		char summary[ 128 ];
+
+		if ( !RM_ExportDeviceReady( &testExport, summary, sizeof( summary ) ) ) {
+			common->Warning( "rendererModuleSelfTest: a module without diagnostics must not be device-gated" );
+			numFailures++;
+		}
+		testExport.diagnostics = &testDiagnostics;
+		if ( !RM_ExportDeviceReady( &testExport, summary, sizeof( summary ) ) ) {
+			common->Warning( "rendererModuleSelfTest: a module without a device self-test must not be device-gated" );
+			numFailures++;
+		}
+		testDiagnostics.RunDeviceSelfTest = RM_SelfTestDeviceReady;
+		if ( !RM_ExportDeviceReady( &testExport, summary, sizeof( summary ) ) ) {
+			common->Warning( "rendererModuleSelfTest: a passing device self-test must allow activation" );
+			numFailures++;
+		}
+		testDiagnostics.RunDeviceSelfTest = RM_SelfTestDeviceMissing;
+		if ( RM_ExportDeviceReady( &testExport, summary, sizeof( summary ) )
+				|| idStr::Cmp( summary, "self-test device missing" ) != 0 ) {
+			common->Warning( "rendererModuleSelfTest: a failed device self-test must refuse activation and keep its summary" );
+			numFailures++;
+		}
+		testDiagnostics.RunDeviceSelfTest = RM_SelfTestDeviceMissingSilently;
+		if ( RM_ExportDeviceReady( &testExport, summary, sizeof( summary ) ) || summary[ 0 ] == '\0' ) {
+			common->Warning( "rendererModuleSelfTest: a device self-test that fails without a summary must still record a reason" );
+			numFailures++;
+		}
 	}
 
 	// import completeness: every v2 interface pointer and service binding
@@ -988,6 +1939,10 @@ bool RendererModule_RunSelfTest( void ) {
 				|| testImport.services->LeaveCriticalSection == NULL
 				|| testImport.services->IsRenderDocInjected == NULL ) {
 			common->Warning( "rendererModuleSelfTest: v2 service bindings incomplete" );
+			numFailures++;
+		}
+		if ( testImport.services == NULL || testImport.services->ResetRenderApiAfterDeviceFailure == NULL ) {
+			common->Warning( "rendererModuleSelfTest: v12 device-failure reset service not bound" );
 			numFailures++;
 		}
 		if ( testImport.sys == NULL || testImport.common == NULL || testImport.cvarSystem == NULL

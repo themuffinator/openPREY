@@ -39,7 +39,11 @@ enum rendererTierPreference_t {
 enum rendererContextProfile_t {
 	RENDERER_CONTEXT_PROFILE_UNKNOWN = 0,
 	RENDERER_CONTEXT_PROFILE_COMPATIBILITY,
-	RENDERER_CONTEXT_PROFILE_CORE
+	RENDERER_CONTEXT_PROFILE_CORE,
+	// OpenGL ES. The Android target's native profile; on desktop it is reached
+	// through a translation layer (ANGLE on macOS) so the GLES path can be
+	// developed and tested without a device.
+	RENDERER_CONTEXT_PROFILE_ES
 };
 
 typedef struct rendererContextRequest_s {
@@ -84,6 +88,7 @@ typedef struct renderBackendCaps_s {
 	bool						hasSync;
 	bool						hasMapBufferRange;
 	bool						hasBufferStorage;
+	bool						hasTextureStorage;	// immutable glTexStorage2D
 	bool						hasDSA;
 	bool						hasMultiBind;
 	bool						hasCompute;
@@ -150,7 +155,8 @@ enum rendererDriverQuirkFlags_t {
 	RENDERER_DRIVER_QUIRK_REJECT_DEBUG_CONTEXT = 1u << 5,
 	RENDERER_DRIVER_QUIRK_DISABLE_VBO = 1u << 6,
 	RENDERER_DRIVER_QUIRK_PREFER_SIMPLE_INTERACTION = 1u << 7,
-	RENDERER_DRIVER_QUIRK_DISABLE_ARB2_INTERACTIONS = 1u << 8
+	RENDERER_DRIVER_QUIRK_DISABLE_ARB2_INTERACTIONS = 1u << 8,
+	RENDERER_DRIVER_QUIRK_DISABLE_PERSISTENT_UPLOADS = 1u << 9
 };
 
 typedef struct rendererDriverInfo_s {

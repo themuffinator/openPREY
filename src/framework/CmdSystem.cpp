@@ -68,6 +68,7 @@ public:
 	virtual void			BufferCommandArgs( cmdExecution_t exec, const idCmdArgs &args );
 
 	virtual void			SetupReloadEngine( const idCmdArgs &args );
+	virtual void            SetupReloadEngineMenu( const idCmdArgs &args );
 	virtual void			SetupReloadGameModule( const idCmdArgs &args );
 	virtual bool			PostReloadEngine( void );
 
@@ -299,6 +300,11 @@ void idCmdSystemLocal::Vstr_f( const idCmdArgs &args ) {
 		return;
 	}
 
+	idCVar *cvar = cvarSystem->Find( args.Argv( 1 ) );
+	if ( cvar != NULL && ( cvar->GetFlags() & CVAR_PRIVATE ) ) {
+		common->Printf( "vstr is unavailable for private CVar %s\n", cvar->GetName() );
+		return;
+	}
 	v = cvarSystem->GetCVarString( args.Argv( 1 ) );
 
 	cmdSystemLocal.BufferCommandText( CMD_EXEC_APPEND, va( "%s\n", v ) );
@@ -571,8 +577,8 @@ void idCmdSystemLocal::ExecuteTokenizedString( const idCmdArgs &args ) {
 	const char *cmdName;
 	
 	// execute the command line
-	if ( !args.Argc() ) {
-		return;		// no tokens
+	if ( !args.Argc() || !args.Argv( 0 )[0] ) {
+		return;		// no command, including a quoted empty token
 	}
 
 	cmdName = args.Argv( 0 );
@@ -648,7 +654,7 @@ void idCmdSystemLocal::InsertCommandText( const char *text ) {
 	int		len;
 	int		i;
 
-	len = strlen( text ) + 1;
+	len = idLib::SizeToInt( strlen( text ) + 1, "idCmdSystemLocal::InsertCommandText" );
 	if ( len + textLength > (int)sizeof( textBuf ) ) {
 		common->Printf( "idCmdSystemLocal::InsertText: buffer overflow\n" );
 		return;
@@ -678,7 +684,7 @@ Adds command text at the end of the buffer, does NOT add a final \n
 void idCmdSystemLocal::AppendCommandText( const char *text ) {
 	int l;
 	
-	l = strlen( text );
+	l = idLib::SizeToInt( strlen( text ), "idCmdSystemLocal::AppendCommandText" );
 
 	if ( textLength + l >= (int)sizeof( textBuf ) ) {
 		common->Printf( "idCmdSystemLocal::AppendText: buffer overflow\n" );
@@ -780,9 +786,25 @@ void idCmdSystemLocal::ExecuteCommandBuffer( void ) {
 			
 		text[i] = 0;
 
+		bool privateCommand = cvarSystem != NULL && cvarSystem->IsInitialized() &&
+			cvarSystem->CommandContainsPrivateCVar( text );
 		if ( !idStr::Cmp( text, "_execTokenized" ) ) {
-			args = tokenizedCmds[ 0 ];
-			tokenizedCmds.RemoveIndex( 0 );
+			if ( tokenizedCmds.Num() == 0 ) {
+				common->Warning( "ignored unmatched internal tokenized-command marker" );
+				// args is reused across loop iterations.  An unmatched marker must
+				// not execute the preceding command a second time.
+				args.ClearSensitive();
+			} else {
+				args = tokenizedCmds[ 0 ];
+				for ( int argIndex = 0; argIndex < args.Argc() && !privateCommand; ++argIndex ) {
+					privateCommand = cvarSystem != NULL && cvarSystem->IsInitialized() &&
+						cvarSystem->CommandContainsPrivateCVar( args.Argv( argIndex ) );
+				}
+				if ( privateCommand ) {
+					tokenizedCmds[ 0 ].ClearSensitive();
+				}
+				tokenizedCmds.RemoveIndex( 0 );
+			}
 		} else {
 			args.TokenizeString( text, false );
 		}
@@ -791,6 +813,7 @@ void idCmdSystemLocal::ExecuteCommandBuffer( void ) {
 		// this is necessary because commands (exec) can insert data at the
 		// beginning of the text buffer
 
+		const int previousTextLength = textLength;
 		if ( i == textLength ) {
 			textLength = 0;
 		} else {
@@ -798,9 +821,16 @@ void idCmdSystemLocal::ExecuteCommandBuffer( void ) {
 			textLength -= i;
 			memmove( text, text+i, textLength );
 		}
+		// Do not leave consumed command arguments (which can include private
+		// CVar assignments) in the unused tail of this long-lived buffer.
+		memset( textBuf + textLength, 0, previousTextLength - textLength );
 
 		// execute the command line that we have already tokenized
 		ExecuteTokenizedString( args );
+		if ( privateCommand ) {
+			args.ClearSensitive();
+			idCmdArgs::ClearArgsScratch();
+		}
 	}
 }
 
@@ -894,6 +924,11 @@ idCmdSystemLocal::SetupReloadEngine
 */
 void idCmdSystemLocal::SetupReloadEngine( const idCmdArgs &args ) {
 	BufferCommandText( CMD_EXEC_APPEND, "reloadEngine\n" );
+	postReload = args;
+}
+
+void idCmdSystemLocal::SetupReloadEngineMenu( const idCmdArgs &args ) {
+	BufferCommandText( CMD_EXEC_APPEND, "reloadEngine menu\n" );
 	postReload = args;
 }
 

@@ -398,6 +398,7 @@ void idRenderModelOverlay::AddOverlaySurfacesToModel( idRenderModel *baseModel )
 			newSurf->geometry = NULL;
 			newSurf->shader = materials[k]->material;
 			newSurf->id = -1 - k;
+			newSurf->mOriginalSurfaceName = NULL;
 		}
 
 		if ( newSurf->geometry == NULL || newSurf->geometry->numVerts < numVerts || newSurf->geometry->numIndexes < numIndexes ) {
@@ -411,6 +412,7 @@ void idRenderModelOverlay::AddOverlaySurfacesToModel( idRenderModel *baseModel )
 		}
 
 		newTri = newSurf->geometry;
+		R_GpuSkinning_ClearSurfaceContract( newTri, GPU_SKINNING_FALLBACK_NONE );
 		numVerts = numIndexes = 0;
 
 		for ( i = 0; i < materials[k]->surfaces.Num(); i++ ) {

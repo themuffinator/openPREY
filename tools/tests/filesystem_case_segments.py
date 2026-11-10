@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
+
 def require(haystack: str, needle: str, context: str) -> None:
     if needle not in haystack:
         raise AssertionError(f"Missing {needle!r} in {context}")
@@ -142,10 +143,12 @@ def validate_linux_build_path_casing() -> None:
     push = read(".github/workflows/push-verification.yml")
     commit = read(".github/workflows/commit-validation.yml")
 
-    require(root_meson, 'root / ".." / "OpenPrey-game"', "default GameLibs repository path")
-    require(root_meson, "../OpenPrey-game", "GameLibs repository diagnostics")
-    reject(root_meson, 'root / ".." / "openQ4-game"', "default GameLibs repository path")
-    reject(root_meson, "../openQ4-game", "GameLibs repository diagnostics")
+    require(root_meson, 'game_libs_repo_root = meson.project_source_root()', "canonical game source path")
+    reject(root_meson, "../OpenPrey-game", "retired companion source input")
+    reject(root_meson, 'root / ".." / "OpenPrey-game"', "retired companion source input")
+    reject(root_meson, "../openQ4-game", "retired companion source input")
+    reject(root_meson, 'root / ".." / "OpenQ4-game"', "default GameLibs repository path")
+    reject(root_meson, "../OpenQ4-game", "GameLibs repository diagnostics")
 
     require(root_meson, "assets/linux/openPREY-steamdeck.in", "Steam Deck launcher template input")
     require(root_meson, "assets/linux/openprey-steamdeck.desktop.in", "Steam Deck desktop template input")
@@ -158,10 +161,12 @@ def validate_linux_build_path_casing() -> None:
         (push, "push verification workflow"),
         (commit, "commit validation workflow"),
     ):
-        require(workflow, "OPENPREY_GAMELIBS_REPO", context)
-        require(workflow, "../OpenPrey-game", context)
-        require(workflow, "OpenPrey-game.git", context)
+        reject(workflow, "OPENPREY_GAMELIBS_REPO", context)
+        reject(workflow, "../OpenPrey-game", context)
+        reject(workflow, "OpenPrey-game.git", context)
         reject(workflow, "../openQ4-game", context)
+        reject(workflow, "openQ4-game.git", context)
+        reject(workflow, "../OpenQ4-game", context)
 
 
 def validate_release_note() -> None:

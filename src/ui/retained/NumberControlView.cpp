@@ -1,0 +1,529 @@
+// Copyright (C) 2026 DarkMatter Productions. GPL-3.0-or-later.
+#include "NumberControlView.h"
+#include "FloatChars.h"
+#include "TextRun.h"
+#include "VectorElement.h"
+#include <RmlUi/Core/Box.h>
+#include <RmlUi/Core/ComputedValues.h>
+#include <RmlUi/Core/Element.h>
+#include <RmlUi/Core/ElementDocument.h>
+#include <RmlUi/Core/ElementText.h>
+#include <RmlUi/Core/ElementUtilities.h>
+#include <RmlUi/Core/FontEngineInterface.h>
+#include <RmlUi/Core/Property.h>
+#include <RmlUi/Core/StringUtilities.h>
+#include <algorithm>
+#include <cmath>
+#include <iomanip>
+#include <locale>
+#include <sstream>
+
+namespace openq4::ui {
+namespace {
+std::string Pixels(float value) {
+	std::ostringstream out; out.imbue(std::locale::classic());
+	out << std::setprecision(9) << value << "px"; return out.str();
+}
+bool Within(Rml::Element* element,Rml::Element* root) {
+	for (;element;element=element->GetParentNode()) if (element==root) return true;
+	return false;
+}
+Bounds BoundsOf(const Rml::Rectanglef& rect) { return {rect.Left(),rect.Top(),rect.Width(),rect.Height()}; }
+bool Finite(const Bounds& box) {
+	return std::isfinite(box.x) && std::isfinite(box.y) && std::isfinite(box.width) && std::isfinite(box.height);
+}
+bool Same(float a,float b) { return std::isfinite(a) && std::isfinite(b) && std::abs(a-b)<=.01f; }
+std::string Presented(const NumberEditView& view) {
+	if (view.nativePresentation) return view.nativePresentation->text;
+	if (!view.active || !view.composition) return view.state.text;
+	const auto first=std::min(view.state.anchor,view.state.caret), last=std::max(view.state.anchor,view.state.caret);
+	return view.state.text.substr(0,first)+view.composition->text+view.state.text.substr(last);
+}
+// A masked field's presentation: one '*' per scalar of its plain text, and
+// the plain text's scalar boundaries, boundaries[i] being the plain byte
+// offset of the mask's offset i. Text that starts inside a scalar has none.
+struct Mask { std::string text; std::vector<std::size_t> boundaries; };
+bool MaskOf(std::string_view plain,Mask& out) {
+	if (!plain.empty() && (static_cast<unsigned char>(plain[0])&0xc0)==0x80) return false;
+	Mask mask; mask.boundaries.reserve(plain.size()+1);
+	for (std::size_t i=0;i<plain.size();++i) if ((static_cast<unsigned char>(plain[i])&0xc0)!=0x80) { mask.boundaries.push_back(i); mask.text+='*'; }
+	mask.boundaries.push_back(plain.size());
+	out=std::move(mask); return true;
+}
+// A plain offset's place in the mask; one inside a scalar has none.
+std::optional<std::size_t> MaskOffset(const std::vector<std::size_t>& boundaries,std::size_t plain) {
+	const auto at=std::lower_bound(boundaries.begin(),boundaries.end(),plain);
+	if (at==boundaries.end() || *at!=plain) return {};
+	return static_cast<std::size_t>(at-boundaries.begin());
+}
+// A number field's message may name its range: the first %s takes the
+// field's minimum and the second its maximum, written to the field's decimal
+// places where it limits them (0.01 to 30.00), else in their shortest exact
+// decimals ("Enter a number from %s to %s.").
+std::string RangeText(std::string message,const NumberSpec& spec) {
+	if (spec.textField) return message;
+	for (const double bound:{spec.minimum,spec.maximum}) {
+		const auto at=message.find("%s");
+		if (at==std::string::npos) break;
+		char text[32];
+		const auto written=spec.integer || spec.decimals>=0 ?
+			FloatToChars(text,text+sizeof(text),bound,std::chars_format::fixed,spec.integer ? 0 : spec.decimals) :
+			FloatToChars(text,text+sizeof(text),bound);
+		message.replace(at,2,written.ec==std::errc{} ? std::string(text,written.ptr) : std::string());
+	}
+	return message;
+}
+}
+struct NumberControlView::Impl {
+	struct Entry {
+		NumberSpec spec;
+		std::shared_ptr<const TextRun> run;
+		// A masked field's plain scalar boundaries as painted (MaskOf); the
+		// run measures the mask, so its offsets map back through these.
+		std::vector<std::size_t> maskBoundaries;
+		NumberEditIdentity identity;
+		std::optional<NativeTextSnapshot> nativePresentation;
+		bool nativeUnsettled=false;
+		// Derived siblings have no canonical IDs or semantic control identity.
+		std::vector<Rml::ObserverPtr<Rml::Element>> compositions;
+		float scroll=0, baselineX=0, baselineY=0;
+		std::uintptr_t font=0;
+		float letterSpacing=0;
+		Bounds localViewport,localCaret;
+		double blinkEpoch=0;
+		bool geometryReady=false,wasActive=false;
+	};
+	struct Applied { std::string requested,actual; };
+	Rml::ElementDocument* document=nullptr;
+	std::function<Rml::Element*(const std::string&)> find;
+	NumberTextRunQuery query;
+	std::function<std::string(const std::string&)> translate;
+	NumberValidationText validation;
+	std::map<std::string,Entry> entries;
+	// The model's authored values by node, read in place; `model` keeps them.
+	std::shared_ptr<const DocumentModel> model;
+	std::unordered_map<std::string_view,const std::map<std::string,Value>*> authored;
+	std::map<Rml::Element*,std::map<std::string,Applied>> applied;
+	const std::map<std::string,Value>& Authored(const std::string& id) const { return *authored.at(id); }
+	~Impl() {
+		// Runtime normally resets us before closing the document. Observers also
+		// make destruction safe if its DOM has already been released.
+		for (auto& [id,entry]:entries) for (auto& observer:entry.compositions)
+			if (auto* element=observer.get()) if (auto* parent=element->GetParentNode()) parent->RemoveChild(element);
+	}
+	Rml::Element* Element(const std::string& id) const { return !document ? nullptr : find ? find(id) : document->GetElementById(id); }
+	bool Property(const std::string& id,const std::string& key,const std::string& value) {
+		return Property(Element(id),key,value);
+	}
+	bool Property(Rml::Element* element,const std::string& key,const std::string& value) {
+		if (!element) return false;
+		auto& previous=applied[element][key]; const auto* current=element->GetLocalProperty(key);
+		if (previous.requested==value && current && previous.actual==current->ToString()) return false;
+		if (!element->SetProperty(key,value)) return false;
+		current=element->GetLocalProperty(key); previous={value,current ? current->ToString() : std::string{}}; return true;
+	}
+	bool Text(const std::string& id,const std::string& value) {
+		auto* element=Element(id); if (!element) return false;
+		auto& previous=applied[element]["text"];
+		if (previous.requested==value && previous.actual==element->GetInnerRML()) return false;
+		element->SetInnerRML(Rml::StringUtilities::EncodeRml(value)); previous={value,element->GetInnerRML()}; return true;
+	}
+	bool Display(const std::string& id,bool visible) { return Display(Element(id),id,visible); }
+	bool Display(Rml::Element* element,const std::string& id,bool visible) {
+		const auto& properties=Authored(id); const auto found=properties.find("display");
+		const auto shown=found!=properties.end() && found->second.text!="none" ? found->second.text : "block";
+		return Property(element,"display",visible ? shown : "none");
+	}
+	bool HideEditing(Entry& entry) {
+		entry.geometryReady=false; entry.run.reset();
+		bool changed=Display(entry.spec.caret,false);
+		changed|=Display(entry.spec.selection,false); changed|=Display(entry.spec.composition,false);
+		for (auto& part:entry.compositions) changed|=Display(part.get(),entry.spec.composition,false);
+		return changed;
+	}
+	static bool OwnedCompositionProperty(Rml::PropertyId key) {
+		using P=Rml::PropertyId;
+		return key==P::Left || key==P::Top || key==P::Width || key==P::Height ||
+			key==P::Display || key==P::Position || key==P::Transform;
+	}
+	// Clone does not copy the first-party vector geometry owned by its instancer.
+	// Copy it explicitly, and remove every ID before attaching the new subtree.
+	static bool CopyArtwork(Rml::Element& target,const Rml::Element& source) {
+		target.SetId("");
+		if (auto* vector=dynamic_cast<VectorElement*>(&target)) {
+			const auto* original=dynamic_cast<const VectorElement*>(&source); if (!original) return false;
+			vector->CopyArtworkFrom(*original);
+		}
+		if (target.GetNumChildren()!=source.GetNumChildren()) return false;
+		for (int i=0;i<source.GetNumChildren();++i)
+			if (!CopyArtwork(*target.GetChild(i),*source.GetChild(i))) return false;
+		return true;
+	}
+	// Bindings and timelines can change authored artwork styling. Mirror those
+	// current styles without resetting the view-owned root rectangle each frame.
+	static bool MirrorArtwork(Rml::Element& target,Rml::Element& source,bool root=true) {
+		bool changed=false;
+		const auto& current=source.GetLocalStyleProperties();
+		std::vector<Rml::PropertyId> removed;
+		for (const auto& [key,value]:target.GetLocalStyleProperties())
+			if (!(root && OwnedCompositionProperty(key)) && !current.contains(key)) removed.push_back(key);
+		for (auto key:removed) { target.RemoveProperty(key); changed=true; }
+		for (const auto& [key,value]:current) if (!(root && OwnedCompositionProperty(key))) {
+			const auto* old=target.GetLocalProperty(key);
+			if (!old || *old!=value) { target.SetProperty(key,value); changed=true; }
+		}
+		if (target.GetClassNames()!=source.GetClassNames()) { target.SetClassNames(source.GetClassNames()); changed=true; }
+		if (source.GetTagName()=="#text") {
+			auto& a=static_cast<Rml::ElementText&>(target); auto& b=static_cast<Rml::ElementText&>(source);
+			if (a.GetText()!=b.GetText()) { a.SetText(b.GetText()); changed=true; }
+		}
+		for (int i=0;i<source.GetNumChildren() && i<target.GetNumChildren();++i)
+			changed|=MirrorArtwork(*target.GetChild(i),*source.GetChild(i),false);
+		return changed;
+	}
+	static bool SameArtworkShape(const Rml::Element& a,const Rml::Element& b) {
+		if (a.GetTagName()!=b.GetTagName() || a.GetNumChildren()!=b.GetNumChildren()) return false;
+		for (int i=0;i<a.GetNumChildren();++i) if (!SameArtworkShape(*a.GetChild(i),*b.GetChild(i))) return false;
+		return true;
+	}
+	bool EnsureCompositions(Entry& entry,std::size_t count,bool& changed) {
+		if (count>32) return false;
+		auto* source=Element(entry.spec.composition); auto* viewport=Element(entry.spec.viewport);
+		if (!source || source->GetParentNode()!=viewport) return false;
+		while (entry.compositions.size()+1<count) {
+			auto copy=source->Clone(); if (!copy || !CopyArtwork(*copy,*source)) return false;
+			auto* previous=entry.compositions.empty() ? source : entry.compositions.back().get();
+			if (!previous) return false;
+			auto observer=copy->GetObserverPtr();
+			entry.compositions.push_back(observer);
+			viewport->InsertBefore(std::move(copy),previous->GetNextSibling()); changed=true;
+		}
+		for (auto& part:entry.compositions) {
+			if (!part || part->GetParentNode()!=viewport) return false;
+			// A bound text decoration can gain/lose its generated text child.
+			// Recreate this derived subtree before mirroring a different shape.
+			if (!SameArtworkShape(*part.get(),*source)) {
+				auto copy=source->Clone(); if (!copy || !CopyArtwork(*copy,*source)) return false;
+				auto* old=part.get(); auto observer=copy->GetObserverPtr();
+				viewport->InsertBefore(std::move(copy),old); applied.erase(old); viewport->RemoveChild(old);
+				part=observer; changed=true;
+			}
+			changed|=MirrorArtwork(*part.get(),*source);
+		}
+		return true;
+	}
+	bool SamePresentation(const Entry& entry,const NumberEditView& edit) const {
+		return entry.nativePresentation==edit.nativePresentation && entry.nativeUnsettled==edit.nativeUnsettled;
+	}
+	// A Paint pass may set offsets which RmlUi has not laid out yet. Queries
+	// become usable only when the actual line, viewport and caret match that pass.
+	bool Fresh(const Entry& entry) const {
+		if (!entry.geometryReady || !entry.run) return false;
+		auto* viewport=Element(entry.spec.viewport); auto* parent=Element(entry.spec.text); auto* caret=Element(entry.spec.caret);
+		if (!viewport || !parent || !caret || !viewport->IsVisible(true) || !parent->IsVisible(true) || !caret->IsVisible(true)) return false;
+		auto* typography=parent;
+		Rml::Vector2f line;
+		if (!entry.run->text.empty()) {
+			if (parent->GetNumChildren()!=1 || parent->GetChild(0)->GetTagName()!="#text") return false;
+			auto* ink=static_cast<Rml::ElementText*>(parent->GetChild(0));
+			if (ink->GetLines().size()!=1 || ink->GetLines()[0].text!=entry.run->text) return false;
+			typography=ink; line=ink->GetLines()[0].position;
+		} else {
+			const auto font=parent->GetFontFaceHandle(); if (!font || font!=entry.font) return false;
+			const auto& metrics=Rml::GetFontEngineInterface()->GetFontMetrics(font);
+			line={0,(parent->GetComputedValues().line_height().value-metrics.ascent-metrics.descent)*.5f+metrics.ascent};
+		}
+		if (typography->GetFontFaceHandle()!=entry.font || typography->GetComputedValues().letter_spacing()!=entry.letterSpacing) return false;
+		const auto baseline=typography->GetAbsoluteOffset(Rml::BoxArea::Content).Round()+line;
+		const auto vp=viewport->GetAbsoluteOffset(Rml::BoxArea::Content),vs=viewport->GetBox().GetSize(Rml::BoxArea::Content);
+		const auto cp=caret->GetAbsoluteOffset(Rml::BoxArea::Border),cs=caret->GetBox().GetSize(Rml::BoxArea::Border);
+		return Same(baseline.x,entry.baselineX) && Same(baseline.y,entry.baselineY) &&
+			Same(vp.x,entry.localViewport.x) && Same(vp.y,entry.localViewport.y) && Same(vs.x,entry.localViewport.width) && Same(vs.y,entry.localViewport.height) &&
+			Same(cp.x,entry.localCaret.x) && Same(cp.y,entry.localCaret.y) && Same(cs.x,entry.localCaret.width) && Same(cs.y,entry.localCaret.height);
+	}
+	float Length(const std::string& id,const std::string& key,float ratio,float reference,float fallback) const {
+		const auto& properties=Authored(id); const auto found=properties.find(key);
+		if (found==properties.end() || found->second.type!=ValueType::Length) return fallback;
+		const auto& value=found->second;
+		if (value.unit=="em") {
+			const auto* element=Element(id);
+			return element ? static_cast<float>(value.data[0])*element->GetComputedValues().font_size() : fallback;
+		}
+		return static_cast<float>(value.data[0])*(value.unit=="dp" ? ratio : value.unit=="%" ? reference*.01f : 1.f);
+	}
+	bool Rectangle(const Entry& entry,const std::string& id,float x,float y,float width,float height) {
+		return Rectangle(entry,Element(id),x,y,width,height);
+	}
+	bool Rectangle(const Entry& entry,Rml::Element* element,float x,float y,float width,float height) {
+		auto* viewport=Element(entry.spec.viewport);
+		const auto paddingOrigin=viewport->GetAbsoluteOffset(Rml::BoxArea::Padding);
+		const auto& box=element->GetBox();
+		// The requested rectangle is a border box; content-box CSS excludes
+		// both border and padding, including on replicated native range parts.
+		const auto frame=box.GetFrameSize(Rml::BoxArea::Border)+box.GetFrameSize(Rml::BoxArea::Padding);
+		// Absolute children use the viewport's padding box as their containing
+		// block. CSS left/top locate the margin edge, not the painted border edge.
+		const float left=x-paddingOrigin.x+viewport->GetScrollLeft()-box.GetEdge(Rml::BoxArea::Margin,Rml::BoxEdge::Left);
+		const float top=y-paddingOrigin.y+viewport->GetScrollTop()-box.GetEdge(Rml::BoxArea::Margin,Rml::BoxEdge::Top);
+		const bool borderBox=element->GetComputedValues().box_sizing()==Rml::Style::BoxSizing::BorderBox;
+		bool changed=Property(element,"left",Pixels(left)); changed|=Property(element,"top",Pixels(top));
+		changed|=Property(element,"width",Pixels(std::max(0.f,width-(borderBox ? 0.f : frame.x))));
+		changed|=Property(element,"height",Pixels(std::max(0.f,height-(borderBox ? 0.f : frame.y)))); return changed;
+	}
+};
+NumberControlView::NumberControlView():impl(std::make_unique<Impl>()) {}
+NumberControlView::~NumberControlView()=default;
+void NumberControlView::Reset() { impl=std::make_unique<Impl>(); }
+bool NumberControlView::Initialize(std::shared_ptr<const DocumentModel> model,Rml::ElementDocument& document,NumberTextRunQuery query,
+	std::function<std::string(const std::string&)> translate,NumberValidationText validation,std::string& error,
+	std::function<Rml::Element*(const std::string&)> find) {
+	Reset(); impl->document=&document; impl->find=std::move(find); impl->query=std::move(query); impl->translate=std::move(translate); impl->validation=std::move(validation);
+	impl->model=std::move(model);
+	std::vector<const Node*> nodes{&impl->model->root};
+	while (!nodes.empty()) {
+		const auto* node=nodes.back(); nodes.pop_back(); impl->authored[node->id]=&node->properties;
+		if (node->control) if (const auto* spec=std::get_if<NumberSpec>(&node->control->widget)) {
+			if (!impl->query) { error="Number controls require the shared text-run service"; Reset(); return false; }
+			for (const auto& id : {spec->viewport,spec->text,spec->selection,spec->caret,spec->composition,spec->validation})
+				if (!impl->Element(id)) { error="Missing number part: "+id; Reset(); return false; }
+			impl->entries[node->id].spec=*spec;
+		}
+		for (const auto& child:node->children) nodes.push_back(&child);
+	}
+	error.clear(); return true;
+}
+bool NumberControlView::Paint(const Interaction& interaction,float ratio,double seconds,bool steadyCaret) {
+	if (!impl->document) return false;
+	bool changed=false;
+	if (!std::isfinite(ratio) || ratio<=0 || !std::isfinite(seconds)) {
+		for (auto& item:impl->entries) changed|=impl->HideEditing(item.second);
+		return changed;
+	}
+	for (auto& [id,entry]:impl->entries) {
+		entry.geometryReady=false; entry.run.reset(); entry.maskBoundaries.clear();
+		const auto fail=[&] { changed|=impl->HideEditing(entry); };
+		// A text field (role "text") reads back its string; a number its value.
+		const auto view=interaction.Widget(id);
+		if (!view || !(entry.spec.textField ? std::holds_alternative<std::string>(view->accepted) : std::holds_alternative<double>(view->accepted))) { fail(); continue; }
+		const auto& spec=entry.spec; const auto* edit=view->number ? &*view->number : nullptr;
+		const bool active=edit && edit->active && interaction.Focused()==id && interaction.CanActivate(id);
+		std::string text,error;
+		if (edit) text=Presented(*edit);
+		else if (spec.textField) {
+			text=std::get<std::string>(view->accepted);
+			if (text.size()>spec.maxBytes) { fail(); continue; }
+		}
+		else if (!FormatTextNumber(std::get<double>(view->accepted),{spec.minimum,spec.maximum,spec.exponent,spec.integer,spec.decimals},text,error)) { fail(); continue; }
+		// A masked field presents its mask, which the run measures: every plain
+		// offset below reaches the run through `position`.
+		const std::size_t plainSize=text.size();
+		if (spec.masked) {
+			Mask mask; if (!MaskOf(text,mask)) { fail(); continue; }
+			text=std::move(mask.text); entry.maskBoundaries=std::move(mask.boundaries);
+		}
+		const auto position=[&](std::size_t plain,float& x) {
+			if (!spec.masked) return entry.run->CaretPosition(plain,x);
+			const auto shown=MaskOffset(entry.maskBoundaries,plain);
+			return shown.has_value() && entry.run->CaretPosition(*shown,x);
+		};
+		const bool edited=edit && (edit->identity!=entry.identity || !impl->SamePresentation(entry,*edit));
+		entry.nativePresentation=edit ? edit->nativePresentation : std::nullopt;
+		entry.nativeUnsettled=edit && edit->nativeUnsettled;
+		if (edited) entry.identity=edit->identity;
+		if (active && (edited || !entry.wasActive)) entry.blinkEpoch=seconds;
+		entry.wasActive=active;
+		if (!edit) entry.identity={};
+		// Rml stores the shorthand as two longhands; reading local "overflow"
+		// cannot detect equality and would force a layout on every Paint.
+		changed|=impl->Property(spec.viewport,"overflow-x","hidden"); changed|=impl->Property(spec.viewport,"overflow-y","hidden");
+		changed|=impl->Property(spec.viewport,"clip","always");
+		changed|=impl->Property(spec.text,"white-space","pre"); changed|=impl->Property(spec.text,"text-align","left");
+		changed|=impl->Property(spec.text,"text-transform","none");
+		for (const auto& part:{spec.text,spec.selection,spec.caret,spec.composition}) {
+			changed|=impl->Property(part,"position","absolute"); changed|=impl->Property(part,"transform","none");
+		}
+		const bool invalid=edit && (edit->conflict || edit->status!=TextNumberStatus::Valid || view->rejected || edit->notice!=NumberEditNotice::None);
+		std::string message;
+		if (invalid) {
+			if (edit->notice!=NumberEditNotice::None) {
+				const char* key=edit->notice==NumberEditNotice::ClipboardReadFailed ? "#str_230001" :
+					edit->notice==NumberEditNotice::ClipboardWriteFailed ? "#str_230002" :
+					edit->notice==NumberEditNotice::ClipboardMasked ? "#str_231129" : "#str_230003";
+				message=impl->translate ? impl->translate(key) : key;
+			} else if (impl->validation) message=impl->validation(spec,*edit,view->rejected.has_value());
+			else {
+				message=impl->Authored(spec.validation).at("text").text; if (impl->translate) message=impl->translate(message);
+				message=RangeText(std::move(message),spec);
+			}
+		}
+		changed|=impl->Text(spec.validation,message); changed|=impl->Display(spec.validation,invalid);
+		const bool textChanged=impl->Text(spec.text,text); changed|=textChanged;
+		if (textChanged) { fail(); continue; } // Actual formatted line position follows layout.
+		auto* viewport=impl->Element(spec.viewport); auto* parent=impl->Element(spec.text);
+		const auto viewportSize=viewport->GetBox().GetSize(Rml::BoxArea::Content);
+		if (!parent->IsVisible(true) || !std::isfinite(viewportSize.x) || !std::isfinite(viewportSize.y) || viewportSize.x<=0 || viewportSize.y<=0) { fail(); continue; }
+		const float baseLeft=impl->Length(spec.text,"left",ratio,viewport->GetBox().GetSize(Rml::BoxArea::Padding).x,0);
+		if (!active) {
+			entry.scroll=0; changed|=impl->Property(spec.text,"left",Pixels(baseLeft));
+			fail(); continue;
+		}
+		Rml::ElementText* ink=nullptr;
+		if (parent->GetNumChildren()==1 && parent->GetChild(0)->GetTagName()=="#text") ink=static_cast<Rml::ElementText*>(parent->GetChild(0));
+		if (!text.empty() && (!ink || ink->GetLines().size()!=1 || ink->GetLines()[0].text!=text)) { fail(); continue; }
+		auto* typography=ink ? static_cast<Rml::Element*>(ink) : parent;
+		const auto font=typography->GetFontFaceHandle(); if (!font) { fail(); continue; }
+		entry.font=font; entry.letterSpacing=typography->GetComputedValues().letter_spacing();
+		entry.run=impl->query(font,text,entry.letterSpacing); if (!entry.run || !entry.run->monotonicLtr || entry.run->text!=text) { fail(); continue; }
+		const auto& metrics=Rml::GetFontEngineInterface()->GetFontMetrics(font);
+		// ElementText submits its local glyph mesh through Geometry::Render,
+		// which rounds the content translation before the element transform.
+		// Caret/selection use that same painted origin, retaining fractional pens.
+		const auto origin=typography->GetAbsoluteOffset(Rml::BoxArea::Content).Round();
+		const auto line=ink && !ink->GetLines().empty() ? ink->GetLines()[0].position :
+			Rml::Vector2f(0,(typography->GetComputedValues().line_height().value-metrics.ascent-metrics.descent)*.5f+metrics.ascent);
+		entry.baselineX=origin.x+line.x; entry.baselineY=origin.y+line.y;
+		std::size_t caret=edit ? edit->state.caret : plainSize, anchor=edit ? edit->state.anchor : caret;
+		std::size_t compositionFirst=0,compositionLast=0;
+		std::vector<std::pair<float,float>> ranges;
+		if (edit && edit->nativePresentation) {
+			const auto& native=*edit->nativePresentation;
+			if (native.compositions.size()>32 || native.text.size()>spec.maxBytes) { fail(); continue; }
+			caret=native.caret; anchor=native.anchor;
+			bool valid=true;
+			for (const auto& [token,range]:native.compositions) {
+				float first=0,last=0;
+				if (!token || range.first>range.last || !position(range.first,first) || !position(range.last,last)) { valid=false; break; }
+				// Empty native ranges still own composition state but no underline
+				// extent. The caret remains the visible insertion-position witness.
+				if (range.first!=range.last) ranges.emplace_back(first,last);
+			}
+			if (!valid) { fail(); continue; }
+		} else if (edit && edit->composition) {
+			compositionFirst=std::min(edit->state.anchor,edit->state.caret); compositionLast=compositionFirst+edit->composition->text.size();
+			caret=compositionFirst+edit->composition->selectionStart.value_or(edit->composition->text.size());
+			anchor=caret;
+			if (edit->composition->selectionLength) caret+=*edit->composition->selectionLength;
+		}
+		if (edit && !edit->nativePresentation && edit->composition) {
+			float first=0,last=0;
+			if (!position(compositionFirst,first) || !position(compositionLast,last)) { fail(); continue; }
+			if (compositionFirst!=compositionLast) ranges.emplace_back(first,last);
+		}
+		if (!impl->EnsureCompositions(entry,ranges.size(),changed)) { fail(); continue; }
+		float caretX=0,anchorX=0;
+		if (!position(caret,caretX) || !position(anchor,anchorX)) { fail(); continue; }
+		const auto viewportOrigin=viewport->GetAbsoluteOffset(Rml::BoxArea::Content);
+		entry.localViewport={viewportOrigin.x,viewportOrigin.y,viewportSize.x,viewportSize.y};
+		if (!Finite(entry.localViewport) || !std::isfinite(entry.baselineX) || !std::isfinite(entry.baselineY) ||
+			!std::isfinite(metrics.ascent) || !std::isfinite(metrics.descent) || !std::isfinite(metrics.ascent+metrics.descent) || metrics.ascent+metrics.descent<=0) { fail(); continue; }
+		const float caretWidth=std::max(1.f,impl->Length(spec.caret,"width",ratio,viewportSize.x,ratio));
+		const float inset=std::min(2.f*ratio,viewportSize.x*.25f);
+		float scroll=entry.scroll;
+		const float unscrolledOrigin=entry.baselineX-viewportOrigin.x+entry.scroll;
+		if (edit) {
+			const float x=unscrolledOrigin+caretX-scroll;
+			// Match RmlUi's physical-pixel translation grid. An integer shift
+			// commutes with its rounded glyph origin, so one layout settles the
+			// text and editing ink without rounding the run's fractional pens.
+			if (x<inset) scroll=std::floor(scroll+x-inset);
+			else if (x+caretWidth>viewportSize.x-inset) scroll=std::ceil(scroll+x+caretWidth-(viewportSize.x-inset));
+			scroll=std::clamp(scroll,0.f,std::ceil(std::max(0.f,unscrolledOrigin+entry.run->width+caretWidth+inset-viewportSize.x)));
+		}
+		changed|=impl->Property(spec.text,"left",Pixels(baseLeft-scroll));
+		const float scrollDelta=scroll-entry.scroll; entry.scroll=scroll;
+		entry.baselineX-=scrollDelta;
+		const float top=entry.baselineY-metrics.ascent, height=metrics.ascent+metrics.descent;
+		entry.localCaret={entry.baselineX+caretX,top,caretWidth,height};
+		changed|=impl->Rectangle(entry,spec.caret,entry.baselineX+caretX,top,caretWidth,height);
+		changed|=impl->Display(spec.caret,edit!=nullptr);
+		const bool blink=steadyCaret || (edit && (edit->composition || edit->nativeUnsettled)) || std::fmod(std::max(0.0,seconds-entry.blinkEpoch),1.0)<.5;
+		changed|=impl->Property(spec.caret,"opacity",blink ? "1" : "0");
+		changed|=impl->Rectangle(entry,spec.selection,entry.baselineX+std::min(anchorX,caretX),top,std::abs(caretX-anchorX),height);
+		changed|=impl->Display(spec.selection,edit && anchor!=caret);
+		for (std::size_t index=0;index<=entry.compositions.size();++index) {
+			auto* part=index ? entry.compositions[index-1].get() : impl->Element(spec.composition);
+			const bool visible=index<ranges.size();
+			if (visible) {
+				changed|=impl->Property(part,"position","absolute"); changed|=impl->Property(part,"transform","none");
+				const auto [first,last]=ranges[index];
+				changed|=impl->Rectangle(entry,part,entry.baselineX+first,entry.baselineY+metrics.descent,
+					last-first,std::max(1.f,impl->Length(spec.composition,"height",ratio,viewportSize.y,ratio)));
+			}
+			changed|=impl->Display(part,spec.composition,visible);
+		}
+		entry.geometryReady=scrollDelta==0;
+	}
+	return changed;
+}
+std::optional<NumberTextHit> NumberControlView::Hit(Rml::Element* hit,float x,float y,const Interaction& interaction,const std::string& captured) const {
+	if (!std::isfinite(x) || !std::isfinite(y)) return {};
+	for (const auto& [id,entry]:impl->entries) {
+		if (!captured.empty() && captured!=id) continue;
+		const auto view=interaction.Widget(id); if (!impl->Fresh(entry) || !view || !view->number || !view->number->active ||
+			interaction.Focused()!=id || !interaction.CanActivate(id) || view->number->identity!=entry.identity || !impl->SamePresentation(entry,*view->number)) continue;
+		auto* viewport=impl->Element(entry.spec.viewport); if (!viewport || !viewport->IsVisible(true)) continue;
+		if (captured.empty() && !Within(hit,viewport)) continue;
+		Rml::Vector2f point(x,y); if (!viewport->Project(point) || !std::isfinite(point.x) || !std::isfinite(point.y)) return {};
+		const auto origin=viewport->GetAbsoluteOffset(Rml::BoxArea::Content),size=viewport->GetBox().GetSize(Rml::BoxArea::Content);
+		if (captured.empty() && (point.x<origin.x || point.y<origin.y || point.x>=origin.x+size.x || point.y>=origin.y+size.y)) continue;
+		const auto byte=entry.run->HitTestLtr(point.x-entry.baselineX); if (!byte) return {};
+		if (!entry.spec.masked) return NumberTextHit{id,entry.identity,*byte};
+		// The run measured the mask: its offset names a plain scalar boundary.
+		if (*byte>=entry.maskBoundaries.size()) return {};
+		return NumberTextHit{id,entry.identity,entry.maskBoundaries[*byte]};
+	}
+	return {};
+}
+std::optional<NumberTextGeometry> NumberControlView::Geometry(const std::string& id,const Interaction& interaction) const {
+	const auto found=impl->entries.find(id); if (found==impl->entries.end() || !found->second.geometryReady) return {};
+	const auto& entry=found->second; const auto view=interaction.Widget(id);
+	if (!impl->Fresh(entry) || !view || !view->number || !view->number->active || interaction.Focused()!=id ||
+		!interaction.CanActivate(id) || view->number->identity!=entry.identity || !impl->SamePresentation(entry,*view->number)) return {};
+	Rml::Rectanglef caret,viewport;
+	if (!Rml::ElementUtilities::GetBoundingBox(caret,impl->Element(entry.spec.caret),Rml::BoxArea::Border) ||
+		!Rml::ElementUtilities::GetBoundingBox(viewport,impl->Element(entry.spec.viewport),Rml::BoxArea::Content)) return {};
+	if (!Finite(BoundsOf(caret)) || !Finite(BoundsOf(viewport)) || caret.Width()<=0 || caret.Height()<=0 || viewport.Width()<=0 || viewport.Height()<=0) return {};
+	return NumberTextGeometry{id,entry.identity,BoundsOf(caret),BoundsOf(viewport),entry.scroll};
+}
+std::shared_ptr<const TextRun> NumberControlView::CommandRun(const std::string& id,NumberEditIdentity expected,
+	const Interaction& interaction,std::string& error) const {
+	error.clear(); const auto found=impl->entries.find(id); const auto view=interaction.Widget(id);
+	if (found==impl->entries.end() || !view || !view->number || !view->number->active ||
+		!expected.session || !expected.revision || view->number->identity!=expected ||
+		interaction.Focused()!=id || !interaction.CanActivate(id) || view->number->composition ||
+		view->number->conflict || view->pending || view->number->nativePresentation || view->number->nativeUnsettled) { error="Number command editor is stale or unavailable"; return {}; }
+	auto* parent=impl->Element(found->second.spec.text);
+	if (!parent || !parent->IsVisible(true)) { error="Number command typography is unavailable"; return {}; }
+	// The generated #text child inherits the wrapper's resolved typography, just
+	// as in Paint. Its line text can still be an earlier edit; never measure that.
+	auto* typography=parent;
+	if (parent->GetNumChildren()==1 && parent->GetChild(0)->GetTagName()=="#text") typography=parent->GetChild(0);
+	const auto font=typography->GetFontFaceHandle();
+	if (!font || !impl->query) { error="Number command font is unavailable"; return {}; }
+	const auto& plain=view->number->state.text;
+	if (!found->second.spec.masked) {
+		auto run=impl->query(font,plain,typography->GetComputedValues().letter_spacing());
+		if (!run || !run->monotonicLtr || run->text!=plain) {
+			error="Number command requires a current scalar LTR text run"; return {};
+		}
+		return run;
+	}
+	// A masked field moves over its mask, which is always a scalar LTR run
+	// whatever the plain text's script: measure the mask, then carry its
+	// offsets onto the plain text's scalar boundaries.
+	Mask mask; if (!MaskOf(plain,mask)) { error="Masked command text starts inside a scalar"; return {}; }
+	const auto shown=impl->query(font,mask.text,typography->GetComputedValues().letter_spacing());
+	if (!shown || !shown->monotonicLtr || shown->text!=mask.text) {
+		error="Number command requires a current scalar LTR text run"; return {};
+	}
+	auto run=std::make_shared<TextRun>(*shown); run->text=plain;
+	const auto plainOffset=[&](std::size_t& offset) {
+		if (offset>=mask.boundaries.size()) return false;
+		offset=mask.boundaries[offset]; return true;
+	};
+	for (auto& caret:run->carets) if (!plainOffset(caret.byteOffset)) { error="Masked command run is malformed"; return {}; }
+	for (auto& glyph:run->glyphs)
+		if (!plainOffset(glyph.byteStart) || !plainOffset(glyph.byteEnd)) { error="Masked command run is malformed"; return {}; }
+	return run;
+}
+} // namespace openq4::ui

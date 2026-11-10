@@ -32,6 +32,16 @@ If you have questions concerning this license or the applicable additional terms
 #include "AASFile.h"
 #include "AASFile_local.h"
 
+// Compilers write beside the engine (fs_cdpath) by default. The level
+// editor's sandboxed build process sets fs_savepath so its outputs stay in
+// the sandbox until the whole build has succeeded.
+static idCVar com_compilerOutput( "com_compilerOutput", "fs_cdpath", CVAR_SYSTEM,
+	"where dmap and AAS write .proc and .aas files: fs_cdpath (beside the engine) or fs_savepath" );
+
+const char *Compiler_OutputBasePath( void ) {
+	return idStr::Icmp( com_compilerOutput.GetString(), "fs_savepath" ) == 0 ? "fs_savepath" : "fs_cdpath";
+}
+
 
 /*
 ===============================================================================
@@ -161,6 +171,7 @@ idAASSettings::idAASSettings( void ) {
 	boundingBoxes[0] = idBounds( idVec3( -16, -16, 0 ), idVec3( 16, 16, 72 ) );
 	usePatches = false;
 // jmarshall - aas 1.08
+	generateAllFaces = false;
 	generateTacticalFeatures = false;
 // jmarshall end
 	writeBrushMap = false;
@@ -262,6 +273,12 @@ bool idAASSettings::ParseBBoxes( idLexer &src ) {
 		}
 		src.Parse1DMatrix( 3, bounds[1].ToFloatPtr() );
 
+		// openQ4: the file decides how many boxes follow, and each one past the
+		// array's four was written over the settings and the file object after it
+		if ( numBoundingBoxes >= MAX_AAS_BOUNDING_BOXES ) {
+			src.Error( "more than %d bounding boxes", MAX_AAS_BOUNDING_BOXES );
+			return false;
+		}
 		boundingBoxes[numBoundingBoxes++] = bounds;
 	}
 	return false;
@@ -296,8 +313,11 @@ bool idAASSettings::FromParser( idLexer &src ) {
 			if ( !ParseBool( src, usePatches ) ) { return false; }
 		}
 // jmarshall: AAS 1.08
-		else if (token == "generateTacticalFeatures") {
-			if (!ParseBool(src, generateTacticalFeatures)) { return false; }
+		else if ( token == "generateAllFaces" ) {
+			if ( !ParseBool( src, generateAllFaces ) ) { return false; }
+		}
+		else if ( token == "generateTacticalFeatures" ) {
+			if ( !ParseBool( src, generateTacticalFeatures ) ) { return false; }
 		}
 // jmarshall end
 		else if ( token == "writeBrushMap" ) {
@@ -478,6 +498,15 @@ bool idAASSettings::FromDict( const char *name, const idDict *dict ) {
 		common->Error( "Missing 'tt_startWalkOffLedge' in entityDef '%s'", name );
 	}
 
+	// optional Quake 4 keys: the debug-draw tint and switch, and whether the
+	// compiler places tactical features (the shipped aas32 asks for them)
+	idVec3 color;
+	if ( dict->GetVector( "debugColor", "1.0 0.0 0.0", color ) ) {
+		debugColor.Set( color.x, color.y, color.z, 1.0f );
+	}
+	debugDraw = dict->GetBool( "debugDraw", "1" );
+	generateTacticalFeatures = dict->GetBool( "generateTacticalFeatures", "0" );
+
 	return true;
 }
 
@@ -503,8 +532,8 @@ bool idAASSettings::WriteToFile( idFile *fp ) const {
 	fp->WriteFloatString( "\tallowSwimReachabilities = %d\n", allowSwimReachabilities );
 	fp->WriteFloatString( "\tallowFlyReachabilities = %d\n", allowFlyReachabilities );
 // jmarshall - AAS 1.08
-	fp->WriteFloatString("\tgenerateAllFaces = 0\n");
-	fp->WriteFloatString("\tgenerateTacticalFeatures = 0\n");
+	fp->WriteFloatString( "\tgenerateAllFaces = %d\n", generateAllFaces );
+	fp->WriteFloatString( "\tgenerateTacticalFeatures = %d\n", generateTacticalFeatures );
 // jmarshall end
 	fp->WriteFloatString( "\tfileExtension = \"%s\"\n", fileExtension.c_str() );
 	fp->WriteFloatString( "\tgravity = (%f %f %f)\n", gravity.x, gravity.y, gravity.z );
@@ -653,6 +682,22 @@ void idAASFileLocal::Clear( void ) {
 
 /*
 ================
+idAASFileLocal::ClearTactical
+
+Drops the tactical features and the per-area spans that index them.
+================
+*/
+void idAASFileLocal::ClearTactical( void ) {
+	for ( int i = 0; i < areas.Num(); i++ ) {
+		areas[i].numFeatures = 0;
+		areas[i].firstFeature = 0;
+	}
+	featureIndexes.Clear();
+	features.Clear();
+}
+
+/*
+================
 idAASFileLocal::Write
 ================
 */
@@ -662,16 +707,19 @@ bool idAASFileLocal::Write( const idStr &fileName, unsigned int mapFileCRC ) {
 	idReachability *reach;
 
 	common->Printf( "[Write AAS]\n" );
-	common->Printf( "writing %s\n", fileName.c_str() );
 
 	name = fileName;
 	crc = mapFileCRC;
 
-	aasFile = fileSystem->OpenFileWrite( fileName, "fs_cdpath" );
+	aasFile = fileSystem->OpenFileWrite( fileName, Compiler_OutputBasePath() );
 	if ( !aasFile ) {
 		common->Error( "Error opening %s", fileName.c_str() );
 		return false;
 	}
+
+	// report the real destination: compiled output lands beside the engine
+	// (fs_cdpath), which is not necessarily where the .map was read from
+	common->Printf( "writing %s\n", aasFile->GetFullPath() );
 
 	aasFile->WriteFloatString( "%s \"%s\"\n\n", AAS_FILEID, AAS_FILEVERSION );
 	aasFile->WriteFloatString( "%u\n\n", mapFileCRC );
@@ -737,10 +785,9 @@ bool idAASFileLocal::Write( const idStr &fileName, unsigned int mapFileCRC ) {
 		aasFile->WriteFloatString( "\t%d ( %d %d %d %d %d %d ) %d {\n", i, areas[i].flags, areas[i].contents,
 						areas[i].firstFace, areas[i].numFaces, areas[i].cluster, areas[i].clusterAreaNum, num );
 #else
-// jmarshall: AAS 1.08 - numFeatures/firstFeature
+		// AAS 1.08 areas carry their span of the tactical feature index
 		aasFile->WriteFloatString( "\t%d ( %d %d %d %d %d %d %d %d ) %d {\n", i, areas[i].flags, areas[i].contents,
-						areas[i].firstFace, areas[i].numFaces, areas[i].cluster, areas[i].clusterAreaNum, /*areas[i].numFeatures*/ 0, /*areas[i].firstFeature*/ 0, num );
-// jmarshall end
+						areas[i].firstFace, areas[i].numFaces, areas[i].cluster, areas[i].clusterAreaNum, areas[i].numFeatures, areas[i].firstFeature, num );
 #endif
 		for ( reach = areas[i].reach; reach; reach = reach->next ) {
 			Reachability_Write( aasFile, reach );
@@ -785,6 +832,24 @@ bool idAASFileLocal::Write( const idStr &fileName, unsigned int mapFileCRC ) {
 	}
 	aasFile->WriteFloatString( "}\n" );
 
+	// write out the tactical features; like Quake 4, a file without any omits
+	// both sections
+	if ( features.Num() ) {
+		aasFile->WriteFloatString( "featureIndex %d {\n", featureIndexes.Num() );
+		for ( i = 0; i < featureIndexes.Num(); i++ ) {
+			aasFile->WriteFloatString( "\t%d ( %d )\n", i, featureIndexes[i] );
+		}
+		aasFile->WriteFloatString( "}\n" );
+
+		aasFile->WriteFloatString( "features %d {\n", features.Num() );
+		for ( i = 0; i < features.Num(); i++ ) {
+			const aasFeature_t &feature = features[i];
+			aasFile->WriteFloatString( "\t%d ( %d %d %d %d %d %d %d )\n", i, feature.flags, feature.height,
+							feature.normalx, feature.normaly, feature.x, feature.y, feature.z );
+		}
+		aasFile->WriteFloatString( "}\n" );
+	}
+
 	// close file
 	fileSystem->CloseFile( aasFile );
 
@@ -819,6 +884,98 @@ bool idAASFileLocal::ParseIndex( idLexer &src, idList<aasIndex_t> &indexes, aasD
 	}
 	isDummy[dummySection] = ( numIndexes == 0 );
 	return true;
+}
+
+/*
+================
+idAASFileLocal::ParseFeatureIndex
+================
+*/
+bool idAASFileLocal::ParseFeatureIndex( idLexer &src ) {
+	const int numIndexes = src.ParseInt();
+	if ( numIndexes < 0 || !src.ExpectTokenString( "{" ) ) {
+		return false;
+	}
+	featureIndexes.Resize( numIndexes );
+	for ( int i = 0; i < numIndexes; i++ ) {
+		src.ParseInt();
+		if ( !src.ExpectTokenString( "(" ) ) {
+			return false;
+		}
+		featureIndexes.Append( src.ParseInt() );
+		if ( !src.ExpectTokenString( ")" ) ) {
+			return false;
+		}
+	}
+	return src.ExpectTokenString( "}" ) != 0;
+}
+
+/*
+================
+idAASFileLocal::ParseFeatures
+
+Each feature is ( flags height normalx normaly x y z ).
+================
+*/
+bool idAASFileLocal::ParseFeatures( idLexer &src ) {
+	const int numFeatures = src.ParseInt();
+	if ( numFeatures < 0 || !src.ExpectTokenString( "{" ) ) {
+		return false;
+	}
+	features.Resize( numFeatures );
+	for ( int i = 0; i < numFeatures; i++ ) {
+		aasFeature_t feature = {};
+
+		src.ParseInt();
+		if ( !src.ExpectTokenString( "(" ) ) {
+			return false;
+		}
+		feature.flags = static_cast<unsigned short>( src.ParseInt() );
+		feature.height = static_cast<unsigned char>( src.ParseInt() );
+		feature.normalx = static_cast<unsigned char>( src.ParseInt() );
+		feature.normaly = static_cast<unsigned char>( src.ParseInt() );
+		feature.x = static_cast<short>( src.ParseInt() );
+		feature.y = static_cast<short>( src.ParseInt() );
+		feature.z = static_cast<short>( src.ParseInt() );
+		if ( !src.ExpectTokenString( ")" ) ) {
+			return false;
+		}
+		features.Append( feature );
+	}
+	return src.ExpectTokenString( "}" ) != 0;
+}
+
+/*
+================
+idAASFileLocal::ValidateTactical
+
+The tactical sensor reads features through each area's span of the feature
+index without bounds checks. Navigation does not depend on features, so data
+that does not index consistently is dropped rather than failing the file.
+================
+*/
+void idAASFileLocal::ValidateTactical( void ) {
+	const char *problem = NULL;
+	int problemValue = 0;
+
+	for ( int i = 0; i < featureIndexes.Num() && !problem; i++ ) {
+		if ( featureIndexes[i] < 0 || featureIndexes[i] >= features.Num() ) {
+			problem = "feature index %d points outside the features";
+			problemValue = i;
+		}
+	}
+	for ( int i = 0; i < areas.Num() && !problem; i++ ) {
+		if ( areas[i].numFeatures && areas[i].firstFeature + areas[i].numFeatures > featureIndexes.Num() ) {
+			problem = "area %d's features run past the feature index";
+			problemValue = i;
+		}
+	}
+	if ( !problem ) {
+		return;
+	}
+
+	common->Warning( "%s: %s; its tactical features are ignored", name.c_str(), va( problem, problemValue ) );
+	ClearTactical();
 }
 
 /*
@@ -1043,6 +1200,17 @@ bool idAASFileLocal::ParseAreas( idLexer &src ) {
 		return false;
 	}
 	isDummy[AAS_DUMMY_AREAS] = ( numAreas == 0 );
+
+	// openQ4: a reachability's target area is a number from the file, and the
+	// link below stores a pointer in areas[] through it
+	for ( i = 0; i < areas.Num(); i++ ) {
+		for ( const idReachability *reach = areas[i].reach; reach; reach = reach->next ) {
+			if ( reach->toAreaNum < 0 || reach->toAreaNum >= areas.Num() ) {
+				src.Error( "area %d has a reachability to area %d of %d", i, reach->toAreaNum, areas.Num() );
+				return false;
+			}
+		}
+	}
 
 	LinkReversedReachability();
 
@@ -1306,46 +1474,13 @@ bool idAASFileLocal::Load( const idStr &fileName, unsigned int mapFileCRC ) {
 		else if ( token == "clusters" ) {
 			if ( !ParseClusters( src ) ) { return false; }
 		}
-// jmarshall - AAS 1.08
-		else if (token == "featureIndex") {
-			int numFeatureIndexes = src.ParseInt();
-			src.ExpectTokenString("{");
-
-			for (int d = 0; d < numFeatureIndexes; d++)
-			{
-				src.ParseInt();
-				src.ExpectTokenString("(");
-				featureIndexes.Append(src.ParseInt());
-				src.ExpectTokenString(")");
-			}
-
-			src.ExpectTokenString("}");
+		// AAS 1.08 tactical features
+		else if ( token == "featureIndex" ) {
+			if ( !ParseFeatureIndex( src ) ) { return false; }
 		}
-		else if (token == "features") {
-			int numFeatures = src.ParseInt();
-			src.ExpectTokenString("{");
-
-			for (int d = 0; d < numFeatures; d++)
-			{
-				aasFeature_t feature = { };
-
-				src.ParseInt();
-				src.ExpectTokenString("(");
-				feature.flags = src.ParseInt();					// 2 Bytes
-				feature.height = src.ParseInt();					// 2 Bytes
-				feature.normalx = src.ParseInt();					// 2 Bytes
-				feature.normaly = src.ParseInt();				// 2 Bytes
-				feature.x = src.ParseInt();			// 1 Byte
-				feature.y = src.ParseInt();			// 1 Byte
-				feature.z = src.ParseInt();				// 1 Byte
-
-				features.Append(feature);
-				src.ExpectTokenString(")");
-			}
-
-			src.ExpectTokenString("}");
+		else if ( token == "features" ) {
+			if ( !ParseFeatures( src ) ) { return false; }
 		}
-// jmarshall end
 		else {
 			src.Error( "idAASFileLocal::Load: bad token \"%s\"", token.c_str() );
 			return false;
@@ -1353,6 +1488,7 @@ bool idAASFileLocal::Load( const idStr &fileName, unsigned int mapFileCRC ) {
 	}
 
 	FinishAreas();
+	ValidateTactical();
 
 	if ( !IsDummyFile( mapFileCRC ) ) {
 		if ( vertices.Num() == 0 || edges.Num() == 0 || faces.Num() == 0 ) {
@@ -1377,7 +1513,7 @@ idAASFileLocal::MemorySize
 ================
 */
 int idAASFileLocal::MemorySize( void ) const {
-	int size;
+	size_t size;
 
 	size = planeList.Size();
 	size += vertices.Size();
@@ -1392,7 +1528,7 @@ int idAASFileLocal::MemorySize( void ) const {
 	size += clusters.Size();
 	size += sizeof( idReachability_Walk ) * NumReachabilities();
 
-	return size;
+	return idLib::SizeToInt( size, "idAASFileLocal::MemorySize" );
 }
 
 /*

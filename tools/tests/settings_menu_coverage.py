@@ -3,12 +3,15 @@
 
 from collections import defaultdict
 import json
+import os
 from pathlib import Path
 import re
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GAME_LIBS = ROOT.parent / "openQ4-game"
+GAME_LIBS = Path(
+    os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT)
+).resolve()
 
 
 def read(path: Path) -> str:
@@ -23,6 +26,29 @@ def require(haystack: str, needle: str, context: str) -> None:
 def reject(haystack: str, needle: str, context: str) -> None:
     if needle in haystack:
         raise AssertionError(f"Unexpected {needle!r} in {context}")
+
+
+def cvar_statement(source_text: str, name: str, context: str) -> str:
+    match = re.search(
+        rf'^idCVar\s+\w+\(\s*"{re.escape(name)}".*?;\s*$',
+        source_text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if match is None:
+        raise AssertionError(f"Missing CVar declaration for {name!r} in {context}")
+    return " ".join(match.group(0).split())
+
+
+def cvar_signature(source_text: str, name: str, context: str) -> tuple[str, set[str]]:
+    statement = cvar_statement(source_text, name, context)
+    match = re.match(
+        rf'idCVar\s+\w+\(\s*"{re.escape(name)}"\s*,\s*"([^"]*)"\s*,\s*([^,]+),',
+        statement,
+        re.IGNORECASE,
+    )
+    if match is None:
+        raise AssertionError(f"Cannot parse CVar declaration for {name!r} in {context}")
+    return match.group(1), {flag.strip() for flag in match.group(2).split("|")}
 
 
 def gui_block(source_text: str, widget_name: str) -> str:
@@ -257,9 +283,11 @@ def validate_performance_preset_wiring(
     ):
         require(common_cpp, token, "Performance preset engine wiring")
 
-    implementation_start = common_cpp.index("typedef struct openQ4PerformancePreset_s")
+    implementation_start = common_cpp.index("using openQ4PerformancePreset_t = openq4::PerformancePreset;")
     implementation_end = common_cpp.index("Com_ReloadEngine_f", implementation_start)
-    implementation = common_cpp[implementation_start:implementation_end]
+    implementation = common_cpp[implementation_start:implementation_end] + read(ROOT / "src/framework/PerformancePreset.cpp")
+    for shared in ("openq4::PerformancePresets()", "openq4::PerformancePresetTargets()", "openq4::ExpandPerformancePreset(preset,expansion,expansionError)", "openq4::DetectPerformancePreset(signals)"):
+        require(common_cpp, shared, "shared performance preset source")
     for obsolete_target in (
         "OPENQ4_PERFORMANCE_PRESET_DYNAMIC_CVARS",
         '"image_filter"',
@@ -500,6 +528,7 @@ def validate_value_entry_widgets(mainmenu: str, system_gui: str, audio_gui: str,
             "set_game_msenscap_value",
             "set_game_controller_deadzone_value",
             "set_game_controller_look_sensitivity_value",
+            "set_game_controller_wheel_sensitivity_value",
             "set_game_controller_look_curve_value",
             "set_game_controller_trigger_value",
             "set_game_controller_rumble_strength_value",
@@ -626,10 +655,10 @@ def validate_controls_pane_extraction(mainmenu: str, controls_gui: str) -> None:
         '"loadgame quick"',
         "clientMessageMode",
         '"clientMessageMode 1"',
-        "voteyes",
-        "voteno",
+        "_impulse28",
+        "_impulse29",
         "_ingamestats",
-        "ready",
+        "_impulse17",
         '"emote salute"',
         '"emote cheer"',
         '"emote taunt"',
@@ -704,8 +733,370 @@ def validate_scripted_pseudo_setting_adapters(game_gui: str, session_menu: str) 
         require(session_menu, token, "Corpse Time typed adapter")
 
 
+def validate_ingame_menu_activation_contract(
+    mainmenu: str,
+    session_menu: str,
+    session_cpp: str,
+) -> None:
+    set_gui = session_menu[
+        session_menu.index("void idSessionLocal::SetGUI") :
+        session_menu.index("idSessionLocal::ExitMenu")
+    ]
+    for token in (
+        "const bool refreshCatalogs = !mapSpawned;",
+        "if ( refreshCatalogs )",
+        "SetMainMenuGuiVars( refreshCatalogs );",
+    ):
+        require(set_gui, token, "bounded in-game main-menu activation")
+
+    set_main_menu_vars = session_menu[
+        session_menu.index("void idSessionLocal::SetMainMenuGuiVars") :
+        session_menu.index("idSessionLocal::HandleSaveGameMenuCommand")
+    ]
+    for token in (
+        "SetKeyBindingNames()",
+        "PopulateMainMenuAudioDeviceChoices( guiMainMenu )",
+        "PopulateMainMenuDisplayChoices( guiMainMenu )",
+        "SetModsMenuGuiVars()",
+        "SetMainMenuMPModelVars( guiMainMenu )",
+    ):
+        require(set_main_menu_vars, token, "lazy main-menu catalogs")
+    reject(set_main_menu_vars, "SetMainMenuBackgroundMontageGuiVars()", "synchronous menu activation")
+
+    montage_init = session_cpp[
+        session_cpp.index('guiMainMenu = uiManager->FindGui( "guis/mainmenu.gui"') :
+        session_cpp.index("guiMainMenu_MapList = uiManager->AllocListGUI()")
+    ]
+    require(montage_init, "PrimeMainMenuGuiResources();", "session-time menu resource warmup")
+
+    map_load_prime = session_cpp[
+        session_cpp.index("uiManager->BeginLevelLoad();") :
+        session_cpp.index("// set the loading gui that we will wipe to")
+    ]
+    require(map_load_prime, "PrimeMainMenuGuiResources();", "level-load menu resource precache")
+    prime_resources = session_cpp[
+        session_cpp.index("void idSessionLocal::PrimeMainMenuGuiResources") :
+        session_cpp.index("static void Session_DrawFallbackLoadingScreen")
+    ]
+    for token in (
+        "SetMainMenuBackgroundMontageGuiVars();",
+        'declManager->FindMaterial( fallbackLevelshot )',
+        "renderSystem->PreloadImage( fallbackLevelshot );",
+        'declManager->FindSound( "main_menu_gameplay" );',
+    ):
+        require(prime_resources, token, "complete in-game menu resource precache")
+
+    load_in = gui_block(mainmenu, "anim_loadIn")
+    save_in = gui_block(mainmenu, "anim_saveIn")
+    settings_in = gui_block(mainmenu, "anim_settingsIn")
+    mods_in = gui_block(mainmenu, "anim_pop_modsIn")
+    require(load_in, 'set "cmd" "refreshSaveGameList" ;', "lazy Load Game catalog")
+    reject(load_in, 'set "cmd" "MAPScan" ;', "Load Game map-declaration scan")
+    require(save_in, 'set "cmd" "refreshSaveGameList" ;', "lazy Save Game catalog")
+    require(mods_in, 'set "cmd" "refreshMods" ;', "lazy Mods catalog")
+    for command in ("refreshKeyBindings", "refreshSystemSettings", "refreshAudioSettings"):
+        require(settings_in, f'set "cmd" "{command}" ;', "lazy Settings catalog")
+        require(session_menu, f'!idStr::Icmp( cmd, "{command}" )', "lazy Settings command handler")
+
+    for widget, command in (
+        ("set_b_controls", "refreshKeyBindings"),
+        ("set_b_system", "refreshSystemSettings"),
+        ("set_b_audio", "refreshAudioSettings"),
+    ):
+        require(gui_block(mainmenu, widget), f'set "cmd" "{command}" ;', f"{widget} lazy refresh")
+    for command in ("refreshSaveGameList", "refreshMods"):
+        require(session_menu, f'!idStr::Icmp( cmd, "{command}" )', f"{command} handler")
+
+    for token in (
+        "Session_openQ4AssertMenuActivation_f",
+        "OPENQ4_MENU_ACTIVATION PASS elapsed=%dms limit=%dms",
+        'AddCommand( "openq4_assertMenuActivation"',
+    ):
+        require(session_cpp, token, "runtime in-game menu activation assertion")
+
+
+def validate_create_server_choices(mainmenu: str, session_menu: str) -> None:
+    """Create Server's Server Type and Dedicated rows reach startMultiplayer.
+
+    The rows bind CVars, and retail Quake4.exe 1.4.2's startMultiplayer reads
+    them (as net_menuLANServer and net_serverMenuDedicated; CVar names are
+    case-insensitive). Quake 4's menu never sets Doom 3's "server_type" and
+    "dedicated" GUI keys, so reading those made every menu server an Internet
+    listen server whatever the player picked.
+    """
+    require(gui_block(mainmenu, "mp_create_val2"), "cvar\tnet_menulanserver", "Create Server type row")
+    require(gui_block(mainmenu, "mp_create_val3"), "cvar\tnet_serverMenuDedicated", "Create Server dedicated row")
+    reject(session_menu, 'State().GetBool( "server_type" )', "Create Server type")
+    reject(session_menu, 'State().GetInt( "dedicated" )', "Create Server dedicated")
+
+    handler = session_menu[session_menu.index('!idStr::Icmp( cmd, "startMultiplayer" )') :]
+    # The stock button and the retained Create Server page start the server
+    # through one body, StartMenuServer.
+    if "StartMenuServer()" in handler[: handler.index("continue;")]:
+        handler = session_menu[session_menu.index("bool idSessionLocal::StartMenuServer() {") :]
+    handler = handler[: handler.index('"SpawnServer\\n"')]
+    require(
+        handler,
+        'cvarSystem->SetCVarBool( "net_LANServer", cvarSystem->GetCVarBool( "net_menulanserver" ) );',
+        "startMultiplayer Server Type",
+    )
+    # Dedicated asks SpawnServer for a dedicated server, which turns this client
+    # into one in process (validate_dedicated_conversion); it used to fall back
+    # to a listen server with a warning.
+    require(
+        handler,
+        'const int dedicated = cvarSystem->GetCVarBool( "net_serverMenuDedicated" ) ? 1 : 0;',
+        "startMultiplayer Dedicated",
+    )
+    require(handler, 'cvarSystem->SetCVarInteger( "net_serverDedicated", 1 );', "startMultiplayer Dedicated")
+    reject(handler, "int dedicated = 0;", "startMultiplayer Dedicated (listen-server fallback)")
+    reject(handler, "Dedicated is not available in the game yet", "startMultiplayer Dedicated (fallback warning)")
+
+
+def function_body(source_text: str, header: str, context: str) -> str:
+    start = source_text.find(header)
+    if start < 0:
+        raise AssertionError(f"Missing {header!r} in {context}")
+    end = source_text.find("\n}\n", start)
+    if end < 0:
+        raise AssertionError(f"Unterminated {header!r} in {context}")
+    return source_text[start : end + 2]
+
+
+def require_order(haystack: str, needles: list[str], context: str) -> None:
+    position = -1
+    for needle in needles:
+        found = haystack.find(needle, position + 1)
+        if found < 0:
+            raise AssertionError(f"Missing {needle!r} after the previous step in {context}")
+        position = found
+
+
+def validate_dedicated_conversion() -> None:
+    """Dedicated turns the running client into a dedicated server, as retail does.
+
+    SpawnServer_f closes the window, makes the system console the server's only
+    interface and releases the audio device. A spawn from game_sp or q4xbase
+    first reloads, and the client must come back from it with its window to be
+    converted, so net_serverDedicated 1 is held back across it and resumed by the
+    replayed spawnServer. An engine that starts with net_serverDedicated 1 and no
+    device (a launch with it, or any later engine reload) is a dedicated server
+    already: like openQ4-ded's, its session gets worlds and no menus, so a map
+    change's reload holds nothing back. The teardown must leave nothing that a
+    later frame or the final shutdown touches without its device.
+    """
+    network = read(ROOT / "src/framework/async/AsyncNetwork.cpp")
+    spawn = function_body(network, "void idAsyncNetwork::SpawnServer_f( const idCmdArgs &args ) {", "AsyncNetwork.cpp")
+    hold = "dedicatedSpawnDeferred = true;\n\t\t\tserverDedicated.SetInteger( 0 );"
+    require_order(
+        spawn,
+        [
+            "if ( dedicatedSpawnDeferred ) {\n\t\tdedicatedSpawnDeferred = false;\n\t\tserverDedicated.SetInteger( 1 );",
+            "serverDedicated.GetInteger() == 1 && renderSystem->IsOpenGLRunning()",
+            '"q4xbase"',
+            "dedicatedSpawnDeferred = true;\n            serverDedicated.SetInteger( 0 );",
+            "cmdSystem->SetupReloadEngineMenu( args );",
+            hold,
+            "cmdSystem->SetupReloadGameModule( reloadArgs );",
+            # a session without worlds (no device) cannot load a map
+            "if ( session->rw == NULL ) {",
+            "Sys_ShowConsole( cvarSystem->GetCVarBool( \"r_hiddenWindow\" ) ? 0 : 1, true );",
+            "renderSystem->ShutdownOpenGL();",
+            "Sys_ReleaseInstanceLock();",
+            "soundSystem->ShutdownHW();",
+            "server.Spawn();",
+        ],
+        "SpawnServer_f dedicated conversion",
+    )
+    # Shutdown() deletes every sample while sound shaders keep pointers to them.
+    reject(spawn, "soundSystem->Shutdown();", "SpawnServer_f dedicated conversion")
+    # A map change that reloads the engine (an addon map, net_serverReloadEngine)
+    # queues spawnServer after it. The server comes back without a device, still
+    # a dedicated server, so nothing is held back across that reload.
+    reject(network, "HoldDedicatedAcrossReload", "AsyncNetwork.cpp")
+    server = read(ROOT / "src/framework/async/AsyncServer.cpp")
+    require_order(
+        server,
+        [
+            'cmdSystem->BufferCommandText( CMD_EXEC_NOW, "reloadEngine" );',
+            'cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "spawnServer\\n" );',
+        ],
+        "server map change engine reload",
+    )
+    reject(server, "HoldDedicatedAcrossReload", "server map change engine reload")
+
+    common = read(ROOT / "src/framework/Common.cpp")
+    swap = function_body(common, "void Com_ReloadGameModule_f( const idCmdArgs &args ) {", "Common.cpp")
+    require_order(
+        swap,
+        ["ReloadGameModule failed", "idAsyncNetwork::AbandonDeferredDedicatedSpawn();", "session->StartMenu();"],
+        "failed game-module swap",
+    )
+    # A non-menu engine reload leaves a dedicated server's console as it is (its
+    # only window, quitting on close); only a client shows it for the reload.
+    reload = function_body(common, "void Com_ReloadEngine_f( const idCmdArgs &args ) {", "Common.cpp")
+    require_order(
+        reload,
+        [
+            "if ( idAsyncNetwork::serverDedicated.GetInteger() != 1 ) {",
+            "Sys_ShowConsole( 1, false );",
+            "} else if ( renderSystem != NULL && renderSystem->IsOpenGLRunning() ) {",
+            'Sys_ShowConsole( cvarSystem->GetCVarBool( "r_hiddenWindow" ) ? 0 : 1, true );',
+            "commonLocal.ShutdownGame( true );",
+        ],
+        "dedicated console across an engine reload",
+    )
+    # A launch with net_serverDedicated 1 shows its console quitting on close, and
+    # hidden with the game window. r_hiddenWindow is NOCHEAT, so a spawn's reset of
+    # cheat CVars cannot show the window or the console afterwards.
+    win_main = read(ROOT / "src/sys/win32/win_main.cpp")
+    require(win_main, 'cvarSystem->GetCVarBool("r_hiddenWindow");\n\t\tSys_ShowConsole(hidden ? 0 : 1, true);',
+            "hidden dedicated launch console")
+    renderer_init = read(ROOT / "src/renderer/RenderSystem_init.cpp")
+    _, hidden_flags = cvar_signature(renderer_init, "r_hiddenWindow", "RenderSystem_init.cpp")
+    require(" ".join(sorted(hidden_flags)), "CVAR_NOCHEAT", "r_hiddenWindow flags")
+
+    # A dedicated server's session, the client's without a device included, gets
+    # its worlds and none of the menus, as openQ4-ded's does.
+    session = read(ROOT / "src/framework/Session.cpp")
+    predicate = function_body(session, "bool idSessionLocal::IsDedicatedServer() const {", "Session.cpp")
+    require_order(
+        predicate,
+        ["#ifdef ID_DEDICATED", "return true;", "idAsyncNetwork::serverDedicated.GetInteger() == 1 &&",
+         "!renderSystem->IsOpenGLRunning()"],
+        "dedicated session predicate",
+    )
+    init = function_body(session, "void idSessionLocal::Init() {", "Session.cpp")
+    require_order(
+        init,
+        [
+            'AddCommand( "rescanSI"',
+            "const bool dedicatedServer = IsDedicatedServer();",
+            "if ( !dedicatedServer ) {",
+            "IsOpenGLRunning() ) return;",
+            "rw = renderSystem->AllocRenderWorld();",
+            "menuSoundWorld = soundSystem->AllocSoundWorld( rw );",
+            "if ( dedicatedServer ) {",
+            '"Dedicated server: skipping client GUI preload.\\n"',
+            "} else {",
+            'guiMainMenu = uiManager->FindGui( "guis/mainmenu.gui", true, false, true );',
+            "arenaCampaign.Init();",
+        ],
+        "dedicated session init",
+    )
+    # uiManager frees the menus at every engine reload: none may dangle into a
+    # session that gets none.
+    require(
+        function_body(session, "void idSessionLocal::Clear() {", "Session.cpp"),
+        "guiMainMenu = guiRestartMenu = guiGameOver = guiMsg = guiTakeNotes = guiIntro = NULL;",
+        "menus released with the session",
+    )
+    for header, refusal in (
+        ("void idSessionLocal::StartNewGame(", "Dedicated servers cannot start singleplayer games."),
+        ("bool idSessionLocal::LoadGame(", "Dedicated servers cannot load games."),
+        ("void idSessionLocal::StartPlayingRenderDemo(", "Dedicated servers cannot play demos."),
+        ("void idSessionLocal::StartPlayingCmdDemo(", "Dedicated servers cannot play demos."),
+    ):
+        require_order(function_body(session, header, "Session.cpp"), ["if ( IsDedicatedServer() ) {", refusal], header)
+    # Every path to the main menu survives a session without one.
+    menu = read(ROOT / "src/framework/Session_menu.cpp")
+    require_order(
+        function_body(menu, "void idSessionLocal::StartMenu( bool playIntro ) {", "Session_menu.cpp"),
+        ["if ( guiMainMenu == NULL ) {", "SetGUI( NULL, NULL );", "return;", "guiMainMenu->HandleNamedEvent("],
+        "StartMenu without menus",
+    )
+    require_order(
+        function_body(menu, "void idSessionLocal::DispatchCommand(", "Session_menu.cpp"),
+        ["if ( gui == NULL && guiMainMenu == NULL ) {", "return;", "if ( gui == guiMainMenu ) {"],
+        "DispatchCommand without menus",
+    )
+    require(
+        function_body(menu, "void idSessionLocal::HandleGameMenuReturn(", "Session_menu.cpp"),
+        "if ( mainMenuEvent.Length() > 0 && guiMainMenu != NULL ) {",
+        "game menu return without menus",
+    )
+
+    sound = read(ROOT / "src/sound/snd_system.cpp")
+    _, no_sound_flags = cvar_signature(sound, "s_noSound", "snd_system.cpp")
+    # NOCHEAT as in retail: a spawn without cheats resets unarchived cheat CVars.
+    require(" ".join(sorted(no_sound_flags)), "CVAR_NOCHEAT", "s_noSound flags")
+    release = function_body(sound, "void idSoundSystemLocal::ShutdownHW()", "snd_system.cpp")
+    require_order(
+        release,
+        [
+            "s_noSound.SetBool( true );",
+            "emitter->channels[c]->Mute();",
+            "samples[i]->FreeData();",
+            "hardware.Shutdown();",
+            "hardware.ClearInitFailure();",
+        ],
+        "sound hardware release",
+    )
+    reject(release, "DeleteContents", "sound hardware release")
+    reject(release, "sampleHash.Free", "sound hardware release")
+
+    upload = read(ROOT / "src/renderer/RendererUpload.cpp")
+    delete = function_body(upload, "static void R_RendererUpload_DeleteBufferName( unsigned int &vbo ) {", "RendererUpload.cpp")
+    require(delete, "if ( glConfig.isInitialized && glDeleteBuffersARB != NULL ) {", "buffer delete without a context")
+
+    renderer = read(ROOT / "src/renderer/RenderSystem_init.cpp")
+    shutdown_gl = function_body(renderer, "void idRenderSystemLocal::ShutdownOpenGL( void ) {", "RenderSystem_init.cpp")
+    require_order(
+        shutdown_gl,
+        ["R_ShutdownFrameData();", "tr.viewDef = NULL; tr.primaryView = NULL; backEnd.viewDef = NULL;", "GLimp_Shutdown();"],
+        "ShutdownOpenGL view pointers",
+    )
+
+    posix = read(ROOT / "src/sys/posix/posix_syscon.cpp")
+    request = function_body(posix, "static void Posix_ConsoleRequestQuit( void ) {", "posix_syscon.cpp")
+    require_order(
+        request,
+        ["s_consoleWindow.forceFatalWindow", "s_consoleWindow.exitRequested = true;", 'Posix_ConsoleQueueCommand( "quit" );'],
+        "POSIX console quit request",
+    )
+    close = function_body(posix, "static void Posix_ConsoleHandleClose( void ) {", "posix_syscon.cpp")
+    require(close, "Posix_ConsoleRequestQuit();", "POSIX console close")
+    create = function_body(posix, "static bool Posix_ConsoleCreateWindow( void ) {", "posix_syscon.cpp")
+    require(create, "!sys_consoleWindow.GetBool() && !s_consoleWindow.quitOnClose", "POSIX dedicated console window")
+
+
+def check_retained_tab_strips_take_the_pointer() -> None:
+    """A retained group placed after a control takes the pointer's hits over it
+    (RmlUi returns the topmost box), and each settings tab page is a full-size
+    group. The tab strip must therefore follow every page of its sub-page, or
+    its tabs are dead to the mouse and the VR pointer. Next and Previous walk
+    the tree as a ring, so the strip also follows Back: a tab's last row leads
+    on to Back, and Back to the strip, the order the page reads in."""
+    for page, name in (("game", "game"), ("controls", "controls"), ("system", "settings")):
+        text = read(ROOT / f"content/baseoq4/pak0/guis/menu/settings/{page}.q4ui")
+        document = json.loads("\n".join(line for line in text.split("\n") if not line.startswith("//")))
+        found = {}
+
+        def walk(node, path=()):
+            if isinstance(node, dict):
+                ident = node.get("id", "")
+                if ident in (f"{name}-strip", f"{name}_back") or ident.startswith(f"{name}-page-"):
+                    found[ident] = path
+                for position, child in enumerate(node.get("children", [])):
+                    walk(child, path + (position,))
+
+        walk(document["root"])
+        strip = found.get(f"{name}-strip")
+        back = found.get(f"{name}_back")
+        pages = [path for ident, path in found.items() if ident.startswith(f"{name}-page-")]
+        if strip is None or back is None or not pages:
+            raise AssertionError(f"{page}.q4ui: no tab strip, Back or tab pages found")
+        # later in tree order, and not inside a page: drawn above every page
+        for path in pages:
+            if strip[:len(path)] == path or strip < path:
+                raise AssertionError(f"{page}.q4ui: the tab strip must follow every tab page in the tree")
+        if strip < back:
+            raise AssertionError(f"{page}.q4ui: the tab strip must follow Back, or Next leaves a tab's last row for the strip")
+
+
 def main() -> None:
     validate_settings_registry()
+    check_retained_tab_strips_take_the_pointer()
 
     mainmenu = read(ROOT / "content/baseoq4/pak0/guis/mainmenu.gui")
     controls_gui = read(ROOT / "content/baseoq4/pak0/guis/menu/settings/controls.gui")
@@ -715,6 +1106,7 @@ def main() -> None:
     game_gui = read(ROOT / "content/baseoq4/pak0/guis/menu/settings/game.gui")
     game_hovers = read(ROOT / "content/baseoq4/pak0/guis/menu/settings/game_hovers.gui")
     session_menu = read(ROOT / "src/framework/Session_menu.cpp")
+    session_cpp = read(ROOT / "src/framework/Session.cpp")
     common_cpp = read(ROOT / "src/framework/Common.cpp")
     slider_window = read(ROOT / "src/ui/SliderWindow.cpp")
     registry_text = read(ROOT / "docs/dev/settings-menu-registry.json")
@@ -726,6 +1118,9 @@ def main() -> None:
     validate_controls_pane_extraction(mainmenu, controls_gui)
     validate_scripted_pseudo_setting_adapters(game_gui, session_menu)
     validate_performance_preset_wiring(common_cpp, system_gui, session_menu, registry_text, display_docs, locales)
+    validate_ingame_menu_activation_contract(mainmenu, session_menu, session_cpp)
+    validate_create_server_choices(mainmenu, session_menu)
+    validate_dedicated_conversion()
 
     require(mainmenu, '#include "guis/menu/settings/system.gui"', "System settings include")
     reject(mainmenu, "windowDef p_settings_sys", "mainmenu System pane extraction")
@@ -740,6 +1135,11 @@ def main() -> None:
         "s_numberOfSpeakers",
         "s_openALHRTF",
         "s_musicVolume",
+        "s_dialogueVolume",
+        "ui_subtitles",
+        "ui_subtitleScale",
+        "ui_subtitleBackground",
+        "ui_subtitleSpeakers",
     ]
     for cvar in audio_cvars:
         require(audio_gui, cvar, "Audio settings include")
@@ -753,9 +1153,9 @@ def main() -> None:
         "#str_229962",
         "#str_229963",
         "rect\t0,104,640,250",
-        "rect\t-24,-84,640,330",
+        "rect\t-24,-84,640,474",
         "rect\t245,142,361,20",
-        "rect\t245,294,361,20",
+        "rect\t245,318,361,20",
     ):
         require(audio_surface, token, "Audio grouped layout")
 
@@ -763,6 +1163,7 @@ def main() -> None:
         "windowDef set_audio_cat_levels",
         "windowDef set_audio_vol",
         "windowDef set_audio_music",
+        "windowDef set_audio_dialogue",
         "windowDef set_audio_cat_backend",
         "windowDef set_audio_backend",
         "windowDef set_audio_device",
@@ -819,6 +1220,20 @@ def main() -> None:
         "cl_gun_x",
         "cl_gun_y",
         "cl_gun_z",
+        "g_weaponMuzzleKick",
+        "vr_enable",
+        "vr_aimMode",
+        "vr_leftHanded",
+        "vr_turnMode",
+        "vr_snapTurnAngle",
+        "vr_moveDirection",
+        "vr_roomScale",
+        "vr_aimLaser",
+        "vr_hapticStrength",
+        "vr_twoHanded",
+        "vr_comfortVignette",
+        "vr_physicalCrouch",
+        "vr_playSpace",
     ]
     for cvar in game_cvars:
         require(game_gui, cvar, "Game Options settings")
@@ -834,15 +1249,30 @@ def main() -> None:
         "set_game_cl_gun_x",
         "set_game_cl_gun_y",
         "set_game_cl_gun_z",
+        "set_game_weaponkick",
+        "set_game_vr",
+        "set_game_vr_enable",
+        "set_game_vr_aimmode",
+        "set_game_vr_lefthanded",
+        "set_game_vr_turnmode",
+        "set_game_vr_snapturnangle",
+        "set_game_vr_movedirection",
+        "set_game_vr_roomscale",
+        "set_game_vr_aimlaser",
+        "set_game_vr_hapticstrength",
+        "set_game_vr_twohanded",
+        "set_game_vr_vignette",
+        "set_game_vr_physicalcrouch",
+        "set_game_vr_playspace",
     ]
     for row in game_rows:
         require(game_gui, f"windowDef {row}", "Game Options definitions")
-        if row != "set_game_viewweapon":
+        if row not in ("set_game_viewweapon", "set_game_vr"):
             require(mainmenu, f'{row}::visible', "Game Options show/hide events")
             require(game_hovers, f"windowDef {row}_hover", "Game Options hovers")
 
     system_surface = system_gui + "\n" + popups_gui + "\n" + mainmenu
-    for token in ("high\t26", "cvar\tgui_set_sys_scroll"):
+    for token in ("high\t28", "cvar\tgui_set_sys_scroll"):
         require(system_surface, token, "System scroll coverage")
     for token in (
         "windowDef set_sys_section",
@@ -855,7 +1285,7 @@ def main() -> None:
         'set "gui::gui_set_sys_scroll" "9"',
         'set "gui::gui_set_sys_scroll" "14"',
         'set "gui::gui_set_sys_scroll" "21"',
-        'set "gui::gui_set_sys_scroll" "26"',
+        'set "gui::gui_set_sys_scroll" "28"',
         'set "cmd" "applySettingsScroll system"',
         "set_sys_section_choice::noevents",
     ):
@@ -865,11 +1295,11 @@ def main() -> None:
     for token in (
         "rect\t204,104,377,16",
         "rect\t0,128,640,256",
-        "rect\t-24,-41,640,1428",
+        "rect\t-24,-41,640,2186",
         "rect\t613,128,16,256",
-        "high\t46",
+        "high\t78",
         "cvar\tgui_set_game_scroll",
-        "640,1428",
+        "640,2186",
     ):
         require(game_gui + mainmenu, token, "Game Options scroll coverage")
     for token in (
@@ -881,9 +1311,11 @@ def main() -> None:
         'set "gui::gui_set_game_scroll" "0"',
         'set "gui::gui_set_game_scroll" "11"',
         'set "gui::gui_set_game_scroll" "21"',
-        'set "gui::gui_set_game_scroll" "37"',
-        'set "gui::gui_set_game_scroll" "44"',
-        'set "gui::gui_set_game_scroll" "46"',
+        'set "gui::gui_set_game_scroll" "41"',
+        'set "gui::gui_set_game_scroll" "48"',
+        'set "gui::gui_set_game_scroll" "60"',
+        'set "gui::gui_set_game_scroll" "66"',
+        'set "gui::gui_set_game_scroll" "73"',
         'set "cmd" "applySettingsScroll game"',
         "set_game_section_choice::noevents",
     ):
@@ -895,21 +1327,21 @@ def main() -> None:
     reject(mainmenu, 'set "gui_set_audio_scroll"', "Audio scroll GUI state assignment")
     reject(audio_gui + mainmenu, "set gui_set_audio_scroll", "Audio scroll cvar command")
     for token in (
-        'gui_set_sys_scroll( "gui_set_sys_scroll", "0", CVAR_GUI | CVAR_INTEGER, "display menu scroll step", 0, 26 )',
-        'gui_set_game_scroll( "gui_set_game_scroll", "0", CVAR_GUI | CVAR_INTEGER, "game menu scroll step", 0, 46 )',
+        'gui_set_sys_scroll( "gui_set_sys_scroll", "0", CVAR_GUI | CVAR_INTEGER, "display menu scroll step", 0, 28 )',
+        'gui_set_game_scroll( "gui_set_game_scroll", "0", CVAR_GUI | CVAR_INTEGER, "game menu scroll step", 0, 78 )',
         "HandleMainMenuSettingsScrollInput( guiActive, event->evValue )",
         'MainMenuWindowStateEqualsInt( gui, "desktop::curr", page.expectedPage )',
         "MainMenuSettingsPopupIsVisible( gui )",
         "MAINMENU_SETTINGS_SCROLL_PAGES",
         "ApplyMainMenuSettingsScrollPage( gui, page, next, true )",
         "SyncMainMenuSettingsScrollPages( guiActive )",
-        "SyncMainMenuSettingsScrollPages( gui )",
+        "SyncMainMenuSettingsScrollPages( guiTest != NULL ? guiTest : guiActive )",
         'if ( !idStr::Icmp( cmd, "applySettingsScroll" ) )',
         '"set_game_content::rect"',
         '"set_sys_content::rect"',
         '"set_audio_content::rect"',
-        "914",
-        "858",
+        "958",
+        "902",
         "24.0f",
     ):
         require(session_menu, token, "C++ settings scroll bounds")
@@ -961,6 +1393,35 @@ def main() -> None:
 
     for text, context in ((sp_cvars, "SP game cvars"), (mp_cvars, "MP game cvars")):
         require(text, 'g_autoSkipCinematics",\t\t"0",\t\t\tCVAR_GAME | PC_CVAR_ARCHIVE | CVAR_BOOL', context)
+
+    # Stock multiplayer GUIs bind these names directly. Both game modules can
+    # be the first module loaded by the unified executable, so each must
+    # register an identical typed declaration rather than leaving a typeless
+    # GUI-created placeholder behind.
+    for name in (
+        "net_menulanserver",
+        "net_serverMenuDedicated",
+        "s_voiceChatSend",
+        "s_voiceChatReceive",
+        "s_voiceChatEcho",
+        "s_voiceVolume",
+        "s_micInputLevel",
+    ):
+        sp_statement = cvar_statement(sp_cvars, name, "SP game cvars")
+        mp_statement = cvar_statement(mp_cvars, name, "MP game cvars")
+        if sp_statement != mp_statement:
+            raise AssertionError(f"SP/MP GUI CVar declarations differ for {name!r}")
+
+    # The modules intentionally retain Quake 4's distinct SP (box) and MP
+    # (cylinder) defaults, but they share an integer type so an in-process
+    # module switch cannot register the same global CVar with two types.
+    sp_default, sp_flags = cvar_signature(sp_cvars, "pm_usecylinder", "SP game cvars")
+    mp_default, mp_flags = cvar_signature(mp_cvars, "pm_usecylinder", "MP game cvars")
+    if (sp_default, mp_default) != ("0", "1"):
+        raise AssertionError("pm_usecylinder no longer preserves the stock SP/MP defaults")
+    for flags, context in ((sp_flags, "SP"), (mp_flags, "MP")):
+        if "CVAR_INTEGER" not in flags or "CVAR_BOOL" in flags:
+            raise AssertionError(f"{context} pm_usecylinder must use the shared integer type")
 
     for cvar in ("cl_gun_x", "cl_gun_y", "cl_gun_z"):
         require(mp_cvars, f'idCVar {cvar}', "MP game cvar definitions")

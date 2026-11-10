@@ -58,6 +58,16 @@ const int BUTTON_VOICECHAT = BUTTON_7;
 const int BUTTON_TOURNEY = BIT(8);
 const int BUTTON_STRAFE = BIT(9);
 const int BUTTON_WEAPONWHEEL = BIT(10);
+// Upstream VR and quick-chat bits, moved up one past Prey's BUTTON_ATTACK_ALT.
+// VR: the tracked head crouched (vr_physicalCrouch). It crouches the body like
+// a held crouch, and tells the game the view must not drop again.
+const int BUTTON_VRCROUCH = BIT(11);
+// The multiplayer quick-chat wheel is held open (_quickChat). Like the weapon
+// wheel it freezes the view and the weapon on both ends of the wire.
+const int BUTTON_QUICKCHAT = BIT(12);
+// VR: the command's angles are a tracked aim's (the weapon hand's, or the
+// head's). Its pitch is absolute, so the game keeps no pitch offset on it.
+const int BUTTON_VRAIM = BIT(13);
 
 // usercmd_t->impulse commands
 const int IMPULSE_0				= 0;			// weap 0
@@ -187,12 +197,17 @@ public:
 	// Allows Prey game code to scale view input while zoomed or constrained.
 	virtual void		SetGameSensitivityFactor( float factor ) = 0;
 
-	// Presentation-frame view sampling groundwork (in_presentationView):
-	// drains pending mouse input under the async lock and reports the
-	// accumulated, not-yet-consumed view rotation in degrees. The input is
-	// not consumed; the next 60 Hz usercmd still receives the full movement.
-	// Returns false when disabled or inhibited.
-	virtual bool		GetPresentationViewDelta( float &yawDelta, float &pitchDelta ) = 0;
+	// Late look (in_presentationView): the view angles, in degrees, that the
+	// generator would put in its next usercmd if it were built now. That is
+	// the last built usercmd plus mouse/gyro motion not yet consumed and the
+	// elapsed share of held look keys and stick deflection. Comparing it with
+	// the angles of the usercmd the game last applied gives every input the
+	// game has not seen, including usercmds buffered but not yet run, so
+	// nothing is shown twice or skipped. Nothing is consumed: the next
+	// usercmd still receives all of it. Returns false when disabled, inhibited,
+	// temporally filtered (m_smooth/m_filter), replaying commands, in VR, or
+	// while a radial selector owns the look input.
+	virtual bool		GetPresentationViewAngles( float &yaw, float &pitch ) = 0;
 };
 
 extern idUsercmdGen	*usercmdGen;

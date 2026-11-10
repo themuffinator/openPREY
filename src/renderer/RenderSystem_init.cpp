@@ -30,18 +30,34 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "tr_local.h"
+#if !defined( OPENQ4_RENDERER_VK_MODULE ) && !defined( OPENQ4_RENDERER_GLES_MODULE )
+#include "draw_pbr.h"
+#endif
+#include "OpenGL/FramebufferSamples.h"
+#include "LevelShotDepth.h"
+#include "RendererResourceSettings.h"
 #include "../imagetools/DXT/DXTCodec.h"
 #include "CelShading.h"
 #include "RendererBootstrap.h"
 #include "RendererModule.h"
+#include "RenderModuleAPI.h"
 #include "GLDebugScope.h"
 #include "GLStateCache.h"
 #include "RendererBenchmarks.h"
 #include "RendererMetrics.h"
 #include "RendererUpload.h"
+#include "RendererContracts.h"
 #include "RenderGraph.h"
 #include "RenderGraphResources.h"
 #include "MaterialResourceTable.h"
+#include "ClassicGuiDomain.h"
+#include "ClassicCinematicPostDomain.h"
+#include "ClassicSpecialFrameDomain.h"
+#include "ClassicWorldAmbientDomain.h"
+#include "ClassicInteractionDomain.h"
+#include "ClassicFogBlendDomain.h"
+#include "ClassicSubviewDomain.h"
+#include "ClassicDeformDomain.h"
 #include "GeometryResources.h"
 #include "ScenePackets.h"
 #include "ModernClusteredLighting.h"
@@ -49,9 +65,13 @@ If you have questions concerning this license or the applicable additional terms
 #include "ModernGLDrawPlan.h"
 #include "ModernGLShaderLibrary.h"
 #include "ModernGLSubmitPlan.h"
+#include "ModernLightImageAtlas.h"
 #include "ModernShadowPlanner.h"
 #include "../framework/RenderDoc.h"
 #include "../framework/declEntityDef.h"
+#if defined(__APPLE__)
+#include <execinfo.h>
+#endif
 
 // Detect the Microsoft software OpenGL wrapper and guide the user toward
 // installing proper vendor drivers.
@@ -61,11 +81,38 @@ If you have questions concerning this license or the applicable additional terms
 
 // functions that are not called every frame
 
+static bool r_recoverableRendererRestart = false;
+static bool r_forceWindowRendererRestart = false;
+static bool r_recoverableRendererRestore = false;
+static const renderWindowRequest_t *r_recoverableWindowRequest = NULL;
+// Only Init opens this gate. Device success closes it permanently until a full
+// renderer Init, so a normal ShutdownOpenGL cannot masquerade as cold recovery.
+static bool r_initialRendererDevicePending = false;
+
+struct rendererRestartFailure_t {
+	idStr reason;
+	explicit rendererRestartFailure_t( const char *text ) : reason( text ) {}
+};
+
+bool R_IsRecoverableRendererRestart( void ) { return r_recoverableRendererRestart; }
+bool R_ForceWindowForRendererRestart( void ) { return r_forceWindowRendererRestart; }
+const renderWindowRequest_t *R_GetRecoverableWindowRequest( void ) { return r_recoverableWindowRequest; }
+void R_RejectRecoverableRendererRestart( const char *reason ) {
+	if ( r_recoverableRendererRestart ) throw rendererRestartFailure_t( reason );
+}
+
+static bool R_RendererRestartError( char *error, int errorSize, const char *reason ) {
+	if ( error != NULL && errorSize > 0 ) idStr::Copynz( error, reason, errorSize );
+	return false;
+}
+
+static bool R_InitRendererDevice( bool legacyPolicy, bool forceWindow, char *error, int errorSize );
+
 static void R_ErrorForUnsupportedCompatibilityOpenGL( void ) {
 	common->Error( "%s", common->GetLanguageDict()->GetString( "#str_41106" ) );
 }
 
-bool R_CheckExtension( char *name );
+bool R_CheckExtension( const char *name );
 extern idCVar r_inhibitFragmentProgram;
 
 static idStr g_missingRequiredOpenGLFeatures;
@@ -88,6 +135,17 @@ static void R_RecordMissingRequiredOpenGLFeature( const char *name ) {
 static bool R_CheckRequiredExtension( const char *name ) {
 	const bool available = R_CheckExtension( const_cast<char *>( name ) );
 	if ( !available ) {
+		// These "required" features are the fixed-function and ARB-assembly
+		// extensions the legacy ARB2 path is built on. A profile that removed
+		// fixed-function cannot report them by definition, so their absence is
+		// expected rather than fatal: such a context is served by the modern
+		// programmable path, and RendererCaps_SupportsTier already refuses the
+		// legacy tier for it. Applies to OpenGL ES at any version and to a
+		// desktop core profile.
+		if ( glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_ES
+			|| glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_CORE ) {
+			return false;
+		}
 		R_RecordMissingRequiredOpenGLFeature( name );
 	}
 	return available;
@@ -203,11 +261,13 @@ static bool R_CanUseGLSLPrograms() {
 	return true;
 }
 
+#ifdef OPENQ4_RENDERER_VK_MODULE
+thread_local glconfig_t glConfig;
+#else
 glconfig_t	glConfig;
+#endif
 
-static void GfxInfo_f( void );
-
-const char *r_rendererArgs[] = { "best", "arb", "arb2", "Cg", "exp", "nv10", "nv20", "r200", NULL };
+const char *r_rendererArgs[] = { "best", "arb2", "modern", "glesd3", "arb", "Cg", "exp", "nv10", "nv20", "r200", NULL };
 const char *r_glTierArgs[] = { "auto", "legacy", "gl33", "gl41", "gl43", "gl45", "gl46", NULL };
 const char *r_rendererBenchmarkPresetArgs[] = { "low", "baseline", "modern", "high-end", NULL };
 const char *r_multiSamplesArgs[] = { "0", "2", "4", "8", "16", NULL };
@@ -218,6 +278,29 @@ idCVar r_useLightPortalFlow( "r_useLightPortalFlow", "1", CVAR_RENDERER | CVAR_B
 idCVar r_multiSamples( "r_multiSamples", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "MSAA sample count: 0 = off, 2/4/8/16 = supported quality steps", 0, 16, idCmdSystem::ArgCompletion_String<r_multiSamplesArgs> );
 idCVar r_postAA( "r_postAA", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "post AA mode: 0 = off, 1 = SMAA 1x medium, 2 = SMAA 1x high, 3 = SMAA 1x ultra, 4 = SMAA 1x colour-edge prototype", 0, 4, idCmdSystem::ArgCompletion_Integer<0,4> );
 idCVar r_postAAStatePoisonTest( "r_postAAStatePoisonTest", "0", CVAR_RENDERER | CVAR_BOOL, "intentionally dirty GL texture/client state before SMAA post-AA draws for validation" );
+idCVar r_pbrMaterials( "r_pbrMaterials", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "draw explicitly PBR-authored materials as PBR; 0 keeps their classic stages. Stock materials are never PBR" );
+idCVar r_vkPBRSpecularAA( "r_vkPBRSpecularAA", "1", CVAR_RENDERER | CVAR_BOOL, "filter native Vulkan PBR roughness by shading-normal variance; disable only for comparison" );
+idCVar r_pbrGeneratedLegacyFallback( "r_pbrGeneratedLegacyFallback", "1", CVAR_RENDERER | CVAR_BOOL, "allow development-only classic fallback generation for PBR-only materials" );
+idCVar r_pbrDebug( "r_pbrDebug", "0", CVAR_RENDERER | CVAR_INTEGER, "PBR debug view: 0=off, 1=albedo, 2=normal, 3=metallic, 4=roughness, 5=AO, 6=emissive, 7=state marker (green=PBR, magenta=contract mismatch)", 0, 7, idCmdSystem::ArgCompletion_Integer<0,7> );
+idCVar r_pbrIBL( "r_pbrIBL", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "enable environment reflections and diffuse from authored reflection probes for explicitly PBR-authored materials (with r_pbrAnalyticEnvironment, the laboratory studio environment)" );
+idCVar r_pbrProbeAsyncPrefilter( "r_pbrProbeAsyncPrefilter", "1", CVAR_RENDERER | CVAR_BOOL, "filter newly resident reflection probes on a background thread; the probe set keeps its analytic fallback until the result publishes on a later frame (screenshots wait for it). 0 filters on the frame that needs the probe, a stall of tens of milliseconds" );
+// `pbrProbeSettle`: the next few frames finish every background probe filter
+// as a screenshot does, ending early once nothing is pending. Tests and
+// benchmarks use it to measure the settled state without depending on thread
+// timing; the request expires so it can never pin later frames to it.
+static int r_pbrProbeSettleUntilFrame = -1;
+static const int R_PBR_PROBE_SETTLE_FRAMES = 3;
+void R_PBRProbes_RequestSettle( void ) { r_pbrProbeSettleUntilFrame = tr.frameCount + R_PBR_PROBE_SETTLE_FRAMES; }
+bool R_PBRProbes_SettleRequested( void ) { return r_pbrProbeSettleUntilFrame >= tr.frameCount; }
+void R_PBRProbes_SettleDone( void ) { r_pbrProbeSettleUntilFrame = -1; }
+static void R_PBRProbeSettle_f( const idCmdArgs &args ) {
+	( void )args;
+	R_PBRProbes_RequestSettle();
+}
+idCVar r_pbrIBLIntensity( "r_pbrIBLIntensity", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "PBR environment intensity", 0.0f, 4.0f );
+idCVar r_pbrAnalyticEnvironment( "r_pbrAnalyticEnvironment", "0", CVAR_RENDERER | CVAR_BOOL, "laboratory mode: light PBR surfaces with the analytic studio environment where no authored probe applies; 0 leaves environment lighting to authored probes, baked light grids and the map's ambient lights" );
+idCVar r_pbrInferFromLegacyMaterials( "r_pbrInferFromLegacyMaterials", "0", CVAR_RENDERER | CVAR_BOOL, "research-only legacy material reinterpretation; never used for stock rendering by default" );
+idCVar r_pbrLinearScene( "r_pbrLinearScene", "0", CVAR_RENDERER | CVAR_BOOL, "laboratory mode: accumulate PBR radiance in a separate linear scene, encoded once per pixel; with r_hdrToneMap the whole view, classic surfaces included, is presented through the PBR filmic curve. 0 composites each PBR draw into Quake 4's display-referred framebuffer like classic lighting" );
 idCVar r_bloom( "r_bloom", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "enable bloom post-process" );
 idCVar r_bloomThreshold( "r_bloomThreshold", "0.45", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "bloom bright-pass threshold in scene-referred units", 0.0f, 16.0f );
 idCVar r_bloomSoftKnee( "r_bloomSoftKnee", "0.15", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "relative bloom soft-threshold knee", 0.0f, 1.0f );
@@ -236,12 +319,34 @@ idCVar r_ssaoPower( "r_ssaoPower", "1.6", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FL
 idCVar r_ssaoMaxDistance( "r_ssaoMaxDistance", "220.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "fade SSAO out past this view-space distance", 16.0f, 4096.0f );
 idCVar r_ssaoSamples( "r_ssaoSamples", "20", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "number of SSAO spiral samples", 4, 32, idCmdSystem::ArgCompletion_Integer<4,32> );
 idCVar r_ssaoDebug( "r_ssaoDebug", "0", CVAR_RENDERER | CVAR_BOOL, "visualize SSAO only" );
+idCVar r_ssaoResolution( "r_ssaoResolution", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
+	"Vulkan SSAO resolution: 0 automatic (full at the maximum r_ssaoSamples, half below), 1 full, 2 half", 0, 2,
+	idCmdSystem::ArgCompletion_Integer<0,2> );
+
+/*
+====================
+R_SSAOHalfResolution
+
+Automatic keeps the maximum sample count (Ultra's 32) at full resolution and
+draws lower counts, such as Quality's 20, at half resolution: at native
+1440p the full-resolution pass was the largest single GPU cost of the Quality
+frame. The performance presets own r_ssaoSamples, so they select this too.
+====================
+*/
+bool R_SSAOHalfResolution() {
+	switch ( r_ssaoResolution.GetInteger() ) {
+		case 1: return false;
+		case 2: return true;
+		default: return r_ssaoSamples.GetInteger() < 32;
+	}
+}
 idCVar r_motionBlur( "r_motionBlur", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "enable subtle camera motion blur post-process" );
 idCVar r_motionBlurStrength( "r_motionBlurStrength", "0.45", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "motion blur strength multiplier", 0.0f, 2.0f );
 idCVar r_motionBlurMaxPixels( "r_motionBlurMaxPixels", "10", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "maximum motion blur radius in pixels", 0.0f, 64.0f );
 idCVar r_motionBlurSamples( "r_motionBlurSamples", "8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "number of motion blur gather samples", 1, 16, idCmdSystem::ArgCompletion_Integer<1,16> );
 idCVar r_motionBlurDebug( "r_motionBlurDebug", "0", CVAR_RENDERER | CVAR_BOOL, "visualize motion blur vectors instead of applying blur" );
-idCVar r_motionBlurObjectVectors( "r_motionBlurObjectVectors", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "include rigid-object motion vectors when r_motionBlur is enabled" );
+idCVar r_motionBlurObjectVectors( "r_motionBlurObjectVectors", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "include exact object motion vectors (rigid entities, skinned models and the view weapon) when r_motionBlur is enabled" );
+idCVar r_motionBlurShutterMsec( "r_motionBlurShutterMsec", "16.667", CVAR_RENDERER | CVAR_FLOAT, "motion blur length as the motion over this many milliseconds, independent of frame rate; 0 = the motion between two presented frames (original behaviour)", 0.0f, 100.0f );
 idCVar r_forceSpecialEffects( "r_forceSpecialEffects", "0", CVAR_RENDERER | CVAR_INTEGER,
 	"force legacy special-effect bitmask for debugging (1=blur, 2=AL, 3=both)", 0, 3, idCmdSystem::ArgCompletion_Integer<0,3> );
 idCVar r_hdrSceneTarget( "r_hdrSceneTarget", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render the main scene into an HDR scene target before post-processing" );
@@ -272,6 +377,17 @@ idCVar r_crtScanlineStrength( "r_crtScanlineStrength", "0.55", CVAR_RENDERER | C
 idCVar r_crtMaskStrength( "r_crtMaskStrength", "0.35", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "phosphor mask intensity for the CRT monitor post-process", 0.0f, 1.0f );
 idCVar r_crtCurvature( "r_crtCurvature", "0.01", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "screen curvature amount for the CRT monitor post-process", 0.0f, 0.25f );
 idCVar r_crtChromatic( "r_crtChromatic", "0.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "optional channel convergence offset in pixel units for the CRT monitor post-process", 0.0f, 0.35f );
+
+// openQ4 underwater view
+idCVar r_underwater( "r_underwater", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "enable the underwater view post-process" );
+idCVar r_underwaterWarp( "r_underwaterWarp", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "refraction strength of the underwater view, 0 disables the warp", 0.0f, 4.0f );
+idCVar r_underwaterBlur( "r_underwaterBlur", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "soft focus strength of the underwater view, 0 keeps the image sharp", 0.0f, 4.0f );
+idCVar r_underwaterEdgeSoften( "r_underwaterEdgeSoften", "0.8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "how much the underwater view loses focus toward its edges - a soft focus mask, it never darkens the image", 0.0f, 2.0f );
+idCVar r_underwaterCaustics( "r_underwaterCaustics", "0.06", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "strength of the moving light pattern in the underwater view", 0.0f, 0.5f );
+idCVar r_underwaterBloom( "r_underwaterBloom", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "halo suspended particulate throws around lights underwater", 0.0f, 4.0f );
+idCVar r_underwaterAberration( "r_underwaterAberration", "0.35", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "channel separation toward the edges of the underwater view", 0.0f, 4.0f );
+idCVar r_underwaterParticles( "r_underwaterParticles", "0.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "marine snow drifting past the underwater view", 0.0f, 2.0f );
+idCVar r_underwaterVisibility( "r_underwaterVisibility", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "scales how far you can see through a liquid before it fogs out", 0.01f, 8.0f );
 idCVar r_celShading( "r_celShading", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "cel shade model entities: quantized lighting plus silhouette outlines on players, monsters, moveables and the view weapon" );
 idCVar r_celShadingWorld( "r_celShadingWorld", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "extend cel shading to BSP world geometry, adding banded lighting and screen-space edge outlines" );
 idCVar r_celShadingBands( "r_celShadingBands", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "quantize interaction lighting into cel bands; disable to keep smooth lighting and use outlines alone" );
@@ -293,9 +409,11 @@ idCVar r_celShadingWorldDebug( "r_celShadingWorldDebug", "0", CVAR_RENDERER | CV
 idCVar r_msaaResolveDepth( "r_msaaResolveDepth", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "resolve depth when blitting MSAA render targets" );
 idCVar r_msaaAlphaToCoverage( "r_msaaAlphaToCoverage", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "enable alpha-to-coverage for perforated materials on MSAA render targets" );
 idCVar r_mode( "r_mode", "-2", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER, "video mode number (-2 = desktop native, -1 = custom, 0+ = predefined)" );
-idCVar r_displayRefresh( "r_displayRefresh", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_NOCHEAT, "optional display refresh rate option for vid mode", 0.0f, 1000.0f );
+idCVar r_displayRefresh( "r_displayRefresh", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_NOCHEAT | CVAR_ARCHIVE, "optional display refresh rate option for vid mode", 0.0f, 1000.0f );
 idCVar r_fullscreen( "r_fullscreen", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "0 = windowed, 1 = full screen" );
-idCVar r_hiddenWindow( "r_hiddenWindow", "0", CVAR_RENDERER | CVAR_BOOL, "create a hidden OpenGL window for batch renderer jobs" );
+// A launch setting: NOCHEAT, or the reset of cheat CVars when a server spawns
+// or a client joins without cheats would show the window at its next restart.
+idCVar r_hiddenWindow( "r_hiddenWindow", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_NOCHEAT, "create a hidden OpenGL window for batch renderer jobs" );
 idCVar r_customWidth( "r_customWidth", "1920", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "custom screen width. set r_mode to -1 to activate" );
 idCVar r_customHeight( "r_customHeight", "1080", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "custom screen height. set r_mode to -1 to activate" );
 idCVar r_singleTriangle( "r_singleTriangle", "0", CVAR_RENDERER | CVAR_BOOL, "only draw a single triangle per primitive" );
@@ -327,36 +445,39 @@ idCVar r_shadowMapConservativeCasters( "r_shadowMapConservativeCasters", "1", CV
 idCVar r_shadowMapProjectedCSM( "r_shadowMapProjectedCSM", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "allow ordinary projected lights to use cascades when r_shadowMapCSM is enabled" );
 idCVar r_shadowMapDepthCompare( "r_shadowMapDepthCompare", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use hardware comparison sampling for projected depth shadow maps when supported; PCSS-lite (r_shadowMapFilterMode 2) implies the manual path" );
 idCVar r_shadowMapTexelBiasScale( "r_shadowMapTexelBiasScale", "0.45", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "texel-aware receiver bias scale for projected and point shadow maps", 0.0f, 8.0f );
-idCVar r_shadowMapNormalOffsetScale( "r_shadowMapNormalOffsetScale", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-offset shadow bias in shadow texels: pushes the receiver sample point along the geometric normal on sloped surfaces, fixing self-shadow acne without detaching contact shadows", 0.0f, 8.0f );
-idCVar r_shadowMapCasterCulling( "r_shadowMapCasterCulling", "2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow caster face culling: 0 = two-sided, 1 = store light-facing faces, 2 = store back faces (fewer acne artifacts, slight detachment on thin geometry); material twoSided/backSided is always honored", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
-idCVar r_shadowMapReceiverPlaneBias( "r_shadowMapReceiverPlaneBias", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "add derivative receiver-plane depth bias for wider projected shadow filters" );
-idCVar r_shadowMapFilterTaps( "r_shadowMapFilterTaps", "13", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "projected-light PCF tap budget: 1, 5, 9, or 13", 1, 13, idCmdSystem::ArgCompletion_Integer<1,13> );
-idCVar r_shadowMapPointFilterTaps( "r_shadowMapPointFilterTaps", "13", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light PCF tap budget: 1, 5, 9, or 13", 1, 13, idCmdSystem::ArgCompletion_Integer<1,13> );
-idCVar r_shadowMapFilterMode( "r_shadowMapFilterMode", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "projected-light shadow filter mode: 0 = fixed PCF, 1 = stable rotated Poisson, 2 = PCSS-lite when raw depth is available", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
+idCVar r_shadowMapNormalOffsetScale( "r_shadowMapNormalOffsetScale", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-offset shadow bias in shadow texels; reduces slope acne but excessive values can move contact edges (point-light use is bounded by r_shadowMapPointMaxWorldBias)", 0.0f, 8.0f );
+idCVar r_shadowMapCasterCulling( "r_shadowMapCasterCulling", "2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow caster face culling: 0 = always two-sided, 1 = force material-oriented near faces, 2 = automatic (near faces for sealed hulls outside the light, two-sided for open/uncertain/enclosing geometry)", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
+idCVar r_shadowMapReceiverPlaneBias( "r_shadowMapReceiverPlaneBias", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "enable the experimental derivative receiver-plane depth-bias approximation for projected shadow filters" );
+idCVar r_shadowMapFilterTaps( "r_shadowMapFilterTaps", "9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "projected-light PCF tap budget: 1, 5, 9, or 13", 1, 13, idCmdSystem::ArgCompletion_Integer<1,13> );
+idCVar r_shadowMapPointFilterTaps( "r_shadowMapPointFilterTaps", "9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light PCF tap budget: 1, 5, 9, or 13", 1, 13, idCmdSystem::ArgCompletion_Integer<1,13> );
+idCVar r_shadowMapFilterMode( "r_shadowMapFilterMode", "2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "projected-light shadow filter mode: 0 = fixed PCF, 1 = stable rotated Poisson, 2 = PCSS-lite when raw depth is available", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
 idCVar r_shadowMapPointFilterMode( "r_shadowMapPointFilterMode", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light shadow filter mode: 0 = fixed PCF, 1 = stable rotated Poisson", 0, 1, idCmdSystem::ArgCompletion_Integer<0,1> );
 idCVar r_shadowMapDistantFilterScale( "r_shadowMapDistantFilterScale", "0.35", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "scale projected PCF and PCSS radii for parallel/global sky lights whose shadow texels cover more world space", 0.0f, 1.0f );
 idCVar r_shadowMapPCSSLightRadius( "r_shadowMapPCSSLightRadius", "4.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "projected PCSS-lite blocker search radius in shadow texels", 0.0f, 16.0f );
 idCVar r_shadowMapPCSSMaxRadius( "r_shadowMapPCSSMaxRadius", "8.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "projected PCSS-lite maximum filter radius in shadow texels", 0.0f, 16.0f );
-idCVar r_shadowMapPointHighPrecision( "r_shadowMapPointHighPrecision", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "store point-light shadow depth in an fp16 color cubemap instead of packed RGBA8 depth. The packed path quantizes finer (1.5e-5 vs 4.9e-4 near the far envelope) at half the memory, and the default hardware-compare path samples the depth cubemap directly, so this only affects the manual fallback" );
+idCVar r_shadowMapPointHighPrecision( "r_shadowMapPointHighPrecision", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "store point-light shadow depth in an fp16 color cubemap instead of packed RGBA8 depth. The packed path quantizes finer (1.5e-5 vs 4.9e-4 near the far envelope) at half the memory, and the default hardware-compare path samples the depth cubemap directly, so this only affects the manual fallback. OpenGL only: the Vulkan backend always stores native depth, which quantizes finer than either colour format" );
 idCVar r_shadowMapPointLights( "r_shadowMapPointLights", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shadow-map point lights when r_useShadowMap is enabled; disabled falls back to stencil shadows for point lights. Point lights are the dominant light class in Quake 4 content, so disabling this makes r_useShadowMap nearly a no-op" );
 idCVar r_shadowMapPointSize( "r_shadowMapPointSize", "512", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light cube face resolution; separate from r_shadowMapSize because a cube costs six faces of color+depth storage per cached light", 128, 2048, idCmdSystem::ArgCompletion_Integer<128,2048> );
-idCVar r_shadowMapAtlasSize( "r_shadowMapAtlasSize", "4096", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "edge size of the shared projected-light shadow atlas; cached lights occupy r_shadowMapSize-sized cells inside it (CSM lights use a 2x2 cell block)", 2048, 8192, idCmdSystem::ArgCompletion_Integer<2048,8192> );
+idCVar r_shadowMapAtlasSize( "r_shadowMapAtlasSize", "4096", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "edge size of the shared projected-light shadow atlas; cached lights occupy r_shadowMapSize-sized cells inside it (CSM lights use a 2x2 cell block)", 2048, 16384, idCmdSystem::ArgCompletion_Integer<2048,16384> );
 idCVar r_shadowMapPointDepthCompare( "r_shadowMapPointDepthCompare", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use hardware comparison sampling for point-light depth cubemaps when GLSL 1.30 support is available" );
+idCVar r_shadowMapPointDepthOnly( "r_shadowMapPointDepthOnly", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "OpenGL: keep point-light shadow cubes as depth only while nothing samples their packed colour cube, which halves their memory. The colour cube returns by itself without hardware compare, under the modern renderers, the shared interaction stream or the debug overlay; 0 always keeps it" );
 idCVar r_shadowMapStableAlphaHash( "r_shadowMapStableAlphaHash", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "seed shadow-map hashed alpha from stable world coordinates instead of screen-space fragments" );
 idCVar r_shadowMapMaxUpdatesPerView( "r_shadowMapMaxUpdatesPerView", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "maximum shadow-map passes rendered per backend view, 0 = unlimited", 0, 1024, idCmdSystem::ArgCompletion_Integer<0,1024> );
 idCVar r_shadowMapSkipStencilShadows( "r_shadowMapSkipStencilShadows", "1", CVAR_RENDERER | CVAR_BOOL, "skip stencil shadow volume generation and linking for lights that will render shadow maps; a light that fails a shadow-map pass restores its volumes on the next frame" );
 idCVar r_shadowMapStaticCache( "r_shadowMapStaticCache", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "reuse resident shadow maps for static-only lights instead of rerendering every backend view" );
 idCVar r_shadowMapStaticHysteresisFrames( "r_shadowMapStaticHysteresisFrames", "2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "frames to wait after dynamic casters disappear before static shadow-map reuse", 0, 120, idCmdSystem::ArgCompletion_Integer<0,120> );
 idCVar r_shadowMapResidentFrames( "r_shadowMapResidentFrames", "120", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "frames a resident static shadow map may remain unused before its cache slot can be expired", 1, 3600, idCmdSystem::ArgCompletion_Integer<1,3600> );
-idCVar r_shadowMapProjectedCacheSize( "r_shadowMapProjectedCacheSize", "8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "static projected-light shadow-map cache slots", 0, 16, idCmdSystem::ArgCompletion_Integer<0,16> );
-idCVar r_shadowMapPointCacheSize( "r_shadowMapPointCacheSize", "12", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "static point-light cubemap cache slots", 0, 16, idCmdSystem::ArgCompletion_Integer<0,16> );
+idCVar r_shadowMapProjectedCacheSize( "r_shadowMapProjectedCacheSize", "8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "how many full-size (r_shadowMapSize) static projected-light shadow maps the cache keeps; a map cut down for a crowded view takes its share of one, and 0 turns the cache off. Bounds the cache's memory on Vulkan; OpenGL caches into the atlas, which is its bound", 0, 16, idCmdSystem::ArgCompletion_Integer<0,16> );
+idCVar r_shadowMapPointCacheSize( "r_shadowMapPointCacheSize", "64", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "static point-light cubemap cache slots; a dense Quake 4 view lights forty point lights at once, and one without a slot re-renders its cube every frame. r_shadowMapPointCacheMegs bounds the memory the slots may take", 0, 96, idCmdSystem::ArgCompletion_Integer<0,96> );
+idCVar r_shadowMapPointCacheMegs( "r_shadowMapPointCacheMegs", "512", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "video memory the static point-light cubemap cache may fill, in MiB: slots beyond it stay unused, except that the first twelve are always available", 64, 8192 );
+idCVar r_shadowMapPointCompose( "r_shadowMapPointCompose", "1", CVAR_RENDERER | CVAR_BOOL, "draw a point light's moving and cutout casters over a copy of its cached static cube instead of re-rendering all six faces every view; 0 restores the full re-render for comparison" );
 idCVar r_shadowMapCacheCSM( "r_shadowMapCacheCSM", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "allow static-cache reuse for view-fitted CSM/global shadow-map passes" );
 idCVar r_shadowMapTranslucentFilterRadius( "r_shadowMapTranslucentFilterRadius", "-1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "translucent shadow moment filter radius in texels, -1 = inherit opaque shadow radius", -1.0f, 8.0f );
 idCVar r_shadowMapTranslucentMinVariance( "r_shadowMapTranslucentMinVariance", "0.00001", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "minimum variance used when resolving translucent shadow moments", 0.000001f, 0.01f );
 idCVar r_shadowMapTranslucentBleedReduction( "r_shadowMapTranslucentBleedReduction", "0.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "light-bleed reduction applied to translucent shadow moment resolve", 0.0f, 0.95f );
 idCVar r_shadowMapGpuSyncTimings( "r_shadowMapGpuSyncTimings", "0", CVAR_RENDERER | CVAR_BOOL, "diagnostic-only: glFinish around shadow-map passes to report GPU-synchronized milliseconds" );
 idCVar r_shadowMapGpuTimerQueries( "r_shadowMapGpuTimerQueries", "1", CVAR_RENDERER | CVAR_BOOL, "use non-blocking GL timer queries for shadow-map GPU diagnostics when available" );
-idCVar r_softParticles( "r_softParticles", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "depth-fade eligible BSE particles against opaque scene depth when GLSL is available" );
+idCVar r_softParticles( "r_softParticles", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "depth-fade eligible BSE particles against opaque scene depth when GLSL is available" );
 idCVar r_softParticleFadeDistance( "r_softParticleFadeDistance", "64", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "world-unit distance over which r_softParticles fades particle intersections", 1.0f, 512.0f );
 idCVar r_enhancedMaterials( "r_enhancedMaterials", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use enhanced GLSL interaction shading for existing materials when supported" );
 idCVar r_enhancedMaterialNormalScale( "r_enhancedMaterialNormalScale", "1.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "tangent-space normal XY scale when enhanced material shading is enabled", 0.5f, 2.0f );
@@ -371,6 +492,7 @@ idCVar r_useDeferredTangents( "r_useDeferredTangents", "1", CVAR_RENDERER | CVAR
 idCVar r_useCachedDynamicModels( "r_useCachedDynamicModels", "1", CVAR_RENDERER | CVAR_BOOL, "cache snapshots of dynamic models" );
 idCVar r_useRepeatedStateReuse( "r_useRepeatedStateReuse", "1", CVAR_RENDERER | CVAR_BOOL, "keep model-space dynamic snapshots across transform-only entity updates so repeated-state presentation frames skip CPU re-skinning" );
 idCVar r_useNewSkinning( "r_useNewSkinning", "1", CVAR_RENDERER | CVAR_BOOL, "use retail-style SIMD MD5 skinning data" );
+idCVar r_gpuSkinning( "r_gpuSkinning", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use exact four-weight GPU deformation for eligible animated surfaces" );
 idCVar r_useFastSkinning( "r_useFastSkinning", "0", CVAR_RENDERER | CVAR_BOOL, "approximate MD5 tangent skinning with the dominant joint only" );
 idCVar r_deriveBiTangents( "r_deriveBiTangents", "0", CVAR_RENDERER | CVAR_BOOL, "derive bitangents from skinned normals and tangents" );
 idCVar r_forceConvertMD5R( "r_forceConvertMD5R", "0", CVAR_RENDERER | CVAR_BOOL, "prefer source md5/proc assets over any future prebuilt MD5R companions" );
@@ -414,13 +536,28 @@ idCVar r_swapInterval( "r_swapInterval", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVA
 idCVar r_disableVSyncDuringLevelLoad( "r_disableVSyncDuringLevelLoad", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "temporarily disable VSync for loading-screen presents during blocking level loads" );
 
 static bool r_loadingScreenSwapIntervalBypass = false;
+// openQ4 VR: the headset paces VR frames, so the desktop mirror never waits
+// for the monitor's refresh
+static bool r_vrSwapIntervalBypass = false;
 
 static int R_GetEffectiveSwapIntervalForState( bool loadingScreenBypassActive ) {
 	const int configuredInterval = r_swapInterval.GetInteger();
+	if ( r_vrSwapIntervalBypass && configuredInterval != 0 ) {
+		return 0;
+	}
 	if ( loadingScreenBypassActive && r_disableVSyncDuringLevelLoad.GetBool() && configuredInterval != 0 ) {
 		return 0;
 	}
 	return configuredInterval;
+}
+
+void R_SetVRSwapIntervalBypass( bool active ) {
+	const int oldInterval = R_GetEffectiveSwapIntervalForState( r_loadingScreenSwapIntervalBypass );
+	r_vrSwapIntervalBypass = active;
+	const int newInterval = R_GetEffectiveSwapIntervalForState( r_loadingScreenSwapIntervalBypass );
+	if ( oldInterval != newInterval ) {
+		r_swapInterval.SetModified();
+	}
 }
 
 void R_SetLoadingScreenSwapIntervalBypass( bool active ) {
@@ -436,34 +573,59 @@ int R_GetEffectiveSwapInterval( void ) {
 	return R_GetEffectiveSwapIntervalForState( r_loadingScreenSwapIntervalBypass );
 }
 
+bool R_LoadingScreenActive( void ) {
+	return r_loadingScreenSwapIntervalBypass;
+}
+
 idCVar r_gamma( "r_gamma", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "changes gamma tables", 0.5f, 3.0f );
 idCVar r_brightness( "r_brightness", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "changes gamma tables", 0.5f, 2.0f );
 
 idCVar r_renderer( "r_renderer", "best", CVAR_RENDERER | CVAR_ARCHIVE, "hardware specific renderer path to use", r_rendererArgs, idCmdSystem::ArgCompletion_String<r_rendererArgs> );
 idCVar r_actualRenderer( "r_actualRenderer", "UNINITIALIZED", CVAR_RENDERER | CVAR_ROM, "actual active renderer backend after request/fallback selection" );
 idCVar r_glTier( "r_glTier", "auto", CVAR_RENDERER | CVAR_ARCHIVE, "OpenGL renderer tier: auto, legacy, gl33, gl41, gl43, gl45, gl46", r_glTierArgs, idCmdSystem::ArgCompletion_String<r_glTierArgs> );
+idCVar r_glesContext( "r_glesContext", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "request an OpenGL ES 3.0 context instead of desktop GL; bring-up aid for the Android GLES backend, on desktop this needs an EGL/GLES translation layer (ANGLE)" );
+idCVar r_glCoreProfileFirst( "r_glCoreProfileFirst", "0", CVAR_RENDERER | CVAR_BOOL, "with a forced r_glTier, try core-profile contexts before the compatibility fallback; needed to reach the modern path on drivers that cap compatibility below 3.3 (macOS caps it at 2.1), diagnostic only" );
 idCVar r_vkValidation( "r_vkValidation", "0", CVAR_RENDERER | CVAR_BOOL, "enable Vulkan validation layers for the Vulkan renderer module and rendererVkProbe" );
-idCVar r_vkDevice( "r_vkDevice", "-1", CVAR_RENDERER | CVAR_INTEGER, "Vulkan physical-device index override, -1 = automatic selection", -1, 15 );
+idCVar r_vkSampleLocations( "r_vkSampleLocations", "1", CVAR_RENDERER | CVAR_BOOL, "use lower-left standard MSAA locations when supported; read at Vulkan initialization" );
+idCVar r_vkStartupFailure( "r_vkStartupFailure", "0", CVAR_RENDERER | CVAR_INTEGER,
+		"diagnostic Vulkan startup failure: 0 = off, 1 = window, 2 = surface, 3 = swapchain, 4 = renderer resources", 0, 4 );
+idCVar r_vkStartupFailureDevice( "r_vkStartupFailureDevice", "-1", CVAR_RENDERER | CVAR_INTEGER,
+		"diagnostic: limit a swapchain or renderer-resources r_vkStartupFailure to the admitted device with this index, -1 = any device", -1, 255 );
+idCVar r_vkDevice( "r_vkDevice", "-1", CVAR_RENDERER | CVAR_INTEGER, "Vulkan physical-device index override, -1 = automatic selection (resumes on the next compatible device if one fails to start)", -1, 255 );
+idCVar r_vkShadowFallbackTest( "r_vkShadowFallbackTest", "0", CVAR_RENDERER | CVAR_BOOL, "diagnostic: make Vulkan shadow maps and stencil ownership unavailable to exercise unshadowed receiver fallback" );
 idCVar r_glDebugContext( "r_glDebugContext", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "request a debug OpenGL context when the platform backend supports it" );
 idCVar r_glDebugOutput( "r_glDebugOutput", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "report OpenGL driver debug messages when a debug context is active" );
 idCVar r_glDebugSynchronous( "r_glDebugSynchronous", "0", CVAR_RENDERER | CVAR_BOOL, "deliver OpenGL debug callbacks synchronously (diagnostic; may reduce performance)" );
 idCVar r_rendererMetrics( "r_rendererMetrics", "0", CVAR_RENDERER | CVAR_INTEGER, "renderer metrics: 0 = off, 1 = periodic summary, 2 = per-frame/pass detail", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
-idCVar r_rendererGpuTimers( "r_rendererGpuTimers", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "sample GL timer queries when r_rendererMetrics is enabled and supported" );
+idCVar r_rendererGpuTimers( "r_rendererGpuTimers", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "sample delayed whole-frame GPU timestamps on supported backends; OpenGL pass detail additionally requires r_rendererMetrics" );
 idCVar r_rendererBenchmarkPreset( "r_rendererBenchmarkPreset", "baseline", CVAR_RENDERER | CVAR_ARCHIVE, "renderer benchmark budget preset: low, baseline, modern, high-end", r_rendererBenchmarkPresetArgs, idCmdSystem::ArgCompletion_String<r_rendererBenchmarkPresetArgs> );
 idCVar r_rendererPerfThresholdP95( "r_rendererPerfThresholdP95", "0", CVAR_RENDERER | CVAR_INTEGER, "custom renderer benchmark P95 frame-time budget in milliseconds (0 = preset default)", 0, 1000, idCmdSystem::ArgCompletion_Integer<0,1000> );
 idCVar r_rendererPerfThresholdP99( "r_rendererPerfThresholdP99", "0", CVAR_RENDERER | CVAR_INTEGER, "custom renderer benchmark P99 frame-time budget in milliseconds (0 = preset default)", 0, 1000, idCmdSystem::ArgCompletion_Integer<0,1000> );
 idCVar r_rendererAdaptiveClusterGrid( "r_rendererAdaptiveClusterGrid", "0", CVAR_RENDERER | CVAR_BOOL, "use benchmark preset cluster-grid dimensions for the modern clustered-light experiment" );
-idCVar r_rendererDynamicResolution( "r_rendererDynamicResolution", "0", CVAR_RENDERER | CVAR_BOOL, "allow benchmark presets to recommend dynamic screen-percentage experiments; disabled by default" );
+idCVar r_rendererDynamicResolution( "r_rendererDynamicResolution", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "automatically scale the 3D scene from delayed GPU timing; disabled by default" );
 idCVar r_rendererUploadMegs( "r_rendererUploadMegs", "16", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "dynamic renderer upload stream size in megabytes per frame buffer", 1, 128, idCmdSystem::ArgCompletion_Integer<1,128> );
 idCVar r_rendererUploadFrameBuffers( "r_rendererUploadFrameBuffers", "4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "dynamic renderer upload stream frame-buffer rotation depth", 3, 8, idCmdSystem::ArgCompletion_Integer<3,8> );
 idCVar r_rendererUploadPersistent( "r_rendererUploadPersistent", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "allow persistent-mapped dynamic renderer uploads when supported" );
 idCVar r_rendererUploadBufferPool( "r_rendererUploadBufferPool", "1", CVAR_RENDERER | CVAR_BOOL, "recycle static GL buffer names instead of gen/data/delete churn for per-frame regenerated geometry" );
+idCVar r_rendererModernQuality( "r_rendererModernQuality", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "master permit for experimental Milestone-F PBR, probe, decal, volumetric, SSR, and SSGI domains; 0 rolls every domain back to classic ownership" );
+idCVar r_rendererReflectionProbes( "r_rendererReflectionProbes", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "enable authored reflection probes for eligible modern PBR views; unsupported or incomplete probe sets use analytic/classic fallback" );
+idCVar r_rendererClusteredDecals( "r_rendererClusteredDecals", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "transfer complete eligible decal subsets to bounded clustered forward rendering; incomplete views remain entirely classic" );
 idCVar r_rendererModernExecutor( "r_rendererModernExecutor", "0", CVAR_RENDERER | CVAR_BOOL, "prepare the opt-in modern GL executor frame contract while legacy ARB2 still executes" );
 idCVar r_rendererModernSubmit( "r_rendererModernSubmit", "0", CVAR_RENDERER | CVAR_BOOL, "execute opt-in modern GL draw submission before legacy ARB2 fallback; diagnostic until visible pass replacement lands" );
 idCVar r_rendererGpuValidation( "r_rendererGpuValidation", "0", CVAR_RENDERER | CVAR_BOOL, "compare GL 4.3 GPU-driven compute results against CPU reference data on sampled frames" );
 idCVar r_rendererGpuValidationReadbackDelay( "r_rendererGpuValidationReadbackDelay", "2", CVAR_RENDERER | CVAR_INTEGER, "frames to defer opt-in GL 4.3 GPU validation readbacks before polling without a sync wait", 1, 8, idCmdSystem::ArgCompletion_Integer<1,8> );
 idCVar r_rendererBindless( "r_rendererBindless", "0", CVAR_RENDERER | CVAR_BOOL, "enable experimental GL 4.5 bindless texture diagnostics without changing visible output" );
 idCVar r_rendererModernVisible( "r_rendererModernVisible", "0", CVAR_RENDERER | CVAR_BOOL, "execute the opt-in modern hybrid visible-frame composition when all required pass owners are modern-safe" );
+idCVar r_rendererSharedGui( "r_rendererSharedGui", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "execute eligible fixed-function 2D GUI views from the backend-neutral ordered material-stage stream; any unsupported view uses the complete classic path" );
+idCVar r_rendererSharedInWorldGui( "r_rendererSharedInWorldGui", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "execute eligible GUI geometry emitted onto 3D surfaces from a backend-neutral ordered material-stage stream; any unsupported view keeps every in-world GUI surface on the classic path" );
+idCVar r_rendererSharedCinematicPost( "r_rendererSharedCinematicPost", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "execute eligible root cinematic playback and complete authored post-process ranges through a sealed shared transaction; post/video ranges nested in a shared special-view tree publish or roll back with its root; unsupported ranges use the complete classic path" );
+idCVar r_rendererSharedSpecialFrame( "r_rendererSharedSpecialFrame", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "execute eligible render-demo playback and Raven special-effect controller frames through a sealed shared transaction; unsupported views and commands use the complete classic path" );
+idCVar r_rendererSharedWorldAmbient( "r_rendererSharedWorldAmbient", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "execute every eligible classic world ambient/material surface in a complete 3D view from the backend-neutral ordered material-stage stream; any unsupported view uses the complete classic path" );
+idCVar r_rendererSharedWorldInteraction( "r_rendererSharedWorldInteraction", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "execute every eligible unshadowed fixed-classic interaction light and receiver in a complete 3D view from a backend-neutral sealed stream; any unsupported view uses the complete classic path" );
+idCVar r_rendererSharedWorldFogBlend( "r_rendererSharedWorldFogBlend", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "execute the complete classic fog/blend light phase in an eligible 3D view from a backend-neutral sealed stream; any unsupported view uses the complete classic path" );
+idCVar r_rendererSharedSubview( "r_rendererSharedSubview", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "execute eligible direct mirror and capture-backed remote-camera, mirror, reflection, refraction, and x-ray subview transactions from backend-neutral sealed records; nested child trees commit atomically at their outermost special view, while 2D/cubemap color and depth captures retain exact type, aspect, and face; unsupported subviews use the complete classic path" );
+idCVar r_rendererSharedDeform( "r_rendererSharedDeform", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "enable optional, default-off backend-neutral material-deform ownership; incomplete or unsupported work retains the complete classic path" );
+idCVar r_rendererModernLightingParity( "r_rendererModernLightingParity", "0", CVAR_RENDERER | CVAR_INTEGER, "diagnostic override forcing modern lighting-ownership parity contracts proven for bring-up capture: 1 = interaction, 2 = fog/blend, 4 = light grid, 8 = shadow receivers; 0 keeps every unproven domain on the ARB2 bridge", 0, 15, idCmdSystem::ArgCompletion_Integer<0,15> );
 idCVar r_rendererModernAutoPromote( "r_rendererModernAutoPromote", "0", CVAR_RENDERER | CVAR_BOOL, "allow r_glTier auto and r_renderer best to request the guarded modern visible path after promotion evidence and sign-off; off keeps ARB2 default" );
 idCVar r_rendererPromotionEvidence( "r_rendererPromotionEvidence", "", CVAR_RENDERER, "Phase 8 validation evidence token required with r_rendererModernAutoPromote before automatic modern visible promotion" );
 idCVar r_rendererShaderReload( "r_rendererShaderReload", "0", CVAR_RENDERER | CVAR_BOOL, "allow runtime reload of the internal modern GL shader library" );
@@ -488,11 +650,12 @@ idCVar r_shaderReport( "r_shaderReport", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVA
 idCVar r_forceAppleGL21InteractionCorridor( "r_forceAppleGL21InteractionCorridor", "0", CVAR_RENDERER | CVAR_BOOL, "non-Apple hosts only: treat a GL 2.1 compatibility context as the Apple GL 2.1 interaction corridor for reproduction; requires vid_restart" );
 
 idCVar r_jitter( "r_jitter", "0", CVAR_RENDERER | CVAR_BOOL, "randomly subpixel jitter the projection matrix" );
+idCVar r_levelshotSupersample( "r_levelshotSupersample", "1", CVAR_RENDERER | CVAR_FLOAT, "levelshot source scale: each 4:3 view is rendered this many times the tile height, then area-averaged down to the tile", 1.0f, 4.0f );
 
 idCVar r_skipSuppress( "r_skipSuppress", "0", CVAR_RENDERER | CVAR_BOOL, "ignore the per-view suppressions" );
 idCVar r_skipPostProcess( "r_skipPostProcess", "0", CVAR_RENDERER | CVAR_BOOL, "skip all post-process renderings" );
 idCVar r_skipLightScale( "r_skipLightScale", "0", CVAR_RENDERER | CVAR_BOOL, "don't do any post-interaction light scaling, makes things dim on low-dynamic range cards" );
-idCVar r_skipSky( "r_skipSky", "0", CVAR_RENDERER | CVAR_BOOL, "skip sky rendering" );
+idCVar r_skipSky( "r_skipSky", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "skip sky rendering" );
 idCVar r_skipInteractions( "r_skipInteractions", "0", CVAR_RENDERER | CVAR_BOOL, "skip all light/surface interaction drawing" );
 idCVar r_skipDynamicTextures( "r_skipDynamicTextures", "0", CVAR_RENDERER | CVAR_BOOL, "don't dynamically create textures" );
 idCVar r_skipCopyTexture( "r_skipCopyTexture", "0", CVAR_RENDERER | CVAR_BOOL, "do all rendering, but don't actually copyTexSubImage2D" );
@@ -515,6 +678,7 @@ idCVar r_lightGridDepthBiasFactor( "r_lightGridDepthBiasFactor", "0", CVAR_RENDE
 idCVar r_lightGridDepthBiasUnits( "r_lightGridDepthBiasUnits", "0", CVAR_RENDERER | CVAR_FLOAT, "fallback polygon offset units for depth-tested baked light-grid overlay receivers", -4096.0f, 4096.0f );
 idCVar r_lightGridDepthTolerance( "r_lightGridDepthTolerance", "0.005", CVAR_RENDERER | CVAR_FLOAT, "normalized depth tolerance for clipping baked light-grid receivers against captured scene depth", 0.0f, 0.1f );
 idCVar r_lightGridPortalBlend( "r_lightGridPortalBlend", "64", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "world-unit radius for blending indirect light grids across visible portal boundaries; 0 disables", 0.0f, 256.0f );
+idCVar r_lightGridSoftwareDecode( "r_lightGridSoftwareDecode", "0", CVAR_RENDERER | CVAR_BOOL, "decode DXT-compressed light-grid pack atlases in software even where the GPU samples DXT; renderers without S3TC always do, so 1 tests that path" );
 idCVar r_lightGridPreload( "r_lightGridPreload", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "preload every light-grid atlas while loading a map; 0 streams visible areas on demand, 1 avoids area-transition uploads at the cost of longer map loads and more VRAM" );
 idCVar r_lightGridResidencyFrames( "r_lightGridResidencyFrames", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "frames to keep light-grid atlases resident after visible/neighbor use; 0 disables runtime purging", 0, 3600, idCmdSystem::ArgCompletion_Integer<0,3600> );
 idCVar r_lightGridBakeWorkers( "r_lightGridBakeWorkers", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "worker threads for light-grid probe integration (-1 = disabled, 0 = auto, 1..8 = explicit)", -1, 8, idCmdSystem::ArgCompletion_Integer<-1,8> );
@@ -562,8 +726,11 @@ idCVar r_shadowMapBias( "r_shadowMapBias", "0.00016", CVAR_RENDERER | CVAR_ARCHI
 idCVar r_shadowMapNormalBias( "r_shadowMapNormalBias", "0.00075", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "geometric normal bias added on sloped projected-light receivers", 0.0f, 0.05f );
 idCVar r_shadowMapPointBias( "r_shadowMapPointBias", "0.00010", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "constant receiver depth bias for point-light shadow maps", 0.0f, 0.05f );
 idCVar r_shadowMapPointNormalBias( "r_shadowMapPointNormalBias", "0.0010", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "geometric normal bias added on sloped point-light receivers", 0.0f, 0.05f );
+idCVar r_shadowMapPointMaxWorldBias( "r_shadowMapPointMaxWorldBias", "4.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "maximum combined point-shadow receiver depth bias and normal offset at the padded far envelope, in world units; 0 disables the cap", 0.0f, 64.0f );
+// Default projected filtering is PCSS-lite (r_shadowMapFilterMode 2), where this
+// radius is the penumbra's minimum rather than a fixed PCF width.
 idCVar r_shadowMapFilterRadius( "r_shadowMapFilterRadius", "2.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "projected-light PCF radius in texels for the simple shadow-map path", 0.0f, 8.0f );
-idCVar r_shadowMapPointFilterRadius( "r_shadowMapPointFilterRadius", "2.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "point-light PCF radius in texels for the simple shadow-map path", 0.0f, 8.0f );
+idCVar r_shadowMapPointFilterRadius( "r_shadowMapPointFilterRadius", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "point-light PCF radius in texels for the simple shadow-map path", 0.0f, 8.0f );
 idCVar r_shadowMapProjectionPad( "r_shadowMapProjectionPad", "0.15", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normalized padding applied around projected-light shadow-map coverage", 0.0f, 1.0f );
 idCVar r_shadowMapCascadeCount( "r_shadowMapCascadeCount", "4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "number of projected-light cascades when r_shadowMapCSM is enabled", 1, 4, idCmdSystem::ArgCompletion_Integer<1,4> );
 idCVar r_shadowMapCascadeDistance( "r_shadowMapCascadeDistance", "1536", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "camera-space distance covered by the cropped projected-light cascades", 64.0f, 8192.0f );
@@ -577,8 +744,14 @@ idCVar r_shadowMapDebugMode( "r_shadowMapDebugMode", "0", CVAR_RENDERER | CVAR_I
 	0, SHADOWMAP_DEBUGMODE_COUNT - 1, idCmdSystem::ArgCompletion_Integer<0, SHADOWMAP_DEBUGMODE_COUNT - 1> );
 idCVar r_shadowMapCascadeStabilize( "r_shadowMapCascadeStabilize", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "snap projected-light cascade bounds to texels to reduce shimmering" );
 idCVar r_shadowMapPointFarScale( "r_shadowMapPointFarScale", "1.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "padding multiplier applied to point-light shadow-map range", 1.0f, 4.0f );
-idCVar r_shadowMapPolygonFactor( "r_shadowMapPolygonFactor", "0.75", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "slope-scale depth bias used when rendering shadow-map casters", 0.0f, 16.0f );
+idCVar r_shadowMapPolygonFactor( "r_shadowMapPolygonFactor", "0.25", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "slope-scale depth bias used when rendering shadow-map casters", 0.0f, 16.0f );
 idCVar r_shadowMapPolygonOffset( "r_shadowMapPolygonOffset", "0.5", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "constant depth bias used when rendering shadow-map casters", 0.0f, 64.0f );
+static idCVar r_shadowMapContactQualityMigrated( "r_shadowMapContactQualityMigrated", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for legacy broad shadow filtering defaults" );
+static idCVar r_shadowMapFilterDefaultsMigrated( "r_shadowMapFilterDefaultsMigrated", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the legacy fixed-PCF projected shadow filter defaults" );
+static idCVar r_shadowMapPointCacheDefaultsMigrated( "r_shadowMapPointCacheDefaultsMigrated", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the legacy twelve-slot point shadow cache" );
+static idCVar r_pbrMaterialsDefaultMigrated( "r_pbrMaterialsDefaultMigrated", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the PBR material default" );
+static idCVar r_temporalAADefaultMigrated( "r_temporalAADefaultMigrated", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the automatic temporal AA default" );
+extern idCVar r_temporalAA;
 idCVar r_frontBuffer( "r_frontBuffer", "0", CVAR_RENDERER | CVAR_BOOL, "draw to front buffer for debugging" );
 idCVar r_skipSubviews( "r_skipSubviews", "0", CVAR_RENDERER | CVAR_INTEGER, "1 = don't render any gui elements on surfaces" );
 idCVar r_skipParticles( "r_skipParticles", "0", CVAR_RENDERER | CVAR_INTEGER, "1 = skip all particle systems", 0, 1, idCmdSystem::ArgCompletion_Integer<0,1> );
@@ -600,11 +773,14 @@ idCVar r_useCombinerDisplayLists( "r_useCombinerDisplayLists", "1", CVAR_RENDERE
 idCVar r_useDepthBoundsTest( "r_useDepthBoundsTest", "1", CVAR_RENDERER | CVAR_BOOL, "use depth bounds test to reduce shadow fill" );
 
 idCVar r_screenFraction( "r_screenFraction", "100", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_INTEGER, "main-scene resolution scale percentage; values above 100 enable offscreen supersampling", 10, 200 );
-idCVar r_resolutionScaleMode( "r_resolutionScaleMode", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "screen-fraction mode below native resolution: 0 = legacy cropped viewport, 1 = bilinear upscale, 2 = high-quality upscale; supersampling uses the scene-target resolve path", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
+idCVar r_resolutionScaleMode( "r_resolutionScaleMode", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "screen-fraction mode below native resolution: 0 = legacy cropped world viewport with no upscale (fill-rate testing), 1 = bilinear upscale, 2 = high-quality upscale, 3 = nearest-neighbour upscale (sharp, no blur). On OpenGL ES 1 and 2 crop the world render and blit it back out bilinear and 3 does the same with a point filter. Every mode leaves the HUD and menus at native resolution; supersampling uses the scene-target resolve path", 0, 3, idCmdSystem::ArgCompletion_Integer<0,3> );
 idCVar r_resolutionScaleSharpness( "r_resolutionScaleSharpness", "0.4", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "sharpening amount for high-quality resolution scaling", 0.0f, 1.5f );
 idCVar r_demonstrateBug( "r_demonstrateBug", "0", CVAR_RENDERER | CVAR_BOOL, "used during development to show IHV's their problems" );
 idCVar r_usePortals( "r_usePortals", "1", CVAR_RENDERER | CVAR_BOOL, " 1 = use portals to perform area culling, otherwise draw everything" );
-idCVar r_portalsDistanceCull( "r_portalsDistanceCull", "1", CVAR_RENDERER | CVAR_BOOL, "enable distance-cull checks using portal fade cull ranges" );
+// Retail defaults to 1: a portal farther than its authored fade range stops the view flood, so
+// windows and doorways tagged with a fade (mcc_1's medical bay window, 200 units) turn opaque.
+// The cull only saved 2005-era fill rate, so openQ4 keeps every portal open unless asked.
+idCVar r_portalsDistanceCull( "r_portalsDistanceCull", "0", CVAR_RENDERER | CVAR_BOOL, "1 = stop drawing areas behind portals beyond their authored fade distance, as retail Quake 4 did" );
 idCVar r_singleLight( "r_singleLight", "-1", CVAR_RENDERER | CVAR_INTEGER, "suppress all but one light" );
 idCVar r_singleEntity( "r_singleEntity", "-1", CVAR_RENDERER | CVAR_INTEGER, "suppress all but one entity" );
 idCVar r_singleSurface( "r_singleSurface", "-1", CVAR_RENDERER | CVAR_INTEGER, "suppress all but one surface on each entity" );
@@ -684,7 +860,7 @@ idCVar r_debugRenderToTexture( "r_debugRenderToTexture", "0", CVAR_RENDERER | CV
 R_CheckExtension
 =================
 */
-bool R_CheckExtension( char *name ) {
+bool R_CheckExtension( const char *name ) {
 	if ( name == NULL || name[0] == '\0' ) {
 		return false;
 	}
@@ -748,8 +924,15 @@ static void R_RendererDefaultSafetySelfTest_f( const idCmdArgs &args ) {
 }
 
 static void R_RendererBenchmarkCapture_f( const idCmdArgs &args ) {
-	(void)args;
+	if ( args.Argc() > 2 ) {
+		common->Printf( "usage: rendererBenchmarkCapture [\"relative CSV path\"]\n" );
+		return;
+	}
 	RendererBenchmarks_PrintLatestCapture();
+	RendererBenchmarks_PrintTimingMarker();
+	if ( args.Argc() > 1 ) {
+		RendererBenchmarks_WriteTimingTrace( args.Argv( 1 ) );
+	}
 }
 
 static void R_RendererUploadSelfTest_f( const idCmdArgs &args ) {
@@ -799,6 +982,109 @@ static void R_RendererMaterialResourceTableSelfTest_f( const idCmdArgs &args ) {
 	}
 }
 
+static void R_RendererClassicGuiDomainSelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	if ( RendererClassicGuiDomain_RunSelfTest() ) {
+		common->Printf( "RendererClassicGuiDomain self-test passed\n" );
+	} else {
+		common->Warning( "RendererClassicGuiDomain self-test failed" );
+	}
+}
+
+static void R_RendererClassicCinematicPostDomainSelfTest_f(
+		const idCmdArgs &args ) {
+	(void)args;
+	if ( RendererClassicCinematicPostDomain_RunSelfTest() ) {
+		common->Printf( "RendererClassicCinematicPostDomain self-test passed\n" );
+	} else {
+		common->Warning( "RendererClassicCinematicPostDomain self-test failed" );
+	}
+}
+
+static void R_RendererClassicSpecialFrameDomainSelfTest_f(
+		const idCmdArgs &args ) {
+	(void)args;
+	if ( RendererClassicSpecialFrameDomain_RunSelfTest() ) {
+		common->Printf( "RendererClassicSpecialFrameDomain self-test passed\n" );
+	} else {
+		common->Warning( "RendererClassicSpecialFrameDomain self-test failed" );
+	}
+}
+
+static void R_RendererClassicWorldAmbientDomainSelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	if ( RendererClassicWorldAmbientDomain_RunSelfTest() ) {
+		common->Printf( "RendererClassicWorldAmbientDomain self-test passed\n" );
+	} else {
+		common->Warning( "RendererClassicWorldAmbientDomain self-test failed" );
+	}
+}
+
+static void R_RendererClassicInteractionDomainSelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	if ( RendererClassicInteractionDomain_RunSelfTest() ) {
+		common->Printf( "RendererClassicInteractionDomain self-test passed\n" );
+	} else {
+		common->Warning( "RendererClassicInteractionDomain self-test failed" );
+	}
+}
+
+static void R_RendererClassicFogBlendDomainSelfTest_f(
+		const idCmdArgs &args ) {
+	(void)args;
+	if ( RendererClassicFogBlendDomain_RunSelfTest() ) {
+		common->Printf( "RendererClassicFogBlendDomain self-test passed\n" );
+	} else {
+		common->Warning( "RendererClassicFogBlendDomain self-test failed" );
+	}
+}
+
+static void R_RendererClassicSubviewDomainSelfTest_f(
+		const idCmdArgs &args ) {
+	(void)args;
+	if ( RendererClassicSubviewDomain_RunSelfTest() ) {
+		common->Printf( "RendererClassicSubviewDomain self-test passed\n" );
+	} else {
+		common->Warning( "RendererClassicSubviewDomain self-test failed" );
+	}
+}
+
+static void R_RendererClassicDeformDomainSelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	if ( RendererClassicDeformDomain_RunSelfTest() ) {
+		common->Printf( "RendererClassicDeformDomain self-test passed\n" );
+	} else {
+		common->Warning( "RendererClassicDeformDomain self-test failed" );
+	}
+}
+
+static void R_RendererGpuSkinningSelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	if ( R_GpuSkinning_RunSelfTest() ) {
+		common->Printf( "RendererGpuSkinning self-test passed\n" );
+	} else {
+		common->Warning( "RendererGpuSkinning self-test failed" );
+	}
+}
+
+static void R_RendererContractsSelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	if ( RendererContracts_RunSelfTest() ) {
+		common->Printf( "RendererContracts self-test passed\n" );
+	} else {
+		common->Warning( "RendererContracts self-test failed" );
+	}
+}
+
+static void R_RendererPBRMaterialSelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	if ( !R_PBRMaterialParserSelfTest() ) {
+		common->Warning( "Renderer PBR material parser self-test failed" );
+		return;
+	}
+	common->Printf( "RendererPBRMaterial self-test passed\n" );
+}
+
 static void R_RendererMaterialResourceTableDump_f( const idCmdArgs &args ) {
 	(void)args;
 	R_MaterialResourceTable_DumpLatest();
@@ -846,10 +1132,24 @@ static void R_RendererGBufferSelfTest_f( const idCmdArgs &args ) {
 	}
 }
 
+static void R_RendererPBRVisibleSelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	if ( !RendererPBRVisible_RunSelfTest() ) {
+		common->Warning( "Renderer PBR visible-path self-test failed" );
+	}
+}
+
 static void R_RendererClusterGridSelfTest_f( const idCmdArgs &args ) {
 	(void)args;
 	if ( !RendererClusterGrid_RunSelfTest() ) {
 		common->Warning( "Renderer clustered light-grid self-test failed" );
+	}
+}
+
+static void R_RendererLightImageAtlasSelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	if ( !RendererLightImageAtlas_RunSelfTest() ) {
+		common->Warning( "Renderer light image atlas self-test failed" );
 	}
 }
 
@@ -963,6 +1263,7 @@ void R_PublishCompressionCapsToImageTools( void ) {
 	imageToolsCompressionCaps_t compressionCaps;
 	compressionCaps.textureCompressionAvailable = glConfig.textureCompressionAvailable;
 	compressionCaps.bptcTextureCompressionAvailable = glConfig.bptcTextureCompressionAvailable;
+	compressionCaps.etc2TextureCompressionAvailable = glConfig.etc2TextureCompressionAvailable;
 	ImageTools_SetCompressionCaps( compressionCaps );
 }
 
@@ -972,13 +1273,9 @@ R_CheckPortableExtensions
 
 ==================
 */
-static void R_CheckPortableExtensions( void ) {
-	R_RecordRendererStartupPhase( RENDERER_STARTUP_PHASE_R_CHECK_PORTABLE_EXTENSIONS );
-	glConfig.glVersion = atof( glConfig.version_string );
-	R_ClearMissingRequiredOpenGLFeatures();
-
+static bool R_InitOpenGLExtensionLoader( char *error, int errorSize ) {
 	if ( !GLimp_EnsureActiveContext( "GLEW initialization" ) ) {
-		common->FatalError( "Unable to make OpenGL context current for GLEW initialization\n" );
+		return R_RendererRestartError( error, errorSize, "Unable to make OpenGL context current for GLEW initialization" );
 	}
 	common->Printf("Init Glew...\n");
 
@@ -986,13 +1283,33 @@ static void R_CheckPortableExtensions( void ) {
 	const GLenum glewResult = glewInit();
 	if ( glewResult != GLEW_OK ) {
 		const GLubyte *glewError = glewGetErrorString( glewResult );
-		common->FatalError( "Failed to init GLEW: %s\n", glewError != NULL ? reinterpret_cast<const char *>( glewError ) : "unknown error" );
+		return R_RendererRestartError( error, errorSize, va( "Failed to init GLEW: %s", glewError != NULL ? reinterpret_cast<const char *>( glewError ) : "unknown error" ) );
 	}
 	while ( glGetError() != GL_NO_ERROR ) {
 	}
+	return true;
+}
+
+static bool R_CheckPortableExtensions( bool legacyPolicy, char *error, int errorSize ) {
+	R_RecordRendererStartupPhase( RENDERER_STARTUP_PHASE_R_CHECK_PORTABLE_EXTENSIONS );
+	glConfig.glVersion = atof( glConfig.version_string );
+	R_ClearMissingRequiredOpenGLFeatures();
+	if ( !R_InitOpenGLExtensionLoader( error, errorSize ) ) return false;
 
 	GLCapabilityProbe_Build( glConfig.backendCaps, glConfig.version_string, glConfig.extensions_string );
 	glConfig.extensions_string = GLCapabilityProbe_ExtensionString();
+
+	// The atof() above cannot read an "OpenGL ES <n>.<n> ..." version string
+	// and leaves 0.0 behind. The probe parses both spellings, so adopt its
+	// result now that it has run.
+	glConfig.glVersion = glConfig.backendCaps.glVersion;
+
+	// A profile with no fixed-function stage: desktop core, or OpenGL ES at any
+	// version. Several checks below are written against compatibility-only
+	// extension strings and enums, which such a profile cannot answer.
+	const bool programmableOnlyProfile =
+		glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_ES
+		|| glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_CORE;
 
 	// GL_ARB_multitexture
 	glConfig.multitextureAvailable = R_CheckRequiredExtension( "GL_ARB_multitexture" );
@@ -1012,6 +1329,24 @@ static void R_CheckPortableExtensions( void ) {
 		}
 		glGetIntegerv(GL_MAX_TEXTURE_COORDS_ARB, (GLint*)&glConfig.maxTextureCoords);
 		glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS_ARB, (GLint*)&glConfig.maxTextureImageUnits);
+	} else if ( programmableOnlyProfile ) {
+		// GL_ARB_multitexture is compatibility-only, so the block above never
+		// runs here and every limit would stay 0 -- which makes GL_SelectTexture
+		// and idImage::Bind reject every unit and the frame comes out black.
+		// GL_MAX_TEXTURE_IMAGE_UNITS is the core query and is what actually
+		// bounds a fragment shader's samplers. GL_MAX_TEXTURE_UNITS and
+		// GL_MAX_TEXTURE_COORDS describe fixed-function stages that do not
+		// exist, so mirror the image-unit count rather than querying them.
+		glGetIntegerv( GL_MAX_TEXTURE_IMAGE_UNITS, (GLint *)&glConfig.maxTextureImageUnits );
+		if ( glConfig.maxTextureImageUnits <= 0 ) {
+			glConfig.maxTextureImageUnits = 16;		// the ES 3.0 / GL 3.3 floor
+		}
+		if ( glConfig.maxTextureImageUnits > MAX_MULTITEXTURE_UNITS ) {
+			glConfig.maxTextureImageUnits = MAX_MULTITEXTURE_UNITS;
+		}
+		glConfig.maxTextureUnits = glConfig.maxTextureImageUnits;
+		glConfig.maxTextureCoords = glConfig.maxTextureImageUnits;
+		glConfig.multitextureAvailable = true;
 	}
 
 	glConfig.maxDrawBuffers = 1;
@@ -1054,7 +1389,22 @@ static void R_CheckPortableExtensions( void ) {
 		common->Printf( "X..texture compression entry points incomplete\n" );
 	}
 	const bool textureCompressionAvailable = textureCompressionAdvertised && textureCompressionEntryPointsAvailable;
-	if ( textureCompressionAvailable && R_CheckExtension( "GL_EXT_texture_compression_s3tc" ) ) {
+	// OpenGL ES never advertises GL_EXT_texture_compression_s3tc. ANGLE splits the
+	// same formats across GL_EXT_texture_compression_dxt1 (which defines both the
+	// RGB and RGBA DXT1 tokens) and GL_ANGLE_texture_compression_dxt5, and only
+	// offers the sRGB variant under the s3tc name. The engine uploads exactly
+	// GL_COMPRESSED_RGBA_S3TC_DXT1_EXT and GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, so
+	// those two extensions cover everything FMT_DXT1/FMT_DXT5 need.
+	//
+	// Getting this wrong is not a quiet quality downgrade: a rejected DXT header
+	// makes R_BinaryImageHeaderSupportedByRenderer fail, so every precompressed
+	// image is regenerated from source art as FMT_RGB565 -- slowly, and lazily
+	// enough that placeholders are visible until a level load completes.
+	const bool s3tcSpelled = R_CheckExtension( "GL_EXT_texture_compression_s3tc" );
+	const bool dxtSpelledSeparately =
+		R_CheckExtension( "GL_EXT_texture_compression_dxt1" ) &&
+		R_CheckExtension( "GL_ANGLE_texture_compression_dxt5" );
+	if ( textureCompressionAvailable && ( s3tcSpelled || dxtSpelledSeparately ) ) {
 		glConfig.textureCompressionAvailable = true;
 	} else {
 		glConfig.textureCompressionAvailable = false;
@@ -1064,6 +1414,26 @@ static void R_CheckPortableExtensions( void ) {
 	glConfig.bptcTextureCompressionAvailable =
 		textureCompressionAvailable &&
 		bptcTextureCompressionAdvertised;
+
+	// ETC2 and EAC are core in OpenGL ES 3.0 -- no extension string to check,
+	// and every device that can run this renderer has them. That is the whole
+	// point: on the Adreno 650 class, which advertises no S3TC at all, this is
+	// the only compressed format the driver will take, and without it every
+	// texture lands at FMT_RGBA8.
+	//
+	// Deliberately NOT enabled for desktop GL. Core since 4.3 there too, but
+	// desktop drivers commonly satisfy that by decompressing to RGBA in the
+	// driver, which is slower than uncompressed and no smaller. Desktop has
+	// S3TC and does not need this path.
+	glConfig.etc2TextureCompressionAvailable =
+		( glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_ES ) &&
+		glConfig.glVersion >= 3.0f &&
+		textureCompressionEntryPointsAvailable;
+	if ( glConfig.etc2TextureCompressionAvailable ) {
+		common->Printf( "...using ETC2/EAC texture compression (core in ES 3.0)\n" );
+	} else {
+		common->Printf( "X..ETC2/EAC texture compression not used on this context\n" );
+	}
 
 	// push the compression capabilities into the shared imagetools library,
 	// which gates precompressed-DDS selection without reading renderer globals
@@ -1110,7 +1480,15 @@ static void R_CheckPortableExtensions( void ) {
 	// This isn't very important, but some pathological case might cause a clamp error and give a shadow bug.
 	// Nvidia also believes that future hardware may be able to run faster with this enabled to avoid the
 	// serialization of clamping.
-	if ( R_CheckExtension( "GL_EXT_stencil_wrap" ) ) {
+	// Promoted to core in OpenGL 2.0 and in OpenGL ES 2.0, so neither a core
+	// nor an ES context advertises the extension string -- probing for it
+	// there silently selects the saturating GL_INCR/GL_DECR, which clamps
+	// nested shadow volumes and breaks the order-equivalence the two-sided
+	// single-pass stencil path depends on.
+	const bool stencilWrapIsCore =
+		glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_ES
+		|| glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_CORE;
+	if ( stencilWrapIsCore || R_CheckExtension( "GL_EXT_stencil_wrap" ) ) {
 		tr.stencilIncr = GL_INCR_WRAP_EXT;
 		tr.stencilDecr = GL_DECR_WRAP_EXT;
 	} else {
@@ -1137,7 +1515,7 @@ static void R_CheckPortableExtensions( void ) {
 	// GL_ATI_fragment_shader
 	glConfig.atiFragmentShaderAvailable = GLCapabilityProbe_HasExtension( "GL_ATI_fragment_shader" );
 	if (! glConfig.atiFragmentShaderAvailable ) {
-		// only on OSX: ATI_fragment_shader is faked through ATI_text_fragment_shader (macosx_glimp.cpp)
+		// only on OSX: ATI_fragment_shader is faked through ATI_text_fragment_shader (macos_glimp.cpp)
 		#if defined( MACOS_X )
 		glConfig.atiFragmentShaderAvailable = GLCapabilityProbe_HasExtension( "GL_ATI_text_fragment_shader" );
 		#endif
@@ -1161,6 +1539,15 @@ static void R_CheckPortableExtensions( void ) {
 
 	// ARB_vertex_buffer_object
 	glConfig.ARBVertexBufferObjectAvailable = R_CheckExtension( "GL_ARB_vertex_buffer_object" );
+	if ( !glConfig.ARBVertexBufferObjectAvailable && programmableOnlyProfile ) {
+		// Buffer objects are core since GL 1.5 and ES 2.0, so the extension
+		// string is absent on these profiles and the probe above finds nothing.
+		// Believing it drops the engine onto the virtual-memory vertex cache
+		// ("Vertex cache is SLOW"), which leaves every ambientCache->vbo at 0.
+		// Every scene surface then fails the modern geometry path with
+		// MISSING_VERTEX_BUFFER: measured on game/mcc_1, 654 of ~662 draws.
+		glConfig.ARBVertexBufferObjectAvailable = true;
+	}
 	if ( glConfig.ARBVertexBufferObjectAvailable && !R_HasARBVertexBufferObjectEntryPoints() ) {
 		common->Printf( "X..GL_ARB_vertex_buffer_object entry points incomplete; using virtual-memory vertex cache\n" );
 		glConfig.ARBVertexBufferObjectAvailable = false;
@@ -1199,10 +1586,14 @@ static void R_CheckPortableExtensions( void ) {
 		// compile the #version 130 post shaders (SMAA); record the ceiling so
 		// those paths can gate and report instead of failing at compile time.
 		const char *glslVersionString = (const char *)glGetString( GL_SHADING_LANGUAGE_VERSION );
+		const bool glslES = glslVersionString != NULL && idStr::Icmpn( glslVersionString, "OpenGL ES GLSL ES ", 18 ) == 0;
+		const char *numericVersion = glslES ? glslVersionString + 18 : glslVersionString;
 		int glslMajor = 0;
 		int glslMinor = 0;
-		if ( glslVersionString != NULL && sscanf( glslVersionString, "%d.%d", &glslMajor, &glslMinor ) == 2 ) {
-			glConfig.GLSL130Available = ( glslMajor > 1 ) || ( glslMajor == 1 && glslMinor >= 30 );
+		if ( numericVersion != NULL && sscanf( numericVersion, "%d.%d", &glslMajor, &glslMinor ) == 2 ) {
+			// GLES 3.x runs the translated post shaders; ES 1.00 cannot. Its
+			// standard text prefix must not make a modern mobile GPU look legacy.
+			glConfig.GLSL130Available = glslES ? glslMajor >= 3 : ( glslMajor > 1 ) || ( glslMajor == 1 && glslMinor >= 30 );
 		}
 		common->Printf( "...using GL_ARB shader objects + GLSL (version %s)\n", glslVersionString != NULL ? glslVersionString : "unknown" );
 	} else if ( r_inhibitFragmentProgram.GetBool() ) {
@@ -1214,9 +1605,16 @@ static void R_CheckPortableExtensions( void ) {
 	}
 
 	// check for minimum set
-	if ( !glConfig.multitextureAvailable || !glConfig.textureEnvCombineAvailable || !glConfig.cubeMapAvailable
-		|| !glConfig.envDot3Available ) {
-			R_ErrorForMissingRequiredOpenGLFeatures();
+	//
+	// This minimum is the legacy ARB2 path's, expressed as compatibility-only
+	// extension strings. A profile without fixed-function cannot report them,
+	// so the check is meaningless there and would fail a context the modern
+	// path is perfectly able to drive -- see R_CheckRequiredExtension.
+	if ( !programmableOnlyProfile
+		&& ( !glConfig.multitextureAvailable || !glConfig.textureEnvCombineAvailable || !glConfig.cubeMapAvailable
+		|| !glConfig.envDot3Available ) ) {
+			if ( legacyPolicy ) R_ErrorForMissingRequiredOpenGLFeatures();
+			return R_RendererRestartError( error, errorSize, "Required OpenGL compatibility features are unavailable" );
 	}
 
  	// GL_EXT_depth_bounds_test
@@ -1230,9 +1628,16 @@ static void R_CheckPortableExtensions( void ) {
 	glConfig.backendCaps.maxColorAttachments = glConfig.maxColorAttachments;
 	glConfig.backendCaps.hasARBVertexProgram = glConfig.ARBVertexProgramAvailable;
 	glConfig.backendCaps.hasARBFragmentProgram = glConfig.ARBFragmentProgramAvailable;
-	glConfig.backendCaps.hasVBO = glConfig.ARBVertexBufferObjectAvailable;
-	glConfig.backendCaps.hasPBO = glConfig.pixelBufferObjectAvailable;
-	glConfig.backendCaps.hasGLSL = glConfig.GLSLProgramAvailable;
+	if ( !programmableOnlyProfile ) {
+		// These mirror the compatibility-only extension strings back into the
+		// caps. On a core or ES profile those strings are absent for features
+		// that are core, so copying them here would undo what the capability
+		// probe already worked out from the version -- and a 4.1 core context
+		// would report VBO:0 GLSL:0 and drop to NullRenderer.
+		glConfig.backendCaps.hasVBO = glConfig.ARBVertexBufferObjectAvailable;
+		glConfig.backendCaps.hasPBO = glConfig.pixelBufferObjectAvailable;
+		glConfig.backendCaps.hasGLSL = glConfig.GLSLProgramAvailable;
+	}
 	glConfig.backendCaps.hasSRGBTextures = glConfig.textureSRGBAvailable;
 	glConfig.backendCaps.hasFramebufferSRGB = glConfig.framebufferSRGBAvailable;
 	glConfig.backendCaps.hasMRT = glConfig.maxDrawBuffers >= 4 && glConfig.maxColorAttachments >= 4;
@@ -1264,6 +1669,7 @@ static void R_CheckPortableExtensions( void ) {
 			RendererTier_Name( glConfig.rendererTier ) );
 	}
 
+	return true;
 }
 
 
@@ -1548,6 +1954,26 @@ the GL bring-up does.
 ====================
 */
 bool R_GetInitialWindowSize( bool fullScreen, int *width, int *height ) {
+	if ( R_IsRecoverableRendererRestart() ) {
+		int requestedWidth = 0, requestedHeight = 0;
+		if ( r_recoverableWindowRequest != NULL ) {
+			requestedWidth = r_recoverableWindowRequest->parms.width; requestedHeight = r_recoverableWindowRequest->parms.height;
+		} else if ( !fullScreen || R_ForceWindowForRendererRestart() || r_hiddenWindow.GetBool() ) {
+			requestedWidth = r_windowWidth.GetInteger(); requestedHeight = r_windowHeight.GetInteger();
+		} else if ( r_mode.GetInteger() == -2 ) {
+			if ( !Sys_GetDesktopResolution( &requestedWidth, &requestedHeight ) ) return false;
+		} else if ( r_mode.GetInteger() == -1 ) {
+			requestedWidth = r_customWidth.GetInteger(); requestedHeight = r_customHeight.GetInteger();
+		} else {
+			const vidmode_t *mode = R_FindVidModeByMode( r_mode.GetInteger() );
+			if ( mode == NULL ) return false;
+			requestedWidth = mode->width; requestedHeight = mode->height;
+		}
+		if ( requestedWidth < 320 || requestedWidth > 16384 || requestedHeight < 240 || requestedHeight > 16384 ) return false;
+		if ( width != NULL ) *width = requestedWidth;
+		if ( height != NULL ) *height = requestedHeight;
+		return true;
+	}
 	if ( fullScreen ) {
 		return R_GetModeInfo( width, height, r_mode.GetInteger() );
 	}
@@ -1638,8 +2064,7 @@ all renderSystem functions will still operate properly, notably the material
 and model information functions.
 ==================
 */
-void R_InitOpenGL( void ) {
-	GLint			temp;
+static bool R_CreateOpenGLContext( bool legacyPolicy, bool forceWindow, char *error, int errorSize ) {
 	glimpParms_t	parms;
 	int				i;
 
@@ -1649,7 +2074,7 @@ void R_InitOpenGL( void ) {
 	RB_ResetAppleGL21RouteCounters();
 
 	if ( glConfig.isInitialized ) {
-		common->FatalError( "R_InitOpenGL called while active" );
+		return R_RendererRestartError( error, errorSize, "R_InitOpenGL called while active" );
 	}
 
 	// every context creation starts a new handle generation; GL object handles
@@ -1661,24 +2086,21 @@ void R_InitOpenGL( void ) {
 	tr.viewportOffset[0] = 0;
 	tr.viewportOffset[1] = 0;
 
-	R_NormalizeDisplayCvars();
+	if ( legacyPolicy ) R_NormalizeDisplayCvars();
 
 	// select the rendering API path (r_renderApi) before any window or
 	// context work; a failed non-GL selection falls back closed onto GL here
-	R_RendererModule_Boot();
+	if ( legacyPolicy ) R_RendererModule_Boot();
 
 	//
 	// initialize OS specific portions of the renderSystem
 	//
-	for ( i = 0 ; i < 2 ; i++ ) {
+	for ( i = 0 ; i < ( legacyPolicy ? 2 : 1 ) ; i++ ) {
 		// set the parameters we are trying
 		parms.hiddenWindow = r_hiddenWindow.GetBool();
-		parms.fullScreen = !parms.hiddenWindow && r_fullscreen.GetBool();
-		if ( parms.fullScreen ) {
-			R_GetModeInfo( &parms.width, &parms.height, r_mode.GetInteger() );
-		} else {
-			R_GetWindowedModeInfo( &parms.width, &parms.height );
-		}
+		parms.fullScreen = !forceWindow && !parms.hiddenWindow && r_fullscreen.GetBool();
+		if ( !R_GetInitialWindowSize( parms.fullScreen, &parms.width, &parms.height ) )
+			return R_RendererRestartError( error, errorSize, "Requested display dimensions are unavailable" );
 		engineWindowState.vidWidth = parms.width;
 		engineWindowState.vidHeight = parms.height;
 		glConfig.vidWidth = parms.width;
@@ -1687,14 +2109,21 @@ void R_InitOpenGL( void ) {
 		parms.displayHz = r_displayRefresh.GetInteger();
 		parms.multiSamples = r_multiSamples.GetInteger();
 		parms.stereo = false;
+		if ( !legacyPolicy && r_recoverableWindowRequest != NULL ) {
+			const renderWindowParms_t &requested = r_recoverableWindowRequest->parms;
+			parms.width = requested.width; parms.height = requested.height;
+			parms.fullScreen = requested.fullScreen; parms.borderless = requested.borderless;
+			parms.hiddenWindow = requested.hiddenWindow; parms.displayHz = requested.displayHz;
+			parms.multiSamples = requested.multiSamples; parms.stereo = requested.stereo;
+		}
 
 		if ( GLimp_Init( parms ) ) {
 			// it worked
 			break;
 		}
 
-		if ( i == 1 ) {
-			common->FatalError( "Unable to initialize OpenGL" );
+		if ( !legacyPolicy || i == 1 ) {
+			return R_RendererRestartError( error, errorSize, "Unable to initialize OpenGL" );
 		}
 
 		// if we failed, set everything back to "safe mode"
@@ -1711,7 +2140,7 @@ void R_InitOpenGL( void ) {
 	//soundSystem->Init();
 
 	if ( !GLimp_EnsureActiveContext( "OpenGL startup string query" ) ) {
-		common->FatalError( "Unable to make OpenGL context current after window creation\n" );
+		return R_RendererRestartError( error, errorSize, "Unable to make OpenGL context current after window creation" );
 	}
 
 	// get our config strings
@@ -1720,7 +2149,7 @@ void R_InitOpenGL( void ) {
 	glConfig.version_string = (const char *)glGetString(GL_VERSION);
 	glConfig.extensions_string = (const char *)glGetString(GL_EXTENSIONS);
 	if ( glConfig.version_string == NULL ) {
-		common->FatalError( "OpenGL context did not report GL_VERSION after window creation; context may not be current\n" );
+		return R_RendererRestartError( error, errorSize, "OpenGL context did not report GL_VERSION after window creation; context may not be current" );
 	}
 	if ( glConfig.vendor_string == NULL ) {
 		glConfig.vendor_string = "unknown";
@@ -1731,6 +2160,12 @@ void R_InitOpenGL( void ) {
 	if ( glConfig.extensions_string == NULL ) {
 		glConfig.extensions_string = "";
 	}
+	return true;
+}
+
+static bool R_InitOpenGLInternal( bool legacyPolicy, bool forceWindow, char *error, int errorSize ) {
+	if ( !R_CreateOpenGLContext( legacyPolicy, forceWindow, error, errorSize ) ) return false;
+	GLint temp;
 
 	// Query the actual framebuffer bit depths from the active context.
 	// Some platform backends don't populate these fields directly.
@@ -1782,31 +2217,81 @@ void R_InitOpenGL( void ) {
 		glConfig.maxTextureSize = 256;
 	}
 
-	glConfig.isInitialized = true;
-
 	// recheck all the extensions (FIXME: this might be dangerous)
-	R_CheckPortableExtensions();
+	if ( legacyPolicy ) glConfig.isInitialized = true;
+	if ( !R_CheckPortableExtensions( legacyPolicy, error, errorSize ) ) return false;
+	// Query only the active context. OS adapter enumeration can describe a
+	// different GPU on a hybrid laptop; shared/free memory is not dedicated VRAM.
+	glConfig.gpuClass = RendererClassifyGLDevice( glConfig.renderer_string );
+	glConfig.dedicatedVideoMemoryMB = 0;
+	if ( glConfig.gpuClass == RendererGpuClass::Discrete &&
+			R_CheckExtension( "GL_NVX_gpu_memory_info" ) ) {
+		GLint dedicatedKB = 0;
+		glGetIntegerv( 0x9047 /* GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX */, &dedicatedKB );
+		if ( dedicatedKB > 0 && dedicatedKB / 1024 <= 256 * 1024 )
+			glConfig.dedicatedVideoMemoryMB = dedicatedKB / 1024;
+	}
+	glConfig.isInitialized = true;
 	R_GLDebugOutput_Init();
 
 	// parse our vertex and fragment programs, possibly disably support for
 	// one of the paths if there was an error
 	R_ARB2_Init();
-	R_ModernGLExecutor_Init( glConfig.backendCaps, glConfig.renderFeatures );
+#ifdef OPENQ4_RENDERER_GLES_MODULE
+	if ( glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_ES ) {
+		// gles_d3 is the back end on ES, and it does not use the modern
+		// executor. The executor's shader library is desktop GLSL -- every
+		// program in it fails to compile as GLSL ES -- so bringing it up here
+		// only prints forty lines of compile errors for a path that will not
+		// run. Skip it.
+		//
+		// The GL state cache still has to come up: tr_backend drives it every
+		// frame whichever back end drew the view.
+		R_GLStateCache_Init( glConfig.backendCaps );
+	} else
+#endif
+	{
+		R_ModernGLExecutor_Init( glConfig.backendCaps, glConfig.renderFeatures );
+	}
 	RendererBootstrap_SetModernExecutorAvailable( R_ModernGLExecutor_Stats().available );
 	RendererBootstrap_FinalizeLegacyBridge( glConfig.allowARB2Path );
 	glConfig.rendererTier = RendererBootstrap_GetState().selectedTier;
 	glConfig.renderFeatures = RendererBootstrap_GetState().features;
-	if ( !glConfig.allowARB2Path ) {
-		R_ErrorForMissingRequiredOpenGLFeatures();
+	// The ARB2 bridge is a hard requirement on a compatibility context: the
+	// modern executor only *owns* the passes it has claimed and the legacy path
+	// renders the rest, so losing ARB2 there means losing most of the frame.
+	// Two independent escapes from that requirement:
+	//   - a programmable-only profile (core or ES) has no ARB2 by construction;
+	//     erroring out would make such a context unusable no matter how capable
+	//     it is, and letting it through is what exposes the modern path's
+	//     standalone coverage
+	//   - once the modern visible path is promoted it can own the frame without
+	//     the compatibility bridge (upstream); while no parity contract is
+	//     proven the promotion state is false, keeping this exactly as strict
+	//     as before
+	const bool programmableOnlyProfile =
+		glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_ES
+		|| glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_CORE;
+	if ( !glConfig.allowARB2Path && !programmableOnlyProfile
+			&& !RendererBootstrap_ShouldAutoPromoteModernVisible() ) {
+		if ( legacyPolicy ) R_ErrorForMissingRequiredOpenGLFeatures();
+		return R_RendererRestartError( error, errorSize, "Required OpenGL rendering backend is unavailable" );
+	}
+	if ( !glConfig.allowARB2Path && programmableOnlyProfile ) {
+		common->Printf(
+			"Renderer: no ARB2 bridge on a %s profile; the modern executor renders standalone "
+			"and any pass it does not own will be missing\n",
+			RendererContextProfile_Name( glConfig.backendCaps.profile ) );
 	}
 	R_RenderGraphResources_Init( glConfig.backendCaps, glConfig.renderFeatures );
 	R_MaterialResourceTable_Init( glConfig.backendCaps, glConfig.renderFeatures );
 
-	cmdSystem->AddCommand( "reloadARBprograms", R_ReloadARBPrograms_f, CMD_FL_RENDERER, "reloads and validates all registered ARB programs" );
+	// reloadARBprograms is registered with the other renderer commands below.
 	R_LoadARBProgramsForStartup();
 	R_GLDebugOutput_FlushMessages();
 
 	R_RendererUpload_Init( glConfig.backendCaps );
+	R_GpuSkinning_ContractInit( glConfig.backendCaps );
 
 	// allocate the vertex array range or vertex objects
 	R_RecordRendererStartupPhase( RENDERER_STARTUP_PHASE_VERTEX_CACHE_INIT );
@@ -1826,7 +2311,7 @@ void R_InitOpenGL( void ) {
 
 #ifdef _WIN32
 	static bool glCheck = false;
-	if ( !glCheck ) {
+	if ( legacyPolicy && !glCheck ) {
 		glCheck = true;
 		if ( !idStr::Icmp( glConfig.vendor_string, "Microsoft" ) && idStr::FindText( glConfig.renderer_string, "OpenGL-D3D" ) != -1 ) {
 			if ( cvarSystem->GetCVarBool( "r_fullscreen" ) ) {
@@ -1845,6 +2330,12 @@ void R_InitOpenGL( void ) {
 		}
 	}
 #endif
+	return true;
+}
+
+void R_InitOpenGL( void ) {
+	char error[1024];
+	if ( !R_InitOpenGLInternal( true, false, error, sizeof( error ) ) ) common->FatalError( "%s", error );
 }
 
 /*
@@ -1865,6 +2356,7 @@ void GL_CheckErrors( void ) {
 		if ( err == GL_NO_ERROR ) {
 			return;
 		}
+		R_ImagePolicyObserveError( "OpenGL resource error", err );
 		switch( err ) {
 			case GL_INVALID_ENUM:
 				strcpy( s, "GL_INVALID_ENUM" );
@@ -1891,6 +2383,17 @@ void GL_CheckErrors( void ) {
 
 		if ( !r_ignoreGLErrors.GetBool() ) {
 			common->Printf( "GL_CheckErrors: %s\n", s );
+#if defined(__APPLE__)
+			void *frames[8];
+			const int frameCount = backtrace( frames, 8 );
+			char **symbols = backtrace_symbols( frames, frameCount );
+			if ( symbols != NULL ) {
+				for ( int frame = 0; frame < frameCount; ++frame ) {
+					common->Printf( "  %s\n", symbols[frame] );
+				}
+				free( symbols );
+			}
+#endif
 		}
 	}
 }
@@ -2151,10 +2654,21 @@ static int R_BenchmarkPercentileIndex( int count, int percentile ) {
 	return idMath::ClampInt( 0, count - 1, rank - 1 );
 }
 
+// Each benchmark sample must include its GPU work. glFinish is an inert stub
+// in the Vulkan module, so that backend waits for its submitted frames.
+static void R_BenchmarkFinish( void ) {
+#ifdef OPENQ4_RENDERER_VK_MODULE
+	extern void VK_Device_WaitIdleForTiming( void );
+	VK_Device_WaitIdleForTiming();
+#else
+	glFinish();
+#endif
+}
+
 static renderingFPSResult_t R_RenderingFPS( const renderView_t *renderView ) {
 	renderingFPSResult_t result;
 	memset( &result, 0, sizeof( result ) );
-	glFinish();
+	R_BenchmarkFinish();
 
 	int		start = Sys_Milliseconds();
 	static const int SAMPLE_MSEC = 1000;
@@ -2170,7 +2684,7 @@ static renderingFPSResult_t R_RenderingFPS( const renderView_t *renderView ) {
 		renderSystem->BeginFrame( glConfig.vidWidth, glConfig.vidHeight );
 		tr.primaryWorld->RenderScene( renderView );
 		renderSystem->EndFrame( NULL, NULL );
-		glFinish();
+		R_BenchmarkFinish();
 		const int frameEnd = Sys_Milliseconds();
 		if ( frameSampleCount < MAX_FRAME_SAMPLES ) {
 			frameTimes[frameSampleCount++] = Max( 0, frameEnd - frameStart );
@@ -2276,18 +2790,82 @@ tiling it into window-sized chunks and rendering each chunk separately
 If ref isn't specified, the full session UpdateScreen will be done.
 ====================
 */
-void R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref = NULL ) {
+/*
+====================
+r_screenshotKeepScissor
+
+A screenshot is a RE-RENDER, not a copy of the frame on screen, and the
+capture below turns the scissor off before producing it. Any defect that
+depends on scissor state is therefore structurally invisible in a screenshot:
+the image comes back correct while the display is wrong.
+
+A capture therefore cannot be trusted to reproduce a scissor-dependent fault.
+
+Note this was NOT the cause of the black surfaces reported during the gles_d3
+bring-up, though it was suspected at the time. Those captures came back
+correct for a different reason in the same family: the readback below reads
+GL_RGBA and packs down to RGB, discarding alpha, and the fault was in the
+alpha channel (see RB_ForceOpaquePresentAlpha, tr_backend.cpp). Two
+independent ways for a screenshot to disagree with the display, which is why
+this one is worth having even though it did not find that bug.
+
+Set this to keep the scissor exactly as the frame loop had it. Default 0, the
+historical behaviour, because leaving it on makes tiled (larger-than-screen)
+captures responsible for their own scissor rects, which they are not.
+====================
+*/
+idCVar r_screenshotKeepScissor( "r_screenshotKeepScissor", "0", CVAR_RENDERER | CVAR_BOOL,
+		"screenshots re-render with the scissor left as the frame loop set it, so scissor-dependent faults are visible in a capture" );
+
+#ifdef OPENQ4_RENDERER_VK_MODULE
+bool VK_GLStubs_ConsumeReadPixelsFailure( void );
+bool VK_Device_DrawableSize( int &width, int &height );
+#endif
+
+// TakeScreenshot's verdict for the commands that report "Wrote".
+static bool r_screenshotCaptureFailed = false;
+
+/*
+False when any tile could not be read or the window changed size during the
+capture. The buffer is then zero-filled where nothing was read, never left
+holding whatever the allocator returned, and callers must not save it as a
+capture of the frame.
+*/
+bool R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref = NULL ) {
 	// include extra space for OpenGL padding to word boundaries
 	byte	*temp = (byte *)R_StaticAlloc( (glConfig.vidWidth+3) * glConfig.vidHeight * 3 );
+	memset( temp, 0, (glConfig.vidWidth+3) * glConfig.vidHeight * 3 );
+	bool	captured = true;
+#ifdef OPENQ4_RENDERER_VK_MODULE
+	(void)VK_GLStubs_ConsumeReadPixelsFailure();
+#endif
+
+	// OpenGL ES guarantees exactly one glReadPixels format for the default
+	// framebuffer -- GL_RGBA/GL_UNSIGNED_BYTE -- plus an implementation-defined
+	// pair reported by GL_IMPLEMENTATION_COLOR_READ_FORMAT. ANGLE reports RGBA
+	// and rejects the GL_RGB read this function used to issue, which failed with
+	// GL_INVALID_OPERATION and left the destination untouched: every ES
+	// screenshot came out uniformly black while the frame on screen was fine.
+	// RGBA is equally valid on desktop GL, so read RGBA everywhere and pack down
+	// rather than branching per backend.
+	byte	*rgbaTemp = (byte *)R_StaticAlloc( (glConfig.vidWidth+3) * glConfig.vidHeight * 4 );
+	memset( rgbaTemp, 0, (glConfig.vidWidth+3) * glConfig.vidHeight * 4 );
 
 	int	oldWidth = glConfig.vidWidth;
 	int oldHeight = glConfig.vidHeight;
+	const bool oldUseScissor = r_useScissor.GetBool();
 
 	tr.tiledViewport[0] = width;
 	tr.tiledViewport[1] = height;
 
-	// disable scissor, so we don't need to adjust all those rects
-	r_useScissor.SetBool( false );
+	// Only tiled captures need to disregard unadjusted light scissors. A
+	// window-sized screenshot must preserve the frame's rendering semantics;
+	// disabling scissors can extend clamped projectors beyond their viewport
+	// bounds and make the capture disagree with the displayed/linear frame.
+	const bool overrideScissor = !r_screenshotKeepScissor.GetBool() && ( width > oldWidth || height > oldHeight );
+	if ( overrideScissor ) {
+		r_useScissor.SetBool( false );
+	}
 
 	for ( int xo = 0 ; xo < width ; xo += oldWidth ) {
 		for ( int yo = 0 ; yo < height ; yo += oldHeight ) {
@@ -2336,7 +2914,30 @@ void R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref =
 				h = height - yo;
 			}
 
-			glReadPixels( 0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, temp ); 
+			// The frame was produced by commands that may still be queued. A
+			// desktop driver generally resolves that implicitly, but ANGLE's
+			// Metal backend hands back an empty default framebuffer unless the
+			// work is forced to complete first -- which is why ES screenshots
+			// came out uniformly black while the frame on screen was correct.
+			glReadPixels( 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgbaTemp );
+#ifdef OPENQ4_RENDERER_VK_MODULE
+			if ( VK_GLStubs_ConsumeReadPixelsFailure() ) {
+				captured = false;
+				memset( rgbaTemp, 0, (oldWidth+3) * oldHeight * 4 );
+			}
+#endif
+
+			const int rgbaRow = ( w * 4 + 3 ) & ~3;
+			const int rgbRow = ( w * 3 + 3 ) & ~3;
+			for ( int y = 0; y < h; y++ ) {
+				const byte *src = rgbaTemp + y * rgbaRow;
+				byte *dst = temp + y * rgbRow;
+				for ( int x = 0; x < w; x++ ) {
+					dst[x * 3 + 0] = src[x * 4 + 0];
+					dst[x * 3 + 1] = src[x * 4 + 1];
+					dst[x * 3 + 2] = src[x * 4 + 2];
+				}
+			}
 
 			int	row = ( w * 3 + 3 ) & ~3;		// OpenGL pads to dword boundaries
 
@@ -2347,7 +2948,10 @@ void R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref =
 		}
 	}
 
-	r_useScissor.SetBool( true );
+	// restore only what we overrode, and to what the player actually had
+	if ( overrideScissor ) {
+		r_useScissor.SetBool( oldUseScissor );
+	}
 
 	tr.viewportOffset[0] = 0;
 	tr.viewportOffset[1] = 0;
@@ -2355,9 +2959,28 @@ void R_ReadTiledPixels( int width, int height, byte *buffer, renderView_t *ref =
 	tr.tiledViewport[1] = 0;
 
 	R_StaticFree( temp );
+	R_StaticFree( rgbaTemp );
 
+	// BeginFrame sizes glConfig to the capture (tiledViewport) while it runs, so
+	// the window's size is restored here.
 	glConfig.vidWidth = oldWidth;
 	glConfig.vidHeight = oldHeight;
+#ifdef OPENQ4_RENDERER_VK_MODULE
+	// Vulkan publishes each new drawable size from its swapchain. A resize
+	// during the capture leaves the tiles sized for the old window: keep the
+	// new size rather than restoring a stale one, and fail the capture.
+	int drawableWidth = 0;
+	int drawableHeight = 0;
+	if ( VK_Device_DrawableSize( drawableWidth, drawableHeight )
+			&& ( drawableWidth != oldWidth || drawableHeight != oldHeight ) ) {
+		common->Warning( "screenshot: the window changed from %dx%d to %dx%d during the capture",
+				oldWidth, oldHeight, drawableWidth, drawableHeight );
+		glConfig.vidWidth = drawableWidth;
+		glConfig.vidHeight = drawableHeight;
+		return false;
+	}
+#endif
+	return captured;
 }
 
 
@@ -2382,15 +3005,19 @@ void idRenderSystemLocal::TakeScreenshot( int width, int height, const char *fil
 		return;
 	}
 
+	// the backend reads takingScreenshot live; finish the frame it is drawing
+	R_RenderThread_Sync( "screenshot" );
 	takingScreenshot = true;
+	r_screenshotCaptureFailed = false;
 
 	int	pix = width * height;
 
 	buffer = (byte *)R_StaticAlloc(pix*3 + 18);
 	memset (buffer, 0, 18);
 
+	bool captured = true;
 	if ( blends <= 1 ) {
-		R_ReadTiledPixels( width, height, buffer + 18, ref );
+		captured = R_ReadTiledPixels( width, height, buffer + 18, ref );
 	} else {
 		unsigned short *shortBuffer = (unsigned short *)R_StaticAlloc(pix*2*3);
 		memset (shortBuffer, 0, pix*2*3);
@@ -2399,7 +3026,7 @@ void idRenderSystemLocal::TakeScreenshot( int width, int height, const char *fil
 		r_jitter.SetBool( true );
 
 		for ( i = 0 ; i < blends ; i++ ) {
-			R_ReadTiledPixels( width, height, buffer + 18, ref );
+			captured = R_ReadTiledPixels( width, height, buffer + 18, ref ) && captured;
 
 			for ( j = 0 ; j < pix*3 ; j++ ) {
 				shortBuffer[j] += buffer[18+j];
@@ -2413,6 +3040,16 @@ void idRenderSystemLocal::TakeScreenshot( int width, int height, const char *fil
 
 		R_StaticFree( shortBuffer );
 		r_jitter.SetBool( false );
+	}
+
+	if ( !captured ) {
+		// Never write the buffer as a capture of the frame: it is partly or
+		// wholly unread.
+		common->Warning( "TakeScreenshot: the capture failed; %s was not written", fileName );
+		r_screenshotCaptureFailed = true;
+		R_StaticFree( buffer );
+		takingScreenshot = false;
+		return;
 	}
 
 	// fill in the header (this is vertically flipped, which glReadPixels emits)
@@ -2432,10 +3069,11 @@ void idRenderSystemLocal::TakeScreenshot( int width, int height, const char *fil
 	}
 
 	// _D3XP adds viewnote screenie save to cdpath
-	if ( strstr( fileName, "viewnote" ) ) {
-		fileSystem->WriteFile( fileName, buffer, c, "fs_cdpath" );
-	} else {
-		fileSystem->WriteFile( fileName, buffer, c );
+	const int written = fileSystem->WriteFile( fileName, buffer, c,
+		strstr( fileName, "viewnote" ) ? "fs_cdpath" : "fs_savepath" );
+	if ( written != c ) {
+		r_screenshotCaptureFailed = true;
+		common->Warning( "TakeScreenshot: could not write %s", fileName );
 	}
 
 	R_StaticFree( buffer );
@@ -2605,7 +3243,71 @@ static void R_CaptureTiledPixelsRGBA( int width, int height, int blends, renderV
 	R_StaticFree( rgbBuffer );
 }
 
+/*
+==================
+R_DownsampleLevelShotAreaRGBA
+
+Box-filters src into dst, weighting partially covered source texels by their overlap.
+R_ResampleTexture only filters correctly down to half size, so a supersampled capture
+reduced further than that would alias.
+==================
+*/
+static void R_DownsampleLevelShotAreaRGBA( const byte *src, int srcWidth, int srcHeight, byte *dst, int dstWidth, int dstHeight ) {
+	const float scaleX = static_cast<float>( srcWidth ) / static_cast<float>( dstWidth );
+	const float scaleY = static_cast<float>( srcHeight ) / static_cast<float>( dstHeight );
+	idTempArray<float> columns( dstWidth * srcHeight * 4 );
+
+	for ( int y = 0; y < srcHeight; y++ ) {
+		const byte *srcRow = src + y * srcWidth * 4;
+		float *dstRow = columns.Ptr() + y * dstWidth * 4;
+		for ( int x = 0; x < dstWidth; x++ ) {
+			const float x0 = x * scaleX;
+			const float x1 = x0 + scaleX;
+			float sum[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			for ( int sx = idMath::Ftoi( idMath::Floor( x0 ) ); sx < x1 && sx < srcWidth; sx++ ) {
+				const float weight = Min( x1, static_cast<float>( sx + 1 ) ) - Max( x0, static_cast<float>( sx ) );
+				if ( weight <= 0.0f ) {
+					continue;
+				}
+				for ( int c = 0; c < 4; c++ ) {
+					sum[c] += srcRow[ sx * 4 + c ] * weight;
+				}
+			}
+			for ( int c = 0; c < 4; c++ ) {
+				dstRow[ x * 4 + c ] = sum[c] / scaleX;
+			}
+		}
+	}
+
+	for ( int y = 0; y < dstHeight; y++ ) {
+		const float y0 = y * scaleY;
+		const float y1 = y0 + scaleY;
+		for ( int x = 0; x < dstWidth; x++ ) {
+			float sum[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			for ( int sy = idMath::Ftoi( idMath::Floor( y0 ) ); sy < y1 && sy < srcHeight; sy++ ) {
+				const float weight = Min( y1, static_cast<float>( sy + 1 ) ) - Max( y0, static_cast<float>( sy ) );
+				if ( weight <= 0.0f ) {
+					continue;
+				}
+				const float *column = columns.Ptr() + ( sy * dstWidth + x ) * 4;
+				for ( int c = 0; c < 4; c++ ) {
+					sum[c] += column[c] * weight;
+				}
+			}
+			byte *dstPixel = dst + ( y * dstWidth + x ) * 4;
+			for ( int c = 0; c < 4; c++ ) {
+				dstPixel[c] = static_cast<byte>( idMath::ClampInt( 0, 255, idMath::Ftoi( sum[c] / scaleY + 0.5f ) ) );
+			}
+		}
+	}
+}
+
 static bool R_ResampleLevelShotTileRGBA( const byte *src, int srcWidth, int srcHeight, int tileSize, byte *dst ) {
+	if ( srcHeight > tileSize && srcWidth >= tileSize ) {
+		R_DownsampleLevelShotAreaRGBA( src, srcWidth, srcHeight, dst, tileSize, tileSize );
+		return true;
+	}
+
 	byte *resampled = R_ResampleTexture( src, srcWidth, srcHeight, tileSize, tileSize );
 	if ( resampled == NULL ) {
 		return false;
@@ -2616,19 +3318,124 @@ static bool R_ResampleLevelShotTileRGBA( const byte *src, int srcWidth, int srcH
 	return true;
 }
 
+// Pixels rendered around every region and then discarded, so screen-space
+// passes such as SSAO see real neighbours where regions meet.
+static const int LEVELSHOT_REGION_GUARD = 64;
+
+/*
+==================
+R_CaptureLevelShotTileRGBA
+
+Renders one 4:3 levelshot view, off-axis by the given shift in half-view units.
+A view larger than the window is split into regions that each fit it; every
+region is rendered as its own sub-frustum of the view and copied back pixel for
+pixel. R_ReadTiledPixels' viewport-offset tiling cannot be used for that: the
+scene render target and its post passes only ever see the first tile.
+==================
+*/
 static void R_CaptureLevelShotTileRGBA( int width, int height, int blends, const renderView_t &sourceView,
 	float projectionShiftX, float projectionShiftY, byte *rgbaOut ) {
 	const bool previousDisableLevelshotEntityCulling = tr.disableLevelshotEntityCulling;
 	tr_levelshotProjectionShiftActive = true;
-	tr_levelshotProjectionShiftX = projectionShiftX;
-	tr_levelshotProjectionShiftY = projectionShiftY;
 	tr.disableLevelshotEntityCulling = true;
-	renderView_t captureView = sourceView;
-	R_CaptureTiledPixelsRGBA( width, height, blends, &captureView, rgbaOut );
+
+	const int guard = LEVELSHOT_REGION_GUARD;
+	if ( width <= glConfig.vidWidth && height <= glConfig.vidHeight ) {
+		tr_levelshotProjectionShiftX = projectionShiftX;
+		tr_levelshotProjectionShiftY = projectionShiftY;
+		renderView_t captureView = sourceView;
+		R_CaptureTiledPixelsRGBA( width, height, blends, &captureView, rgbaOut );
+	} else {
+		const int maxRegionWidth = Max( 16, glConfig.vidWidth - 2 * guard );
+		const int maxRegionHeight = Max( 16, glConfig.vidHeight - 2 * guard );
+		const int columns = ( width + maxRegionWidth - 1 ) / maxRegionWidth;
+		const int rows = ( height + maxRegionHeight - 1 ) / maxRegionHeight;
+		const float tanX = idMath::Tan( DEG2RAD( sourceView.fov_x * 0.5f ) );
+		const float tanY = idMath::Tan( DEG2RAD( sourceView.fov_y * 0.5f ) );
+
+		for ( int row = 0; row < rows; row++ ) {
+			// rows run top-down, like the RGBA the capture returns
+			const int y0 = row * height / rows;
+			const int y1 = ( row + 1 ) * height / rows;
+			for ( int column = 0; column < columns; column++ ) {
+				const int x0 = column * width / columns;
+				const int x1 = ( column + 1 ) * width / columns;
+				const int regionX = x0 - guard;
+				const int regionY = y0 - guard;
+				const int regionWidth = x1 - x0 + 2 * guard;
+				const int regionHeight = y1 - y0 + 2 * guard;
+
+				// Region extents in units of the whole view's half-extents, up positive.
+				const float left = projectionShiftX - 1.0f + 2.0f * regionX / width;
+				const float right = projectionShiftX - 1.0f + 2.0f * ( regionX + regionWidth ) / width;
+				const float top = projectionShiftY + 1.0f - 2.0f * regionY / height;
+				const float bottom = projectionShiftY + 1.0f - 2.0f * ( regionY + regionHeight ) / height;
+				const float halfX = 0.5f * ( right - left );
+				const float halfY = 0.5f * ( top - bottom );
+
+				renderView_t regionView = sourceView;
+				regionView.fov_x = RAD2DEG( 2.0f * idMath::ATan( halfX * tanX ) );
+				regionView.fov_y = RAD2DEG( 2.0f * idMath::ATan( halfY * tanY ) );
+				tr_levelshotProjectionShiftX = 0.5f * ( left + right ) / halfX;
+				tr_levelshotProjectionShiftY = 0.5f * ( top + bottom ) / halfY;
+
+				idTempArray<byte> region( regionWidth * regionHeight * 4 );
+				R_CaptureTiledPixelsRGBA( regionWidth, regionHeight, blends, &regionView, region.Ptr() );
+				for ( int y = y0; y < y1; y++ ) {
+					memcpy( rgbaOut + ( y * width + x0 ) * 4,
+						region.Ptr() + ( ( y - regionY ) * regionWidth + guard ) * 4, ( x1 - x0 ) * 4 );
+				}
+			}
+		}
+	}
+
 	tr.disableLevelshotEntityCulling = previousDisableLevelshotEntityCulling;
 	tr_levelshotProjectionShiftActive = false;
 	tr_levelshotProjectionShiftX = 0.0f;
 	tr_levelshotProjectionShiftY = 0.0f;
+}
+
+/*
+==================
+R_LevelShotApplyCamera
+
+Points a copy of the player view at an explicit camera. The view keeps its viewID, time
+and shader parms, so the player's own body and view weapon stay suppressed and animated
+materials match the frame the command ran on.
+==================
+*/
+static void R_LevelShotApplyCamera( renderView_t &view, const idVec3 &origin, const idAngles &angles, float fovX, float aspect ) {
+	view.vieworg = origin;
+	view.viewaxis = angles.ToMat3();
+	view.fov_x = fovX;
+	view.fov_y = RAD2DEG( 2.0f * idMath::ATan( idMath::Tan( DEG2RAD( fovX * 0.5f ) ) / aspect ) );
+}
+
+static bool R_ParseLevelShotCamera( const idCmdArgs &args, int firstArg, idVec3 &origin, idAngles &angles, float &fovX ) {
+	float values[7];
+	const int count = Min( 7, args.Argc() - firstArg );
+	if ( count < 6 ) {
+		return false;
+	}
+
+	values[6] = 90.0f;
+	for ( int i = 0; i < count; i++ ) {
+		const char *token = args.Argv( firstArg + i );
+		char *end = NULL;
+		values[i] = static_cast<float>( strtod( token, &end ) );
+		// FLOAT_IS_NAN matches an all-ones exponent, so it rejects infinities too.
+		if ( end == token || *end != '\0' || FLOAT_IS_NAN( values[i] ) ) {
+			return false;
+		}
+	}
+	if ( values[6] <= 1.0f || values[6] >= 179.0f ) {
+		return false;
+	}
+
+	origin.Set( values[0], values[1], values[2] );
+	angles.Set( values[3], values[4], values[5] );
+	fovX = values[6];
+	return true;
 }
 
 static void R_LevelShotNormalizeFovToAspect( const renderView_t &sourceView, float currentAspect, float targetAspect, float &fovX, float &fovY ) {
@@ -2875,13 +3682,21 @@ static void R_WriteLevelShotPose( const idStr &baseName, const renderView_t &vie
 void R_LevelShot_f( const idCmdArgs &args ) {
 	idStr baseName;
 	int size = 512;
+	idVec3 cameraOrigin;
+	idAngles cameraAngles;
+	float cameraFovX = 90.0f;
+	const bool explicitCamera = args.Argc() >= 8;
 
-	if ( args.Argc() > 2 ) {
-		common->Printf( "usage: levelshot\n       levelshot <size>\n" );
+	if ( args.Argc() > 9 || ( args.Argc() > 2 && !explicitCamera ) ) {
+		common->Printf( "usage: levelshot\n       levelshot <size>\n       levelshot <size> <x> <y> <z> <pitch> <yaw> <roll> [fovX]\n" );
 		return;
 	}
-	if ( args.Argc() == 2 ) {
+	if ( args.Argc() >= 2 ) {
 		size = atoi( args.Argv( 1 ) );
+	}
+	if ( explicitCamera && !R_ParseLevelShotCamera( args, 2, cameraOrigin, cameraAngles, cameraFovX ) ) {
+		common->Printf( "levelshot: the camera needs six finite numbers and an optional fovX between 1 and 179\n" );
+		return;
 	}
 
 	R_NormalizeLevelShotBaseName( baseName );
@@ -2895,16 +3710,20 @@ void R_LevelShot_f( const idCmdArgs &args ) {
 		return;
 	}
 
-	const int rawTileHeight = size;
+	const int rawTileHeight = Max( size, idMath::Ftoi( size * r_levelshotSupersample.GetFloat() + 0.5f ) );
 	const float tileAspect = static_cast<float>( SCREEN_WIDTH ) / static_cast<float>( SCREEN_HEIGHT );
 	const int rawTileWidth = Max( 1, idMath::Ftoi( rawTileHeight * tileAspect + 0.5f ) );
 
 	renderView_t baseRef = tr.primaryView->renderView;
-	float currentAspect = tileAspect;
-	if ( glConfig.vidWidth > 0 && glConfig.vidHeight > 0 ) {
-		currentAspect = static_cast<float>( glConfig.vidWidth ) / static_cast<float>( glConfig.vidHeight );
+	if ( explicitCamera ) {
+		R_LevelShotApplyCamera( baseRef, cameraOrigin, cameraAngles, cameraFovX, tileAspect );
+	} else {
+		float currentAspect = tileAspect;
+		if ( glConfig.vidWidth > 0 && glConfig.vidHeight > 0 ) {
+			currentAspect = static_cast<float>( glConfig.vidWidth ) / static_cast<float>( glConfig.vidHeight );
+		}
+		R_LevelShotNormalizeFovToAspect( tr.primaryView->renderView, currentAspect, tileAspect, baseRef.fov_x, baseRef.fov_y );
 	}
-	R_LevelShotNormalizeFovToAspect( tr.primaryView->renderView, currentAspect, tileAspect, baseRef.fov_x, baseRef.fov_y );
 	baseRef.x = 0;
 	baseRef.y = 0;
 	baseRef.width = SCREEN_WIDTH;
@@ -2957,6 +3776,181 @@ void R_LevelShot_f( const idCmdArgs &args ) {
 		baseName.c_str(), rawTileWidth, rawTileHeight );
 }
 
+static bool R_RenderLevelShotProbe( const idCmdArgs &probe ) {
+	const char *outputName = probe.Argv( 0 );
+	const int width = atoi( probe.Argv( 1 ) );
+	const int height = atoi( probe.Argv( 2 ) );
+	const bool currentView = idStr::Icmp( probe.Argv( 3 ), "current" ) == 0;
+	const int cameraArgs = currentView ? 4 : 10;
+	const bool wantDepth = probe.Argc() == cameraArgs + 1 && idStr::Icmp( probe.Argv( cameraArgs ), "depth" ) == 0;
+
+	if ( outputName[0] == '\0' || ( probe.Argc() != cameraArgs && !wantDepth ) ) {
+		common->Warning( "levelshotProbe: malformed probe '%s'", probe.Args() );
+		return false;
+	}
+	if ( width < 16 || height < 16 || width > 8192 || height > 8192 ) {
+		common->Warning( "levelshotProbe: bad probe size %dx%d for '%s'", width, height, outputName );
+		return false;
+	}
+
+	const float aspect = static_cast<float>( width ) / static_cast<float>( height );
+	renderView_t ref = tr.primaryView->renderView;
+	if ( currentView ) {
+		float windowAspect = aspect;
+		if ( glConfig.vidWidth > 0 && glConfig.vidHeight > 0 ) {
+			windowAspect = static_cast<float>( glConfig.vidWidth ) / static_cast<float>( glConfig.vidHeight );
+		}
+		R_LevelShotNormalizeFovToAspect( tr.primaryView->renderView, windowAspect, aspect, ref.fov_x, ref.fov_y );
+	} else {
+		idVec3 origin;
+		idAngles angles;
+		float fovX;
+		if ( !R_ParseLevelShotCamera( probe, 3, origin, angles, fovX ) ) {
+			common->Warning( "levelshotProbe: bad camera for '%s'", outputName );
+			return false;
+		}
+		R_LevelShotApplyCamera( ref, origin, angles, fovX, aspect );
+	}
+	ref.x = 0;
+	ref.y = 0;
+	ref.width = SCREEN_WIDTH;
+	ref.height = SCREEN_HEIGHT;
+
+	// Depth comes from one backend pass, so the probe must fit the window untiled.
+	const bool canReadDepth = width <= glConfig.vidWidth && height <= glConfig.vidHeight;
+	if ( wantDepth && !canReadDepth ) {
+		common->Warning( "levelshotProbe: '%s' is larger than the %dx%d window; skipping its depth", outputName, glConfig.vidWidth, glConfig.vidHeight );
+	}
+	idTempArray<float> depth( ( wantDepth && canReadDepth ) ? width * height : 1 );
+	if ( wantDepth && canReadDepth ) {
+		tr_levelshotDepthCapture.linearDepth = depth.Ptr();
+		tr_levelshotDepthCapture.width = width;
+		tr_levelshotDepthCapture.height = height;
+		tr_levelshotDepthCapture.captured = false;
+	}
+
+	idTempArray<byte> rgba( width * height * 4 );
+	R_CaptureTiledPixelsRGBA( width, height, 1, &ref, rgba.Ptr() );
+
+	const bool depthCaptured = tr_levelshotDepthCapture.linearDepth != NULL && tr_levelshotDepthCapture.captured;
+	tr_levelshotDepthCapture.linearDepth = NULL;
+	tr_levelshotDepthCapture.captured = false;
+
+	R_WriteTGA( va( "%s.tga", outputName ), rgba.Ptr(), width, height );
+	if ( depthCaptured ) {
+		fileSystem->WriteFile( va( "%s.depth", outputName ), depth.Ptr(), width * height * sizeof( float ) );
+	} else if ( wantDepth && canReadDepth ) {
+		common->Warning( "levelshotProbe: no depth was captured for '%s'", outputName );
+	}
+
+	const idAngles viewAngles = ref.viewaxis.ToAngles();
+	idStr pose = va( "%.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %d %d %d %d\n",
+		ref.vieworg.x, ref.vieworg.y, ref.vieworg.z, viewAngles.pitch, viewAngles.yaw, viewAngles.roll,
+		ref.fov_x, ref.fov_y, width, height, ref.time, depthCaptured ? 1 : 0 );
+	fileSystem->WriteFile( va( "%s.pose", outputName ), pose.c_str(), pose.Length() );
+	return true;
+}
+
+/*
+==================
+R_LevelShotProbe_f
+
+levelshotProbe <requestFile>
+
+Renders camera probes for tools that search for a levelshot pose, without moving the
+player or touching game state. Each line of the request file (relative to fs_savepath) is
+
+	<output> <width> <height> <x> <y> <z> <pitch> <yaw> <roll> <fovX> [depth]
+	<output> <width> <height> current [depth]
+
+"current" renders the view the game last drew (a cinematic camera, say) with its fov fitted
+to the probe's aspect. Every probe writes <output>.tga and <output>.pose ("x y z pitch yaw
+roll fovX fovY width height time depthWritten"); "depth" adds <output>.depth, float32
+distances along the view axis, top row first, -1 where nothing was drawn. A line that
+starts with "levelshot" runs that command, so a driver can stage a scene and then take the
+five-tile capture exactly once. All lines in a request share one frame's time; a first line
+"after <time>" holds the whole request until the view's time (the .pose time) reaches it.
+The request file is deleted once every line is handled, which is the completion signal for
+a driver that polls this command.
+==================
+*/
+static void R_LevelShotProbe_f( const idCmdArgs &args ) {
+	if ( args.Argc() != 2 ) {
+		common->Printf( "usage: levelshotProbe <requestFile>\n" );
+		return;
+	}
+
+	const idStr requestName = args.Argv( 1 );
+	// Open the OS path directly: a pure server hides loose savepath files from the search paths.
+	idFile *requestFile = fileSystem->OpenExplicitFileRead( fileSystem->RelativePathToOSPath( requestName.c_str(), "fs_savepath" ) );
+	if ( requestFile == NULL ) {
+		return;
+	}
+	if ( !tr.primaryView || !tr.primaryWorld ) {
+		// Leave the request queued until the world is drawing.
+		fileSystem->CloseFile( requestFile );
+		return;
+	}
+
+	idStr request;
+	const int length = requestFile->Length();
+	if ( length > 0 ) {
+		idTempArray<char> text( length + 1 );
+		const int read = requestFile->Read( text.Ptr(), length );
+		text[ Max( 0, read ) ] = '\0';
+		request = text.Ptr();
+	}
+	fileSystem->CloseFile( requestFile );
+
+	// A request that opens with "after <time>" stays queued until the primary view's clock
+	// reaches that time, so a capture lands on a chosen game time (a spinning pickup at a
+	// given angle, say) without the requester having to race the frame loop.
+	idCmdArgs gate;
+	const int gateEnd = request.Find( '\n' );
+	gate.TokenizeString( request.Left( gateEnd < 0 ? request.Length() : gateEnd ).c_str(), false );
+	const bool gated = gate.Argc() == 2 && !idStr::Icmp( gate.Argv( 0 ), "after" );
+	if ( gated && tr.primaryView->renderView.time < atoi( gate.Argv( 1 ) ) ) {
+		return;
+	}
+
+	console->Close();
+	const bool previousSuppressLevelshotViewModels = tr.suppressLevelshotViewModels;
+	tr.suppressLevelshotViewModels = true;
+
+	int rendered = 0;
+	int rejected = 0;
+	int lineStart = gated ? ( gateEnd < 0 ? request.Length() : gateEnd + 1 ) : 0;
+	while ( lineStart < request.Length() ) {
+		int lineEnd = request.Find( '\n', lineStart );
+		if ( lineEnd < 0 ) {
+			lineEnd = request.Length();
+		}
+		const idStr line = request.Mid( lineStart, lineEnd - lineStart );
+		lineStart = lineEnd + 1;
+
+		idCmdArgs probe;
+		probe.TokenizeString( line.c_str(), false );
+		if ( probe.Argc() == 0 ) {
+			continue;
+		}
+		if ( !idStr::Icmp( probe.Argv( 0 ), "levelshot" ) ) {
+			// A queued five-tile capture, taken once a staged scene is in place.
+			R_LevelShot_f( probe );
+			rendered++;
+			continue;
+		}
+		if ( probe.Argc() < 4 || !R_RenderLevelShotProbe( probe ) ) {
+			rejected++;
+			continue;
+		}
+		rendered++;
+	}
+
+	tr.suppressLevelshotViewModels = previousSuppressLevelshotViewModels;
+	fileSystem->RemoveFile( requestName.c_str() );
+	common->Printf( "levelshotProbe: rendered %d probe(s) from %s, rejected %d\n", rendered, requestName.c_str(), rejected );
+}
+
 /*
 ================== 
 R_BlendedScreenShot
@@ -2965,17 +3959,54 @@ screenshot
 screenshot [filename]
 screenshot [width] [height]
 screenshot [width] [height] [samples]
+screenshot image <imageName> screenshots/<name>.tga
 ================== 
 */ 
 #define	MAX_BLENDS	256	// to keep the accumulation in shorts
 void R_ScreenShot_f( const idCmdArgs &args ) {
 	static int lastNumber = 0;
 	idStr checkname;
+	if ( args.Argc() >= 2 && !idStr::Icmp( args.Argv( 1 ), "image" ) ) {
+		if ( args.Argc() != 4 ) {
+			common->Printf( "usage: screenshot image <imageName> screenshots/<name>.tga\n" );
+			return;
+		}
+		idStr path( args.Argv( 3 ) );
+		if ( path.Icmpn( "screenshots/", 12 ) != 0 || path.Find( ".." ) >= 0
+				|| path.Find( ':' ) >= 0 || path.Find( '\\' ) >= 0 || !path.CheckExtension( ".tga" ) ) {
+			common->Printf( "screenshot image: use screenshots/<name>.tga\n" );
+			return;
+		}
+		idImage *image = globalImages->GetImage( args.Argv( 2 ) );
+		if ( image == NULL || image->IsDefaulted() ) {
+			common->Printf( "screenshot image: image '%s' is unavailable\n", args.Argv( 2 ) );
+			return;
+		}
+		idList<byte> pixels;
+		if ( !image->ReadPixelsRGBA8( pixels ) ) {
+			common->Printf( "screenshot image: readback requires a loaded single-sample RGBA8 2D image up to 8192x8192\n" );
+			return;
+		}
+		const int width = image->GetUploadWidth(), height = image->GetUploadHeight();
+		if ( pixels.Num() != width * height * 4
+				|| !R_WriteTGA( path.c_str(), pixels.Ptr(), width, height, true ) ) {
+			common->Printf( "screenshot image: write failed\n" );
+			return;
+		}
+		common->Printf( "Wrote %s (image %s, %dx%d RGBA8)\n", path.c_str(), image->GetName(), width, height );
+		return;
+	}
+	if ( args.Argc() >= 2 && !idStr::Icmp( args.Argv( 1 ), "linear" ) ) {
+		if ( args.Argc() != 3 ) {
+			common->Printf( "usage: screenshot linear screenshots/<name>.pfm\n" );
+		} else {
+			R_ModernGLExecutor_LinearScreenshot( args.Argv( 2 ) );
+		}
+		return;
+	}
 
 	int width = glConfig.vidWidth;
 	int height = glConfig.vidHeight;
-	int	x = 0;
-	int y = 0;
 	int	blends = 0;
 
 	switch ( args.Argc() ) {
@@ -3023,6 +4054,9 @@ void R_ScreenShot_f( const idCmdArgs &args ) {
 	console->Close();
 
 	tr.TakeScreenshot( width, height, checkname, blends, NULL );
+	if ( r_screenshotCaptureFailed ) {
+		return;
+	}
 
 	common->Printf( "Wrote %s\n", checkname.c_str() );
 }
@@ -3071,15 +4105,50 @@ void R_StencilShot( void ) {
 	Mem_Free( byteBuffer );	
 }
 
-/* 
-================== 
+/*
+==================
+R_SetNativeCubeAxes
+
+View axes of the six faces of a native cube map (_px, _nx, _py, _ny, _pz,
+_nz), each in the orientation cubeMap loads it.
+==================
+*/
+static void R_SetNativeCubeAxes( idMat3 axis[6] ) {
+	memset( axis, 0, sizeof( idMat3 ) * 6 );
+	axis[0][0][0] = 1;
+	axis[0][1][2] = 1;
+	axis[0][2][1] = 1;
+
+	axis[1][0][0] = -1;
+	axis[1][1][2] = -1;
+	axis[1][2][1] = 1;
+
+	axis[2][0][1] = 1;
+	axis[2][1][0] = -1;
+	axis[2][2][2] = -1;
+
+	axis[3][0][1] = -1;
+	axis[3][1][0] = -1;
+	axis[3][2][2] = 1;
+
+	axis[4][0][2] = 1;
+	axis[4][1][0] = -1;
+	axis[4][2][1] = 1;
+
+	axis[5][0][2] = -1;
+	axis[5][1][0] = 1;
+	axis[5][2][1] = 1;
+}
+
+/*
+==================
 R_EnvShot_f
 
 envshot <basename>
 
 Saves out env/<basename>_ft.tga, etc
-================== 
-*/  
+==================
+*/
 void R_EnvShot_f( const idCmdArgs &args ) {
 	idStr		fullname;
 	const char	*baseName;
@@ -3088,7 +4157,7 @@ void R_EnvShot_f( const idCmdArgs &args ) {
 	renderView_t	ref;
 	viewDef_t	primary;
 	int			blends;
-	char	*extensions[6] =  { "_px.tga", "_nx.tga", "_py.tga", "_ny.tga", 
+	const char	*extensions[6] =  { "_px.tga", "_nx.tga", "_py.tga", "_ny.tga", 
 		"_pz.tga", "_nz.tga" };
 	int			size;
 
@@ -3130,46 +4199,194 @@ void R_EnvShot_f( const idCmdArgs &args ) {
 
 	primary = *tr.primaryView;
 
-	memset( &axis, 0, sizeof( axis ) );
-	axis[0][0][0] = 1;
-	axis[0][1][2] = 1;
-	axis[0][2][1] = 1;
-
-	axis[1][0][0] = -1;
-	axis[1][1][2] = -1;
-	axis[1][2][1] = 1;
-
-	axis[2][0][1] = 1;
-	axis[2][1][0] = -1;
-	axis[2][2][2] = -1;
-
-	axis[3][0][1] = -1;
-	axis[3][1][0] = -1;
-	axis[3][2][2] = 1;
-
-	axis[4][0][2] = 1;
-	axis[4][1][0] = -1;
-	axis[4][2][1] = 1;
-
-	axis[5][0][2] = -1;
-	axis[5][1][0] = 1;
-	axis[5][2][1] = 1;
+	R_SetNativeCubeAxes( axis );
 
 	for ( i = 0 ; i < 6 ; i++ ) {
 		ref = primary.renderView;
 		ref.x = ref.y = 0;
 		ref.fov_x = ref.fov_y = 90;
-		ref.width = glConfig.vidWidth;
-		ref.height = glConfig.vidHeight;
+		// View rectangles are virtual-screen units: the full screen is the
+		// whole size x size capture. Window pixels drew a larger view and
+		// kept only its corner unless the window was 640x480.
+		ref.width = SCREEN_WIDTH;
+		ref.height = SCREEN_HEIGHT;
 		ref.viewaxis = axis[i];
 		fullname = "env/";
 		fullname += baseName;
 		fullname += extensions[i];
 		tr.TakeScreenshot( size, size, fullname, blends, &ref );
+		if ( r_screenshotCaptureFailed ) {
+			common->Warning( "envshot: capture failed for %s; cubemap is incomplete", fullname.c_str() );
+			return;
+		}
 	}
 
 	common->Printf( "Wrote %s, etc\n", fullname.c_str() );
-} 
+}
+
+/*
+==================
+R_SavedFileLoads
+
+True when a load of relativePath reads the copy in the save path. openQ4
+searches the save path last, so a copy in the game or install tree wins.
+==================
+*/
+static bool R_SavedFileLoads( const char *relativePath ) {
+	idFile *saved = fileSystem->OpenExplicitFileRead( fileSystem->RelativePathToOSPath( relativePath, "fs_savepath" ) );
+	if ( saved == NULL ) {
+		return false;
+	}
+	void *loaded = NULL;
+	const int length = fileSystem->ReadFile( relativePath, &loaded );
+	bool same = length >= 0 && length == saved->Length();
+	if ( same && length > 0 ) {
+		idTempArray<byte> bytes( length );
+		same = saved->Read( bytes.Ptr(), length ) == length && memcmp( bytes.Ptr(), loaded, length ) == 0;
+	}
+	fileSystem->CloseFile( saved );
+	if ( loaded != NULL ) {
+		fileSystem->FreeFile( loaded );
+	}
+	return same;
+}
+
+/*
+==================
+R_BakeReflectionProbes_f
+
+bakeReflectionProbes [size] [blends]
+
+Captures each authored reflection probe of the current map from its light
+origin, in the light's own axes, and writes the six faces its cubeMap loads
+(<cubeMap>_px.tga .. _nz.tga) under the save path. Each image then reloads,
+so the probes reflect the capture at once. The capture is the scene alone:
+display filters, view weapons, subviews and existing probe reflections are
+left out, so baking again from the same scene writes the same faces.
+==================
+*/
+static void R_BakeReflectionProbes_f( const idCmdArgs &args ) {
+	static const char *suffixes[6] = { "_px.tga", "_nx.tga", "_py.tga", "_ny.tga", "_pz.tga", "_nz.tga" };
+	if ( args.Argc() > 3 ) {
+		common->Printf( "usage: bakeReflectionProbes [size] [blends]\n" );
+		return;
+	}
+	const int size = args.Argc() > 1 ? atoi( args.Argv( 1 ) ) : MODERN_SPECULAR_PROBE_ATLAS_FACE_SIZE;
+	if ( size < 16 || size > MODERN_SPECULAR_PROBE_ATLAS_FACE_SIZE || ( size & ( size - 1 ) ) != 0 ) {
+		common->Printf( "bakeReflectionProbes: size must be a power of two from 16 to %i\n",
+			MODERN_SPECULAR_PROBE_ATLAS_FACE_SIZE );
+		return;
+	}
+	const int blends = idMath::ClampInt( 1, MAX_BLENDS, args.Argc() > 2 ? atoi( args.Argv( 2 ) ) : 1 );
+	if ( tr.primaryWorld == NULL || tr.primaryView == NULL ) {
+		common->Printf( "bakeReflectionProbes: no map is being rendered\n" );
+		return;
+	}
+
+	idList<const idRenderLightLocal *> probes;
+	const idRenderWorldLocal *world = tr.primaryWorld;
+	for ( int i = 0; i < world->lightDefs.Num(); ++i ) {
+		const idRenderLightLocal *light = world->lightDefs[i];
+		if ( light != NULL && light->lightShader != NULL && light->lightShader->HasSpecularProbe() ) {
+			probes.Append( light );
+		}
+	}
+	if ( probes.Num() == 0 ) {
+		common->Printf( "bakeReflectionProbes: the map has no reflection probe lights\n" );
+		return;
+	}
+
+	struct captureSetting_t {
+		idCVar *		cvar;
+		const char *	value;
+		idStr			saved;
+	};
+	captureSetting_t settings[] = {
+		{ &r_skipPostProcess, "1" }, { &r_skipGlowOverlay, "1" }, { &r_skipSubviews, "1" },
+		{ &r_rendererReflectionProbes, "0" }, { &r_hdrToneMap, "0" }, { &r_hdrAutoExposure, "0" },
+		{ &r_hdrExposure, "1" }, { &r_bloom, "0" }, { &r_motionBlur, "0" }, { &r_crt, "0" },
+		{ &r_gamma, "1" }, { &r_brightness, "1" },
+	};
+	for ( int i = 0; i < (int)( sizeof( settings ) / sizeof( settings[0] ) ); ++i ) {
+		settings[i].saved = settings[i].cvar->GetString();
+		settings[i].cvar->SetString( settings[i].value );
+	}
+	const bool oldSuppressViewModels = tr.suppressLevelshotViewModels;
+	tr.suppressLevelshotViewModels = true;
+
+	// Copy the view before capturing: each capture starts frames that reuse
+	// the memory tr.primaryView points into.
+	const renderView_t primary = tr.primaryView->renderView;
+	idMat3 faceAxes[6];
+	R_SetNativeCubeAxes( faceAxes );
+	int baked = 0;
+	for ( int i = 0; i < probes.Num(); ++i ) {
+		const idRenderLightLocal *light = probes[i];
+		const specularProbeMaterialInfo_t &info = light->lightShader->GetSpecularProbeInfo();
+		const char *material = light->lightShader->GetName();
+		if ( info.cubeImage == NULL || info.cubeConvention != SPECULAR_PROBE_CUBE_NATIVE ) {
+			common->Printf( "bakeReflectionProbes: skipped %s: only a cubeMap probe can be baked\n", material );
+			continue;
+		}
+		if ( !light->parms.pointLight ) {
+			common->Printf( "bakeReflectionProbes: skipped %s: a probe is a point light\n", material );
+			continue;
+		}
+		// A probe owns its cube image: probe lights sharing one would
+		// overwrite each other's capture, so none of them is baked.
+		int users = 0;
+		for ( int j = 0; j < probes.Num(); ++j ) {
+			if ( probes[j]->lightShader->GetSpecularProbeInfo().cubeImage == info.cubeImage ) {
+				++users;
+			}
+		}
+		if ( users > 1 ) {
+			common->Printf( "bakeReflectionProbes: skipped %s: %i probe lights share its cube map\n", material, users );
+			continue;
+		}
+		renderView_t ref = primary;
+		ref.x = ref.y = 0;
+		ref.fov_x = ref.fov_y = 90;
+		ref.width = SCREEN_WIDTH;
+		ref.height = SCREEN_HEIGHT;
+		ref.vieworg = light->globalLightOrigin;
+		bool captured = true;
+		for ( int face = 0; face < 6; ++face ) {
+			ref.viewaxis = faceAxes[face] * light->parms.axis;
+			tr.TakeScreenshot( size, size, va( "%s%s", info.cubeImage->GetName(), suffixes[face] ), blends, &ref );
+			// A capture runs its frame inline but never reaches EndFrame:
+			// release what the face allocated as EndFrame does, without
+			// presenting (as the light-grid bake's LightGrid_FinishCapture).
+			R_ToggleSmpFrame();
+			vertexCache.EndFrame();
+			R_RendererUpload_EndFrame();
+			if ( r_screenshotCaptureFailed ) {
+				captured = false;
+				break;
+			}
+		}
+		if ( !captured ) {
+			common->Warning( "bakeReflectionProbes: %s capture is incomplete; probe was not reloaded", material );
+			continue;
+		}
+		const idStr firstFace = va( "%s%s", info.cubeImage->GetName(), suffixes[0] );
+		if ( !R_SavedFileLoads( firstFace ) ) {
+			common->Warning( "bakeReflectionProbes: %s does not load from the bake at %s: another copy loads first, or the save path is not writable",
+				firstFace.c_str(), fileSystem->RelativePathToOSPath( firstFace, "fs_savepath" ) );
+		}
+		info.cubeImage->Reload( true );
+		common->Printf( "bakeReflectionProbes: %s at (%.1f %.1f %.1f) -> %s_*.tga\n", material,
+			light->globalLightOrigin.x, light->globalLightOrigin.y, light->globalLightOrigin.z,
+			info.cubeImage->GetName() );
+		++baked;
+	}
+
+	tr.suppressLevelshotViewModels = oldSuppressViewModels;
+	for ( int i = 0; i < (int)( sizeof( settings ) / sizeof( settings[0] ) ); ++i ) {
+		settings[i].cvar->SetString( settings[i].saved );
+	}
+	common->Printf( "bakeReflectionProbes: baked %i of %i probes at %ix%i\n", baked, probes.Num(), size, size );
+}
 
 //============================================================================
 
@@ -3243,7 +4460,7 @@ void R_MakeAmbientMap_f( const idCmdArgs &args ) {
 	renderView_t	ref;
 	viewDef_t	primary;
 	int			downSample;
-	char	*extensions[6] =  { "_px.tga", "_nx.tga", "_py.tga", "_ny.tga", 
+	const char	*extensions[6] =  { "_px.tga", "_nx.tga", "_py.tga", "_ny.tga", 
 		"_pz.tga", "_nz.tga" };
 	int			outSize;
 	byte		*buffers[6];
@@ -3465,7 +4682,12 @@ static int R_GfxInfoGLMaxSamples( bool &available ) {
 	int maxSamples = 0;
 
 #ifdef GL_MAX_SAMPLES
-	if ( glConfig.isInitialized && ( GLEW_ARB_texture_multisample || GLEW_VERSION_3_2 ) ) {
+	// GL_MAX_SAMPLES comes with framebuffer multisampling, not with multisample
+	// textures. Ask the context: under glewExperimental GLEW's flags only say
+	// the entry points resolved.
+	if ( glConfig.isInitialized && ( glConfig.backendCaps.glVersion >= 3.0f
+			|| GLCapabilityProbe_HasExtension( "GL_ARB_framebuffer_object" )
+			|| GLCapabilityProbe_HasExtension( "GL_EXT_framebuffer_multisample" ) ) ) {
 		glGetIntegerv( GL_MAX_SAMPLES, &maxSamples );
 		available = maxSamples > 0;
 	}
@@ -3474,23 +4696,107 @@ static int R_GfxInfoGLMaxSamples( bool &available ) {
 	return maxSamples;
 }
 
+#ifndef OPENQ4_RENDERER_VK_MODULE
+/*
+================
+R_GfxInfoObservedMSAA
+
+The samples of the target the last main scene view drew into, as
+RB_STD_DrawView recorded them. Returns false until a main scene has drawn in
+this context, for example during startup self-tests.
+================
+*/
+static bool R_GfxInfoObservedMSAA( const int requestedMSAA, const int glMaxSamples,
+		const bool maxSamplesAvailable, const bool textureMSAAAvailable,
+		int &effectiveMSAA, const char *&msaaReason ) {
+	if ( backEnd.mainSceneTargetContext != tr.glContextGeneration ) {
+		return false;
+	}
+
+	if ( backEnd.mainSceneTargetIsWindow ) {
+		// The window carries the samples SDL reported.
+		const int windowSamples = R_DefaultFramebufferSamples();
+		effectiveMSAA = windowSamples > 1 ? windowSamples : 0;
+		msaaReason = effectiveMSAA > 1 ? "default-framebuffer"
+			: requestedMSAA > 1 ? "default-framebuffer-single-sample" : "off";
+		return true;
+	}
+
+	const int targetSamples = backEnd.mainSceneTargetSamples;
+	if ( targetSamples > 1 ) {
+		effectiveMSAA = targetSamples;
+		if ( targetSamples == requestedMSAA ) {
+			msaaReason = "active";
+		} else if ( maxSamplesAvailable && targetSamples == glMaxSamples && requestedMSAA > glMaxSamples ) {
+			// image allocation clamps a multisample texture to the limit
+			msaaReason = "gl-max-clamp";
+		} else {
+			// A target keeps the count it was created with: an r_multiSamples
+			// change waits for vid_restart or a map load, and a refused count
+			// retries lower.
+			msaaReason = "scene-target";
+		}
+	} else {
+		effectiveMSAA = 0;
+		if ( requestedMSAA <= 1 ) {
+			msaaReason = "off";
+		} else if ( !textureMSAAAvailable ) {
+			// every render texture is single-sample here, the forward target too
+			msaaReason = "texture-msaa-unavailable";
+		} else {
+			msaaReason = "scene-target-single-sample";
+		}
+	}
+	return true;
+}
+#endif
+
 static void R_GfxInfoPrintAAState( void ) {
 	bool maxSamplesAvailable = false;
 	const int glMaxSamples = R_GfxInfoGLMaxSamples( maxSamplesAvailable );
 	const int requestedMSAA = Max( 0, r_multiSamples.GetInteger() );
 	const int screenFraction = idMath::ClampInt( 10, 200, r_screenFraction.GetInteger() );
 	const bool supersamplingActive = screenFraction > 100;
-	const bool modernVisiblePostSuppressesMSAA = R_ModernGLExecutor_ModernVisibleRequestedForPost();
-	const bool textureMSAAAvailable = ( GLEW_ARB_texture_multisample || GLEW_VERSION_3_2 ) != 0;
+	// A rejected modern transaction leaves the native renderer in charge,
+	// including its multisample target and post AA. Report the frame that was
+	// actually presented, not the requested owner or its discarded sidecar.
+#ifndef OPENQ4_RENDERER_VK_MODULE
+	const bool modernVisiblePost = R_ModernGLExecutor_ModernVisibleRequestedForPost()
+		&& R_ModernGLExecutor_Stats().modernVisibleExecuted;
+	// The test idImage::AllocImage makes before it allocates a multisample
+	// texture. GLEW cannot answer it: macOS resolves the GL 3.2 entry points
+	// for its GL 2.1 legacy context, which has no multisample textures.
+	const bool textureMSAAAvailable = glTexImage2DMultisample != NULL
+		&& ( glConfig.backendCaps.glVersion >= 3.2f
+			|| GLCapabilityProbe_HasExtension( "GL_ARB_texture_multisample" ) );
+#endif
 
 	int effectiveMSAA = 0;
 	const char *msaaReason = "off";
-	if ( requestedMSAA > 1 ) {
-		if ( supersamplingActive ) {
+	// Once a main scene has drawn in this context, report the samples of the
+	// target it drew into. Before that (startup self-tests) predict them.
+	bool mainSceneObserved = false;
+#ifndef OPENQ4_RENDERER_VK_MODULE
+	mainSceneObserved = !modernVisiblePost && R_GfxInfoObservedMSAA( requestedMSAA,
+		glMaxSamples, maxSamplesAvailable, textureMSAAAvailable, effectiveMSAA, msaaReason );
+#endif
+	if ( !mainSceneObserved && requestedMSAA > 1 ) {
+#ifdef OPENQ4_RENDERER_VK_MODULE
+		extern int VK_PostProcess_SceneSamples( void );
+		effectiveMSAA = VK_PostProcess_SceneSamples();
+		msaaReason = effectiveMSAA > 1 ? "vulkan-scene" : "vulkan-scene-single-sample";
+#else
+		if ( modernVisiblePost ) {
+			const modernGLExecutorStats_t &modern = R_ModernGLExecutor_Stats();
+			effectiveMSAA = modern.modernVisibleExecuted && modern.sceneMSAAColorResolves > 0
+				&& modern.sceneMSAADepthResolves > 0 ? modern.sceneMSAASamples : 0;
+			msaaReason = effectiveMSAA > 1 ? "modern-forward-resolve" : "modern-scene-single-sample";
+		} else if ( supersamplingActive ) {
 			msaaReason = "supersampling";
-		} else if ( modernVisiblePostSuppressesMSAA ) {
-			msaaReason = "modern-visible-post";
 		} else if ( !textureMSAAAvailable ) {
+			// Every render texture is single-sample here, including the game's
+			// forward target, so a scene gets MSAA only by drawing straight into
+			// the window: the route with every post effect off. None has yet.
 			msaaReason = "texture-msaa-unavailable";
 		} else {
 			effectiveMSAA = requestedMSAA;
@@ -3504,6 +4810,7 @@ static void R_GfxInfoPrintAAState( void ) {
 				msaaReason = "gl-max-disabled";
 			}
 		}
+#endif
 	}
 
 	const int postAA = idMath::ClampInt( 0, 4, r_postAA.GetInteger() );
@@ -3515,6 +4822,8 @@ static void R_GfxInfoPrintAAState( void ) {
 	} else if ( r_skipPostProcess.GetBool() ) {
 		postAAEffective = false;
 		postAAReason = "r_skipPostProcess";
+#ifndef OPENQ4_RENDERER_VK_MODULE
+	// Vulkan embeds its native SMAA programs and has no OpenGL GLSL context.
 	} else if ( !glConfig.GLSLProgramAvailable ) {
 		postAAEffective = false;
 		postAAReason = "glsl-unavailable";
@@ -3522,6 +4831,7 @@ static void R_GfxInfoPrintAAState( void ) {
 		// SMAA shaders require #version 130; Apple GL 2.1 stops at GLSL 1.20.
 		postAAEffective = false;
 		postAAReason = "glsl-130-unavailable";
+#endif
 	}
 
 	char glMaxSamplesText[32];
@@ -3561,6 +4871,11 @@ GfxInfo_f
 ================
 */
 void GfxInfo_f( const idCmdArgs &args ) {
+	// Driver-owned strings may have died with a failed recoverable context.
+	if ( !glConfig.isInitialized ) {
+		common->Printf( "gfxInfo: graphics device is unavailable\n" );
+		return;
+	}
 	const char *fsstrings[] =
 	{
 		"windowed",
@@ -3650,15 +4965,37 @@ void GfxInfo_f( const idCmdArgs &args ) {
 		common->Printf( "Renderer caps: %s\n", capsSummary );
 	}
 	RendererModule_PrintGfxInfo();
+	R_GpuSkinning_PrintGfxInfo();
 	RendererCompatibilityGates_PrintGfxInfo();
 	RendererTierContract_PrintGfxInfo();
 	RendererBootstrap_PrintGfxInfo();
 	RendererBenchmarks_PrintGfxInfo();
+	renderGpuFrameTiming_t gpuFrameTiming;
+	R_RendererMetrics_GetGpuFrameTiming( gpuFrameTiming );
+	const char *gpuTimingBackend = "none";
+	if ( gpuFrameTiming.backend == RENDER_GPU_TIMING_BACKEND_OPENGL ) {
+		gpuTimingBackend = "opengl";
+	} else if ( gpuFrameTiming.backend == RENDER_GPU_TIMING_BACKEND_VULKAN ) {
+		gpuTimingBackend = "vulkan";
+	}
 	common->Printf(
-		"Renderer GPU timers: %s, cvar=%d, timerQuery=%d\n",
+		"Renderer GPU timers: %s, cvar=%d, glPassTimerQuery=%d\n",
 		R_RendererMetrics_GpuTimersAvailable() ? "available" : "unavailable",
 		r_rendererGpuTimers.GetBool() ? 1 : 0,
 		glConfig.backendCaps.hasTimerQuery ? 1 : 0 );
+	common->Printf(
+		"Renderer whole-frame GPU timing: backend=%s supported=%d valid=%d frame=%d generation=%u elapsed=%lluus latency=%u resolved=%llu unavailable=%llu dropped=%llu resets=%llu nonblocking=1\n",
+		gpuTimingBackend,
+		gpuFrameTiming.supported ? 1 : 0,
+		gpuFrameTiming.valid ? 1 : 0,
+		gpuFrameTiming.frameNumber,
+		gpuFrameTiming.generation,
+		gpuFrameTiming.elapsedMicroseconds,
+		gpuFrameTiming.latencyFrames,
+		gpuFrameTiming.resolvedSamples,
+		gpuFrameTiming.unavailableSamples,
+		gpuFrameTiming.droppedSamples,
+		gpuFrameTiming.resetCount );
 	common->Printf(
 		"Renderer scene packets: legacy bridge V2, maxScenes=%d, maxPasses=%d, maxDrawPackets=%d, maxMaterialRecords=%d, maxGeometryRecords=%d, maxInstanceRecords=%d\n",
 		SCENE_PACKET_MAX_SCENES,
@@ -3667,6 +5004,24 @@ void GfxInfo_f( const idCmdArgs &args ) {
 		SCENE_PACKET_MAX_MATERIAL_RECORDS,
 		SCENE_PACKET_MAX_GEOMETRY_RECORDS,
 		SCENE_PACKET_MAX_INSTANCE_RECORDS );
+	{
+		const classicDeformDomainStats_t &deform =
+			R_ClassicDeformDomain_Stats();
+		common->Printf(
+			"Renderer shared material deform: requested=%d frameToken=%llu records=%d none=%d notApplicable=%d completed=%d empty=%d skipped=%d failed=%d unsupported=%d invalid=%d hash=%016llx\n",
+			r_rendererSharedDeform.GetBool() ? 1 : 0,
+			static_cast<unsigned long long>( deform.frameToken ),
+			deform.records,
+			deform.none,
+			deform.notApplicable,
+			deform.completed,
+			deform.empty,
+			deform.skipped,
+			deform.failed,
+			deform.unsupported,
+			deform.invalid,
+			static_cast<unsigned long long>( deform.hash ) );
+	}
 	R_GeometryResources_PrintGfxInfo();
 	common->Printf(
 		"Renderer graph: resource-backed packet graph, maxPasses=%d, maxResources=%d, maxResourceAccesses=%d\n",
@@ -3675,7 +5030,545 @@ void GfxInfo_f( const idCmdArgs &args ) {
 		RENDER_GRAPH_MAX_RESOURCE_ACCESSES );
 	R_RenderGraphResources_PrintGfxInfo();
 	R_MaterialResourceTable_PrintGfxInfo();
+#if !defined( OPENQ4_RENDERER_VK_MODULE ) && !defined( OPENQ4_RENDERER_GLES_MODULE )
+	RB_GLPBR_PrintInfo();
+#endif
+	{
+		const classicGuiDomainStats_t &guiDomain = R_ClassicGuiDomain_Stats();
+		common->Printf(
+			"Renderer shared classic GUI: rootRequested=%d inWorldRequested=%d prepared=%d valid=%d views=%d(root=%d world=%d) ready=%d fallback=%d surfaces=%d/%d noop=%d deform=%d/%d/%d passes=%d draw=%d inactive=%d activeNoop=%d hash=%016llx status=%s GL=%d/%d VK=%d/%d\n",
+			r_rendererSharedGui.GetBool() ? 1 : 0,
+			r_rendererSharedInWorldGui.GetBool() ? 1 : 0,
+			guiDomain.prepared ? 1 : 0,
+			guiDomain.frameValid ? 1 : 0,
+			guiDomain.guiViews,
+			guiDomain.rootViews,
+			guiDomain.inWorldViews,
+			guiDomain.readyViews,
+			guiDomain.fallbackViews,
+			guiDomain.drawableSurfaces,
+			guiDomain.sourceSurfaces,
+			guiDomain.noopSurfaces,
+			guiDomain.materialDeformSurfaces,
+			guiDomain.completedDeformSurfaces,
+			guiDomain.emptyDeformSurfaces,
+			guiDomain.evaluatedPasses,
+			guiDomain.drawablePasses,
+			guiDomain.inactivePasses,
+			guiDomain.activeNoopPasses,
+			static_cast<unsigned long long>( guiDomain.hash ),
+			guiDomain.status,
+			guiDomain.backend[CLASSIC_GUI_DOMAIN_BACKEND_GL].ownedViews,
+			guiDomain.backend[CLASSIC_GUI_DOMAIN_BACKEND_GL].fallbackViews,
+			guiDomain.backend[CLASSIC_GUI_DOMAIN_BACKEND_VULKAN].ownedViews,
+			guiDomain.backend[CLASSIC_GUI_DOMAIN_BACKEND_VULKAN].fallbackViews );
+	}
+	{
+		const classicCinematicPostDomainStats_t &cinematicPost =
+			R_ClassicCinematicPostDomain_Stats();
+		common->Printf(
+			"Renderer shared cinematic/post: requested=%d prepared=%d valid=%d overflow=%d scenes=%d views=%d(root=%d post=%d nested=%d/%d nestedCinematic=%d) ready=%d fallback=%d cinematicStages=%d currentRender=%d currentDepth=%d hash=%016llx status=%s GL=%d/%d/%d/%d VK=%d/%d/%d/%d\n",
+			r_rendererSharedCinematicPost.GetBool() ? 1 : 0,
+			cinematicPost.prepared ? 1 : 0,
+			cinematicPost.frameValid ? 1 : 0,
+			cinematicPost.overflow ? 1 : 0,
+			cinematicPost.sourceScenes,
+			cinematicPost.views,
+			cinematicPost.rootCinematicViews,
+			cinematicPost.authoredPostViews,
+			cinematicPost.nestedSpecialViews,
+			cinematicPost.nestedSpecialTransactions,
+			cinematicPost.nestedCinematicStages,
+			cinematicPost.readyViews,
+			cinematicPost.fallbackViews,
+			cinematicPost.cinematicStages,
+			cinematicPost.currentRenderStages,
+			cinematicPost.currentDepthStages,
+			static_cast<unsigned long long>( cinematicPost.hash ),
+			cinematicPost.status,
+			cinematicPost.backend[CLASSIC_CINEMATIC_POST_BACKEND_GL].ownedViews,
+			cinematicPost.backend[CLASSIC_CINEMATIC_POST_BACKEND_GL].fallbackViews,
+			cinematicPost.backend[CLASSIC_CINEMATIC_POST_BACKEND_GL].coverageMismatches,
+			cinematicPost.backend[CLASSIC_CINEMATIC_POST_BACKEND_GL].duplicateReports,
+			cinematicPost.backend[CLASSIC_CINEMATIC_POST_BACKEND_VULKAN].ownedViews,
+			cinematicPost.backend[CLASSIC_CINEMATIC_POST_BACKEND_VULKAN].fallbackViews,
+			cinematicPost.backend[CLASSIC_CINEMATIC_POST_BACKEND_VULKAN].coverageMismatches,
+			cinematicPost.backend[CLASSIC_CINEMATIC_POST_BACKEND_VULKAN].duplicateReports );
+	}
+	{
+		const classicSpecialFrameDomainStats_t &specialFrame =
+			R_ClassicSpecialFrameDomain_Stats();
+		common->Printf(
+			"Renderer shared special frame: requested=%d prepared=%d valid=%d overflow=%d scenes=%d views=%d(demo=%d raven=%d) ready=%d fallback=%d effectsMask=0x%x hash=%016llx status=%s GL=%d/%d VK=%d/%d\n",
+			r_rendererSharedSpecialFrame.GetBool() ? 1 : 0,
+			specialFrame.prepared ? 1 : 0,
+			specialFrame.frameValid ? 1 : 0,
+			specialFrame.overflow ? 1 : 0,
+			specialFrame.sourceScenes,
+			specialFrame.views,
+			specialFrame.renderDemoViews,
+			specialFrame.ravenEffectsViews,
+			specialFrame.readyViews,
+			specialFrame.fallbackViews,
+			specialFrame.specialEffectsMask,
+			static_cast<unsigned long long>( specialFrame.hash ),
+			specialFrame.status,
+			specialFrame.backend[CLASSIC_SPECIAL_FRAME_BACKEND_GL].ownedViews,
+			specialFrame.backend[CLASSIC_SPECIAL_FRAME_BACKEND_GL].fallbackViews,
+			specialFrame.backend[CLASSIC_SPECIAL_FRAME_BACKEND_VULKAN].ownedViews,
+			specialFrame.backend[CLASSIC_SPECIAL_FRAME_BACKEND_VULKAN].fallbackViews );
+	}
+	{
+		const classicWorldAmbientDomainStats_t &worldAmbient =
+			R_ClassicWorldAmbientDomain_Stats();
+		common->Printf(
+			"Renderer shared world ambient: requested=%d prepared=%d valid=%d views=%d ready=%d fallback=%d surfaces=%d/%d noop=%d deform=%d/%d/%d passes=%d draw=%d pre=%d post=%d inactive=%d activeNoop=%d hash=%016llx status=%s GL=%d/%d VK=%d/%d\n",
+			r_rendererSharedWorldAmbient.GetBool() ? 1 : 0,
+			worldAmbient.prepared ? 1 : 0,
+			worldAmbient.frameValid ? 1 : 0,
+			worldAmbient.worldViews,
+			worldAmbient.readyViews,
+			worldAmbient.fallbackViews,
+			worldAmbient.drawableSurfaces,
+			worldAmbient.sourceSurfaces,
+			worldAmbient.noopSurfaces,
+			worldAmbient.materialDeformSurfaces,
+			worldAmbient.completedDeformSurfaces,
+			worldAmbient.emptyDeformSurfaces,
+			worldAmbient.evaluatedPasses,
+			worldAmbient.drawablePasses,
+			worldAmbient.phaseDrawablePasses[CLASSIC_WORLD_AMBIENT_PHASE_PRE_FOG],
+			worldAmbient.phaseDrawablePasses[CLASSIC_WORLD_AMBIENT_PHASE_POST_FOG],
+			worldAmbient.inactivePasses,
+			worldAmbient.activeNoopPasses,
+			static_cast<unsigned long long>( worldAmbient.hash ),
+			worldAmbient.status,
+			worldAmbient.backend[CLASSIC_WORLD_AMBIENT_BACKEND_GL].ownedViews,
+			worldAmbient.backend[CLASSIC_WORLD_AMBIENT_BACKEND_GL].fallbackViews,
+			worldAmbient.backend[CLASSIC_WORLD_AMBIENT_BACKEND_VULKAN].ownedViews,
+			worldAmbient.backend[CLASSIC_WORLD_AMBIENT_BACKEND_VULKAN].fallbackViews );
+		for ( int viewIndex = 0;
+				viewIndex < R_ClassicWorldAmbientDomain_NumViews(); ++viewIndex ) {
+			const classicWorldAmbientDomainView_t *view =
+				R_ClassicWorldAmbientDomain_ViewByIndex( viewIndex );
+			if ( view == NULL ) {
+				continue;
+			}
+			const char *sourceClass = "none";
+			if ( view->failure
+					== CLASSIC_WORLD_AMBIENT_FAILURE_SOURCE_SURFACE_FALLBACK
+					&& view->failureDetail >= 0
+					&& view->failureDetail
+						< CLASSIC_WORLD_AMBIENT_SOURCE_SURFACE_COUNT ) {
+				sourceClass = ClassicWorldAmbientDomainSourceSurface_Name(
+					static_cast<classicWorldAmbientDomainSourceSurface_t>(
+						view->failureDetail ) );
+			}
+			common->Printf(
+				"Renderer shared world ambient view[%d]: scene=%d ready=%d failure=%s detail=%d sourceClass=%s surface=%d stage=%d worldPass=%s eval=%d hash=%016llx GL=%d/%s/%d/%d+%d/%d VK=%d/%s/%d/%d+%d/%d\n",
+				viewIndex,
+				view->scenePacketIndex,
+				view->ready ? 1 : 0,
+				ClassicWorldAmbientDomainFailure_Name( view->failure ),
+				view->failureDetail,
+				sourceClass,
+				view->failureSourceSurfaceIndex,
+				view->failureSourceStageIndex,
+				MaterialResourceWorldPassFailure_Name(
+					view->worldPassFailure ),
+				view->evaluationStatus,
+				static_cast<unsigned long long>( view->hash ),
+				view->backendOutcome[CLASSIC_WORLD_AMBIENT_BACKEND_GL],
+				ClassicWorldAmbientDomainFailure_Name(
+					view->backendFailure[CLASSIC_WORLD_AMBIENT_BACKEND_GL] ),
+				view->backendFailureDetail[CLASSIC_WORLD_AMBIENT_BACKEND_GL],
+				view->backendDrawnPasses[CLASSIC_WORLD_AMBIENT_BACKEND_GL]
+					[CLASSIC_WORLD_AMBIENT_PHASE_PRE_FOG],
+				view->backendDrawnPasses[CLASSIC_WORLD_AMBIENT_BACKEND_GL]
+					[CLASSIC_WORLD_AMBIENT_PHASE_POST_FOG],
+				view->backendNoopPasses[CLASSIC_WORLD_AMBIENT_BACKEND_GL],
+				view->backendOutcome[CLASSIC_WORLD_AMBIENT_BACKEND_VULKAN],
+				ClassicWorldAmbientDomainFailure_Name(
+					view->backendFailure[CLASSIC_WORLD_AMBIENT_BACKEND_VULKAN] ),
+				view->backendFailureDetail[CLASSIC_WORLD_AMBIENT_BACKEND_VULKAN],
+				view->backendDrawnPasses[CLASSIC_WORLD_AMBIENT_BACKEND_VULKAN]
+					[CLASSIC_WORLD_AMBIENT_PHASE_PRE_FOG],
+				view->backendDrawnPasses[CLASSIC_WORLD_AMBIENT_BACKEND_VULKAN]
+					[CLASSIC_WORLD_AMBIENT_PHASE_POST_FOG],
+				view->backendNoopPasses[CLASSIC_WORLD_AMBIENT_BACKEND_VULKAN] );
+		}
+	}
+	{
+		const classicInteractionDomainStats_t &interaction =
+			R_ClassicInteractionDomain_Stats();
+		common->Printf(
+			"Renderer shared interaction: requested=%d prepared=%d valid=%d views=%d ready=%d fallback=%d lights=%d surfaces=%d primitives=%d draw=%d noop=%d shadow=%d/%d/%d+%d volumes=%d+%d maps=%d+%d modes=%d+%d csm=%d stages=%d/%d+%d/%d receivers=%d/%d/%d deform=%d/%d/%d hash=%016llx status=%s GL=%d/%d/%d VK=%d/%d/%d\n",
+			r_rendererSharedWorldInteraction.GetBool() ? 1 : 0,
+			interaction.prepared ? 1 : 0,
+			interaction.frameValid ? 1 : 0,
+			interaction.interactionViews,
+			interaction.readyViews,
+			interaction.fallbackViews,
+			interaction.lights,
+			interaction.surfaces,
+			interaction.primitives,
+			interaction.drawablePrimitives,
+			interaction.noopPrimitives,
+			interaction.shadowLights,
+			interaction.shadowCasters,
+			interaction.drawableShadowCasters,
+			interaction.noopShadowCasters,
+			interaction.logicalVolumeDraws,
+			interaction.preloadVolumeDraws,
+			interaction.shadowMapPasses,
+			interaction.hybridShadowPasses,
+			interaction.projectedShadowMapPasses,
+			interaction.pointShadowMapPasses,
+			interaction.csmShadowMapPasses,
+			interaction.activeLightStages,
+			interaction.inactiveLightStages,
+			interaction.activeSurfaceStages,
+			interaction.inactiveSurfaceStages,
+			interaction.receiverSurfaces[CLASSIC_INTERACTION_RECEIVER_LOCAL],
+			interaction.receiverSurfaces[CLASSIC_INTERACTION_RECEIVER_GLOBAL],
+			interaction.receiverSurfaces[CLASSIC_INTERACTION_RECEIVER_TRANSLUCENT],
+			interaction.materialDeformReceivers,
+			interaction.completedDeformCasters,
+			interaction.emptyDeformCasters,
+			static_cast<unsigned long long>( interaction.hash ),
+			interaction.status,
+			interaction.backend[CLASSIC_INTERACTION_BACKEND_GL].ownedViews,
+			interaction.backend[CLASSIC_INTERACTION_BACKEND_GL].fallbackViews,
+			interaction.backend[CLASSIC_INTERACTION_BACKEND_GL].coverageMismatches,
+			interaction.backend[CLASSIC_INTERACTION_BACKEND_VULKAN].ownedViews,
+			interaction.backend[CLASSIC_INTERACTION_BACKEND_VULKAN].fallbackViews,
+			interaction.backend[CLASSIC_INTERACTION_BACKEND_VULKAN].coverageMismatches );
+		for ( int viewIndex = 0;
+				viewIndex < R_ClassicInteractionDomain_NumViews(); ++viewIndex ) {
+			const classicInteractionDomainView_t *view =
+				R_ClassicInteractionDomain_ViewByIndex( viewIndex );
+			if ( view == NULL ) {
+				continue;
+			}
+			common->Printf(
+				"Renderer shared interaction view[%d]: scene=%d pass=%d shadowPass=%d/%d mode=%s ready=%d failure=%s detail=%d drawPacket=%d light=%d receiver=%d stage=%d lights=%d surfaces=%d primitives=%d/%d noop=%d shadow=%d/%d/%d+%d volumes=%d+%d maps=%d+%d modes=%d+%d csm=%d hash=%016llx GL=%d/%s/%d/%d+%d/%d+%d+%d+%d/%d+%d VK=%d/%s/%d/%d+%d/%d+%d+%d+%d/%d+%d\n",
+				viewIndex,
+				view->scenePacketIndex,
+				view->interactionPassPacketIndex,
+				view->stencilShadowPassPacketIndex,
+				view->shadowMapPassPacketIndex,
+				ClassicInteractionDomainShadowMode_Name( view->shadowMode ),
+				view->ready ? 1 : 0,
+				ClassicInteractionDomainFailure_Name( view->failure ),
+				view->failureDetail,
+				view->failureDrawPacketIndex,
+				view->failureLightOrdinal,
+				view->failureReceiverOrdinal,
+				view->failureStageIndex,
+				view->lightCount,
+				view->surfaceCount,
+				view->primitiveCount,
+				view->drawablePrimitiveCount,
+				view->noopPrimitiveCount,
+				view->shadowLightCount,
+				view->shadowCasterCount,
+				view->drawableShadowCasterCount,
+				view->noopShadowCasterCount,
+				view->logicalVolumeDrawCount,
+				view->preloadVolumeDrawCount,
+				view->shadowMapPassCount,
+				view->hybridShadowPassCount,
+				view->projectedShadowMapPassCount,
+				view->pointShadowMapPassCount,
+				view->csmShadowMapPassCount,
+				static_cast<unsigned long long>( view->hash ),
+				view->backendOutcome[CLASSIC_INTERACTION_BACKEND_GL],
+				ClassicInteractionDomainFailure_Name(
+					view->backendFailure[CLASSIC_INTERACTION_BACKEND_GL] ),
+				view->backendFailureDetail[CLASSIC_INTERACTION_BACKEND_GL],
+				view->backendDrawnPrimitives[CLASSIC_INTERACTION_BACKEND_GL],
+				view->backendNoopPrimitives[CLASSIC_INTERACTION_BACKEND_GL],
+				view->backendShadowCasters[CLASSIC_INTERACTION_BACKEND_GL],
+				view->backendNoopShadowCasters[CLASSIC_INTERACTION_BACKEND_GL],
+				view->backendLogicalVolumeDraws[CLASSIC_INTERACTION_BACKEND_GL],
+				view->backendPreloadVolumeDraws[CLASSIC_INTERACTION_BACKEND_GL],
+				view->backendShadowMapPasses[CLASSIC_INTERACTION_BACKEND_GL],
+				view->backendHybridPasses[CLASSIC_INTERACTION_BACKEND_GL],
+				view->backendOutcome[CLASSIC_INTERACTION_BACKEND_VULKAN],
+				ClassicInteractionDomainFailure_Name(
+					view->backendFailure[CLASSIC_INTERACTION_BACKEND_VULKAN] ),
+				view->backendFailureDetail[CLASSIC_INTERACTION_BACKEND_VULKAN],
+				view->backendDrawnPrimitives[CLASSIC_INTERACTION_BACKEND_VULKAN],
+				view->backendNoopPrimitives[CLASSIC_INTERACTION_BACKEND_VULKAN],
+				view->backendShadowCasters[CLASSIC_INTERACTION_BACKEND_VULKAN],
+				view->backendNoopShadowCasters[CLASSIC_INTERACTION_BACKEND_VULKAN],
+				view->backendLogicalVolumeDraws[CLASSIC_INTERACTION_BACKEND_VULKAN],
+				view->backendPreloadVolumeDraws[CLASSIC_INTERACTION_BACKEND_VULKAN],
+				view->backendShadowMapPasses[CLASSIC_INTERACTION_BACKEND_VULKAN],
+				view->backendHybridPasses[CLASSIC_INTERACTION_BACKEND_VULKAN] );
+			for ( int lightIndex = 0; lightIndex < view->lightCount;
+					++lightIndex ) {
+				const classicInteractionDomainLight_t *light =
+					R_ClassicInteractionDomain_ViewLight( *view, lightIndex );
+				if ( light == NULL ) {
+					continue;
+				}
+				for ( int receiverIndex = CLASSIC_INTERACTION_RECEIVER_LOCAL;
+						receiverIndex <= CLASSIC_INTERACTION_RECEIVER_GLOBAL;
+						++receiverIndex ) {
+					const classicInteractionDomainReceiver_t receiver =
+						static_cast<classicInteractionDomainReceiver_t>(
+							receiverIndex );
+					const classicInteractionDomainShadowMapPass_t *mapPass =
+						R_ClassicInteractionDomain_LightShadowMapPass(
+							*light, receiver );
+					if ( mapPass == NULL ) {
+						continue;
+					}
+					common->Printf(
+						"Renderer shared interaction map view[%d] light=%d receiver=%s mode=%s class=%s cascades=%d alias=%d plan=%016llx generation=%u casters=%d+%d features=%d+%d+%d+%d hash=%016llx\n",
+						viewIndex, lightIndex,
+						ClassicInteractionDomainReceiver_Name( receiver ),
+						ClassicInteractionDomainShadowMode_Name(
+							mapPass->mode ),
+						R_ShadowMapLightClassName( mapPass->lightClass ),
+						mapPass->lightClass == SHADOWMAP_LIGHT_POINT
+							? 6 : mapPass->projected.state.cascadeCount,
+						mapPass->resourceAlias ? 1 : 0,
+						static_cast<unsigned long long>(
+							mapPass->resourcePlanId ),
+						mapPass->resourceGeneration,
+						mapPass->mappedCasterCount,
+						mapPass->supplementCasterCount,
+						mapPass->hasStaticCasters ? 1 : 0,
+						mapPass->hasDynamicCasters ? 1 : 0,
+						mapPass->hasAlphaCasters ? 1 : 0,
+						mapPass->hasTranslucentCasters ? 1 : 0,
+						static_cast<unsigned long long>( mapPass->hash ) );
+				}
+			}
+		}
+	}
+	{
+		const classicFogBlendDomainStats_t &fogBlend =
+			R_ClassicFogBlendDomain_Stats();
+		common->Printf(
+			"classicFogBlendDomain requested=%d prepared=%d frameValid=%d overflow=%d status=%s views=%d ready=%d fallback=%d lights=%d fog=%d blend=%d noopLights=%d surfaces=%d global=%d local=%d deformReceivers=%d stages=%d active=%d inactive=%d noopStages=%d primitives=%d fogReceivers=%d fogCaps=%d blendDraws=%d noop=%d textures=%d hash=%016llx\n",
+			r_rendererSharedWorldFogBlend.GetBool() ? 1 : 0,
+			fogBlend.prepared ? 1 : 0,
+			fogBlend.frameValid ? 1 : 0,
+			fogBlend.overflow ? 1 : 0,
+			fogBlend.status,
+			fogBlend.fogBlendViews,
+			fogBlend.readyViews,
+			fogBlend.fallbackViews,
+			fogBlend.lights,
+			fogBlend.fogLights,
+			fogBlend.blendLights,
+			fogBlend.noopLights,
+			fogBlend.surfaces,
+			fogBlend.receiverSurfaces[
+				CLASSIC_FOG_BLEND_RECEIVER_GLOBAL ],
+			fogBlend.receiverSurfaces[
+				CLASSIC_FOG_BLEND_RECEIVER_LOCAL ],
+			fogBlend.materialDeformReceivers,
+			fogBlend.lightStages,
+			fogBlend.activeLightStages,
+			fogBlend.inactiveLightStages,
+			fogBlend.noopLightStages,
+			fogBlend.primitives,
+			fogBlend.fogReceiverPrimitives,
+			fogBlend.fogFrustumPrimitives,
+			fogBlend.blendPrimitives,
+			fogBlend.noopPrimitives,
+			fogBlend.textures,
+			static_cast<unsigned long long>( fogBlend.hash ) );
+		for ( int backendIndex = 0;
+				backendIndex < CLASSIC_FOG_BLEND_BACKEND_COUNT;
+				++backendIndex ) {
+			const classicFogBlendDomainBackend_t backend =
+				static_cast<classicFogBlendDomainBackend_t>( backendIndex );
+			const classicFogBlendDomainBackendCoverage_t &coverage =
+				fogBlend.backend[ backendIndex ];
+			common->Printf(
+				"classicFogBlendDomain backend=%s ownedViews=%d fallbackViews=%d ownedFogReceivers=%d ownedFogCaps=%d ownedBlend=%d ownedNoops=%d ownedNoopStages=%d ownedNoopLights=%d mismatches=%d duplicate=%d untracked=%d\n",
+				ClassicFogBlendDomainBackend_Name( backend ),
+				coverage.ownedViews,
+				coverage.fallbackViews,
+				coverage.ownedFogReceiverPrimitives,
+				coverage.ownedFogFrustumPrimitives,
+				coverage.ownedBlendPrimitives,
+				coverage.ownedNoopPrimitives,
+				coverage.ownedNoopLightStages,
+				coverage.ownedNoopLights,
+				coverage.coverageMismatches,
+				coverage.duplicateReports,
+				coverage.untrackedFallbacks );
+		}
+		for ( int viewIndex = 0;
+				viewIndex < R_ClassicFogBlendDomain_NumViews(); ++viewIndex ) {
+			const classicFogBlendDomainView_t *view =
+				R_ClassicFogBlendDomain_ViewByIndex( viewIndex );
+			if ( view == NULL ) {
+				continue;
+			}
+			common->Printf(
+				"classicFogBlendDomain view[%d] scene=%d pass=%d ready=%d failure=%s detail=%d drawPacket=%d light=%d receiver=%d stage=%d lights=%d/%d+%d surfaces=%d stages=%d/%d+%d primitives=%d drawable=%d fogReceivers=%d fogCaps=%d blendDraws=%d noop=%d noopStages=%d noopLights=%d hash=%016llx GL=%d/%s/%d Vulkan=%d/%s/%d\n",
+				viewIndex,
+				view->scenePacketIndex,
+				view->fogBlendPassPacketIndex,
+				view->ready ? 1 : 0,
+				ClassicFogBlendDomainFailure_Name( view->failure ),
+				view->failureDetail,
+				view->failureDrawPacketIndex,
+				view->failureLightOrdinal,
+				view->failureReceiverOrdinal,
+				view->failureStageIndex,
+				view->lightCount,
+				view->fogLightCount,
+				view->blendLightCount,
+				view->surfaceCount,
+				view->lightStageCount,
+				view->activeLightStageCount,
+				view->inactiveLightStageCount,
+				view->primitiveCount,
+				view->drawablePrimitiveCount,
+				view->fogReceiverPrimitiveCount,
+				view->fogFrustumPrimitiveCount,
+				view->blendPrimitiveCount,
+				view->noopPrimitiveCount,
+				view->noopLightStageCount,
+				view->noopLightCount,
+				static_cast<unsigned long long>( view->hash ),
+				view->backendOutcome[ CLASSIC_FOG_BLEND_BACKEND_GL ],
+				ClassicFogBlendDomainFailure_Name(
+					view->backendFailure[ CLASSIC_FOG_BLEND_BACKEND_GL ] ),
+				view->backendFailureDetail[ CLASSIC_FOG_BLEND_BACKEND_GL ],
+				view->backendOutcome[ CLASSIC_FOG_BLEND_BACKEND_VULKAN ],
+				ClassicFogBlendDomainFailure_Name(
+					view->backendFailure[
+						CLASSIC_FOG_BLEND_BACKEND_VULKAN ] ),
+				view->backendFailureDetail[
+					CLASSIC_FOG_BLEND_BACKEND_VULKAN ] );
+		}
+	}
+	{
+		const classicSubviewDomainStats_t &subview =
+			R_ClassicSubviewDomain_Stats();
+		common->Printf(
+			"classicSubviewDomain requested=%d prepared=%d frameValid=%d overflow=%d status=%s scenes=%d subviews=%d captures=%d ready=%d fallback=%d nested=%d nestedTransactions=%d maxNestingDepth=%d directMirror=%d remote=%d mirror=%d reflection=%d refraction=%d xray=%d colorCubemap=%d depth2D=%d depthCubemap=%d hash=%016llx\n",
+			r_rendererSharedSubview.GetBool() ? 1 : 0,
+			subview.prepared ? 1 : 0,
+			subview.frameValid ? 1 : 0,
+			subview.overflow ? 1 : 0,
+			subview.status,
+			subview.sourceScenes,
+			subview.subviewScenes,
+			subview.capturePackets,
+			subview.readyViews,
+			subview.fallbackViews,
+			subview.nestedViews,
+			subview.nestedTransactions,
+			subview.maxNestingDepth,
+			subview.directMirrorViews,
+			subview.remoteCameraViews,
+			subview.mirrorViews,
+			subview.reflectionViews,
+			subview.refractionViews,
+			subview.xrayViews,
+			subview.colorCubemapCaptures,
+			subview.depth2DCaptures,
+			subview.depthCubemapCaptures,
+			static_cast<unsigned long long>( subview.hash ) );
+		for ( int backendIndex = 0;
+				backendIndex < CLASSIC_SUBVIEW_DOMAIN_BACKEND_COUNT;
+				++backendIndex ) {
+			const classicSubviewDomainBackend_t backend =
+				static_cast<classicSubviewDomainBackend_t>( backendIndex );
+			const classicSubviewDomainBackendCoverage_t &coverage =
+				subview.backend[ backendIndex ];
+			common->Printf(
+				"classicSubviewDomain backend=%s ownedViews=%d fallbackViews=%d nestedOwned=%d nestedTransactions=%d nestedFallback=%d nestedFallbackTransactions=%d directMirror=%d remote=%d mirror=%d reflection=%d refraction=%d xray=%d colorCubemap=%d depth2D=%d depthCubemap=%d mismatches=%d duplicate=%d untracked=%d\n",
+				ClassicSubviewDomainBackend_Name( backend ),
+				coverage.ownedViews,
+				coverage.fallbackViews,
+				coverage.ownedNestedViews,
+				coverage.ownedNestedTransactions,
+				coverage.fallbackNestedViews,
+				coverage.fallbackNestedTransactions,
+				coverage.ownedDirectMirrorViews,
+				coverage.ownedRemoteCameraViews,
+				coverage.ownedMirrorViews,
+				coverage.ownedReflectionViews,
+				coverage.ownedRefractionViews,
+				coverage.ownedXrayViews,
+				coverage.ownedColorCubemapCaptures,
+				coverage.ownedDepth2DCaptures,
+				coverage.ownedDepthCubemapCaptures,
+				coverage.coverageMismatches,
+				coverage.duplicateReports,
+				coverage.untrackedFallbacks );
+		}
+		for ( int viewIndex = 0;
+				viewIndex < R_ClassicSubviewDomain_NumViews(); ++viewIndex ) {
+			const classicSubviewDomainView_t *view =
+				R_ClassicSubviewDomain_ViewByIndex( viewIndex );
+			if ( view == NULL ) {
+				continue;
+			}
+			common->Printf(
+				"classicSubviewDomain view[%d] scene=%d parent=%d parentView=%d root=%d depth=%d subtree=%d capture=%d kind=%s captureType=%s ready=%d failure=%s detail=%d captureImage=%s rect=%d,%d %dx%d cube=%d depth=%d hash=%016llx GL=%d/%s/%d Vulkan=%d/%s/%d\n",
+				viewIndex,
+				view->scenePacketIndex,
+				view->parentScenePacketIndex,
+				view->parentViewIndex,
+				view->rootViewIndex,
+				view->nestingDepth,
+				view->subtreeViewCount,
+				view->capturePacketIndex,
+				ClassicSubviewDomainKind_Name( view->kind ),
+				ClassicSubviewDomainCaptureType_Name( view->captureType ),
+				view->ready ? 1 : 0,
+				ClassicSubviewDomainFailure_Name( view->failure ),
+				view->failureDetail,
+				view->captureImage != NULL ? view->captureImage->GetName() : "<none>",
+				view->captureX,
+				view->captureY,
+				view->captureWidth,
+				view->captureHeight,
+				view->captureCubeFace,
+				view->captureCopyDepth ? 1 : 0,
+				static_cast<unsigned long long>( view->hash ),
+				view->backendOutcome[ CLASSIC_SUBVIEW_DOMAIN_BACKEND_GL ],
+				ClassicSubviewDomainFailure_Name(
+					view->backendFailure[ CLASSIC_SUBVIEW_DOMAIN_BACKEND_GL ] ),
+				view->backendFailureDetail[ CLASSIC_SUBVIEW_DOMAIN_BACKEND_GL ],
+				view->backendOutcome[ CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN ],
+				ClassicSubviewDomainFailure_Name(
+					view->backendFailure[
+						CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN ] ),
+				view->backendFailureDetail[
+					CLASSIC_SUBVIEW_DOMAIN_BACKEND_VULKAN ] );
+		}
+	}
+	common->Printf(
+		"Modern quality: master=%d pbr=%d probes=%d clusteredDecals=%d froxel=%d ssr=%d ssgi=%d (master=0 is complete Milestone-F rollback)\n"
+		"PBR materials: parser=1 modernLighting=1 effective=%d generatedLegacyFallback=%d inferLegacy=%d debug=%d\n",
+		r_rendererModernQuality.GetBool() ? 1 : 0,
+		r_pbrMaterials.GetBool() ? 1 : 0,
+		r_rendererReflectionProbes.GetBool() ? 1 : 0,
+		r_rendererClusteredDecals.GetBool() ? 1 : 0,
+		r_rendererFroxelVolumetrics.GetBool() ? 1 : 0,
+		r_rendererSSR.GetBool() ? 1 : 0,
+		r_rendererSSGI.GetBool() ? 1 : 0,
+		( r_rendererModernQuality.GetBool() && r_pbrMaterials.GetBool() ) ? 1 : 0,
+		r_pbrGeneratedLegacyFallback.GetBool() ? 1 : 0,
+		r_pbrInferFromLegacyMaterials.GetBool() ? 1 : 0,
+		r_pbrDebug.GetInteger() );
 	R_ModernGLExecutor_PrintGfxInfo();
+#ifndef OPENQ4_RENDERER_VK_MODULE
+	RB_HDRPrintGfxInfo();
+#endif
 	R_ModernClusteredLighting_PrintGfxInfo();
 	R_ModernShadowPlanner_PrintGfxInfo();
 	{
@@ -3781,6 +5674,10 @@ static void R_ClearActiveRenderTextures( void ) {
 }
 
 static void R_ShutdownRenderTargetsBeforeImagePurge( void ) {
+	// an OpenXR session shares this context's images; it closes first
+	if ( glConfig.isInitialized ) {
+		R_RendererModule_RendererDeviceEvent( RENDER_DEVICE_STOPPING );
+	}
 	R_ClearActiveRenderTextures();
 	if ( glConfig.isInitialized ) {
 		idRenderTexture::BindNull();
@@ -3792,40 +5689,196 @@ static void R_ShutdownRenderTargetsBeforeImagePurge( void ) {
 	tr.ShutdownSpecialEffects();
 	RB_ShutdownScenePostProcess();
 	RB_ShutdownShadowMapResources();
+	R_VR_DestroyTargets();
 	tr.ProcessPendingRenderTextureDeletes();
 	R_ClearActiveRenderTextures();
 }
 
-static void R_PerformFullVidRestart( bool forceWindow ) {
+static void R_ShutdownDeviceForRestart( void ) {
+	R_RenderThread_Shutdown();
 	R_ShutdownRenderTargetsBeforeImagePurge();
 
 	// Input is tied to the native window/context lifecycle.
 	Sys_ShutdownInput();
 
+	// Release cached faces and metrics, but retain atlas pixels for the image
+	// generators used during context restoration. The UI refresh then rebuilds
+	// the fonts at the new viewport scale and codepage.
+	R_DoneFreeType( true );
+
 	// Force image/object handles to rebuild against the new context.
 	globalImages->PurgeAllImages();
 	R_ShutdownFrameData();
 	R_RendererMetrics_ShutdownGpuTimers();
+	R_ClassicGuiDomain_ResetFrame();
+	R_ClassicCinematicPostDomain_ResetFrame();
+	R_ClassicSpecialFrameDomain_ResetFrame();
+	R_ClassicWorldAmbientDomain_ResetFrame();
+	R_ClassicInteractionDomain_ResetFrame();
+	R_ClassicFogBlendDomain_ResetFrame();
+	R_ClassicSubviewDomain_ResetFrame();
 	R_MaterialResourceTable_Shutdown();
 	R_RenderGraphResources_Shutdown();
 	R_ModernGLExecutor_Shutdown();
+	R_GpuSkinning_ContractShutdown();
 	R_RendererUpload_Shutdown();
 	RendererBootstrap_Shutdown();
 	R_PurgeFramebufferCopyFBOs();
 	R_GLDebugOutput_Shutdown();
 	GLimp_Shutdown();
 	glConfig.isInitialized = false;
+	R_ClearActiveRenderTextures();
+}
+
+static void R_PerformFullVidRestart( bool forceWindow ) {
+	R_ShutdownDeviceForRestart();
 
 	const bool latchedFullscreen = cvarSystem->GetCVarBool( "r_fullscreen" );
 	if ( forceWindow ) {
 		cvarSystem->SetCVarBool( "r_fullscreen", false );
 	}
 
-	R_InitOpenGL();
+	// Use the same backend-aware device startup as initial initialization.
+	// The low-level GL initializer cannot recreate a Vulkan device.
+	tr.InitOpenGL();
 	cvarSystem->SetCVarBool( "r_fullscreen", latchedFullscreen );
 	R_ClearActiveRenderTextures();
 
-	globalImages->ReloadImages( true );
+	R_InitFreeType();
+	R_RefreshConsoleFontAtlas();
+}
+
+static bool R_TryFullVidRestartInternal( const renderWindowRequest_t *request, bool forceWindow, char *error, int errorSize ) {
+	R_RenderThread_Sync( "display restart" );
+	if ( error != NULL && errorSize > 0 ) error[0] = '\0';
+	if ( r_recoverableRendererRestart ) return R_RendererRestartError( error, errorSize, "A renderer restart is already in progress" );
+	if ( globalImages == NULL || renderModelManager == NULL || ( !glConfig.isInitialized && !r_recoverableRendererRestore ) )
+		return R_RendererRestartError( error, errorSize, "A recoverable restart requires a running renderer or a failed restart to restore" );
+	if ( glConfig.isInitialized && ( frameData == NULL || frameData->cmdHead == NULL ||
+		frameData->cmdHead->commandId != RC_NOP || frameData->cmdHead->next != NULL ) )
+		return R_RendererRestartError( error, errorSize, "Renderer commands must be submitted before restarting" );
+	struct Scope {
+		Scope( const renderWindowRequest_t *request, bool forceWindow ) {
+			r_recoverableRendererRestart = true; r_forceWindowRendererRestart = forceWindow; r_recoverableWindowRequest = request;
+		}
+		~Scope() { r_recoverableRendererRestart = false; r_forceWindowRendererRestart = false; r_recoverableWindowRequest = NULL; }
+	} scope( request, forceWindow );
+	int width = 0, height = 0;
+	if ( !R_GetInitialWindowSize( r_fullscreen.GetBool(), &width, &height ) )
+		return R_RendererRestartError( error, errorSize, "Requested display dimensions are invalid or unavailable" );
+	const int samples = request != NULL ? request->parms.multiSamples : r_multiSamples.GetInteger();
+	const int refresh = request != NULL ? request->parms.displayHz : r_displayRefresh.GetInteger();
+	if ( samples != R_NormalizeMultiSamplesValue( samples ) || refresh < 0 || refresh > 1000 )
+		return R_RendererRestartError( error, errorSize, "Requested display samples or refresh rate are invalid" );
+	if ( request != NULL && ( request->displayIndex < -1 || request->swapInterval < -1 || request->swapInterval > 1 ||
+		request->parms.stereo || ( request->parms.hiddenWindow && ( request->parms.fullScreen || request->parms.borderless ) ) ||
+		( request->parms.fullScreen && request->parms.borderless ) ) )
+		return R_RendererRestartError( error, errorSize, "Requested display policy is invalid" );
+
+	// Once teardown starts, failure deliberately leaves no renderable context.
+	// The caller owns the saved display/CVar state and chooses the restore; this
+	// route never substitutes a mode or invokes startup's fatal-error policy.
+	renderDisplayPresentation_t before = {};
+	R_GetDisplayPresentation( &before );
+	r_recoverableRendererRestore = true;
+	try {
+		R_RendererMetrics_ResetGpuFrameTiming( "recoverable vid_restart" );
+		Sys_GrabMouseCursor( false );
+		renderModelManager->FreeModelVertexCaches();
+		R_FreeDerivedData();
+		if ( frameData != NULL ) { R_ToggleSmpFrame(); R_ToggleSmpFrame(); }
+		vertexCache.PurgeAll();
+		if ( !R_ImagePolicyBeforeTeardown( error, errorSize ) ) R_RejectRecoverableRendererRestart( error );
+		R_ShutdownDeviceForRestart();
+		tr.viewDef = NULL; tr.primaryView = NULL; backEnd.viewDef = NULL;
+		R_ImagePolicyBeginDeviceReload();
+		if ( R_InitRendererDevice( false, forceWindow, error, errorSize ) ) {
+			if ( !R_ImagePolicyAfterDeviceReload( error, errorSize ) ) R_RejectRecoverableRendererRestart( error );
+			R_ClearActiveRenderTextures();
+			R_InitFreeType();
+			R_RefreshConsoleFontAtlas();
+#ifndef OPENQ4_RENDERER_VK_MODULE
+			if ( !GLimp_EnsureActiveContext( "recoverable renderer resource reload" ) || glGetError() != GL_NO_ERROR )
+				R_RejectRecoverableRendererRestart( "OpenGL context or font resource reload failed" );
+#endif
+			tr.viewCount++;
+			R_RegenerateWorld_f( idCmdArgs() );
+			if ( R_ImagePolicyActive() && session != NULL ) session->SetPlayingSoundWorld();
+			if ( !R_ImagePolicyFinish( error, errorSize ) ) R_RejectRecoverableRendererRestart( error );
+			// Publish only after every renderer/font/world dependency is ready.
+			tr.videoRestartCount = tr.videoRestartCount < 0x7fffffff ? tr.videoRestartCount + 1 : 1;
+			if ( !R_ImagePolicyActive() && session != NULL ) session->SetPlayingSoundWorld();
+			r_recoverableRendererRestore = false;
+			return true;
+		}
+	} catch ( const rendererRestartFailure_t &failure ) {
+		R_RendererRestartError( error, errorSize, failure.reason.c_str() );
+	}
+	// Expected device/program refusal reaches here without Common::Error or
+	// Session shutdown. Global allocation exhaustion/corruption is not caught.
+	R_ShutdownDeviceForRestart();
+	tr.viewDef = NULL; tr.primaryView = NULL; backEnd.viewDef = NULL;
+	renderDisplayPresentation_t failed = {};
+	R_GetDisplayPresentation( &failed );
+	if ( failed.failureSequence == before.failureSequence ) R_DisplayPresentationFailed( RDP_INIT_FAILED );
+	return false;
+}
+
+bool R_TryFullVidRestart( const renderWindowRequest_t *request, char *error, int errorSize ) {
+	if ( R_ImagePolicyActive() ) { R_ImagePolicyObserveError( "Reentrant display restart during image policy work" ); return R_RendererRestartError( error, errorSize, "Image policy restart is active" ); }
+	if ( request == NULL ) return R_RendererRestartError( error, errorSize, "A display request is required" );
+	const renderWindowRequest_t immutable = *request;
+	return R_TryFullVidRestartInternal( &immutable, false, error, errorSize );
+}
+
+bool R_TryFullVidRestartForImagePolicy( const renderWindowRequest_t *request, char *error, int errorSize ) {
+	if ( !R_ImagePolicyActive() || !R_ImagePolicyOperationAllowed() || !request ) return R_RendererRestartError( error, errorSize, "No active image policy request" );
+	return R_TryFullVidRestartInternal( request, false, error, errorSize );
+}
+
+bool R_TryInitializeDisplay( const renderWindowRequest_t *request, char *error, int errorSize ) {
+	if ( R_ImagePolicyActive() ) { R_ImagePolicyObserveError( "Reentrant initial display during image policy work" ); return R_RendererRestartError( error, errorSize, "Image policy restart is active" ); }
+	if ( error != NULL && errorSize > 0 ) error[0] = '\0';
+	if ( request == NULL ) return R_RendererRestartError( error, errorSize, "A display request is required" );
+	if ( r_recoverableRendererRestart ) return R_RendererRestartError( error, errorSize, "A renderer device operation is already in progress" );
+	if ( !r_initialRendererDevicePending || globalImages == NULL || renderModelManager == NULL ||
+		glConfig.isInitialized || r_recoverableRendererRestore || frameData != NULL ||
+		tr.worlds.Num() != 0 || tr.primaryWorld != NULL || tr.viewDef != NULL || tr.primaryView != NULL || backEnd.viewDef != NULL )
+		return R_RendererRestartError( error, errorSize, "Strict initial display requires an initialized renderer before its first device or world" );
+	const renderWindowRequest_t immutable = *request;
+	struct Scope {
+		explicit Scope( const renderWindowRequest_t *request ) {
+			r_recoverableRendererRestart = true; r_forceWindowRendererRestart = false; r_recoverableWindowRequest = request;
+		}
+		~Scope() { r_recoverableRendererRestart = false; r_forceWindowRendererRestart = false; r_recoverableWindowRequest = NULL; }
+	} scope( &immutable );
+	int width = 0, height = 0;
+	if ( !R_GetInitialWindowSize( immutable.parms.fullScreen, &width, &height ) )
+		return R_RendererRestartError( error, errorSize, "Requested display dimensions are invalid or unavailable" );
+	if ( immutable.parms.multiSamples != R_NormalizeMultiSamplesValue( immutable.parms.multiSamples ) ||
+		immutable.parms.displayHz < 0 || immutable.parms.displayHz > 1000 )
+		return R_RendererRestartError( error, errorSize, "Requested display samples or refresh rate are invalid" );
+	if ( immutable.displayIndex < -1 || immutable.swapInterval < -1 || immutable.swapInterval > 1 ||
+		immutable.parms.stereo || ( immutable.parms.hiddenWindow && ( immutable.parms.fullScreen || immutable.parms.borderless ) ) ||
+		( immutable.parms.fullScreen && immutable.parms.borderless ) )
+		return R_RendererRestartError( error, errorSize, "Requested display policy is invalid" );
+
+	renderDisplayPresentation_t before = {};
+	R_GetDisplayPresentation( &before );
+	try {
+		// This is initial resource creation, not a restart. Init already built the
+		// CPU-side images/models; no world, session sound or UI font atlas exists.
+		// The shared device helper publishes no successful presentation here.
+		if ( R_InitRendererDevice( false, false, error, errorSize ) ) return true;
+	} catch ( const rendererRestartFailure_t &failure ) {
+		R_RendererRestartError( error, errorSize, failure.reason.c_str() );
+	}
+	R_ShutdownDeviceForRestart();
+	tr.viewDef = NULL; tr.primaryView = NULL; backEnd.viewDef = NULL;
+	renderDisplayPresentation_t failed = {};
+	R_GetDisplayPresentation( &failed );
+	if ( failed.failureSequence == before.failureSequence ) R_DisplayPresentationFailed( RDP_INIT_FAILED );
+	return false;
 }
 
 static GLenum R_ClearPendingGLErrors( void ) {
@@ -3838,12 +5891,14 @@ static GLenum R_ClearPendingGLErrors( void ) {
 }
 
 void R_VidRestart_f( const idCmdArgs &args ) {
+	R_RenderThread_Sync( "vid_restart" );
 	int	err;
 
 	// if OpenGL isn't started, do nothing
 	if ( !glConfig.isInitialized ) {
 		return;
 	}
+	R_RendererMetrics_ResetGpuFrameTiming( "vid_restart" );
 
 	bool full = true;
 	bool forceWindow = false;
@@ -3896,6 +5951,10 @@ void R_VidRestart_f( const idCmdArgs &args ) {
 			R_PerformFullVidRestart( forceWindow );
 		} else {
 			(void)R_ClearPendingGLErrors();
+			// The context survived, but a mode change can alter the UI viewport.
+			// Re-rasterise the fixed-cell sheet at the new display scale; cached
+			// GUI fonts refresh lazily from videoRestartCount below.
+			R_RefreshConsoleFontAtlas();
 		}
 	}
 
@@ -4030,11 +6089,138 @@ void R_InitCvars( void ) {
 }
 
 /*
+==================
+R_MigrateLegacyShadowMapContactQuality
+
+Renderer cvars are registered by Init before the archived config and autoexec
+files run. Perform value-based migrations at device startup after those files
+and the initial StartupVariable pass, or an existing profile would be marked
+migrated while the compiled defaults were still visible. Common's later
+AddStartupCommands replay intentionally leaves explicit command-line +set
+values authoritative over the migrated archive.
+==================
+*/
+static void R_MigrateLegacyShadowMapContactQuality( void ) {
+	if ( !r_shadowMapContactQualityMigrated.GetBool() ) {
+		// Preserve customized profiles. Only replace the complete legacy tuple,
+		// whose wide filters and caster slope offset blurred contact shadows and
+		// amplified the old far-shell detachment.
+		const bool legacyShadowQualityDefaults =
+			idMath::Fabs( r_shadowMapFilterRadius.GetFloat() - 2.0f ) < 0.0001f &&
+			idMath::Fabs( r_shadowMapPointFilterRadius.GetFloat() - 2.5f ) < 0.0001f &&
+			r_shadowMapFilterTaps.GetInteger() == 13 &&
+			r_shadowMapPointFilterTaps.GetInteger() == 13 &&
+			idMath::Fabs( r_shadowMapPolygonFactor.GetFloat() - 0.75f ) < 0.0001f;
+		if ( legacyShadowQualityDefaults ) {
+			common->Printf( "Migrating legacy shadow-map defaults: restoring contact detail and balanced filtering\n" );
+			r_shadowMapFilterRadius.SetFloat( 0.75f );
+			r_shadowMapPointFilterRadius.SetFloat( 1.0f );
+			r_shadowMapFilterTaps.SetInteger( 9 );
+			r_shadowMapPointFilterTaps.SetInteger( 9 );
+			r_shadowMapPolygonFactor.SetFloat( 0.25f );
+		}
+		r_shadowMapContactQualityMigrated.SetBool( true );
+	}
+}
+
+/*
+==================
+R_MigrateLegacyShadowMapPointCacheSize
+
+The point cache held twelve cubes, a third of the point lights one dense stock
+view shows; every light past the twelfth re-rendered six faces each frame. An
+archived profile keeps that twelve, so move exactly the old default once; any
+other count is a player's choice and is kept.
+==================
+*/
+static void R_MigrateLegacyShadowMapPointCacheSize( void ) {
+	if ( r_shadowMapPointCacheDefaultsMigrated.GetBool() ) {
+		return;
+	}
+	if ( r_shadowMapPointCacheSize.GetInteger() == 12 ) {
+		common->Printf( "Migrating the legacy point shadow cache: 64 slots within r_shadowMapPointCacheMegs\n" );
+		r_shadowMapPointCacheSize.SetInteger( 64 );
+	}
+	r_shadowMapPointCacheDefaultsMigrated.SetBool( true );
+}
+
+/*
+==================
+R_MigrateLegacyShadowMapFilterDefaults
+
+Projected shadow maps now default to PCSS-lite with a 2 texel minimum radius.
+Every archived profile carries the filter cvars, so one still holding the old
+fixed-PCF pair (radius 0.75, mode 0) would never see the new defaults. Move
+that exact pair once; any other combination is a player's choice and is kept.
+Runs after the contact-quality migration, which can itself leave the old pair.
+==================
+*/
+static void R_MigrateLegacyShadowMapFilterDefaults( void ) {
+	// the other shadow default that moved; it keeps its own one-time flag
+	R_MigrateLegacyShadowMapPointCacheSize();
+	if ( r_shadowMapFilterDefaultsMigrated.GetBool() ) {
+		return;
+	}
+	if ( idMath::Fabs( r_shadowMapFilterRadius.GetFloat() - 0.75f ) < 0.0001f &&
+		r_shadowMapFilterMode.GetInteger() == 0 ) {
+		common->Printf( "Migrating legacy projected shadow filtering: PCSS-lite with a 2 texel minimum radius\n" );
+		r_shadowMapFilterRadius.SetFloat( 2.0f );
+		r_shadowMapFilterMode.SetInteger( 2 );
+	}
+	r_shadowMapFilterDefaultsMigrated.SetBool( true );
+}
+
+/*
+==================
+R_MigrateLegacyPBRMaterialsDefault
+
+PBR materials now default on: they change only content that ships
+PBR-authored materials, never stock surfaces. Every archived profile carries
+r_pbrMaterials, so one saved under the old default (0) would never see the
+new one. Turn it on once; a later 0 is a player's choice and is kept.
+==================
+*/
+static void R_MigrateLegacyPBRMaterialsDefault( void ) {
+	if ( r_pbrMaterialsDefaultMigrated.GetBool() ) {
+		return;
+	}
+	if ( !r_pbrMaterials.GetBool() ) {
+		common->Printf( "Migrating the legacy PBR material default: PBR-authored materials on\n" );
+		r_pbrMaterials.SetBool( true );
+	}
+	r_pbrMaterialsDefaultMigrated.SetBool( true );
+}
+
+/*
+==================
+R_MigrateLegacyTemporalAADefault
+
+Temporal AA now defaults to automatic (r_temporalAA 2): it upscales only
+when the 3D scene renders below native resolution, where it replaces a
+bilinear stretch, and stays off at native resolution. A profile saved under
+the old default (0) would never see that, so move it once; a later 0 is a
+player's choice and is kept.
+==================
+*/
+static void R_MigrateLegacyTemporalAADefault( void ) {
+	if ( r_temporalAADefaultMigrated.GetBool() ) {
+		return;
+	}
+	if ( r_temporalAA.GetInteger() == 0 ) {
+		common->Printf( "Migrating the legacy temporal AA default: temporal upscaling below native resolution\n" );
+		r_temporalAA.SetInteger( 2 );
+	}
+	r_temporalAADefaultMigrated.SetBool( true );
+}
+
+/*
 =================
 R_InitCommands
 =================
 */
 void R_InitCommands( void ) {
+	cmdSystem->AddCommand( "lightGridPackTest", R_LightGridPackTest_f, CMD_FL_RENDERER, "loads every map's .lightgridpack (or the named maps') as a map load does and reports whether each is accepted with all its chunks" );
+	cmdSystem->AddCommand( "lightGridPackLoose", R_LightGridPackLoose_f, CMD_FL_RENDERER, "packs a map's existing loose .lightgrid and save-path atlases into a .lightgridpack without baking" );
 	cmdSystem->AddCommand( "sizeUp", R_SizeUp_f, CMD_FL_RENDERER, "makes the rendered view larger" );
 	cmdSystem->AddCommand( "sizeDown", R_SizeDown_f, CMD_FL_RENDERER, "makes the rendered view smaller" );
 	cmdSystem->AddCommand( "reloadGuis", R_ReloadGuis_f, CMD_FL_RENDERER, "reloads guis" );
@@ -4043,7 +6229,9 @@ void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "guiTraceProbe", R_GuiTraceProbe_f, CMD_FL_RENDERER, "diagnostic: GuiTrace every in-world gui surface and report hits" );
 	cmdSystem->AddCommand( "screenshot", R_ScreenShot_f, CMD_FL_RENDERER, "takes a screenshot" );
 	cmdSystem->AddCommand( "levelshot", R_LevelShot_f, CMD_FL_RENDERER | CMD_FL_CHEAT, "captures a 5-tile levelshot set" );
+	cmdSystem->AddCommand( "levelshotProbe", R_LevelShotProbe_f, CMD_FL_RENDERER | CMD_FL_CHEAT, "renders the camera probes queued in a request file, for levelshot pose tools" );
 	cmdSystem->AddCommand( "envshot", R_EnvShot_f, CMD_FL_RENDERER, "takes an environment shot" );
+	cmdSystem->AddCommand( "bakeReflectionProbes", R_BakeReflectionProbes_f, CMD_FL_RENDERER | CMD_FL_CHEAT, "captures each reflection probe light's cube map from the current map and reloads it: [size 16-256] [blends]" );
 	cmdSystem->AddCommand( "makeAmbientMap", R_MakeAmbientMap_f, CMD_FL_RENDERER|CMD_FL_CHEAT, "makes an ambient map" );
 	cmdSystem->AddCommand( "benchmark", R_Benchmark_f, CMD_FL_RENDERER, "benchmark" );
 	cmdSystem->AddCommand( "gfxInfo", GfxInfo_f, CMD_FL_RENDERER, "show graphics info" );
@@ -4054,14 +6242,48 @@ void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "rendererBenchmarkSelfTest", R_RendererBenchmarkSelfTest_f, CMD_FL_RENDERER, "run renderer benchmark capture and percentile self tests" );
 	cmdSystem->AddCommand( "rendererDefaultPromotionSelfTest", R_RendererDefaultPromotionSelfTest_f, CMD_FL_RENDERER, "run renderer default-promotion gate self tests" );
 	cmdSystem->AddCommand( "rendererDefaultSafetySelfTest", R_RendererDefaultSafetySelfTest_f, CMD_FL_RENDERER, "run renderer conservative-default safety self tests" );
-	cmdSystem->AddCommand( "rendererBenchmarkCapture", R_RendererBenchmarkCapture_f, CMD_FL_RENDERER, "print the latest renderer benchmark capture summary" );
+	cmdSystem->AddCommand( "rendererBenchmarkCapture", R_RendererBenchmarkCapture_f, CMD_FL_RENDERER, "print renderer benchmark summary; optional relative CSV path writes retained frame timings" );
 	cmdSystem->AddCommand( "rendererUploadSelfTest", R_RendererUploadSelfTest_f, CMD_FL_RENDERER, "run renderer upload stream self tests" );
+	cmdSystem->AddCommand( "rendererGpuSkinningSelfTest", R_RendererGpuSkinningSelfTest_f, CMD_FL_RENDERER, "run renderer GPU skinning contract self tests" );
+	cmdSystem->AddCommand( "rendererContractsSelfTest", R_RendererContractsSelfTest_f, CMD_FL_RENDERER, "run renderer layout and buffer contract self tests" );
+#ifdef OPENQ4_RENDERER_VK_MODULE
+	extern void R_RendererVulkanRenderTargetsSelfTest_f( const idCmdArgs &args );
+	extern void R_RendererVulkanHDRInfo_f( const idCmdArgs &args );
+	extern void R_RendererVulkanHDRSelfTest_f( const idCmdArgs &args );
+	extern void R_RendererVulkanTemporalMotionSelfTest_f( const idCmdArgs &args );
+	extern void R_RendererVulkanMemoryInfo_f( const idCmdArgs &args );
+	extern void R_RendererVulkanPresentTiming_f( const idCmdArgs &args );
+	cmdSystem->AddCommand( "rendererPresentTiming", R_RendererVulkanPresentTiming_f,
+			CMD_FL_RENDERER, "when frames reached the display since the last 'rendererPresentTiming reset' (r_vkPresentTiming 1, VK_KHR_present_wait)" );
+	cmdSystem->AddCommand( "rendererVulkanTemporalMotionSelfTest", R_RendererVulkanTemporalMotionSelfTest_f,
+			CMD_FL_RENDERER, "test Vulkan rigid temporal motion and history rejection on the active GPU" );
+	cmdSystem->AddCommand( "rendererVulkanMemoryInfo", R_RendererVulkanMemoryInfo_f,
+			CMD_FL_RENDERER, "report Vulkan memory heap usage, budget and live allocations" );
+	cmdSystem->AddCommand( "rendererVulkanHDRSelfTest", R_RendererVulkanHDRSelfTest_f,
+			CMD_FL_RENDERER, "test Vulkan floating-point scenes and exposure on the active GPU" );
+	cmdSystem->AddCommand( "rendererVulkanHDRInfo", R_RendererVulkanHDRInfo_f,
+			CMD_FL_RENDERER, "report Vulkan HDR luminance and exposure state" );
+	cmdSystem->AddCommand( "rendererVulkanRenderTargetsSelfTest", R_RendererVulkanRenderTargetsSelfTest_f,
+			CMD_FL_RENDERER, "validate Vulkan cubemap render targets and color/depth captures on the active device" );
+#endif
 	cmdSystem->AddCommand( "rendererGpuTimerSelfTest", R_RendererGpuTimerSelfTest_f, CMD_FL_RENDERER, "run renderer GPU timer query self tests" );
+	cmdSystem->AddCommand( "rendererTemporalPresentationStatus", R_TemporalPresentation_PrintStatus_f, CMD_FL_RENDERER, "report dynamic-resolution and temporal-history state" );
+	cmdSystem->AddCommand( "pbrProbeSettle", R_PBRProbeSettle_f, CMD_FL_RENDERER, "finish background reflection-probe filtering on the next frames, as a screenshot does" );
+	cmdSystem->AddCommand( "rendererMotionBlurStatus", R_TemporalPresentation_PrintMotionBlurStatus_f, CMD_FL_RENDERER, "report motion blur requested/effective settings and history decisions; \"reset\" clears the counters" );
 	cmdSystem->AddCommand( "rendererScenePacketSelfTest", R_RendererScenePacketSelfTest_f, CMD_FL_RENDERER, "run renderer front-end scene-packet self tests" );
 	cmdSystem->AddCommand( "rendererRenderGraphSelfTest", R_RendererRenderGraphSelfTest_f, CMD_FL_RENDERER, "run renderer resource-graph self tests" );
 	cmdSystem->AddCommand( "rendererRenderGraphResourceSelfTest", R_RendererRenderGraphResourceSelfTest_f, CMD_FL_RENDERER, "run renderer graph resource owner self tests" );
 	cmdSystem->AddCommand( "rendererRenderGraphResourceDump", R_RendererRenderGraphResourceDump_f, CMD_FL_RENDERER, "dump the latest renderer graph resource handles" );
 	cmdSystem->AddCommand( "rendererMaterialResourceTableSelfTest", R_RendererMaterialResourceTableSelfTest_f, CMD_FL_RENDERER, "run renderer material resource-table self tests" );
+	cmdSystem->AddCommand( "rendererClassicGuiDomainSelfTest", R_RendererClassicGuiDomainSelfTest_f, CMD_FL_RENDERER, "run backend-neutral classic GUI whole-view contract self tests" );
+	cmdSystem->AddCommand( "rendererClassicCinematicPostDomainSelfTest", R_RendererClassicCinematicPostDomainSelfTest_f, CMD_FL_RENDERER, "run sealed classic cinematic and authored post transaction self tests" );
+	cmdSystem->AddCommand( "rendererClassicSpecialFrameDomainSelfTest", R_RendererClassicSpecialFrameDomainSelfTest_f, CMD_FL_RENDERER, "run sealed render-demo and Raven special-frame transaction self tests" );
+	cmdSystem->AddCommand( "rendererClassicWorldAmbientDomainSelfTest", R_RendererClassicWorldAmbientDomainSelfTest_f, CMD_FL_RENDERER, "run backend-neutral classic world ambient whole-view contract self tests" );
+	cmdSystem->AddCommand( "rendererClassicInteractionDomainSelfTest", R_RendererClassicInteractionDomainSelfTest_f, CMD_FL_RENDERER, "run backend-neutral classic interaction whole-view contract self tests" );
+	cmdSystem->AddCommand( "rendererClassicFogBlendDomainSelfTest", R_RendererClassicFogBlendDomainSelfTest_f, CMD_FL_RENDERER, "run backend-neutral classic fog/blend whole-view contract self tests" );
+	cmdSystem->AddCommand( "rendererClassicSubviewDomainSelfTest", R_RendererClassicSubviewDomainSelfTest_f, CMD_FL_RENDERER, "run backend-neutral capture-backed classic subview transaction self tests" );
+	cmdSystem->AddCommand( "rendererClassicDeformDomainSelfTest", R_RendererClassicDeformDomainSelfTest_f, CMD_FL_RENDERER, "run sealed classic material-deform contract self tests" );
+	cmdSystem->AddCommand( "rendererPBRMaterialSelfTest", R_RendererPBRMaterialSelfTest_f, CMD_FL_RENDERER, "run PBR material parser and classic fallback self tests" );
 	cmdSystem->AddCommand( "rendererMaterialResourceTableDump", R_RendererMaterialResourceTableDump_f, CMD_FL_RENDERER, "dump the latest renderer material resource table" );
 	cmdSystem->AddCommand( "rendererGeometryResourceSelfTest", R_RendererGeometryResourceSelfTest_f, CMD_FL_RENDERER, "run renderer geometry and instance packet self tests" );
 	cmdSystem->AddCommand( "rendererGLStateCacheSelfTest", R_RendererGLStateCacheSelfTest_f, CMD_FL_RENDERER, "run renderer GL state-cache self tests" );
@@ -4069,7 +6291,9 @@ void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "rendererGpuDrivenSelfTest", R_RendererGpuDrivenSelfTest_f, CMD_FL_RENDERER, "run renderer GL43 GPU-driven compute and indirect self tests" );
 	cmdSystem->AddCommand( "rendererVisiblePathSelfTest", R_RendererVisiblePathSelfTest_f, CMD_FL_RENDERER, "run renderer visible modern depth-path self tests" );
 	cmdSystem->AddCommand( "rendererGBufferSelfTest", R_RendererGBufferSelfTest_f, CMD_FL_RENDERER, "run renderer modern opaque G-buffer self tests" );
+	cmdSystem->AddCommand( "rendererPBRVisibleSelfTest", R_RendererPBRVisibleSelfTest_f, CMD_FL_RENDERER, "run guarded modern PBR G-buffer/deferred/forward self tests" );
 	cmdSystem->AddCommand( "rendererClusterGridSelfTest", R_RendererClusterGridSelfTest_f, CMD_FL_RENDERER, "run renderer clustered light-grid self tests" );
+	cmdSystem->AddCommand( "rendererLightImageAtlasSelfTest", R_RendererLightImageAtlasSelfTest_f, CMD_FL_RENDERER, "run renderer modern light falloff/projection atlas self tests" );
 	cmdSystem->AddCommand( "rendererShadowPlannerSelfTest", R_RendererShadowPlannerSelfTest_f, CMD_FL_RENDERER, "run renderer modern shadow-planner self tests" );
 	cmdSystem->AddCommand( "rendererShadowProjectedDiagnosticSelfTest", R_RendererShadowProjectedDiagnosticSelfTest_f, CMD_FL_RENDERER, "run renderer projected shadow diagnostic scene self tests" );
 	cmdSystem->AddCommand( "rendererDeferredResolveSelfTest", R_RendererDeferredResolveSelfTest_f, CMD_FL_RENDERER, "run renderer deferred light resolve self tests" );
@@ -4090,6 +6314,8 @@ void R_InitCommands( void ) {
 	cmdSystem->AddCommand( "reportSurfaceAreas", R_ReportSurfaceAreas_f, CMD_FL_RENDERER, "lists all used materials sorted by surface area" );
 	cmdSystem->AddCommand( "reportImageDuplication", R_ReportImageDuplication_f, CMD_FL_RENDERER, "checks all referenced images for duplications" );
 	cmdSystem->AddCommand( "reportShaderPrograms", R_ReportShaderPrograms_f, CMD_FL_RENDERER, "shows ARB plus material/shadow GLSL shader program status" );
+	cmdSystem->AddCommand( "reloadARBprograms", R_ReloadARBPrograms_f, CMD_FL_RENDERER, "reloads ARB and authored GLSL material programs" );
+	cmdSystem->AddCommand( "reloadGLSLprograms", R_ReloadGLSLPrograms_f, CMD_FL_RENDERER, "reloads authored GLSL material programs" );
 	cmdSystem->AddCommand( "regenerateWorld", R_RegenerateWorld_f, CMD_FL_RENDERER, "regenerates all interactions" );
 	cmdSystem->AddCommand( "showInteractionMemory", R_ShowInteractionMemory_f, CMD_FL_RENDERER, "shows memory used by interactions" );
 	cmdSystem->AddCommand( "showTriSurfMemory", R_ShowTriSurfMemory_f, CMD_FL_RENDERER, "shows memory used by triangle surfaces" );
@@ -4127,6 +6353,8 @@ void idRenderSystemLocal::Clear( void ) {
 	viewportOffset[1] = 0;
 	tiledViewport[0] = 0;
 	tiledViewport[1] = 0;
+	tiledWindow[0] = 0;
+	tiledWindow[1] = 0;
 	backEndRenderer = BE_BAD;
 	backEndRendererHasVertexPrograms = false;
 	backEndRendererMaxLight = 1.0f;
@@ -4151,6 +6379,9 @@ void idRenderSystemLocal::Clear( void ) {
 	ambientCubeImage = NULL;
 	viewDef = NULL;
 	memset( &pc, 0, sizeof( pc ) );
+	memset( &renderThreadFrameCounters, 0, sizeof( renderThreadFrameCounters ) );
+	renderThreadFrameCountersValid = false;
+	frameLookSampleClock = frameFlashPressClock = frameSwapClock = 0.0;
 	memset( &lockSurfacesCmd, 0, sizeof( lockSurfacesCmd ) );
 	memset( &identitySpace, 0, sizeof( identitySpace ) );
 	logFile = NULL;
@@ -4158,15 +6389,29 @@ void idRenderSystemLocal::Clear( void ) {
 	stencilDecr = 0;
 	memset( renderCrops, 0, sizeof( renderCrops ) );
 	currentRenderCrop = 0;
+	resolutionScaleCropActive = false;
+	resolutionScaleWidth = 0;
+	resolutionScaleHeight = 0;
+	resolutionScaleSuppressed = false;
 	guiRecursionLevel = 0;
 	guiModel = NULL;
 	demoGuiModel = NULL;
+	demoFrameGuiModel = NULL;
+	demoLastGuiModel = NULL;
+	demoLastGuiModelValid = false;
 	pendingRenderTextureDeletes.Clear();
 	useUIViewportFor2D = true;
 	activeRenderTexture = NULL;
 	portalSkyCaptureViewCallback = NULL;
 	suppressLevelshotViewModels = false;
 	disableLevelshotEntityCulling = false;
+	memset( &vrFrame, 0, sizeof( vrFrame ) );
+	memset( &vrFrameResult, 0, sizeof( vrFrameResult ) );
+	vrFrontEndTarget = -1;
+	vrWindowWidth = 0;
+	vrWindowHeight = 0;
+	memset( vrSavedUIViewport, 0, sizeof( vrSavedUIViewport ) );
+	memset( vrTargets, 0, sizeof( vrTargets ) );
 	memset( gammaTable, 0, sizeof( gammaTable ) );
 	takingScreenshot = false;
 }
@@ -4177,8 +6422,11 @@ idRenderSystemLocal::Init
 ===============
 */
 void idRenderSystemLocal::Init( void ) {
+	if ( !R_ImagePolicyBindRendererThread() ) return;
+	r_initialRendererDevicePending = false;
 
 	common->Printf( "------- Initializing renderSystem --------\n" );
+	R_RendererMetrics_ResetGpuFrameTiming( "renderer init" );
 
 	// route imagetools static-allocation counters into tr.pc before any
 	// image or model loading can call R_StaticAlloc
@@ -4205,12 +6453,19 @@ void idRenderSystemLocal::Init( void ) {
 	R_InitCvars();
 
 	R_InitCommands();
+	R_RenderThread_Init();
 
 	guiModel = new idGuiModel;
 	guiModel->Clear();
 
 	demoGuiModel = new idGuiModel;
 	demoGuiModel->Clear();
+
+	demoFrameGuiModel = new idGuiModel;
+	demoFrameGuiModel->Clear();
+	demoLastGuiModel = new idGuiModel;
+	demoLastGuiModel->Clear();
+	demoLastGuiModelValid = false;
 
 	R_InitTriSurfData();
 
@@ -4236,6 +6491,7 @@ void idRenderSystemLocal::Init( void ) {
 
 	common->Printf( "renderSystem initialized.\n" );
 	common->Printf( "--------------------------------------\n" );
+	r_initialRendererDevicePending = true;
 }
 
 /*
@@ -4243,8 +6499,13 @@ void idRenderSystemLocal::Init( void ) {
 idRenderSystemLocal::Shutdown
 ===============
 */
-void idRenderSystemLocal::Shutdown( void ) {	
+void idRenderSystemLocal::Shutdown( void ) {
+	renderImageOwnerShutdown_t imageOwnerShutdown;
+	if ( !imageOwnerShutdown.Allowed() ) return;
+	r_initialRendererDevicePending = false;
 	common->Printf( "idRenderSystem::Shutdown()\n" );
+	R_RenderThread_Shutdown();
+	R_RendererMetrics_ResetGpuFrameTiming( "renderer shutdown" );
 
 	R_DoneFreeType( );
 
@@ -4284,12 +6545,19 @@ void idRenderSystemLocal::Shutdown( void ) {
 	ProcessPendingRenderTextureDeletes();
 
 	delete guiModel;
+	R_ShutdownStereoGuiShare();
 	delete demoGuiModel;
+	delete demoFrameGuiModel;
+	demoFrameGuiModel = NULL;
+	delete demoLastGuiModel;
+	demoLastGuiModel = NULL;
+	demoLayerGuiModels.DeleteContents( true );
 
 	ShutdownSpecialEffects();
 	Clear();
 
 	ShutdownOpenGL();
+	(void)imageOwnerShutdown.Complete();
 }
 
 /*
@@ -4298,6 +6566,24 @@ idRenderSystemLocal::BeginLevelLoad
 ========================
 */
 void idRenderSystemLocal::BeginLevelLoad( void ) {
+	R_RendererMetrics_ResetGpuFrameTiming( "begin level load" );
+#ifdef OPENQ4_RENDERER_VK_MODULE
+	// keep what the last map compiled even if this session never exits cleanly
+	extern void VK_Device_PersistPipelineCache( const char *reason );
+	VK_Device_PersistPipelineCache( "since the last save" );
+#endif
+	// SetUnderwaterView is the only writer of this state, and it is driven by the game
+	// each frame. A map change started while the player was submerged would otherwise
+	// leave the effect live across the whole loading screen and into the first frames
+	// of the new map, costing a full-screen copy per loading-screen present.
+	underwaterAmount = 0.0f;
+	underwaterTint.Zero();
+
+	// The caller runs declManager->BeginLevelLoad() immediately before this, and
+	// that purge can reach the generated glyph atlas materials. Put them back
+	// before the loading screen draws its first frame of text.
+	R_TTFRestoreAtlasMaterials();
+
 	renderModelManager->BeginLevelLoad();
 	globalImages->BeginLevelLoad();
 }
@@ -4323,6 +6609,10 @@ void idRenderSystemLocal::EndLevelLoad( void ) {
 	if ( r_forceLoadImages.GetBool() ) {
 		RB_ShowImages();
 	}
+
+	// Loading-screen work belongs to the old timing epoch. Start gameplay with
+	// an empty delayed ring so budget capture cannot mix the two workloads.
+	R_RendererMetrics_ResetGpuFrameTiming( "end level load" );
 }
 
 /*
@@ -4330,7 +6620,10 @@ void idRenderSystemLocal::EndLevelLoad( void ) {
 idRenderSystemLocal::InitOpenGL
 ========================
 */
-void idRenderSystemLocal::InitOpenGL( void ) {
+static bool R_InitRendererDevice( bool legacyPolicy, bool forceWindow, char *error, int errorSize ) {
+	if ( !R_ImagePolicyBindRendererThread() ) {
+		return R_RendererRestartError( error, errorSize, "Renderer initialization requires its available owner thread" );
+	}
 	// if the device isn't started, start it now
 	if ( !glConfig.isInitialized ) {
 #ifdef OPENQ4_RENDERER_VK_MODULE
@@ -4338,8 +6631,27 @@ void idRenderSystemLocal::InitOpenGL( void ) {
 		// the window services; no GL ladder, caps probe, or program loads
 		extern bool VK_InitRenderDevice( void );
 		if ( !VK_InitRenderDevice() ) {
-			common->FatalError( "Vulkan renderer device initialization failed" );
+			if ( legacyPolicy ) {
+				// Initial startup uses the recoverable PrepareStartupDevice export
+				// before reaching this call. A failure here belongs to a later
+				// renderer restart, whose module is still on the call stack; preserve
+				// the next-launch recovery path for that runtime failure.
+				const bool nextLaunchUsesGL = R_RendererModule_ResetApiAfterDeviceFailure();
+				common->FatalError( "Vulkan renderer device initialization failed; %s",
+						nextLaunchUsesGL ? "r_renderApi has been reset to gl, so the next launch uses OpenGL"
+								: "launch with +set r_renderApi gl to use OpenGL" );
+			}
+			return R_RendererRestartError( error, errorSize, "Vulkan renderer device initialization failed" );
 		}
+		// The Vulkan module does not run the OpenGL tier/bootstrap tail that
+		// normally initializes shared scene resources.  The classic-GUI domain
+		// only needs the backend-neutral scene-packet/material contract, so make
+		// that one conservative feature explicit without advertising any GL
+		// modern-visible capability.
+		renderFeatureSet_t vkSharedFeatures = glConfig.renderFeatures;
+		vkSharedFeatures.scenePackets = true;
+		R_MaterialResourceTable_Init( glConfig.backendCaps, vkSharedFeatures );
+		R_GpuSkinning_ContractInit( glConfig.backendCaps );
 		// mirror the R_InitOpenGL tail the seam skips: the front-end needs
 		// the vertex cache, a resolved back end, frame data, and gamma
 		// tables before the first BeginFrame
@@ -4354,15 +6666,44 @@ void idRenderSystemLocal::InitOpenGL( void ) {
 #else
 		int	err;
 
-		R_InitOpenGL();
+		if ( legacyPolicy ) R_InitOpenGL();
+		else if ( !R_InitOpenGLInternal( false, forceWindow, error, errorSize ) ) return false;
 
 		globalImages->ReloadImages(true);
 
 		err = glGetError();
 		if ( err != GL_NO_ERROR ) {
+			if ( !legacyPolicy ) return R_RendererRestartError( error, errorSize, "OpenGL image resource reload failed" );
 			common->Printf( "glGetError() = 0x%x\n", err );
 		}
 #endif
+	}
+	r_initialRendererDevicePending = false;
+	if ( glConfig.isInitialized ) {
+		R_RendererModule_RendererDeviceEvent( RENDER_DEVICE_READY );
+	}
+	return true;
+}
+
+void idRenderSystemLocal::InitOpenGL( void ) {
+	R_MigrateLegacyShadowMapContactQuality();
+	R_MigrateLegacyShadowMapFilterDefaults();
+	R_MigrateLegacyPBRMaterialsDefault();
+	R_MigrateLegacyTemporalAADefault();
+	char error[1024];
+	if ( !R_InitRendererDevice( true, false, error, sizeof( error ) ) ) common->FatalError( "%s", error );
+	r_recoverableRendererRestore = false;
+	// On the first device start, build the console sheet for the active
+	// language now rather than at the first font registration. The startup
+	// splash draws from it before the UI registers a font, and the retail
+	// sheet is Windows-1252 art, so Cyrillic, Czech or Turkish splash text
+	// would otherwise draw as the wrong letters. Restarts reach this through
+	// tr.InitOpenGL() too, but refresh the sheet themselves afterwards.
+	static bool startupConsoleSheetBuilt = false;
+	if ( !startupConsoleSheetBuilt && glConfig.isInitialized ) {
+		startupConsoleSheetBuilt = true;
+		R_InitFreeType();
+		R_RefreshConsoleFontAtlas();
 	}
 }
 
@@ -4372,6 +6713,9 @@ idRenderSystemLocal::ShutdownOpenGL
 ========================
 */
 void idRenderSystemLocal::ShutdownOpenGL( void ) {
+	R_RenderThread_Shutdown();
+	CancelSavePreview();
+	r_recoverableRendererRestore = false;
 	if ( !glConfig.isInitialized ) {
 		R_ClearActiveRenderTextures();
 		useUIViewportFor2D = true;
@@ -4385,9 +6729,20 @@ void idRenderSystemLocal::ShutdownOpenGL( void ) {
 
 	// free the context and close the window
 	R_ShutdownFrameData();
+	// the views lived in the frame memory just freed
+	tr.viewDef = NULL; tr.primaryView = NULL; backEnd.viewDef = NULL;
+	R_GpuSkinning_ContractShutdown();
+	R_ClassicGuiDomain_ResetFrame();
+	R_ClassicCinematicPostDomain_ResetFrame();
+	R_ClassicSpecialFrameDomain_ResetFrame();
+	R_ClassicWorldAmbientDomain_ResetFrame();
+	R_ClassicInteractionDomain_ResetFrame();
+	R_ClassicFogBlendDomain_ResetFrame();
+	R_ClassicSubviewDomain_ResetFrame();
 #ifdef OPENQ4_RENDERER_VK_MODULE
 	// Vulkan backend seam (Phase C): the GL executor/upload/graph/debug
 	// subsystems never initialized; device + window teardown is GLimp_Shutdown
+	R_MaterialResourceTable_Shutdown();
 	GLimp_Shutdown();
 #else
 	R_RendererMetrics_ShutdownGpuTimers();

@@ -1083,7 +1083,10 @@ int idLexer::ReadNumber( idToken *token ) {
 					token->subtype |= TT_NAN;
 					c2++;
 				}
-				for ( i = 0; i < c2; i++ ) {
+				// openQ4: stop at the terminator. Text ending in "1.#" was read up
+				// to three bytes past its end, and lexing went on from there
+				// under the no-error flags decls and command lines use.
+				for ( i = 0; i < c2 && c != '\0'; i++ ) {
 					token->AppendDirty( c );
 					c = *(++idLexer::script_p);
 				}
@@ -1822,6 +1825,26 @@ const char *idLexer::ParseBracedSectionExact( idStr &out, int tabs ) {
 	skipWhite = false;
 	doTabs = tabs >= 0;
 
+	// openQ4: without re-indenting, the loop below copies every character as
+	// it stands, so find the end and take the section in one append. Appending
+	// a character at a time regrew and recopied the string every 32 bytes,
+	// which is quadratic in the section's size, and every decl is read this way.
+	if ( !doTabs ) {
+		const char *start = idLexer::script_p;
+		while( depth && *idLexer::script_p ) {
+			const char c = *(idLexer::script_p++);
+			if ( c == '\n' ) {
+				line++;
+			} else if ( c == '{' ) {
+				depth++;
+			} else if ( c == '}' ) {
+				depth--;
+			}
+		}
+		out.Append( start, static_cast<int>( idLexer::script_p - start ) );
+		return out.c_str();
+	}
+
 	while( depth && *idLexer::script_p ) {
 		char c = *(idLexer::script_p++);
 
@@ -2050,15 +2073,29 @@ int idLexer::LoadFile( const char *filename, bool OSPath ) {
 		return false;
 	}
 	length = fp->Length();
+	if ( length < 0 || length == idMath::INT_MAX ) {
+		idLib::common->Warning( "idLexer::LoadFile: invalid length %d for '%s'", length, pathname.c_str() );
+		idLib::fileSystem->CloseFile( fp );
+		return false;
+	}
 // RAVEN BEGIN
 // amccarthy: Added memory allocation tag
 	buf = (char *) Mem_Alloc( length + 1, MA_LEXER );
 	if( !buf ) {
+		idLib::fileSystem->CloseFile( fp );
 		common->FatalError( "Memory system failure : out of memory" );
+		return false;
 	}
 // RAVEN END
+	const int bytesRead = fp->Read( buf, length );
+	if ( bytesRead != length ) {
+		idLib::common->Warning( "idLexer::LoadFile: short read for '%s' (read %d of %d bytes)",
+			pathname.c_str(), bytesRead, length );
+		idLib::fileSystem->CloseFile( fp );
+		Mem_Free( buf );
+		return false;
+	}
 	buf[length] = '\0';
-	fp->Read( buf, length );
 	idLexer::fileTime = fp->Timestamp();
 	idLexer::filename = fp->GetFullPath();
 	idLib::fileSystem->CloseFile( fp );
@@ -2675,7 +2712,7 @@ Lexer::Lexer(int flags)
 	}
 }
 
-Lexer::Lexer(char const * const ptr, int length, char const * const name, int flags)
+Lexer::Lexer(char const * const ptr, int length, char const * const name, int flags) : Lexer(flags)
 {
 	if(flags & LEXFL_READBINARY)
 	{
@@ -2688,7 +2725,7 @@ Lexer::Lexer(char const * const ptr, int length, char const * const name, int fl
 	}
 	else
 	{
-		mDelegate = new idLexer(ptr, length, name, flags);
+		mDelegate->LoadMemory(ptr, length, name);
 	}
 }
 
@@ -2761,6 +2798,13 @@ void Lexer::Error(char const *str, ...)
 	va_start( ap, str );
 	idStr::vsnPrintf( text, sizeof( text ), str, ap );
 	va_end( ap );
+
+	// Text lexers own their error policy and HadError state. In particular,
+	// authoring previews use NOFATALERRORS for incomplete user-authored geometry.
+	if (mDelegate) {
+		mDelegate->Error("%s", text);
+		return;
+	}
 
 	assert(false);
 
@@ -3291,15 +3335,8 @@ int idLexer::PeekTokenString(const char* string) {
 		return 0;
 	}
 
-	// unread token
-	script_p = lastScript_p;
-	line = lastline;
-
-	// if the given string is available
-	if (tok == string) {
-		return 1;
-	}
-	return 0;
+	UnreadToken( &tok );
+	return tok == string;
 }
 
 int Lexer::CheckTokenString(char const *string)

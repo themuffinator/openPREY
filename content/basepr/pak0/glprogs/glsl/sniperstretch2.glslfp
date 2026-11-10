@@ -16,7 +16,8 @@ void main(void)
 	vec2 start = clamp( viewportTexCoord * safeTextureScale, vec2( 0.0, 0.0 ), safeTextureScale );
 	vec2 blurDir = start - ( safeTextureScale * 0.5 );
 	vec4 scopeArea = texture2D( Scope, scopeTexCoord );
-	vec4 blurColor = texture2D( BackgroundImage, start );
+	vec4 sceneColor = texture2D( BackgroundImage, start );
+	vec4 blurColor = sceneColor;
 
 	if ( length( blurDir ) > 0.0 ) {
 		blurDir = normalize( blurDir );
@@ -45,9 +46,10 @@ void main(void)
 		blurColor = ( blurColor + backgroundColor ) * 0.5;
 	}
 
-	if ( scopeArea.r == 0.0 ) {
-		gl_FragColor = texture2D( BackgroundImage, start );
-	} else {
-		gl_FragColor = blurColor;
-	}
+	// The low-resolution mask (including its compressed DDS) has tiny nonzero
+	// values around the aperture. A binary r > 0 test turns those blocks into
+	// a half-strength opaque tint. Ease in the tint over the first eight mask
+	// levels while preserving the six-tap radial blur outside that narrow rim.
+	float blurCoverage = smoothstep( 0.0, 8.0 / 255.0, scopeArea.r );
+	gl_FragColor = mix( sceneColor, blurColor, blurCoverage );
 }

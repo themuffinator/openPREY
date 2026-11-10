@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import groovy.json.JsonSlurper
+import java.security.MessageDigest
+
+// Every runtime pack in tools/build/content_packs.json, in load order.
+ext.openQ4ContentPackNames = {
+    def table = new JsonSlurper().parse(rootProject.file('../../tools/build/content_packs.json'))
+    def names = table.packs.collect { it.name as String }
+    if (names.isEmpty() || names.any { !(it ==~ /pak[0-9]\.pk4/) }) {
+        throw new IOException('Invalid content pack table')
+    }
+    return names
+}
+
+// Canonical ASCII, sorted by the normalized relative path on every build host.
+// The Activity and release verifier enforce the same bounds and required files.
+ext.openQ4PackageManifest = { File directory ->
+    def entries = [:]
+    directory.eachFileRecurse { asset ->
+        if (java.nio.file.Files.isSymbolicLink(asset.toPath())) {
+            throw new IOException("Package assets may not be links: ${asset}")
+        }
+        if (asset.isFile()) {
+            String name = directory.toPath().relativize(asset.toPath()).toString().replace('\\', '/')
+            if (name.length() > 240 || !(name ==~ /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*/) ||
+                    name.split('/').length > 16 || name.split('/').any { it == '.' || it == '..' }) {
+                throw new IOException("Invalid package path: ${name}")
+            }
+            entries[name] = asset
+        }
+    }
+    if (entries.size() > 4096 || !entries.keySet().containsAll(['mod.json'] + openQ4ContentPackNames())) {
+        throw new IOException('Invalid package manifest file count or missing required file')
+    }
+    long total = 0
+    StringBuilder manifest = new StringBuilder('openQ4-package-v1\n')
+    entries.keySet().sort().each { name ->
+        File asset = entries[name]
+        long size = asset.length()
+        total += size
+        if (size > 2147483648L || total > 4294967296L) throw new IOException('Package size exceeds limit')
+        def digest = MessageDigest.getInstance('SHA-256')
+        asset.withInputStream { input ->
+            byte[] buffer = new byte[65536]
+            int count
+            long read = 0
+            while ((count = input.read(buffer)) != -1) {
+                read += count
+                if (read > size) throw new IOException("Package file changed during staging: ${name}")
+                digest.update(buffer, 0, count)
+            }
+            if (read != size) throw new IOException("Package file changed during staging: ${name}")
+        }
+        manifest.append(digest.digest().encodeHex()).append('\t').append(size).append('\t').append(name).append('\n')
+    }
+    byte[] bytes = manifest.toString().getBytes('US-ASCII')
+    if (bytes.length > 1024 * 1024) throw new IOException('Package manifest exceeds limit')
+    return bytes
+}

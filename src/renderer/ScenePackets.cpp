@@ -4,12 +4,151 @@
 #include "tr_local.h"
 #include "ScenePackets.h"
 #include "RendererBootstrap.h"
+#include "MaterialResourceTable.h"
 
-static idScenePacketFrame rg_frontEndScenePacketFrame;
-static bool rg_frontEndScenePacketFrameOpen = false;
+static idScenePacketFrame rg_scenePacketFrames[2];
+static bool rg_scenePacketFramesOpen[2];
+static bool rg_scenePacketHistoryCommitted[2];
+static const viewDef_t *rg_scenePacketLastViews[2];
+static int R_ScenePackets_FrameSlot() {
+	const frameData_t *frame = R_BackEndFrameData();
+	return frame != NULL ? frame->slot : 0;
+}
+
+// The front end emits RC_COPY_RENDER immediately after a capture-backed
+// subview's RC_DRAW_VIEW. Preserve that producer while assembling packet data;
+// tr.viewDef has already been restored to the parent when CaptureRenderToImage
+// queues its copy command.
+
+
+typedef struct scenePacketTemporalInstanceHistory_s {
+	unsigned long long viewIdentity;
+	unsigned int historyGeneration;
+	int frameNumber;
+	int entityIndex;
+	float modelMatrix[16];
+} scenePacketTemporalInstanceHistory_t;
+
+static thread_local idList<scenePacketTemporalInstanceHistory_t>
+	rg_scenePacketTemporalInstanceHistory;
+static thread_local idList<scenePacketTemporalInstanceHistory_t>
+	rg_scenePacketTemporalNextInstanceHistory;
+
+// Hash acceleration for the (viewIdentity, entityIndex) history lookups.
+// Each idHashIndex always mirrors the list its pointer is paired with; the
+// pointers swap in lockstep with the list Swap() in Commit. These are only
+// touched from the runtime Find/Store/Commit paths, never from
+// idScenePacketFrame::Clear(), preserving the static-constructor constraint
+// documented above the lookup-slot table.
+static thread_local idHashIndex rg_scenePacketTemporalHistoryLookupA;
+static thread_local idHashIndex rg_scenePacketTemporalHistoryLookupB;
+static thread_local idHashIndex *rg_scenePacketTemporalHistoryLookup =
+	&rg_scenePacketTemporalHistoryLookupA;
+static thread_local idHashIndex *rg_scenePacketTemporalNextHistoryLookup =
+	&rg_scenePacketTemporalHistoryLookupB;
+
+static int R_ScenePackets_TemporalHistoryLookupKey(
+		unsigned long long viewIdentity, int entityIndex ) {
+	return static_cast<int>(
+		static_cast<unsigned int>( viewIdentity )
+		^ static_cast<unsigned int>( viewIdentity >> 32 )
+		^ ( static_cast<unsigned int>( entityIndex ) * 0x9e3779b9u ) );
+}
+
+static bool R_ScenePackets_FindTemporalInstanceHistory(
+		unsigned long long viewIdentity, int entityIndex,
+		float previousModelMatrix[16], int &ageFrames ) {
+	ageFrames = 0;
+	if ( viewIdentity == 0 || entityIndex < 0 ) {
+		return false;
+	}
+	const unsigned int historyGeneration =
+		R_TemporalPresentation_HistoryGeneration();
+	const int lookupKey =
+		R_ScenePackets_TemporalHistoryLookupKey( viewIdentity, entityIndex );
+	for ( int i = rg_scenePacketTemporalHistoryLookup->First( lookupKey );
+			i >= 0; i = rg_scenePacketTemporalHistoryLookup->Next( i ) ) {
+		const scenePacketTemporalInstanceHistory_t &entry =
+			rg_scenePacketTemporalInstanceHistory[i];
+		if ( entry.viewIdentity != viewIdentity
+				|| entry.entityIndex != entityIndex
+				|| entry.historyGeneration != historyGeneration ) {
+			continue;
+		}
+		const unsigned int age = static_cast<unsigned int>( R_RenderThread_OnRenderThread() ? backEnd.frameCount : tr.frameCount )
+			- static_cast<unsigned int>( entry.frameNumber );
+		if ( age == 0u || age > 2u ) {
+			return false;
+		}
+		memcpy( previousModelMatrix, entry.modelMatrix,
+			sizeof( entry.modelMatrix ) );
+		ageFrames = static_cast<int>( age );
+		return true;
+	}
+	return false;
+}
+
+static void R_ScenePackets_StoreTemporalInstanceHistory(
+		const instanceRecord_t &record ) {
+	if ( record.entityIndex < 0 || !record.hasModelMatrix
+			|| record.temporalViewIdentity == 0
+			|| record.temporalCaptureFrame ) {
+		return;
+	}
+	const int lookupKey = R_ScenePackets_TemporalHistoryLookupKey(
+		record.temporalViewIdentity, record.entityIndex );
+	for ( int i = rg_scenePacketTemporalNextHistoryLookup->First( lookupKey );
+			i >= 0; i = rg_scenePacketTemporalNextHistoryLookup->Next( i ) ) {
+		const scenePacketTemporalInstanceHistory_t &existing =
+			rg_scenePacketTemporalNextInstanceHistory[i];
+		if ( existing.viewIdentity == record.temporalViewIdentity
+				&& existing.entityIndex == record.entityIndex ) {
+			return;
+		}
+	}
+	scenePacketTemporalInstanceHistory_t &entry =
+		rg_scenePacketTemporalNextInstanceHistory.Alloc();
+	entry.viewIdentity = record.temporalViewIdentity;
+	entry.historyGeneration = record.temporalHistoryGeneration;
+	entry.frameNumber = R_RenderThread_OnRenderThread() ? backEnd.frameCount : tr.frameCount;
+	entry.entityIndex = record.entityIndex;
+	memcpy( entry.modelMatrix, record.modelMatrix, sizeof( entry.modelMatrix ) );
+	rg_scenePacketTemporalNextHistoryLookup->Add( lookupKey,
+		rg_scenePacketTemporalNextInstanceHistory.Num() - 1 );
+}
+
+static void R_ScenePackets_CommitTemporalInstanceHistory(
+		const idScenePacketFrame &frame ) {
+	// SetNum( 0, false ) keeps the allocations (bounded at
+	// SCENE_PACKET_MAX_INSTANCE_RECORDS entries) so steady-state capture
+	// frames reuse the buffers instead of freeing and regrowing them.
+	rg_scenePacketTemporalNextInstanceHistory.SetNum( 0, false );
+	rg_scenePacketTemporalNextHistoryLookup->Clear();
+	for ( int i = 0; i < frame.NumInstanceRecords(); ++i ) {
+		R_ScenePackets_StoreTemporalInstanceHistory( frame.InstanceRecord( i ) );
+	}
+	rg_scenePacketTemporalInstanceHistory.Swap(
+		rg_scenePacketTemporalNextInstanceHistory );
+	idSwap( rg_scenePacketTemporalHistoryLookup,
+		rg_scenePacketTemporalNextHistoryLookup );
+	rg_scenePacketTemporalNextInstanceHistory.SetNum( 0, false );
+	rg_scenePacketTemporalNextHistoryLookup->Clear();
+}
+
+// A negative view id alone is not a render demo: portal-sky cameras use the
+// same convention. The session's active demo reader and its exact render world
+// make playback provenance explicit before command buffers are submitted.
+static bool R_ScenePackets_IsRenderDemoPlaybackView( const viewDef_t *viewDef ) {
+	return viewDef != NULL && viewDef->viewEntitys != NULL
+		&& viewDef->renderWorld != NULL && !viewDef->isSubview
+		&& session != NULL && session->readDemo != NULL
+		&& session->rw == viewDef->renderWorld;
+}
 
 static bool R_ScenePackets_ModernPipelineRequested( void ) {
 	const bool modernVisibleRequested = r_rendererModernVisible.GetBool() || RendererBootstrap_ShouldAutoPromoteModernVisible();
+	const bool advancedLightingLeafRequested = r_rendererModernQuality.GetBool()
+		&& ( r_rendererReflectionProbes.GetBool() || r_rendererClusteredDecals.GetBool() );
 	const bool shadowMapSidecarRequested =
 		r_useShadowMap.GetBool()
 		&& r_shadows.GetBool()
@@ -20,6 +159,16 @@ static bool R_ScenePackets_ModernPipelineRequested( void ) {
 		|| r_rendererGpuValidation.GetBool()
 		|| r_rendererBindless.GetBool()
 		|| modernVisibleRequested
+		|| advancedLightingLeafRequested
+		|| r_rendererSharedGui.GetBool()
+		|| r_rendererSharedInWorldGui.GetBool()
+		|| r_rendererSharedCinematicPost.GetBool()
+		|| r_rendererSharedSpecialFrame.GetBool()
+		|| r_rendererSharedWorldAmbient.GetBool()
+		|| r_rendererSharedWorldInteraction.GetBool()
+		|| r_rendererSharedWorldFogBlend.GetBool()
+		|| r_rendererSharedSubview.GetBool()
+		|| r_rendererSharedDeform.GetBool()
 		|| r_rendererModernVisibleDepth.GetBool()
 		|| r_rendererModernDepthDebug.GetInteger() > 0
 		|| r_rendererModernOpaque.GetBool()
@@ -46,11 +195,29 @@ private:
 };
 
 bool R_ScenePackets_FrontEndCaptureRequired( void ) {
-	return r_rendererMetrics.GetInteger() >= 2;
+	// The shared subview transaction has to retain the exact RC_DRAW_VIEW ->
+	// RC_COPY_RENDER edge on the front end. Backend reconstruction cannot infer
+	// it when an image capture occurs after tr.viewDef returns to the parent.
+	return r_rendererSharedSubview.GetBool()
+		|| R_TemporalPresentation_TemporalAARequested()
+		|| r_rendererMetrics.GetInteger() >= 2;
 }
 
 bool R_ScenePackets_SidePipelineRequired( void ) {
-	return R_ScenePackets_ModernPipelineRequested() || r_rendererMetrics.GetInteger() >= 2;
+	// gles_d3 renders the view itself and shares no state with the modern
+	// executor. Leaving the side pipeline armed under BE_GLES_D3 does not just
+	// waste work: R_ModernGLExecutor_ComposeVisibleFrame and SubmitModernGui
+	// run on RC_SWAP_BUFFERS and paint an empty composite over the finished
+	// frame -- the same failure mode the legacy post chain has on this
+	// context. This is the single gate that keeps the two backends from
+	// touching each other.
+	if ( tr.backEndRenderer == BE_GLES_D3 ) {
+		return false;
+	}
+
+	return R_ScenePackets_ModernPipelineRequested()
+		|| R_TemporalPresentation_TemporalAARequested()
+		|| r_rendererMetrics.GetInteger() >= 2;
 }
 
 // Side tables accelerating the FindOrAdd* record dedup scans.  They are keyed
@@ -62,16 +229,46 @@ bool R_ScenePackets_SidePipelineRequired( void ) {
 // dirty wipe keeps the hash resets on the capture path only.
 // SCENE_PACKET_LOOKUP_SLOTS must stay a power of two for the steal mask.
 static const int SCENE_PACKET_LOOKUP_SLOTS = 4;
-static const idScenePacketFrame *rg_scenePacketLookupOwner[SCENE_PACKET_LOOKUP_SLOTS];
-static bool rg_scenePacketLookupDirty[SCENE_PACKET_LOOKUP_SLOTS];
-static int rg_scenePacketLookupNextSteal;
-static idHashIndex rg_scenePacketMaterialLookup[SCENE_PACKET_LOOKUP_SLOTS];
-static idHashIndex rg_scenePacketGeometryLookup[SCENE_PACKET_LOOKUP_SLOTS];
-static idHashIndex rg_scenePacketInstanceLookup[SCENE_PACKET_LOOKUP_SLOTS];
+static thread_local const idScenePacketFrame *rg_scenePacketLookupOwner[SCENE_PACKET_LOOKUP_SLOTS];
+static thread_local bool rg_scenePacketLookupDirty[SCENE_PACKET_LOOKUP_SLOTS];
+static thread_local int rg_scenePacketLookupNextSteal;
+static thread_local idHashIndex rg_scenePacketMaterialLookup[SCENE_PACKET_LOOKUP_SLOTS];
+static thread_local idHashIndex rg_scenePacketGeometryLookup[SCENE_PACKET_LOOKUP_SLOTS];
+static thread_local idHashIndex rg_scenePacketInstanceLookup[SCENE_PACKET_LOOKUP_SLOTS];
 
 static int R_ScenePackets_PointerLookupKey( const void *pointer ) {
 	const size_t address = reinterpret_cast<size_t>( pointer );
 	return static_cast<int>( ( address >> 4 ) ^ ( address >> 14 ) );
+}
+
+static classicDeformRole_t R_ScenePackets_ClassicDeformRoleForPass(
+		renderPassCategory_t category ) {
+	switch ( category ) {
+	case RENDER_PASS_ARB2_INTERACTION:
+		return CLASSIC_DEFORM_ROLE_INTERACTION_RECEIVER;
+	case RENDER_PASS_FOG_BLEND:
+		return CLASSIC_DEFORM_ROLE_FOG_RECEIVER;
+	case RENDER_PASS_STENCIL_SHADOW:
+		return CLASSIC_DEFORM_ROLE_SHADOW_VOLUME;
+	default:
+		// Ambient, depth, shadow-map caster, and forward/post classifications
+		// originate from the finalized view draw rather than receiver chains.
+		return CLASSIC_DEFORM_ROLE_FINALIZED_DRAW;
+	}
+}
+
+static int R_ScenePackets_GeometryLookupKey( const srfTriangles_t *geometry,
+		const classicDeformRecord_t &classicDeform ) {
+	const std::uint64_t semantic = classicDeform.semanticHash;
+	const std::uint64_t frame = classicDeform.frameToken;
+	const unsigned int mixed =
+		static_cast<unsigned int>( R_ScenePackets_PointerLookupKey( geometry ) )
+		^ static_cast<unsigned int>( semantic )
+		^ static_cast<unsigned int>( semantic >> 32 )
+		^ static_cast<unsigned int>( frame )
+		^ static_cast<unsigned int>( frame >> 32 )
+		^ ( static_cast<unsigned int>( classicDeform.role ) * 0x9e3779b9u );
+	return static_cast<int>( mixed );
 }
 
 static void R_ScenePackets_ClaimLookupSlot( const idScenePacketFrame *frame ) {
@@ -139,6 +336,7 @@ void idScenePacketFrame::Clear( void ) {
 	memset( materialRecords, 0, sizeof( materialRecords ) );
 	memset( geometryRecords, 0, sizeof( geometryRecords ) );
 	memset( instanceRecords, 0, sizeof( instanceRecords ) );
+	memset( subviewCaptures, 0, sizeof( subviewCaptures ) );
 #endif
 	memset( &stats, 0, sizeof( stats ) );
 	activeScene = -1;
@@ -269,12 +467,32 @@ static const idImage *R_ScenePackets_FirstAmbientImage( const idMaterial *materi
 	return firstAmbientImage;
 }
 
-static bool R_ScenePackets_DrawSurfUsesSkinning( const drawSurf_t *drawSurf ) {
+static geometrySkinningMode_t R_ScenePackets_DrawSurfSkinningMode(
+	const drawSurf_t *drawSurf, gpuSkinningSurface_t *surface = NULL ) {
+	if ( surface != NULL ) {
+		memset( surface, 0, sizeof( *surface ) );
+	}
+	if ( drawSurf == NULL || drawSurf->geo == NULL ) {
+		return GEOMETRY_SKINNING_NONE;
+	}
+	gpuSkinningSurface_t candidate;
+	if ( R_GpuSkinning_GetSurface( drawSurf->geo, candidate ) ) {
+		if ( surface != NULL ) {
+			*surface = candidate;
+		}
+		return GEOMETRY_SKINNING_GPU_PALETTE;
+	}
+	// A source-side exactness or eligibility rejection means the ordinary
+	// deformed idDrawVert stream is authoritative for this snapshot.
+	if ( R_GpuSkinning_IsCandidate( drawSurf->geo ) ) {
+		return GEOMETRY_SKINNING_CPU;
+	}
 #if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
-	return drawSurf != NULL && drawSurf->geo != NULL && drawSurf->geo->numSkinToModelTransforms > 0;
-#else
-	return false;
+	if ( drawSurf->geo->numSkinToModelTransforms > 0 ) {
+		return GEOMETRY_SKINNING_GPU_PALETTE;
+	}
 #endif
+	return GEOMETRY_SKINNING_NONE;
 }
 
 static bool R_ScenePackets_MaterialUsesRemoteRender( const idMaterial *material ) {
@@ -291,7 +509,99 @@ static bool R_ScenePackets_MaterialUsesRemoteRender( const idMaterial *material 
 	return false;
 }
 
-static scenePacketCategory_t R_ScenePackets_CategoryForDrawSurf( const viewDef_t *viewDef, const drawSurf_t *drawSurf, renderPassCategory_t passCategory ) {
+bool R_ScenePackets_TemporalRigidMotionEligible(
+		const drawSurf_t *drawSurf ) {
+	if ( drawSurf == NULL || drawSurf->geo == NULL
+			|| drawSurf->material == NULL || drawSurf->space == NULL
+			|| drawSurf->space->entityDef == NULL ) {
+		return false;
+	}
+
+	const srfTriangles_t *geometry = drawSurf->geo;
+	const idMaterial *material = drawSurf->material;
+	const idRenderEntityLocal *entity = drawSurf->space->entityDef;
+	if ( !material->IsDrawn() || !material->HasAmbient()
+			|| material->IsPortalSky() || material->SuppressInSubview()
+			|| material->Coverage() != MC_OPAQUE
+			|| material->GetSort() >= SS_POST_PROCESS ) {
+		return false;
+	}
+	if ( geometry->numIndexes <= 0 || R_TriHasPrimBatchMesh( geometry )
+			|| geometry->deformedSurface || drawSurf->space->weaponDepthHack
+			|| drawSurf->space->modelDepthHack != 0.0f ) {
+		return false;
+	}
+	return entity->index >= 0 && entity->parms.callback == NULL
+		&& entity->parms.hModel != NULL
+		&& entity->parms.hModel->IsDynamicModel() == DM_STATIC
+		&& entity->dynamicModel == NULL;
+}
+
+temporalSurfaceMotion_t R_ScenePackets_TemporalSurfaceMotion(
+		const drawSurf_t *drawSurf ) {
+	if ( drawSurf == NULL || drawSurf->geo == NULL
+			|| drawSurf->material == NULL || drawSurf->space == NULL ) {
+		return TEMPORAL_SURFACE_MOTION_NONE;
+	}
+	const srfTriangles_t *geometry = drawSurf->geo;
+	const idMaterial *material = drawSurf->material;
+	if ( !material->IsDrawn() || material->IsPortalSky()
+			|| geometry->numIndexes <= 0
+			|| ( drawSurf->dsFlags & DSF_OUTLINE_ONLY ) != 0 ) {
+		return TEMPORAL_SURFACE_MOTION_NONE;
+	}
+	// Effects, GUI output, subview images and authored post surfaces change on
+	// their own whatever their geometry does.
+	if ( ( drawSurf->dsFlags & ( DSF_BSE_EFFECT | DSF_IN_WORLD_GUI ) ) != 0
+			|| material->GetSort() >= SS_POST_PROCESS
+			|| R_ScenePackets_MaterialUsesRemoteRender( material )
+			|| R_ScenePackets_MaterialClassForDrawSurf( drawSurf )
+				== RENDER_MATERIAL_SUBVIEW ) {
+		return TEMPORAL_SURFACE_MOTION_REACTIVE;
+	}
+	const idRenderEntityLocal *entity = drawSurf->space->entityDef;
+	if ( entity == NULL || ( entity->parms.hModel != NULL
+			&& entity->parms.hModel->IsStaticWorldModel() ) ) {
+		// world geometry moves only with the camera, which depth reprojection
+		// already follows exactly
+		return TEMPORAL_SURFACE_MOTION_NONE;
+	}
+	if ( entity->index < 0 || drawSurf->space->modelDepthHack != 0.0f
+			|| material->Coverage() == MC_TRANSLUCENT
+			|| R_TriHasPrimBatchMesh( geometry ) ) {
+		return TEMPORAL_SURFACE_MOTION_REACTIVE;
+	}
+	if ( drawSurf->previousPositionCache != NULL ) {
+		return TEMPORAL_SURFACE_MOTION_PREVIOUS_POSITIONS;
+	}
+	if ( geometry->deformedSurface || entity->parms.callback != NULL
+			|| entity->parms.hModel == NULL
+			|| entity->parms.hModel->IsDynamicModel() != DM_STATIC
+			|| entity->dynamicModel != NULL ) {
+		return TEMPORAL_SURFACE_MOTION_REACTIVE;
+	}
+	return TEMPORAL_SURFACE_MOTION_RIGID;
+}
+
+float R_ScenePackets_TemporalSurfaceReactiveStrength( const drawSurf_t *drawSurf ) {
+	if ( drawSurf == NULL || drawSurf->material == NULL ) {
+		return 1.0f;
+	}
+	// A subview or post surface shows a different image every frame; an
+	// in-world GUI is mostly still text, so it keeps half its history.
+	if ( drawSurf->material->GetSort() >= SS_POST_PROCESS
+			|| R_ScenePackets_MaterialUsesRemoteRender( drawSurf->material )
+			|| R_ScenePackets_MaterialClassForDrawSurf( drawSurf )
+				== RENDER_MATERIAL_SUBVIEW ) {
+		return 1.0f;
+	}
+	if ( ( drawSurf->dsFlags & DSF_IN_WORLD_GUI ) != 0 ) {
+		return 0.5f;
+	}
+	return R_TemporalPresentation_EffectReactiveStrength();
+}
+
+static scenePacketCategory_t R_ScenePackets_CategoryForDrawSurf( const viewDef_t *viewDef, const drawSurf_t *drawSurf, renderPassCategory_t passCategory, const materialResourceRecord_t *materialRecord = NULL ) {
 	if ( passCategory == RENDER_PASS_SPECIAL_EFFECTS ) {
 		return SCENE_PACKET_CATEGORY_SPECIAL_EFFECTS;
 	}
@@ -305,7 +615,14 @@ static scenePacketCategory_t R_ScenePackets_CategoryForDrawSurf( const viewDef_t
 		return SCENE_PACKET_CATEGORY_POST_PROCESS;
 	}
 	if ( passCategory == RENDER_PASS_GUI ) {
-		return SCENE_PACKET_CATEGORY_GUI;
+		// A GUI pass in a 3D scene is the provenance-tagged output of
+		// R_RenderGuiSurf, not a root-2D command list. Keep it in the world
+		// domain so material compilation retains depth-test semantics.
+		return viewDef != NULL && viewDef->viewEntitys != NULL
+			? SCENE_PACKET_CATEGORY_WORLD : SCENE_PACKET_CATEGORY_GUI;
+	}
+	if ( R_ScenePackets_IsRenderDemoPlaybackView( viewDef ) ) {
+		return SCENE_PACKET_CATEGORY_RENDER_DEMO;
 	}
 	if ( viewDef != NULL && viewDef->isSubview ) {
 		return SCENE_PACKET_CATEGORY_SUBVIEW;
@@ -322,10 +639,16 @@ static scenePacketCategory_t R_ScenePackets_CategoryForDrawSurf( const viewDef_t
 	if ( drawSurf->space != NULL && drawSurf->space->entityDef != NULL && drawSurf->space->entityDef->parms.remoteRenderView != NULL ) {
 		return SCENE_PACKET_CATEGORY_REMOTE_CAMERA;
 	}
-	if ( R_ScenePackets_MaterialUsesRemoteRender( drawSurf->material ) ) {
+	const bool usesRemoteRender = materialRecord != NULL
+		? materialRecord->usesRemoteRender
+		: R_ScenePackets_MaterialUsesRemoteRender( drawSurf->material );
+	if ( usesRemoteRender ) {
 		return SCENE_PACKET_CATEGORY_REMOTE_CAMERA;
 	}
-	if ( R_ScenePackets_MaterialClassForDrawSurf( drawSurf ) == RENDER_MATERIAL_SUBVIEW ) {
+	const rendererMaterialClass_t materialClass = materialRecord != NULL
+		? static_cast<rendererMaterialClass_t>( materialRecord->permutation.materialClass )
+		: R_ScenePackets_MaterialClassForDrawSurf( drawSurf );
+	if ( materialClass == RENDER_MATERIAL_SUBVIEW ) {
 		return SCENE_PACKET_CATEGORY_SUBVIEW;
 	}
 	return SCENE_PACKET_CATEGORY_WORLD;
@@ -341,11 +664,15 @@ static scenePacketCategory_t R_ScenePackets_CategoryForCommandPass( renderPassCa
 	case RENDER_PASS_AUTHORED_POST:
 		return SCENE_PACKET_CATEGORY_POST_PROCESS;
 	case RENDER_PASS_GUI:
-		return SCENE_PACKET_CATEGORY_GUI;
+		return viewDef != NULL && viewDef->viewEntitys != NULL
+			? SCENE_PACKET_CATEGORY_WORLD : SCENE_PACKET_CATEGORY_GUI;
 	case RENDER_PASS_PRESENT:
 		return SCENE_PACKET_CATEGORY_PRESENT;
 	default:
 		break;
+	}
+	if ( R_ScenePackets_IsRenderDemoPlaybackView( viewDef ) ) {
+		return SCENE_PACKET_CATEGORY_RENDER_DEMO;
 	}
 	if ( viewDef != NULL && viewDef->isSubview ) {
 		return SCENE_PACKET_CATEGORY_SUBVIEW;
@@ -501,7 +828,31 @@ int idScenePacketFrame::FindOrAddMaterialRecord( const drawSurf_t *drawSurf ) {
 	}
 	record.normalImage = R_ScenePackets_FirstStageImage( material, SL_BUMP );
 	record.specularImage = R_ScenePackets_FirstStageImage( material, SL_SPECULAR );
+	if ( material->HasPBR() ) {
+		const pbrMaterialInfo_t &pbr = material->GetPBRInfo();
+		record.hasPBR = true;
+		record.pbrWorkflow = static_cast<int>( pbr.workflow );
+		record.pbrNormalFormat = static_cast<int>( pbr.normalFormat );
+		record.pbrAlbedoImage = pbr.albedo.present ? pbr.albedo.image : NULL;
+		record.pbrNormalImage = pbr.normal.present ? pbr.normal.image : NULL;
+		record.pbrORMImage = pbr.orm.present ? pbr.orm.image : NULL;
+		record.pbrMetallicImage = pbr.metallic.present ? pbr.metallic.image : NULL;
+		record.pbrRoughnessImage = pbr.roughness.present ? pbr.roughness.image : NULL;
+		record.pbrAOImage = pbr.ao.present ? pbr.ao.image : NULL;
+		record.pbrEmissiveImage = pbr.emissive.present ? pbr.emissive.image : NULL;
+		record.pbrHasAuthoredClassicFallback = pbr.hasAuthoredClassicFallback;
+		record.pbrHasExplicitLegacyFallback = pbr.hasExplicitLegacyFallback;
+		record.pbrUsesGeneratedLegacyFallback = pbr.usesGeneratedLegacyFallback;
+		record.pbrUsesApproximateLegacyFallback = pbr.usesApproximateLegacyFallback;
+		record.pbrLegacyFallbackMissing = pbr.legacyFallbackMissing;
+		record.pbrMetallicRegister = pbr.metallicRegister;
+		record.pbrRoughnessRegister = pbr.roughnessRegister;
+		record.pbrAORegister = pbr.aoRegister;
+		record.pbrNormalScaleRegister = pbr.normalScaleRegister;
+		memcpy( record.pbrEmissiveColorRegisters, pbr.emissiveColorRegisters, sizeof( record.pbrEmissiveColorRegisters ) );
+	}
 	record.resourceTableIndex = material->Index();
+	record.usesRemoteRender = R_ScenePackets_MaterialUsesRemoteRender( material );
 	record.permutation.materialClass = R_ScenePackets_MaterialClassForDrawSurf( drawSurf );
 	record.permutation.lightingMode =
 		( material->IsDrawn() ? 1u : 0u ) |
@@ -514,10 +865,12 @@ int idScenePacketFrame::FindOrAddMaterialRecord( const drawSurf_t *drawSurf ) {
 		( material->TestMaterialFlag( MF_NOSELFSHADOW ) ? 2u : 0u ) |
 		( material->TestMaterialFlag( MF_FORCESHADOWS ) ? 4u : 0u );
 	record.permutation.alphaMode = material->Coverage();
-	record.permutation.skinningMode = R_ScenePackets_DrawSurfUsesSkinning( drawSurf ) ? 1u : 0u;
-	record.permutation.deformMode =
-		( drawSurf != NULL && drawSurf->geo != NULL && drawSurf->geo->deformedSurface ) ? 2u :
-		( material->Deform() != DFRM_NONE ? 1u : 0u );
+	record.permutation.skinningMode =
+		R_ScenePackets_DrawSurfSkinningMode( drawSurf ) != GEOMETRY_SKINNING_NONE ? 1u : 0u;
+	// srfTriangles_t::deformedSurface is generated-model topology ownership,
+	// not evidence of material deformation. Per-draw execution provenance is
+	// sealed separately in classicDeformRecord_t.
+	record.permutation.deformMode = material->Deform() != DFRM_NONE ? 1u : 0u;
 	record.permutation.lightGridMode =
 		( material->ReceivesLighting() ? 1u : 0u ) |
 		( material->HasAmbient() ? 2u : 0u );
@@ -527,23 +880,29 @@ int idScenePacketFrame::FindOrAddMaterialRecord( const drawSurf_t *drawSurf ) {
 	return recordIndex;
 }
 
-int idScenePacketFrame::FindOrAddGeometryRecord( const drawSurf_t *drawSurf ) {
+int idScenePacketFrame::FindOrAddGeometryRecord( const drawSurf_t *drawSurf,
+		const classicDeformRecord_t &classicDeform ) {
 	if ( drawSurf == NULL || drawSurf->geo == NULL ) {
 		return -1;
 	}
 
 	const srfTriangles_t *geo = drawSurf->geo;
+	const int lookupKey = R_ScenePackets_GeometryLookupKey( geo, classicDeform );
 	const int lookupSlot = R_ScenePackets_PreparedLookupSlot( this );
 	if ( lookupSlot >= 0 ) {
 		const idHashIndex &lookup = rg_scenePacketGeometryLookup[lookupSlot];
-		for ( int i = lookup.First( R_ScenePackets_PointerLookupKey( geo ) ); i >= 0; i = lookup.Next( i ) ) {
-			if ( geometryRecords[i].legacyGeometry == geo ) {
+		for ( int i = lookup.First( lookupKey ); i >= 0; i = lookup.Next( i ) ) {
+			if ( geometryRecords[i].legacyGeometry == geo
+					&& R_ClassicDeformDomain_SameProvenance(
+						geometryRecords[i].classicDeform, classicDeform ) ) {
 				return i;
 			}
 		}
 	} else {
 		for ( int i = 0; i < stats.geometryRecords; ++i ) {
-			if ( geometryRecords[i].legacyGeometry == geo ) {
+			if ( geometryRecords[i].legacyGeometry == geo
+					&& R_ClassicDeformDomain_SameProvenance(
+						geometryRecords[i].classicDeform, classicDeform ) ) {
 				return i;
 			}
 		}
@@ -556,7 +915,7 @@ int idScenePacketFrame::FindOrAddGeometryRecord( const drawSurf_t *drawSurf ) {
 
 	const int recordIndex = stats.geometryRecords++;
 	if ( lookupSlot >= 0 ) {
-		rg_scenePacketGeometryLookup[lookupSlot].Add( R_ScenePackets_PointerLookupKey( geo ), recordIndex );
+		rg_scenePacketGeometryLookup[lookupSlot].Add( lookupKey, recordIndex );
 	}
 	geometryResourceRecord_t &record = geometryRecords[recordIndex];
 	memset( &record, 0, sizeof( record ) );
@@ -569,14 +928,29 @@ int idScenePacketFrame::FindOrAddGeometryRecord( const drawSurf_t *drawSurf ) {
 	record.firstIndex = 0;
 	record.vertexStride = sizeof( idDrawVert );
 	record.indexType = GL_INDEX_TYPE;
-	record.skinningMode = R_ScenePackets_DrawSurfUsesSkinning( drawSurf ) ? GEOMETRY_SKINNING_GPU_PALETTE : GEOMETRY_SKINNING_NONE;
-	record.deformMode = geo->deformedSurface ? GEOMETRY_DEFORM_SURFACE :
-		( drawSurf->material != NULL && drawSurf->material->Deform() != DFRM_NONE ? GEOMETRY_DEFORM_MATERIAL : GEOMETRY_DEFORM_NONE );
+	record.classicDeform = classicDeform;
+	record.hasClassicDeformRecord =
+		R_ClassicDeformDomain_ValidateRecordForFrame( classicDeform,
+			classicDeform.frameToken );
+	record.skinningMode = R_ScenePackets_DrawSurfSkinningMode(
+		drawSurf, &record.gpuSkinningSurface );
+	record.hasGpuSkinningContract = record.skinningMode == GEOMETRY_SKINNING_GPU_PALETTE
+		&& record.gpuSkinningSurface.fallbackReason == GPU_SKINNING_FALLBACK_NONE
+		&& record.gpuSkinningSurface.bindPoseVerts != NULL;
+	// Generated/dynamic topology remains an explicit surface-ownership class;
+	// it is never evidence that a material deform executed. Material deformation
+	// is classified only from the sealed per-draw record.
+	record.deformMode = geo->deformedSurface
+		? GEOMETRY_DEFORM_SURFACE
+		: ( classicDeform.kind != CLASSIC_DEFORM_KIND_NONE
+			? GEOMETRY_DEFORM_MATERIAL : GEOMETRY_DEFORM_NONE );
 	record.uploadLifetime = R_ScenePackets_UploadLifetimeForCache( geo->ambientCache, geo->indexCache, geo );
 	record.fallbackReason = GEOMETRY_RESOURCE_FALLBACK_NONE;
-	record.skinningPaletteOffset = 0;
+	record.skinningPaletteOffset = record.hasGpuSkinningContract
+		? static_cast<int>( record.gpuSkinningSurface.palette.buffer.offsetBytes ) : 0;
 #if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
-	record.skinningPaletteCount = geo->numSkinToModelTransforms;
+	record.skinningPaletteCount = record.hasGpuSkinningContract
+		? record.gpuSkinningSurface.palette.numJoints : geo->numSkinToModelTransforms;
 	record.hasPrimBatchMesh = geo->primBatchMesh != NULL;
 #else
 	record.skinningPaletteCount = 0;
@@ -597,13 +971,29 @@ int idScenePacketFrame::FindOrAddGeometryRecord( const drawSurf_t *drawSurf ) {
 		record.indexCacheBytes = geo->indexCache->size;
 		record.hasIndexBuffer = geo->indexCache->vbo != 0 && geo->indexCache->indexBuffer;
 	}
-	if ( record.deformMode != GEOMETRY_DEFORM_NONE ) {
+	// GEOMETRY_DEFORM_SURFACE is admitted: the front end already ran the deform,
+	// so the cache holds finished geometry at the normal idDrawVert stride and
+	// the ordinary vertex/index binding covers it. Only GEOMETRY_DEFORM_MATERIAL
+	// (a deform the material still has to execute) stays unsupported.
+	//
+	// Admitting it originally produced ~966 GL_INVALID_OPERATION per frame on
+	// game/storage1, which read like a vertex-binding problem but was not. With
+	// a debug context the driver named it: "State(s) are invalid: program
+	// texture usage". These surfaces are the first to reach the transparent-
+	// forward and clustered shadow-sampling programs, whose samplerCube shadow
+	// uniforms sat on the same texture units as the sampler2D material texture
+	// table. GL fails any draw whose active samplers disagree on a unit's type,
+	// so the fix was to make those unit ranges disjoint (see
+	// MODERN_GL_SHADOW_TEXTURE_UNIT_FIRST in ModernGLShaderLibrary.h), not to
+	// change anything about the geometry these records describe.
+	if ( record.deformMode == GEOMETRY_DEFORM_MATERIAL ) {
 		R_ScenePackets_AddGeometryFallback(
 			record,
 			GEOMETRY_RESOURCE_FALLBACK_UNSUPPORTED_DEFORM,
 			GEOMETRY_RESOURCE_FALLBACK_FLAG_UNSUPPORTED_DEFORM );
 	}
-	if ( record.skinningMode == GEOMETRY_SKINNING_GPU_PALETTE ) {
+	if ( record.skinningMode == GEOMETRY_SKINNING_GPU_PALETTE
+		&& !record.hasGpuSkinningContract ) {
 		R_ScenePackets_AddGeometryFallback(
 			record,
 			GEOMETRY_RESOURCE_FALLBACK_UNSUPPORTED_GPU_SKINNING,
@@ -668,16 +1058,32 @@ int idScenePacketFrame::FindOrAddInstanceRecord( const drawSurf_t *drawSurf, sce
 	record.shaderRegisterCount = ( shaderRegisters != NULL && drawSurf->material != NULL ) ? drawSurf->material->GetNumRegisters() : 0;
 	record.skinningPaletteOffset = 0;
 	record.visibilityFlags = R_ScenePackets_InstanceVisibilityFlags( drawSurf, packetCategory, activeScene >= 0 && scenes[activeScene].legacyBridge );
+	const viewDef_t *instanceView = activeScene >= 0
+		? scenes[activeScene].viewDef : NULL;
+	record.temporalViewIdentity = instanceView != NULL
+		? ( instanceView->temporalViewIdentity != 0
+			? instanceView->temporalViewIdentity
+			: R_TemporalPresentation_ViewIdentity( instanceView ) ) : 0;
+	record.temporalHistoryGeneration =
+		R_TemporalPresentation_HistoryGeneration();
+	record.temporalHistoryAgeFrames = 0;
 	memcpy( record.modelMatrix, space->modelMatrix, sizeof( record.modelMatrix ) );
-	memcpy( record.previousModelMatrix, space->modelMatrix, sizeof( record.previousModelMatrix ) );
+	record.hasPreviousModelMatrix = R_ScenePackets_FindTemporalInstanceHistory(
+		record.temporalViewIdentity, record.entityIndex,
+		record.previousModelMatrix, record.temporalHistoryAgeFrames );
+	if ( !record.hasPreviousModelMatrix ) {
+		memcpy( record.previousModelMatrix, space->modelMatrix,
+			sizeof( record.previousModelMatrix ) );
+	}
 	memcpy( record.modelViewMatrix, space->modelViewMatrix, sizeof( record.modelViewMatrix ) );
 	record.modelDepthHack = space->modelDepthHack;
 	record.hasModelMatrix = true;
-	record.hasPreviousModelMatrix = true;
 	record.hasShaderRegisters = shaderRegisters != NULL;
 	record.weaponDepthHack = space->weaponDepthHack;
 	record.negativeScale = R_ScenePackets_MatrixHasNegativeScale( space->modelMatrix );
 	record.legacyBridge = activeScene >= 0 && scenes[activeScene].legacyBridge;
+	record.temporalCaptureFrame = instanceView != NULL
+		&& instanceView->temporalCaptureFrame;
 	if ( shaderRegisters != NULL ) {
 		record.entityColor[0] = shaderRegisters[EXP_REG_PARM0];
 		record.entityColor[1] = shaderRegisters[EXP_REG_PARM1];
@@ -708,11 +1114,25 @@ bool idScenePacketFrame::AddScene( const viewDef_t *viewDef, bool legacyBridge )
 	scenePacket_t &scene = scenes[stats.scenePackets++];
 	memset( &scene, 0, sizeof( scene ) );
 	scene.viewDef = viewDef;
-	scene.packetCategory = viewDef != NULL && viewDef->isSubview ? SCENE_PACKET_CATEGORY_SUBVIEW :
-		( viewDef != NULL && viewDef->renderView.viewID < 0 ? SCENE_PACKET_CATEGORY_RENDER_DEMO : SCENE_PACKET_CATEGORY_WORLD );
+	scene.renderDemoPlayback = R_ScenePackets_IsRenderDemoPlaybackView( viewDef );
+	scene.packetCategory = scene.renderDemoPlayback ? SCENE_PACKET_CATEGORY_RENDER_DEMO :
+		( viewDef != NULL && viewDef->isSubview ? SCENE_PACKET_CATEGORY_SUBVIEW :
+		( viewDef != NULL && viewDef->renderView.viewID < 0 ? SCENE_PACKET_CATEGORY_RENDER_DEMO : SCENE_PACKET_CATEGORY_WORLD ) );
 	scene.firstPassPacket = stats.passPackets;
 	scene.firstDrawPacket = stats.drawPackets;
 	scene.legacyBridge = legacyBridge;
+	if ( viewDef != NULL ) {
+		scene.temporalViewIdentity = viewDef->temporalViewIdentity != 0
+			? viewDef->temporalViewIdentity
+			: R_TemporalPresentation_ViewIdentity( viewDef );
+		scene.temporalHistoryGeneration = viewDef->temporalHistoryGeneration;
+		scene.temporalJitterIndex = viewDef->temporalJitterIndex;
+		scene.temporalHistoryResetReason =
+			viewDef->temporalHistoryResetReason;
+		scene.temporalHistoryValid = viewDef->temporalHistoryValid;
+		scene.temporalJitterEnabled = viewDef->temporalJitterEnabled;
+		scene.temporalCaptureFrame = viewDef->temporalCaptureFrame;
+	}
 	activeScene = stats.scenePackets - 1;
 	activePass = -1;
 	activePassLastSortKey = 0;
@@ -749,7 +1169,9 @@ bool idScenePacketFrame::AddPass( renderPassCategory_t category, bool enabled, b
 	return true;
 }
 
-bool idScenePacketFrame::AddDrawPacket( const drawSurf_t *drawSurf, renderPassCategory_t category, int drawIndex ) {
+bool idScenePacketFrame::AddDrawPacket( const drawSurf_t *drawSurf,
+		renderPassCategory_t category, int drawIndex,
+		classicDeformRole_t deformRole ) {
 	if ( activePass < 0 ) {
 		if ( !AddPass( category, true ) ) {
 			return false;
@@ -764,8 +1186,20 @@ bool idScenePacketFrame::AddDrawPacket( const drawSurf_t *drawSurf, renderPassCa
 	drawPacket_t &packet = drawPackets[stats.drawPackets++];
 	memset( &packet, 0, sizeof( packet ) );
 	const int materialRecordIndex = FindOrAddMaterialRecord( drawSurf );
-	const scenePacketCategory_t packetCategory = R_ScenePackets_CategoryForDrawSurf( activeScene >= 0 ? scenes[activeScene].viewDef : NULL, drawSurf, category );
-	const int geometryRecordIndex = FindOrAddGeometryRecord( drawSurf );
+	const materialResourceRecord_t *cachedMaterialRecord =
+		materialRecordIndex >= 0 ? &materialRecords[materialRecordIndex] : NULL;
+	const scenePacketCategory_t packetCategory = R_ScenePackets_CategoryForDrawSurf( activeScene >= 0 ? scenes[activeScene].viewDef : NULL, drawSurf, category, cachedMaterialRecord );
+	classicDeformRecord_t classicDeform;
+	const std::uint64_t deformFrameToken = stats.backendDerived
+		? R_ClassicDeformDomain_BackEndFrameToken()
+		: R_ClassicDeformDomain_CurrentFrameToken();
+	if ( deformRole == CLASSIC_DEFORM_ROLE_UNKNOWN ) {
+		deformRole = R_ScenePackets_ClassicDeformRoleForPass( category );
+	}
+	R_ClassicDeformDomain_SnapshotDrawSurf( drawSurf,
+		deformRole, deformFrameToken, classicDeform );
+	const int geometryRecordIndex = FindOrAddGeometryRecord(
+		drawSurf, classicDeform );
 	const int instanceRecordIndex = FindOrAddInstanceRecord( drawSurf, packetCategory );
 	packet.legacyDrawSurf = drawSurf;
 	packet.viewDef = activeScene >= 0 ? scenes[activeScene].viewDef : NULL;
@@ -786,6 +1220,56 @@ bool idScenePacketFrame::AddDrawPacket( const drawSurf_t *drawSurf, renderPassCa
 	packet.vertexOffset = 0;
 	packet.instanceOffset = 0;
 	packet.instanceCount = drawSurf ? 1 : 0;
+	temporalMotionInput_t temporalInput = {};
+	temporalInput.hasEntity = packet.instanceRecord != NULL
+		&& packet.instanceRecord->entityIndex >= 0;
+	temporalInput.hasPreviousTransform = packet.instanceRecord != NULL
+		&& packet.instanceRecord->hasPreviousModelMatrix;
+	temporalInput.skinned = packet.geometryRecord != NULL
+		&& packet.geometryRecord->skinningMode != GEOMETRY_SKINNING_NONE;
+	// Posed surfaces are never approximated as rigid motion: they own exact
+	// motion only through the previous model-space positions the front end
+	// captured before this frame's pose (drawSurf->previousPositionCache).
+	temporalInput.hasPreviousSkinningPalette = false;
+	temporalInput.particle = drawSurf != NULL
+		&& ( drawSurf->dsFlags & DSF_BSE_EFFECT ) != 0;
+	temporalInput.deform = packet.geometryRecord != NULL
+		&& packet.geometryRecord->deformMode != GEOMETRY_DEFORM_NONE;
+	temporalInput.hasPreviousDeformedVertices = drawSurf != NULL
+		&& drawSurf->previousPositionCache != NULL;
+	temporalInput.subview = cachedMaterialRecord != NULL
+		? ( cachedMaterialRecord->usesRemoteRender
+			|| static_cast<rendererMaterialClass_t>(
+				cachedMaterialRecord->permutation.materialClass )
+				== RENDER_MATERIAL_SUBVIEW )
+		: ( drawSurf != NULL
+			&& ( R_ScenePackets_MaterialUsesRemoteRender( drawSurf->material )
+				|| R_ScenePackets_MaterialClassForDrawSurf( drawSurf )
+					== RENDER_MATERIAL_SUBVIEW ) );
+	temporalInput.inWorldGui = drawSurf != NULL
+		&& ( drawSurf->dsFlags & DSF_IN_WORLD_GUI ) != 0;
+	temporalInput.viewModel = drawSurf != NULL && drawSurf->space != NULL
+		&& drawSurf->space->weaponDepthHack;
+	temporalInput.translucent = drawSurf != NULL && drawSurf->material != NULL
+		&& drawSurf->material->Coverage() != MC_OPAQUE;
+	packet.temporalMotion = TemporalHistoryCore_ClassifyMotion( temporalInput );
+	packet.temporalExactRigidEligible =
+		packet.temporalMotion.domain == TEMPORAL_MOTION_DOMAIN_RIGID
+		&& R_ScenePackets_TemporalRigidMotionEligible( drawSurf );
+	if ( activeScene >= 0 && scenes[activeScene].viewDef != NULL
+			&& scenes[activeScene].viewDef->isSubview ) {
+		packet.temporalMotion.flags |=
+			TEMPORAL_MOTION_OWNERSHIP_SEPARATE_HISTORY;
+	}
+	packet.classicDeformRecord = packet.geometryRecord != NULL
+		? &packet.geometryRecord->classicDeform : NULL;
+	packet.hasClassicDeformRecord = packet.classicDeformRecord != NULL
+		&& packet.geometryRecord->hasClassicDeformRecord
+		&& R_ClassicDeformDomain_ValidateRecordForFrame(
+			*packet.classicDeformRecord, deformFrameToken )
+		&& R_ClassicDeformDomain_SameProvenance(
+			*packet.classicDeformRecord, classicDeform );
+	R_ClassicDeformDomain_RecordPacket( classicDeform );
 	if ( drawSurf != NULL ) {
 		packet.scissorX1 = drawSurf->scissorRect.x1;
 		packet.scissorY1 = drawSurf->scissorRect.y1;
@@ -806,6 +1290,22 @@ bool idScenePacketFrame::AddDrawPacket( const drawSurf_t *drawSurf, renderPassCa
 	passes[activePass].drawPacketCount++;
 	scenes[activeScene].drawPacketCount++;
 	CountCategory( packetCategory );
+	if ( packet.temporalMotion.domain >= TEMPORAL_MOTION_DOMAIN_STATIC_WORLD
+			&& packet.temporalMotion.domain < TEMPORAL_MOTION_DOMAIN_COUNT ) {
+		stats.temporalMotionDomainPackets[packet.temporalMotion.domain]++;
+	}
+	if ( ( packet.temporalMotion.flags
+			& TEMPORAL_MOTION_OWNERSHIP_REACTIVE ) != 0 ) {
+		stats.temporalReactivePackets++;
+	}
+	if ( ( packet.temporalMotion.flags
+			& TEMPORAL_MOTION_OWNERSHIP_HAS_PREVIOUS_TRANSFORM ) != 0 ) {
+		stats.temporalPreviousTransformPackets++;
+	}
+	if ( ( packet.temporalMotion.flags
+			& TEMPORAL_MOTION_OWNERSHIP_SEPARATE_HISTORY ) != 0 ) {
+		stats.temporalSeparateHistoryPackets++;
+	}
 	if ( drawSurf != NULL && drawSurf->material != NULL ) {
 		stats.drawPacketsWithMaterial++;
 	}
@@ -830,6 +1330,126 @@ bool idScenePacketFrame::AddDrawPacket( const drawSurf_t *drawSurf, renderPassCa
 	if ( packet.hasAmbientCache ) {
 		stats.drawPacketsWithAmbientCache++;
 	}
+	if ( packet.hasClassicDeformRecord ) {
+		stats.drawPacketsWithClassicDeformRecord++;
+	}
+	if ( classicDeform.kind != CLASSIC_DEFORM_KIND_NONE ) {
+		stats.materialDeformDrawPackets++;
+		switch ( classicDeform.role ) {
+		case CLASSIC_DEFORM_ROLE_FINALIZED_DRAW:
+			stats.deformFinalizedDrawPackets++;
+			break;
+		case CLASSIC_DEFORM_ROLE_INTERACTION_RECEIVER:
+			stats.deformInteractionReceiverPackets++;
+			break;
+		case CLASSIC_DEFORM_ROLE_FOG_RECEIVER:
+			stats.deformFogReceiverPackets++;
+			break;
+		case CLASSIC_DEFORM_ROLE_SHADOW_VOLUME:
+			stats.deformShadowVolumePackets++;
+			break;
+		default:
+			stats.deformOtherRolePackets++;
+			break;
+		}
+		switch ( classicDeform.outcome ) {
+		case CLASSIC_DEFORM_OUTCOME_COMPLETED:
+			stats.deformCompletedPackets++;
+			break;
+		case CLASSIC_DEFORM_OUTCOME_EMPTY:
+			stats.deformEmptyPackets++;
+			break;
+		case CLASSIC_DEFORM_OUTCOME_NOT_APPLICABLE:
+			stats.deformNotApplicablePackets++;
+			break;
+		case CLASSIC_DEFORM_OUTCOME_SKIPPED:
+			stats.deformSkippedPackets++;
+			break;
+		case CLASSIC_DEFORM_OUTCOME_FAILED:
+			stats.deformFailedPackets++;
+			break;
+		case CLASSIC_DEFORM_OUTCOME_UNSUPPORTED:
+			stats.deformUnsupportedPackets++;
+			break;
+		default:
+			break;
+		}
+		if ( ( packet.geometryRecord != NULL
+					&& ( packet.geometryRecord->fallbackFlags
+						& GEOMETRY_RESOURCE_FALLBACK_FLAG_UNSUPPORTED_DEFORM ) != 0 )
+				|| R_ClassicDeformDomain_IsFailClosed( classicDeform ) ) {
+			stats.deformFallbackPackets++;
+		}
+	}
+	return true;
+}
+
+void idScenePacketFrame::SetLastSceneSpecialEffectsMask(
+		int specialEffectsMask ) {
+	const int sceneIndex = stats.scenePackets - 1;
+	if ( sceneIndex < 0 || sceneIndex >= stats.scenePackets ) {
+		return;
+	}
+	scenes[ sceneIndex ].specialEffectsMask = specialEffectsMask
+		& ( SPECIAL_EFFECT_BLUR | SPECIAL_EFFECT_AL );
+}
+
+bool idScenePacketFrame::AddInteractionDrawPacket( const drawSurf_t *drawSurf,
+		int drawIndex, const viewLight_t *viewLight, int lightOrdinal,
+		sceneInteractionReceiverClass_t receiverClass, int receiverOrdinal ) {
+	if ( !AddDrawPacket( drawSurf, RENDER_PASS_ARB2_INTERACTION, drawIndex ) ) {
+		return false;
+	}
+	drawPacket_t &packet = drawPackets[stats.drawPackets - 1];
+	packet.interactionLight = viewLight;
+	packet.interactionLightOrdinal = lightOrdinal;
+	packet.interactionReceiverClass = receiverClass;
+	packet.interactionReceiverOrdinal = receiverOrdinal;
+	packet.interactionSourceOrdinal = drawIndex;
+	return true;
+}
+
+bool idScenePacketFrame::AddFogBlendDrawPacket( const drawSurf_t *drawSurf,
+		int drawIndex, const viewLight_t *viewLight, int lightOrdinal,
+		sceneFogBlendReceiverClass_t receiverClass, int receiverOrdinal ) {
+	if ( receiverClass <= SCENE_FOG_BLEND_RECEIVER_NONE
+			|| receiverClass >= SCENE_FOG_BLEND_RECEIVER_COUNT
+			|| !AddDrawPacket( drawSurf, RENDER_PASS_FOG_BLEND, drawIndex ) ) {
+		return false;
+	}
+	drawPacket_t &packet = drawPackets[stats.drawPackets - 1];
+	packet.fogBlendLight = viewLight;
+	packet.fogBlendLightOrdinal = lightOrdinal;
+	packet.fogBlendReceiverClass = receiverClass;
+	packet.fogBlendReceiverOrdinal = receiverOrdinal;
+	packet.fogBlendSourceOrdinal = drawIndex;
+	return true;
+}
+
+bool idScenePacketFrame::AddShadowDrawPacket( const drawSurf_t *drawSurf,
+		renderPassCategory_t category, int drawIndex,
+		const viewLight_t *viewLight, int lightOrdinal,
+		sceneShadowCasterClass_t casterClass, int chainOrdinal ) {
+	if ( ( category != RENDER_PASS_STENCIL_SHADOW
+			&& category != RENDER_PASS_SHADOW_MAP )
+			|| casterClass <= SCENE_SHADOW_CASTER_NONE
+			|| casterClass >= SCENE_SHADOW_CASTER_COUNT ) {
+		return false;
+	}
+	const bool stencilGeometry = category == RENDER_PASS_STENCIL_SHADOW
+		|| casterClass == SCENE_SHADOW_CASTER_SUPPLEMENT_GLOBAL
+		|| casterClass == SCENE_SHADOW_CASTER_SUPPLEMENT_LOCAL;
+	if ( !AddDrawPacket( drawSurf, category, drawIndex,
+			stencilGeometry ? CLASSIC_DEFORM_ROLE_SHADOW_VOLUME
+				: CLASSIC_DEFORM_ROLE_FINALIZED_DRAW ) ) {
+		return false;
+	}
+	drawPacket_t &packet = drawPackets[stats.drawPackets - 1];
+	packet.shadowLight = viewLight;
+	packet.shadowLightOrdinal = lightOrdinal;
+	packet.shadowCasterClass = casterClass;
+	packet.shadowChainOrdinal = chainOrdinal;
+	packet.shadowSourceOrdinal = drawIndex;
 	return true;
 }
 
@@ -843,6 +1463,40 @@ void idScenePacketFrame::FinishScene( void ) {
 void idScenePacketFrame::AddCommandPacket( scenePacketCategory_t category ) {
 	stats.commandPackets++;
 	CountCategory( category );
+}
+
+bool idScenePacketFrame::AddSubviewCapture( const viewDef_t *viewDef,
+		idImage *image, int x, int y, int width, int height, int cubeFace,
+		bool copyDepth ) {
+	if ( viewDef == NULL || image == NULL || width <= 0 || height <= 0 ) {
+		return false;
+	}
+	if ( stats.subviewCaptures >= SCENE_PACKET_MAX_SUBVIEW_CAPTURES ) {
+		SetOverflow( SCENE_PACKET_OVERFLOW_SUBVIEW_CAPTURES );
+		return false;
+	}
+	int scenePacketIndex = -1;
+	for ( int i = stats.scenePackets - 1; i >= 0; --i ) {
+		if ( scenes[ i ].viewDef == viewDef ) {
+			scenePacketIndex = i;
+			break;
+		}
+	}
+	if ( scenePacketIndex < 0 ) {
+		return false;
+	}
+	sceneSubviewCapture_t &capture = subviewCaptures[ stats.subviewCaptures++ ];
+	memset( &capture, 0, sizeof( capture ) );
+	capture.viewDef = viewDef;
+	capture.image = image;
+	capture.viewScenePacketIndex = scenePacketIndex;
+	capture.x = x;
+	capture.y = y;
+	capture.width = width;
+	capture.height = height;
+	capture.cubeFace = cubeFace;
+	capture.copyDepth = copyDepth;
+	return true;
 }
 
 void idScenePacketFrame::AddLegacyDrawView( void ) {
@@ -912,6 +1566,14 @@ const instanceRecord_t &idScenePacketFrame::InstanceRecord( int index ) const {
 	return instanceRecords[index];
 }
 
+int idScenePacketFrame::NumSubviewCaptures( void ) const {
+	return stats.subviewCaptures;
+}
+
+const sceneSubviewCapture_t &idScenePacketFrame::SubviewCapture( int index ) const {
+	return subviewCaptures[index];
+}
+
 const scenePacketFrameStats_t &idScenePacketFrame::Stats( void ) const {
 	return stats;
 }
@@ -938,6 +1600,98 @@ bool idScenePacketFrame::ValidateSortKeys( void ) const {
 		}
 	}
 	return stats.sortKeyValidationFailures == 0;
+}
+
+static bool R_ScenePackets_TemporalVisiblePass(
+		renderPassCategory_t category ) {
+	switch ( category ) {
+	case RENDER_PASS_ARB2_INTERACTION:
+	case RENDER_PASS_LIGHT_GRID:
+	case RENDER_PASS_AMBIENT:
+	case RENDER_PASS_DEFERRED_RESOLVE:
+	case RENDER_PASS_FORWARD_PLUS:
+	case RENDER_PASS_FOG_BLEND:
+	case RENDER_PASS_GUI:
+		return true;
+	default:
+		// Depth, shadow, and fullscreen post packets are not independently
+		// visible surfaces in the color image consumed by temporal resolve.
+		return false;
+	}
+}
+
+bool idScenePacketFrame::BuildTemporalViewMotionPolicy(
+		const viewDef_t *viewDef, unsigned int backendExactMotionDomainMask,
+		temporalViewMotionPolicy_t &policy, bool perPixelOwnership ) const {
+	policy = TemporalHistoryCore_BeginViewMotionPolicy();
+	if ( viewDef == NULL ) {
+		return false;
+	}
+
+	const int viewWidth = viewDef->viewport.x2 - viewDef->viewport.x1 + 1;
+	const int viewHeight = viewDef->viewport.y2 - viewDef->viewport.y1 + 1;
+	if ( viewWidth <= 0 || viewHeight <= 0 ) {
+		return false;
+	}
+	const float inverseWidth = 1.0f / static_cast<float>( viewWidth );
+	const float inverseHeight = 1.0f / static_cast<float>( viewHeight );
+	bool foundScene = false;
+	for ( int sceneIndex = 0; sceneIndex < stats.scenePackets; ++sceneIndex ) {
+		const scenePacket_t &scene = scenes[sceneIndex];
+		if ( scene.viewDef != viewDef ) {
+			continue;
+		}
+		foundScene = true;
+		for ( int drawIndex = 0; drawIndex < scene.drawPacketCount; ++drawIndex ) {
+			const int packetIndex = scene.firstDrawPacket + drawIndex;
+			if ( packetIndex < 0 || packetIndex >= stats.drawPackets ) {
+				continue;
+			}
+			const drawPacket_t &packet = drawPackets[packetIndex];
+			if ( !R_ScenePackets_TemporalVisiblePass( packet.passCategory )
+					|| !packet.hasGeometry ) {
+				continue;
+			}
+			if ( perPixelOwnership ) {
+				// The velocity pass already owned every moving surface per pixel:
+				// record what was present, but no conservative regions.
+				policy.presentDomainMask |= TemporalHistoryCore_MotionDomainBit(
+					packet.temporalMotion.domain );
+				continue;
+			}
+			unsigned int packetExactMotionDomainMask =
+				backendExactMotionDomainMask;
+			if ( packet.temporalMotion.domain == TEMPORAL_MOTION_DOMAIN_RIGID
+					&& !packet.temporalExactRigidEligible ) {
+				packetExactMotionDomainMask &=
+					~TemporalHistoryCore_MotionDomainBit(
+						TEMPORAL_MOTION_DOMAIN_RIGID );
+			}
+			TemporalHistoryCore_AddMotionOwnership( policy,
+				packet.temporalMotion, packetExactMotionDomainMask,
+				static_cast<float>( packet.scissorX1 ) * inverseWidth,
+				static_cast<float>( packet.scissorY1 ) * inverseHeight,
+				static_cast<float>( packet.scissorX2 + 1 ) * inverseWidth,
+				static_cast<float>( packet.scissorY2 + 1 ) * inverseHeight );
+		}
+	}
+
+	if ( foundScene && stats.overflow ) {
+		// Packet clipping makes a partial policy unsafe. Reject history over the
+		// full view for every object-motion domain rather than leaving clipped
+		// particles, characters, or view models with unowned stale history.
+		unsigned int overflowDomains = 0u;
+		for ( int domain = TEMPORAL_MOTION_DOMAIN_RIGID;
+				domain < TEMPORAL_MOTION_DOMAIN_COUNT; ++domain ) {
+			overflowDomains |= TemporalHistoryCore_MotionDomainBit(
+				static_cast<temporalMotionDomain_t>( domain ) );
+		}
+		policy.presentDomainMask |= overflowDomains;
+		policy.reactiveDomainMask |= overflowDomains;
+		TemporalHistoryCore_AddReactiveRegion( policy, overflowDomains,
+			0.0f, 0.0f, 1.0f, 1.0f );
+	}
+	return foundScene;
 }
 
 const char *RenderPassCategory_Name( renderPassCategory_t category ) {
@@ -1023,6 +1777,8 @@ const char *ScenePacketOverflowCause_Name( scenePacketOverflowCause_t cause ) {
 		return "geometryRecords";
 	case SCENE_PACKET_OVERFLOW_INSTANCE_RECORDS:
 		return "instanceRecords";
+	case SCENE_PACKET_OVERFLOW_SUBVIEW_CAPTURES:
+		return "subviewCaptures";
 	default:
 		return "unknown";
 	}
@@ -1071,27 +1827,45 @@ const char *GeometryResourceFallbackReason_Name( geometryResourceFallbackReason_
 }
 
 static void R_ScenePackets_EnsureFrontEndFrame( void ) {
-	if ( !rg_frontEndScenePacketFrameOpen ) {
-		rg_frontEndScenePacketFrame.Clear();
-		rg_frontEndScenePacketFrameOpen = true;
+	if ( !rg_scenePacketFramesOpen[R_ScenePackets_FrameSlot()] ) {
+		rg_scenePacketFrames[R_ScenePackets_FrameSlot()].Clear();
+		rg_scenePacketFramesOpen[R_ScenePackets_FrameSlot()] = true;
+		rg_scenePacketHistoryCommitted[R_ScenePackets_FrameSlot()] = false;
+		rg_scenePacketLastViews[R_ScenePackets_FrameSlot()] = NULL;
+		R_ClassicDeformDomain_BeginPacketFrame(
+			R_ClassicDeformDomain_CurrentFrameToken() );
 	}
-	rg_frontEndScenePacketFrame.MarkFrontEndDerived();
+	rg_scenePacketFrames[R_ScenePackets_FrameSlot()].MarkFrontEndDerived();
 }
 
 void R_ScenePackets_BeginFrame( void ) {
-	rg_frontEndScenePacketFrame.Clear();
-	rg_frontEndScenePacketFrame.MarkFrontEndDerived();
-	rg_frontEndScenePacketFrameOpen = true;
+	rg_scenePacketFrames[R_ScenePackets_FrameSlot()].Clear();
+	rg_scenePacketFrames[R_ScenePackets_FrameSlot()].MarkFrontEndDerived();
+	rg_scenePacketFramesOpen[R_ScenePackets_FrameSlot()] = true;
+	rg_scenePacketHistoryCommitted[R_ScenePackets_FrameSlot()] = false;
+	rg_scenePacketLastViews[R_ScenePackets_FrameSlot()] = NULL;
+	R_ClassicDeformDomain_BeginPacketFrame(
+		R_ClassicDeformDomain_CurrentFrameToken() );
+}
+
+void R_ScenePackets_SealFrame( void ) {
+	const int slot = R_ScenePackets_FrameSlot();
+	if ( rg_scenePacketFramesOpen[slot] && !rg_scenePacketHistoryCommitted[slot] ) {
+		R_ScenePackets_CommitTemporalInstanceHistory( rg_scenePacketFrames[slot] );
+		rg_scenePacketHistoryCommitted[slot] = true;
+	}
 }
 
 void R_ScenePackets_EndFrame( void ) {
-	if ( !rg_frontEndScenePacketFrameOpen ) {
+	if ( !rg_scenePacketFramesOpen[R_ScenePackets_FrameSlot()] ) {
 		// Frame was never opened (capture off): last operation was already a
 		// Clear() from the constructor or a prior EndFrame, nothing to do.
 		return;
 	}
-	rg_frontEndScenePacketFrame.Clear();
-	rg_frontEndScenePacketFrameOpen = false;
+	R_ScenePackets_SealFrame();
+	rg_scenePacketFrames[R_ScenePackets_FrameSlot()].Clear();
+	rg_scenePacketFramesOpen[R_ScenePackets_FrameSlot()] = false;
+	rg_scenePacketLastViews[R_ScenePackets_FrameSlot()] = NULL;
 }
 
 typedef bool (*scenePacketDrawSurfFilter_t)( const viewDef_t *viewDef, const drawSurf_t *drawSurf );
@@ -1250,7 +2024,13 @@ static bool R_ScenePackets_DrawSurfAmbientEligible( const viewDef_t *viewDef, co
 		return false;
 	}
 	const idMaterial *material = drawSurf->material;
-	if ( !material->HasAmbient() || material->IsPortalSky() || material->SuppressInSubview() ) {
+	// Clustered PBR and the qualified classic diffuse contract use one stable
+	// ambient packet to own the complete light list, even when the declaration
+	// contains no legacy ambient stage. The resource table and draw plan still
+	// validate the full contract; rejected views retain their native owner.
+	if ( ( !material->HasAmbient() && !material->HasPBR()
+			&& !R_MaterialResourceTable_ClassicFixedMaterialEligible( material ) )
+			|| material->IsPortalSky() || material->SuppressInSubview() ) {
 		return false;
 	}
 	if ( r_skipDecals.GetBool() && R_ScenePackets_DrawSurfIsDecalMaterialPass( drawSurf ) ) {
@@ -1308,19 +2088,36 @@ static bool R_ScenePackets_DrawSurfGUIEligible( const viewDef_t *viewDef, const 
 	return material->HasAmbient() && !material->IsPortalSky();
 }
 
+static bool R_ScenePackets_DrawSurfInWorldGUIEligible( const viewDef_t *viewDef,
+		const drawSurf_t *drawSurf ) {
+	return drawSurf != NULL && ( drawSurf->dsFlags & DSF_IN_WORLD_GUI ) != 0
+		&& R_ScenePackets_DrawSurfGUIEligible( viewDef, drawSurf );
+}
+
+// Preserve an empty GUI pass only when the front end actually emitted a
+// provenance-tagged surface.  That lets the ownership domain diagnose a
+// malformed or otherwise ineligible tagged surface and fall back as a whole,
+// without adding a synthetic GUI pass to every ordinary world view.
+static bool R_ScenePackets_HasInWorldGUIDrawSurfs( const viewDef_t *viewDef ) {
+	if ( viewDef == NULL || viewDef->drawSurfs == NULL || viewDef->numDrawSurfs <= 0 ) {
+		return false;
+	}
+
+	for ( int i = 0; i < viewDef->numDrawSurfs; ++i ) {
+		const drawSurf_t *drawSurf = viewDef->drawSurfs[i];
+		if ( drawSurf != NULL && ( drawSurf->dsFlags & DSF_IN_WORLD_GUI ) != 0 ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool R_ScenePackets_DrawSurfInteractionEligible( const drawSurf_t *drawSurf ) {
 	if ( !R_ScenePackets_DrawSurfHasMaterialGeometry( drawSurf ) ) {
 		return false;
 	}
 	const idMaterial *material = drawSurf->material;
 	return material->ReceivesLighting() && !material->IsPortalSky();
-}
-
-static bool R_ScenePackets_DrawSurfFogBlendEligible( const drawSurf_t *drawSurf ) {
-	if ( !R_ScenePackets_DrawSurfHasMaterialGeometry( drawSurf ) ) {
-		return false;
-	}
-	return drawSurf->material->ReceivesFog() && !drawSurf->material->SuppressInSubview();
 }
 
 static bool R_ScenePackets_DrawSurfShadowEligible( const drawSurf_t *drawSurf ) {
@@ -1365,35 +2162,65 @@ static int R_ScenePackets_CountDrawSurfChain( const drawSurf_t *drawSurf, bool (
 	return count;
 }
 
-static bool R_ScenePackets_AppendDrawSurfChain( idScenePacketFrame &packetFrame, const drawSurf_t *drawSurf, renderPassCategory_t category, bool ( *filter )( const drawSurf_t *drawSurf ), int &drawIndex ) {
-	for ( const drawSurf_t *cursor = drawSurf; cursor != NULL; cursor = cursor->nextOnLight ) {
+static bool R_ScenePackets_AppendInteractionChain( idScenePacketFrame &packetFrame,
+		const viewLight_t *viewLight, int lightOrdinal,
+		const drawSurf_t *drawSurf, sceneInteractionReceiverClass_t receiverClass,
+		bool ( *filter )( const drawSurf_t *drawSurf ), int &drawIndex ) {
+	int receiverOrdinal = 0;
+	for ( const drawSurf_t *cursor = drawSurf; cursor != NULL;
+			cursor = cursor->nextOnLight, ++receiverOrdinal ) {
 		if ( filter != NULL && !filter( cursor ) ) {
 			continue;
 		}
-		if ( !packetFrame.AddDrawPacket( cursor, category, drawIndex++ ) ) {
-			packetFrame.AddClippedDrawPackets( R_ScenePackets_CountDrawSurfChain( cursor->nextOnLight, filter ) );
+		if ( !packetFrame.AddInteractionDrawPacket( cursor, drawIndex++, viewLight,
+				lightOrdinal, receiverClass, receiverOrdinal ) ) {
+			packetFrame.AddClippedDrawPackets(
+				R_ScenePackets_CountDrawSurfChain( cursor->nextOnLight, filter ) );
 			return false;
 		}
 	}
 	return true;
 }
 
-static bool R_ScenePackets_AppendDrawSurfChainLazyPass( idScenePacketFrame &packetFrame, const drawSurf_t *drawSurf, renderPassCategory_t category, bool ( *filter )( const drawSurf_t *drawSurf ), int &drawIndex, bool &passAdded ) {
-	for ( const drawSurf_t *cursor = drawSurf; cursor != NULL; cursor = cursor->nextOnLight ) {
+static bool R_ScenePackets_AppendFogBlendChain(
+		idScenePacketFrame &packetFrame, const viewLight_t *viewLight,
+		int lightOrdinal, const drawSurf_t *drawSurf,
+		sceneFogBlendReceiverClass_t receiverClass, int &drawIndex ) {
+	int receiverOrdinal = 0;
+	for ( const drawSurf_t *cursor = drawSurf; cursor != NULL;
+			cursor = cursor->nextOnLight, ++receiverOrdinal ) {
+		if ( !packetFrame.AddFogBlendDrawPacket( cursor, drawIndex++, viewLight,
+				lightOrdinal, receiverClass, receiverOrdinal ) ) {
+			packetFrame.AddClippedDrawPackets(
+				R_ScenePackets_CountDrawSurfChain( cursor->nextOnLight, NULL ) );
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool R_ScenePackets_AppendShadowChainLazyPass(
+		idScenePacketFrame &packetFrame, const viewLight_t *viewLight,
+		int lightOrdinal, const drawSurf_t *drawSurf,
+		renderPassCategory_t category, sceneShadowCasterClass_t casterClass,
+		bool ( *filter )( const drawSurf_t *drawSurf ), int &drawIndex,
+		bool &passAdded ) {
+	int chainOrdinal = 0;
+	for ( const drawSurf_t *cursor = drawSurf; cursor != NULL;
+			cursor = cursor->nextOnLight, ++chainOrdinal ) {
 		if ( filter != NULL && !filter( cursor ) ) {
 			continue;
 		}
-		// Pass existence drives executor ownership and legacy-skip decisions,
-		// so the pass is only opened once a surf actually passes the filter;
-		// AddDrawPacket would otherwise append into the previously open pass.
 		if ( !passAdded ) {
 			if ( !packetFrame.AddPass( category, true ) ) {
 				return false;
 			}
 			passAdded = true;
 		}
-		if ( !packetFrame.AddDrawPacket( cursor, category, drawIndex++ ) ) {
-			packetFrame.AddClippedDrawPackets( R_ScenePackets_CountDrawSurfChain( cursor->nextOnLight, filter ) );
+		if ( !packetFrame.AddShadowDrawPacket( cursor, category, drawIndex++,
+				viewLight, lightOrdinal, casterClass, chainOrdinal ) ) {
+			packetFrame.AddClippedDrawPackets(
+				R_ScenePackets_CountDrawSurfChain( cursor->nextOnLight, filter ) );
 			return false;
 		}
 	}
@@ -1441,26 +2268,28 @@ static bool R_ScenePackets_ViewLightCanCastShadows( const viewLight_t *vLight ) 
 	if ( !r_shadows.GetBool() || !vLight->lightShader->LightCastsShadows() ) {
 		return false;
 	}
-	if ( vLight->lightDef != NULL && ( vLight->lightDef->parms.noShadows || vLight->lightDef->parms.noDynamicShadows ) ) {
+	if ( vLight->lightDef != NULL && vLight->lightDef->parms.noShadows ) {
 		return false;
 	}
 	return true;
+}
+
+static bool R_ScenePackets_ViewLightCanUseShadowMaps( const viewLight_t *vLight ) {
+	if ( !R_ScenePackets_ViewLightCanCastShadows( vLight ) ) {
+		return false;
+	}
+	// noDynamicShadows still permits dmap's optimized static/prelight stencil
+	// volumes. It only excludes the dynamic/map caster path.
+	return vLight->lightDef == NULL
+		|| !vLight->lightDef->parms.noDynamicShadows;
 }
 
 static bool R_ScenePackets_ViewLightIsFogOrBlend( const viewLight_t *vLight ) {
 	if ( vLight == NULL || vLight->lightShader == NULL ) {
 		return false;
 	}
-	if ( !vLight->lightShader->IsFogLight() && !vLight->lightShader->IsBlendLight() ) {
-		return false;
-	}
-	if ( r_skipFogLights.GetBool() ) {
-		return false;
-	}
-	if ( vLight->lightShader->IsBlendLight() && r_skipBlendLights.GetBool() ) {
-		return false;
-	}
-	return true;
+	return vLight->lightShader->IsFogLight()
+		|| vLight->lightShader->IsBlendLight();
 }
 
 static void R_ScenePackets_AddInteractionPass( idScenePacketFrame &packetFrame, const viewDef_t *viewDef ) {
@@ -1469,17 +2298,29 @@ static void R_ScenePackets_AddInteractionPass( idScenePacketFrame &packetFrame, 
 	}
 
 	int drawIndex = 0;
-	for ( const viewLight_t *vLight = viewDef->viewLights; vLight != NULL; vLight = vLight->next ) {
+	int lightOrdinal = 0;
+	for ( const viewLight_t *vLight = viewDef->viewLights; vLight != NULL;
+			vLight = vLight->next, ++lightOrdinal ) {
 		if ( !R_ScenePackets_ViewLightHasMaterialInteractions( vLight ) ) {
 			continue;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChain( packetFrame, vLight->localInteractions, RENDER_PASS_ARB2_INTERACTION, R_ScenePackets_DrawSurfInteractionEligible, drawIndex ) ) {
+		if ( !R_ScenePackets_AppendInteractionChain( packetFrame, vLight,
+				lightOrdinal, vLight->localInteractions,
+				SCENE_INTERACTION_RECEIVER_LOCAL,
+				R_ScenePackets_DrawSurfInteractionEligible, drawIndex ) ) {
 			return;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChain( packetFrame, vLight->globalInteractions, RENDER_PASS_ARB2_INTERACTION, R_ScenePackets_DrawSurfInteractionEligible, drawIndex ) ) {
+		if ( !R_ScenePackets_AppendInteractionChain( packetFrame, vLight,
+				lightOrdinal, vLight->globalInteractions,
+				SCENE_INTERACTION_RECEIVER_GLOBAL,
+				R_ScenePackets_DrawSurfInteractionEligible, drawIndex ) ) {
 			return;
 		}
-		if ( !r_skipTranslucent.GetBool() && !R_ScenePackets_AppendDrawSurfChain( packetFrame, vLight->translucentInteractions, RENDER_PASS_ARB2_INTERACTION, R_ScenePackets_DrawSurfInteractionEligible, drawIndex ) ) {
+		if ( !r_skipTranslucent.GetBool()
+				&& !R_ScenePackets_AppendInteractionChain( packetFrame, vLight,
+					lightOrdinal, vLight->translucentInteractions,
+					SCENE_INTERACTION_RECEIVER_TRANSLUCENT,
+					R_ScenePackets_DrawSurfInteractionEligible, drawIndex ) ) {
 			return;
 		}
 	}
@@ -1492,26 +2333,57 @@ static void R_ScenePackets_AddShadowMapPass( idScenePacketFrame &packetFrame, co
 
 	bool passAdded = false;
 	int drawIndex = 0;
-	for ( const viewLight_t *vLight = viewDef->viewLights; vLight != NULL; vLight = vLight->next ) {
-		if ( !R_ScenePackets_ViewLightCanCastShadows( vLight ) ) {
+	int lightOrdinal = 0;
+	for ( const viewLight_t *vLight = viewDef->viewLights; vLight != NULL;
+			vLight = vLight->next, ++lightOrdinal ) {
+		if ( !R_ScenePackets_ViewLightHasMaterialInteractions( vLight )
+				|| !R_ScenePackets_ViewLightCanUseShadowMaps( vLight ) ) {
 			continue;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChainLazyPass( packetFrame, vLight->globalShadowMapCasters, RENDER_PASS_SHADOW_MAP, R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
+		if ( !R_ScenePackets_AppendShadowChainLazyPass( packetFrame, vLight,
+				lightOrdinal, vLight->globalShadowMapCasters,
+				RENDER_PASS_SHADOW_MAP, SCENE_SHADOW_CASTER_MAP_GLOBAL_STATIC,
+				R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
 			return;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChainLazyPass( packetFrame, vLight->localShadowMapCasters, RENDER_PASS_SHADOW_MAP, R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
+		if ( !R_ScenePackets_AppendShadowChainLazyPass( packetFrame, vLight,
+				lightOrdinal, vLight->localShadowMapCasters,
+				RENDER_PASS_SHADOW_MAP, SCENE_SHADOW_CASTER_MAP_LOCAL_STATIC,
+				R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
 			return;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChainLazyPass( packetFrame, vLight->globalTranslucentShadowMapCasters, RENDER_PASS_SHADOW_MAP, R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
+		if ( !R_ScenePackets_AppendShadowChainLazyPass( packetFrame, vLight,
+				lightOrdinal, vLight->globalShadowMapDynamicCasters,
+				RENDER_PASS_SHADOW_MAP, SCENE_SHADOW_CASTER_MAP_GLOBAL_DYNAMIC,
+				R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
 			return;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChainLazyPass( packetFrame, vLight->localTranslucentShadowMapCasters, RENDER_PASS_SHADOW_MAP, R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
+		if ( !R_ScenePackets_AppendShadowChainLazyPass( packetFrame, vLight,
+				lightOrdinal, vLight->localShadowMapDynamicCasters,
+				RENDER_PASS_SHADOW_MAP, SCENE_SHADOW_CASTER_MAP_LOCAL_DYNAMIC,
+				R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
 			return;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChainLazyPass( packetFrame, vLight->globalShadows, RENDER_PASS_SHADOW_MAP, R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
+		if ( !R_ScenePackets_AppendShadowChainLazyPass( packetFrame, vLight,
+				lightOrdinal, vLight->globalTranslucentShadowMapCasters,
+				RENDER_PASS_SHADOW_MAP,
+				SCENE_SHADOW_CASTER_MAP_GLOBAL_TRANSLUCENT,
+				R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
 			return;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChainLazyPass( packetFrame, vLight->localShadows, RENDER_PASS_SHADOW_MAP, R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
+		if ( !R_ScenePackets_AppendShadowChainLazyPass( packetFrame, vLight,
+				lightOrdinal, vLight->localTranslucentShadowMapCasters,
+				RENDER_PASS_SHADOW_MAP,
+				SCENE_SHADOW_CASTER_MAP_LOCAL_TRANSLUCENT,
+				R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded )
+				|| !R_ScenePackets_AppendShadowChainLazyPass( packetFrame, vLight,
+					lightOrdinal, vLight->globalShadowMapStencilSupplements,
+					RENDER_PASS_SHADOW_MAP, SCENE_SHADOW_CASTER_SUPPLEMENT_GLOBAL,
+					R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded )
+				|| !R_ScenePackets_AppendShadowChainLazyPass( packetFrame, vLight,
+					lightOrdinal, vLight->localShadowMapStencilSupplements,
+					RENDER_PASS_SHADOW_MAP, SCENE_SHADOW_CASTER_SUPPLEMENT_LOCAL,
+					R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
 			return;
 		}
 	}
@@ -1524,14 +2396,23 @@ static void R_ScenePackets_AddStencilShadowPass( idScenePacketFrame &packetFrame
 
 	bool passAdded = false;
 	int drawIndex = 0;
-	for ( const viewLight_t *vLight = viewDef->viewLights; vLight != NULL; vLight = vLight->next ) {
-		if ( !R_ScenePackets_ViewLightCanCastShadows( vLight ) ) {
+	int lightOrdinal = 0;
+	for ( const viewLight_t *vLight = viewDef->viewLights; vLight != NULL;
+			vLight = vLight->next, ++lightOrdinal ) {
+		if ( !R_ScenePackets_ViewLightHasMaterialInteractions( vLight )
+				|| !R_ScenePackets_ViewLightCanCastShadows( vLight ) ) {
 			continue;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChainLazyPass( packetFrame, vLight->globalShadows, RENDER_PASS_STENCIL_SHADOW, R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
+		if ( !R_ScenePackets_AppendShadowChainLazyPass( packetFrame, vLight,
+				lightOrdinal, vLight->globalShadows, RENDER_PASS_STENCIL_SHADOW,
+				SCENE_SHADOW_CASTER_STENCIL_GLOBAL,
+				R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
 			return;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChainLazyPass( packetFrame, vLight->localShadows, RENDER_PASS_STENCIL_SHADOW, R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
+		if ( !R_ScenePackets_AppendShadowChainLazyPass( packetFrame, vLight,
+				lightOrdinal, vLight->localShadows, RENDER_PASS_STENCIL_SHADOW,
+				SCENE_SHADOW_CASTER_STENCIL_LOCAL,
+				R_ScenePackets_DrawSurfShadowEligible, drawIndex, passAdded ) ) {
 			return;
 		}
 	}
@@ -1543,14 +2424,20 @@ static void R_ScenePackets_AddFogBlendPass( idScenePacketFrame &packetFrame, con
 	}
 
 	int drawIndex = 0;
-	for ( const viewLight_t *vLight = viewDef->viewLights; vLight != NULL; vLight = vLight->next ) {
+	int lightOrdinal = 0;
+	for ( const viewLight_t *vLight = viewDef->viewLights; vLight != NULL;
+			vLight = vLight->next, ++lightOrdinal ) {
 		if ( !R_ScenePackets_ViewLightIsFogOrBlend( vLight ) ) {
 			continue;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChain( packetFrame, vLight->globalInteractions, RENDER_PASS_FOG_BLEND, R_ScenePackets_DrawSurfFogBlendEligible, drawIndex ) ) {
+		if ( !R_ScenePackets_AppendFogBlendChain( packetFrame, vLight,
+				lightOrdinal, vLight->globalInteractions,
+				SCENE_FOG_BLEND_RECEIVER_GLOBAL, drawIndex ) ) {
 			return;
 		}
-		if ( !R_ScenePackets_AppendDrawSurfChain( packetFrame, vLight->localInteractions, RENDER_PASS_FOG_BLEND, R_ScenePackets_DrawSurfFogBlendEligible, drawIndex ) ) {
+		if ( !R_ScenePackets_AppendFogBlendChain( packetFrame, vLight,
+				lightOrdinal, vLight->localInteractions,
+				SCENE_FOG_BLEND_RECEIVER_LOCAL, drawIndex ) ) {
 			return;
 		}
 	}
@@ -1653,6 +2540,10 @@ static void R_ScenePackets_AddDrawView( idScenePacketFrame &packetFrame, const v
 		R_ScenePackets_AddStencilShadowPass( packetFrame, viewDef );
 		R_ScenePackets_AddInteractionPass( packetFrame, viewDef );
 		R_ScenePackets_AddFilteredDrawSurfPass( packetFrame, viewDef, RENDER_PASS_AMBIENT, R_ScenePackets_DrawSurfAmbientEligible );
+		if ( r_rendererSharedInWorldGui.GetBool()
+				&& R_ScenePackets_HasInWorldGUIDrawSurfs( viewDef ) ) {
+			R_ScenePackets_AddFilteredDrawSurfPass( packetFrame, viewDef, RENDER_PASS_GUI, R_ScenePackets_DrawSurfInWorldGUIEligible );
+		}
 		R_ScenePackets_AddFilteredDrawSurfPass( packetFrame, viewDef, RENDER_PASS_LIGHT_GRID, R_ScenePackets_DrawSurfLightGridEligible );
 		R_ScenePackets_AddFogBlendPass( packetFrame, viewDef );
 		R_ScenePackets_AddRootPostProcessPasses( packetFrame, viewDef );
@@ -1675,56 +2566,113 @@ static void R_ScenePackets_AddCommandPass( idScenePacketFrame &packetFrame, rend
 
 void R_ScenePackets_AddRenderView( const viewDef_t *viewDef ) {
 	R_ScenePackets_EnsureFrontEndFrame();
-	R_ScenePackets_AddDrawView( rg_frontEndScenePacketFrame, viewDef, false );
+	R_ScenePackets_AddDrawView( rg_scenePacketFrames[R_ScenePackets_FrameSlot()], viewDef, false );
+	rg_scenePacketLastViews[R_ScenePackets_FrameSlot()] = viewDef;
 }
 
-void R_ScenePackets_AddSpecialEffects( const viewDef_t *viewDef ) {
+void R_ScenePackets_AddSpecialEffects( const viewDef_t *viewDef,
+		int specialEffectsMask ) {
 	R_ScenePackets_EnsureFrontEndFrame();
-	R_ScenePackets_AddCommandPass( rg_frontEndScenePacketFrame, RENDER_PASS_SPECIAL_EFFECTS, viewDef, false );
+	R_ScenePackets_AddCommandPass( rg_scenePacketFrames[R_ScenePackets_FrameSlot()], RENDER_PASS_SPECIAL_EFFECTS, viewDef, false );
+	rg_scenePacketFrames[R_ScenePackets_FrameSlot()].SetLastSceneSpecialEffectsMask(
+		specialEffectsMask );
+	rg_scenePacketLastViews[R_ScenePackets_FrameSlot()] = NULL;
 }
 
 void R_ScenePackets_AddRenderTargetOp( void ) {
 	R_ScenePackets_EnsureFrontEndFrame();
-	R_ScenePackets_AddCommandPass( rg_frontEndScenePacketFrame, RENDER_PASS_AUTHORED_POST, NULL, false );
+	R_ScenePackets_AddCommandPass( rg_scenePacketFrames[R_ScenePackets_FrameSlot()], RENDER_PASS_AUTHORED_POST, NULL, false );
+	rg_scenePacketLastViews[R_ScenePackets_FrameSlot()] = NULL;
 }
 
-void R_ScenePackets_AddCopyRender( void ) {
+void R_ScenePackets_AddCopyRender( idImage *image, int x, int y,
+		int width, int height, int cubeFace, bool copyDepth ) {
 	R_ScenePackets_EnsureFrontEndFrame();
-	R_ScenePackets_AddCommandPass( rg_frontEndScenePacketFrame, RENDER_PASS_AUTHORED_POST, NULL, false );
+	R_ScenePackets_AddCommandPass( rg_scenePacketFrames[R_ScenePackets_FrameSlot()], RENDER_PASS_AUTHORED_POST, NULL, false );
+	if ( rg_scenePacketLastViews[R_ScenePackets_FrameSlot()] != NULL && rg_scenePacketLastViews[R_ScenePackets_FrameSlot()]->isSubview ) {
+		rg_scenePacketFrames[R_ScenePackets_FrameSlot()].AddSubviewCapture( rg_scenePacketLastViews[R_ScenePackets_FrameSlot()],
+			image, x, y, width, height, cubeFace, copyDepth );
+	}
+	// A capture can belong to exactly one immediately preceding subview draw.
+	rg_scenePacketLastViews[R_ScenePackets_FrameSlot()] = NULL;
 }
 
 void R_ScenePackets_AddPresent( void ) {
 	R_ScenePackets_EnsureFrontEndFrame();
-	R_ScenePackets_AddCommandPass( rg_frontEndScenePacketFrame, RENDER_PASS_PRESENT, NULL, false );
+	R_ScenePackets_AddCommandPass( rg_scenePacketFrames[R_ScenePackets_FrameSlot()], RENDER_PASS_PRESENT, NULL, false );
+	rg_scenePacketLastViews[R_ScenePackets_FrameSlot()] = NULL;
 }
 
 void R_ScenePackets_AddCommandOnly( void ) {
 	R_ScenePackets_EnsureFrontEndFrame();
-	rg_frontEndScenePacketFrame.AddCommandPacket();
+	rg_scenePacketFrames[R_ScenePackets_FrameSlot()].AddCommandPacket();
+	rg_scenePacketLastViews[R_ScenePackets_FrameSlot()] = NULL;
 }
 
 const idScenePacketFrame &R_ScenePackets_FrontEndFrame( void ) {
-	return rg_frontEndScenePacketFrame;
+	return rg_scenePacketFrames[R_ScenePackets_FrameSlot()];
 }
 
 bool R_ScenePackets_FrontEndFrameAvailable( void ) {
-	const scenePacketFrameStats_t &stats = rg_frontEndScenePacketFrame.Stats();
-	return rg_frontEndScenePacketFrameOpen
+	const scenePacketFrameStats_t &stats = rg_scenePacketFrames[R_ScenePackets_FrameSlot()].Stats();
+	return rg_scenePacketFramesOpen[R_ScenePackets_FrameSlot()]
 		&& stats.frontEndDerived
 		&& ( stats.scenePackets > 0 || stats.passPackets > 0 || stats.drawPackets > 0 || stats.commandPackets > 0 );
+}
+
+bool R_ScenePackets_BuildTemporalViewMotionPolicy( const viewDef_t *viewDef,
+		unsigned int backendExactMotionDomainMask,
+		temporalViewMotionPolicy_t &policy, bool perPixelOwnership ) {
+	policy = TemporalHistoryCore_BeginViewMotionPolicy();
+	return R_ScenePackets_FrontEndFrameAvailable()
+		&& rg_scenePacketFrames[R_ScenePackets_FrameSlot()].BuildTemporalViewMotionPolicy( viewDef,
+			backendExactMotionDomainMask, policy, perPixelOwnership );
+}
+
+/*
+==================
+R_ScenePackets_CommandStreamHasPBR
+
+PBR materials default on, but stock content has none: the per-frame packet,
+material-table and probe preparation they need is skipped for every frame
+that draws no PBR-authored material.
+==================
+*/
+bool R_ScenePackets_CommandStreamHasPBR( const emptyCommand_t *cmds ) {
+	for ( const emptyCommand_t *cmd = cmds; cmd != NULL; cmd = reinterpret_cast<const emptyCommand_t *>( cmd->next ) ) {
+		if ( cmd->commandId != RC_DRAW_VIEW ) {
+			continue;
+		}
+		const viewDef_t *viewDef = reinterpret_cast<const drawSurfsCommand_t *>( cmd )->viewDef;
+		if ( viewDef == NULL || viewDef->drawSurfs == NULL ) {
+			continue;
+		}
+		for ( int i = 0; i < viewDef->numDrawSurfs; i++ ) {
+			const drawSurf_t *surf = viewDef->drawSurfs[i];
+			if ( surf != NULL && surf->material != NULL && surf->material->HasPBR() ) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 void R_ScenePackets_BuildLegacyCommandStream( const emptyCommand_t *cmds, idScenePacketFrame &packetFrame ) {
 	packetFrame.Clear();
 	packetFrame.MarkBackendDerived();
+	const viewDef_t *lastDrawView = NULL;
 
 	for ( const emptyCommand_t *cmd = cmds; cmd != NULL; cmd = reinterpret_cast<const emptyCommand_t *>( cmd->next ) ) {
 		switch ( cmd->commandId ) {
 		case RC_DRAW_VIEW:
-			R_ScenePackets_AddDrawView( packetFrame, reinterpret_cast<const drawSurfsCommand_t *>( cmd )->viewDef, true );
+			lastDrawView = reinterpret_cast<const drawSurfsCommand_t *>( cmd )->viewDef;
+			R_ScenePackets_AddDrawView( packetFrame, lastDrawView, true );
 			break;
 		case RC_DRAW_SPECIAL_EFFECTS:
-			R_ScenePackets_AddCommandPass( packetFrame, RENDER_PASS_SPECIAL_EFFECTS, reinterpret_cast<const drawSurfsCommand_t *>( cmd )->viewDef, true );
+			R_ScenePackets_AddCommandPass( packetFrame, RENDER_PASS_SPECIAL_EFFECTS, reinterpret_cast<const drawSpecialEffectsCommand_t *>( cmd )->viewDef, true );
+			packetFrame.SetLastSceneSpecialEffectsMask(
+				reinterpret_cast<const drawSpecialEffectsCommand_t *>( cmd )->effects.enabled );
+			lastDrawView = NULL;
 			break;
 		case RC_SET_RENDERTEXTURE:
 		case RC_RESOLVE_MSAA:
@@ -1733,17 +2681,29 @@ void R_ScenePackets_BuildLegacyCommandStream( const emptyCommand_t *cmds, idScen
 		case RC_SET_POSTPROCESS_SOURCE_COLOR_SPACE:
 		case RC_SET_POSTPROCESS_SMAA_QUALITY:
 			R_ScenePackets_AddCommandPass( packetFrame, RENDER_PASS_AUTHORED_POST, NULL, true );
+			lastDrawView = NULL;
 			break;
 		case RC_COPY_RENDER:
 			R_ScenePackets_AddCommandPass( packetFrame, RENDER_PASS_AUTHORED_POST, NULL, true );
+			if ( lastDrawView != NULL && lastDrawView->isSubview ) {
+				const copyRenderCommand_t *copy =
+					reinterpret_cast<const copyRenderCommand_t *>( cmd );
+				packetFrame.AddSubviewCapture( lastDrawView, copy->image,
+					copy->x, copy->y, copy->imageWidth, copy->imageHeight,
+					copy->cubeFace, copy->copyDepth );
+			}
+			lastDrawView = NULL;
 			break;
 		case RC_SET_BUFFER:
 			packetFrame.AddCommandPacket();
+			lastDrawView = NULL;
 			break;
 		case RC_SWAP_BUFFERS:
 			R_ScenePackets_AddCommandPass( packetFrame, RENDER_PASS_PRESENT, NULL, true );
+			lastDrawView = NULL;
 			break;
 		default:
+			lastDrawView = NULL;
 			break;
 		}
 	}
@@ -1756,7 +2716,7 @@ void R_ScenePackets_LogIfVerbose( const idScenePacketFrame &packetFrame ) {
 
 	const scenePacketFrameStats_t &stats = packetFrame.Stats();
 	common->Printf(
-		"scenePackets source=%s scenes=%d passes=%d draws=%d clipped=%d cmds=%d drawViews=%d materials=%d geometryRecords=%d instanceRecords=%d withMaterial=%d resources=%d geometryRecordRefs=%d instanceRefs=%d geometry=%d regs=%d indexCache=%d ambientCache=%d categories(world=%d subview=%d remote=%d fx=%d viewmodel=%d demo=%d gui=%d post=%d present=%d command=%d) sortFailures=%d overflow=%d cause=%s\n",
+		"scenePackets source=%s scenes=%d passes=%d draws=%d clipped=%d cmds=%d drawViews=%d subviewCaptures=%d materials=%d geometryRecords=%d instanceRecords=%d withMaterial=%d resources=%d geometryRecordRefs=%d instanceRefs=%d geometry=%d regs=%d indexCache=%d ambientCache=%d deformRecords=%d deform(material=%d finalized=%d interaction=%d fog=%d shadowVolume=%d other=%d completed=%d empty=%d notApplicable=%d skipped=%d failed=%d unsupported=%d fallback=%d) categories(world=%d subview=%d remote=%d fx=%d viewmodel=%d demo=%d gui=%d post=%d present=%d command=%d) sortFailures=%d overflow=%d cause=%s\n",
 		stats.frontEndDerived ? "frontend" : ( stats.backendDerived ? "backend" : "unknown" ),
 		stats.scenePackets,
 		stats.passPackets,
@@ -1764,6 +2724,7 @@ void R_ScenePackets_LogIfVerbose( const idScenePacketFrame &packetFrame ) {
 		stats.clippedDrawPackets,
 		stats.commandPackets,
 		stats.legacyDrawViews,
+		stats.subviewCaptures,
 		stats.materialRecords,
 		stats.geometryRecords,
 		stats.instanceRecords,
@@ -1775,6 +2736,20 @@ void R_ScenePackets_LogIfVerbose( const idScenePacketFrame &packetFrame ) {
 		stats.drawPacketsWithShaderRegisters,
 		stats.drawPacketsWithIndexCache,
 		stats.drawPacketsWithAmbientCache,
+		stats.drawPacketsWithClassicDeformRecord,
+		stats.materialDeformDrawPackets,
+		stats.deformFinalizedDrawPackets,
+		stats.deformInteractionReceiverPackets,
+		stats.deformFogReceiverPackets,
+		stats.deformShadowVolumePackets,
+		stats.deformOtherRolePackets,
+		stats.deformCompletedPackets,
+		stats.deformEmptyPackets,
+		stats.deformNotApplicablePackets,
+		stats.deformSkippedPackets,
+		stats.deformFailedPackets,
+		stats.deformUnsupportedPackets,
+		stats.deformFallbackPackets,
 		stats.worldPackets,
 		stats.subviewPackets,
 		stats.remoteCameraPackets,
@@ -1803,20 +2778,22 @@ void R_ScenePackets_LogIfVerbose( const idScenePacketFrame &packetFrame ) {
 	for ( int i = 0; i < materialRecordLogCount; ++i ) {
 		const materialResourceRecord_t &record = packetFrame.MaterialRecord( i );
 		common->Printf(
-			"scenePackets material[%d]=%s class=%s diffuse=%s normal=%s specular=%s table=%d\n",
+			"scenePackets material[%d]=%s class=%s diffuse=%s normal=%s specular=%s pbr=%d workflow=%d table=%d\n",
 			i,
 			record.material ? record.material->GetName() : "<null>",
 			RendererMaterialClass_Name( static_cast<rendererMaterialClass_t>( record.permutation.materialClass ) ),
 			record.diffuseImage ? record.diffuseImage->GetName() : "<none>",
 			record.normalImage ? record.normalImage->GetName() : "<none>",
 			record.specularImage ? record.specularImage->GetName() : "<none>",
+			record.hasPBR ? 1 : 0,
+			record.pbrWorkflow,
 			record.resourceTableIndex );
 	}
 	const int geometryRecordLogCount = Min( packetFrame.NumGeometryRecords(), 8 );
 	for ( int i = 0; i < geometryRecordLogCount; ++i ) {
 		const geometryResourceRecord_t &record = packetFrame.GeometryRecord( i );
 		common->Printf(
-			"scenePackets geometry[%d]=verts:%d indexes:%d vbo:%d@%d ibo:%d@%d lifetime=%d skin=%d deform=%d fallback=%s flags=0x%x bounds=%s\n",
+			"scenePackets geometry[%d]=verts:%d indexes:%d vbo:%d@%d ibo:%d@%d lifetime=%d skin=%d deform=%d contract=%s/%s/%s fresh=%d hash=%llu fallback=%s flags=0x%x bounds=%s\n",
 			i,
 			record.vertexCount,
 			record.indexCount,
@@ -1827,6 +2804,11 @@ void R_ScenePackets_LogIfVerbose( const idScenePacketFrame &packetFrame ) {
 			record.uploadLifetime,
 			record.skinningMode,
 			record.deformMode,
+			ClassicDeformRole_Name( record.classicDeform.role ),
+			ClassicDeformKind_Name( record.classicDeform.kind ),
+			ClassicDeformOutcome_Name( record.classicDeform.outcome ),
+			record.hasClassicDeformRecord ? 1 : 0,
+			static_cast<unsigned long long>( record.classicDeform.semanticHash ),
 			GeometryResourceFallbackReason_Name( record.fallbackReason ),
 			record.fallbackFlags,
 			record.hasBounds ? "yes" : "no" );
@@ -1892,7 +2874,7 @@ bool RendererScenePacket_RunSelfTest( void ) {
 	memset( &drawCmd, 0, sizeof( drawCmd ) );
 	drawCmd.commandId = RC_DRAW_VIEW;
 	drawCmd.viewDef = &worldView;
-	drawSurfsCommand_t fxCmd;
+	drawSpecialEffectsCommand_t fxCmd;
 	memset( &fxCmd, 0, sizeof( fxCmd ) );
 	fxCmd.commandId = RC_DRAW_SPECIAL_EFFECTS;
 	fxCmd.viewDef = &worldView;
@@ -1966,7 +2948,7 @@ bool RendererScenePacket_RunSelfTest( void ) {
 
 	R_ScenePackets_BeginFrame();
 	R_ScenePackets_AddRenderView( &worldView );
-	R_ScenePackets_AddSpecialEffects( &worldView );
+	R_ScenePackets_AddSpecialEffects( &worldView, SPECIAL_EFFECT_BLUR );
 	R_ScenePackets_AddPresent();
 	const idScenePacketFrame &frontEndPacketFrame = R_ScenePackets_FrontEndFrame();
 	const scenePacketFrameStats_t &frontEndStats = frontEndPacketFrame.Stats();
@@ -2002,6 +2984,13 @@ bool RendererScenePacket_RunSelfTest( void ) {
 		R_ScenePackets_EndFrame();
 		return false;
 	}
+	if ( frontEndPacketFrame.NumScenes() < 2
+			|| frontEndPacketFrame.Scene( 1 ).specialEffectsMask
+				!= SPECIAL_EFFECT_BLUR ) {
+		common->Printf( "RendererScenePacket self-test failed: frontend special-effect mask capture mismatch\n" );
+		R_ScenePackets_EndFrame();
+		return false;
+	}
 	R_ScenePackets_EndFrame();
 
 	idScenePacketFrame postPacketFrame;
@@ -2030,6 +3019,73 @@ bool RendererScenePacket_RunSelfTest( void ) {
 		return false;
 	}
 
-	common->Printf( "RendererScenePacket self-test passed (backend, frontend, post commands)\n" );
+	// Exercise the actual material-record capture path with opt-in PBR metadata.
+	// The ambient stage makes this a drawable synthetic surface while the absent
+	// bump+diffuse interaction deliberately proves the missing-fallback bit.
+	static const char pbrPacketDeclaration[] =
+		"material _pbr_scene_packet_selftest {\n"
+		" {\n"
+		"  map _white\n"
+		" }\n"
+		" pbr {\n"
+		"  workflow metallicRoughness\n"
+		"  albedoMap _white\n"
+		"  metallic 0.35\n"
+		"  roughness 0.65\n"
+		"  ao 0.85\n"
+		"  autoLegacyFallback 0\n"
+		" }\n"
+		"}\n";
+	idDecl *pbrPacketDecl = declManager->AllocateDecl( DECL_MATERIAL );
+	if ( pbrPacketDecl == NULL ) {
+		common->Printf( "RendererScenePacket self-test failed: PBR declaration allocation\n" );
+		return false;
+	}
+	idMaterial *pbrPacketMaterial = static_cast<idMaterial *>( pbrPacketDecl );
+	bool pbrPacketValid = pbrPacketMaterial->Parse(
+		pbrPacketDeclaration,
+		idLib::SizeToInt( sizeof( pbrPacketDeclaration ) - 1, "RendererScenePacket PBR self-test" ) );
+	if ( pbrPacketValid ) {
+		drawSurf_t pbrDrawSurf;
+		memset( &pbrDrawSurf, 0, sizeof( pbrDrawSurf ) );
+		pbrDrawSurf.material = pbrPacketMaterial;
+		pbrDrawSurf.sort = pbrPacketMaterial->GetSort();
+		{
+			idScenePacketFrame pbrPacketFrame;
+			pbrPacketValid = pbrPacketFrame.AddDrawPacket( &pbrDrawSurf, RENDER_PASS_AMBIENT, 0 );
+			const drawPacket_t *pbrDrawPacket = pbrPacketValid && pbrPacketFrame.NumDrawPackets() == 1
+				? &pbrPacketFrame.DrawPacket( 0 )
+				: NULL;
+			const materialResourceRecord_t *pbrRecord = pbrDrawPacket != NULL && pbrDrawPacket->materialRecordIndex >= 0
+				? &pbrPacketFrame.MaterialRecord( pbrDrawPacket->materialRecordIndex )
+				: NULL;
+			const pbrMaterialInfo_t &pbr = pbrPacketMaterial->GetPBRInfo();
+			const int registerCount = pbrPacketMaterial->GetNumRegisters();
+			auto validRegister = [&]( int index ) -> bool { return index >= 0 && index < registerCount; };
+			pbrPacketValid = pbrRecord != NULL
+				&& pbrDrawPacket->materialRecord == pbrRecord
+				&& pbrRecord->material == pbrPacketMaterial
+				&& pbrRecord->hasPBR
+				&& pbrRecord->pbrWorkflow == static_cast<int>( pbr.workflow )
+				&& pbrRecord->pbrAlbedoImage == pbr.albedo.image
+				&& pbrRecord->pbrLegacyFallbackMissing
+				&& pbrRecord->pbrLegacyFallbackMissing == pbr.legacyFallbackMissing
+				&& pbrRecord->pbrMetallicRegister == pbr.metallicRegister
+				&& pbrRecord->pbrRoughnessRegister == pbr.roughnessRegister
+				&& pbrRecord->pbrAORegister == pbr.aoRegister
+				&& pbrRecord->pbrNormalScaleRegister == pbr.normalScaleRegister
+				&& validRegister( pbrRecord->pbrMetallicRegister )
+				&& validRegister( pbrRecord->pbrRoughnessRegister )
+				&& validRegister( pbrRecord->pbrAORegister )
+				&& validRegister( pbrRecord->pbrNormalScaleRegister );
+		}
+	}
+	DeclManager_FreeAllocatedDecl( pbrPacketDecl );
+	if ( !pbrPacketValid ) {
+		common->Printf( "RendererScenePacket self-test failed: PBR packet metadata propagation\n" );
+		return false;
+	}
+
+	common->Printf( "RendererScenePacket self-test passed (backend, frontend, post commands, PBR metadata)\n" );
 	return true;
 }

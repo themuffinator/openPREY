@@ -1224,12 +1224,15 @@ void idCollisionModelManagerLocal::BoundsForRotation( const idVec3 &origin, cons
 	for ( i = 0; i < 3; i++ ) {
 		// if the derivative changes sign along this axis during the rotation from start to end
 		if ( ( v1[i] > 0.0f && v2[i] < 0.0f ) || ( v1[i] < 0.0f && v2[i] > 0.0f ) ) {
+			// the axis is only nearly normalized: a component a hair above 1 must
+			// not take the square root of a negative number (NaN bounds)
+			const float extent = idMath::Sqrt( radiusSqr * Max( 0.0f, 1.0f - axis[i] * axis[i] ) );
 			if ( ( 0.5f * (start[i] + end[i]) - origin[i] ) > 0.0f ) {
 				bounds[0][i] = Min( start[i], end[i] );
-				bounds[1][i] = origin[i] + idMath::Sqrt( radiusSqr * ( 1.0f - axis[i] * axis[i] ) );
+				bounds[1][i] = origin[i] + extent;
 			}
 			else {
-				bounds[0][i] = origin[i] - idMath::Sqrt( radiusSqr * ( 1.0f - axis[i] * axis[i] ) );
+				bounds[0][i] = origin[i] - extent;
 				bounds[1][i] = Max( start[i], end[i] );
 			}
 		}

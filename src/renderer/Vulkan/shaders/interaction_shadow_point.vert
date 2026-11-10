@@ -1,7 +1,10 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "pbr_vertex.glsl"
+#include "point_shadow_math.glsl"
 
 // openQ4 Vulkan point-shadow-receiving interaction — vertex stage (Phase
-// F2b, docs/dev/plans/2026-07-19-vulkan-phase-f.md).
+// F2b, docs/dev/archive/2026-10-18/plans/2026-07-19-vulkan-phase-f.md).
 //
 // interaction.vert plus the point-light cube shadow vector of the GL
 // shadow_point_interaction.vs contract: worldPos comes from the model
@@ -42,6 +45,9 @@ layout(set = 6, binding = 0, std140) uniform InteractionBlock {
     vec4 diffuseColor;
     vec4 specularColor;
     vec4 flatDiffuseParams;
+    // cel banding (RB_SetCelInteractionUniform): x enabled, y band count,
+    // z hard specular, w softness; zero when the surface is not banded
+    vec4 celParams;
 } inter;
 
 layout(set = 7, binding = 1, std140) uniform ShadowBlock {
@@ -66,6 +72,12 @@ layout(location = 8) out vec3 vPointShadowVector;
 layout(location = 9) out float vShadowLightCos;
 layout(location = 10) out vec3 vViewVector;
 
+// Pack the basis into unused components so the projected receiver remains
+// within Vulkan's minimum 16 varying locations (0..15).
+layout(location = 12, component = 1) out vec3 vPBRTangent0;
+layout(location = 14, component = 1) out vec3 vPBRTangent1;
+layout(location = 15) out vec3 vPBRNormal;
+
 vec3 TangentSpaceVector(vec3 objectVector) {
     return vec3(
         dot(inTangent0, objectVector),
@@ -80,9 +92,16 @@ void main() {
     vec3 toLight = inter.localLightOrigin.xyz - position.xyz;
     vec3 toView = inter.localViewOrigin.xyz - position.xyz;
 
-    vLightVector = TangentSpaceVector(toLight);
+    vLightVector = pc.d.x > 0.5 ? toLight : TangentSpaceVector(toLight);
     vHalfAngleVector = TangentSpaceVector(normalize(toLight) + normalize(toView));
-    vViewVector = TangentSpaceVector(toView);
+    // PBR dot products use the interpolated object-space material normal.
+    vViewVector = pc.d.x > 0.5 ? toView : TangentSpaceVector(toView);
+    vPBRTangent0 = inTangent0;
+    vPBRTangent1 = inTangent1;
+    vPBRNormal = inNormal;
+    if (pc.d.x > 0.5) {
+        PBRVertexFrame(inNormal, inTangent0, inTangent1, vPBRNormal, vPBRTangent0, vPBRTangent1);
+    }
 
     vBumpTexCoord = vec2(dot(texCoord, inter.bumpMatrixS), dot(texCoord, inter.bumpMatrixT));
     vDiffuseTexCoord = vec2(dot(texCoord, inter.diffuseMatrixS), dot(texCoord, inter.diffuseMatrixT));
@@ -107,7 +126,7 @@ void main() {
         dot(vec4(inNormal, 0.0), shadow.modelRow2)));
     float shadowLightCos = max(dot(normalize(inNormal), normalize(toLight)), 0.0);
     float shadowSinTheta = sqrt(max(1.0 - shadowLightCos * shadowLightCos, 0.0));
-    float normalOffset = shadow.biasParams.w * length(pointShadowVector) * shadowSinTheta;
+    float normalOffset = shadow.biasParams.w * PointShadowRadialLength(pointShadowVector) * shadowSinTheta;
     vPointShadowVector = pointShadowVector + worldNormal * normalOffset;
     vShadowLightCos = shadowLightCos;
 

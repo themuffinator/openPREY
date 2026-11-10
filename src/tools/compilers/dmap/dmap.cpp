@@ -358,7 +358,9 @@ void Dmap( const idCmdArgs &args ) {
 			// create the collision map
 			start = Sys_Milliseconds();
 
-			collisionModelManager->LoadMap( dmapGlobals.dmapFile );
+			// A dmap compile must refresh collision data even when this map's
+			// previous .cm has already been cached by the running engine.
+			collisionModelManager->LoadMap( dmapGlobals.dmapFile, true );
 			collisionModelManager->FreeMap(NULL);
 
 			end = Sys_Milliseconds();
@@ -367,8 +369,18 @@ void Dmap( const idCmdArgs &args ) {
 		}
 
 		if ( !noAAS && !region ) {
-			// create AAS files
-			//RunAAS_f( args );
+			// rebuild the navigation meshes so AI matches the geometry that was
+			// just compiled into .proc/.cm
+			start = Sys_Milliseconds();
+
+			if ( !RunAASForMap( passedName, &args ) ) {
+				common->Warning( "AAS navigation for '%s' was not fully rebuilt; AI may not match the new geometry.",
+					passedName.c_str() );
+			}
+
+			end = Sys_Milliseconds();
+			common->Printf( "-------------------------------------\n" );
+			common->Printf( "%5.0f seconds to create AAS\n", ( end - start ) * 0.001f );
 		}
 	}
 

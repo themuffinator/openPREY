@@ -171,9 +171,20 @@ private:
 
 // RAVEN BEGIN
 // rjohnson: initialized floatvalue to prevent fpu exceptin
+// openQ4: initialize the complete token state so default-constructed parser
+// temporaries are deterministic and safe to inspect before a successful read.
 
 ID_INLINE idToken::idToken( void ) :
-	floatvalue(0.0)
+	type( 0 ),
+	subtype( 0 ),
+	line( 0 ),
+	linesCrossed( 0 ),
+	flags( 0 ),
+	intvalue( 0 ),
+	floatvalue( 0.0 ),
+	whiteSpaceStart_p( NULL ),
+	whiteSpaceEnd_p( NULL ),
+	next( NULL )
 {
 }
 
@@ -223,7 +234,7 @@ ID_INLINE int idToken::GetIntValue( void ) {
 }
 
 ID_INLINE int idToken::WhiteSpaceBeforeToken( void ) const {
-	return ( whiteSpaceEnd_p > whiteSpaceStart_p );
+	return ( whiteSpaceStart_p != NULL && whiteSpaceEnd_p != NULL && whiteSpaceEnd_p > whiteSpaceStart_p );
 }
 
 ID_INLINE void idToken::AppendDirty( const char a ) {

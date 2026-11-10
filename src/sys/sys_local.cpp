@@ -31,8 +31,10 @@ If you have questions concerning this license or the applicable additional terms
 #include "sys_local.h"
 
 const char * sysLanguageNames[] = {
-	"english", "spanish", "italian", "german", "french", "russian", 
-	"polish", "korean", "japanese", "chinese", NULL
+	"english", "spanish", "italian", "german", "french", "russian",
+	"polish", "korean", "japanese", "chinese",
+	// openQ4 additions, text only: no retail media archive exists for these.
+	"brazilian", "czech", "hungarian", "turkish", "ukrainian", NULL
 };
 
 idCVar sys_lang( "sys_lang", "english", CVAR_SYSTEM | CVAR_ARCHIVE,  "", sysLanguageNames, idCmdSystem::ArgCompletion_String<sysLanguageNames> );
@@ -285,6 +287,14 @@ void idSysLocal::DLL_GetFileName( const char *baseName, char *dllName, int maxLe
 		idStr::snPrintf( dllName, maxLength, "%s.dll", baseName );
 	} else {
 		idStr::snPrintf( dllName, maxLength, "%s" CPUSTRING ".dll", baseName );
+	}
+#elif defined( __ANDROID__ )
+	// Only lib*.so is packaged into the APK and extracted to the native library
+	// directory, so every module carries the prefix there.
+	if ( explicitGameModuleName ) {
+		idStr::snPrintf( dllName, maxLength, "lib%s.so", baseName );
+	} else {
+		idStr::snPrintf( dllName, maxLength, "lib%s" CPUSTRING ".so", baseName );
 	}
 #elif defined( __linux__ )
 	if ( explicitGameModuleName ) {

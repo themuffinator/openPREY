@@ -15,6 +15,17 @@ import sys
 import tempfile
 from pathlib import Path
 
+CONTENT_PACK_NAMES = tuple(
+    pack["name"]
+    for pack in json.loads((Path(__file__).resolve().with_name("content_packs.json")).read_text(encoding="utf-8"))["packs"]
+)
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from game_layer import PACKAGED_LAYER_GAME_DIRS, RETIRED_LAYER_GAME_DIRS  # noqa: E402
+
 
 THIN_MANIFEST_NAME = "OPENPREY-MACOS-THIN.json"
 THIN_MANIFEST_FORMAT = 1
@@ -27,7 +38,7 @@ THIN_MACHO_ARCHES = {
 }
 BUILD_TYPES = ("debug", "debugoptimized", "release", "minsize")
 GRAPHICS_BRIDGES = ("opengl", "metal")
-OPENAL_PROVIDERS = ("apple_framework", "openal_soft")
+OPENAL_PROVIDERS = ("apple_framework", "system")
 SOURCE_PROVENANCE_FIELDS = (
     "projectGitCommit",
     "projectGitDirty",
@@ -44,31 +55,70 @@ COMMON_BUILD_FIELDS = (
 )
 # libMoltenVK.dylib is a third-party Vulkan-on-Metal translation layer that
 # openPREY does not build. It ships as a genuinely universal (arm64 + x86_64)
-# binary, so the arm64 and x64 thin trees stage byte-identical copies of it and
-# it flows through as ordinary shared payload. It is deliberately NOT a
+# binary and flows through as shared payload. It is deliberately NOT a
 # CODE_KEY: lipo must not touch it, its install name must not be rewritten, and
-# it has no openPREY entry point to check. Treating it as shared payload also
-# means validate_matching_inputs() rejects two thin trees that staged different
-# MoltenVK builds, and copy_shared_payload() reproduces it byte-for-byte.
+# it has no openPREY entry point to check. Apple's ad-hoc signer can emit different
+# signature envelopes on Intel and Apple Silicon hosts, so assembly validates
+# both signed inputs and compares temporary signature-stripped copies. All
+# unsigned MoltenVK bytes must still match exactly, and copy_shared_payload()
+# reproduces the validated ARM64-host copy before final package signing.
 MOLTENVK_DYLIB_NAME = "libMoltenVK.dylib"
+OPENAL_SOFT_DYLIB_NAME = "libopenal.1.dylib"
+OPENAL_SOFT_INSTALL_NAME = f"@rpath/{OPENAL_SOFT_DYLIB_NAME}"
+OPENAL_SOFT_RELATIVE_PATH = Path("Frameworks") / OPENAL_SOFT_DYLIB_NAME
 REQUIRED_SHARED_PATHS = (
     "openPREY.icns",
     "collect_macos_support_info.sh",
     "assets/splash/prey_rt_bitmap_4001.bmp",
     "basepr/mod.json",
-    "basepr/pak0.pk4",
-    "basepr/pak1.pk4",
+    *(f"basepr/{name}" for name in CONTENT_PACK_NAMES),
     MOLTENVK_DYLIB_NAME,
+    "licenses/openal-soft/COPYING",
+    "licenses/openal-soft/LICENSE-pffft",
+    "licenses/openal-soft/LICENSE-fmt",
+    "licenses/openal-soft/LICENSE-gsl",
+    "licenses/openal-soft/SOURCE.md",
+    "licenses/openal-soft/openal-soft-1.25.2.tar.gz",
 )
 # Code files that lipo merges into one universal2 artifact. renderer-vk is the
 # macOS Vulkan renderer module; renderer-gl is not built on darwin, so it has no
 # entry here (the stale-code sweep below still rejects one if it ever appears).
-CODE_KEYS = ("client", "dedicated", "game", "renderer-vk")
+CODE_KEYS = ("client", "dedicated", "game", "renderer-vk", "openal-soft")
 # Loadable modules carry a @loader_path install name and one required export.
 MODULE_ENTRY_POINT_EXPORTS = {
     "game": "GetGameAPI",
     "renderer-vk": "GetRenderAPI",
 }
+# A game-library layer (game_layer.PACKAGED_LAYER_GAME_DIRS, q4xbase) stages its own game
+# modules beside basepr's. They are optional code keys, "q4xbase/game-sp" and
+# "q4xbase/game-mp": a layer is staged whole (both modules and its mod.json, which is shared
+# payload like basepr's) in both thin slices, or in neither.
+LAYER_MODULE_STEMS = ("game-sp", "game-mp")
+
+
+def module_stem(code_key: str) -> str:
+    """The module kind a code key names: "q4xbase/game-sp" is a game-sp module."""
+    return code_key.rsplit("/", 1)[-1]
+
+
+def layer_code_keys(layer: str) -> tuple[str, ...]:
+    return tuple(f"{layer}/{stem}" for stem in LAYER_MODULE_STEMS)
+
+
+def optional_thin_code_paths(arch: str) -> dict[str, Path]:
+    return {
+        f"{layer}/{stem}": Path(layer) / f"{stem}_{arch}.dylib"
+        for layer in PACKAGED_LAYER_GAME_DIRS
+        for stem in LAYER_MODULE_STEMS
+    }
+
+
+def optional_universal_code_paths() -> dict[str, Path]:
+    return {
+        f"{layer}/{stem}": Path(layer) / f"{stem}_{UNIVERSAL_ARCH}.dylib"
+        for layer in PACKAGED_LAYER_GAME_DIRS
+        for stem in LAYER_MODULE_STEMS
+    }
 
 
 class Universal2Error(RuntimeError):
@@ -86,6 +136,7 @@ def thin_code_paths(arch: str) -> dict[str, Path]:
         # install root; package_nightly.py is what relocates it into
         # openPREY.app/Contents/Frameworks.
         "renderer-vk": Path(f"renderer-vk_{arch}.dylib"),
+        "openal-soft": OPENAL_SOFT_RELATIVE_PATH,
     }
 
 
@@ -98,13 +149,81 @@ def universal_code_paths() -> dict[str, Path]:
         "dedicated": Path("openPREY-ded_universal2"),
         "game": Path("basepr") / "game_universal2.dylib",
         "renderer-vk": Path("renderer-vk_universal2.dylib"),
+        "openal-soft": OPENAL_SOFT_RELATIVE_PATH,
     }
 
 
 def expected_install_name(code_key: str, arch: str) -> str:
-    if code_key not in MODULE_ENTRY_POINT_EXPORTS:
+    if code_key == "openal-soft":
+        return OPENAL_SOFT_INSTALL_NAME
+    # a layer's modules keep their own file name as ID, as meson links them
+    stem = module_stem(code_key)
+    if stem not in MODULE_ENTRY_POINT_EXPORTS:
         return ""
-    return f"@loader_path/{code_key}_{arch}.dylib"
+    return f"@loader_path/{stem}_{arch}.dylib"
+
+
+def staged_code_paths(root: Path, arch: str) -> dict[str, Path]:
+    """The code files a thin tree holds: the required set plus each staged layer's modules."""
+    paths = thin_code_paths(arch)
+    optional = optional_thin_code_paths(arch)
+    for layer in PACKAGED_LAYER_GAME_DIRS:
+        keys = layer_code_keys(layer)
+        present = [key for key in keys if os.path.lexists(root / optional[key])]
+        has_manifest = os.path.lexists(root / layer / "mod.json")
+        if present or has_manifest:
+            if len(present) != len(keys) or not has_manifest:
+                needed = ", ".join([*(optional[key].as_posix() for key in keys), f"{layer}/mod.json"])
+                raise Universal2Error(f"thin macOS payload has an incomplete {layer}/ layer; it needs {needed}")
+            paths.update({key: optional[key] for key in keys})
+    return paths
+
+
+def staged_layer_keys(binaries: dict[str, object]) -> tuple[str, ...]:
+    """The optional layer code keys a thin manifest records, in a stable order."""
+    return tuple(key for key in optional_thin_code_paths("arm64") if key in binaries)
+
+
+def prepare_thin_payload(root: Path, arch: str) -> None:
+    """Normalize and re-sign loadable thin modules before provenance recording."""
+    if arch not in THIN_MACHO_ARCHES:
+        raise Universal2Error(f"unsupported thin macOS architecture: {arch}")
+    root = require_directory(root, "thin macOS install root")
+    install_name_tool = require_tool("install_name_tool")
+    codesign = require_tool("codesign")
+    expected_arches = THIN_MACHO_ARCHES[arch]
+    macho_arch = next(iter(expected_arches))
+
+    for code_key, relative in staged_code_paths(root, arch).items():
+        expected_id = expected_install_name(code_key, arch)
+        if not expected_id:
+            continue
+
+        path = require_regular_file(root / relative, f"thin macOS {code_key} binary", executable=True)
+        validate_exact_arches(path, expected_arches)
+        if install_name(path, macho_arch=macho_arch) != expected_id:
+            run_command(
+                [install_name_tool, "-id", expected_id, str(path)],
+                f"normalizing thin {arch} {code_key} install name",
+            )
+        # Meson install may rewrite the load command, invalidating a linker-
+        # produced ad-hoc signature. Sign and verify every loadable module so an
+        # already-correct ID cannot conceal an invalid signature. Universal
+        # assembly fuses these signed inputs unchanged, then normalizes and
+        # re-signs the fused output; packaging applies its final signature later.
+        run_command(
+            [codesign, "--force", "--sign", "-", str(path)],
+            f"ad-hoc signing normalized thin {arch} {code_key}",
+        )
+        run_command(
+            [codesign, "--verify", "--strict", str(path)],
+            f"verifying normalized thin {arch} {code_key} signature",
+        )
+        actual_id = install_name(path, macho_arch=macho_arch)
+        if actual_id != expected_id:
+            raise Universal2Error(
+                f"install name normalization failed for {path}: expected {expected_id!r}, found {actual_id!r}"
+            )
 
 
 def file_sha256(path: Path) -> str:
@@ -248,7 +367,7 @@ def require_module_entry_export(path: Path, *, macho_arch: str, code_key: str) -
     symbol would silently accept a module the engine can never bind.
     """
 
-    symbol = MODULE_ENTRY_POINT_EXPORTS[code_key]
+    symbol = MODULE_ENTRY_POINT_EXPORTS[module_stem(code_key)]
     completed = run_command(
         [require_tool("nm"), "-arch", macho_arch, "-gU", str(path)],
         f"reading exported symbols for {path} ({macho_arch})",
@@ -304,7 +423,7 @@ def load_source_manifest(path: Path) -> dict[str, object]:
 
 
 def classify_staged_tree(root: Path, arch: str) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
-    code_paths = thin_code_paths(arch)
+    code_paths = staged_code_paths(root, arch)
     reverse_code_paths = {path.as_posix(): key for key, path in code_paths.items()}
     expected_code_names = set(reverse_code_paths)
     code_records: dict[str, dict[str, object]] = {}
@@ -332,6 +451,11 @@ def classify_staged_tree(root: Path, arch: str) -> tuple[dict[str, dict[str, obj
         if (
             (path.parent == root and re.fullmatch(r"openPREY-(?:client|ded)_[A-Za-z0-9]+", path.name))
             or (path.parent == root / "basepr" and re.fullmatch(r"game_[A-Za-z0-9]+\.dylib", path.name))
+            or (
+                path.parent.parent == root
+                and path.parent.name in (*PACKAGED_LAYER_GAME_DIRS, *RETIRED_LAYER_GAME_DIRS)
+                and re.fullmatch(r"game-(?:sp|mp)_[A-Za-z0-9]+\.dylib", path.name)
+            )
             or (path.parent == root and re.fullmatch(r"renderer-(?:gl|vk)_[A-Za-z0-9]+\.dylib", path.name))
         ) and relative not in expected_code_names:
             raise Universal2Error(f"thin macOS payload contains a stale or mismatched code file: {relative}")
@@ -347,7 +471,7 @@ def classify_staged_tree(root: Path, arch: str) -> tuple[dict[str, dict[str, obj
         else:
             shared_records[relative] = record
 
-    missing_code = sorted(set(CODE_KEYS) - set(code_records))
+    missing_code = sorted(set(code_paths) - set(code_records))
     if missing_code:
         raise Universal2Error(f"thin macOS payload is missing required code files: {', '.join(missing_code)}")
     for code_key, relative in code_paths.items():
@@ -359,7 +483,7 @@ def collect_binary_metadata(root: Path, arch: str, deployment_target: str) -> di
     expected_arches = THIN_MACHO_ARCHES[arch]
     macho_arch = next(iter(expected_arches))
     result: dict[str, dict[str, object]] = {}
-    for code_key, relative in thin_code_paths(arch).items():
+    for code_key, relative in staged_code_paths(root, arch).items():
         path = root / relative
         validate_exact_arches(path, expected_arches)
         minimum_os = minimum_os_version(path, macho_arch=macho_arch)
@@ -373,7 +497,7 @@ def collect_binary_metadata(root: Path, arch: str, deployment_target: str) -> di
             raise Universal2Error(
                 f"install name mismatch for {path}: expected {expected_id!r}, found {actual_id!r}"
             )
-        if expected_id:
+        if module_stem(code_key) in MODULE_ENTRY_POINT_EXPORTS:
             require_module_entry_export(path, macho_arch=macho_arch, code_key=code_key)
         result[code_key] = {
             "path": relative.as_posix(),
@@ -410,7 +534,9 @@ def record_thin(args: argparse.Namespace) -> None:
     code_records, shared_records = classify_staged_tree(root, args.arch)
     source = load_source_manifest(Path(args.source_manifest))
     binary_records = collect_binary_metadata(root, args.arch, args.deployment_target)
-    for key in CODE_KEYS:
+    if set(binary_records) != set(code_records):
+        raise Universal2Error("thin code files changed while they were being recorded")
+    for key in code_records:
         if binary_records[key]["sha256"] != code_records[key]["sha256"]:
             raise Universal2Error(f"thin binary changed while it was being recorded: {code_records[key]['path']}")
     manifest = {
@@ -486,9 +612,18 @@ def validate_thin_manifest_metadata(manifest: dict[str, object], expected_arch: 
         raise Universal2Error("thin build manifest has invalid sharedFileCount")
 
     binaries = manifest.get("binaries")
-    if not isinstance(binaries, dict) or set(binaries) != set(CODE_KEYS):
+    if not isinstance(binaries, dict) or not set(CODE_KEYS) <= set(binaries):
         raise Universal2Error("thin build manifest has an invalid binary set")
-    for key, relative in thin_code_paths(expected_arch).items():
+    optional = optional_thin_code_paths(expected_arch)
+    layer_keys = set(binaries) - set(CODE_KEYS)
+    if not layer_keys <= set(optional):
+        raise Universal2Error("thin build manifest has an invalid binary set")
+    for layer in PACKAGED_LAYER_GAME_DIRS:
+        keys = set(layer_code_keys(layer))
+        if layer_keys & keys and not keys <= layer_keys:
+            raise Universal2Error(f"thin build manifest records an incomplete {layer}/ layer")
+    recorded_paths = {**thin_code_paths(expected_arch), **{key: optional[key] for key in sorted(layer_keys)}}
+    for key, relative in recorded_paths.items():
         record = binaries.get(key)
         if not isinstance(record, dict):
             raise Universal2Error(f"thin build manifest has invalid {key} binary metadata")
@@ -529,6 +664,8 @@ def validate_recorded_tree(root: Path, arch: str, manifest: dict[str, object]) -
         raise Universal2Error(f"thin shared payload changed after recording: {root}")
     binary_manifest = manifest["binaries"]
     assert isinstance(binary_manifest, dict)
+    if set(code_records) != set(binary_manifest):
+        raise Universal2Error(f"thin code files changed after recording: {root}")
     for key, record in code_records.items():
         saved = binary_manifest.get(key)
         if not isinstance(saved, dict) or any(saved.get(field) != record[field] for field in ("path", "sha256", "size", "mode")):
@@ -556,6 +693,16 @@ def validate_matching_inputs(
     mismatched_fields = [field for field in COMMON_BUILD_FIELDS if arm_manifest.get(field) != x64_manifest.get(field)]
     if mismatched_fields:
         raise Universal2Error(f"thin macOS provenance/build settings differ: {', '.join(mismatched_fields)}")
+    arm_binaries = arm_manifest["binaries"]
+    x64_binaries = x64_manifest["binaries"]
+    assert isinstance(arm_binaries, dict) and isinstance(x64_binaries, dict)
+    arm_layer_keys = staged_layer_keys(arm_binaries)
+    x64_layer_keys = staged_layer_keys(x64_binaries)
+    if arm_layer_keys != x64_layer_keys:
+        raise Universal2Error(
+            "game-layer modules must be staged in both thin slices or in neither: "
+            f"arm64={list(arm_layer_keys)} x64={list(x64_layer_keys)}"
+        )
     if arm_shared != x64_shared:
         arm_paths = set(arm_shared)
         x64_paths = set(x64_shared)
@@ -568,10 +715,7 @@ def validate_matching_inputs(
         if changed:
             details.append(f"different content/mode: {changed[:5]}")
         raise Universal2Error("thin shared payloads are not identical; " + "; ".join(details))
-    arm_binaries = arm_manifest["binaries"]
-    x64_binaries = x64_manifest["binaries"]
-    assert isinstance(arm_binaries, dict) and isinstance(x64_binaries, dict)
-    for key in CODE_KEYS:
+    for key in (*CODE_KEYS, *arm_layer_keys):
         arm_record = arm_binaries[key]
         x64_record = x64_binaries[key]
         assert isinstance(arm_record, dict) and isinstance(x64_record, dict)
@@ -579,39 +723,67 @@ def validate_matching_inputs(
             raise Universal2Error(f"thin {key} dependency sets differ between arm64 and x64")
 
 
-def remove_signature_if_present(path: Path) -> None:
+def signature_normalized_shared_records(
+    root: Path,
+    shared: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    """Return matching records with only MoltenVK's host signature removed.
+
+    Both recorded files remain immutable and retain their independently valid
+    signatures. The temporary copy makes a strict underlying-byte comparison
+    possible without accepting two different MoltenVK builds merely because
+    both have valid ad-hoc signatures.
+    """
+
+    normalized = {relative: dict(record) for relative, record in shared.items()}
+    if MOLTENVK_DYLIB_NAME not in normalized:
+        raise Universal2Error(f"thin macOS payload is missing required {MOLTENVK_DYLIB_NAME}")
+
+    source = require_regular_file(root / MOLTENVK_DYLIB_NAME, "host-signed MoltenVK shared payload")
+    validate_exact_arches(source, UNIVERSAL_MACHO_ARCHES)
     codesign = require_tool("codesign")
-    inspected = subprocess.run(
-        [codesign, "--display", str(path)],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    run_command(
+        [codesign, "--verify", "--strict", "--all-architectures", str(source)],
+        f"verifying all MoltenVK signature slices for {source}",
     )
-    if inspected.returncode == 0:
-        run_command([codesign, "--remove-signature", str(path)], f"removing thin code signature from {path}")
+    with tempfile.TemporaryDirectory(prefix="openq4-moltenvk-signature-") as temporary:
+        unsigned = Path(temporary) / MOLTENVK_DYLIB_NAME
+        shutil.copy2(source, unsigned)
+        run_command(
+            [codesign, "--remove-signature", str(unsigned)],
+            f"normalizing host-dependent MoltenVK signature for {source}",
+        )
+        normalized[MOLTENVK_DYLIB_NAME] = {
+            "path": MOLTENVK_DYLIB_NAME,
+            "sha256": file_sha256(unsigned),
+            "size": unsigned.stat().st_size,
+            "mode": stat.S_IMODE(unsigned.stat().st_mode),
+        }
+    return normalized
 
 
 def merge_binary(arm_path: Path, x64_path: Path, output_path: Path, code_key: str) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="openq4-universal2-code-", dir=output_path.parent) as temporary:
-        temporary_root = Path(temporary)
-        arm_copy = temporary_root / "arm64"
-        x64_copy = temporary_root / "x64"
-        shutil.copy2(arm_path, arm_copy)
-        shutil.copy2(x64_path, x64_copy)
-        remove_signature_if_present(arm_copy)
-        remove_signature_if_present(x64_copy)
-        expected_id = expected_install_name(code_key, UNIVERSAL_ARCH)
-        if expected_id:
-            install_name_tool = require_tool("install_name_tool")
-            run_command([install_name_tool, "-id", expected_id, str(arm_copy)], f"normalizing arm64 {code_key} install name")
-            run_command([install_name_tool, "-id", expected_id, str(x64_copy)], f"normalizing x64 {code_key} install name")
-        run_command(
-            [require_tool("lipo"), "-create", str(arm_copy), str(x64_copy), "-output", str(output_path)],
-            f"merging universal2 {code_key}",
-        )
+    run_command(
+        [require_tool("lipo"), "-create", str(arm_path), str(x64_path), "-output", str(output_path)],
+        f"merging universal2 {code_key}",
+    )
     output_path.chmod(stat.S_IMODE(arm_path.stat().st_mode) | 0o111)
+    expected_id = expected_install_name(code_key, UNIVERSAL_ARCH)
+    if expected_id:
+        run_command(
+            [require_tool("install_name_tool"), "-id", expected_id, str(output_path)],
+            f"normalizing universal2 {code_key} install name",
+        )
+    codesign = require_tool("codesign")
+    run_command(
+        [codesign, "--force", "--sign", "-", str(output_path)],
+        f"ad-hoc signing universal2 {code_key}",
+    )
+    run_command(
+        [codesign, "--verify", "--strict", "--all-architectures", str(output_path)],
+        f"verifying universal2 {code_key} signature",
+    )
     validate_exact_arches(output_path, UNIVERSAL_MACHO_ARCHES)
     if expected_id:
         for macho_arch in sorted(UNIVERSAL_MACHO_ARCHES):
@@ -620,8 +792,9 @@ def merge_binary(arm_path: Path, x64_path: Path, output_path: Path, code_key: st
                 raise Universal2Error(
                     f"universal2 {code_key} install name mismatch for {macho_arch}: {actual_id!r}"
                 )
-        for macho_arch in sorted(UNIVERSAL_MACHO_ARCHES):
-            require_module_entry_export(output_path, macho_arch=macho_arch, code_key=code_key)
+        if module_stem(code_key) in MODULE_ENTRY_POINT_EXPORTS:
+            for macho_arch in sorted(UNIVERSAL_MACHO_ARCHES):
+                require_module_entry_export(output_path, macho_arch=macho_arch, code_key=code_key)
 
 
 def copy_shared_payload(source_root: Path, output_root: Path, shared: dict[str, dict[str, object]]) -> None:
@@ -643,7 +816,9 @@ def validate_universal_output(
     arm_binaries = arm_manifest["binaries"]
     x64_binaries = x64_manifest["binaries"]
     assert isinstance(arm_binaries, dict) and isinstance(x64_binaries, dict)
-    for key, relative in universal_code_paths().items():
+    optional = optional_universal_code_paths()
+    output_paths = {**universal_code_paths(), **{key: optional[key] for key in staged_layer_keys(arm_binaries)}}
+    for key, relative in output_paths.items():
         path = require_regular_file(output_root / relative, f"universal2 {key}", executable=True)
         validate_exact_arches(path, UNIVERSAL_MACHO_ARCHES)
         expected_id = expected_install_name(key, UNIVERSAL_ARCH)
@@ -720,14 +895,23 @@ def assemble(args: argparse.Namespace) -> None:
     x64_manifest = load_thin_manifest(x64_root, "x64")
     arm_shared = validate_recorded_tree(arm_root, "arm64", arm_manifest)
     x64_shared = validate_recorded_tree(x64_root, "x64", x64_manifest)
-    validate_matching_inputs(arm_manifest, x64_manifest, arm_shared, x64_shared)
+    arm_shared_for_matching = signature_normalized_shared_records(arm_root, arm_shared)
+    x64_shared_for_matching = signature_normalized_shared_records(x64_root, x64_shared)
+    validate_matching_inputs(
+        arm_manifest,
+        x64_manifest,
+        arm_shared_for_matching,
+        x64_shared_for_matching,
+    )
 
     temporary_root = Path(tempfile.mkdtemp(prefix=f".{output_root.name}-", dir=output_parent))
     try:
         copy_shared_payload(arm_root, temporary_root, arm_shared)
-        arm_paths = thin_code_paths("arm64")
-        x64_paths = thin_code_paths("x64")
-        for key, output_relative in universal_code_paths().items():
+        arm_paths = staged_code_paths(arm_root, "arm64")
+        x64_paths = staged_code_paths(x64_root, "x64")
+        optional = optional_universal_code_paths()
+        output_paths = {**universal_code_paths(), **{key: optional[key] for key in staged_layer_keys(arm_paths)}}
+        for key, output_relative in output_paths.items():
             merge_binary(arm_root / arm_paths[key], x64_root / x64_paths[key], temporary_root / output_relative, key)
         output_records = validate_universal_output(temporary_root, arm_manifest, x64_manifest)
         os.replace(temporary_root, output_root)
@@ -741,6 +925,9 @@ def assemble(args: argparse.Namespace) -> None:
         "machoArchitectures": sorted(UNIVERSAL_MACHO_ARCHES),
         **{field: arm_manifest[field] for field in COMMON_BUILD_FIELDS},
         "sharedPayloadSha256": arm_manifest["sharedPayloadSha256"],
+        "signatureNormalizedSharedPayloadSha256": canonical_json_sha256(
+            list(arm_shared_for_matching.values())
+        ),
         "sharedFileCount": arm_manifest["sharedFileCount"],
         "thinManifestSha256": {
             "arm64": file_sha256(arm_root / THIN_MANIFEST_NAME),
@@ -765,6 +952,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     record_parser.add_argument("--build-type", default="debug", choices=BUILD_TYPES)
     record_parser.add_argument("--replace", action="store_true")
 
+    prepare_parser = subparsers.add_parser(
+        "prepare",
+        help="normalize and ad-hoc sign one staged thin macOS payload before recording",
+    )
+    prepare_parser.add_argument("--install-root", required=True)
+    prepare_parser.add_argument("--arch", required=True, choices=sorted(THIN_MACHO_ARCHES))
+
     assemble_parser = subparsers.add_parser("assemble", help="merge validated arm64 and x64 staging trees")
     assemble_parser.add_argument("--arm64-root", required=True)
     assemble_parser.add_argument("--x64-root", required=True)
@@ -779,6 +973,8 @@ def main(argv: list[str]) -> int:
         args = parse_args(argv)
         if args.command == "record":
             record_thin(args)
+        elif args.command == "prepare":
+            prepare_thin_payload(Path(args.install_root), args.arch)
         else:
             assemble(args)
     except (OSError, Universal2Error, ValueError) as exc:

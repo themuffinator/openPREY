@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
+import json
 import os
 import platform
 import re
@@ -19,6 +21,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
@@ -73,8 +76,12 @@ MACOS_STATIC_DRY_RUN_PROFILES = (
 
 STAGED_REQUIRED_GAME_FILES = (
     "mod.json",
-    "pak0.pk4",
-    "pak1.pk4",
+    *(
+        pack["name"]
+        for pack in json.loads(
+            (Path(__file__).resolve().parents[2] / "tools" / "build" / "content_packs.json").read_text(encoding="utf-8")
+        )["packs"]
+    ),
 )
 STAGED_FORBIDDEN_PK4_MEMBER_SUBSTRINGS = (
     "roadhouse_quick",
@@ -230,6 +237,16 @@ MACOS_NON_RUNTIME_PATTERNS = NON_RUNTIME_PATTERNS + (
     "*.pdb",
 )
 MACOS_SUPPORT_INFO_SCRIPT_NAME = "collect_macos_support_info.sh"
+MACOS_OPENAL_SOFT_DYLIB_NAME = "libopenal.1.dylib"
+MACOS_OPENAL_SOFT_LICENSE_FILES = (
+    "COPYING",
+    "LICENSE-pffft",
+    "LICENSE-fmt",
+    "LICENSE-gsl",
+    "SOURCE.md",
+    "openal-soft-1.25.2.tar.gz",
+)
+MACOS_OPENAL_PROVIDERS = ("apple_framework", "system")
 MAX_MACOS_SUPPORT_INFO_SCRIPT_BYTES = 256 * 1024
 MACOS_SUPPORT_INFO_REQUIRED_TOKENS = (
     "#!/bin/sh",
@@ -466,6 +483,7 @@ def setup_args(args: argparse.Namespace, root: Path, build_dir: Path) -> list[st
         base.append(f"-Dplatform_backend={args.platform_backend}")
 
     base.extend(args.extra_setup_arg or [])
+    base.append("-Dbuild_native_tests=true")
     return base
 
 
@@ -481,6 +499,10 @@ def install_args(build_dir: Path) -> list[str]:
     return ["install", "-C", str(build_dir), "--no-rebuild", "--skip-subprojects"]
 
 
+def test_args(build_dir: Path) -> list[str]:
+    return ["test", "-C", str(build_dir), "--print-errorlogs"]
+
+
 def validation_env(args: argparse.Namespace, root: Path) -> dict[str, str]:
     env = os.environ.copy()
     if args.game_libs_repo:
@@ -489,18 +511,19 @@ def validation_env(args: argparse.Namespace, root: Path) -> dict[str, str]:
         configured_repo = env.get("OPENPREY_GAMELIBS_REPO", "").strip()
         if not configured_repo:
             configured_repo = env.get("OPENQ4_GAMELIBS_REPO", "").strip()
-        game_libs_repo = validate_game_libs_repo_path(
-            Path(configured_repo) if configured_repo else root / ".." / "OpenPrey-game"
-        )
+        # The Prey game library (src/game, src/Prey, src/preyengine) is compiled
+        # in place, so the default game-source root is this checkout. The
+        # override only exists for validation fixtures.
+        game_libs_repo = validate_game_libs_repo_path(Path(configured_repo) if configured_repo else root)
 
-    # OPENPREY_GAMELIBS_REPO is canonical. Mirror it into the migration alias so
-    # older helper scripts invoked by this compatibility entry point agree.
+    # OPENPREY_GAMELIBS_REPO is canonical. Mirror it into the migration alias that
+    # the inherited source-contract tests read so both agree.
     canonical_game_libs_repo = str(game_libs_repo)
     env["OPENPREY_GAMELIBS_REPO"] = canonical_game_libs_repo
     env["OPENQ4_GAMELIBS_REPO"] = canonical_game_libs_repo
 
-    if args.build_gamelibs:
-        env["OPENPREY_BUILD_GAMELIBS"] = "1"
+    # Game modules are compiled with the engine; the old switch is accepted
+    # for command-line continuity and has no separate checkout/build step.
 
     if args.skip_icon_sync:
         env["OPENPREY_SKIP_ICON_SYNC"] = "1"
@@ -514,21 +537,217 @@ def validate_game_libs_repo_path(game_libs_repo: Path) -> Path:
     return game_libs_repo.resolve()
 
 
+def python_test_jobs(args: argparse.Namespace) -> int:
+    requested = getattr(args, "python_jobs", None)
+    if requested is not None:
+        return requested
+    configured = os.environ.get("OPENQ4_PYTHON_TEST_JOBS", "").strip()
+    if configured:
+        return positive_int(configured)
+    return os.cpu_count() or 1
+
+
+def run_python_check_captured(
+    test_script: Path, test_args: list[str], root: Path, env: dict[str, str]
+) -> tuple[int, str, float]:
+    started = time.monotonic()
+    completed = subprocess.run(
+        [sys.executable, str(test_script), *test_args],
+        cwd=str(root),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return completed.returncode, completed.stdout, time.monotonic() - started
+
+
+def run_python_checks_parallel(
+    checks: list[tuple[Path, list[str]]], root: Path, env: dict[str, str], jobs: int
+) -> list[str]:
+    """Run independent checks concurrently, reporting each in list order.
+
+    Every check is its own interpreter writing only to fresh temporary
+    directories, so they can overlap. Output is held until a check finishes and
+    printed in the original order, so the log reads as a sequential run does.
+    """
+    # Checks put their temporary directories under .tmp without creating it; run
+    # in sequence an earlier check always had, but in parallel any can go first.
+    (root / ".tmp").mkdir(exist_ok=True)
+    print(f"\n==> Python checks: {len(checks)} with {jobs} parallel job(s)", flush=True)
+    failures: list[str] = []
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = [
+            pool.submit(run_python_check_captured, test_script, test_args, root, env)
+            for test_script, test_args in checks
+        ]
+        for (test_script, test_args), future in zip(checks, futures):
+            title = f"Python check: {rel(test_script, root)}"
+            returncode, output, seconds = future.result()
+            section(title)
+            print(format_command([sys.executable, str(test_script), *test_args]), flush=True)
+            if output:
+                print(output, end="" if output.endswith("\n") else "\n", flush=True)
+            print(f"({seconds:.1f}s)", flush=True)
+            if returncode != 0:
+                failures.append(f"{rel(test_script, root)}: {title} failed with exit code {returncode}.")
+    print(f"\n==> Python checks finished in {time.monotonic() - started:.0f}s", flush=True)
+    return failures
+
+
 def run_python_tests(args: argparse.Namespace, root: Path, env: dict[str, str]) -> None:
     inherited_tests = [
+        root / "tools" / "tests" / "aas_liquid_area_state.py",
+        root / "tools" / "tests" / "airdefense_performance_contract.py",
+        root / "tools" / "tests" / "mvd_seek_weapon_state.py",
+        root / "tools" / "tests" / "mvd_storage_budget.py",
+        root / "tools" / "tests" / "player_air_readout_state.py",
+        root / "tools" / "tests" / "renderer_selection_startup.py",
+        root / "tools" / "tests" / "ui_rendering_settings.py",
+        root / "tools" / "tests" / "aas_compiler_contract.py",
+        root / "tools" / "tests" / "aas_settings_contract.py",
+        root / "tools" / "tests" / "arena_campaign.py",
+        root / "tools" / "tests" / "arena_restart_in_place.py",
+        root / "tools" / "tests" / "arena_decided_result.py",
+        root / "tools" / "tests" / "mvd_seek_debris_contract.py",
+        root / "tools" / "tests" / "campaign_chapters.py",
+        root / "tools" / "tests" / "in_game_difficulty_restart.py",
+        root / "tools" / "tests" / "async_drop_client_contract.py",
+        root / "tools" / "tests" / "async_client_frame_contract.py",
+        root / "tools" / "tests" / "async_client_resume.py",
+        root / "tools" / "tests" / "async_session_command_contract.py",
+        root / "tools" / "tests" / "async_usercmd_window_contract.py",
+        root / "tools" / "tests" / "chat_history.py",
+        root / "tools" / "tests" / "choice_gui_value_contract.py",
+        root / "tools" / "tests" / "list_window_selection_contract.py",
+        root / "tools" / "tests" / "loading_pacifier_reentry_contract.py",
+        root / "tools" / "tests" / "loading_wipe_capture_crop_contract.py",
+        root / "tools" / "tests" / "server_browser_contract.py",
+        root / "tools" / "tests" / "base64_input_safety.py",
         root / "tools" / "tests" / "campaign_split_state_transition.py",
+        root / "tools" / "tests" / "campaign_scope.py",
+        root / "tools" / "tests" / "clang_tidy_input_safety.py",
+        root / "tools" / "tests" / "cmdargs_append_contract.py",
+        root / "tools" / "tests" / "console_completion_contract.py",
+        root / "tools" / "tests" / "console_input_contract.py",
+        root / "tools" / "tests" / "arb_color_zero_floor_contract.py",
+        root / "tools" / "tests" / "renderer_show_shadows_color_contract.py",
+        root / "tools" / "tests" / "renderer_md5r_conversion_contract.py",
+        root / "tools" / "tests" / "competitive_match_layer.py",
+        root / "tools" / "tests" / "competitive_match_localization.py",
+        root / "tools" / "tests" / "decl_checksum_stability_contract.py",
+        root / "tools" / "tests" / "match_control_localization_bridge.py",
+        root / "tools" / "tests" / "match_control_ui_contract.py",
+        root / "tools" / "tests" / "campaign_demo_contract.py",
         root / "tools" / "tests" / "demo_playback.py",
         root / "tools" / "tests" / "module_only_render_geo_lifecycle.py",
         root / "tools" / "tests" / "lightgrid_bake_autoquit.py",
         root / "tools" / "tests" / "docs_link_integrity.py",
+        root / "tools" / "tests" / "dmap_render_geometry_lifecycle.py",
+        root / "tools" / "tests" / "dmap_vertex_sharing.py",
+        root / "tools" / "tests" / "dmap_tjunction_slivers.py",
+        root / "tools" / "tests" / "dmap_optimizer_zero_area.py",
+        root / "tools" / "tests" / "dmap_patch_texture_groups.py",
+        root / "tools" / "tests" / "idstr_last_color_code.py",
+        root / "tools" / "tests" / "renderer_silhouette_edges.py",
+        root / "tools" / "tests" / "fatal_error_startup_safety.py",
+        root / "tools" / "tests" / "android_build.py",
+        root / "tools" / "tests" / "android_touch_input.py",
+        root / "tools" / "tests" / "android_touch_controls.py",
+        root / "tools" / "tests" / "audio_payload_restore.py",
+        root / "tools" / "tests" / "renderer_gles_dispatch.py",
+        root / "tools" / "tests" / "renderer_gles_alpha.py",
+        root / "tools" / "tests" / "renderer_gles_upload.py",
+        root / "tools" / "tests" / "android_host_storage.py",
+        root / "tools" / "tests" / "android_retail_data.py",
+        root / "tools" / "tests" / "android_retail_import.py",
+        root / "tools" / "tests" / "android_document_source.py",
+        root / "tools" / "tests" / "android_setup_task.py",
+        root / "tools" / "tests" / "android_setup_flow.py",
+        root / "tools" / "tests" / "android_touch_setup.py",
+        root / "tools" / "tests" / "android_touch_layout.py",
+        root / "tools" / "tests" / "android_interface_setup.py",
+        root / "tools" / "tests" / "android_private_export.py",
+        root / "tools" / "tests" / "android_document_export.py",
+        root / "tools" / "tests" / "image_block_mips.py",
+        root / "tools" / "tests" / "android_async.py",
+        root / "tools" / "tests" / "android_basepath.py",
+        root / "tools" / "tests" / "android_console_input.py",
+        root / "tools" / "tests" / "android_lifecycle.py",
+        root / "tools" / "tests" / "android_savepath.py",
+        root / "tools" / "tests" / "android_window_lifecycle.py",
+        root / "tools" / "tests" / "arena_sound_pause.py",
+        root / "tools" / "tests" / "client_entity_registration.py",
+        root / "tools" / "tests" / "openal_device_pause.py",
+        root / "tools" / "tests" / "openxr_lifecycle.py",
+        root / "tools" / "tests" / "savegame_restore_bindings.py",
+        root / "tools" / "tests" / "savegame_restore_classes.py",
+        root / "tools" / "tests" / "savegame_restore_cleanup.py",
+        root / "tools" / "tests" / "savegame_restore_resources.py",
+        root / "tools" / "tests" / "savegame_restore_physics.py",
+        root / "tools" / "tests" / "savegame_restore_animation.py",
+        root / "tools" / "tests" / "savegame_restore_af.py",
+        root / "tools" / "tests" / "savegame_restore_events.py",
+        root / "tools" / "tests" / "vehicle_hud.py",
+        root / "tools" / "tests" / "savegame_restore_gui.py",
+        root / "tools" / "tests" / "savegame_restore_identity.py",
+        root / "tools" / "tests" / "savegame_restore_movers.py",
+        root / "tools" / "tests" / "savegame_restore_recovery.py",
+        root / "tools" / "tests" / "savegame_restore_render_handles.py",
+        root / "tools" / "tests" / "savegame_restore_spawn_refs.py",
+        root / "tools" / "tests" / "savegame_restore_threads.py",
+        root / "tools" / "tests" / "medic_yield_behavior.py",
+        root / "tools" / "tests" / "awakening_m07_behavior.py",
+        root / "tools" / "tests" / "awakening_chapter_behavior.py",
+        root / "tools" / "tests" / "clip_owner_behavior.py",
+        root / "tools" / "tests" / "clip_empty_model_behavior.py",
+        root / "tools" / "tests" / "ui_engine_thread.py",
+        root / "tools" / "tests" / "ui_generated_images.py",
         root / "tools" / "tests" / "filesystem_case_segments.py",
+        root / "tools" / "tests" / "repository_path_portability.py",
+        root / "tools" / "tests" / "pinned_archive_headers.py",
+        root / "tools" / "tests" / "filesystem_find_file_contract.py",
+        root / "tools" / "tests" / "filesystem_length_probe_contract.py",
+        root / "tools" / "tests" / "generated_image_pak_content_stamp.py",
+        root / "tools" / "tests" / "pure_image_cache_eviction_contract.py",
+        root / "tools" / "tests" / "pure_level_load_cache_contract.py",
+        root / "tools" / "tests" / "pure_expanded_loadscreen_contract.py",
+        root / "tools" / "tests" / "parser_include_paths_contract.py",
         root / "tools" / "tests" / "filesystem_mod_manifest.py",
         root / "tools" / "tests" / "openprey_filesystem_policy.py",
+        root / "tools" / "tests" / "filesystem_write_qpath_safety.py",
         root / "tools" / "tests" / "game_class_allocator_alignment.py",
+        root / "tools" / "tests" / "game_module_completion_safety.py",
         root / "tools" / "tests" / "game_type_module_selection.py",
-        root / "tools" / "tests" / "gamelibs_staging.py",
+        root / "tools" / "tests" / "awakening_ci_contract.py",
+        root / "tools" / "tests" / "awakening_speeder_physics_contract.py",
+        root / "tools" / "tests" / "awakening_gameplay_contract.py",
+        root / "tools" / "tests" / "awakening_turret_skin_contract.py",
+        root / "tools" / "tests" / "awakening_status_behavior.py",
+        root / "tools" / "tests" / "gui_clipping_contract.py",
+        root / "tools" / "tests" / "gui_transition_operand_contract.py",
         root / "tools" / "tests" / "generated_animation_cache.py",
+        root / "tools" / "tests" / "level_load_cache.py",
+        root / "tools" / "tests" / "lightgrid_map_identity.py",
+        root / "tools" / "tests" / "lightgrid_bake_contract.py",
+        root / "tools" / "tests" / "renderer_render_thread_contract.py",
+        root / "tools" / "tests" / "renderer_render_thread_runtime.py",
+        root / "tools" / "tests" / "renderer_input_latency.py",
+        root / "tools" / "tests" / "renderer_special_effect_snapshot.py",
+        root / "tools" / "tests" / "renderer_frame_identity.py",
+        root / "tools" / "tests" / "renderer_frame_ownership.py",
+        root / "tools" / "tests" / "renderer_snapshot_copy.py",
+        root / "tools" / "tests" / "renderer_overlap_benchmark_test.py",
+        root / "tools" / "tests" / "presentation_reference_suite_test.py",
         root / "tools" / "tests" / "hdr_postprocess_math.py",
+        root / "tools" / "tests" / "idstr_input_safety.py",
+        root / "tools" / "tests" / "lexer_input_safety.py",
+        root / "tools" / "tests" / "lexer_peek_contract.py",
+        root / "tools" / "tests" / "key_bind_presentation.py",
+        root / "tools" / "tests" / "levelshot_inventory.py",
         root / "tools" / "tests" / "linux_arm64_cross_compile.py",
         root / "tools" / "tests" / "linux_arm64_ci_coverage.py",
         root / "tools" / "tests" / "linux_arm64_release_evidence.py",
@@ -550,6 +769,9 @@ def run_python_tests(args: argparse.Namespace, root: Path, env: dict[str, str]) 
         root / "tools" / "tests" / "linux_vsync_support.py",
         root / "tools" / "tests" / "linux_wayland_build_contract.py",
         root / "tools" / "tests" / "loading_continue_input.py",
+        root / "tools" / "tests" / "loading_pacifier_pacing.py",
+        root / "tools" / "tests" / "map_entity_strings.py",
+        root / "tools" / "tests" / "weapon_wheel_time_scale.py",
         root / "tools" / "tests" / "macos_apple_gl21_arb2_corridor.py",
         root / "tools" / "tests" / "macos_dedicated_server_smoke_contract.py",
         root / "tools" / "tests" / "macos_evidence_plumbing.py",
@@ -580,47 +802,129 @@ def run_python_tests(args: argparse.Namespace, root: Path, env: dict[str, str]) 
         root / "tools" / "tests" / "macos_metal_bridge.py",
         root / "tools" / "tests" / "macos_moltenvk_policy.py",
         root / "tools" / "tests" / "mp_bot_characters.py",
+        root / "tools" / "tests" / "mp_bot_combat.py",
+        root / "tools" / "tests" / "mp_bot_death_policy.py",
+        root / "tools" / "tests" / "mp_bot_goal_contracts.py",
+        root / "tools" / "tests" / "mp_bot_navmesh_search.py",
+        root / "tools" / "tests" / "mp_bot_objectives.py",
+        root / "tools" / "tests" / "mp_bot_regressions.py",
+        root / "tools" / "tests" / "mp_bot_team_balance.py",
+        root / "tools" / "tests" / "mp_bot_team_orders.py",
+        root / "tools" / "tests" / "mp_bot_audit_clock.py",
+        root / "tools" / "tests" / "mp_bot_recovery_traffic.py",
+        root / "tools" / "tests" / "mp_bot_intelligence.py",
         root / "tools" / "tests" / "mp_bot_navigation.py",
+        root / "tools" / "tests" / "mp_bot_jump_trajectories.py",
+        root / "tools" / "tests" / "mp_bot_hazards.py",
+        root / "tools" / "tests" / "mp_bot_server_menu.py",
         root / "tools" / "tests" / "mp_client_combat_effects.py",
+        root / "tools" / "tests" / "bse_retail_parity.py",
+        root / "tools" / "tests" / "mp_lag_compensation_contract.py",
+        root / "tools" / "tests" / "mp_lag_compensation_state.py",
+        root / "tools" / "tests" / "network_fragment_state.py",
+        root / "tools" / "tests" / "mp_match_artifact_io_state.py",
+        root / "tools" / "tests" / "mp_client_prediction_state.py",
+        root / "tools" / "tests" / "mp_runtime_freshness.py",
+        root / "tools" / "tests" / "mp_weapon_switch_contract.py",
         root / "tools" / "tests" / "multiview_demo.py",
+        root / "tools" / "tests" / "mvd_server_api_contract.py",
+        root / "tools" / "tests" / "mvd_navigation_contract.py",
+        root / "tools" / "tests" / "mvd_recording_failure_contract.py",
+        root / "tools" / "tests" / "mvd_recovery_contract.py",
+        root / "tools" / "tests" / "mvd_start_state_contract.py",
         root / "tools" / "tests" / "native_glx_shutdown.py",
+        root / "tools" / "tests" / "network_ipv4_support.py",
+        root / "tools" / "tests" / "network_ipv6_support.py",
+        root / "tools" / "tests" / "network_impairment_contract.py",
+        root / "tools" / "tests" / "network_impairment_state.py",
+        root / "tools" / "tests" / "network_security.py",
+        root / "tools" / "tests" / "untrusted_file_bounds.py",
+        root / "tools" / "tests" / "openurl_security.py",
         root / "tools" / "tests" / "openq4_pure_pack.py",
         root / "tools" / "tests" / "openprey_rebase_contract.py",
         root / "tools" / "tests" / "openprey_runtime_branding.py",
         root / "tools" / "tests" / "openprey_tool_branding.py",
+        root / "tools" / "tests" / "p0_governance_evidence.py",
         root / "tools" / "tests" / "packaging_safety.py",
+        root / "tools" / "tests" / "content_pack_release_tests.py",
+        root / "tools" / "tests" / "parallel_job_system.py",
+        root / "tools" / "tests" / "pbr_orm_packer.py",
+        root / "tools" / "tests" / "pbr_procedural_fixture.py",
+        root / "tools" / "tests" / "pbr_laboratory_fixture.py",
         root / "tools" / "tests" / "preprocessor_macro_safety.py",
         root / "tools" / "tests" / "posix_memory_management.py",
         root / "tools" / "tests" / "posix_monotonic_time.py",
         root / "tools" / "tests" / "posix_network_resolution.py",
         root / "tools" / "tests" / "posix_thread_shutdown.py",
         root / "tools" / "tests" / "release_tooling_safety.py",
+        root / "tools" / "tests" / "renderer_advanced_lighting.py",
+        root / "tools" / "tests" / "renderer_budget_contract.py",
         root / "tools" / "tests" / "renderer_cel_shading.py",
+        root / "tools" / "tests" / "renderer_demo_projection_safety.py",
+        root / "tools" / "tests" / "renderer_gpu_frame_timing.py",
+        root / "tools" / "tests" / "renderer_gpu_skinning.py",
+        root / "tools" / "tests" / "renderer_vulkan_gui_upload.py",
         root / "tools" / "tests" / "renderer_mp_flat_items.py",
+        root / "tools" / "tests" / "renderer_pbr_materials.py",
+        root / "tools" / "tests" / "renderer_classic_gui_domain.py",
+        root / "tools" / "tests" / "renderer_classic_cinematic_post_domain.py",
+        root / "tools" / "tests" / "renderer_classic_special_frame_domain.py",
+        root / "tools" / "tests" / "renderer_classic_world_ambient_domain.py",
+        root / "tools" / "tests" / "renderer_classic_interaction_domain.py",
+        root / "tools" / "tests" / "renderer_classic_fog_blend_domain.py",
+        root / "tools" / "tests" / "renderer_classic_subview_domain.py",
+        root / "tools" / "tests" / "renderer_classic_deform_domain.py",
+        root / "tools" / "tests" / "renderer_module_completion_safety.py",
         root / "tools" / "tests" / "renderer_msaa_cvar_safety.py",
         root / "tools" / "tests" / "renderer_picmip_policy.py",
         root / "tools" / "tests" / "renderer_player_visibility.py",
+        root / "tools" / "tests" / "renderer_scaled_scene_presentation.py",
         root / "tools" / "tests" / "renderer_screenshot_readback.py",
         root / "tools" / "tests" / "renderer_supersampling_safety.py",
+        root / "tools" / "tests" / "renderer_temporal_presentation.py",
+        root / "tools" / "tests" / "renderer_motion_blur_contract.py",
+        root / "tools" / "tests" / "renderer_shadow_alpha_fallback_contract.py",
+        root / "tools" / "tests" / "renderer_pbr_probe_prefilter_contract.py",
+        root / "tools" / "tests" / "renderer_texture_filter.py",
         root / "tools" / "tests" / "renderer_vulkan_decal_compatibility.py",
         root / "tools" / "tests" / "renderer_vulkan_gui_residency.py",
         root / "tools" / "tests" / "renderer_vulkan_md5r_compatibility.py",
+        root / "tools" / "tests" / "renderer_vulkan_probe_safety.py",
         root / "tools" / "tests" / "renderer_vulkan_shadow_compatibility.py",
         root / "tools" / "tests" / "renderer_vulkan_world_interaction_compatibility.py",
+        root / "tools" / "tests" / "rigid_body_recovery_diagnostics.py",
+        root / "tools" / "tests" / "ai_medic_approach_watchdog.py",
         root / "tools" / "tests" / "savegame_corruption_contract.py",
+        root / "tools" / "tests" / "savegame_gui_layout_contract.py",
+        root / "tools" / "tests" / "weapon_gui_event_queue_contract.py",
+        root / "tools" / "tests" / "turbo_scripted_movers.py",
         root / "tools" / "tests" / "savegame_pointer_width_safety.py",
+        root / "tools" / "tests" / "savegame_v3_contract.py",
+        root / "tools" / "tests" / "savegame_raw_inventory.py",
         root / "tools" / "tests" / "sdl3_input_parity.py",
+        root / "tools" / "tests" / "crosshair_picker_contract.py",
+        root / "tools" / "tests" / "menu_controller_navigation.py",
         root / "tools" / "tests" / "sdl3_multidisplay_windowing.py",
         root / "tools" / "tests" / "settings_menu_coverage.py",
         root / "tools" / "tests" / "source_charset_integrity.py",
         root / "tools" / "tests" / "steam_deck_support.py",
         root / "tools" / "tests" / "system_console_presentation.py",
         root / "tools" / "tests" / "lang_table_encoding.py",
+        root / "tools" / "tests" / "ttf_font_integrity.py",
         root / "tools" / "tests" / "startup_language_override.py",
+        root / "tools" / "tests" / "stock_asset_baseline.py",
+        root / "tools" / "tests" / "stock_media_fallbacks.py",
         root / "tools" / "tests" / "ui_embedded_icons.py",
+        root / "tools" / "tests" / "ui_cursor_state_safety.py",
+        root / "tools" / "tests" / "ui_background_cursor.py",
+        root / "tools" / "tests" / "ui_legacy_inventory.py",
+        root / "tools" / "tests" / "ui_window_state_safety.py",
         root / "tools" / "tests" / "validation_hardening.py",
         root / "tools" / "tests" / "vk_shader_header_pin.py",
+        root / "tools" / "tests" / "vk_temporal_resolve_shader_pin.py",
         root / "tools" / "tests" / "vscode_fast_build.py",
+        root / "tools" / "tests" / "weapon_zoom_view_alignment.py",
+        root / "tools" / "tests" / "windows_dedicated_server_smoke_contract.py",
     ]
     excluded_tests = (
         DEFERRED_RELEASE_LANE_TESTS
@@ -628,15 +932,190 @@ def run_python_tests(args: argparse.Namespace, root: Path, env: dict[str, str]) 
         | DEFERRED_PREY_API_V7_TESTS
     )
     tests = [test for test in inherited_tests if test.name not in excluded_tests]
-    for test_script in tests:
+    inherited_argument_checks = [
+        (root / "tools" / "tests" / "async_rcon_verify_contract.py", ['--mutations']),
+        (root / "tools" / "tests" / "sp_turbo_weapon_wheel.py", []),
+        (root / "tools" / "tests" / "weapon_wheel_behavior.py", ['--output', str(root / '.tmp/weapon-wheel-behavior')]),
+        (root / "tools" / "tests" / "remastered_hud_behavior.py", ['--output', str(root / '.tmp/remastered-hud-behavior')]),
+        (root / "tools" / "tests" / "retained_view_effects.py", []),
+        (root / "tools" / "tests" / "ui_hud_coverage.py", []),
+        (root / "tools" / "tests" / "ui_retained_scopes.py", []),
+        (root / "tools" / "tests" / "ui_legacy_feedback.py", []),
+        (root / "tools" / "tests" / 'renderer_native_ui_output.py', []),
+        (root / "tools" / "tests" / 'sys_event_queue_ownership.py', []),
+        (root / "tools" / "tests" / 'event_journal.py', []),
+        (root / "tools" / "tests" / 'event_disposition_storage.py', []),
+        (root / "tools" / "tests" / 'sdl3_input_disposition.py', []),
+        (root / "tools" / "tests" / 'native_event_disposition.py', []),
+        (root / "tools" / "tests" / 'native_input_route.py', []),
+        (root / "tools" / "tests" / 'native_input_lifecycle.py', []),
+        (root / "tools" / "tests" / 'native_input_driver.py', ['--mutations']),
+        (root / "tools" / "tests" / 'native_input_facts.py', []),
+        (root / "tools" / "tests" / 'native_input_terminal.py', []),
+        (root / "tools" / "tests" / 'native_event_retirement.py', []),
+        (root / "tools" / "tests" / 'sdl3_clipboard_status.py', []),
+        (root / "tools" / "tests" / 'sdl3_wayland_mode_contract.py', []),
+        (root / "tools" / "tests" / 'sdl3_text_provenance.py', []),
+        (root / "tools" / "tests" / 'sdl3_native_fence.py', []),
+        (root / "tools" / "tests" / 'native_queue_batch.py', []),
+        (root / "tools" / "tests" / 'game_regression_suite.py', ['--check-discovery']),
+        (root / "tools" / "tests" / 'presentation_clock_ownership.py', []),
+        (root / "tools" / "tests" / 'presentation_hf_contract.py', ['--mutations']),
+        (root / "tools" / "tests" / 'ui_inventory_revision.py', []),
+        (root / "tools" / "tests" / 'ui_requirement_archive.py', []),
+        (root / "tools" / "tests" / 'ui_requirement_acceptance.py', []),
+        (root / "tools" / "tests" / 'ui_text_edit_model.py', []),
+        (root / "tools" / "tests" / 'ui_native_text_document.py', []),
+        (root / "tools" / "tests" / 'ui_native_text_editor.py', []),
+        (root / "tools" / "tests" / 'ui_native_text_collection.py', []),
+        (root / "tools" / "tests" / 'ui_number_clipboard.py', []),
+        (root / "tools" / "tests" / 'ui_number_drafts.py', []),
+        (root / "tools" / "tests" / 'ui_number_native.py', []),
+        (root / "tools" / "tests" / 'ui_native_collection_coordinator.py', []),
+        (root / "tools" / "tests" / 'ui_managed_native_owner.py', []),
+        (root / "tools" / "tests" / 'ui_settings_decimal_precision.py', []),
+        (root / "tools" / "tests" / 'ui_settings_exact_values.py', ['--mutations']),
+        (root / "tools" / "tests" / 'ui_settings_automatic.py', []),
+        (root / "tools" / "tests" / 'ui_settings_effect_journal.py', []),
+        (root / "tools" / "tests" / 'sound_settings.py', []),
+        (root / "tools" / "tests" / 'sound_recovery.py', []),
+        (root / "tools" / "tests" / 'sound_distance.py', []),
+        (root / "tools" / "tests" / 'sound_retail_reverb_contract.py', []),
+        (root / "tools" / "tests" / 'sound_screen_shake.py', []),
+        (root / "tools" / "tests" / 'audio_decode_budget.py', []),
+        (root / "tools" / "tests" / 'audio_memory.py', []),
+        (root / "tools" / "tests" / 'audio_stream_budget.py', []),
+        (root / "tools" / "tests" / 'audio_subtitles.py', []),
+        (root / "tools" / "tests" / 'audio_scene_audit_contract.py', []),
+        (root / "tools" / "ui" / 'build_subtitles.py', ['--check']),
+        (root / "tools" / "tests" / 'voice_capture_lifecycle.py', []),
+        (root / "tools" / "tests" / 'voice_transport.py', []),
+        (root / "tools" / "tests" / 'voice_protocol_gating_contract.py', []),
+        (root / "tools" / "tests" / 'ui_performance_presets.py', ['--mutations', '--adjacent']),
+        (root / "tools" / "tests" / 'ui_system_number_fields.py', []),
+        (root / "tools" / "tests" / 'ui_system_presets.py', []),
+        (root / "tools" / "tests" / 'system_settings_archive_policy.py', []),
+        (root / "tools" / "tests" / 'ui_text_input.py', []),
+        (root / "tools" / "tests" / 'ui_retained_input.py', []),
+        (root / "tools" / "tests" / 'ui_retained_state_sources.py', []),
+        (root / "tools" / "tests" / 'ui_presentation_bridge.py', []),
+        (root / "tools" / "tests" / 'ui_retained_layer_pool.py', []),
+        (root / "tools" / "tests" / 'ui_retained_atlas.py', []),
+        (root / "tools" / "tests" / 'ui_retained_pause.py', []),
+        (root / "tools" / "tests" / 'ui_retained_hud_state.py', []),
+        (root / "tools" / "tests" / 'ui_manager_lifecycle.py', []),
+        (root / "tools" / "tests" / 'ui_event_delivery.py', []),
+        (root / "tools" / "tests" / 'ui_list_selection_safety.py', []),
+        (root / "tools" / "tests" / 'ui_session_test_gui.py', []),
+        (root / "tools" / "tests" / 'ui_system_session_route.py', []),
+        (root / "tools" / "tests" / 'ui_controller_menu_pump.py', []),
+        (root / "tools" / "tests" / 'ui_retained_gate.py', []),
+        (root / "tools" / "tests" / 'ui_stock_level_load.py', []),
+        (root / "tools" / "tests" / 'ui_retained_resource_lifecycle.py', []),
+        (root / "tools" / "tests" / 'ui_retained_adapter.py', []),
+        (root / "tools" / "tests" / 'ui_player_identity.py', []),
+        (root / "tools" / "tests" / 'ui_player_targets.py', []),
+        (root / "tools" / "tests" / 'ui_scrollbar_interaction.py', ['--mutations']),
+        (root / "tools" / "tests" / 'ui_choice_scroll_interaction.py', ['--mutations']),
+        (root / "tools" / "tests" / 'ui_document_edit.py', ['--mutations']),
+        (root / "tools" / "tests" / 'ui_popup_placement.py', ['--mutations']),
+        (root / "tools" / "tests" / 'gui_state_debug_log_contract.py', ['--mutations']),
+        (root / "tools" / "tests" / 'ui_text_owner.py', []),
+        (root / "tools" / "tests" / 'ui_system_settings_host.py', []),
+        (root / "tools" / "tests" / 'ui_settings_service.py', []),
+        (root / "tools" / "tests" / 'durable_file.py', ['--mutations']),
+        (root / "tools" / "tests" / 'savegame_durability.py', []),
+        (root / "tools" / "tests" / 'save_codec.py', []),
+        (root / "tools" / "tests" / 'settings_configuration_persistence.py', []),
+        (root / "tools" / "tests" / 'sdl3_settings_placement.py', []),
+        (root / "tools" / "tests" / 'ui_system_display.py', []),
+        (root / "tools" / "tests" / 'ui_settings_display_service.py', []),
+        (root / "tools" / "tests" / 'ui_display_settings_fixture.py', []),
+        (root / "tools" / "tests" / 'ui_generated_font_precache.py', []),
+        (root / "tools" / "tests" / 'ui_capture_display_settings.py', []),
+        (root / "tools" / "tests" / 'ui_capture_settings_recovery.py', []),
+        (root / "tools" / "tests" / 'ui_capture_managed.py', []),
+        (root / "tools" / "tests" / 'ui_capture_system_settings.py', []),
+        (root / "tools" / "tests" / 'ui_capture_system_page.py', []),
+        (root / "tools" / "tests" / 'ui_capture_system_exit.py', []),
+        (root / "tools" / "tests" / 'ui_capture_multiplayer_rosters.py', []),
+        (root / "tools" / "tests" / 'ui_capture_system_refresh.py', []),
+        (root / "tools" / "tests" / 'ui_player_identity.py', []),
+        (root / "tools" / "tests" / 'renderer_vid_restart_route.py', []),
+        (root / "tools" / "tests" / 'renderer_image_recovery_owner.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_recovery_module.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_recovery_loader.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_recovery_codec.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_recovery_cold.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_recovery_lifecycle.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_policy_restart.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_policy_boundaries.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_policy_lifetimes.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_policy_metadata.py', ['--mutations']),
+        (root / 'tools' / 'tests' / 'renderer_vulkan_material_cache.py', []),
+        (root / 'tools' / 'tests' / 'renderer_vulkan_presentation.py', ['--self-test']),
+        (root / "tools" / "tests" / 'renderer_consumed_policy.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_consumed_upload_batches.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_upload_storage.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_reduction.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_image_content.py', ['--mutations']),
+        (root / "tools" / "tests" / 'renderer_display_services.py', []),
+        (root / "tools" / "tests" / 'renderer_settings_reports.py', []),
+        (root / "tools" / "tests" / 'openxr_vr_contract.py', []),
+        (root / "tools" / "tests" / 'renderer_display_presentation.py', []),
+        (root / "tools" / "tests" / 'renderer_debug_readback.py', []),
+        (root / "tools" / "tests" / 'renderer_image_residency.py', []),
+        (root / "tools" / "tests" / 'renderer_vulkan_material_resources.py', []),
+        (root / "tools" / "tests" / 'renderer_gl_display_policy.py', []),
+        (root / "tools" / "tests" / 'sdl3_strict_window.py', []),
+        (root / "tools" / "tests" / 'ui_capture_display_device.py', []),
+        (root / "tools" / "tests" / 'ui_legacy_import.py', []),
+        (root / "tools" / "tests" / 'ui_legacy_expression.py', ['--mutations']),
+        (root / "tools" / "tests" / 'gui_expression_storage.py', []),
+        (root / "tools" / "tests" / 'gui_initial_save_state.py', []),
+        (root / "tools" / "tests" / 'gui_precache_lifetime.py', ['--mutations']),
+        (root / "tools" / "tests" / 'material_hit_map_lifetime.py', []),
+        (root / "tools" / "tests" / 'ui_legacy_observation.py', ['--mutations']),
+        (root / "tools" / "tests" / 'vk_display_color_mapping.py', []),
+        (root / "tools" / "tests" / 'vk_display_color_mapping_shader_pin.py', []),
+        (root / "tools" / "tests" / 'vk_display_color_mapping_capture.py', ['--self-test']),
+        (root / "tools" / "tests" / 'savegame_restore_matrix.py', ['--self-test']),
+        (root / "tools" / "tests" / 'savegame_cross_load.py', ['--self-test']),
+        (root / "tools" / "tests" / 'bse_lifecycle_runtime.py', ['--self-test']),
+        (root / "tools" / "tests" / 'turbo_lift_runtime.py', ['--self-test']),
+        (root / "tools" / "tests" / 'awakening_vehicle_runtime.py', ['--self-test']),
+    ]
+    argument_checks = [
+        (test, test_args) for test, test_args in inherited_argument_checks if test.name not in excluded_tests
+    ]
+    failures: list[str] = []
+    checks: list[tuple[Path, list[str]]] = []
+    for test_script, test_args in [(path, []) for path in tests] + argument_checks:
         if not test_script.is_file():
-            raise ValidationError(f"Python validation test not found: {test_script}")
-        run_command(
-            [sys.executable, str(test_script)],
-            cwd=root,
-            env=env,
-            title=f"Python check: {rel(test_script, root)}",
-            dry_run=args.dry_run,
+            failures.append(f"{rel(test_script, root)}: test script was not found")
+            continue
+        checks.append((test_script, test_args))
+
+    jobs = python_test_jobs(args)
+    if jobs <= 1 or args.dry_run:
+        for test_script, test_args in checks:
+            try:
+                run_command(
+                    [sys.executable, str(test_script), *test_args],
+                    cwd=root,
+                    env=env,
+                    title=f"Python check: {rel(test_script, root)}",
+                    dry_run=args.dry_run,
+                )
+            except ValidationError as exc:
+                failures.append(f"{rel(test_script, root)}: {exc}")
+    else:
+        failures += run_python_checks_parallel(checks, root, env, jobs)
+
+    if failures:
+        formatted = "\n".join(f"  - {failure}" for failure in failures)
+        raise ValidationError(
+            f"{len(failures)} Python validation check(s) failed:\n{formatted}"
         )
 
 
@@ -650,7 +1129,7 @@ def ensure_game_libs_repo(env: dict[str, str]) -> None:
         expected = game_libs_repo / "src" / source_tree
         if not expected.is_dir():
             raise ValidationError(
-                f"OpenPrey-game {label} source directory was not found. "
+                f"Canonical {label} game source directory was not found. "
                 f"Expected: {expected}"
             )
 
@@ -843,23 +1322,57 @@ def validate_no_macos_non_runtime_artifacts(root: Path, install_root: Path, game
     )
 
 
-def macos_casefold_path_key(path: str) -> str:
+def staged_casefold_path_key(path: str) -> str:
     return unicodedata.normalize("NFC", path).casefold()
 
 
-def validate_no_macos_casefold_path_collisions(root: Path, install_root: Path) -> None:
+def first_staged_casefold_path_collision(paths: list[str]) -> tuple[str, str] | None:
     seen_paths: dict[str, str] = {}
-    for path in sorted(install_root.rglob("*")):
-        relative = path.relative_to(install_root).as_posix()
-        key = macos_casefold_path_key(relative)
+    for relative in sorted(paths):
+        key = staged_casefold_path_key(relative)
         previous = seen_paths.get(key)
         if previous is not None and previous != relative:
-            raise ValidationError(
-                "macOS staged payload contains case-insensitive duplicate paths:\n"
-                f"  - {rel(install_root / previous, root)}\n"
-                f"  - {rel(path, root)}"
-            )
+            return previous, relative
         seen_paths[key] = relative
+    return None
+
+
+def validate_no_staged_casefold_path_collisions(root: Path, install_root: Path) -> None:
+    relative_paths = [
+        path.relative_to(install_root).as_posix()
+        for path in install_root.rglob("*")
+    ]
+    collision = first_staged_casefold_path_collision(relative_paths)
+    if collision is None:
+        return
+
+    previous, relative = collision
+    raise ValidationError(
+        "Staged payload contains case-insensitive duplicate paths:\n"
+        f"  - {rel(install_root / previous, root)}\n"
+        f"  - {rel(install_root / relative, root)}"
+    )
+
+
+def macos_casefold_path_key(path: str) -> str:
+    return staged_casefold_path_key(path)
+
+
+def validate_no_macos_casefold_path_collisions(root: Path, install_root: Path) -> None:
+    relative_paths = [
+        path.relative_to(install_root).as_posix()
+        for path in install_root.rglob("*")
+    ]
+    collision = first_staged_casefold_path_collision(relative_paths)
+    if collision is None:
+        return
+
+    previous, relative = collision
+    raise ValidationError(
+        "macOS staged payload contains case-insensitive duplicate paths:\n"
+        f"  - {rel(install_root / previous, root)}\n"
+        f"  - {rel(install_root / relative, root)}"
+    )
 
 
 def validate_no_staged_symlinks(root: Path, install_root: Path) -> None:
@@ -1223,12 +1736,15 @@ def validate_linux_binary_hardening(
                         (fields[3], fields[4], fields[5], fields[6], fields[-1])
                     )
 
+            # The entry point plus the one deliberate addition in
+            # tools/build/linux_game_module.map: the engine resolves
+            # openQ4_Mem_GetModuleStats by name to add the module's own idlib
+            # memory counters to its total (src/idlib/Heap.h).
+            expected_game_exports = {"GetGameAPI", "openQ4_Mem_GetModuleStats"}
             expected_game_api = (
-                len(public_symbols) == 1
-                and public_symbols[0][0] == "FUNC"
-                and public_symbols[0][1] == "GLOBAL"
-                and public_symbols[0][2] == "DEFAULT"
-                and public_symbols[0][4] == "GetGameAPI"
+                len(public_symbols) == len(expected_game_exports)
+                and {symbol[4] for symbol in public_symbols} == expected_game_exports
+                and all(symbol[:3] == ("FUNC", "GLOBAL", "DEFAULT") for symbol in public_symbols)
             )
             if not expected_game_api:
                 public_summary = ", ".join(
@@ -1236,8 +1752,8 @@ def validate_linux_binary_hardening(
                     for symbol_type, binding, visibility, index, name in public_symbols
                 ) or "<none>"
                 raise ValidationError(
-                    "Linux game module must expose exactly one GLOBAL/DEFAULT/FUNC "
-                    f"GetGameAPI definition: {rel(binary_path, root)}; found {public_summary}"
+                    "Linux game module must expose exactly the GLOBAL/DEFAULT/FUNC GetGameAPI "
+                    f"and openQ4_Mem_GetModuleStats definitions: {rel(binary_path, root)}; found {public_summary}"
                 )
 
 
@@ -1253,6 +1769,42 @@ def is_macos_root_engine_binary(path: Path) -> bool:
         path.name.startswith(f"{CLIENT_BINARY_STEM}_")
         or path.name.startswith(f"{DEDICATED_BINARY_STEM}_")
     )
+
+
+def selected_macos_openal_provider(build_dir: Path) -> str:
+    metadata_path = build_dir / "meson-info" / "intro-buildoptions.json"
+    try:
+        build_options = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValidationError(
+            "macOS staged validation cannot identify the selected OpenAL provider because "
+            f"Meson build-option metadata is missing: {metadata_path}"
+        ) from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValidationError(
+            f"macOS staged validation could not read Meson build-option metadata: {metadata_path}: {exc}"
+        ) from exc
+
+    if not isinstance(build_options, list):
+        raise ValidationError(f"Meson build-option metadata is not a list: {metadata_path}")
+
+    matching_options = [
+        option
+        for option in build_options
+        if isinstance(option, dict) and option.get("name") == "macos_openal_provider"
+    ]
+    if len(matching_options) != 1:
+        raise ValidationError(
+            "Meson build-option metadata must contain exactly one macos_openal_provider entry: "
+            f"{metadata_path}"
+        )
+
+    provider = matching_options[0].get("value")
+    if provider not in MACOS_OPENAL_PROVIDERS:
+        raise ValidationError(
+            f"Unsupported macOS OpenAL provider in Meson build-option metadata: {provider!r}"
+        )
+    return provider
 
 
 def validate_macos_staged_root_engine_binaries(
@@ -1291,6 +1843,8 @@ def validate_macos_staged_metadata(
     game_dir: Path,
     client_candidates: list[Path],
     dedicated_candidates: list[Path],
+    *,
+    openal_provider: str = "system",
 ) -> None:
     icon_path = install_root / "prey.icns"
     splash_path = install_root / "assets" / "splash" / "prey_rt_bitmap_4001.bmp"
@@ -1299,6 +1853,24 @@ def validate_macos_staged_metadata(
         raise ValidationError(f"macOS staged payload is missing app icon: {rel(icon_path, root)}")
     if not splash_path.is_file():
         raise ValidationError(f"macOS staged payload is missing startup splash asset: {rel(splash_path, root)}")
+
+    if openal_provider not in MACOS_OPENAL_PROVIDERS:
+        raise ValidationError(f"Unsupported macOS OpenAL provider: {openal_provider!r}")
+
+    openal_runtime = install_root / "Frameworks" / MACOS_OPENAL_SOFT_DYLIB_NAME
+    openal_runtime_binaries: list[Path] = []
+    if openal_provider == "system":
+        if not openal_runtime.is_file() or not is_posix_executable(openal_runtime):
+            raise ValidationError(
+                f"macOS staged payload is missing executable OpenAL Soft runtime: {rel(openal_runtime, root)}"
+            )
+        for filename in MACOS_OPENAL_SOFT_LICENSE_FILES:
+            license_file = install_root / "licenses" / "openal-soft" / filename
+            if not license_file.is_file() or license_file.stat().st_size == 0:
+                raise ValidationError(
+                    f"macOS staged payload is missing OpenAL Soft license/source payload: {rel(license_file, root)}"
+                )
+        openal_runtime_binaries.append(openal_runtime)
     validate_no_macos_symlinks(root, install_root)
     validate_macos_support_collector_script(root, install_root)
 
@@ -1353,7 +1925,7 @@ def validate_macos_staged_metadata(
             install_root / f"{CLIENT_BINARY_STEM}_{staged_arch}",
             install_root / f"{DEDICATED_BINARY_STEM}_{staged_arch}",
             expected_game_module,
-        ],
+        ] + openal_runtime_binaries,
     )
 
     validate_no_macos_non_runtime_artifacts(root, install_root, game_dir)
@@ -1400,7 +1972,7 @@ def validate_windows_symbols(root: Path, install_root: Path, game_dir: Path, arc
         raise ValidationError(f"Windows staged payload contains stale or architecture-mismatched PDB files:\n{formatted}")
 
 
-def validate_staged_payload(root: Path, *, dry_run: bool) -> None:
+def validate_staged_payload(root: Path, *, dry_run: bool, build_dir: Path | None = None) -> None:
     section("Validate staged .install payload")
     if dry_run:
         print("Staged payload checks skipped during dry run.", flush=True)
@@ -1416,6 +1988,7 @@ def validate_staged_payload(root: Path, *, dry_run: bool) -> None:
         raise ValidationError(f"Staged game directory must not be a symlink: {game_dir}")
     if not game_dir.is_dir():
         raise ValidationError(f"Staged game directory is missing: {game_dir}")
+    validate_no_staged_casefold_path_collisions(root, install_root)
 
     legacy_runtime_paths = find_forbidden_staged_legacy_paths(install_root, game_dir)
     if legacy_runtime_paths:
@@ -1484,12 +2057,14 @@ def validate_staged_payload(root: Path, *, dry_run: bool) -> None:
         ]
         validate_linux_dedicated_runtime_dependencies(root, dedicated_runtime_specs)
     if host_is_macos():
+        openal_provider = selected_macos_openal_provider(build_dir or root / "builddir")
         validate_macos_staged_metadata(
             root,
             install_root,
             game_dir,
             client_candidates,
             dedicated_candidates,
+            openal_provider=openal_provider,
         )
 
     for relative_name in STAGED_REQUIRED_GAME_FILES:
@@ -1685,9 +2260,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--no-install", dest="install", action="store_false", help="Skip Meson install and staged payload checks.")
     parser.add_argument("--skip-python-tests", action="store_true", help="Skip lightweight Python validation tests.")
+    parser.add_argument(
+        "--python-jobs",
+        type=positive_int,
+        default=None,
+        help="Python validation checks to run at once (default: OPENQ4_PYTHON_TEST_JOBS or the CPU count; 1 runs them in sequence).",
+    )
     parser.add_argument("--skip-build", action="store_true", help="Skip Meson setup/compile/install steps.")
-    parser.add_argument("--build-gamelibs", action="store_true", help="Ask the Windows Meson wrapper to build OpenPrey-game during compile.")
-    parser.add_argument("--game-libs-repo", default="", help="Override the OpenPrey-game companion repository path.")
+    parser.add_argument("--build-gamelibs", action="store_true", help="Deprecated: game modules now build with the engine.")
+    parser.add_argument("--game-libs-repo", default="", help="Override the game-source root for validation fixtures; ordinary builds use this checkout.")
     parser.add_argument("--skip-icon-sync", action="store_true", help="Set OPENPREY_SKIP_ICON_SYNC=1 for this run.")
     parser.add_argument("--jobs", "-j", type=positive_int, default=None, help="Parallel compile job count passed to Meson.")
     parser.add_argument("--extra-setup-arg", action="append", default=[], help="Additional argument appended to Meson setup.")
@@ -1695,7 +2276,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--runtime", action="store_true", help="Also run the safe renderer startup validation matrix after install.")
     parser.add_argument("--runtime-cases", default="", help="Comma-separated renderer validation case ids.")
     parser.add_argument("--runtime-tiers", default="auto,legacy", help="Renderer tiers for --runtime. Defaults to auto,legacy.")
-    parser.add_argument("--runtime-timeout", type=positive_int, default=60, help="Per-case renderer validation timeout.")
+    parser.add_argument("--runtime-timeout", type=positive_int, default=120,
+                        help="Per-case renderer validation timeout. The foundation self-test case "
+                             "loads every GUI before it reports, and on the slowest CI runner that has "
+                             "come in just over a minute, so the budget is deliberately well clear of it.")
     parser.add_argument("--runtime-basepath", default=None, help="Prey (2006) install/base path override for renderer validation.")
     parser.add_argument(
         "--runtime-skip-official-pak-validation",
@@ -1753,6 +2337,13 @@ def main(argv: list[str]) -> int:
                 title="Meson compile",
                 dry_run=args.dry_run,
             )
+            run_command(
+                wrapper + test_args(build_dir),
+                cwd=root,
+                env=env,
+                title="Meson native tests",
+                dry_run=args.dry_run,
+            )
             if args.install:
                 run_command(
                     wrapper + install_args(build_dir),
@@ -1767,7 +2358,7 @@ def main(argv: list[str]) -> int:
         # Release workflows use this after staging and before mutating binaries
         # for debug-symbol packaging.
         if args.install:
-            validate_staged_payload(root, dry_run=args.dry_run)
+            validate_staged_payload(root, dry_run=args.dry_run, build_dir=build_dir)
 
         if args.runtime:
             if not args.install and not args.dry_run:

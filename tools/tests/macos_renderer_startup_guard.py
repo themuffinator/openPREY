@@ -196,15 +196,15 @@ def validate_disabled_upload_bridge_state() -> None:
         "const int activeRingBytes = requestedPath == UPLOAD_PATH_DISABLED ? 0 : ringBytes;",
         "allocator.Init( activeRingBytes, requestedPath == UPLOAD_PATH_PERSISTENT )",
         "ring.Init( activeRingBytes, requestedPath == UPLOAD_PATH_PERSISTENT )",
-        "hasSync = requestedPath != UPLOAD_PATH_DISABLED",
+        "hasSync = requestedPath == UPLOAD_PATH_PERSISTENT && syncAvailable",
         'const char *bridgeMode = "disabled"',
         'bridgeMode = "streaming"',
-        "activeRingBytes / 1024",
+        "stats.ringSizeBytes / 1024",
     ):
         require(init_body, token, "disabled renderer upload bridge state")
 
     for token in (
-        "if ( glDeleteBuffersARB != NULL )",
+        "if ( glConfig.isInitialized && glDeleteBuffersARB != NULL )",
         "glDeleteBuffersARB( 1, &vbo )",
         "vbo = 0;",
     ):
@@ -374,14 +374,26 @@ def validate_apple_gl21_simple_interaction_fallback() -> None:
     ):
         require(arb2, token, "Apple GL 2.1 simple interaction fallback")
 
-    force_ambient = function_body(common, "static void RB_STD_ForceAmbient( void ) {")
+    force_ambient_value = function_body(
+        common, "static float RB_STD_ForceAmbientValue( void ) {"
+    )
     for token in (
         "glConfig.preferSimpleInteraction",
         "glConfig.disableARB2Interactions",
         "VPROG_SIMPLE_INTERACTION",
         "FPROG_SIMPLE_INTERACTION",
     ):
-        require(force_ambient, token, "force ambient interaction rescue family selection")
+        require(
+            force_ambient_value,
+            token,
+            "force ambient interaction rescue family selection",
+        )
+    force_ambient = function_body(common, "static void RB_STD_ForceAmbient( void ) {")
+    require(
+        force_ambient,
+        "RB_STD_ForceAmbientValue()",
+        "force ambient shared rescue value",
+    )
 
     require(
         gfx_info,

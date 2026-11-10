@@ -16,6 +16,7 @@
     },
     {
       "label": "Configure openPREY (Meson Debug)",
+      "detail": "Configure builddir as a debug build, reconfiguring it in place when it exists.",
       "type": "shell",
       "command": "powershell",
       "args": [
@@ -30,6 +31,7 @@
     },
     {
       "label": "Compile openPREY (Meson Debug)",
+      "detail": "Compile builddir without staging anything.",
       "type": "shell",
       "command": "powershell",
       "args": [
@@ -44,6 +46,7 @@
     },
     {
       "label": "Stage openPREY Install Tree (Meson Debug)",
+      "detail": "Install builddir into .install with meson install (no rebuild, no subprojects).",
       "type": "shell",
       "command": "powershell",
       "args": [
@@ -58,6 +61,7 @@
     },
     {
       "label": "Build openPREY (Meson Debug)",
+      "detail": "Compile builddir, then copy changed runtime files into .install for the launch configurations.",
       "type": "shell",
       "command": "powershell",
       "args": [
@@ -76,6 +80,7 @@
     },
     {
       "label": "Full Build and Stage openPREY (Meson Debug)",
+      "detail": "Configure, compile and fully install builddir into .install.",
       "dependsOrder": "sequence",
       "dependsOn": [
         "Configure openPREY (Meson Debug)",

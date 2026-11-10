@@ -11,6 +11,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import json  # noqa: E402
+import hashlib  # noqa: E402
+
+from game_layer import PACKAGED_LAYER_GAME_DIRS  # noqa: E402
+from openq4_pak import OPENQ4_BULK_PACK_NAMES, OPENQ4_PACK_NAMES  # noqa: E402
+
 
 PRODUCT_NAME = "openPREY"
 PRODUCT_PUBLISHER = "DarkMatter Productions"
@@ -78,6 +88,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Optional explicit path to ISCC.exe.",
     )
     parser.add_argument(
+        "--content-packs-manifest",
+        default="",
+        help=(
+            "content-packs.json for this release. The installer then leaves the bulk packs out "
+            "and downloads each one only when the install folder lacks it or holds other bytes."
+        ),
+    )
+    parser.add_argument(
+        "--content-pack-base-url",
+        default="",
+        help="Release download URL the bulk packs are fetched from, for example https://github.com/OWNER/REPO/releases/download/TAG/.",
+    )
+    parser.add_argument(
         "--skip-compile",
         action="store_true",
         help="Only emit the generated .iss file and skip invoking ISCC.exe.",
@@ -139,19 +162,27 @@ def validate_output_paths(output_dir: Path, script_path: Path, installer_path: P
 def validate_package_dir(package_dir: Path, arch: str) -> None:
     required_paths = [
         package_dir / f"{PRODUCT_NAME}-client_{arch}.exe",
-        package_dir / f"{PRODUCT_NAME}-client_{arch}.pdb",
         package_dir / f"{PRODUCT_NAME}-ded_{arch}.exe",
-        package_dir / f"{PRODUCT_NAME}-ded_{arch}.pdb",
         package_dir / "OpenAL32.dll",
         package_dir / "README.html",
         package_dir / "LICENSE",
+        package_dir / "LICENSING.md",
+        package_dir / "LICENSES" / "PREY-SDK-EULA.rtf",
         package_dir / "docs" / "index.html",
         package_dir / "basepr" / "mod.json",
-        package_dir / "basepr" / "pak0.pk4",
-        package_dir / "basepr" / "pak1.pk4",
+        *(package_dir / "basepr" / pack_name for pack_name in OPENQ4_PACK_NAMES),
         package_dir / "basepr" / f"game_{arch}.dll",
-        package_dir / "basepr" / f"game_{arch}.pdb",
     ]
+    # a packaged game-library layer (q4xbase) must be complete: its mod.json and modules.
+    # Symbols are published separately (the -symbols.zip asset), never installed.
+    for layer in PACKAGED_LAYER_GAME_DIRS:
+        layer_dir = package_dir / layer
+        if layer_dir.is_symlink():
+            raise FileNotFoundError(f"packaged game layer must not be a symlink: {layer_dir}")
+        if layer_dir.exists():
+            required_paths.append(layer_dir / "mod.json")
+            for module in (f"game-sp_{arch}", f"game-mp_{arch}"):
+                required_paths.append(layer_dir / f"{module}.dll")
 
     missing = [path for path in required_paths if not path.is_file() and not path.is_symlink()]
     if missing:
@@ -200,6 +231,232 @@ def resolve_iscc_path(explicit_path: str | None) -> Path:
     )
 
 
+CONTENT_PACK_NUMBERS = range(10)  # pak0.pk4 to pak9.pk4 are openPREY's own pack names
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def validate_content_pack_base_url(value: str) -> str:
+    """Releases download over HTTPS; plain HTTP is accepted only from this machine, for tests."""
+    if not value.endswith("/"):
+        value += "/"
+    if re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9._~%/+-]*", value):
+        return value
+    if re.fullmatch(r"http://(?:127\.0\.0\.1|localhost)(?::[0-9]+)?/[A-Za-z0-9._~%/+-]*", value):
+        return value
+    raise ValueError(f"content pack base URL must be an https:// release URL: {value!r}")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_download_packs(manifest_path: Path, package_dir: Path, base_url: str) -> list[dict[str, object]]:
+    """The bulk packs the installer downloads, pinned to the manifest's SHA-256.
+
+    Each must equal the copy in the package directory, so the installer fetches
+    exactly the bytes the zip package carries.
+    """
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    records = {pack["name"]: pack for pack in document.get("packs", [])}
+    packs = []
+    for name in OPENQ4_BULK_PACK_NAMES:
+        record = records.get(name)
+        if record is None:
+            raise RuntimeError(f"{manifest_path} does not list the bulk pack {name}")
+        sha256 = str(record["sha256"]).lower()
+        if not SHA256_HEX.fullmatch(sha256):
+            raise RuntimeError(f"{manifest_path} records an invalid SHA-256 for {name}")
+        packaged = package_dir / "basepr" / name
+        if sha256_file(packaged) != sha256:
+            raise RuntimeError(f"{packaged} does not match the manifest's {name}")
+        packs.append({"name": name, "sha256": sha256, "size": int(record["size"]), "url": base_url + name})
+    return packs
+
+
+def pascal_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def render_content_pack_code(download_packs: list[dict[str, object]]) -> str:
+    """Pascal for the selective bulk-pack download (roadmap PKG-05).
+
+    A pack already in the install folder with the pinned SHA-256 is kept; one
+    saved beside setup.exe with that SHA-256 is copied; anything else is
+    downloaded from the release URL compiled in here, and Inno Setup rejects a
+    download whose SHA-256 differs. Nothing a server sends chooses what is
+    downloaded.
+    """
+    count = len(download_packs)
+    names = "\n".join(f"    {i}: Result := {pascal_string(str(p['name']))};" for i, p in enumerate(download_packs))
+    digests = "\n".join(f"    {i}: Result := {pascal_string(str(p['sha256']))};" for i, p in enumerate(download_packs))
+    urls = "\n".join(f"    {i}: Result := {pascal_string(str(p['url']))};" for i, p in enumerate(download_packs))
+    if count == 0:
+        return """procedure InitializeContentPacks;
+begin
+end;
+
+function FetchContentPacks: Boolean;
+begin
+  Result := True;
+end;
+
+procedure InstallContentPacks;
+begin
+end;"""
+    return f"""const
+  ContentPackCount = {count};
+  ContentPackKeep = 0;
+  ContentPackFromSource = 1;
+  ContentPackDownloaded = 2;
+
+var
+  ContentPackDownloadPage: TDownloadWizardPage;
+  ContentPackAction: array of Integer;
+
+function ContentPackName(Index: Integer): String;
+begin
+  case Index of
+{names}
+  end;
+end;
+
+function ContentPackSha256(Index: Integer): String;
+begin
+  case Index of
+{digests}
+  end;
+end;
+
+function ContentPackUrl(Index: Integer): String;
+begin
+  case Index of
+{urls}
+  end;
+end;
+
+function ContentPackTarget(Index: Integer): String;
+begin
+  Result := ExpandConstant('{{app}}\\basepr\\') + ContentPackName(Index);
+end;
+
+function ContentPackMatches(const Path, Sha256: String): Boolean;
+begin
+  Result := False;
+  if FileExists(Path) then
+  try
+    Result := CompareText(GetSHA256OfFile(Path), Sha256) = 0;
+  except
+    Result := False;
+  end;
+end;
+
+function OnContentPackProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
+begin
+  Result := True;
+end;
+
+procedure InitializeContentPacks;
+begin
+  ContentPackDownloadPage := CreateDownloadPage(SetupMessage(msgWizardPreparing),
+    'Downloading the openPREY light-grid and loadscreen packs this installation needs.', @OnContentPackProgress);
+end;
+
+function FetchContentPacks: Boolean;
+var
+  I, Downloads: Integer;
+begin
+  Result := True;
+  SetArrayLength(ContentPackAction, ContentPackCount);
+  ContentPackDownloadPage.Clear;
+  Downloads := 0;
+  for I := 0 to ContentPackCount - 1 do
+  begin
+    if ContentPackMatches(ContentPackTarget(I), ContentPackSha256(I)) then
+    begin
+      ContentPackAction[I] := ContentPackKeep;
+      Log('Keeping the installed ' + ContentPackName(I) + '; it is current.');
+    end
+    else if ContentPackMatches(ExpandConstant('{{src}}\\') + ContentPackName(I), ContentPackSha256(I)) then
+    begin
+      ContentPackAction[I] := ContentPackFromSource;
+      Log('Using ' + ContentPackName(I) + ' saved beside setup.');
+    end
+    else
+    begin
+      ContentPackAction[I] := ContentPackDownloaded;
+      ContentPackDownloadPage.Add(ContentPackUrl(I), ContentPackName(I) + '.download', ContentPackSha256(I));
+      Downloads := Downloads + 1;
+      Log('Downloading ' + ContentPackName(I) + ' from ' + ContentPackUrl(I));
+    end;
+  end;
+  if Downloads = 0 then
+    Exit;
+  ContentPackDownloadPage.Show;
+  try
+    try
+      ContentPackDownloadPage.Download;
+    except
+      if not ContentPackDownloadPage.AbortedByUser then
+        SuppressibleMsgBox('openPREY could not download its content packs: ' + GetExceptionMessage + #13#10#13#10 +
+          'Check your connection and try again, or download the full openPREY package instead.', mbCriticalError, MB_OK, IDOK);
+      Result := False;
+    end;
+  finally
+    ContentPackDownloadPage.Hide;
+  end;
+end;
+
+procedure InstallContentPacks;
+var
+  I: Integer;
+  Source: String;
+begin
+  if GetArrayLength(ContentPackAction) <> ContentPackCount then
+    if not FetchContentPacks then
+    begin
+      SuppressibleMsgBox('openPREY was installed without its light-grid and loadscreen packs. ' +
+        'Run setup again, or download the full openPREY package.', mbCriticalError, MB_OK, IDOK);
+      Exit;
+    end;
+  for I := 0 to ContentPackCount - 1 do
+  begin
+    if ContentPackAction[I] = ContentPackKeep then
+      Continue;
+    if ContentPackAction[I] = ContentPackFromSource then
+      Source := ExpandConstant('{{src}}\\') + ContentPackName(I)
+    else
+      Source := ExpandConstant('{{tmp}}\\') + ContentPackName(I) + '.download';
+    if not FileCopy(Source, ContentPackTarget(I), False) then
+      SuppressibleMsgBox('openPREY could not install ' + ContentPackName(I) + ' into ' + ContentPackTarget(I) + '.',
+        mbCriticalError, MB_OK, IDOK);
+  end;
+end;"""
+
+
+def render_install_delete(download_packs: list[dict[str, object]]) -> str:
+    lines = [
+        'Type: files; Name: "{app}\\*.pdb"',
+        'Type: files; Name: "{app}\\basepr\\*.pdb"',
+        *(f'Type: files; Name: "{{app}}\\{layer}\\*.pdb"' for layer in PACKAGED_LAYER_GAME_DIRS),
+    ]
+    used = set(OPENQ4_PACK_NAMES)
+    lines += [
+        f'Type: files; Name: "{{app}}\\basepr\\pak{number}.pk4"'
+        for number in CONTENT_PACK_NUMBERS
+        if f"pak{number}.pk4" not in used
+    ]
+    return "\n".join(lines)
+
+
+def render_uninstall_delete(download_packs: list[dict[str, object]]) -> str:
+    # Downloaded packs are written by code, not [Files], so remove them explicitly.
+    return "\n".join(f'Type: files; Name: "{{app}}\\basepr\\{pack["name"]}"' for pack in download_packs)
+
+
 def render_installer_script(
     template_text: str,
     *,
@@ -209,20 +466,28 @@ def render_installer_script(
     version_tag: str,
     arch: str,
     setup_icon_file: Path,
+    download_packs: list[dict[str, object]] | None = None,
 ) -> str:
     arch_allowed, arch_install_mode = ARCHITECTURE_DIRECTIVES[arch]
     installer_basename = f"openprey-{version_tag}-windows-{arch}-setup"
+    download_packs = download_packs or []
+    excludes = ",".join(f"\\basepr\\{pack['name']}" for pack in download_packs)
 
     replacements = {
         "@@APP_ARCH@@": arch,
         "@@APP_VERSION@@": version,
         "@@PACKAGE_SOURCE@@": inno_string_contents(package_dir),
         "@@LICENSE_FILE@@": inno_string_literal(package_dir / "LICENSE"),
+        "@@LICENSING_FILE@@": inno_string_literal(package_dir / "LICENSING.md"),
         "@@OUTPUT_DIR@@": inno_string_literal(output_dir),
         "@@OUTPUT_BASENAME@@": installer_basename,
         "@@SETUP_ICON_FILE@@": inno_string_literal(setup_icon_file),
         "@@ARCH_ALLOWED_DIRECTIVE@@": arch_allowed,
         "@@ARCH_INSTALL_MODE_DIRECTIVE@@": arch_install_mode,
+        "@@INSTALL_DELETE@@": render_install_delete(download_packs),
+        "@@FILES_EXCLUDES@@": excludes,
+        "@@UNINSTALL_DELETE@@": render_uninstall_delete(download_packs),
+        "@@CONTENT_PACK_CODE@@": render_content_pack_code(download_packs),
     }
 
     rendered = template_text
@@ -286,6 +551,15 @@ def main(argv: list[str]) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    download_packs: list[dict[str, object]] = []
+    if args.content_packs_manifest:
+        try:
+            base_url = validate_content_pack_base_url(args.content_pack_base_url)
+            download_packs = read_download_packs(Path(args.content_packs_manifest), package_dir, base_url)
+        except (OSError, ValueError, KeyError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
     output_dir.mkdir(parents=True, exist_ok=True)
     script_text = render_installer_script(
         template_path.read_text(encoding="utf-8"),
@@ -295,8 +569,11 @@ def main(argv: list[str]) -> int:
         version_tag=version_tag,
         arch=args.arch,
         setup_icon_file=setup_icon_file.resolve(),
+        download_packs=download_packs,
     )
     script_path.write_text(script_text, encoding="utf-8", newline="\n")
+    for pack in download_packs:
+        print(f"Downloads {pack['name']} ({pack['size']} bytes) only when missing or different: {pack['url']}")
 
     if args.skip_compile:
         print(f"Generated installer script: {script_path}")

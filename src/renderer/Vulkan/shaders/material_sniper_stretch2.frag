@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "framebuffer_coords.glsl"
 
 // Vulkan port of Quake 4's shipped
 // glprogs/glsl/sniperstretch2.glslfp.
@@ -69,7 +71,7 @@ vec2 CurrentRenderCoord(out vec2 halfTextureScale) {
     // Vulkan fragment coordinates are upper-left oriented.  Convert to the
     // bottom-left GL window space used by the retail program and by the
     // current-render capture, then localize the coordinate to this viewport.
-    vec2 windowGL = vec2(gl_FragCoord.x, framebufferHeight - gl_FragCoord.y);
+    vec2 windowGL = vec2(gl_FragCoord.x, CanonicalWindowY(framebufferHeight));
     vec2 viewportCoord = (windowGL - viewportOrigin) / viewportSize;
     halfTextureScale = currentRenderScale * 0.5;
     return clamp(viewportCoord * currentRenderScale, vec2(0.0), currentRenderScale);
@@ -88,11 +90,13 @@ void main() {
         blurDir = vec2(0.0);
     }
 
+    vec4 sceneColor = texture(BackgroundImage, start);
     vec4 color;
     if (scopeArea.r == 0.0) {
-        color = texture(BackgroundImage, start);
+        color = sceneColor;
     } else {
-        // Preserve the retail six-tap radial offsets and weighting exactly.
+        // Preserve the retail six-tap radial offsets and weighting outside
+        // the feathered aperture rim.
         float len = scopeArea.r;
         vec2 amount = blurDir * len * 0.25;
         vec4 blurColor =
@@ -105,6 +109,11 @@ void main() {
         blurColor /= 6.0;
         color = (blurColor + material.shaderParms[2]) * 0.5;
     }
+
+    // Match the GL shader: compressed mask noise must not switch on the
+    // half-strength tint abruptly along a staircase of texture blocks.
+    float blurCoverage = smoothstep(0.0, 8.0 / 255.0, scopeArea.r);
+    color = mix(sceneColor, color, blurCoverage);
 
     if (AlphaTestFails(color.a)) {
         discard;

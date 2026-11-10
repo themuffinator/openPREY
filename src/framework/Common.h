@@ -197,6 +197,15 @@ struct openq4AsyncTimingStats_t {
 
 void				openQ4_GetAsyncTimingStats( openq4AsyncTimingStats_t &stats, int maxSamples = 60 );
 void				openQ4_BeginPresentationFrame( void );
+// Main-thread cooperative startup redraw; true while startup owns presentation.
+bool                openQ4_UpdateInitialization( void );
+// The presentation cap the throttle actually paces to. Callers that budget work
+// against a frame period must use this rather than com_maxfps directly, or their
+// budget and the throttle's period disagree and they sleep away the difference.
+int					openQ4_GetRequestedPresentationCap( void );
+// When the limiter released the current presentation frame, in milliseconds on
+// the high-resolution clock (Sys_GetClockTicks); 0 before the first frame.
+double				openQ4_GetPresentationFrameStartMsec( void );
 void				openQ4_SetLoadingContinueInputActive( bool active );
 bool				openQ4_AcceptingLoadingContinueInput( void );
 int					openQ4_GetActiveToolFlags( int flags );
@@ -239,6 +248,10 @@ public:
 
 	virtual int					GetUserCmdHz(void) const = 0;
 	virtual int					GetUserCmdMSec(void) const = 0;
+	// Transient game-owned simulation scale. This is separate from the public
+	// timescale CVar so gameplay features never overwrite a user's setting.
+	virtual void				SetGameTimeScale(float scale) = 0;
+	virtual float				GetGameTimeScale(void) const = 0;
 	virtual int					GetUserCmdTime(int ticNumber) const {
 		if ( ticNumber <= 0 ) {
 			return 0;
@@ -341,6 +354,7 @@ public:
 
 	// Returns key bound to the command
 	virtual const char* KeysFromBinding(const char* bind) = 0;
+	virtual const char* KeysFromBindingForPrompt(const char* bind) = 0;
 
 	// Returns the binding bound to the key
 	virtual const char* BindingFromKey(const char* key) = 0;

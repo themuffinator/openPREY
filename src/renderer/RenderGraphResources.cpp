@@ -10,6 +10,7 @@
 typedef struct renderGraphPhysicalAllocation_s {
 	bool					valid;
 	bool					inUseThisFrame;
+	int						unusedFrames;
 	int						id;
 	renderGraphResourceType_t type;
 	int						width;
@@ -42,6 +43,10 @@ static renderGraphPhysicalAllocation_t rg_renderGraphPhysicalAllocations[RENDER_
 static int rg_renderGraphResourceHandleCount = 0;
 static int rg_renderGraphResourcePassCount = 0;
 static bool rg_renderGraphResourceInitialized = false;
+static unsigned int rg_renderGraphAllocationRevision = 0;
+static int rg_renderGraphMaxSceneSamples = 1;
+static int rg_renderGraphSceneWidth = 0;
+static int rg_renderGraphSceneHeight = 0;
 
 static void R_RenderGraphResources_FormatDebugLabel( char *dest, int destSize, const char *fmt, ... ) {
 	va_list argptr;
@@ -164,14 +169,15 @@ static int R_RenderGraphResources_ShadowResourceSize( void ) {
 }
 
 static bool R_RenderGraphResources_HDRColorFormatSupported( void ) {
-	return rg_renderGraphResourceFeatures.modernGL41
-		|| rg_renderGraphResourceFeatures.gpuDriven
-		|| rg_renderGraphResourceFeatures.lowOverhead;
+	// RGBA16F is a required color-renderable format in the GL 3.x baseline.
+	// Restricting it to 4.1 silently clipped the GL 3.3 PBR scene before post.
+	return rg_renderGraphResourceFeatures.modernBaseline;
 }
 
 static bool R_RenderGraphResources_IsHDRColorResource( const char *name ) {
 	return name != NULL
 		&& ( !idStr::Icmp( name, "sceneColor" )
+			|| !idStr::Icmp( name, "sceneColorMSAA" )
 			|| !idStr::Icmp( name, "deferredLight" )
 			|| !idStr::Icmp( name, "hybridSceneColor" )
 			|| !idStr::Icmp( name, "postA" )
@@ -269,7 +275,9 @@ static int R_RenderGraphResources_FrameWidth( const renderGraphResource_t &resou
 		return R_RenderGraphResources_ShadowResourceSize();
 	}
 	const int scale = Max( 1, resource.widthScale );
-	return Max( 1, glConfig.vidWidth / scale );
+	const int width = resource.imported || resource.presentable
+		? glConfig.vidWidth : rg_renderGraphSceneWidth;
+	return Max( 1, width / scale );
 }
 
 static int R_RenderGraphResources_FrameHeight( const renderGraphResource_t &resource ) {
@@ -277,7 +285,9 @@ static int R_RenderGraphResources_FrameHeight( const renderGraphResource_t &reso
 		return R_RenderGraphResources_ShadowResourceSize();
 	}
 	const int scale = Max( 1, resource.heightScale );
-	return Max( 1, glConfig.vidHeight / scale );
+	const int height = resource.imported || resource.presentable
+		? glConfig.vidHeight : rg_renderGraphSceneHeight;
+	return Max( 1, height / scale );
 }
 
 static bool R_RenderGraphResources_RangesOverlap( int firstA, int lastA, int firstB, int lastB ) {
@@ -348,6 +358,9 @@ static void R_RenderGraphResources_ResetFrameRecords( const idRenderGraph &graph
 		allocation.firstPass = -1;
 		allocation.lastPass = -1;
 		if ( allocation.valid ) {
+			if ( allocation.unusedFrames < idMath::INT_MAX ) {
+				allocation.unusedFrames++;
+			}
 			rg_renderGraphResourceStats.physicalAllocations++;
 			if ( allocation.dsaTexture ) {
 				rg_renderGraphResourceStats.dsaTextureAllocations++;
@@ -502,7 +515,7 @@ static bool R_RenderGraphResources_InitHandleFromGraph( const idRenderGraph &gra
 	handle.graphResourceIndex = resourceIndex;
 	handle.width = R_RenderGraphResources_IsTextureResource( resource.type ) ? R_RenderGraphResources_FrameWidth( resource ) : 0;
 	handle.height = R_RenderGraphResources_IsTextureResource( resource.type ) ? R_RenderGraphResources_FrameHeight( resource ) : 0;
-	handle.samples = Max( 1, resource.samples );
+	handle.samples = Min( Max( 1, resource.samples ), rg_renderGraphMaxSceneSamples );
 	handle.imported = resource.imported;
 	handle.transient = resource.transient;
 	handle.presentable = resource.presentable;
@@ -552,12 +565,46 @@ static int R_RenderGraphResources_FindAliasAllocation( const renderGraphResource
 }
 
 static int R_RenderGraphResources_FindFreeAllocation( void ) {
+	int oldestUnused = -1;
 	for ( int i = 0; i < RENDER_GRAPH_RESOURCE_MAX_PHYSICAL_ALLOCATIONS; ++i ) {
-		if ( !rg_renderGraphPhysicalAllocations[i].valid ) {
+		const renderGraphPhysicalAllocation_t &allocation = rg_renderGraphPhysicalAllocations[i];
+		if ( !allocation.valid ) {
 			return i;
 		}
+		if ( !allocation.inUseThisFrame && ( oldestUnused < 0
+				|| allocation.unusedFrames > rg_renderGraphPhysicalAllocations[oldestUnused].unusedFrames ) ) {
+			oldestUnused = i;
+		}
 	}
-	return -1;
+	if ( oldestUnused < 0 ) {
+		return -1;
+	}
+
+	// Cached targets from old sizes/formats must not exhaust the frame's pool.
+	// Only retire an allocation with no logical handle in this frame. OpenGL
+	// retains objects needed by already submitted work; no GPU stall is needed.
+	renderGraphPhysicalAllocation_t &allocation = rg_renderGraphPhysicalAllocations[oldestUnused];
+	glDeleteFramebuffers( 1, &allocation.framebuffer );
+	glDeleteTextures( 1, &allocation.texture );
+	rg_renderGraphResourceStats.physicalAllocations--;
+	rg_renderGraphResourceStats.releasedPhysicalAllocations++;
+	if ( allocation.dsaTexture ) {
+		rg_renderGraphResourceStats.dsaTextureAllocations--;
+		rg_renderGraphResourceStats.dsaTextureParameterUpdates -= allocation.textureParameterUpdates;
+	} else {
+		rg_renderGraphResourceStats.classicTextureAllocations--;
+	}
+	if ( allocation.dsaFramebuffer ) {
+		rg_renderGraphResourceStats.dsaFramebufferAllocations--;
+	} else {
+		rg_renderGraphResourceStats.classicFramebufferAllocations--;
+	}
+	memset( &allocation, 0, sizeof( allocation ) );
+	// Deleted names may be reused by the driver. Invalidate both binding state
+	// and executor attachment caches, including ones used in a later frame.
+	rg_renderGraphAllocationRevision++;
+	R_GLStateCache_InvalidateAll( "render graph resource retirement" );
+	return oldestUnused;
 }
 
 static bool R_RenderGraphResources_CreateTextureAndFramebufferDSA( renderGraphPhysicalAllocation_t &allocation, const renderGraphResourceHandle_t &handle ) {
@@ -810,6 +857,7 @@ static bool R_RenderGraphResources_AssignPhysicalAllocation( renderGraphResource
 
 	renderGraphPhysicalAllocation_t &allocation = rg_renderGraphPhysicalAllocations[allocationIndex];
 	allocation.inUseThisFrame = true;
+	allocation.unusedFrames = 0;
 	R_RenderGraphResources_UpdateAllocationLifetime( allocation, handle );
 	handle.physicalAllocationId = allocation.id;
 	handle.texture = allocation.texture;
@@ -892,10 +940,24 @@ void R_RenderGraphResources_Init( const renderBackendCaps_t &caps, const renderF
 	rg_renderGraphResourceStats.initialized = true;
 	rg_renderGraphResourceStats.supported = features.renderGraph && caps.hasFBO;
 	rg_renderGraphResourceStats.available = R_RenderGraphResources_CanUseGLObjects( caps, features );
+	rg_renderGraphMaxSceneSamples = 1;
+	// Ask the context, as idImage::AllocImage does, not GLEW. Under
+	// glewExperimental, GLEW's 3.2 and ARB_texture_multisample flags only mean
+	// the entry points resolved, and macOS resolves every 3.2 entry point for
+	// its GL 2.1 legacy context too. There these two limit queries raised
+	// GL_INVALID_ENUM on every startup.
+	if ( rg_renderGraphResourceStats.available && glTexImage2DMultisample != NULL
+			&& ( caps.glVersion >= 3.2f || GLCapabilityProbe_HasExtension( "GL_ARB_texture_multisample" ) ) ) {
+		GLint colorSamples = 1, depthSamples = 1;
+		glGetIntegerv( GL_MAX_COLOR_TEXTURE_SAMPLES, &colorSamples );
+		glGetIntegerv( GL_MAX_DEPTH_TEXTURE_SAMPLES, &depthSamples );
+		rg_renderGraphMaxSceneSamples = Max( 1, Min( colorSamples, depthSamples ) );
+	}
 	R_RenderGraphResources_SetStatus( rg_renderGraphResourceStats.available ? "ready" : "unsupported or missing GL FBO functions" );
 }
 
 void R_RenderGraphResources_Shutdown( void ) {
+	rg_renderGraphAllocationRevision++;
 	if ( rg_renderGraphResourceInitialized ) {
 		for ( int i = 0; i < RENDER_GRAPH_RESOURCE_MAX_PHYSICAL_ALLOCATIONS; ++i ) {
 			renderGraphPhysicalAllocation_t &allocation = rg_renderGraphPhysicalAllocations[i];
@@ -914,8 +976,15 @@ void R_RenderGraphResources_Shutdown( void ) {
 	rg_renderGraphResourceInitialized = false;
 }
 
-void R_RenderGraphResources_PrepareFrame( const idRenderGraph &graph ) {
+unsigned int R_RenderGraphResources_AllocationRevision( void ) {
+	return rg_renderGraphAllocationRevision;
+}
+
+void R_RenderGraphResources_PrepareFrame( const idRenderGraph &graph,
+		int sceneWidth, int sceneHeight ) {
 	idGLDebugScope scope( "RenderGraphResources::PrepareFrame" );
+	rg_renderGraphSceneWidth = sceneWidth > 0 ? sceneWidth : Max( 1, glConfig.vidWidth );
+	rg_renderGraphSceneHeight = sceneHeight > 0 ? sceneHeight : Max( 1, glConfig.vidHeight );
 	R_RenderGraphResources_ResetFrameRecords( graph );
 	R_RenderGraphResources_CopyPassRecords( graph );
 	R_RenderGraphResources_AddLegacyImports( graph );
@@ -961,6 +1030,9 @@ const renderGraphResourceHandle_t *R_RenderGraphResources_HandleForGraphResource
 }
 
 void R_RenderGraphResources_PrintGfxInfo( void ) {
+	common->Printf( "Renderer graph extent: scene=%dx%d native=%dx%d\n",
+		rg_renderGraphSceneWidth, rg_renderGraphSceneHeight,
+		glConfig.vidWidth, glConfig.vidHeight );
 	common->Printf(
 		"Renderer graph resources: initialized=%d available=%d supported=%d lowOverhead=%d handles=%d imported=%d transient=%d textures=%d buffers=%d physical=%d mipmapped=%d/%d dsa(tex=%d params=%d fbo=%d) classic(tex=%d fbo=%d) fbo=%d/%d status='%s'\n",
 		rg_renderGraphResourceStats.initialized ? 1 : 0,
@@ -987,7 +1059,7 @@ void R_RenderGraphResources_PrintGfxInfo( void ) {
 
 void R_RenderGraphResources_DumpLatest( void ) {
 	common->Printf(
-		"RenderGraphResource dump: prepared=%d lowOverhead=%d handles=%d graphResources=%d passes=%d physical=%d new=%d reused=%d aliasReused=%d mipmapped=%d/%d dsa(tex=%d params=%d fbo=%d) classic(tex=%d fbo=%d) fbo=%d/%d failures=%d overflow=%d status='%s'\n",
+		"RenderGraphResource dump: prepared=%d lowOverhead=%d handles=%d graphResources=%d passes=%d physical=%d new=%d reused=%d aliasReused=%d released=%d revision=%u mipmapped=%d/%d dsa(tex=%d params=%d fbo=%d) classic(tex=%d fbo=%d) fbo=%d/%d failures=%d overflow=%d status='%s'\n",
 		rg_renderGraphResourceStats.prepared ? 1 : 0,
 		rg_renderGraphResourceStats.lowOverheadReady ? 1 : 0,
 		rg_renderGraphResourceStats.handles,
@@ -997,6 +1069,8 @@ void R_RenderGraphResources_DumpLatest( void ) {
 		rg_renderGraphResourceStats.newPhysicalAllocations,
 		rg_renderGraphResourceStats.reusedPhysicalAllocations,
 		rg_renderGraphResourceStats.aliasReusedPhysicalAllocations,
+		rg_renderGraphResourceStats.releasedPhysicalAllocations,
+		rg_renderGraphAllocationRevision,
 		rg_renderGraphResourceStats.mipmappedTextures,
 		rg_renderGraphResourceStats.totalMipLevels,
 		rg_renderGraphResourceStats.dsaTextureAllocations,
@@ -1125,7 +1199,7 @@ static bool R_RenderGraphResources_BuildWorldSelfTestGraph( idRenderGraph &graph
 	memset( &drawCmd, 0, sizeof( drawCmd ) );
 	drawCmd.commandId = RC_DRAW_VIEW;
 	drawCmd.viewDef = &worldView;
-	drawSurfsCommand_t fxCmd;
+	drawSpecialEffectsCommand_t fxCmd;
 	memset( &fxCmd, 0, sizeof( fxCmd ) );
 	fxCmd.commandId = RC_DRAW_SPECIAL_EFFECTS;
 	fxCmd.viewDef = &worldView;

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Vulkan port of openQ4's live smaa_edge.fs material program.
 
@@ -7,6 +8,8 @@ layout(set = 0, binding = 0) uniform sampler2D ColorTex;
 layout(set = 6, binding = 0, std140) uniform MaterialShaderParms {
     vec4 shaderParms[16];
 } material;
+
+#include "material_image_coords.glsl"
 
 layout(location = 0) in vec2 vTexCoord;
 layout(location = 0) out vec4 outColor;
@@ -38,7 +41,7 @@ vec3 ToSMAAPerceptualColor(vec3 color) {
 }
 
 vec3 SamplePerceptualColor(vec2 uv) {
-    return ToSMAAPerceptualColor(texture(ColorTex, uv).rgb);
+    return ToSMAAPerceptualColor(texture(ColorTex, MaterialImageCoord(uv, 0u)).rgb);
 }
 
 float ColorDelta(vec3 a, vec3 b) {

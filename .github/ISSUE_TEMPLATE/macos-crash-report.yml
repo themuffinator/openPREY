@@ -1,15 +1,15 @@
-name: Experimental macOS crash report
+name: macOS crash report
 description: Report an Apple Silicon/arm64 macOS crash, including issue #73 style startup crashes.
 title: "[macOS crash]: "
 labels:
   - macOS
   - crash
-  - experimental-support
+  - preview-support
 body:
   - type: markdown
     attributes:
       value: |
-        macOS support is experimental. Complete reports are especially useful because the maintainer may not have access to macOS hardware.
+        macOS support is a preview. Complete reports are especially useful because the maintainer may not have access to macOS hardware.
 
         If this looks like GitHub issue #73, please attach full terminal output as text, not only a screenshot. The most useful reports include both the terminal transcript and the saved `openprey.log`.
   - type: input

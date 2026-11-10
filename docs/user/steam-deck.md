@@ -10,7 +10,7 @@ openPREY includes a dedicated `openPREY-steamdeck` launcher in staged Linux pack
 
 - Use `openPREY-steamdeck` instead of `openPREY-client_x64`.
 - The launcher adds `+set com_platformProfile steamdeck`, exports `OPENPREY_STEAMDECK=1`, and preserves any extra command-line arguments you pass.
-- Native Wayland is the default SDL choice when available. To force the old XWayland fallback path, launch with `OPENPREY_FORCE_X11=1`; the dedicated launcher and direct client launches both honor it unless an explicit SDL video-driver override is already set.
+- Native Wayland is used when your compositor supports the fifo-v1 protocol (or `SDL_VIDEO_DRIVER=wayland` is set); otherwise SDL runs through XWayland. To force the old XWayland fallback path, launch with `OPENPREY_FORCE_X11=1`; the dedicated launcher and direct client launches both honor it unless an explicit SDL video-driver override is already set.
 - If native Wayland hits a libdecor startup or window-decoration issue on a specific compositor stack, launch with `OPENPREY_WAYLAND_DISABLE_LIBDECOR=1`.
 - If you launch `openPREY-client_x64` directly on a Steam Deck or SteamOS host, openPREY auto-selects the `steamdeck` platform profile when `com_platformProfile` is still `default`. Set `OPENPREY_NO_STEAMDECK_AUTODETECT=1` or `OPENPREY_DISABLE_STEAMDECK_AUTODETECT=1` to disable that fallback.
 
@@ -35,8 +35,8 @@ Default gameplay bindings shipped by the stock openPREY config:
 
 Menu behavior:
 
-- `JOY7` and `JOY8` both open the in-game menu; `JOY17` also opens the menu when the OS delivers the Guide button to the game.
-- `JOY3` selects the focused menu item, while `JOY4`, `JOY7`, and `JOY8` back out of menus.
+- `JOY7` opens the in-game menu and `JOY8` (View) shows the scores or objectives while held; `JOY17` also opens the menu when the OS delivers the Guide button to the game.
+- `JOY3` selects the focused menu item, while `JOY4`, `JOY7`, and `JOY8` back out of menus (View hides or shows Join Game's server details).
 - The D-pad is reserved for menu focus movement whenever a menu is open, even though those same buttons also have gameplay bindings.
 - The movement stick can also move menu focus, and holding the D-pad, movement stick, or shoulder buttons repeats navigation/scrolling for longer lists.
 - Extra `JOY23` through `JOY32` and `AUX1` through `AUX16` buttons are bindable but left unbound by default for user customization.
@@ -47,8 +47,10 @@ Tuning and haptics:
 - Use `in_joystickRumble 0` to disable motor output, or tune strength with `in_joystickRumbleScale`.
 - The Steam Deck profile sets `in_joystickLowBatteryRumbleThreshold 20` and `in_joystickLowBatteryRumbleScale 0.75`, which caps effective rumble output while SDL reports a controller battery at or below 20 percent. This does not rewrite your configured rumble strength.
 - The Steam Deck profile enables native SDL gyro aiming with a conservative `in_gyroSensitivity 0.20`; raise or lower that cvar if gyro aim feels slow or fast.
+- With the Steam Deck profile, menu prompts show the Deck's own button glyphs once you use its controls. Set `in_promptStyle` to pick another style for the menus and the HUD; see [Input Settings](input-settings.md#button-prompts).
 - `in_touchpadMode 1` routes gamepad touchpad motion to menu/console cursor movement. Use `in_touchpadMode 2` for touchpad mouse-look, `0` to disable touchpad motion, or `3` to leave touchpad motion off while keeping touchpad button binds.
 - `in_touchscreen 1` routes direct touchscreen taps and drags to menus, console, and loading-continue input when SDL delivers native touch events.
+- The Steam Deck profile starts the HUD at 125% (`ui_hudScale 1.25`) so its readouts stay legible on the handheld screen; change it under `Settings -> Game Options -> HUD`.
 - The in-game menu exposes controller controls under `Settings -> Game Options -> Controller`, including stick layout, radial dead-zone, look sensitivity, look curve, invert-look, trigger threshold, rumble tuning, gyro, touchpad mode, touchscreen input, and low-battery rumble caps.
 - For the full input settings guide, see [input-settings.md](input-settings.md).
 

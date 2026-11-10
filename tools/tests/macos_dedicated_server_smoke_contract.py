@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Static contract for native macOS dedicated-server smoke coverage."""
 
+import re
 from pathlib import Path
 
 
@@ -27,7 +28,7 @@ def main() -> None:
     push = read(".github/workflows/push-verification.yml")
     validator = read("tools/validation/openq4_validate.py")
     platform_support = read("docs/dev/platform-support.md")
-    plan = read("docs/dev/plan/2026-06-30-macos-compatibility-support.md")
+    plan = read("docs/dev/archive/2026-10-18/plan/2026-06-30-macos-compatibility-support.md")
     release_completion = read("docs/dev/release-completion.md")
     release_notes = read("docs/dev/releases/v0.8.1.md")
 
@@ -44,6 +45,13 @@ def main() -> None:
         '"si_gameType", "dm"',
         '"s_noSound", "1"',
         '"net_serverDedicated", "1"',
+        'IPV4_SELF_TEST_MARKER = "IPv4 network self-test: passed"',
+        'CANONICAL_GAMETYPE_MARKER = \'"si_gameType" is:"DM"\'',
+        "IPV4_SELF_TEST_MARKER,",
+        "CANONICAL_GAMETYPE_MARKER,",
+        '"+netIPv4SelfTest"',
+        '"+si_gameType"',
+        '"IPv4 network self-test: FAILED"',
         '"+wait", "1"',
         '"Selected game module: logical=\'game_mp\'"',
         '"game initialized."',
@@ -54,6 +62,14 @@ def main() -> None:
         "subprocess.TimeoutExpired",
     ):
         require(runner, token, "macOS dedicated-server smoke runner")
+    command = runner[runner.index("    command = [") : runner.index("\n    ]", runner.index("    command = ["))]
+    if not (
+        command.index('"si_gameType", "dm"')
+        < command.index('"+netIPv4SelfTest"')
+        < command.index('"+si_gameType"')
+        < command.index('"+echo", READY_MARKER')
+    ):
+        raise AssertionError("macOS dedicated smoke must test IPv4 and canonical DM before its ready marker")
     reject(runner, "Program Files", "asset-free macOS dedicated-server smoke runner")
     reject(runner, "steamapps", "asset-free macOS dedicated-server smoke runner")
 
@@ -88,6 +104,26 @@ def main() -> None:
         "macOS dedicated-server builds now run an asset-free hosted startup smoke",
         "curated release notes macOS dedicated-server entry",
     )
+
+    # The macOS dedicated server shares the SDL client's source list, which
+    # drops the callback-free native input facade for the client's driver. It
+    # links only if it takes the facade back, and never takes the driver.
+    meson = read("meson.build")
+    snapshot = meson.index("openq4_dedicated_sources = openq4_engine_sources")
+    facade = meson.index("openq4_dedicated_sources += files('src/framework/NativeInputDispatchDisabled.cpp')")
+    driver = meson.index("'src/sys/sdl3/NativeInputDriver.cpp')")
+    guard = meson.rindex("if dedicated_shares_client_sources", 0, facade)
+    if not snapshot < guard < facade < driver:
+        raise AssertionError("macOS dedicated server: take back the disabled native input facade after the client snapshot")
+    # Sharing is the default every target without its own list inherits.
+    require(meson[snapshot:snapshot + 120], "\n  dedicated_shares_client_sources = true\n", "dedicated targets share the client list by default")
+    for added in re.finditer(r"openq4_dedicated_sources\s*\+=\s*(files\([^)]*\)|\[[^\]]*\])", meson):
+        reject(added.group(1), "NativeInputDriver", "the dedicated server never links the client's native input driver")
+    for platform in ("  if windows_gl_free_ded\n", "  if host_system == 'linux'\n"):
+        block = meson[meson.index(platform, snapshot):facade]
+        require(block[:200], "dedicated_shares_client_sources = false", "dedicated targets with their own source list")
+    sources = read("tools/build/meson_sources.py")
+    require(sources, 'if args.target_kind == "client" and args.platform_backend == "sdl3":', "client-only facade removal")
 
     print("macos_dedicated_server_smoke_contract: ok")
 

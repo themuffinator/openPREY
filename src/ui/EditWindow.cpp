@@ -56,6 +56,10 @@ bool idEditWindow::ParseInternalVar( const char *_name, idParser *src ) {
 		numeric = src->ParseBool();
 		return true;
 	}
+	if ( idStr::Icmp( _name, "numericNegative" ) == 0 ) {
+		numericNegative = src->ParseBool();
+		return true;
+	}
 	if ( idStr::Icmp( _name, "wrap" ) == 0) {
 		wrap = src->ParseBool();
 		return true;
@@ -103,6 +107,7 @@ idWinVar *idEditWindow::GetWinVarByName( const char *_name, bool fixup, drawWin_
 void idEditWindow::CommonInit() {
 	maxChars = 128;
 	numeric = false;
+	numericNegative = false;
 	paintOffset = 0;
 	cursorPos = 0;
 	cursorLine = 0;
@@ -249,9 +254,24 @@ const char *idEditWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 		return ret;
 	}
 
+	// openQ4: take the length first - for a gui:: bound string that is what
+	// re-reads the binding, and c_str() then returns the fresh text - and hold
+	// the cursor to it. Only Draw clamped the cursor, so a key that arrived after
+	// the text was shortened or cleared but before the next draw (Enter clears
+	// the chat line, and several events can share a frame) moved a negative
+	// number of bytes or wrote before the buffer.
+	int len = text.Length();
 	idStr::Copynz( buffer, text.c_str(), sizeof( buffer ) );
 	int key = event->evValue;
-	int len = text.Length();
+	if ( len > MAX_EDITFIELD - 1 ) {
+		len = MAX_EDITFIELD - 1;
+	}
+	if ( cursorPos > len ) {
+		cursorPos = len;
+	}
+	if ( cursorPos < 0 ) {
+		cursorPos = 0;
+	}
 
 	if ( event->evType == SE_CHAR ) {
 		if ( event->evValue == Sys_GetConsoleKey( false ) || event->evValue == Sys_GetConsoleKey( true ) ) {
@@ -308,7 +328,8 @@ const char *idEditWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 		}
 
 		if ( numeric ) {
-			if ( ( key < '0' || key > '9' ) && key != '.' ) {
+			const bool leadingMinus = numericNegative && key == '-' && cursorPos == 0 && buffer[0] != '-';
+			if ( ( key < '0' || key > '9' ) && key != '.' && !leadingMinus ) {
 	       		return "";
 			}
 		}
@@ -692,6 +713,13 @@ idEditWindow::UpdateCvar
 ============
 */
 void idEditWindow::UpdateCvar( bool read, bool force ) {
+	// A signed field needs an editable prefix before the first digit. Do not
+	// round-trip '-' through the integer CVar (which canonicalizes it to 0).
+	// Leaving the field restores the last valid value in the ordinary read.
+	if ( !force && numeric && numericNegative && ( flags & WIN_FOCUS ) != 0 &&
+		 ( text.Length() == 0 || idStr::Cmp( text, "-" ) == 0 ) ) {
+		return;
+	}
 	if ( force || liveUpdate ) {
 		if ( cvar ) {
 			if ( read ) {

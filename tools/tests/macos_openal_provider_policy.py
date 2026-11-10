@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static checks for the experimental macOS OpenAL provider policy."""
+"""Static checks for the macOS OpenAL Soft release/package policy."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PLAN_PATH = "docs/dev/plans/2026-06-30-apple-support-no-macos-access.md"
 
 
 def read(relative_path: str) -> str:
@@ -33,216 +32,256 @@ def reject_regex(haystack: str, pattern: str, context: str) -> None:
 def validate_meson_provider_switch() -> None:
     options = read("meson_options.txt")
     meson = read("meson.build")
-
     for token in (
         "'macos_openal_provider'",
         "choices: ['apple_framework', 'system']",
         "value: 'apple_framework'",
-        "apple_framework is the release default",
-        "system uses dependency(\"openal\") plus OpenAL Soft-style AL/... headers for migration testing",
+        "Release workflows use system with the pinned, bundled OpenAL Soft runtime",
+        "OpenAL Soft-style AL/... headers",
     ):
         require(options, token, "macOS OpenAL provider Meson option")
 
     for token in (
-        "if host_system != 'darwin' and macos_openal_provider != 'apple_framework'",
-        "macos_openal_provider=' + macos_openal_provider + ' is only valid on macOS hosts.",
-        "if macos_openal_provider == 'apple_framework'",
         "dependency('appleframeworks', modules: ['OpenAL'], required: true)",
-        "dependency('openal', required: true)",
+        "dependency('openal', required: true, method: 'pkg-config')",
         "if macos_openal_provider == 'system'",
         "-DUSE_OPENAL_SOFT_INCLUDES=1",
+        "@loader_path/Frameworks:@loader_path/../Frameworks:@loader_path/openQ4.app/Contents/Frameworks",
+        "install_rpath: macos_openal_install_rpath",
         "'macOS OpenAL provider': macos_openal_provider",
     ):
         require(meson, token, "macOS OpenAL provider Meson wiring")
 
 
-def validate_release_workflow_pin() -> None:
-    manual_release = read(".github/workflows/manual-release.yml")
+def validate_pinned_builder_and_licensing() -> None:
+    script = read("tools/build/prepare_macos_openal_soft.sh")
+    source_notice = read("src/external/openal-soft/SOURCE.md")
+    copying = read("src/external/openal-soft/COPYING")
+    for token in (
+        'OPENAL_SOFT_VERSION="1.25.2"',
+        'OPENAL_SOFT_ARCHIVE_SHA256="fb27e5839aa11f0e5b9d33756965291fad5d6909ab928ea1f796f4a1a6877894"',
+        '[[ ! "${OPENAL_SOFT_ARCHIVE_SHA256}" =~ ^[0-9a-f]{64}$ ]]',
+        "https://github.com/kcat/openal-soft/archive/refs/tags/",
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=",
+        "-DLIBTYPE=SHARED",
+        "-DALSOFT_BACKEND_COREAUDIO=ON",
+        "-DALSOFT_REQUIRE_COREAUDIO=ON",
+        "-DALSOFT_OSX_FRAMEWORK=OFF",
+        'OPENAL_SOFT_INSTALL_NAME="@rpath/${OPENAL_SOFT_DYLIB_NAME}"',
+        'prefix=${pcfiledir}/../..',
+        'exec_prefix=${prefix}',
+        'libdir=${exec_prefix}/lib',
+        'includedir=${prefix}/include',
+        'chmod 0755 "${installed_runtime}"',
+        '"${stage_install_dir}/Frameworks"',
+        '"${stage_install_dir}/licenses/openal-soft"',
+        "openal-soft-${OPENAL_SOFT_VERSION}.tar.gz",
+        "src/external/openal-soft/COPYING",
+        "src/external/openal-soft/SOURCE.md",
+        '"${source_root}/LICENSE-pffft"',
+        '"${source_root}/fmt-11.2.0/LICENSE"',
+        '"${source_root}/gsl/LICENSE"',
+    ):
+        require(script, token, "pinned macOS OpenAL Soft builder")
+    for token in (
+        "[OpenAL Soft](https://openal-soft.org/)",
+        "version 1.25.2",
+        "openal-soft-1.25.2.tar.gz",
+        "fb27e5839aa11f0e5b9d33756965291fad5d6909ab928ea1f796f4a1a6877894",
+        "prepare_macos_openal_soft.sh",
+        "LICENSE-pffft",
+        "LICENSE-fmt",
+        "LICENSE-gsl",
+    ):
+        require(source_notice, token, "OpenAL Soft source notice")
+    require(copying, "GNU LIBRARY GENERAL PUBLIC LICENSE", "OpenAL Soft license")
+
+
+def validate_release_workflows() -> None:
+    manual = read(".github/workflows/manual-release.yml")
     commit = read(".github/workflows/commit-validation.yml")
     push = read(".github/workflows/push-verification.yml")
+    universal = read(".github/workflows/macos-universal2-candidate.yml")
+    sanitizer = read(".github/workflows/macos-sanitizer.yml")
+    debug = read(".github/workflows/macos-debug.yml")
 
+    require(manual, '"platform": "macos"', "manual release macOS matrix")
+    require(manual, '"macos_openal_provider": "system"', "manual release OpenAL Soft pin")
+    for token in (
+        'openal_runtime="${module_dir}/libopenal.1.dylib"',
+        "@rpath/libopenal.1.dylib)",
+        'if [ ! -f "${openal_runtime}" ]; then',
+        '"${renderer_module}" "${openal_runtime}"',
+        'check_macos_install_name "${openal_runtime}" "@rpath/libopenal.1.dylib"',
+    ):
+        require(manual, token, "manual release bundled OpenAL dependency audit")
     for source, context in (
-        (manual_release, "manual release workflow"),
+        (manual, "manual release workflow"),
         (commit, "commit validation workflow"),
         (push, "push verification workflow"),
+        (universal, "universal2 candidate workflow"),
+        (sanitizer, "macOS sanitizer workflow"),
+        (debug, "macOS debug workflow"),
     ):
-        require(source, "macos_openal_provider", context)
-        require(source, "apple_framework", context)
-        reject_regex(
-            source,
-            r"(platform|name|label)[^\n]*(macos|macOS).*?macos_openal_provider:\s*system",
-            context,
-        )
-        reject_regex(
-            source,
-            r'"platform":\s*"macos".*?"macos_openal_provider":\s*"system"',
-            context,
-        )
+        require(source, "prepare_macos_openal_soft.sh", context)
+    require(commit, "macos_openal_provider: system", "commit validation OpenAL Soft pin")
+    require(push, "macos_openal_provider: system", "push validation OpenAL Soft pin")
+    for source, context in (
+        (universal, "universal2 candidate workflow"),
+        (sanitizer, "macOS sanitizer workflow"),
+        (debug, "macOS debug workflow"),
+    ):
+        require(source, "macos_openal_provider=system", context)
+    for source, context in (
+        (manual, "manual release workflow"),
+        (commit, "commit validation workflow"),
+        (push, "push verification workflow"),
+        (universal, "universal2 candidate workflow"),
+        (sanitizer, "macOS sanitizer workflow"),
+        (debug, "macOS debug workflow"),
+    ):
+        require(source, "--stage-install-dir .install", context)
+    require(universal, "--openal-provider system", "universal2 provenance")
+    require(debug, "macOS Apple OpenAL Compatibility Corridor", "Apple OpenAL diagnostic lane")
+    require(debug, "-Dmacos_openal_provider=apple_framework", "Apple OpenAL diagnostic lane")
+    reject_regex(
+        manual,
+        r'"platform":\s*"macos".{0,400}"macos_openal_provider":\s*"apple_framework"',
+        "manual release macOS matrix",
+    )
 
-    require(manual_release, '"macos_openal_provider": "apple_framework"', "manual release macOS matrix")
-    require(commit, "macos_openal_provider: apple_framework", "commit validation macOS matrix")
-    require(push, "macos_openal_provider: apple_framework", "push verification macOS matrix")
+
+def validate_package_contract() -> None:
+    package = read("tools/build/package_nightly.py")
+    assembler = read("tools/build/assemble_macos_universal2.py")
+    validator = read("tools/validation/openq4_validate.py")
+    for token in (
+        'MACOS_OPENAL_SOFT_DYLIB_NAME = "libopenal.1.dylib"',
+        'MACOS_OPENAL_SOFT_INSTALL_NAME = f"@rpath/{MACOS_OPENAL_SOFT_DYLIB_NAME}"',
+        'MACOS_APP_OPENAL_LICENSE_DIR = MACOS_APP_RESOURCES_DIR / "licenses" / "openal-soft"',
+        "macos_embedded_openal_soft_path",
+        "copy_macos_openal_soft_licenses",
+        "MACOS_OPENAL_SOFT_LICENSE_FILES",
+        "openal-soft-1.25.2.tar.gz",
+        "macOS client does not use exactly one bundled OpenAL Soft dependency",
+        "misplaced OpenAL Soft runtime copies",
+        "macos_embedded_library_paths",
+    ):
+        require(package, token, "macOS package OpenAL Soft contract")
+    for token in (
+        'OPENAL_PROVIDERS = ("apple_framework", "system")',
+        'OPENAL_SOFT_RELATIVE_PATH = Path("Frameworks") / OPENAL_SOFT_DYLIB_NAME',
+        '"openal-soft": OPENAL_SOFT_RELATIVE_PATH',
+        "OPENAL_SOFT_INSTALL_NAME",
+        '"licenses/openal-soft/COPYING"',
+        '"licenses/openal-soft/LICENSE-pffft"',
+        '"licenses/openal-soft/LICENSE-fmt"',
+        '"licenses/openal-soft/LICENSE-gsl"',
+        '"licenses/openal-soft/SOURCE.md"',
+        '"licenses/openal-soft/openal-soft-1.25.2.tar.gz"',
+    ):
+        require(assembler, token, "macOS universal2 OpenAL Soft contract")
+    for token in (
+        'MACOS_OPENAL_SOFT_DYLIB_NAME = "libopenal.1.dylib"',
+        "MACOS_OPENAL_SOFT_LICENSE_FILES",
+        "selected_macos_openal_provider",
+        'intro-buildoptions.json',
+        'if openal_provider == "system":',
+        'install_root / "Frameworks" / MACOS_OPENAL_SOFT_DYLIB_NAME',
+        "missing OpenAL Soft license/source payload",
+    ):
+        require(validator, token, "staged macOS OpenAL Soft validation")
 
 
-def validate_policy_docs() -> None:
+def validate_nonfatal_allocation_policy() -> None:
+    sample_header = read("src/sound/OpenAL/AL_SoundSample.h")
+    sample_source = read("src/sound/OpenAL/AL_SoundSample.cpp")
+    voice_source = read("src/sound/OpenAL/AL_SoundVoice.cpp")
+    require(sample_header, "openalBufferUploadFailed", "OpenAL sample state")
+    for token in (
+        "openQ4_openALBufferAllocationWarningIssued",
+        "continuing with streaming fallback where resources permit",
+        "Further allocation failures are suppressed",
+        "openalBufferUploadFailed = true",
+        "CreateOpenALBuffer();",
+    ):
+        require(sample_source, token, "non-fatal OpenAL sample upload")
+    reject(
+        sample_source,
+        'common->Error( "idSoundSample_OpenAL::CreateOpenALBuffer: error generating OpenAL hardware buffer"',
+        "OpenAL allocation failure policy",
+    )
+    reject(
+        sample_source,
+        'common->Error( "idSoundSample_OpenAL::MakeDefault: error generating OpenAL hardware buffer"',
+        "default-sample allocation failure policy",
+    )
+    require(voice_source, "EnsureStreamingBuffers()", "OpenAL voice streaming fallback")
+
+
+def validate_docs_and_attribution() -> None:
     policy = read("docs/dev/macos-openal-provider-policy.md")
     building = read("BUILDING.md")
     platform = read("docs/dev/platform-support.md")
-    workflow_doc = read("docs/dev/macos-vm-testing-workflow.md")
-
+    workflow = read("docs/dev/macos-vm-testing-workflow.md")
+    readme = read("README.md")
+    getting_started = read("docs/user/getting-started.md")
+    package_readme = read("assets/release/README.html")
+    release_completion = read("docs/dev/release-completion.md")
     for token in (
-        "# macOS OpenAL Provider Policy",
-        "-Dmacos_openal_provider=apple_framework",
-        "Apple's OpenAL framework",
-        "not bundled OpenAL Soft",
-        "`-Dmacos_openal_provider=system` is migration-only",
-        "Library location",
-        "openQ4.app/Contents/Frameworks/",
-        "Install names",
-        "@executable_path/../Frameworks/",
-        "Codesigning",
-        "License notice",
-        "Notarization allowlist",
-        ".dSYM",
-        "case-fold collisions",
-        "OpenAL vendor:",
-        "OpenAL renderer:",
-        "OpenAL active device:",
-        "OpenAL EFX",
+        "-Dmacos_openal_provider=system",
+        "checksum-pinned OpenAL Soft 1.25.2",
+        "openQ4.app/Contents/Frameworks/libopenal.1.dylib",
+        "@rpath/libopenal.1.dylib",
+        "Codesigning and notarization",
+        "COPYING",
+        "PFFFT/fmt/Microsoft GSL notices",
+        "SOURCE.md",
+        "openal-soft-1.25.2.tar.gz",
+        "Allocation-failure behavior",
         "logs/openal-summary.txt",
         "must not launch openQ4",
     ):
-        require(policy, token, "macOS OpenAL provider policy doc")
-
+        require(policy, token, "macOS OpenAL provider policy")
     for source, context in (
         (building, "build documentation"),
         (platform, "platform support documentation"),
-        (workflow_doc, "macOS workflow documentation"),
+        (workflow, "macOS workflow documentation"),
     ):
-        require(source, "apple_framework", context)
-        require(source, "migration", context)
         require(source, "OpenAL Soft", context)
         require(source, "docs/dev/macos-openal-provider-policy.md", context)
-
-    require(building, "current macOS packages do not bundle OpenAL Soft", "build documentation")
-    require(platform, "current macOS packages do not bundle OpenAL Soft", "platform support documentation")
-    require(workflow_doc, "not release evidence that macOS packages bundle OpenAL Soft", "macOS workflow documentation")
-
-
-def validate_user_facing_docs_do_not_overclaim_openal_soft() -> None:
-    user_docs = {
-        "README": read("README.md"),
-        "getting started": read("docs/user/getting-started.md"),
-        "package README": read("assets/release/README.html"),
-        "release notes": read("docs/dev/releases/v0.6.5.md"),
-    }
-
-    forbidden_patterns = (
-        r"macOS[^.\n]*(bundles?|ships?|includes?)[^.\n]*OpenAL Soft",
-        r"OpenAL Soft[^.\n]*(bundled|included|shipped)[^.\n]*macOS",
-        r"macOS[^.\n]*OpenAL Soft provider",
-    )
-    for context, source in user_docs.items():
-        for pattern in forbidden_patterns:
-            reject_regex(source, pattern, context)
+    require(readme, "[OpenAL Soft](https://openal-soft.org/)", "README attribution")
+    require(getting_started, "no Homebrew or separate audio install is required", "player setup guide")
+    require(package_readme, "no Homebrew or separate audio install is required", "packaged README")
+    require(release_completion, "This resolves GitHub issue #122", "candidate release notes")
+    reject(platform, "current macOS packages do not bundle OpenAL Soft", "current platform documentation")
+    reject(building, "current macOS packages do not bundle OpenAL Soft", "current build documentation")
 
 
-def validate_support_intake_audio_fields() -> None:
+def validate_support_and_wiring() -> None:
     template = read(".github/ISSUE_TEMPLATE/macos-crash-report.yml")
     collector = read("tools/macos/collect_macos_support_info.sh")
     support_doc = read("docs/user/macos-support-data.md")
-
+    local_runner = read("tools/validation/openq4_validate.py")
     for token in (
-        "id: openal_vendor",
-        "label: OpenAL vendor",
         "OpenAL vendor:",
-        "id: openal_renderer",
-        "label: OpenAL renderer",
         "OpenAL renderer:",
-        "id: openal_device",
-        "label: OpenAL device name",
         "OpenAL active device:",
-        "id: openal_efx_lines",
-        "label: OpenAL EFX warnings",
         "OpenAL EFX",
         "logs/openal-summary.txt",
     ):
-        require(template, token, "macOS crash issue template OpenAL fields")
-
-    for token in (
-        "logs/openal-summary.txt",
-        "OpenAL vendor, OpenAL renderer, OpenAL version, OpenAL requested device, OpenAL default device, OpenAL active device, OpenAL EFX",
-        "grep -E 'OpenAL (vendor|renderer|version|requested device|default device|active device|ALC version|EFX|HRTF|output mode)",
-        "OpenAL vendor, renderer, device name, and EFX warning lines could not be copied without launching openQ4.",
-        "logs/openal-summary.txt records OpenAL vendor, renderer, version, device, and EFX warning/status lines",
-    ):
-        require(collector, token, "macOS support collector OpenAL summary")
-
-    for token in (
-        "OpenAL audio lines",
-        "`OpenAL vendor:`",
-        "`OpenAL renderer:`",
-        "`OpenAL active device:`",
-        "`OpenAL EFX ...`",
-        "`logs/openal-summary.txt`",
-        "without launching openQ4",
-    ):
-        require(support_doc, token, "macOS support-data guide OpenAL fields")
-
-
-def validate_plan_release_notes_and_wiring() -> None:
-    plan = read(PLAN_PATH)
-    release_completion = read("docs/dev/release-completion.md")
-    release_notes = read("docs/dev/releases/v0.6.5.md")
-    local_runner = read("tools/validation/openq4_validate.py")
-    commit = read(".github/workflows/commit-validation.yml")
-    push = read(".github/workflows/push-verification.yml")
-    macos_debug = read(".github/workflows/macos-debug.yml")
-
-    for token in (
-        "- [x] Keep release builds pinned to `macos_openal_provider=apple_framework`",
-        "- [x] Write a static package policy for a future OpenAL Soft macOS provider:",
-        "- [x] Keep `-Dmacos_openal_provider=system` described as migration-only.",
-        "- [x] Add static tests that user-facing release docs do not imply OpenAL Soft is",
-        "- [x] Add crash/support template fields for OpenAL vendor, renderer, device",
-        "Phase 6 implementation status",
-        "docs/dev/macos-openal-provider-policy.md",
-        "tools/tests/macos_openal_provider_policy.py",
-        "No macOS platform testing is required or claimed for Phase 6.",
-    ):
-        require(plan, token, "Phase 6 Apple support plan")
-
-    for source, context in (
-        (release_completion, "release completion notes"),
-        (release_notes, "curated release notes"),
-    ):
-        require(source, "Apple OpenAL framework", context)
-        require(source, "OpenAL Soft", context)
-        require(source, "logs/openal-summary.txt", context)
-
-    for source, context in (
-        (local_runner, "local validation runner"),
-        (commit, "commit validation workflow"),
-        (push, "push verification workflow"),
-        (macos_debug, "macOS debug workflow"),
-    ):
-        require(source, "macos_openal_provider_policy.py", context)
-
-    for source, context in (
-        (commit, "commit validation workflow"),
-        (push, "push verification workflow"),
-        (macos_debug, "macOS debug workflow"),
-    ):
-        require(source, "python tools/tests/macos_openal_provider_policy.py", context)
+        require(template + collector + support_doc, token, "macOS OpenAL support intake")
+    require(local_runner, "macos_openal_provider_policy.py", "local validation runner")
 
 
 def main() -> None:
     validate_meson_provider_switch()
-    validate_release_workflow_pin()
-    validate_policy_docs()
-    validate_user_facing_docs_do_not_overclaim_openal_soft()
-    validate_support_intake_audio_fields()
-    validate_plan_release_notes_and_wiring()
+    validate_pinned_builder_and_licensing()
+    validate_release_workflows()
+    validate_package_contract()
+    validate_nonfatal_allocation_policy()
+    validate_docs_and_attribution()
+    validate_support_and_wiring()
     print("macos_openal_provider_policy: ok")
 
 

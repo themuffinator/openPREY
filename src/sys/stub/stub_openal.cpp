@@ -67,6 +67,9 @@ void AL_APIENTRY alDeleteBuffers( ALsizei, const ALuint* ) AL_API_NOEXCEPT {
 void AL_APIENTRY alDeleteSources( ALsizei, const ALuint* ) AL_API_NOEXCEPT {
 }
 
+void AL_APIENTRY alDopplerFactor( ALfloat ) AL_API_NOEXCEPT {
+}
+
 void AL_APIENTRY alGenBuffers( const ALsizei count, ALuint* buffers ) AL_API_NOEXCEPT {
 	ZeroValues( buffers, count );
 }
@@ -83,6 +86,10 @@ ALenum AL_APIENTRY alGetError( void ) AL_API_NOEXCEPT {
 	return AL_NO_ERROR;
 }
 
+ALint AL_APIENTRY alGetInteger( ALenum ) AL_API_NOEXCEPT {
+	return 0;
+}
+
 void AL_APIENTRY alGetListenerf( ALenum, ALfloat* value ) AL_API_NOEXCEPT {
 	ZeroValues( value, 1 );
 }
@@ -95,7 +102,16 @@ void AL_APIENTRY alGetSourcef( ALuint, ALenum, ALfloat* value ) AL_API_NOEXCEPT 
 	ZeroValues( value, 1 );
 }
 
+void AL_APIENTRY alGetSourcefv( ALuint, const ALenum param, ALfloat* values ) AL_API_NOEXCEPT {
+	const bool vector = param == AL_POSITION || param == AL_VELOCITY || param == AL_DIRECTION;
+	ZeroValues( values, vector ? 3 : 1 );
+}
+
 void AL_APIENTRY alGetSourcei( ALuint, ALenum, ALint* value ) AL_API_NOEXCEPT {
+	ZeroValues( value, 1 );
+}
+
+void AL_APIENTRY alGetBufferi( ALuint, ALenum, ALint* value ) AL_API_NOEXCEPT {
 	ZeroValues( value, 1 );
 }
 
@@ -144,6 +160,12 @@ void AL_APIENTRY alSourceQueueBuffers( ALuint, ALsizei, const ALuint* ) AL_API_N
 }
 
 void AL_APIENTRY alSourceStop( ALuint ) AL_API_NOEXCEPT {
+}
+
+void AL_APIENTRY alSourceRewind( ALuint ) AL_API_NOEXCEPT {
+}
+
+void AL_APIENTRY alSpeedOfSound( ALfloat ) AL_API_NOEXCEPT {
 }
 
 void AL_APIENTRY alSourceUnqueueBuffers( ALuint, const ALsizei count, ALuint* buffers ) AL_API_NOEXCEPT {

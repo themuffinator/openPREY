@@ -1,6 +1,4 @@
-
-
-
+#include "NumericString.h"
 
 // TTimo - don't do anything funky if you're on a real OS ;-)
 #if defined(_WINDOWS) || defined(_XENON)
@@ -308,20 +306,16 @@ void idStr::RegisterIconEscapeCode( const char *code ) {
 idStr::ReAllocate
 ============
 */
-void idStr::ReAllocate( int amount, bool keepold ) {
+void idStr::ReAllocate( size_t amount, bool keepold ) {
 	char	*newbuffer;
 	int		newsize;
-	int		mod;
 
 	//assert( data );
 	assert( amount > 0 );
 
-	mod = amount % STR_ALLOC_GRAN;
-	if ( !mod ) {
-		newsize = amount;
-	}
-	else {
-		newsize = amount + STR_ALLOC_GRAN - mod;
+	if ( !idStrAllocationDetail::TryRoundUpToInt( amount, STR_ALLOC_GRAN, newsize ) ) {
+		idLib::Error( "idStr::ReAllocate: requested allocation cannot fit the 32-bit string buffer" );
+		return;
 	}
 	alloced = newsize;
 
@@ -427,8 +421,9 @@ void idStr::operator=( const char *text ) {
 		return;
 	}
 
-	l = strlen( text );
-	EnsureAlloced( l + 1, false );
+	const size_t textLength = strlen( text );
+	EnsureAlloced( idStrAllocationDetail::SaturatingAdd( textLength, 1 ), false );
+	l = idLib::SizeToInt( textLength, "idStr::operator=" );
 	strcpy( data, text );
 	len = l;
 }
@@ -444,7 +439,7 @@ int idStr::FindChar( const char *str, const char c, int start, int end ) {
 	int i;
 
 	if ( end == -1 ) {
-		end = strlen( str ) - 1;
+		end = idLib::SizeToInt( strlen( str ), "idStr::FindChar" ) - 1;
 	}
 	for ( i = start; i <= end; i++ ) {
 		if ( str[i] == c ) {
@@ -465,9 +460,9 @@ int idStr::FindText( const char *str, const char *text, bool casesensitive, int 
 	int l, i, j;
 
 	if ( end == -1 ) {
-		end = strlen( str );
+		end = idLib::SizeToInt( strlen( str ), "idStr::FindText" );
 	}
-	l = end - strlen( text );
+	l = end - idLib::SizeToInt( strlen( text ), "idStr::FindText" );
 	for ( i = start; i <= l; i++ ) {
 		if ( casesensitive ) {
 			for ( j = 0; text[j]; j++ ) {
@@ -530,6 +525,9 @@ bool idStr::Filter( const char *filter, const char *name, bool casesensitive ) {
 			}
 		}
 		else if (*filter == '?') {
+			if ( *name == '\0' ) {
+				return false;
+			}
 			filter++;
 			name++;
 		}
@@ -542,6 +540,9 @@ bool idStr::Filter( const char *filter, const char *name, bool casesensitive ) {
 				name++;
 			}
 			else {
+				if ( *name == '\0' ) {
+					return false;
+				}
 				filter++;
 				found = false;
 				while(*filter && !found) {
@@ -583,6 +584,9 @@ bool idStr::Filter( const char *filter, const char *name, bool casesensitive ) {
 						break;
 					}
 					filter++;
+				}
+				if ( *filter == '\0' ) {
+					return false;
 				}
 				filter++;
 				name++;
@@ -738,7 +742,7 @@ idStr::StripLeading
 void idStr::StripLeading( const char *string ) {
 	int l;
 
-	l = strlen( string );
+	l = idLib::SizeToInt( strlen( string ), "idStr::StripLeading" );
 	if ( l > 0 ) {
 		while ( !Cmpn( string, l ) ) {
 			memmove( data, data + l, len - l + 1 );
@@ -755,7 +759,7 @@ idStr::StripLeadingOnce
 bool idStr::StripLeadingOnce( const char *string ) {
 	int l;
 
-	l = strlen( string );
+	l = idLib::SizeToInt( strlen( string ), "idStr::StripLeadingOnce" );
 	if ( ( l > 0 ) && !Cmpn( string, l ) ) {
 		memmove( data, data + l, len - l + 1 );
 		len -= l;
@@ -786,7 +790,7 @@ idStr::StripLeading
 void idStr::StripTrailing( const char *string ) {
 	int l;
 
-	l = strlen( string );
+	l = idLib::SizeToInt( strlen( string ), "idStr::StripTrailing" );
 	if ( l > 0 ) {
 		while ( ( len >= l ) && !Cmpn( string, data + len - l, l ) ) {
 			len -= l;
@@ -803,7 +807,7 @@ idStr::StripTrailingOnce
 bool idStr::StripTrailingOnce( const char *string ) {
 	int l;
 
-	l = strlen( string );
+	l = idLib::SizeToInt( strlen( string ), "idStr::StripTrailingOnce" );
 	if ( ( l > 0 ) && ( len >= l ) && !Cmpn( string, data + len - l, l ) ) {
 		len -= l;
 		data[len] = '\0';
@@ -831,8 +835,11 @@ int idStr::Replace( const char *old, const char *nw ) {
 	int		oldLen, newLen, i, j, count;
 	idStr	oldString( data );
 
-	oldLen = strlen( old );
-	newLen = strlen( nw );
+	oldLen = idLib::SizeToInt( strlen( old ), "idStr::Replace" );
+	newLen = idLib::SizeToInt( strlen( nw ), "idStr::Replace" );
+	if ( oldLen == 0 ) {
+		return 0;
+	}
 
 	// Work out how big the new string will be
 	count = 0;
@@ -844,7 +851,23 @@ int idStr::Replace( const char *old, const char *nw ) {
 	}
 
 	if( count ) {
-		EnsureAlloced( len + ( ( newLen - oldLen ) * count ) + 2, false );
+		const size_t originalLength = static_cast<size_t>( oldString.Length() );
+		const size_t removedLength = idStrAllocationDetail::SaturatingMultiply(
+			static_cast<size_t>( oldLen ), static_cast<size_t>( count )
+		);
+		const size_t replacementLength = idStrAllocationDetail::SaturatingMultiply(
+			static_cast<size_t>( newLen ), static_cast<size_t>( count )
+		);
+		if ( removedLength > originalLength ) {
+			idLib::Error( "idStr::Replace: matched text exceeds the source length" );
+			return 0;
+		}
+
+		const size_t resultLength = idStrAllocationDetail::SaturatingAdd(
+			originalLength - removedLength, replacementLength
+		);
+		EnsureAlloced( idStrAllocationDetail::SaturatingAdd( resultLength, 2 ), false );
+		const int checkedResultLength = idLib::SizeToInt( resultLength, "idStr::Replace" );
 
 		// Replace the old data with the new data
 		for( i = 0, j = 0; i < oldString.Length(); i++ ) {
@@ -859,7 +882,8 @@ int idStr::Replace( const char *old, const char *nw ) {
 			}
 		}
 		data[j] = 0;
-		len = strlen( data );
+		assert( j == checkedResultLength );
+		len = checkedResultLength;
 	}
 	return iReplaced;
 }
@@ -959,6 +983,11 @@ idStr& idStr::StripQuotes ( void )
 {
 	if ( data[0] != '\"' )
 	{
+		return *this;
+	}
+	if ( len == 1 )
+	{
+		Empty();
 		return *this;
 	}
 	
@@ -1221,7 +1250,10 @@ void idStr::AppendPath( const char *text ) {
 
 	if ( text && text[i] ) {
 		pos = len;
-		EnsureAlloced( len + strlen( text ) + 2 );
+		const size_t requiredLength = idStrAllocationDetail::SaturatingAdd(
+			static_cast<size_t>( len ), strlen( text )
+		);
+		EnsureAlloced( idStrAllocationDetail::SaturatingAdd( requiredLength, 2 ) );
 
 		if ( pos ) {
 			if ( data[ pos-1 ] != '/' ) {
@@ -1428,25 +1460,7 @@ Checks a string to see if it contains only numerical values.
 ============
 */
 bool idStr::IsNumeric( const char *s ) {
-	int		i;
-	bool	dot;
-
-	if ( *s == '-' ) {
-		s++;
-	}
-
-	dot = false;
-	for ( i = 0; s[i]; i++ ) {
-		if ( !isdigit( ( byte )s[i] ) ) {
-			if ( ( s[ i ] == '.' ) && !dot ) {
-				dot = true;
-				continue;
-			}
-			return false;
-		}
-	}
-
-	return true;
+	return idNumericString::IsDecimal( s );
 }
 
 /*
@@ -1837,7 +1851,7 @@ idStr::Append
 void idStr::Append( char *dest, int size, const char *src ) {
 	int		l1;
 
-	l1 = strlen( dest );
+	l1 = idLib::SizeToInt( strlen( dest ), "idStr::Append" );
 	if ( l1 >= size ) {
 		idLib::common->Error( "idStr::Append: already overflowed" );
 	}
@@ -2354,10 +2368,18 @@ idStr idStr::GetLastColorCode( void ) const {
 		int escapeType = 0;
 		int escapeLength = idStr::IsEscape( &data[i-1], &escapeType );
 
-		if ( escapeLength && ( escapeType == S_ESCAPE_COLORINDEX || S_ESCAPE_COLOR ) ) {
+		if ( escapeLength == 0 ) {
+			continue;
+		}
+		if ( escapeType == S_ESCAPE_COLORINDEX || escapeType == S_ESCAPE_COLOR ) {
 			idStr result = "";
 			result.Append( &data[i-1], escapeLength );
 			return result;
+		}
+		// ^r resets the color: the text after it is in the default color.
+		// Icons and other commands set no color, so look past them.
+		if ( data[i] == 'r' || data[i] == 'R' ) {
+			return "";
 		}
 	}
 

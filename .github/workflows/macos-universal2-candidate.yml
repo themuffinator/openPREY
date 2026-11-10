@@ -3,11 +3,6 @@ name: DISABLED - inherited OpenQ4 reference (macOS Universal2 Release Candidate)
 on:
   workflow_dispatch:
     inputs:
-      openq4_game_ref:
-        description: openQ4-game branch, tag, or full commit SHA to build
-        required: true
-        default: main
-        type: string
       graphics_bridge:
         description: Graphics bridge package(s) to assemble
         required: true
@@ -48,19 +43,18 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
       - name: Resolve clean source pair and candidate matrix
         id: resolve
         env:
-          OPENQ4_GAME_REF: ${{ inputs.openq4_game_ref }}
           OPENQ4_GRAPHICS_BRIDGE: ${{ inputs.graphics_bridge }}
         shell: bash
         run: |
@@ -72,17 +66,7 @@ jobs:
           fi
           source_sha="$(git rev-parse --verify 'HEAD^{commit}')"
 
-          game_root="${RUNNER_TEMP}/openQ4-game-resolve"
-          rm -rf "${game_root}"
-          git init --quiet "${game_root}"
-          git -C "${game_root}" remote add origin https://github.com/themuffinator/openQ4-game.git
-          git -C "${game_root}" fetch --quiet --no-tags --depth=1 origin "${OPENQ4_GAME_REF}"
-          git -C "${game_root}" checkout --quiet --detach FETCH_HEAD
-          game_sha="$(git -C "${game_root}" rev-parse --verify 'HEAD^{commit}')"
-          if [ -n "$(git -C "${game_root}" status --porcelain --untracked-files=all)" ]; then
-            echo "Resolved openQ4-game checkout is unexpectedly dirty."
-            exit 1
-          fi
+          game_sha="${source_sha}"
 
           version_info="$(python tools/build/openq4_version.py --source-root "${GITHUB_WORKSPACE}" --track stable)"
           version="$(printf '%s\n' "${version_info}" | awk -F= '$1 == "base_version" { print $2; exit }')"
@@ -159,12 +143,12 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.metadata.outputs.thin_matrix) }}
     env:
-      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
       MACOSX_DEPLOYMENT_TARGET: "11.0"
 
     steps:
       - name: Checkout pinned openQ4 source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.metadata.outputs.source_sha }}
@@ -183,36 +167,8 @@ jobs:
             exit 1
           fi
 
-      - name: Fetch pinned openQ4-game source
-        shell: bash
-        run: |
-          set -euo pipefail
-          expected_source_sha="${{ needs.metadata.outputs.source_sha }}"
-          expected_game_sha="${{ needs.metadata.outputs.game_sha }}"
-          if [ "$(git rev-parse --verify 'HEAD^{commit}')" != "${expected_source_sha}" ]; then
-            echo "openQ4 checkout does not match the resolved candidate commit."
-            exit 1
-          fi
-          if [ -e "${OPENQ4_GAMELIBS_REPO}" ]; then
-            echo "Refusing to reuse an existing openQ4-game checkout: ${OPENQ4_GAMELIBS_REPO}"
-            exit 1
-          fi
-          mkdir -p "$(dirname "${OPENQ4_GAMELIBS_REPO}")"
-          git init --quiet "${OPENQ4_GAMELIBS_REPO}"
-          git -C "${OPENQ4_GAMELIBS_REPO}" remote add origin https://github.com/themuffinator/openQ4-game.git
-          git -C "${OPENQ4_GAMELIBS_REPO}" fetch --quiet --no-tags --depth=1 origin "${expected_game_sha}"
-          git -C "${OPENQ4_GAMELIBS_REPO}" checkout --quiet --detach "${expected_game_sha}"
-          if [ "$(git -C "${OPENQ4_GAMELIBS_REPO}" rev-parse --verify 'HEAD^{commit}')" != "${expected_game_sha}" ]; then
-            echo "openQ4-game checkout does not match the resolved candidate commit."
-            exit 1
-          fi
-          if [ -n "$(git -C "${OPENQ4_GAMELIBS_REPO}" status --porcelain --untracked-files=all)" ]; then
-            echo "Pinned openQ4-game checkout is unexpectedly dirty."
-            exit 1
-          fi
-
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
@@ -222,6 +178,18 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install meson ninja markdown
+
+      - name: Prepare pinned OpenAL Soft
+        shell: bash
+        run: |
+          set -euo pipefail
+          prepared_root="${GITHUB_WORKSPACE}/.tmp/openal-soft-macos-${{ matrix.binary_arch }}"
+          bash tools/build/prepare_macos_openal_soft.sh \
+            --architecture "${{ matrix.binary_arch }}" \
+            --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
+            --output-root "${prepared_root}" \
+            --stage-install-dir .install
+          echo "PKG_CONFIG_PATH=${prepared_root}/lib/pkgconfig" >> "${GITHUB_ENV}"
 
       - name: Build and stage thin macOS runtime
         shell: bash
@@ -238,7 +206,7 @@ jobs:
             --wrap-mode=forcefallback \
             -Dplatform_backend=sdl3 \
             -Dmacos_graphics_bridge=${{ matrix.bridge }} \
-            -Dmacos_openal_provider=apple_framework \
+            -Dmacos_openal_provider=system \
             -Dversion_track=stable \
             -Dversion_base_override=${{ needs.metadata.outputs.version }}
           bash tools/build/meson_setup.sh compile -C builddir
@@ -250,10 +218,16 @@ jobs:
           set -euo pipefail
           python tools/build/verify_release_source_provenance.py \
             --project-root "${GITHUB_WORKSPACE}" \
-            --gamelibs-root "${OPENQ4_GAMELIBS_REPO}" \
-            --stage-manifest "${GITHUB_WORKSPACE}/builddir/.tmp/openprey_gamelibs_stage/openprey_gamelibs_stage_manifest.json" \
             --expected-project-commit "${{ needs.metadata.outputs.source_sha }}" \
-            --expected-gamelibs-commit "${{ needs.metadata.outputs.game_sha }}"
+            --build-dir builddir
+
+      - name: Normalize thin universal2 payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/build/assemble_macos_universal2.py prepare \
+            --install-root .install \
+            --arch "${{ matrix.binary_arch }}"
 
       - name: Run thin dedicated-server smoke
         shell: bash
@@ -263,16 +237,23 @@ jobs:
             --arch "${{ matrix.binary_arch }}" \
             --output-root ".tmp/macos-universal2-candidate/${{ matrix.bridge }}/${{ matrix.binary_arch }}/dedicated-smoke"
 
+      - name: Stage pinned MoltenVK for thin payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/prepare_macos_moltenvk.sh --output-dir .install
+          bash tools/build/prepare_macos_moltenvk.sh --verify-only --output-dir .install
+
       - name: Record thin universal2 provenance
         shell: bash
         run: |
           set -euo pipefail
           python tools/build/assemble_macos_universal2.py record \
             --install-root .install \
-            --source-manifest builddir/.tmp/openprey_gamelibs_stage/openprey_gamelibs_stage_manifest.json \
+            --source-manifest builddir/openq4_game_sources.json \
             --arch "${{ matrix.binary_arch }}" \
             --graphics-bridge "${{ matrix.bridge }}" \
-            --openal-provider apple_framework \
+            --openal-provider system \
             --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
             --build-type debugoptimized
 
@@ -288,7 +269,7 @@ jobs:
           tar -tzf "${payload_archive}" >/dev/null
 
       - name: Upload thin universal2 candidate payload
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: openq4-macos-universal2-thin-${{ needs.metadata.outputs.source_sha }}-${{ matrix.bridge }}-${{ matrix.binary_arch }}
           path: .tmp/macos-universal2-candidate/${{ matrix.bridge }}/${{ matrix.binary_arch }}/thin-payload.tar.gz
@@ -308,24 +289,27 @@ jobs:
 
     steps:
       - name: Checkout pinned openQ4 source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.metadata.outputs.source_sha }}
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
+      - name: Install release documentation dependency
+        run: python -m pip install markdown
+
       - name: Download ARM64 thin payload
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: openq4-macos-universal2-thin-${{ needs.metadata.outputs.source_sha }}-${{ matrix.bridge }}-arm64
           path: .tmp/macos-universal2-candidate/${{ matrix.bridge }}/arm64
 
       - name: Download Intel thin payload
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: openq4-macos-universal2-thin-${{ needs.metadata.outputs.source_sha }}-${{ matrix.bridge }}-x64
           path: .tmp/macos-universal2-candidate/${{ matrix.bridge }}/x64
@@ -436,10 +420,9 @@ jobs:
             --arch universal2
             --version "${{ needs.metadata.outputs.version }}"
             --version-tag "${{ needs.metadata.outputs.version_tag }}"
-            --package-suffix "${package_suffix}"
+            "--package-suffix=${package_suffix}"
             --archive-format "${archive_format}"
             --source-root "${GITHUB_WORKSPACE}"
-            --repository-metadata-manifest "${corridor_root}/assembly-manifest.json"
             --install-dir "${corridor_root}/universal2"
             --output-dir "${corridor_root}/package-output"
           )
@@ -451,10 +434,9 @@ jobs:
               --arch universal2
               --version "${{ needs.metadata.outputs.version }}"
               --version-tag "${{ needs.metadata.outputs.version_tag }}"
-              --package-suffix "${package_suffix}"
+              "--package-suffix=${package_suffix}"
               --archive-format "${archive_format}"
               --source-root "${GITHUB_WORKSPACE}"
-              --repository-metadata-manifest "${corridor_root}/assembly-manifest.json"
               --install-dir "${corridor_root}/universal2"
               --output-dir "${corridor_root}/package-output"
               --macos-signing-mode developer-id
@@ -547,13 +529,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          package_dir="${{ steps.package.outputs.package_dir }}"
+          package_dir="${GITHUB_WORKSPACE}/${{ steps.package.outputs.package_dir }}"
           app_exec="${package_dir}/openQ4.app/Contents/MacOS/openQ4"
           smoke_root="${RUNNER_TEMP}/openq4-universal2-candidate-${{ matrix.bridge }}"
           smoke_cwd="${smoke_root}/finder-style-cwd"
           smoke_save="${smoke_root}/save"
           smoke_log="${smoke_save}/baseoq4/logs/macos_universal2_candidate_app_smoke.log"
+          smoke_console="${smoke_root}/console.log"
           smoke_timeout_marker="${smoke_root}/timed-out"
+          smoke_exit_status="${smoke_root}/app-exit-status"
           rm -rf "${smoke_root}"
           mkdir -p "${smoke_cwd}" "${smoke_save}"
           (
@@ -568,7 +552,7 @@ jobs:
               +set r_fullscreen 0 \
               +set r_ignoreGLErrors 0 \
               +rendererDefaultSafetySelfTest \
-              +quit &
+              +quit > "${smoke_console}" 2>&1 &
             app_pid=$!
             (
               sleep 90
@@ -590,16 +574,49 @@ jobs:
             if [ -f "${smoke_timeout_marker}" ]; then
               exit 124
             fi
-            exit "${app_status}"
+            printf '%s\n' "${app_status}" > "${smoke_exit_status}"
           )
-          grep -F "RendererDefaultSafety self-test passed" "${smoke_log}" >/dev/null
-          grep -F "Filesystem paths:" "${smoke_log}" >/dev/null
-          grep -F "fs_cdpath='${package_dir}/openQ4.app/Contents/Resources'" "${smoke_log}" >/dev/null
-          grep -F "game-sp_universal2.dylib" "${smoke_log}" >/dev/null
+          if [ ! -f "${smoke_log}" ]; then
+            echo "Universal2 app smoke log was not created: ${smoke_log}"
+            exit 1
+          fi
+          if [ ! -f "${smoke_exit_status}" ]; then
+            echo "Universal2 app smoke did not record the application exit status."
+            exit 1
+          fi
+          if [ ! -f "${smoke_console}" ]; then
+            echo "Universal2 app smoke console output was not created: ${smoke_console}"
+            exit 1
+          fi
+          app_status="$(tr -d '[:space:]' < "${smoke_exit_status}")"
+          if ! [[ "${app_status}" =~ ^[0-9]+$ ]] || [ "${app_status}" -gt 127 ]; then
+            echo "Universal2 app smoke ended abnormally with status '${app_status}'."
+            exit 1
+          fi
+          require_smoke_output() {
+            local expected="$1"
+            if ! grep -Fq "${expected}" "${smoke_console}"; then
+              echo "Universal2 app smoke console output is missing: ${expected}"
+              tail -n 160 "${smoke_console}" || true
+              exit 1
+            fi
+          }
+          require_smoke_output "RendererDefaultSafety self-test passed"
+          require_smoke_output "Filesystem paths:"
+          require_smoke_output "fs_cdpath='${package_dir}/openQ4.app/Contents/Resources'"
+          require_smoke_output "Selected game module: logical='game_sp' binary='game-sp_universal2'"
+          if grep -Eiq '(^|[[:space:]])(FATAL|Sys_Error):' "${smoke_console}" "${smoke_log}"; then
+            echo "Universal2 app smoke output contains a fatal startup diagnostic."
+            exit 1
+          fi
+          if [ "${app_status}" -ne 0 ]; then
+            echo "Universal2 app smoke completed its startup and shutdown checks with SDL launcher status ${app_status}."
+          fi
+
 
       - name: Upload universal2 candidate evidence
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: openq4-macos-universal2-candidate-${{ needs.metadata.outputs.version_tag }}-${{ needs.metadata.outputs.source_sha }}-${{ matrix.bridge }}
           path: |

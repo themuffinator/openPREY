@@ -472,9 +472,12 @@ public:
 
 	// interface wrapper over MT_GetMaterialTypeArray so the renderer module
 	// reaches the material-type decl data across the DLL boundary (Phase B8,
-	// docs/dev/plans/2026-07-16-vulkan-renderer-phase-b.md); const char*
+	// docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer-phase-b.md); const char*
 	// because idStr must never cross the module ABI by value
 	virtual byte *					GetMaterialTypeArray( const char *image, int &width, int &height ) = 0;
+	// The engine owns these allocations. Release through the same binary so
+	// allocator ownership and per-module diagnostics remain paired.
+	virtual void					FreeMaterialTypeArray( byte *array ) = 0;
 
 #if defined(_XENON)
 // mwhitlock: Xenon texture streaming

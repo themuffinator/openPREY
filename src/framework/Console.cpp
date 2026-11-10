@@ -30,6 +30,10 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "Session_local.h"
+#include "ConsoleCompletion.h"
+#include "ConsoleInput.h"
+#include "NativeInputPublications.h"
+#include "../ui/PointerCursor.h"
 
 void SCR_DrawTextLeftAlign( float &y, const char *text, ... ) id_attribute((format(printf,2,3)));
 void SCR_DrawTextRightAlign( float &y, const char *text, ... ) id_attribute((format(printf,2,3)));
@@ -41,8 +45,10 @@ void SCR_DrawTextRightAlign( float &y, const char *text, ... ) id_attribute((for
 #define CON_LINE_STRIDE			256
 #define	CON_MAX_TOTAL_LINES		(CON_TEXTSIZE / CON_LINE_STRIDE)
 #define CON_HISTORY_MAX_CHARS	(CON_TEXTSIZE * 8)
-#define CONSOLE_FIRSTREPEAT		200
-#define CONSOLE_REPEAT			100
+// openQ4: the history is trimmed back to CON_HISTORY_MAX_CHARS once it has run
+// this far past it, and its buffer is reserved to hold that plus one long line
+#define CON_HISTORY_TRIM_SLACK	(CON_HISTORY_MAX_CHARS / 8)
+#define CON_HISTORY_RESERVE		(CON_HISTORY_MAX_CHARS + CON_HISTORY_TRIM_SLACK + 4096)
 #define CON_SCROLLBAR_BASE_WIDTH		2.0f
 #define CON_SCROLLBAR_HOVER_GROW		3.0f
 #define CON_SCROLLBAR_HIT_PAD			5.0f
@@ -50,12 +56,10 @@ void SCR_DrawTextRightAlign( float &y, const char *text, ... ) id_attribute((for
 #define CON_SCROLLBAR_MIN_THUMB			18.0f
 #define CON_SCROLLBAR_LERP_SPEED		12.0f
 #define CON_SELECTION_ALPHA				0.35f
-#define CON_COMPLETION_MAX_MATCHES		64
+#define CON_COMPLETION_MAX_MATCHES		oq4completion::MAX_MATCHES
+#define CON_COMPLETION_MAX_FUZZY_MATCHES	oq4completion::MAX_FUZZY_MATCHES
 #define CON_COMPLETION_MAX_VISIBLE		8
 #define CON_TEXT_DRAG_THRESHOLD			4.0f
-#define CON_MOUSE_CURSOR_SIZE			32.0f
-#define CON_MOUSE_CURSOR_HOTSPOT_X		0.0f
-#define CON_MOUSE_CURSOR_HOTSPOT_Y		static_cast<float>( SMALLCHAR_HEIGHT )
 
 #define	COMMAND_HISTORY			64
 static const char *kConsoleHistoryFileName = "consolehistory.dat";
@@ -82,11 +86,13 @@ public:
 	virtual	void		LoadGraphics( void );
 	virtual	bool		ProcessEvent( const sysEvent_t *event, bool forceAccept );
 	virtual	bool		Active( void );
+	bool NativeInputBlocked() const noexcept { return keyCatching; }
 	virtual	void		ClearNotifyLines( void );
 	virtual	void		Close( void );
 	virtual void		SetProcFileOutOfDate( bool state );
 	virtual void		SetAASFileOutOfDate( bool state );
 	virtual	void		SetMousePosition( float x, float y );
+	void				OpenForInput( bool reduced );
 	virtual	void		Print( const char *text );
 	virtual	void		Draw( bool forceFullScreen );
 
@@ -111,6 +117,10 @@ private:
 	void				Linefeed();
 
 	void				ClampDisplay( void );
+	void				UpdateFrameTime( void );
+	void				UpdateCaretBlink( void );
+	void				CloseFromInput( void );
+	void				RecallHistoryLine( int line );
 	void				UpdateDisplayLine( void );
 	float				GetOpenFraction( bool reduced ) const;
 	int					GetFooterRows( void ) const;
@@ -124,7 +134,7 @@ private:
 	int					GetInputCursorFromMouse( void ) const;
 	bool				GetLogPositionFromMouse( int &line, int &column ) const;
 	void				EnsureMouseInitialized( void );
-	void				UpdateScrollbarHoverValue( float &hoverFrac, bool dragging, bool hot );
+	void				UpdateScrollbarHoverValue( float &hoverFrac, bool dragging, bool hot ) const;
 	void				GetScrollbarFrameGeometry( float areaX, float areaW, float areaY, float areaH, float hoverFrac,
 							float &trackX, float &trackY, float &trackW, float &trackH, float *hitX = NULL, float *hitW = NULL ) const;
 	void				GetScrollbarThumbGeometry( float trackY, float trackH, int visibleCount, int filled, float displayFrac,
@@ -191,7 +201,9 @@ private:
 	void				ClampCompletionScroll( bool keepSelectionVisible );
 	void				MoveCompletionSelection( int delta );
 	void				RefreshCompletionState( void );
+	int					MeasureCompletionPopupChars( void ) const;
 	void				ApplySelectedCompletion( int direction );
+	bool				EnterAcceptsCompletion( void );
 	bool				IsCurrentSegmentCompletionMatch( const char *match ) const;
 	bool				ShouldHideMatchedCompletionPopup( void ) const;
 	bool				GetCompletionCvarInfo( const char *match, char *value, int valueSize, bool *modified ) const;
@@ -225,7 +237,6 @@ private:
 	void				DrawNotify();
 	void				DrawSolidConsole( float frac );
 
-	void				Scroll();
 	void				SetDisplayFraction( float frac );
 	void				UpdateDisplayFraction( void );
 	short *				LinePtr( int line );
@@ -245,9 +256,14 @@ private:
 	int					current;		// line where next message will be printed
 	int					x;				// offset in current line for next print
 	int					display;		// bottom of console displays this line
-	int					lastKeyEvent;	// time of last key event for scroll delay
-	int					nextKeyEvent;	// keyboard repeat rate
 	float				displayLine;	// smoothed display row for scrollback
+	double				frameClock;		// Sys_GetClockTicks at the last Draw
+	float				frameSeconds;	// wall time since the Draw before it
+	double				caretClock;		// seconds since the edit line last changed
+	int					caretCursor;	// the edit line as the caret blink last saw it
+	int					caretLength;
+	int					caretAnchor;
+	bool				caretOverstrike;
 
 	float				displayFrac;	// approaches finalFrac at scr_conspeed
 	float				finalFrac;		// 0.0 to 1.0 lines of console to display
@@ -265,6 +281,8 @@ private:
 	int					historyLine;	// the line being displayed from history buffer
 									// will be <= nextHistoryLine
 	bool				commandHistoryLoaded;
+	idEditField			historyDraft;	// the line being typed, kept while history is browsed
+	int					completionRebuildHold;	// > 0 while a paste or drop inserts its characters
 
 	idEditField			consoleField;
 	int					inputSelectionAnchor;
@@ -287,6 +305,7 @@ private:
 	int					completionReplaceOffset;
 	int					completionReplaceLength;
 	int					completionSnapshotCursor;
+	int					completionPopupChars;	// widest row, measured when the list is rebuilt
 	bool				completionAppendSpace;
 	bool				completionPrependSlash;
 	bool				completionPopupVisible;
@@ -309,6 +328,7 @@ private:
 	consoleFocus_t		focus;
 	char				completionSnapshotBuffer[MAX_EDIT_LINE];
 	char				completionMatches[CON_COMPLETION_MAX_MATCHES][MAX_EDIT_LINE];
+	oq4completion::CandidateIndex<CON_COMPLETION_MAX_MATCHES>	completionMatchIndex;
 	char				textDragText[MAX_EDIT_LINE];
 
 	int					lineWidth;
@@ -328,7 +348,6 @@ private:
 
 	const idMaterial *	whiteShader;
 	const idMaterial *	consoleShader;
-	const idMaterial *	mouseCursorShader;
 };
 
 static idConsoleLocal localConsole;
@@ -344,7 +363,7 @@ idCVar idConsoleLocal::con_noPrint( "con_noPrint", "0", CVAR_BOOL|CVAR_SYSTEM|CV
 idCVar idConsoleLocal::con_noPrint( "con_noPrint", "1", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "print on the console but not onscreen when console is pulled up" );
 #endif
 idCVar idConsoleLocal::con_scrollSmooth( "con_scrollSmooth", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "smoothly animate console scrollback movements" );
-idCVar idConsoleLocal::con_scrollSmoothSpeed( "con_scrollSmoothSpeed", "24", CVAR_FLOAT | CVAR_SYSTEM | CVAR_ARCHIVE, "scrollback smoothing speed", 1.0f, 96.0f );
+idCVar idConsoleLocal::con_scrollSmoothSpeed( "con_scrollSmoothSpeed", "24", CVAR_FLOAT | CVAR_SYSTEM | CVAR_ARCHIVE, "slowest speed of the scrollback smoothing, in lines per second; longer jumps move faster", 1.0f, 96.0f );
 idCVar idConsoleLocal::con_completionPopup( "con_completionPopup", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR_ARCHIVE, "show the live console completion popup while typing" );
 idCVar idConsoleLocal::con_scrollLines( "con_scrollLines", "6", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE, "mouse wheel / page scroll step in console lines", 1.0f, 64.0f );
 
@@ -427,8 +446,9 @@ struct consoleCompletionCandidate_t {
 
 struct consoleFuzzyCompletionState_t {
 	char						needle[MAX_EDIT_LINE];
+	int							argIndex;
 	int							count;
-	consoleCompletionCandidate_t	matches[CON_COMPLETION_MAX_MATCHES];
+	consoleCompletionCandidate_t	matches[CON_COMPLETION_MAX_FUZZY_MATCHES];
 };
 
 static void Con_LightenColor( const idVec4 &color, float amount, idVec4 &outColor ) {
@@ -442,29 +462,6 @@ static void Con_LightenColor( const idVec4 &color, float amount, idVec4 &outColo
 
 static int Con_CompletionLower( int ch ) {
 	return tolower( static_cast<unsigned char>( ch ) );
-}
-
-static const char *Con_FindCompletionSegmentStart( const char *cmd ) {
-	const char *segmentStart = cmd;
-	for ( const char *scan = cmd; *scan != '\0'; ++scan ) {
-		if ( *scan == ';' ) {
-			segmentStart = scan + 1;
-		}
-	}
-	return segmentStart;
-}
-
-static void NormalizeCompletionCommandString( const char *cmd, char *normalized, size_t normalizedSize ) {
-	const char *segmentStart = Con_FindCompletionSegmentStart( cmd );
-
-	while ( *segmentStart != '\0' && *segmentStart <= ' ' ) {
-		++segmentStart;
-	}
-
-	idStr::Copynz( normalized, segmentStart, normalizedSize );
-	if ( normalized[0] == '/' || normalized[0] == '\\' ) {
-		memmove( normalized, normalized + 1, strlen( normalized ) );
-	}
 }
 
 static bool Con_IsCompletionWordChar( int ch ) {
@@ -483,7 +480,7 @@ static bool Con_IsCompletionBoundary( const char *match, int index ) {
 }
 
 static bool Con_FindSubstringCompletion( const char *match, const char *needle, int *outPos, bool *outBoundary ) {
-	const int needleLen = strlen( needle );
+	const int needleLen = idLib::SizeToInt( strlen( needle ), "Con_FindSubstringCompletion" );
 	int bestPos = -1;
 	bool bestBoundary = false;
 
@@ -629,8 +626,8 @@ static int Con_GetMaxCompletionDistance( int needleLen ) {
 }
 
 static int Con_FindBestCompletionDistance( const char *match, const char *needle, int maxDistance, int *outStart, bool *outBoundary ) {
-	const int needleLen = strlen( needle );
-	const int matchLen = strlen( match );
+	const int needleLen = idLib::SizeToInt( strlen( needle ), "Con_FindBestCompletionDistance" );
+	const int matchLen = idLib::SizeToInt( strlen( match ), "Con_FindBestCompletionDistance" );
 	const int minWindowLen = Max( 1, needleLen - maxDistance );
 	const int maxWindowLen = needleLen + maxDistance;
 	int bestDistance = maxDistance + 1;
@@ -686,7 +683,7 @@ static bool Con_BuildFuzzyCompletionMatch( const char *match, const char *needle
 	}
 
 	idStr::Copynz( outCandidate.match, match, sizeof( outCandidate.match ) );
-	outCandidate.secondary = strlen( match );
+	outCandidate.secondary = idLib::SizeToInt( strlen( match ), "Con_BuildFuzzyCompletionMatch" );
 	outCandidate.tertiary = 0;
 
 	if ( Con_FindSubstringCompletion( match, needle, &pos, &boundary ) ) {
@@ -703,7 +700,9 @@ static bool Con_BuildFuzzyCompletionMatch( const char *match, const char *needle
 		return true;
 	}
 
-	metric = Con_FindBestCompletionDistance( match, needle, Con_GetMaxCompletionDistance( strlen( needle ) ), &start, &boundary );
+	const int maxDistance = Con_GetMaxCompletionDistance(
+		idLib::SizeToInt( strlen( needle ), "Con_BuildFuzzyCompletionMatch" ) );
+	metric = Con_FindBestCompletionDistance( match, needle, maxDistance, &start, &boundary );
 	if ( metric >= 0 ) {
 		outCandidate.category = boundary ? 4 : 5;
 		outCandidate.primary = metric;
@@ -733,6 +732,55 @@ static int Con_CompareFuzzyCompletionMatches( const void *lhs, const void *rhs )
 	return idStr::Icmp( a.match, b.match );
 }
 
+/*
+================
+Con_ExtractCompletionCandidateToken
+
+Candidate lines hold a whole command, such as "com_maxfps 120"; the popup shows
+and inserts only the token at argIndex. A command token loses its leading slash.
+================
+*/
+static bool Con_ExtractCompletionCandidateToken( const char *candidateLine, int argIndex, char *token, int tokenSize ) {
+	idCmdArgs args;
+	const char *candidateToken;
+
+	if ( token != NULL && tokenSize > 0 ) {
+		token[0] = '\0';
+	}
+
+	if ( candidateLine == NULL || candidateLine[0] == '\0' || token == NULL || tokenSize <= 0 ) {
+		return false;
+	}
+
+	args.TokenizeString( candidateLine, false );
+	if ( args.Argc() <= 0 ) {
+		return false;
+	}
+
+	if ( argIndex >= 0 && argIndex < args.Argc() ) {
+		candidateToken = args.Argv( argIndex );
+	} else if ( args.Argc() == 1 ) {
+		candidateToken = args.Argv( 0 );
+	} else {
+		return false;
+	}
+
+	if ( candidateToken == NULL || candidateToken[0] == '\0' ) {
+		return false;
+	}
+
+	if ( argIndex == 0 && ( candidateToken[0] == '\\' || candidateToken[0] == '/' ) ) {
+		++candidateToken;
+	}
+
+	if ( candidateToken[0] == '\0' ) {
+		return false;
+	}
+
+	idStr::Copynz( token, candidateToken, tokenSize );
+	return true;
+}
+
 static bool Con_CollectCompletionMatchCallback( const char *match, void *context ) {
 	return reinterpret_cast<idConsoleLocal *>( context )->CollectCompletionMatch( match );
 }
@@ -740,8 +788,23 @@ static bool Con_CollectCompletionMatchCallback( const char *match, void *context
 static bool Con_CollectFuzzyCompletionMatchCallback( const char *match, void *context ) {
 	consoleFuzzyCompletionState_t *state = reinterpret_cast<consoleFuzzyCompletionState_t *>( context );
 	consoleCompletionCandidate_t candidate;
+	char token[MAX_EDIT_LINE];
 
-	if ( state == NULL || !Con_BuildFuzzyCompletionMatch( match, state->needle, candidate ) ) {
+	if ( state == NULL ) {
+		return true;
+	}
+
+	// Argument candidates are whole lines. Score and keep only the argument
+	// being completed, as the prefix path does; a suggestion holding the whole
+	// line would put the command in place of the token a second time.
+	if ( state->argIndex > 0 ) {
+		if ( !Con_ExtractCompletionCandidateToken( match, state->argIndex, token, sizeof( token ) ) ) {
+			return true;
+		}
+		match = token;
+	}
+
+	if ( !Con_BuildFuzzyCompletionMatch( match, state->needle, candidate ) ) {
 		return true;
 	}
 
@@ -756,7 +819,7 @@ static bool Con_CollectFuzzyCompletionMatchCallback( const char *match, void *co
 		return true;
 	}
 
-	if ( state->count < CON_COMPLETION_MAX_MATCHES ) {
+	if ( state->count < CON_COMPLETION_MAX_FUZZY_MATCHES ) {
 		state->matches[state->count++] = candidate;
 		return true;
 	}
@@ -773,6 +836,36 @@ static bool Con_CollectFuzzyCompletionMatchCallback( const char *match, void *co
 	}
 
 	return true;
+}
+
+/*
+================
+Con_ConsoleCellForCodePoint
+
+The console sheet is 256 cells indexed by codepage byte, not by code point - see
+R_BuildConsoleFontAtlas for why that stayed. Text reaching the console is UTF-8,
+so a code point has to be mapped onto a cell of whichever codepage the sheet was
+last built for; the sheet is rebuilt whenever that changes, so a Russian session
+gets Cyrillic cells and a Polish one gets Polish cells.
+
+Returns false for a character the active codepage cannot express. Callers draw a
+question mark for those rather than nothing: a silently dropped character in a
+console line reads as a bug in whatever printed it.
+================
+*/
+static bool Con_ConsoleCellForCodePoint( unsigned int codePoint, int &cell ) {
+	unsigned char mapped = 0;
+	if ( LangDict_ByteForCodePoint( codePoint, mapped ) ) {
+		cell = mapped;
+		return true;
+	}
+
+	const char *fold = LangDict_AsciiFoldForCodePoint( codePoint );
+	if ( fold != NULL && fold[0] != '\0' ) {
+		cell = (unsigned char)fold[0];
+		return true;
+	}
+	return false;
 }
 
 void idConsoleLocal::PrintToBuffer( const char *txt, bool markNotifyTime ) {
@@ -795,14 +888,32 @@ void idConsoleLocal::PrintToBuffer( const char *txt, bool markNotifyTime ) {
 			continue;
 		}
 
+		// One cell per character. A buffer cell has eight bits for the character
+		// and eight for the colour, which is no room for a code point, so what
+		// goes in is the console sheet's cell index - see
+		// Con_ConsoleCellForCodePoint. Doing the mapping here rather than at draw
+		// time is what keeps the column arithmetic below honest: a two-byte
+		// Cyrillic letter takes one column, and word wrap counts columns.
+		unsigned int codePoint = 0;
+		const int codePointBytes = Max( 1, LangDict_NextCodePoint( txt, UTF8_MAX_BYTES, codePoint ) );
+		int cell = '?';
+		Con_ConsoleCellForCodePoint( codePoint, cell );
+
 		// if we are about to print a new word, check to see if we should wrap
 		// to the new line
 		if ( c > ' ' && ( x == 0 || ( line[x - 1] & 0xff ) <= ' ' ) ) {
-			// count word length
+			// count word length, in columns rather than bytes
+			const char *scan = txt;
 			for ( l = 0; l < width; l++ ) {
-				if ( txt[l] <= ' ' ) {
+				unsigned int scanned = 0;
+				const int scannedBytes = LangDict_NextCodePoint( scan, UTF8_MAX_BYTES, scanned );
+				// Unsigned: a plain char is signed here, so every byte of a
+				// multi-byte sequence would compare below a space and end the
+				// word on its first character.
+				if ( scannedBytes <= 0 || scanned <= (unsigned int)' ' ) {
 					break;
 				}
+				scan += scannedBytes;
 			}
 
 			// word wrap
@@ -812,7 +923,7 @@ void idConsoleLocal::PrintToBuffer( const char *txt, bool markNotifyTime ) {
 			}
 		}
 
-		txt++;
+		txt += codePointBytes;
 
 		switch ( c ) {
 			case '\n':
@@ -832,7 +943,7 @@ void idConsoleLocal::PrintToBuffer( const char *txt, bool markNotifyTime ) {
 				x = 0;
 				break;
 			default:	// display character and advance
-				line[x] = ( color << 8 ) | c;
+				line[x] = ( color << 8 ) | cell;
 				x++;
 				if ( x >= width ) {
 					Linefeed();
@@ -899,6 +1010,12 @@ static void Con_DrawSizedChar( float x, float y, float charWidth, float charHeig
 	renderSystem->DrawStretchPic( x, y, charWidth, charHeight, fcol, frow, fcol + size, frow + size, material );
 }
 
+static void Con_DrawSizedCodePoint( float x, float y, float charWidth, float charHeight, unsigned int codePoint, const idMaterial *material ) {
+	int cell = '?';
+	Con_ConsoleCellForCodePoint( codePoint, cell );
+	Con_DrawSizedChar( x, y, charWidth, charHeight, cell, material );
+}
+
 static void Con_DrawSmallChar( float x, float y, int ch ) {
 	Con_DrawSizedChar( x, y, localConsole.GetSmallCharWidth(), SMALLCHAR_HEIGHT, ch, localConsole.charSetShader );
 }
@@ -930,9 +1047,13 @@ static void Con_DrawSizedStringExt( float x, float y, float charWidth, float cha
 			continue;
 		}
 
-		Con_DrawSizedChar( xx, y, charWidth, charHeight, *s, localConsole.charSetShader );
+		// One cell per character, not per byte: the console is fixed pitch, so a
+		// two-byte Cyrillic letter still occupies exactly one cell.
+		unsigned int codePoint = 0;
+		const int used = LangDict_NextCodePoint( reinterpret_cast<const char *>( s ), UTF8_MAX_BYTES, codePoint );
+		Con_DrawSizedCodePoint( xx, y, charWidth, charHeight, codePoint, localConsole.charSetShader );
 		xx += charWidth;
-		s++;
+		s += Max( 1, used );
 	}
 
 	renderSystem->SetColor( colorWhite );
@@ -1055,12 +1176,18 @@ SCR_DrawMemoryUsage
 */
 float SCR_DrawMemoryUsage( float y ) {
 	memoryStats_t allocs, frees;
-	
-	Mem_GetStats( allocs );
-	SCR_DrawTextRightAlign( y, "total allocated memory: %4d, %4dkB", allocs.num, allocs.totalSize>>10 );
+
+	// Reports what is still held: allocations minus frees, summed over the
+	// engine and every loaded module (each links its own idlib, so each keeps
+	// its own counters). Printed in MB because a loaded map runs to well over a
+	// million kB, unreadable as one number and enough to overflow a 32-bit sum.
+	Mem_GetProcessStats( allocs );
+	SCR_DrawTextRightAlign( y, "live allocations: %d blocks, %.1f MB",
+		allocs.num, allocs.totalSize / ( 1024.0 * 1024.0 ) );
 
 	Mem_GetFrameStats( allocs, frees );
-	SCR_DrawTextRightAlign( y, "frame alloc: %4d, %4dkB  frame free: %4d, %4dkB", allocs.num, allocs.totalSize>>10, frees.num, frees.totalSize>>10 );
+	SCR_DrawTextRightAlign( y, "frame alloc: %d, %.0f kB  frame free: %d, %.0f kB",
+		allocs.num, allocs.totalSize / 1024.0, frees.num, frees.totalSize / 1024.0 );
 
 	Mem_ClearFrameStats();
 
@@ -1076,11 +1203,13 @@ static const char *SCR_FramePacingBoundLabel( openq4FramePacingBound_t boundMode
 		case OPENQ4_FRAME_BOUND_PRESENTATION_CAP:
 			return "presentation-cap";
 		case OPENQ4_FRAME_BOUND_UNCAPPED:
-			return "uncapped";
+			return "frame-work";
 		default:
 			return "collecting";
 	}
 }
+
+float openQ4_GetPresentationThrottleLatenessP95( void );
 
 float SCR_DrawFramePacing( float y ) {
 	const openq4FramePacingStats_t &stats = sessLocal.GetFramePacingStats();
@@ -1109,12 +1238,33 @@ float SCR_DrawFramePacing( float y ) {
 
 	SCR_DrawTextRightAlign(
 		y,
-		"present avg = %.2f ms (%.1f Hz), last = %d ms, async avg = %.2f ms (%.1f Hz)",
+		"present avg = %.2f ms (%.1f Hz), last = %.2f ms, async avg = %.2f ms (%.1f Hz)",
 		stats.avgFrameMsec,
 		stats.avgFrameHz,
 		stats.lastFrameMsec,
 		stats.asyncStats.avgDeltaMsec,
 		stats.asyncStats.avgHz );
+
+	// Since framePacingReset, at 50 us resolution: enough to judge the 240 Hz
+	// budget (PresentationPacing.h), which only a visible foreground window on
+	// the reference machine qualifies.
+	const float p50 = Session_GetFramePacingPercentileMsec( stats, 50 );
+	const float p95 = Session_GetFramePacingPercentileMsec( stats, 95 );
+	const float p99 = Session_GetFramePacingPercentileMsec( stats, 99 );
+	SCR_DrawTextRightAlign(
+		y,
+		"interval p50/p95/p99/max = %.2f/%.2f/%.2f/%.2f ms, display %.1f Hz, limiter late p95 = %.3f ms",
+		p50, p95, p99, stats.maxFrameMsec, stats.refreshHz, openQ4_GetPresentationThrottleLatenessP95() );
+	const openq4::FramePacingBudget budget = openq4::JudgeFramePacingBudget( stats.presentationCap, p95, p99 );
+	if ( budget != openq4::FramePacingBudget::NotDeclared ) {
+		SCR_DrawTextRightAlign(
+			y,
+			"%d Hz budget p95 <= %.2f, p99 <= %.2f ms: %s",
+			openq4::SUPPORTED_PRESENTATION_CAP,
+			openq4::SUPPORTED_CAP_P95_BUDGET_MSEC,
+			openq4::SUPPORTED_CAP_P99_BUDGET_MSEC,
+			budget == openq4::FramePacingBudget::Met ? "met" : "missed" );
+	}
 	SCR_DrawTextRightAlign(
 		y,
 		"async jitter = %.2f ms, min/max = %d/%d ms, async work = %.2f ms",
@@ -1214,6 +1364,43 @@ static void Con_Clear_f( const idCmdArgs &args ) {
 	localConsole.Clear();
 }
 
+// com_latencyFlash (UsercmdGen.cpp): true once for each press of the attack
+// button, taken by the first frame drawn after it; Arm stands in for a press.
+bool Usercmd_ConsumeLatencyFlash( void );
+void Usercmd_ArmLatencyFlash( void );
+void Usercmd_NoteLatencyFlashDrawn( void );
+
+static idCVar com_latencyFlash( "com_latencyFlash", "0", CVAR_SYSTEM | CVAR_BOOL | CVAR_NOCHEAT,
+	"click-to-photon latency aid: draw a white bar down the left edge on the first frame drawn after the attack button goes down, for sensors such as NVIDIA LDAT and OSLTT" );
+
+/*
+==============
+Con_LatencyFlashTest_f
+==============
+*/
+static void Con_LatencyFlashTest_f( const idCmdArgs &args ) {
+	Usercmd_ArmLatencyFlash();
+}
+
+/*
+==============
+Con_PointerTest_f
+
+Opens the console and puts its pointer at a point of the 640x480 screen, as
+the mouse would, without device input, so captures can show the pointer.
+==============
+*/
+static void Con_PointerTest_f( const idCmdArgs &args ) {
+	if ( args.Argc() != 3 ) {
+		common->Printf( "usage: conPointerTest <x> <y>\n" );
+		return;
+	}
+	if ( !localConsole.Active() ) {
+		localConsole.OpenForInput( false );
+	}
+	localConsole.SetMousePosition( static_cast<float>( atof( args.Argv( 1 ) ) ), static_cast<float>( atof( args.Argv( 2 ) ) ) );
+}
+
 /*
 ==============
 Con_Dump_f
@@ -1241,12 +1428,21 @@ idConsoleLocal::Init
 void idConsoleLocal::Init( void ) {
 	int		i;
 
+	openq4::NativeInputBeforeInputBlockerChange();
+
 	keyCatching = false;
 	procFileOutOfDate = false;
 	aasFileOutOfDate = false;
 
-	lastKeyEvent = -1;
-	nextKeyEvent = CONSOLE_FIRSTREPEAT;
+	frameClock = 0.0;
+	frameSeconds = 0.0f;
+	caretClock = 0.0;
+	caretCursor = 0;
+	caretLength = 0;
+	caretAnchor = -1;
+	caretOverstrike = false;
+	completionRebuildHold = 0;
+	historyDraft.Clear();
 	lineWidth = CON_DEFAULT_LINE_WIDTH;
 	smallCharWidth = SMALLCHAR_WIDTH;
 	bigCharWidth = BIGCHAR_WIDTH;
@@ -1274,10 +1470,12 @@ void idConsoleLocal::Init( void ) {
 	completionReplaceOffset = 0;
 	completionReplaceLength = 0;
 	completionSnapshotCursor = 0;
+	completionPopupChars = 0;
 	completionAppendSpace = false;
 	completionPrependSlash = false;
 	completionPopupVisible = false;
 	completionSnapshotValid = false;
+	completionMatchIndex.Clear();
 	mouseInitialized = false;
 	scrollbarDragging = false;
 	completionScrollbarDragging = false;
@@ -1299,7 +1497,6 @@ void idConsoleLocal::Init( void ) {
 	completionFuzzyNeedle[0] = '\0';
 	whiteShader = NULL;
 	consoleShader = NULL;
-	mouseCursorShader = NULL;
 	nextHistoryLine = 0;
 	historyLine = 0;
 	commandHistoryLoaded = false;
@@ -1312,6 +1509,8 @@ void idConsoleLocal::Init( void ) {
 
 	cmdSystem->AddCommand( "clear", Con_Clear_f, CMD_FL_SYSTEM, "clears the console" );
 	cmdSystem->AddCommand( "conDump", Con_Dump_f, CMD_FL_SYSTEM, "dumps the console text to a file" );
+	cmdSystem->AddCommand( "latencyFlashTest", Con_LatencyFlashTest_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "arms com_latencyFlash as an attack press would, without device input" );
+	cmdSystem->AddCommand( "conPointerTest", Con_PointerTest_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "opens the console with its pointer at x y of the 640x480 screen, without device input" );
 }
 
 /*
@@ -1339,7 +1538,6 @@ void idConsoleLocal::LoadGraphics() {
 // jmarshall end
 	whiteShader = declManager->FindMaterial( "_white" );
 	consoleShader = declManager->FindMaterial( "console" );
-	mouseCursorShader = declManager->FindMaterial( "gfx/guis/guicursor_arrow" );
 	if ( charSetShader != NULL ) {
 		charSetShader->SetSort( SS_GUI );
 	}
@@ -1349,9 +1547,6 @@ void idConsoleLocal::LoadGraphics() {
 	if ( consoleShader != NULL ) {
 		consoleShader->SetSort( SS_GUI );
 	}
-	if ( mouseCursorShader != NULL ) {
-		mouseCursorShader->SetSort( SS_GUI );
-	}
 	UpdateLayoutMetrics( true );
 }
 
@@ -1360,6 +1555,8 @@ void idConsoleLocal::LoadGraphics() {
 idConsoleLocal::Active
 ================
 */
+bool openq4::Console_BlocksNativeInput() noexcept { return localConsole.NativeInputBlocked(); }
+
 bool	idConsoleLocal::Active( void ) {
 	return keyCatching;
 }
@@ -1383,6 +1580,7 @@ idConsoleLocal::Close
 ================
 */
 void	idConsoleLocal::Close() {
+	openq4::NativeInputBeforeInputBlockerChange();
 	keyCatching = false;
 	SetDisplayFraction( 0 );
 	displayFrac = 0;	// don't scroll to that point, go immediately
@@ -1427,6 +1625,46 @@ void idConsoleLocal::SetMousePosition( float x, float y ) {
 	mouseX = x;
 	mouseY = y;
 	mouseInitialized = true;
+}
+
+/*
+==============
+idConsoleLocal::OpenForInput
+
+Opens the console as its key does, taking the keyboard and the mouse.
+==============
+*/
+void idConsoleLocal::OpenForInput( bool reduced ) {
+	consoleField.Clear();
+	historyLine = nextHistoryLine;
+	historyDraft.Clear();
+	caretClock = 0.0;
+	openq4::NativeInputBeforeInputBlockerChange();
+	keyCatching = true;
+	focus = CON_FOCUS_INPUT;
+	mouseInitialized = false;
+	scrollbarDragging = false;
+	completionScrollbarDragging = false;
+	ClearInputSelection();
+	ClearLogSelection();
+	ClearTextDragState();
+	InvalidateCompletionState();
+	SetDisplayFraction( GetOpenFraction( reduced ) );
+	cvarSystem->SetCVarBool( "ui_chat", true );
+	Sys_GrabMouseCursor( false );
+}
+
+/*
+==============
+idConsoleLocal::CloseFromInput
+
+Puts the console away as its key does, handing the mouse back to the game.
+==============
+*/
+void idConsoleLocal::CloseFromInput( void ) {
+	Close();
+	Sys_GrabMouseCursor( true );
+	cvarSystem->SetCVarBool( "ui_chat", false );
 }
 
 /*
@@ -1502,7 +1740,7 @@ void idConsoleLocal::Dump( const char *fileName ) {
 		buffer[x+1] = '\r';
 		buffer[x+2] = '\n';
 		buffer[x+3] = 0;
-		f->Write( buffer.Ptr(), strlen( buffer.Ptr() ) );
+		f->Write( buffer.Ptr(), idLib::SizeToInt( strlen( buffer.Ptr() ), "idConsoleLocal::Dump" ) );
 	}
 
 	fileSystem->CloseFile( f );
@@ -1532,6 +1770,7 @@ void idConsoleLocal::LoadCommandHistory( void ) {
 		return;
 	}
 
+	bool removedPrivateCommand = false;
 	int lineStart = 0;
 	for ( int i = 0; i <= fileLength; ++i ) {
 		const bool atEnd = ( i == fileLength );
@@ -1551,6 +1790,20 @@ void idConsoleLocal::LoadCommandHistory( void ) {
 		if ( lineLength > 0 ) {
 			line.Append( fileBuffer + lineStart, lineLength );
 		}
+		if ( cvarSystem != NULL && cvarSystem->CommandContainsPrivateCVar( line.c_str() ) ) {
+			// Older builds persisted the complete command line, including values
+			// assigned to secret CVars. Purge those entries instead of bringing a
+			// credential back into live history (or writing it out again).
+			removedPrivateCommand = true;
+			lineStart = i + 1;
+			continue;
+		}
+		// Older builds also recorded blank lines and every repeat of a command.
+		if ( !oq4console::ShouldRecordHistoryLine( line.c_str(), nextHistoryLine > 0 ?
+				historyEditLines[( nextHistoryLine - 1 ) % COMMAND_HISTORY].GetBuffer() : NULL ) ) {
+			lineStart = i + 1;
+			continue;
+		}
 
 		historyEditLines[nextHistoryLine % COMMAND_HISTORY].SetBuffer( line.c_str() );
 		nextHistoryLine++;
@@ -1558,7 +1811,15 @@ void idConsoleLocal::LoadCommandHistory( void ) {
 	}
 
 	historyLine = nextHistoryLine;
+	if ( removedPrivateCommand && fileLength > 0 ) {
+		// The old history buffer can contain the credential that was just
+		// purged from disk. Scrub it before returning the allocation.
+		memset( const_cast<char *>( fileBuffer ), 0, fileLength );
+	}
 	fileSystem->FreeFile( ( void * )fileBuffer );
+	if ( removedPrivateCommand ) {
+		SaveCommandHistory();
+	}
 }
 
 /*
@@ -1582,7 +1843,7 @@ void idConsoleLocal::SaveCommandHistory( void ) {
 	for ( int i = 0; i < historyCount; ++i ) {
 		const char *line = historyEditLines[( startLine + i ) % COMMAND_HISTORY].GetBuffer();
 		if ( line[0] != '\0' ) {
-			historyFile->Write( line, strlen( line ) );
+			historyFile->Write( line, idLib::SizeToInt( strlen( line ), "idConsoleLocal::SaveCommandHistory" ) );
 		}
 		historyFile->Write( "\n", 1 );
 	}
@@ -1616,14 +1877,9 @@ idConsoleLocal::UpdateDisplayLine
 ================
 */
 void idConsoleLocal::UpdateDisplayLine( void ) {
-	static int lastDisplayLineUpdateTime = 0;
-
 	const float target = static_cast<float>( display );
-	const int now = eventLoop->Milliseconds();
-	const int frameMsec = ( lastDisplayLineUpdateTime > 0 ) ? ( now - lastDisplayLineUpdateTime ) : 0;
-	lastDisplayLineUpdateTime = now;
 
-	if ( !con_scrollSmooth.GetBool() || frameMsec <= 0 ) {
+	if ( !con_scrollSmooth.GetBool() ) {
 		displayLine = target;
 		return;
 	}
@@ -1633,21 +1889,56 @@ void idConsoleLocal::UpdateDisplayLine( void ) {
 		return;
 	}
 
-	const float delta = target - displayLine;
-	if ( idMath::Fabs( delta ) < 0.01f ) {
-		displayLine = target;
+	// openQ4: the smoothed row used to close on the target at a constant
+	// con_scrollSmoothSpeed, so a long jump kept the view travelling for as long
+	// as the distance took: seconds after a held Page Up was released, and half
+	// a minute across a full scrollback. The speed is now the floor of an
+	// approach that settles any jump in a fraction of a second.
+	displayLine = oq4console::SmoothScrollAdvance( displayLine, target, frameSeconds, con_scrollSmoothSpeed.GetFloat() );
+}
+
+/*
+================
+idConsoleLocal::UpdateFrameTime
+
+Wall time between console frames, for the scrollback, scrollbar and caret
+animations. The millisecond event clock read zero for a frame above 1000 Hz,
+which the scrollback took as "do not animate".
+================
+*/
+void idConsoleLocal::UpdateFrameTime( void ) {
+	const double ticksPerSecond = Sys_ClockTicksPerSecond();
+	const double now = Sys_GetClockTicks();
+
+	frameSeconds = 0.0f;
+	if ( ticksPerSecond > 0.0 && frameClock > 0.0 && now > frameClock ) {
+		frameSeconds = static_cast<float>( ( now - frameClock ) / ticksPerSecond );
+	}
+	frameClock = now;
+}
+
+/*
+================
+idConsoleLocal::UpdateCaretBlink
+
+Restarts the caret's blink, in its visible half, whenever the edit line, the
+caret or the selection changed since the last frame.
+================
+*/
+void idConsoleLocal::UpdateCaretBlink( void ) {
+	const int cursor = consoleField.GetCursor();
+	const int length = consoleField.GetLength();
+	const bool overstrike = idKeyInput::GetOverstrikeMode();
+
+	if ( cursor != caretCursor || length != caretLength || inputSelectionAnchor != caretAnchor || overstrike != caretOverstrike ) {
+		caretCursor = cursor;
+		caretLength = length;
+		caretAnchor = inputSelectionAnchor;
+		caretOverstrike = overstrike;
+		caretClock = 0.0;
 		return;
 	}
-
-	const float speed = Max( 1.0f, con_scrollSmoothSpeed.GetFloat() );
-	const float step = speed * frameMsec * 0.001f;
-	if ( step >= idMath::Fabs( delta ) ) {
-		displayLine = target;
-	} else if ( delta > 0.0f ) {
-		displayLine += step;
-	} else {
-		displayLine -= step;
-	}
+	caretClock += frameSeconds;
 }
 
 /*
@@ -1865,15 +2156,10 @@ void idConsoleLocal::EnsureMouseInitialized( void ) {
 idConsoleLocal::UpdateScrollbarHoverValue
 ================
 */
-void idConsoleLocal::UpdateScrollbarHoverValue( float &hoverFrac, bool dragging, bool hot ) {
-	const float target = ( dragging || hot ) ? 1.0f : 0.0f;
-	const float step = 0.2f;
-
-	if ( hoverFrac < target ) {
-		hoverFrac = Min( target, hoverFrac + step );
-	} else if ( hoverFrac > target ) {
-		hoverFrac = Max( target, hoverFrac - step );
-	}
+void idConsoleLocal::UpdateScrollbarHoverValue( float &hoverFrac, bool dragging, bool hot ) const {
+	// openQ4: timed, not a fixed step per frame, which grew the bar in 20 ms at
+	// 240 Hz and 80 ms at 60 Hz
+	hoverFrac = oq4console::HoverAdvance( hoverFrac, dragging || hot, frameSeconds, CON_SCROLLBAR_LERP_SPEED );
 }
 
 /*
@@ -2184,7 +2470,6 @@ idConsoleLocal::InsertInputChar
 */
 void idConsoleLocal::InsertInputChar( int ch ) {
 	char *buffer = consoleField.GetBuffer();
-	const int len = consoleField.GetLength();
 	int cursor = consoleField.GetCursor();
 
 	if ( ch < ' ' ) {
@@ -2193,6 +2478,11 @@ void idConsoleLocal::InsertInputChar( int ch ) {
 
 	DeleteInputSelection();
 	cursor = consoleField.GetCursor();
+	// openQ4: measure after the selection is gone. With the length from before,
+	// overstriking a selection that reached the end of the line left the new
+	// character unterminated and the deleted tail came back, and inserting over
+	// a full selected line was refused as if the line were still full.
+	const int len = consoleField.GetLength();
 
 	if ( idKeyInput::GetOverstrikeMode() ) {
 		if ( cursor >= MAX_EDIT_LINE - 2 ) {
@@ -2280,14 +2570,13 @@ void idConsoleLocal::PasteClipboardToInput( void ) {
 		return;
 	}
 
+	// openQ4: pasted as a drop is, so a tab or line break between two words
+	// becomes a space where it used to join them
 	DeleteInputSelection();
-	focus = CON_FOCUS_INPUT;
-	for ( int i = 0; text[i] != '\0'; ++i ) {
-		if ( text[i] >= ' ' ) {
-			InsertInputChar( text[i] );
-		}
-	}
+	InsertInputTextAt( text, consoleField.GetCursor() );
 
+	// the clipboard can hold a credential on its way into a private CVar
+	memset( text, 0, strlen( text ) );
 	Mem_Free( text );
 }
 
@@ -2304,7 +2593,13 @@ void idConsoleLocal::InsertInputTextAt( const char *text, int cursor ) {
 		return;
 	}
 
+	// openQ4: one completion query for the whole text. Each inserted character
+	// used to run its own, tens of milliseconds apiece over a large name family,
+	// so a pasted line stalled the frame.
+	completionRebuildHold++;
 	for ( int i = 0; text[i] != '\0'; ++i ) {
+		// unsigned: plain char is signed off Windows, where every byte of
+		// non-ASCII text would compare below ' ' and be dropped
 		int ch = static_cast<unsigned char>( text[i] );
 		if ( ch == '\r' || ch == '\n' || ch == '\t' ) {
 			if ( lastWasConvertedSpace ) {
@@ -2321,6 +2616,8 @@ void idConsoleLocal::InsertInputTextAt( const char *text, int cursor ) {
 
 		InsertInputChar( ch );
 	}
+	completionRebuildHold--;
+	RebuildCompletionState();
 }
 
 /*
@@ -2771,6 +3068,7 @@ void idConsoleLocal::InvalidateCompletionState( void ) {
 	completionReplaceArgIndex = 0;
 	completionReplaceOffset = 0;
 	completionReplaceLength = 0;
+	completionPopupChars = 0;
 	completionAppendSpace = false;
 	completionPrependSlash = false;
 	completionPopupVisible = false;
@@ -2792,6 +3090,9 @@ void idConsoleLocal::RebuildCompletionState( void ) {
 	// Keep the popup model current for rapid input events instead of waiting
 	// for the next draw pass to rebuild completion candidates.
 	InvalidateCompletionState();
+	if ( completionRebuildHold > 0 ) {
+		return;
+	}
 	RefreshCompletionState();
 }
 
@@ -2886,19 +3187,10 @@ bool idConsoleLocal::CollectCompletionMatch( const char *match ) {
 		return true;
 	}
 
-	for ( int i = 0; i < completionCount; ++i ) {
-		if ( idStr::Icmp( completionMatches[i], token ) == 0 ) {
-			return true;
-		}
-	}
-
-	if ( completionCount >= CON_COMPLETION_MAX_MATCHES ) {
-		return false;
-	}
-
-	idStr::Copynz( completionMatches[completionCount], token, sizeof( completionMatches[completionCount] ) );
-	++completionCount;
-	return true;
+	// Only candidates that start with the typed text arrive here, so the cap is
+	// reached only while a large domain is barely narrowed, such as the first
+	// digit of a 0..60000 value.
+	return completionMatchIndex.Add( completionMatches, completionCount, token );
 }
 
 static int Con_CompareCompletionStrings( const void *lhs, const void *rhs ) {
@@ -3113,7 +3405,12 @@ bool idConsoleLocal::GetCompletionCvarInfo( const char *match, char *value, int 
 		*modified = cvar->IsModified();
 	}
 	if ( value != NULL && valueSize > 0 ) {
-		const char *cvarValue = cvar->GetString();
+		// Completion candidates are populated from the full CVar-name list, so a
+		// partial prefix can reach this path before the edit-field private-command
+		// guard sees the complete name. Never let the popup turn completion into a
+		// private-value query.
+		const char *cvarValue = ( cvar->GetFlags() & CVAR_PRIVATE ) ?
+			"<redacted>" : cvar->GetString();
 		idStr::Copynz( value, ( cvarValue != NULL && cvarValue[0] != '\0' ) ? cvarValue : "\"\"", valueSize );
 	}
 	return true;
@@ -3125,44 +3422,7 @@ idConsoleLocal::ExtractCompletionCandidateToken
 ================
 */
 bool idConsoleLocal::ExtractCompletionCandidateToken( const char *candidateLine, char *token, int tokenSize ) const {
-	idCmdArgs args;
-	const char *candidateToken;
-
-	if ( token != NULL && tokenSize > 0 ) {
-		token[0] = '\0';
-	}
-
-	if ( candidateLine == NULL || candidateLine[0] == '\0' || token == NULL || tokenSize <= 0 ) {
-		return false;
-	}
-
-	args.TokenizeString( candidateLine, false );
-	if ( args.Argc() <= 0 ) {
-		return false;
-	}
-
-	if ( completionReplaceArgIndex >= 0 && completionReplaceArgIndex < args.Argc() ) {
-		candidateToken = args.Argv( completionReplaceArgIndex );
-	} else if ( args.Argc() == 1 ) {
-		candidateToken = args.Argv( 0 );
-	} else {
-		return false;
-	}
-
-	if ( candidateToken == NULL || candidateToken[0] == '\0' ) {
-		return false;
-	}
-
-	if ( completionReplaceArgIndex == 0 && ( candidateToken[0] == '\\' || candidateToken[0] == '/' ) ) {
-		++candidateToken;
-	}
-
-	if ( candidateToken[0] == '\0' ) {
-		return false;
-	}
-
-	idStr::Copynz( token, candidateToken, tokenSize );
-	return true;
+	return Con_ExtractCompletionCandidateToken( candidateLine, completionReplaceArgIndex, token, tokenSize );
 }
 
 /*
@@ -3241,12 +3501,14 @@ void idConsoleLocal::RefreshCompletionState( void ) {
 		currentToken[0] = '\0';
 	}
 
+	completionMatchIndex.Clear();
 	idEditField::QueryCompletionMatches( prefixBuffer, &appendSpace, Con_CollectCompletionMatchCallback, this );
 
-	if ( completionCount < 1 && currentToken[0] != '\0' && currentToken[1] != '\0' ) {
+	if ( completionCount < 1 && oq4completion::AllowsFuzzyFallback( completionReplaceArgIndex, currentToken ) ) {
 		consoleFuzzyCompletionState_t fuzzyState;
 
 		completionCount = 0;
+		fuzzyState.argIndex = completionReplaceArgIndex;
 		fuzzyState.count = 0;
 		idStr::Copynz( completionFuzzyNeedle, currentToken, sizeof( completionFuzzyNeedle ) );
 		idStr::Copynz( fuzzyState.needle, completionFuzzyNeedle, sizeof( fuzzyState.needle ) );
@@ -3322,11 +3584,39 @@ void idConsoleLocal::RefreshCompletionState( void ) {
 	}
 
 	completionAppendSpace = ( completionCount == 1 );
+	completionPopupChars = MeasureCompletionPopupChars();
 	ClampCompletionScroll( true );
 	completionPopupVisible = true;
 	completionSnapshotValid = true;
 	completionSnapshotCursor = cursor;
 	idStr::Copynz( completionSnapshotBuffer, buffer, sizeof( completionSnapshotBuffer ) );
+}
+
+/*
+================
+idConsoleLocal::MeasureCompletionPopupChars
+
+Width in characters of the widest popup row, CVar value included. Measured once
+per rebuilt list: the popup geometry is queried several times a frame, and a
+whole name family can be a thousand rows.
+================
+*/
+int idConsoleLocal::MeasureCompletionPopupChars( void ) const {
+	int longest = 0;
+
+	for ( int i = 0; i < completionCount; ++i ) {
+		char cvarValue[MAX_EDIT_LINE];
+		bool modified;
+		size_t matchLength = strlen( completionMatches[i] );
+		if ( GetCompletionCvarInfo( completionMatches[i], cvarValue, sizeof( cvarValue ), &modified ) ) {
+			matchLength += 3 + strlen( cvarValue );
+		}
+		const int matchLen = idLib::SizeToInt( matchLength, "idConsoleLocal::MeasureCompletionPopupChars" );
+		if ( matchLen > longest ) {
+			longest = matchLen;
+		}
+	}
+	return longest;
 }
 
 /*
@@ -3424,6 +3714,28 @@ void idConsoleLocal::ApplySelectedCompletion( int direction ) {
 
 /*
 ================
+idConsoleLocal::EnterAcceptsCompletion
+
+Enter takes the highlighted popup entry only when that changes the line. When
+the highlighted entry already is the token under the cursor, as "60" is after
+typing "com_maxfps 60" while 600-609 are still listed, there is nothing left to
+complete and Enter runs the line, as it does with the popup closed.
+================
+*/
+bool idConsoleLocal::EnterAcceptsCompletion( void ) {
+	if ( !HasActiveCompletionPopup() ) {
+		return false;
+	}
+
+	RefreshCompletionState();
+	if ( !HasActiveCompletionPopup() || completionSelection < 0 || completionSelection >= completionCount ) {
+		return false;
+	}
+	return !IsCurrentSegmentCompletionMatch( completionMatches[completionSelection] );
+}
+
+/*
+================
 idConsoleLocal::GetCompletionPopupGeometry
 ================
 */
@@ -3444,18 +3756,7 @@ bool idConsoleLocal::GetCompletionPopupGeometry( float &popupX, float &popupY, f
 	ClampCompletionScroll( false );
 	first = completionScroll;
 
-	int longest = 8;
-	for ( int i = 0; i < completionCount; ++i ) {
-		char cvarValue[MAX_EDIT_LINE];
-		bool modified;
-		int matchLen = strlen( completionMatches[i] );
-		if ( GetCompletionCvarInfo( completionMatches[i], cvarValue, sizeof( cvarValue ), &modified ) ) {
-			matchLen += 3 + strlen( cvarValue );
-		}
-		if ( matchLen > longest ) {
-			longest = matchLen;
-		}
-	}
+	int longest = Max( 8, completionPopupChars );
 
 	float consoleX, consoleY, consoleW, consoleH;
 	GetConsoleRect( consoleX, consoleY, consoleW, consoleH );
@@ -3709,17 +4010,34 @@ bool idConsoleLocal::InputKeyDownEvent( int key ) {
 		return true;
 	}
 
+	// openQ4: the popup takes the arrows, the page keys and Enter. Home and End
+	// stay with the edit line: the popup shows for nearly every half-typed
+	// command, and while it took them too the caret could not be sent to either
+	// end of the line, nor the line selected from the caret with Shift.
 	if ( HasActiveCompletionPopup() ) {
 		switch ( key ) {
 			case K_UPARROW:
 			case K_KP_UPARROW:
-			case K_MWHEELUP:
 				MoveCompletionSelection( -1 );
 				return true;
 			case K_DOWNARROW:
 			case K_KP_DOWNARROW:
-			case K_MWHEELDOWN:
 				MoveCompletionSelection( 1 );
+				return true;
+			// openQ4: the wheel works on what the pointer is over. It used to
+			// walk the popup wherever the pointer was, so the log could not be
+			// scrolled while a completion list was showing, which is whenever a
+			// command is half typed. Over the list it stops at the ends: wrapping
+			// is for the arrow keys, a wheel that rolls past the top should not
+			// land on the last entry.
+			case K_MWHEELUP:
+			case K_MWHEELDOWN:
+				if ( !IsPointInCompletionPopup( mouseX, mouseY ) ) {
+					break;
+				}
+				completionSelection = idMath::ClampInt( 0, completionCount - 1,
+					completionSelection + ( key == K_MWHEELUP ? -1 : 1 ) );
+				ClampCompletionScroll( true );
 				return true;
 			case K_PGUP:
 				completionSelection = Max( 0, completionSelection - CON_COMPLETION_MAX_VISIBLE );
@@ -3729,19 +4047,14 @@ bool idConsoleLocal::InputKeyDownEvent( int key ) {
 				completionSelection = Min( completionCount - 1, completionSelection + CON_COMPLETION_MAX_VISIBLE );
 				ClampCompletionScroll( true );
 				return true;
-			case K_HOME:
-				completionSelection = 0;
-				ClampCompletionScroll( true );
-				return true;
-			case K_END:
-				completionSelection = completionCount - 1;
-				ClampCompletionScroll( true );
-				return true;
 			case K_ENTER:
 			case K_KP_ENTER:
-				ApplySelectedCompletion( 0 );
-				DismissCompletionPopup();
-				return true;
+				if ( EnterAcceptsCompletion() ) {
+					ApplySelectedCompletion( 0 );
+					DismissCompletionPopup();
+					return true;
+				}
+				break;
 			default:
 				break;
 		}
@@ -3931,9 +4244,7 @@ bool idConsoleLocal::MouseKeyEvent( int key, bool down ) {
 	popupActive = HasActiveCompletionPopup();
 
 	if ( key == K_MOUSE1 && !IsPointInConsoleRect( mouseX, mouseY ) ) {
-		Close();
-		Sys_GrabMouseCursor( true );
-		cvarSystem->SetCVarBool( "ui_chat", false );
+		CloseFromInput();
 		return true;
 	}
 
@@ -4068,21 +4379,61 @@ void idConsoleLocal::KeyDownEvent( int key ) {
 		return;
 	}
 
-	if ( key == K_ENTER || key == K_KP_ENTER ) {
+	// openQ4: Escape puts away what is open, innermost first: the completion
+	// list, then the console. The session used to take it before the console
+	// saw it, which in a game closed the console and opened the menu in one
+	// press, and over a menu did nothing at all.
+	if ( key == K_ESCAPE ) {
 		if ( HasActiveCompletionPopup() ) {
+			DismissCompletionPopup();
+		} else {
+			CloseFromInput();
+		}
+		return;
+	}
+
+	// openQ4: Ctrl+Home and Ctrl+End reach the ends of the scrollback. They
+	// were tested after the edit line had already taken Home and End, so they
+	// never ran. With Shift they still extend a selection.
+	if ( ( key == K_HOME || key == K_END ) && idKeyInput::IsDown( K_CTRL ) && !idKeyInput::IsDown( K_SHIFT ) ) {
+		if ( key == K_HOME ) {
+			Top();
+		} else {
+			Bottom();
+		}
+		return;
+	}
+
+	if ( key == K_ENTER || key == K_KP_ENTER ) {
+		if ( EnterAcceptsCompletion() ) {
 			ApplySelectedCompletion( 0 );
 			DismissCompletionPopup();
 			return;
 		}
 
-		common->Printf( "]%s\n", consoleField.GetBuffer() );
+		// openQ4: a command's output prints at the end of the log, so running
+		// one from a scrolled-back view returns there instead of leaving the
+		// answer out of sight
+		Bottom();
+
+		const bool privateCommand = cvarSystem != NULL &&
+			cvarSystem->CommandContainsPrivateCVar( consoleField.GetBuffer() );
+		if ( privateCommand ) {
+			common->Printf( "]<private command redacted>\n" );
+		} else {
+			common->Printf( "]%s\n", consoleField.GetBuffer() );
+		}
 		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, consoleField.GetBuffer() );
 		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "\n" );
 
-		historyEditLines[nextHistoryLine % COMMAND_HISTORY] = consoleField;
-		nextHistoryLine++;
+		if ( !privateCommand && oq4console::ShouldRecordHistoryLine( consoleField.GetBuffer(), nextHistoryLine > 0 ?
+				historyEditLines[( nextHistoryLine - 1 ) % COMMAND_HISTORY].GetBuffer() : NULL ) ) {
+			historyEditLines[nextHistoryLine % COMMAND_HISTORY] = consoleField;
+			nextHistoryLine++;
+			SaveCommandHistory();
+		}
 		historyLine = nextHistoryLine;
-		SaveCommandHistory();
+		historyDraft.Clear();
 
 		consoleField.Clear();
 		consoleField.SetWidthInChars( lineWidth );
@@ -4101,59 +4452,30 @@ void idConsoleLocal::KeyDownEvent( int key ) {
 
 	if ( ( key == K_UPARROW ) ||
 		 ( ( tolower( key ) == 'p' ) && idKeyInput::IsDown( K_CTRL ) ) ) {
-		if ( nextHistoryLine - historyLine < COMMAND_HISTORY && historyLine > 0 ) {
-			historyLine--;
-		}
-		consoleField = historyEditLines[historyLine % COMMAND_HISTORY];
-		consoleField.SetWidthInChars( lineWidth );
-		ClearInputSelection();
-		ClearLogSelection();
-		focus = CON_FOCUS_INPUT;
-		RebuildCompletionState();
+		RecallHistoryLine( oq4console::HistoryOlder( historyLine, nextHistoryLine, COMMAND_HISTORY ) );
 		return;
 	}
 
 	if ( ( key == K_DOWNARROW ) ||
 		 ( ( tolower( key ) == 'n' ) && idKeyInput::IsDown( K_CTRL ) ) ) {
-		if ( historyLine == nextHistoryLine ) {
-			return;
-		}
-		historyLine++;
-		consoleField = historyEditLines[historyLine % COMMAND_HISTORY];
-		consoleField.SetWidthInChars( lineWidth );
-		ClearInputSelection();
-		ClearLogSelection();
-		focus = CON_FOCUS_INPUT;
-		RebuildCompletionState();
+		RecallHistoryLine( oq4console::HistoryNewer( historyLine, nextHistoryLine ) );
 		return;
 	}
 
-	if ( key == K_PGUP ) {
-		PageUp();
-		lastKeyEvent = eventLoop->Milliseconds();
-		nextKeyEvent = CONSOLE_FIRSTREPEAT;
-		return;
-	}
-	if ( key == K_PGDN ) {
-		PageDown();
-		lastKeyEvent = eventLoop->Milliseconds();
-		nextKeyEvent = CONSOLE_FIRSTREPEAT;
-		return;
-	}
-	if ( key == K_MWHEELUP ) {
+	// openQ4: one step per key event. A held key repeats through the system's
+	// own key repeat, which arrives here as further key-down events, like every
+	// other key of the edit line. The engine used to add its own repeat on top,
+	// from 200 ms after the press and once per drawn frame: at 240 Hz that was
+	// 1440 lines a second until the system's repeat took over, enough to cross
+	// the whole scrollback in a short hold. It also ran with the console
+	// closed, so Page Up held in a game scrolled the hidden log away from its
+	// end.
+	if ( key == K_PGUP || key == K_MWHEELUP ) {
 		PageUp();
 		return;
 	}
-	if ( key == K_MWHEELDOWN ) {
+	if ( key == K_PGDN || key == K_MWHEELDOWN ) {
 		PageDown();
-		return;
-	}
-	if ( key == K_HOME && idKeyInput::IsDown( K_CTRL ) ) {
-		Top();
-		return;
-	}
-	if ( key == K_END && idKeyInput::IsDown( K_CTRL ) ) {
-		Bottom();
 		return;
 	}
 
@@ -4163,26 +4485,36 @@ void idConsoleLocal::KeyDownEvent( int key ) {
 
 /*
 ==============
-Scroll
-deals with scrolling text because we don't have key repeat
+idConsoleLocal::RecallHistoryLine
+
+Puts a history line, or at nextHistoryLine the line that was being typed, in the
+edit field. The typed line is kept when browsing starts: stepping back down
+used to show slot nextHistoryLine of the ring, which is blank only until the
+history has wrapped and from then on holds the oldest command.
 ==============
 */
-void idConsoleLocal::Scroll( ) {
-	if (lastKeyEvent == -1 || (lastKeyEvent+200) > eventLoop->Milliseconds()) {
-		return;
-	}
-	// console scrolling
-	if ( idKeyInput::IsDown( K_PGUP ) ) {
-		PageUp();
-		nextKeyEvent = CONSOLE_REPEAT;
+void idConsoleLocal::RecallHistoryLine( int line ) {
+	if ( line == historyLine ) {
 		return;
 	}
 
-	if ( idKeyInput::IsDown( K_PGDN ) ) {
-		PageDown();
-		nextKeyEvent = CONSOLE_REPEAT;
-		return;
+	if ( historyLine == nextHistoryLine ) {
+		historyDraft = consoleField;
 	}
+	historyLine = line;
+
+	if ( historyLine == nextHistoryLine ) {
+		consoleField = historyDraft;
+	} else {
+		consoleField = historyEditLines[historyLine % COMMAND_HISTORY];
+		consoleField.SetCursor( consoleField.GetLength() );
+	}
+	consoleField.SetWidthInChars( lineWidth );
+	consoleField.ClampCursorAndScroll();
+	ClearInputSelection();
+	ClearLogSelection();
+	focus = CON_FOCUS_INPUT;
+	RebuildCompletionState();
 }
 
 /*
@@ -4264,24 +4596,10 @@ bool	idConsoleLocal::ProcessEvent( const sysEvent_t *event, bool forceAccept ) {
 
 		// a down event will toggle the destination lines
 		if ( keyCatching ) {
-			Close();
-			Sys_GrabMouseCursor( true );
-			cvarSystem->SetCVarBool( "ui_chat", false );
+			CloseFromInput();
 		} else {
-			consoleField.Clear();
-			keyCatching = true;
-			focus = CON_FOCUS_INPUT;
-			mouseInitialized = false;
-			scrollbarDragging = false;
-			completionScrollbarDragging = false;
-			ClearInputSelection();
-			ClearLogSelection();
-			ClearTextDragState();
-			InvalidateCompletionState();
 			// Holding Shift keeps the reduced-open behavior without exceeding the configured console height.
-			SetDisplayFraction( GetOpenFraction( idKeyInput::IsDown( K_SHIFT ) ) );
-			cvarSystem->SetCVarBool( "ui_chat", true );
-			Sys_GrabMouseCursor( false );
+			OpenForInput( idKeyInput::IsDown( K_SHIFT ) );
 		}
 		return true;
 	}
@@ -4311,6 +4629,12 @@ bool	idConsoleLocal::ProcessEvent( const sysEvent_t *event, bool forceAccept ) {
 		}
 
 		if ( event->evValue2 == 0 ) {
+			return true;
+		}
+
+		// A console that is forced to take events, as the editor's is, has
+		// nothing to close and no game to hand the mouse back to.
+		if ( forceAccept && event->evValue == K_ESCAPE ) {
 			return true;
 		}
 
@@ -4382,9 +4706,19 @@ void idConsoleLocal::Print( const char *txt ) {
 	}
 
 	UpdateLayoutMetrics();
+	// openQ4: idStr grows 32 bytes at a time and copies itself whenever it does,
+	// so nearly every line printed used to copy the whole history - 1.5 MB once
+	// it was full, and three times that for the trim below, which also ran on
+	// every line. Reserve the buffer once and trim in place a slack's worth at a
+	// time; the replay only ever needs the tail, so what it rebuilds is the same.
+	if ( printHistory.Allocated() < CON_HISTORY_RESERVE ) {
+		printHistory.ReAllocate( CON_HISTORY_RESERVE, true );
+	}
 	printHistory.Append( txt );
-	if ( printHistory.Length() > CON_HISTORY_MAX_CHARS ) {
-		printHistory = printHistory.Right( CON_HISTORY_MAX_CHARS );
+	if ( printHistory.Length() > CON_HISTORY_MAX_CHARS + CON_HISTORY_TRIM_SLACK ) {
+		const int drop = printHistory.Length() - CON_HISTORY_MAX_CHARS;
+		memmove( &printHistory[0], &printHistory[drop], CON_HISTORY_MAX_CHARS + 1 );
+		printHistory.CapLength( CON_HISTORY_MAX_CHARS );
 	}
 
 	PrintToBuffer( txt, true );
@@ -4473,7 +4807,10 @@ void idConsoleLocal::DrawInputText( float x, float y, bool showCursor ) const {
 	DrawInputSelection( x, y, prestep, safeDrawLen );
 	Con_DrawSmallStringExt( x, y, visible, colorWhite, false );
 
-	if ( !showCursor || ( ( com_ticNumber >> 4 ) & 1 ) != 0 ) {
+	// openQ4: the blink restarts whenever the line or the caret changes. Timed
+	// off the tic counter alone, the caret was hidden half the time it had just
+	// been moved.
+	if ( !showCursor || !oq4console::CaretVisible( caretClock ) ) {
 		return;
 	}
 
@@ -4584,23 +4921,26 @@ void idConsoleLocal::DrawMouseCursor( void ) {
 
 	EnsureMouseInitialized();
 
-	if ( mouseCursorShader != NULL ) {
-		const float cursorXScale = Con_GetConsoleXScale();
-		const float cursorWidth = CON_MOUSE_CURSOR_SIZE * cursorXScale;
-		const float cursorDrawX = mouseX - CON_MOUSE_CURSOR_HOTSPOT_X * cursorXScale;
-		const float cursorDrawY = mouseY - CON_MOUSE_CURSOR_HOTSPOT_Y;
-		renderSystem->SetColor( colorWhite );
-		renderSystem->DrawStretchPic( cursorDrawX, cursorDrawY, cursorWidth, CON_MOUSE_CURSOR_SIZE,
-			0.0f, 0.0f, 1.0f, 1.0f, mouseCursorShader );
-		return;
+	// The menus' pointer, its hotspot at the point clicks use, in the UI
+	// viewport the console's mouse maps to and at the console text's scale.
+	// Over the edit line, where a click places the caret, or while a selection
+	// that started there is under way, it is the I-beam.
+	float inputX, inputY, inputW, inputH;
+	const bool overInput = inputSelecting || ( GetInputAreaRect( inputX, inputY, inputW, inputH ) &&
+		mouseY >= inputY && mouseY <= inputY + inputH && mouseX >= 0.0f && mouseX <= SCREEN_WIDTH );
+	float width = static_cast<float>( engineWindowState.uiViewportWidth );
+	float height = static_cast<float>( engineWindowState.uiViewportHeight );
+	if ( width <= 0.0f || height <= 0.0f ) {
+		width = static_cast<float>( renderSystem->GetScreenWidth() );
+		height = static_cast<float>( renderSystem->GetScreenHeight() );
 	}
-
-	const idVec4 &cursorColor = kConsoleBorderColor;
-	DrawSolidRect( mouseX, mouseY, 3.0f, 13.0f, cursorColor );
-	DrawSolidRect( mouseX, mouseY, 10.0f, 3.0f, cursorColor );
-	DrawSolidRect( mouseX + 3.0f, mouseY + 3.0f, 3.0f, 3.0f, cursorColor );
-	DrawSolidRect( mouseX + 6.0f, mouseY + 6.0f, 3.0f, 3.0f, cursorColor );
-	DrawSolidRect( mouseX + 3.0f, mouseY + 10.0f, 7.0f, 3.0f, cursorColor );
+	const bool oldViewport = renderSystem->GetUseUIViewportFor2D();
+	renderSystem->SetUseUIViewportFor2D( true );
+	UI_DrawPointerCursor( overInput ? POINTER_TEXT : POINTER_ARROW,
+		mouseX * width / SCREEN_WIDTH, mouseY * height / SCREEN_HEIGHT,
+		width, height, height / SCREEN_HEIGHT );
+	renderSystem->FlushGui();
+	renderSystem->SetUseUIViewportFor2D( oldViewport );
 }
 
 /*
@@ -4721,11 +5061,18 @@ void idConsoleLocal::DrawSolidConsole( float frac ) {
 	renderSystem->DrawStretchPic( 0, y, SCREEN_WIDTH, 2, 0, 0, 1, 1, whiteShader );
 	renderSystem->SetColor( colorWhite );
 
-	renderSystem->SetColor( kConsoleVersionColor );
+	// openQ4: the version sits half a row below the edit line, at its right
+	// end, and a long command used to be drawn through it. It steps aside once
+	// the typed text, its caret included, reaches it.
 	idStr version = OPENQ4_PRODUCT_VERSION;
-	for ( i = 0; i < version.Length(); ++i ) {
-		Con_DrawSmallChar( SCREEN_WIDTH - ( version.Length() - i ) * charWidth,
-			lines - ( SMALLCHAR_HEIGHT + SMALLCHAR_HEIGHT / 2.0f ), version[i] );
+	int inputPrestep, inputDrawLen;
+	GetInputDrawInfo( inputPrestep, inputDrawLen );
+	if ( ( 2 + inputDrawLen + 2 ) * charWidth <= SCREEN_WIDTH - version.Length() * charWidth ) {
+		renderSystem->SetColor( kConsoleVersionColor );
+		for ( i = 0; i < version.Length(); ++i ) {
+			Con_DrawSmallChar( SCREEN_WIDTH - ( version.Length() - i ) * charWidth,
+				lines - ( SMALLCHAR_HEIGHT + SMALLCHAR_HEIGHT / 2.0f ), version[i] );
+		}
 	}
 
 	// draw the text
@@ -4811,13 +5158,14 @@ void	idConsoleLocal::Draw( bool forceFullScreen ) {
 		// we want the console closed when we go back to a session state
 		Close();
 		// we are however catching keyboard input
+		openq4::NativeInputBeforeInputBlockerChange();
 		keyCatching = true;
 	}
 
-	Scroll();
-
+	UpdateFrameTime();
 	UpdateDisplayFraction();
 	UpdateDisplayLine();
+	UpdateCaretBlink();
 
 	if ( forceFullScreen ) {
 		DrawSolidConsole( 1.0f );
@@ -4858,6 +5206,15 @@ void	idConsoleLocal::Draw( bool forceFullScreen ) {
 
 	if ( !idAsyncNetwork::client.IsActive() && !idAsyncNetwork::server.IsActive() && aasFileOutOfDate ) {
 		SCR_DrawTextRightAlign( y, "AAS" );
+	}
+
+	// Taken every frame, so turning the flash on never shows a stale press.
+	if ( Usercmd_ConsumeLatencyFlash() && com_latencyFlash.GetBool() ) {
+		DrawSolidRect( 0.0f, 0.0f, SCREEN_WIDTH * 0.1f, SCREEN_HEIGHT, colorWhite, 1.0f );
+		Usercmd_NoteLatencyFlashDrawn();
+		if ( com_developer.GetBool() ) {
+			common->Printf( "latencyFlash: drawn at %d ms\n", Sys_Milliseconds() );
+		}
 	}
 
 	if ( keyCatching && ( forceFullScreen || displayFrac > 0.0f ) ) {

@@ -91,12 +91,13 @@ private:
 
 	bool					looping;
 	bool					dirty;
+	int						lastDecodeSerial;
 	bool					half;
 	bool					smootheddouble;
 	bool					inMemory;
 
 	void					RoQ_init(void);
-	void					blitVQQuad32fs(byte** status, unsigned char* data);
+	void					blitVQQuad32fs(byte** status, unsigned char* data, const unsigned char* dataEnd);
 	void					RoQShutdown(void);
 	void					RoQInterrupt(void);
 
@@ -145,6 +146,10 @@ static unsigned short* vq2 = NULL;
 static unsigned short* vq4 = NULL;
 static unsigned short* vq8 = NULL;
 
+// single monotonic serial shared by all cinematic instances in this binary;
+// a (instance pointer, serial) pair therefore never repeats
+static int cinematicFrameSerial = 0;
+
 
 
 //===========================================
@@ -173,8 +178,12 @@ void idCinematic::InitCinematic(void) {
 		ROQ_YY_tab[i] = (int)((i << 6) | (i >> 2));
 	}
 
-	// RoQInterrupt reads RoQFrameSize + 8 bytes (chunk payload plus next chunk header)
-	file = (byte*)Mem_Alloc(65536 + 8);
+	// RoQInterrupt reads RoQFrameSize + 8 bytes (chunk payload plus next chunk
+	// header). The extra 64-byte tail is slack: blitVQQuad32fs bounds its walk
+	// at the chunk-payload end, but a single decode iteration may over-advance
+	// the read cursor by a few bytes past that checkpoint, so keep those reads
+	// inside the allocation.
+	file = (byte*)Mem_Alloc(65536 + 8 + 64);
 	vq2 = (word*)Mem_Alloc(256 * 16 * 4 * sizeof(word));
 	vq4 = (word*)Mem_Alloc(256 * 64 * 4 * sizeof(word));
 	vq8 = (word*)Mem_Alloc(256 * 256 * 4 * sizeof(word));
@@ -269,6 +278,7 @@ idCinematicLocal::idCinematicLocal
 idCinematicLocal::idCinematicLocal() {
 	image = NULL;
 	imageCapacity = 0;
+	lastDecodeSerial = 0;
 	status = FMV_EOF;
 	buf = NULL;
 	iFile = NULL;
@@ -478,6 +488,7 @@ cinData_t idCinematicLocal::ImageForTime(int thisTime) {
 	cinData.imageHeight = CIN_HEIGHT;
 	cinData.status = status;
 	cinData.image = buf;
+	cinData.frameSerial = lastDecodeSerial;
 
 	return cinData;
 }
@@ -839,7 +850,7 @@ void idCinematicLocal::blit2_32(byte* src, byte* dst, int spl) {
 idCinematicLocal::blitVQQuad32fs
 ==============
 */
-void idCinematicLocal::blitVQQuad32fs(byte** status, unsigned char* data) {
+void idCinematicLocal::blitVQQuad32fs(byte** status, unsigned char* data, const unsigned char* dataEnd) {
 	unsigned short	newd, celdata, code;
 	unsigned int	index, i;
 
@@ -848,6 +859,13 @@ void idCinematicLocal::blitVQQuad32fs(byte** status, unsigned char* data) {
 	index = 0;
 
 	do {
+		// A well-formed VQ frame terminates on the NULL status sentinel before
+		// its cel stream is exhausted; a corrupt one can keep consuming codes,
+		// so stop once the read cursor reaches the chunk-payload end rather than
+		// walking off the shared file buffer.
+		if (data >= dataEnd) {
+			break;
+		}
 		if (!newd) {
 			newd = 7;
 			celdata = data[0] + data[1] * 256;
@@ -896,7 +914,16 @@ void idCinematicLocal::blitVQQuad32fs(byte** status, unsigned char* data) {
 					data++;
 					break;
 				case	0x4000:										// motion compensation
-					move4_32(status[index] + mcomp[(*data)], status[index], samplesPerLine);
+					{
+						// mcomp[] is built from attacker-controllable frame-header
+						// offsets; validate the 4x4 source block stays inside the
+						// decode image before reading it, else drop the block.
+						const ptrdiff_t srcOff = (status[index] - image) + mcomp[(*data)];
+						const ptrdiff_t span4 = (ptrdiff_t)3 * samplesPerLine + 16;
+						if (image != NULL && srcOff >= 0 && (size_t)srcOff + (size_t)span4 <= imageCapacity) {
+							move4_32(image + srcOff, status[index], samplesPerLine);
+						}
+					}
 					data++;
 					break;
 				}
@@ -904,7 +931,15 @@ void idCinematicLocal::blitVQQuad32fs(byte** status, unsigned char* data) {
 			}
 			break;
 		case	0x4000:													// motion compensation
-			move8_32(status[index] + mcomp[(*data)], status[index], samplesPerLine);
+			{
+				// See the 4x4 case: bound the 8x8 motion-compensation source
+				// block against the decode image before reading it.
+				const ptrdiff_t srcOff = (status[index] - image) + mcomp[(*data)];
+				const ptrdiff_t span8 = (ptrdiff_t)7 * samplesPerLine + 32;
+				if (image != NULL && srcOff >= 0 && (size_t)srcOff + (size_t)span8 <= imageCapacity) {
+					move8_32(image + srcOff, status[index], samplesPerLine);
+				}
+			}
 			data++;
 			index += 5;
 			break;
@@ -1506,16 +1541,24 @@ redump:
 	switch (roq_id)
 	{
 	case	ROQ_QUAD_VQ:
+		// A ROQ_QUAD_INFO chunk (which allocates qStatus/image and leaves
+		// numQuads >= 0) must precede any VQ frame. A malformed stream that
+		// sends VQ first leaves numQuads at its -1 init value and would walk
+		// the uninitialized qStatus pointer arrays as blit destinations.
+		if (numQuads < 0) {
+			status = FMV_EOF;
+			return;
+		}
 		if ((numQuads & 1)) {
 			normalBuffer0 = t[1];
 			RoQPrepMcomp(roqF0, roqF1);
-			blitVQQuad32fs(qStatus[1], framedata);
+			blitVQQuad32fs(qStatus[1], framedata, framedata + RoQFrameSize);
 			buf = image + screenDelta;
 		}
 		else {
 			normalBuffer0 = t[0];
 			RoQPrepMcomp(roqF0, roqF1);
-			blitVQQuad32fs(qStatus[0], framedata);
+			blitVQQuad32fs(qStatus[0], framedata, framedata + RoQFrameSize);
 			buf = image;
 		}
 		if (numQuads == 0) {		// first frame
@@ -1523,6 +1566,7 @@ redump:
 		}
 		numQuads++;
 		dirty = true;
+		lastDecodeSerial = ++cinematicFrameSerial;
 		break;
 	case	ROQ_CODEBOOK:
 		decodeCodeBook(framedata, (unsigned short)roq_flags);
@@ -1553,6 +1597,7 @@ redump:
 			JPEGBlit(image, framedata, RoQFrameSize);
 			memcpy(image + screenDelta, image, samplesPerLine * ysize);
 			numQuads++;
+			lastDecodeSerial = ++cinematicFrameSerial;
 		}
 		break;
 	default:

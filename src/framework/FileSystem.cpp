@@ -30,9 +30,28 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "Unzip.h"
+#include "GameDirPolicy.h"
+#include "LevelLoadCacheManager.h"
 #include "openq4_paks_generated.h"
+#include "../sys/URLPolicy.h"
 
+#include <errno.h>
 #include <stdint.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <limits>
+#include <mutex>
+#include <thread>
+#include <algorithm>
+#include <atomic>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#if defined( USE_SDL3 )
+	#include <SDL3/SDL_filesystem.h>
+	#include <SDL3/SDL_error.h>
+#endif
 
 #ifdef WIN32
 	#include <windows.h>
@@ -51,10 +70,163 @@ If you have questions concerning this license or the applicable additional terms
 
 #if ID_ENABLE_CURL
 	#include "../curl/include/curl/curl.h"
+	#if defined( LIBCURL_VERSION_NUM ) && LIBCURL_VERSION_NUM >= 0x071304 && defined( CURL_VERSION_ASYNCHDNS )
+		#define OPENQ4_CURL_CAPABLE_BUILD 1
+	#else
+		#define OPENQ4_CURL_CAPABLE_BUILD 0
+	#endif
 #endif
 
 int Com_GetNumStartupCommandLines( void );
 const idCmdArgs *Com_GetStartupCommandLine( int index );
+
+/*
+========================
+FS_IsWindowsDeviceQPathSegment
+
+Windows resolves these names to devices even when an extension is present.
+Reject both the legacy single-byte and UTF-8 encodings of the superscript
+digits that Windows also treats as COM/LPT device numbers.
+========================
+*/
+static bool FS_IsWindowsDeviceQPathSegment( const char *segment, int segmentLength ) {
+	int stemLength = 0;
+	while ( stemLength < segmentLength && segment[ stemLength ] != '.' ) {
+		stemLength++;
+	}
+
+	if ( stemLength == 3 ) {
+		return idStr::Icmpn( segment, "con", 3 ) == 0 ||
+			idStr::Icmpn( segment, "prn", 3 ) == 0 ||
+			idStr::Icmpn( segment, "aux", 3 ) == 0 ||
+			idStr::Icmpn( segment, "nul", 3 ) == 0;
+	}
+
+	const bool portPrefix = stemLength >= 4 &&
+		( idStr::Icmpn( segment, "com", 3 ) == 0 || idStr::Icmpn( segment, "lpt", 3 ) == 0 );
+	if ( !portPrefix ) {
+		return false;
+	}
+
+	const unsigned char digit = static_cast<unsigned char>( segment[ 3 ] );
+	if ( stemLength == 4 ) {
+		return ( digit >= '1' && digit <= '9' ) || digit == 0xB9 || digit == 0xB2 || digit == 0xB3;
+	}
+
+	return stemLength == 5 && digit == 0xC2 &&
+		( static_cast<unsigned char>( segment[ 4 ] ) == 0xB9 ||
+		  static_cast<unsigned char>( segment[ 4 ] ) == 0xB2 ||
+		  static_cast<unsigned char>( segment[ 4 ] ) == 0xB3 );
+}
+
+/*
+========================
+FS_HasParentOSPathSegment
+
+Explicit OS paths may legitimately contain repeated dots in a filename or
+directory name.  Reject only a complete parent-directory component so an
+absolute save path cannot be used to make CreateOSPath back up the hierarchy.
+========================
+*/
+static bool FS_HasParentOSPathSegment( const char *OSPath ) {
+	const char *segmentStart = OSPath;
+	for ( const char *scan = OSPath; ; scan++ ) {
+		const char c = *scan;
+		if ( c != '\0' && c != '/' && c != '\\' ) {
+			continue;
+		}
+
+		if ( scan - segmentStart == 2 && segmentStart[ 0 ] == '.' && segmentStart[ 1 ] == '.' ) {
+			return true;
+		}
+		if ( c == '\0' ) {
+			return false;
+		}
+		segmentStart = scan + 1;
+	}
+}
+
+/*
+========================
+FS_ValidateRelativeWritePath
+
+Mutation APIs accept portable qpaths, not OS paths.  Validate before joining
+the caller-controlled value to a writable root so platform normalization can
+never reinterpret a segment or escape the game directory.
+========================
+*/
+bool FS_ValidateRelativeWritePath( const char *relativePath, const char **reason ) {
+	if ( reason != NULL ) {
+		*reason = NULL;
+	}
+
+	if ( relativePath == NULL || relativePath[ 0 ] == '\0' ) {
+		if ( reason != NULL ) {
+			*reason = "path is empty";
+		}
+		return false;
+	}
+	if ( relativePath[ 0 ] == '/' || relativePath[ 0 ] == '\\' ) {
+		if ( reason != NULL ) {
+			*reason = "path is rooted";
+		}
+		return false;
+	}
+
+	const char *segmentStart = relativePath;
+	for ( const char *scan = relativePath; ; scan++ ) {
+		const unsigned char c = static_cast<unsigned char>( *scan );
+		if ( c == '\\' || c == ':' ) {
+			if ( reason != NULL ) {
+				*reason = "path contains an OS path separator or volume marker";
+			}
+			return false;
+		}
+		if ( c != '\0' && ( c < 32 || c == '<' || c == '>' || c == '"' || c == '|' || c == '?' || c == '*' ) ) {
+			if ( reason != NULL ) {
+				*reason = "path contains a non-portable filename character";
+			}
+			return false;
+		}
+		if ( c != '/' && c != '\0' ) {
+			continue;
+		}
+
+		const int segmentLength = static_cast<int>( scan - segmentStart );
+		if ( segmentLength == 0 ) {
+			if ( reason != NULL ) {
+				*reason = "path contains an empty segment";
+			}
+			return false;
+		}
+		if ( ( segmentLength == 1 && segmentStart[ 0 ] == '.' ) ||
+			 ( segmentLength == 2 && segmentStart[ 0 ] == '.' && segmentStart[ 1 ] == '.' ) ) {
+			if ( reason != NULL ) {
+				*reason = "path contains a dot directory segment";
+			}
+			return false;
+		}
+		if ( segmentStart[ 0 ] == ' ' ||
+			 segmentStart[ segmentLength - 1 ] == '.' ||
+			 segmentStart[ segmentLength - 1 ] == ' ' ) {
+			if ( reason != NULL ) {
+				*reason = "path segment starts or ends in a character normalized by Windows";
+			}
+			return false;
+		}
+		if ( FS_IsWindowsDeviceQPathSegment( segmentStart, segmentLength ) ) {
+			if ( reason != NULL ) {
+				*reason = "path contains a Windows device name";
+			}
+			return false;
+		}
+
+		if ( c == '\0' ) {
+			return true;
+		}
+		segmentStart = scan + 1;
+	}
+}
 
 /*
 =============================================================================
@@ -65,8 +237,9 @@ All of Doom's data access is through a hierarchical file system, but the content
 the file system can be transparently merged from several sources.
 
 A "relativePath" is a reference to game file data, which must include a terminating zero.
-"..", "\\", and ":" are explicitly illegal in qpaths to prevent any references
-outside the Doom directory system.
+Dot directory segments, empty segments, OS separators and volume markers are
+illegal in qpaths used for mutation, preventing references outside the Doom
+directory system and platform-specific filename aliases.
 
 The "base path" is the path to the directory holding all the game directories and
 usually the executable. It defaults to the current directory, but can be overridden
@@ -165,8 +338,12 @@ unresolved segment in debug output instead of relying on lowercase assumptions.
 
 "additional mod path search":
 fs_game_base can be used to set an additional search path
-in search order, fs_game, fs_game_base, BASEGAME
-for instance to base a mod of openQ4 + D3XP assets, fs_game mymod, fs_game_base baseoq4
+in search order, fs_game, fs_game_base, baseoq4, BASEGAME
+Any mod selected with fs_game runs on top of the openQ4 runtime directory
+(baseoq4), which carries the engine's own runtime content and the fallback
+game modules, so it is searched below the mod without being named. fs_game_base
+remains free for an intermediate base, for instance a mod built on the
+Awakening expansion: fs_game mymod, fs_game_base q4xbase
 
 =============================================================================
 */
@@ -462,6 +639,11 @@ static const char *fsLanguagePackOrder[] = {
 	"korean",
 	"japanese",
 	"chinese",
+	"brazilian",
+	"czech",
+	"hungarian",
+	"turkish",
+	"ukrainian",
 	NULL
 };
 
@@ -498,7 +680,7 @@ static void FS_AppendUniqueLanguage( idStrList &languages, const char *language 
 	languages.Append( language );
 }
 
-static bool FS_ParseLanguagePackName( const char *pakFilename, idStr &language ) {
+static bool FS_ParseLanguagePackName( const char *pakFilename, idStr &language, bool allowPatchArchives = true ) {
 	idStr fileName;
 	int suffix;
 
@@ -520,6 +702,9 @@ static bool FS_ParseLanguagePackName( const char *pakFilename, idStr &language )
 		return false;
 	}
 	if ( suffix > 0 ) {
+		if ( !allowPatchArchives ) {
+			return false;
+		}
 		language.CapLength( suffix );
 	}
 
@@ -1439,8 +1624,18 @@ static bool FS_AutoDiscoverBasePath( idStr &basePath ) {
 typedef struct fileInPack_s {
 	idStr				name;						// name of the file
 	uint32_t			pos;						// classic-ZIP central-directory position
+	uint32_t			size;						// uncompressed size from the central directory
+	uint32_t			crc;						// CRC-32 of the uncompressed bytes, from the central directory
 	struct fileInPack_s * next;						// next file in the hash
 } fileInPack_t;
+
+// A length/timestamp query against a pk4 member, answered from the pak's
+// central-directory index instead of opening the member.
+typedef struct packMemberProbe_s {
+	bool				found;
+	int					length;
+	uint32_t			crc;
+} packMemberProbe_t;
 
 typedef enum {
 	BINARY_UNKNOWN = 0,
@@ -1499,10 +1694,21 @@ typedef struct searchpath_s {
 // + .jpg and .tga
 #define MAX_CACHED_DIRS 6
 
-// how many OSes to handle game paks for ( we don't have to know them precisely )
-#define MAX_GAME_OS	6
 #define BINARY_CONFIG "binary.conf"
 #define ADDON_CONFIG "addon.conf"
+
+// Protocol 2.41 identifies compatible game code with the official 1.4.2
+// q4base/game300.pk4 checksum. openQ4 never loads executable code from that
+// archive; the unchanged value is a platform-independent wire token for a
+// module that FindDLL resolved from the trusted package/module roots.
+static const int OPENQ4_Q4_142_GAME300_PAK_CHECKSUM = 0x68fb90b1;
+
+typedef enum {
+	GAME_MODULE_ORIGIN_NONE = 0,
+	GAME_MODULE_ORIGIN_ACTIVE_MOD,
+	GAME_MODULE_ORIGIN_BASE_GAME,
+	GAME_MODULE_ORIGIN_PACKAGE_ROOT
+} gameModuleOrigin_t;
 
 class idDEntry : public idStrList {
 public:
@@ -1524,6 +1730,53 @@ typedef enum modManifestStatus_s {
 	MOD_MANIFEST_INVALID
 } modManifestStatus_t;
 
+// The identity on disk of an openQ4 runtime pack that passed its checksum
+// check (see ValidateOpenQ4Paks).
+typedef struct openQ4PakStamp_s {
+	uint64_t			size;
+	uint64_t			modified;		// last write, in the platform's native time units
+	uint64_t			changed;		// last content or metadata change, likewise
+	uint64_t			volume;
+	uint64_t			fileId;
+	uint32_t			zipChecksum;	// pack_t::checksum, over the central directory's CRCs
+	uint32_t			zipFiles;
+} openQ4PakStamp_t;
+
+typedef struct verifiedOpenQ4Pak_s {
+	std::string			path;
+	openQ4PakStamp_t	stamp;
+	char				md5[ 33 ];
+} verifiedOpenQ4Pak_t;
+
+// One openQ4 runtime pack from tools/build/content_packs.json, as the build
+// recorded it in openq4_paks_generated.h.
+typedef struct openQ4PackTableEntry_s {
+	const char *		name;
+	const char *		md5;
+	long long			sizeBytes;
+	int					fileCount;
+	bool				clientOnly;		// presentation data a server never reads
+	bool				bulk;			// carried by full packages, not update archives
+	const char *		contentsString;	// localized description, for example "light grids"
+	const char *		contents;		// English description, for logs
+} openQ4PackTableEntry_t;
+
+static const openQ4PackTableEntry_t openQ4PackTable[] = {
+	OPENQ4_PACK_TABLE_ENTRIES
+};
+static const int openQ4PackTableCount = sizeof( openQ4PackTable ) / sizeof( openQ4PackTable[ 0 ] );
+
+static const openQ4PackTableEntry_t *FS_FindOpenQ4PackTableEntry( const char *fileName ) {
+	for ( int i = 0; i < openQ4PackTableCount; i++ ) {
+		if ( !idStr::Icmp( openQ4PackTable[ i ].name, fileName ) ) {
+			return &openQ4PackTable[ i ];
+		}
+	}
+	return NULL;
+}
+
+class idLevelLoadCacheManager;
+
 class idFileSystemLocal : public idFileSystem {
 public:
 							idFileSystemLocal( void );
@@ -1535,6 +1788,8 @@ public:
 	virtual void			Shutdown( bool reloading );
 	virtual bool			IsInitialized( void ) const;
 	virtual bool			PerformingCopyFiles( void ) const;
+	virtual idCampaignContentInfo GetAwakeningContentInfo();
+	virtual const char *GetActiveGameDir() const { return gameFolder.c_str(); }
 	virtual idModList *		ListMods( void );
 	virtual bool			GetModInfo( const char *modDir, idModInfo &modInfo, idStr *reason = NULL );
 	virtual void			FreeModList( idModList *modList );
@@ -1542,6 +1797,7 @@ public:
 	virtual idFileList *	ListFilesTree( const char *relativePath, const char *extension, bool sort = false, const char* gamedir = NULL );
 	virtual void			FreeFileList( idFileList *fileList );
 	virtual void			ListAvailableLanguagePacks( idStrList &languages );
+	bool					HasBaseLanguageMediaPack( void );
 	virtual const char *	OSPathToRelativePath( const char *OSPath );
 	virtual const char *	RelativePathToOSPath( const char *relativePath, const char *basePath );
 	virtual const char *	BuildOSPath( const char *base, const char *game, const char *relativePath );
@@ -1556,8 +1812,14 @@ public:
 	virtual	void			ClearPureChecksums( void );
 	virtual int				GetOSMask( void );
 	virtual int				ReadFile( const char *relativePath, void **buffer, ID_TIME_T *timestamp );
+	virtual int				ReadFileContentStamp( const char *relativePath, void **buffer, ID_TIME_T *contentStamp );
+	int						ReadFileStamped( const char *relativePath, void **buffer, ID_TIME_T *timestamp, bool contentStamp );
 	virtual void			FreeFile( void *buffer );
 	virtual int				WriteFile( const char *relativePath, const void *buffer, int size, const char *basePath = "fs_savepath" );
+	virtual bool			PromoteFile( const char *stagedRelativePath, const char *finalRelativePath,
+								const char *basePath = "fs_savepath" );
+	virtual bool			RemoveFileChecked( const char *relativePath,
+								const char *basePath = "fs_savepath" );
 	virtual void			RemoveFile( const char *relativePath, const char *basePath = "fs_savepath" );
 	virtual int				RemoveExplicitFile( const char *OSPath );
 	virtual void			SetIsFileLoadingAllowed( bool mode );
@@ -1566,6 +1828,27 @@ public:
 	virtual void			WriteAssetLog();
 	virtual void			ClearAssetLog();
 	virtual const char *	GetAssetLogName();
+	virtual void			BeginLevelLoadCache( const char *mapKey, const char *gameMode,
+								const char *entityFilter, const char *settingsKey );
+	virtual void			FinishLevelLoadCache( bool successful );
+	void					ReleaseLevelLoadCache( void );
+	virtual void			CancelLevelLoadCache( void );
+	virtual void			RecordLevelLoadResource( levelLoadResourceType_t type,
+								const char *name, const char *options,
+								unsigned int flags, unsigned int priority );
+	virtual idFile *		OpenGeneratedCacheRead( generatedCacheKind_t kind,
+								const char *sourcePath, unsigned int parserVersion,
+								const char *settingsKey );
+	virtual bool			WriteGeneratedCache( generatedCacheKind_t kind,
+								const char *sourcePath, unsigned int parserVersion,
+								const char *settingsKey, const void *payload,
+								unsigned int payloadBytes );
+	virtual void			DiscardGeneratedCache( generatedCacheKind_t kind,
+								const char *sourcePath, unsigned int parserVersion,
+								const char *settingsKey );
+	virtual bool			GeneratedCacheReadsEnabled( generatedCacheKind_t kind ) const;
+	virtual bool			GeneratedCacheWritesEnabled( generatedCacheKind_t kind ) const;
+	virtual bool			TakePureImageCacheEviction( void );
 	virtual idFile *		GetNewFileMemory( void );
 	virtual idFile *		GetNewFilePermanent( void );
 	virtual idFile *		OpenFileReadFlags( const char *relativePath, int searchFlags, pack_t **foundInPak = NULL, bool allowCopyFiles = true, const char* gamedir = NULL );
@@ -1579,19 +1862,9 @@ public:
 	virtual idFile *		OpenExplicitFileAppend( const char *OSPath, bool sync = false );
 	virtual void			CloseFile( idFile *f );
 	virtual void			BackgroundDownload( backgroundDownload_t *bgl );
-	virtual void			ResetReadCount( void ) { readCount = 0; }
-	virtual void			AddToReadCount( int c ) {
-		if ( c <= 0 ) {
-			return;
-		}
-
-		readCount += c;
-
-		// Keep loading progress responsive on PC as data is read.
-		// idSessionLocal::PacifierUpdate is internally throttled and no-ops outside map load.
-		session->PacifierUpdate();
-	}
-	virtual int				GetReadCount( void ) { return readCount; }
+	virtual void			ResetReadCount( void );
+	virtual void			AddToReadCount( int c );
+	virtual int				GetReadCount( void );
 	virtual void			FindDLL( const char *basename, char dllPath[ MAX_OSPATH ], bool updateChecksum );
 	virtual void			ClearDirCache( void );
 	virtual bool			HasD3XP( void );
@@ -1611,12 +1884,18 @@ public:
 	static void				Path_f( const idCmdArgs &args );
 	static void				TouchFile_f( const idCmdArgs &args );
 	static void				TouchFileList_f( const idCmdArgs &args );
+	static void				MapLevelshot_f( const idCmdArgs &args );
 
 private:
 	friend dword 			BackgroundDownloadThread( void *parms );
 
 	searchpath_t *			searchPaths;
 	int						readCount;			// total bytes read
+	// bytes read since the last loading-pacifier offer, see AddToReadCount
+	static const int		READCOUNT_PACIFIER_INTERVAL_BYTES = 1024 * 1024;
+	int						readCountPacifierBytes;
+	std::mutex				readCountMutex;
+	std::thread::id			fileSystemMainThread;
 	int						loadCount;			// total files read
 	int						loadStack;			// total files in memory
 	idStr					gameFolder;			// this will be a single name without separators
@@ -1631,6 +1910,8 @@ private:
 	static idCVar			fs_basepath;
 	static idCVar			fs_homepath;
 	static idCVar			fs_savepath;
+	static idCVar			fs_awakeningpath;
+	static idCVar			fs_cachepath;
 	static idCVar			fs_cdpath;
 	static idCVar			fs_devpath;
 	static idCVar			fs_game;
@@ -1638,6 +1919,8 @@ private:
 	static idCVar			fs_caseSensitiveOS;
 	static idCVar			fs_searchAddons;
 	static idCVar			fs_validateOfficialPaks;
+	static idCVar			fs_cacheVerifiedPaks;
+	static idCVar			fs_cacheLooseDirectories;
 
 	backgroundDownload_t *	backgroundDownloads;
 	backgroundDownload_t	defaultBackgroundDownload;
@@ -1645,15 +1928,27 @@ private:
 
 	idList<pack_t *>		serverPaks;
 	bool					loadedFileFromDir;		// set to true once a file was loaded from a directory - can't switch to pure anymore
+	bool					loadedImageCacheFromDir;	// a generated image cache entry or expanded loading background was read: a pure lock must evict those images
+	bool					pureImageCacheEvictionPending;	// the pure lock was taken over such reads; TakePureImageCacheEviction hands it on
 	idList<int>				restartChecksums;		// used during a restart to set things in right order
 	idList<int>				addonChecksums;			// list of checksums that should go to the search list directly ( for restarts )
 	int						restartGamePakChecksum;
 	int						gameDLLChecksum;		// the checksum of the last loaded game DLL
 	int						gamePakChecksum;		// the checksum of the pak holding the loaded game DLL
+	gameModuleOrigin_t		gameModuleOrigin;		// trusted root and active-mod provenance
 	bool					isFileLoadingAllowed;
 	idStr					currentAssetLog;
 	idStr					currentAssetLogUnfiltered;
 	idStrList				assetLog;
+	idLevelLoadCacheManager *levelLoadCache;
+
+	// Level-load memo of loose search directories, keyed by lower-case OS path
+	// with '/' separators. See LooseDirectoryMissing.
+	std::mutex				looseDirectoryLock;
+	std::unordered_map<std::string, bool> looseDirectoryExists;
+	std::atomic<bool>		looseDirectoryCacheActive;
+	int						looseDirectoryChecks;	// directory stats performed
+	int						looseDirectorySkips;	// loose opens avoided
 
 	int						gamePakForOS[ MAX_GAME_OS ];
 
@@ -1674,6 +1969,14 @@ private:
 	int						DirectFileLength( FILE *o );
 	void					CopyFile( idFile *src, const char *toOSPath );
 	void					AddAssetLogEntry( const char *relativePath );
+	void					BuildLevelLoadContentKey( idStr &key ) const;
+	bool					GeneratedCacheReadsRefused( void ) const;
+	void					RecordOpenedLevelLoadSource( const char *relativePath, idFile *file );
+	idFile *				UsePreloadedLevelLoadSource( const char *relativePath, idFile *file );
+	idFile *				OpenFileReadSearch( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir, packMemberProbe_t *probe );
+	void					SetLooseDirectoryCacheActive( bool active );
+	bool					LooseDirectoryMissing( const directory_t *dir, const char *relativePath );
+	bool					LooseDirectoryMissingLocked( const std::string &key, const std::string &osPath );
 	int						AddUnique( const char *name, idStrList &list, idHashIndex &hashIndex ) const;
 	void					GetExtensionList( const char *extension, idStrList &extensionList ) const;
 	int						GetFileList( const char *relativePath, const idStrList &extensions, idStrList &list, idHashIndex &hashIndex, bool fullRelativePath, const char* gamedir = NULL );
@@ -1685,12 +1988,17 @@ private:
 	bool					IsGameDirPack( const pack_t *pak, const char *gameDir ) const;
 	bool					IsBaseGamePack( const pack_t *pak ) const;
 	bool					IsOpenQ4PurePack( const pack_t *pak ) const;
+	bool					IsOpenQ4ClientOnlyPack( const pack_t *pak ) const;
+	const openQ4PackTableEntry_t *FindOpenQ4PackTableEntry( const pack_t *pak ) const;
 	pack_t *				FindGamePackByName( const char *name, const char *gameDir ) const;
 	pack_t *				FindBaseGamePackByName( const char *name ) const;
 	void					PrintContentSearchDiagnostics( void );
 	bool					FindMisplacedOfficialPaks( idStr &errors ) const;
-	bool					ValidateOpenQ4Paks( idStr &errors ) const;
+	bool					ValidateOpenQ4Paks( idStr &errors, bool &onlyClientPacks );
+	void					ReadVerifiedOpenQ4Paks( std::vector<verifiedOpenQ4Pak_t> &records );
+	bool					WriteVerifiedOpenQ4Paks( const std::vector<verifiedOpenQ4Pak_t> &records );
 	bool					ValidateRequiredOfficialPaks( idStr &errors ) const;
+	bool					UsesOpenQ4RuntimeUnderlay( void ) const;
 	void					Startup( void );
 	void					SetRestrictions( void );
 							// some files can be obtained from directories without compromising si_pure
@@ -1723,6 +2031,14 @@ idCVar	idFileSystemLocal::fs_copyfiles( "fs_copyfiles", "0", CVAR_SYSTEM | CVAR_
 idCVar	idFileSystemLocal::fs_basepath( "fs_basepath", "", CVAR_SYSTEM | CVAR_INIT, "" );
 idCVar	idFileSystemLocal::fs_homepath( "fs_homepath", "", CVAR_SYSTEM | CVAR_INIT, "" );
 idCVar	idFileSystemLocal::fs_savepath( "fs_savepath", "", CVAR_SYSTEM | CVAR_INIT, "" );
+// Regenerable data only: the generated/ tree (binary image and sound caches).
+// Empty means "write it to fs_savepath", which is where it went before this
+// existed, so leaving it unset changes nothing. Hosts that have a directory the
+// OS may reclaim -- Android's getCacheDir(), XDG_CACHE_HOME -- should point this
+// there, because a purged cache costs a slow reload and nothing else, while a
+// purged savepath costs the player their config and saves.
+idCVar	idFileSystemLocal::fs_cachepath( "fs_cachepath", "", CVAR_SYSTEM | CVAR_INIT, "regenerable cache directory for the generated/ tree; empty uses fs_savepath" );
+idCVar idFileSystemLocal::fs_awakeningpath( "fs_awakeningpath", "", CVAR_SYSTEM | CVAR_ARCHIVE, "optional Awakening content root (containing q4xbase), mounted only for its single-player campaign" );
 idCVar	idFileSystemLocal::fs_cdpath( "fs_cdpath", "", CVAR_SYSTEM | CVAR_INIT, "" );
 idCVar	idFileSystemLocal::fs_devpath( "fs_devpath", "", CVAR_SYSTEM | CVAR_INIT, "optional highest-priority loose development-content root" );
 idCVar	idFileSystemLocal::fs_game( "fs_game", OPENQ4_GAMEDIR, CVAR_SYSTEM | CVAR_INIT | CVAR_SERVERINFO, "mod path" );
@@ -1734,6 +2050,8 @@ idCVar	idFileSystemLocal::fs_caseSensitiveOS( "fs_caseSensitiveOS", "1", CVAR_SY
 #endif
 idCVar	idFileSystemLocal::fs_searchAddons( "fs_searchAddons", "0", CVAR_SYSTEM | CVAR_BOOL, "search all addon pk4s ( disables addon functionality )" );
 idCVar	idFileSystemLocal::fs_validateOfficialPaks( "fs_validateOfficialPaks", "1", CVAR_SYSTEM | CVAR_INIT | CVAR_BOOL, "verify required official Prey media pk4 files on startup" );
+idCVar	idFileSystemLocal::fs_cacheVerifiedPaks( "fs_cacheVerifiedPaks", "1", CVAR_SYSTEM | CVAR_INIT | CVAR_BOOL, "skip re-hashing an openPREY runtime pack whose size, times, file id and zip directory are unchanged since it passed its checksum check; 0 hashes every pack at every startup" );
+idCVar	idFileSystemLocal::fs_cacheLooseDirectories( "fs_cacheLooseDirectories", "1", CVAR_SYSTEM | CVAR_BOOL, "during a level load, remember which loose search-path directories do not exist, so a lookup skips them instead of failing an open in each (case-insensitive filesystems only)" );
 
 idFileSystemLocal	fileSystemLocal;
 idFileSystem *		fileSystem = &fileSystemLocal;
@@ -1745,22 +2063,384 @@ idFileSystemLocal::idFileSystemLocal
 */
 idFileSystemLocal::idFileSystemLocal( void ) {
 	searchPaths = NULL;
+	fileSystemMainThread = std::this_thread::get_id();
 	readCount = 0;
+	readCountPacifierBytes = 0;
 	loadCount = 0;
 	loadStack = 0;
 	dir_cache_index = 0;
 	dir_cache_count = 0;
 	d3xp = 0;
 	loadedFileFromDir = false;
+	loadedImageCacheFromDir = false;
+	pureImageCacheEvictionPending = false;
 	restartGamePakChecksum = 0;
+	gameDLLChecksum = 0;
+	gamePakChecksum = 0;
+	gameModuleOrigin = GAME_MODULE_ORIGIN_NONE;
+	memset( gamePakForOS, 0, sizeof( gamePakForOS ) );
 	isFileLoadingAllowed = false;
 	currentAssetLog.Clear();
 	currentAssetLogUnfiltered.Clear();
 	assetLog.Clear();
+	levelLoadCache = NULL;
+	looseDirectoryCacheActive = false;
+	looseDirectoryChecks = 0;
+	looseDirectorySkips = 0;
 	backgroundDownloads = NULL;
-	memset( &defaultBackgroundDownload, 0, sizeof( defaultBackgroundDownload ) );
+	defaultBackgroundDownload.next = NULL;
+	defaultBackgroundDownload.opcode = DLTYPE_FILE;
+	defaultBackgroundDownload.f = NULL;
+	defaultBackgroundDownload.file.position = 0;
+	defaultBackgroundDownload.file.length = 0;
+	defaultBackgroundDownload.file.buffer = NULL;
+	defaultBackgroundDownload.url.url.Clear();
+	defaultBackgroundDownload.url.dlerror[ 0 ] = '\0';
+	defaultBackgroundDownload.url.expectedSize = 0;
+	defaultBackgroundDownload.url.dltotal = 0;
+	defaultBackgroundDownload.url.dlnow = 0;
+	defaultBackgroundDownload.url.dlstatus = 0;
+	defaultBackgroundDownload.url.status = DL_WAIT;
+	defaultBackgroundDownload.completed = true;
 	memset( &backgroundThread, 0, sizeof( backgroundThread ) );
 	addonPaks = NULL;
+}
+
+/*
+================
+idFileSystemLocal::BuildLevelLoadContentKey
+
+Produces an installation-root-independent fingerprint input for the exact
+ordered active PK4/search set.  Per-file loose-source timestamps are still
+validated separately by each manifest/cache source identity.
+================
+*/
+void idFileSystemLocal::BuildLevelLoadContentKey( idStr &key ) const {
+	key = va( "game=%s|base=%s|", fs_game.GetString(), fs_game_base.GetString() );
+	int order = 0;
+	for ( const searchpath_t *search = searchPaths; search != NULL; search = search->next, order++ ) {
+		if ( search->pack != NULL ) {
+			idStr fileName;
+			search->pack->pakFilename.ExtractFileName( fileName );
+			fileName.ToLower();
+			key += va( "p%d=%s:%08x:%d:%d:%d|", order, fileName.c_str(),
+				static_cast<unsigned int>( search->pack->checksum ),
+				search->pack->length, search->pack->numfiles,
+				search->pack->addon_search ? 1 : 0 );
+		} else if ( search->dir != NULL ) {
+			idStr gameDir = search->dir->gamedir;
+			gameDir.ToLower();
+			key += va( "d%d=%s|", order, gameDir.c_str() );
+		}
+	}
+	key += "pure=";
+	for ( int i = 0; i < serverPaks.Num(); i++ ) {
+		key += va( "%08x,", static_cast<unsigned int>( serverPaks[ i ]->checksum ) );
+	}
+}
+
+void idFileSystemLocal::RecordOpenedLevelLoadSource( const char *relativePath, idFile *file ) {
+	if ( levelLoadCache != NULL ) {
+		levelLoadCache->RecordOpenedSource( relativePath, file );
+	}
+}
+
+idFile *idFileSystemLocal::UsePreloadedLevelLoadSource( const char *relativePath, idFile *file ) {
+	if ( levelLoadCache == NULL || file == NULL ) {
+		return file;
+	}
+	idFile *preloaded = levelLoadCache->OpenPreloadedSource( relativePath, file );
+	if ( preloaded == NULL ) {
+		return file;
+	}
+	CloseFile( file );
+	return preloaded;
+}
+
+void idFileSystemLocal::BeginLevelLoadCache( const char *mapKey, const char *gameMode,
+		const char *entityFilter, const char *settingsKey ) {
+	SetLooseDirectoryCacheActive( true );
+	if ( levelLoadCache == NULL ) {
+		return;
+	}
+	idStr contentKey;
+	BuildLevelLoadContentKey( contentKey );
+	levelLoadCache->Begin( mapKey, gameMode, entityFilter, contentKey.c_str(), settingsKey );
+}
+
+void idFileSystemLocal::FinishLevelLoadCache( const bool successful ) {
+	if ( levelLoadCache != NULL ) {
+		levelLoadCache->Finish( successful );
+	}
+}
+
+void idFileSystemLocal::ReleaseLevelLoadCache( void ) {
+	if ( levelLoadCache != NULL ) {
+		levelLoadCache->Release();
+	}
+	if ( looseDirectoryCacheActive && cvarSystem->GetCVarBool( "com_showLevelLoadTimes" ) ) {
+		common->Printf( "Loose search directories: %d opens skipped, %d directory checks\n",
+			looseDirectorySkips, looseDirectoryChecks );
+	}
+	SetLooseDirectoryCacheActive( false );
+}
+
+// Engine-only lifecycle hook. Keeping this outside the public filesystem ABI
+// lets Session retain replay bytes through all EndLevelLoad consumers without
+// exposing coordinator internals to renderer or game modules.
+void FS_ReleaseLevelLoadCache( void ) {
+	fileSystemLocal.ReleaseLevelLoadCache();
+}
+
+void idFileSystemLocal::CancelLevelLoadCache( void ) {
+	if ( levelLoadCache != NULL ) {
+		levelLoadCache->Cancel();
+	}
+	SetLooseDirectoryCacheActive( false );
+}
+
+/*
+===========
+Loose search-directory memo
+
+Every lookup of a packed asset first tries an fopen in each loose directory
+search path ahead of its pak (fs_savepath, fs_cdpath and fs_basepath for each
+game directory). On Windows each failed open costs ~25-35 usec, and a level
+load performs thousands of lookups, mostly for paths whose directories do not
+exist at all outside the paks (textures/, models/, sound/...).
+
+Between BeginLevelLoadCache and ReleaseLevelLoadCache the existence of each
+directory on the way to a loose file is checked once, top-down from the
+search root, and remembered. A lookup under a directory known to be missing
+skips the open. Every directory the engine creates goes through CreateOSPath,
+which forgets all negative answers, so files written during the load are
+always found; only a directory created by another process mid-load is not
+seen until the next level load. A case-sensitive filesystem resolves case
+through directory listings, so the memo stays off there.
+===========
+*/
+static bool FS_IsOSDirectory( const char *osPath ) {
+#ifdef _WIN32
+	struct _stat64 info;
+	return _stat64( osPath, &info ) == 0 && ( info.st_mode & _S_IFMT ) == _S_IFDIR;
+#else
+	struct stat info;
+	return stat( osPath, &info ) == 0 && S_ISDIR( info.st_mode );
+#endif
+}
+
+static void FS_AppendLooseDirectoryKey( std::string &key, const char *text, size_t length ) {
+	for ( size_t i = 0; i < length; ++i ) {
+		const char c = text[ i ];
+		if ( c == '\\' || c == '/' ) {
+			key += '/';
+		} else if ( c >= 'A' && c <= 'Z' ) {
+			key += static_cast<char>( c - 'A' + 'a' );
+		} else {
+			key += c;
+		}
+	}
+}
+
+void idFileSystemLocal::SetLooseDirectoryCacheActive( bool active ) {
+	std::lock_guard<std::mutex> lock( looseDirectoryLock );
+	looseDirectoryExists.clear();
+	looseDirectoryChecks = 0;
+	looseDirectorySkips = 0;
+	looseDirectoryCacheActive = active && fs_cacheLooseDirectories.GetBool() && !fs_caseSensitiveOS.GetBool();
+}
+
+bool idFileSystemLocal::LooseDirectoryMissingLocked( const std::string &key, const std::string &osPath ) {
+	const auto found = looseDirectoryExists.find( key );
+	if ( found != looseDirectoryExists.end() ) {
+		return !found->second;
+	}
+	const bool exists = FS_IsOSDirectory( osPath.c_str() );
+	looseDirectoryChecks++;
+	looseDirectoryExists.emplace( key, exists );
+	return !exists;
+}
+
+bool idFileSystemLocal::LooseDirectoryMissing( const directory_t *dir, const char *relativePath ) {
+	if ( !looseDirectoryCacheActive ) {
+		return false;
+	}
+	// the search root, then each directory segment of the relative path
+	std::string osPath( dir->path.c_str() );
+	while ( !osPath.empty() && ( osPath.back() == '/' || osPath.back() == '\\' ) ) {
+		osPath.pop_back();
+	}
+	if ( dir->gamedir.Length() > 0 ) {
+		osPath += PATHSEPERATOR_CHAR;
+		osPath += dir->gamedir.c_str();
+	}
+	std::string key;
+	key.reserve( osPath.size() + 64 );
+	FS_AppendLooseDirectoryKey( key, osPath.c_str(), osPath.size() );
+
+	std::lock_guard<std::mutex> lock( looseDirectoryLock );
+	if ( !looseDirectoryCacheActive ) {
+		return false;
+	}
+	bool missing = LooseDirectoryMissingLocked( key, osPath );
+	const char *segment = relativePath;
+	while ( !missing ) {
+		const char *end = segment;
+		while ( *end != '\0' && *end != '/' && *end != '\\' ) {
+			end++;
+		}
+		if ( *end == '\0' ) {
+			break;	// the file name itself; its directory exists
+		}
+		const size_t length = static_cast<size_t>( end - segment );
+		if ( length > 0 ) {
+			osPath += PATHSEPERATOR_CHAR;
+			osPath.append( segment, length );
+			key += '/';
+			FS_AppendLooseDirectoryKey( key, segment, length );
+			missing = LooseDirectoryMissingLocked( key, osPath );
+		}
+		segment = end + 1;
+	}
+	if ( missing ) {
+		looseDirectorySkips++;
+	}
+	return missing;
+}
+
+void idFileSystemLocal::RecordLevelLoadResource( const levelLoadResourceType_t type,
+		const char *name, const char *options, const unsigned int flags,
+		const unsigned int priority ) {
+	if ( levelLoadCache != NULL ) {
+		levelLoadCache->RecordSemantic( type, name, options, flags, priority );
+	}
+}
+
+idFile *idFileSystemLocal::OpenGeneratedCacheRead( const generatedCacheKind_t kind,
+		const char *sourcePath, const unsigned int parserVersion, const char *settingsKey ) {
+	// the content key walks every search path; skip it when nothing can hit
+	if ( !GeneratedCacheReadsEnabled( kind ) ) {
+		return NULL;
+	}
+	idStr contentKey;
+	BuildLevelLoadContentKey( contentKey );
+	return levelLoadCache->OpenGeneratedCacheRead( kind, sourcePath, parserVersion,
+		settingsKey, contentKey.c_str() );
+}
+
+bool idFileSystemLocal::WriteGeneratedCache( const generatedCacheKind_t kind,
+		const char *sourcePath, const unsigned int parserVersion, const char *settingsKey,
+		const void *payload, const unsigned int payloadBytes ) {
+	if ( !GeneratedCacheWritesEnabled( kind ) ) {
+		return false;
+	}
+	idStr contentKey;
+	BuildLevelLoadContentKey( contentKey );
+	return levelLoadCache->WriteGeneratedCache( kind, sourcePath, parserVersion,
+		settingsKey, payload, payloadBytes, contentKey.c_str() );
+}
+
+void idFileSystemLocal::DiscardGeneratedCache( const generatedCacheKind_t kind,
+		const char *sourcePath, const unsigned int parserVersion, const char *settingsKey ) {
+	if ( levelLoadCache == NULL ) {
+		return;
+	}
+	idStr contentKey;
+	BuildLevelLoadContentKey( contentKey );
+	levelLoadCache->DiscardGeneratedCache( kind, sourcePath, parserVersion,
+		settingsKey, contentKey.c_str() );
+}
+
+/*
+================
+idFileSystemLocal::GeneratedCacheReadsRefused
+
+The level-load caches (render models, worlds, collision, and the game's
+animation cache) are openQ4's own derived data. Their owners read them from
+fs_savepath with OpenExplicitFileRead, outside the search paths, so the pure
+directory gate in OpenFileReadSearch never sees them. Like a generated image
+cache entry, an entry names its source by public pak metadata and binds its
+payload to nothing, so a forged entry would pass every check. None is read
+while a pure lock or fs_restrict holds. A resident decoded from one before
+the lock is re-derived from its source at the next level load, once its owner
+sees reads refused: idRenderModelManagerLocal::BeginLevelLoad,
+idRenderWorldLocal::InitFromMap, idCollisionModelManagerLocal::LoadMap and the
+game's idGameLocal::LoadMap. The lock is only taken when every pak the session
+has read from is in the server's list, so each source can be read again.
+
+The learned manifests stay readable: they only schedule reads, and each entry
+is opened again through the pure search paths and must match its recorded
+identity before a byte of it is used.
+================
+*/
+bool idFileSystemLocal::GeneratedCacheReadsRefused( void ) const {
+	return fs_restrict.GetBool() || serverPaks.Num() > 0;
+}
+
+bool idFileSystemLocal::GeneratedCacheReadsEnabled( const generatedCacheKind_t kind ) const {
+	if ( GeneratedCacheReadsRefused() ) {
+		return false;
+	}
+	return levelLoadCache != NULL && levelLoadCache->GeneratedCacheReadsEnabled( kind );
+}
+
+bool idFileSystemLocal::GeneratedCacheWritesEnabled( const generatedCacheKind_t kind ) const {
+	// An entry written under a pure lock carries the lock in its content key
+	// (BuildLevelLoadContentKey), and nothing is read while a lock holds, so
+	// no session could ever read it back: skip the serialization.
+	if ( serverPaks.Num() > 0 ) {
+		return false;
+	}
+	return levelLoadCache != NULL && levelLoadCache->GeneratedCacheWritesEnabled( kind );
+}
+
+/*
+================
+idFileSystemLocal::ResetReadCount
+
+Level-load workers may inflate independently opened PK4 streams. Protect the
+shared progress counter, but keep presentation calls on the main thread.
+================
+*/
+void idFileSystemLocal::ResetReadCount( void ) {
+	std::lock_guard<std::mutex> lock( readCountMutex );
+	readCount = 0;
+	readCountPacifierBytes = 0;
+}
+
+int idFileSystemLocal::GetReadCount( void ) {
+	std::lock_guard<std::mutex> lock( readCountMutex );
+	return readCount;
+}
+
+void idFileSystemLocal::AddToReadCount( const int count ) {
+	if ( count <= 0 ) {
+		return;
+	}
+
+	bool offerPacifier = false;
+	{
+		std::lock_guard<std::mutex> lock( readCountMutex );
+		const int maxCount = ( std::numeric_limits<int>::max )();
+		readCount = count > maxCount - readCount ? maxCount : readCount + count;
+		readCountPacifierBytes = count > maxCount - readCountPacifierBytes
+			? maxCount
+			: readCountPacifierBytes + count;
+		if ( readCountPacifierBytes >= READCOUNT_PACIFIER_INTERVAL_BYTES ) {
+			readCountPacifierBytes = 0;
+			offerPacifier = true;
+		}
+	}
+
+	if ( std::this_thread::get_id() == fileSystemMainThread ) {
+		if ( offerPacifier && session != NULL ) {
+			session->PacifierUpdate();
+		} else {
+			// Startup reads are mostly small script/decl/GUI files. The animated
+			// initialization screen paces itself by time, so offer it every read.
+			openQ4_UpdateInitialization();
+		}
+	}
 }
 
 /*
@@ -1947,8 +2627,7 @@ void idFileSystemLocal::CreateOSPath( const char *OSPath ) {
 	char	*ofs;
 	
 	// make absolutely sure that it can't back up the path
-	// FIXME: what about c: ?
-	if ( strstr( OSPath, ".." ) || strstr( OSPath, "::" ) ) {
+	if ( FS_HasParentOSPathSegment( OSPath ) || strstr( OSPath, "::" ) ) {
 #ifdef _DEBUG		
 		common->DPrintf( "refusing to create relative path \"%s\"\n", OSPath );
 #endif
@@ -1964,6 +2643,15 @@ void idFileSystemLocal::CreateOSPath( const char *OSPath ) {
 			*ofs = PATHSEPERATOR_CHAR;
 		}
 	}
+
+	// a directory remembered as missing may exist now
+	if ( looseDirectoryCacheActive ) {
+		std::lock_guard<std::mutex> lock( looseDirectoryLock );
+		for ( auto entry = looseDirectoryExists.begin(); entry != looseDirectoryExists.end(); ) {
+			entry = entry->second ? std::next( entry ) : looseDirectoryExists.erase( entry );
+		}
+	}
+
 }
 
 /*
@@ -2314,14 +3002,16 @@ const char *idFileSystemLocal::OSPathToRelativePath( const char *OSPath ) {
 	}
 #endif
 	// fs_game and fs_game_base support - look for first complete name with a mod path
-	// ( fs_game searched before fs_game_base )
+	// ( fs_game searched before fs_game_base, then the openQ4 runtime under a mod )
 	const char *fsgame = NULL;
 	int igame = 0;
-	for ( igame = 0; igame < 2; igame++ ) {
+	for ( igame = 0; igame < 3; igame++ ) {
 		if ( igame == 0 ) {
 			fsgame = fs_game.GetString();
 		} else if ( igame == 1 ) {
 			fsgame = fs_game_base.GetString();
+		} else {
+			fsgame = UsesOpenQ4RuntimeUnderlay() ? OPENQ4_GAMEDIR : NULL;
 		}
 		if ( base == NULL && fsgame && strlen( fsgame ) ) {
 			base = (char *)strstr( OSPath, fsgame );
@@ -2382,11 +3072,68 @@ const char *idFileSystemLocal::RelativePathToOSPath( const char *relativePath, c
 
 /*
 =================
+idFileSystemLocal::RemoveFileChecked
+
+Removes a validated qpath from exactly one writable root.  An already-absent
+file is a successful cleanup; every other host error is reported to the caller.
+=================
+*/
+bool idFileSystemLocal::RemoveFileChecked( const char *relativePath,
+		const char *basePath ) {
+	if ( !searchPaths ) {
+		common->Warning( "idFileSystemLocal::RemoveFileChecked: filesystem is not initialized" );
+		return false;
+	}
+	const char *invalidReason = NULL;
+	if ( !FS_ValidateRelativeWritePath( relativePath, &invalidReason ) ) {
+		common->Warning( "idFileSystemLocal::RemoveFileChecked: refusing unsafe relative path (%s)",
+			invalidReason != NULL ? invalidReason : "invalid path" );
+		return false;
+	}
+	if ( basePath == NULL || basePath[ 0 ] == '\0' ) {
+		common->Warning( "idFileSystemLocal::RemoveFileChecked: writable root is empty" );
+		return false;
+	}
+
+	const char *root = cvarSystem->GetCVarString( basePath );
+	if ( root == NULL || root[ 0 ] == '\0' ) {
+		if ( idStr::Icmp( basePath, "fs_savepath" ) != 0 ) {
+			common->Warning( "idFileSystemLocal::RemoveFileChecked: writable root '%s' is unset",
+				basePath );
+			return false;
+		}
+		root = fs_savepath.GetString();
+	}
+	if ( root == NULL || root[ 0 ] == '\0' ) {
+		common->Warning( "idFileSystemLocal::RemoveFileChecked: fs_savepath is unset" );
+		return false;
+	}
+
+	const idStr OSPath = BuildOSPath( root, gameFolder, relativePath );
+	errno = 0;
+	const int removalResult = remove( OSPath.c_str() );
+	const int removalError = errno;
+	if ( removalResult == 0 || removalError == ENOENT ) {
+		ClearDirCache();
+		return true;
+	}
+	common->Warning( "Could not remove '%s' from '%s' (error %d)",
+		relativePath, basePath, removalError );
+	return false;
+}
+
+/*
+=================
 idFileSystemLocal::RemoveFile
 =================
 */
 void idFileSystemLocal::RemoveFile( const char *relativePath, const char *basePath ) {
 	idStr OSPath;
+	const char *invalidReason;
+	if ( !FS_ValidateRelativeWritePath( relativePath, &invalidReason ) ) {
+		common->Warning( "idFileSystemLocal::RemoveFile: refusing unsafe relative path (%s)", invalidReason );
+		return;
+	}
 
 	if ( idStr::Icmp( basePath, "fs_savepath" ) != 0 ) {
 		const char *path = cvarSystem->GetCVarString( basePath );
@@ -2496,6 +3243,28 @@ timestamp can be NULL if not required
 ============
 */
 int idFileSystemLocal::ReadFile( const char *relativePath, void **buffer, ID_TIME_T *timestamp ) {
+	return ReadFileStamped( relativePath, buffer, timestamp, false );
+}
+
+/*
+============
+idFileSystemLocal::ReadFileContentStamp
+
+ReadFile for generated-cache identities: a pk4 member reports
+FS_PakMemberContentStamp rather than its timestamp of 0, from the probe and
+from the full read alike.
+============
+*/
+int idFileSystemLocal::ReadFileContentStamp( const char *relativePath, void **buffer, ID_TIME_T *contentStamp ) {
+	return ReadFileStamped( relativePath, buffer, contentStamp, true );
+}
+
+/*
+============
+idFileSystemLocal::ReadFileStamped
+============
+*/
+int idFileSystemLocal::ReadFileStamped( const char *relativePath, void **buffer, ID_TIME_T *timestamp, bool contentStamp ) {
 	idFile *	f;
 	byte *		buf;
 	int			len;
@@ -2558,7 +3327,24 @@ int idFileSystemLocal::ReadFile( const char *relativePath, void **buffer, ID_TIM
 	}
 
 	// look for it in the filesystem or pack files
-	f = OpenFileRead( relativePath, ( buffer != NULL ) );
+	if ( !buffer ) {
+		// A null buffer asks only for the length and timestamp. Opening a pk4
+		// member for that reopens the pak, seeks its local header and sets up
+		// an inflate stream, all to learn a length and CRC the central
+		// directory already holds and a timestamp that is always 0
+		// (idFile_InZip). Image staleness checks make ~1,700 of these per
+		// level load.
+		packMemberProbe_t probe;
+		f = OpenFileReadSearch( relativePath, FSFLAG_SEARCH_DIRS | FSFLAG_SEARCH_PAKS, NULL, false, NULL, &probe );
+		if ( probe.found ) {
+			if ( timestamp ) {
+				*timestamp = contentStamp ? FS_PakMemberContentStamp( probe.crc, probe.length ) : 0;
+			}
+			return probe.length;
+		}
+	} else {
+		f = OpenFileRead( relativePath, true );
+	}
 	if ( f == NULL ) {
 		if ( buffer ) {
 			*buffer = NULL;
@@ -2568,7 +3354,7 @@ int idFileSystemLocal::ReadFile( const char *relativePath, void **buffer, ID_TIM
 	len = f->Length();
 
 	if ( timestamp ) {
-		*timestamp = f->Timestamp();
+		*timestamp = contentStamp ? f->ContentStamp() : f->Timestamp();
 	}
 	
 	if ( !buffer ) {
@@ -2633,6 +3419,11 @@ int idFileSystemLocal::WriteFile( const char *relativePath, const void *buffer, 
 	if ( !relativePath || !buffer ) {
 		common->FatalError( "idFileSystemLocal::WriteFile: NULL parameter" );
 	}
+	const char *invalidReason;
+	if ( !FS_ValidateRelativeWritePath( relativePath, &invalidReason ) ) {
+		common->Warning( "idFileSystemLocal::WriteFile: refusing unsafe relative path (%s)", invalidReason );
+		return -1;
+	}
 
 	f = idFileSystemLocal::OpenFileWrite( relativePath, basePath );
 	if ( !f ) {
@@ -2645,6 +3436,70 @@ int idFileSystemLocal::WriteFile( const char *relativePath, const void *buffer, 
 	CloseFile( f );
 
 	return size;
+}
+
+/*
+============
+idFileSystemLocal::PromoteFile
+
+Promotes a staged qpath with the host's atomic replace primitive.  Copying is
+deliberately not a fallback: an interrupted copy could destroy the prior final
+artifact and would violate the caller's transaction guarantee.
+============
+*/
+bool idFileSystemLocal::PromoteFile( const char *stagedRelativePath,
+		const char *finalRelativePath, const char *basePath ) {
+	if ( !searchPaths ) {
+		common->FatalError( "Filesystem call made without initialization\n" );
+	}
+
+	const char *stagedReason = NULL;
+	const char *finalReason = NULL;
+	if ( !FS_ValidateRelativeWritePath( stagedRelativePath, &stagedReason ) ||
+		 !FS_ValidateRelativeWritePath( finalRelativePath, &finalReason ) ) {
+		common->Warning( "idFileSystemLocal::PromoteFile: refusing unsafe qpath (%s)",
+			stagedReason != NULL ? stagedReason : ( finalReason != NULL ? finalReason : "invalid path" ) );
+		return false;
+	}
+	if ( idStr::Icmp( stagedRelativePath, finalRelativePath ) == 0 ) {
+		common->Warning( "idFileSystemLocal::PromoteFile: staged and final qpaths are identical" );
+		return false;
+	}
+
+	const char *root = cvarSystem->GetCVarString( basePath );
+	if ( root == NULL || root[ 0 ] == '\0' ) {
+		root = fs_savepath.GetString();
+	}
+	idStr stagedOS = BuildOSPath( root, gameFolder, stagedRelativePath );
+	idStr finalOS = BuildOSPath( root, gameFolder, finalRelativePath );
+	CreateOSPath( finalOS );
+
+	bool promoted = false;
+#if defined( USE_SDL3 )
+	promoted = SDL_RenamePath( stagedOS.c_str(), finalOS.c_str() );
+	if ( !promoted ) {
+		common->Warning( "Could not atomically promote '%s' to '%s': %s",
+			stagedRelativePath, finalRelativePath, SDL_GetError() );
+	}
+#elif defined( WIN32 )
+	promoted = MoveFileExA( stagedOS.c_str(), finalOS.c_str(),
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH ) != FALSE;
+	if ( !promoted ) {
+		common->Warning( "Could not atomically promote '%s' to '%s' (error %lu)",
+			stagedRelativePath, finalRelativePath, static_cast<unsigned long>( GetLastError() ) );
+	}
+#else
+	promoted = rename( stagedOS.c_str(), finalOS.c_str() ) == 0;
+	if ( !promoted ) {
+		common->Warning( "Could not atomically promote '%s' to '%s' (error %d)",
+			stagedRelativePath, finalRelativePath, errno );
+	}
+#endif
+
+	if ( promoted ) {
+		ClearDirCache();
+	}
+	return promoted;
 }
 
 /*
@@ -2973,6 +3828,9 @@ pack_t *idFileSystemLocal::LoadZipFile( const char *zipfile ) {
 			break;
 		}
 		buildBuffer[i].pos = static_cast<uint32_t>( fileInfoPosition );
+		// bounded above by INT_MAX, so it also fits the legacy int length
+		buildBuffer[i].size = static_cast<uint32_t>( file_info.uncompressed_size );
+		buildBuffer[i].crc = static_cast<uint32_t>( file_info.crc );
 		// add the file to the hash
 		buildBuffer[i].next = pack->hashTable[hash];
 		pack->hashTable[hash] = &buildBuffer[i];
@@ -3125,10 +3983,9 @@ int idFileSystemLocal::GetFileList( const char *relativePath, const idStrList &e
 	if ( !relativePath ) {
 		return 0;
 	}
-	pathLength = strlen( relativePath );
-	if ( pathLength ) {
-		pathLength++;	// for the trailing '/'
-	}
+	const size_t relativePathLength = strlen( relativePath );
+	pathLength = relativePathLength == 0 ? 0 :
+		idLib::SizeToInt( relativePathLength + 1, "idFileSystemLocal::GetFileList" ); // include the trailing '/'
 
 	// search through the path, one element at a time, adding to list
 	for( search = searchPaths; search != NULL; search = search->next ) {
@@ -3199,7 +4056,10 @@ int idFileSystemLocal::GetFileList( const char *relativePath, const idStrList &e
 				}
  
 				// ensure we have a path, and not just a filename containing the path
-				if ( name[ pathLength ] == '\0' || name[pathLength - 1] != '/' ) {
+				// openQ4: only when there is a path. For the root, name[-1] was
+				// read from before the string and every file in a pak was
+				// skipped, so completing "exec" never offered a pak's configs.
+				if ( pathLength && ( name[ pathLength ] == '\0' || name[pathLength - 1] != '/' ) ) {
 					continue;
 				}
  
@@ -3350,6 +4210,33 @@ void idFileSystemLocal::ListAvailableLanguagePacks( idStrList &languages ) {
 	}
 
 	FS_OrderLanguagePackList( languages );
+}
+
+/*
+===============
+idFileSystemLocal::HasBaseLanguageMediaPack
+
+The numbered zpak_<language>_NN.pk4 archives are patches. They can identify a
+language for dictionary selection, but they do not replace the unsuffixed base
+archive that carries the retail campaign dialogue.
+===============
+*/
+bool idFileSystemLocal::HasBaseLanguageMediaPack( void ) {
+	idStr language;
+
+	for ( searchpath_t *search = searchPaths; search != NULL; search = search->next ) {
+		if ( search->pack == NULL ) {
+			continue;
+		}
+		if ( !FS_PakPathIsInGameDir( search->pack->pakFilename.c_str(), BASE_GAMEDIR ) ) {
+			continue;
+		}
+		if ( FS_ParseLanguagePackName( search->pack->pakFilename.c_str(), language, false ) ) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 static const char *OPENQ4_MOD_MANIFEST_FILENAME = "mod.json";
@@ -3869,7 +4756,11 @@ static bool FS_ParseopenQ4BaseVersion( const char *version, openQ4BaseVersion_t 
 		return false;
 	}
 
+	// hand-edited manifests often carry a stray space inside the quotes
 	const char *cursor = version;
+	while ( *cursor == ' ' || *cursor == '\t' ) {
+		++cursor;
+	}
 	for ( int part = 0; part < 3; ++part ) {
 		if ( *cursor < '0' || *cursor > '9' ) {
 			return false;
@@ -3891,6 +4782,9 @@ static bool FS_ParseopenQ4BaseVersion( const char *version, openQ4BaseVersion_t 
 		}
 	}
 
+	while ( *cursor == ' ' || *cursor == '\t' ) {
+		++cursor;
+	}
 	if ( *cursor != '\0' ) {
 		return false;
 	}
@@ -4106,7 +5000,7 @@ idModList *idFileSystemLocal::ListMods( void ) {
 		dirs.Remove( "pb" );
 
 		for ( int i = dirs.Num() - 1; i >= 0; --i ) {
-			if ( dirs[ i ].HasUpper() ) {
+			if ( dirs[ i ].HasUpper() || !dirs[i].Icmp( "q4xbase" ) ) {
 				dirs.RemoveIndex( i );
 			}
 		}
@@ -4130,7 +5024,14 @@ idModList *idFileSystemLocal::ListMods( void ) {
 		}
 	}
 
-	list->mods.Sort( idModInfoCompare );
+	// idList::Sort is a byte-for-byte qsort and idModInfo holds idStr members,
+	// which point their data at their own inline buffer while the string is
+	// short.  Swapping two entries byte-wise leaves each string addressing the
+	// other entry's buffer, so destroying the list hands the allocator a pointer
+	// it never returned and the process aborts.  std::sort moves entries through
+	// idStr's assignment operator, which repoints the buffers.
+	std::sort( list->mods.Ptr(), list->mods.Ptr() + list->mods.Num(),
+		[]( const idModInfo &a, const idModInfo &b ) { return idModInfoCompare( &a, &b ) < 0; } );
 
 	return list;
 }
@@ -4252,6 +5153,12 @@ bool idFileSystemLocal::GetModInfo( const char *modDir, idModInfo &modInfo, idSt
 		}
 		return false;
 	}
+	if ( !idGameDirPolicy::IsPortableSegment( modDir ) ) {
+		if ( reason != NULL ) {
+			*reason = "mod directory must be one portable directory segment";
+		}
+		return false;
+	}
 
 	const char *search[ 4 ];
 	search[ 0 ] = fs_devpath.GetString();
@@ -4287,6 +5194,95 @@ bool idFileSystemLocal::GetModInfo( const char *modDir, idModInfo &modInfo, idSt
 idFileSystemLocal::ValidateConfiguredGameDir
 ===============
 */
+
+static idStr FS_AwakeningRoot() {
+    idStr root = cvarSystem->GetCVarString( "fs_awakeningpath" );
+    root.BackSlashesToSlashes();
+    root.StripTrailing( '/' );
+    idStr leaf;
+    root.ExtractFileName( leaf );
+    if ( !leaf.Icmp( "q4xbase" ) ) {
+        root.StripFilename();
+        root.StripTrailing( '/' );
+    }
+    return root;
+}
+
+idCampaignContentInfo idFileSystemLocal::GetAwakeningContentInfo() {
+    static const char *const required[] = {
+        "def/q4xdamage.def", "def/weapons/spikegun.def",
+        "scripts/main.script", "scripts/events.script",
+        "maps/game/m01_stranarus_trench1.map", "maps/game/m01_stranarus_trench1.proc", "maps/game/m01_stranarus_trench1.cm",
+        "maps/game/m01_stranarus_trench2.map", "maps/game/m01_stranarus_trench2.proc", "maps/game/m01_stranarus_trench2.cm",
+        "maps/game/m02_trianfac.map", "maps/game/m02_trianfac.proc", "maps/game/m02_trianfac.cm",
+        "maps/game/m03_airassault.map", "maps/game/m03_airassault.proc", "maps/game/m03_airassault.cm",
+        "maps/game/m04_prison.map", "maps/game/m04_prison.proc", "maps/game/m04_prison.cm",
+        "maps/game/m05_bio.map", "maps/game/m05_bio.proc", "maps/game/m05_bio.cm",
+        "maps/game/m06_mcc.map", "maps/game/m06_mcc.proc", "maps/game/m06_mcc.cm",
+        "maps/game/m06_mcc_invasion.map", "maps/game/m06_mcc_invasion.proc", "maps/game/m06_mcc_invasion.cm",
+        "maps/game/m07_race.map", "maps/game/m07_race.proc", "maps/game/m07_race.cm",
+        "maps/game/m07_race1.map", "maps/game/m07_race1.proc", "maps/game/m07_race1.cm",
+        "maps/game/m07_race2.map", "maps/game/m07_race2.proc", "maps/game/m07_race2.cm",
+        "maps/game/m08_cryofac.map", "maps/game/m08_cryofac.proc", "maps/game/m08_cryofac.cm",
+        "maps/game/m09_valkaryne.map", "maps/game/m09_valkaryne.proc", "maps/game/m09_valkaryne.cm"
+    };
+    bool found[ sizeof( required ) / sizeof( required[0] ) ] = {};
+    bool seen[ sizeof( required ) / sizeof( required[0] ) ] = {};
+    idCampaignContentInfo info;
+    idStrList roots;
+    roots.AddUnique( fs_savepath.GetString() );
+    roots.AddUnique( fs_cachepath.GetString() );
+    roots.AddUnique( fs_basepath.GetString() );
+    roots.AddUnique( fs_cdpath.GetString() );
+    roots.AddUnique( FS_AwakeningRoot() );
+    // Match SetupGameDirectories/AddGameDirectory precedence without mounting.
+    // A higher-priority empty file must not be hidden by a complete lower copy.
+    for ( int r = roots.Num() - 1; r >= 0; --r ) {
+        if ( roots[r].IsEmpty() ) continue;
+        const idStr directory = BuildOSPath( roots[r], "q4xbase", "" );
+        for ( size_t i = 0; i < sizeof( required ) / sizeof( required[0] ); ++i ) {
+            if ( seen[i] ) continue;
+            idStr filename = BuildOSPath( roots[r], "q4xbase", required[i] );
+            FILE *file = OpenOSFileCorrectName( filename, "rb" );
+            if ( file != NULL ) {
+                found[i] = fgetc( file ) != EOF;
+                seen[i] = true;
+                fclose( file );
+            }
+        }
+        idStrList packs;
+        ListOSFiles( directory, ".pk4", packs );
+        FS_SortPk4FilesForLoadOrder( packs );
+        for ( int p = packs.Num() - 1; p >= 0; --p ) {
+            const idStr filename = BuildOSPath( roots[r], "q4xbase", packs[p] );
+            pack_t *pack = LoadZipFile( filename );
+            if ( pack == NULL ) continue;
+            for ( size_t i = 0; i < sizeof( required ) / sizeof( required[0] ); ++i ) {
+                if ( seen[i] ) continue;
+                for ( fileInPack_t *entry = pack->hashTable[ HashFileName( required[i] ) ]; entry; entry = entry->next ) {
+                    if ( entry->name.Icmp( required[i] ) != 0 ) continue;
+                    seen[i] = true;
+                    unz_file_info zipInfo = {};
+                    found[i] = unzSetCurrentFileInfoPosition( pack->handle, entry->pos ) == UNZ_OK &&
+                        unzGetCurrentFileInfo( pack->handle, &zipInfo, NULL, 0, NULL, 0, NULL, 0 ) == UNZ_OK && zipInfo.uncompressed_size > 0;
+                    break;
+                }
+            }
+            FreePack( pack );
+        }
+    }
+    info.ready = true;
+    for ( size_t i = 0; i < sizeof( required ) / sizeof( required[0] ); ++i ) {
+        info.present = info.present || seen[i];
+        if ( !found[i] ) {
+            info.ready = false;
+            if ( info.missing.Length() ) info.missing += ", ";
+            info.missing += required[i];
+        }
+    }
+    return info;
+}
+
 bool idFileSystemLocal::ValidateConfiguredGameDir( const char *gameDir, idStr *reason ) {
 	if ( reason != NULL ) {
 		reason->Clear();
@@ -4300,8 +5296,13 @@ bool idFileSystemLocal::ValidateConfiguredGameDir( const char *gameDir, idStr *r
 		return true;
 	}
 
-	idModInfo modInfo;
-	return GetModInfo( gameDir, modInfo, reason );
+	if ( !idStr::Icmp( gameDir, "q4xbase" ) ) {
+        const idCampaignContentInfo info = GetAwakeningContentInfo();
+        if ( reason && !info.ready ) *reason = "incomplete Awakening campaign: " + info.missing;
+        return info.ready;
+    }
+    idModInfo modInfo;
+    return GetModInfo( gameDir, modInfo, reason );
 }
 
 /*
@@ -4592,6 +5593,22 @@ void idFileSystemLocal::TouchFile_f( const idCmdArgs &args ) {
 
 /*
 ============
+idFileSystemLocal::MapLevelshot_f
+============
+*/
+void idFileSystemLocal::MapLevelshot_f( const idCmdArgs &args ) {
+	if ( args.Argc() != 2 ) {
+		common->Printf( "Usage: openq4_mapLevelshot <map>\n" );
+		return;
+	}
+
+	char levelshot[ MAX_STRING_CHARS ];
+	fileSystemLocal.FindMapScreenshot( args.Argv( 1 ), levelshot, sizeof( levelshot ) );
+	common->Printf( "MAP_LEVELSHOT %s %s\n", args.Argv( 1 ), levelshot );
+}
+
+/*
+============
 idFileSystemLocal::TouchFileList_f
 
 Takes a text file and touches every file in it, use one file per line.
@@ -4607,7 +5624,7 @@ void idFileSystemLocal::TouchFileList_f( const idCmdArgs &args ) {
 	const char *buffer = NULL;
 	idParser src( LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT );
 	if ( fileSystem->ReadFile( args.Argv( 1 ), ( void** )&buffer, NULL ) && buffer ) {
-		src.LoadMemory( buffer, strlen( buffer ), args.Argv( 1 ) );
+		src.LoadMemory( buffer, idLib::SizeToInt( strlen( buffer ), "idFileSystemLocal::TouchFileList_f" ), args.Argv( 1 ) );
 		if ( src.IsLoaded() ) {
 			idToken token;
 			while( src.ReadToken( &token ) ) {
@@ -4681,6 +5698,17 @@ void idFileSystemLocal::AddGameDirectory( const char *path, const char *dir ) {
 			common->Printf( "Ignoring unneeded game binary pk4 %s\n", BuildOSPath( path, dir, pakfiles[ i ] ) );
 			continue;
 		}
+		// pak0.pk4 to pak9.pk4 in baseoq4 are openQ4's own packs. One this build's
+		// pack table does not list was retired or left by another release (an
+		// update archive cannot delete files), and mounting it would override
+		// current content, so it is skipped.
+		numberedPakName_t numberedPak;
+		if ( !idStr::Icmp( dir, OPENQ4_GAMEDIR ) && FS_ParseNumberedPakName( pakfiles[ i ].c_str(), numberedPak ) &&
+			 numberedPak.digitCount == 1 && FS_FindOpenQ4PackTableEntry( pakfiles[ i ].c_str() ) == NULL ) {
+			common->Warning( "Ignoring %s: this version of openQ4 does not use it. It was left by another release and can be deleted.",
+				BuildOSPath( path, dir, pakfiles[ i ] ) );
+			continue;
+		}
 
 		pakfile = BuildOSPath( path, dir, pakfiles[i] );
 		pak = LoadZipFile( pakfile );
@@ -4708,6 +5736,22 @@ void idFileSystemLocal::SetupGameDirectories( const char *gameName ) {
 	// setup savepath
 	if ( fs_savepath.GetString()[0] ) {
 		AddGameDirectory( fs_savepath.GetString(), gameName );
+	}
+
+	// Cache after savepath, which gives it the higher search priority of the
+	// two: entries are prepended, so whatever is added last is found first.
+	//
+	// It must outrank savepath specifically because the cache is the only thing
+	// that writes the generated/ tree. Ordering it below savepath means a
+	// generated file left there by an older build is found first, fails the
+	// derived-opts check against what the current build wants, and is re-derived
+	// and rewritten into the cache on every single load -- where it is never
+	// read, because the stale copy keeps winning. Measured on the Note 20 that
+	// was 1249 of 1944 images re-encoded every load against a 1.1 GB stale tree.
+	//
+	// It stays below basepath and cdpath, so real game content still wins.
+	if ( fs_cachepath.GetString()[0] ) {
+		AddGameDirectory( fs_cachepath.GetString(), gameName );
 	}
 
 	// setup basepath
@@ -4981,14 +6025,38 @@ idFileSystemLocal::IsOpenQ4PurePack
 ================
 */
 bool idFileSystemLocal::IsOpenQ4PurePack( const pack_t *pak ) const {
+	const openQ4PackTableEntry_t *entry = FindOpenQ4PackTableEntry( pak );
+	return entry != NULL && !entry->clientOnly;
+}
+
+/*
+================
+idFileSystemLocal::IsOpenQ4ClientOnlyPack
+
+Client-only packs (light grids, loadscreens) are presentation data: a server
+does not need them, so they stay out of every pure list and a client keeps
+reading its own copy on a pure server that has none.
+================
+*/
+bool idFileSystemLocal::IsOpenQ4ClientOnlyPack( const pack_t *pak ) const {
+	const openQ4PackTableEntry_t *entry = FindOpenQ4PackTableEntry( pak );
+	return entry != NULL && entry->clientOnly;
+}
+
+/*
+================
+idFileSystemLocal::FindOpenQ4PackTableEntry
+================
+*/
+const openQ4PackTableEntry_t *idFileSystemLocal::FindOpenQ4PackTableEntry( const pack_t *pak ) const {
 	idStr name;
 
-	if ( !IsGameDirPack( pak, OPENQ4_GAMEDIR ) ) {
-		return false;
+	if ( pak == NULL || !IsGameDirPack( pak, OPENQ4_GAMEDIR ) ) {
+		return NULL;
 	}
 
 	pak->pakFilename.ExtractFileName( name );
-	return !name.Icmp( "pak0.pk4" ) || !name.Icmp( "pak1.pk4" );
+	return FS_FindOpenQ4PackTableEntry( name.c_str() );
 }
 
 /*
@@ -5061,49 +6129,507 @@ bool idFileSystemLocal::FindMisplacedOfficialPaks( idStr &errors ) const {
 
 /*
 ================
-idFileSystemLocal::ValidateOpenQ4Paks
+openQ4 runtime pack verification record
+
+ValidateOpenQ4Paks proves every pack in the generated table against the digests built
+into this executable. pak1 is about 800 MB, and hashing it cost about 1.3 s of
+every warm launch, more from a cold disk cache, and the same again at every
+filesystem restart.
+
+A pack that passes is written to a small record, generated/packs/verified.txt
+under fs_cachepath, with its identity on disk: size, last-write time, change
+time, volume and file id, and the CRC digest and entry count of its zip central
+directory that LoadZipFile already computed. A later startup that finds the
+same identity at the same path, recorded with the digest this executable
+expects, does not read the pack again.
+
+Writing, replacing, re-staging or touching a pack changes that identity.
+Writing to a file always moves its change time, which ordinary tools cannot
+set back, so an edited pack is hashed again and fails exactly as before. Every
+doubt falls back to hashing: no record, an unreadable or malformed one, another
+build's digest, a pack that could not be stamped or that changed while it was
+hashed. Only a hash ever rejects a pack. The record is a cache with the trust
+model of make and git, not a signature: whoever can rewrite it can equally
+rewrite the executable. fs_cacheVerifiedPaks 0 hashes every pack at every
+startup.
 ================
 */
-bool idFileSystemLocal::ValidateOpenQ4Paks( idStr &errors ) const {
-	struct expectedOpenQ4Pak_t {
-		const char *name;
-		const char *md5;
-	};
-	static const expectedOpenQ4Pak_t expectedPaks[] = {
-		{ "pak0.pk4", OPENQ4_PAK0_MD5 },
-		{ "pak1.pk4", OPENQ4_PAK1_MD5 },
-		{ NULL, NULL }
-	};
+static const char * const	FS_VERIFIED_PAKS_FILE = "generated/packs/verified.txt";
+static const char * const	FS_VERIFIED_PAKS_HEADER = "openQ4 verified runtime packs 1";
+static const size_t			FS_VERIFIED_PAKS_MAX = 16;
+static const int			FS_VERIFIED_PAKS_MAX_BYTES = 64 * 1024;
 
+#ifndef _WIN32
+static uint64_t FS_StampTime( const struct timespec &value ) {
+	return static_cast<uint64_t>( value.tv_sec ) * 1000000000ull + static_cast<uint64_t>( value.tv_nsec );
+}
+#endif
+
+/*
+================
+FS_StampOpenQ4Pak
+
+Reads the pack's identity through the same narrow-path fopen that loaded it.
+================
+*/
+static bool FS_StampOpenQ4Pak( const pack_t *pack, openQ4PakStamp_t &stamp ) {
+	memset( &stamp, 0, sizeof( stamp ) );
+	FILE *file = fopen( pack->pakFilename.c_str(), "rb" );
+	if ( file == NULL ) {
+		return false;
+	}
+	bool stamped = false;
+#ifdef _WIN32
+	const HANDLE handle = reinterpret_cast<HANDLE>( _get_osfhandle( _fileno( file ) ) );
+	BY_HANDLE_FILE_INFORMATION info;
+	FILE_BASIC_INFO basic;
+	if ( handle != INVALID_HANDLE_VALUE &&
+		 GetFileInformationByHandle( handle, &info ) &&
+		 GetFileInformationByHandleEx( handle, FileBasicInfo, &basic, sizeof( basic ) ) ) {
+		stamp.size = ( static_cast<uint64_t>( info.nFileSizeHigh ) << 32 ) | info.nFileSizeLow;
+		stamp.modified = static_cast<uint64_t>( basic.LastWriteTime.QuadPart );
+		stamp.changed = static_cast<uint64_t>( basic.ChangeTime.QuadPart );
+		stamp.volume = info.dwVolumeSerialNumber;
+		stamp.fileId = ( static_cast<uint64_t>( info.nFileIndexHigh ) << 32 ) | info.nFileIndexLow;
+		stamped = true;
+	}
+#else
+	struct stat info;
+	if ( fstat( fileno( file ), &info ) == 0 && S_ISREG( info.st_mode ) ) {
+		stamp.size = static_cast<uint64_t>( info.st_size );
+#if defined( __APPLE__ )
+		stamp.modified = FS_StampTime( info.st_mtimespec );
+		stamp.changed = FS_StampTime( info.st_ctimespec );
+#else
+		stamp.modified = FS_StampTime( info.st_mtim );
+		stamp.changed = FS_StampTime( info.st_ctim );
+#endif
+		// The device number stays out: btrfs subvolumes and network mounts
+		// get a new one at each mount, and the path and inode pin the file.
+		stamp.fileId = static_cast<uint64_t>( info.st_ino );
+		stamped = true;
+	}
+#endif
+	fclose( file );
+	stamp.zipChecksum = static_cast<uint32_t>( pack->checksum );
+	stamp.zipFiles = static_cast<uint32_t>( pack->numfiles );
+	return stamped;
+}
+
+static bool FS_SameOpenQ4PakStamp( const openQ4PakStamp_t &a, const openQ4PakStamp_t &b ) {
+	return a.size == b.size && a.modified == b.modified && a.changed == b.changed &&
+		a.volume == b.volume && a.fileId == b.fileId &&
+		a.zipChecksum == b.zipChecksum && a.zipFiles == b.zipFiles;
+}
+
+static bool FS_IsVerifiedPakHexDigit( const char c ) {
+	return ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' );
+}
+
+/*
+================
+FS_ParseVerifiedPakNumber
+
+One hexadecimal field and the single space after it.
+================
+*/
+static bool FS_ParseVerifiedPakNumber( const char *&cursor, uint64_t &value ) {
+	if ( !FS_IsVerifiedPakHexDigit( *cursor ) ) {
+		return false;
+	}
+	char *end = NULL;
+	errno = 0;
+	const unsigned long long parsed = strtoull( cursor, &end, 16 );
+	if ( errno != 0 || end == NULL || *end != ' ' ) {
+		return false;
+	}
+	value = static_cast<uint64_t>( parsed );
+	cursor = end + 1;
+	return true;
+}
+
+/*
+================
+FS_ParseVerifiedPakLine
+
+<md5> <size> <modified> <changed> <volume> <file id> <zip checksum> <zip files> <path>
+================
+*/
+static bool FS_ParseVerifiedPakLine( const char *line, const char *end, verifiedOpenQ4Pak_t &record ) {
+	for ( int i = 0; i < 32; i++ ) {
+		if ( !FS_IsVerifiedPakHexDigit( line[ i ] ) ) {
+			return false;
+		}
+	}
+	if ( line[ 32 ] != ' ' ) {
+		return false;
+	}
+	memcpy( record.md5, line, 32 );
+	record.md5[ 32 ] = '\0';
+
+	const char *cursor = line + 33;
+	uint64_t fields[ 7 ];
+	for ( int i = 0; i < 7; i++ ) {
+		if ( cursor >= end || !FS_ParseVerifiedPakNumber( cursor, fields[ i ] ) ) {
+			return false;
+		}
+	}
+	const char *pathEnd = end;
+	if ( pathEnd > cursor && pathEnd[ -1 ] == '\r' ) {
+		pathEnd--;
+	}
+	if ( pathEnd <= cursor || fields[ 5 ] > UINT32_MAX || fields[ 6 ] > UINT32_MAX ) {
+		return false;
+	}
+	record.stamp.size = fields[ 0 ];
+	record.stamp.modified = fields[ 1 ];
+	record.stamp.changed = fields[ 2 ];
+	record.stamp.volume = fields[ 3 ];
+	record.stamp.fileId = fields[ 4 ];
+	record.stamp.zipChecksum = static_cast<uint32_t>( fields[ 5 ] );
+	record.stamp.zipFiles = static_cast<uint32_t>( fields[ 6 ] );
+	record.path.assign( cursor, static_cast<size_t>( pathEnd - cursor ) );
+	return true;
+}
+
+static void FS_ParseVerifiedPaks( const char *text, std::vector<verifiedOpenQ4Pak_t> &records ) {
+	records.clear();
+	const int headerLength = idStr::Length( FS_VERIFIED_PAKS_HEADER );
+	if ( idStr::Cmpn( text, FS_VERIFIED_PAKS_HEADER, headerLength ) != 0 || text[ headerLength ] != '\n' ) {
+		return;
+	}
+	const char *line = text + headerLength + 1;
+	while ( *line != '\0' && records.size() < FS_VERIFIED_PAKS_MAX ) {
+		const char *end = strchr( line, '\n' );
+		if ( end == NULL ) {
+			break;	// a line counts only with its newline
+		}
+		verifiedOpenQ4Pak_t record;
+		if ( FS_ParseVerifiedPakLine( line, end, record ) ) {
+			records.push_back( record );
+		}
+		line = end + 1;
+	}
+}
+
+static void FS_FormatVerifiedPaks( const std::vector<verifiedOpenQ4Pak_t> &records, std::string &text ) {
+	text = FS_VERIFIED_PAKS_HEADER;
+	text += '\n';
+	for ( size_t i = 0; i < records.size(); i++ ) {
+		const verifiedOpenQ4Pak_t &record = records[ i ];
+		char fields[ 256 ];
+		idStr::snPrintf( fields, sizeof( fields ), "%s %llx %llx %llx %llx %llx %x %x ", record.md5,
+			static_cast<unsigned long long>( record.stamp.size ),
+			static_cast<unsigned long long>( record.stamp.modified ),
+			static_cast<unsigned long long>( record.stamp.changed ),
+			static_cast<unsigned long long>( record.stamp.volume ),
+			static_cast<unsigned long long>( record.stamp.fileId ),
+			static_cast<unsigned int>( record.stamp.zipChecksum ),
+			static_cast<unsigned int>( record.stamp.zipFiles ) );
+		text += fields;
+		text += record.path;
+		text += '\n';
+	}
+}
+
+static const verifiedOpenQ4Pak_t *FS_FindVerifiedPak( const std::vector<verifiedOpenQ4Pak_t> &records, const char *path ) {
+	for ( size_t i = 0; i < records.size(); i++ ) {
+		if ( records[ i ].path == path ) {
+			return &records[ i ];
+		}
+	}
+	return NULL;
+}
+
+/*
+================
+FS_RecordVerifiedPak
+
+Puts the pack first, replacing any older entry for its path, and keeps the
+most recent FS_VERIFIED_PAKS_MAX packs (builddir, the staged package and test
+runtimes can share one fs_cachepath).
+================
+*/
+static void FS_RecordVerifiedPak( std::vector<verifiedOpenQ4Pak_t> &records, const char *path,
+		const openQ4PakStamp_t &stamp, const char *md5 ) {
+	if ( strpbrk( path, "\r\n" ) != NULL ) {
+		return;	// would not survive the line format
+	}
+	for ( size_t i = 0; i < records.size(); ) {
+		if ( records[ i ].path == path ) {
+			records.erase( records.begin() + static_cast<std::ptrdiff_t>( i ) );
+		} else {
+			i++;
+		}
+	}
+	verifiedOpenQ4Pak_t record;
+	record.path = path;
+	record.stamp = stamp;
+	memcpy( record.md5, md5, 32 );
+	record.md5[ 32 ] = '\0';
+	records.insert( records.begin(), record );
+	if ( records.size() > FS_VERIFIED_PAKS_MAX ) {
+		records.resize( FS_VERIFIED_PAKS_MAX );
+	}
+}
+
+/*
+================
+idFileSystemLocal::ReadVerifiedOpenQ4Paks
+
+Reads the exact file under fs_cachepath. A search-path lookup would let a pak
+or another search directory supply the record.
+================
+*/
+void idFileSystemLocal::ReadVerifiedOpenQ4Paks( std::vector<verifiedOpenQ4Pak_t> &records ) {
+	records.clear();
+	const idStr osPath = RelativePathToOSPath( FS_VERIFIED_PAKS_FILE, "fs_cachepath" );
+	idFile *file = OpenExplicitFileRead( osPath );
+	if ( file == NULL ) {
+		return;
+	}
+	const int length = file->Length();
+	if ( length > 0 && length <= FS_VERIFIED_PAKS_MAX_BYTES ) {
+		std::string text( static_cast<size_t>( length ), '\0' );
+		if ( file->Read( &text[ 0 ], length ) == length ) {
+			FS_ParseVerifiedPaks( text.c_str(), records );
+		}
+	}
+	CloseFile( file );
+}
+
+/*
+================
+idFileSystemLocal::WriteVerifiedOpenQ4Paks
+
+Publishes the record through a staged file of this process's own, so startups
+sharing fs_cachepath never read a partial record.
+================
+*/
+bool idFileSystemLocal::WriteVerifiedOpenQ4Paks( const std::vector<verifiedOpenQ4Pak_t> &records ) {
+	std::string text;
+	FS_FormatVerifiedPaks( records, text );
+#ifdef _WIN32
+	const unsigned long processId = static_cast<unsigned long>( GetCurrentProcessId() );
+#else
+	const unsigned long processId = static_cast<unsigned long>( getpid() );
+#endif
+	const idStr staged = va( "generated/packs/verified.%lu.tmp", processId );
+	const int length = static_cast<int>( text.size() );
+	if ( WriteFile( staged, text.data(), length, "fs_cachepath" ) == length &&
+		 PromoteFile( staged, FS_VERIFIED_PAKS_FILE, "fs_cachepath" ) ) {
+		return true;
+	}
+	RemoveFileChecked( staged, "fs_cachepath" );
+	return false;
+}
+
+/*
+================
+openQ4 content pack failures
+
+A missing or mismatched core pack (pak0) stops startup at once, in English:
+pak0 carries the string tables, so nothing localized can be trusted without it.
+A missing or mismatched client-only pack is reported once the string tables
+have loaded, so the player reads which pack is wrong, what it holds and where
+to get it in their own language. Nothing between filesystem startup and the
+language load needs those packs.
+================
+*/
+typedef struct openQ4PackProblem_s {
+	const openQ4PackTableEntry_t *	pack;
+	bool							missing;
+} openQ4PackProblem_t;
+
+static idList<openQ4PackProblem_t>	fs_openQ4PackProblems;
+static idStr						fs_openQ4PackProblemDetails;
+static bool							fs_openQ4PackProblemsMayRaise = false;
+
+static const char *FS_LocalizedOr( const char *key, const char *fallback ) {
+	const idLangDict *dict = common != NULL ? common->GetLanguageDict() : NULL;
+	if ( dict == NULL || dict->GetNumKeyVals() == 0 ) {
+		return fallback;
+	}
+	const char *value = dict->GetString( key );
+	return ( value == NULL || value[ 0 ] == '\0' || !idStr::Cmp( value, key ) ) ? fallback : value;
+}
+
+/*
+================
+FS_FormatOpenQ4PackProblems
+
+The player-facing report: one line per pack naming it and what it holds,
+then where to get it. The English checksum details follow for support.
+================
+*/
+static idStr FS_FormatOpenQ4PackProblems( void ) {
+	idStr message = FS_LocalizedOr( "#str_231700",
+		"openQ4 cannot start because a content pack is missing or does not match this version." );
+	message += "\n\n";
+	for ( int i = 0; i < fs_openQ4PackProblems.Num(); i++ ) {
+		const openQ4PackProblem_t &problem = fs_openQ4PackProblems[ i ];
+		const char *contents = FS_LocalizedOr( problem.pack->contentsString, problem.pack->contents );
+		if ( problem.missing ) {
+			message += va( FS_LocalizedOr( "#str_231704", "%s (%s) is missing from the %s folder." ),
+				problem.pack->name, contents, OPENQ4_GAMEDIR );
+		} else {
+			message += va( FS_LocalizedOr( "#str_231705", "%s (%s) in the %s folder does not match this version of openQ4." ),
+				problem.pack->name, contents, OPENQ4_GAMEDIR );
+		}
+		message += "\n";
+	}
+	message += "\n";
+	message += va( FS_LocalizedOr( "#str_231706",
+		"Install the full openQ4 %s package, or download each listed pack for that version from %s and save it in the %s folder under the same name." ),
+		PROJECT_VERSION, PROJECT_RELEASES_URL, OPENQ4_GAMEDIR );
+	if ( fs_openQ4PackProblemDetails.Length() ) {
+		message += "\n\n";
+		message += FS_LocalizedOr( "#str_231707", "Details:" );
+		message += "\n";
+		message += fs_openQ4PackProblemDetails;
+	}
+	return message;
+}
+
+/*
+================
+FS_RaiseDeferredContentPackFailure
+
+Called once the string tables have loaded at startup. Reports a client-only
+pack failure found by filesystem startup; from here on, a filesystem restart
+reports one at once.
+================
+*/
+void FS_RaiseDeferredContentPackFailure( void ) {
+	fs_openQ4PackProblemsMayRaise = true;
+	if ( fs_openQ4PackProblems.Num() == 0 ) {
+		return;
+	}
+	const idStr message = FS_FormatOpenQ4PackProblems();
+	common->FatalError( "%s", message.c_str() );
+}
+
+/*
+================
+idFileSystemLocal::ValidateOpenQ4Paks
+
+Checks every pack in the generated pack table against this executable's
+digest. onlyClientPacks reports whether every failure is a client-only pack,
+which can wait for the localized report.
+================
+*/
+bool idFileSystemLocal::ValidateOpenQ4Paks( idStr &errors, bool &onlyClientPacks ) {
 	errors.Clear();
+	onlyClientPacks = true;
+	fs_openQ4PackProblems.Clear();
+	fs_openQ4PackProblemDetails.Clear();
 
 	if ( idStr::Icmp( fs_game.GetString(), OPENQ4_GAMEDIR ) &&
-		 idStr::Icmp( fs_game_base.GetString(), OPENQ4_GAMEDIR ) ) {
+		 idStr::Icmp( fs_game_base.GetString(), OPENQ4_GAMEDIR ) &&
+		 !UsesOpenQ4RuntimeUnderlay() ) {
 		return true;
 	}
 
-	for ( int i = 0; expectedPaks[ i ].name != NULL; i++ ) {
-		const expectedOpenQ4Pak_t &expected = expectedPaks[ i ];
+	const bool useRecord = fs_cacheVerifiedPaks.GetBool();
+	std::vector<verifiedOpenQ4Pak_t> records;
+	bool recordChanged = false;
+	if ( useRecord ) {
+		ReadVerifiedOpenQ4Paks( records );
+	}
+
+	for ( int i = 0; i < openQ4PackTableCount; i++ ) {
+		const openQ4PackTableEntry_t &expected = openQ4PackTable[ i ];
 		pack_t *pack = FindGamePackByName( expected.name, OPENQ4_GAMEDIR );
 		char actualMD5[33];
+#ifdef ID_DEDICATED
+		// A server never reads presentation packs; it runs without them and
+		// leaves any copy it has out of the pure list.
+		const bool optional = expected.clientOnly;
+#else
+		const bool optional = false;
+#endif
 
 		if ( !pack ) {
-			errors += va( "missing %s/%s (expected checksum %s)\n", OPENQ4_GAMEDIR, expected.name, expected.md5 );
+			if ( optional ) {
+				common->Printf( "Client-only pk4 %s/%s (%s) is not installed; this server does not need it\n",
+					OPENQ4_GAMEDIR, expected.name, expected.contents );
+				continue;
+			}
+			errors += va( "missing %s/%s, %s (expected checksum %s)\n", OPENQ4_GAMEDIR, expected.name, expected.contents, expected.md5 );
+			openQ4PackProblem_t problem = { &expected, true };
+			fs_openQ4PackProblems.Append( problem );
+			onlyClientPacks = onlyClientPacks && expected.clientOnly;
 			continue;
 		}
 
-		if ( !MD5_FileChecksum( pack->pakFilename.c_str(), actualMD5 ) ) {
-			errors += va( "could not read %s for checksum validation\n", pack->pakFilename.c_str() );
+		// unchanged since it was hashed and recorded with this executable's digest
+		openQ4PakStamp_t stamp;
+		const bool stamped = useRecord && FS_StampOpenQ4Pak( pack, stamp );
+		const verifiedOpenQ4Pak_t *recorded = stamped ? FS_FindVerifiedPak( records, pack->pakFilename.c_str() ) : NULL;
+		if ( recorded != NULL && FS_SameOpenQ4PakStamp( recorded->stamp, stamp ) &&
+			 !idStr::Icmp( recorded->md5, expected.md5 ) ) {
+			common->Printf( "Verified pk4 %s: unchanged since its checksum was recorded\n", pack->pakFilename.c_str() );
 			continue;
 		}
 
-		if ( idStr::Icmp( actualMD5, expected.md5 ) ) {
-			errors += va( "checksum mismatch for %s/%s (expected %s, got %s from %s)\n",
-				OPENQ4_GAMEDIR, expected.name, expected.md5, actualMD5, pack->pakFilename.c_str() );
+		const int hashStart = Sys_Milliseconds();
+		const bool hashed = MD5_FileChecksum( pack->pakFilename.c_str(), actualMD5 );
+		if ( !hashed || idStr::Icmp( actualMD5, expected.md5 ) ) {
+			idStr detail;
+			if ( hashed ) {
+				detail = va( "checksum mismatch for %s/%s, %s (expected %s, got %s from %s)\n",
+					OPENQ4_GAMEDIR, expected.name, expected.contents, expected.md5, actualMD5, pack->pakFilename.c_str() );
+			} else {
+				detail = va( "could not read %s for checksum validation\n", pack->pakFilename.c_str() );
+			}
+			if ( optional ) {
+				common->Warning( "Ignoring client-only pk4 that does not match this server: %s", detail.c_str() );
+				continue;
+			}
+			errors += detail;
+			openQ4PackProblem_t problem = { &expected, false };
+			fs_openQ4PackProblems.Append( problem );
+			onlyClientPacks = onlyClientPacks && expected.clientOnly;
+			continue;
+		}
+		common->Printf( "Verified pk4 %s: hashed in %d ms\n", pack->pakFilename.c_str(), Sys_Milliseconds() - hashStart );
+
+		// record the pass only if the pack did not change while it was read
+		openQ4PakStamp_t after;
+		if ( stamped && FS_StampOpenQ4Pak( pack, after ) && FS_SameOpenQ4PakStamp( stamp, after ) ) {
+			FS_RecordVerifiedPak( records, pack->pakFilename.c_str(), stamp, actualMD5 );
+			recordChanged = true;
 		}
 	}
 
-	return ( errors.Length() == 0 );
+	fs_openQ4PackProblemDetails = errors;
+	if ( errors.Length() != 0 ) {
+		return false;
+	}
+	if ( recordChanged && !WriteVerifiedOpenQ4Paks( records ) ) {
+		common->Printf( "Could not record the verified pk4 checksums in %s; the packs will be hashed again at the next startup\n",
+			RelativePathToOSPath( FS_VERIFIED_PAKS_FILE, "fs_cachepath" ) );
+	}
+	return true;
+}
+
+/*
+================
+idFileSystemLocal::UsesOpenQ4RuntimeUnderlay
+
+A mod selected with fs_game runs on top of the openQ4 runtime directory.
+baseoq4 holds the engine's own runtime content (GLSL programs, fonts, strings,
+menus) and the fallback game modules, none of which a mod can be expected to
+carry, so it stays in the search path below the mod unless the mod already
+names it through fs_game_base.
+================
+*/
+bool idFileSystemLocal::UsesOpenQ4RuntimeUnderlay( void ) const {
+	const char *game = fs_game.GetString();
+	if ( game[ 0 ] == '\0' || !idStr::Icmp( game, BASE_GAMEDIR ) || !idStr::Icmp( game, OPENQ4_GAMEDIR ) ) {
+		return false;
+	}
+	return idStr::Icmp( fs_game_base.GetString(), OPENQ4_GAMEDIR ) != 0;
 }
 
 /*
@@ -5299,7 +6825,16 @@ void idFileSystemLocal::Startup( void ) {
 		common->Printf( "restarting filesystem with %d addon pak file(s) to include\n", addonChecksums.Num() );
 	}
 
-	idStr invalidReason;
+	// Awakening is a single-player campaign, never a multiplayer/base overlay.
+    if ( !idStr::Icmp( fs_game_base.GetString(), "q4xbase" ) ) fs_game_base.SetString( "" );
+#ifdef ID_DEDICATED
+    const bool awakeningAllowed = false;
+#else
+    const bool awakeningAllowed = !idStr::Icmp( cvarSystem->GetCVarString( "si_gameType" ), "singleplayer" ) &&
+        idStr::Icmp( cvarSystem->GetCVarString( "com_nextGameModule" ), "game_mp" );
+#endif
+    if ( !awakeningAllowed && !idStr::Icmp( fs_game.GetString(), "q4xbase" ) ) fs_game.SetString( OPENQ4_GAMEDIR );
+    idStr invalidReason;
 	if ( fs_game_base.GetString()[ 0 ] &&
 		 idStr::Icmp( fs_game_base.GetString(), BASE_GAMEDIR ) &&
 		 !ValidateConfiguredGameDir( fs_game_base.GetString(), &invalidReason ) ) {
@@ -5319,7 +6854,10 @@ void idFileSystemLocal::Startup( void ) {
 		}
 
 		common->Warning( "Ignoring fs_game '%s': %s", fs_game.GetString(), invalidReason.c_str() );
-		fs_game.SetString( "" );
+		// Fall back to the default openQ4 game, not to retail-only content: an
+		// empty fs_game also drops the openQ4 runtime underlay (strings, GUIs,
+		// staged overrides), leaving a half-working game and serverinfo.
+		fs_game.SetString( OPENQ4_GAMEDIR );
 	}
 
 	// File writes should use the selected game directory even while search paths
@@ -5335,6 +6873,11 @@ void idFileSystemLocal::Startup( void ) {
 
 	SetupGameDirectories( BASE_GAMEDIR );
 
+	// the openQ4 runtime sits between the retail assets and any mod
+	if ( UsesOpenQ4RuntimeUnderlay() ) {
+		SetupGameDirectories( OPENQ4_GAMEDIR );
+	}
+
 	// fs_game_base override
 	if ( fs_game_base.GetString()[0] &&
 		 idStr::Icmp( fs_game_base.GetString(), BASE_GAMEDIR ) ) {
@@ -5348,13 +6891,29 @@ void idFileSystemLocal::Startup( void ) {
 		SetupGameDirectories( fs_game.GetString() );
 	}
 
+	if ( !idStr::Icmp( fs_game.GetString(), "q4xbase" ) ) {
+        const idStr externalRoot = FS_AwakeningRoot();
+        if ( externalRoot.Length() ) AddGameDirectory( externalRoot, "q4xbase" );
+    }
+
 	idStr openQ4PakErrors;
-	if ( !ValidateOpenQ4Paks( openQ4PakErrors ) ) {
+	bool onlyClientPacks = false;
+	if ( !ValidateOpenQ4Paks( openQ4PakErrors, onlyClientPacks ) ) {
 		PrintContentSearchDiagnostics();
-		common->FatalError(
-			"openPREY runtime content packs in '%s' are missing or modified.\n\n%s\n"
-			"Rebuild or reinstall openPREY so '<openPREY package root>/%s/pak0.pk4' and '<openPREY package root>/%s/pak1.pk4' match this engine. Retail Prey PK4s belong in '%s', not '%s'.",
-			OPENQ4_GAMEDIR, openQ4PakErrors.c_str(), OPENQ4_GAMEDIR, OPENQ4_GAMEDIR, BASE_GAMEDIR, OPENQ4_GAMEDIR );
+		if ( !onlyClientPacks ) {
+			idStr expectedPacks;
+			for ( int i = 0; i < openQ4PackTableCount; i++ ) {
+				expectedPacks += va( "%s'<openPREY package root>/%s/%s'", i ? ", " : "", OPENQ4_GAMEDIR, openQ4PackTable[ i ].name );
+			}
+			common->FatalError(
+				"openPREY runtime content packs in '%s' are missing or modified.\n\n%s\n"
+				"Rebuild or reinstall openPREY %s so %s match this engine; packages are at %s. Retail Prey PK4s belong in '%s', not '%s'.",
+				OPENQ4_GAMEDIR, openQ4PakErrors.c_str(), PROJECT_VERSION, expectedPacks.c_str(), PROJECT_RELEASES_URL, BASE_GAMEDIR, OPENQ4_GAMEDIR );
+		}
+		common->Printf( "openPREY client content packs are missing or modified:\n%s", openQ4PakErrors.c_str() );
+		if ( fs_openQ4PackProblemsMayRaise ) {
+			FS_RaiseDeferredContentPackFailure();
+		}
 	}
 
 	if ( fs_validateOfficialPaks.GetBool() ) {
@@ -5377,6 +6936,23 @@ void idFileSystemLocal::Startup( void ) {
 				"Do not put retail pk4 files in '%s'; that directory is reserved for openPREY runtime files.",
 				BASE_GAMEDIR, validationErrors.c_str(), BASE_GAMEDIR, OPENQ4_GAMEDIR );
 		}
+
+// Quake 4 only: Prey keeps character VO in its own retail packs (pak000-pak004,
+// or pak_en_v.pk4/pak_en_t.pk4), which ValidateRequiredOfficialPaks covers.
+#if !defined( ID_DEDICATED ) && !defined( HUMANHEAD )
+		// The core pak001-pak022 media set is shared by every retail language and
+		// deliberately remains the only fatal validation baseline. Character VO is
+		// different: it lives in the edition-specific zpak_<language>.pk4 archives,
+		// so a partial copy can pass that baseline while every conversation is
+		// silent. Keep alternate physical/localized editions valid, but make the
+		// missing media actionable on clients instead of failing one sample at a time.
+		if ( !HasBaseLanguageMediaPack() ) {
+			common->Warning(
+				"No recognized base Quake 4 language media archive (zpak_<language>.pk4, without a numeric suffix) was found in '%s'; character dialogue will be incomplete or silent. "
+				"Numbered patch archives such as zpak_english_01.pk4 do not replace the base archive. Install or verify the unsuffixed retail language archive in '<Quake 4 install root>/%s', or launch with +set fs_basepath pointing at the install root that contains it.",
+				BASE_GAMEDIR, BASE_GAMEDIR );
+		}
+#endif
 	}
 
 	// Startup map commands run after initialization, but addon filtering happens here.
@@ -5519,6 +7095,7 @@ void idFileSystemLocal::Startup( void ) {
 	cmdSystem->AddCommand( "path", Path_f, CMD_FL_SYSTEM, "lists search paths" );
 	cmdSystem->AddCommand( "touchFile", TouchFile_f, CMD_FL_SYSTEM, "touches a file" );
 	cmdSystem->AddCommand( "touchFileList", TouchFileList_f, CMD_FL_SYSTEM, "touches a list of files" );
+	cmdSystem->AddCommand( "openq4_mapLevelshot", MapLevelshot_f, CMD_FL_SYSTEM, "prints the levelshot the menus show for a map" );
 
 	// print the current search paths
 	Path_f( idCmdArgs() );
@@ -5595,64 +7172,23 @@ idFileSystemLocal::UpdateGamePakChecksums
 =====================
 */
 bool idFileSystemLocal::UpdateGamePakChecksums( void ) {
-	searchpath_t	*search;
-	fileInPack_t	*pakFile;
-	int				confHash;
-	idFile			*confFile;
-	char			*buf;
-	idLexer			*lexConf;
-	idToken			token;
-	int				id;
-
-	confHash = HashFileName( BINARY_CONFIG );
-
 	memset( gamePakForOS, 0, sizeof( gamePakForOS ) );
-	for ( search = searchPaths; search; search = search->next ) {
-		if ( !search->pack ) {
-			continue;
-		}
-		search->pack->binary = BINARY_NO;
-		for ( pakFile = search->pack->hashTable[confHash]; pakFile; pakFile = pakFile->next ) {
-			if ( !FilenameCompare( pakFile->name, BINARY_CONFIG ) ) {
-				search->pack->binary = BINARY_YES;
-				confFile = ReadFileFromZip( search->pack, pakFile, BINARY_CONFIG );
-				if ( confFile == NULL ) {
-					search->pack->binary = BINARY_NO;
-					break;
-				}
-				buf = new char[ confFile->Length() + 1 ];
-				confFile->Read( (void *)buf, confFile->Length() );
-				buf[ confFile->Length() ] = '\0';
-				lexConf = new idLexer( buf, confFile->Length(), confFile->GetFullPath() );
-				while ( lexConf->ReadToken( &token ) ) {
-					if ( token.IsNumeric() ) {
-						id = atoi( token );
-						if ( id < MAX_GAME_OS && !gamePakForOS[ id ] ) {
-							if ( fs_debug.GetBool() ) {
-								common->Printf( "Adding game pak checksum for OS %d: %s 0x%x\n", id, confFile->GetFullPath(), search->pack->checksum );
-							}
- 							gamePakForOS[ id ] = search->pack->checksum;
-						}
-					}
-				}
-				CloseFile( confFile );
-				delete lexConf;
-				delete[] buf;
-			}
-		}
+	if ( gameDLLChecksum == 0 || gamePakChecksum != OPENQ4_Q4_142_GAME300_PAK_CHECKSUM ||
+		 gameModuleOrigin == GAME_MODULE_ORIGIN_NONE ) {
+		common->Warning( "No trusted openQ4 game module is loaded for pure-server startup" );
+		return false;
 	}
-
-	// some sanity checks on the game code references
-	// make sure that at least the local OS got a pure reference
-	if ( !gamePakForOS[ BUILD_OS_ID ] ) {
-		common->Warning( "No game code pak reference found for the local OS" );
+	if ( gameModuleOrigin == GAME_MODULE_ORIGIN_ACTIVE_MOD &&
+		 !cvarSystem->GetCVarBool( "net_serverAllowServerMod" ) ) {
+		common->Warning( "The active mod supplies game code (net_serverAllowServerMod is off)" );
 		return false;
 	}
 
-	if ( !cvarSystem->GetCVarBool( "net_serverAllowServerMod" ) &&
-		gamePakChecksum != gamePakForOS[ BUILD_OS_ID ] ) {
-		common->Warning( "The current game code doesn't match pak files (net_serverAllowServerMod is off)" );
-		return false;
+	// Protocol 2.41 defines Windows, Linux and macOS as OS IDs 0..2. The
+	// compatibility token is deliberately platform-independent; executable
+	// bytes remain outside the downloadable/pure-PK4 path.
+	for ( int os = 0; os <= 2; ++os ) {
+		gamePakForOS[ os ] = OPENQ4_Q4_142_GAME300_PAK_CHECKSUM;
 	}
 
 	return true;
@@ -5711,6 +7247,16 @@ int idFileSystemLocal::ValidateDownloadPakForChecksum( int checksum, char path[ 
 	}
 	// check the binary
 	// a pure server sets the binary flag when starting the game
+	if ( pak->binary == BINARY_UNKNOWN ) {
+		const int confHash = HashFileName( BINARY_CONFIG );
+		pak->binary = BINARY_NO;
+		for ( fileInPack_t *pakFile = pak->hashTable[ confHash ]; pakFile; pakFile = pakFile->next ) {
+			if ( !FilenameCompare( pakFile->name, BINARY_CONFIG ) ) {
+				pak->binary = BINARY_YES;
+				break;
+			}
+		}
+	}
 	assert( pak->binary != BINARY_UNKNOWN );
 	pakBinary = ( pak->binary == BINARY_YES ) ? true : false;
 	if ( isBinary != pakBinary ) {
@@ -5745,6 +7291,8 @@ idFileSystemLocal::ClearPureChecksums
 void idFileSystemLocal::ClearPureChecksums( void ) {
 	common->DPrintf( "Cleared pure server lock\n" );
 	serverPaks.Clear();
+	pureImageCacheEvictionPending = false;
+	memset( gamePakForOS, 0, sizeof( gamePakForOS ) );
 }
 
 /*
@@ -5758,8 +7306,10 @@ can be:
   some pak files currently referenced are not referenced by the server
   wrong order - if the pak order doesn't match, means some stuff could have been loaded from somewhere else
 server referenced files are prepended to the list if possible ( that doesn't break pureness )
-DLL:
-  the checksum of the pak containing the DLL is maintained seperately, the server can send different replies by OS
+Game code:
+  protocol 2.41 carries the official q4base/game300.pk4 checksum as a
+  compatibility token, but openQ4 resolves executable modules only from its
+  trusted package/module roots and never from a server-selected PK4
 =====================
 */
 fsPureReply_t idFileSystemLocal::SetPureServerChecksums( const int pureChecksums[ MAX_PURE_PAKS ], int _gamePakChecksum, int missingChecksums[ MAX_PURE_PAKS ], int *missingGamePakChecksum ) {
@@ -5767,17 +7317,23 @@ fsPureReply_t idFileSystemLocal::SetPureServerChecksums( const int pureChecksums
 	int				i, j, imissing;
 	bool			success = true;
 	bool			canPrepend = true;
-	char			dllName[MAX_OSPATH];
-	int				dllHash;
-	fileInPack_t *	pakFile;
-
-	sys->DLL_GetFileName( "game", dllName, MAX_OSPATH );
-	dllHash = HashFileName( dllName );
 
 	imissing = 0;
 	missingChecksums[ 0 ] = 0;
 	assert( missingGamePakChecksum );
 	*missingGamePakChecksum = 0;
+
+	// Validate the legacy game-code field before touching the server-selected
+	// asset list. It is only a wire-compatibility token in openQ4; it must never
+	// select, download, extract, or restart into executable code.
+	if ( _gamePakChecksum != OPENQ4_Q4_142_GAME300_PAK_CHECKSUM ||
+		 gamePakChecksum != OPENQ4_Q4_142_GAME300_PAK_CHECKSUM ||
+		 gameDLLChecksum == 0 || gameModuleOrigin == GAME_MODULE_ORIGIN_NONE ) {
+		if ( fs_debug.GetBool() ) {
+			common->Printf( "pure server supplied unsupported game-code token 0x%x\n", _gamePakChecksum );
+		}
+		return PURE_NODLL;
+	}
 
 	if ( pureChecksums[ 0 ] == 0 ) {
 		ClearPureChecksums();
@@ -5851,48 +7407,6 @@ fsPureReply_t idFileSystemLocal::SetPureServerChecksums( const int pureChecksums
 		j++;
 	}
 
-	// DLL checksuming
-	if ( !_gamePakChecksum ) {
-		// server doesn't have knowledge of code we can use ( OS issue )
-		return PURE_NODLL;
-	}
-	assert( gameDLLChecksum );
-#if ID_FAKE_PURE
-	gamePakChecksum = _gamePakChecksum;
-#endif
-	if ( _gamePakChecksum != gamePakChecksum ) {
-		// current DLL is wrong, search for a pak with the approriate checksum
-		// ( search all paks, the pure list is not relevant here )
-		pack = GetPackForChecksum( _gamePakChecksum );
-		if ( !pack ) {
-			if ( fs_debug.GetBool() ) {
-				common->Printf( "missing the game code pak ( 0x%x )\n", _gamePakChecksum );
-			}
-			// if there are other paks missing they have also been marked above
-			*missingGamePakChecksum = _gamePakChecksum;
-			return PURE_MISSING;
-		}
-		// if assets paks are missing, don't try any of the DLL restart / NODLL
-		if ( imissing ) {
-			return PURE_MISSING;
-		}
-		// we have a matching pak
-		if ( fs_debug.GetBool() ) {
-			common->Printf( "server's game code pak candidate is '%s' ( 0x%x )\n", pack->pakFilename.c_str(), pack->checksum );
-		}
-		// make sure there is a valid DLL for us
-		if ( pack->hashTable[ dllHash ] ) {
-			for ( pakFile = pack->hashTable[ dllHash ]; pakFile; pakFile = pakFile->next ) {
-				if ( !FilenameCompare( pakFile->name, dllName ) ) {
-					gamePakChecksum = _gamePakChecksum;		// this will be used to extract the DLL in pure mode FindDLL
-					return PURE_RESTART;
-				}
-			}
-		}
-		common->Warning( "media is misconfigured. server claims pak '%s' ( 0x%x ) has media for us, but '%s' is not found\n", pack->pakFilename.c_str(), pack->checksum, dllName );
-		return PURE_NODLL;
-	}
-
 	// we reply to missing after DLL check so it can be part of the list
 	if ( imissing ) {
 		return PURE_MISSING;
@@ -5905,7 +7419,33 @@ fsPureReply_t idFileSystemLocal::SetPureServerChecksums( const int pureChecksums
 			common->Printf( "SetPureServerChecksums: there are files loaded from dir\n" );
 		}
 	}
+	// Generated image cache entries and expanded loading backgrounds alone do
+	// not need a restart: the lock now refuses both, and the caller evicts the
+	// images they supplied (see FS_IsGeneratedImageCachePath,
+	// FS_IsGeneratedLoadscreenPath and TakePureImageCacheEviction).
+	if ( success && loadedImageCacheFromDir && serverPaks.Num() ) {
+		pureImageCacheEvictionPending = true;
+		if ( fs_debug.GetBool() ) {
+			common->Printf( "SetPureServerChecksums: generated images were loaded from a directory; they must be evicted\n" );
+		}
+	}
 	return ( success ? PURE_OK : PURE_RESTART );
+}
+
+/*
+=====================
+idFileSystemLocal::TakePureImageCacheEviction
+=====================
+*/
+bool idFileSystemLocal::TakePureImageCacheEviction( void ) {
+	if ( !pureImageCacheEvictionPending ) {
+		return false;
+	}
+	pureImageCacheEvictionPending = false;
+	// No cache entry or loading background can be read again until the lock
+	// is cleared.
+	loadedImageCacheFromDir = false;
+	return true;
 }
 
 /*
@@ -5921,10 +7461,12 @@ void idFileSystemLocal::GetPureServerChecksums( int checksums[ MAX_PURE_PAKS ], 
 	}
 	checksums[ i ] = 0;
 	if ( _gamePakChecksum ) {
-		if ( OS >= 0 ) {
+		if ( OS >= 0 && OS < MAX_GAME_OS ) {
 			*_gamePakChecksum = gamePakForOS[ OS ];
-		} else {
+		} else if ( OS == -1 ) {
 			*_gamePakChecksum = gamePakChecksum;
+		} else {
+			*_gamePakChecksum = 0;
 		}
 	}
 }
@@ -5964,6 +7506,7 @@ is resetting due to a game change
 ================
 */
 void idFileSystemLocal::Init( void ) {
+	fileSystemMainThread = std::this_thread::get_id();
 	// allow command line parms to override our defaults
 	// we have to specially handle this, because normal command
 	// line variable sets don't happen until after the filesystem
@@ -5972,8 +7515,9 @@ void idFileSystemLocal::Init( void ) {
 	common->StartupVariable( "fs_homepath", false );
 	common->StartupVariable( "fs_savepath", false );
 	common->StartupVariable( "fs_devpath", false );
-	common->StartupVariable( "fs_game", false );
-	common->StartupVariable( "fs_game_base", false );
+	common->StartupVariable( "fs_game", true );
+	common->StartupVariable( "fs_game_base", true );
+	common->StartupVariable( "fs_awakeningpath", false );
 	common->StartupVariable( "fs_copyfiles", false );
 	common->StartupVariable( "fs_restrict", false );
 	common->StartupVariable( "fs_searchAddons", false );
@@ -5996,8 +7540,15 @@ void idFileSystemLocal::Init( void ) {
 	// 6) GOG install paths
 	if ( fs_basepath.GetString()[0] ) {
 		if ( !FS_HasGameFilesAtBasePath( fs_basepath.GetString() ) ) {
+#if defined( __ANDROID__ )
+			// The Android host supplies its accessible retail-data directory.
+			// Preserve it through missing/incomplete onboarding; desktop install
+			// discovery would replace it with the process working directory.
+			common->Warning( "fs_basepath '%s' has no %s game files", fs_basepath.GetString(), BASE_GAMEDIR );
+#else
 			common->Warning( "fs_basepath '%s' has no %s game files, auto-discovery will be attempted", fs_basepath.GetString(), BASE_GAMEDIR );
 			fs_basepath.SetString( "" );
+#endif
 		}
 	}
 	if ( fs_basepath.GetString()[0] == '\0' ) {
@@ -6021,14 +7572,23 @@ void idFileSystemLocal::Init( void ) {
 	if ( fs_savepath.GetString()[0] == '\0' ) {
 		fs_savepath.SetString( fs_homepath.GetString() );
 	}
+	// Resolving this to fs_savepath rather than leaving it empty keeps the log
+	// honest about where the generated/ tree actually lands. It also costs
+	// nothing when the two are equal: SetupGameDirectories adds the cache first
+	// and AddGameDirectory ignores a duplicate path, so the search order comes
+	// out exactly as it did before.
+	if ( fs_cachepath.GetString()[0] == '\0' ) {
+		fs_cachepath.SetString( fs_savepath.GetString() );
+	}
 	// fs_cdpath is locked to the platform content root (the app's Resources
 	// directory on macOS, otherwise the process current directory).
 	fs_cdpath.SetString( Sys_DefaultCDPath() );
 	common->Printf(
-		"Filesystem paths: fs_basepath='%s' fs_homepath='%s' fs_savepath='%s' fs_cdpath='%s' fs_devpath='%s' fs_game='%s' fs_game_base='%s'\n",
+		"Filesystem paths: fs_basepath='%s' fs_homepath='%s' fs_savepath='%s' fs_cachepath='%s' fs_cdpath='%s' fs_devpath='%s' fs_game='%s' fs_game_base='%s'\n",
 		fs_basepath.GetString(),
 		fs_homepath.GetString(),
 		fs_savepath.GetString(),
+		fs_cachepath.GetString(),
 		fs_cdpath.GetString(),
 		fs_devpath.GetString(),
 		fs_game.GetString(),
@@ -6039,6 +7599,9 @@ void idFileSystemLocal::Init( void ) {
 
 	// see if we are going to allow add-ons
 	SetRestrictions();
+	if ( levelLoadCache == NULL ) {
+		levelLoadCache = new idLevelLoadCacheManager( this );
+	}
 
 	// spawn a thread to handle background file reads
 	StartBackgroundDownloadThread();
@@ -6071,6 +7634,13 @@ void idFileSystemLocal::Restart( void ) {
 
 	// see if we are going to allow add-ons
 	SetRestrictions();
+	if ( levelLoadCache == NULL ) {
+		levelLoadCache = new idLevelLoadCacheManager( this );
+	}
+
+	// Shutdown( true ) stops the worker, so filesystem restarts must restore it
+	// before another background file read or pure-pack download is queued.
+	StartBackgroundDownloadThread();
 
 	// if we can't find default.cfg, assume that the paths are
 	// busted and error out now, rather than getting an unreadable
@@ -6092,6 +7662,13 @@ Frees all resources and closes all files
 */
 void idFileSystemLocal::Shutdown( bool reloading ) {
 	searchpath_t *sp, *next, *loop;
+	if ( levelLoadCache != NULL ) {
+		levelLoadCache->Cancel();
+		if ( !reloading ) {
+			delete levelLoadCache;
+			levelLoadCache = NULL;
+		}
+	}
 
 	StopBackgroundDownloadThread();
 
@@ -6113,8 +7690,12 @@ void idFileSystemLocal::Shutdown( bool reloading ) {
 		addonChecksums.Clear();
 	}
 	loadedFileFromDir = false;
+	loadedImageCacheFromDir = false;
+	pureImageCacheEvictionPending = false;
 	gameDLLChecksum = 0;
 	gamePakChecksum = 0;
+	gameModuleOrigin = GAME_MODULE_ORIGIN_NONE;
+	memset( gamePakForOS, 0, sizeof( gamePakForOS ) );
 
 	ClearDirCache();
 
@@ -6141,6 +7722,7 @@ void idFileSystemLocal::Shutdown( bool reloading ) {
 	cmdSystem->RemoveCommand( "dir" );
 	cmdSystem->RemoveCommand( "dirtree" );
 	cmdSystem->RemoveCommand( "touchFile" );
+	cmdSystem->RemoveCommand( "openq4_mapLevelshot" );
 
 	mapDict.Clear();
 }
@@ -6169,7 +7751,7 @@ idFileSystemLocal::FileAllowedFromDir
 ===========
 */
 bool idFileSystemLocal::FileAllowedFromDir( const char *path ) {
-	unsigned int l;
+	size_t l;
 
 	if ( path == NULL ) {
 		return false;
@@ -6218,6 +7800,94 @@ bool idFileSystemLocal::FileAllowedFromDir( const char *path ) {
 
 /*
 ===========
+FS_IsGeneratedImageCachePath
+
+A binary image cache entry that idBinaryImage writes under generated/images/.
+It is derived data, and its payload is bound to nothing a client could check
+short of deriving it again: the header's source stamp is the pak member's
+CRC-32 and length, which anyone can copy. So such an entry is never read while
+pure (the directory gate in OpenFileReadSearch still refuses it), and one read
+before the pure lock does not force a restart: SetPureServerChecksums leaves a
+pending eviction instead, and the client reloads every image that came from the
+cache once the lock is in place (idRenderSystem::ReloadGeneratedCacheImages),
+or restarts if that fails. Any other directory read still requires a restart.
+===========
+*/
+static bool FS_IsGeneratedImageCachePath( const char *path ) {
+	static const char prefix[] = "generated/images/";
+	static const char extension[] = ".bimage";
+	const size_t prefixLength = sizeof( prefix ) - 1;
+	const size_t extensionLength = sizeof( extension ) - 1;
+	if ( path == NULL ) {
+		return false;
+	}
+	const size_t length = strlen( path );
+	return length > prefixLength + extensionLength &&
+		idStr::Icmpn( path, prefix, static_cast<int>( prefixLength ) ) == 0 &&
+		idStr::Icmp( path + length - extensionLength, extension ) == 0;
+}
+
+/*
+===========
+FS_IsGeneratedLoadscreenPath
+
+An expanded loading background left by an older build. Builds until
+9 November 2026 composed the wide loading screen of a window that is not 4:3,
+published it under fs_savepath as
+guis/assets/generated/loadscreens/<map>_<w>x<h>.tga and loaded it back through
+the search paths. The session now composes it in memory and never names these
+files (Session_PrepareExpandedLoadingBackground), but they stay in players' save
+folders, and a stray reference can still open one: an older build's learned
+level-load manifest, for example. Like a generated image cache entry such a file
+is openQ4's own derived data, so it is never read while pure: the directory gate
+refuses it. A read before the pure lock leaves the same pending eviction as a
+cache entry instead of a restart, and the client then purges every resident
+image from that folder (idImageManager::ReloadGeneratedCacheImages). Only the
+names those builds wrote qualify: a single segment ending in
+_<width>x<height>.tga.
+===========
+*/
+static bool FS_IsGeneratedLoadscreenPath( const char *path ) {
+	static const char prefix[] = "guis/assets/generated/loadscreens/";
+	static const char extension[] = ".tga";
+	const size_t prefixLength = sizeof( prefix ) - 1;
+	const size_t extensionLength = sizeof( extension ) - 1;
+	if ( path == NULL ) {
+		return false;
+	}
+	const size_t length = strlen( path );
+	if ( length <= prefixLength + extensionLength ||
+		idStr::Icmpn( path, prefix, static_cast<int>( prefixLength ) ) != 0 ||
+		idStr::Icmp( path + length - extensionLength, extension ) != 0 ) {
+		return false;
+	}
+	const char *name = path + prefixLength;
+	const char *cursor = path + length - extensionLength;
+	for ( const char *c = name; c < cursor; c++ ) {
+		if ( *c == '/' || *c == '\\' ) {
+			return false;
+		}
+	}
+	// walk back over <height>, 'x', <width> and '_'; a map name must remain
+	const char *digits = cursor;
+	while ( cursor > name && cursor[ -1 ] >= '0' && cursor[ -1 ] <= '9' ) {
+		cursor--;
+	}
+	if ( cursor == digits || cursor == name || ( cursor[ -1 ] != 'x' && cursor[ -1 ] != 'X' ) ) {
+		return false;
+	}
+	digits = --cursor;
+	while ( cursor > name && cursor[ -1 ] >= '0' && cursor[ -1 ] <= '9' ) {
+		cursor--;
+	}
+	if ( cursor == digits || cursor == name || cursor[ -1 ] != '_' ) {
+		return false;
+	}
+	return cursor - 1 > name;
+}
+
+/*
+===========
 idFileSystemLocal::GetPackStatus
 ===========
 */
@@ -6237,6 +7907,11 @@ pureStatus_t idFileSystemLocal::GetPackStatus( pack_t *pak ) {
 	if ( IsOpenQ4PurePack( pak ) ) {
 		pak->pureStatus = PURE_ALWAYS;
 		return PURE_ALWAYS;
+	}
+	// Client-only packs never enter a pure list, and stay readable on a pure server.
+	if ( IsOpenQ4ClientOnlyPack( pak ) ) {
+		pak->pureStatus = PURE_NEVER;
+		return PURE_NEVER;
 	}
 
 	// Keep stock Prey base media in the pure list no matter its contents.
@@ -6326,6 +8001,8 @@ idFile_InZip * idFileSystemLocal::ReadFileFromZip( pack_t *pak, fileInPack_t *pa
 	file->zipFilePos = pakFile->pos;
 	file->fileSize = static_cast<int>( zfi->cur_file_info.uncompressed_size );
 	file->containerChecksum = pak->checksum;
+	// the index entry, not cur_file_info, so a full open matches the probe
+	file->contentCrc = pakFile->crc;
 	return file;
 }
 
@@ -6340,6 +8017,23 @@ separate file or a ZIP file.
 ===========
 */
 idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir ) {
+	return OpenFileReadSearch( relativePath, searchFlags, foundInPak, allowCopyFiles, gamedir, NULL );
+}
+
+/*
+===========
+idFileSystemLocal::OpenFileReadSearch
+
+The search behind OpenFileReadFlags. With a probe, a pk4 member that wins the
+search is reported through it rather than opened: the probe receives the
+member's uncompressed length and NULL is returned. The pak is still marked
+referenced and the asset log still records the path, exactly as an open would.
+Only the level-load source manifest is skipped, since nothing is read.
+Directory files are opened as usual, so callers handle a returned file the
+same way with or without a probe.
+===========
+*/
+idFile *idFileSystemLocal::OpenFileReadSearch( const char *relativePath, int searchFlags, pack_t **foundInPak, bool allowCopyFiles, const char* gamedir, packMemberProbe_t *probe ) {
 	searchpath_t *	search;
 	idStr			netpath;
 	pack_t *		pak;
@@ -6359,6 +8053,11 @@ idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int sear
 	if ( foundInPak ) {
 		*foundInPak = NULL;
 	}
+	if ( probe ) {
+		probe->found = false;
+		probe->length = -1;
+		probe->crc = 0;
+	}
 
 	// qpaths are not supposed to have a leading slash
 	if ( relativePath[0] == '/' || relativePath[0] == '\\' ) {
@@ -6367,11 +8066,11 @@ idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int sear
 
 	// make absolutely sure that it can't back up the path.
 	// The searchpaths do guarantee that something will always
-	// be prepended, so we don't need to worry about "c:" or "//limbo" 
+	// be prepended, so we don't need to worry about "c:" or "//limbo"
 	if ( strstr( relativePath, ".." ) || strstr( relativePath, "::" ) ) {
 		return NULL;
 	}
-	
+
 	// edge case
 	if ( relativePath[0] == '\0' ) {
 		return NULL;
@@ -6383,7 +8082,14 @@ idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int sear
 
 	hash = HashFileName( relativePath );
 
+    const bool protectCampaignNavigation = !gameFolder.Icmp( "q4xbase" ) &&
+        ( !idStr::Icmp( relativePath, "default.cfg" ) || !idStr::Icmp( relativePath, "guis/mainmenu.gui" ) ||
+          !idStr::Icmp( relativePath, "guis/arena_menu.gui" ) || !idStr::Icmp( relativePath, "guis/campaign_menu.gui" ) ||
+          !idStr::Icmpn( relativePath, "guis/menu/", 10 ) );
 	for ( search = searchPaths; search; search = search->next ) {
+        if ( protectCampaignNavigation &&
+             ( (search->dir && !search->dir->gamedir.Icmp( "q4xbase" )) ||
+               (search->pack && IsGameDirPack( search->pack, "q4xbase" )) ) ) continue;
 		if ( search->dir && ( searchFlags & FSFLAG_SEARCH_DIRS ) ) {
 			// check a file in the directory tree
 
@@ -6403,6 +8109,10 @@ idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int sear
 				}
 			}
 			
+			if ( LooseDirectoryMissing( dir, relativePath ) ) {
+				continue;
+			}
+
 			netpath = BuildOSPath( dir->path, dir->gamedir, relativePath );
 			fp = OpenOSFileCorrectName( netpath, "rb" );
 			if ( !fp ) {
@@ -6419,7 +8129,18 @@ idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int sear
 				common->Printf( "idFileSystem::OpenFileRead: %s (found in '%s/%s')\n", relativePath, dir->path.c_str(), dir->gamedir.c_str() );
 			}
 
-			if ( !loadedFileFromDir && !FileAllowedFromDir( relativePath ) ) {
+			if ( FS_IsGeneratedImageCachePath( relativePath ) || FS_IsGeneratedLoadscreenPath( relativePath ) ) {
+				// openQ4's own derived images: a pure lock evicts them instead
+				// of restarting the engine. See FS_IsGeneratedImageCachePath
+				// and FS_IsGeneratedLoadscreenPath.
+				if ( !loadedImageCacheFromDir ) {
+					if ( restartChecksums.Num() ) {
+						common->FatalError( "'%s' loaded from directory: Failed to restart with pure mode restrictions for server connect", relativePath );
+					}
+					common->DPrintf( "filesystem: switching to pure mode will evict generated images. '%s' is a generated image.\n", relativePath );
+					loadedImageCacheFromDir = true;
+				}
+			} else if ( !loadedFileFromDir && !FileAllowedFromDir( relativePath ) ) {
 				if ( restartChecksums.Num() ) {
 					common->FatalError( "'%s' loaded from directory: Failed to restart with pure mode restrictions for server connect", relativePath );
 				}
@@ -6485,10 +8206,16 @@ idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int sear
 			}
 
 			AddAssetLogEntry( relativePath );
-			return file;
+			RecordOpenedLevelLoadSource( relativePath, file );
+			return UsePreloadedLevelLoadSource( relativePath, file );
 		} else if ( search->pack && ( searchFlags & FSFLAG_SEARCH_PAKS ) ) {
 
 			if ( !search->pack->hashTable[hash] ) {
+				continue;
+			}
+
+			// a game directory restriction covers its paks as well as its loose files
+			if ( gamedir && gamedir[0] && !IsGameDirPack( search->pack, gamedir ) ) {
 				continue;
 			}
 
@@ -6525,9 +8252,12 @@ idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int sear
 			for ( pakFile = pak->hashTable[hash]; pakFile; pakFile = pakFile->next ) {
 				// case and separator insensitive comparisons
 				if ( !FilenameCompare( pakFile->name, relativePath ) ) {
-					idFile_InZip *file = ReadFileFromZip( pak, pakFile, relativePath );
-					if ( file == NULL ) {
-						continue;
+					idFile_InZip *file = NULL;
+					if ( probe == NULL ) {
+						file = ReadFileFromZip( pak, pakFile, relativePath );
+						if ( file == NULL ) {
+							continue;
+						}
 					}
 
 					if ( foundInPak ) {
@@ -6546,7 +8276,14 @@ idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int sear
 						common->Printf( "idFileSystem::OpenFileRead: %s (found in '%s')\n", relativePath, pak->pakFilename.c_str() );
 					}
 					AddAssetLogEntry( relativePath );
-					return file;
+					if ( probe != NULL ) {
+						probe->found = true;
+						probe->length = static_cast<int>( pakFile->size );
+						probe->crc = pakFile->crc;
+						return NULL;
+					}
+					RecordOpenedLevelLoadSource( relativePath, file );
+					return UsePreloadedLevelLoadSource( relativePath, file );
 				}
 			}
 		}
@@ -6559,9 +8296,12 @@ idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int sear
 			pak = search->pack;
 			for ( pakFile = pak->hashTable[hash]; pakFile; pakFile = pakFile->next ) {
 				if ( !FilenameCompare( pakFile->name, relativePath ) ) {
-					idFile_InZip *file = ReadFileFromZip( pak, pakFile, relativePath );
-					if ( file == NULL ) {
-						continue;
+					idFile_InZip *file = NULL;
+					if ( probe == NULL ) {
+						file = ReadFileFromZip( pak, pakFile, relativePath );
+						if ( file == NULL ) {
+							continue;
+						}
 					}
 					if ( foundInPak ) {
 						*foundInPak = pak;
@@ -6571,7 +8311,14 @@ idFile *idFileSystemLocal::OpenFileReadFlags( const char *relativePath, int sear
 						common->Printf( "idFileSystem::OpenFileRead: %s (found in addon pk4 '%s')\n", relativePath, search->pack->pakFilename.c_str() );
 					}
 					AddAssetLogEntry( relativePath );
-					return file;
+					if ( probe != NULL ) {
+						probe->found = true;
+						probe->length = static_cast<int>( pakFile->size );
+						probe->crc = pakFile->crc;
+						return NULL;
+					}
+					RecordOpenedLevelLoadSource( relativePath, file );
+					return UsePreloadedLevelLoadSource( relativePath, file );
 				}
 			}
 		}
@@ -6614,6 +8361,11 @@ idFile *idFileSystemLocal::OpenFileWrite( const char *relativePath, const char *
 
 	if ( !searchPaths ) {
 		common->FatalError( "Filesystem call made without initialization\n" );
+	}
+	const char *invalidReason;
+	if ( !FS_ValidateRelativeWritePath( relativePath, &invalidReason ) ) {
+		common->Warning( "idFileSystemLocal::OpenFileWrite: refusing unsafe relative path (%s)", invalidReason );
+		return NULL;
 	}
 
 	path = cvarSystem->GetCVarString( basePath );
@@ -6665,7 +8417,8 @@ idFile *idFileSystemLocal::OpenExplicitFileRead( const char *OSPath ) {
 		common->Printf( "idFileSystem::OpenExplicitFileRead: %s\n", OSPath );
 	}
 
-	common->DPrintf( "idFileSystem::OpenExplicitFileRead - reading from: %s\n", OSPath );
+	// The fs_debug trace above is sufficient. Checkpoint recovery probes this
+	// path repeatedly; developer logging must not flush each existence check.
 
 	f = new idFile_Permanent();
 	f->o = OpenOSFile( OSPath, "rb" );
@@ -6761,6 +8514,11 @@ idFile *idFileSystemLocal::OpenFileAppend( const char *relativePath, bool sync, 
 	if ( !searchPaths ) {
 		common->FatalError( "Filesystem call made without initialization\n" );
 	}
+	const char *invalidReason;
+	if ( !FS_ValidateRelativeWritePath( relativePath, &invalidReason ) ) {
+		common->Warning( "idFileSystemLocal::OpenFileAppend: refusing unsafe relative path (%s)", invalidReason );
+		return NULL;
+	}
 
 	path = cvarSystem->GetCVarString( basePath );
 	if ( !path[0] ) {
@@ -6834,12 +8592,38 @@ back ground loading
 idFileSystemLocal::CurlWriteFunction
 =================
 */
+struct curlDownloadContext_t {
+	backgroundDownload_t *download;
+	const size_t maximumBytes;
+	size_t bytesWritten;
+};
+
 size_t idFileSystemLocal::CurlWriteFunction( void *ptr, size_t size, size_t nmemb, void *stream ) {
-	backgroundDownload_t *bgl = (backgroundDownload_t *)stream;
-	if ( !bgl->f ) {
-		return size * nmemb;
+	curlDownloadContext_t *context = static_cast<curlDownloadContext_t *>( stream );
+	backgroundDownload_t *bgl = context->download;
+	const size_t maximumSize = static_cast<size_t>( -1 );
+	if ( size != 0 && nmemb > maximumSize / size ) {
+		idStr::Copynz( bgl->url.dlerror, "download byte count overflow", MAX_STRING_CHARS );
+		return 0;
 	}
-	return fwrite(ptr, size, nmemb, static_cast<idFile_Permanent*>(bgl->f)->GetFilePtr());
+
+	const size_t byteCount = size * nmemb;
+	if ( context->bytesWritten > maximumSize - byteCount ) {
+		idStr::Copynz( bgl->url.dlerror, "download byte count overflow", MAX_STRING_CHARS );
+		return 0;
+	}
+	if ( context->maximumBytes != 0 &&
+		 ( context->bytesWritten > context->maximumBytes || byteCount > context->maximumBytes - context->bytesWritten ) ) {
+		idStr::Copynz( bgl->url.dlerror, "download exceeds advertised size", MAX_STRING_CHARS );
+		return 0;
+	}
+	if ( !bgl->f ) {
+		return byteCount;
+	}
+
+	const size_t written = fwrite( ptr, 1, byteCount, static_cast<idFile_Permanent *>( bgl->f )->GetFilePtr() );
+	context->bytesWritten += written;
+	return written;
 }
 
 /*
@@ -6852,10 +8636,129 @@ int idFileSystemLocal::CurlProgressFunction( void *clientp, double dltotal, doub
 	if ( bgl->url.status == DL_ABORTING || Sys_IsCurrentThreadStopRequested() ) {
 		return 1;
 	}
-	bgl->url.dltotal = dltotal;
-	bgl->url.dlnow = dlnow;
+	const int reportedTotal = dltotal >= idMath::INT_MAX ? idMath::INT_MAX :
+		( dltotal > 0.0 ? static_cast<int>( dltotal ) : 0 );
+	const int reportedNow = dlnow >= idMath::INT_MAX ? idMath::INT_MAX :
+		( dlnow > 0.0 ? static_cast<int>( dlnow ) : 0 );
+	if ( bgl->url.expectedSize > 0 ) {
+		bgl->url.dltotal = bgl->url.expectedSize;
+		bgl->url.dlnow = Min( reportedNow, bgl->url.expectedSize );
+	} else {
+		bgl->url.dltotal = reportedTotal;
+		bgl->url.dlnow = reportedNow;
+	}
 	return 0;
 }
+
+#if ID_ENABLE_CURL
+static bool fsCurlGlobalInitialized = false;
+static bool fsCurlHTTPReady = false;
+
+static void FS_ShutdownCurl() {
+	fsCurlHTTPReady = false;
+	if ( fsCurlGlobalInitialized ) {
+		curl_global_cleanup();
+		fsCurlGlobalInitialized = false;
+	}
+}
+
+static bool FS_InitializeCurl() {
+#if !OPENQ4_CURL_CAPABLE_BUILD
+	common->Warning( "HTTP downloads disabled: libcurl 7.19.4 or newer with asynchronous DNS is required" );
+	return false;
+#else
+	if ( fsCurlHTTPReady ) {
+		return true;
+	}
+
+	const CURLcode initResult = curl_global_init( CURL_GLOBAL_DEFAULT );
+	if ( initResult != CURLE_OK ) {
+		common->Warning( "HTTP downloads disabled: curl_global_init failed (%s)", curl_easy_strerror( initResult ) );
+		return false;
+	}
+	fsCurlGlobalInitialized = true;
+
+	const curl_version_info_data *versionInfo = curl_version_info( CURLVERSION_NOW );
+	bool hasHTTP = false;
+	if ( versionInfo != NULL && versionInfo->protocols != NULL ) {
+		for ( const char *const *protocol = versionInfo->protocols; *protocol != NULL; ++protocol ) {
+			if ( idStr::Icmp( *protocol, "http" ) == 0 ) {
+				hasHTTP = true;
+				break;
+			}
+		}
+	}
+	if ( versionInfo == NULL || versionInfo->version_num < 0x071304 ||
+		 ( versionInfo->features & CURL_VERSION_ASYNCHDNS ) == 0 || !hasHTTP ) {
+		common->Warning( "HTTP downloads disabled: libcurl lacks the required version, HTTP, or asynchronous-DNS capability" );
+		FS_ShutdownCurl();
+		return false;
+	}
+
+	fsCurlHTTPReady = true;
+	return true;
+#endif
+}
+
+class idScopedCurlEasySession {
+public:
+	explicit idScopedCurlEasySession( CURL *session ) : session( session ) {}
+	~idScopedCurlEasySession() {
+		curl_easy_cleanup( session );
+	}
+
+private:
+	idScopedCurlEasySession( const idScopedCurlEasySession & ) = delete;
+	idScopedCurlEasySession &operator=( const idScopedCurlEasySession & ) = delete;
+	CURL *session;
+};
+
+static CURLcode FS_ConfigureBoundedHTTPTransfer( CURL *session ) {
+#if !OPENQ4_CURL_CAPABLE_BUILD
+	return CURLE_FAILED_INIT;
+#else
+	CURLcode result;
+
+	// Keep package transfer and shutdown behavior bounded even when a remote
+	// endpoint accepts a connection and then stops making progress. Protocol
+	// masks are repeated here so future callers cannot bypass URLPolicy by
+	// reaching libcurl directly.
+	result = curl_easy_setopt( session, CURLOPT_PROTOCOLS, static_cast<long>( CURLPROTO_HTTP | CURLPROTO_HTTPS ) );
+	if ( result != CURLE_OK ) {
+		return result;
+	}
+	result = curl_easy_setopt( session, CURLOPT_REDIR_PROTOCOLS, static_cast<long>( CURLPROTO_HTTP | CURLPROTO_HTTPS ) );
+	if ( result != CURLE_OK ) {
+		return result;
+	}
+	result = curl_easy_setopt( session, CURLOPT_FOLLOWLOCATION, 0L );
+	if ( result != CURLE_OK ) {
+		return result;
+	}
+	result = curl_easy_setopt( session, CURLOPT_MAXREDIRS, 0L );
+	if ( result != CURLE_OK ) {
+		return result;
+	}
+	result = curl_easy_setopt( session, CURLOPT_CONNECTTIMEOUT, 15L );
+	if ( result != CURLE_OK ) {
+		return result;
+	}
+	result = curl_easy_setopt( session, CURLOPT_LOW_SPEED_LIMIT, 1024L );
+	if ( result != CURLE_OK ) {
+		return result;
+	}
+	result = curl_easy_setopt( session, CURLOPT_LOW_SPEED_TIME, 30L );
+	if ( result != CURLE_OK ) {
+		return result;
+	}
+	result = curl_easy_setopt( session, CURLOPT_TIMEOUT, 3600L );
+	if ( result != CURLE_OK ) {
+		return result;
+	}
+	return curl_easy_setopt( session, CURLOPT_NOSIGNAL, 1L );
+#endif
+}
+#endif
 
 /*
 ===================
@@ -6887,12 +8790,34 @@ dword BackgroundDownloadThread( void *parms ) {
 			// use the low level read function, because fread may allocate memory
 			fread(bgl->file.buffer, bgl->file.length, 1, static_cast<idFile_Permanent*>(bgl->f)->GetFilePtr());
 			bgl->completed = true;
-		} else {
+		} else if ( bgl->opcode == DLTYPE_URL ) {
 #if ID_ENABLE_CURL
+			dlStatus_t expectedStatus = DL_WAIT;
+			if ( !bgl->url.status.compare_exchange_strong( expectedStatus, DL_INPROGRESS ) ) {
+				bgl->url.dlstatus = -1;
+				bgl->url.status = DL_FAILED;
+				idStr::Copynz( bgl->url.dlerror,
+					expectedStatus == DL_ABORTING ? "download cancelled" : "invalid download state",
+					MAX_STRING_CHARS );
+				bgl->completed = true;
+				continue;
+			}
+			if ( !fsCurlHTTPReady ) {
+				bgl->url.dlstatus = CURLE_FAILED_INIT;
+				bgl->url.status = DL_FAILED;
+				idStr::Copynz( bgl->url.dlerror,
+					"HTTP download support is unavailable with this libcurl runtime",
+					MAX_STRING_CHARS );
+				bgl->completed = true;
+				continue;
+			}
 			// DLTYPE_URL
 			// use a local buffer for curl error since the size define is local
 			char error_buf[ CURL_ERROR_SIZE ];
+			error_buf[ 0 ] = '\0';
 			bgl->url.dlerror[ 0 ] = '\0';
+			const size_t maximumBytes = bgl->url.expectedSize > 0 ? static_cast<size_t>( bgl->url.expectedSize ) : 0;
+			curlDownloadContext_t downloadContext = { bgl, maximumBytes, 0 };
 			CURL *session = curl_easy_init();
 			CURLcode ret;
 			if ( !session ) {
@@ -6901,6 +8826,7 @@ dword BackgroundDownloadThread( void *parms ) {
 				bgl->completed = true;
 				continue;
 			}
+			idScopedCurlEasySession scopedSession( session );
 			ret = curl_easy_setopt( session, CURLOPT_ERRORBUFFER, error_buf );
 			if ( ret ) {
 				bgl->url.dlstatus = ret;
@@ -6915,7 +8841,14 @@ dword BackgroundDownloadThread( void *parms ) {
 				bgl->completed = true;
 				continue;
 			}
-			ret = curl_easy_setopt( session, CURLOPT_FAILONERROR, 1 );
+			ret = FS_ConfigureBoundedHTTPTransfer( session );
+			if ( ret ) {
+				bgl->url.dlstatus = ret;
+				bgl->url.status = DL_FAILED;
+				bgl->completed = true;
+				continue;
+			}
+			ret = curl_easy_setopt( session, CURLOPT_FAILONERROR, 1L );
 			if ( ret ) {
 				bgl->url.dlstatus = ret;
 				bgl->url.status = DL_FAILED;
@@ -6929,14 +8862,14 @@ dword BackgroundDownloadThread( void *parms ) {
 				bgl->completed = true;
 				continue;
 			}
-			ret = curl_easy_setopt( session, CURLOPT_WRITEDATA, bgl );
+			ret = curl_easy_setopt( session, CURLOPT_WRITEDATA, &downloadContext );
 			if ( ret ) {
 				bgl->url.dlstatus = ret;
 				bgl->url.status = DL_FAILED;
 				bgl->completed = true;
 				continue;
 			}
-			ret = curl_easy_setopt( session, CURLOPT_NOPROGRESS, 0 );
+			ret = curl_easy_setopt( session, CURLOPT_NOPROGRESS, 0L );
 			if ( ret ) {
 				bgl->url.dlstatus = ret;
 				bgl->url.status = DL_FAILED;
@@ -6959,22 +8892,49 @@ dword BackgroundDownloadThread( void *parms ) {
 			}
 			bgl->url.dlnow = 0;
 			bgl->url.dltotal = 0;
-			bgl->url.status = DL_INPROGRESS;
 			ret = curl_easy_perform( session );
 			if ( ret ) {
-				Sys_Printf( "curl_easy_perform failed: %s\n", error_buf );
-				idStr::Copynz( bgl->url.dlerror, error_buf, MAX_STRING_CHARS );
+				const char *errorMessage = bgl->url.dlerror[ 0 ] != '\0' ? bgl->url.dlerror :
+					( error_buf[ 0 ] != '\0' ? error_buf : curl_easy_strerror( ret ) );
+				Sys_Printf( "curl_easy_perform failed: %s\n", errorMessage );
+				if ( bgl->url.dlerror[ 0 ] == '\0' ) {
+					idStr::Copynz( bgl->url.dlerror, errorMessage, MAX_STRING_CHARS );
+				}
 				bgl->url.dlstatus = ret;
 				bgl->url.status = DL_FAILED;
 				bgl->completed = true;
 				continue;
 			}
-			bgl->url.status = DL_DONE;
+			if ( downloadContext.maximumBytes != 0 && downloadContext.bytesWritten != downloadContext.maximumBytes ) {
+				idStr::snPrintf( bgl->url.dlerror, MAX_STRING_CHARS,
+					"download size mismatch: received %zu bytes, expected %zu",
+					downloadContext.bytesWritten, downloadContext.maximumBytes );
+				Sys_Printf( "%s\n", bgl->url.dlerror );
+				bgl->url.dlstatus = CURLE_PARTIAL_FILE;
+				bgl->url.status = DL_FAILED;
+				bgl->completed = true;
+				continue;
+			}
+			expectedStatus = DL_INPROGRESS;
+			if ( !bgl->url.status.compare_exchange_strong( expectedStatus, DL_DONE ) ) {
+				bgl->url.dlstatus = -1;
+				bgl->url.status = DL_FAILED;
+				idStr::Copynz( bgl->url.dlerror,
+					expectedStatus == DL_ABORTING ? "download cancelled" : "invalid download completion state",
+					MAX_STRING_CHARS );
+			}
 			bgl->completed = true;
 #else
 			bgl->url.status = DL_FAILED;
+			bgl->url.dlstatus = -1;
+			idStr::Copynz( bgl->url.dlerror, "HTTP download support is unavailable in this build", MAX_STRING_CHARS );
 			bgl->completed = true;
 #endif
+		} else {
+			bgl->url.status = DL_FAILED;
+			bgl->url.dlstatus = -1;
+			idStr::Copynz( bgl->url.dlerror, "unsupported background download operation", MAX_STRING_CHARS );
+			bgl->completed = true;
 		}
 	}
 	return 0;
@@ -6987,9 +8947,15 @@ idFileSystemLocal::StartBackgroundReadThread
 */
 void idFileSystemLocal::StartBackgroundDownloadThread() {
 	if ( !backgroundThread.threadHandle ) {
+#if ID_ENABLE_CURL
+		FS_InitializeCurl();
+#endif
 		Sys_CreateThread( (xthread_t)BackgroundDownloadThread, NULL, THREAD_NORMAL, backgroundThread, "backgroundDownload", g_threads, &g_thread_count );
 		if ( !backgroundThread.threadHandle ) {
 			common->Warning( "idFileSystemLocal::StartBackgroundDownloadThread: failed" );
+#if ID_ENABLE_CURL
+			FS_ShutdownCurl();
+#endif
 		}
 	} else {
 		common->Printf( "background thread already running\n" );
@@ -7021,6 +8987,10 @@ void idFileSystemLocal::StopBackgroundDownloadThread() {
 		bgl->completed = true;
 		bgl = next;
 	}
+
+#if ID_ENABLE_CURL
+	FS_ShutdownCurl();
+#endif
 }
 
 /*
@@ -7029,6 +8999,28 @@ idFileSystemLocal::BackgroundDownload
 =================
 */
 void idFileSystemLocal::BackgroundDownload( backgroundDownload_t *bgl ) {
+	if ( bgl == NULL ) {
+		return;
+	}
+	if ( bgl->opcode != DLTYPE_FILE && bgl->opcode != DLTYPE_URL ) {
+		bgl->url.status = DL_FAILED;
+		bgl->url.dlstatus = -1;
+		idStr::Copynz( bgl->url.dlerror, "unsupported background download operation", sizeof( bgl->url.dlerror ) );
+		bgl->completed = true;
+		return;
+	}
+	if ( bgl->opcode == DLTYPE_URL && !idURLPolicy::IsAllowedHTTPURL( bgl->url.url.c_str() ) ) {
+		// Keep the generic downloader fail-closed too. Today the async pure-pack
+		// client is the sole URL producer, but a future caller must not silently
+		// re-enable file:, SMB, or another libcurl-supported protocol.
+		bgl->url.status = DL_FAILED;
+		bgl->url.dlstatus = -1;
+		idStr::Copynz( bgl->url.dlerror,
+			"download URL must be bounded HTTP or HTTPS with a host",
+			sizeof( bgl->url.dlerror ) );
+		bgl->completed = true;
+		return;
+	}
 	if ( bgl->opcode == DLTYPE_FILE ) {
 		if ( dynamic_cast<idFile_Permanent *>(bgl->f) ) {
 			// add the bgl to the background download list
@@ -7163,6 +9155,7 @@ void idFileSystemLocal::FindDLL( const char *name, char _dllPath[ MAX_OSPATH ], 
 	idFile			*dllFile = NULL;
 	char			dllName[MAX_OSPATH];
 	idStr			dllPath;
+	gameModuleOrigin_t resolvedOrigin = GAME_MODULE_ORIGIN_NONE;
 
 	sys->DLL_GetFileName( name, dllName, MAX_OSPATH );
 
@@ -7198,8 +9191,18 @@ void idFileSystemLocal::FindDLL( const char *name, char _dllPath[ MAX_OSPATH ], 
 	}
 
 	const char *moduleGameDir = fs_game.GetString();
-	if ( !moduleGameDir[0] ) {
+	if ( !moduleGameDir[0] || !idStr::Icmp( moduleGameDir, "q4xbase" ) ) {
 		moduleGameDir = OPENQ4_GAMEDIR;
+	}
+	if ( !idGameDirPolicy::IsPortableSegment( moduleGameDir ) ) {
+		common->Warning( "Refusing game module lookup for unsafe fs_game '%s'", moduleGameDir );
+		if ( updateChecksum ) {
+			gameDLLChecksum = 0;
+			gamePakChecksum = 0;
+			gameModuleOrigin = GAME_MODULE_ORIGIN_NONE;
+		}
+		_dllPath[ 0 ] = '\0';
+		return;
 	}
 	idStr trustedModuleRoots;
 	idStr attemptedModulePaths;
@@ -7212,12 +9215,19 @@ void idFileSystemLocal::FindDLL( const char *name, char _dllPath[ MAX_OSPATH ], 
 	for ( int i = 0; !dllFile && i < numModuleSearchRoots; i++ ) {
 		FS_AppendGameModuleSearchPath( attemptedModulePaths, moduleSearchRoots[i], moduleGameDir, dllName );
 		dllFile = FS_OpenGameModuleFromExeDir( this, moduleSearchRoots[i], moduleGameDir, dllName, dllPath );
+		if ( dllFile ) {
+			resolvedOrigin = idStr::Icmp( moduleGameDir, OPENQ4_GAMEDIR ) == 0 ?
+				GAME_MODULE_ORIGIN_BASE_GAME : GAME_MODULE_ORIGIN_ACTIVE_MOD;
+		}
 	}
 
 	if ( !dllFile && idStr::Icmp( moduleGameDir, OPENQ4_GAMEDIR ) != 0 ) {
 		for ( int i = 0; !dllFile && i < numModuleSearchRoots; i++ ) {
 			FS_AppendGameModuleSearchPath( attemptedModulePaths, moduleSearchRoots[i], OPENQ4_GAMEDIR, dllName );
 			dllFile = FS_OpenGameModuleFromExeDir( this, moduleSearchRoots[i], OPENQ4_GAMEDIR, dllName, dllPath );
+			if ( dllFile ) {
+				resolvedOrigin = GAME_MODULE_ORIGIN_BASE_GAME;
+			}
 		}
 		if ( dllFile ) {
 			common->DPrintf( "Game DLL '%s' not found in mod directory '%s'; falling back to '%s'.\n", dllName, moduleGameDir, OPENQ4_GAMEDIR );
@@ -7229,6 +9239,9 @@ void idFileSystemLocal::FindDLL( const char *name, char _dllPath[ MAX_OSPATH ], 
 		dllPath = moduleSearchRoots[i];
 		dllPath.AppendPath( dllName );
 		dllFile = OpenExplicitFileRead( dllPath );
+		if ( dllFile ) {
+			resolvedOrigin = GAME_MODULE_ORIGIN_PACKAGE_ROOT;
+		}
 	}
 
 	if ( updateChecksum ) {
@@ -7237,7 +9250,8 @@ void idFileSystemLocal::FindDLL( const char *name, char _dllPath[ MAX_OSPATH ], 
 		} else {
 			gameDLLChecksum = 0;
 		}
-		gamePakChecksum = 0;
+		gameModuleOrigin = resolvedOrigin;
+		gamePakChecksum = dllFile ? OPENQ4_Q4_142_GAME300_PAK_CHECKSUM : 0;
 	}
 	if ( dllFile ) {
 		dllPath = dllFile->GetFullPath( );
@@ -7276,7 +9290,9 @@ idFileSystemLocal::HasD3XP
 ===============
 */
 bool idFileSystemLocal::HasD3XP( void ) {
+#if ID_ALLOW_D3XP
 	int			i;
+#endif
 	idStrList	dirs, pk4s;
 	idStr		gamepath;
 
@@ -7392,6 +9408,7 @@ idFileSystemLocal::FindFile
 	}
 	if ( !pak ) {
 		// found in FS, not even in paks
+		delete f;
 		return FIND_YES;
 	}
 	// marking addons for inclusion on reload - may need to do that even when already in the search path
@@ -7484,11 +9501,32 @@ const idDict * idFileSystemLocal::GetMapDecl( int idecl ) {
 /*
 ===============
 idFileSystemLocal::FindMapScreenshot
+
+The levelshot the menus show for a map. A mapDef's "loadimage" comes first, as on
+the map's loading screen: the Awakening's CTF maps have no levelshot of their own
+name and reuse retail's through it. Otherwise it is
+gfx/guis/loadscreens/<map>.tga, one extracted from an addon, or the generic one.
 ===============
 */
 void idFileSystemLocal::FindMapScreenshot( const char *path, char *buf, int len ) {
 	idFile	*file;
 	idStr	mapname = path;
+
+	// a mapDef is named by its map's path under maps/, without the extension
+	idStr declName = path;
+	declName.BackSlashesToSlashes();
+	declName.StripFileExtension();
+	if ( !declName.Icmpn( "maps/", 5 ) ) {
+		declName = declName.Right( declName.Length() - 5 );
+	}
+	const idDeclEntityDef *mapDef = static_cast<const idDeclEntityDef *>( declManager->FindType( DECL_MAPDEF, declName.c_str(), false ) );
+	if ( mapDef != NULL ) {
+		const char *loadImage = mapDef->dict.GetString( "loadimage" );
+		if ( loadImage[ 0 ] != '\0' ) {
+			idStr::Copynz( buf, loadImage, len );
+			return;
+		}
+	}
 
 	mapname.StripPath();
 	mapname.StripFileExtension();
@@ -7498,12 +9536,19 @@ void idFileSystemLocal::FindMapScreenshot( const char *path, char *buf, int len 
 		// try to extract from an addon
 		file = OpenFileReadFlags( buf, FSFLAG_SEARCH_ADDONS );
 		if ( file ) {
-			// save it out to an addon splash directory
+			// save it out to an addon splash directory, unless an earlier
+			// launch already did: the same size, written since the addon
 			int dlen = file->Length();
+			const ID_TIME_T addonTime = file->Timestamp();
+			idStr::snPrintf( buf, len, "guis/assets/splash/addon/%s.tga", mapname.c_str() );
+			ID_TIME_T extractedTime = FILE_NOT_FOUND_TIMESTAMP;
+			if ( ReadFile( buf, NULL, &extractedTime ) == dlen && extractedTime != FILE_NOT_FOUND_TIMESTAMP && extractedTime >= addonTime ) {
+				CloseFile( file );
+				return;
+			}
 			char *data = new char[ dlen ];
 			file->Read( data, dlen );
 			CloseFile( file );
-			idStr::snPrintf( buf, len, "guis/assets/splash/addon/%s.tga", mapname.c_str() );
 			WriteFile( buf, data, dlen );
 			delete[] data;
 		} else {

@@ -1,0 +1,468 @@
+#!/usr/bin/env python3
+"""Execute production retained key routing and usercmd release gates in memory.
+
+SDL queue/window services and shared-view readiness are counted stubs. The
+resource coordinator has separate lifecycle coverage. No device is polled, no
+OS event is injected, and no game window is controlled by this test.
+"""
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+from filesystem_case_segments import function_body
+
+ROOT = Path(__file__).resolve().parents[2]
+
+SUPPORT = r'''
+#include "src/framework/NativeInputDispatch.h"
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <cmath>
+#include <map>
+#include <vector>
+#include <algorithm>
+#include <memory>
+#include <limits>
+#include "src/ui/RetainedUI.h"
+#include "src/ui/retained/Input.h"
+bool retainedOpen = false;
+bool RetainedUI_IsOpen() { return retainedOpen; }
+struct Console { bool active=false; bool Active() const { return active; } } consoleObject;
+Console* console=&consoleObject;
+std::vector<retainedUIInput_t> queued;
+void RetainedUI_QueueInput(const retainedUIInput_t& input, int) { queued.push_back(input); }
+unsigned char Sys_GetConsoleKey(bool shifted) { return shifted ? '~' : '`'; }
+bool s_retainedKeyOwners[K_LAST_KEY]={};
+using Uint8=unsigned char;
+constexpr int SDL_GAMEPAD_BUTTON_COUNT=4, SDL3_MAX_JOYSTICK_BUTTONS=4;
+constexpr Uint8 SDL_HAT_CENTERED=0, SDL_HAT_UP=1, SDL_HAT_RIGHT=2, SDL_HAT_DOWN=4, SDL_HAT_LEFT=8;
+bool s_gamepadButtonsDown[SDL_GAMEPAD_BUTTON_COUNT]={}, s_joystickButtonsDown[SDL3_MAX_JOYSTICK_BUTTONS]={};
+bool s_gamepadLeftTriggerDown=false, s_gamepadRightTriggerDown=false;
+Uint8 s_joystickHatState=SDL_HAT_CENTERED;
+int SDL3_MapGamepadButton(Uint8 button) { return K_JOY3+button; }
+int SDL3_JoyKeyFromOrdinal(int button) { return K_JOY3+button; }
+void SDL3_PostControllerKeyEvent(int key,bool down,int time);
+std::map<int,int> inputKeys;
+struct RadialCvars {
+    int owner=0; bool canceled=false;
+    int GetCVarInteger(const char* name) { assert(std::strcmp(name,"ui_radialOwner")==0);return owner; }
+    void SetCVarBool(const char* name,bool value) { assert(std::strcmp(name,"ui_radialCancel")==0);canceled=value; }
+} radialCvars,*cvarSystem=&radialCvars;
+struct idKeyInput {
+    static inline bool swapped=false;
+    static inline bool touch=false;
+    static bool LastPointerWasTouch() { return touch; }
+    static int MenuControllerKey(int key) { return swapped && (key==K_JOY3 || key==K_JOY4) ? (key==K_JOY3 ? K_JOY4 : K_JOY3) : key; }
+    static inline bool held[K_LAST_KEY]={};
+    static inline int bindings[K_LAST_KEY]={};
+    static bool IsDown(int key) { return key>=0 && key<K_LAST_KEY && held[key]; }
+    static int GetUsercmdAction(int key) { return bindings[key]; }
+    static void PreliminaryKeyEvent(int key, bool down) { held[key]=down; }
+    static void ClearStates() { std::memset(held,0,sizeof(held)); }
+};
+namespace idMath { int Abs(int x) { return std::abs(x); } int ClampChar(int x) { return std::clamp(x,-128,127); } }
+constexpr int UB_NONE=0, UB_ATTACK=1, UB_WEAPONWHEEL=8, UB_QUICKCHAT=9, UB_IMPULSE0=20, UB_IMPULSE14=UB_IMPULSE0+14, UB_IMPULSE15=UB_IMPULSE0+15,
+    UB_IMPULSE127=147, UB_MAX_BUTTONS=160, UCF_IMPULSE_SEQUENCE=1;
+constexpr int AXIS_SIDE=0, AXIS_FORWARD=1, AXIS_UP=2, AXIS_ROLL=3, AXIS_YAW=4, AXIS_PITCH=5, MAX_JOYSTICK_AXIS=6;
+int physicalAxes[MAX_JOYSTICK_AXIS]={};
+bool Sys_GetJoystickAxisState(int axis, int& value) { value=physicalAxes[axis]; return true; }
+int Sys_PollJoystickInputEvents() { return MAX_JOYSTICK_AXIS; }
+bool Sys_ReturnJoystickInputEvent(int i, int& axis, int& value) { axis=i; value=physicalAxes[i]; return true; }
+void Sys_EndJoystickInputEvents() {}
+bool IsWeaponSelectionImpulse(int) { return false; }
+int latencyFlashArms=0; void Usercmd_ArmLatencyFlash() { ++latencyFlashArms; }
+struct idUsercmdGenLocal {
+    int buttonState[UB_MAX_BUTTONS]={};
+    bool keyState[K_LAST_KEY]={}, directButtonState[UB_MAX_BUTTONS]={};
+    bool retainedKeyBlocked[K_LAST_KEY]={}, retainedDirectBlocked[UB_MAX_BUTTONS]={}, retainedAxisBlocked[MAX_JOYSTICK_AXIS]={};
+    int joystickAxis[MAX_JOYSTICK_AXIS]={};
+    int inhibitCommands=0, mouseDx=0, mouseDy=0, mouseButton=0, filtersReset=0;
+    bool mouseDown=false;
+    struct Toggle { void Clear() {} } toggled_zoom;
+    struct Cmd { int impulse=0,flags=0; } cmd;
+    void ResetMouseFilter() { ++filtersReset; }
+    bool nativeUnknownKeyBlocked[K_LAST_KEY]={};bool nativeSourceExhausted=false;
+    struct NativeHold{bool down=false;int key=0;} nativeHeldSources[512];
+    // The held scoreboard's scrolling (14.14): scrolled rows.
+    bool scoreboardScrolls=false; int scoreboardStickDirection=0, scoreboardStickRepeat=0, scrolled=0;
+    bool ScoreboardScrolls() { return scoreboardScrolls; } void ScrollScoreboard(int rows) { scrolled+=rows; }
+    bool NativeKeyBlocked(int) const noexcept;
+    bool Inhibited(); void Clear(); void Key(int,bool); void SetButtonAction(int,bool);
+    void SetUsercmdButton(int,bool); void Joystick(); void RetainedInputChanged();
+};
+template<class T> T Max(T a,T b) { return std::max(a,b); }
+struct FakeRuntime {
+    std::vector<openq4::ui::RoutedInput> received;
+    std::vector<openq4::ui::ControlAction> actions;
+    float x=0,y=0;
+    int cancels=0;
+    void CancelInput(double) { ++cancels; }
+    void PointerButton(bool down,double) { received.push_back({openq4::ui::RoutedInput::Kind::PointerButton,openq4::ui::MenuInput::Accept,down}); }
+    void PointerMove(float a,float b,double) { x=a;y=b; }
+    bool touchPointer=false;
+    void SetTouchPointer(bool touch) { touchPointer=touch; }
+    void MenuAction(openq4::ui::MenuInput menu,bool down,double) {
+        received.push_back({openq4::ui::RoutedInput::Kind::Menu,menu,down});
+        if(menu==openq4::ui::MenuInput::Back && down) actions.push_back({openq4::ui::ControlAction::Kind::Back,"doc","",""});
+    }
+    bool PopModal(double) { return false; }
+    std::vector<openq4::ui::ControlAction> TakeActions() { auto result=actions;actions.clear();return result; }
+};
+std::unique_ptr<FakeRuntime> runtime;
+// Editor view lifetime is outside this input-routing fixture.
+struct EditCall {};
+openq4::ui::Input input;
+bool inputFocused=true,inputSuspended=false,inputResourceSuspended=false,analogNeedsNeutral=true;
+bool InputFocused() { return inputFocused; }
+int analogDirection=-1;
+unsigned inputGeneration=1,closes=0;
+double now=0;
+double PresentationTime() { return now; }
+std::vector<openq4::ui::ControlAction> applicationRequests;
+struct { int uiViewportWidth=1280,uiViewportHeight=720; } engineWindowState;
+struct Common { void Warning(const char*) { assert(false); } } commonObject;
+Common* common=&commonObject;
+void Close() { ++closes;retainedOpen=false; }
+// Only model the coordinator's readiness and ownership-change boundary here;
+// ui_retained_resource_lifecycle.py executes its production lifecycle code.
+void CancelInput(bool forgetSources, bool cancelDocument);
+bool mockReady=true, mockRefreshGeneration=false;
+unsigned readyChecks=0;
+bool PreviewReady() {
+    ++readyChecks;
+    if(mockRefreshGeneration) {
+        mockRefreshGeneration=false;
+        CancelInput(false,false);inputKeys.clear();++inputGeneration;
+    }
+    return mockReady && runtime!=nullptr;
+}
+'''
+
+MAIN = r'''
+int main() {
+    using openq4::ui::MenuInput;
+    MenuInput action=MenuInput::Back;
+    assert(MapMenuKey(K_JOY3,action) && action==MenuInput::Accept);
+    assert(MapMenuKey(K_JOY4,action) && action==MenuInput::Back);
+    assert(!MapMenuKey(K_JOY1,action)); // SDL maps this to the left shoulder.
+    // Swap Confirm and Back: east accepts and south goes back.
+    idKeyInput::swapped=true;
+    assert(MapMenuKey(K_JOY4,action) && action==MenuInput::Accept);
+    assert(MapMenuKey(K_JOY3,action) && action==MenuInput::Back);
+    assert(MapMenuKey(K_ENTER,action) && action==MenuInput::Accept);
+    idKeyInput::swapped=false;
+    inputKeys[101]=K_SHIFT; inputKeys[102]=K_SHIFT;
+    assert(MapMenuKey(K_TAB,action) && action==MenuInput::Previous);
+    inputKeys.erase(101);
+    assert(MapMenuKey(K_TAB,action) && action==MenuInput::Previous);
+    inputKeys.clear(); assert(MapMenuKey(K_TAB,action) && action==MenuInput::Next);
+    retainedOpen=true;
+    assert(SDL3_QueueRetainedKey(K_ENTER,true,false,1050,0));
+    assert(queued.size()==1 && queued[0].source==1050 && queued[0].down && !queued[0].repeated);
+    assert(SDL3_QueueRetainedKey(K_ENTER,true,true,1050,1));
+    assert(queued.back().repeated);
+    retainedOpen=false;
+    assert(SDL3_QueueRetainedKey(K_ENTER,true,true,1050,2)); // Old-owner repeat must not run a binding.
+    assert(queued.size()==2);
+    assert(!SDL3_QueueRetainedKey(K_ENTER,false,false,1050,3));
+    assert(!SDL3_QueueRetainedKey(K_ENTER,true,false,1050,4));
+    retainedOpen=true;
+    assert(!SDL3_QueueRetainedKey('`',true,false,1051,5));
+    assert(!SDL3_QueueRetainedKey('~',true,false,1051,5));
+    consoleObject.active=true;
+    assert(!SDL3_QueueRetainedKey(K_UPARROW,true,false,1052,6));
+    consoleObject.active=false;
+    SDL3_QueueRetainedPointer(91.125f,42.375f,7);
+    assert(queued.back().x==91.125f && queued.back().y==42.375f);
+    SDL3_QueueRetainedFocus(false,8);
+    assert(queued.back().kind==retainedUIInput_t::FOCUS && !queued.back().down);
+    assert(!SDL3_QueueRetainedKey(-1,true,false,0,9));
+    queued.clear();s_gamepadButtonsDown[0]=true;s_gamepadButtonsDown[1]=true;
+    s_gamepadLeftTriggerDown=true;s_gamepadRightTriggerDown=true;
+    SDL3_ReleaseGamepadState(10);
+    assert(queued.size()==5 && queued.front().kind==retainedUIInput_t::CANCEL);
+    for(size_t i=1;i<queued.size();++i) assert(queued[i].kind==retainedUIInput_t::KEY && !queued[i].down);
+    assert(!s_gamepadButtonsDown[0] && !s_gamepadButtonsDown[1] && !s_gamepadLeftTriggerDown && !s_gamepadRightTriggerDown);
+    queued.clear();s_joystickButtonsDown[0]=true;s_joystickHatState=SDL_HAT_UP|SDL_HAT_RIGHT;
+    SDL3_ReleaseJoystickState(11);
+    assert(queued.size()==4 && queued.front().kind==retainedUIInput_t::CANCEL);
+    for(size_t i=1;i<queued.size();++i) assert(queued[i].kind==retainedUIInput_t::KEY && !queued[i].down);
+    assert(!s_joystickButtonsDown[0] && s_joystickHatState==SDL_HAT_CENTERED);
+
+    idUsercmdGenLocal usercmd;
+    usercmd.Clear(); retainedOpen=false;
+    idKeyInput::bindings['w']=3; idKeyInput::bindings[K_ENTER]=2;
+    idKeyInput::bindings[K_F5]=UB_IMPULSE0+4;
+    idKeyInput::held['w']=true;
+    usercmd.Key('w',true); assert(usercmd.buttonState[3]==1);
+    usercmd.mouseDx=73; usercmd.mouseDy=-44;
+    physicalAxes[AXIS_YAW]=90; physicalAxes[AXIS_ROLL]=127;
+    retainedOpen=true; usercmd.RetainedInputChanged();
+    assert(usercmd.Inhibited() && usercmd.buttonState[3]==0);
+    assert(usercmd.mouseDx==0 && usercmd.mouseDy==0 && usercmd.filtersReset==1);
+    usercmd.Key('w',true); usercmd.Key(K_ENTER,true); usercmd.Key(K_F5,true);
+    idKeyInput::held[K_ENTER]=true; idKeyInput::held[K_F5]=true;
+    usercmd.SetUsercmdButton(5,true);
+    assert(usercmd.buttonState[3]==0 && usercmd.buttonState[2]==0 && usercmd.cmd.flags==0);
+    usercmd.Joystick(); assert(usercmd.joystickAxis[AXIS_YAW]==0);
+    retainedOpen=false; usercmd.RetainedInputChanged();
+    assert(!usercmd.Inhibited());
+    usercmd.Key('w',true); usercmd.Key(K_ENTER,true); usercmd.Key(K_F5,true);
+    usercmd.SetUsercmdButton(5,true); usercmd.Joystick();
+    assert(usercmd.buttonState[2]==0 && usercmd.buttonState[5]==0 && usercmd.cmd.flags==0);
+    assert(usercmd.joystickAxis[AXIS_YAW]==0 && usercmd.joystickAxis[AXIS_ROLL]==127);
+    usercmd.Key('w',false); usercmd.Key(K_ENTER,false); usercmd.Key(K_F5,false); usercmd.SetUsercmdButton(5,false);
+    idKeyInput::held['w']=false; idKeyInput::held[K_ENTER]=false; idKeyInput::held[K_F5]=false;
+    physicalAxes[AXIS_YAW]=8; usercmd.Joystick(); assert(usercmd.joystickAxis[AXIS_YAW]==0);
+    physicalAxes[AXIS_YAW]=90; usercmd.Joystick(); assert(usercmd.joystickAxis[AXIS_YAW]==90);
+    usercmd.Key(K_ENTER,true); usercmd.Key(K_F5,true); usercmd.SetUsercmdButton(5,true);
+    assert(usercmd.buttonState[2]==1 && usercmd.buttonState[5]==1 && usercmd.cmd.impulse==4 && usercmd.cmd.flags==1);
+    usercmd.inhibitCommands=2; usercmd.RetainedInputChanged(); assert(usercmd.Inhibited());
+    usercmd.Clear(); assert(!usercmd.Inhibited());
+    retainedOpen=true;usercmd.RetainedInputChanged();usercmd.Key(K_ENTER,true);
+    // The ordered UI path sees key-up before the polled path drains it.
+    idKeyInput::held[K_ENTER]=false;retainedOpen=false;usercmd.RetainedInputChanged();
+    usercmd.Key(K_ENTER,true);assert(usercmd.buttonState[2]==1);
+    usercmd.Clear();
+    // East/Back cancels either gameplay radial selector without pressing its
+    // crouch binding. Quarantine lasts until release, then normal play resumes.
+    idKeyInput::bindings[K_JOY4]=3;
+    for(int owner:{1,2}) {
+        radialCvars.owner=owner;radialCvars.canceled=false;
+        usercmd.Key(K_JOY4,true);
+        assert(radialCvars.canceled && usercmd.buttonState[3]==0 && !usercmd.keyState[K_JOY4]);
+        radialCvars.owner=0;radialCvars.canceled=false;
+        usercmd.Key(K_JOY4,true); // Repeat after the wheel has closed.
+        assert(!radialCvars.canceled && usercmd.buttonState[3]==0);
+        usercmd.Key(K_JOY4,false);usercmd.Key(K_JOY4,true);
+        assert(usercmd.buttonState[3]==1);
+        // A crouch held before opening must get its release even if repeated.
+        radialCvars.owner=owner;usercmd.Key(K_JOY4,true);usercmd.Key(K_JOY4,false);
+        assert(!radialCvars.canceled && usercmd.buttonState[3]==0);
+        radialCvars.owner=0;
+    }
+    // A second bound control cancels without releasing the original hold or
+    // introducing a second action count. Its release is consumed exactly once.
+    for(int owner:{1,2}) {
+        const int action=owner==1?UB_WEAPONWHEEL:UB_QUICKCHAT;
+        idKeyInput::bindings['q']=idKeyInput::bindings['v']=action;
+        usercmd.Key('q',true);assert(usercmd.buttonState[action]==1);
+        radialCvars.owner=owner;radialCvars.canceled=false;
+        usercmd.Key('q',true);assert(!radialCvars.canceled);
+        usercmd.Key('v',true);assert(radialCvars.canceled && usercmd.buttonState[action]==1);
+        radialCvars.owner=0;usercmd.Key('v',false);usercmd.Key('q',false);
+        assert(usercmd.buttonState[action]==0);
+    }
+    radialCvars.canceled=false;usercmd.Clear();
+    // While the held scoreboard scrolls, the weapon-cycle impulses scroll it and
+    // never reach the game as a weapon change; otherwise they are impulses.
+    usercmd.scoreboardScrolls=true; usercmd.cmd.impulse=0; usercmd.cmd.flags=0;
+    for(int action:{UB_IMPULSE14,UB_IMPULSE15,UB_IMPULSE15}) { usercmd.SetButtonAction(action,true); usercmd.SetButtonAction(action,false); }
+    assert(usercmd.scrolled==-1 && usercmd.cmd.impulse==0 && usercmd.cmd.flags==0);
+    usercmd.scoreboardScrolls=false; usercmd.SetButtonAction(UB_IMPULSE14,true); usercmd.SetButtonAction(UB_IMPULSE14,false);
+    assert(usercmd.scrolled==-1 && usercmd.cmd.impulse==14 && usercmd.cmd.flags==1);
+    usercmd.Clear(); usercmd.cmd.impulse=0; usercmd.cmd.flags=0;
+    // com_latencyFlash arms on the attack press edge only: a second input
+    // holding the button, or its release, is not a new press.
+    latencyFlashArms=0; usercmd.SetButtonAction(UB_ATTACK,true); usercmd.SetButtonAction(UB_ATTACK,true);
+    usercmd.SetButtonAction(UB_ATTACK,false); usercmd.SetButtonAction(UB_ATTACK,false); assert(latencyFlashArms==1);
+    usercmd.SetButtonAction(UB_ATTACK,true); usercmd.SetButtonAction(UB_ATTACK,false); assert(latencyFlashArms==2);
+    usercmd.Clear();
+    // Exercise the production engine transport/clock dispatcher against a
+    // counted runtime sink. The native retained suite separately checks that
+    // sink's real layout, hit testing, feedback and action behavior.
+    physicalAxes[AXIS_YAW]=0; idKeyInput::ClearStates(); queued.clear(); inputKeys.clear();
+    runtime=std::make_unique<FakeRuntime>(); retainedOpen=true;
+    mockReady=false;RetainedUI_FrameInput();
+    assert(readyChecks==1 && analogNeedsNeutral && inputResourceSuspended && runtime->cancels==1);
+    for(const auto& event:runtime->received) assert(!event.down);
+    runtime->received.clear();RetainedUI_FrameInput();
+    assert(runtime->cancels==1 && runtime->received.empty());
+    const int initialCancels=runtime->cancels;
+    mockReady=true;
+    physicalAxes[AXIS_YAW]=90;RetainedUI_FrameInput();
+    assert(runtime->received.empty() && !inputResourceSuspended && runtime->cancels==initialCancels);
+    physicalAxes[AXIS_YAW]=0;RetainedUI_FrameInput();assert(!analogNeedsNeutral);
+    physicalAxes[AXIS_YAW]=60;RetainedUI_FrameInput();
+    assert(runtime->received.size()==1 && runtime->received.back().menu==MenuInput::Right && runtime->received.back().down);
+    now=.321;RetainedUI_FrameInput();assert(runtime->received.size()==2);
+    physicalAxes[AXIS_YAW]=37;RetainedUI_FrameInput();assert(runtime->received.size()==3 && !runtime->received.back().down);
+    physicalAxes[AXIS_YAW]=49;RetainedUI_FrameInput();assert(runtime->received.size()==3);
+    physicalAxes[AXIS_YAW]=60;RetainedUI_FrameInput();assert(runtime->received.size()==4);
+    physicalAxes[AXIS_YAW]=0;RetainedUI_FrameInput();runtime->received.clear();
+    auto send=[&](retainedUIInput_t payload,int generation=-1,int size=sizeof(retainedUIInput_t)) {
+        sysEvent_t event{};event.evType=SE_RETAINED_UI;event.evValue=generation<0?inputGeneration:generation;
+        event.evPtr=&payload;event.evPtrLength=size;
+        assert(RetainedUI_ProcessEvent(&event));
+    };
+    retainedUIInput_t payload;payload.source=1100;payload.key=K_ENTER;payload.down=1;
+    send(payload);assert(runtime->received.size()==1 && runtime->received.back().down && idKeyInput::IsDown(K_ENTER));
+    payload.source=1101;payload.key=K_KP_ENTER;send(payload);assert(runtime->received.size()==1);
+    payload.source=1100;payload.key=K_ENTER;payload.down=0;send(payload);assert(runtime->received.size()==1);
+    payload.source=1101;payload.key=K_KP_ENTER;send(payload);assert(runtime->received.size()==2 && !runtime->received.back().down);
+    payload.kind=retainedUIInput_t::POINTER;payload.x=83.125f;payload.y=57.375f;send(payload);
+    assert(runtime->x==83.125f && runtime->y==57.375f);
+    // Readiness can refresh ownership during dispatch. The old-generation
+    // event must be checked after that refresh, before it reaches the runtime.
+    runtime->received.clear();
+    payload.kind=retainedUIInput_t::KEY;payload.source=1100;payload.key=K_ENTER;payload.down=1;
+    const unsigned queuedGeneration=inputGeneration, checksBeforeRefresh=readyChecks;
+    mockRefreshGeneration=true;send(payload,queuedGeneration);
+    assert(inputGeneration==queuedGeneration+1 && readyChecks==checksBeforeRefresh+1);
+    assert(runtime->received.empty() && idKeyInput::IsDown(K_ENTER));
+    send(payload);assert(runtime->received.size()==1 && runtime->received.back().down);
+    // If the refresh instead meets an already queued release, quarantine is
+    // retired immediately, and the next fresh full press routes exactly once.
+    const unsigned heldGeneration=inputGeneration;
+    runtime->received.clear();payload.down=0;mockRefreshGeneration=true;send(payload,heldGeneration);
+    assert(inputGeneration==heldGeneration+1 && runtime->received.empty() && !idKeyInput::IsDown(K_ENTER));
+    payload.down=1;send(payload);assert(runtime->received.size()==1 && runtime->received.back().down);
+    payload.down=0;send(payload);assert(runtime->received.size()==2 && !runtime->received.back().down);
+    // Execute actual SDL device-release ordering through the actual decoder.
+    // Cancellation disarms first; artificial ups only remove quarantined holds.
+    runtime->received.clear();queued.clear();
+    SDL3_PostControllerKeyEvent(K_JOY3,true,12);send(queued.back());
+    assert(runtime->received.size()==1 && runtime->received.back().down);
+    s_gamepadButtonsDown[0]=true;queued.clear();SDL3_ReleaseGamepadState(13);
+    assert(queued.size()==2 && queued[0].kind==retainedUIInput_t::CANCEL);
+    send(queued[0]);assert(runtime->cancels==initialCancels+1 && analogNeedsNeutral);
+    runtime->received.clear();send(queued[1]);assert(runtime->received.empty());
+    queued.clear();SDL3_PostControllerKeyEvent(K_JOY3,true,14);send(queued.back());
+    assert(runtime->received.size()==1 && runtime->received.back().down);
+    SDL3_PostControllerKeyEvent(K_JOY3,false,15);send(queued.back());
+    assert(runtime->received.size()==2 && !runtime->received.back().down);
+    // A cancelled virtual stick hold must recover after neutral, including
+    // document replacement while the physical stick remains deflected.
+    physicalAxes[AXIS_YAW]=60;RetainedUI_FrameInput();
+    assert(analogDirection==static_cast<int>(MenuInput::Right));
+    CancelInput();runtime->received.clear();
+    RetainedUI_FrameInput();assert(runtime->received.empty() && analogNeedsNeutral);
+    physicalAxes[AXIS_YAW]=0;RetainedUI_FrameInput();assert(!analogNeedsNeutral);
+    physicalAxes[AXIS_YAW]=60;RetainedUI_FrameInput();
+    assert(runtime->received.size()==1 && runtime->received.back().menu==MenuInput::Right && runtime->received.back().down);
+    physicalAxes[AXIS_YAW]=0;RetainedUI_FrameInput();runtime->received.clear();
+    payload.kind=retainedUIInput_t::KEY;payload.source=1100;payload.key=K_ENTER;payload.down=1;send(payload);
+    payload.kind=retainedUIInput_t::FOCUS;payload.down=0;send(payload);
+    assert(inputSuspended && runtime->cancels==initialCancels+3 && !idKeyInput::IsDown(K_ENTER));
+    payload.down=1;send(payload);assert(!inputSuspended);
+    runtime->received.clear();payload.kind=retainedUIInput_t::KEY;payload.source=1100;payload.key=K_ENTER;payload.repeated=1;send(payload);
+    assert(runtime->received.empty());
+    payload.repeated=0;send(payload);assert(runtime->received.size()==1);
+    input.Cancel();ApplyInput();++inputGeneration;runtime->received.clear();
+    payload.down=0;send(payload,inputGeneration-1);
+    assert(runtime->received.empty() && !idKeyInput::IsDown(K_ENTER));
+    payload.down=1;send(payload,inputGeneration-1);assert(runtime->received.empty());
+    // A release queued before the ownership change retires only quarantine;
+    // the first fresh press works, and later stale releases cannot end it.
+    send(payload);assert(runtime->received.size()==1 && runtime->received.back().down);
+    payload.down=0;send(payload,inputGeneration-1);assert(runtime->received.size()==1);
+    payload.down=1;send(payload);assert(runtime->received.size()==1);
+    payload.down=0;send(payload);assert(runtime->received.size()==2 && !runtime->received.back().down);
+    runtime->received.clear();
+    payload.kind=retainedUIInput_t::POINTER_BUTTON;payload.down=1;send(payload);
+    CancelInput();++inputGeneration;runtime->received.clear();
+    payload.down=0;send(payload,inputGeneration-1);assert(runtime->received.empty());
+    payload.down=1;send(payload);assert(runtime->received.size()==1 && runtime->received.back().down);
+    payload.down=0;send(payload);assert(runtime->received.size()==2 && !runtime->received.back().down);
+    // A resource wait quarantines every held source once, blocks direct
+    // actions and pointer motion, and consumes releases without activation.
+    runtime->received.clear();
+    payload.kind=retainedUIInput_t::KEY;payload.source=1200;payload.key=K_ENTER;payload.down=1;send(payload);
+    payload.kind=retainedUIInput_t::POINTER_BUTTON;send(payload);
+    assert(runtime->received.size()==2);
+    runtime->received.clear();
+    const int beforeResourceWait=runtime->cancels;
+    const float savedX=runtime->x,savedY=runtime->y;
+    // The very first unavailable event may already be the held key's release.
+    mockReady=false;payload.kind=retainedUIInput_t::KEY;payload.down=0;send(payload);
+    assert(inputResourceSuspended && runtime->cancels==beforeResourceWait+1);
+    for(const auto& event:runtime->received) assert(!event.down);
+    assert(!idKeyInput::IsDown(K_ENTER));
+    assert(runtime->x==savedX && runtime->y==savedY && runtime->actions.empty());
+    runtime->received.clear();
+    payload.kind=retainedUIInput_t::POINTER;payload.x=901;payload.y=502;send(payload);
+    payload.kind=retainedUIInput_t::KEY;payload.key=K_ESCAPE;payload.source=1201;payload.down=1;send(payload);
+    assert(idKeyInput::IsDown(K_ESCAPE) && closes==0 && runtime->received.empty());
+    payload.down=0;send(payload);assert(!idKeyInput::IsDown(K_ESCAPE));
+    payload.source=1200;payload.key=K_ENTER;send(payload);
+    assert(!idKeyInput::IsDown(K_ENTER) && runtime->received.empty());
+    payload.kind=retainedUIInput_t::POINTER_BUTTON;send(payload,inputGeneration-1);
+    payload.kind=retainedUIInput_t::POINTER_LEAVE;send(payload);
+    RetainedUI_FrameInput();RetainedUI_FrameInput();
+    assert(runtime->cancels==beforeResourceWait+1 && runtime->received.empty());
+    assert(runtime->x==savedX && runtime->y==savedY && runtime->actions.empty());
+    mockReady=true;
+    payload.kind=retainedUIInput_t::KEY;payload.down=1;send(payload);send(payload);
+    assert(runtime->received.size()==1 && runtime->received.back().down);
+    payload.kind=retainedUIInput_t::POINTER_BUTTON;send(payload);send(payload);
+    assert(runtime->received.size()==2 && runtime->received.back().down);
+    payload.down=0;send(payload);
+    payload.kind=retainedUIInput_t::KEY;send(payload);
+    assert(runtime->received.size()==4 && !runtime->received[2].down && !runtime->received[3].down);
+    // A hold which outlives the wait remains quarantined on recovery. Neither
+    // an unflagged duplicate nor an OS repeat may rearm it before its release.
+    runtime->received.clear();payload.down=1;send(payload);
+    mockReady=false;RetainedUI_FrameInput();runtime->received.clear();
+    const int beforeResourceRecovery=runtime->cancels;
+    mockReady=true;RetainedUI_FrameInput();send(payload);
+    payload.repeated=1;send(payload);
+    assert(runtime->cancels==beforeResourceRecovery && runtime->received.empty());
+    payload.repeated=0;payload.down=0;send(payload);assert(runtime->received.empty());
+    payload.down=1;send(payload);payload.down=0;send(payload);
+    assert(runtime->received.size()==2 && runtime->received[0].down && !runtime->received[1].down);
+    runtime->received.clear();payload.kind=retainedUIInput_t::KEY;payload.down=1;
+    send(payload,-1,0);assert(runtime->received.empty());
+    payload.kind=static_cast<retainedUIInput_t::kind_t>(99);send(payload);assert(runtime->received.empty());
+    payload.kind=retainedUIInput_t::KEY;payload.key=K_ESCAPE;payload.source=1102;send(payload);
+    assert(closes==1 && !retainedOpen);
+    runtime->received.clear();payload.key=K_ENTER;payload.source=1100;payload.down=0;send(payload);
+    assert(runtime->received.empty() && !idKeyInput::IsDown(K_ENTER));
+    std::puts("retained input: production source mapping, readiness/transport generations/focus/disconnect/close, stick recovery, console routing, absolute coordinates and gameplay release gates passed");
+}
+'''
+
+
+def main():
+    keys=(ROOT/'src/framework/KeyInput.h').read_text()
+    key_enum=re.search(r'typedef enum \{.*?\} keyNum_t;', keys, re.S).group()
+    system=(ROOT/'src/sys/sys_public.h').read_text()
+    event_enum=re.search(r'typedef enum \{\s*SE_NONE,.*?\} sysEventType_t;',system,re.S).group()
+    event_struct=re.search(r'typedef struct sysEvent_s \{.*?\} sysEvent_t;',system,re.S).group()
+    ui=(ROOT/'src/ui/RetainedUI.cpp').read_text()
+    sdl=(ROOT/'src/sys/sdl3/sdl3_backend.cpp').read_text()
+    usercmd=(ROOT/'src/framework/UsercmdGen.cpp').read_text()
+    functions='\n'.join(function_body(source,signature) for source,signature in [
+        (ui,'bool MapMenuKey('),
+        (ui,'void ApplyInput('), (ui,'void CancelInput('), (ui,'void SuspendInput('),
+        (ui,'void ReleaseQuarantinedInput('), (ui,'bool PreviewInputReady('),
+        (ui,'void RetainedUI_FrameInput('), (ui,'bool RetainedUI_ProcessEvent('),
+        (sdl,'static bool SDL3_QueueRetainedKey('),
+        (sdl,'static void SDL3_QueueRetainedPointer('),
+        (sdl,'static void SDL3_QueueRetainedFocus('),
+        (sdl,'static void SDL3_QueueRetainedCancel('),
+        (sdl,'static void SDL3_SetJoystickHat('),
+        (sdl,'static void SDL3_ReleaseGamepadState('),
+        (sdl,'static void SDL3_ReleaseJoystickState('),
+        *[(usercmd,signature) for signature in [
+            'bool idUsercmdGenLocal::NativeKeyBlocked(', 'bool idUsercmdGenLocal::Inhibited(', 'void idUsercmdGenLocal::Clear(',
+            'void idUsercmdGenLocal::Key(', 'void idUsercmdGenLocal::SetButtonAction(',
+            'void idUsercmdGenLocal::SetUsercmdButton(', 'void idUsercmdGenLocal::Joystick(',
+            'void idUsercmdGenLocal::RetainedInputChanged(',
+        ]],
+    ])
+    compiler=next((found for name in ('clang++','g++','c++') if (found:=shutil.which(name))),None)
+    if not compiler:
+        raise RuntimeError('C++ compiler required')
+    (ROOT/'.tmp').mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='ui-input-',dir=ROOT/'.tmp') as temp:
+        source=Path(temp)/'input.cpp'; binary=Path(temp)/'input.exe'
+        controller_stub='void SDL3_PostControllerKeyEvent(int key,bool down,int time) { assert(SDL3_QueueRetainedKey(key,down,false,2048+key,time)); }\n'
+        source.write_text(key_enum+event_enum+event_struct+SUPPORT+functions+controller_stub+MAIN,encoding='utf-8')
+        subprocess.run([compiler,'-std=c++20','-I',str(ROOT),str(source),str(ROOT/'src/ui/retained/Input.cpp'),str(ROOT/'src/framework/NativeInputDispatchDisabled.cpp'),'-o',str(binary)],check=True)
+        subprocess.run([str(binary)],check=True)
+
+
+if __name__=='__main__':
+    main()

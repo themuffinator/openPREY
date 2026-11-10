@@ -29,6 +29,8 @@ If you have questions concerning this license or the applicable additional terms
 
 
 
+#include "../../framework/NativeInputDispatch.h"
+#include <intrin.h>
 #include <errno.h>
 #include <float.h>
 #include <fcntl.h>
@@ -37,6 +39,7 @@ If you have questions concerning this license or the applicable additional terms
 #include <conio.h>
 #include <mapi.h>
 #include <ShellAPI.h>
+#include <ShlObj.h>
 
 #ifndef __MRC__
 #include <sys/types.h>
@@ -44,6 +47,7 @@ If you have questions concerning this license or the applicable additional terms
 #endif
 
 #include "../sys_local.h"
+#include "../URLPolicy.h"
 #include "win_local.h"
 #include "win_crash.h"
 #include "rc/CreateResourceIDs.h"
@@ -507,6 +511,82 @@ static bool Sys_ConvertWideToUtf8( const wchar_t *wideText, idStr &utf8Text ) {
 	return true;
 }
 
+static bool Sys_ConvertWideToWindowsPath( const wchar_t *widePath, idStr &path ) {
+	int requiredBytes;
+	char *pathBuffer;
+
+	path.Clear();
+	if ( widePath == NULL || widePath[0] == L'\0' ) {
+		return false;
+	}
+
+	// The filesystem still reaches the Windows CRT through narrow path APIs.
+	// Keep the Known Folder result in that API's active code page until those
+	// callers are migrated together to wide-character or UTF-8-aware I/O.
+	requiredBytes = WideCharToMultiByte( CP_ACP, 0, widePath, -1, NULL, 0, NULL, NULL );
+	if ( requiredBytes <= 0 ) {
+		return false;
+	}
+
+	pathBuffer = new char[ requiredBytes ];
+	if ( WideCharToMultiByte( CP_ACP, 0, widePath, -1, pathBuffer, requiredBytes, NULL, NULL ) <= 0 ) {
+		delete[] pathBuffer;
+		return false;
+	}
+
+	path = pathBuffer;
+	delete[] pathBuffer;
+	path.SlashesToBackSlashes();
+	return !path.IsEmpty();
+}
+
+static bool Sys_GetKnownFolderPath( REFKNOWNFOLDERID folderId, idStr &path ) {
+	PWSTR widePath = NULL;
+	const HRESULT result = SHGetKnownFolderPath( folderId, KF_FLAG_DEFAULT, NULL, &widePath );
+	if ( FAILED( result ) || widePath == NULL ) {
+		if ( widePath != NULL ) {
+			CoTaskMemFree( widePath );
+		}
+		path.Clear();
+		return false;
+	}
+
+	const bool converted = Sys_ConvertWideToWindowsPath( widePath, path );
+	CoTaskMemFree( widePath );
+	return converted;
+}
+
+static bool Sys_IsAbsoluteWindowsPath( const idStr &path ) {
+	if ( path.Length() < 3 ) {
+		return false;
+	}
+
+	const char *text = path.c_str();
+	const bool drivePath =
+		( ( text[0] >= 'A' && text[0] <= 'Z' ) || ( text[0] >= 'a' && text[0] <= 'z' ) ) &&
+		text[1] == ':' && text[2] == '\\';
+	const bool uncPath = text[0] == '\\' && text[1] == '\\' && text[2] != '\0';
+	return drivePath || uncPath;
+}
+
+static bool Sys_BuildWindowsProductSavePath( const char *root, idStr &savePath ) {
+	if ( root == NULL || root[0] == '\0' ) {
+		savePath.Clear();
+		return false;
+	}
+
+	savePath = root;
+	savePath.SlashesToBackSlashes();
+	if ( !Sys_IsAbsoluteWindowsPath( savePath ) ) {
+		savePath.Clear();
+		return false;
+	}
+	savePath.StripTrailing( '\\' );
+	savePath.AppendPath( "openPREY" );
+	savePath.SlashesToBackSlashes();
+	return true;
+}
+
 static bool Sys_BuildWindowsUtf8Argv( idList<idStr> &utf8Args, idList<const char *> &argvArgs ) {
 	int wideArgc = 0;
 	LPWSTR *wideArgv;
@@ -684,7 +764,6 @@ Sys_Sentry
 ==================
 */
 void Sys_Sentry() {
-	int j = 0;
 }
 
 /*
@@ -914,13 +993,24 @@ Show the early console as an error dialog
 =============
 */
 void Sys_Error(const char* error, ...) {
-	va_list		argptr;
-	char		text[4096];
+    // Freeze borrowed diagnostics before retirement can release their owner.
+    // Formatting touches no GUI, native window, or message-dispatch boundary.
+    va_list argptr;
+    char text[4096];
+    va_start(argptr, error);
+    idStr::vsnPrintf(text, sizeof(text), error ? error : "Unknown error", argptr);
+    va_end(argptr);
+    if (!NativeInput_FatalRetire()) {
+        // An already-fatal unresolved native lease cannot enter the console or
+        // dispatch DLL/CRT shutdown callbacks. Preserve bounded raw diagnostics.
+        const char* message = text;
+        DWORD length = 0, written = 0;
+        while (length < 2048 && message[length]) ++length;
+        (void)WriteFile(GetStdHandle(STD_ERROR_HANDLE), message, length, &written, NULL);
+        (void)TerminateProcess(GetCurrentProcess(), 1);
+        __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+    }
 	MSG        msg;
-
-	va_start(argptr, error);
-	idStr::vsnPrintf(text, sizeof(text), error, argptr);
-	va_end(argptr);
 
 	Conbuf_AppendText(text);
 	Conbuf_AppendText("\n");
@@ -1136,23 +1226,41 @@ Sys_DefaultSavePath
 */
 const char* Sys_DefaultSavePath(void) {
 	static idStr savePath;
+	idStr knownFolderPath;
 	const char *localAppData = getenv( "LOCALAPPDATA" );
 	const char *userProfile = getenv( "USERPROFILE" );
 
-	if ( localAppData && localAppData[0] ) {
-		savePath = localAppData;
-		savePath.AppendPath( "openPREY" );
+	if ( Sys_GetKnownFolderPath( FOLDERID_LocalAppData, knownFolderPath ) &&
+			Sys_BuildWindowsProductSavePath( knownFolderPath.c_str(), savePath ) ) {
+		return savePath.c_str();
+	}
+
+	// Preserve the environment fallback for unusual stripped-down Windows
+	// sessions where the Shell Known Folder query is unavailable.
+	if ( Sys_BuildWindowsProductSavePath( localAppData, savePath ) ) {
+		return savePath.c_str();
+	}
+
+	if ( Sys_GetKnownFolderPath( FOLDERID_SavedGames, knownFolderPath ) &&
+			Sys_BuildWindowsProductSavePath( knownFolderPath.c_str(), savePath ) ) {
 		return savePath.c_str();
 	}
 
 	if ( userProfile && userProfile[0] ) {
-		savePath = userProfile;
-		savePath.AppendPath( "Saved Games" );
-		savePath.AppendPath( "openPREY" );
+		knownFolderPath = userProfile;
+		knownFolderPath.AppendPath( "Saved Games" );
+		if ( Sys_BuildWindowsProductSavePath( knownFolderPath.c_str(), savePath ) ) {
+			return savePath.c_str();
+		}
+	}
+
+	savePath = Sys_Cwd();
+	savePath.SlashesToBackSlashes();
+	if ( Sys_IsAbsoluteWindowsPath( savePath ) ) {
 		return savePath.c_str();
 	}
 
-	return Sys_Cwd();
+	return ".";
 }
 
 /*
@@ -1385,9 +1493,11 @@ void Sys_DLL_Unload(INT_PTR dllHandle) {
 	}
 	if (FreeLibrary((HMODULE)dllHandle) == 0) {
 		int lastError = GetLastError();
-		LPVOID lpMsgBuf;
+		// openQ4: without FROM_SYSTEM the call fails and writes nothing, and the
+		// error below then formatted an uninitialised pointer with %s
+		LPVOID lpMsgBuf = NULL;
 		FormatMessage(
-			FORMAT_MESSAGE_ALLOCATE_BUFFER,
+			FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
 			NULL,
 			lastError,
 			MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), // Default language
@@ -1395,7 +1505,7 @@ void Sys_DLL_Unload(INT_PTR dllHandle) {
 			0,
 			NULL
 		);
-		Sys_Error("Sys_DLL_Unload: FreeLibrary failed - %s (%d)", lpMsgBuf, lastError);
+		Sys_Error("Sys_DLL_Unload: FreeLibrary failed - %s (%d)", lpMsgBuf != NULL ? (const char *)lpMsgBuf : "unknown error", lastError);
 	}
 }
 
@@ -1407,12 +1517,34 @@ EVENT LOOP
 ========================================================================
 */
 
+#include "../EventQueueContinuity.h"
+#include "../EventDisposition.h"
+#include "../EventRetirement.h"
+
 #define	MAX_QUED_EVENTS		256
 #define	MASK_QUED_EVENTS	( MAX_QUED_EVENTS - 1 )
 
 sysEvent_t	eventQue[MAX_QUED_EVENTS];
+static sysEventDispositionTag_t eventDispositionTags[MAX_QUED_EVENTS];
+static std::uint64_t eventRetirementSerials[MAX_QUED_EVENTS];
+static std::uint64_t eventRetirementHighwater = 0; // Never reset by clear/rebind.
 int			eventHead = 0;
 int			eventTail = 0;
+
+// Only pending queue entries own their payload. Dequeued slots may still hold
+// a pointer whose ownership has already transferred to the event consumer.
+static void Sys_DiscardQueuedEvent( sysEvent_t &event ) {
+	if ( event.evPtr != NULL ) {
+		// Discarded console input can contain private CVar values. Wipe all
+		// bounded console bytes without parsing text during queue teardown.
+		if ( event.evType == SE_CONSOLE && event.evPtrLength > 0 ) {
+			memset( event.evPtr, 0, static_cast<size_t>( event.evPtrLength ) );
+		}
+		Mem_Free( event.evPtr );
+	}
+	event.evPtr = NULL;
+	event.evPtrLength = 0;
+}
 
 /*
 ================
@@ -1428,11 +1560,10 @@ void Sys_QueEvent(int time, sysEventType_t type, int value, int value2, int ptrL
 	ev = &eventQue[eventHead & MASK_QUED_EVENTS];
 
 	if (eventHead - eventTail >= MAX_QUED_EVENTS) {
+		Sys_InvalidateEventQueue();
 		common->Printf("Sys_QueEvent: overflow\n");
 		// we are discarding an event, but don't leak memory
-		if (ev->evPtr) {
-			Mem_Free(ev->evPtr);
-		}
+		Sys_DiscardQueuedEvent( *ev );
 		eventTail++;
 	}
 
@@ -1443,6 +1574,72 @@ void Sys_QueEvent(int time, sysEventType_t type, int value, int value2, int ptrL
 	ev->evValue2 = value2;
 	ev->evPtrLength = ptrLength;
 	ev->evPtr = ptr;
+	eventDispositionTags[ev - eventQue] = {};
+	eventRetirementSerials[ev - eventQue] = 0;
+}
+
+bool Sys_QueTrackedEvent(sysEvent_t& event, sysEventDispositionTag_t& tag) noexcept {
+	int type = 0;
+	memcpy(&type, &event.evType, sizeof(type));
+	if (!Sys_EventDispositionTagCurrent(tag) || type <= SE_NONE || type > SE_RETAINED_UI ||
+		event.evPtrLength < 0 || event.evPtrLength > 1024 * 1024 ||
+		((event.evPtrLength != 0) != (event.evPtr != NULL))) return false;
+	if (eventHead - eventTail >= MAX_QUED_EVENTS) {
+		Sys_InvalidateEventQueue();
+		return false; // No eviction, ownership transfer or callback on failed admission.
+	}
+	if (eventRetirementHighwater == (std::numeric_limits<std::uint64_t>::max)()) return false;
+	const int slot = eventHead & MASK_QUED_EVENTS;
+	eventQue[slot] = event;
+	eventDispositionTags[slot] = tag;
+	eventRetirementSerials[slot] = ++eventRetirementHighwater;
+	++eventHead;
+	event = {}; tag = {};
+	return true;
+}
+
+
+sysEventTransfer_t Sys_PeekEventDispositionTag(sysEventDispositionTag_t& out) noexcept {
+    if (!Sys_EventDispositionBoundThread()) return sysEventTransfer_t::Refused;
+    if (eventHead <= eventTail) return sysEventTransfer_t::Empty;
+    out = eventDispositionTags[eventTail & MASK_QUED_EVENTS];
+    return sysEventTransfer_t::Ready;
+}
+sysEventTransfer_t Sys_PeekEventForRetirement(openq4::NativeInputHead& out) noexcept {
+    if (!Sys_EventDispositionBoundThread()) return sysEventTransfer_t::Refused;
+    if (eventHead <= eventTail) return sysEventTransfer_t::Empty;
+    const unsigned slot = static_cast<unsigned>(eventTail & MASK_QUED_EVENTS);
+    if (!eventRetirementSerials[slot] || !eventDispositionTags[slot].ShapeValid()) return sysEventTransfer_t::Refused;
+    out = Sys_EventRetirementHead(openq4::NativeInputLane::Platform, eventRetirementSerials[slot], slot,
+        eventQue[slot], eventDispositionTags[slot]);
+    return sysEventTransfer_t::Ready;
+}
+sysEventTransfer_t Sys_TakeEventForRetirement(openq4::NativeInputRoute& route,
+    const openq4::NativeInputRoute::CancellationPermit& permit, sysEvent_t& event, sysEventDispositionTag_t& tag) noexcept {
+    openq4::NativeInputHead head;
+    const auto status = Sys_PeekEventForRetirement(head);
+    if (status != sysEventTransfer_t::Ready) return status;
+    if (!route.AllowsCancellation(permit, head)) return sysEventTransfer_t::Refused;
+    // Serialized original event thread; no foreign call between comparison and transfer.
+    const auto ownedEvent = eventQue[head.slot]; const auto ownedTag = eventDispositionTags[head.slot];
+    eventQue[head.slot] = {}; eventDispositionTags[head.slot] = {}; eventRetirementSerials[head.slot] = 0;
+    ++eventTail;
+    event = ownedEvent; tag = ownedTag;
+    return sysEventTransfer_t::Ready;
+}
+
+sysEventTransfer_t Sys_TakeEventWithDisposition(sysEvent_t& event, sysEventDispositionTag_t& tag) noexcept {
+	if (!Sys_EventDispositionEpoch()) return sysEventTransfer_t::Refused;
+	if (eventHead <= eventTail) return sysEventTransfer_t::Empty;
+	const int slot = eventTail & MASK_QUED_EVENTS;
+	const auto ownedTag = eventDispositionTags[slot];
+	if (!ownedTag.Empty() && !Sys_EventDispositionTagCurrent(ownedTag)) return sysEventTransfer_t::Refused;
+	const auto ownedEvent = eventQue[slot];
+	eventQue[slot] = {}; eventDispositionTags[slot] = {};
+	eventRetirementSerials[slot] = 0;
+	++eventTail;
+	event = ownedEvent; tag = ownedTag;
+	return sysEventTransfer_t::Ready;
 }
 
 /*
@@ -1453,6 +1650,7 @@ This allows windows to be moved during renderbump
 =============
 */
 void Sys_PumpEvents(void) {
+    if (NativeInput_OwnsPump()) return; // Same owner also covers support windows.
 	MSG msg;
 
 #ifdef USE_SDL3
@@ -1510,10 +1708,15 @@ void Sys_GenerateEvents(void) {
 	if (s) {
 		char* b;
 		int		len;
+		const bool privateCommand = cvarSystem != NULL && cvarSystem->IsInitialized() &&
+			cvarSystem->CommandContainsPrivateCVar( s );
 
-		len = strlen(s) + 1;
+		len = idLib::SizeToInt( strlen( s ) + 1, "Sys_GenerateEvents console command" );
 		b = (char*)Mem_Alloc(len);
 		strcpy(b, s);
+		if ( privateCommand ) {
+			memset( s, 0, len );
+		}
 		Sys_QueEvent(0, SE_CONSOLE, 0, 0, len, b);
 	}
 
@@ -1526,6 +1729,13 @@ Sys_ClearEvents
 ================
 */
 void Sys_ClearEvents(void) {
+	Sys_InvalidateEventQueue();
+	while ( eventHead > eventTail ) {
+		Sys_DiscardQueuedEvent( eventQue[ eventTail & MASK_QUED_EVENTS ] );
+		eventDispositionTags[eventTail & MASK_QUED_EVENTS] = {};
+		eventRetirementSerials[eventTail & MASK_QUED_EVENTS] = 0;
+		eventTail++;
+	}
 	eventHead = eventTail = 0;
 }
 
@@ -1539,6 +1749,10 @@ sysEvent_t Sys_GetEvent(void) {
 
 	// return if we have data
 	if (eventHead > eventTail) {
+		if (!eventDispositionTags[eventTail & MASK_QUED_EVENTS].Empty()) {
+			Sys_InvalidateEventQueue();
+			return sysEvent_t{}; // Preserve original tagged ownership for explicit retirement.
+		}
 		eventTail++;
 		return eventQue[(eventTail - 1) & MASK_QUED_EVENTS];
 	}
@@ -1547,6 +1761,15 @@ sysEvent_t Sys_GetEvent(void) {
 	memset(&ev, 0, sizeof(ev));
 
 	return ev;
+}
+
+/*
+================
+Sys_HasQueuedEvents
+================
+*/
+bool Sys_HasQueuedEvents(void) {
+	return eventHead > eventTail;
 }
 
 //================================================================
@@ -1630,6 +1853,8 @@ void Sys_StartAsyncThread(void) {
 	}
 }
 
+static HANDLE win_instanceMutex = NULL;
+
 /*
 ================
 Sys_AlreadyRunning
@@ -1640,13 +1865,68 @@ returns true if there is a copy of openPREY running already
 bool Sys_AlreadyRunning(void) {
 #ifndef DEBUG
 	if (!win32.win_allowMultipleInstances.GetBool()) {
-		HANDLE hMutexOneInstance = ::CreateMutex(NULL, FALSE, "openPREY");
+		win_instanceMutex = ::CreateMutex(NULL, FALSE, "openPREY");
 		if (::GetLastError() == ERROR_ALREADY_EXISTS || ::GetLastError() == ERROR_ACCESS_DENIED) {
 			return true;
 		}
 	}
 #endif
 	return false;
+}
+
+/*
+================
+Sys_ReleaseInstanceLock
+================
+*/
+void Sys_ReleaseInstanceLock(void) {
+	if (win_instanceMutex != NULL) {
+		::CloseHandle(win_instanceMutex);
+		win_instanceMutex = NULL;
+	}
+}
+
+/*
+================
+Sys_KeepTimerResolutionWhenOccluded
+
+Windows 11 stops honouring timeBeginPeriod for a process whose windows are all
+occluded or minimized, unless the process opts out. The async thread's 1 ms
+tick timer and the frame cap would then fall back to the default 15.6 ms
+resolution, so a listen server behind another window ticks in bursts and a
+capped client wakes late. Resolved at run time: the opt-out exists on
+Windows 11 only, and older systems refuse it harmlessly.
+================
+*/
+static idCVar win_keepTimerResolution("win_keepTimerResolution", "0", CVAR_SYSTEM | CVAR_ROM | CVAR_BOOL,
+	"1 when Windows keeps this process's 1 ms timer resolution while its window is occluded or minimized (the Windows 11 opt-out)");
+
+static void Sys_KeepTimerResolutionWhenOccluded(void) {
+	typedef struct {
+		ULONG Version;
+		ULONG ControlMask;
+		ULONG StateMask;
+	} powerThrottlingState_t;	// PROCESS_POWER_THROTTLING_STATE
+	typedef BOOL (WINAPI *setProcessInformation_t)(HANDLE, int, LPVOID, DWORD);
+	const int processPowerThrottling = 4;			// ProcessPowerThrottling
+	const ULONG ignoreTimerResolution = 0x4;		// PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+
+	HMODULE kernel = GetModuleHandleA("kernel32.dll");
+	setProcessInformation_t setInformation = kernel != NULL
+		? reinterpret_cast<setProcessInformation_t>(GetProcAddress(kernel, "SetProcessInformation")) : NULL;
+	if (setInformation == NULL) {
+		return;
+	}
+
+	powerThrottlingState_t state;
+	state.Version = 1;							// PROCESS_POWER_THROTTLING_CURRENT_VERSION
+	state.ControlMask = ignoreTimerResolution;
+	state.StateMask = 0;						// never ignore this process's resolution
+	// Sys_Init runs before the log file opens; win_keepTimerResolution keeps the result
+	if (setInformation(GetCurrentProcess(), processPowerThrottling, &state, sizeof(state))) {
+		win_keepTimerResolution.SetBool(true);
+		common->Printf("Timer resolution: 1 ms kept while the window is occluded\n");
+	}
 }
 
 /*
@@ -1663,6 +1943,7 @@ void Sys_Init(void) {
 	// make sure the timer is high precision, otherwise
 	// NT gets 18ms resolution
 	timeBeginPeriod(1);
+	Sys_KeepTimerResolutionWhenOccluded();
 
 	// get WM_TIMER messages pumped every millisecond
 //	SetTimer( NULL, 0, 100, NULL );
@@ -1901,14 +2182,14 @@ void EmailCrashReport(LPSTR messageText) {
 			{
 				0,										// ulReserved
 					MAPI_TO,							// ulRecipClass
-					"DOOM 3 Crash",						// lpszName
-					"SMTP:programmers@idsoftware.com",	// lpszAddress
+					(LPSTR)"DOOM 3 Crash",				// lpszName
+					(LPSTR)"SMTP:programmers@idsoftware.com",	// lpszAddress
 					0,									// ulEIDSize
 					0									// lpEntry
 			};
 
 			memset(&message, 0, sizeof(message));
-			message.lpszSubject = "DOOM 3 Fatal Error";
+			message.lpszSubject = (LPSTR)"DOOM 3 Fatal Error";
 			message.lpszNoteText = messageText;
 			message.nRecipCount = 1;
 			message.lpRecips = &toProgrammers;
@@ -2004,7 +2285,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	// hide or show the early console as necessary
 	if (win32.win_viewlog.GetInteger() || com_skipRenderer.GetBool() || idAsyncNetwork::serverDedicated.GetInteger()) {
-		Sys_ShowConsole(1, true);
+		// A dedicated server launched with a hidden game window keeps its
+		// console hidden too, as a client that turns into one does.
+		const bool hidden = !win32.win_viewlog.GetInteger() && idAsyncNetwork::serverDedicated.GetInteger() == 1 &&
+			cvarSystem->GetCVarBool("r_hiddenWindow");
+		Sys_ShowConsole(hidden ? 0 : 1, true);
 	}
 	else {
 		Sys_ShowConsole(0, false);
@@ -2108,15 +2393,21 @@ void idSysLocal::OpenURL(const char* url, bool doexit) {
 	static bool doexit_spamguard = false;
 	HWND wnd;
 
+	if ( !idURLPolicy::IsAllowedHTTPURL( url ) ) {
+		common->Printf( "OpenURL rejected: expected a bounded HTTP or HTTPS URL with a host\n" );
+		return;
+	}
+
 	if (doexit_spamguard) {
-		common->DPrintf("OpenURL: already in an exit sequence, ignoring %s\n", url);
+		common->DPrintf("OpenURL: already in an exit sequence, ignoring request\n");
 		return;
 	}
 
 	common->Printf("Open URL: %s\n", url);
 
-	if (!ShellExecute(NULL, "open", url, NULL, NULL, SW_RESTORE)) {
-		common->Error("Could not open url: '%s' ", url);
+	const HINSTANCE result = ShellExecute(NULL, "open", url, NULL, NULL, SW_RESTORE);
+	if (reinterpret_cast<INT_PTR>(result) <= 32) {
+		common->Printf("OpenURL failed after validation\n");
 		return;
 	}
 

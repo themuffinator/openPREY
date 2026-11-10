@@ -28,6 +28,8 @@ openPREY now tracks two known official Prey base pack layouts:
 
 ## Required Baseline: Consolidated Naming
 
+At least one unsuffixed `zpak_<language>.pk4` base archive is needed for character dialogue: the shared `pak001.pk4` through `pak022.pk4` baseline contains the sound declarations and lip-sync data, but not the localized voice audio itself. Numbered files such as `zpak_english_01.pk4` are patch archives and do not replace that base media. Client startup warns when no recognized unsuffixed retail language-pack filename is mounted. This check identifies the known language name and base filename; it does not claim that the archive contents are complete. The absence remains non-fatal so dedicated servers and alternate physical/localized editions are not tied to one specific language archive or checksum.
+
 | PK4 | Checksum |
 |---|---|
 | `base/pak_data.pk4` | `0xbe295ead` |

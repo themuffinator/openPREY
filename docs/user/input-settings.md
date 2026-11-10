@@ -22,7 +22,7 @@ This guide covers the main ways to configure keyboard, mouse, and controller inp
 | Menu | Use it for |
 |---|---|
 | `Settings -> Controls -> Movement` | Forward, back, strafe, jump, crouch, turn, run/walk. |
-| `Settings -> Controls -> Weapons` | Direct weapon slots and buy menu. |
+| `Settings -> Controls -> Weapons` | Direct weapon slots, buy menu and the quick-chat wheel. |
 | `Settings -> Controls -> Attack` | Attack, reload, zoom, next/previous weapon, flashlight, objectives, weapon wheel. |
 | `Settings -> Controls -> Other` | Quick save/load, chat, vote, ready, stats, emotes, voice chat. |
 | `Settings -> Game Options` | Free look, toggle zoom, mouse input tuning, controller tuning, console access. |
@@ -86,7 +86,7 @@ seta cl_mouseAccelDebug 0
 
 For CPI-normalized tuning, set `m_cpi` to the mouse hardware value and use `360 / sensitivity` as an approximate centimeters-per-360 target.
 
-SDL3 builds use relative mouse capture during gameplay on Windows, Linux, and experimental macOS. On Linux, openPREY requests unscaled relative deltas from SDL where the desktop stack supports them and preserves fractional movement before it reaches the integer engine event queue. `Mouse1` through `Mouse8` are bindable by name on SDL3 and the native X11 fallback, and wheel up/down remain available as `MWHEELUP` and `MWHEELDOWN`.
+SDL3 builds use relative mouse capture during gameplay on Windows, Linux, and macOS. On Linux, openPREY requests unscaled relative deltas from SDL where the desktop stack supports them and preserves fractional movement before it reaches the integer engine event queue. `Mouse1` through `Mouse8` are bindable by name on SDL3 and the native X11 fallback, and wheel up/down remain available as `MWHEELUP` and `MWHEELDOWN`.
 
 Experimental native macOS builds also expose `Mouse1` through `Mouse8`, track high-resolution wheel/trackpad deltas before emitting wheel steps, and synthesize common edit-field control characters such as Return, Tab, Backspace, and Ctrl-letter shortcuts.
 
@@ -100,6 +100,7 @@ Controller tuning lives in `Settings -> Game Options -> Controller`.
 | Stick Layout | `in_joystickSouthpaw` | Default | Use `Southpaw` to swap movement and look sticks. |
 | Stick Dead Zone | `in_joystickDeadZone` | `0.18` | Raises or lowers the center area ignored by analog sticks. |
 | Look Sensitivity | `in_joystickLookSensitivity` | `0.75` | Scales controller turn speed after stick deflection is normalized. |
+| Wheel Sensitivity | `in_weaponWheelSensitivity` | `4.0` | Speeds up the Classic weapon-wheel cursor (`ui_retained 0`). Range `0.25–16.0`; higher is faster. The Remastered wheel follows the stick's direction directly beyond 35% deflection. |
 | Look Curve | `in_joystickLookCurve` | `1.35` | Higher values damp small aim movements; full-stick turn speed is controlled by Look Sensitivity. |
 | Invert Look | `in_joystickInvertLook` | Off | Flips vertical controller look. |
 | Trigger Press | `in_joystickTriggerThreshold` | `0.35` | Controls how far LT/RT must be pressed before they count as buttons. |
@@ -117,6 +118,13 @@ Suggested adjustments:
 - If triggers fire too easily, raise `Trigger Press`.
 - If triggers feel unresponsive, lower `Trigger Press`.
 
+In the new menus (`ui_retained 1`), the left stick and D-pad move the
+selection. The right stick (the left one with Southpaw) scrolls panels that
+have no rows to select, such as the pause menu's objectives, the multiplayer
+scoreboard and player list and long confirmation messages, and in Player
+Setup it turns the preview of your player. Invert Look does not affect the
+menus.
+
 Advanced movement tuning is available from the console:
 
 ```cfg
@@ -127,7 +135,78 @@ seta in_joystickMoveCurve 1.0
 
 SDL gamepads use SDL's standard controller database, so Xbox, PlayStation, Steam Input, and similar pads should not need axis remapping. Generic SDL joysticks use raw axes with these auto defaults:
 
-Linux and macOS SDL3 builds opt into SDL's HIDAPI controller backends by default so PlayStation, Switch, Steam, Steam Deck, and Xbox-class controllers can expose the same button, stick, trigger, rumble, battery, gyro, and touchpad capabilities available through the shared SDL3 path. macOS builds remain experimental. Run `listControllers` to confirm which SDL driver, hint state, and capabilities are active for a connected device.
+### Confirm and Back
+
+On a Nintendo-layout controller, menus confirm with A (the right button) and
+go back with B (the bottom button), as Switch games do. Nintendo prompts
+chosen with `in_promptStyle 3` (see [Button Prompts](#button-prompts)) count
+as a Nintendo layout. Other controllers confirm with the bottom button. To
+choose for any controller, set **Swap Confirm and Back** in **Settings > Game
+Options > Controller**: **Off** confirms with the bottom button, **On** with the
+right button, and **Automatic** follows the controller. The console setting is
+the same choice:
+
+```cfg
+seta in_swapConfirmBack 2
+```
+
+| Value | Menus confirm with |
+| --- | --- |
+| `0` (default) | The right button on Nintendo layouts, the bottom button otherwise |
+| `1` | The bottom button |
+| `2` | The right button |
+
+The menu prompts follow the choice. In-game bindings are not affected.
+
+### Menu Buttons
+
+In the menus, the controller's Menu button (Start, Options or +) takes you
+back to the game from the pause menu's Save, Load and Restart Level pages.
+The View button (Back, Select or −) hides or shows Join Game's server details;
+in play, holding it shows the scores or objectives.
+On a multiplayer server's Admin page it applies your server changes, and the
+Apply Changes button shows the Menu button's symbol. While a dialog or an
+open list is showing, it closes that first, as Back does.
+
+### Button Prompts
+
+Once you use a controller, menu prompts show its buttons instead of
+keyboard keys:
+
+- Xbox pads show A and B.
+- PlayStation pads show the cross and circle.
+- Switch pads show their B and A.
+- The Steam Deck's built-in controls show its own A and B.
+- Other pads show a diamond with the button to press filled in.
+
+In a multiplayer match's menu, the keys that switch tabs show your
+shoulder buttons: LB and RB, L1 and R1, or L and R. On the Match and Admin
+pages, the row of sections ends with your triggers (LT and RT, L2 and R2, or
+ZL and ZR), which step through the sections. The keyboard or mouse switches
+the prompts back to keys.
+
+If Steam Input or another remapper hides your real controller, choose the
+controller prompts yourself with **Prompt Style** in **Settings > Game Options >
+Controller**, or from the console. The setting covers the menus and the HUD:
+
+```cfg
+seta in_promptStyle 2
+```
+
+| Value | Controller prompts |
+| --- | --- |
+| `0` (default) | The controller's own |
+| `1` | Xbox |
+| `2` | PlayStation |
+| `3` | Nintendo; menus also confirm with A |
+| `4` | Steam Deck |
+| `5` | Generic |
+
+The prompts still switch to keys while you use the keyboard or mouse.
+`listControllers` shows the style in use for the connected controller on
+its `prompt glyphs:` line.
+
+Linux and macOS SDL3 builds opt into SDL's HIDAPI controller backends by default so PlayStation, Switch, Steam, Steam Deck, and Xbox-class controllers can expose the same button, stick, trigger, rumble, battery, gyro, and touchpad capabilities available through the shared SDL3 path. macOS support is a preview, and controllers have not yet been tested on a Mac. Run `listControllers` to confirm which SDL driver, hint state, and capabilities are active for a connected device.
 
 | Cvar | Auto default | What it changes |
 |---|---:|---|
@@ -182,12 +261,13 @@ The shipped defaults are defined in `content/basepr/pak0/default.cfg`.
 | Objectives / scores | `Tab` |
 | Chat | `T` |
 | Team chat | `Y` |
+| Quick-chat wheel (multiplayer) | `V` |
 | Quick save / quick load | `F5` / `F9` |
 | Screenshot | `F12` |
 
 ## Default Controller Buttons
 
-SDL gamepads use stable `JOY` button names so binds work across common Xbox, PlayStation, and Steam Input layouts. Controller support is first-class in SDL3 builds on Windows, Linux, and macOS. macOS controller support remains part of the experimental macOS build track. The native Linux, experimental native macOS, and legacy Win32 input fallbacks currently remain keyboard/mouse focused.
+SDL gamepads use stable `JOY` button names so binds work across common Xbox, PlayStation, and Steam Input layouts. Controller support is first-class in SDL3 builds on Windows, Linux, and macOS. On macOS, controller support has not yet been tested on real hardware. The native Linux, experimental native macOS, and legacy Win32 input fallbacks currently remain keyboard/mouse focused.
 
 | Button | Default action |
 |---|---|
@@ -198,9 +278,9 @@ SDL gamepads use stable `JOY` button names so binds work across common Xbox, Pla
 | `JOY5` / Y or Triangle | Flashlight |
 | `JOY6` / X or Square | Reload |
 | `JOY7` / Start | Menu |
-| `JOY8` / Back or Select | Menu |
+| `JOY8` / View, Back or Select | Scores or objectives while held |
 | `JOY9` / D-pad Up | Objectives or scores |
-| `JOY10` / D-pad Down | Center view |
+| `JOY10` / D-pad Down | Quick-chat wheel (multiplayer) |
 | `JOY11` / D-pad Right | Previous weapon |
 | `JOY12` / D-pad Left | Next weapon |
 | `JOY13` / Left stick click | Run or walk modifier |
@@ -214,15 +294,30 @@ SDL gamepads use stable `JOY` button names so binds work across common Xbox, Pla
 | `JOY21` / Right paddle 2 | Reload |
 | `JOY22` / Left paddle 2 | Weapon wheel |
 
+**Button prompts.** In the new interface's HUD, prompts such as Exit, Respawn
+and the quick-chat wheel's channel switch show the control you would press: a
+key's name while you play with keyboard and mouse, and your controller's button
+once you use a controller, drawn the way the controller labels it (A, B, X, Y
+or the PlayStation symbols, LB/L1, LT/L2/ZL, the d-pad's arm). openPREY picks the
+style from the controller SDL reports, or Steam Deck's on the Steam Deck
+profile. If a remapping tool hides your controller, force a style with
+`in_promptStyle`, which sets the menus' prompts too (see
+[Button Prompts](#button-prompts)); generic prompts show positions instead
+of letters.
+
 Menu behavior:
 
-- `JOY7` and `JOY8` open the in-game menu.
+- `JOY7` opens the in-game menu; `JOY8` (View) shows the scores or objectives
+  while held, as `JOY9` does.
 - `JOY3` activates the focused menu item.
-- `JOY4`, `JOY7`, and `JOY8` back out of menus.
+- `JOY4`, `JOY7`, and `JOY8` back out of menus, except where `JOY7` (Menu)
+  or `JOY8` (View) has its own job on a page: View hides or shows Join
+  Game's server details.
 - The D-pad and movement stick move menu focus.
 - Holding the D-pad, movement stick, or shoulder buttons repeats navigation for long lists.
 - Steam Deck packages enable the `steamdeck` platform profile, which applies `openprey_profile_steamdeck.cfg` on top of the normal defaults.
 - `JOY23` through `JOY28`, `JOY29` through `JOY32`, and generic `AUX1` through `AUX16` are bindable for extra device buttons but are intentionally unbound by default.
+- VR motion controllers press these same `JOY` buttons, so their binds change here too; see [Virtual Reality](vr.md) for which controller button is which.
 
 ## Useful Console Commands
 
@@ -247,6 +342,34 @@ writeConfig my-input-backup.cfg
 ```
 
 Most input cvars are archived, so changes made through the menu or with `seta` persist after exit.
+
+## Using the Console
+
+The console takes the keyboard and the mouse while it is open.
+
+| Key | What it does |
+|---|---|
+| `` ` `` or `~` | Opens and closes the console. Hold `Shift` to open it at a reduced height. |
+| `Esc` | Closes the completion list if one is showing, otherwise the console. |
+| `Enter` | Runs the line. If the highlighted completion would change the line, takes it first. |
+| `Tab`, `Shift+Tab` | Completes the word at the caret and steps through the matches. |
+| `Up`, `Down` | Steps through the commands you ran before; `Down` returns to the line you were typing. While the completion list shows, they move through the list. |
+| `Page Up`, `Page Down`, mouse wheel | Scrolls the log by `con_scrollLines` lines. Holding a page key repeats at your system's key-repeat rate. While the completion list shows, the page keys move through it a page at a time, and the wheel moves through it when the pointer is over it. |
+| `Ctrl+Home`, `Ctrl+End` | Jumps to the oldest and the newest line of the log. |
+| `Home`, `End`, `Left`, `Right` | Moves the caret; with `Ctrl`, `Left` and `Right` move a word. Add `Shift` to select. |
+| `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, `Ctrl+V` | Select all, copy, cut and paste. `Shift+Insert` also pastes; `Insert` switches between inserting and overwriting. |
+| `Ctrl+L` | Clears the log. |
+
+With the mouse you can click in the edit line to place the caret and drag to select, drag across the log to select text and copy it with `Ctrl+C` (`Shift`+click extends the selection), drag selected text onto the edit line, drag the scrollbar, and click a completion to take it. A click below the console closes it.
+
+Running a command returns the log to its newest line. Blank lines and a command repeated straight after itself are not added to the command history.
+
+| Setting | What it does |
+|---|---|
+| `con_height` | How far down the screen the console opens, `0.1` to `1` (default `0.5`). |
+| `con_scrollLines` | Lines scrolled per wheel notch or page key (default `6`). |
+| `con_scrollSmooth` | `1` animates scrolling, `0` jumps. The animation finishes within half a second whatever the distance. |
+| `con_completionPopup` | `1` shows the completion list while you type, `0` leaves completion to `Tab`. |
 
 ## Example Tweaks
 
@@ -324,3 +447,7 @@ On Steam Deck or SteamOS, direct `openPREY-client_x64` launches auto-select this
 If you want a final personal override layer that survives menu changes, place your preferred `seta` and `bind` commands in `autoexec.cfg`.
 
 For Steam Deck launcher details and Deck-specific notes, see [steam-deck.md](steam-deck.md).
+
+### Switching between controller and mouse in menus
+
+Controller navigation clears the old mouse highlight and hides the menu pointer. Moving or clicking the mouse restores pointer control. Directional navigation follows the visible controls in either direction and wraps at the ends; hidden pages cannot retain navigation focus. Binding capture still receives the original controller button.

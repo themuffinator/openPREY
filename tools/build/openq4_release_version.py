@@ -10,6 +10,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from openq4_release_status import is_withdrawn_release, require_available_release
+
 
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 RELEASE_TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
@@ -144,7 +146,9 @@ def list_release_tags(source_root: Path) -> list[tuple[str, ReleaseVersion]]:
         match = RELEASE_TAG_RE.fullmatch(tag)
         if match is None:
             continue
-        tags.append((tag, parse_version(match.group(1))))
+        version = parse_version(match.group(1))
+        if not is_withdrawn_release(version.key):
+            tags.append((tag, version))
     return tags
 
 
@@ -202,6 +206,7 @@ CATEGORY_RULES: tuple[tuple[str, str, int, bool], ...] = (
     ("content/basepr/pak1/env/", "maps", 3, True),
     ("content/basepr/pak1/gfx/guis/loadscreens/", "maps", 3, False),
     ("content/basepr/pak1/maps/", "maps", 3, True),
+    ("content/basepr/pak0/maps/", "maps", 3, True),
     ("content/basepr/pak0/guis/", "ui-content", 2, False),
     ("content/basepr/pak0/def/", "defs", 2, False),
     ("content/basepr/pak0/strings/", "localization", 1, False),
@@ -319,6 +324,7 @@ def validate_version_override(
     current_version: ReleaseVersion,
     latest_release: tuple[str, ReleaseVersion] | None,
 ) -> None:
+    require_available_release(override_version.key)
     if override_version.key < current_version.key:
         raise SystemExit(
             "version override must not be lower than the configured project version "
@@ -343,6 +349,7 @@ def main(argv: list[str]) -> int:
     current_version = parse_version(
         read_project_version(source_root, args.current_version)
     )
+    require_available_release(current_version.key)
     latest_release = find_latest_release_tag(source_root)
 
     version_override = args.version_override.strip()
@@ -486,6 +493,12 @@ def main(argv: list[str]) -> int:
         )
     else:
         next_version = base_version.format(patch=base_version.patch + 1)
+
+    # A withdrawn version must never be recreated by an automatic minor bump.
+    while is_withdrawn_release(parse_version(next_version).key):
+        withdrawn = parse_version(next_version)
+        next_version = withdrawn.format(patch=withdrawn.patch + 1)
+        release_reason += f" Skipped withdrawn version {withdrawn.text}."
 
     emit_metadata(
         {

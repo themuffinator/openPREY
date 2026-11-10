@@ -1,5 +1,10 @@
 # macOS Renderer And Backend Policy
 
+Current work and future design/removal decisions belong in the
+[development roadmap](roadmap.md#desktop-platforms-and-packaging). References
+below to a separate design or removal plan mean a scoped roadmap decision with
+supporting technical documentation, not another active delivery plan.
+
 Updated: 2026-07-11
 
 This document defines the current macOS renderer and platform-backend support
@@ -49,7 +54,7 @@ documented macOS floor and latest public macOS release.
 ## Apple OpenGL Risk
 
 Apple OpenGL remains the limiting macOS rendering dependency. The current policy
-accepts this for the experimental release line because stock Quake 4 asset
+accepts this for the preview release line because stock Quake 4 asset
 compatibility and renderer parity are higher priorities than changing graphics
 APIs prematurely.
 
@@ -101,26 +106,31 @@ Added: 2026-07-25.
 The gate above has been cleared for exactly one non-GL macOS renderer path: the
 existing openQ4 Vulkan renderer module running through MoltenVK, a
 Vulkan-on-Metal translation layer. The design plan is
-[macos-moltenvk-decision.md](macos-moltenvk-decision.md) and the staged record
-is [plans/2026-07-25-macos-moltenvk.md](plans/2026-07-25-macos-moltenvk.md).
+[macos-moltenvk-decision.md](archive/2026-10-18/macos-moltenvk-decision.md) and the staged record
+is [plans/2026-07-25-macos-moltenvk.md](archive/2026-10-18/plans/2026-07-25-macos-moltenvk.md).
 
 Clearing that gate did not change the default renderer, the package set, or the
 macOS support claim:
 
-- OpenGL remains the default and recommended macOS renderer in both package
-  variants.
-- Vulkan is opt-in only, through `r_renderApi vulkan`, applied at the next
-  engine start. `r_renderApi best` still resolves to `gl` on macOS.
+- The user-requested 28 October 2026 hardware policy makes fresh desktop
+  `best` configurations try Vulkan with OpenGL fallback. Existing explicit
+  OpenGL selections remain OpenGL in both package variants.
+- The retained System menu saves backend and stable device preferences and
+  offers a main-menu engine restart. Vulkan remains experimental on macOS;
+  this selection policy does not close its physical hardware gates.
 - No third package variant and no new `macos_graphics_bridge` value are
   introduced. The `renderer-vk_<arch>.dylib` module and the bundled
   `libMoltenVK.dylib` ship inside the existing `OpenGL` and `Metal bridge`
   packages, in `openQ4.app/Contents/Frameworks`.
-- macOS support remains experimental Apple Silicon/arm64. macOS Vulkan is an
-  experimental renderer inside an experimental platform, and no first-class or
+- macOS support is a preview for Apple Silicon/arm64. macOS Vulkan is an
+  experimental renderer on that preview platform, and no first-class or
   supported-renderer claim follows from this decision.
-- An initialization failure falls back to the OpenGL renderer through the
-  existing fail-closed ladder, so a failed opt-in never leaves a user without a
-  picture.
+- A missing renderer module, a missing MoltenVK, or a GPU that cannot start
+  Vulkan falls back to the OpenGL renderer through the existing fail-closed
+  ladder, which probes the Vulkan device before it activates the module. A
+  window or surface failure after activation stops openQ4 with an error, after
+  setting `r_renderApi` back to `gl` so the next launch uses OpenGL (issue #96
+  recorded the old behavior, where every device failure stopped every launch).
 
 The gate remains closed for a native Metal renderer, for making Vulkan the macOS
 default or resolving `best` to `vulkan` on macOS, and for any additional macOS
@@ -165,7 +175,7 @@ Native backend maintenance rules:
 
 ## Release-Gate Summary
 
-Before macOS support can move beyond the current experimental wording:
+Before macOS support can move beyond the current preview wording to first-class:
 
 - OpenGL and Metal bridge package evidence must be current for the supported OS
   matrix.

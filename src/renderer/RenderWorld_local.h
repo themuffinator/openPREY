@@ -29,6 +29,8 @@ If you have questions concerning this license or the applicable additional terms
 #ifndef __RENDERWORLDLOCAL_H__
 #define __RENDERWORLDLOCAL_H__
 
+#include "RendererSettingsReports.h"
+
 // assume any lightDef or entityDef index above this is an internal error
 const int LUDICROUS_INDEX	= 10000;
 
@@ -192,7 +194,7 @@ public:
 	virtual void			DebugWinding( const idVec4 &color, const idWinding &w, const idVec3 &origin, const idMat3 &axis, const int lifetime = 0, const bool depthTest = false );
 	virtual void			DebugCircle( const idVec4 &color, const idVec3 &origin, const idVec3 &dir, const float radius, const int numSteps, const int lifetime = 0, const bool depthTest = false );
 	virtual void			DebugSphere( const idVec4 &color, const idSphere &sphere, const int lifetime = 0, bool depthTest = false );
-	virtual void			DebugBounds( const idVec4 &color, const idBounds &bounds, const idVec3 &org = vec3_origin, const int lifetime = 0 );
+	virtual void			DebugBounds( const idVec4 &color, const idBounds &bounds, const idVec3 &org = vec3_origin, const int lifetime = 0, bool depthTest = false );
 	virtual void			DebugBox( const idVec4 &color, const idBox &box, const int lifetime = 0 );
 	virtual void			DebugFrustum( const idVec4 &color, const idFrustum &frustum, const bool showFromOrigin = false, const int lifetime = 0 );
 	virtual void			DebugCone( const idVec4 &color, const idVec3 &apex, const idVec3 &dir, float radius1, float radius2, const int lifetime = 0 );
@@ -224,11 +226,13 @@ public:
 
 	virtual bool			HasSkybox( int areaNum );
 	void					FreeDeferredLightDefs();
+	void					ApplyPendingDefOps( void );
 
 	//-----------------------
 
 	idStr					mapName;				// ie: maps/tim_dm2.proc, written to demoFile
 	ID_TIME_T					mapTimeStamp;			// for fast reloads of the same level
+	bool					worldFromGeneratedCache;	// decoded from the generated cache: not retained once those reads are refused
 	unsigned int			mapFileCRC;				// retail PROC / MD5RProc header CRC token
 
 	areaNode_t *			areaNodes;
@@ -240,6 +244,8 @@ public:
 
 	int						lightGridAvailabilityFrame;	// tr.frameCount the latch below was evaluated for
 	bool					anyLightGridAvailable;		// any portal area has a usable light grid
+	idFile *				lightGridPackFile;			// whole .lightgridpack in memory while atlases can still stream from it
+	idStr					lightGridPackFileName;		// pack held (or that failed to read) in lightGridPackFile
 
 	idScreenRect *			areaScreenRect;
 
@@ -259,6 +265,44 @@ public:
 
 	idList<idRenderLightLocal*>		lightDefs;
 	idList<idRenderLightLocal*>		deferredFreeLightDefs;
+	// entityDefs freed while the render thread still draws a frame that
+	// references them (r_vkRenderThread); deleted with the deferred lights
+	idList<idRenderEntityLocal*>	deferredFreeEntityDefs;
+
+	// Render thread stage 1 (r_vkRenderThread, REN-07). While a frame records
+	// on the render thread, the game's changes to existing defs it may draw,
+	// and to their decals and overlays, are queued here and applied in call
+	// order by the next R_RenderThread_Sync, before the next front end runs.
+	typedef enum {
+		PENDING_UPDATE_ENTITY,
+		PENDING_FREE_ENTITY,
+		PENDING_UPDATE_LIGHT,
+		PENDING_FREE_LIGHT,
+		PENDING_DECAL_ONTO_WORLD,
+		PENDING_DECAL,
+		PENDING_OVERLAY,
+		PENDING_REMOVE_DECALS
+	} pendingDefOpType_t;
+	typedef struct {
+		pendingDefOpType_t	type;
+		qhandle_t			handle;
+		renderEntity_t		entity;
+		renderLight_t		light;
+		idFixedWinding *	winding;
+		idVec3				projectionOrigin;
+		bool				parallel;
+		float				fadeDepth;
+		const idMaterial *	material;
+		int					startTime;
+		idPlane				localTextureAxis[2];
+	} pendingDefOp_t;
+	idList<pendingDefOp_t>			pendingDefOps;
+	// effect snapshots deleted while the in-flight frame may still draw them
+	idList<idRenderModel *>			pendingModelDeletes;
+
+	pendingDefOp_t *				QueueDefOp( pendingDefOpType_t type, qhandle_t handle );
+	const pendingDefOp_t *			FindPendingDefOp( qhandle_t handle, bool light ) const;
+	void							DeleteEffectModel( idRenderModel *model );
 // jmarshall: BSE
 	idList<rvRenderEffectLocal*>	effectsDef;
 // jmarshll end
@@ -297,16 +341,25 @@ public:
 	void					ConvertProcToMD5R();
 	void					ClearPortalStates();
 	virtual	bool			InitFromMap( const char *mapName );
+	bool					WriteLevelLoadCachePayload( idFile &file ) const;
+	bool					ReadLevelLoadCachePayload( idFile &file, const char *expectedMapName, ID_TIME_T sourceTimestamp );
 	bool					WriteMD5R( bool compressed );
 	void					SetupLightGrid();
 	void					LoadLightGridImages( bool forceReloadLoaded = false );
-	void					PreloadLightGridImages();
+	// Makes the map's light grids resident under the load's preload policy and
+	// fills in what it did; SetupLightGrid publishes the receipt (render API 20).
+	void					PreloadLightGridImages( renderLightGridLoadReceipt_t &receipt );
+	void					PublishLightGridLoadReceipt( const renderLightGridLoadReceipt_t &receipt ) const;
 	bool					EnsureLightGridAreaImages( int areaIndex );
+	idFile *				AcquireLightGridPack( const char *name );
+	void					ReleaseLightGridPack();
+	void					TrimLightGridPack();
 	bool					AnyLightGridAvailable();
-	bool					LoadLightGridFile( const char *name );
-	bool					LoadLightGridPackFile( const char *name );
-	void					ParseLightGridPoints( idLexer *src );
-	void					ParseLightGridVisibility( idLexer *src );
+	bool					LoadLightGridFile( const char *name, bool osPath = false );	// osPath: name is an OS path, not a game path
+	// chunkCount/assignedChunks, when given, report the pack's chunk directory and how many found an atlas
+	bool					LoadLightGridPackFile( const char *name, int *chunkCount = NULL, int *assignedChunks = NULL );
+	bool					ParseLightGridPoints( idLexer *src );
+	bool					ParseLightGridVisibility( idLexer *src );
 	void					WriteLightGridsToFile( const char *name ) const;
 
 	//--------------------------
@@ -361,7 +414,36 @@ public:
 	bool					ReadRenderEntity();
 	bool					ReadRenderLight();
 	bool					ReadRenderEffect();
-	
+
+	// An entity's in-world GUI in a render demo (v11), by entity handle and
+	// renderEntity_t::gui slot. Recording writes a GUI's geometry when it
+	// changes; playback draws the last geometry read in place of a live GUI.
+	void					WriteGuiSurface( qhandle_t handle, int entityGui, const class idGuiModel &model );
+	bool					ReadGuiSurface();
+	class idGuiModel *		DemoGuiSurface( qhandle_t handle, int entityGui ) const;
+	void					FreeDemoGuiSurfaces( qhandle_t handle );	// -1: all
+	idList<class idGuiModel *>	demoGuiSurfaces;		// playback, handle * MAX_RENDERENTITY_GUI + slot
+	idList<unsigned int>	demoGuiSurfaceChecksums;	// recording, same index; 0 = not written
+	class idGuiModel *		demoGuiScratch = NULL;		// recording: the filtered copy written
+
+	// An entity's joints in a render demo (v12). Recording predicts them from the
+	// joints it last wrote for the handle and playback from the joints it last
+	// read; both sides drop that history at every DC_LOADMAP, so a segment still
+	// depends on nothing before it.
+	struct demoJointHistory_t {
+		int						numJoints = 0;
+		bool					hasPrevious = false;	// previous: the record before current, same joint count
+		idList<unsigned int>	current;				// the joints as raw IEEE words
+		idList<unsigned int>	previous;
+	};
+	void					WriteDemoJoints( qhandle_t handle, const idJointMat *joints, int numJoints );
+	bool					ReadDemoJoints( qhandle_t handle, idJointMat *joints, int numJoints );
+	void					ResetDemoJointHistory( qhandle_t handle );	// -1: all
+	demoJointHistory_t *	DemoJointHistory( qhandle_t handle, bool create );
+	idList<demoJointHistory_t *>	demoJointHistory;	// by entity handle
+	idList<byte>			demoJointBuffer;			// one record's encoded joints
+	idList<unsigned int>	demoJointWords;				// one record's decoded joints
+
 
 	//--------------------------
 	// RenderWorld.cpp

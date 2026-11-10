@@ -11,7 +11,13 @@ const int MODERN_GL_SUBMIT_MATERIAL_TEXTURE_MAIN = 0;
 const int MODERN_GL_SUBMIT_MATERIAL_TEXTURE_NORMAL = 1;
 const int MODERN_GL_SUBMIT_MATERIAL_TEXTURE_SPECULAR = 2;
 const int MODERN_GL_SUBMIT_MATERIAL_TEXTURE_EMISSIVE = 3;
-const int MODERN_GL_SUBMIT_MATERIAL_TEXTURE_COUNT = 4;
+// PBR's separate metallic/roughness/AO layout uses these direct samplers.
+// They stay below the texture-array/shadow range, so this fits the GL 3.3
+// floor without overlapping a cubemap shadow sampler.
+const int MODERN_GL_SUBMIT_MATERIAL_TEXTURE_METALLIC = 4;
+const int MODERN_GL_SUBMIT_MATERIAL_TEXTURE_ROUGHNESS = 5;
+const int MODERN_GL_SUBMIT_MATERIAL_TEXTURE_AO = 6;
+const int MODERN_GL_SUBMIT_MATERIAL_TEXTURE_COUNT = 7;
 
 typedef struct modernGLSubmitCommand_s {
 	const modernGLDrawPlanEntry_t *drawPlanEntry;
@@ -31,10 +37,15 @@ typedef struct modernGLSubmitCommand_s {
 	int							modelViewMatrixLocation;
 	int							debugColorLocation;
 	int							localParamsLocation;
+	int							pbrIBLLocation;
+	int							bakedGridLocation;
 	int							mainTextureLocation;
 	int							normalTextureLocation;
 	int							specularTextureLocation;
 	int							emissiveTextureLocation;
+	int							metallicTextureLocation;
+	int							roughnessTextureLocation;
+	int							aoTextureLocation;
 	int							textureIndicesLocation;
 	int							textureTableModeLocation;
 	int							materialFlagsLocation;

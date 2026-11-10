@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 from pathlib import Path
+import re
 
 
 def assert_true(condition, message):
@@ -10,6 +11,29 @@ def assert_true(condition, message):
 
 def read_repo_file(relative_path):
     return (Path(__file__).resolve().parents[2] / relative_path).read_text(encoding="utf-8")
+
+
+def cxx_braced_block(source, start):
+    """The source from start through the brace closing the first block opened after it."""
+    assert_true(start >= 0, "the block's opening line should exist")
+    open_brace = source.find("{", start)
+    assert_true(open_brace >= 0, "the block should open a brace")
+    depth = 0
+    for index in range(open_brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise AssertionError("the block should close its brace")
+
+
+def cxx_code(text):
+    """C++ without comments or layout, to compare two copies of the same code."""
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", " ", text)
+    return " ".join(text.split())
 
 
 def test_msaa_cvar_exposes_guarded_steps():
@@ -58,14 +82,112 @@ def test_gfxinfo_reports_effective_aa_state():
     assert_true("R_GfxInfoGLMaxSamples" in init_cpp and "GL_MAX_SAMPLES" in init_cpp, "gfxInfo should report GL max MSAA samples")
     assert_true("R_GfxInfoPostAAName" in init_cpp, "gfxInfo should name post-AA modes")
     assert_true("SMAA1xMedium" in init_cpp and "SMAA1xUltra" in init_cpp and "SMAA1xColorPrototype" in init_cpp, "gfxInfo should use user-facing post-AA mode names")
-    assert_true("modern-visible-post" in init_cpp, "gfxInfo should explain modern-visible MSAA suppression")
+    assert_true("modern-forward-resolve" in init_cpp and "modern-scene-single-sample" in init_cpp,
+                "gfxInfo should distinguish an actual modern MSAA resolve from a single-sample frame")
+    assert_true("&& R_ModernGLExecutor_Stats().modernVisibleExecuted" in init_cpp,
+                "a rejected modern transaction must not suppress native AA reporting")
     assert_true("texture-msaa-unavailable" in init_cpp, "gfxInfo should explain unavailable texture MSAA")
     assert_true("gl-max-clamp" in init_cpp, "gfxInfo should report GL max sample clamping")
+    # Once a main scene has drawn, gfxInfo reports the samples of the target it
+    # drew into rather than r_multiSamples clamped to GL_MAX_SAMPLES: Xvfb's
+    # sample-less window, a changed r_multiSamples awaiting vid_restart and the
+    # game's forward target under supersampling all made that prediction wrong.
+    observed_start = init_cpp.find("static bool R_GfxInfoObservedMSAA(")
+    observed = init_cpp[observed_start:init_cpp.find("static void R_GfxInfoPrintAAState( void ) {")]
+    assert_true(observed_start >= 0, "gfxInfo should report the main scene's observed MSAA")
+    assert_true("if ( backEnd.mainSceneTargetContext != tr.glContextGeneration ) {\n\t\treturn false;" in observed,
+                "only a main scene drawn in the current context should be observed")
+    assert_true("const int targetSamples = backEnd.mainSceneTargetSamples;" in observed,
+                "gfxInfo should report the recorded render texture samples")
+    # Without multisample textures (Apple's GL 2.1 context) every render texture
+    # is single-sample, so the scene is multisampled only when its view drew
+    # straight into the window; report that instead of the requested count.
+    assert_true('"default-framebuffer"' in observed and '"default-framebuffer-single-sample"' in observed,
+                "gfxInfo should report window MSAA when the scene drew into the default framebuffer")
+    window_branch = observed.find("if ( backEnd.mainSceneTargetIsWindow ) {")
+    assert_true(0 <= window_branch < observed.find("R_DefaultFramebufferSamples()"),
+                "gfxInfo should read the window's samples only for a scene that drew there")
+    assert_true('"scene-target"' in observed and '"scene-target-single-sample"' in observed,
+                "gfxInfo should explain a scene target whose samples differ from the request")
+    # The modern executor reports its own resolve, and before any main scene has
+    # drawn (startup self-tests) the count is still predicted.
+    assert_true("mainSceneObserved = !modernVisiblePost && R_GfxInfoObservedMSAA(" in init_cpp,
+                "the modern executor's resolve report should take precedence over the observed target")
+    assert_true("if ( !mainSceneObserved && requestedMSAA > 1 ) {" in init_cpp,
+                "gfxInfo should keep predicting MSAA until a main scene has drawn")
+    draw_common = read_repo_file(Path("src") / "renderer" / "draw_common.cpp")
+    draw_view = draw_common[draw_common.find("void\tRB_STD_DrawView( void ) {"):]
+    target_chosen = draw_view.find("backEnd.renderTexture = rbSceneRenderTexture;")
+    target_recorded = draw_view.find("backEnd.mainSceneTargetIsWindow = ( sceneTarget == NULL );")
+    assert_true(0 <= target_chosen < target_recorded,
+                "the main view should record its target after the renderer picks its own scene target")
+    assert_true("? backEnd.renderTexture : R_GetDefaultRenderTarget();" in draw_view,
+                "a VR frame's eye texture stands in for the window as the scene target")
+    # A levelshot, envshot or light-grid capture renders its own view outside the
+    # game's forward target; it must not replace the gameplay frame's record.
+    assert_true("&& !tr.takingScreenshot && tr.tiledViewport[0] == 0 ) {" in draw_view,
+                "screenshot and capture views should keep the gameplay frame's record")
+    assert_true("backEnd.mainSceneTargetSamples = sceneColor != NULL ? Max( 0, sceneColor->GetOpts().numMSAASamples ) : 0;" in draw_view,
+                "the main view should record its target's color samples")
     assert_true(
         "Renderer AA: MSAA requested=%d effective=%d reason=%s GL_MAX_SAMPLES=%s alphaToCoverage=%d PostAA=%d(%s) postAAEffective=%d postAAReason=%s screenFraction=%d%% supersampling=%s resolutionScaleMode=%d" in init_cpp,
         "gfxInfo should print the AA summary fields",
     )
     assert_true("R_GfxInfoPrintAAState();" in init_cpp, "gfxInfo should call the AA state reporter")
+
+
+def test_gles_view_path_records_main_scene_target():
+    # renderer-gles compiles RenderSystem_init.cpp but not draw_common.cpp, and
+    # draws views through its own RB_DrawView. Without a copy of RB_STD_DrawView's
+    # record, gfxInfo on an ES context only ever predicted the MSAA.
+    draw_common = read_repo_file(Path("src") / "renderer" / "draw_common.cpp")
+    gles_backend = read_repo_file(Path("src") / "renderer" / "GLES" / "gles_Backend.cpp")
+
+    desktop_test = cxx_braced_block(
+        draw_common, draw_common.find("static bool RB_IsMainScenePostProcessView( const viewDef_t *viewDef ) {"))
+    gles_test = cxx_braced_block(
+        gles_backend, gles_backend.find("static bool RB_GLES_IsMainScenePostProcessView( const viewDef_t *viewDef ) {"))
+    assert_true(
+        cxx_code(gles_test).replace("RB_GLES_IsMainScenePostProcessView", "RB_IsMainScenePostProcessView")
+        == cxx_code(desktop_test),
+        "the GLES main-view test should stay a copy of RB_IsMainScenePostProcessView")
+
+    draw_view = draw_common[draw_common.find("void\tRB_STD_DrawView( void ) {"):]
+    desktop_record = cxx_braced_block(draw_view, draw_view.find("if ( RB_IsMainScenePostProcessView( backEnd.viewDef )"))
+    gles_view = cxx_braced_block(gles_backend, gles_backend.find("void RB_DrawView( const void *data ) {"))
+    record_start = gles_view.find("if ( RB_GLES_IsMainScenePostProcessView( backEnd.viewDef )")
+    gles_record = cxx_braced_block(gles_view, record_start)
+    assert_true(
+        cxx_code(gles_record).replace("RB_GLES_IsMainScenePostProcessView", "RB_IsMainScenePostProcessView")
+        == cxx_code(desktop_record),
+        "the GLES view path should record the main scene target exactly as RB_STD_DrawView does")
+    for snippet, purpose in (
+        ("&& !tr.takingScreenshot && tr.tiledViewport[0] == 0 ) {", "screenshots and captures keep the gameplay frame's record"),
+        ("? backEnd.renderTexture : R_GetDefaultRenderTarget();", "the target choice stays RB_STD_DrawView's, VR stand-in included"),
+        ("backEnd.mainSceneTargetContext = tr.glContextGeneration;", "the record belongs to the current context"),
+        ("backEnd.mainSceneTargetIsWindow = ( sceneTarget == NULL );", "a scene drawn into the window reports the window's samples"),
+        ("backEnd.mainSceneTargetSamples = sceneColor != NULL ? Max( 0, sceneColor->GetOpts().numMSAASamples ) : 0;",
+         "the record keeps the target's color samples"),
+    ):
+        assert_true(snippet in gles_record, f"GLES record: {purpose}")
+
+    # Recorded where RB_STD_DrawView would run, after the empty-view and
+    # r_skipRender returns, and ahead of both ES paths: gles_d3 draws the view
+    # itself and the modern executor's path falls through.
+    skip_render = gles_view.find("if ( r_skipRender.GetBool() && backEnd.viewDef->viewEntitys ) {")
+    gles_d3_draw = gles_view.find("RB_GLESD3_DrawView();")
+    modern_path = gles_view.find("RB_GLES_ResolveSceneResolutionScale();")
+    assert_true(0 <= skip_render < record_start < gles_d3_draw < modern_path,
+                "the GLES view path should record each drawn main view before either backend draws it")
+    # RB_DrawView must stay gles_d3's only entry, or a view could skip the record.
+    renderer_root = Path(__file__).resolve().parents[2] / "src" / "renderer"
+    callers = {
+        path.relative_to(renderer_root).as_posix(): calls
+        for path in renderer_root.rglob("*.cpp")
+        if (calls := path.read_text(encoding="utf-8", errors="replace").count("RB_GLESD3_DrawView();"))
+    }
+    assert_true(callers == {"GLES/gles_Backend.cpp": 1},
+                f"RB_GLESD3_DrawView should be called only from the GLES RB_DrawView, found {callers}")
 
 
 def test_postaa_settings_surface_exposes_all_modes():
@@ -169,6 +291,7 @@ def main():
     test_msaa_cvar_exposes_guarded_steps()
     test_msaa_cvar_normalizes_unsupported_values_before_gl_init()
     test_gfxinfo_reports_effective_aa_state()
+    test_gles_view_path_records_main_scene_target()
     test_postaa_settings_surface_exposes_all_modes()
     test_postaa_smaa_quality_presets_are_explicit_and_logged()
     test_sdl3_context_creation_has_msaa_fallback_ladder()

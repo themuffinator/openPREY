@@ -70,5 +70,5 @@ evidence.
 
 Passing this track means the no-platform-access robustness work is internally
 consistent. It does not prove Finder behavior, Gatekeeper behavior, input,
-audio, display modes, OpenGL/Metal bridge gameplay, or issue #73 runtime status
-on Apple hardware.
+audio, display modes, OpenGL/Metal bridge gameplay, issue #98 visual parity, or
+complete runtime signoff on Apple hardware.

@@ -17,10 +17,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 READY_MARKER = "OPENQ4_MACOS_DEDICATED_SMOKE_READY"
+IPV4_SELF_TEST_MARKER = "IPv4 network self-test: passed"
+CANONICAL_GAMETYPE_MARKER = '"si_gameType" is:"DM"'
 REQUIRED_MARKERS = (
     "Selected game module: logical='game_mp'",
     "------------- Initializing Game -------------",
     "game initialized.",
+    IPV4_SELF_TEST_MARKER,
+    CANONICAL_GAMETYPE_MARKER,
     READY_MARKER,
     "--- Common Initialization Complete ---",
     "Type 'help' for dedicated server info.",
@@ -29,6 +33,7 @@ REQUIRED_MARKERS = (
 FATAL_MARKERS = (
     "ERROR:",
     "Error during initialization",
+    "IPv4 network self-test: FAILED",
     "couldn't load game dynamic library",
     "couldn't find game DLL API",
     "wrong game DLL API version",
@@ -144,6 +149,8 @@ def main(argv: list[str]) -> int:
         "+set", "net_serverDedicated", "1",
         "+set", "logFile", "2",
         "+set", "logFileName", "logs/macos-dedicated-smoke.log",
+        "+netIPv4SelfTest",
+        "+si_gameType",
         "+echo", READY_MARKER,
         "+com_activeGameModule",
         "+wait", "1",

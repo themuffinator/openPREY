@@ -5,7 +5,7 @@
 ===============================================================================
 
 	Windows dedicated-server GL stub (Phase B7,
-	docs/dev/plans/2026-07-16-vulkan-renderer-phase-b.md).
+	docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer-phase-b.md).
 
 	The Windows ded target keeps the full renderer front-end (RenderWorld
 	PVS/portals, RenderModel collision, Material parse) but links no OpenGL:

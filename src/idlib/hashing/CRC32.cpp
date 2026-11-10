@@ -151,7 +151,54 @@ void CRC32_Update( uint32_t &crcvalue, const byte data ) {
 void CRC32_UpdateChecksum( uint32_t &crcvalue, const void *data, int length ) {
 	const unsigned char *buf = (const unsigned char *) data;
 
-	while( length-- ) {
+	// Each table advances one input byte through up to sixteen zero bytes of
+	// the same polynomial. This separates the serial byte dependencies while
+	// preserving the incremental CRC state and existing save/PK4 checksums.
+	struct slicingTables_t {
+		uint32_t values[16][256];
+		slicingTables_t() {
+			for ( int byteValue = 0; byteValue < 256; ++byteValue ) {
+				uint32_t value = crctable[byteValue];
+				values[0][byteValue] = value;
+				for ( int slice = 1; slice < 16; ++slice ) {
+					value = crctable[value & 0xffu] ^ ( value >> 8 );
+					values[slice][byteValue] = value;
+				}
+			}
+		}
+	};
+	static const slicingTables_t tables;
+	while ( length >= 16 ) {
+		const uint32_t first = crcvalue ^ static_cast<uint32_t>( buf[0] ) ^
+			( static_cast<uint32_t>( buf[1] ) << 8 ) ^
+			( static_cast<uint32_t>( buf[2] ) << 16 ) ^
+			( static_cast<uint32_t>( buf[3] ) << 24 );
+		crcvalue = tables.values[15][first & 0xffu] ^ tables.values[14][( first >> 8 ) & 0xffu] ^
+			tables.values[13][( first >> 16 ) & 0xffu] ^ tables.values[12][first >> 24] ^
+			tables.values[11][buf[4]] ^ tables.values[10][buf[5]] ^
+			tables.values[9][buf[6]] ^ tables.values[8][buf[7]] ^
+			tables.values[7][buf[8]] ^ tables.values[6][buf[9]] ^
+			tables.values[5][buf[10]] ^ tables.values[4][buf[11]] ^
+			tables.values[3][buf[12]] ^ tables.values[2][buf[13]] ^
+			tables.values[1][buf[14]] ^ tables.values[0][buf[15]];
+		buf += 16;
+		length -= 16;
+	}
+	while ( length >= 8 ) {
+		// Explicit byte assembly is endian- and alignment-independent; compilers
+		// combine it into a word load on targets that support unaligned loads.
+		const uint32_t first = crcvalue ^ static_cast<uint32_t>( buf[0] ) ^
+			( static_cast<uint32_t>( buf[1] ) << 8 ) ^
+			( static_cast<uint32_t>( buf[2] ) << 16 ) ^
+			( static_cast<uint32_t>( buf[3] ) << 24 );
+		crcvalue = tables.values[7][first & 0xffu] ^ tables.values[6][( first >> 8 ) & 0xffu] ^
+			tables.values[5][( first >> 16 ) & 0xffu] ^ tables.values[4][first >> 24] ^
+			tables.values[3][buf[4]] ^ tables.values[2][buf[5]] ^
+			tables.values[1][buf[6]] ^ tables.values[0][buf[7]];
+		buf += 8;
+		length -= 8;
+	}
+	while( length-- > 0 ) {
 		crcvalue = crctable[ ( crcvalue ^ ( *buf++ ) ) & 0xffu ] ^ ( crcvalue >> 8 );
 	}
 }

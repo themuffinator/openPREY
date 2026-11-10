@@ -64,34 +64,34 @@ def validate_macos_source_manifest() -> None:
     for token in (
         "SDL3_DARWIN_SOURCES",
         "DARWIN_PLATFORM_SOURCES",
-        '"sys/osx/macosx_compat.mm"',
-        '"sys/osx/macosx_event.mm"',
-        '"sys/osx/macosx_glimp.mm"',
-        '"sys/osx/macosx_misc.mm"',
-        '"sys/osx/macosx_sys.mm"',
-        '"sys/osx/macosx_sdl3.cpp"',
-        '"sys/osx/macosx_sdl3_main.cpp"',
+        '"sys/macos/macos_compat.mm"',
+        '"sys/macos/macos_event.mm"',
+        '"sys/macos/macos_glimp.mm"',
+        '"sys/macos/macos_misc.mm"',
+        '"sys/macos/macos_sys.mm"',
+        '"sys/macos/macos_sdl3.cpp"',
+        '"sys/macos/macos_sdl3_main.cpp"',
     ):
         require(sources, token, "macOS Meson source manifest")
     for legacy_source in (
         "DOOMController.mm",
         "PreferencesDialog.cpp",
         "PickMonitor.cpp",
-        "macosx_sound.cpp",
-        "macosx_utils.mm",
+        "macos_sound.cpp",
+        "macos_utils.mm",
     ):
         reject(sources, legacy_source, "macOS Meson source manifest")
 
 
 def validate_no_live_raw_string_builders() -> None:
     for relative_path in (
-        "src/sys/osx/macosx_compat.mm",
-        "src/sys/osx/macosx_event.mm",
-        "src/sys/osx/macosx_glimp.mm",
-        "src/sys/osx/macosx_misc.mm",
-        "src/sys/osx/macosx_sys.mm",
-        "src/sys/osx/macosx_sdl3.cpp",
-        "src/sys/osx/macosx_sdl3_main.cpp",
+        "src/sys/macos/macos_compat.mm",
+        "src/sys/macos/macos_event.mm",
+        "src/sys/macos/macos_glimp.mm",
+        "src/sys/macos/macos_misc.mm",
+        "src/sys/macos/macos_sys.mm",
+        "src/sys/macos/macos_sdl3.cpp",
+        "src/sys/macos/macos_sdl3_main.cpp",
     ):
         live_source = strip_if0_blocks(read(relative_path))
         for pattern in (r"\bstrcpy\s*\(", r"\bstrcat\s*\(", r"\bsprintf\s*\(", r"\bvsprintf\s*\(", r"\balloca\s*\("):
@@ -100,20 +100,20 @@ def validate_no_live_raw_string_builders() -> None:
 
 
 def validate_native_cocoa_context() -> None:
-    source = read("src/sys/osx/macosx_glimp.mm")
+    source = read("src/sys/macos/macos_glimp.mm")
     accessor = function_body(source, "- (CGLContextObj) cglContext;")
     ladder = function_body(source, "static bool OSX_CreateContextWithLadder( unsigned int &selectedMultisamples, NSOpenGLPixelFormat **selectedPixelFormat ) {")
     require(accessor, "return [self CGLContextObj];", "native macOS CGL context accessor")
     require(ladder, "context != nil && [context cglContext] != NULL", "native macOS CGL context validation")
     require(ladder, "[context release];", "native macOS failed context cleanup")
 
-    set_context_macro = read("src/sys/osx/macosx_native_gl.h")
+    set_context_macro = read("src/sys/macos/macos_native_gl.h")
     require(set_context_macro, "glw_state._cgl_ctx = [_context cglContext];", "native macOS context storage")
     require(set_context_macro, "glw_state._ctx_is_current = NO;", "native macOS context current-state reset")
 
 
 def validate_native_fullscreen_failures() -> None:
-    source = read("src/sys/osx/macosx_glimp.mm")
+    source = read("src/sys/macos/macos_glimp.mm")
     create_window = function_body(source, "static bool CreateGameWindow(  glimpParms_t parms ) {")
     pixel_attrs = function_body(source, "static NSOpenGLPixelFormatAttribute *GetPixelAttributes( unsigned int multisamples, const rendererContextCandidate_t &candidate ) {")
     pixel_format = function_body(source, "static NSOpenGLPixelFormat *OSX_CreatePixelFormatForCandidate( unsigned int &multisamples, const rendererContextCandidate_t &candidate ) {")
@@ -183,7 +183,7 @@ def validate_native_fullscreen_failures() -> None:
 
 
 def validate_hide_unhide_and_stubs() -> None:
-    source = read("src/sys/osx/macosx_glimp.mm")
+    source = read("src/sys/macos/macos_glimp.mm")
     pause = function_body(source, "void Sys_PauseGL () {")
     resume = function_body(source, "void Sys_ResumeGL () {")
     restore = function_body(source, "static void _GLimp_RestoreOriginalVideoSettings() {")
@@ -230,7 +230,7 @@ def validate_hide_unhide_and_stubs() -> None:
 
 
 def validate_display_and_gamma_guards() -> None:
-    source = read("src/sys/osx/macosx_glimp.mm")
+    source = read("src/sys/macos/macos_glimp.mm")
     glimp_init = function_body(source, "bool GLimp_Init( glimpParms_t parms ) {")
     matching_mode = function_body(source, "NSDictionary *Sys_GetMatchingDisplayMode( glimpParms_t parms ) {")
     get_gamma = function_body(source, "void Sys_GetGammaTable(glwgamma_t *table) {")
@@ -300,8 +300,8 @@ def validate_display_and_gamma_guards() -> None:
 
 
 def validate_native_input_capture_guards() -> None:
-    source = read("src/sys/osx/macosx_event.mm")
-    update_rect = read("src/sys/osx/macosx_glimp.mm")
+    source = read("src/sys/macos/macos_event.mm")
+    update_rect = read("src/sys/macos/macos_glimp.mm")
 
     require(source, "static CGRect\tinputRect\t\t= CGRectZero;", "native macOS input rect initialization")
 
@@ -355,8 +355,8 @@ def validate_native_input_capture_guards() -> None:
 
 
 def validate_objc_text_bridge_guards() -> None:
-    misc = read("src/sys/osx/macosx_misc.mm")
-    sys = read("src/sys/osx/macosx_sys.mm")
+    misc = read("src/sys/macos/macos_misc.mm")
+    sys = read("src/sys/macos/macos_sys.mm")
 
     localized = function_body(misc, "const char* OSX_GetLocalizedString( const char* key )")
     clipboard = function_body(sys, "char *Sys_GetClipboardData(void)")
@@ -394,7 +394,7 @@ def validate_objc_text_bridge_guards() -> None:
 
 
 def validate_default_savepath_guards() -> None:
-    source = read("src/sys/osx/macosx_compat.mm")
+    source = read("src/sys/macos/macos_compat.mm")
     default_savepath = function_body(source, "const char *Sys_DefaultSavePath( void ) {")
     normalize = function_body(source, "static void Sys_NormalizeMacOSDirectoryPath( idStr &path ) {")
     ensure_tree = function_body(source, "static bool Sys_EnsureMacOSDirectoryTree( const idStr &path ) {")

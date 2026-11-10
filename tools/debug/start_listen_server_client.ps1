@@ -130,6 +130,7 @@ $serverArgs = New-openPREYCommonArgs `
 $serverArgs += @(
     "+set", "net_serverDedicated", "0",
     "+set", "net_port", $Port.ToString(),
+    "+set", "ui_autoJoin", "1",
     "+seta", "si_pure", "0",
     "+set", "net_serverAllowServerMod", "1",
     "+set", "sv_cheats", "1",
@@ -148,6 +149,7 @@ $clientArgs = New-openPREYCommonArgs `
     -ShowFramePacing $ShowFramePacing
 
 $clientArgs += @(
+    "+set", "ui_autoJoin", "1",
     "+set", "ui_name", $ClientName,
     "+connect", ("127.0.0.1:{0}" -f $Port)
 )

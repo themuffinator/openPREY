@@ -9,8 +9,8 @@ It is a roadmap, not a release-support claim.
 - Canonical build system: Meson + Ninja.
 - Standard build output: `builddir/`.
 - Standard staged runtime: `.install/`.
-- Canonical game source: adjacent `OpenPrey-game` checkout, overridable with
-  `OPENPREY_GAMELIBS_REPO`.
+- Canonical game source: in-tree `src/game`, `src/Prey` and `src/preyengine`
+  (Prey SDK EULA, `LICENSES/PREY-SDK-EULA.rtf`).
 - Runtime game directory: `basepr/`.
 - Module model: one `game_<arch>` module for SP and MP.
 - Platform backend direction: SDL3 first; native/legacy backends are diagnostic
@@ -25,15 +25,14 @@ It is a roadmap, not a release-support claim.
 | Windows/Linux ARM64 | Inherited build support exists | Prey runtime evidence pending | Gated |
 | macOS arm64/x64/universal2 | Inherited backend/tooling support exists | Prey runtime and package evidence pending | Experimental and gated |
 
-The active workflow is `.github/workflows/openprey-validation.yml`. It validates the
-canonical companion staging contract, deterministic `pak0.pk4`/`pak1.pk4` inputs,
-one staged `game_<arch>` module, `basepr/`, and openPREY desktop/icon payloads on the
-enabled x64 lanes.
+The active workflow is `.github/workflows/openprey-validation.yml`. It validates
+deterministic `pak0.pk4`/`pak1.pk4` inputs, one staged `game_<arch>` module,
+`basepr/`, and openPREY desktop/icon payloads on the enabled x64 lanes.
 
 Inherited OpenQ4 ARM64, macOS, Universal2, signing, and manual-release workflows are
 retained only as manual static-test/reference fixtures. Every job is unconditionally
-false-gated because it clones `openQ4-game` and asserts split `game-sp`/`game-mp`
-modules. Those gates must not be removed until the lanes are rebuilt around the
+false-gated because it asserts upstream OpenQ4's split `game-sp`/`game-mp` modules
+and package contracts. Those gates must not be removed until the lanes are rebuilt around the
 openPREY contract and backed by runtime evidence.
 
 ## Linux and Steam Deck
@@ -70,7 +69,7 @@ hardware:
 5. logs free of new engine/game/parser/loader errors;
 6. renderer validation using the engine `screenshot` command, never an OS capture;
 7. package extraction/install and launcher/icon checks;
-8. evidence tied to exact engine and `OpenPrey-game` commits.
+8. evidence tied to the exact source commit.
 
 All agent-driven runtime validation must force `+set r_fullscreen 0`.
 

@@ -59,6 +59,27 @@ def validate_build_machine_tools() -> None:
     require(sdl_meson, "find_program('wayland-scanner', native: true)", "build-machine Wayland scanner")
 
 
+def validate_cross_platform_sdl_config_defaults() -> None:
+    source = read("subprojects/packagefiles/sdl3/meson.build")
+    wrap = read("subprojects/sdl3.wrap")
+    first_host_branch = source.find("if host_machine.system() == 'darwin'")
+    if first_host_branch == -1:
+        raise AssertionError("SDL Meson overlay is missing its first host-system branch")
+    unconditional_config = source[:first_host_branch]
+
+    require(wrap, "patch_directory = sdl3", "SDL Meson packagefile overlay")
+    for variable in (
+        "SDL_LIBDECOR_VERSION_MAJOR",
+        "SDL_LIBDECOR_VERSION_MINOR",
+        "SDL_LIBDECOR_VERSION_PATCH",
+    ):
+        require(
+            unconditional_config,
+            f"cdata.set('{variable}', 0)",
+            "cross-platform SDL config defaults",
+        )
+
+
 def validate_wayland_dynamic_loading() -> None:
     source = read("subprojects/packagefiles/sdl3/meson.build")
 
@@ -90,6 +111,7 @@ def validate_linux_ime_support() -> None:
     backend = read("src/sys/sdl3/sdl3_backend.cpp")
     syscon = read("src/sys/posix/posix_syscon.cpp")
     edit_window = read("src/ui/EditWindow.cpp")
+    legacy_gui = read("src/ui/UserInterface.cpp")
     for token in (
         "cdata.set('HAVE_FCITX', 1)",
         "cdata.set('SDL_USE_IME', 1)",
@@ -112,7 +134,8 @@ def validate_linux_ime_support() -> None:
     ):
         require(backend, token, "SDL native IME lifecycle")
 
-    require(backend, "dynamic_cast<idEditWindow *>(activeGui->GetDesktop()->GetFocusedChild())", "focused GUI edit-field IME gate")
+    require(backend, "activeGui->GetTextInputState(area, cursorOffset)", "active GUI text-input interface")
+    require(legacy_gui, "dynamic_cast<idEditWindow *>( desktop->GetFocusedChild() )", "legacy focused GUI edit-field IME gate")
     require(edit_window, "idEditWindow::GetTextInputState", "GUI edit-field IME geometry")
     require(edit_window, "cursorPixels - paintOffset", "GUI edit-field caret placement")
 
@@ -223,6 +246,7 @@ def validate_elf_contract() -> None:
     require(meson, "'-Wl,--version-script=' + linux_game_module_export_map[0].full_path()", "Linux game-module export map")
     require(module_meson, "link_depends: game_module_link_depends", "Linux game-module export-map relink dependency")
     require(export_map, "GetGameAPI;", "Linux game-module public API")
+    require(export_map, "openQ4_Mem_GetModuleStats;", "Linux game-module memory counter export")
     require(export_map, "local:", "Linux game-module local symbol policy")
     require(export_map, "*;", "Linux game-module default-local symbol policy")
     for token in (
@@ -232,10 +256,11 @@ def validate_elf_contract() -> None:
         '["--wide", "--dyn-syms"]',
         'fields[4] in {"GLOBAL", "WEAK", "UNIQUE"}',
         'fields[5] in {"DEFAULT", "PROTECTED"}',
-        "len(public_symbols) == 1",
-        'public_symbols[0][4] == "GetGameAPI"',
+        'expected_game_exports = {"GetGameAPI", "openQ4_Mem_GetModuleStats"}',
+        "len(public_symbols) == len(expected_game_exports)",
+        'symbol[:3] == ("FUNC", "GLOBAL", "DEFAULT")',
         'readelf_env["LC_ALL"] = "C"',
-        "Linux game module must expose exactly one GLOBAL/DEFAULT/FUNC",
+        "Linux game module must expose exactly the GLOBAL/DEFAULT/FUNC GetGameAPI",
         "linux_binary_specs",
     ):
         require(validator, token, "Linux staged ELF validation")
@@ -264,6 +289,7 @@ def validate_multiple_instance_benchmark() -> None:
 
 def main() -> None:
     validate_build_machine_tools()
+    validate_cross_platform_sdl_config_defaults()
     validate_wayland_dynamic_loading()
     validate_linux_ime_support()
     validate_openal_device_event_threading()

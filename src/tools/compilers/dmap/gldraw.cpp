@@ -36,7 +36,7 @@ If you have questions concerning this license or the applicable additional terms
 
 	The Windows-only 'dmap -draw' immediate-mode GL visualization (and its
 	winsock glserv companion) was retired with the renderer-module seam
-	(docs/dev/plans/2026-07-16-vulkan-renderer-phase-b.md, B6): the engine
+	(docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer-phase-b.md, B6): the engine
 	executables no longer carry an OpenGL surface for it to draw into. The
 	entry points remain as no-ops so the optimizer's instrumentation call
 	sites stay in place.

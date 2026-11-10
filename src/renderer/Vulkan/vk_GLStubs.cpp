@@ -5,17 +5,20 @@
 ===============================================================================
 
 	Vulkan module GL stubs (Phase C,
-	docs/dev/plans/2026-07-17-vulkan-phase-c.md).
+	docs/dev/archive/2026-10-18/plans/2026-07-17-vulkan-phase-c.md).
 
 	The Vulkan module compiles the shared renderer front-end, whose mixed
 	TUs still carry GL call sites (image bind/copy paths, GPU timers, caps
-	probes, debug draws). None of them executes under the Vulkan backend —
-	glConfig-driven guards and the replaced GL-backend TUs keep those paths
-	cold — but they must link. GLEW builds in its hook-resolving dedicated
-	flavor (the hook below returns NULL; glewInit is never called), and the
-	GL 1.1 entry points resolve to these no-ops. On Windows the module
-	compiles with GLAPI=extern so GLEW's GL 1.1 declarations lose their
-	dllimport decoration.
+	probes, debug draws). The debug tools (tr_rendertools.cpp) are the one
+	exception that runs: the fixed-function entry points they use forward to
+	the emulation in vk_DebugTools.cpp, which draws them while
+	VK_DebugTools_DrawView is active and ignores them otherwise. Nothing else
+	executes under the Vulkan backend — glConfig-driven guards and the
+	replaced GL-backend TUs keep those paths cold — but they must link. GLEW
+	builds in its hook-resolving dedicated flavor (the hook below returns
+	NULL; glewInit is never called), and the GL 1.1 entry points resolve to
+	these no-ops. On Windows the module compiles with GLAPI=extern so GLEW's
+	GL 1.1 declarations lose their dllimport decoration.
 
 ===============================================================================
 */
@@ -27,37 +30,76 @@
 
 #include "../tr_local.h"
 
-bool VK_GuiExecutor_ReadPixels( int x, int y, int width, int height, void *pixels );
+bool VK_GuiExecutor_ReadPixels( int x, int y, int width, int height, void *pixels, int components );
+
+// The debug tools' fixed-function calls (tr_rendertools.cpp, tr_trace.cpp)
+// drive a small emulation in vk_DebugTools.cpp. It only records inside
+// VK_DebugTools_DrawView; everywhere else these stay the no-ops the rest of
+// the shared front end relies on.
+void VK_DebugGL_Begin( GLenum mode );
+void VK_DebugGL_End( void );
+void VK_DebugGL_Vertex3f( float x, float y, float z );
+void VK_DebugGL_Color4f( float r, float g, float b, float a );
+void VK_DebugGL_TexCoord2f( float s, float t );
+void VK_DebugGL_VertexPointer( int size, GLenum type, int stride, const void *pointer );
+void VK_DebugGL_ColorPointer( int size, GLenum type, int stride, const void *pointer );
+void VK_DebugGL_TexCoordPointer( int size, GLenum type, int stride, const void *pointer );
+void VK_DebugGL_ClientState( GLenum array, bool enable );
+void VK_DebugGL_ArrayElement( int i );
+void VK_DebugGL_DrawElements( GLenum mode, int count, GLenum type, const void *indices );
+void VK_DebugGL_Enable( GLenum cap, bool enable );
+void VK_DebugGL_PolygonOffset( float factor, float units );
+void VK_DebugGL_DepthRange( double zNear, double zFar );
+void VK_DebugGL_Scissor( int x, int y, int width, int height );
+void VK_DebugGL_LineWidth( float width );
+void VK_DebugGL_PointSize( float size );
+void VK_DebugGL_DepthMask( bool write );
+void VK_DebugGL_ColorMask( bool r, bool g, bool b, bool a );
+void VK_DebugGL_StencilFunc( GLenum func, int ref, unsigned int mask );
+void VK_DebugGL_StencilOp( GLenum fail, GLenum zfail, GLenum zpass );
+void VK_DebugGL_ClearColor( float r, float g, float b, float a );
+void VK_DebugGL_ClearStencil( int s );
+void VK_DebugGL_Clear( GLbitfield mask );
+void VK_DebugGL_MatrixMode( GLenum mode );
+void VK_DebugGL_LoadMatrixf( const float *m );
+void VK_DebugGL_LoadIdentity( void );
+void VK_DebugGL_PushMatrix( void );
+void VK_DebugGL_PopMatrix( void );
+void VK_DebugGL_Ortho( double left, double right, double bottom, double top, double zNear, double zFar );
+void VK_DebugGL_PushAttrib( void );
+void VK_DebugGL_PopAttrib( void );
+void VK_DebugGL_RasterPos2f( float x, float y );
+void VK_DebugGL_DrawPixels( int width, int height, GLenum format, GLenum type, const void *pixels );
 
 void glAccum(GLenum op, GLfloat value){};
 void glAlphaFunc(GLenum func, GLclampf ref){};
 GLboolean glAreTexturesResident(GLsizei n, const GLuint *textures, GLboolean *residences){return GL_FALSE;};
-void glArrayElement(GLint i){};
-void glBegin(GLenum mode){};
+void glArrayElement(GLint i){ VK_DebugGL_ArrayElement( i ); }
+void glBegin(GLenum mode){ VK_DebugGL_Begin( mode ); }
 void glBindTexture(GLenum target, GLuint texture){};
 void glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig, GLfloat xmove, GLfloat ymove, const GLubyte *bitmap){};
 void glBlendFunc(GLenum sfactor, GLenum dfactor){};
 void glCallList(GLuint list){};
 void glCallLists(GLsizei n, GLenum type, const GLvoid *lists){};
-void glClear(GLbitfield mask){};
+void glClear(GLbitfield mask){ VK_DebugGL_Clear( mask ); }
 void glClearAccum(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha){};
-void glClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha){};
+void glClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha){ VK_DebugGL_ClearColor( red, green, blue, alpha ); }
 void glClearDepth(GLclampd depth){};
 void glClearIndex(GLfloat c){};
-void glClearStencil(GLint s){};
+void glClearStencil(GLint s){ VK_DebugGL_ClearStencil( s ); }
 void glClipPlane(GLenum plane, const GLdouble *equation){};
 void glColor3b(GLbyte red, GLbyte green, GLbyte blue){};
 void glColor3bv(const GLbyte *v){};
 void glColor3d(GLdouble red, GLdouble green, GLdouble blue){};
 void glColor3dv(const GLdouble *v){};
-void glColor3f(GLfloat red, GLfloat green, GLfloat blue){};
-void glColor3fv(const GLfloat *v){};
+void glColor3f(GLfloat red, GLfloat green, GLfloat blue){ VK_DebugGL_Color4f( red, green, blue, 1.0f ); }
+void glColor3fv(const GLfloat *v){ VK_DebugGL_Color4f( v[0], v[1], v[2], 1.0f ); }
 void glColor3i(GLint red, GLint green, GLint blue){};
 void glColor3iv(const GLint *v){};
 void glColor3s(GLshort red, GLshort green, GLshort blue){};
 void glColor3sv(const GLshort *v){};
-void glColor3ub(GLubyte red, GLubyte green, GLubyte blue){};
-void glColor3ubv(const GLubyte *v){};
+void glColor3ub(GLubyte red, GLubyte green, GLubyte blue){ VK_DebugGL_Color4f( red / 255.0f, green / 255.0f, blue / 255.0f, 1.0f ); }
+void glColor3ubv(const GLubyte *v){ VK_DebugGL_Color4f( v[0] / 255.0f, v[1] / 255.0f, v[2] / 255.0f, 1.0f ); }
 void glColor3ui(GLuint red, GLuint green, GLuint blue){};
 void glColor3uiv(const GLuint *v){};
 void glColor3us(GLushort red, GLushort green, GLushort blue){};
@@ -66,21 +108,21 @@ void glColor4b(GLbyte red, GLbyte green, GLbyte blue, GLbyte alpha){};
 void glColor4bv(const GLbyte *v){};
 void glColor4d(GLdouble red, GLdouble green, GLdouble blue, GLdouble alpha){};
 void glColor4dv(const GLdouble *v){};
-void glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha){};
-void glColor4fv(const GLfloat *v){};
+void glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha){ VK_DebugGL_Color4f( red, green, blue, alpha ); }
+void glColor4fv(const GLfloat *v){ VK_DebugGL_Color4f( v[0], v[1], v[2], v[3] ); }
 void glColor4i(GLint red, GLint green, GLint blue, GLint alpha){};
 void glColor4iv(const GLint *v){};
 void glColor4s(GLshort red, GLshort green, GLshort blue, GLshort alpha){};
 void glColor4sv(const GLshort *v){};
-void glColor4ub(GLubyte red, GLubyte green, GLubyte blue, GLubyte alpha){};
-void glColor4ubv(const GLubyte *v){};
+void glColor4ub(GLubyte red, GLubyte green, GLubyte blue, GLubyte alpha){ VK_DebugGL_Color4f( red / 255.0f, green / 255.0f, blue / 255.0f, alpha / 255.0f ); }
+void glColor4ubv(const GLubyte *v){ VK_DebugGL_Color4f( v[0] / 255.0f, v[1] / 255.0f, v[2] / 255.0f, v[3] / 255.0f ); }
 void glColor4ui(GLuint red, GLuint green, GLuint blue, GLuint alpha){};
 void glColor4uiv(const GLuint *v){};
 void glColor4us(GLushort red, GLushort green, GLushort blue, GLushort alpha){};
 void glColor4usv(const GLushort *v){};
-void glColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha){};
+void glColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha){ VK_DebugGL_ColorMask( red != GL_FALSE, green != GL_FALSE, blue != GL_FALSE, alpha != GL_FALSE ); }
 void glColorMaterial(GLenum face, GLenum mode){};
-void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer){};
+void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer){ VK_DebugGL_ColorPointer( size, type, stride, pointer ); }
 void glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type){};
 void glCopyTexImage1D(GLenum target, GLint level, GLenum internalFormat, GLint x, GLint y, GLsizei width, GLint border){};
 void glCopyTexImage2D(GLenum target, GLint level, GLenum internalFormat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border){};
@@ -90,20 +132,20 @@ void glCullFace(GLenum mode){};
 void glDeleteLists(GLuint list, GLsizei range){};
 void glDeleteTextures(GLsizei n, const GLuint *textures){};
 void glDepthFunc(GLenum func){};
-void glDepthMask(GLboolean flag){};
-void glDepthRange(GLclampd zNear, GLclampd zFar){};
-void glDisable(GLenum cap){};
-void glDisableClientState(GLenum array){};
+void glDepthMask(GLboolean flag){ VK_DebugGL_DepthMask( flag != GL_FALSE ); }
+void glDepthRange(GLclampd zNear, GLclampd zFar){ VK_DebugGL_DepthRange( zNear, zFar ); }
+void glDisable(GLenum cap){ VK_DebugGL_Enable( cap, false ); }
+void glDisableClientState(GLenum array){ VK_DebugGL_ClientState( array, false ); }
 void glDrawArrays(GLenum mode, GLint first, GLsizei count){};
 void glDrawBuffer(GLenum mode){};
-void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices){};
-void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels){};
+void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices){ VK_DebugGL_DrawElements( mode, count, type, indices ); }
+void glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels){ VK_DebugGL_DrawPixels( width, height, format, type, pixels ); }
 void glEdgeFlag(GLboolean flag){};
 void glEdgeFlagPointer(GLsizei stride, const GLvoid *pointer){};
 void glEdgeFlagv(const GLboolean *flag){};
-void glEnable(GLenum cap){};
-void glEnableClientState(GLenum array){};
-void glEnd(void){};
+void glEnable(GLenum cap){ VK_DebugGL_Enable( cap, true ); }
+void glEnableClientState(GLenum array){ VK_DebugGL_ClientState( array, true ); }
+void glEnd(void){ VK_DebugGL_End(); }
 void glEndList(void){};
 void glEvalCoord1d(GLdouble u){};
 void glEvalCoord1dv(const GLdouble *u){};
@@ -195,11 +237,11 @@ void glLightfv(GLenum light, GLenum pname, const GLfloat *params){};
 void glLighti(GLenum light, GLenum pname, GLint param){};
 void glLightiv(GLenum light, GLenum pname, const GLint *params){};
 void glLineStipple(GLint factor, GLushort pattern){};
-void glLineWidth(GLfloat width){};
+void glLineWidth(GLfloat width){ VK_DebugGL_LineWidth( width ); }
 void glListBase(GLuint base){};
-void glLoadIdentity(void){};
+void glLoadIdentity(void){ VK_DebugGL_LoadIdentity(); }
 void glLoadMatrixd(const GLdouble *m){};
-void glLoadMatrixf(const GLfloat *m){};
+void glLoadMatrixf(const GLfloat *m){ VK_DebugGL_LoadMatrixf( m ); }
 void glLoadName(GLuint name){};
 void glLogicOp(GLenum opcode){};
 void glMap1d(GLenum target, GLdouble u1, GLdouble u2, GLint stride, GLint order, const GLdouble *points){};
@@ -214,7 +256,7 @@ void glMaterialf(GLenum face, GLenum pname, GLfloat param){};
 void glMaterialfv(GLenum face, GLenum pname, const GLfloat *params){};
 void glMateriali(GLenum face, GLenum pname, GLint param){};
 void glMaterialiv(GLenum face, GLenum pname, const GLint *params){};
-void glMatrixMode(GLenum mode){};
+void glMatrixMode(GLenum mode){ VK_DebugGL_MatrixMode( mode ); }
 void glMultMatrixd(const GLdouble *m){};
 void glMultMatrixf(const GLfloat *m){};
 void glNewList(GLuint list, GLenum mode){};
@@ -229,7 +271,7 @@ void glNormal3iv(const GLint *v){};
 void glNormal3s(GLshort nx, GLshort ny, GLshort nz){};
 void glNormal3sv(const GLshort *v){};
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer){};
-void glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar){};
+void glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar){ VK_DebugGL_Ortho( left, right, bottom, top, zNear, zFar ); }
 void glPassThrough(GLfloat token){};
 void glPixelMapfv(GLenum map, GLsizei mapsize, const GLfloat *values){};
 void glPixelMapuiv(GLenum map, GLsizei mapsize, const GLuint *values){};
@@ -239,22 +281,22 @@ void glPixelStorei(GLenum pname, GLint param){};
 void glPixelTransferf(GLenum pname, GLfloat param){};
 void glPixelTransferi(GLenum pname, GLint param){};
 void glPixelZoom(GLfloat xfactor, GLfloat yfactor){};
-void glPointSize(GLfloat size){};
+void glPointSize(GLfloat size){ VK_DebugGL_PointSize( size ); }
 void glPolygonMode(GLenum face, GLenum mode){};
-void glPolygonOffset(GLfloat factor, GLfloat units){};
+void glPolygonOffset(GLfloat factor, GLfloat units){ VK_DebugGL_PolygonOffset( factor, units ); }
 void glPolygonStipple(const GLubyte *mask){};
-void glPopAttrib(void){};
+void glPopAttrib(void){ VK_DebugGL_PopAttrib(); }
 void glPopClientAttrib(void){};
-void glPopMatrix(void){};
+void glPopMatrix(void){ VK_DebugGL_PopMatrix(); }
 void glPopName(void){};
 void glPrioritizeTextures(GLsizei n, const GLuint *textures, const GLclampf *priorities){};
-void glPushAttrib(GLbitfield mask){};
+void glPushAttrib(GLbitfield mask){ VK_DebugGL_PushAttrib(); }
 void glPushClientAttrib(GLbitfield mask){};
-void glPushMatrix(void){};
+void glPushMatrix(void){ VK_DebugGL_PushMatrix(); }
 void glPushName(GLuint name){};
 void glRasterPos2d(GLdouble x, GLdouble y){};
 void glRasterPos2dv(const GLdouble *v){};
-void glRasterPos2f(GLfloat x, GLfloat y){};
+void glRasterPos2f(GLfloat x, GLfloat y){ VK_DebugGL_RasterPos2f( x, y ); }
 void glRasterPos2fv(const GLfloat *v){};
 void glRasterPos2i(GLint x, GLint y){};
 void glRasterPos2iv(const GLint *v){};
@@ -277,13 +319,29 @@ void glRasterPos4iv(const GLint *v){};
 void glRasterPos4s(GLshort x, GLshort y, GLshort z, GLshort w){};
 void glRasterPos4sv(const GLshort *v){};
 void glReadBuffer(GLenum mode){};
+// glReadPixels returns nothing, so a failure is latched here for the capture
+// code (R_ReadTiledPixels) to collect instead of saving what the buffer held.
+static bool vkReadPixelsFailed = false;
+
+bool VK_GLStubs_ConsumeReadPixelsFailure( void ) {
+	const bool failed = vkReadPixelsFailed;
+	vkReadPixelsFailed = false;
+	return failed;
+}
+
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels){
-	if ( format == GL_RGB && type == GL_UNSIGNED_BYTE ) {
-		if ( !VK_GuiExecutor_ReadPixels( x, y, width, height, pixels ) ) {
+	// GL_RGBA is what R_ReadTiledPixels issues since the ES screenshot fix, and
+	// is the only format OpenGL ES guarantees for the default framebuffer.
+	// GL_RGB is kept for callers that still ask for it.
+	if ( ( format == GL_RGB || format == GL_RGBA ) && type == GL_UNSIGNED_BYTE ) {
+		if ( !VK_GuiExecutor_ReadPixels( x, y, width, height, pixels,
+				format == GL_RGBA ? 4 : 3 ) ) {
+			vkReadPixelsFailed = true;
 			common->Warning( "Vulkan glReadPixels failed for %d x %d capture", width, height );
 		}
 		return;
 	}
+	vkReadPixelsFailed = true;
 	common->Warning( "Vulkan glReadPixels does not support format 0x%x/type 0x%x", format, type );
 };
 void glRectd(GLdouble x1, GLdouble y1, GLdouble x2, GLdouble y2){};
@@ -299,12 +357,12 @@ void glRotated(GLdouble angle, GLdouble x, GLdouble y, GLdouble z){};
 void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z){};
 void glScaled(GLdouble x, GLdouble y, GLdouble z){};
 void glScalef(GLfloat x, GLfloat y, GLfloat z){};
-void glScissor(GLint x, GLint y, GLsizei width, GLsizei height){};
+void glScissor(GLint x, GLint y, GLsizei width, GLsizei height){ VK_DebugGL_Scissor( x, y, width, height ); }
 void glSelectBuffer(GLsizei size, GLuint *buffer){};
 void glShadeModel(GLenum mode){};
-void glStencilFunc(GLenum func, GLint ref, GLuint mask){};
+void glStencilFunc(GLenum func, GLint ref, GLuint mask){ VK_DebugGL_StencilFunc( func, ref, mask ); }
 void glStencilMask(GLuint mask){};
-void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass){};
+void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass){ VK_DebugGL_StencilOp( fail, zfail, zpass ); }
 void glTexCoord1d(GLdouble s){};
 void glTexCoord1dv(const GLdouble *v){};
 void glTexCoord1f(GLfloat s){};
@@ -315,8 +373,8 @@ void glTexCoord1s(GLshort s){};
 void glTexCoord1sv(const GLshort *v){};
 void glTexCoord2d(GLdouble s, GLdouble t){};
 void glTexCoord2dv(const GLdouble *v){};
-void glTexCoord2f(GLfloat s, GLfloat t){};
-void glTexCoord2fv(const GLfloat *v){};
+void glTexCoord2f(GLfloat s, GLfloat t){ VK_DebugGL_TexCoord2f( s, t ); }
+void glTexCoord2fv(const GLfloat *v){ VK_DebugGL_TexCoord2f( v[0], v[1] ); }
 void glTexCoord2i(GLint s, GLint t){};
 void glTexCoord2iv(const GLint *v){};
 void glTexCoord2s(GLshort s, GLshort t){};
@@ -337,7 +395,7 @@ void glTexCoord4i(GLint s, GLint t, GLint r, GLint q){};
 void glTexCoord4iv(const GLint *v){};
 void glTexCoord4s(GLshort s, GLshort t, GLshort r, GLshort q){};
 void glTexCoord4sv(const GLshort *v){};
-void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer){};
+void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer){ VK_DebugGL_TexCoordPointer( size, type, stride, pointer ); }
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param){};
 void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params){};
 void glTexEnvi(GLenum target, GLenum pname, GLint param){};
@@ -360,7 +418,7 @@ void glTranslated(GLdouble x, GLdouble y, GLdouble z){};
 void glTranslatef(GLfloat x, GLfloat y, GLfloat z){};
 void glVertex2d(GLdouble x, GLdouble y){};
 void glVertex2dv(const GLdouble *v){};
-void glVertex2f(GLfloat x, GLfloat y){};
+void glVertex2f(GLfloat x, GLfloat y){ VK_DebugGL_Vertex3f( x, y, 0.0f ); }
 void glVertex2fv(const GLfloat *v){};
 void glVertex2i(GLint x, GLint y){};
 void glVertex2iv(const GLint *v){};
@@ -368,8 +426,8 @@ void glVertex2s(GLshort x, GLshort y){};
 void glVertex2sv(const GLshort *v){};
 void glVertex3d(GLdouble x, GLdouble y, GLdouble z){};
 void glVertex3dv(const GLdouble *v){};
-void glVertex3f(GLfloat x, GLfloat y, GLfloat z){};
-void glVertex3fv(const GLfloat *v){};
+void glVertex3f(GLfloat x, GLfloat y, GLfloat z){ VK_DebugGL_Vertex3f( x, y, z ); }
+void glVertex3fv(const GLfloat *v){ VK_DebugGL_Vertex3f( v[0], v[1], v[2] ); }
 void glVertex3i(GLint x, GLint y, GLint z){};
 void glVertex3iv(const GLint *v){};
 void glVertex3s(GLshort x, GLshort y, GLshort z){};
@@ -382,7 +440,7 @@ void glVertex4i(GLint x, GLint y, GLint z, GLint w){};
 void glVertex4iv(const GLint *v){};
 void glVertex4s(GLshort x, GLshort y, GLshort z, GLshort w){};
 void glVertex4sv(const GLshort *v){};
-void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer){};
+void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer){ VK_DebugGL_VertexPointer( size, type, stride, pointer ); }
 void glViewport(GLint x, GLint y, GLsizei width, GLsizei height){};
 
 // GLEW SDL3-loader hook: never called (glewInit is not reached under the
@@ -421,5 +479,8 @@ bool QGL_Init( const char *dllname ) {
 
 void QGL_Shutdown( void ) {
 }
+
+// RB_UnderwaterViewAvailable lives with the Vulkan underwater pass in
+// vk_PostProcess.cpp.
 
 #endif /* OPENQ4_RENDERER_VK_MODULE */

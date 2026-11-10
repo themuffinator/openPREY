@@ -46,7 +46,7 @@ export HOME="${GUEST_HOME}"
 
 action="${1:-build}"
 graphics_bridge="${OPENQ4_MACOS_GRAPHICS_BRIDGE:-opengl}"
-openal_provider="${OPENQ4_MACOS_OPENAL_PROVIDER:-apple_framework}"
+openal_provider="${OPENQ4_MACOS_OPENAL_PROVIDER:-system}"
 os_matrix_role="${OPENQ4_MACOS_OS_MATRIX_ROLE:-current-manual-signoff}"
 stamp="${OPENQ4_MACOS_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RESULT_TOKEN_MAX_LENGTH=80
@@ -67,7 +67,7 @@ expand_guest_path() {
 
 workspace="$(expand_guest_path "${OPENQ4_GUEST_WORKSPACE:-${GUEST_HOME}/openq4-work}")"
 repo="${workspace}/openQ4"
-gamelibs="${workspace}/openQ4-game"
+gamelibs="${repo}"
 basepath="$(expand_guest_path "${OPENQ4_BASEPATH:-${workspace}/Quake4}")"
 
 require_result_token() {
@@ -710,7 +710,6 @@ build_openq4() {
     require_repo
     cd "${repo}"
     export OPENQ4_GAMELIBS_REPO="${gamelibs}"
-    export OPENQ4_BUILD_GAMELIBS="${OPENQ4_BUILD_GAMELIBS:-1}"
     # Keep Meson subprojects (SDL3, GLEW, libogg, libvorbis) on the same macOS 11.0
     # floor as the main project's -mmacosx-version-min=11.0 flags.
     export MACOSX_DEPLOYMENT_TARGET=11.0
@@ -723,6 +722,33 @@ build_openq4() {
     require_choice "OPENQ4_PLATFORM_BACKEND" "${platform_backend}" sdl3 native
     builddir="$(resolve_under_repo "${builddir}")"
     require_safe_builddir "${raw_builddir}" "${builddir}"
+
+    local openal_arch=""
+    local openal_root=""
+    if [[ "${openal_provider}" == "system" ]]; then
+        case "$(uname -m)" in
+            arm64) openal_arch="arm64" ;;
+            x86_64) openal_arch="x64" ;;
+            *)
+                echo "Unsupported macOS architecture for OpenAL Soft: $(uname -m)" >&2
+                exit 1
+                ;;
+        esac
+        openal_root="${repo}/.tmp/openal-soft-macos-${openal_arch}"
+        if [[ -d "${openal_root}" ]]; then
+            bash tools/build/prepare_macos_openal_soft.sh \
+                --verify-only \
+                --architecture "${openal_arch}" \
+                --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
+                --output-root "${openal_root}"
+        else
+            bash tools/build/prepare_macos_openal_soft.sh \
+                --architecture "${openal_arch}" \
+                --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
+                --output-root "${openal_root}"
+        fi
+        export PKG_CONFIG_PATH="${openal_root}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+    fi
 
     echo "Configuring openQ4 (${buildtype}, backend=${platform_backend}, macos_graphics_bridge=${graphics_bridge}, macos_openal_provider=${openal_provider})"
     bash tools/build/meson_setup.sh setup --wipe "${builddir}" . \
@@ -738,6 +764,14 @@ build_openq4() {
 
     echo "Staging openQ4 into .install"
     bash tools/build/meson_setup.sh install -C "${builddir}" --no-rebuild --skip-subprojects
+    if [[ "${openal_provider}" == "system" ]]; then
+        bash tools/build/prepare_macos_openal_soft.sh \
+            --verify-only \
+            --architecture "${openal_arch}" \
+            --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
+            --output-root "${openal_root}" \
+            --stage-install-dir .install
+    fi
     validate_staged_macos_payload
 }
 
@@ -943,7 +977,7 @@ write_signoff_report() {
         echo "- Date (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         echo "- Host: $(hostname)"
         echo "- Architecture: $(uname -m)"
-        echo "- Architecture policy: arm64-only experimental release matrix"
+        echo "- Architecture policy: arm64-only preview release matrix"
         echo "- OS matrix role: ${os_matrix_role}"
         echo "- Graphics bridge: ${graphics_bridge}"
         echo "- OpenAL provider: ${openal_provider}"

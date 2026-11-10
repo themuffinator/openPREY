@@ -83,17 +83,7 @@ typedef void ( *TSpawnFunc )( float *, const class rvParticleParms &, idVec3 *, 
 class idRenderModel;
 
 // Parameters that define how a particle spawns. These are generic to all fields
-struct sdModelInfo {
-	static const int NUM_SURF_REMAP = 10;
-	idRenderModel *model;
-	int surfRemap[NUM_SURF_REMAP];	//Will have a nuber of elements set to a certain surface's index based on the number of triangles in that surface
-									// so surfaces with only like a few triangles don't have very dense particles generated for them.
-
-	void CalculateSurfRemap( void );
-};
-
-extern const char sdPoolAllocator_rvParticleParms[];
-class rvParticleParms //: public sdPoolAllocator< rvParticleParms, sdPoolAllocator_rvParticleParms, 128 >
+class rvParticleParms
 {
 	friend class rvParticle;
 	friend class rvLineParticle;
@@ -123,11 +113,9 @@ class rvParticleParms //: public sdPoolAllocator< rvParticleParms, sdPoolAllocat
 	friend void SpawnSurfaceBox2( float *result, const rvParticleParms &parms, idVec3 *normal, const idVec3 * );
 	friend void SpawnSurfaceBox3( float *result, const rvParticleParms &parms, idVec3 *normal, const idVec3 * );
 
-	friend void SpawnSphere1( float *result, const rvParticleParms &parms, idVec3 *normal, const idVec3 * );
 	friend void SpawnSphere2( float *result, const rvParticleParms &parms, idVec3 *normal, const idVec3 * );
 	friend void SpawnSphere3( float *result, const rvParticleParms &parms, idVec3 *normal, const idVec3 * );
 
-	friend void SpawnSurfaceSphere1( float *result, const rvParticleParms &parms, idVec3 *normal, const idVec3 * );
 	friend void SpawnSurfaceSphere2( float *result, const rvParticleParms &parms, idVec3 *normal, const idVec3 * );
 	friend void SpawnSurfaceSphere3( float *result, const rvParticleParms &parms, idVec3 *normal, const idVec3 * );
 
@@ -140,22 +128,17 @@ class rvParticleParms //: public sdPoolAllocator< rvParticleParms, sdPoolAllocat
 	friend void SpawnModel3( float *result, const rvParticleParms &parms, idVec3 *normal, const idVec3 * );
 
 public:
-				rvParticleParms( void ) { mModelInfo = NULL; mStatic = 0;}
-				~rvParticleParms( void ) { delete mModelInfo; }
-				
+				rvParticleParms( void ) { mModel = NULL; mStatic = 0;}
+
 	void operator= ( const rvParticleParms &other ) {
 		memcpy( this, &other, sizeof( rvParticleParms ) );
-		if ( other.mModelInfo ) {
-			mModelInfo = new sdModelInfo;
-			*mModelInfo = *other.mModelInfo;
-		}
 		mStatic = 0;
 	}
 
 	bool		operator== ( const rvParticleParms &comp ) const { return( Compare( comp ) ); }
 	bool		operator!= ( const rvParticleParms &comp ) const { return( !Compare( comp ) ); }
 
-	void		Init( int spawnType = SPF_NONE_0 ) { mSpawnType = spawnType; mFlags = 0; mRange = 0.0f; mModelInfo = NULL; mMins.Zero(); mMaxs.Zero(); }
+	void		Init( int spawnType = SPF_NONE_0 ) { mSpawnType = spawnType; mFlags = 0; mRange = 0.0f; mModel = NULL; mMins.Zero(); mMaxs.Zero(); }
 	ID_INLINE void		Spawn( float *dest, const rvParticleParms &parms, idVec3 *normal, const idVec3 *centre ) { ( *spawnFunctions[mSpawnType] )( dest, parms, normal, centre ); }
 	ID_INLINE void		Spawn( float *dest, const rvParticleParms &parms ) { ( *spawnFunctions[mSpawnType] )( dest, parms, NULL, NULL ); }
 	void		HandleRelativeParms( float *death, float *init, int count );
@@ -171,7 +154,7 @@ public:
 	byte		mStatic;
 	byte		mPad;
 	float		mRange;					// Repeat length of spiral
-	sdModelInfo		*mModelInfo;					// idRenderModel *
+	const idRenderModel *mModel;		// Model domain source (not owned)
 	idVec3		mMins;					// Box mins, line start etc
 	idVec3		mMaxs;					// Box maxs, line end etc
 
@@ -207,11 +190,9 @@ void SpawnSurfaceBox1( float *result, const rvParticleParms &parms, idVec3 *norm
 void SpawnSurfaceBox2( float *result, const rvParticleParms &parms, idVec3 *normal = NULL, const idVec3 * = NULL );
 void SpawnSurfaceBox3( float *result, const rvParticleParms &parms, idVec3 *normal = NULL, const idVec3 * = NULL );
 
-void SpawnSphere1( float *result, const rvParticleParms &parms, idVec3 *normal = NULL, const idVec3 * = NULL );
 void SpawnSphere2( float *result, const rvParticleParms &parms, idVec3 *normal = NULL, const idVec3 * = NULL );
 void SpawnSphere3( float *result, const rvParticleParms &parms, idVec3 *normal = NULL, const idVec3 * = NULL );
 
-void SpawnSurfaceSphere1( float *result, const rvParticleParms &parms, idVec3 *normal = NULL, const idVec3 * = NULL );
 void SpawnSurfaceSphere2( float *result, const rvParticleParms &parms, idVec3 *normal = NULL, const idVec3 * = NULL );
 void SpawnSurfaceSphere3( float *result, const rvParticleParms &parms, idVec3 *normal = NULL, const idVec3 * = NULL );
 

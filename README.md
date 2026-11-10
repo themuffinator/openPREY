@@ -123,8 +123,10 @@ Keep compatibility with official Prey assets in mind, follow the existing code s
 
 ### Upstream Credit
 
+- **[openQ4](https://github.com/themuffinator/openQ4)** — the engine openPREY tracks; its engine history is merged here
 - **Justin Marshall** — [Quake4Doom](https://github.com/jmarshall23/Quake4Doom) baseline and related reverse-engineering work
-- **Robert Backebans** — RBDOOM-3-BFG modernization work that informs this ecosystem
+- **Robert Beckebans** — RBDOOM-3-BFG modernization work that informs this ecosystem
+- **[Emile Belanger (emileb)](https://github.com/emileb)** — original Android, SigmaTouch and OpenGL ES work in the upstream engine (see [CONTRIBUTORS.md](CONTRIBUTORS.md))
 
 ### Original Developers
 
@@ -138,6 +140,8 @@ Keep compatibility with official Prey assets in mind, follow the existing code s
 - **GLEW Team** — OpenGL extension wrangler
 - **OpenAL Soft Contributors** — 3D audio implementation
 - **SDL Team** — Cross-platform framework
+- **Sean Barrett** — [stb_vorbis](https://github.com/nothings/stb) Ogg Vorbis decoder
+- **RmlUi, glslang, OpenXR SDK, JsonCpp and libtess2 contributors** — retained UI, shader compilation, VR, JSON and tessellation libraries carried with the upstream engine; notices in [LICENSES/](LICENSES/)
 
 ---
 

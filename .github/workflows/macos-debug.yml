@@ -36,7 +36,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 120
     env:
-      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
     strategy:
       fail-fast: false
       matrix:
@@ -64,22 +64,22 @@ jobs:
 
       - name: Checkout
         if: steps.select.outputs.selected == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Fetch openQ4-game
-        if: steps.select.outputs.selected == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "${OPENQ4_GAMELIBS_REPO}"
-
       - name: Setup Python
         if: steps.select.outputs.selected == 'true'
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
+
+      - name: Setup Java for Android host storage validation
+        if: steps.select.outputs.selected == 'true'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
 
       - name: Install Meson and Ninja
         if: steps.select.outputs.selected == 'true'
@@ -88,6 +88,19 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install meson ninja
+
+      - name: Prepare pinned OpenAL Soft
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          prepared_root="${GITHUB_WORKSPACE}/.tmp/openal-soft-macos-arm64"
+          bash tools/build/prepare_macos_openal_soft.sh \
+            --architecture arm64 \
+            --deployment-target 11.0 \
+            --output-root "${prepared_root}" \
+            --stage-install-dir .install
+          echo "PKG_CONFIG_PATH=${prepared_root}/lib/pkgconfig" >> "${GITHUB_ENV}"
 
       - name: Host diagnostics
         if: steps.select.outputs.selected == 'true'
@@ -193,7 +206,8 @@ jobs:
             --wrap-mode=forcefallback \
             -Dplatform_backend=sdl3 \
             -Dbuild_renderer_vk=true \
-            -Dmacos_graphics_bridge=${{ matrix.bridge }}
+            -Dmacos_graphics_bridge=${{ matrix.bridge }} \
+            -Dmacos_openal_provider=system
 
       - name: Compile
         if: steps.select.outputs.selected == 'true'
@@ -254,7 +268,7 @@ jobs:
 
       - name: Publish debug artifacts
         if: always() && steps.select.outputs.selected == 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: macos-debug-${{ matrix.artifact_suffix }}
           path: |
@@ -270,33 +284,32 @@ jobs:
           retention-days: ${{ fromJSON(inputs.retention_days) }}
           include-hidden-files: true
 
-  # Migration-corridor compile check: builds against Homebrew OpenAL Soft with
-  # -Dmacos_openal_provider=system. This is migration testing only, not release
-  # evidence; release packages stay on apple_framework. No packaging or signoff.
+  # Compatibility-only compile check for Apple's deprecated framework. Release,
+  # package, and standard validation paths use pinned OpenAL Soft instead.
   macos-openal-migration:
     if: ${{ false }} # OPENPREY-GATED: split-module/OpenQ4 source contract
-    name: macOS OpenAL Soft Migration Corridor (compile only)
+    name: macOS Apple OpenAL Compatibility Corridor (compile only)
     runs-on: macos-15
     timeout-minutes: 90
     env:
-      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Fetch openQ4-game
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "${OPENQ4_GAMELIBS_REPO}"
-
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
+
+      - name: Setup Java for Android host storage validation
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
 
       - name: Install Meson and Ninja
         shell: bash
@@ -305,14 +318,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install meson ninja
 
-      - name: Install OpenAL Soft
-        shell: bash
-        run: |
-          set -euo pipefail
-          brew install openal-soft
-          echo "PKG_CONFIG_PATH=$(brew --prefix openal-soft)/lib/pkgconfig" >> "${GITHUB_ENV}"
-
-      - name: Configure (system OpenAL)
+      - name: Configure (Apple framework)
         shell: bash
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
@@ -324,9 +330,9 @@ jobs:
             --wrap-mode=forcefallback \
             -Dplatform_backend=sdl3 \
             -Dmacos_graphics_bridge=opengl \
-            -Dmacos_openal_provider=system
+            -Dmacos_openal_provider=apple_framework
 
-      - name: Compile (system OpenAL)
+      - name: Compile (Apple framework)
         shell: bash
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"

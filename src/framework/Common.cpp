@@ -29,23 +29,56 @@ If you have questions concerning this license or the applicable additional terms
 
 
 
+#include <algorithm>
+
+#include "NativeInputDispatch.h"
 //#include "../renderer/Image.h"
 #include "../bse/BSE_API.h"
 #include "../imagetools/ImageTools.h"
-#include "../render_geo/RenderGeometry.h"
+#include "../rendergeo/RenderGeometry.h"
 #include "../renderer/RendererModule.h"
+#include "../ui/RetainedUI.h"
+#include "../ui/SettingsService.h"
+#include "ArenaCampaign.h"
+#include "CVarCompletionSnapshot.h"
 #include "GameModuleDiagnostics.h"
 #include "RenderDoc.h"
+#include "ParallelJobSystem.h"
+#include "LevelEditor.h"
+#include "DurableFile.h"
+#include "SettingsPersistence.h"
+#include "PerformancePreset.h"
+#include "CVarAssignmentCapture.h"
+#include "InitializationPresentation.h"
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+#include "FileSystemPathValidation.h"
+#include "SaveGameReleases.h"
+#include "../sys/NetworkEndpoint.h"
+
+#include "PresentationPacing.h"
+#include "../sys/DisplayModeRule.h"
+#include "FrameWorkProfile.h"
 
 #if defined( USE_SDL3 )
 #include <SDL3/SDL_locale.h>
+#include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_cpuinfo.h>
+// The refresh of the display the game window is on, 0 when unknown (sdl3_backend.cpp).
+float Sys_SDL_GetWindowRefreshHz( void );
 #endif
 
 #define	MAX_PRINT_MSG_SIZE	4096
 #define MAX_WARNING_LIST	256
 
 void openQ4_PrintFramePacingSnapshot( const char *reason );
-void openQ4_RecordMultiplayerFramePacing( int frameStartMsec );
+void openQ4_RecordMultiplayerFramePacing( void );
+void Session_FinishPendingSave();
+static void Com_ProfileFrameWork_f( const idCmdArgs &args );
 
 #ifdef OPENQ4_RENDERER_MODULE_ONLY
 // The executable and renderer module each link their own render-geometry
@@ -88,21 +121,30 @@ static void Common_WriteLogIdentityBanner( idFile *file ) {
 
 	char line[sizeof( version.string ) + 2];
 	idStr::snPrintf( line, sizeof( line ), "%s\n", version.string );
-	file->Write( line, strlen( line ) );
+	file->Write( line, idLib::SizeToInt( strlen( line ), "Common_WriteLogIdentityBanner" ) );
 }
 
 idCVar com_version( "si_version", version.string, CVAR_SYSTEM|CVAR_ROM|CVAR_SERVERINFO, "engine version" );
 idCVar com_buildInfo( "com_buildInfo", buildInfo.string, CVAR_SYSTEM|CVAR_ROM, "detailed engine build information" );
 idCVar com_skipRenderer( "com_skipRenderer", "0", CVAR_BOOL|CVAR_SYSTEM, "skip the renderer completely" );
 idCVar com_machineSpec( "com_machineSpec", "-1", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_SYSTEM, "hardware classification, -1 = not detected, 0 = low quality, 1 = medium quality, 2 = high quality, 3 = ultra quality" );
-const char *com_performancePresetArgs[] = { "minimum", "lowpower", "performance", "balanced", "quality", "ultra", NULL };
-static const char *com_performancePresetValueStrings[] = { "balanced", "minimum", "lowpower", "performance", "quality", "ultra", NULL };
-idCVar com_performancePreset( "com_performancePreset", "balanced", CVAR_ARCHIVE | CVAR_SYSTEM, "coherent system performance preset: minimum, lowpower, performance, balanced, quality, ultra", com_performancePresetValueStrings, idCmdSystem::ArgCompletion_String<com_performancePresetArgs> );
+const char *com_performancePresetArgs[] = { "minimum", "lowpower", "low", "performance", "balanced", "enhanced", "quality", "ultra", "maximum", NULL };
+static const char *com_performancePresetValueStrings[] = { "balanced", "minimum", "lowpower", "low", "performance", "enhanced", "quality", "ultra", "maximum", NULL };
+idCVar com_performancePreset( "com_performancePreset", "balanced", CVAR_ARCHIVE | CVAR_SYSTEM, "coherent system performance preset: minimum, lowpower (both without shadows), low, performance, balanced, enhanced, quality, ultra, maximum (everything on, no frame-rate target)", com_performancePresetValueStrings, idCmdSystem::ArgCompletion_String<com_performancePresetArgs> );
 idCVar com_purgeAll( "com_purgeAll", "0", CVAR_BOOL | CVAR_ARCHIVE | CVAR_SYSTEM, "purge everything between level loads" );
 idCVar com_WriteSingleDeclFile( "com_WriteSingleDeclFile", "0", CVAR_SYSTEM | CVAR_BOOL, "write a packed decl file after startup or map loads; use com_singleDeclFileWriteMode for compatibility or exact-retail game-type coverage" );
 idCVar com_memoryMarker( "com_memoryMarker", "-1", CVAR_INTEGER | CVAR_SYSTEM | CVAR_INIT, "used as a marker for memory stats" );
 idCVar com_preciseTic( "com_preciseTic", "1", CVAR_BOOL|CVAR_SYSTEM, "run one game tick every async thread update" );
 idCVar com_asyncInput( "com_asyncInput", "0", CVAR_BOOL|CVAR_SYSTEM, "sample input from the async thread" );
+#if defined( ID_DEDICATED )
+static const char *OPENQ4_JOBS_DETERMINISTIC_DEFAULT = "1";
+#else
+static const char *OPENQ4_JOBS_DETERMINISTIC_DEFAULT = "0";
+#endif
+idCVar jobs_enable( "jobs_enable", "1", CVAR_BOOL | CVAR_ARCHIVE | CVAR_INIT | CVAR_SYSTEM, "enable the portable job service; 0 preserves all work by executing job lists synchronously" );
+idCVar jobs_deterministic( "jobs_deterministic", OPENQ4_JOBS_DETERMINISTIC_DEFAULT, CVAR_BOOL | CVAR_ARCHIVE | CVAR_INIT | CVAR_SYSTEM, "execute every job inline in deterministic insertion order (default on dedicated servers)" );
+idCVar jobs_numThreads( "jobs_numThreads", "0", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_INIT | CVAR_SYSTEM, "portable job worker threads (0 = automatic, 1..32 = explicit)", 0, 32, idCmdSystem::ArgCompletion_Integer<0,32> );
+idCVar jobs_queueCapacity( "jobs_queueCapacity", "64", CVAR_INTEGER | CVAR_ARCHIVE | CVAR_INIT | CVAR_SYSTEM, "maximum admitted job lists; saturated submissions fail explicitly and remain retryable", 1, 1024, idCmdSystem::ArgCompletion_Integer<1,1024> );
 #define ASYNCSOUND_INFO "0: mix sound inline, 1: memory mapped async mix, 2: callback mixing, 3: write async mix"
 #if defined( MACOS_X )
 idCVar com_asyncSound( "com_asyncSound", "2", CVAR_INTEGER|CVAR_SYSTEM|CVAR_ROM, ASYNCSOUND_INFO );
@@ -128,6 +170,8 @@ idCVar con_allowConsole( "con_allowConsole", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR
 idCVar com_speeds( "com_speeds", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "show engine timings" );
 idCVar com_showFPS( "com_showFPS", "0", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_NOCHEAT, "show frames rendered per second: 1 = in-game only, 2 = legacy always on", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
 idCVar com_maxfps( "com_maxfps", "240", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_NOCHEAT, "presentation frame cap, 0 = uncapped", 0, 1000, idCmdSystem::ArgCompletion_Integer<0,1000> );
+static idCVar com_preciseFrameWait( "com_preciseFrameWait", "1", CVAR_BOOL | CVAR_SYSTEM | CVAR_NOCHEAT, "frame cap wait: 1 = sleep on the high-resolution timer and spin only its measured wake-up error, 0 = whole-millisecond sleeps and a fixed spin" );
+static idCVar com_presentationStallProbe( "com_presentationStallProbe", "0", CVAR_INTEGER | CVAR_SYSTEM | CVAR_CHEAT, "development probe: once a second, stall one frame this many milliseconds, so hitch catch-up can be measured without a real hitch; requires cheats", 0, 1000 );
 idCVar com_showFramePacing( "com_showFramePacing", "0", CVAR_INTEGER | CVAR_SYSTEM | CVAR_NOCHEAT, "show frame pacing diagnostics: 1 = HUD overlay, 2 = overlay plus console logging", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
 idCVar com_showMemoryUsage( "com_showMemoryUsage", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "show total and per frame memory usage" );
 idCVar com_showAsyncStats( "com_showAsyncStats", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "show async network stats" );
@@ -136,19 +180,25 @@ idCVar com_timestampPrints( "com_timestampPrints", "0", CVAR_SYSTEM, "print time
 idCVar com_timescale( "timescale", "1", CVAR_SYSTEM | CVAR_FLOAT, "scales the time", 0.1f, 10.0f );
 idCVar com_logFile( "logFile", "0", CVAR_SYSTEM | CVAR_NOCHEAT, "1 = buffer log, 2 = flush after each print", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
 idCVar com_logFileName( "logFileName", "qconsole.log", CVAR_SYSTEM | CVAR_NOCHEAT, "name of log file, if empty, qconsole.log will be used" );
+// A renderer-startup retry reopens the filesystem in this process. Keep the
+// original failure and owner teardown in the same diagnostic log.
+static bool com_preserveStartupRecoveryLog = false;
 idCVar com_autoScreenshot( "com_autoScreenshot", "0", CVAR_SYSTEM | CVAR_BOOL | CVAR_NOCHEAT, "take a one-shot screenshot after map load (diagnostic)" );
 idCVar com_makingBuild( "com_makingBuild", "0", CVAR_BOOL | CVAR_SYSTEM, "1 when making a build" );
 idCVar com_updateLoadSize( "com_updateLoadSize", "0", CVAR_BOOL | CVAR_SYSTEM | CVAR_NOCHEAT, "update the load size after loading a map" );
 idCVar com_videoRam( "com_videoRam", "64", CVAR_INTEGER | CVAR_SYSTEM | CVAR_NOCHEAT | CVAR_ARCHIVE, "holds the last amount of detected video ram" );
-idCVar com_activeGameModule( "com_activeGameModule", "", CVAR_SYSTEM, "active unified game module (game)" );
-idCVar com_nextGameModule( "com_nextGameModule", "", CVAR_SYSTEM, "internal one-shot game module override for reloadEngine" );
-idCVar com_platformProfile( "com_platformProfile", "default", CVAR_SYSTEM | CVAR_INIT, "startup platform profile (default or steamdeck)" );
+idCVar com_activeGameModule( "com_activeGameModule", "", CVAR_SYSTEM | CVAR_NOCHEAT, "active unified game module (game)" );
+idCVar com_nextGameModule( "com_nextGameModule", "", CVAR_SYSTEM | CVAR_NOCHEAT, "internal one-shot game module override for reloadEngine" );
+idCVar com_platformProfile( "com_platformProfile", "default", CVAR_SYSTEM | CVAR_INIT, "startup platform profile (default, steamdeck or couch)" );
 
 static bool openPREY_IsValidGameModuleName( const char *moduleName );
 
 idCVar com_product_lang_ext( "com_product_lang_ext", "1", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE, "Extension to use when creating language files." );
 idCVar r_skipGlowOverlay( "r_skipGlowOverlay", "0", CVAR_ARCHIVE | CVAR_RENDERER, "skip glow overlays when non-zero" );
 static idCVar r_borderlessDefaultMigrated( "r_borderlessDefaultMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for legacy bordered window defaults" );
+static idCVar net_rateDefaultMigrated( "net_rateDefaultMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the legacy 25600 B/s network rate caps" );
+static idCVar vr_weaponOffsetDefaultMigrated( "vr_weaponOffsetDefaultMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the VR weapon offsets that held weapons replaced" );
+static idCVar s_audioDefaultsMigrated( "s_audioDefaultsMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER, "number of one-time audio default migrations already applied" );
 
 static void Common_MigrateLegacyConsoleAllowCVar( void ) {
 	idCVar *legacyAllowConsole = cvarSystem->Find( "com_allowConsole" );
@@ -216,9 +266,141 @@ static void Common_MigrateLegacyBorderlessWindowDefault( void ) {
 #endif
 }
 
+/*
+==================
+Common_MigrateLegacyNetworkRateCaps
+
+net_serverMaxClientRate / net_clientMaxRate are archived, so raising their
+defaults reaches new installs only.  Everyone who has ever run openQ4 keeps the
+25600 B/s these shipped with, and that cap does not shed bytes - the channel's
+token bucket refuses whole snapshots until the previous packet has been paid
+for, so any snapshot over ~1280 bytes drags the update rate below the one the
+server was asked for.  Measured on a listen server, a client being served ~2.9KB
+snapshots got 2-3 a second instead of 20.
+
+Only the exact legacy default is rewritten: anyone who deliberately chose a rate
+did not type 25600, and their choice is left alone.  Once.
+==================
+*/
+static void Common_MigrateLegacyNetworkRateCaps( void ) {
+	if ( net_rateDefaultMigrated.GetBool() ) {
+		return;
+	}
+
+	// Kept in step with the defaults in idAsyncNetwork; tools/tests/network_security.py
+	// pins the pair so they cannot drift apart silently.
+	static const int legacyNetworkRate = 25600;
+	static const int modernNetworkRate = 128000;
+	static const char * const rateCVars[] = { "net_serverMaxClientRate", "net_clientMaxRate" };
+	for ( int i = 0; i < 2; i++ ) {
+		if ( cvarSystem->GetCVarInteger( rateCVars[i] ) != legacyNetworkRate ) {
+			continue;
+		}
+		common->Printf( "Migrating legacy network config: %s %d -> %d B/s\n",
+						rateCVars[i], legacyNetworkRate, modernNetworkRate );
+		cvarSystem->SetCVarInteger( rateCVars[i], modernNetworkRate, CVAR_ARCHIVE );
+	}
+
+	net_rateDefaultMigrated.SetBool( true );
+}
+
+/*
+==================
+Common_MigrateLegacyVRWeaponOffsets
+
+The first VR builds placed the view weapon at the controller's aim with
+archived offsets of -5 along it and -3 up. Weapons are now held by their own
+grip and the offsets only fine-tune that hold, so the old defaults would push
+every gun back out of the hand. Only that exact pair is reset, once.
+==================
+*/
+static void Common_MigrateLegacyVRWeaponOffsets( void ) {
+	if ( vr_weaponOffsetDefaultMigrated.GetBool() ) {
+		return;
+	}
+	if ( cvarSystem->GetCVarFloat( "vr_weaponOffsetX" ) == -5.0f && cvarSystem->GetCVarFloat( "vr_weaponOffsetZ" ) == -3.0f ) {
+		common->Printf( "Migrating legacy VR config: weapons are held by their own grip, vr_weaponOffsetX -5 and vr_weaponOffsetZ -3 -> 0\n" );
+		cvarSystem->SetCVarFloat( "vr_weaponOffsetX", 0.0f, CVAR_ARCHIVE );
+		cvarSystem->SetCVarFloat( "vr_weaponOffsetZ", 0.0f, CVAR_ARCHIVE );
+	}
+	vr_weaponOffsetDefaultMigrated.SetBool( true );
+}
+
+/*
+==================
+Common_MigrateLegacyAudioDefaults
+
+Archived audio defaults that turned out wrong; changing a default reaches new
+installs only. s_audioDefaultsMigrated counts the steps already applied, and
+each step rewrites only the exact legacy value, once.
+
+Step 1:
+- s_numberOfSpeakers 6 asked OpenAL for 5.1 on every device, so Windows downmixed
+  it on headphones and OpenAL Soft's automatic HRTF never engaged. The device
+  layout (0) gives a 5.1 system the same 5.1, so 6 is moved to it. 2 is left
+  alone: it was retail's default and may be a deliberate choice.
+- s_radioChatterFraction 0.5 was a guess; Quake 4 1.4.2 ships 0.9.
+- s_quadraticFalloff 1 was Doom 3's value; Quake 4 1.4.2 ships 0 (linear) and
+  does not archive it.
+
+Step 2:
+- The minimum, lowpower and performance presets switched room reverb off. Every
+  preset keeps it now, so a profile still on one of those presets with reverb
+  off gets it back.
+==================
+*/
+static const int OPENQ4_AUDIO_DEFAULTS_MIGRATION_STEPS = 2;
+
+static void Common_MigrateLegacyAudioDefaults( void ) {
+	const int applied = s_audioDefaultsMigrated.GetInteger();
+	if ( applied >= OPENQ4_AUDIO_DEFAULTS_MIGRATION_STEPS ) {
+		return;
+	}
+	if ( applied < 1 ) {
+		if ( cvarSystem->GetCVarInteger( "s_numberOfSpeakers" ) == 6 ) {
+			common->Printf( "Migrating legacy audio config: s_numberOfSpeakers 6 -> 0 (the output device's own layout)\n" );
+			cvarSystem->SetCVarInteger( "s_numberOfSpeakers", 0, CVAR_ARCHIVE );
+		}
+		if ( cvarSystem->GetCVarFloat( "s_radioChatterFraction" ) == 0.5f ) {
+			common->Printf( "Migrating legacy audio config: s_radioChatterFraction 0.5 -> 0.9\n" );
+			cvarSystem->SetCVarFloat( "s_radioChatterFraction", 0.9f, CVAR_ARCHIVE );
+		}
+		if ( cvarSystem->GetCVarBool( "s_quadraticFalloff" ) ) {
+			common->Printf( "Migrating legacy audio config: s_quadraticFalloff 1 -> 0 (linear, as retail)\n" );
+			cvarSystem->SetCVarBool( "s_quadraticFalloff", false );
+		}
+	}
+	if ( applied < 2 && !cvarSystem->GetCVarBool( "s_useEAXReverb" ) ) {
+		static const char * const reverblessPresets[] = { "minimum", "lowpower", "performance" };
+		for ( int i = 0; i < 3; i++ ) {
+			if ( idStr::Icmp( com_performancePreset.GetString(), reverblessPresets[i] ) == 0 ) {
+				common->Printf( "Migrating legacy audio config: the %s preset keeps room reverb now, s_useEAXReverb 0 -> 1\n", reverblessPresets[i] );
+				cvarSystem->SetCVarBool( "s_useEAXReverb", true, CVAR_ARCHIVE );
+				break;
+			}
+		}
+	}
+	s_audioDefaultsMigrated.SetInteger( OPENQ4_AUDIO_DEFAULTS_MIGRATION_STEPS );
+}
+
 static int commonLastPresentationCap = -1;
 static double commonNextPresentationFrameClock = 0.0;
 static bool commonNextPresentationFrameValid = false;
+static double commonPresentationFrameStartClock = 0.0;
+
+// How late each throttled wake came against its target, the limiter's own
+// precision apart from the work a frame does (framePacingSnapshot, HF-07).
+static const int COMMON_THROTTLE_LATENESS_HISTORY = 2048;
+static float commonThrottleLatenessMsec[ COMMON_THROTTLE_LATENESS_HISTORY ];
+static int commonThrottleLatenessCount = 0;
+static int commonThrottleLatenessNext = 0;
+// Time the waits since framePacingReset spent busy-waiting, the limiter's CPU cost.
+static double commonThrottleSpinMsec = 0.0;
+static int commonThrottleSpinWaits = 0;
+
+// How late the precise wait's recent sleeps woke; the spin covers their 95th
+// percentile (PresentationPacing.h).
+static openq4::LimiterOversleepWindow commonLimiterOversleep;
 
 static void Common_ResetPresentationThrottle( void ) {
 	commonNextPresentationFrameClock = 0.0;
@@ -233,17 +415,198 @@ static double Common_GetPresentationClockUnitsPerSecond( void ) {
 	return Sys_ClockTicksPerSecond();
 }
 
-static int Common_GetRequestedPresentationCap( void ) {
-	int cap = Max( 0, com_maxfps.GetInteger() );
-
-#if defined( _WIN32 )
-	// Hidden/minimized windows should not spin uncapped when presentation is decoupled.
-	if ( !Sys_IsWindowVisible() && ( cap == 0 || cap > 60 ) ) {
-		cap = 60;
-	}
+#if defined( USE_SDL3 )
+bool Sys_SDL_IsGameWindowShown( void );
 #endif
 
-	return cap;
+// Whether the game window shows anything. Hidden windows (r_hiddenWindow, the
+// light-grid bake) and minimized ones do not, on any platform.
+static bool Common_IsGameWindowShown( void ) {
+#if defined( USE_SDL3 )
+	return Sys_SDL_IsGameWindowShown();
+#elif defined( _WIN32 )
+	// Win32 IsWindowVisible() reports TRUE for minimized windows
+	return Sys_IsWindowVisible();
+#else
+	return true;
+#endif
+}
+
+static int Common_GetRequestedPresentationCap( void ) {
+	// a headset session paces every frame through xrWaitFrame
+	if ( vrSystem != NULL && vrSystem->IsPacing() ) {
+		return 0;
+	}
+
+	// A window that shows nothing never presents faster than 60 Hz, uncapped
+	// included, so a hidden or minimized client does not spin (HF-07).
+	return openq4::PresentationCapForWindow( com_maxfps.GetInteger(), Common_IsGameWindowShown() );
+}
+
+// Whether the limiter waits on the high-resolution timer (PresentationPacing.h).
+// com_preciseFrameWait 0 restores whole-millisecond sleeps and a fixed spin.
+static bool Common_UsePreciseFrameWait( void ) {
+#if defined( USE_SDL3 )
+	return com_preciseFrameWait.GetBool();
+#else
+	return false;
+#endif
+}
+
+// SDL_DelayNS sleeps on a high-resolution waitable timer on Windows and on
+// nanosleep elsewhere, so a sleep can end within a fraction of a millisecond.
+static void Common_PreciseSleep( double msec ) {
+#if defined( USE_SDL3 )
+	SDL_DelayNS( static_cast<Uint64>( msec * 1000000.0 ) );
+#else
+	Sys_Sleep( Max( 1, static_cast<int>( idMath::Floor( static_cast<float>( msec ) ) ) ) );
+#endif
+}
+
+/*
+=================
+openQ4_PrintPresentationThrottleStats
+
+The limiter's wake lateness since the last framePacingReset: a frame that
+had to wait wakes this long after its target. Frames that arrive already
+late (the work took longer than the cap) never wait and are not counted.
+=================
+*/
+void openQ4_PrintPresentationThrottleStats( const char *reason ) {
+	const int count = commonThrottleLatenessCount;
+	if ( count <= 0 ) {
+		common->Printf( "Presentation throttle%s: no waits\n", reason );
+		return;
+	}
+	idList<float> sorted;
+	sorted.SetNum( count );
+	for ( int i = 0; i < count; i++ ) {
+		sorted[ i ] = commonThrottleLatenessMsec[ i ];
+	}
+	std::sort( sorted.Ptr(), sorted.Ptr() + count );
+	const auto at = [&]( float fraction ) { return sorted[ Min( count - 1, static_cast<int>( fraction * ( count - 1 ) + 0.5f ) ) ]; };
+	common->Printf( "Presentation throttle%s: waits=%d late p50=%.3f p95=%.3f p99=%.3f max=%.3f ms, spin mean=%.3f ms\n",
+		reason, count, at( 0.5f ), at( 0.95f ), at( 0.99f ), sorted[ count - 1 ],
+		commonThrottleSpinWaits > 0 ? commonThrottleSpinMsec / commonThrottleSpinWaits : 0.0 );
+}
+
+void openQ4_ResetPresentationThrottleStats( void ) {
+	commonThrottleLatenessCount = 0;
+	commonThrottleLatenessNext = 0;
+	commonThrottleSpinMsec = 0.0;
+	commonThrottleSpinWaits = 0;
+}
+
+/*
+=================
+Common_RecordFrameInputToSwap
+
+How long after its input each frame reached the screen's swap chain (HF-08):
+from the first late-look sample of the draw, and from the press behind a drawn
+latency flash, to the backend's successful swap or present. The main thread
+records the frame at retirement, including an asynchronous backend. A sensor's
+click-to-photon reading minus pressToSwap leaves the GPU, compositor and display.
+Input older than a quarter second was taken outside an ordinary frame (a load) and is
+dropped rather than counted.
+=================
+*/
+
+static const int COMMON_INPUT_TO_SWAP_HISTORY = 2048;
+
+struct commonInputToSwapRing_t {
+	float	msec[ COMMON_INPUT_TO_SWAP_HISTORY ];
+	int		count;
+	int		next;
+};
+
+static commonInputToSwapRing_t commonLookSampleToSwap;
+static commonInputToSwapRing_t commonFlashPressToSwap;
+static double commonInputToSwapResetClock = 0.0;
+
+static void Common_AddInputToSwap( commonInputToSwapRing_t &ring, double inputClock, double swapClock, double clockUnitsPerSecond ) {
+	if ( inputClock <= 0.0 || swapClock < inputClock ) {
+		return;
+	}
+	const double msec = ( ( swapClock - inputClock ) * 1000.0 ) / clockUnitsPerSecond;
+	if ( msec > 250.0 ) {
+		return;
+	}
+	ring.msec[ ring.next ] = static_cast<float>( msec );
+	ring.next = ( ring.next + 1 ) % COMMON_INPUT_TO_SWAP_HISTORY;
+	ring.count = Min( ring.count + 1, COMMON_INPUT_TO_SWAP_HISTORY );
+}
+
+void Common_RecordFrameInputToSwap( double lookSampleClock, double flashPressClock, double swapClock ) {
+	const double clockUnitsPerSecond = Common_GetPresentationClockUnitsPerSecond();
+	if ( clockUnitsPerSecond <= 0.0 ) {
+		return;
+	}
+	if ( lookSampleClock >= commonInputToSwapResetClock ) {
+		Common_AddInputToSwap( commonLookSampleToSwap, lookSampleClock, swapClock, clockUnitsPerSecond );
+	}
+	if ( flashPressClock >= commonInputToSwapResetClock ) {
+		Common_AddInputToSwap( commonFlashPressToSwap, flashPressClock, swapClock, clockUnitsPerSecond );
+	}
+}
+
+static idStr Common_InputToSwapPercentiles( const commonInputToSwapRing_t &ring ) {
+	const int count = ring.count;
+	if ( count <= 0 ) {
+		return "none";
+	}
+	idList<float> sorted;
+	sorted.SetNum( count );
+	for ( int i = 0; i < count; i++ ) {
+		sorted[ i ] = ring.msec[ i ];
+	}
+	std::sort( sorted.Ptr(), sorted.Ptr() + count );
+	const auto at = [&]( float fraction ) { return sorted[ Min( count - 1, static_cast<int>( fraction * ( count - 1 ) + 0.5f ) ) ]; };
+	return va( "p50=%.3f p95=%.3f p99=%.3f max=%.3f ms", at( 0.5f ), at( 0.95f ), at( 0.99f ), sorted[ count - 1 ] );
+}
+
+void openQ4_PrintPresentationLatencyStats( const char *reason ) {
+	common->Printf( "Presentation latency%s: lookSamples=%d sampleToSwap %s; flashes=%d pressToSwap %s\n",
+		reason, commonLookSampleToSwap.count, Common_InputToSwapPercentiles( commonLookSampleToSwap ).c_str(),
+		commonFlashPressToSwap.count, Common_InputToSwapPercentiles( commonFlashPressToSwap ).c_str() );
+}
+
+void openQ4_ResetPresentationLatencyStats( void ) {
+	// A threaded frame handed off before this reset may retire afterwards.
+	commonInputToSwapResetClock = Common_GetPresentationClockNow();
+	commonLookSampleToSwap.count = commonLookSampleToSwap.next = 0;
+	commonFlashPressToSwap.count = commonFlashPressToSwap.next = 0;
+}
+
+/*
+=================
+openQ4_GetPresentationThrottleLatenessP95
+
+The com_showFramePacing overlay's view of the same lateness: p95 over the
+recent waits, sorted at most four times a second, 0 with no waits.
+=================
+*/
+float openQ4_GetPresentationThrottleLatenessP95( void ) {
+	static int lastSortMsec = 0;
+	static float latenessP95 = 0.0f;
+	const int nowMsec = Sys_Milliseconds();
+	if ( lastSortMsec != 0 && nowMsec - lastSortMsec >= 0 && nowMsec - lastSortMsec < 250 ) {
+		return latenessP95;
+	}
+	lastSortMsec = nowMsec != 0 ? nowMsec : 1;
+	const int count = commonThrottleLatenessCount;
+	if ( count <= 0 ) {
+		latenessP95 = 0.0f;
+		return latenessP95;
+	}
+	static float sorted[ COMMON_THROTTLE_LATENESS_HISTORY ];
+	memcpy( sorted, commonThrottleLatenessMsec, count * sizeof( sorted[ 0 ] ) );
+	std::sort( sorted, sorted + count );
+	latenessP95 = sorted[ Min( count - 1, static_cast<int>( 0.95f * ( count - 1 ) + 0.5f ) ) ];
+	return latenessP95;
+}
+
+int openQ4_GetRequestedPresentationCap( void ) {
+	return Common_GetRequestedPresentationCap();
 }
 
 static void Common_ThrottlePresentationFrame( void ) {
@@ -280,26 +643,75 @@ static void Common_ThrottlePresentationFrame( void ) {
 
 	// Sleep away the bulk of the frame period, then use the high-resolution counter
 	// for the last slice so low frame caps don't pick up an extra scheduler quantum.
-	const double sleepSlackMsec = idMath::ClampFloat( 0.5f, 1.5f, static_cast<float>( frameMsec * 0.125f ) );
+	// The slice covers how late a sleep wakes: as measured for the high-resolution
+	// timer, a fixed eighth of the frame for millisecond sleeps.
+	const bool preciseWait = Common_UsePreciseFrameWait();
+	const double sleepSlackMsec = preciseWait
+		? openq4::LimiterSpinMsec( commonLimiterOversleep )
+		: openq4::LegacyLimiterSpinMsec( frameMsec );
+
+	// Never wait longer than a few frame periods here however the clock behaves. The
+	// tail of this loop is a deliberate busy-spin for sub-millisecond precision, so a
+	// counter that stalls or runs backwards would otherwise wedge the process with no
+	// way out.
+	const double waitDeadlineClock = Common_GetPresentationClockNow() + frameClockUnits * 4.0;
+	// Only a frame that arrives before its target waits. One whose work overran
+	// the period is late already, which says nothing about the limiter's own
+	// precision, so it is not counted as a late wake.
+	bool waited = false;
+	double spinStartClock = -1.0;
 	while ( true ) {
-		const double remainingClockUnits = commonNextPresentationFrameClock - Common_GetPresentationClockNow();
+		const double spinNowClock = Common_GetPresentationClockNow();
+		const double remainingClockUnits = commonNextPresentationFrameClock - spinNowClock;
 		if ( remainingClockUnits <= 0.0 ) {
+			if ( waited ) {
+				commonThrottleLatenessMsec[ commonThrottleLatenessNext ] =
+					static_cast<float>( ( -remainingClockUnits * 1000.0 ) / clockUnitsPerSecond );
+				commonThrottleLatenessNext = ( commonThrottleLatenessNext + 1 ) % COMMON_THROTTLE_LATENESS_HISTORY;
+				commonThrottleLatenessCount = Min( commonThrottleLatenessCount + 1, COMMON_THROTTLE_LATENESS_HISTORY );
+				if ( spinStartClock >= 0.0 ) {
+					commonThrottleSpinMsec += ( ( spinNowClock - spinStartClock ) * 1000.0 ) / clockUnitsPerSecond;
+				}
+				++commonThrottleSpinWaits;
+			}
 			break;
+		}
+		waited = true;
+
+		if ( spinNowClock >= waitDeadlineClock ) {
+			// The clock is not behaving; drop the backlog and resynchronise next frame
+			// rather than spinning against a target we can never reach.
+			Common_ResetPresentationThrottle();
+			commonLastPresentationCap = cap;
+			return;
 		}
 
 		const double remainingMsec = ( remainingClockUnits * 1000.0 ) / clockUnitsPerSecond;
 		if ( remainingMsec <= sleepSlackMsec ) {
+			if ( spinStartClock < 0.0 ) {
+				spinStartClock = spinNowClock;
+			}
 			continue;
 		}
 
-		const int sleepMsec = Max( 1, static_cast<int>( idMath::Floor( remainingMsec - sleepSlackMsec ) ) );
-		Sys_Sleep( sleepMsec );
+		if ( preciseWait ) {
+			const double sleepMsec = remainingMsec - sleepSlackMsec;
+			Common_PreciseSleep( sleepMsec );
+			const double sleptMsec = ( ( Common_GetPresentationClockNow() - spinNowClock ) * 1000.0 ) / clockUnitsPerSecond;
+			commonLimiterOversleep.Add( sleptMsec - sleepMsec );
+		} else {
+			const int sleepMsec = Max( 1, static_cast<int>( idMath::Floor( static_cast<float>( remainingMsec - sleepSlackMsec ) ) ) );
+			Sys_Sleep( sleepMsec );
+		}
 	}
 
 	commonNextPresentationFrameClock += frameClockUnits;
 }
 
 void openQ4_BeginPresentationFrame( void ) {
+    static std::uint64_t nativeInputPresentation = 0;
+    if (nativeInputPresentation != UINT64_MAX) ++nativeInputPresentation;
+    NativeInput_BeginFrame(nativeInputPresentation);
 	if ( idAsyncNetwork::serverDedicated.GetInteger() == 1 ) {
 		Common_ResetPresentationThrottle();
 	} else {
@@ -307,6 +719,15 @@ void openQ4_BeginPresentationFrame( void ) {
 	}
 
 	com_frameRealTime = Sys_Milliseconds();
+	commonPresentationFrameStartClock = Common_GetPresentationClockNow();
+}
+
+double openQ4_GetPresentationFrameStartMsec( void ) {
+	const double clockUnitsPerSecond = Common_GetPresentationClockUnitsPerSecond();
+	if ( commonPresentationFrameStartClock <= 0.0 || clockUnitsPerSecond <= 0.0 ) {
+		return 0.0;
+	}
+	return ( commonPresentationFrameStartClock * 1000.0 ) / clockUnitsPerSecond;
 }
 
 // While the single-player loading-screen continue gate is waiting for input, the
@@ -355,7 +776,7 @@ openQ4_IsAnyToolActive
 ==================
 */
 bool openQ4_IsAnyToolActive( void ) {
-	return com_editorActive || openQ4_GetActiveToolFlags( EDITOR_ALL ) != 0;
+	return com_editorActive || LevelEditor_UIIsActive() || openQ4_GetActiveToolFlags( EDITOR_ALL ) != 0;
 }
 
 /*
@@ -502,6 +923,7 @@ static bool Common_IsEnvFlagTrue( const char *value ) {
 		  idStr::Icmp( value, "steamdeck" ) == 0 );
 }
 
+#if defined( __linux__ )
 static bool Common_FileContainsAnyToken( const char *path, const char **tokens, int numTokens ) {
 	FILE *file = fopen( path, "r" );
 	if ( file == NULL ) {
@@ -522,6 +944,7 @@ static bool Common_FileContainsAnyToken( const char *path, const char **tokens, 
 	fclose( file );
 	return false;
 }
+#endif
 
 static bool Common_HasSteamDeckHostSignal( void ) {
 	const char *explicitSignals[] = {
@@ -573,8 +996,31 @@ static bool Common_HasSteamDeckHostSignal( void ) {
 	return false;
 }
 
+// openQ4: Steam's Big Picture mode (SteamTenfoot) means a television across the
+// room, the Couch viewing profile of ui-visual-design.md section 13.2.
+// OPENQ4_COUCH forces the answer either way.
+static bool Common_HasCouchHostSignal( void ) {
+	const char *explicitSignals[] = {
+		"OPENPREY_COUCH",
+		"OPENQ4_COUCH",
+		"OPENQ4_AUTODETECT_COUCH",
+		"SteamTenfoot"
+	};
+	for ( int i = 0; i < static_cast<int>( sizeof( explicitSignals ) / sizeof( explicitSignals[0] ) ); ++i ) {
+		const char *value = Common_GetNonEmptyEnv( explicitSignals[i] );
+		if ( Common_IsEnvFlagFalse( value ) ) {
+			return false;
+		}
+		if ( Common_IsEnvFlagTrue( value ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool Common_HasRaspberryPiHostSignal( void ) {
 	const char *explicitSignals[] = {
+		"OPENPREY_RASPBERRYPI",
 		"OPENQ4_RASPBERRYPI",
 		"OPENQ4_RPI",
 		"OPENQ4_AUTODETECT_RASPBERRYPI",
@@ -608,6 +1054,7 @@ static bool Common_HasRaspberryPiHostSignal( void ) {
 
 static bool Common_HasExplicitLowPowerHostSignal( void ) {
 	const char *explicitSignals[] = {
+		"OPENPREY_LOWPOWER",
 		"OPENQ4_LOWPOWER",
 		"OPENQ4_LOW_POWER",
 		"OPENQ4_AUTODETECT_LOWPOWER"
@@ -646,6 +1093,8 @@ public:
 	virtual void				StartupVariable( const char *match, bool once );
 	virtual int					GetUserCmdHz( void ) const;
 	virtual int					GetUserCmdMSec( void ) const;
+	virtual void				SetGameTimeScale( float scale );
+	virtual float				GetGameTimeScale( void ) const;
 	virtual int					GetUserCmdTime( int ticNumber ) const;
 	virtual int					GetUserCmdDeltaMsec( int ticNumber ) const;
 	virtual int					GetFrameTime( void ) const;
@@ -657,6 +1106,7 @@ public:
 	virtual rvISourceControl *	GetSourceControl( void );
 	virtual void				ActivateTool( bool active );
 	virtual void				WriteConfigToFile( const char *filename );
+	bool					WriteConfigToFileChecked( const char *filename, bool coordinatorOwnsLock, std::string& error );
 	virtual void				WriteFlaggedCVarsToFile( const char *filename, int flags, const char *setCmd );
 	virtual void				ModViewThink( void );
 	virtual void				RunAlwaysThinkGUIs( int time );
@@ -681,6 +1131,7 @@ public:
 	virtual const idLangDict *	GetLanguageDict( void );
 
 	virtual const char *		KeysFromBinding( const char *bind );
+	virtual const char *		KeysFromBindingForPrompt( const char *bind );
 	virtual const char *		BindingFromKey( const char *key );
 	virtual void				MaterialKeyForBinding( const char *binding, char *keyMaterial, char *key, bool &isWide );
 	virtual void				SetGameSensitivityFactor( float factor );
@@ -730,7 +1181,7 @@ static idStr Common_BuildPlatformProfileConfigName( const char *profileName ) {
 	if ( sanitized.Length() == 0 || sanitized.Icmp( "default" ) == 0 ) {
 		return "";
 	}
-	if ( sanitized.Icmp( "steamdeck" ) != 0 ) {
+	if ( sanitized.Icmp( "steamdeck" ) != 0 && sanitized.Icmp( "couch" ) != 0 ) {
 		return "";
 	}
 
@@ -766,6 +1217,9 @@ static idStr Common_BuildPlatformProfileConfigName( const char *profileName ) {
 	idStrList					errorList;
 
 	intptr_t					gameDLL;
+	idCVarCompletionSnapshot	gameModuleCompletions;	// captured when gameDLL loaded
+	bool						gameShutdownCalled;
+	bool						gameShutdownAfterDeclsCalled;
 
 	idLangDict					languageDict;
 
@@ -799,6 +1253,8 @@ idCommonLocal::idCommonLocal( void ) {
 	rd_flush = NULL;
 
 	gameDLL = 0;
+	gameShutdownCalled = false;
+	gameShutdownAfterDeclsCalled = false;
 
 #ifdef ID_WRITE_VERSION
 	config_compressor = NULL;
@@ -847,7 +1303,7 @@ BOOL CALLBACK EnumWindowsProc( HWND hwnd, LPARAM lParam ) {
 	char buff[1024];
 
 	::GetWindowText( hwnd, buff, sizeof( buff ) );
-	if ( idStr::Icmpn( buff, EDITOR_WINDOWTEXT, strlen( EDITOR_WINDOWTEXT ) ) == 0 ) {
+	if ( idStr::Icmpn( buff, EDITOR_WINDOWTEXT, idStr::Length( EDITOR_WINDOWTEXT ) ) == 0 ) {
 		com_hwndMsg = hwnd;
 		return FALSE;
 	}
@@ -891,6 +1347,63 @@ void idCommonLocal::SetRefreshOnPrint( bool set ) {
 
 /*
 ==================
+Common_QueueOffMainThread
+
+The console, the warning list and the error unwind belong to the main thread.
+The Vulkan render thread (r_vkRenderThread) records and presents a frame while
+the main thread runs the next game tic, so whatever it prints is queued here
+and replayed by the main thread, in order, at its next print or frame.
+==================
+*/
+struct comOffMainThreadPrint_t {
+	bool			warning;
+	std::string		text;
+};
+
+static std::thread::id						com_mainThreadId;
+static std::mutex							com_offMainThreadMutex;
+static std::vector<comOffMainThreadPrint_t>	com_offMainThreadPrints;
+static std::atomic<bool>					com_offMainThreadPending( false );
+static const size_t							COM_MAX_OFF_MAIN_THREAD_PRINTS = 1024;
+
+static bool Common_OnMainThread( void ) {
+	// before Init records the main thread, everything runs on it
+	return com_mainThreadId == std::thread::id() || std::this_thread::get_id() == com_mainThreadId;
+}
+
+static bool Common_QueueOffMainThread( bool warning, const char *text ) {
+	if ( Common_OnMainThread() ) {
+		return false;
+	}
+	std::lock_guard<std::mutex> lock( com_offMainThreadMutex );
+	if ( com_offMainThreadPrints.size() < COM_MAX_OFF_MAIN_THREAD_PRINTS ) {
+		com_offMainThreadPrints.push_back( { warning, text } );
+	}
+	com_offMainThreadPending.store( true, std::memory_order_release );
+	return true;
+}
+
+static void Common_FlushOffMainThreadPrints( void ) {
+	if ( !com_offMainThreadPending.load( std::memory_order_acquire ) || !Common_OnMainThread() ) {
+		return;
+	}
+	std::vector<comOffMainThreadPrint_t> prints;
+	{
+		std::lock_guard<std::mutex> lock( com_offMainThreadMutex );
+		prints.swap( com_offMainThreadPrints );
+		com_offMainThreadPending.store( false, std::memory_order_release );
+	}
+	for ( const comOffMainThreadPrint_t &print : prints ) {
+		if ( print.warning ) {
+			common->Warning( "%s", print.text.c_str() );
+		} else {
+			common->Printf( "%s", print.text.c_str() );
+		}
+	}
+}
+
+/*
+==================
 idCommonLocal::VPrintf
 
 A raw string should NEVER be passed as fmt, because of "%f" type crashes.
@@ -914,7 +1427,7 @@ void idCommonLocal::VPrintf( const char *fmt, va_list args ) {
 			t /= 1000;
 		}
 		sprintf( msg, "[%i]", t );
-		timeLength = strlen( msg );
+		timeLength = idLib::SizeToInt( strlen( msg ), "idCommonLocal::VPrintf timestamp" );
 	} else {
 		timeLength = 0;
 	}
@@ -925,10 +1438,15 @@ void idCommonLocal::VPrintf( const char *fmt, va_list args ) {
 		Sys_Printf( "idCommon::VPrintf: truncated to %zu characters\n", strlen(msg)-1 );
 	}
 
+	if ( Common_QueueOffMainThread( false, msg ) ) {
+		return;
+	}
+	Common_FlushOffMainThreadPrints();
+
 	if ( rd_buffer ) {
 		const char *text = msg;
 		while ( *text ) {
-			int used = strlen( rd_buffer );
+			int used = idLib::SizeToInt( strlen( rd_buffer ), "idCommonLocal::VPrintf redirect buffer" );
 			int available = rd_buffersize - used - 1;
 			if ( available <= 0 ) {
 				rd_flush( rd_buffer );
@@ -940,7 +1458,7 @@ void idCommonLocal::VPrintf( const char *fmt, va_list args ) {
 				break;
 			}
 
-			const int remaining = strlen( text );
+			const int remaining = idLib::SizeToInt( strlen( text ), "idCommonLocal::VPrintf redirect text" );
 			const int copyLength = Min( available, remaining );
 			memcpy( rd_buffer + used, text, copyLength );
 			rd_buffer[used + copyLength] = '\0';
@@ -1000,7 +1518,9 @@ void idCommonLocal::VPrintf( const char *fmt, va_list args ) {
 			// fileSystem->OpenFileWrite can cause recursive prints into here
 			recursing = true;
 
-			logFile = fileSystem->OpenFileWrite( fileNameToOpen );
+			logFile = com_preserveStartupRecoveryLog
+					? fileSystem->OpenFileAppend( fileNameToOpen, false, "fs_savepath" )
+					: fileSystem->OpenFileWrite( fileNameToOpen );
 			if ( !logFile ) {
 				logFileFailed = true;
 				FatalError( "failed to open log file '%s'\n", fileNameToOpen );
@@ -1018,7 +1538,7 @@ void idCommonLocal::VPrintf( const char *fmt, va_list args ) {
 			Printf( "log file '%s' opened on %s\n", fileNameToOpen, asctime( newtime ) );
 		}
 		if ( logFile ) {
-			logFile->Write( msg, strlen( msg ) );
+			logFile->Write( msg, idLib::SizeToInt( strlen( msg ), "idCommonLocal::VPrintf log message" ) );
 			logFile->Flush();	// ForceFlush doesn't help a whole lot
 		}
 	}
@@ -1098,7 +1618,14 @@ void idCommonLocal::DPrintf( const char *fmt, ... ) {
 	idStr::vsnPrintf( msg, sizeof(msg), fmt, argptr );
 	va_end( argptr );
 	msg[sizeof(msg)-1] = '\0';
-	
+
+	if ( !Common_OnMainThread() ) {
+		char colored[MAX_PRINT_MSG_SIZE];
+		idStr::snPrintf( colored, sizeof( colored ), S_COLOR_RED "%s", msg );
+		Common_QueueOffMainThread( false, colored );
+		return;
+	}
+
 	// never refresh the screen, which could cause reentrency problems
 	bool temp = com_refreshOnPrint;
 	com_refreshOnPrint = false;
@@ -1146,6 +1673,10 @@ void idCommonLocal::Warning( const char *fmt, ... ) {
 	idStr::vsnPrintf( msg, sizeof(msg), fmt, argptr );
 	va_end( argptr );
 	msg[sizeof(msg)-1] = 0;
+
+	if ( Common_QueueOffMainThread( true, msg ) ) {
+		return;
+	}
 
 	Printf( S_COLOR_YELLOW "WARNING: " S_COLOR_RED "%s\n", msg );
 
@@ -1243,6 +1774,22 @@ void idCommonLocal::DumpWarnings( void ) {
 
 /*
 ==================
+Com_FlushBufferedOutput
+
+Sys_Printf reaches the terminal through stdio, which buffers. The error paths
+below finish in Sys_Error, and a fault raised by the teardown they run first
+kills the process through _exit(), which discards every buffered stream: the
+terminal ends mid-sentence several KB behind the message that explains the exit,
+pointing at whichever subsystem happened to be printing (issue #96). Push the
+buffers out before running teardown that could fault.
+==================
+*/
+static void Com_FlushBufferedOutput( void ) {
+	fflush( NULL );
+}
+
+/*
+==================
 idCommonLocal::Error
 ==================
 */
@@ -1253,6 +1800,20 @@ void idCommonLocal::Error( const char *fmt, ... ) {
 	int			currentTime;
 
 	int code = ERP_DROP;
+
+	if ( !Common_OnMainThread() ) {
+		// The error unwind belongs to the main thread. Record the message and
+		// unwind this thread only; its owner re-raises it on the main thread.
+		char msg[MAX_PRINT_MSG_SIZE];
+		va_start( argptr, fmt );
+		idStr::vsnPrintf( msg, sizeof( msg ), fmt, argptr );
+		va_end( argptr );
+		msg[sizeof( msg ) - 1] = '\0';
+		char warning[MAX_PRINT_MSG_SIZE];
+		idStr::snPrintf( warning, sizeof( warning ), "error off the main thread: %s", msg );
+		Common_QueueOffMainThread( true, warning );
+		throw idException( msg );
+	}
 
 	// always turn this off after an error
 	com_refreshOnPrint = false;
@@ -1294,10 +1855,23 @@ void idCommonLocal::Error( const char *fmt, ... ) {
 
 			Sys_Printf( "FATAL: %s\n", errorMessage );
 			Sys_Printf( "FATAL: secondary error while shutting down: %s\n", secondary );
+			Com_FlushBufferedOutput();
 
 			Sys_Error( "%s (secondary error while shutting down: %s)", errorMessage, secondary );
 		}
 		code = ERP_FATAL;
+	}
+
+	// A save restore owns its partial object graph. Let it unwind before the
+	// session closes the save or releases the map's renderer/script resources.
+	// The load transaction reports this failure through the ordinary save UI.
+	if ( code == ERP_DROP && openQ4_saveGameRestore.file != NULL ) {
+		char restoreError[ sizeof( errorMessage ) ];
+		va_start( argptr, fmt );
+		idStr::vsnPrintf( restoreError, sizeof( restoreError ), fmt, argptr );
+		va_end( argptr );
+		restoreError[ sizeof( restoreError ) - 1 ] = '\0';
+		throw idException( restoreError );
 	}
 
 	// if we are getting a solid stream of ERP_DROP, do an ERP_FATAL
@@ -1326,6 +1900,15 @@ void idCommonLocal::Error( const char *fmt, ... ) {
 
 	// Dont shut down the session for gui editor or debugger
 	if ( !( com_editors & ( EDITOR_GUI | EDITOR_DEBUGGER ) ) ) {
+#ifndef ID_DEDICATED
+		// A recoverable drop can bypass the ordinary disconnect command. Restore
+		// Arena's temporary server rules before the session tears its server down,
+		// recording a result the match had already decided.
+		if ( arenaCampaign.NeedsCleanup() ) {
+			arenaCampaign.RecordDecidedResult();
+			arenaCampaign.AbortMatch();
+		}
+#endif
 		session->Stop();
 	}
 
@@ -1350,6 +1933,8 @@ void idCommonLocal::Error( const char *fmt, ... ) {
 	if ( renderSystem && renderSystem->IsOpenGLRunning() && cvarSystem->GetCVarBool( "r_fullscreen" ) ) {
 		cmdSystem->BufferCommandText( CMD_EXEC_NOW, "vid_restart partial windowed\n" );
 	}
+
+	Com_FlushBufferedOutput();
 
 	Shutdown();
 
@@ -1382,6 +1967,7 @@ void idCommonLocal::FatalError( const char *fmt, ... ) {
 		errorMessage[sizeof(errorMessage)-1] = '\0';
 
 		Sys_Printf( "%s\n", errorMessage );
+		Com_FlushBufferedOutput();
 
 		// exit through the fatal path rather than Sys_Quit(): Sys_Quit() reports
 		// EXIT_SUCCESS and writes no durable record, so a recursed fatal used to
@@ -1409,6 +1995,12 @@ void idCommonLocal::FatalError( const char *fmt, ... ) {
 
 	Sys_SetFatalError( errorMessage );
 
+	// Shutdown() below runs the whole engine teardown, and FatalError can fire
+	// from anywhere in startup -- including before the session has allocated the
+	// state that teardown walks. Get the message out of the stdio buffers first
+	// so a fault in teardown cannot swallow it (issue #96).
+	Com_FlushBufferedOutput();
+
 	Shutdown();
 
 	Sys_Error( "%s", errorMessage );
@@ -1430,6 +2022,17 @@ void idCommonLocal::Quit( void ) {
 
 	// don't try to shutdown if we are in a recursive error
 	if ( !com_errorEntered ) {
+#ifndef ID_DEDICATED
+		// Arena temporarily overrides archived multiplayer and user settings.
+		// Restore and flush them while the session and filesystem are still
+		// alive; session shutdown is too late to repair a config written during
+		// the active match. A result already decided is recorded first.
+		if ( arenaCampaign.NeedsCleanup() ) {
+			arenaCampaign.RecordDecidedResult();
+			arenaCampaign.AbortMatch();
+			WriteConfiguration();
+		}
+#endif
 		Shutdown();
 	}
 
@@ -1524,6 +2127,10 @@ idCommonLocal::ClearCommandLine
 ==================
 */
 void idCommonLocal::ClearCommandLine( void ) {
+	for ( int i = 0; i < com_numConsoleLines; ++i ) {
+		com_consoleLines[ i ].ClearSensitive();
+	}
+	idCmdArgs::ClearArgsScratch();
 	com_numConsoleLines = 0;
 }
 
@@ -1576,6 +2183,7 @@ void idCommonLocal::CheckToolMode( void ) {
 		
 		if ( !idStr::Icmp( com_consoleLines[ i ].Argv(0), "renderbump" )
 			|| !idStr::Icmp( com_consoleLines[ i ].Argv(0), "editor" )
+			|| !idStr::Icmp( com_consoleLines[ i ].Argv(0), "editorExperimental" )
 			|| !idStr::Icmp( com_consoleLines[ i ].Argv(0), "guieditor" )
 			|| !idStr::Icmp( com_consoleLines[ i ].Argv(0), "debugger" )
 			|| !idStr::Icmp( com_consoleLines[ i ].Argv(0), "dmap" )
@@ -1616,6 +2224,30 @@ static bool Common_HasStartupVariable( const char *match ) {
 	}
 
 	return false;
+}
+
+/*
+==================
+Common_IsRetailGameDirFile
+
+True when the file a relative path resolves to is a loose file in the retail
+game directory. GOG's Quake 4 installers write q4base/autoexec.cfg with the
+language picked at install time, and tools that extract every language variant
+leave whichever came last (issue #199).
+==================
+*/
+static bool Common_IsRetailGameDirFile( const char *relativePath ) {
+	idFile *file = fileSystem->OpenFileRead( relativePath );
+	if ( file == NULL ) {
+		return false;
+	}
+
+	idStr directory = file->GetFullPath();
+	fileSystem->CloseFile( file );
+	directory.BackSlashesToSlashes();
+	directory.StripFilename();
+	directory.StripPath();
+	return directory.Icmp( BASE_GAMEDIR ) == 0;
 }
 
 void idCommonLocal::StartupVariable( const char *match, bool once ) {
@@ -1769,6 +2401,27 @@ idCommonLocal::GetUserCmdMSec
 */
 int idCommonLocal::GetUserCmdMSec( void ) const {
 	return USERCMD_MSEC;
+}
+
+static std::atomic<float> openQ4_gameTimeScale( 1.0f );
+
+void idCommonLocal::SetGameTimeScale( float scale ) {
+	if ( FLOAT_IS_NAN( scale ) || FLOAT_IS_INF( scale ) ) {
+		scale = 1.0f;
+	}
+	scale = idMath::ClampFloat( 0.01f, 1.0f, scale );
+	openQ4_gameTimeScale.store( scale, std::memory_order_release );
+
+	if ( soundSystem != NULL ) {
+		idSoundWorld *soundWorld = soundSystem->GetPlayingSoundWorld();
+		if ( soundWorld != NULL ) {
+			soundWorld->SetSlowmoSpeed( scale );
+		}
+	}
+}
+
+float idCommonLocal::GetGameTimeScale( void ) const {
+	return openQ4_gameTimeScale.load( std::memory_order_acquire );
 }
 
 /*
@@ -1932,39 +2585,85 @@ void idCommonLocal::WriteFlaggedCVarsToFile( const char *filename, int flags, co
 idCommonLocal::WriteConfigToFile
 ==================
 */
-void idCommonLocal::WriteConfigToFile( const char *filename ) {
-	idFile *f;
-#ifdef ID_WRITE_VERSION
-	ID_TIME_T t;
-	char *curtime;
-	idStr runtag;
-	idFile_Memory compressed( "compressed" );
-	idBase64 out;
-#endif
-
-	f = fileSystem->OpenFileWrite( filename );
-	if ( !f ) {
-		Printf ("Couldn't write %s.\n", filename );
-		return;
+// The legacy serializers ignore Write/Printf return values. Record failures in
+// the sink, including formatting truncation, before publishing any bytes.
+class idCheckedConfigMemory : public idFile_Memory {
+public:
+	explicit idCheckedConfigMemory( const char *name ) : idFile_Memory( name ), failed( false ) {}
+	bool Failed() const { return failed; }
+	int Write( const void *buffer, int len ) override {
+		if ( failed || len < 0 || ( len > 0 && buffer == NULL ) ||
+			static_cast<size_t>( len ) > openq4::DurableFileMaxBytes - static_cast<size_t>( Length() ) ) {
+			failed = true;
+			return 0;
+		}
+		if ( len == 0 ) return 0;
+		const int written = idFile_Memory::Write( buffer, len );
+		if ( written != len ) failed = true;
+		return written;
 	}
+	int Printf( const char *fmt, ... ) override {
+		va_list args;
+		va_start( args, fmt );
+		const int written = Format( fmt, args, true );
+		va_end( args );
+		return written;
+	}
+	int VPrintf( const char *fmt, va_list args ) override { return Format( fmt, args, false ); }
+private:
+	int Format( const char *fmt, va_list args, bool crlf ) {
+		char buffer[4096];
+		const int length = idStr::vsnPrintf( buffer, sizeof( buffer ), fmt, args );
+		if ( length < 0 || length >= static_cast<int>( sizeof( buffer ) ) ) {
+			failed = true;
+			return 0;
+		}
+		if ( !crlf ) return Write( buffer, length );
+		idStr text( buffer );
+		text.Replace( "\n", "\r\n" );
+		return Write( text.c_str(), text.Length() );
+	}
+	bool failed;
+};
 
-#ifdef ID_WRITE_VERSION
-	assert( config_compressor );
-	t = time( NULL );
-	curtime = ctime( &t );
-	runtag = cvarSystem->GetCVarString( "si_version" );
-	runtag += " - ";
-	runtag += curtime;
-	config_compressor->Init( &compressed, true, 8 );
-	config_compressor->Write( runtag.c_str(), runtag.Length() );
-	config_compressor->FinishCompress( );
-	out.Encode( (const byte *)compressed.GetDataPtr(), compressed.Length() );
-	f->Printf( "// %s\n", out.c_str() );
+static bool Common_SettingsSaveDirectory( std::string& directory, std::string& error ) {
+	if ( fileSystem == NULL || !fileSystem->IsInitialized() || cvarSystem == NULL ) {
+		error = "configuration filesystem is unavailable";
+		return false;
+	}
+	std::string root = cvarSystem->GetCVarString( "fs_savepath" );
+	if ( root.empty() || root.size() > 32768 ) {
+		error = "configuration save root is empty or oversized";
+		return false;
+	}
+	size_t prefix = 0;
+#ifdef _WIN32
+	for ( char& c : root ) if ( c == '\\' ) c = '/';
+	if ( root.size() >= 3 && ( ( root[0] >= 'A' && root[0] <= 'Z' ) || ( root[0] >= 'a' && root[0] <= 'z' ) ) &&
+		root[1] == ':' && root[2] == '/' ) {
+		prefix = 3;
+	} else if ( root.size() > 2 && root[0] == '/' && root[1] == '/' ) {
+		// UNC paths require both a server and a share before our game directory.
+		const size_t share = root.find( '/', 2 );
+		if ( share != std::string::npos && share + 1 < root.size() ) prefix = 2;
+	}
+#else
+	if ( root[0] == '/' ) prefix = 1;
 #endif
-
-	idKeyInput::WriteBindings( f );
-	cvarSystem->WriteFlaggedVariables( CVAR_ARCHIVE, "seta", f );
-	fileSystem->CloseFile( f );
+	if ( prefix == 0 ) {
+		error = "configuration save root must be an absolute native path";
+		return false;
+	}
+	if ( root.size() > prefix && root.back() == '/' ) root.pop_back();
+	const char *reason = NULL;
+	if ( root.size() > prefix && !FS_ValidateRelativeWritePath( root.c_str() + prefix, &reason ) ) {
+		error = std::string( "invalid configuration save root: " ) + reason;
+		return false;
+	}
+	if ( root.back() != '/' ) root += '/';
+	directory = root + "baseoq4/";
+	error.clear();
+	return true;
 }
 
 static bool openPREY_SavePathHasExactFilename( const char *relativeFilename ) {
@@ -2029,6 +2728,118 @@ static bool openPREY_NormalizeConfigFilenameCase( const char *loadedFilename ) {
 	return true;
 }
 
+static void Common_CreateSettingsParent( const std::string& path ) {
+	// CreateOSPath recognizes only the native separator. DurableFile accepts
+	// these exact slash paths without VFS case correction or search fallbacks.
+	std::string nativePath = path;
+#ifdef _WIN32
+	for ( char& c : nativePath ) if ( c == '/' ) c = '\\';
+#endif
+	fileSystem->CreateOSPath( nativePath.c_str() );
+}
+
+bool Common_SettingsPersistencePaths( std::string& journal, std::string& lock, std::string& error ) {
+	std::string directory;
+	if ( !Common_SettingsSaveDirectory( directory, error ) ) return false;
+	const std::string resolvedJournal = directory + "ui-settings-recovery.dat";
+	const std::string resolvedLock = directory + ".settings-recovery.lock";
+	Common_CreateSettingsParent( resolvedJournal );
+	journal = resolvedJournal;
+	lock = resolvedLock;
+	error.clear();
+	return true;
+}
+
+bool idCommonLocal::WriteConfigToFileChecked( const char *filename, bool coordinatorOwnsLock, std::string& error ) {
+	if ( !coordinatorOwnsLock && UI_SettingsBlocksConfigWrite() ) {
+		error = "settings recovery blocks configuration writes";
+		return false;
+	}
+	const char *reason = NULL;
+	if ( !FS_ValidateRelativeWritePath( filename, &reason ) ) {
+		error = std::string( "invalid configuration filename: " ) + reason;
+		return false;
+	}
+	const std::string firstSegment = std::string( filename ).substr( 0, std::string( filename ).find( '/' ) );
+	if ( idStr::Icmp( firstSegment.c_str(), "ui-settings-recovery.dat" ) == 0 ||
+		idStr::Icmp( firstSegment.c_str(), ".settings-recovery.lock" ) == 0 ) {
+		error = "configuration filename is reserved for settings recovery";
+		return false;
+	}
+	// Callbacks from serialization must not enter a second write, even when the
+	// coordinator already owns the process-external lease.
+	static bool writing = false;
+	if ( writing ) { error = "configuration write is already active"; return false; }
+	struct WriteScope {
+		bool& active;
+		explicit WriteScope( bool& value ) : active( value ) { active = true; }
+		~WriteScope() { active = false; }
+	} scope( writing );
+
+	std::string journal, lock;
+	if ( !Common_SettingsPersistencePaths( journal, lock, error ) ) return false;
+	openq4::DurableFileLease lease;
+	if ( !coordinatorOwnsLock ) {
+		if ( !lease.TryAcquire( lock, error ) ) return false;
+		std::string pending;
+		const openq4::DurableReadResult status = openq4::DurableReadExact( journal, openq4::DurableFileMaxBytes, pending, error );
+		if ( status == openq4::DurableReadResult::Failed ) return false;
+		if ( status == openq4::DurableReadResult::Present ) {
+			error = "settings recovery journal blocks configuration writes";
+			return false;
+		}
+	}
+	// Derive the destination from the same root snapshot used by the lease,
+	// rather than re-reading a CVar or consulting the active mod's search path.
+	const std::string destination = journal.substr( 0, journal.find_last_of( '/' ) + 1 ) + filename;
+	idCheckedConfigMemory memory( "configuration" );
+#ifdef ID_WRITE_VERSION
+	if ( config_compressor == NULL ) { error = "configuration version compressor is unavailable"; return false; }
+	ID_TIME_T t = time( NULL );
+	const char *curtime = ctime( &t );
+	if ( curtime == NULL ) { error = "configuration version timestamp is unavailable"; return false; }
+	idStr runtag = cvarSystem->GetCVarString( "si_version" );
+	runtag += " - ";
+	runtag += curtime;
+	idCheckedConfigMemory compressed( "compressed" );
+	config_compressor->Init( &compressed, true, 8 );
+	const int consumed = config_compressor->Write( runtag.c_str(), runtag.Length() );
+	config_compressor->FinishCompress();
+	if ( consumed != runtag.Length() || compressed.Failed() ) {
+		error = "configuration version compression failed";
+		return false;
+	}
+	idBase64 out;
+	out.Encode( (const byte *)compressed.GetDataPtr(), compressed.Length() );
+	memory.Printf( "// %s\n", out.c_str() );
+#endif
+	idKeyInput::WriteBindings( &memory );
+	cvarSystem->WriteFlaggedVariables( CVAR_ARCHIVE, "seta", &memory );
+	if ( memory.Failed() ) { error = "configuration serialization failed or exceeded its size limit"; return false; }
+	const std::string bytes( memory.GetDataPtr(), memory.Length() );
+	Common_CreateSettingsParent( destination );
+	const bool committed = openq4::DurableReplaceExact( destination, bytes, error );
+	// A failed durability barrier may follow an already-visible rename.
+	fileSystem->ClearDirCache();
+	return committed;
+}
+
+bool Common_WriteSettingsConfiguration( bool coordinatorOwnsLock, std::string& error ) {
+	if ( !commonLocal.WriteConfigToFileChecked( CONFIG_FILE, coordinatorOwnsLock, error ) ) return false;
+	cvarSystem->ClearModifiedFlags( CVAR_ARCHIVE );
+	return true;
+}
+
+void idCommonLocal::WriteConfigToFile( const char *filename ) {
+	// Keep the public void ABI; the settings coordinator uses the checked API.
+	if ( UI_SettingsBlocksConfigWrite() ) return;
+	std::string error;
+	if ( !WriteConfigToFileChecked( filename, false, error ) ) {
+		Printf( "Couldn't write configuration: %s.\n", error.c_str() );
+	}
+}
+
+
 /*
 ===============
 idCommonLocal::WriteConfiguration
@@ -2042,21 +2853,23 @@ void idCommonLocal::WriteConfiguration( void ) {
 	if ( !com_fullyInitialized ) {
 		return;
 	}
+	if ( UI_SettingsBlocksConfigWrite() ) return;
+#ifndef ID_DEDICATED
+	// Arena owns a temporary transaction of archived multiplayer rules. Do not
+	// serialize that transaction; once it restores the player's values, the
+	// ordinary modified-flag path writes the durable configuration.
+	if ( arenaCampaign.NeedsCleanup() ) {
+		return;
+	}
+#endif
 
 	if ( !( cvarSystem->GetModifiedFlags() & CVAR_ARCHIVE ) ) {
 		return;
 	}
+	std::string error;
+	if ( !WriteConfigToFileChecked( CONFIG_FILE, false, error ) ) return;
 	cvarSystem->ClearModifiedFlags( CVAR_ARCHIVE );
-
-	// disable printing out the "Writing to:" message
-	bool developer = com_developer.GetBool();
-	com_developer.SetBool( false );
-
-	WriteConfigToFile( CONFIG_FILE );
-	session->WriteCDKey( );
-
-	// restore the developer cvar
-	com_developer.SetBool( developer );
+	session->WriteCDKey();
 }
 
 namespace {
@@ -2090,6 +2903,16 @@ Returns the key bound to the command
 */
 const char* idCommonLocal::KeysFromBinding( const char *bind ) {
 	return idKeyInput::KeysFromBinding( bind );
+}
+
+/*
+===============
+KeysFromBindingForPrompt()
+Returns the key bound to the command using the emphasized center-prompt form
+===============
+*/
+const char* idCommonLocal::KeysFromBindingForPrompt( const char *bind ) {
+	return idKeyInput::KeysFromBindingForPrompt( bind );
 }
 
 /*
@@ -2491,290 +3314,22 @@ void Com_SetMachineSpec_f( const idCmdArgs &args ) {
 	commonLocal.SetMachineSpec();
 }
 
-/*
-=================
-Com_ExecMachineSpecs_f
-=================
-*/
-#ifdef MACOS_X
-void OSX_GetVideoCard( int& outVendorId, int& outDeviceId );
-bool OSX_GetCPUIdentification( int& cpuId, bool& oldArchitecture );
-#endif
-void Com_ExecMachineSpec_f( const idCmdArgs &args ) {
-	if ( com_machineSpec.GetInteger() == 3 ) {
-		cvarSystem->SetCVarInteger( "image_anisotropy", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_lodbias", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_forceDownSize", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_roundDown", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_preload", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useAllFormats", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecular", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeBump", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecularLimit", 64, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeBumpLimit", 256, CVAR_ARCHIVE );
-		// keep DDS replacements enabled at the top spec; in openQ4 this cvar also
-		// gates user-supplied replacement packs, not just the stock progimg tree
-		cvarSystem->SetCVarInteger( "image_usePrecompressedTextures", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSize", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarString( "image_filter", "GL_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_anisotropy", 16, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useCompression", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_ignoreHighQuality", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "s_maxSoundsPerShader", 0, CVAR_ARCHIVE );
-		// Prey's authored 16:9 presentation scales cleanly at 2560x1440.
-		cvarSystem->SetCVarInteger( "r_mode", 6, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useNormalCompression", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_multiSamples", 8, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_postAA", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_screenFraction", 100, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_swapInterval", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarFloat( "r_forceAmbient", 0.0f, CVAR_ARCHIVE );
-	} else if ( com_machineSpec.GetInteger() == 2 ) {
-		cvarSystem->SetCVarString( "image_filter", "GL_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_anisotropy", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_lodbias", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_forceDownSize", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_roundDown", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_preload", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useAllFormats", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecular", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeBump", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecularLimit", 64, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeBumpLimit", 256, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_usePrecompressedTextures", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSize", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_anisotropy", 8, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useCompression", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_ignoreHighQuality", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "s_maxSoundsPerShader", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useNormalCompression", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_mode", 3, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_multiSamples", 4, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_postAA", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_screenFraction", 100, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_swapInterval", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarFloat( "r_forceAmbient", 0.0f, CVAR_ARCHIVE );
-	} else if ( com_machineSpec.GetInteger() == 1 ) {
-		cvarSystem->SetCVarString( "image_filter", "GL_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_anisotropy", 4, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_lodbias", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSize", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_forceDownSize", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_roundDown", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_preload", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useCompression", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useAllFormats", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_usePrecompressedTextures", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecular", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeBump", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecularLimit", 64, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeBumpLimit", 256, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useNormalCompression", 2, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_mode", 2, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_multiSamples", 2, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_postAA", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_screenFraction", 100, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_swapInterval", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarFloat( "r_forceAmbient", 0.0f, CVAR_ARCHIVE );
-	} else {
-		cvarSystem->SetCVarString( "image_filter", "GL_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_anisotropy", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_lodbias", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_roundDown", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_preload", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useAllFormats", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_usePrecompressedTextures", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSize", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_anisotropy", 2, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useCompression", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_ignoreHighQuality", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "s_maxSoundsPerShader", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecular", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeBump", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecularLimit", 64, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeBumpLimit", 256, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_mode", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_useNormalCompression", 2, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_multiSamples", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_postAA", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_screenFraction", 85, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_swapInterval", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarFloat( "r_forceAmbient", 0.0f, CVAR_ARCHIVE );
-	}
-
-	if ( Sys_GetVideoRam() < 128 ) {
-		cvarSystem->SetCVarBool( "image_ignoreHighQuality", true, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSize", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeLimit", 256, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecular", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecularLimit", 64, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeBump", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeBumpLimit", 256, CVAR_ARCHIVE );
-	}
-
-	if ( Sys_GetSystemRam() < 512 ) {
-		cvarSystem->SetCVarBool( "image_ignoreHighQuality", true, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "s_maxSoundsPerShader", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSize", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeLimit", 256, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecular", 1, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_downSizeSpecularLimit", 64, CVAR_ARCHIVE );
-		cvarSystem->SetCVarBool( "com_purgeAll", true, CVAR_ARCHIVE );
-		cvarSystem->SetCVarBool( "r_forceLoadImages", true, CVAR_ARCHIVE );
-	} else {
-		cvarSystem->SetCVarBool( "com_purgeAll", false, CVAR_ARCHIVE );
-		cvarSystem->SetCVarBool( "r_forceLoadImages", false, CVAR_ARCHIVE );
-	}
-
-	bool oldCard = false;
-	bool nv10or20 = false;
-	renderSystem->GetCardCaps( oldCard, nv10or20 );
-	if ( oldCard ) {
-		cvarSystem->SetCVarBool( "g_decals", false, CVAR_ARCHIVE );
-		cvarSystem->SetCVarBool( "g_projectileLights", false, CVAR_ARCHIVE );
-		cvarSystem->SetCVarBool( "g_doubleVision", false, CVAR_ARCHIVE );
-		cvarSystem->SetCVarBool( "g_muzzleFlash", false, CVAR_ARCHIVE );
-	} else {
-		cvarSystem->SetCVarBool( "g_decals", true, CVAR_ARCHIVE );
-		cvarSystem->SetCVarBool( "g_projectileLights", true, CVAR_ARCHIVE );
-		cvarSystem->SetCVarBool( "g_doubleVision", true, CVAR_ARCHIVE );
-		cvarSystem->SetCVarBool( "g_muzzleFlash", true, CVAR_ARCHIVE );
-	}
-	if ( nv10or20 ) {
-		cvarSystem->SetCVarInteger( "image_useNormalCompression", 1, CVAR_ARCHIVE );
-	}
-
-#if defined( MACOS_X )
-	// On low settings, G4 systems & 64MB FX5200/NV34 Systems should default shadows off
-	bool oldArch;
-	int vendorId, deviceId, cpuId;
-	OSX_GetVideoCard( vendorId, deviceId );
-	OSX_GetCPUIdentification( cpuId, oldArch );
-	bool isFX5200 = vendorId == 0x10DE && ( deviceId & 0x0FF0 ) == 0x0320;
-	if ( ( oldArch || ( isFX5200 && Sys_GetVideoRam() < 128 ) ) && com_machineSpec.GetInteger() == 0 ) {
-		cvarSystem->SetCVarBool( "r_shadows", false, CVAR_ARCHIVE );
-	} else {
-		cvarSystem->SetCVarBool( "r_shadows", true, CVAR_ARCHIVE );
-	}
-#endif
-}
-
-typedef struct openQ4PerformancePreset_s {
-	const char *name;
-	int machineSpec;
-	const char *rendererBenchmarkPreset;
-	int screenFraction;
-	int multiSamples;
-	int postAA;
-	int maxFps;
-	int anisotropy;
-	int downSizeLimit;
-	int downSize;
-	int ignoreHighQuality;
-	int usePrecompressedTextures;
-	int maxSoundsPerShader;
-	int useShadowMap;
-	int shadowMapSize;
-	int shadowMapMaxUpdates;
-	int bloom;
-	int ssao;
-	int hdrToneMap;
-	int motionBlur;
-	int crt;
-	int useLightGrid;
-	int uploadMegs;
-	int uploadFrameBuffers;
-	int numberOfSpeakers;
-	int useEAXReverb;
-	int maxEmitterChannels;
-} openQ4PerformancePreset_t;
-
-static const openQ4PerformancePreset_t OPENQ4_PERFORMANCE_PRESETS[] = {
-	{ "minimum", 0, "low",
-		50, 0, 0, 30,
-		1, 512, 1, 1, 1, 1,
-		0, 512, 1, 0, 0, 0, 0, 0, 1, 8, 3,
-		2, 0, 24 },
-	{ "lowpower", 0, "low",
-		75, 0, 0, 30,
-		1, 1024, 1, 1, 1, 1,
-		0, 512, 1, 0, 0, 0, 0, 0, 1, 8, 3,
-		2, 0, 32 },
-	{ "performance", 1, "baseline",
-		85, 0, 1, 60,
-		2, 0, 0, 0, 1, 0,
-		0, 1024, 2, 0, 0, 0, 0, 0, 1, 16, 4,
-		2, 0, 40 },
-	{ "balanced", 2, "baseline",
-		100, 2, 1, 120,
-		4, 0, 0, 0, 1, 0,
-		0, 1024, 0, 0, 0, 0, 0, 0, 1, 16, 4,
-		6, 1, 48 },
-	{ "quality", 3, "modern",
-		100, 4, 1, 144,
-		8, 0, 0, 0, 1, 0,
-		0, 1024, 0, 0, 0, 0, 0, 0, 1, 32, 4,
-		6, 1, 48 },
-	// image_usePrecompressedTextures stays at 1 here even though retail's top
-	// machine spec used 0. In openQ4 that cvar also gates user-supplied DDS
-	// replacement packs, so 0 silently discarded a player's high-resolution BC7
-	// art the moment they touched the settings menu - the reverse of what the
-	// highest preset should do.
-	{ "ultra", 3, "high-end",
-		100, 8, 1, 240,
-		16, 0, 0, 0, 1, 0,
-		0, 2048, 0, 0, 0, 0, 0, 0, 1, 32, 4,
-		6, 1, 48 }
-};
-
-static const int OPENQ4_PERFORMANCE_PRESET_COUNT = static_cast<int>( sizeof( OPENQ4_PERFORMANCE_PRESETS ) / sizeof( OPENQ4_PERFORMANCE_PRESETS[0] ) );
-static const char *OPENQ4_DEFAULT_PERFORMANCE_PRESET = "balanced";
+using openQ4PerformancePreset_t = openq4::PerformancePreset;
+static const auto& OPENQ4_PERFORMANCE_PRESETS = openq4::PerformancePresets();
+static const int OPENQ4_PERFORMANCE_PRESET_COUNT = openq4::PerformancePresetCount;
+static const char *OPENQ4_DEFAULT_PERFORMANCE_PRESET = openq4::PerformancePresetDefaultName;
 static const int OPENQ4_PERFORMANCE_PRESET_MAX_SHADOW_UPDATES = 1024;
 static const int OPENQ4_PERFORMANCE_PRESET_MIN_UPLOAD_FRAME_BUFFERS = 3;
 static const int OPENQ4_PERFORMANCE_PRESET_MAX_UPLOAD_FRAME_BUFFERS = 8;
 static const int OPENQ4_PERFORMANCE_PRESET_MAX_EMITTER_CHANNELS = 48;
 static const int OPENQ4_PERFORMANCE_PRESET_UNLIMITED_BUDGET_RANK = 0x7fffffff;
-static const int OPENQ4_PERFORMANCE_PRESET_UNKNOWN_SYSTEM_RAM_MB = 8192;
-static const int OPENQ4_PERFORMANCE_PRESET_UNKNOWN_VIDEO_RAM_MB = 2048;
-static const int OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_SYSTEM_RAM_MB = 4 * 1024 * 1024;
-static const int OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_VIDEO_RAM_MB = 256 * 1024;
+static const int OPENQ4_PERFORMANCE_PRESET_UNKNOWN_SYSTEM_RAM_MB = openq4::PerformancePresetUnknownSystemRamMB;
+static const int OPENQ4_PERFORMANCE_PRESET_UNKNOWN_VIDEO_RAM_MB = openq4::PerformancePresetUnknownVideoRamMB;
+static const int OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_SYSTEM_RAM_MB = openq4::PerformancePresetMaxSystemRamMB;
+static const int OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_VIDEO_RAM_MB = openq4::PerformancePresetMaxVideoRamMB;
 
-static const char *OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVARS[] = {
-	"com_performancePreset",
-	"com_machineSpec",
-	"r_rendererBenchmarkPreset",
-	"r_screenFraction",
-	"r_multiSamples",
-	"r_postAA",
-	"com_maxfps",
-	"image_anisotropy",
-	"image_usePrecompressedTextures",
-	"image_downSize",
-	"image_downSizeLimit",
-	"image_downSizeSpecular",
-	"image_downSizeBump",
-	"image_downSizeSpecularLimit",
-	"image_downSizeBumpLimit",
-	"image_ignoreHighQuality",
-	"image_writeGeneratedImages",
-	"s_maxSoundsPerShader",
-	"r_useShadowMap",
-	"r_shadowMapSize",
-	"r_shadowMapMaxUpdatesPerView",
-	"r_bloom",
-	"r_ssao",
-	"r_hdrToneMap",
-	"r_motionBlur",
-	"r_crt",
-	"r_useLightGrid",
-	"r_rendererUploadMegs",
-	"r_rendererUploadFrameBuffers",
-	"s_numberOfSpeakers",
-	"s_useEAXReverb",
-	"s_maxEmitterChannels"
-};
-
-static const int OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT = static_cast<int>( sizeof( OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVARS ) / sizeof( OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVARS[0] ) );
+static const auto& OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVARS = openq4::PerformancePresetTargets();
+static const int OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT = openq4::PerformancePresetTargetCount;
 
 static bool Common_PerformancePresetTargetIsDeclared( const char *name ) {
 	if ( name == NULL || name[0] == '\0' ) {
@@ -2789,16 +3344,7 @@ static bool Common_PerformancePresetTargetIsDeclared( const char *name ) {
 }
 
 static const openQ4PerformancePreset_t *Common_FindPerformancePreset( const char *name ) {
-	if ( name == NULL || name[0] == '\0' ) {
-		return NULL;
-	}
-
-	for ( int i = 0; i < OPENQ4_PERFORMANCE_PRESET_COUNT; ++i ) {
-		if ( idStr::Icmp( OPENQ4_PERFORMANCE_PRESETS[i].name, name ) == 0 ) {
-			return &OPENQ4_PERFORMANCE_PRESETS[i];
-		}
-	}
-	return NULL;
+ return name != NULL ? openq4::FindPerformancePreset(name) : NULL;
 }
 
 static const openQ4PerformancePreset_t *Common_DefaultPerformancePreset( void ) {
@@ -2956,49 +3502,23 @@ static bool Common_ApplyPerformancePreset( const openQ4PerformancePreset_t &pres
 		return false;
 	}
 
+ openq4::PerformancePresetAssignments expansion; std::string expansionError;
+ if (!openq4::ExpandPerformancePreset(preset,expansion,expansionError)) {
+  if (!quiet) common->Warning("Performance preset '%s' could not expand: %s",preset.name,expansionError.c_str());
+  return false;
+ }
+
 	openQ4PerformancePresetCVarBackup_t backups[OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT];
 	const int savedModifiedFlags = cvarSystem->GetModifiedFlags();
 	Common_BackupPerformancePresetCVars( backups );
 
-	bool applied = true;
-	applied &= Common_SetPerformancePresetInt( preset.name, "com_machineSpec", preset.machineSpec, quiet );
-
-	applied &= Common_SetPerformancePresetString( preset.name, "r_rendererBenchmarkPreset", preset.rendererBenchmarkPreset, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_screenFraction", preset.screenFraction, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_multiSamples", preset.multiSamples, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_postAA", preset.postAA, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "com_maxfps", preset.maxFps, quiet );
-
-	applied &= Common_SetPerformancePresetInt( preset.name, "image_anisotropy", preset.anisotropy, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "image_usePrecompressedTextures", preset.usePrecompressedTextures, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "image_downSize", preset.downSize, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "image_downSizeLimit", preset.downSizeLimit, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "image_downSizeSpecular", preset.downSize, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "image_downSizeBump", preset.downSize, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "image_downSizeSpecularLimit", 64, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "image_downSizeBumpLimit", preset.downSize != 0 ? 256 : 0, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "image_ignoreHighQuality", preset.ignoreHighQuality, quiet );
-	// 1 at every preset: the generated image cache is a load-time win at any
-	// quality level, and the downsize cvars above are part of its cache key, so
-	// a preset change is exactly when the new variants need to be written out
-	applied &= Common_SetPerformancePresetInt( preset.name, "image_writeGeneratedImages", 1, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "s_maxSoundsPerShader", preset.maxSoundsPerShader, quiet );
-
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_useShadowMap", preset.useShadowMap, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_shadowMapSize", preset.shadowMapSize, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_shadowMapMaxUpdatesPerView", preset.shadowMapMaxUpdates, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_bloom", preset.bloom, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_ssao", preset.ssao, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_hdrToneMap", preset.hdrToneMap, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_motionBlur", preset.motionBlur, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_crt", preset.crt, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_useLightGrid", preset.useLightGrid, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_rendererUploadMegs", preset.uploadMegs, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "r_rendererUploadFrameBuffers", preset.uploadFrameBuffers, quiet );
-
-	applied &= Common_SetPerformancePresetInt( preset.name, "s_numberOfSpeakers", preset.numberOfSpeakers, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "s_useEAXReverb", preset.useEAXReverb, quiet );
-	applied &= Common_SetPerformancePresetInt( preset.name, "s_maxEmitterChannels", preset.maxEmitterChannels, quiet );
+ bool applied = true;
+ for (size_t i=0;i+1<expansion.size();++i) {
+  const auto& assignment=expansion[i];
+  if (const auto number=std::get_if<int>(&assignment.value))
+   applied &= Common_SetPerformancePresetInt(preset.name,assignment.key,*number,quiet);
+  else applied &= Common_SetPerformancePresetString(preset.name,assignment.key,std::get<std::string>(assignment.value).c_str(),quiet);
+ }
 
 	// Commit the public selection marker only after every profile target accepted
 	// its value. Any unexpected normalization failure rolls the whole apply back.
@@ -3019,86 +3539,91 @@ static bool Common_ApplyPerformancePreset( const openQ4PerformancePreset_t &pres
 	return applied;
 }
 
+// Retain the stock console command, but never revive its separate resolution,
+// texture, vsync and obsolete card-specific recipes.
+void Com_ExecMachineSpec_f( const idCmdArgs &args ) {
+ const auto *preset=openq4::PerformancePresetForMachineSpec(com_machineSpec.GetInteger());
+ if(args.Argc()!=1||!preset){
+  common->Printf("execMachineSpec requires no arguments and com_machineSpec 0..3. Settings were preserved.\n");
+  return;
+ }
+ Common_ApplyPerformancePreset(*preset);
+}
+
 static int Common_SanitizePerformancePresetMemoryMB( int rawMegabytes, int fallbackMegabytes, int maxReasonableMegabytes ) {
-	if ( rawMegabytes <= 0 || rawMegabytes > maxReasonableMegabytes ) {
-		return fallbackMegabytes;
-	}
-	return rawMegabytes;
+ return openq4::SanitizePerformancePresetMemoryMB(rawMegabytes,fallbackMegabytes,maxReasonableMegabytes);
 }
 
-static idStr Common_FormatPerformancePresetMemorySignal( int rawMegabytes, int effectiveMegabytes ) {
-	idStr text = Sys_FormatMemoryMB( effectiveMegabytes );
-	if ( rawMegabytes != effectiveMegabytes ) {
-		text += " effective, ";
-		text += Sys_FormatMemoryMB( rawMegabytes );
-		text += " reported";
-	}
-	return text;
+bool Common_CapturePerformancePresetSignals(openq4::PerformancePresetSignals& output,std::string& error) {
+ openq4::PerformancePresetSignals signals;
+ if (!renderSystem || !renderSystem->GetGLConfig().isInitialized) {
+  error="Renderer capability observation is unavailable";return false;
+ }
+ const auto& config=renderSystem->GetGLConfig();
+ signals.explicitLowPower=Common_HasExplicitLowPowerHostSignal();
+ signals.raspberryPi=Common_HasRaspberryPiHostSignal();
+ signals.steamDeck=idStr::Icmp(com_platformProfile.GetString(),"steamdeck")==0 || Common_HasSteamDeckHostSignal();
+ signals.arm64=Common_HostCpuIsArm64();
+#if defined( __ANDROID__ )
+ signals.mobile=true;
+#endif
+#if defined( USE_SDL3 )
+ // Unlike the legacy platform getters, SDL reports 0 on query failure instead
+ // of inventing 512/1024/2048 MiB. Use one observation on all supported hosts.
+ signals.systemRamMB=SDL_GetSystemRAM();
+#else
+ signals.systemRamMB=Sys_GetSystemRam();
+#endif
+ signals.videoRamMB=config.dedicatedVideoMemoryMB;
+ signals.gpuClass=config.gpuClass;
+ signals.drawableWidth=config.vidWidth;signals.drawableHeight=config.vidHeight;
+ // The retired GetCardCaps reports false unconditionally; observe the actual
+ // live backend instead. Vulkan does not populate GL-specific capability bits.
+ const bool vulkan=config.version_string && RendererNameContains(config.version_string,"Vulkan");
+ signals.postAAAvailable=vulkan || (config.GLSLProgramAvailable && config.GLSL130Available && config.backendCaps.hasFBO);
+ signals.modernEffects=signals.postAAAvailable && (vulkan || config.maxTextureSize>=4096);
+ // Apple GL 2.1 has GLSL 1.20 and runs the classic material path well. Missing
+ // SMAA/HDR/post support says nothing about its texture or MSAA performance.
+ // Only a limited classic material pipeline/texture size warrants Minimum.
+ const bool classicPrograms=config.GLSLProgramAvailable ||
+  (config.ARBVertexProgramAvailable && config.ARBFragmentProgramAvailable);
+ signals.legacyRenderer=!vulkan && (!classicPrograms || config.maxTextureSize<2048);
+#if defined( USE_SDL3 )
+ signals.logicalCpus=SDL_GetNumLogicalCPUCores();
+ // The display the window is on, so a detected start can match its rate.
+ signals.displayRefreshHz=openq4::DisplayRefreshHertz(Sys_SDL_GetWindowRefreshHz());
+#endif
+ output=signals;error.clear();return true;
 }
-
-static const char *Common_DetectPerformancePresetName( idStr &reason ) {
-	if ( Common_HasExplicitLowPowerHostSignal() ) {
-		reason = "explicit low-power environment signal";
-		return "lowpower";
-	}
-
-	if ( Common_HasRaspberryPiHostSignal() ) {
-		reason = "Raspberry Pi host signal";
-		return "lowpower";
-	}
-
-	if ( idStr::Icmp( com_platformProfile.GetString(), "steamdeck" ) == 0 || Common_HasSteamDeckHostSignal() ) {
-		reason = "Steam Deck platform profile";
-		return "performance";
-	}
-
-	const int rawSysRam = Sys_GetSystemRam();
-	const int rawVidRam = Sys_GetVideoRam();
-	const int sysRam = Common_SanitizePerformancePresetMemoryMB(
-		rawSysRam,
-		OPENQ4_PERFORMANCE_PRESET_UNKNOWN_SYSTEM_RAM_MB,
-		OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_SYSTEM_RAM_MB );
-	const int vidRam = Common_SanitizePerformancePresetMemoryMB(
-		rawVidRam,
-		OPENQ4_PERFORMANCE_PRESET_UNKNOWN_VIDEO_RAM_MB,
-		OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_VIDEO_RAM_MB );
-	const idStr sysRamReason = Common_FormatPerformancePresetMemorySignal( rawSysRam, sysRam );
-	const idStr vidRamReason = Common_FormatPerformancePresetMemorySignal( rawVidRam, vidRam );
-	bool oldCard = false;
-	bool nv10or20 = false;
-	renderSystem->GetCardCaps( oldCard, nv10or20 );
-
-	if ( oldCard ) {
-		reason = "legacy renderer architecture";
-		return "minimum";
-	}
-
-	if ( Common_HostCpuIsArm64() ) {
-		if ( sysRam <= 4096 || vidRam <= 1024 ) {
-			reason = va( "ARM64 with constrained memory (%s RAM, %s VRAM)", sysRamReason.c_str(), vidRamReason.c_str() );
-			return "lowpower";
-		}
-		reason = va( "ARM64 host (%s RAM, %s VRAM)", sysRamReason.c_str(), vidRamReason.c_str() );
-		return "performance";
-	}
-
-	if ( sysRam <= 4096 || vidRam <= 1024 ) {
-		reason = va( "constrained memory (%s RAM, %s VRAM)", sysRamReason.c_str(), vidRamReason.c_str() );
-		return "lowpower";
-	}
-
-	if ( sysRam <= 8192 || vidRam <= 2048 ) {
-		reason = va( "modest memory/GPU budget (%s RAM, %s VRAM)", sysRamReason.c_str(), vidRamReason.c_str() );
-		return "performance";
-	}
-
-	if ( sysRam >= 16384 && vidRam >= 6144 ) {
-		reason = va( "high memory/GPU budget (%s RAM, %s VRAM)", sysRamReason.c_str(), vidRamReason.c_str() );
-		return "quality";
-	}
-
-	reason = va( "standard desktop budget (%s RAM, %s VRAM)", sysRamReason.c_str(), vidRamReason.c_str() );
-	return "balanced";
+static bool Common_DetectPerformancePreset( openQ4PerformancePreset_t &preset, idStr &reason, int *videoRamMB = NULL ) {
+ openq4::PerformancePresetSignals signals;std::string error;
+ if (!Common_CapturePerformancePresetSignals(signals,error)) {reason=error.c_str();return false;}
+ const auto detected=openq4::DetectPerformancePreset(signals);
+ if (videoRamMB!=NULL) *videoRamMB=detected.videoRamMB;
+ if (!openq4::ResolveDetectedPerformancePreset(detected,preset)) {reason="detected profile is unavailable";return false;}
+ using Reason=openq4::PerformancePresetReason;
+ const char* policy="unknown hardware; conservative starting point";
+ switch(detected.reason){
+  case Reason::ExplicitLowPower:policy="explicit low-power request";break;
+  case Reason::RaspberryPi:policy="Raspberry Pi host";break;
+  case Reason::SteamDeck:policy="Steam Deck power budget";break;
+  case Reason::Mobile:policy="mobile power budget";break;
+  case Reason::LegacyRenderer:policy="limited active renderer capabilities";break;
+  case Reason::Software:policy="software renderer";break;
+  case Reason::Virtual:policy="virtual GPU";break;
+  case Reason::LowMemory:policy="constrained memory";break;
+  case Reason::ModestMemory:policy="modest or unknown system memory";break;
+  case Reason::Dedicated:policy="dedicated GPU capacity; not a measured frame rate";break;
+  case Reason::Shared:policy="shared-memory GPU budget";break;
+  case Reason::Resolution:policy="drawable resolution budget";break;
+  case Reason::Cpu:policy="limited or unknown CPU concurrency";break;
+  default:break;
+ }
+ reason=va("%s; GPU=%s, RAM=%d MiB, dedicated VRAM=%d MiB (0=unknown/shared), drawable=%dx%d, CPUs=%d, scene scale=%d%%, post AA=%d, display=%d Hz (0=unknown), frame cap=%d",
+  policy,RendererGpuClassName(signals.gpuClass),detected.systemRamMB,detected.videoRamMB,
+  signals.drawableWidth,signals.drawableHeight,signals.logicalCpus,preset.screenFraction,preset.postAA,
+  signals.displayRefreshHz,preset.maxFps);
+ return true;
 }
 
 static bool Common_ApplyPerformancePresetCommand( const idCmdArgs &args, bool quiet = false ) {
@@ -3152,27 +3677,92 @@ static bool Common_AutoDetectPerformancePresetCommand( const idCmdArgs &args, bo
 	}
 
 	idStr reason;
-	const char *presetName = Common_DetectPerformancePresetName( reason );
-	const openQ4PerformancePreset_t *preset = Common_FindPerformancePreset( presetName );
-	if ( preset == NULL ) {
-		preset = Common_DefaultPerformancePreset();
-		reason = "internal fallback";
-	}
-	if ( preset == NULL ) {
-		if ( !quiet ) {
-			common->Printf( "Auto-detect default preset '%s' is unavailable.\n", OPENQ4_DEFAULT_PERFORMANCE_PRESET );
-		}
+	openQ4PerformancePreset_t preset;
+	if ( !Common_DetectPerformancePreset( preset, reason ) ) {
+		if ( !quiet ) common->Printf( "Auto-detect unavailable: %s. Settings were preserved.\n", reason.c_str() );
 		return false;
 	}
 
 	if ( !quiet ) {
-		common->Printf( "Auto-detected performance preset '%s' (%s).\n", preset->name, reason.c_str() );
+		common->Printf( "Auto-detected performance preset '%s' (%s).\n", preset.name, reason.c_str() );
 	}
-	return Common_ApplyPerformancePreset( *preset, quiet );
+	return Common_ApplyPerformancePreset( preset, quiet );
 }
 
 static void Com_AutoDetectPerformancePreset_f( const idCmdArgs &args ) {
 	Common_AutoDetectPerformancePresetCommand( args );
+}
+
+// The reporter-facing summary of the tier, video memory, preset and ambient
+// floor behind the image (issue #73). Printed at every startup, and again after
+// a first launch's detection replaces the bootstrap profile.
+static void Common_PrintQualityProfile( bool firstLaunchBootstrap = false ) {
+	if ( firstLaunchBootstrap ) {
+		common->Printf( "Quality profile: first launch; bootstrap preset '%s' until the device is detected\n",
+			com_performancePreset.GetString() );
+		return;
+	}
+	common->Printf(
+		"Quality profile: com_machineSpec=%d com_videoRam=%d com_performancePreset='%s' r_forceAmbient=%.3f\n",
+		com_machineSpec.GetInteger(),
+		com_videoRam.GetInteger(),
+		com_performancePreset.GetString(),
+		cvarSystem->GetCVarFloat( "r_forceAmbient" ) );
+}
+
+static bool Common_BootstrapStartupPerformancePreset(
+	openQ4PerformancePresetCVarBackup_t bootstrap[OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT] ) {
+	const auto *preset = Common_FindPerformancePreset( "minimum" );
+	if ( preset == NULL || !Common_ApplyPerformancePreset( *preset, true ) ) return false;
+	Common_BackupPerformancePresetCVars( bootstrap );
+	return true;
+}
+
+// First launch starts with a small bootstrap profile until a real device can be
+// observed. Keep settings supplied by autoexec/launch options over that profile;
+// a named profile is an explicit choice, including Minimum. Existing saved
+// configurations never enter this path just because their spec marker is gone.
+static bool Common_ApplyStartupPerformancePreset(
+	const openQ4PerformancePresetCVarBackup_t bootstrap[OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT],
+	const bool assigned[OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT] ) {
+	idStr reason;
+	bool explicitPreset = false;
+	for ( int i = 0; i < OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT; ++i ) {
+		if ( assigned[i] && idStr::Icmp( bootstrap[i].name, "com_performancePreset" ) == 0 ) explicitPreset = true;
+	}
+	openQ4PerformancePreset_t detectedPreset;
+	int detectedVideoRamMB = 0;
+	const char *name = explicitPreset ? com_performancePreset.GetString() : "auto";
+	const auto *preset = explicitPreset ? Common_FindPerformancePreset( name ) :
+		( Common_DetectPerformancePreset( detectedPreset, reason, &detectedVideoRamMB ) ? &detectedPreset : NULL );
+	if ( preset == NULL ) {
+		common->Printf( "First-launch performance detection unavailable (requested '%s'): %s\n",
+			name != NULL ? name : "", reason.c_str() );
+		return false;
+	}
+	openQ4PerformancePresetCVarBackup_t configured[OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT];
+	Common_BackupPerformancePresetCVars( configured );
+	const int modifiedFlags = cvarSystem->GetModifiedFlags();
+	if ( !Common_ApplyPerformancePreset( *preset, true ) ) return false;
+	bool restored = true;
+	for ( int i = 0; i < OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT; ++i ) {
+		const auto &value = configured[i];
+		if ( idStr::Icmp( value.name, "com_performancePreset" ) == 0 ) continue;
+		if ( value.valid && ( assigned[i] || value.value != bootstrap[i].value || Common_HasStartupVariable( value.name ) ) ) {
+			restored &= Common_SetPerformancePresetString( preset->name, value.name, value.value.c_str(), false );
+		}
+	}
+	if ( !restored ) {
+		Common_RestorePerformancePresetCVars( configured );
+		Common_RestorePerformancePresetModifiedFlags( modifiedFlags );
+		return false;
+	}
+	// The bootstrap ran before a device existed; record what the device reported.
+	if ( detectedVideoRamMB > 0 ) com_videoRam.SetInteger( detectedVideoRamMB );
+	common->Printf( "First-launch performance preset '%s'%s%s; preserving configured overrides.\n",
+		preset->name, reason.c_str()[0] == '\0' ? "" : ": ", reason.c_str() );
+	Common_PrintQualityProfile();
+	return true;
 }
 
 static const char *commonCommandCompletionMatch = NULL;
@@ -3350,7 +3940,9 @@ static bool Common_PerformancePresetCheckBenchmarkPreset( const openQ4Performanc
 
 static bool Common_PerformancePresetCheckRestoredAudio( const openQ4PerformancePreset_t &preset ) {
 	bool passed = true;
-	passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_numberOfSpeakers", preset.numberOfSpeakers, 6 );
+	// The speaker layout is the output device's, not a performance tier's.
+	passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_numberOfSpeakers", preset.numberOfSpeakers, 0 );
+	// Room reverb is part of the authored mix; every tier keeps it.
 	passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_useEAXReverb", preset.useEAXReverb, 1 );
 	passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_maxEmitterChannels", preset.maxEmitterChannels, OPENQ4_PERFORMANCE_PRESET_MAX_EMITTER_CHANNELS );
 	passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_maxSoundsPerShader", preset.maxSoundsPerShader, 0 );
@@ -3360,17 +3952,25 @@ static bool Common_PerformancePresetCheckRestoredAudio( const openQ4PerformanceP
 static bool Common_ValidatePerformancePresetIntent( const openQ4PerformancePreset_t &preset ) {
 	bool passed = true;
 
-	if ( preset.useShadowMap != 0 ) {
-		common->Printf( "PerformancePreset self-test failed: %s enables shadow maps; presets should keep shadow maps opt-in\n", preset.name );
-		passed = false;
-	}
-	if ( preset.bloom != 0 || preset.ssao != 0 || preset.hdrToneMap != 0 || preset.motionBlur != 0 || preset.crt != 0 ) {
-		common->Printf( "PerformancePreset self-test failed: %s enables optional post effects; presets should keep authored rendering as the baseline\n", preset.name );
-		passed = false;
-	}
+	// Enhanced is the affordable modern-effects tier; lower tiers retain stencil.
+	const bool shadowMapTier = Common_PerformancePresetIsNamed( preset, "enhanced" ) || Common_PerformancePresetIsNamed( preset, "quality" ) || Common_PerformancePresetIsNamed( preset, "ultra" ) || Common_PerformancePresetIsNamed( preset, "maximum" );
+	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_useShadowMap", preset.useShadowMap, shadowMapTier ? 1 : 0 );
+	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_bloom", preset.bloom, shadowMapTier ? 1 : 0 );
+	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_ssao", preset.ssao, shadowMapTier ? 1 : 0 );
+	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_hdrToneMap", preset.hdrToneMap, shadowMapTier ? 1 : 0 );
+	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_motionBlur", preset.motionBlur, Common_PerformancePresetIsNamed( preset, "maximum" ) ? 1 : 0 );
+	// Only Enhanced leaves point lights on stencil shadows; every other shadow-map
+	// tier maps them, and the stencil tiers keep the inert default.
+	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapPointLights", preset.shadowMapPointLights, Common_PerformancePresetIsNamed( preset, "enhanced" ) ? 0 : 1 );
+	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_crt", preset.crt, 0 );
 	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_useLightGrid", preset.useLightGrid, 1 );
+	// Only the two tiers below the documented minimum hardware draw no shadows;
+	// Low restores the stencil shadows every tier above it keeps.
+	const bool shadowlessTier = Common_PerformancePresetIsNamed( preset, "minimum" ) || Common_PerformancePresetIsNamed( preset, "lowpower" );
+	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadows", preset.shadows, shadowlessTier ? 0 : 1 );
 
-	if ( Common_PerformancePresetIsNamed( preset, "minimum" ) || Common_PerformancePresetIsNamed( preset, "lowpower" ) ) {
+	if ( shadowlessTier || Common_PerformancePresetIsNamed( preset, "low" ) ) {
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "com_maxfps", preset.maxFps, shadowlessTier ? 30 : 60 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "com_machineSpec", preset.machineSpec, 0 );
 		passed &= Common_PerformancePresetCheckBenchmarkPreset( preset, "low" );
 		passed &= Common_PerformancePresetCheckIntAtMost( preset, "r_screenFraction", preset.screenFraction, 75 );
@@ -3379,8 +3979,8 @@ static bool Common_ValidatePerformancePresetIntent( const openQ4PerformancePrese
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_downSize", preset.downSize, 1 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_ignoreHighQuality", preset.ignoreHighQuality, 1 );
 		passed &= Common_PerformancePresetCheckIntAtLeast( preset, "s_maxSoundsPerShader", preset.maxSoundsPerShader, 1 );
-		passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_numberOfSpeakers", preset.numberOfSpeakers, 2 );
-		passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_useEAXReverb", preset.useEAXReverb, 0 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_numberOfSpeakers", preset.numberOfSpeakers, 0 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_useEAXReverb", preset.useEAXReverb, 1 );
 		passed &= Common_PerformancePresetCheckIntAtMost( preset, "s_maxEmitterChannels", preset.maxEmitterChannels, 32 );
 		passed &= Common_PerformancePresetCheckIntAtMost( preset, "r_rendererUploadMegs", preset.uploadMegs, 8 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_rendererUploadFrameBuffers", preset.uploadFrameBuffers, OPENQ4_PERFORMANCE_PRESET_MIN_UPLOAD_FRAME_BUFFERS );
@@ -3392,8 +3992,8 @@ static bool Common_ValidatePerformancePresetIntent( const openQ4PerformancePrese
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_postAA", preset.postAA, 1 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_downSize", preset.downSize, 0 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_ignoreHighQuality", preset.ignoreHighQuality, 0 );
-		passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_numberOfSpeakers", preset.numberOfSpeakers, 2 );
-		passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_useEAXReverb", preset.useEAXReverb, 0 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_numberOfSpeakers", preset.numberOfSpeakers, 0 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "s_useEAXReverb", preset.useEAXReverb, 1 );
 		passed &= Common_PerformancePresetCheckIntAtMost( preset, "s_maxEmitterChannels", preset.maxEmitterChannels, 40 );
 		passed &= Common_PerformancePresetCheckIntAtLeast( preset, "r_rendererUploadMegs", preset.uploadMegs, 16 );
 	} else if ( Common_PerformancePresetIsNamed( preset, "balanced" ) ) {
@@ -3405,21 +4005,72 @@ static bool Common_ValidatePerformancePresetIntent( const openQ4PerformancePrese
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_downSize", preset.downSize, 0 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_ignoreHighQuality", preset.ignoreHighQuality, 0 );
 		passed &= Common_PerformancePresetCheckRestoredAudio( preset );
+	} else if ( Common_PerformancePresetIsNamed( preset, "enhanced" ) ) {
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "com_machineSpec", preset.machineSpec, 2 );
+		passed &= Common_PerformancePresetCheckBenchmarkPreset( preset, "modern" );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_screenFraction", preset.screenFraction, 100 );
+		// FPS-02 Enhanced holds 144 Hz: SMAA high instead of MSAA.
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_multiSamples", preset.multiSamples, 0 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_postAA", preset.postAA, 2 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "com_maxfps", preset.maxFps, 144 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_anisotropy", preset.anisotropy, 16 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapSize", preset.shadowMapSize, 1024 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapPointSize", preset.shadowMapPointSize, 512 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapFilterMode", preset.shadowMapFilterMode, 0 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapFilterTaps", preset.shadowMapFilterTaps, 5 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_ssaoSamples", preset.ssaoSamples, 12 );
+		passed &= Common_PerformancePresetCheckRestoredAudio( preset );
 	} else if ( Common_PerformancePresetIsNamed( preset, "quality" ) ) {
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "com_machineSpec", preset.machineSpec, 3 );
 		passed &= Common_PerformancePresetCheckBenchmarkPreset( preset, "modern" );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_screenFraction", preset.screenFraction, 100 );
-		passed &= Common_PerformancePresetCheckIntAtLeast( preset, "r_multiSamples", preset.multiSamples, 4 );
-		passed &= Common_PerformancePresetCheckIntAtLeast( preset, "image_anisotropy", preset.anisotropy, 8 );
+		// FPS-02 Quality holds 100 Hz with every light class shadow-mapped.
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_multiSamples", preset.multiSamples, 2 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_anisotropy", preset.anisotropy, 16 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapSize", preset.shadowMapSize, 2048 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapPointSize", preset.shadowMapPointSize, 512 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapFilterMode", preset.shadowMapFilterMode, 2 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapCSM", preset.shadowMapCSM, 0 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_usePrecompressedTextures", preset.usePrecompressedTextures, 1 );
 		passed &= Common_PerformancePresetCheckIntAtLeast( preset, "r_rendererUploadMegs", preset.uploadMegs, 32 );
 		passed &= Common_PerformancePresetCheckRestoredAudio( preset );
 	} else if ( Common_PerformancePresetIsNamed( preset, "ultra" ) ) {
+		// FPS-02 Ultra: the best image that holds 75 Hz on the reference machine.
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "com_machineSpec", preset.machineSpec, 3 );
 		passed &= Common_PerformancePresetCheckBenchmarkPreset( preset, "high-end" );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_screenFraction", preset.screenFraction, 100 );
-		passed &= Common_PerformancePresetCheckIntAtLeast( preset, "r_multiSamples", preset.multiSamples, 8 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_multiSamples", preset.multiSamples, 4 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_anisotropy", preset.anisotropy, 16 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_postAA", preset.postAA, 3 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapSize", preset.shadowMapSize, 4096 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapPointSize", preset.shadowMapPointSize, 512 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapFilterTaps", preset.shadowMapFilterTaps, 13 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapFilterMode", preset.shadowMapFilterMode, 2 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapAtlasSize", preset.shadowMapAtlasSize, 8192 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapCSM", preset.shadowMapCSM, 0 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_ssaoSamples", preset.ssaoSamples, 32 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_usePrecompressedTextures", preset.usePrecompressedTextures, 1 );
+		passed &= Common_PerformancePresetCheckIntAtLeast( preset, "r_rendererUploadMegs", preset.uploadMegs, 32 );
+		passed &= Common_PerformancePresetCheckRestoredAudio( preset );
+	} else if ( Common_PerformancePresetIsNamed( preset, "maximum" ) ) {
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "com_machineSpec", preset.machineSpec, 3 );
+		passed &= Common_PerformancePresetCheckBenchmarkPreset( preset, "high-end" );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_screenFraction", preset.screenFraction, 100 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_multiSamples", preset.multiSamples, 16 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_anisotropy", preset.anisotropy, 16 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_postAA", preset.postAA, 3 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapSize", preset.shadowMapSize, 4096 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapPointSize", preset.shadowMapPointSize, 2048 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapFilterTaps", preset.shadowMapFilterTaps, 13 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapPointFilterTaps", preset.shadowMapPointFilterTaps, 13 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapFilterMode", preset.shadowMapFilterMode, 2 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapPointFilterMode", preset.shadowMapPointFilterMode, 1 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapAtlasSize", preset.shadowMapAtlasSize, 16384 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapCSM", preset.shadowMapCSM, 1 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_ssaoSamples", preset.ssaoSamples, 32 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_bloomMipCount", preset.bloomMipCount, 5 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_motionBlurSamples", preset.motionBlurSamples, 16 );
+
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_usePrecompressedTextures", preset.usePrecompressedTextures, 1 );
 		passed &= Common_PerformancePresetCheckIntAtLeast( preset, "r_rendererUploadMegs", preset.uploadMegs, 32 );
 		passed &= Common_PerformancePresetCheckRestoredAudio( preset );
@@ -3463,13 +4114,29 @@ static bool Common_ValidatePerformancePresetProgression( void ) {
 
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "com_machineSpec", previousPreset.machineSpec, preset.machineSpec );
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_screenFraction", previousPreset.screenFraction, preset.screenFraction );
-		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_multiSamples", previousPreset.multiSamples, preset.multiSamples );
+		// Entering the shadow-mapped tiers may trade MSAA for the modern effects
+		// (FPS-02: Enhanced spends its 144 Hz budget on them and keeps SMAA high);
+		// within a renderer class sample counts only rise.
+		if ( previousPreset.useShadowMap == preset.useShadowMap ) {
+			passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_multiSamples", previousPreset.multiSamples, preset.multiSamples );
+		}
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_postAA", previousPreset.postAA, preset.postAA );
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "com_maxfps", previousPreset.maxFps, preset.maxFps );
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "image_anisotropy", previousPreset.anisotropy, preset.anisotropy );
 		passed &= Common_PerformancePresetCheckNonDecreasingBudget( previousPreset, preset, "image_downSizeLimit", previousPreset.downSizeLimit, preset.downSizeLimit );
 		passed &= Common_PerformancePresetCheckNonDecreasingBudget( previousPreset, preset, "s_maxSoundsPerShader", previousPreset.maxSoundsPerShader, preset.maxSoundsPerShader );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadows", previousPreset.shadows, preset.shadows );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_useShadowMap", previousPreset.useShadowMap, preset.useShadowMap );
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadowMapSize", previousPreset.shadowMapSize, preset.shadowMapSize );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadowMapPointSize", previousPreset.shadowMapPointSize, preset.shadowMapPointSize );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadowMapFilterTaps", previousPreset.shadowMapFilterTaps, preset.shadowMapFilterTaps );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadowMapPointFilterTaps", previousPreset.shadowMapPointFilterTaps, preset.shadowMapPointFilterTaps );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadowMapFilterMode", previousPreset.shadowMapFilterMode, preset.shadowMapFilterMode );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadowMapPointFilterMode", previousPreset.shadowMapPointFilterMode, preset.shadowMapPointFilterMode );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadowMapAtlasSize", previousPreset.shadowMapAtlasSize, preset.shadowMapAtlasSize );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_ssaoSamples", previousPreset.ssaoSamples, preset.ssaoSamples );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_bloomMipCount", previousPreset.bloomMipCount, preset.bloomMipCount );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_motionBlurSamples", previousPreset.motionBlurSamples, preset.motionBlurSamples );
 		passed &= Common_PerformancePresetCheckNonDecreasingBudget( previousPreset, preset, "r_shadowMapMaxUpdatesPerView", previousPreset.shadowMapMaxUpdates, preset.shadowMapMaxUpdates );
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_rendererUploadMegs", previousPreset.uploadMegs, preset.uploadMegs );
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_rendererUploadFrameBuffers", previousPreset.uploadFrameBuffers, preset.uploadFrameBuffers );
@@ -3506,7 +4173,19 @@ static bool Common_ValidatePerformancePresetDefinition( const openQ4PerformanceP
 		 preset.usePrecompressedTextures < 0 || preset.usePrecompressedTextures > 2 ||
 		 preset.maxSoundsPerShader < 0 ||
 		 ( preset.useShadowMap != 0 && preset.useShadowMap != 1 ) ||
+		 ( preset.shadows != 0 && preset.shadows != 1 ) ||
 		 preset.shadowMapSize < 128 || preset.shadowMapSize > 4096 ||
+		 preset.shadowMapPointSize < 128 || preset.shadowMapPointSize > 2048 ||
+		 preset.shadowMapFilterTaps < 1 || preset.shadowMapFilterTaps > 13 ||
+		 preset.shadowMapPointFilterTaps < 1 || preset.shadowMapPointFilterTaps > 13 ||
+		 preset.shadowMapFilterMode < 0 || preset.shadowMapFilterMode > 2 ||
+		 preset.shadowMapPointFilterMode < 0 || preset.shadowMapPointFilterMode > 1 ||
+		 preset.shadowMapAtlasSize < 2048 || preset.shadowMapAtlasSize > 16384 ||
+		 preset.shadowMapCSM < 0 || preset.shadowMapCSM > 1 ||
+		 preset.ssaoSamples < 4 || preset.ssaoSamples > 32 ||
+		 preset.bloomMipCount < 1 || preset.bloomMipCount > 5 ||
+		 preset.motionBlurSamples < 1 || preset.motionBlurSamples > 16 ||
+
 		 preset.shadowMapMaxUpdates < 0 || preset.shadowMapMaxUpdates > OPENQ4_PERFORMANCE_PRESET_MAX_SHADOW_UPDATES ||
 		 ( preset.bloom != 0 && preset.bloom != 1 ) ||
 		 ( preset.ssao != 0 && preset.ssao != 1 ) ||
@@ -3516,7 +4195,7 @@ static bool Common_ValidatePerformancePresetDefinition( const openQ4PerformanceP
 		 ( preset.useLightGrid != 0 && preset.useLightGrid != 1 ) ||
 		 preset.uploadMegs < 1 || preset.uploadMegs > 128 ||
 		 preset.uploadFrameBuffers < OPENQ4_PERFORMANCE_PRESET_MIN_UPLOAD_FRAME_BUFFERS || preset.uploadFrameBuffers > OPENQ4_PERFORMANCE_PRESET_MAX_UPLOAD_FRAME_BUFFERS ||
-		 ( preset.numberOfSpeakers != 2 && preset.numberOfSpeakers != 6 ) ||
+		 ( preset.numberOfSpeakers != 0 && preset.numberOfSpeakers != 2 && preset.numberOfSpeakers != 6 ) ||
 		 ( preset.useEAXReverb != 0 && preset.useEAXReverb != 1 ) ||
 		 preset.maxEmitterChannels <= 0 || preset.maxEmitterChannels > OPENQ4_PERFORMANCE_PRESET_MAX_EMITTER_CHANNELS ) {
 		common->Printf( "PerformancePreset self-test failed: %s has out-of-range values\n", preset.name );
@@ -3627,6 +4306,29 @@ static bool Common_ValidatePerformancePresetApplied( const openQ4PerformancePres
 	passed &= Common_CheckPerformancePresetInt( preset.name, "s_numberOfSpeakers", preset.numberOfSpeakers );
 	passed &= Common_CheckPerformancePresetInt( preset.name, "s_useEAXReverb", preset.useEAXReverb );
 	passed &= Common_CheckPerformancePresetInt( preset.name, "s_maxEmitterChannels", preset.maxEmitterChannels );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapPointSize", preset.shadowMapPointSize );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapFilterTaps", preset.shadowMapFilterTaps );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapPointFilterTaps", preset.shadowMapPointFilterTaps );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapFilterMode", preset.shadowMapFilterMode );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapPointFilterMode", preset.shadowMapPointFilterMode );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapAtlasSize", preset.shadowMapAtlasSize );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_ssaoSamples", preset.ssaoSamples );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_bloomMipCount", preset.bloomMipCount );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_motionBlurSamples", preset.motionBlurSamples );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapPointLights", preset.shadowMapPointLights );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_hdrSceneTarget", preset.hdrToneMap );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadows", preset.shadows );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_skipBump", 0 );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_skipSpecular", 0 );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_skipSky", 0 );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "image_picmip", 0 );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapCSM", preset.shadowMapCSM );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapCascadeCount", 4 );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapProjectedCSM", 1 );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapCascadeStabilize", 1 );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_motionBlurObjectVectors", 1 );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapHashedAlpha", 1 );
+	passed &= Common_CheckPerformancePresetInt( preset.name, "r_shadowMapTranslucentReceivers", 1 );
 	passed &= Common_CheckPerformancePresetTargetsArchived( preset.name );
 	return passed;
 }
@@ -3653,31 +4355,24 @@ static void Com_PerformancePresetSelfTest_f( const idCmdArgs &args ) {
 	passed &= targetsPassed;
 
 	idStr reason;
-	const char *detectedPresetName = Common_DetectPerformancePresetName( reason );
+	openQ4PerformancePreset_t detectedPreset;
+	if ( !Common_DetectPerformancePreset( detectedPreset, reason ) ) {
+		common->Printf( "PerformancePreset self-test failed: %s\n", reason.c_str() );
+		return;
+	}
+	const char *detectedPresetName = detectedPreset.name;
 	if ( Common_FindPerformancePreset( detectedPresetName ) == NULL ) {
 		common->Printf( "PerformancePreset self-test failed: auto-detect returned unknown preset '%s'\n", detectedPresetName != NULL ? detectedPresetName : "" );
 		passed = false;
 	}
-	if ( idStr::Icmp( detectedPresetName, "ultra" ) == 0 ) {
-		common->Printf( "PerformancePreset self-test failed: auto-detect selected ultra\n" );
+	if ( idStr::Icmp( detectedPresetName, "maximum" ) == 0 ) {
+		common->Printf( "PerformancePreset self-test failed: auto-detect selected Maximum, which has no frame-rate target\n" );
 		passed = false;
 	}
 	if ( Common_SanitizePerformancePresetMemoryMB( 0, OPENQ4_PERFORMANCE_PRESET_UNKNOWN_VIDEO_RAM_MB, OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_VIDEO_RAM_MB ) != OPENQ4_PERFORMANCE_PRESET_UNKNOWN_VIDEO_RAM_MB ||
 		 Common_SanitizePerformancePresetMemoryMB( OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_VIDEO_RAM_MB + 1, OPENQ4_PERFORMANCE_PRESET_UNKNOWN_VIDEO_RAM_MB, OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_VIDEO_RAM_MB ) != OPENQ4_PERFORMANCE_PRESET_UNKNOWN_VIDEO_RAM_MB ||
 		 Common_SanitizePerformancePresetMemoryMB( 6144, OPENQ4_PERFORMANCE_PRESET_UNKNOWN_VIDEO_RAM_MB, OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_VIDEO_RAM_MB ) != 6144 ) {
 		common->Printf( "PerformancePreset self-test failed: memory telemetry sanitizer returned an unexpected value\n" );
-		passed = false;
-	}
-	const int rawDetectedVideoRam = Sys_GetVideoRam();
-	const int effectiveDetectedVideoRam = Common_SanitizePerformancePresetMemoryMB(
-		rawDetectedVideoRam,
-		OPENQ4_PERFORMANCE_PRESET_UNKNOWN_VIDEO_RAM_MB,
-		OPENQ4_PERFORMANCE_PRESET_MAX_REASONABLE_VIDEO_RAM_MB );
-	if ( rawDetectedVideoRam != effectiveDetectedVideoRam && idStr::Icmp( detectedPresetName, "quality" ) == 0 ) {
-		common->Printf(
-			"PerformancePreset self-test failed: auto-detect selected quality from sanitized VRAM telemetry (%s reported, %s effective)\n",
-			Sys_FormatMemoryMB( rawDetectedVideoRam ).c_str(),
-			Sys_FormatMemoryMB( effectiveDetectedVideoRam ).c_str() );
 		passed = false;
 	}
 
@@ -3734,12 +4429,11 @@ static void Com_PerformancePresetSelfTest_f( const idCmdArgs &args ) {
 			passed = false;
 		}
 
-		const openQ4PerformancePreset_t *detectedPreset = Common_FindPerformancePreset( detectedPresetName );
-		if ( detectedPreset != NULL ) {
+		{
 			idCmdArgs autoDetectArgs( "autoDetectPerformancePreset", false );
 			if ( !Common_AutoDetectPerformancePresetCommand( autoDetectArgs, true ) ||
-				 !Common_ValidatePerformancePresetApplied( *detectedPreset ) ) {
-				common->Printf( "PerformancePreset self-test failed: auto-detect command did not apply detected preset '%s'\n", detectedPreset->name );
+				 !Common_ValidatePerformancePresetApplied( detectedPreset ) ) {
+				common->Printf( "PerformancePreset self-test failed: auto-detect command did not apply detected preset '%s'\n", detectedPreset.name );
 				passed = false;
 			}
 		}
@@ -3773,6 +4467,490 @@ static void Com_PerformancePresetSelfTest_f( const idCmdArgs &args ) {
 	}
 }
 
+typedef struct openQ4JobSelfTestStage_s {
+	std::atomic<int> *phase;
+	std::atomic<bool> *failed;
+	int expectedPhase;
+	int replacementPhase;
+} openQ4JobSelfTestStage_t;
+
+static void Common_JobSelfTestStage( const idJobContext &context ) {
+	openQ4JobSelfTestStage_t *stage = static_cast<openQ4JobSelfTestStage_t *>( context.data );
+	if ( stage == NULL || stage->phase == NULL || stage->failed == NULL ) {
+		return;
+	}
+	if ( stage->phase->load( std::memory_order_acquire ) != stage->expectedPhase ) {
+		stage->failed->store( true, std::memory_order_release );
+	}
+	stage->phase->store( stage->replacementPhase, std::memory_order_release );
+}
+
+static void Common_JobSelfTestIncrement( const idJobContext &context ) {
+	std::atomic<int> *counter = static_cast<std::atomic<int> *>( context.data );
+	if ( counter != NULL ) {
+		counter->fetch_add( 1, std::memory_order_relaxed );
+	}
+}
+
+static bool Common_JobSubmitSucceeded( const idJobSubmitResult result ) {
+	return result == idJobSubmitResult::ACCEPTED ||
+		result == idJobSubmitResult::EXECUTED_SYNCHRONOUSLY;
+}
+
+static void Com_JobsStats_f( const idCmdArgs &args ) {
+	( void )args;
+	const idJobSystemMetrics metrics = jobSystem.GetMetrics();
+	common->Printf(
+		"Job system: initialized=%s mode=%s workers=%u accepting=%s queued=%llu/%d highWater=%llu running=%llu sleeping=%llu\n",
+		jobSystem.IsInitialized() ? "yes" : "no",
+		metrics.synchronous ? "synchronous" : "threaded",
+		metrics.workerThreads,
+		metrics.accepting ? "yes" : "no",
+		static_cast<unsigned long long>( metrics.queuedLists ),
+		jobs_queueCapacity.GetInteger(),
+		static_cast<unsigned long long>( metrics.queueHighWatermark ),
+		static_cast<unsigned long long>( metrics.runningJobs ),
+		static_cast<unsigned long long>( metrics.sleepingWorkers ) );
+	common->Printf(
+		"Job totals: lists submitted=%llu completed=%llu cancelled=%llu failed=%llu rejected=%llu; jobs submitted=%llu executed=%llu cancelled=%llu failed=%llu; wakes=%llu priorityPromotions=%llu execution=%lluus wait=%lluus\n",
+		static_cast<unsigned long long>( metrics.submittedLists ),
+		static_cast<unsigned long long>( metrics.completedLists ),
+		static_cast<unsigned long long>( metrics.cancelledLists ),
+		static_cast<unsigned long long>( metrics.failedLists ),
+		static_cast<unsigned long long>( metrics.rejectedSubmissions ),
+		static_cast<unsigned long long>( metrics.submittedJobs ),
+		static_cast<unsigned long long>( metrics.executedJobs ),
+		static_cast<unsigned long long>( metrics.cancelledJobs ),
+		static_cast<unsigned long long>( metrics.failedJobs ),
+		static_cast<unsigned long long>( metrics.workerWakeups ),
+		static_cast<unsigned long long>( metrics.priorityPromotions ),
+		static_cast<unsigned long long>( metrics.totalExecutionMicroseconds ),
+		static_cast<unsigned long long>( metrics.totalWaitMicroseconds ) );
+}
+
+static void Com_JobsSelfTest_f( const idCmdArgs &args ) {
+	( void )args;
+	bool passed = jobSystem.IsInitialized();
+	std::atomic<int> phase( 0 );
+	std::atomic<bool> dependencyFailed( false );
+	std::atomic<int> parallelCount( 0 );
+	openQ4JobSelfTestStage_t rootData = { &phase, &dependencyFailed, 0, 1 };
+	openQ4JobSelfTestStage_t dependentData = { &phase, &dependencyFailed, 1, 2 };
+	const idJobSystemMetrics before = jobSystem.GetMetrics();
+
+	std::unique_ptr<idJobList> root = jobSystem.CreateJobList( "engine-self-test-root", 1, 0, idJobPriority::HIGH );
+	std::unique_ptr<idJobList> dependent = jobSystem.CreateJobList( "engine-self-test-dependent", 1, 1, idJobPriority::NORMAL );
+	std::unique_ptr<idJobList> batch = jobSystem.CreateJobList( "engine-self-test-batch", 8, 0, idJobPriority::LOW );
+	passed &= root != NULL && dependent != NULL && batch != NULL;
+	if ( passed ) {
+		passed &= root->AddJob( Common_JobSelfTestStage, &rootData );
+		passed &= Common_JobSubmitSucceeded( root->Submit() );
+		passed &= root->Wait();
+		passed &= dependent->AddDependency( *root );
+		passed &= dependent->AddJob( Common_JobSelfTestStage, &dependentData );
+		passed &= Common_JobSubmitSucceeded( dependent->Submit() );
+		passed &= dependent->Wait();
+		for ( int jobIndex = 0; jobIndex < 8; ++jobIndex ) {
+			passed &= batch->AddJob( Common_JobSelfTestIncrement, &parallelCount );
+		}
+		passed &= Common_JobSubmitSucceeded( batch->Submit() );
+		passed &= batch->Wait();
+	}
+
+	const idJobSystemMetrics after = jobSystem.GetMetrics();
+	passed &= !dependencyFailed.load( std::memory_order_acquire );
+	passed &= phase.load( std::memory_order_acquire ) == 2;
+	passed &= parallelCount.load( std::memory_order_acquire ) == 8;
+	passed &= after.submittedLists >= before.submittedLists + 3;
+	passed &= after.executedJobs >= before.executedJobs + 10;
+	passed &= after.failedLists == before.failedLists;
+
+	if ( passed ) {
+		common->Printf( "jobsSelfTest PASS v1 mode=%s workers=%u phase=%d batch=%d\n",
+			after.synchronous ? "synchronous" : "threaded",
+			after.workerThreads,
+			phase.load(),
+			parallelCount.load() );
+	} else {
+		common->Warning( "jobsSelfTest FAILED v1 root=%s dependent=%s batch=%s phase=%d batchCount=%d",
+			root != NULL ? idJobListStatusName( root->GetStatus() ) : "unavailable",
+			dependent != NULL ? idJobListStatusName( dependent->GetStatus() ) : "unavailable",
+			batch != NULL ? idJobListStatusName( batch->GetStatus() ) : "unavailable",
+			phase.load(),
+			parallelCount.load() );
+	}
+}
+
+static void Common_NetIPv4SelfTestFailure( bool &passed, const char *reason ) {
+	common->Printf( "IPv4 network self-test failure: %s\n", reason );
+	passed = false;
+}
+
+static void Com_NetIPv4SelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	bool passed = true;
+
+	netadr_t address;
+	if ( !Sys_StringToNetAdr( "127.0.0.1:65535", &address, false ) ||
+			( address.type != NA_LOOPBACK && address.type != NA_IP ) ||
+			address.ip[0] != 127 || address.ip[1] != 0 || address.ip[2] != 0 || address.ip[3] != 1 || address.port != 65535 ) {
+		Common_NetIPv4SelfTestFailure( passed, "numeric IPv4 endpoint did not round-trip" );
+	}
+	if ( !Sys_StringToNetAdr( "255.255.255.255:65535", &address, false ) ||
+			address.type != NA_IP || address.ip[0] != 255 || address.ip[1] != 255 ||
+			address.ip[2] != 255 || address.ip[3] != 255 || address.port != 65535 ) {
+		Common_NetIPv4SelfTestFailure( passed, "IPv4 broadcast literal did not parse" );
+	}
+	if ( Sys_StringToNetAdr( "localhost", &address, false ) || address.type != NA_BAD ) {
+		Common_NetIPv4SelfTestFailure( passed, "numeric-only resolution accepted a hostname" );
+	}
+	if ( !Sys_StringToNetAdr( "localhost:65535", &address, true ) ||
+			( address.type != NA_LOOPBACK && address.type != NA_IP ) ||
+			address.port != 65535 ) {
+		Common_NetIPv4SelfTestFailure( passed, "DNS-enabled localhost did not resolve to IPv4" );
+	}
+	if ( Sys_StringToNetAdr( "127.0.0.1:65536", &address, false ) || address.type != NA_BAD ) {
+		Common_NetIPv4SelfTestFailure( passed, "out-of-range port was accepted" );
+	}
+
+	static const char * const testCVarNames[] = { "net_ip", "net_forceLatency", "net_forceDrop" };
+	static const char * const testCVarValues[] = { "127.0.0.1", "0", "0" };
+	idStr savedCVarValues[ sizeof( testCVarNames ) / sizeof( testCVarNames[0] ) ];
+	int savedCVarFlags[ sizeof( testCVarNames ) / sizeof( testCVarNames[0] ) ] = {};
+	bool savedCVars[ sizeof( testCVarNames ) / sizeof( testCVarNames[0] ) ] = {};
+	const int savedModifiedFlags = cvarSystem->GetModifiedFlags();
+	for ( int i = 0; i < static_cast<int>( sizeof( testCVarNames ) / sizeof( testCVarNames[0] ) ); ++i ) {
+		idCVar *cvar = cvarSystem->Find( testCVarNames[i] );
+		if ( cvar == NULL ) {
+			continue;
+		}
+		savedCVars[i] = true;
+		savedCVarValues[i] = cvar->GetString();
+		savedCVarFlags[i] = cvar->GetFlags();
+		cvarSystem->SetCVarString( testCVarNames[i], testCVarValues[i] );
+	}
+
+	idPort invalidPort;
+	if ( invalidPort.InitForPort( -2 ) || invalidPort.GetPort() != 0 ) {
+		Common_NetIPv4SelfTestFailure( passed, "idPort accepted port -2" );
+	}
+	if ( invalidPort.InitForPort( 65536 ) || invalidPort.GetPort() != 0 ) {
+		Common_NetIPv4SelfTestFailure( passed, "idPort accepted port 65536" );
+	}
+
+	idPort sender;
+	idPort receiver;
+	int receiverPort = 0;
+	for ( int candidatePort = 65535; candidatePort >= 65472; --candidatePort ) {
+		if ( receiver.InitForPort( candidatePort ) ) {
+			receiverPort = candidatePort;
+			break;
+		}
+	}
+	if ( receiverPort == 0 || receiver.GetPort() != receiverPort || !sender.InitForPort( PORT_ANY ) ) {
+		Common_NetIPv4SelfTestFailure( passed, "could not open IPv4 loopback sockets" );
+	} else {
+		if ( sender.packetsWritten != 0 || sender.bytesWritten != 0 || receiver.packetsRead != 0 || receiver.bytesRead != 0 ) {
+			Common_NetIPv4SelfTestFailure( passed, "socket counters were not initialized" );
+		}
+
+		netadr_t destination;
+		if ( !Sys_StringToNetAdr( va( "127.0.0.1:%d", receiverPort ), &destination, false ) ) {
+			Common_NetIPv4SelfTestFailure( passed, "could not create the loopback destination" );
+		} else {
+			static const char payload[] = "openQ4 IPv4 loopback";
+			sender.SendPacket( destination, payload, static_cast<int>( sizeof( payload ) ) );
+
+			char received[sizeof( payload )];
+			int receivedSize = 0;
+			netadr_t source;
+			if ( !receiver.GetPacketBlocking( source, received, receivedSize, sizeof( received ), 1000 ) ||
+					receivedSize != sizeof( payload ) || memcmp( received, payload, sizeof( payload ) ) != 0 ||
+					!Sys_CompareNetAdrBase( source, destination ) ) {
+				Common_NetIPv4SelfTestFailure( passed, "UDP loopback payload did not round-trip" );
+			}
+
+			static const char reply[] = "openQ4 IPv4 reply";
+			receiver.SendPacket( source, reply, static_cast<int>( sizeof( reply ) ) );
+			netadr_t replySource;
+			receivedSize = 0;
+			if ( !sender.GetPacketBlocking( replySource, received, receivedSize, sizeof( received ), 1000 ) ||
+					receivedSize != sizeof( reply ) || memcmp( received, reply, sizeof( reply ) ) != 0 ||
+					!Sys_CompareNetAdrBase( replySource, destination ) || replySource.port != destination.port ) {
+				Common_NetIPv4SelfTestFailure( passed, "UDP loopback reply did not round-trip" );
+			}
+
+			byte exactPacket[64];
+			for ( int i = 0; i < static_cast<int>( sizeof( exactPacket ) ); ++i ) {
+				exactPacket[i] = static_cast<byte>( i );
+			}
+			sender.SendPacket( destination, exactPacket, sizeof( exactPacket ) );
+			byte exactReceived[sizeof( exactPacket )];
+			receivedSize = 0;
+			if ( !receiver.GetPacketBlocking( source, exactReceived, receivedSize, sizeof( exactReceived ), 1000 ) ||
+					receivedSize != sizeof( exactPacket ) || memcmp( exactReceived, exactPacket, sizeof( exactPacket ) ) != 0 ) {
+				Common_NetIPv4SelfTestFailure( passed, "exact-capacity UDP datagram was rejected" );
+			}
+
+			byte oversizePacket[sizeof( exactPacket ) + 1];
+			memset( oversizePacket, 0x5a, sizeof( oversizePacket ) );
+			static const byte markerPacket[] = { 0x49, 0x50, 0x76, 0x34 };
+			sender.SendPacket( destination, oversizePacket, sizeof( oversizePacket ) );
+			sender.SendPacket( destination, markerPacket, sizeof( markerPacket ) );
+			receivedSize = -1;
+			if ( receiver.GetPacketBlocking( source, exactReceived, receivedSize, sizeof( exactReceived ), 1000 ) || receivedSize != 0 ) {
+				Common_NetIPv4SelfTestFailure( passed, "oversized UDP datagram was not rejected" );
+			}
+			receivedSize = 0;
+			if ( !receiver.GetPacketBlocking( source, exactReceived, receivedSize, sizeof( exactReceived ), 1000 ) ||
+					receivedSize != sizeof( markerPacket ) || memcmp( exactReceived, markerPacket, sizeof( markerPacket ) ) != 0 ) {
+				Common_NetIPv4SelfTestFailure( passed, "packet after oversized UDP datagram was not preserved" );
+			}
+		}
+
+		const int previousPort = receiver.GetPort();
+		receiver.Close();
+		if ( receiver.GetPort() != 0 || !receiver.InitForPort( PORT_ANY ) || receiver.GetPort() == 0 || previousPort == 0 ) {
+			Common_NetIPv4SelfTestFailure( passed, "socket close/reopen lifecycle failed" );
+		}
+	}
+
+	sender.Close();
+	receiver.Close();
+	for ( int i = 0; i < static_cast<int>( sizeof( testCVarNames ) / sizeof( testCVarNames[0] ) ); ++i ) {
+		if ( !savedCVars[i] ) {
+			continue;
+		}
+		cvarSystem->SetCVarString( testCVarNames[i], savedCVarValues[i].c_str() );
+		Common_RestorePerformancePresetCVarFlags( cvarSystem->Find( testCVarNames[i] ), savedCVarFlags[i] );
+	}
+	Common_RestorePerformancePresetModifiedFlags( savedModifiedFlags );
+	if ( passed ) {
+		common->Printf( "IPv4 network self-test: passed\n" );
+	} else {
+		common->Printf( "IPv4 network self-test: FAILED\n" );
+	}
+}
+
+static void Common_NetIPv6SelfTestFailure( bool &passed, const char *reason ) {
+	common->Printf( "IPv6 network self-test failure: %s\n", reason );
+	passed = false;
+}
+
+static void Com_NetIPv6SelfTest_f( const idCmdArgs &args ) {
+	(void)args;
+	bool passed = true;
+
+	netadr_t address;
+	if ( !Sys_StringToNetAdr( "[::1]:65535", &address, false ) || address.type != NA_IP6 ||
+			!idNetworkEndpoint::IsIPv6Loopback( address.ip6 ) || address.port != 65535 ) {
+		Common_NetIPv6SelfTestFailure( passed, "bracketed IPv6 endpoint did not round-trip" );
+	}
+	if ( !Sys_StringToNetAdr( "::1", &address, false ) || address.type != NA_IP6 ||
+			!idNetworkEndpoint::IsIPv6Loopback( address.ip6 ) || address.port != 0 ) {
+		Common_NetIPv6SelfTestFailure( passed, "unbracketed IPv6 literal did not parse" );
+	}
+	if ( Sys_StringToNetAdr( "[::1]:65536", &address, false ) || address.type != NA_BAD ) {
+		Common_NetIPv6SelfTestFailure( passed, "out-of-range IPv6 port was accepted" );
+	}
+	if ( Sys_StringToNetAdr( "[::1", &address, false ) || address.type != NA_BAD ) {
+		Common_NetIPv6SelfTestFailure( passed, "unterminated IPv6 bracket was accepted" );
+	}
+	// An IPv4 peer arriving through the mapped range must resolve to one
+	// identity, not a second IPv6 shaped one.
+	if ( !Sys_StringToNetAdr( "[::ffff:127.0.0.1]:65535", &address, false ) || address.type != NA_LOOPBACK ||
+			address.ip[0] != 127 || address.ip[1] != 0 || address.ip[2] != 0 || address.ip[3] != 1 || address.port != 65535 ) {
+		Common_NetIPv6SelfTestFailure( passed, "IPv4-mapped address was not normalized" );
+	}
+
+	// The formatted text is the identity key for the server browser and for the
+	// game module's ban list, so it has to be canonical and re-parseable.
+	if ( !Sys_StringToNetAdr( "[2001:0db8:0000:0000:0000:0000:0000:0001]:27650", &address, false ) ||
+			idStr::Cmp( Sys_NetAdrToString( address ), "[2001:db8::1]:27650" ) != 0 ) {
+		Common_NetIPv6SelfTestFailure( passed, "IPv6 text was not canonicalized" );
+	}
+	netadr_t reparsed;
+	if ( !Sys_StringToNetAdr( "[2001:db8::1]:27650", &address, false ) ||
+			!Sys_StringToNetAdr( Sys_NetAdrToString( address ), &reparsed, false ) ||
+			!Sys_CompareNetAdrBase( address, reparsed ) || reparsed.port != address.port ) {
+		Common_NetIPv6SelfTestFailure( passed, "IPv6 address text did not survive a round-trip" );
+	}
+	netadr_t other;
+	if ( !Sys_StringToNetAdr( "[2001:db8::2]:27650", &other, false ) || Sys_CompareNetAdrBase( address, other ) ) {
+		Common_NetIPv6SelfTestFailure( passed, "distinct IPv6 addresses compared equal" );
+	}
+	if ( !Sys_StringToNetAdr( "[::1]:27650", &address, false ) || !Sys_IsLANAddress( address ) ) {
+		Common_NetIPv6SelfTestFailure( passed, "IPv6 loopback was not treated as a LAN address" );
+	}
+	if ( !Sys_StringToNetAdr( "[fe80::1]:27650", &address, false ) || !Sys_IsLANAddress( address ) ) {
+		Common_NetIPv6SelfTestFailure( passed, "IPv6 link-local was not treated as a LAN address" );
+	}
+
+	static const char * const testCVarNames[] = { "net_ip", "net_ip6", "net_enableIPv4", "net_enableIPv6", "net_forceLatency", "net_forceDrop" };
+	static const char * const testCVarValues[] = { "127.0.0.1", "::1", "1", "1", "0", "0" };
+	idStr savedCVarValues[ sizeof( testCVarNames ) / sizeof( testCVarNames[0] ) ];
+	int savedCVarFlags[ sizeof( testCVarNames ) / sizeof( testCVarNames[0] ) ] = {};
+	bool savedCVars[ sizeof( testCVarNames ) / sizeof( testCVarNames[0] ) ] = {};
+	const int savedModifiedFlags = cvarSystem->GetModifiedFlags();
+	for ( int i = 0; i < static_cast<int>( sizeof( testCVarNames ) / sizeof( testCVarNames[0] ) ); ++i ) {
+		idCVar *cvar = cvarSystem->Find( testCVarNames[i] );
+		if ( cvar == NULL ) {
+			continue;
+		}
+		savedCVars[i] = true;
+		savedCVarValues[i] = cvar->GetString();
+		savedCVarFlags[i] = cvar->GetFlags();
+		cvarSystem->SetCVarString( testCVarNames[i], testCVarValues[i] );
+	}
+
+	idPort invalidPort;
+	if ( invalidPort.InitForPort( -2 ) || invalidPort.GetPort() != 0 ) {
+		Common_NetIPv6SelfTestFailure( passed, "idPort accepted port -2" );
+	}
+	if ( invalidPort.InitForPort( 65536 ) || invalidPort.GetPort() != 0 ) {
+		Common_NetIPv6SelfTestFailure( passed, "idPort accepted port 65536" );
+	}
+
+	// Bind IPv6 alone for the transport checks so every datagram below provably
+	// travels over the IPv6 socket rather than falling back to IPv4.
+	cvarSystem->SetCVarString( "net_enableIPv4", "0" );
+
+	idPort sender;
+	idPort receiver;
+	int receiverPort = 0;
+	for ( int candidatePort = 65471; candidatePort >= 65408; --candidatePort ) {
+		if ( receiver.InitForPort( candidatePort ) ) {
+			receiverPort = candidatePort;
+			break;
+		}
+	}
+	if ( receiverPort == 0 || receiver.GetPort() != receiverPort || !sender.InitForPort( PORT_ANY ) ) {
+		// A host with IPv6 switched off is a supported configuration, so this
+		// reports an unavailable transport instead of a failed contract.
+		common->Printf( "IPv6 network self-test: skipped transport checks - the host bound no IPv6 socket\n" );
+	} else {
+		if ( sender.packetsWritten != 0 || sender.bytesWritten != 0 || receiver.packetsRead != 0 || receiver.bytesRead != 0 ) {
+			Common_NetIPv6SelfTestFailure( passed, "socket counters were not initialized" );
+		}
+
+		netadr_t destination;
+		if ( !Sys_StringToNetAdr( va( "[::1]:%d", receiverPort ), &destination, false ) || destination.type != NA_IP6 ) {
+			Common_NetIPv6SelfTestFailure( passed, "could not create the IPv6 loopback destination" );
+		} else {
+			static const char payload[] = "openQ4 IPv6 loopback";
+			sender.SendPacket( destination, payload, static_cast<int>( sizeof( payload ) ) );
+
+			char received[sizeof( payload )];
+			int receivedSize = 0;
+			netadr_t source;
+			if ( !receiver.GetPacketBlocking( source, received, receivedSize, sizeof( received ), 1000 ) ||
+					receivedSize != sizeof( payload ) || memcmp( received, payload, sizeof( payload ) ) != 0 ||
+					source.type != NA_IP6 || !Sys_CompareNetAdrBase( source, destination ) ) {
+				Common_NetIPv6SelfTestFailure( passed, "IPv6 UDP loopback payload did not round-trip" );
+			}
+
+			static const char reply[] = "openQ4 IPv6 reply";
+			receiver.SendPacket( source, reply, static_cast<int>( sizeof( reply ) ) );
+			netadr_t replySource;
+			receivedSize = 0;
+			if ( !sender.GetPacketBlocking( replySource, received, receivedSize, sizeof( received ), 1000 ) ||
+					receivedSize != sizeof( reply ) || memcmp( received, reply, sizeof( reply ) ) != 0 ||
+					!Sys_CompareNetAdrBase( replySource, destination ) || replySource.port != destination.port ) {
+				Common_NetIPv6SelfTestFailure( passed, "IPv6 UDP loopback reply did not round-trip" );
+			}
+
+			byte exactPacket[64];
+			for ( int i = 0; i < static_cast<int>( sizeof( exactPacket ) ); ++i ) {
+				exactPacket[i] = static_cast<byte>( i );
+			}
+			sender.SendPacket( destination, exactPacket, sizeof( exactPacket ) );
+			byte exactReceived[sizeof( exactPacket )];
+			receivedSize = 0;
+			if ( !receiver.GetPacketBlocking( source, exactReceived, receivedSize, sizeof( exactReceived ), 1000 ) ||
+					receivedSize != sizeof( exactPacket ) || memcmp( exactReceived, exactPacket, sizeof( exactPacket ) ) != 0 ) {
+				Common_NetIPv6SelfTestFailure( passed, "exact-capacity IPv6 UDP datagram was rejected" );
+			}
+
+			byte oversizePacket[sizeof( exactPacket ) + 1];
+			memset( oversizePacket, 0x5a, sizeof( oversizePacket ) );
+			static const byte markerPacket[] = { 0x49, 0x50, 0x76, 0x36 };
+			sender.SendPacket( destination, oversizePacket, sizeof( oversizePacket ) );
+			sender.SendPacket( destination, markerPacket, sizeof( markerPacket ) );
+			receivedSize = -1;
+			if ( receiver.GetPacketBlocking( source, exactReceived, receivedSize, sizeof( exactReceived ), 1000 ) || receivedSize != 0 ) {
+				Common_NetIPv6SelfTestFailure( passed, "oversized IPv6 UDP datagram was not rejected" );
+			}
+			receivedSize = 0;
+			if ( !receiver.GetPacketBlocking( source, exactReceived, receivedSize, sizeof( exactReceived ), 1000 ) ||
+					receivedSize != sizeof( markerPacket ) || memcmp( exactReceived, markerPacket, sizeof( markerPacket ) ) != 0 ) {
+				Common_NetIPv6SelfTestFailure( passed, "packet after oversized IPv6 UDP datagram was not preserved" );
+			}
+		}
+
+		const int previousPort = receiver.GetPort();
+		receiver.Close();
+		if ( receiver.GetPort() != 0 || !receiver.InitForPort( PORT_ANY ) || receiver.GetPort() == 0 || previousPort == 0 ) {
+			Common_NetIPv6SelfTestFailure( passed, "IPv6 socket close/reopen lifecycle failed" );
+		}
+
+		// One endpoint must serve both families at the same port, which is what
+		// lets a dual-stack server publish a single address to every client.
+		cvarSystem->SetCVarString( "net_enableIPv4", "1" );
+		idPort dualStack;
+		if ( !dualStack.InitForPort( PORT_ANY ) || dualStack.GetPort() == 0 ) {
+			Common_NetIPv6SelfTestFailure( passed, "dual-stack port did not bind" );
+		} else {
+			netadr_t dualDestination;
+			static const char dualPayload[] = "openQ4 dual stack";
+			char dualReceived[sizeof( dualPayload )];
+			int dualSize = 0;
+			netadr_t dualSource;
+			if ( !Sys_StringToNetAdr( va( "[::1]:%d", dualStack.GetPort() ), &dualDestination, false ) ) {
+				Common_NetIPv6SelfTestFailure( passed, "could not address the dual-stack port over IPv6" );
+			} else {
+				sender.SendPacket( dualDestination, dualPayload, static_cast<int>( sizeof( dualPayload ) ) );
+				if ( !dualStack.GetPacketBlocking( dualSource, dualReceived, dualSize, sizeof( dualReceived ), 1000 ) ||
+						dualSize != sizeof( dualPayload ) || dualSource.type != NA_IP6 ) {
+					Common_NetIPv6SelfTestFailure( passed, "dual-stack port did not receive over IPv6" );
+				}
+			}
+			if ( !Sys_StringToNetAdr( va( "127.0.0.1:%d", dualStack.GetPort() ), &dualDestination, false ) ) {
+				Common_NetIPv6SelfTestFailure( passed, "could not address the dual-stack port over IPv4" );
+			} else {
+				idPort ipv4Sender;
+				if ( !ipv4Sender.InitForPort( PORT_ANY ) ) {
+					Common_NetIPv6SelfTestFailure( passed, "could not open an IPv4 sender for the dual-stack port" );
+				} else {
+					dualSize = 0;
+					ipv4Sender.SendPacket( dualDestination, dualPayload, static_cast<int>( sizeof( dualPayload ) ) );
+					if ( !dualStack.GetPacketBlocking( dualSource, dualReceived, dualSize, sizeof( dualReceived ), 1000 ) ||
+							dualSize != sizeof( dualPayload ) || dualSource.type == NA_IP6 ) {
+						Common_NetIPv6SelfTestFailure( passed, "dual-stack port did not receive over IPv4" );
+					}
+				}
+				ipv4Sender.Close();
+			}
+		}
+		dualStack.Close();
+	}
+
+	sender.Close();
+	receiver.Close();
+	for ( int i = 0; i < static_cast<int>( sizeof( testCVarNames ) / sizeof( testCVarNames[0] ) ); ++i ) {
+		if ( !savedCVars[i] ) {
+			continue;
+		}
+		cvarSystem->SetCVarString( testCVarNames[i], savedCVarValues[i].c_str() );
+		Common_RestorePerformancePresetCVarFlags( cvarSystem->Find( testCVarNames[i] ), savedCVarFlags[i] );
+	}
+	Common_RestorePerformancePresetModifiedFlags( savedModifiedFlags );
+	if ( passed ) {
+		common->Printf( "IPv6 network self-test: passed\n" );
+	} else {
+		common->Printf( "IPv6 network self-test: FAILED\n" );
+	}
+}
+
 /*
 =================
 Com_ReloadEngine_f
@@ -3792,10 +4970,25 @@ void Com_ReloadEngine_f( const idCmdArgs &args ) {
 	common->Printf( "============= ReloadEngine start =============\n" );
 	fileSystem->SetIsFileLoadingAllowed( true );
 	if ( !menu ) {
-		Sys_ShowConsole( 1, false );
+		if ( idAsyncNetwork::serverDedicated.GetInteger() != 1 ) {
+			Sys_ShowConsole( 1, false );
+		} else if ( renderSystem != NULL && renderSystem->IsOpenGLRunning() ) {
+			// This client comes back from the reload as a dedicated server with
+			// no window: the console becomes its only one and quits on close, as
+			// SpawnServer_f makes it when a client converts.
+			Sys_ShowConsole( cvarSystem->GetCVarBool( "r_hiddenWindow" ) ? 0 : 1, true );
+		}
+		// A dedicated server's console already is its only window and quits on
+		// close: the reload leaves it as it is.
 	}
+	com_preserveStartupRecoveryLog = com_logFile.GetInteger() != 0;
 	commonLocal.ShutdownGame( true );
+	if ( !R_RendererModule_FinishSelectionReload() ) {
+		common->FatalError( "renderer selection reload could not retire the previous module" );
+		return;
+	}
 	commonLocal.InitGame();
+	com_preserveStartupRecoveryLog = false;
 	if ( !menu && !idAsyncNetwork::serverDedicated.GetBool() ) {
 		Sys_ShowConsole( 0, false );
 	}
@@ -3819,12 +5012,15 @@ void Com_ReloadGameModule_f( const idCmdArgs &args ) {
 		return;
 	}
 
-	const char *nextModule = cvarSystem->GetCVarString( "com_nextGameModule" );
-	if ( !openPREY_IsValidGameModuleName( nextModule ) ) {
+	// Copy CVar-backed strings before teardown. Config replay and module unload
+	// can replace their backing storage while this command is still running.
+	const idStr requestedModule = cvarSystem->GetCVarString( "com_nextGameModule" );
+	if ( !openPREY_IsValidGameModuleName( requestedModule.c_str() ) ) {
 		common->Printf( "reloadGameModule requested without a valid com_nextGameModule; falling back to reloadEngine\n" );
 		Com_ReloadEngine_f( args );
 		return;
 	}
+	const idStr previousModule = cvarSystem->GetCVarString( "com_activeGameModule" );
 
 	common->Printf( "============= ReloadGameModule start =============\n" );
 	fileSystem->SetIsFileLoadingAllowed( true );
@@ -3841,29 +5037,96 @@ void Com_ReloadGameModule_f( const idCmdArgs &args ) {
 	// which swallows it silently and leaves a half-built engine with no clue in
 	// the log about which half failed.
 	idStr swapError;
+	idStr cleanupError;
+	idStr rollbackError;
+	gameModuleLoadPhase_t failedPhase = GAME_MODULE_PHASE_IDLE;
 	bool swapFailed = false;
+	bool oldShutdownComplete = false;
+	bool newInitStarted = false;
 	try {
 		GLimp_PreserveWindowOnShutdown( true );
 		commonLocal.ShutdownGame( true );
+		oldShutdownComplete = true;
 		GLimp_PreserveWindowOnShutdown( false );
+		newInitStarted = true;
 		commonLocal.InitGame();
 	}
 	catch( idException &ex ) {
 		GLimp_PreserveWindowOnShutdown( false );
 		swapFailed = true;
 		swapError = ex.error;
+		failedPhase = Com_GetGameModuleLoadPhase();
+
+		// If the replacement InitGame started, its decls, renderer, UI or game
+		// object may be only partly initialized. Tear that attempt back down
+		// before trying to restore the previously active module.
+		if ( newInitStarted ) {
+			try {
+				commonLocal.ShutdownGame( true );
+			}
+			catch( idException &cleanupException ) {
+				cleanupError = cleanupException.error;
+			}
+		}
 	}
 
 	if ( swapFailed ) {
 		cvarSystem->SetCVarString( "com_nextGameModule", "" );
 		common->Warning(
 			"game module swap to '%s' failed at phase '%s': %s",
-			nextModule,
-			Com_GameModuleLoadPhaseName( Com_GetGameModuleLoadPhase() ),
+			requestedModule.c_str(),
+			Com_GameModuleLoadPhaseName( failedPhase ),
 			swapError.c_str() );
+
+		bool rollbackSucceeded = false;
+		if ( oldShutdownComplete && cleanupError.IsEmpty() && openPREY_IsValidGameModuleName( previousModule.c_str() ) ) {
+			// The requested si_gameType already names the new module by this point.
+			// Restore a safe canonical mode for the old module before declarations
+			// are rebuilt; the user's archived settings replay normally afterwards.
+			cvarSystem->SetCVarString(
+				"si_gameType",
+				idStr::Icmp( previousModule.c_str(), "game_mp" ) == 0 ? "DM" : "singleplayer" );
+			cvarSystem->SetCVarString( "com_nextGameModule", previousModule.c_str() );
+			try {
+				commonLocal.InitGame();
+				rollbackSucceeded = true;
+			}
+			catch( idException &rollbackException ) {
+				rollbackError = rollbackException.error;
+			}
+		} else if ( !cleanupError.IsEmpty() ) {
+			rollbackError = va( "partial replacement cleanup failed: %s", cleanupError.c_str() );
+		} else if ( !oldShutdownComplete ) {
+			rollbackError = "the previous module did not finish shutting down";
+		} else {
+			rollbackError = "the previously active module name was unavailable";
+		}
+
+		if ( !rollbackSucceeded ) {
+			common->FatalError(
+				"game module swap to '%s' failed (%s), and rollback to '%s' failed (%s)",
+				requestedModule.c_str(),
+				swapError.c_str(),
+				previousModule.c_str(),
+				rollbackError.c_str() );
+			return;
+		}
+
 		common->Printf( "============= ReloadGameModule failed ============\n" );
 		// Whatever was queued to run after the swap assumed the new module
-		// came up. Do not run it; the next successful swap overwrites it.
+		// came up. Do not run it; the next successful swap overwrites it. A
+		// dedicated server it was holding back goes with it, so a later listen
+		// server does not inherit the request.
+		idAsyncNetwork::AbandonDeferredDedicatedSpawn();
+#ifndef ID_DEDICATED
+		// ArenaCampaign::Shutdown deliberately preserves its transaction across
+		// the expected game_sp -> game_mp swap. If InitGame failed, that handoff
+		// will never complete, so release the token and restore the saved server
+		// settings before returning to a usable menu.
+		if ( arenaCampaign.NeedsCleanup() ) {
+			arenaCampaign.AbortMatch();
+		}
+#endif
 		session->StartMenu();
 		fileSystem->SetIsFileLoadingAllowed( false );
 		return;
@@ -3872,7 +5135,24 @@ void Com_ReloadGameModule_f( const idCmdArgs &args ) {
 	common->Printf( "============= ReloadGameModule end ===============\n" );
 
 	if ( !cmdSystem->PostReloadEngine() ) {
+#ifndef ID_DEDICATED
+		// A successful module load is not enough for Arena: its replayed
+		// spawnServer command is the second half of the transaction. If that
+		// command disappeared, fail closed instead of leaving an active token
+		// and archived multiplayer overrides stranded behind the main menu.
+		const bool abandonedArenaLaunch = arenaCampaign.NeedsCleanup();
+		if ( abandonedArenaLaunch ) {
+			arenaCampaign.AbortMatch();
+		}
+#endif
 		session->StartMenu();
+#ifndef ID_DEDICATED
+		// Say why the match never started, as every other failed launch does,
+		// instead of reopening the browser as if the button had been ignored.
+		if ( abandonedArenaLaunch ) {
+			arenaCampaign.ReportStartFailure();
+		}
+#endif
 	}
 	fileSystem->SetIsFileLoadingAllowed( false );
 }
@@ -3902,7 +5182,7 @@ void idCommonLocal::FilterLangList( idStrList* list, idStr lang ) {
 	idStr temp;
 	for( int i = 0; i < list->Num(); i++ ) {
 		temp = (*list)[i];
-		temp = temp.Right(temp.Length()-strlen("strings/"));
+		temp = temp.Right( temp.Length() - idStr::Length( "strings/" ) );
 		temp = temp.Left(lang.Length());
 		if(idStr::Icmp(temp, lang) != 0) {
 			list->RemoveIndex(i);
@@ -3945,6 +5225,51 @@ static void Common_AppendUniqueLanguage( idStrList &languages, const char *langu
 	languages.Append( language );
 }
 
+/*
+===============
+Common_AppendLanguagesWithStringTables
+
+ListAvailableLanguagePacks only sees the retail zpak_<language> media archives,
+because those are what carry a language's recorded dialogue. That is the right
+test for a retail localisation, but it is the wrong one for a language whose
+text ships in the base paks with no media pack of its own - openQ4 translates
+its own strings for languages id never recorded VO for, and gating on the media
+pack rejected them before the tables were ever consulted.
+
+Take the union instead: a language is selectable if it has a media pack or a
+string table. The dictionary loads English first and overlays the selected
+language, so a text-only language still renders, just with English audio.
+===============
+*/
+static void Common_AppendLanguagesWithStringTables( const idStrList &langFiles, idStrList &languages ) {
+	const int prefixLength = idStr::Length( "strings/" );
+
+	for ( int i = 0; i < langFiles.Num(); ++i ) {
+		idStr fileName = langFiles[ i ];
+		if ( fileName.Length() <= prefixLength ) {
+			continue;
+		}
+		fileName = fileName.Right( fileName.Length() - prefixLength );
+
+		// "<language>_<category>.lang"
+		const int separator = fileName.Find( '_' );
+		if ( separator <= 0 ) {
+			continue;
+		}
+		fileName.CapLength( separator );
+		fileName.ToLower();
+
+		// Only names the engine actually knows, so a stray file cannot invent a
+		// language the rest of the system has no font or codepage policy for.
+		for ( int name = 0; sysLanguageNames[ name ] != NULL; ++name ) {
+			if ( !fileName.Icmp( sysLanguageNames[ name ] ) ) {
+				Common_AppendUniqueLanguage( languages, sysLanguageNames[ name ] );
+				break;
+			}
+		}
+	}
+}
+
 static const char *Common_MapLocaleLanguageCode( const char *languageCode ) {
 	struct languageMap_t {
 		const char *code;
@@ -3963,6 +5288,13 @@ static const char *Common_MapLocaleLanguageCode( const char *languageCode ) {
 		{ "ja", "japanese" },
 		{ "jp", "japanese" },
 		{ "zh", "chinese" },
+		// Portuguese has one table, written for Brazil; it is still the closest
+		// match for a European Portuguese locale.
+		{ "pt", "brazilian" },
+		{ "cs", "czech" },
+		{ "hu", "hungarian" },
+		{ "tr", "turkish" },
+		{ "uk", "ukrainian" },
 		{ NULL, NULL }
 	};
 
@@ -4045,6 +5377,11 @@ static const char *Common_MapWindowsPrimaryLanguage( WORD primaryLanguage ) {
 		case LANG_KOREAN: return "korean";
 		case LANG_JAPANESE: return "japanese";
 		case LANG_CHINESE: return "chinese";
+		case LANG_PORTUGUESE: return "brazilian";
+		case LANG_CZECH: return "czech";
+		case LANG_HUNGARIAN: return "hungarian";
+		case LANG_TURKISH: return "turkish";
+		case LANG_UKRAINIAN: return "ukrainian";
 		default: return NULL;
 	}
 }
@@ -4146,6 +5483,7 @@ void idCommonLocal::InitLanguageDict( bool applyStartupSysLang, bool allowAutoLa
 	idStrList langList = langFiles->GetList();
 	idStrList availableLanguagePacks;
 	fileSystem->ListAvailableLanguagePacks( availableLanguagePacks );
+	Common_AppendLanguagesWithStringTables( langList, availableLanguagePacks );
 	const bool hasStartupSysLang = Common_HasStartupVariable( "sys_lang" );
 
 	if ( applyStartupSysLang ) {
@@ -4201,6 +5539,12 @@ void idCommonLocal::InitLanguageDict( bool applyStartupSysLang, bool allowAutoLa
 		FilterLangList( &currentLangList, langName );
 	}
 
+	// Both the string tables and the byte-indexed fonts are 8-bit, so the
+	// codepage has to be chosen before anything is loaded and it applies to the
+	// English fallback tables as well - one dictionary cannot hold two
+	// codepages. Polish selects Windows-1250; everything else Windows-1252.
+	LangDict_SetActiveCodePage( LangDict_CodePageForLanguage( langName.c_str() ) );
+
 	if ( idStr::Icmp( langName.c_str(), "english" ) != 0 ) {
 		idStrList englishLangList = langList;
 		FilterLangList( &englishLangList, "english" );
@@ -4217,6 +5561,7 @@ void idCommonLocal::InitLanguageDict( bool applyStartupSysLang, bool allowAutoLa
 	fileSystem->FreeFileList(langFiles);
 
 	Sys_InitScanTable();
+	RetainedUI_LanguageChanged();
 }
 
 /*
@@ -4261,7 +5606,7 @@ void idCommonLocal::LocalizeMapData( const char *fileName, idLangDict &langDict 
 	common->SetRefreshOnPrint( true );
 
 	if ( fileSystem->ReadFile( fileName, (void**)&buffer ) > 0 ) {
-		src.LoadMemory( buffer, strlen(buffer), fileName );
+		src.LoadMemory( buffer, idLib::SizeToInt( strlen( buffer ), "idCommonLocal::LocalizeMapData" ), fileName );
 		if ( src.IsLoaded() ) {
 			common->Printf( "Processing %s\n", fileName );
 			idStr mapFileName;
@@ -4308,7 +5653,7 @@ void idCommonLocal::LocalizeGui( const char *fileName, idLangDict &langDict ) {
 	char nl = 'n';
 	idLexer src( LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT );
 	if ( fileSystem->ReadFile( fileName, (void**)&buffer ) > 0 ) {
-		src.LoadMemory( buffer, strlen(buffer), fileName );
+		src.LoadMemory( buffer, idLib::SizeToInt( strlen( buffer ), "idCommonLocal::LocalizeGui" ), fileName );
 		if ( src.IsLoaded() ) {
 			idFile *outFile = fileSystem->OpenFileWrite( fileName ); 
 			common->Printf( "Processing %s\n", fileName );
@@ -4421,7 +5766,7 @@ void LoadMapLocalizeData(ListHash& listHash) {
 	idLexer src( LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT );
 
 	if ( fileSystem->ReadFile( fileName, (void**)&buffer ) > 0 ) {
-		src.LoadMemory( buffer, strlen(buffer), fileName );
+		src.LoadMemory( buffer, idLib::SizeToInt( strlen( buffer ), "LoadMapLocalizeData" ), fileName );
 		if ( src.IsLoaded() ) {
 			idStr classname;
 			idToken token;
@@ -4455,7 +5800,7 @@ void LoadGuiParmExcludeList(idStrList& list) {
 	idLexer src( LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT );
 
 	if ( fileSystem->ReadFile( fileName, (void**)&buffer ) > 0 ) {
-		src.LoadMemory( buffer, strlen(buffer), fileName );
+		src.LoadMemory( buffer, idLib::SizeToInt( strlen( buffer ), "LoadGuiParmExcludeList" ), fileName );
 		if ( src.IsLoaded() ) {
 			idStr classname;
 			idToken token;
@@ -4912,6 +6257,8 @@ idCommonLocal::InitCommands
 =================
 */
 void idCommonLocal::InitCommands( void ) {
+	LevelEditor_InitCommands();
+	cmdSystem->AddCommand( "profileFrameWork", Com_ProfileFrameWork_f, CMD_FL_SYSTEM, "capture 1..60000 complete engine frames without per-frame logging into diagnostics/frame-work.csv or a named .csv; 0 stops early and writes the frames captured so far" );
 	cmdSystem->AddCommand( "error", Com_Error_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "causes an error" );
 	cmdSystem->AddCommand( "crash", Com_Crash_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "causes a crash" );
 	cmdSystem->AddCommand( "freeze", Com_Freeze_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "freezes the game for a number of seconds" );
@@ -4925,16 +6272,23 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "applyPerformancePreset", Com_ApplyPerformancePreset_f, CMD_FL_SYSTEM, "applies the selected openPREY performance preset", idCmdSystem::ArgCompletion_String<com_performancePresetArgs> );
 	cmdSystem->AddCommand( "autoDetectPerformancePreset", Com_AutoDetectPerformancePreset_f, CMD_FL_SYSTEM, "detects and applies a conservative openPREY performance preset" );
 	cmdSystem->AddCommand( "performancePresetSelfTest", Com_PerformancePresetSelfTest_f, CMD_FL_SYSTEM, "validates openPREY performance preset commands and cvar mappings" );
+	cmdSystem->AddCommand( "jobsStats", Com_JobsStats_f, CMD_FL_SYSTEM, "prints bounded job-service scheduling and timing counters" );
+	cmdSystem->AddCommand( "jobsSelfTest", Com_JobsSelfTest_f, CMD_FL_SYSTEM, "validates job execution, dependencies, deterministic fallback, and metrics" );
+	cmdSystem->AddCommand( "netIPv4SelfTest", Com_NetIPv4SelfTest_f, CMD_FL_SYSTEM, "validates IPv4 parsing and UDP loopback transport" );
+	cmdSystem->AddCommand( "netIPv6SelfTest", Com_NetIPv6SelfTest_f, CMD_FL_SYSTEM, "validates IPv6 parsing and UDP loopback transport" );
 
 	cmdSystem->AddCommand("dmap", Dmap_f, CMD_FL_TOOL, "compiles a map", idCmdSystem::ArgCompletion_MapName);
-	//cmdSystem->AddCommand("runAAS", RunAAS_f, CMD_FL_TOOL, "compiles an AAS file for a map", idCmdSystem::ArgCompletion_MapName);
+	// The AAS compiler ships with dmap rather than the optional editor tools, so
+	// map authors can rebuild navigation without an ID_ALLOW_TOOLS build.
+	cmdSystem->AddCommand( "runAAS", RunAAS_f, CMD_FL_TOOL, "compiles AAS files for a map", idCmdSystem::ArgCompletion_MapName );
+	cmdSystem->AddCommand( "runAASDir", RunAASDir_f, CMD_FL_TOOL, "compiles AAS files for all maps in a folder", idCmdSystem::ArgCompletion_MapName );
+	cmdSystem->AddCommand( "runReach", RunReach_f, CMD_FL_TOOL, "calculates reachability for an AAS file", idCmdSystem::ArgCompletion_MapName );
+	cmdSystem->AddCommand( "runAASTactical", RunAASTactical_f, CMD_FL_TOOL, "calculates tactical features for an AAS file", idCmdSystem::ArgCompletion_MapName );
 
 #ifdef ID_ALLOW_TOOLS
 	// compilers	
 	cmdSystem->AddCommand( "renderbump", RenderBump_f, CMD_FL_TOOL, "renders a bump map", idCmdSystem::ArgCompletion_ModelName );
 	cmdSystem->AddCommand( "renderbumpFlat", RenderBumpFlat_f, CMD_FL_TOOL, "renders a flat bump map", idCmdSystem::ArgCompletion_ModelName );	
-	cmdSystem->AddCommand( "runAASDir", RunAASDir_f, CMD_FL_TOOL, "compiles AAS files for all maps in a folder", idCmdSystem::ArgCompletion_MapName );
-	cmdSystem->AddCommand( "runReach", RunReach_f, CMD_FL_TOOL, "calculates reachability for an AAS file", idCmdSystem::ArgCompletion_MapName );
 	cmdSystem->AddCommand( "roq", RoQFileEncode_f, CMD_FL_TOOL, "encodes a roq file" );
 #endif
 
@@ -4999,7 +6353,13 @@ void idCommonLocal::InitRenderSystem( void ) {
 		return;
 	}
 
-	renderSystem->InitOpenGL();
+	if ( UI_SettingsStartupActive() ) {
+		std::string recoveryError;
+		if ( !UI_SettingsInitializeDisplay( recoveryError ) ) {
+			FatalError( "Settings display recovery failed: %s. Recovery data was retained.", recoveryError.c_str() );
+			return;
+		}
+	} else renderSystem->InitOpenGL();
 
 	// imagetools is a static library, so the executable and the renderer module
 	// each hold a private copy of the texture-compression capability block that
@@ -5012,6 +6372,7 @@ void idCommonLocal::InitRenderSystem( void ) {
 		imageToolsCompressionCaps_t compressionCaps;
 		compressionCaps.textureCompressionAvailable = rendererConfig.textureCompressionAvailable;
 		compressionCaps.bptcTextureCompressionAvailable = rendererConfig.bptcTextureCompressionAvailable;
+		compressionCaps.etc2TextureCompressionAvailable = rendererConfig.etc2TextureCompressionAvailable;
 		ImageTools_SetCompressionCaps( compressionCaps );
 	}
 
@@ -5028,6 +6389,8 @@ static int Common_CountVisibleSmallChars( const char *string ) {
 		return 0;
 	}
 
+	// Characters, not bytes: the string is UTF-8, and one cell draws one
+	// character whatever its encoded length.
 	int count = 0;
 	const unsigned char *s = reinterpret_cast<const unsigned char *>( string );
 	while ( *s ) {
@@ -5036,8 +6399,9 @@ static int Common_CountVisibleSmallChars( const char *string ) {
 			s += colorEscapeLength;
 			continue;
 		}
+		unsigned int codePoint = 0;
 		count++;
-		s++;
+		s += Max( 1, LangDict_NextCodePoint( reinterpret_cast<const char *>( s ), UTF8_MAX_BYTES, codePoint ) );
 	}
 	return count;
 }
@@ -5086,6 +6450,26 @@ static void Common_DrawLoadingExpansionSlice( const idMaterial *material, const 
 	}
 }
 
+/*
+=================
+Common_SmallCharCellForCodePoint
+
+The splash text is drawn from the console's 'bigchars' sheet, whose 256 cells
+are the active codepage rather than Latin-1 (see Con_ConsoleCellForCodePoint),
+so a code point is mapped onto the cell that draws it. Punctuation the
+codepage lacks folds to ASCII; anything else draws as a question mark rather
+than a wrong letter.
+=================
+*/
+static int Common_SmallCharCellForCodePoint( unsigned int codePoint ) {
+	unsigned char cell = 0;
+	if ( LangDict_ByteForCodePoint( codePoint, cell ) ) {
+		return cell;
+	}
+	const char *fold = LangDict_AsciiFoldForCodePoint( codePoint );
+	return ( fold != NULL && fold[0] != '\0' ) ? (unsigned char)fold[0] : '?';
+}
+
 static void Common_DrawScaledSmallString( float x, float y, float charWidth, float charHeight,
 	const char *string, const idVec4 &setColor, bool forceColor, const idMaterial *material ) {
 	if ( !( string && *string ) || !material || charWidth <= 0.0f || charHeight <= 0.0f ) {
@@ -5115,7 +6499,11 @@ static void Common_DrawScaledSmallString( float x, float y, float charWidth, flo
 			continue;
 		}
 
-		const int ch = *s & 255;
+		// Localized splash text is UTF-8; read whole characters, or a
+		// multi-byte letter would draw as two unrelated cells.
+		unsigned int codePoint = 0;
+		const int codePointBytes = Max( 1, LangDict_NextCodePoint( reinterpret_cast<const char *>( s ), UTF8_MAX_BYTES, codePoint ) );
+		const int ch = Common_SmallCharCellForCodePoint( codePoint );
 		if ( ch != ' ' ) {
 			const int row = ch >> 4;
 			const int col = ch & 15;
@@ -5127,18 +6515,107 @@ static void Common_DrawScaledSmallString( float x, float y, float charWidth, flo
 		}
 
 		xx += charWidth;
-		s++;
+		s += codePointBytes;
 	}
 
 	renderSystem->SetColor( idVec4( 1.0f, 1.0f, 1.0f, 1.0f ) );
 }
 
+namespace {
+thread_local bool initializationActive = false;
+bool initializationDrawing = false;
+idStr initializationMessage;
+openq4::InitializationPresentation initializationPacing;
+int initializationFrames = 0;
+double initializationLastFrame = 0, initializationMaxGap = 0, initializationDrawMsec = 0;
+// Trace-only: where loading starves presentation, and what each frame costs.
+double initializationStart = 0, initializationLastHook = 0, initializationMaxHookGap = 0, initializationSubmit = 0;
+double InitializationMilliseconds() {
+	return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+struct InitializationScope {
+	InitializationScope() {
+		initializationMessage.Clear();
+		initializationPacing = {};
+		initializationFrames = 0;
+		initializationLastFrame = initializationMaxGap = initializationDrawMsec = 0;
+		initializationStart = initializationLastHook = InitializationMilliseconds();
+		initializationMaxHookGap = initializationSubmit = 0;
+		initializationActive = true;
+	}
+	void Finish() {
+		if ( !initializationActive ) return;
+		initializationActive = false;
+		initializationMessage.Clear();
+		RetainedUI_EndInitialization();
+		if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+			common->Printf( "INITIALIZATION_PRESENTATION frames=%d drawMsec=%.3f maxGapMsec=%.3f maxHookGapMsec=%.3f totalMsec=%.3f\n",
+				initializationFrames, initializationDrawMsec, initializationMaxGap, initializationMaxHookGap,
+				InitializationMilliseconds() - initializationStart );
+		}
+	}
+	~InitializationScope() { Finish(); }
+};
+}
+
+bool openQ4_UpdateInitialization( void ) {
+	// Thread-local ownership is checked before touching shared renderer/UI state.
+	if ( !initializationActive ) return false;
+	if ( !initializationDrawing ) {
+		const double now = InitializationMilliseconds(), gap = now - initializationLastHook;
+		initializationLastHook = now;
+		initializationMaxHookGap = Max( initializationMaxHookGap, gap );
+		if ( gap > 50 && cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+			common->Printf( "INITIALIZATION_HOOK_GAP msec=%.1f\n", gap );
+		}
+	}
+	if ( initializationDrawing || initializationMessage.IsEmpty() ||
+		!initializationPacing.Due( InitializationMilliseconds(), openQ4_GetRequestedPresentationCap() ) ||
+		!RetainedUI_CanUpdateInitialization() ) return true;
+	commonLocal.PrintLoadingMessage( initializationMessage.c_str() );
+	if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+		common->Printf( "INITIALIZATION_UPDATE frame=%d\n", initializationFrames );
+	}
+	return true;
+}
+
 void idCommonLocal::PrintLoadingMessage( const char *msg ) {
-	if ( !( msg && *msg ) ) {
+	if ( !( msg && *msg ) || !renderSystem || !renderSystem->IsOpenGLRunning() ) {
 		return;
 	}
+	if ( initializationDrawing ) return;
+	struct DrawingScope {
+		double start = InitializationMilliseconds();
+		DrawingScope() { initializationDrawing = true; }
+		~DrawingScope() {
+			initializationDrawing = false;
+			if ( initializationActive ) {
+				const double end = InitializationMilliseconds();
+				initializationPacing.Presented( start, end );
+				if ( initializationFrames++ ) initializationMaxGap = Max( initializationMaxGap, end - initializationLastFrame );
+				initializationLastFrame = end;
+				initializationDrawMsec += end - start;
+				if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+					common->Printf( "INITIALIZATION_FRAME at=%.1f build=%.2f present=%.2f\n", end - initializationStart,
+						( initializationSubmit > start ? initializationSubmit : end ) - start,
+						initializationSubmit > start ? end - initializationSubmit : 0.0 );
+				}
+			}
+		}
+	} drawingScope;
+	if ( initializationActive && msg != initializationMessage.c_str() ) initializationMessage = msg;
 
+	UI_SettingsRenderFrame settingsFrame;
 	renderSystem->BeginFrame( renderSystem->GetScreenWidth(), renderSystem->GetScreenHeight() );
+	if ( RetainedUI_DrawInitialization( msg ) ) {
+		initializationSubmit = InitializationMilliseconds();
+		settingsFrame.Submitting();
+		renderSystem->EndFrame( NULL, NULL );
+		settingsFrame.Presented();
+		RetainedUI_FrameSubmitted();
+		UI_SettingsFrame( false );
+		return;
+	}
 
 	const float virtualWidth = static_cast<float>( SCREEN_WIDTH );
 	const float virtualHeight = static_cast<float>( SCREEN_HEIGHT );
@@ -5230,7 +6707,11 @@ void idCommonLocal::PrintLoadingMessage( const char *msg ) {
 	Common_DrawScaledSmallString( textX, textY, charWidth, charHeight, msg,
 		idVec4( 0.65f, 0.75f, 1.0f, 0.8f ), true, declManager->FindMaterial( "textures/bigchars", false ) );
 	renderSystem->SetColor( idVec4( 1.0f, 1.0f, 1.0f, 1.0f ) );
+	settingsFrame.Submitting();
 	renderSystem->EndFrame( NULL, NULL );
+	settingsFrame.Presented();
+	RetainedUI_FrameSubmitted();
+	UI_SettingsFrame( false ); // Startup/loading may observe recovery, never perform device or file work.
 }
 
 /*
@@ -5245,17 +6726,129 @@ void idCommonLocal::InitSIMD( void ) {
 
 /*
 =================
-idCommonLocal::Frame
+Common_PresentationStallProbe
+
+com_presentationStallProbe: a development stand-in for a hitch, such as a slow
+read or a driver stall. Once a second one frame sleeps this many milliseconds,
+so the catch-up that follows, and what is drawn across it, can be measured
+without waiting for a real hitch.
 =================
 */
+static void Common_PresentationStallProbe( void ) {
+	static int lastStallMsec = 0;
+	const int stallMsec = com_presentationStallProbe.GetInteger();
+	if ( stallMsec <= 0 ) {
+		return;
+	}
+	const int now = Sys_Milliseconds();
+	if ( now - lastStallMsec < 1000 ) {
+		return;
+	}
+	lastStallMsec = now;
+	Sys_Sleep( stallMsec );
+}
+
+static openq4::FrameWorkProfile commonFrameWorkProfile;
+static idStr commonFrameWorkTracePath( "diagnostics/frame-work.csv" );
+
+static double Common_FrameWorkNow() {
+	return Common_GetPresentationClockNow() * 1000.0 / Common_GetPresentationClockUnitsPerSecond();
+}
+
+// A trace path given on the console must stay below the save path: relative,
+// no parent references, no drive, .csv extension.
+static bool Common_FrameWorkTracePathOk( const char *path ) {
+	idStr candidate( path );
+	if ( candidate.Length() < 5 || candidate[0] == '/' || candidate[0] == '\\' ) {
+		return false;
+	}
+	if ( candidate.Find( ".." ) != -1 || candidate.Find( ':' ) != -1 ) {
+		return false;
+	}
+	return idStr::Icmp( candidate.Right( 4 ), ".csv" ) == 0;
+}
+
+static void Common_WriteFrameWorkTrace() {
+	const auto& samples=commonFrameWorkProfile.Samples();
+	static const char* names[]{"gap","wait","events","configuration","commands","session","draw","tail"};
+	idFile* file=fileSystem->OpenFileWrite(commonFrameWorkTracePath.c_str());
+	if (file) {
+		// startMs: Wait-phase start on the presentation clock (QueryPerformanceCounter
+		// ticks in milliseconds on Windows), for tools/debug/cpu_sampler.py frames.
+		file->Printf("frame,totalMs,gapMs,waitMs,eventsMs,configurationMs,commandsMs,sessionMs,drawMs,tailMs,startMs\n");
+		for (const auto& sample:samples) {
+			file->Printf("%d,%.6f",sample.frame,sample.Total());
+			for (double value:sample.milliseconds) file->Printf(",%.6f",value);
+			file->Printf(",%.6f\n",sample.startMs);
+		}
+		fileSystem->CloseFile(file);
+	}
+	std::vector<double> values; values.reserve(samples.size());
+	for (int phase=-1; phase<static_cast<int>(openq4::FrameWorkPhase::Count); ++phase) {
+		values.clear(); double total=0;
+		for (const auto& sample:samples) {
+			const double value=phase<0 ? sample.Total() : sample.milliseconds[phase];
+			values.push_back(value); total+=value;
+		}
+		if (values.empty()) break;
+		std::sort(values.begin(),values.end());
+		common->Printf("Frame work phase=%s samples=%u mean_ms=%.6f p95_ms=%.6f p99_ms=%.6f max_ms=%.6f\n",
+			phase<0 ? "total" : names[phase],static_cast<unsigned>(values.size()),total/values.size(),
+			values[static_cast<size_t>(ceil(values.size()*.95))-1],values[static_cast<size_t>(ceil(values.size()*.99))-1],values.back());
+	}
+	common->Printf("Frame work trace: %s\n",file ? commonFrameWorkTracePath.c_str() : "file write unavailable");
+}
+
+static void Com_ProfileFrameWork_f( const idCmdArgs &args ) {
+	if ( args.Argc() < 2 || args.Argc() > 3 ) {
+		common->Printf( "usage: profileFrameWork <1..60000> [relative csv path below the save path]\n       profileFrameWork 0   (stop early and write the frames captured so far)\n" );
+		return;
+	}
+	const int frames = atoi( args.Argv( 1 ) );
+	if ( frames == 0 ) {
+		if ( commonFrameWorkProfile.Stop() ) {
+			Common_WriteFrameWorkTrace();
+		} else {
+			common->Printf( "Frame work profile: nothing captured\n" );
+		}
+		return;
+	}
+	if ( args.Argc() == 3 && !Common_FrameWorkTracePathOk( args.Argv( 2 ) ) ) {
+		common->Printf( "profileFrameWork: the trace path must be a relative .csv path below the save path\n" );
+		return;
+	}
+	if ( !commonFrameWorkProfile.Reset( frames ) ) {
+		common->Printf( "usage: profileFrameWork <1..60000> [relative csv path below the save path]\n" );
+		return;
+	}
+	commonFrameWorkTracePath = args.Argc() == 3 ? args.Argv( 2 ) : "diagnostics/frame-work.csv";
+	common->Printf( "Frame work profile: requested %d complete frames -> %s\n", frames, commonFrameWorkTracePath.c_str() );
+}
+
+static void Common_MarkFrameWork(openq4::FrameWorkPhase phase) {
+	if (commonFrameWorkProfile.Active()) commonFrameWorkProfile.Mark(phase,Common_FrameWorkNow());
+}
+
+static void Common_EndFrameWork(int frame) {
+	if (!commonFrameWorkProfile.Active() || !commonFrameWorkProfile.End(frame,Common_FrameWorkNow())) return;
+	Common_WriteFrameWorkTrace();
+}
+
 void idCommonLocal::Frame( void ) {
 	try {
+		Common_FlushOffMainThreadPrints();
+		if (commonFrameWorkProfile.Active()) commonFrameWorkProfile.Begin(Common_FrameWorkNow());
 		openQ4_BeginPresentationFrame();
-		const int frameStartMsec = com_frameRealTime;
+		Common_PresentationStallProbe();
+		Common_MarkFrameWork(openq4::FrameWorkPhase::Wait);
 
 		// pump all the events
 		Sys_GenerateEvents();
+		Common_MarkFrameWork(openq4::FrameWorkPhase::Events);
 
+		// Settings cleanup/confirmation is independent of GUI/input ownership and
+		// SP pause. Finish it before deciding which values may reach disk.
+		UI_SettingsFrame();
 		// write config file if anything changed
 		WriteConfiguration(); 
 
@@ -5263,27 +6856,42 @@ void idCommonLocal::Frame( void ) {
 		if ( com_forceGenericSIMD.IsModified() ) {
 			InitSIMD();
 		}
+		Common_MarkFrameWork(openq4::FrameWorkPhase::Configuration);
 
 		eventLoop->RunEventLoop();
 
 		com_frameTime = GetUserCmdTime( com_ticNumber );
+		LevelEditor_Frame();
 
 		idAsyncNetwork::RunFrame();
+
+#ifndef ID_DEDICATED
+		// Drive Arena presentation transitions from the common frame path: while
+		// its listen server is active, idSessionLocal::Frame is intentionally not
+		// called by the ordinary multiplayer branch below.
+		arenaCampaign.Frame();
+#endif
+		Common_MarkFrameWork(openq4::FrameWorkPhase::Commands);
 
 	if ( idAsyncNetwork::IsActive() ) {
 		if ( idAsyncNetwork::serverDedicated.GetInteger() != 1 ) {
 			// Keep netplay flow the same as stock, but ensure audio mixes each frame.
 			soundSystem->Render();
 			session->GuiFrameEvents();
-			openQ4_RecordMultiplayerFramePacing( frameStartMsec );
+			openQ4_RecordMultiplayerFramePacing();
+			Common_MarkFrameWork(openq4::FrameWorkPhase::Session);
 			session->UpdateScreen( false );
+		} else {
+			Common_MarkFrameWork(openq4::FrameWorkPhase::Session);
 		}
 	} else {
 			session->Frame();
+			Common_MarkFrameWork(openq4::FrameWorkPhase::Session);
 
 			// normal, in-sequence screen update
 			session->UpdateScreen( false );
 		}
+		Common_MarkFrameWork(openq4::FrameWorkPhase::Draw);
 
 		// report timing information
 		if ( com_speeds.GetBool() ) {
@@ -5300,6 +6908,7 @@ void idCommonLocal::Frame( void ) {
 
 		// set idLib frame number for frame based memory dumps
 		idLib::frameNumber = com_frameNumber;
+		Common_EndFrameWork(com_frameNumber-1);
 
 		// the FPU stack better be empty at this point or some bad code or compiler bug left values on the stack
 		//if ( !Sys_FPU_StackIsEmpty() ) {
@@ -5309,6 +6918,7 @@ void idCommonLocal::Frame( void ) {
 	}
 
 	catch( idException & ) {
+		commonFrameWorkProfile.Abort();
 		return;			// an ERP_DROP was thrown
 	}
 }
@@ -5319,8 +6929,10 @@ idCommonLocal::GUIFrame
 =================
 */
 void idCommonLocal::GUIFrame( bool execCmd, bool network ) {
+	Common_FlushOffMainThreadPrints();
 	openQ4_BeginPresentationFrame();
 	Sys_GenerateEvents();
+	UI_SettingsFrame( false ); // Poll only: loading callbacks must never restart recursively.
 	eventLoop->RunEventLoop( execCmd );	// and execute any commands
 	com_frameTime = GetUserCmdTime( com_ticNumber );
 	if ( network ) {
@@ -5424,17 +7036,19 @@ void openQ4_GetAsyncTimingStats( openq4AsyncTimingStats_t &stats, int maxSamples
 	stats.avgJitterMsec = jitterSum / static_cast<float>( stats.sampleCount );
 }
 
-static bool openQ4_ShouldUseSmoothSingleplayerSlowTime( void ) {
-	if ( cvarSystem == NULL || idAsyncNetwork::IsActive() ) {
+// The async thread must not search the global CVar registry while a game DLL is
+// registering its static CVars. Module swaps grow that registry on the main
+// thread and can invalidate an in-flight FindInternal traversal. Publish the
+// only bit of module state needed by the timer after game->Init() completes.
+static std::atomic<bool> openQ4_singleplayerGameModuleReady( false );
+
+static bool openQ4_ShouldUseSmoothSingleplayerSlowTime( float effectiveTimeScale ) {
+	if ( !openQ4_singleplayerGameModuleReady.load( std::memory_order_acquire ) ||
+		 idAsyncNetwork::IsActive() ) {
 		return false;
 	}
 
-	const char *gameType = cvarSystem->GetCVarString( "si_gameType" );
-	if ( gameType == NULL || idStr::Icmp( gameType, "singleplayer" ) != 0 ) {
-		return false;
-	}
-
-	return com_timescale.GetFloat() < 0.999f;
+	return effectiveTimeScale < 0.999f;
 }
 
 void idCommonLocal::SingleAsyncTic( void ) {
@@ -5494,9 +7108,10 @@ void idCommonLocal::Async( void ) {
 
 	double ticMsec = GetUserCmdMsecFloat();
 
-	// the number of msec per tic can be varies with the timescale cvar
-	float timescale = com_timescale.GetFloat();
-	const bool smoothSlowTime = openQ4_ShouldUseSmoothSingleplayerSlowTime();
+	// Accelerated time produces more tics. Slow time keeps the normal tic cadence
+	// and lets the single-player game advance simulation by a smaller delta.
+	float timescale = com_timescale.GetFloat() * openQ4_gameTimeScale.load( std::memory_order_acquire );
+	const bool smoothSlowTime = openQ4_ShouldUseSmoothSingleplayerSlowTime( timescale );
 	if ( !smoothSlowTime && timescale != 1.0f ) {
 		ticMsec /= timescale;
 		if ( ticMsec < 1.0 ) {
@@ -5505,11 +7120,28 @@ void idCommonLocal::Async( void ) {
 	}
 
 	// don't skip too many
-	if ( smoothSlowTime || timescale == 1.0f ) {
-		const double clampedCatchupMsec = 10.0 * GetUserCmdMsecFloat();
-		if ( lastTicMsec + clampedCatchupMsec < static_cast<double>( msec ) ) {
-			lastTicMsec = static_cast<double>( msec ) - clampedCatchupMsec;
-		}
+#if defined( __ANDROID__ )
+	// Android may freeze the entire process between timer wakes. Bound every
+	// timescale to ten current tics, including the first call after foreground,
+	// rather than replaying minutes of accelerated input in the async worker.
+	const bool boundCatchup = true;
+	const double clampedCatchupMsec = 10.0 * ticMsec;
+#else
+	const bool boundCatchup = smoothSlowTime || timescale == 1.0f;
+	const double clampedCatchupMsec = 10.0 * GetUserCmdMsecFloat();
+#endif
+	// openQ4: Sys_Milliseconds is an int and wraps to a large negative number
+	// after 24.86 days of uptime. The last tic used to be an int as well and
+	// wrapped with it; as a double it stays up near 2^31, every test below is
+	// then false for the next 49.7 days, and no tic runs - a server that has
+	// been up that long stops dead. The clock never goes backwards otherwise,
+	// so a step back is the wrap: carry on from the new reading.
+	if ( static_cast<double>( msec ) < lastTicMsec - clampedCatchupMsec ) {
+		lastTicMsec = static_cast<double>( msec ) - ticMsec;
+	}
+
+	if ( boundCatchup && lastTicMsec + clampedCatchupMsec < static_cast<double>( msec ) ) {
+		lastTicMsec = static_cast<double>( msec ) - clampedCatchupMsec;
 	}
 
 	while ( lastTicMsec + ticMsec <= static_cast<double>( msec ) ) {
@@ -5535,6 +7167,84 @@ static bool openPREY_IsValidGameModuleName( const char *moduleName ) {
 		}
 	}
 	return false;
+}
+
+// Upstream's split-module routing table. openPREY loads one unified 'game'
+// module, so openQ4_NormalizeGameTypeForModule only acts on legacy game_mp
+// requests; the table stays so upstream's call sites keep their meaning.
+// Mirror of the multiplayer rows in the GameLibs descriptor table
+// (src/mpgame/mp/GameTypes.cpp), including whether each row is selectable. The
+// engine has to choose a game module before any module is loaded, so it cannot
+// ask the game for its own table; tools/tests/game_type_module_selection.py
+// cross-checks the two tables.
+//
+// This is an allowlist on purpose. "anything that is not singleplayer is
+// multiplayer" meant a typo, a stale config or a mod-specific value booted
+// game_mp and then forced a full renderer-tearing module swap on the first
+// New Game.
+struct openQ4GameTypeRoute_t {
+	const char *name;
+	bool selectable;
+};
+
+static const openQ4GameTypeRoute_t openQ4_multiplayerGameTypes[] = {
+	{ "DM", true },
+	{ "Tourney", true },
+	{ "Team DM", true },
+	{ "CTF", true },
+	{ "One Flag CTF", true },
+	{ "Arena CTF", true },
+	{ "Arena One Flag CTF", true },
+	{ "DeadZone", true },
+	{ "Duel", true },
+	{ "Clan Arena", true },
+	{ "Freeze Tag", true },
+	{ "Red Rover", true },
+	// Reserved multiplayer wire tokens still route to game_mp so its validated
+	// descriptor table remains append-only. They are normalized to DM before
+	// game_mp registers its public si_gameType value list.
+	{ "Overload", false },
+	{ "Harvester", false },
+	{ "Domination", false },
+	{ "Attack Defend", false },
+	{ NULL, false }
+};
+
+static const char *openQ4_CanonicalMultiplayerGameType( const char *gameType, const bool selectableOnly ) {
+	if ( gameType == NULL || gameType[0] == '\0' ) {
+		return NULL;
+	}
+	for ( int i = 0; openQ4_multiplayerGameTypes[i].name != NULL; i++ ) {
+		const openQ4GameTypeRoute_t &route = openQ4_multiplayerGameTypes[i];
+		if ( idStr::Icmp( gameType, route.name ) == 0 && ( !selectableOnly || route.selectable ) ) {
+			return route.name;
+		}
+	}
+	return NULL;
+}
+
+static void openQ4_NormalizeGameTypeForModule( const char *moduleName ) {
+	if ( idStr::Icmp( moduleName, "game_mp" ) != 0 ) {
+		return;
+	}
+
+	const char *currentGameType = cvarSystem->GetCVarString( "si_gameType" );
+	const char *canonicalGameType = openQ4_CanonicalMultiplayerGameType( currentGameType, true );
+	if ( canonicalGameType != NULL ) {
+		if ( idStr::Cmp( currentGameType, canonicalGameType ) != 0 ) {
+			// CVar values use a case-insensitive early-out, so a direct "dm" ->
+			// "DM" write is ignored. Cross a different valid value to make the
+			// canonical spelling observable before declarations are rebuilt.
+			cvarSystem->SetCVarString( "si_gameType", "singleplayer" );
+			cvarSystem->SetCVarString( "si_gameType", canonicalGameType );
+		}
+		return;
+	}
+
+	// game_mp cannot initialize against an unsupported or single-player mode.
+	// This covers joins, listen servers, and dedicated startup alike.
+	common->Printf( "Selected game_mp with unsupported si_gameType '%s'; using DM for multiplayer module initialization.\n", currentGameType );
+	cvarSystem->SetCVarString( "si_gameType", "DM" );
 }
 
 static const char *openPREY_SelectGameModuleBaseName( void ) {
@@ -5669,6 +7379,8 @@ const char *Com_GameModuleLoadPhaseName( gameModuleLoadPhase_t phase ) {
 		return "game module ready";
 	case GAME_MODULE_PHASE_GAME_SHUTDOWN:
 		return "game->Shutdown()";
+	case GAME_MODULE_PHASE_GAME_FINALIZE:
+		return "game->ShutdownAfterDecls()";
 	case GAME_MODULE_PHASE_BINARY_UNLOAD:
 		return "unloading game module binary";
 	default:
@@ -5697,10 +7409,35 @@ const char *Com_GameModuleLoadPhaseSignalName( void ) {
 
 /*
 =================
+Com_UnloadGameModuleBinary
+
+Every game module unload goes through here. GetGameAPI registers the module's
+static cvars, which points the value completion of each one it declares into
+the module, the ones it shares with the engine and the renderer included
+(CVarCompletionSnapshot.h). ShutdownAfterDecls clears only the CVAR_GAME ones,
+so first put back the callbacks captured when the module was loaded.
+=================
+*/
+static void Com_UnloadGameModuleBinary( intptr_t handle, idCVarCompletionSnapshot &completions ) {
+	completions.Restore();
+	completions.Clear();
+	Mem_UnregisterModuleStats( (memModuleStats_t) Sys_DLL_GetProcAddress( handle, MEM_MODULE_STATS_ENTRY_POINT ) );
+	Sys_DLL_Unload( handle );
+}
+
+/*
+=================
 idCommonLocal::LoadGameDLL
 =================
 */
 void idCommonLocal::LoadGameDLL( void ) {
+	openQ4_singleplayerGameModuleReady.store( false, std::memory_order_release );
+	SetGameTimeScale( 1.0f );
+	gameShutdownCalled = false;
+	gameShutdownAfterDeclsCalled = false;
+	const char *gameModuleBaseName = openPREY_SelectGameModuleBaseName();
+	openQ4_NormalizeGameTypeForModule( gameModuleBaseName );
+
 #ifdef __DOOM_DLL__
 	char			dllPath[ MAX_OSPATH ];
 	idStr			attemptedCandidates;
@@ -5713,7 +7450,6 @@ void idCommonLocal::LoadGameDLL( void ) {
 
 	Com_SetGameModuleLoadPhase( GAME_MODULE_PHASE_LOCATE );
 
-	const char *gameModuleBaseName = openPREY_SelectGameModuleBaseName();
 	dllPath[0] = '\0';
 	openPREY_BuildGameModuleCandidateList( gameModuleCandidates );
 	for ( int i = 0; i < gameModuleCandidates.Num(); i++ ) {
@@ -5753,11 +7489,13 @@ void idCommonLocal::LoadGameDLL( void ) {
 		common->FatalError( "couldn't load game dynamic library '%s'", selectedModuleBinary.c_str() );
 		return;
 	}
+	// before GetGameAPI registers the module's cvars; spent by the unload
+	gameModuleCompletions.Capture();
 
 	Com_SetGameModuleLoadPhase( GAME_MODULE_PHASE_RESOLVE_ENTRY_POINT );
 	GetGameAPI = (GetGameAPI_t) Sys_DLL_GetProcAddress( gameDLL, "GetGameAPI" );
 	if ( !GetGameAPI ) {
-		Sys_DLL_Unload( gameDLL );
+		Com_UnloadGameModuleBinary( gameDLL, gameModuleCompletions );
 		gameDLL = NULL;
 		common->FatalError( "couldn't find game DLL API" );
 		return;
@@ -5784,7 +7522,7 @@ void idCommonLocal::LoadGameDLL( void ) {
 	Com_SetGameModuleLoadPhase( GAME_MODULE_PHASE_CALL_GET_GAME_API );
 	const gameExport_t *gameExportPtr = GetGameAPI( &gameImport );
 	if ( gameExportPtr == NULL ) {
-		Sys_DLL_Unload( gameDLL );
+		Com_UnloadGameModuleBinary( gameDLL, gameModuleCompletions );
 		gameDLL = NULL;
 		common->FatalError(
 			"game module '%s' returned no export table from GetGameAPI",
@@ -5796,7 +7534,7 @@ void idCommonLocal::LoadGameDLL( void ) {
 	Com_SetGameModuleLoadPhase( GAME_MODULE_PHASE_VERIFY_API_VERSION );
 	if ( gameExport.version != GAME_API_VERSION ) {
 		const int loadedVersion = gameExport.version;
-		Sys_DLL_Unload( gameDLL );
+		Com_UnloadGameModuleBinary( gameDLL, gameModuleCompletions );
 		gameDLL = NULL;
 		common->FatalError(
 			"wrong game DLL API version for '%s' (expected %d, got %d)",
@@ -5804,13 +7542,18 @@ void idCommonLocal::LoadGameDLL( void ) {
 		return;
 	}
 	if ( gameExport.game == NULL || gameExport.gameEdit == NULL ) {
-		Sys_DLL_Unload( gameDLL );
+		Com_UnloadGameModuleBinary( gameDLL, gameModuleCompletions );
 		gameDLL = NULL;
 		common->FatalError(
 			"game module '%s' returned an incomplete export table",
 			selectedModuleBinary.c_str() );
 		return;
 	}
+
+	// the game module links its own idlib archive; fold its allocation
+	// counters into the engine's total. Optional symbol, so a module built
+	// before this existed is simply left out rather than rejected.
+	Mem_RegisterModuleStats( (memModuleStats_t) Sys_DLL_GetProcAddress( gameDLL, MEM_MODULE_STATS_ENTRY_POINT ) );
 
 	game								= gameExport.game;
 	gameEdit							= gameExport.gameEdit;
@@ -5824,6 +7567,11 @@ void idCommonLocal::LoadGameDLL( void ) {
 	if ( game != NULL ) {
 		game->Init();
 	}
+	openQ4_singleplayerGameModuleReady.store(
+		// openPREY's unified "game" module serves single player too; the async
+		// timer still rules out network sessions itself.
+		game != NULL && ( idStr::Icmp( gameModuleBaseName, "game" ) == 0 || idStr::Icmp( gameModuleBaseName, "game_sp" ) == 0 ),
+		std::memory_order_release );
 	Com_SetGameModuleLoadPhase( GAME_MODULE_PHASE_READY );
 }
 
@@ -5833,18 +7581,12 @@ idCommonLocal::UnloadGameDLL
 =================
 */
 void idCommonLocal::UnloadGameDLL( void ) {
-
-	// shut down the game object
-	Com_SetGameModuleLoadPhase( GAME_MODULE_PHASE_GAME_SHUTDOWN );
-	if ( game != NULL ) {
-		game->Shutdown();
-	}
-
+	RetainedUI_ClearModelWorlds();
 #ifdef __DOOM_DLL__
 
 	Com_SetGameModuleLoadPhase( GAME_MODULE_PHASE_BINARY_UNLOAD );
 	if ( gameDLL ) {
-		Sys_DLL_Unload( gameDLL );
+		Com_UnloadGameModuleBinary( gameDLL, gameModuleCompletions );
 		gameDLL = NULL;
 	}
 	game = NULL;
@@ -5879,105 +7621,16 @@ void idCommonLocal::ApplyAutomaticPlatformProfile( void ) {
 	}
 	if ( Common_IsEnvFlagTrue( disableAutoDetect ) || Common_IsEnvFlagTrue( noAutoDetect ) ) {
 		Printf( "Steam Deck platform profile auto-detection disabled by environment.\n" );
+	} else if ( Common_HasSteamDeckHostSignal() ) {
+		Printf( "Auto-selecting steamdeck platform profile from host environment.\n" );
+		com_platformProfile.SetString( "steamdeck" );
 		return;
 	}
 
-	if ( !Common_HasSteamDeckHostSignal() ) {
-		return;
-	}
-
-	Printf( "Auto-selecting steamdeck platform profile from host environment.\n" );
-	com_platformProfile.SetString( "steamdeck" );
-}
-
-static double Common_AdjustMachineSpecGHz( double ghz, cpuid_t cpu ) {
-	// Retail Quake 4 applies a CPU-vendor adjustment before classifying the
-	// quality tier. openQ4 does not expose a separate AMD64 flag, so keep the
-	// conservative legacy AMD adjustment without changing the public CPU enum.
-	if ( ( cpu & CPUID_AMD ) != 0 ) {
-		return ghz * 1.15f;
-	}
-	return ghz;
-}
-
-static int Common_DetectMachineSpec( double ghz, int vidRam, int sysRam, bool oldCard ) {
-#if defined( __aarch64__ ) || defined( __arm64__ ) || defined( _M_ARM64 )
-	// No arm64 host reports a usable CPU frequency: Apple Silicon has no
-	// hw.cpufrequency, aarch64 Linux has no "cpu MHz" line in /proc/cpuinfo,
-	// and Windows on ARM has no "~MHz" registry value. Every arm64 desktop
-	// part comfortably exceeds the 2005-era retail CPU thresholds, so
-	// classify by memory alone rather than dropping every arm64 machine to
-	// the lowest tier. Unified or shared memory also means a missing VRAM
-	// probe should fall back to a share of system memory.
-	if ( ghz <= 0.0 && !oldCard ) {
-		int effectiveVidRam = vidRam;
-		const bool guessedVidRam = ( effectiveVidRam <= 0 );
-		if ( guessedVidRam ) {
-			effectiveVidRam = sysRam / 2;
-		}
-
-		// Thresholds for the upper tiers. A real VRAM probe is trusted and uses
-		// the stock numbers. A *guessed* one is not: sysRam / 2 says nothing
-		// about GPU capability, so a 8 GB single-board computer produces the
-		// same number as a workstation.
-		//
-		// This matters because tier 0 is the only tier that downsizes textures
-		// (image_downSize, image_ignoreHighQuality, image_downSizeSpecular and
-		// image_downSizeBump - see Com_ExecMachineSpec_f), and openQ4 currently
-		// uploads ordinary textures uncompressed, so promoting out of tier 0
-		// multiplies the texture budget. Both arm64 hosts that have reported
-		// memory failures were 8 GB boards killed by the OOM reaper during load
-		// (issues #76 on a Pi 5 and #78 on aarch64 Linux). So when we are
-		// guessing, require clearly abundant system memory before leaving the
-		// downsizing tier.
-		//
-		// Apple Silicon keeps the stock thresholds regardless: it has genuine
-		// unified memory on a GPU class known to run the game well, and no arm64
-		// Mac has reported a memory-pressure failure.
-#if defined( MACOS_X )
-		const int ultraSysRam = 1000;
-		const int highSysRam = 1000;
-		const int mediumSysRam = 750;
-#else
-		const int ultraSysRam = guessedVidRam ? 24000 : 1000;
-		const int highSysRam = guessedVidRam ? 16000 : 1000;
-		const int mediumSysRam = guessedVidRam ? 12000 : 750;
-#endif
-
-		if ( effectiveVidRam >= 300 && sysRam >= ultraSysRam ) {
-			return 3;
-		}
-		if ( effectiveVidRam >= 160 && sysRam >= highSysRam ) {
-			return 2;
-		}
-		if ( effectiveVidRam >= 160 && sysRam >= mediumSysRam ) {
-			return 1;
-		}
-		return 0;
-	}
-#endif
-	if ( ghz >= 2.89f && vidRam >= 300 && sysRam >= 1000 && !oldCard ) {
-		return 3;
-	}
-	if ( ghz >= 2.89f && vidRam >= 160 && sysRam >= 1000 && !oldCard ) {
-		return 2;
-	}
-	if ( ghz >= 2.29f && vidRam >= 160 && sysRam >= 750 && !oldCard ) {
-		return 1;
-	}
-	return 0;
-}
-
-static const char *Common_MachineSpecQualificationMessage( int machineSpec ) {
-	switch ( machineSpec ) {
-		case 3:
-			return "This system qualifies for Ultra quality!\n";
-		case 2:
-			return "This system qualifies for High quality!\n";
-		case 1:
-			return "This system qualifies for Medium quality.\n";
-		default:
-			return "This system qualifies for Low quality.\n";
+	// openQ4: a television (Big Picture) takes the Couch profile.
+	if ( Common_HasCouchHostSignal() ) {
+		Printf( "Auto-selecting couch platform profile from host environment.\n" );
+		com_platformProfile.SetString( "couch" );
 	}
 }
 
@@ -5987,27 +7640,25 @@ idCommonLocal::SetMachineSpec
 =================
 */
 void idCommonLocal::SetMachineSpec( void ) {
-	// Sys_ClockTicksPerSecond is the timer rate (QPC/monotonic), not CPU speed
-	cpuid_t cpu = Sys_GetProcessorId();
-	const double cpuHz = Sys_GetApproximateProcessorFrequencyHz();
-	const double ghz = Common_AdjustMachineSpecGHz( cpuHz * 0.000000001f, cpu );
-	int vidRam = Sys_GetVideoRam();
-	int sysRam = Sys_GetSystemRam();
-	bool oldCard = false;
-	bool nv10or20 = false;
-
-	renderSystem->GetCardCaps( oldCard, nv10or20 );
-
-	Printf( "Detected\n\tCPU: %s\n\tSystem memory: %s\n\tVideo memory: %s on %s\n\n",
-		Sys_GetProcessorString(),
-		Sys_FormatMemoryMB( sysRam ).c_str(),
-		Sys_FormatMemoryMB( vidRam ).c_str(),
-		( oldCard ) ? "a less than optimal video architecture" : "an optimal video architecture" );
-
-	const int machineSpec = Common_DetectMachineSpec( ghz, vidRam, sysRam, oldCard );
-	Printf( "%s", Common_MachineSpecQualificationMessage( machineSpec ) );
-	com_machineSpec.SetInteger( machineSpec );
-	com_videoRam.SetInteger( vidRam );
+	openq4::PerformancePresetSignals signals;
+	std::string error;
+	if ( !Common_CapturePerformancePresetSignals( signals, error ) ) {
+		// Before a device exists, keep only actual host memory/power facts.
+		// CPU frequency, ISA and an OS-wide VRAM inventory cannot rank its GPU.
+#if defined( USE_SDL3 )
+		signals.systemRamMB = SDL_GetSystemRAM();
+#else
+		signals.systemRamMB = Sys_GetSystemRam();
+#endif
+		signals.explicitLowPower = Common_HasExplicitLowPowerHostSignal();
+		signals.raspberryPi = Common_HasRaspberryPiHostSignal();
+		signals.steamDeck = idStr::Icmp( com_platformProfile.GetString(), "steamdeck" ) == 0 || Common_HasSteamDeckHostSignal();
+	}
+	const auto detected = openq4::DetectPerformancePreset( signals );
+	com_machineSpec.SetInteger( detected.preset->machineSpec );
+	com_videoRam.SetInteger( detected.videoRamMB );
+	Printf( "Detected performance profile '%s': GPU=%s, system memory=%d MiB, dedicated video memory=%d MiB (0=unknown/shared).\n",
+		detected.preset->name, RendererGpuClassName( signals.gpuClass ), detected.systemRamMB, detected.videoRamMB );
 }
 
 /*
@@ -6017,6 +7668,7 @@ idCommonLocal::Init
 */
 void idCommonLocal::Init( int argc, const char **argv, const char *cmdline ) {
 	try {
+		com_mainThreadId = std::this_thread::get_id();
 
 		// set interface pointers used by idLib
 		idLib::sys			= sys;
@@ -6070,12 +7722,38 @@ void idCommonLocal::Init( int argc, const char **argv, const char *cmdline ) {
 		StartupVariable( NULL, false );
 		ApplyAutomaticPlatformProfile();
 
+#ifndef ID_DEDICATED
+		// The splash must respect launch settings before creating any visible window.
+		if ( !cvarSystem->GetCVarBool( "r_hiddenWindow" ) && !com_skipRenderer.GetBool() &&
+			!idAsyncNetwork::serverDedicated.GetInteger() && !cvarSystem->GetCVarBool( "win_viewlog" ) ) {
+			Sys_ShowSplash();
+		}
+#endif
+
 		if ( !idAsyncNetwork::serverDedicated.GetInteger() && Sys_AlreadyRunning() ) {
 			Sys_Quit();
 		}
 
 		// initialize processor specific SIMD implementation
 		InitSIMD();
+
+		// The job service is engine-owned and renderer-independent, so the same
+		// lifecycle is available to clients, tools, and headless dedicated builds.
+		// Disabling jobs never drops work: it selects the deterministic inline path.
+		idJobSystemConfig jobConfig;
+		jobConfig.synchronous = !jobs_enable.GetBool() || jobs_deterministic.GetBool();
+		jobConfig.workerThreads = jobConfig.synchronous ? 0 :
+			idJobSystem::ResolveWorkerThreadCount( jobs_numThreads.GetInteger() );
+		jobConfig.maxQueuedLists = static_cast<std::size_t>( jobs_queueCapacity.GetInteger() );
+		if ( !jobSystem.Initialize( jobConfig ) ) {
+			FatalError( "Failed to initialize the portable job system" );
+		}
+		Printf( "Job system initialized: mode=%s workers=%u queueCapacity=%d (jobs_enable=%d deterministic=%d)\n",
+			jobSystem.IsSynchronous() ? "synchronous" : "threaded",
+			jobSystem.GetWorkerThreadCount(),
+			jobs_queueCapacity.GetInteger(),
+			jobs_enable.GetBool() ? 1 : 0,
+			jobs_deterministic.GetBool() ? 1 : 0 );
 
 		// init commands
 		InitCommands();
@@ -6092,6 +7770,12 @@ void idCommonLocal::Init( int argc, const char **argv, const char *cmdline ) {
 			Printf( "Command line (parsed):\n" );
 			for ( int i = 0; i < com_numConsoleLines; ++i ) {
 				if ( !com_consoleLines[ i ].Argc() ) {
+					continue;
+				}
+				const char *lineText = com_consoleLines[ i ].Args( 0, com_consoleLines[ i ].Argc() - 1 );
+				if ( cvarSystem->CommandContainsPrivateCVar( lineText ) ) {
+					idCmdArgs::ClearArgsScratch();
+					Printf( "  %d: <private command redacted>\n", i );
 					continue;
 				}
 				Printf( "  %d:", i );
@@ -6144,13 +7828,37 @@ idCommonLocal::Shutdown
 */
 void idCommonLocal::Shutdown( void ) {
 
+	// A committed checkpoint is a user operation, not cancellable preload work.
+	// Finish its preview and storage job while both services still exist.
+	Session_FinishPendingSave();
 	com_shuttingDown = true;
+	LevelEditor_Shutdown();
+
+	// Stop every engine job before any subsystem it may reference is torn down.
+	// Running jobs receive cancellation and are joined; queued jobs never start.
+	jobSystem.Shutdown( idJobShutdownMode::CANCEL_PENDING );
+	const idJobSystemMetrics shutdownJobMetrics = jobSystem.GetMetrics();
+	if ( jobSystem.IsInitialized() || shutdownJobMetrics.queuedLists != 0 || shutdownJobMetrics.runningJobs != 0 ) {
+		Warning( "jobsShutdown FAILED v1 initialized=%d queued=%llu running=%llu",
+			jobSystem.IsInitialized() ? 1 : 0,
+			static_cast<unsigned long long>( shutdownJobMetrics.queuedLists ),
+			static_cast<unsigned long long>( shutdownJobMetrics.runningJobs ) );
+	} else {
+		Printf( "jobsShutdown PASS v1 initialized=0 queued=0 running=0\n" );
+	}
 
 	idAsyncNetwork::server.Kill();
 	idAsyncNetwork::client.Shutdown();
 
+	// the OpenXR session shares the renderer's context: close it while that lives
+	vrSystem->Shutdown();
+
 	// game specific shut down
 	ShutdownGame( false );
+
+	// Release the engine/tool-side render-geometry copy after renderer teardown.
+	// This is a no-op on static-renderer builds whose shared copy already stopped.
+	R_ShutdownTriSurfData();
 
 	// shut down non-portable system services
 	Sys_Shutdown();
@@ -6194,6 +7902,19 @@ idCommonLocal::InitGame
 =================
 */
 void idCommonLocal::InitGame( void ) {
+	// A game-module reload rebuilds declarations before it replays archived cfgs.
+	// Canonicalize the pending multiplayer mode at the start of that rebuild;
+	// doing this only in LoadGameDLL is too late for the decl checksum.
+	const idStr pendingGameModule = openPREY_SelectGameModuleBaseName();
+	const bool preservePendingGameType = openPREY_IsValidGameModuleName(
+		cvarSystem->GetCVarString( "com_nextGameModule" ) );
+	openQ4_NormalizeGameTypeForModule( pendingGameModule.c_str() );
+	const idStr pendingGameType = cvarSystem->GetCVarString( "si_gameType" );
+
+    if ( pendingGameModule == "game_mp" && !idStr::Icmp( cvarSystem->GetCVarString( "fs_game" ), "q4xbase" ) ) {
+        cvarSystem->SetCVarString( "fs_game", OPENQ4_GAMEDIR );
+        cvarSystem->SetCVarString( "fs_game_base", "" );
+    }
 	// initialize the file system
 	fileSystem->Init();
 
@@ -6224,19 +7945,32 @@ void idCommonLocal::InitGame( void ) {
 	bool sysDetect = ( file == NULL );
 	if ( file ) {
 		fileSystem->CloseFile( file );
-	} else {
-		file = fileSystem->OpenFileWrite( CONFIG_SPEC );
-		fileSystem->CloseFile( file );
 	}
 	
 	idCmdArgs args;
-	if ( sysDetect ) {
-		SetMachineSpec();
-		Com_ExecMachineSpec_f( args );
+	bool detectStartupPreset = false;
+	openQ4PerformancePresetCVarBackup_t startupPresetBootstrap[OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT];
+	bool startupPresetAssigned[OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT] = {};
+	openq4::CVarAssignmentCapture startupPresetCapture;
+#ifndef ID_DEDICATED
+	detectStartupPreset = sysDetect && !SafeMode() && fileSystem->ReadFile( CONFIG_FILE, NULL ) < 0;
+	if ( detectStartupPreset ) {
+		detectStartupPreset = Common_BootstrapStartupPerformancePreset( startupPresetBootstrap );
 	}
+#endif
 
 	// initialize the renderSystem data structures, but don't start OpenGL yet
 	renderSystem->Init();
+
+	// VR commands; its session opens once the renderer has a device
+	vrSystem->Init();
+
+	// The render-geometry library is linked independently into module-only
+	// renderers and the engine. Initialize the engine copy for dmap and the
+	// other in-process tools after the renderer has installed its allocation
+	// hooks, but before startup scripts can invoke a tool command. On static
+	// renderer builds the shared copy is already initialized, so this is a no-op.
+	R_InitTriSurfData();
 
 	// initialize string database right off so we can use it for loading messages
 	const idStr startupLanguageBeforeAutoSelect = cvarSystem->GetCVarString( "sys_lang" );
@@ -6267,6 +8001,15 @@ void idCommonLocal::InitGame( void ) {
 		// Temporary config migration alias for existing development installs.
 		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "exec openq4_defaults.cfg\n" );
 	}
+	if ( detectStartupPreset ) {
+		// Finish shipped defaults before taking the bootstrap baseline: they
+		// are not user overrides. Keep the marker a valid profile name. Platform,
+		// autoexec and launch choices execute after this point and take priority.
+		cmdSystem->ExecuteCommandBuffer();
+		detectStartupPreset = Common_BootstrapStartupPerformancePreset( startupPresetBootstrap );
+		if ( detectStartupPreset ) startupPresetCapture.Begin( OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVARS.data(),
+			OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT, startupPresetAssigned );
+	}
 	const idStr platformProfileConfig = Common_BuildPlatformProfileConfigName( com_platformProfile.GetString() );
 	if ( platformProfileConfig.Length() > 0 && fileSystem->ReadFile( platformProfileConfig, NULL ) >= 0 ) {
 		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, va( "exec %s\n", platformProfileConfig.c_str() ) );
@@ -6284,6 +8027,16 @@ void idCommonLocal::InitGame( void ) {
 			}
 		}
 	}
+
+	// An installer's q4base/autoexec.cfg supplies the first launch's language.
+	// After that the saved config holds the player's Settings choice, which a
+	// player's own autoexec.cfg elsewhere may still override.
+	const bool keepSavedLanguage = !sysDetect && !SafeMode() && Common_IsRetailGameDirFile( "autoexec.cfg" );
+	idStr savedLanguage;
+	if ( keepSavedLanguage ) {
+		cmdSystem->ExecuteCommandBuffer();
+		savedLanguage = cvarSystem->GetCVarString( "sys_lang" );
+	}
 	if ( fileSystem->ReadFile( "autoexec.cfg", NULL ) >= 0 ) {
 		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "exec autoexec.cfg\n" );
 	}
@@ -6295,9 +8048,21 @@ void idCommonLocal::InitGame( void ) {
 		openPREY_NormalizeConfigFilenameCase( legacyConfigNameToMigrate );
 		WriteConfigToFile( CONFIG_FILE );
 	}
+	if ( keepSavedLanguage && savedLanguage.Icmp( cvarSystem->GetCVarString( "sys_lang" ) ) != 0 ) {
+		Printf( "Keeping the saved language '%s' over sys_lang '%s' from " BASE_GAMEDIR "/autoexec.cfg.\n",
+			savedLanguage.c_str(), cvarSystem->GetCVarString( "sys_lang" ) );
+		cvarSystem->SetCVarString( "sys_lang", savedLanguage.c_str() );
+	}
 
 	// re-override anything from the config files with command line args
 	StartupVariable( NULL, false );
+	startupPresetCapture.End();
+	if ( preservePendingGameType ) {
+		// A queued campaign/module handoff owns its mode. Replayed base configs
+		// and one-shot launch settings must not turn a requested CTF game into DM.
+		cvarSystem->SetCVarString( "si_gameType", pendingGameType.c_str() );
+		openQ4_NormalizeGameTypeForModule( pendingGameModule.c_str() );
+	}
 
 	// Reload the language dictionary after cfg/autoexec and command-line cvars
 	// have settled, so +set sys_lang wins over archived startup scripts.
@@ -6306,11 +8071,17 @@ void idCommonLocal::InitGame( void ) {
 	InitLanguageDict( false, false );
 	fileSystem->SetIsFileLoadingAllowed( wasFileLoadingAllowed );
 
+	// A missing or mismatched light-grid or loadscreen pack is reported here,
+	// in the player's language, rather than in English at filesystem startup.
+	FS_RaiseDeferredContentPackFailure();
+
 	bool repairedUnsetMachineSpec = false;
 	if ( com_machineSpec.GetInteger() < 0 ) {
 		Printf( "com_machineSpec is unset; detecting system quality tier.\n" );
 		SetMachineSpec();
-		Com_ExecMachineSpec_f( args );
+		// Repair only the legacy classification. The old four-tier command also
+		// overwrites resolution, AA, textures and VSync using host-wide VRAM.
+		// A missing marker is not permission to replace an existing config.
 		repairedUnsetMachineSpec = true;
 	}
 
@@ -6320,13 +8091,9 @@ void idCommonLocal::InitGame( void ) {
 	// only prints on the run that detects the tier. Every later run -- which is
 	// every run a reporter actually sends -- said nothing about which quality
 	// tier, VRAM figure, preset or ambient floor produced the image they are
-	// asking about (issue #73).
-	Printf(
-		"Quality profile: com_machineSpec=%d com_videoRam=%d com_performancePreset='%s' r_forceAmbient=%.3f\n",
-		com_machineSpec.GetInteger(),
-		com_videoRam.GetInteger(),
-		com_performancePreset.GetString(),
-		cvarSystem->GetCVarFloat( "r_forceAmbient" ) );
+	// asking about (issue #73). A first launch has only the bootstrap profile
+	// here; the detected one is printed once the device exists.
+	Common_PrintQualityProfile( detectStartupPreset );
 
 	// if any archived cvars are modified after this, we will trigger a writing of the config file
 	cvarSystem->ClearModifiedFlags( CVAR_ARCHIVE );
@@ -6335,9 +8102,17 @@ void idCommonLocal::InitGame( void ) {
 	}
 	Common_MigrateLinuxLegacyLowVRamTexturePreset();
 	Common_MigrateLegacyBorderlessWindowDefault();
+	Common_MigrateLegacyNetworkRateCaps();
+	Common_MigrateLegacyVRWeaponOffsets();
+	Common_MigrateLegacyAudioDefaults();
 
 	// cvars are initialized, but not the rendering system. Allow preference startup dialog
 	Sys_DoPreferences();
+	std::string settingsRecoveryError;
+	if ( !UI_SettingsStartup( settingsRecoveryError ) ) {
+		FatalError( "Settings startup recovery failed: %s. Recovery data was retained.", settingsRecoveryError.c_str() );
+		return;
+	}
 
 	// init the user command input code
 	usercmdGen->Init();
@@ -6362,10 +8137,25 @@ void idCommonLocal::InitGame( void ) {
 	} else {
 		// init OpenGL, which will open a window and connect sound and input hardware
 		PrintLoadingMessage( common->GetLanguageDict()->GetString( "#str_04348" ) );
+		if ( !com_skipRenderer.GetBool() && !R_RendererModule_PrepareStartupDevice() ) {
+			// No UI, BSE runtime, game DLL or session has been initialized yet.
+			// The regular owner teardown releases renderer-allocated declarations
+			// and console materials while their module and idLib are still live.
+			com_preserveStartupRecoveryLog = logFile != NULL;
+			ShutdownGame( true );
+			if ( !R_RendererModule_RetryFailedStartup() ) {
+				FatalError( "renderer startup recovery could not retire the failed module" );
+				return;
+			}
+			InitGame();
+			com_preserveStartupRecoveryLog = false;
+			return;
+		}
 		InitRenderSystem();
 	}
 #endif
 
+	InitializationScope initializationScope;
 	PrintLoadingMessage( common->GetLanguageDict()->GetString( "#str_04349" ) );
 
 	// initialize the user interfaces
@@ -6388,16 +8178,23 @@ void idCommonLocal::InitGame( void ) {
 
 	// init the session
 	session->Init();
+	initializationScope.Finish();
 
-	// have to do this twice.. first one sets the correct r_mode for the renderer init
-	// this time around the backend is all setup correct.. a bit fugly but do not want
-	// to mess with all the gl init at this point.. an old vid card will never qualify for 
-	if ( sysDetect ) {
-		SetMachineSpec();
-		Com_ExecMachineSpec_f( args );
-		cvarSystem->SetCVarInteger( "s_numberOfSpeakers", 6 );
-		cmdSystem->BufferCommandText( CMD_EXEC_NOW, "s_restart\n" );
+	// A pending settings recovery owns these fields. Publish the detection
+	// marker only after successful startup, so a renderer fallback that re-enters
+	// InitGame cannot mistake the temporary bootstrap for completed detection.
+	const bool startupRecovery = UI_SettingsStartupActive() || UI_SettingsRecoveryPending();
+	bool startupPresetReady = !detectStartupPreset;
+	if ( detectStartupPreset && !startupRecovery && Common_ApplyStartupPerformancePreset( startupPresetBootstrap, startupPresetAssigned ) ) {
+		// Apply the selected AA/texture/resource policy to the live device before
+		// startup map commands run. Detection never changes the window mode.
+		cmdSystem->BufferCommandText( CMD_EXEC_NOW, "vid_restart\ns_restart\n" );
 		cmdSystem->ExecuteCommandBuffer();
+		startupPresetReady = true;
+	}
+	if ( sysDetect && startupPresetReady && !startupRecovery ) {
+		file = fileSystem->OpenFileWrite( CONFIG_SPEC );
+		if ( file != NULL ) fileSystem->CloseFile( file );
 	}
 }
 
@@ -6407,6 +8204,11 @@ idCommonLocal::ShutdownGame
 =================
 */
 void idCommonLocal::ShutdownGame( bool reloading ) {
+	UI_SettingsShutdown();
+	// Stop advertising a ready single-player module before any shutdown work can
+	// race the async thread or mutate game-owned state.
+	openQ4_singleplayerGameModuleReady.store( false, std::memory_order_release );
+	SetGameTimeScale( 1.0f );
 
 	// kill sound first
 	//idSoundWorld *sw = soundSystem->GetPlayingSoundWorld();
@@ -6422,6 +8224,23 @@ void idCommonLocal::ShutdownGame( bool reloading ) {
 
 	// shut down the session
 	session->Shutdown();
+
+	// The game owns GUI list handlers and may clear GUI, HUD, renderer, sound and
+	// network state during Shutdown.  Run it while those engine services are
+	// still alive, but keep the DLL loaded until game-owned decl instances with
+	// module-local vtables have been released below.
+	Com_SetGameModuleLoadPhase( GAME_MODULE_PHASE_GAME_SHUTDOWN );
+	if ( game != NULL && !gameShutdownCalled ) {
+		// Set this before entering module code so a fatal error raised by game
+		// teardown cannot recursively invoke the same half of the lifecycle.
+		gameShutdownCalled = true;
+		game->Shutdown();
+	}
+
+	// Cached collision polygons retain material declarations. A campaign or
+	// module restart replaces those declarations, so retire the cache after
+	// the game releases its clip models and before renderer/decl teardown.
+	collisionModelManager->Shutdown();
 
 	// shut down the user interfaces
 	uiManager->Shutdown();
@@ -6454,6 +8273,19 @@ void idCommonLocal::ShutdownGame( bool reloading ) {
 	// shutdown the decl manager while the game DLL is still loaded, because
 	// game-owned decl types (e.g. entity/fx decls) can have module-local vtables.
 	declManager->Shutdown();
+
+	// Model decl destructors release idAnim references into the module animation
+	// manager, and all module decl destructors depend on the module idLib.  Those
+	// support resources therefore have a separate late teardown phase.
+	Com_SetGameModuleLoadPhase( GAME_MODULE_PHASE_GAME_FINALIZE );
+	if ( game != NULL && !gameShutdownAfterDeclsCalled ) {
+		// As above, publish the one-shot state before crossing the module boundary.
+		gameShutdownAfterDeclsCalled = true;
+#if !defined( HUMANHEAD )
+		// Prey's v7 idGame has one shutdown phase; its decls are released by Shutdown.
+		game->ShutdownAfterDecls();
+#endif
+	}
 
 	// unload the game dll after game-owned decl instances are released
 	UnloadGameDLL();

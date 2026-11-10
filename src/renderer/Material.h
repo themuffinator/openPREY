@@ -28,6 +28,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #ifndef __MATERIAL_H__
 #define __MATERIAL_H__
+#include "RendererConsumedPolicy.h"
 
 /*
 ===============================================================================
@@ -40,6 +41,87 @@ If you have questions concerning this license or the applicable additional terms
 class idImage;
 class idCinematic;
 class idUserInterface;
+
+// openQ4-only, opt-in physically based material metadata.  This is kept
+// separate from the classic stage list so retail Quake 4 materials retain
+// their exact bump/diffuse/specular parsing and rendering contract.
+typedef enum {
+	PBR_WORKFLOW_NONE = 0,
+	PBR_WORKFLOW_METALLIC_ROUGHNESS,
+	PBR_WORKFLOW_SPECULAR_GLOSSINESS
+} pbrWorkflow_t;
+
+typedef enum {
+	PBR_NORMAL_UNSPECIFIED = -1,
+	PBR_NORMAL_QUAKE4_AGB = 0,
+	PBR_NORMAL_TANGENT_RG,
+	PBR_NORMAL_TANGENT_XYZ
+} pbrNormalFormat_t;
+
+typedef struct {
+	idImage *	image;
+	bool		present;
+	int			filter;			// textureFilter_t, retained for classic fallback generation
+	int			repeat;			// textureRepeat_t, retained for classic fallback generation
+	bool		allowPicmip;
+	bool		noMips;
+	bool		highQuality;
+	bool		forceHighQuality;
+} pbrMaterialTexture_t;
+
+typedef struct {
+	bool				enabled;
+	pbrWorkflow_t		workflow;
+	pbrNormalFormat_t	normalFormat;
+	pbrMaterialTexture_t albedo;
+	pbrMaterialTexture_t normal;
+	pbrMaterialTexture_t orm;
+	pbrMaterialTexture_t metallic;
+	pbrMaterialTexture_t roughness;
+	pbrMaterialTexture_t ao;
+	pbrMaterialTexture_t emissive;
+	pbrMaterialTexture_t legacyBump;
+	pbrMaterialTexture_t legacyDiffuse;
+	pbrMaterialTexture_t legacySpecular;
+	pbrMaterialTexture_t legacyEmissive;
+	int					metallicRegister;
+	int					roughnessRegister;
+	int					aoRegister;
+	int					normalScaleRegister;
+	int					emissiveColorRegisters[3];
+	bool				autoLegacyFallback;
+	bool				hasAuthoredClassicFallback;
+	bool				hasExplicitLegacyFallback;
+	bool				usesGeneratedLegacyFallback;
+	bool				usesApproximateLegacyFallback;
+	bool				legacyFallbackMissing;
+	// Separate metallic/roughness/AO maps were packed into `orm` (packORM).
+	bool				packedSeparateData;
+} pbrMaterialInfo_t;
+
+// An authored specular probe is renderer metadata carried by a light material.
+// The light still supplies the spatial volume; this block supplies only the
+// immutable image and ranking/blending policy.  Keeping it out of renderLight_t
+// preserves the game-module, save-game, demo, and network contracts.
+typedef enum {
+	SPECULAR_PROBE_CUBE_NONE = 0,
+	SPECULAR_PROBE_CUBE_NATIVE,
+	SPECULAR_PROBE_CUBE_CAMERA
+} specularProbeCubeConvention_t;
+
+typedef struct {
+	bool						enabled;
+	idImage *				cubeImage;
+	specularProbeCubeConvention_t cubeConvention;
+	float					tint[3];
+	float					intensity;
+	float					blendFraction;
+	int						priority;
+	// The light's volume is a box room the cube map was captured inside:
+	// reflections are parallax-corrected against it and its weight falls off
+	// at its faces, so its light_radius may differ per axis.
+	bool					boxParallax;
+} specularProbeMaterialInfo_t;
 
 // moved from image.h for default parm
 typedef enum {
@@ -392,7 +474,8 @@ typedef enum {
 	MF_NOPORTALFOG = BIT(5),	// this fog volume won't ever consider a portal fogged out
 	MF_EDITOR_VISIBLE = BIT(6),	// in use (visible) per editor
 	MF_SKY = BIT(7),
-	MF_NEED_CURRENT_RENDER = BIT(8)
+	MF_NEED_CURRENT_RENDER = BIT(8),
+	MF_NOSHADOWS_EXPLICIT = BIT(9) // authored noShadows/DECAL_MACRO, not inferred from translucent coverage
 } materialFlags_t;
 
 // contents flags, NOTE: make sure to keep the defines in doom_defs.script up to date with these!
@@ -541,6 +624,10 @@ class idSoundEmitter;
 class idMaterial : public idDecl {
 public:
 	idMaterial();
+	idMaterial(const idMaterial&) = delete;
+	idMaterial& operator=(const idMaterial&) = delete;
+	uint64_t GetImagePolicyIdentity() const { return imagePolicyIdentity; }
+	bool GetConsumedPolicy(materialConsumedPolicy_t& output) const;
 	virtual				~idMaterial();
 
 	virtual size_t		Size(void) const;
@@ -568,6 +655,31 @@ public:
 
 	// get a specific stage
 	const shaderStage_t* GetStage(const int index) const { assert(index >= 0 && index < numStages); return &stages[index]; }
+
+	// PBR metadata is consumed only by explicitly enabled modern renderer paths.
+	// Classic callers continue to use the unchanged stage list.
+	bool				HasPBR(void) const { return pbrInfo.enabled; }
+	const pbrMaterialInfo_t& GetPBRInfo(void) const { return pbrInfo; }
+
+	// openQ4-authored light-material metadata. Classic material stages and
+	// every public render-light/game ABI remain unchanged.
+	bool				HasSpecularProbe(void) const { return specularProbeInfo.enabled && !TestMaterialFlag( MF_DEFAULTED ); }
+	const specularProbeMaterialInfo_t& GetSpecularProbeInfo(void) const { return specularProbeInfo; }
+
+	// Retarget a parsed stage without rewriting authored declaration text.
+	// Runtime-generated images (for example the scalable console font atlas)
+	// must not change the declaration checksum used by multiplayer handshakes.
+	bool				OverrideStageImageForRuntime(const int index, idImage* image) {
+		if (index < 0 || index >= numStages || image == NULL) {
+			return false;
+		}
+		shaderStage_t& stage = stages[index];
+		if (stage.newStage != NULL || stage.texture.cinematic != NULL || stage.texture.dynamic != DI_STATIC) {
+			return false;
+		}
+		stage.texture.image = image;
+		return true;
+	}
 
 	// get the first bump map stage, or NULL if not present.
 	// used for bumpy-specular
@@ -606,6 +718,12 @@ public:
 	// distinction between global and no-self shadows
 	bool				SurfaceCastsShadow(void) const {
 		return TestMaterialFlag(MF_FORCESHADOWS) || !TestMaterialFlag(MF_NOSHADOWS);
+	}
+
+	// Translucent shadow options may override the coverage-implied default,
+	// but must retain authored opt-outs. forceShadows keeps its usual priority.
+	bool				ExplicitlyDisablesShadows(void) const {
+		return TestMaterialFlag(MF_NOSHADOWS_EXPLICIT) && !TestMaterialFlag(MF_FORCESHADOWS);
 	}
 
 	// returns true if the material will generate interactions with fog/blend lights
@@ -829,6 +947,9 @@ public:
 	// will return a pointer to an internal table, and EvaluateRegisters will not need
 	// to be called.  If NULL is returned, EvaluateRegisters must be used.
 	const float* ConstantRegisters() const;
+	// Prove an individual literal/folded register independently of the optional
+	// whole-material cache and of unrelated animated material parameters.
+	bool GetConstantRegisterValue( int registerIndex, float &value ) const;
 
 	bool				SuppressInSubview() const { return suppressInSubview; };
 	bool				IsPortalSky() const { return portalSky; };
@@ -843,6 +964,10 @@ public:
 	virtual void		ResolveUse();
 
 private:
+	materialConsumedPolicy_t consumedPolicy{};
+	uint64_t consumedParseRevision = 0;
+	uint32_t consumedParseDepth = 0;
+	const uint64_t imagePolicyIdentity;
 	// parse the entire material
 	void				CommonInit();
 	void				ParseMaterial(idLexer& src);
@@ -855,6 +980,10 @@ private:
 	void				ParseShaderParm(idLexer& src, newShaderStage_t* newStage);
 	void				ParseShaderTexture(idLexer& src, newShaderStage_t* newStage);
 	void				ParseStage(idLexer& src, const textureRepeat_t trpDefault = TR_REPEAT);
+	bool				ParsePBRBlock(idLexer& src, const textureRepeat_t trpDefault);
+	bool				ParsePBRImage(idLexer& src, pbrMaterialTexture_t& target, const int usage, const textureRepeat_t trpDefault);
+	bool				ParseSpecularProbeBlock(idLexer& src);
+	void				AddPBRLegacyFallbackStages(const textureRepeat_t trpDefault);
 	void				ParseDeform(idLexer& src);
 	void				ParseDecalInfo(idLexer& src);
 	bool				CheckSurfaceParm(idToken* token);
@@ -962,11 +1091,20 @@ private:
 	bool				portalSky;
 	subviewClass_t		subviewClass;
 	int					directPortalDistance;
+	pbrMaterialInfo_t	pbrInfo;
+	specularProbeMaterialInfo_t specularProbeInfo;
+	// parse-time structural fact: some stage carries an active-able customLighting
+	// GLSL program (newStage with customLighting + glslProgram). Lets the hot
+	// per-surface interaction and shadow-receiver chain scans early-out without
+	// walking every stage; register conditions are still evaluated when set.
+	bool				hasCustomGLSLLightingStage;
 	int					refCount;
 };
 
 // Parser-free regression hook for custom GLSL receiver compatibility helpers.
 bool R_MaterialCustomGLSLReceiverHelperSelfTest( void );
+bool R_PBRMaterialParserSelfTest( void );
+bool R_SpecularProbeMaterialParserSelfTest( void );
 
 typedef idList<const idMaterial*> idMatList;
 

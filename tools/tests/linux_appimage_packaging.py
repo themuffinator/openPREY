@@ -215,11 +215,26 @@ def validate_user_documentation() -> None:
             require(text, token, f"AppImage documentation in {relative}")
 
 
+def validate_game_layer_runtime_paths() -> None:
+    """User content or obsolete expansion modules never add an AppImage runtime dependency."""
+    work = ROOT / ".tmp" / "openq4-appimage-policy" / "layer-paths"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    base = APPIMAGE.core_runtime_relative_paths(work, "arm64")
+    if base != APPIMAGE.CORE_RUNTIME_RELATIVE_PATHS["arm64"]:
+        raise AssertionError("an AppImage without q4xbase prepares exactly the core runtime")
+    (work / "q4xbase").mkdir()
+    with_layer = APPIMAGE.core_runtime_relative_paths(work, "arm64")
+    if with_layer != base:
+        raise AssertionError(f"obsolete q4xbase modules must not enter the AppImage runtime: {with_layer}")
+
+
 def main() -> None:
     try:
         validate_filename_policy()
         validate_desktop_and_apprun_generation()
         validate_tree_safety()
+        validate_game_layer_runtime_paths()
         validate_environment_safety_policy()
         validate_release_workflow_policy()
         validate_user_documentation()

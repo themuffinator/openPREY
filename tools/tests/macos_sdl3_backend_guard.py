@@ -47,8 +47,8 @@ def require_before(haystack: str, first: str, second: str, context: str) -> None
 
 
 def validate_macos_sdl3_source_selection() -> None:
-    wrapper = read("src/sys/osx/macosx_sdl3.cpp")
-    main = read("src/sys/osx/macosx_sdl3_main.cpp")
+    wrapper = read("src/sys/macos/macos_sdl3.cpp")
+    main = read("src/sys/macos/macos_sdl3_main.cpp")
     sources = read("tools/build/meson_sources.py")
     display = function_body(wrapper, "CGDirectDisplayID Sys_DisplayToUse(void) {")
     openq4_main = function_body(main, "static int SDLCALL OpenQ4_Main(int argc, char **argv) {")
@@ -57,8 +57,8 @@ def validate_macos_sdl3_source_selection() -> None:
     require(wrapper, "#define OPENQ4_SDL3_DARWIN_HOST 1", "macOS SDL3 wrapper host marker")
     require(wrapper, '#include "../sdl3/sdl3_backend.cpp"', "macOS SDL3 wrapper shared backend")
     require(sources, "SDL3_DARWIN_SOURCES", "macOS SDL3 source manifest")
-    require(sources, '"sys/osx/macosx_sdl3.cpp"', "macOS SDL3 source manifest")
-    require(sources, '"sys/osx/macosx_sdl3_main.cpp"', "macOS SDL3 source manifest")
+    require(sources, '"sys/macos/macos_sdl3.cpp"', "macOS SDL3 source manifest")
+    require(sources, '"sys/macos/macos_sdl3_main.cpp"', "macOS SDL3 source manifest")
 
     for token in (
         "CGGetActiveDisplayList",
@@ -79,13 +79,12 @@ def validate_macos_sdl3_source_selection() -> None:
 
 
 def validate_macos_process_handoff_guards() -> None:
-    source = read("src/sys/osx/macosx_misc.mm")
+    source = read("src/sys/macos/macos_misc.mm")
     start_process = function_body(source, "static bool OSX_StartProcessArgs( char *const argv[], bool dofork ) {")
     drop_environment = function_body(source, "static bool OSX_ShouldDropProcessEnvironmentEntry( const char *entry ) {")
     filtered_environment = function_body(source, "static char **OSX_CreateFilteredProcessEnvironment() {")
     do_start_process = function_body(source, "void Sys_DoStartProcess( const char *exeName, bool dofork ) {")
     allowed_url = function_body(source, "static bool OSX_IsAllowedURL( NSURL *url ) {")
-    file_url = function_body(source, "static bool OSX_FileURLIsLocalRuntimeFile( NSURL *url ) {")
     open_url = function_body(source, "void idSysLocal::OpenURL( const char *url, bool doexit ) {")
 
     require(source, "static bool OSX_IsAbsolutePath( const char *path )", "macOS process handoff absolute-path helper")
@@ -113,14 +112,14 @@ def validate_macos_process_handoff_guards() -> None:
     require(do_start_process, 'common->Printf( "Sys_DoStartProcess: invalid command line\\n" );', "macOS invalid process command diagnostic")
     reject(do_start_process, 'invalid command line \'%s\'', "macOS invalid process command diagnostic")
 
-    require(source, "MAX_OSX_URL_LENGTH", "macOS URL length guard")
-    require(open_url, "OSX_URLHasSafeSchemeSyntax( url )", "macOS URL syntax guard")
-    require(open_url, "OpenURL rejected: expected a bounded URL with a safe scheme", "macOS unsafe URL diagnostic")
+    require(source, '#include "../URLPolicy.h"', "shared macOS URL policy")
+    require(open_url, "idURLPolicy::IsAllowedHTTPURL( url )", "macOS HTTP(S)-only URL guard")
+    require(open_url, "OpenURL rejected: expected a bounded HTTP or HTTPS URL with a host", "macOS unsafe URL diagnostic")
     require(open_url, "OpenURL rejected: URL is not valid UTF-8", "macOS unsafe URL diagnostic")
     require(open_url, "OpenURL rejected: Foundation could not parse URL", "macOS unsafe URL diagnostic")
-    require(open_url, "OpenURL rejected: scheme is not allowed", "macOS unsafe URL diagnostic")
+    require(open_url, "OpenURL rejected: Foundation did not preserve the required HTTP(S) host", "macOS unsafe URL diagnostic")
     require(open_url, "OpenURL failed after validation", "macOS URL handoff diagnostic")
-    require_before(open_url, "OSX_URLHasSafeSchemeSyntax( url )", 'NSString *urlString = [ NSString stringWithUTF8String: url ];', "macOS URL syntax before UTF-8 bridge")
+    require_before(open_url, "idURLPolicy::IsAllowedHTTPURL( url )", 'NSString *urlString = [ NSString stringWithUTF8String: url ];', "macOS URL policy before UTF-8 bridge")
     require_before(open_url, "OSX_IsAllowedURL( nsURL )", 'common->Printf( "Open URL: %s\\n", url );', "macOS URL logging after allowlist guard")
     require_before(open_url, 'common->Printf( "Open URL: %s\\n", url );', "openURL: nsURL", "macOS approved URL logging before AppKit handoff")
     require(open_url, "OSX_IsAllowedURL( nsURL )", "macOS URL allowlist guard")
@@ -129,15 +128,9 @@ def validate_macos_process_handoff_guards() -> None:
     require(allowed_url, '[scheme caseInsensitiveCompare:@"https"]', "macOS URL allowlist")
     require(allowed_url, '[scheme caseInsensitiveCompare:@"http"]', "macOS URL allowlist")
     require(allowed_url, "return host != nil && [host length] > 0;", "macOS HTTP URL host guard")
-    require(allowed_url, '[scheme caseInsensitiveCompare:@"file"]', "macOS URL allowlist")
-    require(file_url, "[url isFileURL]", "macOS file URL local-file guard")
-    require(file_url, "OSX_StringHasControlCharacters( path )", "macOS file URL local-file guard")
-    require(file_url, "OSX_IsAbsolutePath( path )", "macOS file URL local-file guard")
-    require(file_url, "OSX_IsRegularFile( path )", "macOS file URL local-file guard")
-    require(file_url, 'GetCVarString( "fs_savepath" )', "macOS file URL runtime-root guard")
-    require(file_url, 'GetCVarString( "fs_basepath" )', "macOS file URL runtime-root guard")
-    require(file_url, "OSX_ResolvedPathIsUnderDirectory( path, savePath )", "macOS file URL runtime-root guard")
-    reject(source, "static bool OSX_IsSafeURL", "macOS URL broad scheme guard")
+    reject(allowed_url, '[scheme caseInsensitiveCompare:@"file"]', "macOS file URL policy")
+    reject(source, "OSX_FileURLIsLocalRuntimeFile", "macOS file URL launcher")
+    reject(source, "OSX_URLHasSafeSchemeSyntax", "macOS broad URL syntax-only policy")
 
 
 def validate_sdl3_context_teardown_guards() -> None:
@@ -145,6 +138,7 @@ def validate_sdl3_context_teardown_guards() -> None:
     # compiled into the SDL3 backend until the module split (Phase B8)
     source = read("src/renderer/OpenGL/gl_ContextSDL3.cpp")
     ensure_current = function_body(source, "static bool SDL3_EnsureGLContextCurrent(const char *operation) {")
+    apply_swap = function_body(source, "static bool SDL3_ApplySwapInterval(void) {")
     screen_parms = function_body(source, "bool GLimp_SetScreenParms(glimpParms_t parms) {")
     shutdown = function_body(source, "void GLimp_Shutdown(void) {")
     swap = function_body(source, "void GLimp_SwapBuffers(void) {")
@@ -164,11 +158,23 @@ def validate_sdl3_context_teardown_guards() -> None:
     ):
         require(ensure_current, token, "SDL3 current-context helper")
 
+    require(apply_swap, 'SDL3_EnsureGLContextCurrent("swap interval update")', "SDL3 swap-interval current-context guard")
+    require_before(
+        apply_swap,
+        'SDL3_EnsureGLContextCurrent("swap interval update")',
+        "SetGLSwapInterval(requestedInterval)",
+        "SDL3 swap-interval current-context guard",
+    )
     require(screen_parms, 'SDL3_EnsureGLContextCurrent("screen parm change")', "SDL3 screen-parm current-context guard")
     require(shutdown, "if (s_glWindow) {\n\t\t\t(void)windowServices->MakeGLContextCurrent(NULL);", "SDL3 shutdown context detach guard")
     reject(shutdown, "(void)windowServices->MakeGLContextCurrent(NULL);\n\t\twindowServices->DestroyGLContext", "SDL3 shutdown unguarded context detach")
 
-    require(swap, 'if (SDL3_EnsureGLContextCurrent("swap buffers") && !s_glWindowServices->SwapGLWindow())', "SDL3 swap current-context guard")
+    require(swap, 'const bool contextCurrent = SDL3_EnsureGLContextCurrent("swap buffers");', "SDL3 measured current-context check")
+    current_guard = 'if (!contextCurrent) {'
+    guard_body = function_body(swap, current_guard)
+    require(guard_body, "return;", "SDL3 failed current-context stops presentation")
+    require_before(swap, current_guard, "s_glWindowServices->SwapGLWindow()", "SDL3 swap current-context guard")
+    require_before(swap, current_guard, "RB_GLES_RestoreStateAfterOverlay();", "GLES overlay restore current-context guard")
     reject(swap, "if (s_glWindow && !s_glWindowServices->SwapGLWindow())", "SDL3 swap window-only guard")
 
     require(activate, 'SDL3_EnsureGLContextCurrent("activate context")', "SDL3 activate current-context guard")
@@ -382,7 +388,7 @@ def validate_posix_signal_guards() -> None:
 
 
 def validate_native_vram_probe_guards() -> None:
-    source = read("src/sys/osx/macosx_compat.mm")
+    source = read("src/sys/macos/macos_compat.mm")
     video_ram = function_body(source, "int Sys_GetVideoRam( void ) {")
 
     require(video_ram, "const CGDirectDisplayID display = Sys_DisplayToUse();", "native macOS VRAM display guard")

@@ -15,6 +15,11 @@ openQ4 multi-view demo recording and playback.
 #define OPENPREY_ENABLE_MVD 0
 #endif
 
+#include "NetworkSystem.h"
+#include "MvdNavigation.h"
+
+#include <vector>
+
 class idFile;
 class idBitMsg;
 class idCmdArgs;
@@ -34,6 +39,8 @@ struct mvdFileInfo_t {
 	int						snapshotCount;
 	int						reliableCount;
 	int						recordCount;
+	int						markerCount;
+	int						keyframeCount;
 	int						fileSize;
 	idStr					mapName;
 	idStr					gameType;
@@ -51,6 +58,10 @@ public:
 	void					SessionStop();
 
 	bool					IsRecording() const;
+	bool					StartNamedRecording( const char *name );
+	bool					StopRecordingCleanly( const char *reason );
+	bool					CopyRecordingQPath( char *buffer, int bufferSize ) const;
+	bool					CopyRecordingResult( serverMVDRecordingResult_t &result ) const;
 	bool					IsPlaying() const;
 	bool					IsPaused() const;
 	bool					IsSeeking() const;
@@ -68,11 +79,19 @@ public:
 	bool					SeekByMS( int deltaMS );
 	void					StepFrames( int frames );
 	void					FollowNext();
+	void					FollowPrev();
+	bool					FollowClient( int clientNum );
+	int						FindFollowClient( const char *text ) const;
+	bool					CopyFollowName( int clientNum, idStr &name ) const;
 	void					FreeRoam();
 	bool					QueryFileInfo( const char *name, mvdFileInfo_t &info );
+	int						GetMarkerCount() const;
+	bool					SeekToMarker( int direction, int kindFilter );
 
 	void					CaptureServerFrame( int gameFrame, int gameTime );
 	void					CaptureReliableMessage( const idBitMsg &msg, int routeType, int routeClient, int routeInstance = -1 );
+	void					CaptureUserInfo( int clientNum, const idDict &info );
+	bool					RecordMarker( const serverMVDMarker_t &marker );
 	void					RunPlaybackFrame();
 	void					OnServerMapChange();
 
@@ -80,13 +99,22 @@ public:
 	static void				Stop_f( const idCmdArgs &args );
 	static void				Play_f( const idCmdArgs &args );
 	static void				Info_f( const idCmdArgs &args );
+	static void				Status_f( const idCmdArgs &args );
+	static void				Library_f( const idCmdArgs &args );
 	static void				Pause_f( const idCmdArgs &args );
 	static void				Seek_f( const idCmdArgs &args );
 	static void				Skip_f( const idCmdArgs &args );
 	static void				Speed_f( const idCmdArgs &args );
 	static void				Step_f( const idCmdArgs &args );
+	static void				Recover_f( const idCmdArgs &args );
 	static void				FollowNext_f( const idCmdArgs &args );
+	static void				FollowPrev_f( const idCmdArgs &args );
+	static void				Follow_f( const idCmdArgs &args );
 	static void				FreeRoam_f( const idCmdArgs &args );
+	static void				Mark_f( const idCmdArgs &args );
+	static void				Markers_f( const idCmdArgs &args );
+	static void				Marker_f( const idCmdArgs &args );
+	static void				AutoTrack_f( const idCmdArgs &args );
 
 private:
 	enum state_t {
@@ -142,6 +170,7 @@ private:
 	header_t				header;
 
 	int						recordingStartRealTime;
+	int64_t					recordingLibraryByteLimit;
 	int						lastSnapshotGameFrame;
 	int						lastSnapshotGameTime;
 	int						lastSnapshotFileOffset;
@@ -163,25 +192,39 @@ private:
 	bool					seekInProgress;
 	bool					forcePresentationFrame;
 	int						seekTargetGameTime;
+	int						preferredFollowClient;
 	int						playbackStreamOffset;
 	int						playbackInitializationRecordCount;
 	int						playbackEndGameTime;
 	int						playbackLastRecordGameFrame;
 	int						playbackLastRecordGameTime;
-	int						pendingButtons;
-	int						pendingUpMove;
 	record_t				pendingRecord;
 	record_t				playbackMapState;
 	record_t				playbackNetworkState;
 	idList<indexEntry_t>	recordingIndex;
+	// Format 1.3 navigation. While recording these collect the directories
+	// written at finalization; during playback they hold what was read back.
+	std::vector<openq4_mvd::Marker>	markers;
+	std::vector<openq4_mvd::Keyframe> keyframes;
+	int						markersDropped;
+	int						lastKeyframeGameTime;
+	int						lastMarkerIndex;
+	int						nextPlaybackMarker;
+	bool					keyframeWritesDisabled;
+	serverMVDRecordingResult_t recordingResult;
+	bool					recordingResultValid;
 
 	void					Clear();
+	void					ClearState();
 	bool					StartRecording( const idCmdArgs &args );
-	void					StopRecording( const char *reason, bool finalize );
+	bool					StopRecording( const char *reason, bool finalize,
+							serverMVDResultReason_t failureReason =
+								SERVER_MVD_REASON_STREAM_WRITE_FAILED );
 	bool					StartPlayback( const idCmdArgs &args );
 	void					StopPlayback( const char *reason );
 	void					FinishPlayback( const char *reason, bool warning );
 	bool					Inspect( const idCmdArgs &args );
+	bool					Recover( const idCmdArgs &args );
 
 	bool					WriteHeader();
 	bool					ReadHeader( idFile *source, header_t &outHeader );
@@ -193,8 +236,18 @@ private:
 	bool					WriteMapStateRecord();
 	bool					WriteNetworkStateRecord();
 	bool					WriteIndexRecord();
+	bool					WriteNavigationRecords();
+	bool					WriteKeyframeRecord( int gameFrame, int gameTime );
+	void					WriteMapStatePayload( idFile *payload ) const;
 	bool					ReadMapStateRecord( const record_t &record );
+	bool					ReadMapStatePayload( const byte *data, int length, idDict &serverInfo,
+								idDict &syncedCVars, idDict userInfo[MAX_ASYNC_CLIENTS] );
 	bool					ValidateNetworkStateRecord( const record_t &record, idStr &error ) const;
+	bool					ValidateNetworkStatePayload( const byte *bytes, int length, idStr &error ) const;
+	bool					NoteNavigationRecord( const record_t &record, int fileOffset );
+	bool					ParseNavigationTable( const record_t &record, int streamStart, int tableOffset );
+	bool					ApplyUserInfoRecord( const record_t &record );
+	bool					JumpToKeyframe( int index, bool &worldReset );
 	bool					ProcessPlaybackRecord( const record_t &record, bool &finished );
 	bool					RecordTimestamp( const record_t &record, int &gameTime ) const;
 	bool					LoadNextPlaybackRecord();
@@ -205,6 +258,9 @@ private:
 
 	idStr					BuildRecordingName( const idCmdArgs &args ) const;
 	idStr					BuildPlaybackName( const char *name ) const;
+	void					SetRecordingResult( serverMVDResultState_t resultState,
+							serverMVDResultReason_t resultReason,
+							const char *finalQPath, const char *partialQPath );
 	bool					CommitRecording();
 	bool					WouldExceedLimits( int additionalBytes ) const;
 };

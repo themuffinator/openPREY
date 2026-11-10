@@ -81,6 +81,7 @@ typedef enum {
 	CVAR_SPECIAL_CONCAT		= BIT(22),	// special concatination of the incoming string to the cvar system, will remove space between ^ and the code that is produced by tokenzier
 	CVAR_STRIPTRAILING		= BIT(23),	// always strip trailing / on that cvar
 	CVAR_REPEATERINFO		= BIT(24),	// sent from repeaters, available to menu
+	CVAR_PRIVATE			= BIT(25),	// secret value: redact from console output and omit from generic serialization
 } cvarFlags_t;
 
 
@@ -253,6 +254,17 @@ public:
 							// Moves CVars to and from dictionaries.
 	virtual const idDict *	MoveCVarsToDict( int flags ) const = 0;
 	virtual void			SetCVarsFromDict( const idDict &dict ) = 0;
+	// Applies only CVars carrying exactly the authority represented by one of
+	// CVAR_USERINFO, CVAR_SERVERINFO, or CVAR_NETWORKSYNC.  Network decoders
+	// must use this entry point instead of granting a received dictionary the
+	// authority to force-set arbitrary registered CVars.
+	virtual bool			SetCVarsFromDictByFlags( const idDict &dict, int requiredFlag ) = 0;
+
+	// ABI rule: append new virtual methods here.  Inserting one above the
+	// legacy SetCVarsFromDict tail silently changes every later vtable slot for
+	// an otherwise version-compatible game module.
+	// Console front ends use this before echoing or retaining typed input.
+	virtual bool			CommandContainsPrivateCVar( const char *commandText ) const = 0;
 };
 
 extern idCVarSystem *		cvarSystem;

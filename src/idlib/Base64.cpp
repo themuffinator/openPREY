@@ -89,6 +89,10 @@ void idBase64::Encode( const byte *from, int size ) {
 	}
 	
 	EnsureAlloced( (int)encodedSize ); // ratio and padding + trailing \0
+	if ( data == NULL ) {
+		len = 0;
+		return;
+	}
 	to = data;
 	
 	w = 0;
@@ -166,7 +170,6 @@ int idBase64::Decode( byte *to ) const {
 		return 0;
 	}
 
-	w = 0;
 	i = 0;
 	n = 0;
 	byte in[4] = {0,0,0,0};
@@ -177,7 +180,7 @@ int idBase64::Decode( byte *to ) const {
 		}
 		int sixtet = Base64_DecodeSixtet( *from );
 		if ( sixtet < 0 ) {
-			return n;
+			return idLib::SizeToInt( n, "idBase64::Decode" );
 		}
 		in[i] = (byte)sixtet;
 		++i;
@@ -190,7 +193,6 @@ int idBase64::Decode( byte *to ) const {
 				w >>= 8;
 			}
 			i = 0;
-			w = 0;
 			memset( in, 0, sizeof( in ) );
 		}
 	}
@@ -203,7 +205,7 @@ int idBase64::Decode( byte *to ) const {
 			w >>= 8;
 		}
 	}
-	return n;
+	return idLib::SizeToInt( n, "idBase64::Decode" );
 }
 
 /*

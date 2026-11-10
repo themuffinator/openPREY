@@ -17,7 +17,7 @@ Defaults:
 - Memory/CPU: 8 GB RAM, 4 vCPUs
 - Shared folders:
   - `openQ4` -> this repository, writable only so guest logs can return under `.tmp/`
-  - `openQ4-game` -> companion repo, read-only
+  - The `openQ4` share includes canonical SP/MP game sources.
   - `Quake4` -> Steam Quake 4 install, read-only
   - `Downloads` -> host Downloads folder, read-only, for the Quake 4 patch payload
 
@@ -61,7 +61,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/vmware/Invoke-openQ4Li
 - formats/mounts the second disk as `/mnt/openq4-data`
 - copies Quake 4 assets to `/mnt/openq4-data/Quake4`
 - applies the Downloads 1.4.2 patch overlay only when the copied assets do not already look patched
-- syncs `openQ4` and `openQ4-game` into `~/openq4-work/` on the guest ext4 disk
+- syncs `openQ4`, including its SP/MP sources, into `~/openq4-work/` on the guest ext4 disk
 - configures, builds, and stages openQ4 with `tools/build/meson_setup.sh`
 - runs the smoke profile from `tools/tests/renderer_gameplay_benchmark.py` against `/mnt/openq4-data/Quake4`
 - installs an executable `openQ4.desktop` launcher on the Mint desktop, pointing at the staged `.install` runtime and copied Quake 4 assets
@@ -91,7 +91,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/vmware/Invoke-openQ4Li
 ## Guest Paths
 
 - Guest source workspace: `~/openq4-work/openQ4`
-- Guest GameLibs workspace: `~/openq4-work/openQ4-game`
+- Guest game sources: `~/openq4-work/openQ4/src/game` and `src/mpgame`
 - Guest staged runtime: `~/openq4-work/openQ4/.install`
 - Guest Quake 4 assets: `/mnt/openq4-data/Quake4`
 - Guest desktop launcher: `~/Desktop/openQ4.desktop`

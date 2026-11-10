@@ -1,0 +1,7 @@
+{
+  "format": 1,
+  "abi": "@ANDROID_ABI@",
+  "variant": "@ANDROID_VARIANT@",
+  "androidApi": @ANDROID_API@,
+  "sdlVersion": "@SDL_VERSION@"
+}

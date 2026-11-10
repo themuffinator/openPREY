@@ -130,12 +130,17 @@ static int R_CountPackedTurboShadowingFaces( const rvMD5RMesh &mesh, const rvMD5
 
 static int R_CreatePackedTurboShadowSideWalls( const rvMD5RPrimBatch &primBatch, const silEdge_t *batchSilEdges, glIndex_t *shadowIndices, const byte *batchFacing ) {
 	int emittedIndexCount = 0;
+	const int batchTriangleCount = primBatch.silTraceGeoSpec.primitiveCount;
 
 	for ( int silEdgeIndex = 0; silEdgeIndex < primBatch.silEdgeCount; ++silEdgeIndex ) {
 		const silEdge_t &sil = batchSilEdges[ silEdgeIndex ];
+		// p2 == the batch triangle count is the classic dangling-edge sentinel:
+		// an open edge of the mesh, or one whose other face landed in another
+		// prim batch. Its missing face counts as lit, as the padded facing entry
+		// does for whole surfaces, so each batch's volume stays closed.
 		if ( sil.p1 < 0 || sil.p2 < 0
-			|| sil.p1 >= primBatch.silTraceGeoSpec.primitiveCount
-			|| sil.p2 >= primBatch.silTraceGeoSpec.primitiveCount
+			|| sil.p1 >= batchTriangleCount
+			|| sil.p2 > batchTriangleCount
 			|| sil.v1 < 0 || sil.v2 < 0
 			|| sil.v1 >= primBatch.silTraceGeoSpec.vertexCount
 			|| sil.v2 >= primBatch.silTraceGeoSpec.vertexCount ) {
@@ -143,7 +148,7 @@ static int R_CreatePackedTurboShadowSideWalls( const rvMD5RPrimBatch &primBatch,
 		}
 
 		const int f1 = batchFacing[ sil.p1 ];
-		const int f2 = batchFacing[ sil.p2 ];
+		const int f2 = ( sil.p2 == batchTriangleCount ) ? 1 : batchFacing[ sil.p2 ];
 		if ( !( f1 ^ f2 ) ) {
 			continue;
 		}
@@ -394,7 +399,9 @@ srfTriangles_t *R_CreateVertexProgramTurboShadowVolume( const idRenderEntityLoca
 	glIndex_t *tempIndexes = newTri->indexes;
 	glIndex_t *shadowIndexes = newTri->indexes;
 #else
-	glIndex_t *tempIndexes = (glIndex_t *)_alloca16( tri->numSilEdges * 6 * sizeof( tempIndexes[0] ) );
+	// sil edges grow with the surface, so a large surface builds its sil
+	// planes on the heap rather than walking off the end of the stack
+	OPENQ4_ALLOC16_SCRATCH( glIndex_t, tempIndexes, tri->numSilEdges * 6 );
 	glIndex_t *shadowIndexes = tempIndexes;
 #endif
 
@@ -585,7 +592,7 @@ srfTriangles_t *R_CreateTurboShadowVolume( const idRenderEntityLocal *ent,
 	glIndex_t *tempIndexes = newTri->indexes;
 	glIndex_t *shadowIndexes = newTri->indexes;
 #else
-	glIndex_t *tempIndexes = (glIndex_t *)_alloca16( tri->numSilEdges * 6 * sizeof( tempIndexes[0] ) );
+	OPENQ4_ALLOC16_SCRATCH( glIndex_t, tempIndexes, tri->numSilEdges * 6 );
 	glIndex_t *shadowIndexes = tempIndexes;
 #endif
 
@@ -671,17 +678,26 @@ geometry and should never be fed packed surfaces directly.
 */
 srfTriangles_t *R_CreateTurboShadowVolumeForSurface( const idRenderEntityLocal *ent,
 		const srfTriangles_t *tri, const idRenderLightLocal *light, srfCullInfo_t &cullInfo ) {
+	gpuSkinningSurface_t gpuSurface;
+	const bool gpuStencilFallback = r_gpuSkinning.GetBool()
+		&& R_GpuSkinning_IsCandidate( tri )
+		&& R_GpuSkinning_GetSurface( tri, gpuSurface );
+	srfTriangles_t *shadowTri = NULL;
 #if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
 	if ( tri->primBatchMesh != NULL ) {
-		if ( srfTriangles_t *packedShadowTri = R_CreatePackedTurboShadowVolume( ent, tri, light, cullInfo ) ) {
-			return packedShadowTri;
-		}
+		shadowTri = R_CreatePackedTurboShadowVolume( ent, tri, light, cullInfo );
 	}
 #endif
 
-	if ( tr.backEndRendererHasVertexPrograms && r_useShadowVertexProgram.GetBool() ) {
-		return R_CreateVertexProgramTurboShadowVolume( ent, tri, light, cullInfo );
+	if ( shadowTri == NULL && tr.backEndRendererHasVertexPrograms
+		&& r_useShadowVertexProgram.GetBool() ) {
+		shadowTri = R_CreateVertexProgramTurboShadowVolume( ent, tri, light, cullInfo );
 	}
-
-	return R_CreateTurboShadowVolume( ent, tri, light, cullInfo );
+	if ( shadowTri == NULL ) {
+		shadowTri = R_CreateTurboShadowVolume( ent, tri, light, cullInfo );
+	}
+	if ( shadowTri != NULL && gpuStencilFallback ) {
+		R_GpuSkinning_RecordFallback( GPU_SKINNING_FALLBACK_STENCIL_VOLUME );
+	}
+	return shadowTri;
 }

@@ -32,6 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "../renderer/Image.h"
 #include "ImageTools.h"
+#include "LegacyScopeMask.h"
 #include "DXT/DXTCodec.h"
 
 idCVar image_usePrecompressedTextures(
@@ -65,7 +66,7 @@ void R_LoadImage( const char *name, byte **pic, int *width, int *height, bool ma
  */
 
 extern "C" {
-#include "jpeg-6/jpeglib.h"
+#include "../external/jpeg-6/jpeglib.h"
 
 
 // hooks from jpeg lib to our system
@@ -98,7 +99,7 @@ void jpg_Printf( const char *fmt, ... ) {
 R_WriteTGA
 ================
 */
-void R_WriteTGA( const char *filename, const byte *data, int width, int height, bool flipVertical, const char * basePath ) {
+bool R_WriteTGA( const char *filename, const byte *data, int width, int height, bool flipVertical, const char * basePath ) {
 	byte	*buffer;
 	int		i;
 	int		bufferSize = width*height*4 + 18;
@@ -125,7 +126,7 @@ void R_WriteTGA( const char *filename, const byte *data, int width, int height, 
 		buffer[i+3] = data[i-imgStart+3];		// alpha
 	}
 
-	fileSystem->WriteFile( filename, buffer, bufferSize, basePath );
+	return fileSystem->WriteFile( filename, buffer, bufferSize, basePath ) == bufferSize;
 }
 
 static void LoadTGA( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp );
@@ -176,7 +177,7 @@ static void LoadTGA( const char *name, byte **pic, int *width, int *height, ID_T
 	byte		*targa_rgba;
 
 	if ( !pic ) {
-		fileSystem->ReadFile( name, NULL, timestamp );
+		fileSystem->ReadFileContentStamp( name, NULL, timestamp );
 		return;	// just getting timestamp
 	}
 
@@ -185,7 +186,7 @@ static void LoadTGA( const char *name, byte **pic, int *width, int *height, ID_T
 	//
 	// load the file
 	//
-	fileSize = fileSystem->ReadFile( name, (void **)&buffer, timestamp );
+	fileSize = fileSystem->ReadFileContentStamp( name, (void **)&buffer, timestamp );
 	if ( !buffer ) {
 		return;
 	}
@@ -473,6 +474,7 @@ static void LoadJPG( const char *filename, unsigned char **pic, int *width, int 
   int row_stride;		/* physical row width in output buffer */
   unsigned char *out;
   byte	*fbuffer;
+  int	fbufferLength = 0;	// openQ4: the file's bytes in fbuffer, without its padding
   byte  *bbuf;
 
   /* In this example we want to open the input file before doing anything else,
@@ -496,14 +498,27 @@ static void LoadJPG( const char *filename, unsigned char **pic, int *width, int 
 		}
 		len = f->Length();
 		if ( timestamp ) {
-			*timestamp = f->Timestamp();
+			*timestamp = f->ContentStamp();
 		}
 		if ( !pic ) {
 			fileSystem->CloseFile( f );
 			return;	// just getting timestamp
 		}
-		fbuffer = (byte *)Mem_ClearedAlloc( len + 4096 );
-		f->Read( fbuffer, len );
+		// Only the 4096-byte tail needs zeroing (fill_input_buffer over-reads
+		// past the payload); the body is fully overwritten by the read. Zeroing
+		// just the pad avoids a full-buffer clear on multi-MB JPEGs. The
+		// short-read check is load-bearing, not cosmetic: with an uncleared
+		// body a truncated file would otherwise leave uninitialized heap for
+		// libjpeg to parse.
+		fbuffer = (byte *)Mem_Alloc( len + 4096 );
+		fbufferLength = len;
+		memset( fbuffer + len, 0, 4096 );
+		if ( f->Read( fbuffer, len ) != len ) {
+			Mem_Free( fbuffer );
+			fileSystem->CloseFile( f );
+			common->Warning( "LoadJPG( %s ): truncated file\n", filename );
+			return;
+		}
 		fileSystem->CloseFile( f );
   }
 
@@ -522,7 +537,7 @@ static void LoadJPG( const char *filename, unsigned char **pic, int *width, int 
 
   /* Step 2: specify data source (eg, a file) */
 
-  jpeg_stdio_src(&cinfo, fbuffer);
+  jpeg_stdio_src(&cinfo, fbuffer, fbufferLength);
 
   /* Step 3: read file parameters with jpeg_read_header() */
 
@@ -556,8 +571,18 @@ static void LoadJPG( const char *filename, unsigned char **pic, int *width, int 
   row_stride = cinfo.output_width * cinfo.output_components;
 
   if (cinfo.output_components!=4) {
-		common->DWarning( "JPG %s is unsupported color depth (%d)", 
+		common->DWarning( "JPG %s is unsupported color depth (%d)",
 			filename, cinfo.output_components);
+  }
+  // output_width/height are JDIMENSION (unsigned); the product * 4 wraps a
+  // 32-bit computation before widening to the allocation size, so the scanline
+  // loop below would then write far past a tiny buffer. Reject oversize
+  // dimensions up front, mirroring the TGA loader (libjpeg permits dimensions
+  // well beyond 2^31/4 pixels, so this is reachable on crafted files).
+  if ( (int64)cinfo.output_width * cinfo.output_height * 4 > 0x7FFFFFFF ) {
+		jpeg_destroy_decompress( &cinfo );
+		Mem_Free( fbuffer );
+		common->Error( "LoadJPG( %s ): dimensions too large (%i x %i)\n", filename, cinfo.output_width, cinfo.output_height );
   }
   out = (byte *)R_StaticAlloc(cinfo.output_width*cinfo.output_height*4);
 
@@ -747,6 +772,14 @@ static bool R_DDSComputeLevelLayout( int fileSize, int dataOffset, uint32 width,
 	return true;
 }
 
+// DXT3 files are left to LoadDDS (see there), so R_ParseDDSFileInfo rejects them
+static bool R_DDSFileIsDXT3( const byte *file, int fileSize ) {
+	return fileSize >= DDS_HEADER_BYTES &&
+		R_ReadLittleUInt32( file + 0 ) == R_MakeFourCC( 'D', 'D', 'S', ' ' ) &&
+		( R_ReadLittleUInt32( file + 80 ) & DDS_PIXELFORMAT_FOURCC ) != 0 &&
+		R_ReadLittleUInt32( file + 84 ) == R_MakeFourCC( 'D', 'X', 'T', '3' );
+}
+
 static bool R_ParseDDSFileInfo( const byte *header, int headerBytes, int fileSize, ddsFileInfo_t &info ) {
 	memset( &info, 0, sizeof( info ) );
 	info.format = DDS_STORED_FORMAT_INVALID;
@@ -821,7 +854,7 @@ static bool R_ParseDDSFileInfo( const byte *header, int headerBytes, int fileSiz
 	return true;
 }
 
-static bool R_ReadDDSFileInfo( const char *name, ddsFileInfo_t &info, ID_TIME_T *timestamp ) {
+static bool R_ReadDDSFileInfoUncached( const char *name, ddsFileInfo_t &info, ID_TIME_T *timestamp ) {
 	if ( timestamp != NULL ) {
 		*timestamp = FILE_NOT_FOUND_TIMESTAMP;
 	}
@@ -841,9 +874,72 @@ static bool R_ReadDDSFileInfo( const char *name, ddsFileInfo_t &info, ID_TIME_T 
 		return false;
 	}
 	if ( timestamp != NULL ) {
-		*timestamp = file->Timestamp();
+		*timestamp = file->ContentStamp();
 	}
 	return true;
+}
+
+/*
+=============
+DDS probe memoization
+
+A level load resolves the same DDS replacement candidates several times per
+image (source selection, the staleness timestamp probe, generated-cache
+validation, and the decode pass), and every probe is a real file open across
+all search paths. Search-path contents cannot change during the synchronous
+BeginLevelLoad..EndLevelLoad window, so per-candidate probe results are
+memoized there. Outside the window every call probes the filesystem directly,
+which keeps reloadImages and hot-reload workflows seeing freshly dropped
+files. Image loading is single-threaded (see parseBuffer in
+Image_program.cpp), so plain statics are safe here.
+=============
+*/
+struct ddsProbeCacheEntry_t {
+	idStr			name;
+	bool			found;
+	ddsFileInfo_t	info;
+	ID_TIME_T		timestamp;
+};
+
+static bool ddsProbeCacheActive = false;
+static idHashIndex ddsProbeCacheHash;
+static idList<ddsProbeCacheEntry_t> ddsProbeCacheEntries;
+
+void R_SetDDSProbeCacheActive( bool active ) {
+	ddsProbeCacheActive = active;
+	ddsProbeCacheHash.Free();
+	ddsProbeCacheEntries.Clear();
+}
+
+static bool R_ReadDDSFileInfo( const char *name, ddsFileInfo_t &info, ID_TIME_T *timestamp ) {
+	if ( !ddsProbeCacheActive ) {
+		return R_ReadDDSFileInfoUncached( name, info, timestamp );
+	}
+	const int hashKey = ddsProbeCacheHash.GenerateKey( name, false );
+	for ( int i = ddsProbeCacheHash.First( hashKey ); i >= 0; i = ddsProbeCacheHash.Next( i ) ) {
+		const ddsProbeCacheEntry_t &entry = ddsProbeCacheEntries[ i ];
+		if ( entry.name.Icmp( name ) == 0 ) {
+			if ( timestamp != NULL ) {
+				*timestamp = entry.found ? entry.timestamp : FILE_NOT_FOUND_TIMESTAMP;
+			}
+			if ( entry.found ) {
+				info = entry.info;
+			}
+			return entry.found;
+		}
+	}
+	ddsProbeCacheEntry_t entry;
+	entry.name = name;
+	entry.timestamp = FILE_NOT_FOUND_TIMESTAMP;
+	entry.found = R_ReadDDSFileInfoUncached( name, entry.info, &entry.timestamp );
+	if ( timestamp != NULL ) {
+		*timestamp = entry.found ? entry.timestamp : FILE_NOT_FOUND_TIMESTAMP;
+	}
+	if ( entry.found ) {
+		info = entry.info;
+	}
+	ddsProbeCacheHash.Add( hashKey, ddsProbeCacheEntries.Append( entry ) );
+	return entry.found;
 }
 
 static bool R_ImageNameHasDDSShadowPrefix( const idStr &name ) {
@@ -860,7 +956,8 @@ static bool R_ImageNameIsProgramOperator( const idToken &token ) {
 		!token.Icmp( "invertColor" ) ||
 		!token.Icmp( "makeIntensity" ) ||
 		!token.Icmp( "downsize" ) ||
-		!token.Icmp( "makeAlpha" );
+		!token.Icmp( "makeAlpha" ) ||
+		!token.Icmp( "packORM" );
 }
 
 static bool R_IsPlainImageSourceName( const char *imageName ) {
@@ -869,7 +966,7 @@ static bool R_IsPlainImageSourceName( const char *imageName ) {
 	}
 
 	idLexer src;
-	src.LoadMemory( imageName, strlen( imageName ), imageName );
+	src.LoadMemory( imageName, idLib::SizeToInt( strlen( imageName ), "R_IsPlainImageSourceName" ), imageName );
 	src.SetFlags( LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS | LEXFL_ALLOWPATHNAMES );
 
 	idToken token;
@@ -1141,6 +1238,16 @@ static void R_BuildDDSCandidates( const char *cname, idStrList &candidates, idSt
 	}
 }
 
+static bool R_HasUncompressedLegacyScopeMask( const char *name ) {
+	if ( !R_IsLegacyScopeDistortionMask( name ) ) {
+		return false;
+	}
+	idStr source = name;
+	source.BackSlashesToSlashes();
+	source.DefaultFileExtension( ".tga" );
+	return fileSystem->ReadFile( source, NULL ) > 0;
+}
+
 /*
 =============
 R_ResolvePreferredDDSImageSource
@@ -1156,7 +1263,6 @@ bool R_ResolvePreferredDDSImageSource( const char *cname, idStr &ddsName, ID_TIM
 	if ( cname == NULL || cname[0] == '\0' ) {
 		return false;
 	}
-
 	if ( image_usePrecompressedTextures.GetInteger() <= 0 ) {
 		return false;
 	}
@@ -1167,8 +1273,14 @@ bool R_ResolvePreferredDDSImageSource( const char *cname, idStr &ddsName, ID_TIM
 
 	const bool logMisses = image_showPrecompressedTextures.GetBool();
 	idStr rejections;
+	const bool preferScopeSource = R_HasUncompressedLegacyScopeMask( cname );
 
 	for ( int i = 0; i < candidates.Num(); i++ ) {
+		// Keep intentional dds/ replacement packs eligible. Only the retail
+		// sibling DDS loses priority to the precise source mask.
+		if ( preferScopeSource && candidates[i].IcmpPrefix( "dds/" ) != 0 ) {
+			continue;
+		}
 		const char *rejectReason = NULL;
 		if ( R_TryResolvePreferredDDSImageSource( candidates[i], ddsName, timestamp, allowPrecompressedDDS, precompressedDDS, &rejectReason ) ) {
 			return true;
@@ -1187,12 +1299,20 @@ bool R_ResolvePreferredDDSImageSource( const char *cname, idStr &ddsName, ID_TIM
 	return false;
 }
 
+static imageDDSPrefetchTake_t ddsPrefetchTake = NULL;
+
+void R_SetDDSPrefetchSource( imageDDSPrefetchTake_t take ) {
+	ddsPrefetchTake = take;
+}
+
 /*
 =============
 R_LoadPrecompressedDDS
 =============
 */
-bool R_LoadPrecompressedDDS( const char *cname, idBinaryImage &image, ID_TIME_T *timestamp, textureUsage_t usage, const imageDownsizePolicy_t &downsizePolicy, bool useMipmaps ) {
+bool R_LoadPrecompressedDDS( const char *cname, idBinaryImage &image, ID_TIME_T *timestamp, textureUsage_t usage, const imageDownsizePolicy_t &downsizePolicy, bool useMipmaps, imageReductionResult_t* reduction, const imageFileContent_t* expected ) {
+    const imageFileContent_t requested = expected ? *expected : imageFileContent_t{};
+    if (expected && (!R_ImageFileContentValid(requested) || requested.kind != IFC_DIRECT_DDS)) return false;
 	if ( cname == NULL || cname[0] == '\0' ) {
 		return false;
 	}
@@ -1206,20 +1326,51 @@ bool R_LoadPrecompressedDDS( const char *cname, idBinaryImage &image, ID_TIME_T 
 		return false;
 	}
 
+    if (expected && strcmp(name.c_str(),requested.qpath) != 0) return false;
+	// Read into a buffer this library owns rather than fileSystem->ReadFile: the
+	// mip payloads stay behind as views into it inside the idBinaryImage, and its
+	// eventual Mem_Free in idBinaryImage::Clear must pair with this binary's
+	// allocator (the renderer modules carry their own idlib heap).
 	byte *buffer = NULL;
-	const int fileSize = fileSystem->ReadFile( name.c_str(), (void **)&buffer, timestamp );
-	if ( buffer == NULL || fileSize < DDS_HEADER_BYTES ) {
-		if ( buffer != NULL ) {
-			fileSystem->FreeFile( buffer );
+    struct ReleaseBuffer { byte*& bytes; ~ReleaseBuffer() { if (bytes) Mem_Free(bytes); } } releaseBuffer{buffer};
+	int fileSize = 0;
+    imageFileContent_t actualContent;
+    bool contentObserved = false;
+	// A level load may already have read and fingerprinted this exact file on a
+	// worker thread; that buffer also comes from this binary's heap.
+	const bool prefetched = expected == NULL && ddsPrefetchTake != NULL
+		&& ddsPrefetchTake( name.c_str(), &buffer, &fileSize, timestamp, &actualContent, &contentObserved );
+	if ( !prefetched ) {
+		idFile *ddsFile = fileSystem->OpenFileRead( name.c_str() );
+	    struct CloseFile { idFile*& file; ~CloseFile() { if (file) fileSystem->CloseFile(file); } } closeFile{ddsFile};
+		if ( ddsFile == NULL ) {
+			if ( timestamp != NULL ) {
+				*timestamp = FILE_NOT_FOUND_TIMESTAMP;
+			}
+			return false;
 		}
-		return false;
+		if ( timestamp != NULL ) {
+			*timestamp = ddsFile->ContentStamp();
+		}
+		fileSize = ddsFile->Length();
+	    if (expected && (fileSize < 0 || std::uint64_t(fileSize) != requested.bytes)) return false;
+		buffer = fileSize >= DDS_HEADER_BYTES ? (byte *)Mem_Alloc( fileSize ) : NULL;
+		const bool readOk = buffer != NULL && ddsFile->Read( buffer, fileSize ) == fileSize;
+		fileSystem->CloseFile( ddsFile );
+	    ddsFile = NULL;
+		if ( !readOk ) return false;
+	    contentObserved = R_MakeImageFileContent(IFC_DIRECT_DDS,name.c_str(),buffer,fileSize,actualContent);
 	}
+    if (expected && (!contentObserved || !R_ImageFileContentEqual(requested,actualContent))) return false;
 
 	bool loaded = false;
 	do {
 		ddsFileInfo_t info;
 		if ( !R_ParseDDSFileInfo( buffer, fileSize, fileSize, info ) ) {
-			idLib::Warning( "Image file '%s' has an invalid or incomplete supported DDS layout", name.c_str() );
+			// DXT3 is valid but never uploaded as it is: LoadDDS decodes it
+			if ( !R_DDSFileIsDXT3( buffer, fileSize ) ) {
+				idLib::Warning( "Image file '%s' has an invalid or incomplete supported DDS layout", name.c_str() );
+			}
 			break;
 		}
 
@@ -1246,13 +1397,11 @@ bool R_LoadPrecompressedDDS( const char *cname, idBinaryImage &image, ID_TIME_T 
 		// full chain; a replacement exported without one simply runs out of levels
 		// and stays larger, which the caller reports under
 		// image_showPrecompressedTextures.
-		int selectedWidth = (int)info.width;
-		int selectedHeight = (int)info.height;
-		const int firstLevel = R_ImageDownsizePolicyMipSkip( downsizePolicy, selectedWidth, selectedHeight, (int)info.numLevels );
-		for ( int i = 0; i < firstLevel; i++ ) {
-			selectedWidth = Max( 1, selectedWidth >> 1 );
-			selectedHeight = Max( 1, selectedHeight >> 1 );
-		}
+        imageReductionResult_t selected{};
+        if (!R_ResolveImageReduction(downsizePolicy, info.width, info.height, info.numLevels, selected)) break;
+        const int selectedWidth = selected.selectedWidth;
+        const int selectedHeight = selected.selectedHeight;
+        const int firstLevel = selected.firstLevel;
 
 		const int selectedLevels = useMipmaps ? info.numLevels - firstLevel : 1;
 		textureFormat_t textureFormat = FMT_NONE;
@@ -1284,13 +1433,41 @@ bool R_LoadPrecompressedDDS( const char *cname, idBinaryImage &image, ID_TIME_T 
 			info.format == DDS_STORED_FORMAT_RXGB ||
 			( usage == TD_BUMP && textureFormat == FMT_DXT5 );
 		const textureColor_t colorFormat = rxgbNormal ? CFM_NORMAL_DXT5 : CFM_DEFAULT;
-		image.Load2DFromCompressedData( selectedWidth, selectedHeight, selectedLevels, textureFormat, colorFormat,
+		image.Load2DFromOwnedCompressedData( selectedWidth, selectedHeight, selectedLevels, textureFormat, colorFormat,
 			buffer, levelOffsets.Ptr() + firstLevel, levelSizes.Ptr() + firstLevel );
+		buffer = NULL;	// the binary image now owns the file buffer
+        if (contentObserved) image.ObserveFileContent(actualContent);
+        if (reduction) *reduction = selected;
 		loaded = true;
 	} while ( false );
 
-	fileSystem->FreeFile( buffer );
 	return loaded;
+}
+
+/*
+=============
+R_WriteDXT3Alpha
+
+DXT3 (BC2) blocks carry the same colour half as DXT5 ones, so LoadDDS decodes
+their colour as DXT5 and then writes the real alpha over what that decode made
+of the first eight bytes: sixteen explicit 4-bit values, row by row, low nibble
+first.
+=============
+*/
+static void R_WriteDXT3Alpha( const byte *blocks, byte *rgba, const int paddedWidth, const int paddedHeight ) {
+	const int blocksWide = paddedWidth / 4;
+	const int blocksHigh = paddedHeight / 4;
+	for ( int by = 0; by < blocksHigh; by++ ) {
+		for ( int bx = 0; bx < blocksWide; bx++ ) {
+			const byte *block = blocks + ( by * blocksWide + bx ) * 16;
+			for ( int texel = 0; texel < 16; texel++ ) {
+				const int nibble = ( block[ texel >> 1 ] >> ( ( texel & 1 ) * 4 ) ) & 0x0f;
+				const int x = bx * 4 + ( texel & 3 );
+				const int y = by * 4 + ( texel >> 2 );
+				rgba[ ( y * paddedWidth + x ) * 4 + 3 ] = (byte)( nibble * 17 );
+			}
+		}
+	}
 }
 
 /*
@@ -1395,6 +1572,34 @@ bool R_ImageDDS_RunSelfTest() {
 		return false;
 	}
 
+	// DXT3 never goes up as it is: Quake 4's font atlases are DXT3 and have to
+	// load from the .tga beside each one. LoadDDS decodes DXT3 instead.
+	R_WriteLittleUInt32( header + 84, R_MakeFourCC( 'D', 'X', 'T', '3' ) );
+	if ( R_ParseDDSFileInfo( header, DDS_HEADER_BYTES, completeRXGBFileSize, info ) ) {
+		common->Warning( "Image DDS self-test failed: DXT3 data was accepted for direct upload" );
+		return false;
+	}
+
+	// one DXT3 block: alphas 0 to 15, row by row, over solid red
+	byte dxt3Block[16];
+	for ( int texel = 0; texel < 16; texel += 2 ) {
+		dxt3Block[ texel >> 1 ] = (byte)( texel | ( ( texel + 1 ) << 4 ) );
+	}
+	dxt3Block[8] = 0x00;	// color0 0xf800, red
+	dxt3Block[9] = 0xf8;
+	memset( dxt3Block + 10, 0, 6 );	// color1 black, every index color0
+	byte dxt3Rgba[4 * 4 * 4];
+	idDxtDecoder dxt3Decoder;
+	dxt3Decoder.DecompressImageDXT5( dxt3Block, dxt3Rgba, 4, 4 );
+	R_WriteDXT3Alpha( dxt3Block, dxt3Rgba, 4, 4 );
+	for ( int texel = 0; texel < 16; texel++ ) {
+		const byte *rgba = dxt3Rgba + texel * 4;
+		if ( rgba[0] != 255 || rgba[1] != 0 || rgba[2] != 0 || rgba[3] != texel * 17 ) {
+			common->Warning( "Image DDS self-test failed: DXT3 texel %d decoded to %d %d %d %d", texel, rgba[0], rgba[1], rgba[2], rgba[3] );
+			return false;
+		}
+	}
+
 	common->Printf( "Image DDS self-test passed\n" );
 	return true;
 }
@@ -1402,6 +1607,12 @@ bool R_ImageDDS_RunSelfTest() {
 /*
 =============
 LoadDDS
+
+Decodes DXT1, DXT3, DXT5 and RXGB files on the CPU. DXT3 is only ever read
+here, never uploaded as it is: Quake 4 ships a DXT3 .dds beside the .tga of
+each font atlas, and those atlases must keep coming from the .tga (see
+idImage::DeriveOpts). A DXT3 file is used only when a material names it outright
+or nothing else by its name exists, as with the Awakening expansion's three.
 =============
 */
 static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_TIME_T *timestamp, bool decodeRXGBNormalMap ) {
@@ -1409,13 +1620,13 @@ static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_T
 	byte *buffer;
 
 	if ( !pic ) {
-		fileSystem->ReadFile( name, NULL, timestamp );
+		fileSystem->ReadFileContentStamp( name, NULL, timestamp );
 		return;	// just getting timestamp
 	}
 
 	*pic = NULL;
 
-	fileSize = fileSystem->ReadFile( name, (void **)&buffer, timestamp );
+	fileSize = fileSystem->ReadFileContentStamp( name, (void **)&buffer, timestamp );
 	if ( !buffer ) {
 		return;
 	}
@@ -1446,6 +1657,7 @@ static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_T
 	int blockSize = 0;
 	enum ddsCompression_t {
 		DDS_COMPRESSION_DXT1,
+		DDS_COMPRESSION_DXT3,
 		DDS_COMPRESSION_DXT5
 	} compression;
 	bool storedRXGBNormalMap = false;
@@ -1453,6 +1665,9 @@ static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_T
 	if ( fourCC == R_MakeFourCC( 'D', 'X', 'T', '1' ) ) {
 		blockSize = 8;
 		compression = DDS_COMPRESSION_DXT1;
+	} else if ( fourCC == R_MakeFourCC( 'D', 'X', 'T', '3' ) ) {
+		blockSize = 16;
+		compression = DDS_COMPRESSION_DXT3;
 	} else if ( fourCC == R_MakeFourCC( 'D', 'X', 'T', '5' ) ) {
 		blockSize = 16;
 		compression = DDS_COMPRESSION_DXT5;
@@ -1490,6 +1705,9 @@ static void LoadDDS( const char *name, byte **pic, int *width, int *height, ID_T
 	idDxtDecoder decoder;
 	if ( compression == DDS_COMPRESSION_DXT1 ) {
 		decoder.DecompressImageDXT1( buffer + dataOffset, decodedRgba, paddedWidth, paddedHeight );
+	} else if ( compression == DDS_COMPRESSION_DXT3 ) {
+		decoder.DecompressImageDXT5( buffer + dataOffset, decodedRgba, paddedWidth, paddedHeight );
+		R_WriteDXT3Alpha( buffer + dataOffset, decodedRgba, paddedWidth, paddedHeight );
 	} else if ( storedRXGBNormalMap || decodeRXGBNormalMap ) {
 		decoder.DecompressNormalMapDXT5( buffer + dataOffset, decodedRgba, paddedWidth, paddedHeight );
 	} else {
@@ -1569,6 +1787,29 @@ static void R_LoadImageInternal( const char *cname, byte **pic, int *width, int 
 		*height = 0;
 	}
 
+	// Image programs recurse through this CPU loader, bypassing the renderer's
+	// intrinsic image cache. Supply the same uncompressed source values here so
+	// heightmap(_white), smoothnormals(_flat), etc. have real inputs rather than
+	// silently becoming the missing-image checker. Usage-specific swizzling is
+	// still performed by the destination image after the program is evaluated.
+	const bool white = name.Icmp( "_white" ) == 0;
+	const bool black = name.Icmp( "_black" ) == 0;
+	const bool flat = name.Icmp( "_flat" ) == 0;
+	if ( white || black || flat ) {
+		if ( width ) { *width = 16; }
+		if ( height ) { *height = 16; }
+		if ( timestamp ) { *timestamp = 0; }
+		if ( pic ) {
+			*pic = static_cast<byte *>( R_StaticAlloc( 16 * 16 * 4 ) );
+			for ( int i = 0; i < 16 * 16; ++i ) {
+				(*pic)[i * 4] = (*pic)[i * 4 + 1] = white ? 255 : ( flat ? 128 : 0 );
+				(*pic)[i * 4 + 2] = black ? 0 : 255;
+				(*pic)[i * 4 + 3] = 255;
+			}
+		}
+		return;
+	}
+
 	name.DefaultFileExtension( ".tga" );
 
 	if (name.Length()<5) {
@@ -1580,8 +1821,17 @@ static void R_LoadImageInternal( const char *cname, byte **pic, int *width, int 
 	name.ExtractFileExtension( ext );
 
 	idStr preferredDDSName;
-	if ( ext != "dds" && R_ResolvePreferredDDSImageSource( name.c_str(), preferredDDSName, NULL, false, NULL ) ) {
-		LoadDDS( preferredDDSName.c_str(), pic, width, height, timestamp, decodeRXGBNormalMap );
+	ID_TIME_T preferredDDSTime = FILE_NOT_FOUND_TIMESTAMP;
+	if ( ext != "dds" && R_ResolvePreferredDDSImageSource( name.c_str(), preferredDDSName, &preferredDDSTime, false, NULL ) ) {
+		if ( pic == NULL ) {
+			// timestamp-only probe: the resolve already opened this file and read
+			// its timestamp, so don't open it a second time
+			if ( timestamp != NULL ) {
+				*timestamp = preferredDDSTime;
+			}
+		} else {
+			LoadDDS( preferredDDSName.c_str(), pic, width, height, timestamp, decodeRXGBNormalMap );
+		}
 		if ( R_LoadImageSucceeded( pic, timestamp ) ) {
 			return;
 		}
@@ -1601,6 +1851,13 @@ static void R_LoadImageInternal( const char *cname, byte **pic, int *width, int 
 		}
 	} else if ( ext == "jpg" ) {
 		LoadJPG( name.c_str(), pic, width, height, timestamp );
+		if ( ( pic && *pic == 0 ) || ( timestamp && *timestamp == -1 ) ) { //-V595
+			// the mirror of the .tga-to-.jpg fallback: the Awakening expansion's
+			// Valkaryne names its limb textures .jpg and ships them as .tga
+			name.StripFileExtension();
+			name.DefaultFileExtension( ".tga" );
+			LoadTGA( name.c_str(), pic, width, height, timestamp );
+		}
 		if ( ( pic && *pic == 0 ) || ( timestamp && *timestamp == -1 ) ) { //-V595
 			name.StripFileExtension();
 			name.DefaultFileExtension( ".dds" );
@@ -1663,11 +1920,11 @@ Loads six files with proper extensions
 */
 bool R_LoadCubeImages( const char *imgName, cubeFiles_t extensions, byte *pics[6], int *outSize, ID_TIME_T *timestamp ) {
 	int		i, j;
-	char	*cameraSides[6] =  { "_forward.tga", "_back.tga", "_left.tga", "_right.tga", 
+	const char	*cameraSides[6] =  { "_forward.tga", "_back.tga", "_left.tga", "_right.tga", 
 		"_up.tga", "_down.tga" };
-	char	*axisSides[6] =  { "_px.tga", "_nx.tga", "_py.tga", "_ny.tga", 
+	const char	*axisSides[6] =  { "_px.tga", "_nx.tga", "_py.tga", "_ny.tga", 
 		"_pz.tga", "_nz.tga" };
-	char	**sides;
+	const char	**sides;
 	char	fullName[MAX_IMAGE_NAME];
 	int		width, height, size = 0;
 
@@ -1699,7 +1956,7 @@ bool R_LoadCubeImages( const char *imgName, cubeFiles_t extensions, byte *pics[6
 		} else {
 			R_LoadImageProgram( fullName, &pics[i], &width, &height, &thisTime );
 		}
-		if ( thisTime == FILE_NOT_FOUND_TIMESTAMP ) {
+		if ( thisTime == FILE_NOT_FOUND_TIMESTAMP || (pics && !pics[i]) ) {
 			break;
 		}
 		if ( i == 0 ) {
@@ -1710,9 +1967,7 @@ bool R_LoadCubeImages( const char *imgName, cubeFiles_t extensions, byte *pics[6
 			break;
 		}
 		if ( timestamp ) {
-			if ( thisTime > *timestamp ) {
-				*timestamp = thisTime;
-			}
+			*timestamp = FS_CombineContentStamps( *timestamp, thisTime );
 		}
 		if ( pics && extensions == CF_CAMERA ) {
 			// convert from "camera" images to native cube map images

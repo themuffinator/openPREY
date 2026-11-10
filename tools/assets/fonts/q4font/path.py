@@ -87,6 +87,10 @@ class Contour:
 		def convert(point: Point) -> Point:
 			return (point[0] * scale_x + offset_x, point[1] * scale_y + offset_y)
 
+		return self.mapped(convert)
+
+	def mapped(self, convert) -> "Contour":
+		"""Apply ``convert`` to every point, control points included."""
 		result = Contour(convert(self.start))
 		for segment in self.segments:
 			if segment[0] == "L":
@@ -105,6 +109,9 @@ class Path2D:
 
 	def transformed(self, scale_x: float, scale_y: float, offset_x: float = 0.0, offset_y: float = 0.0) -> "Path2D":
 		return Path2D([c.transformed(scale_x, scale_y, offset_x, offset_y) for c in self.contours])
+
+	def mapped(self, convert) -> "Path2D":
+		return Path2D([c.mapped(convert) for c in self.contours])
 
 	def bounds(self) -> tuple[float, float, float, float] | None:
 		xs: list[float] = []

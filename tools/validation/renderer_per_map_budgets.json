@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "kind": "openq4-renderer-per-map-budgets",
+  "contractId": "stock-baseline-targets-v1",
+  "timeUnit": "microseconds",
+  "budgets": [
+    { "id": "storage1-opengl-baseline", "map": "game/storage1", "backend": "opengl", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "storage1-vulkan-baseline", "map": "game/storage1", "backend": "vulkan", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "airdefense1-opengl-baseline", "map": "game/airdefense1", "backend": "opengl", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "airdefense1-vulkan-baseline", "map": "game/airdefense1", "backend": "vulkan", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "airdefense2-opengl-baseline", "map": "game/airdefense2", "backend": "opengl", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "airdefense2-vulkan-baseline", "map": "game/airdefense2", "backend": "vulkan", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "storage2-opengl-baseline", "map": "game/storage2", "backend": "opengl", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "storage2-vulkan-baseline", "map": "game/storage2", "backend": "vulkan", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "medlabs-opengl-baseline", "map": "game/medlabs", "backend": "opengl", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "medlabs-vulkan-baseline", "map": "game/medlabs", "backend": "vulkan", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "mcc-landing-opengl-baseline", "map": "game/mcc_landing", "backend": "opengl", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "mcc-landing-vulkan-baseline", "map": "game/mcc_landing", "backend": "vulkan", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "q4dm1-opengl-baseline", "map": "mp/q4dm1", "backend": "opengl", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "q4dm1-vulkan-baseline", "map": "mp/q4dm1", "backend": "vulkan", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "tram1-opengl-baseline", "map": "game/tram1", "backend": "opengl", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } },
+    { "id": "tram1-vulkan-baseline", "map": "game/tram1", "backend": "vulkan", "profile": "baseline", "minimumSamples": { "cpu": 120, "gpu": 64 }, "cpu": { "p95Us": 20000, "p99Us": 28000 }, "gpu": { "required": true, "p95Us": 20000, "p99Us": 28000 } }
+  ]
+}

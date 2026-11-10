@@ -1,7 +1,7 @@
 #version 450
 
 // openQ4 Vulkan fog light — vertex stage (Phase G2,
-// docs/dev/plans/2026-07-20-vulkan-phase-g.md).
+// docs/dev/archive/2026-10-18/plans/2026-07-20-vulkan-phase-g.md).
 //
 // Port of the RB_T_BasicFog texgen contract (draw_common.cpp:7593-7616;
 // the MD5R fog vprog env-param twin at draw_arb2.cpp:1573-1588 is the

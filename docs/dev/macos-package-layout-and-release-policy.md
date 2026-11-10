@@ -4,7 +4,7 @@ Updated: 2026-08-01
 
 This document records the current macOS package support contract for openPREY.
 The client application is self-contained; loose binaries remain beside it for
-dedicated-server and diagnostic use while macOS remains experimental.
+dedicated-server and diagnostic use while macOS remains a preview.
 
 ## Current Layout Decision
 
@@ -46,7 +46,7 @@ through to generic base-path probing.
 
 ## Supported Launch Flows
 
-Supported for experimental macOS signoff:
+Supported for preview macOS signoff:
 
 - Double-click `openPREY.app` from the mounted signed/notarized DMG payload.
 - Drag only `openPREY.app` to `/Applications` or another user-writable folder,
@@ -116,9 +116,11 @@ its translation layer as nested code:
 
 These are additions to the two existing package variants, not a new variant.
 There is no third macOS download and no new `macos_graphics_bridge` value.
-OpenGL remains the default renderer in both packages; the Vulkan renderer is
-selected at run time with `r_renderApi vulkan`. The decision plan is
-[macos-moltenvk-decision.md](macos-moltenvk-decision.md).
+Fresh desktop configurations now use Automatic (`best`): Vulkan with OpenGL
+fallback. Existing explicit backend preferences persist. The retained System
+menu can change the backend and GPU; macOS Vulkan qualification remains
+experimental. This 28 October selection-policy change leaves packaging intact. The decision plan is
+[macos-moltenvk-decision.md](archive/2026-10-18/macos-moltenvk-decision.md).
 
 Both files are nested code and follow the existing inside-out signing rule: each
 is signed with the Developer ID Application identity, without app entitlements,
@@ -207,8 +209,8 @@ First-class macOS releases require signed and notarized DMGs for every supported
 macOS artifact. A first-class macOS release job must fail if Apple Developer ID
 signing or notarization credentials are missing.
 
-Unsigned `-unsigned.tar.gz` archives are allowed only for experimental or
-development fallback output. They must stay clearly marked as unsigned and
+Unsigned `-unsigned.tar.gz` archives are allowed only for experimental, preview,
+or development fallback output. They must stay clearly marked as unsigned and
 unnotarized in artifact names, release notes, and user-facing docs.
 
 Runtime and symbol archive validation must match the declared package format. A
@@ -231,7 +233,7 @@ Credentialed macOS release artifacts must keep these checks mandatory:
 
 ## Backward Compatibility
 
-The runtime keeps a legacy adjacent-package fallback so older experimental
+The runtime keeps a legacy adjacent-package fallback so older experimental-era
 downloads can still launch when their original `openPREY.app`, `basepr/`, loose
 client, loose dedicated binary, and unified game module remain together. New
 package generation,

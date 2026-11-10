@@ -23,6 +23,7 @@ typedef struct rendererBenchmarkBudget_s {
 } rendererBenchmarkBudget_t;
 
 typedef struct rendererBenchmarkFrameSample_s {
+	int				cpuFrameNumber;
 	int				frameMsec;
 	int				frontEndMsec;
 	int				visibilityMsec;
@@ -31,7 +32,18 @@ typedef struct rendererBenchmarkFrameSample_s {
 	int				submitMsec;
 	int				backEndMsec;
 	int				presentMsec;
+	unsigned long long presentPhaseMicroseconds[RENDERER_PRESENT_CPU_PHASE_COUNT];
+	unsigned long long waitPhaseMicroseconds[RENDERER_WAIT_CPU_PHASE_COUNT];
+	unsigned long long uploadRetireMicroseconds;
+	unsigned long long cpuFrameMicroseconds;
+	unsigned long long frameBuildMicroseconds;
+	unsigned long long frameSubmitMicroseconds;
 	int				gpuMsec;
+	bool			gpuFrameTimingValid;
+	renderGpuTimingBackend_t gpuFrameBackend;
+	int				gpuFrameNumber;
+	unsigned int	gpuFrameGeneration;
+	unsigned long long gpuFrameMicroseconds;
 	int				gpuPassMsec[RENDERER_GPU_TIMER_COUNT];
 	int				gpuPassSamples[RENDERER_GPU_TIMER_COUNT];
 	int				uploadBytes;
@@ -63,8 +75,11 @@ typedef struct rendererBenchmarkFrameSample_s {
 
 const rendererBenchmarkBudget_t &RendererBenchmarks_CurrentBudget( void );
 bool RendererBenchmarks_AdaptiveClusterGridEnabled( void );
+void RendererBenchmarks_ResetHistory( void );
 void RendererBenchmarks_RecordFrame( const rendererBenchmarkFrameSample_t &sample );
 void RendererBenchmarks_PrintLatestCapture( void );
+void RendererBenchmarks_PrintTimingMarker( void );
+bool RendererBenchmarks_WriteTimingTrace( const char *path );
 void RendererBenchmarks_PrintGfxInfo( void );
 bool RendererBenchmark_RunSelfTest( void );
 

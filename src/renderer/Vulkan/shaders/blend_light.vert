@@ -1,7 +1,7 @@
 #version 450
 
 // openQ4 Vulkan blend light — vertex stage (Phase G2,
-// docs/dev/plans/2026-07-20-vulkan-phase-g.md).
+// docs/dev/archive/2026-10-18/plans/2026-07-20-vulkan-phase-g.md).
 //
 // Port of the RB_T_BlendLight texgen contract (draw_common.cpp:7470-7484):
 // tex0 projects S/T/Q from the model-local lightProject[0..2] planes (the

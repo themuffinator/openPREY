@@ -36,12 +36,9 @@ ID_INLINE int BSE_GetFrameCounterMode() {
 	return cvarSystem ? cvarSystem->GetCVarInteger("bse_frameCounters") : 0;
 }
 
-ID_INLINE float Clamp01(float x) {
-	return idMath::ClampFloat(0.0f, 1.0f, x);
-}
-
+// Low byte of the rounded value: colours outside 0..1 wrap instead of clamping.
 ID_INLINE byte ToByte(float x) {
-	return static_cast<byte>(idMath::ClampInt(0, 255, idMath::FtoiFast(Clamp01(x) * 255.0f)));
+	return static_cast<byte>(lrintf(x * 255.0f));
 }
 
 ID_INLINE dword PackColorLocal(const idVec4& color) {
@@ -119,35 +116,14 @@ ID_INLINE idVec3 WorldFromLocal(const rvBSE* effect, const idVec3& local) {
 	return effect->GetCurrentOrigin() + effect->GetCurrentAxis() * local;
 }
 
-ID_INLINE bool IsScalarDomain(const rvParticleParms* parms) {
-	if (!parms) {
-		return false;
+// Bolt side axis: horizontal and square to the bolt, +x when the bolt is vertical.
+ID_INLINE idVec3 BoltLeft(const idVec3& forward) {
+	const float planar = forward.x * forward.x + forward.y * forward.y;
+	if (planar == 0.0f) {
+		return idVec3(1.0f, 0.0f, 0.0f);
 	}
-	return (parms->mSpawnType & 0x3) == 1;
-}
-
-ID_INLINE void BuildPerpBasis(const idVec3& forward, idVec3& right, idVec3& up) {
-	if (idMath::Fabs(forward.x) < 0.99f) {
-		right = idVec3(0.0f, 0.0f, 1.0f).Cross(forward);
-	}
-	else {
-		right = idVec3(0.0f, 1.0f, 0.0f).Cross(forward);
-	}
-
-	if (right.LengthSqr() > 1e-8f) {
-		right.NormalizeFast();
-	}
-	else {
-		right.Set(0.0f, 1.0f, 0.0f);
-	}
-
-	up = forward.Cross(right);
-	if (up.LengthSqr() > 1e-8f) {
-		up.NormalizeFast();
-	}
-	else {
-		up.Set(0.0f, 0.0f, 1.0f);
-	}
+	const float inv = idMath::InvSqrt(planar);
+	return idVec3(-forward.y * inv, forward.x * inv, 0.0f);
 }
 
 ID_INLINE idMat3 BuildInitToCurrentAxis(const rvBSE* effect, const idMat3& initAxis) {
@@ -158,13 +134,13 @@ ID_INLINE idMat3 BuildInitToCurrentAxis(const rvBSE* effect, const idMat3& initA
 	return initAxis / effect->GetCurrentAxis();
 }
 
-ID_INLINE idMat3 BuildCurrentToInitAxis(const rvBSE* effect, const idMat3& initAxis) {
-	if (!effect) {
-		return initAxis;
+ID_INLINE void SpawnVector(rvParticleParms* parms, idVec3& dest) {
+	if (parms) {
+		parms->Spawn(dest.ToFloatPtr(), *parms, NULL, NULL);
 	}
-	// Inverse mapping of BuildInitToCurrentAxis, used when persisting
-	// current-frame results back into the particle's original init frame.
-	return effect->GetCurrentAxis() / initAxis;
+	else {
+		dest.Zero();
+	}
 }
 
 ID_INLINE void BSETraceRenderDrop(const char* typeName, const rvParticle* particle, float time, const char* reason, float value0 = 0.0f, float value1 = 0.0f) {
@@ -256,23 +232,17 @@ void rvParticle::Attenuate(float atten, rvParticleParms& parms, rvEnvParms3Parti
 }
 
 void rvLineParticle::HandleTiling(rvParticleTemplate* pt) {
-	if (!pt || !GetTiled()) {
-		return;
+	// One texture repeat per tiling units of the spawn length.
+	if (pt && GetTiled() && pt->GetTiling() != 0.0f) {
+		const float* len = GetInitLength();
+		mTextureScale = idVec3(len[0], len[1], len[2]).Length() / pt->GetTiling();
 	}
-	const float* len = GetInitLength();
-	if (!len) {
-		mTextureScale = 1.0f;
-		return;
-	}
-	const idVec3 length(len[0], len[1], len[2]);
-	mTextureScale = Max(0.001f, length.LengthFast() / Max(0.001f, pt->GetTiling()));
 }
 
 void rvLinkedParticle::HandleTiling(rvParticleTemplate* pt) {
-	if (!pt || !GetTiled()) {
-		return;
+	if (pt && GetTiled()) {
+		mTextureScale = pt->GetTiling();
 	}
-	mTextureScale = Max(0.001f, pt->GetTiling());
 }
 
 // ---------------------------------------------------------------------------
@@ -313,75 +283,18 @@ DEFINE_ARRAY_INDEX(rvDebrisParticle)
 //  spawning helpers
 // ---------------------------------------------------------------------------
 void rvParticle::SetOriginUsingEndOrigin(rvBSE* effect, rvParticleTemplate* pt, idVec3* normal, idVec3* centre) {
-	if (!effect || !pt || !pt->mpSpawnPosition) {
-		mInitPos.Zero();
-		return;
-	}
+	// Sample once, then resample in the effect frame with x stretched from that first
+	// sample out to the distance from the original origin to the current end origin.
+	rvParticleParms& parms = *pt->mpSpawnPosition;
+	parms.Spawn(mInitPos.ToFloatPtr(), parms, NULL, NULL);
 
-	// Match vanilla end-origin spawn behavior:
-	// 1) seed/randomize once, 2) force fraction in X and resample.
-	// Domains with linearSpacing consume that pre-seeded X value.
-	pt->mpSpawnPosition->Spawn(mInitPos.ToFloatPtr(), *pt->mpSpawnPosition, NULL, NULL);
+	rvParticleParms endParms;
+	endParms = parms;
+	endParms.mMins.x = mInitPos.x;
+	endParms.mMaxs.x = (effect->GetCurrentEndOrigin() - effect->GetOriginalOrigin()).Length();
+
 	mInitPos.x = mFraction;
-	pt->mpSpawnPosition->Spawn(mInitPos.ToFloatPtr(), *pt->mpSpawnPosition, normal, centre);
-
-	if (!effect->GetHasEndOrigin()) {
-		return;
-	}
-
-	const idVec3 endLocal = effect->GetCurrentAxisTransposed() * (effect->GetCurrentEndOrigin() - effect->GetCurrentOrigin());
-	idVec3 forward = endLocal;
-	const float endLenSqr = forward.LengthSqr();
-	if (endLenSqr <= 1e-8f) {
-		return;
-	}
-	forward.NormalizeFast();
-
-	idVec3 right;
-	idVec3 up;
-	BuildPerpBasis(forward, right, up);
-
-	const bool linearSpacing = (pt->mpSpawnPosition->mFlags & PPFLAG_LINEARSPACING) != 0;
-	const float t = linearSpacing ? Clamp01(mFraction) : Clamp01(mInitPos.x);
-	const int spawnShape = pt->mpSpawnPosition->mSpawnType & ~0x3;
-
-	// Spiral domains authored with `useEndOrigin linearSpacing` expect their
-	// lateral offset to advance around the beam as spacing advances.
-	const float range = pt->mpSpawnPosition->mRange;
-	const bool spiralTwist = linearSpacing && (spawnShape == SPF_SPIRAL_0) && (idMath::Fabs(range) > BSE_TIME_EPSILON);
-	float twistS = 0.0f;
-	float twistC = 1.0f;
-	if (spiralTwist) {
-		const float endLength = idMath::Sqrt(endLenSqr);
-		const float twist = idMath::TWO_PI * ((t * endLength) / range);
-		idMath::SinCos(twist, twistS, twistC);
-	}
-
-	idVec3 local = mInitPos;
-	if (spiralTwist) {
-		const float y = local.y * twistC - local.z * twistS;
-		const float z = local.y * twistS + local.z * twistC;
-		local.y = y;
-		local.z = z;
-	}
-	mInitPos = endLocal * t + forward * local.x + right * local.y + up * local.z;
-
-	if (normal) {
-		idVec3 localNormal = *normal;
-		if (spiralTwist) {
-			const float y = localNormal.y * twistC - localNormal.z * twistS;
-			const float z = localNormal.y * twistS + localNormal.z * twistC;
-			localNormal.y = y;
-			localNormal.z = z;
-		}
-		*normal = forward * localNormal.x + right * localNormal.y + up * localNormal.z;
-		if (normal->LengthSqr() > 1e-8f) {
-			normal->NormalizeFast();
-		}
-		else {
-			*normal = forward;
-		}
-	}
+	endParms.Spawn(mInitPos.ToFloatPtr(), endParms, normal, centre);
 }
 
 void rvParticle::HandleEndOrigin(rvBSE* effect, rvParticleTemplate* pt, idVec3* normal, idVec3* centre) {
@@ -402,35 +315,20 @@ void rvParticle::HandleEndOrigin(rvBSE* effect, rvParticleTemplate* pt, idVec3* 
 }
 
 void rvParticle::SetLengthUsingEndOrigin(rvBSE* effect, rvParticleParms& parms, float* length) {
-	if (!length) {
-		return;
-	}
-	parms.Spawn(length, parms, NULL, NULL);
-	if (!effect || !effect->GetHasEndOrigin()) {
-		return;
-	}
-
-	const idVec3 endLocal = effect->GetCurrentAxisTransposed() * (effect->GetCurrentEndOrigin() - effect->GetCurrentOrigin());
-	idVec3 forward = endLocal;
-	if (forward.LengthSqr() <= 1e-8f) {
-		return;
-	}
-	forward.NormalizeFast();
-
-	idVec3 right;
-	idVec3 up;
-	BuildPerpBasis(forward, right, up);
-
-	// `useEndOrigin` lengths are authored as offsets around the baseline
-	// vector from origin to end-origin.
-	const idVec3 out = endLocal + forward * length[0] + right * length[1] + up * length[2];
-	length[0] = out.x;
-	length[1] = out.y;
-	length[2] = out.z;
+	// The x range is pushed out by the current origin to end origin distance; the
+	// copy drops the parm flags.
+	const float distance = (effect->GetCurrentEndOrigin() - effect->GetCurrentOrigin()).Length();
+	rvParticleParms endParms;
+	endParms = parms;
+	endParms.mFlags = 0;
+	endParms.mMins.x += distance;
+	endParms.mMaxs.x += distance;
+	endParms.Spawn(length, endParms, NULL, NULL);
 }
 
 void rvParticle::HandleEndLength(rvBSE* effect, rvParticleTemplate* pt, rvParticleParms& parms, float* length) {
-	if ((parms.mFlags & PPFLAG_USEENDORIGIN) != 0) {
+	// Init and dest lengths both follow the spawn length's useEndOrigin flag.
+	if (effect && effect->GetHasEndOrigin() && pt->mpSpawnLength && (pt->mpSpawnLength->mFlags & PPFLAG_USEENDORIGIN)) {
 		SetLengthUsingEndOrigin(effect, parms, length);
 	}
 	else {
@@ -456,6 +354,7 @@ void rvParticle::FinishSpawn(rvBSE* effect, rvSegment* segment, float birthTime,
 	mMotionStartTime = birthTime;
 	mLastTrailTime = birthTime;
 	mFlags = pt->GetFlags();
+	SetLocked(st->GetLocked());
 	mStartTime = birthTime;
 	mFraction = fraction;
 	mTextureScale = 1.0f;
@@ -464,10 +363,12 @@ void rvParticle::FinishSpawn(rvBSE* effect, rvSegment* segment, float birthTime,
 	mInitAxis = mat3_identity;
 	mTrailRepeat = pt->GetTrailRepeat();
 
+	SpawnVector(pt->mpSpawnVelocity, mVelocity);
+	SpawnVector(pt->mpSpawnAcceleration, mAcceleration);
+	SpawnVector(pt->mpSpawnFriction, mFriction);
+
 	const bool generatedOriginNormal = pt->GetGeneratedOriginNormal();
 	const bool generatedNormal = pt->GetGeneratedNormal();
-	const bool transformByNormal = generatedOriginNormal || generatedNormal;
-	const bool flipNormal = pt->GetFlippedNormal();
 
 	idVec3 normal(1.0f, 0.0f, 0.0f);
 	if (generatedOriginNormal) {
@@ -478,111 +379,68 @@ void rvParticle::FinishSpawn(rvBSE* effect, rvSegment* segment, float birthTime,
 		HandleEndOrigin(effect, pt, &normal, &centre);
 	}
 	else {
-		HandleEndOrigin(effect, pt, NULL, NULL);
 		if (pt->GetCalculatedNormal() && pt->mpSpawnDirection) {
 			pt->mpSpawnDirection->Spawn(normal.ToFloatPtr(), *pt->mpSpawnDirection, NULL, NULL);
 		}
+		HandleEndOrigin(effect, pt, NULL, NULL);
 	}
 
-	SetLocked(st->GetLocked());
-	// Legacy particle flag bit 0x80000 is set for trail-child segments in
-	// segment-template finish and controls use of parent-supplied init transform.
-	const bool transformParent = (pt->GetFlags() & PTFLAG_LINKED) != 0;
+	// Trail children (PTFLAG_LINKED) move in the frame of the particle that emitted them.
+	const bool trailChild = (pt->GetFlags() & PTFLAG_LINKED) != 0;
+	if (trailChild) {
+		mVelocity = initAxis * mVelocity;
+	}
+
+	// Orientation follows the sampled normal; generated normals also carry velocity and length.
+	rvAngles orientation = normal.ToRadians();
+	if (generatedOriginNormal || generatedNormal) {
+		normal.Normalize();
+		mVelocity = normal.ToMat3() * mVelocity;
+		TransformLength(normal);
+	}
+	if (pt->GetFlippedNormal()) {
+		mVelocity = -mVelocity;
+		ScaleLength(-1.0f);
+	}
+
+	// Acceleration is authored relative to the direction of travel and friction relative to
+	// the direction of acceleration; a zero vector keeps the previous frame.
+	if (mVelocity.LengthSqr() != 0.0f) {
+		normal = mVelocity;
+		normal.Normalize();
+	}
+	mAcceleration = normal.ToMat3() * mAcceleration;
+	if (mAcceleration.LengthSqr() != 0.0f) {
+		normal = mAcceleration;
+		normal.Normalize();
+	}
+	mFriction = normal.ToMat3() * mFriction;
+
+	// Unlocked particles keep the spawn-time effect frame, placed where the effect was
+	// at the birth time within the frame.
 	if (GetLocked()) {
-		mInitEffectPos = vec3_origin;
 		mInitAxis = initAxis;
 	}
 	else {
 		mInitEffectPos = effect->GetCurrentOrigin();
 		mInitAxis = effect->GetCurrentAxis();
-		// Match vanilla spawn timing: compensate for owner interpolation so
-		// particles start in the frame-accurate local position at birthTime.
-		mInitPos -= mInitAxis * effect->GetInterpolatedOffset(birthTime);
+		mInitPos -= mInitAxis.Transpose() * effect->GetInterpolatedOffset(birthTime);
 	}
-	if (pt->mpSpawnOffset && pt->mpSpawnOffset->mSpawnType != SPF_NONE_0) {
-		SetHasOffset(true);
+	if (trailChild) {
+		mInitPos += initOffset;
 	}
-	if (pt->GetTiled()) {
-		SetFlag(true, PTFLAG_TILED);
-	}
-	if (pt->GetGeneratedLine()) {
-		SetFlag(true, PTFLAG_GENERATED_LINE);
-	}
-
-	idVec3 direction = normal;
-	if (direction.LengthSqr() > 1e-6f) {
-		direction.NormalizeFast();
-	}
-	else {
-		direction.Set(1.0f, 0.0f, 0.0f);
-	}
-
-	if (pt->mpSpawnVelocity) {
-		pt->mpSpawnVelocity->Spawn(mVelocity.ToFloatPtr(), *pt->mpSpawnVelocity, NULL, NULL);
-		if (IsScalarDomain(pt->mpSpawnVelocity)) {
-			if (!transformByNormal) {
-				mVelocity = direction * mVelocity.x;
-			}
-		}
-		if (transformParent) {
-			mVelocity = initAxis * mVelocity;
-		}
-	}
-	else {
-		mVelocity.Zero();
-	}
-
-	if (pt->mpSpawnAcceleration) {
-		pt->mpSpawnAcceleration->Spawn(mAcceleration.ToFloatPtr(), *pt->mpSpawnAcceleration, NULL, NULL);
-		if (IsScalarDomain(pt->mpSpawnAcceleration)) {
-			if (!transformByNormal) {
-				mAcceleration = direction * mAcceleration.x;
-			}
-		}
-	}
-	else {
-		mAcceleration.Zero();
-	}
-
-	if (transformByNormal) {
-		if (normal.LengthSqr() > 1e-8f) {
-			normal.NormalizeFast();
-		}
-
-		const idMat3 normalAxis = normal.ToMat3();
-		mVelocity = normalAxis * mVelocity;
-		mAcceleration = normalAxis * mAcceleration;
-	}
-
-	if (flipNormal) {
-		mVelocity = -mVelocity;
-	}
-
-	if (normal.LengthSqr() <= 1e-8f) {
-		normal = mVelocity;
-		if (normal.LengthSqr() > 1e-8f) {
-			normal.NormalizeFast();
-		}
-	}
-
-	if (pt->mpSpawnFriction) {
-		float frictionParms[3] = { 0.0f, 0.0f, 0.0f };
-		pt->mpSpawnFriction->Spawn(frictionParms, *pt->mpSpawnFriction, NULL, NULL);
-		mFriction = Max(0.0f, frictionParms[0]);
-	}
-	else {
-		mFriction = 0.0f;
-	}
-
 	if (pt->GetParentVelocity()) {
 		mVelocity += effect->GetCurrentVelocity();
 	}
-	if (transformParent) {
-		mInitPos += initOffset;
+
+	// The offset envelope only runs when either end of the offset is authored.
+	if ((pt->mpSpawnOffset && pt->mpSpawnOffset->mSpawnType != SPF_NONE_3) || (pt->mpDeathOffset && pt->mpDeathOffset->mSpawnType != SPF_NONE_3)) {
+		SetHasOffset(true);
 	}
 
 	const float duration = idMath::ClampFloat(BSE_TIME_EPSILON, BSE_MAX_DURATION, pt->GetDuration());
 	mEndTime = mStartTime + duration;
+	mOneOverDuration = 1.0f / duration;
 
 	if (pt->mpSpawnTint) {
 		pt->mpSpawnTint->Spawn(mTintEnv.GetStart(), *pt->mpSpawnTint, NULL, NULL);
@@ -643,31 +501,10 @@ void rvParticle::FinishSpawn(rvBSE* effect, rvSegment* segment, float birthTime,
 	// Angles/rotation in decls are specified in turns; runtime evaluates radians.
 	ScaleRotation(idMath::TWO_PI);
 	ScaleAngle(idMath::TWO_PI);
-	const idAngles normalAngles = normal.ToAngles();
-	rvAngles orient(DEG2RAD(normalAngles.pitch), DEG2RAD(normalAngles.yaw), DEG2RAD(normalAngles.roll));
-	HandleOrientation(orient);
-
-	if (float* initLength = GetInitLength()) {
-		if (pt->mpSpawnLength) {
-			HandleEndLength(effect, pt, *pt->mpSpawnLength, initLength);
-		}
-		if (float* destLength = GetDestLength()) {
-			if (pt->mpDeathLength) {
-				pt->mpDeathLength->Spawn(destLength, *pt->mpDeathLength, NULL, NULL);
-				pt->mpDeathLength->HandleRelativeParms(destLength, initLength, 3);
-			}
-		}
-	}
-
-	if (transformByNormal) {
-		TransformLength(normal);
-	}
-	if (flipNormal) {
-		ScaleLength(-1.0f);
-	}
+	HandleOrientation(orientation);
 
 	mTrailTime = pt->GetTrailTime();
-	mTrailCount = idMath::ClampInt(0, 128, idMath::FtoiFast(rvRandom::flrand(pt->mTrailInfo->mTrailCount.x, pt->mTrailInfo->mTrailCount.y)));
+	mTrailCount = pt->GetTrailCount();
 	SetModel(pt->GetModel());
 	SetupElectricity(pt);
 
@@ -677,9 +514,6 @@ void rvParticle::FinishSpawn(rvBSE* effect, rvSegment* segment, float birthTime,
 	}
 	if (pt->mpSpawnSize) {
 		AttenuateSize(attenuation, *pt->mpSpawnSize);
-	}
-	if (pt->mpSpawnLength) {
-		AttenuateLength(attenuation, *pt->mpSpawnLength);
 	}
 	const float gravityScale = pt->GetGravity();
 	if (gravityScale != 0.0f) {
@@ -694,7 +528,22 @@ void rvParticle::FinishSpawn(rvBSE* effect, rvSegment* segment, float birthTime,
 }
 
 void rvLineParticle::FinishSpawn(rvBSE* effect, rvSegment* segment, float birthTime, float fraction, const idVec3& initOffset, const idMat3& initAxis) {
+	rvSegmentTemplate* st = segment ? segment->GetSegmentTemplate() : NULL;
+	rvParticleTemplate* pt = st ? st->GetParticleTemplate() : NULL;
+	if (!effect || !pt || !pt->mpSpawnLength || !pt->mpDeathLength) {
+		rvParticle::FinishSpawn(effect, segment, birthTime, fraction, initOffset, initAxis);
+		return;
+	}
+
+	// Lengths are sampled first so the base spawn's normal and flip transforms apply to
+	// both; tiling (in the base spawn) sees the length before attenuation.
+	float* initLength = GetInitLength();
+	float* destLength = GetDestLength();
+	HandleEndLength(effect, pt, *pt->mpSpawnLength, initLength);
+	HandleEndLength(effect, pt, *pt->mpDeathLength, destLength);
 	rvParticle::FinishSpawn(effect, segment, birthTime, fraction, initOffset, initAxis);
+	pt->mpDeathLength->HandleRelativeParms(destLength, initLength, 3);
+	AttenuateLength(effect->GetAttenuation(st), *pt->mpSpawnLength);
 }
 
 void rvLinkedParticle::FinishSpawn(rvBSE* effect, rvSegment* segment, float birthTime, float fraction, const idVec3& initOffset, const idMat3& initAxis) {
@@ -702,115 +551,85 @@ void rvLinkedParticle::FinishSpawn(rvBSE* effect, rvSegment* segment, float birt
 }
 
 void rvDebrisParticle::FinishSpawn(rvBSE* effect, rvSegment* segment, float birthTime, float fraction, const idVec3& initOffset, const idMat3& initAxis) {
-	if (!bse_debris.GetBool() || !effect || !segment || !game || session->readDemo) {
-		if (bse_debug.GetInteger() > 0 && effect) {
-			common->Printf("BSE debris skipped: effect=%s enabled=%d game=%p demo=%d\n",
-				effect->GetDeclName(),
-				bse_debris.GetBool() ? 1 : 0,
-				game,
-				session && session->readDemo ? 1 : 0);
-		}
-		return;
-	}
+	rvSegmentTemplate* st = segment ? segment->GetSegmentTemplate() : NULL;
+	rvParticleTemplate* pt = st ? st->GetParticleTemplate() : NULL;
 
-	rvParticle::FinishSpawn(effect, segment, birthTime, fraction, initOffset, initAxis);
-
-	rvSegmentTemplate* st = segment->GetSegmentTemplate();
-	if (!st) {
-		return;
-	}
-	rvParticleTemplate* pt = st->GetParticleTemplate();
-	if (!pt) {
-		return;
-	}
-
-	const char* entityDefName = pt->GetEntityDefName();
-	if (!entityDefName || entityDefName[0] == '\0') {
-		// Keep compatibility with legacy data that may author debris as plain particles.
-		if (bse_debug.GetInteger() > 0) {
-			common->Printf("BSE debris skipped: effect=%s has no entityDef\n", effect->GetDeclName());
-		}
-		return;
-	}
-
-	idVec3 localPosition;
-	EvaluatePosition(effect, pt, localPosition, birthTime);
-	idVec3 localVelocity;
-	EvaluateVelocity(effect, localVelocity, birthTime);
-
-	idVec3 angularVelocity(vec3_origin);
-	if (float* initRotate = GetInitRotation()) {
-		angularVelocity.Set(initRotate[0], initRotate[1], initRotate[2]);
-	}
-
-	idVec3 worldOrigin;
-	idVec3 worldVelocity;
-	idMat3 worldAxis;
-	if (GetLocked()) {
-		worldOrigin = effect->GetCurrentOrigin() + effect->GetCurrentAxis() * localPosition;
-		worldVelocity = effect->GetCurrentAxis() * localVelocity;
-		angularVelocity = effect->GetCurrentAxis() * angularVelocity;
-		worldAxis = effect->GetCurrentAxis();
-	}
-	else {
-		worldOrigin = mInitEffectPos + mInitAxis * localPosition;
-		worldVelocity = mInitAxis * localVelocity;
-		angularVelocity = mInitAxis * angularVelocity;
-		worldAxis = mInitAxis;
-	}
-
-	const int maxLifetimeMs = idMath::FtoiFast(BSE_MAX_DURATION * 1000.0f);
-	const int lifetimeMs = idMath::ClampInt(1, maxLifetimeMs, idMath::FtoiFast(GetDuration() * 1000.0f));
-
-	if (bse_debug.GetInteger() > 0) {
-		common->Printf("BSE debris: effect=%s entityDef=%s lifetime=%d origin=(%.1f %.1f %.1f)\n",
-			effect->GetDeclName(),
-			entityDefName,
-			lifetimeMs,
-			worldOrigin.x,
-			worldOrigin.y,
-			worldOrigin.z);
-	}
-
-#if !defined(HUMANHEAD)
-	game->SpawnClientMoveable(entityDefName, lifetimeMs, worldOrigin, worldAxis, worldVelocity, angularVelocity);
-#endif
-
-	// Debris is represented by spawned client entities, not by CPU-side BSE quads.
-	mEndTime = mStartTime;
+	// Debris only hands off to a client moveable; the particle itself dies at birth.
+	mNext = NULL;
+	mFlags = pt ? pt->GetFlags() : 0;
+	mStartTime = mMotionStartTime = mLastTrailTime = mEndTime = birthTime;
 	mTrailTime = 0.0f;
 	mTrailCount = 0;
+	mFraction = fraction;
+	mTextureScale = 1.0f;
+	mInitEffectPos.Zero();
+	mInitAxis = mat3_identity;
+	mInitPos.Zero();
+	mVelocity.Zero();
+	mAcceleration.Zero();
+	mFriction.Zero();
+	mPosition.Zero();
+	if (!effect || !pt || !game || !bse_debris.GetBool() || session->readDemo) {
+		return;
+	}
+
+	SpawnVector(pt->mpSpawnVelocity, mVelocity);
+	idVec3 normal(1.0f, 0.0f, 0.0f);
+	if (pt->GetGeneratedOriginNormal()) {
+		HandleEndOrigin(effect, pt, &normal, NULL);
+	}
+	else if (pt->GetGeneratedNormal()) {
+		idVec3 centre = pt->mCentre;
+		HandleEndOrigin(effect, pt, &normal, &centre);
+	}
+	else {
+		HandleEndOrigin(effect, pt, NULL, NULL);
+	}
+	if (pt->GetGeneratedOriginNormal() || pt->GetGeneratedNormal()) {
+		normal.Normalize();
+		mVelocity = normal.ToMat3() * mVelocity;
+	}
+	if (pt->GetFlippedNormal()) {
+		mVelocity = -mVelocity;
+	}
+
+	// Placed like an unlocked particle, but handed over through the effect's original frame.
+	mInitEffectPos = effect->GetCurrentOrigin();
+	mInitAxis = effect->GetCurrentAxis();
+	mInitPos -= mInitAxis.Transpose() * effect->GetInterpolatedOffset(birthTime);
+	mPosition = mInitPos;
+
+	float* destRotate = GetDestRotation();
+	if (pt->mpSpawnRotate) {
+		pt->mpSpawnRotate->Spawn(GetInitRotation(), *pt->mpSpawnRotate, NULL, NULL);
+	}
+	if (pt->mpDeathRotate) {
+		pt->mpDeathRotate->Spawn(destRotate, *pt->mpDeathRotate, NULL, NULL);
+	}
+	ScaleRotation(idMath::TWO_PI);
+
+#if !defined(HUMANHEAD)
+	// The end rotation is the spin; a zero lifetime lets the entityDef's duration apply.
+	const idVec3 origin = effect->GetOriginalOrigin() + effect->GetOriginalAxis() * mInitPos;
+	const idVec3 velocity = effect->GetCurrentAxis() * mVelocity;
+	const idVec3 angularVelocity(destRotate[0], destRotate[1], destRotate[2]);
+	game->SpawnClientMoveable(pt->GetEntityDefName(), 0, origin, effect->GetCurrentAxis(), velocity, angularVelocity);
+#endif
 }
 
 void rvLineParticle::Refresh(rvBSE* effect, rvSegmentTemplate* st, rvParticleTemplate* pt) {
-	if (!effect || !pt || !pt->UsesEndOrigin()) {
+	if (!effect || !pt || !pt->mpSpawnLength || !pt->mpDeathLength) {
 		return;
 	}
-	if (float* initLength = GetInitLength()) {
-		if (pt->mpSpawnLength) {
-			HandleEndLength(effect, pt, *pt->mpSpawnLength, initLength);
-		}
-		if (float* destLength = GetDestLength()) {
-			if (pt->mpDeathLength) {
-				if ((pt->mpDeathLength->mFlags & PPFLAG_USEENDORIGIN) != 0) {
-					SetLengthUsingEndOrigin(effect, *pt->mpDeathLength, destLength);
-				}
-				else {
-					pt->mpDeathLength->Spawn(destLength, *pt->mpDeathLength, NULL, NULL);
-				}
-				pt->mpDeathLength->HandleRelativeParms(destLength, initLength, 3);
-			}
-		}
-	}
 
+	// Resample both lengths against the moved end origin; unlike spawning, no
+	// attenuation or normal/flip transform is applied.
+	float* initLength = GetInitLength();
+	float* destLength = GetDestLength();
+	HandleEndLength(effect, pt, *pt->mpSpawnLength, initLength);
+	HandleEndLength(effect, pt, *pt->mpDeathLength, destLength);
+	pt->mpDeathLength->HandleRelativeParms(destLength, initLength, 3);
 	HandleTiling(pt);
-	const float attenuation = effect->GetAttenuation(st);
-	if (pt->mpSpawnLength) {
-		AttenuateLength(attenuation, *pt->mpSpawnLength);
-	}
-	// Keep the refreshed start/end length values intact. Re-initializing the
-	// particle length envelope here can zero out the freshly recomputed
-	// useEndOrigin vector and collapse the beam to fallback directions.
 }
 
 // ---------------------------------------------------------------------------
@@ -836,34 +655,43 @@ void rvParticle::EvaluateVelocity(const rvBSE* effect, idVec3& velocity, float t
 		return;
 	}
 
-	const float damp = Max(0.0f, 1.0f - mFriction * t);
-	velocity = (mVelocity + mAcceleration * t) * damp;
+	velocity = mVelocity + mAcceleration * t;
+	if (mFriction.LengthSqr() != 0.0f) {
+		const float duration = Max(BSE_TIME_EPSILON, GetDuration());
+		velocity += mFriction * (0.5f * t * t * (1.0f + idMath::Exp((duration - t) / duration) * (1.0f - t * (1.0f / 3.0f))));
+	}
 }
 
 void rvParticle::EvaluatePosition(const rvBSE* effect, rvParticleTemplate* pt, idVec3& pos, float time) {
 	const float t = Max(0.0f, time - mMotionStartTime);
 	if (GetStationary()) {
 		pos = mInitPos;
-		mPosition = pos;
-		return;
+	}
+	else {
+		pos = mInitPos + mVelocity * t;
+
+		if (GetHasOffset() && pt && pt->mpAngleEnvelope && pt->mpOffsetEnvelope) {
+			rvAngles angle;
+			idVec3 offset;
+			EvaluateAngle(pt->mpAngleEnvelope, t, mOneOverDuration, angle);
+			EvaluateOffset(pt->mpOffsetEnvelope, t, mOneOverDuration, offset);
+
+			idMat3 rotation;
+			angle.ToMat3(rotation);
+			pos += rotation * offset;
+		}
+
+		// Friction is an exponential drift that pushes along its vector early in life and
+		// pulls back once half t squared passes the duration.
+		const float halfT2 = 0.5f * t * t;
+		pos += mAcceleration * halfT2;
+		if (mFriction.LengthSqr() != 0.0f) {
+			const float duration = Max(BSE_TIME_EPSILON, GetDuration());
+			pos += mFriction * ((idMath::Exp((duration - halfT2) / duration) - 1.0f) * halfT2 * halfT2 * (1.0f / 3.0f));
+		}
 	}
 
-	const float halfT2 = 0.5f * t * t;
-	const float damp = Max(0.0f, 1.0f - mFriction * t);
-	pos = mInitPos + (mVelocity * t + mAcceleration * halfT2) * damp;
-
-	if (GetHasOffset() && pt && pt->mpAngleEnvelope && pt->mpOffsetEnvelope) {
-		const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
-		rvAngles angle;
-		idVec3 offset;
-		EvaluateAngle(pt->mpAngleEnvelope, t, oneOverDuration, angle);
-		EvaluateOffset(pt->mpOffsetEnvelope, t, oneOverDuration, offset);
-
-		idMat3 rotation;
-		angle.ToMat3(rotation);
-		pos += rotation * offset;
-	}
-
+	// Unlocked particles, resting ones included, stay in the effect frame they were born in.
 	if (effect && !GetLocked()) {
 		const idMat3 initToCurrent = BuildInitToCurrentAxis(effect, mInitAxis);
 		pos = initToCurrent * pos;
@@ -914,10 +742,12 @@ bool rvParticle::RunPhysics(rvBSE* effect, rvSegmentTemplate* st, float time) {
 	if (pt->mTraceModelIndex >= 0) {
 		trm = bse->GetTraceModel(pt->mTraceModelIndex);
 	}
+	// The game's shot mask: world solids plus render-model clip (actors, moveables, items).
 	trace_t trace;
 	idVec3 source = sourceWorld;
 	idVec3 dest = destWorld;
-	game->Translation(trace, source, dest, trm, CONTENTS_SOLID | CONTENTS_OPAQUE);
+	rvBSEManagerLocal::AddPerfCounter(PERF_NUM_TRACES);
+	game->Translation(trace, source, dest, trm, CONTENTS_SOLID | CONTENTS_RENDERMODEL);
 	if (trace.fraction >= 1.0f) {
 		return false;
 	}
@@ -929,23 +759,16 @@ bool rvParticle::RunPhysics(rvBSE* effect, rvSegmentTemplate* st, float time) {
 			CalcImpactPoint(impactPos, trace.endpos, motion, trm->bounds, trace.c.normal);
 		}
 
-		const int idx = rvRandom::irand(0, pt->mNumImpactEffects - 1);
-		const rvDeclEffect* impactEffect = pt->mImpactEffects[idx];
-		if (impactEffect) {
-			game->PlayEffect(
-				impactEffect,
-				impactPos,
-				trace.c.normal.ToMat3(),
-				false,
-				vec3_origin,
-				false,
-				false,
-				EC_IGNORE,
-				vec4_one);
+		// Impact effects only start while the owner is in an area connected to the player.
+		if (effect->GetInConnectedArea()) {
+			const rvDeclEffect* impactEffect = pt->mImpactEffects[rvRandom::irand(0, pt->mNumImpactEffects - 1)];
+			if (impactEffect) {
+				game->PlayEffect(impactEffect, impactPos, trace.c.normal.ToMat3(), false, vec3_origin, false, false, EC_IGNORE, vec4_one);
+			}
 		}
 	}
 
-	if (pt->mBounce > 0.0f) {
+	if (pt->mBounce != 0.0f) {
 		Bounce(effect, pt, trace.endpos, trace.c.normal, time);
 	}
 
@@ -958,46 +781,23 @@ void rvParticle::Bounce(rvBSE* effect, rvParticleTemplate* pt, idVec3 endPos, id
 		return;
 	}
 
-	const idMat3 currentAxis = effect->GetCurrentAxis();
-	const idMat3 currentAxisTransposed = effect->GetCurrentAxisTransposed();
+	idVec3 velocity;
+	EvaluateVelocity(effect, velocity, time);
+	velocity = effect->GetCurrentAxis() * velocity;
+	velocity -= normal * (2.0f * (velocity * normal));
+	velocity *= pt->mBounce;
 
-	idVec3 oldVelocity;
-	EvaluateVelocity(effect, oldVelocity, time);
-
-	idVec3 worldVelocity = currentAxis * oldVelocity;
-	const float proj = worldVelocity * normal;
-	worldVelocity -= (proj + proj) * normal;
-	worldVelocity *= pt->mBounce;
-
-	const float speedSqr = worldVelocity.LengthSqr();
-	if (speedSqr < BSE_BOUNCE_LIMIT) {
-		// Match vanilla settle behavior: only stick when the impact normal is
-		// sufficiently opposite gravity direction (roughly "floor" contacts).
-		const float gravityDot = normal * effect->GetGravityDir();
-		if (gravityDot < -idMath::SQRT_1OVER2) {
-			SetStationary(true);
-			worldVelocity.Zero();
-		}
-	}
-
-	const idVec3 currentLocalVelocity = currentAxisTransposed * worldVelocity;
-	const idVec3 currentLocalPos = currentAxisTransposed * (endPos - effect->GetCurrentOrigin());
-
-	if (GetLocked()) {
-		mVelocity = currentLocalVelocity;
-		mInitPos = currentLocalPos;
-	}
-	else {
-		// Preserve the original unlocked init frame and persist bounce results
-		// via the exact inverse of EvaluatePosition/EvaluateVelocity's
-		// init->current mapping.
-		const idMat3 currentToInit = BuildCurrentToInitAxis(effect, mInitAxis);
-		const idVec3 originDelta = mInitEffectPos - effect->GetCurrentOrigin();
-		const idVec3 currentOriginOffset = currentAxisTransposed * originDelta;
-		mVelocity = currentToInit * currentLocalVelocity;
-		mInitPos = currentToInit * (currentLocalPos - currentOriginOffset);
-	}
+	// Motion restarts from the impact point, stored in the current effect frame whether
+	// or not the particle is locked.
+	mVelocity = effect->GetCurrentAxisTransposed() * velocity;
+	mInitPos = effect->GetCurrentAxisTransposed() * (endPos - effect->GetCurrentOrigin());
 	mMotionStartTime = time;
+
+	// A slow bounce off a floor-like surface (normal against gravity) comes to rest.
+	if (mVelocity.LengthSqr() < BSE_BOUNCE_LIMIT && normal * effect->GetGravityDir() < -idMath::SQRT_1OVER2) {
+		SetStationary(true);
+		mVelocity.Zero();
+	}
 }
 
 void rvParticle::CheckTimeoutEffect(rvBSE* effect, rvSegmentTemplate* st, float time) {
@@ -1007,8 +807,9 @@ void rvParticle::CheckTimeoutEffect(rvBSE* effect, rvSegmentTemplate* st, float 
 	if (!effect || !st || !game) {
 		return;
 	}
+	// Timeout effects only start while the owner is in an area connected to the player.
 	rvParticleTemplate* pt = st->GetParticleTemplate();
-	if (!pt || pt->GetNumTimeoutEffects() <= 0) {
+	if (!pt || pt->GetNumTimeoutEffects() <= 0 || !effect->GetInConnectedArea()) {
 		return;
 	}
 
@@ -1095,10 +896,13 @@ void rvParticle::EmitSmokeParticles(rvBSE* effect, rvSegment* child, rvParticleT
 	const float timeEnd = time + 0.016000001f;
 	while (mLastTrailTime < timeEnd) {
 		if (mLastTrailTime >= mStartTime && mLastTrailTime < mEndTime) {
+			// Trail history is timed from the particle's birth, even after a bounce has
+			// restarted its motion.
+			const float sampleTime = mMotionStartTime + (mLastTrailTime - mStartTime);
 			idVec3 position;
 			idVec3 velocity;
-			EvaluatePosition(effect, pt, position, mLastTrailTime);
-			EvaluateVelocity(effect, velocity, mLastTrailTime);
+			EvaluatePosition(effect, pt, position, sampleTime);
+			EvaluateVelocity(effect, velocity, sampleTime);
 			if (velocity.LengthSqr() > 1e-8f) {
 				velocity.NormalizeFast();
 			}
@@ -1121,26 +925,16 @@ void rvParticle::EmitSmokeParticles(rvBSE* effect, rvSegment* child, rvParticleT
 //  render helpers
 // ---------------------------------------------------------------------------
 dword rvParticle::HandleTint(const rvBSE* effect, idVec4& colour, float alpha) {
-	idVec4 out = colour;
-	out[3] *= alpha;
-	if (effect) {
-		const float bright = effect->GetBrightness();
-		out[0] *= effect->GetRed() * bright;
-		out[1] *= effect->GetGreen() * bright;
-		out[2] *= effect->GetBlue() * bright;
-		out[3] *= effect->GetAlpha();
-	}
-
-	// Additive stages author fade in the alpha envelope, but blend-add paths
-	// do not consume destination alpha for attenuation. Premultiply RGB so
-	// additive particles fade over time like stock BSE.
-	if (GetAdditive()) {
-		out[0] *= out[3];
-		out[1] *= out[3];
-		out[2] *= out[3];
-	}
-
-	return PackColorLocal(out);
+	// Additive particles fade through RGB and stay opaque, ignoring the owner's alpha;
+	// the rest fade through alpha. Brightness only scales RGB.
+	const float bright = effect->GetBrightness();
+	const float rgbScale = GetAdditive() ? colour[3] * alpha * bright : bright;
+	const float outAlpha = GetAdditive() ? 1.0f : effect->GetAlpha() * colour[3] * alpha;
+	return PackColorLocal(idVec4(
+		effect->GetRed() * colour[0] * rgbScale,
+		effect->GetGreen() * colour[1] * rgbScale,
+		effect->GetBlue() * colour[2] * rgbScale,
+		outAlpha));
 }
 
 void rvParticle::RenderQuadTrail(const rvBSE* effect, srfTriangles_t* tri, idVec3 offset, float fraction, idVec4& colour, idVec3& pos, bool first) {
@@ -1188,12 +982,11 @@ void rvParticle::RenderMotion(rvBSE* effect, rvParticleTemplate* pt, srfTriangle
 	}
 
 	const float evalTime = Max(0.0f, time - mStartTime);
-	const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
 	idVec4 color;
-	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, oneOverDuration, color);
+	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, mOneOverDuration, color);
 
 	idVec3 size(1.0f, 1.0f, 1.0f);
-	EvaluateSize(pt->mpSizeEnvelope, evalTime, oneOverDuration, size.ToFloatPtr());
+	EvaluateSize(pt->mpSizeEnvelope, evalTime, mOneOverDuration, size.ToFloatPtr());
 	const float width = size.x;
 
 	idVec3 position;
@@ -1287,7 +1080,7 @@ void rvDecalParticle::GetSpawnInfo(idVec4& tint, idVec3& size, idVec3& rotate) {
 	const float* tintStart = mTintEnv.GetStart();
 	tint.Set(tintStart[0], tintStart[1], tintStart[2], mFadeEnv.GetStart()[0]);
 	const float* sizeStart = mSizeEnv.GetStart();
-	size.Set(sizeStart[0], sizeStart[1], Max(idMath::Fabs(sizeStart[0]), idMath::Fabs(sizeStart[1])));
+	size.Set(sizeStart[0], sizeStart[1], 0.0f);
 	rotate.Set(mRotationEnv.GetStart()[0], 0.0f, 0.0f);
 }
 
@@ -1308,31 +1101,21 @@ bool rvSpriteParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, const
 	idVec3 pos;
 	EvaluatePosition(effect, pt, pos, time);
 
-	const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
 	idVec4 color;
-	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, oneOverDuration, color);
-	color[3] *= override;
-	if (color[3] <= 0.0f) {
-		BSETraceRenderDrop("sprite", this, time, "alpha", color[3], override);
-		return false;
-	}
+	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, mOneOverDuration, color);
 
 	float size[2] = { 1.0f, 1.0f };
-	EvaluateSize(pt->mpSizeEnvelope, evalTime, oneOverDuration, size);
-	const idVec2& spriteSize = effect->GetSpriteSize();
-	if (idMath::Fabs(spriteSize.x) > BSE_TIME_EPSILON || idMath::Fabs(spriteSize.y) > BSE_TIME_EPSILON) {
-		size[0] = spriteSize.x;
-		size[1] = spriteSize.y;
-	}
+	EvaluateSize(pt->mpSizeEnvelope, evalTime, mOneOverDuration, size);
 	float rotation = 0.0f;
-	EvaluateRotation(pt->mpRotateEnvelope, evalTime, oneOverDuration, &rotation);
+	EvaluateRotation(pt->mpRotateEnvelope, evalTime, mOneOverDuration, &rotation);
 
 	float s, c;
 	idMath::SinCos(rotation, s, c);
 	idVec3 right = (view[1] * c - view[2] * s) * size[0];
 	idVec3 up = (view[1] * s + view[2] * c) * size[1];
 
-	dword rgba = HandleTint(effect, color, 1.0f);
+	// No alpha test: a fully faded particle still emits its quad (and so its burn trail).
+	dword rgba = HandleTint(effect, color, override);
 	AppendQuad(
 		tri,
 		pos - right,
@@ -1358,32 +1141,24 @@ bool rvLineParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, const i
 	idVec3 pos;
 	EvaluatePosition(effect, pt, pos, time);
 
-	const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
 	idVec4 color;
-	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, oneOverDuration, color);
-	color[3] *= override;
-	if (color[3] <= 0.0f) {
-		BSETraceRenderDrop("line", this, time, "alpha", color[3], override);
-		return false;
-	}
+	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, mOneOverDuration, color);
 
 	float width = 1.0f;
-	EvaluateSize(pt->mpSizeEnvelope, evalTime, oneOverDuration, &width);
+	EvaluateSize(pt->mpSizeEnvelope, evalTime, mOneOverDuration, &width);
 
 	idVec3 length(0.0f, 0.0f, 1.0f);
-	EvaluateLength(pt->mpLengthEnvelope, evalTime, oneOverDuration, length);
+	EvaluateLength(pt->mpLengthEnvelope, evalTime, mOneOverDuration, length);
 	if (!GetLocked()) {
 		const idMat3 initToCurrent = BuildInitToCurrentAxis(effect, mInitAxis);
 		length = initToCurrent * length;
 	}
 	if (GetGeneratedLine()) {
+		// The length is laid along the direction of travel; without motion it collapses.
 		idVec3 velocity;
 		EvaluateVelocity(effect, velocity, time);
-		const float velocitySqr = velocity.LengthSqr();
-		if (velocitySqr > 1e-8f) {
-			velocity.NormalizeFast();
-			length = velocity * length.LengthFast();
-		}
+		velocity.Normalize();
+		length = velocity * length.Length();
 	}
 
 	const idVec3 end = pos + length;
@@ -1395,7 +1170,7 @@ bool rvLineParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, const i
 	}
 	side *= width;
 
-	dword rgba = HandleTint(effect, color, 1.0f);
+	dword rgba = HandleTint(effect, color, override);
 	const int base = tri->numVerts;
 	SetDrawVert(tri->verts[base + 0], pos + side, 0.0f, 0.0f, rgba);
 	SetDrawVert(tri->verts[base + 1], pos - side, 0.0f, 1.0f, rgba);
@@ -1432,20 +1207,14 @@ bool rvLinkedParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, const
 	idVec3 pos;
 	EvaluatePosition(effect, pt, pos, time);
 
-	const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
 	idVec4 color;
-	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, oneOverDuration, color);
-	color[3] *= override;
-	if (color[3] <= 0.0f) {
-		return false;
-	}
+	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, mOneOverDuration, color);
 
 	float size = 1.0f;
-	EvaluateSize(pt->mpSizeEnvelope, evalTime, oneOverDuration, &size);
-	size = idMath::Fabs(size);
+	EvaluateSize(pt->mpSizeEnvelope, evalTime, mOneOverDuration, &size);
 
 	idVec3 up = view[1] * size;
-	dword rgba = HandleTint(effect, color, 1.0f);
+	dword rgba = HandleTint(effect, color, override);
 
 	const int base = tri->numVerts;
 	SetDrawVert(tri->verts[base + 0], pos + up, mFraction * mTextureScale, 0.0f, rgba);
@@ -1484,26 +1253,20 @@ bool rvOrientedParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, con
 	idVec3 position;
 	EvaluatePosition(effect, pt, position, time);
 
-	const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
 	idVec4 tint;
-	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, oneOverDuration, tint);
-	tint[3] *= override;
-	if (tint[3] <= 0.0f) {
-		BSETraceRenderDrop("oriented", this, time, "alpha", tint[3], override);
-		return false;
-	}
+	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, mOneOverDuration, tint);
 
 	float size[2] = { 1.0f, 1.0f };
 	float rotation[3] = { 0.0f, 0.0f, 0.0f };
-	EvaluateSize(pt->mpSizeEnvelope, evalTime, oneOverDuration, size);
-	EvaluateRotation(pt->mpRotateEnvelope, evalTime, oneOverDuration, rotation);
+	EvaluateSize(pt->mpSizeEnvelope, evalTime, mOneOverDuration, size);
+	EvaluateRotation(pt->mpRotateEnvelope, evalTime, mOneOverDuration, rotation);
 
 	idMat3 transform;
 	rvAngles(rotation[0], rotation[1], rotation[2]).ToMat3(transform);
 	const idVec3 right = transform[1] * -size[0];
 	const idVec3 up = transform[2] * size[1];
 
-	dword rgba = HandleTint(effect, tint, 1.0f);
+	dword rgba = HandleTint(effect, tint, override);
 	AppendQuad(
 		tri,
 		position - right,
@@ -1528,19 +1291,14 @@ bool rvModelParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, const 
 	idVec3 position;
 	EvaluatePosition(effect, pt, position, time);
 
-	const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
 	idVec4 color;
-	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, oneOverDuration, color);
-	color[3] *= override;
-	if (color[3] <= 0.0f) {
-		return false;
-	}
+	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, mOneOverDuration, color);
 
 	float size[3] = { 1.0f, 1.0f, 1.0f };
-	EvaluateSize(pt->mpSizeEnvelope, evalTime, oneOverDuration, size);
+	EvaluateSize(pt->mpSizeEnvelope, evalTime, mOneOverDuration, size);
 
 	float rotation[3] = { 0.0f, 0.0f, 0.0f };
-	EvaluateRotation(pt->mpRotateEnvelope, evalTime, oneOverDuration, rotation);
+	EvaluateRotation(pt->mpRotateEnvelope, evalTime, mOneOverDuration, rotation);
 
 	const modelSurface_t* surf = mModel->Surface(0);
 	if (!surf || !surf->geometry) {
@@ -1550,7 +1308,7 @@ bool rvModelParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, const 
 	const srfTriangles_t* src = surf->geometry;
 	const int baseVert = tri->numVerts;
 	const int baseIndex = tri->numIndexes;
-	const dword rgba = HandleTint(effect, color, 1.0f);
+	const dword rgba = HandleTint(effect, color, override);
 	byte rgbaBytes[4];
 	UnpackColor(rgba, rgbaBytes);
 
@@ -1572,9 +1330,8 @@ bool rvModelParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, const 
 		p.z *= size[2];
 		dst.xyz = position + p;
 
-		dst.normal = transform * dst.normal;
-		dst.tangents[0] = transform * dst.tangents[0];
-		dst.tangents[1] = transform * dst.tangents[1];
+		// Retail rvModelParticle::Render (0x101c8d90) transforms only xyz and
+		// keeps the model's normal and tangents as copied above.
 		dst.color[0] = rgbaBytes[0];
 		dst.color[1] = rgbaBytes[1];
 		dst.color[2] = rgbaBytes[2];
@@ -1626,20 +1383,8 @@ void rvElectricityParticle::RenderBranch(const rvBSE* effect, struct SElecWork* 
 
 	const idDeclTable* resolvedJitterTable = jitterTable ? jitterTable : mJitterTable;
 
-	const float forwardLenSqr = work->forward.LengthSqr();
-	if (forwardLenSqr > 1e-8f) {
-		work->forward *= idMath::InvSqrt(forwardLenSqr);
-	}
-
-	idVec3 left;
-	const float planarLenSqr = work->forward.x * work->forward.x + work->forward.y * work->forward.y;
-	if (planarLenSqr <= 1e-8f) {
-		left.Set(1.0f, 0.0f, 0.0f);
-	}
-	else {
-		const float invPlanarLen = idMath::InvSqrt(planarLenSqr);
-		left.Set(-work->forward.y * invPlanarLen, work->forward.x * invPlanarLen, 0.0f);
-	}
+	work->forward.Normalize();
+	const idVec3 left = BoltLeft(work->forward);
 	const idVec3 down = left.Cross(work->forward);
 
 	const int segmentVertStart = work->tri->numVerts;
@@ -1689,6 +1434,7 @@ void rvElectricityParticle::RenderBranch(const rvBSE* effect, struct SElecWork* 
 
 		RenderLineSegment(effect, work, current, 1.0f);
 
+		// Vertices come in (+side, -side) pairs; each quad splits along base..base+3.
 		for (int base = segmentVertStart; base < work->tri->numVerts - 2; base += 2) {
 			if (!HasTriCapacity(work->tri, 0, 6)) {
 				break;
@@ -1697,10 +1443,10 @@ void rvElectricityParticle::RenderBranch(const rvBSE* effect, struct SElecWork* 
 			const int indexBase = work->tri->numIndexes;
 			work->tri->indexes[indexBase + 0] = base;
 			work->tri->indexes[indexBase + 1] = base + 1;
-			work->tri->indexes[indexBase + 2] = base + 2;
+			work->tri->indexes[indexBase + 2] = base + 3;
 			work->tri->indexes[indexBase + 3] = base;
-			work->tri->indexes[indexBase + 4] = base + 2;
-			work->tri->indexes[indexBase + 5] = base + 3;
+			work->tri->indexes[indexBase + 4] = base + 3;
+			work->tri->indexes[indexBase + 5] = base + 2;
 			work->tri->numIndexes += 6;
 		}
 	}
@@ -1738,43 +1484,24 @@ void rvElectricityParticle::ApplyShape(const rvBSE* effect, struct SElecWork* wo
 		return;
 	}
 
+	// Each pass kinks the segment at a point about a third of the way along, pushed out
+	// sideways and down, and at one about two thirds along, pushed back by roughly the
+	// same amount, so the bolt zigzags evenly about its line.
 	while (count >= 1) {
-		const float bendA = rvRandom::flrand(0.05f, 0.09f);
-		const float bendB = rvRandom::flrand(0.05f, 0.09f);
-		const float shape = rvRandom::flrand(0.56f, 0.76f);
+		const float down1 = rvRandom::flrand(0.05f, 0.09f);
+		const float left1 = rvRandom::flrand(0.05f, 0.09f);
+		const float weight1 = rvRandom::flrand(0.56f, 0.76f);
+		const float down2 = rvRandom::flrand(-down1 - 0.02f, 0.02f - down1);
+		const float left2 = rvRandom::flrand(-left1 - 0.02f, 0.02f - left1);
+		const float weight2 = rvRandom::flrand(0.23f, 0.43f);
 
 		idVec3 forward = end - start;
-		const float length = forward.LengthFast() * 0.7f;
-		if (length <= 1e-6f) {
-			break;
-		}
-		forward.NormalizeFast();
-
-		idVec3 left;
-		const float planarLenSqr = forward.x * forward.x + forward.y * forward.y;
-		if (planarLenSqr <= 1e-8f) {
-			left.Set(1.0f, 0.0f, 0.0f);
-		}
-		else {
-			const float invPlanarLen = idMath::InvSqrt(planarLenSqr);
-			left.Set(-forward.y * invPlanarLen, forward.x * invPlanarLen, 0.0f);
-		}
+		const float length = forward.Normalize() * 0.7f;
+		const idVec3 left = BoltLeft(forward);
 		const idVec3 down = left.Cross(forward);
 
-		const float leftOffset1 = rvRandom::flrand(-bendB - 0.02f, 0.02f - bendB) * length;
-		const idVec3 point1 =
-			start * shape +
-			end * (1.0f - shape) +
-			left * leftOffset1 +
-			down * rvRandom::flrand(0.23f, 0.43f) * length;
-
-		const float t2 = rvRandom::flrand(0.23f, 0.43f);
-		const float leftOffset2 = rvRandom::flrand(-bendA - 0.02f, 0.02f - bendA) * length;
-		const idVec3 point2 =
-			start * t2 +
-			end * (1.0f - t2) +
-			left * leftOffset2 +
-			down * rvRandom::flrand(-0.02f, 0.02f) * length;
+		const idVec3 point1 = start * weight1 + end * (1.0f - weight1) + left * (left1 * length) + down * (down1 * length);
+		const idVec3 point2 = start * weight2 + end * (1.0f - weight2) + left * (left2 * length) + down * (down2 * length);
 
 		const float mid0 = startFraction * 0.6666667f + endFraction * 0.3333333f;
 		const float mid1 = startFraction * 0.3333333f + endFraction * 0.6666667f;
@@ -1797,9 +1524,8 @@ int rvElectricityParticle::Update(rvParticleTemplate* pt, float time) {
 	}
 
 	const float evalTime = Max(0.0f, time - mStartTime);
-	const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
 	idVec3 length;
-	EvaluateLength(pt->mpLengthEnvelope, evalTime, oneOverDuration, length);
+	EvaluateLength(pt->mpLengthEnvelope, evalTime, mOneOverDuration, length);
 	mNumBolts = GetBoltCount(length.LengthFast());
 	return mNumBolts;
 }
@@ -1814,18 +1540,13 @@ bool rvElectricityParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, 
 		return false;
 	}
 
-	const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
 	idVec4 tint;
-	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, oneOverDuration, tint);
-	tint[3] *= override;
-	if (tint[3] <= 0.0f) {
-		return false;
-	}
+	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, mOneOverDuration, tint);
 
 	float width = 1.0f;
-	EvaluateSize(pt->mpSizeEnvelope, evalTime, oneOverDuration, &width);
+	EvaluateSize(pt->mpSizeEnvelope, evalTime, mOneOverDuration, &width);
 	idVec3 length;
-	EvaluateLength(pt->mpLengthEnvelope, evalTime, oneOverDuration, length);
+	EvaluateLength(pt->mpLengthEnvelope, evalTime, mOneOverDuration, length);
 
 	idVec3 position;
 	EvaluatePosition(effect, pt, position, time);
@@ -1871,8 +1592,8 @@ bool rvElectricityParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, 
 	work.coords = tmpCoords;
 	work.coordCount = 0;
 	work.tint = tint;
-	work.size = idMath::Fabs(width);
-	work.alpha = 1.0f;
+	work.size = width;
+	work.alpha = override;
 	work.length = length;
 	work.forward = length;
 	work.viewPos = view[0];
@@ -1913,7 +1634,7 @@ bool rvElectricityParticle::Render(const rvBSE* effect, rvParticleTemplate* pt, 
 			continue;
 		}
 
-		work.length = dir;
+		// Forks keep the main bolt's length, so their ribbons share its width direction.
 		work.forward = dir;
 		work.step = 1.0f / static_cast<float>(GetBoltCount(forkLength));
 		RenderBranch(effect, &work, forkBases[i], forkEnd, jitterTable);
@@ -1969,42 +1690,29 @@ bool rvLightParticle::InitLight(rvBSE* effect, rvSegmentTemplate* st, float time
 		return false;
 	}
 
-	const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
 	idVec4 tint;
 	idVec3 size;
 	idVec3 position;
-	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, oneOverDuration, tint);
-	EvaluateSize(pt->mpSizeEnvelope, evalTime, oneOverDuration, size.ToFloatPtr());
+	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, mOneOverDuration, tint);
+	EvaluateSize(pt->mpSizeEnvelope, evalTime, mOneOverDuration, size.ToFloatPtr());
 	EvaluatePosition(effect, pt, position, time);
 
-	// Retail BSE light particles premultiply RGB by fade before submitting the
-	// render light, rather than inheriting unrelated owner shader parms.
-	if (effect) {
-		const float bright = effect->GetBrightness();
-		tint.x *= effect->GetRed() * bright;
-		tint.y *= effect->GetGreen() * bright;
-		tint.z *= effect->GetBlue() * bright;
-		tint.w *= effect->GetAlpha();
-	}
-	const float fade = Max( 0.0f, tint.w );
-
+	// The light colour is the raw tint: fade and the owner's colour and brightness are not
+	// applied, and the alpha parm stays zero. A missing material uses the default light.
 	memset(&mLight, 0, sizeof(mLight));
 	mLight.origin = effect->GetCurrentOrigin() + effect->GetCurrentAxis() * position;
-	mLight.lightRadius.x = Max(1.0f, idMath::Fabs(size.x));
-	mLight.lightRadius.y = Max(1.0f, idMath::Fabs(size.y));
-	mLight.lightRadius.z = Max(1.0f, idMath::Fabs(size.z));
+	mLight.lightRadius.x = Max(1.0f, size.x);
+	mLight.lightRadius.y = Max(1.0f, size.y);
+	mLight.lightRadius.z = Max(1.0f, size.z);
 	mLight.axis = effect->GetCurrentAxis();
-	mLight.shaderParms[ SHADERPARM_RED ] = tint.x * fade;
-	mLight.shaderParms[ SHADERPARM_GREEN ] = tint.y * fade;
-	mLight.shaderParms[ SHADERPARM_BLUE ] = tint.z * fade;
-	mLight.shaderParms[ SHADERPARM_ALPHA ] = fade;
+	mLight.shaderParms[ SHADERPARM_RED ] = tint.x;
+	mLight.shaderParms[ SHADERPARM_GREEN ] = tint.y;
+	mLight.shaderParms[ SHADERPARM_BLUE ] = tint.z;
 	mLight.pointLight = true;
 	mLight.detailLevel = 10.0f;
 	mLight.noShadows = !pt->GetShadows();
 	mLight.noSpecular = !pt->GetSpecular();
-	mLight.suppressLightInViewID = effect->GetSuppressLightsInViewID();
-	mLight.lightId = LIGHTID_EFFECT_LIGHT;
-	mLight.shader = pt->GetMaterial() ? pt->GetMaterial() : declManager->FindMaterial("_default");
+	mLight.shader = pt->GetMaterial();
 
 	mLightDefHandle = renderWorld->AddLightDef(&mLight);
 	mLightRenderWorld = renderWorld;
@@ -2012,14 +1720,8 @@ bool rvLightParticle::InitLight(rvBSE* effect, rvSegmentTemplate* st, float time
 }
 
 bool rvLightParticle::PresentLight(rvBSE* effect, rvParticleTemplate* pt, float time, bool infinite) {
-	idRenderWorld* renderWorld = effect ? effect->GetRenderWorld() : NULL;
-	if (!renderWorld) {
-		renderWorld = mLightRenderWorld;
-	}
-	if (!renderWorld && session) {
-		renderWorld = session->rw;
-	}
-	if (!effect || !pt || !renderWorld) {
+	// A light that InitLight could not register is not added again here.
+	if (mLightDefHandle == -1 || !mLightRenderWorld || !effect || !pt) {
 		return false;
 	}
 
@@ -2028,47 +1730,23 @@ bool rvLightParticle::PresentLight(rvBSE* effect, rvParticleTemplate* pt, float 
 		return false;
 	}
 
-	if (mLightDefHandle == -1 || mLightRenderWorld != renderWorld) {
-		if (mLightDefHandle != -1 && mLightRenderWorld != NULL) {
-			mLightRenderWorld->FreeLightDef(mLightDefHandle);
-		}
-		mLightDefHandle = renderWorld->AddLightDef(&mLight);
-		if (mLightDefHandle == -1) {
-			return false;
-		}
-		mLightRenderWorld = renderWorld;
-	}
-
-	const float oneOverDuration = 1.0f / Max(BSE_TIME_EPSILON, GetDuration());
 	idVec4 tint;
 	idVec3 size;
 	idVec3 position;
-	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, oneOverDuration, tint);
-	EvaluateSize(pt->mpSizeEnvelope, evalTime, oneOverDuration, size.ToFloatPtr());
+	EvaluateTint(pt->mpTintEnvelope, pt->mpFadeEnvelope, evalTime, mOneOverDuration, tint);
+	EvaluateSize(pt->mpSizeEnvelope, evalTime, mOneOverDuration, size.ToFloatPtr());
 	EvaluatePosition(effect, pt, position, time);
 
-	// Keep runtime updates in sync with InitLight attenuation semantics.
-	if (effect) {
-		const float bright = effect->GetBrightness();
-		tint.x *= effect->GetRed() * bright;
-		tint.y *= effect->GetGreen() * bright;
-		tint.z *= effect->GetBlue() * bright;
-		tint.w *= effect->GetAlpha();
-	}
-	const float fade = Max( 0.0f, tint.w );
-
+	// Same raw-tint colour as InitLight.
 	mLight.origin = effect->GetCurrentOrigin() + effect->GetCurrentAxis() * position;
-	mLight.lightRadius.x = Max(1.0f, idMath::Fabs(size.x));
-	mLight.lightRadius.y = Max(1.0f, idMath::Fabs(size.y));
-	mLight.lightRadius.z = Max(1.0f, idMath::Fabs(size.z));
+	mLight.lightRadius.x = Max(1.0f, size.x);
+	mLight.lightRadius.y = Max(1.0f, size.y);
+	mLight.lightRadius.z = Max(1.0f, size.z);
 	mLight.axis = effect->GetCurrentAxis();
-	memset( mLight.shaderParms, 0, sizeof( mLight.shaderParms ) );
-	mLight.shaderParms[ SHADERPARM_RED ] = tint.x * fade;
-	mLight.shaderParms[ SHADERPARM_GREEN ] = tint.y * fade;
-	mLight.shaderParms[ SHADERPARM_BLUE ] = tint.z * fade;
-	mLight.shaderParms[ SHADERPARM_ALPHA ] = fade;
-	mLight.suppressLightInViewID = effect->GetSuppressLightsInViewID();
-	renderWorld->UpdateLightDef(mLightDefHandle, &mLight);
+	mLight.shaderParms[ SHADERPARM_RED ] = tint.x;
+	mLight.shaderParms[ SHADERPARM_GREEN ] = tint.y;
+	mLight.shaderParms[ SHADERPARM_BLUE ] = tint.z;
+	mLightRenderWorld->UpdateLightDef(mLightDefHandle, &mLight);
 	return true;
 }
 

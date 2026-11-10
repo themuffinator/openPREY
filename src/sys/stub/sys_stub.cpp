@@ -46,6 +46,12 @@ int Sys_Milliseconds( void ) {
 	return common->GetUserCmdTime( frameNum );
 }
 
+bool Sys_GetSecureRandomBytes( void *buffer, int bytes ) {
+	(void)buffer;
+	(void)bytes;
+	return false;
+}
+
 double Sys_GetClockTicks( void ) {
 	return static_cast<double>( common->GetUserCmdTime( frameNum ) );
 }

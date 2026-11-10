@@ -7,6 +7,7 @@ uniform sampler2D BloomTex4;
 uniform float bloomIntensity;
 uniform float bloomEnabled;
 uniform float toneMapEnabled;
+uniform float hdrLinearScene;
 uniform float hdrExposure;
 uniform float hdrWhitePoint;
 uniform float hdrLift;
@@ -77,12 +78,26 @@ vec3 ToneMapHDR( vec3 color ) {
 	float safeExposure = max( hdrExposure, 0.001 );
 	vec3 exposedColor = color * safeExposure;
 	float safeWhitePoint = max( hdrWhitePoint, 1.0 );
-	float shoulderStart = 0.98;
-	float exposedWhitePoint = max( safeWhitePoint * safeExposure, shoulderStart + 0.001 );
-	float shoulderRange = max( exposedWhitePoint - shoulderStart, 0.001 );
-	float shoulderNorm = max( 1.0 - exp( -4.0 ), 0.0001 );
-	vec3 shoulderT = max( exposedColor - vec3( shoulderStart ), vec3( 0.0 ) ) / shoulderRange;
-	vec3 shoulderColor = vec3( shoulderStart ) + ( 1.0 - shoulderStart ) * ( vec3( 1.0 ) - exp( -shoulderT * 4.0 ) ) / shoulderNorm;
+	if ( hdrLinearScene > 0.5 ) {
+		// The opt-in PBR scene is linear and may greatly exceed display white.
+		// Keep the reference white independent of exposure; scaling both would
+		// cancel exposure precisely where highlight control is needed most.
+		vec3 mapped = ACESFilm( exposedColor ) / max( ACESFilmScalar( safeWhitePoint ), 0.0001 );
+		mapped = clamp( HighlightCompress( mapped ), 0.0, 1.0 );
+		// Encode exactly once here. Framebuffer sRGB is disabled, and authored
+		// post effects / SMAA / the HUD consume display-referred color afterwards.
+		return mix( mapped * 12.92, 1.055 * pow( mapped, vec3(1.0 / 2.4) ) - 0.055,
+			step( vec3(0.0031308), mapped ) );
+	}
+	// Stock scene values are perceptual. Preserve their midrange and reserve
+	// the upper half of the display range for a smooth highlight shoulder;
+	// the former .98 knee lost texture detail under automatic exposure.
+	float shoulderStart = 0.5;
+	float exposedWhitePoint = max( safeWhitePoint * safeExposure, 1.0 );
+	float shoulderRange = exposedWhitePoint - shoulderStart;
+	float curvature = 1.0 / ( 1.0 - shoulderStart ) - 1.0 / shoulderRange;
+	vec3 shoulderT = max( exposedColor - vec3( shoulderStart ), vec3( 0.0 ) );
+	vec3 shoulderColor = vec3( shoulderStart ) + shoulderT / ( vec3( 1.0 ) + curvature * shoulderT );
 	vec3 mappedColor = mix( exposedColor, shoulderColor, step( vec3( shoulderStart ), exposedColor ) );
 	return clamp( HighlightCompress( mappedColor ), 0.0, 1.0 );
 }

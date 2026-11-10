@@ -95,6 +95,9 @@ public:
 					// outright, so callers that pay to build their payload can ask
 					// first instead of losing it.
 	int				GetMaxSendMessageSize( void ) const;
+	// Real-time media is dropped under backpressure and never fragmented or
+	// retransmitted. Include the reliable backlog in this admission decision.
+	bool			CanSendUnfragmented( int time, int payloadBytes, int burstMsec = 0 ) const;
 
 					// Sends the next fragment if the last message was too large to send at once.
 	void			SendNextFragment( idPort &port, const int time );
@@ -154,6 +157,8 @@ private:
 	// incoming fragment assembly buffer
 	int				fragmentSequence;
 	int				fragmentLength;
+	int				fragmentExpectedLength;	// -1 until the final fragment arrives
+	unsigned int	fragmentReceived;		// one bit per aligned fragment (at most 16 KiB)
 	byte			fragmentBuffer[MAX_MESSAGE_SIZE];
 
 	// reliable messages
@@ -161,7 +166,7 @@ private:
 	idMsgQueue		reliableReceive;
 
 private:
-	void			WriteMessageData( idBitMsg &out, const idBitMsg &msg );
+	bool			WriteMessageData( idBitMsg &out, const idBitMsg &msg );
 	bool			ReadMessageData( idBitMsg &out, const idBitMsg &msg );
 
 	void			UpdateOutgoingRate( const int time, const int size );

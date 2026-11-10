@@ -29,6 +29,17 @@ If you have questions concerning this license or the applicable additional terms
 #ifndef __MODEL_LOCAL_H__
 #define __MODEL_LOCAL_H__
 
+#include "GpuSkinning.h"
+
+// Cache payload capabilities belong to renderer-owned concrete models.  Keep
+// them out of the public idRenderModel ABI shared with game modules.
+typedef enum {
+	RENDER_MODEL_CACHE_UNSUPPORTED = 0,
+	RENDER_MODEL_CACHE_STATIC = 1,
+	RENDER_MODEL_CACHE_MD5 = 2,
+	RENDER_MODEL_CACHE_MD5R = 3
+} renderModelCacheType_t;
+
 /*
 ===============================================================================
 
@@ -36,6 +47,70 @@ If you have questions concerning this license or the applicable additional terms
 
 ===============================================================================
 */
+
+// Checked primitive I/O shared by the concrete render-model cache codecs.  It
+// deliberately avoids idFile::ReadString because cache strings must be capped
+// before allocating their backing storage.
+class idRenderModelCacheReader {
+public:
+								idRenderModelCacheReader( idFile &source );
+
+	bool					ReadBytes( void *data, int length );
+	bool					ReadInt( int &value );
+	bool					ReadUnsignedInt( unsigned int &value );
+	bool					ReadUnsigned64( uint64_t &value );
+	bool					ReadByte( byte &value );
+	bool					ReadBool( bool &value );
+	bool					ReadFloat( float &value );
+	bool					ReadVec2( idVec2 &value );
+	bool					ReadVec3( idVec3 &value );
+	bool					ReadVec4( idVec4 &value );
+	bool					ReadFloatArray( float *values, int count );
+	bool					ReadIntArray( int *values, int count );
+	bool					ReadBounds( idBounds &value, bool allowCleared = false );
+	bool					ReadString( idStr &value, int maxLength );
+	bool					ReadCount( int &value, int maxCount, size_t elementSize = 0 );
+	bool					Reserve( int count, size_t elementSize );
+	bool					IsValid() const { return valid; }
+
+private:
+	idFile &					file;
+	uint64_t				transferBytes;
+	uint64_t				allocationBytes;
+	bool					valid;
+};
+
+class idRenderModelCacheWriter {
+public:
+								idRenderModelCacheWriter( idFile &destination );
+
+	bool					WriteBytes( const void *data, int length );
+	bool					WriteInt( int value );
+	bool					WriteUnsignedInt( unsigned int value );
+	bool					WriteUnsigned64( uint64_t value );
+	bool					WriteByte( byte value );
+	bool					WriteBool( bool value );
+	bool					WriteFloat( float value );
+	bool					WriteVec2( const idVec2 &value );
+	bool					WriteVec3( const idVec3 &value );
+	bool					WriteVec4( const idVec4 &value );
+	bool					WriteFloatArray( const float *values, int count );
+	bool					WriteIntArray( const int *values, int count );
+	bool					WriteBounds( const idBounds &value );
+	bool					WriteString( const char *value, int maxLength );
+	bool					IsValid() const { return valid; }
+
+private:
+	idFile &					file;
+	uint64_t				transferBytes;
+	bool					valid;
+};
+
+bool R_RenderModelCacheFloatIsFinite( float value );
+bool R_TryReadGeneratedRenderModelCache( idRenderModel &model, const char *sourcePath,
+	unsigned int parserVersion, const char *settingsKey );
+void R_WriteGeneratedRenderModelCache( const idRenderModel &model, const char *sourcePath,
+	unsigned int parserVersion, const char *settingsKey );
 
 class idRenderModelStatic : public idRenderModel {
 public:
@@ -79,19 +154,28 @@ public:
 	virtual jointHandle_t		GetJointHandle( const char *name ) const;
 	virtual const char *		GetJointName( jointHandle_t handle ) const;
 	virtual const idJointQuat *	GetDefaultPose( void ) const;
-	virtual int					NearestJoint( int surfaceNum, int a, int b, int c ) const;
+	virtual int					NearestJoint( int surfaceId, int a, int b, int c ) const;
 	virtual bool				HasCollisionSurface( const struct renderEntity_s *ent ) const;
 	virtual idBounds			Bounds( const struct renderEntity_s *ent ) const;
 	virtual void				SetBounds( const idBounds &newBounds ) { bounds = newBounds; }
 	virtual void				ReadFromDemoFile( class idDemoFile *f );
 	virtual void				WriteToDemoFile( class idDemoFile *f );
+	virtual renderModelCacheType_t LevelLoadCachePayloadType() const;
+	virtual bool				WriteLevelLoadCachePayload( idFile &file ) const;
+	virtual bool				ReadLevelLoadCachePayload( idFile &file );
 	virtual float				DepthHack() const;
 	virtual int					GetSurfaceMask( const char *surface ) const;
 
 	void						MakeDefaultModel();
 	void						SetProcSky( bool value );
 	bool						HasProcSky() const;
-	
+	// Whether the resident data was decoded from openQ4's generated cache,
+	// directly or by converting a model that was; purging clears it. Once
+	// generated-cache reads are refused (a pure lock), BeginLevelLoad purges
+	// such models so they are derived again from their source.
+	bool						HoldsGeneratedCacheContent() const { return generatedCacheContent; }
+	void						SetGeneratedCacheContent( bool value ) { generatedCacheContent = value; }
+
 	bool						LoadASE( const char *fileName );
 	bool						LoadLWO( const char *fileName );
 	bool						LoadFLT( const char *fileName );
@@ -107,12 +191,18 @@ public:
 	void						DeleteSurfacesWithNegativeId( void );
 	bool						FindSurfaceWithId( int id, int &surfaceNum );
 
+	// createBackSides false finishes surfaces that already carry their back
+	// sides, such as MD5R surfaces rebuilt 1:1 from packed meshes
+	void						FinishSurfaces( bool createBackSides );
+
 public:
 	idList<modelSurface_t>		surfaces;
 	idBounds					bounds;
 	int							overlaysAdded;
 
 protected:
+	void						SwapLevelLoadCacheState( idRenderModelStatic &other );
+
 	int							lastModifiedFrame;
 	int							lastArchivedFrame;
 
@@ -124,6 +214,7 @@ protected:
 	bool						fastLoad;				// don't generate tangents and shadow data
 	bool						reloadable;				// if not, reloadModels won't check timestamp
 	bool						procSky;				// Quake 4 .proc / MD5RProc area needs portal-sky PVS
+	bool						generatedCacheContent;	// resident data came from the generated cache
 	bool						levelLoadReferenced;	// for determining if it needs to be freed
 	ID_TIME_T						timeStamp;
 
@@ -150,7 +241,7 @@ public:
 								~idMD5Mesh();
 
  	void						ParseMesh( idLexer &parser, int numJoints, const idJointMat *joints );
-	void						UpdateSurface( const struct renderEntity_s *ent, const idJointMat *joints, modelSurface_t *surf, bool calculateTangents = true );
+	void						UpdateSurface( const struct renderEntity_s *ent, const idJointMat *joints, modelSurface_t *surf, bool calculateTangents = true, bool allowGpuSkinning = true );
 	idBounds					CalcBounds( const idJointMat *joints );
 	int							NearestJoint( int a, int b, int c ) const;
 	int							NumVerts( void ) const;
@@ -170,8 +261,14 @@ private:
 	struct deformInfo_s *		deformInfo;			// used to create srfTriangles_t from base frames and new vertexes
 	int							surfaceNum;			// number of the static surface created for this mesh
 	float						currentTime;		// animation LOD timer
+	idList<idDrawVert>			gpuBindPoseVerts;	// immutable output-vertex bind pose
+	idList<gpuSkinningVertex_t> gpuSkinningVerts;	// dedicated four-weight stream
+	int						gpuSkinningNumJoints;
+	int						gpuSkinningJointBound;	// highest influencing joint + 1
+	gpuSkinningFallbackReason_t gpuSkinningFallback;
 
 	bool						UpdateLod( const struct renderEntity_s *ent, const struct viewEntity_s *viewEnt, const modelSurface_t *surf );
+	void						BuildGpuSkinningSidecar( int numJoints );
 	void						TransformVerts( idDrawVert *verts, const idJointMat *joints );
 	void						TransformScaledVerts( idDrawVert *verts, const idJointMat *joints, float scale );
 };
@@ -201,8 +298,11 @@ public:
 	virtual const char *		GetJointName( jointHandle_t handle ) const;
 	virtual const idJointQuat *	GetDefaultPose( void ) const;
 	virtual const idJointMat *	GetSkinSpaceToLocalMats( void ) const;
-	virtual int					NearestJoint( int surfaceNum, int a, int b, int c ) const;
+	virtual int					NearestJoint( int surfaceId, int a, int b, int c ) const;
 	virtual int					GetSurfaceMask( const char *surface ) const;
+	virtual renderModelCacheType_t LevelLoadCachePayloadType() const;
+	virtual bool				WriteLevelLoadCachePayload( idFile &file ) const;
+	virtual bool				ReadLevelLoadCachePayload( idFile &file );
 
 private:
 	idList<idMD5Joint>			joints;
@@ -223,6 +323,10 @@ typedef enum {
 	MD5R_SOURCE_LWO_ASE_FLT,
 	MD5R_SOURCE_PROC
 } rvMD5RSource_t;
+
+// The packed md5r*.vp programs read their joint palette from env[0..74], three
+// rows per transform, so a primitive batch can reference at most 25 joints.
+const int MD5R_MAX_PRIM_BATCH_TRANSFORMS = 25;
 
 struct rvMD5RGeometrySpec {
 								rvMD5RGeometrySpec() :
@@ -316,7 +420,10 @@ struct rvMD5RMesh {
 									numDrawIndices( 0 ),
 									numDrawPrimitives( 0 ),
 									numTransforms( 0 ),
-									deformInfo( NULL ) {
+									deformInfo( NULL ),
+									gpuSkinningSourceVerts( 0 ),
+									gpuSkinningJointBound( 0 ),
+									gpuSkinningFallback( GPU_SKINNING_FALLBACK_MISSING_SKIN_VERTICES ) {
 									bounds.Clear();
 								}
 
@@ -344,6 +451,11 @@ struct rvMD5RMesh {
 	idList<rvMD5RPrimBatch>		primBatches;
 	struct deformInfo_s *		deformInfo;
 	idList<idDrawVert>			baseDrawVerts;
+	idList<idDrawVert>			gpuBindPoseVerts;
+	idList<gpuSkinningVertex_t> gpuSkinningVerts;
+	int						gpuSkinningSourceVerts;
+	int						gpuSkinningJointBound;	// highest influencing transform + 1
+	gpuSkinningFallbackReason_t gpuSkinningFallback;
 };
 
 struct rvMD5RVertexFormatDesc {
@@ -475,9 +587,12 @@ public:
 	virtual const char *		GetJointName( jointHandle_t handle ) const;
 	virtual const idJointQuat *	GetDefaultPose( void ) const;
 	virtual const idJointMat *	GetSkinSpaceToLocalMats( void ) const;
-	virtual int					NearestJoint( int surfaceNum, int a, int b, int c ) const;
+	virtual int					NearestJoint( int surfaceId, int a, int b, int c ) const;
 	virtual int					GetSurfaceMask( const char *surface ) const;
 	virtual int					Memory() const;
+	virtual renderModelCacheType_t LevelLoadCachePayloadType() const;
+	virtual bool				WriteLevelLoadCachePayload( idFile &file ) const;
+	virtual bool				ReadLevelLoadCachePayload( idFile &file );
 
 	bool						InitFromMD5Model( const idRenderModelMD5 &sourceModel );
 	bool						InitFromStaticModel( const idRenderModelStatic &sourceModel, rvMD5RSource_t sourceType );
@@ -495,6 +610,7 @@ public:
 
 private:
 	bool						InitFromStaticModelInternal( const idRenderModelStatic &sourceModel, rvMD5RSource_t sourceType, idList<rvMD5RVertexBufferDesc> *sharedVertexBuffers, idList<rvMD5RIndexBufferDesc> *sharedIndexBuffers, idList<silEdge_t> *sharedSilEdges );
+	bool						AppendConvertedMD5Mesh( const idMD5Mesh &sourceMesh, int meshIdentifier );
 	const idList<rvMD5RVertexBufferDesc> &GetVertexBuffers() const;
 	const idList<rvMD5RIndexBufferDesc> &GetIndexBuffers() const;
 	const idList<silEdge_t> &GetSilhouetteEdges() const;
@@ -527,7 +643,8 @@ private:
 	void						ParseJoint( Lexer &parser, int jointIndex, idJointQuat &worldPose );
 	void						BuildLevelsOfDetail();
 	bool						BuildDynamicMeshTemplate( rvMD5RMesh &mesh );
-	bool						UpdateDynamicSurface( const rvMD5RMesh &mesh, const idJointMat *entJoints, modelSurface_t &surface, bool calculateTangents, float skinScale ) const;
+	void						BuildGpuSkinningSidecar( rvMD5RMesh &mesh ) const;
+	bool						UpdateDynamicSurface( const rvMD5RMesh &mesh, const idJointMat *entJoints, modelSurface_t &surface, bool calculateTangents, float skinScale, bool allowGpuSkinning ) const;
 	bool						GenerateDynamicSurface( idRenderModelStatic &staticModel, rvMD5RMesh &mesh, const renderEntity_s &ent, const idJointMat *entJoints, dword surfMask );
 	bool						CopyPrimBatchTriangles( const rvMD5RMesh &mesh, idDrawVert *destDrawVerts, glIndex_t *destIndices, const rvSilTraceVertT *silTraceVerts ) const;
 	bool						GenerateStaticSurfaces();
@@ -685,7 +802,7 @@ private:
 class idRenderModelBeam : public idRenderModelStatic {
 public:
 	virtual dynamicModel_t		IsDynamicModel() const;
-	virtual bool				IsLoaded() const;
+	virtual bool				IsLoaded();
 	virtual idRenderModel *		InstantiateDynamicModel( const struct renderEntity_s *ent, const struct viewDef_s *view, idRenderModel *cachedModel );
 	virtual idBounds			Bounds( const struct renderEntity_s *ent ) const;
 };
@@ -716,7 +833,7 @@ public:
 								idRenderModelTrail();
 
 	virtual dynamicModel_t		IsDynamicModel() const;
-	virtual bool				IsLoaded() const;
+	virtual bool				IsLoaded();
 	virtual idRenderModel *		InstantiateDynamicModel( const struct renderEntity_s *ent, const struct viewDef_s *view, idRenderModel *cachedModel );
 	virtual idBounds			Bounds( const struct renderEntity_s *ent ) const;
 
@@ -736,7 +853,7 @@ public:
 class idRenderModelLightning : public idRenderModelStatic {
 public:
 	virtual dynamicModel_t		IsDynamicModel() const;
-	virtual bool				IsLoaded() const;
+	virtual bool				IsLoaded();
 	virtual idRenderModel *		InstantiateDynamicModel( const struct renderEntity_s *ent, const struct viewDef_s *view, idRenderModel *cachedModel );
 	virtual idBounds			Bounds( const struct renderEntity_s *ent ) const;
 };
@@ -751,7 +868,7 @@ public:
 class idRenderModelSprite : public idRenderModelStatic {
 public:
 	virtual	dynamicModel_t	IsDynamicModel() const;
-	virtual	bool			IsLoaded() const;
+	virtual	bool			IsLoaded();
 	virtual	idRenderModel *	InstantiateDynamicModel( const struct renderEntity_s *ent, const struct viewDef_s *view, idRenderModel *cachedModel );
 	virtual	idBounds		Bounds( const struct renderEntity_s *ent ) const;
 };

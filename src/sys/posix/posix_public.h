@@ -77,8 +77,32 @@ bool		Posix_ConsoleNeedsEventPump( void );
 bool		Posix_ConsoleProcessEvent( const void *eventData );
 void		Posix_ConsoleFrame( void );
 void		Posix_ConsoleFatalErrorWait( void );
+#if defined( __ANDROID__ )
+// True once the fatal-error console owns the screen; the touch overlay uses
+// this to fall back to its blank control set.
+bool		Posix_ConsoleFatalErrorActive( void );
+// Ends the fatal-error wait from the host input thread.
+void		Posix_ConsoleRequestFatalDismiss( void );
+#endif
 void		Posix_ShutdownConsole( void );
 void		Posix_Shutdown( void );
+
+#if defined( __ANDROID__ )
+// Console output goes to logcat under the tag "openQ4"; see
+// sys/android/android_log.cpp for why it does not go through stdout. The
+// values match <android/log.h>'s android_LogPriority, which android_log.cpp
+// static-asserts, so callers here need not include that header.
+enum {
+	SYS_ANDROID_LOG_DEBUG	= 3,
+	SYS_ANDROID_LOG_INFO	= 4,
+	SYS_ANDROID_LOG_WARN	= 5,
+	SYS_ANDROID_LOG_ERROR	= 6
+};
+// buffers until a newline, so one engine line becomes one logcat record
+void		Sys_AndroidLogPrint( int priority, const char *text );
+// emits a line the engine left unterminated
+void		Sys_AndroidLogFlush( void );
+#endif
 
 void		Sys_FPE_handler( int signum, siginfo_t *info, void *context );
 void		Sys_DoStartProcess( const char *exeName, bool dofork = true ); // if not forking, current process gets replaced

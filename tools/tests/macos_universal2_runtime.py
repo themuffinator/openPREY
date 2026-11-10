@@ -50,7 +50,7 @@ def validate_loader_fallback() -> None:
 
 
 def validate_bundle_integrity_fallback() -> None:
-    compat = read("src/sys/osx/macosx_compat.mm")
+    compat = read("src/sys/macos/macos_compat.mm")
     start = compat.index("static void Sys_CollectMacOSGameModulePairIssues")
     end = compat.index("static bool Sys_MacOSAppBundleHasEmbeddedRuntimeMarker", start)
     contract = compat[start:end]
@@ -115,7 +115,7 @@ def validate_module_search_diagnostics() -> None:
 def validate_docs_and_wiring() -> None:
     design = read("docs/dev/macos-universal2-design.md")
     matrix = read("docs/dev/macos-support-matrix-policy.md")
-    plan = read("docs/dev/plan/2026-06-30-macos-compatibility-support.md")
+    plan = read("docs/dev/archive/2026-10-18/plan/2026-06-30-macos-compatibility-support.md")
     release_completion = read("docs/dev/release-completion.md")
     release_notes = read("docs/dev/releases/v0.8.1.md")
     validator = read("tools/validation/openq4_validate.py")
@@ -147,17 +147,18 @@ def validate_docs_and_wiring() -> None:
     ):
         require(source, "macos_universal2_runtime.py", context)
 
+    # Releases are arm64-only, so universal2 assembly runs in the manual
+    # candidate lane rather than on every pull request.
+    require(commit, "Record macOS ARM64 thin-build provenance", "commit validation arm64 thin provenance")
+    reject(commit, "macos-universal2:", "commit validation universal2 scope")
+    candidate = read(".github/workflows/macos-universal2-candidate.yml")
     for token in (
-        "macos-universal2:",
-        "Record macOS ARM64 thin-build provenance",
-        "Record macOS Intel thin-build provenance",
+        "assemble_macos_universal2.py record",
         "assemble_macos_universal2.py assemble",
         "--arch universal2",
-        "OPENQ4_UNIVERSAL_INSTALL_ROOT",
-        '"baseoq4", "mod.json"',
-        "Package and validate universal2 app",
+        "python tools/tests/macos_dedicated_server_smoke.py",
     ):
-        require(commit, token, "hosted universal2 assembly workflow")
+        require(candidate, token, "manual universal2 assembly workflow")
 
     package = read("tools/build/package_nightly.py")
     manual_release = read(".github/workflows/manual-release.yml")

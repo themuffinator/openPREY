@@ -51,7 +51,7 @@ ROOT_MARKDOWN = (
     "README.md",
     "BUILDING.md",
     "TECHNICAL.md",
-    "TODO.md",
+    "LICENSING.md",
     "AGENTS.md",
 )
 
@@ -156,9 +156,12 @@ def validate_no_legacy_path_tokens() -> None:
     )
     hits: list[str] = []
     for path in iter_text_files():
-        data = path.read_bytes()
+        # A valid external reference may preserve an upstream repository's old
+        # directory name.  The migration guard owns only local paths and prose,
+        # so remove URL targets before looking for legacy openQ4 wiring.
+        local_data = re.sub(rb"https?://[^\s)>]+", b"", path.read_bytes())
         for token in legacy_tokens:
-            if token.encode("ascii") in data:
+            if token.encode("ascii") in local_data:
                 hits.append(f"{path.relative_to(ROOT).as_posix()}: contains {token!r}")
 
     if hits:

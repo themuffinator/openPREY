@@ -1,0 +1,7 @@
+{
+    "file_format_version": "1.0.0",
+    "runtime": {
+        "name": "openQ4 test runtime",
+        "library_path": "./@LIBRARY@"
+    }
+}

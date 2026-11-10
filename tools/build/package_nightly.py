@@ -33,7 +33,11 @@ from linux_metadata import (
     desktop_exec_command as parse_linux_desktop_exec_command,
 )
 from generate_release_docs import GeneratedDocSite, generate_release_docs_site
+from gamelibs_stage_path import MANIFEST_NAME as GAMELIBS_STAGE_MANIFEST_NAME, stage_root as gamelibs_stage_root
+from game_layer import PACKAGED_LAYER_GAME_DIRS, RETIRED_LAYER_GAME_DIRS, LayerError, read_layer_mod_json
 from openq4_pak import (
+    OPENQ4_BULK_PACK_NAMES,
+    OPENQ4_CONTENT_PACKS_BY_NAME,
     OPENQ4_PK4_FORBIDDEN_FILES,
     OPENQ4_PACK_NAMES,
     OPENQ4_REQUIRED_LOOSE_GAME_FILES,
@@ -54,7 +58,6 @@ MACOS_SUPPORT_INFO_SCRIPT_PATH = Path("tools") / "macos" / "collect_macos_suppor
 MACOS_SUPPORT_INFO_SCRIPT_NAME = "collect_macos_support_info.sh"
 MACOS_SYMBOL_MANIFEST_NAME = "SYMBOLS.txt"
 MACOS_SYMBOL_ARCHIVE_SUFFIX = ".tar.xz"
-GAMELIBS_STAGE_MANIFEST_PATH = Path(".tmp") / "openprey_gamelibs_stage" / "openprey_gamelibs_stage_manifest.json"
 SUPPORTED_ARCHES = ("x64", "x86", "arm64", "universal2")
 
 PLATFORM_EXECUTABLE_EXT = {
@@ -97,6 +100,7 @@ MACOS_EXPECTED_PLIST_VALUES = {
     "LSMinimumSystemVersion": "11.0",
     "LSApplicationCategoryType": "public.app-category.games",
     "NSPrincipalClass": "NSApplication",
+    "NSMicrophoneUsageDescription": "Use push-to-talk voice chat or test your microphone after enabling microphone access in Voice settings.",
     MACOS_RUNTIME_LAYOUT_KEY: MACOS_RUNTIME_LAYOUT_VALUE,
 }
 MACOS_ALLOWED_RUNTIME_DEPENDENCY_PREFIXES = (
@@ -147,8 +151,20 @@ MACOS_PACKAGE_ROOT_ERROR_STRINGS = {
 # are then relocated into openPREY.app/Contents/Frameworks beside the game modules.
 MACOS_MOLTENVK_DYLIB_NAME = "libMoltenVK.dylib"
 MACOS_MOLTENVK_PREPARE_SCRIPT = "tools/build/prepare_macos_moltenvk.sh"
+MACOS_OPENAL_SOFT_DYLIB_NAME = "libopenal.1.dylib"
+MACOS_OPENAL_SOFT_INSTALL_NAME = f"@rpath/{MACOS_OPENAL_SOFT_DYLIB_NAME}"
+MACOS_OPENAL_SOFT_PREPARE_SCRIPT = "tools/build/prepare_macos_openal_soft.sh"
+MACOS_OPENAL_SOFT_LICENSE_FILES = (
+    "COPYING",
+    "LICENSE-pffft",
+    "LICENSE-fmt",
+    "LICENSE-gsl",
+    "SOURCE.md",
+    "openal-soft-1.25.2.tar.gz",
+)
 MACOS_APP_FRAMEWORKS_DIR = Path("Contents") / "Frameworks"
 MACOS_APP_RESOURCES_DIR = Path("Contents") / "Resources"
+MACOS_APP_OPENAL_LICENSE_DIR = MACOS_APP_RESOURCES_DIR / "licenses" / "openal-soft"
 MACOS_APP_GAME_DATA_DIR = MACOS_APP_RESOURCES_DIR / GAME_DIR_NAME
 MACOS_APP_SPLASH_DIR = MACOS_APP_RESOURCES_DIR / "assets" / "splash"
 MACOS_EXPECTED_APP_BUNDLE_DIRS = (
@@ -159,6 +175,8 @@ MACOS_EXPECTED_APP_BUNDLE_DIRS = (
     f"Contents/Resources/{GAME_DIR_NAME}",
     "Contents/Resources/assets",
     "Contents/Resources/assets/splash",
+    "Contents/Resources/licenses",
+    "Contents/Resources/licenses/openal-soft",
     "Contents/Resources/English.lproj",
     "Contents/Resources/French.lproj",
 )
@@ -172,9 +190,14 @@ MACOS_EXPECTED_APP_BUNDLE_FILES = (
     "Contents/Resources/openPREY.icns",
     "Contents/Resources/VERSION.txt",
     f"Contents/Resources/{GAME_DIR_NAME}/mod.json",
-    f"Contents/Resources/{GAME_DIR_NAME}/pak0.pk4",
-    f"Contents/Resources/{GAME_DIR_NAME}/pak1.pk4",
+    *(f"Contents/Resources/{GAME_DIR_NAME}/{pak_name}" for pak_name in OPENQ4_PACK_NAMES),
     "Contents/Resources/assets/splash/prey_rt_bitmap_4001.bmp",
+    "Contents/Resources/licenses/openal-soft/COPYING",
+    "Contents/Resources/licenses/openal-soft/LICENSE-pffft",
+    "Contents/Resources/licenses/openal-soft/LICENSE-fmt",
+    "Contents/Resources/licenses/openal-soft/LICENSE-gsl",
+    "Contents/Resources/licenses/openal-soft/SOURCE.md",
+    "Contents/Resources/licenses/openal-soft/openal-soft-1.25.2.tar.gz",
     "Contents/Resources/English.lproj/InfoPlist.strings",
     "Contents/Resources/French.lproj/InfoPlist.strings",
     f"Contents/Resources/English.lproj/{MACOS_PACKAGE_ROOT_ERROR_STRINGS_NAME}",
@@ -272,7 +295,7 @@ VERSION_REPOSITORY_METADATA_KEYS = (
 MACOS_FORBIDDEN_ENTITLEMENTS = {
     "com.apple.security.app-sandbox": (
         "openPREY direct-distribution packages are not App Sandbox-ready because "
-        "they need explicit access to user-selected Quake 4 assets, saves, logs, "
+        "they need explicit access to user-selected Prey (2006) assets, saves, logs, "
         "and staged runtime overlays"
     ),
     "com.apple.security.get-task-allow": (
@@ -346,14 +369,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Meson build directory containing the staged GameLibs provenance (default: <source-root>/builddir).",
     )
     parser.add_argument(
-        "--repository-metadata-manifest",
-        default=None,
-        help=(
-            "Optional stage or universal2 assembly manifest carrying project/GameLibs git metadata. "
-            "This is required when packaging downloaded build artifacts without a local Meson build directory."
-        ),
-    )
-    parser.add_argument(
         "--install-dir",
         default=None,
         help="Install directory to package (defaults to <source-root>/.install).",
@@ -386,6 +401,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Allow packaging to continue when required platform binaries are missing. "
             "Useful for host bring-up previews."
+        ),
+    )
+    parser.add_argument(
+        "--require-game-layer",
+        action="append",
+        default=[],
+        choices=PACKAGED_LAYER_GAME_DIRS,
+        help=(
+            "Retired compatibility option: separate campaign modules are no longer packaged. "
+            "Campaigns use the in-tree SP module."
         ),
     )
     parser.add_argument(
@@ -1171,6 +1196,37 @@ def macos_embedded_moltenvk_path(package_root: Path) -> Path:
     return package_root / "openPREY.app" / MACOS_APP_FRAMEWORKS_DIR / MACOS_MOLTENVK_DYLIB_NAME
 
 
+def macos_embedded_openal_soft_path(package_root: Path) -> Path:
+    return package_root / "openPREY.app" / MACOS_APP_FRAMEWORKS_DIR / MACOS_OPENAL_SOFT_DYLIB_NAME
+
+
+def macos_embedded_game_layers(package_root: Path) -> list[str]:
+    """The game-library layers (q4xbase) embedded in openPREY.app.
+
+    A layer's modules sit in Contents/Frameworks/<layer> and its mod.json in
+    Contents/Resources/<layer>. Either directory marks the layer as embedded, so the
+    bundle checks catch a layer that is only half there.
+    """
+    app_root = package_root / "openPREY.app"
+    return [
+        name
+        for name in PACKAGED_LAYER_GAME_DIRS
+        if any(
+            (app_root / parent / name).exists() or (app_root / parent / name).is_symlink()
+            for parent in (MACOS_APP_FRAMEWORKS_DIR, MACOS_APP_RESOURCES_DIR)
+        )
+    ]
+
+
+def macos_embedded_game_layer_module_paths(package_root: Path, arch: str) -> list[Path]:
+    framework_root = package_root / "openPREY.app" / MACOS_APP_FRAMEWORKS_DIR
+    return [
+        framework_root / name / f"game-{kind}_{arch}.dylib"
+        for name in macos_embedded_game_layers(package_root)
+        for kind in ("sp", "mp")
+    ]
+
+
 def macos_embedded_library_paths(package_root: Path, arch: str) -> list[Path]:
     """Every Mach-O library nested inside openPREY.app/Contents/Frameworks.
 
@@ -1180,8 +1236,10 @@ def macos_embedded_library_paths(package_root: Path, arch: str) -> list[Path]:
 
     return [
         *macos_embedded_game_module_paths(package_root, arch),
+        *macos_embedded_game_layer_module_paths(package_root, arch),
         macos_embedded_renderer_module_path(package_root, arch),
         macos_embedded_moltenvk_path(package_root),
+        macos_embedded_openal_soft_path(package_root),
     ]
 
 
@@ -1193,25 +1251,39 @@ def macos_signable_targets(package_root: Path, arch: str) -> list[Path]:
     ]
 
 
-def macos_game_module_install_names(package_root: Path, arch: str) -> dict[Path, str]:
+def macos_loadable_module_install_names(package_root: Path, arch: str) -> dict[Path, str]:
     game_module = macos_embedded_game_module_paths(package_root, arch)[0]
-    # Scope note: this map drives install_name_tool rewriting. The renderer
-    # module already links with -Wl,-install_name,@loader_path/renderer-vk_<arch>
-    # .dylib from meson, and libMoltenVK's package-relative install name is set
-    # and asserted by tools/build/prepare_macos_moltenvk.sh before it is staged,
-    # so neither is rewritten here.
-    return {game_module: f"@loader_path/game_{arch}.dylib"}
+    renderer_module = macos_embedded_renderer_module_path(package_root, arch)
+    # Meson's Darwin install depfixer may replace linker-authored IDs with the
+    # absolute staging destination for every installed dylib. Normalize every
+    # openPREY loadable module after it enters the app bundle. libMoltenVK's
+    # package-relative ID is set and asserted by its pinned provider script.
+    # OpenAL Soft is likewise prepared outside Meson, but it is included here
+    # because its @rpath identity is part of the package contract.
+    return {
+        game_module: f"@loader_path/game_{arch}.dylib",
+        # a layer's modules take the same self-relative identity as basepr's
+        **{
+            module: f"@loader_path/{module.name}"
+            for module in macos_embedded_game_layer_module_paths(package_root, arch)
+        },
+        renderer_module: f"@loader_path/renderer-vk_{arch}.dylib",
+        macos_embedded_openal_soft_path(package_root): MACOS_OPENAL_SOFT_INSTALL_NAME,
+    }
 
 
-def normalize_macos_game_module_install_names(package_root: Path, arch: str) -> None:
+def normalize_macos_loadable_module_install_names(package_root: Path, arch: str) -> None:
     if sys.platform != "darwin":
         return
 
+    expected_arches = sorted(macos_expected_lipo_arches(arch))
     pending_updates: list[tuple[Path, str]] = []
-    for binary_path, expected_install_name in macos_game_module_install_names(package_root, arch).items():
-        require_packaged_executable(binary_path, "macOS game module install-name normalization binary")
-        actual_install_name = macos_otool_install_name(binary_path)
-        if actual_install_name != expected_install_name:
+    for binary_path, expected_install_name in macos_loadable_module_install_names(package_root, arch).items():
+        require_packaged_executable(binary_path, "macOS loadable module install-name normalization binary")
+        if any(
+            macos_otool_install_name(binary_path, macho_arch=macho_arch) != expected_install_name
+            for macho_arch in expected_arches
+        ):
             pending_updates.append((binary_path, expected_install_name))
 
     if not pending_updates:
@@ -1224,7 +1296,7 @@ def normalize_macos_game_module_install_names(package_root: Path, arch: str) -> 
     for binary_path, expected_install_name in pending_updates:
         run_macos_command(
             [install_name_tool_path, "-id", expected_install_name, str(binary_path)],
-            label=f"setting macOS game module install name for {binary_path}",
+            label=f"setting macOS loadable module install name for {binary_path}",
         )
 
 
@@ -1506,17 +1578,12 @@ def clean_version_metadata_value(value: object) -> str:
     return text
 
 
-def read_staged_repository_metadata(
-    source_root: Path,
-    build_dir: Path | None = None,
-    repository_manifest: Path | None = None,
-) -> dict[str, str]:
-    if repository_manifest is None:
-        if build_dir is None:
-            build_dir = source_root / "builddir"
-        manifest_path = build_dir / GAMELIBS_STAGE_MANIFEST_PATH
-    else:
-        manifest_path = repository_manifest
+def read_staged_repository_metadata(source_root: Path, platform: str = "windows", arch: str = "x64") -> dict[str, str]:
+    # Universal2 provenance comes from the verified thin-package records; it
+    # has no corresponding Meson source stage of its own.
+    if arch == "universal2":
+        return {}
+    manifest_path = gamelibs_stage_root(source_root, platform, arch) / GAMELIBS_STAGE_MANIFEST_NAME
     if not manifest_path.is_file() or manifest_path.is_symlink():
         return {}
 
@@ -1535,34 +1602,13 @@ def read_staged_repository_metadata(
     }
 
 
-def collect_package_repository_metadata(
-    source_root: Path,
-    build_dir: Path | None = None,
-    repository_manifest: Path | None = None,
-) -> dict[str, str]:
-    metadata = {key: "unavailable" for key in VERSION_REPOSITORY_METADATA_KEYS}
-    staged_metadata = read_staged_repository_metadata(source_root, build_dir, repository_manifest)
-    for key, value in staged_metadata.items():
-        if value != "unavailable":
-            metadata[key] = value
-
-    if metadata["openq4_commit"] == "unavailable":
-        metadata["openq4_commit"] = clean_version_metadata_value(
-            package_git_value(source_root, "rev-parse", "--verify", "HEAD")
-        )
-    if metadata["openq4_dirty"] == "unavailable":
-        metadata["openq4_dirty"] = package_git_dirty(source_root)
-
-    gamelibs_env = os.environ.get("OPENQ4_GAMELIBS_REPO", "").strip()
-    gamelibs_root = Path(gamelibs_env) if gamelibs_env else source_root.parent / "OpenPrey-game"
-    if metadata["openq4_game_commit"] == "unavailable":
-        metadata["openq4_game_commit"] = clean_version_metadata_value(
-            package_git_value(gamelibs_root, "rev-parse", "--verify", "HEAD")
-        )
-    if metadata["openq4_game_dirty"] == "unavailable":
-        metadata["openq4_game_dirty"] = package_git_dirty(gamelibs_root)
-
-    return metadata
+def collect_package_repository_metadata(source_root: Path, platform: str = "windows", arch: str = "x64") -> dict[str, str]:
+    # Release provenance is verified against builddir's canonical inventory
+    # before packaging. Both receipt fields identify the same source commit.
+    commit = clean_version_metadata_value(package_git_value(source_root, "rev-parse", "--verify", "HEAD"))
+    dirty = package_git_dirty(source_root)
+    return {"openq4_commit": commit, "openq4_dirty": dirty,
+            "openq4_game_commit": commit, "openq4_game_dirty": dirty}
 
 
 def write_version_manifest(
@@ -1614,6 +1660,15 @@ def macos_symbol_targets(package_root: Path, arch: str) -> list[tuple[Path, Path
             Path("openPREY.app") / MACOS_APP_FRAMEWORKS_DIR / f"game_{arch}.dylib",
             game_module,
             Path("dSYMs") / f"game_{arch}.dylib.dSYM",
+        ),
+        # a layer's modules keep their game directory, so the dSYMs cannot collide
+        *(
+            (
+                Path("openPREY.app") / MACOS_APP_FRAMEWORKS_DIR / module.parent.name / module.name,
+                module,
+                Path("dSYMs") / module.parent.name / f"{module.name}.dSYM",
+            )
+            for module in macos_embedded_game_layer_module_paths(package_root, arch)
         ),
         (
             Path("openPREY.app") / MACOS_APP_FRAMEWORKS_DIR / f"renderer-vk_{arch}.dylib",
@@ -1736,6 +1791,7 @@ def validate_macos_symbol_manifest_bytes(
     package_suffix: str,
     runtime_archive_name: str,
     symbol_archive_name: str,
+    game_layers: tuple[str, ...] | list[str] = (),
 ) -> None:
     validate_macos_metadata_bytes_size(data, label)
     try:
@@ -1808,6 +1864,10 @@ def validate_macos_symbol_manifest_bytes(
         # absent because it is third-party and has no dSYM.
         f"openPREY.app/Contents/Frameworks/renderer-vk_{arch}.dylib": f"dSYMs/renderer-vk_{arch}.dylib.dSYM",
     }
+    for layer in game_layers:
+        for kind in ("sp", "mp"):
+            module = f"{layer}/game-{kind}_{arch}.dylib"
+            expected_binaries[f"openPREY.app/Contents/Frameworks/{module}"] = f"dSYMs/{module}.dSYM"
     if "binaries:" not in [line.strip() for line in lines]:
         raise RuntimeError(f"{label} is missing required token: binaries:")
 
@@ -1949,6 +2009,7 @@ def validate_macos_symbol_archive_contents(
     arch: str,
     package_suffix: str,
     runtime_archive_name: str,
+    game_layers: tuple[str, ...] | list[str] = (),
 ) -> None:
     if archive_path.is_symlink():
         raise RuntimeError(f"macOS symbol archive path must not be a symlink: {archive_path}")
@@ -1974,7 +2035,14 @@ def validate_macos_symbol_archive_contents(
         # libMoltenVK has no dSYM, so it must never appear in the symbol archive
         # at all -- if it does, someone copied runtime payload in by mistake.
         f"{package_prefix}openPREY.app/Contents/Frameworks/{MACOS_MOLTENVK_DYLIB_NAME}",
+        # OpenAL Soft is third-party runtime code and likewise has no openPREY dSYM.
+        f"{package_prefix}openPREY.app/Contents/Frameworks/{MACOS_OPENAL_SOFT_DYLIB_NAME}",
     }
+    for layer in game_layers:
+        for kind in ("sp", "mp"):
+            module = f"game-{kind}_{arch}.dylib"
+            expected_entries.add(f"{package_prefix}dSYMs/{layer}/{module}.dSYM/Contents/Resources/DWARF/{module}")
+            forbidden_runtime_entries.add(f"{package_prefix}openPREY.app/Contents/Frameworks/{layer}/{module}")
 
     entry_names: set[str] = set()
     casefold_entry_names: dict[str, str] = {}
@@ -2051,6 +2119,7 @@ def validate_macos_symbol_archive_contents(
         package_suffix=package_suffix,
         runtime_archive_name=runtime_archive_name,
         symbol_archive_name=expected_symbol_archive_name,
+        game_layers=game_layers,
     )
 
 
@@ -2085,6 +2154,7 @@ def create_macos_symbol_archive(
         arch=arch,
         package_suffix=package_suffix,
         runtime_archive_name=runtime_archive_name,
+        game_layers=macos_embedded_game_layers(package_root),
     )
     return symbol_archive_path
 
@@ -2147,9 +2217,11 @@ def write_macos_localized_info_strings(app_contents: Path, version: str) -> None
     ]
 
     for locale in ("English", "French"):
+        microphone_usage = ("Utilisez le chat vocal ou testez votre microphone après avoir autorisé son accès dans les paramètres de voix."
+                            if locale == "French" else MACOS_EXPECTED_PLIST_VALUES["NSMicrophoneUsageDescription"])
         write_text_file(
             app_contents / "Resources" / f"{locale}.lproj" / "InfoPlist.strings",
-            localized_info_lines,
+            localized_info_lines + [f'NSMicrophoneUsageDescription = "{microphone_usage}";'],
         )
 
 
@@ -2172,6 +2244,12 @@ def copy_release_collateral(source_root: Path, package_root: Path, platform: str
     collateral = (
         (source_root / RELEASE_README_PATH, package_root / "README.html"),
         (source_root / LICENSE_PATH, package_root / "LICENSE"),
+        (source_root / "LICENSING.md", package_root / "LICENSING.md"),
+        (source_root / "LICENSES" / "PREY-SDK-EULA.rtf", package_root / "licenses" / "PREY-SDK-EULA.rtf"),
+        (source_root / "LICENSES" / "DOOM-3-ADDITIONAL-TERMS.txt", package_root / "licenses" / "DOOM-3-ADDITIONAL-TERMS.txt"),
+        (source_root / "LICENSES" / "DOOM-3-BFG-ADDITIONAL-TERMS.txt", package_root / "licenses" / "DOOM-3-BFG-ADDITIONAL-TERMS.txt"),
+        (source_root / "LICENSES" / "KHRONOS-GLES-MIT.txt", package_root / "licenses" / "KHRONOS-GLES-MIT.txt"),
+        (source_root / "CONTRIBUTORS.md", package_root / "CONTRIBUTORS.md"),
     )
 
     for source, destination in collateral:
@@ -2350,6 +2428,82 @@ def copy_required_loose_game_files(
     return missing_required
 
 
+def validate_packaged_layer_mod_manifest(package_layer_dir: Path, version: str) -> None:
+    """A layer's mod.json carries the layer's own version, so the base game's check does not
+    apply. The layer is rebuilt with each engine; a stable release needs exactly its version."""
+    try:
+        manifest = read_layer_mod_json(package_layer_dir / "mod.json")
+    except LayerError as exc:
+        raise RuntimeError(f"packaged {package_layer_dir.name}/mod.json: {exc}") from exc
+    required = manifest["requiredopenQ4Version"]
+    if is_stable_base_version(version) and required != version:
+        raise RuntimeError(
+            f"packaged {package_layer_dir.name}/mod.json requires openPREY {required}, "
+            f"which is not release {version}"
+        )
+
+
+def staged_game_layer_files(platform: str, arch: str) -> set[str]:
+    """Exactly what a staged layer game directory holds on this platform."""
+    files = {*get_required_game_module_binaries(platform, arch), "mod.json"}
+    if platform == "windows":
+        files.update(get_required_windows_game_symbols(arch))
+    return files
+
+
+def staged_game_layer_dirs(
+    platform: str,
+    arch: str,
+    install_dir: Path,
+    required_layers: set[str],
+) -> list[Path]:
+    """The staged layer game directories to package, each checked to hold exactly its files.
+
+    A layer is packaged whenever it was staged; one named in required_layers must have been.
+    """
+    layers: list[Path] = []
+    for name in PACKAGED_LAYER_GAME_DIRS:
+        source = install_dir / name
+        if source.is_symlink():
+            raise RuntimeError(f"staged {name}/ must not be a symlink: {source}")
+        if not source.exists():
+            if name in required_layers:
+                raise FileNotFoundError(f"required game layer {name}/ was not staged: {source}")
+            continue
+        if not source.is_dir():
+            raise RuntimeError(f"staged {name} is not a directory: {source}")
+        expected = staged_game_layer_files(platform, arch)
+        actual = {path.relative_to(source).as_posix() for path in source.rglob("*")}
+        if actual != expected:
+            raise RuntimeError(
+                f"staged {name}/ must hold exactly {sorted(expected)}; "
+                f"missing {sorted(expected - actual)}, unexpected {sorted(actual - expected)}"
+            )
+        layers.append(source)
+    return layers
+
+
+def copy_game_layer_dirs(
+    platform: str,
+    arch: str,
+    install_dir: Path,
+    package_root: Path,
+    version: str,
+    required_layers: set[str],
+) -> list[str]:
+    """Copy each staged game-library layer beside basepr (Windows and Linux; macOS embeds
+    its layers in the app bundle). Returns the packaged game directory names."""
+    packaged: list[str] = []
+    for source in staged_game_layer_dirs(platform, arch, install_dir, required_layers):
+        destination = package_root / source.name
+        destination.mkdir(parents=True, exist_ok=True)
+        for filename in sorted(staged_game_layer_files(platform, arch)):
+            copy_regular_file(source / filename, destination / filename)
+        validate_packaged_layer_mod_manifest(destination, version)
+        packaged.append(source.name)
+    return packaged
+
+
 def create_game_pk4(
     install_game_dir: Path, destination_pk4: Path, pak_name: str = PAK0_NAME
 ) -> tuple[int, list[str], list[str]]:
@@ -2390,7 +2544,15 @@ def create_release_archive(
     archive_path: Path,
     archive_format: str,
     executable_relative_paths: set[Path] | None = None,
+    *,
+    excluded_relative_paths: frozenset[str] = frozenset(),
+    rootless: bool = False,
 ) -> None:
+    """Archive package_root under its own folder name, or at the archive root when rootless.
+
+    An update archive is rootless so it extracts straight into an existing
+    openPREY folder, replacing files, and leaves out the bulk content packs.
+    """
     validate_archive_output_outside_input_tree(package_root, archive_path, "release archive output")
     prepare_archive_output_path(archive_path, "release archive output")
 
@@ -2414,7 +2576,9 @@ def create_release_archive(
                 if not path.is_file():
                     continue
                 relative_path = path.relative_to(package_root)
-                arcname = (Path(package_root.name) / relative_path).as_posix()
+                if relative_path.as_posix() in excluded_relative_paths:
+                    continue
+                arcname = relative_path.as_posix() if rootless else (Path(package_root.name) / relative_path).as_posix()
                 info = ZipInfo(arcname, date_time=DETERMINISTIC_ARCHIVE_TIMESTAMP)
                 info.compress_type = ZIP_DEFLATED
                 mode = 0o100644
@@ -2432,7 +2596,9 @@ def create_release_archive(
             if not path.is_file():
                 continue
             relative_path = path.relative_to(package_root)
-            arcname = (Path(package_root.name) / relative_path).as_posix()
+            if relative_path.as_posix() in excluded_relative_paths:
+                continue
+            arcname = relative_path.as_posix() if rootless else (Path(package_root.name) / relative_path).as_posix()
             info = archive.gettarinfo(path, arcname=arcname)
             info.uid = 0
             info.gid = 0
@@ -2446,8 +2612,74 @@ def create_release_archive(
                 archive.addfile(info, handle)
 
 
+UPDATE_ARCHIVE_SUFFIX = "-update"
+WINDOWS_SYMBOL_ARCHIVE_SUFFIX = "-symbols.zip"
+
+
+def update_archive_excluded_paths() -> frozenset[str]:
+    """The bulk content packs, which full packages carry and update archives leave out."""
+    return frozenset(f"{GAME_DIR_NAME}/{pak_name}" for pak_name in OPENQ4_BULK_PACK_NAMES)
+
+
+def move_windows_symbols(package_root: Path, symbol_root: Path) -> list[Path]:
+    """Move every PDB out of the package into symbol_root, keeping relative paths.
+
+    Players never need them; crash reports are symbolized from the symbols asset,
+    as the Linux debug-symbol and macOS dSYM archives already are.
+    """
+    if symbol_root.exists():
+        shutil.rmtree(symbol_root)
+    moved: list[Path] = []
+    for path in sorted(package_root.rglob("*.pdb")):
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"Windows symbol is not a regular file: {path}")
+        relative = path.relative_to(package_root)
+        destination = symbol_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(destination))
+        moved.append(relative)
+    return moved
+
+
+def create_windows_symbol_archive(
+    package_root: Path, symbol_root: Path, archive_path: Path, symbols: list[Path], version: str, arch: str
+) -> None:
+    """Zip the moved PDBs with a manifest pairing each with its binary's SHA-256."""
+    prepare_archive_output_path(archive_path, "Windows symbol archive output")
+    lines = [
+        "openPREY Windows symbols",
+        f"version={version}",
+        f"arch={arch}",
+        f"runtime_archive={package_root.name}.zip",
+    ]
+    for relative in symbols:
+        binary = None
+        for suffix in (".exe", ".dll"):
+            candidate = package_root / relative.with_suffix(suffix)
+            if candidate.is_file():
+                binary = candidate
+                break
+        binary_digest = sha256_file(binary) if binary is not None else "-"
+        binary_name = binary.relative_to(package_root).as_posix() if binary is not None else "-"
+        lines.append(f"{relative.as_posix()}\t{sha256_file(symbol_root / relative)}\t{binary_name}\t{binary_digest}")
+    write_text_file(symbol_root / "SYMBOLS.txt", lines)
+    with ZipFile(archive_path, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
+        for path in sorted(symbol_root.rglob("*")):
+            if not path.is_file():
+                continue
+            info = ZipInfo((Path(symbol_root.name) / path.relative_to(symbol_root)).as_posix(), date_time=DETERMINISTIC_ARCHIVE_TIMESTAMP)
+            info.compress_type = ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            info.create_system = 3
+            with path.open("rb") as source, archive.open(info, "w") as target:
+                shutil.copyfileobj(source, target, length=1024 * 1024)
+
+
 def get_package_executable_archive_paths(
-    platform: str, arch: str, copied_linux_launchers: list[str]
+    platform: str,
+    arch: str,
+    copied_linux_launchers: list[str],
+    game_layers: tuple[str, ...] | list[str] = (),
 ) -> set[Path]:
     if platform not in ("linux", "macos"):
         return set()
@@ -2463,7 +2695,13 @@ def get_package_executable_archive_paths(
                 Path("openPREY.app") / MACOS_APP_FRAMEWORKS_DIR / f"game_{arch}.dylib",
                 Path("openPREY.app") / MACOS_APP_FRAMEWORKS_DIR / f"renderer-vk_{arch}.dylib",
                 Path("openPREY.app") / MACOS_APP_FRAMEWORKS_DIR / MACOS_MOLTENVK_DYLIB_NAME,
+                Path("openPREY.app") / MACOS_APP_FRAMEWORKS_DIR / MACOS_OPENAL_SOFT_DYLIB_NAME,
             }
+        )
+        executable_paths.update(
+            Path("openPREY.app") / MACOS_APP_FRAMEWORKS_DIR / layer / f"game-{kind}_{arch}.dylib"
+            for layer in game_layers
+            for kind in ("sp", "mp")
         )
 
     return executable_paths
@@ -2578,7 +2816,13 @@ def record_macos_archive_entry(
 
 
 def validate_macos_archive_contents(
-    package_root: Path, archive_path: Path, archive_format: str, arch: str, version: str
+    package_root: Path,
+    archive_path: Path,
+    archive_format: str,
+    arch: str,
+    version: str,
+    *,
+    game_layers: tuple[str, ...] | list[str] = (),
 ) -> None:
     if archive_path.is_symlink():
         raise RuntimeError(f"macOS archive path must not be a symlink: {archive_path}")
@@ -2596,13 +2840,25 @@ def validate_macos_archive_contents(
     embedded_game_module_entry = f"{app_bundle_prefix}Contents/Frameworks/game_{arch}.dylib"
     embedded_renderer_module_entry = f"{app_bundle_prefix}Contents/Frameworks/renderer-vk_{arch}.dylib"
     embedded_moltenvk_entry = f"{app_bundle_prefix}Contents/Frameworks/{MACOS_MOLTENVK_DYLIB_NAME}"
+    embedded_openal_soft_entry = f"{app_bundle_prefix}Contents/Frameworks/{MACOS_OPENAL_SOFT_DYLIB_NAME}"
     expected_app_bundle_entries.update(
         {
             embedded_game_module_entry,
             embedded_renderer_module_entry,
             embedded_moltenvk_entry,
+            embedded_openal_soft_entry,
         }
     )
+    # a game-library layer (q4xbase): modules in Frameworks/<layer>, mod.json in Resources/<layer>
+    embedded_layer_module_entries = {
+        f"{app_bundle_prefix}Contents/Frameworks/{layer}/game-{kind}_{arch}.dylib"
+        for layer in game_layers
+        for kind in ("sp", "mp")
+    }
+    embedded_layer_manifest_entries = {
+        f"{app_bundle_prefix}Contents/Resources/{layer}/mod.json" for layer in game_layers
+    }
+    expected_app_bundle_entries.update(embedded_layer_module_entries | embedded_layer_manifest_entries)
     optional_app_bundle_entries = {
         f"{app_bundle_prefix}{relative_path}"
         for relative_path in MACOS_OPTIONAL_APP_BUNDLE_SIGNATURE_FILES
@@ -2617,9 +2873,9 @@ def validate_macos_archive_contents(
         embedded_game_module_entry,
         embedded_renderer_module_entry,
         embedded_moltenvk_entry,
+        embedded_openal_soft_entry,
         f"{app_bundle_prefix}Contents/Resources/{GAME_DIR_NAME}/mod.json",
-        f"{app_bundle_prefix}Contents/Resources/{GAME_DIR_NAME}/pak0.pk4",
-        f"{app_bundle_prefix}Contents/Resources/{GAME_DIR_NAME}/pak1.pk4",
+        *(f"{app_bundle_prefix}Contents/Resources/{GAME_DIR_NAME}/{pak_name}" for pak_name in OPENQ4_PACK_NAMES),
         support_info_entry,
         f"{package_prefix}{MACOS_SYMBOL_MANIFEST_NAME}",
         f"{package_prefix}VERSION.txt",
@@ -2632,6 +2888,8 @@ def validate_macos_archive_contents(
         f"{package_prefix}openPREY.app/Contents/Resources/French.lproj/InfoPlist.strings",
         f"{package_prefix}openPREY.app/Contents/Resources/English.lproj/{MACOS_PACKAGE_ROOT_ERROR_STRINGS_NAME}",
         f"{package_prefix}openPREY.app/Contents/Resources/French.lproj/{MACOS_PACKAGE_ROOT_ERROR_STRINGS_NAME}",
+        *embedded_layer_module_entries,
+        *embedded_layer_manifest_entries,
     }
     executable_entries = {
         client_entry,
@@ -2641,6 +2899,8 @@ def validate_macos_archive_contents(
         embedded_game_module_entry,
         embedded_renderer_module_entry,
         embedded_moltenvk_entry,
+        embedded_openal_soft_entry,
+        *embedded_layer_module_entries,
     }
     plist_entry = f"{package_prefix}openPREY.app/Contents/Info.plist"
 
@@ -2824,15 +3084,28 @@ def validate_macos_archive_contents(
             "macOS archive code signature resources",
         )
 
-    expected_game_modules = {embedded_game_module_entry}
+    expected_game_modules = {
+        embedded_game_module_entry,
+        *embedded_layer_module_entries,
+    }
+    game_module_prefixes = (
+        f"{package_prefix}{GAME_DIR_NAME}/game_",
+        f"{app_bundle_prefix}Contents/Frameworks/game_",
+        f"{app_bundle_prefix}Contents/Resources/{GAME_DIR_NAME}/game_",
+        *(
+            prefix
+            for layer in (*PACKAGED_LAYER_GAME_DIRS, *RETIRED_LAYER_GAME_DIRS)
+            for prefix in (
+                f"{package_prefix}{layer}/game-",
+                f"{app_bundle_prefix}Contents/Frameworks/{layer}/game-",
+                f"{app_bundle_prefix}Contents/Resources/{layer}/game-",
+            )
+        ),
+    )
     unexpected_game_modules = sorted(
         name
         for name in entry_names
-        if (
-            name.startswith(f"{package_prefix}{GAME_DIR_NAME}/game_")
-            or name.startswith(f"{app_bundle_prefix}Contents/Frameworks/game_")
-            or name.startswith(f"{app_bundle_prefix}Contents/Resources/{GAME_DIR_NAME}/game_")
-        )
+        if name.startswith(game_module_prefixes)
         and Path(name).name.lower().endswith((".dll", ".so", ".dylib"))
         and name not in expected_game_modules
     )
@@ -2841,6 +3114,15 @@ def validate_macos_archive_contents(
         raise RuntimeError(
             f"macOS archive contains stale or mismatched game modules, including wrong-platform entries: {joined}"
         )
+    # the app embeds its layers; a loose copy beside it would not be the signed one the engine loads
+    loose_layer_entries = sorted(
+        name
+        for name in entry_names
+        if any(name.startswith(f"{package_prefix}{layer}/") for layer in (*PACKAGED_LAYER_GAME_DIRS, *RETIRED_LAYER_GAME_DIRS))
+    )
+    if loose_layer_entries:
+        joined = ", ".join(loose_layer_entries[:5])
+        raise RuntimeError(f"macOS archive carries a game layer outside openPREY.app: {joined}")
 
     # Same sweep for renderer modules: a leftover renderer-vk_x64.dylib inside an
     # arm64 package, or a renderer-gl module that darwin never builds, must not
@@ -2875,6 +3157,15 @@ def validate_macos_archive_contents(
     if unexpected_moltenvk:
         joined = ", ".join(unexpected_moltenvk[:5])
         raise RuntimeError(f"macOS archive contains misplaced MoltenVK runtime copies: {joined}")
+
+    unexpected_openal_soft = sorted(
+        name
+        for name in entry_names
+        if Path(name).name == MACOS_OPENAL_SOFT_DYLIB_NAME and name != embedded_openal_soft_entry
+    )
+    if unexpected_openal_soft:
+        joined = ", ".join(unexpected_openal_soft[:5])
+        raise RuntimeError(f"macOS archive contains misplaced OpenAL Soft runtime copies: {joined}")
 
     expected_root_binaries = {client_entry, dedicated_entry}
     unexpected_root_binaries = sorted(
@@ -2934,6 +3225,7 @@ def validate_macos_archive_contents(
         package_suffix=macos_package_suffix_from_name(package_root, arch),
         runtime_archive_name=archive_path.name,
         symbol_archive_name=f"{package_root.name}-symbols{MACOS_SYMBOL_ARCHIVE_SUFFIX}",
+        game_layers=game_layers,
     )
     for locale in MACOS_LOCALIZED_INFO_LOCALES:
         data = localized_info_bytes.get(locale)
@@ -3124,6 +3416,7 @@ def validate_macos_binary_dependencies(package_root: Path, arch: str) -> None:
                 dependency
                 for dependency in macos_otool_dependencies(binary_path, macho_arch=macho_arch)
                 if not dependency.startswith(MACOS_ALLOWED_RUNTIME_DEPENDENCY_PREFIXES)
+                and dependency != MACOS_OPENAL_SOFT_INSTALL_NAME
             ]
             if rejected_dependencies:
                 joined = ", ".join(rejected_dependencies)
@@ -3132,13 +3425,34 @@ def validate_macos_binary_dependencies(package_root: Path, arch: str) -> None:
                     f"{binary_path} ({macho_arch}): {joined}"
                 )
 
-    expected_install_names = macos_game_module_install_names(package_root, arch)
+    # The executable must bind the bundled runtime through its package-relative
+    # identity. Absolute Homebrew/MacPorts paths would pass on the build host and
+    # fail on players' systems, while Apple's framework would silently restore
+    # the exhausted implementation this package is intended to replace.
+    for binary_path in (
+        package_root / f"{PRODUCT_NAME}-client_{arch}",
+        package_root / "openPREY.app" / "Contents" / "MacOS" / "openPREY",
+    ):
+        for macho_arch in sorted(macos_expected_lipo_arches(arch)):
+            dependencies = macos_otool_dependencies(binary_path, macho_arch=macho_arch)
+            openal_dependencies = [
+                dependency
+                for dependency in dependencies
+                if "openal" in dependency.lower()
+            ]
+            if openal_dependencies != [MACOS_OPENAL_SOFT_INSTALL_NAME]:
+                raise RuntimeError(
+                    "macOS client does not use exactly one bundled OpenAL Soft dependency: "
+                    f"{binary_path} ({macho_arch}): {openal_dependencies}"
+                )
+
+    expected_install_names = macos_loadable_module_install_names(package_root, arch)
     for binary_path, expected_install_name in expected_install_names.items():
         for macho_arch in sorted(macos_expected_lipo_arches(arch)):
             actual_install_name = macos_otool_install_name(binary_path, macho_arch=macho_arch)
             if actual_install_name != expected_install_name:
                 raise RuntimeError(
-                    "macOS game module install name is not package-relative: "
+                    "macOS loadable module install name is not package-relative: "
                     f"{binary_path} ({macho_arch}): {actual_install_name!r}; expected {expected_install_name!r}"
                 )
 
@@ -3155,6 +3469,29 @@ def copy_optional_share_tree(platform: str, install_dir: Path, package_root: Pat
     copy_regular_tree(share_source, share_dest)
     return True
 
+
+def copy_required_linux_splash(
+    install_dir: Path,
+    package_root: Path,
+    allow_missing_binaries: bool,
+) -> list[str]:
+    """Ship the startup splash bitmap beside the Linux binaries.
+
+    Windows compiles the bitmap in as an RC resource and the macOS bundle carries
+    its own copy under Contents/Resources, so Linux is the only package that has to
+    ship it as a loose file.  posix_syscon.cpp resolves it relative to the working
+    directory, SDL's base path and the executable, so the package root is where it
+    has to land.
+    """
+    relative = Path("assets") / "splash" / "prey_rt_bitmap_4001.bmp"
+    source = install_dir / relative
+    if not source.is_file():
+        if allow_missing_binaries:
+            return [relative.as_posix()]
+        raise FileNotFoundError(f"required Linux startup splash not found: {source}")
+
+    copy_regular_file(source, package_root / relative)
+    return []
 
 def copy_optional_linux_launchers(install_dir: Path, package_root: Path) -> list[str]:
     copied: list[str] = []
@@ -3273,6 +3610,7 @@ def validate_macos_app_bundle(package_root: Path, app_root: Path, arch: str, ver
     expected_bundle_dirs = {Path(relative_path) for relative_path in MACOS_EXPECTED_APP_BUNDLE_DIRS}
     embedded_renderer_module = macos_embedded_renderer_module_path(package_root, arch)
     embedded_moltenvk = macos_embedded_moltenvk_path(package_root)
+    embedded_openal_soft = macos_embedded_openal_soft_path(package_root)
 
     expected_bundle_files = {Path(relative_path) for relative_path in MACOS_EXPECTED_APP_BUNDLE_FILES}
     expected_bundle_files.update(
@@ -3280,8 +3618,19 @@ def validate_macos_app_bundle(package_root: Path, app_root: Path, arch: str, ver
             embedded_game_module.relative_to(app_root),
             embedded_renderer_module.relative_to(app_root),
             embedded_moltenvk.relative_to(app_root),
+            embedded_openal_soft.relative_to(app_root),
         }
     )
+    game_layers = macos_embedded_game_layers(package_root)
+    for name in game_layers:
+        expected_bundle_dirs.update({MACOS_APP_FRAMEWORKS_DIR / name, MACOS_APP_RESOURCES_DIR / name})
+        expected_bundle_files.update(
+            {
+                MACOS_APP_FRAMEWORKS_DIR / name / f"game-sp_{arch}.dylib",
+                MACOS_APP_FRAMEWORKS_DIR / name / f"game-mp_{arch}.dylib",
+                MACOS_APP_RESOURCES_DIR / name / "mod.json",
+            }
+        )
     optional_signature_dirs = {Path(relative_path) for relative_path in MACOS_OPTIONAL_APP_BUNDLE_SIGNATURE_DIRS}
     optional_signature_files = {Path(relative_path) for relative_path in MACOS_OPTIONAL_APP_BUNDLE_SIGNATURE_FILES}
     allowed_bundle_dirs = expected_bundle_dirs | optional_signature_dirs
@@ -3327,6 +3676,12 @@ def validate_macos_app_bundle(package_root: Path, app_root: Path, arch: str, ver
         raise RuntimeError(
             f"macOS package retained adjacent {GAME_DIR_NAME}/ instead of embedding it in openPREY.app: {package_game_dir}"
         )
+    for name in PACKAGED_LAYER_GAME_DIRS:
+        package_layer_dir = package_root / name
+        if package_layer_dir.exists() or package_layer_dir.is_symlink():
+            raise RuntimeError(
+                f"macOS package retained adjacent {name}/ instead of embedding it in openPREY.app: {package_layer_dir}"
+            )
 
     app_contents = app_root / "Contents"
     app_plist = app_contents / "Info.plist"
@@ -3342,14 +3697,21 @@ def validate_macos_app_bundle(package_root: Path, app_root: Path, arch: str, ver
     require_non_empty_package_file(app_version, "macOS app bundle version manifest")
     for relative_path in (
         MACOS_APP_GAME_DATA_DIR / "mod.json",
-        MACOS_APP_GAME_DATA_DIR / "pak0.pk4",
-        MACOS_APP_GAME_DATA_DIR / "pak1.pk4",
+        *(MACOS_APP_GAME_DATA_DIR / pak_name for pak_name in OPENQ4_PACK_NAMES),
         MACOS_APP_SPLASH_DIR / "prey_rt_bitmap_4001.bmp",
     ):
         require_non_empty_package_file(app_root / relative_path, f"macOS embedded runtime file {relative_path}")
     require_packaged_executable(embedded_game_module, "macOS embedded unified game module")
     require_packaged_executable(embedded_renderer_module, "macOS embedded Vulkan renderer module")
     require_packaged_executable(embedded_moltenvk, "macOS embedded MoltenVK runtime")
+    require_packaged_executable(embedded_openal_soft, "macOS embedded OpenAL Soft runtime")
+    for name in game_layers:
+        for kind in ("sp", "mp"):
+            require_packaged_executable(
+                app_root / MACOS_APP_FRAMEWORKS_DIR / name / f"game-{kind}_{arch}.dylib",
+                f"macOS embedded {name} {kind.upper()} game module",
+            )
+        validate_packaged_layer_mod_manifest(app_root / MACOS_APP_RESOURCES_DIR / name, version)
     if not app_pkginfo.is_file() or app_pkginfo.read_bytes() != MACOS_PKGINFO_BYTES:
         raise RuntimeError(f"macOS app bundle is missing a valid PkgInfo file: {app_pkginfo}")
 
@@ -3399,6 +3761,32 @@ def resolve_macos_moltenvk_source(install_dir: Path) -> Path:
     )
 
 
+def resolve_macos_openal_soft_source(install_dir: Path) -> Path:
+    candidate = install_dir / "Frameworks" / MACOS_OPENAL_SOFT_DYLIB_NAME
+    if candidate.is_symlink():
+        raise RuntimeError(f"macOS OpenAL Soft runtime must not be a symlink: {candidate}")
+    if candidate.is_file() and candidate.stat().st_size > 0:
+        return candidate
+    raise RuntimeError(
+        f"macOS package is missing the bundled OpenAL Soft runtime ({MACOS_OPENAL_SOFT_DYLIB_NAME}). "
+        "Build and stage the pinned runtime before packaging: "
+        f"{MACOS_OPENAL_SOFT_PREPARE_SCRIPT} --verify-only --output-root <prepared-root> "
+        f"--stage-install-dir {install_dir}. Searched: {candidate}"
+    )
+
+
+def copy_macos_openal_soft_licenses(install_dir: Path, app_root: Path) -> None:
+    source_root = install_dir / "licenses" / "openal-soft"
+    destination_root = app_root / MACOS_APP_OPENAL_LICENSE_DIR
+    destination_root.mkdir(parents=True, exist_ok=True)
+    for filename in MACOS_OPENAL_SOFT_LICENSE_FILES:
+        source = source_root / filename
+        require_non_empty_package_file(source, f"macOS OpenAL Soft license/source payload {filename}")
+        if source.is_symlink():
+            raise RuntimeError(f"macOS OpenAL Soft license/source payload must not be a symlink: {source}")
+        copy_regular_file(source, destination_root / filename)
+
+
 def create_macos_app_bundle(
     package_root: Path,
     install_dir: Path,
@@ -3406,6 +3794,8 @@ def create_macos_app_bundle(
     version: str,
     version_tag: str,
     repository_metadata: dict[str, str] | None = None,
+    *,
+    required_layers: set[str] | frozenset[str] = frozenset(),
 ) -> Path:
     app_root = package_root / "openPREY.app"
     app_contents = app_root / "Contents"
@@ -3433,8 +3823,7 @@ def create_macos_app_bundle(
     staged_game_module = staged_game_dir / f"game_{arch}.dylib"
     for path, label in (
         (staged_game_dir / "mod.json", "macOS staged game metadata"),
-        (staged_game_dir / "pak0.pk4", "macOS staged pak0"),
-        (staged_game_dir / "pak1.pk4", "macOS staged pak1"),
+        *((staged_game_dir / pak_name, f"macOS staged {pak_name}") for pak_name in OPENQ4_PACK_NAMES),
     ):
         require_non_empty_package_file(path, label)
     require_packaged_executable(staged_game_module, "macOS staged unified game module")
@@ -3445,6 +3834,25 @@ def create_macos_app_bundle(
         str(embedded_game_dir / staged_game_module.name),
         str(app_frameworks / staged_game_module.name),
     )
+
+    # A game-library layer (q4xbase) embeds the same way. Its modules join the signed
+    # code as Contents/Frameworks/<layer>/, where the engine looks for <moduleRoot>/<fs_game>/,
+    # and its mod.json joins the game data as Contents/Resources/<layer>/. Only code may sit
+    # under Frameworks; codesign treats anything there as nested code.
+    for staged_layer_dir in staged_game_layer_dirs("macos", arch, install_dir, set(required_layers)):
+        layer_frameworks = app_frameworks / staged_layer_dir.name
+        layer_resources = app_resources / staged_layer_dir.name
+        layer_frameworks.mkdir(parents=True, exist_ok=True)
+        layer_resources.mkdir(parents=True, exist_ok=True)
+        for kind in ("sp", "mp"):
+            staged_layer_module = staged_layer_dir / f"game-{kind}_{arch}.dylib"
+            require_packaged_executable(
+                staged_layer_module, f"macOS staged {staged_layer_dir.name} {kind.upper()} game module"
+            )
+            copy_regular_file(staged_layer_module, layer_frameworks / staged_layer_module.name)
+            ensure_posix_executable(layer_frameworks / staged_layer_module.name)
+        copy_regular_file(staged_layer_dir / "mod.json", layer_resources / "mod.json")
+        validate_packaged_layer_mod_manifest(layer_resources, version)
 
     # The renderer module is installed beside the engine binaries, so it lands in
     # the package root first. Move it into the same signed Contents/Frameworks
@@ -3465,6 +3873,15 @@ def create_macos_app_bundle(
     embedded_moltenvk = app_frameworks / MACOS_MOLTENVK_DYLIB_NAME
     copy_regular_file(staged_moltenvk, embedded_moltenvk)
     ensure_posix_executable(embedded_moltenvk)
+
+    # OpenAL Soft replaces Apple's deprecated, buffer-limited OpenAL framework.
+    # Keep the dynamically linked runtime beside the other signed libraries and
+    # carry its exact license and corresponding source in Resources.
+    staged_openal_soft = resolve_macos_openal_soft_source(install_dir)
+    embedded_openal_soft = app_frameworks / MACOS_OPENAL_SOFT_DYLIB_NAME
+    copy_regular_file(staged_openal_soft, embedded_openal_soft)
+    ensure_posix_executable(embedded_openal_soft)
+    copy_macos_openal_soft_licenses(install_dir, app_root)
 
     staged_splash_dir = package_root / "assets" / "splash"
     staged_splash = staged_splash_dir / "prey_rt_bitmap_4001.bmp"
@@ -3527,6 +3944,8 @@ def create_macos_app_bundle(
             "<string>public.app-category.games</string>",
             "<key>NSPrincipalClass</key>",
             "<string>NSApplication</string>",
+            "<key>NSMicrophoneUsageDescription</key>",
+            f"<string>{MACOS_EXPECTED_PLIST_VALUES['NSMicrophoneUsageDescription']}</string>",
             "<key>NSHighResolutionCapable</key>",
             "<true/>",
             "<key>NSSupportsAutomaticGraphicsSwitching</key>",
@@ -3569,11 +3988,6 @@ def main(argv: list[str]) -> int:
     raw_build_dir = Path(args.build_dir)
     if not raw_build_dir.is_absolute():
         raw_build_dir = raw_source_root / raw_build_dir
-    raw_repository_manifest = None
-    if args.repository_metadata_manifest is not None:
-        raw_repository_manifest = Path(args.repository_metadata_manifest)
-        if not raw_repository_manifest.is_absolute():
-            raw_repository_manifest = raw_source_root / raw_repository_manifest
     raw_install_dir = Path(args.install_dir) if args.install_dir is not None else raw_source_root / ".install"
     raw_output_dir = Path(args.output_dir)
 
@@ -3599,11 +4013,7 @@ def main(argv: list[str]) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    repository_metadata = collect_package_repository_metadata(
-        source_root,
-        raw_build_dir.resolve(),
-        raw_repository_manifest.resolve() if raw_repository_manifest is not None else None,
-    )
+    repository_metadata = collect_package_repository_metadata(source_root, args.platform, args.arch)
 
     package_stem = f"{PRODUCT_STEM}-{version_tag}-{args.platform}-{args.arch}{package_suffix}"
     archive_path = output_dir / f"{package_stem}{archive_suffix}"
@@ -3683,12 +4093,23 @@ def main(argv: list[str]) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    source_content_dir = source_root / "content" / GAME_DIR_NAME
+    # Game-library layers (q4xbase) ship beside basepr; create_macos_app_bundle embeds macOS's.
+    required_layers = set(args.require_game_layer)
+    packaged_layers: list[str] = []
+    try:
+        if args.platform in ("windows", "linux"):
+            packaged_layers = copy_game_layer_dirs(
+                args.platform, args.arch, install_dir, package_root, version, required_layers
+            )
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     pk4_results = []
     for pak_name in OPENQ4_PACK_NAMES:
         game_pk4_path = package_game_dir / pak_name
         staged_game_pk4_path = install_game_dir / pak_name
-        source_pack_dir = source_content_dir / Path(pak_name).stem
+        source_pack_dir = source_root / OPENQ4_CONTENT_PACKS_BY_NAME[pak_name].source
 
         if staged_game_pk4_path.is_file():
             pk4_result = copy_game_pk4(staged_game_pk4_path, game_pk4_path, pak_name=pak_name)
@@ -3721,6 +4142,9 @@ def main(argv: list[str]) -> int:
     copied_share = copy_optional_share_tree(args.platform, install_dir, package_root)
     copied_linux_launchers: list[str] = []
     if args.platform == "linux":
+        missing_required.extend(
+            copy_required_linux_splash(install_dir, package_root, args.allow_missing_binaries)
+        )
         copied_linux_launchers = copy_optional_linux_launchers(install_dir, package_root)
         try:
             validate_linux_package_metadata(
@@ -3734,14 +4158,20 @@ def main(argv: list[str]) -> int:
 
     macos_app_bundle = None
     if args.platform == "macos":
-        macos_app_bundle = create_macos_app_bundle(
-            package_root,
-            install_dir,
-            args.arch,
-            version,
-            version_tag,
-            repository_metadata,
-        )
+        try:
+            macos_app_bundle = create_macos_app_bundle(
+                package_root,
+                install_dir,
+                args.arch,
+                version,
+                version_tag,
+                repository_metadata,
+                required_layers=required_layers,
+            )
+        except (FileNotFoundError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        packaged_layers = macos_embedded_game_layers(package_root)
         try:
             validate_no_package_symlinks(package_root)
             validate_no_package_special_files(package_root)
@@ -3751,7 +4181,7 @@ def main(argv: list[str]) -> int:
             strip_macos_forbidden_xattrs(package_root)
             validate_no_macos_forbidden_xattrs(package_root)
             validate_macos_package_root_engine_binaries(package_root, args.arch)
-            normalize_macos_game_module_install_names(package_root, args.arch)
+            normalize_macos_loadable_module_install_names(package_root, args.arch)
             macos_signing = resolve_macos_signing_config(args)
             sign_macos_payload(package_root, args.arch, macos_signing)
             write_macos_symbol_manifest(
@@ -3783,8 +4213,24 @@ def main(argv: list[str]) -> int:
         args.platform,
         args.arch,
         copied_linux_launchers,
+        packaged_layers if args.platform == "macos" else (),
     )
 
+    windows_symbol_archive_path: Path | None = None
+    if args.platform == "windows":
+        try:
+            symbol_root = output_dir / f"{package_stem}-symbols"
+            moved_symbols = move_windows_symbols(package_root, symbol_root)
+            if moved_symbols:
+                windows_symbol_archive_path = output_dir / f"{package_stem}{WINDOWS_SYMBOL_ARCHIVE_SUFFIX}"
+                create_windows_symbol_archive(
+                    package_root, symbol_root, windows_symbol_archive_path, moved_symbols, version, args.arch
+                )
+        except (OSError, RuntimeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    update_archive_path: Path | None = None
     try:
         create_release_archive(
             package_root,
@@ -3792,6 +4238,16 @@ def main(argv: list[str]) -> int:
             archive_format,
             archive_executable_paths,
         )
+        if args.platform in ("windows", "linux") and archive_format in ("zip", "tar.gz", "tar.xz"):
+            update_archive_path = output_dir / f"{package_stem}{UPDATE_ARCHIVE_SUFFIX}{archive_suffix}"
+            create_release_archive(
+                package_root,
+                update_archive_path,
+                archive_format,
+                archive_executable_paths,
+                excluded_relative_paths=update_archive_excluded_paths(),
+                rootless=True,
+            )
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -3810,6 +4266,7 @@ def main(argv: list[str]) -> int:
                     archive_format,
                     args.arch,
                     version,
+                    game_layers=packaged_layers,
                 )
             macos_symbol_archive_path = create_macos_symbol_archive(
                 package_root,
@@ -3827,6 +4284,10 @@ def main(argv: list[str]) -> int:
     print(f"Packaged openPREY release {version} for {args.platform}")
     print(f"Package directory: {package_root}")
     print(f"Release archive: {archive_path}")
+    if update_archive_path is not None:
+        print(f"Update archive (no {', '.join(OPENQ4_BULK_PACK_NAMES)}): {update_archive_path}")
+    if windows_symbol_archive_path is not None:
+        print(f"Windows symbol archive: {windows_symbol_archive_path}")
     print(f"Archive format: {archive_format}")
     print(f"Version manifest: {package_root / 'VERSION.txt'}")
     print(f"Documentation portal: {generated_docs.index_path} ({generated_docs.page_count} pages)")
@@ -3836,6 +4297,10 @@ def main(argv: list[str]) -> int:
             f"  - {package_game_dir / pak_name} "
             f"({pk4_result.added_files} files, md5 {pk4_result.md5_hex})"
         )
+    if packaged_layers:
+        print("Game-library layers:")
+        for name in packaged_layers:
+            print(f"  - {package_root / name if args.platform != 'macos' else macos_app_bundle / MACOS_APP_FRAMEWORKS_DIR / name}")
     if copied_share:
         print(f"Share payload: {package_root / 'share'}")
     if copied_linux_launchers:

@@ -4,14 +4,15 @@ title: "[Windows ARM64]: "
 labels:
   - windows
   - arm64
-  - preview-support
+  - experimental-support
 body:
   - type: markdown
     attributes:
       value: |
-        Windows ARM64 is the least validated openPREY target. Packages are produced by a manual release job on a
-        native `windows-11-arm` runner, but **no openPREY Windows ARM64 binary has been started by automation**,
-        and there is no per-push or per-PR Windows ARM64 CI lane. Every report from real hardware is valuable.
+        Windows ARM64 packages are experimental, and Windows ARM64 is the least validated openPREY target. Packages
+        are produced by a manual release job on a native `windows-11-arm` runner, but **no openPREY Windows ARM64
+        binary has been started by automation**, and there is no per-push or per-PR Windows ARM64 CI lane. Every
+        report from real hardware is valuable.
 
         Known rough edges to check before filing, so your report is not a duplicate:
 

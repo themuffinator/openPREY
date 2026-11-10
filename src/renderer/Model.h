@@ -22,6 +22,7 @@
 #if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
 class rvMesh;
 #endif
+struct gpuSkinningVertex_s;
 // RAVEN END
 
 // shared between the renderer, game, and Maya export DLL
@@ -192,6 +193,36 @@ typedef struct srfTriangles_s {
 	char						description[64];
 #endif
 // RAVEN END
+
+	// Immutable model-owned source data plus a snapshot-owned canonical joint
+	// palette. The allocation pointer is non-NULL only for the owning tri.
+	const idDrawVert *			gpuSkinningBindPoseVerts;
+	const gpuSkinningVertex_s *gpuSkinningVerts;
+	int							numGpuSkinningVerts;
+	float *						gpuSkinningJointPalette;
+	float *						gpuSkinningJointPaletteAlloc;
+	int							numGpuSkinningJoints;
+	int							numGpuSkinningJointPaletteAllocJoints;
+	unsigned int				gpuSkinningPaletteGeneration;
+	int							gpuSkinningFallbackReason;
+	bool						gpuSkinningSignedWeights;
+	// Joint bound the model validated every influence of its immutable skin
+	// sidecar against when it built it (0 = validate each use).
+	int							gpuSkinningPrevalidatedJoints;
+	// A backend that skins this surface later in the frame (Vulkan) accepted
+	// it: the CPU ambient stream holds current positions only, and the backend
+	// completes it on the CPU before any draw if its dispatch is refused.
+	bool						gpuSkinningDeferred;
+
+	// Temporal reprojection of posed (skinned) surfaces. positionsFrame is the
+	// renderer frame whose pose verts holds; just before the next pose replaces
+	// it, R_CaptureTemporalPreviousPositions copies those positions into
+	// previousPositions, which then describe the surface as it was drawn on
+	// previousPositionsFrame - 1. Owned by the tri, freed with it.
+	idVec3 *					previousPositions;
+	int							numPreviousPositions;
+	int							previousPositionsFrame;
+	int							positionsFrame;
 } srfTriangles_t;
 
 static const int STF_SOFT_PARTICLE_CANDIDATE = 1 << 0;

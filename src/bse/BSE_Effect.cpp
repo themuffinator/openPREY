@@ -19,20 +19,6 @@
 #include "../sound/sound.h"
 //#include "../renderer/RenderCommon.h"
 
-static ID_INLINE void BSE_BoundTriSurf(srfTriangles_t* tri) {
-	if (!tri) {
-		return;
-	}
-	if (tri->numVerts <= 0 || !tri->verts) {
-		tri->bounds.Clear();
-		return;
-	}
-	tri->bounds.Clear();
-	for (int i = 0; i < tri->numVerts; ++i) {
-		tri->bounds.AddPoint(tri->verts[i].xyz);
-	}
-}
-
 void rvBSE::Init(const rvDeclEffect* declEffect, renderEffect_s* parms, float time)
 {
 	int v6; // esi
@@ -40,10 +26,6 @@ void rvBSE::Init(const rvDeclEffect* declEffect, renderEffect_s* parms, float ti
 	float* v8; // eax
 	double v9; // st3
 	double v10; // st5
-	float* v11; // esi
-	float* v12; // eax
-	int v13; // ecx
-	double v14; // st5
 	//float v15; // [esp+18h] [ebp-30h]
 	//float v16; // [esp+1Ch] [ebp-2Ch]
 	//float v17; // [esp+20h] [ebp-28h]
@@ -148,7 +130,9 @@ void rvBSE::Init(const rvDeclEffect* declEffect, renderEffect_s* parms, float ti
 	this->mCurrentWorldBounds.Clear();
 	this->mCurrentWorldBounds.AddPoint(this->mCurrentOrigin + this->mCurrentLocalBounds[0]);
 	this->mCurrentWorldBounds.AddPoint(this->mCurrentOrigin + this->mCurrentLocalBounds[1]);
-	this->mSpriteSize.Zero();
+	// The owner's looping and ambient state are fixed for the effect's life.
+	SetLooping(parms->loop);
+	SetFlag(parms->ambient, EFLAG_AMBIENT);
 	UpdateFromOwner(parms, time, 1);
 	this->mReferenceSoundHandle = parms->referenceSoundHandle;
 	UpdateSegments(time);
@@ -447,38 +431,16 @@ bool rvBSE::Service(renderEffect_t* parms, float ownerTime, float presentationTi
 
 float rvBSE::EvaluateCost(int segment)
 {
-	double result; // st7
-	int v4; // edi
-	int v5; // ebx
-	double v6; // st7
-
-	if (segment < 0)
-	{
-		v4 = 0;
-		this->mCost = 0.0;
-		if (this->mSegments.Num() > 0)
-		{
-			v5 = 0;
-			do
-			{
-				v6 = mDeclEffect->EvaluateCost(
-					this->mSegments[v5].mActiveCount,
-					segment);
-				++v4;
-				++v5;
-				this->mCost = v6 + this->mCost;
-			} while (v4 < this->mSegments.Num());
-		}
-		result = this->mCost;
+	// Each segment is costed by its own template at its own live count.
+	if (segment >= 0) {
+		mCost = mDeclEffect->EvaluateCost(mSegments[segment].mActiveCount, mSegments[segment].mSegmentTemplateHandle);
+		return mCost;
 	}
-	else
-	{
-		this->mCost = mDeclEffect->EvaluateCost(
-			this->mSegments[segment].mActiveCount,
-			segment);
-		result = this->mCost;
+	mCost = 0.0f;
+	for (int i = 0; i < mSegments.Num(); ++i) {
+		mCost += mDeclEffect->EvaluateCost(mSegments[i].mActiveCount, mSegments[i].mSegmentTemplateHandle);
 	}
-	return result;
+	return mCost;
 }
 
 void rvBSE::InitModel(idRenderModel* model)
@@ -565,7 +527,10 @@ idRenderModel* rvBSE::Render(idRenderModel* model, const struct renderEffect_s* 
 			continue;
 		}
 
-		BSE_BoundTriSurf(tri);
+		// rvSegment::Render and RenderMotion bound a surface as the last thing
+		// they do to it, and ClearSurface left every other one empty (skipped
+		// above), so tri->bounds is current; walking the vertices again here
+		// bounded every particle surface twice per view.
 		if (!hasBounds) {
 			modelBounds = tri->bounds;
 			hasBounds = true;
@@ -589,11 +554,8 @@ idRenderModel* rvBSE::Render(idRenderModel* model, const struct renderEffect_s* 
 
 void rvBSE::Destroy()
 {
-	idSoundEmitter* referenceSound = GetReferenceSound();
-	if (referenceSound) {
-		referenceSound->StopSound(SCHANNEL_ANY);
-		soundSystem->FreeSoundEmitter(SOUNDWORLD_GAME, mReferenceSoundHandle, true);
-	}
+	// The reference sound emitter belongs to the owner, which keeps it across effect
+	// restarts and frees it itself, so its sounds are left alone here.
 	mSegments.Clear();
 	mReferenceSoundHandle = -1;
 }
@@ -602,24 +564,12 @@ void rvBSE::Destroy()
 void rvBSE::UpdateSegments(float time)
 {
 	int v3; // ebx
-	rvSegment* v4; // eax
-	rvParticle** v5; // esi
-	bool v6; // cc
-	int v7; // ecx
-	int* v8; // eax
-	rvSegment* v9; // esi
-	rvSegment* v10; // ecx
-	int v11; // edx
-	int v12; // eax
-	rvParticle** v13; // esi
 	int v14; // esi
 	int v15; // edi
 	int v16; // esi
 	int v17; // edi
 	int v18; // esi
 	int v19; // edi
-	rvSegment* ptr; // [esp+14h] [ebp-14h]
-
 	v3 = this->mDeclEffect->mSegmentTemplates.Num();
 	if (v3 > 0)
 	{
@@ -663,6 +613,23 @@ void rvBSE::UpdateSegments(float time)
 			++v18;
 			++v19;
 		} while (v18 < this->mSegments.Num());
+	}
+
+	// A looping map effect starts with two loops of history behind it, so it is
+	// already in full flow when first seen: the first service back-fills the
+	// particles those loops would have emitted.
+	if (GetLooping() && GetAmbient() && mDuration != 0.0f) {
+		while (time - 2.0f * mDuration > mStartTime) {
+			mStartTime += mDuration;
+			for (int i = 0; i < mSegments.Num(); ++i) {
+				mSegments[i].Advance(this);
+			}
+		}
+		mCurrentTime -= 2.0f * mDuration;
+		mStartTime -= 2.0f * mDuration;
+		for (int i = 0; i < mSegments.Num(); ++i) {
+			mSegments[i].Rewind(this);
+		}
 	}
 }
 
@@ -735,17 +702,17 @@ void rvBSE::UpdateFromOwner(renderEffect_s* parms, float time, bool init)
 		mGravityDir *= idMath::InvSqrt(gravityLengthSqr);
 	}
 
-	SetLooping(parms->loop);
-	SetHasEndOrigin(parms->hasEndOrigin);
 	SetOrientateIdentity((mDeclEffect->mFlags & ETFLAG_ORIENTATE_IDENTITY) != 0);
-	SetFlag(parms->ambient, EFLAG_AMBIENT);
+	// Child, impact and timeout effects only play while the owner is in an area
+	// connected to the player.
+	SetFlag(parms->inConnectedArea, EFLAG_IN_CONNECTED_AREA);
 
 	const idVec3 halfSize(mDeclEffect->mSize, mDeclEffect->mSize, mDeclEffect->mSize);
 
 	mCurrentWorldBounds.AddPoint(mCurrentOrigin + halfSize);
 	mCurrentWorldBounds.AddPoint(mCurrentOrigin - halfSize);
 
-	if (parms->hasEndOrigin && (mDeclEffect->mFlags & ETFLAG_USES_ENDORIGIN) != 0) {
+	if (GetHasEndOrigin() && (mDeclEffect->mFlags & ETFLAG_USES_ENDORIGIN) != 0) {
 		const bool endOriginChanged = init || parms->endOrigin != mCurrentEndOrigin || mCurrentOrigin != mLastOrigin;
 		mCurrentEndOrigin = parms->endOrigin;
 		mCurrentWorldBounds.AddPoint(mCurrentEndOrigin + halfSize);
@@ -811,8 +778,5 @@ void rvBSE::UpdateFromOwner(renderEffect_s* parms, float time, bool init)
 	mShaderParms[SHADERPARM_BLUE] = mTint[2];
 	mShaderParms[SHADERPARM_ALPHA] = mTint[3];
 	mShaderParms[SHADERPARM_BRIGHTNESS] = mBrightness;
-	mSpriteSize.x = parms->shaderParms[8];
-	mSpriteSize.y = parms->shaderParms[9];
 	mAttenuation = parms->attenuation;
-	mSuppressLightsInViewID = parms->suppressSurfaceInViewID;
 }

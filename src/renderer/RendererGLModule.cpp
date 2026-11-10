@@ -5,8 +5,8 @@
 ===============================================================================
 
 	Shared renderer-module glue (Phase B8 / Phase C,
-	docs/dev/plans/2026-07-16-vulkan-renderer-phase-b.md,
-	docs/dev/plans/2026-07-17-vulkan-phase-c.md).
+	docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer-phase-b.md,
+	docs/dev/archive/2026-10-18/plans/2026-07-17-vulkan-phase-c.md).
 
 	Compiled ONLY into renderer dynamic modules (OPENQ4_RENDERER_MODULE,
 	with OPENQ4_RENDERER_GL_MODULE / OPENQ4_RENDERER_VK_MODULE selecting the
@@ -29,6 +29,7 @@
 #endif
 
 #include "tr_local.h"
+#include "RendererResourceSettings.h"
 #include "RenderModuleAPI.h"
 #include "RendererModule.h"
 #include "../bse/BSEInterface.h"
@@ -94,6 +95,19 @@ idCVar r_windowHeight( "r_windowHeight", "720", CVAR_RENDERER | CVAR_ARCHIVE | C
 idCVar r_skipGuiShaders( "r_skipGuiShaders", "0", CVAR_RENDERER | CVAR_INTEGER, "1 = skip all gui elements on surfaces, 2 = skip drawing but still handle events, 3 = draw but skip events", 0, 3, idCmdSystem::ArgCompletion_Integer<0,3> );
 
 static const renderModuleServices_t *rgm_services = NULL;
+
+void Usercmd_TakeFrameInputClocks( double &look, double &flash ) {
+	look = flash = 0.0;
+	if ( rgm_services && rgm_services->TakeFrameInputClocks ) {
+		rgm_services->TakeFrameInputClocks( look, flash );
+	}
+}
+
+void Common_RecordFrameInputToSwap( double look, double flash, double swap ) {
+	if ( rgm_services && rgm_services->RecordFrameInputToSwap ) {
+		rgm_services->RecordFrameInputToSwap( look, flash, swap );
+	}
+}
 static const renderWindowServices_t *rgm_windowServices = NULL;
 static renderExport_t rgm_export;
 
@@ -175,7 +189,7 @@ MoltenVK loader search in VulkanDevice.cpp, which anchors its bundle-relative
 lookup on the executable directory.
 
 _NSGetExecutablePath is exactly what the engine's own macOS Sys_EXEPath is built
-on (src/sys/osx/macosx_compat.mm), so both halves resolve the same MoltenVK
+on (src/sys/macos/macos_compat.mm), so both halves resolve the same MoltenVK
 image - which is the whole point of that search, since two libraries behind one
 VkInstance is undefined behavior. The engine's NSBundle fallback is dropped
 here: it needs Objective-C, and it only ever runs when _NSGetExecutablePath
@@ -404,10 +418,69 @@ void RendererModule_PrintGfxInfo( void ) {
 	}
 }
 
-#ifdef OPENQ4_RENDERER_GL_MODULE
+bool R_RendererModule_ResetApiAfterDeviceFailure( void ) {
+	// the loader owns the archived r_renderApi selection
+	if ( rgm_services != NULL && rgm_services->ResetRenderApiAfterDeviceFailure != NULL ) {
+		return rgm_services->ResetRenderApiAfterDeviceFailure();
+	}
+	return false;
+}
+
+// Settings reports (render API 20): the engine keeps them for its settings service.
+void R_RendererModule_PublishRendererSelection( const renderRendererSelection_t *selection ) {
+	if ( rgm_services != NULL && rgm_services->PublishRendererSelection != NULL ) {
+		rgm_services->PublishRendererSelection( selection );
+	}
+}
+
+bool R_RendererModule_GetLightGridLoadPolicy( bool *preload, uint64_t *token ) {
+	if ( rgm_services != NULL && rgm_services->GetLightGridLoadPolicy != NULL ) {
+		return rgm_services->GetLightGridLoadPolicy( preload, token );
+	}
+	return false;
+}
+
+void R_RendererModule_PublishLightGridLoadReceipt( const renderLightGridLoadReceipt_t *receipt ) {
+	if ( rgm_services != NULL && rgm_services->PublishLightGridLoadReceipt != NULL ) {
+		rgm_services->PublishLightGridLoadReceipt( receipt );
+	}
+}
+
+// OpenXR (render API 21): the engine's VR system follows the device's lifetime.
+void R_RendererModule_RendererDeviceEvent( int event ) {
+	if ( rgm_services != NULL && rgm_services->RendererDeviceEvent != NULL ) {
+		rgm_services->RendererDeviceEvent( event );
+	}
+}
+
+// OpenXR on Vulkan (render API 32): the runtime creates the instance and device.
+bool R_RendererModule_CreateVulkanInstanceForVR( void *getInstanceProcAddr, const void *createInfo,
+		void **outInstance, int *outResult ) {
+	if ( rgm_services != NULL && rgm_services->CreateVulkanInstanceForVR != NULL ) {
+		return rgm_services->CreateVulkanInstanceForVR( getInstanceProcAddr, createInfo, outInstance, outResult );
+	}
+	return false;
+}
+
+bool R_RendererModule_GetVulkanPhysicalDeviceForVR( void *instance, void **outPhysicalDevice ) {
+	if ( rgm_services != NULL && rgm_services->GetVulkanPhysicalDeviceForVR != NULL ) {
+		return rgm_services->GetVulkanPhysicalDeviceForVR( instance, outPhysicalDevice );
+	}
+	return false;
+}
+
+bool R_RendererModule_CreateVulkanDeviceForVR( void *getInstanceProcAddr, void *physicalDevice, const void *createInfo,
+		void **outDevice, int *outResult ) {
+	if ( rgm_services != NULL && rgm_services->CreateVulkanDeviceForVR != NULL ) {
+		return rgm_services->CreateVulkanDeviceForVR( getInstanceProcAddr, physicalDevice, createInfo, outDevice, outResult );
+	}
+	return false;
+}
+
+#if defined( OPENQ4_RENDERER_GL_MODULE ) || defined( OPENQ4_RENDERER_GLES_MODULE )
 /*
 ====================
-QGL loader (module-local, GL backend only)
+QGL loader (module-local, GL and GLES backends)
 
 Under the SDL3 seam all GL procs resolve through the window services; QGL
 only tracks the driver library handle on Windows for parity with the legacy
@@ -444,7 +517,7 @@ void QGL_Shutdown( void ) {
 }
 #endif
 
-#endif /* OPENQ4_RENDERER_GL_MODULE */
+#endif /* OPENQ4_RENDERER_GL_MODULE || OPENQ4_RENDERER_GLES_MODULE */
 
 /*
 ====================
@@ -458,7 +531,13 @@ GetRenderAPI
 void VK_ModuleBindServices( const renderModuleServices_t *services );
 const renderModuleDiagnostics_t *VK_GetModuleDiagnostics( void );
 void VK_Bringup_Shutdown( void );
+bool VK_PrepareStartupDevice( char *outReason, int reasonLength );
+bool VK_Device_QueryCatalog(renderDeviceCatalog_t*);
 #endif
+
+static void RGM_SyncConfiguration( void ) {
+	R_RenderThread_Sync( "renderer configuration" );
+}
 
 static void RGM_Shutdown( void ) {
 #ifdef OPENQ4_RENDERER_VK_MODULE
@@ -526,10 +605,22 @@ renderExport_t *GetRenderAPI( renderImport_t *moduleImport ) {
 
 	rgm_export.renderSystem = renderSystem;			// the module's statically-initialized &tr
 	rgm_export.renderModelManager = renderModelManager;
+	rgm_export.SyncConfiguration = RGM_SyncConfiguration;
+	rgm_export.TryDeviceRestart = R_TryFullVidRestart;
+	rgm_export.GetDisplayPresentation = R_GetDisplayPresentation;
+	rgm_export.TryInitializeDisplay = R_TryInitializeDisplay;
+	rgm_export.TryImagePolicyRestart = R_TryImagePolicyRestart;
+    rgm_export.PrepareImagePolicyRecovery=R_PrepareImagePolicyRecovery;
+    rgm_export.CaptureImagePolicyRecovery=R_CaptureImagePolicyRecovery;
+    rgm_export.PrepareColdImagePolicyRecovery=R_PrepareColdImagePolicyRecovery;
+    rgm_export.CancelImagePolicyRecovery=R_CancelPreparedImagePolicyRecovery;
+    rgm_export.ReleaseImagePolicyRecovery=R_ReleaseCompletedImagePolicyRecovery;
 #ifdef OPENQ4_RENDERER_VK_MODULE
 	// the Vulkan backend keeps its bring-up diagnostics surface for the
 	// on-demand rendererVkProbe flow
 	rgm_export.diagnostics = VK_GetModuleDiagnostics();
+	rgm_export.PrepareStartupDevice = VK_PrepareStartupDevice;
+	rgm_export.GetRenderingDevices = VK_Device_QueryCatalog;
 #endif
 	return &rgm_export;
 }

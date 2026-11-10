@@ -51,6 +51,11 @@ If you have questions concerning this license or the applicable additional terms
 
 #if defined( __linux__ )
 #include <sys/sysinfo.h>
+#include <sys/random.h>
+#endif
+
+#if defined( __GLIBC__ )
+#include <malloc.h>
 #endif
 
 #if defined( MACOS_X )
@@ -150,6 +155,11 @@ Posix_Exit
 ================
 */
 void Posix_Exit(int ret) {
+#if defined( __ANDROID__ )
+	// nothing below is guaranteed to print again, so do not let an
+	// unterminated line leave with the process
+	Sys_AndroidLogFlush();
+#endif
 	if ( !Posix_IsMainThread() ) {
 		// A worker-thread fatal error exits through here. Joining the async
 		// thread from itself would recurse through common->Error until the
@@ -281,6 +291,72 @@ int Sys_Milliseconds( void ) {
 
 /*
 ================
+Sys_GetSecureRandomBytes
+================
+*/
+bool Sys_GetSecureRandomBytes( void *buffer, int bytes ) {
+	if ( bytes < 0 || ( bytes > 0 && buffer == NULL ) ) {
+		return false;
+	}
+	if ( bytes == 0 ) {
+		return true;
+	}
+
+#if defined( __ANDROID__ )
+	// bionic only grew getrandom() at API 28; arc4random_buf has been there
+	// since API 21 and is the same kernel entropy source.
+	arc4random_buf( buffer, static_cast<size_t>( bytes ) );
+	return true;
+#elif defined( __linux__ )
+	unsigned char *cursor = static_cast<unsigned char *>( buffer );
+	int remaining = bytes;
+	while ( remaining > 0 ) {
+		const ssize_t received = getrandom( cursor, static_cast<size_t>( remaining ), 0 );
+		if ( received > 0 ) {
+			cursor += received;
+			remaining -= static_cast<int>( received );
+			continue;
+		}
+		if ( received < 0 && errno == EINTR ) {
+			continue;
+		}
+		return false;
+	}
+	return true;
+#elif defined( MACOS_X )
+	arc4random_buf( buffer, static_cast<size_t>( bytes ) );
+	return true;
+#else
+	int descriptor;
+	do {
+		descriptor = open( "/dev/urandom", O_RDONLY );
+	} while ( descriptor < 0 && errno == EINTR );
+	if ( descriptor < 0 ) {
+		return false;
+	}
+	unsigned char *cursor = static_cast<unsigned char *>( buffer );
+	int remaining = bytes;
+	while ( remaining > 0 ) {
+		const ssize_t received = read( descriptor, cursor,
+			static_cast<size_t>( remaining ) );
+		if ( received > 0 ) {
+			cursor += received;
+			remaining -= static_cast<int>( received );
+			continue;
+		}
+		if ( received < 0 && errno == EINTR ) {
+			continue;
+		}
+		close( descriptor );
+		return false;
+	}
+	close( descriptor );
+	return true;
+#endif
+}
+
+/*
+================
 Sys_Mkdir
 ================
 */
@@ -373,11 +449,33 @@ EVENT LOOP
 ============================================================================
 */
 
+#include "../EventQueueContinuity.h"
+#include "../EventDisposition.h"
+#include "../EventRetirement.h"
+
 #define	MAX_QUED_EVENTS		256
 #define	MASK_QUED_EVENTS	( MAX_QUED_EVENTS - 1 )
 
 static sysEvent_t eventQue[MAX_QUED_EVENTS];
+static sysEventDispositionTag_t eventDispositionTags[MAX_QUED_EVENTS];
+static std::uint64_t eventRetirementSerials[MAX_QUED_EVENTS];
+static std::uint64_t eventRetirementHighwater = 0; // Never reset by clear/rebind.
 static int eventHead, eventTail;
+
+// Only pending queue entries own their payload. Dequeued slots may still hold
+// a pointer whose ownership has already transferred to the event consumer.
+static void Sys_DiscardQueuedEvent( sysEvent_t &event ) {
+	if ( event.evPtr != NULL ) {
+		// Discarded console input can contain private CVar values. Wipe all
+		// bounded console bytes without parsing text during queue teardown.
+		if ( event.evType == SE_CONSOLE && event.evPtrLength > 0 ) {
+			memset( event.evPtr, 0, static_cast<size_t>( event.evPtrLength ) );
+		}
+		Mem_Free( event.evPtr );
+	}
+	event.evPtr = NULL;
+	event.evPtrLength = 0;
+}
 
 /*
 ================
@@ -392,13 +490,11 @@ void Posix_QueEvent( sysEventType_t type, int value, int value2,
 
 	ev = &eventQue[eventHead & MASK_QUED_EVENTS];
 	if (eventHead - eventTail >= MAX_QUED_EVENTS) {
+		Sys_InvalidateEventQueue();
 		common->Printf( "Posix_QueEvent: overflow\n" );
 		// we are discarding an event, but don't leak memory
 		// TTimo: verbose dropped event types?
-		if (ev->evPtr) {
-			Mem_Free(ev->evPtr);
-			ev->evPtr = NULL;
-		}
+		Sys_DiscardQueuedEvent( *ev );
 		eventTail++;
 	}
 
@@ -409,10 +505,76 @@ void Posix_QueEvent( sysEventType_t type, int value, int value2,
 	ev->evValue2 = value2;
 	ev->evPtrLength = ptrLength;
 	ev->evPtr = ptr;
+	eventDispositionTags[ev - eventQue] = {};
+	eventRetirementSerials[ev - eventQue] = 0;
 
 #if 0
 	common->Printf( "Event %d: %d %d\n", ev->evType, ev->evValue, ev->evValue2 );
 #endif
+}
+
+bool Sys_QueTrackedEvent(sysEvent_t& event, sysEventDispositionTag_t& tag) noexcept {
+	int type = 0;
+	memcpy(&type, &event.evType, sizeof(type));
+	if (!Sys_EventDispositionTagCurrent(tag) || type <= SE_NONE || type > SE_RETAINED_UI ||
+		event.evPtrLength < 0 || event.evPtrLength > 1024 * 1024 ||
+		((event.evPtrLength != 0) != (event.evPtr != NULL))) return false;
+	if (eventHead - eventTail >= MAX_QUED_EVENTS) {
+		Sys_InvalidateEventQueue();
+		return false; // No eviction, ownership transfer or callback on failed admission.
+	}
+	if (eventRetirementHighwater == (std::numeric_limits<std::uint64_t>::max)()) return false;
+	const int slot = eventHead & MASK_QUED_EVENTS;
+	eventQue[slot] = event;
+	eventDispositionTags[slot] = tag;
+	eventRetirementSerials[slot] = ++eventRetirementHighwater;
+	++eventHead;
+	event = {}; tag = {};
+	return true;
+}
+
+
+sysEventTransfer_t Sys_PeekEventDispositionTag(sysEventDispositionTag_t& out) noexcept {
+    if (!Sys_EventDispositionBoundThread()) return sysEventTransfer_t::Refused;
+    if (eventHead <= eventTail) return sysEventTransfer_t::Empty;
+    out = eventDispositionTags[eventTail & MASK_QUED_EVENTS];
+    return sysEventTransfer_t::Ready;
+}
+sysEventTransfer_t Sys_PeekEventForRetirement(openq4::NativeInputHead& out) noexcept {
+    if (!Sys_EventDispositionBoundThread()) return sysEventTransfer_t::Refused;
+    if (eventHead <= eventTail) return sysEventTransfer_t::Empty;
+    const unsigned slot = static_cast<unsigned>(eventTail & MASK_QUED_EVENTS);
+    if (!eventRetirementSerials[slot] || !eventDispositionTags[slot].ShapeValid()) return sysEventTransfer_t::Refused;
+    out = Sys_EventRetirementHead(openq4::NativeInputLane::Platform, eventRetirementSerials[slot], slot,
+        eventQue[slot], eventDispositionTags[slot]);
+    return sysEventTransfer_t::Ready;
+}
+sysEventTransfer_t Sys_TakeEventForRetirement(openq4::NativeInputRoute& route,
+    const openq4::NativeInputRoute::CancellationPermit& permit, sysEvent_t& event, sysEventDispositionTag_t& tag) noexcept {
+    openq4::NativeInputHead head;
+    const auto status = Sys_PeekEventForRetirement(head);
+    if (status != sysEventTransfer_t::Ready) return status;
+    if (!route.AllowsCancellation(permit, head)) return sysEventTransfer_t::Refused;
+    // Serialized original event thread; no foreign call between comparison and transfer.
+    const auto ownedEvent = eventQue[head.slot]; const auto ownedTag = eventDispositionTags[head.slot];
+    eventQue[head.slot] = {}; eventDispositionTags[head.slot] = {}; eventRetirementSerials[head.slot] = 0;
+    ++eventTail;
+    event = ownedEvent; tag = ownedTag;
+    return sysEventTransfer_t::Ready;
+}
+
+sysEventTransfer_t Sys_TakeEventWithDisposition(sysEvent_t& event, sysEventDispositionTag_t& tag) noexcept {
+	if (!Sys_EventDispositionEpoch()) return sysEventTransfer_t::Refused;
+	if (eventHead <= eventTail) return sysEventTransfer_t::Empty;
+	const int slot = eventTail & MASK_QUED_EVENTS;
+	const auto ownedTag = eventDispositionTags[slot];
+	if (!ownedTag.Empty() && !Sys_EventDispositionTagCurrent(ownedTag)) return sysEventTransfer_t::Refused;
+	const auto ownedEvent = eventQue[slot];
+	eventQue[slot] = {}; eventDispositionTags[slot] = {};
+	eventRetirementSerials[slot] = 0;
+	++eventTail;
+	event = ownedEvent; tag = ownedTag;
+	return sysEventTransfer_t::Ready;
 }
 
 /*
@@ -425,6 +587,10 @@ sysEvent_t Sys_GetEvent(void) {
 
 	// return if we have data
 	if (eventHead > eventTail) {
+		if (!eventDispositionTags[eventTail & MASK_QUED_EVENTS].Empty()) {
+			Sys_InvalidateEventQueue();
+			return sysEvent_t{}; // Preserve original tagged ownership for explicit retirement.
+		}
 		eventTail++;
 		return eventQue[(eventTail - 1) & MASK_QUED_EVENTS];
 	}
@@ -436,10 +602,26 @@ sysEvent_t Sys_GetEvent(void) {
 
 /*
 ================
+Sys_HasQueuedEvents
+================
+*/
+bool Sys_HasQueuedEvents(void) {
+	return eventHead > eventTail;
+}
+
+/*
+================
 Sys_ClearEvents
 ================
 */
 void Sys_ClearEvents( void ) {
+	Sys_InvalidateEventQueue();
+	while ( eventHead > eventTail ) {
+		Sys_DiscardQueuedEvent( eventQue[ eventTail & MASK_QUED_EVENTS ] );
+		eventDispositionTags[eventTail & MASK_QUED_EVENTS] = {};
+		eventRetirementSerials[eventTail & MASK_QUED_EVENTS] = 0;
+		eventTail++;
+	}
 	eventHead = eventTail = 0;
 }
 
@@ -557,6 +739,42 @@ void Sys_GetExeLaunchMemoryStatus( sysMemoryStats_t &stats ) {
 	Sys_GetCurrentMemoryStatus( stats );
 }
 
+bool Sys_GetProcessMemoryUsage( unsigned long long &privateBytes, unsigned long long &residentBytes ) {
+	privateBytes = residentBytes = 0;
+#if defined( __linux__ )
+	// Linux and Android: anonymous resident memory plus swap is what the process
+	// owns privately; file-backed pages such as mapped libraries are excluded.
+	FILE *status = fopen( "/proc/self/status", "r" );
+	if ( status == NULL ) {
+		return false;
+	}
+	char line[256];
+	unsigned long long anonymousKiB = 0, swapKiB = 0, residentKiB = 0;
+	bool found = false;
+	while ( fgets( line, sizeof( line ), status ) != NULL ) {
+		found |= sscanf( line, "RssAnon: %llu kB", &anonymousKiB ) == 1;
+		sscanf( line, "VmSwap: %llu kB", &swapKiB );
+		sscanf( line, "VmRSS: %llu kB", &residentKiB );
+	}
+	fclose( status );
+	privateBytes = ( anonymousKiB + swapKiB ) * 1024ULL;
+	residentBytes = residentKiB * 1024ULL;
+	return found;
+#elif defined( MACOS_X )
+	// The physical footprint is the figure the system's memory pressure tools use.
+	task_vm_info_data_t info;
+	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+	if ( task_info( mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>( &info ), &count ) != KERN_SUCCESS ) {
+		return false;
+	}
+	privateBytes = info.phys_footprint;
+	residentBytes = info.resident_size;
+	return true;
+#else
+	return false;
+#endif
+}
+
 /*
 =================
 Sys_Init
@@ -656,9 +874,17 @@ void Sys_DLL_Unload( intptr_t handle ) {
 
 #if !defined( MACOS_X )
 // Only relevant when specified on the command line. macOS provides a
-// bundle-aware implementation in macosx_compat.mm so Finder launches can use
+// bundle-aware implementation in macos_compat.mm so Finder launches can use
 // the adjacent package root even when their process working directory differs.
 const char *Sys_DefaultCDPath( void ) {
+#if defined( __ANDROID__ )
+	// The standalone host extracts packaged overlays into private storage.
+	// Keep the retail install, writable saves and APK native modules separate.
+	const char *contentRoot = getenv( "OPENQ4_CONTENT_ROOT" );
+	if ( contentRoot != NULL && contentRoot[0] == '/' ) {
+		return contentRoot;
+	}
+#endif
 	return Posix_Cwd();
 }
 #endif
@@ -769,6 +995,23 @@ void Sys_FPU_SetPrecision( int precision ) {
 
 /*
 ================
+Sys_ReleaseFreeHeapMemory
+
+glibc gives each thread that allocates its own malloc arena and keeps memory
+freed into an arena for reuse. Level loads allocate on the job workers and free
+on the main thread, so without a trim a Linux client grew by about 60 MiB on
+every map change and never levelled off. malloc_trim returns the free pages of
+every arena. Other C libraries return memory themselves.
+================
+*/
+void Sys_ReleaseFreeHeapMemory( void ) {
+#if defined( __GLIBC__ )
+	malloc_trim( 0 );
+#endif
+}
+
+/*
+================
 Sys_LockMemory
 ================
 */
@@ -807,6 +1050,13 @@ return in MegaBytes
 ===========
 */
 int Sys_GetDriveFreeSpace( const char *path ) {
+#if defined( __ANDROID__ ) && defined( OPENQ4_SIGMATOUCH )
+	// Always report plenty. Save paths may be SAF-backed and synthetic
+	// ('/[internal]/...'), so statvfs resolves no component of them and the walk
+	// up below would end on the read-only system mount and report it as (near
+	// zero) free, blocking savegames with "not enough drive space".
+	return 1024;
+#else
 	char probePath[PATH_MAX];
 	struct statvfs fsStats;
 
@@ -844,6 +1094,7 @@ int Sys_GetDriveFreeSpace( const char *path ) {
 
 	common->DPrintf( "Sys_GetDriveFreeSpace: statvfs failed for '%s': %s\n", path, strerror( errno ) );
 	return 26;
+#endif
 }
 
 /*
@@ -891,6 +1142,15 @@ bool Sys_AlreadyRunning( void ) {
 	Posix_WriteInstanceLockPid( posix_instanceLockFd );
 #endif
 	return false;
+}
+
+/*
+================
+Sys_ReleaseInstanceLock
+================
+*/
+void Sys_ReleaseInstanceLock( void ) {
+	Posix_ReleaseInstanceLock();
 }
 
 static pthread_t posix_mainThread;
@@ -1152,20 +1412,26 @@ char *Posix_ConsoleInput( void ) {
 					const char *inputBuffer = tty_InputState( inputLength, inputCursor );
 					idStr::Copynz( input_ret, inputBuffer, sizeof( input_ret ) );
 				}
-				assert( hidden );
-				tty_Show();
-				write( STDOUT_FILENO, &key, 1 );
-				input_field.Clear();
-				if ( history_count < COMMAND_HISTORY ) {
-					history[ history_count ] = input_ret;
-					history_count++;
-				} else {
-					history[ history_start ] = input_ret;
-					history_start++;
-					history_start %= COMMAND_HISTORY;
+				{
+					const bool privateCommand = cvarSystem != NULL && cvarSystem->IsInitialized() &&
+						cvarSystem->CommandContainsPrivateCVar( input_ret );
+					assert( hidden );
+					tty_Show();
+					write( STDOUT_FILENO, &key, 1 );
+					input_field.Clear();
+					if ( !privateCommand ) {
+						if ( history_count < COMMAND_HISTORY ) {
+							history[ history_count ] = input_ret;
+							history_count++;
+						} else {
+							history[ history_start ] = input_ret;
+							history_start++;
+							history_start %= COMMAND_HISTORY;
+						}
+					}
+					history_current = 0;
+					return input_ret;
 				}
-				history_current = 0;
-				return input_ret;
 			case '\t':
 				input_field.AutoComplete();
 				break;
@@ -1426,6 +1692,10 @@ void Sys_GenerateEvents( void ) {
 			return;
 		}
 		idStr::Copynz( b, s, len );
+		if ( cvarSystem != NULL && cvarSystem->IsInitialized() &&
+			cvarSystem->CommandContainsPrivateCVar( s ) ) {
+			memset( s, 0, len );
+		}
 		Posix_QueEvent( SE_CONSOLE, 0, 0, len, b );
 	}
 }
@@ -1436,29 +1706,45 @@ low level output
 ===============
 */
 
+#define MAX_POSIX_PRINT_MSG 4096
+
 void Sys_DebugPrintf( const char *fmt, ... ) {
 	va_list argptr;
 
 	if ( fmt == NULL ) {
 		return;
 	}
+#if defined( __ANDROID__ )
+	char text[MAX_POSIX_PRINT_MSG];
+	va_start( argptr, fmt );
+	idStr::vsnPrintf( text, sizeof( text ) - 1, fmt, argptr );
+	va_end( argptr );
+	text[sizeof( text ) - 1] = '\0';
+	Sys_AndroidLogPrint( SYS_ANDROID_LOG_DEBUG, text );
+#else
 	tty_Hide();
 	va_start( argptr, fmt );
 	vprintf( fmt, argptr );
 	va_end( argptr );
 	tty_Show();
+#endif
 }
 
 void Sys_DebugVPrintf( const char *fmt, va_list arg ) {
 	if ( fmt == NULL ) {
 		return;
 	}
+#if defined( __ANDROID__ )
+	char text[MAX_POSIX_PRINT_MSG];
+	idStr::vsnPrintf( text, sizeof( text ) - 1, fmt, arg );
+	text[sizeof( text ) - 1] = '\0';
+	Sys_AndroidLogPrint( SYS_ANDROID_LOG_DEBUG, text );
+#else
 	tty_Hide();
 	vprintf( fmt, arg );
 	tty_Show();
+#endif
 }
-
-#define MAX_POSIX_PRINT_MSG 4096
 
 void Sys_Printf(const char *msg, ...) {
 	char text[MAX_POSIX_PRINT_MSG];
@@ -1474,9 +1760,16 @@ void Sys_Printf(const char *msg, ...) {
 
 	Posix_ConsoleAppendText( text );
 
+#if defined( __ANDROID__ )
+	// There is no terminal here, and stdout only reaches logcat through the
+	// host app's pipe pump, which cannot preserve line boundaries. Go straight
+	// to liblog instead - see sys/android/android_log.cpp.
+	Sys_AndroidLogPrint( SYS_ANDROID_LOG_INFO, text );
+#else
 	tty_Hide();
 	fputs( text, stdout );
 	tty_Show();
+#endif
 }
 
 void Sys_VPrintf(const char *msg, va_list arg) {
@@ -1490,9 +1783,13 @@ void Sys_VPrintf(const char *msg, va_list arg) {
 
 	Posix_ConsoleAppendText( text );
 
+#if defined( __ANDROID__ )
+	Sys_AndroidLogPrint( SYS_ANDROID_LOG_INFO, text );
+#else
 	tty_Hide();
 	fputs( text, stdout );
 	tty_Show();
+#endif
 }
 
 static char posix_fatalBreadcrumbPath[ MAX_OSPATH ];
@@ -1607,6 +1904,11 @@ void Sys_Error(const char *error, ...) {
 
 	Sys_SetFatalError( text );
 	Posix_AppendFatalBreadcrumb( text );
+#if defined( __ANDROID__ )
+	// whatever was mid-line when this happened is the context for the error,
+	// so get it out before the error itself rather than after
+	Sys_AndroidLogFlush();
+#endif
 	Sys_Printf( "Sys_Error: %s\n", text );
 	Posix_ConsoleFatalErrorWait();
 

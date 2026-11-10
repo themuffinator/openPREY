@@ -2,7 +2,7 @@
 
 Updated: 2026-06-30
 
-This document records the no-hardware symbolication contract for experimental
+This document records the no-hardware symbolication contract for preview
 macOS openQ4 packages. It helps maintainers pair a user `.ips` or `.crash`
 report with the matching dSYM archive even when they cannot reproduce the crash
 on macOS.
@@ -16,7 +16,7 @@ Every macOS release package must have a separate dSYM archive beside it:
 - Runtime package: `openq4-<version>-macos-arm64-metal.dmg`
 - Symbol archive: `openq4-<version>-macos-arm64-metal-symbols.tar.xz`
 
-Unsigned experimental fallback packages keep the same rule with
+Unsigned fallback packages keep the same rule with
 `-unsigned-symbols.tar.xz`.
 
 The runtime DMG or tarball must not contain `.dSYM` bundles. The symbol archive

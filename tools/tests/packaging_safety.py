@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 import uuid
 from pathlib import Path
 from types import ModuleType
@@ -20,6 +21,9 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 ROOT = Path(__file__).resolve().parents[2]
 BUILD_DIR = ROOT / "tools" / "build"
 WORK_BASE = ROOT / ".tmp" / "packaging-safety-test"
+# 2000-01-01 UTC in whole seconds, so coarse-timestamp filesystems store it
+# exactly; older than anything a test run writes.
+OLD_MTIME_NS = 946_684_800 * 1_000_000_000
 
 
 def make_work_root() -> Path:
@@ -45,11 +49,11 @@ OPENQ4_PAK = load_module("openq4_pak_safety_test", BUILD_DIR / "openq4_pak.py")
 BUILD_PAK0 = load_module("build_pak0_safety_test", BUILD_DIR / "build_pak0.py")
 CHECK_STAGED_CONTENT = load_module("check_staged_content_safety_test", BUILD_DIR / "check_staged_content_edits.py")
 PACKAGE = load_module("package_nightly_safety_test", BUILD_DIR / "package_nightly.py")
-STAGE_GAMELIBS = load_module("stage_gamelibs_safety_test", BUILD_DIR / "stage_gamelibs.py")
 VERSION = load_module("openq4_version_safety_test", BUILD_DIR / "openq4_version.py")
 WINDOWS_RUNTIME = load_module("windows_runtime_safety_test", BUILD_DIR / "windows_runtime.py")
 MESON_SOURCES = load_module("meson_sources_safety_test", BUILD_DIR / "meson_sources.py")
 CLEAN_RUNTIME_INSTALL = BUILD_DIR / "clean_runtime_install.py"
+FAST_STAGE = load_module("stage_fast_install_safety_test", BUILD_DIR / "stage_fast_install.py")
 
 
 def write_file(path: Path, data: bytes = b"data\n") -> None:
@@ -94,6 +98,31 @@ def run_script(script: Path, *args: Path | str) -> subprocess.CompletedProcess[s
         stderr=subprocess.PIPE,
         text=True,
     )
+
+
+def validate_pk4_cross_host_identity() -> None:
+    source = WORK / "cross-host-source"
+    payload = b"authored package content\n" * 2048
+    write_file(source / "materials/example.mtr", payload)
+    original_info = OPENQ4_PAK.ZipInfo
+    archives = []
+    try:
+        for host in (0, 3):
+            def host_info(*args, **kwargs):
+                info = original_info(*args, **kwargs)
+                info.create_system = host
+                return info
+
+            OPENQ4_PAK.ZipInfo = host_info
+            output = WORK / f"host-{host}.pk4"
+            OPENQ4_PAK.create_game_pk4(source, output, pak_name="pak0.pk4", required_files=set())
+            with ZipFile(output) as archive:
+                assert archive.read("materials/example.mtr") == payload
+            archives.append(output.read_bytes())
+    finally:
+        OPENQ4_PAK.ZipInfo = original_info
+    if archives[0] != archives[1]:
+        raise AssertionError("identical PK4 content produced different Windows/Unix archive checksums")
 
 
 def validate_pk4_source_containment() -> None:
@@ -242,6 +271,30 @@ def validate_copy_helpers_do_not_follow_destination_symlinks() -> None:
         )
 
 
+def validate_identical_copy_takes_newer_source_timestamp() -> None:
+    source = WORK / "copy-timestamps" / "pak1.pk4"
+    destination = WORK / "copy-timestamps" / "stage" / "pak1.pk4"
+    write_file(source, b"same\n")
+    write_file(destination, b"same\n")
+    source_ns = OLD_MTIME_NS + 3600 * 1_000_000_000
+    os.utime(destination, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+    os.utime(source, ns=(source_ns, source_ns))
+
+    if OPENQ4_PAK.copy_file_if_changed(source, destination):
+        raise AssertionError("copy_file_if_changed recopied an identical file")
+    if destination.stat().st_mtime_ns != source_ns:
+        raise AssertionError(
+            "an identical copy kept a timestamp older than its source, so staged runtime "
+            "checks would report it stale"
+        )
+
+    later_ns = source_ns + 3600 * 1_000_000_000
+    os.utime(destination, ns=(later_ns, later_ns))
+    OPENQ4_PAK.copy_file_if_changed(source, destination)
+    if destination.stat().st_mtime_ns != later_ns:
+        raise AssertionError("copy_file_if_changed moved an identical copy's timestamp backwards")
+
+
 def validate_pk4_replace_helper_does_not_preserve_destination_symlink() -> None:
     source = WORK / "replace" / "source.pk4.tmp"
     destination = WORK / "replace" / "pak0.pk4"
@@ -301,23 +354,20 @@ def validate_legacy_build_pak0_copy_does_not_follow_symlink() -> None:
 
 def validate_legacy_build_pak0_cli_guards() -> None:
     source_root = WORK / "build-pak0-cli"
-    pak0_source = source_root / "pak0"
-    pak1_source = source_root / "pak1"
-    write_file(pak0_source / "materials" / "ok.mtr")
-    write_file(pak1_source / "gfx" / "loadscreen.tga")
+    real_pak0_source = source_root / "real-pak0"
+    write_file(real_pak0_source / "materials" / "ok.mtr")
+    for spec in OPENQ4_PAK.OPENQ4_CONTENT_PACKS[1:]:
+        write_file(source_root / spec.source / "gfx" / "loadscreen.tga")
 
-    pak0_link = source_root / "pak0-link"
-    if make_symlink(pak0_source, pak0_link, target_is_directory=True):
+    pak0_link = source_root / OPENQ4_PAK.OPENQ4_CONTENT_PACKS[0].source
+    pak0_link.parent.mkdir(parents=True, exist_ok=True)
+    if make_symlink(real_pak0_source, pak0_link, target_is_directory=True):
         result = run_script(
             BUILD_DIR / "build_pak0.py",
-            "--pak0-source-dir",
-            pak0_link,
-            "--pak1-source-dir",
-            pak1_source,
-            "--pak0-out",
-            WORK / "build-pak0-cli" / "pak0.pk4",
-            "--pak1-out",
-            WORK / "build-pak0-cli" / "pak1.pk4",
+            "--source-root",
+            source_root,
+            "--out-dir",
+            WORK / "build-pak0-cli" / "out",
             "--header-out",
             WORK / "build-pak0-cli" / "openq4_paks_generated.h",
         )
@@ -354,12 +404,26 @@ def validate_list_sources_guards() -> None:
             raise AssertionError(f"list_sources.py accepted a symlinked source: {result.stderr}")
 
 
+# stage_fast_install.py stages by the host's own runtime policy, so the
+# guard/copy fixture must use the host platform's artifact names; explicit
+# per-platform policy output is pinned by validate_fast_stage_cross_platform_policy.
+FAST_STAGE_HOST_FIXTURES = {
+    "win32": ("openPREY-client_x64.exe", "renderer-gl_x64.dll", "game_x64.dll"),
+    "linux": ("openPREY-client_x64", "renderer-gl_x64.so", "game_x64.so"),
+    "darwin": ("openPREY-client_x64", "renderer-vk_x64.dylib", "game_x64.dylib"),
+}
+
+
 def validate_fast_stage_guards_and_copy() -> None:
+    if sys.platform not in FAST_STAGE_HOST_FIXTURES:
+        raise AssertionError(f"unsupported fast-stage host platform: {sys.platform}")
+    client_name, renderer_name, game_name = FAST_STAGE_HOST_FIXTURES[sys.platform]
     source_root = WORK / "fast-stage" / "openPREY"
     build_dir = source_root / "builddir"
     install_dir = source_root / ".install"
-    write_file(build_dir / "openPREY-client_x64.exe", b"client\n")
-    write_file(build_dir / "basepr" / "game_x64.dll", b"game\n")
+    write_file(build_dir / client_name, b"client\n")
+    write_file(build_dir / renderer_name, b"renderer\n")
+    write_file(build_dir / "basepr" / game_name, b"game\n")
     write_file(build_dir / "basepr" / "pak0.pk4", b"pak0\n")
 
     bad_result = run_script(
@@ -403,7 +467,7 @@ def validate_fast_stage_guards_and_copy() -> None:
             "--install-dir",
             symlink_install_dir,
         )
-        if symlink_result.returncode == 0 or "build directory must not be a symlink" not in symlink_result.stderr:
+        if symlink_result.returncode == 0 or "build directory must not be a link or junction" not in symlink_result.stderr:
             raise AssertionError(f"stage_fast_install.py accepted a symlinked build dir: {symlink_result.stderr}")
 
     result = run_script(
@@ -417,10 +481,205 @@ def validate_fast_stage_guards_and_copy() -> None:
     )
     if result.returncode != 0:
         raise AssertionError(f"stage_fast_install.py failed safe staging: {result.stderr}")
-    if not (install_dir / "openPREY-client_x64.exe").is_file():
+    if not (install_dir / client_name).is_file():
         raise AssertionError("fast stage did not copy root runtime binary")
-    if not (install_dir / "basepr" / "game_x64.dll").is_file():
+    if not (install_dir / "basepr" / game_name).is_file():
         raise AssertionError("fast stage did not copy game runtime binary")
+    if not (install_dir / renderer_name).is_file():
+        raise AssertionError("fast stage did not copy renderer runtime binary")
+
+    escaped_temporary = source_root / ".tmp" / "other-runtime" / "capture"
+    escaped_result = run_script(
+        BUILD_DIR / "stage_fast_install.py",
+        "--source-root",
+        source_root,
+        "--build-dir",
+        build_dir,
+        "--install-dir",
+        escaped_temporary,
+        "--temporary-runtime",
+    )
+    if escaped_result.returncode == 0 or "must stay below" not in escaped_result.stderr:
+        raise AssertionError(
+            f"stage_fast_install.py accepted an escaped temporary runtime: {escaped_result.stderr}"
+        )
+
+    temporary_runtime = source_root / ".tmp" / "stock-runtime" / "capture"
+    temporary_result = run_script(
+        BUILD_DIR / "stage_fast_install.py",
+        "--source-root",
+        source_root,
+        "--build-dir",
+        build_dir,
+        "--install-dir",
+        temporary_runtime,
+        "--temporary-runtime",
+    )
+    if temporary_result.returncode != 0:
+        raise AssertionError(
+            f"stage_fast_install.py failed isolated temporary staging: {temporary_result.stderr}"
+        )
+    if not (temporary_runtime / client_name).is_file():
+        raise AssertionError("temporary fast stage did not copy root runtime binary")
+    if not (temporary_runtime / renderer_name).is_file():
+        raise AssertionError("temporary fast stage did not copy renderer runtime binary")
+    repeated_result = run_script(
+        BUILD_DIR / "stage_fast_install.py",
+        "--source-root",
+        source_root,
+        "--build-dir",
+        build_dir,
+        "--install-dir",
+        temporary_runtime,
+        "--temporary-runtime",
+    )
+    if repeated_result.returncode == 0 or "must be new" not in repeated_result.stderr:
+        raise AssertionError(
+            f"stage_fast_install.py reused a temporary runtime: {repeated_result.stderr}"
+        )
+
+
+def validate_fast_stage_cross_platform_policy() -> None:
+    source_root = WORK / "fast-stage-platform-policy" / "builddir"
+    source_game = source_root / "basepr"
+    root_files = (
+        "openPREY-client_x64",
+        "openPREY-ded_x64",
+        "openPREY-client_x64.exe",
+        "openPREY-client_x64.pdb",
+        "openPREY-ded_x64.exe",
+        "openPREY-ded_x64.pdb",
+        "renderer-gl_x64.dll",
+        "renderer-gl_x64.pdb",
+        "renderer-vk_x64.dll",
+        "renderer-vk_x64.pdb",
+        "renderer-gl_x64.so",
+        "renderer-vk_x64.so",
+        "renderer-gl_x64.dylib",
+        "renderer-vk_x64.dylib",
+        # MoltenVK is provider-staged and verified separately; it must never
+        # be mistaken for a Meson-produced fast-stage artifact.
+        "libMoltenVK.dylib",
+        "OpenAL32.dll",
+    )
+    game_files = (
+        "game_x64.dll",
+        "game_x64.pdb",
+        "game_x64.so",
+        "game_x64.dylib",
+        "mod.json",
+        "pak0.pk4",
+        "pak1.pk4",
+    )
+    for filename in root_files:
+        write_file(source_root / filename, filename.encode("utf-8"))
+    for filename in game_files:
+        write_file(source_game / filename, filename.encode("utf-8"))
+
+    expected = {
+        "win32": (
+            {
+                "openPREY-client_x64.exe",
+                "openPREY-client_x64.pdb",
+                "openPREY-ded_x64.exe",
+                "openPREY-ded_x64.pdb",
+                "renderer-gl_x64.dll",
+                "renderer-gl_x64.pdb",
+                "renderer-vk_x64.dll",
+                "renderer-vk_x64.pdb",
+                "OpenAL32.dll",
+            },
+            {
+                "game_x64.dll",
+                "game_x64.pdb",
+                "mod.json",
+                "pak0.pk4",
+                "pak1.pk4",
+            },
+        ),
+        "linux": (
+            {
+                "openPREY-client_x64",
+                "openPREY-ded_x64",
+                "renderer-gl_x64.so",
+                "renderer-vk_x64.so",
+            },
+            {
+                "game_x64.so",
+                "mod.json",
+                "pak0.pk4",
+                "pak1.pk4",
+            },
+        ),
+        "darwin": (
+            {
+                "openPREY-client_x64",
+                "openPREY-ded_x64",
+                "renderer-vk_x64.dylib",
+            },
+            {
+                "game_x64.dylib",
+                "mod.json",
+                "pak0.pk4",
+                "pak1.pk4",
+            },
+        ),
+    }
+    for platform_name, (expected_root, expected_game) in expected.items():
+        policy = FAST_STAGE.runtime_stage_policy(platform_name)
+        destination = WORK / "fast-stage-platform-policy" / platform_name
+        destination_game = destination / "basepr"
+        FAST_STAGE.copy_matches(
+            source_root,
+            destination,
+            policy.root_copy_patterns,
+            policy.root_copy_exclude_patterns,
+        )
+        FAST_STAGE.copy_matches(
+            source_game, destination_game, policy.game_copy_patterns
+        )
+        actual_root = {
+            path.name for path in destination.iterdir() if path.is_file()
+        }
+        actual_game = {
+            path.name for path in destination_game.iterdir() if path.is_file()
+        }
+        if actual_root != expected_root:
+            raise AssertionError(
+                f"{platform_name} fast-stage root policy copied {sorted(actual_root)!r}; "
+                f"expected {sorted(expected_root)!r}"
+            )
+        if actual_game != expected_game:
+            raise AssertionError(
+                f"{platform_name} fast-stage game policy copied {sorted(actual_game)!r}; "
+                f"expected {sorted(expected_game)!r}"
+            )
+
+    cleanup_root = WORK / "fast-stage-platform-policy" / "windows-cleanup"
+    cleanup_game = cleanup_root / "basepr"
+    retained_root = cleanup_root / "renderer-gl_x64.dll"
+    retained_game = cleanup_game / "game_x64.dll"
+    foreign_paths = (
+        cleanup_root / "renderer-gl_x64.so",
+        cleanup_root / "renderer-vk_x64.dylib",
+        cleanup_game / "game_x64.so",
+        cleanup_game / "game_x64.dylib",
+    )
+    for path in (*foreign_paths, retained_root, retained_game):
+        write_file(path)
+    FAST_STAGE.remove_non_runtime_files(
+        cleanup_root,
+        cleanup_game,
+        FAST_STAGE.runtime_stage_policy("win32"),
+    )
+    remaining_foreign = [path for path in foreign_paths if path.exists()]
+    if remaining_foreign:
+        raise AssertionError(
+            "Windows fast-stage cleanup retained foreign modules: "
+            + ", ".join(str(path) for path in remaining_foreign)
+        )
+    if not retained_root.is_file() or not retained_game.is_file():
+        raise AssertionError("Windows fast-stage cleanup removed native DLL payloads")
 
 
 def validate_dev_only_fixtures_not_in_pak_sources() -> None:
@@ -625,14 +884,14 @@ def validate_package_name_and_copy_guards() -> None:
             "release archive output symlink",
         )
 
-    executable = archive_root / "bin" / "openQ4-client_x64"
+    executable = archive_root / "bin" / "openPREY-client_x64"
     write_file(executable, b"#!/bin/sh\n")
     zip_path = WORK / "package-archive-metadata.zip"
     PACKAGE.create_release_archive(
         archive_root,
         zip_path,
         "zip",
-        {Path("bin") / "openQ4-client_x64"},
+        {Path("bin") / "openPREY-client_x64"},
     )
     with ZipFile(zip_path, "r") as archive:
         for info in archive.infolist():
@@ -642,7 +901,7 @@ def validate_package_name_and_copy_guards() -> None:
                 raise AssertionError(f"zip entry kept host mtime: {info.filename} {info.date_time}")
             if info.create_system != 3:
                 raise AssertionError(f"zip entry did not use portable Unix mode metadata: {info.filename}")
-        executable_info = archive.getinfo(f"{archive_root.name}/bin/openQ4-client_x64")
+        executable_info = archive.getinfo(f"{archive_root.name}/bin/openPREY-client_x64")
         if ((executable_info.external_attr >> 16) & 0o777) != 0o755:
             raise AssertionError("zip executable mode was not normalized to 0755")
 
@@ -651,7 +910,7 @@ def validate_package_name_and_copy_guards() -> None:
         archive_root,
         tar_path,
         "tar.gz",
-        {Path("bin") / "openQ4-client_x64"},
+        {Path("bin") / "openPREY-client_x64"},
     )
     with tarfile.open(tar_path, "r:gz") as archive:
         for member in archive.getmembers():
@@ -659,7 +918,7 @@ def validate_package_name_and_copy_guards() -> None:
                 raise AssertionError(f"tar entry kept host ownership metadata: {member.name}")
             if member.mtime != PACKAGE.DETERMINISTIC_TAR_MTIME:
                 raise AssertionError(f"tar entry kept host mtime: {member.name}")
-        executable_member = archive.getmember(f"{archive_root.name}/bin/openQ4-client_x64")
+        executable_member = archive.getmember(f"{archive_root.name}/bin/openPREY-client_x64")
         if executable_member.mode != 0o755:
             raise AssertionError("tar executable mode was not normalized to 0755")
 
@@ -758,15 +1017,92 @@ def validate_build_pack_and_header_cli_guards() -> None:
     if make_symlink(pak_target, pak_link):
         result = run_script(
             BUILD_DIR / "generate_pak_header.py",
-            "--pak0",
-            pak_link,
-            "--pak1",
-            pak_target,
+            "--pack",
+            f"pak0.pk4={pak_link}",
+            *(
+                argument
+                for pak_name in OPENQ4_PAK.OPENQ4_PACK_NAMES[1:]
+                for argument in ("--pack", f"{pak_name}={pak_target}")
+            ),
             "--header-out",
             WORK / "pak-header" / "openq4_paks_generated.h",
         )
         if result.returncode == 0 or "pak0.pk4 must not be a symlink" not in result.stderr:
             raise AssertionError(f"generate_pak_header.py accepted a symlinked PK4 input: {result.stderr}")
+
+
+def validate_unchanged_pack_rebuild_stays_current() -> None:
+    """An identical rebuild restamps the pack but leaves the checksum header alone.
+
+    Meson runs `ninja -t restat` after every reconfigure, which replaces each
+    logged timestamp with the output's own. A pack left unwritten with an mtime
+    older than its inputs was therefore repacked after every reconfigure. The
+    header must still stay untouched, or a restamped pack recompiles
+    FileSystem.cpp.
+    """
+    root = WORK / "unchanged-pack"
+    pack_args: dict[str, tuple[Path | str, ...]] = {}
+    for pak_name in OPENQ4_PAK.OPENQ4_PACK_NAMES:
+        source_dir = root / "source" / Path(pak_name).stem
+        for relative_path in sorted(OPENQ4_PAK.required_files_for_pack(pak_name)):
+            write_file(source_dir / relative_path, f"{relative_path}\n".encode("utf-8"))
+        pack_args[pak_name] = (
+            "--pak-name",
+            pak_name,
+            "--source-dir",
+            source_dir,
+            "--out",
+            root / "out" / pak_name,
+            "--stage-out",
+            root / "stage" / "basepr" / pak_name,
+        )
+        result = run_script(BUILD_DIR / "build_openq4_pack.py", *pack_args[pak_name])
+        if result.returncode != 0:
+            raise AssertionError(f"build_openq4_pack.py failed to build {pak_name}: {result.stderr}")
+
+    header_out = root / "out" / "openq4_paks_generated.h"
+    header_args = (
+        *(argument for pak_name in pack_args for argument in ("--pack", f"{pak_name}={root / 'out' / pak_name}")),
+        "--header-out",
+        header_out,
+    )
+    result = run_script(BUILD_DIR / "generate_pak_header.py", *header_args)
+    if result.returncode != 0:
+        raise AssertionError(f"generate_pak_header.py failed: {result.stderr}")
+    header_bytes = header_out.read_bytes()
+    os.utime(header_out, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+
+    for pak_name, args in pack_args.items():
+        pak_out = root / "out" / pak_name
+        stage_out = root / "stage" / "basepr" / pak_name
+        pak_bytes = pak_out.read_bytes()
+        for path in (pak_out, stage_out):
+            os.utime(path, ns=(OLD_MTIME_NS, OLD_MTIME_NS))
+
+        started_ns = time.time_ns()
+        result = run_script(BUILD_DIR / "build_openq4_pack.py", *args)
+        if result.returncode != 0:
+            raise AssertionError(f"build_openq4_pack.py failed to rebuild {pak_name}: {result.stderr}")
+        if pak_out.read_bytes() != pak_bytes or stage_out.read_bytes() != pak_bytes:
+            raise AssertionError(f"identical {pak_name} rebuild changed the pack bytes")
+        pak_mtime_ns = pak_out.stat().st_mtime_ns
+        # Two seconds of slack covers filesystems that store coarse timestamps.
+        if pak_mtime_ns < started_ns - 2_000_000_000:
+            raise AssertionError(
+                f"identical {pak_name} rebuild kept its old timestamp; the `ninja -t restat` "
+                "Meson runs after a reconfigure would make it repack again"
+            )
+        if stage_out.stat().st_mtime_ns < pak_mtime_ns:
+            raise AssertionError(f"identical {pak_name} stage copy kept a timestamp older than its pack")
+
+    result = run_script(BUILD_DIR / "generate_pak_header.py", *header_args)
+    if result.returncode != 0:
+        raise AssertionError(f"generate_pak_header.py failed to regenerate: {result.stderr}")
+    if header_out.read_bytes() != header_bytes or header_out.stat().st_mtime_ns != OLD_MTIME_NS:
+        raise AssertionError(
+            "generate_pak_header.py rewrote an unchanged header, so restamping a pack "
+            "would recompile FileSystem.cpp"
+        )
 
 
 def validate_version_manifest_integrity() -> None:
@@ -854,114 +1190,6 @@ def validate_macos_signing_input_guards() -> None:
     )
 
 
-def validate_stage_manifest_rejects_unsafe_paths() -> None:
-    stage_root = WORK / "stage-manifest"
-    write_file(stage_root / "src" / "game" / "Game_local.cpp")
-    manifest_path = stage_root / STAGE_GAMELIBS.MANIFEST_NAME
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "format": 1,
-                "fileCount": 1,
-                "files": [{"path": "../escape.cpp", "sha256": "0" * 64}],
-            }
-        ),
-        encoding="utf-8",
-    )
-    expect_runtime_error(
-        lambda: STAGE_GAMELIBS.validate_stage_manifest(stage_root),
-        "unsafe path",
-        "unsafe staged manifest path",
-    )
-
-    manifest_link_root = WORK / "stage-manifest-link"
-    manifest_link_root.mkdir(parents=True, exist_ok=True)
-    manifest_target = WORK / "external-stage-manifest.json"
-    write_file(manifest_target, b'{"format": 1, "fileCount": 0, "files": []}\n')
-    if make_symlink(manifest_target, manifest_link_root / STAGE_GAMELIBS.MANIFEST_NAME):
-        expect_runtime_error(
-            lambda: STAGE_GAMELIBS.validate_stage_manifest(manifest_link_root),
-            "manifest must not be a symlink",
-            "symlinked staged manifest",
-        )
-
-    bad_format_root = WORK / "stage-manifest-format"
-    write_file(bad_format_root / "src" / "game" / "Game_local.cpp")
-    (bad_format_root / STAGE_GAMELIBS.MANIFEST_NAME).write_text(
-        json.dumps(
-            {
-                "format": 999,
-                "fileCount": 1,
-                "files": [{"path": "src/game/Game_local.cpp", "sha256": "0" * 64}],
-            }
-        ),
-        encoding="utf-8",
-    )
-    expect_runtime_error(
-        lambda: STAGE_GAMELIBS.validate_stage_manifest(bad_format_root),
-        "unsupported format",
-        "unsupported staged manifest format",
-    )
-
-    bad_hash_root = WORK / "stage-manifest-hash"
-    write_file(bad_hash_root / "src" / "game" / "Game_local.cpp")
-    (bad_hash_root / STAGE_GAMELIBS.MANIFEST_NAME).write_text(
-        json.dumps(
-            {
-                "format": 1,
-                "fileCount": 1,
-                "files": [{"path": "src/game/Game_local.cpp", "sha256": "not-a-sha"}],
-            }
-        ),
-        encoding="utf-8",
-    )
-    expect_runtime_error(
-        lambda: STAGE_GAMELIBS.validate_stage_manifest(bad_hash_root),
-        "malformed sha256",
-        "malformed staged manifest hash",
-    )
-
-
-def validate_stage_gamelibs_raw_stage_root_symlink_guard() -> None:
-    root = WORK / "gamelibs-stage-root-symlink"
-    project_root = root / "openPREY"
-    gamelibs_root = root / "OpenPrey-game"
-    stage_target = project_root / ".tmp" / "real-stage"
-    stage_link = project_root / ".tmp" / "linked-stage"
-
-    write_file(project_root / "meson.build", b"project('openPREY')\n")
-    write_file(gamelibs_root / "src" / "game" / "Game_local.cpp", b"// game\n")
-    stage_target.mkdir(parents=True, exist_ok=True)
-    stage_link.parent.mkdir(parents=True, exist_ok=True)
-    if not make_symlink(stage_target, stage_link):
-        return
-
-    result = run_script(BUILD_DIR / "stage_gamelibs.py", project_root, gamelibs_root, stage_link)
-    if result.returncode == 0 or "refusing to stage into symlink" not in result.stderr:
-        raise AssertionError(f"stage_gamelibs.py accepted a symlinked stage root: {result.stderr}")
-
-
-def validate_stage_gamelibs_raw_source_root_symlink_guards() -> None:
-    root = WORK / "gamelibs-source-root-symlink"
-    project_root = root / "openPREY"
-    gamelibs_root = root / "OpenPrey-game"
-    stage_root = project_root / ".tmp" / "stage"
-    write_file(project_root / "meson.build", b"project('openPREY')\n")
-    write_file(gamelibs_root / "src" / "game" / "Game_local.cpp", b"// game\n")
-
-    project_link = root / "openPREY-link"
-    if make_symlink(project_root, project_link, target_is_directory=True):
-        result = run_script(BUILD_DIR / "stage_gamelibs.py", project_link, gamelibs_root, stage_root)
-        if result.returncode == 0 or "openPREY root must not be a symlink" not in result.stderr:
-            raise AssertionError(f"stage_gamelibs.py accepted a symlinked project root: {result.stderr}")
-
-    gamelibs_link = root / "OpenPrey-game-link"
-    if make_symlink(gamelibs_root, gamelibs_link, target_is_directory=True):
-        result = run_script(BUILD_DIR / "stage_gamelibs.py", project_root, gamelibs_link, stage_root)
-        if result.returncode == 0 or "GameLibs root must not be a symlink" not in result.stderr:
-            raise AssertionError(f"stage_gamelibs.py accepted a symlinked GameLibs root: {result.stderr}")
-
-
 def validate_meson_source_symlink_guards() -> None:
     source_root = WORK / "meson-source-symlinks" / "src"
     outside = WORK / "meson-source-symlinks" / "outside.cpp"
@@ -987,6 +1215,98 @@ def validate_meson_source_symlink_guards() -> None:
 
 
 def validate_windows_runtime_staging_guards() -> None:
+    expected_stale_stage_files = {
+        f"openPREY-{kind}_{arch}"
+        for kind in ("client", "ded")
+        for arch in ("x86", "x64", "arm64")
+    } | {
+        f"renderer-{renderer}_{arch}.dll.mainbak"
+        for renderer in ("gl", "vk")
+        for arch in ("x86", "x64", "arm64")
+    }
+    if set(WINDOWS_RUNTIME.WINDOWS_STALE_STAGE_FILE_MANIFEST) != expected_stale_stage_files:
+        raise AssertionError("Windows stage cleanup must remain an exact stale-file allowlist")
+    if WINDOWS_RUNTIME.WINDOWS_EMPTY_STAGE_DIRECTORY_MANIFEST != ("basepr/skins",):
+        raise AssertionError("Windows stage cleanup must only prune the known empty skins directory")
+
+    hygiene_root = WORK / "windows-runtime" / "stage-hygiene"
+    stale_client = hygiene_root / "openPREY-client_x64"
+    stale_dedicated = hygiene_root / "openPREY-ded_x64"
+    stale_backup = hygiene_root / "renderer-vk_x64.dll.mainbak"
+    current_client = hygiene_root / "openPREY-client_x64.exe"
+    current_renderer = hygiene_root / "renderer-vk_x64.dll"
+    unlisted_extensionless = hygiene_root / "openPREY-client_custom"
+    empty_skins = hygiene_root / "basepr" / "skins"
+    for path in (stale_client, stale_dedicated, stale_backup, current_client, current_renderer, unlisted_extensionless):
+        write_file(path)
+    empty_skins.mkdir(parents=True)
+
+    hygiene_result = WINDOWS_RUNTIME.cleanup_windows_stage_target(hygiene_root)
+    if set(hygiene_result["removed_stale_files"]) != {
+        "openPREY-client_x64",
+        "openPREY-ded_x64",
+        "renderer-vk_x64.dll.mainbak",
+    }:
+        raise AssertionError(f"unexpected Windows stale-stage cleanup result: {hygiene_result!r}")
+    if hygiene_result["removed_empty_directories"] != ["basepr/skins"]:
+        raise AssertionError(f"empty Windows stage directory was not pruned: {hygiene_result!r}")
+    for removed_path in (stale_client, stale_dedicated, stale_backup, empty_skins):
+        if removed_path.exists() or removed_path.is_symlink():
+            raise AssertionError(f"known stale Windows stage entry was retained: {removed_path}")
+    for preserved_path in (current_client, current_renderer, unlisted_extensionless):
+        if not preserved_path.is_file():
+            raise AssertionError(f"Windows stage cleanup removed an unlisted runtime entry: {preserved_path}")
+
+    populated_root = WORK / "windows-runtime" / "stage-hygiene-populated"
+    populated_skin = populated_root / "basepr" / "skins" / "custom.skin"
+    write_file(populated_skin)
+    populated_result = WINDOWS_RUNTIME.cleanup_windows_stage_target(populated_root)
+    if populated_result["removed_empty_directories"] or not populated_skin.is_file():
+        raise AssertionError("Windows stage cleanup must preserve a populated basepr/skins directory")
+
+    stale_directory_root = WORK / "windows-runtime" / "stage-hygiene-stale-directory"
+    (stale_directory_root / "openPREY-client_x64").mkdir(parents=True)
+    expect_runtime_error(
+        lambda: WINDOWS_RUNTIME.cleanup_windows_stage_target(stale_directory_root),
+        "not a regular file",
+        "Windows stage stale-file directory guard",
+    )
+
+    empty_path_file_root = WORK / "windows-runtime" / "stage-hygiene-empty-path-file"
+    write_file(empty_path_file_root / "basepr" / "skins")
+    expect_runtime_error(
+        lambda: WINDOWS_RUNTIME.cleanup_windows_stage_target(empty_path_file_root),
+        "is not a directory",
+        "Windows stage empty-directory path guard",
+    )
+
+    stale_link_root = WORK / "windows-runtime" / "stage-hygiene-stale-link"
+    stale_link_root.mkdir(parents=True)
+    stale_link_target = WORK / "windows-runtime" / "stage-hygiene-link-target"
+    write_file(stale_link_target, b"outside\n")
+    stale_link = stale_link_root / "renderer-vk_x64.dll.mainbak"
+    if make_symlink(stale_link_target, stale_link):
+        link_result = WINDOWS_RUNTIME.cleanup_windows_stage_target(stale_link_root)
+        if link_result["removed_stale_files"] != ["renderer-vk_x64.dll.mainbak"]:
+            raise AssertionError("Windows stage cleanup did not report the known stale symlink")
+        if stale_link.exists() or stale_link.is_symlink():
+            raise AssertionError("Windows stage cleanup did not unlink the known stale symlink")
+        if stale_link_target.read_bytes() != b"outside\n":
+            raise AssertionError("Windows stage cleanup followed a known stale symlink target")
+
+    linked_game_root = WORK / "windows-runtime" / "stage-hygiene-linked-game-root"
+    linked_game_target = WORK / "windows-runtime" / "stage-hygiene-linked-game-target"
+    linked_game_root.mkdir(parents=True)
+    (linked_game_target / "skins").mkdir(parents=True)
+    if make_symlink(linked_game_target, linked_game_root / "basepr", target_is_directory=True):
+        expect_runtime_error(
+            lambda: WINDOWS_RUNTIME.cleanup_windows_stage_target(linked_game_root),
+            "cleanup parent is a link or junction",
+            "Windows stage cleanup linked game-root guard",
+        )
+        if not (linked_game_target / "skins").is_dir():
+            raise AssertionError("Windows stage cleanup followed a linked basepr directory")
+
     malformed_pe = WORK / "windows-runtime" / "truncated.exe"
     malformed_pe.parent.mkdir(parents=True, exist_ok=True)
     data = bytearray(0x48)
@@ -1070,6 +1390,22 @@ def validate_windows_runtime_staging_guards() -> None:
             "runtime target must not be a symlink",
             "Windows runtime target symlink guard",
         )
+
+    # Static game-core targets live beside the generated modules. Their
+    # intermediates may be locked by a compiler and never belong in a runtime.
+    generated_build = WORK / "windows-runtime" / "generated-build"
+    generated = generated_build / "content/basepr"
+    write_file(generated / "game_x64.dll", b"runtime\n")
+    write_file(generated / "mod.json", b"{}\n")
+    for artifact in ("game_x64.dll.p/module.obj", "libopenprey_game_core.a.p/Game.obj",
+                     "game_core.lib.p/Game.obj", "libopenprey_game_core.a", "game_x64.lib",
+                     "game_x64.exp", "stray.obj", "stray.o"):
+        write_file(generated / artifact, b"build-only\n")
+    WINDOWS_RUNTIME.stage_build_game_directory(runtime_source, generated_build)
+    staged = {p.relative_to(generated_build / "basepr").as_posix()
+              for p in (generated_build / "basepr").rglob("*") if p.is_file()}
+    if staged != {"game_x64.dll", "mod.json"}:
+        raise AssertionError(f"build-only game-core artifacts entered the direct-run runtime: {staged}")
 
     symlink_tree_source = WORK / "windows-runtime" / "symlink-tree-source"
     symlink_tree_build = WORK / "windows-runtime" / "symlink-tree-build"
@@ -1178,12 +1514,96 @@ def validate_validation_wiring() -> None:
             raise AssertionError(f"packaging_safety.py is not wired into {context}")
 
 
+def validate_target_repository_metadata() -> None:
+    project_root = WORK / "target-repository-metadata"
+    targets = (
+        ("windows", "x64", "gamelibs_stage", "1" * 40),
+        ("linux", "x64", "gamelibs_stage-linux-x64", "2" * 40),
+        ("linux", "arm64", "gamelibs_stage-linux-arm64", "3" * 40),
+        ("macos", "arm64", "gamelibs_stage-darwin-arm64", "4" * 40),
+    )
+    for platform, arch, directory, revision in targets:
+        manifest = project_root / ".tmp" / directory / "openq4_gamelibs_stage_manifest.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(json.dumps({"gameLibsGitCommit": revision, "gameLibsGitDirty": False}), encoding="utf-8")
+    for platform, arch, directory, revision in targets:
+        metadata = PACKAGE.read_staged_repository_metadata(project_root, platform, arch)
+        if metadata.get("openq4_game_commit") != revision:
+            raise AssertionError(f"{platform}/{arch} package read another target's source provenance: {metadata}")
+    if PACKAGE.read_staged_repository_metadata(project_root, "macos", "universal2"):
+        raise AssertionError("Universal2 must not read an unrelated thin-build stage")
+
+
+def write_layer_mod_json(path: Path, required: str = "0.13.2", **overrides) -> None:
+    manifest = {
+        "name": "Quake 4: The Awakening",
+        "version": "0.1.0",
+        "requiredopenQ4Version": required,
+        "layer": "awakening",
+    }
+    manifest.update(overrides)
+    write_file(path, (json.dumps(manifest, indent=2) + "\n").encode("utf-8"))
+
+
+def stage_game_layer(install_dir: Path, platform: str, arch: str) -> Path:
+    layer_dir = install_dir / "q4xbase"
+    for filename in PACKAGE.get_required_game_module_binaries(platform, arch):
+        write_file(layer_dir / filename, f"{filename}\n".encode("utf-8"))
+    if platform == "windows":
+        for filename in PACKAGE.get_required_windows_game_symbols(arch):
+            write_file(layer_dir / filename, f"{filename}\n".encode("utf-8"))
+    write_layer_mod_json(layer_dir / "mod.json")
+    return layer_dir
+
+
+def validate_game_layer_packaging() -> None:
+    """Stale Awakening modules and user-supplied assets never enter packages."""
+    assert PACKAGE.PACKAGED_LAYER_GAME_DIRS == ()
+    assert not any("q4xbase" in pattern for pattern in WINDOWS_RUNTIME.RUNTIME_BINARY_PATTERNS)
+    for platform, arch in (("windows", "x64"), ("linux", "arm64")):
+        work = WORK / f"layer-{platform}"
+        install_dir, package_root = work / "install", work / "package"
+        package_root.mkdir(parents=True, exist_ok=True)
+        layer_dir = stage_game_layer(install_dir, platform, arch)
+        write_file(layer_dir / "user-assets.pk4", b"user supplied content")
+        assert PACKAGE.copy_game_layer_dirs(platform, arch, install_dir, package_root, "0.13.2", set()) == []
+        assert not (package_root / "q4xbase").exists()
+        assert (layer_dir / "user-assets.pk4").read_bytes() == b"user supplied content"
+
+def validate_layer_retirement() -> None:
+    sys.path.insert(0, str(ROOT / 'tools/build'))
+    from retire_game_layers import retire
+    root = WORK / 'retire'
+    for name in ('mod.json','game-sp_x64.dll','game-mp_arm64.so','game-sp_universal2.dylib'):
+        write_file(root / 'q4xbase' / name, b'obsolete build output')
+    for name in ('assets.pk4','savegames/campaign.save','config.cfg','def/weapon.def','third-party.dll'):
+        write_file(root / 'q4xbase' / name, b'user file')
+    assert len(retire(root)) == 4
+    assert retire(root) == []
+    for name in ('assets.pk4','savegames/campaign.save','config.cfg','def/weapon.def','third-party.dll'):
+        assert (root / 'q4xbase' / name).read_bytes() == b'user file'
+    outside = WORK / 'retire-outside'
+    write_file(outside / 'game-sp_x64.dll', b'preserve')
+    link = root / 'q4xbase/game-sp_x64.dll'
+    if make_symlink(outside / 'game-sp_x64.dll',link):
+        try:
+            retire(root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('layer retirement accepted a symlink')
+        assert link.is_symlink() and (outside / 'game-sp_x64.dll').read_bytes() == b'preserve'
+        link.unlink()
+
 def main() -> None:
     shutil.rmtree(WORK, ignore_errors=True)
     try:
+        validate_target_repository_metadata()
+        validate_pk4_cross_host_identity()
         validate_pk4_source_containment()
         validate_pk4_archive_member_guards()
         validate_copy_helpers_do_not_follow_destination_symlinks()
+        validate_identical_copy_takes_newer_source_timestamp()
         validate_pk4_replace_helper_does_not_preserve_destination_symlink()
         validate_generated_text_writers_do_not_follow_symlinks()
         validate_legacy_build_pak0_copy_does_not_follow_symlink()
@@ -1192,15 +1612,16 @@ def main() -> None:
         validate_fast_stage_guards_and_copy()
         validate_dev_only_fixtures_not_in_pak_sources()
         validate_plain_install_cleanup()
+        validate_fast_stage_cross_platform_policy()
         validate_stale_content_prune_symlink_handling()
         validate_package_name_and_copy_guards()
+        validate_game_layer_packaging()
+        validate_layer_retirement()
         validate_renderer_module_staging()
         validate_build_pack_and_header_cli_guards()
+        validate_unchanged_pack_rebuild_stays_current()
         validate_version_manifest_integrity()
         validate_macos_signing_input_guards()
-        validate_stage_manifest_rejects_unsafe_paths()
-        validate_stage_gamelibs_raw_stage_root_symlink_guard()
-        validate_stage_gamelibs_raw_source_root_symlink_guards()
         validate_meson_source_symlink_guards()
         validate_windows_runtime_staging_guards()
         validate_prepare_windows_openal_path_boundary_guard()

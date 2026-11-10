@@ -93,8 +93,32 @@ def validate_language_reload_contract() -> None:
         "startup language reload should happen after command-line reapply",
     )
     require_order(init_game, "InitLanguageDict( true, allowStartupLanguageAutoSelect );", "exec autoexec.cfg", "early language load before cfg files")
-    require_order(init_game, "exec autoexec.cfg", "cmdSystem->ExecuteCommandBuffer();", "cfg files before execution")
-    require_order(init_game, "cmdSystem->ExecuteCommandBuffer();", "StartupVariable( NULL, false );", "cfg execution before command-line reapply")
+    require_order(init_game, "exec autoexec.cfg", "// run cfg execution\n\tcmdSystem->ExecuteCommandBuffer();", "cfg files before execution")
+    require_order(init_game, "// run cfg execution\n\tcmdSystem->ExecuteCommandBuffer();", "StartupVariable( NULL, false );", "cfg execution before command-line reapply")
+
+    # An installer's q4base/autoexec.cfg must not replace the saved Settings language (#199).
+    retail_file = function_body(source, "static bool Common_IsRetailGameDirFile( const char *relativePath ) {")
+    require(retail_file, "fileSystem->OpenFileRead( relativePath );", "retail autoexec lookup uses the normal search order")
+    require(retail_file, "file->GetFullPath();", "retail autoexec origin from the opened file")
+    require(retail_file, "directory.StripFilename();", "retail autoexec directory")
+    require(retail_file, "directory.StripPath();", "retail autoexec directory name")
+    require(retail_file, "directory.Icmp( BASE_GAMEDIR ) == 0", "only loose files in the retail game directory")
+    require(
+        init_game,
+        'const bool keepSavedLanguage = !sysDetect && !SafeMode() && Common_IsRetailGameDirFile( "autoexec.cfg" );',
+        "saved language kept only over an installer autoexec once a config exists",
+    )
+    require(init_game, 'savedLanguage = cvarSystem->GetCVarString( "sys_lang" );', "saved language sampled after the config")
+    require(init_game, 'cvarSystem->SetCVarString( "sys_lang", savedLanguage.c_str() );', "saved language restored after the installer autoexec")
+    require_order(init_game, "exec \" CONFIG_FILE", 'savedLanguage = cvarSystem->GetCVarString( "sys_lang" );', "config executed before sampling")
+    require_order(init_game, 'savedLanguage = cvarSystem->GetCVarString( "sys_lang" );', "exec autoexec.cfg", "sampled before autoexec")
+    require_order(init_game, "exec autoexec.cfg", 'cvarSystem->SetCVarString( "sys_lang", savedLanguage.c_str() );', "restored after autoexec")
+    require_order(
+        init_game,
+        'cvarSystem->SetCVarString( "sys_lang", savedLanguage.c_str() );',
+        "StartupVariable( NULL, false );",
+        "+set sys_lang still wins over the saved language",
+    )
     require_order(init_game, "StartupVariable( NULL, false );", "InitLanguageDict( false, false );", "command-line reapply before final language reload")
     require_order(init_game, "fileSystem->SetIsFileLoadingAllowed( true );", "InitLanguageDict( false, false );", "file loading enabled before final language reload")
     require_order(init_game, "InitLanguageDict( false, false );", "fileSystem->SetIsFileLoadingAllowed( wasFileLoadingAllowed );", "file-loading flag restored after final language reload")
@@ -143,6 +167,68 @@ def validate_config_filename_migration_contract() -> None:
     )
 
 
+def validate_language_media_diagnostic() -> None:
+    source = read("src/framework/FileSystem.cpp")
+    startup = function_body(source, "void idFileSystemLocal::Startup( void ) {")
+    parser = function_body(
+        source,
+        "static bool FS_ParseLanguagePackName( const char *pakFilename, idStr &language, bool allowPatchArchives = true ) {",
+    )
+    base_media = function_body(source, "bool idFileSystemLocal::HasBaseLanguageMediaPack( void ) {")
+    available_media = function_body(source, "void idFileSystemLocal::ListAvailableLanguagePacks( idStrList &languages ) {")
+
+    require(
+        available_media,
+        "FS_ParseLanguagePackName( search->pack->pakFilename.c_str(), language )",
+        "language selection continues to recognize numbered patch archives",
+    )
+
+    require(
+        parser,
+        "if ( !allowPatchArchives )",
+        "numbered language-patch rejection",
+    )
+    require(
+        base_media,
+        "FS_ParseLanguagePackName( search->pack->pakFilename.c_str(), language, false )",
+        "base language-media discovery excludes patch archives",
+    )
+    require(
+        startup,
+        "if ( !HasBaseLanguageMediaPack() )",
+        "missing base language-media guard",
+    )
+    require(
+        startup,
+        "No recognized base Quake 4 language media archive (zpak_<language>.pk4, without a numeric suffix)",
+        "actionable language-media warning",
+    )
+    require(
+        startup,
+        "character dialogue will be incomplete or silent",
+        "language-media warning symptom",
+    )
+    require(
+        startup,
+        "Numbered patch archives such as zpak_english_01.pk4 do not replace the base archive",
+        "patch-only install guidance",
+    )
+    require_regex(
+        startup,
+        r"if\s*\(\s*fs_validateOfficialPaks\.GetBool\(\)\s*\)\s*\{[\s\S]*"
+        r"#ifndef\s+ID_DEDICATED[\s\S]*"
+        r"HasBaseLanguageMediaPack\(\)[\s\S]*"
+        r"#endif[\s\S]*\n\s*\}",
+        "official-media and client-only warning gates",
+    )
+    require_order(
+        startup,
+        "ValidateRequiredOfficialPaks( validationErrors )",
+        "HasBaseLanguageMediaPack()",
+        "required core validation before optional language-media diagnostic",
+    )
+
+
 def validate_ci_smoke() -> None:
     push = read(".github/workflows/push-verification.yml")
     commit = read(".github/workflows/commit-validation.yml")
@@ -159,6 +245,7 @@ def validate_ci_smoke() -> None:
 def main() -> None:
     validate_language_reload_contract()
     validate_config_filename_migration_contract()
+    validate_language_media_diagnostic()
     validate_ci_smoke()
     print("startup_language_override: ok")
 

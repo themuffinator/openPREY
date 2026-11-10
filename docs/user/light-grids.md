@@ -57,18 +57,20 @@ openPREY's current light-grid path:
 - relocates probes away from solid or near-solid map space where possible, then uses those relocated positions at runtime
 - blends indirect light between adjacent visible portal areas near doorway/window boundaries
 - streams packed light-grid atlases for visible areas and their portal neighbors on demand, avoiding large up-front map-load stalls and VRAM spikes
+- reads the map's `.lightgridpack` into memory once while the map loads, so an area that streams in costs only its own atlas upload; that copy is dropped as soon as every atlas is resident, unless `r_lightGridResidencyFrames` may still purge some
 - draws one material-selected representative diffuse stage for the indirect pass, avoiding repeated light-grid redraws on multi-diffuse materials
 - lights eligible first-person weapon/viewmodel surfaces from the active view area's light grid through a dedicated weapon pass
 
 Current scope and limits:
 - diffuse-only
-- non-PBR
+- not a PBR bake: [PBR materials](pbr-materials.md) receive its diffuse light,
+  weighted by their metalness and ambient occlusion, on OpenGL and Vulkan
 - LDR bake output
 - writes `.tga` atlas images, not BFG `.exr`
 - intended for openPREY's native bake/load path, not drop-in BFG asset parity
 - translucent effects, decals, and other non-lighting surfaces remain outside the runtime light-grid pass
 
-If no baked assets are found, openPREY can still generate a runtime probe layout for debugging and baking, but there will be no indirect-light contribution until actual baked files exist.
+If no baked assets are found, openPREY leaves the runtime grid empty. Starting a light-grid bake generates the requested probe layout on demand; this avoids paying the collision and visibility setup cost on every stock-map load when there is no atlas to render.
 
 ## Runtime Controls
 
@@ -256,7 +258,20 @@ What each file is for:
 - `env/maps/.../area*_lightgrid_pos.tga`
   Loose fallback/debug compact per-probe relocation offsets so runtime visibility checks use the actual baked probe positions instead of ideal grid centers.
 
-openPREY loads these files automatically when the corresponding map is loaded. A valid `.lightgridpack` wins; the loose `.lightgrid` and TGA files remain useful for inspection, compatibility, and fallback.
+openPREY loads these files automatically when the corresponding map is loaded. A valid `.lightgridpack` wins on every renderer: one that cannot sample DXT textures (OpenGL ES without S3TC, as on most Mali and PowerVR GPUs) decodes the pack's DXT irradiance atlases on the CPU, so it never needs the loose TGAs. `r_lightGridSoftwareDecode 1` forces that path on any renderer for testing.
+
+### Checking packs
+
+`lightGridPackTest` loads every map's `.lightgridpack` (or only the maps you name) exactly as a map load does, uploads each area's atlases and prints one line per map and a summary:
+
+```text
+LIGHTGRID_PACK_TEST maps/game/dmroadhouse accepted areas=<n> chunks=<n>/<n> resident=<n>/<n> decode=gpu
+LIGHTGRID_PACK_TEST_DONE tested=<n> accepted=<n> rejected=0 loose_only=<n>
+```
+
+`tools/tests/lightgrid_pack_load_test.py` runs it on OpenGL, on OpenGL with software decoding and on Vulkan.
+
+`lightGridPackLoose <map>` packs a map's existing loose bake (its `.lightgrid` plus the atlas TGAs under `env/<map>/` in the save path) into a `.lightgridpack` without baking again. A version-4 bake that wrote only irradiance atlases packs into irradiance-only chunks, which the runtime treats exactly as it treats those loose files.
 
 ## Typical Workflows
 
@@ -395,6 +410,15 @@ Try:
 - checking that the map is using the expected saved files, not stale older bake output
 - confirming `area*_lightgrid_amb.tga`, `area*_lightgrid_vis.tga`, and `area*_lightgrid_pos.tga` exist for each baked area
 
+### `bakeLightGrids` says the pack "will not load from this bake"
+
+Cause:
+- The map already has a light grid in a loaded PK4, and those bundled copies load before anything in `fs_savepath`. Your bake is complete and correct, but when the map next loads the bundled light grid is used instead.
+
+Fix:
+- None is needed to play: the bundled light grid keeps working.
+- Developers who re-bake a bundled map replace its files in the package's source content with the bake's output and rebuild the package.
+
 ### I want to turn the feature off completely
 
 ```cfg
@@ -440,6 +464,12 @@ openPREY-client_x64.exe +set logFileName logs/openprey_lightgrids.log +bakeLight
 ```
 
 On a standard local setup, logs are written under `fs_savepath/basepr/logs/`.
+
+### Reducing traversal stutter
+
+Use **Settings > Display > Post FX > Preload Light Grids** to load all baked light-grid atlases during the next map load. This can avoid upload-related pauses when entering new areas, at the cost of longer loading and more video memory. The default remains off. From the console, use `r_lightGridPreload 1`, then reload the map or load a save.
+
+The modern SYSTEM page (opt-in with `ui_retainedSystem 1`) offers the same **Preload Light Grids** toggle under Irradiance Volumes. **Apply Changes** saves it without asking you to keep it, since nothing changes until the next map loads. A line under the toggle tells you whether the current map preloads or streams its light grids, has none, or keeps the previous setting until the next map loads.
 
 ## Related Documentation
 

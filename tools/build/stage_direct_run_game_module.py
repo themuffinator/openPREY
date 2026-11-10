@@ -12,8 +12,14 @@ import tempfile
 
 
 def atomic_copy_if_changed(source: Path, destination: Path) -> bool:
-    if destination.is_file() and filecmp.cmp(source, destination, shallow=False):
-        return False
+    try:
+        if destination.is_file() and filecmp.cmp(source, destination, shallow=False):
+            return False
+    except FileNotFoundError:
+        # A Meson regeneration can remove an old direct-run output between the
+        # existence probe and filecmp opening it. Treat that as a changed file;
+        # the atomic replacement below is already the recovery path.
+        pass
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None

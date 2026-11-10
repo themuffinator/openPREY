@@ -19,10 +19,10 @@ public:
 						virtual ~idInterpolate() { }
 
 	void				Init( const float startTime, const float duration, const type &startValue, const type &endValue );
-	void				SetStartTime( float time ) { this->startTime = time; }
-	void				SetDuration( float duration ) { this->duration = duration; }
-	void				SetStartValue( const type &startValue ) { this->startValue = startValue; }
-	void				SetEndValue( const type &endValue ) { this->endValue = endValue; }
+	void				SetStartTime( float time ) { this->startTime = time; cacheValid = false; }
+	void				SetDuration( float duration ) { this->duration = duration; cacheValid = false; }
+	void				SetStartValue( const type &startValue ) { this->startValue = startValue; cacheValid = false; }
+	void				SetEndValue( const type &endValue ) { this->endValue = endValue; cacheValid = false; }
 
 // RAVEN BEGIN
 // abahr: made virtual
@@ -52,6 +52,7 @@ protected:
 	type				endValue;
 	mutable float		currentTime;
 	mutable type		currentValue;
+	mutable bool		cacheValid;
 };
 
 /*
@@ -62,7 +63,9 @@ idInterpolate::idInterpolate
 template< class type >
 ID_INLINE idInterpolate<type>::idInterpolate() {
 	currentTime = startTime = duration = 0;
-	memset( &currentValue, 0, sizeof( currentValue ) );
+	cacheValid = false;
+	// Zero whatever the type; idVec/idQuat constructors leave members unset.
+	memset( static_cast<void *>( &currentValue ), 0, sizeof( currentValue ) );
 	startValue = endValue = currentValue;
 }
 
@@ -77,7 +80,7 @@ ID_INLINE void idInterpolate<type>::Init( const float startTime, const float dur
 	this->duration = duration;
 	this->startValue = startValue;
 	this->endValue = endValue;
-	this->currentTime = startTime - 1;
+	this->cacheValid = false;
 	this->currentValue = startValue;
 }
 
@@ -91,7 +94,8 @@ ID_INLINE type idInterpolate<type>::GetCurrentValue( float time ) const {
 	float deltaTime;
 
 	deltaTime = time - startTime;
-	if ( time != currentTime ) {
+	if ( !cacheValid || time != currentTime ) {
+		cacheValid = true;
 		currentTime = time;
 		if ( deltaTime <= 0 ) {
 			currentValue = startValue;
@@ -137,7 +141,7 @@ public:
 						rvSphericalInterpolate();
 	virtual idQuat		GetCurrentValue( float time ) const;
 
-	void				SetTimeFunction( TimeManipFunc func ) { timeFunc = func; }
+	void				SetTimeFunction( TimeManipFunc func ) { timeFunc = func; cacheValid = false; }
 
 protected:
 	TimeManipFunc		timeFunc;
@@ -162,7 +166,8 @@ ID_INLINE idQuat rvSphericalInterpolate::GetCurrentValue( float time ) const {
 	float deltaTime;
 
 	deltaTime = time - startTime;
-	if ( time != currentTime ) {
+	if ( !cacheValid || time != currentTime ) {
+		cacheValid = true;
 		currentTime = time;
 		if( duration == 0.0f ) {
 			currentValue = endValue;
@@ -248,12 +253,14 @@ ID_INLINE void idInterpolateAccelDecelLinear<type>::Init( const float startTime,
 	type speed;
 
 	this->startTime = startTime;
-	this->accelTime = accelTime;
-	this->decelTime = decelTime;
+	this->accelTime = accelTime > 0.0f ? accelTime : 0.0f;
+	this->decelTime = decelTime > 0.0f ? decelTime : 0.0f;
 	this->startValue = startValue;
 	this->endValue = endValue;
 
 	if ( duration <= 0.0f ) {
+		this->accelTime = this->linearTime = this->decelTime = 0.0f;
+		extrapolate.Init( startTime, 0, startValue, startValue - startValue, startValue - startValue, EXTRAPOLATION_NONE );
 		return;
 	}
 
@@ -280,7 +287,8 @@ idInterpolateAccelDecelLinear::Invalidate
 */
 template< class type >
 ID_INLINE void idInterpolateAccelDecelLinear<type>::Invalidate( void ) {
-	extrapolate.Init( 0, 0, extrapolate.GetStartValue(), extrapolate.GetBaseSpeed(), extrapolate.GetSpeed(), EXTRAPOLATION_NONE );
+	// Endpoint changes also change velocity, not just the active phase.
+	Init( startTime, accelTime, decelTime, accelTime + linearTime + decelTime, startValue, endValue );
 }
 
 /*
@@ -405,12 +413,14 @@ ID_INLINE void idInterpolateAccelDecelSine<type>::Init( const float startTime, c
 	type speed;
 
 	this->startTime = startTime;
-	this->accelTime = accelTime;
-	this->decelTime = decelTime;
+	this->accelTime = accelTime > 0.0f ? accelTime : 0.0f;
+	this->decelTime = decelTime > 0.0f ? decelTime : 0.0f;
 	this->startValue = startValue;
 	this->endValue = endValue;
 
 	if ( duration <= 0.0f ) {
+		this->accelTime = this->linearTime = this->decelTime = 0.0f;
+		extrapolate.Init( startTime, 0, startValue, startValue - startValue, startValue - startValue, EXTRAPOLATION_NONE );
 		return;
 	}
 
@@ -437,7 +447,7 @@ idInterpolateAccelDecelSine::Invalidate
 */
 template< class type >
 ID_INLINE void idInterpolateAccelDecelSine<type>::Invalidate( void ) {
-	extrapolate.Init( 0, 0, extrapolate.GetStartValue(), extrapolate.GetBaseSpeed(), extrapolate.GetSpeed(), EXTRAPOLATION_NONE );
+	Init( startTime, accelTime, decelTime, accelTime + linearTime + decelTime, startValue, endValue );
 }
 
 /*

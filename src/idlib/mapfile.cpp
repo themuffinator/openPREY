@@ -136,6 +136,14 @@ idMapPatch *idMapPatch::Parse( Lexer &src, const idVec3 &origin, bool patchDef3,
 		}
 	}
 
+	// openQ4: the control points are stored as width * height vertices. The
+	// product was taken in int from the file's numbers, so a patch declared
+	// 65537 by 65536 got 65536 of them and its rows were written past the end.
+	if ( !( info[0] >= 1.0f && info[0] <= 1024.0f && info[1] >= 1.0f && info[1] <= 1024.0f ) ) {
+		src.Error( "idMapPatch::Parse: bad size" );
+		return NULL;
+	}
+
 	idMapPatch *patch = new idMapPatch( info[0], info[1] );
 	patch->SetSize( info[0], info[1] );
 	if ( version < 2 ) {
@@ -554,11 +562,6 @@ unsigned int idMapBrush::GetGeometryCRC( void ) const {
 // RAVEN BEGIN
 // rjohnson: added resolve for handling func_groups and other aspects.  Before, radiant would do this processing on a map destroying the original data
 
-// This is taken from tools/radiant/EditorBrushPrimit.cpp
-float SarrusDet(idVec3 a, idVec3 b, idVec3 c) {
-	return (float)a[0] * (float)b[1] * (float)c[2] + (float)b[0] * (float)c[1] * (float)a[2] + (float)c[0] * (float)a[1] * (float)b[2] - (float)c[0] * (float)b[1] * (float)a[2] - (float)a[1] * (float)b[0] * (float)c[2] -	(float)a[0] * (float)b[2] * (float)c[1];
-}
-
 /*
 ===============
 idMapBrush::AdjustOrigin
@@ -573,52 +576,31 @@ void idMapBrush::AdjustOrigin( idVec3 &delta ) {
 
 		mapSide->SetPlane( mapSide->GetPlane().Translate( delta ) );
 
-		// This is taken from Face_MoveTexture_BrushPrimit() in tools/radiant/EditorBrushPrimit.cpp
+		// Keep the texture locked to the moved face, as
+		// Face_MoveTexture_BrushPrimit() in tools/radiant/EditorBrushPrimit.cpp
+		// does. That solves a 3x3 system by Cramer's rule, and for a pure
+		// translation its exact solution is this closed form: the scale and
+		// rotation terms are unchanged, and each offset loses the translation's
+		// projection onto the face's texture axes.
+		//
+		// Raven's copy ran that solve in single precision. The x87 FPU hid it
+		// behind extended-precision intermediates, but in SSE float arithmetic
+		// the determinant's partial sums pass 2^24 once a func_group origin is
+		// a few thousand units out. The solve then returned flipped, sheared
+		// or unlocked matrices for most folded faces, so every dmap-compiled
+		// map with func_groups came out with misaligned textures.
 		idVec3	texS, texT;
-		float	tx, ty;
-		idVec3	M[3];	// columns of the matrix .. easier that way
-		float	det;
-		idVec3	D[2];
+		ComputeAxisBase( mapSide->GetPlane().Normal(), texS, texT );
 
-		// compute plane axis base ( doesn't change with translation )
-		ComputeAxisBase( mapSide->GetPlane().Normal(), texS, texT);
-
-		// compute translation vector in plane axis base
-		tx = DotProduct(delta, texS);
-		ty = DotProduct(delta, texT);
-
-		// fill the data vectors
-		M[0][0] = tx;
-		M[0][1] = 1.0f + tx;
-		M[0][2] = tx;
-		M[1][0] = ty;
-		M[1][1] = ty;
-		M[1][2] = 1.0f + ty;
-		M[2][0] = 1.0f;
-		M[2][1] = 1.0f;
-		M[2][2] = 1.0f;
+		const double tx = (double)delta[0] * texS[0] + (double)delta[1] * texS[1] + (double)delta[2] * texS[2];
+		const double ty = (double)delta[0] * texT[0] + (double)delta[1] * texT[1] + (double)delta[2] * texT[2];
 
 		idVec3	tm[2];
 		mapSide->GetTextureMatrix( tm[0], tm[1] );
-
-		D[0][0] = tm[0][2];
-		D[0][1] = tm[0][0] + tm[0][2];
-		D[0][2] = tm[0][1] + tm[0][2];
-		D[1][0] = tm[1][2];
-		D[1][1] = tm[1][0] + tm[1][2];
-		D[1][2] = tm[1][1] + tm[1][2];
-
-		// solve
-		det = SarrusDet(M[0], M[1], M[2]);
-		if ( det != 0. ) {
-			tm[0][0] = SarrusDet(D[0], M[1], M[2]) / det;
-			tm[0][1] = SarrusDet(M[0], D[0], M[2]) / det;
-			tm[0][2] = SarrusDet(M[0], M[1], D[0]) / det;
-			tm[1][0] = SarrusDet(D[1], M[1], M[2]) / det;
-			tm[1][1] = SarrusDet(M[0], D[1], M[2]) / det;
-			tm[1][2] = SarrusDet(M[0], M[1], D[1]) / det;
-			mapSide->SetTextureMatrix(tm);
+		for ( int j = 0; j < 2; j++ ) {
+			tm[j][2] = (float)( (double)tm[j][2] - (double)tm[j][0] * tx - (double)tm[j][1] * ty );
 		}
+		mapSide->SetTextureMatrix( tm );
 	}
 }
 // RAVEN END
@@ -825,6 +807,332 @@ unsigned int idMapEntity::GetGeometryCRC( void ) const {
 
 /*
 ===============
+idMapFile::ParseEntityStringFile
+
+Parses one text-only entity-string companion into caller-owned temporary
+storage. Parsing is bounded and atomic; this function never mutates the map's
+active entity list.
+===============
+*/
+bool idMapFile::ParseEntityStringFile( const char *extension, bool replacement, bool osPath,
+	idList<idMapEntity *> &parsedEntities, unsigned int &timestamp, bool &found ) {
+	static const int MAX_ENTITY_STRING_FILE_BYTES = 16 * 1024 * 1024;
+	static const int MAX_ENTITY_STRING_FILE_ENTITIES = 4096;
+	static const int MAX_ENTITY_STRING_FILE_KEYS = 4096;
+
+	idStr extensionName = name;
+	extensionName.SetFileExtension( extension );
+
+	found = false;
+	timestamp = 0;
+
+	idFile *extensionFile = osPath
+		? idLib::fileSystem->OpenExplicitFileRead( extensionName )
+		: idLib::fileSystem->OpenFileRead( extensionName );
+	if ( extensionFile == NULL ) {
+		return true;
+	}
+	found = true;
+
+	const int extensionLength = extensionFile->Length();
+	const unsigned int extensionTime = static_cast<unsigned int>( extensionFile->Timestamp() );
+	if ( extensionLength < 0 || extensionLength > MAX_ENTITY_STRING_FILE_BYTES ) {
+		idLib::fileSystem->CloseFile( extensionFile );
+		common->Warning( "Entity-string file '%s' is %d bytes; the supported limit is %d bytes",
+			extensionName.c_str(), extensionLength, MAX_ENTITY_STRING_FILE_BYTES );
+		return false;
+	}
+
+	char *extensionText = static_cast<char *>( Mem_Alloc( extensionLength + 1 ) );
+	const int bytesRead = extensionFile->Read( extensionText, extensionLength );
+	idLib::fileSystem->CloseFile( extensionFile );
+	extensionText[ extensionLength ] = '\0';
+	if ( bytesRead != extensionLength ) {
+		common->Warning( "Could not read complete entity-string file '%s' (%d of %d bytes)",
+			extensionName.c_str(), bytesRead, extensionLength );
+		Mem_Free( extensionText );
+		return false;
+	}
+
+	for ( int i = 0; i < extensionLength; i++ ) {
+		if ( extensionText[ i ] == '\0' ) {
+			common->Warning( "Entity-string file '%s' contains an embedded NUL byte at offset %d",
+				extensionName.c_str(), i );
+			Mem_Free( extensionText );
+			return false;
+		}
+	}
+
+	const char *parseText = extensionText;
+	int parseLength = extensionLength;
+	if ( parseLength >= 3 &&
+		static_cast<unsigned char>( parseText[ 0 ] ) == 0xEF &&
+		static_cast<unsigned char>( parseText[ 1 ] ) == 0xBB &&
+		static_cast<unsigned char>( parseText[ 2 ] ) == 0xBF ) {
+		parseText += 3;
+		parseLength -= 3;
+	}
+
+	idHashIndex entityNameHash( 1024, 64 );
+
+	bool valid = true;
+	bool firstTopLevelToken = true;
+	int errorLine = 1;
+	idStr parseError;
+	{
+		idLexer src( parseText, parseLength, extensionName,
+			LEXFL_NOSTRINGCONCAT | LEXFL_NOSTRINGESCAPECHARS |
+			LEXFL_ALLOWPATHNAMES | LEXFL_NOFATALERRORS );
+		idToken token;
+
+		while ( valid && src.ReadToken( &token ) ) {
+			if ( firstTopLevelToken && token.Icmp( "Version" ) == 0 ) {
+				idToken versionToken;
+				if ( !src.ReadToken( &versionToken ) || versionToken != "1" ) {
+					valid = false;
+					errorLine = src.GetLineNum();
+					parseError = "the optional header must be 'Version 1'";
+				}
+				firstTopLevelToken = false;
+				continue;
+			}
+			firstTopLevelToken = false;
+
+			if ( token != "{" ) {
+				valid = false;
+				errorLine = src.GetLineNum();
+				parseError = va( "expected '{', found '%s'", token.c_str() );
+				break;
+			}
+			if ( parsedEntities.Num() >= MAX_ENTITY_STRING_FILE_ENTITIES ) {
+				valid = false;
+				errorLine = src.GetLineNum();
+				parseError = va( "contains more than %d entities", MAX_ENTITY_STRING_FILE_ENTITIES );
+				break;
+			}
+
+			idMapEntity *mapEnt = new idMapEntity;
+			bool closed = false;
+			while ( valid && src.ReadToken( &token ) ) {
+				if ( token == "}" ) {
+					closed = true;
+					break;
+				}
+				if ( token == "{" ) {
+					valid = false;
+					errorLine = src.GetLineNum();
+					parseError = "brushes and patches are not supported in entity-string files";
+					break;
+				}
+
+				idStr key = token;
+				idToken valueToken;
+				if ( !src.ReadToken( &valueToken ) || valueToken == "{" || valueToken == "}" ) {
+					valid = false;
+					errorLine = src.GetLineNum();
+					parseError = va( "missing value for key '%s'", key.c_str() );
+					break;
+				}
+
+				idStr value = valueToken;
+				key.StripTrailingWhitespace();
+				value.StripTrailingWhitespace();
+				if ( key.IsEmpty() ) {
+					valid = false;
+					errorLine = src.GetLineNum();
+					parseError = "entity keys may not be empty";
+					break;
+				}
+				if ( mapEnt->epairs.FindKey( key ) != NULL ) {
+					valid = false;
+					errorLine = src.GetLineNum();
+					parseError = va( "duplicate key '%s'", key.c_str() );
+					break;
+				}
+				mapEnt->epairs.Set( key, value );
+				if ( mapEnt->epairs.GetNumKeyVals() > MAX_ENTITY_STRING_FILE_KEYS ) {
+					valid = false;
+					errorLine = src.GetLineNum();
+					parseError = va( "an entity contains more than %d keys", MAX_ENTITY_STRING_FILE_KEYS );
+					break;
+				}
+			}
+
+			if ( valid && !closed ) {
+				valid = false;
+				errorLine = src.GetLineNum();
+				parseError = "unexpected end of file before the entity's closing '}'";
+			}
+			if ( valid && src.HadError() ) {
+				valid = false;
+				errorLine = src.GetLineNum();
+				parseError = "lexer error";
+			}
+
+			const char *className = mapEnt->epairs.GetString( "classname" );
+			if ( valid && className[ 0 ] == '\0' ) {
+				valid = false;
+				errorLine = src.GetLineNum();
+				parseError = "every entity requires a non-empty 'classname'";
+			}
+			if ( valid && replacement && parsedEntities.Num() == 0 && idStr::Icmp( className, "worldspawn" ) != 0 ) {
+				valid = false;
+				errorLine = src.GetLineNum();
+				parseError = "a .ent replacement must begin with worldspawn";
+			}
+			if ( valid && idStr::Icmp( className, "worldspawn" ) == 0 && ( !replacement || parsedEntities.Num() != 0 ) ) {
+				valid = false;
+				errorLine = src.GetLineNum();
+				parseError = replacement
+					? "a .ent replacement may contain only one worldspawn, as its first entity"
+					: "worldspawn cannot be added by an .entx extender";
+			}
+			if ( valid && mapEnt->epairs.FindKey( "spawn_entnum" ) != NULL ) {
+				valid = false;
+				errorLine = src.GetLineNum();
+				parseError = "'spawn_entnum' is engine-owned and cannot be set by an entity-string file";
+			}
+
+			const char *entityName = mapEnt->epairs.GetString( "name" );
+			if ( valid && entityName[ 0 ] != '\0' ) {
+				const int hashKey = entityNameHash.GenerateKey( entityName, false );
+				for ( int index = entityNameHash.First( hashKey ); index != -1; index = entityNameHash.Next( index ) ) {
+					idMapEntity *other = parsedEntities[ index ];
+					if ( idStr::Icmp( entityName, other->epairs.GetString( "name" ) ) == 0 ) {
+						valid = false;
+						errorLine = src.GetLineNum();
+						parseError = va( "duplicate entity name '%s'", entityName );
+						break;
+					}
+				}
+				if ( valid ) {
+					entityNameHash.Add( hashKey, parsedEntities.Num() );
+				}
+			}
+
+			if ( !valid ) {
+				delete mapEnt;
+				break;
+			}
+			mapEnt->fromEntityStringFile = true;
+			parsedEntities.Append( mapEnt );
+		}
+
+		if ( valid && src.HadError() ) {
+			valid = false;
+			errorLine = src.GetLineNum();
+			parseError = "lexer error";
+		}
+	}
+	if ( valid && replacement && parsedEntities.Num() == 0 ) {
+		valid = false;
+		parseError = "a .ent replacement must contain a worldspawn entity";
+	}
+
+	Mem_Free( extensionText );
+	if ( !valid ) {
+		common->Warning( "Invalid entity-string file '%s' at line %d: %s; no entity-string changes were applied",
+			extensionName.c_str(), errorLine, parseError.c_str() );
+		parsedEntities.DeleteContents( true );
+		return false;
+	}
+
+	timestamp = extensionTime;
+	return true;
+}
+
+/*
+===============
+idMapFile::ApplyEntityStringFiles
+
+At runtime, <map>.ent replaces the complete entity string and <map>.entx then
+appends additional point entities. The game calls this after collision loading,
+so entity replacement cannot alter the source map's compiled geometry.
+===============
+*/
+bool idMapFile::ApplyEntityStringFiles( void ) {
+	if ( entityStringFilesEnabled ) {
+		return true;
+	}
+
+	idList<idMapEntity *> replacementEntities;
+	idList<idMapEntity *> extenderEntities;
+	unsigned int replacementTime = 0;
+	unsigned int extenderTime = 0;
+	bool replacementFound = false;
+	bool extenderFound = false;
+
+	if ( !ParseEntityStringFile( "ent", true, parsedFromOSPath, replacementEntities, replacementTime, replacementFound ) ||
+		!ParseEntityStringFile( "entx", false, parsedFromOSPath, extenderEntities, extenderTime, extenderFound ) ) {
+		replacementEntities.DeleteContents( true );
+		extenderEntities.DeleteContents( true );
+		return false;
+	}
+
+	const idList<idMapEntity *> &activeEntities = replacementFound ? replacementEntities : entities;
+	idHashIndex entityNameHash( 1024, activeEntities.Num() + extenderEntities.Num() + 64 );
+	for ( int i = 0; i < activeEntities.Num(); i++ ) {
+		const char *entityName = activeEntities[ i ]->epairs.GetString( "name" );
+		if ( entityName[ 0 ] != '\0' ) {
+			entityNameHash.Add( entityNameHash.GenerateKey( entityName, false ), i );
+		}
+	}
+	for ( int i = 0; i < extenderEntities.Num(); i++ ) {
+		const char *entityName = extenderEntities[ i ]->epairs.GetString( "name" );
+		if ( entityName[ 0 ] == '\0' ) {
+			continue;
+		}
+		const int hashKey = entityNameHash.GenerateKey( entityName, false );
+		for ( int index = entityNameHash.First( hashKey ); index != -1; index = entityNameHash.Next( index ) ) {
+			idMapEntity *other = index < activeEntities.Num()
+				? activeEntities[ index ]
+				: extenderEntities[ index - activeEntities.Num() ];
+			if ( idStr::Icmp( entityName, other->epairs.GetString( "name" ) ) == 0 ) {
+				common->Warning( "Invalid entity-string extender '%s.entx': duplicate entity name '%s'; no entity-string changes were applied",
+					name.c_str(), entityName );
+				replacementEntities.DeleteContents( true );
+				extenderEntities.DeleteContents( true );
+				return false;
+			}
+		}
+		entityNameHash.Add( hashKey, activeEntities.Num() + i );
+	}
+
+	if ( replacementFound ) {
+		entities.DeleteContents( true );
+		for ( int i = 0; i < replacementEntities.Num(); i++ ) {
+			entities.Append( replacementEntities[ i ] );
+		}
+		replacementEntities.Clear();
+		mHasFuncGroups = false;
+		common->Printf( "Entity string: replaced with %d entities from %s.ent\n", entities.Num(), name.c_str() );
+	}
+
+	const int numExtended = extenderEntities.Num();
+	for ( int i = 0; i < numExtended; i++ ) {
+		entities.Append( extenderEntities[ i ] );
+	}
+	extenderEntities.Clear();
+	if ( extenderFound ) {
+		common->Printf( "Entity string: appended %d entities from %s.entx\n", numExtended, name.c_str() );
+	}
+
+	replacementEntityFileLoaded = replacementFound;
+	replacementEntityFileTime = replacementTime;
+	extenderEntityFileLoaded = extenderFound;
+	extenderEntityFileTime = extenderTime;
+	entityStringFilesEnabled = true;
+	if ( replacementFound || extenderFound ) {
+		Resolve();
+		if ( replacementFound ) {
+			hasPrimitiveData = false;
+		}
+	}
+	return true;
+}
+
+/*
+===============
 idMapFile::Parse
 ===============
 */
@@ -844,6 +1152,13 @@ bool idMapFile::Parse( const char *filename, bool ignoreRegion, bool osPath ) {
 
 	name = filename;
 	name.StripFileExtension();
+	loadedSourceFileName.Clear();
+	parsedFromOSPath = osPath;
+	entityStringFilesEnabled = false;
+	replacementEntityFileLoaded = false;
+	replacementEntityFileTime = 0;
+	extenderEntityFileLoaded = false;
+	extenderEntityFileTime = 0;
 	fullName = name;
 	hasPrimitiveData = false;
 
@@ -869,6 +1184,7 @@ bool idMapFile::Parse( const char *filename, bool ignoreRegion, bool osPath ) {
 
 	version = OLD_MAP_VERSION;
 	fileTime = src.GetFileTime();
+	loadedSourceFileName = fullName;
 	entities.DeleteContents( true );
 
 	if ( src.CheckTokenString( "Version" ) ) {
@@ -996,6 +1312,7 @@ idMapFile::Write
 */
 bool idMapFile::Write( const char *fileName, const char *ext, bool fromBasePath, bool exportOnly ) {
 	int i;
+	int entityNum;
 	idStr qpath;
 	idFile *fp;
 // RAVEN BEGIN
@@ -1005,6 +1322,10 @@ bool idMapFile::Write( const char *fileName, const char *ext, bool fromBasePath,
 
 	qpath = fileName;
 	qpath.SetFileExtension( ext );
+	if ( replacementEntityFileLoaded ) {
+		idLib::common->Warning( "Refusing to write %s while a .ent replacement is active; reload the original .map for editing first", qpath.c_str() );
+		return false;
+	}
 
 	idLib::common->Printf( "writing %s...\n", qpath.c_str() );
 
@@ -1022,20 +1343,24 @@ bool idMapFile::Write( const char *fileName, const char *ext, bool fromBasePath,
 
 	fp->WriteFloatString( "Version %d\n", CURRENT_MAP_VERSION );
 
+	entityNum = 0;
 	if (exportOnly)
 	{
 		for ( i = 0; i < entities.Num(); i++ ) 
 		{
-			if (entities[i]->epairs.GetInt("export"))
+			if ( !entities[i]->IsFromEntityStringFile() && entities[i]->epairs.GetInt("export"))
 			{
-				entities[i]->Write( fp, i );
+				entities[i]->Write( fp, entityNum++ );
 			}
 		}
 	}
 	else
 	{
 		for ( i = 0; i < entities.Num(); i++ ) {
-			entities[i]->Write( fp, i );
+			if ( entities[i]->IsFromEntityStringFile() ) {
+				continue;
+			}
+			entities[i]->Write( fp, entityNum++ );
 // RAVEN BEGIN
 // rhummer: See if there are func_groups, there should be if there was during loading..
 			if ( !idStr::Icmp( entities[i]->epairs.GetString( "classname" ), "func_group" ) ) {
@@ -1158,13 +1483,62 @@ idMapFile::NeedsReload
 ===============
 */
 bool idMapFile::NeedsReload() {
-	if ( name.Length() ) {
-		ID_TIME_T time = (ID_TIME_T)-1;
-		if ( idLib::fileSystem->ReadFile( name, NULL, &time ) > 0 ) {
-			return ( time > fileTime );
+	if ( !loadedSourceFileName.Length() ) {
+		return true;
+	}
+
+	idFile *sourceFile = parsedFromOSPath
+		? idLib::fileSystem->OpenExplicitFileRead( loadedSourceFileName )
+		: idLib::fileSystem->OpenFileRead( loadedSourceFileName );
+	if ( sourceFile == NULL ) {
+		return true;
+	}
+	const unsigned int sourceTime = static_cast<unsigned int>( sourceFile->Timestamp() );
+	idLib::fileSystem->CloseFile( sourceFile );
+	if ( sourceTime != fileTime ) {
+		return true;
+	}
+
+	if ( entityStringFilesEnabled ) {
+		idStr entityFileName = name;
+		entityFileName.SetFileExtension( "ent" );
+		idFile *entityFile = parsedFromOSPath
+			? idLib::fileSystem->OpenExplicitFileRead( entityFileName )
+			: idLib::fileSystem->OpenFileRead( entityFileName );
+		if ( ( entityFile != NULL ) != replacementEntityFileLoaded ) {
+			if ( entityFile != NULL ) {
+				idLib::fileSystem->CloseFile( entityFile );
+			}
+			return true;
+		}
+		if ( entityFile != NULL ) {
+			const unsigned int entityFileTime = static_cast<unsigned int>( entityFile->Timestamp() );
+			idLib::fileSystem->CloseFile( entityFile );
+			if ( entityFileTime != replacementEntityFileTime ) {
+				return true;
+			}
+		}
+
+		entityFileName = name;
+		entityFileName.SetFileExtension( "entx" );
+		entityFile = parsedFromOSPath
+			? idLib::fileSystem->OpenExplicitFileRead( entityFileName )
+			: idLib::fileSystem->OpenFileRead( entityFileName );
+		if ( ( entityFile != NULL ) != extenderEntityFileLoaded ) {
+			if ( entityFile != NULL ) {
+				idLib::fileSystem->CloseFile( entityFile );
+			}
+			return true;
+		}
+		if ( entityFile != NULL ) {
+			const unsigned int entityFileTime = static_cast<unsigned int>( entityFile->Timestamp() );
+			idLib::fileSystem->CloseFile( entityFile );
+			if ( entityFileTime != extenderEntityFileTime ) {
+				return true;
+			}
 		}
 	}
-	return true;
+	return false;
 }
 
 bool idMapFile::WriteExport( const char *fileName, bool fromBasePath )
@@ -1175,6 +1549,9 @@ bool idMapFile::WriteExport( const char *fileName, bool fromBasePath )
 	for ( i = 0; i < entities.Num(); i++ ) 
 	{
 		idMapEntity *ent = entities[i];
+		if ( ent->IsFromEntityStringFile() ) {
+			continue;
+		}
 
 		if ( ent->epairs.GetInt("export") == 1 )
 		{
@@ -1244,7 +1621,6 @@ bool idMapFile::ParseExport( const char *filename, bool osPath )
 	}
 
 	version = OLD_MAP_VERSION;
-	fileTime = src.GetFileTime();
 	mExportEntities.DeleteContents( true );
 
 	if ( src.CheckTokenString( "Version" ) ) {

@@ -16,23 +16,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
       PKG_CONFIG_ALLOW_CROSS: "1"
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Fetch openQ4-game
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "${OPENQ4_GAMELIBS_REPO}"
-
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
@@ -128,14 +122,16 @@ jobs:
                 count++
                 if ($4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" && $8 == "GetGameAPI") {
                   api++
+                } else if ($4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" && $8 == "openQ4_Mem_GetModuleStats") {
+                  stats++
                 } else {
                   unexpected++
                   print "Unexpected public game-module symbol: " $0 > "/dev/stderr"
                 }
               }
               END {
-                if (count != 1 || api != 1 || unexpected != 0) {
-                  print "Expected exactly one GLOBAL DEFAULT FUNC GetGameAPI export" > "/dev/stderr"
+                if (count != 2 || api != 1 || stats != 1 || unexpected != 0) {
+                  print "Expected only GLOBAL DEFAULT FUNC GetGameAPI and openQ4_Mem_GetModuleStats exports" > "/dev/stderr"
                   exit 1
                 }
               }

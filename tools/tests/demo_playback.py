@@ -156,10 +156,18 @@ def validate_library_contract() -> None:
     reject(legacy_net, "DEMO_CAP_PLAY", "unsupported retail netdemo capability")
     require(legacy_net, '"#str_41547"', "legacy netdemo status")
 
-    dispatch = between(
+    # The browser's Play and the retained Demos page share one typed player.
+    browser_play = between(
         source,
         'if ( !idStr::Icmp( cmd, "demoPlay" ) ) {',
         'if ( !idStr::Icmp( cmd, "demoDelete" ) ) {',
+        "browser demo playback",
+    )
+    require(browser_play, "PlayDemoLibraryEntry( selection )", "browser demo playback")
+    dispatch = between(
+        source,
+        "bool idSessionLocal::PlayDemoLibraryEntry( int index ) {",
+        "bool idSessionLocal::DeleteDemoLibraryFile(",
         "typed demo playback dispatch",
     )
     for needle in (
@@ -169,6 +177,15 @@ def validate_library_contract() -> None:
     ):
         require(dispatch, needle, "typed demo playback dispatch")
     reject(dispatch, "commandName.StripFileExtension();", "dotted command demo dispatch")
+    # Deletion stays inside the save path's demo directory for both.
+    deletion = between(
+        source,
+        "bool idSessionLocal::DeleteDemoLibraryFile(",
+        "bool idSessionLocal::HandleDemoMenuCommand",
+        "demo deletion",
+    )
+    for needle in ("DemoPathIsSafe( entry.path )", "saveDemoRoot", "DemoEntryCanDelete( entry.path )", "RemoveExplicitFile"):
+        require(deletion, needle, "demo deletion containment")
 
     path_check = between(
         source,
@@ -385,27 +402,58 @@ def validate_gui_and_localization() -> None:
 
     for needle in (
         "listDef demoList",
-        '"demoFilter all"',
-        '"demoFilter mvd"',
-        '"demoFilter render"',
-        '"demoFilter legacy"',
-        '"demoFilter incomplete"',
-        '"demoPlay"',
-        '"demoDelete"',
-        '"demoPause"',
-        '"demoSkip -30"',
-        '"demoSkip -10"',
-        '"demoStep"',
-        '"demoSkip 10"',
-        '"demoSkip 30"',
-        '"demoFreeRoam"',
-        '"demoFollow"',
-        '"demoSpeed 0.25"',
-        '"demoSpeed 0.5"',
-        '"demoSpeed 1"',
-        '"demoSpeed 2"',
-        '"demoSpeed 4"',
-        '"demoStop"',
+        "demo_browser_reveal_timeline",
+        "demo_browser_exit_timeline",
+        # The retained pages' backdrop: the stock screen's light band and a grid.
+        "gfx/guis/mainmenu/screen",
+        "gfx/guis/loading/bg_grid_tiled",
+        # The filters' rails follow a number: GUI expressions cannot compare strings.
+        '"gui::demo_filterIndex" == 0',
+        '"gui::demo_filterIndex" == 4',
+        "gfx/guis/mainmenu/topbar",
+        "gfx/guis/mainmenu/btmbar",
+        "demo_browser_topbar_tile_left",
+        "demo_browser_topbar_tile_right",
+        "demo_browser_btmbar_tile_left",
+        "demo_browser_btmbar_tile_right",
+        "demo_filter_all_active",
+        "demo_filter_mvd_active",
+        "demo_filter_render_active",
+        "demo_filter_legacy_active",
+        "demo_filter_incomplete_active",
+        "demo_selected_name",
+        "demo_playback_reveal_timeline",
+        "demo_playback_transition_blocker",
+        "demo_playback_transition_input_blocker",
+        "demo_playback_reveal_curtain",
+        "demo_playback_deck_surface",
+        "demo_playback_deck_line",
+        "screenaligny\ttop",
+        "screenaligny\tbottom",
+        "gfx/guis/mainmenu/b2_dark",
+        "gfx/guis/mainmenu/b4_light",
+        '"play main_menu_selection ; demoFilter all"',
+        '"play main_menu_selection ; demoFilter mvd"',
+        '"play main_menu_selection ; demoFilter render"',
+        '"play main_menu_selection ; demoFilter legacy"',
+        '"play main_menu_selection ; demoFilter incomplete"',
+        '"play main_menu_selection ; demoPlay"',
+        '"play main_menu_selection ; demoDelete"',
+        '"play main_menu_selection ; demoPause"',
+        '"play main_menu_selection ; demoSkip -30"',
+        '"play main_menu_selection ; demoSkip -10"',
+        '"play main_menu_selection ; demoStep"',
+        '"play main_menu_selection ; demoSkip 10"',
+        '"play main_menu_selection ; demoSkip 30"',
+        '"play main_menu_selection ; demoFreeRoam"',
+        '"play main_menu_selection ; demoFollow"',
+        '"play main_menu_selection ; demoSpeed 0.25"',
+        '"play main_menu_selection ; demoSpeed 0.5"',
+        '"play main_menu_selection ; demoSpeed 1"',
+        '"play main_menu_selection ; demoSpeed 2"',
+        '"play main_menu_selection ; demoSpeed 4"',
+        '"play main_menu_selection ; demoStop"',
+        '"play main_menu_mouseover"',
     ):
         require(gui, needle, "demo menu actions")
 
@@ -422,9 +470,25 @@ def validate_gui_and_localization() -> None:
         "demo_seeking",
         "demo_browserMode",
         "demo_interactive",
+        "demo_filter",
+        "demo_filterIndex",
     ):
         require(gui, f"gui::{state}", "capability-gated demo menu")
         require(source, f'"{state}"', "demo menu state producer")
+
+    require(source, "DemoEllipsizeText", "bounded demo-browser text")
+    command_handler = between(
+        source,
+        "bool idSessionLocal::HandleDemoMenuCommand",
+        "return handled;",
+        "demo menu compound command handler",
+    )
+    for needle in (
+        "for ( int icmd = 0; icmd < args.Argc(); )",
+        '"play"',
+        "PlayShaderDirectly",
+    ):
+        require(command_handler, needle, "demo menu sound/action sequencing")
 
     require(
         main_menu,
@@ -432,6 +496,19 @@ def validate_gui_and_localization() -> None:
         "main-menu Demos entry",
     )
     require(main_menu, 'set "main_t_b9::text" "#str_41500" ;', "localized Demos label")
+
+    open_menu = between(
+        source,
+        "void idSessionLocal::OpenDemoMenu",
+        "void idSessionLocal::CloseDemoMenu",
+        "demo browser activation",
+    )
+    state_update = open_menu.find("UpdateDemoMenuGui();")
+    activation = open_menu.find("SetGUI( guiDemoMenu, NULL );")
+    if not 0 <= state_update < activation:
+        raise AssertionError(
+            "Demo browser state must be published before the synchronous GUI activation"
+        )
 
     # GUI display text must be localized or dynamic. A slash is the only
     # intentional literal, used between current and total time.
@@ -441,7 +518,17 @@ def validate_gui_and_localization() -> None:
         raise AssertionError(f"Unlocalized demo GUI text: {value!r}")
 
     used_ids = set(re.findall(r"#str_415\d{2}", "\n".join((gui, main_menu, source))))
-    expected_ids = {f"#str_{value}" for value in range(41500, 41567)}
+    expected_ids = {f"#str_{value}" for value in range(41500, 41571)}
+    # The long-form seek caption remains in the language tables for existing
+    # consumers; the tight capability chip deliberately uses its compact sibling.
+    expected_ids.remove("#str_41538")
+    # The browser stands in the retained Demos page's layout and takes that
+    # page's upper-case title, column and plate labels; its earlier mixed-case
+    # ones stay in the language tables for a mod's copy of the stock browser.
+    for retired in (41501, 41507, 41509, 41510, 41512, 41513, 41514, 41515, 41530, 41557):
+        expected_ids.remove(f"#str_{retired}")
+    for label in ("#str_231523", "#str_231521", "#str_231536", "#str_231530", "#str_231531"):
+        require(gui, label, "demo browser labels shared with the retained page")
     missing_usage = sorted(expected_ids - used_ids)
     if missing_usage:
         raise AssertionError(f"Demo string contract is not referenced: {missing_usage}")
@@ -471,7 +558,7 @@ def validate_documentation_entry_points() -> None:
     release = read("docs/dev/release-completion.md")
     require(
         readme,
-        "[Demo Library and Multi-View Demos](docs/user/multiview-demos.md)",
+        "[Demo Library and Multi-View Demos](https://github.com/themuffinator/openQ4/blob/v0.13.2/docs/user/multiview-demos.md)",
         "README demo guide",
     )
     require(release, "MVD 1.2", "release completion demo compatibility note")

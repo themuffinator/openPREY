@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Regression contracts for Vulkan shadow ownership and fail-closed safety."""
+"""Regression contracts for Vulkan shadow ownership and graceful fallback."""
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import math
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -47,13 +51,26 @@ def require_order(haystack: str, needles: tuple[str, ...], context: str) -> None
 
 
 def braced_body(source: str, marker: str, context: str) -> str:
-    start = source.find(marker)
-    if start == -1:
-        raise AssertionError(f"Missing {marker!r} in {context}")
+    search_from = 0
+    while True:
+        start = source.find(marker, search_from)
+        if start == -1:
+            raise AssertionError(f"Missing function definition {marker!r} in {context}")
 
-    opening_brace = source.find("{", start + len(marker))
-    if opening_brace == -1:
-        raise AssertionError(f"Missing opening brace after {marker!r} in {context}")
+        suffix_start = start + len(marker)
+        marker_brace = marker.rfind("{")
+        if marker_brace != -1:
+            opening_brace = start + marker_brace
+            break
+        opening_brace = source.find("{", suffix_start)
+        semicolon = source.find(";", suffix_start)
+        if opening_brace != -1 and (semicolon == -1 or opening_brace < semicolon):
+            break
+
+        # Skip forward declarations and continue at the next occurrence of the
+        # marker. Shadow-cache storage validators intentionally need prototypes
+        # because cache expiry calls them before their definitions.
+        search_from = suffix_start
 
     depth = 0
     for index in range(opening_brace, len(source)):
@@ -81,6 +98,794 @@ def load_test_module(relative_path: str, module_name: str) -> ModuleType:
     return module
 
 
+def write_rgb_tga(path: Path, width: int, height: int, value: int) -> None:
+    header = bytearray(18)
+    header[2] = 2
+    header[12:14] = width.to_bytes(2, "little")
+    header[14:16] = height.to_bytes(2, "little")
+    header[16] = 24
+    pixel = bytes((value, value, value))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(bytes(header) + pixel * (width * height))
+
+
+def validate_shadow_effectiveness_image_gate() -> None:
+    gameplay = load_test_module(
+        "tools/tests/renderer_gameplay_benchmark.py",
+        "openq4_renderer_gameplay_shadow_image_contract",
+    )
+    tmp_root = ROOT / ".tmp"
+    tmp_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="shadow-image-contract-", dir=tmp_root
+    ) as temp_name:
+        temp = Path(temp_name)
+        savepath = temp / "save"
+        actual = savepath / "baseoq4" / "screenshots" / "renderer-bench" / "sp_0.tga"
+        references = temp / "references"
+        reference = references / actual.name
+        write_rgb_tga(actual, 4, 4, 0)
+        write_rgb_tga(reference, 4, 4, 0)
+
+        identical = gameplay.compare_screenshot_difference_if_requested(
+            actual, savepath, references, 0.1, 1, "shadow-contract"
+        )
+        if identical.get("status") != "difference-compared" or identical.get("pass"):
+            raise AssertionError(
+                "Identical shadows-on/off TGAs must not satisfy the shadow effectiveness gate"
+            )
+
+        write_rgb_tga(reference, 4, 4, 255)
+        parity = gameplay.compare_screenshot_if_requested(
+            actual, savepath, references, 0.0, 0, True, "shadow-contract"
+        )
+        if parity.get("status") != "compared" or parity.get("pass"):
+            raise AssertionError(
+                "A non-identical shared/classic TGA must not satisfy exact parity thresholds"
+            )
+
+        different = gameplay.compare_screenshot_difference_if_requested(
+            actual, savepath, references, 1.0, 48, "shadow-contract"
+        )
+        if (
+            different.get("status") != "difference-compared"
+            or not different.get("pass")
+            or different.get("differingChannels") != 48
+        ):
+            raise AssertionError(
+                "A material engine-TGA shadow delta must satisfy the effectiveness gate"
+            )
+
+        generated_references = temp / "generated" / "savepaths"
+        generated_reference = (
+            generated_references
+            / "shadow-contract"
+            / "baseoq4"
+            / "screenshots"
+            / "renderer-bench"
+            / "sp_0.tga"
+        )
+        write_rgb_tga(generated_reference, 4, 4, 0)
+        generated_tree = gameplay.compare_screenshot_if_requested(
+            actual,
+            savepath,
+            generated_references,
+            0.0,
+            0,
+            True,
+            "shadow-contract",
+        )
+        if generated_tree.get("status") != "compared" or not generated_tree.get("pass"):
+            raise AssertionError(
+                "A reference tree generated by the gameplay runner must be consumable directly"
+            )
+
+        missing = gameplay.compare_screenshot_difference_if_requested(
+            actual, savepath, temp / "missing", 0.1, 1, "shadow-contract"
+        )
+        if missing.get("status") != "missing-difference-reference" or missing.get("pass"):
+            raise AssertionError("A missing shadows-off TGA reference must fail closed")
+
+
+def validate_shared_interaction_shadow_runtime_contract() -> None:
+    gameplay = load_test_module(
+        "tools/tests/renderer_gameplay_benchmark.py",
+        "openq4_renderer_gameplay_shadow_runtime_contract",
+    )
+    aggregate = (
+        "Renderer shared interaction: requested=1 prepared=1 valid=1 views=1 "
+        "ready=1 fallback=0 lights=1 surfaces=1 primitives=2 draw=2 noop=0 "
+        "shadow=1/2/2+0 volumes=1+0 maps=2+1 modes=2+0 csm=2 "
+        "stages=1/0+1/0 receivers=1/1/0 hash=0123456789abcdef status=ready "
+        "GL=1/0/0 VK=0/0/0"
+    )
+    view = (
+        "Renderer shared interaction view[0]: scene=0 pass=1 shadowPass=2/3 "
+        "mode=hybrid ready=1 failure=none detail=0 drawPacket=-1 light=-1 "
+        "receiver=-1 stage=-1 lights=1 surfaces=1 primitives=2/2 noop=0 "
+        "shadow=1/2/2+0 volumes=1+0 maps=2+1 modes=2+0 csm=2 "
+        "hash=0123456789abcdef "
+        "GL=1/none/0/2+0/2+0+1+0/2+1 "
+        "VK=0/none/0/0+0/0+0+0+0/0+0"
+    )
+    maps = (
+        "Renderer shared interaction map view[0] light=0 receiver=local "
+        "mode=hybrid class=projected cascades=3 alias=0 "
+        "plan=0000000100000001 generation=1 casters=1+1 "
+        "features=1+0+0+0 hash=1111111111111111\n"
+        "Renderer shared interaction map view[0] light=0 receiver=global "
+        "mode=projected class=projected cascades=3 alias=1 "
+        "plan=0000000100000002 generation=1 casters=1+0 "
+        "features=1+0+0+0 hash=2222222222222222"
+    )
+    summary = gameplay.extract_summary("\n".join((aggregate, view, maps)))
+    spec = gameplay.RunSpec(
+        case_id="synthetic-hybrid",
+        mode="SP",
+        map_name="maps/tools/mv2",
+        budget_map_name="maps/tools/mv2",
+        purpose="synthetic mapped receiver accounting",
+        path_name="spawn-static",
+        tier="auto",
+        maxfps="240",
+        swap_interval="0",
+        display_mode="windowed",
+        shadow_preset="mapped",
+        renderer="best",
+        render_api="gl",
+        interaction_expectation="owned",
+        interaction_shadow_expectation="hybrid",
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(spec, summary)
+    if failures:
+        raise AssertionError(
+            "Complete hybrid map/stencil runtime evidence must pass: "
+            f"{failures!r}"
+        )
+
+    bad_backend = dict(summary)
+    bad_backend["sharedInteractionView"] = view.replace(
+        "/2+1 VK=", "/0+0 VK="
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(spec, bad_backend)
+    if not any("execution=" in failure for failure in failures):
+        raise AssertionError(
+            "Mapped backend pass-count mismatch must fail exact execution reconciliation"
+        )
+
+    malformed_shadow = dict(summary)
+    malformed_shadow["sharedInteraction"] = aggregate.replace(
+        "shadow=1/2/2+0 volumes=1+0", "shadow=malformed volumes=malformed"
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(spec, malformed_shadow)
+    if not any("shadow/volume counters=missing" in failure for failure in failures):
+        raise AssertionError(
+            "Malformed shadow counters must fail closed without raising during backend reconciliation"
+        )
+
+    duplicate_map = dict(summary)
+    duplicate_map["sharedInteractionMaps"] = maps + "\n" + maps.splitlines()[0]
+    failures = gameplay.evaluate_shared_interaction_evidence(spec, duplicate_map)
+    if not any("per-map reconciliation=" in failure for failure in failures):
+        raise AssertionError(
+            "Duplicate per-map evidence must fail exact pass identity reconciliation"
+        )
+
+    dynamic_spec = gameplay.RunSpec(
+        case_id="synthetic-dynamic",
+        mode="SP",
+        map_name="game/airdefense2",
+        budget_map_name="game/airdefense2",
+        purpose="synthetic dynamic mapped-caster evidence",
+        path_name="spawn-static",
+        tier="auto",
+        maxfps="240",
+        swap_interval="0",
+        display_mode="windowed",
+        shadow_preset="csm",
+        renderer="best",
+        render_api="gl",
+        interaction_expectation="owned",
+        interaction_shadow_expectation="dynamic",
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(dynamic_spec, summary)
+    if not any("dynamic caster feature missing=" in failure for failure in failures):
+        raise AssertionError(
+            "A dynamic target must fail unless a sealed map pass reports dynamic=1"
+        )
+
+    perforated_spec = gameplay.RunSpec(
+        case_id="synthetic-perforated",
+        mode="SP",
+        map_name="game/storage2",
+        budget_map_name="game/storage2",
+        purpose="synthetic perforated mapped-caster evidence",
+        path_name="spawn-static",
+        tier="auto",
+        maxfps="240",
+        swap_interval="0",
+        display_mode="windowed",
+        shadow_preset="csm",
+        renderer="best",
+        render_api="gl",
+        interaction_expectation="owned",
+        interaction_shadow_expectation="perforated",
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(perforated_spec, summary)
+    if not any("perforated caster feature missing=" in failure for failure in failures):
+        raise AssertionError(
+            "A perforated target must fail unless a sealed map pass reports alpha=1"
+        )
+
+    feature_summary = dict(summary)
+    feature_summary["sharedInteractionMaps"] = maps.replace(
+        "features=1+0+0+0", "features=1+1+1+0"
+    )
+    for feature_spec in (dynamic_spec, perforated_spec):
+        failures = gameplay.evaluate_shared_interaction_evidence(
+            feature_spec, feature_summary
+        )
+        if failures:
+            raise AssertionError(
+                "Explicit dynamic/alpha per-map evidence must satisfy its stock "
+                f"target: {feature_spec.interaction_shadow_expectation} {failures!r}"
+            )
+
+    zero_shadow_summary = dict(summary)
+    zero_shadow_summary["sharedInteraction"] = aggregate.replace(
+        "shadow=1/2/2+0", "shadow=0/0/0+0"
+    )
+    zero_shadow_summary["sharedInteractionView"] = (
+        view.replace("shadow=1/2/2+0", "shadow=0/0/0+0")
+        .replace("/2+0+1+0/2+1 VK=", "/0+0+1+0/2+1 VK=")
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        spec, zero_shadow_summary
+    )
+    if not any("mapped caster accounting=" in failure for failure in failures):
+        raise AssertionError(
+            "Per-map caster records must not reconcile against zero aggregate shadow casters"
+        )
+
+    dual_backend_summary = dict(summary)
+    dual_backend_summary["sharedInteraction"] = aggregate.replace(
+        "VK=0/0/0", "VK=1/0/0"
+    )
+    dual_backend_summary["sharedInteractionView"] = view.replace(
+        "VK=0/none/0/0+0/0+0+0+0/0+0",
+        "VK=1/none/0/2+0/2+0+1+0/2+1",
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        spec, dual_backend_summary
+    )
+    if not any("inactive backend" in failure for failure in failures):
+        raise AssertionError(
+            "A selected GL run must reject simultaneous Vulkan ownership and execution"
+        )
+
+    mixed_aggregate = (
+        "Renderer shared interaction: requested=1 prepared=1 valid=1 views=1 "
+        "ready=1 fallback=0 lights=1 surfaces=1 primitives=1 draw=1 noop=0 "
+        "shadow=1/1/1+0 volumes=1+0 maps=1+0 modes=1+0 csm=0 "
+        "stages=1/0+1/0 receivers=1/0/0 hash=0123456789abcdef status=ready "
+        "GL=1/0/0 VK=0/0/0"
+    )
+    mixed_view = (
+        "Renderer shared interaction view[0]: scene=0 pass=1 shadowPass=2/3 "
+        "mode=hybrid ready=1 failure=none detail=0 drawPacket=-1 light=-1 "
+        "receiver=-1 stage=-1 lights=1 surfaces=1 primitives=1/1 noop=0 "
+        "shadow=1/1/1+0 volumes=1+0 maps=1+0 modes=1+0 csm=0 "
+        "hash=0123456789abcdef "
+        "GL=1/none/0/1+0/1+0+1+0/1+0 "
+        "VK=0/none/0/0+0/0+0+0+0/0+0"
+    )
+    mixed_map = (
+        "Renderer shared interaction map view[0] light=0 receiver=local "
+        "mode=projected class=projected cascades=1 alias=0 "
+        "plan=0000000100000001 generation=1 casters=1+0 "
+        "features=1+0+0+0 hash=1111111111111111"
+    )
+    mixed_spec = gameplay.RunSpec(
+        case_id="synthetic-mixed",
+        mode="SP",
+        map_name="maps/tools/mv2",
+        budget_map_name="maps/tools/mv2",
+        purpose="synthetic mixed-light identity",
+        path_name="spawn-static",
+        tier="auto",
+        maxfps="240",
+        swap_interval="0",
+        display_mode="windowed",
+        shadow_preset="mixed",
+        renderer="best",
+        render_api="gl",
+        interaction_expectation="owned",
+        interaction_shadow_expectation="mixed",
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        mixed_spec,
+        gameplay.extract_summary("\n".join((mixed_aggregate, mixed_view, mixed_map))),
+    )
+    if not any("map/stencil mix=" in failure for failure in failures):
+        raise AssertionError(
+            "Mixed ownership must include a stencil shadow light outside the mapped-light identities"
+        )
+
+    fallback_aggregate = (
+        "Renderer shared interaction: requested=1 prepared=1 valid=0 views=1 "
+        "ready=0 fallback=1 lights=0 surfaces=0 primitives=0 draw=0 noop=0 "
+        "shadow=0/0/0+0 volumes=0+0 maps=0+0 modes=0+0 csm=0 "
+        "stages=0/0+0/0 receivers=0/0/0 hash=0000000000000000 status=fallback "
+        "GL=0/1/0 VK=0/0/0"
+    )
+    translucent_view = (
+        "Renderer shared interaction view[0]: scene=0 pass=1 shadowPass=2/3 "
+        "mode=none ready=0 failure=shadowMap detail=6 drawPacket=-1 light=0 "
+        "receiver=-1 stage=-1 lights=0 surfaces=0 primitives=0/0 noop=0 "
+        "shadow=0/0/0+0 volumes=0+0 maps=0+0 modes=0+0 csm=0 "
+        "hash=0000000000000000 "
+        "GL=2/shadowMap/6/0+0/0+0+0+0/0+0 "
+        "VK=0/none/0/0+0/0+0+0+0/0+0"
+    )
+    translucent_spec = gameplay.RunSpec(
+        case_id="synthetic-translucent",
+        mode="SP",
+        map_name="game/medlabs",
+        budget_map_name="game/medlabs",
+        purpose="synthetic translucent-moment fallback",
+        path_name="spawn-static",
+        tier="auto",
+        maxfps="240",
+        swap_interval="0",
+        display_mode="windowed",
+        shadow_preset="translucent",
+        renderer="best",
+        render_api="gl",
+        interaction_expectation="fallback",
+        interaction_shadow_expectation="translucent-fallback",
+    )
+    translucent_summary = gameplay.extract_summary(
+        "\n".join((fallback_aggregate, translucent_view))
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        translucent_spec, translucent_summary
+    )
+    if failures:
+        raise AssertionError(
+            f"Exact translucent shadow-chain fallback must pass: {failures!r}"
+        )
+    wrong_fallback_summary = dict(translucent_summary)
+    wrong_fallback_summary["sharedInteractionView"] = (
+        translucent_view.replace("failure=shadowMap detail=6", "failure=deform detail=13")
+        .replace("GL=2/shadowMap/6/", "GL=2/deform/13/")
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        translucent_spec, wrong_fallback_summary
+    )
+    if not any(
+        "translucent-moment fallback=" in failure for failure in failures
+    ):
+        raise AssertionError(
+            "An unrelated named fallback must not satisfy translucent-moment acceptance"
+        )
+
+    budget_aggregate = (
+        aggregate.replace(
+            "lights=1 surfaces=1 primitives=2 draw=2",
+            "lights=4 surfaces=4 primitives=4 draw=4",
+        )
+        .replace(
+            "shadow=1/2/2+0 volumes=1+0 maps=2+1 modes=2+0 csm=2",
+            "shadow=4/4/4+0 volumes=0+0 maps=4+0 modes=1+3 csm=0",
+        )
+        .replace("GL=1/0/0 VK=0/0/0", "GL=0/1/0 VK=0/0/0")
+    )
+    budget_view = (
+        view.replace(
+            "lights=1 surfaces=1 primitives=2/2",
+            "lights=4 surfaces=4 primitives=4/4",
+        )
+        .replace(
+            "shadow=1/2/2+0 volumes=1+0 maps=2+1 modes=2+0 csm=2",
+            "shadow=4/4/4+0 volumes=0+0 maps=4+0 modes=1+3 csm=0",
+        )
+        .replace(
+            "GL=1/none/0/2+0/2+0+1+0/2+1",
+            "GL=2/backendRejected/-1892967296/0+0/0+0+0+0/0+0",
+        )
+    )
+    budget_maps = (
+        "Renderer shared interaction map view[0] light=0 receiver=local "
+        "mode=projected class=projected cascades=1 alias=0 "
+        "plan=0000000100000001 generation=1 casters=1+0 "
+        "features=1+0+0+0 hash=1111111111111111\n"
+        "Renderer shared interaction map view[0] light=1 receiver=local "
+        "mode=point class=point cascades=6 alias=0 "
+        "plan=0000000100000002 generation=1 casters=1+0 "
+        "features=1+0+0+0 hash=2222222222222222\n"
+        "Renderer shared interaction map view[0] light=2 receiver=local "
+        "mode=point class=point cascades=6 alias=0 "
+        "plan=0000000100000003 generation=1 casters=1+0 "
+        "features=1+0+0+0 hash=3333333333333333\n"
+        "Renderer shared interaction map view[0] light=3 receiver=local "
+        "mode=point class=point cascades=6 alias=0 "
+        "plan=0000000100000004 generation=1 casters=1+0 "
+        "features=1+0+0+0 hash=4444444444444444"
+    )
+    budget_spec = gameplay.RunSpec(
+        case_id="synthetic-map-budget",
+        mode="SP",
+        map_name="maps/tools/mv2",
+        budget_map_name="maps/tools/mv2",
+        purpose="synthetic map-admission fallback",
+        path_name="spawn-static",
+        tier="auto",
+        maxfps="240",
+        swap_interval="0",
+        display_mode="windowed",
+        shadow_preset="map-budget-fallback",
+        renderer="best",
+        render_api="gl",
+        interaction_expectation="fallback",
+        interaction_shadow_expectation="map-budget-fallback",
+    )
+    budget_summary = gameplay.extract_summary(
+        "\n".join((budget_aggregate, budget_view, budget_maps))
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        budget_spec, budget_summary
+    )
+    if failures:
+        raise AssertionError(
+            f"Exact map-transaction admission fallback must pass: {failures!r}"
+        )
+    wrong_budget_summary = dict(budget_summary)
+    wrong_budget_summary["sharedInteractionView"] = budget_view.replace(
+        "-1892967296", "1801000001"
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        budget_spec, wrong_budget_summary
+    )
+    if not any(
+        "map-budget admission fallback=" in failure for failure in failures
+    ):
+        raise AssertionError(
+            "An unrelated shadow-cache rejection must not satisfy map-admission fallback acceptance"
+        )
+
+    wrong_budget_light_summary = dict(budget_summary)
+    wrong_budget_light_summary["sharedInteractionView"] = budget_view.replace(
+        "-1892967296", "-1893967296"
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        budget_spec, wrong_budget_light_summary
+    )
+    if not any(
+        "map-budget admission fallback=" in failure for failure in failures
+    ):
+        raise AssertionError(
+            "A map-transaction rejection on the wrong controlled light must not satisfy the exact budget target"
+        )
+
+    duplicate_budget_maps = dict(budget_summary)
+    budget_map_lines = budget_maps.splitlines()
+    duplicate_budget_maps["sharedInteractionMaps"] = "\n".join(
+        (*budget_map_lines[:-1], budget_map_lines[0])
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        budget_spec, duplicate_budget_maps
+    )
+    if not any("fallback mapped plan=" in failure for failure in failures):
+        raise AssertionError(
+            "Duplicate map identities must not satisfy a prepared map-budget fallback plan"
+        )
+
+    zero_budget_shadow = dict(budget_summary)
+    zero_budget_shadow["sharedInteraction"] = budget_aggregate.replace(
+        "shadow=4/4/4+0", "shadow=0/0/0+0"
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        budget_spec, zero_budget_shadow
+    )
+    if not any(
+        "fallback mapped caster accounting=" in failure for failure in failures
+    ):
+        raise AssertionError(
+            "Prepared budget maps must not reconcile against zero shadow-light/caster accounting"
+        )
+
+    undercounted_budget_shadow = dict(budget_summary)
+    undercounted_budget_shadow["sharedInteraction"] = budget_aggregate.replace(
+        "shadow=4/4/4+0", "shadow=4/1/1+0"
+    )
+    failures = gameplay.evaluate_shared_interaction_evidence(
+        budget_spec, undercounted_budget_shadow
+    )
+    if not any(
+        "fallback mapped caster accounting=" in failure for failure in failures
+    ):
+        raise AssertionError(
+            "Per-light mapped caster minima must not exceed aggregate caster accounting"
+        )
+
+
+def validate_shared_interaction_shadow_profile_contract() -> None:
+    gameplay = load_test_module(
+        "tools/tests/renderer_gameplay_benchmark.py",
+        "openq4_renderer_gameplay_shadow_profile_contract",
+    )
+
+    interaction_args = gameplay.parse_args(
+        ["--profile", "interaction", "--pacing-only", "--dry-run"]
+    )
+    interaction_specs = gameplay.build_specs(interaction_args)
+    interaction_contract = [
+        (
+            spec.case_id,
+            spec.shadow_preset,
+            spec.interaction_expectation,
+            spec.interaction_shadow_expectation,
+        )
+        for spec in interaction_specs
+    ]
+    expected_interaction_contract = [
+        ("sp-mv2-interaction", "unshadowed", "owned", "none"),
+        ("sp-mv2-interaction", "stencil", "owned", "stencil"),
+        ("sp-mv2-interaction", "mapped", "owned", "mapped"),
+        ("sp-mv2-interaction", "mixed", "owned", "mixed"),
+        (
+            "sp-mv2-interaction",
+            "map-budget-fallback",
+            "fallback",
+            "map-budget-fallback",
+        ),
+    ]
+    if interaction_contract != expected_interaction_contract:
+        raise AssertionError(
+            "Controlled interaction profile must cover unshadowed, stencil, "
+            "mapped, mixed, and atomic map-admission fallback exactly: "
+            f"{interaction_contract!r}"
+        )
+
+    stock_args = gameplay.parse_args(
+        ["--profile", "interaction-shadow-stock", "--pacing-only", "--dry-run"]
+    )
+    if ("g_stopTime", "1") not in stock_args.launch_cvars:
+        raise AssertionError(
+            "Stock interaction-shadow startup must begin from deterministic tic zero"
+        )
+    if ("ui_showGun", "0") not in stock_args.launch_cvars:
+        raise AssertionError(
+            "Stock interaction-shadow captures must exclude unsupported viewmodel interactions"
+        )
+    if ("r_multiSamples", "0") not in stock_args.launch_cvars:
+        raise AssertionError(
+            "Stock interaction-shadow captures must disable multisampled game targets"
+        )
+    direct_target_cvars = {
+        "g_renderFastNoPost": "1",
+        "g_renderFastNoPostDirect": "1",
+        "g_renderCasUpscale": "0",
+        "r_postAA": "0",
+        "r_screenFraction": "100",
+        "r_bloom": "0",
+        "r_motionBlur": "0",
+        "r_ssao": "0",
+        "r_hdrToneMap": "0",
+        "r_hdrDebugView": "0",
+    }
+    stock_extra_cvars = dict(stock_args.extra_cvars)
+    if any(
+        stock_extra_cvars.get(name) != value
+        for name, value in direct_target_cvars.items()
+    ):
+        raise AssertionError(
+            "Stock interaction-shadow captures must make the direct root target deterministic"
+        )
+    if ("g_stopTime", "0") not in stock_args.extra_cvars:
+        raise AssertionError(
+            "Stock interaction-shadow scenes must advance during their settle interval"
+        )
+    if "g_stopTime 1" not in stock_args.exec_commands:
+        raise AssertionError(
+            "Stock interaction-shadow scenes must freeze again before sampling"
+        )
+    stock_specs = gameplay.build_specs(stock_args)
+    stock_contract = [
+        (
+            spec.case_id,
+            spec.shadow_preset,
+            spec.interaction_expectation,
+            spec.interaction_shadow_expectation,
+        )
+        for spec in stock_specs
+    ]
+    expected_stock_contract = [
+        ("shadow-projected-airdefense2", "unshadowed", "owned", "none"),
+        ("shadow-projected-airdefense2", "mapped", "owned", "projected"),
+        ("shadow-point-airdefense2", "unshadowed", "owned", "none"),
+        ("shadow-point-airdefense2", "mapped", "owned", "point"),
+        ("shadow-csm-airdefense1", "unshadowed", "owned", "none"),
+        ("shadow-csm-airdefense1", "csm", "owned", "csm"),
+        ("shadow-character-airdefense2", "unshadowed", "owned", "none"),
+        ("shadow-character-airdefense2", "csm", "owned", "dynamic"),
+        ("shadow-cutout-storage2", "unshadowed", "owned", "none"),
+        ("shadow-cutout-storage2", "csm", "owned", "perforated"),
+        ("shadow-hybrid-storage2", "unshadowed", "owned", "none"),
+        ("shadow-hybrid-storage2", "mapped", "owned", "hybrid"),
+        (
+            "shadow-translucent-medlabs",
+            "translucent",
+            "fallback",
+            "translucent-fallback",
+        ),
+    ]
+    if stock_contract != expected_stock_contract:
+        raise AssertionError(
+            "Stock interaction-shadow profile must cover projected, point, CSM, "
+            "dynamic, perforated, same-light hybrid, and translucent-moment "
+            f"fallback exactly: {stock_contract!r}"
+        )
+
+    for spec in (*interaction_specs, *stock_specs):
+        unshadowed_id = spec.id_for_shadow_preset("unshadowed")
+        if spec.shadow_preset == "unshadowed" and unshadowed_id != spec.id:
+            raise AssertionError(
+                "Unshadowed runs must use their own capture id as the image-difference reference key"
+            )
+        if spec.shadow_preset != "unshadowed" and unshadowed_id == spec.id:
+            raise AssertionError(
+                "Shadowed runs must resolve image-difference evidence through the matching unshadowed capture id"
+            )
+
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            gameplay.parse_args(
+                [
+                    "--profile",
+                    "interaction",
+                    "--pacing-only",
+                    "--require-references",
+                ]
+            )
+        except SystemExit as exc:
+            if exc.code != 2:
+                raise
+        else:
+            raise AssertionError(
+                "--require-references without --reference-dir must fail during argument validation"
+            )
+
+    shadows_off_args = gameplay.parse_args(
+        [
+            "--profile",
+            "interaction",
+            "--pacing-only",
+            "--shadow-presets",
+            "map-budget-fallback",
+            "--set-cvar",
+            "r_shadows=0",
+            "--set-cvar",
+            "r_useShadowMap=0",
+        ]
+    )
+    shadows_off_specs = gameplay.build_specs(shadows_off_args)
+    if any(
+        spec.interaction_expectation != "owned"
+        or spec.interaction_shadow_expectation != "none"
+        for spec in shadows_off_specs
+    ):
+        raise AssertionError(
+            "Shadows-off reference generation must not retain a shadow fallback expectation"
+        )
+
+    matrix = load_test_module(
+        "tools/tests/renderer_validation_matrix.py",
+        "openq4_renderer_validation_shadow_profile_contract",
+    )
+    expected_matrix_keys = {
+        (profile, backend)
+        for profile in ("interaction", "interaction-shadow-stock")
+        for backend in ("gl", "vk")
+    }
+
+    def interaction_matrix_failures(entries: list[dict[str, object]]) -> list[str]:
+        indexed: dict[tuple[object, object], dict[str, object]] = {}
+        failures: list[str] = []
+        for entry in entries:
+            profile = entry.get("profile")
+            if profile not in ("interaction", "interaction-shadow-stock"):
+                continue
+            key = (profile, entry.get("renderApi"))
+            if key in indexed:
+                failures.append(f"duplicate {key[0]}/{key[1]}")
+                continue
+            indexed[key] = entry
+
+        for profile, backend in sorted(expected_matrix_keys - set(indexed)):
+            failures.append(f"missing {profile}/{backend}")
+        for profile, backend in sorted(
+            set(indexed) - expected_matrix_keys,
+            key=lambda item: (str(item[0]), str(item[1])),
+        ):
+            failures.append(f"unexpected {profile}/{backend}")
+
+        for profile, backend in sorted(expected_matrix_keys & set(indexed)):
+            command = str(indexed[(profile, backend)].get("command", ""))
+            for required_option in (
+                f"--render-api {backend}",
+                "--reference-dir",
+                "--require-references",
+                "--image-rms-threshold 0",
+                "--image-max-threshold 0",
+                "--difference-reference-dir",
+            ):
+                if required_option not in command:
+                    failures.append(
+                        f"{profile}/{backend} missing option {required_option}"
+                    )
+            if (
+                f"{profile}\\{backend}\\classic\\savepaths" not in command
+                or f"{profile}\\{backend}\\shadows-off\\savepaths"
+                not in command
+            ):
+                failures.append(
+                    f"{profile}/{backend} references are not backend-scoped savepaths"
+                )
+        return failures
+
+    matrix_entries = list(matrix.GAMEPLAY_BENCHMARK_HARNESS)
+    matrix_failures = interaction_matrix_failures(matrix_entries)
+    if matrix_failures:
+        raise AssertionError(
+            "Renderer validation matrix must register exactly one GL and Vulkan "
+            "gate for each interaction profile: " + "; ".join(matrix_failures)
+        )
+
+    missing_fixture = [
+        entry
+        for entry in matrix_entries
+        if (entry.get("profile"), entry.get("renderApi"))
+        != ("interaction", "gl")
+    ]
+    if "missing interaction/gl" not in interaction_matrix_failures(missing_fixture):
+        raise AssertionError(
+            "Interaction matrix guard must reject a missing profile/backend pair"
+        )
+
+    duplicate_fixture = list(matrix_entries)
+    duplicate_fixture.append(
+        dict(
+            next(
+                entry
+                for entry in matrix_entries
+                if (entry.get("profile"), entry.get("renderApi"))
+                == ("interaction", "gl")
+            )
+        )
+    )
+    if "duplicate interaction/gl" not in interaction_matrix_failures(
+        duplicate_fixture
+    ):
+        raise AssertionError(
+            "Interaction matrix guard must reject a duplicate profile/backend pair"
+        )
+
+    foundation = next(
+        case
+        for case in matrix.build_safe_cases(("auto", "gl33", "gl43", "gl45"))
+        if case["id"] == "renderer-foundation-selftests"
+    )
+    foundation_args = foundation["args"]
+    if not any(
+        foundation_args[index : index + 3] == ["+set", "r_renderApi", "gl"]
+        for index in range(len(foundation_args) - 2)
+    ) or not foundation.get("preservesConfig"):
+        raise AssertionError(
+            "Foundation self-tests must force OpenGL without persisting the archived API choice"
+        )
+
+
 def validate_runtime_failure_gates() -> None:
     gameplay = load_test_module(
         "tools/tests/renderer_gameplay_benchmark.py",
@@ -92,15 +897,34 @@ def validate_runtime_failure_gates() -> None:
     )
 
     signature_lines = {
+        "binaryImageCacheWrite": "^3WARNING: ^1idBinaryImage: Could not open generated cache 'generated/images/fixture.bimage' or compact fallback 'generated/images/_compact/v1/fixture.bimage'",
+        "expandedLoadscreenUpload": "^3WARNING: ^1Could not upload expanded loading background '_expandedLoadingBackground_1820x1024'; using the source levelshot",
         "vulkanValidation": "Vulkan validation: descriptor binding mismatch",
         "vulkanVuid": "Validation ID VUID-vkCmdDrawIndexed-commandBuffer-recording",
         "vulkanCallFailed": "Vulkan: vkCreateGraphicsPipelines failed (-3)",
+        "vulkanDrawFailure": "^3WARNING: ^1Vulkan: descriptor retirement budget exhausted; image draw skipped",
         "fatal": "Fatal Error: renderer bootstrap stopped",
         "errorLine": "ERROR: render target creation stopped",
     }
     failure_text = "\n".join(signature_lines.values())
     native_fatal = "FATAL: renderer bootstrap stopped"
     benign_vk_result = "Vulkan: swapchain returned VK_ERROR_OUT_OF_DATE_KHR; retry scheduled"
+    legacy_binary_image_warning = (
+        "^3WARNING: ^1idBinaryImage: Could not open file "
+        "'generated/images/legacy-fixture.bimage'"
+    )
+    binary_image_near_miss = (
+        "idBinaryImage: Could not open generated cache 'generated/images/fixture.bimage' "
+        "or compact fallback 'generated/images/_compact/v1/fixture.bimage'"
+    )
+    expanded_loadscreen_near_miss = (
+        "Could not upload expanded loading background "
+        "'_expandedLoadingBackground_1820x1024'; using the source levelshot"
+    )
+    expanded_loadscreen_restore = (
+        "^3WARNING: ^1Could not restore expanded loading background "
+        "'_expandedLoadingBackground_1820x1024' after a video restart"
+    )
 
     for module, counter_name, context in (
         (gameplay, "warning_counts", "gameplay benchmark"),
@@ -130,6 +954,12 @@ def validate_runtime_failure_gates() -> None:
                     f"{context} must preserve the exact source line for {signature}; got {matches!r}"
                 )
 
+        post_refusal = "^3WARNING: ^1Vulkan: r_bloom/r_hdrToneMap pass could not run (draw refused)"
+        if counter(post_refusal).get("vulkanDrawFailure") != 1:
+            raise AssertionError(f"{context} must reject a refused Vulkan post draw")
+        if counter("Vulkan: expected draw skipped by material condition").get("vulkanDrawFailure") != 0:
+            raise AssertionError(f"{context} must require a warning for skipped-draw failures")
+
         benign_counts = counter(benign_vk_result)
         if benign_counts.get("errorLine") != 0:
             raise AssertionError(
@@ -149,6 +979,22 @@ def validate_runtime_failure_gates() -> None:
         ):
             raise AssertionError(
                 f"{context} must preserve the engine-native FATAL: diagnostic line"
+            )
+        if counter(legacy_binary_image_warning).get("binaryImageCacheWrite") != 1:
+            raise AssertionError(
+                f"{context} must retain the legacy binary-image cache warning signature"
+            )
+        if counter(binary_image_near_miss).get("binaryImageCacheWrite") != 0:
+            raise AssertionError(
+                f"{context} must require WARNING: for binary-image cache write failures"
+            )
+        if counter(expanded_loadscreen_near_miss).get("expandedLoadscreenUpload") != 0:
+            raise AssertionError(
+                f"{context} must require WARNING: for expanded-loadscreen upload failures"
+            )
+        if counter(expanded_loadscreen_restore).get("expandedLoadscreenUpload") != 1:
+            raise AssertionError(
+                f"{context} must count an expanded-loadscreen restore failure after a video restart"
             )
 
     checks_ok, missing = matrix.evaluate_checks(
@@ -189,12 +1035,15 @@ def validate_runtime_failure_gates() -> None:
         screenshot_path.parent.mkdir(parents=True)
         stdout_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
-        screenshot_path.write_bytes(b"source-contract")
+        write_rgb_tga(
+            screenshot_path, gameplay.BUDGET_WIDTH, gameplay.BUDGET_HEIGHT, 0
+        )
 
         spec = gameplay.RunSpec(
             case_id="vulkan-shadow-contract",
             mode="SP",
             map_name="game/contract",
+            budget_map_name="game/contract",
             purpose="synthetic failure-gate coverage",
             path_name="spawn-static",
             tier="auto",
@@ -203,11 +1052,14 @@ def validate_runtime_failure_gates() -> None:
             display_mode="windowed",
             shadow_preset="mapped",
             renderer="vk",
+            render_api="vk",
         )
 
         def evaluate(log_body: str) -> dict[str, object]:
             log_path.write_text(
-                f"Selected renderer tier: Vulkan\n{log_body}\n",
+                "Selected renderer tier: Vulkan\n"
+                f"MODE: -1, {gameplay.BUDGET_WIDTH} x {gameplay.BUDGET_HEIGHT} "
+                f"windowed hz:N/A\n{log_body}\n",
                 encoding="utf-8",
             )
             return gameplay.evaluate_role_result(
@@ -327,21 +1179,44 @@ def validate_receiver_ownership_split() -> None:
         "bool VK_ShadowMap_RenderAtlas(",
         "shadow-map caster rendering",
     )
+    # Projected ownership passes route their chains through the shared
+    # static/dynamic selector so the compose split lives in one place; the
+    # point cube pass still walks the four chains itself, because a cube has
+    # no composition path.
+    pass_casters = braced_body(
+        shadow_map,
+        "static int VK_ShadowMap_DrawPassCasters(",
+        "projected ownership caster chain selection",
+    )
     for token in (
         "vLight->globalShadowMapCasters",
         "vLight->globalShadowMapDynamicCasters",
         "vLight->localShadowMapCasters",
         "vLight->localShadowMapDynamicCasters",
     ):
-        if render.count(token) < 2:
+        if pass_casters.count(token) < 1 or render.count(token) < 1:
             raise AssertionError(
                 f"Projected and point ownership passes must both retain caster chain {token!r}"
             )
+    for global_only_chain in (
+        "vLight->localShadowMapCasters",
+        "vLight->localShadowMapDynamicCasters",
+    ):
+        if f"globalOwnership && drawStatic" not in pass_casters or (
+            f"globalOwnership && drawDynamic" not in pass_casters
+        ):
+            raise AssertionError(
+                "Projected GLOBAL resources must gate the local caster chains on ownership"
+            )
+        if global_only_chain not in pass_casters:
+            raise AssertionError(
+                f"Projected GLOBAL resources must add local caster chain {global_only_chain!r}"
+            )
     if compact(render).count(
         compact("receiverPass == VK_SHADOW_RECEIVER_GLOBAL")
-    ) < 2:
+    ) < 1:
         raise AssertionError(
-            "Projected and point GLOBAL resources must both add local caster chains"
+            "Point GLOBAL resources must add local caster chains"
         )
 
     interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
@@ -477,7 +1352,7 @@ def validate_shadow_depth_format_selection() -> None:
     require_order(
         device_init,
         (
-            "vkCtx.physicalDevice = devices[ chosenDevice ];",
+            "vkCtx.physicalDevice = selected.device;",
             "VK_Device_SelectShadowDepthFormat();",
         ),
         "shadow depth probing after physical-device selection",
@@ -489,6 +1364,8 @@ def validate_shadow_depth_format_selection() -> None:
         ("VkPipeline VK_Exec_PointCasterPipeline(", "point shadow caster pipeline"),
     ):
         caster_pipeline = braced_body(executor, marker, context)
+        require(caster_pipeline, "const bool withStencil = VK_ShadowMap_UseStencilAttachment();", context)
+        require(caster_pipeline, "[withStencil ? 1 : 0]", "separate cached pipeline variants")
         require_compact(
             caster_pipeline,
             "target.depthFormat = vkCtx.shadowDepthFormat;",
@@ -496,12 +1373,19 @@ def validate_shadow_depth_format_selection() -> None:
         )
         require_compact(
             caster_pipeline,
-            """target.stencilFormat = vkCtx.shadowDepthHasStencil
+            """target.stencilFormat = withStencil
                 ? vkCtx.shadowDepthFormat : VK_FORMAT_UNDEFINED;""",
             context,
         )
 
     shadow_map = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    stencil_attachment = braced_body(shadow_map, "bool VK_ShadowMap_UseStencilAttachment(", "unused shadow stencil")
+    require_compact(stencil_attachment,
+        "return vkCtx.shadowDepthHasStencil && r_vkShadowStencilAttachmentReference.GetBool();",
+        "reference attachment gated by actual format")
+    for pipeline in ("casterPipeline", "pointCasterPipeline"):
+        if executor.count(f"for ( VkPipeline &pipeline : vkExec.{pipeline} )") != 2:
+            raise AssertionError("Both caster variants must retire on shutdown and format reconfiguration")
     aspect_mask = braced_body(
         shadow_map,
         "static VkImageAspectFlags VK_ShadowMap_DepthAspectMask(",
@@ -542,7 +1426,7 @@ def validate_shadow_depth_format_selection() -> None:
         "shadow-map caster rendering",
     )
     if compact(render).count(
-        compact("ri.pStencilAttachment = vkCtx.shadowDepthHasStencil ? &depth : NULL;")
+        compact("ri.pStencilAttachment = VK_ShadowMap_UseStencilAttachment() ? &depth : NULL;")
     ) < 2:
         raise AssertionError(
             "Projected and point shadow rendering must both omit stencil attachment metadata for depth-only formats"
@@ -586,20 +1470,46 @@ def validate_csm_atlas_and_receiver_contract() -> None:
         "static bool VK_ShadowMap_AllocTileBlock(",
         "contiguous shadow-atlas block allocator",
     )
+    # The lights of a view no longer share one tile size, so blocks are cut
+    # by buddy allocation: power-of-two squares inside a power-of-two root,
+    # with the same edges the front end counts with. A row scan wastes the
+    # space under a small block that follows a large one.
     require_order(
         allocator,
         (
-            "blockSize <= 0 || blockSize > vkShadow.atlasSize",
-            "vkShadow.nextTileX + blockSize > vkShadow.atlasSize",
-            "vkShadow.nextTileY += vkShadow.nextTileRowHeight;",
-            "vkShadow.nextTileY + blockSize > vkShadow.atlasSize",
-            "tileX = vkShadow.nextTileX;",
-            "tileY = vkShadow.nextTileY;",
-            "vkShadow.nextTileX += blockSize;",
-            "vkShadow.nextTileRowHeight = Max( vkShadow.nextTileRowHeight, blockSize );",
+            "const int rootEdge = R_ShadowMapAtlasRootEdge( vkShadow.atlasSize );",
+            "const int blockEdge = R_ShadowMapAtlasBlockEdge( blockSize, 1 );",
+            "blockSize <= 0 || blockEdge <= 0 || blockEdge > rootEdge",
+            "return false;",
+            "while ( ( rootEdge >> level ) > blockEdge ) {",
+            "return VK_ShadowMap_TakeAtlasBlock( level, rootEdge, tileX, tileY );",
         ),
         "contiguous shadow-atlas block allocator",
     )
+    take = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_TakeAtlasBlock(",
+        "shadow-atlas buddy allocation",
+    )
+    require_order(
+        take,
+        (
+            "if ( vkShadow.atlasFreeCount[ level ] > 0 ) {",
+            "return true;",
+            "if ( level == 0 ) {",
+            "if ( !vkShadow.atlasRootFree ) {",
+            "return false;",
+            "vkShadow.atlasRootFree = false;",
+            "if ( !VK_ShadowMap_TakeAtlasBlock( level - 1, rootEdge, x, y ) ) {",
+            "const int edge = rootEdge >> level;",
+            "for ( int quarter = 3 ; quarter >= 1 ; quarter-- ) {",
+            "vkShadow.atlasFreeX[ level ][ slot ] = x + ( quarter & 1 ) * edge;",
+            "vkShadow.atlasFreeY[ level ][ slot ] = y + ( quarter >> 1 ) * edge;",
+        ),
+        "a free block of the size is taken, else the next larger one is split in four",
+    )
+    if shadow_map.count("VK_ShadowMap_ResetAtlasBlocks();") != 2:
+        raise AssertionError("every prepared view and every release must cut the atlas afresh")
 
     projected_alloc = braced_body(
         shadow_map,
@@ -635,7 +1545,8 @@ def validate_csm_atlas_and_receiver_contract() -> None:
         prepare,
         (
             "const int requestedAtlasDiv = idMath::ClampInt( 1, 2, classification.atlasDiv );",
-            "const int maxTileSize = vkShadow.atlasSize / requestedAtlasDiv;",
+            "const int tileSize = R_ShadowMapProjectedTileSize( vLight, requestedAtlasDiv, vkShadow.atlasSize );",
+            "if ( tileSize <= 0 ) {",
             "R_BuildShadowMapProjectedLightState( vLight, viewDef, tileSize, projectedState );",
             "projectedState.cascadeCount > SHADOWMAP_PROJECTED_MAX_CASCADES",
             "projectedState.atlasDiv < 1 || projectedState.atlasDiv > 2",
@@ -663,14 +1574,38 @@ def validate_csm_atlas_and_receiver_contract() -> None:
             "viewport.y = (float)( cascadeTileY + light.tileSize );",
             "scissor.offset.x = cascadeTileX;",
             "scissor.offset.y = cascadeTileY;",
-            "VK_ShadowMap_DrawCasterChain( ctx, light, cascadeIndex, vLight->globalShadowMapCasters )",
-            "VK_ShadowMap_DrawCasterChain( ctx, light, cascadeIndex, vLight->globalShadowMapDynamicCasters )",
-            "if ( receiverPass == VK_SHADOW_RECEIVER_GLOBAL )",
-            "VK_ShadowMap_DrawCasterChain( ctx, light, cascadeIndex, vLight->localShadowMapCasters )",
-            "VK_ShadowMap_DrawCasterChain( ctx, light, cascadeIndex, vLight->localShadowMapDynamicCasters )",
+            """VK_ShadowMap_DrawPassCasters( ctx, light, receiverPass,
+                cascadeIndex, pass.composeDynamic
+                    ? VK_SHADOW_CHAINS_STATIC_ONLY
+                    : VK_SHADOW_CHAINS_ALL, copiedLocalDepth || pass.unionLocalDepth )""",
             "VK_ShadowMap_InvalidatePassResource( light, receiverPass );",
         ),
         "complete per-cascade ownership rendering",
+    )
+
+    # The selector is the single place the four chains are split into the
+    # GL SHADOWMAP_RENDER_STATIC_ONLY / _COMPOSE_DYNAMIC / full sets.
+    pass_casters = braced_body(
+        shadow_map,
+        "static int VK_ShadowMap_DrawPassCasters(",
+        "projected ownership caster chain selection",
+    )
+    require_order(
+        pass_casters,
+        (
+            "const bool drawStatic = select != VK_SHADOW_CHAINS_DYNAMIC_ONLY;",
+            "const bool drawDynamic = select != VK_SHADOW_CHAINS_STATIC_ONLY;",
+            "const bool globalOwnership = receiverPass == VK_SHADOW_RECEIVER_GLOBAL;",
+            "if ( drawStatic && !localChainsOnly )",
+            "VK_ShadowMap_DrawCasterChain( ctx, light, cascadeIndex, vLight->globalShadowMapCasters )",
+            "if ( drawDynamic && !localChainsOnly )",
+            "VK_ShadowMap_DrawCasterChain( ctx, light, cascadeIndex, vLight->globalShadowMapDynamicCasters )",
+            "if ( globalOwnership && drawStatic )",
+            "VK_ShadowMap_DrawCasterChain( ctx, light, cascadeIndex, vLight->localShadowMapCasters )",
+            "if ( globalOwnership && drawDynamic )",
+            "VK_ShadowMap_DrawCasterChain( ctx, light, cascadeIndex, vLight->localShadowMapDynamicCasters )",
+        ),
+        "static/dynamic caster chain selection",
     )
 
     interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
@@ -818,12 +1753,15 @@ def validate_shadow_descriptor_abi() -> None:
             "shadowBindings[ 1 ].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;",
             "shadowBindings[ 2 ].binding = 2;",
             "shadowBindings[ 2 ].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;",
-            "dslci.bindingCount = 3;",
+            "for ( int momentBinding = 3; momentBinding < 6; momentBinding++ ) {",
+            "shadowBindings[ momentBinding ].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;",
+            "dslci.bindingCount = 6;",
+            "VK_MAX_DESCRIPTOR_SETS + 5 * shadowSetBudget + retiredSetBudget;",
             "interactionSetLayouts[ 7 ] = vkExec.shadowSetLayout;",
             "bufferInfo.range = VK_SHADOW_UNIFORM_SLICE_BYTES;",
             "write.dstBinding = 1;",
         ),
-        "set-7 compare/UBO/raw descriptor layout",
+        "set-7 compare/UBO/raw/moment descriptor layout",
     )
 
     shadow_alloc = braced_body(
@@ -982,8 +1920,25 @@ def validate_exact_filter_tiers(sample_body: str, sample_call: str, context: str
         raise AssertionError(f"{context} is missing the center sample that starts its tiered kernel")
     if sample_body[tier_start:].count(sample_call) != 13:
         raise AssertionError(f"{context} must issue exactly 13 samples at its maximum tier")
-    if sample_body.count("RotateShadowOffset(") != 12:
-        raise AssertionError(f"{context} must rotate exactly the twelve off-center Poisson taps")
+    if sample_body.count("rotation * vec2(") != 12:
+        raise AssertionError(
+            f"{context} must transform exactly the twelve off-center Poisson taps"
+        )
+    # The first four Poisson taps all lie to one side of the centre, so the
+    # five-tap tier replaces them with a balanced ring before it samples.
+    require_order(
+        sample_body,
+        (
+            "if (shadow.filterParams.y <= 5.0) {",
+            "o1 = rotation * kShadowFiveTapRingA;",
+            "o2 = rotation * kShadowFiveTapRingB;",
+            "o3 = -o1;",
+            "o4 = -o2;",
+            "if (shadow.filterParams.y <= 5.0)",
+            "return result * (1.0 / 5.0);",
+        ),
+        f"{context} balanced five-tap ring",
+    )
     require_order(
         sample_body,
         (
@@ -1023,6 +1978,19 @@ def validate_shadow_filtering_contract() -> None:
         ),
         "shared projected shadow filter policy",
     )
+    # Modern GL receivers have no blocker search and filter with one fixed
+    # kernel. PCSS-lite's effective radius bounds the classic search, not the
+    # blur: as an 8-texel kernel it shadowed unoccluded grazing walls.
+    planner = read("src/renderer/ModernShadowPlanner.cpp")
+    require_compact(
+        planner,
+        """descriptor.pcfKernel = static_cast<int>( idMath::Ceil( descriptor.pointLight
+            ? r_shadowMapPointFilterRadius.GetFloat()
+            : projectedFilterSettings.filterRadius ) );""",
+        "modern GL projected kernel uses the contact radius",
+    )
+    if "projectedFilterSettings.effectiveFilterRadius" in planner:
+        raise AssertionError("Modern GL receivers must not filter with the PCSS search bound")
 
     interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
     shadow_slice = braced_body(
@@ -1059,10 +2027,10 @@ def validate_shadow_filtering_contract() -> None:
     require_order(
         projected_compare,
         (
-            "float compareDepth = depth - ShadowReceiverBias(cascadeIndex);",
+            "float compareDepth = depth - ShadowReceiverBias(cascadeIndex) - tapBias;",
             "if (shadow.filterParams.w > 0.5)",
             "texture(shadowCompareMap, vec3(uv, compareDepth))",
-            "texture(shadowRawMap, uv).r",
+            "RawShadowDepth(uv)",
             "compareDepth <= storedDepth ? 1.0 : 0.0",
         ),
         "projected runtime compare/raw selection",
@@ -1070,7 +2038,7 @@ def validate_shadow_filtering_contract() -> None:
 
     projected_rotation = braced_body(
         projected,
-        "vec2 RotateShadowOffset(",
+        "mat2 ShadowOffsetRotation(",
         "projected stable Poisson rotation",
     )
     require_order(
@@ -1081,7 +2049,7 @@ def validate_shadow_filtering_contract() -> None:
             "floor(uv / max(shadow.texelSize.x, 1.0e-6))",
             "floor(depth * 1024.0)",
             "* 6.2831853",
-            "return vec2(c * offset.x - s * offset.y, s * offset.x + c * offset.y);",
+            "return mat2(c, s, -s, c);",
         ),
         "projected stable Poisson rotation",
     )
@@ -1095,7 +2063,8 @@ def validate_shadow_filtering_contract() -> None:
         receiver_bias,
         (
             "float receiverPlaneBias = 0.0;",
-            "if (shadow.pcssParams.w > 0.5)",
+            """if (shadow.pcssParams.w > 0.5
+                && !ShadowDebugModeIs(kShadowDebugReceiverPlaneBiasOff))""",
             "ShadowDepthGradient(cascadeIndex)",
             "max(shadow.pcssParams.z, 1.0)",
             "max(max(texelBias, receiverPlaneBias), 0.0)",
@@ -1111,7 +2080,9 @@ def validate_shadow_filtering_contract() -> None:
     require_order(
         blocker_search,
         (
-            "shadow.filterParams.z < 1.5 || shadow.filterParams.w > 0.5",
+            """ShadowDebugModeIs(kShadowDebugPCFOff)
+                || shadow.filterParams.z < 1.5
+                || shadow.filterParams.w > 0.5""",
             "float compareDepth = depth - ShadowReceiverBias(cascadeIndex);",
             "float blockerDepth = 0.0;",
             "float blockerCount = 0.0;",
@@ -1120,15 +2091,24 @@ def validate_shadow_filtering_contract() -> None:
             "float d2 = RawShadowDepth(",
             "float d3 = RawShadowDepth(",
             "float d4 = RawShadowDepth(",
+            "float d5 = RawShadowDepth(",
+            "float d6 = RawShadowDepth(",
+            "float d7 = RawShadowDepth(",
+            "float d8 = RawShadowDepth(",
             "if (blockerCount <= 0.0)",
+            "return 0.0;",
             "float averageBlocker = blockerDepth / blockerCount;",
-            "float penumbra = (depth - averageBlocker) / max(averageBlocker, 1.0e-4);",
+            "float separation = max(compareDepth - averageBlocker, 0.0);",
+            "float penumbra = separation / max(averageBlocker, 1.0e-4);",
             "return clamp(max(baseRadius, penumbra * shadow.pcssParams.x), baseRadius, maxRadius);",
         ),
         "projected PCSS blocker search",
     )
-    if blocker_search.count("RawShadowDepth(") != 5:
-        raise AssertionError("Projected PCSS blocker search must use its fixed five raw-depth probes")
+    if blocker_search.count("RawShadowDepth(") != 9:
+        raise AssertionError("Projected PCSS blocker search must use its fixed nine raw-depth probes")
+    require(blocker_search, "mat2 rotation", "projected PCSS shared kernel rotation")
+    if blocker_search.count("ShadowOffsetRotation(") != 0:
+        raise AssertionError("Projected PCSS must reuse the caller's stable rotation")
 
     projected_samples = braced_body(
         projected,
@@ -1140,6 +2120,8 @@ def validate_shadow_filtering_contract() -> None:
         "SampleShadowCompare(",
         "projected Poisson shadow filter",
     )
+    if projected_samples.count("ShadowOffsetRotation(") != 1:
+        raise AssertionError("Projected blocker search and PCF taps must share one stable rotation")
 
     projected_main = braced_body(projected, "void main()", "projected shadow fragment main")
     if projected_main.count("dFdx(") != 4 or projected_main.count("dFdy(") != 4:
@@ -1161,13 +2143,12 @@ def validate_shadow_filtering_contract() -> None:
     point = read("src/renderer/Vulkan/shaders/interaction_shadow_point.frag")
     point_compare = braced_body(
         point,
-        "float SamplePointShadowCompare(",
+        "float PointShadowCompareDepth(",
         "point runtime depth comparison",
     )
     require_order(
         point_compare,
         (
-            "float compareDepth = depth - ShadowReceiverBias();",
             "if (shadow.samplingParams.x > 0.5)",
             "texture(shadowCompareMap, vec4(direction, compareDepth))",
             "texture(shadowRawMap, direction).r",
@@ -1178,7 +2159,7 @@ def validate_shadow_filtering_contract() -> None:
 
     point_rotation = braced_body(
         point,
-        "vec2 RotateShadowOffset(",
+        "mat2 ShadowOffsetRotation(",
         "point stable tangent-disc rotation",
     )
     require_order(
@@ -1187,7 +2168,7 @@ def validate_shadow_filtering_contract() -> None:
             "if (shadow.filterParams.z < 0.5)",
             "StableShadowHash(floor(direction * 37.0))",
             "* 6.2831853",
-            "return vec2(c * offset.x - s * offset.y, s * offset.x + c * offset.y);",
+            "return mat2(c, s, -s, c);",
         ),
         "point stable tangent-disc rotation",
     )
@@ -1213,6 +2194,2127 @@ def validate_shadow_filtering_contract() -> None:
         "SamplePointShadowCompare(",
         "point tangent-disc shadow filter",
     )
+    if point_samples.count("ShadowOffsetRotation(") != 1:
+        raise AssertionError("Point PCF taps must share one stable rotation")
+
+    # The shipped OpenGL 1.10 programs are manually maintained counterparts,
+    # not products of the Vulkan SPIR-V header generator. Keep their blocker,
+    # filter-tier, and rotation contracts pinned independently so one backend
+    # cannot silently drift or compile with a different kernel.
+    gl_projected = read("content/baseoq4/pak0/glprogs/shadow_interaction.fs")
+    gl_blocker_search = braced_body(
+        gl_projected,
+        "float ProjectedPCSSRadius(",
+        "OpenGL projected PCSS blocker search",
+    )
+    require_order(
+        gl_blocker_search,
+        (
+            "float compareDepth = depth - ShadowReceiverBias( cascadeIndex, depth );",
+            "float d0 = RawShadowDepth( uv );",
+            "float d1 = RawShadowDepth(",
+            "float d8 = RawShadowDepth(",
+            "if ( blockerCount <= 0.0 )",
+            "return 0.0;",
+            "float separation = max( compareDepth - averageBlocker, 0.0 );",
+        ),
+        "OpenGL bias-consistent nine-probe PCSS search",
+    )
+    if gl_blocker_search.count("RawShadowDepth(") != 9:
+        raise AssertionError("OpenGL PCSS blocker search must use exactly nine raw-depth probes")
+    if gl_blocker_search.count("rotation * vec2(") != 8:
+        raise AssertionError("OpenGL PCSS blocker search must use eight unique off-center probes")
+    if gl_blocker_search.count("ShadowOffsetRotation(") != 0:
+        raise AssertionError("OpenGL PCSS blocker search must reuse the caller's rotation")
+    for tap_index in range(1, 9):
+        require_compact(
+            gl_blocker_search,
+            f"float d{tap_index} = RawShadowDepth( clamp( uv + o{tap_index} * searchTap, clampMin, clampMax ) );",
+            f"OpenGL clamped PCSS probe d{tap_index}",
+        )
+        require_compact(
+            gl_blocker_search,
+            f"if ( d{tap_index} < compareDepth - length( o{tap_index} ) * searchBias ) "
+            f"{{ blockerDepth += d{tap_index}; blockerCount += 1.0; }}",
+            f"OpenGL PCSS probe d{tap_index} contribution",
+        )
+
+    gl_projected_samples = braced_body(
+        gl_projected,
+        "vec4 SampleShadowCascade(",
+        "OpenGL projected Poisson shadow filter",
+    )
+    gl_projected_tier_start = gl_projected_samples.find("float shadow = 0.0;")
+    if gl_projected_tier_start == -1 or gl_projected_samples[gl_projected_tier_start:].count("SampleShadowCompare(") != 13:
+        raise AssertionError("OpenGL projected PCF must issue exactly 13 samples at its maximum tier")
+    if gl_projected_samples.count("rotation * vec2(") != 12:
+        raise AssertionError("OpenGL projected PCF must transform twelve off-center taps")
+    if gl_projected_samples.count("ShadowOffsetRotation(") != 1:
+        raise AssertionError("OpenGL blocker search and PCF must share one stable rotation")
+    require_order(
+        gl_projected_samples,
+        (
+            "mat2 rotation = ShadowOffsetRotation( uv, depth );",
+            "ProjectedPCSSRadius( uv, depth, cascadeIndex, clampMin, clampMax, rotation )",
+            "shadow += SampleShadowCompare( uv, depth, cascadeIndex, 0.0 );",
+            "if ( uShadowFilterTaps <= 1.0 )",
+            "if ( uShadowFilterTaps <= 5.0 )",
+            "if ( uShadowFilterTaps <= 9.0 )",
+            "shadow * ( 1.0 / 13.0 )",
+        ),
+        "OpenGL exact projected filter tiers",
+    )
+
+    gl_point = read("content/baseoq4/pak0/glprogs/shadow_point_interaction.fs")
+    gl_point_samples = braced_body(
+        gl_point,
+        "float SamplePointShadow()",
+        "OpenGL point tangent-disc shadow filter",
+    )
+    if gl_point_samples.count("SamplePointShadowCompare(") != 14:
+        # One early unfiltered return plus the complete 13-sample tiered kernel.
+        raise AssertionError("OpenGL point receiver must preserve one direct and thirteen tiered samples")
+    if gl_point_samples.count("rotation * vec2(") != 12:
+        raise AssertionError("OpenGL point PCF must transform twelve off-center taps")
+    if gl_point_samples.count("ShadowOffsetRotation(") != 1:
+        raise AssertionError("OpenGL point PCF taps must share one stable rotation")
+    require_order(
+        gl_point_samples,
+        (
+            "vec3 direction = SafeNormalize( vPointShadowVector );",
+            "vec3 tangent = SafeNormalize( cross( up, direction ) );",
+            "vec3 bitangent = cross( direction, tangent );",
+            "float tap = uPointShadowTexelScale * filterRadius;",
+            "if ( uShadowFilterTaps <= 1.0 )",
+            "if ( uShadowFilterTaps <= 5.0 )",
+            "if ( uShadowFilterTaps <= 9.0 )",
+            "shadow * ( 1.0 / 13.0 )",
+        ),
+        "OpenGL exact point filter tiers",
+    )
+
+
+def validate_projected_footprint_bias_contract() -> None:
+    """Off-centre projected taps add bias per texel of their distance.
+
+    A receiver at an angle to the light changes stored depth by
+    texelDepthStep * slope per shadow texel. Comparing a PCF tap or PCSS
+    probe several texels away with the centre's bias alone shadows the
+    receiver with its own nearer surface: the grazing-wall speckle that grew
+    with r_shadowMapFilterRadius 2.0. All three projected receivers scale the
+    same step by each tap's distance, and the centre sample keeps the plain
+    receiver bias so contact shadows keep their reach.
+    """
+    projected_state = read("src/renderer/ShadowMapProjected.cpp")
+    step = braced_body(
+        projected_state,
+        "float R_ShadowMapTexelDepthStep(",
+        "projected texel depth step",
+    )
+    require(step, "return worldTexelSize / Max( depthRange, 1.0f );", "projected texel depth step")
+    texel_bias = braced_body(
+        projected_state,
+        "float R_ShadowMapTexelDepthBias(",
+        "projected texel depth bias",
+    )
+    require(
+        texel_bias,
+        "Max( 0.0f, r_shadowMapTexelBiasScale.GetFloat() ) * worldTexelSize / Max( depthRange, 1.0f )",
+        "texel depth bias is the scaled texel depth step",
+    )
+    steps = braced_body(
+        projected_state,
+        "void R_ShadowMapProjectedTexelDepthSteps(",
+        "per-cascade texel depth steps",
+    )
+    require_compact(
+        steps,
+        "R_ShadowMapTexelDepthStep( state.worldTexelSize[cascadeIndex], state.depthRange[cascadeIndex] )",
+        "per-cascade texel depth steps",
+    )
+
+    arb2 = read("src/renderer/draw_arb2.cpp")
+    require(
+        arb2,
+        'glGetUniformLocationARB( programObject, "uShadowTexelDepthStep[0]" )',
+        "OpenGL projected receiver texel depth step uniform",
+    )
+    if arb2.count("R_ShadowMapProjectedTexelDepthSteps(") != 2:
+        raise AssertionError(
+            "Both OpenGL projected receiver uploads must provide the texel depth step"
+        )
+
+    gl = read("content/baseoq4/pak0/glprogs/shadow_interaction.fs")
+    require(gl, "uniform float uShadowTexelDepthStep[4];", "OpenGL projected receiver")
+    gl_footprint = braced_body(gl, "float ShadowFootprintBias(", "OpenGL footprint bias")
+    require_order(
+        gl_footprint,
+        (
+            "if ( ShadowDebugModeIs( kShadowDebugBiasOff ) )",
+            "float slopeBias = min( sinTheta / lightCos, kShadowBiasMaxSlope );",
+            "return max( CascadeTexelDepthStep( cascadeIndex ), 0.0 ) * slopeBias;",
+        ),
+        "OpenGL footprint bias",
+    )
+    gl_compare = braced_body(gl, "float SampleShadowCompare(", "OpenGL projected compare")
+    require(
+        gl_compare,
+        "float bias = ShadowReceiverBias( cascadeIndex, depth ) + tapBias;",
+        "OpenGL projected compare",
+    )
+    gl_search = braced_body(gl, "float ProjectedPCSSRadius(", "OpenGL PCSS blocker search")
+    require(
+        gl_search,
+        "float searchBias = ShadowFootprintBias( cascadeIndex ) * searchRadius;",
+        "OpenGL PCSS blocker search",
+    )
+    gl_samples = braced_body(gl, "vec4 SampleShadowCascade(", "OpenGL projected Poisson shadow filter")
+    require(
+        gl_samples,
+        "float tapBias = ShadowFootprintBias( cascadeIndex ) * filterRadius;",
+        "OpenGL projected Poisson shadow filter",
+    )
+    if gl_samples.count("SampleShadowCompare( uv, depth, cascadeIndex, 0.0 )") != 2:
+        raise AssertionError("OpenGL projected centre samples must keep the plain receiver bias")
+    for tap_index in range(1, 13):
+        require(
+            gl_samples,
+            f"depth, cascadeIndex, length( o{tap_index} ) * tapBias );",
+            f"OpenGL projected tap o{tap_index} footprint bias",
+        )
+
+    vulkan = read("src/renderer/Vulkan/shaders/interaction_shadow.frag")
+    vulkan_bias = braced_body(vulkan, "float ShadowReceiverBias(", "Vulkan projected receiver bias")
+    require_compact(
+        vulkan_bias,
+        "float texelBias = shadow.texelSize.z * CascadeComponent( shadow.texelDepthStep, cascadeIndex) * (1.0 + slopeBias);",
+        "Vulkan texel bias rebuilt from the texel depth step",
+    )
+    vulkan_footprint = braced_body(vulkan, "float ShadowFootprintBias(", "Vulkan footprint bias")
+    require_order(
+        vulkan_footprint,
+        (
+            "if (ShadowDebugModeIs(kShadowDebugBiasOff))",
+            "float slopeBias = min(sinTheta / lightCos, 4.0);",
+            "return max(CascadeComponent(shadow.texelDepthStep, cascadeIndex), 0.0) * slopeBias;",
+        ),
+        "Vulkan footprint bias",
+    )
+    vulkan_search = braced_body(vulkan, "float ProjectedPCSSRadius(", "Vulkan PCSS blocker search")
+    require(
+        vulkan_search,
+        "float searchBias = ShadowFootprintBias(cascadeIndex) * searchRadius;",
+        "Vulkan PCSS blocker search",
+    )
+    for tap_index in range(1, 9):
+        require(
+            vulkan_search,
+            f"if (d{tap_index} < compareDepth - length(o{tap_index}) * searchBias)",
+            f"Vulkan PCSS probe d{tap_index} footprint bias",
+        )
+    vulkan_samples = braced_body(vulkan, "float SampleShadowCascade(", "Vulkan projected Poisson shadow filter")
+    require(
+        vulkan_samples,
+        "float tapBias = ShadowFootprintBias(cascadeIndex) * filterRadius;",
+        "Vulkan projected Poisson shadow filter",
+    )
+    if vulkan_samples.count("SampleShadowCompare(uv, depth, cascadeIndex, 0.0)") != 2:
+        raise AssertionError("Vulkan projected centre samples must keep the plain receiver bias")
+    for tap_index in range(1, 13):
+        require(
+            vulkan_samples,
+            f"length(o{tap_index}) * tapBias);",
+            f"Vulkan projected tap o{tap_index} footprint bias",
+        )
+    for stage in ("interaction_shadow.vert", "interaction_shadow.frag"):
+        stage_source = read(f"src/renderer/Vulkan/shaders/{stage}")
+        if "texelDepthBias" in stage_source or "vec4 texelDepthStep;" not in stage_source:
+            raise AssertionError(f"Vulkan {stage} must declare the shadow block's texel depth step")
+
+    interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
+    if interactions.count("R_ShadowMapProjectedTexelDepthSteps( projected, block.texelDepthStep );") != 2:
+        raise AssertionError("Both Vulkan projected shadow blocks must carry the texel depth step")
+    if interactions.count("block.texelSize[ 2 ] = Max( 0.0f, r_shadowMapTexelBiasScale.GetFloat() );") != 2:
+        raise AssertionError("Both Vulkan projected shadow blocks must carry the texel bias scale")
+
+    modern = read("src/renderer/ModernGLShaderLibrary.cpp")
+    require_order(
+        modern,
+        (
+            r'"float ModernClusterShadowFootprintBias(ModernClusterShadowDescriptor descriptor, int cascadeIndex, vec3 normal, vec3 lightDir) {\n"',
+            r'"    float depthPerUnit = min(length(vec3(shadowMatrix[0].z, shadowMatrix[1].z, shadowMatrix[2].z)), 1.0);\n"',
+            r'"    float bias = ModernClusterShadowReceiverBias(descriptor, cascadeIndex, normal, lightDir, depth) + tapBias;\n"',
+            r'"    float shadow = ModernClusterCompareProjected(descriptor, uv, depth, cascadeIndex, normal, lightDir, 0.0);\n"',
+            r'"        float tapBias = ModernClusterShadowFootprintBias(descriptor, cascadeIndex, normal, lightDir) * radius * 0.70710678;\n"',
+        ),
+        "modern GL projected footprint bias",
+    )
+    if modern.count("depth, cascadeIndex, normal, lightDir, tapBias);") != 4:
+        raise AssertionError("Every modern GL projected PCF tap must carry the footprint bias")
+
+
+def point_receiver_settings(
+    far_distance: float,
+    face_size: int,
+    constant_bias: float,
+    normal_bias: float,
+    texel_bias_scale: float,
+    normal_offset_scale: float,
+    max_world_bias: float,
+) -> tuple[float, float, float, float, float]:
+    def nonnegative_finite(value: float) -> float:
+        return value if math.isfinite(value) and value > 0.0 else 0.0
+
+    far = far_distance if math.isfinite(far_distance) and far_distance > 0.0 else 1.0
+    face = max(face_size, 1)
+    values = [
+        nonnegative_finite(constant_bias),
+        nonnegative_finite(normal_bias),
+        nonnegative_finite(texel_bias_scale),
+        nonnegative_finite(normal_offset_scale),
+    ]
+    cap = nonnegative_finite(max_world_bias)
+    depth_world = far * max(values[0] + values[1], values[2] / face * 5.0)
+    offset_world = far * 2.0 * values[3] / face
+    requested = depth_world + offset_world
+    scale = cap / requested if cap > 0.0 and requested > cap else 1.0
+    return (*(value * scale for value in values), scale)
+
+
+def storage_adjusted_point_receiver_settings(
+    base: tuple[float, float, float, float, float],
+    far_distance: float,
+    face_size: int,
+    depth_compare: bool,
+    high_precision: bool,
+    max_world_bias: float,
+) -> tuple[float, float, float, float, float]:
+    if depth_compare:
+        return base
+    storage_step = 1.0 / 2048.0 if high_precision else 1.0 / 65025.0
+    return point_receiver_settings(
+        far_distance,
+        face_size,
+        max(base[0], storage_step * 1.5),
+        base[1],
+        base[2],
+        base[3],
+        max_world_bias,
+    )
+
+
+def validate_point_receiver_world_bias_contract() -> None:
+    # Ordinary local lights retain the authored defaults.
+    ordinary = point_receiver_settings(256.0, 512, 0.00010, 0.0010, 0.45, 1.0, 4.0)
+    if ordinary[4] != 1.0:
+        raise AssertionError("Ordinary point lights must remain below the world-bias cap")
+
+    # Retail airdefense1 light_146: radius + abs(center), then the default 1.25 far scale.
+    far_distance = math.sqrt(15488.0**2 + 16040.0**2 + 10568.0**2) * 1.25
+    bounded = point_receiver_settings(
+        far_distance, 512, 0.00010, 0.0010, 0.45, 1.0, 4.0
+    )
+    expected_scale = 0.0156235087883939
+    if not math.isclose(bounded[4], expected_scale, rel_tol=1.0e-6):
+        raise AssertionError(f"Unexpected airdefense1 point-bias scale: {bounded[4]}")
+    bounded_world = far_distance * (
+        max(bounded[0] + bounded[1], bounded[2] / 512.0 * 5.0)
+        + 2.0 * bounded[3] / 512.0
+    )
+    if bounded_world > 4.00001:
+        raise AssertionError(f"Point receiver world-bias cap exceeded: {bounded_world}")
+
+    if storage_adjusted_point_receiver_settings(
+        bounded, far_distance, 512, True, False, 4.0
+    ) != bounded:
+        raise AssertionError("Hardware point comparison must not apply a manual storage floor")
+    for high_precision in (False, True):
+        adjusted = storage_adjusted_point_receiver_settings(
+            bounded, far_distance, 512, False, high_precision, 4.0
+        )
+        adjusted_world = far_distance * (
+            max(adjusted[0] + adjusted[1], adjusted[2] / 512.0 * 5.0)
+            + 2.0 * adjusted[3] / 512.0
+        )
+        if adjusted_world > 4.00001 or not all(math.isfinite(value) for value in adjusted):
+            raise AssertionError(
+                f"Manual point storage floor escaped its world cap (fp16={high_precision})"
+            )
+
+    modern_depth_only = point_receiver_settings(
+        far_distance, 512, 0.00010, 0.0010, 0.45, 0.0, 4.0
+    )
+    if modern_depth_only[3] != 0.0:
+        raise AssertionError("A receiver without geometric normal offset must reserve no offset budget")
+    modern_adjusted = storage_adjusted_point_receiver_settings(
+        modern_depth_only, far_distance, 512, False, False, 4.0
+    )
+    modern_world = far_distance * max(
+        modern_adjusted[0] + modern_adjusted[1],
+        modern_adjusted[2] / 512.0 * 5.0,
+    )
+    if modern_world > 4.00001:
+        raise AssertionError("Modern manual point depth escaped the depth-only world cap")
+    if point_receiver_settings(
+        far_distance, 512, 0.00010, 0.0010, 0.45, 1.0, 0.0
+    )[4] != 1.0:
+        raise AssertionError("A zero point receiver world-bias cap must disable clamping")
+    if not all(
+        math.isfinite(value)
+        for value in point_receiver_settings(
+            math.nan, 0, math.nan, -1.0, math.inf, -math.inf, math.nan
+        )
+    ):
+        raise AssertionError("Invalid point receiver inputs must sanitize to finite values")
+
+    init = read("src/renderer/RenderSystem_init.cpp")
+    require_compact(
+        init,
+        '''idCVar r_shadowMapPointMaxWorldBias( "r_shadowMapPointMaxWorldBias", "4.0",
+            CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT''',
+        "point receiver world-bias cap default",
+    )
+    require(init, '0.0f, 64.0f );', "point receiver world-bias cap range")
+
+    classification_h = read("src/renderer/ShadowMapClassification.h")
+    classification = read("src/renderer/ShadowMapClassification.cpp")
+    require(
+        classification_h,
+        "SHADOWMAP_POINT_RECEIVER_MAX_SLOPE = 4.0f",
+        "CPU point receiver slope bound",
+    )
+    clamp = braced_body(
+        classification,
+        "shadowMapPointReceiverSettings_t R_ClampShadowMapPointReceiverSettings(",
+        "pure point receiver world-bias clamp",
+    )
+    require_order(
+        clamp,
+        (
+            "const double scalarDepthBias",
+            "const double texelDepthBias",
+            "SHADOWMAP_POINT_RECEIVER_MAX_SLOPE",
+            "const double depthWorldBias",
+            "const double normalOffsetWorldBias",
+            "const double requestedWorldBias",
+            "cap / requestedWorldBias",
+            "settings.constantBias *= settings.worldBiasScale;",
+            "settings.normalBias *= settings.worldBiasScale;",
+            "settings.texelBiasScale *= settings.worldBiasScale;",
+            "settings.normalOffsetScale *= settings.worldBiasScale;",
+        ),
+        "pure point receiver world-bias clamp",
+    )
+
+    storage_floor = braced_body(
+        classification,
+        "R_ShadowMapPointStorageAdjustedReceiverSettings(",
+        "shared cap-bounded manual point-depth floor",
+    )
+    require_order(
+        storage_floor,
+        (
+            "if ( depthCompare )",
+            "const float storageStep",
+            "R_ClampShadowMapPointReceiverSettings(",
+            "Max( baseSettings.constantBias, storageStep * 1.5f )",
+            "r_shadowMapPointMaxWorldBias.GetFloat()",
+        ),
+        "shared cap-bounded manual point-depth floor",
+    )
+    gl = read("src/renderer/draw_arb2.cpp")
+    direct_gl = braced_body(
+        gl,
+        "static bool RB_GLSLPointShadowMap_CreateDrawInteractions(",
+        "direct GL bounded point receiver upload",
+    )
+    require_order(
+        direct_gl,
+        (
+            "R_ShadowMapPointFarDistance( backEnd.vLight )",
+            "R_ShadowMapPointReceiverSettings(",
+            "R_ShadowMapPointStorageAdjustedReceiverSettings(",
+            "receiverSettings.constantBias",
+            "receiverSettings.normalBias",
+            "receiverSettings.texelBiasScale / pointFaceSize",
+            "receiverSettings.normalOffsetScale / pointFaceSize",
+        ),
+        "direct GL bounded point receiver upload",
+    )
+
+    modern = read("src/renderer/ModernShadowPlanner.cpp")
+    modern_contract = braced_body(
+        modern,
+        "static void R_ModernShadowPlanner_InitDescriptorContract(",
+        "modern bounded point receiver descriptor",
+    )
+    require(
+        modern_contract,
+        "MODERN_SHADOW_COMPARE_MANUAL_PACKED_DEPTH",
+        "modern OpenGL point descriptor uses manual color-depth decoding",
+    )
+    require_order(
+        modern_contract,
+        (
+            "if ( descriptor.pointLight )",
+            "R_ShadowMapPointFarDistance( vLight )",
+            "R_ClampShadowMapPointReceiverSettings(",
+            "r_shadowMapPointBias.GetFloat()",
+            "r_shadowMapPointNormalBias.GetFloat()",
+            "r_shadowMapTexelBiasScale.GetFloat()",
+            "r_shadowMapNormalOffsetScale.GetFloat()",
+            "r_shadowMapPointMaxWorldBias.GetFloat()",
+            "#ifndef OPENQ4_RENDERER_VK_MODULE",
+            "R_ShadowMapPointStorageAdjustedReceiverSettings(",
+            "false",
+            "r_shadowMapPointHighPrecision.GetBool()",
+            "#endif",
+            "descriptor.bias[0] = pointReceiverSettings.constantBias;",
+            "descriptor.bias[1] = pointReceiverSettings.normalBias;",
+            "descriptor.texelDepthBias[0] =",
+            "pointReceiverSettings.texelBiasScale",
+            "descriptor.normalOffsetScale = pointReceiverSettings.normalOffsetScale;",
+        ),
+        "modern bounded point receiver descriptor",
+    )
+
+    texture_bindings = braced_body(
+        gl,
+        "bool RB_ShadowMapTextureBindings(",
+        "modern OpenGL manual point-depth binding",
+    )
+    require_order(
+        texture_bindings,
+        (
+            "bindings.pointDepthCompare = RB_PointShadowMapDepthCompareEnabled();",
+            "idImage *pointAtlasImage = g_pointShadowMapColorImage;",
+            "bindings.pointAtlas",
+            "pointAtlasImage",
+            "RB_ShadowMapActivePointCacheContentReady()",
+        ),
+        "modern OpenGL manual point-depth binding independent of classic compare",
+    )
+
+    point_content_ready = braced_body(
+        gl,
+        "static bool RB_ShadowMapActivePointCacheContentReady(",
+        "exact active point-cache content gate",
+    )
+    require_order(
+        point_content_ready,
+        (
+            "g_activePointShadowMapCache",
+            "entry == &g_pointShadowMapCache[i]",
+            "RB_ShadowMapPointCacheSlotLimit()",
+            "entry->passKind != static_cast<int>( SHADOWMAP_PASS_GLOBAL )",
+            "entry->lastUpdatedFrame > tr.frameCount",
+            "entry->size != RB_ShadowMapPointSizeValue()",
+            "entry->colorImage != g_pointShadowMapColorImage",
+            "entry->depthImage != g_pointShadowMapDepthImage",
+            "entry->renderTexture != g_pointShadowMapRenderTexture",
+            "entry->colorImage->IsLoaded()",
+            "entry->depthImage->IsLoaded()",
+        ),
+        "point binding requires exact valid GLOBAL cache content",
+    )
+    if "? g_pointShadowMapDepthImage : g_pointShadowMapColorImage" in texture_bindings:
+        raise AssertionError(
+            "Modern GL point binding must not reinterpret the hardware depth cube as packed color depth"
+        )
+    modern_executor = read("src/renderer/ModernGLExecutor.cpp")
+    modern_bind = braced_body(
+        modern_executor,
+        "static void R_ModernGLExecutor_BindShadowTextureSlot(",
+        "modern OpenGL manual shadow sampler binding",
+    )
+    require(
+        modern_bind,
+        "glTexParameteri( target, GL_TEXTURE_COMPARE_MODE, GL_NONE );",
+        "modern OpenGL point sampler disables hardware comparison",
+    )
+    modern_shader = read("src/renderer/ModernGLShaderLibrary.cpp")
+    require_order(
+        modern_shader,
+        (
+            "float ModernClusterDecodePointDepth",
+            "uModernShadowSamplerState.z > 0.5",
+            "return encodedDepth.r;",
+            "encodedDepth.r + encodedDepth.g * (1.0 / 255.0)",
+        ),
+        "modern OpenGL fp16/packed color-depth decoding",
+    )
+
+    shadow_h = read("src/renderer/Vulkan/vk_ShadowMap.h")
+    light_state = braced_body(
+        shadow_h, "typedef struct vkShadowLightState_s", "Vulkan point shadow state"
+    )
+    require_order(
+        light_state,
+        ("float\t\t\t\tconstantBias;", "float\t\t\t\tnormalBias;", "float\t\t\t\ttexelDepthBias;", "float\t\t\t\tnormalOffsetWorld;"),
+        "Vulkan sealed point receiver settings",
+    )
+    interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
+    shadow_slice = braced_body(
+        interactions,
+        "static int VK_Inter_WriteShadowSlice(",
+        "direct Vulkan bounded point receiver upload",
+    )
+    require_order(
+        shadow_slice,
+        (
+            "pointBlock.biasParams[ 0 ] = state->constantBias;",
+            "pointBlock.biasParams[ 1 ] = state->normalBias;",
+            "pointBlock.biasParams[ 2 ] = state->texelDepthBias;",
+            "pointBlock.biasParams[ 3 ] = state->normalOffsetWorld;",
+        ),
+        "direct Vulkan bounded point receiver upload",
+    )
+
+    vk = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    vk_prepare = braced_body(
+        vk,
+        "int VK_ShadowMap_PrepareViewLights(",
+        "Vulkan sealed point receiver policy",
+    )
+    require_order(
+        vk_prepare,
+        (
+            "R_ShadowMapPointReceiverSettings(",
+            "entry.constantBias = receiverSettings.constantBias;",
+            "entry.normalBias = receiverSettings.normalBias;",
+            "entry.texelDepthBias = receiverSettings.texelBiasScale",
+            "entry.normalOffsetWorld =",
+            "receiverSettings.normalOffsetScale",
+        ),
+        "Vulkan sealed point receiver policy",
+    )
+
+    gl_point_vertex = read(
+        "content/baseoq4/pak0/glprogs/shadow_point_interaction.vs"
+    )
+    require_order(
+        gl_point_vertex,
+        (
+            "vec3 pointShadowVector = worldPos - uGlobalLightOrigin.xyz;",
+            "float pointShadowSinTheta",
+            "uPointShadowNormalOffsetWorld * length( pointShadowVector )",
+            "vPointShadowVector = pointShadowVector + worldNormal * pointShadowNormalOffset;",
+        ),
+        "OpenGL bounded point normal-offset consumption",
+    )
+    vk_point_vertex = read(
+        "src/renderer/Vulkan/shaders/interaction_shadow_point.vert"
+    )
+    require_order(
+        vk_point_vertex,
+        (
+            "vec3 pointShadowVector = worldPos - shadow.lightOriginFar.xyz;",
+            "float shadowSinTheta",
+            "shadow.biasParams.w * PointShadowRadialLength(pointShadowVector)",
+            "vPointShadowVector = pointShadowVector + worldNormal * normalOffset;",
+        ),
+        "Vulkan bounded point normal-offset consumption",
+    )
+    # The radial helper intentionally fixes square-summation order. It must
+    # retain the world-axis length used by both the offset and depth compare.
+    require(vk_point_vertex, '#include "point_shadow_math.glsl"', "shared radial helper")
+    radial = read("src/renderer/Vulkan/shaders/point_shadow_math.glsl")
+    require_order(
+        radial,
+        (
+            "precise float squareLength = value.x * value.x;",
+            "squareLength = fma(value.y, value.y, squareLength);",
+            "squareLength = fma(value.z, value.z, squareLength);",
+            "return sqrt(squareLength);",
+            "precise float depth = PointShadowRadialLength(value) * inverseFar;",
+        ),
+        "world-axis radial shadow length and depth",
+    )
+
+
+def validate_shadow_contact_and_gl_robustness_contract() -> None:
+    init = read("src/renderer/RenderSystem_init.cpp")
+    common = read("src/framework/Common.cpp")
+    interaction = read("src/renderer/Interaction.cpp")
+    domain_h = read("src/renderer/ClassicInteractionDomain.h")
+    domain = read("src/renderer/ClassicInteractionDomain.cpp")
+    arb2_parity_h = read("src/renderer/ShadowMapArb2Parity.h")
+    gl = read("src/renderer/draw_arb2.cpp")
+    modern = read("src/renderer/ModernShadowPlanner.cpp")
+    modern_h = read("src/renderer/ModernShadowPlanner.h")
+    modern_executor = read("src/renderer/ModernGLExecutor.cpp")
+    modern_shader = read("src/renderer/ModernGLShaderLibrary.cpp")
+    tr_local = read("src/renderer/tr_local.h")
+    vk = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+
+    init_cvars = braced_body(init, "void R_InitCvars( void )", "renderer cvar registration")
+    for migration_flag in ("r_shadowMapContactQualityMigrated", "r_shadowMapFilterDefaultsMigrated"):
+        if migration_flag in init_cvars:
+            raise AssertionError(
+                "Shadow quality migration must not run before archived configs are executed"
+            )
+    migration = braced_body(
+        init,
+        "static void R_MigrateLegacyShadowMapContactQuality( void )",
+        "post-config shadow quality migration",
+    )
+    require_order(
+        migration,
+        (
+            "!r_shadowMapContactQualityMigrated.GetBool()",
+            "r_shadowMapFilterRadius.GetFloat() - 2.0f",
+            "r_shadowMapPointFilterRadius.GetFloat() - 2.5f",
+            "r_shadowMapFilterTaps.GetInteger() == 13",
+            "r_shadowMapPointFilterTaps.GetInteger() == 13",
+            "r_shadowMapPolygonFactor.GetFloat() - 0.75f",
+            "r_shadowMapFilterRadius.SetFloat( 0.75f )",
+            "r_shadowMapPointFilterRadius.SetFloat( 1.0f )",
+            "r_shadowMapFilterTaps.SetInteger( 9 )",
+            "r_shadowMapPointFilterTaps.SetInteger( 9 )",
+            "r_shadowMapPolygonFactor.SetFloat( 0.25f )",
+            "r_shadowMapContactQualityMigrated.SetBool( true )",
+        ),
+        "complete legacy shadow tuple migration",
+    )
+
+    legacy_profile = (2.0, 2.5, 13, 13, 0.75)
+    balanced_profile = (0.75, 1.0, 9, 9, 0.25)
+
+    def migrate_profile(
+        profile: tuple[float, float, int, int, float], migrated: bool
+    ) -> tuple[tuple[float, float, int, int, float], bool]:
+        if migrated:
+            return profile, True
+        return (balanced_profile if profile == legacy_profile else profile), True
+
+    if migrate_profile(legacy_profile, False) != (balanced_profile, True):
+        raise AssertionError("The exact legacy shadow tuple must migrate once")
+    custom_profile = (1.5, 2.5, 13, 13, 0.75)
+    if migrate_profile(custom_profile, False) != (custom_profile, True):
+        raise AssertionError("Customized shadow profiles must be preserved")
+    if migrate_profile(legacy_profile, True) != (legacy_profile, True):
+        raise AssertionError("The shadow contact migration flag must make migration one-shot")
+    for compiled_default in (
+        'r_shadowMapFilterRadius( "r_shadowMapFilterRadius", "2.0"',
+        'r_shadowMapFilterMode( "r_shadowMapFilterMode", "2"',
+        'r_shadowMapPointFilterRadius( "r_shadowMapPointFilterRadius", "1.0"',
+        'r_shadowMapFilterTaps( "r_shadowMapFilterTaps", "9"',
+        'r_shadowMapPointFilterTaps( "r_shadowMapPointFilterTaps", "9"',
+        'r_shadowMapPolygonFactor( "r_shadowMapPolygonFactor", "0.25"',
+    ):
+        require(init, compiled_default, "compiled contact-shadow and PCSS-lite filter defaults")
+
+    filter_migration = braced_body(
+        init,
+        "static void R_MigrateLegacyShadowMapFilterDefaults( void )",
+        "post-config projected filter default migration",
+    )
+    require_order(
+        filter_migration,
+        (
+            "r_shadowMapFilterDefaultsMigrated.GetBool()",
+            "return;",
+            "r_shadowMapFilterRadius.GetFloat() - 0.75f",
+            "r_shadowMapFilterMode.GetInteger() == 0",
+            "r_shadowMapFilterRadius.SetFloat( 2.0f )",
+            "r_shadowMapFilterMode.SetInteger( 2 )",
+            "r_shadowMapFilterDefaultsMigrated.SetBool( true )",
+        ),
+        "exact legacy fixed-PCF pair migrates once to PCSS-lite",
+    )
+
+    def migrate_filter(profile: tuple[float, int], migrated: bool) -> tuple[tuple[float, int], bool]:
+        if migrated:
+            return profile, True
+        return ((2.0, 2) if profile == (0.75, 0) else profile), True
+
+    # The contact migration leaves the legacy tuple on 0.75, which the filter
+    # migration then carries to the new default.
+    legacy_after_contact = migrate_profile(legacy_profile, False)[0]
+    if migrate_filter((legacy_after_contact[0], 0), False) != ((2.0, 2), True):
+        raise AssertionError("A contact-migrated legacy profile must reach the PCSS-lite default")
+    for chosen in ((0.75, 1), (3.0, 2), (1.0, 0)):
+        if migrate_filter(chosen, False) != (chosen, True):
+            raise AssertionError("Customized projected filter profiles must be preserved")
+    if migrate_filter((0.75, 0), True) != ((0.75, 0), True):
+        raise AssertionError("The projected filter migration flag must make migration one-shot")
+    renderer_device_init = braced_body(
+        init,
+        "void idRenderSystemLocal::InitOpenGL( void )",
+        "post-config renderer device startup",
+    )
+    require_order(
+        renderer_device_init,
+        (
+            "R_MigrateLegacyShadowMapContactQuality();",
+            "R_MigrateLegacyShadowMapFilterDefaults();",
+            "R_InitRendererDevice( true, false, error, sizeof( error ) )",
+        ),
+        "migration before either renderer device starts",
+    )
+    common_init = braced_body(common, "void idCommonLocal::InitGame( void )", "engine startup")
+    require_order(
+        common_init,
+        (
+            "renderSystem->Init();",
+            '"exec " CONFIG_FILE "\\n"',
+            "cmdSystem->ExecuteCommandBuffer();",
+            "StartupVariable( NULL, false );",
+            "InitRenderSystem();",
+        ),
+        "archived config and command-line ordering before renderer device startup",
+    )
+    common_outer_init = braced_body(
+        common,
+        "void idCommonLocal::Init( int argc, const char **argv, const char *cmdline )",
+        "outer engine startup",
+    )
+    require_order(
+        common_outer_init,
+        (
+            "InitGame();",
+            "AddStartupCommands()",
+        ),
+        "late explicit +set commands remain authoritative after archived migration",
+    )
+
+    require(domain_h, "bool\t\t\tperfectHull;", "sealed caster topology")
+    require(domain, "HashBool( hash, caster.perfectHull );", "caster topology identity")
+    for token in (
+        "caster.perfectHull = drawSurf->geo->perfectHull;",
+        "caster.perfectHull = casterGeometry->perfectHull;",
+    ):
+        require(domain, token, "actual caster topology capture")
+
+    caster_signature = braced_body(
+        interaction,
+        "static void R_RecordShadowMapCaster(",
+        "physical shadow caster cache signature",
+    )
+    require_order(
+        caster_signature,
+        (
+            "shader->GetCullType()",
+            "casterTris->perfectHull",
+            "casterTris->numVerts",
+            "casterTris->numIndexes",
+            "casterTris->bounds[ corner ][ component ]",
+            "entityDef->lastModifiedFrameNum",
+            "entityDef->dynamicModelFrameCount",
+            "entityDef->modelMatrix[i]",
+        ),
+        "topology/material/transform-aware physical caster signature",
+    )
+    if interaction.count("casterTris, false, shadowMapCasterOnly") != 1 or interaction.count(
+        "casterTris, true, shadowMapCasterOnly"
+    ) != 1:
+        raise AssertionError("Both opaque and translucent caster records must hash actual geometry")
+
+    classification_h = read("src/renderer/ShadowMapClassification.h")
+    classification = read("src/renderer/ShadowMapClassification.cpp")
+    require(
+        classification_h,
+        "R_ShadowMapLightOriginInsideCasterBounds(",
+        "shared enclosing-light caster guard declaration",
+    )
+    require(
+        classification_h,
+        "R_ShadowMapCasterTransformNeedsTwoSided(",
+        "shared unsafe-transform caster guard declaration",
+    )
+    transform_guard = braced_body(
+        classification,
+        "bool R_ShadowMapCasterTransformNeedsTwoSided(",
+        "shared unsafe-transform caster guard",
+    )
+    require_order(
+        transform_guard,
+        (
+            "if ( modelMatrix == NULL )",
+            "return true;",
+            "const double determinant =",
+            "static_cast<double>( modelMatrix[ 0 ] )",
+            "return !std::isfinite( determinant ) || determinant <= 0.0;",
+        ),
+        "fail-conservative mirrored/non-finite transform guard",
+    )
+    enclosing_guard = braced_body(
+        classification,
+        "bool R_ShadowMapLightOriginInsideCasterBounds(",
+        "shared enclosing-light caster guard",
+    )
+    require_order(
+        enclosing_guard,
+        (
+            "R_GlobalPointToLocal(",
+            "minimum > maximum",
+            "return true;",
+            "local < minimum || local > maximum",
+            "return false;",
+        ),
+        "fail-conservative enclosing-light bounds guard",
+    )
+
+    def expected_cull(
+        mode: int,
+        material: str,
+        perfect_hull: bool | None,
+        light_inside_bounds: bool,
+        unsafe_transform: bool = False,
+    ) -> str:
+        if mode == 0 or material == "two":
+            return "none"
+        if mode == 2 and (
+            perfect_hull is not True or unsafe_transform or light_inside_bounds
+        ):
+            return "none"
+        return "back" if material == "back" else "front"
+
+    for material in ("front", "back", "two"):
+        if expected_cull(0, material, True, False) != "none":
+            raise AssertionError("Caster culling mode 0 must be unconditionally two-sided")
+    if expected_cull(1, "front", False, True) != "front":
+        raise AssertionError("Caster culling mode 1 must force the near-shell orientation")
+    if expected_cull(1, "back", True, False) != "back":
+        raise AssertionError("Back-sided material orientation must reverse forced near-shell culling")
+    for topology, inside in ((False, False), (None, False), (True, True)):
+        if expected_cull(2, "front", topology, inside) != "none":
+            raise AssertionError("AUTO culling must fail conservatively to two-sided depth")
+    if expected_cull(2, "front", True, False) != "front":
+        raise AssertionError("AUTO may cull only a sealed hull whose bounds exclude the light")
+    if expected_cull(2, "front", True, False, True) != "none":
+        raise AssertionError("AUTO must render mirrored/non-finite transforms two-sided")
+    if expected_cull(1, "front", True, False, True) != "front":
+        raise AssertionError("Explicit caster culling mode 1 must retain force semantics")
+
+    gl_cull = braced_body(
+        gl,
+        "static void RB_ShadowMapApplyCasterCull(",
+        "direct OpenGL topology-aware caster culling",
+    )
+    require_order(
+        gl_cull,
+        (
+            "mode == 2",
+            "casterGeo == NULL || !casterGeo->perfectHull",
+            "R_ShadowMapCasterTransformNeedsTwoSided( modelMatrix )",
+            "R_ShadowMapLightOriginInsideCasterBounds( backEnd.vLight",
+            "mode != 0 && !automaticTwoSided",
+            "GLenum cullFace = GL_FRONT;",
+            "materialCull == CT_BACK_SIDED",
+        ),
+        "direct OpenGL near-shell/uncertain-hull policy",
+    )
+    gl_shared_cull = braced_body(
+        gl,
+        "static void RB_SharedWorldInteractionGLApplyMapCasterCull(",
+        "shared OpenGL topology-aware caster culling",
+    )
+    require_order(
+        gl_shared_cull,
+        (
+            "pass.casterCullMode == 2",
+            "!caster.perfectHull",
+            "R_ShadowMapLightOriginInsideCasterBounds(",
+            "pass.legacyViewLight",
+            "pass.casterCullMode != 0 && !automaticTwoSided",
+            "GLenum face = GL_FRONT;",
+        ),
+        "shared OpenGL near-shell/uncertain-hull policy",
+    )
+    vk_cull = braced_body(
+        vk,
+        "static VkCullModeFlags VK_ShadowMap_CasterCullMode(",
+        "direct Vulkan topology-aware caster culling",
+    )
+    require_order(
+        vk_cull,
+        (
+            "mode == 0 || materialCull == CT_TWO_SIDED",
+            "casterGeo == NULL || !casterGeo->perfectHull",
+            "surf == NULL || surf->space == NULL",
+            "R_ShadowMapCasterTransformNeedsTwoSided(",
+            "surf->space->modelMatrix",
+            "R_ShadowMapLightOriginInsideCasterBounds( vLight",
+            "bool cullFront = true;",
+        ),
+        "direct Vulkan near-shell/uncertain-hull policy",
+    )
+    vk_shared_cull = braced_body(
+        vk,
+        "static VkCullModeFlags VK_ClassicShadow_EffectiveCull(",
+        "shared Vulkan topology-aware caster culling",
+    )
+    require_order(
+        vk_shared_cull,
+        (
+            "pass.casterCullMode == 0",
+            "pass.casterCullMode == 2",
+            "!casterPlan.caster->perfectHull",
+            "R_ShadowMapLightOriginInsideCasterBounds(",
+            "pass.legacyViewLight",
+            "bool cullFront = true;",
+        ),
+        "shared Vulkan near-shell/uncertain-hull policy",
+    )
+    for forbidden in ("mode == 1 ) ? GL_FRONT : GL_BACK", "mode 2 (default) stores engine-back"):
+        if forbidden in gl or forbidden in vk:
+            raise AssertionError(f"Far-shell caster policy survived: {forbidden!r}")
+
+    gl_signature = braced_body(
+        gl,
+        "static int RB_ShadowMapBuildPassSignatureForView(",
+        "OpenGL world-scoped cache signature",
+    )
+    for token in (
+        "renderWorld->mapFileCRC",
+        "RB_ShadowMapMapNameHash( viewDef )",
+        "vLight->shadowMapIncompleteMapMask",
+        "vLight->shadowMapHybridIncompleteMask",
+        "vLight->shadowMapPrelightMapMissingMask",
+        "R_ShadowMapPointFarDistance( vLight )",
+        "vLight->lightDef->parms.lightCenter[i]",
+    ):
+        require(gl_signature, token, "OpenGL world-scoped cache signature")
+
+    for token in (
+        "unsigned int\t\t\t\t\tcacheKeyHitMask;",
+        "unsigned int\t\t\t\t\tplannedCacheUpdateKeyMask;",
+    ):
+        require(arb2_parity_h, token, "canonical ARB2 cache estimate ABI")
+    cache_estimate = braced_body(
+        gl,
+        "static void RB_ShadowMapEstimateArb2CachePass(",
+        "canonical ARB2 cache estimate",
+    )
+    require_order(
+        cache_estimate,
+        (
+            "const unsigned int passMask",
+            "RB_ShadowMapCachePassKind( vLight, passKind )",
+            "const unsigned int cacheKeyMask",
+            "RB_ShadowMapStaticCacheableReadOnly( vLight, cachePassKind",
+            "RB_ShadowMapBuildPassSignatureForView( vLight, viewDef, cachePassKind",
+            "estimate.cacheKeyHitMask |= cacheKeyMask;",
+            "estimate.plannedCacheUpdateKeyMask & cacheKeyMask",
+            "estimate.cacheHitPassMask |= passMask;",
+            "estimate.freshUpdatePasses++;",
+            "estimate.plannedCacheUpdateKeyMask |= cacheKeyMask;",
+        ),
+        "requested receiver masks remain separate from canonical cache keys",
+    )
+    cache_admission = braced_body(
+        gl,
+        "static void RB_ShadowMapBuildUpdateAdmissions(",
+        "canonical ARB2 update admission cost",
+    )
+    require_compact(
+        cache_admission,
+        """const int cost = estimate.freshUpdatePasses
+            + estimate.budgetFallbackPasses;""",
+        "simplified canonical update admission cost",
+    )
+    for obsolete_cost in (
+        "collapsedFreshUpdatePasses",
+        "estimate.freshUpdatePassMask & SHADOWMAP_ARB2_CACHE_PASS_GLOBAL",
+    ):
+        if obsolete_cost in cache_admission:
+            raise AssertionError(
+                f"Obsolete LOCAL/GLOBAL admission collapse survived: {obsolete_cost}"
+            )
+    gl_cache_view = braced_body(
+        gl,
+        "bool RB_ShadowMapPrepareCacheView(",
+        "OpenGL map transition invalidation",
+    )
+    require_order(
+        gl_cache_view,
+        (
+            "renderWorld->mapFileCRC",
+            "RB_ShadowMapMapNameHash( viewDef )",
+            "g_projectedShadowMapCache[i].valid = false;",
+            "g_pointShadowMapCache[i].valid = false;",
+            "memset( g_shadowMapLightHistory, 0",
+            "g_activeProjectedShadowMapCache = NULL;",
+            "g_activePointShadowMapCache = NULL;",
+            "g_shadowMapDepthImage = NULL;",
+            "g_pointShadowMapColorImage = NULL;",
+            "memset( &g_projectedShadowMapState, 0",
+            "g_projectedTranslucentShadowPassReady = false;",
+            "g_pointTranslucentShadowPassReady = false;",
+            "g_shadowMapCacheRenderWorld = renderWorld;",
+        ),
+        "OpenGL map transition invalidates cache, aliases, and moment readiness",
+    )
+
+    projected_scratch = braced_body(
+        gl,
+        "static void RB_ShadowMapSelectProjectedScratchResources(",
+        "projected-only scratch selection",
+    )
+    point_scratch = braced_body(
+        gl,
+        "static void RB_ShadowMapSelectPointScratchResources(",
+        "point-only scratch selection",
+    )
+    for token in (
+        "g_activeProjectedShadowMapCache = NULL;",
+        "g_shadowMapDepthImage = g_shadowMapScratchDepthImage;",
+        "g_shadowMapRenderTexture = g_shadowMapScratchRenderTexture;",
+    ):
+        require(projected_scratch, token, "projected-only scratch selection")
+    for forbidden in ("g_activePointShadowMapCache", "g_pointShadowMap"):
+        if forbidden in projected_scratch:
+            raise AssertionError(
+                f"Projected scratch selection invalidates point provenance: {forbidden}"
+            )
+    for token in (
+        "g_activePointShadowMapCache = NULL;",
+        "g_pointShadowMapColorImage = g_pointShadowMapScratchColorImage;",
+        "g_pointShadowMapDepthImage = g_pointShadowMapScratchDepthImage;",
+        "g_pointShadowMapRenderTexture = g_pointShadowMapScratchRenderTexture;",
+    ):
+        require(point_scratch, token, "point-only scratch selection")
+    for forbidden in ("g_activeProjectedShadowMapCache", "g_shadowMapDepthImage"):
+        if forbidden in point_scratch:
+            raise AssertionError(
+                f"Point scratch selection invalidates projected provenance: {forbidden}"
+            )
+    direct_schedule = braced_body(
+        gl,
+        "static shadowMapSchedule_t RB_ShadowMapSchedulePass(",
+        "type-specific direct scratch selection",
+    )
+    require_order(
+        direct_schedule,
+        (
+            "if ( pointLight )",
+            "RB_ShadowMapSelectPointScratchResources();",
+            "else",
+            "RB_ShadowMapSelectProjectedScratchResources();",
+            "schedule.cacheable =",
+        ),
+        "point and projected scratch aliases are selected independently",
+    )
+
+    point_storage = braced_body(
+        gl,
+        "static bool RB_ShadowMapPointCacheEntryStorageValid(",
+        "point-cube physical storage validation",
+    )
+    # A cube is depth only unless something samples its packed colour, so the
+    # colour image's identity is checked where it exists and its presence has
+    # to match what the receivers need.
+    require_order(
+        braced_body(
+            gl,
+            "static bool RB_ShadowMapPointCacheEntryColorValid(",
+            "point-cube colour storage validation",
+        ),
+        (
+            "entry->colorImage != NULL",
+            "entry->colorStorageGeneration != 0",
+            "entry->colorImage->GetStorageGeneration()",
+            "entry->colorImage->IsLoaded()",
+            "!entry->colorImage->IsDefaulted()",
+            "entry->colorImage->GetDeviceHandle() != 0",
+            "entry->colorImage->GetOpts().textureType == TT_CUBIC",
+            "entry->colorImage->GetOpts().format",
+            "entry->highPrecision ? FMT_RGBA16F : FMT_RGBA8",
+        ),
+        "point-cube colour identity is generation/type/format exact",
+    )
+    require_order(
+        point_storage,
+        (
+            "entry->depthImage != NULL",
+            "entry->renderTexture != NULL",
+            "( entry->colorImage != NULL ) == RB_PointShadowMapColorCubeNeeded()",
+            "entry->colorImage == NULL",
+            "RB_ShadowMapPointCacheEntryColorValid( entry )",
+            "( entry->renderTexture->GetNumColorImages() > 0 )",
+            "== ( entry->colorImage != NULL )",
+            "entry->depthStorageGeneration != 0",
+            "entry->depthImage->GetStorageGeneration()",
+            "entry->depthImage->IsLoaded()",
+            "!entry->depthImage->IsDefaulted()",
+            "entry->depthImage->GetDeviceHandle() != 0",
+            "entry->depthImage->GetOpts().textureType == TT_CUBIC",
+            "entry->depthImage->GetOpts().format == FMT_DEPTH",
+            "entry->renderTexture->GetWidth() == entry->size",
+            "entry->renderTexture->GetHeight() == entry->size",
+        ),
+        "point-cube storage identity is generation/type/format/dimension exact",
+    )
+    for field in ("lightOrigin[3];", "farDistance;"):
+        require(gl, field, "point-cube render-time projection provenance")
+    point_active = braced_body(
+        gl,
+        "static bool RB_ShadowMapActivePointCacheContentReady(",
+        "active point-cube provenance validation",
+    )
+    require_order(
+        point_active,
+        (
+            "entry->farDistance > 0.0f",
+            "entry->lightOrigin[0]",
+            "entry->colorStorageGeneration == 0",
+            "entry->depthStorageGeneration == 0",
+            "entry->colorImage->GetStorageGeneration()",
+            "entry->depthImage->GetStorageGeneration()",
+        ),
+        "active point cubes require published projection and storage provenance",
+    )
+    point_projection = braced_body(
+        gl,
+        "static bool RB_ShadowMapPointCacheEntryProjectionMatches(",
+        "point-cube render-time projection identity",
+    )
+    require_order(
+        point_projection,
+        (
+            "entry->farDistance == R_ShadowMapPointFarDistance( vLight )",
+            "entry->lightOrigin[0] == vLight->globalLightOrigin[0]",
+            "entry->lightOrigin[1] == vLight->globalLightOrigin[1]",
+            "entry->lightOrigin[2] == vLight->globalLightOrigin[2]",
+        ),
+        "compatible point history cannot cross light-origin or far-plane changes",
+    )
+    point_history = braced_body(
+        gl,
+        "static pointShadowMapCacheEntry_t *RB_ShadowMapNewestCompatiblePointEntry(",
+        "point-cube admission history compatibility",
+    )
+    require_order(
+        point_history,
+        (
+            "requiredSize = RB_ShadowMapPointSizeValue()",
+            "requiredHighPrecision = RB_PointShadowMapHighPrecisionEnabled()",
+            "requiredDepthCompare = RB_PointShadowMapDepthCompareEnabled()",
+            "RB_ShadowMapPointCacheEntryStorageValid( entry )",
+            "entry->size == requiredSize",
+            "entry->highPrecision == requiredHighPrecision",
+            "entry->depthCompare == requiredDepthCompare",
+            "RB_ShadowMapPointCacheEntryProjectionMatches( entry, vLight )",
+            "entry->lastUpdatedFrame > newest->lastUpdatedFrame",
+            "newest = entry;",
+            "return newest;",
+        ),
+        "point-cube history selects the newest projection-compatible allocation",
+    )
+    projected_storage = braced_body(
+        gl,
+        "static bool RB_ShadowMapProjectedCacheEntryStorageValid(",
+        "projected-atlas physical storage validation",
+    )
+    require_order(
+        projected_storage,
+        (
+            "entry->atlasStorageGeneration != 0",
+            "g_shadowMapAtlasDepthImage != NULL",
+            "g_shadowMapAtlasRenderTexture != NULL",
+            "g_shadowMapAtlasDepthImage->GetStorageGeneration()",
+            "entry->atlasStorageGeneration",
+            "g_shadowMapAtlasDepthImage->IsLoaded()",
+            "!g_shadowMapAtlasDepthImage->IsDefaulted()",
+            "g_shadowMapAtlasDepthImage->GetDeviceHandle() != 0",
+            "g_shadowMapAtlasDepthImage->GetOpts().textureType == TT_2D",
+            "g_shadowMapAtlasDepthImage->GetOpts().format == FMT_DEPTH",
+            "g_shadowMapAtlasRenderTexture->GetWidth() > 0",
+            "g_shadowMapAtlasRenderTexture->GetHeight() > 0",
+        ),
+        "projected cache entries require the atlas allocation they rendered into",
+    )
+    for lookup_name in (
+        "static projectedShadowMapCacheEntry_t *RB_ShadowMapFindProjectedCacheEntry(",
+        "static projectedShadowMapCacheEntry_t *RB_ShadowMapNewestProjectedGlobalEntry( const int lightIndex ) {",
+    ):
+        require(
+            braced_body(gl, lookup_name, "projected cache lookup generation gate"),
+            "RB_ShadowMapProjectedCacheEntryStorageValid( entry )",
+            "projected cache lookups reject stale atlas allocations",
+        )
+    direct_cache_completion = braced_body(
+        gl,
+        "static void RB_ShadowMapCompleteCacheUpdate(",
+        "direct projected cache storage publication",
+    )
+    require_order(
+        direct_cache_completion,
+        (
+            "entry->lastUpdatedFrame = tr.frameCount;",
+            "entry->atlasStorageGeneration = g_shadowMapAtlasDepthImage != NULL",
+            "g_shadowMapAtlasDepthImage->GetStorageGeneration()",
+            "entry->state = g_projectedShadowMapState;",
+        ),
+        "direct projected cache publication stamps the rendered atlas allocation",
+    )
+    require_order(
+        direct_cache_completion,
+        (
+            "entry->lightOrigin[0] = vLight->globalLightOrigin[0];",
+            "entry->lightOrigin[1] = vLight->globalLightOrigin[1];",
+            "entry->lightOrigin[2] = vLight->globalLightOrigin[2];",
+            "entry->farDistance = R_ShadowMapPointFarDistance( vLight );",
+            "entry->lastUpdatedFrame = tr.frameCount;",
+            "entry->colorStorageGeneration = entry->colorImage != NULL",
+            "entry->depthStorageGeneration = entry->depthImage != NULL",
+        ),
+        "direct point-cache publication stamps projection and storage provenance",
+    )
+    shared_cache_completion = braced_body(
+        gl,
+        "static void RB_SharedWorldInteractionGLCompleteSealedCacheUpdate(",
+        "shared projected cache storage publication",
+    )
+    require_order(
+        shared_cache_completion,
+        (
+            "entry->lastUpdatedFrame = tr.frameCount;",
+            "entry->atlasStorageGeneration = preparedPass.projectedDepthImage != NULL",
+            "preparedPass.projectedDepthImage->GetStorageGeneration()",
+            "entry->state = pass.projected.state;",
+        ),
+        "shared projected cache publication stamps the rendered atlas allocation",
+    )
+    require_order(
+        shared_cache_completion,
+        (
+            "entry->lightOrigin[0] = pass.point.lightOrigin[0];",
+            "entry->lightOrigin[1] = pass.point.lightOrigin[1];",
+            "entry->lightOrigin[2] = pass.point.lightOrigin[2];",
+            "entry->farDistance = pass.point.farDistance;",
+            "entry->lastUpdatedFrame = tr.frameCount;",
+            "entry->colorStorageGeneration = entry->colorImage != NULL",
+            "entry->depthStorageGeneration = entry->depthImage != NULL",
+        ),
+        "shared point-cache publication stamps sealed projection and storage provenance",
+    )
+    shared_projected_match = braced_body(
+        gl,
+        "static bool RB_SharedWorldInteractionGLProjectedEntryMatches(",
+        "shared projected cache generation revalidation",
+    )
+    require_order(
+        shared_projected_match,
+        (
+            "entry->atlasStorageGeneration != 0",
+            "entry->atlasStorageGeneration",
+            "preparedPass.sampleStorageGeneration",
+        ),
+        "shared projected consumption preserves cache-to-storage provenance",
+    )
+    shared_point_match = braced_body(
+        gl,
+        "static bool RB_SharedWorldInteractionGLPointEntryMatches(",
+        "shared point-cache projection revalidation",
+    )
+    require_order(
+        shared_point_match,
+        (
+            "entry->lightOrigin[0] == pass.point.lightOrigin[0]",
+            "entry->lightOrigin[1] == pass.point.lightOrigin[1]",
+            "entry->lightOrigin[2] == pass.point.lightOrigin[2]",
+            "entry->farDistance == pass.point.farDistance",
+            "entry->colorStorageGeneration != 0",
+            "entry->depthStorageGeneration != 0",
+        ),
+        "shared point-cache consumption preserves projection and storage provenance",
+    )
+    point_bindings = braced_body(
+        gl,
+        "bool RB_ShadowMapTextureBindings(",
+        "point-cube bind-time identity export",
+    )
+    require_order(
+        point_bindings,
+        (
+            "bindings.pointAtlasLightIndex = -1;",
+            "bindings.pointAtlasContentFrame = -1;",
+            "RB_ShadowMapActivePointCacheContentReady()",
+            "bindings.pointAtlasLightIndex = g_activePointShadowMapCache->lightIndex;",
+            "bindings.pointAtlasSignature = g_activePointShadowMapCache->signature;",
+            "bindings.pointAtlasContentFrame = g_activePointShadowMapCache->lastUpdatedFrame;",
+        ),
+        "point sampler binding carries exact cache provenance",
+    )
+    for field in (
+        "pointAtlasLightIndex;",
+        "pointAtlasSignature;",
+        "pointAtlasContentFrame;",
+    ):
+        require(tr_local, field, "renderer point-cube binding ABI")
+
+    for declaration in (
+        "bool RB_ShadowMapProjectedAtlasSlotForLight( const viewLight_t *vLight,",
+        "const viewDef_t *viewDef, shadowMapArb2AtlasSlot_t &slot );",
+        "bool RB_ShadowMapProjectedAtlasSlotMarkUsed( int lightDefIndex,",
+        "int signature, std::uint64_t storageGeneration,",
+        "int cellX, int cellY, int cellSpan );",
+    ):
+        require(arb2_parity_h, declaration, "exact projected-atlas provenance API")
+    require(arb2_parity_h, "storageGeneration;", "projected-atlas slot generation ABI")
+    projected_slot_export = braced_body(
+        gl,
+        "bool RB_ShadowMapProjectedAtlasSlotForLight(",
+        "exact projected-atlas provenance export",
+    )
+    require_order(
+        projected_slot_export,
+        (
+            "viewDef->renderWorld == NULL",
+            "g_shadowMapCacheRenderWorld != viewDef->renderWorld",
+            "g_shadowMapCacheMapFileCRC != viewDef->renderWorld->mapFileCRC",
+            "g_shadowMapCacheMapNameHash != RB_ShadowMapMapNameHash( viewDef )",
+            "g_shadowMapAtlasDepthImage->IsDefaulted()",
+            "g_shadowMapAtlasDepthImage->GetOpts().textureType != TT_2D",
+            "g_shadowMapAtlasDepthImage->GetOpts().format != FMT_DEPTH",
+            "RB_ShadowMapBuildPassSignatureForView(",
+            "SHADOWMAP_PASS_GLOBAL, false",
+            "RB_ShadowMapFindProjectedCacheEntry(",
+            "lightDefIndex, SHADOWMAP_PASS_GLOBAL, signature",
+            "slot.signature = entry->signature;",
+            "slot.storageGeneration = entry->atlasStorageGeneration;",
+            "slot.lastUpdatedFrame = entry->lastUpdatedFrame;",
+            "slot.valid = true;",
+        ),
+        "projected slot export requires the exact current GLOBAL signature",
+    )
+    if "RB_ShadowMapNewestProjectedGlobalEntry(" in projected_slot_export:
+        raise AssertionError(
+            "Projected provenance export must not select a merely newest stale sibling"
+        )
+    projected_slot_pin = braced_body(
+        gl,
+        "bool RB_ShadowMapProjectedAtlasSlotMarkUsed(",
+        "exact projected-atlas residency pin",
+    )
+    require_order(
+        projected_slot_pin,
+        (
+            "RB_ShadowMapFindProjectedCacheEntry(",
+            "lightDefIndex, SHADOWMAP_PASS_GLOBAL, signature",
+            "entry->atlasStorageGeneration != storageGeneration",
+            "entry->atlasCellX != cellX",
+            "entry->atlasCellY != cellY",
+            "entry->atlasCellSpan != cellSpan",
+            "return false;",
+            "entry->lastUsedFrame = tr.frameCount;",
+            "return true;",
+        ),
+        "projected slot pin revalidates signature, storage generation, and physical cell identity",
+    )
+
+    point_cube_export = braced_body(
+        gl,
+        "bool RB_ShadowMapPointCubeForLight(",
+        "exact point-cube provenance export",
+    )
+    require_order(
+        point_cube_export,
+        (
+            "viewDef->renderWorld == NULL",
+            "g_shadowMapCacheRenderWorld != viewDef->renderWorld",
+            "g_shadowMapCacheMapFileCRC != viewDef->renderWorld->mapFileCRC",
+            "g_shadowMapCacheMapNameHash != RB_ShadowMapMapNameHash( viewDef )",
+            "!RB_ShadowMapActivePointCacheContentReady()",
+            "RB_ShadowMapBuildPassSignatureForView(",
+            "SHADOWMAP_PASS_GLOBAL",
+            "entry->lightIndex != cube.lightIndex",
+            "entry->signature != signature",
+            "cube.lastUpdatedFrame = entry->lastUpdatedFrame;",
+            "return true;",
+        ),
+        "point cube export is scoped to exact world, light, pass, and signature",
+    )
+
+    point_cube_mark_used = braced_body(
+        gl,
+        "void RB_ShadowMapPointCubeMarkUsed(",
+        "exact point-cube residency pin",
+    )
+    require_order(
+        point_cube_mark_used,
+        (
+            "RB_ShadowMapActivePointCacheContentReady()",
+            "g_activePointShadowMapCache->lightIndex == lightDefIndex",
+            "lastUsedFrame = tr.frameCount;",
+        ),
+        "only the selected valid point cube can be pinned",
+    )
+
+    hybrid_available = braced_body(
+        gl,
+        "static bool RB_ShadowMapHybridAvailableForPass( const viewLight_t *vLight,\n\t\tconst shadowMapPassKind_t passKind )",
+        "direct ARB2 hybrid availability",
+    )
+    require_order(
+        hybrid_available,
+        (
+            "RB_ShadowMapReceiverMaskForPass( passKind )",
+            "vLight->shadowMapIncompleteMapMask",
+            "vLight->shadowMapPrelightMapMissingMask",
+            "incompleteMapMask & receiverMask",
+            "vLight->shadowMapPrelightMapMissingMask & receiverMask",
+            "vLight->shadowMapHybridIncompleteMask & receiverMask",
+            "vLight->globalShadowMapStencilSupplements != NULL",
+            "passKind == SHADOWMAP_PASS_GLOBAL",
+            "vLight->localShadowMapStencilSupplements != NULL",
+        ),
+        "direct hybrid accepts only exact ordinary supplement ownership",
+    )
+    hybrid_stencil = braced_body(
+        gl,
+        "static bool RB_ShadowMapPrepareMappedReceiverStencil(",
+        "direct ARB2 mapped supplement stencil",
+    )
+    require_order(
+        hybrid_stencil,
+        (
+            "if ( !hybrid )",
+            "glStencilFunc( GL_ALWAYS, 128, 255 );",
+            "vLight->globalShadowMapStencilSupplements",
+            "passKind == SHADOWMAP_PASS_GLOBAL",
+            "vLight->localShadowMapStencilSupplements",
+            "globalSupplements == NULL && localSupplements == NULL",
+            "glScissor(",
+            "glClear( GL_STENCIL_BUFFER_BIT );",
+            "VPROG_STENCIL_SHADOW",
+            "RB_StencilShadowPass( globalSupplements );",
+            "RB_StencilShadowPass( localSupplements );",
+            "glStencilFunc( GL_GEQUAL, 128, 255 );",
+        ),
+        "direct hybrid clears and stamps only the missing caster supplements",
+    )
+    direct_shadow_pass = braced_body(
+        gl,
+        "static void RB_ShadowMapRunPass(",
+        "direct ARB2 incomplete-map failover",
+    )
+    map_or_hybrid = braced_body(
+        gl,
+        "static bool RB_ShadowMapMapOrHybridAvailableForPass(\n\t\tconst viewLight_t *vLight",
+        "shared direct/estimator completeness predicate",
+    )
+    require_order(
+        map_or_hybrid,
+        (
+            "RB_ShadowMapReceiverMaskForPass( passKind )",
+            "vLight->shadowMapIncompleteMapMask",
+            "vLight->shadowMapPrelightMapMissingMask",
+            "if ( !mapIncomplete )",
+            "RB_ShadowMapHybridAvailableForPass(",
+            "*hybridOut = hybrid;",
+            "return hybrid;",
+        ),
+        "complete maps or exact hybrids share one fail-closed predicate",
+    )
+    require_order(
+        direct_shadow_pass,
+        (
+            "RB_ShadowMapMapOrHybridAvailableForPass(",
+            "vLight, passKind, &hybrid",
+            "passKind == SHADOWMAP_PASS_GLOBAL",
+            "g_shadowMapGlobalPassHybrid = hybrid;",
+            "if ( !mapOrHybridAvailable )",
+            "RB_ShadowMapMarkStencilFallbackSticky( vLight );",
+            "if ( !deferReceiverDraw )",
+            "RB_ShadowMapSchedulePass(",
+        ),
+        "incomplete direct maps fail closed before scheduling unless hybrid-complete",
+    )
+    if direct_shadow_pass.count("RB_ShadowMapPrepareMappedReceiverStencil(") != 2:
+        raise AssertionError(
+            "Direct ARB2 must stamp hybrid supplements on both cache reuse and fresh map paths"
+        )
+    reuse_path = braced_body(
+        direct_shadow_pass,
+        "if ( schedule.action == SHADOWMAP_SCHEDULE_REUSE )",
+        "direct ARB2 cache-reuse mask failover",
+    )
+    require_order(
+        reuse_path,
+        (
+            "RB_ShadowMapPrepareMappedReceiverStencil(",
+            "const bool maskOk = receiverStencilReady",
+            "if ( maskOk )",
+            "RB_ShadowMapMarkStencilFallbackSticky( vLight );",
+            "RB_ShadowMapStencilFallback(",
+        ),
+        "hybrid cache reuse falls back to full stencil if the mapped mask fails",
+    )
+    fresh_mask_start = direct_shadow_pass.find("bool maskOk = false;")
+    if fresh_mask_start < 0:
+        raise AssertionError("Missing fresh direct ARB2 receiver-mask result")
+    require_order(
+        direct_shadow_pass[fresh_mask_start:],
+        (
+            "RB_ShadowMapPrepareMappedReceiverStencil(",
+            "maskOk = receiverStencilReady",
+            "const bool mapped =",
+            "if ( mapped )",
+            "RB_ShadowMapMarkStencilFallbackSticky( vLight );",
+            "RB_ShadowMapStencilFallback(",
+        ),
+        "fresh hybrid map mask failure falls back to full stencil",
+    )
+    direct_entry = braced_body(
+        gl,
+        "void RB_ARB2_DrawInteractions( void )",
+        "direct ARB2 translucent hybrid handoff",
+    )
+    require_order(
+        direct_entry,
+        (
+            "g_shadowMapGlobalPassHybrid = false;",
+            "RB_ShadowMapRunPass( vLight, SHADOWMAP_PASS_GLOBAL",
+            "g_shadowMapGlobalPassMapped != SHADOWMAP_GLOBAL_MAPPED_NONE",
+            "RB_ShadowMapPrepareMappedReceiverStencil( vLight",
+            "SHADOWMAP_PASS_GLOBAL",
+            "g_shadowMapGlobalPassHybrid",
+            "const bool translucentMaskOk = receiverStencilReady",
+            "if ( translucentMaskOk )",
+            "else",
+            "RB_ShadowMapMarkStencilFallbackSticky( vLight );",
+            "RB_ShadowMapStencilFallback( vLight",
+        ),
+        "translucent mapped receivers restamp hybrid supplements and fail closed",
+    )
+
+    require(
+        modern_h,
+        "unsigned int\t\tarb2CacheKeyHitMask;",
+        "modern descriptor canonical cache-key provenance",
+    )
+    modern_single_resource = braced_body(
+        modern,
+        "static bool R_ModernShadowPlanner_Arb2SingleResourceComplete(",
+        "modern single-resource ownership fail-closed gate",
+    )
+    require_order(
+        modern_single_resource,
+        (
+            "vLight->localInteractions != NULL",
+            "activeReceiverMask |= SHADOWMAP_RECEIVER_MASK_LOCAL;",
+            "vLight->globalInteractions != NULL",
+            "vLight->translucentInteractions != NULL",
+            "activeReceiverMask |= SHADOWMAP_RECEIVER_MASK_GLOBAL;",
+            "vLight->shadowMapIncompleteMapMask",
+            "vLight->shadowMapHybridIncompleteMask",
+            "vLight->shadowMapPrelightMapMissingMask",
+            "incompleteMapMask & activeReceiverMask",
+            "vLight->localShadowMapCasters != NULL",
+            "vLight->localShadowMapDynamicCasters != NULL",
+            "vLight->localTranslucentShadowMapCasters != NULL",
+            "vLight->globalShadowMapStencilSupplements != NULL",
+            "vLight->localShadowMapStencilSupplements != NULL",
+            "return activeReceiverMask != 0;",
+        ),
+        "modern projected and point resources cannot collapse receiver ownership or stencil supplements",
+    )
+
+    modern_point_resource = braced_body(
+        modern,
+        "static void R_ModernShadowPlanner_ResolveArb2AtlasSlot(",
+        "modern exact point-cube planner resolution",
+    )
+    require_order(
+        modern_point_resource,
+        (
+            "descriptor.arb2AtlasSlotReady = false;",
+            "descriptor.arb2AtlasSignature = 0;",
+            "descriptor.arb2AtlasStorageGeneration = 0;",
+            "descriptor.arb2PointCubeReady = false;",
+            "descriptor.arb2PointCubeSignature = 0;",
+            "descriptor.arb2PointCubeContentFrame = -1;",
+            "descriptor.arb2CacheKeyHitMask & SHADOWMAP_ARB2_CACHE_PASS_GLOBAL",
+            "vLight->shadowMapDynamicCasterCount == 0",
+            "R_ModernShadowPlanner_Arb2SingleResourceComplete( vLight )",
+            "if ( descriptor.pointLight )",
+            "RB_ShadowMapPointCubeForLight( vLight, viewDef, cube )",
+            "cube.size != descriptor.resolution",
+            "descriptor.arb2PointCubeSignature = cube.signature;",
+            "descriptor.arb2PointCubeContentFrame = cube.lastUpdatedFrame;",
+            "descriptor.arb2PointCubeReady = true;",
+            "RB_ShadowMapProjectedAtlasSlotForLight( vLight, viewDef, slot )",
+            "descriptor.arb2AtlasSignature = slot.signature;",
+            "descriptor.arb2AtlasStorageGeneration = slot.storageGeneration;",
+            "descriptor.arb2AtlasContentFrame = slot.lastUpdatedFrame;",
+            "descriptor.arb2AtlasSlotReady = true;",
+        ),
+        "modern descriptors require exact complete static GLOBAL physical content",
+    )
+    require(
+        modern_h,
+        "arb2AtlasStorageGeneration;",
+        "modern projected-atlas generation provenance ABI",
+    )
+
+    modern_cache_isolation = braced_body(
+        modern,
+        "static bool R_ModernShadowPlanner_CanIsolateArb2CacheOwnership(",
+        "modern physical shadow resource isolation",
+    )
+    require_order(
+        modern_cache_isolation,
+        (
+            "descriptor.pointLight",
+            "descriptor.arb2PointCubeReady",
+            "descriptor.arb2AtlasSlotReady",
+            "descriptor.modernReceiverSamplingReady && !physicalResourceReady",
+        ),
+        "cache isolation follows point-cube or projected-atlas provenance",
+    )
+
+    vk_backend = read("src/renderer/Vulkan/vk_Backend.cpp")
+    vk_projected_slot_stub = braced_body(
+        vk_backend,
+        "bool RB_ShadowMapProjectedAtlasSlotForLight(",
+        "Vulkan fail-closed GL projected-slot provenance stub",
+    )
+    require_order(
+        vk_projected_slot_stub,
+        (
+            "(void)vLight; (void)viewDef;",
+            "memset( &slot, 0, sizeof( slot ) );",
+            "return false;",
+        ),
+        "Vulkan must not advertise the GL projected atlas",
+    )
+    vk_projected_pin_stub = braced_body(
+        vk_backend,
+        "bool RB_ShadowMapProjectedAtlasSlotMarkUsed(",
+        "Vulkan fail-closed GL projected-slot pin stub",
+    )
+    require_order(
+        vk_projected_pin_stub,
+        (
+            "(void)lightDefIndex; (void)signature; (void)cellX; (void)cellY;",
+            "(void)storageGeneration; (void)cellSpan;",
+            "return false;",
+        ),
+        "Vulkan projected-slot pin cannot validate GL residency",
+    )
+    vk_point_cube_stub = braced_body(
+        vk_backend,
+        "bool RB_ShadowMapPointCubeForLight(",
+        "Vulkan fail-closed GL point-cube provenance stub",
+    )
+    require_order(
+        vk_point_cube_stub,
+        (
+            "memset( &cube, 0, sizeof( cube ) );",
+            "return false;",
+        ),
+        "Vulkan must not advertise the GL point cube",
+    )
+    vk_point_mark_stub = braced_body(
+        vk_backend,
+        "void RB_ShadowMapPointCubeMarkUsed(",
+        "Vulkan no-op GL point-cube residency stub",
+    )
+    require(vk_point_mark_stub, "(void)lightDefIndex;", "Vulkan point-cube pin is a no-op")
+
+    clustered = read("src/renderer/ModernClusteredLighting.cpp")
+    clustered_flags = braced_body(
+        clustered,
+        "static int R_ModernClusteredLighting_ShadowDescriptorFlags(",
+        "clustered shadow physical-resource flag",
+    )
+    require(
+        clustered_flags,
+        "shadow.arb2AtlasSlotReady || shadow.arb2PointCubeReady",
+        "point cubes and projected atlas cells share the GPU provenance flag",
+    )
+    clustered_copy = braced_body(
+        clustered,
+        "static void R_ModernClusteredLighting_CopyPlannerShadowDescriptor(",
+        "clustered point-cube freshness handoff",
+    )
+    require_order(
+        clustered_copy,
+        (
+            "src.pointLight",
+            "src.arb2PointCubeContentFrame",
+            "src.arb2AtlasContentFrame",
+            "src.arb2AtlasSlotReady || src.arb2PointCubeReady",
+        ),
+        "clustered descriptors carry exact point or projected resource freshness",
+    )
+    clustered_apply = braced_body(
+        clustered,
+        "static void R_ModernClusteredLighting_ApplyShadowDescriptor(",
+        "clustered per-light physical-resource gate",
+    )
+    require_order(
+        clustered_apply,
+        (
+            "bool projectedSlotReady = shadow->arb2AtlasSlotReady;",
+            "RB_ShadowMapProjectedAtlasSlotMarkUsed(",
+            "shadow->lightDefIndex, shadow->arb2AtlasSignature",
+            "shadow->arb2AtlasStorageGeneration",
+            "shadow->arb2AtlasCellX, shadow->arb2AtlasCellY",
+            "shadow->arb2AtlasCellSpan",
+            "const bool projectedSlotBlocked",
+            "projectedSlotBlocked || pointCubeBlocked",
+            "stats.shadowAtlasSlotBlockedLights++;",
+        ),
+        "projected resource identity is revalidated before modern consumption",
+    )
+    require_order(
+        clustered_apply,
+        (
+            "const bool projectedSlotBlocked",
+            "const bool pointCubeBlocked",
+            "!shadow->arb2PointCubeReady",
+            "projectedSlotBlocked || pointCubeBlocked",
+            "MODERN_SHADOW_FALLBACK_RESOURCE_UNAVAILABLE",
+            "RB_ShadowMapPointCubeMarkUsed( shadow->lightDefIndex )",
+        ),
+        "clustered point lights fail closed without their exact cube",
+    )
+    clustered_lossless = braced_body(
+        clustered,
+        "bool R_ModernClusteredLighting_FrameLossless(",
+        "clustered frame lossless physical-resource guard",
+    )
+    require(
+        clustered_lossless,
+        "rg_clusteredLightingStats.shadowAtlasSlotBlockedLights == 0",
+        "slot pin/bind failure blocks visible modern ownership",
+    )
+    gl_cache_gate = braced_body(
+        gl,
+        "static bool RB_ShadowMapStaticCacheable(",
+        "OpenGL mutable-caster cache gate",
+    )
+    gl_cache_read_gate = braced_body(
+        gl,
+        "static bool RB_ShadowMapStaticCacheableReadOnly(",
+        "OpenGL mutable-caster read gate",
+    )
+    for gate in (gl_cache_gate, gl_cache_read_gate):
+        require(gate, "vLight->shadowMapStaticCasterCount <= 0", "only opaque static depth is resident")
+        if "shadowMapAlphaCasterCount > 0" in gate:
+            raise AssertionError("Live cutouts must not disable opaque projected cache composition")
+    interaction = read("src/renderer/Interaction.cpp")
+    classification = braced_body(interaction, "static bool R_ShadowMapCasterIsDynamic(", "live caster classification")
+    require_compact(classification, "if ( shader != NULL && shader->Coverage() == MC_PERFORATED ) { return true; }",
+                    "animated cutout coverage is always live")
+    require(interaction, "R_ShadowMapCasterIsDynamic( entityDef, shadowShader )", "cutout chain routing")
+    require(interaction, "R_ShadowMapCasterIsDynamic( entityDef, shader )", "cutout signature exclusion")
+    stats_reset = braced_body(gl, "static void RB_ShadowMapStatsReset( void )", "shadow frame reset")
+    require(stats_reset, "RB_ShadowMapPrepareCacheView( backEnd.viewDef );", "per-view cache scope check")
+
+    modern_cache_owner = braced_body(
+        modern_executor,
+        "static const viewDef_t *R_ModernGLExecutor_ShadowCacheOwnerView(",
+        "modern OpenGL shadow cache owner selection",
+    )
+    require_order(
+        modern_cache_owner,
+        (
+            "packetFrame.NumScenes() - 1",
+            "viewDef->renderWorld == NULL",
+            "!viewDef->isSubview",
+            "return fallback;",
+        ),
+        "modern OpenGL root-view cache owner selection",
+    )
+    modern_prepare = braced_body(
+        modern_executor,
+        "void R_ModernGLExecutor_PrepareFrame(",
+        "modern OpenGL pre-plan cache transition",
+    )
+    require_order(
+        modern_prepare,
+        (
+            "R_ModernGLExecutor_ShadowCacheOwnerView( packetFrame )",
+            "RB_ShadowMapPrepareCacheView( shadowCacheOwnerView )",
+            "R_ModernGLExecutor_ResetPassOwnershipTable( \"frame-start\" )",
+            "R_ModernShadowPlanner_PrepareFrame( packetFrame, shadowPlanningRequested );",
+        ),
+        "modern OpenGL cache transition precedes planning",
+    )
+    require_compact(
+        modern_prepare,
+        """rg_modernGLShadowTextureBindingsCurrent = shadowCacheOwnerView != NULL
+            && !RB_ShadowMapPrepareCacheView( shadowCacheOwnerView );""",
+        "modern GL first-frame and map-transition binding freshness assignment",
+    )
+    modern_shadow_bind_marker = "static bool R_ModernGLExecutor_BindModernShadowTextures("
+    modern_shadow_bind_definition = modern_executor.find(
+        modern_shadow_bind_marker,
+        modern_executor.find(modern_shadow_bind_marker) + len(modern_shadow_bind_marker),
+    )
+    if modern_shadow_bind_definition < 0:
+        raise AssertionError("Missing modern OpenGL shadow binding definition")
+    modern_shadow_bindings = braced_body(
+        modern_executor[modern_shadow_bind_definition:],
+        modern_shadow_bind_marker,
+        "modern OpenGL transition-frame binding guard",
+    )
+    require_order(
+        modern_shadow_bindings,
+        (
+            "RB_ShadowMapTextureBindings( bindings );",
+            "R_ModernGLExecutor_PointCubeDescriptorReady( bindings )",
+            "if ( !rg_modernGLShadowTextureBindingsCurrent )",
+            "bindings.projectedPersistentAtlas.ready = false;",
+            "bindings.pointAtlas.ready = false;",
+            "bindings.projectedMoments[i].ready = false;",
+            "bindings.pointMoments[i].ready = false;",
+            "if ( !exactPointCubeReady )",
+            "if ( bindings.projectedPersistentAtlasReady )",
+        ),
+        "modern OpenGL transition frame cannot expose stale atlas resources",
+    )
+    modern_exact_point_mismatch = braced_body(
+        modern_shadow_bindings,
+        "if ( !exactPointCubeReady )",
+        "modern OpenGL exact point-cube mismatch clear",
+    )
+    require_order(
+        modern_exact_point_mismatch,
+        (
+            "bindings.pointAtlas.ready = false;",
+            "bindings.pointAtlasReady = false;",
+            "for ( int i = 0; i < RENDERER_SHADOW_TEXTURE_MOMENT_COUNT; ++i )",
+            "bindings.pointMoments[i].ready = false;",
+            "bindings.pointMomentsReady = false;",
+        ),
+        "point cube and moments fail closed together on exact-descriptor mismatch",
+    )
+
+    modern_point_descriptor_gate = braced_body(
+        modern_executor,
+        "static bool R_ModernGLExecutor_PointCubeDescriptorReady(",
+        "modern GL exact point-cube descriptor gate",
+    )
+    require_order(
+        modern_point_descriptor_gate,
+        (
+            "bindings.pointAtlasReady",
+            "R_ModernShadowPlanner_DescriptorByIndex(",
+            "descriptor->pointLight",
+            "descriptor->arb2PointCubeReady",
+            "bindings.pointAtlasLightIndex == descriptor->lightDefIndex",
+            "bindings.pointAtlasSignature",
+            "descriptor->arb2PointCubeSignature",
+            "bindings.pointAtlasContentFrame",
+            "descriptor->arb2PointCubeContentFrame",
+            "bindings.pointAtlas.width == descriptor->resolution",
+            "bindings.pointAtlas.height == descriptor->resolution",
+            "descriptor->modernReceiverSamplingReady",
+            "descriptor->policy == MODERN_SHADOW_POLICY_MAPPED",
+            "descriptor->policy == MODERN_SHADOW_POLICY_CACHE_REUSE",
+        ),
+        "modern GL advertises a point cube only for a consumable exact descriptor",
+    )
+    modern_single_point_cube = braced_body(
+        modern_executor,
+        "static bool R_ModernGLExecutor_ModernVisibleShadowReceiversReady(",
+        "modern GL single point-cube ownership constraint",
+    )
+    duplicate_point_descriptor = braced_body(
+        modern_single_point_cube,
+        "if ( distinctPointLightDefs[i] == descriptor->lightDefIndex )",
+        "modern GL duplicate point-light descriptor deduplication",
+    )
+    require_order(
+        duplicate_point_descriptor,
+        ("seen = true;", "break;"),
+        "duplicate descriptors for one point light share its cube",
+    )
+    unseen_point_descriptor = braced_body(
+        modern_single_point_cube,
+        "if ( !seen )",
+        "modern GL distinct point-light accounting",
+    )
+    require_order(
+        unseen_point_descriptor,
+        (
+            "distinctPointLightDefCount < static_cast<int>( sizeof( distinctPointLightDefs ) / sizeof( distinctPointLightDefs[0] ) )",
+            "distinctPointLightDefs[distinctPointLightDefCount++] = descriptor->lightDefIndex;",
+            "distinctPointLightOverflow = true;",
+            "consumablePointLights++;",
+        ),
+        "only distinct point lights consume the single-cube budget and overflow fails closed",
+    )
+    if modern_single_point_cube.count("consumablePointLights++") != 1:
+        raise AssertionError(
+            "Point-cube ownership must count each distinct light exactly once"
+        )
+    point_cube_overflow = braced_body(
+        modern_single_point_cube,
+        "if ( consumablePointLights > 1 || distinctPointLightOverflow )",
+        "modern GL second-point-light fail-closed gate",
+    )
+    require_order(
+        point_cube_overflow,
+        (
+            "blockedLights += Max( 1, consumablePointLights - 1 );",
+            "stats.modernVisibleShadowPointConstraintLights = consumablePointLights;",
+        ),
+        "multiple distinct point lights cannot share the one bound samplerCube",
+    )
+    require_order(
+        modern_single_point_cube,
+        (
+            "if ( consumablePointLights > 1 || distinctPointLightOverflow )",
+            "stats.modernVisibleShadowBlockedLights = blockedLights;",
+            "if ( blockedLights > 0 )",
+            "return false;",
+        ),
+        "point-cube constraint blocks modern visible ownership",
+    )
+    require(
+        modern_shader,
+        "mapType == MODERN_SHADOW_MAP_POINT && ModernClusterShadowFlag(descriptor, MODERN_SHADOW_FLAG_ATLAS_SLOT) && descriptor.freshness.y > 0.5",
+        "modern point shader rejects missing or stale cube provenance",
+    )
+
+    atlas_grid = braced_body(gl, "static int RB_ShadowMapAtlasGridDim( void )", "physical atlas grid")
+    require_order(
+        atlas_grid,
+        (
+            "g_shadowMapAtlasRenderTexture->GetWidth()",
+            "g_shadowMapAtlasRenderTexture->GetHeight()",
+            "atlasSize / g_shadowMapAtlasCellSize",
+            "gridDim > 0",
+        ),
+        "physical atlas grid bounds",
+    )
+
+    def atlas_grid_dim(width: int, height: int, cell: int) -> int:
+        if cell <= 0:
+            return 0
+        raw = min(width, height) // cell
+        return min(8, max(1, raw)) if raw > 0 else 0
+
+    atlas_cases = {
+        (4096, 2048, 512): 4,
+        (4095, 4096, 512): 7,
+        (256, 512, 512): 0,
+        (8192, 8192, 512): 8,
+        (4096, 4096, 0): 0,
+    }
+    for inputs, expected in atlas_cases.items():
+        actual = atlas_grid_dim(*inputs)
+        if actual != expected:
+            raise AssertionError(
+                f"Physical atlas grid case {inputs} produced {actual}, expected {expected}"
+            )
+
+    atlas_find = braced_body(
+        gl,
+        "static bool RB_ShadowMapAtlasFindFreeBlock(",
+        "bounded atlas block allocation",
+    )
+
+    cache_expire = braced_body(
+        gl,
+        "static void RB_ShadowMapExpireCaches( void )",
+        "live OpenGL cache limit enforcement",
+    )
+    require_order(
+        cache_expire,
+        (
+            "RB_ShadowMapProjectedCacheSlotLimit()",
+            "RB_ShadowMapPointCacheSlotLimit()",
+            "RB_ShadowMapProjectedCacheEntryStorageValid(",
+            "i >= projectedLimit",
+            "g_projectedShadowMapCache[i].valid = false;",
+            "RB_ShadowMapPointCacheEntryStorageValid(",
+            "i >= pointLimit",
+            "g_pointShadowMapCache[i].valid = false;",
+        ),
+        "live OpenGL cache generation, limit, and residency enforcement",
+    )
+    cache_estimate_counts = braced_body(
+        gl,
+        "static void RB_ShadowMapArb2CacheSlotCountsReadOnly(",
+        "ARB2 cache-estimate live-storage counts",
+    )
+    require_order(
+        cache_estimate_counts,
+        (
+            "RB_ShadowMapProjectedCacheEntryStorageValid(",
+            "estimate.projectedCacheSlotsUsed++;",
+            "RB_ShadowMapPointCacheEntryStorageValid(",
+            "estimate.pointCacheSlotsUsed++;",
+        ),
+        "ARB2 cache estimates exclude generation-stale metadata",
+    )
+    for stale_flag in (
+        "g_projectedShadowMapCache[i].valid",
+        "g_pointShadowMapCache[i].valid",
+    ):
+        if stale_flag in cache_estimate_counts:
+            raise AssertionError(
+                "ARB2 cache estimates must validate physical storage, not raw cache metadata: "
+                + stale_flag
+            )
+    require_order(
+        atlas_find,
+        (
+            "span <= 0 || span > gridDim",
+            "y + span <= gridDim",
+            "x + span <= gridDim",
+            "occupied[y + by][x + bx]",
+        ),
+        "bounded atlas block allocation",
+    )
+    atlas_live_occupancy = braced_body(
+        atlas_find,
+        "if ( !RB_ShadowMapProjectedCacheEntryStorageValid( &entry ) )",
+        "projected-atlas live-storage occupancy gate",
+    )
+    require(
+        atlas_live_occupancy,
+        "continue;",
+        "stale projected-atlas generation excluded from occupancy",
+    )
+    require_order(
+        atlas_find,
+        (
+            "RB_ShadowMapProjectedCacheEntryStorageValid( &entry )",
+            "occupied[y][x] = true;",
+            "occupied[y + by][x + bx]",
+        ),
+        "only live projected-atlas storage reserves cells before free-block search",
+    )
+
+    timed_begin = braced_body(
+        gl,
+        "static void RB_ShadowMapBeginTimedPhase(",
+        "non-nested OpenGL shadow timing begin",
+    )
+    require_order(
+        timed_begin,
+        (
+            "RB_ShadowMapGpuTimerQueriesAvailable()",
+            "R_RendererMetrics_PauseGpuTimer( timerSlot )",
+            "RB_ShadowMapBeginGpuTimerQuery(",
+            "timedPhase.gpuTimerQuery == NULL && timedPhase.parentGpuTimerPaused",
+            "R_RendererMetrics_ResumeGpuTimer(",
+        ),
+        "non-nested OpenGL shadow timing begin",
+    )
+    timed_end = braced_body(
+        gl,
+        "static float RB_ShadowMapEndTimedPhase(",
+        "non-nested OpenGL shadow timing end",
+    )
+    require_order(
+        timed_end,
+        (
+            "RB_ShadowMapEndGpuTimerQuery( timedPhase.gpuTimerQuery );",
+            "if ( timedPhase.parentGpuTimerPaused )",
+            "R_RendererMetrics_ResumeGpuTimer(",
+        ),
+        "inner query completion before parent timer resume",
+    )
 
 
 def validate_exact_static_cache_and_admission_contract() -> None:
@@ -1222,7 +4324,7 @@ def validate_exact_static_cache_and_admission_contract() -> None:
     resources_known_good = braced_body(
         shadow_map,
         "bool VK_ShadowMap_ResourcesKnownGood(",
-        "conservative Vulkan shadow resource truth",
+        "Vulkan shadow resource truth",
     )
     require_order(
         resources_known_good,
@@ -1236,15 +4338,31 @@ def validate_exact_static_cache_and_admission_contract() -> None:
         ),
         "generation-gated Vulkan shadow resource truth",
     )
-    if "return true;" in resources_known_good:
-        raise AssertionError(
-            "Vulkan resource truth must remain conservative until pre-front-end admission is safe"
-        )
-    if resources_known_good.count("return false;") < 3 or not compact(
+    # The front-end elision gate (R_ShadowMapLightWillUseShadowMaps) may only
+    # shed a light's stencil volumes once both class generations prove out, so
+    # the two guarded falses must precede the single trailing true.
+    if resources_known_good.count("return false;") != 2 or not compact(
         resources_known_good
-    ).endswith("return false; }"):
+    ).endswith("return true; }"):
         raise AssertionError(
-            "Vulkan resource truth must end in an unconditional false after its generation checks"
+            "Vulkan resource truth must report generation truth: two guarded falses then true"
+        )
+
+    # A per-view admission miss lands after the front end has already elided
+    # volumes, so every unresolved receiver must still draw unshadowed. The
+    # 2026-07-24 fail-closed shape (dropping the light contribution) is what
+    # forced the conservative gate; it must not return.
+    interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
+    for unresolved_receiver_fallback in (
+        """if ( !localReceiverDrawn && vLight->localInteractions != NULL ) {""",
+        """if ( !globalOpaqueReceiverDrawn
+            && vLight->globalInteractions != NULL ) {""",
+        "translucentUsesUnshadowedFallback",
+    ):
+        require_compact(
+            interactions,
+            unresolved_receiver_fallback,
+            "unresolved Vulkan receivers draw unshadowed instead of vanishing",
         )
 
     require_compact(
@@ -1255,8 +4373,8 @@ def validate_exact_static_cache_and_admission_contract() -> None:
     )
     require_compact(
         header,
-        "static const int VK_SHADOW_MAX_CACHE_SLOTS = 16;",
-        "bounded class-specific static caches",
+        "static const int VK_SHADOW_MAX_CACHE_SLOTS = SHADOWMAP_POINT_CACHE_MAX_SLOTS;",
+        "static cache records sized for a whole view of point lights",
     )
     for obsolete_gate in (
         "VK_SHADOW_MAX_POINT_LIGHTS",
@@ -1348,7 +4466,7 @@ def validate_exact_static_cache_and_admission_contract() -> None:
         ("static_cast<int>( classification.lightClass )", "light-class identity"),
         ("vLight->shadowMapCasterSignature", "caster-content identity"),
         ("resourceSize", "resource-size identity"),
-        ("VK_ShadowMap_PointLightFar( vLight )", "point far-envelope identity"),
+        ("R_ShadowMapPointFarDistance( vLight )", "point far-envelope identity"),
         ("vLight->lightDef->parms.lightCenter[ i ]", "point center identity"),
         ("vLight->globalLightOrigin[ i ]", "receiver light-origin identity"),
         ("vLight->lightRadius[ i ]", "light-radius identity"),
@@ -1373,7 +4491,7 @@ def validate_exact_static_cache_and_admission_contract() -> None:
             "entry.tileSize == tileSize",
             "entry.image != VK_NULL_HANDLE",
             "entry.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL",
-            "entry.lastUsedFrame = tr.frameCount;",
+            "entry.lastUsedFrame = backEnd.frameCount;",
             "entry.reserved = true;",
             "return i;",
         ),
@@ -1397,7 +4515,7 @@ def validate_exact_static_cache_and_admission_contract() -> None:
             "entry.cube.image != VK_NULL_HANDLE",
             """entry.cube.layout
                 == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL""",
-            "entry.lastUsedFrame = tr.frameCount;",
+            "entry.lastUsedFrame = backEnd.frameCount;",
             "entry.reserved = true;",
             "return i;",
         ),
@@ -1443,22 +4561,25 @@ def validate_exact_static_cache_and_admission_contract() -> None:
         "dynamic caster cache exclusion",
     )
     for exclusion in (
-        "haveDynamicCasters",
+        "dynamicsDefeatCache",
         "vLight->shadowMapCasterCount <= 0",
         "vLight->shadowMapStaticCasterCount <= 0",
-        "vLight->shadowMapAlphaCasterCount > 0",
         "vLight->shadowMapTranslucentCasterCount > 0",
         "vLight->globalTranslucentShadowMapCasters != NULL",
         "vLight->localTranslucentShadowMapCasters != NULL",
     ):
         require(static_gate, exclusion, f"opaque static-only exclusion {exclusion}")
+    # GL parity: view-fitted CSM reuse is an opt-in cvar gate, not a
+    # structural exclusion. AllocateProjectedPass restores the resident fit
+    # along with the tiles. The exact signature also includes that fit;
+    # copying cached depth still has a cost even when its coverage is current.
     require_compact(
         static_gate,
-        """if ( !pointLight
-            && ( cascadeCount != 1 || atlasDiv != 1 ) ) {
+        """if ( !pointLight && cascadeCount > 1
+            && !r_shadowMapCacheCSM.GetBool() ) {
             return false;
         }""",
-        "projected CSM cache exclusion",
+        "projected CSM cache gate",
     )
     require(
         static_gate,
@@ -1481,10 +4602,29 @@ def validate_exact_static_cache_and_admission_contract() -> None:
         "r_shadowMapProjectedCacheSize.GetInteger()",
         "projected cache-size cvar",
     )
-    require(
+    # The point limit is the shared policy both backends size their cube cache
+    # with: the slot cvar, bounded by the memory cvar and the record count.
+    require_order(
         point_limit,
-        "r_shadowMapPointCacheSize.GetInteger()",
-        "point cache-size cvar",
+        (
+            "R_ShadowMapPointCacheSlotLimit( VK_ShadowMap_PointSizeValue(),",
+            "VK_ShadowMap_DepthBytesPerPixel()",
+            "VK_SHADOW_MAX_CACHE_SLOTS",
+        ),
+        "point cache-size policy",
+    )
+    shared_point_limit = braced_body(
+        read("src/renderer/ShadowMapClassification.cpp"),
+        "int R_ShadowMapPointCacheSlotLimit(",
+        "shared point cache-size policy",
+    )
+    require_order(
+        shared_point_limit,
+        (
+            "r_shadowMapPointCacheSize.GetInteger()",
+            "r_shadowMapPointCacheMegs.GetInteger()",
+        ),
+        "shared point cache-size cvars",
     )
 
     begin_cache_view = braced_body(
@@ -1497,6 +4637,8 @@ def validate_exact_static_cache_and_admission_contract() -> None:
         (
             "renderWorld->mapFileCRC",
             "VK_ShadowMap_MapNameHash( viewDef )",
+            "VK_ShadowMap_ProjectedCacheSlotLimit()",
+            "VK_ShadowMap_PointCacheSlotLimit()",
             "r_shadowMapResidentFrames.GetInteger()",
             "vkShadow.cacheRenderWorld != renderWorld",
             "vkShadow.cacheMapFileCRC != mapFileCRC",
@@ -1504,11 +4646,13 @@ def validate_exact_static_cache_and_admission_contract() -> None:
             "VK_ShadowMap_ClearProjectedEntryMetadata(",
             "VK_ShadowMap_ClearPointEntryMetadata(",
             "projected.reserved = false;",
+            "i >= projectedLimit",
             "projected.generation != tr.videoRestartCount",
-            "tr.frameCount - projected.lastUsedFrame",
+            "backEnd.frameCount - projected.lastUsedFrame",
             "point.reserved = false;",
+            "i >= pointLimit",
             "point.generation != tr.videoRestartCount",
-            "tr.frameCount - point.lastUsedFrame",
+            "backEnd.frameCount - point.lastUsedFrame",
         ),
         "map/generation/residency cache invalidation",
     )
@@ -1547,37 +4691,90 @@ def validate_exact_static_cache_and_admission_contract() -> None:
         "runtime alias check across every local caster class",
     )
 
-    for marker, context, ensure_call, cache_name in (
-        (
-            "static int VK_ShadowMap_AllocProjectedCacheEntry(",
-            "projected cache LRU allocation",
-            "VK_ShadowMap_EnsureProjectedCacheImage( selected )",
-            "projectedCache",
-        ),
-        (
+    # Point cubes are one size, so their cache is a count of slots and the
+    # least recently used one gives way.
+    require_order(
+        braced_body(
+            shadow_map,
             "static int VK_ShadowMap_AllocPointCacheEntry(",
             "point cache LRU allocation",
-            "VK_ShadowMap_EnsurePointCacheCube( selected )",
-            "pointCache",
         ),
-    ):
-        allocation = braced_body(shadow_map, marker, context)
-        require_order(
-            allocation,
-            (
-                "if ( entry.reserved )",
-                "continue;",
-                "if ( !entry.valid )",
-                "selected = i;",
-                "entry.lastUsedFrame",
-                f"vkShadow.{cache_name}[ selected ].lastUsedFrame",
-                ensure_call,
-                f"VK_ShadowMap_Clear{'Projected' if cache_name == 'projectedCache' else 'Point'}EntryMetadata(",
-                f"vkShadow.{cache_name}[ selected ].reserved = true;",
-                "return selected;",
-            ),
-            context,
-        )
+        (
+            "if ( entry.reserved )",
+            "continue;",
+            "if ( !entry.valid )",
+            "selected = i;",
+            "entry.lastUsedFrame",
+            "vkShadow.pointCache[ selected ].lastUsedFrame",
+            "VK_ShadowMap_EnsurePointCacheCube( selected )",
+            "VK_ShadowMap_ClearPointEntryMetadata(",
+            "vkShadow.pointCache[ selected ].reserved = true;",
+            "return selected;",
+        ),
+        "point cache LRU allocation",
+    )
+    # Projected tiles differ in size, so their cache is bounded by the texels
+    # it holds: an idle image of the wanted size is taken as it is, and room
+    # for a new one comes from idle images first, then from the least
+    # recently used tiles no light on screen is using.
+    require_order(
+        braced_body(
+            shadow_map,
+            "static int VK_ShadowMap_OldestEvictableProjectedEntry(",
+            "projected cache LRU victim",
+        ),
+        (
+            "if ( entry.reserved ) {",
+            "continue;",
+            "if ( !entry.valid ) {",
+            "continue;",
+            "entry.lastUsedFrame >= backEnd.frameCount - 1",
+            "continue;",
+            "vkShadow.projectedCache[ oldest ].lastUsedFrame",
+            "return oldest;",
+        ),
+        "projected cache LRU victim",
+    )
+    require_order(
+        braced_body(
+            shadow_map,
+            "static int VK_ShadowMap_AllocProjectedCacheEntry(",
+            "projected cache memory-bounded allocation",
+        ),
+        (
+            "const long long budget = R_ShadowMapProjectedCacheTexelBudget();",
+            "!R_ShadowMapProjectedCacheAdmits( budget, 0, tileSize )",
+            "return -1;",
+            "if ( entry.reserved || entry.valid ) {",
+            "continue;",
+            "entry.blockSize == blockSize",
+            "entry.imageTileSize == tileSize",
+            "selected = i;",
+            "long long resident = VK_ShadowMap_ProjectedCacheTexels();",
+            # nothing is released for a block that would not fit even then
+            "long long reclaimable = 0;",
+            "entry.lastUsedFrame < backEnd.frameCount - 1",
+            "reclaimable += VK_ShadowMap_ProjectedEntryTexels( entry );",
+            "resident - reclaimable, tileSize ) ) {",
+            "return -1;",
+            "!R_ShadowMapProjectedCacheAdmits( budget, resident,",
+            "i != idle && !entry.valid && !entry.reserved",
+            "VK_ShadowMap_ReleaseProjectedCacheImage( entry );",
+            "while ( idle < 0 || !R_ShadowMapProjectedCacheAdmits( budget,",
+            "VK_ShadowMap_OldestEvictableProjectedEntry( limit );",
+            "return -1;",
+            "if ( victim.blockSize == blockSize",
+            "victim.imageTileSize == tileSize",
+            "selected = oldest;",
+            "VK_ShadowMap_ReleaseProjectedCacheImage( victim );",
+            "selected = idle;",
+            "VK_ShadowMap_EnsureProjectedCacheImage( selected, tileSize, blockSize )",
+            "VK_ShadowMap_ClearProjectedEntryMetadata(",
+            "vkShadow.projectedCache[ selected ].reserved = true;",
+            "return selected;",
+        ),
+        "projected cache memory-bounded allocation",
+    )
 
     schedule = braced_body(
         shadow_map,
@@ -1802,8 +4999,8 @@ def validate_exact_static_cache_and_admission_contract() -> None:
         (
             "region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;",
             "region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;",
-            "copy.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;",
-            "copy.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;",
+            "copy.srcImageLayout = srcImage == dstImage ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;",
+            "copy.dstImageLayout = srcImage == dstImage ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;",
             "vkCmdCopyImage2( cmd, &copy );",
         ),
         "depth-only projected cache copy",
@@ -1827,7 +5024,7 @@ def validate_exact_static_cache_and_admission_contract() -> None:
                 vkShadow.atlasImage,
                 pass.tileX, pass.tileY,
                 cache.image, 0, 0,
-                light.tileSize );""",
+                VK_ShadowMap_ProjectedBlockSize( light ) );""",
             "cache.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;",
             "if ( haveCacheHits )",
             "VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL",
@@ -1835,7 +5032,7 @@ def validate_exact_static_cache_and_admission_contract() -> None:
                 cache.image, 0, 0,
                 vkShadow.atlasImage,
                 pass.tileX, pass.tileY,
-                light.tileSize );""",
+                VK_ShadowMap_ProjectedBlockSize( light ) );""",
             "VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL",
             "vkShadow.atlasLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;",
         ),
@@ -1894,7 +5091,7 @@ def validate_exact_static_cache_and_admission_contract() -> None:
     require_compact(
         render,
         """if ( projectedCount == 0 && pointFreshCount == 0
-            && pointHitCount > 0 ) {
+            && pointComposeCount == 0 && pointHitCount > 0 ) {
             VK_ShadowMap_FinalizeCachePasses( viewDef );
             return true;
         }""",
@@ -2025,11 +5222,13 @@ def validate_packed_shadow_geometry() -> None:
             "VK_Exec_BindShadowGeometry( cmd, interPass.slot, tri )",
             "if ( packedPrimBatches )",
             """VK_Inter_DrawPackedShadowSurface( surf, packedCapInclusive, external,
-                frontSidedFace, backSidedFace )""",
+                frontSidedFace, backSidedFace, true )""",
+            """VK_Inter_DrawPackedShadowSurface( surf, packedCapInclusive, external,
+                frontSidedFace, backSidedFace, false )""",
             "interPass.volumeSkipCount++;",
             "continue;",
         ),
-        "packed/classic stencil geometry dispatch",
+        "packed/classic stencil geometry dispatch (r_showShadows colors packed volumes too)",
     )
 
     executor = read("src/renderer/Vulkan/vk_GuiExecutor.cpp")
@@ -2054,6 +5253,18 @@ def validate_packed_shadow_geometry() -> None:
 
 
 def validate_fail_closed_target_and_stencil_behavior() -> None:
+    render_init = read("src/renderer/RenderSystem_init.cpp")
+    gl_backend = read("src/renderer/draw_arb2.cpp")
+    require(
+        render_init,
+        'idCVar r_vkShadowFallbackTest( "r_vkShadowFallbackTest", "0"',
+        "default-off Vulkan shadow fallback injection",
+    )
+    require(
+        read("src/renderer/RendererBootstrap.cpp"),
+        '{ "r_vkShadowFallbackTest", &r_vkShadowFallbackTest, 0 }',
+        "default-safety Vulkan shadow fallback injection",
+    )
     executor = read("src/renderer/Vulkan/vk_GuiExecutor.cpp")
     target_has_stencil = braced_body(
         executor,
@@ -2069,6 +5280,11 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
     )
 
     interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
+    require(
+        interactions,
+        "!r_vkShadowFallbackTest.GetBool()",
+        "forced missing-stencil fallback coverage",
+    )
     draw_lights = braced_body(
         interactions,
         "void VK_Interactions_DrawLights(",
@@ -2120,8 +5336,11 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
             "VK_StencilShadowPass( globalGlobalVolumes );",
             "VK_StencilShadowPass( globalLocalVolumes );",
             "VK_DrawInteractionChain( vLight->globalInteractions );",
+            "if ( !localReceiverDrawn && vLight->localInteractions != NULL )",
+            "if ( !globalOpaqueReceiverDrawn && vLight->globalInteractions != NULL )",
             "const bool translucentUsesStencilFallback =",
             "const bool translucentUsesEmptyFallback =",
+            "const bool translucentUsesUnshadowedFallback =",
             "const bool drawTranslucentReceiver =",
             "if ( drawTranslucentReceiver )",
             "VK_DrawInteractionChain( vLight->translucentInteractions );",
@@ -2137,7 +5356,8 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
         (
             """const bool stencilResourcesReady =
                 activeTargetHasStencil &&
-                interPass.pipelineStencilShadow != VK_NULL_HANDLE;""",
+				interPass.pipelineStencilShadow != VK_NULL_HANDLE &&
+				!r_vkShadowFallbackTest.GetBool();""",
             "stencil target and pipeline readiness",
         ),
         (
@@ -2183,18 +5403,18 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
                     !localReceiverDrewWithStencil )
                 || ( globalStencilFallback &&
                     !globalStencilPassComplete );""",
-            "late stencil submission fail-closed gate",
+            "late stencil submission degradation gate",
         ),
     ):
         require_compact(draw_lights, snippet, label)
     require(
         draw_lights,
-        "stencil shadow volume submission incomplete; affected light receivers are skipped fail-closed",
+        "stencil shadow volume submission incomplete; affected light receivers fall back unshadowed",
         "late stencil submission diagnostic",
     )
     expected_draw_counts = {
-        "VK_DrawInteractionChain( vLight->localInteractions );": 3,
-        "VK_DrawInteractionChain( vLight->globalInteractions );": 3,
+        "VK_DrawInteractionChain( vLight->localInteractions );": 4,
+        "VK_DrawInteractionChain( vLight->globalInteractions );": 4,
         "VK_DrawInteractionChain( vLight->translucentInteractions );": 1,
     }
     for call, expected_count in expected_draw_counts.items():
@@ -2218,8 +5438,8 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
     )
     require(
         draw_lights,
-        "required shadow resource unavailable; affected light receivers are skipped fail-closed",
-        "fail-closed shadow diagnostic",
+        "required shadow resource unavailable; affected light receivers fall back unshadowed",
+        "unshadowed shadow-degradation diagnostic",
     )
 
     shared = read("src/renderer/tr_local.h")
@@ -2248,20 +5468,32 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
     )
 
     frontend = read("src/renderer/Interaction.cpp")
+    interaction_domain = read("src/renderer/ClassicInteractionDomain.cpp")
+    require_compact(
+        frontend,
+        """hash = R_ShadowMapHashInt( hash, entityDef->lastModifiedFrameNum );
+        hash = R_ShadowMapHashInt( hash, entityDef->dynamicModelFrameCount );""",
+        "settled dynamic-model caster signature revision",
+    )
     moments_support = braced_body(
         frontend,
         "static bool R_TranslucentShadowMapMomentsSupportedForLight(",
         "translucent shadow moment backend gate",
     )
+    # Vulkan answers the moment tier from its own capability, never from
+    # stale OpenGL state; the GL module keeps its GLSL/draw-buffer gate.
     require_order(
         moments_support,
         (
             'cvarSystem->GetCVarString( "r_actualRenderApi" )',
             'idStr::Icmp( activeRenderApi, "vulkan" ) == 0',
+            "#ifdef OPENQ4_RENDERER_VK_MODULE",
+            "return VK_ShadowMap_TranslucentMomentsAvailable();",
+            "#else",
             "return false;",
             "r_shadowMapTranslucentMoments.GetBool()",
         ),
-        "explicit Vulkan translucent-moment rejection",
+        "Vulkan translucent-moment tier answered by the Vulkan module",
     )
     require_order(
         frontend,
@@ -2289,15 +5521,14 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
         "front-end map/stencil ownership completeness",
     )
     require_compact(
-        frontend,
+        re.sub(r'//[^\n]*', '', frontend),
         """const bool mapMissingCasterNeedsStencil =
             shadowMapCasterPolicyActive &&
             !sint->shadowStencilUsesPrelight &&
             !linkedShadowMapCaster &&
             ( admittedShadowMapCaster ||
-                shadowTris != NULL ) &&
-            ( !shadowMapCasterOnly ||
-                admittedShadowMapCaster );""",
+                ( sint->shadowStencilEligible &&
+                    ( !sint->pointEmitterCasterSkip || shadowTris != NULL ) ) );""",
         "actual-caster map completeness provenance",
     )
     require_compact(
@@ -2310,31 +5541,101 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
         "point-emitter stencil generation probe",
     )
     require_compact(
+        interaction_domain,
+        """( geometry.skinningMode != GEOMETRY_SKINNING_NONE
+            && geometry.skinningMode != GEOMETRY_SKINNING_CPU )""",
+        "CPU-skinned shared interaction geometry admission",
+    )
+    require_compact(
         frontend,
         """const bool suppressDynamicShadowVolume =
             surfaceCanCastStencilShadowVolume && shadowLODAdmitted &&
-            model->IsDynamicModel() != DM_STATIC &&
+            ( surfaceCanCastDedicatedShadowMap ||
+                surfaceCanCastTranslucentShadowMap ) &&
+            entityModelIsDynamic &&
             !forcePointEmitterStencilGeneration &&
             R_ShadowMapLightWillUseShadowMaps( lightDef );""",
         "point-emitter volume probe before dynamic elision",
     )
     per_surface_volume_gate = braced_body(
         frontend,
-        "bool R_VulkanShadowMapsNeedPerSurfaceStencilVolumes(",
-        "Vulkan mapped per-surface stencil-volume policy",
+        "bool R_ShadowMapsNeedPerSurfaceStencilVolumes(",
+        "backend-neutral mapped per-surface stencil-volume policy",
     )
     require_order(
         per_surface_volume_gate,
         (
             "!r_shadows.GetBool()",
             "!r_useShadowMap.GetBool()",
+            # a prelight-only light keeps its combined volume: it has no
+            # per-surface volumes and no map casters to replace it with
+            "lightDef->parms.noShadows || lightDef->parms.noDynamicShadows",
+            "return false;",
             "lightDef->parms.pointLight",
             "!r_shadowMapPointLights.GetBool()",
-            'cvarSystem->GetCVarString( "r_actualRenderApi" )',
-            'idStr::Icmp( activeRenderApi, "vulkan" ) == 0',
+            "return false;",
+            "return true;",
         ),
-        "Vulkan mapped per-surface stencil-volume policy",
+        "backend-neutral mapped per-surface stencil-volume policy",
     )
+
+    require_compact(
+        gl_backend,
+        """static pointShadowMapCacheEntry_t *RB_ShadowMapAllocPointCacheEntry(
+        const bool allowEviction = true )""",
+        "GL point shadow cache non-evicting transaction allocator",
+    )
+    require_compact(
+        gl_backend,
+        """if ( !allowEviction || oldest == NULL ) {
+        return NULL;
+    }
+    oldest->valid = false;""",
+        "GL point shadow cache transaction spill",
+    )
+    require_compact(
+        gl_backend,
+        """schedule.pointEntry = RB_ShadowMapAllocPointCacheEntry( false );""",
+        "GL sealed point shadow transaction cache preservation",
+    )
+    require_compact(
+        gl_backend,
+        """schedule.projectedEntry = RB_ShadowMapAllocProjectedCacheEntry(
+            cellSpan, false );""",
+        "GL sealed projected shadow transaction cache preservation",
+    )
+    # A projected cache miss re-renders into the light's own idle entry and
+    # atlas cell. A map that changes cell on each rebuild flips receivers on
+    # the comparison threshold, and an entry used this frame must stay put.
+    recycle = braced_body(
+        gl_backend,
+        "static projectedShadowMapCacheEntry_t *RB_ShadowMapRecycleProjectedCacheEntry(",
+        "GL projected shadow cache cell reuse",
+    )
+    require_order(
+        recycle,
+        (
+            "RB_ShadowMapProjectedCacheEntryStorageValid( entry )",
+            "entry->lightIndex == lightIndex",
+            "entry->passKind == static_cast<int>( passKind )",
+            "entry->atlasCellSpan == cellSpan",
+            "entry->lastUsedFrame != tr.frameCount",
+            "newest->valid = false;",
+        ),
+        "GL projected shadow cache reuses only the light's own idle entry",
+    )
+    for recycle_call in (
+        """schedule.projectedEntry = RB_ShadowMapRecycleProjectedCacheEntry(
+            cacheLightIndex, passKind, cellSpan );
+        if ( schedule.projectedEntry == NULL ) {""",
+        """schedule.projectedEntry = RB_ShadowMapRecycleProjectedCacheEntry( lightIndex, passKind, RB_ShadowMapAtlasSpanForLight( vLight ) );
+            if ( schedule.projectedEntry == NULL ) {""",
+    ):
+        require_compact(gl_backend, recycle_call, "GL projected shadow miss keeps the light's atlas cell")
+    if "r_actualRenderApi" in per_surface_volume_gate:
+        raise AssertionError(
+            "Mapped per-surface prelight retention must not be Vulkan-only"
+        )
     require_compact(
         frontend,
         """sint->shadowStencilUsesPrelight =
@@ -2342,8 +5643,8 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
             R_LightHasRealPrelightModel( lightDef->parms ) &&
             model->IsStaticWorldModel() &&
             r_useOptimizedShadows.GetBool() &&
-            !R_VulkanShadowMapsNeedPerSurfaceStencilVolumes( lightDef );""",
-        "mapped Vulkan optimized-prelight split",
+            !R_ShadowMapsNeedPerSurfaceStencilVolumes( lightDef );""",
+        "mapped backend-neutral optimized-prelight split",
     )
     render_system = read("src/renderer/RenderSystem.cpp")
     require_order(
@@ -2412,7 +5713,7 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
     require_order(
         prelight,
         (
-            "R_VulkanShadowMapsNeedPerSurfaceStencilVolumes(",
+            "R_ShadowMapsNeedPerSurfaceStencilVolumes(",
             "return;",
             "idRenderModel *prelightModel = R_ViewLightPrelightModel( vLight );",
         ),
@@ -2430,21 +5731,52 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
         ),
         "optimized-prelight completeness resolution",
     )
+
+    map_admission = braced_body(
+        prelight_source,
+        "bool R_ShadowMapLightWillUseShadowMaps(",
+        "front-end shadow-map stencil-elision admission",
+    )
+    # A mapped prelit light casts from per-surface volumes like any other, so
+    # it sheds them the same way. What an atlas light cannot count on is its
+    # tile: it keeps its volumes unless the view's atlas lights all fit.
+    require_order(
+        map_admission,
+        (
+            """const bool pointLightPath = lightDef->parms.pointLight && !lightDef->parms.parallel
+                && !R_ShadowMapUsesDistantPointProjection( lightDef->parms );""",
+            """if ( pointLightPath ) {
+                if ( !r_shadowMapPointLights.GetBool() || !glConfig.cubeMapAvailable ) {
+                    return false;
+                }
+            } else if ( !R_ShadowMapAtlasHoldsView() ) {""",
+            "return false;",
+            "if ( !RB_ShadowMapResourcesKnownGood( pointLightPath ) ) { return false; }",
+        ),
+        "atlas lights shed their volumes only in a view whose atlas holds them all",
+    )
+    if "R_LightHasRealPrelightModel" in map_admission:
+        raise AssertionError(
+            "A mapped prelit light has per-surface volumes and must shed them like any other light"
+        )
+    if "protectStaticWorldNoSelfReceivers" in prelight:
+        raise AssertionError(
+            "Combined optimized prelights cannot conditionally lose LOCAL receiver ownership"
+        )
     require_compact(
         prelight,
-        """const int prelightStencilOwnershipMask =
-            protectStaticWorldNoSelfReceivers
-                ? SHADOWMAP_RECEIVER_MASK_GLOBAL
-                : ( SHADOWMAP_RECEIVER_MASK_LOCAL |
-                    SHADOWMAP_RECEIVER_MASK_GLOBAL );""",
-        "optimized-prelight receiver ownership routing",
+        """const bool linkedPrelightVolume = R_LinkLightSurf(
+            &vLight->globalShadows,
+            tri, NULL, light, NULL, vLight->scissorRect, true /* FIXME? */ );""",
+        "optimized-prelight retail global-shadow routing",
     )
     require_compact(
         prelight,
         """vLight->shadowMapPrelightStencilReadyMask |=
             vLight->shadowMapPrelightStencilRequiredMask &
-            prelightStencilOwnershipMask;""",
-        "optimized-prelight ownership-specific readiness",
+            ( SHADOWMAP_RECEIVER_MASK_LOCAL |
+                SHADOWMAP_RECEIVER_MASK_GLOBAL );""",
+        "optimized-prelight complete receiver readiness",
     )
 
     shadow_map = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
@@ -2477,14 +5809,25 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
         "void VK_ShadowMap_AbandonPreparedLights(",
         "prepared-shadow abandonment",
     )
-    require_order(
+    release_prepared = braced_body(
+        shadow_map,
+        "static void VK_ShadowMap_ReleasePreparedLights(",
+        "prepared-shadow release transaction",
+    )
+    require_compact(
         abandon,
+        "VK_ShadowMap_ReleasePreparedLights( true );",
+        "prepared-shadow abandonment",
+    )
+    require_order(
+        release_prepared,
         (
-            "VK_ShadowMap_MarkStencilFallbackSticky( vkShadow.lights[ i ].vLight );",
-            "vkShadow.lights[ i ].passes[ passIndex ].valid = false;",
+            "if ( markSticky && vkShadow.lights[ i ].valid )",
+            "VK_ShadowMap_MarkStencilFallbackSticky(",
+            "vkShadow.lights[ i ].passes[ passIndex ]",
             "vkShadow.lights[ i ].valid = false;",
         ),
-        "prepared-shadow abandonment",
+        "prepared-shadow release transaction",
     )
 
     render = braced_body(
@@ -2501,6 +5844,2647 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
             "return resumedMainRendering;",
         ),
         "main-rendering resume failure",
+    )
+
+
+def validate_dynamic_caster_composition_contract() -> None:
+    """GL SHADOWMAP_RENDER_STATIC_ONLY / _COMPOSE_DYNAMIC parity.
+
+    A light with a moving caster must keep its resident entry, which holds
+    STATIC depth only, and draw the dynamic chains over the published or
+    restored tile (projected) or over a scratch copy of the resident cube
+    (point). Re-rendering the whole static scene every frame is the
+    behaviour this replaces, so the pieces that make the split safe are
+    pinned here rather than left to reading.
+    """
+    shadow_map = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    header = read("src/renderer/Vulkan/vk_ShadowMap.h")
+
+    require_compact(
+        header,
+        "bool composeDynamic;",
+        "projected compose flag on the ownership pass state",
+    )
+
+    cacheable = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_StaticCacheable(",
+        "static cache admission",
+    )
+    # Dynamics compose, so they must not defeat or invalidate the cache --
+    # except while the opt-in shared stream can own the view, whose sealed
+    # allowCacheReuse forbids a composed hit on both backends, and for a
+    # point cube that cannot compose, which regenerates instead.
+    require_compact(
+        cacheable,
+        """const bool dynamicsDefeatCache = haveDynamicCasters
+            && ( r_rendererSharedWorldInteraction.GetBool()
+                || ( pointLight
+                    && !VK_ShadowMap_PointComposeAvailable() ) );""",
+        "dynamics keep the cache unless the light cannot compose",
+    )
+    require_compact(
+        cacheable,
+        """if ( dynamicsDefeatCache ) {
+            VK_ShadowMap_InvalidateLightCaches( renderWorld, lightIndex );
+        }""",
+        "only a cache-defeating class invalidates resident entries",
+    )
+    if compact(cacheable).count(compact("|| haveDynamicCasters")) != 0:
+        raise AssertionError(
+            "Projected dynamic casters must no longer reject static cacheability outright"
+        )
+    require_compact(
+        cacheable,
+        """if ( pointLight && !VK_ShadowMap_PointComposeAvailable()
+                && backEnd.frameCount - history->lastDynamicFrame
+                    < Max( 0,
+                            r_shadowMapStaticHysteresisFrames.GetInteger() ) ) {""",
+        "static hysteresis applies only to a point cube that regenerates",
+    )
+    read_only = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_StaticCacheableReadOnly(",
+        "side-effect-free static cache admission",
+    )
+    require_order(
+        read_only,
+        (
+            """const bool pointRegenerates = pointLight
+                && !VK_ShadowMap_PointComposeAvailable();""",
+            """if ( haveDynamicCasters
+                && ( pointRegenerates
+                    || r_rendererSharedWorldInteraction.GetBool() ) ) {""",
+            "if ( history != NULL && pointRegenerates",
+        ),
+        "the admission estimate predicts the same cacheability the walk decides",
+    )
+
+    allocate = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_AllocateProjectedPass(",
+        "projected ownership allocation",
+    )
+    require_compact(
+        allocate,
+        """pass.composeDynamic = ( pass.cacheHit || pass.cacheUpdate )
+            && VK_ShadowMap_PassHasDynamicCasters( light.vLight,
+                    receiverPass );""",
+        "cached projected passes owe their dynamic casters a compose draw",
+    )
+
+    dynamic_chains = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_PassHasDynamicCasters(",
+        "ownership dynamic caster presence",
+    )
+    require_order(
+        dynamic_chains,
+        (
+            "if ( vLight->globalShadowMapDynamicCasters != NULL )",
+            "return true;",
+            """return receiverPass == VK_SHADOW_RECEIVER_GLOBAL
+                && vLight->localShadowMapDynamicCasters != NULL;""",
+        ),
+        "LOCAL maps see global dynamics, GLOBAL maps add local dynamics",
+    )
+
+    render = braced_body(
+        shadow_map,
+        "bool VK_ShadowMap_RenderAtlas(",
+        "shadow-map caster rendering",
+    )
+    # An exact hit normally skips caster validation because the update that
+    # published the signature proved it. A composed hit still draws live
+    # casters, so it must prove the pipeline and representability again.
+    require_compact(
+        render,
+        """} else if ( pass.composeDynamic
+                && ( casterPipeline == VK_NULL_HANDLE
+                    || !VK_ShadowMap_PassCastersRepresentable(
+                            light, receiverPass ) ) ) {""",
+        "composed cache hits revalidate their live dynamic casters",
+    )
+    require_order(
+        render,
+        (
+            # publication copies the static-only tile out first ...
+            "VK_ShadowMap_CopyDepthTile( cmd, vkShadow.atlasImage, pass.tileX, pass.tileY, cache.image, 0, 0, VK_ShadowMap_ProjectedBlockSize( light ) );",
+            # ... then a resident hit restores its static tile ...
+            "VK_ShadowMap_CopyDepthTile( cmd, cache.image, 0, 0, vkShadow.atlasImage, pass.tileX, pass.tileY, VK_ShadowMap_ProjectedBlockSize( light ) );",
+            # ... and only then do the dynamics compose over both.
+            "if ( projectedComposeCount > 0 && casterPipeline != VK_NULL_HANDLE )",
+            "depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;",
+            """VK_ShadowMap_DrawPassCasters( ctx, light, receiverPass, cascadeIndex,
+                VK_SHADOW_CHAINS_DYNAMIC_ONLY )""",
+            "vkCmdEndRendering( cmd );",
+        ),
+        "compose runs after publication and restore, never before",
+    )
+    if "VK_ATTACHMENT_LOAD_OP_LOAD" not in render:
+        raise AssertionError(
+            "The compose scope must preserve the cached tile instead of clearing it"
+        )
+
+    # Point lights compose too (GL RB_RenderPointShadowMap render modes): the
+    # resident cube keeps static depth, and each view copies it to a scratch
+    # cube and draws the live chains over the copy.
+    available = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_PointComposeAvailable( void ) {",
+        "point compose availability",
+    )
+    require_compact(
+        available,
+        """return r_shadowMapPointCompose.GetBool()
+            && !r_rendererSharedWorldInteraction.GetBool();""",
+        "the sealed shared stream never composes a point cube",
+    )
+    create_cube = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_CreatePointCube(",
+        "point cube creation",
+    )
+    require_compact(
+        create_cube,
+        """ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+            | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;""",
+        "resident and scratch cubes can be the two ends of the composed copy",
+    )
+    claim = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_ClaimPointComposeTarget(",
+        "composed point target claim",
+    )
+    require_order(
+        claim,
+        (
+            "vkShadow.pointCubesUsed >= VK_SHADOW_MAX_POINT_CUBES",
+            "!VK_ShadowMap_EnsurePointCube( vkShadow.pointCubesUsed )",
+            "pass.composeDynamic = true;",
+            "pass.cubeIndex = cubeIndex;",
+            "pass.pointSet = pointSet;",
+            "vkShadow.pointCubesUsed++;",
+        ),
+        "a composed pass samples a scratch cube and keeps its entry as the static source",
+    )
+    allocate_point = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_AllocatePointPass(",
+        "point ownership allocation",
+    )
+    require_order(
+        allocate_point,
+        (
+            """const bool composeDynamic = VK_ShadowMap_PointComposeAvailable()
+                && VK_ShadowMap_PassHasDynamicCasters( light.vLight,
+                        receiverPass );""",
+            "pass.cacheHit = true;",
+            """if ( composeDynamic
+                && ( cache.size != vkShadow.pointCubeFaceSize
+                    || !VK_ShadowMap_ClaimPointComposeTarget( pass,
+                            frameSlot ) ) ) {""",
+            "VK_ShadowMap_CancelScheduledPass( schedule, true );",
+            "pass.cacheUpdate = true;",
+            """if ( !composeDynamic
+                || VK_ShadowMap_ClaimPointComposeTarget( pass,
+                        frameSlot ) ) {""",
+            "VK_ShadowMap_CancelScheduledPass( schedule, true );",
+        ),
+        "cached point passes with live casters claim a composed target or fail whole",
+    )
+    copy_cube = braced_body(
+        shadow_map,
+        "static void VK_ShadowMap_CopyDepthCube(",
+        "resident cube copy",
+    )
+    for token in (
+        "region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;",
+        "region.srcSubresource.layerCount = 6;",
+        "region.dstSubresource.layerCount = 6;",
+        "copy.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;",
+        "copy.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;",
+    ):
+        require_compact(copy_cube, token, "all six faces of depth in one copy")
+    # A composed hit is GPU work: it must not take the pure-hit early return,
+    # it needs the solid alpha descriptor, and it revalidates its live casters.
+    require_compact(
+        render,
+        """if ( pointCasterPipeline == VK_NULL_HANDLE
+                || VK_ShadowMap_PointComposeTarget( pass )
+                    == NULL
+                || !VK_ShadowMap_PassCastersRepresentable(
+                        light, receiverPass ) ) {""",
+        "composed point hits revalidate their live casters and their target",
+    )
+    require_compact(
+        render,
+        """const int casterPassCount = projectedFreshCount + pointFreshCount
+            + projectedComposeCount + pointComposeCount;""",
+        "composed point passes bind the solid alpha descriptor",
+    )
+    require_order(
+        render,
+        (
+            "if ( pointFreshCount > 0 || pointComposeCount > 0 ) {",
+            "const bool composePass = !classicCommit && pass.composeDynamic;",
+            """if ( pass.cacheHit && !composePass ) {
+                continue;
+            }""",
+            "const bool renderCube = !pass.cacheHit;",
+            # the static chains alone are published ...
+            """drawCubeFaces( *cube, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                composePass ? VK_SHADOW_CHAINS_STATIC_ONLY
+                    : VK_SHADOW_CHAINS_ALL );""",
+            "if ( composePass && pass.valid ) {",
+            # ... copied whole to the scratch cube ...
+            "VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,",
+            "VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,",
+            """VK_ShadowMap_CopyDepthCube( cmd, cube->image,
+                composeTarget->image, faceSize );""",
+            # ... the resident cube returns to its sampled layout ...
+            """VK_ShadowMap_ImageBarrier( cmd, cube->image, 6,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,""",
+            "cube->layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;",
+            # ... and only the live chains are drawn over the copy.
+            """drawCubeFaces( *composeTarget, VK_ATTACHMENT_LOAD_OP_LOAD,
+                VK_SHADOW_CHAINS_DYNAMIC_ONLY );""",
+            "vkShadow.composePasses++;",
+            "cube = composeTarget;",
+            "cube->layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;",
+        ),
+        "point compose: static publish, whole-cube copy, live chains over the copy",
+    )
+    overlay_cube = braced_body(
+        shadow_map,
+        "static const vkPointShadowCube_t *VK_ShadowMap_OverlayPassCube(",
+        "overlay point cube resolution",
+    )
+    require_order(
+        overlay_cube,
+        (
+            "VK_ShadowMap_PointComposeTarget( pass );",
+            "return composed;",
+            "return &vkShadow.pointCache[ pass.cacheEntry ].cube;",
+        ),
+        "the overlay shows the composed cube the receivers sampled",
+    )
+
+
+def validate_csm_static_cache_contract() -> None:
+    """r_shadowMapCacheCSM parity.
+
+    A cached CSM light's resident content is the whole contiguous cascade
+    block, not one tile. Copying or matching a single tile would restore a
+    quarter of the cascades and leave the rest holding whatever the atlas
+    row-scan last put there, so the physical block edge is part of both the
+    slot's identity and every transfer.
+    """
+    shadow_map = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+
+    block_size = braced_body(
+        shadow_map,
+        "static int VK_ShadowMap_ProjectedBlockSize(",
+        "projected resident block edge",
+    )
+    require_compact(
+        block_size,
+        """return light.tileSize
+            * idMath::ClampInt( 1, 2, light.projectedState.atlasDiv );""",
+        "block edge is tileSize * atlasDiv",
+    )
+
+    require_compact(
+        shadow_map,
+        "int blockSize;",
+        "resident entries record their physical block edge",
+    )
+
+    ensure_image = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_EnsureProjectedCacheImage(",
+        "projected cache image creation",
+    )
+    require_order(
+        ensure_image,
+        (
+            # a slot reused at a different block edge retires its image first
+            "if ( entry.image != VK_NULL_HANDLE && entry.blockSize != blockSize )",
+            "VK_ShadowMap_ReleaseProjectedCacheImage( entry );",
+            # the same block made of other tiles keeps its image at the new cost
+            "entry.imageTileSize = tileSize;",
+            "return true;",
+            "ici.extent.width = (uint32_t)blockSize;",
+            "ici.extent.height = (uint32_t)blockSize;",
+            "entry.blockSize = blockSize;",
+            "entry.imageTileSize = tileSize;",
+        ),
+        "block-sized resident images retire on a size change",
+    )
+    require_order(
+        braced_body(
+            shadow_map,
+            "static void VK_ShadowMap_ReleaseProjectedCacheImage(",
+            "projected cache image release",
+        ),
+        (
+            # behind the frame fence: an earlier view of the recording frame
+            # may have copied with it, and a device wait cannot cover that
+            "VK_Device_DeferDestroy( entry.image, VK_NULL_HANDLE, VK_NULL_HANDLE, entry.allocation );",
+            "entry.image = VK_NULL_HANDLE;",
+            "entry.layout = VK_IMAGE_LAYOUT_UNDEFINED;",
+            "entry.blockSize = 0;",
+            "entry.imageTileSize = 0;",
+            "VK_ShadowMap_ClearProjectedEntryMetadata( entry );",
+        ),
+        "a released resident image retires behind the frame fence",
+    )
+
+    find_entry = braced_body(
+        shadow_map,
+        "static int VK_ShadowMap_FindProjectedCacheEntry(",
+        "projected exact resident lookup",
+    )
+    require_compact(
+        find_entry,
+        "&& entry.blockSize == blockSize",
+        "an exact hit must match the physical block edge",
+    )
+
+    schedule = braced_body(
+        shadow_map,
+        "static vkShadowSchedule_t VK_ShadowMap_SchedulePass(",
+        "projected cache scheduling",
+    )
+    require_compact(
+        schedule,
+        """const int projectedBlockSize = resourceSize
+            * idMath::ClampInt( 1, 2, atlasDiv );""",
+        "scheduling derives the cascade block edge",
+    )
+    for threaded in (
+        "schedule.signature, resourceSize, projectedBlockSize );",
+        "VK_ShadowMap_AllocProjectedCacheEntry( resourceSize, projectedBlockSize );",
+    ):
+        require_compact(
+            schedule, threaded, "block edge reaches lookup and allocation"
+        )
+
+    render = braced_body(
+        shadow_map,
+        "bool VK_ShadowMap_RenderAtlas(",
+        "cached shadow rendering",
+    )
+    require_compact(
+        render,
+        "|| cache->blockSize != VK_ShadowMap_ProjectedBlockSize( light )",
+        "a resident hit revalidates the physical block edge",
+    )
+    finalize = braced_body(
+        shadow_map,
+        "static void VK_ShadowMap_FinalizeCachePasses(",
+        "resident entry publication",
+    )
+    require_compact(
+        finalize,
+        "cache.blockSize = VK_ShadowMap_ProjectedBlockSize( light );",
+        "publication records the physical block edge",
+    )
+
+    validate_pass = braced_body(
+        shadow_map,
+        "static bool VK_ClassicShadow_ValidatePhysicalPass(",
+        "sealed-stream physical reconciliation",
+    )
+    require_compact(
+        validate_pass,
+        "&& cache->blockSize == VK_ShadowMap_ProjectedBlockSize( light )",
+        "the sealed stream reconciles the same block edge",
+    )
+
+
+def validate_shadow_debug_mode_contract() -> None:
+    """r_shadowMapDebugMode parity with glprogs/shadow_interaction.fs.
+
+    The visualizations are only useful if they describe the sample the lit
+    path actually took and if mode 0 costs nothing, so the selector reaches
+    both receiver classes through the shadow ABI, the views run after
+    sampling, and every debug branch is gated behind an explicit mode test.
+    """
+    projected = read("src/renderer/Vulkan/shaders/interaction_shadow.frag")
+    point = read("src/renderer/Vulkan/shaders/interaction_shadow_point.frag")
+    interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
+    shadow_map = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+
+    # The selector rides the shadow block, not a pipeline variant.
+    for source, context in (
+        (projected, "projected receiver debug ABI"),
+        (point, "point receiver debug ABI"),
+    ):
+        require_compact(
+            source,
+            "vec4 debugParams;",
+            context,
+        )
+        require_compact(
+            source,
+            """bool ShadowDebugModeIs(float mode) {
+                return abs(shadow.debugParams.x - mode) < 0.5;
+            }""",
+            context,
+        )
+
+    # std140 mirrors must grow with the block or the shader reads garbage.
+    require_compact(
+        interactions,
+        "float debugParams[ 4 ];",
+        "std140 debug selector mirrors",
+    )
+    require_compact(
+        interactions,
+        """static_assert( sizeof( vkShadowBlock_t ) == 512,
+            "projected shadow std140 block must remain 32 vec4s" );""",
+        "projected block size follows the debug selector and moments",
+    )
+    require_compact(
+        interactions,
+        """static_assert( sizeof( vkPointShadowBlock_t ) == 160,
+            "point shadow std140 block must remain 10 vec4s" );""",
+        "point block size follows the debug selector and moments",
+    )
+
+    # Every block writer uploads it: the sealed stream and the legacy walker,
+    # projected and point. A writer that forgot would silently show mode 0.
+    if interactions.count("debugParams[ 0 ] = VK_ShadowMap_DebugModeValue();") != 4:
+        raise AssertionError(
+            "All four shadow block writers must upload the debug selector"
+        )
+    require_compact(
+        interactions,
+        """static float VK_ShadowMap_DebugModeValue( void ) {
+            return (float)idMath::ClampInt( 0, SHADOWMAP_DEBUGMODE_COUNT - 1,
+                    r_shadowMapDebugMode.GetInteger() );
+        }""",
+        "one clamped source for the uploaded debug selector",
+    )
+
+    # Mode 10 is a caster-side view: it belongs to the shadow pass, not the
+    # receiver, exactly as RB_ShadowMapPolygonFactor/-Offset do it.
+    require_compact(
+        shadow_map,
+        """const bool casterOffsetOff = idMath::ClampInt( 0,
+            SHADOWMAP_DEBUGMODE_COUNT - 1,
+            r_shadowMapDebugMode.GetInteger() )
+                == SHADOWMAP_DEBUGMODE_CASTER_OFFSET_OFF;""",
+        "caster-offset debug view",
+    )
+    require_compact(
+        shadow_map,
+        """ctx.slopeFactor = casterOffsetOff
+            ? 0.0f : r_shadowMapPolygonFactor.GetFloat();""",
+        "caster-offset debug view zeroes the slope term",
+    )
+
+    # The visualizations must run AFTER the sample, so the cascade they
+    # describe is the one that was shaded.
+    projected_main = braced_body(projected, "void main(", "projected receiver main")
+    require_order(
+        projected_main,
+        (
+            "SampleShadowFactor()",
+            "if (ShadowVisualDebugMode())",
+            "outColor = ShadowDebugOutput();",
+            "light *= SampleShadowFactor();",
+            "if (ShadowVisualDebugMode())",
+            "outColor = ShadowDebugOutput();",
+        ),
+        "projected views replace the lit output after sampling",
+    )
+    point_main = braced_body(point, "void main(", "point receiver main")
+    require_order(
+        point_main,
+        (
+            "SampleShadowFactor()",
+            "if (ShadowVisualDebugMode())",
+            "outColor = PointShadowDebugOutput();",
+            "light *= SampleShadowFactor();",
+            "if (ShadowVisualDebugMode())",
+            "outColor = PointShadowDebugOutput();",
+        ),
+        "point views replace the lit output after sampling",
+    )
+
+    # The selected cascade and its split blend are recorded during sampling.
+    sample_factor = braced_body(
+        projected, "float SampleShadowFactor(", "projected cascade selection"
+    )
+    require_order(
+        sample_factor,
+        (
+            "gShadowCascadeIndex = cascadeIndex;",
+            "gShadowCascadeBlend = 0.0;",
+            "gShadowCascadeBlend = blend;",
+        ),
+        "the views describe the shaded cascade",
+    )
+
+    # Coordinate rejection is classified once, shared by sampling and the
+    # invalid-mask view, so the two cannot disagree.
+    project_coord = braced_body(
+        projected, "bool ProjectShadowCoord(", "projected coordinate rejection"
+    )
+    require_order(
+        project_coord,
+        (
+            "gShadowDebugState = max(gShadowDebugState, 1.0);",
+            "gShadowDebugState = max(gShadowDebugState, 2.0);",
+            "return true;",
+        ),
+        "rejection classes recorded for the invalid-mask view",
+    )
+    sample_cascade = braced_body(
+        projected, "float SampleShadowCascade(", "projected cascade sampling"
+    )
+    require_compact(
+        sample_cascade,
+        "if (!ProjectShadowCoord(shadowCoord, localUv, depth))",
+        "sampling and the views project through one helper",
+    )
+
+    # The suppression views alter the sample instead of replacing the output.
+    receiver_bias = braced_body(
+        projected, "float ShadowReceiverBias(", "projected receiver bias"
+    )
+    require_compact(
+        receiver_bias,
+        """if (ShadowDebugModeIs(kShadowDebugBiasOff)) {
+            return 0.0;
+        }""",
+        "bias-off view",
+    )
+    require_compact(
+        receiver_bias,
+        """float normalBias = ShadowDebugModeIs(kShadowDebugReceiverPlaneBiasOff)
+            ? 0.0 : shadow.biasParams.y;""",
+        "receiver-plane-bias-off view",
+    )
+    point_bias = braced_body(
+        point, "float ShadowReceiverBias(", "point receiver bias"
+    )
+    require_compact(
+        point_bias,
+        """if (ShadowDebugModeIs(kShadowDebugBiasOff)) {
+            return 0.0;
+        }""",
+        "point bias-off view",
+    )
+
+    # Mode 0 must not pay for any of this: every debug read is behind a test.
+    for source, context in (
+        (projected, "projected receiver"),
+        (point, "point receiver"),
+    ):
+        for guarded in ("ShadowDebugModeIs(", "shadow.debugParams.x"):
+            if guarded not in source:
+                raise AssertionError(
+                    f"{context} lost its guarded debug selector {guarded!r}"
+                )
+
+
+def validate_update_admission_contract() -> None:
+    """RB_ShadowMapBuildUpdateAdmissions parity.
+
+    A limited r_shadowMapMaxUpdatesPerView spent in view-light-list order lets
+    an off-screen light consume the budget a large, stale, on-screen one
+    needed. Score first, then admit greedily. The estimate runs before the
+    scheduling walk, so it must not reserve a slot, age a history, or
+    invalidate an entry -- the walk would then see state it did not create.
+    """
+    shadow_map = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+
+    build = braced_body(
+        shadow_map,
+        "static void VK_ShadowMap_BuildUpdateAdmissions(",
+        "importance-ordered update admission",
+    )
+    require_order(
+        build,
+        (
+            # an unlimited budget or a policy that already forbids fresh
+            # renders needs no ordering at all
+            "const int updateBudget = r_shadowMapMaxUpdatesPerView.GetInteger();",
+            "if ( updateBudget <= 0",
+            "r_shadowMapSubviewPolicy.GetInteger() ) > 0 )",
+            "VK_ShadowMap_EstimateUpdateCost( vLight, viewDef, cost, staleness )",
+            # GL's score: screen coverage, staleness, camera inside the light
+            """candidates[ candidateCount ].score = scissorArea / 32
+                + staleness * 512
+                + ( vLight->viewInsideLight ? 8192 : 0 );""",
+            # everything fits: first-come order is already correct
+            "if ( candidateCount == 0 || totalCost <= updateBudget )",
+            "return;",
+            # (score desc, lightIndex asc), then greedy admission
+            """while ( j >= 0
+                && ( candidates[ j ].score < key.score
+                    || ( candidates[ j ].score == key.score
+                        && candidates[ j ].lightIndex
+                            > key.lightIndex ) ) )""",
+            "int remaining = updateBudget;",
+            "if ( candidates[ i ].cost > remaining && vkShadowAdmittedLightCount > 0 )",
+            "continue;",
+            "remaining = Max( 0, remaining - candidates[ i ].cost );",
+            "vkShadowAdmissionsActive = true;",
+        ),
+        "importance-ordered update admission",
+    )
+
+    # The estimate must be side-effect free. FindProjectedCacheEntry and
+    # FindPointCacheEntry reserve; StaticCacheable ages history and can
+    # invalidate. The read-only peers exist for exactly that reason.
+    estimate = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_EstimateUpdateCost(",
+        "read-only update-cost estimate",
+    )
+    for mutating in (
+        "VK_ShadowMap_FindProjectedCacheEntry(",
+        "VK_ShadowMap_FindPointCacheEntry(",
+        "VK_ShadowMap_AllocProjectedCacheEntry(",
+        "VK_ShadowMap_AllocPointCacheEntry(",
+        "VK_ShadowMap_StaticCacheable(",
+        "VK_ShadowMap_InvalidateLightCaches(",
+    ):
+        if mutating in estimate:
+            raise AssertionError(
+                f"The admission estimate must not call the mutating {mutating!r}"
+            )
+    for read_only in (
+        "VK_ShadowMap_StaticCacheableReadOnly(",
+        "VK_ShadowMap_PeekPointCacheEntry(",
+        "VK_ShadowMap_PeekProjectedCacheEntry(",
+    ):
+        require(estimate, read_only, "read-only admission estimate")
+
+    history_const = braced_body(
+        shadow_map,
+        "static const vkShadowLightHistory_t *VK_ShadowMap_FindLightHistoryConst(",
+        "pure light-history lookup",
+    )
+    for mutating in ("oldest", "= backEnd.frameCount", "history.valid = true"):
+        if mutating in history_const:
+            raise AssertionError(
+                "The const history lookup must never claim or evict a slot"
+            )
+
+    # Staleness needs the frame the CONTENT was written, not the frame a view
+    # last touched the slot; a cache hit refreshes the latter every frame.
+    for entry_marker, context in (
+        ("typedef struct vkProjectedShadowCacheEntry_s", "projected entry"),
+        ("typedef struct vkPointShadowCacheEntry_s", "point entry"),
+    ):
+        entry = braced_body(shadow_map, entry_marker, context)
+        require_compact(
+            entry,
+            "int lastUpdatedFrame;",
+            f"{context} records its content write",
+        )
+    finalize = braced_body(
+        shadow_map,
+        "static void VK_ShadowMap_FinalizeCachePasses(",
+        "resident entry publication",
+    )
+    if finalize.count("lastUpdatedFrame = backEnd.frameCount;") != 2:
+        raise AssertionError(
+            "Both resident classes must stamp their content-write frame on publication"
+        )
+
+    # Ordering decides WHICH lights spend a limited budget; the running count
+    # still decides when it is gone, and a required map bypasses both.
+    schedule = braced_body(
+        shadow_map,
+        "static vkShadowSchedule_t VK_ShadowMap_SchedulePass(",
+        "budget admission gate",
+    )
+    require_compact(
+        schedule,
+        """const bool admissionDenied = updateBudget > 0
+            && vkShadowAdmissionsActive
+            && !VK_ShadowMap_UpdateAdmitted( lightIndex );""",
+        "scheduling honours the admission list",
+    )
+    require_compact(
+        schedule,
+        """if ( updateBudget > 0
+                && ( vkShadow.freshUpdates >= updateBudget || admissionDenied )
+                && !mapRequiredForCorrectness ) {""",
+        "a correctness-required map still bypasses the budget",
+    )
+
+    prepare = braced_body(
+        shadow_map,
+        "int VK_ShadowMap_PrepareViewLights(",
+        "per-view admission build",
+    )
+    require_order(
+        prepare,
+        (
+            "VK_ShadowMap_BeginCacheView( viewDef );",
+            "VK_ShadowMap_BuildUpdateAdmissions( viewDef );",
+        ),
+        "admissions are built before any light can claim the budget",
+    )
+
+
+def validate_shadow_report_and_storage_honesty() -> None:
+    """r_shadowMapReport depth, and cvars that cannot lie about Vulkan.
+
+    A report that prints zeroes for work a backend never does reads as "fast"
+    rather than "not implemented", so the two GL-only timing cvars and the
+    GL-only point storage cvar announce themselves instead.
+    """
+    shadow_map = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    init = read("src/renderer/RenderSystem_init.cpp")
+
+    report = braced_body(
+        shadow_map,
+        "static void VK_ShadowMap_ReportViewCache(",
+        "per-view shadow report",
+    )
+    require_order(
+        report,
+        (
+            "if ( r_shadowMapReport.GetInteger() < 1 )",
+            "r_shadowMapReportInterval.GetInteger()",
+            "vkShadow.admissionDenied,",
+            "vkShadow.atlasTilesRendered,",
+            "vkShadow.atlasTilesAllocated,",
+            "vkShadow.pointFacesRendered,",
+            "VK_ShadowMap_ResidentBytes() / ( 1024.0 * 1024.0 ),",
+            "VK_ShadowMap_ReportViewLights();",
+        ),
+        "the view line reports what the view actually spent",
+    )
+    # The timing cvars now drive real measurements, but a device without
+    # usable timestamps must say so rather than printing a convincing zero.
+    require_compact(
+        report,
+        """if ( r_shadowMapGpuTimerQueries.GetBool()
+            || r_shadowMapGpuSyncTimings.GetBool() ) {""",
+        "the shadow timing cvars gate the timing line",
+    )
+    require_compact(
+        report,
+        "if ( !timing.available ) {",
+        "a device without usable timestamps reports unavailable",
+    )
+    require_compact(
+        report,
+        "if ( r_shadowMapPointHighPrecision.GetBool() ) {",
+        "GL-only point storage cvar announces itself",
+    )
+
+    per_light = braced_body(
+        shadow_map,
+        "static void VK_ShadowMap_ReportViewLights(",
+        "per-light shadow decisions",
+    )
+    require_compact(
+        per_light,
+        "if ( r_shadowMapReport.GetInteger() < 2 )",
+        "per-light decisions are report level 2",
+    )
+    # Each ownership names the decision it reached, including the two that
+    # only exist once composition and aliasing do.
+    for outcome in (
+        '"unused"',
+        '"unmapped"',
+        '"alias"',
+        '"reuse+compose"',
+        '"reuse"',
+        '"publish+compose"',
+        '"publish"',
+        '"scratch"',
+    ):
+        require(per_light, outcome, "per-light ownership outcome")
+
+    resident = braced_body(
+        shadow_map,
+        "static double VK_ShadowMap_ResidentBytes(",
+        "resident shadow memory",
+    )
+    require_order(
+        resident,
+        (
+            "vkShadow.atlasImage != VK_NULL_HANDLE",
+            "projected.image != VK_NULL_HANDLE",
+            "vkShadow.pointCache[ i ].cube.image != VK_NULL_HANDLE",
+            "vkShadow.pointCubes[ i ].image != VK_NULL_HANDLE",
+        ),
+        "every created shadow image counts toward resident memory",
+    )
+
+    # An inert cvar must not partition the cache: hashing it would discard
+    # every resident point map on a toggle that changes nothing.
+    signature = braced_body(
+        shadow_map,
+        "static int VK_ShadowMap_BuildPassSignatureForView(",
+        "resident cache signature",
+    )
+    if "r_shadowMapPointHighPrecision.GetBool()" in signature:
+        raise AssertionError(
+            "Vulkan point cubes always store native depth, so the storage cvar"
+            " must not partition their cache"
+        )
+    require(
+        signature,
+        "r_shadowMapPointDepthCompare.GetBool()",
+        "the compare mode still partitions the point cache",
+    )
+
+    require(
+        init,
+        "OpenGL only: the Vulkan backend always stores native depth",
+        "the point storage cvar documents its backend scope",
+    )
+
+
+def validate_shadow_gpu_timing_contract() -> None:
+    """r_shadowMapGpuTimerQueries / r_shadowMapGpuSyncTimings on Vulkan.
+
+    OpenGL brackets each shadow phase with glFinish. Vulkan cannot: the pass
+    is being RECORDED, so there is nothing submitted to wait for. Timestamp
+    spans measure it instead, and the synchronized mode is applied at readback.
+
+    It lives in its own TU because renderer_temporal_presentation pins that
+    VulkanGpuFrameTiming.cpp never waits at all -- a file-scoped guarantee
+    that dynamic-resolution timing cannot block the frame.
+
+    Two properties keep that safe. Resetting a query pair is illegal inside a
+    dynamic-rendering scope, so every span opens outside one. And a wait on a
+    span whose command buffer was never submitted would never return, so the
+    wait is gated on an age past which the frame loop has already waited that
+    slot's fence, with an age-out behind it.
+    """
+    timing = read("src/renderer/Vulkan/VulkanShadowTiming.cpp")
+    header = read("src/renderer/Vulkan/VulkanShadowTiming.h")
+    shadow_map = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+
+    require_compact(
+        header,
+        """typedef enum vkShadowTimingPhase_e {
+            VK_SHADOW_TIMING_MAP_RENDER = 0,""",
+        "the phase split OpenGL reports",
+    )
+
+    begin_view = braced_body(
+        timing,
+        "void VK_ShadowGpuTiming_BeginView(",
+        "per-view shadow timing resolve",
+    )
+    # A span from the current frame has not been submitted; waiting on it
+    # would hang, so it is only ever carried.
+    require_compact(
+        begin_view,
+        """if ( span.frameNumber >= backEnd.frameCount ) {
+            vkShadowTimingReport.pending++;
+            continue;
+        }""",
+        "spans recorded this frame are never resolved",
+    )
+    require_compact(
+        begin_view,
+        """VK_ShadowGpuTiming_ResolveSpan( span, i,
+            synchronized && age > VK_FRAMES_IN_FLIGHT );""",
+        "the synchronized wait is gated on a retired frame slot",
+    )
+    require_compact(
+        begin_view,
+        "if ( age > VK_SHADOW_TIMING_MAX_SPAN_AGE_FRAMES ) {",
+        "a span whose submission never happened is dropped, not waited on",
+    )
+    # A span opened and never closed holds two queries forever.
+    require_compact(
+        begin_view,
+        """if ( !span.open
+                || backEnd.frameCount - span.frameNumber
+                    > VK_FRAMES_IN_FLIGHT ) {""",
+        "an unclosed span is reclaimed instead of leaking its queries",
+    )
+
+    resolve = braced_body(
+        timing,
+        "static void VK_ShadowGpuTiming_ResolveSpan(",
+        "shadow timing readback",
+    )
+    require_compact(
+        resolve,
+        """if ( synchronized ) {
+            flags |= VK_QUERY_RESULT_WAIT_BIT;
+        }""",
+        "synchronized mode waits rather than dropping",
+    )
+    require_compact(
+        resolve,
+        """if ( result == VK_NOT_READY ) {""",
+        "an unready poll is carried, not counted as zero",
+    )
+
+    begin_phase = braced_body(
+        timing,
+        "void VK_ShadowGpuTiming_BeginPhase(",
+        "shadow timing span open",
+    )
+    require_order(
+        begin_phase,
+        (
+            "const int index = VK_ShadowGpuTiming_ClaimSpan( phase );",
+            # ring pressure must degrade to a lost sample, never to a stall
+            "if ( index < 0 )",
+            "vkShadowTimingReport.dropped++;",
+            "vkCmdResetQueryPool( commandBuffer, vkShadowTimingQueryPool, firstQuery, 2 );",
+            "vkCmdWriteTimestamp( commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,",
+        ),
+        "a span resets its queries before writing its begin timestamp",
+    )
+
+    # Every span must open outside a dynamic-rendering scope, because
+    # vkCmdResetQueryPool is illegal inside one. Check each open site is
+    # followed by vkCmdBeginRendering rather than preceded by it.
+    render = braced_body(
+        shadow_map,
+        "bool VK_ShadowMap_RenderAtlas(",
+        "shadow pass timing spans",
+    )
+    compact_render = compact(render)
+    for opened_before_scope in (
+        # fresh projected scope
+        """VK_ShadowGpuTiming_BeginPhase( cmd,
+            VK_SHADOW_TIMING_MAP_RENDER );
+            VK_ShadowMap_ImageBarrier( cmd, vkShadow.atlasImage, 1,""",
+        # resident transfers
+        """if ( haveCacheUpdates || haveCacheHits ) {
+            VK_ShadowGpuTiming_BeginPhase( cmd,
+                VK_SHADOW_TIMING_CACHE_REUSE );
+        }""",
+        # point cube faces, opened before the first per-face scope
+        """VK_ShadowGpuTiming_BeginPhase( cmd, VK_SHADOW_TIMING_MAP_RENDER );
+            vkCmdBindPipeline( cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointCasterPipeline );""",
+    ):
+        require_compact(
+            render,
+            opened_before_scope,
+            "spans open outside a dynamic-rendering scope",
+        )
+    # Compose is timed as MAP_RENDER, the same phase split OpenGL uses.
+    if compact_render.count(
+        compact("VK_ShadowGpuTiming_BeginPhase( cmd, VK_SHADOW_TIMING_MAP_RENDER )")
+    ) != 3:
+        raise AssertionError(
+            "The fresh, compose and point regions must all be timed as MAP_RENDER"
+        )
+    if compact_render.count(
+        compact("VK_ShadowGpuTiming_EndPhase( cmd, VK_SHADOW_TIMING_MAP_RENDER )")
+    ) != 3:
+        raise AssertionError( "Every MAP_RENDER span must be closed" )
+
+    # A view whose main scope never resumes is never submitted.
+    require_compact(
+        render,
+        "VK_ShadowGpuTiming_AbandonView();",
+        "an unsubmitted view releases its spans",
+    )
+    require_compact(
+        shadow_map,
+        "VK_ShadowGpuTiming_Shutdown();",
+        "the query pool retires with the shadow resources",
+    )
+
+
+def validate_shadow_debug_overlay_contract() -> None:
+    """r_shadowMapDebugOverlay: the GL mini-map, sampled safely on Vulkan.
+
+    The overlay reads live shadow resources from inside the scene's render
+    scope, which is the only place in the module where a diagnostic touches
+    the same images the receivers just sampled. Each pin below guards one way
+    that could go wrong.
+    """
+
+    shadow_map = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    executor = read("src/renderer/Vulkan/vk_GuiExecutor.cpp")
+    header = read("src/renderer/Vulkan/vk_ShadowMap.h")
+
+    require(
+        header,
+        "void\tVK_ShadowMap_DebugOverlayDraw( const viewDef_t *viewDef );",
+        "the overlay is exported for the interaction walkers' caller",
+    )
+
+    # One call site, after BOTH walkers, so the overlay covers the shared
+    # ownership path, the legacy walker, and the views where neither drew a
+    # light (the GL "NO MAP" state). r_skipInteractions suppresses it exactly
+    # like the GL pass it belongs to.
+    if executor.count("VK_ShadowMap_DebugOverlayDraw(") != 1:
+        raise AssertionError(
+            "The Vulkan shadow overlay must have exactly one call site, so both"
+            " interaction walkers and the light-less views reach it identically"
+        )
+    require_order(
+        executor,
+        (
+            "VK_ClassicInteraction_DrawOwnedView( viewDef );",
+            "VK_Interactions_DrawLights( viewDef );",
+            "if ( !r_skipInteractions.GetBool() ) {",
+            "VK_ShadowMap_DebugOverlayDraw( viewDef );",
+        ),
+        "the overlay draws after the interaction dispatch, under r_skipInteractions",
+    )
+
+    overlay = braced_body(
+        shadow_map,
+        "void VK_ShadowMap_DebugOverlayDraw( const viewDef_t *viewDef ) {",
+        "Vulkan shadow debug overlay draw",
+    )
+    select = braced_body(
+        shadow_map,
+        "static bool VK_ShadowMap_OverlaySelect( const viewDef_t *viewDef,",
+        "Vulkan shadow debug overlay selection",
+    )
+
+    require(
+        overlay,
+        "if ( !r_shadowMapDebugOverlay.GetBool() || viewDef == NULL ) {",
+        "the overlay is gated on its own cvar",
+    )
+
+    # The shadow pass interrupts the dynamic-rendering scope. Appending draws
+    # to a scope that failed to resume is invalid usage, not a cosmetic bug.
+    require_order(
+        overlay,
+        (
+            "if ( !VK_Exec_MainRenderingScopeOpen() ) {",
+            "return;",
+            "draw.cmd = VK_Exec_ActiveCmd();",
+        ),
+        "the overlay proves the render scope is recording before it records",
+    )
+    require(
+        executor,
+        "bool VK_Exec_MainRenderingScopeOpen( void ) {",
+        "the executor exposes the recording state the overlay checks",
+    )
+    require_compact(
+        executor,
+        "return vkExec.frameOpen && vkExec.mainScopeOpen && vkExec.cmd != VK_NULL_HANDLE;",
+        "the scope query answers for the frame AND the scope",
+    )
+
+    # A stale table is worse than no table: the panel would show another
+    # view's light while claiming to describe this one. Shared ownership can
+    # reach a view that prepared nothing at all (shadowMapPassCount 0).
+    require(
+        shadow_map,
+        "const viewDef_t *\tpreparedView;",
+        "the module records which view produced the light table",
+    )
+    prepare = braced_body(
+        shadow_map,
+        "int VK_ShadowMap_PrepareViewLights( const viewDef_t *viewDef,",
+        "prepared-view stamp",
+    )
+    require_order(
+        prepare,
+        ("vkShadow.numLights = 0;", "vkShadow.preparedView = viewDef;",
+         "vkShadow.preparedFrame = backEnd.frameCount;"),
+        "preparation stamps the view that owns the table",
+    )
+    release = braced_body(
+        shadow_map,
+        "static void VK_ShadowMap_ReleasePreparedLights( const bool markSticky ) {",
+        "prepared-view stamp release",
+    )
+    require_order(
+        release,
+        ("vkShadow.numLights = 0;", "vkShadow.preparedView = NULL;",
+         "vkShadow.preparedFrame = -1;"),
+        "releasing the table clears the view that owned it",
+    )
+    require_order(
+        select,
+        (
+            "if ( !VK_ShadowMap_ViewPrepared( viewDef ) ) {",
+            "return false;",
+        ),
+        "the overlay refuses a light table another view prepared",
+    )
+    identity = braced_body(shadow_map, "static bool VK_ShadowMap_ViewPrepared(", "frame-arena ownership")
+    require_compact(identity, "return viewDef != NULL && vkShadow.preparedView == viewDef && vkShadow.preparedFrame == backEnd.frameCount;",
+                    "reused frame-arena addresses cannot revive old light records")
+    require(
+        overlay,
+        "const bool viewPrepared = VK_ShadowMap_ViewPrepared( viewDef );",
+        "the readout knows whether the view counters describe this view",
+    )
+    for counter in (
+        "vkShadow.projectedCacheHits",
+        "vkShadow.pointCacheHits",
+        "vkShadow.projectedFreshUpdates",
+        "vkShadow.pointFreshUpdates",
+        "vkShadow.composePasses",
+        "vkShadow.atlasTilesRendered",
+        "vkShadow.atlasTilesAllocated",
+        "vkShadow.pointFacesRendered",
+        "vkShadow.budgetFallbacks",
+        "vkShadow.admissionDenied",
+        "vkShadow.subviewFallbacks",
+    ):
+        require_compact(
+            overlay,
+            f"viewPrepared ? {counter} : 0",
+            "every displayed view counter reports zero for a view that prepared nothing",
+        )
+
+    # Both shadow descriptor families declare DEPTH_STENCIL_READ_ONLY_OPTIMAL.
+    # Sampling through a descriptor whose declared layout disagrees with the
+    # image is undefined, and the overlay runs after a pass that legitimately
+    # leaves images in transfer/attachment layouts on some paths.
+    require_compact(
+        select,
+        "const bool atlasReadable = vkShadow.atlasImage != VK_NULL_HANDLE"
+        " && vkShadow.atlasLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;",
+        "the projected panel samples the atlas only in the layout its descriptor declares",
+    )
+    require_compact(
+        select,
+        "const VkDescriptorSet atlasSet = atlasReadable"
+        " ? VK_Exec_ShadowDescriptorSet() : VK_NULL_HANDLE;",
+        "an unreadable atlas yields no descriptor rather than a mismatched one",
+    )
+    require_compact(
+        select,
+        "if ( cube == NULL || cube->image == VK_NULL_HANDLE"
+        " || cube->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL ) {",
+        "the point panel samples a cube only in the layout its descriptor declares",
+    )
+
+    # The cube resolution must agree with the render walk's, or the panel
+    # would show a different image than the receivers sampled.
+    pass_cube = braced_body(
+        shadow_map,
+        "static const vkPointShadowCube_t *VK_ShadowMap_OverlayPassCube(",
+        "overlay point cube resolution",
+    )
+    require_order(
+        pass_cube,
+        (
+            "if ( pass.cacheEntry >= 0 && pass.cacheEntry < VK_SHADOW_MAX_CACHE_SLOTS ) {",
+            "return &vkShadow.pointCache[ pass.cacheEntry ].cube;",
+            "if ( pass.cubeIndex >= 0 && pass.cubeIndex < VK_SHADOW_MAX_POINT_CUBES ) {",
+            "return &vkShadow.pointCubes[ pass.cubeIndex ];",
+        ),
+        "the overlay resolves a pass's cube the way the point render walk does",
+    )
+
+    # An aliased pass points at the other ownership's resource, which is
+    # already reachable under the name of the pass that owns it.
+    require_compact(
+        select,
+        "if ( !pass.valid || pass.resourcePass != (vkShadowReceiverPass_t)passIndex ) { continue; }",
+        "only a receiver ownership that owns its own resource is shown",
+    )
+    require(
+        select,
+        "if ( singleLight >= 0 && lightDefIndex != singleLight ) {",
+        "r_singleLight selects the displayed light exactly, as it does on OpenGL",
+    )
+
+    # The interaction pass leaves a negative-height viewport for GL winding
+    # parity; reusing it would flip the panel and its text. Vulkan cannot
+    # query the scissor the shared walker last latched, so the overlay
+    # restores the view rect explicitly instead of leaving a per-primitive one.
+    require_order(
+        overlay,
+        (
+            "viewport.height = (float)fbHeight;",
+            "vkCmdSetViewport( draw.cmd, 0, 1, &viewport );",
+            "vkCmdSetScissor( draw.cmd, 0, 1, &scissor );",
+            "VK_Exec_SetViewScissor( draw.cmd, viewDef, fbHeight );",
+        ),
+        "the overlay owns its viewport/scissor and restores the view scissor",
+    )
+    if "viewport.height = -" in overlay:
+        raise AssertionError(
+            "The overlay's own viewport must be positive-height: its vertex"
+            " stage maps top-left pixels straight to Vulkan clip space"
+        )
+    require(
+        executor,
+        "void VK_Exec_SetViewScissor( VkCommandBuffer cmd, const viewDef_t *viewDef, int fbHeight ) {",
+        "the executor exposes the view scissor the overlay restores",
+    )
+
+    # 2D semantics over the finished scene, exactly like the GL overlay's
+    # GLS_DEPTHFUNC_ALWAYS + depth/stencil disable.
+    for state in (
+        "vkCmdSetDepthTestEnable( draw.cmd, VK_FALSE );",
+        "vkCmdSetDepthWriteEnable( draw.cmd, VK_FALSE );",
+        "vkCmdSetStencilTestEnable( draw.cmd, VK_FALSE );",
+        "vkCmdSetCullMode( draw.cmd, VK_CULL_MODE_NONE );",
+        "vkCmdSetDepthBiasEnable( draw.cmd, VK_FALSE );",
+    ):
+        require(overlay, state, "the overlay latches 2D dynamic state before drawing")
+
+    # shadowSetLayout carries the receivers' dynamic shadow block at binding 1,
+    # so binding the panel set without an offset is invalid even though the
+    # panel shaders never read it.
+    require_compact(
+        overlay,
+        "vkCmdBindDescriptorSets( draw.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,"
+        " draw.layout, 0, 1, &selection.panelSet, 1, &dynamicOffset );",
+        "the panel set binds with the dynamic offset its layout requires",
+    )
+    require_order(
+        overlay,
+        ("if ( drawPanel ) {", "vkCmdBindDescriptorSets( draw.cmd"),
+        "no descriptor set is bound when there is no panel to sample",
+    )
+
+    # A diagnostic that moves backEnd.pc changes the numbers r_rendererMetrics
+    # reports while it is on, and the GL overlay's immediate-mode quads never
+    # reach those counters either. Every overlay draw is emitted by the quad
+    # helper, so both it and the entry point have to stay silent.
+    quad = braced_body(
+        shadow_map,
+        "static void VK_ShadowMap_OverlayQuad( vkShadowOverlayDraw_t &draw,",
+        "overlay quad emitter",
+    )
+    require(quad, "vkCmdDraw( draw.cmd, 6, 1, 0, 0 );", "the overlay emits its quads here")
+    for source, name in ( ( overlay, "entry point" ), ( quad, "quad emitter" ) ):
+        if "VK_Device_Count" in source:
+            raise AssertionError(
+                f"The overlay {name} must not account its own draws: it would"
+                " move the renderer counters it exists to help read"
+            )
+
+    validate_shadow_debug_overlay_pipelines(executor)
+    validate_shadow_debug_overlay_shaders()
+
+
+def validate_shadow_debug_overlay_pipelines(executor: str) -> None:
+    """The overlay's three pipelines and the layout they share."""
+
+    require(
+        executor,
+        "typedef struct vkShadowOverlayPush_s {",
+        "the overlay declares its own push block",
+    )
+    require_compact(
+        executor,
+        "overlayPushRange.size = sizeof( vkShadowOverlayPush_t );",
+        "the overlay layout advertises its own push range",
+    )
+    # 128 bytes is the guaranteed maxPushConstantsSize; the overlay block must
+    # stay inside it on every implementation, not just the ones tested.
+    push_block = braced_body(
+        executor,
+        "typedef struct vkShadowOverlayPush_s {",
+        "overlay push block",
+    )
+    vec4s = push_block.count("[ 4 ];")
+    if vec4s * 16 > 128:
+        raise AssertionError(
+            f"The overlay push block is {vec4s * 16} bytes; the guaranteed"
+            " maxPushConstantsSize is 128"
+        )
+
+    variant = braced_body(
+        executor,
+        "static VkPipeline VK_Exec_ShadowOverlayPipelineVariant( vkSpecialPipelineKind_t kind,",
+        "overlay pipeline variant",
+    )
+    require_compact(
+        variant,
+        "vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;",
+        "the overlay pipelines declare a vertex input state",
+    )
+    if "pVertexBindingDescriptions" in variant or "pVertexAttributeDescriptions" in variant:
+        raise AssertionError(
+            "The overlay generates its quad from gl_VertexIndex; binding a"
+            " vertex buffer would make a diagnostic compete for the frame rings"
+        )
+    require_compact(
+        variant,
+        "GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA",
+        "the overlay blends over the scene like the GL overlay's GL_State",
+    )
+    require_compact(
+        variant,
+        "vkExec.shadowOverlayPipelineLayout, false, false, target",
+        "the overlay pipelines keep the scene's color attachment",
+    )
+
+    # Three variants: the two panels differ only in the view type they declare
+    # for the raw sampler, and the text variant needs no sampler at all so the
+    # "NO MAP" readout can draw with nothing bound.
+    for kind in (
+        "VK_SPECIAL_SHADOW_OVERLAY_PANEL",
+        "VK_SPECIAL_SHADOW_OVERLAY_POINT_PANEL",
+        "VK_SPECIAL_SHADOW_OVERLAY_TEXT",
+    ):
+        require(executor, kind, "the overlay pipeline kinds are distinct cache keys")
+    require_compact(
+        executor,
+        "VkPipeline VK_Exec_ShadowOverlayPanelPipeline( bool pointLight ) {"
+        " return pointLight"
+        " ? VK_Exec_ShadowOverlayPipelineVariant( VK_SPECIAL_SHADOW_OVERLAY_POINT_PANEL,"
+        " vkExec.shadowOverlayPointFragModule )"
+        " : VK_Exec_ShadowOverlayPipelineVariant( VK_SPECIAL_SHADOW_OVERLAY_PANEL,"
+        " vkExec.shadowOverlayFragModule ); }",
+        "the light class picks the panel variant whose sampler view type matches",
+    )
+    require_compact(
+        executor,
+        "plci.setLayoutCount = 1; plci.pSetLayouts = &vkExec.shadowSetLayout;"
+        " plci.pPushConstantRanges = &overlayPushRange;",
+        "the overlay layout reuses the shadow receiver set layout at slot 0",
+    )
+
+
+def validate_shadow_debug_overlay_shaders() -> None:
+    """The three overlay shaders and their committed SPIR-V registration."""
+
+    panel = read("src/renderer/Vulkan/shaders/shadow_debug_overlay.frag")
+    point_panel = read("src/renderer/Vulkan/shaders/shadow_debug_overlay_point.frag")
+    text = read("src/renderer/Vulkan/shaders/shadow_debug_overlay_text.frag")
+    vertex = read("src/renderer/Vulkan/shaders/shadow_debug_overlay.vert")
+
+    require(
+        vertex,
+        "kCorners[gl_VertexIndex]",
+        "the overlay quad comes from the vertex index, not a vertex buffer",
+    )
+    # Vulkan clip space already puts y = -1 at the top row, so the GL vertex
+    # program's flip must NOT be reproduced here.
+    require(
+        vertex,
+        "vec2 clip = pixel / extent * 2.0 - 1.0;",
+        "top-left pixels map straight to Vulkan clip space",
+    )
+
+    # Binding 2 is the raw (compare-disabled, NEAREST) sampler. Binding 0 is
+    # the LEQUAL compare sampler, whose result is a shadow test, not the
+    # stored depth the panel is supposed to show.
+    require(
+        panel,
+        "layout(set = 0, binding = 2) uniform sampler2D shadowRawMap;",
+        "the projected panel reads stored depth through the raw sampler",
+    )
+    require(
+        point_panel,
+        "layout(set = 0, binding = 2) uniform samplerCube shadowRawMap;",
+        "the point panel reads stored depth through the raw cube sampler",
+    )
+    for source, name in (
+        (panel, "projected panel"),
+        (point_panel, "point panel"),
+        (text, "text"),
+    ):
+        if "binding = 0" in source or "Shadow " in source:
+            raise AssertionError(
+                f"The overlay {name} shader must not sample the compare"
+                " sampler: a shadow-test result is not the stored depth"
+            )
+
+    # The "NO MAP" readout has to draw when there is no shadow resource at
+    # all, so its shader may not statically use a descriptor.
+    if "uniform sampler" in text:
+        raise AssertionError(
+            "The overlay text shader must declare no sampler, or the 'NO MAP'"
+            " state would need a descriptor set that does not exist"
+        )
+    require(
+        text,
+        "const uvec2 kFont[44]",
+        "the 5x7 font lives in exactly one shader",
+    )
+    for source, name in ((panel, "projected panel"), (point_panel, "point panel")):
+        if "kFont" in source:
+            raise AssertionError(
+                f"The overlay {name} shader must not duplicate the font: the"
+                " text variant owns every glyph and solid fill"
+            )
+
+    # Vulkan point cubes always store native depth (r_shadowMapPointHighPrecision
+    # is OpenGL-only), so the packed two-channel decode the GL overlay needs
+    # must not be carried over.
+    if "UnpackDepth" in point_panel or "1.0 / 255.0" in point_panel:
+        raise AssertionError(
+            "Vulkan point cubes store native depth; the overlay must not decode"
+            " the OpenGL packed-color encoding"
+        )
+
+    # The cascade grid must line up with the panel's own edges wherever in the
+    # atlas the light's block landed, so it is computed in panel-local space
+    # while only the sample coordinate comes from the block rect.
+    require(
+        panel,
+        "vec2 sampleUv = mix(pc.uvRect.xy, pc.uvRect.zw, fragLocal);",
+        "the sampled coordinate spans the light's atlas block",
+    )
+    require_compact(
+        panel,
+        "float tileIndex = floor(fragLocal.x * divisions)"
+        " + floor(fragLocal.y * divisions) * divisions;",
+        "the cascade grid is panel-local, not atlas-local",
+    )
+    if "uvRect" in panel.split("float tileIndex")[1]:
+        raise AssertionError(
+            "The panel's cascade grid must not depend on the block rect, or it"
+            " would drift with the light's atlas allocation"
+        )
+
+    pin = read("tools/tests/vk_shader_header_pin.py")
+    committed = read("src/renderer/Vulkan/shaders/gui_shaders_spv.h")
+    for shader, array in (
+        ("shadow_debug_overlay.vert", "vk_shadow_debug_overlay_vert_spv"),
+        ("shadow_debug_overlay.frag", "vk_shadow_debug_overlay_frag_spv"),
+        ("shadow_debug_overlay_point.frag", "vk_shadow_debug_overlay_point_frag_spv"),
+        ("shadow_debug_overlay_text.frag", "vk_shadow_debug_overlay_text_frag_spv"),
+    ):
+        require(pin, f'"{shader}"', "every overlay shader is pinned to the committed header")
+        require(committed, f"{array}[]", "every overlay shader is embedded in the committed header")
+
+
+def validate_projection_cache_precision_and_derivatives() -> None:
+    # Numerical regressions execute in rendererShadowProjectedDiagnosticSelfTest.
+    # Pin both integrations so neither can revert to its quantized cache helper.
+    for path, helper, signature in (
+        ("src/renderer/draw_arb2.cpp", "static int RB_ShadowMapHashFloat(",
+         "static int RB_ShadowMapBuildPassSignatureForView("),
+        ("src/renderer/Vulkan/vk_ShadowMap.cpp", "static int VK_ShadowMap_HashFloat(",
+         "static int VK_ShadowMap_BuildPassSignatureForView("),
+    ):
+        source = read(path)
+        require_compact(braced_body(source, helper, path),
+                        "return R_ShadowMapHashFloat( hash, value );", path)
+        require(braced_body(source, signature, path),
+                "R_ShadowMapProjectedStateHash( hash, projectedState )", path)
+
+    if "static int R_ShadowMapHashFloat(" in read("src/renderer/Interaction.cpp"):
+        raise AssertionError("Caster transforms must use the shared exact float hash")
+
+    require_compact(read("src/renderer/Vulkan/vk_Interactions.cpp"),
+                    "const bool shadowingEnabled = r_shadows.GetBool() "
+                    "&& vLight->lightShader->LightCastsShadows() "
+                    "&& ( vLight->lightDef == NULL || !vLight->lightDef->parms.noShadows )",
+                    "authored no-shadows lights never require a shadow fallback")
+
+    library = read("src/renderer/ModernGLShaderLibrary.cpp")
+    if "dFdx(depth)" in library or "dFdy(depth)" in library:
+        raise AssertionError("Shadow depth derivatives must not execute inside light/cascade branches")
+    require(library, "ModernClusterPrepareShadowDerivatives(viewPosition);",
+            "deferred receiver derivatives")
+    if library.count("ModernClusterPrepareShadowDerivatives(ModernClusterFromEyeSpace(vViewPosition));") != 2:
+        raise AssertionError("Opaque/alpha-test and transparent forward receivers both need derivatives")
+    forward = library[library.index("if ( kind == MODERN_GL_SHADER_CLUSTERED_FORWARD_OPAQUE ||"):]
+    require_order(forward, ("ModernClusterPrepareShadowDerivatives(", "if (texel.a <= 0.0) discard;"),
+                  "forward derivatives precede alpha discard")
+    require(library, "shadowMatrix * vec4(gModernShadowPositionDx, 0.0)",
+            "directional derivative excludes depth-plane translation")
+
+
+def validate_gl_shadow_coverage_contract() -> None:
+    source = read("src/renderer/draw_arb2.cpp")
+    schedule = braced_body(source, "static shadowMapSchedule_t RB_ShadowMapSchedulePass(", "GL scheduling")
+    require(schedule, "shadowMapIncompleteStencilMask", "map-only casters override optional budgets")
+    require(schedule, "shadowMapPrelightStencilRequiredMask", "prelight coverage participates in scheduling")
+    require(schedule, "subviewPolicy >= 2 && !mapRequired", "subview stencil fallback requires coverage")
+    require(schedule, "( budgetExhausted || admissionDenied || subviewDenied ) && !mapRequired",
+            "budget/admission fallback requires coverage")
+    # Changed membership (a stopped door starts moving or a portal reveals
+    # another caster) must never turn a signature miss into resident reuse.
+    denied = braced_body(schedule,
+        "if ( ( budgetExhausted || admissionDenied || subviewDenied ) && !mapRequired )",
+        "GL denied update")
+    if "SHADOWMAP_SCHEDULE_REUSE" in denied or "CacheEntry" in denied:
+        raise AssertionError("Budget/subview misses must not revive obsolete door depth")
+    require(denied, "schedule.action = SHADOWMAP_SCHEDULE_FALLBACK;", "current complete stencil coverage")
+    admission = braced_body(source, "static void RB_ShadowMapBuildUpdateAdmissions(", "GL admission")
+    require(admission, "candidates[i].cost > remaining && g_shadowMapAdmittedLightCount > 0",
+            "a two-pass light can make progress within a budget of one")
+    require(read("src/renderer/Vulkan/vk_ShadowMap.h"), "VK_SHADOW_MAX_LIGHTS = 256;",
+            "stock door/portal views exceed the old 64-light table")
+    require(read("src/renderer/Vulkan/vk_ShadowMap.cpp"),
+            "VK_SHADOW_MAX_ADMITTED_LIGHTS = VK_SHADOW_MAX_LIGHTS;",
+            "update admission must cover the expanded light table")
+    for chain, render in (("RB_ShadowMapDrawCasterChain", "RB_RenderShadowMap"),
+                          ("RB_PointShadowMapDrawCasterChain", "RB_RenderPointShadowMap")):
+        body = braced_body(source, f"static bool {chain}(", chain)
+        require_compact(body, "if ( !RB_ShadowMapResolveCasterDrawData( surf, casterGeo, ambientCache ) ) { return false; }",
+                        "any missing caster fails its ownership")
+        render_body = braced_body(source, f"static bool {render}(", render)
+        for casters in ("primaryCasters", "secondaryCasters", "tertiaryCasters", "quaternaryCasters"):
+            require(render_body, f"allCastersRendered &= {chain}( {casters},", "all four caster chains participate")
+        require(render_body, "return allCastersRendered;", "partial maps are never published or sampled")
+
+
+def validate_map_investigation_repairs() -> None:
+    interaction = read("src/renderer/Interaction.cpp")
+    material = read("src/renderer/Material.cpp")
+    for directive in ('else if ( !token.Icmp( "noShadows" ) )',
+                      'else if ( !token.Icmp( "DECAL_MACRO" ) )'):
+        policy = braced_body(material, directive, "authored shadow opt-out")
+        require(policy, "MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT", "authored shadow opt-out provenance")
+    stencil_policy = braced_body(interaction, "static bool R_TranslucentStencilCasterEligible(",
+                                "translucent stencil admission")
+    require(stencil_policy, "!shader->ExplicitlyDisablesShadows()", "translucent options preserve noShadows")
+    for signature in ("void idInteraction::CreateInteraction(",
+                      "static bool R_ShadowMapShaderCanCastStencilParityTranslucent("):
+        require(braced_body(interaction, signature, "translucent caster policy consumer"),
+                "R_TranslucentStencilCasterEligible(", "shared stencil/map translucent admission")
+    moments = braced_body(interaction, "static bool R_ShadowMapMaterialPolicyCanCastTranslucent(",
+                         "translucent moment admission")
+    require(moments, "!policy.explicitlyDisablesShadows", "moment casters preserve authored opt-outs")
+    require_compact(interaction, """
+        const bool shadowMapCasterPolicyActive =
+            r_shadows.GetBool() && r_useShadowMap.GetBool() &&
+            ( !vLight->pointLight || vLight->parallel || r_shadowMapPointLights.GetBool() );
+        """, "shadows-off frames must not latch missing-caster fallback")
+    executor = read("src/renderer/Vulkan/vk_GuiExecutor.cpp")
+    point_pipeline = braced_body(executor, "VkPipeline VK_Exec_PointCasterPipeline(", "point caster pipeline")
+    if "depthClampSupported" in point_pipeline:
+        raise AssertionError("Point casters must clip geometry crossing the light origin")
+    for shader in ("shadow_caster.frag", "shadow_point_caster.frag"):
+        source = read("src/renderer/Vulkan/shaders/" + shader)
+        body = braced_body(source, "void main()", shader)
+        alpha = body.index("if (pc.params.x != 0.0)")
+        if body.index("dFdx(") > alpha or body.index("dFdy(") > alpha:
+            raise AssertionError(f"{shader}: caster derivatives must precede cutout discard")
+    gl = read("src/renderer/draw_arb2.cpp")
+    if "GL_SelectTextureNoClient( 6 + i )" in gl:
+        raise AssertionError("Moment unit 8 must not index the eight-unit legacy state array")
+    binding = braced_body(gl, "static void RB_ShadowMapBindMomentTexture(", "moment binding")
+    require(binding, "unit < MAX_MULTITEXTURE_UNITS", "tracked moment unit bounds")
+    require(binding, "glBindTexture( target,", "extra GLSL moment sampler binding")
+    require(binding, "glActiveTextureARB( GL_TEXTURE0_ARB );", "extra sampler restores tracked active unit")
+
+
+def validate_vulkan_receiver_scan_contract() -> None:
+    # FPS-03: the Vulkan front end keeps a light's stencil volumes only while a
+    # receiver may use authored GLSL lighting. A finished interaction's NULL
+    # slot (no geometry, no shader, outside the light) receives nothing and must
+    # not keep them; an unbuilt interaction stays unknown; an interaction being
+    # built answers for every surface of its model. The verdict is memoized per
+    # view light, so every interaction state change must invalidate it.
+    light = read("src/renderer/tr_light.cpp")
+    admission = braced_body(light, "bool R_ShadowMapLightWillUseShadowMaps(",
+                            "front-end shadow-map stencil-elision admission")
+    require_compact(admission, "if ( !R_ShadowMapReceiversAllowMaps( lightDef ) ) { return false; }",
+                    "Vulkan receiver scan gates volume elision")
+    if "surfaces[i].shader == NULL" in admission:
+        raise AssertionError("a finished interaction's NULL slot must not keep every stencil volume of the light")
+    scan = braced_body(light, "static bool R_ShadowMapReceiversAllowMaps(", "Vulkan receiver scan")
+    # An unbuilt interaction that may still link receivers in this view keeps
+    # the light unknown. Three cannot: an entity outside the view set, an
+    # interaction already visited and left unbuilt, an entity the view does not
+    # see. One still waiting for its visible entity's turn is answered by that
+    # entity's model: the model itself when static, the remembered verdict of
+    # the model it last drew when it animates.
+    require_order(scan, ("vLight->shadowMapReceiverScanValid", "return vLight->shadowMapReceiverScanAllowsMaps;",
+                         "VK_MaterialPrograms_NeedsStencilGeneration()",
+                         "if ( inter->IsDeferred() ) {",
+                         "if ( entityDef->viewCount != tr.viewCount || inter->unbuiltVisitView == tr.viewCount ) {",
+                         "continue;",
+                         "if ( entityDef->viewEntity == NULL || entityDef->viewEntity->scissorRect.IsEmpty() ) {",
+                         "continue;",
+                         "if ( hModel != NULL && hModel->IsDynamicModel() == DM_STATIC && entityDef->parms.callback == NULL ) {",
+                         "R_ShadowMapNoteEntityModel( entityDef, hModel );",
+                         "if ( R_EntityReceiverVerdict( entityDef, generation, entityNeedsStencil )",
+                         "&& !entityNeedsStencil ) {",
+                         "continue;", "allowsMaps = false;",
+                         "if ( R_InteractionReceiverNeedsStencil( inter, generation ) ) {", "allowsMaps = false;",
+                         "vLight->shadowMapReceiverScanValid = true;"),
+                  "memoized Vulkan receiver scan keeps unbuilt interactions that may still gain receivers unknown")
+    model_verdict = braced_body(light, "static bool R_ModelReceiverNeedsStencil(", "whole-model receiver verdict")
+    require_order(model_verdict, ("surf->geometry == NULL",
+                                  "R_RemapShaderBySkin( surf->shader, parms.customSkin, parms.customShader ), NULL )",
+                                  "return true;"),
+                  "a model answers for every surface with geometry, under the entity's skin and shader")
+    verdict = braced_body(light, "static bool R_InteractionReceiverNeedsStencil(", "per-interaction receiver verdict")
+    require_order(verdict, ("if ( inter->buildModel != NULL ) {",
+                            "R_ModelReceiverNeedsStencil( inter->buildModel, inter->entityDef->parms );",
+                            "VK_MaterialPrograms_NeedsStencil( inter->surfaces[i].shader, NULL );"),
+                  "building interactions answer for the whole model, built ones for their filled slots")
+    # The remembered verdict is only as good as the identity it was taken for.
+    entity_verdict = braced_body(light, "static bool R_EntityReceiverVerdict(", "remembered entity receiver verdict")
+    require_order(entity_verdict, ("def->stencilReceiverGeneration != generation",
+                                   "def->stencilReceiverModel != def->parms.hModel",
+                                   "def->stencilReceiverSkin != def->parms.customSkin",
+                                   "def->stencilReceiverShader != def->parms.customShader",
+                                   "return false;", "needed = def->stencilReceiverNeeded;"),
+                  "a remembered verdict stands only for the same model, skin, shader and program generation")
+    note = braced_body(light, "void R_ShadowMapNoteEntityModel(", "entity receiver verdict recorder")
+    require_order(note, ("#ifdef OPENQ4_RENDERER_VK_MODULE",
+                         "def->stencilReceiverInstance == model",
+                         "def->stencilReceiverInstanceFrame == def->dynamicModelFrameCount",
+                         "def->stencilReceiverNeeded = R_ModelReceiverNeedsStencil( model, def->parms );"),
+                  "the verdict is taken again from every model instance")
+    require(braced_body(light, "void R_AddModelSurfaces(", "view entity submission"),
+            "R_ShadowMapNoteEntityModel( vEntity->entityDef, model );",
+            "a visible entity whose interactions are all culled still records its model")
+
+    interaction = read("src/renderer/Interaction.cpp")
+    for marker, context in (("idInteraction *idInteraction::AllocAndLink(", "new unbuilt interaction"),
+                            ("void idInteraction::FreeSurfaces(", "freed surfaces"),
+                            ("void idInteraction::Unlink(", "unlinked or emptied interaction")):
+        require(braced_body(interaction, marker, context), "R_InvalidateShadowMapReceiverScan(",
+                f"{context} invalidates the memoized receiver scan")
+    # Only an interaction AddActiveInteraction leaves unbuilt in this view may be
+    # skipped; freeing its surfaces makes it unknown again.
+    active = braced_body(interaction, "void idInteraction::AddActiveInteraction(", "interaction submission")
+    require_order(active, ("struct unbuiltVisitMark_t {", "if ( inter->IsDeferred() ) {",
+                           "inter->unbuiltVisitView = tr.viewCount;", "R_InvalidateShadowMapReceiverScan( inter->lightDef );",
+                           "} unbuiltVisitMark = { this };", "CreateInteraction( model );"),
+                  "unbuilt-visit mark is recorded on every return of the only interaction builder")
+    require(braced_body(interaction, "void idInteraction::FreeSurfaces(", "freed surfaces"), "this->unbuiltVisitView = -1;",
+            "freed surfaces forget the unbuilt visit")
+    create = braced_body(interaction, "void idInteraction::CreateInteraction(", "interaction creation")
+    require_order(create, ("R_ShadowMapNoteEntityModel( entityDef, model );",
+                           "buildModel = model;", "R_InvalidateShadowMapReceiverScan( lightDef );",
+                           "const bool suppressDynamicShadowVolume =", "buildModel = NULL;",
+                           "R_InvalidateShadowMapReceiverScan( lightDef );", "MakeEmpty();"),
+                  "interaction creation brackets its slots with the build model")
+
+    programs = read("src/renderer/Vulkan/vk_MaterialPrograms.cpp")
+    for marker in ("void VK_MaterialPrograms_Reload()", "void VK_MaterialPrograms_Shutdown()"):
+        require(braced_body(programs, marker, marker), "++nativeFamilyGeneration;",
+                f"{marker} invalidates cached NeedsStencil verdicts")
+
+
+def validate_live_cutout_and_point_culling_contract() -> None:
+    gl = read("src/renderer/draw_arb2.cpp")
+    cache_view = braced_body(gl, "bool RB_ShadowMapPrepareCacheView(", "shadow cache view ownership")
+    require_compact(cache_view, "if ( viewDef == NULL || viewDef->renderWorld == NULL ) { return false; }",
+                    "2D views must not evict the world shadow cache")
+    require_order(cache_view, ("viewDef->renderWorld == NULL", "g_projectedShadowMapCache[i].valid = false"),
+                  "ignore non-world views before cache mutation")
+    interaction = read("src/renderer/Interaction.cpp")
+    emitter = braced_body(interaction, "static bool R_CachedShouldSkipPointLightEmitterCaster(", "emitter exception")
+    require_compact(emitter, "!( sint->shadowStencilEligible && !sint->shadowStencilUsesPrelight && sint->shadowTris != NULL )",
+                    "real emitter blockers must remain in depth maps")
+    for path, signature in (
+        ("src/renderer/draw_arb2.cpp", "static int RB_ShadowMapBuildPassSignatureForView("),
+        ("src/renderer/Vulkan/vk_ShadowMap.cpp", "static int VK_ShadowMap_BuildPassSignatureForView("),
+    ):
+        body = braced_body(read(path), signature, "static depth identity")
+        for live_count in ("shadowMapDynamicCasterCount", "shadowMapAlphaCasterCount", "shadowMapCasterCount"):
+            if live_count in body:
+                raise AssertionError(f"{path}: live caster counts must not invalidate opaque static depth")
+    vk = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    point = braced_body(vk, "static int VK_ShadowMap_DrawPointCasterChain(", "point face rejection")
+    require_order(point, ("R_ShadowMapCasterOutsidePointFace", "VK_Exec_BindTriGeometry"),
+                  "reject irrelevant faces before geometry binding/upload")
+    for gate_name in ("VK_ShadowMap_StaticCacheable", "VK_ShadowMap_StaticCacheableReadOnly"):
+        gate = braced_body(vk, "static bool " + gate_name + "(", gate_name)
+        if "shadowMapAlphaCasterCount > 0" in gate:
+            raise AssertionError("Live cutouts must allow projected static depth composition")
+    prepare = braced_body(vk, "int VK_ShadowMap_PrepareViewLights(", "prepare shadow maps")
+    if "VK_ShadowMap_ReportViewCache" in prepare:
+        raise AssertionError("Reports before rendering hide actual cube-face and composition costs")
+    diagnostics = braced_body(vk, "void VK_ShadowMap_DebugOverlayDraw(", "completed-view diagnostics")
+    require_order(diagnostics, ("VK_ShadowMap_ReportViewCache", "!r_shadowMapDebugOverlay.GetBool()"),
+                  "completed-view reports work with visual overlay disabled")
+
+
+def validate_translucent_moment_contract() -> None:
+    """r_shadowMapTranslucentMoments on Vulkan: the GL moment caster and
+    resolve, a frame-boundary moment atlas, and both receivers."""
+    shadow_map = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    executor = read("src/renderer/Vulkan/vk_GuiExecutor.cpp")
+    interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
+
+    available = braced_body(shadow_map, "bool VK_ShadowMap_TranslucentMomentsAvailable(",
+                            "Vulkan moment tier")
+    for token in ("VK_ShadowMap_MomentsRequested()", "vkShadow.momentAtlasFailedSize == 0",
+                  "VK_Exec_MomentCasterModulesReady()"):
+        require(available, token, "Vulkan moment tier")
+    require(braced_body(shadow_map, "static bool VK_ShadowMap_MomentsRequested(", "moment request"),
+            "r_shadowMapTranslucentMoments.GetBool()", "moment request")
+
+    # Every shadow set names the atlas, so it changes only idle, at a frame
+    # boundary, and its views are swapped out before they are destroyed.
+    lifecycle = braced_body(shadow_map, "static void VK_ShadowMap_UpdateMomentAtlas(",
+                            "moment atlas lifecycle")
+    require_order(lifecycle, (
+        "VK_ShadowMap_EnsureMomentPlaceholder()",
+        "vkDeviceWaitIdle( vkCtx.device );",
+        "VK_ShadowMap_PublishMomentViews();",
+        "VK_ShadowMap_DestroyMomentAtlas();",
+        "VK_ShadowMap_CreateMomentAtlas( wantedSize )",
+        "VK_ShadowMap_PublishMomentViews();",
+    ), "moment atlas lifecycle")
+    require_order(braced_body(shadow_map, "void VK_ShadowMap_BeginFrame(", "shadow frame begin"), (
+        "VK_GuiExecutor_FrameIsOpen()",
+        "VK_ShadowMap_UpdateMomentAtlas();",
+    ), "moment atlas at the frame boundary")
+    require(braced_body(shadow_map, "static void VK_ShadowMap_RecordMomentClear(", "moment clear"),
+            "VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL", "moment images start cleared and sampleable")
+
+    # GL RB_RenderTranslucentShadowMap state: clear, ONE/ONE, no depth, back
+    # faces culled, after the depth maps and before main rendering resumes.
+    render = braced_body(shadow_map, "static void VK_ShadowMap_RenderMoments(", "moment pass")
+    require_order(render, (
+        "VK_ShadowMap_MomentBarrier( cmd, true );",
+        "colors[ i ].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;",
+        "vkCmdSetDepthTestEnable( cmd, VK_FALSE );",
+        "vkCmdSetCullMode( cmd, VK_CULL_MODE_BACK_BIT );",
+        "VK_FRONT_FACE_CLOCKWISE",
+        "VK_FRONT_FACE_COUNTER_CLOCKWISE",
+        "vkCmdEndRendering( cmd );",
+        "VK_ShadowMap_MomentBarrier( cmd, false );",
+    ), "moment pass state")
+    require_order(braced_body(shadow_map, "bool VK_ShadowMap_RenderAtlas(", "shadow atlas render"), (
+        "VK_Exec_EndMainRendering();",
+        "VK_ShadowMap_RenderMoments( cmd, ctx.slot, whiteSet );",
+        "VK_Exec_BeginMainRendering( false );",
+    ), "moments between the depth maps and the resumed scope")
+    require(braced_body(shadow_map, "static bool VK_ShadowMap_PassHasCasters(", "pass casters"),
+            "VK_ShadowMap_PassHasTranslucentCasters( vLight, receiverPass )",
+            "a translucent-only pass still maps (GL RB_ShadowMapRunPass)")
+    require(braced_body(shadow_map, "int VK_ShadowMap_PrepareViewLights(", "prepare lights"),
+            "VK_ShadowMap_AllocateMomentBlocks();", "moment blocks per view")
+    require(shadow_map, "pass.momentAtlas[ 0 ] = scale * (float)vkShadow.atlasSize * invMoment;",
+            "projected moment blocks mirror their depth blocks")
+
+    pipeline = braced_body(executor, "VkPipeline VK_Exec_MomentCasterPipeline(", "moment pipeline")
+    for token in ("target.colorCount = 3;", "VK_FORMAT_R16G16B16A16_SFLOAT",
+                  "GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE, vkExec.fogBlendPipelineLayout",
+                  "offsetof( idDrawVert, color )"):
+        require(pipeline, token, "moment caster pipeline")
+    for writer in ("bool VK_Exec_UpdateShadowAtlasDescriptors(", "bool VK_Exec_CreateShadowCubeSets("):
+        body = braced_body(executor, writer, writer)
+        require(body, "VK_Exec_ShadowMomentViewsPublished()", writer)
+        require(body, "VK_Exec_WriteShadowMomentBindings(", writer)
+
+    for writer_token in ("memcpy( block.momentAtlas, passState->momentAtlas",
+                         "memcpy( pointBlock.momentRect, passState->momentAtlas"):
+        require(interactions, writer_token, "receiver moment mapping")
+
+    caster = read("src/renderer/Vulkan/shaders/shadow_moment_caster.glsl")
+    require_compact(caster, "outMomentR = vec4(tau.r, tau.r * d, tau.r * d2, tau.r * d2 * d);",
+                    "GL moment layout")
+    resolve = read("src/renderer/Vulkan/shaders/shadow_moment_resolve.glsl")
+    require_compact(resolve, "return exp(-min(tau * max(params.x, 0.0), 16.0));", "GL moment resolve")
+    projected = read("src/renderer/Vulkan/shaders/interaction_shadow.frag")
+    point = read("src/renderer/Vulkan/shaders/interaction_shadow_point.frag")
+    require(projected, "layout(set = 7, binding = 5) uniform sampler2D shadowMomentMapB;", "projected moments")
+    require(projected, "light *= SampleTranslucentShadow();", "projected classic receiver")
+    require(projected, "packed *= SampleTranslucentShadow();", "projected PBR receiver")
+    require(point, "layout(set = 7, binding = 5) uniform sampler2D shadowMomentMapB;", "point moments")
+    require(point, "light *= SamplePointTranslucentShadow();", "point classic receiver")
+    require(point, "packed *= SamplePointTranslucentShadow();", "point PBR receiver")
+
+
+def validate_point_cache_parity_and_receiver_cost_contract() -> None:
+    """Point lights are the dominant shadowing class in Quake 4. Their cube
+    cache must hold a whole dense view, compose live casters over static
+    depth instead of re-rendering six faces, and never thrash; diagnostics
+    must cost nothing while they are off; the receiver must not pay for
+    fragments the light does not reach; and the stencil rules mapped lights
+    replace (prelight-only lights, the prelight's global ownership) must hold.
+    """
+    classification_h = read("src/renderer/ShadowMapClassification.h")
+    classification = read("src/renderer/ShadowMapClassification.cpp")
+    gl = read("src/renderer/draw_arb2.cpp")
+    vk = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    init = read("src/renderer/RenderSystem_init.cpp")
+    interaction = read("src/renderer/Interaction.cpp")
+
+    require(classification_h, "static const int SHADOWMAP_POINT_CACHE_MAX_SLOTS = 96;",
+        "point cube cache record bound")
+    require(classification_h, "static const int SHADOWMAP_POINT_CACHE_MIN_BUDGET_SLOTS = 12;",
+        "point cube cache budget floor")
+    slot_limit = braced_body(classification, "int R_ShadowMapPointCacheSlotLimitFor(",
+        "point cache slot policy")
+    require_order(
+        slot_limit,
+        (
+            "requested <= SHADOWMAP_POINT_CACHE_MIN_BUDGET_SLOTS",
+            "return requested;",
+            "budgetBytes / entryBytes",
+            "Max( SHADOWMAP_POINT_CACHE_MIN_BUDGET_SLOTS, budgetSlots )",
+        ),
+        "point cache slot policy",
+    )
+    require(init, 'idCVar r_shadowMapPointCacheSize( "r_shadowMapPointCacheSize", "64"',
+        "point cache default holds a dense view")
+    require(init, 'idCVar r_shadowMapPointCacheMegs( "r_shadowMapPointCacheMegs", "512"',
+        "point cache memory bound")
+    migration = braced_body(init, "static void R_MigrateLegacyShadowMapPointCacheSize(",
+        "legacy twelve-slot migration")
+    require_order(
+        migration,
+        (
+            "r_shadowMapPointCacheDefaultsMigrated.GetBool()",
+            "r_shadowMapPointCacheSize.GetInteger() == 12",
+            "r_shadowMapPointCacheSize.SetInteger( 64 );",
+            "r_shadowMapPointCacheDefaultsMigrated.SetBool( true );",
+        ),
+        "legacy twelve-slot migration",
+    )
+    require(init, "R_MigrateLegacyShadowMapPointCacheSize();", "migration runs at startup")
+
+    require_compact(gl, "g_pointShadowMapCache[SHADOWMAP_POINT_CACHE_MAX_SLOTS];",
+        "GL point cache records")
+    gl_limit = braced_body(gl, "static int RB_ShadowMapPointCacheSlotLimit( void ) {",
+        "GL point cache slot limit")
+    require(gl_limit, "R_ShadowMapPointCacheSlotLimit( RB_ShadowMapPointSizeValue(),",
+        "GL point cache slot limit")
+    # Neither backend may evict a cube a light still on screen is using: the
+    # victim misses later in the same view and evicts the next one in turn.
+    gl_alloc = braced_body(gl, "static pointShadowMapCacheEntry_t *RB_ShadowMapAllocPointCacheEntry(",
+        "GL point cache allocation")
+    require_order(
+        gl_alloc,
+        (
+            "if ( !entry->valid ) {",
+            "entry->lastUsedFrame >= tr.frameCount - 1",
+            "continue;",
+            "if ( !allowEviction || oldest == NULL ) {",
+        ),
+        "GL point cache allocation",
+    )
+    vk_alloc = braced_body(vk, "static int VK_ShadowMap_AllocPointCacheEntry(",
+        "Vulkan point cache allocation")
+    require_order(
+        vk_alloc,
+        (
+            "if ( entry.reserved ) {",
+            "if ( !entry.valid ) {",
+            "entry.lastUsedFrame >= backEnd.frameCount - 1",
+            "continue;",
+        ),
+        "Vulkan point cache allocation",
+    )
+    gl_recycle = braced_body(gl, "static pointShadowMapCacheEntry_t *RB_ShadowMapRecyclePointCacheEntry(",
+        "GL point cache same-light recycle")
+    require_order(
+        gl_recycle,
+        (
+            "entry->lightIndex == lightIndex",
+            "entry->passKind == static_cast<int>( passKind )",
+            "entry->lastUsedFrame != tr.frameCount",
+            "newest->valid = false;",
+        ),
+        "GL point cache same-light recycle",
+    )
+
+    # GL composes live casters over a copy of the cached static cube.
+    gl_cacheable = braced_body(gl, "static bool RB_ShadowMapStaticCacheable(",
+        "GL static cacheability")
+    require_compact(
+        gl_cacheable,
+        """const bool dynamicsDefeatCache = pointLight && vLight->shadowMapDynamicCasterCount > 0
+        && !RB_ShadowMapPointComposeAvailable();""",
+        "GL point lights compose instead of defeating the cache",
+    )
+    gl_point_render = braced_body(gl, "static bool RB_RenderPointShadowMap(",
+        "GL point cube render modes")
+    require_order(
+        gl_point_render,
+        (
+            "const bool composeMode = renderMode == SHADOWMAP_RENDER_COMPOSE_DYNAMIC;",
+            "!RB_ShadowMapPointCacheEntryStorageValid( composeFrom )",
+            "g_shadowMapStats.composePasses++;",
+            "g_shadowMapStats.shadowMapUpdates++;",
+            "composeFrom->renderTexture->MakeCurrent( cubeFace )",
+            "glBlitFramebuffer( 0, 0, shadowMapWidth, shadowMapHeight,",
+            "glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );",
+            "if ( drawStaticChains ) {",
+            "if ( drawDynamicChains ) {",
+        ),
+        "GL point cube compose",
+    )
+    gl_run_pass = braced_body(gl, "static void RB_ShadowMapRunPass(", "GL shadow pass driver")
+    require_order(
+        gl_run_pass,
+        (
+            "schedule.pointEntry != NULL && RB_ShadowMapPointComposeAvailable()",
+            "SHADOWMAP_RENDER_COMPOSE_DYNAMIC, schedule.pointEntry );",
+            "composePlanned ? SHADOWMAP_RENDER_STATIC_ONLY : SHADOWMAP_RENDER_FULL;",
+            "SHADOWMAP_RENDER_COMPOSE_DYNAMIC, schedule.pointEntry );",
+        ),
+        "GL point compose scheduling",
+    )
+    gl_pass_kind = braced_body(gl, "static shadowMapPassKind_t RB_ShadowMapCachePassKind(",
+        "GL cache ownership identity")
+    require_order(
+        gl_pass_kind,
+        (
+            "vLight->localShadowMapCasters != NULL",
+            "return passKind;",
+            "vLight->localShadowMapDynamicCasters == NULL",
+            "return SHADOWMAP_PASS_GLOBAL;",
+            "!RB_ShadowMapPointComposeAvailable()",
+        ),
+        "composed ownerships share one static entry",
+    )
+
+    # Timer queries exist for the report; they must not run without it.
+    gl_timers = braced_body(gl, "static bool RB_ShadowMapGpuTimerQueriesAvailable( void ) {",
+        "GL shadow timer query gate")
+    require_order(
+        gl_timers,
+        (
+            "!r_shadowMapGpuTimerQueries.GetBool()",
+            "r_shadowMapReport.GetInteger() <= 0 && !r_shadowMapDebugOverlay.GetBool()",
+            "return false;",
+        ),
+        "GL shadow timer query gate",
+    )
+    gl_restore = braced_body(gl, "static void RB_ShadowMapRestoreViewViewport( void ) {",
+        "GL view viewport restore")
+    require_order(
+        gl_restore,
+        ("RB_TileOffsetX() + backEnd.viewDef->viewport.x1", "RB_TileOffsetY() + backEnd.viewDef->viewport.y1"),
+        "shadow passes restore the tiled-capture offset",
+    )
+    if gl.count("RB_ShadowMapRestoreViewViewport();") != 4:
+        raise AssertionError("every GL shadow-map pass must restore the view viewport through the shared helper")
+
+    # A caster stays live for a quarter second of frames, not one frame.
+    require(classification_h, "static const int SHADOWMAP_DYNAMIC_CASTER_WINDOW_MSEC = 250;",
+        "live caster window")
+    dynamic = braced_body(interaction, "static bool R_ShadowMapCasterIsDynamic(",
+        "live caster classification")
+    require(dynamic, "const int recentFrame = tr.frameCount - R_ShadowMapDynamicCasterFrames();",
+        "live caster window spans a game tic at any display rate")
+    require(read("src/renderer/RenderSystem.cpp"), "R_ShadowMapBeginFrame( Sys_Milliseconds() );",
+        "live caster window follows rendered frames")
+    require(read("src/renderer/ModernShadowPlanner.cpp"), "R_ShadowMapCachePolicySelfTest()",
+        "cache policy self-test runs with the shadow diagnostics")
+
+    # Stencil rules a mapped light replaces.
+    per_surface = braced_body(interaction, "bool R_ShadowMapsNeedPerSurfaceStencilVolumes(",
+        "prelight-only lights keep their prelight")
+    require(per_surface, "lightDef->parms.noShadows || lightDef->parms.noDynamicShadows",
+        "prelight-only lights keep their prelight")
+    require_order(
+        interaction,
+        (
+            "const bool prelightOwnsShadows =",
+            "r_useOptimizedShadows.GetBool() &&",
+            "entityDef->parms.hModel->IsStaticWorldModel() &&",
+            "R_LightHasRealPrelightModel( lightDef->parms );",
+            "const bool materialNoSelfShadow = !prelightOwnsShadows",
+            "&& shadowShader->TestMaterialFlag( MF_NOSELFSHADOW );",
+        ),
+        "static world under a prelit light keeps the prelight's global ownership",
+    )
+    require_compact(
+        read("src/game/gamesys/SysCvar.cpp"),
+        """return cvarSystem->GetCVarBool( "r_useShadowMap" )
+        && cvarSystem->GetCVarBool( "r_shadowMapPointLights" );""",
+        "corpse shadows need every light class mapped",
+    )
+
+    # Receivers: no shadow work for unlit fragments, a balanced five-tap ring,
+    # and the default nine taps as one pass over a four-by-four texel block.
+    gl_point = read("content/baseoq4/pak0/glprogs/shadow_point_interaction.fs")
+    gl_projected = read("content/baseoq4/pak0/glprogs/shadow_interaction.fs")
+    vk_point = read("src/renderer/Vulkan/shaders/interaction_shadow_point.frag")
+    vk_projected = read("src/renderer/Vulkan/shaders/interaction_shadow.frag")
+    require_order(
+        gl_point,
+        (
+            "float SamplePointShadowGrid( vec3 direction, float depth ) {",
+            "perTexel = 4.0 * depth * texelScale * ( planeSlope + texelScale ) >= bias * 0.5;",
+            "return lit * ( 1.0 / 9.0 );",
+            "PointShadowPlaneCompare( texel, depth, bias, texelScale );",
+            "return lit * ( 1.0 / 9.0 );",
+            "return SamplePointShadowGrid( direction, depth );",
+            "if ( max( light.r, max( light.g, light.b ) ) > 0.0 ) {",
+            "light *= SamplePointShadow();",
+        ),
+        "GL point receiver grid kernel and unlit early-out",
+    )
+    require_order(
+        vk_point,
+        (
+            "float SamplePointShadowGrid(vec3 direction, float depth) {",
+            "perTexel = 4.0 * depth * texelScale * (planeSlope + texelScale) >= bias * 0.5;",
+            "PointShadowPlaneCompare(texel, depth, bias, texelScale);",
+            "return SamplePointShadowGrid(direction, depth);",
+            "bool lit = max(light.r, max(light.g, light.b)) > 0.0 || ShadowVisualDebugMode();",
+            "light *= SampleShadowFactor();",
+        ),
+        "Vulkan point receiver grid kernel and unlit early-out",
+    )
+    require_order(
+        gl_projected,
+        (
+            "if ( max( light.r, max( light.g, light.b ) ) > 0.0 || ShadowVisualDebugMode() ) {",
+            "shadowInfo = SampleShadow();",
+        ),
+        "GL projected receiver unlit early-out",
+    )
+    require_order(
+        vk_projected,
+        (
+            "bool lit = max(light.r, max(light.g, light.b)) > 0.0 || ShadowVisualDebugMode();",
+            "light *= SampleShadowFactor();",
+        ),
+        "Vulkan projected receiver unlit early-out",
+    )
+    for shader, context in ((gl_point, "GL point"), (gl_projected, "GL projected")):
+        require_order(
+            shader,
+            ("o1 = rotation * kShadowFiveTapRingA;", "o2 = rotation * kShadowFiveTapRingB;", "o3 = -o1;", "o4 = -o2;"),
+            f"{context} receiver balanced five-tap ring",
+        )
+    require(
+        read("content/baseoq4/pak0/glprogs/shadow_point_caster.fs"),
+        "clamp( depth, 0.0, 65024.0 / 65025.0 )",
+        "packed point depth cannot wrap to the nearest value at the far envelope",
+    )
+
+
+def validate_stencil_elision_contract() -> None:
+    """A mapped light sheds the stencil work it no longer draws.
+
+    Three things kept that from happening for most lights: a prelit light
+    never shed anything, a dynamic model's volumes were never left out
+    (the test looked at the instantiated snapshot, which is always static),
+    and a caster the camera had moved away from dropped out of the map while
+    its volume stayed, which read as a caster the map cannot hold and turned
+    the light to stencil for good.
+    """
+    light = read("src/renderer/tr_light.cpp")
+    interaction = read("src/renderer/Interaction.cpp")
+    classification = read("src/renderer/ShadowMapClassification.cpp")
+    classification_h = read("src/renderer/ShadowMapClassification.h")
+
+    require(read("src/renderer/tr_local.h"),
+            "bool R_ShadowMapLightWillUseShadowMaps( const idRenderLightLocal *lightDef, const bool applySubviewPolicy = true );",
+            "the admission can be asked for every view of the frame")
+    admission = braced_body(light, "bool R_ShadowMapLightWillUseShadowMaps(",
+                            "front-end shadow-map stencil-elision admission")
+    require_compact(admission,
+        """if ( applySubviewPolicy && tr.viewDef != NULL && tr.viewDef->isSubview
+                && r_shadowMapSubviewPolicy.GetInteger() > 0 ) {""",
+        "only the subview clause differs between the views of a frame")
+
+    # The atlas is allocated per view; an atlas light sheds its volumes only
+    # when every atlas light of the view is certain of a block: two each at
+    # the smallest tile it may be given, which is the most the finished view
+    # can ask for (validate_atlas_tile_assignment_contract pins the rest).
+    holds = braced_body(light, "static bool R_ShadowMapAtlasHoldsView(", "per-view atlas capacity")
+    require_order(
+        holds,
+        (
+            "const viewDef_t *viewDef = tr.viewDef != NULL ? tr.viewDef : backEnd.viewDef;",
+            "const int count = R_ShadowMapGatherAtlasRequests( viewDef, false, atlasSize, requests, NULL );",
+            "cachedHolds = count >= 0 && R_ShadowMapFitAtlasTiles( atlasSize, requests, count );",
+        ),
+        "two blocks at the smallest tile for every atlas light of the view against what the atlas holds",
+    )
+    require(classification_h, "int R_ShadowMapAtlasBlockCapacity( int atlasSize, int tileSize, int atlasDiv );",
+            "shared atlas capacity policy")
+    capacity = braced_body(classification, "int R_ShadowMapAtlasBlockCapacity(", "atlas block capacity")
+    require_order(capacity, ("R_ShadowMapAtlasBlockEdge( tileSize, atlasDiv )", "R_ShadowMapAtlasRootEdge( atlasSize )",
+                             "return 0;", "rootEdge / blockEdge", "perRow * perRow"), "atlas block capacity")
+    selftest = braced_body(classification, "bool R_ShadowMapCachePolicySelfTest(", "shared policy self-test")
+    for case in ("R_ShadowMapAtlasBlockCapacity( 4096, 2048, 1 ) != 4",
+                 "R_ShadowMapAtlasBlockCapacity( 8192, 4096, 1 ) != 4",
+                 "R_ShadowMapAtlasBlockCapacity( 4096, 1024, 1 ) != 16",
+                 "R_ShadowMapAtlasBlockCapacity( 16384, 4096, 2 ) != 4"):
+        require(selftest, case, "the self-test pins each preset's atlas capacity")
+
+    # Dynamic volumes are left out by the entity's own model, and come back
+    # when the light returns to stencil.
+    create = braced_body(interaction, "void idInteraction::CreateInteraction(", "interaction creation")
+    require_order(
+        create,
+        (
+            "shadowVolumesSuppressed = false;",
+            """const bool entityModelIsDynamic =
+                entityDef->parms.hModel != NULL &&
+                entityDef->parms.hModel->IsDynamicModel() != DM_STATIC;""",
+            "if ( suppressDynamicShadowVolume ) {",
+            "interactionGenerated = true;",
+            "shadowVolumesSuppressed = true;",
+            "} else if ( sint->shadowStencilEligible ) {",
+        ),
+        "a dynamic model's volumes are left out while its light renders shadow maps",
+    )
+    if "model->IsDynamicModel() != DM_STATIC" in create:
+        raise AssertionError(
+            "The instantiated snapshot is always static: ask the entity's own model whether it is dynamic"
+        )
+    active = braced_body(interaction, "void idInteraction::AddActiveInteraction(", "interaction submission")
+    require_order(
+        active,
+        (
+            "dynamicModelFrameCount = entityDef->dynamicModelFrameCount;",
+            """if ( !IsDeferred() && shadowVolumesSuppressed
+                    && !R_ShadowMapLightWillUseShadowMaps( lightDef, false ) ) {
+                FreeSurfaces();
+            }""",
+            "if ( IsDeferred() ) {",
+            "CreateInteraction( model );",
+        ),
+        "surfaces built without volumes are built again when the light returns to stencil",
+    )
+    for marker, context in (("idInteraction::idInteraction( void ) {", "new interaction"),
+                            ("idInteraction *idInteraction::AllocAndLink(", "linked interaction"),
+                            ("void idInteraction::FreeSurfaces(", "freed surfaces")):
+        require(braced_body(interaction, marker, context), "shadowVolumesSuppressed",
+                f"{context} forgets suppressed volumes")
+
+    # The map and the stencil volume agree on which casters LOD admitted.
+    require_compact(
+        active,
+        """const bool casterLODAdmitted = sint->shadowStencilEligible
+            || R_CachedInteractionShadowLODAdmitted( sint, entityDef );""",
+        "a surface with a stencil volume stays a map caster",
+    )
+    if compact(active).count(compact("casterLODAdmitted;")) != 2:
+        raise AssertionError("opaque and translucent map admission must both use the agreed LOD verdict")
+    if active.count("R_CachedInteractionShadowLODAdmitted( sint, entityDef )") != 1:
+        raise AssertionError("map caster admission must not ask this view's LOD apart from the stencil verdict")
+
+
+def validate_atlas_tile_assignment_contract() -> None:
+    """A tile size per atlas light, so the atlas holds a view at every tier.
+
+    Quality and Ultra cut four tiles of r_shadowMapSize and a light with both
+    receiver ownerships takes two. A view of three projected lights left one
+    on stencil for the rest of the level on Vulkan (convoy2's start does) and
+    re-rendering every view on OpenGL. The front end now sizes each light's
+    tile once the view is finished; both back ends read that size and cut
+    blocks that fit by construction.
+    """
+    light = read("src/renderer/tr_light.cpp")
+    classification = read("src/renderer/ShadowMapClassification.cpp")
+    classification_h = read("src/renderer/ShadowMapClassification.h")
+    vk = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    gl = read("src/renderer/draw_arb2.cpp")
+
+    # the policy: full size while the view fits, then one halving at a time
+    # from the lights that cover the least, never below the floor
+    fit = braced_body(classification, "bool R_ShadowMapFitAtlasTiles(", "atlas tile fit")
+    require_order(
+        fit,
+        (
+            "const long long capacity = rootEdge * rootEdge;",
+            "requests[order[slot - 1]].extent >= requests[i].extent",
+            "while ( demand > capacity ) {",
+            "for ( int i = 0; i < count && demand > capacity; ++i ) {",
+            "const int smaller = request.tileSize / 2;",
+            "if ( smaller < request.minTileSize || smaller < 1 ) {",
+            "request.tileSize = smaller;",
+            "if ( !halved ) {",
+            "return demand <= capacity;",
+        ),
+        "lights give up resolution one halving at a time, smallest extent first",
+    )
+    require_compact(
+        braced_body(classification, "int R_ShadowMapAtlasMinTileSize(", "atlas tile floor"),
+        "return Min( tileSize, Max( 128, tileSize / 4 ) );",
+        "no light is cut below a quarter of its tile or 128",
+    )
+    tile = braced_body(classification, "int R_ShadowMapProjectedTileSize(", "per-light tile size")
+    require_order(
+        tile,
+        (
+            "const int maxTileSize = maxBlockSize / Max( 1, atlasDiv );",
+            "if ( maxTileSize < 128 ) {",
+            "vLight->shadowMapTileSize > 0",
+            "? vLight->shadowMapTileSize : r_shadowMapSize.GetInteger();",
+            "return idMath::ClampInt( 128, maxTileSize, wanted );",
+        ),
+        "back ends read the assigned tile, else r_shadowMapSize",
+    )
+    selftest = braced_body(classification, "bool R_ShadowMapCachePolicySelfTest(", "shared policy self-test")
+    for case in (
+        "R_ShadowMapAtlasBlockEdge( 1500, 1 ) != 2048",
+        "R_ShadowMapAtlasRootEdge( 6000 ) != 4096",
+        "R_ShadowMapAtlasMinTileSize( 2048 ) != 512",
+        "fits[0].tileSize != 2048 || fits[1].tileSize != 2048",
+        "three[0].tileSize != 2048 || three[1].tileSize != 1024 || three[2].tileSize != 1024",
+        "!R_ShadowMapFitAtlasTiles( 4096, many, 32 )",
+        "R_ShadowMapFitAtlasTiles( 4096, many, 33 )",
+        "cascaded[0].tileSize != 1024 || cascaded[1].tileSize != 1024",
+    ):
+        require(selftest, case, "the self-test pins the atlas fit")
+    require(classification_h, "static const int SHADOWMAP_ATLAS_MAX_REQUESTS = 64;", "atlas request bound")
+
+    # the front end: counted before the interactions are known, assigned after
+    gather = braced_body(light, "static int R_ShadowMapGatherAtlasRequests(", "atlas request gathering")
+    require_order(
+        gather,
+        (
+            "!R_ShadowMapsNeedPerSurfaceStencilVolumes( lightDef )",
+            "if ( classification.pointLight ) {",
+            "const int tileSize = R_ShadowMapProjectedTileSize( NULL, atlasDiv, atlasSize );",
+            "int passes = 2;",
+            "if ( interactionsKnown ) {",
+            "passes = ( localReceivers ? 1 : 0 ) + ( globalReceivers ? 1 : 0 );",
+            "if ( passes == 2 && !localCasters ) {",
+            "if ( count >= SHADOWMAP_ATLAS_MAX_REQUESTS ) {",
+            "return -1;",
+            "if ( classification.ordinaryProjectedLight ) {",
+            "extent = 2.0f * Max( parms.right.Length(), parms.up.Length() );",
+            "request.minTileSize = R_ShadowMapAtlasMinTileSize( tileSize );",
+            "request.tileSize = interactionsKnown ? tileSize : request.minTileSize;",
+        ),
+        "two blocks at the floor before interactions are known, the real ownerships at full size after",
+    )
+    assign = braced_body(light, "void R_ShadowMapAssignAtlasTiles(", "atlas tile assignment")
+    require_order(
+        assign,
+        (
+            "R_ShadowMapGatherAtlasRequests( viewDef, true, atlasSize, requests, lights );",
+            "R_ShadowMapFitAtlasTiles( atlasSize, requests, count );",
+            "lights[i]->shadowMapTileSize = requests[i].tileSize;",
+        ),
+        "the finished view's atlas lights are sized together",
+    )
+    require_order(
+        read("src/renderer/tr_main.cpp"),
+        ("R_RemoveUnecessaryViewLights();", "R_ShadowMapAssignAtlasTiles( tr.viewDef );", "R_SortDrawSurfs();"),
+        "tiles are assigned once the view's lights are final",
+    )
+
+    # every consumer reads the same per-light size
+    require_compact(
+        braced_body(gl, "static int RB_ShadowMapTileSizeForLight(", "GL projected tile size"),
+        """return R_ShadowMapProjectedTileSize( vLight, RB_ShadowMapAtlasDivForLight( vLight ),
+            glConfig.maxTextureSize );""",
+        "OpenGL reads the assigned tile",
+    )
+    require_compact(
+        vk,
+        "resourceSize = R_ShadowMapProjectedTileSize( vLight, atlasDiv, atlasEdge );",
+        "the Vulkan admission estimate reads the assigned tile",
+    )
+    require_compact(
+        braced_body(read("src/renderer/ClassicInteractionDomain.cpp"), "static int ShadowMapProjectedTileSize(",
+                    "sealed projected tile size"),
+        "return R_ShadowMapProjectedTileSize( viewLight, atlasDiv, Min( maxTextureSize, atlasSize ) );",
+        "the sealed stream reads the assigned tile",
+    )
+
+    # Vulkan: resident tiles of different sizes coexist, and a tile a light
+    # on screen is using is not evicted
+    if "projectedCacheTileSize" in vk or "VK_ShadowMap_EnsureProjectedCacheConfiguration" in vk:
+        raise AssertionError("one tile size for the whole projected cache throws every resident tile away when a light's differs")
+    vk_alloc = braced_body(vk, "static int VK_ShadowMap_OldestEvictableProjectedEntry(", "Vulkan projected cache eviction")
+    require_order(
+        vk_alloc,
+        ("if ( entry.reserved ) {", "if ( !entry.valid ) {", "entry.lastUsedFrame >= backEnd.frameCount - 1", "continue;"),
+        "Vulkan projected cache eviction",
+    )
+
+    gl_alloc = braced_body(gl, "static projectedShadowMapCacheEntry_t *RB_ShadowMapAllocProjectedCacheEntry(",
+                           "GL projected cache allocation")
+    require_order(
+        gl_alloc,
+        ("if ( !entry->valid ) {", "entry->lastUsedFrame >= tr.frameCount - 1", "continue;",
+         "if ( oldest == NULL || entry->lastUsedFrame < oldest->lastUsedFrame ) {"),
+        "GL projected cache allocation",
+    )
+
+    # OpenGL: a cell is the smallest tile, blocks sit on multiples of their
+    # span, and the scratch target keeps its size
+    ensure = braced_body(gl, "static bool RB_ShadowMapEnsureResources(", "GL projected resources")
+    require_order(
+        ensure,
+        (
+            "const int atlasCellSize = R_ShadowMapAtlasMinTileSize(",
+            "static int scratchSizedForSetting = 0;",
+            "width < shadowMapSize || height < shadowMapSize",
+            "scratchSizedForSetting != setting",
+            "tr.ResizeRenderTexture( g_shadowMapScratchRenderTexture, shadowMapSize, shadowMapSize );",
+        ),
+        "a cell is the smallest tile, and the scratch target only grows within a setting",
+    )
+    require(gl, "static const int SHADOWMAP_ATLAS_MAX_GRID = 32;", "atlas grid bound")
+    require_compact(
+        braced_body(gl, "static int RB_ShadowMapAtlasSpanForBlock(", "atlas cell span"),
+        "return ( blockPixels + g_shadowMapAtlasCellSize - 1 ) / g_shadowMapAtlasCellSize;",
+        "a block spans the cells it covers",
+    )
+    require_order(
+        braced_body(gl, "static bool RB_ShadowMapAtlasFindFreeBlock(", "atlas free block search"),
+        ("for ( int y = 0; y + span <= gridDim; y += span ) {", "for ( int x = 0; x + span <= gridDim; x += span ) {"),
+        "blocks sit on multiples of their own span",
+    )
+    require_compact(
+        braced_body(gl, "static bool RB_ShadowMapEnsureTranslucentResources(", "GL moment target"),
+        """const int shadowMapSize = Max( shadowMapTileSize * shadowMapAtlasDiv,
+            g_shadowMapScratchRenderTexture != NULL ? g_shadowMapScratchRenderTexture->GetWidth() : 0 );""",
+        "the moment target matches the scratch depth target it is sampled with",
+    )
+
+
+def validate_projected_cache_memory_bound_contract() -> None:
+    """The projected cache is bounded by tile texels, not by a count of entries.
+
+    A view's atlas tiles are no longer one size. Eight slots held eight full
+    maps, and held no more than eight of the quarter-area ones a crowded view
+    is cut to, so that view's remaining passes drew their static casters again
+    every view. r_shadowMapProjectedCacheSize now counts full-size maps' worth,
+    and a map cut down takes its share of one.
+
+    A map is counted by its tile. Counting a cascaded light's block of four
+    tiles as four starved every other light as soon as cascade caching was on
+    (door-portal: two cached blocks filled the cache and the flashlight's map
+    was drawn again every view), where one slot had always been enough.
+
+    Only Vulkan needs the bound. OpenGL caches into the atlas, which is
+    allocated whole: holding part of it back would save nothing.
+    """
+    policy_h = read("src/renderer/ShadowMapClassification.h")
+    policy = read("src/renderer/ShadowMapClassification.cpp")
+    gl = read("src/renderer/draw_arb2.cpp")
+    vk = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+
+    require(policy_h, "static const int SHADOWMAP_PROJECTED_CACHE_MAX_SLOTS = 64;", "projected cache record count")
+    require_compact(
+        braced_body(policy, "long long R_ShadowMapProjectedCacheTexelBudgetFor(", "projected cache budget"),
+        """const long long tiles = idMath::ClampInt( 0, 16, cacheSize );
+        const long long edge = idMath::ClampInt( 128, 4096, tileSize );
+        return tiles * edge * edge;""",
+        "the budget is the cvar's count of full-size tiles, in texels",
+    )
+    require_order(
+        braced_body(policy, "long long R_ShadowMapProjectedCacheTexelBudget(", "projected cache budget cvars"),
+        ("r_shadowMapProjectedCacheSize.GetInteger()", "r_shadowMapSize.GetInteger()"),
+        "the budget follows both live cvars",
+    )
+    require_order(
+        braced_body(policy, "bool R_ShadowMapProjectedCacheAdmits(", "projected cache admission"),
+        ("if ( tileSize <= 0 || budgetTexels <= 0 ) {", "return false;",
+         "const long long tile = static_cast<long long>( tileSize ) * tileSize;",
+         "+ tile <= budgetTexels;"),
+        "a map is admitted while its tile's texels fit",
+    )
+    require_order(
+        braced_body(policy, "bool R_ShadowMapCachePolicySelfTest(", "cache policy self-test"),
+        ("const long long quality = R_ShadowMapProjectedCacheTexelBudgetFor( 8, 2048 );",
+         "!R_ShadowMapProjectedCacheAdmits( quality, 7 * full, 2048 )",
+         "R_ShadowMapProjectedCacheAdmits( quality, 8 * full, 2048 )",
+         "!R_ShadowMapProjectedCacheAdmits( quality, 31 * ( full / 4 ), 1024 )",
+         "R_ShadowMapProjectedCacheAdmits( quality, 32 * ( full / 4 ), 1024 )",
+         "!R_ShadowMapProjectedCacheAdmits( quality, 2 * full + 23 * ( full / 4 ), 1024 )",
+         "R_ShadowMapProjectedCacheTexelBudgetFor( 0, 2048 ) != 0"),
+        "eight full maps, thirty-two half-size ones, a mix, and none at 0",
+    )
+
+    # neither back end counts entries with the cvar any more
+    for source, marker, limit, context in (
+        (vk, "static int VK_ShadowMap_ProjectedCacheSlotLimit(",
+         "? Min( SHADOWMAP_PROJECTED_CACHE_MAX_SLOTS, VK_SHADOW_MAX_CACHE_SLOTS )", "Vulkan projected records"),
+        (gl, "static int RB_ShadowMapProjectedCacheSlotLimit(",
+         "? SHADOWMAP_PROJECTED_CACHE_MAX_SLOTS : 0;", "OpenGL projected records"),
+    ):
+        body = braced_body(source, marker, context)
+        require_order(body, ("r_shadowMapProjectedCacheSize.GetInteger() > 0", limit), context)
+        if "ClampInt" in body:
+            raise AssertionError(f"{context}: the cvar is a memory bound, not a count of entries")
+    require(gl, "static projectedShadowMapCacheEntry_t\tg_projectedShadowMapCache[SHADOWMAP_PROJECTED_CACHE_MAX_SLOTS];",
+            "OpenGL projected record array")
+
+    # Vulkan: idle images count, and a shrunk bound is enforced at the next view
+    require_order(
+        braced_body(vk, "static long long VK_ShadowMap_ProjectedCacheTexels(", "Vulkan projected cache texels"),
+        ("for ( int i = 0 ; i < VK_SHADOW_MAX_CACHE_SLOTS ; i++ ) {", "VK_ShadowMap_ProjectedEntryTexels("),
+        "every image the cache holds counts, in use or idle",
+    )
+    require_compact(
+        braced_body(vk, "static long long VK_ShadowMap_ProjectedEntryTexels(", "Vulkan projected entry texels"),
+        """return entry.image != VK_NULL_HANDLE
+            ? static_cast<long long>( entry.imageTileSize ) * entry.imageTileSize
+            : 0;""",
+        "an image costs one tile of its map, whether its content is valid or not",
+    )
+    require(vk, "int\t\t\t\t\timageTileSize;", "a record keeps the tile size its image was made for")
+    require_order(
+        braced_body(vk, "static void VK_ShadowMap_BeginCacheView(", "Vulkan per-view cache upkeep"),
+        ("const long long budget = R_ShadowMapProjectedCacheTexelBudget();",
+         "long long resident = VK_ShadowMap_ProjectedCacheTexels();",
+         "resident > budget ; i++ ) {",
+         "if ( !projected.valid ) {",
+         "VK_ShadowMap_ReleaseProjectedCacheImage( projected );",
+         "while ( resident > budget ) {",
+         "vkShadow.projectedCache[ oldest ].lastUsedFrame",
+         "VK_ShadowMap_ReleaseProjectedCacheImage("),
+        "a lowered bound releases idle images, then the least recently used tiles",
+    )
+    require(vk, "projectedTiles=%.2f/%.0f", "the Vulkan report states the cache against its bound")
+
+    # OpenGL: the atlas is the bound, and the cache may fill it
+    require_compact(
+        braced_body(gl, "static int RB_ShadowMapAtlasCellCount(", "OpenGL atlas cells"),
+        """const int gridDim = RB_ShadowMapAtlasGridDim();
+        return gridDim * gridDim;""",
+        "every atlas cell may hold a cached tile",
+    )
+    if "R_ShadowMapProjectedCacheTexelBudget(" in gl:
+        raise AssertionError("OpenGL's projected cache is the atlas: a texel budget below it saves no memory")
+    require_order(
+        braced_body(gl, "static int RB_ShadowMapProjectedCacheCellsUsed(", "OpenGL projected cells used"),
+        ("RB_ShadowMapProjectedCacheEntryStorageValid( &entry )", "cells += entry.atlasCellSpan * entry.atlasCellSpan;"),
+        "resident entries count by the cells they fill",
+    )
+    require_order(
+        braced_body(gl, "static projectedShadowMapCacheEntry_t *RB_ShadowMapAllocProjectedCacheEntry(",
+                    "OpenGL projected cache allocation"),
+        ("const int atlasCells = RB_ShadowMapAtlasCellCount();",
+         "cellSpan <= 0 || cellSpan * cellSpan > atlasCells",
+         "return NULL;",
+         # nothing is evicted for a block that would not fit even then
+         "int pinnedCells = 0;",
+         "entry.lastUsedFrame >= tr.frameCount - 1",
+         "pinnedCells += entry.atlasCellSpan * entry.atlasCellSpan;",
+         "if ( pinnedCells + cellSpan * cellSpan > atlasCells ) {",
+         "return NULL;",
+         "if ( freeEntry != NULL && RB_ShadowMapAtlasFindFreeBlock( cellSpan, cellX, cellY ) ) {",
+         "oldest->valid = false;"),
+        "a block is placed where the atlas has room, else the least recently used tile gives way",
+    )
+    require(gl, "projectedCells=%d/%d", "the OpenGL report states the cache against the atlas")
+
+    require(
+        read("src/renderer/RenderSystem_init.cpp"),
+        'idCVar r_shadowMapProjectedCacheSize( "r_shadowMapProjectedCacheSize", "8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, '
+        '"how many full-size (r_shadowMapSize) static projected-light shadow maps the cache keeps; '
+        'a map cut down for a crowded view takes its share of one, and 0 turns the cache off.',
+        "the cvar says what it counts, and keeps its default",
+    )
+
+
+def validate_depth_only_point_cube_contract() -> None:
+    """OpenGL point cubes carry no colour image while nothing samples it.
+
+    A cube's colour image holds radial depth packed into RGBA for receivers
+    that compare by hand. With hardware compare, which is the default, the
+    receiver reads the depth cube through a shadow sampler and the colour was
+    written, cached and copied for nothing: half the memory of every cube.
+    The colour cube stays wherever something does read it.
+    """
+    gl = read("src/renderer/draw_arb2.cpp")
+
+    needed = braced_body(gl, "static bool RB_PointShadowMapColorCubeNeeded(", "point colour cube need")
+    require_order(
+        needed,
+        (
+            # the switch, and the fallback for a driver whose depth-only cube target is incomplete
+            "if ( !r_shadowMapPointDepthOnly.GetBool() ) {",
+            "return true;",
+            "g_pointShadowMapDepthOnlyAvailableGeneration == tr.videoRestartCount && !g_pointShadowMapDepthOnlyAvailable",
+            "return true;",
+            # every consumer of the packed colour
+            "return !RB_PointShadowMapDepthCompareEnabled()",
+            "|| r_shadowMapDebugOverlay.GetBool()",
+            "|| r_rendererSharedWorldInteraction.GetBool()",
+            "|| r_rendererModernVisible.GetBool()",
+            "|| r_rendererModernVisibleDepth.GetBool()",
+            "|| r_rendererModernDeferred.GetBool()",
+            "|| r_rendererForwardPlus.GetBool();",
+        ),
+        "the colour cube stays for every receiver that decodes it",
+    )
+    # the consumers the predicate names really are the ones that read the colour image
+    require_compact(
+        gl,
+        """if ( RB_PointShadowMapDepthCompareEnabled() && g_pointShadowMapDepthImage != NULL ) {
+            g_pointShadowMapDepthImage->Bind();""",
+        "the classic receiver samples the depth cube under hardware compare",
+    )
+    require_compact(
+        braced_body(gl, "bool RB_ShadowMapTextureBindings(", "modern shadow bindings"),
+        "idImage *pointAtlasImage = g_pointShadowMapColorImage;",
+        "the modern programs decode the colour cube",
+    )
+    require_order(
+        braced_body(gl, "static bool RB_SharedWorldInteractionGLAssignPointCacheResource(", "sealed point resource"),
+        ("entry->colorImage == NULL", "return false;"),
+        "the shared interaction stream requires both images",
+    )
+
+    # A cube changes shape whole. Its images and its target are made and
+    # resized together; keeping the depth image across a change wrapped a new
+    # target around whatever size it had been left at, and door-point, which
+    # lowers the cube size and then toggles the debug overlay, could no longer
+    # compose its light (the cached cube came back at 512 beside a 256 scratch).
+    require_order(
+        braced_body(gl, "static void RB_PointShadowMapReleaseCube(", "point cube release"),
+        (
+            "RB_ShadowMapDestroyRenderTexture( renderTexture );",
+            "RB_ShadowMapPurgeImage( colorImage );",
+            "colorImage = NULL;",
+            "RB_ShadowMapPurgeImage( depthImage );",
+            "depthImage = NULL;",
+        ),
+        "a cube gives up both images and its target together",
+    )
+
+    # resources: no colour image, no colour attachment
+    ensure = braced_body(gl, "static bool RB_PointShadowMapEnsureResources(", "point cube resources")
+    require_order(
+        ensure,
+        (
+            "RB_PointShadowMapLoadProgram() || !RB_PointShadowMapLoadCasterProgram()",
+            # read after the programs settled hardware compare for the generation
+            "const bool wantColor = RB_PointShadowMapColorCubeNeeded();",
+            "if ( ( *colorImage != NULL ) != wantColor",
+            "( ( *renderTexture )->GetNumColorImages() > 0 ) != wantColor",
+            "RB_PointShadowMapReleaseCube( *colorImage, *depthImage, *renderTexture );",
+            "if ( wantColor && *colorImage == NULL ) {",
+            "if ( *depthImage == NULL ) {",
+            "tr.CreateRenderTexture( wantColor ? *colorImage : NULL, *depthImage );",
+            # the size is checked for a new target as for an old one
+            "if ( *renderTexture != NULL",
+            "( *renderTexture )->GetWidth() != shadowMapSize || ( *renderTexture )->GetHeight() != shadowMapSize",
+            "tr.ResizeRenderTexture( *renderTexture, shadowMapSize, shadowMapSize );",
+            "g_pointShadowMapColorImage = *colorImage;",
+            "const bool resourcesOk = ( !wantColor || g_pointShadowMapColorImage != NULL )",
+        ),
+        "a cube is built with a colour image only when one is needed, at the current size",
+    )
+
+    # a change of configuration gives the old cubes back at once
+    require_order(
+        braced_body(gl, "static void RB_PointShadowMapSyncColorCubes(", "point cube configuration change"),
+        (
+            "const bool wantColor = RB_PointShadowMapColorCubeNeeded();",
+            "g_pointShadowMapCubesHaveColor == wantColor",
+            "return;",
+            "RB_PointShadowMapReleaseCube( g_pointShadowMapScratchColorImage,",
+            "g_pointShadowMapScratchDepthImage, g_pointShadowMapScratchRenderTexture );",
+            "RB_PointShadowMapReleaseCube( entry.colorImage, entry.depthImage, entry.renderTexture );",
+            "entry.depthStorageGeneration = 0;",
+            "entry.valid = false;",
+            "g_activePointShadowMapCache = NULL;",
+            "g_pointShadowMapCubesHaveColor = wantColor;",
+        ),
+        "cubes made for the other configuration are released, not left for slot reuse",
+    )
+    require_order(
+        gl,
+        ("RB_PointShadowMapSyncColorCubes();", "RB_ShadowMapExpireCaches();", "RB_ShadowMapCountCacheSlots();"),
+        "the configuration is settled before a view looks anything up",
+    )
+
+    # the memory bound counts what a cube really costs
+    require_compact(
+        braced_body(gl, "static int RB_ShadowMapPointCacheSlotLimit( void ) {", "GL point cache slot limit"),
+        """const int bytesPerTexel = !RB_PointShadowMapColorCubeNeeded() ? 4
+            : ( RB_PointShadowMapHighPrecisionEnabled() ? 12 : 8 );
+        return R_ShadowMapPointCacheSlotLimit( RB_ShadowMapPointSizeValue(),
+            bytesPerTexel, SHADOWMAP_POINT_CACHE_MAX_SLOTS );""",
+        "a depth-only cube is four bytes a texel",
+    )
+
+    # the caster pass: an incomplete depth-only target falls back to colour cubes
+    render = braced_body(gl, "static bool RB_RenderPointShadowMap(", "point cube render")
+    require_order(
+        render,
+        (
+            "g_pointShadowMapRenderTexture->MakeCurrent( 0 );",
+            "if ( g_pointShadowMapRenderTexture->IsKnownIncomplete() ) {",
+            "if ( g_pointShadowMapRenderTexture->GetNumColorImages() == 0 ) {",
+            "RB_PointShadowMapDisableDepthOnlyForGeneration();",
+            "return false;",
+            # the static cube is copied without a colour plane it does not have
+            "const GLbitfield composeCopyMask = GL_DEPTH_BUFFER_BIT",
+            "g_pointShadowMapRenderTexture->GetNumColorImages() > 0 ? GL_COLOR_BUFFER_BIT : 0",
+        ),
+        "a depth-only cube renders and composes without a colour plane, and fails closed",
+    )
+    # the modern copy reads the colour attachment
+    require_order(
+        braced_body(gl, "bool RB_ModernShadowMapRender(", "modern current shadow map"),
+        (
+            "g_pointShadowMapRenderTexture->GetNumColorImages() == 0",
+            "complete = false;",
+            "glReadBuffer( GL_COLOR_ATTACHMENT0 );",
+        ),
+        "the modern copy never reads a colour attachment that is not there",
+    )
+
+    require(gl, "pointColorCube=%d", "the report states whether cubes carry colour")
+    require(
+        read("src/renderer/RenderSystem_init.cpp"),
+        'idCVar r_shadowMapPointDepthOnly( "r_shadowMapPointDepthOnly", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,',
+        "depth-only cubes are on by default and can be switched off",
+    )
+    require(
+        read("docs/user/shadow-mapping.md"),
+        "| `r_shadowMapPointDepthOnly` | `1` |",
+        "the switch is documented",
     )
 
 
@@ -2524,15 +8508,39 @@ def validate_ci_registration() -> None:
 
 
 def main() -> None:
+    validate_shadow_effectiveness_image_gate()
+    validate_shared_interaction_shadow_runtime_contract()
+    validate_shared_interaction_shadow_profile_contract()
     validate_runtime_failure_gates()
     validate_receiver_ownership_split()
     validate_shadow_depth_format_selection()
     validate_csm_atlas_and_receiver_contract()
     validate_shadow_descriptor_abi()
     validate_shadow_filtering_contract()
+    validate_projected_footprint_bias_contract()
+    validate_point_receiver_world_bias_contract()
+    validate_shadow_contact_and_gl_robustness_contract()
     validate_exact_static_cache_and_admission_contract()
+    validate_dynamic_caster_composition_contract()
+    validate_csm_static_cache_contract()
+    validate_shadow_debug_mode_contract()
+    validate_update_admission_contract()
+    validate_shadow_report_and_storage_honesty()
+    validate_shadow_gpu_timing_contract()
     validate_packed_shadow_geometry()
     validate_fail_closed_target_and_stencil_behavior()
+    validate_shadow_debug_overlay_contract()
+    validate_projection_cache_precision_and_derivatives()
+    validate_gl_shadow_coverage_contract()
+    validate_map_investigation_repairs()
+    validate_vulkan_receiver_scan_contract()
+    validate_live_cutout_and_point_culling_contract()
+    validate_translucent_moment_contract()
+    validate_point_cache_parity_and_receiver_cost_contract()
+    validate_stencil_elision_contract()
+    validate_atlas_tile_assignment_contract()
+    validate_projected_cache_memory_bound_contract()
+    validate_depth_only_point_cube_contract()
     validate_ci_registration()
     print("renderer_vulkan_shadow_compatibility: ok")
 

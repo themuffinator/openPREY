@@ -94,8 +94,11 @@ def main() -> None:
     require(
         async_path,
         async_network,
-        'serverMaxClientRate( "net_serverMaxClientRate", "32000"',
-        'clientMaxRate( "net_clientMaxRate", "32000"',
+        # Upstream openQ4's ceilings: a cap below snapshotSize * snapshotHz sheds
+        # whole snapshots, so the defaults follow upstream rather than FW-38.
+        'serverSnapshotDelay( "net_serverSnapshotDelay", "33"',
+        'serverMaxClientRate( "net_serverMaxClientRate", "128000"',
+        'clientMaxRate( "net_clientMaxRate", "128000"',
     )
 
     menu_path = "src/framework/Session_menu.cpp"
@@ -144,7 +147,7 @@ def main() -> None:
         '"GUI save version"',
         "unsupported GUI stream marker",
     )
-    if gui.index("&OPENPREY_GUI_SAVE_MAGIC") > gui.index("int num = state.GetNumKeyVals()"):
+    if gui.index("UI_WriteSaveGameInt( savefile, OPENPREY_GUI_SAVE_MAGIC") > gui.index("const int num = state.GetNumKeyVals()"):
         raise SystemExit(f"{gui_path}: GUI marker must precede the serialized GUI payload")
 
     lwo_path = "src/renderer/Model_lwo.cpp"

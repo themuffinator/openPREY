@@ -30,11 +30,19 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "tr_local.h"
 #include "Model_local.h"
+#include "ModernGLExecutor.h"
+#include "RendererBootstrap.h"
 #include "RendererMetrics.h"
+#include "RendererModule.h"
+#include "RendererResourceSettings.h"
 #include "RendererUpload.h"
 #include "ScenePackets.h"
-#include "smaa/AreaTex.h"
-#include "smaa/SearchTex.h"
+#include "ShadowMapClassification.h"
+#include "TemporalPresentation.h"
+#include "SavePreviewCapture.h"
+#include "DisplayPresentation.h"
+#include "../external/smaa/AreaTex.h"
+#include "../external/smaa/SearchTex.h"
 
 idRenderSystemLocal	tr;
 idRenderSystem	*renderSystem = &tr;
@@ -48,6 +56,10 @@ static const char *R_GetBackEndRendererName( backEndName_t renderer ) {
 	switch ( renderer ) {
 		case BE_ARB2:
 			return "ARB2";
+		case BE_MODERN:
+			return "Modern";
+		case BE_GLES_D3:
+			return "GLESD3";
 		default:
 			return "BAD";
 	}
@@ -76,6 +88,10 @@ static bool R_IsLegacyBackEndRequest( const char *rendererName ) {
 R_RequestBackEndRenderer
 ==============================
 */
+static bool R_ModernBackEndAvailable( void ) {
+	return R_ModernGLExecutor_Stats().available;
+}
+
 static backEndName_t R_RequestBackEndRenderer( const char *rendererName ) {
 	if ( rendererName == NULL || rendererName[0] == '\0' || idStr::Icmp( rendererName, "best" ) == 0 ) {
 		return BE_BAD;
@@ -84,6 +100,18 @@ static backEndName_t R_RequestBackEndRenderer( const char *rendererName ) {
 	if ( idStr::Icmp( rendererName, "arb2" ) == 0 ) {
 		return glConfig.allowARB2Path ? BE_ARB2 : BE_BAD;
 	}
+
+	if ( idStr::Icmp( rendererName, "modern" ) == 0 ) {
+		return R_ModernBackEndAvailable() ? BE_MODERN : BE_BAD;
+	}
+
+#ifdef OPENQ4_RENDERER_GLES_MODULE
+	// Only the renderer-gles module compiles the GLES_D3 translation units, so
+	// the name resolves nowhere else.
+	if ( idStr::Icmp( rendererName, "glesd3" ) == 0 ) {
+		return BE_GLES_D3;
+	}
+#endif
 
 	return BE_BAD;
 }
@@ -94,8 +122,27 @@ R_PickBestBackEndRenderer
 ===============================
 */
 static backEndName_t R_PickBestBackEndRenderer() {
+	// ARB2 stays the automatic choice wherever it exists. The modern executor
+	// is layered over it there and gives up passes it cannot own, which is a
+	// strictly better frame than the standalone backend can produce today.
 	if ( glConfig.allowARB2Path ) {
 		return BE_ARB2;
+	}
+
+#ifdef OPENQ4_RENDERER_GLES_MODULE
+	// An ES profile: gles_d3 is the back end that renders here. The modern
+	// executor's shader library targets desktop GLSL and does not compile as
+	// GLSL ES, so BE_MODERN on ES draws nothing -- picking it would hand back a
+	// black frame rather than a renderer.
+	if ( glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_ES ) {
+		return BE_GLES_D3;
+	}
+#endif
+
+	// No ARB2 -- a desktop core profile. Standalone modern is the only backend
+	// left, and it is still better than failing to start.
+	if ( R_ModernBackEndAvailable() ) {
+		return BE_MODERN;
 	}
 
 	return BE_BAD;
@@ -216,15 +263,18 @@ only be called when the back end thread is idle.
 */
 static void R_PerformanceCounters( void ) {
 	if ( r_showDynamic.GetBool() ) {
-		common->Printf( "callback:%i md5:%i dfrmVerts:%i dfrmTris:%i tangTris:%i guis:%i decals:%i\n",
+		common->Printf( "callback:%i md5:%i dfrmVerts:%i dfrmTris:%i tangTris:%i guis:%i guisShared:%i decals:%i eyeSubviews:%i remoteSubviews:%i\n",
 			tr.pc.c_entityDefCallbacks,
 			tr.pc.c_generateMd5,
 			tr.pc.c_deformedVerts,
 			tr.pc.c_deformedIndexes/3,
 			tr.pc.c_tangentIndexes/3,
 			tr.pc.c_guiSurfs,
-			tr.pc.c_numDecalIndexes/3
-			); 
+			tr.pc.c_guiSurfsShared,
+			tr.pc.c_numDecalIndexes/3,
+			tr.pc.c_eyeSubviews,
+			tr.pc.c_remoteSubviews
+			);
 	}
 
 	if ( r_showCull.GetBool() ) {
@@ -246,10 +296,10 @@ static void R_PerformanceCounters( void ) {
 			tr.pc.c_shadowViewEntities, tr.pc.c_viewLights );
 	}
 	if ( r_showUpdates.GetBool() ) {
-		common->Printf( "entityUpdates:%i  entityRefs:%i  lightUpdates:%i  lightRefs:%i  snapshotsReused:%i\n",
+		common->Printf( "entityUpdates:%i  entityRefs:%i  lightUpdates:%i  lightRefs:%i  snapshotsReused:%i  updatesElided:%i\n",
 			tr.pc.c_entityUpdates, tr.pc.c_entityReferences,
 			tr.pc.c_lightUpdates, tr.pc.c_lightReferences,
-			tr.pc.c_entitySnapshotsReused );
+			tr.pc.c_entitySnapshotsReused, tr.pc.c_entityUpdatesElided );
 	}
 	if ( r_showMemory.GetBool() ) {
 		int	m1 = frameData ? frameData->memoryHighwater : 0;
@@ -264,6 +314,19 @@ static void R_PerformanceCounters( void ) {
 }
 
 
+
+// Preflight runs before the command loop reaches RC_SET_BUFFER. Latch its
+// identity first so backend caches and GPU receipts never observe the next
+// front-end frame. A mid-frame flush without SET_BUFFER retains this identity.
+void RB_BeginCommandFrame( const emptyCommand_t *cmds ) {
+	for ( const emptyCommand_t *cmd = cmds; cmd != NULL;
+			cmd = reinterpret_cast<const emptyCommand_t *>( cmd->next ) ) {
+		if ( cmd->commandId == RC_SET_BUFFER ) {
+			backEnd.frameCount = reinterpret_cast<const setBufferCommand_t *>( cmd )->frameCount;
+			return;
+		}
+	}
+}
 
 /*
 ====================
@@ -301,6 +364,8 @@ static void R_SubmitDeferredCommands( void ) {
 }
 
 static void R_IssueRenderCommands( void ) {
+	// captures and other inline flushes need the previous frame finished
+	R_RenderThread_Sync( "inline issue" );
 	R_SubmitDeferredCommands();
 
 	if ( frameData->cmdHead->commandId == RC_NOP
@@ -327,10 +392,65 @@ static void R_IssueRenderCommands( void ) {
 }
 
 /*
+====================
+R_IssueRenderCommandsOnRenderThread
+
+Hands this frame's commands to the render thread (r_vkRenderThread). False
+means the caller runs them inline.
+====================
+*/
+static bool R_IssueRenderCommandsOnRenderThread( void ) {
+	R_SubmitDeferredCommands();
+	if ( frameData->cmdHead->commandId == RC_NOP && !frameData->cmdHead->next ) {
+		return false;
+	}
+	if ( R_RenderThread_OverlapRequested() ) R_PrepareRenderFrameResources( frameData->cmdHead );
+	if ( !R_RenderThread_Begin( frameData->cmdHead ) ) return false;
+	// Only advance producer history once a worker owns this frame. Inline
+	// reconstruction still needs the previous history until command retirement.
+	R_ScenePackets_SealFrame();
+	return true;
+}
+
+/*
+====================
+R_RenderThread_FrameQualifies
+
+Only ordinary presented frames run on the render thread. Captures,
+tiled screenshots and loading screens keep the inline backend: they read the
+result back, or interleave with level loading that creates and destroys
+device resources. A VR frame stays inline too: the engine releases the
+headset's swapchain images as soon as EndFrame returns, and the runtime may
+composite them from then on, so the backend has to be done drawing by then.
+====================
+*/
+bool R_RenderThread_FrameQualifies( void ) {
+	// A mode change after an earlier view was queued cannot retroactively
+	// freeze that view's packet references. Render that transition inline.
+	if ( R_RenderThread_OverlapRequested() ) {
+		for ( const emptyCommand_t *cmd = frameData->cmdHead; cmd; cmd = reinterpret_cast<const emptyCommand_t *>( cmd->next ) ) {
+			if ( cmd->commandId != RC_DRAW_VIEW ) continue;
+			const viewDef_t *view = reinterpret_cast<const drawSurfsCommand_t *>( cmd )->viewDef;
+			if ( view != NULL && !view->frameSnapshot ) return false;
+		}
+	}
+	// The Alpha Labs overlay walks the world's live lightDefs, which the game
+	// tic adds to and frees. A checked image reload binds image work to the
+	// main thread.
+	return !tr.takingScreenshot
+		&& !tr.vrFrame.active
+		&& tr.tiledViewport[0] == 0
+		&& !R_LoadingScreenActive()
+		&& ( tr.specialEffectsEnabled & SPECIAL_EFFECT_AL ) == 0
+		&& ( r_forceSpecialEffects.GetInteger() & SPECIAL_EFFECT_AL ) == 0
+		&& !R_ImagePolicyActive();
+}
+
+/*
 ============
 R_GetCommandBuffer
 
-Returns memory for a command buffer (stretchPicCommand_t, 
+Returns memory for a command buffer (stretchPicCommand_t,
 drawSurfsCommand_t, etc) and links it to the end of the
 current command chain.
 ============
@@ -338,6 +458,8 @@ current command chain.
 void *R_GetCommandBuffer( int bytes ) {
 	emptyCommand_t	*cmd;
 
+	// the chain still belongs to the render thread until the frame completes
+	R_RenderThread_SyncFrontEnd( "command buffer" );
 	cmd = (emptyCommand_t *)R_FrameAlloc( bytes );
 	cmd->next = NULL;
 	frameData->cmdTail->next = &cmd->commandId;
@@ -433,6 +555,7 @@ have multiple views if a mirror, portal, or dynamic texture is present.
 =============
 */
 void	R_AddDrawViewCmd( viewDef_t *parms ) {
+	R_SnapshotRenderView( parms );
 	drawSurfsCommand_t	*cmd;
 
 	if ( ( parms->renderFlags & RF_DEFER_COMMAND_SUBMIT ) != 0 ) {
@@ -461,7 +584,7 @@ R_AddSpecialEffects
 =============
 */
 void R_AddSpecialEffects( viewDef_t *parms ) {
-	drawSurfsCommand_t *cmd;
+	drawSpecialEffectsCommand_t *cmd;
 	int activeMask;
 
 	if ( parms == NULL ) {
@@ -489,7 +612,7 @@ void R_AddSpecialEffects( viewDef_t *parms ) {
 	}
 
 	if ( ( parms->renderFlags & RF_DEFER_COMMAND_SUBMIT ) != 0 ) {
-		cmd = (drawSurfsCommand_t *)R_GetCommandBufferDeferred(
+		cmd = (drawSpecialEffectsCommand_t *)R_GetCommandBufferDeferred(
 				sizeof( *cmd ) );
 	} else {
 		// Keep this controller command on the same side of the deferred-view
@@ -497,12 +620,14 @@ void R_AddSpecialEffects( viewDef_t *parms ) {
 		// portal-sky/subview draw can land between the special command and the
 		// primary view it captures.
 		R_SubmitDeferredCommands();
-		cmd = (drawSurfsCommand_t *)R_GetCommandBuffer( sizeof( *cmd ) );
+		cmd = (drawSpecialEffectsCommand_t *)R_GetCommandBuffer( sizeof( *cmd ) );
 	}
 	cmd->commandId = RC_DRAW_SPECIAL_EFFECTS;
 	cmd->viewDef = parms;
+	cmd->effects.enabled = activeMask & ( SPECIAL_EFFECT_BLUR | SPECIAL_EFFECT_AL );
+	memcpy( cmd->effects.parms, tr.specialEffectParms, sizeof( cmd->effects.parms ) );
 	if ( R_ScenePackets_FrontEndCaptureRequired() ) {
-		R_ScenePackets_AddSpecialEffects( parms );
+		R_ScenePackets_AddSpecialEffects( parms, activeMask );
 	}
 }
 
@@ -527,6 +652,7 @@ evaluated interactively.
 ======================
 */
 void R_LockSurfaceScene( viewDef_t *parms ) {
+	R_RenderThread_Sync( "locked surfaces" );
 	drawSurfsCommand_t	*cmd;
 	viewEntity_t			*vModel;
 
@@ -620,6 +746,7 @@ void idRenderSystemLocal::SetSpecialEffect( ESpecialEffectType Which, bool Enabl
 	if ( Which <= SPECIAL_EFFECT_NONE || Which >= SPECIAL_EFFECT_MAX ) {
 		return;
 	}
+	// Values are copied into RC_DRAW_SPECIAL_EFFECTS at view submission.
 
 	if ( Enabled ) {
 		specialEffectsEnabled |= Which;
@@ -629,6 +756,7 @@ void idRenderSystemLocal::SetSpecialEffect( ESpecialEffectType Which, bool Enabl
 		// command without attempting an image load during command recording.
 		if ( Which == SPECIAL_EFFECT_AL && specialALLightImage == NULL
 				&& globalImages != NULL ) {
+			R_RenderThread_Sync( "special effect image" );
 			specialALLightImage = globalImages->ImageFromFile(
 					"gfx/lights/round.tga", TF_LINEAR, TR_CLAMP, TD_DEFAULT );
 		}
@@ -649,7 +777,6 @@ void idRenderSystemLocal::SetSpecialEffectParm( ESpecialEffectType Which, int Pa
 	if ( Parm < 0 || Parm >= MAX_ENTITY_SHADER_PARMS ) {
 		return;
 	}
-
 	specialEffectParms[ Which ][ Parm ] = Value;
 }
 
@@ -663,6 +790,7 @@ idRenderSystemLocal::ShutdownSpecialEffects
 =============
 */
 void idRenderSystemLocal::ShutdownSpecialEffects( void ) {
+	R_RenderThread_Sync( "special effect" );
 	if ( specialBlurDepthRenderTexture != NULL ) {
 		DestroyRenderTexture( specialBlurDepthRenderTexture );
 		specialBlurDepthRenderTexture = NULL;
@@ -728,7 +856,8 @@ void idRenderSystemLocal::CaptureDepthRenderToImage( const char *imageName ) {
 	cmd->cubeFace = 0;
 	cmd->copyDepth = true;
 	if ( R_ScenePackets_FrontEndCaptureRequired() ) {
-		R_ScenePackets_AddCopyRender();
+		R_ScenePackets_AddCopyRender( image, cmd->x, cmd->y,
+			cmd->imageWidth, cmd->imageHeight, cmd->cubeFace, cmd->copyDepth );
 	}
 
 	guiModel->Clear();
@@ -829,8 +958,9 @@ void idRenderSystemLocal::DrawStretchPic( float x, float y, float w, float h, fl
 =============
 GetMaterialStageImageInfo
 
-Binds the stage's image and reports its uploaded format facts so engine-side
-self-tests never need renderer-internal image types.
+Loads the stage's image and reports its uploaded format facts so engine-side
+self-tests never need renderer-internal image types. Only the upload is
+needed: a texture-unit bind is OpenGL state the Vulkan module does not have.
 =============
 */
 bool idRenderSystemLocal::GetMaterialStageImageInfo( const idMaterial *material, int stageIndex, materialImageInfo_t &info ) {
@@ -843,7 +973,9 @@ bool idRenderSystemLocal::GetMaterialStageImageInfo( const idMaterial *material,
 		return false;
 	}
 	idImage *image = stage->texture.image;
-	image->Bind();
+	if ( !image->IsLoaded() ) {
+		image->ActuallyLoadImage( true );
+	}
 	const idImageOpts &opts = image->GetOpts();
 	info.numLevels = opts.numLevels;
 	info.isDXT1Compressed = ( opts.format == FMT_DXT1 );
@@ -860,6 +992,7 @@ generated GUI content (player stat graphs).
 =============
 */
 bool idRenderSystemLocal::UploadMaterialStageScratchImage( const idMaterial *material, int stageIndex, const byte *data, int width, int height ) {
+	R_RenderThread_Sync( "image" );
 	if ( material == NULL || data == NULL || stageIndex < 0 || stageIndex >= material->GetNumStages() ) {
 		return false;
 	}
@@ -1000,9 +1133,22 @@ void idRenderSystemLocal::SetUseUIViewportFor2D( bool enable ) {
 		return;
 	}
 
-	// Viewport selection for 2D is applied when guiModel is emitted.
-	// Flush pending 2D so already-queued surfaces keep the previous mode.
-	FlushGui();
+	// Selection is applied at emission. Preserve a batch when both modes
+	// select precisely the same rectangle (the usual full-window HUD).
+	// Cropped, offscreen and editor views ignore this switch entirely.
+	const renderCrop_t& crop=renderCrops[currentRenderCrop];
+	const bool sameViewport=currentRenderCrop!=0 || activeRenderTexture!=NULL || (viewDef && viewDef->isEditor) ||
+		(glConfig.uiViewportX==crop.x && glConfig.vidHeight-glConfig.uiViewportY-glConfig.uiViewportHeight==crop.y &&
+		 glConfig.uiViewportWidth==crop.width && glConfig.uiViewportHeight==crop.height);
+	bool mustFlush = !sameViewport;
+#if !defined( OPENQ4_RENDERER_VK_MODULE )
+	// GL captures _currentRender at the start of the post-process range. Keep
+	// the final scene composite separate from a following legacy scope even
+	// when their rectangles match. Ordinary UI geometry can still batch.
+	// Vulkan captures just before the consuming pass and keeps its own ordering.
+	mustFlush = mustFlush || guiModel->HasSceneFeedback();
+#endif
+	if (mustFlush) FlushGui();
 
 	useUIViewportFor2D = enable;
 }
@@ -1242,6 +1388,7 @@ void idRenderSystemLocal::SetBackEndRenderer() {
 		return;
 	}
 
+	R_RenderThread_Sync( "backend selection" );
 	const char *requestedRendererName = r_renderer.GetString();
 
 	if ( !glConfig.isInitialized ) {
@@ -1261,6 +1408,7 @@ void idRenderSystemLocal::SetBackEndRenderer() {
 		backEndRenderer = R_PickBestBackEndRenderer();
 	}
 	if ( backEndRenderer == BE_BAD ) {
+		R_RejectRecoverableRendererRestart( "SetBackEndRenderer: no supported renderSystem back end is available" );
 		common->FatalError( "SetBackEndRenderer: no supported renderSystem back end is available" );
 	}
 
@@ -1276,25 +1424,63 @@ void idRenderSystemLocal::SetBackEndRenderer() {
 			r_lightDetailLevel.SetFloat( 0.0f );
 		}
 		break;
+	case BE_MODERN:
+		common->Printf( "using standalone modern renderSystem (no ARB2 bridge)\n" );
+		// Vertex programs in the sense the legacy path means -- ARB assembly
+		// vertex programs -- do not exist here. The flag drives interaction
+		// data layout and vertex-cache invalidation, and the modern executor
+		// builds its own vertex input, so it stays false.
+		backEndRendererHasVertexPrograms = false;
+		backEndRendererMaxLight = 999;
+		break;
+	case BE_GLES_D3:
+		common->Printf( "using Doom 3-shaped GLES 3.0 renderSystem (gles_d3)\n" );
+		// Same reasoning as BE_MODERN: no ARB assembly vertex programs exist on
+		// an ES context, and this backend builds its own vertex input.
+		backEndRendererHasVertexPrograms = false;
+		backEndRendererMaxLight = 999;
+		break;
 	default:
+		R_RejectRecoverableRendererRestart( "SetBackEndRenderer: bad back end" );
 		common->FatalError( "SetbackEndRenderer: bad back end" );
 	}
 
 	r_actualRenderer.SetString( R_GetBackEndRendererName( backEndRenderer ) );
 
+	// The settings service compares this report with what it asked for: the
+	// selected and automatic back ends, the fallback the warnings below name,
+	// and the upload storage the device allocated.
+	renderRendererSelection_t selection;
+	memset( &selection, 0, sizeof( selection ) );
+	idStr::Copynz( selection.requested, requestedRendererName != NULL ? requestedRendererName : "", sizeof( selection.requested ) );
+	selection.selected = backEndRenderer;
+	selection.automatic = R_PickBestBackEndRenderer();
+	selection.fallback = RENDER_SELECTION_REQUESTED;
+	selection.promotionActive = RendererBootstrap_ShouldAutoPromoteModernVisible();
+	rendererUploadStorage_t uploadStorage;
+	if ( R_RendererUpload_QueryStorage( uploadStorage ) ) {
+		selection.uploadObserved = true;
+		selection.uploadPath = uploadStorage.path;
+		selection.uploadPersistentFallback = uploadStorage.persistentFallback;
+	}
+
 	if ( requestedRendererName != NULL && requestedRendererName[0] != '\0' ) {
 		if ( R_IsLegacyBackEndRequest( requestedRendererName ) ) {
+			selection.fallback = RENDER_SELECTION_LEGACY;
 			common->Warning(
 				"r_renderer \"%s\" requested, but openPREY only ships the ARB2 backend; using %s instead",
 				requestedRendererName,
 				r_actualRenderer.GetString() );
 		} else if ( idStr::Icmp( requestedRendererName, "best" ) != 0 && idStr::Icmp( requestedRendererName, r_actualRenderer.GetString() ) != 0 ) {
+			selection.fallback = RENDER_SELECTION_UNAVAILABLE;
 			common->Warning(
 				"r_renderer \"%s\" is unavailable on this renderer; using %s instead",
 				requestedRendererName,
 				r_actualRenderer.GetString() );
 		}
 	}
+
+	R_RendererModule_PublishRendererSelection( &selection );
 
 	// clear the vertex cache if we are changing between
 	// using vertex programs and not, because specular and
@@ -1320,6 +1506,10 @@ void idRenderSystemLocal::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( !glConfig.isInitialized ) {
 		return;
 	}
+	// The previous frame may still be recording on the render thread; this
+	// frame's front end reuses its frame memory and vertex-cache temps.
+	R_RenderThread_SyncFrontEnd( "frame" );
+	R_RendererMetrics_MarkCpuFrameBegin();
 
 	// determine which back end we will use
 	SetBackEndRenderer();
@@ -1355,14 +1545,31 @@ void idRenderSystemLocal::BeginFrame( int windowWidth, int windowHeight ) {
 	}
 
 	guiModel->Clear();
+	if ( demoFrameGuiModel != NULL ) {
+		// a frame's recorded 2D starts empty, whatever the last frame drew
+		demoFrameGuiModel->Clear();
+	}
+	if ( session->writeDemo == NULL && demoLayerGuiModels.Num() > 0 ) {
+		// retained layer content is only tracked while a demo records
+		demoLayerGuiModels.DeleteContents( true );
+	}
 	useUIViewportFor2D = true;
 	activeRenderTexture = NULL;
 
 	// for the larger-than-window tiled rendering screenshots
 	if ( tiledViewport[0] ) {
+		// glConfig takes the capture's size below; keep the real window's.
+		tiledWindow[0] = windowWidth;
+		tiledWindow[1] = windowHeight;
 		windowWidth = tiledViewport[0];
 		windowHeight = tiledViewport[1];
+	} else {
+		tiledWindow[0] = 0;
+		tiledWindow[1] = 0;
 	}
+
+	// openQ4 VR: a headset frame's output is the virtual screen (RenderSystem_vr.cpp)
+	const bool vrPresenting = BeginVRFrame( windowWidth, windowHeight );
 
 	glConfig.vidWidth = windowWidth;
 	glConfig.vidHeight = windowHeight;
@@ -1425,21 +1632,23 @@ void idRenderSystemLocal::BeginFrame( int windowWidth, int windowHeight ) {
 	renderCrops[0].height = windowHeight;
 	currentRenderCrop = 0;
 
-	// screenFraction mode 0 keeps the legacy cropped-viewport behavior used for
-	// quick fill-rate testing below native resolution. Supersampling above native
-	// is handled by the main-scene render target path so the back buffer stays at
-	// the display size.
-	const int screenFraction = idMath::ClampInt( 10, 200, r_screenFraction.GetInteger() );
-	if ( screenFraction < 100 && r_resolutionScaleMode.GetInteger() == 0 ) {
-		int	w = SCREEN_WIDTH * screenFraction / 100.0f;
-		int h = SCREEN_HEIGHT * screenFraction / 100.0f;
-		CropRenderSize( w, h );
-	}
+	// No resolution-scale crop is pushed here, in any r_resolutionScaleMode. A
+	// crop pushed in BeginFrame is the whole frame's coordinate system -- menu,
+	// HUD and scene alike -- so it costs the UI its native resolution; the legacy
+	// mode 0 crop drew the menu into the bottom-left corner this way (#169).
+	// PushSceneResolutionScale wraps the world render instead; see
+	// idRenderWorldLocal::RenderScene. Supersampling above native is handled by
+	// the main-scene render target path so the back buffer stays at the display
+	// size.
+	resolutionScaleCropActive = false;
+	resolutionScaleWidth = 0;
+	resolutionScaleHeight = 0;
 
 
 	// this is the ONLY place this is modified
 	frameCount++;
 	R_RendererMetrics_BeginFrame( frameCount );
+	R_TemporalPresentation_BeginFrame( windowWidth, windowHeight, takingScreenshot );
 	R_RendererUpload_BeginFrame( frameCount );
 	if ( R_ScenePackets_FrontEndCaptureRequired() ) {
 		R_ScenePackets_BeginFrame();
@@ -1456,6 +1665,9 @@ void idRenderSystemLocal::BeginFrame( int windowWidth, int windowHeight ) {
 
 	// set the time for shader effects in 2D rendering
 	SetFrameShaderTime( eventLoop->Milliseconds() );
+	// the wall clock, not the event clock: the shadow-map static/live caster
+	// split follows rendered frames even while the game is paused or scaled
+	R_ShadowMapBeginFrame( Sys_Milliseconds() );
 
 	//
 	// draw buffer stuff
@@ -1472,12 +1684,41 @@ void idRenderSystemLocal::BeginFrame( int windowWidth, int windowHeight ) {
 	if ( R_ScenePackets_FrontEndCaptureRequired() ) {
 		R_ScenePackets_AddCommandOnly();
 	}
+
+	// the backend moves onto the virtual screen before anything is drawn
+	if ( vrPresenting ) {
+		SetVRRenderTarget( -1 );
+	}
 }
 
 void idRenderSystemLocal::WriteDemoPics() {
+	// The frame's earlier screen batches, then the one still pending.
+	idGuiModel *frame = demoFrameGuiModel != NULL ? demoFrameGuiModel : guiModel;
+	if ( demoFrameGuiModel != NULL && R_DemoGuiTarget() == demoFrameGuiModel ) {
+		demoFrameGuiModel->AppendForDemo( *guiModel );
+	}
 	session->writeDemo->WriteInt( DS_RENDER );
 	session->writeDemo->WriteInt( DC_GUI_MODEL );
-	guiModel->WriteToDemo( session->writeDemo );
+	if ( demoFrameGuiModel == NULL || demoLastGuiModel == NULL ) {
+		frame->WriteToDemo( session->writeDemo );
+		return;
+	}
+	frame->WriteToDemo( session->writeDemo, demoLastGuiModelValid ? demoLastGuiModel : NULL );
+	// keep what was written for the next frame's comparison, without a copy
+	demoLastGuiModel->Swap( *demoFrameGuiModel );
+	demoLastGuiModelValid = true;
+	demoFrameGuiModel->Clear();
+}
+
+void idRenderSystemLocal::WriteDemoEndFrame() {
+	if ( session->writeDemo == NULL ) {
+		return;
+	}
+	session->writeDemo->WriteInt( DS_RENDER );
+	session->writeDemo->WriteInt( DC_END_FRAME );
+	if ( r_showDemo.GetBool() ) {
+		common->Printf( "write DC_END_FRAME\n" );
+	}
 }
 
 void idRenderSystemLocal::DrawDemoPics() {
@@ -1496,6 +1737,9 @@ EndFrame
 Returns the number of msec spent in the back end
 =============
 */
+void Usercmd_TakeFrameInputClocks( double &lookSampleClock, double &flashPressClock );
+void Common_RecordFrameInputToSwap( double lookSampleClock, double flashPressClock, double swapClock );
+
 void idRenderSystemLocal::EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	emptyCommand_t *cmd;
 
@@ -1505,6 +1749,11 @@ void idRenderSystemLocal::EndFrame( int *frontEndMsec, int *backEndMsec ) {
 
 	// close any gui drawing
 	FlushGui();
+
+	// a VR frame ends on its virtual screen, which presents last
+	EndVRFrame();
+	// At most one backend is in flight. Join after building this front end.
+	R_RenderThread_Sync( "handoff" );
 
 	// check for dynamic changes that require some initialization
 	R_CheckCvars();
@@ -1520,16 +1769,109 @@ void idRenderSystemLocal::EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	}
 
 	// start the back end up again with the new command list
-	R_IssueRenderCommands();
-	ProcessPendingRenderTextureDeletes();
+	Usercmd_TakeFrameInputClocks( frameLookSampleClock, frameFlashPressClock );
+	if ( r_hiddenWindow.GetBool() ) {
+		// Hidden Vulkan frames complete in an offscreen image; its presentation
+		// receipt serves resource lifetime, not input-to-display measurement.
+		frameLookSampleClock = frameFlashPressClock = 0.0;
+	}
+	frameSwapClock = 0.0;
+	R_RendererMetrics_MarkFrameSubmitBegin();
+	const int frameFrontEndMsec = pc.frontEndMsec;
+	// The worker can overwrite backEnd.pc as soon as we hand it this frame.
+	const int previousBackEndMsec = backEnd.pc.msec;
+	if ( R_IssueRenderCommandsOnRenderThread() ) {
+		renderThreadFrameCounters = pc;
+		renderThreadFrameCountersValid = true;
+		memset( &pc, 0, sizeof( pc ) );
+		if ( R_RenderThread_FrontEndMayOverlap() ) {
+			R_AdvanceFrameData();
+			vertexCache.EndFrame();
+			R_RendererUpload_EndFrame();
+		}
+		// The render thread owns this frame's commands, frame memory and
+		// vertex-cache temps until R_RenderThread_Sync completes the frame.
+		// The back-end time reported here is the previous frame's.
+		if ( frontEndMsec ) {
+			*frontEndMsec = frameFrontEndMsec;
+		}
+		if ( backEndMsec ) {
+			*backEndMsec = previousBackEndMsec;
+		}
+	} else {
+		R_IssueRenderCommands();
+		CompleteBackEndFrame();
 
-	// save out timing information after the backend has consumed the frame.
-	if ( frontEndMsec ) {
-		*frontEndMsec = pc.frontEndMsec;
+		// save out timing information after the backend has consumed the frame.
+		if ( frontEndMsec ) {
+			*frontEndMsec = frameFrontEndMsec;
+		}
+		if ( backEndMsec ) {
+			*backEndMsec = backEnd.pc.msec;
+		}
 	}
-	if ( backEndMsec ) {
-		*backEndMsec = backEnd.pc.msec;
+
+	// The session ends recorded frames itself (WriteDemoEndFrame), after a
+	// gameplay draw only; ending every presented frame here filled campaign
+	// recordings with the frozen frames of menus, pauses and loading screens.
+}
+
+// Keep the receipt on the frame until the main thread retires it. In the
+// threaded path EndFrame returns before this swap has even started.
+void R_SwapBuffersWithInputTiming( void ) {
+	const bool timeInput = tr.frameLookSampleClock > 0.0 || tr.frameFlashPressClock > 0.0;
+	renderDisplayPresentation_t beforeSwap = {};
+	if ( timeInput ) {
+		R_GetDisplayPresentation( &beforeSwap );
 	}
+	GLimp_SwapBuffers();
+	if ( timeInput ) {
+		const double swapClock = sys->GetClockTicks();
+		renderDisplayPresentation_t afterSwap;
+		R_GetDisplayPresentation( &afterSwap );
+		// Failed presents, readbacks and hidden offscreen frames must not
+		// masquerade as low input-to-display latency.
+		if ( afterSwap.available && afterSwap.generation == beforeSwap.generation
+				&& afterSwap.failureSequence == beforeSwap.failureSequence
+				&& afterSwap.presentedSequence > beforeSwap.presentedSequence ) {
+			tr.frameSwapClock = swapClock;
+		}
+	}
+}
+
+/*
+===============
+idRenderSystemLocal::CompleteBackEndFrame
+
+The bookkeeping that follows the backend's consumption of a frame. EndFrame
+runs it inline; with the render thread (r_vkRenderThread) the main thread
+runs it in R_RenderThread_Sync once the thread has finished the frame.
+===============
+*/
+void idRenderSystemLocal::CompleteBackEndFrame( void ) {
+	frameData_t *submittedFrame = R_BackEndFrameData();
+	if ( frameSwapClock > 0.0 ) {
+		Common_RecordFrameInputToSwap( frameLookSampleClock, frameFlashPressClock, frameSwapClock );
+	}
+	frameLookSampleClock = frameFlashPressClock = frameSwapClock = 0.0;
+	performanceCounters_t ticCounters;
+	const bool threadedFrame = renderThreadFrameCountersValid;
+	if ( threadedFrame ) {
+		ticCounters = pc;
+		pc = renderThreadFrameCounters;
+		renderThreadFrameCountersValid = false;
+	}
+
+	pc.c_alloc += submittedFrame->backendAllocCount;
+	pc.c_free += submittedFrame->backendFreeCount;
+	pc.c_tangentIndexes += submittedFrame->backendTangentIndexes;
+	pc.c_createShadowVolumes += submittedFrame->backendShadowVolumes;
+	staticAllocCount += submittedFrame->backendStaticAllocBytes;
+	submittedFrame->backendAllocCount = submittedFrame->backendFreeCount = 0;
+	submittedFrame->backendTangentIndexes = submittedFrame->backendShadowVolumes = 0;
+	submittedFrame->backendStaticAllocBytes = 0;
+	FinishVRFrame();
+	ProcessPendingRenderTextureDeletes();
 
 	R_RendererMetrics_EndFrame(
 		pc.frontEndMsec,
@@ -1545,22 +1887,28 @@ void idRenderSystemLocal::EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	// print any other statistics and clear all of them
 	R_PerformanceCounters();
 
-	// use the other buffers next frame, because another CPU
-	// may still be rendering into the current buffers
-	R_ToggleSmpFrame();
-
-	// we can now release the vertexes used this frame
-	vertexCache.EndFrame();
-	R_RendererUpload_EndFrame();
-
-	if ( session->writeDemo ) {
-		session->writeDemo->WriteInt( DS_RENDER );
-		session->writeDemo->WriteInt( DC_END_FRAME );
-		if ( r_showDemo.GetBool() ) {
-			common->Printf( "write DC_END_FRAME\n" );
-		}
+	R_RetireRenderSnapshots( submittedFrame );
+	R_TemporalPresentation_RetireFrame();
+	R_SetBackEndFrameData( NULL );
+	for ( int i = 0; i < worlds.Num(); ++i ) {
+		if ( worlds[i] != NULL ) worlds[i]->FreeDeferredLightDefs();
+	}
+	// Overlap advanced the producer at handoff; retirement must not reset it.
+	if ( submittedFrame == frameData ) {
+		R_ToggleSmpFrame();
+		vertexCache.EndFrame();
+		R_RendererUpload_EndFrame();
 	}
 
+	if ( threadedFrame ) {
+		pc = ticCounters;
+		// the game tic's changes to defs the finished frame drew
+		for ( int i = 0; i < worlds.Num(); i++ ) {
+			if ( worlds[i] != NULL ) {
+				worlds[i]->ApplyPendingDefOps();
+			}
+		}
+	}
 }
 
 /*
@@ -1611,6 +1959,159 @@ static int RoundDownToPowerOfTwo( int v ) {
 		}
 	}
 	return 1<<i;
+}
+
+/*
+================
+idRenderSystemLocal::PushSceneResolutionScale
+
+r_screenFraction below native, scoped to the world render.
+
+The saving comes from the crop: everything downstream of RenderViewToViewport --
+the view's viewport, its scissor, every drawSurf, light and entity scissor rect,
+and the viewports of any mirror or portal subviews derived from it -- is computed
+in the smaller space by front-end maths that already exists. Nothing in the back
+end has to rescale anything.
+
+Scoping it to RenderScene rather than the frame is what keeps the HUD and the
+menus at native resolution. A crop pushed in BeginFrame reaches
+idGuiModel::EmitFullScreen too, and every fullscreen 2D draw in the frame lands
+inside it.
+
+Mode 0, the legacy crop for fill-rate testing, is pushed here on every profile
+and nothing resolves it: a world drawn straight to the back buffer stays in its
+bottom-left corner, as it always has, while the 2D drawn after it keeps the
+whole display. Modes 1 to 3 crop here only on ES; desktop GL and Vulkan scale
+the scene through their own scene targets instead.
+
+Returns whether a crop was pushed; the caller must pop exactly when it did.
+================
+*/
+bool idRenderSystemLocal::PushSceneResolutionScale( const renderView_t &renderView ) {
+	resolutionScaleCropActive = false;
+
+	if ( !glConfig.isInitialized ) {
+		return false;
+	}
+
+	const int screenFraction = idMath::ClampInt( 10, 200, r_screenFraction.GetInteger() );
+	if ( screenFraction >= 100 ) {
+		return false;
+	}
+
+	const bool legacyCrop = r_resolutionScaleMode.GetInteger() == 0;
+	if ( legacyCrop ) {
+		// VR and the temporal paths own the scene extent themselves, and the
+		// automatic temporal AA already stands down for mode 0.
+		if ( vrFrame.active
+				|| R_TemporalPresentation_DynamicResolutionRequested()
+				|| R_TemporalPresentation_TemporalAARequested()
+				|| R_TemporalPresentation_ScreenSpaceEffectsRequested() ) {
+			return false;
+		}
+	} else {
+		// Modes 1 to 3 are implemented in draw_common.cpp and the Vulkan
+		// executor for the desktop paths; this is the ES half of them.
+		if ( glConfig.backendCaps.profile != RENDERER_CONTEXT_PROFILE_ES ) {
+			return false;
+		}
+
+		// the back end has told us it cannot resolve the crop on this context
+		if ( resolutionScaleSuppressed ) {
+			return false;
+		}
+	}
+
+	// Something else already owns the frame's coordinate system -- a levelshot,
+	// or a game render-to-texture capture. Do not layer a second one under it.
+	if ( currentRenderCrop != 0 ) {
+		return false;
+	}
+
+	// A larger-than-window capture re-renders the scene once per tile with
+	// tr.viewportOffset moved, and resolving a crop inside one tile would stretch
+	// that tile over the whole window. Ordinary same-size screenshots are just a
+	// re-render of the live frame and keep the scaling, so a capture shows what
+	// the display shows.
+	if ( tiledViewport[0] > glConfig.vidWidth || tiledViewport[1] > glConfig.vidHeight ) {
+		return false;
+	}
+
+	// Only a view that fills the display is the scene. A GUI renderDef draws a
+	// model into one rectangle of a menu that is itself at native resolution;
+	// cropping it would move the model away from its frame, and on ES the
+	// resolve would then stretch the display's corner over the whole menu.
+	idScreenRect fullViewport;
+	RenderViewToViewport( &renderView, &fullViewport );
+	if ( fullViewport.x1 > 0 || fullViewport.y1 > 0
+			|| fullViewport.x2 < renderCrops[0].width - 1
+			|| fullViewport.y2 < renderCrops[0].height - 1 ) {
+		return false;
+	}
+
+	if ( legacyCrop ) {
+		// Nothing resolves the legacy crop, so a capture of any size other than
+		// the window (an envshot or probe face, a custom-size screenshot) would
+		// keep the scene in its corner: a 256x256 envshot inside a 50% crop drew
+		// every face at half size in the bottom-left. Only a window-sized capture
+		// shows what the display shows. glConfig.vidWidth is the capture's size
+		// while it renders (BeginFrame); tiledWindow is the window's.
+		if ( tiledViewport[0] != 0
+				&& ( tiledViewport[0] != tiledWindow[0] || tiledViewport[1] != tiledWindow[1] ) ) {
+			return false;
+		}
+		CropRenderSize( SCREEN_WIDTH * screenFraction / 100.0f, SCREEN_HEIGHT * screenFraction / 100.0f );
+		// resolutionScaleWidth stays 0: there is nothing for a back end to resolve
+		resolutionScaleCropActive = true;
+		return true;
+	}
+
+	// The scene may be rendering into an offscreen target rather than the back
+	// buffer -- that is the normal path once MSAA or post AA is on, and it is
+	// what an Android build with r_multiSamples set does. That is fine: the back
+	// end resolves the crop inside whatever target is bound, before the game's
+	// fullscreen material samples it at texcoords 0..1.
+	//
+	// The one case it cannot handle is a multisampled target, which ES 3.0
+	// refuses as a blit destination. Catch that here rather than letting the back
+	// end discover it, so no frame is ever presented with the scene left in the
+	// target's corner.
+	if ( activeRenderTexture != NULL ) {
+		idImage *sceneColor = ( activeRenderTexture->GetNumColorImages() > 0 )
+			? activeRenderTexture->GetColorImage( 0 )
+			: NULL;
+		if ( sceneColor == NULL || sceneColor->GetOpts().numMSAASamples > 1 ) {
+			static bool reported = false;
+			if ( !reported ) {
+				reported = true;
+				common->Printf( "r_screenFraction: inactive -- the scene target is multisampled, which cannot receive a blit on ES.\n" );
+			}
+			return false;
+		}
+	}
+
+	CropRenderSize( SCREEN_WIDTH * screenFraction / 100.0f, SCREEN_HEIGHT * screenFraction / 100.0f );
+
+	// CropRenderSize converts to physical pixels and can halve what it was asked
+	// for, so the rect it actually pushed is the one the back end has to resolve
+	// -- not the percentage it was derived from.
+	resolutionScaleCropActive = true;
+	resolutionScaleWidth = renderCrops[currentRenderCrop].width;
+	resolutionScaleHeight = renderCrops[currentRenderCrop].height;
+	return true;
+}
+
+/*
+================
+idRenderSystemLocal::PopSceneResolutionScale
+================
+*/
+void idRenderSystemLocal::PopSceneResolutionScale( void ) {
+	if ( !resolutionScaleCropActive ) {
+		return;
+	}
+	resolutionScaleCropActive = false;
+	UnCrop();
 }
 
 /*
@@ -1675,11 +2176,12 @@ void	idRenderSystemLocal::CropRenderSize( int width, int height, bool makePowerO
 
 	renderCrop_t	*rc = &renderCrops[currentRenderCrop];
 
-	// we might want to clip these to the crop window instead
-	while ( width > glConfig.vidWidth ) {
+	// Forced offscreen targets can exceed the window (density/editor previews).
+	// Their owner validates device limits and allocated target dimensions.
+	while ( width > glConfig.vidWidth && !(forceDimensions && activeRenderTexture) ) {
 		width >>= 1;
 	}
-	while ( height > glConfig.vidHeight ) {
+	while ( height > glConfig.vidHeight && !(forceDimensions && activeRenderTexture) ) {
 		height >>= 1;
 	}
 
@@ -1765,7 +2267,8 @@ void idRenderSystemLocal::CaptureRenderToImage( const char *imageName ) {
 	cmd->cubeFace = 0;
 	cmd->copyDepth = false;
 	if ( R_ScenePackets_FrontEndCaptureRequired() ) {
-		R_ScenePackets_AddCopyRender();
+		R_ScenePackets_AddCopyRender( image, cmd->x, cmd->y,
+			cmd->imageWidth, cmd->imageHeight, cmd->cubeFace, cmd->copyDepth );
 	}
 
 	guiModel->Clear();
@@ -1778,40 +2281,187 @@ CaptureRenderToFile
 ==============
 */
 void idRenderSystemLocal::CaptureRenderToFile( const char *fileName, bool fixAlpha ) {
+	CaptureRenderToFile( fileName, fixAlpha, 0, 0 );
+}
+
+static const int MAX_CAPTURE_DIMENSION = 16384;
+static const int64 MAX_CAPTURE_PIXELS = 33554432;
+
+/*
+==============
+R_ResampleCaptureToAspectRGBA
+
+Preserves the bottom-up row order returned by glReadPixels.  R_WriteTGA's
+flipVertical argument then describes those rows exactly as it does for an
+unscaled capture.
+==============
+*/
+static byte *R_ResampleCaptureToAspectRGBA( const byte *source, int sourceWidth, int sourceHeight,
+	int outputWidth, int outputHeight, bool topDown = false, bool bgra = false ) {
+	int cropX = 0;
+	int cropY = 0;
+	int cropWidth = sourceWidth;
+	int cropHeight = sourceHeight;
+
+	const int64 sourceAspectProduct = (int64)sourceWidth * outputHeight;
+	const int64 outputAspectProduct = (int64)sourceHeight * outputWidth;
+	if ( sourceAspectProduct > outputAspectProduct ) {
+		cropWidth = (int)( (int64)sourceHeight * outputWidth / outputHeight );
+		cropWidth = Max( cropWidth, 1 );
+		cropX = ( sourceWidth - cropWidth ) / 2;
+	} else if ( sourceAspectProduct < outputAspectProduct ) {
+		cropHeight = (int)( (int64)sourceWidth * outputHeight / outputWidth );
+		cropHeight = Max( cropHeight, 1 );
+		cropY = ( sourceHeight - cropHeight ) / 2;
+	}
+
+	const size_t outputPixels = (size_t)outputWidth * (size_t)outputHeight;
+	byte *output = (byte *)R_StaticAlloc( outputPixels * 4 );
+	const int cropMaxX = cropX + cropWidth - 1;
+	const int cropMaxY = cropY + cropHeight - 1;
+
+	for ( int y = 0; y < outputHeight; y++ ) {
+		const double sourceY = cropY + ( ( y + 0.5 ) * cropHeight / outputHeight ) - 0.5;
+		int y0 = (int)floor( sourceY );
+		double yFraction = sourceY - y0;
+		if ( y0 < cropY ) {
+			y0 = cropY;
+			yFraction = 0.0;
+		} else if ( y0 >= cropMaxY ) {
+			y0 = cropMaxY;
+			yFraction = 0.0;
+		}
+		const int y1 = Min( y0 + 1, cropMaxY );
+		byte *outputRow = output + (size_t)y * (size_t)outputWidth * 4;
+
+		for ( int x = 0; x < outputWidth; x++ ) {
+			const double sourceX = cropX + ( ( x + 0.5 ) * cropWidth / outputWidth ) - 0.5;
+			int x0 = (int)floor( sourceX );
+			double xFraction = sourceX - x0;
+			if ( x0 < cropX ) {
+				x0 = cropX;
+				xFraction = 0.0;
+			} else if ( x0 >= cropMaxX ) {
+				x0 = cropMaxX;
+				xFraction = 0.0;
+			}
+			const int x1 = Min( x0 + 1, cropMaxX );
+
+			const int row0 = topDown ? sourceHeight - 1 - y0 : y0;
+			const int row1 = topDown ? sourceHeight - 1 - y1 : y1;
+			const byte *topLeft = source + ( (size_t)row0 * sourceWidth + x0 ) * 4;
+			const byte *topRight = source + ( (size_t)row0 * sourceWidth + x1 ) * 4;
+			const byte *bottomLeft = source + ( (size_t)row1 * sourceWidth + x0 ) * 4;
+			const byte *bottomRight = source + ( (size_t)row1 * sourceWidth + x1 ) * 4;
+			byte *destination = outputRow + x * 4;
+
+			for ( int channel = 0; channel < 4; channel++ ) {
+				const int sourceChannel = bgra && ( channel == 0 || channel == 2 ) ? 2 - channel : channel;
+				const double top = topLeft[sourceChannel] + ( topRight[sourceChannel] - topLeft[sourceChannel] ) * xFraction;
+				const double bottom = bottomLeft[sourceChannel] + ( bottomRight[sourceChannel] - bottomLeft[sourceChannel] ) * xFraction;
+				destination[channel] = (byte)( top + ( bottom - top ) * yFraction + 0.5 );
+			}
+		}
+	}
+
+	return output;
+}
+
+bool idRenderSystemLocal::BeginSavePreview() {
+	// the preview state machine is shared with the frame on the render thread
+	R_RenderThread_Sync( "save preview" );
+	return glConfig.isInitialized && RB_RequestSavePreview();
+}
+
+int idRenderSystemLocal::PollSavePreview( const char *fileName ) {
+	R_RenderThread_Sync( "save preview" );
+	const byte *pixels = NULL;
+	int width = 0, height = 0;
+	bool topDown = false, bgra = false;
+	int result = RB_PollSavePreview( pixels, width, height, topDown, bgra );
+	if ( result == 0 ) return 0;
+	if ( result == 1 ) {
+		byte *thumbnail = R_ResampleCaptureToAspectRGBA( pixels, width, height, 320, 240, topDown, bgra );
+		for ( int i = 0; i < 320 * 240; ++i ) thumbnail[i * 4 + 3] = 255;
+		if ( !R_WriteTGA( fileName, thumbnail, 320, 240, true ) ) result = -1;
+		R_StaticFree( thumbnail );
+	}
+	RB_ReleaseSavePreview();
+	return result;
+}
+
+void idRenderSystemLocal::CancelSavePreview() {
+	R_RenderThread_Sync( "save preview" );
+	RB_ReleaseSavePreview();
+}
+
+bool idRenderSystemLocal::ReloadGeneratedCacheImages() {
+	// with no device no texture is resident, so nothing holds cache pixels
+	if ( !IsOpenGLRunning() || globalImages == NULL ) {
+		return true;
+	}
+	return globalImages->ReloadGeneratedCacheImages();
+}
+
+void idRenderSystemLocal::CaptureRenderToFile( const char *fileName, bool fixAlpha,
+	int outputWidth, int outputHeight ) {
 	if ( !glConfig.isInitialized ) {
 		return;
 	}
 
 	renderCrop_t *rc = &renderCrops[currentRenderCrop];
+	const bool resample = outputWidth != 0 || outputHeight != 0;
+	const int64 sourcePixelCount = (int64)rc->width * rc->height;
+	if ( rc->width < 1 || rc->height < 1 ||
+			rc->width > MAX_CAPTURE_DIMENSION || rc->height > MAX_CAPTURE_DIMENSION ||
+			sourcePixelCount > MAX_CAPTURE_PIXELS ) {
+		common->Warning( "CaptureRenderToFile: invalid source dimensions %d x %d", rc->width, rc->height );
+		return;
+	}
+	const int64 outputPixelCount = (int64)outputWidth * outputHeight;
+	if ( resample && ( outputWidth < 1 || outputHeight < 1 ||
+			outputWidth > MAX_CAPTURE_DIMENSION || outputHeight > MAX_CAPTURE_DIMENSION ||
+			outputPixelCount > MAX_CAPTURE_PIXELS ) ) {
+		common->Warning( "CaptureRenderToFile: invalid output dimensions %d x %d", outputWidth, outputHeight );
+		return;
+	}
 
+	R_RenderThread_Sync( "screenshot" );
 	guiModel->EmitFullScreen();
 	guiModel->Clear();
 	const bool wasTakingScreenshot = tr.takingScreenshot;
 	tr.takingScreenshot = true;
+	R_TemporalPresentation_MarkCurrentFrameCapture( "synchronous readback" );
 	R_IssueRenderCommands();
 
 	glReadBuffer( GL_BACK );
 
-	// include extra space for OpenGL padding to word boundaries
-	int	c = ( rc->width + 3 ) * rc->height;
-	byte *data = (byte *)R_StaticAlloc( c * 3 );
-	
-	glReadPixels( rc->x, rc->y, rc->width, rc->height, GL_RGB, GL_UNSIGNED_BYTE, data ); 
+	// RGBA is naturally pack-aligned and is also the native Vulkan/ES readback
+	// format. Avoid a full-frame RGB intermediate and a second expansion copy.
+	byte *data2 = (byte *)R_StaticAlloc( (size_t)sourcePixelCount * 4 );
+	memset( data2, 0, (size_t)sourcePixelCount * 4 );
+	glReadPixels( rc->x, rc->y, rc->width, rc->height, GL_RGBA, GL_UNSIGNED_BYTE, data2 );
 	tr.takingScreenshot = wasTakingScreenshot;
 
-	byte *data2 = (byte *)R_StaticAlloc( c * 4 );
-
-	for ( int i = 0 ; i < c ; i++ ) {
-		data2[ i * 4 ] = data[ i * 3 ];
-		data2[ i * 4 + 1 ] = data[ i * 3 + 1 ];
-		data2[ i * 4 + 2 ] = data[ i * 3 + 2 ];
-		data2[ i * 4 + 3 ] = 0xff;
+	// Save previews have always been opaque, regardless of framebuffer alpha.
+	for ( int64 pixel = 0; pixel < sourcePixelCount; ++pixel ) {
+		data2[pixel * 4 + 3] = 0xff;
 	}
 
-	R_WriteTGA( fileName, data2, rc->width, rc->height, true );
+	byte *outputData = data2;
+	int capturedWidth = rc->width;
+	int capturedHeight = rc->height;
+	if ( resample ) {
+		outputData = R_ResampleCaptureToAspectRGBA( data2, rc->width, rc->height,
+			outputWidth, outputHeight );
+		R_StaticFree( data2 );
+		data2 = NULL;
+		capturedWidth = outputWidth;
+		capturedHeight = outputHeight;
+	}
 
-	R_StaticFree( data );
-	R_StaticFree( data2 );
+	R_WriteTGA( fileName, outputData, capturedWidth, capturedHeight, true );
+	R_StaticFree( outputData );
 }
 
 
@@ -1833,6 +2483,7 @@ FreeRenderWorld
 ==============
 */
 void idRenderSystemLocal::FreeRenderWorld( idRenderWorld *rw ) {
+	R_RenderThread_Sync( "world" );
 	if ( primaryWorld == rw ) {
 		primaryWorld = NULL;
 	}
@@ -1862,12 +2513,29 @@ idRenderSystemLocal::UploadImage
 ===============
 */
 bool idRenderSystemLocal::UploadImage( const char *imageName, const byte *data, int width, int height  ) {
+	R_RenderThread_Sync( "image" );
+	if ( data == NULL || width <= 0 || height <= 0 ) return false;
 	idImage *image = globalImages->GetImage( imageName );
 	if ( !image ) {
 		return false;
 	}
+	// Explicitly allocated RGBA8 targets already specify their type and size.
+	// UploadScratch's cinematic heuristic interprets a 1:6 image as a cube;
+	// a generated UI image with that aspect ratio must remain an ordinary 2D
+	// texture. Preserve the target's allocation and sampler for all rectangles.
+	const idImageOpts& options = image->GetOpts();
+	if ( image->IsScratchImage() && options.textureType == TT_2D && options.format == FMT_RGBA8 &&
+		options.numLevels == 1 && options.width == width && options.height == height ) {
+		image->SubImageUpload( 0, 0, 0, 0, width, height, data );
+		return true;
+	}
+	// UploadScratch also serves cinematics and selects linear/repeat sampling.
+	// Updating an existing named image must retain its authored sampler (in
+	// particular nearest/clamp for pixel coverage and nearest for lagometers).
+	const textureFilter_t filter = image->GetFilter();
+	const textureRepeat_t repeat = image->GetRepeat();
 	image->UploadScratch( data, width, height );
-	//image->SetImageFilterAndRepeat();
+	image->SetSamplerState( filter, repeat );
 	return true;
 }
 
@@ -1877,6 +2545,19 @@ bool idRenderSystemLocal::UploadImage( const char *imageName, const byte *data, 
 idRenderSystemLocal::BindRenderTexture
 ===============
 */
+void idRenderSystemLocal::BeginGuiRoot() {
+	// Only elide an immediately preceding identical command. No backend work
+	// can have changed the target between these, and pending GUI geometry is
+	// already destined for this same target. Do not infer backend state from
+	// activeRenderTexture alone: scene, resolve and VR commands can affect it.
+	if (!r_deferredCommandHead && frameData && frameData->cmdTail && frameData->cmdTail->commandId==RC_SET_RENDERTEXTURE &&
+		activeRenderTexture==NULL) {
+		const auto* previous=reinterpret_cast<const setRenderTargetCommand_t*>(frameData->cmdTail);
+		if (!previous->renderTexture && !previous->feedbackRenderTexture) return;
+	}
+	BindRenderTexture(NULL,NULL);
+}
+
 void idRenderSystemLocal::BindRenderTexture(idRenderTexture* renderTexture, idRenderTexture* feedbackRenderTexture) {
 	setRenderTargetCommand_t* cmd;
 
@@ -1901,17 +2582,26 @@ void idRenderSystemLocal::BindRenderTexture(idRenderTexture* renderTexture, idRe
 idRenderSystemLocal::ClearRenderTarget
 ===============
 */
-void idRenderSystemLocal::ClearRenderTarget(bool clearColor, bool clearDepth, float depthValue, float red, float green, float blue) {
+void idRenderSystemLocal::ClearRenderTarget(bool clearColor, bool clearDepth, float depthValue, float red, float green, float blue, float alpha) {
 	renderClearBufferCommand_t* cmd;
 
 	cmd = (renderClearBufferCommand_t*)R_GetCommandBuffer(sizeof(*cmd));
 	cmd->commandId = RC_CLEAR_RENDERTARGET;
 
+	// A recorded retained layer starts over with its target, exactly as its
+	// pixels do; batches still pending reach it after the clear, as they do here.
+	if ( clearColor && session->writeDemo != NULL && activeRenderTexture != NULL ) {
+		idGuiModel *layerContent = R_DemoGuiTarget();
+		if ( layerContent != NULL && layerContent != demoFrameGuiModel ) {
+			layerContent->Clear();
+		}
+	}
+
 	cmd->clearColor = clearColor;
 	cmd->clearDepth = clearDepth;
 
 	cmd->clearDepthValue = depthValue;
-	cmd->clearColorValue = idVec4(red, green, blue, 1.0);
+	cmd->clearColorValue = idVec4(red, green, blue, alpha);
 	if ( R_ScenePackets_FrontEndCaptureRequired() ) {
 		R_ScenePackets_AddRenderTargetOp();
 	}
@@ -1934,6 +2624,8 @@ void idRenderSystemLocal::ResolveMSAA(idRenderTexture* msaaRenderTexture, idRend
 	cmd->msaaRenderTexture = msaaRenderTexture;
 	cmd->destRenderTexture = destRenderTexture;
 	cmd->resolveDepth = resolveDepth;
+	cmd->frameNumber = tr.frameCount;
+	cmd->historyGeneration = R_TemporalPresentation_HistoryGeneration();
 	if ( R_ScenePackets_FrontEndCaptureRequired() ) {
 		R_ScenePackets_AddRenderTargetOp();
 	}
@@ -1945,13 +2637,10 @@ idRenderSystemLocal::CreateImage
 ===============
 */
 idImage* idRenderSystemLocal::CreateImage(const char* name, idImageOpts* opts, textureFilter_t textureFilter) {
-	// Check to see if the image already exists.
-	idImage* image = globalImages->GetImage(name);
-	if (image != nullptr) {
-		image->AllocImage(*opts, textureFilter, TR_CLAMP);
-		return image;
-	}
-
+	R_RenderThread_Sync( "image" );
+	// Adopt existing intrinsic placeholders through the same ownership path as
+	// new images. Allocating them directly leaves their generators in charge of
+	// reload, which discards the render target's current size and format.
 	return globalImages->ScratchImage(name, opts, textureFilter, TR_CLAMP, TD_DEFAULT);
 }
 
@@ -2088,6 +2777,11 @@ static bool R_ValidateSMAALookupImage( const idImage *image, const char *imageNa
 }
 
 bool idRenderSystemLocal::ValidateSMAALookupTextures( void ) {
+#ifndef OPENQ4_RENDERER_VK_MODULE
+	if ( !glConfig.GLSLProgramAvailable || !glConfig.GLSL130Available ) {
+		return false;
+	}
+#endif
 	const idImage *areaImage = globalImages->GetImage( "_smaaArea" );
 	const idImage *searchImage = globalImages->GetImage( "_smaaSearch" );
 
@@ -2130,6 +2824,7 @@ idRenderSystemLocal::ResizeImage
 ===============
 */
 void idRenderSystemLocal::ResizeImage(idImage* image, int width, int height) {
+	R_RenderThread_Sync( "image" );
 	image->Resize(width, height);
 }
 
@@ -2159,6 +2854,242 @@ idRenderSystemLocal::GetGLConfig
 */
 const glconfig_t &idRenderSystemLocal::GetGLConfig( void ) const {
 	return glConfig;
+}
+
+/*
+====================
+idRenderSystemLocal::GetGpuFrameTiming
+
+The query objects stay backend-private. This POD snapshot is the sole
+cross-module timing surface and is safe to consume from engine/game code.
+====================
+*/
+void idRenderSystemLocal::GetGpuFrameTiming( renderGpuFrameTiming_t &timing ) const {
+	R_RendererMetrics_GetGpuFrameTiming( timing );
+}
+
+void idRenderSystemLocal::ResetGpuFrameTiming( const char *reason ) {
+	R_RendererMetrics_ResetGpuFrameTiming( reason );
+	// Session/map/backend discontinuities invalidate both delayed timing samples
+	// and native-resolution image history. The controller maintains independent
+	// generations so rejecting one never aliases an unrelated sample stream.
+	R_TemporalPresentation_InvalidateHistory( reason );
+}
+
+/*
+====================
+idRenderSystemLocal::GetPresentationState
+
+Publishes the scene extent selected once at BeginFrame. Game render targets
+consume this POD while the final composite and UI continue to use the native
+output extent. Calls made before the first BeginFrame receive the active video
+mode as a safe native-resolution fallback.
+====================
+*/
+void idRenderSystemLocal::GetPresentationState( renderPresentationState_t &state ) const {
+	const temporalPresentationFrameState_t &frame =
+		R_TemporalPresentation_GetFrameState();
+	const int fallbackWidth = Max( 0, glConfig.vidWidth );
+	const int fallbackHeight = Max( 0, glConfig.vidHeight );
+
+	memset( &state, 0, sizeof( state ) );
+	state.frameNumber = frame.frameNumber;
+	state.outputWidth = frame.nativeWidth > 0 ? frame.nativeWidth : fallbackWidth;
+	state.outputHeight = frame.nativeHeight > 0 ? frame.nativeHeight : fallbackHeight;
+	state.sceneWidth = frame.sceneWidth > 0 ? frame.sceneWidth : state.outputWidth;
+	state.sceneHeight = frame.sceneHeight > 0 ? frame.sceneHeight : state.outputHeight;
+	state.effectiveScalePercent = frame.effectiveScalePercent > 0
+		? frame.effectiveScalePercent : 100;
+	state.historyGeneration = R_TemporalPresentation_HistoryGeneration();
+	state.dynamicResolutionRequested = frame.nativeWidth > 0
+		? frame.dynamicResolutionRequested
+		: R_TemporalPresentation_DynamicResolutionRequested();
+	state.dynamicResolutionActive = frame.dynamicResolutionActive;
+	state.temporalAARequested = frame.nativeWidth > 0
+		? frame.temporalAARequested
+		: R_TemporalPresentation_TemporalAARequested();
+	state.captureFrozen = frame.captureFrozen;
+	state.captureForcedNative = frame.captureForcedNative;
+}
+
+/*
+====================
+idRenderSystemLocal::ResolveTemporalPresentation
+
+Queues a backend-neutral temporal resolve after the game has completed its
+scene-sized post chain. The immutable command snapshot is the only temporal
+state consumed by an asynchronous backend. Runtime execution still observes
+tr.takingScreenshot so a save-preview readback that starts after enqueue can
+reject both history reads and history writes.
+====================
+*/
+bool idRenderSystemLocal::ResolveTemporalPresentation(
+		idRenderTexture *sceneColorTarget,
+		idRenderTexture *sceneDepthTarget,
+		idRenderTexture *historyReadTarget,
+		idRenderTexture *historyWriteTarget ) {
+	if ( sceneColorTarget == NULL || sceneDepthTarget == NULL
+			|| tr.primaryView == NULL ) {
+		return false;
+	}
+
+	renderPresentationState_t presentation;
+	GetPresentationState( presentation );
+	const temporalPresentationFrameState_t &temporalFrame =
+		R_TemporalPresentation_GetFrameState();
+	const unsigned int historyGeneration =
+		R_TemporalPresentation_HistoryGeneration();
+	const viewDef_t *primaryView = tr.primaryView;
+	const bool screenSpaceRequested = AdvancedScreenSpaceCore_Requested(
+		temporalFrame.advancedScreenSpace );
+	const bool captureFrame = tr.takingScreenshot
+		|| presentation.captureFrozen || presentation.captureForcedNative
+		|| primaryView->temporalCaptureFrame;
+	if ( ( !presentation.temporalAARequested && !screenSpaceRequested )
+			|| presentation.frameNumber != tr.frameCount
+			|| presentation.outputWidth <= 0 || presentation.outputHeight <= 0
+			|| presentation.sceneWidth <= 0 || presentation.sceneHeight <= 0
+			|| !primaryView->temporalPrepared
+			|| ( presentation.temporalAARequested && !captureFrame
+				&& primaryView->temporalHistoryGeneration != historyGeneration ) ) {
+		return false;
+	}
+
+	if ( sceneColorTarget->GetWidth() != presentation.sceneWidth
+			|| sceneColorTarget->GetHeight() != presentation.sceneHeight
+			|| sceneDepthTarget->GetWidth() != presentation.sceneWidth
+			|| sceneDepthTarget->GetHeight() != presentation.sceneHeight
+			|| ( historyWriteTarget != NULL
+				&& ( historyWriteTarget->GetWidth() != presentation.outputWidth
+					|| historyWriteTarget->GetHeight() != presentation.outputHeight
+					|| historyWriteTarget == sceneColorTarget
+					|| historyWriteTarget == sceneDepthTarget ) ) ) {
+		return false;
+	}
+	if ( historyReadTarget != NULL
+			&& ( historyReadTarget == historyWriteTarget
+				|| historyReadTarget == sceneColorTarget
+				|| historyReadTarget == sceneDepthTarget
+				|| historyReadTarget->GetWidth() != presentation.outputWidth
+				|| historyReadTarget->GetHeight() != presentation.outputHeight ) ) {
+		return false;
+	}
+
+	// Full-screen post submissions are batched in guiModel. Seal them before
+	// appending the resolve so it remains the last scene operation before UI.
+	if ( guiModel != NULL ) {
+		guiModel->EmitFullScreen();
+		guiModel->Clear();
+	}
+
+	resolveTemporalPresentationCommand_t *cmd =
+		reinterpret_cast<resolveTemporalPresentationCommand_t *>(
+			R_GetCommandBuffer( sizeof( *cmd ) ) );
+	cmd->commandId = RC_RESOLVE_TEMPORAL_PRESENTATION;
+	cmd->sceneColorTarget = sceneColorTarget;
+	cmd->sceneDepthTarget = sceneDepthTarget;
+	cmd->historyReadTarget = historyReadTarget;
+	cmd->historyWriteTarget = historyWriteTarget;
+	cmd->viewDef = primaryView;
+	cmd->presentation = presentation;
+	cmd->historyGeneration = historyGeneration;
+	cmd->historyValid = !captureFrame && historyReadTarget != NULL
+		&& historyWriteTarget != NULL
+		&& primaryView->temporalHistoryValid;
+	cmd->captureFrame = captureFrame;
+	cmd->feedback = temporalFrame.temporalFeedback;
+	cmd->reactiveScale = temporalFrame.temporalReactiveScale;
+	cmd->debugMode = temporalFrame.temporalDebugMode;
+	cmd->advancedScreenSpace = temporalFrame.advancedScreenSpace;
+	if ( R_ScenePackets_FrontEndCaptureRequired() ) {
+		R_ScenePackets_AddRenderTargetOp();
+	}
+	return true;
+}
+
+/*
+====================
+idRenderSystemLocal::PresentScaledScene
+
+Queues the r_resolutionScaleMode upscale of the game's finished below-native
+scene (RC_PRESENT_SCALED_SCENE). Every refusal returns before anything is
+queued, so the caller's own full-screen material still presents the frame:
+the bilinear modes 0 and 1, a native or supersampled scene, an ES context
+(its modes crop and resolve inside the scene target instead), a tiled capture
+(each tile moves the viewport under the scene), and a target that is not the
+latched single-sample scene extent.
+====================
+*/
+bool idRenderSystemLocal::PresentScaledScene( idRenderTexture *sceneColorTarget ) {
+	const int mode = idMath::ClampInt( 0, 3, r_resolutionScaleMode.GetInteger() );
+	if ( sceneColorTarget == NULL || !glConfig.isInitialized
+			|| ( mode != 2 && mode != 3 )
+			|| glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_ES
+			|| tiledViewport[0] > glConfig.vidWidth || tiledViewport[1] > glConfig.vidHeight ) {
+		return false;
+	}
+
+	renderPresentationState_t presentation;
+	GetPresentationState( presentation );
+	const idImage *sceneColor = sceneColorTarget->GetNumColorImages() > 0
+		? sceneColorTarget->GetColorImage( 0 ) : NULL;
+	if ( presentation.frameNumber != tr.frameCount
+			|| presentation.outputWidth != glConfig.vidWidth
+			|| presentation.outputHeight != glConfig.vidHeight
+			|| presentation.sceneWidth <= 0 || presentation.sceneHeight <= 0
+			|| presentation.sceneWidth > presentation.outputWidth
+			|| presentation.sceneHeight > presentation.outputHeight
+			|| ( presentation.sceneWidth == presentation.outputWidth
+				&& presentation.sceneHeight == presentation.outputHeight )
+			|| sceneColorTarget->GetWidth() != presentation.sceneWidth
+			|| sceneColorTarget->GetHeight() != presentation.sceneHeight
+			|| sceneColor == NULL || sceneColor->GetOpts().numMSAASamples > 1 ) {
+		return false;
+	}
+
+	// Full-screen post submissions are batched in guiModel. Seal them so the
+	// upscale is the scene's last operation before the HUD and menus.
+	if ( guiModel != NULL ) {
+		guiModel->EmitFullScreen();
+		guiModel->Clear();
+	}
+
+	presentScaledSceneCommand_t *cmd = reinterpret_cast<presentScaledSceneCommand_t *>(
+		R_GetCommandBuffer( sizeof( *cmd ) ) );
+	cmd->commandId = RC_PRESENT_SCALED_SCENE;
+	cmd->sceneColorTarget = sceneColorTarget;
+	cmd->sceneWidth = presentation.sceneWidth;
+	cmd->sceneHeight = presentation.sceneHeight;
+	cmd->outputWidth = presentation.outputWidth;
+	cmd->outputHeight = presentation.outputHeight;
+	cmd->mode = mode;
+	cmd->sharpness = idMath::ClampFloat( 0.0f, 1.5f, r_resolutionScaleSharpness.GetFloat() );
+	if ( R_ScenePackets_FrontEndCaptureRequired() ) {
+		R_ScenePackets_AddRenderTargetOp();
+	}
+	return true;
+}
+
+/*
+===============
+idRenderSystemLocal::SetUnderwaterView
+
+Publishes the underwater state for this frame and reports whether the effect will actually be
+drawn. Both back ends have the post-process pass (draw_common.cpp, Vulkan/vk_PostProcess.cpp);
+RB_UnderwaterViewAvailable answers false when r_underwater is off or the pass cannot run, and the
+caller falls back to a flat wash.
+===============
+*/
+bool idRenderSystemLocal::SetUnderwaterView( float amount, const idVec3 &tint, float fogDistance ) {
+	underwaterAmount = idMath::ClampFloat( 0.0f, 1.0f, amount );
+	underwaterTint = tint;
+	underwaterFogDistance = Max( 1.0f, fogDistance );
+
+	if ( underwaterAmount <= 0.0f ) {
+		return true;		// nothing to draw, and nothing for the caller to fall back to either
+	}
+
+	return RB_UnderwaterViewAvailable();
 }
 
 /*
@@ -2268,6 +3199,7 @@ idRenderSystemLocal::ResizeRenderTexture
 ===============
 */
 bool idRenderSystemLocal::ResizeRenderTexture(idRenderTexture*& renderTexture, int width, int height) {
+	R_RenderThread_Sync( "render texture" );
 	if ( renderTexture == NULL ) {
 		return false;
 	}
@@ -2381,6 +3313,7 @@ idRenderSystemLocal::CreateRenderTexture
 ===============
 */
 idRenderTexture* idRenderSystemLocal::CreateRenderTexture(idImage* albedoImage, idImage* depthImage, idImage* albedoImage2, idImage* albedoImage3) {
+	R_RenderThread_Sync( "render texture" );
 	// Creation runs on the active GL thread. Latch a rejected attachment/storage
 	// set so helpers that keep a NULL pointer do not recreate and re-log the same
 	// unsupported FBO every frame. Context changes and image reallocations retry.
@@ -2423,6 +3356,7 @@ idRenderSystemLocal::DestroyRenderTexture
 ===============
 */
 void idRenderSystemLocal::DestroyRenderTexture( idRenderTexture* renderTexture ) {
+	R_RenderThread_Sync( "render texture" );
 	if ( renderTexture == nullptr ) {
 		return;
 	}
@@ -2450,3 +3384,8 @@ void idRenderSystemLocal::DestroyRenderTexture( idRenderTexture* renderTexture )
 
 	pendingRenderTextureDeletes.Append( renderTexture );
 }
+
+#ifndef OPENQ4_RENDERER_VK_MODULE
+viewDef_t *R_SubmittedPrimaryView( void ) { return tr.primaryView; }
+bool R_SubmittedTakingScreenshot( void ) { return tr.takingScreenshot; }
+#endif

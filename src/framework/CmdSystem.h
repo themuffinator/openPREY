@@ -93,6 +93,8 @@ public:
 	virtual void		SetupReloadGameModule( const idCmdArgs &args ) = 0;
 						// Executes the saved post-reload command in the rebuilt session.
 	virtual bool		PostReloadEngine( void ) = 0;
+	// UI transitions rebuild the filesystem without showing the console.
+	virtual void        SetupReloadEngineMenu( const idCmdArgs &args ) = 0;
 
 						// There is a cache of the last completion operation that may need to be cleared sometimes
 	//virtual void		ClearCompletion( void ) = 0;

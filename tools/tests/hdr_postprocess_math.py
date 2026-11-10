@@ -113,17 +113,17 @@ def tone_map_hdr(color, exposure, white_point, highlight_desaturation, gamut_com
     safe_exposure = max(exposure, 1.0e-3)
     exposed = tuple(channel * safe_exposure for channel in color)
     safe_white = max(white_point, 1.0)
-    shoulder_start = 0.98
-    exposed_white = max(safe_white * safe_exposure, shoulder_start + 1.0e-3)
-    shoulder_range = max(exposed_white - shoulder_start, 1.0e-3)
-    shoulder_norm = max(1.0 - math.exp(-4.0), 1.0e-4)
+    shoulder_start = 0.5
+    exposed_white = max(safe_white * safe_exposure, 1.0)
+    shoulder_range = exposed_white - shoulder_start
+    curvature = 1.0 / (1.0 - shoulder_start) - 1.0 / shoulder_range
     mapped = []
     for channel in exposed:
         if channel < shoulder_start:
             mapped.append(channel)
             continue
-        shoulder_t = max(channel - shoulder_start, 0.0) / shoulder_range
-        shoulder_value = shoulder_start + (1.0 - shoulder_start) * (1.0 - math.exp(-shoulder_t * 4.0)) / shoulder_norm
+        shoulder_t = max(channel - shoulder_start, 0.0)
+        shoulder_value = shoulder_start + shoulder_t / (1.0 + curvature * shoulder_t)
         mapped.append(shoulder_value)
     compressed = highlight_compress(tuple(mapped), highlight_desaturation, gamut_compression)
     return tuple(clamp(channel, 0.0, 1.0) for channel in compressed)
@@ -262,16 +262,22 @@ def test_tone_map_preserves_midrange_sdr():
         assert_true(abs(mapped_channel - source_channel) < 0.02, "HDR tonemap should preserve midrange SDR contrast before the shoulder")
 
 
-def test_tone_map_preserves_ldr_authored_highlights():
-    colors = [
-        (1.0, 1.0, 1.0),
-        (0.85, 1.0, 1.0),
-        (1.0, 0.7, 0.35),
-    ]
-    for color in colors:
-        mapped = tone_map_hdr(color, 1.0, 6.0, 0.35, 1.0)
-        for mapped_channel, source_channel in zip(mapped, color):
-            assert_true(abs(mapped_channel - source_channel) < 0.03, "HDR tonemap should not dull stock LDR-authored additive highlights")
+def test_tone_map_retains_exposed_highlight_detail():
+    # The old .98 knee gave nearly every sunlit texel the same display code
+    # when exposure reached eight. These independent perceptual bounds demand
+    # useful contrast in both ordinary and strongly exposed highlights.
+    for exposure in (1.0, 3.0, 8.0):
+        low = tone_map_hdr((0.25,) * 3, exposure, 6.0, 0.35, 1.0)[0]
+        high = tone_map_hdr((0.75,) * 3, exposure, 6.0, 0.35, 1.0)[0]
+        assert_true(high - low > 0.08, "sunlit texture range must retain at least 20 display codes")
+        assert_true(high < 0.97, "ordinary highlights must leave headroom below white")
+    white = tone_map_hdr((1.0,) * 3, 1.0, 6.0, 0.35, 1.0)[0]
+    assert_true(0.75 < white < 0.85, "scene white must leave room for overbright energy")
+    epsilon = 1.0e-5
+    below = tone_map_hdr((0.5 - epsilon,) * 3, 1.0, 6.0, 0.0, 0.0)[0]
+    above = tone_map_hdr((0.5 + epsilon,) * 3, 1.0, 6.0, 0.0, 0.0)[0]
+    assert_true(abs((above - below) / (2 * epsilon) - 1) < 0.001,
+                "highlight shoulder must join the midrange without a slope discontinuity")
 
 
 def test_hdr_rejects_negative_scene_energy():
@@ -383,7 +389,7 @@ def test_display_color_mapping_matches_legacy_curve_and_present_path():
     vk_module = (root / "src" / "renderer" / "Vulkan" / "vk_Backend.cpp").read_text(encoding="utf-8")
     win32_backend = (root / "src" / "sys" / "win32" / "win_glimp.cpp").read_text(encoding="utf-8")
     linux_native = (root / "src" / "sys" / "linux" / "glimp.cpp").read_text(encoding="utf-8")
-    osx_native = (root / "src" / "sys" / "osx" / "macosx_glimp.mm").read_text(encoding="utf-8")
+    osx_native = (root / "src" / "sys" / "macos" / "macos_glimp.mm").read_text(encoding="utf-8")
 
     for channel in (0.0, 0.1, 0.25, 0.5, 0.85, 1.0):
         shader_value = apply_display_color_mapping((channel, channel, channel), 1.2, 1.4)[0]
@@ -393,7 +399,9 @@ def test_display_color_mapping_matches_legacy_curve_and_present_path():
     assert_true("vec3 color = clamp( sampleColor.rgb * brightness, 0.0, 1.0 );" in draw_common, "final color mapping should apply r_brightness before gamma")
     assert_true("color = pow( color, vec3( 1.0 / safeGamma ) );" in draw_common, "final color mapping should apply r_gamma as the legacy display curve")
     assert_true("GLimp_UseNativeGammaRamps()" in draw_common, "final color mapping should skip platforms that still use native gamma ramps")
-    assert_true("RB_ApplyResolutionScaleToBackBuffer();\n\t\tRB_ApplyCRTToBackBuffer();\n\t\tRB_ApplyColorMappingsToBackBuffer();" in tr_backend, "display color mapping should run after other final backbuffer passes")
+    assert_true("if ( !RB_VR_PresentFrame() ) {\n\t\t\tRB_ApplyResolutionScaleToBackBuffer();\n\t\t\tRB_ApplyCRTToBackBuffer();\n\t\t\tRB_ApplyColorMappingsToBackBuffer();" in tr_backend, "display color mapping should run after other final backbuffer passes")
+    vr_presentation = (root / "src" / "renderer" / "OpenGL" / "gl_VRPresentation.cpp").read_text(encoding="utf-8")
+    assert_true("static void RB_VR_FinishBoundTarget( void ) {\n\tRB_ApplyCRTToBackBuffer();\n\tRB_ApplyColorMappingsToBackBuffer();\n}" in vr_presentation, "VR eyes and the virtual screen should get the same final color mapping as the window")
     assert_true("bool GLimp_UseNativeGammaRamps(void) {\n\treturn false;\n}" in gl_module, "SDL3 renderer-gl module should use renderer-owned color mapping")
     assert_true("bool GLimp_UseNativeGammaRamps( void ) {\n\treturn false;\n}" in vk_module, "renderer-vk module should use renderer-owned color mapping")
     assert_true("bool GLimp_UseNativeGammaRamps( void ) {\n\treturn false;\n}" in win32_backend, "legacy Win32 should use renderer-owned color mapping")
@@ -412,7 +420,7 @@ def main():
         test_tone_map_monotonic,
         test_white_point_near_one,
         test_tone_map_preserves_midrange_sdr,
-        test_tone_map_preserves_ldr_authored_highlights,
+        test_tone_map_retains_exposed_highlight_detail,
         test_hdr_rejects_negative_scene_energy,
         test_no_nan_edge_cases,
         test_modern_lighting_keeps_scene_referred_energy,

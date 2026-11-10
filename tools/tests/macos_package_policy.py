@@ -36,7 +36,7 @@ def validate_package_layout_policy_doc() -> None:
         "`fs_basepath`, `fs_cdpath`, and `fs_savepath`",
         "Gatekeeper behavior",
         "First-class macOS releases require signed and notarized DMGs",
-        "Unsigned `-unsigned.tar.gz` archives are allowed only for experimental or",
+        "Unsigned `-unsigned.tar.gz` archives are allowed only for experimental, preview,",
         "tools/build/package_nightly.py",
     ):
         require(policy, token, "macOS package layout and release policy doc")
@@ -110,7 +110,7 @@ def validate_release_workflow_gate() -> None:
         "OPENQ4_MACOS_SUPPORT_TIER",
         "First-class macOS releases require signed/notarized DMGs",
         "missing Apple signing/notary repository secrets",
-        "Experimental macOS unsigned/unnotarized tar.gz release artifacts enabled as fallback output",
+        "Preview macOS unsigned/unnotarized tar.gz release artifacts enabled as fallback output",
         "macos_support_tier=",
     ):
         require(workflow, token, "manual release macOS first-class gate")
@@ -119,7 +119,7 @@ def validate_release_workflow_gate() -> None:
         (building, "build documentation"),
         (platform_support, "platform support documentation"),
     ):
-        require(source, "macos_support_tier=experimental", context)
+        require(source, "macos_support_tier=preview", context)
         require(source, "macos_support_tier=first-class", context)
         require(source, "signed/notarized DMGs", context)
         require(source, "`-unsigned.tar.gz`", context)
@@ -163,7 +163,7 @@ def validate_user_docs_and_package_readme() -> None:
 
 
 def validate_plan_status_and_ci_wiring() -> None:
-    plan = read("docs/dev/plan/2026-06-30-macos-compatibility-support.md")
+    plan = read("docs/dev/archive/2026-10-18/plan/2026-06-30-macos-compatibility-support.md")
     local_runner = read("tools/validation/openq4_validate.py")
     commit = read(".github/workflows/commit-validation.yml")
     push = read(".github/workflows/push-verification.yml")

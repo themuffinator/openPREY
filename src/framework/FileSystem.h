@@ -29,6 +29,9 @@ If you have questions concerning this license or the applicable additional terms
 #ifndef __FILESYSTEM_H__
 #define __FILESYSTEM_H__
 
+#include <atomic>
+#include <stdint.h>
+
 /*
 ===============================================================================
 
@@ -56,8 +59,63 @@ If you have questions concerning this license or the applicable additional terms
 */
 
 static const ID_TIME_T		FILE_NOT_FOUND_TIMESTAMP	= static_cast<ID_TIME_T>( -1 );
+
+/*
+	Content stamps: the source identity generated caches compare.
+
+	A loose file's content stamp is its modification time. A pk4 member has no
+	usable time -- Timestamp() is 0 for every member -- so a cache built from it
+	could never notice the member changing under the same name. Its content
+	stamp instead folds the member's zip CRC-32 and uncompressed length, both
+	from the pak's central directory, into a value below
+	FILE_NOT_FOUND_TIMESTAMP. A content stamp identifies a source: compare it
+	for equality only. FS_ContentStampOrderTime hands ordered staleness checks
+	the 0 they have always seen for a pak file.
+*/
+inline ID_TIME_T FS_FoldContentIdentity( uint64_t identity ) {
+	// Keep the result below -1 in whichever width ID_TIME_T has.
+	identity = sizeof( ID_TIME_T ) >= sizeof( uint64_t )
+		? ( identity & 0x3fffffffffffffffull )
+		: ( ( identity ^ ( identity >> 32 ) ) & 0x3fffffffull );
+	return -static_cast<ID_TIME_T>( identity ) - 2;
+}
+
+inline ID_TIME_T FS_PakMemberContentStamp( uint32_t crc, int length ) {
+	return FS_FoldContentIdentity( ( static_cast<uint64_t>( static_cast<uint32_t>( length ) ) << 32 ) | crc );
+}
+
+inline bool FS_IsPakMemberContentStamp( ID_TIME_T stamp ) {
+	return stamp < FILE_NOT_FOUND_TIMESTAMP;
+}
+
+inline ID_TIME_T FS_ContentStampOrderTime( ID_TIME_T stamp ) {
+	return FS_IsPakMemberContentStamp( stamp ) ? 0 : stamp;
+}
+
+// Accumulates the stamp of something built from several files (an image
+// program, a cube map's faces), starting from 0. Loose-only inputs keep the
+// newest time as before; once a pk4 member is involved the result hashes every
+// part, so a change to any one of them changes it.
+inline ID_TIME_T FS_CombineContentStamps( ID_TIME_T accumulated, ID_TIME_T stamp ) {
+	if ( accumulated == 0 ) {
+		return stamp;
+	}
+	if ( stamp == 0 ) {
+		return accumulated;
+	}
+	if ( !FS_IsPakMemberContentStamp( accumulated ) && !FS_IsPakMemberContentStamp( stamp ) ) {
+		return stamp > accumulated ? stamp : accumulated;
+	}
+	uint64_t mixed = static_cast<uint64_t>( accumulated ) * 0x9e3779b97f4a7c15ull ^ static_cast<uint64_t>( stamp );
+	mixed ^= mixed >> 31;
+	mixed *= 0xbf58476d1ce4e5b9ull;
+	mixed ^= mixed >> 29;
+	return FS_FoldContentIdentity( mixed );
+}
+
 static const int		MAX_PURE_PAKS				= 128;
 static const int		MAX_OSPATH					= 256;
+static const int		MAX_GAME_OS					= 6;
 
 // modes for OpenFileByMode. used as bit mask internally
 typedef enum {
@@ -87,23 +145,47 @@ typedef enum {
 } dlStatus_t;
 
 typedef enum {
-	FILE_EXEC,
-	FILE_OPEN
-} dlMime_t;
-
-typedef enum {
 	FIND_NO,
 	FIND_YES,
 	FIND_ADDON
 } findFile_t;
 
+// Typed scheduling records used by the learned, per-map preload manifest.
+// These values are part of the engine/game and renderer-module ABI; append new
+// values instead of reordering existing ones.
+typedef enum {
+	LEVEL_LOAD_RESOURCE_RENDER_MODEL = 1,
+	LEVEL_LOAD_RESOURCE_IMAGE,
+	LEVEL_LOAD_RESOURCE_ANIMATION,
+	LEVEL_LOAD_RESOURCE_SOUND,
+	LEVEL_LOAD_RESOURCE_COLLISION,
+	LEVEL_LOAD_RESOURCE_WORLD,
+	LEVEL_LOAD_RESOURCE_MATERIAL,
+	LEVEL_LOAD_RESOURCE_GUI,
+	LEVEL_LOAD_RESOURCE_EFFECT,
+	LEVEL_LOAD_RESOURCE_SKIN,
+	LEVEL_LOAD_RESOURCE_DECL,
+	LEVEL_LOAD_RESOURCE_RAW
+} levelLoadResourceType_t;
+
+// Append new values; the existing ones cross the module boundary.
+typedef enum {
+	GENERATED_CACHE_RENDER_MODEL = 1,
+	GENERATED_CACHE_RENDER_WORLD,
+	GENERATED_CACHE_COLLISION_MODEL,
+	// The game module's generated/animations cache. The game reads and writes
+	// it in its own format; the filesystem only answers whether it may be read.
+	GENERATED_CACHE_ANIMATION
+} generatedCacheKind_t;
+
 typedef struct urlDownload_s {
 	idStr				url;
 	char				dlerror[ MAX_STRING_CHARS ];
-	int					dltotal;
-	int					dlnow;
-	int					dlstatus;
-	dlStatus_t			status;
+	int					expectedSize;	// immutable transfer limit; zero permits an unrestricted download
+	std::atomic<int>	dltotal;
+	std::atomic<int>	dlnow;
+	std::atomic<int>	dlstatus;
+	std::atomic<dlStatus_t> status;
 } urlDownload_t;
 
 typedef struct fileDownload_s {
@@ -118,7 +200,7 @@ typedef struct backgroundDownload_s {
 	idFile *			f;
 	fileDownload_t		file;
 	urlDownload_t		url;
-	volatile bool		completed;
+	std::atomic<bool>	completed;
 } backgroundDownload_t;
 
 // file list for directory listings
@@ -133,6 +215,15 @@ public:
 private:
 	idStr					basePath;
 	idStrList				list;
+};
+
+// A built-in campaign is content, not a separately loaded game module.
+// "ready" checks the campaign's compiled maps and defining scripts/decls;
+// it does not certify the completeness of an unfinished third-party release.
+struct idCampaignContentInfo {
+    bool present = false;
+    bool ready = false;
+    idStr missing;
 };
 
 // mod list
@@ -224,6 +315,7 @@ public:
 							// the function tries to configure pure mode from the paks already referenced and this new list
 							// it returns wether the switch was successfull, and sets the missing checksums
 							// the process is verbosive when fs_debug 1
+							// after PURE_OK, the caller must honour TakePureImageCacheEviction
 	virtual fsPureReply_t	SetPureServerChecksums( const int pureChecksums[ MAX_PURE_PAKS ], int gamePakChecksum, int missingChecksums[ MAX_PURE_PAKS ], int *missingGamePakChecksum ) = 0;
 							// fills a 0-terminated list of pak checksums for a client
 							// if OS is -1, give the current game pak checksum. if >= 0, lookup the game pak table (server only)
@@ -243,11 +335,26 @@ public:
 							// A 0 byte will always be appended at the end, so string ops are safe.
 							// The buffer should be considered read-only, because it may be cached for other uses.
 	virtual int				ReadFile( const char *relativePath, void **buffer, ID_TIME_T *timestamp = NULL ) = 0;
+							// ReadFile, reporting the file's content stamp (see FS_PakMemberContentStamp)
+							// instead of its timestamp. For generated-cache source identities.
+	virtual int				ReadFileContentStamp( const char *relativePath, void **buffer, ID_TIME_T *contentStamp ) = 0;
 							// Frees the memory allocated by ReadFile.
 	virtual void			FreeFile( void *buffer ) = 0;
+							// Relative mutation paths must be non-empty portable qpaths using '/' separators.
+							// Rooted paths, dot/empty segments, OS volume syntax, and platform filename aliases are rejected.
+							// Use the Explicit/OSPath APIs only when a fully qualified OS path is intentionally required.
 							// Writes a complete file, will create any needed subdirectories.
 							// Returns the length of the file, or -1 on failure.
 	virtual int				WriteFile( const char *relativePath, const void *buffer, int size, const char *basePath = "fs_savepath" ) = 0;
+							// Atomically replaces finalRelativePath with a fully written staged file.
+							// Both names are validated qpaths under the same writable root.  On failure
+							// the previous final file is left unchanged whenever the host OS permits.
+	virtual bool			PromoteFile( const char *stagedRelativePath, const char *finalRelativePath,
+								const char *basePath = "fs_savepath" ) = 0;
+							// Removes one validated qpath from exactly the selected writable root.
+							// Returns true when the file was removed or was already absent.
+	virtual bool			RemoveFileChecked( const char *relativePath,
+								const char *basePath = "fs_savepath" ) = 0;
 
 							// Removes the given file.
 	virtual void			RemoveFile( const char *relativePath, const char *basePath = "fs_savepath" ) = 0;
@@ -326,9 +433,56 @@ public:
 	virtual bool			FilenameCompare( const char *s1, const char *s2 ) const = 0;
 
 	virtual bool			InProductionMode() = 0;
+
+	// Milestone B extensions are append-only at the end of the shared
+	// engine/game vtable.  Older game modules retain the complete historical
+	// prefix, while API v44 modules can opt into these coordinator services.
+	virtual void			BeginLevelLoadCache( const char *mapKey, const char *gameMode,
+								const char *entityFilter, const char *settingsKey ) = 0;
+	virtual void			FinishLevelLoadCache( bool successful ) = 0;
+	virtual void			CancelLevelLoadCache( void ) = 0;
+	virtual void			RecordLevelLoadResource( levelLoadResourceType_t type,
+								const char *name, const char *options = "",
+								unsigned int flags = 0, unsigned int priority = 1 ) = 0;
+	virtual idFile *		OpenGeneratedCacheRead( generatedCacheKind_t kind,
+								const char *sourcePath, unsigned int parserVersion,
+								const char *settingsKey = "" ) = 0;
+	virtual bool			WriteGeneratedCache( generatedCacheKind_t kind,
+								const char *sourcePath, unsigned int parserVersion,
+								const char *settingsKey, const void *payload,
+								unsigned int payloadBytes ) = 0;
+	virtual void			DiscardGeneratedCache( generatedCacheKind_t kind,
+								const char *sourcePath, unsigned int parserVersion,
+								const char *settingsKey = "" ) = 0;
+	virtual idCampaignContentInfo GetAwakeningContentInfo() = 0;
+	virtual const char *GetActiveGameDir() const = 0;
+	// Appended for RENDER_API_VERSION 23: whether OpenGeneratedCacheRead can
+	// return, or WriteGeneratedCache store, a cache of this kind right now.
+	// Owners ask before decoding or encoding a payload, so a disabled cache
+	// costs a cvar check instead of a serialization that is thrown away.
+	// No generated cache is read while a pure lock or fs_restrict holds, and a
+	// resident decoded from one before then is re-derived from its source at
+	// the next level load once reads return false (see
+	// idFileSystemLocal::GeneratedCacheReadsRefused).
+	virtual bool			GeneratedCacheReadsEnabled( generatedCacheKind_t kind ) const = 0;
+	virtual bool			GeneratedCacheWritesEnabled( generatedCacheKind_t kind ) const = 0;
+	// Appended for RENDER_API_VERSION 33. Reading a generated/images cache
+	// entry, or an expanded loading background an older build left under the
+	// save path, from a directory does not make a pure lock restart the engine; a
+	// SetPureServerChecksums that returns PURE_OK with the lock taken over such
+	// reads leaves this pending instead. It returns true once, and the caller
+	// must then call renderSystem->ReloadGeneratedCacheImages() or, if that
+	// fails, restart as for PURE_RESTART. Both stay unreadable while pure.
+	virtual bool			TakePureImageCacheEviction( void ) = 0;
 };
 
 extern idFileSystem *		fileSystem;
+
+// Reports a missing or mismatched client-only openQ4 content pack that
+// filesystem startup found, now that the string tables can localize it. Call
+// once after the startup language load; later filesystem restarts report such
+// a failure at once.
+void						FS_RaiseDeferredContentPackFailure( void );
 
 /*
 ================================================

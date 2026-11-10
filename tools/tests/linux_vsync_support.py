@@ -63,6 +63,13 @@ def validate_sdl3_swap_interval() -> None:
     require(apply_swap, "SetGLSwapInterval(requestedInterval)", "SDL3 swap interval helper")
     require(apply_swap, "GetGLSwapInterval(&actualInterval)", "SDL3 swap interval helper")
     require(apply_swap, "requested swap interval", "SDL3 swap interval diagnostics")
+    require(apply_swap, 'SDL3_EnsureGLContextCurrent("swap interval update")', "SDL3 swap interval context guard")
+    require_order(
+        apply_swap,
+        'SDL3_EnsureGLContextCurrent("swap interval update")',
+        "SetGLSwapInterval(requestedInterval)",
+        "SDL3 swap interval context guard",
+    )
 
     require(backend_set, "SDL_GL_SetSwapInterval(interval)", "SDL3 swap interval seam implementation")
     require(backend_get, "SDL_GL_GetSwapInterval(outInterval)", "SDL3 swap interval seam implementation")

@@ -323,6 +323,19 @@ public:
 #include <ctype.h>
 #include <typeinfo>
 #include <atomic>
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 #include <errno.h>
 #include <math.h>
 
@@ -382,6 +395,7 @@ const float MAX_BOUND_SIZE = 65536.0f;
 #include "../renderer/ModelManager.h"
 #include "../renderer/RenderSystem.h"
 #include "../renderer/RenderWorld.h"
+#include "../framework/VRSystem.h"
 
 // sound engine
 #include "../sound/sound.h"

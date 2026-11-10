@@ -3,13 +3,18 @@
 
 #include "tr_local.h"
 #include "ModernClusteredLighting.h"
+#include "AdvancedLightingCore.h"
 #include "GLDebugScope.h"
 #include "GLStateCache.h"
+#include "ModernLightImageAtlas.h"
 #include "ModernShadowPlanner.h"
+#include "ModernSpecularProbeAtlas.h"
 #include "RendererBenchmarks.h"
 #include "RendererMetrics.h"
 #include "ShadowMapProjected.h"
 #include "ShadowMapArb2Parity.h"
+
+#include <cmath>
 
 const int MODERN_CLUSTER_MAX_GRIDS = 16;
 const int MODERN_CLUSTER_MAX_LIGHTS_UBO = 256;
@@ -28,6 +33,7 @@ const int MODERN_CLUSTER_UBO_BINDING_PARAMS = 3;
 const int MODERN_CLUSTER_UBO_BINDING_LIGHTS = 4;
 const int MODERN_CLUSTER_UBO_BINDING_INDICES = 5;
 const int MODERN_CLUSTER_UBO_BINDING_SHADOW_DESCRIPTORS = 6;
+const int MODERN_CLUSTER_UBO_BINDING_SPECULAR_PROBES = 7;
 const int MODERN_CLUSTER_SSBO_BINDING_LIGHTS = 6;
 const int MODERN_CLUSTER_SSBO_BINDING_INDICES = 7;
 const int MODERN_CLUSTER_SSBO_BINDING_SHADOW_DESCRIPTORS = 8;
@@ -40,6 +46,11 @@ const int MODERN_CLUSTER_LIGHT_FLAG_SHADOW_FALLBACK = 1 << 5;
 const int MODERN_CLUSTER_LIGHT_FLAG_SHADOW_CASCADE = 1 << 6;
 const int MODERN_CLUSTER_LIGHT_FLAG_SHADOW_POINT = 1 << 7;
 const int MODERN_CLUSTER_LIGHT_FLAG_BLEND = 1 << 8;
+
+static_assert( RENDERER_CLUSTER_SPECULAR_PROBES_PER_CLUSTER == ADVANCED_LIGHTING_PROBES_PER_CLUSTER,
+	"cluster probe selection width must match the device-independent contract" );
+static_assert( RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS == 32,
+	"cluster probe producer must match the fixed shader ABI" );
 
 typedef struct modernClusterGridRecord_s {
 	const viewDef_t *	viewDef;
@@ -58,6 +69,8 @@ typedef struct modernClusterGridRecord_s {
 	int					indexGroupsPerCluster;
 	int					firstLight;
 	int					lightCount;
+	int					firstProbe;
+	int					probeCount;
 	int					width;
 	int					height;
 	float				nearZ;
@@ -86,7 +99,36 @@ typedef struct modernClusterLightRecord_s {
 	idPlane				viewLightProject[4];
 	idScreenRect		scissor;
 	bool				fullDepthRange;
+	// Cluster bin bounds computed in the counting pass and reused in the fill
+	// pass (CPU-CSR path); not uploaded to the GPU. Zero-initialized, which the
+	// compute-binning path leaves untouched.
+	int					binTileMinX;
+	int					binTileMaxX;
+	int					binTileMinY;
+	int					binTileMaxY;
+	int					binSliceMinZ;
+	int					binSliceMaxZ;
 } modernClusterLightRecord_t;
+
+typedef struct modernSpecularProbeRecord_s {
+	int					sceneIndex;
+	int					stableLightIdentity;
+	int					priority;
+	idVec3				cameraOrigin;
+	idVec3				axisX;
+	idVec3				axisY;
+	idVec3				axisZ;
+	idVec3				tint;
+	float				intensity;
+	float				radius;
+	float				blendFraction;
+	float				depthMin;
+	float				depthMax;
+	idScreenRect			scissor;
+	modernSpecularProbeAtlasPlacement_t placement;
+	bool				boxParallax;
+	idVec3				boxExtents;	// half extents along axisX/Y/Z
+} modernSpecularProbeRecord_t;
 
 typedef struct modernClusterRecord_s {
 	int					firstLightIndex;
@@ -94,6 +136,7 @@ typedef struct modernClusterRecord_s {
 	int					uploadedLightCount;
 	int					writeLightCount;
 	bool				overflow;
+	advancedLightingProbeCandidate_t probes[RENDERER_CLUSTER_SPECULAR_PROBES_PER_CLUSTER];
 } modernClusterRecord_t;
 
 typedef struct modernClusterGridGpuParams_s {
@@ -131,13 +174,25 @@ typedef struct modernClusterLightGpuRecord_s {
 	float				projectS[4];
 	float				projectT[4];
 	float				projectQ[4];
+	// atlas cells for this light's own falloff and projection images, as
+	// { uOffset, vOffset, uScale, vScale }. Zero scale means the image is not
+	// resident and the shader must not sample it.
+	float				falloffRect[4];
+	float				projectionRect[4];
 } modernClusterLightGpuRecord_t;
 
 // hand-synced with GLSL struct ModernClusterLightRecord; all-vec4 layout
 // keeps tight C packing identical to std140/std430
-assert_sizeof( modernClusterLightGpuRecord_t, 10 * 4 * sizeof( float ) );
+assert_sizeof( modernClusterLightGpuRecord_t, 12 * 4 * sizeof( float ) );
 assert_offsetof( modernClusterLightGpuRecord_t, flags, 64 );
 assert_offsetof( modernClusterLightGpuRecord_t, projectQ, 144 );
+
+typedef rendererSpecularProbeRecord_t modernSpecularProbeGpuRecord_t;
+
+assert_sizeof( modernSpecularProbeGpuRecord_t, 7 * 4 * sizeof( float ) );
+assert_offsetof( modernSpecularProbeGpuRecord_t, tintIntensity, 16 );
+assert_offsetof( modernSpecularProbeGpuRecord_t, identity, 80 );
+assert_offsetof( modernSpecularProbeGpuRecord_t, boxExtents, 96 );
 
 typedef struct modernClusterIndexGpuRecord_s {
 	GLuint				indices[4];
@@ -193,14 +248,17 @@ typedef struct modernClusterDebugPixel_s {
 typedef struct modernClusterFrameData_s {
 	idList<modernClusterGridRecord_t> grids;
 	idList<modernClusterLightRecord_t> lights;
+	idList<modernSpecularProbeRecord_t> probes;
 	idList<modernClusterRecord_t> clusters;
 	idList<GLuint> clusterLightIndices;
 	idList<modernClusterLightGpuRecord_t> lightGpuRecords;
+	idList<modernSpecularProbeGpuRecord_t> probeGpuRecords;
 	idList<modernClusterIndexGpuRecord_t> indexGpuRecords;
 	idList<rendererModernShadowDescriptor_t> shadowDescriptors;
 	idList<modernClusterShadowDescriptorGpuRecord_t> shadowGpuRecords;
 	int					gridCount;
 	int					lightCount;
+	int					probeCount;
 	int					shadowDescriptorCount;
 	int					clusterCount;
 	int					clusterRecordCount;
@@ -211,18 +269,73 @@ typedef struct modernClusterFrameData_s {
 	int					indexRecordCapacity;
 	int					shadowDescriptorCapacity;
 	bool				shaderStoragePath;
+	bool				probeSetComplete;
+	unsigned int		probeFrameGeneration;
 } modernClusterFrameData_t;
+
+typedef struct modernClusterDecalRecord_s {
+	rendererClusteredDecalSource_t source;
+	int				gridIndex;
+	int				tileMinX;
+	int				tileMaxX;
+	int				tileMinY;
+	int				tileMaxY;
+	int				sliceMinZ;
+	int				sliceMaxZ;
+	int				clusterReferenceCount;
+	unsigned long long	hash;
+} modernClusterDecalRecord_t;
+
+typedef struct modernClusterDecalClusterRecord_s {
+	int				firstReference;
+	int				referenceCount;
+	int				writeCount;
+} modernClusterDecalClusterRecord_t;
+
+typedef struct modernClusterDecalViewRecord_s {
+	const viewDef_t *	viewDef;
+	int				gridIndex;
+	int				recordCount;
+	int				firstCommandOrder;
+	int				lastCommandOrder;
+	int				clusterReferences;
+	unsigned long long	gridHash;
+	unsigned long long	sourceOrderHash;
+	bool				owned;
+} modernClusterDecalViewRecord_t;
+
+typedef struct modernClusterDecalFrameData_s {
+	idList<modernClusterDecalRecord_t> records;
+	idList<modernClusterDecalClusterRecord_t> clusters;
+	idList<int>		clusterReferences;
+	idList<modernClusterDecalViewRecord_t> views;
+	unsigned int		generation;
+	unsigned long long	sourceOrderHash;
+	int				viewCount;
+	bool				valid;
+} modernClusterDecalFrameData_t;
+
+typedef struct modernClusterDecalRejectInfo_s {
+	rendererClusteredDecalReject_t reason;
+	int				sourceIndex;
+	int				viewIndex;
+} modernClusterDecalRejectInfo_t;
 
 static void R_ModernClusteredLighting_ViewPlaneForLightProject( const viewDef_t *viewDef, const idPlane &worldPlane, float out[4] );
 
 static rendererClusteredLightingStats_t rg_clusteredLightingStats;
 static modernClusterFrameData_t rg_clusteredLightingFrame;
+static rendererClusteredDecalStats_t rg_clusteredDecalStats;
+static modernClusterDecalFrameData_t rg_clusteredDecalFrame;
+static modernClusterDecalFrameData_t rg_clusteredDecalPrepareScratch;
+static modernClusterDecalFrameData_t rg_clusteredDecalSealScratch;
 static renderBackendCaps_t rg_clusteredLightingCaps;
 static renderFeatureSet_t rg_clusteredLightingFeatures;
 static GLuint rg_clusteredLightingParamsUBO = 0;
 static GLuint rg_clusteredLightingLightsUBO = 0;
 static GLuint rg_clusteredLightingIndicesUBO = 0;
 static GLuint rg_clusteredLightingShadowDescriptorsUBO = 0;
+static GLuint rg_clusteredLightingSpecularProbesUBO = 0;
 static GLuint rg_clusteredLightingLightsSSBO = 0;
 static GLuint rg_clusteredLightingIndicesSSBO = 0;
 static GLuint rg_clusteredLightingShadowDescriptorsSSBO = 0;
@@ -241,6 +354,77 @@ static bool rg_clusteredLightingInitialized = false;
 static bool rg_clusteredLightingAvailable = false;
 static bool rg_clusteredLightingShaderStorageAvailable = false;
 static int rg_clusteredLightingBoundGridIndex = -1;
+
+// The ordinary clustered entry point owns GL resources. Vulkan uses the
+// CPU-only PrepareProbes export and supplies its resident-atlas callback;
+// it must never fall through to the GL resource owner below.
+static modernSpecularProbeAtlasReject_t R_ModernClusteredLighting_AcquireProbeAtlas(
+		const idImage *image, modernSpecularProbeAtlasPlacement_t *placement ) {
+#if defined( OPENQ4_RENDERER_VK_MODULE )
+	( void )image;
+	if ( placement != NULL ) {
+		ModernSpecularProbeAtlas_ClearPlacement( *placement );
+	}
+	return MODERN_SPECULAR_PROBE_ATLAS_REJECT_UNAVAILABLE;
+#else
+	return R_ModernSpecularProbeAtlas_Acquire( image, placement );
+#endif
+}
+
+static bool R_ModernClusteredLighting_ProbeAtlasReady( void ) {
+#if defined( OPENQ4_RENDERER_VK_MODULE )
+	return false;
+#else
+	return R_ModernSpecularProbeAtlas_Ready();
+#endif
+}
+
+static bool R_ModernClusteredLighting_ProbeAtlasFrameReady( void ) {
+#if defined( OPENQ4_RENDERER_VK_MODULE )
+	return false;
+#else
+	return R_ModernSpecularProbeAtlas_FrameReady();
+#endif
+}
+
+static std::uint64_t R_ModernClusteredLighting_ProbeAtlasFrameGeneration( void ) {
+#if defined( OPENQ4_RENDERER_VK_MODULE )
+	return 0;
+#else
+	return R_ModernSpecularProbeAtlas_Stats().frameGeneration;
+#endif
+}
+
+static void R_ModernClusteredLighting_ClearDecalStorage( modernClusterDecalFrameData_t &frame ) {
+	frame.records.SetNum( 0, false );
+	frame.clusters.SetNum( 0, false );
+	frame.clusterReferences.SetNum( 0, false );
+	frame.views.SetNum( 0, false );
+	frame.generation = 0;
+	frame.sourceOrderHash = 0;
+	frame.viewCount = 0;
+	frame.valid = false;
+}
+
+static void R_ModernClusteredLighting_ResetDecalTransaction( void ) {
+	R_ModernClusteredLighting_ClearDecalStorage( rg_clusteredDecalFrame );
+	memset( &rg_clusteredDecalStats, 0, sizeof( rg_clusteredDecalStats ) );
+	rg_clusteredDecalStats.recordCapacity = RENDERER_CLUSTER_DECAL_MAX_RECORDS;
+	rg_clusteredDecalStats.referenceCapacity = RENDERER_CLUSTER_DECAL_MAX_REFERENCES;
+	rg_clusteredDecalStats.lastReject = RENDERER_CLUSTER_DECAL_REJECT_NONE;
+	rg_clusteredDecalStats.lastRejectSource = -1;
+	rg_clusteredDecalStats.lastRejectView = -1;
+	idStr::Copynz( rg_clusteredDecalStats.status, "empty", sizeof( rg_clusteredDecalStats.status ) );
+}
+
+void R_ModernClusteredLighting_ResetDecalsForFrame( void ) {
+	R_ModernClusteredLighting_ResetDecalTransaction();
+}
+
+static unsigned int R_ModernClusteredLighting_CurrentDecalGeneration( void ) {
+	unsigned int generation = static_cast<unsigned int>( backEnd.frameCount ) + 1u;
+	return generation != 0u ? generation : 1u;
+}
 
 static void R_ModernClusteredLighting_SetStatus( rendererClusteredLightingStats_t &stats, const char *status ) {
 	idStr::Copynz( stats.status, status ? status : "unknown", sizeof( stats.status ) );
@@ -269,12 +453,20 @@ static bool R_ModernClusteredLighting_UseShaderStoragePath( void ) {
 		&& glBindBufferBase != NULL;
 }
 
-static bool R_ModernClusteredLighting_UseComputeBinningPath( void ) {
+static bool R_ModernClusteredLighting_ComputeBinningCapable( void ) {
 	return R_ModernClusteredLighting_UseShaderStoragePath()
 		&& rg_clusteredLightingCaps.hasCompute
 		&& rg_clusteredLightingComputeProgram != 0
 		&& glDispatchCompute != NULL
 		&& glMemoryBarrier != NULL;
+}
+
+static bool R_ModernClusteredLighting_UseComputeBinningPath( void ) {
+	// Header z/w carry authored-probe ownership. The existing compute builder
+	// writes all four header lanes, so probe frames stay on deterministic CPU
+	// CSR until the compute contract can preserve those lanes exactly.
+	return R_ModernClusteredLighting_ComputeBinningCapable()
+		&& rg_clusteredLightingFrame.probeCount == 0;
 }
 
 static int R_ModernClusteredLighting_LightCapacity( void ) {
@@ -310,26 +502,31 @@ static void R_ModernClusteredLighting_UpdateBuffer( GLenum target, GLuint buffer
 static void R_ModernClusteredLighting_BindGpuBuffers( bool useShaderStorage ) {
 	if ( useShaderStorage ) {
 		R_GLStateCache().BindBufferBase( GL_UNIFORM_BUFFER, MODERN_CLUSTER_UBO_BINDING_PARAMS, rg_clusteredLightingParamsUBO );
+		R_GLStateCache().BindBufferBase( GL_UNIFORM_BUFFER, MODERN_CLUSTER_UBO_BINDING_SPECULAR_PROBES, rg_clusteredLightingSpecularProbesUBO );
 		const GLuint ssboBuffers[3] = { rg_clusteredLightingLightsSSBO, rg_clusteredLightingIndicesSSBO, rg_clusteredLightingShadowDescriptorsSSBO };
 		R_GLStateCache().BindBuffersBase( GL_SHADER_STORAGE_BUFFER, MODERN_CLUSTER_SSBO_BINDING_LIGHTS, 3, ssboBuffers );
 		return;
 	}
 
-	const GLuint uboBuffers[4] = { rg_clusteredLightingParamsUBO, rg_clusteredLightingLightsUBO, rg_clusteredLightingIndicesUBO, rg_clusteredLightingShadowDescriptorsUBO };
-	R_GLStateCache().BindBuffersBase( GL_UNIFORM_BUFFER, MODERN_CLUSTER_UBO_BINDING_PARAMS, 4, uboBuffers );
+	const GLuint uboBuffers[5] = { rg_clusteredLightingParamsUBO, rg_clusteredLightingLightsUBO, rg_clusteredLightingIndicesUBO, rg_clusteredLightingShadowDescriptorsUBO, rg_clusteredLightingSpecularProbesUBO };
+	R_GLStateCache().BindBuffersBase( GL_UNIFORM_BUFFER, MODERN_CLUSTER_UBO_BINDING_PARAMS, 5, uboBuffers );
 }
 
 static void R_ModernClusteredLighting_ResetFrameData( void ) {
+	R_ModernClusteredLighting_ResetDecalTransaction();
 	rg_clusteredLightingFrame.grids.SetNum( 0, false );
 	rg_clusteredLightingFrame.lights.SetNum( 0, false );
+	rg_clusteredLightingFrame.probes.SetNum( 0, false );
 	rg_clusteredLightingFrame.clusters.SetNum( 0, false );
 	rg_clusteredLightingFrame.clusterLightIndices.SetNum( 0, false );
 	rg_clusteredLightingFrame.lightGpuRecords.SetNum( 0, false );
+	rg_clusteredLightingFrame.probeGpuRecords.SetNum( 0, false );
 	rg_clusteredLightingFrame.indexGpuRecords.SetNum( 0, false );
 	rg_clusteredLightingFrame.shadowDescriptors.SetNum( 0, false );
 	rg_clusteredLightingFrame.shadowGpuRecords.SetNum( 0, false );
 	rg_clusteredLightingFrame.gridCount = 0;
 	rg_clusteredLightingFrame.lightCount = 0;
+	rg_clusteredLightingFrame.probeCount = 0;
 	rg_clusteredLightingFrame.shadowDescriptorCount = 0;
 	rg_clusteredLightingFrame.clusterCount = 0;
 	rg_clusteredLightingFrame.clusterRecordCount = 0;
@@ -340,6 +537,8 @@ static void R_ModernClusteredLighting_ResetFrameData( void ) {
 	rg_clusteredLightingFrame.lightCapacity = R_ModernClusteredLighting_LightCapacity();
 	rg_clusteredLightingFrame.indexRecordCapacity = R_ModernClusteredLighting_IndexRecordCapacity();
 	rg_clusteredLightingFrame.shadowDescriptorCapacity = R_ModernClusteredLighting_ShadowDescriptorCapacity();
+	rg_clusteredLightingFrame.probeSetComplete = true;
+	rg_clusteredLightingFrame.probeFrameGeneration = 0;
 	rg_clusteredLightingBoundGridIndex = -1;
 }
 
@@ -433,22 +632,6 @@ static float R_ModernClusteredLighting_LightRadius( const viewLight_t *vLight ) 
 		radius = vLight->pointLight ? 256.0f : 1024.0f;
 	}
 	return idMath::ClampFloat( 1.0f, 32768.0f, radius );
-}
-
-static float R_ModernClusteredLighting_PointShadowFar( const viewLight_t *vLight ) {
-	if ( vLight == NULL ) {
-		return 1.0f;
-	}
-
-	idVec3 adjustedRadius = vLight->lightRadius;
-	if ( vLight->lightDef != NULL ) {
-		const renderLight_t &parms = vLight->lightDef->parms;
-		adjustedRadius[0] = parms.lightRadius[0] + idMath::Fabs( parms.lightCenter[0] );
-		adjustedRadius[1] = parms.lightRadius[1] + idMath::Fabs( parms.lightCenter[1] );
-		adjustedRadius[2] = parms.lightRadius[2] + idMath::Fabs( parms.lightCenter[2] );
-	}
-
-	return Max( adjustedRadius.Length() * r_shadowMapPointFarScale.GetFloat(), 1.0f );
 }
 
 static rendererModernLightType_t R_ModernClusteredLighting_ClassifyLight( const viewLight_t *vLight ) {
@@ -575,8 +758,11 @@ static int R_ModernClusteredLighting_ShadowDescriptorFlags( const modernShadowLi
 	if ( shadow.modernReceiverSamplingReady ) {
 		flags |= RENDERER_MODERN_SHADOW_DESCRIPTOR_FLAG_SAMPLING_READY;
 	}
-	if ( shadow.arb2AtlasSlotReady ) {
+	if ( shadow.arb2AtlasSlotReady || shadow.arb2PointCubeReady ) {
 		flags |= RENDERER_MODERN_SHADOW_DESCRIPTOR_FLAG_ATLAS_SLOT;
+	}
+	if ( shadow.currentFrameMapReady ) {
+		flags |= RENDERER_MODERN_SHADOW_DESCRIPTOR_FLAG_CURRENT_FRAME_MAP;
 	}
 	if ( shadow.stableCascadeReady ) {
 		flags |= RENDERER_MODERN_SHADOW_DESCRIPTOR_FLAG_STABLE_CASCADE;
@@ -654,20 +840,25 @@ static void R_ModernClusteredLighting_CopyPlannerShadowDescriptor( rendererModer
 	dst.projectedSkippedSampleCount = src.projectedSkippedSampleCount;
 	dst.flags = R_ModernClusteredLighting_ShadowDescriptorFlags( src );
 	dst.updateFrame = src.updateFrame;
-	dst.atlasContentFrame = src.arb2AtlasContentFrame;
+	dst.atlasContentFrame = src.pointLight
+		? src.arb2PointCubeContentFrame : src.arb2AtlasContentFrame;
 	dst.atlasCellX = src.arb2AtlasCellX;
 	dst.atlasCellY = src.arb2AtlasCellY;
 	dst.atlasCellSpan = src.arb2AtlasCellSpan;
-	dst.atlasSlotValid = src.arb2AtlasSlotReady;
+	dst.atlasSlotValid = src.arb2AtlasSlotReady || src.arb2PointCubeReady;
 	memcpy( dst.shadowMatrix, src.shadowMatrix, sizeof( dst.shadowMatrix ) );
 	for ( int cascadeIndex = 0; cascadeIndex < RENDERER_MODERN_SHADOW_DESCRIPTOR_MAX_CASCADES; ++cascadeIndex ) {
 		R_ModernClusteredLighting_SetIdentityMatrix( dst.viewShadowMatrix[cascadeIndex] );
 	}
 	if ( src.pointLight ) {
-		dst.projection[0] = R_ModernClusteredLighting_PointShadowFar( src.viewLight );
+		dst.projection[0] = R_ShadowMapPointFarDistance( src.viewLight );
 		dst.projection[1] = 2.0f / static_cast<float>( Max( 1, src.resolution ) );
 		dst.projection[2] = static_cast<float>( src.depthFormat );
 		dst.projection[3] = static_cast<float>( src.compareMode );
+		if ( src.currentFrameMapReady ) {
+			dst.projection[2] = static_cast<float>( src.currentPointFirstTile );
+			dst.projection[3] = static_cast<float>( src.currentPointAtlasColumns );
+		}
 	} else {
 		dst.projection[0] = src.projectionPad;
 		dst.projection[1] = src.projectionScale;
@@ -675,6 +866,7 @@ static void R_ModernClusteredLighting_CopyPlannerShadowDescriptor( rendererModer
 		dst.projection[3] = static_cast<float>( src.projectedFallbackReason );
 	}
 	memcpy( dst.bias, src.bias, sizeof( dst.bias ) );
+	dst.normalOffsetScale = src.normalOffsetScale;
 	memcpy( dst.projectedBaseClipPlanes, src.projectedBaseClipPlanes, sizeof( dst.projectedBaseClipPlanes ) );
 
 	const int cascadeCount = Min( RENDERER_MODERN_SHADOW_DESCRIPTOR_MAX_CASCADES, MODERN_SHADOW_DESCRIPTOR_MAX_CASCADES );
@@ -752,8 +944,9 @@ static void R_ModernClusteredLighting_FillShadowDescriptorGpuRecord( modernClust
 	// float precision on long soaks, the 2^20 residue stays exact
 	dst.freshness[0] = static_cast<float>( src.updateFrame & 0xFFFFF );
 	dst.freshness[1] = src.atlasSlotValid ? 1.0f : 0.0f;
-	dst.freshness[2] = src.atlasSlotValid ? static_cast<float>( idMath::ClampInt( 0, 1 << 20, tr.frameCount - src.atlasContentFrame ) ) : -1.0f;
-	dst.freshness[3] = 0.0f;
+	dst.freshness[2] = src.atlasSlotValid ? static_cast<float>( idMath::ClampInt( 0, 1 << 20, backEnd.frameCount - src.atlasContentFrame ) ) : -1.0f;
+	// Previously reserved component; preserve the GPU record/block layout.
+	dst.freshness[3] = src.normalOffsetScale;
 	memcpy( dst.shadowMatrix, src.viewShadowMatrix, sizeof( dst.shadowMatrix ) );
 	memcpy( dst.cascadeSplitDepths, src.cascadeSplitDepths, sizeof( dst.cascadeSplitDepths ) );
 	memcpy( dst.cascadeBiasScale, src.cascadeBiasScale, sizeof( dst.cascadeBiasScale ) );
@@ -779,13 +972,28 @@ static void R_ModernClusteredLighting_ApplyShadowDescriptor( modernClusterLightR
 	record.shadowFallbackReason = shadow->fallbackReason;
 	stats.shadowDescriptorCount = Max( stats.shadowDescriptorCount, shadow->descriptorIndex + 1 );
 
-	// per-light gating (5c): a projected light is GPU-consumable only when
-	// its descriptor references a live persistent-atlas cell; a mapped light
-	// without one is blocked individually instead of poisoning the frame
+	// Per-light physical-resource gating (5c): projected lights require a live
+	// persistent-atlas cell and point lights require the exact cache cube which
+	// is currently bound. Missing provenance blocks only that light.
+	const bool mappedOrReused = shadow->policy == MODERN_SHADOW_POLICY_MAPPED
+		|| shadow->policy == MODERN_SHADOW_POLICY_CACHE_REUSE;
+	bool projectedSlotReady = shadow->arb2AtlasSlotReady;
+	if ( !shadow->pointLight && mappedOrReused
+			&& shadow->modernReceiverSamplingReady && projectedSlotReady && !shadow->currentFrameMapReady ) {
+		projectedSlotReady = RB_ShadowMapProjectedAtlasSlotMarkUsed(
+			shadow->lightDefIndex, shadow->arb2AtlasSignature,
+			shadow->arb2AtlasStorageGeneration,
+			shadow->arb2AtlasCellX, shadow->arb2AtlasCellY,
+			shadow->arb2AtlasCellSpan );
+	}
 	const bool projectedSlotBlocked = !shadow->pointLight
-		&& ( shadow->policy == MODERN_SHADOW_POLICY_MAPPED || shadow->policy == MODERN_SHADOW_POLICY_CACHE_REUSE )
+		&& mappedOrReused
 		&& shadow->modernReceiverSamplingReady
-		&& !shadow->arb2AtlasSlotReady;
+		&& !projectedSlotReady;
+	const bool pointCubeBlocked = shadow->pointLight
+		&& mappedOrReused
+		&& shadow->modernReceiverSamplingReady
+		&& !shadow->arb2PointCubeReady;
 
 	bool mappedShadowForModernReceiver = false;
 	if ( shadow->policy == MODERN_SHADOW_POLICY_MAPPED && !shadow->modernReceiverSamplingReady ) {
@@ -795,7 +1003,7 @@ static void R_ModernClusteredLighting_ApplyShadowDescriptor( modernClusterLightR
 		record.shadowPolicy = MODERN_SHADOW_POLICY_NONE;
 		record.shadowFallbackReason = MODERN_SHADOW_FALLBACK_RECEIVER_SAMPLING_UNAVAILABLE;
 		stats.shadowReceiverBlockedLights++;
-	} else if ( projectedSlotBlocked ) {
+	} else if ( projectedSlotBlocked || pointCubeBlocked ) {
 		record.shadowDescriptorIndex = -1;
 		record.shadowPolicy = MODERN_SHADOW_POLICY_NONE;
 		record.shadowFallbackReason = MODERN_SHADOW_FALLBACK_RESOURCE_UNAVAILABLE;
@@ -822,10 +1030,8 @@ static void R_ModernClusteredLighting_ApplyShadowDescriptor( modernClusterLightR
 		stats.shadowSkippedLights++;
 	}
 
-	if ( mappedShadowForModernReceiver && !shadow->pointLight && shadow->arb2AtlasSlotReady ) {
-		// the atlas cell this light record will present must not idle-expire
-		// under the GPU; this is the closest CPU point to actual consumption
-		RB_ShadowMapProjectedAtlasSlotMarkUsed( shadow->lightDefIndex );
+	if ( mappedShadowForModernReceiver && shadow->pointLight && shadow->arb2PointCubeReady && !shadow->currentFrameMapReady ) {
+		RB_ShadowMapPointCubeMarkUsed( shadow->lightDefIndex );
 	}
 
 	if ( mappedShadowForModernReceiver && shadow->mapType == MODERN_SHADOW_MAP_CASCADE ) {
@@ -848,11 +1054,18 @@ static const idMaterial *R_ModernClusteredLighting_ResolvedLightShader( const vi
 	return NULL;
 }
 
+static bool R_ModernClusteredLighting_IsSpecularProbe( const viewLight_t *vLight ) {
+	const idMaterial *lightShader = R_ModernClusteredLighting_ResolvedLightShader( vLight );
+	return lightShader != NULL && lightShader->HasSpecularProbe();
+}
+
 static bool R_ModernClusteredLighting_UsePerStageDescriptors( const viewLight_t *vLight, const idMaterial *lightShader ) {
 	if ( vLight == NULL || lightShader == NULL || vLight->shaderRegisters == NULL ) {
 		return false;
 	}
-	if ( lightShader->IsFogLight() || lightShader->IsAmbientLight() || lightShader->IsBlendLight() ) {
+	// Ambient lights split like every other additive light: classic draws one
+	// interaction per stage, and PBR encodes each stage's draw on its own.
+	if ( lightShader->IsFogLight() || lightShader->IsBlendLight() ) {
 		return false;
 	}
 	if ( !vLight->pointLight && vLight->parallel ) {
@@ -881,6 +1094,9 @@ static int R_ModernClusteredLighting_CountViewLights( const viewDef_t *viewDef )
 	}
 	for ( const viewLight_t *vLight = viewDef->viewLights; vLight != NULL; vLight = vLight->next ) {
 		const idMaterial *lightShader = R_ModernClusteredLighting_ResolvedLightShader( vLight );
+		if ( lightShader != NULL && lightShader->HasSpecularProbe() ) {
+			continue;
+		}
 		if ( R_ModernClusteredLighting_UsePerStageDescriptors( vLight, lightShader ) ) {
 			const int stageCount = lightShader->GetNumStages();
 			for ( int stageIndex = 0; stageIndex < stageCount; ++stageIndex ) {
@@ -961,6 +1177,8 @@ static void R_ModernClusteredLighting_InitGrid( modernClusterGridRecord_t &grid,
 	grid.indexGroupsPerCluster = R_ModernClusteredLighting_CeilDiv( requestedLightsPerCluster, 4 );
 	grid.firstLight = rg_clusteredLightingFrame.lightCount;
 	grid.lightCount = 0;
+	grid.firstProbe = rg_clusteredLightingFrame.probeCount;
+	grid.probeCount = 0;
 	grid.nearZ = viewDef != NULL && viewDef->renderView.cramZNear ? 0.25f : Max( 0.01f, r_znear.GetFloat() );
 	grid.farZ = 4096.0f;
 	R_ModernClusteredLighting_FormatDebugString( grid.debugName, sizeof( grid.debugName ), "scene%d_%dx%dx%d", sceneIndex, grid.tileCountX, grid.tileCountY, grid.sliceCountZ );
@@ -968,6 +1186,615 @@ static void R_ModernClusteredLighting_InitGrid( modernClusterGridRecord_t &grid,
 
 static int R_ModernClusteredLighting_ClusterIndex( const modernClusterGridRecord_t &grid, int tileX, int tileY, int sliceZ ) {
 	return grid.clusterOffset + ( sliceZ * grid.tileCountY + tileY ) * grid.tileCountX + tileX;
+}
+
+static const unsigned long long MODERN_CLUSTER_DECAL_HASH_OFFSET = 1469598103934665603ull;
+static const unsigned long long MODERN_CLUSTER_DECAL_HASH_PRIME = 1099511628211ull;
+
+static void R_ModernClusteredLighting_DecalHashByte( unsigned long long &hash, unsigned int value ) {
+	hash ^= value & 0xffu;
+	hash *= MODERN_CLUSTER_DECAL_HASH_PRIME;
+}
+
+static void R_ModernClusteredLighting_DecalHashU32( unsigned long long &hash, unsigned int value ) {
+	for ( int byteIndex = 0; byteIndex < 4; ++byteIndex ) {
+		R_ModernClusteredLighting_DecalHashByte( hash, value >> ( byteIndex * 8 ) );
+	}
+}
+
+static void R_ModernClusteredLighting_DecalHashU64( unsigned long long &hash, unsigned long long value ) {
+	for ( int byteIndex = 0; byteIndex < 8; ++byteIndex ) {
+		R_ModernClusteredLighting_DecalHashByte( hash, static_cast<unsigned int>( value >> ( byteIndex * 8 ) ) );
+	}
+}
+
+static void R_ModernClusteredLighting_DecalHashInt( unsigned long long &hash, int value ) {
+	R_ModernClusteredLighting_DecalHashU32( hash, static_cast<unsigned int>( value ) );
+}
+
+static unsigned int R_ModernClusteredLighting_DecalFloatBits( float value ) {
+	unsigned int bits = 0;
+	memcpy( &bits, &value, sizeof( bits ) );
+	return bits;
+}
+
+static void R_ModernClusteredLighting_DecalHashFloat( unsigned long long &hash, float value ) {
+	R_ModernClusteredLighting_DecalHashU32( hash, R_ModernClusteredLighting_DecalFloatBits( value ) );
+}
+
+static unsigned long long R_ModernClusteredLighting_DecalGridHash( const modernClusterGridRecord_t &grid ) {
+	unsigned long long hash = MODERN_CLUSTER_DECAL_HASH_OFFSET;
+	R_ModernClusteredLighting_DecalHashInt( hash, grid.sceneIndex );
+	R_ModernClusteredLighting_DecalHashInt( hash, grid.tileCountX );
+	R_ModernClusteredLighting_DecalHashInt( hash, grid.tileCountY );
+	R_ModernClusteredLighting_DecalHashInt( hash, grid.sliceCountZ );
+	R_ModernClusteredLighting_DecalHashInt( hash, grid.clusterOffset );
+	R_ModernClusteredLighting_DecalHashInt( hash, grid.clusterCount );
+	R_ModernClusteredLighting_DecalHashInt( hash, grid.width );
+	R_ModernClusteredLighting_DecalHashInt( hash, grid.height );
+	R_ModernClusteredLighting_DecalHashFloat( hash, grid.nearZ );
+	R_ModernClusteredLighting_DecalHashFloat( hash, grid.farZ );
+	return hash;
+}
+
+static unsigned long long R_ModernClusteredLighting_DecalSourceHash( const rendererClusteredDecalSource_t &source ) {
+	// Pointer values deliberately stay out of the stable hash.  Seal compares
+	// both pointers exactly, while the immutable resource IDs make this hash
+	// deterministic across executions.
+	unsigned long long hash = MODERN_CLUSTER_DECAL_HASH_OFFSET;
+	R_ModernClusteredLighting_DecalHashInt( hash, source.commandIndex );
+	R_ModernClusteredLighting_DecalHashInt( hash, source.commandOrder );
+	R_ModernClusteredLighting_DecalHashU32( hash, source.materialStableId );
+	R_ModernClusteredLighting_DecalHashU32( hash, source.geometryStableId );
+	R_ModernClusteredLighting_DecalHashU32( hash, source.instanceStableId );
+	R_ModernClusteredLighting_DecalHashInt( hash, source.screenX1 );
+	R_ModernClusteredLighting_DecalHashInt( hash, source.screenY1 );
+	R_ModernClusteredLighting_DecalHashInt( hash, source.screenX2 );
+	R_ModernClusteredLighting_DecalHashInt( hash, source.screenY2 );
+	R_ModernClusteredLighting_DecalHashFloat( hash, source.depthMin );
+	R_ModernClusteredLighting_DecalHashFloat( hash, source.depthMax );
+	R_ModernClusteredLighting_DecalHashU32( hash, source.generation );
+	return hash;
+}
+
+static int R_ModernClusteredLighting_ExactGridIndexForView( const viewDef_t *viewDef ) {
+	if ( viewDef == NULL ) {
+		return -1;
+	}
+	for ( int gridIndex = 0; gridIndex < rg_clusteredLightingFrame.gridCount; ++gridIndex ) {
+		if ( rg_clusteredLightingFrame.grids[gridIndex].viewDef == viewDef ) {
+			return gridIndex;
+		}
+	}
+	return -1;
+}
+
+static void R_ModernClusteredLighting_SetDecalReject( modernClusterDecalRejectInfo_t &reject,
+		rendererClusteredDecalReject_t reason, int sourceIndex, int viewIndex ) {
+	if ( reject.reason == RENDERER_CLUSTER_DECAL_REJECT_NONE ) {
+		reject.reason = reason;
+		reject.sourceIndex = sourceIndex;
+		reject.viewIndex = viewIndex;
+	}
+}
+
+static bool R_ModernClusteredLighting_DecalSourceIdentityEqual(
+		const rendererClusteredDecalSource_t &a, const rendererClusteredDecalSource_t &b ) {
+	return a.viewDef == b.viewDef
+		&& a.sourceSurface == b.sourceSurface
+		&& a.commandIndex == b.commandIndex
+		&& a.commandOrder == b.commandOrder
+		&& a.materialStableId == b.materialStableId
+		&& a.geometryStableId == b.geometryStableId
+		&& a.instanceStableId == b.instanceStableId
+		&& a.screenX1 == b.screenX1
+		&& a.screenY1 == b.screenY1
+		&& a.screenX2 == b.screenX2
+		&& a.screenY2 == b.screenY2
+		&& R_ModernClusteredLighting_DecalFloatBits( a.depthMin ) == R_ModernClusteredLighting_DecalFloatBits( b.depthMin )
+		&& R_ModernClusteredLighting_DecalFloatBits( a.depthMax ) == R_ModernClusteredLighting_DecalFloatBits( b.depthMax )
+		&& a.generation == b.generation;
+}
+
+static bool R_ModernClusteredLighting_BuildDecalCandidate(
+		const rendererClusteredDecalSource_t *sources, int sourceCount, unsigned int generation,
+		modernClusterDecalFrameData_t &candidate, modernClusterDecalRejectInfo_t &reject ) {
+	R_ModernClusteredLighting_ClearDecalStorage( candidate );
+	reject.reason = RENDERER_CLUSTER_DECAL_REJECT_NONE;
+	reject.sourceIndex = -1;
+	reject.viewIndex = -1;
+
+	if ( sourceCount < 0 ) {
+		R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_INVALID_ARGUMENT, -1, -1 );
+		return false;
+	}
+	if ( sourceCount > RENDERER_CLUSTER_DECAL_MAX_RECORDS ) {
+		R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_RECORD_CAPACITY, RENDERER_CLUSTER_DECAL_MAX_RECORDS, -1 );
+		return false;
+	}
+	if ( sourceCount > 0 && sources == NULL ) {
+		R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_INVALID_ARGUMENT, 0, -1 );
+		return false;
+	}
+	if ( rg_clusteredLightingFrame.gridCount <= 0
+			|| rg_clusteredLightingFrame.grids.Num() != rg_clusteredLightingFrame.gridCount
+			|| rg_clusteredLightingFrame.clusterCount <= 0
+			|| rg_clusteredLightingFrame.clusters.Num() != rg_clusteredLightingFrame.clusterCount ) {
+		R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_RESOURCE_UNAVAILABLE, -1, -1 );
+		return false;
+	}
+
+	candidate.generation = generation;
+	candidate.views.SetNum( rg_clusteredLightingFrame.gridCount, false );
+	for ( int gridIndex = 0; gridIndex < rg_clusteredLightingFrame.gridCount; ++gridIndex ) {
+		modernClusterDecalViewRecord_t &view = candidate.views[gridIndex];
+		memset( &view, 0, sizeof( view ) );
+		view.viewDef = rg_clusteredLightingFrame.grids[gridIndex].viewDef;
+		view.gridIndex = gridIndex;
+		view.firstCommandOrder = -1;
+		view.lastCommandOrder = -1;
+		view.gridHash = R_ModernClusteredLighting_DecalGridHash( rg_clusteredLightingFrame.grids[gridIndex] );
+		view.sourceOrderHash = MODERN_CLUSTER_DECAL_HASH_OFFSET;
+		R_ModernClusteredLighting_DecalHashU64( view.sourceOrderHash, view.gridHash );
+	}
+
+	int totalReferences = 0;
+	for ( int sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex ) {
+		const rendererClusteredDecalSource_t &source = sources[sourceIndex];
+		const int gridIndex = R_ModernClusteredLighting_ExactGridIndexForView( source.viewDef );
+		if ( gridIndex < 0 ) {
+			R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_RESOURCE_UNAVAILABLE, sourceIndex, -1 );
+			return false;
+		}
+		const modernClusterGridRecord_t &grid = rg_clusteredLightingFrame.grids[gridIndex];
+		modernClusterDecalViewRecord_t &view = candidate.views[gridIndex];
+		if ( source.generation != generation ) {
+			R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_STALE_GENERATION, sourceIndex, gridIndex );
+			return false;
+		}
+		if ( source.sourceSurface == NULL
+				|| source.materialStableId == RENDERER_CLUSTER_DECAL_INVALID_STABLE_ID
+				|| source.geometryStableId == RENDERER_CLUSTER_DECAL_INVALID_STABLE_ID
+				|| source.instanceStableId == RENDERER_CLUSTER_DECAL_INVALID_STABLE_ID ) {
+			R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_RESOURCE_UNAVAILABLE, sourceIndex, gridIndex );
+			return false;
+		}
+		if ( source.commandIndex < 0 || source.commandOrder < 0
+				|| ( view.recordCount > 0 && source.commandOrder <= view.lastCommandOrder ) ) {
+			R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_MALFORMED_ORDER, sourceIndex, gridIndex );
+			return false;
+		}
+		for ( int previousIndex = 0; previousIndex < candidate.records.Num(); ++previousIndex ) {
+			const modernClusterDecalRecord_t &previous = candidate.records[previousIndex];
+			if ( previous.gridIndex == gridIndex
+					&& ( previous.source.commandIndex == source.commandIndex
+						|| previous.source.sourceSurface == source.sourceSurface ) ) {
+				R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_MALFORMED_ORDER, sourceIndex, gridIndex );
+				return false;
+			}
+		}
+		if ( source.screenX1 < 0 || source.screenY1 < 0
+				|| source.screenX2 < source.screenX1 || source.screenY2 < source.screenY1
+				|| source.screenX2 >= grid.width || source.screenY2 >= grid.height ) {
+			R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_MALFORMED_RECT, sourceIndex, gridIndex );
+			return false;
+		}
+		if ( !std::isfinite( static_cast<double>( source.depthMin ) )
+				|| !std::isfinite( static_cast<double>( source.depthMax ) )
+				|| source.depthMin <= 0.0f || source.depthMax < source.depthMin ) {
+			R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_MALFORMED_DEPTH, sourceIndex, gridIndex );
+			return false;
+		}
+
+		modernClusterDecalRecord_t record;
+		memset( &record, 0, sizeof( record ) );
+		record.source = source;
+		record.gridIndex = gridIndex;
+		record.tileMinX = idMath::ClampInt( 0, grid.tileCountX - 1, ( source.screenX1 * grid.tileCountX ) / Max( 1, grid.width ) );
+		record.tileMaxX = idMath::ClampInt( 0, grid.tileCountX - 1, ( source.screenX2 * grid.tileCountX ) / Max( 1, grid.width ) );
+		record.tileMinY = idMath::ClampInt( 0, grid.tileCountY - 1, ( source.screenY1 * grid.tileCountY ) / Max( 1, grid.height ) );
+		record.tileMaxY = idMath::ClampInt( 0, grid.tileCountY - 1, ( source.screenY2 * grid.tileCountY ) / Max( 1, grid.height ) );
+		record.sliceMinZ = R_ModernClusteredLighting_DepthSliceForZ( grid, source.depthMin );
+		record.sliceMaxZ = R_ModernClusteredLighting_DepthSliceForZ( grid, source.depthMax );
+		const long long referenceCount =
+			static_cast<long long>( record.tileMaxX + 1 - record.tileMinX )
+			* static_cast<long long>( record.tileMaxY + 1 - record.tileMinY )
+			* static_cast<long long>( record.sliceMaxZ + 1 - record.sliceMinZ );
+		if ( referenceCount <= 0
+				|| referenceCount > RENDERER_CLUSTER_DECAL_MAX_REFERENCES
+				|| static_cast<long long>( totalReferences ) + referenceCount > RENDERER_CLUSTER_DECAL_MAX_REFERENCES ) {
+			R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_REFERENCE_CAPACITY, sourceIndex, gridIndex );
+			return false;
+		}
+		record.clusterReferenceCount = static_cast<int>( referenceCount );
+		record.hash = R_ModernClusteredLighting_DecalSourceHash( source );
+		candidate.records.Append( record );
+		totalReferences += record.clusterReferenceCount;
+
+		if ( view.recordCount == 0 ) {
+			view.firstCommandOrder = source.commandOrder;
+			candidate.viewCount++;
+		}
+		view.lastCommandOrder = source.commandOrder;
+		view.recordCount++;
+		view.clusterReferences += record.clusterReferenceCount;
+		R_ModernClusteredLighting_DecalHashU64( view.sourceOrderHash, record.hash );
+	}
+
+	candidate.clusters.SetNum( rg_clusteredLightingFrame.clusterCount, false );
+	if ( candidate.clusters.Num() > 0 ) {
+		memset( candidate.clusters.Ptr(), 0, sizeof( modernClusterDecalClusterRecord_t ) * candidate.clusters.Num() );
+	}
+	for ( int recordIndex = 0; recordIndex < candidate.records.Num(); ++recordIndex ) {
+		const modernClusterDecalRecord_t &record = candidate.records[recordIndex];
+		const modernClusterGridRecord_t &grid = rg_clusteredLightingFrame.grids[record.gridIndex];
+		for ( int z = record.sliceMinZ; z <= record.sliceMaxZ; ++z ) {
+			for ( int y = record.tileMinY; y <= record.tileMaxY; ++y ) {
+				for ( int x = record.tileMinX; x <= record.tileMaxX; ++x ) {
+					const int clusterIndex = R_ModernClusteredLighting_ClusterIndex( grid, x, y, z );
+					if ( clusterIndex < 0 || clusterIndex >= candidate.clusters.Num() ) {
+						R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_INTERNAL, recordIndex, record.gridIndex );
+						return false;
+					}
+					candidate.clusters[clusterIndex].referenceCount++;
+				}
+			}
+		}
+	}
+
+	int referenceOffset = 0;
+	for ( int clusterIndex = 0; clusterIndex < candidate.clusters.Num(); ++clusterIndex ) {
+		modernClusterDecalClusterRecord_t &cluster = candidate.clusters[clusterIndex];
+		cluster.firstReference = referenceOffset;
+		referenceOffset += cluster.referenceCount;
+		if ( referenceOffset > RENDERER_CLUSTER_DECAL_MAX_REFERENCES ) {
+			R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_REFERENCE_CAPACITY, -1, -1 );
+			return false;
+		}
+	}
+	if ( referenceOffset != totalReferences ) {
+		R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_INTERNAL, -1, -1 );
+		return false;
+	}
+	candidate.clusterReferences.SetNum( referenceOffset, false );
+	for ( int recordIndex = 0; recordIndex < candidate.records.Num(); ++recordIndex ) {
+		const modernClusterDecalRecord_t &record = candidate.records[recordIndex];
+		const modernClusterGridRecord_t &grid = rg_clusteredLightingFrame.grids[record.gridIndex];
+		for ( int z = record.sliceMinZ; z <= record.sliceMaxZ; ++z ) {
+			for ( int y = record.tileMinY; y <= record.tileMaxY; ++y ) {
+				for ( int x = record.tileMinX; x <= record.tileMaxX; ++x ) {
+					const int clusterIndex = R_ModernClusteredLighting_ClusterIndex( grid, x, y, z );
+					modernClusterDecalClusterRecord_t &cluster = candidate.clusters[clusterIndex];
+					const int destination = cluster.firstReference + cluster.writeCount;
+					if ( cluster.writeCount >= cluster.referenceCount
+							|| destination < 0 || destination >= candidate.clusterReferences.Num() ) {
+						R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_INTERNAL, recordIndex, record.gridIndex );
+						return false;
+					}
+					candidate.clusterReferences[destination] = recordIndex;
+					cluster.writeCount++;
+				}
+			}
+		}
+	}
+	for ( int clusterIndex = 0; clusterIndex < candidate.clusters.Num(); ++clusterIndex ) {
+		if ( candidate.clusters[clusterIndex].writeCount != candidate.clusters[clusterIndex].referenceCount ) {
+			R_ModernClusteredLighting_SetDecalReject( reject, RENDERER_CLUSTER_DECAL_REJECT_INTERNAL, -1, -1 );
+			return false;
+		}
+	}
+
+	candidate.sourceOrderHash = MODERN_CLUSTER_DECAL_HASH_OFFSET;
+	R_ModernClusteredLighting_DecalHashU32( candidate.sourceOrderHash, generation );
+	for ( int viewIndex = 0; viewIndex < candidate.views.Num(); ++viewIndex ) {
+		modernClusterDecalViewRecord_t &view = candidate.views[viewIndex];
+		if ( view.recordCount <= 0 ) {
+			continue;
+		}
+		R_ModernClusteredLighting_DecalHashInt( view.sourceOrderHash, view.recordCount );
+		R_ModernClusteredLighting_DecalHashInt( view.sourceOrderHash, view.firstCommandOrder );
+		R_ModernClusteredLighting_DecalHashInt( view.sourceOrderHash, view.lastCommandOrder );
+		R_ModernClusteredLighting_DecalHashInt( candidate.sourceOrderHash, viewIndex );
+		R_ModernClusteredLighting_DecalHashU64( candidate.sourceOrderHash, view.sourceOrderHash );
+	}
+	candidate.valid = true;
+	return true;
+}
+
+const char *R_ModernClusteredLighting_DecalRejectName( rendererClusteredDecalReject_t reject ) {
+	switch ( reject ) {
+	case RENDERER_CLUSTER_DECAL_REJECT_NONE: return "none";
+	case RENDERER_CLUSTER_DECAL_REJECT_NOT_PREPARED: return "not-prepared";
+	case RENDERER_CLUSTER_DECAL_REJECT_INVALID_ARGUMENT: return "invalid-argument";
+	case RENDERER_CLUSTER_DECAL_REJECT_RESOURCE_UNAVAILABLE: return "resource-unavailable";
+	case RENDERER_CLUSTER_DECAL_REJECT_RECORD_CAPACITY: return "record-capacity";
+	case RENDERER_CLUSTER_DECAL_REJECT_REFERENCE_CAPACITY: return "reference-capacity";
+	case RENDERER_CLUSTER_DECAL_REJECT_STALE_GENERATION: return "stale-generation";
+	case RENDERER_CLUSTER_DECAL_REJECT_STALE_IDENTITY: return "stale-identity";
+	case RENDERER_CLUSTER_DECAL_REJECT_MALFORMED_RECT: return "malformed-rect";
+	case RENDERER_CLUSTER_DECAL_REJECT_MALFORMED_DEPTH: return "malformed-depth";
+	case RENDERER_CLUSTER_DECAL_REJECT_MALFORMED_ORDER: return "malformed-order";
+	case RENDERER_CLUSTER_DECAL_REJECT_VIEW_INCOMPLETE: return "view-incomplete";
+	case RENDERER_CLUSTER_DECAL_REJECT_ORDER_MISMATCH: return "order-mismatch";
+	case RENDERER_CLUSTER_DECAL_REJECT_HASH_MISMATCH: return "hash-mismatch";
+	case RENDERER_CLUSTER_DECAL_REJECT_INTERNAL: return "internal";
+	default: return "unknown";
+	}
+}
+
+static bool R_ModernClusteredLighting_RejectDecals( rendererClusteredDecalReject_t reason,
+		int sourceIndex, int viewIndex, bool seal, int submittedRecords, unsigned int generation ) {
+	R_ModernClusteredLighting_ClearDecalStorage( rg_clusteredDecalFrame );
+	memset( &rg_clusteredDecalStats, 0, sizeof( rg_clusteredDecalStats ) );
+	rg_clusteredDecalStats.generation = generation;
+	rg_clusteredDecalStats.submittedRecords = Max( 0, submittedRecords );
+	rg_clusteredDecalStats.recordCapacity = RENDERER_CLUSTER_DECAL_MAX_RECORDS;
+	rg_clusteredDecalStats.referenceCapacity = RENDERER_CLUSTER_DECAL_MAX_REFERENCES;
+	rg_clusteredDecalStats.prepareRejects = seal ? 0 : 1;
+	rg_clusteredDecalStats.sealRejects = seal ? 1 : 0;
+	rg_clusteredDecalStats.lastReject = reason;
+	rg_clusteredDecalStats.lastRejectSource = sourceIndex;
+	rg_clusteredDecalStats.lastRejectView = viewIndex;
+	idStr::snPrintf( rg_clusteredDecalStats.status, sizeof( rg_clusteredDecalStats.status ),
+		"%s-rejected:%s", seal ? "seal" : "prepare", R_ModernClusteredLighting_DecalRejectName( reason ) );
+	return false;
+}
+
+bool R_ModernClusteredLighting_RejectDecalsForFrame( rendererClusteredDecalReject_t reason,
+		int sourceIndex, int submittedRecords, unsigned int generation ) {
+	if ( reason == RENDERER_CLUSTER_DECAL_REJECT_NONE ) {
+		reason = RENDERER_CLUSTER_DECAL_REJECT_RESOURCE_UNAVAILABLE;
+	}
+	return R_ModernClusteredLighting_RejectDecals(
+		reason, sourceIndex, -1, false, submittedRecords, generation );
+}
+
+bool R_ModernClusteredLighting_PrepareDecals( const rendererClusteredDecalSource_t *sources,
+		int sourceCount, unsigned int generation ) {
+	R_ModernClusteredLighting_ResetDecalTransaction();
+	modernClusterDecalFrameData_t &candidate = rg_clusteredDecalPrepareScratch;
+	modernClusterDecalRejectInfo_t reject;
+	if ( !R_ModernClusteredLighting_BuildDecalCandidate( sources, sourceCount, generation, candidate, reject ) ) {
+		return R_ModernClusteredLighting_RejectDecals( reject.reason, reject.sourceIndex,
+			reject.viewIndex, false, sourceCount, generation );
+	}
+	rg_clusteredDecalStats.prepared = true;
+	rg_clusteredDecalStats.csrReady = true;
+	rg_clusteredDecalStats.generation = generation;
+	rg_clusteredDecalStats.submittedRecords = sourceCount;
+	rg_clusteredDecalStats.stagedRecords = candidate.records.Num();
+	rg_clusteredDecalStats.viewCount = candidate.viewCount;
+	rg_clusteredDecalStats.clusterCount = candidate.clusters.Num();
+	rg_clusteredDecalStats.clusterReferences = candidate.clusterReferences.Num();
+	rg_clusteredDecalStats.sourceOrderHash = candidate.sourceOrderHash;
+	rg_clusteredDecalFrame.generation = candidate.generation;
+	rg_clusteredDecalFrame.sourceOrderHash = candidate.sourceOrderHash;
+	rg_clusteredDecalFrame.viewCount = candidate.viewCount;
+	rg_clusteredDecalFrame.valid = candidate.valid;
+	rg_clusteredDecalFrame.records.Swap( candidate.records );
+	rg_clusteredDecalFrame.clusters.Swap( candidate.clusters );
+	rg_clusteredDecalFrame.clusterReferences.Swap( candidate.clusterReferences );
+	rg_clusteredDecalFrame.views.Swap( candidate.views );
+	idStr::Copynz( rg_clusteredDecalStats.status, "prepared", sizeof( rg_clusteredDecalStats.status ) );
+	return true;
+}
+
+static rendererClusteredDecalReject_t R_ModernClusteredLighting_DecalRecordMismatch(
+		const modernClusterDecalRecord_t &prepared, const modernClusterDecalRecord_t &sealed ) {
+	if ( prepared.source.generation != sealed.source.generation ) {
+		return RENDERER_CLUSTER_DECAL_REJECT_STALE_GENERATION;
+	}
+	if ( prepared.source.viewDef != sealed.source.viewDef
+			|| prepared.source.sourceSurface != sealed.source.sourceSurface
+			|| prepared.source.materialStableId != sealed.source.materialStableId
+			|| prepared.source.geometryStableId != sealed.source.geometryStableId
+			|| prepared.source.instanceStableId != sealed.source.instanceStableId ) {
+		return RENDERER_CLUSTER_DECAL_REJECT_STALE_IDENTITY;
+	}
+	if ( prepared.source.commandIndex != sealed.source.commandIndex
+			|| prepared.source.commandOrder != sealed.source.commandOrder ) {
+		return RENDERER_CLUSTER_DECAL_REJECT_ORDER_MISMATCH;
+	}
+	return RENDERER_CLUSTER_DECAL_REJECT_HASH_MISMATCH;
+}
+
+bool R_ModernClusteredLighting_SealDecals( const rendererClusteredDecalSource_t *sources,
+		int sourceCount, unsigned int generation ) {
+	if ( !rg_clusteredDecalStats.prepared || !rg_clusteredDecalFrame.valid ) {
+		return R_ModernClusteredLighting_RejectDecals( RENDERER_CLUSTER_DECAL_REJECT_NOT_PREPARED,
+			-1, -1, true, sourceCount, generation );
+	}
+	if ( generation != rg_clusteredDecalFrame.generation ) {
+		return R_ModernClusteredLighting_RejectDecals( RENDERER_CLUSTER_DECAL_REJECT_STALE_GENERATION,
+			-1, -1, true, sourceCount, generation );
+	}
+
+	modernClusterDecalFrameData_t &candidate = rg_clusteredDecalSealScratch;
+	modernClusterDecalRejectInfo_t reject;
+	if ( !R_ModernClusteredLighting_BuildDecalCandidate( sources, sourceCount, generation, candidate, reject ) ) {
+		return R_ModernClusteredLighting_RejectDecals( reject.reason, reject.sourceIndex,
+			reject.viewIndex, true, sourceCount, generation );
+	}
+	if ( candidate.records.Num() != rg_clusteredDecalFrame.records.Num()
+			|| candidate.views.Num() != rg_clusteredDecalFrame.views.Num() ) {
+		return R_ModernClusteredLighting_RejectDecals( RENDERER_CLUSTER_DECAL_REJECT_VIEW_INCOMPLETE,
+			-1, -1, true, sourceCount, generation );
+	}
+	// Compare exact source identity before aggregate view hashes so stale
+	// pointer/resource identity receives a useful diagnostic rather than being
+	// collapsed into a generic hash mismatch.
+	for ( int recordIndex = 0; recordIndex < candidate.records.Num(); ++recordIndex ) {
+		const modernClusterDecalRecord_t &prepared = rg_clusteredDecalFrame.records[recordIndex];
+		const modernClusterDecalRecord_t &sealed = candidate.records[recordIndex];
+		if ( !R_ModernClusteredLighting_DecalSourceIdentityEqual( prepared.source, sealed.source )
+				|| prepared.gridIndex != sealed.gridIndex || prepared.hash != sealed.hash ) {
+			return R_ModernClusteredLighting_RejectDecals(
+				R_ModernClusteredLighting_DecalRecordMismatch( prepared, sealed ),
+				recordIndex, prepared.gridIndex, true, sourceCount, generation );
+		}
+	}
+	for ( int viewIndex = 0; viewIndex < candidate.views.Num(); ++viewIndex ) {
+		const modernClusterDecalViewRecord_t &prepared = rg_clusteredDecalFrame.views[viewIndex];
+		const modernClusterDecalViewRecord_t &sealed = candidate.views[viewIndex];
+		if ( prepared.viewDef != sealed.viewDef || prepared.gridIndex != sealed.gridIndex
+				|| prepared.gridHash != sealed.gridHash ) {
+			return R_ModernClusteredLighting_RejectDecals( RENDERER_CLUSTER_DECAL_REJECT_STALE_IDENTITY,
+				-1, viewIndex, true, sourceCount, generation );
+		}
+		if ( prepared.recordCount != sealed.recordCount ) {
+			return R_ModernClusteredLighting_RejectDecals( RENDERER_CLUSTER_DECAL_REJECT_VIEW_INCOMPLETE,
+				-1, viewIndex, true, sourceCount, generation );
+		}
+		if ( prepared.firstCommandOrder != sealed.firstCommandOrder
+				|| prepared.lastCommandOrder != sealed.lastCommandOrder ) {
+			return R_ModernClusteredLighting_RejectDecals( RENDERER_CLUSTER_DECAL_REJECT_ORDER_MISMATCH,
+				-1, viewIndex, true, sourceCount, generation );
+		}
+		if ( prepared.sourceOrderHash != sealed.sourceOrderHash
+				|| prepared.clusterReferences != sealed.clusterReferences ) {
+			return R_ModernClusteredLighting_RejectDecals( RENDERER_CLUSTER_DECAL_REJECT_HASH_MISMATCH,
+				-1, viewIndex, true, sourceCount, generation );
+		}
+	}
+	if ( candidate.clusters.Num() != rg_clusteredDecalFrame.clusters.Num()
+			|| candidate.clusterReferences.Num() != rg_clusteredDecalFrame.clusterReferences.Num()
+			|| candidate.sourceOrderHash != rg_clusteredDecalFrame.sourceOrderHash ) {
+		return R_ModernClusteredLighting_RejectDecals( RENDERER_CLUSTER_DECAL_REJECT_HASH_MISMATCH,
+			-1, -1, true, sourceCount, generation );
+	}
+	for ( int clusterIndex = 0; clusterIndex < candidate.clusters.Num(); ++clusterIndex ) {
+		const modernClusterDecalClusterRecord_t &prepared = rg_clusteredDecalFrame.clusters[clusterIndex];
+		const modernClusterDecalClusterRecord_t &sealed = candidate.clusters[clusterIndex];
+		if ( prepared.firstReference != sealed.firstReference
+				|| prepared.referenceCount != sealed.referenceCount
+				|| prepared.writeCount != sealed.writeCount ) {
+			return R_ModernClusteredLighting_RejectDecals( RENDERER_CLUSTER_DECAL_REJECT_HASH_MISMATCH,
+				-1, -1, true, sourceCount, generation );
+		}
+	}
+	for ( int referenceIndex = 0; referenceIndex < candidate.clusterReferences.Num(); ++referenceIndex ) {
+		if ( candidate.clusterReferences[referenceIndex] != rg_clusteredDecalFrame.clusterReferences[referenceIndex] ) {
+			return R_ModernClusteredLighting_RejectDecals( RENDERER_CLUSTER_DECAL_REJECT_HASH_MISMATCH,
+				-1, -1, true, sourceCount, generation );
+		}
+	}
+
+	int ownedViews = 0;
+	for ( int viewIndex = 0; viewIndex < rg_clusteredDecalFrame.views.Num(); ++viewIndex ) {
+		modernClusterDecalViewRecord_t &view = rg_clusteredDecalFrame.views[viewIndex];
+		view.owned = view.recordCount > 0;
+		if ( view.owned ) {
+			ownedViews++;
+		}
+	}
+	rg_clusteredDecalStats.sealed = true;
+	rg_clusteredDecalStats.ownershipReady = true;
+	rg_clusteredDecalStats.publishedRecords = rg_clusteredDecalFrame.records.Num();
+	rg_clusteredDecalStats.ownedViews = ownedViews;
+	idStr::Copynz( rg_clusteredDecalStats.status, "sealed", sizeof( rg_clusteredDecalStats.status ) );
+	return true;
+}
+
+const rendererClusteredDecalStats_t &R_ModernClusteredLighting_DecalStats( void ) {
+	return rg_clusteredDecalStats;
+}
+
+bool R_ModernClusteredLighting_DecalViewStats( const viewDef_t *viewDef,
+		rendererClusteredDecalViewStats_t &stats ) {
+	memset( &stats, 0, sizeof( stats ) );
+	stats.viewDef = viewDef;
+	stats.firstCommandOrder = -1;
+	stats.lastCommandOrder = -1;
+	if ( !rg_clusteredDecalStats.prepared || !rg_clusteredDecalFrame.valid || viewDef == NULL ) {
+		return false;
+	}
+	for ( int viewIndex = 0; viewIndex < rg_clusteredDecalFrame.views.Num(); ++viewIndex ) {
+		const modernClusterDecalViewRecord_t &view = rg_clusteredDecalFrame.views[viewIndex];
+		if ( view.viewDef != viewDef ) {
+			continue;
+		}
+		stats.prepared = true;
+		stats.owned = rg_clusteredDecalStats.ownershipReady && view.owned;
+		stats.recordCount = view.recordCount;
+		stats.firstCommandOrder = view.firstCommandOrder;
+		stats.lastCommandOrder = view.lastCommandOrder;
+		stats.clusterReferences = view.clusterReferences;
+		stats.sourceOrderHash = view.sourceOrderHash;
+		return true;
+	}
+	return false;
+}
+
+bool R_ModernClusteredLighting_DecalOwnsSurface( const viewDef_t *viewDef, const void *sourceSurface ) {
+	if ( !r_rendererModernQuality.GetBool()
+			|| !r_rendererClusteredDecals.GetBool()
+			|| r_skipDecals.GetBool()
+			|| r_showOverDraw.GetInteger() != 0
+			|| r_rendererSharedWorldAmbient.GetBool()
+			|| !rg_clusteredDecalStats.ownershipReady
+			|| rg_clusteredDecalStats.generation != R_ModernClusteredLighting_CurrentDecalGeneration()
+			|| viewDef == NULL || sourceSurface == NULL ) {
+		return false;
+	}
+	const int viewIndex = R_ModernClusteredLighting_ExactGridIndexForView( viewDef );
+	if ( viewIndex < 0 || viewIndex >= rg_clusteredDecalFrame.views.Num()
+			|| !rg_clusteredDecalFrame.views[viewIndex].owned ) {
+		return false;
+	}
+	for ( int recordIndex = 0; recordIndex < rg_clusteredDecalFrame.records.Num(); ++recordIndex ) {
+		const modernClusterDecalRecord_t &record = rg_clusteredDecalFrame.records[recordIndex];
+		if ( record.gridIndex == viewIndex && record.source.sourceSurface == sourceSurface ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool R_ModernClusteredLighting_DecalOwnsCommand( const viewDef_t *viewDef, int commandIndex ) {
+	if ( !r_rendererModernQuality.GetBool()
+			|| !r_rendererClusteredDecals.GetBool()
+			|| r_skipDecals.GetBool()
+			|| r_showOverDraw.GetInteger() != 0
+			|| r_rendererSharedWorldAmbient.GetBool()
+			|| !rg_clusteredDecalStats.ownershipReady
+			|| rg_clusteredDecalStats.generation != R_ModernClusteredLighting_CurrentDecalGeneration()
+			|| viewDef == NULL || commandIndex < 0 ) {
+		return false;
+	}
+	const int viewIndex = R_ModernClusteredLighting_ExactGridIndexForView( viewDef );
+	if ( viewIndex < 0 || viewIndex >= rg_clusteredDecalFrame.views.Num()
+			|| !rg_clusteredDecalFrame.views[viewIndex].owned ) {
+		return false;
+	}
+	for ( int recordIndex = 0; recordIndex < rg_clusteredDecalFrame.records.Num(); ++recordIndex ) {
+		const modernClusterDecalRecord_t &record = rg_clusteredDecalFrame.records[recordIndex];
+		if ( record.gridIndex == viewIndex && record.source.commandIndex == commandIndex ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+int R_ModernClusteredLighting_DecalSealedCommandForSurface( const viewDef_t *viewDef,
+		const void *sourceSurface, bool &duplicate ) {
+	duplicate = false;
+	if ( !R_ModernClusteredLighting_DecalOwnsSurface( viewDef, sourceSurface ) ) {
+		return -1;
+	}
+	const int viewIndex = R_ModernClusteredLighting_ExactGridIndexForView( viewDef );
+	int commandIndex = -1;
+	for ( int recordIndex = 0; recordIndex < rg_clusteredDecalFrame.records.Num(); ++recordIndex ) {
+		const modernClusterDecalRecord_t &record = rg_clusteredDecalFrame.records[recordIndex];
+		if ( record.gridIndex != viewIndex || record.source.sourceSurface != sourceSurface ) {
+			continue;
+		}
+		if ( commandIndex >= 0 ) {
+			duplicate = true;
+			return -1;
+		}
+		commandIndex = record.source.commandIndex;
+	}
+	return commandIndex;
 }
 
 static void R_ModernClusteredLighting_CountClusterReference( modernClusterRecord_t &cluster, rendererClusteredLightingStats_t &stats ) {
@@ -988,13 +1815,31 @@ static void R_ModernClusteredLighting_FillClusterReference( modernClusterRecord_
 	cluster.writeLightCount++;
 }
 
-static void R_ModernClusteredLighting_BinLight( const modernClusterGridRecord_t &grid, int lightIndex, const modernClusterLightRecord_t &light, rendererClusteredLightingStats_t &stats, bool fillReferences ) {
-	const int tileMinX = idMath::ClampInt( 0, grid.tileCountX - 1, ( light.scissor.x1 * grid.tileCountX ) / Max( 1, grid.width ) );
-	const int tileMaxX = idMath::ClampInt( 0, grid.tileCountX - 1, ( light.scissor.x2 * grid.tileCountX ) / Max( 1, grid.width ) );
-	const int tileMinY = idMath::ClampInt( 0, grid.tileCountY - 1, ( light.scissor.y1 * grid.tileCountY ) / Max( 1, grid.height ) );
-	const int tileMaxY = idMath::ClampInt( 0, grid.tileCountY - 1, ( light.scissor.y2 * grid.tileCountY ) / Max( 1, grid.height ) );
-	const int sliceMinZ = light.fullDepthRange ? 0 : R_ModernClusteredLighting_DepthSliceForZ( grid, light.depthMin );
-	const int sliceMaxZ = light.fullDepthRange ? grid.sliceCountZ - 1 : R_ModernClusteredLighting_DepthSliceForZ( grid, light.depthMax );
+static void R_ModernClusteredLighting_BinLight( const modernClusterGridRecord_t &grid, int lightIndex, modernClusterLightRecord_t &light, rendererClusteredLightingStats_t &stats, bool fillReferences ) {
+	int tileMinX, tileMaxX, tileMinY, tileMaxY, sliceMinZ, sliceMaxZ;
+	if ( fillReferences ) {
+		// The counting pass (which always runs first on this CPU path) already
+		// derived these bounds from the same immutable grid/light inputs.
+		tileMinX = light.binTileMinX;
+		tileMaxX = light.binTileMaxX;
+		tileMinY = light.binTileMinY;
+		tileMaxY = light.binTileMaxY;
+		sliceMinZ = light.binSliceMinZ;
+		sliceMaxZ = light.binSliceMaxZ;
+	} else {
+		tileMinX = idMath::ClampInt( 0, grid.tileCountX - 1, ( light.scissor.x1 * grid.tileCountX ) / Max( 1, grid.width ) );
+		tileMaxX = idMath::ClampInt( 0, grid.tileCountX - 1, ( light.scissor.x2 * grid.tileCountX ) / Max( 1, grid.width ) );
+		tileMinY = idMath::ClampInt( 0, grid.tileCountY - 1, ( light.scissor.y1 * grid.tileCountY ) / Max( 1, grid.height ) );
+		tileMaxY = idMath::ClampInt( 0, grid.tileCountY - 1, ( light.scissor.y2 * grid.tileCountY ) / Max( 1, grid.height ) );
+		sliceMinZ = light.fullDepthRange ? 0 : R_ModernClusteredLighting_DepthSliceForZ( grid, light.depthMin );
+		sliceMaxZ = light.fullDepthRange ? grid.sliceCountZ - 1 : R_ModernClusteredLighting_DepthSliceForZ( grid, light.depthMax );
+		light.binTileMinX = tileMinX;
+		light.binTileMaxX = tileMaxX;
+		light.binTileMinY = tileMinY;
+		light.binTileMaxY = tileMaxY;
+		light.binSliceMinZ = sliceMinZ;
+		light.binSliceMaxZ = sliceMaxZ;
+	}
 
 	for ( int z = sliceMinZ; z <= sliceMaxZ; ++z ) {
 		for ( int y = tileMinY; y <= tileMaxY; ++y ) {
@@ -1101,7 +1946,7 @@ static void R_ModernClusteredLighting_LightProjectionForStage( const viewLight_t
 
 	lightProject[0] = vLight->lightProject[0];
 	lightProject[1] = vLight->lightProject[1];
-	lightProject[2] = vLight->lightProject[3];
+	lightProject[2] = vLight->lightProject[2];
 	if ( lightStage == NULL || !lightStage->texture.hasMatrix || vLight->shaderRegisters == NULL ) {
 		return;
 	}
@@ -1167,10 +2012,11 @@ static void R_ModernClusteredLighting_FillDescriptor( modernClusterLightRecord_t
 	descriptor.depthRange[1] = record.depthMax;
 	descriptor.depthRange[2] = grid.nearZ;
 	descriptor.depthRange[3] = grid.farZ;
-	descriptor.falloff[0] = record.falloffScale;
-	descriptor.falloff[1] = record.falloffBias;
-	descriptor.falloff[2] = record.fullDepthRange ? 1.0f : 0.0f;
-	descriptor.falloff[3] = 0.0f;
+	// The shader dots this against a cluster-space position. Radius/bias
+	// metadata is not a plane: using it here extinguished one side of a view.
+	// Quake 4's four-plane order is S, T, Q, falloff.
+	R_ModernClusteredLighting_ViewPlaneForLightProject( grid.viewDef, vLight->lightProject[3], descriptor.falloff );
+	R_ModernClusteredLighting_CopyPlane( descriptor.falloff, record.viewLightProject[3] );
 	idPlane stageLightProject[3];
 	R_ModernClusteredLighting_LightProjectionForStage( vLight, lightStage, stageLightProject );
 	R_ModernClusteredLighting_ViewPlaneForLightProject( grid.viewDef, stageLightProject[0], descriptor.projectS );
@@ -1178,7 +2024,7 @@ static void R_ModernClusteredLighting_FillDescriptor( modernClusterLightRecord_t
 	R_ModernClusteredLighting_ViewPlaneForLightProject( grid.viewDef, stageLightProject[2], descriptor.projectQ );
 	R_ModernClusteredLighting_CopyPlane( descriptor.projectS, record.viewLightProject[0] );
 	R_ModernClusteredLighting_CopyPlane( descriptor.projectT, record.viewLightProject[1] );
-	R_ModernClusteredLighting_CopyPlane( descriptor.projectQ, record.viewLightProject[3] );
+	R_ModernClusteredLighting_CopyPlane( descriptor.projectQ, record.viewLightProject[2] );
 
 	const idMaterial *lightShader = R_ModernClusteredLighting_LightShader( vLight );
 	const idImage *projectionImage = R_ModernClusteredLighting_ProjectionImageForStage( vLight, lightStage );
@@ -1190,6 +2036,19 @@ static void R_ModernClusteredLighting_FillDescriptor( modernClusterLightRecord_t
 	descriptor.projectionRepeat = projectionImage != NULL ? projectionImage->GetRepeat() : TR_CLAMP;
 	descriptor.falloffFilter = falloffImage != NULL ? falloffImage->GetFilter() : TF_DEFAULT;
 	descriptor.falloffRepeat = falloffImage != NULL ? falloffImage->GetRepeat() : TR_CLAMP;
+
+	// Pack this light's own falloff and projection images into the shared atlas
+	// so the clustered shader can sample them per record instead of needing a
+	// texture pair bound per light. Both must land, or the light is not
+	// shadeable from the atlas and stays on the ARB2 bridge.
+	const modernLightAtlasReject_t falloffReject =
+		R_ModernLightImageAtlas_Acquire( falloffImage, descriptor.falloffAtlasRect );
+	const modernLightAtlasReject_t projectionReject =
+		R_ModernLightImageAtlas_Acquire( projectionImage, descriptor.projectionAtlasRect );
+	descriptor.atlasReady =
+		falloffReject == MODERN_LIGHT_ATLAS_REJECT_NONE &&
+		projectionReject == MODERN_LIGHT_ATLAS_REJECT_NONE;
+
 	idStr::Copynz( descriptor.debugName, record.debugName, sizeof( descriptor.debugName ) );
 }
 
@@ -1212,6 +2071,15 @@ static bool R_ModernClusteredLighting_AppendLightRecord( modernClusterGridRecord
 	record.color = lightColor;
 	record.radius = R_ModernClusteredLighting_LightRadius( vLight );
 	record.scissor = scissor;
+	// Scissor is an optimization, not part of the authored light function.
+	// Match native interactions when it is disabled (including tiled captures).
+	// The descriptor and CPU/compute bins must agree, otherwise the shader
+	// still clips light even though the native path no longer does.
+	if ( !r_useScissor.GetBool() ) {
+		record.scissor.x1 = record.scissor.y1 = 0;
+		record.scissor.x2 = static_cast<short>( grid.width - 1 );
+		record.scissor.y2 = static_cast<short>( grid.height - 1 );
+	}
 	R_ModernClusteredLighting_CameraPoint( grid.viewDef, record.worldOrigin, record.cameraOrigin );
 	record.fullDepthRange = type == RENDERER_MODERN_LIGHT_FOG || type == RENDERER_MODERN_LIGHT_AMBIENT || type == RENDERER_MODERN_LIGHT_BLEND || type == RENDERER_MODERN_LIGHT_SPECIAL;
 	// cull on the raw extent only when the light is entirely behind the near plane; lights beyond
@@ -1241,12 +2109,19 @@ static bool R_ModernClusteredLighting_AppendLightRecord( modernClusterGridRecord
 		} else if ( !R_ModernClusteredLighting_FormatDebugString( record.debugName, sizeof( record.debugName ), "%s:%d:%s", R_ModernClusteredLighting_TypeName( record.type ), record.lightDefIndex, shaderName != NULL ? shaderName : "<null>" ) ) {
 			R_ModernClusteredLighting_RecordDebugStringTruncation( stats, "cluster light debugName" );
 		}
-	} else if ( stageIndex >= 0 ) {
-		if ( !R_ModernClusteredLighting_FormatDebugString( record.debugName, sizeof( record.debugName ), "%s:%d:s%d", R_ModernClusteredLighting_TypeName( record.type ), record.lightDefIndex, stageIndex ) ) {
-			R_ModernClusteredLighting_RecordDebugStringTruncation( stats, "cluster stage light shortName" );
+	} else if ( r_shadowMapReport.GetInteger() >= 2 ) {
+		// The only consumer of debugName outside the metrics/clusterDebug overlays
+		// is the shadow-map join report (also gated on r_shadowMapReport >= 2), and
+		// it substitutes "<unnamed>" for an empty name. When no diagnostic wants
+		// names, skip the per-record vsnPrintf entirely; debugName stays empty from
+		// the record memset.
+		if ( stageIndex >= 0 ) {
+			if ( !R_ModernClusteredLighting_FormatDebugString( record.debugName, sizeof( record.debugName ), "%s:%d:s%d", R_ModernClusteredLighting_TypeName( record.type ), record.lightDefIndex, stageIndex ) ) {
+				R_ModernClusteredLighting_RecordDebugStringTruncation( stats, "cluster stage light shortName" );
+			}
+		} else if ( !R_ModernClusteredLighting_FormatDebugString( record.debugName, sizeof( record.debugName ), "%s:%d", R_ModernClusteredLighting_TypeName( record.type ), record.lightDefIndex ) ) {
+			R_ModernClusteredLighting_RecordDebugStringTruncation( stats, "cluster light shortName" );
 		}
-	} else if ( !R_ModernClusteredLighting_FormatDebugString( record.debugName, sizeof( record.debugName ), "%s:%d", R_ModernClusteredLighting_TypeName( record.type ), record.lightDefIndex ) ) {
-		R_ModernClusteredLighting_RecordDebugStringTruncation( stats, "cluster light shortName" );
 	}
 	R_ModernClusteredLighting_FillDescriptor( record, grid, vLight, lightStage );
 
@@ -1259,6 +2134,9 @@ static bool R_ModernClusteredLighting_AppendLightRecord( modernClusterGridRecord
 
 static bool R_ModernClusteredLighting_AddLight( modernClusterGridRecord_t &grid, const viewLight_t *vLight, rendererClusteredLightingStats_t &stats ) {
 	if ( vLight == NULL ) {
+		return false;
+	}
+	if ( R_ModernClusteredLighting_IsSpecularProbe( vLight ) ) {
 		return false;
 	}
 	if ( !R_ModernClusteredLighting_LightAreaVisible( grid.viewDef, vLight ) ) {
@@ -1295,6 +2173,260 @@ static bool R_ModernClusteredLighting_AddLight( modernClusterGridRecord_t &grid,
 	}
 
 	return R_ModernClusteredLighting_AppendLightRecord( grid, vLight, scissor, type, NULL, -1, R_ModernClusteredLighting_LightColor( vLight ), stats );
+}
+
+static bool R_ModernClusteredLighting_FiniteVec3( const idVec3 &value ) {
+	return std::isfinite( value.x ) && std::isfinite( value.y )
+		&& std::isfinite( value.z );
+}
+
+static bool R_ModernClusteredLighting_NormalizeProbeAxis( idVec3 &axis ) {
+	if ( !R_ModernClusteredLighting_FiniteVec3( axis ) ) {
+		return false;
+	}
+	const float lengthSquared = axis * axis;
+	if ( !std::isfinite( lengthSquared ) || lengthSquared <= 0.000001f ) {
+		return false;
+	}
+	axis *= 1.0f / std::sqrt( lengthSquared );
+	return R_ModernClusteredLighting_FiniteVec3( axis );
+}
+
+static void R_ModernClusteredLighting_ProbeAxisInView( const viewDef_t *viewDef,
+		const idVec3 &worldAxis, idVec3 &viewAxis ) {
+	if ( viewDef == NULL ) {
+		viewAxis = worldAxis;
+		return;
+	}
+	viewAxis.x = worldAxis * viewDef->renderView.viewaxis[1];
+	viewAxis.y = worldAxis * viewDef->renderView.viewaxis[2];
+	viewAxis.z = worldAxis * viewDef->renderView.viewaxis[0];
+}
+
+static unsigned int R_ModernClusteredLighting_ProbeGenerationExact( std::uint64_t generation ) {
+	unsigned int exact = static_cast<unsigned int>( generation & 0x00ffffffull );
+	return exact != 0 ? exact : 1u;
+}
+
+static unsigned int R_ModernClusteredLighting_PublishedProbeFrameGeneration(
+		bool recordsComplete, int uploadedRecords, int totalRecords,
+		bool atlasReady, bool atlasFrameReady, std::uint64_t frameGeneration ) {
+	if ( !recordsComplete || totalRecords <= 0 || uploadedRecords != totalRecords
+			|| !atlasReady || !atlasFrameReady || frameGeneration == 0 ) {
+		return 0u;
+	}
+	return R_ModernClusteredLighting_ProbeGenerationExact( frameGeneration );
+}
+
+static bool R_ModernClusteredLighting_AppendSpecularProbe( modernClusterGridRecord_t &grid,
+		const viewLight_t *vLight, rendererClusteredLightingStats_t &stats,
+		rendererProbeAtlasAcquire_t acquire = R_ModernClusteredLighting_AcquireProbeAtlas ) {
+	if ( vLight == NULL || !R_ModernClusteredLighting_IsSpecularProbe( vLight ) ) {
+		return false;
+	}
+	if ( !R_ModernClusteredLighting_LightAreaVisible( grid.viewDef, vLight ) ) {
+		return false;
+	}
+	idScreenRect scissor = vLight->scissorRect;
+	if ( scissor.IsEmpty() ) {
+		return false;
+	}
+	R_ModernClusteredLighting_ClampRectToView( scissor, grid.viewDef );
+	if ( scissor.IsEmpty() ) {
+		return false;
+	}
+	if ( rg_clusteredLightingFrame.probeCount >= RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS ) {
+		stats.probeOverflow++;
+		rg_clusteredLightingFrame.probeSetComplete = false;
+		return false;
+	}
+
+	const idMaterial *material = R_ModernClusteredLighting_ResolvedLightShader( vLight );
+	if ( material == NULL || !material->HasSpecularProbe() ) {
+		stats.probeRejectedMaterial++;
+		rg_clusteredLightingFrame.probeSetComplete = false;
+		return false;
+	}
+	const specularProbeMaterialInfo_t &info = material->GetSpecularProbeInfo();
+	bool materialValid = info.enabled && info.cubeImage != NULL
+		&& info.cubeConvention != SPECULAR_PROBE_CUBE_NONE
+		&& std::isfinite( info.intensity ) && info.intensity > 0.0f && info.intensity <= 64.0f
+		&& std::isfinite( info.blendFraction ) && info.blendFraction > 0.0f && info.blendFraction <= 1.0f
+		&& info.priority >= 0 && info.priority <= 255;
+	for ( int component = 0; component < 3; ++component ) {
+		materialValid = materialValid && std::isfinite( info.tint[component] )
+			&& info.tint[component] >= 0.0f && info.tint[component] <= 64.0f;
+	}
+	if ( !materialValid ) {
+		stats.probeRejectedMaterial++;
+		rg_clusteredLightingFrame.probeSetComplete = false;
+		return false;
+	}
+
+	const idVec3 radii = vLight->lightRadius;
+	const float radiusMin = Min( radii.x, Min( radii.y, radii.z ) );
+	const float radiusMax = Max( radii.x, Max( radii.y, radii.z ) );
+	const int stableIdentity = vLight->lightDef != NULL ? vLight->lightDef->index : -1;
+	// A spherical probe needs equal radii. A box-parallax probe's volume is
+	// the room box itself, so its radii may differ per axis.
+	if ( !vLight->pointLight || vLight->parallel || stableIdentity < 0
+			|| !R_ModernClusteredLighting_FiniteVec3( vLight->globalLightOrigin )
+			|| !R_ModernClusteredLighting_FiniteVec3( radii )
+			|| radiusMin <= 0.0f || radiusMax > 32768.0f
+			|| ( !info.boxParallax && radiusMax - radiusMin > Max( 0.01f, radiusMax * 0.01f ) ) ) {
+		stats.probeRejectedVolume++;
+		rg_clusteredLightingFrame.probeSetComplete = false;
+		return false;
+	}
+
+	idVec3 axisX;
+	idVec3 axisY;
+	idVec3 axisZ;
+	R_ModernClusteredLighting_ProbeAxisInView( grid.viewDef, vLight->lightAxis[0], axisX );
+	R_ModernClusteredLighting_ProbeAxisInView( grid.viewDef, vLight->lightAxis[1], axisY );
+	R_ModernClusteredLighting_ProbeAxisInView( grid.viewDef, vLight->lightAxis[2], axisZ );
+	if ( !R_ModernClusteredLighting_NormalizeProbeAxis( axisX )
+			|| !R_ModernClusteredLighting_NormalizeProbeAxis( axisY )
+			|| !R_ModernClusteredLighting_NormalizeProbeAxis( axisZ ) ) {
+		stats.probeRejectedVolume++;
+		rg_clusteredLightingFrame.probeSetComplete = false;
+		return false;
+	}
+	const float determinant =
+		( axisX.y * axisY.z - axisX.z * axisY.y ) * axisZ.x
+		+ ( axisX.z * axisY.x - axisX.x * axisY.z ) * axisZ.y
+		+ ( axisX.x * axisY.y - axisX.y * axisY.x ) * axisZ.z;
+	if ( idMath::Fabs( axisX * axisY ) >= 0.01f
+			|| idMath::Fabs( axisX * axisZ ) >= 0.01f
+			|| idMath::Fabs( axisY * axisZ ) >= 0.01f
+			|| idMath::Fabs( determinant ) <= 0.99f ) {
+		stats.probeRejectedVolume++;
+		rg_clusteredLightingFrame.probeSetComplete = false;
+		return false;
+	}
+
+	modernSpecularProbeAtlasPlacement_t placement;
+	const modernSpecularProbeAtlasReject_t atlasReject =
+		acquire( info.cubeImage, &placement );
+	if ( atlasReject != MODERN_SPECULAR_PROBE_ATLAS_REJECT_NONE
+			|| !placement.valid
+			|| placement.slot < 0 || placement.slot >= MODERN_SPECULAR_PROBE_ATLAS_MAX_ENTRIES
+			|| placement.faceSize <= 0 || placement.faceSize > MODERN_SPECULAR_PROBE_ATLAS_FACE_SIZE
+			|| placement.sourceStorageGeneration == 0
+			|| placement.residencyGeneration == 0 ) {
+		stats.probeRejectedAtlas++;
+		rg_clusteredLightingFrame.probeSetComplete = false;
+		return false;
+	}
+
+	rg_clusteredLightingFrame.probes.SetNum( rg_clusteredLightingFrame.probeCount + 1, false );
+	modernSpecularProbeRecord_t &record = rg_clusteredLightingFrame.probes[rg_clusteredLightingFrame.probeCount];
+	memset( &record, 0, sizeof( record ) );
+	record.sceneIndex = grid.sceneIndex;
+	record.stableLightIdentity = stableIdentity & 0x00ffffff;
+	record.priority = info.priority;
+	R_ModernClusteredLighting_CameraPoint( grid.viewDef, vLight->globalLightOrigin, record.cameraOrigin );
+	record.axisX = axisX;
+	record.axisY = axisY;
+	record.axisZ = axisZ;
+	record.tint.Set( info.tint[0], info.tint[1], info.tint[2] );
+	record.intensity = info.intensity;
+	// A box probe clusters by its bounding sphere and weighs itself by the box.
+	record.boxParallax = info.boxParallax;
+	record.boxExtents = radii;
+	record.radius = info.boxParallax ? radii.Length() : ( radii.x + radii.y + radii.z ) / 3.0f;
+	record.blendFraction = info.blendFraction;
+	record.depthMin = idMath::ClampFloat( grid.nearZ, grid.farZ, record.cameraOrigin.z - record.radius );
+	record.depthMax = idMath::ClampFloat( grid.nearZ, grid.farZ, record.cameraOrigin.z + record.radius );
+	record.scissor = scissor;
+	record.placement = placement;
+	grid.probeCount++;
+	rg_clusteredLightingFrame.probeCount++;
+	stats.probeCount = rg_clusteredLightingFrame.probeCount;
+	return true;
+}
+
+static void R_ModernClusteredLighting_ClusterCenter( const modernClusterGridRecord_t &grid,
+		int tileX, int tileY, int sliceZ, float center[3] ) {
+	const float nearZ = Max( 0.01f, grid.nearZ );
+	const float farZ = Max( nearZ + 1.0f, grid.farZ );
+	const float sliceFraction = ( static_cast<float>( sliceZ ) + 0.5f )
+		/ static_cast<float>( Max( 1, grid.sliceCountZ ) );
+	const float z = nearZ * std::exp( std::log( farZ / nearZ ) * sliceFraction );
+	const float ndcX = ( static_cast<float>( tileX ) + 0.5f )
+		/ static_cast<float>( Max( 1, grid.tileCountX ) ) * 2.0f - 1.0f;
+	// idScreenRect, GL fragment coordinates and both CSR builders all count
+	// rows from the bottom. Probe selection must use the same physical row.
+	const float ndcY = ( static_cast<float>( tileY ) + 0.5f )
+		/ static_cast<float>( Max( 1, grid.tileCountY ) ) * 2.0f - 1.0f;
+	center[0] = 0.0f;
+	center[1] = 0.0f;
+	center[2] = z;
+	if ( grid.viewDef != NULL ) {
+		const float projectionX = grid.viewDef->projectionMatrix[0];
+		const float projectionY = grid.viewDef->projectionMatrix[5];
+		if ( idMath::Fabs( projectionX ) > 0.0001f ) {
+			center[0] = -( ndcX + grid.viewDef->projectionMatrix[8] ) * z / projectionX;
+		}
+		if ( idMath::Fabs( projectionY ) > 0.0001f ) {
+			center[1] = ( ndcY + grid.viewDef->projectionMatrix[9] ) * z / projectionY;
+		}
+	}
+}
+
+static void R_ModernClusteredLighting_BinSpecularProbes( rendererClusteredLightingStats_t &stats ) {
+	stats.probeReferences = 0;
+	for ( int gridIndex = 0; gridIndex < rg_clusteredLightingFrame.gridCount; ++gridIndex ) {
+		const modernClusterGridRecord_t &grid = rg_clusteredLightingFrame.grids[gridIndex];
+		for ( int localProbeIndex = 0; localProbeIndex < grid.probeCount; ++localProbeIndex ) {
+			const int probeIndex = grid.firstProbe + localProbeIndex;
+			if ( probeIndex < 0 || probeIndex >= rg_clusteredLightingFrame.probeCount ) {
+				continue;
+			}
+			const modernSpecularProbeRecord_t &probe = rg_clusteredLightingFrame.probes[probeIndex];
+			const int tileMinX = idMath::ClampInt( 0, grid.tileCountX - 1, ( probe.scissor.x1 * grid.tileCountX ) / Max( 1, grid.width ) );
+			const int tileMaxX = idMath::ClampInt( 0, grid.tileCountX - 1, ( probe.scissor.x2 * grid.tileCountX ) / Max( 1, grid.width ) );
+			const int tileMinY = idMath::ClampInt( 0, grid.tileCountY - 1, ( probe.scissor.y1 * grid.tileCountY ) / Max( 1, grid.height ) );
+			const int tileMaxY = idMath::ClampInt( 0, grid.tileCountY - 1, ( probe.scissor.y2 * grid.tileCountY ) / Max( 1, grid.height ) );
+			const int sliceMinZ = R_ModernClusteredLighting_DepthSliceForZ( grid, probe.depthMin );
+			const int sliceMaxZ = R_ModernClusteredLighting_DepthSliceForZ( grid, probe.depthMax );
+			const float origin[3] = { probe.cameraOrigin.x, probe.cameraOrigin.y, probe.cameraOrigin.z };
+			const float blendDistance = probe.radius * probe.blendFraction;
+			for ( int z = sliceMinZ; z <= sliceMaxZ; ++z ) {
+				for ( int y = tileMinY; y <= tileMaxY; ++y ) {
+					for ( int x = tileMinX; x <= tileMaxX; ++x ) {
+						const int clusterIndex = R_ModernClusteredLighting_ClusterIndex( grid, x, y, z );
+						if ( clusterIndex < 0 || clusterIndex >= rg_clusteredLightingFrame.clusterCount ) {
+							continue;
+						}
+						float center[3];
+						R_ModernClusteredLighting_ClusterCenter( grid, x, y, z, center );
+						advancedLightingProbeCandidate_t candidate;
+						candidate.probeIndex = probeIndex;
+						candidate.stableId = probe.stableLightIdentity;
+						const float sphericalWeight = AdvancedLightingCore_SphericalProbeWeight(
+							origin, probe.radius, center, blendDistance );
+						// A cluster AABB can intersect a probe while its center lies exactly
+						// outside the sphere. Keep that conservative reference, but rank it
+						// below every positive center contributor so an authored high-priority
+						// edge cannot crowd a valid third probe out of the bounded top-two set.
+						candidate.priority = sphericalWeight > 0.0f ? probe.priority : -1;
+						candidate.weight = sphericalWeight > 0.0f
+							? sphericalWeight
+							: static_cast<float>( probe.priority + 1 ) * 0.000001f;
+						AdvancedLightingCore_SelectProbe( rg_clusteredLightingFrame.clusters[clusterIndex].probes, candidate );
+					}
+				}
+			}
+		}
+	}
+	for ( int clusterIndex = 0; clusterIndex < rg_clusteredLightingFrame.clusterCount; ++clusterIndex ) {
+		for ( int candidateIndex = 0; candidateIndex < RENDERER_CLUSTER_SPECULAR_PROBES_PER_CLUSTER; ++candidateIndex ) {
+			if ( rg_clusteredLightingFrame.clusters[clusterIndex].probes[candidateIndex].probeIndex >= 0 ) {
+				stats.probeReferences++;
+			}
+		}
+	}
 }
 
 static void R_ModernClusteredLighting_BinFrameReferences( rendererClusteredLightingStats_t &stats, bool fillReferences ) {
@@ -1418,7 +2550,19 @@ static void R_ModernClusteredLighting_FillClusterIndexList( rendererClusteredLig
 
 static void R_ModernClusteredLighting_FinalizeClusterStats( rendererClusteredLightingStats_t &stats ) {
 	R_ModernClusteredLighting_BuildClusterLayout( stats );
-	R_ModernClusteredLighting_FillClusterIndexList( stats );
+	// The CPU fill pass exists solely to populate clusterLightIndices for the
+	// non-compute upload branch. When compute binning owns the CSR the GPU
+	// rebuilds the flat list from scratch and the upload path never reads the
+	// CPU-filled contents (headers are zero-seeded and flat records seeded to
+	// 0xffffffff in R_ModernClusteredLighting_UploadBuffers), so skip the
+	// second full binning pass. stats.maxLightsInCluster already comes from
+	// the counting pass and stats.uploadedReferences from the layout pass, and
+	// the fill pass reproduces both bit-identically when it does run. The
+	// predicate is stable through this frame's upload: it depends only on
+	// init-time GL state and probeCount, which is final before finalize.
+	if ( !R_ModernClusteredLighting_UseComputeBinningPath() ) {
+		R_ModernClusteredLighting_FillClusterIndexList( stats );
+	}
 	stats.lossless = stats.overflowReferences == 0
 		&& stats.overflowLights == 0
 		&& stats.unsampledSpillReferences == 0
@@ -1428,11 +2572,16 @@ static void R_ModernClusteredLighting_FinalizeClusterStats( rendererClusteredLig
 	stats.frameValid = true;
 }
 
-static void R_ModernClusteredLighting_BuildFrame( const idScenePacketFrame &packetFrame, bool requested, rendererClusteredLightingStats_t &stats ) {
+static void R_ModernClusteredLighting_BuildFrame( const idScenePacketFrame &packetFrame, bool requested, rendererClusteredLightingStats_t &stats, rendererProbeAtlasAcquire_t probeAcquire = NULL ) {
 	R_ModernClusteredLighting_ResetFrameData();
+	const bool probesOnly = probeAcquire != NULL;
+	if ( probesOnly ) {
+		// Native storage uses the GL SSBO grid budget without GL allocations.
+		rg_clusteredLightingFrame.indexRecordCapacity = MODERN_CLUSTER_MAX_INDEX_RECORDS_SSBO;
+	}
 	memset( &stats, 0, sizeof( stats ) );
-	stats.available = rg_clusteredLightingAvailable;
-	stats.initialized = rg_clusteredLightingInitialized;
+	stats.available = probesOnly || rg_clusteredLightingAvailable;
+	stats.initialized = probesOnly || rg_clusteredLightingInitialized;
 	stats.requested = requested;
 	stats.debugMode = r_rendererClusterDebug.GetInteger();
 	stats.debugOverlayReady = rg_clusteredLightingDebugProgram != 0 && rg_clusteredLightingDebugVAO != 0;
@@ -1442,6 +2591,9 @@ static void R_ModernClusteredLighting_BuildFrame( const idScenePacketFrame &pack
 	stats.lightCapacity = rg_clusteredLightingFrame.lightCapacity;
 	stats.indexRecordCapacity = rg_clusteredLightingFrame.indexRecordCapacity;
 	stats.shadowDescriptorCapacity = rg_clusteredLightingFrame.shadowDescriptorCapacity;
+	stats.probeCapacity = RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS;
+	stats.probeUBOBytes = sizeof( modernSpecularProbeGpuRecord_t ) * RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS;
+	stats.probeBufferReady = rg_clusteredLightingSpecularProbesUBO != 0;
 	const int sceneCount = packetFrame.NumScenes();
 	stats.sceneCount = sceneCount;
 	R_ModernClusteredLighting_SetStatus( stats, requested ? "unavailable" : "off" );
@@ -1449,10 +2601,10 @@ static void R_ModernClusteredLighting_BuildFrame( const idScenePacketFrame &pack
 	if ( !requested ) {
 		return;
 	}
-	if ( !rg_clusteredLightingAvailable ) {
+	if ( !stats.available ) {
 		return;
 	}
-	if ( !rg_clusteredLightingInitialized ) {
+	if ( !stats.initialized ) {
 		R_ModernClusteredLighting_SetStatus( stats, "not-initialized" );
 		return;
 	}
@@ -1462,6 +2614,12 @@ static void R_ModernClusteredLighting_BuildFrame( const idScenePacketFrame &pack
 	for ( int sceneIndex = 0; sceneIndex < sceneCount; ++sceneIndex ) {
 		const scenePacket_t &scene = packetFrame.Scene( sceneIndex );
 		if ( scene.viewDef == NULL ) {
+			continue;
+		}
+		// GUI and post views have no clustered receivers or lights. Reserving
+		// a full grid for each of them can exhaust the GL 3.3 UBO before the
+		// world's light indices are packed, particularly with HDR/MSAA post.
+		if ( scene.viewDef->viewEntitys == NULL && scene.viewDef->viewLights == NULL ) {
 			continue;
 		}
 		if ( rg_clusteredLightingFrame.gridCount >= MODERN_CLUSTER_MAX_GRIDS ) {
@@ -1490,6 +2648,10 @@ static void R_ModernClusteredLighting_BuildFrame( const idScenePacketFrame &pack
 			modernClusterRecord_t &cluster = rg_clusteredLightingFrame.clusters[rg_clusteredLightingFrame.clusterCount + i];
 			memset( &cluster, 0, sizeof( cluster ) );
 			cluster.firstLightIndex = -1;
+			for ( int probeIndex = 0; probeIndex < RENDERER_CLUSTER_SPECULAR_PROBES_PER_CLUSTER; ++probeIndex ) {
+				cluster.probes[probeIndex].probeIndex = -1;
+				cluster.probes[probeIndex].stableId = -1;
+			}
 		}
 		rg_clusteredLightingFrame.gridCount++;
 		rg_clusteredLightingFrame.clusterCount += grid.clusterCount;
@@ -1507,6 +2669,8 @@ static void R_ModernClusteredLighting_BuildFrame( const idScenePacketFrame &pack
 
 	for ( int gridIndex = 0; gridIndex < rg_clusteredLightingFrame.gridCount; ++gridIndex ) {
 		modernClusterGridRecord_t &grid = rg_clusteredLightingFrame.grids[gridIndex];
+		grid.firstLight = rg_clusteredLightingFrame.lightCount;
+		grid.firstProbe = rg_clusteredLightingFrame.probeCount;
 		if ( grid.sceneIndex < 0 || grid.sceneIndex >= packetFrame.NumScenes() ) {
 			continue;
 		}
@@ -1514,12 +2678,34 @@ static void R_ModernClusteredLighting_BuildFrame( const idScenePacketFrame &pack
 		if ( scene.viewDef == NULL ) {
 			continue;
 		}
+		const bool probesRequested = r_rendererModernQuality.GetBool()
+			&& r_rendererReflectionProbes.GetBool();
 		for ( const viewLight_t *vLight = scene.viewDef->viewLights; vLight != NULL; vLight = vLight->next ) {
-			R_ModernClusteredLighting_AddLight( grid, vLight, stats );
+			if ( R_ModernClusteredLighting_IsSpecularProbe( vLight ) ) {
+				if ( probesRequested ) {
+					R_ModernClusteredLighting_AppendSpecularProbe( grid, vLight, stats,
+						probesOnly ? probeAcquire : R_ModernClusteredLighting_AcquireProbeAtlas );
+				}
+				continue;
+			}
+			if ( !probesOnly ) {
+				R_ModernClusteredLighting_AddLight( grid, vLight, stats );
+			}
 		}
 		if ( grid.lightCount > 0 ) {
 			stats.scenesWithLights++;
 		}
+	}
+	stats.probeCount = rg_clusteredLightingFrame.probeCount;
+	stats.probeCpuCSRForced = rg_clusteredLightingFrame.probeCount > 0
+		&& R_ModernClusteredLighting_ComputeBinningCapable();
+	stats.computeBinningReady = R_ModernClusteredLighting_UseComputeBinningPath();
+	R_ModernClusteredLighting_BinSpecularProbes( stats );
+	if ( probesOnly ) {
+		stats.clusterCount = rg_clusteredLightingFrame.clusterCount;
+		stats.frameValid = !stats.overflow && rg_clusteredLightingFrame.probeSetComplete;
+		stats.buildMsec = Sys_Milliseconds() - startMsec;
+		return;
 	}
 	R_ModernClusteredLighting_BuildShadowDescriptors( packetFrame, stats );
 	R_ModernClusteredLighting_BinFrameReferences( stats, false );
@@ -1632,6 +2818,8 @@ static GLuint R_ModernClusteredLighting_CompileComputeBinningProgram( void ) {
 		"	vec4 projectS;\n"
 		"	vec4 projectT;\n"
 		"	vec4 projectQ;\n"
+		"	vec4 falloffRect;\n"
+		"	vec4 projectionRect;\n"
 		"};\n"
 		"layout(std140, binding = 3) uniform ModernClusterGridParams {\n"
 		"	vec4 grid;\n"
@@ -1685,7 +2873,7 @@ static GLuint R_ModernClusteredLighting_CompileComputeBinningProgram( void ) {
 		"	int tileMaxX = clamp(int(floor(light.scissorDepth.z * float(grid.x) / viewport.x)), 0, grid.x - 1);\n"
 		"	int tileMinY = clamp(int(floor(light.scissorDepth.y * float(grid.y) / viewport.y)), 0, grid.y - 1);\n"
 		"	int tileMaxY = clamp(int(floor(light.scissorDepth.w * float(grid.y) / viewport.y)), 0, grid.y - 1);\n"
-		"	bool fullDepth = light.falloff.z > 0.5;\n"
+		"	bool fullDepth = (int(light.flags.x + 0.5) & 8) != 0;\n"
 		"	int sliceMinZ = fullDepth ? 0 : DepthSliceForZ(light.depthRange.x);\n"
 		"	int sliceMaxZ = fullDepth ? grid.z - 1 : DepthSliceForZ(light.depthRange.y);\n"
 		"	for (int z = sliceMinZ; z <= sliceMaxZ; ++z) {\n"
@@ -1877,6 +3065,46 @@ static void R_ModernClusteredLighting_DispatchComputeBinning( rendererClusteredL
 	}
 }
 
+static void R_ModernClusteredLighting_FillProbeHeader(
+		modernClusterIndexGpuRecord_t &header, const modernClusterRecord_t &cluster ) {
+	header.indices[2] = cluster.probes[0].probeIndex >= 0
+		? static_cast<GLuint>( cluster.probes[0].probeIndex ) : 0xffffffffu;
+	header.indices[3] = cluster.probes[1].probeIndex >= 0
+		? static_cast<GLuint>( cluster.probes[1].probeIndex ) : 0xffffffffu;
+}
+
+static void R_ModernClusteredLighting_PackProbe( const modernSpecularProbeRecord_t &src,
+		unsigned int generation, modernSpecularProbeGpuRecord_t &dst ) {
+	dst.positionRadius[0] = src.cameraOrigin.x;
+	dst.positionRadius[1] = src.cameraOrigin.y;
+	dst.positionRadius[2] = src.cameraOrigin.z;
+	dst.positionRadius[3] = src.radius;
+	dst.tintIntensity[0] = src.tint.x;
+	dst.tintIntensity[1] = src.tint.y;
+	dst.tintIntensity[2] = src.tint.z;
+	dst.tintIntensity[3] = src.intensity;
+	dst.axisXPriority[0] = src.axisX.x;
+	dst.axisXPriority[1] = src.axisX.y;
+	dst.axisXPriority[2] = src.axisX.z;
+	dst.axisXPriority[3] = static_cast<float>( src.priority );
+	dst.axisYBlend[0] = src.axisY.x;
+	dst.axisYBlend[1] = src.axisY.y;
+	dst.axisYBlend[2] = src.axisY.z;
+	dst.axisYBlend[3] = src.blendFraction;
+	dst.axisZSlot[0] = src.axisZ.x;
+	dst.axisZSlot[1] = src.axisZ.y;
+	dst.axisZSlot[2] = src.axisZ.z;
+	dst.axisZSlot[3] = static_cast<float>( src.placement.slot );
+	dst.identity[0] = static_cast<float>( src.stableLightIdentity );
+	dst.identity[1] = static_cast<float>( R_ModernClusteredLighting_ProbeGenerationExact( src.placement.sourceStorageGeneration ) );
+	dst.identity[2] = static_cast<float>( R_ModernClusteredLighting_ProbeGenerationExact( src.placement.residencyGeneration ) );
+	dst.identity[3] = static_cast<float>( generation );
+	dst.boxExtents[0] = src.boxExtents.x;
+	dst.boxExtents[1] = src.boxExtents.y;
+	dst.boxExtents[2] = src.boxExtents.z;
+	dst.boxExtents[3] = src.boxParallax ? 1.0f : 0.0f;
+}
+
 static bool R_ModernClusteredLighting_UploadBuffers( rendererClusteredLightingStats_t &stats ) {
 	rg_clusteredLightingBoundGridIndex = -1;
 	stats.paramsUBOBytes = sizeof( modernClusterGridGpuParams_t );
@@ -1887,15 +3115,21 @@ static bool R_ModernClusteredLighting_UploadBuffers( rendererClusteredLightingSt
 	stats.lightsUBOBytes = sizeof( modernClusterLightGpuRecord_t ) * lightCapacity;
 	stats.indicesUBOBytes = sizeof( modernClusterIndexGpuRecord_t ) * indexRecordCapacity;
 	stats.shadowDescriptorBytes = sizeof( modernClusterShadowDescriptorGpuRecord_t ) * shadowDescriptorCapacity;
+	stats.probeUBOBytes = sizeof( modernSpecularProbeGpuRecord_t ) * RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS;
 	stats.shaderStorageReady = useShaderStorage;
 	stats.computeBinningReady = R_ModernClusteredLighting_UseComputeBinningPath();
 	stats.shadowDescriptorBufferReady = false;
+	stats.probeBufferReady = false;
 	stats.shadowDescriptorCapacity = shadowDescriptorCapacity;
+	stats.probeCapacity = RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS;
 	stats.shadowDescriptorCount = rg_clusteredLightingFrame.shadowDescriptorCount;
+	stats.probeCount = rg_clusteredLightingFrame.probeCount;
 	stats.clusterRecordCount = rg_clusteredLightingFrame.clusterRecordCount;
 	stats.flatIndexRecordCount = rg_clusteredLightingFrame.flatIndexRecordCount;
 	stats.flatIndexReferenceCapacity = rg_clusteredLightingFrame.flatIndexReferenceCapacity;
-	if ( !stats.requested || !stats.frameValid || rg_clusteredLightingParamsUBO == 0 || glBufferSubData == NULL || glBindBufferBase == NULL ) {
+	if ( !stats.requested || !stats.frameValid || rg_clusteredLightingParamsUBO == 0
+			|| rg_clusteredLightingSpecularProbesUBO == 0
+			|| glBufferSubData == NULL || glBindBufferBase == NULL ) {
 		return false;
 	}
 	if ( useShaderStorage ) {
@@ -1907,9 +3141,18 @@ static bool R_ModernClusteredLighting_UploadBuffers( rendererClusteredLightingSt
 	}
 
 	const int uploadedLights = Min( rg_clusteredLightingFrame.lightCount, lightCapacity );
+	const int uploadedProbes = Min( rg_clusteredLightingFrame.probeCount, RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS );
 	const int uploadedShadowDescriptors = Min( rg_clusteredLightingFrame.shadowDescriptorCount, shadowDescriptorCapacity );
 	stats.uploadedLights = uploadedLights;
+	stats.uploadedProbes = uploadedProbes;
 	stats.uploadedShadowDescriptors = uploadedShadowDescriptors;
+	stats.probeFrameGeneration = R_ModernClusteredLighting_PublishedProbeFrameGeneration(
+		rg_clusteredLightingFrame.probeSetComplete, uploadedProbes,
+		rg_clusteredLightingFrame.probeCount, R_ModernClusteredLighting_ProbeAtlasReady(),
+		R_ModernClusteredLighting_ProbeAtlasFrameReady(),
+		R_ModernClusteredLighting_ProbeAtlasFrameGeneration() );
+	stats.probeFrameReady = stats.probeFrameGeneration != 0u;
+	rg_clusteredLightingFrame.probeFrameGeneration = stats.probeFrameGeneration;
 	stats.uploadedClusters = Min( rg_clusteredLightingFrame.clusterCount, MODERN_CLUSTER_MAX_CLUSTERS );
 	stats.uploadedGridIndexRecords = Min( rg_clusteredLightingFrame.indexRecordCount, indexRecordCapacity );
 	modernClusterGridGpuParams_t params;
@@ -1920,7 +3163,13 @@ static bool R_ModernClusteredLighting_UploadBuffers( rendererClusteredLightingSt
 	}
 
 	idList<modernClusterLightGpuRecord_t> &lightRecords = rg_clusteredLightingFrame.lightGpuRecords;
-	const int lightUploadRecords = useShaderStorage ? Max( uploadedLights, 1 ) : lightCapacity;
+	// Prefix-sized fills and uploads on both paths: the full-capacity UBO/SSBO
+	// storage allocated at init keeps its binding ranges, glBufferSubData just
+	// writes this frame's prefix. Records beyond the counts are unreachable by
+	// contract (headers carry first/count, flat light indices are filtered
+	// against uploadedLights at fill time, and the GLSL fetch helpers clamp to
+	// capacity) - the SSBO path has always worked this way over a stale tail.
+	const int lightUploadRecords = Max( uploadedLights, 1 );
 	lightRecords.SetNum( lightUploadRecords, false );
 	memset( lightRecords.Ptr(), 0, sizeof( modernClusterLightGpuRecord_t ) * lightUploadRecords );
 	for ( int i = 0; i < uploadedLights; ++i ) {
@@ -1957,25 +3206,39 @@ static bool R_ModernClusteredLighting_UploadBuffers( rendererClusteredLightingSt
 		memcpy( dst.projectS, src.descriptor.projectS, sizeof( dst.projectS ) );
 		memcpy( dst.projectT, src.descriptor.projectT, sizeof( dst.projectT ) );
 		memcpy( dst.projectQ, src.descriptor.projectQ, sizeof( dst.projectQ ) );
+		memcpy( dst.falloffRect, src.descriptor.falloffAtlasRect, sizeof( dst.falloffRect ) );
+		memcpy( dst.projectionRect, src.descriptor.projectionAtlasRect, sizeof( dst.projectionRect ) );
+	}
+
+	idList<modernSpecularProbeGpuRecord_t> &probeRecords = rg_clusteredLightingFrame.probeGpuRecords;
+	probeRecords.SetNum( RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS, false );
+	memset( probeRecords.Ptr(), 0,
+		sizeof( modernSpecularProbeGpuRecord_t ) * RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS );
+	for ( int i = 0; i < uploadedProbes; ++i ) {
+		const modernSpecularProbeRecord_t &src = rg_clusteredLightingFrame.probes[i];
+		modernSpecularProbeGpuRecord_t &dst = probeRecords[i];
+		R_ModernClusteredLighting_PackProbe( src, stats.probeFrameGeneration, dst );
 	}
 
 	idList<modernClusterShadowDescriptorGpuRecord_t> &shadowRecords = rg_clusteredLightingFrame.shadowGpuRecords;
-	const int shadowUploadRecords = useShaderStorage ? Max( uploadedShadowDescriptors, 1 ) : shadowDescriptorCapacity;
+	const int shadowUploadRecords = Max( uploadedShadowDescriptors, 1 );
 	shadowRecords.SetNum( shadowUploadRecords, false );
-	memset( shadowRecords.Ptr(), 0, sizeof( modernClusterShadowDescriptorGpuRecord_t ) * shadowUploadRecords );
+	// FillShadowDescriptorGpuRecord memsets each record it fills, so only clear
+	// the padding tail (present only when no shadow descriptors were uploaded).
+	if ( shadowUploadRecords > uploadedShadowDescriptors ) {
+		memset( shadowRecords.Ptr() + uploadedShadowDescriptors, 0,
+			sizeof( modernClusterShadowDescriptorGpuRecord_t ) * ( shadowUploadRecords - uploadedShadowDescriptors ) );
+	}
 	for ( int i = 0; i < uploadedShadowDescriptors; ++i ) {
 		R_ModernClusteredLighting_FillShadowDescriptorGpuRecord( shadowRecords[i], rg_clusteredLightingFrame.shadowDescriptors[i] );
 	}
 
 	idList<modernClusterIndexGpuRecord_t> &indexRecords = rg_clusteredLightingFrame.indexGpuRecords;
-	const int indexUploadRecords = useShaderStorage ? Max( stats.uploadedGridIndexRecords, 1 ) : indexRecordCapacity;
+	const int indexUploadRecords = Max( stats.uploadedGridIndexRecords, 1 );
 	indexRecords.SetNum( indexUploadRecords, false );
-	for ( int i = 0; i < indexUploadRecords; ++i ) {
-		indexRecords[i].indices[0] = 0xffffffffu;
-		indexRecords[i].indices[1] = 0xffffffffu;
-		indexRecords[i].indices[2] = 0xffffffffu;
-		indexRecords[i].indices[3] = 0xffffffffu;
-	}
+	// The record is exactly four GLuint lanes; 0xff in every byte is the
+	// all-lanes-invalid (0xffffffff) sentinel, so one memset seeds them all.
+	memset( indexRecords.Ptr(), 0xff, sizeof( modernClusterIndexGpuRecord_t ) * indexUploadRecords );
 	stats.uploadedReferences = 0;
 	const bool seedComputeBinning = R_ModernClusteredLighting_UseComputeBinningPath();
 	for ( int gridIndex = 0; gridIndex < rg_clusteredLightingFrame.gridCount; ++gridIndex ) {
@@ -1998,8 +3261,7 @@ static bool R_ModernClusteredLighting_UploadBuffers( rendererClusteredLightingSt
 			} else {
 				indexRecords[headerRecord].indices[0] = static_cast<GLuint>( Max( 0, cluster.firstLightIndex ) );
 				indexRecords[headerRecord].indices[1] = static_cast<GLuint>( Max( 0, cluster.uploadedLightCount ) );
-				indexRecords[headerRecord].indices[2] = cluster.overflow ? 1u : 0u;
-				indexRecords[headerRecord].indices[3] = 0u;
+				R_ModernClusteredLighting_FillProbeHeader( indexRecords[headerRecord], cluster );
 			}
 		}
 	}
@@ -2025,6 +3287,9 @@ static bool R_ModernClusteredLighting_UploadBuffers( rendererClusteredLightingSt
 		&& stats.uploadedGridIndexRecords == rg_clusteredLightingFrame.indexRecordCount;
 
 	R_ModernClusteredLighting_UpdateBuffer( GL_UNIFORM_BUFFER, rg_clusteredLightingParamsUBO, 0, sizeof( params ), &params );
+	R_ModernClusteredLighting_UpdateBuffer( GL_UNIFORM_BUFFER, rg_clusteredLightingSpecularProbesUBO, 0,
+		sizeof( modernSpecularProbeGpuRecord_t ) * RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS,
+		probeRecords.Ptr() );
 	rg_clusteredLightingBoundGridIndex = rg_clusteredLightingFrame.gridCount > 0 ? 0 : -1;
 	if ( useShaderStorage ) {
 		R_ModernClusteredLighting_UpdateBuffer( GL_SHADER_STORAGE_BUFFER, rg_clusteredLightingLightsSSBO, 0, sizeof( modernClusterLightGpuRecord_t ) * lightUploadRecords, lightRecords.Ptr() );
@@ -2042,9 +3307,10 @@ static bool R_ModernClusteredLighting_UploadBuffers( rendererClusteredLightingSt
 		R_ModernClusteredLighting_SetStatus( stats, stats.lossless ? "uploaded-csr" : "uploaded-csr-lossy" );
 	}
 
-	stats.bufferUploads += 4;
+	stats.bufferUploads += 5;
 	stats.buffersReady = true;
 	stats.shadowDescriptorBufferReady = true;
+	stats.probeBufferReady = true;
 	stats.uboFallbackReady = !useShaderStorage;
 	return true;
 }
@@ -2147,6 +3413,80 @@ static void R_ModernClusteredLighting_BuildGridParams( const modernClusterGridRe
 		params.projectionDepth[0] = -1.0f;
 		params.projectionDepth[1] = -2.0f * Max( 0.25f, grid.nearZ );
 	}
+	params.projectionDepth[2] = static_cast<float>( stats.uploadedProbes );
+	params.projectionDepth[3] = static_cast<float>( stats.probeFrameGeneration );
+}
+
+static void R_ModernClusteredLighting_PackProbeViews( unsigned int exactGeneration,
+		std::vector<rendererSpecularProbeView_t> &views );
+
+bool R_ModernClusteredLighting_PrepareProbes( const idScenePacketFrame &packetFrame,
+		rendererProbeAtlasAcquire_t acquire, std::uint64_t generation,
+		std::vector<rendererSpecularProbeView_t> &views, rendererClusteredLightingStats_t &stats ) {
+	views.clear();
+	memset( &stats, 0, sizeof( stats ) );
+	if ( acquire == NULL || generation == 0 ) { return false; }
+	R_ModernClusteredLighting_BuildFrame( packetFrame, true, stats, acquire );
+	if ( !stats.frameValid ) { return false; }
+	const unsigned int exactGeneration = R_ModernClusteredLighting_ProbeGenerationExact( generation );
+	stats.uploadedProbes = stats.probeCount;
+	stats.probeFrameGeneration = exactGeneration;
+	stats.probeFrameReady = true;
+	R_ModernClusteredLighting_PackProbeViews( exactGeneration, views );
+	return true;
+}
+
+bool R_ModernClusteredLighting_ExportProbeViews( std::uint64_t generation,
+		std::vector<rendererSpecularProbeView_t> &views ) {
+	views.clear();
+	// A frame stays valid for its lights when its probe set is incomplete or
+	// overflows; the executor then publishes no probe frame and every view
+	// falls back to the analytic environment. Adopters follow that verdict.
+	if ( generation == 0 || !rg_clusteredLightingStats.frameValid || rg_clusteredLightingStats.probeCount <= 0
+			|| !rg_clusteredLightingStats.probeFrameReady ) {
+		return false;
+	}
+	R_ModernClusteredLighting_PackProbeViews( R_ModernClusteredLighting_ProbeGenerationExact( generation ), views );
+	return true;
+}
+
+static void R_ModernClusteredLighting_PackProbeViews( unsigned int exactGeneration,
+		std::vector<rendererSpecularProbeView_t> &views ) {
+	for ( int g = 0; g < rg_clusteredLightingFrame.gridCount; ++g ) {
+		const modernClusterGridRecord_t &grid = rg_clusteredLightingFrame.grids[g];
+		if ( grid.probeCount == 0 ) { continue; }
+		rendererSpecularProbeView_t view = {};
+		view.viewDef = grid.viewDef;
+		view.grid[0] = float( grid.tileCountX );
+		view.grid[1] = float( grid.tileCountY );
+		view.grid[2] = float( grid.sliceCountZ );
+		view.grid[3] = float( grid.probeCount );
+		view.depth[0] = grid.nearZ;
+		view.depth[1] = grid.farZ;
+		view.depth[2] = Max( 0.0001f, idMath::Log( grid.farZ / Max( 0.01f, grid.nearZ ) ) );
+		view.depth[3] = float( exactGeneration );
+		memcpy( view.viewOrigin, grid.viewDef->renderView.vieworg.ToFloatPtr(), 3 * sizeof( float ) );
+		for ( int axis = 0; axis < 3; ++axis ) {
+			memcpy( view.worldToView[axis], grid.viewDef->renderView.viewaxis[( axis + 1 ) % 3].ToFloatPtr(), 3 * sizeof( float ) );
+		}
+		view.projection[0] = grid.viewDef->projectionMatrix[0];
+		view.projection[1] = grid.viewDef->projectionMatrix[5];
+		view.projection[2] = grid.viewDef->projectionMatrix[8];
+		view.projection[3] = grid.viewDef->projectionMatrix[9];
+		for ( int i = 0; i < grid.probeCount; ++i ) {
+			R_ModernClusteredLighting_PackProbe( rg_clusteredLightingFrame.probes[grid.firstProbe + i],
+				exactGeneration, view.records[i] );
+		}
+		view.indices.resize( grid.clusterCount * RENDERER_CLUSTER_SPECULAR_PROBES_PER_CLUSTER );
+		for ( int c = 0; c < grid.clusterCount; ++c ) {
+			const modernClusterRecord_t &cluster = rg_clusteredLightingFrame.clusters[grid.clusterOffset + c];
+			for ( int i = 0; i < RENDERER_CLUSTER_SPECULAR_PROBES_PER_CLUSTER; ++i ) {
+				const int index = cluster.probes[i].probeIndex - grid.firstProbe;
+				view.indices[c * 2 + i] = index >= 0 && index < grid.probeCount ? std::uint32_t( index ) : 0xffffffffu;
+			}
+		}
+		views.push_back( view );
+	}
 }
 
 void R_ModernClusteredLighting_Init( const renderBackendCaps_t &caps, const renderFeatureSet_t &features ) {
@@ -2164,10 +3504,12 @@ void R_ModernClusteredLighting_Init( const renderBackendCaps_t &caps, const rend
 	const int lightBytes = sizeof( modernClusterLightGpuRecord_t ) * MODERN_CLUSTER_MAX_LIGHTS_UBO;
 	const int indexBytes = sizeof( modernClusterIndexGpuRecord_t ) * MODERN_CLUSTER_MAX_INDEX_RECORDS_UBO;
 	const int shadowDescriptorBytes = sizeof( modernClusterShadowDescriptorGpuRecord_t ) * MODERN_CLUSTER_MAX_SHADOW_DESCRIPTORS_UBO;
+	const int probeBytes = sizeof( modernSpecularProbeGpuRecord_t ) * RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS;
 	if ( !R_ModernClusteredLighting_CreateBuffer( GL_UNIFORM_BUFFER, paramsBytes, rg_clusteredLightingParamsUBO, "Modern clustered lighting grid params UBO" ) ||
 		!R_ModernClusteredLighting_CreateBuffer( GL_UNIFORM_BUFFER, lightBytes, rg_clusteredLightingLightsUBO, "Modern clustered lighting light records UBO" ) ||
 		!R_ModernClusteredLighting_CreateBuffer( GL_UNIFORM_BUFFER, indexBytes, rg_clusteredLightingIndicesUBO, "Modern clustered lighting indices UBO" ) ||
-		!R_ModernClusteredLighting_CreateBuffer( GL_UNIFORM_BUFFER, shadowDescriptorBytes, rg_clusteredLightingShadowDescriptorsUBO, "Modern clustered lighting shadow descriptors UBO" ) ) {
+		!R_ModernClusteredLighting_CreateBuffer( GL_UNIFORM_BUFFER, shadowDescriptorBytes, rg_clusteredLightingShadowDescriptorsUBO, "Modern clustered lighting shadow descriptors UBO" ) ||
+		!R_ModernClusteredLighting_CreateBuffer( GL_UNIFORM_BUFFER, probeBytes, rg_clusteredLightingSpecularProbesUBO, "Modern clustered lighting specular probe records UBO" ) ) {
 		R_ModernClusteredLighting_Shutdown();
 		R_ModernClusteredLighting_SetStatus( rg_clusteredLightingStats, "buffer-init-failed" );
 		return;
@@ -2204,22 +3546,25 @@ void R_ModernClusteredLighting_Init( const renderBackendCaps_t &caps, const rend
 	rg_clusteredLightingStats.initialized = true;
 	rg_clusteredLightingStats.buffersReady = true;
 	rg_clusteredLightingStats.shadowDescriptorBufferReady = true;
+	rg_clusteredLightingStats.probeBufferReady = true;
 	rg_clusteredLightingStats.shaderStorageReady = R_ModernClusteredLighting_UseShaderStoragePath();
 	rg_clusteredLightingStats.computeBinningReady = R_ModernClusteredLighting_UseComputeBinningPath();
 	rg_clusteredLightingStats.uboFallbackReady = !rg_clusteredLightingStats.shaderStorageReady;
 	rg_clusteredLightingStats.lightCapacity = R_ModernClusteredLighting_LightCapacity();
 	rg_clusteredLightingStats.indexRecordCapacity = R_ModernClusteredLighting_IndexRecordCapacity();
 	rg_clusteredLightingStats.shadowDescriptorCapacity = R_ModernClusteredLighting_ShadowDescriptorCapacity();
+	rg_clusteredLightingStats.probeCapacity = RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS;
 	rg_clusteredLightingStats.debugOverlayReady = rg_clusteredLightingDebugProgram != 0 && rg_clusteredLightingDebugVAO != 0;
 	rg_clusteredLightingStats.paramsUBOBytes = paramsBytes;
 	rg_clusteredLightingStats.lightsUBOBytes = sizeof( modernClusterLightGpuRecord_t ) * rg_clusteredLightingStats.lightCapacity;
 	rg_clusteredLightingStats.indicesUBOBytes = sizeof( modernClusterIndexGpuRecord_t ) * rg_clusteredLightingStats.indexRecordCapacity;
 	rg_clusteredLightingStats.shadowDescriptorBytes = sizeof( modernClusterShadowDescriptorGpuRecord_t ) * rg_clusteredLightingStats.shadowDescriptorCapacity;
+	rg_clusteredLightingStats.probeUBOBytes = probeBytes;
 	R_ModernClusteredLighting_SetStatus( rg_clusteredLightingStats, "initialized" );
 }
 
 void R_ModernClusteredLighting_Shutdown( void ) {
-	GLuint buffers[7];
+	GLuint buffers[8];
 	int numBuffers = 0;
 	if ( rg_clusteredLightingParamsUBO != 0 ) {
 		buffers[numBuffers++] = rg_clusteredLightingParamsUBO;
@@ -2232,6 +3577,9 @@ void R_ModernClusteredLighting_Shutdown( void ) {
 	}
 	if ( rg_clusteredLightingShadowDescriptorsUBO != 0 ) {
 		buffers[numBuffers++] = rg_clusteredLightingShadowDescriptorsUBO;
+	}
+	if ( rg_clusteredLightingSpecularProbesUBO != 0 ) {
+		buffers[numBuffers++] = rg_clusteredLightingSpecularProbesUBO;
 	}
 	if ( rg_clusteredLightingLightsSSBO != 0 ) {
 		buffers[numBuffers++] = rg_clusteredLightingLightsSSBO;
@@ -2261,6 +3609,7 @@ void R_ModernClusteredLighting_Shutdown( void ) {
 	rg_clusteredLightingLightsUBO = 0;
 	rg_clusteredLightingIndicesUBO = 0;
 	rg_clusteredLightingShadowDescriptorsUBO = 0;
+	rg_clusteredLightingSpecularProbesUBO = 0;
 	rg_clusteredLightingLightsSSBO = 0;
 	rg_clusteredLightingIndicesSSBO = 0;
 	rg_clusteredLightingShadowDescriptorsSSBO = 0;
@@ -2469,6 +3818,40 @@ void R_ModernClusteredLighting_PrintGfxInfo( void ) {
 		rg_clusteredLightingStats.debugStringTruncationSource,
 		rg_clusteredLightingStats.buildMsec,
 		rg_clusteredLightingStats.bufferUploads );
+	common->Printf(
+		"Modern clustered specular probes: records=%d/%d uploaded=%d refs=%d buffer=%d bytes=%d frameReady=%d generation=%u cpuCSRForced=%d rejected(material=%d volume=%d atlas=%d overflow=%d)\n",
+		rg_clusteredLightingStats.probeCount,
+		rg_clusteredLightingStats.probeCapacity,
+		rg_clusteredLightingStats.uploadedProbes,
+		rg_clusteredLightingStats.probeReferences,
+		rg_clusteredLightingStats.probeBufferReady ? 1 : 0,
+		rg_clusteredLightingStats.probeUBOBytes,
+		rg_clusteredLightingStats.probeFrameReady ? 1 : 0,
+		rg_clusteredLightingStats.probeFrameGeneration,
+		rg_clusteredLightingStats.probeCpuCSRForced ? 1 : 0,
+		rg_clusteredLightingStats.probeRejectedMaterial,
+		rg_clusteredLightingStats.probeRejectedVolume,
+		rg_clusteredLightingStats.probeRejectedAtlas,
+		rg_clusteredLightingStats.probeOverflow );
+	common->Printf(
+		"Modern clustered decals: status=%s prepared=%d sealed=%d owned=%d generation=%u records=%d/%d refs=%d/%d views=%d/%d rejects=%d/%d last=%s source=%d view=%d hash=%llu\n",
+		rg_clusteredDecalStats.status,
+		rg_clusteredDecalStats.prepared ? 1 : 0,
+		rg_clusteredDecalStats.sealed ? 1 : 0,
+		rg_clusteredDecalStats.ownershipReady ? 1 : 0,
+		rg_clusteredDecalStats.generation,
+		rg_clusteredDecalStats.publishedRecords,
+		rg_clusteredDecalStats.recordCapacity,
+		rg_clusteredDecalStats.clusterReferences,
+		rg_clusteredDecalStats.referenceCapacity,
+		rg_clusteredDecalStats.ownedViews,
+		rg_clusteredDecalStats.viewCount,
+		rg_clusteredDecalStats.prepareRejects,
+		rg_clusteredDecalStats.sealRejects,
+		R_ModernClusteredLighting_DecalRejectName( rg_clusteredDecalStats.lastReject ),
+		rg_clusteredDecalStats.lastRejectSource,
+		rg_clusteredDecalStats.lastRejectView,
+		rg_clusteredDecalStats.sourceOrderHash );
 }
 
 const rendererClusteredLightingStats_t &R_ModernClusteredLighting_Stats( void ) {
@@ -2499,13 +3882,16 @@ bool R_ModernClusteredLighting_FrameLossless( void ) {
 		&& rg_clusteredLightingStats.overflowLights == 0
 		&& rg_clusteredLightingStats.overflowReferences == 0
 		&& rg_clusteredLightingStats.unsampledSpillReferences == 0
+		&& rg_clusteredLightingStats.shadowAtlasSlotBlockedLights == 0
 		&& rg_clusteredLightingStats.uploadedLights == rg_clusteredLightingStats.lightCount
 		&& rg_clusteredLightingStats.uploadedReferences == rg_clusteredLightingStats.lightReferences
 		&& rg_clusteredLightingStats.uploadedShadowDescriptors == rg_clusteredLightingStats.shadowDescriptorCount;
 }
 
 bool R_ModernClusteredLighting_BindGridForView( const viewDef_t *viewDef ) {
-	if ( !rg_clusteredLightingStats.frameValid || !rg_clusteredLightingStats.buffersReady || rg_clusteredLightingParamsUBO == 0 || glBufferSubData == NULL || glBindBufferBase == NULL ) {
+	if ( !rg_clusteredLightingStats.frameValid || !rg_clusteredLightingStats.buffersReady
+			|| rg_clusteredLightingParamsUBO == 0 || rg_clusteredLightingSpecularProbesUBO == 0
+			|| glBufferSubData == NULL || glBindBufferBase == NULL ) {
 		rg_clusteredLightingStats.gridBindFailures++;
 		return false;
 	}
@@ -2521,9 +3907,11 @@ bool R_ModernClusteredLighting_BindGridForView( const viewDef_t *viewDef ) {
 		R_ModernClusteredLighting_UpdateBuffer( GL_UNIFORM_BUFFER, rg_clusteredLightingParamsUBO, 0, sizeof( params ), &params );
 		rg_clusteredLightingBoundGridIndex = gridIndex;
 		rg_clusteredLightingStats.gridSwitches++;
+		// grid switches are the only stats mutation on this path; snapshotting the
+		// ~460-byte struct per accepted forward+ draw was pure memcpy overhead
+		R_RendererMetrics_RecordClusteredLighting( rg_clusteredLightingStats );
 	}
 	R_ModernClusteredLighting_BindGpuBuffers( R_ModernClusteredLighting_UseShaderStoragePath() );
-	R_RendererMetrics_RecordClusteredLighting( rg_clusteredLightingStats );
 	return true;
 }
 
@@ -2551,6 +3939,11 @@ const rendererModernShadowDescriptor_t *R_ModernClusteredLighting_ShadowDescript
 
 int R_ModernClusteredLighting_ShadowDescriptorUboBlockBytes( void ) {
 	return static_cast<int>( sizeof( modernClusterShadowDescriptorGpuRecord_t ) ) * MODERN_CLUSTER_MAX_SHADOW_DESCRIPTORS_UBO;
+}
+
+int R_ModernClusteredLighting_ProbeUboBlockBytes( void ) {
+	return static_cast<int>( sizeof( modernSpecularProbeGpuRecord_t ) )
+		* RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS;
 }
 
 static void R_ModernClusteredLighting_SetupSelfTestView( viewDef_t &view, viewLight_t *lights, idRenderLightLocal *lightDefs, int lightCount ) {
@@ -2594,7 +3987,321 @@ static void R_ModernClusteredLighting_SetupSelfTestView( viewDef_t &view, viewLi
 	view.viewLights = lightCount > 0 ? &lights[0] : NULL;
 }
 
+static void R_ModernClusteredLighting_SetupSelfTestDecal( rendererClusteredDecalSource_t &source,
+		const viewDef_t *viewDef, const void *surface, int commandIndex, int commandOrder,
+		unsigned int generation ) {
+	memset( &source, 0, sizeof( source ) );
+	source.viewDef = viewDef;
+	source.sourceSurface = surface;
+	source.commandIndex = commandIndex;
+	source.commandOrder = commandOrder;
+	source.materialStableId = static_cast<unsigned int>( 100 + commandIndex );
+	source.geometryStableId = static_cast<unsigned int>( 200 + commandIndex );
+	source.instanceStableId = static_cast<unsigned int>( 300 + commandIndex );
+	source.screenX1 = 48 + commandIndex * 8;
+	source.screenY1 = 64 + commandIndex * 4;
+	source.screenX2 = source.screenX1 + 95;
+	source.screenY2 = source.screenY1 + 63;
+	source.depthMin = 24.0f + static_cast<float>( commandIndex * 8 );
+	source.depthMax = source.depthMin + 128.0f;
+	source.generation = generation;
+}
+
+static bool R_ModernClusteredLighting_DecalOwnershipIsZero( const viewDef_t *viewDef,
+		const void *surface, int commandIndex ) {
+	const rendererClusteredDecalStats_t &stats = R_ModernClusteredLighting_DecalStats();
+	return !stats.ownershipReady
+		&& stats.publishedRecords == 0
+		&& stats.ownedViews == 0
+		&& !R_ModernClusteredLighting_DecalOwnsSurface( viewDef, surface )
+		&& !R_ModernClusteredLighting_DecalOwnsCommand( viewDef, commandIndex );
+}
+
+static bool R_ModernClusteredLighting_RunDecalSelfTest( viewDef_t &view ) {
+	if ( rg_clusteredLightingFrame.gridCount != 1 || rg_clusteredLightingFrame.clusterCount <= 0 ) {
+		common->Printf( "RendererClusterGrid self-test failed: decal grid unavailable\n" );
+		return false;
+	}
+
+	struct decalGateRestore_t {
+		bool oldMaster;
+		bool oldLeaf;
+		bool oldSharedAmbient;
+		decalGateRestore_t()
+			: oldMaster( r_rendererModernQuality.GetBool() ),
+			  oldLeaf( r_rendererClusteredDecals.GetBool() ),
+			  oldSharedAmbient( r_rendererSharedWorldAmbient.GetBool() ) {
+			r_rendererModernQuality.SetBool( true );
+			r_rendererClusteredDecals.SetBool( true );
+			r_rendererSharedWorldAmbient.SetBool( false );
+		}
+		~decalGateRestore_t() {
+			r_rendererModernQuality.SetBool( oldMaster );
+			r_rendererClusteredDecals.SetBool( oldLeaf );
+			r_rendererSharedWorldAmbient.SetBool( oldSharedAmbient );
+		}
+	} restoreDecalGates;
+
+	const unsigned int generation = R_ModernClusteredLighting_CurrentDecalGeneration();
+	int surfaceIdentities[4] = { 0, 1, 2, 3 };
+	rendererClusteredDecalSource_t sources[3];
+	for ( int sourceIndex = 0; sourceIndex < 3; ++sourceIndex ) {
+		R_ModernClusteredLighting_SetupSelfTestDecal( sources[sourceIndex], &view,
+			&surfaceIdentities[sourceIndex], sourceIndex, 10 + sourceIndex * 10, generation );
+	}
+
+	if ( !R_ModernClusteredLighting_PrepareDecals( sources, 3, generation ) ) {
+		const rendererClusteredDecalStats_t &failed = R_ModernClusteredLighting_DecalStats();
+		common->Printf( "RendererClusterGrid self-test failed: decal prepare rejected (%s source=%d view=%d)\n",
+			R_ModernClusteredLighting_DecalRejectName( failed.lastReject ),
+			failed.lastRejectSource, failed.lastRejectView );
+		return false;
+	}
+	const rendererClusteredDecalStats_t prepared = R_ModernClusteredLighting_DecalStats();
+	rendererClusteredDecalViewStats_t preparedView;
+	if ( !prepared.prepared || prepared.sealed || prepared.ownershipReady || !prepared.csrReady
+			|| prepared.stagedRecords != 3 || prepared.publishedRecords != 0
+			|| prepared.viewCount != 1 || prepared.clusterReferences <= 0
+			|| prepared.clusterReferences > RENDERER_CLUSTER_DECAL_MAX_REFERENCES
+			|| prepared.sourceOrderHash == 0
+			|| !R_ModernClusteredLighting_DecalViewStats( &view, preparedView )
+			|| !preparedView.prepared || preparedView.owned || preparedView.recordCount != 3
+			|| preparedView.firstCommandOrder != 10 || preparedView.lastCommandOrder != 30
+			|| preparedView.clusterReferences != prepared.clusterReferences
+			|| preparedView.sourceOrderHash == 0
+			|| R_ModernClusteredLighting_DecalOwnsSurface( &view, &surfaceIdentities[0] )
+			|| R_ModernClusteredLighting_DecalOwnsCommand( &view, sources[0].commandIndex ) ) {
+		common->Printf(
+			"RendererClusterGrid self-test failed: decal prepared contract invalid (prepared=%d sealed=%d owned=%d csr=%d staged=%d published=%d views=%d refs=%d hash=%llu viewPrepared=%d viewOwned=%d viewCount=%d order=%d..%d viewRefs=%d viewHash=%llu)\n",
+			prepared.prepared ? 1 : 0, prepared.sealed ? 1 : 0,
+			prepared.ownershipReady ? 1 : 0, prepared.csrReady ? 1 : 0,
+			prepared.stagedRecords, prepared.publishedRecords, prepared.viewCount,
+			prepared.clusterReferences, prepared.sourceOrderHash,
+			preparedView.prepared ? 1 : 0, preparedView.owned ? 1 : 0,
+			preparedView.recordCount, preparedView.firstCommandOrder,
+			preparedView.lastCommandOrder, preparedView.clusterReferences,
+			preparedView.sourceOrderHash );
+		return false;
+	}
+	for ( int clusterIndex = 0; clusterIndex < rg_clusteredDecalFrame.clusters.Num(); ++clusterIndex ) {
+		const modernClusterDecalClusterRecord_t &cluster = rg_clusteredDecalFrame.clusters[clusterIndex];
+		int previousRecord = -1;
+		for ( int localReference = 0; localReference < cluster.referenceCount; ++localReference ) {
+			const int referenceIndex = cluster.firstReference + localReference;
+			if ( referenceIndex < 0 || referenceIndex >= rg_clusteredDecalFrame.clusterReferences.Num()
+					|| rg_clusteredDecalFrame.clusterReferences[referenceIndex] <= previousRecord ) {
+				common->Printf( "RendererClusterGrid self-test failed: decal CSR order invalid (cluster=%d ref=%d)\n",
+					clusterIndex, referenceIndex );
+				return false;
+			}
+			previousRecord = rg_clusteredDecalFrame.clusterReferences[referenceIndex];
+		}
+	}
+	idList<int> referenceSnapshot = rg_clusteredDecalFrame.clusterReferences;
+	const unsigned long long preparedHash = prepared.sourceOrderHash;
+	if ( !R_ModernClusteredLighting_SealDecals( sources, 3, generation ) ) {
+		const rendererClusteredDecalStats_t &failed = R_ModernClusteredLighting_DecalStats();
+		common->Printf( "RendererClusterGrid self-test failed: decal seal rejected (%s source=%d view=%d)\n",
+			R_ModernClusteredLighting_DecalRejectName( failed.lastReject ),
+			failed.lastRejectSource, failed.lastRejectView );
+		return false;
+	}
+	const rendererClusteredDecalStats_t sealed = R_ModernClusteredLighting_DecalStats();
+	rendererClusteredDecalViewStats_t sealedView;
+	if ( !sealed.sealed || !sealed.ownershipReady || sealed.publishedRecords != 3
+			|| sealed.ownedViews != 1 || sealed.sourceOrderHash != preparedHash
+			|| !R_ModernClusteredLighting_DecalViewStats( &view, sealedView )
+			|| !sealedView.owned || sealedView.recordCount != 3
+			|| !R_ModernClusteredLighting_DecalOwnsSurface( &view, &surfaceIdentities[0] )
+			|| !R_ModernClusteredLighting_DecalOwnsSurface( &view, &surfaceIdentities[2] )
+			|| !R_ModernClusteredLighting_DecalOwnsCommand( &view, sources[1].commandIndex )
+			|| R_ModernClusteredLighting_DecalOwnsSurface( &view, &surfaceIdentities[3] )
+			|| R_ModernClusteredLighting_DecalOwnsCommand( &view, 999 ) ) {
+		common->Printf( "RendererClusterGrid self-test failed: decal sealed membership invalid (sealed=%d ready=%d published=%d ownedViews=%d hash=%llu)\n",
+			sealed.sealed ? 1 : 0, sealed.ownershipReady ? 1 : 0,
+			sealed.publishedRecords, sealed.ownedViews, sealed.sourceOrderHash );
+		return false;
+	}
+
+	if ( !R_ModernClusteredLighting_PrepareDecals( sources, 3, generation )
+			|| R_ModernClusteredLighting_DecalStats().sourceOrderHash != preparedHash
+			|| rg_clusteredDecalFrame.clusterReferences.Num() != referenceSnapshot.Num() ) {
+		common->Printf( "RendererClusterGrid self-test failed: decal deterministic rebuild rejected\n" );
+		return false;
+	}
+	for ( int referenceIndex = 0; referenceIndex < referenceSnapshot.Num(); ++referenceIndex ) {
+		if ( rg_clusteredDecalFrame.clusterReferences[referenceIndex] != referenceSnapshot[referenceIndex] ) {
+			common->Printf( "RendererClusterGrid self-test failed: decal deterministic CSR mismatch at %d\n", referenceIndex );
+			return false;
+		}
+	}
+	if ( !R_ModernClusteredLighting_SealDecals( sources, 3, generation ) ) {
+		common->Printf( "RendererClusterGrid self-test failed: decal deterministic reseal rejected\n" );
+		return false;
+	}
+
+	if ( R_ModernClusteredLighting_PrepareDecals( &sources[0], RENDERER_CLUSTER_DECAL_MAX_RECORDS + 1, generation )
+			|| R_ModernClusteredLighting_DecalStats().lastReject != RENDERER_CLUSTER_DECAL_REJECT_RECORD_CAPACITY
+			|| !R_ModernClusteredLighting_DecalOwnershipIsZero( &view, &surfaceIdentities[0], sources[0].commandIndex ) ) {
+		common->Printf( "RendererClusterGrid self-test failed: decal record overflow did not fail closed\n" );
+		return false;
+	}
+
+	const modernClusterGridRecord_t &grid = rg_clusteredLightingFrame.grids[0];
+	const int referenceOverflowCount = RENDERER_CLUSTER_DECAL_MAX_REFERENCES / Max( 1, grid.clusterCount ) + 1;
+	if ( referenceOverflowCount <= 0 || referenceOverflowCount > RENDERER_CLUSTER_DECAL_MAX_RECORDS ) {
+		common->Printf( "RendererClusterGrid self-test failed: decal reference overflow fixture invalid (%d records, %d clusters)\n",
+			referenceOverflowCount, grid.clusterCount );
+		return false;
+	}
+	idList<int> overflowSurfaceIdentities;
+	idList<rendererClusteredDecalSource_t> referenceOverflowSources;
+	overflowSurfaceIdentities.SetNum( referenceOverflowCount, false );
+	referenceOverflowSources.SetNum( referenceOverflowCount, false );
+	for ( int sourceIndex = 0; sourceIndex < referenceOverflowCount; ++sourceIndex ) {
+		overflowSurfaceIdentities[sourceIndex] = sourceIndex;
+		R_ModernClusteredLighting_SetupSelfTestDecal( referenceOverflowSources[sourceIndex], &view,
+			&overflowSurfaceIdentities[sourceIndex], sourceIndex, sourceIndex, generation );
+		referenceOverflowSources[sourceIndex].screenX1 = 0;
+		referenceOverflowSources[sourceIndex].screenY1 = 0;
+		referenceOverflowSources[sourceIndex].screenX2 = grid.width - 1;
+		referenceOverflowSources[sourceIndex].screenY2 = grid.height - 1;
+		referenceOverflowSources[sourceIndex].depthMin = Max( 0.01f, grid.nearZ );
+		referenceOverflowSources[sourceIndex].depthMax = grid.farZ;
+	}
+	if ( R_ModernClusteredLighting_PrepareDecals( referenceOverflowSources.Ptr(), referenceOverflowCount, generation )
+			|| R_ModernClusteredLighting_DecalStats().lastReject != RENDERER_CLUSTER_DECAL_REJECT_REFERENCE_CAPACITY
+			|| !R_ModernClusteredLighting_DecalOwnershipIsZero( &view, &overflowSurfaceIdentities[0], 0 ) ) {
+		common->Printf( "RendererClusterGrid self-test failed: decal reference overflow did not fail closed (records=%d clusters=%d reject=%s)\n",
+			referenceOverflowCount, grid.clusterCount,
+			R_ModernClusteredLighting_DecalRejectName( R_ModernClusteredLighting_DecalStats().lastReject ) );
+		return false;
+	}
+
+	rendererClusteredDecalSource_t staleSources[3];
+	memcpy( staleSources, sources, sizeof( staleSources ) );
+	staleSources[1].geometryStableId++;
+	if ( !R_ModernClusteredLighting_PrepareDecals( sources, 3, generation )
+			|| R_ModernClusteredLighting_SealDecals( staleSources, 3, generation )
+			|| R_ModernClusteredLighting_DecalStats().lastReject != RENDERER_CLUSTER_DECAL_REJECT_STALE_IDENTITY
+			|| !R_ModernClusteredLighting_DecalOwnershipIsZero( &view, &surfaceIdentities[0], sources[0].commandIndex ) ) {
+		common->Printf( "RendererClusterGrid self-test failed: stale decal identity did not fail closed (reject=%s)\n",
+			R_ModernClusteredLighting_DecalRejectName( R_ModernClusteredLighting_DecalStats().lastReject ) );
+		return false;
+	}
+
+	rendererClusteredDecalSource_t malformed = sources[0];
+	malformed.screenX2 = malformed.screenX1 - 1;
+	if ( R_ModernClusteredLighting_PrepareDecals( &malformed, 1, generation )
+			|| R_ModernClusteredLighting_DecalStats().lastReject != RENDERER_CLUSTER_DECAL_REJECT_MALFORMED_RECT
+			|| !R_ModernClusteredLighting_DecalOwnershipIsZero( &view, &surfaceIdentities[0], sources[0].commandIndex ) ) {
+		common->Printf( "RendererClusterGrid self-test failed: malformed decal rect did not fail closed\n" );
+		return false;
+	}
+	malformed = sources[0];
+	malformed.depthMin = malformed.depthMax + 1.0f;
+	if ( R_ModernClusteredLighting_PrepareDecals( &malformed, 1, generation )
+			|| R_ModernClusteredLighting_DecalStats().lastReject != RENDERER_CLUSTER_DECAL_REJECT_MALFORMED_DEPTH
+			|| !R_ModernClusteredLighting_DecalOwnershipIsZero( &view, &surfaceIdentities[0], sources[0].commandIndex ) ) {
+		common->Printf( "RendererClusterGrid self-test failed: malformed decal depth did not fail closed\n" );
+		return false;
+	}
+
+	if ( !R_ModernClusteredLighting_PrepareDecals( sources, 3, generation )
+			|| R_ModernClusteredLighting_SealDecals( sources, 3, generation + 1 )
+			|| R_ModernClusteredLighting_DecalStats().lastReject != RENDERER_CLUSTER_DECAL_REJECT_STALE_GENERATION
+			|| !R_ModernClusteredLighting_DecalOwnershipIsZero( &view, &surfaceIdentities[0], sources[0].commandIndex ) ) {
+		common->Printf( "RendererClusterGrid self-test failed: stale decal generation did not fail closed\n" );
+		return false;
+	}
+	if ( !R_ModernClusteredLighting_PrepareDecals( sources, 3, generation )
+			|| R_ModernClusteredLighting_SealDecals( sources, 2, generation )
+			|| R_ModernClusteredLighting_DecalStats().lastReject != RENDERER_CLUSTER_DECAL_REJECT_VIEW_INCOMPLETE
+			|| !R_ModernClusteredLighting_DecalOwnershipIsZero( &view, &surfaceIdentities[0], sources[0].commandIndex ) ) {
+		common->Printf( "RendererClusterGrid self-test failed: incomplete decal seal retained ownership (reject=%s)\n",
+			R_ModernClusteredLighting_DecalRejectName( R_ModernClusteredLighting_DecalStats().lastReject ) );
+		return false;
+	}
+
+	R_ModernClusteredLighting_ResetDecalTransaction();
+	return true;
+}
+
+static bool R_ModernClusteredLighting_RunProbeRecordSelfTest( void ) {
+	if ( sizeof( modernSpecularProbeGpuRecord_t ) != 112
+			|| R_ModernClusteredLighting_ProbeUboBlockBytes()
+				!= 112 * RENDERER_CLUSTER_SPECULAR_PROBE_MAX_RECORDS ) {
+		common->Printf( "RendererClusterGrid self-test failed: specular probe std140 size drifted\n" );
+		return false;
+	}
+
+	modernClusterRecord_t cluster;
+	memset( &cluster, 0, sizeof( cluster ) );
+	for ( int index = 0; index < RENDERER_CLUSTER_SPECULAR_PROBES_PER_CLUSTER; ++index ) {
+		cluster.probes[index].probeIndex = -1;
+		cluster.probes[index].stableId = -1;
+	}
+	modernClusterIndexGpuRecord_t header;
+	memset( &header, 0, sizeof( header ) );
+	R_ModernClusteredLighting_FillProbeHeader( header, cluster );
+	if ( header.indices[2] != 0xffffffffu || header.indices[3] != 0xffffffffu ) {
+		common->Printf( "RendererClusterGrid self-test failed: empty probe header was not sentinel-filled\n" );
+		return false;
+	}
+	cluster.probes[0].probeIndex = 4;
+	cluster.probes[1].probeIndex = 7;
+	R_ModernClusteredLighting_FillProbeHeader( header, cluster );
+	if ( header.indices[2] != 4u || header.indices[3] != 7u ) {
+		common->Printf( "RendererClusterGrid self-test failed: top-two probe header order drifted\n" );
+		return false;
+	}
+
+	if ( R_ModernClusteredLighting_PublishedProbeFrameGeneration(
+			false, 2, 2, true, true, 17 ) != 0u
+			|| R_ModernClusteredLighting_PublishedProbeFrameGeneration(
+				true, 1, 2, true, true, 17 ) != 0u
+			|| R_ModernClusteredLighting_PublishedProbeFrameGeneration(
+				true, 2, 2, true, false, 17 ) != 0u
+			|| R_ModernClusteredLighting_PublishedProbeFrameGeneration(
+				true, 2, 2, true, true, 0 ) != 0u
+			|| R_ModernClusteredLighting_PublishedProbeFrameGeneration(
+				true, 2, 2, true, true, 17 ) != 17u ) {
+		common->Printf( "RendererClusterGrid self-test failed: probe generation gate did not fail closed\n" );
+		return false;
+	}
+
+	modernClusterGridRecord_t grid;
+	memset( &grid, 0, sizeof( grid ) );
+	grid.tileCountX = 1;
+	grid.tileCountY = 1;
+	grid.sliceCountZ = 1;
+	grid.clusterCount = 1;
+	grid.width = 1;
+	grid.height = 1;
+	grid.nearZ = 1.0f;
+	grid.farZ = 64.0f;
+	grid.maxLightsPerCluster = 1;
+	rendererClusteredLightingStats_t stats;
+	memset( &stats, 0, sizeof( stats ) );
+	stats.uploadedProbes = 2;
+	stats.probeFrameGeneration = 17;
+	modernClusterGridGpuParams_t params;
+	R_ModernClusteredLighting_BuildGridParams( grid, stats, params );
+	if ( params.projectionDepth[2] != 2.0f || params.projectionDepth[3] != 17.0f ) {
+		common->Printf( "RendererClusterGrid self-test failed: probe count/generation grid ABI drifted\n" );
+		return false;
+	}
+	return true;
+}
+
 bool RendererClusterGrid_RunSelfTest( void ) {
+	if ( !R_ModernClusteredLighting_RunProbeRecordSelfTest() ) {
+		return false;
+	}
+	if ( !rg_clusteredLightingAvailable ) {
+		common->Printf( "RendererClusterGrid self-test skipped: modern clustered lighting unavailable\n" );
+		return true;
+	}
 	if ( !r_rendererModernExecutor.GetBool() && r_rendererClusterDebug.GetInteger() <= 0 ) {
 		common->Printf( "RendererClusterGrid self-test passed (disabled)\n" );
 		return true;
@@ -2621,6 +4328,28 @@ bool RendererClusterGrid_RunSelfTest( void ) {
 	viewLight_t lights[6];
 	idRenderLightLocal lightDefs[6];
 	R_ModernClusteredLighting_SetupSelfTestView( view, lights, lightDefs, 6 );
+	// Authored falloff coordinates must survive a translated, rotated camera.
+	// Exercise the same transform as the GPU producer against world-space dots.
+	const idPlane testFalloff( 0.013f, 0.017f, 0.029f, 0.43f );
+	view.renderView.vieworg.Set( 71.0f, -39.0f, 125.0f );
+	view.renderView.viewaxis = idAngles( 13.0f, 47.0f, 9.0f ).ToMat3();
+	float transformedFalloff[4];
+	R_ModernClusteredLighting_ViewPlaneForLightProject( &view, testFalloff, transformedFalloff );
+	for ( int i = 0; i < 5; ++i ) {
+		const idVec3 worldPoint( -80.0f + i * 47.0f, 135.0f - i * 29.0f, i * 61.0f );
+		idVec3 cameraPoint;
+		R_ModernClusteredLighting_CameraPoint( &view, worldPoint, cameraPoint );
+		const float sample = cameraPoint.x * transformedFalloff[0] + cameraPoint.y * transformedFalloff[1]
+			+ cameraPoint.z * transformedFalloff[2] + transformedFalloff[3];
+		if ( idMath::Fabs( sample - testFalloff.Distance( worldPoint ) ) > 0.00001f ) {
+			common->Printf( "RendererClusterGrid self-test failed: camera-dependent light falloff\n" );
+			return false;
+		}
+	}
+	view.renderView.vieworg.Zero();
+	view.renderView.viewaxis = mat3_identity;
+	lights[0].lightProject[3] = testFalloff;
+	lights[0].lightProject[2] = idPlane( 0.0f, 0.0f, 0.0f, 1.0f );
 
 	idScenePacketFrame packetFrame;
 	packetFrame.Clear();
@@ -2663,11 +4392,22 @@ bool RendererClusterGrid_RunSelfTest( void ) {
 		common->Printf( "RendererClusterGrid self-test failed: shared descriptor contract invalid\n" );
 		return false;
 	}
+	const float expectedFalloff[4] = { 0.017f, 0.029f, 0.013f, 0.43f };
+	for ( int i = 0; i < 4; ++i ) {
+		if ( firstDescriptor->falloff[i] != expectedFalloff[i]
+				|| firstDescriptor->projectQ[i] != ( i == 3 ? 1.0f : 0.0f ) ) {
+			common->Printf( "RendererClusterGrid self-test failed: authored falloff plane lost\n" );
+			return false;
+		}
+	}
 	const int sliceA = R_ModernClusteredLighting_DepthSliceForZ( rg_clusteredLightingFrame.grids[0], 32.0f );
 	const int sliceB = R_ModernClusteredLighting_DepthSliceForZ( rg_clusteredLightingFrame.grids[0], 512.0f );
 	const int sliceC = R_ModernClusteredLighting_DepthSliceForZ( rg_clusteredLightingFrame.grids[0], 2048.0f );
 	if ( sliceA > sliceB || sliceB > sliceC ) {
 		common->Printf( "RendererClusterGrid self-test failed: depth slices not monotonic (%d %d %d)\n", sliceA, sliceB, sliceC );
+		return false;
+	}
+	if ( !R_ModernClusteredLighting_RunDecalSelfTest( view ) ) {
 		return false;
 	}
 
@@ -2676,7 +4416,10 @@ bool RendererClusterGrid_RunSelfTest( void ) {
 			common->Printf( "RendererClusterGrid self-test failed: clustered CSR upload unavailable\n" );
 			return false;
 		}
-		if ( !stats.buffersReady || !stats.shadowDescriptorBufferReady || !stats.lossless || !stats.csrReady || stats.uploadedLights != 6 || stats.uploadedClusters <= 0 || stats.uploadedReferences != stats.lightReferences || stats.uploadedGridIndexRecords <= 0 || stats.shadowDescriptorCapacity <= 0 || stats.shadowDescriptorBytes <= 0 || ( stats.computeBinningReady && ( !stats.computeBinningExecuted || stats.computeBinningDispatches <= 0 ) ) ) {
+		if ( !stats.buffersReady || !stats.shadowDescriptorBufferReady || !stats.probeBufferReady
+				|| stats.probeUBOBytes != R_ModernClusteredLighting_ProbeUboBlockBytes()
+				|| stats.uploadedProbes != 0 || stats.probeFrameGeneration != 0
+				|| !stats.lossless || !stats.csrReady || stats.uploadedLights != 6 || stats.uploadedClusters <= 0 || stats.uploadedReferences != stats.lightReferences || stats.uploadedGridIndexRecords <= 0 || stats.shadowDescriptorCapacity <= 0 || stats.shadowDescriptorBytes <= 0 || ( stats.computeBinningReady && ( !stats.computeBinningExecuted || stats.computeBinningDispatches <= 0 ) ) ) {
 			common->Printf( "RendererClusterGrid self-test failed: upload stats invalid (buffers=%d shadowBuffer=%d lossless=%d csr=%d lights=%d clusters=%d refs=%d/%d indexRecords=%d shadowDesc=%d/%d bytes=%d compute=%d/%d dispatch=%d)\n", stats.buffersReady ? 1 : 0, stats.shadowDescriptorBufferReady ? 1 : 0, stats.lossless ? 1 : 0, stats.csrReady ? 1 : 0, stats.uploadedLights, stats.uploadedClusters, stats.uploadedReferences, stats.lightReferences, stats.uploadedGridIndexRecords, stats.uploadedShadowDescriptors, stats.shadowDescriptorCapacity, stats.shadowDescriptorBytes, stats.computeBinningReady ? 1 : 0, stats.computeBinningExecuted ? 1 : 0, stats.computeBinningDispatches );
 			return false;
 		}

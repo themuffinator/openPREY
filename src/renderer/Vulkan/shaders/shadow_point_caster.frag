@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "point_shadow_math.glsl"
 
 // openQ4 Vulkan point-light shadow-map caster — fragment stage (Phase F2b).
 //
@@ -52,6 +54,12 @@ float AlphaCoverage(float alpha) {
 }
 
 void main() {
+    if (pc.depthRow.z <= 0.0) {
+        discard;
+    }
+    // Derivatives need the complete fragment quad, before cutout discard.
+    float rawDepth = PointShadowRadialDepth(vPointShadowVector, pc.depthRow.z);
+    float depthSlope = max(abs(dFdx(rawDepth)), abs(dFdy(rawDepth)));
     if (pc.params.x != 0.0) {
         float alpha = texture(alphaMap, vAlphaTexCoord).a * pc.params.z;
         if (pc.params.w > 0.5 && pc.params.x > 0.5
@@ -78,11 +86,5 @@ void main() {
         }
     }
 
-    if (pc.depthRow.z <= 0.0) {
-        discard;
-    }
-
-    float rawDepth = length(vPointShadowVector) / pc.depthRow.z;
-    float depthSlope = max(abs(dFdx(rawDepth)), abs(dFdy(rawDepth)));
     gl_FragDepth = clamp(rawDepth + pc.alphaS.z * depthSlope + pc.alphaT.z, 0.0, 1.0);
 }

@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "framebuffer_coords.glsl"
 
 // Native reconstruction of the source-less Quake 4 Water guide program.
 // The implementation preserves the authored two-normal, reflection,
@@ -56,7 +58,7 @@ vec2 CurrentRenderCoord() {
     vec2 textureScale = max(material.shaderParms[15].xy, vec2(1.0e-6));
 
     // Captured render maps retain OpenGL's bottom-up texture convention.
-    vec2 windowGL = vec2(gl_FragCoord.x, framebufferHeight - gl_FragCoord.y);
+    vec2 windowGL = vec2(gl_FragCoord.x, CanonicalWindowY(framebufferHeight));
     vec2 viewportCoord = (windowGL - viewportOrigin) / viewportSize;
     return clamp(viewportCoord * textureScale, vec2(0.0), textureScale);
 }

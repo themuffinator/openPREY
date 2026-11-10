@@ -43,13 +43,17 @@ If you have questions concerning this license or the applicable additional terms
 
 // LIGHT_CULL_ALL_FRONT, LIGHT_CLIP_EPSILON, and srfCullInfo_t are defined by
 // the shared render-geometry library
-#include "../render_geo/RenderGeometry.h"
+#include "../rendergeo/RenderGeometry.h"
 
 
 typedef struct {		
 	// if lightTris == LIGHT_TRIS_DEFERRED, then the calculation of the
 	// lightTris has been deferred, and must be done if ambientTris is visible
 	srfTriangles_t *		lightTris;
+	// Native PBR evaluates the interpolated normal per fragment. Keep its
+	// light-volume-clipped triangles separate from the classic facing subset.
+	// Owned for this interaction's lifetime; NULL means the classic set suffices.
+	srfTriangles_t *		pbrLightTris;
 
 	// shadow volume triangle surface
 	srfTriangles_t *		shadowTris;
@@ -63,15 +67,22 @@ typedef struct {
 	// openQ4's shadow-map paths draw ambient triangles instead of stencil volumes,
 	// but they must still honor Quake 4's entity-level shadow LOD. Keep validity
 	// separate so cvar-gated shadow-map features can ask for the decision lazily;
-	// the decision is refreshed once per frame so it can never freeze stale.
+	// the decision is refreshed for each renderer view's coverage and distance.
 	bool					shadowLODDecisionValid;
 	bool					shadowLODAdmitted;
-	int						shadowLODDecisionFrame;
+	int						shadowLODDecisionView;
 	// The classic volume path admitted this surface. A static-world surface
 	// may be represented by the light's combined prelight volume instead of
 	// carrying per-interaction shadowTris.
 	bool					shadowStencilEligible;
 	bool					shadowStencilUsesPrelight;
+
+	// Lifetime cache of the point-light emitter-panel caster verdict. Its inputs
+	// (shadow shader, ambientTris, the interaction's local light origin/radius)
+	// are all fixed for the surface interaction's lifetime; any change frees and
+	// rebuilds these surfaces, clearing the flag, so it never goes stale.
+	bool					pointEmitterCasterVerdictValid;
+	bool					pointEmitterCasterSkip;
 
 	int						expCulled;			// only for the experimental shadow buffer renderer
 
@@ -107,6 +118,24 @@ public:
 	idInteraction *			lightPrev;
 	idInteraction *			entityNext;				// for entityDef chains
 	idInteraction *			entityPrev;
+
+	// Vulkan shadow-map admission (R_ShadowMapLightWillUseShadowMaps): whether
+	// a receiver surface of this interaction uses authored GLSL lighting, which
+	// only the light's stencil chain can shadow. Cached for the current surface
+	// set; a generation of -1 means not computed yet. While CreateInteraction
+	// fills the slots, buildModel names the model being built so the verdict
+	// can cover every surface the interaction may still fill.
+	mutable int				stencilReceiverGeneration;
+	mutable bool			stencilReceiverNeeded;
+	const idRenderModel *	buildModel;
+	// The view in which AddActiveInteraction returned with this interaction still
+	// unbuilt. It links no receivers in that view, so the receiver scan need not
+	// wait for it; -1 once its surfaces are freed.
+	int						unbuiltVisitView;
+	// CreateInteraction left out a dynamic model's stencil volumes because the
+	// light was going to render shadow maps. The surfaces are built again, with
+	// their volumes, when the light returns to stencil.
+	bool					shadowVolumesSuppressed;
 
 public:
 							idInteraction( void );

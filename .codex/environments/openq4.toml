@@ -1,529 +1,203 @@
+# Codex app environment. The setup script and actions run VS Code entries through
+# .codex/scripts/run-vscode-entry.ps1, naming each task by its label and each
+# launch by its configuration name. Positions are not stable:
+# tools/debug/generate_vscode_launch.py regroups .vscode/launch.json.
+# tools/tests/vscode_fast_build.py checks that every action runs an entry that
+# exists and is named after it.
+#
+# The launches are the main menus and their variants, then the first level of
+# each campaign and the first map of each stock multiplayer mode, on both
+# renderers. VS Code's Run and Debug list has the rest.
 name = "openQ4"
 
 [setup]
 script = 'echo "No Codex setup script is configured for this platform."'
 
 [setup.win32]
-script = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task 0'
+script = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task "Configure openQ4 (Meson Optimized)"'''
 
 [[actions]]
-name = "Configure openQ4 (Meson Debug)"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task 0'
+name = "Configure openQ4 (Meson Optimized)"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task "Configure openQ4 (Meson Optimized)"'''
 icon = "tool"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "Compile openQ4 (Meson Debug)"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task 1'
+name = "Compile openQ4 (Meson Optimized)"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task "Compile openQ4 (Meson Optimized)"'''
 icon = "tool"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "Stage openQ4 Install Tree (Meson Debug)"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task 2'
+name = "Stage openQ4 Install Tree (Meson Optimized)"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task "Stage openQ4 Install Tree (Meson Optimized)"'''
 icon = "tool"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "Build openQ4 (Meson Debug)"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task 3'
+name = "Build openQ4 (Meson Optimized)"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task "Build openQ4 (Meson Optimized)"'''
 icon = "tool"
-platforms = ["windows"]
+platform = "win32"
+
+[[actions]]
+name = "Full Build and Stage openQ4 (Meson Optimized)"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task "Full Build and Stage openQ4 (Meson Optimized)"'''
+icon = "tool"
+platform = "win32"
 
 [[actions]]
 name = "Bake Light Grids (All MP)"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task 4'
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 task "Bake Light Grids (All MP)"'''
 icon = "tool"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm1 'THE FRAGGING YARD'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 0'
+name = "(SP) Main menu — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) Main menu — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm2 'SANDSTORM'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 1'
+name = "(SP) Main menu — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) Main menu — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm3 'THE LOST FLEET'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 2'
+name = "(MP) Main menu — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) Main menu — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm4 'BLOODWORK'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 3'
+name = "(MP) Main menu — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) Main menu — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm5 'THE ROSE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 4'
+name = "(SP) Awakening main menu — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) Awakening main menu — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm6 'NO DOCTORS'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 5'
+name = "(SP) Awakening main menu — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) Awakening main menu — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm7 'OVER THE EDGE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 6'
+name = "(MP) Awakening main menu — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) Awakening main menu — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm8 'THE LONGEST DAY'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 7'
+name = "(MP) Awakening main menu — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) Awakening main menu — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm9 'CAMPGROUNDS REDUX'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 8'
+name = "(SP) Main menu - Stock UI — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) Main menu - Stock UI — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm10 'OUTPATIENT'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 9'
+name = "(SP) Main menu - Stock UI — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) Main menu - Stock UI — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4dm11 'SKELETON CREW'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 10'
+name = "(MP) Main menu - Stock UI — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) Main menu - Stock UI — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp1 'SPIRAL'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 11'
+name = "(MP) Main menu - Stock UI — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) Main menu - Stock UI — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp2 'GRINDER'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 12'
+name = "(SP) Main menu - Validation Layers — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) Main menu - Validation Layers — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp3 'PHRANTIC'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 13'
+name = "(SP) airdefense1 'AIR DEFENSE BUNKER' — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) airdefense1 'AIR DEFENSE BUNKER' — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp4 'CITY HEAT'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 14'
+name = "(SP) airdefense1 'AIR DEFENSE BUNKER' — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) airdefense1 'AIR DEFENSE BUNKER' — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp5 'RAVAGE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 15'
+name = "(SP) Awakening m01_stranarus_trench1 'STRANARUS TRENCH' — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) Awakening m01_stranarus_trench1 'STRANARUS TRENCH' — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp6 'PENETRATION'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 16'
+name = "(SP) Awakening m01_stranarus_trench1 'STRANARUS TRENCH' — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(SP) Awakening m01_stranarus_trench1 'STRANARUS TRENCH' — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp7 'CAUSTIC BURN'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 17'
+name = "(MP) q4dm1 'THE FRAGGING YARD' — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) q4dm1 'THE FRAGGING YARD' — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp8 'BETTER THAN NOTHING'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 18'
+name = "(MP) q4dm1 'THE FRAGGING YARD' — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) q4dm1 'THE FRAGGING YARD' — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp9 'WALLS OF HATE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 19'
+name = "(MP) q4dm11v1 'THE FRAGGING YARD 1v1' — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) q4dm11v1 'THE FRAGGING YARD 1v1' — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp10 'ARID WASTES'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 20'
+name = "(MP) q4dm11v1 'THE FRAGGING YARD 1v1' — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) q4dm11v1 'THE FRAGGING YARD 1v1' — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp11 'SYSTEMATIC LOCKDOWN'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 21'
+name = "(MP) q4ctf1 'HEARTLESS' — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) q4ctf1 'HEARTLESS' — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp12 'KAT FIGHT!'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 22'
+name = "(MP) q4ctf1 'HEARTLESS' — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) q4ctf1 'HEARTLESS' — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp13 'LEARNING CURVE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 23'
+name = "(MP) q4dz1 'HEARTLESS' — GL"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) q4dz1 'HEARTLESS' — GL"'''
 icon = "run"
-platforms = ["windows"]
+platform = "win32"
 
 [[actions]]
-name = "(MP) q4cmp14 'ATOMS FOR PEACE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 24'
+name = "(MP) q4dz1 'HEARTLESS' — Vulkan"
+command = '''powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch "(MP) q4dz1 'HEARTLESS' — Vulkan"'''
 icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4cmp15 'CLINT EASTWOOD'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 25'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4xdm10 'CENTRAL INDUSTRIAL'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 26'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4xdm11 'WARFORGED'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 27'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4xdm13 'STROYENT RED'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 28'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4xdm14 'RETROPHOBOPOLIS'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 29'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4xdm15 'FIREWALL'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 30'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4dm11v1 'THE FRAGGING YARD 1v1'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 31'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4tourney1 'RAILED'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 32'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4xtourney1 'STROGGENOMENON'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 33'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4xtourney2 'VERTICON'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 34'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4ctf1 'HEARTLESS'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 35'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4ctf2 'DEATH BEFORE DISHONOR'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 36'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4ctf3 'SPEED TRAP'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 37'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4ctf4 'RELATIVITY'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 38'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4ctf5 'XAERO GRAVITY'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 39'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4ctf6 'MIND THE GAP'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 40'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4ctf7 'TREMORS'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 41'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4ctf8 'DOUBLE EDGED'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 42'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4xctf6 'CAVERNOUS CRYONICS'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 43'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4dz1 'HEARTLESS'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 44'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4dz2 'DEATH BEFORE DISHONOR'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 45'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4dz3 'SPEED TRAP'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 46'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP) q4dz4 'THE ROSE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 47'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) airdefense1 'AIR DEFENSE BUNKER'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 48'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) airdefense1_noblue 'AIR DEFENSE BUNKER' - No Blue Global FX"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 49'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) airdefense1 'AIR DEFENSE BUNKER' - Loading Continue Gate"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 50'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) airdefense2 'AIR DEFENSE TRENCHES'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 51'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) hangar1 'HANGAR PERIMETER'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 52'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) hangar2 'INTERIOR HANGAR'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 53'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) mcc_landing 'MCC LANDING SITE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 54'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) mcc_1 'OPERATION: ADVANTAGE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 55'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) convoy1 'CANYON'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 56'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) building_b 'PERIMETER DEFENSE STATION'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 57'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) convoy2 'AQUEDUCTS'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 58'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) convoy2b 'AQUEDUCTS ANNEX'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 59'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) hub1 'NEXUS HUB TUNNELS'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 60'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) hub2 'NEXUS HUB'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 61'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) medlabs 'STROGG MEDICAL FACILITIES'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 62'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) walker 'CONSTRUCTION ZONE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 63'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) dispersal 'DISPERSAL FACILITY'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 64'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) recomp 'RECOMPOSITION CENTER'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 65'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) putra 'PUTRIFICATION CENTER'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 66'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) waste 'WASTE PROCESSING FACILITY'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 67'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) mcc_2 'OPERATION: LAST HOPE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 68'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) storage1 'DATA STORAGE TERMINAL'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 69'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) storage2 'DATA STORAGE SECURITY'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 70'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) tram1 'TRAM HUB STATION'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 71'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) tram1b 'TRAM RAIL'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 72'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) process1 'DATA PROCESSING TERMINAL'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 73'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) process2 'DATA PROCESSING SECURITY'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 74'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) network1 'DATA NETWORKING TERMINAL'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 75'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) network2 'DATA NETWORKING SECURITY'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 76'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) core1 'NEXUS CORE'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 77'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) core2 'THE NEXUS'"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 78'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP) airdefense2 'AIR DEFENSE TRENCHES' - Door Test"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 79'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(MP)"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 80'
-icon = "run"
-platforms = ["windows"]
-
-[[actions]]
-name = "(SP)"
-command = 'powershell -NoProfile -ExecutionPolicy Bypass -File .codex\scripts\run-vscode-entry.ps1 launch 81'
-icon = "run"
-platforms = ["windows"]
+platform = "win32"

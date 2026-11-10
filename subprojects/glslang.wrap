@@ -1,0 +1,6 @@
+[wrap-file]
+directory = glslang-16.6.0
+source_url = https://github.com/KhronosGroup/glslang/archive/refs/tags/16.6.0.tar.gz
+source_filename = glslang-16.6.0.tar.gz
+source_hash = 9c09b901149c729df745057dafa815278aaa101b84d2b6e14f16a42de52f97f2
+patch_directory = glslang

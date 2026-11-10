@@ -55,7 +55,7 @@ dynamicModel_t idRenderModelSprite::IsDynamicModel() const {
 idRenderModelBeam::IsLoaded
 ===============
 */
-bool idRenderModelSprite::IsLoaded() const {
+bool idRenderModelSprite::IsLoaded() {
 	return true;
 }
 
@@ -67,7 +67,7 @@ idRenderModelSprite::InstantiateDynamicModel
 idRenderModel *	idRenderModelSprite::InstantiateDynamicModel( const struct renderEntity_s *renderEntity, const struct viewDef_s *viewDef, idRenderModel *cachedModel ) {
 	idRenderModelStatic *staticModel;
 	srfTriangles_t *tri;
-	modelSurface_t surf;
+	modelSurface_t surf = {};
 
 	if ( cachedModel && !r_useCachedDynamicModels.GetBool() ) {
 		delete cachedModel;
@@ -174,6 +174,13 @@ idRenderModel *	idRenderModelSprite::InstantiateDynamicModel( const struct rende
 	tri->verts[ 3 ].color[ 3 ] = alpha;
 
 	R_BoundTriSurf( tri );
+
+	// The reused snapshot keeps its persistent static ambientCache, and
+	// R_CreateAmbientCache short-circuits on a non-NULL cache, so without this
+	// the first frame's quad (size/vertex color) would render forever. Freeing
+	// the vertex caches after the rewrite forces a re-upload; it is a no-op on a
+	// freshly allocated tri.
+	R_FreeStaticTriSurfVertexCaches( tri );
 
 	staticModel->bounds = tri->bounds;
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PLAN_PATH = "docs/dev/plans/2026-06-30-apple-support-no-macos-access.md"
+PLAN_PATH = "docs/dev/archive/2026-10-18/plans/2026-06-30-apple-support-no-macos-access.md"
 
 
 def read(relative_path: str) -> str:
@@ -37,9 +37,9 @@ def validate_issue_template() -> None:
     template = read(".github/ISSUE_TEMPLATE/macos-crash-report.yml")
 
     for token in (
-        "Experimental macOS crash report",
+        "macOS crash report",
         "issue #73",
-        "macOS support is experimental",
+        "macOS support is a preview",
         "full terminal output as text, not only a screenshot",
         "openQ4 version",
         "Package artifact name",
@@ -261,7 +261,7 @@ def validate_user_docs() -> None:
     release_notes = read("docs/dev/releases/v0.6.5.md")
 
     for token in (
-        "# Experimental macOS Support Data",
+        "# macOS Support Data",
         "GitHub issue #73",
         "Full terminal output as text, not only a screenshot",
         "openQ4-ded_arm64` from Terminal",

@@ -29,15 +29,19 @@ If you have questions concerning this license or the applicable additional terms
 */
 
 #include "../snd_local.h"
+#include "../VoiceChat.h"
+#include "../SoundSettings.h"
 #if defined(USE_DOOMCLASSIC)
 	#include "../../../doomclassic/doom/i_sound.h"
 #endif
 
-idCVar s_showLevelMeter( "s_showLevelMeter", "0", CVAR_BOOL | CVAR_ARCHIVE, "Show VU meter" );
+idCVar s_showLevelMeter( "s_showLevelMeter", "0", CVAR_BOOL, "Show VU meter" );
 idCVar s_meterTopTime( "s_meterTopTime", "1000", CVAR_INTEGER | CVAR_ARCHIVE, "How long (in milliseconds) peaks are displayed on the VU meter" );
 idCVar s_meterPosition( "s_meterPosition", "100 100 20 200", CVAR_ARCHIVE, "VU meter location (x y w h)" );
 idCVar s_device( "s_device", "-1", CVAR_INTEGER | CVAR_ARCHIVE, "Which audio device to use (listDevices to list, -1 for default)" );
 idCVar s_showPerfData( "s_showPerfData", "0", CVAR_BOOL, "Show sound backend performance data" );
+idCVar s_outputLimiter( "s_outputLimiter", "1", CVAR_ARCHIVE | CVAR_BOOL, "soft-limit the final mix so loud scenes compress instead of clipping" );
+idCVar s_resampler( "s_resampler", "auto", CVAR_ARCHIVE, "OpenAL resampler for every voice: auto (an 11th order sinc when the runtime has one), default (the runtime's own), or a name or number from listResamplers; takes effect on s_restart" );
 extern idCVar s_useEAXReverb;
 extern idCVar s_deviceName;
 extern idCVar s_openALHRTF;
@@ -48,6 +52,7 @@ static const char* OPENQ4_AUDIO_DEVICE_DEFAULT_CHOICE = "__OPENQ4_DEFAULT_AUDIO_
 static const int OPENQ4_OPENAL_HRTF_AUTO = 0;
 static const int OPENQ4_OPENAL_HRTF_OFF = 1;
 static const int OPENQ4_OPENAL_HRTF_ON = 2;
+static const int OPENQ4_OPENAL_SPEAKERS_DEVICE = 0;
 static const int OPENQ4_OPENAL_SPEAKERS_STEREO = 2;
 static const int OPENQ4_OPENAL_SPEAKERS_SURROUND = 6;
 
@@ -166,6 +171,7 @@ static void ALC_APIENTRY openQ4_OpenALDeviceEventCallback( ALCenum eventType, AL
 	const int flag = openQ4_DeviceEventFlagForType( eventType );
 	if( flag != 0 )
 	{
+		SoundSettings_DeviceEvent();
 		openQ4_PendingOpenALDeviceEvents.fetch_or( flag, std::memory_order_relaxed );
 	}
 }
@@ -251,6 +257,9 @@ typedef void ( AL_APIENTRY *openq4_alEffecti_t )( ALuint effect, ALenum param, A
 typedef void ( AL_APIENTRY *openq4_alGenAuxiliaryEffectSlots_t )( ALsizei n, ALuint *effectslots );
 typedef void ( AL_APIENTRY *openq4_alDeleteAuxiliaryEffectSlots_t )( ALsizei n, const ALuint *effectslots );
 typedef void ( AL_APIENTRY *openq4_alAuxiliaryEffectSloti_t )( ALuint effectslot, ALenum param, ALint iValue );
+typedef void ( AL_APIENTRY *openq4_alEffectf_t )( ALuint effect, ALenum param, ALfloat flValue );
+typedef void ( AL_APIENTRY *openq4_alEffectfv_t )( ALuint effect, ALenum param, const ALfloat *pflValues );
+typedef void ( AL_APIENTRY *openq4_alGetEffecti_t )( ALuint effect, ALenum param, ALint *piValue );
 
 static openq4_alGenEffects_t qalGenEffects = NULL;
 static openq4_alDeleteEffects_t qalDeleteEffects = NULL;
@@ -258,6 +267,9 @@ static openq4_alEffecti_t qalEffecti = NULL;
 static openq4_alGenAuxiliaryEffectSlots_t qalGenAuxiliaryEffectSlots = NULL;
 static openq4_alDeleteAuxiliaryEffectSlots_t qalDeleteAuxiliaryEffectSlots = NULL;
 static openq4_alAuxiliaryEffectSloti_t qalAuxiliaryEffectSloti = NULL;
+static openq4_alEffectf_t qalEffectf = NULL;
+static openq4_alEffectfv_t qalEffectfv = NULL;
+static openq4_alGetEffecti_t qalGetEffecti = NULL;
 
 static bool openQ4_LoadHardwareEfxProcs() {
 	static bool initialized = false;
@@ -274,6 +286,9 @@ static bool openQ4_LoadHardwareEfxProcs() {
 	qalGenAuxiliaryEffectSlots = reinterpret_cast<openq4_alGenAuxiliaryEffectSlots_t>( alGetProcAddress( "alGenAuxiliaryEffectSlots" ) );
 	qalDeleteAuxiliaryEffectSlots = reinterpret_cast<openq4_alDeleteAuxiliaryEffectSlots_t>( alGetProcAddress( "alDeleteAuxiliaryEffectSlots" ) );
 	qalAuxiliaryEffectSloti = reinterpret_cast<openq4_alAuxiliaryEffectSloti_t>( alGetProcAddress( "alAuxiliaryEffectSloti" ) );
+	qalEffectf = reinterpret_cast<openq4_alEffectf_t>( alGetProcAddress( "alEffectf" ) );
+	qalEffectfv = reinterpret_cast<openq4_alEffectfv_t>( alGetProcAddress( "alEffectfv" ) );
+	qalGetEffecti = reinterpret_cast<openq4_alGetEffecti_t>( alGetProcAddress( "alGetEffecti" ) );
 
 	available =
 		( qalGenEffects != NULL ) &&
@@ -281,7 +296,10 @@ static bool openQ4_LoadHardwareEfxProcs() {
 		( qalEffecti != NULL ) &&
 		( qalGenAuxiliaryEffectSlots != NULL ) &&
 		( qalDeleteAuxiliaryEffectSlots != NULL ) &&
-		( qalAuxiliaryEffectSloti != NULL );
+		( qalAuxiliaryEffectSloti != NULL ) &&
+		( qalEffectf != NULL ) &&
+		( qalEffectfv != NULL ) &&
+		( qalGetEffecti != NULL );
 	return available;
 }
 #endif
@@ -313,12 +331,21 @@ static const char* openQ4_HrtfModeName( const int mode )
 
 static int openQ4_GetSpeakerCount()
 {
-	return ( s_numberOfSpeakers.GetInteger() == OPENQ4_OPENAL_SPEAKERS_SURROUND ) ? OPENQ4_OPENAL_SPEAKERS_SURROUND : OPENQ4_OPENAL_SPEAKERS_STEREO;
+	const int speakers = s_numberOfSpeakers.GetInteger();
+	return ( speakers == OPENQ4_OPENAL_SPEAKERS_STEREO || speakers == OPENQ4_OPENAL_SPEAKERS_SURROUND ) ? speakers : OPENQ4_OPENAL_SPEAKERS_DEVICE;
 }
 
 static const char* openQ4_SpeakerCountName( const int speakerCount )
 {
-	return ( speakerCount == OPENQ4_OPENAL_SPEAKERS_SURROUND ) ? "5.1 surround" : "stereo";
+	switch( speakerCount )
+	{
+		case OPENQ4_OPENAL_SPEAKERS_STEREO:
+			return "stereo";
+		case OPENQ4_OPENAL_SPEAKERS_SURROUND:
+			return "5.1 surround";
+		default:
+			return "device layout";
+	}
 }
 
 #if defined( ALC_OUTPUT_MODE_SOFT ) && defined( ALC_ANY_SOFT ) && defined( ALC_STEREO_SOFT ) && defined( ALC_SURROUND_5_1_SOFT )
@@ -379,27 +406,15 @@ static ALCint openQ4_GetRequestedOutputMode()
 		return ALC_STEREO_HRTF_SOFT;
 	}
 #endif
-	return ( openQ4_GetSpeakerCount() == OPENQ4_OPENAL_SPEAKERS_SURROUND ) ? ALC_SURROUND_5_1_SOFT : ALC_STEREO_SOFT;
-}
-
-static const ALCint* openQ4_BuildOutputModeContextAttributes( ALCdevice* device, ALCint attributes[ 3 ] )
-{
-	attributes[0] = 0;
-	if( device == NULL || alcIsExtensionPresent( device, "ALC_SOFT_output_mode" ) != AL_TRUE )
+	switch( openQ4_GetSpeakerCount() )
 	{
-		if( openQ4_GetSpeakerCount() == OPENQ4_OPENAL_SPEAKERS_SURROUND )
-		{
-			common->Warning( "OpenAL output mode requested '%s', but ALC_SOFT_output_mode is not available.", openQ4_SpeakerCountName( openQ4_GetSpeakerCount() ) );
-		}
-		return NULL;
+		case OPENQ4_OPENAL_SPEAKERS_SURROUND:
+			return ALC_SURROUND_5_1_SOFT;
+		case OPENQ4_OPENAL_SPEAKERS_STEREO:
+			return ALC_STEREO_SOFT;
+		default:
+			return ALC_ANY_SOFT;
 	}
-
-	const ALCint outputMode = openQ4_GetRequestedOutputMode();
-	attributes[0] = ALC_OUTPUT_MODE_SOFT;
-	attributes[1] = outputMode;
-	attributes[2] = 0;
-	common->Printf( "OpenAL output mode requested: %s\n", openQ4_OutputModeName( outputMode ) );
-	return attributes;
 }
 
 static void openQ4_ReportOutputMode( ALCdevice* device )
@@ -418,19 +433,6 @@ static void openQ4_ReportOutputMode( ALCdevice* device )
 	}
 }
 #else
-static const ALCint* openQ4_BuildOutputModeContextAttributes( ALCdevice* device, ALCint attributes[ 3 ] )
-{
-	(void)device;
-	(void)attributes;
-	if( openQ4_GetSpeakerCount() == OPENQ4_OPENAL_SPEAKERS_SURROUND )
-	{
-		// Expected with default cvars on providers without ALC_SOFT_output_mode
-		// (e.g. Apple's OpenAL framework); status line, not a warning.
-		common->Printf( "OpenAL output mode '%s' requested, but this build does not expose ALC_SOFT_output_mode; using the runtime default.\n", openQ4_SpeakerCountName( openQ4_GetSpeakerCount() ) );
-	}
-	return NULL;
-}
-
 static void openQ4_ReportOutputMode( ALCdevice* device )
 {
 	(void)device;
@@ -481,7 +483,7 @@ static bool openQ4_LoadHrtfProcs( ALCdevice* device )
 	return qalcResetDeviceSOFT != NULL;
 }
 
-static void openQ4_ApplyHrtfPreference( ALCdevice* device )
+static void openQ4_ReportHrtfPreference( ALCdevice* device )
 {
 	if( device == NULL )
 	{
@@ -498,33 +500,10 @@ static void openQ4_ApplyHrtfPreference( ALCdevice* device )
 		return;
 	}
 
-	if( !openQ4_LoadHrtfProcs( device ) )
-	{
-		if( mode != OPENQ4_OPENAL_HRTF_AUTO )
-		{
-			common->Warning( "OpenAL HRTF requested '%s', but alcResetDeviceSOFT is unavailable.", openQ4_HrtfModeName( mode ) );
-		}
-		return;
-	}
-
+	// alcGetStringiSOFT lists the HRTFs; the preference itself is applied
+	// through openQ4_BuildDeviceAttributes when the context is created.
+	openQ4_LoadHrtfProcs( device );
 	common->Printf( "OpenAL HRTF requested mode: %s\n", openQ4_HrtfModeName( mode ) );
-	if( mode == OPENQ4_OPENAL_HRTF_AUTO )
-	{
-		return;
-	}
-
-	const ALCint hrtfValue = ( mode == OPENQ4_OPENAL_HRTF_ON ) ? ALC_TRUE : ALC_FALSE;
-	const ALCint hrtfAttributes[] = {
-		ALC_HRTF_SOFT, hrtfValue,
-		0
-	};
-	(void)alcGetError( device );
-	const bool resetSucceeded = qalcResetDeviceSOFT( device, hrtfAttributes ) == ALC_TRUE;
-	const ALCenum resetError = CheckALCErrors( device );
-	if( !resetSucceeded || resetError != ALC_NO_ERROR )
-	{
-		common->Warning( "OpenAL HRTF request '%s' was rejected by the active device.", openQ4_HrtfModeName( mode ) );
-	}
 }
 
 static void openQ4_ReportHrtfStatus( ALCdevice* device )
@@ -563,7 +542,7 @@ static void openQ4_ReportHrtfStatus( ALCdevice* device )
 #endif
 }
 #else
-static void openQ4_ApplyHrtfPreference( ALCdevice* device )
+static void openQ4_ReportHrtfPreference( ALCdevice* device )
 {
 	(void)device;
 	if( openQ4_GetHrtfMode() != OPENQ4_OPENAL_HRTF_AUTO )
@@ -584,6 +563,93 @@ static void openQ4_ReportHrtfStatus( ALCdevice* device )
 
 /*
 ========================
+openQ4_BuildDeviceAttributes
+
+Every device preference travels in one attribute list. alcCreateContext and
+alcReopenDeviceSOFT rebuild the device's parameters from the list they are
+given, so a preference applied any other way (the old HRTF reset before the
+context existed) silently reverts to the runtime default: s_openALHRTF 1 still
+heard HRTF, and a hot-plug reopen dropped the speaker layout.
+========================
+*/
+static const int OPENQ4_OPENAL_DEVICE_ATTRIBUTE_CAPACITY = 7;	// three pairs and the terminator
+
+static const ALCint* openQ4_BuildDeviceAttributes( ALCdevice* device, ALCint attributes[ OPENQ4_OPENAL_DEVICE_ATTRIBUTE_CAPACITY ], const bool report )
+{
+	int count = 0;
+	attributes[0] = 0;
+	if( device == NULL )
+	{
+		return NULL;
+	}
+
+#if OPENQ4_OPENAL_HRTF_SUPPORTED
+	const int hrtfMode = openQ4_GetHrtfMode();
+	if( hrtfMode != OPENQ4_OPENAL_HRTF_AUTO && alcIsExtensionPresent( device, "ALC_SOFT_HRTF" ) == AL_TRUE )
+	{
+		attributes[count++] = ALC_HRTF_SOFT;
+		attributes[count++] = ( hrtfMode == OPENQ4_OPENAL_HRTF_ON ) ? ALC_TRUE : ALC_FALSE;
+	}
+#endif
+
+#if OPENQ4_OPENAL_OUTPUT_MODE_SUPPORTED
+	if( alcIsExtensionPresent( device, "ALC_SOFT_output_mode" ) == AL_TRUE )
+	{
+		const ALCint outputMode = openQ4_GetRequestedOutputMode();
+		attributes[count++] = ALC_OUTPUT_MODE_SOFT;
+		attributes[count++] = outputMode;
+		if( report )
+		{
+			common->Printf( "OpenAL output mode requested: %s\n", openQ4_OutputModeName( outputMode ) );
+		}
+	}
+	else if( report && openQ4_GetSpeakerCount() == OPENQ4_OPENAL_SPEAKERS_SURROUND )
+	{
+		common->Warning( "OpenAL output mode requested '%s', but ALC_SOFT_output_mode is not available.", openQ4_SpeakerCountName( openQ4_GetSpeakerCount() ) );
+	}
+#else
+	if( report && openQ4_GetSpeakerCount() == OPENQ4_OPENAL_SPEAKERS_SURROUND )
+	{
+		// Expected with default cvars on providers without ALC_SOFT_output_mode
+		// (e.g. Apple's OpenAL framework); status line, not a warning.
+		common->Printf( "OpenAL output mode '%s' requested, but this build does not expose ALC_SOFT_output_mode; using the runtime default.\n", openQ4_SpeakerCountName( openQ4_GetSpeakerCount() ) );
+	}
+#endif
+
+#if defined( ALC_OUTPUT_LIMITER_SOFT )
+	// OpenAL Soft only limits integer output by default, and shared-mode Windows
+	// endpoints mix in float, so a big firefight could clip; ask for it outright.
+	if( alcIsExtensionPresent( device, "ALC_SOFT_output_limiter" ) == AL_TRUE )
+	{
+		attributes[count++] = ALC_OUTPUT_LIMITER_SOFT;
+		attributes[count++] = s_outputLimiter.GetBool() ? ALC_TRUE : ALC_FALSE;
+	}
+#endif
+
+	attributes[count] = 0;
+	return ( count > 0 ) ? attributes : NULL;
+}
+
+static void openQ4_ReportOutputLimiter( ALCdevice* device )
+{
+#if defined( ALC_OUTPUT_LIMITER_SOFT )
+	if( device == NULL || alcIsExtensionPresent( device, "ALC_SOFT_output_limiter" ) != AL_TRUE )
+	{
+		return;
+	}
+	ALCint limiter = ALC_FALSE;
+	alcGetIntegerv( device, ALC_OUTPUT_LIMITER_SOFT, 1, &limiter );
+	if( CheckALCErrors( device ) == ALC_NO_ERROR )
+	{
+		common->Printf( "OpenAL output limiter: %s\n", limiter == ALC_TRUE ? "on" : "off" );
+	}
+#else
+	(void)device;
+#endif
+}
+
+/*
+========================
 idSoundHardware_OpenAL::idSoundHardware_OpenAL
 ========================
 */
@@ -595,6 +661,14 @@ idSoundHardware_OpenAL::idSoundHardware_OpenAL()
 	efxEnabled = false;
 	auxEffectSlot = 0;
 	auxReverbEffect = 0;
+	for( int i = 0; i < SOUND_REVERB_SLOTS - 1; i++ )
+	{
+		areaReverbSlots[i] = 0;
+		areaReverbEffects[i] = 0;
+	}
+	maxAuxiliarySends = 0;
+	reverbSlotGeneration = 0;
+	ResetReverbSlotState();
 	deviceEventsEnabled = false;
 	enabledDeviceEventFlags = 0;
 	reopenDeviceAvailable = false;
@@ -607,6 +681,18 @@ idSoundHardware_OpenAL::idSoundHardware_OpenAL()
 	openedWithDefaultFallback = false;
 	openedHrtfMode = openQ4_GetHrtfMode();
 	openedSpeakerCount = openQ4_GetSpeakerCount();
+	// soundSystemLocal is built during static initialization, before cvars from
+	// other files exist; CaptureOpenedDeviceState records the real value
+	openedOutputLimiter = true;
+	sourceRadiusAvailable = false;
+	directChannelsAvailable = false;
+	directChannelsMode = AL_FALSE;
+	sourceResampler = -1;
+	outputSerial = 1;
+	outputCenterObserved = false;
+	centerRoutingAvailable = false;
+	disconnectQueryAvailable = false;
+	simulatedInterruptionEnd = 0;
 
 	//vuMeterRMS = NULL;
 	//vuMeterPeak = NULL;
@@ -792,6 +878,7 @@ void idSoundHardware_OpenAL::CaptureOpenedDeviceState( const char* requestedDevi
 	openedWithDefaultFallback = openedRequestedDeviceName.Length() > 0 && openedActiveDeviceName.Icmp( openedRequestedDeviceName ) != 0;
 	openedHrtfMode = openQ4_GetHrtfMode();
 	openedSpeakerCount = openQ4_GetSpeakerCount();
+	openedOutputLimiter = s_outputLimiter.GetBool();
 	lastDeviceCheckTime = Sys_Milliseconds();
 }
 
@@ -926,7 +1013,10 @@ bool idSoundHardware_OpenAL::TryReopenDevice( const char* requestedDeviceName, c
 	}
 
 	(void)alcGetError( openalDevice );
-	const bool reopened = qalcReopenDeviceSOFT( openalDevice, reopenDeviceName, NULL ) == ALC_TRUE;
+	// The reopened device is rebuilt from these attributes alone; NULL would drop the
+	// HRTF preference, the speaker layout and the limiter.
+	ALCint reopenAttributes[ OPENQ4_OPENAL_DEVICE_ATTRIBUTE_CAPACITY ];
+	const bool reopened = qalcReopenDeviceSOFT( openalDevice, reopenDeviceName, openQ4_BuildDeviceAttributes( openalDevice, reopenAttributes, false ) ) == ALC_TRUE;
 	const ALCenum reopenError = CheckALCErrors( openalDevice );
 	if( !reopened || reopenError != ALC_NO_ERROR )
 	{
@@ -950,12 +1040,160 @@ bool idSoundHardware_OpenAL::TryReopenDevice( const char* requestedDeviceName, c
 	}
 	openQ4_ReportHrtfStatus( openalDevice );
 	openQ4_ReportOutputMode( openalDevice );
+	openQ4_ReportOutputLimiter( openalDevice );
+	// A disconnect left every source stopped, and the new endpoint can have
+	// another layout: voices restart or re-route at the scene clock.
+	NoteOutputChanged( reason != NULL ? reason : "device reopened" );
 	return true;
 #else
 	(void)normalizedRequestedDeviceName;
 	(void)reason;
 	return false;
 #endif
+}
+
+/*
+========================
+idSoundHardware_OpenAL::TryResetDevice
+
+Applies a changed speaker layout, HRTF mode or limiter to the open device in
+place. alcResetDeviceSOFT keeps the context, its sources, buffers and effect
+slots, so nothing is reloaded; the restart this replaces freed and decoded every
+sample again. Playing voices re-route at their scene clock when the layout's
+centre speaker comes or goes.
+========================
+*/
+bool idSoundHardware_OpenAL::TryResetDevice( const char* reason )
+{
+#if OPENQ4_OPENAL_HRTF_SUPPORTED
+	if( openalDevice == NULL || alcIsExtensionPresent( openalDevice, "ALC_SOFT_HRTF" ) != ALC_TRUE )
+	{
+		return false;
+	}
+	if( qalcResetDeviceSOFT == NULL && !openQ4_LoadHrtfProcs( openalDevice ) )
+	{
+		return false;
+	}
+	ALCint resetAttributes[ OPENQ4_OPENAL_DEVICE_ATTRIBUTE_CAPACITY ];
+	const ALCint* attributes = openQ4_BuildDeviceAttributes( openalDevice, resetAttributes, true );
+	(void)alcGetError( openalDevice );
+	const bool reset = qalcResetDeviceSOFT( openalDevice, attributes ) == ALC_TRUE;
+	if( CheckALCErrors( openalDevice ) != ALC_NO_ERROR || !reset )
+	{
+		common->Warning( "OpenAL in-place device reset failed; falling back to sound system restart." );
+		return false;
+	}
+	openedHrtfMode = openQ4_GetHrtfMode();
+	openedSpeakerCount = openQ4_GetSpeakerCount();
+	openedOutputLimiter = s_outputLimiter.GetBool();
+	// An owned settings transaction must see that the device changed under it.
+	SoundSettings_DeviceEvent();
+	common->Printf( "OpenAL %s; device reset in place.\n", reason );
+	openQ4_ReportHrtfStatus( openalDevice );
+	openQ4_ReportOutputMode( openalDevice );
+	openQ4_ReportOutputLimiter( openalDevice );
+	NoteOutputChanged( reason );
+	return true;
+#else
+	(void)reason;
+	return false;
+#endif
+}
+
+/*
+========================
+idSoundHardware_OpenAL::NoteOutputChanged
+========================
+*/
+void idSoundHardware_OpenAL::NoteOutputChanged( const char* reason )
+{
+	++outputSerial;
+	outputCenterObserved = HasCenterChannelOutput();
+	common->Printf( "OpenAL output changed (%s): serial %u, centre speaker %s\n", reason, outputSerial, outputCenterObserved ? "routed" : "not routed" );
+}
+
+/*
+========================
+idSoundHardware_OpenAL::UpdateOutputState
+
+Every frame, before the throttled device checks: ends a simulated interruption,
+and notices a centre speaker appearing or going away under the open context.
+========================
+*/
+void idSoundHardware_OpenAL::UpdateOutputState()
+{
+	if( simulatedInterruptionEnd != 0 && Sys_Milliseconds() - simulatedInterruptionEnd >= 0 )
+	{
+		simulatedInterruptionEnd = 0;
+		NoteOutputChanged( "simulated interruption ended" );
+		return;
+	}
+	if( HasCenterChannelOutput() != outputCenterObserved )
+	{
+		NoteOutputChanged( outputCenterObserved ? "centre speaker lost" : "centre speaker available" );
+	}
+}
+
+/*
+========================
+idSoundHardware_OpenAL::IsOutputConnected
+========================
+*/
+bool idSoundHardware_OpenAL::IsOutputConnected() const
+{
+	if( openalDevice == NULL || simulatedInterruptionEnd != 0 )
+	{
+		return false;
+	}
+#if defined( ALC_CONNECTED )
+	if( disconnectQueryAvailable )
+	{
+		ALCint connected = ALC_TRUE;
+		alcGetIntegerv( openalDevice, ALC_CONNECTED, 1, &connected );
+		return connected != ALC_FALSE;
+	}
+#endif
+	return true;
+}
+
+/*
+========================
+idSoundHardware_OpenAL::SimulateOutputInterruption
+
+What OpenAL Soft does to a context when its endpoint disconnects, without a
+physical device: every source stops, whatever it was doing, and stays stopped.
+The voices then follow the production recovery path; the outage ends with the
+same output change notice a reopen gives.
+========================
+*/
+void idSoundHardware_OpenAL::SimulateOutputInterruption( int msec )
+{
+	if( openalDevice == NULL )
+	{
+		common->Printf( "No active OpenAL device.\n" );
+		return;
+	}
+	for( int i = 0; i < voices.Num(); i++ )
+	{
+		if( alIsSource( voices[i].openalSource ) )
+		{
+			alSourceStop( voices[i].openalSource );
+		}
+	}
+	SoundVoiceChat_OutputInterrupted();
+	CheckALErrors();
+	msec = idMath::ClampInt( 1, 60000, msec );
+	simulatedInterruptionEnd = Sys_Milliseconds() + msec;
+	if( simulatedInterruptionEnd == 0 )
+	{
+		simulatedInterruptionEnd = 1;
+	}
+	common->Printf( "SOUND_OUTPUT_INTERRUPTION msec=%d serial=%u\n", msec, outputSerial );
+}
+
+static void testDeviceInterruption_f( const idCmdArgs& args )
+{
+	soundSystemLocal.hardware.SimulateOutputInterruption( args.Argc() > 1 ? atoi( args.Argv( 1 ) ) : 1000 );
 }
 
 void idSoundHardware_OpenAL::BeginDeferredUpdates() {
@@ -994,6 +1232,9 @@ void idSoundHardware_OpenAL::EndDeferredUpdates() {
 }
 
 bool idSoundHardware_OpenAL::UpdateDeviceMonitoring() {
+	// The owned settings lease queries drift and keeps recovery authority.
+	if (SoundSettings_BlockAutomaticRestart()) return false;
+	UpdateOutputState();
 	const int nowTime = Sys_Milliseconds();
 	const int pendingDeviceEventFlags = openQ4_ConsumePendingDeviceEventFlags();
 	if( pendingDeviceEventFlags != 0 )
@@ -1039,16 +1280,39 @@ bool idSoundHardware_OpenAL::UpdateDeviceMonitoring() {
 		return true;
 	}
 
+	// Layout, HRTF and limiter changes apply to the open device in place; a full
+	// restart, which reloads every sample, is only the fallback.
 	const int hrtfMode = openQ4_GetHrtfMode();
 	if( hrtfMode != openedHrtfMode ) {
-		common->Printf( "OpenAL HRTF mode changed from %s to %s; restarting sound system.\n", openQ4_HrtfModeName( openedHrtfMode ), openQ4_HrtfModeName( hrtfMode ) );
+		common->Printf( "OpenAL HRTF mode changed from %s to %s.\n", openQ4_HrtfModeName( openedHrtfMode ), openQ4_HrtfModeName( hrtfMode ) );
+		if( TryResetDevice( "HRTF mode changed" ) )
+		{
+			return false;
+		}
+		common->Printf( "OpenAL HRTF mode change requires sound system restart.\n" );
 		soundSystemLocal.SetNeedsRestart();
 		return true;
 	}
 
 	const int speakerCount = openQ4_GetSpeakerCount();
 	if( speakerCount != openedSpeakerCount ) {
-		common->Printf( "OpenAL speaker mode changed from %s to %s; restarting sound system.\n", openQ4_SpeakerCountName( openedSpeakerCount ), openQ4_SpeakerCountName( speakerCount ) );
+		common->Printf( "OpenAL speaker mode changed from %s to %s.\n", openQ4_SpeakerCountName( openedSpeakerCount ), openQ4_SpeakerCountName( speakerCount ) );
+		if( TryResetDevice( "speaker mode changed" ) )
+		{
+			return false;
+		}
+		common->Printf( "OpenAL speaker mode change requires sound system restart.\n" );
+		soundSystemLocal.SetNeedsRestart();
+		return true;
+	}
+
+	if( s_outputLimiter.GetBool() != openedOutputLimiter ) {
+		common->Printf( "OpenAL output limiter turned %s.\n", s_outputLimiter.GetBool() ? "on" : "off" );
+		if( TryResetDevice( "output limiter changed" ) )
+		{
+			return false;
+		}
+		common->Printf( "OpenAL output limiter change requires sound system restart.\n" );
 		soundSystemLocal.SetNeedsRestart();
 		return true;
 	}
@@ -1154,6 +1418,247 @@ void idSoundHardware_OpenAL::PrintALInfo()
 	CheckALErrors();
 }
 
+#if defined( AL_SOURCE_RESAMPLER_SOFT ) && defined( AL_NUM_RESAMPLERS_SOFT ) && defined( AL_DEFAULT_RESAMPLER_SOFT ) && defined( AL_RESAMPLER_NAME_SOFT )
+	#define OPENQ4_OPENAL_RESAMPLER_SUPPORTED 1
+typedef const ALchar* ( AL_APIENTRY *openq4_alGetStringiSOFT_t )( ALenum pname, ALsizei index );
+
+static const char* openQ4_ResamplerName( openq4_alGetStringiSOFT_t getStringi, const ALint index )
+{
+	const ALchar* name = getStringi != NULL ? getStringi( AL_RESAMPLER_NAME_SOFT, index ) : NULL;
+	return name != NULL ? name : "";
+}
+
+/*
+========================
+openQ4_SelectResampler
+
+Quake 4 recorded 4762 of its 5737 sounds at 22.05 kHz, so nearly every voice is
+upsampled about 2.2x to a 48 kHz device. A short polyphase sinc keeps the images
+above 11 kHz out of the mix; the runtime's own default is a 4-point
+interpolator. Returns -1 to leave the runtime default in place.
+========================
+*/
+static ALint openQ4_SelectResampler( idStr& chosenName )
+{
+	chosenName = "runtime default";
+	if( alIsExtensionPresent( "AL_SOFT_source_resampler" ) != AL_TRUE )
+	{
+		chosenName = "runtime default (no AL_SOFT_source_resampler)";
+		return -1;
+	}
+	const openq4_alGetStringiSOFT_t getStringi = reinterpret_cast<openq4_alGetStringiSOFT_t>( alGetProcAddress( "alGetStringiSOFT" ) );
+	const ALint count = alGetInteger( AL_NUM_RESAMPLERS_SOFT );
+	const ALint defaultIndex = alGetInteger( AL_DEFAULT_RESAMPLER_SOFT );
+	if( CheckALErrors() != AL_NO_ERROR || getStringi == NULL || count <= 0 )
+	{
+		return -1;
+	}
+	if( defaultIndex >= 0 && defaultIndex < count )
+	{
+		chosenName = openQ4_ResamplerName( getStringi, defaultIndex );
+	}
+
+	const idStr request = s_resampler.GetString();
+	ALint chosen = -1;
+	if( request.Length() == 0 || request.Icmp( "default" ) == 0 )
+	{
+		return -1;
+	}
+	if( request.Icmp( "auto" ) == 0 )
+	{
+		for( ALint i = 0; i < count && chosen < 0; i++ )
+		{
+			const idStr name = openQ4_ResamplerName( getStringi, i );
+			if( name.Find( "11th order Sinc", false ) >= 0 && name.Find( "fast", false ) < 0 )
+			{
+				chosen = i;
+			}
+		}
+		for( ALint i = 0; i < count && chosen < 0; i++ )
+		{
+			if( idStr( openQ4_ResamplerName( getStringi, i ) ).Find( "Sinc", false ) >= 0 )
+			{
+				chosen = i;
+			}
+		}
+	}
+	else if( request.IsNumeric() )
+	{
+		const int index = atoi( request.c_str() );
+		if( index >= 0 && index < count )
+		{
+			chosen = index;
+		}
+	}
+	else
+	{
+		for( ALint i = 0; i < count && chosen < 0; i++ )
+		{
+			if( request.Icmp( openQ4_ResamplerName( getStringi, i ) ) == 0 )
+			{
+				chosen = i;
+			}
+		}
+	}
+	if( chosen < 0 )
+	{
+		if( request.Icmp( "auto" ) != 0 )
+		{
+			common->Warning( "s_resampler '%s' names no OpenAL resampler; keeping the runtime default (listResamplers lists them).", request.c_str() );
+		}
+		return -1;
+	}
+	chosenName = openQ4_ResamplerName( getStringi, chosen );
+	return chosen;
+}
+
+static void listResamplers_f( const idCmdArgs& args )
+{
+	(void)args;
+	if( soundSystem->GetOpenALDevice() == NULL || alIsExtensionPresent( "AL_SOFT_source_resampler" ) != AL_TRUE )
+	{
+		idLib::Printf( "OpenAL resamplers: unavailable\n" );
+		return;
+	}
+	const openq4_alGetStringiSOFT_t getStringi = reinterpret_cast<openq4_alGetStringiSOFT_t>( alGetProcAddress( "alGetStringiSOFT" ) );
+	const ALint count = alGetInteger( AL_NUM_RESAMPLERS_SOFT );
+	const ALint defaultIndex = alGetInteger( AL_DEFAULT_RESAMPLER_SOFT );
+	const ALint active = soundSystemLocal.hardware.GetSourceResampler();
+	idLib::Printf( "OpenAL resamplers (s_resampler accepts a name or number):\n" );
+	for( ALint i = 0; i < count; i++ )
+	{
+		const bool isActive = ( active >= 0 ) ? ( i == active ) : ( i == defaultIndex );
+		idLib::Printf( "  %c %d: %s%s\n", isActive ? '*' : ' ', i, openQ4_ResamplerName( getStringi, i ), i == defaultIndex ? " (runtime default)" : "" );
+	}
+	CheckALErrors();
+}
+#else
+	#define OPENQ4_OPENAL_RESAMPLER_SUPPORTED 0
+static ALint openQ4_SelectResampler( idStr& chosenName )
+{
+	chosenName = "runtime default";
+	return -1;
+}
+
+static void listResamplers_f( const idCmdArgs& args )
+{
+	(void)args;
+	idLib::Printf( "OpenAL resamplers: unavailable\n" );
+}
+#endif
+
+/*
+========================
+idSoundHardware_OpenAL::GetAirAbsorptionGainHF
+========================
+*/
+float idSoundHardware_OpenAL::GetAirAbsorptionGainHF() const
+{
+	if( !efxEnabled || primaryReverbSlot < 0 || primaryReverbSlot >= SOUND_REVERB_SLOTS )
+	{
+		return 1.0f;
+	}
+	const float gain = appliedReverb[primaryReverbSlot].airAbsorptionGainHF;
+	return ( FLOAT_IS_NAN( gain ) || gain <= 0.0f || gain > 1.0f ) ? 1.0f : gain;
+}
+
+float idSoundHardware_OpenAL::GetReverbSlotRoomRolloff( int slot ) const
+{
+	if( !efxEnabled || slot < 0 || slot >= SOUND_REVERB_SLOTS || appliedReverbSlot[slot] == 0 )
+	{
+		return 0.0f;
+	}
+	const float rolloff = appliedReverb[slot].roomRolloffFactor;
+	return ( FLOAT_IS_NAN( rolloff ) || rolloff <= 0.0f ) ? 0.0f : rolloff;
+}
+
+/*
+========================
+idSoundHardware_OpenAL::HasCenterChannelOutput
+
+True when the context renders a 5.1/6.1/7.1 layout and can play 5.1 buffers
+through direct channels, the only case in which centre routing is used.
+========================
+*/
+bool idSoundHardware_OpenAL::HasCenterChannelOutput() const
+{
+#if defined( ALC_OUTPUT_MODE_SOFT ) && defined( AL_FORMAT_51CHN16 ) && defined( AL_DIRECT_CHANNELS_SOFT )
+	// The extensions are the context's (DetectVoiceFeatures); the layout is queried
+	// live, since a reopen or an in-place reset can change it under every voice.
+	if( openalDevice == NULL || !centerRoutingAvailable ) return false;
+	ALCint mode = 0;
+	alcGetError( openalDevice );
+	alcGetIntegerv( openalDevice, ALC_OUTPUT_MODE_SOFT, 1, &mode );
+	if( alcGetError( openalDevice ) != ALC_NO_ERROR ) return false;
+	return mode == ALC_SURROUND_5_1_SOFT || mode == ALC_SURROUND_6_1_SOFT || mode == ALC_SURROUND_7_1_SOFT;
+#else
+	return false;
+#endif
+}
+
+uint64 idSoundHardware_OpenAL::QueuedBufferBytes() const {
+	uint64 total = 0;
+	for (int i = 0; i < voices.Num(); ++i) {
+		for (int j = 0; j < 3; ++j) {
+			const ALuint buffer = voices[i].openalStreamingBuffer[j];
+			if (buffer == 0) continue;
+			ALint bytes = 0;
+			alGetBufferi(buffer, AL_SIZE, &bytes);
+			if (CheckALErrors() == AL_NO_ERROR && bytes > 0) total += bytes;
+		}
+	}
+	return total;
+}
+
+/*
+========================
+idSoundHardware_OpenAL::DetectVoiceFeatures
+
+What every voice can use on this context. Called with the context current.
+========================
+*/
+void idSoundHardware_OpenAL::DetectVoiceFeatures()
+{
+	sourceRadiusAvailable = false;
+	directChannelsAvailable = false;
+	directChannelsMode = AL_FALSE;
+	sourceResampler = -1;
+
+#if defined( AL_SOURCE_RADIUS )
+	sourceRadiusAvailable = alIsExtensionPresent( "AL_EXT_SOURCE_RADIUS" ) == AL_TRUE;
+#endif
+#if defined( AL_DIRECT_CHANNELS_SOFT )
+	if( alIsExtensionPresent( "AL_SOFT_direct_channels" ) == AL_TRUE )
+	{
+		directChannelsAvailable = true;
+		directChannelsMode = AL_TRUE;
+#if defined( AL_REMIX_UNMATCHED_SOFT )
+		// remix rather than drop channels the output does not have
+		if( alIsExtensionPresent( "AL_SOFT_direct_channels_remix" ) == AL_TRUE )
+		{
+			directChannelsMode = AL_REMIX_UNMATCHED_SOFT;
+		}
+#endif
+	}
+#endif
+	centerRoutingAvailable = directChannelsAvailable && openalDevice != NULL &&
+		alIsExtensionPresent( "AL_EXT_MCFORMATS" ) == AL_TRUE &&
+		alcIsExtensionPresent( openalDevice, "ALC_SOFT_output_mode" ) == ALC_TRUE;
+	idStr resamplerName;
+	sourceResampler = openQ4_SelectResampler( resamplerName );
+
+	// Doom units are inches, and OpenAL reads AL_SPEED_OF_SOUND in the units of the
+	// velocities it is given, so its 343.3 default meant 343 inches a second.
+	alSpeedOfSound( 343.3f / 0.0254f );
+	alDopplerFactor( 1.0f );
+	CheckALErrors();
+
+	common->Printf( "OpenAL voices: source radius %s, direct stereo %s, resampler %s\n",
+		sourceRadiusAvailable ? "on" : "unavailable",
+		directChannelsAvailable ? ( directChannelsMode == AL_TRUE ? "on" : "on (remixed)" ) : "unavailable",
+		resamplerName.c_str() );
+}
+
 void listDevices_f( const idCmdArgs& args )
 {
 	idStrList deviceNames;
@@ -1190,11 +1695,16 @@ idSoundHardware_OpenAL::Init
 */
 void idSoundHardware_OpenAL::Init()
 {
+	if (SoundSettings_BlockAutomaticRestart()) return;
+	SoundSettings_DeviceInitialized();
 	static bool listDevicesCommandAdded = false;
 	if( !listDevicesCommandAdded )
 	{
 		listDevicesCommandAdded = true;
 		cmdSystem->AddCommand( "listDevices", listDevices_f, 0, "Lists the connected sound devices", NULL );
+		cmdSystem->AddCommand( "listResamplers", listResamplers_f, 0, "Lists the OpenAL resamplers s_resampler can pick", NULL );
+		cmdSystem->AddCommand( "s_testDeviceInterruption", testDeviceInterruption_f, CMD_FL_SOUND | CMD_FL_CHEAT,
+			"stops every sound as a lost audio device does and refuses new ones for [msec] (default 1000), then reports the device returned", NULL );
 	}
 
 	// Periodic re-init retries after a failure run silently so a missing
@@ -1237,15 +1747,15 @@ void idSoundHardware_OpenAL::Init()
 		return;
 	}
 
-	openQ4_ApplyHrtfPreference( openalDevice );
+	openQ4_ReportHrtfPreference( openalDevice );
 
-	ALCint openalContextAttributes[ 3 ];
-	const ALCint* requestedContextAttributes = openQ4_BuildOutputModeContextAttributes( openalDevice, openalContextAttributes );
+	ALCint openalContextAttributes[ OPENQ4_OPENAL_DEVICE_ATTRIBUTE_CAPACITY ];
+	const ALCint* requestedContextAttributes = openQ4_BuildDeviceAttributes( openalDevice, openalContextAttributes, true );
 	openalContext = alcCreateContext( openalDevice, requestedContextAttributes );
 	if( openalContext == NULL && requestedContextAttributes != NULL )
 	{
 		CheckALCErrors( openalDevice );
-		common->Warning( "idSoundHardware_OpenAL::Init: alcCreateContext() rejected requested OpenAL output mode; retrying with runtime default." );
+		common->Warning( "idSoundHardware_OpenAL::Init: alcCreateContext() rejected the requested OpenAL device attributes; retrying with runtime default." );
 		openalContext = alcCreateContext( openalDevice, NULL );
 	}
 	if( openalContext == NULL )
@@ -1280,6 +1790,8 @@ void idSoundHardware_OpenAL::Init()
 		return;
 	}
 
+	// A restart or a device retry must retain an outstanding app suspension.
+	SetDevicePaused( devicePauseRequested );
 	if( !quietRetry )
 	{
 		common->Printf( "Done.\n" );
@@ -1321,6 +1833,35 @@ void idSoundHardware_OpenAL::Init()
 	common->Printf( "OpenAL renderer: %s\n", alGetString( AL_RENDERER ) );
 	common->Printf( "OpenAL version: %s\n", alGetString( AL_VERSION ) );
 	common->Printf( "OpenAL extensions: %s\n", alGetString( AL_EXTENSIONS ) );
+	// What the device granted rather than what was asked for: a mobile provider
+	// (OpenSL ES/AAudio on Android) can choose its own mixing rate, update
+	// period and source limits (AND-02 qualifies the provider on devices).
+	{
+		ALCint attributeCount = 0;
+		alcGetIntegerv( openalDevice, ALC_ATTRIBUTES_SIZE, 1, &attributeCount );
+		if( CheckALCErrors( openalDevice ) == ALC_NO_ERROR && attributeCount > 0 && attributeCount <= 256 )
+		{
+			ALCint attributes[256] = {};
+			alcGetIntegerv( openalDevice, ALC_ALL_ATTRIBUTES, attributeCount, attributes );
+			if( CheckALCErrors( openalDevice ) == ALC_NO_ERROR )
+			{
+				int frequency = 0, refresh = 0, monoSources = 0, stereoSources = 0;
+				for( int i = 0; i + 1 < attributeCount && attributes[i] != 0; i += 2 )
+				{
+					switch( attributes[i] )
+					{
+						case ALC_FREQUENCY: frequency = attributes[i + 1]; break;
+						case ALC_REFRESH: refresh = attributes[i + 1]; break;
+						case ALC_MONO_SOURCES: monoSources = attributes[i + 1]; break;
+						case ALC_STEREO_SOURCES: stereoSources = attributes[i + 1]; break;
+						default: break;
+					}
+				}
+				common->Printf( "OpenAL device attributes: frequency=%d refresh=%d monoSources=%d stereoSources=%d\n",
+					frequency, refresh, monoSources, stereoSources );
+			}
+		}
+	}
 
 	deferredUpdatesAvailable = alIsExtensionPresent( "AL_SOFT_deferred_updates" ) == AL_TRUE && openQ4_LoadDeferredUpdateProcs();
 	deferredUpdatesActive = false;
@@ -1336,6 +1877,12 @@ void idSoundHardware_OpenAL::Init()
 	{
 		common->Printf( "OpenAL callback buffers available.\n" );
 	}
+	DetectVoiceFeatures();
+#if defined( ALC_CONNECTED )
+	disconnectQueryAvailable = alcIsExtensionPresent( openalDevice, "ALC_EXT_disconnect" ) == ALC_TRUE;
+#endif
+	simulatedInterruptionEnd = 0;
+	NoteOutputChanged( "device opened" );
 
 	CaptureOpenedDeviceState( requestedDeviceName.c_str() );
 	reopenDeviceAvailable = alcIsExtensionPresent( openalDevice, "ALC_SOFT_reopen_device" ) == ALC_TRUE && openQ4_LoadReopenDeviceProc( openalDevice );
@@ -1360,17 +1907,29 @@ void idSoundHardware_OpenAL::Init()
 	}
 	openQ4_ReportHrtfStatus( openalDevice );
 	openQ4_ReportOutputMode( openalDevice );
+	openQ4_ReportOutputLimiter( openalDevice );
 
 	efxEnabled = false;
 	efxFiltersAvailable = false;
 	auxEffectSlot = 0;
 	auxReverbEffect = 0;
+	maxAuxiliarySends = 0;
+	ResetReverbSlotState();
 #if OPENQ4_OPENAL_EFX_SUPPORTED
 	const bool efxExtensionPresent = openALVersionSupported && alcIsExtensionPresent( openalDevice, "ALC_EXT_EFX" ) == AL_TRUE;
 	efxFiltersAvailable = efxExtensionPresent;
 	if( efxFiltersAvailable )
 	{
 		common->Printf( "OpenAL EFX filters available.\n" );
+#if defined( ALC_MAX_AUXILIARY_SENDS )
+		// retail EAX gave every source two active sends: its own area and the listener's
+		ALCint sends = 0;
+		alcGetIntegerv( openalDevice, ALC_MAX_AUXILIARY_SENDS, 1, &sends );
+		if( CheckALCErrors( openalDevice ) == ALC_NO_ERROR && sends > 0 )
+		{
+			maxAuxiliarySends = sends;
+		}
+#endif
 	}
 	if( s_useEAXReverb.GetBool() && efxExtensionPresent && openQ4_LoadHardwareEfxProcs() )
 	{
@@ -1395,7 +1954,7 @@ void idSoundHardware_OpenAL::Init()
 				if( CheckALErrors() == AL_NO_ERROR )
 				{
 					efxEnabled = true;
-					common->Printf( "OpenAL EFX reverb send enabled.\n" );
+					common->Printf( "OpenAL EFX reverb send enabled (%d auxiliary sends).\n", maxAuxiliarySends );
 				}
 			}
 		}
@@ -1511,6 +2070,45 @@ void idSoundHardware_OpenAL::Init()
 	}
 }
 
+// SDL can park the engine loop while OpenAL keeps mixing. Silence the owned
+// context immediately and, when both extension functions exist, stop the device.
+// Keep the resume function for this exact device so partial extension support
+// cannot leave it paused. The requested state survives device replacement.
+void idSoundHardware_OpenAL::SetDevicePaused( bool paused )
+{
+	devicePauseRequested = paused;
+	if( openalContext != NULL && alcGetCurrentContext() == openalContext )
+	{
+		alListenerf( AL_GAIN, ( paused || soundSystem->IsMuted() ) ? 0.0f : 1.0f );
+		EndDeferredUpdates();
+	}
+	if( openalDevice == NULL )
+	{
+		return;
+	}
+	if( !paused )
+	{
+		if( deviceResume != NULL )
+		{
+			deviceResume( openalDevice );
+			deviceResume = NULL;
+		}
+		return;
+	}
+	if( deviceResume == NULL && alcIsExtensionPresent( openalDevice, "ALC_SOFT_pause_device" ) == ALC_TRUE )
+	{
+		const devicePauseFunction_t pauseDevice = reinterpret_cast<devicePauseFunction_t>(
+			alcGetProcAddress( openalDevice, "alcDevicePauseSOFT" ) );
+		const devicePauseFunction_t resumeDevice = reinterpret_cast<devicePauseFunction_t>(
+			alcGetProcAddress( openalDevice, "alcDeviceResumeSOFT" ) );
+		if( pauseDevice != NULL && resumeDevice != NULL )
+		{
+			pauseDevice( openalDevice );
+			deviceResume = resumeDevice;
+		}
+	}
+}
+
 /*
 ========================
 idSoundHardware_OpenAL::Shutdown
@@ -1518,6 +2116,10 @@ idSoundHardware_OpenAL::Shutdown
 */
 void idSoundHardware_OpenAL::Shutdown()
 {
+	// Closing a paused device releases it; never reuse its extension pointer.
+	deviceResume = NULL;
+	SoundVoiceChat_Shutdown();
+	SoundSettings_DeviceDestroyed();
 	EndDeferredUpdates();
 	DisableDeviceEventMonitoring();
 
@@ -1528,8 +2130,32 @@ void idSoundHardware_OpenAL::Shutdown()
 	voices.Clear();
 	freeVoices.Clear();
 	zombieVoices.Clear();
+	// Voices released streams whose blocks were still decoding: join them before
+	// s_restart or shutdown closes their files and reservations.
+	idSoundOggStream::ReapReleased( true );
 
 	#if OPENQ4_OPENAL_EFX_SUPPORTED
+		// the sources are gone, so nothing still feeds the area slots
+		for( int i = 0; i < SOUND_REVERB_SLOTS - 1; i++ )
+		{
+			if( areaReverbSlots[i] != 0 )
+			{
+				if ( qalAuxiliaryEffectSloti != NULL ) {
+					qalAuxiliaryEffectSloti( areaReverbSlots[i], AL_EFFECTSLOT_EFFECT, AL_EFFECT_NULL );
+				}
+				if ( qalDeleteAuxiliaryEffectSlots != NULL ) {
+					qalDeleteAuxiliaryEffectSlots( 1, &areaReverbSlots[i] );
+				}
+				areaReverbSlots[i] = 0;
+			}
+			if( areaReverbEffects[i] != 0 )
+			{
+				if ( qalDeleteEffects != NULL ) {
+					qalDeleteEffects( 1, &areaReverbEffects[i] );
+				}
+				areaReverbEffects[i] = 0;
+			}
+		}
 		if( auxEffectSlot != 0 )
 		{
 			if ( qalAuxiliaryEffectSloti != NULL ) {
@@ -1550,6 +2176,8 @@ void idSoundHardware_OpenAL::Shutdown()
 	#endif
 	efxEnabled = false;
 	efxFiltersAvailable = false;
+	maxAuxiliarySends = 0;
+	ResetReverbSlotState();
 
 #if defined(USE_DOOMCLASSIC)
 	// ---------------------
@@ -1572,7 +2200,16 @@ void idSoundHardware_OpenAL::Shutdown()
 	deferredUpdatesActive = false;
 	openedWithDefaultFallback = false;
 	openedHrtfMode = OPENQ4_OPENAL_HRTF_AUTO;
-	openedSpeakerCount = OPENQ4_OPENAL_SPEAKERS_SURROUND;
+	openedSpeakerCount = OPENQ4_OPENAL_SPEAKERS_DEVICE;
+	openedOutputLimiter = true;
+	sourceRadiusAvailable = false;
+	directChannelsAvailable = false;
+	directChannelsMode = AL_FALSE;
+	sourceResampler = -1;
+	centerRoutingAvailable = false;
+	outputCenterObserved = false;
+	disconnectQueryAvailable = false;
+	simulatedInterruptionEnd = 0;
 	openedRequestedDeviceName.Clear();
 	openedActiveDeviceName.Clear();
 	openedDefaultDeviceName.Clear();
@@ -1599,6 +2236,12 @@ idSoundHardware_OpenAL::AllocateVoice
 idSoundVoice* idSoundHardware_OpenAL::AllocateVoice( const idSoundSample* leadinSample, const idSoundSample* loopingSample )
 {
 	if( leadinSample == NULL )
+	{
+		return NULL;
+	}
+	// A lost endpoint stops every source it is given. Channels keep their clocks
+	// and get voices again once it returns or another device is opened.
+	if( !IsOutputConnected() )
 	{
 		return NULL;
 	}
@@ -1689,6 +2332,46 @@ static void OpenQ4_DiagnosticSampleName( const idSoundSample_OpenAL* sample, idS
 	{
 		name += sample->IsCompressed() ? ".ogg" : ".wav";
 	}
+}
+
+/*
+========================
+idSoundHardware_OpenAL::PrintDistanceInfo
+========================
+*/
+void idSoundHardware_OpenAL::PrintDistanceInfo( const idSoundVoice* voice ) const
+{
+	if( openalDevice == NULL || voice == NULL )
+	{
+		idLib::Printf( "SOUND_DISTANCE_BACKEND available=0\n" );
+		return;
+	}
+	const idSoundVoice_OpenAL* source = static_cast<const idSoundVoice_OpenAL*>( voice );
+	if( !alIsSource( source->openalSource ) )
+	{
+		idLib::Printf( "SOUND_DISTANCE_BACKEND available=0\n" );
+		return;
+	}
+	ALfloat position[3] = {}, gain = 0, listenerGain = 0, rolloff = 0, reference = 0, radius = -1;
+	ALint state = AL_INITIAL;
+	alGetSourcefv( source->openalSource, AL_POSITION, position );
+	alGetSourcef( source->openalSource, AL_GAIN, &gain );
+	alGetSourcef( source->openalSource, AL_ROLLOFF_FACTOR, &rolloff );
+	alGetSourcef( source->openalSource, AL_REFERENCE_DISTANCE, &reference );
+	alGetSourcei( source->openalSource, AL_SOURCE_STATE, &state );
+	alGetListenerf( AL_GAIN, &listenerGain );
+#if defined( AL_SOURCE_RADIUS )
+	if( HasSourceRadius() ) alGetSourcef( source->openalSource, AL_SOURCE_RADIUS, &radius );
+#endif
+	if( CheckALErrors() != AL_NO_ERROR )
+	{
+		idLib::Printf( "SOUND_DISTANCE_BACKEND available=0 error=1\n" );
+		return;
+	}
+	idLib::Printf( "SOUND_DISTANCE_BACKEND available=1 source=%u playing=%d gain=%.7f listenerGain=%.7f "
+		"position=%.4f,%.4f,%.4f rolloff=%.4f reference=%.4f innerRadius=%.4f sourceRadius=%.4f\n",
+		source->openalSource, state == AL_PLAYING ? 1 : 0, gain, listenerGain,
+		position[0], position[1], position[2], rolloff, reference, source->innerRadius, radius );
 }
 
 /*
@@ -1797,6 +2480,45 @@ int idSoundHardware_OpenAL::ListPlayingVoices() const
 
 /*
 ========================
+idSoundHardware_OpenAL::ListVoiceOutputState
+
+Each voice in use with the output it started on, its routing and its playback
+position, for checking recovery after an output change without a device.
+========================
+*/
+void idSoundHardware_OpenAL::ListVoiceOutputState() const
+{
+	idLib::Printf( "SOUND_OUTPUT serial=%u connected=%d centre=%d interrupted=%d\n", outputSerial,
+		IsOutputConnected() ? 1 : 0, HasCenterChannelOutput() ? 1 : 0, simulatedInterruptionEnd != 0 ? 1 : 0 );
+	int count = 0;
+	for( int i = 0; i < voices.Num(); i++ )
+	{
+		const idSoundVoice_OpenAL& voice = voices[i];
+		if( !alIsSource( voice.openalSource ) || voice.leadinSample == NULL || freeVoices.FindIndex( const_cast<idSoundVoice_OpenAL*>( &voice ) ) >= 0 )
+		{
+			continue;
+		}
+		ALint state = AL_INITIAL;
+		ALfloat seconds = 0.0f;
+		alGetSourcei( voice.openalSource, AL_SOURCE_STATE, &state );
+		alGetSourcef( voice.openalSource, AL_SEC_OFFSET, &seconds );
+		if( CheckALErrors() != AL_NO_ERROR )
+		{
+			continue;
+		}
+		const char* stateName = state == AL_PLAYING ? "playing" : state == AL_PAUSED ? "paused" : state == AL_STOPPED ? "stopped" : "initial";
+		idStr sampleName;
+		OpenQ4_DiagnosticSampleName( voice.leadinSample, sampleName );
+		idLib::Printf( "SOUND_VOICE source=%u state=%s routed=%d queued=%d serial=%u offsetMs=%.1f sample=%s\n",
+			static_cast<unsigned int>( voice.openalSource ), stateName, voice.centerRouting ? 1 : 0,
+			voice.UsesBoundedQueue() ? 1 : 0, voice.outputSerial, seconds * 1000.0f, sampleName.c_str() );
+		count++;
+	}
+	idLib::Printf( "SOUND_VOICES_END voices=%d\n", count );
+}
+
+/*
+========================
 idSoundHardware_OpenAL::PrintPerformanceData
 ========================
 */
@@ -1864,6 +2586,8 @@ idSoundHardware_OpenAL::Update
 */
 void idSoundHardware_OpenAL::Update()
 {
+	// Free streams whose cancelled blocks the workers have let go of; never waits.
+	idSoundOggStream::ReapReleased( false );
 	if( openalDevice == NULL )
 	{
 		int nowTime = Sys_Milliseconds();
@@ -1879,7 +2603,7 @@ void idSoundHardware_OpenAL::Update()
 		return;
 	}
 
-	if( soundSystem->IsMuted() )
+	if( devicePauseRequested || soundSystem->IsMuted() )
 	{
 		alListenerf( AL_GAIN, 0.0f );
 	}
@@ -1981,6 +2705,308 @@ void idSoundHardware_OpenAL::Update()
 		}
 	}
 	*/
+}
+
+/*
+========================
+idSoundHardware_OpenAL reverb slots
+
+The four retail area reverb slots (see idSoundReverb). Slot 0 is the
+auxEffectSlot/auxReverbEffect pair whose lifetime the checked settings path
+owns; slots 1-3 are created while slot 0 holds its reverb, and released before
+slot 0 can be deleted.
+========================
+*/
+void idSoundHardware_OpenAL::ResetReverbSlotState()
+{
+	areaReverbUnavailable = false;
+	primaryReverbSlot = 0;
+	trackedReverbSlot = 0;
+	for( int i = 0; i < SOUND_REVERB_SLOTS; i++ )
+	{
+		memset( &appliedReverb[i], 0, sizeof( appliedReverb[i] ) );
+		appliedReverbSlot[i] = 0;
+		reverbEffectType[i] = 0;
+	}
+	reverbSlotGeneration++;
+}
+
+bool idSoundHardware_OpenAL::HasAreaReverbResources() const
+{
+	for( int i = 0; i < SOUND_REVERB_SLOTS - 1; i++ )
+	{
+		if( areaReverbSlots[i] != 0 || areaReverbEffects[i] != 0 )
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+ALuint idSoundHardware_OpenAL::GetReverbSlotHandle( int slot ) const
+{
+	if( slot == 0 )
+	{
+		return auxEffectSlot;
+	}
+	if( slot > 0 && slot < SOUND_REVERB_SLOTS )
+	{
+		return areaReverbSlots[slot - 1];
+	}
+	return 0;
+}
+
+ALuint idSoundHardware_OpenAL::ReverbEffectHandle( int slot ) const
+{
+	if( slot == 0 )
+	{
+		return auxReverbEffect;
+	}
+	if( slot > 0 && slot < SOUND_REVERB_SLOTS )
+	{
+		return areaReverbEffects[slot - 1];
+	}
+	return 0;
+}
+
+ALuint idSoundHardware_OpenAL::GetPrimaryAuxEffectSlot() const
+{
+	const ALuint slot = GetReverbSlotHandle( primaryReverbSlot );
+	return slot != 0 ? slot : auxEffectSlot;
+}
+
+void idSoundHardware_OpenAL::SetPrimaryReverbSlot( int slot )
+{
+	if( GetReverbSlotHandle( slot ) != 0 )
+	{
+		primaryReverbSlot = slot;
+	}
+}
+
+int idSoundHardware_OpenAL::SyncReverbSlots()
+{
+#if OPENQ4_OPENAL_EFX_SUPPORTED
+	if( auxEffectSlot != trackedReverbSlot )
+	{
+		// the checked settings path created, replaced or removed slot 0
+		trackedReverbSlot = auxEffectSlot;
+		primaryReverbSlot = 0;
+		appliedReverbSlot[0] = 0;
+		reverbEffectType[0] = 0;
+		reverbSlotGeneration++;
+	}
+	const bool reverbUsable = efxEnabled && auxEffectSlot != 0 && auxReverbEffect != 0 && openalContext != NULL && openQ4_LoadHardwareEfxProcs();
+	if( !reverbUsable )
+	{
+		if( HasAreaReverbResources() )
+		{
+			ReleaseAreaReverbSlots();
+		}
+		return 0;
+	}
+	if( !HasAreaReverbResources() && !areaReverbUnavailable && maxAuxiliarySends >= 2 )
+	{
+		CreateAreaReverbSlots();
+	}
+	return HasAreaReverbResources() ? SOUND_REVERB_SLOTS : 1;
+#else
+	return 0;
+#endif
+}
+
+bool idSoundHardware_OpenAL::CreateAreaReverbSlots()
+{
+#if OPENQ4_OPENAL_EFX_SUPPORTED
+	CheckALErrors();
+	ALint type = 0;
+	qalGetEffecti( auxReverbEffect, AL_EFFECT_TYPE, &type );
+	if( alGetError() != AL_NO_ERROR || ( type != AL_EFFECT_EAXREVERB && type != AL_EFFECT_REVERB ) )
+	{
+		type = AL_EFFECT_EAXREVERB;
+	}
+
+	bool created = true;
+	for( int i = 0; i < SOUND_REVERB_SLOTS - 1 && created; i++ )
+	{
+		qalGenEffects( 1, &areaReverbEffects[i] );
+		created = alGetError() == AL_NO_ERROR && areaReverbEffects[i] != 0;
+		if( created )
+		{
+			qalEffecti( areaReverbEffects[i], AL_EFFECT_TYPE, type );
+			created = alGetError() == AL_NO_ERROR;
+		}
+		if( created )
+		{
+			qalGenAuxiliaryEffectSlots( 1, &areaReverbSlots[i] );
+			created = alGetError() == AL_NO_ERROR && areaReverbSlots[i] != 0;
+		}
+		if( created )
+		{
+			qalAuxiliaryEffectSloti( areaReverbSlots[i], AL_EFFECTSLOT_EFFECT, areaReverbEffects[i] );
+			created = alGetError() == AL_NO_ERROR;
+		}
+	}
+
+	if( !created )
+	{
+		// no source feeds a slot created this frame, so they can go at once
+		for( int i = 0; i < SOUND_REVERB_SLOTS - 1; i++ )
+		{
+			if( areaReverbSlots[i] != 0 )
+			{
+				qalDeleteAuxiliaryEffectSlots( 1, &areaReverbSlots[i] );
+				areaReverbSlots[i] = 0;
+			}
+			if( areaReverbEffects[i] != 0 )
+			{
+				qalDeleteEffects( 1, &areaReverbEffects[i] );
+				areaReverbEffects[i] = 0;
+			}
+		}
+		alGetError();
+		areaReverbUnavailable = true;
+		common->Warning( "OpenAL EFX could not create the area reverb slots; only the listener's area reverb will play." );
+		return false;
+	}
+
+	for( int i = 0; i < SOUND_REVERB_SLOTS; i++ )
+	{
+		reverbEffectType[i] = type;
+		if( i > 0 )
+		{
+			appliedReverbSlot[i] = 0;
+		}
+	}
+	reverbSlotGeneration++;
+	return true;
+#else
+	return false;
+#endif
+}
+
+void idSoundHardware_OpenAL::ReleaseAreaReverbSlots()
+{
+#if OPENQ4_OPENAL_EFX_SUPPORTED
+	if( !HasAreaReverbResources() )
+	{
+		primaryReverbSlot = 0;
+		return;
+	}
+
+	// OpenAL refuses to delete an effect slot that a source still feeds
+	for( int i = 0; i < voices.Num(); i++ )
+	{
+		voices[i].DetachReverbSends();
+	}
+	for( int i = 0; i < SOUND_REVERB_SLOTS - 1; i++ )
+	{
+		if( areaReverbSlots[i] != 0 )
+		{
+			qalAuxiliaryEffectSloti( areaReverbSlots[i], AL_EFFECTSLOT_EFFECT, AL_EFFECT_NULL );
+			qalDeleteAuxiliaryEffectSlots( 1, &areaReverbSlots[i] );
+			areaReverbSlots[i] = 0;
+		}
+		if( areaReverbEffects[i] != 0 )
+		{
+			qalDeleteEffects( 1, &areaReverbEffects[i] );
+			areaReverbEffects[i] = 0;
+		}
+		appliedReverbSlot[i + 1] = 0;
+		reverbEffectType[i + 1] = 0;
+	}
+	CheckALErrors();
+	primaryReverbSlot = 0;
+	reverbSlotGeneration++;
+#endif
+}
+
+void idSoundHardware_OpenAL::SetReverbSlotProperties( int slot, const soundReverbEAX_t& properties )
+{
+#if OPENQ4_OPENAL_EFX_SUPPORTED
+	if( slot < 0 || slot >= SOUND_REVERB_SLOTS || !efxEnabled || !openQ4_LoadHardwareEfxProcs() )
+	{
+		return;
+	}
+	const ALuint slotHandle = GetReverbSlotHandle( slot );
+	const ALuint effect = ReverbEffectHandle( slot );
+	if( slotHandle == 0 || effect == 0 )
+	{
+		return;
+	}
+
+	soundReverbEFX_t efx;
+	SoundReverb_ConvertEAXToEFX( properties, efx );
+	if( appliedReverbSlot[slot] == slotHandle && SoundReverb_EFXEqual( appliedReverb[slot], efx ) )
+	{
+		return;
+	}
+
+	CheckALErrors();
+	if( reverbEffectType[slot] == 0 )
+	{
+		ALint type = 0;
+		qalGetEffecti( effect, AL_EFFECT_TYPE, &type );
+		reverbEffectType[slot] = alGetError() == AL_NO_ERROR ? type : AL_EFFECT_NULL;
+	}
+
+	if( reverbEffectType[slot] == AL_EFFECT_EAXREVERB )
+	{
+		qalEffectf( effect, AL_EAXREVERB_DENSITY, efx.density );
+		qalEffectf( effect, AL_EAXREVERB_DIFFUSION, efx.diffusion );
+		qalEffectf( effect, AL_EAXREVERB_GAIN, efx.gain );
+		qalEffectf( effect, AL_EAXREVERB_GAINHF, efx.gainHF );
+		qalEffectf( effect, AL_EAXREVERB_GAINLF, efx.gainLF );
+		qalEffectf( effect, AL_EAXREVERB_DECAY_TIME, efx.decayTime );
+		qalEffectf( effect, AL_EAXREVERB_DECAY_HFRATIO, efx.decayHFRatio );
+		qalEffectf( effect, AL_EAXREVERB_DECAY_LFRATIO, efx.decayLFRatio );
+		qalEffectf( effect, AL_EAXREVERB_REFLECTIONS_GAIN, efx.reflectionsGain );
+		qalEffectf( effect, AL_EAXREVERB_REFLECTIONS_DELAY, efx.reflectionsDelay );
+		qalEffectfv( effect, AL_EAXREVERB_REFLECTIONS_PAN, efx.reflectionsPan );
+		qalEffectf( effect, AL_EAXREVERB_LATE_REVERB_GAIN, efx.lateReverbGain );
+		qalEffectf( effect, AL_EAXREVERB_LATE_REVERB_DELAY, efx.lateReverbDelay );
+		qalEffectfv( effect, AL_EAXREVERB_LATE_REVERB_PAN, efx.lateReverbPan );
+		qalEffectf( effect, AL_EAXREVERB_ECHO_TIME, efx.echoTime );
+		qalEffectf( effect, AL_EAXREVERB_ECHO_DEPTH, efx.echoDepth );
+		qalEffectf( effect, AL_EAXREVERB_MODULATION_TIME, efx.modulationTime );
+		qalEffectf( effect, AL_EAXREVERB_MODULATION_DEPTH, efx.modulationDepth );
+		qalEffectf( effect, AL_EAXREVERB_AIR_ABSORPTION_GAINHF, efx.airAbsorptionGainHF );
+		qalEffectf( effect, AL_EAXREVERB_HFREFERENCE, efx.hfReference );
+		qalEffectf( effect, AL_EAXREVERB_LFREFERENCE, efx.lfReference );
+		qalEffectf( effect, AL_EAXREVERB_ROOM_ROLLOFF_FACTOR, efx.roomRolloffFactor );
+		qalEffecti( effect, AL_EAXREVERB_DECAY_HFLIMIT, efx.decayHFLimit ? AL_TRUE : AL_FALSE );
+	}
+	else if( reverbEffectType[slot] == AL_EFFECT_REVERB )
+	{
+		// standard reverb has no low-frequency, echo, modulation or panning controls
+		qalEffectf( effect, AL_REVERB_DENSITY, efx.density );
+		qalEffectf( effect, AL_REVERB_DIFFUSION, efx.diffusion );
+		qalEffectf( effect, AL_REVERB_GAIN, efx.gain );
+		qalEffectf( effect, AL_REVERB_GAINHF, efx.gainHF );
+		qalEffectf( effect, AL_REVERB_DECAY_TIME, efx.decayTime );
+		qalEffectf( effect, AL_REVERB_DECAY_HFRATIO, efx.decayHFRatio );
+		qalEffectf( effect, AL_REVERB_REFLECTIONS_GAIN, efx.reflectionsGain );
+		qalEffectf( effect, AL_REVERB_REFLECTIONS_DELAY, efx.reflectionsDelay );
+		qalEffectf( effect, AL_REVERB_LATE_REVERB_GAIN, efx.lateReverbGain );
+		qalEffectf( effect, AL_REVERB_LATE_REVERB_DELAY, efx.lateReverbDelay );
+		qalEffectf( effect, AL_REVERB_AIR_ABSORPTION_GAINHF, efx.airAbsorptionGainHF );
+		qalEffectf( effect, AL_REVERB_ROOM_ROLLOFF_FACTOR, efx.roomRolloffFactor );
+		qalEffecti( effect, AL_REVERB_DECAY_HFLIMIT, efx.decayHFLimit ? AL_TRUE : AL_FALSE );
+	}
+	else
+	{
+		return;
+	}
+
+	// a slot holds a copy of its effect; binding it again publishes the parameters
+	qalAuxiliaryEffectSloti( slotHandle, AL_EFFECTSLOT_EFFECT, effect );
+	if( CheckALErrors() != AL_NO_ERROR )
+	{
+		appliedReverbSlot[slot] = 0;
+		return;
+	}
+	appliedReverb[slot] = efx;
+	appliedReverbSlot[slot] = slotHandle;
+#endif
 }
 
 

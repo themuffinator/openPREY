@@ -11,6 +11,11 @@ else
   subdir('pipewire')
 endif
 
+# SDL's opt-in dummy driver supplies silence for automated capture lifecycle
+# tests. It is never selected as a fallback for a physical microphone.
+cdata.set('SDL_AUDIO_DRIVER_DUMMY', 1)
+sources += files('dummy/SDL_dummyaudio.c')
+
 sources += files(
   'SDL_audio.c',
   'SDL_audiocvt.c',

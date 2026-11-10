@@ -83,6 +83,8 @@ double Sys_ClockTicksPerSecond(void) {
 ==============================================================
 */
 
+#if defined( _M_IX86 ) || defined( __i386__ )
+
 /*
 ================
 HasCPUID
@@ -170,6 +172,8 @@ static bool HasSSE3(void) {
 	return false;
 }
 
+#endif
+
 
 /*
 ================
@@ -191,6 +195,8 @@ int CPUCount(int& logicalNum, int& physicalNum) {
 	physicalNum = 4;
 	return 1;
 }
+
+#if defined( _M_IX86 ) || defined( __i386__ )
 
 /*
 ================
@@ -225,6 +231,8 @@ static bool HasDAZ(void) {
 	return false;
 }
 
+#endif
+
 /*
 ================
 Sys_GetCPUId
@@ -253,7 +261,7 @@ cpuid_t Sys_GetCPUId(void) {
 */
 
 typedef struct bitFlag_s {
-	char* name;
+	const char* name;
 	int			bit;
 } bitFlag_t;
 
@@ -269,13 +277,13 @@ static bitFlag_t controlWordFlags[] = {
 	{ "Infinity control", 12 },
 	{ "", 0 }
 };
-static char* precisionControlField[] = {
+static const char* precisionControlField[] = {
 	"Single Precision (24-bits)",
 	"Reserved",
 	"Double Precision (53-bits)",
 	"Double Extended Precision (64-bits)"
 };
-static char* roundingControlField[] = {
+static const char* roundingControlField[] = {
 	"Round to nearest",
 	"Round down",
 	"Round up",

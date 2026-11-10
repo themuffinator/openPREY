@@ -28,6 +28,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "../../idlib/precompiled.h"
 #include "../posix/posix_public.h"
 #include "../sys_local.h"
+#include "../URLPolicy.h"
 
 #include <pthread.h>
 #include <errno.h>
@@ -225,24 +226,6 @@ static bool Sys_QueueOrStartProcessArgs( char *const argv[], bool quit ) {
 	}
 
 	return Sys_ExecProcessArgs( argv, true );
-}
-
-static bool Sys_IsSafeURL( const char *url ) {
-	if ( url == NULL || url[0] == '\0' || Sys_StringHasControlCharacters( url ) ) {
-		return false;
-	}
-	if ( !isalpha( static_cast<unsigned char>( url[0] ) ) ) {
-		return false;
-	}
-	for ( const char *scan = url + 1; *scan != '\0'; ++scan ) {
-		if ( *scan == ':' ) {
-			return true;
-		}
-		if ( !( isalnum( static_cast<unsigned char>( *scan ) ) || *scan == '+' || *scan == '-' || *scan == '.' ) ) {
-			return false;
-		}
-	}
-	return false;
 }
 
 static bool Sys_FindExecutableOnPath( const char *name, idStr &resolvedPath ) {
@@ -913,16 +896,17 @@ void idSysLocal::OpenURL( const char *url, bool quit ) {
 
 	static bool	quit_spamguard = false;
 
+	if ( !idURLPolicy::IsAllowedHTTPURL( url ) ) {
+		common->Printf( "OpenURL rejected: expected a bounded HTTP or HTTPS URL with a host\n" );
+		return;
+	}
+
 	if ( quit_spamguard ) {
-		common->DPrintf( "Sys_OpenURL: already in a doexit sequence, ignoring %s\n", url ? url : "" );
+		common->DPrintf( "Sys_OpenURL: already in a doexit sequence, ignoring request\n" );
 		return;
 	}
 
 	common->Printf( "Open URL: %s\n", url );
-	if ( !Sys_IsSafeURL( url ) ) {
-		common->Printf( "OpenURL '%s' rejected: expected a URL with a safe scheme\n", url ? url : "" );
-		return;
-	}
 
 	// opening an URL on *nix can mean a lot of things .. 
 	// prefer a user-provided script, then fall back to freedesktop helpers.
@@ -1090,7 +1074,6 @@ int main(int argc, const char **argv) {
 	Posix_EarlyInit( );
 #ifndef ID_DEDICATED
 	Sys_ReportWaylandRuntime();
-	Sys_ShowSplash();
 #endif
 
 	if ( argc > 1 ) {

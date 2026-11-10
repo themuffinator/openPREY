@@ -40,6 +40,7 @@ The Settings panel is `p_settings` in `mainmenu.gui`. It owns the left navigatio
 | Game Options | `windowDef set_b_gameoptions` | `p_settings_game` | Includes gameplay, mouse, controller, crosshair, corpse, language, and console options. |
 | System | `windowDef set_b_system` | `p_settings_sys` | Video, display, quality, advanced rendering, and post effects. |
 | Audio | `windowDef set_b_audio` | `p_settings_audio` | Output backend/device plus volume controls. |
+| Android setup | `windowDef set_android_setup` | Standalone Android setup Activity | `androidSetupAvailable` exposes this only on standalone Android. The SDL host opens setup without closing the running game; Return to game keeps the same session. File operations remain blocked while the native storage lease is held. |
 | Load Defaults | `windowDef set_b_loaddefaults` | Reset-confirm popup | Sets `desktop::active` and opens `anim_pop_defaultsIn`. |
 | Video Restart | `windowDef set_b_vidrestart` | `vid_restart` | Hidden by default, then shown by video-warning paths for changes that require a restart. Back also routes through the warning flow when `desktop::vidwarn` is set. |
 | Back | `windowDef set_b_back` | Exits Settings | If `desktop::vidwarn` is set, Back routes through the video warning flow. |
@@ -112,6 +113,7 @@ The numbered `set_b_controls_move_1..13` windows are row hover/action surfaces f
 | Dark Matter Gun | `set_ctrls_weap_dmg_key` | `_impulse9` |
 | Napalm Launcher | `set_ctrls_weap_napalmlauncher_key` | `_impulse10` |
 | Buy Menu | `set_ctrls_weap_buymenu_key` | `buymenu` |
+| Quick Chat | `set_ctrls_weap_quickchat_key` | `_quickChat` |
 
 ### Attack/Look
 
@@ -169,6 +171,7 @@ The Game Options pane is `p_settings_game` and is included from `content/baseoq4
 | Opponent Weapon Style | `choiceDef` | `set_game_opponentweaponstyle_value` | `g_mpFlatOpponentWeapons` | `0 Original`, `1 Flat Color` | Client-side multiplayer option for weapons held by opponents. View weapons are never affected. |
 | Force Model | `choiceDef` | `set_game_forcemodel_value` | GUI state `ui_proskins` via `applyForceModelChoice` | `0 No`, `1 Yes` | The C++ menu adapter writes the pro-skin force-model cvars when enabled and clears `g_forceModel`, `g_forceMarineModel`, and `g_forceStroggModel` when disabled. |
 | Auto Skip Cinematics | `choiceDef` | `set_game_autoskipcinematics_value` | `g_autoSkipCinematics` | `No;Yes` | Archived SP/MP gameplay cvar. Affects future cinematics. |
+| Cinematic Shake | `choiceDef` | `set_game_cinematicshake_value` | `ui_cinematicShake` | `Off;Low;Full` (`0;0.5;1`) | Scales scripted cinematic camera shake. |
 
 ### Mouse
 
@@ -193,21 +196,41 @@ The Game Options pane is `p_settings_game` and is included from `content/baseoq4
 | Stick Layout | `choiceDef` | `set_game_controller_layout_value` | `in_joystickSouthpaw` | `0 Default`, `1 Southpaw` | Swaps movement and look sticks. |
 | Stick Dead Zone | `sliderDef` + `editDef` | `set_game_controller_deadzone_slider_bar`, `set_game_controller_deadzone_value` | `in_joystickDeadZone` | `0..0.95`, step `0.01` | Edit field `maxchars 4`. |
 | Look Sensitivity | `sliderDef` + `editDef` | `set_game_controller_look_sensitivity_slider_bar`, `set_game_controller_look_sensitivity_value` | `in_joystickLookSensitivity` | `0.1..4.0`, step `0.05` | Scales analog look speed. Edit field `maxchars 4`. |
+| Wheel Sensitivity | `sliderDef` + `editDef` | `set_game_controller_wheel_sensitivity_slider_bar`, `set_game_controller_wheel_sensitivity_value` | `in_weaponWheelSensitivity` | `0.25..16.0`, step `0.25` | Default `4.0`; SP wheel movement is independent of aiming, zoom, and run modifiers. |
 | Look Curve | `sliderDef` + `editDef` | `set_game_controller_look_curve_slider_bar`, `set_game_controller_look_curve_value` | `in_joystickLookCurve` | `1.0..3.0`, step `0.05` | `1.0` is linear; higher values soften small stick movement. |
 | Invert Look | `choiceDef` | `set_game_controller_invert_value` | `in_joystickInvertLook` | `No;Yes` | Boolean picker. |
 | Trigger Threshold | `sliderDef` + `editDef` | `set_game_controller_trigger_slider_bar`, `set_game_controller_trigger_value` | `in_joystickTriggerThreshold` | `0..1.0`, step `0.01` | Analog trigger press threshold. Edit field `maxchars 4`. |
 | Rumble | `choiceDef` | `set_game_controller_rumble_value` | `in_joystickRumble` | `No;Yes` | Boolean picker. |
 | Rumble Strength | `sliderDef` + `editDef` | `set_game_controller_rumble_strength_slider_bar`, `set_game_controller_rumble_strength_value` | `in_joystickRumbleScale` | `0..2.0`, step `0.05` | `0` effectively mutes rumble. Edit field `maxchars 4`. |
+| Prompt Style | `choiceDef` | `set_game_controller_prompt_style_value` | `in_promptStyle` | `0 Automatic`, `1 Xbox`, `2 PlayStation`, `3 Nintendo`, `4 Steam Deck`, `5 Generic` | Controller prompt family for the menus and the HUD; after Low Battery Rumble Cap. |
+| Swap Confirm and Back | `choiceDef` | `set_game_controller_swap_confirm_value` | `in_swapConfirmBack` | `0 Automatic`, `1 Off`, `2 On` | Which face button confirms in menus; the prompts follow. |
 
 ### Crosshair
 
 | Label | Widget type | Value widget | Target | Values or range | Notes |
 |---|---|---|---|---|---|
 | Custom Crosshair | `choiceDef` | `set_game_customxhair_value` | `g_crosshairCustom` | `Weapon Default;Custom` | Enables or disables the custom preview/action row. |
-| Crosshair Preview | `windowDef` action | `set_game_previewxhair` and preview size windows | `chooseCrosshair` command | Next/previous through command args `1` and `-1` | Disabled when `g_crosshairCustom` is off. |
+| Crosshair Preview | `windowDef` action | `set_game_previewxhair` and preview size windows | `chooseCrosshair` command, `g_crosshairCustomFile` | Click steps to the next of the twenty custom crosshairs (`chooseCrosshair 1`), right-click to the previous (`-1`), wrapping at both ends | Disabled when `g_crosshairCustom` is off. Each menu build shows the current crosshair; a value outside the set becomes the first. |
 | Crosshair Size | `choiceDef` | `set_game_xhairsize_value` | `g_crosshairSize` | `16 Small`, `24 Medium`, `32 Default`, `40 Large`, `48 Extra Large` | Paired with preview update events. |
-| Crosshair Color | `choiceDef` | `set_game_xhaircolor_value` | GUI state `g_crosshairColorChoice` | White, red, orange, yellow, green, cyan, blue, magenta | Focusable picker. Selection writes `g_crosshairColor` RGBA values and updates the preview. |
-| Hit Marker | `choiceDef` | `set_game_hitmarker_value` | `hud_hitMarker` | `No;Yes` | Boolean picker, on by default. Off restores stock Quake 4's crosshair recolour on a hit; `hud_hitMarkerScale` and `hud_crosshairHitFlash` stay console-only. |
+| Crosshair Color | `choiceDef` | `set_game_xhaircolor_value` | GUI state `g_crosshairColorChoice` | White, red, orange, yellow, green, cyan, blue, magenta | Focusable picker. Selection writes `g_crosshairColor` RGBA values and updates the preview. The in-game crosshair takes the new colour at once. |
+| Hit Marker | `choiceDef` | `set_game_hitmarker_value` | `hud_hitMarker` | `No;Yes` | Boolean picker, off by default in both game modes to retain stock hit feedback. Existing archived choices are preserved. Off restores stock Quake 4's crosshair recolour on a hit; `hud_hitMarkerScale` and `hud_crosshairHitFlash` stay console-only. |
+
+### HUD
+
+| Label | Widget type | Value widget | Target | Values or range | Notes |
+|---|---|---|---|---|---|
+| HUD | `windowDef` label | `set_game_hud` | N/A | N/A | Section label below Crosshair. |
+| HUD Layout | `choiceDef` | `set_game_hudlayout_value` | `ui_hudLayout` | `0 Classic`, `1 Remastered`, `2 Minimal`, `3 Competitive` | Classic is the stock HUD; Remastered anchors it to the screen edges; Minimal keeps health, armor, ammunition and the crosshair; Competitive adds multiplayer's match bar, team status and network quality and enlarges the readouts (Remastered elsewhere). See `docs/dev/ui/remastered-hud.md`. |
+| HUD Size | `sliderDef` + `editDef` | `set_game_hudscale_slider_bar`, `set_game_hudscale_value` | `ui_hudScale` | `0.5..2`, step `0.05` | Independent of menu size; narrow screens limit the status bar to keep every gauge visible. |
+| HUD Width | `choiceDef` | `set_game_hudwidth_value` | `ui_hudWidth` | `0 16:9`, `1 21:9`, `2 Full` | How far edge HUD groups spread on wide screens. |
+| Safe Area Inset | `sliderDef` + `editDef` | `set_game_hudinset_slider_bar`, `set_game_hudinset_value` | `ui_hudSafeInset` | `0..10` percent, step `0.5` | Moves the HUD inward from every edge. |
+| Toggle Objectives | `choiceDef` | `set_game_objectivestoggle_value` | `g_objectivesToggle` | `0 No`, `1 Yes` | No shows the objectives display while the scores button is held (stock); Yes opens and closes it with each press, as the Xbox 360 edition did, and the Remastered display adds a Close prompt. |
+| HUD Opacity | `sliderDef` + `editDef` | `set_game_hudopacity_slider_bar`, `set_game_hudopacity_value` | `ui_hudOpacity` | `0.25..1`, step `0.05` | Fades the Remastered and Minimal HUD; Classic keeps the stock HUD. Edit field `maxchars 4`. |
+| Damage Direction | `choiceDef` | `set_game_huddamagedir_value` | `ui_hudDamageDirection` | `0 No`, `1 Yes` | No hides the damage direction indicator in the Remastered and Minimal HUD. |
+| Pickup Messages | `choiceDef` | `set_game_hudpickups_value` | `ui_hudPickups` | `0 No`, `1 Yes` | No hides the pickup messages in the Remastered and Minimal HUD. |
+| Weapon Strip | `choiceDef` | `set_game_hudstrip_value` | `ui_hudWeaponStrip` | `0 No`, `1 Yes` | No keeps the weapon strip hidden on a weapon change in the Remastered and Minimal HUD. |
+| Reduced Flashing | `choiceDef` | `set_game_hudflash_value` | `ui_reducedFlashing` | `0 No`, `1 Yes` | Yes caps the damage direction indicator and the vehicle hit glow at 0.40, dims full-screen white flashes (teleports, spawns) and drops the death afterimage, in every HUD layout. |
+| Opaque Menu Backing | `choiceDef` | `set_game_opaquebacking_value` | `ui_retainedOpaqueBacking` | `0 No`, `1 Yes` | Yes covers the screen behind the retained menus' dialogs and pause with the stock 0.94 black scrim instead of the softened (blurred) view. |
 
 ### Corpse, Language, Console
 
@@ -228,6 +251,21 @@ The Game Options pane is `p_settings_game` and is included from `content/baseoq4
 | Weapon X Offset | `sliderDef` + `editDef` | `set_game_cl_gun_x_slider_bar`, `set_game_cl_gun_x_value` | `cl_gun_x` | `-5..5`, step `0.05` | Additive client-side right offset. |
 | Weapon Y Offset | `sliderDef` + `editDef` | `set_game_cl_gun_y_slider_bar`, `set_game_cl_gun_y_value` | `cl_gun_y` | `-5..5`, step `0.05` | Additive client-side forward offset. |
 | Weapon Z Offset | `sliderDef` + `editDef` | `set_game_cl_gun_z_slider_bar`, `set_game_cl_gun_z_value` | `cl_gun_z` | `-5..5`, step `0.05` | Additive client-side up offset. |
+| Weapon Kick | `choiceDef` | `set_game_weaponkick_value` | `g_weaponMuzzleKick` | `No;Yes` | View model kicks back and tilts when the weapon fires. Presentation only: it never moves aim or the shot origin. Multiplayer weapon defs zero the stock kick values, so the game restores each weapon's single-player kick when this is on. |
+| Virtual Reality | `windowDef` label | `set_game_vr` | N/A | N/A | Section label. |
+| VR Mode | `choiceDef` | `set_game_vr_enable_value` | `vr_enable` | `Disabled;Enabled` | Starts or ends the OpenXR session at once (OpenGL renderer). |
+| Aim With | `choiceDef` | `set_game_vr_aimmode_value` | `vr_aimMode` | `1 Controller`, `0 Head` | Controller aim hides the screen crosshair; the laser sight marks shots. |
+| Weapon Hand | `choiceDef` | `set_game_vr_lefthanded_value` | `vr_leftHanded` | `0 Right`, `1 Left` | Swaps the triggers, grips and sticks with the weapon. |
+| Turning | `choiceDef` | `set_game_vr_turnmode_value` | `vr_turnMode` | `0 Snap`, `1 Smooth` | Weapon-hand stick left and right. |
+| Snap Turn Angle | `choiceDef` | `set_game_vr_snapturnangle_value` | `vr_snapTurnAngle` | `30;45;60;90` degrees | Degrees per snap turn. |
+| Walk Direction | `choiceDef` | `set_game_vr_movedirection_value` | `vr_moveDirection` | `0 Head`, `1 Off Hand` | What the off-hand stick's forward follows. |
+| Room Scale | `choiceDef` | `set_game_vr_roomscale_value` | `vr_roomScale` | `Disabled;Enabled` | The character walks after the player's steps; in multiplayer through its movement input. |
+| Laser Sight | `choiceDef` | `set_game_vr_aimlaser_value` | `vr_aimLaser` | `0 Off`, `1 Dot`, `2 Dot and Beam` | Marks where controller-aimed shots land, at the target's depth. |
+| Vibration | `choiceDef` | `set_game_vr_hapticstrength_value` | `vr_hapticStrength` | `0 Off`, `0.5 Low`, `1 Full` | Controller pulses on each shot and hit. |
+| Two-Handed Grip | `choiceDef` | `set_game_vr_twohanded_value` | `vr_twoHanded` | `Disabled;Enabled` | The off-hand grip on the gun's foregrip holds it in both hands; elsewhere it opens the weapon wheel. |
+| Comfort Vignette | `choiceDef` | `set_game_vr_vignette_value` | `vr_comfortVignette` | `0 Off`, `0.5 Low`, `1 Full` | Darkens the edges of each eye while the stick moves or smoothly turns the player. |
+| Physical Crouch | `choiceDef` | `set_game_vr_physicalcrouch_value` | `vr_physicalCrouch` | `Disabled;Enabled` | Crouching in the room crouches the character. |
+| Play Space | `choiceDef` | `set_game_vr_playspace_value` | `vr_playSpace` | `0 Automatic`, `1 Seated`, `2 Standing` | Seated play measures height from where the player recentred; standing play from the floor, against the standing eye height (`vr_standingHeight`, learned at the first recentre or measured by `vr_calibrateHeight`). Automatic stands when the headset knows the floor. |
 
 ## System
 
@@ -243,7 +281,7 @@ The pane has two display layouts:
 | Label | Widget type | Value widget | Target | Values or range | Notes |
 |---|---|---|---|---|---|
 | Auto Detect | `windowDef` action | `set_b_system_auto` | Auto-detect popup | N/A | Opens the existing auto-detect confirmation flow. |
-| Performance Preset | `choiceDef` | `set_sys_perf_preset_val` | `com_performancePreset` via `applyPerformancePreset` | `minimum`, `lowpower`, `performance`, `balanced`, `quality`, `ultra` | Applies a coordinated profile for machine spec, resolution scale, AA, frame cap, effective anisotropic filtering and texture pressure, renderer budgets, light grids, and audio cost. The engine verifies registered target writes and rolls the profile back atomically if a value is rejected; the session-menu bridge then refreshes video, quality, and aspect widgets. Keeps optional shadow maps and post effects off as separate opt-in settings. |
+| Performance Preset | `choiceDef` | `set_sys_perf_preset_val` | `com_performancePreset` via `applyPerformancePreset` | `minimum`, `lowpower`, `low`, `performance`, `balanced`, `enhanced`, `quality`, `ultra`, `maximum` | Applies a coordinated profile for machine spec, resolution scale, AA, frame cap, effective anisotropic filtering and texture pressure, renderer budgets, light grids, and audio cost. The engine verifies registered target writes and rolls the profile back atomically if a value is rejected; the session-menu bridge then refreshes video, quality, and aspect widgets. Keeps optional shadow maps and post effects off as separate opt-in settings. |
 | Performance Auto-Detect | `windowDef` action | `set_sys_perf_autodetect_button` | `autoDetectPerformancePreset` | N/A | Chooses a conservative supported preset from platform, CPU, memory, VRAM, and renderer capability signals, ignores missing or implausible memory telemetry, forwards stray arguments through the same command rejection path, then refreshes the System page widgets. |
 | Display Resolution | `choiceDef` | `set_sys_screensize_val_0` | GUI state `display_mode_choice` via `applyDisplayModeChoice` | Runtime `gui::display_mode_choices` / `gui::display_mode_values` | Visible compatibility picker. Includes Desktop Native, SDL3 fullscreen preset resolutions from the selected display, then Custom; static presets are not shown unless the display reports them. The adapter writes `r_mode -2`, a stable legacy `r_mode` ID for catalog matches, or `r_mode -1` plus exact `r_customWidth`/`r_customHeight` for detected modes outside the catalog. |
 | Display Resolution | `choiceDef` | `set_sys_screensize_val_1` | GUI state `display_mode_choice` via `applyDisplayModeChoice` | Runtime `gui::display_mode_choices` / `gui::display_mode_values` | Compatibility duplicate retained for the old aspect-bucketed menu events. It uses the same dynamic list and adapter as `set_sys_screensize_val_0`. |
@@ -280,6 +318,7 @@ The pane has two display layouts:
 | Label | Widget type | Value widget | Target | Values or range | Notes |
 |---|---|---|---|---|---|
 | Renderer Fallback | `choiceDef` | `set_sys_vidqual_val` | `r_renderer` | `best;arb2` | Displays `Auto;ARB2`. This is the compatibility rollback selector, not the historical multi-backend picker; legacy console/config values still fall back in engine code. Marks `desktop::vidwarn`. |
+| Preload Light Grids | `choiceDef` | `set_sys_preload_val` | `r_lightGridPreload` | `No;Yes` | Preloads baked lighting on the next map load. Help explains smoother traversal, longer loads, and higher VRAM use. |
 | Irradiance Volumes | `choiceDef` | `set_sys_irradiance_val` | `r_useLightGrid` | `No;Yes` | Enables baked light-grid indirect diffuse when available. |
 | Bloom | `choiceDef` | `set_sys_bloom_val` | `r_bloom` | `No;Yes` | Boolean picker. |
 | SSAO | `choiceDef` | `set_sys_ssao_val` | `r_ssao` | `No;Yes` | Boolean picker. |
@@ -309,7 +348,7 @@ The Audio pane is `p_settings_audio`, included from `content/baseoq4/pak0/guis/m
 | Devices | Sound System | `choiceDef` | `set_audio_backend_val` | `s_useOpenAL` | `0 Default`, `1 OpenAL` | Runs `sound drivar` on release. |
 | Devices | Sound Device | `choiceDef` | `set_audio_device_val` | `s_deviceName` | Runtime `gui::device_name` / `gui::device_value` | Disabled when OpenAL is off or failed to load. Runs `sound drivar` on release. |
 | Effects | EAX Reverb | `choiceDef` | `set_audio_eax_val` | `s_useEAXReverb` | `No;Yes` | Disabled when OpenAL is off or failed to load. Runs `sound eax` on release. |
-| Effects | Surround Speakers | `choiceDef` | `set_audio_speakers_val` | `s_numberOfSpeakers` | `2`, `6` | Displayed through `No;Yes`, so this is effectively stereo vs surround. OpenAL Soft requests a matching `ALC_SOFT_output_mode` when available. Runs `sound speakers` on release. |
+| Effects | Surround Speakers | `choiceDef` | `set_audio_speakers_val` | `s_numberOfSpeakers` | `0 Auto`, `2 Off`, `6 On` | Displayed through `Auto;Off;On` (`#str_229980`, shared with Headphone HRTF). `Auto` (default) sends no output-mode request, so OpenAL Soft uses the device's own layout and its automatic HRTF; `Off`/`On` request stereo or 5.1 through `ALC_SOFT_output_mode` when available. Runs `sound speakers` on release. |
 | Effects | Headphone HRTF | `choiceDef` | `set_audio_hrtf_val` | `s_openALHRTF` | `0 Auto`, `1 Off`, `2 On` | Requests OpenAL Soft HRTF through `ALC_SOFT_HRTF` when available. Runs `sound drivar` on release. |
 
 ## Dynamic Lists

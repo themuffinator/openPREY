@@ -20,7 +20,7 @@ The internal tier names are:
 - `TopGL46`
 - `NullRenderer`
 
-Metal and Vulkan are intentionally out of scope for this track. The native Vulkan renderer has its own module-based track in [plans/2026-07-16-vulkan-renderer.md](plans/2026-07-16-vulkan-renderer.md), selected with `r_renderApi` and failing closed onto the GL path described here.
+Metal and Vulkan are intentionally out of scope for this track. The native Vulkan renderer has its own module-based track in [plans/2026-07-16-vulkan-renderer.md](archive/2026-10-18/plans/2026-07-16-vulkan-renderer.md), selected with `r_renderApi` and failing closed onto the GL path described here.
 
 `gfxInfo` also prints `Renderer tier contract:`. That line is the quick audit for whether the selected tier has the workload model it claims:
 
@@ -57,6 +57,7 @@ r_renderer arb2
 r_glTier legacy
 r_rendererModernAutoPromote 0
 r_rendererPromotionEvidence ""
+r_rendererModernLightingParity 0
 r_rendererModernExecutor 0
 r_rendererModernSubmit 0
 r_rendererModernVisible 0
@@ -72,6 +73,128 @@ r_rendererGpuValidation 0
 r_rendererBindless 0
 r_rendererShaderReload 0
 ```
+
+## Lighting Ownership And Parity Contracts
+
+Whether the modern visible path may own a lit frame is decided per light, not
+per pass. `R_ModernGLExecutor_ClassifyModernVisibleLighting` runs after
+`ModernShadowPlanner` and `ModernClusteredLighting` have built the frame, so it
+can consult the descriptor set the modern shaders actually consume. Every
+contributing light lands in one of three buckets:
+
+- **consumable** — the modern path can both describe *and* shade it: a point or
+  projected light whose falloff and projection images are live and reachable by
+  the shader, and whose shadow descriptor is either absent or consumable per the
+  per-light receiver walk. No light currently reaches this bucket; see the
+  capability gate below.
+- **blocked** — genuinely unrepresentable, with a specific reason. Parallel and
+  unidentified lights (`special-light-unrepresentable`); fog and blend lights,
+  which the clustered light loop ignores entirely
+  (`fog-blend-model-unimplemented`); ambient lights, which
+  `ModernClusterEvaluateLight` zeroes (`ambient-light-unevaluated`); missing
+  falloff or projection images; shadow descriptors that would silently drop
+  shadows, including every stencil-shadow light; and — currently every remaining
+  point and projected light — `per-light-images-unbindable`, described below.
+- **unproven** — consumable, but its domain's parity contract has not been
+  satisfied, so it stays on the ARB2 bridge and is counted.
+
+One capability gate sits above all of this. A Quake 4 light is *textured*: its
+shape and colour come from a light projection image and its distance response
+from a falloff image, both sampled projectively per pixel.
+`ModernClusterLightRecord` carries positions, colours and projection planes but
+**no image handles**, and nothing in the clustered path binds them, so
+`ModernClusterEvaluateLight` substitutes an analytic `(1 - d/r)^2` response and a
+binary projection mask. `MODERN_CLUSTER_LIGHT_RECORD_CARRIES_IMAGES` records
+that gap; while it is false, every otherwise-eligible light is blocked as
+`per-light-images-unbindable`, because holding the images on the CPU descriptor
+is not the same as being able to sample them.
+
+`ModernLightImageAtlas` is the answer to that gap — an atlas rather than
+bindless handles, because bindless is GL 4.5+ and would abandon the GL 3.3/4.1
+baseline tiers. It packs per-light 2D falloff and projection images into a 1024²
+atlas of 64 fixed 128px cells, each inset by a one-texel border so bilinear taps
+cannot bleed between cells, and hands back a uv rect per image. Sources are
+copied in by drawing a textured quad rather than by blit or
+`glCopyImageSubData`: light images are frequently DXT-compressed, which cannot
+be colour-attached for a blit, and `glCopyImageSubData` needs GL 4.3 and a
+matching compressed format. Residency is keyed on the image and revalidated
+against its device handle so a reload re-uploads; eviction never reclaims a cell
+already used this frame. Cube-map light images are rejected explicitly rather
+than approximated. `gfxInfo` prints the atlas state and
+`rendererLightImageAtlasSelfTest` covers the packing contract.
+
+The light record now carries `falloffRect` and `projectionRect` alongside its
+planes, the atlas binds on texture unit 13, and `ModernClusterEvaluateLight`
+samples the light's own images rather than substituting an analytic response.
+Specular follows Quake 4's `clamp((N·H)·4−3)²·2` ramp, evaluated analytically
+because the `_specularTable` is exactly that curve. A point or projected light
+whose images the atlas accepted is therefore image-complete, and
+`per-light-images-unbindable` no longer fires for it.
+
+Two constraints are worth knowing before touching this. The atlas upload must
+not be a draw: rendering into the atlas from inside the clustered-light build
+binds an FBO, program, VAO and viewport in the middle of a caller that owns all
+of them and faults the driver, so uploads use `glGetTexImage` +
+`glTexSubImage2D` and are queued to an explicit flush. And cell size is set from
+real content — 128px cells rejected every stock light projection image as
+oversized, so cells are 256 and the atlas is 2048.
+
+That third bucket is the point. Being representable is not the same as being
+correct: shipping a descriptor-complete light whose shading math was never
+compared against ARB2 would silently change what the player sees. Each domain
+therefore carries an explicit parity contract in
+`MODERN_LIGHTING_PARITY_PROVEN_DOMAINS`, a reviewed source constant flipped one
+domain at a time with recorded evidence. The four domains are `interaction`,
+`fog-blend`, `light-grid`, and `shadow`. All four are currently unproven, so the
+default verdict is the same as it has always been — ARB2 owns lit frames — but
+the remaining work is now a measurable count instead of a boolean.
+
+The light grid is the exception to per-light classification: its contribution is
+baked per portal area and selected by the receiving surface, so it is classified
+**per draw** through `RB_LightGridSurfaceModernRepresentable`. A light-grid draw
+is blocked when the surface has no usable area grid (`no-area-light-grid`), when
+its atlases are absent (`light-grid-atlas-missing`), or when the surface sits
+within `r_lightGridPortalBlend` of a portal into another grid
+(`portal-blend-multi-grid`) — portal blending resubmits the surface once per
+contributing grid, and the modern pipeline binds one atlas set per draw. That
+proximity test deliberately omits the per-view visibility checks the backend
+uses, so it is conservative in the safe direction: a surface it clears never
+blends in any view.
+
+The front end declares the light-grid pass unconditionally and filters eligible
+surfaces into it afterwards, so a pass with zero draws carries no work and is
+vacuously ownable rather than blocking. On stock Quake 4 content that is the
+normal case: retail maps ship no baked irradiance volumes, so no surface is
+light-grid eligible and the domain has nothing to own.
+
+`r_rendererModernLightingParity` is a diagnostic bitmask (`1` interaction, `2`
+fog/blend, `4` light grid, `8` shadow, default `0`, not archived) that forces
+domains proven so bring-up can execute the modern path and capture A/B
+comparisons. It is covered by `rendererDefaultSafetySelfTest`, so a non-zero
+value is reported as a non-conservative default.
+
+`gfxInfo` and `r_rendererMetrics 2` print `modernLightingOwnership`, which
+reports the effective contract, per-domain light totals, consumable, blocked and
+unproven counts, the shadow single-cube point-light constraint, each domain's
+readiness, and the first specific blocker (naming the view, pass, light def, and
+reason). `rendererModernCompatibilitySelfTest` covers the default all-unproven
+verdict and asserts the contract is genuinely per-domain.
+
+Shadows are decided solely by the per-light receiver walk in
+`R_ModernGLExecutor_ModernVisibleShadowReceiversReady` plus the `shadow`
+contract; there is no longer a whole-frame shadow-presence gate masking that
+verdict. That walk stays in `ModernVisiblePrecomposeReady` rather than moving
+into the classifier with the other three domains, because it also consults
+deferred/forward+/visible-depth shadow fallback counters that the submit stage
+has not produced yet when the classifier runs. Its verdict therefore reaches
+`modernVisibleHandoffReady` directly instead of through
+`modernVisibleBlockedByLegacy`.
+
+Opting into `r_rendererModernVisible 1` now also builds the clustered-light and
+shadow descriptor sets on frames the modern path cannot own, because that
+descriptor set is the only thing that can explain what is still legacy-bound.
+Visible output is unchanged: composition still fails closed, and pass ownership
+stays legacy while the handoff is not ready.
 
 ## Cross-Platform Context Ladder
 
@@ -134,7 +257,9 @@ Use `rendererUploadSelfTest` to run the ring, allocator, and static-buffer tests
 
 The metrics layer records front-end time, visibility time, scene-packet build time, render-graph build time, submit time, back-end time, present/swap time, view/entity/light counts, draw/surface/vertex/index counts, upload bytes, buffer stalls, upload-stream high-water/overflow data, scene-packet counts, packet material/resource/geometry/instance coverage, packet category and sort-key validation counters, packet-driven render-graph counts, modern-executor preparation coverage, modern shader-library readiness, modern draw-plan coverage, modern submit-plan readiness, modern clustered-light readiness, modern deferred-resolve readiness, modern forward+ readiness, modern visible-frame readiness, and selected renderer tier.
 
-`r_rendererGpuTimers 1` samples GL timer queries when `r_rendererMetrics` is enabled and the driver exposes timer-query support. Samples are resolved on a delayed, nonblocking path; unavailable results are reported as `not-sampled` or dropped instead of stalling the CPU. Detail mode reports resolved GPU timing for the current compatibility backend command categories:
+`r_rendererGpuTimers 1` enables a backend-neutral whole-frame timestamp sample on supported OpenGL and Vulkan renderers. OpenGL resolves a four-slot timestamp ring only after both query objects report availability; Vulkan reads a reused slot only after its ordinary frame fence has already retired and never requests `VK_QUERY_RESULT_WAIT_BIT`. Renderer ABI v11 reports validity, backend, source frame, reset generation, microseconds, frame latency, and cumulative resolved/unavailable/dropped/reset counters. Map loads and renderer/context/device discontinuities invalidate the old generation. The benchmark capture window records high-resolution `BeginFrame` to `EndFrame` CPU microseconds and counts each delayed GPU `(generation, frame)` only once in `OPENQ4_FRAME_TIMING_V1`.
+
+OpenGL detail mode continues to report the compatibility backend command categories when `r_rendererMetrics` is enabled:
 
 - 3D views
 - 2D/GUI views
@@ -144,7 +269,7 @@ The metrics layer records front-end time, visibility time, scene-packet build ti
 - buffer switches
 - swap/present
 
-Use `rendererGpuTimerSelfTest` to verify live timer-query support. `gfxInfo` reports whether renderer GPU timers are available and whether the cvar is enabled.
+Use `rendererGpuTimerSelfTest` to verify live timestamp support without forcing completion. `gfxInfo` reports backend support, latest validity/frame/generation/microseconds/latency, cumulative availability/drop/reset counters, and the no-extra-wait contract.
 
 Metrics now also include the front-end scene-packet stream, resource-backed render graph, graph resource owner, modern GL executor path, modern clustered-light data model, deferred-lite resolve bridge, clustered forward+ bridge, visible-frame composition bridge, modern GL state-cache counters, and benchmark capture summaries. Completed `RenderWorld` views emit `ScenePacket`, `PassPacket`, and `DrawPacket` records after portal/area/scissor culling, surface extraction, special-effect surface submission, subview generation, and draw-surface sorting. Full-screen GUI views emit the same packet contract from the GUI model builder. Draw packets carry legacy sort keys, material records, first bump/diffuse/specular stage images where available, geometry counts, scissor data, shader-register availability, and cache availability. The old ARB2 command-stream translator remains as a backend fallback for direct legacy command flushes, but normal frames report `packets=frontend` in `r_rendererMetrics`. The render graph now preserves ordered packet-pass nodes and attaches explicit virtual resources such as `sceneColor`, `sceneDepth`, G-buffer attachments, `deferredLight`, `hybridSceneColor`, `postA`, `backBuffer`, and imported light-grid/cluster data. It records per-pass read/write/clear/resolve/invalidate/present edges, transient/imported resource counts, first/last resource lifetimes, and aliasable transient groups while ARB2 still owns visible pass execution by default. When `r_rendererModernExecutor 1` is enabled on a GL 3.3+ capable tier, the modern executor consumes that packet/graph data, keeps a starter VAO plus frame-constants UBO alive, validates the internal shader-library variants, builds a draw plan with program selections and state-batch counts, derives a submit plan from vertex/index cache state, builds CPU clustered-light records and UBOs for the hybrid-lighting milestones, can resolve the G-buffer subset into graph-owned deferred lighting, can submit graph-backed clustered forward+ opaque/alpha/transparent side-path draws, can compose a controlled modern visible frame from `deferredLight` and `sceneColor` through graph-owned `hybridSceneColor`, updates the frame UBO once per backend frame through the shared `GLStateCache`, and reports prepared pass/draw/plan/submit/cluster/deferred/forward+/visible-frame coverage. When `r_rendererModernSubmit 1` is also enabled, the executor issues diagnostic GL 3.3 draw calls before the legacy backend runs while masking color/depth writes so ARB2 remains the visible renderer.
 
@@ -154,7 +279,17 @@ Metrics now also include the front-end scene-packet stream, resource-backed rend
 
 `MaterialResourceTable` turns packet material records into stable backend-facing material ids. Each entry records the source material id/name/class, blend and sort group, alpha-test state, shader-register ranges, first bump/diffuse/specular/emissive/GUI/post images, GL 3.3 classic texture slots, GL 4.3+ array/view descriptor candidates, disabled bindless fields, and an explicit fallback reason. Detailed metrics report `materialTable(...)` record, texture, class, missing-image, unsupported-feature, and fallback-reason counters, and `rendererMaterialResourceTableSelfTest` covers opaque, perforated, translucent, GUI, post, and missing-texture records.
 
+The table also compiles materials actually referenced by a GUI packet into bounded, ordered authored-pass spans. Unlike the older one-binding-per-semantic convenience view, these spans retain repeated stage bindings, register references, exact fixed-function state, and opaque generation-checked texture-resource ids. `ClassicGuiDomain` evaluates those spans once per draw, matches them transactionally to every drawable source surface in a root 2D view, and exposes the same immutable records to OpenGL and Vulkan. With `r_rendererSharedGui 1`, each backend preflights the complete view before drawing; any unsupported view, material, state, resource, cache, descriptor, or pipeline executes the untouched classic view. The independent `r_rendererSharedInWorldGui 1` corridor instead admits only provenance-tagged `R_RenderGuiSurf` output in an ordinary 3D view and uses the world depth contract, with complete tagged-subset fallback. Both paths are default-off and independent of the aggregate GUI command used by `r_rendererModernVisible`, which remains a separate hybrid-renderer experiment and is suppressed while shared GUI ownership is requested. See [Shared Classic 2D GUI Domain](classic-gui-domain-modernization.md) and [Shared Classic In-World GUI Domain](classic-inworld-gui-domain-modernization.md).
+
+Materials actually referenced by world ambient packets now compile into a separate bounded world-pass pool rather than reusing the GUI spans or the one-binding convenience record. Each pass is a fixed-program surface pass with enabled depth testing, translated `LESS`/`EQUAL`/`ALWAYS` comparison, authored depth-write state, repeated order, register references, and generation-checked texture identity. `ClassicWorldAmbientDomain` transactionally matches every original surface in an eligible ambient-only 3D view, requires matching established depth packets for opaque/perforated draws, evaluates all passes once, and publishes only a complete pre-fog/post-fog plan. With default-off `r_rendererSharedWorldAmbient 1`, OpenGL and Vulkan complete all resource/state/pipeline preflight before the first shared ambient draw; a non-owned packet, unsupported surface/material/resource, missing depth prerequisite, or backend rejection leaves the complete classic ambient walker untouched. The actual consumers use sealed records and do not reread material stages or shader registers. Local development-worktree stock `maps/tools/mv2` captures now match option-off output exactly on GL and Vulkan with one owned pre-fog draw and domain hash `dc18ed8c0539bbfc`; a stock deform override reports the same named zero-draw whole-view fallback on both backends. Clean-package/platform promotion evidence remains open. See [Shared Classic World Ambient/Material Domain](classic-world-ambient-domain-modernization.md).
+
+`ClassicFogBlendDomain` is the separate fourth default-off shared domain. It transactionally walks every fog/blend light in one eligible ordinary root 3D view, preserves GLOBAL-to-LOCAL receiver order, evaluates every ordered active/inactive blend stage, seals fog receiver and frustum-cap work, and retains complete texgen, color/density, blend/depth/cull, geometry, and generation-checked image state. With `r_rendererSharedWorldFogBlend 1`, OpenGL and Vulkan preflight the whole phase before the first shared main-target draw; any source, geometry, material, resource, target, capacity, or backend rejection executes the untouched complete classic fog/blend walker. This corridor is independent of interaction ownership and of the older aggregate `r_rendererModernVisible` fog classification described above. Native/static validation and the controlled stock-declaration GL/Vulkan runtime suite pass with exact same-backend classic parity, nonempty ownership, material fog/blend deltas, and atomic rollback. Authored-stock fog, clean-package, and platform promotion remain open. See [Shared Classic Fog/Blend Domain](classic-fog-blend-domain-modernization.md).
+
+`ClassicSubviewDomain` is the separate default-off special-subview transaction. It seals direct `SS_SUBVIEW` mirror camera/clip/culling/viewport/scissor semantics, then retains the mature complete child-view executor; it also seals the immediate child scene/copy relationship for eligible remote-camera, mirror, reflection, refraction, and x-ray 2D/cubemap color/depth captures. With `r_rendererSharedSubview 1`, OpenGL copies to the sealed 2D/cube face through `CopyFramebuffer`/`CopyDepthbuffer`, and Vulkan uses an exact type/aspect/face image-copy target, reporting capture ownership only after that transfer completes; direct ownership is reported only after the sealed child executor returns. Eligible nested trees additionally seal exact parent/root/depth records and defer ownership publication until their outermost special view completes; a rejected member returns the complete tree to the classic command path. This is a subview handoff, not shared child-scene material/light rendering. Cinematic, in-world GUI, and post forms retain their separate ownership boundaries. Native/static validation passes; fixed-camera engine-render-target parity, clean-package, and platform qualification remain open. See [Shared Special-Subview Transaction](classic-subview-domain-modernization.md).
+
 Scene Packet V2 adds copied geometry and instance records to the packet stream. `GeometryResourceRecord` captures ambient/index buffer ids, cache offsets and byte ranges, vertex/index formats and counts, bounds, skinning/deform/upload classifications, and CPU index fallback provenance. `InstanceRecord` captures model and model-view matrices, previous matrix, entity color, shader-register ranges, palette offsets, and visibility flags for world, GUI, viewmodel, subview, remote-camera, render-demo, and bridge cases. Detailed metrics report geometry/instance record counts, record references, packet category counts, sort-key validation failures, and overflow causes, and `rendererGeometryResourceSelfTest` validates record copy, category classification, and overflow behavior.
+
+Scene packets now also carry a per-draw classic material-deform record rather than deriving material-deform completion from `srfTriangles_t::deformedSurface`. `ClassicDeformDomain` brackets the authoritative CPU finalization and seals source/result material and geometry, cache backing and lifetime, evaluated inputs, frame freshness, consumer role, outcome, and a pointer-independent semantic hash. With default-off `r_rendererSharedDeform 1`, finalized completed or intentional-empty results can participate in the shared GUI, world-ambient, interaction mapped-caster, and fog/blend transactions; interaction/fog receivers explicitly preserve their classic source geometry. Particle/particle2, skipped, failed, stale, or mismatched records retain complete-domain rollback. Both backends consume only the resulting ordinary vertex/index stream and never rerun the deform. See [Shared Classic Material-Deform Contract](classic-deform-domain-modernization.md).
 
 `GLStateCache` is the central modern-state ownership point for program, VAO, buffer, texture, sampler, framebuffer, blend, depth, stencil, raster, viewport, scissor, and color-mask changes. It is invalidated explicitly when the backend hands control back to the legacy ARB2 renderer, so the modern diagnostic path never trusts state that ARB2 may have changed. `r_rendererMetrics 2` reports state-cache hits, misses, per-category misses, forced invalidations, and legacy handoff resets; `gfxInfo` reports debug-group/object-label availability and the latest cache state. Use `rendererGLStateCacheSelfTest` to exercise redundant state changes and legacy invalidation.
 
@@ -188,7 +323,7 @@ Scene Packet V2 adds copied geometry and instance records to the packet stream. 
 - `r_rendererModernDeferredDebug` overlays deferred light contribution, cluster id, light-count heat, or fallback/overflow pressure before swap.
 - `r_rendererClusterDebug` overlays clustered-light occupancy, light-count heatmap, or overflow pressure before swap.
 - `r_shadowMapReport` and `gfxInfo` report the modern shadow plan: mapped, stencil-fallback, and skipped lights; projected/point/CSM counts; caster/receiver totals; atlas tile use, budgeted shadow size, pixels, update cadence, descriptor readiness, and unsupported-resource fallback reasons. Deferred resolve and forward+ consume the clustered shadow descriptor policy from that plan, but mapped lights whose modern receiver sampler is not production-ready are converted to per-light stencil fallbacks so visible-frame handoff rejects them instead of double-shadowing or silently dropping shadows.
-- Keeps stencil shadows, deform surfaces, unsupported material classes, GPU-palette skinning, unsupported geometry, unavailable graph resources, unavailable MRT state, unsupported forward+ blend modes, GUI draws without ready packet/cache records, subview/post/special-effect packets, and alpha-test surfaces without a diffuse texture on the legacy path with explicit fallback counters.
+- Keeps stencil shadows, unsupported or unsealed material deforms, unsupported material classes, GPU-palette skinning, unsupported geometry, unavailable graph resources, unavailable MRT state, unsupported forward+ blend modes, GUI draws without ready packet/cache records, subview/post/special-effect packets, and alpha-test surfaces without a diffuse texture on the legacy path with explicit fallback counters.
 - Reports prepared pass/draw coverage, shader-library readiness, draw-plan coverage, submit-plan readiness, pipeline demand/skipped-pass/FBO-cache/batch stability, cache-backed versus CPU-uploaded index counts, submitted draw/fallback counts, visible depth/shadow draw and fallback counts, G-buffer draw/fallback/bandwidth/MRT/overlay state, deferred resolve pixel/light/cluster-read/fallback/GPU-timer/overlay state, forward+ opaque/alpha/transparent/sort/fallback/overdraw/cluster-read/GPU-timer state, modern visible-frame composition/owner/fallback/resource/GPU-timer state, clustered-light grid/light/reference/shadow-descriptor/overflow/build/UBO/debug-overlay state, shadow-plan mapped/fallback/skipped/budget state, resource readiness, debug-overlay readiness, GL 4.3 GPU-driven resource/compute/indirect/readback/mismatch metrics, GL 4.5 DSA texture/FBO/sampler creation, named buffer/FBO updates, buffer/texture/sampler multi-bind usage, persistent-upload fence diagnostics, bindless experiment state, and GL state-cache hit/miss behavior through `gfxInfo` and `r_rendererMetrics 2`.
 
 This gives the GL 3.3/4.1 executor a live object lifetime, frame-constant upload, packet-consumption, shader-library reflection, draw-plan generation, diagnostic GL submission, graph-backed depth and G-buffer resource execution, clustered-light preparation, shared shadow planning, deferred-lite resolve execution, clustered forward+ side-path execution, guarded hybrid visible-frame composition, conservative visibility packets, explicit max-depth Hi-Z construction, fit-for-purpose pass demand, fallback accounting, state-cache handoff safety, and metrics contract without replacing the stock Quake 4 color path by default. The GL 4.3 and GL 4.5 tiers are now active executor paths rather than capability labels: forced `r_glTier gl43` exercises SSBO-backed compute culling, clustered-bin validation, compacted indirect command generation, CPU-reference readback, and masked MDI execution, while forced `r_glTier gl45` additionally exercises DSA graph texture/FBO allocation, DSA sampler creation, named buffer/FBO updates, texture/sampler multi-bind groups, submit-batch compaction metrics, FBO attachment-cache diagnostics, and persistent-upload fence diagnostics. Driver quirk and compatibility gates now run before tier selection, so known broken UBO, MRT, timer-query, buffer-storage, and debug-context paths report deterministic fallback behavior in `gfxInfo`. Use `rendererModernGLExecutorSelfTest` to verify the analysis path, live GL object state, GPU-driven buffers, compute validation dispatch, Hi-Z reduction resources, and low-overhead binding path. Use `rendererModernVisibilitySelfTest` to verify conservative scissor/frustum/screen rejection, projected screen bounds, shadow-caster safety, the occlusion kill switch, Hi-Z candidate accounting, and no-query-stall policy. Use `rendererCompatibilityGatesSelfTest` to verify missing-feature downgrades, timer-query fallback, debug-context fallback, and synthetic driver-quirk table entries. Use `rendererGpuDrivenSelfTest` to verify GL 4.3 compute culling, generated indirect commands, CPU/GPU mismatch accounting, and masked multi-draw indirect execution. Use `rendererLowOverheadSelfTest` to verify GL 4.5 DSA resource allocation, DSA sampler setup, buffer/texture/sampler multi-bind, compacted batches, FBO attachment-cache hits, bindless experiment reporting, and upload fence diagnostics. Use `rendererVisiblePathSelfTest` to verify the visible-depth bridge, graph-backed scene/shadow resources, alpha-aware depth bindings, depth-overlay program, and conservative fallback contract. Use `rendererGBufferSelfTest` to verify graph-backed G-buffer resources, MRT setup, diffuse texture binding, packing assumptions, attachment bandwidth metrics, and G-buffer overlay readiness. Use `rendererClusterGridSelfTest` to verify light classification, cluster slicing, overflow accounting, UBO upload readiness, and debug-overlay texture generation. Use `rendererShadowPlannerSelfTest` to verify shadow-light policy, fallback accounting, budgeted map selection, render-graph shadow resource ownership, and clustered descriptor handoff. Use `rendererDeferredResolveSelfTest` to verify graph-backed deferred output, G-buffer/depth/cluster inputs, point/projected light accumulation, clustered shadow-policy consumption, light-grid contribution, fallback counters, and deferred overlay readiness. Use `rendererForwardPlusSelfTest` to verify graph-backed scene-color/depth resources, clustered forward opaque/alpha/transparent programs, transparent sort preservation, clustered-light and shadow-policy reads, and forward+ fallback counters. Use `rendererModernVisibleSelfTest` to verify the full guarded modern-visible sequence, pass-owner accounting, deferred/forward source readiness including single-source composition, hybrid scene target readiness, shadow-ready handoff, back-buffer copy, and fallback blocking. Use `rendererGLStateCacheSelfTest` to verify redundant-state suppression and legacy invalidation. Use `rendererShaderLibrarySelfTest` to verify the internal GLSL families, compact permutation keys, and reflected frame/resource bindings. Use `rendererModernGLDrawPlanSelfTest` to verify packet-to-plan classification against the current resource graph. Use `rendererModernGLSubmitPlanSelfTest` to verify submit-readiness classification, persistent/temp index-cache classification, CPU-index upload classification, and cache-fallback accounting.
@@ -240,7 +375,12 @@ The active visible renderer remains ARB2 by default. The modern executor is stil
 - `RendererBootstrap` owns selected tier/features and marks the ARB2 bridge.
 - `RenderGraph` builds ordered packet-pass nodes from the front-end scene-packet frame and attaches virtual resource edges for current legacy depth, color, post-process, GUI, and present work.
 - `RenderGraphResources` turns graph resource records into stable imported or transient GL handles, owns transient texture/FBO allocation and validation, tracks lifetimes and conservative aliasing, and reports graph resource state without changing visible output.
-- `MaterialResourceTable` turns packet material records into stable table records with texture/sampler descriptors and explicit fallback reasons, so modern draw plans can carry a material table id forward instead of treating the legacy material pointer as submit-time state.
+- `MaterialResourceTable` turns packet material records into stable table records with texture/sampler descriptors and explicit fallback reasons, so modern draw plans can carry a material table id forward instead of treating the legacy material pointer as submit-time state. Its packet-referenced GUI and world compilers additionally preserve distinct complete repeated fixed-function stage spans and opaque generation-checked texture ids for the shared 2D and ambient/material domains.
+- `ClassicGuiDomain` owns the default-off, whole-view fixed-function 2D GUI transaction and the separate complete provenance-tagged in-world GUI subset transaction. It evaluates register-driven pass records once per draw, hashes complete source/pass coverage, and exposes only sealed state to both backend consumers; any unsupported or incomplete root view or tagged subset remains entirely classic.
+- `ClassicWorldAmbientDomain` owns the default-off, whole-view fixed-function world ambient/material transaction. It matches ambient packets and opaque/perforated depth prerequisites, evaluates register-driven surface passes once, splits them around established fog ordering, hashes complete source/pass coverage, and exposes only sealed state to both backend consumers; any non-owned or incomplete view remains entirely classic.
+- `ClassicDeformDomain` owns the default-off material-deform provenance dependency used by all four shared classic domains. It preserves the established CPU algorithms, distinguishes final output from generated/skinned geometry, and makes completed, empty, source-preserving, skipped, failed, and unsupported outcomes explicit before backend ownership.
+- `ClassicInteractionDomain` owns the separate default-off, whole-view unshadowed and shadow-coupled fixed-classic interaction transactions. Interaction and shadow packets carry explicit light, LOCAL/GLOBAL/TRANSLUCENT receiver, caster-chain, and source identity; one bounded preparation walk seals every accepted light stage, decomposed bump/diffuse/specular primitive, no-op, stencil volume, mapped caster/alpha stage, projected/CSM/point pass, hybrid supplement, resource policy, state, and semantic hash. GL and Vulkan preflight complete cache/update/scratch plus receiver plans before visible ownership and reconcile physical stencil replay exactly. Translucent moment-map casters and every custom, unsupported geometry/resource, special-view, overflow, or backend condition retain the untouched complete classic interaction walker.
+- `ClassicFogBlendDomain` owns the separate default-off, whole-phase fixed-classic fog/blend transaction. Fog/blend packets and the source view-light walk carry exact light and GLOBAL/LOCAL receiver identity; one bounded preparation walk seals every ordered blend stage, fog receiver/cap, no-op, texgen plane, color/density, resource, compositing state, and semantic hash. GL and Vulkan preflight the complete phase before visible ownership. Every unsupported source/view/geometry/resource/target/overflow/backend condition retains the untouched complete classic fog/blend walker. Native/static and controlled GL/Vulkan image qualification pass; authored-stock fog and release promotion remain open.
 - `ScenePacket`, `DrawPacket`, `PassPacket`, `MaterialResourceRecord`, `GeometryResourceRecord`, and `InstanceRecord` define the backend-neutral packet contract. `RenderWorld` and GUI producers emit draw-view packets before the legacy command queue reaches the backend; command-only passes such as render-target, copy, special-effect, and present operations are tracked alongside them, and the backend command-stream translator is kept as a survival fallback. ARB2 still executes the original commands for visible output.
 - `ModernGLExecutor` owns the opt-in GL 3.3+ executor shell, validates packet/graph coverage, keeps Shader Library V2 alive, updates a frame-constants UBO, optionally performs masked diagnostic GL submission, optionally writes graph-backed scene/shadow depth resources through `r_rendererModernVisibleDepth`, optionally writes graph-backed opaque G-buffer resources through `r_rendererModernOpaque`, optionally resolves that G-buffer into graph-owned `deferredLight` through `r_rendererModernDeferred`, optionally writes clustered forward+ opaque/alpha/transparent side-path output through `r_rendererForwardPlus`, optionally composes a modern visible frame through `r_rendererModernVisible`, replays ready fullscreen GUI draw packets through a modern GUI overlay after composition, inventories post/copy/subview/render-demo/BSE categories with explicit modern-owner or compatibility-fallback accounting, promotes GL 4.3+ tiers into live SSBO/compute/indirect culling and generated-command work with CPU-reference validation, promotes GL 4.5+ tiers into DSA buffer/FBO/sampler updates and buffer/texture/sampler multi-bind, and leaves mixed/unsupported visible color execution on the ARB2 bridge.
 - `ModernClusteredLighting` builds conservative CPU light-cluster grids from packet-scene `viewLight_t` lists, uploads grid/light/index records through GL 3.3 UBOs or GL 4.3+ SSBOs for hybrid-lighting shaders, tracks uploaded/spilled/hard-overflow references separately, and exposes `r_rendererClusterDebug` occupancy, count, and overflow overlays without changing final lighting.
@@ -250,7 +390,7 @@ The active visible renderer remains ARB2 by default. The modern executor is stil
 - `ModernGLSubmitPlan` translates draw-plan entries into submit commands from copied geometry and instance records when the legacy vertex cache exposes VBO-backed ambient buffers and either VBO-backed, frame-temp, generated, or CPU-uploadable index data, carries shader-kind/reflection metadata forward, and records missing-buffer fallback reasons for the GL3 executor.
 - `RendererUpload` owns static vertex/index buffer uploads, the feature-gated dynamic frame-temp stream, GL 4.5 persistent mapped defaulting with fence-retirement diagnostics, and the old vertex-cache path as a fallback.
 
-Use `gfxInfo` to inspect the selected tier, context profile, feature flags, capability summary, driver quirk report, compatibility gates, default-promotion state, benchmark preset/threshold state, GPU-timer availability, scene-packet limits/source reporting, geometry/instance record limits, resource-graph limits, render-graph resource ownership, material resource-table readiness, modern-executor availability, visible-depth resource/debug-overlay state, G-buffer resource/MRT/debug-overlay state, deferred resolve resource/debug-overlay state, forward+ resource/program/cluster/draw/fallback state, modern visible-frame owner/composition/fallback state, modern compatibility inventory state, clustered-light UBO/debug-overlay state, modern shadow-plan policy/budget/fallback state, GL state-cache/debug-label status, Shader Library V2 status, draw-plan coverage, submit-plan readiness, GL 4.3 GPU-driven resource/validation/indirect status, GL 4.5 DSA/multi-bind/bindless-experiment status, and upload stream/fence diagnostics. Use `rendererContextLadderSelfTest`, `rendererTierSelfTest`, `rendererCompatibilityGatesSelfTest`, `rendererDefaultPromotionSelfTest`, `rendererBenchmarkSelfTest`, `rendererBenchmarkCapture`, `rendererUploadSelfTest`, `rendererGpuTimerSelfTest`, `rendererScenePacketSelfTest`, `rendererRenderGraphSelfTest`, `rendererRenderGraphResourceSelfTest`, `rendererMaterialResourceTableSelfTest`, `rendererGeometryResourceSelfTest`, `rendererGLStateCacheSelfTest`, `rendererModernGLExecutorSelfTest`, `rendererGpuDrivenSelfTest`, `rendererLowOverheadSelfTest`, `rendererVisiblePathSelfTest`, `rendererGBufferSelfTest`, `rendererClusterGridSelfTest`, `rendererShadowPlannerSelfTest`, `rendererDeferredResolveSelfTest`, `rendererForwardPlusSelfTest`, `rendererModernVisibleSelfTest`, `rendererModernCompatibilitySelfTest`, `rendererShaderLibrarySelfTest`, `rendererModernGLDrawPlanSelfTest`, and `rendererModernGLSubmitPlanSelfTest` to run the live renderer foundation tests.
+Use `gfxInfo` to inspect the selected tier, context profile, feature flags, capability summary, driver quirk report, compatibility gates, default-promotion state, benchmark preset/threshold state, GPU-timer availability, scene-packet limits/source reporting, geometry/instance record limits, resource-graph limits, render-graph resource ownership, material resource-table readiness, shared classic-GUI readiness/hash/backend coverage, shared cinematic/authored-post readiness/timing/hash/backend coverage, shared render-demo/Raven special-frame readiness/hash/backend coverage, shared world-ambient readiness/phases/hash/backend coverage, shared interaction light/receiver/primitive/shadow/map readiness, per-map static/dynamic/alpha/translucent features, shared fog/blend light/receiver/stage/cap readiness/hash/backend coverage, modern-executor availability, visible-depth resource/debug-overlay state, G-buffer resource/MRT/debug-overlay state, deferred resolve resource/debug-overlay state, forward+ resource/program/cluster/draw/fallback state, modern visible-frame owner/composition/fallback state, modern compatibility inventory state, clustered-light UBO/debug-overlay state, modern shadow-plan policy/budget/fallback state, GL state-cache/debug-label status, Shader Library V2 status, draw-plan coverage, submit-plan readiness, GL 4.3 GPU-driven resource/validation/indirect status, GL 4.5 DSA/multi-bind/bindless-experiment status, and upload stream/fence diagnostics. Use `rendererContextLadderSelfTest`, `rendererTierSelfTest`, `rendererCompatibilityGatesSelfTest`, `rendererDefaultPromotionSelfTest`, `rendererBenchmarkSelfTest`, `rendererBenchmarkCapture`, `rendererUploadSelfTest`, `rendererGpuTimerSelfTest`, `rendererScenePacketSelfTest`, `rendererRenderGraphSelfTest`, `rendererRenderGraphResourceSelfTest`, `rendererMaterialResourceTableSelfTest`, `rendererClassicGuiDomainSelfTest`, `rendererClassicCinematicPostDomainSelfTest`, `rendererClassicSpecialFrameDomainSelfTest`, `rendererClassicWorldAmbientDomainSelfTest`, `rendererClassicInteractionDomainSelfTest`, `rendererClassicFogBlendDomainSelfTest`, `rendererGeometryResourceSelfTest`, `rendererGLStateCacheSelfTest`, `rendererModernGLExecutorSelfTest`, `rendererGpuDrivenSelfTest`, `rendererLowOverheadSelfTest`, `rendererVisiblePathSelfTest`, `rendererGBufferSelfTest`, `rendererClusterGridSelfTest`, `rendererShadowPlannerSelfTest`, `rendererDeferredResolveSelfTest`, `rendererForwardPlusSelfTest`, `rendererModernVisibleSelfTest`, `rendererModernCompatibilitySelfTest`, `rendererShaderLibrarySelfTest`, `rendererModernGLDrawPlanSelfTest`, and `rendererModernGLSubmitPlanSelfTest` to run the live renderer foundation tests.
 
 The automated safe validation matrix lives in [renderer-validation-matrix.md](renderer-validation-matrix.md) and can be run with:
 

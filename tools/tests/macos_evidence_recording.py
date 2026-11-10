@@ -258,7 +258,7 @@ def main() -> int:
         )
         require(
             ambiguous_bridge_artifact.stderr,
-            "exact experimental macOS arm64 openQ4 opengl/metal package artifact",
+            "exact macOS arm64 openQ4 opengl/metal package artifact",
             "ambiguous bridge artifact rejection",
         )
 

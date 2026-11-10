@@ -1,6 +1,6 @@
 # Vendored Volk
 
-- Source: Vulkan SDK 1.4.313.1 (volk, Arseny Kapoulkine), header version 313
+- Source: Vulkan SDK 1.4.363.0 (volk, Arseny Kapoulkine), header version 363
 - License: MIT (see file banners)
 - Runtime meta-loader for Vulkan: `dlopen`/`LoadLibrary` of the ICD loader at
   `volkInitialize()` time, so `renderer-vk_<arch>` loads cleanly on machines

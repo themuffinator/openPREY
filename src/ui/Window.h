@@ -35,6 +35,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "Winvar.h"
 #include "GuiScript.h"
 #include "SimpleWindow.h"
+#include <deque>
 
 const int WIN_CHILD			= 0x00000001;
 const int WIN_CAPTION		= 0x00000002;
@@ -335,6 +336,7 @@ public:
 	virtual void Moved();
 	virtual void Draw(int time, float x, float y);
 	virtual void MouseExit();
+	void ClearMouseHover();
 	virtual void MouseEnter();
 	virtual void DrawBackground(const idRectangle &drawRect);
 	virtual const char *RouteMouseCoords(float xd, float yd);
@@ -345,13 +347,21 @@ public:
 	virtual void WriteToDemoFile( class idDemoFile *f );
 
 	// SaveGame support
-	void			WriteSaveGameString( const char *string, idFile *savefile );
-	void			WriteSaveGameTransition( idTransitionData &trans, idFile *savefile );
+	bool			WriteSaveGameString( const char *string, idFile *savefile );
+	bool			WriteSaveGameTransition( idTransitionData &trans, idFile *savefile );
+	bool			WriteSaveGameChildReference( idWindow *child, idFile *savefile, const char *fieldName, bool allowDescendant );
+	bool CanKeepForLevelLoad() const;
+	void CaptureForLevelLoad();
+	virtual void RefreshForLevelLoad();
 	virtual void	WriteToSaveGame( idFile *savefile );
-	void			ReadSaveGameString( idStr &string, idFile *savefile );
-	void			ReadSaveGameTransition( idTransitionData & trans, idFile *savefile );
+	bool			ReadSaveGameString( idStr &string, idFile *savefile );
+	bool			ReadSaveGameTransition( idTransitionData & trans, idFile *savefile );
+	idWindow *		ReadSaveGameChildReference( idFile *savefile, const char *fieldName, bool allowDescendant,
+						bool *hadSerializedReference = NULL, bool *readSucceeded = NULL );
 	virtual void	ReadFromSaveGame( idFile *savefile );
-	void			FixupTransitions();
+	bool			FixupTransitions( bool fieldIndexes );
+	static intptr_t	TransitionFieldOffset( bool simple, int index );
+	static int		TransitionFieldIndex( bool simple, intptr_t offset );
 	virtual void HasAction(){};
 	virtual void HasScripts(){};
 
@@ -392,6 +402,8 @@ public:
 	idStr cmd;
 
 	virtual void RunNamedEvent		( const char* eventName );
+	// Whether this window defines the named event itself (not its children).
+	bool		HasNamedEvent		( const char* eventName ) const;
 
 	void		AddDefinedVar		( idWinVar* var );
 
@@ -415,12 +427,19 @@ protected:
 	void		SetDefaults			( void );
 
 	friend class idSimpleWindow;
+	friend class idLevelEditorWindow; // workspace label-fit qualification
 	friend class idUserInterfaceLocal;
 	friend class idUserInterfaceManagerLocal;
 	bool IsSimple();
 	bool UsesSimpleWindowClipBehavior() const;
 	bool HasDirectChildReference( const idWindow *window ) const;
 	bool HasDescendantReference( const idWindow *window ) const;
+	static int SaveGameChildIDCompare( idWindow * const *left, idWindow * const *right );
+	bool BuildSaveGameChildOrder( idList<idWindow *> &orderedChildren, const char *operation ) const;
+	bool FindSaveGameDescendantOrdinal( const idWindow *window, int &nextOrdinal, int &foundOrdinal, int depth ) const;
+	idWindow *FindSaveGameDescendantByOrdinal( int targetOrdinal, int &nextOrdinal, int depth );
+	bool FindSaveGameFlaggedDescendants( unsigned int flag, idWindow *&match, int &matches, int &visited, int depth );
+	bool ValidateRestoredTrackedWindowPointers( bool hadSavedFocusReference, bool hadSavedCaptureReference );
 	void ClearTrackedWindowReference( const idWindow *window );
 	void ValidateTrackedWindowPointers();
 	void UpdateWinVars();
@@ -486,6 +505,19 @@ protected:
 	float textAligny;
 	unsigned char screenAlignX;
 	unsigned char screenAlignY;
+	// openQ4: "hudanchorx" and "hudanchory" name the screen anchor a HUD
+	// window's group scales about (idLegacyHudGroup) where its alignment does
+	// not say: a window Remastered places on an edge through oq4_hudEdge* while
+	// the stock layout keeps it centered. HUD_ANCHOR_UNSET follows the alignment.
+	// "none" keeps the window and its children out of the HUD scale: a layer
+	// that is not part of the HUD's groups (the Arena presentation).
+	enum { HUD_ANCHOR_NONE = 3, HUD_ANCHOR_UNSET = 255 };
+	unsigned char hudAnchorX = HUD_ANCHOR_UNSET;
+	unsigned char hudAnchorY = HUD_ANCHOR_UNSET;
+	// The group anchors this window sets: 0 the centre, 1 the leading or top
+	// edge, 2 the trailing or bottom edge, -1 an ancestor's.
+	int HudGroupAnchorX() const;
+	int HudGroupAnchorY() const;
 	idStr	name;
 	idStr	comment;
 	idStr	windowDefType;
@@ -531,7 +563,33 @@ protected:
 	idWinFloat	textScale;
 	idWinFloat	rotate;
 	idWinStr	text;
-	idWinBackground	backGroundName;
+	// openQ4: "textwidth", the drawn text's widest line in virtual units, and
+	// "textlines", its explicit line count, which other windows' expressions
+	// read (a plate fitted to its text). Measured only once something
+	// references either, as the window draws; never saved.
+	idWinFloat	textWidth;
+	idWinFloat	textLines;
+	bool		measureTextWidth = false;
+	// openQ4: "ellipsis 1" ends a single line too long for its rectangle with
+	// "..." rather than cutting it at the edge; textwidth then reports the
+	// shortened line. What was last measured, and for which text, scale, font,
+	// spacing and width, so an unchanged line is measured once.
+	bool		textEllipsis = false;
+	// openQ4: in a HUD's Remastered layout (the stock windows keep their
+	// stock look in Classic), "keynames 1" writes a key escape in the text as
+	// the key's name instead of drawing its keycap, for a notice that names a
+	// key in passing, and "oneline 1" joins the text's explicit lines.
+	bool		textKeyNames = false;
+	bool		textOneLine = false;
+	bool		measuredRemastered = false;
+	idStr		measuredText;
+	idStr		measuredDrawn;
+	float		measuredScale = -1.0f, measuredSpacing = 0.0f, measuredRect = -1.0f;
+	float		measuredWidth = 0.0f, measuredLines = 0.0f;
+	int			measuredFont = -1;
+	bool		measuredShortened = false;
+	void		MeasureText();
+	idWinBackground	backGroundName;			// 
 	idWinBackground	backgroundLeft;
 	idWinBackground	backgroundRight;
 	idWinBackground	backgroundTop;
@@ -553,6 +611,7 @@ protected:
 	idList<idWinVar*> updateVars;
 
 	idRectangle textRect;			// text extented rect
+	const idMaterial *levelLoadDirectBackground = NULL;
 	const idMaterial *background;         // background asset  
 
 	idWindow *parent;				// parent window
@@ -579,7 +638,9 @@ protected:
 
 	static bool registerIsTemporary[MAX_EXPRESSION_REGISTERS]; // statics to assist during parsing
 // jmarshall - gui crash
-	wexpOp_t ops[MAX_EXPRESSION_OPS];			   	// evaluate to make expressionRegisters
+	// Recursive conditional parsing retains pointers to earlier operations.
+	// Grow only as needed, without invalidating those pointers on append.
+	std::deque<wexpOp_t> ops;
 	int numOps;
 // jmarshall end
 	idList<float> expressionRegisters;

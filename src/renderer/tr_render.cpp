@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "tr_local.h"
+#include "draw_pbr.h"
 
 /*
 
@@ -166,9 +167,10 @@ void RB_DrawElementsWithCounters( const srfTriangles_t *tri ) {
 						(int *)vertexCache.Position( tri->indexCache ) );
 		backEnd.pc.c_vboIndexes += tri->numIndexes;
 	} else {
-		if ( r_useIndexBuffers.GetBool() ) {
-			vertexCache.UnbindIndex();
-		}
+		// The modern renderer can leave an element buffer on the legacy VAO
+		// even when classic index uploads are disabled. A CPU index pointer is
+		// valid only with EBO zero; otherwise GL interprets it as an offset.
+		vertexCache.UnbindIndex();
 		glDrawElements( GL_TRIANGLES, 
 						r_singleTriangle.GetBool() ? 3 : tri->numIndexes,
 						GL_INDEX_TYPE,
@@ -202,9 +204,7 @@ void RB_DrawShadowElementsWithCounters( const drawSurf_t *surf, int numIndexes )
 						(int *)vertexCache.Position( tri->indexCache ) );
 		backEnd.pc.c_vboIndexes += numIndexes;
 	} else {
-		if ( r_useIndexBuffers.GetBool() ) {
-			vertexCache.UnbindIndex();
-		}
+		vertexCache.UnbindIndex();
 		glDrawElements( GL_TRIANGLES, 
 						r_singleTriangle.GetBool() ? 3 : numIndexes,
 						GL_INDEX_TYPE,
@@ -285,8 +285,9 @@ void R_GetDepthHackProjectionMatrix( const viewDef_t *viewDef, bool weaponDepthH
 		return;
 	}
 
+	// a VR eye's off-axis projection is the eye's; a symmetric gun FOV would tear it
 	const float weaponFovOverride = cl_gunfov.GetFloat();
-	if ( weaponFovOverride > 0.0f ) {
+	if ( weaponFovOverride > 0.0f && !viewDef->renderView.asymmetricFov ) {
 		const float viewportWidth = static_cast<float>( Max( 1, viewDef->viewport.x2 - viewDef->viewport.x1 + 1 ) );
 		const float viewportHeight = static_cast<float>( Max( 1, viewDef->viewport.y2 - viewDef->viewport.y1 + 1 ) );
 
@@ -543,6 +544,15 @@ void RB_LoadShaderTextureMatrix( const float *shaderRegisters, const textureStag
 	glMatrixMode( GL_MODELVIEW );
 }
 
+// Cross-frame dedupe for the shared cinematic scratch image. RoQ decodes at
+// ~30fps while the backend can bind the same decoded frame many times per
+// second; when the identical frame is already resident we only rebind.
+// frameSerial 0 = producer opted out (always upload). storageGeneration
+// invalidates across vid_restart / reloadImages (AllocImage bumps it).
+static const idCinematic *	rb_lastCinematic = NULL;
+static int					rb_lastCinematicSerial = 0;
+static uint64_t				rb_lastCinematicStorageGeneration = 0;
+
 /*
 ======================
 RB_BindVariableStageImage
@@ -565,7 +575,26 @@ void RB_BindVariableStageImage( const textureStage_t *texture, const float *shad
 		cin = texture->cinematic->ImageForTime( (int)(1000 * ( backEnd.viewDef->floatTime + backEnd.viewDef->renderView.shaderParms[11] ) ) );
 
 		if ( cin.image ) {
-			globalImages->cinematicImage->UploadScratch( cin.image, cin.imageWidth, cin.imageHeight );
+			idImage *cinImage = globalImages->cinematicImage;
+			const bool sameFrameResident =
+				cin.frameSerial != 0
+				&& texture->cinematic == rb_lastCinematic
+				&& cin.frameSerial == rb_lastCinematicSerial
+				&& cinImage->IsLoaded()
+				&& cinImage->GetStorageGeneration() == rb_lastCinematicStorageGeneration
+				&& cinImage->GetOpts().textureType == TT_2D
+				&& cin.imageHeight != cin.imageWidth * 6;
+			if ( sameFrameResident ) {
+				// identical pixels already resident: rebind exactly the way
+				// UploadScratch's SubImageUpload would have (direct access with
+				// tmu-tracker update, no Bind() texture-type enable dance)
+				R_BindTextureForDirectAccess( GL_TEXTURE_2D, cinImage->GetDeviceHandle() );
+			} else {
+				globalImages->cinematicImage->UploadScratch( cin.image, cin.imageWidth, cin.imageHeight );
+				rb_lastCinematic = texture->cinematic;
+				rb_lastCinematicSerial = cin.frameSerial;
+				rb_lastCinematicStorageGeneration = cinImage->GetStorageGeneration();
+			}
 		} else {
 			globalImages->blackImage->Bind();
 		}
@@ -741,14 +770,14 @@ void RB_BeginDrawingView (void) {
 	glMatrixMode(GL_MODELVIEW);
 
 	// set the window clipping
-	glViewport( tr.viewportOffset[0] + backEnd.viewDef->viewport.x1, 
-		tr.viewportOffset[1] + backEnd.viewDef->viewport.y1, 
+	glViewport( RB_TileOffsetX() + backEnd.viewDef->viewport.x1, 
+		RB_TileOffsetY() + backEnd.viewDef->viewport.y1, 
 		backEnd.viewDef->viewport.x2 + 1 - backEnd.viewDef->viewport.x1,
 		backEnd.viewDef->viewport.y2 + 1 - backEnd.viewDef->viewport.y1 );
 
 	// the scissor may be smaller than the viewport for subviews
-	glScissor( tr.viewportOffset[0] + backEnd.viewDef->viewport.x1 + backEnd.viewDef->scissor.x1, 
-		tr.viewportOffset[1] + backEnd.viewDef->viewport.y1 + backEnd.viewDef->scissor.y1, 
+	glScissor( RB_TileOffsetX() + backEnd.viewDef->viewport.x1 + backEnd.viewDef->scissor.x1, 
+		RB_TileOffsetY() + backEnd.viewDef->viewport.y1 + backEnd.viewDef->scissor.y1, 
 		backEnd.viewDef->scissor.x2 + 1 - backEnd.viewDef->scissor.x1,
 		backEnd.viewDef->scissor.y2 + 1 - backEnd.viewDef->scissor.y1 );
 	backEnd.currentScissor = backEnd.viewDef->scissor;
@@ -881,6 +910,12 @@ void RB_CreateSingleDrawInteractionsFiltered( const drawSurf_t *surf, void (*Dra
 	drawInteraction_t	inter;
 
 	if ( r_skipInteractions.GetBool() || !surf->geo || ( !surf->geo->ambientCache && !RB_HasPackedPrimBatchMesh( surf->geo ) ) ) {
+		return;
+	}
+
+	// Native PBR (draw_pbr.cpp) owns an admitted surface's interactions: a
+	// classic pass skips it and a native pass skips everything else.
+	if ( RB_GLPBR_DecompositionSkips( surf ) ) {
 		return;
 	}
 

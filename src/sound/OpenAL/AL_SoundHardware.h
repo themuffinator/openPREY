@@ -52,10 +52,14 @@ public:
 	void			BeginDeferredUpdates();
 	void			EndDeferredUpdates();
 	void 			Update();
+	// Main-thread application suspension, independent of the player's mute.
+	void			SetDevicePaused( bool paused );
 
 	idSoundVoice* 	AllocateVoice( const idSoundSample* leadinSample, const idSoundSample* loopingSample );
 	void			FreeVoice( idSoundVoice* voice );
 	int				ListPlayingVoices() const;
+	uint64			QueuedBufferBytes() const;
+	void			PrintDistanceInfo( const idSoundVoice* voice ) const;
 
 	static bool		IsDefaultDeviceChoiceValue( const char* deviceName );
 	static void		BuildDeviceChoiceStrings( const char* requestedDeviceName, idStr& choiceNames, idStr& choiceValues );
@@ -89,6 +93,12 @@ public:
 	{
 		return initFailed;
 	}
+	// A deliberate release (a client that became a dedicated server) is not a
+	// device failure: stop that retry, or it would reopen the device.
+	void			ClearInitFailure()
+	{
+		initFailed = false;
+	}
 	bool			HasEFXFilters() const
 	{
 		return efxFiltersAvailable;
@@ -97,6 +107,73 @@ public:
 	{
 		return auxEffectSlot;
 	}
+
+	// Voice features found on the current context (DetectVoiceFeatures)
+	bool			HasSourceRadius() const
+	{
+		return sourceRadiusAvailable;
+	}
+	bool			HasDirectChannels() const
+	{
+		return directChannelsAvailable;
+	}
+	ALint			GetDirectChannelsMode() const
+	{
+		return directChannelsMode;
+	}
+	bool			HasCenterChannelOutput() const;
+	// Counts the output changes that can stop, move or re-lay-out every source: a
+	// reopen, an in-place reset, a centre speaker appearing or going away, a lost
+	// endpoint returning. Voices compare it with the count they started on
+	// (SoundOutputRecovery.h).
+	unsigned int	GetOutputSerial() const
+	{
+		return outputSerial;
+	}
+	// The endpoint is present (ALC_EXT_disconnect) and no simulated interruption runs.
+	bool			IsOutputConnected() const;
+	// s_testDeviceInterruption: stops every source as a disconnect does and refuses
+	// new voices for msec, then reports the output returned.
+	void			SimulateOutputInterruption( int msec );
+	// listSoundVoices
+	void			ListVoiceOutputState() const;
+	// AL_SOURCE_RESAMPLER_SOFT index for every voice, -1 keeps the runtime default
+	ALint			GetSourceResampler() const
+	{
+		return sourceResampler;
+	}
+
+	// Retail area reverb slots (idSoundReverb). Slot 0 is auxEffectSlot, whose
+	// lifetime the checked settings path owns; slots 1-3 exist while it does.
+	// Returns the number of usable slots, 0 when EFX reverb is off.
+	int				SyncReverbSlots();
+	void			SetReverbSlotProperties( int slot, const soundReverbEAX_t& properties );
+	void			SetPrimaryReverbSlot( int slot );
+	int				GetPrimaryReverbSlot() const
+	{
+		return primaryReverbSlot;
+	}
+	ALuint			GetReverbSlotHandle( int slot ) const;
+	// the slot every mono voice's first send feeds: the one holding the listener's area
+	ALuint			GetPrimaryAuxEffectSlot() const;
+	// high-frequency gain per metre from the listener's reverb preset (0.994, -5 mB, in
+	// every stock preset); 1 while no EFX reverb is playing
+	float			GetAirAbsorptionGainHF() const;
+	// the room rolloff factor of the reverb a slot holds (efxs "room rolloff factor"),
+	// 0 while the slot holds none; every stock preset has 0
+	float			GetReverbSlotRoomRolloff( int slot ) const;
+	int				GetMaxAuxiliarySends() const
+	{
+		return maxAuxiliarySends;
+	}
+	// changes whenever slot handles are created, replaced or released
+	unsigned int	GetReverbSlotGeneration() const
+	{
+		return reverbSlotGeneration;
+	}
+	bool			HasAreaReverbResources() const;
+	// detaches every voice's reverb sends, then frees slots 1-3
+	void			ReleaseAreaReverbSlots();
 
 	// OpenAL info
 	static void		PrintDeviceList( const char* list );
@@ -111,6 +188,7 @@ protected:
 	friend class idSoundVoice_OpenAL;
 
 private:
+	friend struct SoundSettingsAccess;
 	/*
 	IXAudio2* pXAudio2;
 	IXAudio2MasteringVoice* pMasterVoice;
@@ -121,6 +199,9 @@ private:
 
 	ALCdevice*			openalDevice;
 	ALCcontext*			openalContext;
+	typedef void ( ALC_APIENTRY *devicePauseFunction_t )( ALCdevice* device );
+	bool				devicePauseRequested = false;
+	devicePauseFunction_t deviceResume = NULL;
 
 	int					lastResetTime;
 	int					lastDeviceCheckTime;
@@ -129,6 +210,16 @@ private:
 	bool				efxEnabled;
 	ALuint				auxEffectSlot;
 	ALuint				auxReverbEffect;
+	ALuint				areaReverbSlots[SOUND_REVERB_SLOTS - 1];
+	ALuint				areaReverbEffects[SOUND_REVERB_SLOTS - 1];
+	bool				areaReverbUnavailable;
+	int					primaryReverbSlot;
+	int					maxAuxiliarySends;
+	unsigned int		reverbSlotGeneration;
+	ALuint				trackedReverbSlot;		// auxEffectSlot as the reverb slots last saw it
+	soundReverbEFX_t	appliedReverb[SOUND_REVERB_SLOTS];
+	ALuint				appliedReverbSlot[SOUND_REVERB_SLOTS];	// slot handle appliedReverb went to
+	ALint				reverbEffectType[SOUND_REVERB_SLOTS];	// AL_EFFECT_EAXREVERB/REVERB, 0 = unqueried
 	bool				deviceEventsEnabled;
 	int					enabledDeviceEventFlags;
 	bool				reopenDeviceAvailable;
@@ -138,9 +229,19 @@ private:
 	bool				openedWithDefaultFallback;
 	int					openedHrtfMode;
 	int					openedSpeakerCount;
+	bool				openedOutputLimiter;
+	bool				sourceRadiusAvailable;
+	bool				directChannelsAvailable;
+	ALint				directChannelsMode;
+	ALint				sourceResampler;
 	idStr				openedRequestedDeviceName;
 	idStr				openedActiveDeviceName;
 	idStr				openedDefaultDeviceName;
+	unsigned int		outputSerial;
+	bool				outputCenterObserved;		// HasCenterChannelOutput() at the last output check
+	bool				centerRoutingAvailable;		// 5.1 buffers, direct channels and output mode queries
+	bool				disconnectQueryAvailable;	// ALC_EXT_disconnect on the open device
+	int					simulatedInterruptionEnd;	// Sys_Milliseconds() a simulated outage ends, 0 for none
 
 	//int				outputChannels;
 	//int				channelMask;
@@ -163,8 +264,15 @@ private:
 	void			EnableDeviceEventMonitoring();
 	void			DisableDeviceEventMonitoring();
 	bool			TryReopenDevice( const char* requestedDeviceName, const char* reason );
+	bool			TryResetDevice( const char* reason );
+	void			NoteOutputChanged( const char* reason );
+	void			UpdateOutputState();
 	bool			UpdateDeviceMonitoring();
 	void			PrintPerformanceData();
+	void			DetectVoiceFeatures();
+	bool			CreateAreaReverbSlots();
+	void			ResetReverbSlotState();
+	ALuint			ReverbEffectHandle( int slot ) const;
 };
 
 /*

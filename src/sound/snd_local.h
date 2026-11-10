@@ -32,6 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 #define __SND_LOCAL_H__
 
 #include "WaveFile.h"
+#include "SoundReverbCore.h"
 
 // Maximum number of voices we can have allocated
 #define MAX_HARDWARE_VOICES 48
@@ -252,6 +253,9 @@ public:
 	// returns true if this channel is marked as looping
 	bool	IsLooping() const;
 
+	// back to the freshly constructed state
+	void	Reset();
+
 	class idSoundEmitterLocal* 	emitter;
 
 	int						startTime;
@@ -268,7 +272,7 @@ public:
 	idSoundFade				volumeFade;
 
 	float					volumeDB;			// last volume at which this channel will play (calculated in UpdateVolume)
-	float					currentAmplitude;	// current amplitude on the hardware voice
+	float					currentAmplitude;	// the sample's envelope at the current playback position
 	float					lastFrequencyShift;
 	float					elapsedFrequencyShiftTime;
 
@@ -314,11 +318,15 @@ public:
 
 	// for load games
 	virtual idSoundEmitter* EmitterForIndex( int index );
+	// a render demo's emitter index, where 0 is localSound
+	idSoundEmitter*		DemoEmitterForIndex( int index );
 
 	// query data from all emitters in the world
 	virtual float			CurrentShakeAmplitude();
 	virtual float			CurrentShakeAmplitudeForPosition( const int time, const idVec3& listenerPosition );
+	float					ShakeAmplitudeForPosition( const idVec3& listenerPosition );
 	float					CurrentRumbleAmplitude() const { return rumbleAmp; }
+	virtual int				GetSubtitles( soundSubtitle_t* cues, int capacity );
 
 	// where is the camera
 	virtual void			PlaceListener( const idVec3& origin, const idMat3& axis, const int listenerId );
@@ -363,6 +371,8 @@ public:
 
 	virtual void			SetSlowmoSpeed( float speed );
 	virtual void			SetEnviroSuit( bool active );
+	virtual void			SetUnderwater( bool active );
+	virtual void			SetLiquidTest( liquidTest_t test );
 
 	//=======================================
 
@@ -391,6 +401,7 @@ public:
 	idDemoFile* 		writeDemo;		// if not NULL, archive commands here
 
 	float				currentCushionDB;	// channels at or below this level will be faded to 0
+	int					lastCushionTime;	// sound time of the last cushion update, 0 = none yet
 	float				shakeAmp;			// last calculated shake amplitude
 	float				rumbleAmp;			// last calculated controller rumble amplitude
 
@@ -411,6 +422,8 @@ public:
 
 	float					slowmoSpeed;
 	bool					enviroSuitActive;
+	bool					underwaterActive;
+	liquidTest_t			liquidTest;
 
 public:
 	struct soundPortalTrace_t
@@ -452,6 +465,8 @@ public:
 	virtual	float	CurrentAmplitude();
 	virtual float	CurrentAmplitude( const s_channelType channel );
 	virtual float	CurrentVoiceAmplitude( const s_channelType channel );
+	float			ShakeAmplitudeForPosition( const int currentTime, const idVec3& listenerPosition );
+	virtual void	AmplitudeHistory( s_channelType channel, float *peaks, int count );
 
 	virtual	int		Index() const;
 
@@ -489,10 +504,82 @@ public:
 	float		spatializedDistance;
 	idVec3		spatializedOrigin;
 	int			occludingPortalCount;
+	bool		crossesLiquidBoundary;	// openQ4: emitter and listener are in different media
+
+	// The shaders and samples this emitter started most recently. Retail's fixed channel
+	// slots kept a finished sound's sample, so no_dups also skipped the variant that had
+	// just ended; openQ4 frees finished channels and needs to remember it here.
+	static const int	RECENT_SAMPLES = 8;
+	const idSoundShader*	recentShaders[ RECENT_SAMPLES ];
+	const idSoundSample*	recentSamples[ RECENT_SAMPLES ];
+	int					recentNext;
 
 	// sound emitters are only allocated by the soundWorld block allocator
 	idSoundEmitterLocal();
 	virtual			~idSoundEmitterLocal();
+};
+
+
+/*
+================================================
+idSoundReverb
+
+Retail Quake 4 environmental reverb (Quake4.exe 1.4.2): the efxs/<name>.efx preset
+file, the map's maps/<map>.reverb area table, and the four reverb slots that
+follow the listener's area and the three areas nearest it through its portals.
+Slot planning and the EAX to EFX arithmetic live in SoundReverbCore.h.
+================================================
+*/
+class idSoundReverb
+{
+public:
+						idSoundReverb();
+
+	// retail idSoundSystemLocal::EndLevelLoad: efxs/<map>.efx, else efxs/default.efx,
+	// then <map>.reverb against the areas of the game render world
+	void				LoadLevel( const char* mapName, const idRenderWorld* renderWorld );
+	void				Clear();
+
+	// once per sound world update, before the voices take their sends
+	void				Update( idSoundWorldLocal* world );
+
+	// the reverb slot holding an area, -1 when no slot holds it
+	int					SlotForArea( int area ) const;
+
+	// retail reverb editor interface
+	const char*			GetReverbName( int reverb ) const;
+	int					GetNumAreas() const;
+	int					GetReverb( int area ) const;
+	bool				SetReverb( int area, const char* reverbName, const char* fileName );
+
+	void				PrintInfo() const;
+
+private:
+	struct effect_t
+	{
+		idStr				name;
+		soundReverbEAX_t	properties;
+	};
+
+	idList<effect_t>	effects;				// efxs/*.efx in file order
+	bool				efxLoaded;
+	idStr				efxFileName;
+	idList<int>			areaReverbs;			// effect index per portal area
+	idStr				reverbFileName;			// empty when the map has no table
+	int					slotToArea[SOUND_REVERB_SLOTS];
+	int					numSlots;				// slots the hardware provided at the last update
+	int					primarySlot;
+	unsigned int		slotGeneration;
+	idList<soundReverbPortal_t>	portals;		// scratch, the listener area's portals
+	idStr				lastShownState;			// s_showReverb
+
+	bool				LoadEffectFile( const char* fileName );
+	bool				ReadEffect( idLexer& src, effect_t& effect );
+	void				LoadAreaTable( const char* mapName, int numAreas );
+	int					FindEffect( const char* name ) const;
+	void				ResetSlots();
+	void				ShowState( const listener_t& listener );
+	static int			EffectForArea( void* context, int area );
 };
 
 
@@ -523,6 +610,7 @@ public:
 	virtual idSoundWorld* 	GetPlayingSoundWorld();
 
 	virtual idSoundWorld* GetSoundWorldFromId(int worldId);
+	virtual float			CurrentShakeAmplitudeForPosition( int worldId, const int time, const idVec3& listenerPosition );
 	virtual void			FreeSoundEmitter(int worldId, int handle, bool immediate);
 
 	// sends the current playing sound world information to the sound hardware
@@ -579,7 +667,7 @@ public:
 	virtual	void			BeginLevelLoad();
 
 	// We might want to defer the loading of new sounds to this point
-	virtual	void			EndLevelLoad();
+	virtual	void			EndLevelLoad( const char* mapName );
 
 	// prints memory info
 	virtual void			PrintMemInfo( MemInfo_t* mi );
@@ -588,6 +676,21 @@ public:
 	virtual void			SetSubtitleData( int subIndex, int subNum, const char* subText, float subTime, int subChannel );
 	virtual soundSub_t*		GetSubtitle( int subIndex, int subNum );
 	virtual soundSubtitleList_t* GetSubtitleList( int subIndex );
+
+	// retail reverb editor interface
+	virtual const char*		GetReverbName( int reverb );
+	virtual int				GetNumAreas();
+	virtual int				GetReverb( int area );
+	virtual bool			SetReverb( int area, const char* reverbName, const char* fileName );
+
+	virtual void			ShutdownHW();
+	virtual bool			UpdateVoiceChat( bool active, bool transmit, bool localTest );
+	virtual int				GetVoiceData( byte* data, int capacity );
+	virtual void			PlayVoiceData( int clientNum, unsigned int generation, const byte* data, int size );
+	virtual void			StopVoiceData( int clientNum );
+	virtual void			ResetVoiceChat();
+	virtual int				GetVoiceTalker() const;
+	virtual float			GetVoiceLevel() const;
 
 	//-------------------------
 
@@ -603,6 +706,10 @@ public:
 	}
 
 	int						SoundTime() const;
+	// Brings the sound clock, otherwise advanced once per mixed frame, up to now: a
+	// pause and an unpause inside one long blocking step such as a level load would
+	// both read the frame before it and hold the clock for none of that time.
+	int						RefreshSoundTime();
 
 	// may return NULL if there are no more voices left
 	idSoundVoice* 			AllocateVoice( const idSoundSample* leadinSample, const idSoundSample* loopingSample );
@@ -653,6 +760,8 @@ public:
 
 	idSoundHardware				hardware;
 
+	idSoundReverb				reverb;
+
 	idRandom2					random;
 
 	int							soundTime;
@@ -662,6 +771,13 @@ public:
 	bool						needsRestart;
 
 	bool						insideLevelLoad;
+	// samples whose PCM is decoding on a job worker (LoadResourceAsync)
+	idList<idSoundSample*>		decodingSamples;
+	// uploads the samples whose decode has finished, or all of them, waiting
+	void						FinishSampleDecodes( bool all );
+	// frees the audio a low-memory notice may take (SoundMemoryTrim.h); idleSeconds < 0
+	// keeps the current level's samples
+	void						TrimMemory( const char* reason, int idleSeconds );
 
 	//-------------------------
 	struct queuedSubtitle_t

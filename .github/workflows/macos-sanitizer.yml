@@ -41,7 +41,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 150
     env:
-      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:detect_leaks=0
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -73,20 +73,13 @@ jobs:
 
       - name: Checkout
         if: steps.select.outputs.selected == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Fetch openQ4-game
-        if: steps.select.outputs.selected == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/themuffinator/openQ4-game.git "${OPENQ4_GAMELIBS_REPO}"
-
       - name: Setup Python
         if: steps.select.outputs.selected == 'true'
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
@@ -97,6 +90,19 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install meson ninja
+
+      - name: Prepare pinned OpenAL Soft
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          prepared_root="${GITHUB_WORKSPACE}/.tmp/openal-soft-macos-arm64"
+          bash tools/build/prepare_macos_openal_soft.sh \
+            --architecture arm64 \
+            --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
+            --output-root "${prepared_root}" \
+            --stage-install-dir .install
+          echo "PKG_CONFIG_PATH=${prepared_root}/lib/pkgconfig" >> "${GITHUB_ENV}"
 
       - name: Record host diagnostics
         if: steps.select.outputs.selected == 'true'
@@ -133,7 +139,7 @@ jobs:
             --wrap-mode=forcefallback \
             -Dplatform_backend=sdl3 \
             -Dmacos_graphics_bridge=${{ matrix.bridge }} \
-            -Dmacos_openal_provider=apple_framework \
+            -Dmacos_openal_provider=system \
             -Duse_pch=false \
             -Didlib_asserts=true \
             -Db_sanitize=address,undefined
@@ -215,14 +221,14 @@ jobs:
 
       - name: Publish sanitizer diagnostics
         if: always() && steps.select.outputs.selected == 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: macos-sanitizer-${{ matrix.artifact_suffix }}
           path: |
             macos-sanitizer-host-${{ matrix.artifact_suffix }}.txt
             macos-sanitizer-binaries-${{ matrix.artifact_suffix }}.txt
             builddir/meson-logs
-            builddir/.tmp/openprey_gamelibs_stage/openprey_gamelibs_stage_manifest.json
+            builddir/openq4_game_sources.json
             .tmp/macos-sanitizer-${{ matrix.artifact_suffix }}-runtime
           if-no-files-found: warn
           retention-days: ${{ fromJSON(inputs.retention_days) }}

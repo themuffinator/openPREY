@@ -77,6 +77,9 @@ public:
 #endif
 
 	virtual int				Milliseconds(void) { return Sys_Milliseconds(); }
+	virtual bool			SecureRandomBytes( void *buffer, int bytes ) {
+		return Sys_GetSecureRandomBytes( buffer, bytes );
+	}
 };
 
 #endif /* !__SYS_LOCAL__ */

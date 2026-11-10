@@ -40,6 +40,24 @@ If you have questions concerning this license or the applicable additional terms
 #include <direct.h>
 #include <io.h>
 #include <dxgi.h>
+#include <bcrypt.h>
+#include <psapi.h>
+
+/*
+================
+Sys_GetSecureRandomBytes
+================
+*/
+bool Sys_GetSecureRandomBytes( void *buffer, int bytes ) {
+	if ( bytes < 0 || ( bytes > 0 && buffer == NULL ) ) {
+		return false;
+	}
+	if ( bytes == 0 ) {
+		return true;
+	}
+	return BCryptGenRandom( NULL, static_cast<PUCHAR>( buffer ),
+		static_cast<ULONG>( bytes ), BCRYPT_USE_SYSTEM_PREFERRED_RNG ) == 0;
+}
 
 namespace {
 
@@ -147,6 +165,7 @@ bool Sys_ResolveDriveProbePath( const char *path, char *resolvedPath, size_t res
 	if ( path == NULL || path[0] == '\0' ) {
 		return false;
 	}
+	const int resolvedPathCapacity = idLib::SizeToInt( resolvedPathSize, "Sys_ResolveDriveProbePath" );
 
 	idStr::Copynz( normalizedPath, path, sizeof( normalizedPath ) );
 	Sys_NormalizeDriveProbePath( normalizedPath );
@@ -156,16 +175,16 @@ bool Sys_ResolveDriveProbePath( const char *path, char *resolvedPath, size_t res
 		Sys_NormalizeDriveProbePath( fullPath );
 
 		if ( ::GetVolumePathNameA( fullPath, volumePath, sizeof( volumePath ) ) ) {
-			idStr::Copynz( resolvedPath, volumePath, resolvedPathSize );
+			idStr::Copynz( resolvedPath, volumePath, resolvedPathCapacity );
 			return true;
 		}
 
-		idStr::Copynz( resolvedPath, fullPath, resolvedPathSize );
+		idStr::Copynz( resolvedPath, fullPath, resolvedPathCapacity );
 		return true;
 	}
 
 	if ( isalpha( (unsigned char)normalizedPath[0] ) && normalizedPath[1] == ':' ) {
-		idStr::snPrintf( resolvedPath, resolvedPathSize, "%c:\\", normalizedPath[0] );
+		idStr::snPrintf( resolvedPath, resolvedPathCapacity, "%c:\\", normalizedPath[0] );
 		return true;
 	}
 
@@ -363,6 +382,39 @@ void Sys_GetCurrentMemoryStatus(sysMemoryStats_t& stats) {
 
 	work = statex.ullAvailExtendedVirtual >> 20;
 	stats.availExtendedVirtual = *(int*)&work;
+}
+
+/*
+================
+Sys_GetProcessMemoryUsage
+================
+*/
+bool Sys_GetProcessMemoryUsage( unsigned long long &privateBytes, unsigned long long &residentBytes ) {
+	privateBytes = residentBytes = 0;
+	// K32GetProcessMemoryInfo is exported by kernel32 since Windows 7; looking it up
+	// keeps psapi.lib out of the link.
+	typedef BOOL ( WINAPI *processMemoryInfo_t )( HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD );
+	static const processMemoryInfo_t query = reinterpret_cast<processMemoryInfo_t>(
+		reinterpret_cast<void *>( GetProcAddress( GetModuleHandleA( "kernel32.dll" ), "K32GetProcessMemoryInfo" ) ) );
+	PROCESS_MEMORY_COUNTERS_EX counters;
+	memset( &counters, 0, sizeof( counters ) );
+	counters.cb = sizeof( counters );
+	if ( query == NULL || !query( GetCurrentProcess(), reinterpret_cast<PPROCESS_MEMORY_COUNTERS>( &counters ), sizeof( counters ) ) ) {
+		return false;
+	}
+	privateBytes = counters.PrivateUsage;
+	residentBytes = counters.WorkingSetSize;
+	return true;
+}
+
+/*
+================
+Sys_ReleaseFreeHeapMemory
+
+The Windows heap decommits free memory itself; level loads level off without help.
+================
+*/
+void Sys_ReleaseFreeHeapMemory(void) {
 }
 
 /*

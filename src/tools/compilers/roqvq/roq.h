@@ -33,7 +33,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "quaddefs.h"
 #define JPEG_INTERNALS
 extern "C" {
-#include "../../../imagetools/jpeg-6/jpeglib.h"
+#include "../../../external/jpeg-6/jpeglib.h"
 }
 #pragma once
 

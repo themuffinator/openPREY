@@ -4,6 +4,7 @@
 import importlib.util
 import contextlib
 import io
+import json
 import os
 import plistlib
 import re
@@ -353,9 +354,24 @@ def make_macos_archive_entries(
             b"moltenvk-runtime\n",
             0o755,
         ),
+        f"{prefix}openQ4.app/Contents/Frameworks/{package.MACOS_OPENAL_SOFT_DYLIB_NAME}": (
+            b"openal-soft-runtime\n",
+            0o755,
+        ),
+        f"{prefix}openQ4.app/Contents/Resources/licenses/openal-soft/COPYING": (b"lgpl\n", 0o644),
+        f"{prefix}openQ4.app/Contents/Resources/licenses/openal-soft/LICENSE-pffft": (b"pffft-license\n", 0o644),
+        f"{prefix}openQ4.app/Contents/Resources/licenses/openal-soft/LICENSE-fmt": (b"fmt-license\n", 0o644),
+        f"{prefix}openQ4.app/Contents/Resources/licenses/openal-soft/LICENSE-gsl": (b"gsl-license\n", 0o644),
+        f"{prefix}openQ4.app/Contents/Resources/licenses/openal-soft/SOURCE.md": (b"source\n", 0o644),
+        f"{prefix}openQ4.app/Contents/Resources/licenses/openal-soft/openal-soft-1.25.2.tar.gz": (
+            b"source-archive\n",
+            0o644,
+        ),
         f"{prefix}openQ4.app/Contents/Resources/{package.GAME_DIR_NAME}/mod.json": (b'{"version":"0.2.000"}\n', 0o644),
-        f"{prefix}openQ4.app/Contents/Resources/{package.GAME_DIR_NAME}/pak0.pk4": (b"pk4\n", 0o644),
-        f"{prefix}openQ4.app/Contents/Resources/{package.GAME_DIR_NAME}/pak1.pk4": (b"pk4\n", 0o644),
+        **{
+            f"{prefix}openQ4.app/Contents/Resources/{package.GAME_DIR_NAME}/{pak_name}": (b"pk4\n", 0o644)
+            for pak_name in package.OPENQ4_PACK_NAMES
+        },
         f"{prefix}openQ4.app/Contents/Resources/assets/splash/quake4_rt_bitmap_4001.bmp": (b"bmp\n", 0o644),
         f"{prefix}openQ4.app/Contents/Info.plist": (plist_bytes, 0o644),
         f"{prefix}openQ4.app/Contents/PkgInfo": (package.MACOS_PKGINFO_BYTES, 0o644),
@@ -604,11 +620,21 @@ def validate_macos_app_bundle_validator_runtime() -> None:
             b"moltenvk-runtime\n",
             0o755,
         )
+        write_test_file(
+            app_contents / "Frameworks" / package.MACOS_OPENAL_SOFT_DYLIB_NAME,
+            b"openal-soft-runtime\n",
+            0o755,
+        )
+        for filename in package.MACOS_OPENAL_SOFT_LICENSE_FILES:
+            write_test_file(
+                app_contents / "Resources" / "licenses" / "openal-soft" / filename,
+                f"openal-soft-{filename}\n".encode(),
+            )
         write_test_file(app_contents / "Resources" / "openQ4.icns", b"icns\n")
         write_test_file(app_contents / "Resources" / "VERSION.txt", b"openQ4\n")
         write_test_file(app_contents / "Resources" / package.GAME_DIR_NAME / "mod.json", b"{}\n")
-        write_test_file(app_contents / "Resources" / package.GAME_DIR_NAME / "pak0.pk4", b"pk4\n")
-        write_test_file(app_contents / "Resources" / package.GAME_DIR_NAME / "pak1.pk4", b"pk4\n")
+        for pak_name in package.OPENQ4_PACK_NAMES:
+            write_test_file(app_contents / "Resources" / package.GAME_DIR_NAME / pak_name, b"pk4\n")
         write_test_file(
             app_contents / "Resources" / "assets" / "splash" / "quake4_rt_bitmap_4001.bmp",
             b"bmp\n",
@@ -716,8 +742,8 @@ def validate_macos_app_bundle_validator_runtime() -> None:
         missing_icon_install = work / "missing-icon-install"
         write_test_file(missing_icon_package / f"openQ4-client_{arch}", client_bytes, 0o755)
         write_test_file(missing_icon_package / package.GAME_DIR_NAME / "mod.json", b"{}\n")
-        write_test_file(missing_icon_package / package.GAME_DIR_NAME / "pak0.pk4", b"pk4\n")
-        write_test_file(missing_icon_package / package.GAME_DIR_NAME / "pak1.pk4", b"pk4\n")
+        for pak_name in package.OPENQ4_PACK_NAMES:
+            write_test_file(missing_icon_package / package.GAME_DIR_NAME / pak_name, b"pk4\n")
         write_test_file(
             missing_icon_package / package.GAME_DIR_NAME / f"game-sp_{arch}.dylib",
             b"sp-module\n",
@@ -748,6 +774,16 @@ def validate_macos_app_bundle_validator_runtime() -> None:
             b"moltenvk-runtime\n",
             0o755,
         )
+        write_test_file(
+            missing_icon_install / "Frameworks" / package.MACOS_OPENAL_SOFT_DYLIB_NAME,
+            b"openal-soft-runtime\n",
+            0o755,
+        )
+        for filename in package.MACOS_OPENAL_SOFT_LICENSE_FILES:
+            write_test_file(
+                missing_icon_install / "licenses" / "openal-soft" / filename,
+                f"openal-soft-{filename}\n".encode(),
+            )
         expect_runtime_error(
             "app icon source was not found",
             lambda: package.create_macos_app_bundle(
@@ -775,8 +811,8 @@ def validate_macos_self_contained_app_creation_runtime() -> None:
     try:
         write_test_file(package_root / f"openQ4-client_{arch}", b"client\n", 0o755)
         write_test_file(package_root / package.GAME_DIR_NAME / "mod.json", b"{}\n")
-        write_test_file(package_root / package.GAME_DIR_NAME / "pak0.pk4", b"pak0\n")
-        write_test_file(package_root / package.GAME_DIR_NAME / "pak1.pk4", b"pak1\n")
+        for pak_name in package.OPENQ4_PACK_NAMES:
+            write_test_file(package_root / package.GAME_DIR_NAME / pak_name, pak_name.removesuffix(".pk4").encode() + b"\n")
         write_test_file(
             package_root / package.GAME_DIR_NAME / f"game-sp_{arch}.dylib",
             b"sp\n",
@@ -791,6 +827,16 @@ def validate_macos_self_contained_app_creation_runtime() -> None:
         # Contents/Frameworks; MoltenVK is copied there from the install tree.
         write_test_file(package_root / f"renderer-vk_{arch}.dylib", b"renderer-vk\n", 0o755)
         write_test_file(install_dir / package.MACOS_MOLTENVK_DYLIB_NAME, b"moltenvk\n", 0o755)
+        write_test_file(
+            install_dir / "Frameworks" / package.MACOS_OPENAL_SOFT_DYLIB_NAME,
+            b"openal-soft\n",
+            0o755,
+        )
+        for filename in package.MACOS_OPENAL_SOFT_LICENSE_FILES:
+            write_test_file(
+                install_dir / "licenses" / "openal-soft" / filename,
+                f"openal-soft-{filename}\n".encode(),
+            )
         write_test_file(
             install_dir / "assets" / "splash" / "quake4_rt_bitmap_4001.bmp",
             b"bmp\n",
@@ -814,13 +860,13 @@ def validate_macos_self_contained_app_creation_runtime() -> None:
             raise AssertionError("macOS package must not retain the renderer module beside the app")
         for relative_path in (
             package.MACOS_APP_GAME_DATA_DIR / "mod.json",
-            package.MACOS_APP_GAME_DATA_DIR / "pak0.pk4",
-            package.MACOS_APP_GAME_DATA_DIR / "pak1.pk4",
+            *(package.MACOS_APP_GAME_DATA_DIR / pak_name for pak_name in package.OPENQ4_PACK_NAMES),
             package.MACOS_APP_SPLASH_DIR / "quake4_rt_bitmap_4001.bmp",
             package.MACOS_APP_FRAMEWORKS_DIR / f"game-sp_{arch}.dylib",
             package.MACOS_APP_FRAMEWORKS_DIR / f"game-mp_{arch}.dylib",
             package.MACOS_APP_FRAMEWORKS_DIR / f"renderer-vk_{arch}.dylib",
             package.MACOS_APP_FRAMEWORKS_DIR / package.MACOS_MOLTENVK_DYLIB_NAME,
+            package.MACOS_APP_FRAMEWORKS_DIR / package.MACOS_OPENAL_SOFT_DYLIB_NAME,
         ):
             if not (app_root / relative_path).is_file():
                 raise AssertionError(f"macOS self-contained app is missing {relative_path}")
@@ -891,6 +937,11 @@ def validate_macos_package_main_collateral_error_runtime() -> None:
     try:
         write_test_file(source_root / "assets" / "release" / "README.html", b"<html></html>\n")
         write_test_file(source_root / "LICENSE", b"license\n")
+        write_test_file(source_root / "LICENSING.md", b"component licences\n")
+        for name in ('QUAKE-4-SDK-EULA.rtf','DOOM-3-ADDITIONAL-TERMS.txt','DOOM-3-BFG-ADDITIONAL-TERMS.txt'):
+            write_test_file(source_root / "LICENSES" / name, b"licence terms\n")
+        write_test_file(source_root / "LICENSES" / "KHRONOS-GLES-MIT.txt", b"khronos notice\n")
+        write_test_file(source_root / "CONTRIBUTORS.md", b"contributors\n")
         write_test_file(
             source_root / package.MACOS_SUPPORT_INFO_SCRIPT_PATH,
             b"#!/bin/sh\nexit 0\n",
@@ -2237,6 +2288,7 @@ def validate_macos_signing_keeps_standalone_client_signature_runtime() -> None:
         write_test_file(framework_root / f"game-mp_{arch}.dylib", b"mp\n", 0o755)
         write_test_file(framework_root / f"renderer-vk_{arch}.dylib", b"renderer-vk\n", 0o755)
         write_test_file(framework_root / package.MACOS_MOLTENVK_DYLIB_NAME, b"moltenvk\n", 0o755)
+        write_test_file(framework_root / package.MACOS_OPENAL_SOFT_DYLIB_NAME, b"openal-soft\n", 0o755)
         write_test_file(app_executable, b"stale-app-executable\n", 0o755)
 
         calls = []
@@ -2283,6 +2335,7 @@ def validate_macos_signing_keeps_standalone_client_signature_runtime() -> None:
             (f"openQ4.app/Contents/Frameworks/game-mp_{arch}.dylib", False),
             (f"openQ4.app/Contents/Frameworks/renderer-vk_{arch}.dylib", False),
             (f"openQ4.app/Contents/Frameworks/{package.MACOS_MOLTENVK_DYLIB_NAME}", False),
+            (f"openQ4.app/Contents/Frameworks/{package.MACOS_OPENAL_SOFT_DYLIB_NAME}", False),
             ("openQ4.app", True),
         ]
         if calls != expected_calls:
@@ -2305,8 +2358,6 @@ def validate_macos_signing_keeps_standalone_client_signature_runtime() -> None:
 def validate_macos_install_name_normalization_runtime() -> None:
     package = load_package_module()
     work = ROOT / ".tmp" / "macos-install-name-contract"
-    package_root = work / "openq4-v0.2.000-macos-arm64-opengl"
-    arch = "arm64"
 
     original_platform = package.sys.platform
     original_which = package.shutil.which
@@ -2315,49 +2366,101 @@ def validate_macos_install_name_normalization_runtime() -> None:
 
     shutil.rmtree(work, ignore_errors=True)
     try:
-        sp_module, mp_module = package.macos_embedded_game_module_paths(package_root, arch)
-        write_test_file(sp_module, b"sp\n", 0o755)
-        write_test_file(mp_module, b"mp\n", 0o755)
-
-        install_names = {
-            sp_module: "/tmp/openq4/.install/baseoq4/game-sp_arm64.dylib",
-            mp_module: f"@loader_path/game-mp_{arch}.dylib",
-        }
+        install_names: dict[tuple[Path, str], str] = {}
         calls = []
+        active_arch = ""
 
         def fake_which(tool_name):
             if tool_name == "install_name_tool":
                 return "/usr/bin/install_name_tool"
             return original_which(tool_name)
 
-        def fake_otool_install_name(binary_path):
-            return install_names[Path(binary_path)]
+        def fake_otool_install_name(binary_path, *, macho_arch=None):
+            if macho_arch is None:
+                raise AssertionError("install-name normalization did not select a Mach-O slice")
+            return install_names[(Path(binary_path), macho_arch)]
 
         def fake_run_macos_command(command, *, label):
             calls.append((command, label))
-            install_names[Path(command[3])] = command[2]
+            module = Path(command[3])
+            for macho_arch in package.macos_expected_lipo_arches(active_arch):
+                install_names[(module, macho_arch)] = command[2]
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         package.sys.platform = "darwin"
         package.shutil.which = fake_which
         package.macos_otool_install_name = fake_otool_install_name
         package.run_macos_command = fake_run_macos_command
-        package.normalize_macos_game_module_install_names(package_root, arch)
 
-        expected_call = (
-            [
-                "/usr/bin/install_name_tool",
-                "-id",
-                f"@loader_path/game-sp_{arch}.dylib",
-                str(sp_module),
-            ],
-            f"setting macOS game module install name for {sp_module}",
+        def run_case(
+            package_root: Path,
+            arch: str,
+            stale_ids: dict[tuple[str, str], str],
+            expected_updated_keys: tuple[str, ...],
+        ) -> None:
+            nonlocal active_arch
+            active_arch = arch
+            calls.clear()
+            install_names.clear()
+            modules = package.macos_loadable_module_install_names(package_root, arch)
+            module_keys = {
+                "game-sp": package.macos_embedded_game_module_paths(package_root, arch)[0],
+                "game-mp": package.macos_embedded_game_module_paths(package_root, arch)[1],
+                "renderer-vk": package.macos_embedded_renderer_module_path(package_root, arch),
+                "openal-soft": package.macos_embedded_openal_soft_path(package_root),
+            }
+            explicit_modules = {
+                module_keys["game-sp"]: f"@loader_path/game-sp_{arch}.dylib",
+                module_keys["game-mp"]: f"@loader_path/game-mp_{arch}.dylib",
+                module_keys["renderer-vk"]: f"@loader_path/renderer-vk_{arch}.dylib",
+                module_keys["openal-soft"]: package.MACOS_OPENAL_SOFT_INSTALL_NAME,
+            }
+            if modules != explicit_modules:
+                raise AssertionError(f"Unexpected macOS loadable module install-name map: {modules!r}")
+            for module in modules:
+                write_test_file(module, b"module\n", 0o755)
+            for key, module in module_keys.items():
+                expected = modules[module]
+                for macho_arch in package.macos_expected_lipo_arches(arch):
+                    install_names[(module, macho_arch)] = stale_ids.get((key, macho_arch), expected)
+
+            package.normalize_macos_loadable_module_install_names(package_root, arch)
+
+            expected_calls = [
+                (
+                    ["/usr/bin/install_name_tool", "-id", modules[module_keys[key]], str(module_keys[key])],
+                    f"setting macOS loadable module install name for {module_keys[key]}",
+                )
+                for key in expected_updated_keys
+            ]
+            if calls != expected_calls:
+                raise AssertionError(f"Unexpected macOS install-name normalization calls: {calls!r}")
+            for module, expected in modules.items():
+                for macho_arch in package.macos_expected_lipo_arches(arch):
+                    actual = install_names[(module, macho_arch)]
+                    if actual != expected:
+                        raise AssertionError(
+                            f"macOS loadable module install name was not normalized for {macho_arch}: "
+                            f"{module} has {actual!r}, expected {expected!r}"
+                        )
+
+        run_case(
+            work / "openq4-v0.2.000-macos-arm64-opengl",
+            "arm64",
+            {
+                ("game-sp", "arm64"): "/tmp/openq4/.install/baseoq4/game-sp_arm64.dylib",
+                ("renderer-vk", "arm64"): "/tmp/openq4/.install/renderer-vk_arm64.dylib",
+            },
+            ("game-sp", "renderer-vk"),
         )
-        if calls != [expected_call]:
-            raise AssertionError(f"Unexpected macOS install-name normalization calls: {calls!r}")
-        expected_install_names = package.macos_game_module_install_names(package_root, arch)
-        if install_names != expected_install_names:
-            raise AssertionError(f"macOS game module install names were not normalized: {install_names!r}")
+        run_case(
+            work / "openq4-v0.2.000-macos-universal2-metal",
+            "universal2",
+            {
+                ("renderer-vk", "x86_64"): "/tmp/openq4/.install/renderer-vk_universal2.dylib",
+            },
+            ("renderer-vk",),
+        )
     finally:
         package.sys.platform = original_platform
         package.shutil.which = original_which
@@ -2395,8 +2498,8 @@ def validate_macos_pk4_symlink_guard_runtime() -> None:
 
 def validate_legacy_macos_plist_runtime() -> None:
     package = load_package_module()
-    info_plist_path = ROOT / "src" / "sys" / "osx" / "Info.plist"
-    version_plist_path = ROOT / "src" / "sys" / "osx" / "version.plist"
+    info_plist_path = ROOT / "src" / "sys" / "macos" / "Info.plist"
+    version_plist_path = ROOT / "src" / "sys" / "macos" / "version.plist"
 
     with info_plist_path.open("rb") as handle:
         info_plist = plistlib.load(handle)
@@ -2434,6 +2537,13 @@ def validate_macos_staged_payload_validator_runtime() -> None:
         write_test_file(support_script, make_validation_support_info_script_bytes(validator), 0o755)
         write_test_file(client, b"client\n", 0o755)
         write_test_file(dedicated, b"ded\n", 0o755)
+        openal_runtime = install_root / "Frameworks" / validator.MACOS_OPENAL_SOFT_DYLIB_NAME
+        write_test_file(openal_runtime, b"openal-soft\n", 0o755)
+        for filename in validator.MACOS_OPENAL_SOFT_LICENSE_FILES:
+            write_test_file(
+                install_root / "licenses" / "openal-soft" / filename,
+                f"openal-soft-{filename}\n".encode(),
+            )
         sp_module = game_dir / f"game-sp_{arch}.dylib"
         mp_module = game_dir / f"game-mp_{arch}.dylib"
         write_test_file(sp_module, b"sp\n", 0o755)
@@ -2640,6 +2750,37 @@ def validate_macos_staged_payload_validator_runtime() -> None:
             ),
             "macOS staged payload missing matched MP module",
         )
+        write_test_file(mp_module, b"mp\n", 0o755)
+
+        openal_runtime.unlink()
+        expect_runtime_error(
+            "missing executable OpenAL Soft runtime",
+            lambda: validator.validate_macos_staged_metadata(
+                ROOT,
+                install_root,
+                game_dir,
+                [client],
+                [dedicated],
+                openal_provider="system",
+            ),
+            "macOS OpenAL Soft staged payload without its runtime",
+        )
+        validator.validate_macos_staged_metadata(
+            ROOT,
+            install_root,
+            game_dir,
+            [client],
+            [dedicated],
+            openal_provider="apple_framework",
+        )
+
+        build_dir = work / "builddir"
+        write_test_file(
+            build_dir / "meson-info" / "intro-buildoptions.json",
+            json.dumps([{"name": "macos_openal_provider", "value": "apple_framework"}]).encode(),
+        )
+        if validator.selected_macos_openal_provider(build_dir) != "apple_framework":
+            raise AssertionError("macOS staged validation did not preserve the selected Apple OpenAL provider")
     finally:
         validator.macos_lipo_arches = real_macos_lipo_arches
         shutil.rmtree(work, ignore_errors=True)
@@ -2666,7 +2807,7 @@ def validate_meson_contract() -> None:
     require(meson, "macos_graphics_bridge == 'metal' and platform_backend_requested != 'sdl3'", "SDL3 bridge guard")
     require(meson, "use_macos_metal_bridge", "Metal bridge build predicate")
     require(meson, "dependency('appleframeworks', modules: ['OpenAL'], required: true)", "macOS Apple OpenAL provider")
-    require(meson, "dependency('openal', required: true)", "macOS system OpenAL provider")
+    require(meson, "dependency('openal', required: true, method: 'pkg-config')", "macOS system OpenAL provider")
     require(meson, "-DUSE_OPENAL_SOFT_INCLUDES=1", "macOS system OpenAL include mode")
     require(meson, "modules: ['Metal', 'QuartzCore']", "Metal bridge framework dependency")
     require(meson, "macos_framework_modules = ['Cocoa', 'OpenGL', 'ApplicationServices']", "macOS SDL3 framework list")
@@ -2783,10 +2924,10 @@ def validate_sdl3_runtime_contract() -> None:
 def validate_packaging_and_release_contract() -> None:
     package = read("tools/build/package_nightly.py")
     pak_helper = read("tools/build/openq4_pak.py")
-    plist = read("src/sys/osx/Info.plist")
+    plist = read("src/sys/macos/Info.plist")
     release = read(".github/workflows/manual-release.yml")
-    compat = read("src/sys/osx/macosx_compat.mm")
-    main = read("src/sys/osx/macosx_sdl3_main.cpp")
+    compat = read("src/sys/macos/macos_compat.mm")
+    main = read("src/sys/macos/macos_sdl3_main.cpp")
     posix = read("src/sys/posix/posix_main.cpp")
     validator = read("tools/validation/openq4_validate.py")
     commit = read(".github/workflows/commit-validation.yml")
@@ -2819,12 +2960,12 @@ def validate_packaging_and_release_contract() -> None:
     require(package, "MACOS_ALLOWED_RUNTIME_DEPENDENCY_PREFIXES", "macOS binary dependency validation")
     require(package, "macos_otool_dependencies", "macOS binary dependency validation")
     require(package, "macos_otool_install_name", "macOS game module install-name validation")
-    require(package, "normalize_macos_game_module_install_names", "macOS game module install-name normalization")
+    require(package, "normalize_macos_loadable_module_install_names", "macOS loadable module install-name normalization")
     require(package, "install_name_tool", "macOS game module install-name normalization")
-    require(package, "setting macOS game module install name", "macOS game module install-name normalization")
+    require(package, "setting macOS loadable module install name", "macOS loadable module install-name normalization")
     require_before(
         package,
-        "normalize_macos_game_module_install_names(package_root, args.arch)",
+        "normalize_macos_loadable_module_install_names(package_root, args.arch)",
         "sign_macos_payload(package_root, args.arch, macos_signing)",
         "macOS install-name normalization before signing",
     )
@@ -2832,7 +2973,7 @@ def validate_packaging_and_release_contract() -> None:
     require(package, "otool_path, \"-L\"", "macOS binary dependency validation")
     require(package, "otool_path, \"-D\"", "macOS game module install-name validation")
     require(package, "macOS binary has unbundled non-system dependencies", "macOS binary dependency validation")
-    require(package, "macOS game module install name is not package-relative", "macOS game module install-name validation")
+    require(package, "macOS loadable module install name is not package-relative", "macOS loadable module install-name validation")
     require(package, "MACOS_FORBIDDEN_XATTRS", "macOS package quarantine validation")
     require(package, "strip_macos_forbidden_xattrs", "macOS package quarantine validation")
     require(package, "validate_no_macos_forbidden_xattrs", "macOS package quarantine validation")
@@ -2991,7 +3132,18 @@ def validate_packaging_and_release_contract() -> None:
     require(package, "code signature verification", "macOS code-sign validation")
     require(package, "game-sp_{arch}.dylib", "macOS archive game module validation")
     require(package, "game-mp_{arch}.dylib", "macOS archive game module validation")
-    require(package, "pak1.pk4", "macOS archive level pack validation")
+    # Since PKG-02 the archive check expects every pack content_packs.json lists
+    # (core pak0, light-grid pak1, loadscreen pak2) rather than naming each one.
+    require(
+        python_function_body(package, "def validate_macos_archive_contents("),
+        "for pak_name in OPENQ4_PACK_NAMES",
+        "macOS archive content pack validation",
+    )
+    require(
+        pak_helper,
+        "OPENQ4_PACK_NAMES = tuple(spec.name for spec in OPENQ4_CONTENT_PACKS)",
+        "macOS archive content pack list",
+    )
     require(package, "macOS archive contains non-runtime metadata/debug entries", "macOS archive metadata validation")
     require(package, "MACOS_FORBIDDEN_ARCHIVE_PREFIXES", "macOS archive metadata validation")
     require(package, "MACOS_FORBIDDEN_ARCHIVE_SUFFIXES", "macOS archive metadata validation")
@@ -3102,12 +3254,43 @@ def validate_packaging_and_release_contract() -> None:
     require(commit, "macOS ARM64 ${{ matrix.bridge_label }} Commit Validation", "commit validation macOS job")
     require(commit, "macos_graphics_bridge: opengl", "commit validation macOS OpenGL job")
     require(commit, "macos_graphics_bridge: metal", "commit validation macOS Metal job")
-    require(commit, "macos_openal_provider: apple_framework", "commit validation macOS OpenAL provider")
+    require(commit, "macos_openal_provider: system", "commit validation macOS OpenAL Soft provider")
     require(commit, "--extra-setup-arg=-Dmacos_graphics_bridge=${{ matrix.macos_graphics_bridge }}", "commit validation macOS bridge setup")
     require(commit, "--extra-setup-arg=-Dmacos_openal_provider=${{ matrix.macos_openal_provider }}", "commit validation macOS OpenAL setup")
     require(commit, "runs-on: macos-15", "commit validation macOS job")
     require(commit, "bash tools/validation/validate_pr.sh \\", "commit validation macOS job")
     require(commit, "--fail-on-dirty \\", "commit validation macOS job")
+    arm64_commit_job = commit[commit.index("\n  macos-arm64:") :]
+    if "\n  macos-x64:" in commit or "\n  macos-universal2:" in commit:
+        raise AssertionError("commit validation must keep Intel and universal2 assembly out of pull requests")
+    thin_normalize = "python tools/build/assemble_macos_universal2.py prepare"
+    moltenvk_stage = "bash tools/build/prepare_macos_moltenvk.sh --output-dir .install"
+    moltenvk_verify = "bash tools/build/prepare_macos_moltenvk.sh --verify-only --output-dir .install"
+    for job, normalize_step_name, arch_token, record_step, context in (
+        (
+            arm64_commit_job,
+            "- name: Normalize ARM64 thin payload",
+            "--arch arm64",
+            "name: Record macOS ARM64 thin-build provenance",
+            "ARM64 thin payload",
+        ),
+    ):
+        if job.count(normalize_step_name) != 1:
+            raise AssertionError(f"Expected exactly one {normalize_step_name!r} in {context}")
+        normalize_start = job.index(normalize_step_name)
+        normalize_end = job.index("\n      - name:", normalize_start + len(normalize_step_name))
+        normalize_step = job[normalize_start:normalize_end]
+        require(normalize_step, thin_normalize, f"{context} install-name normalization")
+        require(normalize_step, "--install-root .install", f"{context} normalization install root")
+        require(normalize_step, arch_token, f"{context} normalization architecture")
+        reject(normalize_step, "\n        if:", f"{context} unconditional normalization")
+        require(job, moltenvk_stage, f"{context} MoltenVK staging")
+        require(job, moltenvk_verify, f"{context} MoltenVK verification")
+        require_before(job, "name: Run selected validation profile", normalize_step_name, f"{context} build normalization order")
+        require_before(job, normalize_step_name, "name: Run macOS dedicated server smoke", f"{context} smoke normalization order")
+        require_before(job, normalize_step_name, record_step, f"{context} normalization order")
+        require_before(job, moltenvk_stage, record_step, f"{context} MoltenVK stage order")
+        require_before(job, moltenvk_verify, record_step, f"{context} MoltenVK verification order")
     require(push, "macOS OpenGL Push Verification", "push verification macOS OpenGL job")
     require(push, "macOS Metal Push Verification", "push verification macOS Metal job")
     if push.count("runtime_smoke: true") < 3:
@@ -3116,7 +3299,7 @@ def validate_packaging_and_release_contract() -> None:
     require(push, 'bash tools/validation/validate_push.sh "${validation_args[@]}"', "macOS hosted runtime smoke invocation")
     require(push, "macos-opengl", "push verification macOS OpenGL artifact")
     require(push, "macos-metal", "push verification macOS Metal artifact")
-    require(push, "macos_openal_provider: apple_framework", "push verification macOS OpenAL provider")
+    require(push, "macos_openal_provider: system", "push verification macOS OpenAL Soft provider")
     require(push, "--extra-setup-arg=-Dmacos_graphics_bridge=${{ matrix.macos_graphics_bridge }}", "push verification macOS bridge setup")
     require(push, "--extra-setup-arg=-Dmacos_openal_provider=${{ matrix.macos_openal_provider }}", "push verification macOS OpenAL setup")
 
@@ -3138,7 +3321,8 @@ def validate_packaging_and_release_contract() -> None:
     require(release, "fromJSON(needs.metadata.outputs.release_matrix)", "manual release dynamic matrix")
     require(release, "macOS ARM64 OpenGL{macos_unsigned_label}", "manual release macOS OpenGL matrix")
     require(release, '"macos_graphics_bridge": "opengl"', "manual release OpenGL bridge matrix")
-    require(release, '"macos_openal_provider": "apple_framework"', "manual release macOS OpenAL provider")
+    require(release, '"platform": "macos"', "manual release macOS platform matrix")
+    require(release, '"macos_openal_provider": "system"', "manual release macOS OpenAL Soft provider")
     require(release, '"macos_release_mode": macos_release_mode', "manual release macOS release mode")
     require(release, '"package_suffix": f"-opengl{macos_unsigned_suffix}"', "manual release OpenGL package suffix")
     require(release, 'macos_archive_format = "dmg" if macos_signed_release_enabled else "tar.gz"', "manual release macOS archive format selection")
@@ -3148,6 +3332,21 @@ def validate_packaging_and_release_contract() -> None:
     require(release, '"package_suffix": f"-metal{macos_unsigned_suffix}"', "manual release Metal package suffix")
     require(release, "-Dmacos_graphics_bridge=${{ matrix.macos_graphics_bridge }}", "manual release setup")
     require(release, "-Dmacos_openal_provider=${{ matrix.macos_openal_provider }}", "manual release OpenAL setup")
+    # Meson never installs MoltenVK - openQ4 does not build it - so without an
+    # explicit staging step resolve_macos_moltenvk_source aborts the macOS
+    # package and the whole release skips publishing. The release lane went out
+    # without this once already.
+    require(
+        release,
+        "bash tools/build/prepare_macos_moltenvk.sh --output-dir .install",
+        "manual release MoltenVK staging",
+    )
+    require_before(
+        release,
+        "bash tools/build/prepare_macos_moltenvk.sh --output-dir .install",
+        "name: Prepare package",
+        "manual release MoltenVK staged before packaging",
+    )
     require(release, "Import macOS Developer ID certificate", "manual release Developer ID setup")
     require(release, "matrix.macos_release_mode == 'signed'", "manual release conditional Developer ID setup")
     require(release, "MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64", "manual release Developer ID certificate secret")
@@ -3190,6 +3389,7 @@ def validate_packaging_and_release_contract() -> None:
     require(release, "spctl --assess --type execute", "manual release Gatekeeper validation")
     require(release, "check_macos_install_name", "manual release macOS install-name validation")
     require(release, "@loader_path/game-sp_${{ matrix.binary_arch }}.dylib", "manual release macOS install-name validation")
+    require(release, "@loader_path/renderer-vk_${{ matrix.binary_arch }}.dylib", "manual release renderer install-name validation")
     require(release, "check_macos_binary_dependencies", "manual release macOS dependency validation")
     require(release, 'otool -arch "${macho_arch}" -L', "manual release macOS dependency validation")
     require(release, "unbundled non-system dependency", "manual release macOS dependency validation")
@@ -3323,10 +3523,11 @@ def validate_macos_workflow_security_contract() -> None:
     require(host, "including hardlinks", "macOS host archive hardlink validation")
     require(host, "rsync -a --delete", "macOS host safe temp extraction sync")
     require(host, 'Join-RemotePosixPath -Base $MacWorkspace -Child "openQ4"', "macOS host remote source sync path joining")
-    require(host, 'Join-RemotePosixPath -Base $MacWorkspace -Child "openQ4-game"', "macOS host remote GameLibs sync path joining")
+    reject(host, 'Join-RemotePosixPath -Base $MacWorkspace -Child "openQ4-game"', "macOS host obsolete companion transfer")
+    require(host, "$HostGameLibsPath = $repoRoot", "macOS host canonical in-tree game sources")
     require(host, "openQ4/.git", "macOS host source metadata exclusion")
     require(host, "openQ4/.codex", "macOS host local agent metadata exclusion")
-    require(host, "openQ4-game/.git", "macOS host GameLibs metadata exclusion")
+    reject(host, "openQ4-game/.git", "macOS host obsolete companion archive")
     require(host, "$assetRootName/q4base/*.cfg", "macOS host personal config exclusion")
     require(host, "$assetRootName/q4base/q4key", "macOS host private key exclusion")
     require(host, '"Signoff"', "macOS host signoff action")
@@ -3497,7 +3698,7 @@ def validate_macos_workflow_security_contract() -> None:
     require(guest, "Quake 4 asset basepath has no q4base PK4 files", "macOS guest asset basepath validation")
     require(guest, "Validated Quake 4 asset basepath", "macOS guest asset validation evidence")
     require(guest, 'graphics_bridge="${OPENQ4_MACOS_GRAPHICS_BRIDGE:-opengl}"', "macOS guest bridge environment")
-    require(guest, 'openal_provider="${OPENQ4_MACOS_OPENAL_PROVIDER:-apple_framework}"', "macOS guest OpenAL provider environment")
+    require(guest, 'openal_provider="${OPENQ4_MACOS_OPENAL_PROVIDER:-system}"', "macOS guest OpenAL Soft provider environment")
     require(guest, 'stamp="${OPENQ4_MACOS_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"', "macOS guest host-controlled run ID")
     require(guest, "RESULT_TOKEN_MAX_LENGTH=80", "macOS guest result token length guard")
     require(guest, "require_result_token", "macOS guest result token validation")
@@ -3709,7 +3910,7 @@ def validate_macos_shell_entrypoints() -> None:
 def validate_docs_and_ci_hooks() -> None:
     building = read("BUILDING.md")
     platform_support = read("docs/dev/platform-support.md")
-    migration = read("docs/dev/sdl3-linux-macos-migration.md")
+    migration = read("docs/dev/archive/2026-10-18/sdl3-linux-macos-migration.md")
     getting_started = read("docs/user/getting-started.md")
     package_readme = read("assets/release/README.html")
     release_notes = read("docs/dev/release-completion.md")
@@ -3719,7 +3920,7 @@ def validate_docs_and_ci_hooks() -> None:
 
     require(building, "-Dmacos_graphics_bridge=metal", "build documentation")
     require(building, "without a native renderer rewrite", "build documentation")
-    require(building, "when a signed/notarized experimental macOS release is required", "macOS release signing documentation")
+    require(building, "when a signed/notarized macOS release is required", "macOS release signing documentation")
     require(building, "MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64", "macOS release signing documentation")
     require(building, "xcrun stapler validate", "macOS release signing documentation")
     require(building, "openq4-<version>-macos-arm64-opengl.dmg", "macOS DMG release asset documentation")
@@ -3728,24 +3929,24 @@ def validate_docs_and_ci_hooks() -> None:
     require(building, "rejects App Sandbox or `get-task-allow` entitlements", "macOS entitlement policy documentation")
     require(building, "Credentialed runs publish signed/notarized DMGs", "macOS release credential policy documentation")
     require(building, "`-unsigned.tar.gz` archives", "macOS release credential fallback documentation")
-    require(building, "Experimental manual macOS release artifacts are Apple Silicon/arm64 only", "macOS architecture policy documentation")
+    require(building, "Preview manual macOS release artifacts are Apple Silicon/arm64 only", "macOS architecture policy documentation")
     require(building, "Intel Mac and universal2 packages are not published", "macOS architecture policy documentation")
     require(building, "SDL3 is the default platform path and does not link Carbon", "macOS Carbon isolation documentation")
     require(building, "macos_openal_provider", "macOS OpenAL provider documentation")
-    require(building, "system/OpenAL Soft dependency", "macOS OpenAL provider documentation")
+    require(building, "dependency('openal', method: 'pkg-config')", "macOS OpenAL provider documentation")
     require(getting_started, "signed/notarized OpenGL and Metal bridge DMGs", "getting started guide")
     require(getting_started, "drag `openQ4.app` to `/Applications`", "getting started guide")
     require(getting_started, "signed SP/MP modules", "getting started self-contained app guide")
     require(getting_started, "publish clearly labeled `-unsigned.tar.gz` archives", "getting started macOS credential fallback")
     require(getting_started, "ad-hoc signed only for bundle validity", "getting started macOS unsigned policy")
-    require(getting_started, "macOS support is experimental. Current packages are for Apple Silicon/arm64 Macs", "getting started macOS architecture policy")
-    require(getting_started, "Intel Mac and universal2 packages are not published yet", "getting started macOS architecture policy")
+    require(getting_started, "Our GitHub macOS packages remain a preview for Apple Silicon/arm64 Macs", "getting started macOS architecture policy")
+    require(getting_started, "Our GitHub releases do not yet publish Intel Mac or universal2 packages", "getting started macOS architecture policy")
     require(package_readme, "signed/notarized OpenGL and Metal bridge DMGs", "release package README")
     require(package_readme, "drag <code>openQ4.app</code> to <code>/Applications</code>", "release package README")
     require(package_readme, "signed SP/MP modules", "release package self-contained app guide")
     require(package_readme, "clearly labeled <code>-unsigned.tar.gz</code> archives", "release package macOS credential fallback")
     require(package_readme, "ad-hoc signed only for bundle validity", "release package macOS unsigned policy")
-    require(package_readme, "macOS support is experimental. Current packages are for Apple Silicon/arm64 Macs", "release package macOS architecture policy")
+    require(package_readme, "macOS support is a preview. Current packages are for Apple Silicon/arm64 Macs", "release package macOS architecture policy")
     require(package_readme, "Intel Mac and universal2 packages are not published yet", "release package macOS architecture policy")
     require(release_notes, "Experimental macOS builds now retain the OpenGL package while adding a separate Metal bridge package", "release completion notes")
     require(release_notes, "Final experimental macOS package validation", "release completion notes")
@@ -3756,19 +3957,19 @@ def validate_docs_and_ci_hooks() -> None:
     require(release_notes, "Apple Silicon/arm64-only experimental macOS support policy", "release completion macOS architecture policy")
     require(release_notes, "Intel Mac and universal2 packages are not advertised", "release completion macOS architecture policy")
     require(release_notes, "Experimental macOS SDL3 release builds now avoid linking the legacy Carbon framework", "release completion Carbon isolation note")
-    require(release_notes, "Experimental macOS OpenAL migration now has an explicit build switch", "release completion OpenAL migration note")
-    require(platform_support, "Linux and experimental macOS now use the shared SDL3 runtime path", "platform support roadmap")
-    require(platform_support, "Experimental macOS SDL3 builds select `src/sys/osx/macosx_sdl3.cpp`", "platform support roadmap")
+    require(release_notes, "Large single-player levels on macOS no longer return to the menu", "release completion OpenAL Soft fix note")
+    require(platform_support, "Linux and macOS now use the shared SDL3 runtime path", "platform support roadmap")
+    require(platform_support, "macOS SDL3 builds select `src/sys/macos/macos_sdl3.cpp`", "platform support roadmap")
     require(platform_support, "Credentialed release runs publish signed/notarized DMGs", "platform support macOS credential policy")
     require(platform_support, "`-unsigned.tar.gz` archives", "platform support macOS credential fallback")
-    require(platform_support, "Experimental manual macOS release artifacts are Apple Silicon/arm64 only", "platform support macOS architecture policy")
+    require(platform_support, "Preview manual macOS release artifacts are Apple Silicon/arm64 only", "platform support macOS architecture policy")
     require(platform_support, "Intel Mac and universal2 packages are intentionally not claimed", "platform support macOS architecture policy")
     require(platform_support, "final compressed DMG creation", "platform support DMG packaging")
     require(platform_support, "DMG notarization/stapling", "platform support DMG packaging")
     require(platform_support, "keeps the legacy Carbon framework isolated to `-Dplatform_backend=native`", "platform support Carbon isolation")
     require(platform_support, "Hardened Runtime without custom entitlements by default", "platform support entitlement policy")
     require(platform_support, "App Sandbox or `get-task-allow` entitlements are rejected", "platform support entitlement policy")
-    require(platform_support, "Experimental macOS audio still defaults to Apple's OpenAL framework", "platform support OpenAL provider policy")
+    require(platform_support, "checksum-pinned OpenAL Soft 1.25.2 CoreAudio runtime", "platform support OpenAL Soft provider policy")
     require(platform_support, "`-Dmacos_openal_provider=system`", "platform support OpenAL provider switch")
     require(migration, "leaves Carbon isolated to the native Cocoa fallback", "SDL3 migration Carbon isolation")
     require(migration, "experimental macOS CI covers OpenGL and Metal bridge configure/build/install/package validation", "SDL3 migration plan")
@@ -3816,6 +4017,216 @@ def validate_embedded_guest_root_validators_runtime() -> None:
                 raise AssertionError(f"{context} did not reject control-character workspace paths: {stderr}")
 
 
+def make_macos_layer_mod_json_bytes(required: str = "0.2.000") -> bytes:
+    manifest = {
+        "name": "Quake 4: The Awakening",
+        "version": "0.1.0",
+        "requiredopenQ4Version": required,
+        "layer": "awakening",
+    }
+    return (json.dumps(manifest, indent=2) + "\n").encode("utf-8")
+
+
+def make_macos_layer_symbol_records(arch: str) -> bytes:
+    records = []
+    for index, kind in enumerate(("sp", "mp")):
+        module = f"game-{kind}_{arch}.dylib"
+        records.append(
+            f"- path=openQ4.app/Contents/Frameworks/q4xbase/{module}\n"
+            f"  sha256={str(6 + index) * 64}\n"
+            "  size=1\n"
+            f"  macho_uuid=UUID: 00000000-0000-0000-0000-00000000000{7 + index} (arm64) {module}\n"
+            f"  dsym=dSYMs/q4xbase/{module}.dSYM\n"
+        )
+    return "".join(records).encode("utf-8")
+
+
+def validate_macos_game_layer_bundle_runtime() -> None:
+    """Unified SP/MP modules are bundled; obsolete campaign stages are ignored."""
+    package = load_package_module()
+    work = ROOT / ".tmp" / "macos-game-layer-contract"
+    package_root = work / "openq4-v0.2.000-macos-arm64-opengl"
+    install_dir = work / "install"
+    arch = "arm64"
+    version = "0.2.000"
+
+    def stage_package() -> None:
+        shutil.rmtree(package_root, ignore_errors=True)
+        write_test_file(package_root / f"openQ4-client_{arch}", b"client\n", 0o755)
+        write_test_file(package_root / package.GAME_DIR_NAME / "mod.json", b"{}\n")
+        for pak_name in package.OPENQ4_PACK_NAMES:
+            write_test_file(package_root / package.GAME_DIR_NAME / pak_name, pak_name.removesuffix(".pk4").encode() + b"\n")
+        write_test_file(package_root / package.GAME_DIR_NAME / f"game-sp_{arch}.dylib", b"sp\n", 0o755)
+        write_test_file(package_root / package.GAME_DIR_NAME / f"game-mp_{arch}.dylib", b"mp\n", 0o755)
+        write_test_file(package_root / f"renderer-vk_{arch}.dylib", b"renderer-vk\n", 0o755)
+
+    def create(**kwargs):
+        return package.create_macos_app_bundle(package_root, install_dir, arch, version, "v0.2.000", **kwargs)
+
+    def validate(app_root: Path) -> None:
+        package.validate_macos_app_bundle(package_root, app_root, arch, version)
+
+    shutil.rmtree(work, ignore_errors=True)
+    try:
+        write_test_file(install_dir / package.MACOS_MOLTENVK_DYLIB_NAME, b"moltenvk\n", 0o755)
+        write_test_file(install_dir / "Frameworks" / package.MACOS_OPENAL_SOFT_DYLIB_NAME, b"openal-soft\n", 0o755)
+        for filename in package.MACOS_OPENAL_SOFT_LICENSE_FILES:
+            write_test_file(
+                install_dir / "licenses" / "openal-soft" / filename,
+                f"openal-soft-{filename}\n".encode(),
+            )
+        write_test_file(install_dir / "assets" / "splash" / "quake4_rt_bitmap_4001.bmp", b"bmp\n")
+        write_test_file(install_dir / "openQ4.icns", b"icns\n")
+
+        # Historical q4xbase outputs may still exist beside an upgraded stage.
+        # The unified package must ignore their modules, metadata and user assets.
+        staged_layer = install_dir / "q4xbase"
+        write_test_file(staged_layer / f"game-sp_{arch}.dylib", b"obsolete-sp\n", 0o755)
+        write_test_file(staged_layer / f"game-mp_{arch}.dylib", b"obsolete-mp\n", 0o755)
+        write_test_file(staged_layer / "mod.json", make_macos_layer_mod_json_bytes())
+        write_test_file(staged_layer / "user-content.pk4", b"private-assets\n")
+        stage_package()
+        app_root = create()
+        validate(app_root)
+        if package.macos_embedded_game_layers(package_root):
+            raise AssertionError("the unified package must not embed historical campaign modules")
+        if any("q4xbase" in path.parts for path in app_root.rglob("*")):
+            raise AssertionError("campaign modules or user content leaked into the app bundle")
+        base_modules = [app_root / package.MACOS_APP_FRAMEWORKS_DIR / f"game-{kind}_{arch}.dylib"
+                        for kind in ("sp", "mp")]
+        for module in base_modules:
+            if module not in package.macos_signable_targets(package_root, arch):
+                raise AssertionError(f"unified game module must be signed: {module}")
+        if not (staged_layer / "user-content.pk4").is_file():
+            raise AssertionError("packaging must preserve installed campaign content")
+
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def validate_macos_game_layer_archive_runtime() -> None:
+    """The runtime and dSYM archives carry q4xbase exactly when the package embeds it."""
+    package = load_package_module()
+    work = ROOT / ".tmp" / "macos-game-layer-archive-contract"
+    package_root = work / "openq4-v0.2.000-macos-arm64-opengl"
+    arch = "arm64"
+    version = "0.2.000"
+    version_tag = "v0.2.000"
+    package_suffix = "-opengl"
+    plist_bytes = make_macos_plist_bytes(package, version)
+    prefix = package_root.name + "/"
+    contents = f"{prefix}openQ4.app/Contents/"
+    base_manifest = make_macos_symbol_manifest_bytes(package_root.name, arch, version, version_tag)
+    layer_manifest = base_manifest + make_macos_layer_symbol_records(arch)
+    layer_sp = f"{contents}Frameworks/q4xbase/game-sp_{arch}.dylib"
+    layer_json = f"{contents}Resources/q4xbase/mod.json"
+
+    def entries(changes=None, removed=()):
+        result = make_macos_archive_entries(
+            package,
+            package_root.name,
+            arch,
+            plist_bytes,
+            extra_entries={
+                layer_sp: (b"layer-sp\n", 0o755),
+                f"{contents}Frameworks/q4xbase/game-mp_{arch}.dylib": (b"layer-mp\n", 0o755),
+                layer_json: (make_macos_layer_mod_json_bytes(), 0o644),
+                f"{prefix}{package.MACOS_SYMBOL_MANIFEST_NAME}": (layer_manifest, 0o644),
+            },
+        )
+        result.update(changes or {})
+        for name in removed:
+            del result[name]
+        return result
+
+    def check(archive_entries, game_layers=("q4xbase",)) -> None:
+        archive_path = work / "layer.tar.gz"
+        write_test_targz_archive(archive_path, archive_entries)
+        package.validate_macos_archive_contents(
+            package_root, archive_path, "tar.gz", arch, version, game_layers=game_layers
+        )
+
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        check(entries())
+        expect_runtime_error("unexpected entries", lambda: check(entries(), ()), "macOS archive with an undeclared layer")
+        expect_runtime_error(
+            "not executable",
+            lambda: check(entries({layer_sp: (b"layer-sp\n", 0o644)})),
+            "macOS archive with a non-executable layer module",
+        )
+        expect_runtime_error(
+            "missing required entries",
+            lambda: check(entries(removed=(layer_json,))),
+            "macOS archive without the layer mod.json",
+        )
+        expect_runtime_error(
+            "outside openQ4.app",
+            lambda: check(entries({f"{prefix}q4xbase/mod.json": (make_macos_layer_mod_json_bytes(), 0o644)})),
+            "macOS archive with a loose q4xbase",
+        )
+        expect_runtime_error(
+            "unexpected entries",
+            lambda: check(entries({f"{contents}Frameworks/q4xbase/game-sp_x64.dylib": (b"stale\n", 0o755)})),
+            "macOS archive with a stale layer module",
+        )
+        expect_runtime_error(
+            "missing binary entries",
+            lambda: check(entries({f"{prefix}{package.MACOS_SYMBOL_MANIFEST_NAME}": (base_manifest, 0o644)})),
+            "macOS archive whose symbol manifest leaves out the layer",
+        )
+
+        symbol_root_name = package.macos_symbol_archive_stem(version_tag, arch, package_suffix)
+        symbol_prefix = symbol_root_name + "/"
+        symbol_entries = make_macos_symbol_archive_entries(
+            package, package_root.name, symbol_root_name, arch, version, version_tag
+        )
+        symbol_entries[f"{symbol_prefix}{package.MACOS_SYMBOL_MANIFEST_NAME}"] = (layer_manifest, 0o644)
+        layer_dsym = f"{symbol_prefix}dSYMs/q4xbase/game-sp_{arch}.dylib.dSYM/Contents/Resources/DWARF/game-sp_{arch}.dylib"
+        symbol_entries[layer_dsym] = (b"layer-sp-dsym\n", 0o644)
+        symbol_entries[
+            f"{symbol_prefix}dSYMs/q4xbase/game-mp_{arch}.dylib.dSYM/Contents/Resources/DWARF/game-mp_{arch}.dylib"
+        ] = (b"layer-mp-dsym\n", 0o644)
+
+        def check_symbols(archive_entries, game_layers=("q4xbase",)) -> None:
+            archive_path = work / f"{symbol_root_name}.tar.xz"
+            write_test_tarxz_archive(archive_path, archive_entries, rewrite_runtime_archive=False)
+            package.validate_macos_symbol_archive_contents(
+                archive_path,
+                symbol_root_name,
+                version=version,
+                version_tag=version_tag,
+                arch=arch,
+                package_suffix=package_suffix,
+                runtime_archive_name=f"{package_root.name}.tar.gz",
+                game_layers=game_layers,
+            )
+
+        check_symbols(symbol_entries)
+        expect_runtime_error(
+            "unexpected binary entries",
+            lambda: check_symbols(symbol_entries, ()),
+            "macOS dSYM archive with an undeclared layer",
+        )
+        without_dsym = dict(symbol_entries)
+        del without_dsym[layer_dsym]
+        expect_runtime_error(
+            "missing required dSYM entries",
+            lambda: check_symbols(without_dsym),
+            "macOS dSYM archive without the layer's dSYM",
+        )
+        with_runtime = dict(symbol_entries)
+        with_runtime[f"{symbol_prefix}openQ4.app/Contents/Frameworks/q4xbase/game-sp_{arch}.dylib"] = (b"code\n", 0o755)
+        expect_runtime_error(
+            "runtime payload entries",
+            lambda: check_symbols(with_runtime),
+            "macOS dSYM archive carrying the layer's runtime module",
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main() -> None:
     validate_meson_contract()
     validate_sdl3_runtime_contract()
@@ -3829,6 +4240,8 @@ def main() -> None:
     validate_macos_package_main_collateral_error_runtime()
     validate_macos_dmg_output_preflight_runtime()
     validate_macos_archive_validator_runtime()
+    validate_macos_game_layer_bundle_runtime()
+    validate_macos_game_layer_archive_runtime()
     validate_macos_signing_config_runtime()
     validate_macos_notary_archive_output_preflight_runtime()
     validate_macos_signing_keeps_standalone_client_signature_runtime()

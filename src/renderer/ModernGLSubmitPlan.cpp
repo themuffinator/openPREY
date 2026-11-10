@@ -3,6 +3,7 @@
 
 #include "tr_local.h"
 #include "ModernGLSubmitPlan.h"
+#include "RendererContracts.h"
 
 idModernGLSubmitPlan::idModernGLSubmitPlan()
 	: numCommands( 0 ) {
@@ -61,7 +62,11 @@ void R_ModernGLSubmitCommand_BuildModelViewProjection( modernGLSubmitCommand_t &
 		}
 		projectionMatrix[14] *= 0.25f;
 	}
-	myGlMultMatrix( command.modelViewMatrix, projectionMatrix, command.modelViewProjectionMatrix );
+	float canonicalModelViewProjection[ 16 ];
+	myGlMultMatrix( command.modelViewMatrix, projectionMatrix, canonicalModelViewProjection );
+	RendererContracts_ConvertClipMatrix( command.modelViewProjectionMatrix,
+		canonicalModelViewProjection, RendererContracts_GLClipSpace(),
+		RendererContracts_GLClipSpace() );
 }
 
 static bool R_ModernGLSubmitPlan_ScissorEquals( const modernGLSubmitCommand_t &a, const modernGLSubmitCommand_t &b ) {
@@ -72,6 +77,12 @@ static bool R_ModernGLSubmitPlan_ScissorEquals( const modernGLSubmitCommand_t &a
 }
 
 static modernGLSubmitCommand_t rg_modernGLSubmitPlanSortScratch[MODERN_GL_SUBMIT_PLAN_MAX_COMMANDS];
+// The comparator ends with the unique originalSubmitOrder, so the sorted
+// permutation is a strict total order: sorting an index array through the
+// same comparator and applying it with two struct copies per element yields
+// the byte-identical command order without O(n log n) struct moves.
+static int rg_modernGLSubmitPlanSortOrder[MODERN_GL_SUBMIT_PLAN_MAX_COMMANDS];
+static int rg_modernGLSubmitPlanSortOrderScratch[MODERN_GL_SUBMIT_PLAN_MAX_COMMANDS];
 
 static int R_ModernGLSubmitPlan_CompareInt( int a, int b ) {
 	return ( a > b ) - ( a < b );
@@ -208,47 +219,47 @@ static bool R_ModernGLSubmitPlan_RangeAlreadySorted( const modernGLSubmitCommand
 	return true;
 }
 
-static void R_ModernGLSubmitPlan_InsertionSortRange( modernGLSubmitCommand_t *commands, int left, int right ) {
+static void R_ModernGLSubmitPlan_InsertionSortRange( const modernGLSubmitCommand_t *commands, int *order, int left, int right ) {
 	for ( int i = left + 1; i < right; ++i ) {
-		const modernGLSubmitCommand_t key = commands[i];
+		const int key = order[i];
 		int j = i;
-		while ( j > left && R_ModernGLSubmitPlan_CompareSortKey( commands[j - 1], key ) > 0 ) {
-			commands[j] = commands[j - 1];
+		while ( j > left && R_ModernGLSubmitPlan_CompareSortKey( commands[order[j - 1]], commands[key] ) > 0 ) {
+			order[j] = order[j - 1];
 			j--;
 		}
-		commands[j] = key;
+		order[j] = key;
 	}
 }
 
-static void R_ModernGLSubmitPlan_StableSortRange( modernGLSubmitCommand_t *commands, int left, int right ) {
+static void R_ModernGLSubmitPlan_StableSortRange( const modernGLSubmitCommand_t *commands, int *order, int left, int right ) {
 	if ( right - left <= 1 ) {
 		return;
 	}
 	if ( right - left <= MODERN_GL_SUBMIT_PLAN_INSERTION_SORT_THRESHOLD ) {
-		R_ModernGLSubmitPlan_InsertionSortRange( commands, left, right );
+		R_ModernGLSubmitPlan_InsertionSortRange( commands, order, left, right );
 		return;
 	}
 	const int mid = left + ( right - left ) / 2;
-	R_ModernGLSubmitPlan_StableSortRange( commands, left, mid );
-	R_ModernGLSubmitPlan_StableSortRange( commands, mid, right );
-	if ( R_ModernGLSubmitPlan_CompareSortKey( commands[mid - 1], commands[mid] ) <= 0 ) {
+	R_ModernGLSubmitPlan_StableSortRange( commands, order, left, mid );
+	R_ModernGLSubmitPlan_StableSortRange( commands, order, mid, right );
+	if ( R_ModernGLSubmitPlan_CompareSortKey( commands[order[mid - 1]], commands[order[mid]] ) <= 0 ) {
 		return;
 	}
 
 	for ( int i = left; i < right; ++i ) {
-		rg_modernGLSubmitPlanSortScratch[i] = commands[i];
+		rg_modernGLSubmitPlanSortOrderScratch[i] = order[i];
 	}
 	int a = left;
 	int b = mid;
 	for ( int out = left; out < right; ++out ) {
 		if ( a >= mid ) {
-			commands[out] = rg_modernGLSubmitPlanSortScratch[b++];
+			order[out] = rg_modernGLSubmitPlanSortOrderScratch[b++];
 		} else if ( b >= right ) {
-			commands[out] = rg_modernGLSubmitPlanSortScratch[a++];
-		} else if ( R_ModernGLSubmitPlan_CompareSortKey( rg_modernGLSubmitPlanSortScratch[a], rg_modernGLSubmitPlanSortScratch[b] ) <= 0 ) {
-			commands[out] = rg_modernGLSubmitPlanSortScratch[a++];
+			order[out] = rg_modernGLSubmitPlanSortOrderScratch[a++];
+		} else if ( R_ModernGLSubmitPlan_CompareSortKey( commands[rg_modernGLSubmitPlanSortOrderScratch[a]], commands[rg_modernGLSubmitPlanSortOrderScratch[b]] ) <= 0 ) {
+			order[out] = rg_modernGLSubmitPlanSortOrderScratch[a++];
 		} else {
-			commands[out] = rg_modernGLSubmitPlanSortScratch[b++];
+			order[out] = rg_modernGLSubmitPlanSortOrderScratch[b++];
 		}
 	}
 }
@@ -322,7 +333,16 @@ static void R_ModernGLSubmitPlan_SortCommands( modernGLSubmitCommand_t *commands
 		if ( index - start > 1 ) {
 			stats.sortSpans++;
 			if ( !R_ModernGLSubmitPlan_RangeAlreadySorted( commands, start, index ) ) {
-				R_ModernGLSubmitPlan_StableSortRange( commands, start, index );
+				for ( int i = start; i < index; ++i ) {
+					rg_modernGLSubmitPlanSortOrder[i] = i;
+				}
+				R_ModernGLSubmitPlan_StableSortRange( commands, rg_modernGLSubmitPlanSortOrder, start, index );
+				for ( int i = start; i < index; ++i ) {
+					rg_modernGLSubmitPlanSortScratch[i] = commands[i];
+				}
+				for ( int i = start; i < index; ++i ) {
+					commands[i] = rg_modernGLSubmitPlanSortScratch[rg_modernGLSubmitPlanSortOrder[i]];
+				}
 				sortedAnySpan = true;
 			}
 		}
@@ -657,6 +677,8 @@ static void R_ModernGLSubmitPlan_SetTextureCacheSlot(
 
 static void R_ModernGLSubmitPlan_FillMaterialTextureCache( modernGLSubmitCommand_t &command, const materialResourceTableRecord_t *materialRecord ) {
 	R_ModernGLSubmitPlan_ResetMaterialTextureCache( command );
+	const bool pbrModernMaterial = materialRecord != NULL
+		&& R_MaterialResourceTable_PBRModernPathEligible( *materialRecord );
 	if ( materialRecord != NULL ) {
 		command.materialLoadedTextureSemanticMask = materialRecord->loadedTextureSemanticMask;
 		command.materialAlphaTestRegister = materialRecord->alphaTestRegister;
@@ -666,23 +688,46 @@ static void R_ModernGLSubmitPlan_FillMaterialTextureCache( modernGLSubmitCommand
 	R_ModernGLSubmitPlan_SetTextureCacheSlot(
 		command,
 		MODERN_GL_SUBMIT_MATERIAL_TEXTURE_MAIN,
-		R_ModernGLSubmitPlan_PrimaryTextureBinding( materialRecord ),
-		MATERIAL_RESOURCE_TEXTURE_DIFFUSE );
+		pbrModernMaterial
+			? R_MaterialResourceTable_TextureBindingForSemantic( *materialRecord, MATERIAL_RESOURCE_TEXTURE_ALBEDO )
+			: R_ModernGLSubmitPlan_PrimaryTextureBinding( materialRecord ),
+		pbrModernMaterial ? MATERIAL_RESOURCE_TEXTURE_ALBEDO : MATERIAL_RESOURCE_TEXTURE_DIFFUSE );
 	R_ModernGLSubmitPlan_SetTextureCacheSlot(
 		command,
 		MODERN_GL_SUBMIT_MATERIAL_TEXTURE_NORMAL,
-		materialRecord != NULL ? R_MaterialResourceTable_TextureBindingForSemantic( *materialRecord, MATERIAL_RESOURCE_TEXTURE_BUMP ) : NULL,
-		MATERIAL_RESOURCE_TEXTURE_BUMP );
+		materialRecord != NULL ? R_MaterialResourceTable_TextureBindingForSemantic( *materialRecord,
+			pbrModernMaterial ? MATERIAL_RESOURCE_TEXTURE_NORMAL : MATERIAL_RESOURCE_TEXTURE_BUMP ) : NULL,
+		pbrModernMaterial ? MATERIAL_RESOURCE_TEXTURE_NORMAL : MATERIAL_RESOURCE_TEXTURE_BUMP );
 	R_ModernGLSubmitPlan_SetTextureCacheSlot(
 		command,
 		MODERN_GL_SUBMIT_MATERIAL_TEXTURE_SPECULAR,
-		materialRecord != NULL ? R_MaterialResourceTable_TextureBindingForSemantic( *materialRecord, MATERIAL_RESOURCE_TEXTURE_SPECULAR ) : NULL,
-		MATERIAL_RESOURCE_TEXTURE_SPECULAR );
+		materialRecord != NULL ? R_MaterialResourceTable_TextureBindingForSemantic( *materialRecord,
+			pbrModernMaterial ? MATERIAL_RESOURCE_TEXTURE_ORM : MATERIAL_RESOURCE_TEXTURE_SPECULAR ) : NULL,
+		pbrModernMaterial ? MATERIAL_RESOURCE_TEXTURE_ORM : MATERIAL_RESOURCE_TEXTURE_SPECULAR );
 	R_ModernGLSubmitPlan_SetTextureCacheSlot(
 		command,
 		MODERN_GL_SUBMIT_MATERIAL_TEXTURE_EMISSIVE,
-		materialRecord != NULL ? R_MaterialResourceTable_TextureBindingForSemantic( *materialRecord, MATERIAL_RESOURCE_TEXTURE_EMISSIVE ) : NULL,
-		MATERIAL_RESOURCE_TEXTURE_EMISSIVE );
+		materialRecord != NULL ? R_MaterialResourceTable_TextureBindingForSemantic( *materialRecord,
+			pbrModernMaterial ? MATERIAL_RESOURCE_TEXTURE_EMISSIVE_PBR : MATERIAL_RESOURCE_TEXTURE_EMISSIVE ) : NULL,
+		pbrModernMaterial ? MATERIAL_RESOURCE_TEXTURE_EMISSIVE_PBR : MATERIAL_RESOURCE_TEXTURE_EMISSIVE );
+	R_ModernGLSubmitPlan_SetTextureCacheSlot(
+		command,
+		MODERN_GL_SUBMIT_MATERIAL_TEXTURE_METALLIC,
+		pbrModernMaterial && materialRecord->pbrSeparateMaterialData
+			? R_MaterialResourceTable_TextureBindingForSemantic( *materialRecord, MATERIAL_RESOURCE_TEXTURE_METALLIC ) : NULL,
+		MATERIAL_RESOURCE_TEXTURE_METALLIC );
+	R_ModernGLSubmitPlan_SetTextureCacheSlot(
+		command,
+		MODERN_GL_SUBMIT_MATERIAL_TEXTURE_ROUGHNESS,
+		pbrModernMaterial && materialRecord->pbrSeparateMaterialData
+			? R_MaterialResourceTable_TextureBindingForSemantic( *materialRecord, MATERIAL_RESOURCE_TEXTURE_ROUGHNESS ) : NULL,
+		MATERIAL_RESOURCE_TEXTURE_ROUGHNESS );
+	R_ModernGLSubmitPlan_SetTextureCacheSlot(
+		command,
+		MODERN_GL_SUBMIT_MATERIAL_TEXTURE_AO,
+		pbrModernMaterial && materialRecord->pbrSeparateMaterialData
+			? R_MaterialResourceTable_TextureBindingForSemantic( *materialRecord, MATERIAL_RESOURCE_TEXTURE_AO ) : NULL,
+		MATERIAL_RESOURCE_TEXTURE_AO );
 }
 
 bool idModernGLSubmitPlan::AddCommand( const modernGLDrawPlanEntry_t &entry ) {
@@ -734,11 +779,18 @@ bool idModernGLSubmitPlan::AddCommand( const modernGLDrawPlanEntry_t &entry ) {
 		stats.fallbackDraws++;
 		return false;
 	}
+	const materialResourceTableRecord_t *materialRecord = R_MaterialResourceTable_RecordForIndex( entry.materialTableIndex );
+	if ( materialRecord != NULL
+		&& !R_MaterialResourceTable_ClassicModernPathEligible( *materialRecord )
+		&& !R_MaterialResourceTable_PBRModernPathEligible( *materialRecord ) ) {
+		stats.fallbackDraws++;
+		return false;
+	}
 
 	modernGLSubmitCommand_t &command = commands[numCommands];
 	memset( &command, 0, sizeof( command ) );
 	command.drawPlanEntry = &entry;
-	command.materialRecord = R_MaterialResourceTable_RecordForIndex( entry.materialTableIndex );
+	command.materialRecord = materialRecord;
 	command.viewDef = draw->viewDef;
 	command.passCategory = entry.passCategory;
 	command.pipeline = entry.pipeline;
@@ -754,10 +806,15 @@ bool idModernGLSubmitPlan::AddCommand( const modernGLDrawPlanEntry_t &entry ) {
 	command.modelViewMatrixLocation = entry.modelViewMatrixLocation;
 	command.debugColorLocation = entry.debugColorLocation;
 	command.localParamsLocation = entry.localParamsLocation;
+	command.pbrIBLLocation = entry.pbrIBLLocation;
+	command.bakedGridLocation = entry.bakedGridLocation;
 	command.mainTextureLocation = entry.mainTextureLocation;
 	command.normalTextureLocation = entry.normalTextureLocation;
 	command.specularTextureLocation = entry.specularTextureLocation;
 	command.emissiveTextureLocation = entry.emissiveTextureLocation;
+	command.metallicTextureLocation = entry.metallicTextureLocation;
+	command.roughnessTextureLocation = entry.roughnessTextureLocation;
+	command.aoTextureLocation = entry.aoTextureLocation;
 	command.textureIndicesLocation = entry.textureIndicesLocation;
 	command.textureTableModeLocation = entry.textureTableModeLocation;
 	command.materialFlagsLocation = entry.materialFlagsLocation;
@@ -774,7 +831,6 @@ bool idModernGLSubmitPlan::AddCommand( const modernGLDrawPlanEntry_t &entry ) {
 	command.instanceRecordIndex = entry.instanceRecordIndex;
 	command.originalSubmitOrder = numCommands;
 	command.sortBucket = -1;
-	const materialResourceTableRecord_t *materialRecord = command.materialRecord;
 	command.blendMode = materialRecord != NULL ? materialRecord->blendMode : MATERIAL_RESOURCE_BLEND_OPAQUE;
 	command.cullType = materialRecord != NULL ? materialRecord->cullType : CT_FRONT_SIDED;
 	command.materialStableId = entry.materialStableId;
@@ -1084,12 +1140,18 @@ bool RendererModernGLSubmitPlan_RunSelfTest( void ) {
 		return true;
 	}
 
-	idScenePacketFrame packetFrame;
+	// Four packet, draw and submit arenas remain alive together. All three
+	// arena types must stay off the finite render-thread stack, even though
+	// each fixture uses only a handful of records.
+	idAutoPtr<idScenePacketFrame> packetFrame( new idScenePacketFrame );
 	idRenderGraph graph;
-	idModernGLDrawPlan drawPlan;
-	R_ModernGLSubmitPlan_BuildSelfTestDrawPlan( true, true, TAG_USED, false, drawPlan, packetFrame, graph );
+	idAutoPtr<idModernGLDrawPlan> drawPlanStorage( new idModernGLDrawPlan );
+	idModernGLDrawPlan &drawPlan = *drawPlanStorage;
+	R_ModernGLSubmitPlan_BuildSelfTestDrawPlan( true, true, TAG_USED, false,
+		drawPlan, *packetFrame, graph );
 
-	idModernGLSubmitPlan submitPlan;
+	idAutoPtr<idModernGLSubmitPlan> submitPlanStorage( new idModernGLSubmitPlan );
+	idModernGLSubmitPlan &submitPlan = *submitPlanStorage;
 	submitPlan.Build( drawPlan );
 	const modernGLSubmitPlanStats_t &readyStats = submitPlan.Stats();
 	const bool expectedDepthEligible = tr.defaultMaterial != NULL
@@ -1147,15 +1209,20 @@ bool RendererModernGLSubmitPlan_RunSelfTest( void ) {
 		}
 	}
 
-	idModernGLDrawPlan missingCacheDrawPlan;
-	idScenePacketFrame missingCachePacketFrame;
+	idAutoPtr<idModernGLDrawPlan> missingCacheDrawPlanStorage( new idModernGLDrawPlan );
+	idModernGLDrawPlan &missingCacheDrawPlan = *missingCacheDrawPlanStorage;
+	idAutoPtr<idScenePacketFrame> missingCachePacketFrame(
+		new idScenePacketFrame );
 	idRenderGraph missingCacheGraph;
-	R_ModernGLSubmitPlan_BuildSelfTestDrawPlan( false, false, TAG_FREE, false, missingCacheDrawPlan, missingCachePacketFrame, missingCacheGraph );
-	idModernGLSubmitPlan missingCacheSubmitPlan;
+	R_ModernGLSubmitPlan_BuildSelfTestDrawPlan( false, false, TAG_FREE, false,
+		missingCacheDrawPlan, *missingCachePacketFrame, missingCacheGraph );
+	idAutoPtr<idModernGLSubmitPlan> missingCacheSubmitPlanStorage( new idModernGLSubmitPlan );
+	idModernGLSubmitPlan &missingCacheSubmitPlan = *missingCacheSubmitPlanStorage;
 	missingCacheSubmitPlan.Build( missingCacheDrawPlan );
 	const modernGLDrawPlanStats_t &missingDrawStats = missingCacheDrawPlan.Stats();
 	const modernGLSubmitPlanStats_t &fallbackStats = missingCacheSubmitPlan.Stats();
-	if ( missingDrawStats.sourceDrawPackets != missingCachePacketFrame.NumDrawPackets()
+	if ( missingDrawStats.sourceDrawPackets
+			!= missingCachePacketFrame->NumDrawPackets()
 		|| missingDrawStats.plannedDraws != 0
 		|| missingDrawStats.geometryFallbackDraws != expectedGeometryFallbackDraws
 		|| missingDrawStats.geometryVertexBufferFallbackDraws != expectedGeometryFallbackDraws
@@ -1166,11 +1233,15 @@ bool RendererModernGLSubmitPlan_RunSelfTest( void ) {
 		return false;
 	}
 
-	idModernGLDrawPlan tempIndexDrawPlan;
-	idScenePacketFrame tempIndexPacketFrame;
+	idAutoPtr<idModernGLDrawPlan> tempIndexDrawPlanStorage( new idModernGLDrawPlan );
+	idModernGLDrawPlan &tempIndexDrawPlan = *tempIndexDrawPlanStorage;
+	idAutoPtr<idScenePacketFrame> tempIndexPacketFrame(
+		new idScenePacketFrame );
 	idRenderGraph tempIndexGraph;
-	R_ModernGLSubmitPlan_BuildSelfTestDrawPlan( true, true, TAG_TEMP, false, tempIndexDrawPlan, tempIndexPacketFrame, tempIndexGraph );
-	idModernGLSubmitPlan tempIndexSubmitPlan;
+	R_ModernGLSubmitPlan_BuildSelfTestDrawPlan( true, true, TAG_TEMP, false,
+		tempIndexDrawPlan, *tempIndexPacketFrame, tempIndexGraph );
+	idAutoPtr<idModernGLSubmitPlan> tempIndexSubmitPlanStorage( new idModernGLSubmitPlan );
+	idModernGLSubmitPlan &tempIndexSubmitPlan = *tempIndexSubmitPlanStorage;
 	tempIndexSubmitPlan.Build( tempIndexDrawPlan );
 	const modernGLSubmitPlanStats_t &tempIndexStats = tempIndexSubmitPlan.Stats();
 	if ( tempIndexStats.sourcePlanDraws != expectedReadyDraws || tempIndexStats.readyDraws != expectedReadyDraws || tempIndexStats.fallbackDraws != 0 || tempIndexStats.indexCacheReadyDraws != expectedReadyDraws || tempIndexStats.indexUploadDraws != 0 ) {
@@ -1182,11 +1253,15 @@ bool RendererModernGLSubmitPlan_RunSelfTest( void ) {
 		return false;
 	}
 
-	idModernGLDrawPlan uploadIndexDrawPlan;
-	idScenePacketFrame uploadIndexPacketFrame;
+	idAutoPtr<idModernGLDrawPlan> uploadIndexDrawPlanStorage( new idModernGLDrawPlan );
+	idModernGLDrawPlan &uploadIndexDrawPlan = *uploadIndexDrawPlanStorage;
+	idAutoPtr<idScenePacketFrame> uploadIndexPacketFrame(
+		new idScenePacketFrame );
 	idRenderGraph uploadIndexGraph;
-	R_ModernGLSubmitPlan_BuildSelfTestDrawPlan( true, false, TAG_FREE, true, uploadIndexDrawPlan, uploadIndexPacketFrame, uploadIndexGraph );
-	idModernGLSubmitPlan uploadIndexSubmitPlan;
+	R_ModernGLSubmitPlan_BuildSelfTestDrawPlan( true, false, TAG_FREE, true,
+		uploadIndexDrawPlan, *uploadIndexPacketFrame, uploadIndexGraph );
+	idAutoPtr<idModernGLSubmitPlan> uploadIndexSubmitPlanStorage( new idModernGLSubmitPlan );
+	idModernGLSubmitPlan &uploadIndexSubmitPlan = *uploadIndexSubmitPlanStorage;
 	uploadIndexSubmitPlan.Build( uploadIndexDrawPlan );
 	const modernGLSubmitPlanStats_t &uploadStats = uploadIndexSubmitPlan.Stats();
 	if ( uploadStats.sourcePlanDraws != expectedReadyDraws || uploadStats.readyDraws != expectedReadyDraws || uploadStats.fallbackDraws != 0 || uploadStats.indexUploadDraws != expectedReadyDraws || uploadStats.indexCacheReadyDraws != 0 ) {

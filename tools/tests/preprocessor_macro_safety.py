@@ -13,7 +13,7 @@ SCAN_ROOTS = (
     ROOT / "src" / "framework",
     ROOT / "src" / "idlib",
     ROOT / "src" / "renderer",
-    ROOT / "src" / "sys" / "osx",
+    ROOT / "src" / "sys" / "macos",
     ROOT / "src" / "sys" / "posix",
 )
 

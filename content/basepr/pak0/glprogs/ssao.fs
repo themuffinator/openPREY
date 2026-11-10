@@ -1,6 +1,17 @@
 uniform sampler2D Scene;
 uniform sampler2D DepthBuffer;
 uniform sampler2D FinalDepthBuffer;
+// Native PBR views (draw_common.cpp RB_PrepareSSAOIndirectField): the world
+// depth without native PBR surfaces, and the field this pass wrote before
+// lighting.
+uniform sampler2D ClassicDepthBuffer;
+uniform sampler2D AOField;
+// 0 classic: darken the lit scene. 1 field: before lighting, write the
+// occlusion native PBR applies to its indirect light (r) and the factor for
+// classic world pixels (g); b marks pixels with world depth. 2 apply: darken
+// only the classic world pixels with the field's factor.
+uniform float ssaoMode;
+uniform vec2 fieldInvSize;
 uniform vec2 invTexSize;
 uniform vec4 projectionInfo;
 uniform vec2 depthProjection;
@@ -140,8 +151,47 @@ bool PixelIsForeground( vec2 uv, float sourceDepth ) {
 	return finalViewDepth + 1.0 < sourceViewDepth;
 }
 
+void FieldMain( vec2 uv ) {
+	float depth = SampleDepth( uv );
+	if ( depth >= 0.99999 ) {
+		// No world depth (sky): untouched, as the classic pass leaves it.
+		gl_FragColor = vec4( 1.0, 1.0, 0.0, 1.0 );
+		return;
+	}
+	if ( PixelIsForeground( uv, depth ) ) {
+		// A model in front of the world: untouched.
+		gl_FragColor = vec4( 1.0 );
+		return;
+	}
+	vec3 centerPos = ReconstructViewPosition( uv, depth );
+	float ao = ComputeAmbientOcclusion( uv, centerPos, ReconstructNormal( uv, centerPos ) );
+	// A classic world surface is the visible one where the frame did not
+	// settle in front of the classic-only snapshot.
+	float classicDepth = texture2D( ClassicDepthBuffer, uv ).x;
+	bool classic = classicDepth < 0.99999 && !PixelIsForeground( uv, classicDepth );
+	gl_FragColor = vec4( ao, classic ? ao : 1.0, 1.0, 1.0 );
+}
+
+void ApplyMain( vec2 uv ) {
+	vec4 scene = texture2D( Scene, uv );
+	vec3 field = texture2D( AOField, gl_FragCoord.xy * fieldInvSize ).rgb;
+	if ( ssaoDebugView > 0.5 ) {
+		gl_FragColor = field.b > 0.5 ? vec4( vec3( field.r ), scene.a ) : scene;
+		return;
+	}
+	gl_FragColor = vec4( scene.rgb * field.g, scene.a );
+}
+
 void main() {
 	vec2 uv = gl_TexCoord[0].st;
+	if ( ssaoMode > 1.5 ) {
+		ApplyMain( uv );
+		return;
+	}
+	if ( ssaoMode > 0.5 ) {
+		FieldMain( uv );
+		return;
+	}
 	vec4 scene = texture2D( Scene, uv );
 	float depth = SampleDepth( uv );
 

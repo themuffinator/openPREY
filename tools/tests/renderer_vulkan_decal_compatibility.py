@@ -217,7 +217,7 @@ def validate_draw_order_and_state() -> None:
             "surfaceShader->GetCullType()",
             "surfaceShader->TestMaterialFlag( MF_POLYGONOFFSET )",
             "surfaceShader->GetPolygonOffset()",
-            "VK_SubmitInteraction( &inter )",
+            "VK_SubmitInteraction( &inter, pbrOwnerEligible )",
             "vkCmdSetDepthBiasEnable( interPass.cmd, VK_FALSE )",
         ),
         "Vulkan lit decal interaction state",

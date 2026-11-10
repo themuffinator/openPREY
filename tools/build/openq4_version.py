@@ -4,17 +4,22 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from openq4_release_status import is_withdrawn_release
+
 
 NUMERIC_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 IDENTIFIER_RE = re.compile(r"^[0-9A-Za-z-]+$")
 DOT_IDENTIFIERS_RE = re.compile(r"^[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*$")
 DATE_STAMP_RE = re.compile(r"^\d{8}$")
+RELEASE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -71,16 +76,48 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv[1:])
 
 
-def read_base_version(source_root: Path, explicit_base_version: str) -> str:
-    if explicit_base_version:
-        return explicit_base_version.strip()
-
+def read_meson_base_version(source_root: Path) -> str:
     meson_build = source_root / "meson.build"
     text = meson_build.read_text(encoding="utf-8")
     match = re.search(r"version:\s*'([^']+)'", text)
     if match is None:
         raise SystemExit(f"failed to parse project version from {meson_build}")
     return match.group(1).strip()
+
+
+def find_latest_release_tag_version(source_root: Path) -> str:
+    """Return the highest release tag not withdrawn, without the 'v'."""
+    highest_key: tuple[int, int, int] | None = None
+    highest_version = ""
+    for raw_tag in run_git(source_root, "tag", "--list", "v*").splitlines():
+        match = RELEASE_TAG_RE.fullmatch(raw_tag.strip())
+        if match is None:
+            continue
+        key = tuple(int(group) for group in match.groups())
+        if is_withdrawn_release(key):
+            continue
+        if highest_key is None or key > highest_key:
+            highest_key = key
+            highest_version = raw_tag.strip()[1:]
+    return highest_version
+
+
+def read_base_version(source_root: Path, explicit_base_version: str) -> str:
+    if explicit_base_version:
+        return explicit_base_version.strip()
+
+    # The meson.build version is only a release floor; it is not bumped for
+    # every published release. Without the tag ceiling below, any build that
+    # does not pin -Dversion_base_override (local builds, CI validation builds)
+    # reports the stale floor instead of a version players can match against a
+    # release, so bug reports arrive tagged with a version that never shipped.
+    floor_version = read_meson_base_version(source_root)
+    latest_release_version = find_latest_release_tag_version(source_root)
+    if not latest_release_version:
+        return floor_version
+    if validate_base_version(latest_release_version) > validate_base_version(floor_version):
+        return latest_release_version
+    return floor_version
 
 
 def validate_base_version(base_version: str) -> tuple[int, int, int]:
@@ -192,6 +229,20 @@ def detect_git_metadata(source_root: Path) -> tuple[str, bool, int]:
     return short_sha, bool(dirty_raw), commit_count
 
 
+def detect_version_date(source_root: Path) -> str:
+    """Date this build's source is from, as YYYY-MM-DD."""
+    commit_date = run_git(source_root, "log", "-1", "--format=%cd", "--date=short")
+    if ISO_DATE_RE.fullmatch(commit_date):
+        return commit_date
+
+    # No usable git history (release tarball, exported tree). Prefer the
+    # reproducible-build stamp over the wall clock when one is published.
+    source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if source_date_epoch.isdigit():
+        return datetime.fromtimestamp(int(source_date_epoch), timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 def compose_prerelease(track: str, iteration: str) -> str:
     if track == "stable":
         return ""
@@ -241,6 +292,7 @@ def generate_header_text(
     version_short: str,
     version: str,
     version_tag: str,
+    version_date: str,
     product_version: str,
     product_version_full: str,
     major: int,
@@ -265,6 +317,7 @@ def generate_header_text(
             f'#define OPENQ4_VERSION_SHORT "{version_short}"',
             f'#define OPENQ4_VERSION "{version}"',
             f'#define OPENQ4_VERSION_TAG "{version_tag}"',
+            f'#define OPENQ4_VERSION_DATE "{version_date}"',
             f'#define OPENQ4_PRODUCT_VERSION "{product_version}"',
             f'#define OPENQ4_PRODUCT_VERSION_FULL "{product_version_full}"',
             "",
@@ -324,11 +377,21 @@ def main(argv: list[str]) -> int:
         iteration = validate_iteration(explicit_iteration, track)
 
     git_sha, git_dirty, commit_count = detect_git_metadata(source_root)
+    if track == "stable" and (
+        not git_sha
+        or commit_count <= 0
+        or run_git(source_root, "rev-parse", "--is-shallow-repository") != "false"
+    ):
+        raise SystemExit(
+            "stable builds require complete Git history for savegame build numbers; "
+            "use git fetch --unshallow or actions/checkout fetch-depth: 0"
+        )
     prerelease = compose_prerelease(track, iteration)
     build_metadata = compose_build_metadata(track, git_sha, git_dirty)
     version_short, version, version_tag = compose_version_strings(
         base_version, prerelease, build_metadata
     )
+    version_date = detect_version_date(source_root)
     product_version = f"openPREY {version_short}"
     product_version_full = f"openPREY {version}"
     resource_build = compute_resource_build(commit_count)
@@ -344,6 +407,7 @@ def main(argv: list[str]) -> int:
             version_short=version_short,
             version=version,
             version_tag=version_tag,
+            version_date=version_date,
             product_version=product_version,
             product_version_full=product_version_full,
             major=major,
@@ -366,6 +430,7 @@ def main(argv: list[str]) -> int:
             "version_short": version_short,
             "version": version,
             "version_tag": version_tag,
+            "version_date": version_date,
             "product_version": product_version,
             "product_version_full": product_version_full,
             "version_major": major,

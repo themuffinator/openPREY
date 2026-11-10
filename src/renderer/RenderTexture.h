@@ -95,4 +95,28 @@ private:
 	uint64_t			cachedDepthGeneration;
 };
 
+/*
+================================================
+openQ4: the frame's default target.
+
+Desktop frames draw to the window's framebuffer. A VR frame stands an eye or
+virtual-screen render texture in for it, and every "unbind"
+(idRenderTexture::BindNull) then binds that stand-in instead, so the backend's
+"present to the back buffer" paths land in the headset's targets unchanged.
+================================================
+*/
+void				R_SetDefaultRenderTarget( idRenderTexture *target );
+idRenderTexture *	R_GetDefaultRenderTarget( void );
+// GL framebuffer name of the default target (0 for the window)
+unsigned int		R_DefaultFramebufferHandle( void );
+// GL_BACK for the window, GL_COLOR_ATTACHMENT0 for a stand-in
+unsigned int		R_DefaultColorBuffer( void );
+// glDrawBuffer/glReadBuffer for the default target, which must be bound
+void				R_SetDefaultDrawAndReadBuffers( void );
+// The VR virtual screen is composited over the world as a premultiplied-alpha
+// layer, so drawing into it keeps a coverage alpha (GL_State blends alpha
+// separately) while the default target is bound.
+void				R_SetDefaultRenderTargetPremultiplied( bool premultiplied );
+bool				R_PremultipliedDefaultTargetBound( void );
+
 #endif //!__RENDERTEXTURE_H__

@@ -1,7 +1,7 @@
 #version 450
 
 // openQ4 Vulkan GUI/2D pipeline — vertex stage (Phase D,
-// docs/dev/plans/2026-07-18-vulkan-phase-d.md).
+// docs/dev/archive/2026-10-18/plans/2026-07-18-vulkan-phase-d.md).
 //
 // Consumes idDrawVert (64-byte stride): position, byte-normalized color,
 // texcoord. The 2D ortho projection arrives fully formed from the engine
@@ -18,8 +18,8 @@ layout(push_constant) uniform GuiPushConstants {
     // 2x3 texture matrix as two row vectors: s' = dot((s,t,0,1), texMatrixS)
     vec4 texMatrixS;
     vec4 texMatrixT;
-    // x: vertex color mode (0 = ignore, 1 = modulate, 2 = inverse modulate)
-    // y: alpha-test enable, z: alpha-test reference, w: texture matrix enable
+    // x: color mode (0 ignore, 1 modulate, 2 inverse, 3 native emission)
+    // y: alpha test (3 filtered / 4 hard PBR), z: reference, w: texture matrix enable
     vec4 params;
 } pc;
 
@@ -37,7 +37,7 @@ void main() {
     fragTexCoord = st;
 
     vec4 vertexColor = inColor;
-    if (pc.params.x < 0.5) {
+    if (pc.params.x < 0.5 || pc.params.x > 2.5) {
         vertexColor = vec4(1.0);
     } else if (pc.params.x > 1.5) {
         // GL's inverse-modulate combiner inverts only the RGB operand;

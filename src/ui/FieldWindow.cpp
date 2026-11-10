@@ -90,7 +90,6 @@ void idFieldWindow::CalcPaintOffset(int len) {
 void idFieldWindow::Draw(int time, float x, float y) {
 	float scale = textScale;
 	int len = text.Length();
-	const int textAdjust = static_cast<int>( textspacing );
 	const int style = static_cast<int>( textstyle );
 	cursorPos = gui->State().GetInt( cursorVar );
 	if (len != lastTextLength || cursorPos != lastCursorPos) {

@@ -1,3 +1,4 @@
+#include "DeclReferenceObserver.h"
 /*
 ===========================================================================
 
@@ -206,8 +207,15 @@ public:
 	int							LoadAndParse( bool unique = false );
 	int							LoadAndParse( idFile *file );
 
+private:
+	int							ReadText( void **buffer, ID_TIME_T *fileTimestamp ) const;
+
 public:
 	idStr						fileName;
+	// Empty for the copy the search path resolves. Otherwise this is a shadowed
+	// copy of fileName read from that game directory only, layered beneath a
+	// mod's copy (see idDeclManagerLocal::LoadDeclFileLayers).
+	idStr						layerGameDir;
 	declType_t					defaultType;
 
 	ID_TIME_T						timestamp;
@@ -223,13 +231,18 @@ static bool DeclManager_IsopenQ4OverrideDeclFile( const idDeclFile *sourceFile )
 		return false;
 	}
 
+	// openQ4 re-declares a game's decls from *_openq4 files named to load
+	// first ("00_" prefixes); the game's later copy is expected, not a clash
 	idStr fileName = sourceFile->fileName;
 	fileName.BackSlashesToSlashes();
-	return fileName.Icmpn( "def/", 4 ) == 0 && fileName.Find( "_openq4.def", false ) >= 0;
+	if ( fileName.Icmpn( "def/", 4 ) == 0 && fileName.Find( "_openq4.def", false ) >= 0 ) {
+		return true;
+	}
+	return fileName.Icmpn( "materials/", 10 ) == 0 && fileName.Find( "_openq4.mtr", false ) >= 0;
 }
 
 static bool DeclManager_DeclNameHasPrefix( const idStr &name, const char *prefix ) {
-	return name.Icmpn( prefix, strlen( prefix ) ) == 0;
+	return name.Icmpn( prefix, idLib::SizeToInt( strlen( prefix ), "DeclManager_DeclNameHasPrefix" ) ) == 0;
 }
 
 static bool DeclManager_IsStockMaterialRedeclaration( declType_t type, const idStr &name, const idDeclFile *previousSourceFile, const idDeclFile *currentSourceFile ) {
@@ -346,6 +359,7 @@ public:
 	virtual bool					Validate( declType_t type, int iIndex, idStr &strReportTo );
 	virtual idDecl *				AllocateDecl( declType_t type );
 	virtual byte *					GetMaterialTypeArray( const char *image, int &width, int &height );
+	virtual void					FreeMaterialTypeArray( byte *array );
 
 public:
 	static void					MakeNameCanonical( const char *name, char *result, int maxLength );
@@ -357,8 +371,9 @@ public:
 	idHashTable<rvDeclGuide *>	guideTable;
 private:
 	void						RegisterDeclFolder( const char *folder, const char *extension, declType_t defaultType, bool unique, bool norecurse );
-	idDeclFile *				FindLoadedDeclFile( const char *fileName );
-	idDeclFile *				FindOrCreateLoadedDeclFile( const char *fileName, declType_t defaultType );
+	void						LoadDeclFileLayers( const char *fileName, declType_t defaultType, bool unique );
+	idDeclFile *				FindLoadedDeclFile( const char *fileName, const char *layerGameDir = "" );
+	idDeclFile *				FindOrCreateLoadedDeclFile( const char *fileName, declType_t defaultType, const char *layerGameDir = "" );
 	idDeclFolder *				FindOrCreateDeclFolder( const char *folder, const char *extension, declType_t defaultType );
 	bool						TypeListContains( const idList<declType_t> &types, declType_t type ) const;
 	int							GetTotalTextMemory( declType_t type );
@@ -400,6 +415,7 @@ private:
 };
 
 idCVar idDeclManagerLocal::decl_show( "decl_show", "0", CVAR_SYSTEM, "set to 1 to print parses, 2 to also print references", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
+static idCVar decl_layerModFiles( "decl_layerModFiles", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_INIT, "when a mod ships a decl file under the same name as a file of the game beneath it, keep the game's decls the mod's copy does not define" );
 idCVar com_SingleDeclFile( "com_SingleDeclFile", "0", CVAR_SYSTEM | CVAR_BOOL, "load decls from a packed single .decls file instead of scanning loose decl folders" );
 static idCVar com_singleDeclFileName( "com_singleDeclFileName", "", CVAR_SYSTEM, "override packed decl file used by com_SingleDeclFile and writeDeclFile" );
 static idCVar com_singleDeclFileWriteMode( "com_singleDeclFileWriteMode", "0", CVAR_SYSTEM | CVAR_INTEGER, "packed .decls writer policy: 0 = openQ4 extended game types, 1 = exact retail game types", 0, 1, idCmdSystem::ArgCompletion_Integer<0,1> );
@@ -821,7 +837,7 @@ void idDeclFile::Reload( bool force ) {
 	// check for an unchanged timestamp
 	if ( !force && timestamp != 0 ) {
 		ID_TIME_T	testTimeStamp;
-		fileSystem->ReadFile( fileName, NULL, &testTimeStamp );
+		ReadText( NULL, &testTimeStamp );
 
 		if ( testTimeStamp == timestamp ) {
 			return;
@@ -830,6 +846,43 @@ void idDeclFile::Reload( bool force ) {
 
 	// parse the text
 	LoadAndParse();
+}
+
+/*
+================
+idDeclFile::ReadText
+
+Reads the copy of fileName this file stands for: whatever the search path
+resolves, or a layered copy from one game directory. With a NULL buffer only
+the timestamp is read. Returns the length, or -1.
+================
+*/
+int idDeclFile::ReadText( void **buffer, ID_TIME_T *fileTimestamp ) const {
+	if ( layerGameDir.IsEmpty() ) {
+		return fileSystem->ReadFile( fileName, buffer, fileTimestamp );
+	}
+
+	if ( buffer != NULL ) {
+		*buffer = NULL;
+	}
+	idFile *file = fileSystem->OpenFileRead( fileName, false, layerGameDir.c_str() );
+	if ( file == NULL ) {
+		if ( fileTimestamp != NULL ) {
+			*fileTimestamp = FILE_NOT_FOUND_TIMESTAMP;
+		}
+		return -1;
+	}
+	const int length = file->Length();
+	if ( fileTimestamp != NULL ) {
+		*fileTimestamp = file->Timestamp();
+	}
+	if ( buffer != NULL ) {
+		byte *text = (byte *)Mem_ClearedAlloc( length + 1 );
+		file->Read( text, length );
+		*buffer = text;
+	}
+	fileSystem->CloseFile( file );
+	return length;
 }
 /*
 ================
@@ -930,8 +983,8 @@ int idDeclFile::LoadAndParse( bool unique ) {
 	bool		referencedThisLevel;
 
 	// load the text
-	common->DPrintf( "...loading '%s'\n", fileName.c_str() );
-	length = fileSystem->ReadFile( fileName, (void **)&buffer, &timestamp );
+	common->DPrintf( "...loading '%s'%s%s\n", fileName.c_str(), layerGameDir.IsEmpty() ? "" : " from ", layerGameDir.c_str() );
+	length = ReadText( (void **)&buffer, &timestamp );
 	if ( length == -1 ) {
 		common->FatalError( "couldn't load %s", fileName.c_str() );
 		return 0;
@@ -1065,7 +1118,10 @@ int idDeclFile::LoadAndParse( bool unique ) {
 			if ( newDecl->sourceFile == this && !newDecl->redefinedInReload ) {
 				referencedThisLevel = newDecl->referencedThisLevel;
 			} else {
-				if ( !DeclManager_IsopenQ4OverrideDeclFile( newDecl->sourceFile ) &&
+				// a layered copy only fills in what the mod's copy above it left out
+				const bool shadowedByLayerAbove = !layerGameDir.IsEmpty() && newDecl->sourceFile != NULL &&
+					newDecl->sourceFile->fileName.Icmp( fileName ) == 0;
+				if ( !shadowedByLayerAbove && !DeclManager_IsopenQ4OverrideDeclFile( newDecl->sourceFile ) &&
 						!DeclManager_IsStockMaterialRedeclaration( identifiedType, name, newDecl->sourceFile, this ) ) {
 					src.Warning( "%s '%s' previously defined at %s:%i", declManagerLocal.GetDeclNameFromType( identifiedType ),
 									name.c_str(), newDecl->sourceFile->fileName.c_str(), newDecl->sourceLine );
@@ -1765,6 +1821,21 @@ bool idDeclManagerLocal::EvaluateGuide( idStr &name, idLexer *src, idStr &defini
 }
 
 bool idDeclManagerLocal::EvaluateInlineGuide( idStr &name, idStr &definition ) {
+	// openQ4: every decl comes through here as its file is read, and without
+	// this test each body was copied and tokenised from end to end to look for
+	// a keyword almost none of them has. The loop below matches the keyword as
+	// a whole token, so a body that does not contain it cannot match.
+	bool mentioned = false;
+	for ( const char *p = definition.c_str(); *p; p++ ) {
+		if ( ( *p == 'i' || *p == 'I' ) && idStr::Icmpn( p, "inlineGuide", 11 ) == 0 ) {
+			mentioned = true;
+			break;
+		}
+	}
+	if ( !mentioned ) {
+		return true;
+	}
+
 	idStr store = definition;
 	idLexer lexer;
 	if ( !lexer.LoadMemory( store.c_str(), store.Length(), name.c_str() ) ) {
@@ -2070,6 +2141,7 @@ void idDeclManagerLocal::RegisterDeclFolder( const char *folder, const char *ext
 			idStr fileName = declFolder->folder + "/" + fileList->GetFile( fileIndex );
 			idDeclFile *declFile = FindOrCreateLoadedDeclFile( fileName.c_str(), defaultType );
 			declFile->LoadAndParse( unique );
+			LoadDeclFileLayers( fileName.c_str(), defaultType, unique );
 		}
 		fileSystem->FreeFileList( fileList );
 	}
@@ -2095,6 +2167,66 @@ void idDeclManagerLocal::RegisterDeclFolder( const char *folder, const char *ext
 
 /*
 ===================
+idDeclManagerLocal::LoadDeclFileLayers
+
+A mod that ships a decl file under the same name as a file of the game beneath
+it replaces that whole file in the search path, and every decl the mod's copy
+leaves out disappears with it. The Awakening expansion does this to retail's
+player.def, debris.def, persona.def and music.sndshd, losing hundreds of decls
+its own content still uses. The mod's copy is parsed first, so its decls win;
+each shadowed copy below it (fs_game_base, the openQ4 runtime, then retail) is
+parsed afterwards from its own directory and adds only the decls still missing.
+Only copies the mod itself supplies are layered, so the openQ4 runtime's own
+replacements of retail files keep replacing them.
+===================
+*/
+void idDeclManagerLocal::LoadDeclFileLayers( const char *fileName, declType_t defaultType, bool unique ) {
+	if ( !decl_layerModFiles.GetBool() ) {
+		return;
+	}
+
+	const char *modDir = cvarSystem->GetCVarString( "fs_game" );
+	if ( modDir[0] == '\0' || !idStr::Icmp( modDir, BASE_GAMEDIR ) || !idStr::Icmp( modDir, OPENQ4_GAMEDIR ) ) {
+		return;
+	}
+
+	idFile *modCopy = fileSystem->OpenFileRead( fileName, false, modDir );
+	if ( modCopy == NULL ) {
+		return;
+	}
+	fileSystem->CloseFile( modCopy );
+
+	const char *modBaseDir = cvarSystem->GetCVarString( "fs_game_base" );
+	const char *lowerDirs[] = { modBaseDir, OPENQ4_GAMEDIR, BASE_GAMEDIR };
+	for ( int i = 0; i < (int)( sizeof( lowerDirs ) / sizeof( lowerDirs[0] ) ); i++ ) {
+		const char *gameDir = lowerDirs[i];
+		if ( gameDir[0] == '\0' || !idStr::Icmp( gameDir, modDir ) ) {
+			continue;
+		}
+		// fs_game_base may name the runtime or retail directory itself
+		bool alreadyLayered = false;
+		for ( int j = 0; j < i; j++ ) {
+			if ( !idStr::Icmp( lowerDirs[j], gameDir ) ) {
+				alreadyLayered = true;
+			}
+		}
+		if ( alreadyLayered ) {
+			continue;
+		}
+
+		idFile *shadowedCopy = fileSystem->OpenFileRead( fileName, false, gameDir );
+		if ( shadowedCopy == NULL ) {
+			continue;
+		}
+		fileSystem->CloseFile( shadowedCopy );
+
+		idDeclFile *layer = FindOrCreateLoadedDeclFile( fileName, defaultType, gameDir );
+		layer->LoadAndParse( unique );
+	}
+}
+
+/*
+===================
 idDeclManagerLocal::RegisterDeclFolderWrapper
 ===================
 */
@@ -2114,9 +2246,9 @@ void idDeclManagerLocal::RegisterDeclFolderWrapper( const char *folder, const ch
 idDeclManagerLocal::FindLoadedDeclFile
 ===================
 */
-idDeclFile *idDeclManagerLocal::FindLoadedDeclFile( const char *fileName ) {
+idDeclFile *idDeclManagerLocal::FindLoadedDeclFile( const char *fileName, const char *layerGameDir ) {
 	for ( int i = 0; i < loadedFiles.Num(); i++ ) {
-		if ( loadedFiles[i]->fileName.Icmp( fileName ) == 0 ) {
+		if ( loadedFiles[i]->fileName.Icmp( fileName ) == 0 && loadedFiles[i]->layerGameDir.Icmp( layerGameDir ) == 0 ) {
 			return loadedFiles[i];
 		}
 	}
@@ -2128,13 +2260,14 @@ idDeclFile *idDeclManagerLocal::FindLoadedDeclFile( const char *fileName ) {
 idDeclManagerLocal::FindOrCreateLoadedDeclFile
 ===================
 */
-idDeclFile *idDeclManagerLocal::FindOrCreateLoadedDeclFile( const char *fileName, declType_t defaultType ) {
-	idDeclFile *declFile = FindLoadedDeclFile( fileName );
+idDeclFile *idDeclManagerLocal::FindOrCreateLoadedDeclFile( const char *fileName, declType_t defaultType, const char *layerGameDir ) {
+	idDeclFile *declFile = FindLoadedDeclFile( fileName, layerGameDir );
 	if ( declFile != NULL ) {
 		return declFile;
 	}
 
 	declFile = new idDeclFile( fileName, defaultType );
+	declFile->layerGameDir = layerGameDir;
 	loadedFiles.Append( declFile );
 	return declFile;
 }
@@ -2448,6 +2581,7 @@ const idDecl *idDeclManagerLocal::FindType( declType_t type, const char *name, b
 		material->AddLevelLoadReference();
 	}
 
+	idDeclReferenceObserver::Notify( decl->self );
 	return decl->self;
 }
 
@@ -2517,6 +2651,7 @@ const idDecl *idDeclManagerLocal::DeclByIndex( declType_t type, int index, bool 
 		decl->ParseLocal();
 	}
 
+	if ( forceParse ) idDeclReferenceObserver::Notify( decl->self );
 	return decl->self;
 }
 
@@ -3071,6 +3206,10 @@ byte *idDeclManagerLocal::GetMaterialTypeArray( const char *image, int &width, i
 	return MT_GetMaterialTypeArray( idStr( image ), width, height );
 }
 
+void idDeclManagerLocal::FreeMaterialTypeArray( byte *array ) {
+	Mem_Free( array );
+}
+
 const rvDeclEffect* idDeclManagerLocal::EffectByIndex(int index, bool forceParse) {
 	return (const rvDeclEffect*)DeclByIndex(DECL_EFFECT, index, forceParse);
 }
@@ -3088,7 +3227,9 @@ void idDeclManagerLocal::MakeNameCanonical( const char *name, char *result, int 
 	int i, lastDot;
 
 	lastDot = -1;
-	for ( i = 0; i < maxLength && name[i] != '\0'; i++ ) {
+	// openQ4: leave room for the terminator; a name of maxLength or more
+	// characters with no dot wrote it one past the caller's buffer
+	for ( i = 0; i < maxLength - 1 && name[i] != '\0'; i++ ) {
 		int c = name[i];
 		if ( c == '\\' ) {
 			result[i] = '/';
@@ -3136,10 +3277,11 @@ void idDeclManagerLocal::ListDecls_f( const idCmdArgs &args ) {
 	int		i, j;
 	int		totalDecls = 0;
 	int		totalText = 0;
-	int		totalStructs = 0;
+	size_t	totalStructs = 0;
 
 	for ( i = 0; i < declManagerLocal.declTypes.Num(); i++ ) {
-		int size, num;
+		size_t size;
+		int num;
 
 		if ( declManagerLocal.declTypes[i] == NULL ) {
 			continue;
@@ -3157,7 +3299,7 @@ void idDeclManagerLocal::ListDecls_f( const idCmdArgs &args ) {
 		}
 		totalStructs += size;
 
-		common->Printf( "%4ik %4i %s\n", size >> 10, num, declManagerLocal.declTypes[i]->typeName.c_str() );
+		common->Printf( "%4zuk %4i %s\n", size >> 10, num, declManagerLocal.declTypes[i]->typeName.c_str() );
 	}
 
 	for ( i = 0 ; i < declManagerLocal.loadedFiles.Num() ; i++ ) {
@@ -3166,7 +3308,7 @@ void idDeclManagerLocal::ListDecls_f( const idCmdArgs &args ) {
 	}
 
 	common->Printf( "%i total decls is %i decl files\n", totalDecls, declManagerLocal.loadedFiles.Num() );
-	common->Printf( "%iKB in text, %iKB in structures\n", totalText >> 10, totalStructs >> 10 );
+	common->Printf( "%iKB in text, %zuKB in structures\n", totalText >> 10, totalStructs >> 10 );
 }
 
 /*
@@ -3774,7 +3916,7 @@ void idDeclLocal::MakeDefault() {
 	self->FreeData();
 
 	// parse
-	self->Parse( defaultText, strlen( defaultText ), false );
+	self->Parse( defaultText, idLib::SizeToInt( strlen( defaultText ), "idDeclLocal::MakeDefault" ), false );
 
 	// we could still eventually hit the recursion if we have enough Error() calls inside Parse...
 	--recursionLevel;
@@ -3899,6 +4041,12 @@ void idDeclLocal::ParseLocal( bool noCaching ) {
 	char *parseText = declText;
 
 	if ( idStr::Icmpn( parseText, "{ STUB:", 7 ) == 0 ) {
+		// The packed stub is the stable declaration identity shared by clients and
+		// dedicated servers.  Expanding it is a lazy cache operation: renderer and
+		// GUI startup touch different subsets of declarations, so replacing the
+		// checksum here would make the network checksum depend on process role and
+		// startup order rather than installed content.
+		const int packedStubChecksum = checksum;
 		idLexer stubLexer;
 		stubLexer.LoadMemory( parseText, parseTextLength, GetFileName(), GetLineNum() );
 		stubLexer.SetFlags( DECL_LEXER_FLAGS );
@@ -3912,8 +4060,18 @@ void idDeclLocal::ParseLocal( bool noCaching ) {
 			common->Warning( "You should precache: %s", GetName() );
 
 			idFile *stubSource = fileSystem->OpenFileRead( sourceFile->fileName.c_str() );
-			if ( stubSource != NULL ) {
-				char *sourceText = (char *)_alloca( stubLength + 1 );
+			// openQ4: the offset and length are numbers out of the decl text. They
+			// went straight to _alloca and Read, so a stub naming a huge or negative
+			// length overflowed the stack or read into it. Hold them to the file
+			// and take the buffer from the heap.
+			if ( stubSource != NULL && ( stubOffset < 0 || stubLength <= 0 ||
+					stubLength > stubSource->Length() - stubOffset ) ) {
+				common->Warning( "Packed decl stub for %s is outside %s (%d bytes at %d).",
+					GetName(), sourceFile->fileName.c_str(), stubLength, stubOffset );
+				fileSystem->CloseFile( stubSource );
+			} else if ( stubSource != NULL ) {
+				idTempArray<char> sourceTextBuffer( stubLength + 1 );
+				char *sourceText = sourceTextBuffer.Ptr();
 				stubSource->Seek( stubOffset, FS_SEEK_SET );
 				const int readBytes = stubSource->Read( sourceText, stubLength );
 				fileSystem->CloseFile( stubSource );
@@ -3939,6 +4097,7 @@ void idDeclLocal::ParseLocal( bool noCaching ) {
 					}
 
 					SetTextLocal( definition.c_str(), definition.Length() );
+					checksum = packedStubChecksum;
 					parseTextLength = definition.Length();
 					parseText = (char *)_alloca( parseTextLength + 1 );
 					memcpy( parseText, definition.c_str(), parseTextLength + 1 );
@@ -3949,7 +4108,17 @@ void idDeclLocal::ParseLocal( bool noCaching ) {
 		}
 	}
 
-	if ( common->IsInitialized() && !declManagerLocal.GetInsideLoad() && !openQ4_IsAnyToolActive() ) {
+	// These are generated render resources, created on demand for retained
+	// geometry (including its multiply blend), its layers and soft-focus
+	// blur passes, and font pages. Ordinary
+	// image/material assets, including retained picture wrappers, still require
+	// precaching; an explicit declaration using this name is not exempt.
+	// tr_fontTTF creates Latin slots as _ttfatlas_ and extended Unicode pages
+	// as _ttfatlasx_; retained output-size pages use _ttfatlasr_. All exist
+	// only after runtime rasterization.
+	const bool generatedRetainedResource = type == DECL_MATERIAL && generatedDefaultText && IsImplicit() &&
+		( name.Icmp("_retainedsolid") == 0 || name.Icmp("_retainedmultiply") == 0 || name.Icmp("_retainedPauseScene") == 0 || name.Icmpn("_retained/_ttfatlas_",20) == 0 || name.Icmpn("_retained/_ttfatlasx_",21) == 0 || name.Icmpn("_retained/_ttfatlasr_",21) == 0 || name.Icmpn("_retainedLayer/",15) == 0 || name.Icmpn("_retainedMask/",14) == 0 || name.Icmpn("_retainedLinearMask/",20) == 0 || name.Icmpn("_retainedBlur/",14) == 0 || name.Icmpn("_retainedAtlas/",15) == 0 || name.Icmpn("_retainedMultiplyAtlas/",23) == 0 || name.Icmpn("_retainedModel/",15) == 0 || name.Icmpn("_retainedModelResolve/",22) == 0 );
+	if ( common->IsInitialized() && !declManagerLocal.GetInsideLoad() && !openQ4_IsAnyToolActive() && !generatedRetainedResource ) {
 		common->Warning( "Loading non pre-cached %s decl %s", declManagerLocal.GetDeclNameFromType( type ), name.c_str() );
 	}
 

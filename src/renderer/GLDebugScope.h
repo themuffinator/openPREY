@@ -32,6 +32,8 @@ private:
 	idGLDebugScope &operator=( const idGLDebugScope & );
 
 	bool active;
+	const char *previousScope;
+	char scopeName[256];
 };
 
 #endif /* !__GL_DEBUG_SCOPE_H__ */

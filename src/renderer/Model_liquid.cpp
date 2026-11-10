@@ -67,7 +67,7 @@ modelSurface_t idRenderModelLiquid::GenerateSurface( float lerp ) {
 	srfTriangles_t	*tri;
 	int				i, base;
 	idDrawVert		*vert;
-	modelSurface_t	surf;
+	modelSurface_t	surf = {};	// id 0: the snapshot's only surface
 	float			inv_lerp;
 
 	inv_lerp = 1.0f - lerp;

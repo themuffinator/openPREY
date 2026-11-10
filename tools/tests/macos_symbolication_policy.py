@@ -874,7 +874,7 @@ def validate_docs_and_support_collector() -> None:
 
 
 def validate_plan_status() -> None:
-    plan = read("docs/dev/plans/2026-06-30-apple-support-no-macos-access.md")
+    plan = read("docs/dev/archive/2026-10-18/plans/2026-06-30-apple-support-no-macos-access.md")
 
     for token in (
         "## Phase 4: Make Symbolication Possible",

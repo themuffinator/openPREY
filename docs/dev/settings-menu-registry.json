@@ -12,7 +12,9 @@
     "session_menu": "src/framework/Session_menu.cpp",
     "common": "src/framework/Common.cpp",
     "default_cfg": "content/baseoq4/pak0/default.cfg",
-    "openq4_defaults_cfg": "content/baseoq4/pak0/openq4_defaults.cfg"
+    "openq4_defaults_cfg": "content/baseoq4/pak0/openq4_defaults.cfg",
+    "system_retained": "content/baseoq4/pak0/guis/menu/settings/system.q4ui",
+    "settings_service": "src/ui/SettingsService.cpp"
   },
   "settings": [
     {
@@ -510,6 +512,29 @@
       "accessibility": "Focusable bindDef row that captures the next key or button for this command."
     },
     {
+      "id": "controls.weapons.weap-quickchat",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Quick Chat",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_quickchat_key",
+        "set_ctrls_weap_quickchat"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_231269",
+      "target_type": "bind",
+      "target": "_quickChat",
+      "default": "v;JOY10",
+      "default_keys": [
+        "v",
+        "JOY10"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
       "id": "controls.attack_look.attk-attack",
       "pane": "Controls",
       "section": "Attack/Look",
@@ -685,9 +710,8 @@
       "label_key": "#str_200121",
       "target_type": "bind",
       "target": "centerview",
-      "default": "JOY10;JOY14;END",
+      "default": "JOY14;END",
       "default_keys": [
-        "JOY10",
         "JOY14",
         "END"
       ],
@@ -914,7 +938,7 @@
       "widget_type": "bind",
       "label_key": "#str_200129",
       "target_type": "bind",
-      "target": "voteyes",
+      "target": "_impulse28",
       "default": "F1",
       "default_keys": [
         "F1"
@@ -936,7 +960,7 @@
       "widget_type": "bind",
       "label_key": "#str_200130",
       "target_type": "bind",
-      "target": "voteno",
+      "target": "_impulse29",
       "default": "F2",
       "default_keys": [
         "F2"
@@ -980,7 +1004,7 @@
       "widget_type": "bind",
       "label_key": "#str_201009",
       "target_type": "bind",
-      "target": "ready",
+      "target": "_impulse17",
       "default": "F3",
       "default_keys": [
         "F3"
@@ -1201,14 +1225,15 @@
       ],
       "widget_type": "choice",
       "label_key": "#str_200152",
-      "choices_key": "#str_200059",
+      "choices_key": "#str_229980",
       "values": [
+        "0",
         "2",
         "6"
       ],
       "target_type": "cvar",
       "target": "s_numberOfSpeakers",
-      "default": "6",
+      "default": "0",
       "restart_required": false,
       "accessibility": "Standard focusable choiceDef row."
     },
@@ -1259,6 +1284,41 @@
       "target_type": "cvar",
       "target": "s_musicVolume",
       "default": "0.5",
+      "ui_range": {
+        "low": "0",
+        "high": "1",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "1"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "audio.dialogue_volume",
+      "pane": "Audio",
+      "section": "Levels",
+      "path": "Settings > Audio > Levels > Dialogue Volume",
+      "source": "audio",
+      "container": "set_audio_dialogue",
+      "widgets": [
+        "set_audio_dialogue_slider",
+        "set_audio_dialogue_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_audio_dialogue_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231300",
+      "target_type": "cvar",
+      "target": "s_dialogueVolume",
+      "default": "1",
       "ui_range": {
         "low": "0",
         "high": "1",
@@ -1542,6 +1602,72 @@
       "accessibility": "Slider with paired edit field; disabled when Ambient Light is off."
     },
     {
+      "id": "system.rendering_backend",
+      "pane": "System",
+      "section": "Performance",
+      "path": "Settings > System > Performance > Rendering Backend",
+      "source": "system_retained",
+      "container": "settings_backend",
+      "widgets": [
+        "settings_backend"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230141",
+      "target_type": "cvar",
+      "target": "r_renderApi",
+      "default": "best",
+      "adapter": {
+        "source": "settings_service",
+        "command": "settings.system.backend"
+      },
+      "restart_required": true,
+      "accessibility": "Localized backend choice; Apply persists the preference and a separate main-menu restart activates it."
+    },
+    {
+      "id": "system.rendering_device",
+      "pane": "System",
+      "section": "Performance",
+      "path": "Settings > System > Performance > Rendering Device",
+      "source": "system_retained",
+      "container": "settings_gpu",
+      "widgets": [
+        "settings_gpu"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230142",
+      "target_type": "cvar",
+      "target": "r_renderDevice",
+      "default": "auto",
+      "adapter": {
+        "source": "settings_service",
+        "command": "settings.system.renderDevice"
+      },
+      "restart_required": true,
+      "accessibility": "Automatic high-performance choice plus detected Vulkan device names; disabled incompatible entries, stable UUID persistence, and active-versus-pending feedback."
+    },
+    {
+      "id": "system.rendering_restart",
+      "pane": "System",
+      "section": "Performance",
+      "path": "Settings > System > Performance > Restart Renderer",
+      "source": "system_retained",
+      "container": "settings_restart_renderer",
+      "widgets": [
+        "settings_restart_renderer"
+      ],
+      "widget_type": "button",
+      "label_key": "#str_230153",
+      "target_type": "gui_state",
+      "target": "restartRenderer",
+      "default": "N/A",
+      "adapter": {
+        "source": "settings_service",
+        "command": "settings.system.restartRenderer"
+      },
+      "restart_required": false,
+      "accessibility": "Available only for a clean applied selection at the main menu; checked configuration persistence precedes owner teardown and module replacement."
+    },
+    {
       "id": "system.performance_preset",
       "pane": "System",
       "section": "Performance",
@@ -1557,10 +1683,13 @@
       "values": [
         "minimum",
         "lowpower",
+        "low",
         "performance",
         "balanced",
+        "enhanced",
         "quality",
-        "ultra"
+        "ultra",
+        "maximum"
       ],
       "target_type": "cvar",
       "target": "com_performancePreset",
@@ -1892,6 +2021,26 @@
       "default": "1",
       "restart_required": false,
       "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.light_grid_preload",
+      "pane": "System",
+      "section": "Post Effects",
+      "path": "Settings > Display > Post FX > Preload Light Grids",
+      "source": "system",
+      "container": "set_sys_preload",
+      "widgets": [
+        "set_sys_preload_val",
+        "set_sys_preload_help"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_42820",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_lightGridPreload",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choice. Localized help explains loading and VRAM costs; applies on the next map load."
     },
     {
       "id": "system.ui_aspect",
@@ -2634,6 +2783,76 @@
       "accessibility": "Slider with paired edit field."
     },
     {
+      "id": "game.controller.wheel_sensitivity",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Wheel Sensitivity",
+      "source": "game",
+      "container": "set_game_controller_wheel_sensitivity",
+      "widgets": [
+        "set_game_controller_wheel_sensitivity_slider_bar",
+        "set_game_controller_wheel_sensitivity_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_wheel_sensitivity_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_42840",
+      "target_type": "cvar",
+      "target": "in_weaponWheelSensitivity",
+      "default": "4.0",
+      "ui_range": {
+        "low": "0.25",
+        "high": "16.0",
+        "step": "0.25"
+      },
+      "cvar_range": {
+        "low": "0.25",
+        "high": "16.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.wheel_offset",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Wheel Horizontal Offset",
+      "source": "game",
+      "container": "set_game_wheel_offset",
+      "widgets": [
+        "set_game_wheel_offset_slider_bar",
+        "set_game_wheel_offset_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_wheel_offset_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_230140",
+      "target_type": "cvar",
+      "target": "ui_weaponWheelOffset",
+      "default": "27",
+      "ui_range": {
+        "low": "-40",
+        "high": "40",
+        "step": "1"
+      },
+      "cvar_range": {
+        "low": "-40",
+        "high": "40"
+      },
+      "restart_required": false,
+      "accessibility": "Signed numeric edit paired with a slider. Zero centers; positive moves right, negative left. Saved preference survives narrow-view fitting."
+    },
+    {
       "id": "game.controller.look_curve",
       "pane": "Game Options",
       "section": "Controller",
@@ -2984,6 +3203,65 @@
       "accessibility": "Slider with paired edit field."
     },
     {
+      "id": "game.controller.prompt_style",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Prompt Style",
+      "source": "game",
+      "container": "set_game_controller_prompt_style",
+      "widgets": [
+        "set_game_controller_prompt_style_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231526",
+      "choices_key": "#str_231527",
+      "values": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "target_type": "cvar",
+      "target": "in_promptStyle",
+      "default": "0",
+      "cvar_range": {
+        "low": "0",
+        "high": "5"
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row: the controller prompt family for the menus and the HUD."
+    },
+    {
+      "id": "game.controller.swap_confirm",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Swap Confirm and Back",
+      "source": "game",
+      "container": "set_game_controller_swap_confirm",
+      "widgets": [
+        "set_game_controller_swap_confirm_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231528",
+      "choices_key": "#str_231529",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target_type": "cvar",
+      "target": "in_swapConfirmBack",
+      "default": "0",
+      "cvar_range": {
+        "low": "0",
+        "high": "2"
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row: which face button confirms in menus; prompts follow it."
+    },
+    {
       "id": "game.crosshair_custom",
       "pane": "Game Options",
       "section": "Crosshair",
@@ -3165,6 +3443,295 @@
       "accessibility": "Standard focusable choiceDef row. Turning the marker off restores stock Quake 4's crosshair recolour on a hit."
     },
     {
+      "id": "game.hud_layout",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > HUD Layout",
+      "container": "set_game_hudlayout",
+      "widgets": [
+        "set_game_hudlayout_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231236",
+      "choices_key": "#str_231237",
+      "values": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "target": "ui_hudLayout",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. Classic keeps the stock HUD, Remastered anchors it to the screen edges, Minimal keeps health, armor, ammunition and the crosshair, and Competitive adds the multiplayer match bar, team status and network quality."
+    },
+    {
+      "id": "game.hud_scale",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > HUD Size",
+      "container": "set_game_hudscale",
+      "widgets": [
+        "set_game_hudscale_slider_bar",
+        "set_game_hudscale_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_hudscale_value",
+          "maxchars": 4
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231238",
+      "target": "ui_hudScale",
+      "default": "1",
+      "ui_range": {
+        "low": "0.5",
+        "high": "2",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0.5",
+        "high": "2"
+      },
+      "accessibility": "Slider with paired edit field. Scales the HUD independently of the menus."
+    },
+    {
+      "id": "game.hud_width",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > HUD Width",
+      "container": "set_game_hudwidth",
+      "widgets": [
+        "set_game_hudwidth_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231239",
+      "choices_key": "#str_231240",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target": "ui_hudWidth",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. How far edge HUD groups spread on wide screens."
+    },
+    {
+      "id": "game.hud_inset",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Safe Area Inset",
+      "container": "set_game_hudinset",
+      "widgets": [
+        "set_game_hudinset_slider_bar",
+        "set_game_hudinset_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_hudinset_value",
+          "maxchars": 4
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231241",
+      "target": "ui_hudSafeInset",
+      "default": "0",
+      "ui_range": {
+        "low": "0",
+        "high": "10",
+        "step": "0.5"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "10"
+      },
+      "accessibility": "Slider with paired edit field. Moves the HUD inward by a percentage of the view."
+    },
+    {
+      "id": "game.objectives_toggle",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Toggle Objectives",
+      "container": "set_game_objectivestoggle",
+      "widgets": [
+        "set_game_objectivestoggle_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231247",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "g_objectivesToggle",
+      "default": "0",
+      "accessibility": "Focusable choiceDef row. No shows the objectives display while the scores button is held; Yes opens and closes it with each press and adds a Close prompt."
+    },
+    {
+      "id": "game.hudopacity",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > HUD Opacity",
+      "container": "set_game_hudopacity",
+      "widgets": [
+        "set_game_hudopacity_slider_bar",
+        "set_game_hudopacity_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_hudopacity_value",
+          "maxchars": 4
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231270",
+      "target": "ui_hudOpacity",
+      "default": "1",
+      "ui_range": {
+        "low": "0.25",
+        "high": "1",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0.25",
+        "high": "1"
+      },
+      "accessibility": "Slider with paired edit field. Fades the Remastered and Minimal HUD between 25% and fully opaque."
+    },
+    {
+      "id": "game.huddamagedir",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Damage Direction",
+      "container": "set_game_huddamagedir",
+      "widgets": [
+        "set_game_huddamagedir_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231271",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "ui_hudDamageDirection",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. No hides the damage direction indicator in the Remastered and Minimal HUD."
+    },
+    {
+      "id": "game.hudpickups",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Pickup Messages",
+      "container": "set_game_hudpickups",
+      "widgets": [
+        "set_game_hudpickups_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231272",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "ui_hudPickups",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. No hides the pickup messages in the Remastered and Minimal HUD."
+    },
+    {
+      "id": "game.hudstrip",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Weapon Strip",
+      "container": "set_game_hudstrip",
+      "widgets": [
+        "set_game_hudstrip_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231273",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "ui_hudWeaponStrip",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. No keeps the weapon strip hidden on a weapon change in the Remastered and Minimal HUD."
+    },
+    {
+      "id": "game.hudflash",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Reduced Flashing",
+      "container": "set_game_hudflash",
+      "widgets": [
+        "set_game_hudflash_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231274",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "ui_reducedFlashing",
+      "default": "0",
+      "accessibility": "Focusable choiceDef row. Yes caps the damage direction indicator and the vehicle hit glow at 0.40, dims full-screen white flashes and drops the death afterimage, in every HUD layout."
+    },
+    {
+      "id": "game.opaque_backing",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Opaque Menu Backing",
+      "container": "set_game_opaquebacking",
+      "widgets": [
+        "set_game_opaquebacking_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231592",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "ui_retainedOpaqueBacking",
+      "default": "0",
+      "accessibility": "Focusable choiceDef row. Yes covers the screen behind the retained menus' dialogs and pause with the stock 0.94 black scrim instead of the softened view, for players who find the blurred backdrop distracting."
+    },
+    {
       "id": "game.auto_skip_cinematics",
       "pane": "Game Options",
       "section": "Gameplay And View",
@@ -3182,6 +3749,30 @@
       "default": "0",
       "restart_required": false,
       "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.cinematic_shake",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > Gameplay And View > Cinematic Shake",
+      "container": "set_game_cinematicshake",
+      "widgets": [
+        "set_game_cinematicshake_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230157",
+      "choices_key": "#str_230136",
+      "values": [
+        "0",
+        "0.5",
+        "1"
+      ],
+      "target": "ui_cinematicShake",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. Off, Low or Full scales scripted cinematic camera shake, such as the Awakening dropship's."
     },
     {
       "id": "game.gun_position",
@@ -3440,6 +4031,438 @@
       },
       "restart_required": false,
       "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.weapon_kick",
+      "pane": "Game Options",
+      "section": "View Weapon",
+      "path": "Settings > Game Options > View Weapon > Weapon Kick",
+      "source": "game",
+      "container": "set_game_weaponkick",
+      "widgets": [
+        "set_game_weaponkick_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229982",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "g_weaponMuzzleKick",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.vr_enable",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > VR Mode",
+      "source": "game",
+      "container": "set_game_vr_enable",
+      "widgets": [
+        "set_game_vr_enable_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230121",
+      "choices_key": "#str_200246",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_enable",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Starts or ends the OpenXR session at once (OpenGL renderer)."
+    },
+    {
+      "id": "game.vr_aimmode",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Aim With",
+      "source": "game",
+      "container": "set_game_vr_aimmode",
+      "widgets": [
+        "set_game_vr_aimmode_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230122",
+      "choices_key": "#str_230123",
+      "values": [
+        "1",
+        "0"
+      ],
+      "target_type": "cvar",
+      "target": "vr_aimMode",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Controller aim hides the screen crosshair; the laser sight marks shots."
+    },
+    {
+      "id": "game.vr_lefthanded",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Weapon Hand",
+      "source": "game",
+      "container": "set_game_vr_lefthanded",
+      "widgets": [
+        "set_game_vr_lefthanded_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230124",
+      "choices_key": "#str_230125",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_leftHanded",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Swaps the triggers, grips and sticks with the weapon."
+    },
+    {
+      "id": "game.vr_turnmode",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Turning",
+      "source": "game",
+      "container": "set_game_vr_turnmode",
+      "widgets": [
+        "set_game_vr_turnmode_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230126",
+      "choices_key": "#str_230127",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_turnMode",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Weapon-hand stick left and right."
+    },
+    {
+      "id": "game.vr_snapturnangle",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Snap Turn Angle",
+      "source": "game",
+      "container": "set_game_vr_snapturnangle",
+      "widgets": [
+        "set_game_vr_snapturnangle_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230128",
+      "choices_key": "#str_230129",
+      "values": [
+        "30",
+        "45",
+        "60",
+        "90"
+      ],
+      "target_type": "cvar",
+      "target": "vr_snapTurnAngle",
+      "default": "45",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Degrees per snap turn."
+    },
+    {
+      "id": "game.vr_movedirection",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Walk Direction",
+      "source": "game",
+      "container": "set_game_vr_movedirection",
+      "widgets": [
+        "set_game_vr_movedirection_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230130",
+      "choices_key": "#str_230131",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_moveDirection",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. What the off-hand stick's forward follows."
+    },
+    {
+      "id": "game.vr_roomscale",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Room Scale",
+      "source": "game",
+      "container": "set_game_vr_roomscale",
+      "widgets": [
+        "set_game_vr_roomscale_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230132",
+      "choices_key": "#str_200246",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_roomScale",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. The character walks after the player's steps; in multiplayer through its movement input."
+    },
+    {
+      "id": "game.vr_aimlaser",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Laser Sight",
+      "source": "game",
+      "container": "set_game_vr_aimlaser",
+      "widgets": [
+        "set_game_vr_aimlaser_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230133",
+      "choices_key": "#str_230134",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target_type": "cvar",
+      "target": "vr_aimLaser",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Marks where controller-aimed shots land, at the target's depth."
+    },
+    {
+      "id": "game.vr_hapticstrength",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Vibration",
+      "source": "game",
+      "container": "set_game_vr_hapticstrength",
+      "widgets": [
+        "set_game_vr_hapticstrength_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230135",
+      "choices_key": "#str_230136",
+      "values": [
+        "0",
+        "0.5",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_hapticStrength",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Controller pulses on each shot and hit."
+    },
+    {
+      "id": "game.vr_twohanded",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Two-Handed Grip",
+      "source": "game",
+      "container": "set_game_vr_twohanded",
+      "widgets": [
+        "set_game_vr_twohanded_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230137",
+      "choices_key": "#str_200246",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_twoHanded",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. The off-hand grip on the gun's foregrip holds it in both hands; elsewhere it opens the weapon wheel."
+    },
+    {
+      "id": "game.vr_vignette",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Comfort Vignette",
+      "source": "game",
+      "container": "set_game_vr_vignette",
+      "widgets": [
+        "set_game_vr_vignette_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230138",
+      "choices_key": "#str_230136",
+      "values": [
+        "0",
+        "0.5",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_comfortVignette",
+      "default": "0.5",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Darkens the edges of each eye while the stick moves or smoothly turns the player."
+    },
+    {
+      "id": "game.vr_physicalcrouch",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Physical Crouch",
+      "source": "game",
+      "container": "set_game_vr_physicalcrouch",
+      "widgets": [
+        "set_game_vr_physicalcrouch_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230139",
+      "choices_key": "#str_200246",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_physicalCrouch",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Crouching in the room crouches the character."
+    },
+    {
+      "id": "game.vr_playspace",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Play Space",
+      "source": "game",
+      "container": "set_game_vr_playspace",
+      "widgets": [
+        "set_game_vr_playspace_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231760",
+      "choices_key": "#str_231761",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target_type": "cvar",
+      "target": "vr_playSpace",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Seated play measures height from where the player recentred; standing play measures it from the floor."
+    },
+    {
+      "id": "audio.subtitles",
+      "pane": "Audio",
+      "section": "Subtitles",
+      "path": "Settings > Audio > Dialogue Subtitles",
+      "source": "audio",
+      "container": "set_audio_subtitles",
+      "widgets": [
+        "set_audio_subtitles_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231308",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "ui_subtitles",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "audio.subtitle_size",
+      "pane": "Audio",
+      "section": "Subtitles",
+      "path": "Settings > Audio > Subtitle Size",
+      "source": "audio",
+      "container": "set_audio_subtitle_size",
+      "widgets": [
+        "set_audio_subtitle_size_slider",
+        "set_audio_subtitle_size_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_audio_subtitle_size_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231309",
+      "target_type": "cvar",
+      "target": "ui_subtitleScale",
+      "default": "1",
+      "ui_range": {
+        "low": "1",
+        "high": "2",
+        "step": "0.1"
+      },
+      "cvar_range": {
+        "low": "1",
+        "high": "2"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "audio.subtitle_background",
+      "pane": "Audio",
+      "section": "Subtitles",
+      "path": "Settings > Audio > Subtitle Background",
+      "source": "audio",
+      "container": "set_audio_subtitle_background",
+      "widgets": [
+        "set_audio_subtitle_background_slider",
+        "set_audio_subtitle_background_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_audio_subtitle_background_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231310",
+      "target_type": "cvar",
+      "target": "ui_subtitleBackground",
+      "default": "0.6",
+      "ui_range": {
+        "low": "0",
+        "high": "1",
+        "step": "0.1"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "1"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "audio.subtitle_speakers",
+      "pane": "Audio",
+      "section": "Subtitles",
+      "path": "Settings > Audio > Speaker Names",
+      "source": "audio",
+      "container": "set_audio_subtitle_speakers",
+      "widgets": [
+        "set_audio_subtitle_speakers_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231311",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "ui_subtitleSpeakers",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
     }
   ],
   "default_bind_sources": [

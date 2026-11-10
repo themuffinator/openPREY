@@ -37,12 +37,13 @@ def validate_workflow() -> None:
         'MACOSX_DEPLOYMENT_TARGET: "11.0"',
         "ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:detect_leaks=0",
         "UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1",
-        "git clone --depth 1 https://github.com/themuffinator/openQ4-game.git",
         "python tools/tests/macos_sanitizer_ci.py",
         "bash tools/build/meson_setup.sh setup --wipe builddir .",
         "-Dplatform_backend=sdl3",
         "-Dmacos_graphics_bridge=${{ matrix.bridge }}",
-        "-Dmacos_openal_provider=apple_framework",
+        "-Dmacos_openal_provider=system",
+        "prepare_macos_openal_soft.sh",
+        "--stage-install-dir .install",
         "-Duse_pch=false",
         "-Didlib_asserts=true",
         "-Db_sanitize=address,undefined",
@@ -64,12 +65,13 @@ def validate_workflow() -> None:
         "ERROR: AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:",
         "Publish sanitizer diagnostics",
         "builddir/meson-logs",
-        "builddir/.tmp/openprey_gamelibs_stage/openprey_gamelibs_stage_manifest.json",
+        "builddir/openq4_game_sources.json",
         ".tmp/macos-sanitizer-${{ matrix.artifact_suffix }}-runtime",
     ):
         require(workflow, token, "macOS sanitizer workflow")
 
     reject(workflow, "continue-on-error: true", "macOS sanitizer fail-fast behavior")
+    reject(workflow, 'OPENQ4_GAMELIBS_SHA', 'retired companion source input')
     reject(workflow, "| head -", "pipefail-safe sanitizer report truncation")
     reject(workflow, "pull_request:", "manual-only macOS sanitizer trigger")
     reject(workflow, "\n  push:", "manual-only macOS sanitizer trigger")
@@ -81,7 +83,7 @@ def validate_wiring_and_docs() -> None:
     push = read(".github/workflows/push-verification.yml")
     building = read("BUILDING.md")
     platform = read("docs/dev/platform-support.md")
-    plan = read("docs/dev/plan/2026-06-30-macos-compatibility-support.md")
+    plan = read("docs/dev/archive/2026-10-18/plan/2026-06-30-macos-compatibility-support.md")
     release_completion = read("docs/dev/release-completion.md")
     release_notes = read("docs/dev/releases/v0.8.1.md")
 

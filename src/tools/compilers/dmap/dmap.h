@@ -26,7 +26,7 @@ If you have questions concerning this license or the applicable additional terms
 ===========================================================================
 */
 
-#include "../../../render_geo/RenderGeometry.h"
+#include "../../../rendergeo/RenderGeometry.h"
 
 
 typedef struct primitive_s {
@@ -201,6 +201,7 @@ typedef struct optimizeGroup_s {
 										// groups will not be combined into model surfaces
 										// after optimization
 	textureVectors_t	texVec;
+	int					texVecSource;	// texVecSource_t: how texVec relates to the triangles' own coordinates
 
 	bool				surfaceEmited;
 
@@ -457,6 +458,7 @@ mapTri_t	*AllocTri( void );
 void		FreeTri( mapTri_t *tri );
 int			CountTriList( const mapTri_t *list );
 mapTri_t	*MergeTriLists( mapTri_t *a, mapTri_t *b );
+void		AppendTriList( mapTri_t **head, mapTri_t **tail, mapTri_t *list );
 mapTri_t	*CopyTriList( const mapTri_t *a );
 void		FreeTriList( mapTri_t *a );
 mapTri_t	*CopyMapTri( const mapTri_t *tri );

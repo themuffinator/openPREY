@@ -1,58 +1,79 @@
 # macOS OpenAL Provider Policy
 
-Updated: 2026-06-30
+Updated: 2026-08-26
 
-This document records the current macOS audio-provider decision for openQ4.
-It is intentionally conservative while macOS remains experimental and issue
-#73-style startup reports are still being collected.
+## Release provider
 
-## Current Release Decision
-
-Experimental macOS release builds must use:
+macOS release, commit-validation, push-validation, sanitizer, and universal2
+jobs use:
 
 ```text
--Dmacos_openal_provider=apple_framework
+-Dmacos_openal_provider=system
 ```
 
-That option links Apple's system OpenAL framework through Meson
-`dependency('appleframeworks', modules: ['OpenAL'], required: true)`. Release
-workflows, package docs, and user-facing release notes must describe current
-macOS audio as Apple's OpenAL framework, not bundled OpenAL Soft.
+For those jobs, `system` means the project’s checksum-pinned OpenAL Soft 1.25.2
+build, not an untracked library from the build host. The build recipe is
+`tools/build/prepare_macos_openal_soft.sh`. It downloads the official
+[OpenAL Soft](https://openal-soft.org/) tag archive, verifies SHA-256
+`fb27e5839aa11f0e5b9d33756965291fad5d6909ab928ea1f796f4a1a6877894`,
+builds a dynamic CoreAudio runtime for the package architecture and macOS 11.0
+floor, and exposes it to Meson through pkg-config. The lookup remains
+pkg-config-only so a missing dependency fails configuration instead of silently
+selecting incompatible headers or Apple’s framework.
 
-`-Dmacos_openal_provider=system` is migration-only. It is available for local
-developer experiments that intentionally use a system `openal` dependency plus
-OpenAL Soft-style `AL/...` headers. It is not a release packaging target, not a
-support claim, and not evidence that macOS packages bundle OpenAL Soft.
+`-Dmacos_openal_provider=apple_framework` remains available only as a
+compatibility diagnostic. A compile-only debug lane keeps that path from
+silently rotting, but published packages must not use it. This decision follows
+GitHub issue #122, which demonstrated that Apple’s implementation exhausts its
+buffer pool on stock single-player levels and then returns `AL_INVALID_VALUE`.
+Staged validation reads the selected provider from Meson's build-option
+metadata: it requires the OpenAL Soft runtime and source/license payload for
+`system`, while allowing an `apple_framework` diagnostic stage to remain
+self-consistent. Release-package validation always enforces the OpenAL Soft
+contract below.
 
-## Future OpenAL Soft Package Policy
+## Package contract
 
-Before OpenAL Soft becomes a macOS release provider, the project needs an
-explicit package-design change covering all of these items:
+Every macOS package must meet all of these requirements:
 
-- Library location: the bundled dylib must live in a reviewed app/package
-  location, such as `openQ4.app/Contents/Frameworks/`, with no loose Homebrew,
-  MacPorts, `/opt`, or `@rpath` dependency leaking into release binaries.
-- Install names: every client, app executable, dedicated server, game dylib, and
-  OpenAL Soft dylib must use package-relative install names such as
-  `@executable_path/../Frameworks/...` or another reviewed package-relative
-  path. Absolute local developer paths are forbidden.
-- Codesigning: the OpenAL Soft dylib must be signed with the same ad-hoc or
-  Developer ID policy as the rest of the package before app signing,
-  notarization upload, archive validation, and DMG creation.
-- License notice: release packages and docs must include the OpenAL Soft license
-  notice and any required attribution before the dependency ships.
-- Notarization allowlist: package and archive validators must add only the
-  intended OpenAL Soft runtime paths to the app/package allowlist, while keeping
-  `.dSYM`, Finder metadata, symlinks, case-fold collisions, stale frameworks,
-  and unrelated dylibs rejected.
+- Library location: exactly one `libopenal.1.dylib` is embedded at
+  `openQ4.app/Contents/Frameworks/libopenal.1.dylib`.
+- Install name: the library ID and client dependency are
+  `@rpath/libopenal.1.dylib`. The client’s reviewed `@loader_path` search paths
+  cover direct `.install` runs, the app executable, and the loose diagnostic
+  client beside `openQ4.app`; absolute Homebrew, MacPorts, `/opt`, and build-tree
+  paths are rejected.
+- Architecture and floor: thin packages contain exactly their requested Mach-O
+  slice; universal2 assembly lipo-merges the independently validated arm64 and
+  x86_64 runtimes; every slice must retain the macOS 11.0 deployment target.
+- Codesigning and notarization: OpenAL Soft is signed inside-out with the other
+  `Contents/Frameworks` images before the app. Dependency, signature,
+  notarization, archive, symlink, file-mode, case-fold, and allowlist checks all
+  include it.
+- License and corresponding source: `Contents/Resources/licenses/openal-soft/`
+  contains `COPYING`, `SOURCE.md`, the PFFFT/fmt/Microsoft GSL notices, and the
+  verified `openal-soft-1.25.2.tar.gz` source archive. Package validation
+  rejects a missing or misplaced item.
 
-Until all of those requirements are implemented and validated, release packages
-must remain on `macos_openal_provider=apple_framework`.
+The OpenAL Soft runtime is LGPL-licensed and dynamically linked. The repository
+already carries its license under `src/external/openal-soft/COPYING`; the source
+notice and exact build recipe are maintained beside it.
 
-## Support Data
+## Allocation-failure behavior
 
-Crash reports should include the OpenAL log lines that already exist in
-`openq4.log`:
+OpenAL buffer creation or upload failure is not a valid reason to tear down a
+successfully loaded map. Decoded sample data remains available to the voice
+streaming path, the first allocation failure is logged with the sample and AL
+error, repeated allocation warnings are suppressed, and an affected sound may
+be skipped if the provider has no buffers left. Invalid or unsupported source
+audio formats remain content errors and retain their existing diagnostics.
+
+Bundled OpenAL Soft is the primary fix; the non-fatal path is defense in depth
+for resource exhaustion or unusual third-party implementations.
+
+## Support data
+
+Crash and audio reports should include these existing `openq4.log` lines:
 
 - `OpenAL vendor:`
 - `OpenAL renderer:`
@@ -62,7 +83,6 @@ Crash reports should include the OpenAL log lines that already exist in
 - `OpenAL active device:`
 - any `OpenAL EFX ...` warnings or status lines
 
-The macOS support collector writes these lines to `logs/openal-summary.txt`
-when it can find an existing `openq4.log`. The collector must not launch
-openQ4 to obtain them. Support tooling must not launch openQ4 just to collect
-OpenAL provider evidence.
+The macOS support collector copies them to `logs/openal-summary.txt` when an
+existing log is available. It must not launch openQ4 merely to collect provider
+evidence.

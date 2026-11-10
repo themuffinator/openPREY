@@ -43,20 +43,81 @@ static void AppendChoiceListSegment( idStrList &list, const idStr &segment ) {
 	choice.Strip( '\r' );
 	choice.Strip( '\n' );
 	choice.StripTrailingWhitespace();
+	// The stock tables quote their choices ('Off';'2x') and the engine quotes
+	// the names it lists itself ("Default Device"), as the retail lexer read
+	// them: a choice wholly inside one pair of quotes shows without them.
+	const int length = choice.Length();
+	if ( length >= 2 && ( choice[0] == '\'' || choice[0] == '"' ) && choice[length - 1] == choice[0] ) {
+		const bool escapes = choice[0] == '"';
+		idStr bare;
+		for ( int i = 1; i < length - 1; i++ ) {
+			if ( escapes && choice[i] == '\\' && i + 1 < length - 1 ) {
+				i++;
+			}
+			bare.Append( choice[i] );
+		}
+		choice = bare;
+	}
 	if ( choice.Length() > 0 ) {
 		choice = common->GetLanguageDict()->GetString( choice.c_str() );
 		list.Append( choice );
 	}
 }
 
+/*
+============
+ChoiceListQuoteEnd
+
+Where the quoted choice that opens at source[start] closes: at its own quote
+mark followed by the separator or the end of the list. Returns -1 when the
+mark opens nothing, as an apostrophe that begins a plain word does.
+============
+*/
+static int ChoiceListQuoteEnd( const idStr &source, int start ) {
+	const char quote = source[start];
+	for ( int i = start + 1; i < source.Length(); i++ ) {
+		if ( quote == '"' && source[i] == '\\' ) {
+			i++;
+			continue;
+		}
+		if ( source[i] != quote ) {
+			continue;
+		}
+		int next = i + 1;
+		while ( next < source.Length() && ( source[next] == ' ' || source[next] == '\t' || source[next] == '\r' || source[next] == '\n' ) ) {
+			next++;
+		}
+		if ( next >= source.Length() || source[next] == ';' ) {
+			return i;
+		}
+	}
+	return -1;
+}
+
 static void SplitChoiceList( const idStr &source, idStrList &list ) {
 	idStr segment;
+	bool leading = true;
 	for ( int i = 0; i < source.Length(); i++ ) {
 		const char ch = source[i];
 		if ( ch == ';' ) {
 			AppendChoiceListSegment( list, segment );
 			segment.Clear();
+			leading = true;
 			continue;
+		}
+		if ( leading && ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n' ) {
+			leading = false;
+			if ( ch == '\'' || ch == '"' ) {
+				// a separator inside the quotes belongs to the choice
+				const int end = ChoiceListQuoteEnd( source, i );
+				if ( end > i ) {
+					for ( ; i <= end; i++ ) {
+						segment.Append( source[i] );
+					}
+					i--;
+					continue;
+				}
+			}
 		}
 		segment.Append( ch );
 	}
@@ -140,7 +201,14 @@ void idChoiceWindow::UpdateVars( bool read, bool force ) {
 			}	
 		}
 		if ( !read && guiStr.NeedsUpdate() ) {
-			guiStr.Set( va( "%i", currentChoice ) );
+			// A GUI-only string choice carries its declared value just like a
+			// CVar-backed choice. Stock dual bindings still expose the numeric
+			// selection index to their GUI scripts.
+			if ( choiceType != 0 && cvar == NULL ) {
+				guiStr.Set( values.Num() ? values[ currentChoice ] : choices[ currentChoice ] );
+			} else {
+				guiStr.Set( va( "%i", currentChoice ) );
+			}
 		}
 	}
 }
@@ -255,11 +323,12 @@ void idChoiceWindow::UpdateChoice() {
 		}
 		ValidateChoice();
 	} else {
-		// ChoiceType 1 stores current as a cvar string
+		// ChoiceType 1 stores the declared value in its CVar or GUI binding.
+		const char *currentValue = cvar != NULL ? cvarStr.c_str() : guiStr.c_str();
 		int c = ( values.Num() ) ? values.Num() : choices.Num();
 		int i;
 		for ( i = 0; i < c; i++ ) {
-			if ( idStr::Icmp( cvarStr.c_str(), ( values.Num() ) ? values[i] : choices[i] ) == 0 ) {
+			if ( idStr::Icmp( currentValue, ( values.Num() ) ? values[i] : choices[i] ) == 0 ) {
 				break;
 			}
 		}

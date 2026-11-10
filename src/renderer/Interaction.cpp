@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "tr_local.h"
+#include "ShadowMapClassification.h"
 
 #if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
 bool R_MD5R_CreateLightTris( const srfTriangles_t &sourceTri, srfTriangles_t *destTri, int &c_backfaced, int &c_distance, const byte *facing, const byte *cullBits, bool includeBackFaces );
@@ -72,17 +73,19 @@ static bool R_ShouldCreateInteractionShadow( idRenderEntityLocal *entityDef ) {
 		return true;
 	}
 
+	// Renderer modules own this clock. The host's idLib::frameNumber is not
+	// advanced in their separate copy of idLib.
 	if ( entityDef->parms.suppressLOD == 1
-		|| entityDef->LODModificationFrame > idLib::frameNumber
+		|| entityDef->LODModificationFrame > tr.frameCount
 		|| viewEntity->screenCoverage >= r_lod_shadows_percent.GetFloat()
 		|| viewEntity->distanceToCamera < entityDef->parms.shadowLODDistance ) {
-		if ( entityDef->LODModificationFrame < idLib::frameNumber ) {
+		if ( entityDef->LODModificationFrame < tr.frameCount ) {
 			// Deterministic stand-in for the retail rand(): identical demo
 			// playback must drop/hold entity shadows on identical frames, and
 			// the per-entity hash still staggers crowds across the hold window.
-			const unsigned int hash = ( static_cast<unsigned int>( entityDef->index ) * 2654435761u ) ^ ( static_cast<unsigned int>( idLib::frameNumber ) * 40503u );
+			const unsigned int hash = ( static_cast<unsigned int>( entityDef->index ) * 2654435761u ) ^ ( static_cast<unsigned int>( tr.frameCount ) * 40503u );
 			const int retailRand = static_cast<int>( ( hash >> 8 ) & SHADOW_LOD_RETAIL_RAND_MASK );
-			entityDef->LODModificationFrame = idLib::frameNumber + static_cast<int>( static_cast<double>( retailRand ) * SHADOW_LOD_RANDOM_UNIT * SHADOW_LOD_MAX_FRAME_DELAY );
+			entityDef->LODModificationFrame = tr.frameCount + static_cast<int>( static_cast<double>( retailRand ) * SHADOW_LOD_RANDOM_UNIT * SHADOW_LOD_MAX_FRAME_DELAY );
 		}
 		return true;
 	}
@@ -94,29 +97,41 @@ static bool R_CachedInteractionShadowLODAdmitted( surfaceInteraction_t *sint, id
 	if ( sint == NULL ) {
 		return R_ShouldCreateInteractionShadow( entityDef );
 	}
-	// Re-evaluate once per frame: a creation-time-only decision freezes the
-	// first verdict for the surface's lifetime, permanently dropping shadows
-	// for static entities first seen at distance (and never shedding them for
-	// entities first seen close). The check is a handful of compares.
-	if ( !sint->shadowLODDecisionValid || sint->shadowLODDecisionFrame != idLib::frameNumber ) {
+	// Coverage and distance belong to the current view, including subviews in
+	// the same frame. A lifetime verdict drops static casters first seen far
+	// away even after the camera approaches them.
+	if ( !sint->shadowLODDecisionValid || sint->shadowLODDecisionView != tr.viewCount ) {
 		sint->shadowLODAdmitted = R_ShouldCreateInteractionShadow( entityDef );
 		sint->shadowLODDecisionValid = true;
-		sint->shadowLODDecisionFrame = idLib::frameNumber;
+		sint->shadowLODDecisionView = tr.viewCount;
 	}
 	return sint->shadowLODAdmitted;
 }
 
 static bool R_TranslucentShadowMapMomentsSupportedForLight( const idRenderLightLocal *lightDef ) {
-	// The Vulkan backend does not own the experimental moment attachments or
-	// their translucent caster chains. Reject that tier explicitly so stale
-	// OpenGL capability state can never admit casters Vulkan would omit; its
-	// stock translucent shadow casters instead use binary stencil-parity depth.
-	const char *activeRenderApi =
-		cvarSystem != NULL
-			? cvarSystem->GetCVarString( "r_actualRenderApi" )
-			: "";
-	if ( idStr::Icmp( activeRenderApi, "vulkan" ) == 0 ) {
+	// The Vulkan backend owns its own moment atlas and answers for itself
+	// (vk_ShadowMap.cpp), so stale OpenGL capability state never decides it.
+	// Without that tier its translucent shadow casters use binary
+	// stencil-parity depth.
+	// r_actualRenderApi is CVAR_ROM, set once at renderer-module selection;
+	// re-resolve the by-name lookup at most once per frame instead of per call.
+	static int cachedApiFrame = -1;
+	static bool cachedVulkanApi = false;
+	if ( cachedApiFrame != tr.frameCount ) {
+		const char *activeRenderApi =
+			cvarSystem != NULL
+				? cvarSystem->GetCVarString( "r_actualRenderApi" )
+				: "";
+		cachedVulkanApi = idStr::Icmp( activeRenderApi, "vulkan" ) == 0;
+		cachedApiFrame = tr.frameCount;
+	}
+	if ( cachedVulkanApi ) {
+#ifdef OPENQ4_RENDERER_VK_MODULE
+		extern bool VK_ShadowMap_TranslucentMomentsAvailable( void );
+		return VK_ShadowMap_TranslucentMomentsAvailable();
+#else
 		return false;
+#endif
 	}
 	return r_shadowMapTranslucentMoments.GetBool() &&
 		glConfig.GLSLProgramAvailable &&
@@ -129,31 +144,35 @@ static bool R_TranslucentShadowMapMomentsSupportedForLight( const idRenderLightL
 
 /*
 =================
-R_VulkanShadowMapsNeedPerSurfaceStencilVolumes
+R_ShadowMapsNeedPerSurfaceStencilVolumes
 
 Optimized prelights combine every static-world caster for a light into one
 volume. A partial filtered shadow map needs only S\M as its stencil
 supplement, so the combined volume cannot be used without hardening casters
 already represented in the map. Keep the stock per-surface volume path for
-Vulkan lights that can actually use mapped shadows; stencil-only and OpenGL
-paths retain the optimized prelight behavior.
+every backend light that can actually use mapped shadows; stencil-only paths
+retain the optimized prelight behavior.
 =================
 */
-bool R_VulkanShadowMapsNeedPerSurfaceStencilVolumes(
+bool R_ShadowMapsNeedPerSurfaceStencilVolumes(
 		const idRenderLightLocal *lightDef ) {
 	if ( lightDef == NULL || !r_shadows.GetBool() ||
 		!r_useShadowMap.GetBool() ) {
+		return false;
+	}
+	// A noDynamicShadows light casts its dmap prelight and nothing else: no
+	// interaction of it has shadows (idInteraction::HasShadows), so it has no
+	// per-surface volumes and no map casters, and no backend maps it. Treating
+	// it as mappable dropped the prelight too and left the light shining
+	// through every wall (197 stock lights, most of them in multiplayer maps).
+	if ( lightDef->parms.noShadows || lightDef->parms.noDynamicShadows ) {
 		return false;
 	}
 	if ( lightDef->parms.pointLight && !lightDef->parms.parallel &&
 		!r_shadowMapPointLights.GetBool() ) {
 		return false;
 	}
-	const char *activeRenderApi =
-		cvarSystem != NULL
-			? cvarSystem->GetCVarString( "r_actualRenderApi" )
-			: "";
-	return idStr::Icmp( activeRenderApi, "vulkan" ) == 0;
+	return true;
 }
 
 typedef struct {
@@ -161,6 +180,7 @@ typedef struct {
 	bool				dedicatedCollision;
 	materialCoverage_t	coverage;
 	bool				surfaceCastsShadow;
+	bool				explicitlyDisablesShadows;
 	bool				hasGui;
 	bool				hasSubview;
 } shadowMapMaterialCasterPolicy_t;
@@ -178,6 +198,7 @@ static shadowMapMaterialCasterPolicy_t R_ShadowMapMaterialCasterPolicyForShader(
 	policy.dedicatedCollision = shader->IsDedicatedCollisionSurface();
 	policy.coverage = shader->Coverage();
 	policy.surfaceCastsShadow = shader->SurfaceCastsShadow();
+	policy.explicitlyDisablesShadows = shader->ExplicitlyDisablesShadows();
 	policy.hasGui = shader->HasGui();
 	policy.hasSubview = shader->HasSubview();
 	return policy;
@@ -200,9 +221,10 @@ static bool R_ShadowMapMaterialPolicyCanCastTranslucent( const shadowMapMaterial
 	// Translucent moment casters are opt-in at the light/resource level. The
 	// material-side rule is deliberately narrower: GUI and subview surfaces stay
 	// excluded, while ordinary translucent effect stages may contribute moments
-	// even when their retail material flags imply no stencil shadow volume.
+	// despite the coverage-implied no-shadow default. Authored opt-outs remain.
 	return policy.shaderPresent &&
 		policy.coverage == MC_TRANSLUCENT &&
+		!policy.explicitlyDisablesShadows &&
 		!policy.hasGui &&
 		!policy.hasSubview;
 }
@@ -219,6 +241,9 @@ static shadowMapCasterRejectReason_t R_ShadowMapMaterialPolicyRejectReason( cons
 	}
 	if ( policy.hasSubview ) {
 		return SHADOWMAP_CASTER_REJECT_SUBVIEW;
+	}
+	if ( policy.explicitlyDisablesShadows ) {
+		return SHADOWMAP_CASTER_REJECT_SURFACE_NO_SHADOW;
 	}
 	if ( policy.coverage == MC_TRANSLUCENT ) {
 		if ( !translucentMomentsEnabled ) {
@@ -266,7 +291,12 @@ static bool R_ShadowMapCasterAdmissionCheck( const char *name, const shadowMapMa
 	return false;
 }
 
+static bool R_ShadowMapExplicitNoShadowsSelfTest( void );
+
 bool R_ShadowMapCasterAdmissionSelfTest( void ) {
+	if ( !R_ShadowMapExplicitNoShadowsSelfTest() ) {
+		return false;
+	}
 	shadowMapMaterialCasterPolicy_t policy;
 	memset( &policy, 0, sizeof( policy ) );
 	policy.coverage = MC_BAD;
@@ -317,6 +347,11 @@ bool R_ShadowMapCasterAdmissionSelfTest( void ) {
 	if ( !R_ShadowMapCasterAdmissionCheck( "translucent", policy, false, true, SHADOWMAP_CASTER_REJECT_TRANSLUCENT_DISABLED, SHADOWMAP_CASTER_REJECT_TRANSLUCENT_UNSUPPORTED, SHADOWMAP_CASTER_REJECT_UNKNOWN ) ) {
 		return false;
 	}
+	policy.explicitlyDisablesShadows = true;
+	if ( !R_ShadowMapCasterAdmissionCheck( "translucentNoShadows", policy, false, false, SHADOWMAP_CASTER_REJECT_SURFACE_NO_SHADOW, SHADOWMAP_CASTER_REJECT_SURFACE_NO_SHADOW, SHADOWMAP_CASTER_REJECT_SURFACE_NO_SHADOW ) ) {
+		return false;
+	}
+	policy.explicitlyDisablesShadows = false;
 
 	policy.hasGui = true;
 	if ( !R_ShadowMapCasterAdmissionCheck( "translucentGui", policy, false, false, SHADOWMAP_CASTER_REJECT_GUI, SHADOWMAP_CASTER_REJECT_GUI, SHADOWMAP_CASTER_REJECT_GUI ) ) {
@@ -374,6 +409,46 @@ bool R_ShadowMapLODAdmissionSelfTest( void ) {
 		return false;
 	}
 
+	// A caster rejected at distance must return in a closer view without
+	// recreating its interaction or relying on the host's idLib frame clock.
+	const int savedFrame = tr.frameCount;
+	const int savedView = tr.viewCount;
+	const bool savedLOD = r_lod_shadows.GetBool();
+	const float savedPercent = r_lod_shadows_percent.GetFloat();
+	r_lod_shadows.SetBool( true );
+	r_lod_shadows_percent.SetFloat( 0.01f );
+	tr.frameCount = 100;
+	tr.viewCount = 100;
+	idRenderEntityLocal entity;
+	viewEntity_t viewEntity;
+	memset( &viewEntity, 0, sizeof( viewEntity ) );
+	surfaceInteraction_t surface;
+	memset( &surface, 0, sizeof( surface ) );
+	entity.index = 123;
+	entity.parms.shadowLODDistance = 4096.0f;
+	entity.viewEntity = &viewEntity;
+	viewEntity.distanceToCamera = 1000000.0f;
+	const bool farRejected = !R_CachedInteractionShadowLODAdmitted( &surface, &entity );
+	tr.viewCount++;
+	viewEntity.distanceToCamera = 100.0f;
+	const bool nearAdmitted = R_CachedInteractionShadowLODAdmitted( &surface, &entity );
+	tr.frameCount++;
+	tr.viewCount++;
+	viewEntity.distanceToCamera = 1000000.0f;
+	const bool holdAdmitted = R_CachedInteractionShadowLODAdmitted( &surface, &entity );
+	tr.frameCount = entity.LODModificationFrame + 1;
+	tr.viewCount++;
+	const bool expiredRejected = !R_CachedInteractionShadowLODAdmitted( &surface, &entity );
+	tr.frameCount = savedFrame;
+	tr.viewCount = savedView;
+	r_lod_shadows.SetBool( savedLOD );
+	r_lod_shadows_percent.SetFloat( savedPercent );
+	if ( !farRejected || !nearAdmitted || !holdAdmitted || !expiredRejected ) {
+		common->Printf( "ShadowMap LOD admission self-test failed: far=%d near=%d hold=%d expired=%d\n",
+			farRejected, nearAdmitted, holdAdmitted, expiredRejected );
+		return false;
+	}
+
 	common->Printf( "ShadowMap LOD admission self-test passed\n" );
 	return true;
 }
@@ -392,6 +467,12 @@ static bool R_ShadowMapShaderCanCastTranslucent( const idMaterial *shader ) {
 // maps. When the opt-in moments tier is unavailable they cast binary depth
 // through the opaque caster chain - the same solid occlusion their stencil
 // volumes produce in the shipping path.
+static bool R_TranslucentStencilCasterEligible( const idMaterial *shader, const bool enabled ) {
+	return enabled && shader != NULL && shader->Coverage() == MC_TRANSLUCENT &&
+		shader->ReceivesLighting() && !shader->HasGui() && !shader->HasSubview() &&
+		!shader->ExplicitlyDisablesShadows();
+}
+
 static bool R_ShadowMapShaderCanCastStencilParityTranslucent( const idMaterial *shader ) {
 	if ( shader == NULL || shader->IsDedicatedCollisionSurface() || shader->HasGui() || shader->HasSubview() ) {
 		return false;
@@ -400,7 +481,40 @@ static bool R_ShadowMapShaderCanCastStencilParityTranslucent( const idMaterial *
 		return false;
 	}
 	return shader->SurfaceCastsShadow() ||
-		( r_stencilTranslucentShadows.GetBool() && shader->ReceivesLighting() );
+		R_TranslucentStencilCasterEligible( shader, r_stencilTranslucentShadows.GetBool() );
+}
+
+static bool R_ShadowMapExplicitNoShadowsSelfTest( void ) {
+	static const char *directives[] = {
+		"translucent", "translucent noShadows", "translucent DECAL_MACRO",
+		"translucent noShadows forceShadows", "translucent forceShadows noShadows"
+	};
+	for ( int test = 0; test < 5; ++test ) {
+		idDecl *decl = declManager->AllocateDecl( DECL_MATERIAL );
+		if ( decl == NULL ) {
+			return false;
+		}
+		idMaterial *material = static_cast<idMaterial *>( decl );
+		char source[256];
+		idStr::snPrintf( source, sizeof( source ),
+			"material _shadow_noShadows_selftest { %s { blend diffusemap map _white } }", directives[test] );
+		const bool blocked = test == 1 || test == 2;
+		const bool ok = material->Parse( source, static_cast<int>( strlen( source ) ) ) &&
+			material->Coverage() == MC_TRANSLUCENT &&
+			material->TestMaterialFlag( MF_NOSHADOWS ) &&
+			material->ExplicitlyDisablesShadows() == blocked &&
+			R_TranslucentStencilCasterEligible( material, true ) == !blocked &&
+			!R_TranslucentStencilCasterEligible( material, false ) &&
+			R_ShadowMapShaderCanCastTranslucent( material ) == !blocked &&
+			material->SurfaceCastsShadow() == ( test >= 3 );
+		DeclManager_FreeAllocatedDecl( decl );
+		if ( !ok ) {
+			common->Printf( "ShadowMap explicit noShadows self-test failed: %s\n", directives[test] );
+			return false;
+		}
+	}
+	common->Printf( "ShadowMap explicit noShadows self-test passed: 5 parsed material policies\n" );
+	return true;
 }
 
 static bool R_ShadowMapShaderSpectrumMatchesLight( const idMaterial *shader, const idRenderLightLocal *lightDef ) {
@@ -416,6 +530,8 @@ static void R_LinkShadowMapCasterSurf( const drawSurf_t **link, const srfTriangl
 
 	drawSurf_t *drawSurf = (drawSurf_t *)R_FrameAlloc( sizeof( *drawSurf ) );
 	drawSurf->geo = tri;
+	drawSurf->pbrLightGeo = NULL;
+	drawSurf->previousPositionCache = NULL;
 	drawSurf->space = space;
 	drawSurf->material = shader;
 	drawSurf->sort = 0.0f;
@@ -497,15 +613,17 @@ static int R_ShadowMapHashInt( int hash, const int value ) {
 	return static_cast<int>( ( h ^ v ) * 16777619u );
 }
 
-static int R_ShadowMapHashFloat( int hash, const float value ) {
-	return R_ShadowMapHashInt( hash, idMath::Ftoi( value * 1024.0f ) );
-}
-
 static int R_ShadowMapHashString( int hash, const char *value ) {
 	return R_ShadowMapHashInt( hash, value != NULL ? idStr::Hash( value ) : 0 );
 }
 
-static bool R_ShadowMapCasterIsDynamic( const idRenderEntityLocal *entityDef ) {
+static bool R_ShadowMapCasterIsDynamic( const idRenderEntityLocal *entityDef, const idMaterial *shader ) {
+	// Cutout coverage can change through stage conditions, image animation,
+	// or texture matrices without an entity update. Keep that depth live while
+	// allowing the opaque static scene to remain resident.
+	if ( shader != NULL && shader->Coverage() == MC_PERFORATED ) {
+		return true;
+	}
 	if ( entityDef == NULL || entityDef->parms.hModel == NULL ) {
 		return true;
 	}
@@ -518,7 +636,12 @@ static bool R_ShadowMapCasterIsDynamic( const idRenderEntityLocal *entityDef ) {
 	// frame. A resting entity's pose cannot change without one of the two
 	// frame counters advancing, and either advance also changes the caster
 	// signature hash, so reuse stays correct when it wakes.
-	const int recentFrame = tr.frameCount - 1;
+	//
+	// "Changing" spans the frames of about a quarter second, not one frame: an
+	// entity the game updates once a tic is untouched on the frames between
+	// tics whenever the display outruns the tic rate, and a one-frame window
+	// then moved it into the static set and back every tic.
+	const int recentFrame = tr.frameCount - R_ShadowMapDynamicCasterFrames();
 	if ( entityDef->lastModifiedFrameNum >= recentFrame ) {
 		return true;
 	}
@@ -529,12 +652,15 @@ static bool R_ShadowMapCasterIsDynamic( const idRenderEntityLocal *entityDef ) {
 	return hasDynamicGeometry && entityDef->dynamicModelFrameCount >= recentFrame;
 }
 
-static void R_RecordShadowMapCaster( viewLight_t *vLight, const idRenderEntityLocal *entityDef, const idMaterial *shader, const bool translucent, const bool expandedCaster ) {
+static void R_RecordShadowMapCaster( viewLight_t *vLight,
+		const idRenderEntityLocal *entityDef, const idMaterial *shader,
+		const srfTriangles_t *casterTris, const bool translucent,
+		const bool expandedCaster ) {
 	if ( vLight == NULL ) {
 		return;
 	}
 
-	const bool dynamicCaster = R_ShadowMapCasterIsDynamic( entityDef );
+	const bool dynamicCaster = R_ShadowMapCasterIsDynamic( entityDef, shader );
 	vLight->shadowMapCasterCount++;
 	if ( shader != NULL && shader->Coverage() == MC_PERFORATED ) {
 		vLight->shadowMapAlphaCasterCount++;
@@ -563,10 +689,27 @@ static void R_RecordShadowMapCaster( viewLight_t *vLight, const idRenderEntityLo
 	hash = R_ShadowMapHashInt( hash, shader != NULL ? static_cast<int>( shader->Coverage() ) : -1 );
 	hash = R_ShadowMapHashString( hash, shader != NULL ? shader->GetName() : NULL );
 	hash = R_ShadowMapHashInt( hash, shader != NULL ? shader->GetNumStages() : 0 );
+	hash = R_ShadowMapHashInt( hash,
+		shader != NULL ? static_cast<int>( shader->GetCullType() ) : -1 );
 	hash = R_ShadowMapHashInt( hash, translucent ? 1 : 0 );
 	hash = R_ShadowMapHashInt( hash, expandedCaster ? 1 : 0 );
+	if ( casterTris != NULL ) {
+		// Automatic caster culling depends on these live geometry properties.
+		// Include them in the physical cache identity so model/decl reloads or
+		// topology changes cannot reuse depth rendered under another policy.
+		hash = R_ShadowMapHashInt( hash, casterTris->perfectHull ? 1 : 0 );
+		hash = R_ShadowMapHashInt( hash, casterTris->numVerts );
+		hash = R_ShadowMapHashInt( hash, casterTris->numIndexes );
+		for ( int corner = 0; corner < 2; ++corner ) {
+			for ( int component = 0; component < 3; ++component ) {
+				hash = R_ShadowMapHashFloat( hash,
+					casterTris->bounds[ corner ][ component ] );
+			}
+		}
+	}
 	if ( entityDef != NULL ) {
 		hash = R_ShadowMapHashInt( hash, entityDef->lastModifiedFrameNum );
+		hash = R_ShadowMapHashInt( hash, entityDef->dynamicModelFrameCount );
 		for ( int i = 0; i < 16; i++ ) {
 			hash = R_ShadowMapHashFloat( hash, entityDef->modelMatrix[i] );
 		}
@@ -731,6 +874,32 @@ static bool R_ShouldSkipPointLightEmitterCaster( const idMaterial *shadowShader,
 	return ambientTris->bounds.Expand( emitterBoundsPad ).ContainsPoint( localLightOrigin );
 }
 
+// Lifetime-cached wrapper: the emitter-panel test walks the surface geometry
+// building a plane and bounds, and its inputs are invariant for the surface
+// interaction's lifetime, so evaluate it at most once per interaction instead
+// of per visible frame. Only point (non-parallel) lights can skip.
+static bool R_CachedShouldSkipPointLightEmitterCaster( surfaceInteraction_t *sint, const viewLight_t *vLight,
+		const idMaterial *shadowShader, const idVec3 &localLightOrigin, const idVec3 &localLightRadius ) {
+	if ( sint == NULL ) {
+		return vLight->pointLight && !vLight->parallel &&
+			R_ShouldSkipPointLightEmitterCaster( shadowShader, NULL, localLightOrigin, localLightRadius );
+	}
+	if ( !( vLight->pointLight && !vLight->parallel ) ) {
+		return false;
+	}
+	if ( !sint->pointEmitterCasterVerdictValid ) {
+		sint->pointEmitterCasterSkip = R_ShouldSkipPointLightEmitterCaster(
+			shadowShader, sint->ambientTris, localLightOrigin, localLightRadius ) &&
+			// The geometric heuristic also catches real blockers near a light
+			// (for example Storage 2's lift panel). A nonempty surface volume
+			// proves that this surface must participate in the depth map too.
+			!( sint->shadowStencilEligible && !sint->shadowStencilUsesPrelight &&
+				sint->shadowTris != NULL );
+		sint->pointEmitterCasterVerdictValid = true;
+	}
+	return sint->pointEmitterCasterSkip;
+}
+
 static void R_BoundInteractionSurface( const srfTriangles_t *tri, const glIndex_t *indexes, int numIndexes, idBounds &bounds ) {
 	if ( numIndexes <= 0 ) {
 		bounds.Clear();
@@ -884,9 +1053,16 @@ The resulting surface will be a subset of the original triangles,
 it will never clip triangles, but it may cull on a per-triangle basis.
 ====================
 */
+static bool R_LightIncludesBackFaces( const idRenderEntityLocal *ent,
+		const idRenderLightLocal *light, const idMaterial *shader ) {
+	return r_lightAllBackFaces.GetBool() || light->lightShader->LightEffectsBackSides()
+		|| shader->ReceivesLightingOnBackSides() || ent->parms.noSelfShadow || ent->parms.noShadow;
+}
+
 static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent, 
 									 const srfTriangles_t *tri, const idRenderLightLocal *light,
-									 const idMaterial *shader, srfCullInfo_t &cullInfo ) {
+									 const idMaterial *shader, srfCullInfo_t &cullInfo,
+									 bool allFaces = false, bool keepEmpty = false ) {
 	int			i;
 	int			numIndexes;
 	glIndex_t	*indexes;
@@ -905,13 +1081,7 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
 	indexes = NULL;
 
 	// it is debatable if non-shadowing lights should light back faces. we aren't at the moment
-	if ( r_lightAllBackFaces.GetBool() || light->lightShader->LightEffectsBackSides()
-			|| shader->ReceivesLightingOnBackSides()
-				|| ent->parms.noSelfShadow || ent->parms.noShadow  ) {
-		includeBackFaces = true;
-	} else {
-		includeBackFaces = false;
-	}
+	includeBackFaces = allFaces || R_LightIncludesBackFaces( ent, light, shader );
 
 	// allocate a new surface for the lit triangles
 	newTri = R_AllocStaticTriSurf();
@@ -949,7 +1119,7 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
 		const byte *facing = includeBackFaces ? NULL : cullInfo.facing;
 		const byte *cullBits = ( cullInfo.cullBits == LIGHT_CULL_ALL_FRONT ) ? NULL : cullInfo.cullBits;
 		if ( R_MD5R_CreateLightTris( *tri, newTri, c_backfaced, c_distance, facing, cullBits, includeBackFaces ) ) {
-			if ( newTri->numIndexes == 0 ) {
+			if ( newTri->numIndexes == 0 && !keepEmpty ) {
 				R_ReallyFreeStaticTriSurf( newTri );
 				return NULL;
 			}
@@ -1063,7 +1233,7 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
 		R_ResizeStaticTriSurfIndexes( newTri, numIndexes );
 	}
 
-	if ( !numIndexes ) {
+	if ( !numIndexes && !keepEmpty ) {
 		R_ReallyFreeStaticTriSurf( newTri );
 		return NULL;
 	}
@@ -1073,6 +1243,38 @@ static srfTriangles_t *R_CreateLightTris( const idRenderEntityLocal *ent,
 	newTri->bounds = bounds;
 
 	return newTri;
+}
+
+// Store both choices before backend resource admission. Changing quality
+// switches or failing a native descriptor allocation must not change classic
+// triangle coverage. A zero-index classic surface is retained when PBR can
+// still illuminate it, so entirely back-facing geometric normals work too.
+static void R_CreateInteractionLightTris( const idRenderEntityLocal *ent,
+		const idRenderLightLocal *light, surfaceInteraction_t *sint ) {
+	bool needsPBR = false;
+	// Native owners: Vulkan and the classic OpenGL light loop (draw_pbr.cpp).
+#if !defined( OPENQ4_RENDERER_GLES_MODULE )
+	needsPBR = sint->shader->HasPBR() && !light->lightShader->IsAmbientLight()
+		&& !light->lightShader->IsFogLight() && !light->lightShader->IsBlendLight()
+		&& !R_LightIncludesBackFaces( ent, light, sint->shader );
+#endif
+	sint->lightTris = R_CreateLightTris( ent, sint->ambientTris, light,
+		sint->shader, sint->cullInfo, false, needsPBR );
+	if ( needsPBR && sint->lightTris != NULL
+			&& sint->lightTris->numIndexes != sint->ambientTris->numIndexes ) {
+		sint->pbrLightTris = R_CreateLightTris( ent, sint->ambientTris, light,
+			sint->shader, sint->cullInfo, true );
+		if ( sint->pbrLightTris != NULL ) {
+			// The PBR set contains the classic set. Use its bounds for view
+			// admission without changing the classic draw's actual indexes.
+			sint->lightTris->bounds = sint->pbrLightTris->bounds;
+		}
+	}
+	if ( sint->lightTris != NULL && sint->lightTris->numIndexes == 0
+			&& sint->pbrLightTris == NULL ) {
+		R_ReallyFreeStaticTriSurf( sint->lightTris );
+		sint->lightTris = NULL;
+	}
 }
 
 /*
@@ -1151,6 +1353,26 @@ idInteraction::idInteraction( void ) {
 	dynamicModelFrameCount	= 0;
 	frustumState			= FRUSTUM_UNINITIALIZED;
 	frustumAreas			= NULL;
+	stencilReceiverGeneration	= -1;
+	stencilReceiverNeeded		= false;
+	buildModel				= NULL;
+	unbuiltVisitView		= -1;
+	shadowVolumesSuppressed	= false;
+}
+
+/*
+===============
+R_InvalidateShadowMapReceiverScan
+
+R_ShadowMapLightWillUseShadowMaps memoizes the Vulkan receiver scan of a light
+on its view light for the current view. Any change to the set or state of the
+light's interactions can change that verdict.
+===============
+*/
+static void R_InvalidateShadowMapReceiverScan( const idRenderLightLocal *lightDef ) {
+	if ( lightDef != NULL && lightDef->viewCount == tr.viewCount && lightDef->viewLight != NULL ) {
+		lightDef->viewLight->shadowMapReceiverScanValid = false;
+	}
 }
 
 /*
@@ -1178,6 +1400,12 @@ idInteraction *idInteraction::AllocAndLink( idRenderEntityLocal *edef, idRenderL
 
 	interaction->frustumState = idInteraction::FRUSTUM_UNINITIALIZED;
 	interaction->frustumAreas = NULL;
+
+	interaction->stencilReceiverGeneration = -1;
+	interaction->stencilReceiverNeeded = false;
+	interaction->buildModel = NULL;
+	interaction->unbuiltVisitView = -1;
+	interaction->shadowVolumesSuppressed = false;
 
 	// link at the start of the entity's list
 	interaction->lightNext = ldef->firstInteraction;
@@ -1208,6 +1436,9 @@ idInteraction *idInteraction::AllocAndLink( idRenderEntityLocal *edef, idRenderL
 		renderWorld->interactionTable[ index ] = interaction;
 	}
 
+	// an unbuilt interaction leaves the light's receivers unknown
+	R_InvalidateShadowMapReceiverScan( ldef );
+
 	return interaction;
 }
 
@@ -1230,6 +1461,10 @@ void idInteraction::FreeSurfaces( void ) {
 				}
 				sint->lightTris = NULL;
 			}
+			if ( sint->pbrLightTris != NULL ) {
+				R_FreeStaticTriSurf( sint->pbrLightTris );
+				sint->pbrLightTris = NULL;
+			}
 			if ( sint->shadowTris ) {
 				// if it doesn't have an entityDef, it is part of a prelight
 				// model, not a generated interaction
@@ -1245,6 +1480,11 @@ void idInteraction::FreeSurfaces( void ) {
 		this->surfaces = NULL;
 	}
 	this->numSurfaces = -1;
+	this->stencilReceiverGeneration = -1;
+	this->buildModel = NULL;
+	this->unbuiltVisitView = -1;
+	this->shadowVolumesSuppressed = false;
+	R_InvalidateShadowMapReceiverScan( this->lightDef );
 }
 
 /*
@@ -1253,6 +1493,8 @@ idInteraction::Unlink
 ===============
 */
 void idInteraction::Unlink( void ) {
+
+	R_InvalidateShadowMapReceiverScan( this->lightDef );
 
 	// unlink from the entity's list
 	if ( this->entityPrev ) {
@@ -1326,6 +1568,8 @@ void idInteraction::MakeEmpty( void ) {
 
 	// an empty interaction has no surfaces
 	numSurfaces = 0;
+	stencilReceiverGeneration = -1;
+	buildModel = NULL;
 
 	Unlink();
 
@@ -1377,6 +1621,7 @@ int idInteraction::MemoryUsed( void ) {
 		surfaceInteraction_t *inter = &surfaces[i];
 
 		total += R_TriSurfMemory( inter->lightTris );
+		total += R_TriSurfMemory( inter->pbrLightTris );
 		total += R_TriSurfMemory( inter->shadowTris );
 	}
 
@@ -1533,6 +1778,8 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 
 	tr.pc.c_createInteractions++;
 
+	R_ShadowMapNoteEntityModel( entityDef, model );
+
 	bounds = model->Bounds( &entityDef->parms );
 
 	// if it doesn't contact the light frustum, none of the surfaces will
@@ -1556,6 +1803,21 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 	//
 	numSurfaces = model->NumSurfaces();
 	surfaces = (surfaceInteraction_t *)R_ClearedStaticAlloc( sizeof( *surfaces ) * numSurfaces );
+
+	// Slots after the current one are still NULL while the loop below runs.
+	// Until it finishes, the Vulkan receiver verdict for this interaction
+	// covers every surface of the model (R_ShadowMapLightWillUseShadowMaps).
+	buildModel = model;
+	stencilReceiverGeneration = -1;
+	R_InvalidateShadowMapReceiverScan( lightDef );
+	shadowVolumesSuppressed = false;
+
+	// The model handed in is the entity's instantiated snapshot, which is
+	// always a static model. Whether its volumes are regenerated every time
+	// the entity animates is a property of the model it was instantiated from.
+	const bool entityModelIsDynamic =
+		entityDef->parms.hModel != NULL &&
+		entityDef->parms.hModel->IsDynamicModel() != DM_STATIC;
 
 	interactionGenerated = false;
 	const bool interactionHasShadows = HasShadows();
@@ -1609,7 +1871,7 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 		// Fog and blend lights follow the separate `noFog` interaction path.
 		if ( R_SurfaceShaderCreatesLightTris( shader, lightShader ) ) {
 			if ( tri->ambientViewCount == tr.viewCount ) {
-				sint->lightTris = R_CreateLightTris( entityDef, tri, lightDef, shader, sint->cullInfo );
+				R_CreateInteractionLightTris( entityDef, lightDef, sint );
 			} else {
 				// this will be calculated when sint->ambientTris is actually in view
 				sint->lightTris = LIGHT_TRIS_DEFERRED;
@@ -1618,11 +1880,7 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 		}
 
 		const bool allowTranslucentStencilShadowCaster =
-			r_stencilTranslucentShadows.GetBool() &&
-			shader->Coverage() == MC_TRANSLUCENT &&
-			shader->ReceivesLighting() &&
-			!shader->HasGui() &&
-			!shader->HasSubview();
+			R_TranslucentStencilCasterEligible( shader, r_stencilTranslucentShadows.GetBool() );
 		const bool dedicatedCollisionSurface = shader->IsDedicatedCollisionSurface();
 		const bool surfaceCanCastInteractionShadow =
 			interactionHasShadows &&
@@ -1652,7 +1910,7 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 			R_LightHasRealPrelightModel( lightDef->parms ) &&
 			model->IsStaticWorldModel() &&
 			r_useOptimizedShadows.GetBool() &&
-			!R_VulkanShadowMapsNeedPerSurfaceStencilVolumes( lightDef );
+			!R_ShadowMapsNeedPerSurfaceStencilVolumes( lightDef );
 
 		// A thin panel surrounding its owning point-light origin is excluded
 		// from the point depth map. Probe its retail stencil path even when
@@ -1685,18 +1943,22 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 			interactionGenerated = true;
 		}
 
-		// Dynamic-model volumes are regenerated every frame, so they can be
-		// elided while the light renders shadow maps; the next regeneration
-		// restores them if the backend flags a fallback. Static volumes are
-		// built once and kept so the per-light stencil fallback stays instant.
+		// Dynamic-model volumes are regenerated every time the entity
+		// animates, so they are left out while the light renders shadow maps.
+		// AddActiveInteraction builds the surfaces again, with their volumes,
+		// once the light returns to stencil. Static volumes are built once
+		// and kept so the per-light stencil fallback stays instant.
 		const bool suppressDynamicShadowVolume =
 			surfaceCanCastStencilShadowVolume && shadowLODAdmitted &&
-			model->IsDynamicModel() != DM_STATIC &&
+			( surfaceCanCastDedicatedShadowMap ||
+				surfaceCanCastTranslucentShadowMap ) &&
+			entityModelIsDynamic &&
 			!forcePointEmitterStencilGeneration &&
 			R_ShadowMapLightWillUseShadowMaps( lightDef );
 		if ( suppressDynamicShadowVolume ) {
 			// shadow ownership stays with this interaction even without volumes
 			interactionGenerated = true;
+			shadowVolumesSuppressed = true;
 		} else if ( sint->shadowStencilEligible ) {
 
 			// if the light has an optimized shadow volume, don't create shadows for any models that are part of the base areas
@@ -1722,6 +1984,11 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 			R_FreeInteractionCullInfo( sint->cullInfo );
 		}
 	}
+
+	// the slots are final: only the filled ones are receivers from now on
+	buildModel = NULL;
+	stencilReceiverGeneration = -1;
+	R_InvalidateShadowMapReceiverScan( lightDef );
 
 	// if none of the surfaces generated anything, don't even bother checking?
 	if ( !interactionGenerated ) {
@@ -1814,6 +2081,25 @@ instantiate the dynamic model to find out
 ==================
 */
 void idInteraction::AddActiveInteraction( void ) {
+	// This is the only place an interaction is built, and it runs once per
+	// interaction per view. One still unbuilt when it returns links no
+	// receivers in this view; record that for the receiver scan.
+	struct unbuiltVisitMark_t {
+		idInteraction *	inter;
+		~unbuiltVisitMark_t() {
+			if ( inter->IsDeferred() ) {
+				inter->unbuiltVisitView = tr.viewCount;
+				R_InvalidateShadowMapReceiverScan( inter->lightDef );
+			}
+		}
+	} unbuiltVisitMark = { this };
+
+	// Probe lights are environment metadata, including interactions prepared
+	// at level load before R_AddLightSurfaces applies its per-view probe gate.
+	// Never publish those cached interactions into the classic fallback lists.
+	if ( lightDef->lightShader != NULL && lightDef->lightShader->HasSpecularProbe() ) {
+		return;
+	}
 	viewLight_t *	vLight;
 	viewEntity_t *	vEntity;
 	idScreenRect	shadowScissor;
@@ -1907,6 +2193,18 @@ void idInteraction::AddActiveInteraction( void ) {
 	}
 	dynamicModelFrameCount = entityDef->dynamicModelFrameCount;
 
+	// These surfaces were built without their dynamic volumes for a light that
+	// was going to render shadow maps. An entity that has stopped animating
+	// keeps them, so build them again once the light returns to stencil for
+	// every view: the sticky fallback, an update budget, a receiver that needs
+	// stencil. A subview policy alone is not such a return. There the missing
+	// volumes already make the map required, and rebuilding would repeat for
+	// every frame the main view and a subview share an animating entity.
+	if ( !IsDeferred() && shadowVolumesSuppressed
+			&& !R_ShadowMapLightWillUseShadowMaps( lightDef, false ) ) {
+		FreeSurfaces();
+	}
+
 	// actually create the interaction if needed, building light and shadow surfaces as needed
 	if ( IsDeferred() ) {
 		CreateInteraction( model );
@@ -1922,6 +2220,41 @@ void idInteraction::AddActiveInteraction( void ) {
 
 	bool lightScissorsEmpty = lightScissor.IsEmpty();
 
+	// Shadow-map admission policy that is invariant across this interaction's
+	// surfaces, hoisted out of the per-surface loop (mirrors CreateInteraction).
+	// translucentShadowMapSupported is only consumed when the caster policy is
+	// active and the interaction has shadows, so the extra guards keep the
+	// default stencil-only configuration from paying the by-name cvar lookup.
+	// Disabling shadows intentionally leaves the map chains empty. Do not treat
+	// that as failed admission and poison the light's sticky fallback state.
+	const bool shadowMapCasterPolicyActive =
+		r_shadows.GetBool() && r_useShadowMap.GetBool() &&
+		( !vLight->pointLight || vLight->parallel || r_shadowMapPointLights.GetBool() );
+	const bool isViewOnlyEntity =
+		( entityDef->parms.allowSurfaceInViewID != 0 &&
+			entityDef->parms.allowSurfaceInViewID == R_EffectiveViewIDForSubview() ) ||
+		( entityDef->parms.weaponDepthHackInViewID != 0 &&
+			entityDef->parms.weaponDepthHackInViewID == R_EffectiveViewIDForSubview() );
+	const bool shadowMapsEnabled = r_shadows.GetBool() && r_useShadowMap.GetBool();
+	const bool translucentShadowMapSupported =
+		interactionHasShadows &&
+		shadowMapCasterPolicyActive &&
+		shadowMapsEnabled &&
+		R_TranslucentShadowMapMomentsSupportedForLight( lightDef );
+	// dmap folds every static-world caster of a prelit light into one volume,
+	// and retail links that volume as a GLOBAL shadow: it darkens noSelfShadow
+	// receivers as well (R_AddOptimizedPrelightShadows). A mapped light draws
+	// those casters surface by surface instead, so they keep that ownership.
+	// Routed by material, a noSelfShadow pillar or cargo container stopped
+	// shadowing the marine behind it, and its light needed a second map.
+	const bool prelightOwnsShadows =
+		interactionHasShadows &&
+		shadowMapCasterPolicyActive &&
+		r_useOptimizedShadows.GetBool() &&
+		entityDef->parms.hModel != NULL &&
+		entityDef->parms.hModel->IsStaticWorldModel() &&
+		R_LightHasRealPrelightModel( lightDef->parms );
+
 	// for each surface of this entity / light interaction
 	for ( int i = 0; i < numSurfaces; i++ ) {
 		surfaceInteraction_t *sint = &surfaces[i];
@@ -1932,7 +2265,7 @@ void idInteraction::AddActiveInteraction( void ) {
 			// make sure we have created this interaction, which may have been deferred
 			// on a previous use that only needed the shadow
 			if ( sint->lightTris == LIGHT_TRIS_DEFERRED ) {
-				sint->lightTris = R_CreateLightTris( vEntity->entityDef, sint->ambientTris, vLight->lightDef, sint->shader, sint->cullInfo );
+				R_CreateInteractionLightTris( vEntity->entityDef, vLight->lightDef, sint );
 				R_FreeInteractionCullInfo( sint->cullInfo );
 			}
 
@@ -1997,6 +2330,8 @@ void idInteraction::AddActiveInteraction( void ) {
 								// surface's live cache when the interaction is later freed
 								srfTriangles_t *frameTris = (srfTriangles_t *)R_FrameAlloc( sizeof( *frameTris ) );
 								*frameTris = *lightTris;
+								frameTris->gpuSkinningJointPaletteAlloc = NULL;
+								frameTris->numGpuSkinningJointPaletteAllocJoints = 0;
 								lightTris->ambientCache = NULL;
 								lightTris->tempAmbientCache = false;
 								lightTris->indexCache = NULL;
@@ -2028,6 +2363,19 @@ void idInteraction::AddActiveInteraction( void ) {
 					}
 
 					// add the surface to the light list
+					// Borrow this frame's ambient vertex cache in a frame copy.
+					// The heap-owned PBR indexes survive until FreeSurfaces; frame
+					// cache handles must never survive there, especially for MD5R.
+					srfTriangles_t *pbrLightGeo = NULL;
+					if ( sint->pbrLightTris != NULL ) {
+						pbrLightGeo = (srfTriangles_t *)R_FrameAlloc( sizeof( *pbrLightGeo ) );
+						*pbrLightGeo = *sint->pbrLightTris;
+						pbrLightGeo->ambientCache = lightTris->ambientCache;
+						pbrLightGeo->tempAmbientCache = lightTris->tempAmbientCache;
+						pbrLightGeo->indexCache = NULL;
+						pbrLightGeo->gpuSkinningJointPaletteAlloc = NULL;
+						pbrLightGeo->numGpuSkinningJointPaletteAllocJoints = 0;
+					}
 
 					const idMaterial *surfaceShader = sint->shader;
 					const bool materialNoSelfShadow = surfaceShader->TestMaterialFlag( MF_NOSELFSHADOW );
@@ -2043,13 +2391,13 @@ void idInteraction::AddActiveInteraction( void ) {
 					// swaps the shader that will actually be drawn for the light pass.
 					if ( surfaceCoverage == MC_TRANSLUCENT ) {
 						R_LinkLightSurf( &vLight->translucentInteractions, lightTris, 
-							vEntity, lightDef, shader, lightScissor, false );
+							vEntity, lightDef, shader, lightScissor, false, pbrLightGeo );
 					} else if ( !lightDef->parms.noShadows && materialNoSelfShadow ) {
 						R_LinkLightSurf( &vLight->localInteractions, lightTris, 
-							vEntity, lightDef, shader, lightScissor, false );
+							vEntity, lightDef, shader, lightScissor, false, pbrLightGeo );
 					} else {
 						R_LinkLightSurf( &vLight->globalInteractions, lightTris, 
-							vEntity, lightDef, shader, lightScissor, false );
+							vEntity, lightDef, shader, lightScissor, false, pbrLightGeo );
 					}
 				}
 			}
@@ -2082,14 +2430,13 @@ void idInteraction::AddActiveInteraction( void ) {
 
 		// Shadow ownership and shadow-admission policy stay tied to the original
 		// interaction material. Retail does not let global shader overrides change
-		// whether a surface casts or locally routes its shadows.
-		const bool materialNoSelfShadow = shadowShader->TestMaterialFlag( MF_NOSELFSHADOW );
+		// whether a surface casts or locally routes its shadows. The static world
+		// under a prelit light is the exception retail makes: global ownership.
+		const bool materialNoSelfShadow = !prelightOwnsShadows
+			&& shadowShader->TestMaterialFlag( MF_NOSELFSHADOW );
 		const int shadowReceiverMask = materialNoSelfShadow
 			? SHADOWMAP_RECEIVER_MASK_GLOBAL
 			: ( SHADOWMAP_RECEIVER_MASK_LOCAL | SHADOWMAP_RECEIVER_MASK_GLOBAL );
-		const bool shadowMapCasterPolicyActive =
-			r_useShadowMap.GetBool() &&
-			( !vLight->pointLight || vLight->parallel || r_shadowMapPointLights.GetBool() );
 		bool admittedShadowMapCaster = false;
 		bool linkedShadowMapCaster = false;
 
@@ -2100,19 +2447,20 @@ void idInteraction::AddActiveInteraction( void ) {
 		// (r_shadowMapPointLights 0 previously built full caster chains the
 		// backend never consumed)
 		if ( shadowMapCasterPolicyActive ) {
-			const bool isViewOnlyEntity =
-				( entityDef->parms.allowSurfaceInViewID != 0 &&
-					entityDef->parms.allowSurfaceInViewID == R_EffectiveViewIDForSubview() ) ||
-				( entityDef->parms.weaponDepthHackInViewID != 0 &&
-					entityDef->parms.weaponDepthHackInViewID == R_EffectiveViewIDForSubview() );
 			const bool shadowMapNoSelfShadow = materialNoSelfShadow;
-			const bool shadowMapsEnabled = r_shadows.GetBool() && r_useShadowMap.GetBool();
-			const bool translucentShadowMapSupported =
-				shadowMapsEnabled &&
-				R_TranslucentShadowMapMomentsSupportedForLight( lightDef );
+			// The stencil representation settles its LOD verdict when the
+			// surfaces are built: one that got a volume casts from it for as
+			// long as the interaction lives. The map has to agree. Asked
+			// again for every view, it dropped a caster the camera had moved
+			// away from (shadow_lod_distance is 768 units for every game
+			// entity) while the volume stayed, which reads as a caster the
+			// map cannot hold and turned the light to its stencil supplement
+			// for good. A surface built without a volume still joins the map
+			// once a view's coverage or distance admits it.
+			const bool casterLODAdmitted = sint->shadowStencilEligible
+				|| R_CachedInteractionShadowLODAdmitted( sint, entityDef );
 			const bool skipPointLightEmitterCaster =
-				vLight->pointLight && !vLight->parallel &&
-				R_ShouldSkipPointLightEmitterCaster( shadowShader, sint->ambientTris, localLightOrigin, lightDef->parms.lightRadius );
+				R_CachedShouldSkipPointLightEmitterCaster( sint, vLight, shadowShader, localLightOrigin, lightDef->parms.lightRadius );
 			const bool sameSpectrumShadowMapCaster =
 				R_ShadowMapShaderSpectrumMatchesLight( shadowShader, lightDef );
 			const bool allowShadowMapCaster =
@@ -2128,7 +2476,7 @@ void idInteraction::AddActiveInteraction( void ) {
 				!skipPointLightEmitterCaster &&
 				( R_ShadowMapShaderCanCastOpaque( shadowShader ) ||
 					( !translucentShadowMapSupported && R_ShadowMapShaderCanCastStencilParityTranslucent( shadowShader ) ) ) &&
-				R_CachedInteractionShadowLODAdmitted( sint, entityDef );
+				casterLODAdmitted;
 			const bool allowTranslucentShadowMapCaster =
 				translucentShadowMapSupported &&
 				!entityDef->parms.noShadow &&
@@ -2137,13 +2485,13 @@ void idInteraction::AddActiveInteraction( void ) {
 				sint->ambientTris != NULL &&
 				sameSpectrumShadowMapCaster &&
 				R_ShadowMapShaderCanCastTranslucent( shadowShader ) &&
-				R_CachedInteractionShadowLODAdmitted( sint, entityDef );
+				casterLODAdmitted;
 			admittedShadowMapCaster =
 				allowShadowMapCaster ||
 				allowTranslucentShadowMapCaster;
 
 			if ( sint->ambientTris != NULL && !allowShadowMapCaster && !allowTranslucentShadowMapCaster ) {
-				R_RecordShadowMapRejectedCaster( vLight, R_ClassifyShadowMapCasterReject( entityDef, vEntity, sint, shadowShader, isViewOnlyEntity, translucentShadowMapSupported, skipPointLightEmitterCaster, sameSpectrumShadowMapCaster, R_CachedInteractionShadowLODAdmitted( sint, entityDef ) ) );
+				R_RecordShadowMapRejectedCaster( vLight, R_ClassifyShadowMapCasterReject( entityDef, vEntity, sint, shadowShader, isViewOnlyEntity, translucentShadowMapSupported, skipPointLightEmitterCaster, sameSpectrumShadowMapCaster, casterLODAdmitted ) );
 			}
 
 			if ( allowShadowMapCaster ) {
@@ -2153,11 +2501,12 @@ void idInteraction::AddActiveInteraction( void ) {
 				if ( haveCasterGeometry ) {
 					R_TouchShadowMapCache( casterTris->ambientCache );
 					R_TouchShadowMapCache( casterTris->indexCache );
-					R_RecordShadowMapCaster( vLight, entityDef, shadowShader, false, shadowMapCasterOnly );
+					R_RecordShadowMapCaster( vLight, entityDef, shadowShader,
+						casterTris, false, shadowMapCasterOnly );
 
 					// dynamic casters go to their own chains so cached static
 					// tiles stay valid while they move (composed per frame)
-					const bool dynamicCasterSurf = R_ShadowMapCasterIsDynamic( entityDef );
+					const bool dynamicCasterSurf = R_ShadowMapCasterIsDynamic( entityDef, shadowShader );
 					if ( shadowMapNoSelfShadow ) {
 						R_LinkShadowMapCasterSurf( dynamicCasterSurf ? &vLight->localShadowMapDynamicCasters : &vLight->localShadowMapCasters,
 							casterTris, vEntity, &entityDef->parms, shadowShader, shadowScissor );
@@ -2176,7 +2525,8 @@ void idInteraction::AddActiveInteraction( void ) {
 				if ( haveCasterGeometry ) {
 					R_TouchShadowMapCache( casterTris->ambientCache );
 					R_TouchShadowMapCache( casterTris->indexCache );
-					R_RecordShadowMapCaster( vLight, entityDef, shadowShader, true, shadowMapCasterOnly );
+					R_RecordShadowMapCaster( vLight, entityDef, shadowShader,
+						casterTris, true, shadowMapCasterOnly );
 
 					if ( shadowMapNoSelfShadow ) {
 						R_LinkShadowMapCasterSurf( &vLight->localTranslucentShadowMapCasters,
@@ -2191,14 +2541,23 @@ void idInteraction::AddActiveInteraction( void ) {
 		}
 
 		srfTriangles_t *shadowTris = sint->shadowTris;
+		// Use this surface's cached stencil eligibility as provenance rather than
+		// the presence of a generated volume: eligible dynamic volumes may have
+		// been suppressed for mapped rendering, and generation/cache setup can
+		// fail. Conservative caster-only interactions must retain that same
+		// surface's stencil representation when map admission fails, without
+		// pulling unrelated or ineligible volumes into the hybrid chains.
 		const bool mapMissingCasterNeedsStencil =
 			shadowMapCasterPolicyActive &&
 			!sint->shadowStencilUsesPrelight &&
 			!linkedShadowMapCaster &&
 			( admittedShadowMapCaster ||
-				shadowTris != NULL ) &&
-			( !shadowMapCasterOnly ||
-				admittedShadowMapCaster );
+				( sint->shadowStencilEligible &&
+					// Emitter panels are deliberately absent from the depth map.
+					// CreateInteraction probes their stencil volume even when
+					// volumes would be elided. An empty probe has no occlusion
+					// to recover and must not invalidate every other caster.
+					( !sint->pointEmitterCasterSkip || shadowTris != NULL ) ) );
 		const bool prelightMapMissingCasterNeedsStencil =
 			shadowMapCasterPolicyActive &&
 			sint->shadowStencilUsesPrelight &&
@@ -2206,6 +2565,13 @@ void idInteraction::AddActiveInteraction( void ) {
 		if ( ( mapMissingCasterNeedsStencil ||
 				prelightMapMissingCasterNeedsStencil ) &&
 			lightDef != NULL ) {
+			if ( r_shadowMapReport.GetInteger() >= 2 && !lightDef->shadowMapStencilFallbackSticky ) {
+				common->Printf( "SM missing caster: light=%d shader=%s entity=%d model=%s material=%s admitted=%d eligible=%d volume=%d prelight=%d viewOnly=%d depthHack=%g\n",
+					lightDef->index, lightDef->lightShader->GetName(), entityDef->index,
+					model->Name(), shadowShader->GetName(), admittedShadowMapCaster,
+					sint->shadowStencilEligible, shadowTris != NULL,
+					sint->shadowStencilUsesPrelight, isViewOnlyEntity, vEntity->modelDepthHack );
+			}
 			// Keep this light's volume links resident: Vulkan can combine the
 			// partial ownership map with per-surface missing-caster volumes,
 			// or fall back to the combined prelight volume.

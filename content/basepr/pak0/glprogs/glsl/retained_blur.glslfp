@@ -1,0 +1,83 @@
+// Retained UI soft focus (REN-016): one pass of a separable Gaussian blur over
+// Source, then saturation. blur.xy is one source texel along the pass's axis,
+// blur.z the sigma in texels and blur.w the saturation, 1 keeping the colour.
+// The output is opaque: it replaces the backdrop it was taken from.
+uniform sampler2D Source;
+uniform vec4 blur;
+
+varying vec2 blurTexCoord;
+
+void main(void)
+{
+	float sigma = abs( blur.z );
+	vec3 sum = texture2D( Source, blurTexCoord ).rgb;
+	float total = 1.0;
+	if ( blur.z < 0.0 ) {
+		// The reduced pass lands halfway between two source texel centres.
+		// Average their complete Gaussian kernels before pairing taps. Pairing
+		// the ordinary integer-centred kernel at this phase aliases fine detail.
+		// This is exactly filtering then averaging adjacent pixels along this
+		// axis, with the same 49-tap source kernel and normalization.
+		sum = vec3( 0.0 ); total = 0.0;
+		float weight = 1.0;
+		float ratio = exp( -0.5 / ( sigma * sigma ) );
+		float ratioStep = ratio * ratio;
+		for ( int i = 0; i < 24; i += 2 ) {
+			float next = weight * ratio; ratio *= ratioStep;
+			float end = next * ratio; ratio *= ratioStep;
+			float a = 0.5 * ( weight + next );
+			float b = 0.5 * ( next + end );
+			float combined = a + b;
+			vec2 offset = blur.xy * ( float( i ) + 0.5 + b / combined );
+			sum += ( texture2D( Source, blurTexCoord + offset ).rgb + texture2D( Source, blurTexCoord - offset ).rgb ) * combined;
+			total += 2.0 * combined;
+			weight = end;
+		}
+		vec2 edge = blur.xy * 24.5;
+		sum += ( texture2D( Source, blurTexCoord + edge ).rgb + texture2D( Source, blurTexCoord - edge ).rgb ) * ( 0.5 * weight );
+		total += weight;
+	} else if ( sigma > 0.0 ) {
+		// 24 taps each side reach 3 sigma; a wider kernel spaces them out and
+		// bilinear filtering covers the gaps between them.
+		float spacing = max( 1.0, sigma * 0.125 );
+		float falloff = -0.5 / ( sigma * sigma );
+		// Successive Gaussian weights follow w(n+1)/w(n)=q^(2n+1).
+		// One exponential and this recurrence replace an exponential at every
+		// tap of every fragment, including the wider spaced kernels.
+		float weight = exp( spacing * spacing * falloff );
+		float ratioStep = weight * weight;
+		float ratio = weight * ratioStep;
+		if ( spacing == 1.0 ) {
+			// At texel centres, one bilinear fetch gives the weighted sum of
+			// adjacent taps. Preserve the same kernel with half the fetches.
+			for ( int i = 1; i <= 24; i += 2 ) {
+				float x = float( i );
+				float a = weight;
+				float b = a * ratio;
+				ratio *= ratioStep;
+				weight = b * ratio;
+				ratio *= ratioStep;
+				float combined = a + b;
+				if ( combined > 0.0 ) {
+					vec2 offset = blur.xy * ( x + b / combined );
+					sum += ( texture2D( Source, blurTexCoord + offset ).rgb + texture2D( Source, blurTexCoord - offset ).rgb ) * combined;
+					total += 2.0 * combined;
+				}
+			}
+		} else {
+			// Wider kernels have non-adjacent taps and keep their authored
+			// spacing. Combining those samples would change the blur.
+			for ( int i = 1; i <= 24; i++ ) {
+				float x = float( i ) * spacing;
+				vec2 offset = blur.xy * x;
+				sum += ( texture2D( Source, blurTexCoord + offset ).rgb + texture2D( Source, blurTexCoord - offset ).rgb ) * weight;
+				total += 2.0 * weight;
+				weight *= ratio;
+				ratio *= ratioStep;
+			}
+		}
+	}
+	vec3 colour = sum / total;
+	float luma = dot( colour, vec3( 0.2126, 0.7152, 0.0722 ) );
+	gl_FragColor = vec4( mix( vec3( luma ), colour, clamp( blur.w, 0.0, 1.0 ) ), 1.0 );
+}

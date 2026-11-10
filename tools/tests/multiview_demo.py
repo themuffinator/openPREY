@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 GAME_LIBS_ROOT = Path(
-    os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT.parent / "openQ4-game")
+    os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT)
 ).resolve()
 
 
@@ -52,6 +52,36 @@ def require_order(text: str, first: str, second: str, context: str) -> None:
         raise AssertionError(f"{first!r} must precede {second!r} in {context}")
 
 
+def expect_contract_rejection(validator, candidate: str, context: str) -> None:
+    try:
+        validator(candidate)
+    except AssertionError:
+        return
+    raise AssertionError(f"Validation contract accepted mutation: {context}")
+
+
+def validate_legacy_game_api_compatibility(source: str) -> None:
+    for token, context in (
+        ("MVD_LEGACY_GAME_API_1_0_1_1 = 39u", "retail-compatible MVD API"),
+        ("MVD_LEGACY_GAME_API_PRE_SHUTDOWN_SPLIT = 42u", "pre-shutdown-split MVD API"),
+        ("MVD_LEGACY_GAME_API_PRE_PRESENTATION_STATE = 44u", "pre-presentation-state MVD API"),
+    ):
+        require(source, token, context)
+    legacy_compatibility = between(
+        source,
+        "static bool MVD_IsLegacyGameAPICompatible",
+        "static bool MVD_ReadCString",
+        "known-compatible MVD 1.0/1.1 API allowlist",
+    )
+    for token in (
+        "version == MVD_LEGACY_GAME_API_1_0_1_1",
+        "version == MVD_LEGACY_GAME_API_PRE_SHUTDOWN_SPLIT",
+        "version == MVD_LEGACY_GAME_API_PRE_PRESENTATION_STATE",
+        "version == static_cast<unsigned int>( GAME_API_VERSION )",
+    ):
+        require(legacy_compatibility, token, "known-compatible MVD 1.0/1.1 API allowlist")
+
+
 def validate_container() -> None:
     source = read(ROOT / "src/framework/async/MultiViewDemo.cpp")
     header = read(ROOT / "src/framework/async/MultiViewDemo.h")
@@ -59,7 +89,9 @@ def validate_container() -> None:
     for needle in (
         "MVD_MAGIC[8]",
         "MVD_FORMAT_MAJOR = 1",
-        "MVD_FORMAT_MINOR = 2",
+        "MVD_FORMAT_MINOR = 3",
+        "MVD_OPTIONAL_KEYFRAMES",
+        "MVD_RECORD_KEYFRAME_TABLE",
         "MVD_FEATURE_RECORD_CRC",
         "MVD_FEATURE_LENGTH_DELIMITED",
         "MVD_FEATURE_SERVER_SNAPSHOTS",
@@ -174,32 +206,30 @@ def validate_container() -> None:
         "MVD_SchemaMinor( header.gameSchemaVersion )",
     ):
         require(start_playback, needle, "MVD playback compatibility gates")
-    require(
-        source,
-        "MVD_LEGACY_GAME_API_1_0_1_1 = 39u",
-        "known-compatible MVD 1.0/1.1 API allowlist",
+    validate_legacy_game_api_compatibility(source)
+    api42_allow = "\t\tversion == MVD_LEGACY_GAME_API_PRE_SHUTDOWN_SPLIT ||\n"
+    if source.count(api42_allow) != 1:
+        raise AssertionError("MVD API-42 compatibility mutation anchor is not unique")
+    expect_contract_rejection(
+        validate_legacy_game_api_compatibility,
+        source.replace(api42_allow, "", 1),
+        "legacy MVDs recorded by game API 42 are rejected after the shutdown-only API bump",
     )
-    legacy_compatibility = between(
-        source,
-        "static bool MVD_IsLegacyGameAPICompatible",
-        "static bool MVD_ReadCString",
-        "known-compatible MVD 1.0/1.1 API allowlist",
-    )
-    require(
-        legacy_compatibility,
-        "version == MVD_LEGACY_GAME_API_1_0_1_1",
-        "known-compatible MVD 1.0/1.1 API allowlist",
-    )
-    require(
-        legacy_compatibility,
-        "version == static_cast<unsigned int>( GAME_API_VERSION )",
-        "current legacy MVD API compatibility",
+    api44_allow = "\t\tversion == MVD_LEGACY_GAME_API_PRE_PRESENTATION_STATE ||\n"
+    if source.count(api44_allow) != 1:
+        raise AssertionError("MVD API-44 compatibility mutation anchor is not unique")
+    expect_contract_rejection(
+        validate_legacy_game_api_compatibility,
+        source.replace(api44_allow, "", 1),
+        "legacy MVDs recorded by game API 44 are rejected after the presentation-only API bump",
     )
 
+    # Map state from the stream start and from keyframes is parsed into
+    # temporaries, validated, and only then applied.
     require_order(
         source,
-        "MVD_ReadDict( &payload, sessLocal.mapSpawnData.syncedCVars, lastError )",
-        "MVD_ValidateSyncedCVars( sessLocal.mapSpawnData.syncedCVars, lastError )",
+        "MVD_ReadDict( &payload, syncedCVars, lastError )",
+        "MVD_ValidateSyncedCVars( syncedCVars, lastError )",
         "MVD network-cvar allowlist",
     )
     synced_cvars = between(
@@ -218,7 +248,9 @@ def validate_container() -> None:
     # Recording is transactional: an interrupted stream remains visibly
     # partial, and only a clean end record is renamed to its final .mvd name.
     require(source, 'tempFileName += ".part";', "MVD staged recording")
-    stop_recording = source[source.index("void idMultiViewDemo::StopRecording") :]
+    stop_recording = source[
+        source.index("bool idMultiViewDemo::StopRecording( const char *reason, bool finalize,") :
+    ]
     stop_recording = stop_recording[: stop_recording.index(
         "void idMultiViewDemo::CaptureReliableMessage"
     )]
@@ -234,7 +266,14 @@ def validate_container() -> None:
         "CommitRecording()",
         "MVD clean finalization",
     )
-    require(source, "rename( fromOS.c_str(), toOS.c_str() )", "MVD atomic commit")
+    # The atomic rename itself lives in idFileSystemLocal::PromoteFile, which
+    # validates both qpaths against the writable root; see
+    # filesystem_write_qpath_safety.py and mvd_server_api_contract.py.
+    require(
+        source,
+        'fileSystem->PromoteFile( tempFileName.c_str(), fileName.c_str(),',
+        "MVD atomic commit",
+    )
 
     # Bounds and CRCs must be checked before game code receives a payload.
     require_order(
@@ -528,8 +567,9 @@ def validate_documented_compatibility() -> None:
     user = read(ROOT / "docs/user/multiview-demos.md")
 
     for needle in (
-        "format `1.2`",
-        "formats `1.0` and `1.1`",
+        "format `1.3`",
+        "formats `1.0` to `1.2`",
+        "### Keyframes, 1.3",
         "raw `GAME_API_VERSION`",
         "packed MVD game-schema",
         "`FULL_WORLD_INSTANCES`",
@@ -550,8 +590,8 @@ def validate_documented_compatibility() -> None:
         require(developer, needle, "developer MVD compatibility documentation")
 
     for needle in (
-        "MVD `.mvd` 1.0-1.2",
-        "MVD 1.2 is the current writer",
+        "MVD `.mvd` 1.3",
+        "MVD 1.3 is the current writer",
         "every active multiplayer instance",
         "version-1 decoder",
         "no index and a zero snapshot count",

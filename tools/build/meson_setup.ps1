@@ -51,7 +51,7 @@ function Quote-CmdArg([string]$Value) {
     return $Value
 }
 
-function Get-openQ4VsProcessArch {
+function Get-openPREYVsProcessArch {
     $arch = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()
     switch ($arch) {
         "x64" { return "x64" }
@@ -61,7 +61,7 @@ function Get-openQ4VsProcessArch {
     }
 }
 
-function Get-openQ4VsTargetArch {
+function Get-openPREYVsTargetArch {
     if (-not [string]::IsNullOrWhiteSpace($env:OPENPREY_VS_TARGET_ARCH)) {
         return $env:OPENPREY_VS_TARGET_ARCH.Trim().ToLowerInvariant()
     }
@@ -69,10 +69,10 @@ function Get-openQ4VsTargetArch {
         return $env:OPENQ4_VS_TARGET_ARCH.Trim().ToLowerInvariant()
     }
 
-    return Get-openQ4VsProcessArch
+    return Get-openPREYVsProcessArch
 }
 
-function Get-openQ4VsHostArch {
+function Get-openPREYVsHostArch {
     if (-not [string]::IsNullOrWhiteSpace($env:OPENPREY_VS_HOST_ARCH)) {
         return $env:OPENPREY_VS_HOST_ARCH.Trim().ToLowerInvariant()
     }
@@ -80,7 +80,7 @@ function Get-openQ4VsHostArch {
         return $env:OPENQ4_VS_HOST_ARCH.Trim().ToLowerInvariant()
     }
 
-    return Get-openQ4VsProcessArch
+    return Get-openPREYVsProcessArch
 }
 
 function Get-MesonCommand {
@@ -284,21 +284,17 @@ function Test-WindowsStaticCRTReconfigureNeeded {
     return [string]$configuredValue -ne $requiredValue
 }
 
-function Get-LatestFileWriteTimeUtc {
-    param([string]$DirectoryPath)
-
-    if ([string]::IsNullOrWhiteSpace($DirectoryPath) -or -not (Test-Path $DirectoryPath)) {
-        return $null
-    }
-
-    $latest = $null
-    foreach ($file in Get-ChildItem -Path $DirectoryPath -Recurse -File -ErrorAction SilentlyContinue) {
-        if ($null -eq $latest -or $file.LastWriteTimeUtc -gt $latest) {
-            $latest = $file.LastWriteTimeUtc
-        }
-    }
-
-    return $latest
+function Test-GameSourcesRefreshNeeded {
+    param([string]$BuildDir, [string]$RepoRoot)
+    if (-not (Test-MesonBuildDirectory $BuildDir)) { return $false }
+    $buildGames = Get-MesonBuildOptionValue -BuildDir $BuildDir -OptionName "build_games"
+    if ($buildGames -eq $false) { return $false }
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+    if ($null -eq $python) { throw "Python is required to check canonical game sources." }
+    # Content and git-state drift only refresh the snapshot; a membership change reconfigures.
+    & $python.Source (Join-Path $RepoRoot "tools\build\game_source_inventory.py") $RepoRoot --refresh (Join-Path $BuildDir "openq4_game_sources.json") | Out-Null
+    return ($LASTEXITCODE -ne 0)
 }
 
 function Remove-NonRuntimeInstallArtifacts {
@@ -326,11 +322,6 @@ function Remove-NonRuntimeInstallArtifacts {
         }
     }
 
-    $installGameDir = Join-Path $InstallRoot "basepr"
-    if (-not (Test-Path $installGameDir)) {
-        return
-    }
-
     $gameDirPatterns = @(
         "*.lib",
         "*.exp",
@@ -341,11 +332,17 @@ function Remove-NonRuntimeInstallArtifacts {
         "game_x86.dll"
     )
 
-    foreach ($pattern in $gameDirPatterns) {
-        $matches = @(Get-ChildItem -Path $installGameDir -Filter $pattern -File -ErrorAction SilentlyContinue)
-        foreach ($match in $matches) {
-            Write-Host "Removing non-runtime staged artifact '$($match.FullName)'"
-            Remove-Item -LiteralPath $match.FullName -Force
+    # basepr and every staged mod game directory that
+    # carries game modules
+    $installGameDirs = @(Get-ChildItem -Path $InstallRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq "basepr" -or (Test-Path -LiteralPath (Join-Path $_.FullName "mod.json") -PathType Leaf) })
+    foreach ($installGameDir in $installGameDirs) {
+        foreach ($pattern in $gameDirPatterns) {
+            $matches = @(Get-ChildItem -Path $installGameDir.FullName -Filter $pattern -File -ErrorAction SilentlyContinue)
+            foreach ($match in $matches) {
+                Write-Host "Removing non-runtime staged artifact '$($match.FullName)'"
+                Remove-Item -LiteralPath $match.FullName -Force
+            }
         }
     }
 }
@@ -414,9 +411,11 @@ function Copy-WindowsDiagnosticSymbols {
     }
 }
 
-function Stop-openQ4RuntimeProcesses {
+function Stop-openPREYRuntimeProcesses {
     [OutputType([bool])]
-    param()
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+
+    $targetDirectory = [System.IO.Path]::GetFullPath($InstallRoot).TrimEnd('\', '/')
 
     $processNames = @(
         "openPREY-client_x64",
@@ -427,12 +426,24 @@ function Stop-openQ4RuntimeProcesses {
         "openPREY-ded_arm64"
     )
 
-    $running = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue)
+    $running = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue | Where-Object {
+        try {
+            # A name match alone includes other worktrees and installed games.
+            # An unreadable executable path is not permission to stop a process.
+            $null = $_.Handle
+            $executablePath = $_.Path
+            if ([string]::IsNullOrWhiteSpace($executablePath)) { return $false }
+            $directory = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($executablePath))
+            return [string]::Equals($directory, $targetDirectory, [StringComparison]::OrdinalIgnoreCase)
+        } catch {
+            return $false
+        }
+    })
     if ($running.Count -eq 0) {
         return $false
     }
 
-    Write-Host "Stopping running openPREY processes before install: $($running.ProcessName -join ', ')"
+    Write-Host "Stopping openPREY processes in '$targetDirectory' before install: $($running.ProcessName -join ', ')"
 
     foreach ($proc in $running) {
         try {
@@ -446,12 +457,22 @@ function Stop-openQ4RuntimeProcesses {
 
     Start-Sleep -Milliseconds 500
 
-    $stillRunning = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue)
-    if ($stillRunning.Count -gt 0) {
+    # Retain the selected process objects/handles. A second lookup by name could
+    # stop another checkout or a new process started during the close interval.
+    foreach ($proc in $running) {
         try {
-            $stillRunning | Stop-Process -Force -ErrorAction Stop
+            $proc.Refresh()
+            if (-not $proc.HasExited) {
+                $proc.Kill()
+                if (-not $proc.WaitForExit(5000)) {
+                    throw "Process $($proc.Id) did not exit."
+                }
+            }
         } catch {
-            throw "Failed to stop running openPREY processes. Close them manually and retry install. Details: $($_.Exception.Message)"
+            # A process can finish between Refresh and Kill.
+            if (-not $proc.HasExited) {
+                throw "Failed to stop openPREY in '$targetDirectory'. Close it manually and retry install. Details: $($_.Exception.Message)"
+            }
         }
     }
 
@@ -462,6 +483,56 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "..\.."))
 $defaultBuildDir = Join-Path $repoRoot "builddir"
 
+# Android uses the NDK compiler recorded in its cross file/build metadata.
+# Dispatch through this same Windows entry point, without desktop-only CRT,
+# companion Windows builds, process shutdown or runtime staging side effects.
+[string[]]$androidMesonArgs = @($args)
+$isAndroidCross = $false
+$androidBuildInfo = Get-CompileBuildDirInfo -MesonArgs $androidMesonArgs -DefaultBuildDir $defaultBuildDir
+$androidMachineInfo = Join-Path $androidBuildInfo.BuildDir "meson-info/intro-machines.json"
+if ($androidMesonArgs.Count -gt 0 -and $androidMesonArgs[0] -in @("compile", "install", "test") -and
+        (Test-Path -LiteralPath $androidMachineInfo -PathType Leaf)) {
+    $androidMachines = Get-Content -LiteralPath $androidMachineInfo -Raw | ConvertFrom-Json
+    $isAndroidCross = $androidMachines.host.system -eq "android"
+}
+for ($index = 0; $index -lt $androidMesonArgs.Count; $index++) {
+    $argument = $androidMesonArgs[$index]
+    $crossFile = $null
+    if ($argument -eq "--cross-file" -and ($index + 1) -lt $androidMesonArgs.Count) {
+        $crossFile = $androidMesonArgs[$index + 1]
+    } elseif ($argument.StartsWith("--cross-file=")) {
+        $crossFile = $argument.Substring("--cross-file=".Length)
+    }
+    if ($crossFile -and (Test-Path -LiteralPath $crossFile -PathType Leaf)) {
+        if ((Get-Content -LiteralPath $crossFile -Raw) -match '(?m)^\s*system\s*=\s*''android''\s*$') {
+            $isAndroidCross = $true
+        }
+    }
+    if (-not $argument.StartsWith("-")) {
+        $machineInfo = Join-Path $argument "meson-info/intro-machines.json"
+        if (Test-Path -LiteralPath $machineInfo -PathType Leaf) {
+            $machines = Get-Content -LiteralPath $machineInfo -Raw | ConvertFrom-Json
+            if ($machines.host.system -eq "android") { $isAndroidCross = $true }
+        }
+    }
+}
+if ($isAndroidCross) {
+    if ($androidMesonArgs[0] -eq "install" -and -not ($androidMesonArgs -contains "--skip-subprojects")) {
+        $androidMesonArgs += "--skip-subprojects"
+    }
+    $androidMesonCommand = Get-MesonCommand
+    if ($androidMesonArgs[0] -eq "compile" -or $androidMesonArgs[0] -eq "install") {
+        if (Test-GameSourcesRefreshNeeded -BuildDir $androidBuildInfo.BuildDir -RepoRoot $repoRoot) {
+            Write-Host "Canonical game source membership changed. Reconfiguring '$($androidBuildInfo.BuildDir)'..."
+            Invoke-Meson -MesonArgs @("setup", "--reconfigure", $androidBuildInfo.BuildDir, $repoRoot) `
+                -VsDevCmdPath "" -MesonCommand $androidMesonCommand -VsTargetArch "" -VsHostArch ""
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+    }
+    Invoke-Meson -MesonArgs $androidMesonArgs -VsDevCmdPath "" -MesonCommand $androidMesonCommand -VsTargetArch "" -VsHostArch ""
+    exit $LASTEXITCODE
+}
+
 $rcWrapper = Join-Path $scriptDir "rc.cmd"
 if (-not (Test-Path $rcWrapper)) {
     throw "WINDRES wrapper not found at '$rcWrapper'."
@@ -469,15 +540,15 @@ if (-not (Test-Path $rcWrapper)) {
 
 $env:WINDRES = $rcWrapper
 
-$vsTargetArch = Get-openQ4VsTargetArch
-$vsHostArch = Get-openQ4VsHostArch
+$vsTargetArch = Get-openPREYVsTargetArch
+$vsHostArch = Get-openPREYVsHostArch
 $vsDevCmd = $null
 if (Test-WindowsHost) {
     $vsDevCmd = Get-VsDevCmdPath -TargetArch $vsTargetArch
 }
 $mesonCommand = Get-MesonCommand
 
-$effectiveArgs = @($args)
+[string[]]$effectiveArgs = @($args)
 if ($effectiveArgs.Count -eq 0) {
     throw "No Meson arguments were provided to meson_setup.ps1."
 }
@@ -490,6 +561,8 @@ $checkStagedContentScript = Join-Path $scriptDir "check_staged_content_edits.py"
 if ($commandName -eq "setup") {
     $effectiveArgs = Ensure-WindowsStaticCRTSetupArgs -MesonArgs $effectiveArgs
 }
+
+
 
 
 if ($effectiveArgs.Length -gt 0 -and ($effectiveArgs[0] -eq "compile" -or $effectiveArgs[0] -eq "install")) {
@@ -528,6 +601,12 @@ if ($effectiveArgs.Length -gt 0 -and ($effectiveArgs[0] -eq "compile" -or $effec
         $reconfigureReasons += "Windows static CRT policy"
     }
 
+    $needsGameLibsRefresh = Test-GameSourcesRefreshNeeded -BuildDir $buildInfo.BuildDir -RepoRoot $repoRoot
+    if ($needsGameLibsRefresh) {
+        Write-Host "Canonical game source membership changed since the last snapshot. Reconfiguring '$($buildInfo.BuildDir)'..."
+        $reconfigureReasons += "canonical game source membership"
+    }
+
     if ($reconfigureReasons.Count -gt 0) {
         $reconfigureArgs = @(
             "setup",
@@ -556,11 +635,11 @@ if ($effectiveArgs.Length -gt 0 -and ($effectiveArgs[0] -eq "compile" -or $effec
     }
 }
 
-if ($commandName -eq "install" -and $env:OPENPREY_INSTALL_CLOSE_RUNNING -ne "0" -and $env:OPENQ4_INSTALL_CLOSE_RUNNING -ne "0") {
-    Stop-openQ4RuntimeProcesses | Out-Null
+if ($commandName -eq "install" -and $env:OPENQ4_INSTALL_CLOSE_RUNNING -ne "0") {
+    Stop-openPREYRuntimeProcesses -InstallRoot (Join-Path $repoRoot ".install") | Out-Null
 }
 
-if (@("setup", "compile", "install").Contains($commandName) -and $env:OPENPREY_SKIP_ICON_SYNC -ne "1" -and $env:OPENQ4_SKIP_ICON_SYNC -ne "1") {
+if (@("setup", "compile", "install").Contains($commandName) -and $env:OPENQ4_SKIP_ICON_SYNC -ne "1") {
     if (-not (Test-Path $syncIconsScript)) {
         throw "Icon sync script not found: '$syncIconsScript'."
     }
@@ -587,9 +666,11 @@ if ($commandName -eq "install") {
 Invoke-Meson -MesonArgs $effectiveArgs -VsDevCmdPath $vsDevCmd -MesonCommand $mesonCommand -VsTargetArch $vsTargetArch -VsHostArch $vsHostArch
 $exitCode = [int]$LASTEXITCODE
 
-if ($commandName -eq "install" -and $exitCode -ne 0 -and $env:OPENPREY_INSTALL_RETRY_ON_FAILURE -ne "0" -and $env:OPENQ4_INSTALL_RETRY_ON_FAILURE -ne "0") {
-    Write-Host "Meson install failed; retrying once after ensuring openPREY processes are stopped..."
-    Stop-openQ4RuntimeProcesses | Out-Null
+if ($commandName -eq "install" -and $exitCode -ne 0 -and $env:OPENQ4_INSTALL_RETRY_ON_FAILURE -ne "0") {
+    Write-Host "Meson install failed; retrying once..."
+    if ($env:OPENQ4_INSTALL_CLOSE_RUNNING -ne "0") {
+        Stop-openPREYRuntimeProcesses -InstallRoot (Join-Path $repoRoot ".install") | Out-Null
+    }
     Start-Sleep -Milliseconds 500
     Invoke-Meson -MesonArgs $effectiveArgs -VsDevCmdPath $vsDevCmd -MesonCommand $mesonCommand -VsTargetArch $vsTargetArch -VsHostArch $vsHostArch
     $exitCode = [int]$LASTEXITCODE

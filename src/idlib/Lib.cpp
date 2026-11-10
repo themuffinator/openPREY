@@ -30,6 +30,20 @@ idFileSystem *	idLib::fileSystem	= NULL;
 int				idLib::frameNumber	= 0;
 
 /*
+===============
+idLib::SizeToInt
+===============
+*/
+int idLib::SizeToInt( size_t value, const char *context ) {
+	if ( value > static_cast<size_t>( idMath::INT_MAX ) ) {
+		Error( "%s: size exceeds the supported 32-bit range", context ? context : "idLib::SizeToInt" );
+		return idMath::INT_MAX;
+	}
+
+	return static_cast<int>( value );
+}
+
+/*
 ================
 idLib::Init
 ================

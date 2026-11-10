@@ -220,6 +220,19 @@ def validate_game_module_fallback_contract() -> None:
     require_before(find_dll, baseoq4_fallback_probe, root_fallback_probe, "baseoq4 before executable-root fallback")
 
 
+def validate_invalid_mod_fallback_contract() -> None:
+    source = read("src/framework/FileSystem.cpp")
+    warning = "common->Warning( \"Ignoring fs_game '%s': %s\""
+    # An empty fs_game also disables the openQ4 runtime underlay, so a broken
+    # mod manifest must fall back to the default openQ4 game, never to
+    # retail-only q4base content.
+    require(source, warning, "invalid mod manifest warning")
+    fallback = source[source.index(warning):]
+    fallback = fallback[:fallback.index("}")]
+    require(fallback, "fs_game.SetString( OPENQ4_GAMEDIR );", "invalid mod falls back to the openQ4 game")
+    reject(fallback, "fs_game.SetString( \"\" );", "invalid mod fallback")
+
+
 def validate_validation_coverage() -> None:
     validator = read("tools/validation/openq4_validate.py")
     require(validator, "filesystem_mod_manifest.py", "validation runner")
@@ -231,6 +244,7 @@ def main() -> None:
     validate_openprey_version_key_contract()
     validate_manifest_only_contract()
     validate_game_module_fallback_contract()
+    validate_invalid_mod_fallback_contract()
     validate_validation_coverage()
     print("filesystem_mod_manifest: ok")
 

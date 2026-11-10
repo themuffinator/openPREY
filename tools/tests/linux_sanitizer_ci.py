@@ -61,7 +61,7 @@ def validate_commit_workflow() -> None:
     require(source, '--output-dir "${output_dir}"', "commit validation sanitizer report output")
     require(source, "commit-linux-sanitizer-build-logs", "commit validation sanitizer artifact")
     require(source, ".tmp/validation/linux-sanitizer-builddir/meson-logs", "commit validation sanitizer logs")
-    require(source, ".tmp/validation/linux-sanitizer-builddir/.tmp/openprey_gamelibs_stage/openprey_gamelibs_stage_manifest.json", "commit validation sanitizer staging manifest")
+    require(source, ".tmp/validation/linux-sanitizer-builddir/openq4_game_sources.json", "commit validation sanitizer source inventory")
     require(source, ".tmp/renderer-validation/sanitizer", "commit validation sanitizer runtime artifacts")
     require(workflow, "python tools/tests/linux_sanitizer_ci.py", "commit script-smoke sanitizer guard")
 
@@ -159,10 +159,21 @@ def validate_cross_dso_sanitizer_boundary() -> None:
     )
     require(
         meson,
-        "bse_cpp_args = shared_cpp_args + common_header_cpp_args",
-        "BSE vptr sanitizer coverage",
+        "bse_cpp_args = shared_cpp_args + common_header_cpp_args + linux_cross_dso_sanitizer_cpp_args",
+        "BSE cross-DSO sanitizer scope",
+    )
+    require(
+        meson,
+        "renderer_gl_module_args = engine_cpp_args + [",
+        "OpenGL renderer cross-DSO sanitizer scope",
+    )
+    require(
+        meson,
+        "renderer_vk_module_args = engine_cpp_args + [",
+        "Vulkan renderer cross-DSO sanitizer scope",
     )
     reject(meson, "shared_cpp_args += ['-fno-sanitize=vptr']", "over-broad UBSan vptr exclusion")
+    reject(meson, "-fno-sanitize=pointer-overflow", "masked renderer file-ownership defect")
     require(meson, "dedicated_engine_cpp_args = engine_cpp_args", "dedicated sanitizer inheritance")
     require(
         meson,

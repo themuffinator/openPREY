@@ -260,8 +260,6 @@ void rvDeclEffect::FreeData()
 {
 	int v2; // ebx
 	int v3; // edi
-	rvSegmentTemplate* v4; // eax
-	int* v5; // edi
 
 	v2 = 0;
 	if (this->mSegmentTemplates.Num() > 0)

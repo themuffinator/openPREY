@@ -628,7 +628,7 @@ static bool GLW_CreateWindow( glimpParms_t parms ) {
 
 	const bool reuseWindow = win32.hWnd != NULL;
 	if ( reuseWindow ) {
-		SetWindowText( win32.hWnd, GAME_NAME );
+		SetWindowText( win32.hWnd, GAME_WINDOW_TITLE );
 		SetWindowLong( win32.hWnd, GWL_STYLE, stylebits );
 		SetWindowLong( win32.hWnd, GWL_EXSTYLE, exstyle );
 		SetWindowPos( win32.hWnd, parms.fullScreen ? HWND_TOPMOST : HWND_NOTOPMOST, x, y, w, h, SWP_FRAMECHANGED | SWP_SHOWWINDOW );
@@ -637,7 +637,7 @@ static bool GLW_CreateWindow( glimpParms_t parms ) {
 		win32.hWnd = CreateWindowEx (
 			 exstyle,
 			 WIN32_WINDOW_CLASS_NAME,
-			 GAME_NAME,
+			 GAME_WINDOW_TITLE,
 			 stylebits,
 			 x, y, w, h,
 			 NULL,

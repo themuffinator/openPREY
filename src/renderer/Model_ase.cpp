@@ -235,7 +235,7 @@ static bool ASE_HasGameDirAssetPath( const idStr &path )
 		if ( gameDir == NULL || gameDir[0] == '\0' ) {
 			continue;
 		}
-		const int gameDirLength = strlen( gameDir );
+		const int gameDirLength = static_cast<int>( strlen( gameDir ) );
 		const char *segment = path.c_str();
 
 		while ( ( segment = strstr( segment, gameDir ) ) != NULL ) {
@@ -502,6 +502,9 @@ static void ASE_KeyCFACE_LIST( const char *token )
 			pMesh->faces[ase.currentFace].vertexColors[remap[i]][0] = pMesh->cvertexes[a][0] * 255;
 			pMesh->faces[ase.currentFace].vertexColors[remap[i]][1] = pMesh->cvertexes[a][1] * 255;
 			pMesh->faces[ase.currentFace].vertexColors[remap[i]][2] = pMesh->cvertexes[a][2] * 255;
+			// ASE vertex colors contain RGB only. Never propagate an uninitialized
+			// fourth byte into material blending or alpha-tested coverage.
+			pMesh->faces[ase.currentFace].vertexColors[remap[i]][3] = 255;
 		}
 
 		ase.currentFace++;
@@ -887,7 +890,7 @@ aseModel_t *ASE_Parse( const char *buffer, bool verbose ) {
 	ase.verbose = verbose;
 
 	ase.buffer = buffer;
-	ase.len = strlen( buffer );
+	ase.len = idLib::SizeToInt( strlen( buffer ), "ASE_Parse" );
 	ase.curpos = ase.buffer;
 	ase.currentObject = NULL;
 

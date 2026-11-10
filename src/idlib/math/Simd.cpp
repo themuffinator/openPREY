@@ -266,7 +266,7 @@ static TIME_TYPE Sys_SimdMonotonicNanoseconds( void ) {
 PrintClocks
 ============
 */
-void PrintClocks( char *string, int dataCount, TIME_TYPE clocks, TIME_TYPE otherClocks = 0 ) {
+void PrintClocks( const char *string, int dataCount, TIME_TYPE clocks, TIME_TYPE otherClocks = 0 ) {
 	int i;
 
 	idLib::common->Printf( "%s", string );
@@ -4377,12 +4377,7 @@ void idSIMD::Test_f( const idCmdArgs &args ) {
 	p_simd = ( processor != NULL ) ? processor : generic;
 	p_generic = generic;
 
-	if ( idStr::Length( args.Argv( 1 ) ) != 0 ) {
-		cpuid_t cpuid = idLib::sys->GetProcessorId();
-		idStr argString = args.Args();
-
-		argString.Replace( " ", "" );
-	}
+	(void)args;
 
 	idLib::common->SetRefreshOnPrint( true );
 

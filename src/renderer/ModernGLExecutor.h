@@ -91,6 +91,7 @@ typedef struct modernGLExecutorStats_s {
 	bool	modernVisibleShadowReady;
 	bool	modernVisibleHDRTargetReady;
 	bool	modernVisibleSceneComposited;
+	bool	modernVisibleLinearScene;
 	bool	modernVisiblePostProcessHandoff;
 	bool	modernVisibleBlockedByLegacy;
 	bool	modernVisibleCompatibilityReady;
@@ -278,6 +279,8 @@ typedef struct modernGLExecutorStats_s {
 	int		drawPlanDepthDraws;
 	int		drawPlanMaterialDraws;
 	int		drawPlanFallbackDraws;
+	int		drawPlanPBRClusteredSurfaceOwners;
+	int		drawPlanPBRClusteredConsumedInteractions;
 	int		drawPlanGeometryFallbackDraws;
 	int		drawPlanGeometryDeformFallbackDraws;
 	int		drawPlanGeometrySkinnedFallbackDraws;
@@ -333,6 +336,9 @@ typedef struct modernGLExecutorStats_s {
 	int		visibleDepthMismatchDraws;
 	int		visibleDepthClearOps;
 	int		visibleDepthResolveOps;
+	int		sceneMSAASamples;
+	int		sceneMSAAColorResolves;
+	int		sceneMSAADepthResolves;
 	int		visibleDepthDebugOverlayDraws;
 	int		opaqueGBufferDraws;
 	int		opaqueGBufferFallbackDraws;
@@ -417,6 +423,29 @@ typedef struct modernGLExecutorStats_s {
 	int		modernVisibleLightingFallbackPasses;
 	int		modernVisibleLightGridFallbackPasses;
 	int		modernVisibleShadowOwnershipFallbackPasses;
+	// per-domain ownership classification: how many contributing lights the
+	// modern descriptor set can represent, how many are genuinely
+	// unrepresentable, and how many are held back only because the domain's
+	// parity contract has not been proven against the ARB2 bridge yet
+	int		modernVisibleLightingParityContract;
+	bool	modernVisibleMaterialLightingProven;
+	int		modernVisibleInteractionPasses;
+	int		modernVisibleFogBlendPasses;
+	int		modernVisibleLightingLights;
+	int		modernVisibleLightingConsumableLights;
+	int		modernVisibleLightingBlockedLights;
+	int		modernVisibleLightingUnprovenLights;
+	int		modernVisibleFogBlendLights;
+	int		modernVisibleFogBlendConsumableLights;
+	int		modernVisibleFogBlendBlockedLights;
+	int		modernVisibleFogBlendUnprovenLights;
+	int		modernVisibleLightGridPasses;
+	int		modernVisibleLightGridUnprovenPasses;
+	int		modernVisibleLightGridDraws;
+	int		modernVisibleLightGridConsumableDraws;
+	int		modernVisibleLightGridBlockedDraws;
+	int		modernVisibleLightGridUnprovenDraws;
+	int		modernVisibleShadowUnprovenLights;
 	int		modernVisibleDroppedByModern;
 	int		modernVisibleGuiLegacyPasses;
 	int		modernVisiblePostLegacyPasses;
@@ -467,20 +496,23 @@ void R_ModernGLExecutor_PrepareFrame( const idScenePacketFrame &packetFrame, con
 void R_ModernGLExecutor_DrawDepthDebugOverlay( void );
 void R_ModernGLExecutor_DrawGBufferDebugOverlay( void );
 void R_ModernGLExecutor_DrawDeferredDebugOverlay( void );
-void R_ModernGLExecutor_SubmitForwardPlusDecalOverlay( const viewDef_t *viewDef );
+bool R_ModernGLExecutor_SubmitForwardPlusDecalSurface( const viewDef_t *viewDef, const drawSurf_t *sourceSurface );
 void R_ModernGLExecutor_ComposeVisibleSceneForPost( void );
 void R_ModernGLExecutor_ComposeVisibleFrame( void );
 const modernGLExecutorStats_t &R_ModernGLExecutor_Stats( void );
 bool R_ModernGLExecutor_ModernVisibleRequestedForPost( void );
 bool R_ModernGLExecutor_ModernVisiblePostProcessHandoffActive( void );
+bool R_ModernGLExecutor_PBRLinearSceneActive( void );
 bool R_ModernGLExecutor_LegacyPassCanSkip( renderPassCategory_t category );
 bool R_ModernGLExecutor_LegacyPassCanSkipForView( renderPassCategory_t category, const viewDef_t *viewDef );
 void R_ModernGLExecutor_RecordLegacyPassSkipped( renderPassCategory_t category );
 void R_ModernGLExecutor_PrintGfxInfo( void );
+bool R_ModernGLExecutor_LinearScreenshot( const char *fileName );
 bool RendererModernGLExecutor_RunSelfTest( void );
 bool RendererGpuDriven_RunSelfTest( void );
 bool RendererVisiblePath_RunSelfTest( void );
 bool RendererGBuffer_RunSelfTest( void );
+bool RendererPBRVisible_RunSelfTest( void );
 bool RendererDeferredResolve_RunSelfTest( void );
 bool RendererForwardPlus_RunSelfTest( void );
 bool RendererModernVisible_RunSelfTest( void );

@@ -61,6 +61,12 @@ vec4 BuildShadowCoord( vec4 position, vec3 normalOffsetDir, float sinTheta, int 
 		dot( offsetPosition, uShadowRow3[index] ) );
 }
 
+#ifdef OPENQ4_PBR
+// Native PBR (draw_pbr.cpp) shades in object space with an orthonormal vertex
+// frame, exactly as Vulkan does; that frame helper is appended to this source.
+void PBRVertexFrame( vec3 normal, vec3 tangent, vec3 bitangent );
+#endif
+
 void main() {
 	vec4 position = gl_Vertex;
 	vec4 texCoord = vec4( attr_TexCoord0.xy, 0.0, 1.0 );
@@ -70,9 +76,19 @@ void main() {
 	vec3 toView = uLocalViewOrigin.xyz - position.xyz;
 	vec3 localLightDir = normalize( toLight );
 
+#ifdef OPENQ4_PBR
+	// Object-space light and eye vectors: transforming them through the
+	// vertex tangent frame before interpolation distorts their directions
+	// across a curved triangle.
+	vLightVector = toLight;
+	vHalfAngleVector = vec3( 0.0 );
+	vViewVector = toView;
+	PBRVertexFrame( attr_Normal, attr_Tangent, attr_Bitangent );
+#else
 	vLightVector = TangentSpaceVector( toLight );
 	vHalfAngleVector = TangentSpaceVector( normalize( toLight ) + normalize( toView ) );
 	vViewVector = TangentSpaceVector( toView );
+#endif
 
 	vBumpTexCoord = vec2( dot( texCoord, uBumpMatrixS ), dot( texCoord, uBumpMatrixT ) );
 	vDiffuseTexCoord = vec2( dot( texCoord, uDiffuseMatrixS ), dot( texCoord, uDiffuseMatrixT ) );
@@ -89,10 +105,18 @@ void main() {
 	vec3 shadowNormal = normalize( attr_Normal );
 	float shadowLightCos = max( dot( shadowNormal, localLightDir ), 0.0 );
 	float shadowSinTheta = sqrt( max( 1.0 - shadowLightCos * shadowLightCos, 0.0 ) );
+#ifdef OPENQ4_PBR_UNSHADOWED
+	// The unshadowed PBR variant serves stencil-shadowed and unshadowed lights.
+	vShadowCoord0 = vec4( 0.0 );
+	vShadowCoord1 = vec4( 0.0 );
+	vShadowCoord2 = vec4( 0.0 );
+	vShadowCoord3 = vec4( 0.0 );
+#else
 	vShadowCoord0 = BuildShadowCoord( position, shadowNormal, shadowSinTheta, 0 );
 	vShadowCoord1 = BuildShadowCoord( position, shadowNormal, shadowSinTheta, 1 );
 	vShadowCoord2 = BuildShadowCoord( position, shadowNormal, shadowSinTheta, 2 );
 	vShadowCoord3 = BuildShadowCoord( position, shadowNormal, shadowSinTheta, 3 );
+#endif
 
 	vVertexColor = gl_Color.rgb * uVertexColorParams.x + vec3( uVertexColorParams.y );
 	vShadowLightCos = shadowLightCos;

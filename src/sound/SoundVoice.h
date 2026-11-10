@@ -95,10 +95,14 @@ public:
 		centerChannel = FLOAT_IS_NAN( c ) ? 0.0f : idMath::ClampFloat( 0.0f, 1.0f, c );
 	}
 
-	void		SetInnerRadius( float r )
+	virtual void	SetInnerRadius( float r )
 	{
 		innerRadius = ( FLOAT_IS_NAN( r ) || r <= 0.0f ) ? 0.0f : r;
 	}
+
+	// Sends the gain, filter and reverb state gathered by this frame's setters
+	// to the hardware in one pass.
+	virtual void	CommitMix() {}
 	void		SetChannelMask( uint32 mask )
 	{
 		channelMask = mask;
@@ -116,6 +120,34 @@ public:
 	virtual void	SetEnvironmentMuffle( float f )
 	{
 		environmentMuffle = FLOAT_IS_NAN( f ) ? 0.0f : idMath::ClampFloat( 0.0f, 1.0f, f );
+	}
+
+	// Retail EAX source state: the reverb slot of the sound's own portal area
+	// (-1 when no slot holds it), EAXSOURCE_ROOM and EAXSOURCE_OCCLUSION in
+	// millibels. As on retail's EAX path only mono voices reach the reverb.
+	// Returns true when the routing changed.
+	virtual bool	SetReverbSource( int areaSlot, int roomMB, int occlusionMB, bool mono )
+	{
+		soundReverbSourceSends_t sends;
+		SoundReverb_SourceSends( roomMB, occlusionMB, sends );
+		if( !mono )
+		{
+			areaSlot = -1;
+			sends.directGain = sends.directGainHF = 1.0f;
+			sends.primaryGain = sends.areaGain = 0.0f;
+		}
+		const bool changed = areaSlot != reverbAreaSlot ||
+			sends.directGain != eaxDirectGain || sends.directGainHF != eaxDirectGainHF ||
+			sends.primaryGain != eaxPrimaryGain || sends.primaryGainHF != eaxPrimaryGainHF ||
+			sends.areaGain != eaxAreaGain || sends.areaGainHF != eaxAreaGainHF;
+		reverbAreaSlot = areaSlot;
+		eaxDirectGain = sends.directGain;
+		eaxDirectGainHF = sends.directGainHF;
+		eaxPrimaryGain = sends.primaryGain;
+		eaxPrimaryGainHF = sends.primaryGainHF;
+		eaxAreaGain = sends.areaGain;
+		eaxAreaGainHF = sends.areaGainHF;
+		return changed;
 	}
 
 	float		GetGain()
@@ -152,6 +184,13 @@ protected:
 	float		innerRadius;		// Anything closer than this is omni
 	float		occlusion;			// How much of this sound is occluded (0-1)
 	float		environmentMuffle;	// Listener/world muffling amount (0-1)
+	int			reverbAreaSlot;		// Reverb slot of the sound's own area, -1 for none
+	float		eaxDirectGain;		// Retail EAX source filters (SoundReverb_SourceSends)
+	float		eaxDirectGainHF;
+	float		eaxPrimaryGain;		// Send into the listener's (primary) reverb slot
+	float		eaxPrimaryGainHF;
+	float		eaxAreaGain;		// Send into the sound's own area slot
+	float		eaxAreaGainHF;
 	uint32		channelMask;		// Set to override the default channel mask
 
 	// These are some setting used to do SSF_DISTANCE_BASED_STERO blending

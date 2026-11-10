@@ -1,0 +1,94 @@
+// Copyright (C) 2026 DarkMatter Productions. GPL-3.0-or-later.
+#pragma once
+
+#include "SettingsTransaction.h"
+#include "SettingsEffectPlan.h"
+
+namespace openq4::ui {
+
+enum class SettingsJournalState { Pending, Confirmed };
+struct SettingsRecoveryJournal {
+	SettingsJournalState state = SettingsJournalState::Pending;
+	// The explicit empty constructor can report MSVC debug-proxy allocation
+	// failure; basic_string's default noexcept constructor would terminate.
+	std::string attempt = std::string(0,'\0'); // 128 random bits as lowercase hex; never a process owner.
+	StateValues baseline, target, patch;
+	StateValues displayRestore, displayTarget, placement;
+};
+
+// Fixed schema, canonical encoding and checksum detect accidental corruption.
+// The checksum is not authentication. Exact save-root selection and the host's
+// catalog/display validators are required before acting on a decoded journal.
+constexpr std::size_t SettingsJournalMaxBytes = 4 * 1024 * 1024;
+bool EncodeSettingsJournal(const SettingsRecoveryJournal& journal,
+	const std::map<std::string,std::size_t>& catalog, std::string& bytes, std::string& error);
+bool DecodeSettingsJournal(const std::string& bytes,
+	const std::map<std::string,std::size_t>& catalog, SettingsRecoveryJournal& journal, std::string& error);
+
+// SYSTEM startup accepts the current 55-field schema-1 catalog or the exact
+// original 53-field catalog. Only the latter is extended, with both new UI
+// preferences copied from a complete current read into baseline and target.
+// Its patch and ownership of the original on-disk bytes remain unchanged.
+// This never supplies defaults or claims ownership of a previously absent key.
+bool DecodeSystemSettingsJournal(const std::string& bytes, const StateValues& current,
+	SettingsRecoveryJournal& journal, std::string& error);
+
+// Schema 2 is an envelope for the same recovery file, not a second journal.
+// Domain maps are bounded typed opaque records. The caller must separately
+// validate their portable semantics, capture provenance, selected-direction
+// reconstruction and readiness before any startup/write/finish operation.
+// A decoded map is never evidence of hardware support or effect completion.
+struct SettingsEffectRecoveryJournal {
+	SettingsJournalState state = SettingsJournalState::Pending;
+	std::string attempt = std::string(0,'\0');
+	SettingsEffectPlan plan;
+	StateValues baseline, target, patch;
+	StateValues displayRestore, displayTarget, placement;
+	StateValues imageRestore, imageTarget, resourceRestore, resourceTarget;
+	StateValues audioRestore, audioTarget, deferredRestore, deferredTarget;
+};
+using SettingsJournalValue = std::variant<SettingsRecoveryJournal,SettingsEffectRecoveryJournal>;
+
+// Immutable, noncopyable decoded value. Moving transfers ownership; a moved or
+// default object is empty (Schema()==0). Pointer-swap publication cannot allocate
+// even when a different schema replaces the old one under MSVC debug iterators.
+class SettingsJournalRecord {
+public:
+	SettingsJournalRecord() noexcept = default;
+	SettingsJournalRecord(SettingsJournalRecord&&) noexcept = default;
+	SettingsJournalRecord& operator=(SettingsJournalRecord&&) noexcept = default;
+	SettingsJournalRecord(const SettingsJournalRecord&) = delete;
+	SettingsJournalRecord& operator=(const SettingsJournalRecord&) = delete;
+	const SettingsJournalValue* Value() const noexcept { return value.get(); }
+	unsigned Schema() const noexcept { return value ? unsigned(value->index()+1) : 0; }
+private:
+	std::unique_ptr<const SettingsJournalValue> value;
+	friend bool DecodeSettingsJournalRecord(const std::string&,const std::map<std::string,std::size_t>&,
+		SettingsJournalRecord&,std::string&);
+};
+constexpr std::size_t SettingsEffectMetadataMaxEntries = 512;
+constexpr std::size_t SettingsEffectMetadataMaxBytes = 64 * 1024;
+constexpr std::size_t SettingsEffectMetadataMaxKeyBytes = 96;
+
+// Versioned image-only transport within schema 2. Each direction has at most
+// 1.5 MiB of canonical base64, split into indexed 4 KiB chunks. Other metadata
+// retains its 64 KiB budget and the complete serialized journal remains 4 MiB.
+// These helpers validate framing only; the renderer must decode/prepare the
+// full selected descriptor against current sources before any mutation.
+bool PackSettingsImageRecovery(const std::string& raw, unsigned direction,
+    const std::string& attempt, StateValues& output);
+bool UnpackSettingsImageRecovery(const StateValues& fields, unsigned direction,
+    const std::string& attempt, std::string& output);
+
+// Variant dispatch is explicit. Old DecodeSettingsJournal still rejects schema
+// 2; no map-presence inference or downgrade to the schema-1 display route occurs.
+// These new entry points preserve outputs on returned false, including caught
+// allocation refusal. They cannot recover an upstream noexcept process termination.
+bool EncodeSettingsEffectJournal(const SettingsEffectRecoveryJournal& journal,
+	const std::map<std::string,std::size_t>& catalog, std::string& bytes, std::string& error);
+bool EncodeSettingsJournalRecord(const SettingsJournalRecord& journal,
+	const std::map<std::string,std::size_t>& catalog, std::string& bytes, std::string& error);
+bool DecodeSettingsJournalRecord(const std::string& bytes,
+	const std::map<std::string,std::size_t>& catalog, SettingsJournalRecord& journal, std::string& error);
+
+} // namespace openq4::ui

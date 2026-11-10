@@ -38,40 +38,58 @@ function Test-MesonBuildDirectory([string]$Path) {
     return (Test-Path $coreData) -and (Test-Path $ninjaFile)
 }
 
+# openPREY's standard local tree (builddir) is a debug build, so the launch
+# configurations debug Prey compatibility work with full symbols and assertions.
+$expectedBuildOptions = [ordered]@{
+    'buildtype' = 'debug'
+}
+
+function Get-StaleBuildOptions([string]$Path) {
+    $optionsFile = Join-Path $Path 'meson-info\intro-buildoptions.json'
+    if (-not (Test-Path $optionsFile)) {
+        return @($expectedBuildOptions.Keys)
+    }
+    $configured = @{}
+    foreach ($option in (Get-Content $optionsFile -Raw | ConvertFrom-Json)) {
+        $configured[$option.name] = "$($option.value)".ToLowerInvariant()
+    }
+    return @($expectedBuildOptions.Keys | Where-Object { $configured[$_] -ne $expectedBuildOptions[$_] })
+}
+
+function Invoke-openPREYSetup {
+    $optionArgs = @('--backend', 'ninja', '--wrap-mode=forcefallback')
+    foreach ($name in $expectedBuildOptions.Keys) {
+        $optionArgs += "-D$name=$($expectedBuildOptions[$name])"
+    }
+    if (Test-MesonBuildDirectory $buildDir) {
+        Invoke-openPREYMeson (@('setup', $buildDir, $workspaceRoot, '--reconfigure') + $optionArgs)
+    } else {
+        Invoke-openPREYMeson (@('setup', '--wipe', $buildDir, $workspaceRoot) + $optionArgs)
+    }
+}
+
+# An existing build directory keeps whatever it was configured with, and the
+# compile tasks never reconfigure on their own, so bring it up to the expected
+# options before compiling.
+function Invoke-openPREYCompile {
+    $stale = @(Get-StaleBuildOptions $buildDir)
+    if ($stale.Count -gt 0) {
+        Write-Host "builddir options out of date ($($stale -join ', ')); reconfiguring."
+        Invoke-openPREYSetup
+    }
+    Invoke-openPREYMeson @(
+        'compile',
+        '-C',
+        $buildDir
+    )
+}
+
 switch ($Action) {
     'setup' {
-        if (Test-MesonBuildDirectory $buildDir) {
-            Invoke-openPREYMeson @(
-                'setup',
-                $buildDir,
-                $workspaceRoot,
-                '--reconfigure',
-                '--backend',
-                'ninja',
-                '--buildtype',
-                'debug',
-                '--wrap-mode=forcefallback'
-            )
-        } else {
-            Invoke-openPREYMeson @(
-                'setup',
-                '--wipe',
-                $buildDir,
-                $workspaceRoot,
-                '--backend',
-                'ninja',
-                '--buildtype',
-                'debug',
-                '--wrap-mode=forcefallback'
-            )
-        }
+        Invoke-openPREYSetup
     }
     'compile' {
-        Invoke-openPREYMeson @(
-            'compile',
-            '-C',
-            $buildDir
-        )
+        Invoke-openPREYCompile
     }
     'fastbuild' {
         if (-not (Test-Path $fastStageScript)) {
@@ -81,11 +99,7 @@ switch ($Action) {
             throw "openPREY staged content edit check script not found at '$checkStagedContentScript'."
         }
 
-        Invoke-openPREYMeson @(
-            'compile',
-            '-C',
-            $buildDir
-        )
+        Invoke-openPREYCompile
         Invoke-PythonTool @(
             $checkStagedContentScript,
             '--source-root',

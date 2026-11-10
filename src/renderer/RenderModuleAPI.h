@@ -3,6 +3,9 @@
 
 #ifndef __RENDERMODULEAPI_H__
 #define __RENDERMODULEAPI_H__
+#include <stdint.h>
+
+#include "RendererSettingsReports.h"
 
 /*
 ===============================================================================
@@ -22,7 +25,7 @@
 	opaque pointers to a standalone module) for full renderer modules that
 	compile against the engine headers.
 
-	See docs/dev/plans/2026-07-16-vulkan-renderer.md for the roadmap.
+	See docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer.md for the roadmap.
 
 ===============================================================================
 */
@@ -46,13 +49,65 @@
 //      surface kind so the engine creates the window for the right API, and
 //      the window services gain SDL-mediated Vulkan instance-extension and
 //      surface creation (the module never links SDL)
-// Version 7 keeps stale renderer modules from consuming the extended
-// renderEntity_t presentation contract (flat diffuse colour and sweep flags).
-// Version 8 carries the Prey render-entity ABI and a late-bound game time-group
-// query so renderer modules do not import the engine's mutable `game` global.
-// Version 9 extends glyphInfo_t with the per-glyph material required by retail
-// Doom 3/Prey bitmap fonts, whose glyphs span multiple texture atlases.
-#define RENDER_API_VERSION			9
+//  7 - Extended renderEntity_t presentation contract (flat diffuse colour
+//      and sweep flags)
+//  8 - Append-only idRenderSystem slot for coherent full-frame capture with
+//      CPU center-crop/resampling to caller-selected output dimensions
+//  9 - Append-only idRenderSystem slots for backend-neutral delayed whole-frame
+//      GPU timing and session-discontinuity resets (OpenGL and Vulkan)
+// 10 - Shared idFile/idFileSystem ABI adds engine-owned memory staging,
+//      semantic preload records, and source-authoritative generated caches
+// 11 - Append-only idRenderSystem slots publish frame-latched scene/native
+//      output state and enqueue the backend-neutral temporal presentation
+//      resolve requested by game modules
+// 12 - renderFramebufferDesc_t::glESProfile lets a module ask for an OpenGL ES
+//      context; a stale module would leave that byte uninitialised
+// 13 - ClearRenderTarget carries alpha for transparent retained UI layers.
+// 14 - Strict window requests/readback and private recoverable device services.
+// 15 - Private strict first-device initialization for durable display recovery.
+// 16 - Checked image/material policy restart receipt (private renderer service).
+// 17 - Owned portable image recovery preparation/capture and checked consumption.
+// 18 - Append-only retained output-size font metrics/glyph/reset services.
+// 19 - Merge startup-device preparation/fallback and current renderer contracts
+//      with retained UI services; both parent branches have incompatible layouts.
+// 20 - Settings reports: the renderer publishes how it resolved r_renderer and
+//      what each level load did with its light grids, and pulls the committed
+//      light-grid preload policy from the settings service.
+// 21 - OpenXR presentation: renderView_t carries an off-axis frustum and the
+//      idRenderSystem vtable appends GetVRGraphicsBinding, SetVRFrame,
+//      SetVRRenderTarget and GetVRFrameResult.
+// 22 - Append-only idRenderSystem slot PresentScaledScene: the game hands its
+//      below-native scene to the renderer's r_resolutionScaleMode upscale.
+// 23 - Append-only idFileSystem slots GeneratedCacheReadsEnabled and
+//      GeneratedCacheWritesEnabled: model and world loads skip building a
+//      generated-cache payload the level-load coordinator would discard.
+// 24 - Append-only idRenderSystem BeginGuiRoot preserves compatible HUD
+//      batches without weakening explicit render-target flush barriers.
+// 25 - idDeclManager appends FreeMaterialTypeArray: hit maps must be freed by
+//      their engine allocator, not by a renderer-local Mem_Free.
+// 26 - Deferred checkpoint capture slots in idRenderSystem.
+// 27 - idDict mutation-observer layout shared across engine/renderer boundaries.
+// 28 - glconfig_t appends active GPU class and dedicated-memory telemetry.
+// 29 - Owned read-only rendering-device inventory, callable on the live module.
+// 30 - Main-thread input-clock handoff and completed-frame latency receipts.
+// 31 - Join submitted rendering before engine-side renderer CVar mutation.
+// 32 - OpenXR on Vulkan: the services create the Vulkan module's instance
+//      and device through the XR runtime, renderVRGraphicsBinding_t carries
+//      the Vulkan device and renderVRFrame_t the VkImage swapchain images.
+//      renderVRGraphicsBinding_t also carries an EGL context (an OpenGL
+//      renderer on native Wayland) for XR_MNDX_egl_enable.
+// 33 - A pure connect no longer restarts the engine over generated image cache
+//      or expanded loading background reads: idFileSystem appends
+//      TakePureImageCacheEviction and idRenderSystem appends
+//      ReloadGeneratedCacheImages, which the client must run once the lock is
+//      in place (a stale module would leave derived pixels on the GPU of a
+//      pure session).
+// 34 - openPREY: the Prey render-entity ABI and a late-bound game time-group
+//      query, so renderer modules do not import the engine's mutable
+//      `game` global; glyphInfo_t carries the per-glyph material retail
+//      Doom 3/Prey bitmap fonts need, whose glyphs span several atlases.
+//      (openPREY's own pre-sync numbering called these 8 and 9.)
+#define RENDER_API_VERSION			34
 #define RENDER_API_ENTRY_POINT		"GetRenderAPI"
 
 class idSys;
@@ -99,8 +154,55 @@ typedef struct renderModuleServices_s {
 	// worker-thread creation intentionally not carried yet: the light-grid
 	// bake pool's Sys_CreateThread signature (thread registry, priority,
 	// threadInfo_t) is resolved by the module-side forwarder design in
-	// Phase B8 (docs/dev/plans/2026-07-16-vulkan-renderer-phase-b.md)
+	// Phase B8 (docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer-phase-b.md)
+
+	// --- version 12: the loader also owns the archived r_renderApi value. An
+	// active module whose device fails during a later vid_restart cannot be
+	// unloaded from its call stack, so before its fatal error it asks the loader
+	// to select gl for the next launch. Initial startup uses the recoverable
+	// version-13 export below. Returns true when the saved config selects gl ---
+	bool			( *ResetRenderApiAfterDeviceFailure )( void );
+
+	// --- version 20: the SYSTEM page's renderer and light-grid settings. The
+	// renderer reports how it resolved r_renderer each time it selects a back
+	// end. Each level load asks once for the light-grid preload policy, which
+	// is the settings service's committed choice and never a draft that could
+	// still be undone, and reports what the load did. False from the policy
+	// service leaves the load on r_lightGridPreload ---
+	void			( *PublishRendererSelection )( const renderRendererSelection_t *selection );
+	bool			( *GetLightGridLoadPolicy )( bool *preload, uint64_t *token );
+	void			( *PublishLightGridLoadReceipt )( const renderLightGridLoadReceipt_t *receipt );
+
+	// --- version 21: OpenXR. The renderer announces its device's lifetime so
+	// the engine opens its XR session on the live context and closes it before
+	// the context goes away (vid_restart, recoverable restarts, shutdown) ---
+	void			( *RendererDeviceEvent )( int event );	// renderDeviceEvent_t
+	// --- version 30: called on the main thread at handoff/retirement. The
+	// backend supplies the successful swap's clock, never the handoff time. ---
+	void			( *TakeFrameInputClocks )( double &look, double &flash );
+	void			( *RecordFrameInputToSwap )( double look, double flash, double swap );
+
+	// --- version 32: OpenXR on Vulkan. XR_KHR_vulkan_enable2 has the runtime
+	// create the instance and the device of the renderer it presents for, on
+	// the GPU the headset is attached to. The Vulkan module offers each
+	// creation here first. True means the engine handled it for VR and
+	// *outResult holds the VkResult; false means VR does not want this
+	// renderer (VR off, no runtime or headset, no Vulkan support) and the
+	// module creates the object itself. Handles are opaque so this header
+	// stays Vulkan-free: getInstanceProcAddr is PFN_vkGetInstanceProcAddr and
+	// createInfo a VkInstanceCreateInfo or VkDeviceCreateInfo ---
+	bool			( *CreateVulkanInstanceForVR )( void *getInstanceProcAddr, const void *createInfo,
+													void **outInstance, int *outResult );
+	// the physical device the runtime renders for, on an instance it created
+	bool			( *GetVulkanPhysicalDeviceForVR )( void *instance, void **outPhysicalDevice );
+	bool			( *CreateVulkanDeviceForVR )( void *getInstanceProcAddr, void *physicalDevice, const void *createInfo,
+												  void **outDevice, int *outResult );
 } renderModuleServices_t;
+
+typedef enum {
+	RENDER_DEVICE_READY = 1,		// a device and its context are live and current
+	RENDER_DEVICE_STOPPING = 2		// the device and its context are about to be destroyed
+} renderDeviceEvent_t;
 
 // native window/surface handoff; zeroed until the engine has created a window
 typedef struct renderModuleWindowInfo_s {
@@ -151,6 +253,8 @@ typedef struct renderFramebufferDesc_s {
 	bool			glDebugContext;
 	// --- version 6 ---
 	int				surfaceKind;		// renderSurfaceKind_t; GL attributes above are ignored for Vulkan
+	// --- version 12 ---
+	bool			glESProfile;		// request an OpenGL ES context; overrides glCoreProfile
 } renderFramebufferDesc_t;
 
 // ABI-neutral mirror of the renderer's glimpParms_t
@@ -163,6 +267,39 @@ typedef struct renderWindowParms_s {
 	int				displayHz;
 	int				multiSamples;
 } renderWindowParms_t;
+
+// Immutable display request. A nonzero displayId is authoritative across display
+// enumeration changes; displayIndex is used only when displayId is zero (-1 Auto).
+// Windowed dimensions are logical window units; exclusive dimensions are pixels.
+// swapInterval and multiSamples are validated by the renderer, not SDL windowing.
+typedef struct renderWindowRequest_s {
+	renderWindowParms_t parms;
+	unsigned int displayId;
+	int displayIndex;
+	bool fullscreenDesktop;
+	bool spanDisplays;
+	int swapInterval;
+	// Explicit baseline restoration. Position is authoritative only when true;
+	// maximized is applied independently, including on positionless compositors.
+	bool restorePlacement;
+	int windowX, windowY;
+	bool maximized;
+} renderWindowRequest_t;
+
+// Observations, never echoes of requested CVars. False query/apply results leave
+// output unchanged. A failed strict apply may have partially changed the window;
+// the caller must explicitly restore its captured state before persisting it.
+typedef struct renderWindowState_s {
+	unsigned int displayId;
+	int displayIndex;
+	unsigned long long windowFlags;
+	bool fullscreen, fullscreenDesktop, borderless, hidden, minimized, maximized, focused;
+	int windowX, windowY, logicalWidth, logicalHeight, pixelWidth, pixelHeight;
+	bool positionValid, currentModeValid;
+	int modeWidth, modeHeight, modePixelWidth, modePixelHeight;
+	float refreshRate, modePixelDensity, displayScale, pixelDensityX, pixelDensityY;
+	int uiViewportX, uiViewportY, uiViewportWidth, uiViewportHeight;
+} renderWindowState_t;
 
 typedef struct renderWindowServices_s {
 	// idempotent window-system bring-up: video subsystem, hints, lifecycle
@@ -228,6 +365,16 @@ typedef struct renderWindowServices_s {
 	// creates a surface on the current game window; false when the window
 	// was not created with RENDER_SURFACE_VULKAN or creation fails
 	bool			( *CreateVulkanSurface )( void *vkInstance, unsigned long long *outVkSurface );
+
+	// --- version 14: strict application has no closest-mode/desktop/placement
+	// fallback. Query reads current SDL state without changing archived CVars.
+	bool			( *QueryWindowState )( renderWindowState_t *outState );
+	bool			( *ApplyScreenParmsStrict )( const renderWindowRequest_t *request,
+								renderWindowState_t *outState, char *error, int errorSize );
+	// A recoverable attempt pins the existing video subsystem so live display
+	// identities survive context/window teardown, including failed attempts.
+	bool			( *RetainVideoSystem )( void );
+	void			( *ReleaseVideoSystem )( void );
 } renderWindowServices_t;
 
 // attribute selectors for renderWindowServices_t::GetGLAttribute; the
@@ -296,6 +443,13 @@ typedef struct renderModuleDiagnostics_s {
 	bool			( *RunDeviceSelfTest )( char *outSummary, int summaryLength );
 } renderModuleDiagnostics_t;
 
+struct renderDisplayPresentation_t;
+struct renderImagePolicyRequest_t;
+struct renderImagePolicyResult_t;
+struct renderImagePolicy_t;
+struct renderImageRecoveryLease_t;
+struct renderDeviceCatalog_t;
+
 typedef struct renderExport_s {
 	int										version;		// RENDER_API_VERSION
 	const char *							backendName;	// "gl" / "vulkan" -> r_actualRenderApi
@@ -310,6 +464,30 @@ typedef struct renderExport_s {
 	// releases module resources; must be safe to call before Sys_DLL_Unload
 	// whenever GetRenderAPI has been called
 	void			( *Shutdown )( void );
+	// Called after configuration and CPU renderer initialization, before input,
+	// UI/session/game initialization. Success retains the real device/resources
+	// for InitOpenGL; failure releases partial GPU/window state and returns to
+	// the engine before any renderer module can be unloaded. Optional for GL.
+	bool			( *PrepareStartupDevice )( char *outReason, int reasonLength );
+	// Version 14: frame-boundary device work and actual backend presentation.
+	// A failed restart may leave no device; the caller must explicitly restore.
+	bool			( *TryDeviceRestart )( const renderWindowRequest_t *request, char *error, int errorSize );
+	void			( *GetDisplayPresentation )( renderDisplayPresentation_t *outState );
+	// Version 15: only after renderSystem->Init and before the first device/world.
+	// Failure leaves no device; an explicit retry retains the caller's request.
+	// This never runs the legacy startup fallback or the world/font restart tail.
+	bool			( *TryInitializeDisplay )( const renderWindowRequest_t *request, char *error, int errorSize );
+    // Version 16: synchronous upload/material work; not a first-present receipt.
+    // False preserves output even when the failed attempt requires explicit restore.
+    bool (*TryImagePolicyRestart)(const renderImagePolicyRequest_t* request,
+        renderImagePolicyResult_t* output, char* error, int errorSize);
+    bool (*PrepareImagePolicyRecovery)(uint64_t,uint64_t,const char*,const renderImagePolicy_t*,renderImageRecoveryLease_t*,char*,int);
+    bool (*CaptureImagePolicyRecovery)(const renderImageRecoveryLease_t*,uint32_t,char*,uint32_t,uint32_t*,char*,int);
+    bool (*PrepareColdImagePolicyRecovery)(uint64_t,uint64_t,const char*,uint32_t,const char*,uint32_t,renderImageRecoveryLease_t*,char*,int);
+    bool (*CancelImagePolicyRecovery)(const renderImageRecoveryLease_t*,char*,int);
+    bool (*ReleaseImagePolicyRecovery)(const renderImageRecoveryLease_t*,uint32_t,const renderImagePolicyResult_t*,char*,int);
+	bool (*GetRenderingDevices)(renderDeviceCatalog_t*);
+	void (*SyncConfiguration)(void);
 } renderExport_t;
 
 extern "C" {

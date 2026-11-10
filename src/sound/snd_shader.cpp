@@ -86,8 +86,11 @@ static rvSoundShaderEditLocal localSoundShaderEdit;
 rvSoundShaderEdit* soundShaderEdit = &localSoundShaderEdit;
 
 static bool SND_IsMusicSamplePath( const idToken &token ) {
+	// retail keeps its score under sound/musical/; the Awakening expansion
+	// keeps its own under sound/music/
 	return token.IcmpPrefixPath( "sound/musical/" ) == 0 ||
-		token.IcmpPrefixPath( "sound/ambience/musical/" ) == 0;
+		token.IcmpPrefixPath( "sound/ambience/musical/" ) == 0 ||
+		token.IcmpPrefixPath( "sound/music/" ) == 0;
 }
 
 static bool ParseSoundClassToken( idToken& token, int& soundClass )
@@ -502,7 +505,9 @@ bool idSoundShader::ParseShader( idLexer& src )
 	parms.soundShaderFlags = 0;
 	parms.soundClass = 0;
 	parms.frequencyShift = 1.0f;
-	parms.wetLevel = 0.0f;
+	// Retail sends every mono sound to the area reverb; it has no "reverb" keyword.
+	// openQ4 keeps the keyword's wet level as a scale on that send.
+	parms.wetLevel = 1.0f;
 	parms.dryLevel = 1.0f;
 	minFrequencyShift = SOUND_SHADER_DEFAULT_FREQUENCY_SHIFT;
 	maxFrequencyShift = SOUND_SHADER_DEFAULT_FREQUENCY_SHIFT;
@@ -599,7 +604,9 @@ bool idSoundShader::ParseShader( idLexer& src )
 			{
 				return false;
 			}
-			if( shakeIndex < 0 )
+			// openQ4: a shader lists at most SOUND_SHADER_MAX_SAMPLES sounds, and
+			// the list below was sized straight from this number in the decl
+			if( shakeIndex < 0 || shakeIndex >= SOUND_SHADER_MAX_SAMPLES )
 			{
 				src.Warning( "shakeData index out of range" );
 			}
@@ -819,10 +826,12 @@ bool idSoundShader::ParseShader( idLexer& src )
 				token.SetFileExtension( ".wav" );
 			}
 
+			// BFG's rule, for openQ4's own SSF_VO. Retail's SSF_IS_VO marks lip-synced speech and
+			// is the game's to set: inferred from the path it took map speakers playing VO out of
+			// s_speakerFraction, 3.7 dB louder than Quake 4 played them.
 			if( token.IcmpPrefixPath( "sound/vo/" ) == 0 || token.IcmpPrefixPath( "sound/guis/" ) == 0 )
 			{
 				parms.soundShaderFlags |= SSF_VO;
-				parms.soundShaderFlags |= SSF_IS_VO;
 			}
 			if( SND_IsMusicSamplePath( token ) )
 			{
@@ -845,7 +854,6 @@ bool idSoundShader::ParseShader( idLexer& src )
 			if( token.IcmpPrefixPath( "sound/vo/" ) == 0 || token.IcmpPrefixPath( "sound/guis/" ) == 0 )
 			{
 				parms.soundShaderFlags |= SSF_VO;
-				parms.soundShaderFlags |= SSF_IS_VO;
 			}
 			if( SND_IsMusicSamplePath( token ) )
 			{
@@ -1064,7 +1072,7 @@ idSoundShader::SetShakeData
 */
 void idSoundShader::SetShakeData( int index, const char* ampData )
 {
-	if( index < 0 )
+	if( index < 0 || index >= SOUND_SHADER_MAX_SAMPLES )
 	{
 		return;
 	}

@@ -1,0 +1,43 @@
+diff --git a/src/lib_json/json_reader.cpp b/src/lib_json/json_reader.cpp
+index 1bf92f3..ce841fb 100644
+--- a/src/lib_json/json_reader.cpp
++++ b/src/lib_json/json_reader.cpp
+@@ -23,6 +23,17 @@
+ #include <set>
+ #include <sstream>
+ #include <utility>
++#if __has_include(<charconv>)
++#include <charconv>
++#endif
++// openQ4: std::from_chars decodes an ordinary number without a stream, a
++// locale or a copy. libc++ gained floating from_chars only in LLVM 20, so a
++// library without it keeps the stream path for every number.
++#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
++#define JSONCPP_OPENQ4_FROM_CHARS 1
++#else
++#define JSONCPP_OPENQ4_FROM_CHARS 0
++#endif
+ 
+ #include <cstdio>
+ 
+@@ -1647,6 +1658,20 @@ bool OurReader::decodeDouble(Token& token) {
+ 
+ bool OurReader::decodeDouble(Token& token, Value& decoded) {
+   double value = 0;
++#if JSONCPP_OPENQ4_FROM_CHARS
++  // openQ4: a number from_chars accepts whole and in range needs no stream.
++  // Anything else (overflow, underflow, a form it rejects) takes the stream
++  // path below, which keeps its results and diagnostics.
++  {
++    const std::from_chars_result parsed =
++        std::from_chars(token.start_, token.end_, value);
++    if (parsed.ec == std::errc() && parsed.ptr == token.end_) {
++      decoded = value;
++      return true;
++    }
++    value = 0;
++  }
++#endif
+   IStringStream is(String(token.start_, token.end_));
+   is.imbue(std::locale::classic());
+   if (!(is >> value)) {

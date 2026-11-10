@@ -32,17 +32,18 @@ along with Doom 3 Source Code.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdlib.h>
 #include <unistd.h>
 
+#define OPENQ4_SDL3_LINUX_HOST 1
+#include "../sdl3/sdl3_backend.cpp"
+
+// Xlib defines macros such as None, Bool and Status that break engine and UI
+// declarations (PaintType::None in ui/retained/Vector.h), so include it after
+// the shared SDL3 backend; only the X11 helpers below use it.
 #if defined(OPENQ4_HAVE_X11_HELPERS)
 #include <X11/Xlib.h>
 extern "C" {
 #include "libXNVCtrl/NVCtrlLib.h"
 }
-#endif
 
-#define OPENQ4_SDL3_LINUX_HOST 1
-#include "../sdl3/sdl3_backend.cpp"
-
-#if defined(OPENQ4_HAVE_X11_HELPERS)
 Display *dpy = NULL;
 Window win = 0;
 #endif

@@ -1,6 +1,6 @@
 # Linux ARM64 cross-compilation
 
-openQ4 has a canonical supplementary cross-build from an Ubuntu 24.04 x64 build machine to a GNU/Linux ARM64 target. It compiles the client, dedicated server, and both staged companion-repository game modules with the SDL3 native-Wayland path. Native ARM64 CI remains authoritative for build/package evidence and assetless Weston/Xvfb window, compositor, and input-startup behavior. The current hosted runs do not prove audio or real SP/MP gameplay, so Linux ARM64 release packages remain preview. First-class release signoff requires the physical-machine tests and review recorded in [the Linux ARM64 evidence record](linux-arm64-signoff-evidence.md).
+openQ4 has a canonical supplementary cross-build from an Ubuntu 24.04 x64 build machine to a GNU/Linux ARM64 target. It compiles the client, dedicated server, and both in-tree game modules with the SDL3 native-Wayland path. Native ARM64 CI remains authoritative for build/package evidence and assetless Weston/Xvfb window, compositor, and input-startup behavior. The current hosted runs do not prove audio or real SP/MP gameplay, so Linux ARM64 release packages remain preview. First-class release signoff requires the physical-machine tests and review recorded in [the Linux ARM64 evidence record](linux-arm64-signoff-evidence.md).
 
 The checked-in Meson machine file is `tools/cross/linux-arm64.ini`. It is intentionally specific to Debian/Ubuntu multiarch directory conventions so that an x64 package can never satisfy an ARM64 target dependency by accident. The corresponding package set is `tools/cross/ubuntu-linux-arm64-packages.txt`, and `.github/workflows/linux-arm64-cross.yml` is the executable reference setup.
 
@@ -14,14 +14,13 @@ sudo apt-get install -y --no-install-recommends "${packages[@]}"
 python3 -m pip install meson ninja
 ```
 
-Clone the companion game repository next to openQ4 or point `OPENQ4_GAMELIBS_REPO` at it. The main build stages those canonical sources and produces both game modules; do not create an engine-side `src/game` copy. The companion repository also supports standalone native Linux x64 and ARM64 SP/MP module builds for compiler and ABI validation, but openQ4's staged build remains the integrated package and runtime path.
+The engine checkout contains the canonical SP/MP sources in `src/game/` and `src/mpgame/`. Meson compiles them directly and writes their source inventory to the build directory. No companion checkout or source staging is required; `-Dbuild_engine=false` supports a standalone game-module build using the same sources and headers.
 
 ## Configure and compile
 
 From the openQ4 repository root:
 
 ```bash
-export OPENQ4_GAMELIBS_REPO="$(cd ../openQ4-game && pwd)"
 export PKG_CONFIG_ALLOW_CROSS=1
 
 bash tools/build/meson_setup.sh setup --wipe builddir-arm64-cross . \

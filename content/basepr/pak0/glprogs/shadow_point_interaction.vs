@@ -43,6 +43,12 @@ vec3 TangentSpaceVector( vec3 objectVector ) {
 		dot( attr_Normal, objectVector ) );
 }
 
+#ifdef OPENQ4_PBR
+// Native PBR (draw_pbr.cpp) shades in object space with an orthonormal vertex
+// frame, exactly as Vulkan does; that frame helper is appended to this source.
+void PBRVertexFrame( vec3 normal, vec3 tangent, vec3 bitangent );
+#endif
+
 void main() {
 	vec4 position = gl_Vertex;
 	vec4 texCoord = vec4( attr_TexCoord0.xy, 0.0, 1.0 );
@@ -55,9 +61,19 @@ void main() {
 		dot( position, uModelMatrixRow1 ),
 		dot( position, uModelMatrixRow2 ) );
 
+#ifdef OPENQ4_PBR
+	// Object-space light and eye vectors: transforming them through the
+	// vertex tangent frame before interpolation distorts their directions
+	// across a curved triangle.
+	vLightVector = toLight;
+	vHalfAngleVector = vec3( 0.0 );
+	vViewVector = toView;
+	PBRVertexFrame( attr_Normal, attr_Tangent, attr_Bitangent );
+#else
 	vLightVector = TangentSpaceVector( toLight );
 	vHalfAngleVector = TangentSpaceVector( normalize( toLight ) + normalize( toView ) );
 	vViewVector = TangentSpaceVector( toView );
+#endif
 	// Normal-offset shadows: push the sampled point along the world-space
 	// geometric normal by (texel footprint at this distance * slope) before
 	// forming the cube lookup vector. uPointShadowNormalOffsetWorld is the

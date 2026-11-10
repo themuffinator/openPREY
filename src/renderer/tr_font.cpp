@@ -93,17 +93,13 @@ static const int PREY_FONTDAT_SIZE =
 	GLYPHS_PER_FONT * PREY_FONTDAT_GLYPH_SIZE + sizeof( float ) + PREY_FONTDAT_FONT_NAME_BYTES;
 static_assert( PREY_FONTDAT_SIZE == 20548, "unexpected retail Prey font data layout" );
 
-static fontInfo_t *R_FontSlotForIndex( fontInfoEx_t &font, q4FontSlotIndex_t slot ) {
-	if ( slot == Q4_FONT_SLOT_SMALL ) {
-		return &font.fontInfoSmall;
-	}
-	if ( slot == Q4_FONT_SLOT_MEDIUM ) {
-		return &font.fontInfoMedium;
-	}
-	return &font.fontInfoLarge;
-}
+// Renderer reloads keep this module mapped, so the console-atlas lifecycle
+// guard must be reset explicitly when FreeType/font resources are released.
+static bool consoleFontChecked = false;
+static int consoleFontCodePageGeneration = -1;
 
-static const fontInfo_t *R_FontSlotForIndex( const fontInfoEx_t &font, q4FontSlotIndex_t slot ) {
+
+static fontInfo_t *R_FontSlotForIndex( fontInfoEx_t &font, q4FontSlotIndex_t slot ) {
 	if ( slot == Q4_FONT_SLOT_SMALL ) {
 		return &font.fontInfoSmall;
 	}
@@ -245,6 +241,11 @@ static bool R_LoadQuake4FontSlot( fontInfoEx_t &font, const char *fontName, cons
 	}
 
 	idStr::Copynz( loadedSlot.name, fontDataName.c_str(), sizeof( loadedSlot.name ) );
+	// A .fontdat is 256 slots of art for one 8-bit codepage - which one is
+	// whatever language the atlas shipped with, and the text layer maps code
+	// points onto it. There is no room for anything above U+00FF, so no
+	// extended pages either; the memset in RegisterFont already left them NULL.
+	loadedSlot.glyphIndexing = GLYPH_INDEX_CODEPAGE;
 	loadedSlot.material = declManager->FindMaterial( fontDataName.c_str() );
 	if ( loadedSlot.material != NULL ) {
 		loadedSlot.material->SetSort( SS_GUI );
@@ -403,6 +404,33 @@ static bool R_LoadFontSlot( fontInfoEx_t &font, const char *fontName, const q4Fo
 
 /*
 ============
+R_SyncFontCodePage
+
+The renderer is a module with its own copy of idlib, so the active codepage the
+engine selects in idCommonLocal::InitLanguageDict does not reach this side -
+that static lives in the engine's copy. Without this the string tables would be
+Windows-1250 while the glyph atlas was still rasterised through Windows-1252,
+which is not a missing glyph but a wrong one: Polish "GRE-ogonek" came out as
+"GRE-circumflex" and "WYJSCIE" as "WYJOECIE".
+
+sys_lang is a cvar, and cvars do cross the module boundary, so derive it here
+from the same language name rather than trying to push the value across.
+============
+*/
+void R_SyncFontCodePage( void ) {
+	LangDict_SetActiveCodePage(
+		LangDict_CodePageForLanguage( cvarSystem->GetCVarString( "sys_lang" ) ) );
+}
+
+void R_RefreshConsoleFontAtlas( void ) {
+	R_SyncFontCodePage();
+	consoleFontChecked = true;
+	consoleFontCodePageGeneration = LangDict_GetCodePageGeneration();
+	R_BuildConsoleFontAtlas();
+}
+
+/*
+============
 RegisterFont
 
 Loads 3 point sizes, 12, 24, and 48
@@ -411,11 +439,19 @@ Loads 3 point sizes, 12, 24, and 48
 bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font ) {
 	memset( &font, 0, sizeof( font ) );
 
+	// Every atlas below is rasterised through the active codepage, so this
+	// module's copy of it has to agree with the string tables before any glyph
+	// is baked.
+	R_SyncFontCodePage();
+
 	// The console sheet is not registered through here, so piggyback on the
-	// first font registration to rebuild it once the renderer is up.
-	static bool consoleFontChecked = false;
-	if ( !consoleFontChecked ) {
+	// first font registration to rebuild it once the renderer is up. It is
+	// byte-indexed like the GUI atlases, so a sys_lang change that moves the
+	// string tables between Windows-1252 and Windows-1250 also invalidates it.
+	const int codePageGeneration = LangDict_GetCodePageGeneration();
+	if ( !consoleFontChecked || consoleFontCodePageGeneration != codePageGeneration ) {
 		consoleFontChecked = true;
+		consoleFontCodePageGeneration = codePageGeneration;
 		R_BuildConsoleFontAtlas();
 	}
 
@@ -464,6 +500,7 @@ void R_InitFreeType( void ) {
 R_DoneFreeType
 ============
 */
-void R_DoneFreeType( void ) {
-//	registeredFontCount = 0;
+void R_DoneFreeType( bool preserveAtlasImages ) {
+	R_ShutdownTrueTypeFonts( preserveAtlasImages );
+	consoleFontChecked = false;
 }

@@ -63,6 +63,9 @@ static void R_FinishDeform( drawSurf_t *drawSurf, srfTriangles_t *newTri, idDraw
 	}
 	// if we are out of vertex cache, leave it the way it is
 	if ( newTri->ambientCache ) {
+		// srfTriangles_t::deformedSurface describes borrowed topology ownership
+		// for generated models; it is not a material-deform execution flag. The
+		// per-draw ClassicDeformDomain record seals this replacement instead.
 		drawSurf->geo = newTri;
 	}
 }
@@ -714,7 +717,13 @@ static void R_FlareDeform( drawSurf_t *surf ) {
 
 	if ( tri->numVerts != 4 || tri->numIndexes != 6 ) {
 		//FIXME: temp hack for flares on tripleted models
-		common->Warning( "R_FlareDeform: not a single quad" );
+		// openQ4: once per material. The surface fails the same way every
+		// frame (The Awakening's m09 printed this about 340 times a second).
+		static idList<const idMaterial *> warnedMaterials;
+		if ( warnedMaterials.FindIndex( surf->material ) < 0 ) {
+			warnedMaterials.Append( surf->material );
+			common->Warning( "R_FlareDeform: not a single quad (%s)", surf->material ? surf->material->GetName() : "no material" );
+		}
 		return;
 	}
 
@@ -919,6 +928,14 @@ static void R_ExpandDeform( drawSurf_t *surf ) {
 		newTri->verts = ac;
 		R_DeriveTangents( newTri, false );
 		newTri->verts = NULL;
+	} else if ( !tri->tangentsCalculated ) {
+		// A GPU-skinned pose (or a deferred basis) leaves the CPU vertices with
+		// current positions only. Derive the basis into the copy over the source
+		// topology, so seams and mirrored vertices still share their normals.
+		srfTriangles_t basisTri = *tri;
+		basisTri.verts = ac;
+		basisTri.facePlanes = NULL;
+		R_DeriveTangents( &basisTri, false );
 	}
 #else
 	newTri->numVerts = tri->numVerts;

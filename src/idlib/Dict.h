@@ -2,6 +2,8 @@
 #ifndef __DICT_H__
 #define __DICT_H__
 
+#include "ContentIdentity.h"
+
 /*
 ===============================================================================
 
@@ -133,6 +135,10 @@ public:
 						// returns a unique checksum for this dictionary's content
 	int					Checksum( void ) const;
 
+	// Save-only observers are invalidated before every content mutation. The
+	// identity does not retain strings or extend the dictionary's lifetime.
+	const idContentIdentity &ContentIdentity() const { return contentIdentity; }
+
 	static void			Init( void );
 	static void			Shutdown( void );
 
@@ -161,6 +167,7 @@ public:
 // RAVEN END
 
 private:
+	idContentIdentity contentIdentity;
 	idList<idKeyValue>	args;
 	idHashIndex			argHash;
 	static idStrPool	globalKeys;

@@ -24,7 +24,7 @@ def validate_evidence_index() -> None:
     for token in (
         "# macOS Signoff Evidence Index",
         "tools/macos/record_signoff_evidence.py",
-        "macOS remains experimental unless the current release entry below points to a completed-checklist archive",
+        "macOS stays a preview, not first-class, unless the current release entry below points to a completed-checklist archive",
         "-RequireCompletedSignoffChecklist",
         "--require-completed-checklist",
         "Archive SHA-256",
@@ -78,7 +78,7 @@ def validate_release_completion_gate() -> None:
 
 
 def validate_plan_status() -> None:
-    plan = read("docs/dev/plan/2026-06-30-macos-compatibility-support.md")
+    plan = read("docs/dev/archive/2026-10-18/plan/2026-06-30-macos-compatibility-support.md")
 
     for token in (
         "Phase 0: Evidence plumbing",

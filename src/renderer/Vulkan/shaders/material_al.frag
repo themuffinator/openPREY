@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "framebuffer_coords.glsl"
 
 // Compatible Vulkan implementation of Quake 4's missing glsl/AL.glsl
 // fragment program.
@@ -61,7 +63,7 @@ void main() {
     vec2 viewportOrigin = material.shaderParms[13].xy;
     vec2 viewportSize = max(material.shaderParms[14].xy, vec2(1.0));
     float framebufferHeight = max(material.shaderParms[12].x, viewportSize.y);
-    vec2 glPixel = vec2(gl_FragCoord.x, framebufferHeight - gl_FragCoord.y);
+    vec2 glPixel = vec2(gl_FragCoord.x, CanonicalWindowY(framebufferHeight));
     vec2 screenTexCoord =
         ((glPixel - viewportOrigin) / viewportSize)
         * material.shaderParms[1].xy;

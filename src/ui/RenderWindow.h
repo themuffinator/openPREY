@@ -28,6 +28,8 @@ If you have questions concerning this license or the applicable additional terms
 #ifndef __RENDERWINDOW_H
 #define __RENDERWINDOW_H
 
+#include "retained/ModelScene.h"
+
 class idUserInterfaceLocal;
 class idRenderWindow : public idWindow {
 public:
@@ -36,9 +38,16 @@ public:
 	virtual ~idRenderWindow();
 
 	virtual void PostParse();
+	virtual void RefreshForLevelLoad() override;
 	virtual void Draw( int time, float x, float y );
 	virtual size_t Allocated() { return idWindow::Allocated(); };
 	virtual idWinVar *GetWinVarByName( const char *_name, bool winLookup = false, drawWin_t **owner = NULL );
+
+	// Programmatic renderDef, shared with the retained host. No GUI scripts or
+	// entity spawning are involved; the caller owns the output target/crop.
+	void ConfigureModelScene( const openq4::ui::ModelScene &scene );
+	bool PrepareModelScene( int time, std::string &error );
+	void DrawModelScene( int time, float fov, int width, int height );
 
 private:
 	enum {
@@ -76,7 +85,9 @@ private:
 	idWinVec4 rimlightColor;
 	idWinVec4 brightSkinColor;
 	idWinFloat outlineWidth;
-	idWinStr customSkin;
+	idWinStr customSkin[MAX_RENDERWINDOW_MODELS];
+	openq4::ui::ModelScene configuredScene;
+	bool sceneConfigured = false;
 	idWinStr customShader;
 	idWinBool needsRender;
 	int animLength[MAX_RENDERWINDOW_MODELS];

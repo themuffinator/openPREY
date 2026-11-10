@@ -432,6 +432,18 @@ typedef struct renderView_s {
 	bool					streamingPrecache;	// If true, we precache all the textures that are visible in the world
 #endif
 // RAVEN END
+
+	// openQ4: an off-axis frustum, one eye of a head-mounted display. When set,
+	// the projection and the culling frustum come from these half-angle tangents
+	// (fovTanLeft and fovTanDown negative) instead of fov_x/fov_y, which should
+	// still hold the enclosing field of view for consumers that only estimate
+	// (LOD, effects, the light grid). The initializers keep every view built by
+	// existing code, demos and savegames symmetric.
+	bool					asymmetricFov = false;
+	float					fovTanLeft = 0.0f;
+	float					fovTanRight = 0.0f;
+	float					fovTanUp = 0.0f;
+	float					fovTanDown = 0.0f;
 } renderView_t;
 
 
@@ -517,6 +529,9 @@ enum
 	RF_PORTAL_SKY				= BIT( 6 ),
 	// this the primary view - when this is rendered, we then know we can capture the screen buffer
 	RF_PRIMARY_VIEW				= BIT( 7 ),
+	// An independently composited UI model preserves the surrounding frame's
+	// clocks, primary-world identity and render-demo stream.
+	RF_INDEPENDENT_VIEW          = BIT( 8 ),
 // RAVEN END
 };
 

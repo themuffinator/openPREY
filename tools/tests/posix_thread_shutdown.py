@@ -46,8 +46,8 @@ def validate_posix_thread_teardown() -> None:
 
 def validate_workers_observe_stop_requests() -> None:
     linux_main = read("src/sys/linux/main.cpp")
-    macos_compat = read("src/sys/osx/macosx_compat.mm")
-    macos_controller = read("src/sys/osx/DOOMController.mm")
+    macos_compat = read("src/sys/macos/macos_compat.mm")
+    macos_controller = read("src/sys/macos/DOOMController.mm")
     file_system = read("src/framework/FileSystem.cpp")
     lightgrid = read("src/renderer/RenderWorld_lightgrid.cpp")
 

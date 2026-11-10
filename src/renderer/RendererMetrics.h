@@ -31,7 +31,31 @@ enum rendererModernExecutorMetricsMode_t {
 	RENDERER_MODERN_EXECUTOR_METRICS_LEGACY_FALLBACK
 };
 
+// CPU phases inside the present command. GPU timestamp spans can include
+// an idle queue while the CPU is blocked; keep the two clocks distinct.
+enum rendererPresentCpuPhase_t {
+	RENDERER_PRESENT_FINISH = 0,
+	RENDERER_PRESENT_FINAL_POST,
+	RENDERER_PRESENT_WINDOW_STATE,
+	RENDERER_PRESENT_CONTEXT,
+	RENDERER_PRESENT_SWAP,
+	RENDERER_PRESENT_CPU_PHASE_COUNT
+};
+// Frame-slot reuse and swapchain acquisition happen before drawing, not inside
+// the present command. Keep these waits separate from CPU recording and GPU work.
+enum rendererWaitCpuPhase_t {
+	RENDERER_WAIT_FRAME_FENCE = 0,
+	RENDERER_WAIT_SWAPCHAIN_IMAGE,
+	RENDERER_WAIT_CPU_PHASE_COUNT
+};
+unsigned long long R_RendererMetrics_CpuClock( void );
+void R_RendererMetrics_EndPresentPhase( rendererPresentCpuPhase_t phase, unsigned long long begin );
+void R_RendererMetrics_EndWaitPhase( rendererWaitCpuPhase_t phase, unsigned long long begin );
+void R_RendererMetrics_EndUploadRetirement( unsigned long long begin );
+
 void R_RendererMetrics_BeginFrame( int frameCount );
+void R_RendererMetrics_MarkCpuFrameBegin( void );
+void R_RendererMetrics_MarkFrameSubmitBegin( void );
 void R_RendererMetrics_RecordSubmitMsec( int submitMsec );
 void R_RendererMetrics_AddVisibilityMsec( int msec );
 void R_RendererMetrics_AddPacketBuildMsec( int msec );
@@ -65,4 +89,19 @@ void R_RendererMetrics_ShutdownGpuTimers( void );
 bool R_RendererMetrics_GpuTimersAvailable( void );
 bool RendererGpuTimer_RunSelfTest( void );
 
+// Delayed whole-frame timing shared by every renderer backend. Backends only
+// publish results after a nonblocking availability check; consumers receive a
+// coherent POD snapshot and never touch GL/Vulkan query objects.
+void R_RendererMetrics_GetGpuFrameTiming( renderGpuFrameTiming_t &timing );
+void R_RendererMetrics_ResetGpuFrameTiming( const char *reason );
+void R_RendererMetrics_SetGpuFrameTimingBackend( renderGpuTimingBackend_t backend, bool supported );
+unsigned int R_RendererMetrics_GpuFrameTimingGeneration( void );
+void R_RendererMetrics_RecordGpuFrameTimingResolved( renderGpuTimingBackend_t backend,
+	int frameNumber, unsigned int generation, unsigned long long elapsedMicroseconds,
+	int currentFrameNumber );
+void R_RendererMetrics_RecordGpuFrameTimingUnavailable( void );
+void R_RendererMetrics_RecordGpuFrameTimingDropped( void );
+
 #endif /* !__RENDERER_METRICS_H__ */
+
+void R_RendererMetrics_MarkBackEndFinished( void );

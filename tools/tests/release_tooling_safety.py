@@ -6,14 +6,17 @@ from __future__ import annotations
 import importlib.util
 import argparse
 import io
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
 import uuid
 import zlib
+from zipfile import ZipFile
 from pathlib import Path
 from types import ModuleType
 
@@ -284,6 +287,58 @@ def validate_changelog_output_and_override_guards() -> None:
         )
 
 
+def validate_withdrawn_release_selection() -> None:
+    repo = make_git_repo(WORK / "withdrawn-release-repo")
+    commit_file(repo, "meson.build", "project('openQ4', version: '0.13.2')\n", "released")
+    git(repo, "tag", "v0.13.2")
+    commit_file(repo, "file.txt", "withdrawn\n", "withdrawn candidate")
+    git(repo, "tag", "v0.14.000")
+    git(repo, "tag", "v0.14.0")
+    commit_file(repo, "file.txt", "development\n", "continue development")
+
+    if VERSION.read_base_version(repo, "") != "0.13.2":
+        raise AssertionError("development version selected a withdrawn tag")
+    latest = RELEASE_VERSION.find_latest_release_tag(repo)
+    if latest is None or latest[0] != "v0.13.2":
+        raise AssertionError("manual release baseline selected a withdrawn tag")
+    if CHANGELOG.find_previous_release_tag(repo, "v0.15.000") != "v0.13.2":
+        raise AssertionError("changelog omitted changes covered only by a withdrawn release")
+
+    command = [sys.executable, str(BUILD_DIR / "openq4_release_version.py"), "--source-root", str(repo)]
+    patch = run(command + ["--bump-mode", "patch"], repo)
+    minor = run(command + ["--bump-mode", "minor"], repo)
+    if "latest_release_tag=v0.13.2\n" not in patch or "release_tag=v0.13.003\n" not in patch:
+        raise AssertionError("patch selection did not start at the available release")
+    if "release_tag=v0.14.001\n" not in minor or "Skipped withdrawn version" not in minor:
+        raise AssertionError("minor selection would reuse the withdrawn version")
+    for text in ("0.14.0", "0.14.000"):
+        expect_system_exit(
+            lambda: RELEASE_VERSION.validate_version_override(
+                RELEASE_VERSION.parse_version(text), RELEASE_VERSION.parse_version("0.13.2"), latest
+            ),
+            "is withdrawn",
+            "withdrawn override",
+        )
+        output = repo / f"notes-{text}.md"
+        expect_system_exit(
+            lambda: CHANGELOG.main([
+                "generate_release_changelog.py", "--source-root", str(repo),
+                "--version", text, "--version-tag", text, "--release-tag", f"v{text}",
+                "--repo", "owner/repo", "--output", str(output),
+            ]),
+            "is withdrawn",
+            "withdrawn notes publication",
+        )
+        if output.exists():
+            raise AssertionError("withdrawn release notes were generated")
+
+    git(repo, "tag", "v0.15.000")
+    if VERSION.read_base_version(repo, "") != "0.15.000":
+        raise AssertionError("withdrawal policy capped future valid releases")
+    if RELEASE_VERSION.find_latest_release_tag(repo)[0] != "v0.15.000":
+        raise AssertionError("manual release selection ignored a future valid release")
+
+
 def validate_openq4_version_iteration() -> None:
     expect_system_exit(
         lambda: VERSION.resolve_auto_iteration_date("20260231"),
@@ -307,6 +362,66 @@ def validate_openq4_version_iteration() -> None:
 
     if iteration != "20260623.11":
         raise AssertionError(f"auto iteration should follow the highest suffix, got {iteration!r}")
+
+
+def validate_version_header_build_refresh_contract() -> None:
+    meson_text = (ROOT / "meson.build").read_text(encoding="utf-8")
+    for token in (
+        "generated_version_header = custom_target(",
+        "version_metadata_command + ['--header-out', '@OUTPUT@']",
+        "build_always_stale: true",
+        "build_by_default: true",
+        "openq4_engine_sources += [openq4_paks_generated_header, generated_version_header]",
+        "game_sp_sources += [savegame_compat_header, generated_version_header]",
+        "game_mp_sources += [savegame_compat_header, generated_version_header]",
+        "openq4_dedicated_sources += [openq4_paks_generated_header, generated_version_header]",
+    ):
+        if token not in meson_text:
+            raise AssertionError(f"version header build-refresh contract is missing {token!r}")
+
+    if "version_metadata_command + ['--header-out', generated_version_header_path]" not in meson_text:
+        raise AssertionError("configure-time version header bootstrap is missing")
+
+
+def validate_release_build_history() -> None:
+    root = WORK / "version-history"
+    source = root / "source"
+    source.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    for index in range(3):
+        write_file(source / "revision.txt", str(index))
+        subprocess.run(["git", "-C", str(source), "add", "revision.txt"], check=True)
+        subprocess.run([
+            "git", "-C", str(source), "-c", "user.name=Release Test",
+            "-c", "user.email=release-test@example.invalid", "commit", "-qm", str(index),
+        ], check=True)
+    command = [
+        sys.executable, str(BUILD_DIR / "openq4_version.py"),
+        "--base-version", "0.13.1", "--track", "stable", "--source-root",
+    ]
+    full = subprocess.run(command + [str(source)], capture_output=True, text=True, check=True)
+    if "resource_build=3\n" not in full.stdout:
+        raise AssertionError("stable savegame build number must reflect complete engine history")
+    shallow = root / "shallow"
+    subprocess.run(["git", "clone", "-q", "--depth", "1", source.as_uri(), str(shallow)], check=True)
+    header = root / "rejected-version.h"
+    rejected = subprocess.run(
+        command + [str(shallow), "--header-out", str(header)], capture_output=True, text=True,
+    )
+    if rejected.returncode == 0 or "complete Git history" not in rejected.stderr or header.exists():
+        raise AssertionError("shallow stable builds must fail before writing unusable save metadata")
+    workflow = (ROOT / ".github/workflows/manual-release.yml").read_text(encoding="utf-8")
+    build_checkout = workflow.split("  builds:", 1)[1].split("- name: Fetch pinned openQ4-game", 1)[0]
+    if "fetch-depth: 0" not in build_checkout or "fetch-depth: 1" in build_checkout:
+        raise AssertionError("release compilation must use complete engine history")
+    # Push verification publishes the payloads handed to players for testing,
+    # so its packaging jobs need the same complete history (#183).
+    push = (ROOT / ".github/workflows/push-verification.yml").read_text(encoding="utf-8")
+    for job in ("posix-builds", "windows-build", "windows-arm64-build"):
+        section = push.split(f"\n  {job}:\n", 1)[1]
+        checkout = section.split("uses: actions/checkout@v7", 1)[1].split("\n      - name:", 1)[0]
+        if "fetch-depth: 0" not in checkout:
+            raise AssertionError(f"push verification job {job} publishes payloads and must use complete engine history")
 
 
 def validate_release_version_floor_and_docs_classification() -> None:
@@ -414,18 +529,26 @@ def validate_release_docs_layout() -> None:
     legacy_user_root = "docs" + "-user"
     legacy_dev_root = "docs" + "-dev"
     write_file(source_root / "README.md", "# Docs\n\nProject docs.\n")
+    write_file(source_root / "LICENSING.md", "# Licensing\n\nComponent terms.\n")
     write_file(source_root / "docs" / "user" / "getting-started.md", "# Getting Started\n\nUser guide.\n")
     write_file(source_root / "docs" / "dev" / "platform-support.md", "# Platform Support\n\nDeveloper guide.\n")
+    write_file(source_root / "docs" / "dev" / "roadmap.md", "# openQ4 development roadmap\n\nActive plan.\n")
     write_file(source_root / "docs" / "dev" / "proposals" / "renderer.md", "# Renderer Proposal\n\nResearch.\n")
+    write_file(source_root / "docs" / "dev" / "archive" / "2026-10-18" / "README.md", "# Planning archive\n\nHistorical plans.\n")
+    write_file(source_root / "docs" / "dev" / "archive" / "2026-10-18" / "plans" / "renderer.md", "# Old renderer plan\n\nSuperseded.\n")
     write_file(source_root / legacy_user_root / "legacy.md", "# Old User Path\n\nIgnored.\n")
     write_file(source_root / legacy_dev_root / "legacy.md", "# Old Dev Path\n\nIgnored.\n")
 
     sources = {relative.as_posix() for relative in DOCS.collect_doc_sources(source_root)}
     expected = {
         "README.md",
+        "LICENSING.md",
         "docs/user/getting-started.md",
         "docs/dev/platform-support.md",
+        "docs/dev/roadmap.md",
         "docs/dev/proposals/renderer.md",
+        "docs/dev/archive/2026-10-18/README.md",
+        "docs/dev/archive/2026-10-18/plans/renderer.md",
     }
     missing = expected - sources
     if missing:
@@ -438,12 +561,28 @@ def validate_release_docs_layout() -> None:
         "README.md": "Project",
         "docs/user/getting-started.md": "User Guides",
         "docs/dev/platform-support.md": "Developer Guides",
+        "docs/dev/roadmap.md": "Developer Guides",
         "docs/dev/proposals/renderer.md": "Research and Proposals",
+        "docs/dev/archive/2026-10-18/README.md": "Planning Archive",
+        "docs/dev/archive/2026-10-18/plans/renderer.md": "Planning Archive",
     }
     for relative, expected_group in classifications.items():
         group = DOCS.classify_group(Path(relative))
         if group != expected_group:
             raise AssertionError(f"{relative} classified as {group!r}, expected {expected_group!r}")
+
+    specs = DOCS.build_doc_specs(source_root)
+    developer_docs = [spec for spec in specs if spec.group == "Developer Guides"]
+    if developer_docs[0].source_relative != Path("docs/dev/roadmap.md") or developer_docs[0].nav_title != "Development roadmap":
+        raise AssertionError("the active development roadmap must lead developer navigation")
+    sidebar = DOCS.render_sidebar(specs, Path("index.html"))
+    if "<h3>Planning Archive</h3>" not in sidebar:
+        raise AssertionError("archived plans need their own sidebar group")
+    index = DOCS.render_index_page(specs, "1.2.3", "Windows", "x64")
+    if '<a class="button" href="docs/dev/roadmap.html">Development roadmap</a>' not in index:
+        raise AssertionError("the documentation portal needs a prominent active-roadmap link")
+    if "Historical plans and proposals, superseded by the development roadmap." not in index:
+        raise AssertionError("the planning archive must be clearly labelled historical")
 
 
 def validate_release_docs_symlink_and_link_guards() -> None:
@@ -502,6 +641,12 @@ def validate_release_docs_symlink_and_link_guards() -> None:
             raise AssertionError(f"unsafe generated-docs URI scheme survived rewrite: {prepared!r}")
     if "[ok](https://example.invalid/docs)" not in prepared:
         raise AssertionError(f"safe HTTPS link was not preserved: {prepared!r}")
+    prepared = DOCS.prepare_markdown(
+        "[![Licence](https://example.invalid/badge.svg)](LICENSING.md) "
+        "[Game sources](src/game/)", source_relative=Path('README.md'),
+        rendered_sources={'readme.md','licensing.md'})
+    assert '](LICENSING.html)' in prepared
+    assert 'https://github.com/themuffinator/openQ4/tree/main/src/game' in prepared
 
 
 def validate_docs_link_integrity_work_roots() -> None:
@@ -593,6 +738,8 @@ def validate_windows_installer_payload_requirements() -> None:
         "openPREY-ded_x64.pdb",
         "README.html",
         "LICENSE",
+        "LICENSING.md",
+        "LICENSES/PREY-SDK-EULA.rtf",
         "docs/index.html",
         "basepr/mod.json",
         "basepr/pak0.pk4",
@@ -627,6 +774,8 @@ def validate_windows_installer_symlink_guards() -> None:
         "OpenAL32.dll",
         "README.html",
         "LICENSE",
+        "LICENSING.md",
+        "LICENSES/PREY-SDK-EULA.rtf",
         "docs/index.html",
         "basepr/mod.json",
         "basepr/pak0.pk4",
@@ -749,6 +898,79 @@ def validate_discord_release_download_suffixes() -> None:
             raise AssertionError(f"Discord release announcer is missing validation token {token!r}")
 
 
+def validate_draft_releases_never_announce() -> None:
+    """A draft has no tag, no audience, and must reach no Discord channel."""
+
+    workflow = (ROOT / ".github" / "workflows" / "manual-release.yml").read_text(encoding="utf-8")
+    announcer = (ROOT / ".github" / "scripts" / "announce-release-discord.mjs").read_text(encoding="utf-8")
+    broadcast = (ROOT / ".github" / "workflows" / "discord-release.yml").read_text(encoding="utf-8")
+
+    if "      draft:\n        description:" not in workflow:
+        raise AssertionError("manual release workflow is missing the draft dispatch input")
+
+    discord_offset = workflow.index("  discord:\n    name: Announce On Discord")
+    discord_steps_offset = workflow.index("    steps:", discord_offset)
+    if (
+        "needs.release.result == 'success' && inputs.draft == false"
+        not in workflow[discord_offset:discord_steps_offset]
+    ):
+        raise AssertionError("draft releases must skip the Discord announcement job")
+
+    release_create_offset = workflow.index("- name: Create or update release")
+    release_create_step = workflow[release_create_offset:discord_offset]
+    assets_query = 'gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100"'
+    if assets_query not in release_create_step or RELEASE_ASSET_SET.MAX_RELEASE_ASSETS > 100:
+        raise AssertionError("published asset verification must fetch the complete bounded whitelist")
+    if "--slurp" in release_create_step:
+        raise AssertionError("release asset JSON must not combine incompatible gh --slurp/--jq flags")
+    for token in (
+        "RELEASE_DRAFT: ${{ inputs.draft }}",
+        'if [ "${RELEASE_DRAFT}" != "true" ] && [ "${RELEASE_DRAFT}" != "false" ]; then',
+        'create_args+=(--draft --prerelease="${RELEASE_PRERELEASE}")',
+        '--json isDraft,targetCommitish',
+        "was requested as a draft but reports isDraft=",
+        "Draft release ${tag} records target",
+    ):
+        if token not in release_create_step:
+            raise AssertionError(f"draft release publication is missing token: {token}")
+
+    draft_branch_offset = release_create_step.index('if [ "${RELEASE_DRAFT}" = "true" ]; then\n            # A draft is not a release')
+    publish_offset = release_create_step.index('-F draft=false')
+    if draft_branch_offset > publish_offset:
+        raise AssertionError("the draft branch must short-circuit before the release is published")
+    if "exit 0" not in release_create_step[draft_branch_offset:publish_offset]:
+        raise AssertionError("the draft branch must exit before clearing the draft flag")
+
+    promotion = release_create_step[draft_branch_offset:publish_offset]
+    if '--json databaseId --jq .databaseId' not in promotion:
+        raise AssertionError("draft promotion must resolve the release ID through the draft-aware gh view")
+    if 'releases/tags/${tag}' in promotion:
+        raise AssertionError("draft promotion must not require a published release-by-tag lookup")
+    if '-F prerelease="${RELEASE_PRERELEASE}"' not in promotion:
+        raise AssertionError("release publication must send typed boolean state to GitHub")
+    for token in (
+        '      prerelease:\n        description:',
+        'RELEASE_PRERELEASE: ${{ inputs.prerelease }}',
+        'if [ "${RELEASE_PRERELEASE}" != "true" ] && [ "${RELEASE_PRERELEASE}" != "false" ]; then',
+        'if [ "${RELEASE_PRERELEASE}" = "true" ]; then\n            latest_policy=false',
+        '-f make_latest="${latest_policy}"',
+        'if [ "${published_state}" != "false ${RELEASE_PRERELEASE}" ]; then',
+    ):
+        if token not in workflow:
+            raise AssertionError(f"prerelease publication is missing its state guard: {token}")
+
+    if "if (release.draft) {" not in announcer:
+        raise AssertionError("Discord release announcer must refuse to announce a draft")
+
+    if "types: [published]" not in broadcast:
+        raise AssertionError("the Discord broadcast workflow must only fire on published releases")
+    for forbidden in ("created", "prereleased", "released", "edited"):
+        if f"types: [{forbidden}" in broadcast:
+            raise AssertionError(
+                f"the Discord broadcast workflow must not fire on release '{forbidden}' events"
+            )
+
+
 def validate_validation_wiring() -> None:
     validator = (ROOT / "tools" / "validation" / "openq4_validate.py").read_text(encoding="utf-8")
     push = (ROOT / ".github" / "workflows" / "push-verification.yml").read_text(encoding="utf-8")
@@ -837,8 +1059,9 @@ def validate_manual_release_linux_staged_gate() -> None:
         "validate_linux_binary_hardening(root, linux_binary_specs)",
         'fields[4] in {"GLOBAL", "WEAK", "UNIQUE"}',
         'fields[5] in {"DEFAULT", "PROTECTED"}',
-        "len(public_symbols) == 1",
-        'public_symbols[0][4] == "GetGameAPI"',
+        'expected_game_exports = {"GetGameAPI", "openQ4_Mem_GetModuleStats"}',
+        "len(public_symbols) == len(expected_game_exports)",
+        'symbol[:3] == ("FUNC", "GLOBAL", "DEFAULT")',
     ):
         if token not in validator:
             raise AssertionError(f"staged Linux release validation is missing required gate: {token}")
@@ -985,7 +1208,7 @@ def validate_manual_release_linux_runtime_gate() -> None:
     diagnostic_step = workflow[diagnostics:package]
     for token in (
         "if: ${{ failure() && matrix.platform == 'linux' }}",
-        "actions/upload-artifact@v6",
+        "actions/upload-artifact@v7",
         ".tmp/release-runtime/${{ matrix.binary_arch }}",
         "runtime-diagnostics",
         "include-hidden-files: true",
@@ -1001,60 +1224,39 @@ def validate_manual_release_linux_runtime_gate() -> None:
         '["SDL3: graphics bridge: OpenGL"]',
         '["created OpenGL context"]',
         '["Shutting down OpenGL subsystem (SDL3 backend)"]',
-        "executable = find_client_executable(root)",
-        "cwd=str(root / \".install\")",
+        "executable = find_client_executable(runtime_dir)",
+        'runtime_dir = Path(args.runtime_dir).resolve() if args.runtime_dir else root / ".install"',
+        'savepath = Path(args.savepath).resolve() if args.savepath else output_dir / "savepath"',
+        "cwd=str(runtime_dir)",
         "exit_code == 0 and not timed_out",
     ):
         if token not in renderer:
             raise AssertionError(f"renderer runtime helper is missing release lifecycle contract: {token}")
+    if 'else root / ".home"' in renderer:
+        raise AssertionError("renderer validation must not inherit archived user settings by default")
 
 
 def validate_manual_release_companion_checkout() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "manual-release.yml").read_text(encoding="utf-8")
-
+    workflow = (ROOT / ".github/workflows/manual-release.yml").read_text(encoding="utf-8")
     for token in (
-        "OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game",
-        "openq4_game_ref:",
-        "description: openQ4-game branch, tag, or full commit SHA to package",
-        "openq4_source_sha: ${{ steps.source_revisions.outputs.openq4_source_sha }}",
-        "openq4_game_ref: ${{ steps.source_revisions.outputs.openq4_game_ref }}",
-        "openq4_game_sha: ${{ steps.source_revisions.outputs.openq4_game_sha }}",
-        "linux_arm64_archive_sha256: ${{ steps.arm64_evidence.outputs.archive_sha256 }}",
-        "ref: ${{ github.sha }}",
+        'openq4_game_sha="${openq4_source_sha}"',
+        "ref: ${{ github.sha }}", "ref: ${{ needs.metadata.outputs.openq4_source_sha }}",
         "Publishing manual releases must be dispatched from refs/heads/main",
         "Linux ARM64 evidence candidates must be dispatched from a pushed branch",
         "must descend from the current origin/main",
         'git merge-base --is-ancestor "${openq4_source_sha}" refs/remotes/origin/main',
-        'git -C "${resolution_repo}" fetch --quiet --no-tags --depth=1 origin "${input_ref}"',
-        'openq4_game_sha="$(git -C "${resolution_repo}" rev-parse --verify \'FETCH_HEAD^{commit}\')"',
-        "ref: ${{ needs.metadata.outputs.openq4_source_sha }}",
-        'git -C "${OPENQ4_GAMELIBS_REPO}" fetch --quiet --no-tags --depth=1 origin "${expected_game_sha}"',
-        'git -C "${OPENQ4_GAMELIBS_REPO}" checkout --quiet --detach "${expected_game_sha}"',
-        "python tools/build/verify_release_source_provenance.py",
+        "python tools/build/verify_release_source_provenance.py", "--build-dir builddir",
         '--expected-project-commit "${{ needs.metadata.outputs.openq4_source_sha }}"',
-        '--expected-gamelibs-commit "${{ needs.metadata.outputs.openq4_game_sha }}"',
         "Release publication is bound to the triggering refs/heads/main commit",
-        'git merge-base --is-ancestor "${OPENQ4_SOURCE_SHA}" refs/remotes/origin/main',
         'published_tag_sha="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"',
         "published_release_target",
     ):
-        if token not in workflow:
-            raise AssertionError(f"manual release source pinning is missing token: {token}")
+        assert token in workflow, f"missing canonical release source gate: {token}"
+    for obsolete in ("openQ4-game.git", "openQ4-game-awakening.git", "inputs.openq4_game_ref", "--require-game-layer q4xbase"):
+        assert obsolete not in workflow, f"release depends on retired source/build: {obsolete}"
 
-    if "OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/openQ4-game" in workflow:
-        raise AssertionError(
-            "manual release must not clone openQ4-game inside the engine checkout; "
-            "that makes a clean engine source manifest appear dirty"
-        )
-    if "git clone --depth 1 https://github.com/themuffinator/openQ4-game.git" in workflow:
-        raise AssertionError("manual release builds must not independently clone a moving openQ4-game ref")
     if workflow.count('--target "${target}"') != 2:
         raise AssertionError("manual release create and edit paths must both target the triggering openQ4 SHA")
-
-    game_ref_input_offset = workflow.index("      openq4_game_ref:")
-    game_ref_input_end = workflow.index("      linux_arm64_support_tier:", game_ref_input_offset)
-    if "        default: main" not in workflow[game_ref_input_offset:game_ref_input_end]:
-        raise AssertionError("manual release openq4_game_ref input must default to main")
 
     source_resolution_offset = workflow.index("- name: Resolve immutable source revisions")
     build_job_offset = workflow.index("  builds:")
@@ -1182,6 +1384,10 @@ def validate_manual_release_companion_checkout() -> None:
     release_job_offset = workflow.index("  release:")
     release_steps_offset = workflow.index("    steps:", release_job_offset)
     release_header = workflow[release_job_offset:release_steps_offset]
+    for token in ('needs: [metadata, content_packs, builds, android]', "needs.android.result == 'success'",
+                  "needs.content_packs.result == 'success'"):
+        if token not in release_header:
+            raise AssertionError('Android APK and content pack validation must gate release publication: ' + token)
     if (
         "needs.builds.result == 'success'"
         " && inputs.generate_linux_arm64_evidence_candidate == false"
@@ -1214,6 +1420,9 @@ def validate_manual_release_companion_checkout() -> None:
         )
 
     asset_gate = workflow[release_asset_gate_offset:release_hash_gate_offset]
+    for suffix in ('-android-arm64-experimental.apk', '-android-dependency-sources.tar.xz'):
+        if suffix not in asset_gate:
+            raise AssertionError('Missing mandatory Android release artifact: ' + suffix)
     for token in (
         "tools/build/verify_release_asset_set.py",
         'expected_args+=(--expected "${package_file}")',
@@ -1332,6 +1541,78 @@ def validate_release_source_provenance_verifier() -> None:
         "checkout is dirty",
         "dirty checked-out GameLibs source",
     )
+
+
+def validate_release_layer_provenance_verifier() -> None:
+    root = WORK / "layer-provenance"
+    project = make_git_repo(root / "openQ4")
+    gamelibs = make_git_repo(root / "openQ4-game")
+    layer = make_git_repo(root / "openQ4-game-awakening")
+    commit_file(project, ".gitignore", ".tmp/\n", "project source")
+    commit_file(gamelibs, "game-source.txt", "game\n", "game source")
+    commit_file(layer, "layer.json", "{}\n", "layer source")
+    project_sha = git(project, "rev-parse", "HEAD")
+    gamelibs_sha = git(gamelibs, "rev-parse", "HEAD")
+    layer_sha = git(layer, "rev-parse", "HEAD")
+    base = {
+        "format": 1,
+        "projectGitCommit": project_sha,
+        "projectGitDirty": False,
+        "gameLibsGitCommit": gamelibs_sha,
+        "gameLibsGitDirty": False,
+        "fileCount": 0,
+        "files": [],
+    }
+    base_manifest = project / ".tmp" / "gamelibs_stage" / "openq4_gamelibs_stage_manifest.json"
+    write_file(base_manifest, json.dumps(base) + "\n")
+    layer_manifest_path = project / ".tmp" / "gamelibs_stage_awakening" / "openq4_gamelibs_stage_manifest.json"
+    layer_manifest = dict(base, layer={"id": "awakening", "gameDir": "q4xbase", "gitCommit": layer_sha, "gitDirty": False})
+    write_file(layer_manifest_path, json.dumps(layer_manifest) + "\n")
+
+    def verify(expected_layer: str = layer_sha):
+        SOURCE_PROVENANCE.verify_release_source_provenance(
+            project,
+            gamelibs,
+            base_manifest,
+            project_sha,
+            gamelibs_sha,
+            layer_root=layer,
+            layer_stage_manifest=layer_manifest_path,
+            expected_layer_commit=expected_layer,
+        )
+
+    verify()
+    expect_runtime_error(
+        lambda: SOURCE_PROVENANCE.verify_release_source_provenance(
+            project, gamelibs, base_manifest, project_sha, gamelibs_sha, layer_root=layer,
+        ),
+        "layer provenance needs",
+        "partial layer provenance arguments",
+    )
+    expect_runtime_error(lambda: verify("0" * 40), "layer checked-out commit", "mismatched checked-out layer SHA")
+
+    layer_manifest["layer"] = dict(layer_manifest["layer"], gitCommit="f" * 40)
+    write_file(layer_manifest_path, json.dumps(layer_manifest) + "\n")
+    expect_runtime_error(verify, "staged layer commit", "mismatched staged layer SHA")
+
+    layer_manifest["layer"] = dict(layer_manifest["layer"], gitCommit=layer_sha, gitDirty=True)
+    write_file(layer_manifest_path, json.dumps(layer_manifest) + "\n")
+    expect_runtime_error(verify, "clean layer checkout", "dirty staged layer")
+
+    layer_manifest["layer"] = dict(layer_manifest["layer"], gitDirty=False)
+    layer_manifest["gameLibsGitCommit"] = "e" * 40
+    write_file(layer_manifest_path, json.dumps(layer_manifest) + "\n")
+    expect_runtime_error(verify, "openQ4-game (layer stage)", "mismatched GameLibs SHA in the layer stage")
+
+    del layer_manifest["layer"]
+    layer_manifest["gameLibsGitCommit"] = gamelibs_sha
+    write_file(layer_manifest_path, json.dumps(layer_manifest) + "\n")
+    expect_runtime_error(verify, "missing its layer metadata", "layer stage without layer metadata")
+
+    layer_manifest["layer"] = {"id": "awakening", "gameDir": "q4xbase", "gitCommit": layer_sha, "gitDirty": False}
+    write_file(layer_manifest_path, json.dumps(layer_manifest) + "\n")
+    write_file(layer / "layer.json", "dirty\n")
+    expect_runtime_error(verify, "checkout is dirty", "dirty checked-out layer source")
 
 
 def validate_linux_release_artifact_helper_contracts() -> None:
@@ -1456,6 +1737,17 @@ def validate_linux_release_artifact_helper_contracts() -> None:
         raise AssertionError("unsafe Linux archive extraction wrote outside its isolated root")
 
 
+def validate_release_game_layer_helpers() -> None:
+    """Retired layer artifacts cannot become release runtime requirements."""
+    runtime_root = WORK / "linux-layer-runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    baseline = LINUX_RELEASE_ARTIFACTS.expected_runtime_binaries(runtime_root, "x64")
+    layer_dir = runtime_root / "q4xbase"
+    write_file(layer_dir / "game-sp_x64.so")
+    write_file(layer_dir / "mod.json", '{"layer":"awakening"}\n')
+    assert LINUX_RELEASE_ARTIFACTS.packaged_layer_dirs(runtime_root) == []
+    assert LINUX_RELEASE_ARTIFACTS.expected_runtime_binaries(runtime_root, "x64") == baseline
+
 def validate_release_asset_set_helper_contracts() -> None:
     root = WORK / "release-asset-set"
     artifact_dir = root / "artifacts"
@@ -1464,13 +1756,47 @@ def validate_release_asset_set_helper_contracts() -> None:
         "openq4-1.2.3-linux-x64.tar.xz",
         "openq4-1.2.3-linux-arm64.tar.xz",
         "openq4-1.2.3-windows-x64.zip",
+        "openq4-1.2.3-macos-arm64-metal-unsigned.tar.gz",
+        "openq4-1.2.3-android-arm64-experimental.apk",
+        "openq4-1.2.3-android-dependency-sources.tar.xz",
     ]
+    def write_archive(path: Path) -> None:
+        payload = b"verified runtime fixture\n"
+        if path.suffix in {".zip", ".apk"}:
+            with ZipFile(path, "w") as archive:
+                archive.writestr("runtime.txt", payload)
+        else:
+            mode = "w:gz" if path.name.endswith(".tar.gz") else "w:xz"
+            with tarfile.open(path, mode) as archive:
+                member = tarfile.TarInfo("runtime.txt")
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
     for name in expected:
-        write_file(artifact_dir / name, name)
+        write_archive(artifact_dir / name)
 
     verified = RELEASE_ASSET_SET.verify_asset_set(artifact_dir, expected)
     if verified != tuple(expected):
         raise AssertionError("release asset whitelist changed its approved ordering")
+    published = [
+        {"name": name, "size": (artifact_dir / name).stat().st_size,
+         "digest": "sha256:" + hashlib.sha256((artifact_dir / name).read_bytes()).hexdigest()}
+        for name in expected
+    ]
+    RELEASE_ASSET_SET.verify_published_assets(artifact_dir, verified, published)
+    published[0]["digest"] = "sha256:" + "0" * 64
+    expect_runtime_error(
+        lambda: RELEASE_ASSET_SET.verify_published_assets(artifact_dir, verified, published),
+        "size/SHA-256 mismatch", "wrong uploaded bytes with the same filename and size",
+    )
+    for name in expected:
+        path = artifact_dir / name
+        intact = path.read_bytes()
+        path.write_bytes(intact[:-8])
+        expect_runtime_error(
+            lambda: RELEASE_ASSET_SET.verify_asset_set(artifact_dir, expected),
+            "truncated or corrupt", "truncated archive/footer before release upload",
+        )
+        path.write_bytes(intact)
     manifest = root / "approved-assets.txt"
     RELEASE_ASSET_SET.write_asset_manifest(manifest, verified)
     if manifest.read_text(encoding="utf-8").splitlines() != expected:
@@ -1497,7 +1823,7 @@ def validate_release_asset_set_helper_contracts() -> None:
         "missing:",
         "missing approved release artifact",
     )
-    write_file(missing)
+    write_archive(missing)
 
     directory_entry = artifact_dir / "openq4-1.2.3-unapproved-directory"
     directory_entry.mkdir()
@@ -1537,7 +1863,10 @@ def main() -> None:
         validate_changelog_git_context_and_limits()
         validate_changelog_input_and_markdown_safety()
         validate_changelog_output_and_override_guards()
+        validate_withdrawn_release_selection()
         validate_openq4_version_iteration()
+        validate_version_header_build_refresh_contract()
+        validate_release_build_history()
         validate_release_version_floor_and_docs_classification()
         validate_release_docs_output_guard()
         validate_release_docs_layout()
@@ -1549,6 +1878,7 @@ def main() -> None:
         validate_windows_installer_symlink_guards()
         validate_windows_installer_input_escaping()
         validate_discord_release_download_suffixes()
+        validate_draft_releases_never_announce()
         validate_validation_wiring()
         validate_manual_release_optimized_builds()
         validate_manual_release_linux_staged_gate()
@@ -1556,7 +1886,9 @@ def main() -> None:
         validate_manual_release_linux_runtime_gate()
         validate_manual_release_companion_checkout()
         validate_release_source_provenance_verifier()
+        validate_release_layer_provenance_verifier()
         validate_linux_release_artifact_helper_contracts()
+        validate_release_game_layer_helpers()
         validate_release_asset_set_helper_contracts()
     finally:
         shutil.rmtree(WORK, ignore_errors=True)

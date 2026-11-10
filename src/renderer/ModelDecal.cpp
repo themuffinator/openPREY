@@ -47,15 +47,33 @@ void R_WriteDrawVertToDemo( idDemoFile *f, const idDrawVert &vert ) {
 }
 
 bool R_ReadDrawVertFromDemo( idDemoFile *f, idDrawVert &vert ) {
-	return f->ReadVec3( vert.xyz ) == sizeof( vert.xyz ) &&
-		f->ReadVec2( vert.st ) == sizeof( vert.st ) &&
-		f->ReadVec3( vert.normal ) == sizeof( vert.normal ) &&
-		f->ReadVec3( vert.tangents[0] ) == sizeof( vert.tangents[0] ) &&
-		f->ReadVec3( vert.tangents[1] ) == sizeof( vert.tangents[1] ) &&
-		f->ReadUnsignedChar( vert.color[0] ) == sizeof( vert.color[0] ) &&
-		f->ReadUnsignedChar( vert.color[1] ) == sizeof( vert.color[1] ) &&
-		f->ReadUnsignedChar( vert.color[2] ) == sizeof( vert.color[2] ) &&
-		f->ReadUnsignedChar( vert.color[3] ) == sizeof( vert.color[3] );
+	if ( f->ReadVec3( vert.xyz ) != sizeof( vert.xyz ) ||
+		f->ReadVec2( vert.st ) != sizeof( vert.st ) ||
+		f->ReadVec3( vert.normal ) != sizeof( vert.normal ) ||
+		f->ReadVec3( vert.tangents[0] ) != sizeof( vert.tangents[0] ) ||
+		f->ReadVec3( vert.tangents[1] ) != sizeof( vert.tangents[1] ) ||
+		f->ReadUnsignedChar( vert.color[0] ) != sizeof( vert.color[0] ) ||
+		f->ReadUnsignedChar( vert.color[1] ) != sizeof( vert.color[1] ) ||
+		f->ReadUnsignedChar( vert.color[2] ) != sizeof( vert.color[2] ) ||
+		f->ReadUnsignedChar( vert.color[3] ) != sizeof( vert.color[3] ) ) {
+		return false;
+	}
+	memset( vert.color2, 0, sizeof( vert.color2 ) );
+	return true;
+}
+
+bool R_IsFiniteDecalDemoDrawVert( const idDrawVert &vert ) {
+	for ( int component = 0; component < 3; component++ ) {
+		if ( !std::isfinite( vert.xyz[component] ) || !std::isfinite( vert.normal[component] ) ||
+			 !std::isfinite( vert.tangents[0][component] ) || !std::isfinite( vert.tangents[1][component] ) ) {
+			return false;
+		}
+	}
+	return std::isfinite( vert.st[0] ) && std::isfinite( vert.st[1] );
+}
+
+bool R_IsFiniteDecalProjectionPoint( const idVec3 &point ) {
+	return std::isfinite( point.x ) && std::isfinite( point.y ) && std::isfinite( point.z );
 }
 
 bool R_RejectDecalDemo( idDemoFile *f, const char *reason ) {
@@ -440,24 +458,40 @@ void idRenderModelDecal::CreateDecal( const idRenderModel *model, const decalPro
 			// create a winding with texture coordinates for the triangle
 			idFixedWinding fw;
 			fw.SetNumPoints( 3 );
-			if ( localInfo.parallel ) {
-				for ( int j = 0; j < 3; j++ ) {
-					fw[j] = stri->verts[stri->indexes[index+j]].xyz;
-					fw[j].s = localInfo.textureAxis[0].Distance( fw[j].ToVec3() );
-					fw[j].t = localInfo.textureAxis[1].Distance( fw[j].ToVec3() );
+			bool projectionValid = true;
+			for ( int j = 0; j < 3; j++ ) {
+				const idVec3 position = stri->verts[stri->indexes[index+j]].xyz;
+				if ( !R_IsFiniteDecalProjectionPoint( position ) ) {
+					projectionValid = false;
+					break;
 				}
-			} else {
-				for ( int j = 0; j < 3; j++ ) {
-					idVec3 dir;
-					float scale;
 
-					fw[j] = stri->verts[stri->indexes[index+j]].xyz;
-					dir = fw[j].ToVec3() - localInfo.projectionOrigin;
-					localInfo.boundingPlanes[NUM_DECAL_BOUNDING_PLANES - 1].RayIntersection( fw[j].ToVec3(), dir, scale );
-					dir = fw[j].ToVec3() + scale * dir;
-					fw[j].s = localInfo.textureAxis[0].Distance( dir );
-					fw[j].t = localInfo.textureAxis[1].Distance( dir );
+				fw[j] = position;
+				idVec3 texturePoint = position;
+				if ( !localInfo.parallel ) {
+					const idVec3 dir = position - localInfo.projectionOrigin;
+					float scale;
+					if ( !localInfo.boundingPlanes[NUM_DECAL_BOUNDING_PLANES - 1].RayIntersection( position, dir, scale ) ||
+						 !std::isfinite( scale ) ) {
+						projectionValid = false;
+						break;
+					}
+					texturePoint = position + scale * dir;
+					if ( !R_IsFiniteDecalProjectionPoint( texturePoint ) ) {
+						projectionValid = false;
+						break;
+					}
 				}
+
+				fw[j].s = localInfo.textureAxis[0].Distance( texturePoint );
+				fw[j].t = localInfo.textureAxis[1].Distance( texturePoint );
+				if ( !std::isfinite( fw[j].s ) || !std::isfinite( fw[j].t ) ) {
+					projectionValid = false;
+					break;
+				}
+			}
+			if ( !projectionValid ) {
+				continue;
 			}
 
 			int orBits = cullBits[v1] | cullBits[v2] | cullBits[v3];
@@ -705,6 +739,12 @@ void idRenderModelDecal::AddDecalDrawSurf( viewEntity_t *space ) {
 	// be able to reorganize the index list
 	srfTriangles_t *newTri = (srfTriangles_t *)R_FrameAlloc( sizeof( *newTri ) );
 	*newTri = tri;
+	newTri->gpuSkinningJointPaletteAlloc = NULL;
+	newTri->numGpuSkinningJointPaletteAllocJoints = 0;
+	newTri->previousPositions = NULL;
+	newTri->numPreviousPositions = 0;
+	newTri->previousPositionsFrame = -1;
+	R_ClearStaticGpuSkinningJointPalette( newTri );
 
 	// Snapshot the vertices plus any per-stage color blocks into one transient
 	// upload so the draw surf matches Quake 4's frame-temp decal submission.
@@ -777,6 +817,10 @@ bool idRenderModelDecal::ReadFromDemoFile( idDemoFile *f ) {
 				 f->ReadFloat( decal->vertDepthFade[vertIndex] ) != sizeof( decal->vertDepthFade[vertIndex] ) ||
 				 f->ReadFloat( decal->vertLifeSpan[vertIndex] ) != sizeof( decal->vertLifeSpan[vertIndex] ) ) {
 				return R_RejectDecalDemo( f, "truncated vertex payload" );
+			}
+			if ( !R_IsFiniteDecalDemoDrawVert( decal->tri.verts[vertIndex] ) ||
+				 !std::isfinite( decal->vertDepthFade[vertIndex] ) || !std::isfinite( decal->vertLifeSpan[vertIndex] ) ) {
+				return R_RejectDecalDemo( f, "non-finite vertex payload" );
 			}
 		}
 

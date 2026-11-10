@@ -1,6 +1,9 @@
 name: Broadcast Release To Discord
 
 on:
+  # Only "published". GitHub never fires this for a draft, and a draft carries no
+  # git tag or permanent download URLs, so an unpublished release is never
+  # announced. Publishing the draft later fires it once, as it should.
   release:
     types: [published]
 
@@ -15,10 +18,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 

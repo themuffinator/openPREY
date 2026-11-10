@@ -20,12 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GAME_LIBS_ROOT = Path(
-    os.environ.get(
-        "OPENPREY_GAMELIBS_REPO",
-        os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT.parent / "OpenPrey-game"),
-    )
-).resolve()
+GAME_LIBS_ROOT = Path(os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT)).resolve()
 
 SCRIPT_PROGRAM_SOURCES = (
     "src/game/script/Script_Program.cpp",

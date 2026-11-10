@@ -1,7 +1,7 @@
 param(
     [ValidateSet("x64", "x86", "arm64")]
     [string]$Architecture = "arm64",
-    [string]$Version = "1.25.1",
+    [string]$Version = "1.25.2",
     [string]$NuGetPackageVersion = "1.23.1",
     [string]$OutputRoot = ""
 )

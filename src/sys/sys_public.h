@@ -110,7 +110,10 @@ class idStr;
 	#define CPU_EASYARGS				1
 #endif
 
-#define ALIGN16( x )					x __attribute__ ((aligned (16)))
+// Clang rejects an alignment attribute that trails a declarator with a
+// constructor initialiser, so prefix the declaration the way the Linux
+// branch does and keep parenthesised initialisers building on macOS.
+#define ALIGN16( x )					__attribute__((aligned(16))) x
 
 #ifdef __MWERKS__
 #define PACKED
@@ -240,11 +243,12 @@ typedef enum {
 
 typedef enum {
 	SE_NONE,				// evTime is still valid
-	SE_KEY,					// evValue is a key code, evValue2 is the down flag
+	SE_KEY,					// key code/down flag; optional KeyEventMetadata.h payload captures modifiers/repeat
 	SE_CHAR,				// evValue is an ascii char
 	SE_MOUSE,				// evValue and evValue2 are reletive signed x / y moves
 	SE_JOYSTICK_AXIS,		// evValue is an axis number and evValue2 is the current state (-127 to 127)
-	SE_CONSOLE				// evPtr is a char*, from typing something at a non-game console
+	SE_CONSOLE,				// evPtr is a char*, from typing something at a non-game console
+	SE_RETAINED_UI			// engine-owned retained input payload; consumed before game/legacy GUI dispatch
 } sysEventType_t;
 
 typedef enum {
@@ -297,6 +301,9 @@ void			Sys_Error( const char *error, ...);
 void			Sys_Quit( void );
 
 bool			Sys_AlreadyRunning( void );
+// gives up the single-instance lock Sys_AlreadyRunning took, for a client that
+// became a dedicated server (which takes none), so the game can start again
+void			Sys_ReleaseInstanceLock( void );
 
 // note that this isn't journaled...
 char *			Sys_GetClipboardData( void );
@@ -320,6 +327,11 @@ void			Sys_Sleep( int msec );
 // Sys_Milliseconds should only be used for profiling purposes,
 // any game related timing information should come from event timestamps
 int				Sys_Milliseconds( void );
+
+// Fill a caller-owned buffer from the operating system CSPRNG. Gameplay
+// random generators and timing entropy are never substitutes for this API.
+// Implementations leave the buffer untouched when validation fails.
+bool			Sys_GetSecureRandomBytes( void *buffer, int bytes );
 
 // for accurate performance testing; a monotonic wall clock, not CPU cycles
 double			Sys_GetClockTicks( void );
@@ -366,6 +378,9 @@ int				Sys_GetSystemRam( void );
 int				Sys_GetVideoRam( void );
 // queries the current desktop resolution for the active display selection
 bool			Sys_GetDesktopResolution( int *width, int *height );
+// counts display topology changes (SDL display events and a window moving to
+// another display or scale), so cached display lists know when to recapture
+unsigned long long	Sys_DisplayTopologyGeneration( void );
 
 // returns amount of drive space in path
 int				Sys_GetDriveFreeSpace( const char *path );
@@ -373,6 +388,13 @@ int				Sys_GetDriveFreeSpace( const char *path );
 // returns memory stats
 void			Sys_GetCurrentMemoryStatus( sysMemoryStats_t &stats );
 void			Sys_GetExeLaunchMemoryStatus( sysMemoryStats_t &stats );
+// this process's private memory (commit charge, or anonymous resident memory plus swap)
+// and resident set, in bytes; false where the OS reports neither
+bool			Sys_GetProcessMemoryUsage( unsigned long long &privateBytes, unsigned long long &residentBytes );
+
+// returns heap memory the allocator holds free to the OS; called after a level
+// load, where it is most worth its cost. A no-op where the allocator does this itself.
+void			Sys_ReleaseFreeHeapMemory( void );
 
 // lock and unlock memory
 bool			Sys_LockMemory( void *ptr, int bytes );
@@ -397,6 +419,8 @@ void			Sys_DLL_Unload(intptr_t dllHandle );
 void			Sys_GenerateEvents( void );
 sysEvent_t		Sys_GetEvent( void );
 void			Sys_ClearEvents( void );
+// true while queued events wait for Sys_GetEvent
+bool			Sys_HasQueuedEvents( void );
 
 // input is tied to windows, so it needs to be started up and shut down whenever 
 // the main window is recreated
@@ -426,9 +450,24 @@ typedef struct engineWindowState_s {
 	int			uiViewportHeight;
 	int			displayFrequency;
 	bool		isFullscreen;
+	float		displayScale;     // physical pixels per density-independent UI unit
+	float		pixelDensityX;   // window-coordinate to framebuffer conversion
+	float		pixelDensityY;
+	// The window's safe area (clear of camera cutouts, rounded corners and
+	// system bars) as framebuffer-pixel insets from each framebuffer edge.
+	int			safeAreaLeft;
+	int			safeAreaTop;
+	int			safeAreaRight;
+	int			safeAreaBottom;
 } engineWindowState_t;
 
 extern engineWindowState_t engineWindowState;
+
+// NULL-terminated list of the sys_lang values the engine knows, in the order
+// the cvar offers them. Framework code matches string-table and pak names
+// against it so a stray file cannot invent a language with no font or codepage
+// policy behind it.
+extern const char *	sysLanguageNames[];
 
 // window/context teardown owned by the platform layer; declared here so
 // framework code does not need renderer-internal headers to reach them
@@ -459,6 +498,16 @@ int				Sys_ReturnJoystickInputEvent( const int n, int &axis, int &value );
 void			Sys_EndJoystickInputEvents( void );
 bool			Sys_GetJoystickAxisState( int axis, int &value );
 bool			Sys_SetJoystickRumble( float lowFrequency, float highFrequency, int durationMsec );
+// openQ4 VR: delivers a tracked-controller button exactly like a gamepad
+// button, to the event queue (menus, console) and the key poll queue (usercmd
+// bindings); mouse buttons are the menu pointer's clicks and take the mouse's
+// route instead. Main thread only; implemented by the SDL3 client backend, the
+// only one that builds OpenXR.
+void			Sys_PostVRControllerKey( int key, bool down );
+// openQ4 VR: the controller points at the virtual screen at (u, v), 0..1 left
+// to right and top to bottom, or has left it. Moves the open menu's cursor the
+// way the mouse would; returns false when no menu takes a pointer.
+bool			Sys_PostVRPointer( bool onScreen, float u, float v );
 
 // when the console is down, or the game is about to perform a lengthy
 // operation like map loading, the system can release the mouse cursor
@@ -519,8 +568,13 @@ typedef enum {
 	NA_IP,
 	NA_IP6,
 // jmarshall
-	NA_BOT
+	NA_BOT,
 // jmarshall end
+	// IPv6 has no broadcast address. NA_MULTICAST6 stands in for it during LAN
+	// discovery and resolves to the net_mcast6addr group in the platform layer.
+	// It is appended so the values above keep the numbering the game module was
+	// built against.
+	NA_MULTICAST6
 } netadrtype_t;
 
 typedef struct {
@@ -535,7 +589,7 @@ typedef struct {
 
 class idPort {
 public:
-				idPort();				// this just zeros netSocket and port
+				idPort();				// initializes the platform socket state and port
 	virtual		~idPort();
 
 	// if the InitForPort fails, the idPort.port field will remain 0
@@ -558,6 +612,7 @@ private:
 	netadr_t	bound_to;		// interface and port
 	idSocketHandle_t	netSocket;		// OS specific socket
 	idSocketHandle_t	netSocket6;		// OS specific IPv6 socket
+	void *		platformData;		// OS specific per-socket state
 };
 
 class idTCP {
@@ -566,7 +621,7 @@ public:
 	virtual		~idTCP();
 
 	// if host is host:port, the value of port is ignored
-	bool		Init( const char *host, short port );
+	bool		Init( const char *host, int port );
 	void		Close();
 
 	// returns -1 on failure (and closes socket)
@@ -586,12 +641,21 @@ private:
 				// NOTE: DNS resolve is a slow/blocking call, think before you use
 				// ( could be exploited for server DoS )
 bool			Sys_StringToNetAdr( const char *s, netadr_t *a, bool doDNSResolve );
+				// every distinct address s names, up to maxCandidates, in the order a
+				// connection should try them; the first is what Sys_StringToNetAdr
+				// returns. Returns how many were written.
+int				Sys_StringToNetAdrCandidates( const char *s, netadr_t *candidates, int maxCandidates, bool doDNSResolve );
 const char *	Sys_NetAdrToString( const netadr_t a );
 bool			Sys_IsLANAddress( const netadr_t a );
+				// this machine's first non-loopback IPv4 address (no port)
+bool			Sys_GetLocalIPAddress( netadr_t &out );
 bool			Sys_CompareNetAdrBase( const netadr_t a, const netadr_t b );
 
 void			Sys_InitNetworking( void );
 void			Sys_ShutdownNetworking( void );
+				// simulated network conditions (net_force*) and what each open port's
+				// delay lines have done with them
+void			Sys_NetImpairmentReport( void );
 
 
 /*
@@ -716,6 +780,7 @@ public:
 	virtual void			LGLCD_DrawShape( int shapeType, int x, int y, int sizeX, int sizeY, int parm, bool layered ) {}
 
 	virtual int				Milliseconds(void) = 0;
+	virtual bool			SecureRandomBytes( void *buffer, int bytes ) = 0;
 };
 
 extern idSys *				sys;

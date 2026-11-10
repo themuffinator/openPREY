@@ -545,7 +545,7 @@ def main() -> None:
     renderer_vk_gui = read("src/renderer/Vulkan/vk_GuiExecutor.cpp")
     renderer_draw_arb2 = read("src/renderer/draw_arb2.cpp")
     renderer_main = read("src/renderer/tr_main.cpp")
-    renderer_trisurf = read("src/render_geo/RenderGeometryTriSurf.cpp")
+    renderer_trisurf = read("src/rendergeo/RenderGeometryTriSurf.cpp")
     render_world = read("src/renderer/RenderWorld.cpp")
     image_files = read("src/imagetools/Image_files.cpp")
     image_tools_h = read("src/imagetools/ImageTools.h")
@@ -575,15 +575,15 @@ def main() -> None:
     win_syscon = read("src/sys/win32/win_syscon.cpp")
     posix_threads = read("src/sys/posix/posix_threads.cpp")
     renderer_gl_module = read("src/renderer/RendererGLModule.cpp")
-    render_geometry_h = read("src/render_geo/RenderGeometry.h")
+    render_geometry_h = read("src/rendergeo/RenderGeometry.h")
     renderer_material = read("src/renderer/Material.cpp")
-    maya_import = read("src/MayaImport/maya_main.cpp")
+    maya_import = read("src/mayaimport/maya_main.cpp")
     linux_sound_h = read("src/sys/linux/sound.h")
     al_sound_sample = read("src/sound/OpenAL/AL_SoundSample.cpp")
-    macos_sound = read("src/sys/osx/macosx_sound.cpp")
-    macos_controller = read("src/sys/osx/DOOMController.mm")
-    macos_glimp = read("src/sys/osx/macosx_glimp.mm")
-    macos_preferences_h = read("src/sys/osx/PreferencesDialog.h")
+    macos_sound = read("src/sys/macos/macos_sound.cpp")
+    macos_controller = read("src/sys/macos/DOOMController.mm")
+    macos_glimp = read("src/sys/macos/macos_glimp.mm")
+    macos_preferences_h = read("src/sys/macos/PreferencesDialog.h")
     dmap = read("src/tools/compilers/dmap/dmap.cpp")
     tool_property_grid = read("src/tools/common/PropertyGrid.cpp")
     tool_path_tree_h = read("src/tools/comafx/CPathTreeCtrl.h")
@@ -628,14 +628,25 @@ def main() -> None:
     )
     require(
         meson,
-        "bse_cpp_args = shared_cpp_args + common_header_cpp_args",
-        "BSE keeps full UBSan vptr coverage",
+        "bse_cpp_args = shared_cpp_args + common_header_cpp_args + linux_cross_dso_sanitizer_cpp_args",
+        "Linux BSE cross-DSO sanitizer scope",
+    )
+    require(
+        meson,
+        "renderer_gl_module_args = engine_cpp_args + [",
+        "OpenGL renderer cross-DSO sanitizer scope",
+    )
+    require(
+        meson,
+        "renderer_vk_module_args = engine_cpp_args + [",
+        "Vulkan renderer cross-DSO sanitizer scope",
     )
     reject(
         meson,
         "shared_cpp_args += ['-fno-sanitize=vptr']",
         "over-broad UBSan vptr exclusion",
     )
+    reject(meson, "-fno-sanitize=pointer-overflow", "masked renderer file-ownership defect")
     require(meson, "dedicated_engine_cpp_args = engine_cpp_args", "dedicated sanitizer inheritance")
     require(
         meson,
@@ -835,7 +846,7 @@ def main() -> None:
     require(simd, "#if defined( ID_SIMD_SSE2_AVAILABLE )", "guarded SSE2 processor selection")
     require(simd, "#define TIME_TYPE int64_t", "fixed-width SIMD benchmark clock type")
     require(simd, "TIME_TYPE baseClocks = 0;", "fixed-width SIMD benchmark baseline")
-    require(simd, "void PrintClocks( char *string, int dataCount, TIME_TYPE clocks, TIME_TYPE otherClocks = 0 )", "wide SIMD benchmark reporting")
+    require(simd, "void PrintClocks( const char *string, int dataCount, TIME_TYPE clocks, TIME_TYPE otherClocks = 0 )", "wide SIMD benchmark reporting")
     reject(simd, "long baseClocks", "LP64-dependent SIMD benchmark baseline")
     reject(simd, "#define TIME_TYPE int\n", "truncated SIMD benchmark clock type")
 
@@ -968,12 +979,23 @@ def main() -> None:
     reject(sys_public, "int\t\t\tnetSocket;", "Win64-truncated UDP socket storage")
     reject(sys_public, "int\t\t\tfd;", "Win64-truncated TCP socket storage")
     for signature in (
-        "SOCKET NET_IPSocket(",
-        "bool Net_WaitForUDPPacket( SOCKET netSocket",
+        "static SOCKET NET_IPSocketForFamily(",
+        "static bool Net_BindDualStack( const char *ipv4Text, const char *ipv6Text, int portNumber, SOCKET &socket4, SOCKET &socket6",
+        "static SOCKET Net_SocketForAddress( SOCKET netSocket, SOCKET netSocket6",
+        "static void Net_SendMulticast6Packet( SOCKET netSocket",
+        "bool Net_WaitForUDPPacket( SOCKET netSocket, SOCKET netSocket6",
         "bool Net_GetUDPPacket( SOCKET netSocket",
         "void Net_SendUDPPacket( SOCKET netSocket",
     ):
         require(win_net, signature, "Win64-safe Winsock helper signature")
+    # A socket handle is 64-bit on Win64, so nothing may narrow one to int.
+    for narrowing in (
+        "int NET_IPSocket",
+        "int Net_SocketForAddress",
+        "( int )netSocket",
+        "(int)netSocket",
+    ):
+        reject(win_net, narrowing, "Win64-truncated Winsock handle")
     require(win_local, "LRESULT CALLBACK MainWndProc", "pointer-sized main window result")
     # Splash, console, input-line and button-subclass procedures.
     if win_syscon.count("LRESULT CALLBACK") != 4:
@@ -982,9 +1004,27 @@ def main() -> None:
     require(win_main, "struct __stat64 st;", "64-bit Windows file timestamp source")
     require(win_main, "_fstat64( _fileno( fp ), &st )", "64-bit Windows file timestamp query")
     reject(win_main, "return (long)st.st_mtime;", "LLP64-truncated Windows file timestamp")
+    require(win_main, "#include <ShlObj.h>", "Windows Known Folder declarations")
+    require(win_main, "SHGetKnownFolderPath( folderId, KF_FLAG_DEFAULT", "Windows Known Folder lookup")
+    require(win_main, "FOLDERID_LocalAppData", "Windows Local AppData save root")
+    require(win_main, "FOLDERID_SavedGames", "Windows redirected Saved Games fallback")
+    require(win_main, "savePath.SlashesToBackSlashes();", "native Windows save-path separators")
+    require(win_main, "!Sys_IsAbsoluteWindowsPath( savePath )", "absolute Windows save-root fallback guard")
+    require(meson, "windows_shell_dep = cc.find_library('shell32', required: true)", "Windows Shell link dependency")
+    require(meson, "windows_ole_dep = cc.find_library('ole32', required: true)", "Windows COM allocator link dependency")
+    if meson.count("\n      windows_shell_dep,") + meson.count("\n    windows_shell_dep,") != 3 or meson.count("\n      windows_ole_dep,") + meson.count("\n    windows_ole_dep,") != 3:
+        raise AssertionError("All Windows client and dedicated dependency sets must retain Known Folder libraries")
     require(sys_public, "uint32_t\t\tthreadId;", "fixed-width cross-platform thread id")
     require(win_main, "DWORD threadId = 0;", "Win32-native CreateThread id output")
     reject(win_main, "&info.threadId", "non-DWORD CreateThread id output")
+    # openQ4-game carried this pin too, but src/sys/win32/ is untracked there,
+    # so it could only ever run for developers with both checkouts. Enforce it
+    # here, against the file this repository actually owns.
+    require(
+        win_main,
+        "info.threadId = static_cast<uint32_t>( threadId );",
+        "fixed-width stored thread identifier",
+    )
     require(posix_threads, "static_assert( sizeof( pthread_t ) <= sizeof( uintptr_t )", "representable POSIX thread handle")
     require(posix_threads, "memcpy( &handle, &thread, sizeof( thread ) );", "complete POSIX thread-handle encoding")
     require(renderer_gl_module, "DWORD threadId = 0;", "renderer Win32-native CreateThread id output")
@@ -1102,8 +1142,8 @@ def main() -> None:
     )
     reject(renderer_local, "int\t\tpoop;", "32-bit-only manual frame allocator padding")
     require(renderer_main, "buf = block->base + block->used;", "aligned frame allocation base")
-    if renderer_main.count("Mem_Alloc16( size + sizeof( *block ) )") != 2:
-        raise AssertionError("Frame allocator blocks must use exactly two aligned allocations")
+    require(renderer_main, "Mem_Alloc16( MEMORY_BLOCK_SIZE + sizeof( *block ) )", "aligned initial frame block")
+    require(renderer_main, "Mem_Alloc16( static_cast<size_t>( size ) + sizeof( *fresh ) )", "native-width aligned frame growth")
     require(renderer_main, "Mem_Free16( block );", "paired aligned frame block release")
     reject(renderer_main, "Mem_Alloc( size + sizeof( *block ) )", "unaligned frame block allocation")
     reject(renderer_main, "Mem_Free( block );", "mismatched frame block release")
@@ -1215,8 +1255,8 @@ def main() -> None:
     )
     require(
         bse_manager,
-        '"bse_active: %i particles: %i traces: %i texels: %g\\n"',
-        "type-correct BSE texel statistic format",
+        '"bse_active: %i particles: %i traces: %i segments: %i\\n"',
+        "integer BSE activity statistic format",
     )
     reject(
         bse_manager,

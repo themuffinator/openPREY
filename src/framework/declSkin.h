@@ -45,7 +45,7 @@ public:
 #endif
 // RAVEN END
 	// virtual so the renderer module reaches it across the DLL boundary
-	// (Phase B8, docs/dev/plans/2026-07-16-vulkan-renderer-phase-b.md)
+	// (Phase B8, docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer-phase-b.md)
 	virtual const idMaterial *	RemapShaderBySkin( const idMaterial *shader ) const;
 
 							// model associations are just for the preview dialog in the editor

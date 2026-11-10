@@ -59,7 +59,7 @@
 #    undef NOGDI
 #  endif
 #  include "wglew.h"
-#elif !defined(__ANDROID__) && !defined(__native_client__) && !defined(__HAIKU__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
+#elif !defined(OPENQ4_GLEW_SDL3_LOADER) && !defined(__ANDROID__) && !defined(__native_client__) && !defined(__HAIKU__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
 #  include <GL/glxew.h>
 #endif
 
@@ -22622,7 +22622,7 @@ GLenum GLEWAPIENTRY wglewInit (void)
   return GLEW_OK;
 }
 
-#elif !defined(__ANDROID__) && !defined(__native_client__) && !defined(__HAIKU__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
+#elif !defined(OPENQ4_GLEW_SDL3_LOADER) && !defined(__ANDROID__) && !defined(__native_client__) && !defined(__HAIKU__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
 
 PFNGLXGETCURRENTDISPLAYPROC __glewXGetCurrentDisplay = NULL;
 

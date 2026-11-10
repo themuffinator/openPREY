@@ -44,15 +44,21 @@ float idDeclTable::TableLookup( float index ) const {
 	
 	int domain = values.Num() - 1;
 
+	// A single-value table (Parse appends a wrap copy, so two entries) evaluates
+	// to 1, as in Quake 4. That includes the "{ { 0 } }" default for a missing
+	// table, so an envelope or material naming one runs at full strength.
 	if ( domain <= 1 ) {
-		return values.Num() > 0 ? values[0] : 1.0f;
+		return 1.0f;
 	}
 
 	if ( clamp ) {
 		index *= (domain-1);
 		if ( index >= domain - 1 ) {
 			return values[domain - 1];
-		} else if ( index <= 0 ) {
+		} else if ( !( index > 0 ) ) {
+			// openQ4: written so that a NaN index lands here too. It failed
+			// both tests as they were, and the integer it converts to indexed
+			// the table two billion entries before its start.
 			return values[0];
 		}
 		iIndex = idMath::Ftoi( index );

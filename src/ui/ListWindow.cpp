@@ -48,6 +48,32 @@ static const int doubleClickSpeed = 300;
 
 static const int Q4_LIST_WINDOW_TEXT_SPACING = 0;
 
+// Browser rows contain sanitized network text. Fit complete UTF-8 characters
+// to the stock column width and signal omitted text instead of slicing glyphs.
+static idStr openQ4_FitBrowserCell( idDeviceContext *dc, const idStr &text, float scale, float width ) {
+	if ( dc->TextWidth( text.c_str(), scale, -1, Q4_LIST_WINDOW_TEXT_SPACING ) <= width ) {
+		return text;
+	}
+	const char *ellipsis = "...";
+	if ( dc->TextWidth( ellipsis, scale, -1, Q4_LIST_WINDOW_TEXT_SPACING ) > width ) {
+		return "";
+	}
+	idStr prefix = text;
+	while ( prefix.Length() > 0 ) {
+		int end = prefix.Length() - 1;
+		while ( end > 0 && ( static_cast<unsigned char>( prefix[end] ) & 0xc0 ) == 0x80 ) {
+			--end;
+		}
+		prefix.CapLength( end );
+		idStr fitted = prefix;
+		fitted += ellipsis;
+		if ( dc->TextWidth( fitted.c_str(), scale, -1, Q4_LIST_WINDOW_TEXT_SPACING ) <= width ) {
+			return fitted;
+		}
+	}
+	return ellipsis;
+}
+
 static const idMaterial *openQ4_ListMaterial( const char *name ) {
 	if ( name == NULL || name[ 0 ] == '\0' ) {
 		return NULL;
@@ -87,9 +113,11 @@ static int openQ4_EnsureSelectionVisible( int top, int fit, int selection, int i
 }
 
 void idListWindow::CommonInit() {
+	maxItems = MAX_LIST_ITEMS;
 	typed = "";
 	typedTime = 0;
 	clickTime = 0;
+	clickRow = -1;
 	currentSel.Clear();
 	top = 0;
 	sizeBias = 0;
@@ -144,9 +172,11 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 	}
 
 	int key = event->evValue;
+	bool doubleClick = false;
 
-	// Update selection before ON_ACTION runs so scripts receive the clicked row immediately.
-	if ( event->evType == SE_KEY && event->evValue2 && key == K_MOUSE1 && Contains( gui->CursorX(), gui->CursorY() ) ) {
+	// Process a click once, before ON_ACTION, so scripts see its new selection.
+	// Test double-click identity against the preceding click and selection.
+	if ( !noEvents && event->evType == SE_KEY && event->evValue2 && key == K_MOUSE1 && Contains( gui->CursorX(), gui->CursorY() ) ) {
 		if ( !scroller->Contains( gui->CursorX(), gui->CursorY() ) ) {
 			const int cur = static_cast<int>( ( gui->CursorY() - actualY - pixelOffset ) / lineHeight ) + top;
 			if ( cur >= 0 && cur < listItems.Num() ) {
@@ -156,11 +186,17 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 					} else {
 						AddCurrentSel( cur );
 					}
+					clickRow = -1;
 				} else {
+					doubleClick = clickRow == cur && IsSelected( cur ) && gui->GetTime() >= clickTime &&
+						gui->GetTime() - clickTime < doubleClickSpeed;
 					SetCurrentSel( cur );
+					clickRow = cur;
+					clickTime = gui->GetTime();
 				}
 			} else {
-				SetCurrentSel( listItems.Num() - 1 );
+				currentSel.Clear();
+				clickRow = -1;
 			}
 
 			if ( currentSel.Num() > 0 ) {
@@ -168,7 +204,7 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 					gui->SetStateInt( va( "%s_sel_%i", listName.c_str(), i ), currentSel[ i ] );
 				}
 			} else {
-				gui->SetStateInt( va( "%s_sel_0", listName.c_str() ), 0 );
+				gui->SetStateInt( va( "%s_sel_0", listName.c_str() ), -1 );
 			}
 			gui->SetStateInt( va( "%s_numsel", listName.c_str() ), currentSel.Num() );
 		}
@@ -176,6 +212,9 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 
 	// need to call this to allow proper focus and capturing on embedded children
 	const char *ret = idWindow::HandleEvent(event, updateVisuals);
+	if ( noEvents ) {
+		return ret;
+	}
 
 	if ( event->evType == SE_KEY ) {
 		if ( !event->evValue2 ) {
@@ -191,6 +230,7 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 		}
 
 		if ( ( key == K_ENTER || key == K_KP_ENTER ) ) {
+			clickRow = -1;
 			RunScript( ON_ENTER );
 			return cmd;
 		}
@@ -202,30 +242,13 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 		}
 
 		if ( key == K_MOUSE1) {
-			if (Contains(gui->CursorX(), gui->CursorY())) {
-				int cur = ( int )( ( gui->CursorY() - actualY - pixelOffset ) / lineHeight ) + top;
-				if ( cur >= 0 && cur < listItems.Num() ) {
-					if ( multipleSel && idKeyInput::IsDown( K_CTRL ) ) {
-						if ( IsSelected( cur ) ) {
-							ClearSelection( cur );
-						} else {
-							AddCurrentSel( cur );
-						}
-					} else {
-						if ( IsSelected( cur ) && ( gui->GetTime() < clickTime + doubleClickSpeed ) ) {
-							// Double-click causes ON_ENTER to get run
-							RunScript(ON_ENTER);
-							return cmd;
-						}
-						SetCurrentSel( cur );
-
-						clickTime = gui->GetTime();
-					}
-				} else {
-					SetCurrentSel( listItems.Num() - 1 );
-				}
+			if ( doubleClick ) {
+				RunScript( ON_ENTER );
+				clickRow = -1;
+				return cmd;
 			}
 		} else if ( key == K_UPARROW || key == K_PGUP || key == K_DOWNARROW || key == K_PGDN ) {
+			clickRow = -1;
 			int numLines = 1;
 
 			if ( key == K_PGUP || key == K_PGDN ) {
@@ -248,6 +271,7 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 		if ( !idStr::CharIsPrintable(key) ) {
 			return ret;
 		}
+		clickRow = -1;
 
 		if ( gui->GetTime() > typedTime + 1000 ) {
 			typed = "";
@@ -266,11 +290,13 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 		return ret;
 	}
 
-	if ( GetCurrentSel() < 0 ) {
+	if ( listItems.Num() == 0 ) {
+		currentSel.Clear();
+	} else if ( GetCurrentSel() < 0 ) {
 		SetCurrentSel( 0 );
 	}
 
-	if ( GetCurrentSel() >= listItems.Num() ) {
+	if ( listItems.Num() > 0 && GetCurrentSel() >= listItems.Num() ) {
 		SetCurrentSel( listItems.Num() - 1 );
 	}
 
@@ -303,20 +329,19 @@ const char *idListWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 	const idStr topStateName = va( "%s_top", listName.c_str() );
 	gui->SetStateInt( topStateName.c_str(), top );
 
-	if ( key != K_MOUSE1 ) {
-		// Send a fake mouse click event so onAction gets run in our parents
-		const sysEvent_t ev = sys->GenerateMouseButtonEvent( 1, true );
-		idWindow::HandleEvent(&ev, updateVisuals);
-	}
-
 	if ( currentSel.Num() > 0 ) {
 		for ( int i = 0; i < currentSel.Num(); i++ ) {
 			gui->SetStateInt( va( "%s_sel_%i", listName.c_str(), i ), currentSel[i] );
 		}
 	} else {
-		gui->SetStateInt( va( "%s_sel_0", listName.c_str() ), 0 );
+		gui->SetStateInt( va( "%s_sel_0", listName.c_str() ), -1 );
 	}
 	gui->SetStateInt( va( "%s_numsel", listName.c_str() ), currentSel.Num() );
+	if ( key != K_MOUSE1 ) {
+		// Publish keyboard selection before running the action, just as clicks do.
+		const sysEvent_t ev = sys->GenerateMouseButtonEvent( 1, true );
+		idWindow::HandleEvent(&ev, updateVisuals);
+	}
 
 	return ret;
 }
@@ -340,6 +365,10 @@ void idListWindow::MouseEnter() {
 
 
 bool idListWindow::ParseInternalVar(const char *_name, idParser *src) {
+	if ( idStr::Icmp( _name, "maxitems" ) == 0 ) {
+		maxItems = idMath::ClampInt( 1, 65536, src->ParseInt() );
+		return true;
+	}
 	if (idStr::Icmp(_name, "horizontal") == 0) {
 		horizontal = src->ParseBool();
 		return true;
@@ -618,18 +647,28 @@ void idListWindow::Draw(int time, float x, float y) {
 			gui->SetStateInt( va( "%s_hover", listName.c_str() ), i );
 		}
 
+		// The retail order: selection, a greyed row, hover, a highlight fill
+		// (the match summary's top three), then the line band.
+		const rowTint_t *tint = i < rowTints.Num() ? &rowTints[ i ] : NULL;
 		const idMaterial *rowMaterial = NULL;
+		bool highlighted = false;
 		if ( selected ) {
 			rowMaterial = matFocus;
+		} else if ( tint != NULL && tint->greyed ) {
+			rowMaterial = matGreyed;
 		} else if ( rowHovered ) {
 			rowMaterial = matHover;
+		} else if ( tint != NULL && tint->highlighted ) {
+			highlighted = true;
 		} else if ( noEvents ) {
 			rowMaterial = matGreyed;
 		} else {
 			rowMaterial = matLine;
 		}
 
-		if ( rowMaterial != NULL ) {
+		if ( highlighted ) {
+			dc->DrawFilledRect( rowRect.x, rowRect.y + pixelOffset, rowRect.w, rowRect.h - pixelOffset, tint->highlight );
+		} else if ( rowMaterial != NULL ) {
 			dc->DrawMaterial( rowRect.x, rowRect.y + pixelOffset, rowRect.w, rowRect.h, rowMaterial, colorWhite, 1.0f, 1.0f );
 		} else if ( selected ) {
 			dc->DrawFilledRect( rowRect.x, rowRect.y + pixelOffset, rowRect.w, rowRect.h, borderColor );
@@ -675,6 +714,9 @@ void idListWindow::Draw(int time, float x, float y) {
 				dc->PushClipRect( rect );
 
 				if ( tabInfo[tab].type == TAB_TYPE_TEXT ) {
+					if ( !listName.Icmp( "serverlist" ) ) {
+						work = openQ4_FitBrowserCell( dc, work, tabInfo[tab].textScale, Max( 0.0f, rect.w - 1.0f ) );
+					}
 					idRectangle textRect = rect;
 					const float textHeight = dc->MaxCharHeight( scale );
 					if ( tabInfo[tab].valign == 0 ) {
@@ -772,10 +814,14 @@ void idListWindow::HandleBuddyUpdate(idWindow *buddy) {
 void idListWindow::UpdateList() {
 	idStr str;
 	listItems.Clear();
-	for (int i = 0; i < MAX_LIST_ITEMS; i++) {
+	rowTints.Clear();
+	for (int i = 0; i < maxItems; i++) {
 		if (gui->State().GetString( va("%s_item_%i", listName.c_str(), i), "", str) ) {
 			if ( str.Length() ) {
 				listItems.Append(str);
+				rowTint_t &tint = rowTints.Alloc();
+				tint.highlighted = gui->State().GetVec4( va( "%s_item_%i_highlight", listName.c_str(), i ), "0 0 0 0", tint.highlight );
+				tint.greyed = gui->State().GetBool( va( "%s_item_%i_greyed", listName.c_str(), i ) );
 			}
 		} else {
 			break;

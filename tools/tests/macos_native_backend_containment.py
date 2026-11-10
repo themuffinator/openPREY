@@ -21,7 +21,7 @@ SDL3_FORBIDDEN_TOKENS = (
     "NSOpenGLPixelFormat",
     "CGLContextObj",
     # CGL context/present call surface; CGLQueryRendererInfo/CGLDescribeRenderer
-    # stay allowed for the SDL3-path VRAM probe in macosx_compat.mm.
+    # stay allowed for the SDL3-path VRAM probe in macos_compat.mm.
     "CGLCreateContext",
     "CGLSetCurrentContext",
     "CGLGetCurrentContext",
@@ -32,9 +32,9 @@ SDL3_FORBIDDEN_TOKENS = (
 )
 
 # Headers that are allowed to hold native NSOpenGL/CGL tokens; imported only by
-# the native comparison backend (macosx_glimp.mm).
+# the native comparison backend (macos_glimp.mm).
 NATIVE_ONLY_OSX_HEADERS = (
-    "src/sys/osx/macosx_native_gl.h",
+    "src/sys/macos/macos_native_gl.h",
 )
 
 NATIVE_METAL_IMPLEMENTATION_TOKENS = (
@@ -115,7 +115,7 @@ def implementation_sources() -> list[Path]:
     paths: set[Path] = set()
     for root in (
         SOURCE_ROOT / "renderer",
-        SOURCE_ROOT / "sys" / "osx",
+        SOURCE_ROOT / "sys" / "macos",
         SOURCE_ROOT / "sys" / "posix",
         SOURCE_ROOT / "sys" / "sdl3",
     ):
@@ -129,15 +129,15 @@ def validate_source_manifest_boundary() -> None:
     sdl3, native = active_darwin_sources()
 
     for required in (
-        "sys/osx/macosx_sdl3.cpp",
-        "sys/osx/macosx_sdl3_main.cpp",
-        "sys/osx/macosx_compat.mm",
-        "sys/osx/macosx_misc.mm",
+        "sys/macos/macos_sdl3.cpp",
+        "sys/macos/macos_sdl3_main.cpp",
+        "sys/macos/macos_compat.mm",
+        "sys/macos/macos_misc.mm",
     ):
         if required not in sdl3:
             raise AssertionError(f"Missing {required!r} from SDL3_DARWIN_SOURCES")
 
-    for native_only in ("sys/osx/macosx_event.mm", "sys/osx/macosx_glimp.mm"):
+    for native_only in ("sys/macos/macos_event.mm", "sys/macos/macos_glimp.mm"):
         if native_only not in native:
             raise AssertionError(f"Missing {native_only!r} from DARWIN_PLATFORM_SOURCES")
         if native_only in sdl3:
@@ -145,15 +145,15 @@ def validate_source_manifest_boundary() -> None:
 
     active = sdl3 | native
     carbon_hits = active_sources_containing("Carbon", active)
-    if carbon_hits != ["sys/osx/macosx_event.mm"]:
+    if carbon_hits != ["sys/macos/macos_event.mm"]:
         raise AssertionError(f"Carbon escaped the native event boundary: {carbon_hits!r}")
 
     nsopengl_hits = active_sources_containing("NSOpenGL", active)
-    if nsopengl_hits != ["sys/osx/macosx_glimp.mm"]:
+    if nsopengl_hits != ["sys/macos/macos_glimp.mm"]:
         raise AssertionError(f"NSOpenGL escaped the native GL boundary: {nsopengl_hits!r}")
 
     cgl_hits = active_sources_containing("CGLContextObj", active)
-    if cgl_hits != ["sys/osx/macosx_glimp.mm"]:
+    if cgl_hits != ["sys/macos/macos_glimp.mm"]:
         raise AssertionError(f"CGL context APIs escaped the native GL boundary: {cgl_hits!r}")
 
 
@@ -172,7 +172,7 @@ def validate_osx_headers_are_native_token_free() -> None:
     for allowed in NATIVE_ONLY_OSX_HEADERS:
         if not (ROOT / allowed).is_file():
             raise AssertionError(f"Missing allowlisted native-only header {allowed!r}")
-    for path in sorted((SOURCE_ROOT / "sys" / "osx").rglob("*.h")):
+    for path in sorted((SOURCE_ROOT / "sys" / "macos").rglob("*.h")):
         relative = path.relative_to(ROOT).as_posix()
         if relative in NATIVE_ONLY_OSX_HEADERS:
             continue
@@ -238,8 +238,8 @@ def validate_policy_docs() -> None:
         "comparison-only diagnostic infrastructure",
         "The native backend is not kept indefinitely by default",
         "separate native-backend removal plan",
-        "`src/sys/osx/macosx_event.mm` is the native Carbon event/input boundary",
-        "`src/sys/osx/macosx_glimp.mm` is the native NSOpenGL/CGL context boundary",
+        "`src/sys/macos/macos_event.mm` is the native Carbon event/input boundary",
+        "`src/sys/macos/macos_glimp.mm` is the native NSOpenGL/CGL context boundary",
         "SDL3 macOS sources must not import Carbon, link Carbon, or use NSOpenGL/CGL",
         "Curated release notes may say that the native backend is comparison-only",
         "native macOS backend support, native Cocoa/OpenGL",
@@ -275,7 +275,7 @@ def validate_release_note_wording() -> None:
 
 
 def validate_phase7_plan_status() -> None:
-    plan = read("docs/dev/plans/2026-06-30-apple-support-no-macos-access.md")
+    plan = read("docs/dev/archive/2026-10-18/plans/2026-06-30-apple-support-no-macos-access.md")
     for token in (
         "## Phase 7: Contain Legacy And Future Renderer Paths",
         "- [x] Keep Carbon and NSOpenGL isolated to the native comparison backend.",

@@ -36,10 +36,15 @@ typedef struct modernGLDrawPlanEntry_s {
 	int							modelViewMatrixLocation;
 	int							debugColorLocation;
 	int							localParamsLocation;
+	int							pbrIBLLocation;
+	int							bakedGridLocation;
 	int							mainTextureLocation;
 	int							normalTextureLocation;
 	int							specularTextureLocation;
 	int							emissiveTextureLocation;
+	int							metallicTextureLocation;
+	int							roughnessTextureLocation;
+	int							aoTextureLocation;
 	int							textureIndicesLocation;
 	int							textureTableModeLocation;
 	int							materialFlagsLocation;
@@ -82,6 +87,8 @@ typedef struct modernGLDrawPlanStats_s {
 	int		vertexOnlyDraws;
 	int		pipelineDraws[MODERN_GL_DRAW_PLAN_PIPELINE_COUNT];
 	int		forwardPlusDecalDraws;
+	int		pbrClusteredSurfaceOwners;
+	int		pbrClusteredConsumedInteractions;
 	int		pipelineBatches;
 	int		geometryBatches;
 	int		textureSetBatches;

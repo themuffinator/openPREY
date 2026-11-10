@@ -50,6 +50,7 @@ public:
 	virtual idWinVar *	GetWinVarByName(const char *_name, bool winLookup = false, drawWin_t** owner = NULL);
 	virtual const char *HandleEvent(const sysEvent_t *event, bool *updateVisuals);
 	virtual void		PostParse();
+	virtual void RefreshForLevelLoad() override;
 	virtual void		Draw(int time, float x, float y);
 	virtual void		DrawBackground(const idRectangle &drawRect);
 	virtual const char *RouteMouseCoords(float xd, float yd);

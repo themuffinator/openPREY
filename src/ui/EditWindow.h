@@ -68,7 +68,6 @@ private:
 	void				UpdateCvar( bool read, bool force = false );
 	
 	void				CommonInit();
-	void				EnsureCursorVisible();
 	void				InitScroller( bool horizontal );
 	
 	int					maxChars;
@@ -79,6 +78,7 @@ private:
 	bool				wrap;
 	bool				readonly;
 	bool				numeric;
+	bool                numericNegative;
 	idStr				sourceFile;
 	idSliderWindow *	scroller;
 	idList<int>			breaks;
@@ -93,6 +93,14 @@ private:
 
 	idWinBool			liveUpdate;
 	idWinStr			cvarGroup;
+
+protected:
+	// Derived editors can resize their text area without moving the caret.
+	void				EnsureCursorVisible();
+	// openQ4: the caret as a byte offset into the text, for derived editors
+	// that present the entry elsewhere (the Remastered chat input).
+	int					CursorPosition() const { return cursorPos; }
+	void				SetCursorPosition( int position ) { cursorPos = idMath::ClampInt( 0, text.Length(), position ); }
 };
 
 #endif /* !__EDITWINDOW_H__ */

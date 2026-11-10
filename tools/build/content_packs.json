@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "comment": "openPREY runtime content packs. This table drives the Meson pack targets, the generated engine pack table (openq4_paks_generated.h), the packagers and the archive verifiers. Retail Prey content is never packed here; users supply it. See docs/dev/content-pack-distribution.md.",
+  "packs": [
+    {
+      "name": "pak0.pk4",
+      "source": "content/basepr/pak0",
+      "contents": "core runtime content",
+      "contents_string": "#str_231701",
+      "client_only": false,
+      "bulk": false,
+      "required_files": [
+        "glprogs/smaa_blend.fs",
+        "glprogs/smaa_blend.vs",
+        "glprogs/smaa_edge.fs",
+        "glprogs/smaa_edge.vs",
+        "glprogs/smaa_weights.fs",
+        "glprogs/smaa_weights.vs",
+        "materials/postprocess_openq4.mtr"
+      ]
+    },
+    {
+      "name": "pak1.pk4",
+      "source": "content/basepr/pak1",
+      "contents": "interface artwork",
+      "contents_string": "#str_231702",
+      "client_only": true,
+      "bulk": false,
+      "required_files": [
+        "guis/assets/guicursor_arrow.tga",
+        "guis/assets/guicursor_menu.tga"
+      ]
+    }
+  ]
+}

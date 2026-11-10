@@ -52,11 +52,12 @@ artifact ZIP transfers normalize executable modes, which would invalidate both
 the recorded mode hashes and the final runtime. The merge job checks and
 extracts each tar payload before it inspects or combines the trees.
 
-The `macos-universal2` commit-validation job obtains the separately built
-OpenGL and Metal thin artifacts, records the final merged manifest, starts the
-assetless dedicated server through `game-mp_universal2.dylib`, and runs the
-normal ad-hoc package/signing/symbol validation. It is a pre-publication gate,
-not a release lane.
+Pull requests no longer run a `macos-universal2` assembly job. Releases are
+arm64-only, so commit validation keeps only the arm64 thin payload and its
+provenance record. The manual candidate lane below builds both slices, records
+the final merged manifest, starts the assetless dedicated server through
+`game-mp_universal2.dylib`, and runs the normal package/signing/symbol
+validation.
 
 ## Non-publishing Release Candidate
 
@@ -70,7 +71,7 @@ then re-signs after `lipo`, notarizes, staples, runs Gatekeeper assessment, and
 checks each final slice and module install name.
 
 Neither mode creates a GitHub release or changes the public package policy:
-user-facing macOS downloads remain experimental and arm64-only. A successful
+user-facing macOS downloads remain an arm64-only preview. A successful
 candidate is evidence for a future expansion, not Intel or universal2 support
 evidence by itself.
 

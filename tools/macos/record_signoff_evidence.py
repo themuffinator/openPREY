@@ -18,7 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INDEX = ROOT / "docs" / "dev" / "macos-signoff-evidence.md"
-DEFAULT_GAMELIBS_ROOT = ROOT.parent / "openQ4-game"
+DEFAULT_GAMELIBS_ROOT = ROOT
 NO_COMPLETED_STATUS = "- [ ] No completed macOS first-class support evidence is recorded yet."
 EVIDENCE_HISTORY_HEADING = "## Evidence History"
 CURRENT_RELEASE_HEADING = "## Current Release Evidence"
@@ -259,7 +259,7 @@ def validate_package_artifacts(artifacts: list[str], bridges: tuple[str, ...]) -
         match = PACKAGE_ARTIFACT_PATTERN.fullmatch(artifact)
         if match is None:
             raise RuntimeError(
-                "Package artifact is not an exact experimental macOS arm64 openQ4 "
+                "Package artifact is not an exact macOS arm64 openQ4 "
                 f"opengl/metal package artifact: {artifact}"
             )
         if match.group("suffix") not in PACKAGE_ARTIFACT_SUFFIXES:
@@ -401,7 +401,7 @@ def build_evidence(args: argparse.Namespace, *, run_id: str, bridges: tuple[str,
         finder_coverage="completed manual checklist validated",
         terminal_coverage="completed manual checklist validated",
         package_layout_contract="self-contained openQ4.app: data in Contents/Resources/baseoq4 and signed modules in Contents/Frameworks",
-        mounted_dmg_coverage="completed manual checklist validated or recorded as an experimental package exception",
+        mounted_dmg_coverage="completed manual checklist validated or recorded as an unsigned-package exception",
         copied_package_coverage="completed manual checklist validated",
         app_only_move_behavior="completed manual checklist validated for dragging openQ4.app independently to a user-writable location",
         path_resolution_log_coverage="fs_basepath, fs_cdpath, and fs_savepath confirmed by completed manual checklist",
@@ -412,7 +412,7 @@ def build_evidence(args: argparse.Namespace, *, run_id: str, bridges: tuple[str,
         known_exceptions=normalize_items(args.known_exception, "none recorded"),
         release_note_limitations=normalize_items(
             args.release_note_limitation,
-            "macOS support remains experimental Apple Silicon/arm64 unless release notes state otherwise",
+            "macOS support remains a preview for Apple Silicon/arm64 unless release notes state otherwise",
         ),
         generated_date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     )
@@ -494,7 +494,7 @@ def format_checklist(data: EvidenceData) -> str:
             "- [x] Dedicated server startup was covered or explicitly documented as unsupported for this release.",
             "- [x] Finder or Desktop launcher startup was checked.",
             "- [x] Terminal startup was checked.",
-            "- [x] Mounted signed/notarized DMG launch was checked, or unsigned archive behavior was recorded as an experimental exception.",
+            "- [x] Mounted signed/notarized DMG launch was checked, or unsigned archive behavior was recorded as an unsigned-package exception.",
             "- [x] Dragging only `openQ4.app` to `/Applications` or another user-writable location was checked.",
             "- [x] Whole-package copied launch was checked for loose client, dedicated-server, and support-tool sibling-runtime discovery.",
             "- [x] `fs_basepath`, `fs_cdpath`, and `fs_savepath` were confirmed in logs for Finder/copied package and terminal launches.",
@@ -504,7 +504,7 @@ def format_checklist(data: EvidenceData) -> str:
             "- [x] Audio output, volume changes, and at least one device switch or reconnect were checked.",
             "- [x] Windowed, fullscreen, selected-display, and HiDPI/Retina behavior were checked.",
             "- [x] The app contained data under `Contents/Resources/baseoq4` and signed SP/MP modules under `Contents/Frameworks`, with no adjacent `baseoq4` duplicate.",
-            "- [x] First-class macOS release artifacts are signed/notarized DMGs, or the release remains experimental and unsigned artifacts are labeled as development fallback output.",
+            "- [x] First-class macOS release artifacts are signed/notarized DMGs, or the release stays a preview and unsigned artifacts are labeled as fallback output.",
             "- [x] Architecture policy, CPU architecture, and OS matrix role were recorded.",
             "- [x] Xcode and macOS SDK versions were recorded.",
             "- [x] macOS floor/latest public signoff coverage was recorded or left as an explicit first-class promotion requirement.",
@@ -605,12 +605,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--bridges", default="opengl,metal", help="Comma-separated bridge list to require.")
     parser.add_argument("--action", default="signoff", help="Expected action token in result directory names.")
     parser.add_argument("--version", default="", help="Release or candidate version label.")
-    parser.add_argument("--support-tier", default="experimental", help="Support tier to record.")
+    parser.add_argument("--support-tier", default="preview", help="Support tier to record.")
     parser.add_argument("--artifact-url", default="", help="External URL for the archived evidence, if available.")
     parser.add_argument("--package-artifact", action="append", default=[], help="Package artifact name. Repeat for multiple artifacts.")
     parser.add_argument("--signing-status", default="", help="Signing/notarization status for the tested packages.")
     parser.add_argument("--openq4-commit", default="", help="openQ4 commit. Defaults to git rev-parse HEAD.")
-    parser.add_argument("--gamelibs-root", type=Path, default=DEFAULT_GAMELIBS_ROOT, help="Path to openQ4-game.")
+    parser.add_argument("--gamelibs-root", type=Path, default=DEFAULT_GAMELIBS_ROOT, help="Game source checkout; defaults to the canonical engine checkout.")
     parser.add_argument("--gamelibs-commit", default="", help="openQ4-game commit. Defaults to git rev-parse HEAD in --gamelibs-root.")
     parser.add_argument("--known-exception", action="append", default=[], help="Known exception to record. Repeat as needed.")
     parser.add_argument("--release-note-limitation", action="append", default=[], help="Release-note limitation to record. Repeat as needed.")

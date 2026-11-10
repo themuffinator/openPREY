@@ -243,9 +243,10 @@ def marching_squares(field: np.ndarray, level: float = 0.5) -> list[list[Point]]
 	contours: list[list[Point]] = []
 	unvisited = set(links)
 	while unvisited:
-		# The start point becomes the first on-curve point in the emitted glyph.
-		# Set iteration is hash-randomised between Python processes, so choosing
-		# it directly made equivalent traces produce different glyf byte streams.
+		# Start each chain at its smallest edge id, never at whatever a set
+		# yields first: edge ids hold strings, so set order follows the
+		# per-process hash seed, and the starting vertex used to change how a
+		# bowl was cut into arcs - two builds of one face came out different.
 		start = min(unvisited)
 		chain: list[Point] = []
 		node = start
@@ -331,8 +332,8 @@ def _detect_corners(points: list[Point], options: TraceOptions) -> list[int]:
 		if is_peak:
 			corners.append(index)
 
-	if not corners:
-		corners = [0]
+	# An empty list means a smooth closed bowl; _split_runs cuts it at its
+	# extrema rather than at wherever the contour happened to start.
 	return corners
 
 
@@ -396,9 +397,28 @@ def _split_runs(points: list[Point], corners: list[int], options: TraceOptions) 
 	# A bowl with no sharp corner at all (O, o, C) arrives as a single closed
 	# run whose start and end coincide, which no curve fitter can parameterise.
 	# Cut it into arcs so each piece is a well-formed span.
-	if len(corners) < 2:
-		pieces = max(4, count // 12)
-		base = corners[0] if corners else 0
+	pieces = max(4, count // 12)
+	if not corners:
+		# At its four extrema first - the top, right, bottom and left - which is
+		# where TrueType outlines want on-curve points and where an arc fits
+		# cleanly, then evenly between them. Cutting from the contour's first
+		# vertex instead made every bowl depend on where tracing started.
+		keys = (
+			lambda p: (p[1], p[0]),
+			lambda p: (-p[0], p[1]),
+			lambda p: (-p[1], -p[0]),
+			lambda p: (p[0], -p[1]),
+		)
+		extrema = sorted({min(range(count), key=lambda i, k=key: k(array[i])) for key in keys})
+		cuts: set[int] = set()
+		for position, first in enumerate(extrema):
+			last = extrema[(position + 1) % len(extrema)]
+			span = (last - first) % count or count
+			steps = max(1, round(span * pieces / count))
+			cuts.update((first + round(k * span / steps)) % count for k in range(steps))
+		corners = sorted(cuts)
+	elif len(corners) < 2:
+		base = corners[0]
 		corners = sorted({(base + round(i * count / pieces)) % count for i in range(pieces)})
 
 	runs: list[_Run] = []

@@ -8,6 +8,7 @@ openQ4 demo library and format-neutral playback controls.
 
 #include "Session_local.h"
 #include "DemoFile.h"
+#include "NativeInputPublications.h"
 #include "async/AsyncNetwork.h"
 #include "../ui/ListGUILocal.h"
 
@@ -19,9 +20,10 @@ static const char *DEMO_FILTER_RENDER = "render";
 static const char *DEMO_FILTER_LEGACY = "legacy";
 static const char *DEMO_FILTER_INCOMPLETE = "incomplete";
 
+// Not a cheat: MVD playback restores a cheat-free server's cvars.
 static idCVar demo_uiSeek(
 	"demo_uiSeek", "0",
-	CVAR_SYSTEM | CVAR_GUI | CVAR_FLOAT,
+	CVAR_SYSTEM | CVAR_GUI | CVAR_FLOAT | CVAR_NOCHEAT,
 	"normalized preview position used by the demo playback timeline",
 	0.0f, 1.0f );
 
@@ -57,24 +59,73 @@ static bool DemoPathIsSafe( const idStr &path ) {
 		path[0] != '\\';
 }
 
+// Text lengths here count characters, not bytes. Demo names and the localized
+// labels are UTF-8, and cutting inside a multi-byte sequence leaves a dangling
+// lead byte that draws as a stray glyph ("Grabaci?..."), so every cut lands on
+// a character boundary.
+static int DemoCharacterBytes( const idStr &text, int offset ) {
+	unsigned int codePoint = 0;
+	return Max( 1, LangDict_NextCodePoint( text.c_str() + offset, text.Length() - offset, codePoint ) );
+}
+
+static int DemoCharacterCount( const idStr &text ) {
+	int count = 0;
+	for ( int i = 0; i < text.Length(); i += DemoCharacterBytes( text, i ) ) {
+		count++;
+	}
+	return count;
+}
+
+static void DemoCapCharacters( idStr &text, int maxCharacters ) {
+	int offset = 0;
+	for ( int count = 0; offset < text.Length() && count < maxCharacters; count++ ) {
+		offset += DemoCharacterBytes( text, offset );
+	}
+	text.CapLength( Min( offset, text.Length() ) );
+}
+
 static idStr DemoSanitizeText( const char *text, int maxLength = 96 ) {
 	idStr source = text ? text : "";
 	source.RemoveColors();
 
 	idStr result;
-	for ( int i = 0; i < source.Length() && result.Length() < maxLength; i++ ) {
+	int characters = 0;
+	for ( int i = 0; i < source.Length() && characters < maxLength; ) {
 		const unsigned char ch = static_cast<unsigned char>( source[i] );
+		const int bytes = DemoCharacterBytes( source, i );
 		if ( ch == '\t' || ch == '\r' || ch == '\n' ) {
 			result.Append( ' ' );
+			characters++;
 		} else if ( ch >= 32 && ch != 127 ) {
-			result.Append( static_cast<char>( ch ) );
+			for ( int k = 0; k < bytes; k++ ) {
+				result.Append( source[i + k] );
+			}
+			characters++;
 		}
+		i += bytes;
 	}
 	while ( result.Find( "  " ) >= 0 ) {
 		result.Replace( "  ", " " );
 	}
 	result.StripLeading( ' ' );
 	result.StripTrailing( ' ' );
+	return result;
+}
+
+// Browser rows deliberately prefer a stable column edge over displaying a
+// filename that runs into the next field.  The full selected name remains
+// available in the detail card beneath the list.
+static idStr DemoEllipsizeText( const char *text, int maxLength ) {
+	idStr result = DemoSanitizeText( text, maxLength + 1 );
+	if ( DemoCharacterCount( result ) <= maxLength ) {
+		return result;
+	}
+	if ( maxLength <= 3 ) {
+		DemoCapCharacters( result, maxLength );
+		return result;
+	}
+	DemoCapCharacters( result, maxLength - 3 );
+	result += "...";
 	return result;
 }
 
@@ -112,17 +163,105 @@ static idStr DemoFormatTime( int milliseconds, bool unknownAllowed = true ) {
 	return va( "%02d:%02d", minutes, seconds );
 }
 
-static idStr DemoFormatSize( int bytes ) {
-	idStr result;
-	result.BestUnit( "%.1f", static_cast<float>( Max( 0, bytes ) ), MEASURE_SIZE );
-	return result;
-}
-
 static int DemoCurrentRenderTimeMS( const idSessionLocal &session ) {
 	if ( session.readDemo == NULL ) {
 		return 0;
 	}
+	if ( session.renderDemoFrameClock ) {
+		// A campaign demo's levels restart their game clocks; its frames do not.
+		return session.RenderDemoFramesToMS( Max( 0, session.numDemoFrames - 1 ) );
+	}
 	return Max( 0, session.currentDemoRenderView.time - session.renderDemoStartViewTime );
+}
+
+// A campaign render demo (v11) as the library and the content check see it,
+// read from its first records and its summary trailer without decoding frames.
+struct demoRenderSessionInfo_t {
+	int				streamVersion = 0;
+	bool			session = false;	// a v11+ stream with its header
+	idDict			header;
+	idStr			firstMap;
+	idStr			firstEntityFilter;
+	bool			summarized = false;	// a clean stop wrote the trailer
+	idDict			summary;
+};
+
+static bool DemoReadRenderSessionInfo( const char *path, demoRenderSessionInfo_t &info ) {
+	idDemoFile probe;
+	if ( !probe.OpenForReading( path, false, true ) ) {
+		return false;
+	}
+	int token = DS_FINISHED;
+	if ( probe.ReadInt( token ) != sizeof( token ) || token != DS_VERSION ||
+		 probe.ReadInt( info.streamVersion ) != sizeof( info.streamVersion ) ) {
+		probe.Close();
+		return true;
+	}
+	int record = 0;
+	if ( info.streamVersion >= OPENQ4_RENDERDEMO_SESSION_VERSION &&
+		 probe.ReadInt( token ) == sizeof( token ) && token == DS_SESSION &&
+		 probe.ReadInt( record ) == sizeof( record ) && record == DSC_HEADER ) {
+		probe.ReadDict( info.header );
+		info.session = probe.IsOpen();
+		// The first segment follows at once: nothing is written while armed.
+		idDict segment;
+		if ( info.session &&
+			 probe.ReadInt( token ) == sizeof( token ) && token == DS_SESSION &&
+			 probe.ReadInt( record ) == sizeof( record ) && record == DSC_SEGMENT ) {
+			probe.ReadDict( segment );
+			if ( probe.IsOpen() ) {
+				info.firstMap = segment.GetString( "map" );
+				info.firstEntityFilter = segment.GetString( "entityFilter" );
+			}
+		}
+	}
+	probe.Close();
+	if ( info.session ) {
+		info.summarized = idDemoFile::ReadTrailer( path, info.summary ) &&
+			info.summary.GetInt( "version" ) >= OPENQ4_RENDERDEMO_SESSION_VERSION;
+	}
+	return true;
+}
+
+// The campaign a game directory holds, as players know it.
+static idStr DemoCampaignName( const char *gameDir ) {
+	if ( !idStr::Icmp( gameDir, "q4xbase" ) ) {
+		return DemoLocalized( "#str_41585" );
+	}
+	if ( gameDir[0] == '\0' || !idStr::Icmp( gameDir, OPENQ4_GAMEDIR ) ) {
+		return DemoLocalized( "#str_41584" );
+	}
+	return DemoSanitizeText( gameDir, 32 );
+}
+
+// "startFrame reason map entityFilter", as StopRecordingRenderDemo writes it.
+static bool DemoParseSegmentSummary( const char *text, idSessionLocal::renderDemoSegment_t &segment ) {
+	idStrList fields;
+	idStr field;
+	for ( const char *c = text; ; c++ ) {
+		if ( *c == ' ' || *c == '\0' ) {
+			if ( !field.IsEmpty() ) {
+				fields.Append( field );
+				field.Clear();
+			}
+			if ( *c == '\0' ) {
+				break;
+			}
+		} else {
+			field.Append( *c );
+		}
+	}
+	if ( fields.Num() < 3 || !fields[0].IsNumeric() ) {
+		return false;
+	}
+	segment.startFrame = atoi( fields[0].c_str() );
+	segment.reason = fields[1];
+	segment.map = fields[2];
+	segment.entityFilter.Clear();
+	if ( fields.Num() > 3 && fields[3] != "-" ) {
+		segment.entityFilter = fields[3];
+	}
+	return segment.startFrame >= 0;
 }
 
 static bool DemoEntryMatchesFilter( const demoLibraryEntry_t &entry, const idStr &filter ) {
@@ -305,6 +444,53 @@ static void DemoProbeEntry( demoLibraryEntry_t &entry ) {
 			entry.capabilities =
 				DEMO_CAP_PLAY | DEMO_CAP_PAUSE | DEMO_CAP_RATE |
 				DEMO_CAP_SEEK | DEMO_CAP_STEP;
+
+			demoRenderSessionInfo_t info;
+			if ( streamVersion >= OPENQ4_RENDERDEMO_SESSION_VERSION &&
+				 DemoReadRenderSessionInfo( entry.path.c_str(), info ) && info.session ) {
+				const char *recordedGame = info.header.GetString( "game", "" );
+				const idStr campaign = DemoCampaignName( recordedGame );
+				if ( !idStr::Icmp( info.header.GetString( "mode" ), "singleplayer" ) ) {
+					entry.format = DemoLocalized( "#str_41576" );
+				}
+				entry.gameType = info.header.GetString( "mode" );
+				if ( !info.firstMap.IsEmpty() ) {
+					entry.mapName = DemoSanitizeText( Session_LevelDisplayName( info.firstMap, info.firstEntityFilter ) );
+				}
+				const int levels = info.summarized ? info.summary.GetInt( "segments" ) : 0;
+				if ( info.summarized ) {
+					const int frames = info.summary.GetInt( "frames" );
+					entry.durationMS = frames > 0
+						? Session_RenderDemoFramesToMS( frames - 1, info.summary.GetInt( "userCmdHz" ) )
+						: -1;
+					entry.cleanEnd = true;
+				}
+				idStr recordingPath = sessLocal.renderDemoRecordPath;
+				recordingPath.BackSlashesToSlashes();
+				if ( sessLocal.IsRenderDemoRecording() && !recordingPath.Icmp( entry.path ) ) {
+					// The file being written now: never offer it half-written.
+					entry.playable = false;
+					entry.compatible = false;
+					entry.capabilities = 0;
+					entry.status = DemoLocalized( "#str_41581" );
+					entry.details = entry.status;
+				} else if ( recordedGame[0] != '\0' && idStr::Icmp( recordedGame, fileSystem->GetActiveGameDir() ) ) {
+					// Its levels and assets belong to another campaign.
+					entry.playable = false;
+					entry.compatible = false;
+					entry.capabilities = 0;
+					entry.status = DemoLocalized( "#str_41577" );
+					entry.details = va( DemoLocalized( "#str_41578" ), campaign.c_str() );
+				} else if ( !info.summarized ) {
+					// Interrupted: every complete frame before the cut still plays.
+					entry.status = DemoLocalized( "#str_41579" );
+					entry.details = DemoLocalized( "#str_41580" );
+				} else {
+					entry.details = levels > 0
+						? va( "%s / %s", campaign.c_str(), va( DemoLocalized( "#str_41582" ), levels ) )
+						: campaign;
+				}
+			}
 		} else {
 			entry.type = DEMO_LIBRARY_RENDER;
 			entry.format =
@@ -351,14 +537,35 @@ static void DemoProbeEntry( demoLibraryEntry_t &entry ) {
 		}
 	}
 
+	// Never offer to delete the file a recording is writing.
+	idStr activeRecording = sessLocal.renderDemoRecordPath;
+	activeRecording.BackSlashesToSlashes();
+	const bool beingRecorded = sessLocal.IsRenderDemoRecording() && !activeRecording.IsEmpty() &&
+		!activeRecording.Icmp( entry.path );
 	if ( DemoEntryCanDelete( entry.path ) ) {
-		entry.capabilities |= DEMO_CAP_DELETE;
+		if ( !beingRecorded ) {
+			entry.capabilities |= DEMO_CAP_DELETE;
+		}
 	} else if ( !entry.details.IsEmpty() ) {
 		entry.details += "\n";
 		entry.details += DemoLocalized( "#str_41554" );
 	}
 }
 
+// With no argument, cycle off, killer, action; the playback deck does the same.
+static void Session_CycleDemoAutoTrack() {
+	idCVar *autoTrack = cvarSystem->Find( "demo_autoTrack" );
+	if ( !idAsyncNetwork::multiViewDemo.IsPlaying() || autoTrack == NULL ) {
+		return;
+	}
+	idCmdArgs args;
+	args.AppendArg( "mvdAutoTrack" );
+	static const char * const modes[] = { "off", "killer", "action" };
+	args.AppendArg( modes[ ( idMath::ClampInt( 0, 2, autoTrack->GetInteger() ) + 1 ) % 3 ] );
+	idMultiViewDemo::AutoTrack_f( args );
+}
+
+#ifndef ID_DEDICATED
 static void Session_DemoMenu_f( const idCmdArgs &args ) {
 	sessLocal.OpenDemoMenu( !sessLocal.IsDemoPlaybackActive() );
 }
@@ -401,7 +608,9 @@ static void Session_DemoStep_f( const idCmdArgs &args ) {
 
 static void Session_DemoFollow_f( const idCmdArgs &args ) {
 	if ( idAsyncNetwork::multiViewDemo.IsPlaying() ) {
-		idAsyncNetwork::multiViewDemo.FollowNext();
+		// demoFollow [next|prev|free|<slot>|<name>]; no argument keeps the
+		// historical "follow the next player".
+		idMultiViewDemo::Follow_f( args );
 	}
 }
 
@@ -411,10 +620,106 @@ static void Session_DemoFreeRoam_f( const idCmdArgs &args ) {
 	}
 }
 
+static void Session_DemoMarker_f( const idCmdArgs &args ) {
+	if ( idAsyncNetwork::multiViewDemo.IsPlaying() ) {
+		idMultiViewDemo::Marker_f( args );
+	} else if ( sessLocal.readDemo != NULL ) {
+		// A campaign demo's markers are the starts of its levels.
+		const char *direction = args.Argc() > 1 ? args.Argv( 1 ) : "next";
+		if ( idStr::Icmp( direction, "next" ) && idStr::Icmp( direction, "prev" ) ) {
+			common->Printf( "usage: demoMarker next|prev\n" );
+			return;
+		}
+		if ( !sessLocal.SeekRenderDemoSegment( !idStr::Icmp( direction, "next" ) ? 1 : -1 ) ) {
+			common->Printf( "demoMarker: no %s level in this demo\n", direction );
+		}
+	}
+}
+
+static void Session_DemoRecordStatus_f( const idCmdArgs &args ) {
+	sessLocal.PrintRenderDemoRecordStatus();
+}
+
+static void Session_DemoAutoTrack_f( const idCmdArgs &args ) {
+	if ( args.Argc() > 1 ) {
+		idMultiViewDemo::AutoTrack_f( args );
+	} else {
+		Session_CycleDemoAutoTrack();
+	}
+}
+
 static void Session_DemoStop_f( const idCmdArgs &args ) {
 	sessLocal.StopDemoPlayback();
 }
 
+static void Session_OpenQ4DemoLibrary_f( const idCmdArgs &args ) {
+	idUserInterface *gui = session->GetActiveGUI();
+	if ( gui == NULL || gui != sessLocal.guiDemoMenu || !sessLocal.demoBrowserMode ||
+		sessLocal.guiDemoList == NULL ) {
+		common->Printf( "openq4_demoLibrary requires the active demo library\n" );
+		return;
+	}
+	const int selected = sessLocal.guiDemoList->GetSelection( NULL, 0 );
+	if ( args.Argc() == 2 && !idStr::Icmp( args.Argv( 1 ), "report" ) ) {
+		const int rows = Min( sessLocal.demoLibrary.Num(), 256 );
+		common->Printf( "DEMO_LIBRARY count=%d visible=%d selected=%d canPlay=%d truncated=%d\n",
+			sessLocal.demoLibrary.Num(), gui->State().GetInt( "demo_count" ), selected,
+			gui->State().GetBool( "demo_canPlay" ), rows < sessLocal.demoLibrary.Num() );
+		for ( int i = 0; i < rows; ++i ) {
+			const demoLibraryEntry_t &entry = sessLocal.demoLibrary[i];
+			const idStr path = DemoSanitizeText( entry.path, MAX_OSPATH );
+			common->Printf( "DEMO_LIBRARY_ENTRY index=%d type=%d playable=%d capabilities=%d path=%s\n",
+				i, static_cast<int>( entry.type ), entry.playable, entry.capabilities, path.c_str() );
+		}
+		return;
+	}
+	if ( args.Argc() == 2 && !idStr::Icmp( args.Argv( 1 ), "play" ) ) {
+		if ( selected < 0 || selected >= sessLocal.demoLibrary.Num() ||
+			( sessLocal.demoLibrary[selected].capabilities & DEMO_CAP_PLAY ) == 0 ) {
+			common->Printf( "openq4_demoLibrary play requires a playable selected recording\n" );
+			return;
+		}
+		// Invoke the same engine action as the library's Play button, without
+		// generating keyboard or mouse events for an automated runtime check.
+		sessLocal.HandleDemoMenuCommand( "demoPlay" );
+		return;
+	}
+	common->Printf( "usage: openq4_demoLibrary report | play\n" );
+}
+#endif
+
+}
+
+bool Session_DemoEntryMatchesFilter( const demoLibraryEntry_t &entry, const char *filter ) {
+	return DemoEntryMatchesFilter( entry, filter != NULL ? filter : DEMO_FILTER_ALL );
+}
+
+// The row caps its columns as the legacy browser's list does; the detail
+// lines keep the format's player-facing revision, the status and the first
+// line of the details.
+void Session_DemoEntryText( const demoLibraryEntry_t &entry, sessionDemoText_t &out ) {
+	out.name = DemoEllipsizeText( entry.displayName, 28 );
+	out.map = DemoEllipsizeText( entry.mapName.IsEmpty() ? "-" : entry.mapName.c_str(), 18 );
+	if ( entry.timestamp > 0 ) {
+		out.date = DemoSanitizeText( Sys_TimeStampToStr( entry.timestamp ), 32 );
+		out.date.CapLength( 10 );
+	} else {
+		out.date = "-";
+	}
+	out.length = DemoFormatTime( entry.durationMS );
+	idStr kind = entry.format;
+	const int separator = kind.Find( " / " );
+	if ( separator >= 0 ) {
+		kind.CapLength( separator );
+	}
+	out.kind = DemoEllipsizeText( kind, 28 );
+	out.status = DemoEllipsizeText( entry.status, 28 );
+	idStr detail = entry.details;
+	const int newline = detail.Find( '\n' );
+	if ( newline >= 0 ) {
+		detail.CapLength( newline );
+	}
+	out.detail = DemoEllipsizeText( detail, 28 );
 }
 
 /*
@@ -449,14 +754,18 @@ void idSessionLocal::InitDemoSystem() {
 #endif
 
 	cmdSystem->AddCommand( "demoMenu", Session_DemoMenu_f, CMD_FL_SYSTEM, "opens the demo library or playback controls" );
+	cmdSystem->AddCommand( "openq4_demoLibrary", Session_OpenQ4DemoLibrary_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "reports the active demo library or invokes its selected Play action for runtime validation" );
 	cmdSystem->AddCommand( "demoPause", Session_DemoPause_f, CMD_FL_SYSTEM, "toggles unified demo playback pause" );
 	cmdSystem->AddCommand( "demoSpeed", Session_DemoSpeed_f, CMD_FL_SYSTEM, "sets unified demo playback speed" );
 	cmdSystem->AddCommand( "demoSeek", Session_DemoSeek_f, CMD_FL_SYSTEM, "seeks to a unified demo time in seconds" );
 	cmdSystem->AddCommand( "demoSkip", Session_DemoSkip_f, CMD_FL_SYSTEM, "moves relative to the current demo time in seconds" );
 	cmdSystem->AddCommand( "demoStep", Session_DemoStep_f, CMD_FL_SYSTEM, "steps a paused demo by one frame" );
-	cmdSystem->AddCommand( "demoFollow", Session_DemoFollow_f, CMD_FL_SYSTEM, "follows the next MVD player" );
+	cmdSystem->AddCommand( "demoFollow", Session_DemoFollow_f, CMD_FL_SYSTEM, "follows an MVD player: demoFollow [next|prev|free|<slot>|<name>]" );
 	cmdSystem->AddCommand( "demoFreeRoam", Session_DemoFreeRoam_f, CMD_FL_SYSTEM, "enters MVD free-roam mode" );
+	cmdSystem->AddCommand( "demoMarker", Session_DemoMarker_f, CMD_FL_SYSTEM, "seeks to an MVD marker: demoMarker next|prev [kind]" );
+	cmdSystem->AddCommand( "demoAutoTrack", Session_DemoAutoTrack_f, CMD_FL_SYSTEM, "sets or cycles MVD auto-tracking: demoAutoTrack [off|killer|action] [any|marine|strogg]" );
 	cmdSystem->AddCommand( "demoStop", Session_DemoStop_f, CMD_FL_SYSTEM, "stops unified demo playback" );
+	cmdSystem->AddCommand( "demoRecordStatus", Session_DemoRecordStatus_f, CMD_FL_SYSTEM, "reports the render-demo recording: its state, file, frames and levels" );
 #endif
 }
 
@@ -481,6 +790,21 @@ idSessionLocal::RefreshDemoLibrary
 ================
 */
 void idSessionLocal::RefreshDemoLibrary() {
+	ScanDemoLibrary();
+	if ( guiDemoList == NULL || guiDemoMenu == NULL ) {
+		return;
+	}
+	RefreshDemoLibraryList();
+}
+
+/*
+================
+idSessionLocal::ScanDemoLibrary
+
+Every recording under demos/, probed, newest first.
+================
+*/
+void idSessionLocal::ScanDemoLibrary() {
 	idStrList paths;
 	DemoCollectExtension( paths, ".mvd" );
 	DemoCollectExtension( paths, ".demo" );
@@ -507,11 +831,16 @@ void idSessionLocal::RefreshDemoLibrary() {
 		}
 		demoLibrary.Insert( entry, insertAt );
 	}
+}
 
-	if ( guiDemoList == NULL || guiDemoMenu == NULL ) {
-		return;
-	}
+/*
+================
+idSessionLocal::RefreshDemoLibraryList
 
+The legacy browser's list, from the scanned library.
+================
+*/
+void idSessionLocal::RefreshDemoLibraryList() {
 	idListGUILocal *list = static_cast<idListGUILocal *>( guiDemoList );
 	list->SetStateChanges( false );
 	list->Clear();
@@ -523,21 +852,36 @@ void idSessionLocal::RefreshDemoLibrary() {
 		if ( !DemoEntryMatchesFilter( entry, demoLibraryFilter ) ) {
 			continue;
 		}
-		idStr row = DemoSanitizeText( entry.displayName );
+		idStr row = DemoEllipsizeText( entry.displayName, 28 );
 		row += "\t";
-		row += DemoSanitizeText( entry.format );
+		// The table needs the recording format, not the internal protocol tail.
+		// Showing only the former makes MVD versions legible in their narrow
+		// legacy-style column; the selected-demo detail retains full metadata.
+		idStr listFormat = entry.format;
+		const int protocolSeparator = listFormat.Find( " / " );
+		if ( protocolSeparator >= 0 ) {
+			listFormat.CapLength( protocolSeparator );
+		}
+		row += DemoEllipsizeText( listFormat, 11 );
 		row += "\t";
-		row += DemoSanitizeText( entry.mapName.IsEmpty() ? "-" : entry.mapName.c_str() );
+		row += DemoEllipsizeText( entry.mapName.IsEmpty() ? "-" : entry.mapName.c_str(), 18 );
 		row += "\t";
 		if ( entry.timestamp > 0 ) {
-			row += DemoSanitizeText( Sys_TimeStampToStr( entry.timestamp ), 32 );
+			idStr listDate = DemoSanitizeText( Sys_TimeStampToStr( entry.timestamp ), 32 );
+			listDate.CapLength( 10 );
+			row += listDate;
 		} else {
 			row += "-";
 		}
 		row += "\t";
 		row += DemoFormatTime( entry.durationMS );
 		row += "\t";
-		row += DemoSanitizeText( entry.status );
+		// Treat the compact table state as a readable badge.  Long diagnostic
+		// reasons remain intact in the selected row instead of becoming a noisy
+		// sequence of ellipses in every browser line.
+		const char *statusKey = entry.playable ? "#str_41546" :
+			( entry.type == DEMO_LIBRARY_INCOMPLETE ? "#str_41570" : "#str_41569" );
+		row += DemoEllipsizeText( DemoLocalized( statusKey ), 13 );
 		list->Add( i, row );
 		if ( !entry.path.Icmp( demoSelectedPath ) ) {
 			selectedRow = visibleRows;
@@ -592,10 +936,15 @@ void idSessionLocal::UpdateDemoMenuGui() {
 		seeking = idAsyncNetwork::multiViewDemo.IsSeeking();
 		title = idAsyncNetwork::multiViewDemo.GetPlaybackName();
 		title.StripPath();
-		view = idAsyncNetwork::multiViewDemo.GetFollowClient() >= 0
-			? va( "%s %d", DemoLocalized( "#str_41560" ),
-				idAsyncNetwork::multiViewDemo.GetFollowClient() + 1 )
-			: DemoLocalized( "#str_41539" );
+		const int followClient = idAsyncNetwork::multiViewDemo.GetFollowClient();
+		idStr followName;
+		if ( followClient < 0 ) {
+			view = DemoLocalized( "#str_41539" );
+		} else if ( idAsyncNetwork::multiViewDemo.CopyFollowName( followClient, followName ) ) {
+			view = va( "%s %s", DemoLocalized( "#str_41560" ), followName.c_str() );
+		} else {
+			view = va( "%s %d", DemoLocalized( "#str_41560" ), followClient + 1 );
+		}
 	} else if ( renderPlaying ) {
 		demoActiveType = DEMO_LIBRARY_RENDER;
 		capabilities = DEMO_CAP_PLAY;
@@ -611,7 +960,9 @@ void idSessionLocal::UpdateDemoMenuGui() {
 		seeking = renderDemoSeeking;
 		title = activeRenderDemoName;
 		title.StripPath();
-		view = DemoLocalized( "#str_41551" );
+		// A campaign demo names the level playing; others keep the camera note.
+		view = renderDemoFrameClock && renderDemoPlaySegment >= 0
+			? RenderDemoSegmentLabel() : idStr( DemoLocalized( "#str_41551" ) );
 	} else if ( commandPlaying ) {
 		demoActiveType = DEMO_LIBRARY_COMMAND;
 		capabilities = DEMO_CAP_PLAY;
@@ -629,6 +980,7 @@ void idSessionLocal::UpdateDemoMenuGui() {
 		guiDemoMenu->SetStateBool( "demo_canStep", false );
 		guiDemoMenu->SetStateBool( "demo_canFreeRoam", false );
 		guiDemoMenu->SetStateBool( "demo_canFollow", false );
+		guiDemoMenu->SetStateBool( "demo_canMarker", false );
 	}
 
 	if ( seeking ) {
@@ -658,6 +1010,15 @@ void idSessionLocal::UpdateDemoMenuGui() {
 		guiDemoMenu->SetStateBool( "demo_canStep", ( capabilities & DEMO_CAP_STEP ) != 0 );
 		guiDemoMenu->SetStateBool( "demo_canFreeRoam", ( capabilities & DEMO_CAP_FREE_ROAM ) != 0 );
 		guiDemoMenu->SetStateBool( "demo_canFollow", ( capabilities & DEMO_CAP_FOLLOW ) != 0 );
+		// A campaign demo's markers are its level starts.
+		guiDemoMenu->SetStateBool( "demo_canMarker",
+			( mvdPlaying && idAsyncNetwork::multiViewDemo.GetMarkerCount() > 0 ) ||
+			( renderPlaying && renderDemoFrameClock && renderDemoPlaySegments.Num() > 1 &&
+			  ( capabilities & DEMO_CAP_SEEK ) != 0 ) );
+		const idCVar *autoTrack = cvarSystem->Find( "demo_autoTrack" );
+		static const char * const autoTrackLabels[] = { "#str_41573", "#str_41574", "#str_41575" };
+		guiDemoMenu->SetStateString( "demo_autoTrackLabel", DemoLocalized( autoTrackLabels[
+			autoTrack != NULL ? idMath::ClampInt( 0, 2, autoTrack->GetInteger() ) : 0 ] ) );
 	}
 
 	if ( demoBrowserMode && guiDemoList != NULL ) {
@@ -666,21 +1027,30 @@ void idSessionLocal::UpdateDemoMenuGui() {
 			selection >= 0 && selection < demoLibrary.Num() ? &demoLibrary[selection] : NULL;
 		if ( entry != NULL ) {
 			demoSelectedPath = entry->path;
-			idStr details = entry->details;
+			idStr details = DemoEllipsizeText( entry->details, 36 );
+			idStr metadata = DemoEllipsizeText( entry->mapName, 20 );
 			if ( !entry->format.IsEmpty() ) {
-				details += "\n";
-				details += DemoSanitizeText( entry->format );
+				// The table needs the full format/protocol pair, while this concise
+				// summary only needs the player-facing format revision.  Keeping the
+				// first segment avoids ending a narrow detail line on a dangling slash.
+				idStr displayFormat = entry->format;
+				const int protocolSeparator = displayFormat.Find( " / " );
+				if ( protocolSeparator >= 0 ) {
+					displayFormat.CapLength( protocolSeparator );
+				}
+				if ( !metadata.IsEmpty() ) {
+					metadata += " / ";
+				}
+				metadata += DemoEllipsizeText( displayFormat, 12 );
 			}
-			if ( entry->timestamp > 0 ) {
-				details += "\n";
-				details += Sys_TimeStampToStr( entry->timestamp );
+			if ( !details.IsEmpty() && !metadata.IsEmpty() ) {
+				details += " / ";
 			}
-			details += "\n";
-			details += DemoFormatSize( entry->sizeBytes );
-			guiDemoMenu->SetStateString( "demo_selectedName", DemoSanitizeText( entry->displayName ) );
+			details += metadata;
+			guiDemoMenu->SetStateString( "demo_selectedName", DemoEllipsizeText( entry->displayName, 43 ) );
 			guiDemoMenu->SetStateString( "demo_selectedMap", DemoSanitizeText( entry->mapName ) );
 			guiDemoMenu->SetStateString( "demo_status", DemoSanitizeText( entry->status ) );
-			guiDemoMenu->SetStateString( "demo_details", DemoSanitizeText( details, 512 ) );
+			guiDemoMenu->SetStateString( "demo_details", DemoEllipsizeText( details, 52 ) );
 			guiDemoMenu->SetStateBool( "demo_canPlay", ( entry->capabilities & DEMO_CAP_PLAY ) != 0 );
 			guiDemoMenu->SetStateBool( "demo_canDelete", ( entry->capabilities & DEMO_CAP_DELETE ) != 0 );
 			guiDemoMenu->SetStateBool( "demo_canPause", ( entry->capabilities & DEMO_CAP_PAUSE ) != 0 );
@@ -702,6 +1072,19 @@ void idSessionLocal::UpdateDemoMenuGui() {
 	guiDemoMenu->SetStateBool( "demo_browserMode", demoBrowserMode );
 	guiDemoMenu->SetStateBool( "demo_interactive", guiActive == guiDemoMenu );
 	guiDemoMenu->SetStateString( "demo_filter", demoLibraryFilter.c_str() );
+	// A GUI expression compares numbers only: against a string every filter
+	// read as the chosen one. The tags' rails follow this index.
+	int filterIndex = 0;
+	if ( !demoLibraryFilter.Icmp( DEMO_FILTER_MVD ) ) {
+		filterIndex = 1;
+	} else if ( !demoLibraryFilter.Icmp( DEMO_FILTER_RENDER ) ) {
+		filterIndex = 2;
+	} else if ( !demoLibraryFilter.Icmp( DEMO_FILTER_LEGACY ) ) {
+		filterIndex = 3;
+	} else if ( !demoLibraryFilter.Icmp( DEMO_FILTER_INCOMPLETE ) ) {
+		filterIndex = 4;
+	}
+	guiDemoMenu->SetStateInt( "demo_filterIndex", filterIndex );
 	guiDemoMenu->StateChanged( common->GetPresentationTime() );
 }
 
@@ -738,6 +1121,9 @@ void idSessionLocal::OpenDemoMenu( bool browser ) {
 	if ( demoBrowserMode ) {
 		RefreshDemoLibrary();
 	}
+	// Set the mode state before SetGUI activates the menu.  The browser's
+	// onActivate script selects its entrance treatment from demo_browserMode.
+	UpdateDemoMenuGui();
 	SetGUI( guiDemoMenu, NULL );
 	UpdateDemoMenuGui();
 #endif
@@ -906,6 +1292,9 @@ void idSessionLocal::ProcessRenderDemoSeekBudget() {
 			}
 		}
 		if ( restoreDemoMenu && guiDemoMenu != NULL && guiActive != guiDemoMenu ) {
+			// Keep the activation script from reading the previous browser/playback
+			// mode while a render-demo seek restores the overlay.
+			UpdateDemoMenuGui();
 			SetGUI( guiDemoMenu, NULL );
 		}
 
@@ -1055,6 +1444,69 @@ void idSessionLocal::StopDemoPlayback() {
 
 /*
 ================
+idSessionLocal::PlayDemoLibraryEntry
+
+Plays a library entry, as the browser's Play does. False when it cannot
+play or a render or command demo could not start; the menus are then left
+to the caller.
+================
+*/
+bool idSessionLocal::PlayDemoLibraryEntry( int index ) {
+	if ( index < 0 || index >= demoLibrary.Num() || ( demoLibrary[index].capabilities & DEMO_CAP_PLAY ) == 0 ) {
+		return false;
+	}
+	const demoLibraryEntry_t entry = demoLibrary[index];
+	guiActive = NULL;
+	demoReturnGui = NULL;
+	demoBrowserMode = false;
+	demoOverlayVisible = true;
+	if ( entry.type == DEMO_LIBRARY_MVD ) {
+		idCmdArgs play;
+		play.AppendArg( "playMVD" );
+		play.AppendArg( entry.path.c_str() );
+		idMultiViewDemo::Play_f( play );
+	} else if ( entry.type == DEMO_LIBRARY_RENDER ) {
+		StartPlayingRenderDemo( entry.path );
+		return readDemo != NULL;
+	} else if ( entry.type == DEMO_LIBRARY_COMMAND ) {
+		idStr commandName = entry.path;
+		if ( idStr::Icmpn( commandName.c_str(), "demos/", 6 ) == 0 ) {
+			commandName = commandName.c_str() + 6;
+		}
+		StartPlayingCmdDemo( commandName.c_str() );
+		return cmdDemoFile != NULL;
+	}
+	return true;
+}
+
+/*
+================
+idSessionLocal::DeleteDemoLibraryFile
+
+Deletes a library entry's recording, which must lie in the save path's
+demo directory. The caller asked first and rescans after.
+================
+*/
+bool idSessionLocal::DeleteDemoLibraryFile( const demoLibraryEntry_t &entry ) {
+	if ( ( entry.capabilities & DEMO_CAP_DELETE ) == 0 || !DemoPathIsSafe( entry.path ) ) {
+		return false;
+	}
+	const idStr saveDemoRoot = fileSystem->RelativePathToOSPath( "demos", "fs_savepath" );
+	const idStr explicitPath = fileSystem->RelativePathToOSPath( entry.path.c_str(), "fs_savepath" );
+	if ( explicitPath.Icmpn( saveDemoRoot.c_str(), saveDemoRoot.Length() ) != 0 ||
+		 !DemoEntryCanDelete( entry.path ) ) {
+		common->Warning( "Refusing to delete demo outside the save-path demo directory" );
+		return false;
+	}
+	if ( fileSystem->RemoveExplicitFile( explicitPath.c_str() ) != 0 ) {
+		common->Warning( "Could not delete demo '%s'", entry.path.c_str() );
+		return false;
+	}
+	return true;
+}
+
+/*
+================
 idSessionLocal::HandleDemoMenuCommand
 ================
 */
@@ -1064,7 +1516,29 @@ bool idSessionLocal::HandleDemoMenuCommand( const char *menuCommand ) {
 	if ( args.Argc() <= 0 ) {
 		return false;
 	}
-	const char *cmd = args.Argv( 0 );
+
+	bool handled = false;
+	for ( int icmd = 0; icmd < args.Argc(); ) {
+		const char *cmd = args.Argv( icmd++ );
+		if ( !idStr::Icmp( cmd, ";" ) ) {
+			continue;
+		}
+		if ( !idStr::Icmp( cmd, "play" ) ) {
+			if ( icmd < args.Argc() ) {
+				idStr sound = args.Argv( icmd++ );
+				int channel = 1;
+				if ( sound.Length() == 1 && idStr::IsNumeric( sound.c_str() ) &&
+					 icmd < args.Argc() ) {
+					channel = atoi( sound.c_str() );
+					sound = args.Argv( icmd++ );
+				}
+				if ( menuSoundWorld != NULL ) {
+					menuSoundWorld->PlayShaderDirectly( sound, channel );
+				}
+			}
+			handled = true;
+			continue;
+		}
 
 	if ( !idStr::Icmp( cmd, "demoOpen" ) ) {
 		OpenDemoMenu( true );
@@ -1075,7 +1549,7 @@ bool idSessionLocal::HandleDemoMenuCommand( const char *menuCommand ) {
 		return true;
 	}
 	if ( !idStr::Icmp( cmd, "demoFilter" ) ) {
-		const char *filter = args.Argc() > 1 ? args.Argv( 1 ) : DEMO_FILTER_ALL;
+		const char *filter = icmd < args.Argc() ? args.Argv( icmd++ ) : DEMO_FILTER_ALL;
 		if ( idStr::Icmp( filter, DEMO_FILTER_ALL ) &&
 			 idStr::Icmp( filter, DEMO_FILTER_MVD ) &&
 			 idStr::Icmp( filter, DEMO_FILTER_RENDER ) &&
@@ -1104,30 +1578,8 @@ bool idSessionLocal::HandleDemoMenuCommand( const char *menuCommand ) {
 			MessageBox( MSG_OK, entry.details.c_str(), entry.status.c_str(), true );
 			return true;
 		}
-
-		guiActive = NULL;
-		demoReturnGui = NULL;
-		demoBrowserMode = false;
-		demoOverlayVisible = true;
-		if ( entry.type == DEMO_LIBRARY_MVD ) {
-			idCmdArgs play;
-			play.AppendArg( "playMVD" );
-			play.AppendArg( entry.path.c_str() );
-			idMultiViewDemo::Play_f( play );
-		} else if ( entry.type == DEMO_LIBRARY_RENDER ) {
-			StartPlayingRenderDemo( entry.path );
-			if ( readDemo == NULL ) {
-				OpenDemoMenu( true );
-			}
-		} else if ( entry.type == DEMO_LIBRARY_COMMAND ) {
-			idStr commandName = entry.path;
-			if ( idStr::Icmpn( commandName.c_str(), "demos/", 6 ) == 0 ) {
-				commandName = commandName.c_str() + 6;
-			}
-			StartPlayingCmdDemo( commandName.c_str() );
-			if ( cmdDemoFile == NULL ) {
-				OpenDemoMenu( true );
-			}
+		if ( !PlayDemoLibraryEntry( selection ) ) {
+			OpenDemoMenu( true );
 		}
 		return true;
 	}
@@ -1153,16 +1605,7 @@ bool idSessionLocal::HandleDemoMenuCommand( const char *menuCommand ) {
 			return true;
 		}
 
-		const idStr saveDemoRoot = fileSystem->RelativePathToOSPath( "demos", "fs_savepath" );
-		const idStr explicitPath = fileSystem->RelativePathToOSPath( entry.path.c_str(), "fs_savepath" );
-		if ( explicitPath.Icmpn( saveDemoRoot.c_str(), saveDemoRoot.Length() ) != 0 ||
-			 !DemoEntryCanDelete( entry.path ) ) {
-			common->Warning( "Refusing to delete demo outside the save-path demo directory" );
-			return true;
-		}
-		if ( fileSystem->RemoveExplicitFile( explicitPath.c_str() ) != 0 ) {
-			common->Warning( "Could not delete demo '%s'", entry.path.c_str() );
-		}
+		DeleteDemoLibraryFile( entry );
 		demoSelectedPath.Clear();
 		RefreshDemoLibrary();
 		return true;
@@ -1176,8 +1619,8 @@ bool idSessionLocal::HandleDemoMenuCommand( const char *menuCommand ) {
 		return true;
 	}
 	if ( !idStr::Icmp( cmd, "demoSkip" ) ) {
-		if ( args.Argc() > 1 ) {
-			SkipDemoMS( static_cast<int>( atof( args.Argv( 1 ) ) * 1000.0 ) );
+		if ( icmd < args.Argc() ) {
+			SkipDemoMS( static_cast<int>( atof( args.Argv( icmd++ ) ) * 1000.0 ) );
 		}
 		return true;
 	}
@@ -1188,8 +1631,8 @@ bool idSessionLocal::HandleDemoMenuCommand( const char *menuCommand ) {
 		} else if ( readDemo != NULL ) {
 			duration = renderDemoKnownDurationMS;
 		}
-		if ( args.Argc() > 1 ) {
-			SeekDemoMS( static_cast<int>( atof( args.Argv( 1 ) ) * 1000.0 ) );
+		if ( icmd < args.Argc() ) {
+			SeekDemoMS( static_cast<int>( atof( args.Argv( icmd++ ) ) * 1000.0 ) );
 		} else if ( duration > 0 ) {
 			SeekDemoMS( static_cast<int>( demo_uiSeek.GetFloat() * duration ) );
 		}
@@ -1200,8 +1643,8 @@ bool idSessionLocal::HandleDemoMenuCommand( const char *menuCommand ) {
 		return true;
 	}
 	if ( !idStr::Icmp( cmd, "demoSpeed" ) ) {
-		if ( args.Argc() > 1 ) {
-			SetDemoSpeed( static_cast<float>( atof( args.Argv( 1 ) ) ) );
+		if ( icmd < args.Argc() ) {
+			SetDemoSpeed( static_cast<float>( atof( args.Argv( icmd++ ) ) ) );
 		}
 		return true;
 	}
@@ -1211,15 +1654,434 @@ bool idSessionLocal::HandleDemoMenuCommand( const char *menuCommand ) {
 		}
 		return true;
 	}
+	if ( !idStr::Icmp( cmd, "demoFollowPrev" ) ) {
+		if ( idAsyncNetwork::multiViewDemo.IsPlaying() ) {
+			idAsyncNetwork::multiViewDemo.FollowPrev();
+		}
+		return true;
+	}
 	if ( !idStr::Icmp( cmd, "demoFreeRoam" ) ) {
 		if ( idAsyncNetwork::multiViewDemo.IsPlaying() ) {
 			idAsyncNetwork::multiViewDemo.FreeRoam();
 		}
 		return true;
 	}
+	if ( !idStr::Icmp( cmd, "demoMarkerNext" ) || !idStr::Icmp( cmd, "demoMarkerPrev" ) ) {
+		if ( idAsyncNetwork::multiViewDemo.IsPlaying() ) {
+			idAsyncNetwork::multiViewDemo.SeekToMarker( !idStr::Icmp( cmd, "demoMarkerNext" ) ? 1 : -1, 0 );
+			UpdateDemoMenuGui();
+		} else if ( readDemo != NULL ) {
+			SeekRenderDemoSegment( !idStr::Icmp( cmd, "demoMarkerNext" ) ? 1 : -1 );
+			UpdateDemoMenuGui();
+		}
+		return true;
+	}
+	if ( !idStr::Icmp( cmd, "demoAutoTrack" ) ) {
+		Session_CycleDemoAutoTrack();
+		UpdateDemoMenuGui();
+		return true;
+	}
 	if ( !idStr::Icmp( cmd, "demoStop" ) ) {
 		StopDemoPlayback();
 		return true;
 	}
+	}
+	return handled;
+}
+
+/*
+===============================================================================
+
+	Campaign render demos (render demo v11)
+
+	One recording spans a whole campaign session. Each level it reaches is a
+	self-contained segment: a DSC_SEGMENT record, a fresh hash-string table,
+	the complete sound state, the level's world and portal state, and every
+	visible definition again on its first frame. A map change, save load,
+	death reload or restart suspends the recording while the level loads; the
+	next level starts the next segment. Only gameplay draws end frames, so the
+	recording holds no menus, pauses or loading screens, and its timeline counts
+	frames rather than the game clock each level restarts.
+
+===============================================================================
+*/
+
+int Session_RenderDemoFramesToMS( int frames, int userCmdHz ) {
+	if ( frames <= 0 || userCmdHz <= 0 ) {
+		return 0;
+	}
+	const int64 msec = static_cast<int64>( frames ) * USERCMD_PER_DEMO_FRAME * 1000 / userCmdHz;
+	return msec > idMath::INT_MAX ? idMath::INT_MAX : static_cast<int>( msec );
+}
+
+bool Session_RenderDemoContentMatches( const char *path, idStr &reason ) {
+	reason.Clear();
+	demoRenderSessionInfo_t info;
+	if ( path == NULL || !DemoReadRenderSessionInfo( path, info ) || !info.session ) {
+		// Older streams make no claim; their own decoder checks remain.
+		return true;
+	}
+	const char *recordedGame = info.header.GetString( "game", "" );
+	if ( recordedGame[0] == '\0' || !idStr::Icmp( recordedGame, fileSystem->GetActiveGameDir() ) ) {
+		return true;
+	}
+	reason = va( DemoLocalized( "#str_41578" ), DemoCampaignName( recordedGame ).c_str() );
 	return false;
+}
+
+/*
+================
+idSessionLocal::RenderDemoFramesToMS
+================
+*/
+int idSessionLocal::RenderDemoFramesToMS( int frames ) const {
+	return Session_RenderDemoFramesToMS( frames, renderDemoUserCmdHz > 0 ? renderDemoUserCmdHz : common->GetUserCmdHz() );
+}
+
+/*
+================
+idSessionLocal::BeginRenderDemoSegment
+
+Starts the level that is now spawned as the recording's next segment.
+================
+*/
+void idSessionLocal::BeginRenderDemoSegment( const char *reason ) {
+	if ( rw == NULL || sw == NULL ) {
+		return;
+	}
+	// An armed recording's file opens with its first level.
+	if ( renderDemoRecordFile == NULL && !OpenRenderDemoRecordFile() ) {
+		renderDemoRecordState = RENDER_DEMO_RECORD_IDLE;
+		renderDemoRecordPath.Clear();
+		renderDemoNextSegmentReason.Clear();
+		return;
+	}
+	renderDemoSegment_t segment;
+	segment.startFrame = renderDemoRecordFrames;
+	segment.map = mapSpawnData.serverInfo.GetString( "si_map", currentMapName.c_str() );
+	segment.entityFilter = mapSpawnData.serverInfo.GetString( "si_entityFilter", "" );
+	segment.reason = reason != NULL && reason[0] != '\0' ? reason : "level";
+
+	idDict record;
+	record.SetInt( "index", renderDemoRecordSegments.Num() );
+	record.SetInt( "frame", segment.startFrame );
+	record.Set( "map", segment.map );
+	record.Set( "entityFilter", segment.entityFilter );
+	record.Set( "reason", segment.reason );
+	record.SetInt( "skill", cvarSystem->GetCVarInteger( "g_skill" ) );
+	renderDemoRecordFile->WriteInt( DS_SESSION );
+	renderDemoRecordFile->WriteInt( DSC_SEGMENT );
+	renderDemoRecordFile->WriteDict( record );
+	// Nothing in the segment refers to a string written before it, so its
+	// table stays bounded across a long campaign and playback can begin a
+	// segment from scratch.
+	renderDemoRecordFile->ResetHashStrings();
+
+	writeDemo = renderDemoRecordFile;
+	renderDemoRecordState = RENDER_DEMO_RECORD_RECORDING;
+	// the level's complete sound and world state, then every visible
+	// definition again as it is drawn
+	sw->StartWritingDemo( writeDemo );
+	rw->StartWritingDemo( writeDemo );
+	renderDemoRecordFile->WriteInt( DS_SESSION );
+	renderDemoRecordFile->WriteInt( DSC_SEGMENT_READY );
+	renderDemoRecordFile->WriteDict( idDict() );
+
+	renderDemoRecordSegments.Append( segment );
+	renderDemoNextSegmentReason.Clear();
+	common->Printf( "RENDER_DEMO_SEGMENT record index=%d frame=%d reason=%s map=%s filter=%s\n",
+		renderDemoRecordSegments.Num() - 1, segment.startFrame, segment.reason.c_str(),
+		segment.map.c_str(), segment.entityFilter.c_str() );
+}
+
+/*
+================
+idSessionLocal::SuspendRenderDemoRecording
+
+A single-player level is going away; nothing is written until the next one.
+================
+*/
+void idSessionLocal::SuspendRenderDemoRecording() {
+	if ( renderDemoRecordState != RENDER_DEMO_RECORD_RECORDING ) {
+		return;
+	}
+	if ( sw != NULL ) {
+		sw->StopWritingDemo();
+	}
+	if ( rw != NULL ) {
+		rw->StopWritingDemo();
+	}
+	writeDemo = NULL;
+	renderDemoRecordState = RENDER_DEMO_RECORD_SUSPENDED;
+	common->DPrintf( "render demo %s suspended after %d frames\n", renderDemoRecordPath.c_str(), renderDemoRecordFrames );
+}
+
+/*
+================
+idSessionLocal::ContinueRenderDemoAfterMapChange
+
+ExecuteMapChange has spawned a level. A campaign recording that is armed or
+between levels records it as its next segment; anything but single-player
+play ends the recording instead.
+================
+*/
+void idSessionLocal::ContinueRenderDemoAfterMapChange() {
+	if ( renderDemoRecordState != RENDER_DEMO_RECORD_ARMED &&
+		 renderDemoRecordState != RENDER_DEMO_RECORD_SUSPENDED ) {
+		return;
+	}
+	if ( IsMultiplayer() || idAsyncNetwork::multiViewDemo.IsPlaying() || readDemo != NULL || !mapSpawned ) {
+		common->Printf( "Campaign recording ends: %s is not a single-player level.\n",
+			mapSpawnData.serverInfo.GetString( "si_map", "the new map" ) );
+		StopRecordingRenderDemo();
+		return;
+	}
+	BeginRenderDemoSegment( renderDemoNextSegmentReason.c_str() );
+}
+
+/*
+================
+idSessionLocal::PrintRenderDemoRecordStatus
+================
+*/
+void idSessionLocal::PrintRenderDemoRecordStatus() {
+	static const char *const states[] = { "idle", "armed", "recording", "suspended" };
+	const int state = idMath::ClampInt( 0, 3, static_cast<int>( renderDemoRecordState ) );
+	const renderDemoSegment_t *segment = renderDemoRecordSegments.Num() > 0
+		? &renderDemoRecordSegments[renderDemoRecordSegments.Num() - 1] : NULL;
+	common->Printf( "RENDER_DEMO_RECORDING state=%s path=%s frames=%d seconds=%d segments=%d map=%s elapsed=%d\n",
+		states[state], renderDemoRecordPath.IsEmpty() ? "-" : renderDemoRecordPath.c_str(),
+		renderDemoRecordFrames, Session_RenderDemoFramesToMS( renderDemoRecordFrames, common->GetUserCmdHz() ) / 1000,
+		renderDemoRecordSegments.Num(), segment != NULL ? segment->map.c_str() : "-",
+		IsRenderDemoRecording() ? ( Sys_Milliseconds() - renderDemoRecordStartMsec ) / 1000 : 0 );
+}
+
+/*
+================
+idSessionLocal::ResetRenderDemoPlaybackSession
+
+Called as playback opens activeRenderDemoName. A clean campaign demo's
+trailer supplies its duration and level starts before any are reached.
+================
+*/
+void idSessionLocal::ResetRenderDemoPlaybackSession() {
+	CloseRenderDemoLevelLoad();
+	renderDemoFrameClock = false;
+	renderDemoUserCmdHz = 0;
+	renderDemoPlayHeader.Clear();
+	renderDemoPlaySegments.Clear();
+	renderDemoPlaySegment = -1;
+	renderDemoPlayMap.Clear();
+
+	idDict summary;
+	if ( !idDemoFile::ReadTrailer( activeRenderDemoName.c_str(), summary ) ||
+		 summary.GetInt( "version" ) < OPENQ4_RENDERDEMO_SESSION_VERSION ) {
+		return;
+	}
+	renderDemoUserCmdHz = idMath::ClampInt( 0, 1000, summary.GetInt( "userCmdHz" ) );
+	renderDemoPlayHeader.SetInt( "frames", Max( 0, summary.GetInt( "frames" ) ) );
+	const int count = idMath::ClampInt( 0, 4096, summary.GetInt( "segments" ) );
+	for ( int i = 0; i < count; i++ ) {
+		renderDemoSegment_t segment;
+		if ( !DemoParseSegmentSummary( summary.GetString( va( "segment%d", i ) ), segment ) ) {
+			// A malformed list is only a convenience lost; segments are still met.
+			renderDemoPlaySegments.Clear();
+			break;
+		}
+		if ( renderDemoPlaySegments.Num() > 0 &&
+			 segment.startFrame < renderDemoPlaySegments[renderDemoPlaySegments.Num() - 1].startFrame ) {
+			renderDemoPlaySegments.Clear();
+			break;
+		}
+		renderDemoPlaySegments.Append( segment );
+	}
+}
+
+/*
+================
+idSessionLocal::CloseRenderDemoLevelLoad
+
+Ends the media load a segment's first records opened, purging what the
+previous level used and this one does not.
+================
+*/
+void idSessionLocal::CloseRenderDemoLevelLoad() {
+	if ( !renderDemoLevelLoadOpen ) {
+		return;
+	}
+	renderDemoLevelLoadOpen = false;
+	renderSystem->EndLevelLoad();
+	soundSystem->EndLevelLoad( va( "maps/%s", renderDemoPlayMap.c_str() ) );
+	declManager->EndLevelLoad();
+	if ( bse ) {
+		bse->EndLevelLoad();
+	}
+}
+
+/*
+================
+idSessionLocal::ProcessRenderDemoSessionRecord
+
+Reads the DS_SESSION record that follows its token. False when malformed;
+finished is set at a clean end, after which nothing is read.
+================
+*/
+bool idSessionLocal::ProcessRenderDemoSessionRecord( bool &finished ) {
+	finished = false;
+	int record = 0;
+	if ( readDemo->ReadInt( record ) != sizeof( record ) ) {
+		return false;
+	}
+	idDict dict;
+	readDemo->ReadDict( dict );
+	if ( !readDemo->IsOpen() ) {
+		return false;
+	}
+
+	switch ( record ) {
+	case DSC_HEADER: {
+		// Trailer values already read stay; the header adds the rest.
+		renderDemoPlayHeader.Copy( dict );
+		const int userCmdHz = dict.GetInt( "userCmdHz" );
+		if ( userCmdHz < 10 || userCmdHz > 1000 ) {
+			return false;
+		}
+		renderDemoUserCmdHz = userCmdHz;
+		renderDemoFrameClock = true;
+		return true;
+	}
+	case DSC_SEGMENT: {
+		readDemo->ResetHashStrings();
+		renderDemoSegment_t segment;
+		segment.startFrame = numDemoFrames;
+		segment.map = dict.GetString( "map" );
+		segment.entityFilter = dict.GetString( "entityFilter" );
+		segment.reason = dict.GetString( "reason", "level" );
+		if ( segment.map.IsEmpty() || dict.GetInt( "frame", "-1" ) != numDemoFrames ) {
+			// Its frame count must agree with the frames played: a segment
+			// out of step means the stream lost or gained frames.
+			return false;
+		}
+		int index = -1;
+		for ( int i = 0; i < renderDemoPlaySegments.Num(); i++ ) {
+			if ( renderDemoPlaySegments[i].startFrame == segment.startFrame ) {
+				index = i;
+				break;
+			}
+		}
+		if ( index < 0 ) {
+			index = 0;
+			while ( index < renderDemoPlaySegments.Num() &&
+					renderDemoPlaySegments[index].startFrame < segment.startFrame ) {
+				index++;
+			}
+			renderDemoPlaySegments.Insert( segment, index );
+		}
+		renderDemoPlaySegment = index;
+
+		// A previous segment that never reached its ready record still ends its load.
+		CloseRenderDemoLevelLoad();
+		const bool newLevel = segment.map.Icmp( renderDemoPlayMap ) != 0;
+		renderDemoPlayMap = segment.map;
+		if ( newLevel ) {
+			if ( numDemoFrames > 0 && !renderDemoSeeking && !timeDemo && !aviCaptureMode && guiLoading != NULL ) {
+				// The level loads in one indivisible step: say which one first.
+				guiLoading->SetStateString( "demo", Session_LevelDisplayName( segment.map, segment.entityFilter ).c_str() );
+				guiLoading->StateChanged( common->GetPresentationTime() );
+				openq4::NativeInputBeforeSessionChange();
+				insideExecuteMapChange = true;
+				UpdateScreen();
+				openq4::NativeInputBeforeSessionChange();
+				insideExecuteMapChange = false;
+				guiLoading->SetStateString( "demo", "" );
+			}
+			// The outgoing level's sounds stop before their shaders can be purged;
+			// the segment's sound state restarts this level's.
+			sw->StopAllSounds();
+			declManager->BeginLevelLoad();
+			renderSystem->BeginLevelLoad();
+			soundSystem->BeginLevelLoad();
+			if ( bse ) {
+				bse->BeginLevelLoad();
+			}
+			renderDemoLevelLoadOpen = true;
+		}
+		common->Printf( "RENDER_DEMO_SEGMENT play index=%d frame=%d reason=%s map=%s\n",
+			index, segment.startFrame, segment.reason.c_str(), segment.map.c_str() );
+		return true;
+	}
+	case DSC_SEGMENT_READY:
+		CloseRenderDemoLevelLoad();
+		return true;
+	case DSC_END:
+		CloseRenderDemoLevelLoad();
+		finished = true;
+		return true;
+	default:
+		// A later minor revision's record: its dictionary was read, so skip it.
+		common->DPrintf( "Render demo '%s': skipped session record %d\n", activeRenderDemoName.c_str(), record );
+		return true;
+	}
+}
+
+/*
+================
+idSessionLocal::SeekRenderDemoSegment
+
+Moves to the start of the next level, or back to the start of this one (the
+previous one when already near its start), as a media player's chapters do.
+================
+*/
+bool idSessionLocal::SeekRenderDemoSegment( int direction ) {
+	if ( readDemo == NULL || !renderDemoFrameClock || renderDemoPlaySegments.Num() == 0 ||
+		 timeDemo || aviCaptureMode ) {
+		return false;
+	}
+	const int reference = renderDemoSeeking ? renderDemoSeekTargetMS : DemoCurrentRenderTimeMS( *this );
+	int target = -1;
+	if ( direction > 0 ) {
+		for ( int i = 0; i < renderDemoPlaySegments.Num(); i++ ) {
+			const int start = RenderDemoFramesToMS( renderDemoPlaySegments[i].startFrame );
+			if ( start > reference ) {
+				target = start;
+				break;
+			}
+		}
+	} else {
+		static const int RESTART_LEVEL_WINDOW_MS = 2000;
+		for ( int i = renderDemoPlaySegments.Num() - 1; i >= 0; i-- ) {
+			const int start = RenderDemoFramesToMS( renderDemoPlaySegments[i].startFrame );
+			if ( start < reference - RESTART_LEVEL_WINDOW_MS ) {
+				target = start;
+				break;
+			}
+		}
+		if ( target < 0 ) {
+			target = 0;
+		}
+	}
+	if ( target < 0 ) {
+		return false;
+	}
+	return SeekDemoMS( target );
+}
+
+/*
+================
+idSessionLocal::RenderDemoSegmentLabel
+
+"Level 2/5: Hangar Defense" for the playback overlay.
+================
+*/
+idStr idSessionLocal::RenderDemoSegmentLabel() const {
+	if ( renderDemoPlaySegment < 0 || renderDemoPlaySegment >= renderDemoPlaySegments.Num() ) {
+		return DemoLocalized( "#str_41551" );
+	}
+	const renderDemoSegment_t &segment = renderDemoPlaySegments[renderDemoPlaySegment];
+	const idStr level = Session_LevelDisplayName( segment.map, segment.entityFilter );
+	const int known = renderDemoPlayHeader.GetInt( "frames" ) > 0 ? renderDemoPlaySegments.Num() : 0;
+	if ( known > 0 ) {
+		return va( "%s %d/%d: %s", DemoLocalized( "#str_41583" ), renderDemoPlaySegment + 1, known, level.c_str() );
+	}
+	return va( "%s %d: %s", DemoLocalized( "#str_41583" ), renderDemoPlaySegment + 1, level.c_str() );
 }

@@ -8,7 +8,7 @@
 #include "../renderer/ModelManager.h"
 #include "../renderer/RenderWorld.h"
 
-#define BSE_FUTURE				( 1.0f / 60.0f )	// How far into the future to check for particle spawning
+#define BSE_FUTURE				( 0.016f )			// How far into the future to check for particle spawning
 #define BSE_TIME_EPSILON		( 0.002f )			// Edge condition checks
 #define BSE_PHYSICS_TIME_SAMPLE	( 0.1f )			// Number of seconds to check the position delta for physics
 #define BSE_MINIMUM_TRACE_DIST	( 16.0f )			// The square of the distance below which physics will not check
@@ -96,7 +96,7 @@ class rvParticle
 public:
 	friend		class			rvParticleTemplate;
 
-								rvParticle( void ) {}
+								rvParticle( void ) : mOneOverDuration( 1.0f ) {}
 	virtual						~rvParticle( void ) {}
 
 				void			SetFlag( bool on, int flag ) { on ? mFlags |= flag : mFlags &= ~flag; }
@@ -231,6 +231,7 @@ protected:
 				// Fixed at spawn time
 				float			mStartTime;								// World start time of particle in seconds
 				float			mEndTime;								// End of particle's life
+				float			mOneOverDuration;						// Envelope rate scale, fixed at spawn so constant segments extending mEndTime keep their speed
 
 				float			mTrailTime;								// Length of trail
 				int				mTrailCount;							// Number of particles in trail
@@ -246,8 +247,8 @@ protected:
 
 				idVec3			mInitPos;								// Position at time = 0
 				idVec3			mVelocity;								// Initial velocity
-				idVec3			mAcceleration;							// Initial acceleration
-				float			mFriction;								// Friction works by slowing down over time, this float is basically ( 1 / [Time in seconds from spawning at which velocity should be zero] )
+				idVec3			mAcceleration;							// Initial acceleration, in the frame of the initial velocity
+				idVec3			mFriction;								// Exponential drift term, in the frame of the initial acceleration
 
 				rvEnvParms3Particle		mTintEnv;
 				rvEnvParms1Particle		mFadeEnv;
@@ -343,7 +344,7 @@ protected:
 				rvEnvParms3Particle		mLengthEnv;
 };
 
-class rvOrientedParticle : public rvSpriteParticle
+class rvOrientedParticle : public rvParticle
 {
 public:
 	friend		class			rvParticleTemplate;
@@ -385,6 +386,7 @@ public:
 	friend		class			rvParticleTemplate;
 
 				int				GetBoltCount( float length );
+				int				GetNumBolts( void ) const { return( mNumBolts ); }
 				void			RenderBranch( const rvBSE *effect, struct SElecWork *work, idVec3 start, idVec3 end, const idDeclTable *jitterTable );
 				bool			RenderLineSegment( const rvBSE *effect, struct SElecWork *work, idVec3 start, float startFraction );
 				void			ApplyShape( const rvBSE *effect, struct SElecWork *work, idVec3 start, idVec3 end, int count, float startFraction, float endFraction );
@@ -434,6 +436,7 @@ public:
 	virtual		float			*GetDestRotation( void ) { return( mRotationEnv.GetEnd() ); }
 
 	virtual		void			ScaleRotation( float constant ) { mRotationEnv.Scale( constant ); }
+	virtual		void			AttenuateSize( float atten, rvParticleParms &parms ) { Attenuate( atten, parms, mSizeEnv ); }
 
 	virtual		void			GetSpawnInfo( idVec4 &tint, idVec3 &size, idVec3 &rotate );
 private:
@@ -560,7 +563,7 @@ public:
 	virtual		bool			Render( const rvBSE *effect, rvParticleTemplate *pt, const idMat3 &view, srfTriangles_t* tri, float time, float override = 1.0f );
 };
 
-class rvDebrisParticle : public rvLineParticle
+class rvDebrisParticle : public rvParticle
 {
 public:
 	friend		class			rvParticleTemplate;

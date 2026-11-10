@@ -18,11 +18,6 @@ on:
         required: false
         default: ""
         type: string
-      openq4_game_ref:
-        description: openQ4-game branch, tag, or full commit SHA to package
-        required: true
-        default: main
-        type: string
       linux_arm64_support_tier:
         description: Linux ARM64 release support tier
         required: true
@@ -44,11 +39,21 @@ on:
       macos_support_tier:
         description: macOS release support tier
         required: true
-        default: experimental
+        default: preview
         type: choice
         options:
-          - experimental
+          - preview
           - first-class
+      draft:
+        description: Leave the release as an unpublished draft (no Discord announcement)
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: Publish as a prerelease without replacing the latest stable release
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: openq4-manual-releases
@@ -88,7 +93,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
@@ -102,7 +107,6 @@ jobs:
       - name: Resolve immutable source revisions
         id: source_revisions
         env:
-          INPUT_OPENQ4_GAME_REF: ${{ inputs.openq4_game_ref }}
           INPUT_ARM64_EVIDENCE_CANDIDATE: ${{ inputs.generate_linux_arm64_evidence_candidate }}
           INPUT_ARM64_SUPPORT_TIER: ${{ inputs.linux_arm64_support_tier }}
         shell: bash
@@ -150,27 +154,8 @@ jobs:
             exit 1
           fi
 
-          input_ref="${INPUT_OPENQ4_GAME_REF}"
-          if [[ ! "${input_ref}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]] || \
-             [[ "${input_ref}" == *".."* ]] || \
-             [[ "${input_ref}" == *"@{"* ]] || \
-             [[ "${input_ref}" == *"//"* ]] || \
-             [[ "${input_ref}" == */ ]] || \
-             [[ "${input_ref}" == *.lock ]]; then
-            echo "openq4_game_ref is empty, unsafe, or not a supported Git ref/SHA: ${input_ref@Q}"
-            exit 1
-          fi
-
-          resolution_repo="$(mktemp -d "${RUNNER_TEMP}/openq4-game-resolution.XXXXXX")"
-          trap 'rm -rf "${resolution_repo}"' EXIT
-          git -C "${resolution_repo}" init -q
-          git -C "${resolution_repo}" remote add origin https://github.com/themuffinator/openQ4-game.git
-          git -C "${resolution_repo}" fetch --quiet --no-tags --depth=1 origin "${input_ref}"
-          openq4_game_sha="$(git -C "${resolution_repo}" rev-parse --verify 'FETCH_HEAD^{commit}')"
-          if [[ ! "${openq4_game_sha}" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Resolved openQ4-game revision is not a full immutable commit SHA: ${openq4_game_sha}"
-            exit 1
-          fi
+          input_ref="${GITHUB_REF}"
+          openq4_game_sha="${openq4_source_sha}"
 
           {
             echo "openq4_source_sha=${openq4_source_sha}"
@@ -181,11 +166,11 @@ jobs:
           {
             echo "### Release source revisions"
             echo "- openQ4: \`${openq4_source_sha}\` (triggering candidate)"
-            echo "- openQ4-game: \`${openq4_game_sha}\` (resolved once from \`${input_ref}\`)"
+            echo "- In-tree SDK game sources: \`${openq4_game_sha}\` (resolved once from \`${input_ref}\`)"
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
@@ -412,9 +397,13 @@ jobs:
                   user_facing_linux_arm64_docs.append(
                       selected_curated_release_notes.as_posix()
                   )
+              # macOS is a preview too. A "preview" followed by macOS or
+              # Apple ("preview macOS", "preview Apple Silicon") is that
+              # platform's claim, not a stale Linux ARM64 one, so macOS
+              # mentions near Linux ARM64 must use that word order.
               linux_arm64_preview_claim_pattern = re.compile(
-                  r"(?:linux[\s_-]+arm64.{0,240}\bpreview\b"
-                  r"|\bpreview\b.{0,240}linux[\s_-]+arm64)",
+                  r"(?:linux[\s_-]+arm64.{0,240}\bpreview\b(?![\s_-]+(?:apple|macos)\b)"
+                  r"|\bpreview\b(?![\s_-]+(?:apple|macos)\b).{0,240}linux[\s_-]+arm64)",
                   flags=re.IGNORECASE | re.DOTALL,
               )
               stale_user_preview_claims = []
@@ -501,8 +490,8 @@ jobs:
               for secret_name in required_macos_secrets
               if not os.environ.get(secret_name)
           ]
-          macos_support_tier = os.environ.get("OPENQ4_MACOS_SUPPORT_TIER", "experimental").strip() or "experimental"
-          if macos_support_tier not in {"experimental", "first-class"}:
+          macos_support_tier = os.environ.get("OPENQ4_MACOS_SUPPORT_TIER", "preview").strip() or "preview"
+          if macos_support_tier not in {"preview", "first-class"}:
               raise SystemExit(f"Unsupported macOS support tier: {macos_support_tier}")
           if (
               not linux_arm64_evidence_candidate
@@ -532,7 +521,7 @@ jobs:
                       + "; ".join(repr(marker) for marker in incomplete_evidence_markers)
                       + ". Validate the signoff archive and record it with "
                       "tools/macos/record_signoff_evidence.py --update-index, or rerun "
-                      "with macos_support_tier=experimental."
+                      "with macos_support_tier=preview."
                   )
           macos_signed_release_enabled = not missing_macos_secrets
           macos_release_mode = "signed" if macos_signed_release_enabled else "unsigned"
@@ -550,7 +539,7 @@ jobs:
                       "binary_arch": "arm64",
                       "platform_backend": "sdl3",
                       "macos_graphics_bridge": "opengl",
-                      "macos_openal_provider": "apple_framework",
+                      "macos_openal_provider": "system",
                       "macos_release_mode": macos_release_mode,
                       "package_suffix": f"-opengl{macos_unsigned_suffix}",
                       "archive_format": macos_archive_format,
@@ -563,7 +552,7 @@ jobs:
                       "binary_arch": "arm64",
                       "platform_backend": "sdl3",
                       "macos_graphics_bridge": "metal",
-                      "macos_openal_provider": "apple_framework",
+                      "macos_openal_provider": "system",
                       "macos_release_mode": macos_release_mode,
                       "package_suffix": f"-metal{macos_unsigned_suffix}",
                       "archive_format": macos_archive_format,
@@ -591,7 +580,7 @@ jobs:
               )
           else:
               macos_release_reason = (
-                  "Experimental macOS unsigned/unnotarized tar.gz release artifacts enabled as fallback output "
+                  "Preview macOS unsigned/unnotarized tar.gz release artifacts enabled as fallback output "
                   "because Apple signing/notary repository secrets are not configured: "
                   + ", ".join(missing_macos_secrets)
               )
@@ -621,59 +610,148 @@ jobs:
           print("release_matrix=" + json.dumps({"include": matrix}, separators=(",", ":")))
           PY
 
+  # Build each content pack once (or reuse the previous release's file when its
+  # sources are unchanged), so every platform package, installer and update
+  # channel carries the same bytes (roadmap PKG-01/PKG-02).
+  content_packs:
+    if: ${{ false }} # OPENPREY-GATED: split-module/OpenQ4 source contract
+    name: Content Packs
+    needs: metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      # A bulk pack's base is built from its content generation's commit.
+      OPENQ4_REQUIRE_CONTENT_GENERATIONS: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Content generations pin bulk packs to earlier commits.
+          fetch-depth: 0
+          ref: ${{ needs.metadata.outputs.openq4_source_sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Fetch the previous release's reusable content packs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ needs.metadata.outputs.latest_release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_dir="${RUNNER_TEMP}/previous-content-packs"
+          rm -rf "${previous_dir}"
+          mkdir -p "${previous_dir}"
+          if [ -z "${PREVIOUS_TAG}" ] || ! gh release download "${PREVIOUS_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" --pattern 'openq4-*-content-packs.json' --dir "${previous_dir}"; then
+            echo "The previous release publishes no content pack manifest; every pack is built from source."
+            exit 0
+          fi
+          shopt -s nullglob
+          manifests=("${previous_dir}"/openq4-*-content-packs.json)
+          shopt -u nullglob
+          if [ "${#manifests[@]}" -ne 1 ]; then
+            echo "Expected exactly one content pack manifest on ${PREVIOUS_TAG}, found ${#manifests[@]}."
+            exit 1
+          fi
+          mv "${manifests[0]}" "${previous_dir}/content-packs.json"
+          python tools/build/content_pack_release.py plan \
+            --source-root . \
+            --previous-manifest "${previous_dir}/content-packs.json" \
+            --reuse-list "${RUNNER_TEMP}/reusable-content-packs.txt"
+          while IFS= read -r pack; do
+            if [[ ! "${pack}" =~ ^pak[0-9]\.pk4$ ]]; then
+              echo "Unsafe content pack name in the reuse plan: ${pack@Q}"
+              exit 1
+            fi
+            if ! gh release download "${PREVIOUS_TAG}" --repo "${GITHUB_REPOSITORY}" \
+                --pattern "${pack}" --dir "${previous_dir}"; then
+              echo "${pack} is not published on ${PREVIOUS_TAG}; it is built from source."
+            fi
+          done < "${RUNNER_TEMP}/reusable-content-packs.txt"
+
+      - name: Build or reuse each content pack once
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          PREVIOUS_VERSION: ${{ needs.metadata.outputs.latest_release_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/content-packs"
+          previous_dir="${RUNNER_TEMP}/previous-content-packs"
+          build_args=(
+            build
+            --source-root .
+            --out-dir "${out_dir}"
+            --version-tag "${{ needs.metadata.outputs.version_tag }}"
+          )
+          if [ -f "${previous_dir}/content-packs.json" ]; then
+            build_args+=(--previous-manifest "${previous_dir}/content-packs.json" --previous-packs-dir "${previous_dir}")
+          fi
+          # A patch release (same major.minor as the previous release) must not
+          # change bulk content, so its players need only the update archive.
+          if [ -n "${PREVIOUS_VERSION}" ] && [ "${RELEASE_VERSION%.*}" = "${PREVIOUS_VERSION%.*}" ]; then
+            build_args+=(--forbid-bulk-changes)
+          fi
+          python tools/build/content_pack_release.py "${build_args[@]}"
+
+          # The bulk packs are published on their own under their runtime names,
+          # with the manifest that records every pack's digests and status.
+          asset_dir="${RUNNER_TEMP}/content-pack-assets"
+          rm -rf "${asset_dir}"
+          mkdir -p "${asset_dir}"
+          cp "${out_dir}/content-packs.json" "${asset_dir}/openq4-${{ needs.metadata.outputs.version_tag }}-content-packs.json"
+          mapfile -t bulk_packs < <(python tools/build/content_packs.py bulk-list)
+          for pack in "${bulk_packs[@]}"; do
+            cp "${out_dir}/${pack}" "${asset_dir}/${pack}"
+          done
+
+      - name: Upload content packs for the platform builds
+        uses: actions/upload-artifact@v7
+        with:
+          name: openq4-content-packs-${{ needs.metadata.outputs.version_tag }}
+          path: ${{ runner.temp }}/content-packs
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload standalone content pack assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: openq4-release-${{ needs.metadata.outputs.version_tag }}-content-packs
+          path: ${{ runner.temp }}/content-pack-assets
+          if-no-files-found: error
+          compression-level: 0
+
   builds:
     if: ${{ false }} # OPENPREY-GATED: split-module/OpenQ4 source contract
     name: ${{ matrix.label }}
-    needs: metadata
+    needs: [metadata, content_packs]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     env:
-      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}/../openQ4-game
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.metadata.outputs.release_matrix) }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          # Save payloads use the engine commit count as their build number.
+          # A shallow checkout makes every release build 1 and rejects its saves.
+          fetch-depth: 0
           ref: ${{ needs.metadata.outputs.openq4_source_sha }}
 
-      - name: Fetch pinned openQ4-game
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          expected_openq4_sha="${{ needs.metadata.outputs.openq4_source_sha }}"
-          expected_game_sha="${{ needs.metadata.outputs.openq4_game_sha }}"
-          actual_openq4_sha="$(git rev-parse --verify 'HEAD^{commit}')"
-          if [ "${actual_openq4_sha}" != "${expected_openq4_sha}" ]; then
-            echo "openQ4 checkout ${actual_openq4_sha} does not match metadata SHA ${expected_openq4_sha}."
-            exit 1
-          fi
-          if [ -e "${OPENQ4_GAMELIBS_REPO}" ]; then
-            echo "Refusing to reuse an existing openQ4-game checkout: ${OPENQ4_GAMELIBS_REPO}"
-            exit 1
-          fi
-
-          mkdir -p "$(dirname "${OPENQ4_GAMELIBS_REPO}")"
-          git init --quiet "${OPENQ4_GAMELIBS_REPO}"
-          git -C "${OPENQ4_GAMELIBS_REPO}" remote add origin https://github.com/themuffinator/openQ4-game.git
-          git -C "${OPENQ4_GAMELIBS_REPO}" fetch --quiet --no-tags --depth=1 origin "${expected_game_sha}"
-          git -C "${OPENQ4_GAMELIBS_REPO}" checkout --quiet --detach "${expected_game_sha}"
-          actual_game_sha="$(git -C "${OPENQ4_GAMELIBS_REPO}" rev-parse --verify 'HEAD^{commit}')"
-          if [ "${actual_game_sha}" != "${expected_game_sha}" ]; then
-            echo "openQ4-game checkout ${actual_game_sha} does not match metadata SHA ${expected_game_sha}."
-            exit 1
-          fi
-          if [ -n "$(git -C "${OPENQ4_GAMELIBS_REPO}" status --porcelain --untracked-files=all)" ]; then
-            echo "Pinned openQ4-game checkout is unexpectedly dirty."
-            exit 1
-          fi
-
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
@@ -681,6 +759,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install meson ninja markdown
+
+      - name: Download the release's content packs
+        uses: actions/download-artifact@v8
+        with:
+          name: openq4-content-packs-${{ needs.metadata.outputs.version_tag }}
+          path: ${{ runner.temp }}/content-packs
 
       - name: Show release metadata
         shell: bash
@@ -693,8 +777,8 @@ jobs:
           echo "Release scale: ${{ needs.metadata.outputs.release_scale }}"
           echo "Release reason: ${{ needs.metadata.outputs.release_reason }}"
           echo "openQ4 source SHA: ${{ needs.metadata.outputs.openq4_source_sha }}"
-          echo "openQ4-game requested ref: ${{ needs.metadata.outputs.openq4_game_ref }}"
-          echo "openQ4-game resolved SHA: ${{ needs.metadata.outputs.openq4_game_sha }}"
+          echo "In-tree game requested ref: ${{ needs.metadata.outputs.openq4_game_ref }}"
+          echo "In-tree game resolved SHA: ${{ needs.metadata.outputs.openq4_game_sha }}"
 
       - name: Install Linux native dependencies
         if: matrix.platform == 'linux'
@@ -737,7 +821,8 @@ jobs:
               libxxf86vm-dev \
               weston \
               xauth \
-              xvfb; then
+              xvfb \
+              zsync; then
               exit 0
             fi
 
@@ -750,12 +835,18 @@ jobs:
             sleep 10
           done
 
-      - name: Install macOS native dependencies
+      - name: Install macOS native dependencies and prepare pinned OpenAL Soft
         if: matrix.platform == 'macos'
         shell: bash
         run: |
           set -euo pipefail
-          echo "Using bundled Meson fallbacks for macOS third-party libraries."
+          prepared_root="${GITHUB_WORKSPACE}/.tmp/openal-soft-macos-${{ matrix.binary_arch }}"
+          bash tools/build/prepare_macos_openal_soft.sh \
+            --architecture "${{ matrix.binary_arch }}" \
+            --deployment-target 11.0 \
+            --output-root "${prepared_root}"
+          echo "OPENQ4_MACOS_OPENAL_ROOT=${prepared_root}" >> "${GITHUB_ENV}"
+          echo "PKG_CONFIG_PATH=${prepared_root}/lib/pkgconfig" >> "${GITHUB_ENV}"
 
       - name: Prepare OpenAL Soft (Windows)
         if: matrix.platform == 'windows'
@@ -788,7 +879,8 @@ jobs:
             "-Dplatform_backend=${{ matrix.platform_backend }}",
             "-Dmacos_graphics_bridge=${{ matrix.macos_graphics_bridge }}",
             "-Dversion_track=stable",
-            "-Dversion_base_override=${{ needs.metadata.outputs.version }}"
+            "-Dversion_base_override=${{ needs.metadata.outputs.version }}",
+            "-Dprebuilt_content_packs=$(Join-Path $env:RUNNER_TEMP 'content-packs')"
           )
           if (-not [string]::IsNullOrWhiteSpace($env:OPENQ4_OPENAL_ROOT)) {
             $setupArgs += "-Dopenal_root_override=$env:OPENQ4_OPENAL_ROOT"
@@ -835,6 +927,7 @@ jobs:
             "-Dmacos_openal_provider=${{ matrix.macos_openal_provider }}"
             -Dversion_track=stable
             "-Dversion_base_override=${{ needs.metadata.outputs.version }}"
+            "-Dprebuilt_content_packs=${RUNNER_TEMP}/content-packs"
           )
           if [ "${{ matrix.platform }}" = "linux" ]; then
             setup_args+=("-Dlinux_x11=enabled")
@@ -843,6 +936,14 @@ jobs:
           bash tools/build/meson_setup.sh "${setup_args[@]}"
           bash tools/build/meson_setup.sh compile -C builddir
           bash tools/build/meson_setup.sh install -C builddir --no-rebuild --skip-subprojects
+          if [ "${{ matrix.platform }}" = "macos" ]; then
+            bash tools/build/prepare_macos_openal_soft.sh \
+              --verify-only \
+              --architecture "${{ matrix.binary_arch }}" \
+              --deployment-target 11.0 \
+              --output-root "${OPENQ4_MACOS_OPENAL_ROOT}" \
+              --stage-install-dir .install
+          fi
 
       - name: Verify checked-out and staged source provenance
         shell: bash
@@ -850,10 +951,8 @@ jobs:
           set -euo pipefail
           python tools/build/verify_release_source_provenance.py \
             --project-root "${GITHUB_WORKSPACE}" \
-            --gamelibs-root "${OPENQ4_GAMELIBS_REPO}" \
-            --stage-manifest "${GITHUB_WORKSPACE}/builddir/.tmp/openprey_gamelibs_stage/openprey_gamelibs_stage_manifest.json" \
             --expected-project-commit "${{ needs.metadata.outputs.openq4_source_sha }}" \
-            --expected-gamelibs-commit "${{ needs.metadata.outputs.openq4_game_sha }}"
+            --build-dir builddir
 
       - name: Validate staged payload
         shell: bash
@@ -870,6 +969,7 @@ jobs:
             echo "Staged baseoq4 payload directory has no files."
             exit 1
           fi
+
 
           if [ "${{ matrix.platform }}" = "linux" ]; then
             if [ ! -f ".install/share/applications/openq4.desktop" ]; then
@@ -1128,7 +1228,7 @@ jobs:
 
       - name: Publish Linux release runtime diagnostics
         if: ${{ failure() && matrix.platform == 'linux' }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: openq4-release-${{ needs.metadata.outputs.version_tag }}-linux-${{ matrix.binary_arch }}${{ matrix.package_suffix }}-runtime-diagnostics
           path: .tmp/release-runtime/${{ matrix.binary_arch }}
@@ -1201,6 +1301,20 @@ jobs:
           echo "keychain_path=${keychain_path}" >> "$GITHUB_OUTPUT"
           echo "notary_profile=${notary_profile}" >> "$GITHUB_OUTPUT"
 
+      - name: Stage macOS MoltenVK runtime
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # macOS has no native Vulkan driver: the renderer module reaches the
+          # GPU through MoltenVK, a Vulkan-on-Metal translation layer openQ4
+          # does not build, so Meson never installs it and package_nightly.py
+          # refuses to package without it. Pinned and checksum-verified; see
+          # docs/dev/macos-moltenvk-provider-policy.md. macos-debug.yml stages
+          # it the same way.
+          bash tools/build/prepare_macos_moltenvk.sh --output-dir .install
+          bash tools/build/prepare_macos_moltenvk.sh --verify-only --output-dir .install
+
       - name: Prepare package
         id: package
         shell: bash
@@ -1257,6 +1371,22 @@ jobs:
               exit 1
             fi
             echo "symbols_archive_path=${symbols_archive_path}" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "${{ matrix.platform }}" = "windows" ] || [ "${{ matrix.platform }}" = "linux" ]; then
+            update_archive_path="${RUNNER_TEMP}/openq4-${{ needs.metadata.outputs.version_tag }}-${{ matrix.platform }}-${{ matrix.binary_arch }}${{ matrix.package_suffix }}-update${{ matrix.archive_ext }}"
+            if [ ! -f "${update_archive_path}" ]; then
+              echo "Expected update archive not found: ${update_archive_path}"
+              exit 1
+            fi
+            echo "update_archive_path=${update_archive_path}" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            windows_symbols_path="${RUNNER_TEMP}/openq4-${{ needs.metadata.outputs.version_tag }}-windows-${{ matrix.binary_arch }}${{ matrix.package_suffix }}-symbols.zip"
+            if [ ! -f "${windows_symbols_path}" ]; then
+              echo "Expected Windows symbol archive not found: ${windows_symbols_path}"
+              exit 1
+            fi
+            echo "windows_symbols_path=${windows_symbols_path}" >> "$GITHUB_OUTPUT"
           fi
           echo "archive_path=${archive_path}" >> "$GITHUB_OUTPUT"
           echo "package_dir=${package_dir}" >> "$GITHUB_OUTPUT"
@@ -1353,9 +1483,11 @@ jobs:
             --appimagetool "${appimagetool}" \
             --runtime-file "${runtime_file}" \
             --work-root "${RUNNER_TEMP}" \
+            --update-information "gh-releases-zsync|${GITHUB_REPOSITORY%%/*}|${GITHUB_REPOSITORY##*/}|latest|openq4-*${{ matrix.package_suffix }}-${appimage_arch}.AppImage.zsync" \
             --output "${appimage_path}"
 
           echo "appimage_path=${appimage_path}" >> "${GITHUB_OUTPUT}"
+          echo "appimage_zsync_path=${appimage_path}.zsync" >> "${GITHUB_OUTPUT}"
 
       - name: Validate Linux AppImage under Wayland and X11
         if: matrix.platform == 'linux' && inputs.generate_linux_arm64_evidence_candidate == false
@@ -1453,7 +1585,7 @@ jobs:
 
       - name: Publish Linux AppImage runtime diagnostics
         if: ${{ failure() && matrix.platform == 'linux' && inputs.generate_linux_arm64_evidence_candidate == false }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: openq4-release-${{ needs.metadata.outputs.version_tag }}-linux-${{ matrix.binary_arch }}${{ matrix.package_suffix }}-appimage-diagnostics
           path: .tmp/release-runtime/${{ matrix.binary_arch }}
@@ -1543,7 +1675,7 @@ jobs:
 
       - name: Upload Linux ARM64 first-class evidence candidate
         if: matrix.platform == 'linux' && matrix.binary_arch == 'arm64' && needs.metadata.outputs.linux_arm64_support_tier == 'preview' && inputs.generate_linux_arm64_evidence_candidate
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: openq4-linux-arm64-first-class-evidence-candidate-${{ needs.metadata.outputs.version_tag }}-${{ needs.metadata.outputs.openq4_source_sha }}
           path: |
@@ -1575,7 +1707,9 @@ jobs:
             --version-tag "${{ needs.metadata.outputs.version_tag }}" `
             --arch "${{ matrix.binary_arch }}" `
             --source-root "${env:GITHUB_WORKSPACE}" `
-            --output-dir "${env:RUNNER_TEMP}"
+            --output-dir "${env:RUNNER_TEMP}" `
+            --content-packs-manifest (Join-Path $env:RUNNER_TEMP "content-packs/content-packs.json") `
+            --content-pack-base-url "https://github.com/${env:GITHUB_REPOSITORY}/releases/download/${{ needs.metadata.outputs.release_tag }}/"
 
           $installerPath = Join-Path $env:RUNNER_TEMP "openq4-${{ needs.metadata.outputs.version_tag }}-windows-${{ matrix.binary_arch }}-setup.exe"
           if (-not (Test-Path -LiteralPath $installerPath)) {
@@ -1603,6 +1737,8 @@ jobs:
           module_dir="${app_root}/Contents/Frameworks"
           sp_module="${module_dir}/game-sp_${{ matrix.binary_arch }}.dylib"
           mp_module="${module_dir}/game-mp_${{ matrix.binary_arch }}.dylib"
+          renderer_module="${module_dir}/renderer-vk_${{ matrix.binary_arch }}.dylib"
+          openal_runtime="${module_dir}/libopenal.1.dylib"
 
           if [ ! -f "${app_plist}" ]; then
             echo "Missing macOS app Info.plist: ${app_plist}"
@@ -1717,7 +1853,11 @@ jobs:
             echo "macOS package must not duplicate baseoq4 beside the self-contained app bundle."
             exit 1
           fi
-          for module in "${sp_module}" "${mp_module}"; do
+          if [ -e "${{ steps.package.outputs.package_dir }}/q4xbase" ]; then
+            echo "Awakening content is user-supplied; no separate q4xbase module directory is packaged."
+            exit 1
+          fi
+          for module in "${sp_module}" "${mp_module}" "${renderer_module}"; do
             if [ ! -x "${module}" ]; then
               echo "Missing or non-executable macOS package game module: ${module}"
               exit 1
@@ -1798,7 +1938,7 @@ jobs:
             for macho_arch in ${expected_lipo_arches}; do
               actual="$(otool -arch "${macho_arch}" -D "${binary}" | sed -n '2p' | tr -d '[:space:]')"
               if [ "${actual}" != "${expected}" ]; then
-                echo "macOS game module install name mismatch: ${binary} (${macho_arch}); expected ${expected}, found ${actual:-<empty>}."
+                echo "macOS loadable module install name mismatch: ${binary} (${macho_arch}); expected ${expected}, found ${actual:-<empty>}."
                 exit 1
               fi
             done
@@ -1821,6 +1961,12 @@ jobs:
                 case "${dependency}" in
                   /System/Library/*|/usr/lib/*)
                     ;;
+                  @rpath/libopenal.1.dylib)
+                    if [ ! -f "${openal_runtime}" ]; then
+                      echo "macOS binary requires the bundled OpenAL Soft runtime, but it is missing: ${openal_runtime}"
+                      exit 1
+                    fi
+                    ;;
                   *)
                     echo "macOS binary has unbundled non-system dependency: ${binary} (${macho_arch}) -> ${dependency}"
                     exit 1
@@ -1829,7 +1975,7 @@ jobs:
               done
             done
           }
-          for binary in "${app_exec}" "${client_binary}" "${dedicated_binary}" "${sp_module}" "${mp_module}"; do
+          for binary in "${app_exec}" "${client_binary}" "${dedicated_binary}" "${sp_module}" "${mp_module}" "${renderer_module}" "${openal_runtime}"; do
             check_macos_binary_architecture "${binary}"
             check_macos_binary_dependencies "${binary}"
             check_macos_codesignature "${binary}"
@@ -1850,6 +1996,8 @@ jobs:
           fi
           check_macos_install_name "${sp_module}" "@loader_path/game-sp_${{ matrix.binary_arch }}.dylib"
           check_macos_install_name "${mp_module}" "@loader_path/game-mp_${{ matrix.binary_arch }}.dylib"
+          check_macos_install_name "${renderer_module}" "@loader_path/renderer-vk_${{ matrix.binary_arch }}.dylib"
+          check_macos_install_name "${openal_runtime}" "@rpath/libopenal.1.dylib"
           check_plist_value() {
             key="$1"
             expected="$2"
@@ -1899,6 +2047,7 @@ jobs:
           smoke_console="${smoke_root}/console.log"
           smoke_timeout_marker="${smoke_root}/timed-out"
           smoke_exit_status="${smoke_root}/app-exit-status"
+          smoke_sample="${smoke_root}/hang-sample.txt"
           rm -rf "${smoke_root}"
           mkdir -p "${smoke_cwd}" "${smoke_save}"
 
@@ -1925,6 +2074,11 @@ jobs:
               if kill -0 "${app_pid}" 2>/dev/null; then
                 echo "macOS app-bundle smoke timed out after 90 seconds" >&2
                 touch "${smoke_timeout_marker}"
+                # Sample the live process before killing it. A hung startup on a
+                # headless runner is not reproducible off Apple hardware, and
+                # without this the step exits 124 having printed nothing at all
+                # about where it stopped.
+                /usr/bin/sample "${app_pid}" 2 -file "${smoke_sample}" >/dev/null 2>&1 || true
                 kill -TERM "${app_pid}" 2>/dev/null || true
                 sleep 5
                 kill -KILL "${app_pid}" 2>/dev/null || true
@@ -1938,6 +2092,12 @@ jobs:
             kill "${watchdog_pid}" 2>/dev/null || true
             wait "${watchdog_pid}" 2>/dev/null || true
             if [ -f "${smoke_timeout_marker}" ]; then
+              echo "----- console output at timeout -----"
+              tail -n 120 "${smoke_console}" 2>/dev/null || echo "(no console output)"
+              echo "----- engine log at timeout -----"
+              tail -n 120 "${smoke_log}" 2>/dev/null || echo "(no engine log)"
+              echo "----- main-thread sample at timeout -----"
+              sed -n '1,120p' "${smoke_sample}" 2>/dev/null || echo "(no sample captured)"
               exit 124
             fi
             printf '%s\n' "${app_status}" > "${smoke_exit_status}"
@@ -1982,15 +2142,31 @@ jobs:
 
       - name: Upload artifact
         if: inputs.generate_linux_arm64_evidence_candidate == false
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: openq4-release-${{ needs.metadata.outputs.version_tag }}-${{ matrix.platform }}-${{ matrix.binary_arch }}${{ matrix.package_suffix }}
           path: ${{ steps.package.outputs.archive_path }}
           if-no-files-found: error
 
+      - name: Upload update archive
+        if: (matrix.platform == 'windows' || matrix.platform == 'linux') && inputs.generate_linux_arm64_evidence_candidate == false
+        uses: actions/upload-artifact@v7
+        with:
+          name: openq4-release-${{ needs.metadata.outputs.version_tag }}-${{ matrix.platform }}-${{ matrix.binary_arch }}${{ matrix.package_suffix }}-update
+          path: ${{ steps.package.outputs.update_archive_path }}
+          if-no-files-found: error
+
+      - name: Upload Windows symbols
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: openq4-release-${{ needs.metadata.outputs.version_tag }}-windows-${{ matrix.binary_arch }}${{ matrix.package_suffix }}-symbols
+          path: ${{ steps.package.outputs.windows_symbols_path }}
+          if-no-files-found: error
+
       - name: Upload macOS dSYM symbols
         if: matrix.platform == 'macos'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: openq4-release-${{ needs.metadata.outputs.version_tag }}-macos-${{ matrix.binary_arch }}${{ matrix.package_suffix }}-symbols
           path: ${{ steps.package.outputs.symbols_archive_path }}
@@ -1998,7 +2174,7 @@ jobs:
 
       - name: Upload Linux debug symbols
         if: matrix.platform == 'linux' && inputs.generate_linux_arm64_evidence_candidate == false
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: openq4-release-${{ needs.metadata.outputs.version_tag }}-linux-${{ matrix.binary_arch }}${{ matrix.package_suffix }}-debugsymbols
           path: ${{ steps.linux_symbols.outputs.debug_symbols_path }}
@@ -2006,31 +2182,43 @@ jobs:
 
       - name: Upload Linux AppImage
         if: matrix.platform == 'linux' && inputs.generate_linux_arm64_evidence_candidate == false
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: openq4-release-${{ needs.metadata.outputs.version_tag }}-linux-${{ matrix.binary_arch }}${{ matrix.package_suffix }}-appimage
-          path: ${{ steps.appimage.outputs.appimage_path }}
+          path: |
+            ${{ steps.appimage.outputs.appimage_path }}
+            ${{ steps.appimage.outputs.appimage_zsync_path }}
           if-no-files-found: error
 
       - name: Upload Windows installer
         if: matrix.platform == 'windows'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: openq4-release-${{ needs.metadata.outputs.version_tag }}-windows-${{ matrix.binary_arch }}-installer
           path: ${{ steps.windows_installer.outputs.installer_path }}
           if-no-files-found: error
 
+  android:
+    name: Android APK
+    needs: [metadata, content_packs]
+    if: ${{ false && inputs.generate_linux_arm64_evidence_candidate == false }} # OPENPREY-GATED
+    uses: ./.github/workflows/android-build.yml
+    with:
+      version: ${{ needs.metadata.outputs.version_tag }}
+      content_packs_artifact: openq4-content-packs-${{ needs.metadata.outputs.version_tag }}
+    secrets: inherit
+
   release:
     name: Publish Release
-    needs: [metadata, builds]
-    if: ${{ false && needs.builds.result == 'success' && inputs.generate_linux_arm64_evidence_candidate == false }} # OPENPREY-GATED
+    needs: [metadata, content_packs, builds, android]
+    if: ${{ false && needs.builds.result == 'success' && inputs.generate_linux_arm64_evidence_candidate == false && needs.android.result == 'success' && needs.content_packs.result == 'success' }} # OPENPREY-GATED
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.metadata.outputs.openq4_source_sha }}
@@ -2072,12 +2260,12 @@ jobs:
           fi
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
       - name: Download packaged artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: openq4-release-${{ needs.metadata.outputs.version_tag }}-*
           path: ${{ runner.temp }}/release-artifacts
@@ -2096,28 +2284,44 @@ jobs:
           fi
 
           expected=(
+            "openq4-${{ needs.metadata.outputs.version_tag }}-android-arm64-experimental.apk"
+            "openq4-${{ needs.metadata.outputs.version_tag }}-android-dependency-sources.tar.xz"
             "openq4-${{ needs.metadata.outputs.version_tag }}-windows-x64.zip"
+            "openq4-${{ needs.metadata.outputs.version_tag }}-windows-x64-update.zip"
+            "openq4-${{ needs.metadata.outputs.version_tag }}-windows-x64-symbols.zip"
             "openq4-${{ needs.metadata.outputs.version_tag }}-windows-x64-setup.exe"
             "openq4-${{ needs.metadata.outputs.version_tag }}-windows-arm64.zip"
+            "openq4-${{ needs.metadata.outputs.version_tag }}-windows-arm64-update.zip"
+            "openq4-${{ needs.metadata.outputs.version_tag }}-windows-arm64-symbols.zip"
             "openq4-${{ needs.metadata.outputs.version_tag }}-windows-arm64-setup.exe"
             "openq4-${{ needs.metadata.outputs.version_tag }}-linux-x64.tar.xz"
+            "openq4-${{ needs.metadata.outputs.version_tag }}-linux-x64-update.tar.xz"
             "openq4-${{ needs.metadata.outputs.version_tag }}-linux-x64-debugsymbols.tar.xz"
             "openq4-${{ needs.metadata.outputs.version_tag }}-x86_64.AppImage"
+            "openq4-${{ needs.metadata.outputs.version_tag }}-x86_64.AppImage.zsync"
+            "openq4-${{ needs.metadata.outputs.version_tag }}-content-packs.json"
           )
+          # The bulk content packs are published under their runtime names.
+          mapfile -t bulk_packs < <(python tools/build/content_packs.py bulk-list)
+          expected+=("${bulk_packs[@]}")
 
           echo "${{ needs.metadata.outputs.linux_arm64_release_reason }}"
           echo "${{ needs.metadata.outputs.macos_release_reason }}"
           if [ "${{ needs.metadata.outputs.linux_arm64_support_tier }}" = "preview" ]; then
             expected+=(
               "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64-preview.tar.xz"
+              "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64-preview-update.tar.xz"
               "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64-preview-debugsymbols.tar.xz"
               "openq4-${{ needs.metadata.outputs.version_tag }}-preview-aarch64.AppImage"
+              "openq4-${{ needs.metadata.outputs.version_tag }}-preview-aarch64.AppImage.zsync"
             )
           else
             expected+=(
               "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64.tar.xz"
+              "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64-update.tar.xz"
               "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64-debugsymbols.tar.xz"
               "openq4-${{ needs.metadata.outputs.version_tag }}-aarch64.AppImage"
+              "openq4-${{ needs.metadata.outputs.version_tag }}-aarch64.AppImage.zsync"
             )
           fi
           if [ "${{ needs.metadata.outputs.macos_signed_release_enabled }}" = "true" ]; then
@@ -2146,6 +2350,71 @@ jobs:
             --manifest "${asset_manifest}" \
             "${expected_args[@]}"
           echo "asset_manifest=${asset_manifest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify content packs and update archives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ needs.metadata.outputs.latest_release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${RUNNER_TEMP}/release-artifacts"
+          tag="${{ needs.metadata.outputs.version_tag }}"
+          manifest="${artifact_dir}/openq4-${tag}-content-packs.json"
+          mapfile -t bulk_packs < <(python tools/build/content_packs.py bulk-list)
+
+          # Every package that can be read here carries the manifest's bytes:
+          # the zips, tarballs and APK, full and update archives alike.
+          identity_args=(verify-identity --manifest "${manifest}" --report "${RUNNER_TEMP}/content-pack-identity.json")
+          shopt -s nullglob
+          for archive in "${artifact_dir}/openq4-${tag}-"*.zip "${artifact_dir}/openq4-${tag}-"*.tar.xz \
+              "${artifact_dir}/openq4-${tag}-"*.tar.gz "${artifact_dir}/openq4-${tag}-"*.apk; do
+            case "$(basename "${archive}")" in
+              *symbols*|*dependency-sources*) continue ;;
+            esac
+            identity_args+=(--archive "${archive}")
+          done
+          shopt -u nullglob
+          standalone_args=()
+          for pack in "${bulk_packs[@]}"; do
+            identity_args+=(--pack-file "${pack}=${artifact_dir}/${pack}")
+            standalone_args+=(--pack "${pack}=${artifact_dir}/${pack}")
+          done
+          python tools/build/content_pack_release.py "${identity_args[@]}"
+
+          # The previous full package plus this update archive (and any changed
+          # bulk pack, published on its own) must equal this full package.
+          previous_dir="${RUNNER_TEMP}/previous-release"
+          rm -rf "${previous_dir}"
+          mkdir -p "${previous_dir}"
+          if [ -z "${PREVIOUS_TAG}" ] || ! gh release download "${PREVIOUS_TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern 'openq4-*-content-packs.json' --dir "${previous_dir}"; then
+            echo "${PREVIOUS_TAG:-The previous release} predates content pack manifests; this release is a full download, and the update proof starts with the next one."
+            exit 0
+          fi
+          shopt -s nullglob
+          previous_manifests=("${previous_dir}"/openq4-*-content-packs.json)
+          shopt -u nullglob
+          mv "${previous_manifests[0]}" "${previous_dir}/content-packs.json"
+          for platform in windows-x64.zip linux-x64.tar.xz; do
+            gh release download "${PREVIOUS_TAG}" --repo "${GITHUB_REPOSITORY}" --pattern "openq4-*-${platform}" --dir "${previous_dir}"
+            shopt -s nullglob
+            previous_full=("${previous_dir}"/openq4-*-"${platform}")
+            shopt -u nullglob
+            if [ "${#previous_full[@]}" -ne 1 ]; then
+              echo "Expected one previous ${platform} package, found ${#previous_full[@]}."
+              exit 1
+            fi
+            stem="${platform%%.*}"
+            extension="${platform#*.}"
+            python tools/build/content_pack_release.py verify-update \
+              --previous-full "${previous_full[0]}" \
+              --update "${artifact_dir}/openq4-${tag}-${stem}-update.${extension}" \
+              --new-full "${artifact_dir}/openq4-${tag}-${platform}" \
+              "${standalone_args[@]}" \
+              --report "${RUNNER_TEMP}/update-proof-${stem}.json"
+            rm -f "${previous_full[0]}"
+          done
 
       - name: Revalidate accepted Linux ARM64 archive after artifact download
         if: needs.metadata.outputs.linux_arm64_support_tier == 'first-class'
@@ -2181,6 +2450,8 @@ jobs:
         env:
           LINUX_ARM64_RELEASE_REASON: ${{ needs.metadata.outputs.linux_arm64_release_reason }}
           LINUX_ARM64_SUPPORT_TIER: ${{ needs.metadata.outputs.linux_arm64_support_tier }}
+          MACOS_SIGNED_RELEASE_ENABLED: ${{ needs.metadata.outputs.macos_signed_release_enabled }}
+          MACOS_SUPPORT_TIER: ${{ needs.metadata.outputs.macos_support_tier }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2197,19 +2468,61 @@ jobs:
             --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --output "${RUNNER_TEMP}/release-changelog.md"
 
+          notes_args=(
+            notes
+            --manifest "${RUNNER_TEMP}/release-artifacts/openq4-${{ needs.metadata.outputs.version_tag }}-content-packs.json"
+            --update-asset-example "openq4-${{ needs.metadata.outputs.version_tag }}-windows-x64-update.zip"
+            --out "${RUNNER_TEMP}/release-changelog.md"
+            --append
+          )
+          if [ -f "${RUNNER_TEMP}/previous-release/content-packs.json" ]; then
+            notes_args+=(--previous-manifest "${RUNNER_TEMP}/previous-release/content-packs.json")
+          fi
+          python tools/build/content_pack_release.py "${notes_args[@]}"
+
           printf '\n## Linux ARM64 Support\n\n%s\n' \
             "${LINUX_ARM64_RELEASE_REASON}" >> "${RUNNER_TEMP}/release-changelog.md"
 
           if [ "${LINUX_ARM64_SUPPORT_TIER}" = "first-class" ]; then
-            if grep -Eiqz \
-              'linux[[:space:]_-]+arm64.{0,240}preview|preview.{0,240}linux[[:space:]_-]+arm64' \
-              "${RUNNER_TEMP}/release-changelog.md"; then
+            # Same rule as the metadata job: "preview macOS" and
+            # "preview Apple Silicon" are macOS claims, not Linux ARM64 ones.
+            # grep -P needs a UTF-8 locale and exits 2 on any error, which
+            # must fail the release rather than read as "no claim found".
+            preview_claim_status=0
+            LC_ALL=C.UTF-8 grep -Piqz \
+              '(?s)linux[\s_-]+arm64.{0,240}preview(?![\s_-]+(?:apple|macos)\b)|preview(?![\s_-]+(?:apple|macos)\b).{0,240}linux[\s_-]+arm64' \
+              "${RUNNER_TEMP}/release-changelog.md" || preview_claim_status=$?
+            if [ "${preview_claim_status}" -eq 0 ]; then
               echo "First-class Linux ARM64 release notes still contain preview claims:"
               grep -Ein 'linux[[:space:]_-]+arm64|preview' \
                 "${RUNNER_TEMP}/release-changelog.md" | head -20 || true
               exit 1
             fi
+            if [ "${preview_claim_status}" -ne 1 ]; then
+              echo "Linux ARM64 preview-claim scan failed with grep status ${preview_claim_status}."
+              exit 1
+            fi
           fi
+
+          # Appended after the Linux ARM64 check so the macOS preview wording
+          # cannot trip it. Windows ARM64 assets carry no tier suffix, so this
+          # section is the only label the release page gives them.
+          if [ "${MACOS_SUPPORT_TIER}" = "first-class" ]; then
+            macos_tier_note="macOS packages are first-class for Apple Silicon (arm64) Macs."
+          else
+            macos_tier_note="macOS packages are a preview for Apple Silicon (arm64) Macs. The build floor is macOS 11, but only current macOS releases have been played on real hardware."
+          fi
+          if [ "${MACOS_SIGNED_RELEASE_ENABLED}" = "true" ]; then
+            macos_package_note="The packages are signed and notarized DMGs."
+          else
+            macos_package_note="The packages are unsigned and not notarized, so macOS asks for approval the first time openQ4.app opens."
+          fi
+          printf '\n## macOS Support\n\n%s %s Intel Macs are not supported.\n' \
+            "${macos_tier_note}" "${macos_package_note}" >> "${RUNNER_TEMP}/release-changelog.md"
+
+          printf '\n## Windows ARM64 Support\n\n%s\n' \
+            "Windows ARM64 packages are experimental. They are built natively for Arm64 and automated tests start the dedicated server, but nothing has started the game client automatically yet, and no real-hardware report has confirmed that the packages run. If the renderer does not start, launch with +set r_renderApi vulkan, and please report the result with the Windows ARM64 issue template." \
+            >> "${RUNNER_TEMP}/release-changelog.md"
 
       - name: Create or update release
         env:
@@ -2217,9 +2530,24 @@ jobs:
           LINUX_ARM64_SUPPORT_TIER: ${{ needs.metadata.outputs.linux_arm64_support_tier }}
           OPENQ4_SOURCE_SHA: ${{ needs.metadata.outputs.openq4_source_sha }}
           RELEASE_ASSET_MANIFEST: ${{ steps.release_assets.outputs.asset_manifest }}
+          RELEASE_DRAFT: ${{ inputs.draft }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
         shell: bash
         run: |
           set -euo pipefail
+
+          if [ "${RELEASE_DRAFT}" != "true" ] && [ "${RELEASE_DRAFT}" != "false" ]; then
+            echo "Invalid draft selector: ${RELEASE_DRAFT@Q}"
+            exit 1
+          fi
+          if [ "${RELEASE_PRERELEASE}" != "true" ] && [ "${RELEASE_PRERELEASE}" != "false" ]; then
+            echo "Invalid prerelease selector: ${RELEASE_PRERELEASE@Q}"
+            exit 1
+          fi
+          latest_policy=legacy
+          if [ "${RELEASE_PRERELEASE}" = "true" ]; then
+            latest_policy=false
+          fi
 
           tag="${{ needs.metadata.outputs.release_tag }}"
           name="${{ needs.metadata.outputs.release_name }}"
@@ -2234,7 +2562,8 @@ jobs:
           mapfile -t asset_names < "${RELEASE_ASSET_MANIFEST}"
           assets=()
           for asset_name in "${asset_names[@]}"; do
-            if [[ ! "${asset_name}" =~ ^openq4-[A-Za-z0-9._+-]+$ ]] || [[ "${asset_name}" == *..* ]]; then
+            if { [[ ! "${asset_name}" =~ ^openq4-[A-Za-z0-9._+-]+$ ]] && [[ ! "${asset_name}" =~ ^pak[0-9]\.pk4$ ]]; } \
+                || [[ "${asset_name}" == *..* ]]; then
               echo "Verified release asset manifest contains an unsafe filename: ${asset_name@Q}"
               exit 1
             fi
@@ -2263,14 +2592,18 @@ jobs:
             if [ "${LINUX_ARM64_SUPPORT_TIER}" = "preview" ]; then
               stale_linux_arm64_assets=(
                 "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64.tar.xz"
+                "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64-update.tar.xz"
                 "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64-debugsymbols.tar.xz"
                 "openq4-${{ needs.metadata.outputs.version_tag }}-aarch64.AppImage"
+                "openq4-${{ needs.metadata.outputs.version_tag }}-aarch64.AppImage.zsync"
               )
             else
               stale_linux_arm64_assets=(
                 "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64-preview.tar.xz"
+                "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64-preview-update.tar.xz"
                 "openq4-${{ needs.metadata.outputs.version_tag }}-linux-arm64-preview-debugsymbols.tar.xz"
                 "openq4-${{ needs.metadata.outputs.version_tag }}-preview-aarch64.AppImage"
+                "openq4-${{ needs.metadata.outputs.version_tag }}-preview-aarch64.AppImage.zsync"
               )
             fi
             mapfile -t existing_release_assets < <(
@@ -2315,11 +2648,16 @@ jobs:
               --notes-file "${notes}"
             gh release upload "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
           else
-            gh release create "${tag}" "${assets[@]}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --target "${target}" \
-              --title "${name}" \
+            create_args=(
+              --repo "${GITHUB_REPOSITORY}"
+              --target "${target}"
+              --title "${name}"
               --notes-file "${notes}"
+            )
+            # Keep new downloads unpublished until their stored bytes have
+            # been compared with the archives that passed validation.
+            create_args+=(--draft --prerelease="${RELEASE_PRERELEASE}")
+            gh release create "${tag}" "${assets[@]}" "${create_args[@]}"
           fi
 
           mapfile -t published_release_assets < <(
@@ -2359,12 +2697,68 @@ jobs:
             fi
           done
 
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq .id)"
+          release_id="$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json databaseId --jq .databaseId)"
+          published_assets_json="${RUNNER_TEMP}/openq4-published-assets.json"
+          # The whitelist allows at most 64 assets, below this single-page limit.
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            > "${published_assets_json}"
+          expected_args=()
+          for asset_name in "${asset_names[@]}"; do
+            expected_args+=(--expected "${asset_name}")
+          done
+          python tools/build/verify_release_asset_set.py \
+            --artifact-dir "${assets_dir}" \
+            --published-assets "${published_assets_json}" \
+            "${expected_args[@]}"
+
+          if [ "${RELEASE_DRAFT}" = "true" ]; then
+            # A draft is not a release: GitHub creates no git tag for it, fires no
+            # release event, and the release-by-tag REST endpoint never returns it.
+            # Read it back through gh, which falls back to the draft listing.
+            gh release edit "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft \
+              --prerelease="${RELEASE_PRERELEASE}"
+            draft_state="$(
+              gh release view "${tag}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --json isDraft,targetCommitish \
+                --jq '[(.isDraft | tostring), .targetCommitish] | join(" ")'
+            )"
+            draft_is_draft="${draft_state%% *}"
+            draft_release_target="${draft_state##* }"
+            if [ "${draft_is_draft}" != "true" ]; then
+              echo "Release ${tag} was requested as a draft but reports isDraft=${draft_is_draft}."
+              exit 1
+            fi
+            if [ "${draft_release_target}" != "${target}" ]; then
+              echo "Draft release ${tag} records target ${draft_release_target}, expected ${target}."
+              exit 1
+            fi
+            {
+              echo "### Draft release staged"
+              echo "- Tag: \`${tag}\` (unpublished; no git tag exists until the draft is published)"
+              echo "- Target: \`${target}\`"
+              echo "- Discord announcement: skipped for drafts"
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          # Resolve through gh so an existing unpublished draft can be promoted.
+          # The release-by-tag REST endpoint only returns published releases.
+          release_id="$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json databaseId --jq .databaseId)"
           gh api \
             --method PATCH \
             "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-            -f prerelease=false \
-            -f draft=false >/dev/null
+            -F prerelease="${RELEASE_PRERELEASE}" \
+            -f make_latest="${latest_policy}" \
+            -F draft=false >/dev/null
+
+          published_state="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '[.draft, .prerelease] | map(tostring) | join(" ")')"
+          if [ "${published_state}" != "false ${RELEASE_PRERELEASE}" ]; then
+            echo "Published release ${tag} has unexpected draft/prerelease state: ${published_state}"
+            exit 1
+          fi
 
           git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
           published_tag_sha="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
@@ -2381,17 +2775,17 @@ jobs:
   discord:
     name: Announce On Discord
     needs: [metadata, release]
-    if: ${{ false && needs.release.result == 'success' }} # OPENPREY-GATED
+    if: ${{ false && needs.release.result == 'success' && inputs.draft == false }} # OPENPREY-GATED
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 

@@ -148,7 +148,7 @@ idRenderWindow::idRenderWindow( idUserInterfaceLocal *g ) : idWindow( g ) {
 
 idRenderWindow::~idRenderWindow() {
 	FreeModelJoints();
-	renderSystem->FreeRenderWorld( world );
+	if (renderSystem) renderSystem->FreeRenderWorld( world );
 }
 
 void idRenderWindow::FreeModelJoints() {
@@ -174,12 +174,16 @@ void idRenderWindow::CommonInit() {
 	useLight[0] = true;
 
 	modelOrigin.Zero();
+	// RenderWindowRotationToAxis reads this every frame and nothing else
+	// initialized it, so a .gui that never sets modelRotate oriented its model
+	// from whatever the allocation happened to contain.
+	modelRotate.Zero();
 	viewOffset = idVec4( -128.0f, 0.0f, 0.0f, 1.0f );
 	outlineColor.Zero();
 	rimlightColor.Zero();
 	brightSkinColor.Zero();
 	outlineWidth = 2.0f;
-	customSkin = "";
+	for ( auto &skin : customSkin ) skin = "";
 	customShader = "NONE";
 	needUpdate.Clear();
 
@@ -239,6 +243,7 @@ void idRenderWindow::UpdateRenderVars() {
 		jointName[i].Update();
 		animName[i].Update();
 		animClass[i].Update();
+		customSkin[i].Update();
 	}
 
 	for ( int i = 0; i < MAX_RENDERWINDOW_LIGHTS; ++i ) {
@@ -253,7 +258,6 @@ void idRenderWindow::UpdateRenderVars() {
 	rimlightColor.Update();
 	brightSkinColor.Update();
 	outlineWidth.Update();
-	customSkin.Update();
 	customShader.Update();
 }
 
@@ -299,7 +303,7 @@ void idRenderWindow::PreRender() {
 	spawnArgs.Clear();
 	spawnArgs.Set( "classname", "func_static" );
 	spawnArgs.Set( "model", modelName[0].c_str() );
-	spawnArgs.Set( "skin", customSkin.c_str() );
+	spawnArgs.Set( "skin", customSkin[0].c_str() );
 	spawnArgs.Set( "origin", modelOrigin.c_str() );
 	gameEdit->ParseSpawnArgsToRenderEntity( &spawnArgs, &worldEntity[0] );
 	if ( worldEntity[0].hModel ) {
@@ -321,6 +325,7 @@ void idRenderWindow::PreRender() {
 		spawnArgs.Clear();
 		spawnArgs.Set( "classname", "func_static" );
 		spawnArgs.Set( "model", modelName[i].c_str() );
+		spawnArgs.Set( "skin", customSkin[i].c_str() );
 		spawnArgs.Set( "origin", "0 0 0" );
 		gameEdit->ParseSpawnArgsToRenderEntity( &spawnArgs, &worldEntity[i] );
 		if ( !worldEntity[i].hModel ) {
@@ -376,6 +381,7 @@ void idRenderWindow::Render( int time ) {
 			false );
 	}
 
+	worldEntity[0].origin = modelOrigin.ToVec3();
 	worldEntity[0].axis = RenderWindowRotationToAxis( modelRotate );
 	RenderWindowApplyPreviewEffects( worldEntity[0], RenderWindowVec4( outlineColor ), outlineWidth, RenderWindowVec4( rimlightColor ), RenderWindowVec4( brightSkinColor ) );
 	if ( modelDef[0] != -1 ) {
@@ -446,6 +452,77 @@ void idRenderWindow::Draw( int time, float x, float y ) {
 	world->RenderScene( &refdef );
 }
 
+void idRenderWindow::RefreshForLevelLoad() {
+    idWindow::RefreshForLevelLoad();
+    const bool hadModel = modelDef[0] != -1;
+    needsRender = true;
+    updateAnimation = true;
+    if (hadModel && gameEdit) {
+        UpdateRenderVars();
+        PreRender();
+        BuildAnimation(gui->GetTime());
+    }
+}
+
+void idRenderWindow::ConfigureModelScene( const openq4::ui::ModelScene &scene ) {
+	const bool rebuild = !sceneConfigured || configuredScene.parts != scene.parts || configuredScene.lights.size() != scene.lights.size();
+	for ( int i = 0; i < MAX_RENDERWINDOW_MODELS; ++i ) {
+		const auto part = i < scene.parts.size() ? scene.parts[i] : openq4::ui::ModelPart{};
+		modelName[i] = part.model.c_str(); customSkin[i] = part.skin.c_str();
+		animName[i] = part.animation.c_str(); animClass[i] = part.animationClass.c_str(); jointName[i] = part.joint.c_str();
+	}
+	const auto vector = [](const auto &value) { return idVec4(float(value[0]),float(value[1]),float(value[2]),1); };
+	for ( int i = 0; i < MAX_RENDERWINDOW_LIGHTS; ++i ) {
+		useLight[i] = i < scene.lights.size();
+		if ( useLight[i] ) { lightOrigin[i] = vector(scene.lights[i].origin); lightColor[i] = vector(scene.lights[i].colour); }
+	}
+	modelOrigin = vector(scene.origin); modelRotate = vector(scene.rotation); viewOffset = vector(scene.camera);
+	outlineColor = idVec4(float(scene.outline[0]),float(scene.outline[1]),float(scene.outline[2]),float(scene.outline[3]));
+	rimlightColor = idVec4(float(scene.rimlight[0]),float(scene.rimlight[1]),float(scene.rimlight[2]),float(scene.rimlight[3]));
+	brightSkinColor = idVec4(float(scene.brightSkin[0]),float(scene.brightSkin[1]),float(scene.brightSkin[2]),float(scene.brightSkin[3]));
+	outlineWidth = float(scene.outlineWidth);
+	if ( rebuild ) { needsRender = true; updateAnimation = true; }
+	configuredScene = scene; sceneConfigured = true;
+}
+
+bool idRenderWindow::PrepareModelScene( int time, std::string &error ) {
+	// The retained caller validates its typed scene before configuration. Keep
+	// this legacy renderDef implementation independent of the retained library,
+	// which is intentionally absent from dedicated-server links.
+	if ( !gameEdit || !world || !sceneConfigured || configuredScene.parts.empty() || configuredScene.parts[0].model.empty() ) {
+		if ( error.empty() ) error = "No game renderer or root model is available for the preview";
+		return false;
+	}
+	PreRender();
+	BuildAnimation(time);
+	for ( size_t i = 0; i < configuredScene.parts.size(); ++i ) {
+		const auto &part = configuredScene.parts[i];
+		if ( part.model.empty() ) continue;
+		if ( !worldEntity[i].hModel || worldEntity[i].hModel->IsDefaultModel() ) { error = "Preview model could not be loaded: " + part.model; return false; }
+		if ( !part.skin.empty() ) {
+			const auto *skin = declManager->FindSkin(part.skin.c_str(),false);
+			if (!skin || skin->GetState()==DS_DEFAULTED) { error = "Preview skin could not be loaded: " + part.skin; return false; }
+		}
+		if ( !part.animation.empty() && (!modelAnim[i] || !worldEntity[i].joints) ) { error = "Preview animation could not be loaded: " + part.animation; return false; }
+		if ( i && !part.joint.empty() && (!worldEntity[0].joints || worldEntity[0].hModel->GetJointHandle(part.joint.c_str()) == INVALID_JOINT) ) {
+			error = "Preview attachment joint could not be found: " + part.joint; return false;
+		}
+	}
+	return true;
+}
+
+void idRenderWindow::DrawModelScene( int time, float fov, int width, int height ) {
+	Render(time);
+	memset(&refdef,0,sizeof(refdef));
+	refdef.vieworg = viewOffset.ToVec3(); refdef.viewaxis.Identity();
+	for ( int i = 0; i < 4; ++i ) refdef.shaderParms[i] = 1;
+	refdef.width = VIRTUAL_WIDTH; refdef.height = VIRTUAL_HEIGHT;
+	refdef.fov_x = fov;
+	refdef.fov_y = 2.0f * atan(tan(fov * idMath::M_DEG2RAD * .5f) * float(height) / float(width)) * idMath::M_RAD2DEG;
+	refdef.time = time;
+	world->RenderScene(&refdef,RF_NO_GUI | RF_INDEPENDENT_VIEW);
+}
+
 void idRenderWindow::PostParse() {
 	idWindow::PostParse();
 }
@@ -473,6 +550,9 @@ idWinVar *idRenderWindow::GetWinVarByName( const char *_name, bool fixup, drawWi
 		}
 		if ( idStr::Icmp( _name, va( "animClass%d", i ) ) == 0 ) {
 			return &animClass[i];
+		}
+		if ( idStr::Icmp( _name, va( "skin%d", i ) ) == 0 ) {
+			return &customSkin[i];
 		}
 	}
 
@@ -521,7 +601,7 @@ idWinVar *idRenderWindow::GetWinVarByName( const char *_name, bool fixup, drawWi
 		return &customShader;
 	}
 	if ( idStr::Icmp( _name, "skin" ) == 0 ) {
-		return &customSkin;
+		return &customSkin[0];
 	}
 	if ( idStr::Icmp( _name, "needsRender" ) == 0 ) {
 		return &needsRender;

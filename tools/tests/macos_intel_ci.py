@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GAME_LIBS_ROOT = Path(os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT.parent / "openQ4-game")).resolve()
+GAME_LIBS_ROOT = Path(os.environ.get("OPENQ4_GAMELIBS_REPO", ROOT)).resolve()
 
 
 def read(relative_path: str) -> str:
@@ -62,67 +62,52 @@ def validate_engine_corridor() -> None:
     ):
         require(dedicated, token, "macOS dedicated smoke Intel support")
 
-    require(commit, "macos-x64:", "commit validation Intel job")
-    intel_job = commit[commit.index("  macos-x64:") :]
-    for token in (
-        "macOS Intel x64 ${{ matrix.bridge_label }} Commit Validation",
-        "runs-on: macos-15-intel",
-        'MACOSX_DEPLOYMENT_TARGET: "11.0"',
-        '"$(uname -m)" != "x86_64"',
-        "macos_graphics_bridge: opengl",
-        "macos_graphics_bridge: metal",
-        "bash tools/validation/validate_pr.sh",
-        "python tools/tests/macos_dedicated_server_smoke.py",
-        "--arch x64",
-        "commit-macos-x64-${{ matrix.artifact_suffix }}-payload",
-        "commit-macos-x64-${{ matrix.artifact_suffix }}-dedicated-smoke",
-    ):
-        require(intel_job, token, "commit validation Intel corridor")
+    # Intel is not a release target: pull requests skip it, and pushes to main
+    # build one bridge variant. The manual universal2 candidate builds both.
+    for token in ("macos-x64:", "macos-15-intel", "Intel x64"):
+        reject(commit, token, "commit validation Intel corridor")
 
+    intel_start = push.index("          - name: macOS Intel x64 OpenGL Push Verification")
+    intel_entry = push[intel_start : push.index("\n    steps:", intel_start)]
     for token in (
-        "macOS Intel x64 OpenGL Push Verification",
-        "macOS Intel x64 Metal Push Verification",
         "os: macos-15-intel",
         "artifact_name: macos-x64-opengl",
-        "artifact_name: macos-x64-metal",
-        'runtime_cases="renderer-default-safety-selftest"',
+        "runtime_smoke: true",
+        "python_tests: false",
+        "macos_graphics_bridge: opengl",
+    ):
+        require(intel_entry, token, "push verification Intel matrix entry")
+    if push.count("os: macos-15-intel") != 1:
+        raise AssertionError("push verification must build exactly one Intel bridge variant")
+    for token in (
+        'runtime_cases="renderer-foundation-selftests,renderer-pbr-visible-selftest,renderer-cluster-grid-selftest,renderer-default-safety-selftest"',
         "python tools/tests/macos_dedicated_server_smoke.py",
         "push-${{ matrix.artifact_name }}-dedicated-smoke",
     ):
         require(push, token, "push verification Intel corridor")
+    reject(push, "macOS Intel x64 Metal Push Verification", "push verification Intel corridor")
+
+    candidate = read(".github/workflows/macos-universal2-candidate.yml")
+    for token in ('"runner": "macos-15-intel"', 'expected_arch="x86_64"', 'actual_arch="$(uname -m)"'):
+        require(candidate, token, "universal2 candidate Intel thin builds")
 
 
 def validate_companion_corridor() -> None:
-    workflow = read_game(".github/workflows/commit-validation.yml")
-    meson = read_game("src/meson.build")
-    contract = read_game("tools/tests/macos_meson_contract.py")
-    readme = read_game("README.md")
-
-    for token in (
-        "['x86_64', 'aarch64'].contains(host_cpu_family)",
-        "game_arch = 'x64'",
-        "game_arch = 'arm64'",
-        "'-Wl,-install_name,@loader_path/'",
-    ):
-        require(meson, token, "openQ4-game macOS architecture contract")
-
-    for token in (
-        "name: macOS ${{ matrix.arch_label }} GameLibs",
-        "runner: macos-15",
-        "runner: macos-15-intel",
-        "module_arch: arm64",
-        "module_arch: x64",
-        "macho_arch: x86_64",
-        'MACOSX_DEPLOYMENT_TARGET: "11.0"',
-        "lipo -archs",
-        "otool -D",
-        "LC_BUILD_VERSION",
-    ):
-        require(workflow, token, "openQ4-game Intel CI corridor")
-
-    require(contract, "runner: macos-15-intel", "openQ4-game Intel CI regression contract")
-    require(readme, "experimental macOS ARM64 and Intel x64 coverage", "openQ4-game Intel CI documentation")
-    require(readme, "Standalone Intel CI is build evidence only", "openQ4-game Intel support boundary")
+    meson=read('meson.build')
+    modules=read('content/baseoq4/meson.build')
+    workflow=read('.github/workflows/commit-validation.yml')
+    for token in ("binary_arch = 'x64'", "binary_arch = 'arm64'"):
+        require(meson,token,'canonical macOS game architecture')
+    for token in ("'-Wl,-install_name,@loader_path/' + game_sp_binary_name + '.dylib'",
+                  "'-Wl,-install_name,@loader_path/' + game_mp_binary_name + '.dylib'"):
+        require(modules,token,'canonical macOS game install names')
+    push=read('.github/workflows/push-verification.yml')
+    for token in ('macos-15',"MACOSX_DEPLOYMENT_TARGET: \"11.0\""):
+        require(workflow,token,'canonical macOS CI corridor')
+    require(push,'macos-15-intel','canonical macOS Intel CI corridor')
+    for source in (workflow,push):
+        reject(source,'openQ4-game.git','retired companion checkout')
+    require(read('tools/validation/openq4_validate.py'),'lipo','staged Mach-O architecture guard')
 
 
 def validate_policy_and_wiring() -> None:
@@ -130,7 +115,7 @@ def validate_policy_and_wiring() -> None:
     policy = read("docs/dev/macos-support-matrix-policy.md")
     building = read("BUILDING.md")
     platform = read("docs/dev/platform-support.md")
-    plan = read("docs/dev/plan/2026-06-30-macos-compatibility-support.md")
+    plan = read("docs/dev/archive/2026-10-18/plan/2026-06-30-macos-compatibility-support.md")
     release_completion = read("docs/dev/release-completion.md")
     release_notes = read("docs/dev/releases/v0.8.1.md")
     validator = read("tools/validation/openq4_validate.py")
@@ -151,7 +136,7 @@ def validate_policy_and_wiring() -> None:
         require(policy, token, "macOS Intel matrix policy")
 
     require(building, "Hosted `macos-15-intel` jobs", "build documentation Intel corridor")
-    require(platform, "Dedicated `macos-15-intel` engine and companion jobs", "platform support Intel corridor")
+    require(platform, "Dedicated `macos-15-intel` engine and game-module jobs", "platform support Intel corridor")
 
     for token in (
         "[x] Add a standard hosted Intel Mac runner",

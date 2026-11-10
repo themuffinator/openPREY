@@ -1,15 +1,18 @@
 # Experimental macOS Support Data
 
 macOS support is experimental and does not currently have an active package/signing
-workflow. Reports should therefore identify the exact source commit, companion
-`OpenPrey-game` commit, Meson options, architecture, and graphics backend used for the
-local build.
+workflow. Reports should therefore identify the exact source commit (the Prey game
+library is built from the same checkout), Meson options, architecture, and graphics
+backend used for the local build. If openPREY crashes on macOS, a complete report is
+much more useful than a screenshot because the maintainer may not have access to a
+Mac. Reports that it simply works are useful too, especially on a macOS version older
+than the current one.
 
 ## Minimum useful report
 
 Include:
 
-- `git rev-parse HEAD` for openPREY and `OpenPrey-game`;
+- `git rev-parse HEAD` for the openPREY checkout (it includes the in-tree Prey game library);
 - macOS version and hardware model;
 - `uname -m` and whether the process ran natively or through translation;
 - the full terminal transcript;

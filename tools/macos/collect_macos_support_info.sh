@@ -1,5 +1,5 @@
 #!/bin/sh
-# Collect redacted macOS support data for experimental openPREY crash reports.
+# Collect redacted macOS support data for experimental openPREY crash and hardware reports.
 
 set -eu
 umask 077

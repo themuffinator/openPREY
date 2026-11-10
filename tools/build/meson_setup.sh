@@ -185,10 +185,80 @@ raise SystemExit(1)
 PY
 }
 
+test_game_sources_refresh_needed() {
+    local build_dir="$1"
+    [[ -d "${build_dir}" ]] || return 1
+    local games
+    games="$(get_meson_build_option_value "${build_dir}" build_games || true)"
+    [[ "${games}" != "false" ]] || return 1
+    # Content and git-state drift only refresh the snapshot; a membership change reconfigures.
+    if "${PYTHON_CMD}" "${script_dir}/game_source_inventory.py" "${repo_root}" \
+        --refresh "${build_dir}/openq4_game_sources.json" >/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
 load_build_dir_info() {
     read_line_array < <(get_compile_build_dir "$@")
     BUILD_DIR="${READ_ARRAY_RESULT[0]}"
     BUILD_DIR_HAS_EXPLICIT="${READ_ARRAY_RESULT[1]}"
+}
+
+declare -a SETUP_ARGS_RESULT=()
+
+build_setup_args_for_existing_build_dir() {
+    local build_dir="$1"
+    SETUP_ARGS_RESULT=(
+        setup
+        "${build_dir}"
+        "${repo_root}"
+        --backend
+        ninja
+    )
+
+    local buildtype=""
+    buildtype="$(get_meson_build_option_value "${build_dir}" buildtype || true)"
+    if [[ -n "${buildtype}" ]]; then
+        SETUP_ARGS_RESULT+=("--buildtype=${buildtype}")
+    fi
+
+    local wrap_mode=""
+    wrap_mode="$(get_meson_build_option_value "${build_dir}" wrap_mode || true)"
+    if [[ -n "${wrap_mode}" ]]; then
+        SETUP_ARGS_RESULT+=("--wrap-mode=${wrap_mode}")
+    fi
+
+    local option_name=""
+    local option_value=""
+    for option_name in platform_backend linux_x11 macos_graphics_bridge macos_openal_provider version_track version_iteration version_base_override openal_root_override use_pch build_engine build_games build_game_sp build_game_mp build_renderer_gl build_renderer_vk enforce_msvc_2026; do
+        option_value="$(get_meson_build_option_value "${build_dir}" "${option_name}" || true)"
+        if [[ -n "${option_value}" ]]; then
+            SETUP_ARGS_RESULT+=("-D${option_name}=${option_value}")
+        fi
+    done
+}
+
+remove_build_directory() {
+    local build_dir="$1"
+    [[ -n "${build_dir}" && -d "${build_dir}" ]] || return 0
+
+    local resolved_build_dir=""
+    local resolved_repo_root=""
+    resolved_build_dir="$(cd -- "${build_dir}" && pwd -P)"
+    resolved_repo_root="$(cd -- "${repo_root}" && pwd -P)"
+
+    if [[ "${resolved_build_dir}" == "/" || "${resolved_build_dir}" == "${resolved_repo_root}" ]]; then
+        echo "Refusing to remove unsafe Meson build directory '${resolved_build_dir}'." >&2
+        exit 1
+    fi
+
+    if [[ ! -f "${resolved_build_dir}/meson-private/coredata.dat" && ! -f "${resolved_build_dir}/build.ninja" ]]; then
+        echo "Refusing to remove '${resolved_build_dir}' because it does not look like a Meson build directory." >&2
+        exit 1
+    fi
+
+    rm -rf -- "${resolved_build_dir}"
 }
 
 remove_non_runtime_install_artifacts() {
@@ -244,6 +314,7 @@ if [[ "${command_name}" == "install" ]]; then
     "${PYTHON_CMD}" "${check_staged_content_script}" --source-root "${repo_root}"
 fi
 
+
 if [[ "${command_name}" == "compile" || "${command_name}" == "install" ]]; then
     load_build_dir_info "${effective_args[@]}"
 
@@ -259,6 +330,11 @@ if [[ "${command_name}" == "compile" || "${command_name}" == "install" ]]; then
             --wrap-mode=forcefallback
         )
         run_meson "${setup_args[@]}"
+    fi
+
+    if test_game_sources_refresh_needed "${BUILD_DIR}"; then
+        echo "In-tree game source membership changed. Reconfiguring '${BUILD_DIR}'..."
+        run_meson setup --reconfigure "${BUILD_DIR}" "${repo_root}"
     fi
 
     if [[ "${BUILD_DIR_HAS_EXPLICIT}" == "0" ]]; then

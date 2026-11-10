@@ -62,7 +62,14 @@ ID_INLINE int GetSegmentParticleCap() {
 }
 
 ID_INLINE bool BSESpawnTraceEnabled() {
-	return cvarSystem && cvarSystem->GetCVarInteger("bse_frameCounters") >= 2;
+	// openQ4: asked for every particle spawned, so find the cvar once. It is
+	// registered by the renderer; the cvar system's own record of it, which is
+	// what Find returns, outlives a renderer reload.
+	static idCVar* frameCounters = NULL;
+	if (frameCounters == NULL && cvarSystem != NULL) {
+		frameCounters = cvarSystem->Find("bse_frameCounters");
+	}
+	return frameCounters != NULL && frameCounters->GetInteger() >= 2;
 }
 
 ID_INLINE void BSE_BoundTriSurf(srfTriangles_t* tri) {
@@ -97,26 +104,18 @@ void rvSegment::PlayEffect(rvBSE* effect, rvSegmentTemplate* st, float depthOffs
 	// OPENPREY-GATED(D3): nested BSE effects require Quake 4 idGame callbacks.
 	return;
 #else
-	if (!effect || !st || st->mNumEffects <= 0 || !game) {
+	// A child effect only starts while its owner is in an area connected to the
+	// player, and it never inherits the parent's end origin.
+	if (!effect || !st || st->mNumEffects <= 0 || !game || !effect->GetInConnectedArea()) {
 		return;
 	}
 
-	const int index = rvRandom::irand(0, st->mNumEffects - 1);
-	const rvDeclEffect* nested = st->mEffects[index];
+	const rvDeclEffect* nested = st->mEffects[rvRandom::irand(0, st->mNumEffects - 1)];
 	if (!nested) {
 		return;
 	}
 
-	game->PlayEffect(
-		nested,
-		effect->GetCurrentOrigin(),
-		effect->GetCurrentAxis(),
-		false,
-		effect->GetHasEndOrigin() ? effect->GetCurrentEndOrigin() : vec3_origin,
-		false,
-		false,
-		EC_IGNORE,
-		vec4_one);
+	game->PlayEffect(nested, effect->GetCurrentOrigin(), effect->GetCurrentAxis(), false, vec3_origin, false, false, EC_IGNORE, vec4_one);
 #endif
 }
 
@@ -257,7 +256,9 @@ rvParticle* rvSegment::SpawnParticle(rvBSE* effect, rvSegmentTemplate* st, float
 		return NULL;
 	}
 
-	const float fraction = birthTime - effect->GetStartTime();
+	// Single spawns (emitters, trails) pass the absolute birth time as the spawn
+	// fraction, so linearSpacing domains there see game time, as in retail.
+	const float fraction = birthTime;
 	particle->FinishSpawn(effect, this, birthTime, fraction, initOffset, initAxis);
 	BSE_AddSpawned(1);
 	if (BSESpawnTraceEnabled()) {
@@ -454,16 +455,11 @@ void rvSegment::AddToParticleCount(rvBSE* effect, int count, int loopCount, floa
 		duration = st->mParticleTemplate.GetMaxDuration();
 	}
 
-	const float countDuration = duration + BSE_FUTURE;
-	if (mSecondsPerParticle.y > BSE_TIME_EPSILON) {
-		const int mult = static_cast<int>(ceilf(countDuration / mSecondsPerParticle.y)) + 1;
-		mLoopParticleCount += loopCount * mult;
-		mParticleCount += count * mult;
-	}
-	else {
-		mLoopParticleCount += loopCount;
-		mParticleCount += count;
-	}
+	// ValidateSpawnRates keeps a trail's interval at 0.002s or more; the clamp only
+	// guards a trail name that resolves to a segment with no spawn rate.
+	const int mult = static_cast<int>(ceilf((duration + BSE_FUTURE) / Max(BSE_TIME_EPSILON, mSecondsPerParticle.y))) + 1;
+	mLoopParticleCount += loopCount * mult;
+	mParticleCount += count * mult;
 
 	const int particleCap = GetSegmentParticleCap();
 	mParticleCount = idMath::ClampInt(0, particleCap, mParticleCount);

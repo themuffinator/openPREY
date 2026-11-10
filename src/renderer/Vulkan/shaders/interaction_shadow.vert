@@ -1,7 +1,9 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "pbr_vertex.glsl"
 
 // openQ4 Vulkan shadow-receiving interaction — vertex stage (Phase F2a,
-// docs/dev/plans/2026-07-19-vulkan-phase-f.md).
+// docs/dev/archive/2026-10-18/plans/2026-07-19-vulkan-phase-f.md).
 //
 // interaction.vert plus the projected shadow coordinate of the GL
 // shadow_interaction.vs contract: four sets of shadow rows are the light's
@@ -43,6 +45,9 @@ layout(set = 6, binding = 0, std140) uniform InteractionBlock {
     vec4 diffuseColor;
     vec4 specularColor;
     vec4 flatDiffuseParams;
+    // cel banding (RB_SetCelInteractionUniform): x enabled, y band count,
+    // z hard specular, w softness; zero when the surface is not banded
+    vec4 celParams;
 } inter;
 
 layout(set = 7, binding = 1, std140) uniform ShadowBlock {
@@ -53,11 +58,11 @@ layout(set = 7, binding = 1, std140) uniform ShadowBlock {
     vec4 atlasRects[4];
     vec4 splitDepths;
     vec4 cascadeBiasScale;
-    vec4 texelDepthBias;
+    vec4 texelDepthStep;
     vec4 normalOffsetWorld;
     vec4 viewDepthRow;
     vec4 biasParams;   // x: constant bias, y: normal bias, z: cascade blend, w: cascade count
-    vec4 texelSize;    // x,y: 1 / atlas dimensions
+    vec4 texelSize;    // x,y: 1 / atlas dimensions, z: r_shadowMapTexelBiasScale
     vec4 filterParams; // x: radius, y: taps, z: mode, w: hardware compare
     vec4 pcssParams;   // x: light radius, y: max radius, z: effective radius, w: receiver-plane bias
 } shadow;
@@ -77,6 +82,12 @@ layout(location = 11) out vec4 vShadowCoord3;
 layout(location = 12) out float vShadowLightCos;
 layout(location = 13) out vec3 vViewVector;
 layout(location = 14) out float vViewDepth;
+
+// Pack the basis into unused components so the projected receiver remains
+// within Vulkan's minimum 16 varying locations (0..15).
+layout(location = 12, component = 1) out vec3 vPBRTangent0;
+layout(location = 14, component = 1) out vec3 vPBRTangent1;
+layout(location = 15) out vec3 vPBRNormal;
 
 vec3 TangentSpaceVector(vec3 objectVector) {
     return vec3(
@@ -103,9 +114,16 @@ void main() {
     vec3 toLight = inter.localLightOrigin.xyz - position.xyz;
     vec3 toView = inter.localViewOrigin.xyz - position.xyz;
 
-    vLightVector = TangentSpaceVector(toLight);
+    vLightVector = pc.d.x > 0.5 ? toLight : TangentSpaceVector(toLight);
     vHalfAngleVector = TangentSpaceVector(normalize(toLight) + normalize(toView));
-    vViewVector = TangentSpaceVector(toView);
+    // PBR dot products use the interpolated object-space material normal.
+    vViewVector = pc.d.x > 0.5 ? toView : TangentSpaceVector(toView);
+    vPBRTangent0 = inTangent0;
+    vPBRTangent1 = inTangent1;
+    vPBRNormal = inNormal;
+    if (pc.d.x > 0.5) {
+        PBRVertexFrame(inNormal, inTangent0, inTangent1, vPBRNormal, vPBRTangent0, vPBRTangent1);
+    }
 
     vBumpTexCoord = vec2(dot(texCoord, inter.bumpMatrixS), dot(texCoord, inter.bumpMatrixT));
     vDiffuseTexCoord = vec2(dot(texCoord, inter.diffuseMatrixS), dot(texCoord, inter.diffuseMatrixT));

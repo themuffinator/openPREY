@@ -16,11 +16,16 @@
 #define PROJECT_COMPANY				"DarkMatter Productions"
 #define PROJECT_VERSION				OPENQ4_VERSION_SHORT
 #define PROJECT_VERSION_FULL			OPENQ4_VERSION
+#define PROJECT_VERSION_DATE			OPENQ4_VERSION_DATE
 #define PROJECT_WEBSITE				"www.darkmatter-quake.com"
 #define PROJECT_REPO					"https://github.com/themuffinator/openPREY"
+#define PROJECT_RELEASES_URL			PROJECT_REPO "/releases"
 
-#define GAME_NAME						PROJECT_NAME			// appears on window titles and errors
+#define GAME_NAME						PROJECT_NAME			// appears on errors and secondary windows
 #define GAME_ICON						"assets/icons/prey.ico"
+
+// caption of the main game window: "openPREY - Version: 0.0.1-dev (2026-11-10)"
+#define GAME_WINDOW_TITLE				PROJECT_NAME " - Version: " PROJECT_VERSION " (" PROJECT_VERSION_DATE ")"
 
 #define ENGINE_VERSION					PROJECT_NAME " " PROJECT_VERSION
 

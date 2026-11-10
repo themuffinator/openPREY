@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PLAN = "docs/dev/plans/2026-06-30-apple-support-no-macos-access.md"
+PLAN = "docs/dev/archive/2026-10-18/plans/2026-06-30-apple-support-no-macos-access.md"
 DOC = "docs/dev/macos-local-validation-track.md"
 
 

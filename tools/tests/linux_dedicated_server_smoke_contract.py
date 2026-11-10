@@ -50,6 +50,13 @@ def main() -> None:
         '"si_gameType", "deathmatch"',
         '"s_noSound", "1"',
         '"net_serverDedicated", "1"',
+        'IPV4_SELF_TEST_MARKER = "IPv4 network self-test: passed"',
+        'CANONICAL_GAMETYPE_MARKER = \'"si_gameType" is:"DM"\'',
+        "IPV4_SELF_TEST_MARKER,",
+        "CANONICAL_GAMETYPE_MARKER,",
+        '"+netIPv4SelfTest"',
+        '"+si_gameType"',
+        '"IPv4 network self-test: FAILED"',
         '"+wait", "1"',
         '"Selected game module: logical=\'game\'"',
         '"game initialized."',
@@ -60,6 +67,14 @@ def main() -> None:
         "subprocess.TimeoutExpired",
     ):
         require(runner, token, "Linux dedicated-server smoke runner")
+    command = runner[runner.index("    command = [") : runner.index("\n    ]", runner.index("    command = ["))]
+    if not (
+        command.index('"si_gameType", "dm"')
+        < command.index('"+netIPv4SelfTest"')
+        < command.index('"+si_gameType"')
+        < command.index('"+echo", READY_MARKER')
+    ):
+        raise AssertionError("Linux dedicated smoke must test IPv4 and canonical DM before its ready marker")
     reject(runner, "Program Files", "asset-free Linux dedicated-server smoke runner")
     reject(runner, "steamapps", "asset-free Linux dedicated-server smoke runner")
     require(
@@ -67,6 +82,23 @@ def main() -> None:
         '#ifdef ID_DEDICATED\n\tcommon->Printf( "Dedicated server: skipping client GUI preload.\\n" );\n#else',
         "dedicated session client-GUI exclusion",
     )
+    # A dedicated server never has a device. Session init's no-device guard is
+    # the client's only and follows the command registrations, so a dedicated
+    # server registers rescanSI (which copies its settings into each map it
+    # spawns) and allocates the worlds a map needs; without them it could not
+    # spawn a map at all.
+    init = session[session.index("void idSessionLocal::Init() {") :]
+    init = init[: init.index("\n}\n")]
+    guard = "#ifndef ID_DEDICATED\n\t// A rejected recoverable restart can leave no device"
+    require(init, guard, "client-only session no-device guard")
+    require_count(init, "IsOpenGLRunning() ) return;", 1, "session init")
+    if not (
+        init.index('AddCommand( "rescanSI"')
+        < init.index(guard)
+        < init.index("IsOpenGLRunning() ) return;")
+        < init.index("rw = renderSystem->AllocRenderWorld();")
+    ):
+        raise AssertionError("session init must register its commands before the client-only no-device guard")
     # The dedicated server never creates a context, so idRenderSystem::Shutdown()
     # tears down a vertex cache that Init() never touched. That used to be
     # guarded at the call site with glConfig.isInitialized, which was wrong in
@@ -91,7 +123,9 @@ def main() -> None:
     )
     require(
         vertex_cache,
-        "void idVertexCache::Shutdown() {\n\tif ( staticHeaders.next == NULL || deferredFreeList.next == NULL ) {",
+        # deferredFreeList became one list per vertex frame (8ed86d2d9); Init links
+        # every slot, so the current slot's sentinel still marks "never initialized".
+        "void idVertexCache::Shutdown() {\n\tif ( staticHeaders.next == NULL || deferredFreeList[listNum].next == NULL ) {",
         "uninitialized vertex-cache shutdown guard",
     )
 

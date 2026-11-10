@@ -317,14 +317,14 @@ private:
 
 idCVar s_lockListener( "s_lockListener", "0", CVAR_BOOL, "lock listener updates" );
 idCVar s_constantAmplitude( "s_constantAmplitude", "-1", CVAR_FLOAT, "" );
-idCVar s_maxEmitterChannels( "s_maxEmitterChannels", "48", CVAR_INTEGER, "Can be set lower than the absolute max of MAX_HARDWARE_VOICES" );
+idCVar s_maxEmitterChannels( "s_maxEmitterChannels", "48", CVAR_INTEGER | CVAR_ARCHIVE, "Can be set lower than the absolute max of MAX_HARDWARE_VOICES" );
 idCVar s_cushionFadeChannels( "s_cushionFadeChannels", "2", CVAR_INTEGER, "Ramp currentCushionDB so this many emitter channels should be silent" );
 idCVar s_cushionFadeRate( "s_cushionFadeRate", "60", CVAR_FLOAT, "DB / second change to currentCushionDB" );
 idCVar s_cushionFadeLimit( "s_cushionFadeLimit", "-30", CVAR_FLOAT, "Never cushion fade beyond this level" );
 idCVar s_cushionFadeOver( "s_cushionFadeOver", "10", CVAR_FLOAT, "DB above s_cushionFadeLimit to start ramp to silence" );
 idCVar s_unpauseFadeInTime( "s_unpauseFadeInTime", "250", CVAR_INTEGER, "When unpausing a sound world, milliseconds to fade sounds in over" );
 idCVar s_doorDistanceAdd( "s_doorDistanceAdd", "150", CVAR_FLOAT, "reduce sound volume with this distance when going through a door" );
-idCVar s_quadraticFalloff( "s_quadraticFalloff", "1", CVAR_ARCHIVE | CVAR_BOOL, "use quadratic sound distance falloff" );
+idCVar s_quadraticFalloff( "s_quadraticFalloff", "0", CVAR_BOOL, "use quadratic sound distance falloff" );
 idCVar s_drawSounds( "s_drawSounds", "0", CVAR_INTEGER, "", 0, 2, idCmdSystem::ArgCompletion_Integer<0, 2> );
 idCVar s_showVoices( "s_showVoices", "0", CVAR_BOOL, "show active voices" );
 idCVar s_volume_dB( "s_volume_dB", "-6", CVAR_ARCHIVE | CVAR_SOUND | CVAR_FLOAT, "volume in dB", DB_SILENCE, 0.0f );
@@ -355,6 +355,7 @@ idSoundWorldLocal::idSoundWorldLocal()
 	shakeAmp = 0.0f;
 	rumbleAmp = 0.0f;
 	currentCushionDB = DB_SILENCE;
+	lastCushionTime = 0;
 
 	localSound = AllocSoundEmitter();
 
@@ -365,6 +366,8 @@ idSoundWorldLocal::idSoundWorldLocal()
 
 	slowmoSpeed = 1.0f;
 	enviroSuitActive = false;
+	underwaterActive = false;
+	liquidTest = NULL;
 }
 
 /*
@@ -428,7 +431,16 @@ idSoundWorldLocal::AllocSoundChannel
 */
 idSoundChannel* idSoundWorldLocal::AllocSoundChannel()
 {
-	return channelAllocator.Alloc();
+	idSoundChannel* channel = channelAllocator.Alloc();
+	// idBlockAlloc hands out recycled channels without constructing them again (BFG's
+	// allocator placed a new object). A recycled channel kept its old volume fade, so
+	// after a map script faded a sound to -80 dB and removed it, whatever sound got
+	// that channel next played silent.
+	if( channel != NULL )
+	{
+		channel->Reset();
+	}
+	return channel;
 }
 
 /*
@@ -450,11 +462,34 @@ idSoundWorldLocal::CurrentShakeAmplitude
 */
 float idSoundWorldLocal::CurrentShakeAmplitude()
 {
+	return ShakeAmplitudeForPosition( listener.pos );
+}
+
+float idSoundWorldLocal::ShakeAmplitudeForPosition( const idVec3& listenerPosition )
+{
 	if( s_constantAmplitude.GetFloat() >= 0.0f )
 	{
-		return s_constantAmplitude.GetFloat();
+		return 0.0f;
 	}
-	return shakeAmp;
+	const int currentTime = GetSoundTime();
+	float amplitude = 0.0f;
+	// Slot zero is this world's localSound emitter, not an unused sentinel.
+	for( int i = 0; i < emitters.Num(); ++i )
+	{
+		if( emitters[i] != NULL )
+		{
+			amplitude += emitters[i]->ShakeAmplitudeForPosition( currentTime, listenerPosition );
+		}
+	}
+	return amplitude;
+}
+
+float idSoundSystemLocal::CurrentShakeAmplitudeForPosition( int worldId, const int time, const idVec3& listenerPosition )
+{
+	// The sound world's playback clock also covers shifted and slow-motion sounds.
+	(void)time;
+	idSoundWorldLocal* world = static_cast<idSoundWorldLocal*>( GetSoundWorldFromId( worldId ) );
+	return world != NULL ? world->ShakeAmplitudeForPosition( listenerPosition ) : 0.0f;
 }
 
 float idSoundWorldLocal::CurrentShakeAmplitudeForPosition( const int time, const idVec3& listenerPosition )
@@ -756,6 +791,8 @@ void idSoundWorldLocal::Update()
 	// A hardware channel is a channel from the sound file itself (IE: left, right, LFE)
 	// We only allow MAX_HARDWARE_CHANNELS channels, which may wind up being a smaller number of idSoundChannels
 	idStaticList< idActiveChannel, MAX_ACTIVE_EMITTER_CHANNEL_CANDIDATES > activeEmitterChannels;
+	// Voice-over that has gone silent but cannot be muted without losing its lip sync
+	idStaticList< idSoundChannel*, MAX_HARDWARE_VOICES > silentUnmutableChannels;
 	const int maxEmitterChannels = idMath::ClampInt( 1, MAX_HARDWARE_VOICES, s_maxEmitterChannels.GetInteger() );
 
 	int activeHardwareChannels = 0;
@@ -788,6 +825,12 @@ void idSoundWorldLocal::Update()
 				if( channel->CanMute() )
 				{
 					channel->Mute();
+				}
+				else if( channel->hardwareVoice != NULL && silentUnmutableChannels.Num() < silentUnmutableChannels.Max() )
+				{
+					// Skipping it left the line playing at its last audible gain: on through
+					// alt-tab with s_muteUnfocused, and through a door that had just closed.
+					silentUnmutableChannels.Append( channel );
 				}
 				continue;
 			}
@@ -839,7 +882,10 @@ void idSoundWorldLocal::Update()
 		}
 	}
 
-	const float secondsPerFrame = 1.0f / 60.0f;
+	// s_cushionFadeRate is dB per second of sound time. BFG stepped it by a fixed 1/60 s
+	// per update, which ramped four times too fast at 240 fps.
+	const float secondsPerFrame = ( lastCushionTime > 0 ) ? idMath::ClampFloat( 0.0f, 0.25f, ( currentTime - lastCushionTime ) * 0.001f ) : ( 1.0f / 60.0f );
+	lastCushionTime = currentTime;
 
 	// ------------------
 	// In the very common case of having more sounds that would contribute to the
@@ -858,7 +904,7 @@ void idSoundWorldLocal::Update()
 	// ------------------
 	// Update Hardware
 	// ------------------
-	shakeAmp = 0.0f;
+	shakeAmp = CurrentShakeAmplitude();
 	rumbleAmp = 0.0f;
 
 	idStr showVoiceTable;
@@ -870,6 +916,14 @@ void idSoundWorldLocal::Update()
 							   soundSystemLocal.activeStreamBufferContexts.Num(), soundSystemLocal.freeStreamBufferContexts.Num() );
 	}
 	soundSystemLocal.hardware.BeginDeferredUpdates();
+	// Retail places the area reverb slots before it mixes any channel, so every
+	// voice's sends below see this frame's slots.
+	soundSystemLocal.reverb.Update( this );
+	// These keep running at zero gain, so the line resumes in step when it is heard again.
+	for( int i = 0; i < silentUnmutableChannels.Num(); i++ )
+	{
+		silentUnmutableChannels[i]->UpdateHardware( 0.0f, currentTime );
+	}
 	for( int i = 0; i < activeEmitterChannels.Num(); i++ )
 	{
 		idSoundChannel* chan = activeEmitterChannels[i].channel;
@@ -896,14 +950,13 @@ void idSoundWorldLocal::Update()
 			showVoiceTable += voiceLine;
 		}
 
-		// Calculate shakes
+		// Controller rumble follows the audible mix; camera shake is queried separately.
 		if( chan->hardwareVoice == NULL )
 		{
 			continue;
 		}
 
 		const float channelAmplitude = chan->hardwareVoice->GetGain() * chan->currentAmplitude;
-		shakeAmp += chan->parms.shakes * channelAmplitude;
 
 		float channelRumble = idMath::Fabs( chan->parms.shakes ) * channelAmplitude;
 		if( ( chan->parms.soundShaderFlags & SSF_CAUSE_RUMBLE ) != 0 )
@@ -925,6 +978,7 @@ void idSoundWorldLocal::Update()
 		// the voice list is actually usable for diagnosing silent sounds.
 //		static idOverlayHandle handle;
 //		console->PrintOverlay( handle, JUSTIFY_LEFT, showVoiceTable.c_str() );
+		showVoiceTable += va( "shake: %.3f  rumble: %.3f\n", shakeAmp, rumbleAmp );
 		idLib::Printf( "%s", showVoiceTable.c_str() );
 	}
 
@@ -995,6 +1049,24 @@ void idSoundWorldLocal::OnReloadSound( const idDecl* shader )
 	{
 		emitters[i]->OnReloadSound( shader );
 	}
+}
+
+/*
+========================
+idSoundWorldLocal::DemoEmitterForIndex
+
+A render demo records the emitter's live index, and slot zero is this world's
+localSound emitter (music, narration, interface sounds), which SCMD_STATE
+recreates first. Savegames never name it; demos do.
+========================
+*/
+idSoundEmitter* idSoundWorldLocal::DemoEmitterForIndex( int index )
+{
+	if( index == 0 )
+	{
+		return emitters.Num() > 0 ? emitters[0] : NULL;
+	}
+	return EmitterForIndex( index );
 }
 
 /*
@@ -1102,10 +1174,10 @@ void idSoundWorldLocal::Pause()
 {
 	if( !isPaused )
 	{
-		pausedTime = soundSystemLocal.SoundTime();
+		pausedTime = soundSystemLocal.RefreshSoundTime();
 		isPaused = true;
 		// just pause all unmutable voices (normally just voice overs)
-		for( int e = emitters.Num() - 1; e > 0; e-- )
+		for( int e = emitters.Num() - 1; e >= 0; e-- )
 		{
 			for( int i = 0; i < emitters[e]->channels.Num(); i++ )
 			{
@@ -1129,12 +1201,12 @@ void idSoundWorldLocal::UnPause()
 	if( isPaused )
 	{
 		isPaused = false;
-		accumulatedPauseTime += soundSystemLocal.SoundTime() - pausedTime;
+		accumulatedPauseTime += soundSystemLocal.RefreshSoundTime() - pausedTime;
 		pauseFade.SetVolume( 0.0f );
 		pauseFade.Fade( 1.0f, s_unpauseFadeInTime.GetInteger(), GetSoundTime() );
 
 		// just unpause all unmutable voices (normally just voice overs)
-		for( int e = emitters.Num() - 1; e > 0; e-- )
+		for( int e = emitters.Num() - 1; e >= 0; e-- )
 		{
 			for( int i = 0; i < emitters[e]->channels.Num(); i++ )
 			{
@@ -1458,7 +1530,7 @@ bool idSoundWorldLocal::ProcessDemoCommand( idDemoFile* readDemo )
 			{
 				return false;
 			}
-			idSoundEmitter* emitter = EmitterForIndex( index );
+			idSoundEmitter* emitter = DemoEmitterForIndex( index );
 			if( emitter == NULL )
 			{
 				return reader.Fail( va( "references unavailable emitter %d", index ) );
@@ -1486,7 +1558,7 @@ bool idSoundWorldLocal::ProcessDemoCommand( idDemoFile* readDemo )
 			{
 				return reader.Fail( va( "contains invalid diversity %g", diversity ) );
 			}
-			idSoundEmitter* emitter = EmitterForIndex( index );
+			idSoundEmitter* emitter = DemoEmitterForIndex( index );
 			if( emitter == NULL )
 			{
 				return reader.Fail( va( "references unavailable emitter %d", index ) );
@@ -1507,7 +1579,7 @@ bool idSoundWorldLocal::ProcessDemoCommand( idDemoFile* readDemo )
 			{
 				return false;
 			}
-			idSoundEmitter* emitter = EmitterForIndex( index );
+			idSoundEmitter* emitter = DemoEmitterForIndex( index );
 			if( emitter == NULL )
 			{
 				return reader.Fail( va( "references unavailable emitter %d", index ) );
@@ -1524,7 +1596,7 @@ bool idSoundWorldLocal::ProcessDemoCommand( idDemoFile* readDemo )
 			{
 				return false;
 			}
-			idSoundEmitter* emitter = EmitterForIndex( index );
+			idSoundEmitter* emitter = DemoEmitterForIndex( index );
 			if( emitter == NULL )
 			{
 				return reader.Fail( va( "references unavailable emitter %d", index ) );
@@ -1545,7 +1617,7 @@ bool idSoundWorldLocal::ProcessDemoCommand( idDemoFile* readDemo )
 			{
 				return false;
 			}
-			idSoundEmitter* emitter = EmitterForIndex( index );
+			idSoundEmitter* emitter = DemoEmitterForIndex( index );
 			if( emitter == NULL )
 			{
 				return reader.Fail( va( "references unavailable emitter %d", index ) );
@@ -1822,6 +1894,14 @@ bool idSoundWorldLocal::ReadSoundState( idFile* savefile, idDemoFile* demoFile )
 		return AbortRead();
 	}
 	const int timeDelta = static_cast<int>( timeDelta64 );
+	if( demoFile == NULL )
+	{
+		// Restored sounds keep their place relative to this moment, but the level is
+		// still loading: hold the clock here until the session unpauses the world
+		// when the map change completes, or a line resumes as far into itself as
+		// the rest of the load took, ahead of the lip sync the game clock drives.
+		Pause();
+	}
 
 	idSoundFade restoredVolumeFade;
 	idSoundFade restoredSoundClassFade[SOUND_MAX_CLASSES];
@@ -1954,6 +2034,13 @@ bool idSoundWorldLocal::ReadSoundState( idFile* savefile, idDemoFile* demoFile )
 				reader.Fail( va( "could not resolve sound shader '%s'", shaderName.c_str() ) );
 				return AbortRead();
 			}
+			// Saves and demos from before the retail area reverb stored the old
+			// shader default wet level of 0, which no override can produce now: a
+			// zero override is ignored, so only a shader saying "reverb 0" can.
+			if( !( channel->parms.wetLevel > 0.0f ) && channel->soundShader->GetParms()->wetLevel > 0.0f )
+			{
+				channel->parms.wetLevel = channel->soundShader->GetParms()->wetLevel;
+			}
 
 			// If the leadin sample is not valid (possible if the shader changed after saving) then the looping entry can't be valid either.
 			channel->leadinSample = NULL;
@@ -2078,4 +2165,27 @@ idSoundWorldLocal::SetEnviroSuit
 void idSoundWorldLocal::SetEnviroSuit( bool active )
 {
 	enviroSuitActive = active;
+}
+
+/*
+=================
+idSoundWorldLocal::SetUnderwater
+
+Muffles the whole mix while the listener's head is below a liquid surface. The game re-derives this
+from the eye position every frame, so unlike the enviro suit it is not part of the savegame.
+=================
+*/
+void idSoundWorldLocal::SetUnderwater( bool active )
+{
+	underwaterActive = active;
+}
+
+/*
+=================
+idSoundWorldLocal::SetLiquidTest
+=================
+*/
+void idSoundWorldLocal::SetLiquidTest( liquidTest_t test )
+{
+	liquidTest = test;
 }

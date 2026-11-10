@@ -8,6 +8,23 @@
 
 static const GLuint INVALID_RENDER_TEXTURE_HANDLE = static_cast<GLuint>( -1 );
 
+// openQ4: the frame's default target (RenderTexture.h). NULL and 0 mean the
+// window; a VR frame stands its eye or virtual-screen target in for it.
+static idRenderTexture *	r_defaultRenderTarget = NULL;
+static GLuint				r_defaultFramebuffer = 0;
+static bool					r_defaultTargetPremultiplied = false;
+static bool					r_defaultFramebufferBound = true;
+
+// GL_State caches blend factors by state bits, so a change in how alpha is
+// blended has to force its next call to reissue them.
+static void R_TrackDefaultFramebufferBound( bool bound ) {
+	const bool wasPremultiplied = R_PremultipliedDefaultTargetBound();
+	r_defaultFramebufferBound = bound;
+	if ( R_PremultipliedDefaultTargetBound() != wasPremultiplied ) {
+		backEnd.glState.forceGlState = true;
+	}
+}
+
 static GLenum R_CubeFaceTarget( int cubeFace ) {
 	const int clampedFace = idMath::ClampInt( 0, 5, cubeFace );
 	return GL_TEXTURE_CUBE_MAP_POSITIVE_X + clampedFace;
@@ -81,6 +98,7 @@ static const char* R_FramebufferStatusName( GLenum status ) {
 static const char* R_TextureFormatName( textureFormat_t format ) {
 	switch ( format ) {
 		case FMT_RGBA8: return "RGBA8";
+		case FMT_SRGBA8: return "SRGBA8";
 		case FMT_XRGB8: return "XRGB8";
 		case FMT_ALPHA: return "ALPHA";
 		case FMT_L8A8: return "L8A8";
@@ -206,6 +224,10 @@ idRenderTexture::~idRenderTexture
 ========================
 */
 idRenderTexture::~idRenderTexture() {
+	if ( r_defaultRenderTarget == this ) {
+		r_defaultRenderTarget = NULL;
+		r_defaultFramebuffer = 0;
+	}
 	ReleaseDeviceHandle();
 }
 
@@ -240,6 +262,10 @@ void idRenderTexture::ReleaseDeviceHandle( void ) {
 	deviceHandle = INVALID_RENDER_TEXTURE_HANDLE;
 	deviceHandleGeneration = -1;
 	validatedCubeFaces = 0;
+	if ( r_defaultRenderTarget == this ) {
+		// the stand-in keeps its role; InitRenderTexture publishes its new name
+		r_defaultFramebuffer = 0;
+	}
 }
 
 /*
@@ -282,8 +308,13 @@ idRenderTexture::FailFramebuffer
 bool idRenderTexture::FailFramebuffer( GLenum status, const char* operation ) {
 	ReportFramebufferFailure( status, operation );
 	CaptureAttachmentHandles();
+	if ( r_defaultRenderTarget == this ) {
+		// a broken stand-in hands the frame back to the window
+		r_defaultRenderTarget = NULL;
+		r_defaultFramebuffer = 0;
+	}
 	if ( glConfig.isInitialized && glBindFramebuffer != NULL ) {
-		glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+		glBindFramebuffer( GL_FRAMEBUFFER, r_defaultFramebuffer );
 	}
 	ReleaseDeviceHandle();
 	knownIncomplete = true;
@@ -499,7 +530,10 @@ bool idRenderTexture::InitRenderTexture(void) {
 
 	CaptureAttachmentHandles();
 	ApplyDebugLabel();
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	if ( r_defaultRenderTarget == this ) {
+		r_defaultFramebuffer = deviceHandle;
+	}
+	glBindFramebuffer( GL_FRAMEBUFFER, r_defaultFramebuffer );
 	return true;
 }
 
@@ -527,6 +561,7 @@ bool idRenderTexture::MakeCurrent(void) {
 		return false;
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, deviceHandle);
+	R_TrackDefaultFramebufferBound( false );
 	R_SetRenderTextureDrawBuffers( colorImages.Num() );
 	return true;
 }
@@ -545,6 +580,7 @@ bool idRenderTexture::MakeCurrent( int cubeFace ) {
 		return false;
 	}
 	glBindFramebuffer( GL_FRAMEBUFFER, deviceHandle );
+	R_TrackDefaultFramebufferBound( false );
 
 	const int clampedCubeFace = idMath::ClampInt( 0, 5, cubeFace );
 	const GLenum faceTarget = R_CubeFaceTarget( clampedCubeFace );
@@ -594,8 +630,61 @@ idRenderTexture::BindNull
 */
 void idRenderTexture::BindNull(void) {
 	if ( glConfig.isInitialized && glBindFramebuffer != NULL ) {
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindFramebuffer( GL_FRAMEBUFFER, r_defaultFramebuffer );
+		R_TrackDefaultFramebufferBound( true );
 	}
+}
+
+/*
+================
+R_SetDefaultRenderTarget
+================
+*/
+void R_SetDefaultRenderTarget( idRenderTexture *target ) {
+	R_SetDefaultRenderTargetPremultiplied( false );
+	r_defaultRenderTarget = NULL;
+	r_defaultFramebuffer = 0;
+	if ( target == NULL ) {
+		return;
+	}
+	const GLuint handle = target->GetDeviceHandle();
+	if ( handle == 0 || handle == INVALID_RENDER_TEXTURE_HANDLE ) {
+		// an unusable stand-in leaves the window as the target rather than
+		// drawing the frame nowhere
+		return;
+	}
+	r_defaultRenderTarget = target;
+	r_defaultFramebuffer = handle;
+}
+
+idRenderTexture *R_GetDefaultRenderTarget( void ) {
+	return r_defaultRenderTarget;
+}
+
+unsigned int R_DefaultFramebufferHandle( void ) {
+	return r_defaultFramebuffer;
+}
+
+unsigned int R_DefaultColorBuffer( void ) {
+	return r_defaultFramebuffer != 0 ? GL_COLOR_ATTACHMENT0 : GL_BACK;
+}
+
+void R_SetDefaultDrawAndReadBuffers( void ) {
+	const GLenum buffer = R_DefaultColorBuffer();
+	glDrawBuffer( buffer );
+	glReadBuffer( buffer );
+}
+
+void R_SetDefaultRenderTargetPremultiplied( bool premultiplied ) {
+	const bool wasPremultiplied = R_PremultipliedDefaultTargetBound();
+	r_defaultTargetPremultiplied = premultiplied;
+	if ( R_PremultipliedDefaultTargetBound() != wasPremultiplied ) {
+		backEnd.glState.forceGlState = true;
+	}
+}
+
+bool R_PremultipliedDefaultTargetBound( void ) {
+	return r_defaultTargetPremultiplied && r_defaultFramebufferBound && r_defaultFramebuffer != 0;
 }
 
 /*

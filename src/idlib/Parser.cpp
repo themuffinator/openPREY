@@ -1,3 +1,4 @@
+#include "ParserSourceObserver.h"
 
 
 
@@ -343,7 +344,7 @@ define_t *idParser::DefineFromString( const char *string ) {
 	idParser src;
 	define_t *def;
 
-	if ( !src.LoadMemory(string, strlen(string), "*defineString") ) {
+	if ( !src.LoadMemory( string, idLib::SizeToInt( strlen( string ), "idParser::DefineFromString" ), "*defineString" ) ) {
 		return NULL;
 	}
 	// create a define from the source
@@ -1012,8 +1013,7 @@ static bool Parser_StripPackArchivePrefix( idStr& path ) {
 		return true;
 	}
 
-	// The caller strips the current filename first. A file at the archive root
-	// therefore leaves a base ending in just "pak-name.pk4", without a slash.
+	// An archive-root base can end in just "pak-name.pk4", without a slash.
 	const int pakSuffixPos = path.Length() - 4;
 	if ( pakSuffixPos >= 0 && idStr::Icmp( path.c_str() + pakSuffixPos, ".pk4" ) == 0 ) {
 		path.Clear();
@@ -1065,6 +1065,11 @@ idParser::Directive_include
 */
 int idParser::Directive_include( void ) {
 	idLexer *script;
+	const auto loadInclude = [&]( const char *path ) {
+		const int loaded = script->LoadFile( path, OSPath );
+		idParserSourceObserver::Notify( this, path, loaded ? script->buffer : NULL, loaded ? script->length : -1 );
+		return loaded;
+	};
 	idToken token;
 	idStr path;
 
@@ -1082,8 +1087,10 @@ int idParser::Directive_include( void ) {
 		// the lexer reports an OS or pk4-backed filename.
 		idStr relBase = scriptstack->GetFileName();
 		relBase.BackSlashesToSlashes();
-		relBase.StripFilename();
+		// Convert the complete filename first: an empty relative directory is
+		// the valid VFS root, but an empty OS-path conversion also means failure.
 		Parser_NormalizeIncludeBase( relBase );
+		relBase.StripFilename();
 		relBase.StripTrailing( '/' );
 
 		idStr tokenStr = token.c_str();
@@ -1099,13 +1106,13 @@ int idParser::Directive_include( void ) {
 			path = tokenStr;
 		}
 
-		if ( !script->LoadFile( path, OSPath ) ) {
+		if ( !loadInclude( path ) ) {
 			// try absolute path
 			path = token;
-			if ( !script->LoadFile( path, OSPath ) ) {
+			if ( !loadInclude( path ) ) {
 				// try from the include path
 				path = includepath + token;
-				if ( !script->LoadFile( path, OSPath ) ) {
+				if ( !loadInclude( path ) ) {
 					delete script;
 					script = NULL;
 				}
@@ -1135,7 +1142,7 @@ int idParser::Directive_include( void ) {
 			return true;
 		}
 		script = new idLexer;
-		if ( !script->LoadFile( includepath + path, OSPath ) ) {
+		if ( !loadInclude( includepath + path ) ) {
 			delete script;
 			script = NULL;
 		}
@@ -2306,7 +2313,7 @@ int idParser::Directive_evalfloat( void ) {
 	token.whiteSpaceEnd_p = NULL;
 	token.linesCrossed = 0;
 	token.flags = 0;
-	sprintf(buf, "%1.2f", idMath::Fabs(value));
+	idStr::snPrintf( buf, sizeof( buf ), "%1.2f", idMath::Fabs(value) );
 	token = buf;
 	token.type = TT_NUMBER;
 	token.subtype = TT_FLOAT|TT_LONG|TT_DECIMAL;
@@ -2439,7 +2446,11 @@ idParser::DollarDirective_evalfloat
 int idParser::DollarDirective_evalfloat( void ) {
 	double value;
 	idToken token;
-	char buf[128];
+	// openQ4: the evaluator multiplies in doubles and this one formats the
+	// double, so "%1.2f" can run past 300 digits ($evalfloat of
+	// 1e38*1e38*1e38*1e38 already needs 156) and overran the 128 bytes this
+	// used to be. #evalfloat narrows to float first and stays under 50.
+	char buf[512];
 
 	if ( !idParser::DollarEvaluate( NULL, &value, false ) ) {
 		return false;
@@ -2450,7 +2461,7 @@ int idParser::DollarDirective_evalfloat( void ) {
 	token.whiteSpaceEnd_p = NULL;
 	token.linesCrossed = 0;
 	token.flags = 0;
-	sprintf( buf, "%1.2f", fabs( value ) );
+	idStr::snPrintf( buf, sizeof( buf ), "%1.2f", fabs( value ) );
 	token = buf;
 	token.type = TT_NUMBER;
 	token.subtype = TT_FLOAT | TT_LONG | TT_DECIMAL | TT_VALUESVALID;
@@ -3078,7 +3089,7 @@ void idParser::GetStringFromMarker( idStr& out, bool clean ) {
 	
 	// If cleaning then reparse
 	if ( clean ) {	
-		idParser temp( marker_p, strlen( marker_p ), "temp", flags );
+		idParser temp( marker_p, idLib::SizeToInt( strlen( marker_p ), "idParser::GetStringFromMarker" ), "temp", flags );
 		idToken token;
 		while ( temp.ReadToken ( &token ) ) {
 			out += token;
@@ -3152,6 +3163,8 @@ int idParser::LoadFile( const char *filename, bool OSPath ) {
 		return false;
 	}
 	script = new idLexer( filename, 0, OSPath );
+	idParserSourceObserver::Notify( this, filename, script->IsLoaded() ? script->buffer : NULL,
+		script->IsLoaded() ? script->length : -1 );
 	if ( !script->IsLoaded() ) {
 		delete script;
 		return false;

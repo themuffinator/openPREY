@@ -28,7 +28,7 @@ def validate_matrix_policy_doc() -> None:
 
     for token in (
         "# macOS Support Matrix Policy",
-        "Current macOS release artifacts are experimental Apple Silicon/arm64 only",
+        "Current macOS release artifacts are preview Apple Silicon/arm64 only",
         "The current user-facing release policy is `arm64 only`",
         "Intel Mac / `x86_64` packages",
         "universal2 packages",
@@ -50,7 +50,7 @@ def validate_release_facing_docs() -> None:
     getting_started = read("docs/user/getting-started.md")
     package_readme = read("assets/release/README.html")
     release_completion = read("docs/dev/release-completion.md")
-    compat = read("src/sys/osx/macosx_compat.mm")
+    compat = read("src/sys/macos/macos_compat.mm")
 
     for source, context in (
         (platform, "platform support documentation"),
@@ -79,7 +79,11 @@ def validate_release_facing_docs() -> None:
         "Apple Silicon/arm64 Macs on macOS 11 or later",
         "getting started macOS floor and architecture",
     )
-    require(getting_started, "Intel Mac and universal2 packages are not published yet", "getting started Intel/universal2 wording")
+    require(
+        getting_started,
+        "Our GitHub releases do not yet publish Intel Mac or universal2 packages",
+        "getting started Intel/universal2 wording",
+    )
     require(getting_started, "Rosetta is not a supported release target", "getting started Rosetta wording")
     require(
         package_readme,
@@ -125,15 +129,17 @@ def validate_workflow_matrix_scope() -> None:
     for token in ("macos-universal2", "macOS universal2"):
         reject(push, token, "push verification macOS matrix")
 
+    # Pull requests validate only the published arm64 slice. Intel builds one
+    # bridge on pushes to main; the manual candidate lane assembles universal2.
     require(commit, "macos-arm64:", "commit validation macOS arm64 job")
-    require(commit, "macos-x64:", "commit validation macOS Intel job")
-    require(commit, "macos-universal2:", "commit validation macOS universal2 assembly job")
-    require(commit, "Pre-publication gate", "commit validation universal2 evidence boundary")
-    require(commit, "runs-on: macos-15-intel", "commit validation macOS Intel runner")
-    require(commit, "commit-macos-x64-${{ matrix.artifact_suffix }}-payload", "commit validation Intel payload")
+    for token in ("macos-x64:", "macos-universal2:", "runs-on: macos-15-intel", "commit-macos-x64-"):
+        reject(commit, token, "commit validation macOS matrix")
     require(push, "macos-15", "push verification hosted macOS runner")
     require(push, "macOS Intel x64 OpenGL Push Verification", "push verification Intel OpenGL job")
-    require(push, "macOS Intel x64 Metal Push Verification", "push verification Intel Metal job")
+    reject(push, "macOS Intel x64 Metal Push Verification", "push verification Intel matrix")
+    candidate = read(".github/workflows/macos-universal2-candidate.yml")
+    require(candidate, "workflow_dispatch:", "manual universal2 candidate lane")
+    require(candidate, '"runner": "macos-15-intel"', "manual universal2 candidate Intel thin build")
 
 
 def validate_evidence_contract() -> None:
@@ -176,7 +182,7 @@ def validate_evidence_contract() -> None:
 
     for token in (
         "os_matrix_role",
-        "Architecture policy: arm64-only experimental release matrix",
+        "Architecture policy: arm64-only preview release matrix",
         "OS matrix role:",
         "Xcode And SDK",
         "xcodebuild -version",
@@ -232,7 +238,7 @@ def validate_ci_and_local_wiring() -> None:
 
 
 def validate_phase4_plan_status() -> None:
-    plan = read("docs/dev/plan/2026-06-30-macos-compatibility-support.md")
+    plan = read("docs/dev/archive/2026-10-18/plan/2026-06-30-macos-compatibility-support.md")
 
     for token in (
         "Phase 4: Matrix expansion",

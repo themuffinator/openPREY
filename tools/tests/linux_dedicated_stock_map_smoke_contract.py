@@ -29,7 +29,7 @@ def main() -> None:
     status_ledger = read("docs/dev/prey-rebase/status-ledger.md")
     session = read("src/framework/Session.cpp")
     linux_main = read("src/sys/linux/main.cpp")
-    macos_main = read("src/sys/osx/macosx_sdl3_main.cpp")
+    macos_main = read("src/sys/macos/macos_sdl3_main.cpp")
     posix_console = read("src/sys/posix/posix_syscon.cpp")
 
     for token in (
@@ -148,9 +148,16 @@ def main() -> None:
         "shared validation host-evidence behavior coverage",
     )
     require(status_ledger, "TODO-RELEASE-LANES", "release-lane deferral policy")
+    # openPREY-ded is always a dedicated server; the client is one with
+    # net_serverDedicated 1 and no device, and skips the same presentation.
     require(
         session,
-        "void idSessionLocal::ShowLoadingGui() {\n#ifdef ID_DEDICATED\n\t// Dedicated servers have no loading GUI",
+        "bool idSessionLocal::IsDedicatedServer() const {\n#ifdef ID_DEDICATED\n\treturn true;\n#else",
+        "dedicated session predicate",
+    )
+    require(
+        session,
+        "void idSessionLocal::ShowLoadingGui() {\n\tif ( IsDedicatedServer() ) {\n\t\t// Dedicated servers have no loading GUI",
         "dedicated map-load presentation exclusion",
     )
     require(
@@ -165,38 +172,44 @@ def main() -> None:
     )
     require(
         session,
-        "void idSessionLocal::LoadLoadingGui( const char *mapName ) {\n#ifdef ID_DEDICATED\n\tguiLoading = NULL;\n\treturn;",
+        "void idSessionLocal::LoadLoadingGui( const char *mapName ) {\n\tif ( IsDedicatedServer() ) {\n\t\tguiLoading = NULL;\n\t\treturn;",
         "dedicated loading GUI exclusion",
     )
     require(
         session,
-        "void idSessionLocal::UpdateScreen( bool outOfSequence ) {\n\n#ifdef ID_DEDICATED\n\treturn;",
+        "void idSessionLocal::UpdateScreen( bool outOfSequence ) {\n\n\tif ( IsDedicatedServer() ) {\n\t\treturn;",
         "dedicated screen-update exclusion",
     )
     require(
         session,
-        "void idSessionLocal::StartWipe( const char *_wipeMaterial, bool hold ) {\n#ifdef ID_DEDICATED\n\t// Dedicated servers never own a presentation surface",
+        "void idSessionLocal::StartWipe( const char *_wipeMaterial, bool hold ) {\n\tif ( IsDedicatedServer() ) {\n\t\t// Dedicated servers never own a presentation surface",
         "dedicated wipe-capture exclusion",
     )
     require(
         session,
-        "void idSessionLocal::CompleteWipe() {\n#ifdef ID_DEDICATED\n\treturn;",
+        "void idSessionLocal::CompleteWipe() {\n\tif ( IsDedicatedServer() ) {\n\t\treturn;",
         "dedicated wipe-completion exclusion",
     )
     require(
         session,
-        'mapSpawned = true;\n#ifdef ID_DEDICATED\n\tcommon->Printf( "Dedicated map ready: %s\\n", mapString.c_str() );',
+        'mapSpawned = true;\n\tif ( IsDedicatedServer() ) {\n\t\tcommon->Printf( "Dedicated map ready: %s\\n", mapString.c_str() );',
         "dedicated post-load readiness marker",
     )
+    reject(linux_main, "Sys_ShowSplash();", "Linux splash deferred until launch settings")
+    reject(macos_main, "Sys_ShowSplash();", "macOS splash deferred until launch settings")
+    reject(read("src/sys/win32/win_syscon.cpp"), "Sys_ShowSplash();", "Windows splash deferred until launch settings")
+    common = read("src/framework/Common.cpp")
+    startup = common[common.index("void idCommonLocal::Init( int argc"):]
+    settings = startup.index("StartupVariable( NULL, false );")
+    splash = startup.index("Sys_ShowSplash();")
+    assert settings < splash, "Splash must follow command-line CVar application"
     require(
-        linux_main,
-        "Posix_EarlyInit( );\n#ifndef ID_DEDICATED\n\tSys_ReportWaylandRuntime();\n\tSys_ShowSplash();",
-        "Linux dedicated splash exclusion",
-    )
-    require(
-        macos_main,
-        "Posix_EarlyInit();\n#ifndef ID_DEDICATED\n\tSys_ShowSplash();",
-        "macOS dedicated splash exclusion",
+        startup,
+        '#ifndef ID_DEDICATED\n\t\t// The splash must respect launch settings before creating any visible window.\n'
+        '\t\tif ( !cvarSystem->GetCVarBool( "r_hiddenWindow" ) && !com_skipRenderer.GetBool() &&\n'
+        '\t\t\t!idAsyncNetwork::serverDedicated.GetInteger() && !cvarSystem->GetCVarBool( "win_viewlog" ) ) {\n'
+        '\t\t\tSys_ShowSplash();\n\t\t}\n#endif',
+        "Shared headless and dedicated splash exclusion",
     )
     require(
         posix_console,
@@ -210,7 +223,9 @@ def main() -> None:
     )
     require(
         posix_console,
-        "void Sys_ShowSplash( void ) {\n#if defined( USE_SDL3 ) && !defined( ID_DEDICATED )",
+        # Android also excludes the splash: its Activity owns the launch screen.
+        "#if defined( USE_SDL3 ) && !defined( ID_DEDICATED ) && !defined( __ANDROID__ )\n"
+        "\tif ( s_splashWindow.window != NULL || s_splashWindow.createFailed ) {",
         "dedicated splash implementation exclusion",
     )
 

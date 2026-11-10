@@ -66,10 +66,13 @@ ENGINE_SOURCE_GLOBS = [
     "idlib/math/*.cpp",
     "renderer/*.cpp",
     "renderer/OpenGL/*.cpp",
+    "tools/compilers/aas/*.cpp",
     "tools/compilers/dmap/*.cpp",
+    "tools/leveleditor/*.cpp",
     "sound/*.cpp",
     "sound/OpenAL/*.cpp",
     "sys/*.cpp",
+    "sys/sdl3/TextClipboard.cpp",
     "ui/*.cpp",
 ]
 
@@ -79,13 +82,14 @@ IMAGETOOLS_SOURCE_GLOBS = [
     "imagetools/*.cpp",
     "imagetools/Color/*.cpp",
     "imagetools/DXT/*.cpp",
-    "imagetools/jpeg-6/*.c",
+    "imagetools/ETC/*.cpp",
+    "external/jpeg-6/*.c",
 ]
 
 # CPU render-geometry shared between the engine (dmap) and the renderer;
 # built as the openq4_render_geo static library
 RENDER_GEO_SOURCE_GLOBS = [
-    "render_geo/*.cpp",
+    "rendergeo/*.cpp",
 ]
 
 # renderer sources for the renderer-gl dynamic module; the loader stays
@@ -109,20 +113,69 @@ RENDERER_VK_SOURCE_GLOBS = [
     "renderer/Vulkan/*.cpp",
 ]
 
+# Query/timestamp plumbing is a required Vulkan module input, not an optional
+# source that may silently disappear while the surrounding directory still
+# satisfies the broad discovery glob.
+RENDERER_VK_REQUIRED_SOURCES = (
+    "renderer/Vulkan/VulkanGpuFrameTiming.cpp",
+    "renderer/Vulkan/vk_HDRScene.cpp",
+)
+
 RENDERER_VK_EXCLUDED_SOURCES = (
     "src/renderer/RendererModule.cpp",
+    # Standalone admission library, shared with its native fake-driver tests.
+    "src/renderer/Vulkan/VulkanDeviceSelection.cpp",
     # GL backend, replaced wholesale
     "src/renderer/draw_arb2.cpp",
     "src/renderer/draw_common.cpp",
+    "src/renderer/draw_pbr.cpp",
     "src/renderer/tr_backend.cpp",
     "src/renderer/tr_render.cpp",
-    "src/renderer/tr_rendertools.cpp",
+    # tr_rendertools.cpp stays: its fixed-function debug drawing runs through
+    # the emulation in renderer/Vulkan/vk_DebugTools.cpp
     "src/renderer/ModernGLExecutor.cpp",
     "src/renderer/ModernGLShaderLibrary.cpp",
+    "src/renderer/ModernLightImageAtlas.cpp",
+    "src/renderer/ModernSpecularProbeAtlas.cpp",
     "src/renderer/RenderGraphResources.cpp",
     "src/renderer/GLStateCache.cpp",
     "src/renderer/GLDebugScope.cpp",
     "src/renderer/RendererUpload.cpp",
+)
+
+# renderer sources for the renderer-gles dynamic module: the shared front-end
+# plus renderer/GLES/*, minus the loader and the fixed-function draw paths.
+#
+# The GLES module retains shared GL infrastructure alongside its ES backend:
+#   - the ModernGL translation units remain compiled alongside the state cache,
+#     upload manager and render-graph resources. The modern shader library
+#     targets desktop GLSL and is not currently GLSL ES-compatible.
+#   - tr_backend.cpp is KEPT. The symbols it still references from the dropped
+#     TUs are supplied by renderer/GLES/gles_Backend.cpp, so the module reuses
+#     the real frame loop instead of writing its own.
+#   - renderer/GLES_D3/* supplies the Doom 3-shaped ES 3.0 path (BE_GLES_D3),
+#     selected automatically for ES contexts by R_PickBestBackEndRenderer.
+#     It renders the view itself and can also be requested explicitly with
+#     `r_renderer glesd3` in the renderer-gles module.
+RENDERER_GLES_SOURCE_GLOBS = [
+    "renderer/*.cpp",
+    "renderer/OpenGL/*.cpp",
+    "renderer/GLES/*.cpp",
+    "renderer/GLES_D3/*.cpp",
+    # one translation unit per shader stage, d3es/neo/renderer/glsl style
+    "renderer/GLES_D3/glsl/*.cpp",
+]
+
+RENDERER_GLES_EXCLUDED_SOURCES = (
+    "src/renderer/RendererModule.cpp",
+    # fixed-function and ARB-assembly draw paths; no ES equivalent at any version
+    "src/renderer/draw_arb2.cpp",
+    "src/renderer/draw_common.cpp",
+    "src/renderer/draw_pbr.cpp",
+    "src/renderer/tr_render.cpp",
+    "src/renderer/tr_rendertools.cpp",
+    # the standalone clear probe is its own executable, not part of the module
+    "src/renderer/GLES/gles_clear_probe.cpp",
 )
 
 GAME_SOURCE_GLOBS = [
@@ -183,10 +236,10 @@ SDL3_DARWIN_SOURCES = (
     "sys/posix/posix_signal.cpp",
     "sys/posix/posix_syscon.cpp",
     "sys/posix/posix_threads.cpp",
-    "sys/osx/macosx_compat.mm",
-    "sys/osx/macosx_misc.mm",
-    "sys/osx/macosx_sdl3.cpp",
-    "sys/osx/macosx_sdl3_main.cpp",
+    "sys/macos/macos_compat.mm",
+    "sys/macos/macos_misc.mm",
+    "sys/macos/macos_sdl3.cpp",
+    "sys/macos/macos_sdl3_main.cpp",
 )
 
 LINUX_PLATFORM_SOURCES = (
@@ -203,6 +256,19 @@ LINUX_PLATFORM_SOURCES = (
     "sys/linux/libXNVCtrl/NVCtrl.c",
 )
 
+# Android shares POSIX networking/threads but owns its app lifecycle and logging.
+SDL3_ANDROID_SOURCES = (
+    "sys/posix/posix_main.cpp",
+    "sys/posix/posix_net.cpp",
+    "sys/posix/posix_signal.cpp",
+    "sys/posix/posix_syscon.cpp",
+    "sys/posix/posix_threads.cpp",
+    "sys/android/android_log.cpp",
+    "sys/android/android_main.cpp",
+    "sys/android/android_sdl3.cpp",
+    "sys/android/android_touch_controls.cpp",
+)
+
 DARWIN_PLATFORM_SOURCES = (
     "sys/posix/posix_input.cpp",
     "sys/posix/posix_main.cpp",
@@ -210,11 +276,11 @@ DARWIN_PLATFORM_SOURCES = (
     "sys/posix/posix_signal.cpp",
     "sys/posix/posix_syscon.cpp",
     "sys/posix/posix_threads.cpp",
-    "sys/osx/macosx_compat.mm",
-    "sys/osx/macosx_event.mm",
-    "sys/osx/macosx_glimp.mm",
-    "sys/osx/macosx_misc.mm",
-    "sys/osx/macosx_sys.mm",
+    "sys/macos/macos_compat.mm",
+    "sys/macos/macos_event.mm",
+    "sys/macos/macos_glimp.mm",
+    "sys/macos/macos_misc.mm",
+    "sys/macos/macos_sys.mm",
 )
 
 
@@ -279,7 +345,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--host-system",
-        choices=("windows", "linux", "darwin"),
+        choices=("windows", "linux", "darwin", "android"),
         default="windows",
         help="Meson host system for source selection.",
     )
@@ -309,7 +375,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--emit",
-        choices=("engine", "imagetools", "render_geo", "renderer_gl", "renderer_vk"),
+        choices=("engine", "imagetools", "render_geo", "renderer_gl", "renderer_vk", "renderer_gles"),
         default="engine",
         help="Emit engine target sources or one of the split library/module source lists.",
     )
@@ -329,6 +395,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
+    if args.host_system == "android" and (
+        args.platform_backend != "sdl3" or args.target_kind != "client"
+    ):
+        print("Android requires the SDL3 client target.", file=sys.stderr)
+        return 1
+
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     source_root = repo_root / "src"
 
@@ -341,12 +413,13 @@ def main(argv: list[str]) -> int:
 
     include_game = args.include_game == "true"
 
-    if args.emit in ("imagetools", "render_geo", "renderer_gl", "renderer_vk"):
+    if args.emit in ("imagetools", "render_geo", "renderer_gl", "renderer_vk", "renderer_gles"):
         globs = {
             "imagetools": IMAGETOOLS_SOURCE_GLOBS,
             "render_geo": RENDER_GEO_SOURCE_GLOBS,
             "renderer_gl": RENDERER_GL_SOURCE_GLOBS,
             "renderer_vk": RENDERER_VK_SOURCE_GLOBS,
+            "renderer_gles": RENDERER_GLES_SOURCE_GLOBS,
         }[args.emit]
         try:
             for pattern in globs:
@@ -357,7 +430,16 @@ def main(argv: list[str]) -> int:
         if args.emit == "renderer_gl":
             for path in RENDERER_GL_EXCLUDED_SOURCES:
                 remove_source(source_set, ordered_sources, path)
+        if args.emit == "renderer_gles":
+            for path in RENDERER_GLES_EXCLUDED_SOURCES:
+                remove_source(source_set, ordered_sources, path)
         if args.emit == "renderer_vk":
+            try:
+                for rel_path in RENDERER_VK_REQUIRED_SOURCES:
+                    add_required_source(source_set, ordered_sources, source_root, rel_path)
+            except SourceListError as exc:
+                print(exc, file=sys.stderr)
+                return 1
             for path in RENDERER_VK_EXCLUDED_SOURCES:
                 remove_source(source_set, ordered_sources, path)
         if not ordered_sources:
@@ -373,6 +455,11 @@ def main(argv: list[str]) -> int:
 
         for pattern in ENGINE_SOURCE_GLOBS:
             add_globbed_sources(source_set, ordered_sources, source_root, pattern)
+
+        # The SDL client links the owned input driver explicitly in Meson.
+        # Dedicated and other platform targets use the callback-free facade.
+        if args.target_kind == "client" and args.platform_backend == "sdl3":
+            remove_source(source_set, ordered_sources, "src/framework/NativeInputDispatchDisabled.cpp")
 
         if include_game:
             for pattern in GAME_SOURCE_GLOBS:
@@ -426,6 +513,9 @@ def main(argv: list[str]) -> int:
             ):
                 for rel_path in LINUX_X11_HELPER_SOURCES:
                     add_required_source(source_set, ordered_sources, source_root, rel_path)
+        elif args.host_system == "android":
+            for rel_path in SDL3_ANDROID_SOURCES:
+                add_required_source(source_set, ordered_sources, source_root, rel_path)
         elif args.host_system == "darwin":
             platform_sources = (
                 SDL3_DARWIN_SOURCES if args.platform_backend == "sdl3" else DARWIN_PLATFORM_SOURCES

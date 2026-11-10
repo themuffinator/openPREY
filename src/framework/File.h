@@ -66,12 +66,17 @@ public:
 	virtual ID_TIME_T			Timestamp( void );
 							// Return the checksum of the containing package, or zero for loose files.
 	virtual int				GetContainerChecksum( void ) const { return 0; }
+							// Return the identity generated caches compare: the timestamp for loose
+							// files, FS_PakMemberContentStamp for pk4 members.
+	virtual ID_TIME_T		ContentStamp( void ) { return Timestamp(); }
 							// Returns offset in file.
 	virtual int				Tell( void );
 							// Forces flush on files being writting to.
 	virtual void			ForceFlush( void );
 							// Causes any buffered data to be written to the file.
 	virtual void			Flush( void );
+							// Flushes buffered data and asks the operating system to persist it.
+	virtual bool			Sync( void );
 							// Seek on a file.
 	virtual int				Seek( long offset, fsOrigin_t origin );
 							// Go back to the beginning of the file.
@@ -122,6 +127,11 @@ public:
 	virtual void			WriteSyncId(void) { }
 	virtual void			ReadSyncId(const char* detail = "unspecified", const char* classname = NULL) { }
 // jmarshall end
+
+	// Append-only memory-file staging hooks.  Keeping these after the complete
+	// historical idFile vtable preserves old game-module dispatch positions.
+	virtual void			MakeReadOnly( void ) {}
+	virtual const char *	GetDataPtr( void ) const { return NULL; }
 
 	template<class type> ID_INLINE size_t ReadBig(type& c) {
 		size_t r = Read(&c, sizeof(c));
@@ -174,12 +184,12 @@ public:
 
 							// changes memory file to read only
 	virtual void			MakeReadOnly( void );
-							// clear the file
+							// clear the file; freeMemory releases owned storage and detaches borrowed storage
 	virtual void			Clear( bool freeMemory = true );
-							// set data for reading
+							// set data for reading; releases old owned storage unless data is a slice of it
 	void					SetData( const char *data, int length );
 							// returns const pointer to the memory buffer
-	const char *			GetDataPtr( void ) const { return filePtr; }
+	virtual const char *	GetDataPtr( void ) const { return filePtr; }
 							// set the file granularity
 	void					SetGranularity( int g ) { assert( g > 0 ); granularity = g; }
 
@@ -237,6 +247,7 @@ public:
 	virtual int				Tell( void );
 	virtual void			ForceFlush( void );
 	virtual void			Flush( void );
+	virtual bool			Sync( void );
 	virtual int				Seek( long offset, fsOrigin_t origin );
 
 	// returns file pointer
@@ -266,6 +277,7 @@ public:
 	virtual int				Length( void );
 	virtual ID_TIME_T			Timestamp( void );
 	virtual int				GetContainerChecksum( void ) const { return containerChecksum; }
+	virtual ID_TIME_T		ContentStamp( void );
 	virtual int				Tell( void );
 	virtual void			ForceFlush( void );
 	virtual void			Flush( void );
@@ -277,6 +289,7 @@ private:
 	uint32_t				zipFilePos;		// classic-ZIP central-directory position
 	int						fileSize;		// size of the file
 	int						containerChecksum;
+	uint32_t				contentCrc;		// zip CRC-32 of the member's uncompressed bytes
 	void *					z;				// unzip info
 };
 

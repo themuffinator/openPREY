@@ -31,6 +31,12 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "Unzip.h"
 
+#if defined( _WIN32 )
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #define	MAX_PRINT_MSG		4096
 
 /*
@@ -262,6 +268,16 @@ idFile::Flush
 =================
 */
 void idFile::Flush( void ) {
+}
+
+/*
+=================
+idFile::Sync
+=================
+*/
+bool idFile::Sync( void ) {
+	Flush();
+	return true;
 }
 
 /*
@@ -607,7 +623,7 @@ int idFile::WriteString( const char *value ) {
 		value = "";
 	}
 	
-	len = strlen( value );
+	len = idLib::SizeToInt( strlen( value ), "idFile::WriteString" );
 	WriteInt( len );
     return Write( value, len );
 }
@@ -728,7 +744,7 @@ idFile_Memory::idFile_Memory
 */
 idFile_Memory::idFile_Memory( const char *name, char *data, int length ) {
 	this->name = name ? name : "";
-	if ( data == NULL || length < 0 ) {
+	if ( data == NULL || length <= 0 ) {
 		data = NULL;
 		length = 0;
 	}
@@ -789,9 +805,8 @@ int idFile_Memory::Read( void *buffer, int len ) {
 		return 0;
 	}
 
-	if ( curPtr + len > filePtr + fileSize ) {
-		len = filePtr + fileSize - curPtr;
-	}
+	// Bound the count before forming a pointer, including requests near INT_MAX.
+	len = Min( len, fileSize - static_cast<int>( curPtr - filePtr ) );
 	if ( len <= 0 ) {
 		return 0;
 	}
@@ -815,28 +830,60 @@ int idFile_Memory::Write( const void *buffer, int len ) {
 		return 0;
 	}
 
-	const int curOffset = ( filePtr != NULL && curPtr != NULL ) ? ( curPtr - filePtr ) : 0;
-	int alloc = curOffset + len + 1 - allocated; // need room for len+1
-	if ( alloc > 0 ) {
-		if ( maxSize != 0 ) {
-			common->Error( "idFile_Memory::Write: exceeded maximum size %d", maxSize );
+	const int curOffset = filePtr != NULL ? static_cast<int>( curPtr - filePtr ) : 0;
+	if ( len > idMath::INT_MAX - 1 - curOffset ) {
+		common->Error( "idFile_Memory::Write: file size overflow for %s", name.c_str() );
+		return 0;
+	}
+	const int endOffset = curOffset + len;
+	const int required = endOffset + 1; // keep room for the trailing terminator
+	if ( maxSize != 0 && required > maxSize ) {
+		common->Error( "idFile_Memory::Write: exceeded maximum size %d", maxSize );
+		return 0;
+	}
+
+	// A caller may append or overwrite with a slice of this file's own buffer.
+	// Retain its offset across reallocation, and reject slices outside storage.
+	int sourceOffset = -1;
+	const uintptr_t sourceAddress = reinterpret_cast<uintptr_t>( buffer );
+	const uintptr_t dataAddress = reinterpret_cast<uintptr_t>( filePtr );
+	if ( filePtr != NULL && sourceAddress >= dataAddress &&
+			sourceAddress - dataAddress < static_cast<uintptr_t>( allocated ) ) {
+		sourceOffset = static_cast<int>( sourceAddress - dataAddress );
+		if ( len > allocated - sourceOffset ) {
+			common->Error( "idFile_Memory::Write: source exceeds buffer for %s", name.c_str() );
 			return 0;
 		}
-		int extra = granularity * ( 1 + alloc / granularity );
-		char *newPtr = (char *) Mem_Alloc( allocated + extra );
-		if ( allocated ) {
-			memcpy( newPtr, filePtr, allocated );
+	}
+
+	if ( required > allocated ) {
+		// Geometric growth amortizes repeated small writes. Round only when the
+		// padding fits, so the signed file-size limit cannot wrap the allocation.
+		int newAllocated = Max( required, allocated + Min( allocated / 2, idMath::INT_MAX - allocated ) );
+		const int quantum = Max( 1, granularity );
+		const int remainder = newAllocated % quantum;
+		if ( remainder != 0 && quantum - remainder <= idMath::INT_MAX - newAllocated ) {
+			newAllocated += quantum - remainder;
 		}
-		allocated += extra;
+		char *newPtr = (char *) Mem_Alloc( newAllocated );
+		const int copySize = sourceOffset >= 0 ? Max( fileSize, sourceOffset + len ) : fileSize;
+		if ( copySize > 0 ) {
+			memcpy( newPtr, filePtr, copySize );
+		}
+		allocated = newAllocated;
 		curPtr = newPtr + curOffset;
 		if ( filePtr ) {
 			Mem_Free( filePtr );
 		}
 		filePtr = newPtr;
 	}
-	memcpy( curPtr, buffer, len );
+	if ( sourceOffset >= 0 ) {
+		memmove( curPtr, filePtr + sourceOffset, len );
+	} else {
+		memcpy( curPtr, buffer, len );
+	}
 	curPtr += len;
-	fileSize += len;
+	fileSize = Max( fileSize, endOffset );
 	filePtr[ fileSize ] = 0; // len + 1
 	return len;
 }
@@ -895,25 +942,27 @@ idFile_Memory::Seek
 =================
 */
 int idFile_Memory::Seek( long offset, fsOrigin_t origin ) {
-	if ( filePtr == NULL ) {
-		if ( offset == 0 ) {
-			curPtr = NULL;
-			return 0;
-		}
-		return -1;
-	}
-
+	// Validate using bounded integers before forming a pointer. In particular,
+	// do not add LONG_MAX or negate LONG_MIN on platforms with 64-bit long.
+	long lower, upper;
+	int baseOffset;
 	switch( origin ) {
 		case FS_SEEK_CUR: {
-			curPtr += offset;
+			baseOffset = filePtr != NULL ? static_cast<int>( curPtr - filePtr ) : 0;
+			lower = -static_cast<long>( baseOffset );
+			upper = fileSize - baseOffset;
 			break;
 		}
 		case FS_SEEK_END: {
-			curPtr = filePtr + fileSize - offset;
+			baseOffset = fileSize;
+			lower = 0;
+			upper = fileSize;
 			break;
 		}
 		case FS_SEEK_SET: {
-			curPtr = filePtr + offset;
+			baseOffset = 0;
+			lower = 0;
+			upper = fileSize;
 			break;
 		}
 		default: {
@@ -921,15 +970,13 @@ int idFile_Memory::Seek( long offset, fsOrigin_t origin ) {
 			return -1;
 		}
 	}
-	if ( curPtr < filePtr ) {
-		curPtr = filePtr;
-		return -1;
-	}
-	if ( curPtr > filePtr + fileSize ) {
-		curPtr = filePtr + fileSize;
-		return -1;
-	}
-	return 0;
+	const bool outOfRange = offset < lower || offset > upper;
+	const long clampedOffset = Max( lower, Min( upper, offset ) );
+	// Preserve the memory-file convention: positive END offsets seek backward.
+	const int target = origin == FS_SEEK_END ? baseOffset - static_cast<int>( clampedOffset ) :
+		baseOffset + static_cast<int>( clampedOffset );
+	curPtr = filePtr != NULL ? filePtr + target : NULL;
+	return outOfRange ? -1 : 0;
 }
 
 /*
@@ -951,12 +998,18 @@ void idFile_Memory::Clear( bool freeMemory ) {
 	fileSize = 0;
 	granularity = 16384;
 	if ( freeMemory ) {
+		if ( allocated > 0 && maxSize == 0 ) {
+			Mem_Free( filePtr );
+		}
 		allocated = 0;
-		Mem_Free( filePtr );
+		maxSize = 0;
 		filePtr = NULL;
 		curPtr = NULL;
 	} else {
 		curPtr = filePtr;
+		if ( filePtr != NULL && ( mode & ( 1 << FS_WRITE ) ) ) {
+			filePtr[0] = 0;
+		}
 	}
 }
 
@@ -969,6 +1022,25 @@ void idFile_Memory::SetData( const char *data, int length ) {
 	if ( data == NULL || length < 0 ) {
 		data = "";
 		length = 0;
+	}
+	if ( filePtr != NULL && allocated > 0 && maxSize == 0 ) {
+		const uintptr_t sourceAddress = reinterpret_cast<uintptr_t>( data );
+		const uintptr_t dataAddress = reinterpret_cast<uintptr_t>( filePtr );
+		if ( sourceAddress >= dataAddress && sourceAddress - dataAddress < static_cast<uintptr_t>( allocated ) ) {
+			const int sourceOffset = static_cast<int>( sourceAddress - dataAddress );
+			if ( length > allocated - sourceOffset ) {
+				common->Error( "idFile_Memory::SetData: source exceeds buffer for %s", name.c_str() );
+				return;
+			}
+			// Retain ownership when turning our own buffer (or a slice) read-only.
+			memmove( filePtr, data, length );
+			fileSize = length;
+			curPtr = filePtr;
+			mode = ( 1 << FS_READ );
+			granularity = 16384;
+			return;
+		}
+		Mem_Free( filePtr );
 	}
 	maxSize = 0;
 	fileSize = length;
@@ -1179,7 +1251,7 @@ int idFile_Permanent::Read( void *buffer, int len ) {
 	tries = 0;
 	while( remaining ) {
 		block = Min( remaining, readChunkBytes );
-		read = fread( buf, 1, block, o );
+		read = idLib::SizeToInt( fread( buf, 1, block, o ), "idFile_Permanent::Read" );
 		if ( read == 0 ) {
 			// we might have been trying to read from a CD, which
 			// sometimes returns a 0 read on windows
@@ -1234,7 +1306,7 @@ int idFile_Permanent::Write( const void *buffer, int len ) {
 	tries = 0;
 	while( remaining ) {
 		block = remaining;
-		written = fwrite( buf, 1, block, o );
+		written = idLib::SizeToInt( fwrite( buf, 1, block, o ), "idFile_Permanent::Write" );
 		if ( written == 0 ) {
 			if ( !tries ) {
 				tries = 1;
@@ -1276,6 +1348,28 @@ idFile_Permanent::Flush
 */
 void idFile_Permanent::Flush( void ) {
 	fflush( o );
+}
+
+/*
+=================
+idFile_Permanent::Sync
+=================
+*/
+bool idFile_Permanent::Sync( void ) {
+	if ( o == NULL ) {
+		return false;
+	}
+	if ( fflush( o ) != 0 ) {
+		return false;
+	}
+	if ( !( mode & ( 1 << FS_WRITE ) ) ) {
+		return true;
+	}
+#if defined( _WIN32 )
+	return _commit( _fileno( o ) ) == 0;
+#else
+	return fsync( fileno( o ) ) == 0;
+#endif
 }
 
 /*
@@ -1357,6 +1451,7 @@ idFile_InZip::idFile_InZip( void ) {
 	zipFilePos = 0;
 	fileSize = 0;
 	containerChecksum = 0;
+	contentCrc = 0;
 	memset( &z, 0, sizeof( z ) );
 }
 
@@ -1461,6 +1556,18 @@ idFile_InZip::Timestamp
 */
 ID_TIME_T idFile_InZip::Timestamp( void ) {
 	return 0;
+}
+
+/*
+================
+idFile_InZip::ContentStamp
+
+Matches the length-only ReadFile probe, which answers from the same
+central-directory entry without opening the member.
+================
+*/
+ID_TIME_T idFile_InZip::ContentStamp( void ) {
+	return FS_PakMemberContentStamp( contentCrc, fileSize );
 }
 
 /*

@@ -21,6 +21,7 @@ def read_repo_file(relative_path):
 
 
 IMAGE_H = Path("src") / "renderer" / "Image.h"
+CONSUMED_POLICY_H = Path("src") / "renderer" / "RendererConsumedPolicy.h"
 IMAGE_MANAGER_CPP = Path("src") / "renderer" / "ImageManager.cpp"
 IMAGE_LOAD_CPP = Path("src") / "renderer" / "Image_load.cpp"
 IMAGE_PROCESS_CPP = Path("src") / "imagetools" / "Image_process.cpp"
@@ -70,11 +71,11 @@ def test_picmip_only_reduces_the_diffuse_layer():
     image_manager = read_repo_file(IMAGE_MANAGER_CPP)
 
     assert_true(
-        "if ( usage == TD_DIFFUSE && R_ImagePicmipFilterAllows( name ) ) {" in image_manager,
+        "if ( usage == TD_DIFFUSE && R_ImagePicmipFilterAllows( name, inputs.picmipFilter ) ) {" in image_manager,
         "picmip must be gated on TD_DIFFUSE so bump, specular, light, sky, font, and 2D images keep their authored size",
     )
     assert_true(
-        "policy.mipShift = Max( 0, image_picmip.GetInteger() );" in image_manager,
+        "policy.mipShift = Max( 0, inputs.picmip );" in image_manager,
         "the diffuse gate should be the only thing that sets a mip shift",
     )
     assert_true(
@@ -86,7 +87,7 @@ def test_picmip_only_reduces_the_diffuse_layer():
 def test_picmip_filter_classifies_the_logical_image_name():
     image_manager = read_repo_file(IMAGE_MANAGER_CPP)
 
-    assert_true("static bool R_ImagePicmipFilterAllows( const char *name )" in image_manager, "picmip should have a path filter")
+    assert_true("static bool R_ImagePicmipFilterAllows( const char *name, int value )" in image_manager, "picmip should have a path filter")
     for snippet in (
         'if ( R_ImagePathStartsWith( path, "textures", 8 ) ) {',
         "return ( filter & PICMIP_FILTER_TEXTURES ) != 0;",
@@ -118,27 +119,33 @@ def test_one_policy_drives_every_loader_path():
     image_load = read_repo_file(IMAGE_LOAD_CPP)
     image_files = read_repo_file(IMAGE_FILES_CPP)
 
-    assert_true("struct imageDownsizePolicy_t {" in image_h, "the reduction contract should be one shared struct")
-    for member in ("int			maxDimension;", "int			mipShift;", "int			minDimension;"):
-        assert_true(member in image_h, f"missing policy member {member!r}")
+    policy_h = read_repo_file(CONSUMED_POLICY_H)
+    assert_true('#include "RendererConsumedPolicy.h"' in image_h, "image consumers must include the shared contract")
+    assert_true("struct imageDownsizePolicy_t {" in policy_h, "the reduction contract should be one shared struct")
+    for member in ("maxDimension = 0", "mipShift = 0", "minDimension = 1"):
+        assert_true(member in policy_h, f"missing policy member {member!r}")
     assert_true(
         "void R_GetImageDownsizePolicy( const char *name, textureUsage_t usage, bool allowDownSize, imageDownsizePolicy_t &policy );" in image_h,
         "the policy builder should be shared, not duplicated per loader",
     )
 
     assert_true(
-        "bool R_LoadPrecompressedDDS(const char* name, idBinaryImage& image, ID_TIME_T* timestamp, textureUsage_t usage, const imageDownsizePolicy_t& downsizePolicy, bool useMipmaps);" in image_h,
+        "bool R_LoadPrecompressedDDS(const char* name, idBinaryImage& image, ID_TIME_T* timestamp, textureUsage_t usage, const imageDownsizePolicy_t& downsizePolicy, bool useMipmaps, imageReductionResult_t* reduction = NULL, const imageFileContent_t* expected = NULL);" in image_h,
         "the DDS loader must take the full policy, not just a size ceiling",
     )
     assert_true(
-        "const int firstLevel = R_ImageDownsizePolicyMipSkip( downsizePolicy, selectedWidth, selectedHeight, (int)info.numLevels );" in image_files,
+        "if (!R_ResolveImageReduction(downsizePolicy, info.width, info.height, info.numLevels, selected)) break;" in image_files,
         "the DDS loader should select a mip level instead of decompressing and resampling",
     )
 
+    assert_true("const imageDownsizePolicy_t& consumedDownsize = consumedLoad.Policy();" in image_load,
+                "all loader branches must use the one captured per-load value")
+    assert_true(image_load.count("if ( consumed ) policy = *consumed;") == 2 and "if (consumed) policy = *consumed;" in image_load,
+                "cache-key and raw/cube helpers must prefer the immutable supplied value")
     for call in (
-        "R_GetImageDownsizePolicy( GetName(), usage, allowDownSize, precompressedDownsizePolicy );",
-        "R_DownsizeLoadedImageData( GetName(), usage, allowDownSize, pic, width, height );",
-        "R_DownsizeLoadedCubeImageData( GetName(), usage, allowDownSize, pics, size );",
+        "precompressedDownsizePolicy = consumedDownsize;",
+        "R_DownsizeLoadedImageData( GetName(), usage, allowDownSize, pic, width, height, &consumedDownsize );",
+        "R_DownsizeLoadedCubeImageData( GetName(), usage, allowDownSize, pics, size, &consumedDownsize );",
     ):
         assert_true(call in image_load, f"loader path not routed through the shared policy: {call!r}")
 
@@ -172,23 +179,23 @@ def test_generated_cache_key_tracks_the_active_reduction():
     image_load = read_repo_file(IMAGE_LOAD_CPP)
 
     assert_true(
-        "static void			GetGeneratedName(idStr& _name, const char* _policyName, const textureUsage_t& _usage, const cubeFiles_t& _cube, bool allowDownSize = true, unsigned int flags = 0);" in image_h,
+        "static void			GetGeneratedName(idStr& _name, const char* _policyName, const textureUsage_t& _usage, const cubeFiles_t& _cube, bool allowDownSize = true, unsigned int flags = 0, const imageDownsizePolicy_t* consumed = NULL);" in image_h,
         "the cache key must be told which logical name the policy was classified against",
     )
     assert_true(
-        image_load.count("GetGeneratedName( generatedName, GetName(), usage, cubeFiles, allowDownSize, flags );") == 2,
+        image_load.count("GetGeneratedName( generatedName, GetName(), usage, cubeFiles, allowDownSize, flags, &consumedDownsize );") == 2,
         "both generated-name call sites must classify against the logical image name, including the DDS replacement site",
     )
 
     assert_true(
-        "static unsigned int R_GetImageDownsizeSignature( const char *name, textureUsage_t usage, bool allowDownSize ) {" in image_load,
+        "static unsigned int R_GetImageDownsizeSignature( const char *name, textureUsage_t usage, bool allowDownSize, const imageDownsizePolicy_t* consumed ) {" in image_load,
         "the cache signature should be derived from the shared policy",
     )
     # The trailing byte is a revision of the reduction arithmetic itself. Bump it
     # here and in Image_load.cpp together whenever the pixels a given policy
     # produces change, or players keep serving stale sizes out of their cache.
     assert_true(
-        "unsigned int signature = ( static_cast<unsigned int>( policy.maxDimension ) << 8 ) ^ static_cast<unsigned int>( usage ) ^ 0x6F713401u;" in image_load,
+        "unsigned int signature = ( static_cast<unsigned int>( policy.maxDimension ) << 8 ) ^ static_cast<unsigned int>( usage ) ^ 0x6F713402u;" in image_load,
         "the reduction revision byte must match the current shrink filter",
     )
     for snippet in (
@@ -207,7 +214,8 @@ def test_exact_halvings_reuse_the_mip_chain_filter():
         "the shrink path should detect an exact power-of-two reduction",
     )
     assert_true(
-        "byte *next = gammaMips ? R_MipMapWithGamma( source, level, levelHeight ) : R_MipMap( source, level, levelHeight );" in image_load,
+        "byte *next = srgbMips ? R_MipMapWithSRGB( source, level, levelHeight )" in image_load
+        and "gammaMips ? R_MipMapWithGamma( source, level, levelHeight ) : R_MipMap( source, level, levelHeight )" in image_load,
         "an exact reduction should use the same filter that builds the mip chain, so image_picmip N matches mip level N",
     )
     assert_true(
@@ -215,12 +223,12 @@ def test_exact_halvings_reuse_the_mip_chain_filter():
         "the shrink filter should follow the same gamma choice DeriveOpts makes",
     )
     assert_true(
-        "return usage == TD_FONT || usage == TD_LIGHT;" in image_load,
-        "gamma mips are only used for the font and light buckets",
+        "return usage == TD_FONT || usage == TD_LIGHT || usage == TD_PBR_COLOR;" in image_load,
+        "gamma mips are used for font, light, and explicitly color-managed PBR buckets",
     )
     assert_true(
-        image_load.count("return R_ResampleTexture( pic, width, height, scaledWidth, scaledHeight );") >= 3,
-        "non power-of-two and failed reductions must fall back to the general resampler with the original source size",
+        image_load.count("return R_ResampleTexture( pic, width, height, scaledWidth, scaledHeight );") == 1 and "if (!next) return NULL;" in image_load,
+        "only non power-of-two reductions resample; failed exact mip chains preserve original input",
     )
 
 
@@ -251,7 +259,19 @@ def test_reduction_changes_reload_images_without_a_restart():
         "image_downSizeBumpLimit",
     ):
         assert_true(f"&{cvar}" in image_manager, f"{cvar} changes should trigger an image reload")
-    assert_true("ReloadImages( true );" in image_manager, "a reduction change should force a full image reload")
+    assert_true(
+        "ReloadImages( true, true );" in image_manager,
+        "a reduction change should force a reload of every file-backed image",
+    )
+    assert_true(
+        "void idImageManager::ReloadImages( bool all, bool fileBackedOnly ) {" in image_manager,
+        "a reload should be able to restrict itself to images that have a file behind them",
+    )
+    assert_true(
+        "if ( fileBackedOnly && R_IsMutableRenderImage( image ) ) {" in image_manager,
+        "scratch pages and render targets have nothing to re-reduce, and reloading one "
+        "reallocates it with no texels - which empties the generated glyph atlases",
+    )
     assert_true(
         "if ( insideLevelLoad ) {" in image_manager,
         "a level load already touches every image, so the reload must not double up on it",

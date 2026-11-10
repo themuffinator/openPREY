@@ -12,9 +12,6 @@ concurrency:
   group: openprey-validation-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  OPENPREY_GAMELIBS_REPO: ${{ github.workspace }}/../OpenPrey-game
-
 jobs:
   scaffold-contracts:
     name: Scaffold and Content Contracts
@@ -23,18 +20,12 @@ jobs:
       - name: Checkout openPREY
         uses: actions/checkout@v6
 
-      - name: Checkout OpenPrey-game
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/themuffinator/OpenPrey-GameLibs.git "${OPENPREY_GAMELIBS_REPO}"
-
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
-      - name: Validate scripts and staged source ownership
+      - name: Validate scripts and in-tree game sources
         shell: bash
         run: |
           set -euo pipefail
@@ -43,13 +34,14 @@ jobs:
             tools/build/generate_pak_header.py \
             tools/build/generate_savegame_compat_header.py \
             tools/build/openq4_pak.py \
-            tools/build/stage_gamelibs.py \
+            tools/build/game_source_inventory.py             tools/build/content_packs.py \
             tools/build/write_pak_manifest.py \
             tools/tests/openprey_rebase_contract.py \
             tools/tests/linux_sanitizer_source_contract.py
           bash -n tools/build/meson_setup.sh
           python tools/build/sync_icons.py --check
-          python tools/tests/gamelibs_staging.py
+          python tools/build/game_source_inventory.py . > /dev/null
+          python tools/build/content_packs.py meson-list
           python tools/tests/openprey_rebase_contract.py
           python tools/tests/linux_sanitizer_source_contract.py
 
@@ -98,12 +90,6 @@ jobs:
     steps:
       - name: Checkout openPREY
         uses: actions/checkout@v6
-
-      - name: Checkout OpenPrey-game
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/themuffinator/OpenPrey-GameLibs.git "${OPENPREY_GAMELIBS_REPO}"
 
       - name: Set up Python
         uses: actions/setup-python@v6

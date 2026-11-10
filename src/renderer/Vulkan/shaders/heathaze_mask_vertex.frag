@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "framebuffer_coords.glsl"
 
 // Native Vulkan port of heatHazeWithMaskAndVertex.vfp. It differs from the
 // ordinary mask variant only by fading mask.xy with primary vertex color
@@ -42,7 +44,7 @@ void main() {
 
     vec2 windowGL = vec2(
         gl_FragCoord.x - sp.parms[7].x,
-        sp.parms[6].z - gl_FragCoord.y - sp.parms[7].y);
+        CanonicalWindowY(sp.parms[6].z) - sp.parms[7].y);
     vec4 screenTexCoord = vec4(windowGL * sp.parms[6].xy, 0.0, 1.0);
     screenTexCoord = clamp(
         localNormal * vDeformScale + screenTexCoord,
