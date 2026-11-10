@@ -2361,11 +2361,13 @@ if build_engine
     default_options: fallback_opt,
   )
 
+  # libvorbis calls alloca() and uses M_PI, which glibc hides under strict
+  # ISO C11; build it as GNU C11 where the compiler has that mode.
   vorbisfile_dep = dependency(
     'vorbisfile',
     required: true,
     fallback: ['vorbis', 'vorbisfile_dep'],
-    default_options: fallback_opt,
+    default_options: fallback_opt + ['c_std=gnu11,c11'],
   )
 
   if host_system == 'android'

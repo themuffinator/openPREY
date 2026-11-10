@@ -1058,7 +1058,7 @@ const int	CINEMATIC_SKIP_DELAY	= SEC2MS( 2.0f );
 // HUMANHEAD END
 
 #include "Actor.h"
-#include "Projectile.h"
+#include "projectile.h"
 
 //HUMANHEAD:
 #include "../Prey/game_fxinfo.h"				// HUMANHEAD
@@ -1123,7 +1123,7 @@ const int	CINEMATIC_SKIP_DELAY	= SEC2MS( 2.0f );
 #include "Camera.h"
 #include "Moveable.h"
 #include "Target.h"
-#include "Trigger.h"
+#include "trigger.h"
 #include "Sound.h"
 #include "../Prey/prey_sound.h"//HUMANHEAD: aob
 #include "../Prey/prey_spiritproxy.h"			// HUMANHEAD
