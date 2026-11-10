@@ -42,6 +42,8 @@ cache (sixteen at most) against forty cubes in view.
 |---|---|
 | **Point cache far smaller than a view.** In the hub2 sweep 26 of 39 cacheable cube passes missed every frame: 29 cubes (174 faces) re-rendered per frame, 4.9 ms of CPU. OpenGL also evicted the first slot in a chain, one miss evicting an entry a later light of the same view would have hit. | **Fixed, both backends.** 64 slots (96 records), bounded by `r_shadowMapPointCacheMegs` (512 MiB, never fewer than the old twelve). A cube used this frame or the last is not evicted; the light renders to scratch until one leaves the view. OpenGL recycles a light's own stale cube. Archived profiles holding the old 12 move to 64 once. |
 | **Point lights with any moving or alpha-tested caster re-rendered six faces every view** and dropped their cached cube. Alpha-tested casters are always classed live, so a static light touching one grate never cached. | **Fixed, both backends.** The cached cube keeps static depth; each view copies it to a scratch cube and draws the live chains over the copy (`r_shadowMapPointCompose`). OpenGL blits face by face and shares one static entry between the LOCAL and GLOBAL ownerships when the light has no static local caster; 0.15 ms of GPU per composed pass in hub2. Vulkan copies the six faces in one transfer and keeps a static cube per ownership, because a resident entry is reserved by one pass per view. It does not compose under the opt-in shared interaction stream, which draws every pass's whole caster plan. See "Vulkan point composition" below. |
+| **Every cutout caster was live.** A caster with holes cut by an alpha test was treated as if the holes could move, so every light that reaches a grate, a railing or a wire cap copied its cached map and redrew the cutout every view, for the same result. In convoy2's start view 25 passes were composed each frame, and 20 of them had no other live caster: every lamp there sits in a wire cap. | **Fixed, both backends.** A cutout is live only while its coverage can change. See "Static cutout casters" below. |
+| **Vulkan copied every reused projected map into the view's atlas**, each view, only to sample it there. The copy serves a view that has moving casters to draw over the map and nothing else. With static cutouts it was the largest shadow phase left in convoy2's start view: 0.54 ms for eleven maps, ten of which had nothing live. | **Fixed (Vulkan).** A reused map with no moving caster is read where it lives. See "Resident projected tiles on Vulkan" below. |
 | **GL timer queries ran in every shadow phase of every light**, whether or not anything read them. A view with more phases than the 64 query slots polled all 64 unfinished queries for each further phase. | **Fixed.** Queries are issued only while `r_shadowMapReport` or `r_shadowMapDebugOverlay` is on. This alone was about half of the OpenGL CPU frame in hub2. |
 | **The point receiver's per-texel path was the common path.** Each of the nine taps compared four texels against their own point on the receiver plane, with a cube-face selection each: 36 comparisons that read a four-by-four block of texels. | **Fixed, both backends.** The default kernel (nine fixed taps, one texel radius, hardware comparison) is one pass over the sixteen texels with the same weights, or nine plain bilinear lookups where the bias covers the block. Other tap counts, radii and the rotated mode keep the tap-by-tap path. 1.6 to 2.6 ms of GPU in hub2 against the old path, in two launches. |
 | **Receivers filtered shadows for fragments the light does not reach** (outside the falloff, turned away). | **Fixed, both backends**, in the stock-material path. The PBR variants still sample first. |
@@ -396,6 +398,155 @@ in-engine self-tests and the sixty-two static tests that read the touched
 files pass. Not run: macOS and Linux drivers, where a depth-only cube target
 is expected to be complete and falls back to the colour cube if it is not.
 
+### Static cutout casters
+
+Added on 10 November, from the measurement meant to price skipping hidden cube
+faces. That measurement turned up a view whose point-cube phase cost six times
+what it did anywhere else: convoy2's start, 0.81 ms of Vulkan GPU against 0.13
+in hub2 and 0.16 in the airdefense1 arena. The cause was not faces. Of the 25
+passes composed there each frame (14 point, 11 projected), 20 had no moving
+caster at all, only a cutout: the wire cap around each lamp
+(`textures/common_misc/c_wirecap01`).
+
+- **A cutout is live only while its coverage can change**
+  (`R_ShadowMapCutoutCoverageAnimates`). It can when a register the coverage
+  is read from follows time, an entity parm, a global or a table (the stage
+  condition, the alpha scale, the alpha reference, the texture matrix), when
+  an alpha stage samples a video or a render target or an image that is not
+  loaded yet, or when the material has a deform. Otherwise the caster is as
+  static as its entity and is drawn into the cached depth with the rest.
+- **The registers are asked one by one**
+  (`idMaterial::GetConstantRegisterValue`: a parse-time literal that no
+  expression writes). So an animated glow stage beside a fixed alpha stage
+  does not keep a cutout live.
+- **The static signature carries what the baked coverage depends on**: the
+  storage of the alpha images and the two hashed-alpha settings.
+- **Only the front end changed.** Both back ends already drew a cutout through
+  its alpha stages in whichever chain it was linked.
+  `r_shadowMapStaticCutouts 0` restores the old rule.
+
+convoy2 start view, Quality. The rule was switched in one process, six pairs,
+each timed window after a settling one:
+
+| | All cutouts live | Static cutouts | |
+|---|---:|---:|---|
+| Passes composed each view | 25 | 3 | both renderers |
+| Vulkan: shadow GPU phases | 1.36 ms | 0.71 ms | the point phase 0.83 to 0.13 ms |
+| Vulkan: GPU frame | 6.02 ms | 5.54 ms | 0.48 ms less, spread 0.56 ms, five of six |
+| OpenGL: shadow-map render time (timer queries) | 3.86 ms | 0.51 ms | 26 passes to 5 |
+| OpenGL: GPU frame | 9.33 ms | 7.58 ms | 1.75 ms less, spread 0.38 ms, six of six |
+| OpenGL: CPU frame | 17.18 ms | 16.04 ms | 1.14 ms less, spread 1.08 ms, five of six |
+
+Other sessions were building and running clients throughout, which inflates
+the frame times and widens the spreads; the phase times and the pass counts do
+not depend on that. The Vulkan cache phase (0.5 ms) is unchanged: it is the
+copy of each reused projected tile into the view's atlas, item 2 below.
+
+The rule itself was tested with four crates under a stock light, on both
+renderers: a plain shipped cutout and a cutout with an animated glow stage
+became static casters, and cutouts whose alpha reference or texture matrix
+follows time stayed live.
+
+The picture does not change. With the rule on against off, and cached against
+uncached with either, the convoy2 captures differ by what two captures of one
+state differ by, in two views and on both renderers (0.010 mean in 8-bit
+units, 0.05% of pixels over 8 levels; 19.1 and 70% with shadows off).
+
+Two things found on the way:
+
+- **Sound-reactive lights make paused captures differ.** The `*_snd` light
+  shaders follow the audio, which keeps playing under `g_stopTime`. Captures
+  taken at a fixed cadence sampled a periodic sound in step with the variants,
+  and one such light looked like a shadow difference between the rule on and
+  off until it was isolated. That is also what made the scenarios'
+  cached-against-fresh errors wander by up to 0.26. The scenario harness now
+  holds those shaders at a constant level (`s_constantAmplitude 1`), and
+  `door-portal` compares at exactly 0 in every phase on both renderers.
+- **`idMaterial::ConstantRegisters()` is NULL for every material.** Stock
+  idTech 4 starts each material with its registers marked constant "until
+  shown otherwise"; that line is missing here and in the upstream base, so no
+  material is ever constant and every surface evaluates its registers every
+  view, on both renderers. Not a shadow matter and not changed here.
+
+Hidden cube faces, the item this started from, were measured after the change
+and set aside. All per-view point-cube work on Vulkan is then 0.13 ms of GPU
+in convoy2 and hub2, 0.16 in the arena and 0.07 in storage2. Skipping the
+faces a view cannot see would save part of that, and needs a margin at every
+face seam for the filter taps that cross it.
+
+Checked for this change: the rule and the pictures as above; the fourteen
+scenarios on both back ends from a private runtime, all passing; the
+in-engine self-tests; and the sixty-two static tests that read the touched
+files.
+
+### Resident projected tiles on Vulkan
+
+Added on 10 November. A projected light's cached depth is an image of its own
+on Vulkan, and every view that reused it copied that image into a block of the
+view's atlas to sample it there. The copy serves a view that has moving
+casters to draw over the map. For any other view it bought nothing, and after
+static cutouts it was the largest shadow phase left in convoy2's start view.
+
+- **An exact hit with no moving caster is read where it lives**
+  (`VK_ShadowMap_ProjectedEntryResidentSet`). The receivers bind the cache
+  image itself. The pass claims no atlas block and records no copy; its
+  cascade rects, its texel size and its translucent moment mapping address
+  that image instead of the atlas.
+- **A hit that composes keeps the copy**, and so does every hit under the
+  shared interaction stream and the debug overlay, which address the atlas.
+  `r_vkShadowSampleResident 0` restores the copy for all of them.
+- **A view of resident maps records no shadow work at all.** Once each map
+  rests in the layout it is read in, the shadow pass returns before it breaks
+  the scene's render scope, as it already did for a view of cached point
+  cubes. That return now collects the GPU timings of earlier views first:
+  nothing else reads them, and a long run of quiet views repeated the last
+  report and let its queries age out as dropped. An independent read of the
+  change found this, and no rendering fault.
+- **The image is sampled and copied, never rendered into**, so it is not an
+  attachment. It rests in a transfer layout after a copy and in a read-only
+  one after being read in place, and each use moves it from where the last
+  one left it (`VK_ShadowMap_TransitionProjectedEntry`).
+- **The descriptor sets belong to the cache record**, one for each frame in
+  flight, and outlive its images. A record's image is replaced when its slot
+  is reused at another size: the image and its view retire behind the frame
+  fence, and a frame slot's set is rewritten at its first use after that. It
+  is never rewritten once the frame being recorded has bound it; such a pass
+  copies for that view.
+
+Quality, the switch alternated in one process, each timed window after a
+settling one (six pairs in convoy2, four elsewhere):
+
+| | Hits read in place | Cache phase | All shadow phases | GPU frame |
+|---|---:|---:|---:|---|
+| convoy2 start | 10 of 11 | 0.54 to 0.04 ms | 0.68 to 0.18 ms | 5.44 to 4.88 ms: 0.56 ms less, spread 0.91 ms, six of six |
+| airdefense1 arena | 1 of 2 | 0.26 to 0.11 ms | 0.44 to 0.28 ms | 5.90 to 5.40 ms: 0.50 ms less, spread 1.17 ms, four of four |
+| hub2 | 2 of 4 | 0.58 to 0.30 ms | 0.82 to 0.55 ms | not resolved (0.10 ms, spread 0.59 ms) |
+| storage2 | no cached projected map | unchanged | unchanged | not resolved |
+
+The phase times are the result. Other sessions were building and running
+clients, and the frame figures move more than the phases can explain where
+the spread is wide. CPU frame time is not resolved in any of them. The hits
+that are not read in place are the ones with a moving caster.
+
+The picture is the same to the byte. In convoy2's start view, paused, two
+captures each of the maps read in place, copied, and drawn again without the
+cache agree in every pixel above the HUD; with shadows off 158,701 of 2.66
+million pixels differ.
+
+The validation layers stayed silent in convoy2 and hub2 while the view turned
+and, in one process, the switch, the map size (1024 and 512), the cache
+budget (8 and 2), the debug overlay, the static cache, the shared interaction
+stream and a `vid_restart` were changed.
+
+Checked for this change: the figures, pictures and validation runs above; the
+fourteen scenarios on both back ends from a private runtime, all passing, with
+in-place reads in every Vulkan case that caches a projected map; the
+continuous-motion qualification on Vulkan, which fails on a dropped timing
+query; a view held on the no-work return for several hundred frames and then
+made to copy again, with no query dropped; the in-engine self-tests; and the
+seventy-one static tests that read the touched files. Not run: any graphics
+card but the reference one, and Linux or macOS.
+
 Checks that passed on the final build: `renderer_shadow_mapping_maps.py`
 `caster-cycle-point`, `caster-cycle-cutout` and `door-point` on both backends
 (caster counts, cache reuse, cached against fresh images byte-identical; run
@@ -416,16 +567,24 @@ whether Enhanced can now map point lights on Vulkan.
 
 ## Still open, in order of value
 
-1. Cube faces the view cannot see; fullscreen budgets for the three tiers.
+1. Fullscreen budgets for the three tiers, on the reference machine with
+   nothing else running. Every change of this round moved what they cost.
 2. One static cube for both ownerships of a composed Vulkan light, as on
    OpenGL. It needs a resident entry two passes of a view can share.
 3. Static-world volumes are still built once for every mapped light and kept
    for the fallback. Leaving them out too would need the same rebuild on
    return, for every surface the light touches.
-4. A reused projected pass on Vulkan copies its resident tile into the view's
-   atlas even when it has no live casters to draw over it. Sampling the
-   resident tile in place would save the copy; convoy2's eleven cached passes
-   together save only 0.3 ms of GPU against drawing them fresh.
-5. The OpenGL projected cache is the atlas, four full tiles at Quality and
+4. The OpenGL projected cache is the atlas, four full tiles at Quality and
    Ultra, so it holds one crowded view and nothing of the view just left.
    Vulkan holds eight maps' worth.
+5. On Vulkan a projected light's tile size is fitted as if every map of the
+   view needed an atlas block. Maps read where they live need none, so a
+   crowded view could keep more of its lights at full size. The fit decides
+   the cache key, so it must not follow what happens to be cached.
+
+Set aside after measurement: cube faces the view cannot see (see "Static
+cutout casters").
+
+Outside the shadow system, found in passing: `idMaterial::ConstantRegisters()`
+is NULL for every material, so every surface evaluates its registers every
+view.
