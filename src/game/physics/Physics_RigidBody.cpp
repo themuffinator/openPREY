@@ -1112,7 +1112,7 @@ void idPhysics_RigidBody::ApplyImpulse( const int id, const idVec3 &point, const
 	}
 
 	//HUMANHEAD: aob - DEBUG TEST
-	assert( !FLOAT_IS_NAN(impulse) );
+	assert( !FLOAT_IS_NAN(impulse.x) && !FLOAT_IS_NAN(impulse.y) && !FLOAT_IS_NAN(impulse.z) );
 	//HUMANHEAD END
 
 	current.i.linearMomentum += impulse;

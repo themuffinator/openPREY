@@ -100,6 +100,59 @@ jobs:
         shell: bash
         run: python -m pip install meson ninja
 
+      # The engine links system GL and builds SDL3 from its wrap, which needs the
+      # X11, Wayland and audio development headers. Same list as upstream
+      # openQ4's Linux x64 validation lane, without its Wayland smoke compositor.
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y \
+              binutils \
+              libasound2-dev \
+              libdbus-1-dev \
+              libdecor-0-dev \
+              libdrm-dev \
+              libegl1-mesa-dev \
+              libfribidi-dev \
+              libgbm-dev \
+              libgl1-mesa-dri \
+              libgl1-mesa-dev \
+              libglx-mesa0 \
+              libibus-1.0-dev \
+              libjack-dev \
+              libopenal-dev \
+              libpipewire-0.3-dev \
+              libpulse-dev \
+              libsndio-dev \
+              libthai-dev \
+              libudev-dev \
+              libwayland-dev \
+              libx11-dev \
+              libxcursor-dev \
+              libxext-dev \
+              libxfixes-dev \
+              libxi-dev \
+              libxkbcommon-dev \
+              libxrandr-dev \
+              libxss-dev \
+              libxtst-dev \
+              libxxf86dga-dev \
+              libxxf86vm-dev; then
+              exit 0
+            fi
+
+            if [ "${attempt}" -eq 3 ]; then
+              echo "Failed to install Linux native dependencies after ${attempt} attempts."
+              exit 1
+            fi
+
+            echo "Linux dependency installation attempt ${attempt} failed; retrying in 10 seconds..."
+            sleep 10
+          done
+
       - name: Configure, build, and stage (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
