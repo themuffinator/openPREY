@@ -30,6 +30,13 @@ backbuffer. This includes eligible static menu, console, HUD, loading, and other
 fullscreen GUI views whose material stages use the classic fixed-function
 ambient contract.
 
+The classic walker that remains the default keeps the same order. OpenGL's
+`RB_STD_DrawView` draws a view without view entities in one source-order
+material walk rather than splitting it by sort around the fog pass, as
+Vulkan's 2D path already does. The split drew every `SS_GUI` label and fill
+before any `SS_MEDIUM` image, so a plate drawn under its text covered it; Prey's
+stock menu tabs lost their labels that way.
+
 The shared path preserves:
 
 - original surface and repeated-stage order, including repeated image semantics;

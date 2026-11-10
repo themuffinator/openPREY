@@ -208,6 +208,15 @@ static bool RB_DrawSurfIsPostFogMaterialPass( const drawSurf_t *surf ) {
 	return material->GetSort() >= SS_MEDIUM && material->GetSort() < SS_POST_PROCESS;
 }
 
+// A fullscreen 2D view has no lights or fog, and the GUI model emits its
+// surfaces in submission order without sorting them. Draw both material
+// ranges in that order in one walk, as the retail renderer did: splitting them
+// around fog drew every SS_GUI label and fill before any SS_MEDIUM image, so a
+// plate drawn under its text (a stock tab, say) covered it.
+static bool RB_DrawSurfIsOrdered2DMaterialPass( const drawSurf_t *surf ) {
+	return RB_DrawSurfIsPreFogMaterialPass( surf ) || RB_DrawSurfIsPostFogMaterialPass( surf );
+}
+
 static bool RB_DrawSurfNeedsPreFogLegacyFeedback( const drawSurf_t *surf ) {
 	return RB_DrawSurfNeedsLegacyFeedback( surf ) && RB_DrawSurfIsPreFogMaterialPass( surf );
 }
@@ -16696,6 +16705,7 @@ void	RB_STD_DrawView( void ) {
 	// surfaces are held until after fog so additive BSE layers are not painted
 	// over by fog volumes that only owned the opaque scene depth.
 	const int processed = RB_STD_FindPostProcessStart( drawSurfs, numDrawSurfs );
+	const bool ordered2DView = backEnd.viewDef->viewEntitys == NULL;
 	const bool ambientLegacySkipped = !sharedWorldAmbientOwned
 		&& R_ModernGLExecutor_LegacyPassCanSkipForView(
 			RENDER_PASS_AMBIENT, backEnd.viewDef );
@@ -16719,7 +16729,8 @@ void	RB_STD_DrawView( void ) {
 		// Some pre-post materials legitimately populate _currentRender; if the
 		// full list is submitted here, SS_POST_PROCESS surfaces can consume that
 		// stale pre-light-grid copy before the indirect overlay has been added.
-		RB_STD_DrawShaderPasses( drawSurfs, processed, RB_DrawSurfIsPreFogMaterialPass );
+		RB_STD_DrawShaderPasses( drawSurfs, processed, ordered2DView
+			? RB_DrawSurfIsOrdered2DMaterialPass : RB_DrawSurfIsPreFogMaterialPass );
 	}
 
 	// Modern visible color/depth must be handed back before legacy overlay
@@ -16778,7 +16789,7 @@ void	RB_STD_DrawView( void ) {
 			backEnd.currentDepthCopied = false;
 			RB_STD_DrawShaderPasses( drawSurfs, processed, RB_DrawSurfNeedsPostFogLegacyFeedback );
 		}
-	} else if ( processed > 0 ) {
+	} else if ( processed > 0 && !ordered2DView ) {
 		RB_STD_DrawShaderPasses( drawSurfs, processed, RB_DrawSurfIsPostFogMaterialPass );
 	}
 
