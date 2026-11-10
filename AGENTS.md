@@ -8,7 +8,7 @@ This file describes project goals, rules, and workflow expectations for anyone w
 - Company: DarkMatter Productions
 - Version: 0.0.1
 - Repository: `https://github.com/themuffinator/openPREY`
-- Companion GameLibs Repo (local): `E:\Repositories\OpenPrey-game`
+- Game library: in-tree `src/game/`, `src/Prey/`, `src/preyengine/` (Prey SDK EULA; see `LICENSING.md`)
 
 **Goals**
 - Deliver a minimal, clean adaptation of the OpenQ4-derived engine for Prey (2006).
@@ -19,8 +19,8 @@ This file describes project goals, rules, and workflow expectations for anyone w
 - Keep a unified runtime game directory layout under `basepr/`.
 
 **Rules**
-- Treat `E:\Repositories\OpenPrey-game` as part of the same working set for planning, edits, and validation.
-- For SDK/game-library work, make canonical source edits in `OpenPrey-game` first. openPREY stages those sources directly at configure time and must not maintain an in-repo `src/game` mirror.
+- The Prey game library is canonical in this repository: `src/game/`, `src/Prey/` and `src/preyengine/`. The former `OpenPrey-game` companion repository is historical; its history is a merge parent of the import commit (see `docs/dev/game-source-provenance.md`).
+- Keep the licence boundary explicit: engine code is GPLv3 (`LICENSE`); the game trees are SDK-derived and stay under the Prey SDK EULA (`LICENSES/PREY-SDK-EULA.rtf`). Never move engine code into the game trees or game code into engine directories, and never relicense either side. Preserve original notices.
 - Keep `openPREY` free of references to the old OpenQ4 closed-source BSE companion-repo workflow.
 - Do not assume Steam/GOG distribution paths for Prey (2006). Auto-detection must support CD-era installs.
 - Prefer robust install discovery from registry/app-path/uninstall entries and known legacy install roots.
@@ -34,7 +34,6 @@ This file describes project goals, rules, and workflow expectations for anyone w
 **Build/Tooling Conventions**
 - On Windows, use `tools/build/meson_setup.ps1 ...` (or `tools/build/openprey_devcmd.cmd`) so MSVC environment setup is consistent.
 - Use `meson install -C builddir --no-rebuild --skip-subprojects` when staging `.install/`.
-- GameLibs repository override: `OPENPREY_GAMELIBS_REPO=<path>`.
 - Legacy `OPENQ4_*` variants are accepted only as temporary migration compatibility inputs.
 
 **Runtime Module Direction**
@@ -67,7 +66,7 @@ This file describes project goals, rules, and workflow expectations for anyone w
 **References (Local, Not Included In Repo)**
 - OpenQ4 source snapshot baseline: `E:\Repositories\OpenQ4`
 - dhewm3 reference baseline: `E:\_SOURCE\_CODE\dhewm3-master`
-- Prey game-library baseline: `E:\Repositories\OpenPrey-game`
+- Historical Prey game-library repository (retired, read-only): `E:\Repositories\OpenPrey-game`
 - Prey retail install (example legacy path): `C:\Program Files (x86)\Human Head Studios\Prey`
 
 **Upstream Credits**

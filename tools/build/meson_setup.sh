@@ -20,8 +20,8 @@ configure_macos_deployment_target() {
     [[ "${host_name}" == "Darwin" ]] || return 0
 
     if [[ -z "${MACOSX_DEPLOYMENT_TARGET:-}" ]]; then
-        # Keep Meson subprojects and companion GameLibs on the same floor as
-        # the main project's -mmacosx-version-min setting.
+        # Keep Meson subprojects on the same floor as the main project's
+        # -mmacosx-version-min setting.
         export MACOSX_DEPLOYMENT_TARGET=11.0
     elif [[ ! "${MACOSX_DEPLOYMENT_TARGET}" =~ ^[0-9]+([.][0-9]+){1,2}$ ]]; then
         echo "MACOSX_DEPLOYMENT_TARGET must be a dotted macOS version, got '${MACOSX_DEPLOYMENT_TARGET}'." >&2
@@ -185,135 +185,6 @@ raise SystemExit(1)
 PY
 }
 
-resolve_gamelibs_repo_path() {
-    "${PYTHON_CMD}" - "${repo_root}" "${OPENPREY_GAMELIBS_REPO:-${OPENQ4_GAMELIBS_REPO:-}}" <<'PY'
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-raw = sys.argv[2].strip()
-repo = pathlib.Path(raw) if raw else root.parent / "OpenPrey-game"
-print(repo.resolve().as_posix())
-PY
-}
-
-test_gamelibs_stage_refresh_needed() {
-    local build_dir="$1"
-    test_meson_build_directory "${build_dir}" || return 1
-
-    local build_engine=""
-    local build_games=""
-    build_engine="$(get_meson_build_option_value "${build_dir}" build_engine || true)"
-    build_games="$(get_meson_build_option_value "${build_dir}" build_games || true)"
-    if [[ "${build_engine}" != "true" && "${build_games}" != "true" ]]; then
-        return 1
-    fi
-
-    local gamelibs_repo=""
-    gamelibs_repo="$(resolve_gamelibs_repo_path)"
-    local stage_root="${build_dir}/.tmp/openprey_gamelibs_stage"
-    local source_game_dirs=(
-        "${gamelibs_repo}/src/game"
-        "${gamelibs_repo}/src/Prey"
-        "${gamelibs_repo}/src/preyengine"
-    )
-    local staged_game_dirs=(
-        "${stage_root}/src/game"
-        "${stage_root}/src/Prey"
-        "${stage_root}/src/preyengine"
-    )
-
-    local directory_path=""
-    for directory_path in "${source_game_dirs[@]}"; do
-        [[ -d "${directory_path}" ]] || return 1
-    done
-    for directory_path in "${staged_game_dirs[@]}"; do
-        [[ -d "${directory_path}" ]] || return 0
-    done
-
-    if "${PYTHON_CMD}" - "${gamelibs_repo}" "${stage_root}" "${source_game_dirs[@]}" -- "${staged_game_dirs[@]}" <<'PY'
-import hashlib
-import json
-import os
-import pathlib
-import sys
-
-gamelibs_root = pathlib.Path(sys.argv[1])
-stage_root = pathlib.Path(sys.argv[2])
-separator = sys.argv.index("--", 3)
-source_dirs = sys.argv[3:separator]
-staged_dirs = sys.argv[separator + 1:]
-
-
-def regular_files(directory_paths):
-    paths = []
-    for directory_path in directory_paths:
-        for root, _dirs, files in os.walk(directory_path):
-            root_path = pathlib.Path(root)
-            paths.extend(root_path / file_name for file_name in files)
-    return paths
-
-
-def latest_file_mtime_ns(paths):
-    latest = None
-    for path in paths:
-        mtime_ns = path.stat().st_mtime_ns
-        latest = mtime_ns if latest is None else max(latest, mtime_ns)
-    return latest
-
-source_files = regular_files(source_dirs)
-staged_files = regular_files(staged_dirs)
-source_relative_paths = {path.relative_to(gamelibs_root).as_posix() for path in source_files}
-staged_relative_paths = {path.relative_to(stage_root).as_posix() for path in staged_files}
-if source_relative_paths != staged_relative_paths:
-    raise SystemExit(0)
-source_latest = latest_file_mtime_ns(source_files)
-staged_latest = latest_file_mtime_ns(staged_files)
-if source_latest is None:
-    raise SystemExit(1)
-if staged_latest is None:
-    raise SystemExit(0)
-# The normal copy2 path preserves timestamps, so this avoids hashing GameLibs
-# on the common no-change path. When a filesystem loses timestamp precision,
-# verify potentially newer files against the staging manifest instead of
-# treating a timestamp gap as a source edit.
-if source_latest <= staged_latest:
-    raise SystemExit(1)
-
-try:
-    manifest = json.loads(
-        (stage_root / "openprey_gamelibs_stage_manifest.json").read_text(encoding="utf-8")
-    )
-    manifest_hashes = {
-        entry["path"]: entry["sha256"]
-        for entry in manifest["files"]
-        if entry["path"].startswith(("src/game/", "src/Prey/", "src/preyengine/"))
-    }
-except (KeyError, OSError, TypeError, json.JSONDecodeError):
-    raise SystemExit(0)
-
-for source_path in source_files:
-    if source_path.stat().st_mtime_ns <= staged_latest:
-        continue
-    relative_path = source_path.relative_to(gamelibs_root).as_posix()
-    expected_hash = manifest_hashes.get(relative_path)
-    if expected_hash is None:
-        raise SystemExit(0)
-    digest = hashlib.sha256()
-    with source_path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    if digest.hexdigest() != expected_hash:
-        raise SystemExit(0)
-raise SystemExit(1)
-PY
-    then
-        return 0
-    else
-        return 1
-    fi
-}
-
 load_build_dir_info() {
     read_line_array < <(get_compile_build_dir "$@")
     BUILD_DIR="${READ_ARRAY_RESULT[0]}"
@@ -388,11 +259,6 @@ if [[ "${command_name}" == "compile" || "${command_name}" == "install" ]]; then
             --wrap-mode=forcefallback
         )
         run_meson "${setup_args[@]}"
-    fi
-
-    if test_gamelibs_stage_refresh_needed "${BUILD_DIR}"; then
-        echo "OpenPrey-game sources changed since the last staged snapshot. Reconfiguring '${BUILD_DIR}'..."
-        run_meson setup --reconfigure "${BUILD_DIR}" "${repo_root}"
     fi
 
     if [[ "${BUILD_DIR_HAS_EXPLICIT}" == "0" ]]; then

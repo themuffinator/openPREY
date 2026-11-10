@@ -6,3 +6,6 @@
 # commonly emit trailing spaces and mixed indentation as part of their source data.
 content/basepr/pak0/** -whitespace
 content/basepr/dev/maps/** -whitespace
+
+# The Prey SDK agreement is retained byte-for-byte, CRLF included.
+LICENSES/*.rtf -text

@@ -91,13 +91,14 @@ runtime matrix is complete.
 
 - [Display Settings](docs/user/display-settings.md) — fullscreen, borderless, monitor selection, and anti-aliasing
 - [Technical Reference](TECHNICAL.md) — compatibility status, advanced configuration, file layout, dependencies, and versioning
-- [Building from Source](BUILDING.md) — compiler requirements, build options, and the GameLibs companion repository
+- [Building from Source](BUILDING.md) — compiler requirements and build options
+- [Licensing](LICENSING.md) — the GPLv3 engine and the Prey SDK EULA game library
 
 ---
 
 ## Building from Source
 
-Want to compile openPREY yourself? Full instructions, compiler requirements, and notes on the [OpenPrey-game](https://github.com/themuffinator/OpenPrey-GameLibs) companion repository live in **[BUILDING.md](BUILDING.md)**.
+Want to compile openPREY yourself? Full instructions and compiler requirements live in **[BUILDING.md](BUILDING.md)**. The engine and the game library build from this one checkout.
 
 ---
 
@@ -146,7 +147,7 @@ openPREY is licensed under the [GNU General Public License v3.0](https://www.gnu
 
 See the [LICENSE](LICENSE) file for full details.
 
-**Note:** The GPLv3 license applies to openPREY's engine code only. Game library code in [OpenPrey-game](https://github.com/themuffinator/OpenPrey-GameLibs) is derived from the Prey SDK and subject to the original Human Head Studios SDK EULA. Prey game assets remain the property of Human Head Studios and 2K.
+**Note:** The GPLv3 license applies to openPREY's engine code only. The game library in `src/game/`, `src/Prey/` and `src/preyengine/` is derived from the Prey SDK and remains subject to the original Human Head Studios [SDK EULA](LICENSES/PREY-SDK-EULA.rtf). See [LICENSING.md](LICENSING.md) for the full breakdown. Prey game assets remain the property of Human Head Studios and 2K.
 
 ---
 
@@ -162,4 +163,4 @@ You must own a legitimate copy of Prey (2006) to use this software. openPREY doe
 
 ## Links
 
-[Repository](https://github.com/themuffinator/openPREY) • [Game Library](https://github.com/themuffinator/OpenPrey-GameLibs) • [Issue Tracker](https://github.com/themuffinator/openPREY/issues) • [Releases](https://github.com/themuffinator/openPREY/releases) • [OpenQ4](https://github.com/themuffinator/OpenQ4)
+[Repository](https://github.com/themuffinator/openPREY) • [Issue Tracker](https://github.com/themuffinator/openPREY/issues) • [Releases](https://github.com/themuffinator/openPREY/releases) • [OpenQ4](https://github.com/themuffinator/OpenQ4)

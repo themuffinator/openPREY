@@ -28,7 +28,7 @@ This status reflects compatibility with official Prey (2006) assets, not binary 
 - ✅ **Project Rebrand Completed** — Meson project metadata, staged binaries, VS Code launch settings, and documentation use openPREY naming throughout
 - ✅ **Prey Install Discovery** — `fs_basepath` auto-detection targets Prey registry/App Paths/uninstall metadata and known legacy install roots; Steam/GOG assumptions removed
 - ✅ **Unified Game Module Loader** — Engine builds and stages a unified `game_<arch>` module under `basepr/` for both SP and MP paths
-- ✅ **Companion Repo Tooling** — Meson stages canonical `OpenPrey-game` sources directly and builds one unified module
+- ✅ **In-tree Game Library** — The Prey SDK-derived game sources live in `src/game/`, `src/Prey/` and `src/preyengine/` and build into one unified module
 - ✅ **Official PK4 Layout Validation** — Engine startup rejects missing or modified required base-pack layouts when `fs_validateOfficialPaks 1` is enabled
 - ✅ **Cross-host Meson Support** — Source selection, dependency wiring, and packaging tooling cover Windows, Linux, and macOS hosts; active CI currently covers the core x64 lanes
 - ✅ **Precomputed Light-Grid Irradiance** — Portal-area light grids can be loaded, baked, visualized, and applied as an indirect-diffuse pass in the renderer
@@ -36,7 +36,7 @@ This status reflects compatibility with official Prey (2006) assets, not binary 
 ### In Progress
 
 - ❌ **Stock-asset SP/MP Smoke Validation** — Default staged launch flow is still being verified across single-player and multiplayer startup cases
-- ❌ **Prey Gameplay Bring-up** — Canonical `OpenPrey-game` integration is implemented; retail runtime verification continues during the migration
+- ❌ **Prey Gameplay Bring-up** — The in-tree game library is integrated; retail runtime verification continues during the migration
 - ❌ **Particle and FX Compatibility** — Doom 3 / Prey-era declarations and runtime paths are restored, with retail parity checks still pending
 - ❌ **Cross-host Runtime Validation** — Windows remains the deepest runtime-validation path while Linux/macOS map validation is extended
 
@@ -211,16 +211,14 @@ Use `r_showLightGrid 1` to inspect only the current portal area, `2` to draw val
 
 ## SDK and Game Library
 
-openPREY's game code is derived from the Prey Software Development Kit and maintained in the companion [OpenPrey-game](https://github.com/themuffinator/OpenPrey-GameLibs) repository. Canonical edits for SDK/game-library work belong there first. Meson stages its `src/game`, `src/Prey`, and `src/preyengine` trees under `<builddir>/.tmp/openprey_gamelibs_stage/` and builds them against engine headers from this repository; companion copies of those engine headers are deliberately excluded. The per-build snapshot keeps concurrent platform configurations isolated.
+openPREY's game code is derived from the Prey Software Development Kit and lives in this repository under `src/game/`, `src/Prey/` and `src/preyengine/`. Meson compiles those trees in place against the engine headers in the rest of `src/`. The former `OpenPrey-game` companion repository is historical; its history was merged in with the import (see `docs/dev/game-source-provenance.md`).
 
-The SDK is subject to the original Human Head Studios EULA, which permits non-commercial modification for use with a legitimate copy of Prey, but prohibits commercial exploitation and standalone redistribution of the SDK-derived code. For complete terms, see `EULA.Development Kit.rtf` in the OpenPrey-game repository.
+The SDK is subject to the original Human Head Studios EULA, which permits non-commercial modification for use with a legitimate copy of Prey, but prohibits commercial exploitation and standalone redistribution of the SDK-derived code. For complete terms, see [`LICENSES/PREY-SDK-EULA.rtf`](LICENSES/PREY-SDK-EULA.rtf) and [`LICENSING.md`](LICENSING.md).
 
-### Companion Workflow
+### Game Library Workflow
 
-- Default companion repo location: `../OpenPrey-game`
-- `OPENPREY_GAMELIBS_REPO` overrides the companion repository location
-- `tools/build/meson_setup.ps1` and `tools/build/meson_setup.sh` refresh the staged source snapshot when needed
-- `tools/build/build_gamelibs.ps1` is a compatibility entry point that directs developers back to the canonical root Meson build
+- Edit the game library in place under `src/game/`, `src/Prey/` and `src/preyengine/`
+- Keep engine code out of the game trees and game code out of the engine directories; the two sides carry different licences
 - Stage targets: `builddir/basepr/` and `.install/basepr/`
 
 ---

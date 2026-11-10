@@ -16,7 +16,7 @@ option(
   'build_games',
   type: 'boolean',
   value: true,
-  description: 'Build the unified game_<arch> module from the companion OpenPrey-game repository.',
+  description: 'Build the unified game_<arch> module from the in-tree src/game, src/Prey and src/preyengine sources.',
 )
 
 option(

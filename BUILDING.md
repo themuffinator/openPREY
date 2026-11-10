@@ -7,7 +7,7 @@ This guide covers everything required to compile openPREY from source on Windows
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
-- [GameLibs Companion Repository](#gamelibs-companion-repository)
+- [Game Library Sources](#game-library-sources)
 - [Build Setup](#build-setup)
 - [Build Options](#build-options)
 - [Building on Windows](#building-on-windows)
@@ -59,35 +59,17 @@ Alternatively, open `tools/build/openprey_devcmd.cmd` first to initialise the Vi
 
 ---
 
-## GameLibs Companion Repository
+## Game Library Sources
 
-openPREY's game code lives in a separate companion repository — [OpenPrey-game](https://github.com/themuffinator/OpenPrey-GameLibs). This separation clearly identifies the SDK-licensed components derived from the Prey Software Development Kit.
+openPREY's game library builds from this checkout. The SDK-derived trees are
+`src/game/`, `src/Prey/` and `src/preyengine/`; they compile into the unified
+`game_<arch>` module against the engine headers in the rest of `src/`. No
+companion checkout, staging step or environment variable is needed.
 
-> [!IMPORTANT]
-> **The openPREY build expects OpenPrey-game to be checked out alongside openPREY**, at `../OpenPrey-game` relative to this repository. If the companion repository is missing or at a different path, game-module builds will fail.
-
-### Setting Up
-
-```bash
-# Clone both repositories side-by-side:
-git clone https://github.com/themuffinator/openPREY.git
-git clone https://github.com/themuffinator/OpenPrey-GameLibs.git OpenPrey-game
-
-# Result:
-#   ./openPREY/            ← this repository
-#   ./OpenPrey-game/       ← game library source
-```
-
-To use a custom location, set the environment variable before configuring:
-
-```bash
-export OPENPREY_GAMELIBS_REPO=/path/to/OpenPrey-game   # Linux / macOS
-$env:OPENPREY_GAMELIBS_REPO = "C:\path\to\OpenPrey-game"  # PowerShell
-```
-
-During configuration, Meson stages the canonical companion `src/game`, `src/Prey`, and `src/preyengine` trees under `<builddir>/.tmp/openprey_gamelibs_stage/`. Each Meson build directory owns its snapshot, so Windows, Linux, and other configurations can run independently without rewriting one another's inputs. Engine-facing headers such as `idlib` always come from this repository; similarly named companion SDK copies are not compiled. There is no in-repo game-source mirror and no separate companion-library build step.
-
-`OPENPREY_GAMELIBS_REPO` overrides the companion location. The legacy `OPENQ4_GAMELIBS_REPO` name remains a temporary migration alias.
+The game trees stay under the Prey SDK EULA while the engine is GPLv3. See
+[LICENSING.md](LICENSING.md) for the boundary and
+[docs/dev/game-source-provenance.md](docs/dev/game-source-provenance.md) for the
+import record. The former `OpenPrey-game` companion repository is historical.
 
 ---
 
@@ -104,7 +86,7 @@ Pass any of these with `-D<option>=<value>` on the `meson setup` command line:
 | Option | Default | Description |
 |---|---|---|
 | `build_engine` | `true` | Build `openPREY-client_<arch>` and `openPREY-ded_<arch>` |
-| `build_games` | `true` | Build the unified game module from the canonical companion sources |
+| `build_games` | `true` | Build the unified game module from the in-tree game sources |
 | `platform_backend` | `sdl3` | `sdl3`, `legacy_win32`, or `native` |
 | `use_pch` | `true` | Use precompiled headers |
 | `enforce_msvc_2026` | `false` | Fail configure if MSVC is older than 19.46+ (Windows only) |
@@ -243,7 +225,7 @@ Package contents:
   AppImage runtime directly.
 
 The inherited nightly/manual publishing workflows are disabled until they are rebuilt
-around `OpenPrey-game`, `basepr`, and the unified module. Local packaging tools remain
+around the in-tree game library, `basepr`, and the unified module. Local packaging tools remain
 available for candidate validation; they do not imply a published release.
 
 ---

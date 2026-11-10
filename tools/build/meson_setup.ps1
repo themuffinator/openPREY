@@ -301,95 +301,6 @@ function Get-LatestFileWriteTimeUtc {
     return $latest
 }
 
-function Get-openQ4GameLibsRepoPath {
-    param(
-        [string]$RepoRoot,
-        [string]$ConfiguredRepo
-    )
-
-    if (-not [string]::IsNullOrWhiteSpace($ConfiguredRepo)) {
-        return [System.IO.Path]::GetFullPath($ConfiguredRepo)
-    }
-
-    return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot "..\OpenPrey-game"))
-}
-
-function Test-GamelibsStageRefreshNeeded {
-    param(
-        [string]$BuildDir,
-        [string]$RepoRoot,
-        [string]$GameLibsRepo
-    )
-
-    if (-not (Test-MesonBuildDirectory $BuildDir)) {
-        return $false
-    }
-
-    $buildEngine = Get-MesonBuildOptionValue -BuildDir $BuildDir -OptionName "build_engine"
-    $buildGames = Get-MesonBuildOptionValue -BuildDir $BuildDir -OptionName "build_games"
-    if ($buildEngine -ne $true -and $buildGames -ne $true) {
-        return $false
-    }
-
-    $resolvedGameLibsRepo = Get-openQ4GameLibsRepoPath -RepoRoot $RepoRoot -ConfiguredRepo $GameLibsRepo
-    $stageRoot = Join-Path $BuildDir ".tmp\openprey_gamelibs_stage"
-    $sourceGameDirs = @(
-        (Join-Path $resolvedGameLibsRepo "src\game"),
-        (Join-Path $resolvedGameLibsRepo "src\Prey"),
-        (Join-Path $resolvedGameLibsRepo "src\preyengine"),
-        (Join-Path $RepoRoot "src\idlib"),
-        (Join-Path $RepoRoot "src\framework"),
-        (Join-Path $RepoRoot "src\renderer"),
-        (Join-Path $RepoRoot "src\ui"),
-        (Join-Path $RepoRoot "src\sys"),
-        (Join-Path $RepoRoot "src\bse"),
-        (Join-Path $RepoRoot "src\MayaImport"),
-        (Join-Path $RepoRoot "src\cm"),
-        (Join-Path $RepoRoot "src\sound"),
-        (Join-Path $RepoRoot "src\tools\compilers")
-    )
-    $stagedGameDirs = @(
-        (Join-Path $stageRoot "src\game"),
-        (Join-Path $stageRoot "src\Prey"),
-        (Join-Path $stageRoot "src\preyengine"),
-        (Join-Path $stageRoot "src\idlib"),
-        (Join-Path $stageRoot "src\framework"),
-        (Join-Path $stageRoot "src\renderer"),
-        (Join-Path $stageRoot "src\ui"),
-        (Join-Path $stageRoot "src\sys"),
-        (Join-Path $stageRoot "src\bse"),
-        (Join-Path $stageRoot "src\MayaImport"),
-        (Join-Path $stageRoot "src\cm"),
-        (Join-Path $stageRoot "src\sound"),
-        (Join-Path $stageRoot "src\tools\compilers")
-    )
-
-    if (@($sourceGameDirs | Where-Object { -not (Test-Path $_) }).Count -ne 0) {
-        return $false
-    }
-
-    if (@($stagedGameDirs | Where-Object { -not (Test-Path $_) }).Count -ne 0) {
-        return $true
-    }
-
-    $sourceLatest = @(
-        $sourceGameDirs | ForEach-Object { Get-LatestFileWriteTimeUtc -DirectoryPath $_ }
-    ) | Where-Object { $null -ne $_ } | Sort-Object -Descending | Select-Object -First 1
-    $stageLatest = @(
-        $stagedGameDirs | ForEach-Object { Get-LatestFileWriteTimeUtc -DirectoryPath $_ }
-    ) | Where-Object { $null -ne $_ } | Sort-Object -Descending | Select-Object -First 1
-
-    if ($null -eq $sourceLatest) {
-        return $false
-    }
-
-    if ($null -eq $stageLatest) {
-        return $true
-    }
-
-    return $sourceLatest -gt $stageLatest
-}
-
 function Remove-NonRuntimeInstallArtifacts {
     param([string]$InstallRoot)
 
@@ -572,8 +483,6 @@ if ($effectiveArgs.Count -eq 0) {
 }
 
 $commandName = $effectiveArgs[0].ToLowerInvariant()
-$gameLibsRepo = if (-not [string]::IsNullOrWhiteSpace($env:OPENPREY_GAMELIBS_REPO)) { $env:OPENPREY_GAMELIBS_REPO } elseif (-not [string]::IsNullOrWhiteSpace($env:OPENQ4_GAMELIBS_REPO)) { $env:OPENQ4_GAMELIBS_REPO } else { "" }
-$buildGameLibsScript = Join-Path $scriptDir "build_gamelibs.ps1"
 $stageWindowsRuntimeScript = Join-Path $scriptDir "stage_windows_runtime.py"
 $syncIconsScript = Join-Path $scriptDir "sync_icons.py"
 $checkStagedContentScript = Join-Path $scriptDir "check_staged_content_edits.py"
@@ -582,24 +491,6 @@ if ($commandName -eq "setup") {
     $effectiveArgs = Ensure-WindowsStaticCRTSetupArgs -MesonArgs $effectiveArgs
 }
 
-$buildGameLibs = $env:OPENPREY_BUILD_GAMELIBS -eq "1" -or $env:OPENQ4_BUILD_GAMELIBS -eq "1"
-$skipGameLibsBuild = $env:OPENPREY_SKIP_GAMELIBS_BUILD -eq "1" -or $env:OPENQ4_SKIP_GAMELIBS_BUILD -eq "1"
-if ($commandName -eq "compile" -and $buildGameLibs -and -not $skipGameLibsBuild) {
-    if (-not (Test-Path $buildGameLibsScript)) {
-        throw "GameLibs build script not found: '$buildGameLibsScript'."
-    }
-
-    $buildArgs = @()
-    if (-not [string]::IsNullOrWhiteSpace($gameLibsRepo)) {
-        $buildArgs += @("-GameLibsRepo", $gameLibsRepo)
-    }
-
-    & $buildGameLibsScript @buildArgs
-    $buildExit = [int]$LASTEXITCODE
-    if ($buildExit -ne 0) {
-        exit $buildExit
-    }
-}
 
 if ($effectiveArgs.Length -gt 0 -and ($effectiveArgs[0] -eq "compile" -or $effectiveArgs[0] -eq "install")) {
     $isCompile = $effectiveArgs[0] -eq "compile"
@@ -635,12 +526,6 @@ if ($effectiveArgs.Length -gt 0 -and ($effectiveArgs[0] -eq "compile" -or $effec
         }
         Write-Host "Meson build directory '$($buildInfo.BuildDir)' uses b_vscrt='$configuredCRT'. Reconfiguring for openPREY's required Windows static CRT policy..."
         $reconfigureReasons += "Windows static CRT policy"
-    }
-
-    $needsGameLibsRefresh = Test-GamelibsStageRefreshNeeded -BuildDir $buildInfo.BuildDir -RepoRoot $repoRoot -GameLibsRepo $gameLibsRepo
-    if ($needsGameLibsRefresh) {
-        Write-Host "OpenPrey-game sources changed since the last staged snapshot. Reconfiguring '$($buildInfo.BuildDir)'..."
-        $reconfigureReasons += "staged OpenPrey-game refresh"
     }
 
     if ($reconfigureReasons.Count -gt 0) {

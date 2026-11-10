@@ -182,13 +182,15 @@ build_game_mp = get_option('build_game_mp')
 needs_game_headers = build_engine or build_games
 install_root_dir = meson.project_source_root() / '.install'
 install_game_dir = install_root_dir / 'basepr'
-game_libs_repo_root = ''
-game_libs_source_root = ''
-game_libs_repo_summary = 'not required'
-game_stage_root = ''
-game_stage_game_root = ''
-game_stage_src_include_rel = '.tmp/openprey_gamelibs_stage/src'
-game_stage_game_include_rel = '.tmp/openprey_gamelibs_stage/src/game'
+# The Prey game library lives in this checkout (src/game, src/Prey and
+# src/preyengine) under the Prey SDK EULA; see LICENSING.md.
+game_libs_repo_root = meson.project_source_root()
+game_libs_source_root = game_libs_repo_root / 'src'
+game_libs_repo_summary = 'in-tree (src/game, src/Prey and src/preyengine)'
+game_stage_root = meson.project_source_root()
+game_stage_game_root = game_stage_root / 'src' / 'game'
+game_stage_src_include_rel = 'src'
+game_stage_game_include_rel = 'src/game'
 bse_source_root = meson.project_source_root() / 'src' / 'bse'
 game_module_defs_file = ''
 
@@ -312,61 +314,16 @@ if build_engine or build_games
 endif
 
 if needs_game_headers
-  game_libs_repo_discovery = run_command(
-    py,
-    '-c',
-    'import os, pathlib, sys; root = pathlib.Path(sys.argv[1]); raw = os.environ.get("OPENPREY_GAMELIBS_REPO", "").strip() or os.environ.get("OPENQ4_GAMELIBS_REPO", "").strip(); repo = pathlib.Path(raw) if raw else (root / ".." / "OpenPrey-game"); print(repo.resolve().as_posix())',
-    meson.project_source_root(),
-    check: true,
-  )
-  game_libs_repo_root = game_libs_repo_discovery.stdout().strip()
-  if game_libs_repo_root == ''
-    error('Failed to resolve the OpenPrey-game repository path. Set OPENPREY_GAMELIBS_REPO or place it at ../OpenPrey-game.')
-  endif
-
-  game_libs_source_root = game_libs_repo_root / 'src'
-  if not fs_mod.is_dir(game_libs_source_root / 'game')
-    error('OpenPrey-game source directory not found: ' + game_libs_source_root / 'game')
-  endif
-  if not fs_mod.is_dir(game_libs_source_root / 'Prey')
-    error('OpenPrey-game Prey source directory not found: ' + game_libs_source_root / 'Prey')
-  endif
-  if not fs_mod.is_dir(game_libs_source_root / 'preyengine')
-    error('OpenPrey-game support source directory not found: ' + game_libs_source_root / 'preyengine')
-  endif
-
-  game_stage_result = run_command(
-    py,
-    meson.project_source_root() / 'tools' / 'build' / 'stage_gamelibs.py',
-    meson.project_source_root(),
-    game_libs_repo_root,
-    meson.project_build_root() / '.tmp' / 'openprey_gamelibs_stage',
-    check: true,
-  )
-  game_stage_root = game_stage_result.stdout().strip()
-  if game_stage_root == ''
-    error('Failed to stage game sources from OpenPrey-game.')
-  endif
-
-  game_stage_game_root = game_stage_root / 'src' / 'game'
-  if not fs_mod.is_dir(game_stage_game_root)
-    error('Staged game source directory not found: ' + game_stage_game_root)
-  endif
-  game_stage_prey_root = game_stage_root / 'src' / 'Prey'
-  if not fs_mod.is_dir(game_stage_prey_root)
-    error('Staged Prey source directory not found: ' + game_stage_prey_root)
-  endif
-  game_stage_manifest = game_stage_root / 'openprey_gamelibs_stage_manifest.json'
-  if not fs_mod.is_file(game_stage_manifest)
-    error('Staged OpenPrey-game source manifest not found: ' + game_stage_manifest)
-  endif
+  foreach game_tree : ['game', 'Prey', 'preyengine']
+    if not fs_mod.is_dir(game_libs_source_root / game_tree)
+      error('Prey game source directory not found: ' + game_libs_source_root / game_tree)
+    endif
+  endforeach
 
   game_module_defs_file = game_stage_game_root / 'Game.def'
   if host_system == 'windows' and not fs_mod.is_file(game_module_defs_file)
-    error('Staged Game.def not found: ' + game_module_defs_file)
+    error('Game.def not found: ' + game_module_defs_file)
   endif
-
-  game_libs_repo_summary = game_libs_repo_root
 endif
 
 if build_engine and not fs_mod.is_dir(bse_source_root)
@@ -590,7 +547,7 @@ if build_games
   )
   game_sources += [savegame_compat_header]
   if build_engine
-    # Session preflights the exact GameLibs source stamp before tearing down
+    # Session preflights the exact game-library source stamp before tearing down
     # the active map, so the engine target must see the same generated header.
     openq4_engine_sources += [savegame_compat_header]
   endif
@@ -1723,7 +1680,7 @@ summary(
     'Integrated BSE in client': build_engine,
     'Integrated BSE source dir': bse_source_root,
     'Build games': build_games,
-    'GameLibs source repo': game_libs_repo_summary,
+    'Game library sources': game_libs_repo_summary,
     'Build unified game': build_games,
     'Unified game binary': build_games ? game_binary_name : '',
     'Legacy build_game_sp option': build_game_sp,
