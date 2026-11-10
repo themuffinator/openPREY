@@ -1363,6 +1363,10 @@ int idDeviceContext::FindFont( const char *name ) {
 	}
 }
 
+bool idDeviceContext::FontIs( int num, const char *name ) const {
+	return num >= 0 && num < fonts.Num() && name != NULL && idStr::Icmp( fonts[num].name, name ) == 0;
+}
+
 void idDeviceContext::SetupFonts() {
 	fonts.SetGranularity( 1 );
 

@@ -1464,6 +1464,9 @@ void idUserInterfaceLocal::Redraw( int _time, bool useAspectCorrection ) {
 	}
 	if ( !loading && desktop ) {
 		time = _time;
+		// Consoles and vehicle HUDs ramp this while Talon translates them; the
+		// alien-face windows read it as they draw (idWindow::Draw).
+		translationAlpha = idMath::ClampFloat( 0.0f, 1.0f, state.GetFloat( "translationAlpha", "0" ) );
 		renderSystem->SetFrameShaderTime( _time );
 		if ( !initialized ) {
 			initialized = true;

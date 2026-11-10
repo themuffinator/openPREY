@@ -110,6 +110,9 @@ public:
 	void						SetControllerNavigation( bool enabled ) { controllerNavigation = enabled; }
 	int							GetTime() const { return time; }
 	void						SetTime( int _time ) { time = _time; }
+	// Prey's translation of the alien face, 0..1: the state float
+	// "translationAlpha", read once per Redraw (prey-ui-visual-design.md 11.4).
+	float						TranslationAlpha() const { return translationAlpha; }
 
 	void						RecurseSetKeyBindingNames( idWindow *window );
 	idStr						&GetPendingCmd() { return pendingCmd; };
@@ -216,6 +219,7 @@ private:
 	void						ClampCursor( void );
 
 	int							time;
+	float						translationAlpha = 0.0f; // derived from state each Redraw; never serialized
 
 	idWinVec4 *					lightColorVar;
 };

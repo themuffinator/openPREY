@@ -527,6 +527,9 @@ protected:
 
 	signed char	textShadow;
 	unsigned char fontNum;
+	// Prey's "notranslation": alien text that never turns English (11.4).
+	// Fixed at parse, like retail's window flag; never serialized.
+	bool	noTranslation;
 	unsigned char cursor;					//
 	signed char	textAlign;
 

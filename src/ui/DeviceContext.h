@@ -76,6 +76,9 @@ public:
 	bool				GetMaxTextIndex(const char *text, int limit, float textScale, wrapInfo_t &wrapInfo);
 
 	int					FindFont( const char *name );
+	// Whether font slot num was registered under name. Unlike FindFont it
+	// registers nothing and touches no material, so a draw can ask each frame.
+	bool				FontIs( int num, const char *name ) const;
 	void				SetupFonts();
 	bool				ReloadFonts();
 

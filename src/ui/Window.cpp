@@ -802,6 +802,7 @@ void idWindow::CommonInit() {
 	lastTimeRun = 0;
 	origin.Zero();
 	fontNum = 0;
+	noTranslation = false;
 	timeLine = -1;
 	xOffset = yOffset = 0.0;
 	cursor = 0;
@@ -1317,6 +1318,16 @@ void idWindow::Draw( int time, float x, float y ) {
 	const int style = static_cast<int>( textstyle );
 	const bool isChatWindow = ( flags & WIN_CHATWINDOW ) != 0;
 	const char *drawn = ( textEllipsis || textKeyNames || textOneLine ) && measuredShortened ? measuredDrawn.c_str() : text.c_str();
+	// Prey's translation (prey-ui-visual-design.md 11.4), as the 2007 engine
+	// draws it: text in the alien face, shadow included, fades out as the GUI's
+	// translationAlpha rises, notranslation windows too. Then, unless the window
+	// is notranslation, the same text fades in over it in the default face:
+	// six units higher, in the text colour at translationAlpha itself.
+	const float translation = gui != NULL ? gui->TranslationAlpha() : 0.0f;
+	const bool translating = translation > 0.0f && dc->FontIs( fontNum, "fonts/alien" );
+	if ( translating ) {
+		drawTextColor[3] *= 1.0f - translation;
+	}
 	if ( textShadow ) {
 		idStr shadowText = drawn;
 		idRectangle shadowRect = textRect;
@@ -1330,6 +1341,15 @@ void idWindow::Draw( int time, float x, float y ) {
 	}
 	dc->DrawText( drawn, textScale, textAlign, drawTextColor, textRect, !( flags & WIN_NOWRAP ), -1,
 		false, NULL, 0, textAdjust, style, isChatWindow );
+	if ( translating && !noTranslation ) {
+		idRectangle translatedRect = textRect;
+		translatedRect.y -= 6.0f;
+		const idVec4 translatedColor( drawTextColor.x, drawTextColor.y, drawTextColor.z, translation );
+		dc->SetFont( 0 );	// the default face, "fonts" (idDeviceContext::SetupFonts)
+		dc->DrawText( drawn, textScale, textAlign, translatedColor, translatedRect, !( flags & WIN_NOWRAP ), -1,
+			false, NULL, 0, textAdjust, style, isChatWindow );
+		SetFont();
+	}
 
 	if ( gui_edit.GetBool() ) {
 		dc->EnableClipping( false );
@@ -3012,6 +3032,12 @@ void idWindow::SetupFromState() {
 		cursor = idDeviceContext::CURSOR_HAND;
 		flags |= WIN_CANFOCUS;
 	}
+
+	// Retail parsed "notranslation" into a window flag. Here it stays the
+	// defined variable earlier builds made of it, so a window's saved
+	// variables keep their order, and is read once the window is parsed.
+	idWinVar *noTranslationVar = FindDefinedVarByNameNoCreate( "notranslation" );
+	noTranslation = noTranslationVar != NULL && atoi( noTranslationVar->c_str() ) != 0;
 }
 
 /*
