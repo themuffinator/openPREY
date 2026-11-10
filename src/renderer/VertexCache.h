@@ -38,7 +38,7 @@ typedef enum {
 } vertBlockTag_t;
 
 typedef struct vertCache_s {
-	GLuint			vbo;
+	unsigned int			vbo;
 	void			*virtMem;			// only one of vbo / virtMem will be set
 	bool			indexBuffer;		// holds indexes instead of vertexes
 
@@ -50,6 +50,13 @@ typedef struct vertCache_s {
 	struct vertCache_s *next, *prev;	// may be on the static list or one of the frame lists
 	int				frameUsed;			// it can't be purged if near the current frame
 } vertCache_t;
+
+// Position() may return a zero-valued byte offset when a VBO is bound.  Form
+// attribute addresses in integer space so offset zero never becomes null
+// pointer arithmetic or a null-base member access in the renderer back end.
+ID_INLINE void *RB_DrawVertAttributePointer( const void *base, const size_t byteOffset ) {
+	return reinterpret_cast<void *>( reinterpret_cast<uintptr_t>( base ) + byteOffset );
+}
 
 
 class idVertexCache {
@@ -79,12 +86,21 @@ public:
 	// an indexCache, this must be called to reset GL_ELEMENT_ARRAY_BUFFER_ARB
 	void			UnbindIndex();
 
+	// redundant glBindBufferARB filtering for the legacy backend. Renderer code
+	// that binds GL_ARRAY_BUFFER_ARB / GL_ELEMENT_ARRAY_BUFFER_ARB must go
+	// through these so the shadow state stays coherent; code that binds those
+	// targets behind our back (modern executor / GL state cache) must call
+	// InvalidateBufferBindings() before the legacy backend draws again.
+	static void		BindArrayBuffer( unsigned int vbo );
+	static void		BindIndexBuffer( unsigned int vbo );
+	static void		InvalidateBufferBindings();
+
 	// automatically freed at the end of the next frame
 	// used for specular texture coordinates and gui drawing, which
 	// will change every frame.
 	// will return NULL if the vertex cache is completely full
 	// As with Position(), this may not actually be a pointer you can access.
-	vertCache_t	*	AllocFrameTemp( void *data, int bytes );
+	vertCache_t	*	AllocFrameTemp( void *data, int bytes, bool indexBuffer = false );
 
 	// notes that a buffer is used this frame, so it can't be purged
 	// out from under the GPU
@@ -106,6 +122,9 @@ public:
 private:
 	void			InitMemoryBlocks( int size );
 	void			ActuallyFree( vertCache_t *block );
+	void			ReclaimHeaderList( vertCache_t *list );
+	void			ReclaimAllHeaders();
+	void			RetireFrame( int slot );
 
 	static idCVar	r_showVertexCache;
 	static idCVar	r_vertexBufferMegs;
@@ -117,6 +136,8 @@ private:
 	int				staticCountThisFrame;
 	int				dynamicAllocThisFrame;
 	int				dynamicCountThisFrame;
+	int				legacyAllocThisFrame;	// bytes used in tempBuffers[listNum]; separate from
+											// dynamicAllocThisFrame, which also counts bridged bytes
 
 	int				currentFrame;			// for purgable block tracking
 	int				listNum;				// currentFrame % NUM_VERTEX_FRAMES, determines which tempBuffers to use
@@ -132,8 +153,8 @@ private:
 
 	vertCache_t		freeStaticHeaders;		// head of doubly linked list
 	vertCache_t		freeDynamicHeaders;		// head of doubly linked list
-	vertCache_t		dynamicHeaders;			// head of doubly linked list
-	vertCache_t		deferredFreeList;		// head of doubly linked list
+	vertCache_t		dynamicHeaders[NUM_VERTEX_FRAMES];			// head of doubly linked list
+	vertCache_t		deferredFreeList[NUM_VERTEX_FRAMES];		// head of doubly linked list
 	vertCache_t		staticHeaders;			// head of doubly linked list in MRU order,
 											// staticHeaders.next is most recently used
 

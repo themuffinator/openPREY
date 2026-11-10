@@ -2,6 +2,8 @@
 #ifndef __MD5_H__
 #define __MD5_H__
 
+#include <stdint.h>
+
 /*
 ===============================================================================
 
@@ -11,6 +13,7 @@
 ===============================================================================
 */
 
-unsigned long MD5_BlockChecksum( const void *data, int length );
+uint32_t MD5_BlockChecksum( const void *data, int length );
+bool MD5_FileChecksum( const char *path, char digestHex[33] );
 
 #endif /* !__MD5_H__ */

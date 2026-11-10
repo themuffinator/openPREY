@@ -123,7 +123,8 @@ bool rvGEApp::Initialize ( void )
 		return false;
 	}
 
-	SetClassLong( mMDIFrame, GCL_HICON, ( LONG )LoadIcon( win32.hInstance, MAKEINTRESOURCE( IDI_GUIED ) ) );
+	SetClassLongPtr( mMDIFrame, GCLP_HICON,
+		reinterpret_cast< LONG_PTR >( LoadIcon( win32.hInstance, MAKEINTRESOURCE( IDI_GUIED ) ) ) );
 	
 	// Create the MDI window
 	CLIENTCREATESTRUCT ccs;
@@ -263,7 +264,7 @@ Main frame window procedure
 */
 LRESULT CALLBACK rvGEApp::FrameWndProc ( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam )
 {
-	rvGEApp* app = (rvGEApp*) GetWindowLong ( hWnd, GWL_USERDATA );
+	rvGEApp* app = reinterpret_cast< rvGEApp * >( GetWindowLongPtr( hWnd, GWLP_USERDATA ) );
 
 	switch ( uMsg )
 	{		
@@ -348,7 +349,7 @@ LRESULT CALLBACK rvGEApp::FrameWndProc ( HWND hWnd, UINT uMsg, WPARAM wParam, LP
 
 			assert ( app );
 			
-			SetWindowLong ( hWnd, GWL_USERDATA, (LONG)app );
+			SetWindowLongPtr( hWnd, GWLP_USERDATA, reinterpret_cast< LONG_PTR >( app ) );
 
 			app->mMDIFrame = hWnd;
 			
@@ -365,9 +366,9 @@ LRESULT CALLBACK rvGEApp::FrameWndProc ( HWND hWnd, UINT uMsg, WPARAM wParam, LP
 			app->mToolWindows.Append ( app->mProperties.GetWindow ( ) );
 			app->mToolWindows.Append ( app->mTransformer.GetWindow ( ) );
 			
-			SendMessage ( app->mNavigator.GetWindow ( ), WM_NCACTIVATE, true, (LONG)-1 );
-			SendMessage ( app->mProperties.GetWindow ( ), WM_NCACTIVATE, true, (LONG)-1 );
-			SendMessage ( app->mTransformer.GetWindow ( ), WM_NCACTIVATE, true, (LONG)-1 );			
+			SendMessage( app->mNavigator.GetWindow(), WM_NCACTIVATE, true, static_cast< LPARAM >( -1 ) );
+			SendMessage( app->mProperties.GetWindow(), WM_NCACTIVATE, true, static_cast< LPARAM >( -1 ) );
+			SendMessage( app->mTransformer.GetWindow(), WM_NCACTIVATE, true, static_cast< LPARAM >( -1 ) );
 
 			break;
 		}
@@ -385,7 +386,7 @@ MDI Child window procedure
 */
 LRESULT CALLBACK rvGEApp::MDIChildProc ( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam )
 {
-	rvGEWorkspace* workspace = (rvGEWorkspace*)GetWindowLong ( hWnd, GWL_USERDATA );	
+	rvGEWorkspace* workspace = reinterpret_cast< rvGEWorkspace * >( GetWindowLongPtr( hWnd, GWLP_USERDATA ) );
 
 	// Give the active workspace a chance to play with it
 	if ( workspace )
@@ -572,10 +573,10 @@ int rvGEApp::HandleCommand ( WPARAM wParam, LPARAM lParam )
 			break;
 			
 		case ID_GUIED_TOOLS_RELOADMATERIALS:
-			SetCursor ( LoadCursor ( NULL, MAKEINTRESOURCE(IDC_WAIT) ) );
+			SetCursor( LoadCursor( NULL, IDC_WAIT ) );
 			cmdSystem->BufferCommandText( CMD_EXEC_NOW, "reloadImages\n" );
 			cmdSystem->BufferCommandText( CMD_EXEC_NOW, "reloadMaterials\n" );
-			SetCursor ( LoadCursor ( NULL, MAKEINTRESOURCE(IDC_ARROW) ) );
+			SetCursor( LoadCursor( NULL, IDC_ARROW ) );
 			break;
 			
 		case ID_GUIED_EDIT_COPY:
@@ -1159,7 +1160,7 @@ bool rvGEApp::NewFile ( void )
 								480,
 								mMDIClient,
 								mInstance,
-								(LONG)workspace );
+								reinterpret_cast< LPARAM >( workspace ) );
 														
 		ShowWindow ( child, SW_SHOW );
 	}
@@ -1191,7 +1192,7 @@ bool rvGEApp::OpenFile ( const char* filename )
 		}
 	}
 
-	SetCursor ( LoadCursor ( NULL, MAKEINTRESOURCE(IDC_WAIT ) ) );
+	SetCursor( LoadCursor( NULL, IDC_WAIT ) );
 
 	// Setup the default error.
 	error = va("Failed to parse '%s'", filename );
@@ -1210,7 +1211,7 @@ bool rvGEApp::OpenFile ( const char* filename )
 								480,
 								mMDIClient,
 								mInstance,
-								(LONG)workspace );
+								reinterpret_cast< LPARAM >( workspace ) );
 														
 		ShowWindow ( child, SW_SHOW );
 		
@@ -1224,7 +1225,7 @@ bool rvGEApp::OpenFile ( const char* filename )
 		MessageBox ( error, MB_OK|MB_ICONERROR );
 	}
 
-	SetCursor ( LoadCursor ( NULL, MAKEINTRESOURCE(IDC_ARROW ) ) );
+	SetCursor( LoadCursor( NULL, IDC_ARROW ) );
 	
 	return result;;
 }
@@ -1362,7 +1363,7 @@ int	rvGEApp::ToolWindowActivate ( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
 		{
 			if ( mToolWindows[i] != hwnd &&	mToolWindows[i] != (HWND) lParam )
 			{
-				SendMessage ( mToolWindows[i], WM_NCACTIVATE, keepActive, (LONG)-1 );
+				SendMessage( mToolWindows[i], WM_NCACTIVATE, keepActive, static_cast< LPARAM >( -1 ) );
 			}
 		}
 	}

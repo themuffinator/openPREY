@@ -2,6 +2,14 @@
 #ifndef __MATH_MATH_H__
 #define __MATH_MATH_H__
 
+#include <stdint.h>
+
+// idMath::INFINITY needs the macro gone, but libc++ uses it inside <cmath>'s
+// own function bodies (__clamp_to_integral), so any translation unit that
+// reaches <cmath> after this header would fail to compile. Pulling it in first
+// means the macro is still defined while that header is processed.
+#include <cmath>
+
 /*
 ===============================================================================
 
@@ -49,18 +57,34 @@
 #define	ANGLE2BYTE(x)			( idMath::FtoiFast( (x) * 256.0f / 360.0f ) & 255 )
 #define	BYTE2ANGLE(x)			( (x) * ( 360.0f / 256.0f ) )
 
-#define FLOATSIGNBITSET(f)		((*(const unsigned long *)&(f)) >> 31)
-#define FLOATSIGNBITNOTSET(f)	((~(*(const unsigned long *)&(f))) >> 31)
-#define FLOATNOTZERO(f)			((*(const unsigned long *)&(f)) & ~(1<<31) )
-#define INTSIGNBITSET(i)		(((const unsigned long)(i)) >> 31)
-#define INTSIGNBITNOTSET(i)		((~((const unsigned long)(i))) >> 31)
+ID_INLINE unsigned int idMath_FloatBits( const float f ) {
+	unsigned int bits;
+	memcpy( &bits, &f, sizeof( bits ) );
+	return bits;
+}
 
-#define	FLOAT_IS_NAN(x)			(((*(const unsigned long *)&x) & 0x7f800000) == 0x7f800000)
-#define FLOAT_IS_INF(x)			(((*(const unsigned long *)&x) & 0x7fffffff) == 0x7f800000)
+ID_INLINE float idMath_FloatFromBits( const unsigned int bits ) {
+	float f;
+	memcpy( &f, &bits, sizeof( f ) );
+	return f;
+}
+
+ID_INLINE float idMath_FloatXorBits( const float f, const unsigned int bits ) {
+	return idMath_FloatFromBits( idMath_FloatBits( f ) ^ bits );
+}
+
+#define FLOATSIGNBITSET(f)		(idMath_FloatBits(f) >> 31)
+#define FLOATSIGNBITNOTSET(f)	((~idMath_FloatBits(f)) >> 31)
+#define FLOATNOTZERO(f)			(idMath_FloatBits(f) & ~(1u<<31) )
+#define INTSIGNBITSET(i)		((static_cast<unsigned int>(i)) >> 31)
+#define INTSIGNBITNOTSET(i)		((~(static_cast<unsigned int>(i))) >> 31)
+
+#define	FLOAT_IS_NAN(x)			((idMath_FloatBits(x) & 0x7f800000u) == 0x7f800000u)
+#define FLOAT_IS_INF(x)			((idMath_FloatBits(x) & 0x7fffffffu) == 0x7f800000u)
 #define FLOAT_IS_INVALID(x)		( FLOAT_IS_NAN( x ) || FLOAT_IS_INF( x ) )
-#define FLOAT_IS_IND(x)			((*(const unsigned long *)&x) == 0xffc00000)
-#define	FLOAT_IS_DENORMAL(x)	(((*(const unsigned long *)&x) & 0x7f800000) == 0x00000000 && \
-								 ((*(const unsigned long *)&x) & 0x007fffff) != 0x00000000 )
+#define FLOAT_IS_IND(x)			(idMath_FloatBits(x) == 0xffc00000u)
+#define	FLOAT_IS_DENORMAL(x)	((idMath_FloatBits(x) & 0x7f800000u) == 0x00000000u && \
+								 (idMath_FloatBits(x) & 0x007fffffu) != 0x00000000u )
 
 #define IEEE_FLT_MANTISSA_BITS	23
 #define IEEE_FLT_EXPONENT_BITS	8
@@ -105,9 +129,9 @@ class idVec3;
 ================================================================================================
 */
 
-#define IEEE_FLT_SIGNBITSET( a )	(reinterpret_cast<const unsigned int &>(a) >> IEEE_FLT_SIGN_BIT)
-#define IEEE_FLT_SIGNBITNOTSET( a )	((~reinterpret_cast<const unsigned int &>(a)) >> IEEE_FLT_SIGN_BIT)
-#define IEEE_FLT_ISNOTZERO( a )		(reinterpret_cast<const unsigned int &>(a) & ~(1u<<IEEE_FLT_SIGN_BIT))
+#define IEEE_FLT_SIGNBITSET( a )	(idMath_FloatBits(a) >> IEEE_FLT_SIGN_BIT)
+#define IEEE_FLT_SIGNBITNOTSET( a )	((~idMath_FloatBits(a)) >> IEEE_FLT_SIGN_BIT)
+#define IEEE_FLT_ISNOTZERO( a )		(idMath_FloatBits(a) & ~(1u<<IEEE_FLT_SIGN_BIT))
 
 class idMath {
 public:
@@ -219,7 +243,7 @@ public:
 	static float				Rint( float f );			// returns the nearest integer
 	static int					Ftoi( float f );			// float to int conversion
 	static int					FtoiFast( float f );		// fast float to int conversion but uses current FPU round mode (default round nearest)
-	static unsigned long		Ftol(float f);			// float to long conversion
+	static uint32_t			Ftol( float f );		// float to 32-bit unsigned conversion
 	static byte					Ftob( float f );			// float to byte conversion, the result is clamped to the range [0-255]
 
 // jmarshall
@@ -328,13 +352,13 @@ private:
 };
 
 ID_INLINE float idMath::RSqrt( float x ) {
-	long i;
+	unsigned int i;
 	float y, r;
 
 	y = x * 0.5f;
-	i = *reinterpret_cast<long *>( &x );
-	i = 0x5f3759df - ( i >> 1 );
-	r = *reinterpret_cast<float *>( &i );
+	i = idMath_FloatBits( x );
+	i = 0x5f3759dfu - ( i >> 1 );
+	r = idMath_FloatFromBits( i );
 	r = r * ( 1.5f - r * r * y );
 	return r;
 }
@@ -747,7 +771,7 @@ ID_INLINE float idMath::Exp16( float f ) {
 
 	x = f * 1.44269504088896340f;		// multiply with ( 1 / log( 2 ) )
 #if 1
-	i = *reinterpret_cast<int *>( &x );
+	i = static_cast<int>( idMath_FloatBits( x ) );
 	s = ( i >> IEEE_FLT_SIGN_BIT );
 	e = ( ( i >> IEEE_FLT_MANTISSA_BITS ) & ( ( 1 << IEEE_FLT_EXPONENT_BITS ) - 1 ) ) - IEEE_FLT_EXPONENT_BIAS;
 	m = ( i & ( ( 1 << IEEE_FLT_MANTISSA_BITS ) - 1 ) ) | ( 1 << IEEE_FLT_MANTISSA_BITS );
@@ -759,7 +783,7 @@ ID_INLINE float idMath::Exp16( float f ) {
 	}
 #endif
 	exponent = ( i + IEEE_FLT_EXPONENT_BIAS ) << IEEE_FLT_MANTISSA_BITS;
-	y = *reinterpret_cast<float *>( &exponent );
+	y = idMath_FloatFromBits( static_cast<unsigned int>( exponent ) );
 	x -= (float) i;
 	if ( x >= 0.5f ) {
 		x -= 0.5f;
@@ -784,10 +808,10 @@ ID_INLINE float idMath::Log16( float f ) {
 	int i, exponent;
 	float y, y2;
 
-	i = *reinterpret_cast<int *>( &f );
+	i = static_cast<int>( idMath_FloatBits( f ) );
 	exponent = ( ( i >> IEEE_FLT_MANTISSA_BITS ) & ( ( 1 << IEEE_FLT_EXPONENT_BITS ) - 1 ) ) - IEEE_FLT_EXPONENT_BIAS;
 	i -= ( exponent + 1 ) << IEEE_FLT_MANTISSA_BITS;	// get value in the range [.5, 1>
-	y = *reinterpret_cast<float *>( &i );
+	y = idMath_FloatFromBits( static_cast<unsigned int>( i ) );
 	y *= 1.4142135623730950488f;						// multiply with sqrt( 2 )
 	y = ( y - 1.0f ) / ( y + 1.0f );
 	y2 = y * y;
@@ -805,7 +829,7 @@ ID_INLINE int idMath::IPow( int x, int y ) {
 }
 
 ID_INLINE int idMath::ILog2( float f ) {
-	return ( ( ( *reinterpret_cast<int *>( &f ) ) >> IEEE_FLT_MANTISSA_BITS ) & ( ( 1 << IEEE_FLT_EXPONENT_BITS ) - 1 ) ) - IEEE_FLT_EXPONENT_BIAS;
+	return ( ( static_cast<int>( idMath_FloatBits( f ) ) >> IEEE_FLT_MANTISSA_BITS ) & ( ( 1 << IEEE_FLT_EXPONENT_BITS ) - 1 ) ) - IEEE_FLT_EXPONENT_BIAS;
 }
 
 ID_INLINE int idMath::ILog2( int i ) {
@@ -821,7 +845,7 @@ ID_INLINE int idMath::BitsForInteger( int i ) {
 }
 
 ID_INLINE int idMath::MaskForFloatSign( float f ) {
-	return ( ( *reinterpret_cast<int *>( &f ) ) >> 31 );
+	return -static_cast<int>( idMath_FloatBits( f ) >> 31 );
 }
 
 ID_INLINE int idMath::MaskForIntegerSign( int i ) {
@@ -869,9 +893,7 @@ ID_INLINE int idMath::Abs( int x ) {
 }
 
 ID_INLINE float idMath::Fabs( float f ) {
-	int tmp = *reinterpret_cast<int *>( &f );
-	tmp &= 0x7FFFFFFF;
-	return *reinterpret_cast<float *>( &tmp );
+	return idMath_FloatFromBits( idMath_FloatBits( f ) & 0x7fffffffu );
 }
 
 ID_INLINE float idMath::Floor( float f ) {
@@ -909,7 +931,7 @@ ID_INLINE int idMath::FtoiFast( float f ) {
 	return i;
 #elif 0						// round chop (C/C++ standard)
 	int i, s, e, m, shift;
-	i = *reinterpret_cast<int *>( &f );
+	i = static_cast<int>( idMath_FloatBits( f ) );
 	s = i >> IEEE_FLT_SIGN_BIT;
 	e = ( ( i >> IEEE_FLT_MANTISSA_BITS ) & ( ( 1 << IEEE_FLT_EXPONENT_BITS ) - 1 ) ) - IEEE_FLT_EXPONENT_BIAS;
 	m = ( i & ( ( 1 << IEEE_FLT_MANTISSA_BITS ) - 1 ) ) | ( 1 << IEEE_FLT_MANTISSA_BITS );
@@ -1035,17 +1057,15 @@ ID_INLINE float idMath::AngleDelta( float angle1, float angle2 ) {
 
 ID_INLINE int idMath::FloatHash( const float *array, const int numFloats ) {
 	int i, hash = 0;
-	const int *ptr;
 
-	ptr = reinterpret_cast<const int *>( array );
 	for ( i = 0; i < numFloats; i++ ) {
-		hash ^= ptr[i];
+		hash ^= static_cast<int>( idMath_FloatBits( array[i] ) );
 	}
 	return hash;
 }
 
-ID_INLINE unsigned long idMath::Ftol(float f) {
-	return (unsigned long)f;
+ID_INLINE uint32_t idMath::Ftol( float f ) {
+	return static_cast<uint32_t>( f );
 }
 
 /*
@@ -1071,15 +1091,16 @@ ID_INLINE float idMath::AngleMod(float a)
 
 class rvRandom {
 private:
-	static	unsigned long	mSeed;
+	static	unsigned int	mSeed;
 public:
 							rvRandom( void ) { mSeed = 0x89abcdef; }
 
 	// for a non seed based init
-	static	int				Init( void );
+	static	unsigned int	Init( void );
 
 	// Init the seed to a unique number
-	static	void			Init( unsigned long seed ) { mSeed = seed; }
+	static	void			Init( unsigned int seed ) { mSeed = seed; }
+	static	unsigned int	GetSeed( void ) { return mSeed; }
 
 	// Returns a float min <= x < max (exclusive; will get max - 0.00001; but never max)
 	static	float			flrand( float min, float max );

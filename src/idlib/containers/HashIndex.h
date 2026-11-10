@@ -85,6 +85,9 @@ private:
 
 	static int		INVALID_INDEX[1];
 
+	static int		NormalizeHashSize( const int hashSize );
+	static int		NormalizeIndexSize( const int indexSize );
+
 	void			Init( const int initialHashSize, const int initialIndexSize );
 	void			Allocate( const int newHashSize, const int newIndexSize );
 };
@@ -122,7 +125,14 @@ idHashIndex::Allocated
 ================
 */
 ID_INLINE size_t idHashIndex::Allocated( void ) const {
-	return hashSize * sizeof( int ) + indexSize * sizeof( int );
+	size_t size = 0;
+	if ( hash != INVALID_INDEX ) {
+		size += hashSize * sizeof( int );
+	}
+	if ( indexChain != INVALID_INDEX ) {
+		size += indexSize * sizeof( int );
+	}
+	return size;
 }
 
 /*
@@ -140,6 +150,10 @@ idHashIndex::operator=
 ================
 */
 ID_INLINE idHashIndex &idHashIndex::operator=( const idHashIndex &other ) {
+	if ( this == &other ) {
+		return *this;
+	}
+
 	granularity = other.granularity;
 	hashMask = other.hashMask;
 	lookupMask = other.lookupMask;
@@ -204,6 +218,9 @@ ID_INLINE void idHashIndex::Add( const int key, const int index ) {
 // RAVEN END
 
 	assert( index >= 0 );
+	if ( index < 0 ) {
+		return;
+	}
 	if ( hash == INVALID_INDEX ) {
 		Allocate( hashSize, index >= indexSize ? index + 1 : indexSize );
 	}
@@ -223,7 +240,7 @@ idHashIndex::Remove
 ID_INLINE void idHashIndex::Remove( const int key, const int index ) {
 	int k = key & hashMask;
 
-	if ( hash == INVALID_INDEX ) {
+	if ( hash == INVALID_INDEX || index < 0 || index >= indexSize ) {
 		return;
 	}
 	if ( hash[k] == index ) {
@@ -231,6 +248,9 @@ ID_INLINE void idHashIndex::Remove( const int key, const int index ) {
 	}
 	else {
 		for ( int i = hash[k]; i != -1; i = indexChain[i] ) {
+			if ( i < 0 || i >= indexSize ) {
+				break;
+			}
 			if ( indexChain[i] == index ) {
 				indexChain[i] = indexChain[index];
 				break;
@@ -256,6 +276,9 @@ idHashIndex::Next
 */
 ID_INLINE int idHashIndex::Next( const int index ) const {
 	assert( index >= 0 && index < indexSize );
+	if ( index < 0 || index >= indexSize ) {
+		return -1;
+	}
 	return indexChain[index & lookupMask];
 }
 
@@ -267,6 +290,9 @@ idHashIndex::InsertIndex
 ID_INLINE void idHashIndex::InsertIndex( const int key, const int index ) {
 	int i, max;
 
+	if ( index < 0 ) {
+		return;
+	}
 	if ( hash != INVALID_INDEX ) {
 		max = index;
 		for ( i = 0; i < hashSize; i++ ) {
@@ -304,6 +330,9 @@ idHashIndex::RemoveIndex
 ID_INLINE void idHashIndex::RemoveIndex( const int key, const int index ) {
 	int i, max;
 
+	if ( index < 0 || index >= indexSize ) {
+		return;
+	}
 	Remove( key, index );
 	if ( hash != INVALID_INDEX ) {
 		max = index;
@@ -349,8 +378,9 @@ idHashIndex::Clear
 */
 ID_INLINE void idHashIndex::Clear( const int newHashSize, const int newIndexSize ) {
 	Free();
-	hashSize = newHashSize;
-	indexSize = newIndexSize;
+	hashSize = NormalizeHashSize( newHashSize );
+	indexSize = NormalizeIndexSize( newIndexSize );
+	hashMask = hashSize - 1;
 }
 
 /*
@@ -378,7 +408,7 @@ idHashIndex::SetGranularity
 */
 ID_INLINE void idHashIndex::SetGranularity( const int newGranularity ) {
 	assert( newGranularity > 0 );
-	granularity = newGranularity;
+	granularity = Max( 1, newGranularity );
 }
 
 /*
@@ -387,6 +417,9 @@ idHashIndex::GenerateKey
 ================
 */
 ID_INLINE int idHashIndex::GenerateKey( const char *string, bool caseSensitive ) const {
+	if ( string == NULL ) {
+		return 0;
+	}
 	if ( caseSensitive ) {
 		return ( idStr::Hash( string ) & hashMask );
 	} else {
@@ -410,7 +443,7 @@ idHashIndex::GenerateKey
 ================
 */
 ID_INLINE int idHashIndex::GenerateKey( const int n1, const int n2 ) const {
-	return ( ( n1 + n2 ) & hashMask );
+	return ( (int)( (unsigned int)n1 + (unsigned int)n2 ) & hashMask );
 }
 
 #endif /* !__HASHINDEX_H__ */

@@ -29,7 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "../framework/Session_local.h"
-#include "../renderer/Image.h"
+#include "../imagetools/ImageTools.h"
 
 #include "DeviceContext.h"
 #include "Window.h"
@@ -41,6 +41,93 @@ If you have questions concerning this license or the applicable additional terms
 #define BALL_MAXSPEED	450.f
 
 #define S_UNIQUE_CHANNEL	6
+
+static const int GAME_BUSTOUT_MAX_SAVE_ENTITIES = 512;
+static const int GAME_BUSTOUT_SAVE_MAGIC = 'O' | ( 'Q' << 8 ) | ( 'B' << 16 ) | ( 'O' << 24 );
+static const int GAME_BUSTOUT_SAVE_VERSION = 1;
+
+static void GameBustOut_WriteSaveInt( idFile *savefile, const int value ) {
+	savefile->WriteInt( value );
+}
+
+static int GameBustOut_ReadLegacySaveInt( idFile *savefile, const char *fieldName ) {
+	int value = 0;
+	const int offset = savefile->Tell();
+	const int bytesRead = savefile->Read( &value, sizeof( value ) );
+	if ( bytesRead != sizeof( value ) ) {
+		common->Error( "idGameBustOutWindow::ReadFromSaveGame: truncated %s at offset %d (read %d of %d)",
+			fieldName ? fieldName : "integer", offset, bytesRead, static_cast<int>( sizeof( value ) ) );
+	}
+	return value;
+}
+
+static int GameBustOut_ReadEndianSaveInt( idFile *savefile, const char *fieldName ) {
+	int value = 0;
+	const int offset = savefile->Tell();
+	const int bytesRead = savefile->ReadInt( value );
+	if ( bytesRead != sizeof( value ) ) {
+		common->Error( "idGameBustOutWindow::ReadFromSaveGame: truncated %s at offset %d (read %d of %d)",
+			fieldName ? fieldName : "integer", offset, bytesRead, static_cast<int>( sizeof( value ) ) );
+	}
+	return value;
+}
+
+static int GameBustOut_ReadSaveInt( idFile *savefile, const char *fieldName, int saveVersion ) {
+	if ( saveVersion >= GAME_BUSTOUT_SAVE_VERSION ) {
+		return GameBustOut_ReadEndianSaveInt( savefile, fieldName );
+	}
+	return GameBustOut_ReadLegacySaveInt( savefile, fieldName );
+}
+
+static int GameBustOut_ReadSaveVersion( idFile *savefile ) {
+	const int markerOffset = savefile->Tell();
+	const int marker = GameBustOut_ReadEndianSaveInt( savefile, "format marker" );
+	if ( marker != GAME_BUSTOUT_SAVE_MAGIC ) {
+		savefile->Seek( markerOffset, FS_SEEK_SET );
+		return 0;
+	}
+
+	const int version = GameBustOut_ReadEndianSaveInt( savefile, "format version" );
+	if ( version <= 0 || version > GAME_BUSTOUT_SAVE_VERSION ) {
+		common->Error( "idGameBustOutWindow::ReadFromSaveGame: unsupported format version %d", version );
+	}
+	return version;
+}
+
+static void GameBustOut_ValidateSaveCount( const char *fieldName, int count ) {
+	if ( count < 0 || count > GAME_BUSTOUT_MAX_SAVE_ENTITIES ) {
+		common->Error( "idGameBustOutWindow::ReadFromSaveGame: invalid %s %d",
+			fieldName ? fieldName : "count", count );
+	}
+}
+
+static void GameBustOut_ValidateEntityIndex( const char *fieldName, int index, int entityCount ) {
+	if ( index < 0 || index >= entityCount ) {
+		common->Error( "idGameBustOutWindow::ReadFromSaveGame: invalid %s %d (entity count %d)",
+			fieldName ? fieldName : "entity index", index, entityCount );
+	}
+}
+
+// Raw copies of these fields wrote exactly the bytes the typed GUI encoders
+// write on every supported target (roadmap Q4-06).
+template< class type >
+static void GameBustOut_ReadSaveField( idFile *savefile, type &value, const char *fieldName ) {
+	OpenQ4_ReadSaveGameField( savefile, value, "idGameBustOutWindow::ReadFromSaveGame", fieldName );
+}
+
+template< class type >
+static void GameBustOut_WriteSaveField( idFile *savefile, const type &value, const char *fieldName ) {
+	OpenQ4_WriteSaveGameField( savefile, value, "idGameBustOutWindow::WriteToSaveGame", fieldName );
+}
+
+static powerupType_t GameBustOut_ReadSavePowerup( idFile *savefile, const char *fieldName, int saveVersion ) {
+	const int value = GameBustOut_ReadSaveInt( savefile, fieldName, saveVersion );
+	if ( value < POWERUP_NONE || value > POWERUP_MULTIBALL ) {
+		common->Error( "idGameBustOutWindow::ReadFromSaveGame: invalid %s %d",
+			fieldName ? fieldName : "powerup", value );
+	}
+	return static_cast<powerupType_t>( value );
+}
 
 /*
 *****************************************************************************
@@ -74,20 +161,20 @@ BOEntity::WriteToSaveGame
 */
 void BOEntity::WriteToSaveGame( idFile *savefile ) {
 
-	savefile->Write( &visible, sizeof(visible) );
+	GameBustOut_WriteSaveField( savefile, visible, "visible" );
 
 	game->WriteSaveGameString( materialName, savefile );
 
-	savefile->Write( &width, sizeof(width) );
-	savefile->Write( &height, sizeof(height) );
+	GameBustOut_WriteSaveField( savefile, width, "width" );
+	GameBustOut_WriteSaveField( savefile, height, "height" );
 
-	savefile->Write( &color, sizeof(color) );
-	savefile->Write( &position, sizeof(position) );
-	savefile->Write( &velocity, sizeof(velocity) );
+	GameBustOut_WriteSaveField( savefile, color, "color" );
+	GameBustOut_WriteSaveField( savefile, position, "position" );
+	GameBustOut_WriteSaveField( savefile, velocity, "velocity" );
 
-	savefile->Write( &powerup, sizeof(powerup) );
-	savefile->Write( &removed, sizeof(removed) );
-	savefile->Write( &fadeOut, sizeof(fadeOut) );
+	GameBustOut_WriteSaveInt( savefile, static_cast<int>( powerup ) );
+	GameBustOut_WriteSaveField( savefile, removed, "removed" );
+	GameBustOut_WriteSaveField( savefile, fadeOut, "fadeOut" );
 }
 
 /*
@@ -95,24 +182,24 @@ void BOEntity::WriteToSaveGame( idFile *savefile ) {
 BOEntity::ReadFromSaveGame
 ======================
 */
-void BOEntity::ReadFromSaveGame( idFile *savefile, idGameBustOutWindow* _game ) {
+void BOEntity::ReadFromSaveGame( idFile *savefile, idGameBustOutWindow* _game, int saveVersion ) {
 	game = _game;
 
-	savefile->Read( &visible, sizeof(visible) );
+	GameBustOut_ReadSaveField( savefile, visible, "entity visible flag" );
 
 	game->ReadSaveGameString( materialName, savefile );
 	SetMaterial( materialName );
 
-	savefile->Read( &width, sizeof(width) );
-	savefile->Read( &height, sizeof(height) );
+	GameBustOut_ReadSaveField( savefile, width, "entity width" );
+	GameBustOut_ReadSaveField( savefile, height, "entity height" );
 
-	savefile->Read( &color, sizeof(color) );
-	savefile->Read( &position, sizeof(position) );
-	savefile->Read( &velocity, sizeof(velocity) );
+	GameBustOut_ReadSaveField( savefile, color, "entity color" );
+	GameBustOut_ReadSaveField( savefile, position, "entity position" );
+	GameBustOut_ReadSaveField( savefile, velocity, "entity velocity" );
 
-	savefile->Read( &powerup, sizeof(powerup) );
-	savefile->Read( &removed, sizeof(removed) );
-	savefile->Read( &fadeOut, sizeof(fadeOut) );
+	powerup = GameBustOut_ReadSavePowerup( savefile, "entity powerup", saveVersion );
+	GameBustOut_ReadSaveField( savefile, removed, "entity removed flag" );
+	GameBustOut_ReadSaveField( savefile, fadeOut, "entity fade-out flag" );
 }
 
 /*
@@ -232,16 +319,16 @@ BOBrick::WriteToSaveGame
 ======================
 */
 void BOBrick::WriteToSaveGame( idFile *savefile ) {
-	savefile->Write( &x, sizeof(x) );
-	savefile->Write( &y, sizeof(y) );
-	savefile->Write( &width, sizeof(width) );
-	savefile->Write( &height, sizeof(height) );
+	GameBustOut_WriteSaveField( savefile, x, "x" );
+	GameBustOut_WriteSaveField( savefile, y, "y" );
+	GameBustOut_WriteSaveField( savefile, width, "width" );
+	GameBustOut_WriteSaveField( savefile, height, "height" );
 
-	savefile->Write( &powerup, sizeof(powerup) );
-	savefile->Write( &isBroken, sizeof(isBroken) );
+	GameBustOut_WriteSaveInt( savefile, static_cast<int>( powerup ) );
+	GameBustOut_WriteSaveField( savefile, isBroken, "isBroken" );
 
 	int index = ent->game->entities.FindIndex( ent );
-	savefile->Write( &index, sizeof(index) );
+	GameBustOut_WriteSaveInt( savefile, index );
 }
 
 /*
@@ -249,17 +336,18 @@ void BOBrick::WriteToSaveGame( idFile *savefile ) {
 BOBrick::ReadFromSaveGame
 ======================
 */
-void BOBrick::ReadFromSaveGame( idFile *savefile, idGameBustOutWindow *game ) {
-	savefile->Read( &x, sizeof(x) );
-	savefile->Read( &y, sizeof(y) );
-	savefile->Read( &width, sizeof(width) );
-	savefile->Read( &height, sizeof(height) );
+void BOBrick::ReadFromSaveGame( idFile *savefile, idGameBustOutWindow *game, int saveVersion ) {
+	GameBustOut_ReadSaveField( savefile, x, "brick x" );
+	GameBustOut_ReadSaveField( savefile, y, "brick y" );
+	GameBustOut_ReadSaveField( savefile, width, "brick width" );
+	GameBustOut_ReadSaveField( savefile, height, "brick height" );
 
-	savefile->Read( &powerup, sizeof(powerup) );
-	savefile->Read( &isBroken, sizeof(isBroken) );
+	powerup = GameBustOut_ReadSavePowerup( savefile, "brick powerup", saveVersion );
+	GameBustOut_ReadSaveField( savefile, isBroken, "brick broken flag" );
 
 	int index;
-	savefile->Read( &index, sizeof(index) );
+	index = GameBustOut_ReadSaveInt( savefile, "brick entity index", saveVersion );
+	GameBustOut_ValidateEntityIndex( "brick entity index", index, game->entities.Num() );
 	ent = game->entities[index];
 }
 
@@ -438,49 +526,52 @@ void idGameBustOutWindow::WriteToSaveGame( idFile *savefile ) {
 	onNewGame.WriteToSaveGame( savefile );
 	onNewLevel.WriteToSaveGame( savefile );
 
-	savefile->Write( &timeSlice, sizeof(timeSlice) );
-	savefile->Write( &gameOver, sizeof(gameOver) );
-	savefile->Write( &numLevels, sizeof(numLevels) );
+	GameBustOut_WriteSaveInt( savefile, GAME_BUSTOUT_SAVE_MAGIC );
+	GameBustOut_WriteSaveInt( savefile, GAME_BUSTOUT_SAVE_VERSION );
+
+	GameBustOut_WriteSaveField( savefile, timeSlice, "timeSlice" );
+	GameBustOut_WriteSaveField( savefile, gameOver, "gameOver" );
+	GameBustOut_WriteSaveInt( savefile, numLevels );
 
 	// Board Data is loaded when GUI is loaded, don't need to save
 
-	savefile->Write( &numBricks, sizeof(numBricks) );
-	savefile->Write( &currentLevel, sizeof(currentLevel) );
+	GameBustOut_WriteSaveInt( savefile, numBricks );
+	GameBustOut_WriteSaveInt( savefile, currentLevel );
 
-	savefile->Write( &updateScore, sizeof(updateScore) );
-	savefile->Write( &gameScore, sizeof(gameScore) );
-	savefile->Write( &nextBallScore, sizeof(nextBallScore) );
+	GameBustOut_WriteSaveField( savefile, updateScore, "updateScore" );
+	GameBustOut_WriteSaveInt( savefile, gameScore );
+	GameBustOut_WriteSaveInt( savefile, nextBallScore );
 
-	savefile->Write( &bigPaddleTime, sizeof(bigPaddleTime) );
-	savefile->Write( &paddleVelocity, sizeof(paddleVelocity) );
+	GameBustOut_WriteSaveInt( savefile, bigPaddleTime );
+	GameBustOut_WriteSaveField( savefile, paddleVelocity, "paddleVelocity" );
 
-	savefile->Write( &ballSpeed, sizeof(ballSpeed) );
-	savefile->Write( &ballsRemaining, sizeof(ballsRemaining) );
-	savefile->Write( &ballsInPlay, sizeof(ballsInPlay) );
-	savefile->Write( &ballHitCeiling, sizeof(ballHitCeiling) );
+	GameBustOut_WriteSaveField( savefile, ballSpeed, "ballSpeed" );
+	GameBustOut_WriteSaveInt( savefile, ballsRemaining );
+	GameBustOut_WriteSaveInt( savefile, ballsInPlay );
+	GameBustOut_WriteSaveField( savefile, ballHitCeiling, "ballHitCeiling" );
 
 	// Write Entities
 	int i;
 	int numberOfEnts = entities.Num();
-	savefile->Write( &numberOfEnts, sizeof(numberOfEnts) );
+	GameBustOut_WriteSaveInt( savefile, numberOfEnts );
 	for ( i=0; i<numberOfEnts; i++ ) {
 		entities[i]->WriteToSaveGame( savefile );
 	}
 
 	// Write Balls
 	numberOfEnts = balls.Num();
-	savefile->Write( &numberOfEnts, sizeof(numberOfEnts) );
+	GameBustOut_WriteSaveInt( savefile, numberOfEnts );
 	for ( i=0; i<numberOfEnts; i++ ) {
 		int ballIndex = entities.FindIndex( balls[i] );
-		savefile->Write( &ballIndex, sizeof(ballIndex) );
+		GameBustOut_WriteSaveInt( savefile, ballIndex );
 	}
 
 	// Write Powerups
 	numberOfEnts = powerUps.Num();
-	savefile->Write( &numberOfEnts, sizeof(numberOfEnts) );
+	GameBustOut_WriteSaveInt( savefile, numberOfEnts );
 	for ( i=0; i<numberOfEnts; i++ ) {
 		int powerIndex = entities.FindIndex( powerUps[i] );
-		savefile->Write( &powerIndex, sizeof(powerIndex) );
+		GameBustOut_WriteSaveInt( savefile, powerIndex );
 	}
 
 	// Write paddle
@@ -490,7 +581,7 @@ void idGameBustOutWindow::WriteToSaveGame( idFile *savefile ) {
 	int row;
 	for ( row=0; row<BOARD_ROWS; row++ ) {
 		numberOfEnts = board[row].Num();
-		savefile->Write( &numberOfEnts, sizeof(numberOfEnts) );
+		GameBustOut_WriteSaveInt( savefile, numberOfEnts );
 		for ( i=0; i<numberOfEnts; i++ ) {
 			board[row][i]->WriteToSaveGame( savefile );
 		}
@@ -504,9 +595,16 @@ idGameBustOutWindow::ReadFromSaveGame
 */
 void idGameBustOutWindow::ReadFromSaveGame( idFile *savefile ) {
 	idWindow::ReadFromSaveGame( savefile );
+	int i;
 
 	// Clear out existing paddle and entities from GUI load
 	delete paddle;
+	paddle = NULL;
+	balls.Clear();
+	powerUps.Clear();
+	for ( i = 0; i < BOARD_ROWS; i++ ) {
+		board[i].DeleteContents( true );
+	}
 	entities.DeleteContents( true );
 
 	gamerunning.ReadFromSaveGame( savefile );
@@ -515,67 +613,74 @@ void idGameBustOutWindow::ReadFromSaveGame( idFile *savefile ) {
 	onNewGame.ReadFromSaveGame( savefile );
 	onNewLevel.ReadFromSaveGame( savefile );
 
-	savefile->Read( &timeSlice, sizeof(timeSlice) );
-	savefile->Read( &gameOver, sizeof(gameOver) );
-	savefile->Read( &numLevels, sizeof(numLevels) );
+	const int saveVersion = GameBustOut_ReadSaveVersion( savefile );
+
+	GameBustOut_ReadSaveField( savefile, timeSlice, "time slice" );
+	GameBustOut_ReadSaveField( savefile, gameOver, "game-over flag" );
+	numLevels = GameBustOut_ReadSaveInt( savefile, "level count", saveVersion );
 
 	// Board Data is loaded when GUI is loaded, don't need to save
 
-	savefile->Read( &numBricks, sizeof(numBricks) );
-	savefile->Read( &currentLevel, sizeof(currentLevel) );
+	numBricks = GameBustOut_ReadSaveInt( savefile, "brick count", saveVersion );
+	currentLevel = GameBustOut_ReadSaveInt( savefile, "current level", saveVersion );
 
-	savefile->Read( &updateScore, sizeof(updateScore) );
-	savefile->Read( &gameScore, sizeof(gameScore) );
-	savefile->Read( &nextBallScore, sizeof(nextBallScore) );
+	GameBustOut_ReadSaveField( savefile, updateScore, "update-score flag" );
+	gameScore = GameBustOut_ReadSaveInt( savefile, "score", saveVersion );
+	nextBallScore = GameBustOut_ReadSaveInt( savefile, "next ball score", saveVersion );
 
-	savefile->Read( &bigPaddleTime, sizeof(bigPaddleTime) );
-	savefile->Read( &paddleVelocity, sizeof(paddleVelocity) );
+	bigPaddleTime = GameBustOut_ReadSaveInt( savefile, "big paddle time", saveVersion );
+	GameBustOut_ReadSaveField( savefile, paddleVelocity, "paddle velocity" );
 
-	savefile->Read( &ballSpeed, sizeof(ballSpeed) );
-	savefile->Read( &ballsRemaining, sizeof(ballsRemaining) );
-	savefile->Read( &ballsInPlay, sizeof(ballsInPlay) );
-	savefile->Read( &ballHitCeiling, sizeof(ballHitCeiling) );
+	GameBustOut_ReadSaveField( savefile, ballSpeed, "ball speed" );
+	ballsRemaining = GameBustOut_ReadSaveInt( savefile, "balls remaining", saveVersion );
+	ballsInPlay = GameBustOut_ReadSaveInt( savefile, "balls in play", saveVersion );
+	GameBustOut_ReadSaveField( savefile, ballHitCeiling, "ball-hit-ceiling flag" );
 
-	int i;
 	int numberOfEnts;
 
 	// Read entities
-	savefile->Read( &numberOfEnts, sizeof(numberOfEnts) );
+	numberOfEnts = GameBustOut_ReadSaveInt( savefile, "entity count", saveVersion );
+	GameBustOut_ValidateSaveCount( "entity count", numberOfEnts );
 	for ( i=0; i<numberOfEnts; i++ ) {
 		BOEntity *ent;
 
 		ent = new BOEntity( this );
-		ent->ReadFromSaveGame( savefile, this );
+		ent->ReadFromSaveGame( savefile, this, saveVersion );
 		entities.Append( ent );
 	}
 
 	// Read balls
-	savefile->Read( &numberOfEnts, sizeof(numberOfEnts) );
+	numberOfEnts = GameBustOut_ReadSaveInt( savefile, "ball count", saveVersion );
+	GameBustOut_ValidateSaveCount( "ball count", numberOfEnts );
 	for ( i=0; i<numberOfEnts; i++ ) {
 		int ballIndex;
-		savefile->Read( &ballIndex, sizeof(ballIndex) );
+		ballIndex = GameBustOut_ReadSaveInt( savefile, "ball entity index", saveVersion );
+		GameBustOut_ValidateEntityIndex( "ball entity index", ballIndex, entities.Num() );
 		balls.Append( entities[ballIndex] );
 	}
 
 	// Read powerups
-	savefile->Read( &numberOfEnts, sizeof(numberOfEnts) );
+	numberOfEnts = GameBustOut_ReadSaveInt( savefile, "powerup count", saveVersion );
+	GameBustOut_ValidateSaveCount( "powerup count", numberOfEnts );
 	for ( i=0; i<numberOfEnts; i++ ) {
 		int powerIndex;
-		savefile->Read( &powerIndex, sizeof(powerIndex) );
-		balls.Append( entities[powerIndex] );
+		powerIndex = GameBustOut_ReadSaveInt( savefile, "powerup entity index", saveVersion );
+		GameBustOut_ValidateEntityIndex( "powerup entity index", powerIndex, entities.Num() );
+		powerUps.Append( entities[powerIndex] );
 	}
 
 	// Read paddle
 	paddle = new BOBrick();
-	paddle->ReadFromSaveGame( savefile, this );
+	paddle->ReadFromSaveGame( savefile, this, saveVersion );
 
 	// Read board
 	int row;
 	for ( row=0; row<BOARD_ROWS; row++ ) {
-		savefile->Read( &numberOfEnts, sizeof(numberOfEnts) );
+		numberOfEnts = GameBustOut_ReadSaveInt( savefile, "board row brick count", saveVersion );
+		GameBustOut_ValidateSaveCount( "board row brick count", numberOfEnts );
 		for ( i=0; i<numberOfEnts; i++ ) {
 			BOBrick *brick = new BOBrick();
-			brick->ReadFromSaveGame( savefile, this );
+			brick->ReadFromSaveGame( savefile, this, saveVersion );
 			board[row].Append( brick );
 		}
 	}
@@ -594,8 +699,8 @@ void idGameBustOutWindow::ResetGameState() {
 	onNewGame = false;
 	onNewLevel = false;
 
-	// Game moves forward 16 milliseconds every frame
-	timeSlice = 0.016f;
+	// Keep the mini-game aligned to an exact 60 Hz step.
+	timeSlice = 1.0f / 60.0f;
 	ballsRemaining = 3;
 	ballSpeed = BALL_SPEED;
 	ballsInPlay = 0;
@@ -883,7 +988,12 @@ void idGameBustOutWindow::LoadBoardFiles( void ) {
 	}
 
 	boardSize = 9 * 12 * 4;
+	if ( numLevels <= 0 || numLevels > idMath::INT_MAX / boardSize ) {
+		common->Warning( "Hell Bust-Out has invalid level count %d", numLevels );
+		return;
+	}
 	levelBoardData = (byte*)Mem_Alloc( boardSize * numLevels );
+	memset( levelBoardData, 0, boardSize * numLevels );
 
 	currentBoard = levelBoardData;
 
@@ -898,6 +1008,9 @@ void idGameBustOutWindow::LoadBoardFiles( void ) {
 		if ( pic != NULL ) {
 			if ( w != 9 || h != 12 ) {
 				common->DWarning( "Hell Bust-Out level image not correct dimensions! (%d x %d)", w, h );
+				Mem_Free(pic);
+				currentBoard += boardSize;
+				continue;
 			}
 
 			memcpy( currentBoard, pic, boardSize );
@@ -1210,7 +1323,7 @@ void idGameBustOutWindow::UpdateBall( void ) {
 					brick->ent->fadeOut = true;
 
 					if ( brick->powerup > POWERUP_NONE ) {
-						BOEntity *pUp = CreatePowerup( brick );
+						CreatePowerup( brick );
 					}
 
 					numBricks--;

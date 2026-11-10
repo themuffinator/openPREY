@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "UserInterfaceLocal.h"
 #include "BindWindow.h"
 
+static const int Q4_BIND_WINDOW_TEXT_SPACING = 0;
 
 void idBindWindow::CommonInit() {
 	bindName = "";
@@ -67,17 +68,34 @@ const char *idBindWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 
 	if (waitingOnKey) {
 		waitingOnKey = false;
-		if (key == K_ESCAPE) {
+		if (key == K_ESCAPE || key == K_JOY7 || key == K_JOY8) {
+			// Escape/Start/Back cancel capture.  Clearing a binding by trying to
+			// leave the capture state is surprising and made accidental data loss
+			// much too easy.
+			if ( updateVisuals != NULL ) {
+				*updateVisuals = true;
+			}
+			return "";
+		} else if (key == K_BACKSPACE || key == K_DEL) {
 			idStr::snPrintf( ret, sizeof( ret ), "clearbind \"%s\"", bindName.GetName());
 		} else {
 			idStr::snPrintf( ret, sizeof( ret ), "bind %i \"%s\"", key, bindName.GetName());
 		}
 		return ret;
 	} else {
-		if (key == K_MOUSE1) {
+		if (key == K_MOUSE1 || key == K_ENTER || key == K_KP_ENTER) {
 			waitingOnKey = true;
 			gui->SetBindHandler(this);
 			return "";
+		} else if (key == K_BACKSPACE || key == K_DEL || key == K_JOY6) {
+			// The focused-row clear action mirrors the keyboard Delete action and
+			// gives controllers a dedicated west-face-button action without making
+			// that button unavailable while capture itself is active.
+			idStr::snPrintf( ret, sizeof( ret ), "clearbind \"%s\"", bindName.GetName());
+			if ( updateVisuals != NULL ) {
+				*updateVisuals = true;
+			}
+			return ret;
 		}
 	}
 
@@ -103,6 +121,7 @@ void idBindWindow::PostParse() {
 
 void idBindWindow::Draw(int time, float x, float y) {
 	idVec4 color = foreColor;
+	const int style = static_cast<int>( textstyle );
 
 	idStr str;
 	if ( waitingOnKey ) {
@@ -119,7 +138,18 @@ void idBindWindow::Draw(int time, float x, float y) {
 		hover = false;
 	}
 
-	dc->DrawText(str, textScale, textAlign, color, textRect, false, -1);
+	// The menu presents a broader binding list than compact gameplay prompts, so
+	// fit its bounded graphical summary into the stock 149x17/18 rows.  Common
+	// configurations stay at authored size; denser sets scale only as far as
+	// remains comfortably legible.
+	float drawScale = textScale;
+	if ( !waitingOnKey && str.Find( "^ik" ) >= 0 ) {
+		const int naturalWidth = dc->TextWidth( str, drawScale, -1, Q4_BIND_WINDOW_TEXT_SPACING );
+		if ( naturalWidth > textRect.w && naturalWidth > 0 ) {
+			drawScale = Max( textScale * 0.72f, textScale * textRect.w / static_cast<float>( naturalWidth ) );
+		}
+	}
+	dc->DrawText( str, drawScale, textAlign, color, textRect, false, -1, false, NULL, 0, Q4_BIND_WINDOW_TEXT_SPACING, style );
 }
 
 void idBindWindow::Activate( bool activate, idStr &act ) {

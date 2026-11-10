@@ -35,6 +35,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "DialogInfo.h"
 #include "splines.h"
 #include "../../renderer/tr_local.h"
+#include "../common/ToolGL.h"
 #include "../../renderer/model_local.h"	// for idRenderModelLiquid
 
 #ifdef _DEBUG
@@ -517,7 +518,7 @@ CXYWnd::CXYWnd() {
 	g_bPathMode = false;
 	g_nPathCount = 0;
 	g_nPathLimit = 0;
-	m_nTimerID = -1;
+	m_nTimerID = 0;
 	m_nButtonstate = 0;
 	XY_Init();
 }
@@ -568,7 +569,7 @@ BEGIN_MESSAGE_MAP(CXYWnd, CWnd)
 	ON_COMMAND_RANGE(ID_ENTITY_START, ID_ENTITY_END, OnEntityCreate)
 END_MESSAGE_MAP()
 // CXYWnd message handlers
-LONG WINAPI XYWndProc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK XYWndProc(HWND, UINT, WPARAM, LPARAM);
 
 /*
  =======================================================================================================================
@@ -641,7 +642,7 @@ static unsigned s_stipple[32] = {
     WXY_WndProc
  =======================================================================================================================
  */
-LONG WINAPI XYWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+LRESULT CALLBACK XYWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 	switch (uMsg)
 	{
 		case WM_DESTROY:
@@ -1225,7 +1226,7 @@ void CXYWnd::OnMouseMove(UINT nFlags, CPoint point) {
 			m_ptDragAdj.y = fAdjustment;
 		}
 
-		if (m_nTimerID == -1) {
+		if (m_nTimerID == 0) {
 			m_nTimerID = SetTimer(100, 50, NULL);
 			m_ptDrag = point;
 			m_ptDragTotal = 0;
@@ -1234,12 +1235,12 @@ void CXYWnd::OnMouseMove(UINT nFlags, CPoint point) {
 		return;
 	}
 
-	// else if (m_nTimerID != -1)
-	if (m_nTimerID != -1) {
+	// else if (m_nTimerID != 0)
+	if (m_nTimerID != 0) {
 		KillTimer(m_nTimerID);
 		pressx -= m_ptDragTotal.x;
 		pressy += m_ptDragTotal.y;
-		m_nTimerID = -1;
+		m_nTimerID = 0;
 
 		// return;
 	}
@@ -1478,6 +1479,7 @@ void CXYWnd::OnPaint() {
 	}
 
 	if (bPaint) {
+		const GLboolean multisampleWasEnabled = ToolGL_DisableMultisampleForEditor();
 		QE_CheckOpenGLForErrors();
 		XY_Draw();
 		QE_CheckOpenGLForErrors();
@@ -1619,6 +1621,7 @@ void CXYWnd::OnPaint() {
 		}
 
 		qwglSwapBuffers(dc.m_hDC);
+		ToolGL_RestoreMultisampleForEditor( multisampleWasEnabled );
 		TRACE("XY Paint\n");
 	}
 }
@@ -2098,7 +2101,7 @@ bool MergeMenu(CMenu * pMenuDestination, const CMenu * pMenuAdd, bool bTopLevel 
 			HMENU hNewMenu = NewPopupMenu.GetSafeHmenu();
 			if (pMenuDestination->InsertMenu(iInsertPosDefault,
 				MF_BYPOSITION | MF_POPUP | MF_ENABLED, 
-				(UINT)hNewMenu, sMenuAddString ))
+					reinterpret_cast< UINT_PTR >( hNewMenu ), sMenuAddString ))
 			{
 				// don't forget to correct the item count
 				iMenuDestItemCount++;
@@ -2169,7 +2172,7 @@ void CXYWnd::HandleDrop() {
 					if (pChild) {
 						pMakeEntityPop->AppendMenu (
 							MF_POPUP,
-							reinterpret_cast < unsigned int > (pChild->GetSafeHmenu()),
+							reinterpret_cast< UINT_PTR >( pChild->GetSafeHmenu() ),
 							strActive
 						);
 						g_ptrMenus.Add(pChild);
@@ -2188,7 +2191,7 @@ void CXYWnd::HandleDrop() {
 				if (pChild) {
 					pMakeEntityPop->AppendMenu (
 						MF_POPUP,
-						reinterpret_cast < unsigned int > (pChild->GetSafeHmenu()),
+						reinterpret_cast< UINT_PTR >( pChild->GetSafeHmenu() ),
 						strActive
 					);
 					g_ptrMenus.Add(pChild);
@@ -2204,7 +2207,7 @@ void CXYWnd::HandleDrop() {
 		if ( pMakeEntityPop != &m_mnuDrop ) {
 			m_mnuDrop.AppendMenu (
 				MF_POPUP,
-				reinterpret_cast < unsigned int > (pMakeEntityPop->GetSafeHmenu()),
+				reinterpret_cast< UINT_PTR >( pMakeEntityPop->GetSafeHmenu() ),
 				"Make Entity"
 			);
 		}
@@ -2734,7 +2737,7 @@ bool CXYWnd::XY_MouseMoved(int x, int y, int buttons) {
 
 /*
  =======================================================================================================================
-    DRAWING £
+    DRAWING
     XY_DrawGrid
  =======================================================================================================================
  */
@@ -3306,7 +3309,7 @@ bool FilterBrush(brush_t *pb) {
 
 /*
  =======================================================================================================================
-    PATH LINES £
+    PATH LINES
     DrawPathLines Draws connections between entities. Needs to consider all entities, not just ones on screen, because
     the lines can be visible when neither end is. Called for both camera view and xy view.
  =======================================================================================================================
@@ -4158,15 +4161,22 @@ void CXYWnd::Copy()
 			HANDLE	h = ::GlobalAlloc(GMEM_ZEROINIT | GMEM_MOVEABLE | GMEM_DDESHARE, lSize + sizeof (long));
 			if (h != NULL) {
 				unsigned char	*cp = reinterpret_cast < unsigned char * > (::GlobalLock(h));
-				memcpy(cp, &lSize, sizeof (long));
-				cp += sizeof (long);
-				g_Clipboard.SeekToBegin();
-				g_Clipboard.Read(cp, lSize);
-				::GlobalUnlock(h);
-				::SetClipboardData(nClipboard, h);
-				::CloseClipboard();
-				bClipped = true;
+				if (cp != NULL) {
+					memcpy(cp, &lSize, sizeof (long));
+					cp += sizeof (long);
+					g_Clipboard.SeekToBegin();
+					g_Clipboard.Read(cp, lSize);
+					::GlobalUnlock(h);
+					if (::SetClipboardData(nClipboard, h) != NULL) {
+						h = NULL;
+						bClipped = true;
+					}
+				}
+				if (h != NULL) {
+					::GlobalFree(h);
+				}
 			}
+			::CloseClipboard();
 		}
 	}
 
@@ -4264,19 +4274,26 @@ void CXYWnd::Paste()
 	CWaitCursor WaitCursor;
 	bool		bPasted = false;
 	UINT		nClipboard = ::RegisterClipboardFormat("RadiantClippings");
-	if (nClipboard > 0 && OpenClipboard() && ::IsClipboardFormatAvailable(nClipboard)) {
-		HANDLE	h = ::GetClipboardData(nClipboard);
-		if (h) {
-			g_Clipboard.SetLength(0);
-
-			unsigned char	*cp = reinterpret_cast < unsigned char * > (::GlobalLock(h));
-			long			lSize = 0;
-			memcpy(&lSize, cp, sizeof (long));
-			cp += sizeof (long);
-			g_Clipboard.Write(cp, lSize);
+	g_Clipboard.SetLength(0);
+	if (nClipboard > 0 && OpenClipboard()) {
+		if (::IsClipboardFormatAvailable(nClipboard)) {
+			HANDLE	h = ::GetClipboardData(nClipboard);
+			if (h) {
+				unsigned char	*cp = reinterpret_cast < unsigned char * > (::GlobalLock(h));
+				const SIZE_T	clipSize = ::GlobalSize(h);
+				if (cp != NULL && clipSize >= sizeof (long)) {
+					long	lSize = 0;
+					memcpy(&lSize, cp, sizeof (long));
+					cp += sizeof (long);
+					if (lSize >= 0 && static_cast<SIZE_T>(lSize) <= clipSize - sizeof (long)) {
+						g_Clipboard.SetLength(0);
+						g_Clipboard.Write(cp, lSize);
+					}
+					::GlobalUnlock(h);
+				}
+			}
 		}
 
-		::GlobalUnlock(h);
 		::CloseClipboard();
 	}
 
@@ -4285,7 +4302,7 @@ void CXYWnd::Paste()
 
 		int		nLen = g_Clipboard.GetLength();
 		char	*pBuffer = new char[nLen + 1];
-		memset(pBuffer, 0, sizeof(pBuffer));
+		memset(pBuffer, 0, nLen + 1);
 		g_Clipboard.Read(pBuffer, nLen);
 		pBuffer[nLen] = '\0';
 		Map_ImportBuffer(pBuffer, !(GetAsyncKeyState(VK_SHIFT) & 0x8000));
@@ -4366,7 +4383,7 @@ idVec3 &CXYWnd::RotateOrigin() {
  =======================================================================================================================
  =======================================================================================================================
  */
-void CXYWnd::OnTimer(UINT nIDEvent) {
+void CXYWnd::OnTimer(UINT_PTR nIDEvent) {
 	if (nIDEvent == 100) {
 		int nDim1 = (m_nViewType == YZ) ? 1 : 0;
 		int nDim2 = (m_nViewType == XY) ? 1 : 2;

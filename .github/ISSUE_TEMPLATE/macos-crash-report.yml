@@ -1,0 +1,139 @@
+name: macOS crash report
+description: Report an Apple Silicon/arm64 macOS crash, including issue #73 style startup crashes.
+title: "[macOS crash]: "
+labels:
+  - macOS
+  - crash
+  - preview-support
+body:
+  - type: markdown
+    attributes:
+      value: |
+        macOS support is a preview. Complete reports are especially useful because the maintainer may not have access to macOS hardware.
+
+        If this looks like GitHub issue #73, please attach full terminal output as text, not only a screenshot. The most useful reports include both the terminal transcript and the saved `openprey.log`.
+  - type: input
+    id: version
+    attributes:
+      label: openPREY version
+      description: "Example: 0.0.1."
+      placeholder: "0.0.1"
+    validations:
+      required: true
+  - type: input
+    id: artifact
+    attributes:
+      label: Package artifact name
+      description: Paste the exact downloaded file or folder name.
+      placeholder: "local source build at 0.0.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: bridge
+    attributes:
+      label: macOS package variant
+      options:
+        - OpenGL
+        - Metal bridge
+        - Both OpenGL and Metal bridge
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: launch_method
+    attributes:
+      label: Launch method
+      options:
+        - openPREY.app
+        - openPREY-client_arm64 from Terminal
+        - openPREY-ded_arm64 from Terminal
+        - Both openPREY.app and openPREY-client_arm64
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS version and build
+      description: Paste `sw_vers` output when possible.
+      placeholder: "macOS 15.5 build 24F74, or macOS 26.0 build ..."
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware model
+      description: Include chip generation and memory when known.
+      placeholder: "MacBook Pro, Apple M4 Max, 48 GB"
+    validations:
+      required: true
+  - type: textarea
+    id: terminal_output
+    attributes:
+      label: Full terminal output
+      description: Paste the complete terminal output as text, not a screenshot. Include the lines before and after `R_InitOpenGL`, `R_ReloadARBPrograms`, `using ARB2 renderSystem`, any `ARB2 interaction bypass` marker, dedicated-server startup if applicable, and any `fatal signal SIGSEGV`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: openprey_log
+    attributes:
+      label: Saved openprey.log
+      description: Attach or paste `~/Library/Application Support/openPREY/basepr/logs/openprey.log` when it exists.
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: openal_vendor
+    attributes:
+      label: OpenAL vendor
+      description: Paste the `OpenAL vendor:` line from `openprey.log` or `logs/openal-summary.txt` when available.
+      placeholder: "OpenAL vendor: Apple Computer Inc."
+    validations:
+      required: false
+  - type: input
+    id: openal_renderer
+    attributes:
+      label: OpenAL renderer
+      description: Paste the `OpenAL renderer:` line from `openprey.log` or `logs/openal-summary.txt` when available.
+      placeholder: "OpenAL renderer: Software"
+    validations:
+      required: false
+  - type: input
+    id: openal_device
+    attributes:
+      label: OpenAL device name
+      description: Paste the `OpenAL requested device:`, `OpenAL default device:`, or `OpenAL active device:` line from `openprey.log`.
+      placeholder: "OpenAL active device: ..."
+    validations:
+      required: false
+  - type: textarea
+    id: openal_efx_lines
+    attributes:
+      label: OpenAL EFX warnings
+      description: Paste any `OpenAL EFX ...` warning/status lines from `openprey.log` or `logs/openal-summary.txt`.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: crash_report
+    attributes:
+      label: macOS crash report
+      description: Attach the matching `.ips` or `.crash` report from `~/Library/Logs/DiagnosticReports` when available.
+    validations:
+      required: false
+  - type: checkboxes
+    id: package_layout
+    attributes:
+      label: Package layout
+      description: The current package must stay together as one adjacent root.
+      options:
+        - label: I tested `openPREY.app` after dragging it independently, or kept the whole package when testing loose client/dedicated tools.
+        - label: I moved only `openPREY.app` somewhere else, such as `/Applications`.
+  - type: textarea
+    id: support_archive
+    attributes:
+      label: Support-info archive
+      description: If your package includes `collect_macos_support_info.sh`, run it from the package root and attach the generated `openprey-macos-support-*.tar.gz` after reviewing its contents. Useful files include `system/rosetta.txt`, `logs/renderer-summary.txt`, `logs/renderer-config.txt`, `package/binary-architecture.txt`, `package/dylib-dependencies.txt`, `package/signing.txt`, and `package/quarantine.txt`.
+    validations:
+      required: false

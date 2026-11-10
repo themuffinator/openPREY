@@ -31,6 +31,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "../../sys/win32/rc/guied_resource.h"
 #include "../../renderer/tr_local.h"
+#include "../common/ToolGL.h"
 
 #include "GEApp.h"
 #include "GEViewer.h"
@@ -228,7 +229,7 @@ static int MapKey (int key)
 
 LRESULT CALLBACK rvGEViewer::WndProc ( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
-	rvGEViewer* viewer = (rvGEViewer*) GetWindowLong ( hwnd, GWL_USERDATA );
+	rvGEViewer* viewer = reinterpret_cast< rvGEViewer * >( GetWindowLongPtr( hwnd, GWLP_USERDATA ) );
 	
 	switch ( msg )
 	{
@@ -364,13 +365,13 @@ LRESULT CALLBACK rvGEViewer::WndProc ( HWND hwnd, UINT msg, WPARAM wParam, LPARA
 		case WM_CREATE:
 		{
 			CREATESTRUCT* cs = (CREATESTRUCT*) lParam;
-			SetWindowLong ( hwnd, GWL_USERDATA, (LONG)cs->lpCreateParams );
+			SetWindowLongPtr( hwnd, GWLP_USERDATA, reinterpret_cast< LONG_PTR >( cs->lpCreateParams ) );
 					
 			viewer = (rvGEViewer*)cs->lpCreateParams;
 			viewer->mWnd = hwnd;
 			viewer->SetupPixelFormat ( );
 
-			viewer->mToolbar = CreateWindowEx ( 0, TOOLBARCLASSNAME, "", CCS_BOTTOM|WS_CHILD|WS_VISIBLE,0,0,0,0, hwnd, (HMENU)IDR_GUIED_VIEWERTOOLBAR, gApp.GetInstance(), NULL );
+			viewer->mToolbar = CreateWindowEx ( 0, TOOLBARCLASSNAME, "", CCS_BOTTOM|WS_CHILD|WS_VISIBLE,0,0,0,0, hwnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDR_GUIED_VIEWERTOOLBAR ) ), gApp.GetInstance(), NULL );
 
 		    // Send the TB_BUTTONSTRUCTSIZE message, which is required for backward compatibility. 
 			SendMessage( viewer->mToolbar, TB_BUTTONSTRUCTSIZE, ( WPARAM )sizeof( TBBUTTON ), 0 );
@@ -449,21 +450,8 @@ Setup the pixel format for the opengl context
 */
 bool rvGEViewer::SetupPixelFormat ( void )
 {
-	HDC	 hDC    = GetDC ( mWnd );
-	bool result = true;
-
-	int pixelFormat = ChoosePixelFormat(hDC, &win32.pfd);
-	if (pixelFormat > 0) 
-	{
-		if (SetPixelFormat(hDC, pixelFormat, &win32.pfd) == NULL) 
-		{
-			result = false;
-		}
-	}
-	else 
-	{
-		result = false;
-	}
+	HDC hDC = GetDC( mWnd );
+	const bool result = ToolGL_SetupPixelFormat( hDC, false );
 	
 	ReleaseDC ( mWnd, hDC );
 
@@ -482,6 +470,8 @@ void rvGEViewer::Render	( HDC dc )
 		common->Printf("Please restart Q3Radiant if the Map view is not working\n");
 	    return;
 	}
+
+	const GLboolean multisampleWasEnabled = ToolGL_DisableMultisampleForEditor();
 
 	if ( !mPaused )
 	{
@@ -538,6 +528,7 @@ void rvGEViewer::Render	( HDC dc )
 
 	qglFinish ( );
 	qwglSwapBuffers(dc);
+	ToolGL_RestoreMultisampleForEditor( multisampleWasEnabled );
 }
 
 void rvGEViewer::RunFrame ( void )

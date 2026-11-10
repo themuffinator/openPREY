@@ -32,253 +32,402 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "tr_local.h"
 
-static ID_INLINE int FloatToIntRound( float value ) {
-	return idMath::FtoiFast( value + ( value >= 0.0f ? 0.5f : -0.5f ) );
-}
+namespace {
 
-#ifdef BUILD_FREETYPE
-#include "../ft2/fterrors.h"
-#include "../ft2/ftsystem.h"
-#include "../ft2/ftimage.h"
-#include "../ft2/freetype.h"
-#include "../ft2/ftoutln.h"
+enum q4FontSlotIndex_t {
+	Q4_FONT_SLOT_SMALL = 0,
+	Q4_FONT_SLOT_MEDIUM,
+	Q4_FONT_SLOT_LARGE,
+	Q4_FONT_SLOT_COUNT
+};
 
-#define _FLOOR(x)  ((x) & -64)
-#define _CEIL(x)   (((x)+63) & -64)
-#define _TRUNC(x)  ((x) >> 6)
+enum q4FontSlotMask_t {
+	Q4_FONT_SLOT_MASK_NONE = 0,
+	Q4_FONT_SLOT_MASK_SMALL = 1 << Q4_FONT_SLOT_SMALL,
+	Q4_FONT_SLOT_MASK_MEDIUM = 1 << Q4_FONT_SLOT_MEDIUM,
+	Q4_FONT_SLOT_MASK_LARGE = 1 << Q4_FONT_SLOT_LARGE,
+	Q4_FONT_SLOT_MASK_SMALL_MEDIUM = Q4_FONT_SLOT_MASK_SMALL | Q4_FONT_SLOT_MASK_MEDIUM,
+	Q4_FONT_SLOT_MASK_SMALL_LARGE = Q4_FONT_SLOT_MASK_SMALL | Q4_FONT_SLOT_MASK_LARGE,
+	Q4_FONT_SLOT_MASK_MEDIUM_LARGE = Q4_FONT_SLOT_MASK_MEDIUM | Q4_FONT_SLOT_MASK_LARGE
+};
 
-FT_Library ftLibrary = NULL;  
-#endif
+struct q4FontSlotSpec_t {
+	q4FontSlotIndex_t	slot;
+	int					pointSize;
+	q4FontSlotMask_t	mask;
+};
+
+struct q4FontSlotExtents_t {
+	float				maxWidth;
+	float				maxHeight;
+};
+
+static const q4FontSlotSpec_t Q4_FONT_SLOT_SPECS[Q4_FONT_SLOT_COUNT] = {
+	{ Q4_FONT_SLOT_SMALL, 12, Q4_FONT_SLOT_MASK_SMALL },
+	{ Q4_FONT_SLOT_MEDIUM, 24, Q4_FONT_SLOT_MASK_MEDIUM },
+	{ Q4_FONT_SLOT_LARGE, 48, Q4_FONT_SLOT_MASK_LARGE }
+};
+
+static const int Q4_FONTDAT_GLYPH_METRIC_FLOAT_COUNT = 9;
+static const int Q4_FONTDAT_SCALAR_FLOAT_COUNT = 4;
+static const int Q4_FONTDAT_SERIALIZED_MATERIAL_PTR_BYTES = 4;
+static const int QUAKE4_FONTDAT_SIZE =
+	GLYPHS_PER_FONT * Q4_FONTDAT_GLYPH_METRIC_FLOAT_COUNT * sizeof( float ) +
+	Q4_FONTDAT_SCALAR_FLOAT_COUNT * sizeof( float ) +
+	Q4_FONTDAT_SERIALIZED_MATERIAL_PTR_BYTES;
+
+// Doom 3 and retail Prey serialize the original glyphInfo_t layout.  The
+// material pointer in each record is process-local junk, but the following
+// shader name identifies the atlas page used by that glyph.
+static const int PREY_FONTDAT_GLYPH_INT_COUNT = 7;
+static const int PREY_FONTDAT_GLYPH_UV_FLOAT_COUNT = 4;
+static const int PREY_FONTDAT_SERIALIZED_MATERIAL_PTR_BYTES = 4;
+static const int PREY_FONTDAT_SHADER_NAME_BYTES = 32;
+static const int PREY_FONTDAT_FONT_NAME_BYTES = 64;
+static const int PREY_FONTDAT_GLYPH_SIZE =
+	PREY_FONTDAT_GLYPH_INT_COUNT * sizeof( int ) +
+	PREY_FONTDAT_GLYPH_UV_FLOAT_COUNT * sizeof( float ) +
+	PREY_FONTDAT_SERIALIZED_MATERIAL_PTR_BYTES +
+	PREY_FONTDAT_SHADER_NAME_BYTES;
+static const int PREY_FONTDAT_SIZE =
+	GLYPHS_PER_FONT * PREY_FONTDAT_GLYPH_SIZE + sizeof( float ) + PREY_FONTDAT_FONT_NAME_BYTES;
+static_assert( PREY_FONTDAT_SIZE == 20548, "unexpected retail Prey font data layout" );
+
+// Renderer reloads keep this module mapped, so the console-atlas lifecycle
+// guard must be reset explicitly when FreeType/font resources are released.
+static bool consoleFontChecked = false;
+static int consoleFontCodePageGeneration = -1;
 
 
-#ifdef BUILD_FREETYPE
-
-/*
-============
-R_GetGlyphInfo
-============
-*/
-void R_GetGlyphInfo(FT_GlyphSlot glyph, int *left, int *right, int *width, int *top, int *bottom, int *height, int *pitch) {
-
-	*left  = _FLOOR( glyph->metrics.horiBearingX );
-	*right = _CEIL( glyph->metrics.horiBearingX + glyph->metrics.width );
-	*width = _TRUNC(*right - *left);
-
-	*top    = _CEIL( glyph->metrics.horiBearingY );
-	*bottom = _FLOOR( glyph->metrics.horiBearingY - glyph->metrics.height );
-	*height = _TRUNC( *top - *bottom );
-	*pitch  = ( qtrue ? (*width+3) & -4 : (*width+7) >> 3 );
-}
-
-/*
-============
-R_RenderGlyph
-============
-*/
-FT_Bitmap *R_RenderGlyph(FT_GlyphSlot glyph, glyphInfo_t* glyphOut) {
-	FT_Bitmap  *bit2;
-	int left, right, width, top, bottom, height, pitch, size;
-
-	R_GetGlyphInfo(glyph, &left, &right, &width, &top, &bottom, &height, &pitch);
-
-	if ( glyph->format == ft_glyph_format_outline ) {
-		size   = pitch*height; 
-
-		bit2 = Mem_Alloc(sizeof(FT_Bitmap));
-
-		bit2->width      = width;
-		bit2->rows       = height;
-		bit2->pitch      = pitch;
-		bit2->pixel_mode = ft_pixel_mode_grays;
-		//bit2->pixel_mode = ft_pixel_mode_mono;
-		bit2->buffer     = Mem_Alloc(pitch*height);
-		bit2->num_grays = 256;
-
-		memset( bit2->buffer, 0, size );
-
-		FT_Outline_Translate( &glyph->outline, -left, -bottom );
-
-		FT_Outline_Get_Bitmap( ftLibrary, &glyph->outline, bit2 );
-
-		glyphOut->height = height;
-		glyphOut->pitch = pitch;
-		glyphOut->top = (glyph->metrics.horiBearingY >> 6) + 1;
-		glyphOut->bottom = bottom;
-
-		return bit2;
+static fontInfo_t *R_FontSlotForIndex( fontInfoEx_t &font, q4FontSlotIndex_t slot ) {
+	if ( slot == Q4_FONT_SLOT_SMALL ) {
+		return &font.fontInfoSmall;
 	}
-	else {
-		common->Printf( "Non-outline fonts are not supported\n" );
+	if ( slot == Q4_FONT_SLOT_MEDIUM ) {
+		return &font.fontInfoMedium;
 	}
-	return NULL;
+	return &font.fontInfoLarge;
 }
 
-/*
-============
-RE_ConstructGlyphInfo
-============
-*/
-glyphInfo_t *RE_ConstructGlyphInfo( unsigned char *imageOut, int *xOut, int *yOut, int *maxHeight, FT_Face face, const unsigned char c, qboolean calcHeight ) {
-	int i;
-	static glyphInfo_t glyph;
-	unsigned char *src, *dst;
-	float scaled_width, scaled_height;
-	FT_Bitmap *bitmap = NULL;
+static void R_ClearFontSlotExtents( q4FontSlotExtents_t &extents ) {
+	extents.maxWidth = 0.0f;
+	extents.maxHeight = 0.0f;
+}
 
-	memset(&glyph, 0, sizeof(glyphInfo_t));
-	// make sure everything is here
-	if (face != NULL) {
-		FT_Load_Glyph(face, FT_Get_Char_Index( face, c), FT_LOAD_DEFAULT );
-		bitmap = R_RenderGlyph(face->glyph, &glyph);
-		if (bitmap) {
-			glyph.xSkip = (face->glyph->metrics.horiAdvance >> 6) + 1;
-		} else {
-			return &glyph;
+static void R_AccumulateFontSlotExtents( const glyphInfo_t &glyph, q4FontSlotExtents_t &extents ) {
+	if ( glyph.width > extents.maxWidth ) {
+		extents.maxWidth = glyph.width;
+	}
+	if ( glyph.height > extents.maxHeight ) {
+		extents.maxHeight = glyph.height;
+	}
+}
+
+static bool R_ReadFontGlyph( idFile *fontFile, glyphInfo_t &glyph ) {
+	return fontFile->ReadFloat( glyph.width ) == sizeof( float ) &&
+		fontFile->ReadFloat( glyph.height ) == sizeof( float ) &&
+		fontFile->ReadFloat( glyph.horiAdvance ) == sizeof( float ) &&
+		fontFile->ReadFloat( glyph.horiBearingX ) == sizeof( float ) &&
+		fontFile->ReadFloat( glyph.horiBearingY ) == sizeof( float ) &&
+		fontFile->ReadFloat( glyph.s ) == sizeof( float ) &&
+		fontFile->ReadFloat( glyph.t ) == sizeof( float ) &&
+		fontFile->ReadFloat( glyph.s2 ) == sizeof( float ) &&
+		fontFile->ReadFloat( glyph.t2 ) == sizeof( float );
+}
+
+static bool R_ReadFontSlotMetrics( idFile *fontFile, fontInfo_t &fontSlot, q4FontSlotExtents_t &extents ) {
+	R_ClearFontSlotExtents( extents );
+
+	for ( int glyphIndex = 0; glyphIndex < GLYPHS_PER_FONT; ++glyphIndex ) {
+		glyphInfo_t &glyph = fontSlot.glyphs[glyphIndex];
+		if ( !R_ReadFontGlyph( fontFile, glyph ) ) {
+			return false;
 		}
-
-		if (glyph.height > *maxHeight) {
-			*maxHeight = glyph.height;
-		}
-
-		if (calcHeight) {
-			Mem_Free(bitmap->buffer);
-			Mem_Free(bitmap);
-			return &glyph;
-		}
-
-/*
-		// need to convert to power of 2 sizes so we do not get 
-		// any scaling from the gl upload
-		for (scaled_width = 1 ; scaled_width < glyph.pitch ; scaled_width<<=1)
-			;
-		for (scaled_height = 1 ; scaled_height < glyph.height ; scaled_height<<=1)
-			;
-*/
-
-		scaled_width = glyph.pitch;
-		scaled_height = glyph.height;
-
-		// we need to make sure we fit
-		if (*xOut + scaled_width + 1 >= 255) {
-			if (*yOut + *maxHeight + 1 >= 255) {
-				*yOut = -1;
-				*xOut = -1;
-				Mem_Free(bitmap->buffer);
-				Mem_Free(bitmap);
-				return &glyph;
-			} else {
-			*xOut = 0;
-			*yOut += *maxHeight + 1;
-			}
-		} else if (*yOut + *maxHeight + 1 >= 255) {
-			*yOut = -1;
-			*xOut = -1;
-			Mem_Free(bitmap->buffer);
-			Mem_Free(bitmap);
-			return &glyph;
-		}
-
-		src = bitmap->buffer;
-		dst = imageOut + (*yOut * 256) + *xOut;
-
-		if (bitmap->pixel_mode == ft_pixel_mode_mono) {
-			for (i = 0; i < glyph.height; i++) {
-				int j;
-				unsigned char *_src = src;
-				unsigned char *_dst = dst;
-				unsigned char mask = 0x80;
-				unsigned char val = *_src;
-				for (j = 0; j < glyph.pitch; j++) {
-					if (mask == 0x80) {
-						val = *_src++;
-					}
-					if (val & mask) {
-						*_dst = 0xff;
-					}
-					mask >>= 1;
-        
-					if ( mask == 0 ) {
-						mask = 0x80;
-					}
-					_dst++;
-				}
-
-				src += glyph.pitch;
-				dst += 256;
-
-			}
-		} else {
-			for (i = 0; i < glyph.height; i++) {
-				memcpy( dst, src, glyph.pitch );
-				src += glyph.pitch;
-				dst += 256;
-			}
-		}
-
-		// we now have an 8 bit per pixel grey scale bitmap 
-		// that is width wide and pf->ftSize->metrics.y_ppem tall
-
-		glyph.imageHeight = scaled_height;
-		glyph.imageWidth = scaled_width;
-		glyph.s = (float)*xOut / 256;
-		glyph.t = (float)*yOut / 256;
-		glyph.s2 = glyph.s + (float)scaled_width / 256;
-		glyph.t2 = glyph.t + (float)scaled_height / 256;
-
-		*xOut += scaled_width + 1;
+		R_AccumulateFontSlotExtents( glyph, extents );
 	}
 
-	Mem_Free(bitmap->buffer);
-	Mem_Free(bitmap);
-
-	return &glyph;
+	return fontFile->ReadFloat( fontSlot.pointSize ) == sizeof( float ) &&
+		fontFile->ReadFloat( fontSlot.fontHeight ) == sizeof( float ) &&
+		fontFile->ReadFloat( fontSlot.ascender ) == sizeof( float ) &&
+		fontFile->ReadFloat( fontSlot.descender ) == sizeof( float );
 }
 
-#endif
+static void R_SetFontSlotMaxExtents( fontInfoEx_t &font, q4FontSlotIndex_t slot, const q4FontSlotExtents_t &extents ) {
+	if ( slot == Q4_FONT_SLOT_SMALL ) {
+		font.maxWidthSmall = extents.maxWidth;
+		font.maxHeightSmall = extents.maxHeight;
+	} else if ( slot == Q4_FONT_SLOT_MEDIUM ) {
+		font.maxWidthMedium = extents.maxWidth;
+		font.maxHeightMedium = extents.maxHeight;
+	} else {
+		font.maxWidthLarge = extents.maxWidth;
+		font.maxHeightLarge = extents.maxHeight;
+	}
+}
 
-static int fdOffset;
-static byte	*fdFile;
+static q4FontSlotExtents_t R_FontSlotExtentsForIndex( const fontInfoEx_t &font, q4FontSlotIndex_t slot ) {
+	q4FontSlotExtents_t extents;
+	if ( slot == Q4_FONT_SLOT_SMALL ) {
+		extents.maxWidth = font.maxWidthSmall;
+		extents.maxHeight = font.maxHeightSmall;
+	} else if ( slot == Q4_FONT_SLOT_MEDIUM ) {
+		extents.maxWidth = font.maxWidthMedium;
+		extents.maxHeight = font.maxHeightMedium;
+	} else {
+		extents.maxWidth = font.maxWidthLarge;
+		extents.maxHeight = font.maxHeightLarge;
+	}
+	return extents;
+}
+
+static void R_CopyFontSlot( fontInfoEx_t &font, q4FontSlotIndex_t dstIndex, q4FontSlotIndex_t srcIndex ) {
+	fontInfo_t *dst = R_FontSlotForIndex( font, dstIndex );
+	const fontInfo_t *src = R_FontSlotForIndex( font, srcIndex );
+	const q4FontSlotExtents_t extents = R_FontSlotExtentsForIndex( font, srcIndex );
+
+	memcpy( dst, src, sizeof( *dst ) );
+	R_SetFontSlotMaxExtents( font, dstIndex, extents );
+}
+
+static void R_PropagateMissingFontSizes( fontInfoEx_t &font, int foundMask ) {
+	switch ( foundMask ) {
+		case Q4_FONT_SLOT_MASK_SMALL:
+			R_CopyFontSlot( font, Q4_FONT_SLOT_MEDIUM, Q4_FONT_SLOT_SMALL );
+			R_CopyFontSlot( font, Q4_FONT_SLOT_LARGE, Q4_FONT_SLOT_SMALL );
+			break;
+		case Q4_FONT_SLOT_MASK_MEDIUM:
+			R_CopyFontSlot( font, Q4_FONT_SLOT_SMALL, Q4_FONT_SLOT_MEDIUM );
+			R_CopyFontSlot( font, Q4_FONT_SLOT_LARGE, Q4_FONT_SLOT_MEDIUM );
+			break;
+		case Q4_FONT_SLOT_MASK_SMALL_MEDIUM:
+			R_CopyFontSlot( font, Q4_FONT_SLOT_LARGE, Q4_FONT_SLOT_MEDIUM );
+			break;
+		case Q4_FONT_SLOT_MASK_LARGE:
+			R_CopyFontSlot( font, Q4_FONT_SLOT_SMALL, Q4_FONT_SLOT_LARGE );
+			R_CopyFontSlot( font, Q4_FONT_SLOT_MEDIUM, Q4_FONT_SLOT_LARGE );
+			break;
+		case Q4_FONT_SLOT_MASK_SMALL_LARGE:
+			R_CopyFontSlot( font, Q4_FONT_SLOT_MEDIUM, Q4_FONT_SLOT_LARGE );
+			break;
+		case Q4_FONT_SLOT_MASK_MEDIUM_LARGE:
+			R_CopyFontSlot( font, Q4_FONT_SLOT_SMALL, Q4_FONT_SLOT_MEDIUM );
+			break;
+		default:
+			break;
+	}
+}
+
+static bool R_LoadQuake4FontSlot( fontInfoEx_t &font, const char *fontName, const q4FontSlotSpec_t &slotSpec ) {
+	idStr fontDataName = va( "%s_%i.fontdat", fontName, slotSpec.pointSize );
+	if ( fileSystem->ReadFile( fontDataName.c_str(), NULL, NULL ) != QUAKE4_FONTDAT_SIZE ) {
+		return false;
+	}
+
+	idFile *fontFile = fileSystem->OpenFileRead( fontDataName.c_str(), true );
+	if ( fontFile == NULL ) {
+		return false;
+	}
+
+	fontInfo_t loadedSlot = {};
+	q4FontSlotExtents_t extents;
+	const bool readMetrics = R_ReadFontSlotMetrics( fontFile, loadedSlot, extents );
+
+	int serializedMaterialPointer = 0;
+	const bool readPointer = fontFile->ReadInt( serializedMaterialPointer ) == sizeof( int );
+	fileSystem->CloseFile( fontFile );
+
+	if ( !readMetrics || !readPointer ) {
+		return false;
+	}
+
+	idStr::Copynz( loadedSlot.name, fontDataName.c_str(), sizeof( loadedSlot.name ) );
+	// A .fontdat is 256 slots of art for one 8-bit codepage - which one is
+	// whatever language the atlas shipped with, and the text layer maps code
+	// points onto it. There is no room for anything above U+00FF, so no
+	// extended pages either; the memset in RegisterFont already left them NULL.
+	loadedSlot.glyphIndexing = GLYPH_INDEX_CODEPAGE;
+	loadedSlot.material = declManager->FindMaterial( fontDataName.c_str() );
+	if ( loadedSlot.material != NULL ) {
+		loadedSlot.material->SetSort( SS_GUI );
+	}
+	*R_FontSlotForIndex( font, slotSpec.slot ) = loadedSlot;
+	R_SetFontSlotMaxExtents( font, slotSpec.slot, extents );
+	return true;
+}
+
+static bool R_ReadPreyFontGlyph( idFile *fontFile, glyphInfo_t &glyph,
+		char shaderName[PREY_FONTDAT_SHADER_NAME_BYTES + 1] ) {
+	int height = 0;
+	int top = 0;
+	int bottom = 0;
+	int pitch = 0;
+	int xSkip = 0;
+	int imageWidth = 0;
+	int imageHeight = 0;
+	float s = 0.0f;
+	float t = 0.0f;
+	float s2 = 0.0f;
+	float t2 = 0.0f;
+	int serializedMaterialPointer = 0;
+
+	if ( fontFile->ReadInt( height ) != sizeof( int ) ||
+			fontFile->ReadInt( top ) != sizeof( int ) ||
+			fontFile->ReadInt( bottom ) != sizeof( int ) ||
+			fontFile->ReadInt( pitch ) != sizeof( int ) ||
+			fontFile->ReadInt( xSkip ) != sizeof( int ) ||
+			fontFile->ReadInt( imageWidth ) != sizeof( int ) ||
+			fontFile->ReadInt( imageHeight ) != sizeof( int ) ||
+			fontFile->ReadFloat( s ) != sizeof( float ) ||
+			fontFile->ReadFloat( t ) != sizeof( float ) ||
+			fontFile->ReadFloat( s2 ) != sizeof( float ) ||
+			fontFile->ReadFloat( t2 ) != sizeof( float ) ||
+			fontFile->ReadInt( serializedMaterialPointer ) != sizeof( int ) ||
+			fontFile->Read( shaderName, PREY_FONTDAT_SHADER_NAME_BYTES ) != PREY_FONTDAT_SHADER_NAME_BYTES ) {
+		return false;
+	}
+
+	shaderName[PREY_FONTDAT_SHADER_NAME_BYTES] = '\0';
+	glyph.width = static_cast<float>( imageWidth );
+	glyph.height = static_cast<float>( imageHeight );
+	glyph.horiAdvance = static_cast<float>( xSkip );
+	glyph.horiBearingX = 0.0f;
+	glyph.horiBearingY = static_cast<float>( top );
+	glyph.s = s;
+	glyph.t = t;
+	glyph.s2 = s2;
+	glyph.t2 = t2;
+	glyph.material = NULL;
+
+	// Retained in the file for the original renderer's upload path.  The modern
+	// metric representation does not need these values once translated above.
+	(void)height;
+	(void)bottom;
+	(void)pitch;
+	(void)serializedMaterialPointer;
+	return true;
+}
+
+static const idMaterial *R_FindPreyGlyphMaterial( const char *fontName, const char *serializedShaderName ) {
+	idStr normalizedShaderName = serializedShaderName;
+	normalizedShaderName.BackSlashesToSlashes();
+
+	const char *relativeShaderName = normalizedShaderName.c_str();
+	static const char serializedFontPrefix[] = "fonts/";
+	if ( idStr::Icmpn( relativeShaderName, serializedFontPrefix, sizeof( serializedFontPrefix ) - 1 ) == 0 ) {
+		relativeShaderName += sizeof( serializedFontPrefix ) - 1;
+	}
+	if ( relativeShaderName[0] == '\0' ) {
+		return NULL;
+	}
+
+	idStr materialName = fontName;
+	materialName.BackSlashesToSlashes();
+	materialName.StripTrailing( '/' );
+	materialName += "/";
+	materialName += relativeShaderName;
+
+	const idMaterial *material = declManager->FindMaterial( materialName.c_str() );
+	if ( material != NULL ) {
+		material->SetSort( SS_GUI );
+	}
+	return material;
+}
+
+static bool R_LoadPreyFontSlot( fontInfoEx_t &font, const char *fontName, const q4FontSlotSpec_t &slotSpec ) {
+	idStr fontDataName = va( "%s/fontImage_%i.dat", fontName, slotSpec.pointSize );
+	if ( fileSystem->ReadFile( fontDataName.c_str(), NULL, NULL ) != PREY_FONTDAT_SIZE ) {
+		return false;
+	}
+
+	idFile *fontFile = fileSystem->OpenFileRead( fontDataName.c_str(), true );
+	if ( fontFile == NULL ) {
+		return false;
+	}
+
+	fontInfo_t loadedSlot = {};
+	char shaderNames[GLYPHS_PER_FONT][PREY_FONTDAT_SHADER_NAME_BYTES + 1] = {};
+	q4FontSlotExtents_t extents;
+	R_ClearFontSlotExtents( extents );
+	bool valid = true;
+
+	for ( int glyphIndex = 0; glyphIndex < GLYPHS_PER_FONT; ++glyphIndex ) {
+		glyphInfo_t &glyph = loadedSlot.glyphs[glyphIndex];
+		if ( !R_ReadPreyFontGlyph( fontFile, glyph, shaderNames[glyphIndex] ) ) {
+			valid = false;
+			break;
+		}
+		// Match the original Prey GUI extents: horizontal layout is based on
+		// xSkip/advance, while vertical layout uses the uploaded image height.
+		extents.maxWidth = Max( extents.maxWidth, glyph.horiAdvance );
+		extents.maxHeight = Max( extents.maxHeight, glyph.height );
+		loadedSlot.ascender = Max( loadedSlot.ascender, glyph.horiBearingY );
+		loadedSlot.descender = Max( loadedSlot.descender, glyph.height - glyph.horiBearingY );
+	}
+
+	float serializedGlyphScale = 0.0f;
+	char serializedFontName[PREY_FONTDAT_FONT_NAME_BYTES];
+	if ( valid ) {
+		valid = fontFile->ReadFloat( serializedGlyphScale ) == sizeof( float ) &&
+			fontFile->Read( serializedFontName, sizeof( serializedFontName ) ) == sizeof( serializedFontName );
+	}
+	fileSystem->CloseFile( fontFile );
+	if ( !valid ) {
+		return false;
+	}
+
+	loadedSlot.pointSize = static_cast<float>( slotSpec.pointSize );
+	loadedSlot.fontHeight = loadedSlot.ascender + loadedSlot.descender;
+	idStr::Copynz( loadedSlot.name, fontDataName.c_str(), sizeof( loadedSlot.name ) );
+	for ( int glyphIndex = 0; glyphIndex < GLYPHS_PER_FONT; ++glyphIndex ) {
+		loadedSlot.glyphs[glyphIndex].material = R_FindPreyGlyphMaterial( fontName, shaderNames[glyphIndex] );
+		if ( loadedSlot.material == NULL && loadedSlot.glyphs[glyphIndex].material != NULL ) {
+			// Preserve the font-wide fallback expected by generic/Q4 UI code.
+			loadedSlot.material = loadedSlot.glyphs[glyphIndex].material;
+		}
+	}
+
+	(void)serializedGlyphScale;
+	(void)serializedFontName;
+	*R_FontSlotForIndex( font, slotSpec.slot ) = loadedSlot;
+	R_SetFontSlotMaxExtents( font, slotSpec.slot, extents );
+	return true;
+}
+
+static bool R_LoadFontSlot( fontInfoEx_t &font, const char *fontName, const q4FontSlotSpec_t &slotSpec ) {
+	if ( R_LoadQuake4FontSlot( font, fontName, slotSpec ) ) {
+		return true;
+	}
+	return R_LoadPreyFontSlot( font, fontName, slotSpec );
+}
+
+}
 
 /*
 ============
-readInt
+R_SyncFontCodePage
+
+The renderer is a module with its own copy of idlib, so the active codepage the
+engine selects in idCommonLocal::InitLanguageDict does not reach this side -
+that static lives in the engine's copy. Without this the string tables would be
+Windows-1250 while the glyph atlas was still rasterised through Windows-1252,
+which is not a missing glyph but a wrong one: Polish "GRE-ogonek" came out as
+"GRE-circumflex" and "WYJSCIE" as "WYJOECIE".
+
+sys_lang is a cvar, and cvars do cross the module boundary, so derive it here
+from the same language name rather than trying to push the value across.
 ============
 */
-int readInt( void ) {
-	int i = fdFile[fdOffset]+(fdFile[fdOffset+1]<<8)+(fdFile[fdOffset+2]<<16)+(fdFile[fdOffset+3]<<24);
-	fdOffset += 4;
-	return i;
+void R_SyncFontCodePage( void ) {
+	LangDict_SetActiveCodePage(
+		LangDict_CodePageForLanguage( cvarSystem->GetCVarString( "sys_lang" ) ) );
 }
 
-typedef union {
-	byte	fred[4];
-	float	ffred;
-} poor;
-
-/*
-============
-readFloat
-============
-*/
-float readFloat( void ) {
-	poor	me;
-#ifdef __ppc__
-	me.fred[0] = fdFile[fdOffset+3];
-	me.fred[1] = fdFile[fdOffset+2];
-	me.fred[2] = fdFile[fdOffset+1];
-	me.fred[3] = fdFile[fdOffset+0];
-#else
-	me.fred[0] = fdFile[fdOffset+0];
-	me.fred[1] = fdFile[fdOffset+1];
-	me.fred[2] = fdFile[fdOffset+2];
-	me.fred[3] = fdFile[fdOffset+3];
-#endif
-	fdOffset += 4;
-	return me.ffred;
+void R_RefreshConsoleFontAtlas( void ) {
+	R_SyncFontCodePage();
+	consoleFontChecked = true;
+	consoleFontCodePageGeneration = LangDict_GetCodePageGeneration();
+	R_BuildConsoleFontAtlas();
 }
-
-#define QUAKE4_FONT_SIZE 20548
-#define QUAKE4_FONTDAT_SIZE 9236
 
 /*
 ============
@@ -288,305 +437,52 @@ Loads 3 point sizes, 12, 24, and 48
 ============
 */
 bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font ) {
-#ifdef BUILD_FREETYPE
-	FT_Face face;
-	int j, k, xOut, yOut, lastStart, imageNumber;
-	int scaledSize, newSize, maxHeight, left, satLevels;
-	unsigned char *out, *imageBuff;
-	glyphInfo_t *glyph;
-	idImage *image;
-	idMaterial *h;
-	float max;
-#endif
-	void *faceData;
-	ID_TIME_T ftime;
-	int i, len, fontCount;
-	char name[1024];
+	memset( &font, 0, sizeof( font ) );
 
-	int pointSize = 12;
-/*
-	if ( registeredFontCount >= MAX_FONTS ) {
-		common->Warning( "RegisterFont: Too many fonts registered already." );
+	// Every atlas below is rasterised through the active codepage, so this
+	// module's copy of it has to agree with the string tables before any glyph
+	// is baked.
+	R_SyncFontCodePage();
+
+	// The console sheet is not registered through here, so piggyback on the
+	// first font registration to rebuild it once the renderer is up. It is
+	// byte-indexed like the GUI atlases, so a sys_lang change that moves the
+	// string tables between Windows-1252 and Windows-1250 also invalidates it.
+	const int codePageGeneration = LangDict_GetCodePageGeneration();
+	if ( !consoleFontChecked || consoleFontCodePageGeneration != codePageGeneration ) {
+		consoleFontChecked = true;
+		consoleFontCodePageGeneration = codePageGeneration;
+		R_BuildConsoleFontAtlas();
+	}
+
+	// The scalable path produces the same fontInfo_t layout, so it can simply
+	// stand in for the atlases when a .ttf face is present and enabled.
+	if ( R_RegisterTrueTypeFont( fontName, font ) ) {
+		if ( r_ttfFontDebug.GetBool() ) {
+			common->Printf( "font register: '%s' -> TrueType\n", fontName );
+		}
+		return true;
+	}
+	if ( r_ttfFontDebug.GetBool() ) {
+		common->Printf( "font register: '%s' -> bitmap atlas\n", fontName );
+	}
+	memset( &font, 0, sizeof( font ) );
+
+	int foundMask = Q4_FONT_SLOT_MASK_NONE;
+	for ( int slotIndex = 0; slotIndex < Q4_FONT_SLOT_COUNT; ++slotIndex ) {
+		const q4FontSlotSpec_t &slotSpec = Q4_FONT_SLOT_SPECS[slotIndex];
+		if ( R_LoadFontSlot( font, fontName, slotSpec ) ) {
+			foundMask |= slotSpec.mask;
+		}
+	}
+
+	R_PropagateMissingFontSizes( font, foundMask );
+
+	if ( foundMask == Q4_FONT_SLOT_MASK_NONE ) {
+		common->Warning( "RegisterFont: couldn't find font: '%s'", fontName );
 		return false;
 	}
 
-	int pointSize = 12;
-	idStr::snPrintf( name, sizeof(name), "%s/fontImage_%i.dat", fontName, pointSize );
-	for ( i = 0; i < registeredFontCount; i++ ) {
-		if ( idStr::Icmp(name, registeredFont[i].fontInfoSmall.name) == 0 ) {
-			memcpy( &font, &registeredFont[i], sizeof( fontInfoEx_t ) );
-			return true;
-		}
-	}
-*/
-
-	memset( &font, 0, sizeof( font ) );
-
-	for ( fontCount = 0; fontCount < 3; fontCount++ ) {
-
-		if ( fontCount == 0) {
-			pointSize = 12;
-		} else if ( fontCount == 1 ) {
-			pointSize = 24;
-		} else {
-			pointSize = 48;
-		}
-		// we also need to adjust the scale based on point size relative to 48 points as the ui scaling is based on a 48 point font
-		float glyphScale = 1.0f; 		// change the scale to be relative to 1 based on 72 dpi ( so dpi of 144 means a scale of .5 )
-		glyphScale *= 48.0f / pointSize;
-
-		idStr::snPrintf( name, sizeof(name), "%s_%i.fontdat", fontName, pointSize );
-
-		fontInfo_t *outFont;
-		if ( fontCount == 0 ) {
-			outFont = &font.fontInfoSmall;
-		}
-		else if ( fontCount == 1 ) {
-			outFont = &font.fontInfoMedium;
-		}
-		else {
-			outFont = &font.fontInfoLarge;
-		}
-
-		idStr::Copynz( outFont->name, name, sizeof( outFont->name ) );
-
-		len = fileSystem->ReadFile( name, NULL, &ftime );
-		if ( len == QUAKE4_FONTDAT_SIZE ) {
-			fileSystem->ReadFile( name, &faceData, &ftime );
-			const float *glyphData = reinterpret_cast<const float *>( faceData );
-			const int glyphStride = 9;
-
-			idStr fontMaterialName = va( "%s_%i", fontName, pointSize );
-			const idMaterial *fontMaterial = declManager->FindMaterial( fontMaterialName.c_str() );
-			fontMaterial->SetSort( SS_GUI );
-
-			int mw = 0;
-			int mh = 0;
-			for ( i = 0; i < GLYPHS_PER_FONT; i++ ) {
-				const float *g = glyphData + ( i * glyphStride );
-				const float imageWidth = g[0];
-				const float imageHeight = g[1];
-				const float xSkip = g[2];
-				const float top = g[4];
-
-				outFont->glyphs[i].imageWidth = FloatToIntRound( imageWidth );
-				outFont->glyphs[i].imageHeight = FloatToIntRound( imageHeight );
-				outFont->glyphs[i].xSkip = FloatToIntRound( xSkip );
-				outFont->glyphs[i].top = FloatToIntRound( top );
-				outFont->glyphs[i].height = outFont->glyphs[i].imageHeight;
-				outFont->glyphs[i].bottom = outFont->glyphs[i].top - outFont->glyphs[i].height;
-				outFont->glyphs[i].pitch = outFont->glyphs[i].imageWidth;
-				outFont->glyphs[i].s = g[5];
-				outFont->glyphs[i].t = g[6];
-				outFont->glyphs[i].s2 = g[7];
-				outFont->glyphs[i].t2 = g[8];
-				outFont->glyphs[i].glyph = fontMaterial;
-				idStr::Copynz( outFont->glyphs[i].shaderName, fontMaterialName.c_str(), sizeof( outFont->glyphs[i].shaderName ) );
-
-				if ( mh < outFont->glyphs[i].height ) {
-					mh = outFont->glyphs[i].height;
-				}
-				if ( mw < outFont->glyphs[i].xSkip ) {
-					mw = outFont->glyphs[i].xSkip;
-				}
-			}
-
-			outFont->glyphScale = glyphScale;
-
-			if ( fontCount == 0 ) {
-				font.maxWidthSmall = mw;
-				font.maxHeightSmall = mh;
-			} else if ( fontCount == 1 ) {
-				font.maxWidthMedium = mw;
-				font.maxHeightMedium = mh;
-			} else {
-				font.maxWidthLarge = mw;
-				font.maxHeightLarge = mh;
-			}
-			fileSystem->FreeFile( faceData );
-			continue;
-		}
-
-		idStr::snPrintf( name, sizeof(name), "%s/fontImage_%i.dat", fontName, pointSize );
-		idStr::Copynz( outFont->name, name, sizeof( outFont->name ) );
-
-		len = fileSystem->ReadFile( name, NULL, &ftime );
-		if ( len != QUAKE4_FONT_SIZE) {
-			common->Warning( "RegisterFont: couldn't find font: '%s'", name );
-			return false;
-		}
-
-		fileSystem->ReadFile( name, &faceData, &ftime );
-		fdOffset = 0;
-		fdFile = reinterpret_cast<unsigned char*>(faceData);
-		for( i = 0; i < GLYPHS_PER_FONT; i++ ) {
-			outFont->glyphs[i].height		= readInt();
-			outFont->glyphs[i].top			= readInt();
-			outFont->glyphs[i].bottom		= readInt();
-			outFont->glyphs[i].pitch		= readInt();
-			outFont->glyphs[i].xSkip		= readInt();
-			outFont->glyphs[i].imageWidth	= readInt();
-			outFont->glyphs[i].imageHeight	= readInt();
-			outFont->glyphs[i].s			= readFloat();
-			outFont->glyphs[i].t			= readFloat();
-			outFont->glyphs[i].s2			= readFloat();
-			outFont->glyphs[i].t2			= readFloat();
-			int junk /* font.glyphs[i].glyph */		= readInt();
-			//FIXME: the +6, -6 skips the embedded fonts/ 
-			memcpy( outFont->glyphs[i].shaderName, &fdFile[fdOffset + 6], 32 - 6 );
-			fdOffset += 32;
-		}
-		outFont->glyphScale = readFloat();
-
-		int mw = 0;
-		int mh = 0;
-		for ( i = GLYPH_START; i <= GLYPH_END; i++ ) {
-			idStr::snPrintf(name, sizeof(name), "%s/%s", fontName, outFont->glyphs[i].shaderName);
-			outFont->glyphs[i].glyph = declManager->FindMaterial(name);
-			outFont->glyphs[i].glyph->SetSort( SS_GUI );
-			if (mh < outFont->glyphs[i].height) {
-				mh = outFont->glyphs[i].height;
-			}
-			if (mw < outFont->glyphs[i].xSkip) {
-				mw = outFont->glyphs[i].xSkip;
-			}
-		}
-		if (fontCount == 0) {
-			font.maxWidthSmall = mw;
-			font.maxHeightSmall = mh;
-		} else if (fontCount == 1) {
-			font.maxWidthMedium = mw;
-			font.maxHeightMedium = mh;
-		} else {
-			font.maxWidthLarge = mw;
-			font.maxHeightLarge = mh;
-		}
-		fileSystem->FreeFile( faceData );
-	}
-
-	//memcpy( &registeredFont[registeredFontCount++], &font, sizeof( fontInfoEx_t ) );
-
-	return true ;
-
-#ifndef BUILD_FREETYPE
-    common->Warning( "RegisterFont: couldn't load FreeType code %s", name );
-#else
-
-	if (ftLibrary == NULL) {
-		common->Warning( "RegisterFont: FreeType not initialized." );
-		return;
-	}
-
-	len = fileSystem->ReadFile(fontName, &faceData, &ftime);
-	if ( len <= 0 ) {
-		common->Warning( "RegisterFont: Unable to read font file" );
-		return;
-	}
-
-	// allocate on the stack first in case we fail
-	if ( FT_New_Memory_Face( ftLibrary, faceData, len, 0, &face ) ) {
-		common->Warning( "RegisterFont: FreeType2, unable to allocate new face." );
-		return;
-	}
-
-
-	if ( FT_Set_Char_Size( face, pointSize << 6, pointSize << 6, dpi, dpi) ) {
-		common->Warning( "RegisterFont: FreeType2, Unable to set face char size." );
-		return;
-	}
-
-	// font = registeredFonts[registeredFontCount++];
-
-	// make a 256x256 image buffer, once it is full, register it, clean it and keep going 
-	// until all glyphs are rendered
-
-	out = Mem_Alloc( 1024*1024 );
-	if ( out == NULL ) {
-		common->Warning( "RegisterFont: Mem_Alloc failure during output image creation." );
-		return;
-	}
-	memset( out, 0, 1024*1024 );
-
-	maxHeight = 0;
-
-	for (i = GLYPH_START; i < GLYPH_END; i++) {
-		glyph = RE_ConstructGlyphInfo(out, &xOut, &yOut, &maxHeight, face, (unsigned char)i, qtrue);
-	}
-
-	xOut = 0;
-	yOut = 0;
-	i = GLYPH_START;
-	lastStart = i;
-	imageNumber = 0;
-
-	while ( i <= GLYPH_END ) {
-
-		glyph = RE_ConstructGlyphInfo(out, &xOut, &yOut, &maxHeight, face, (unsigned char)i, qfalse);
-
-		if (xOut == -1 || yOut == -1 || i == GLYPH_END)  {
-			// ran out of room
-			// we need to create an image from the bitmap, set all the handles in the glyphs to this point
-			// 
-
-			scaledSize = 256*256;
-			newSize = scaledSize * 4;
-			imageBuff = Mem_Alloc(newSize);
-			left = 0;
-			max = 0;
-			satLevels = 255;
-			for ( k = 0; k < (scaledSize) ; k++ ) {
-				if (max < out[k]) {
-					max = out[k];
-				}
-			}
-
-			if (max > 0) {
-				max = 255/max;
-			}
-
-			for ( k = 0; k < (scaledSize) ; k++ ) {
-				imageBuff[left++] = 255;
-				imageBuff[left++] = 255;
-				imageBuff[left++] = 255;
-				imageBuff[left++] = ((float)out[k] * max);
-			}
-
-			idStr::snprintf( name, sizeof(name), "fonts/fontImage_%i_%i.tga", imageNumber++, pointSize );
-			if (r_saveFontData->integer) { 
-				R_WriteTGA(name, imageBuff, 256, 256);
-			}
-
-			//idStr::snprintf( name, sizeof(name), "fonts/fontImage_%i_%i", imageNumber++, pointSize );
-			image = R_CreateImage(name, imageBuff, 256, 256, qfalse, qfalse, GL_CLAMP);
-			h = RE_RegisterShaderFromImage(name, LIGHTMAP_2D, image, qfalse);
-			for (j = lastStart; j < i; j++) {
-				font.glyphs[j].glyph = h;
-				idStr::Copynz( font.glyphs[j].shaderName, name, sizeof( font.glyphs[j].shaderName ) );
-			}
-			lastStart = i;
-			memset( out, 0, 1024*1024 );
-			xOut = 0;
-			yOut = 0;
-			Mem_Free( imageBuff );
-			i++;
-		} else {
-			memcpy( &font.glyphs[i], glyph, sizeof( glyphInfo_t ) );
-			i++;
-		}
-	}
-
-	registeredFont[registeredFontCount].glyphScale = glyphScale;
-	font.glyphScale = glyphScale;
-	memcpy( &registeredFont[registeredFontCount++], &font, sizeof( fontInfo_t ) );
-
-	if ( r_saveFontData->integer ) { 
-		fileSystem->WriteFile( va( "fonts/fontImage_%i.dat", pointSize), &font, sizeof( fontInfo_t ) );
-	}
-
-	Mem_Free( out );
-
-	fileSystem->FreeFile( faceData );
-#endif
 	return true;
 }
 
@@ -596,11 +492,6 @@ R_InitFreeType
 ============
 */
 void R_InitFreeType( void ) {
-#ifdef BUILD_FREETYPE
-	if ( FT_Init_FreeType( &ftLibrary ) ) {
-		common->Printf( "R_InitFreeType: Unable to initialize FreeType.\n" );
-	}
-#endif
 //	registeredFontCount = 0;
 }
 
@@ -609,12 +500,7 @@ void R_InitFreeType( void ) {
 R_DoneFreeType
 ============
 */
-void R_DoneFreeType( void ) {
-#ifdef BUILD_FREETYPE
-	if ( ftLibrary ) {
-		FT_Done_FreeType( ftLibrary );
-		ftLibrary = NULL;
-	}
-#endif
-//	registeredFontCount = 0;
+void R_DoneFreeType( bool preserveAtlasImages ) {
+	R_ShutdownTrueTypeFonts( preserveAtlasImages );
+	consoleFontChecked = false;
 }

@@ -33,6 +33,28 @@ If you have questions concerning this license or the applicable additional terms
 
 //#define TEST_TRACE
 
+static ID_INLINE bool R_GetTraceVertexPosition( const srfTriangles_t *tri, int index, idVec3 &position ) {
+	if ( tri == NULL || index < 0 || index >= tri->numVerts ) {
+		position.Zero();
+		return false;
+	}
+
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	if ( tri->silTraceVerts != NULL ) {
+		position = reinterpret_cast<const rvSilTraceVertT *>( tri->silTraceVerts )[index].xyzw.ToVec3();
+		return true;
+	}
+#endif
+
+	if ( tri->verts == NULL ) {
+		position.Zero();
+		return false;
+	}
+
+	position = tri->verts[index].xyz;
+	return true;
+}
+
 /*
 =================
 R_LocalTrace
@@ -72,7 +94,22 @@ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float r
 
 	// catagorize each point against the four planes
 	cullBits = (byte *) _alloca16( tri->numVerts );
-	SIMDProcessor->TracePointCull( cullBits, totalOr, radius, planes, tri->verts, tri->numVerts );
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	if ( tri->silTraceVerts != NULL ) {
+		SIMDProcessor->TracePointCull(
+			cullBits,
+			totalOr,
+			radius,
+			planes,
+			reinterpret_cast<const rvSilTraceVertT *>( tri->silTraceVerts ),
+			tri->numVerts );
+	} else
+#endif
+	if ( tri->verts != NULL ) {
+		SIMDProcessor->TracePointCull( cullBits, totalOr, radius, planes, tri->verts, tri->numVerts );
+	} else {
+		return hit;
+	}
 
 	// if we don't have points on both sides of both the ray planes, no intersection
 	if ( ( totalOr ^ ( totalOr >> 4 ) ) & 3 ) {
@@ -107,6 +144,7 @@ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float r
 		idVec3		cross;
 		idVec3		edge;
 		byte		triOr;
+		idVec3		p0, p1, p2;
 
 		// get sidedness info for the triangle
 		triOr  = cullBits[ tri->indexes[i+0] ];
@@ -156,11 +194,17 @@ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float r
 		// find the exact point of impact with the plane
 		point = start + f * startDir;
 
+		if ( !R_GetTraceVertexPosition( tri, tri->indexes[i+0], p0 )
+			|| !R_GetTraceVertexPosition( tri, tri->indexes[i+1], p1 )
+			|| !R_GetTraceVertexPosition( tri, tri->indexes[i+2], p2 ) ) {
+			continue;
+		}
+
 		// see if the point is within the three edges
 		// if radius > 0 the triangle is expanded with a circle in the triangle plane
 
-		dir[0] = tri->verts[ tri->indexes[i+0] ].xyz - point;
-		dir[1] = tri->verts[ tri->indexes[i+1] ].xyz - point;
+		dir[0] = p0 - point;
+		dir[1] = p1 - point;
 
 		cross = dir[0].Cross( dir[1] );
 		d = plane->Normal() * cross;
@@ -168,14 +212,14 @@ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float r
 			if ( radiusSqr <= 0.0f ) {
 				continue;
 			}
-			edge = tri->verts[ tri->indexes[i+0] ].xyz - tri->verts[ tri->indexes[i+1] ].xyz;
+			edge = p0 - p1;
 			edgeLengthSqr = edge.LengthSqr();
 			if ( cross.LengthSqr() > edgeLengthSqr * radiusSqr ) {
 				continue;
 			}
 			d = edge * dir[0];
 			if ( d < 0.0f ) {
-				edge = tri->verts[ tri->indexes[i+0] ].xyz - tri->verts[ tri->indexes[i+2] ].xyz;
+				edge = p0 - p2;
 				d = edge * dir[0];
 				if ( d < 0.0f ) {
 					if ( dir[0].LengthSqr() > radiusSqr ) {
@@ -183,7 +227,7 @@ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float r
 					}
 				}
 			} else if ( d > edgeLengthSqr ) {
-				edge = tri->verts[ tri->indexes[i+1] ].xyz - tri->verts[ tri->indexes[i+2] ].xyz;
+				edge = p1 - p2;
 				d = edge * dir[1];
 				if ( d < 0.0f ) {
 					if ( dir[1].LengthSqr() > radiusSqr ) {
@@ -193,7 +237,7 @@ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float r
 			}
 		}
 
-		dir[2] = tri->verts[ tri->indexes[i+2] ].xyz - point;
+		dir[2] = p2 - point;
 
 		cross = dir[1].Cross( dir[2] );
 		d = plane->Normal() * cross;
@@ -201,14 +245,14 @@ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float r
 			if ( radiusSqr <= 0.0f ) {
 				continue;
 			}
-			edge = tri->verts[ tri->indexes[i+1] ].xyz - tri->verts[ tri->indexes[i+2] ].xyz;
+			edge = p1 - p2;
 			edgeLengthSqr = edge.LengthSqr();
 			if ( cross.LengthSqr() > edgeLengthSqr * radiusSqr ) {
 				continue;
 			}
 			d = edge * dir[1];
 			if ( d < 0.0f ) {
-				edge = tri->verts[ tri->indexes[i+1] ].xyz - tri->verts[ tri->indexes[i+0] ].xyz;
+				edge = p1 - p0;
 				d = edge * dir[1];
 				if ( d < 0.0f ) {
 					if ( dir[1].LengthSqr() > radiusSqr ) {
@@ -216,7 +260,7 @@ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float r
 					}
 				}
 			} else if ( d > edgeLengthSqr ) {
-				edge = tri->verts[ tri->indexes[i+2] ].xyz - tri->verts[ tri->indexes[i+0] ].xyz;
+				edge = p2 - p0;
 				d = edge * dir[2];
 				if ( d < 0.0f ) {
 					if ( dir[2].LengthSqr() > radiusSqr ) {
@@ -232,14 +276,14 @@ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float r
 			if ( radiusSqr <= 0.0f ) {
 				continue;
 			}
-			edge = tri->verts[ tri->indexes[i+2] ].xyz - tri->verts[ tri->indexes[i+0] ].xyz;
+			edge = p2 - p0;
 			edgeLengthSqr = edge.LengthSqr();
 			if ( cross.LengthSqr() > edgeLengthSqr * radiusSqr ) {
 				continue;
 			}
 			d = edge * dir[2];
 			if ( d < 0.0f ) {
-				edge = tri->verts[ tri->indexes[i+2] ].xyz - tri->verts[ tri->indexes[i+1] ].xyz;
+				edge = p2 - p1;
 				d = edge * dir[2];
 				if ( d < 0.0f ) {
 					if ( dir[2].LengthSqr() > radiusSqr ) {
@@ -247,7 +291,7 @@ localTrace_t R_LocalTrace( const idVec3 &start, const idVec3 &end, const float r
 					}
 				}
 			} else if ( d > edgeLengthSqr ) {
-				edge = tri->verts[ tri->indexes[i+0] ].xyz - tri->verts[ tri->indexes[i+1] ].xyz;
+				edge = p0 - p1;
 				d = edge * dir[0];
 				if ( d < 0.0f ) {
 					if ( dir[0].LengthSqr() > radiusSqr ) {
@@ -288,8 +332,13 @@ void RB_DrawExpandedTriangles( const srfTriangles_t *tri, const float radius, co
 	idVec3 dir[6], normal, point;
 
 	for ( i = 0; i < tri->numIndexes; i += 3 ) {
+		idVec3 p[3];
 
-		idVec3 p[3] = { tri->verts[ tri->indexes[ i + 0 ] ].xyz, tri->verts[ tri->indexes[ i + 1 ] ].xyz, tri->verts[ tri->indexes[ i + 2 ] ].xyz };
+		if ( !R_GetTraceVertexPosition( tri, tri->indexes[ i + 0 ], p[0] )
+			|| !R_GetTraceVertexPosition( tri, tri->indexes[ i + 1 ], p[1] )
+			|| !R_GetTraceVertexPosition( tri, tri->indexes[ i + 2 ], p[2] ) ) {
+			continue;
+		}
 
 		dir[0] = p[0] - p[1];
 		dir[1] = p[1] - p[2];
@@ -377,14 +426,18 @@ void RB_ShowTrace( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
 	GL_TexEnv( GL_MODULATE );
 
-	globalImages->whiteImage->Bind();
+	RB_BindDebugImage( globalImages->whiteImage );
 
 	// find how many are ambient
 	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
 		surf = drawSurfs[i];
 		tri = surf->geo;
 
-		if ( tri == NULL || tri->verts == NULL ) {
+		if ( tri == NULL || ( tri->verts == NULL
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+			&& tri->silTraceVerts == NULL
+#endif
+			) ) {
 			continue;
 		}
 

@@ -162,7 +162,15 @@ idHashTable<Type>::Allocated
 */
 template< class Type >
 ID_INLINE size_t idHashTable<Type>::Allocated( void ) const {
-	return sizeof( heads ) * tablesize + sizeof( *heads ) * numentries;
+	size_t size = sizeof( *heads ) * tablesize;
+
+	for ( int i = 0; i < tablesize; i++ ) {
+		for ( const hashnode_s *node = heads[ i ]; node != NULL; node = node->next ) {
+			size += sizeof( *node ) + node->key.Allocated();
+		}
+	}
+
+	return size;
 }
 
 /*
@@ -172,7 +180,7 @@ idHashTable<Type>::Size
 */
 template< class Type >
 ID_INLINE size_t idHashTable<Type>::Size( void ) const {
-	return sizeof( idHashTable<Type> ) + sizeof( heads ) * tablesize + sizeof( *heads ) * numentries;
+	return sizeof( idHashTable<Type> ) + Allocated();
 }
 
 /*
@@ -275,7 +283,7 @@ ID_INLINE Type *idHashTable<Type>::GetIndex( int index ) const {
 	int			count;
 	int			i;
 
-	if ( ( index < 0 ) || ( index > numentries ) ) {
+	if ( ( index < 0 ) || ( index >= numentries ) ) {
 		assert( 0 );
 		return NULL;
 	}

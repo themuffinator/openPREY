@@ -31,6 +31,12 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "Unzip.h"
 
+#if defined( _WIN32 )
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #define	MAX_PRINT_MSG		4096
 
 /*
@@ -38,15 +44,42 @@ If you have questions concerning this license or the applicable additional terms
 FS_WriteFloatString
 =================
 */
-int FS_WriteFloatString( char *buf, const char *fmt, va_list argPtr ) {
-	long i;
-	unsigned long u;
+static void FS_AppendFloatString( char *buf, int bufSize, int &index, const char *fmt, ... ) {
+	va_list argPtr;
+	int written;
+
+	if ( index < 0 || index >= bufSize ) {
+		common->Error( "FS_WriteFloatString: output overflow" );
+	}
+
+	va_start( argPtr, fmt );
+	written = idStr::vsnPrintf( buf + index, bufSize - index, fmt, argPtr );
+	va_end( argPtr );
+
+	if ( written < 0 ) {
+		common->Error( "FS_WriteFloatString: output overflow" );
+	}
+
+	index += written;
+}
+
+int FS_WriteFloatString( char *buf, int bufSize, const char *fmt, va_list argPtr ) {
+	int i;
+	unsigned int u;
 	double f;
 	char *str;
 	int index;
 	idStr tmp, format;
 
+	if ( buf == NULL || bufSize <= 0 ) {
+		common->Error( "FS_WriteFloatString: invalid output buffer" );
+	}
+	if ( fmt == NULL ) {
+		common->Error( "FS_WriteFloatString: invalid format string" );
+	}
+
 	index = 0;
+	buf[0] = '\0';
 
 	while( *fmt ) {
 		switch( *fmt ) {
@@ -66,47 +99,50 @@ int FS_WriteFloatString( char *buf, const char *fmt, va_list argPtr ) {
 					case 'G':
 						f = va_arg( argPtr, double );
 						if ( format.Length() <= 2 ) {
+							char tmpBuffer[512];
+
 							// high precision floating point number without trailing zeros
-							sprintf( tmp, "%1.10f", f );
+							idStr::snPrintf( tmpBuffer, sizeof( tmpBuffer ), "%1.10f", f );
+							tmp = tmpBuffer;
 							tmp.StripTrailing( '0' );
 							tmp.StripTrailing( '.' );
-							index += sprintf( buf+index, "%s", tmp.c_str() );
+							FS_AppendFloatString( buf, bufSize, index, "%s", tmp.c_str() );
 						}
 						else {
-							index += sprintf( buf+index, format.c_str(), f );
+							FS_AppendFloatString( buf, bufSize, index, format.c_str(), f );
 						}
 						break;
 					case 'd':
 					case 'i':
-						i = va_arg( argPtr, long );
-						index += sprintf( buf+index, format.c_str(), i );
+						i = va_arg( argPtr, int );
+						FS_AppendFloatString( buf, bufSize, index, format.c_str(), i );
 						break;
 					case 'u':
-						u = va_arg( argPtr, unsigned long );
-						index += sprintf( buf+index, format.c_str(), u );
+						u = va_arg( argPtr, unsigned int );
+						FS_AppendFloatString( buf, bufSize, index, format.c_str(), u );
 						break;
 					case 'o':
-						u = va_arg( argPtr, unsigned long );
-						index += sprintf( buf+index, format.c_str(), u );
+						u = va_arg( argPtr, unsigned int );
+						FS_AppendFloatString( buf, bufSize, index, format.c_str(), u );
 						break;
 					case 'x':
-						u = va_arg( argPtr, unsigned long );
-						index += sprintf( buf+index, format.c_str(), u );
+						u = va_arg( argPtr, unsigned int );
+						FS_AppendFloatString( buf, bufSize, index, format.c_str(), u );
 						break;
 					case 'X':
-						u = va_arg( argPtr, unsigned long );
-						index += sprintf( buf+index, format.c_str(), u );
+						u = va_arg( argPtr, unsigned int );
+						FS_AppendFloatString( buf, bufSize, index, format.c_str(), u );
 						break;
 					case 'c':
-						i = va_arg( argPtr, long );
-						index += sprintf( buf+index, format.c_str(), (char) i );
+						i = va_arg( argPtr, int );
+						FS_AppendFloatString( buf, bufSize, index, format.c_str(), (char) i );
 						break;
 					case 's':
 						str = va_arg( argPtr, char * );
-						index += sprintf( buf+index, format.c_str(), str );
+						FS_AppendFloatString( buf, bufSize, index, format.c_str(), str ? str : "" );
 						break;
 					case '%':
-						index += sprintf( buf+index, format.c_str() );
+						FS_AppendFloatString( buf, bufSize, index, format.c_str() );
 						break;
 					default:
 						common->Error( "FS_WriteFloatString: invalid format %s", format.c_str() );
@@ -118,16 +154,16 @@ int FS_WriteFloatString( char *buf, const char *fmt, va_list argPtr ) {
 				fmt++;
 				switch( *fmt ) {
 					case 't':
-						index += sprintf( buf+index, "\t" );
+						FS_AppendFloatString( buf, bufSize, index, "\t" );
 						break;
 					case 'v':
-						index += sprintf( buf+index, "\v" );
+						FS_AppendFloatString( buf, bufSize, index, "\v" );
 						break;
 					case 'n':
-						index += sprintf( buf+index, "\n" );
+						FS_AppendFloatString( buf, bufSize, index, "\n" );
 						break;
 					case '\\':
-						index += sprintf( buf+index, "\\" );
+						FS_AppendFloatString( buf, bufSize, index, "\\" );
 						break;
 					default:
 						common->Error( "FS_WriteFloatString: unknown escape character \'%c\'", *fmt );
@@ -136,7 +172,7 @@ int FS_WriteFloatString( char *buf, const char *fmt, va_list argPtr ) {
 				fmt++;
 				break;
 			default:
-				index += sprintf( buf+index, "%c", *fmt );
+				FS_AppendFloatString( buf, bufSize, index, "%c", *fmt );
 				fmt++;
 				break;
 		}
@@ -236,6 +272,16 @@ void idFile::Flush( void ) {
 
 /*
 =================
+idFile::Sync
+=================
+*/
+bool idFile::Sync( void ) {
+	Flush();
+	return true;
+}
+
+/*
+=================
 idFile::Seek
 =================
 */
@@ -297,7 +343,7 @@ int idFile::WriteFloatString( const char *fmt, ... ) {
 	va_list argPtr;
 
 	va_start( argPtr, fmt );
-	len = FS_WriteFloatString( buf, fmt, argPtr );
+	len = FS_WriteFloatString( buf, sizeof( buf ), fmt, argPtr );
 	va_end( argPtr );
 
 	return Write( buf, len );
@@ -397,10 +443,26 @@ int idFile::ReadString( idStr &string ) {
 	int len;
 	int result = 0;
 	
-	ReadInt( len );
-	if ( len >= 0 ) {
+	if ( ReadInt( len ) != sizeof( len ) || len < 0 ) {
+		string.Clear();
+		return 0;
+	}
+
+	const int fileLength = Length();
+	const int fileTell = Tell();
+	if ( fileLength > 0 && fileTell >= 0 && len > fileLength - fileTell ) {
+		string.Clear();
+		return 0;
+	}
+
+	if ( len > 0 ) {
 		string.Fill( ' ', len );
 		result = Read( &string[ 0 ], len );
+		if ( result != len ) {
+			string.Clear();
+		}
+	} else {
+		string.Clear();
 	}
 	return result;
 }
@@ -556,8 +618,12 @@ int idFile::WriteBool( const bool value ) {
  */
 int idFile::WriteString( const char *value ) {
 	int len;
+
+	if ( value == NULL ) {
+		value = "";
+	}
 	
-	len = strlen( value );
+	len = idLib::SizeToInt( strlen( value ), "idFile::WriteString" );
 	WriteInt( len );
     return Write( value, len );
 }
@@ -677,7 +743,11 @@ idFile_Memory::idFile_Memory
 =================
 */
 idFile_Memory::idFile_Memory( const char *name, char *data, int length ) {
-	this->name = name;
+	this->name = name ? name : "";
+	if ( data == NULL || length <= 0 ) {
+		data = NULL;
+		length = 0;
+	}
 	maxSize = length;
 	fileSize = 0;
 	allocated = length;
@@ -694,7 +764,11 @@ idFile_Memory::idFile_Memory
 =================
 */
 idFile_Memory::idFile_Memory( const char *name, const char *data, int length ) {
-	this->name = name;
+	this->name = name ? name : "";
+	if ( data == NULL || length < 0 ) {
+		data = "";
+		length = 0;
+	}
 	maxSize = 0;
 	fileSize = length;
 	allocated = 0;
@@ -727,9 +801,14 @@ int idFile_Memory::Read( void *buffer, int len ) {
 		common->FatalError( "idFile_Memory::Read: %s not opened in read mode", name.c_str() );
 		return 0;
 	}
+	if ( len <= 0 || buffer == NULL || curPtr == NULL || filePtr == NULL ) {
+		return 0;
+	}
 
-	if ( curPtr + len > filePtr + fileSize ) {
-		len = filePtr + fileSize - curPtr;
+	// Bound the count before forming a pointer, including requests near INT_MAX.
+	len = Min( len, fileSize - static_cast<int>( curPtr - filePtr ) );
+	if ( len <= 0 ) {
+		return 0;
 	}
 	memcpy( buffer, curPtr, len );
 	curPtr += len;
@@ -747,28 +826,64 @@ int idFile_Memory::Write( const void *buffer, int len ) {
 		common->FatalError( "idFile_Memory::Write: %s not opened in write mode", name.c_str() );
 		return 0;
 	}
+	if ( len <= 0 || buffer == NULL ) {
+		return 0;
+	}
 
-	int alloc = curPtr + len + 1 - filePtr - allocated; // need room for len+1
-	if ( alloc > 0 ) {
-		if ( maxSize != 0 ) {
-			common->Error( "idFile_Memory::Write: exceeded maximum size %d", maxSize );
+	const int curOffset = filePtr != NULL ? static_cast<int>( curPtr - filePtr ) : 0;
+	if ( len > idMath::INT_MAX - 1 - curOffset ) {
+		common->Error( "idFile_Memory::Write: file size overflow for %s", name.c_str() );
+		return 0;
+	}
+	const int endOffset = curOffset + len;
+	const int required = endOffset + 1; // keep room for the trailing terminator
+	if ( maxSize != 0 && required > maxSize ) {
+		common->Error( "idFile_Memory::Write: exceeded maximum size %d", maxSize );
+		return 0;
+	}
+
+	// A caller may append or overwrite with a slice of this file's own buffer.
+	// Retain its offset across reallocation, and reject slices outside storage.
+	int sourceOffset = -1;
+	const uintptr_t sourceAddress = reinterpret_cast<uintptr_t>( buffer );
+	const uintptr_t dataAddress = reinterpret_cast<uintptr_t>( filePtr );
+	if ( filePtr != NULL && sourceAddress >= dataAddress &&
+			sourceAddress - dataAddress < static_cast<uintptr_t>( allocated ) ) {
+		sourceOffset = static_cast<int>( sourceAddress - dataAddress );
+		if ( len > allocated - sourceOffset ) {
+			common->Error( "idFile_Memory::Write: source exceeds buffer for %s", name.c_str() );
 			return 0;
 		}
-		int extra = granularity * ( 1 + alloc / granularity );
-		char *newPtr = (char *) Mem_Alloc( allocated + extra );
-		if ( allocated ) {
-			memcpy( newPtr, filePtr, allocated );
+	}
+
+	if ( required > allocated ) {
+		// Geometric growth amortizes repeated small writes. Round only when the
+		// padding fits, so the signed file-size limit cannot wrap the allocation.
+		int newAllocated = Max( required, allocated + Min( allocated / 2, idMath::INT_MAX - allocated ) );
+		const int quantum = Max( 1, granularity );
+		const int remainder = newAllocated % quantum;
+		if ( remainder != 0 && quantum - remainder <= idMath::INT_MAX - newAllocated ) {
+			newAllocated += quantum - remainder;
 		}
-		allocated += extra;
-		curPtr = newPtr + ( curPtr - filePtr );		
+		char *newPtr = (char *) Mem_Alloc( newAllocated );
+		const int copySize = sourceOffset >= 0 ? Max( fileSize, sourceOffset + len ) : fileSize;
+		if ( copySize > 0 ) {
+			memcpy( newPtr, filePtr, copySize );
+		}
+		allocated = newAllocated;
+		curPtr = newPtr + curOffset;
 		if ( filePtr ) {
 			Mem_Free( filePtr );
 		}
 		filePtr = newPtr;
 	}
-	memcpy( curPtr, buffer, len );
+	if ( sourceOffset >= 0 ) {
+		memmove( curPtr, filePtr + sourceOffset, len );
+	} else {
+		memcpy( curPtr, buffer, len );
+	}
 	curPtr += len;
-	fileSize += len;
+	fileSize = Max( fileSize, endOffset );
 	filePtr[ fileSize ] = 0; // len + 1
 	return len;
 }
@@ -797,6 +912,9 @@ idFile_Memory::Tell
 =================
 */
 int idFile_Memory::Tell( void ) {
+	if ( curPtr == NULL || filePtr == NULL ) {
+		return 0;
+	}
 	return ( curPtr - filePtr );
 }
 
@@ -824,18 +942,27 @@ idFile_Memory::Seek
 =================
 */
 int idFile_Memory::Seek( long offset, fsOrigin_t origin ) {
-
+	// Validate using bounded integers before forming a pointer. In particular,
+	// do not add LONG_MAX or negate LONG_MIN on platforms with 64-bit long.
+	long lower, upper;
+	int baseOffset;
 	switch( origin ) {
 		case FS_SEEK_CUR: {
-			curPtr += offset;
+			baseOffset = filePtr != NULL ? static_cast<int>( curPtr - filePtr ) : 0;
+			lower = -static_cast<long>( baseOffset );
+			upper = fileSize - baseOffset;
 			break;
 		}
 		case FS_SEEK_END: {
-			curPtr = filePtr + fileSize - offset;
+			baseOffset = fileSize;
+			lower = 0;
+			upper = fileSize;
 			break;
 		}
 		case FS_SEEK_SET: {
-			curPtr = filePtr + offset;
+			baseOffset = 0;
+			lower = 0;
+			upper = fileSize;
 			break;
 		}
 		default: {
@@ -843,15 +970,13 @@ int idFile_Memory::Seek( long offset, fsOrigin_t origin ) {
 			return -1;
 		}
 	}
-	if ( curPtr < filePtr ) {
-		curPtr = filePtr;
-		return -1;
-	}
-	if ( curPtr > filePtr + fileSize ) {
-		curPtr = filePtr + fileSize;
-		return -1;
-	}
-	return 0;
+	const bool outOfRange = offset < lower || offset > upper;
+	const long clampedOffset = Max( lower, Min( upper, offset ) );
+	// Preserve the memory-file convention: positive END offsets seek backward.
+	const int target = origin == FS_SEEK_END ? baseOffset - static_cast<int>( clampedOffset ) :
+		baseOffset + static_cast<int>( clampedOffset );
+	curPtr = filePtr != NULL ? filePtr + target : NULL;
+	return outOfRange ? -1 : 0;
 }
 
 /*
@@ -873,12 +998,18 @@ void idFile_Memory::Clear( bool freeMemory ) {
 	fileSize = 0;
 	granularity = 16384;
 	if ( freeMemory ) {
+		if ( allocated > 0 && maxSize == 0 ) {
+			Mem_Free( filePtr );
+		}
 		allocated = 0;
-		Mem_Free( filePtr );
+		maxSize = 0;
 		filePtr = NULL;
 		curPtr = NULL;
 	} else {
 		curPtr = filePtr;
+		if ( filePtr != NULL && ( mode & ( 1 << FS_WRITE ) ) ) {
+			filePtr[0] = 0;
+		}
 	}
 }
 
@@ -888,6 +1019,29 @@ idFile_Memory::SetData
 =================
 */
 void idFile_Memory::SetData( const char *data, int length ) {
+	if ( data == NULL || length < 0 ) {
+		data = "";
+		length = 0;
+	}
+	if ( filePtr != NULL && allocated > 0 && maxSize == 0 ) {
+		const uintptr_t sourceAddress = reinterpret_cast<uintptr_t>( data );
+		const uintptr_t dataAddress = reinterpret_cast<uintptr_t>( filePtr );
+		if ( sourceAddress >= dataAddress && sourceAddress - dataAddress < static_cast<uintptr_t>( allocated ) ) {
+			const int sourceOffset = static_cast<int>( sourceAddress - dataAddress );
+			if ( length > allocated - sourceOffset ) {
+				common->Error( "idFile_Memory::SetData: source exceeds buffer for %s", name.c_str() );
+				return;
+			}
+			// Retain ownership when turning our own buffer (or a slice) read-only.
+			memmove( filePtr, data, length );
+			fileSize = length;
+			curPtr = filePtr;
+			mode = ( 1 << FS_READ );
+			granularity = 16384;
+			return;
+		}
+		Mem_Free( filePtr );
+	}
 	maxSize = 0;
 	fileSize = length;
 	allocated = 0;
@@ -948,6 +1102,9 @@ int idFile_BitMsg::Read( void *buffer, int len ) {
 		common->FatalError( "idFile_BitMsg::Read: %s not opened in read mode", name.c_str() );
 		return 0;
 	}
+	if ( len <= 0 || buffer == NULL ) {
+		return 0;
+	}
 
 	return msg->ReadData( buffer, len );
 }
@@ -961,6 +1118,9 @@ int idFile_BitMsg::Write( const void *buffer, int len ) {
 
 	if ( !( mode & ( 1 << FS_WRITE ) ) ) {
 		common->FatalError( "idFile_Memory::Write: %s not opened in write mode", name.c_str() );
+		return 0;
+	}
+	if ( len <= 0 || buffer == NULL ) {
 		return 0;
 	}
 
@@ -992,7 +1152,7 @@ idFile_BitMsg::Tell
 =================
 */
 int idFile_BitMsg::Tell( void ) {
-	if ( mode & FS_READ ) {
+	if ( mode & ( 1 << FS_READ ) ) {
 		return msg->GetReadCount();
 	} else {
 		return msg->GetSize();
@@ -1081,6 +1241,9 @@ int idFile_Permanent::Read( void *buffer, int len ) {
 	if ( !o ) {
 		return 0;
 	}
+	if ( len <= 0 || buffer == NULL ) {
+		return 0;
+	}
 
 	buf = (byte *)buffer;
 
@@ -1088,7 +1251,7 @@ int idFile_Permanent::Read( void *buffer, int len ) {
 	tries = 0;
 	while( remaining ) {
 		block = Min( remaining, readChunkBytes );
-		read = fread( buf, 1, block, o );
+		read = idLib::SizeToInt( fread( buf, 1, block, o ), "idFile_Permanent::Read" );
 		if ( read == 0 ) {
 			// we might have been trying to read from a CD, which
 			// sometimes returns a 0 read on windows
@@ -1133,6 +1296,9 @@ int idFile_Permanent::Write( const void *buffer, int len ) {
 	if ( !o ) {
 		return 0;
 	}
+	if ( len <= 0 || buffer == NULL ) {
+		return 0;
+	}
 
 	buf = (byte *)buffer;
 
@@ -1140,7 +1306,7 @@ int idFile_Permanent::Write( const void *buffer, int len ) {
 	tries = 0;
 	while( remaining ) {
 		block = remaining;
-		written = fwrite( buf, 1, block, o );
+		written = idLib::SizeToInt( fwrite( buf, 1, block, o ), "idFile_Permanent::Write" );
 		if ( written == 0 ) {
 			if ( !tries ) {
 				tries = 1;
@@ -1182,6 +1348,28 @@ idFile_Permanent::Flush
 */
 void idFile_Permanent::Flush( void ) {
 	fflush( o );
+}
+
+/*
+=================
+idFile_Permanent::Sync
+=================
+*/
+bool idFile_Permanent::Sync( void ) {
+	if ( o == NULL ) {
+		return false;
+	}
+	if ( fflush( o ) != 0 ) {
+		return false;
+	}
+	if ( !( mode & ( 1 << FS_WRITE ) ) ) {
+		return true;
+	}
+#if defined( _WIN32 )
+	return _commit( _fileno( o ) ) == 0;
+#else
+	return fsync( fileno( o ) ) == 0;
+#endif
 }
 
 /*
@@ -1262,6 +1450,8 @@ idFile_InZip::idFile_InZip( void ) {
 	name = "invalid";
 	zipFilePos = 0;
 	fileSize = 0;
+	containerChecksum = 0;
+	contentCrc = 0;
 	memset( &z, 0, sizeof( z ) );
 }
 
@@ -1284,6 +1474,9 @@ Properly handles partial reads
 */
 int idFile_InZip::Read( void *buffer, int len ) {
 	static const int readChunkBytes = 64 * 1024;
+	if ( len <= 0 || buffer == NULL ) {
+		return 0;
+	}
 	byte *buf = static_cast<byte *>( buffer );
 	int totalRead = 0;
 
@@ -1366,6 +1559,18 @@ ID_TIME_T idFile_InZip::Timestamp( void ) {
 }
 
 /*
+================
+idFile_InZip::ContentStamp
+
+Matches the length-only ReadFile probe, which answers from the same
+central-directory entry without opening the member.
+================
+*/
+ID_TIME_T idFile_InZip::ContentStamp( void ) {
+	return FS_PakMemberContentStamp( contentCrc, fileSize );
+}
+
+/*
 =================
 idFile_InZip::Seek
 
@@ -1381,16 +1586,27 @@ int idFile_InZip::Seek( long offset, fsOrigin_t origin ) {
 	switch( origin ) {
 		case FS_SEEK_END: {
 			offset = fileSize - offset;
+			if ( offset < 0 ) {
+				return -1;
+			}
 		}
 		case FS_SEEK_SET: {
 			// set the file position in the zip file (also sets the current file info)
-			unzSetCurrentFileInfoPosition( z, zipFilePos );
-			unzOpenCurrentFile( z );
+			if ( unzSetCurrentFileInfoPosition( z, static_cast<unsigned long>( zipFilePos ) ) != UNZ_OK ||
+				unzOpenCurrentFile( z ) != UNZ_OK ) {
+				return -1;
+			}
+			if ( offset < 0 ) {
+				return -1;
+			}
 			if ( offset <= 0 ) {
 				return 0;
 			}
 		}
 		case FS_SEEK_CUR: {
+			if ( offset < 0 ) {
+				return -1;
+			}
 			buf = (char *) _alloca16( ZIP_SEEK_BUF_SIZE );
 			for ( i = 0; i < ( offset - ZIP_SEEK_BUF_SIZE ); i += ZIP_SEEK_BUF_SIZE ) {
 				res = unzReadCurrentFile( z, buf, ZIP_SEEK_BUF_SIZE );

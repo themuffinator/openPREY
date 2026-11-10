@@ -56,6 +56,7 @@ public:
 	virtual void		Draw(int time, float x, float y);
 	virtual void		Activate(bool activate, idStr &act);
 	virtual void		HandleBuddyUpdate(idWindow *buddy);
+	virtual void		MouseEnter();
 	virtual void		StateChanged( bool redraw = false );
 	virtual size_t		Allocated(){return idWindow::Allocated();};
 	virtual idWinVar*	GetWinVarByName(const char *_name, bool winLookup = false, drawWin_t** owner = NULL);
@@ -74,6 +75,7 @@ private:
 
 	idList<idTabRect>	tabInfo;
 	int					top;
+	int					maxItems;
 	float				sizeBias;
 	bool				horizontal;
 	idStr				tabStopStr;
@@ -86,12 +88,23 @@ private:
 	idHashTable<const idMaterial*> iconMaterials;						
 	bool				multipleSel;
 
+	// A row's companion states, as the retail list reads them:
+	// <list>_item_<i>_highlight fills the row in a color in place of its line
+	// band, and <list>_item_<i>_greyed draws the greyed band.
+	struct rowTint_t {
+		idVec4			highlight;
+		bool			highlighted;
+		bool			greyed;
+	};
+
 	idStrList			listItems;
+	idList<rowTint_t>	rowTints;
 	idSliderWindow*		scroller;
 	idList<int>			currentSel;
 	idStr				listName;
 
 	int					clickTime;
+	int					clickRow;
 
 	int					typedTime;
 	idStr				typed;

@@ -26,10 +26,40 @@ If you have questions concerning this license or the applicable additional terms
 ===========================================================================
 */
 
-
+#include "ConsoleCompletion.h"
 
 
 static autoComplete_t	globalAutoComplete;
+static bool				completionQueryMode;
+static bool				completionQueryCollectAll;
+static editFieldCompletionQueryCallback_t completionQueryCallback;
+static void *			completionQueryContext;
+static int				completionQueryTotalCount;
+
+static const char *FindCompletionSegmentStart( const char *cmd ) {
+	const char *segmentStart = cmd;
+	for ( const char *scan = cmd; *scan != '\0'; ++scan ) {
+		if ( *scan == ';' ) {
+			segmentStart = scan + 1;
+		}
+	}
+	return segmentStart;
+}
+
+static void NormalizeCompletionCommandString( const char *cmd, char *normalized, size_t normalizedSize ) {
+	const char *segmentStart = FindCompletionSegmentStart( cmd );
+
+	while ( *segmentStart != '\0' && *segmentStart <= ' ' ) {
+		++segmentStart;
+	}
+
+	idStr::Copynz( normalized, segmentStart, idLib::SizeToInt( normalizedSize, "NormalizeCompletionCommandString" ) );
+	if ( normalized[0] == '/' || normalized[0] == '\\' ) {
+		memmove( normalized, normalized + 1, strlen( normalized ) );
+	}
+}
+
+static int QueryCompletionInternal( const char *cmd, bool *appendSpace, editFieldCompletionQueryCallback_t callback, void *context, bool collectAll );
 
 static void DrawScaledSmallChar( float x, float y, float charWidth, int ch, const idMaterial *shader ) {
 	int row, col;
@@ -65,17 +95,20 @@ static void DrawScaledSmallStringExt( float x, float y, float charWidth, const c
 	renderSystem->SetColor( setColor );
 
 	while ( *s ) {
-		if ( idStr::IsColor( reinterpret_cast<const char *>( s ) ) ) {
+		idVec4 parsedColor;
+		bool resetToDefault = false;
+		const int colorEscapeLength = idStr::ColorEscapeLength( reinterpret_cast<const char *>( s ), &parsedColor, &resetToDefault );
+		if ( colorEscapeLength > 0 ) {
 			if ( !forceColor ) {
-				if ( *( s + 1 ) == C_COLOR_DEFAULT ) {
+				if ( resetToDefault ) {
 					renderSystem->SetColor( setColor );
 				} else {
-					color = idStr::ColorForIndex( *( s + 1 ) );
+					color = parsedColor;
 					color[3] = setColor[3];
 					renderSystem->SetColor( color );
 				}
 			}
-			s += 2;
+			s += colorEscapeLength;
 			continue;
 		}
 
@@ -94,8 +127,17 @@ FindMatches
 */
 static void FindMatches( const char *s ) {
 	int		i;
+	const bool prefixMatch = ( idStr::Icmpn( s, globalAutoComplete.completionString,
+		idLib::SizeToInt( strlen( globalAutoComplete.completionString ), "FindMatches" ) ) == 0 );
 
-	if ( idStr::Icmpn( s, globalAutoComplete.completionString, strlen( globalAutoComplete.completionString ) ) != 0 ) {
+	if ( completionQueryMode && completionQueryCallback != NULL && ( prefixMatch || completionQueryCollectAll ) ) {
+		++completionQueryTotalCount;
+		if ( !completionQueryCallback( s, completionQueryContext ) ) {
+			completionQueryCallback = NULL;
+		}
+	}
+
+	if ( !prefixMatch ) {
 		return;
 	}
 	globalAutoComplete.matchCount++;
@@ -106,7 +148,7 @@ static void FindMatches( const char *s ) {
 
 	// cut currentMatch to the amount common with s
 	for ( i = 0; s[i]; i++ ) {
-		if ( tolower( globalAutoComplete.currentMatch[i] ) != tolower( s[i] ) ) {
+		if ( tolower( (unsigned char)globalAutoComplete.currentMatch[i] ) != tolower( (unsigned char)s[i] ) ) {
 			globalAutoComplete.currentMatch[i] = 0;
 			break;
 		}
@@ -121,7 +163,8 @@ FindIndexMatch
 */
 static void FindIndexMatch( const char *s ) {
 
-	if ( idStr::Icmpn( s, globalAutoComplete.completionString, strlen( globalAutoComplete.completionString ) ) != 0 ) {
+	if ( idStr::Icmpn( s, globalAutoComplete.completionString,
+		idLib::SizeToInt( strlen( globalAutoComplete.completionString ), "FindIndexMatch" ) ) != 0 ) {
 		return;
 	}
 
@@ -138,7 +181,8 @@ PrintMatches
 ===============
 */
 static void PrintMatches( const char *s ) {
-	if ( idStr::Icmpn( s, globalAutoComplete.currentMatch, strlen( globalAutoComplete.currentMatch ) ) == 0 ) {
+	if ( idStr::Icmpn( s, globalAutoComplete.currentMatch,
+		idLib::SizeToInt( strlen( globalAutoComplete.currentMatch ), "PrintMatches" ) ) == 0 ) {
 		common->Printf( "    %s\n", s );
 	}
 }
@@ -149,8 +193,12 @@ PrintCvarMatches
 ===============
 */
 static void PrintCvarMatches( const char *s ) {
-	if ( idStr::Icmpn( s, globalAutoComplete.currentMatch, strlen( globalAutoComplete.currentMatch ) ) == 0 ) {
-		common->Printf( "    %s" S_COLOR_WHITE " = \"%s\"\n", s, cvarSystem->GetCVarString( s ) );
+	if ( idStr::Icmpn( s, globalAutoComplete.currentMatch,
+		idLib::SizeToInt( strlen( globalAutoComplete.currentMatch ), "PrintCvarMatches" ) ) == 0 ) {
+		idCVar *cvar = cvarSystem->Find( s );
+		const char *value = ( cvar != NULL && ( cvar->GetFlags() & CVAR_PRIVATE ) ) ?
+			"<redacted>" : cvarSystem->GetCVarString( s );
+		common->Printf( "    %s" S_COLOR_WHITE " = \"%s\"\n", s, value );
 	}
 }
 
@@ -178,11 +226,13 @@ idEditField::Clear
 ===============
 */
 void idEditField::Clear( void ) {
-	buffer[0] = 0;
+	// Edit fields can hold console-entered credentials. Clear the backing
+	// storage, not only its first byte, so discarded private commands do not
+	// remain recoverable in stale field memory.
+	memset( buffer, 0, sizeof( buffer ) );
 	cursor = 0;
 	scroll = 0;
-	autoComplete.length = 0;
-	autoComplete.valid = false;
+	memset( &autoComplete, 0, sizeof( autoComplete ) );
 }
 
 /*
@@ -193,6 +243,7 @@ idEditField::SetWidthInChars
 void idEditField::SetWidthInChars( int w ) {
 	assert( w <= MAX_EDIT_LINE );
 	widthInChars = w;
+	ClampCursorAndScroll();
 }
 
 /*
@@ -203,6 +254,7 @@ idEditField::SetCursor
 void idEditField::SetCursor( int c ) {
 	assert( c <= MAX_EDIT_LINE );
 	cursor = c;
+	ClampCursorAndScroll();
 }
 
 /*
@@ -212,6 +264,77 @@ idEditField::GetCursor
 */
 int idEditField::GetCursor( void ) const {
 	return cursor;
+}
+
+/*
+===============
+idEditField::GetScroll
+===============
+*/
+int idEditField::GetScroll( void ) const {
+	return scroll;
+}
+
+/*
+===============
+idEditField::SetScroll
+===============
+*/
+void idEditField::SetScroll( int s ) {
+	scroll = s;
+	ClampCursorAndScroll();
+}
+
+/*
+===============
+idEditField::GetWidthInChars
+===============
+*/
+int idEditField::GetWidthInChars( void ) const {
+	return widthInChars;
+}
+
+/*
+===============
+idEditField::GetLength
+===============
+*/
+int idEditField::GetLength( void ) const {
+	return idLib::SizeToInt( strlen( buffer ), "idEditField::GetLength" );
+}
+
+/*
+===============
+idEditField::ClampCursorAndScroll
+===============
+*/
+void idEditField::ClampCursorAndScroll( void ) {
+	const int len = idLib::SizeToInt( strlen( buffer ), "idEditField::ClampCursorAndScroll" );
+	const int drawLen = Max( 1, widthInChars );
+
+	if ( cursor < 0 ) {
+		cursor = 0;
+	} else if ( cursor > len ) {
+		cursor = len;
+	}
+
+	if ( scroll < 0 ) {
+		scroll = 0;
+	}
+
+	if ( cursor < scroll ) {
+		scroll = cursor;
+	} else if ( cursor >= scroll + drawLen ) {
+		scroll = cursor - drawLen + 1;
+	}
+
+	if ( len > drawLen && scroll > len - drawLen ) {
+		scroll = len - drawLen;
+	}
+
+	if ( scroll < 0 ) {
+		scroll = 0;
+	}
 }
 
 /*
@@ -247,10 +370,23 @@ idEditField::AutoComplete
 void idEditField::AutoComplete( void ) {
 	char completionArgString[MAX_EDIT_LINE];
 	idCmdArgs args;
+	if ( cvarSystem != NULL && cvarSystem->IsInitialized() &&
+		cvarSystem->CommandContainsPrivateCVar( buffer ) ) {
+		idCmdArgs::ClearArgsScratch();
+		common->Printf( "autocomplete is unavailable for private CVar commands\n" );
+		return;
+	}
 
 	if ( !autoComplete.valid ) {
+		const bool explicitCommandPrefix = ( buffer[0] == '/' || buffer[0] == '\\' );
+		const char commandPrefix = explicitCommandPrefix ? buffer[0] : '\0';
+
 		args.TokenizeString( buffer, false );
-		idStr::Copynz( autoComplete.completionString, args.Argv( 0 ), sizeof( autoComplete.completionString ) );
+		const char *completionBase = args.Argv( 0 );
+		if ( ( completionBase[0] == '/' || completionBase[0] == '\\' ) && completionBase[1] != '\0' ) {
+			++completionBase;
+		}
+		idStr::Copynz( autoComplete.completionString, completionBase, sizeof( autoComplete.completionString ) );
 		idStr::Copynz( completionArgString, args.Args(), sizeof( completionArgString ) );
 		autoComplete.matchCount = 0;
 		autoComplete.matchIndex = 0;
@@ -287,25 +423,33 @@ void idEditField::AutoComplete( void ) {
 			autoComplete = globalAutoComplete;
 
 			idStr::snPrintf( buffer, sizeof( buffer ), "%s", autoComplete.currentMatch );
+			if ( explicitCommandPrefix && buffer[0] != '/' && buffer[0] != '\\' && strlen( buffer ) + 1 < sizeof( buffer ) ) {
+				memmove( buffer + 1, buffer, strlen( buffer ) + 1 );
+				buffer[0] = commandPrefix;
+			}
 
 			if ( autoComplete.matchCount == 0 ) {
 				// no argument matches
 				idStr::Append( buffer, sizeof( buffer ), " " );
 				idStr::Append( buffer, sizeof( buffer ), completionArgString );
-				SetCursor( strlen( buffer ) );
+				SetCursor( idLib::SizeToInt( strlen( buffer ), "idEditField::AutoComplete" ) );
 				return;
 			}
 		} else {
 
 			// multiple matches, complete to shortest
 			idStr::snPrintf( buffer, sizeof( buffer ), "%s", autoComplete.currentMatch );
+			if ( explicitCommandPrefix && buffer[0] != '/' && buffer[0] != '\\' && strlen( buffer ) + 1 < sizeof( buffer ) ) {
+				memmove( buffer + 1, buffer, strlen( buffer ) + 1 );
+				buffer[0] = commandPrefix;
+			}
 			if ( strlen( completionArgString ) ) {
 				idStr::Append( buffer, sizeof( buffer ), " " );
 				idStr::Append( buffer, sizeof( buffer ), completionArgString );
 			}
 		}
 
-		autoComplete.length = strlen( buffer );
+		autoComplete.length = idLib::SizeToInt( strlen( buffer ), "idEditField::AutoComplete" );
 		autoComplete.valid = ( autoComplete.matchCount != 1 );
 		SetCursor( autoComplete.length );
 
@@ -320,6 +464,8 @@ void idEditField::AutoComplete( void ) {
 		cvarSystem->ArgCompletion( autoComplete.completionString, PrintMatches );
 
 	} else if ( autoComplete.matchCount != 1 ) {
+		const bool explicitCommandPrefix = ( buffer[0] == '/' || buffer[0] == '\\' );
+		const char commandPrefix = explicitCommandPrefix ? buffer[0] : '\0';
 
 		// get the next match and show instead
 		autoComplete.matchIndex++;
@@ -338,12 +484,118 @@ void idEditField::AutoComplete( void ) {
 		autoComplete = globalAutoComplete;
 
 		// and print it
-		idStr::snPrintf( buffer, sizeof( buffer ), autoComplete.currentMatch );
-		if ( autoComplete.length > (int)strlen( buffer ) ) {
-			autoComplete.length = strlen( buffer );
+		idStr::snPrintf( buffer, sizeof( buffer ), "%s", autoComplete.currentMatch );
+		if ( explicitCommandPrefix && buffer[0] != '/' && buffer[0] != '\\' && strlen( buffer ) + 1 < sizeof( buffer ) ) {
+			memmove( buffer + 1, buffer, strlen( buffer ) + 1 );
+			buffer[0] = commandPrefix;
+		}
+		const int bufferLength = idLib::SizeToInt( strlen( buffer ), "idEditField::AutoComplete" );
+		if ( autoComplete.length > bufferLength ) {
+			autoComplete.length = bufferLength;
 		}
 		SetCursor( autoComplete.length );
 	}
+}
+
+static int QueryCompletionInternal( const char *cmd, bool *appendSpace, editFieldCompletionQueryCallback_t callback, void *context, bool collectAll ) {
+	char normalizedCmd[MAX_EDIT_LINE];
+	idCmdArgs args;
+	bool savedQueryMode;
+	bool savedCollectAll;
+	editFieldCompletionQueryCallback_t savedCallback;
+	void *savedContext;
+
+	if ( appendSpace != NULL ) {
+		*appendSpace = false;
+	}
+
+	if ( cmd == NULL || cmd[0] == '\0' ) {
+		return 0;
+	}
+	if ( cvarSystem != NULL && cvarSystem->IsInitialized() &&
+		cvarSystem->CommandContainsPrivateCVar( cmd ) ) {
+		return 0;
+	}
+
+	NormalizeCompletionCommandString( cmd, normalizedCmd, sizeof( normalizedCmd ) );
+	if ( normalizedCmd[0] == '\0' ) {
+		return 0;
+	}
+
+	args.TokenizeString( normalizedCmd, false );
+	if ( args.Argc() == 0 ) {
+		return 0;
+	}
+
+	globalAutoComplete.valid = false;
+	globalAutoComplete.length = 0;
+	globalAutoComplete.matchCount = 0;
+	globalAutoComplete.matchIndex = 0;
+	globalAutoComplete.findMatchIndex = 0;
+	globalAutoComplete.currentMatch[0] = '\0';
+
+	const int normalizedLength = idLib::SizeToInt( strlen( normalizedCmd ), "QueryCompletionInternal" );
+	const bool trailingWhitespace = normalizedLength > 0 && static_cast<unsigned char>( normalizedCmd[normalizedLength - 1] ) <= ' ';
+	const bool completingArguments = ( args.Argc() > 1 ) || trailingWhitespace;
+	if ( completingArguments ) {
+		// Argument candidates arrive as whole lines ("com_maxfps 120"), so the
+		// typed line narrows them, as idTech4's AutoComplete did. An empty
+		// prefix let every value through, and the popup's cap then kept only the
+		// first values a producer offered: typing 30000 for a 0..60000 CVar
+		// listed only the lowest values, and Enter replaced 30000 with one.
+		oq4completion::BuildArgumentLinePrefix( normalizedCmd, globalAutoComplete.completionString,
+			sizeof( globalAutoComplete.completionString ) );
+	} else {
+		idStr::Copynz( globalAutoComplete.completionString, args.Argv( args.Argc() - 1 ), sizeof( globalAutoComplete.completionString ) );
+	}
+
+	savedQueryMode = completionQueryMode;
+	savedCollectAll = completionQueryCollectAll;
+	savedCallback = completionQueryCallback;
+	savedContext = completionQueryContext;
+
+	completionQueryMode = true;
+	completionQueryCollectAll = collectAll;
+	completionQueryCallback = callback;
+	completionQueryContext = context;
+	completionQueryTotalCount = 0;
+
+	if ( completingArguments ) {
+		cmdSystem->ArgCompletion( normalizedCmd, FindMatches );
+		cvarSystem->ArgCompletion( normalizedCmd, FindMatches );
+	} else {
+		cmdSystem->CommandCompletion( FindMatches );
+		cvarSystem->CommandCompletion( FindMatches );
+	}
+
+	if ( appendSpace != NULL ) {
+		*appendSpace = ( globalAutoComplete.matchCount == 1 );
+	}
+
+	completionQueryMode = savedQueryMode;
+	completionQueryCollectAll = savedCollectAll;
+	completionQueryCallback = savedCallback;
+	completionQueryContext = savedContext;
+
+	return collectAll ? completionQueryTotalCount : globalAutoComplete.matchCount;
+}
+
+/*
+===============
+idEditField::QueryCompletionMatches
+===============
+*/
+int idEditField::QueryCompletionMatches( const char *cmd, bool *appendSpace, editFieldCompletionQueryCallback_t callback, void *context ) {
+	return QueryCompletionInternal( cmd, appendSpace, callback, context, false );
+}
+
+/*
+===============
+idEditField::QueryCompletionCandidates
+===============
+*/
+int idEditField::QueryCompletionCandidates( const char *cmd, editFieldCompletionQueryCallback_t callback, void *context ) {
+	return QueryCompletionInternal( cmd, NULL, callback, context, true );
 }
 
 /*
@@ -364,7 +616,7 @@ void idEditField::CharEvent( int ch ) {
 		return;
 	}
 
-	len = strlen( buffer );
+	len = idLib::SizeToInt( strlen( buffer ), "idEditField::CharEvent" );
 
 	if ( ch == 'h' - 'a' + 1 || ch == K_BACKSPACE ) {	// ctrl-h is backspace
 		if ( cursor > 0 ) {
@@ -436,7 +688,7 @@ void idEditField::KeyDownEvent( int key ) {
 		return;
 	}
 
-	len = strlen( buffer );
+	len = idLib::SizeToInt( strlen( buffer ), "idEditField::KeyDownEvent" );
 
 	if ( key == K_DEL ) {
 		if ( autoComplete.length ) {
@@ -542,7 +794,7 @@ idEditField::Paste
 */
 void idEditField::Paste( void ) {
 	char	*cbd;
-	int		pasteLen, i;
+	size_t	pasteLen, i;
 
 	cbd = Sys_GetClipboardData();
 
@@ -556,6 +808,7 @@ void idEditField::Paste( void ) {
 		CharEvent( cbd[i] );
 	}
 
+	memset( cbd, 0, pasteLen );
 	Mem_Free( cbd );
 }
 
@@ -570,13 +823,23 @@ char *idEditField::GetBuffer( void ) {
 
 /*
 ===============
+idEditField::GetBuffer
+===============
+*/
+const char *idEditField::GetBuffer( void ) const {
+	return buffer;
+}
+
+/*
+===============
 idEditField::SetBuffer
 ===============
 */
 void idEditField::SetBuffer( const char *buf ) {
 	Clear();
 	idStr::Copynz( buffer, buf, sizeof( buffer ) );
-	SetCursor( strlen( buffer ) );
+	SetCursor( idLib::SizeToInt( strlen( buffer ), "idEditField::SetBuffer" ) );
+	ClampCursorAndScroll();
 }
 
 /*
@@ -600,7 +863,7 @@ void idEditField::Draw( int x, int y, int width, bool showCursor, const idMateri
 	size = idMath::ClampFloat( 1.0f, 64.0f, size );
 
 	drawLen = widthInChars;
-	len = strlen( buffer ) + 1;
+	len = idLib::SizeToInt( strlen( buffer ) + 1, "idEditField::Draw" );
 
 	// guarantee that cursor will be visible
 	if ( len <= drawLen ) {

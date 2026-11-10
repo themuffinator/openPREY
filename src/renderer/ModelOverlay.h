@@ -81,7 +81,7 @@ public:
 	// Removes overlay surfaces from the model.
 	static void					RemoveOverlaySurfacesFromModel( idRenderModel *baseModel );
 
-	void						ReadFromDemoFile( class idDemoFile *f );
+	bool						ReadFromDemoFile( class idDemoFile *f );
 	void						WriteToDemoFile( class idDemoFile *f ) const;
 
 private:

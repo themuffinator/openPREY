@@ -156,6 +156,15 @@ static int boxPlaneBitsSilVerts[64][7] = {
 	{ 0, 0, 0, 0, 0, 0, 0 }, // 111111 = 63
 };
 
+/*
+================
+BoxPointBox
+================
+*/
+static ID_INLINE idBox BoxPointBox( const idVec3 &point ) {
+	return idBox( point, vec3_zero, mat3_identity );
+}
+
 
 /*
 ============
@@ -688,7 +697,20 @@ idBox::FromPointTranslation
 ============
 */
 void idBox::FromPointTranslation( const idVec3 &point, const idVec3 &translation ) {
-	// FIXME: implement
+	float length;
+
+	center = point + translation * 0.5f;
+	extents.Zero();
+
+	length = translation.Length();
+	if ( length <= VECTOR_EPSILON ) {
+		axis.Identity();
+		return;
+	}
+
+	axis[0] = translation / length;
+	axis[0].NormalVectors( axis[1], axis[2] );
+	extents[0] = length * 0.5f;
 }
 
 /*
@@ -699,7 +721,26 @@ idBox::FromBoxTranslation
 ============
 */
 void idBox::FromBoxTranslation( const idBox &box, const idVec3 &translation ) {
-	// FIXME: implement
+	idVec3 points[8];
+
+	if ( box.IsCleared() ) {
+		Clear();
+		return;
+	}
+
+	if ( translation.LengthSqr() <= VECTOR_EPSILON * VECTOR_EPSILON ) {
+		*this = box;
+		return;
+	}
+
+	box.ToPoints( points );
+
+	Clear();
+	for ( int i = 0; i < 8; i++ ) {
+		idBox sweptPoint;
+		sweptPoint.FromPointTranslation( points[i], translation );
+		AddBox( sweptPoint );
+	}
 }
 
 /*
@@ -710,7 +751,66 @@ idBox::FromPointRotation
 ============
 */
 void idBox::FromPointRotation( const idVec3 &point, const idRotation &rotation ) {
-	// FIXME: implement
+	float sweepAngle, radius, halfSweep, sinHalf, cosHalf, tangentExtent;
+	idVec3 rotationAxis, axisOrigin, radialStart, radialMid, midPoint;
+
+	sweepAngle = idMath::Fabs( rotation.GetAngle() );
+	if ( sweepAngle <= VECTOR_EPSILON ) {
+		*this = BoxPointBox( point );
+		return;
+	}
+	if ( sweepAngle > 360.0f ) {
+		sweepAngle = 360.0f;
+	}
+
+	rotationAxis = rotation.GetVec();
+	if ( rotationAxis.Normalize() <= VECTOR_EPSILON ) {
+		*this = BoxPointBox( point );
+		return;
+	}
+
+	axisOrigin = rotation.GetOrigin() + rotationAxis * ( rotationAxis * ( point - rotation.GetOrigin() ) );
+	radialStart = point - axisOrigin;
+	radius = radialStart.Length();
+	if ( radius <= VECTOR_EPSILON ) {
+		*this = BoxPointBox( point );
+		return;
+	}
+
+	axis[0] = rotationAxis;
+	axis[1] = radialStart / radius;
+	axis[2].Cross( axis[0], axis[1] );
+	axis[2].Normalize();
+
+	if ( sweepAngle >= 360.0f - VECTOR_EPSILON ) {
+		center = axisOrigin;
+		extents.Set( 0.0f, radius, radius );
+		return;
+	}
+
+	midPoint = point * ( rotation * 0.5f );
+	radialMid = midPoint - axisOrigin;
+	radialMid -= axis[0] * ( radialMid * axis[0] );
+	if ( radialMid.Normalize() > VECTOR_EPSILON ) {
+		axis[1] = radialMid;
+		axis[2].Cross( axis[0], axis[1] );
+		axis[2].Normalize();
+	}
+
+	halfSweep = DEG2RAD( sweepAngle * 0.5f );
+	idMath::SinCos( halfSweep, sinHalf, cosHalf );
+
+	if ( sweepAngle >= 180.0f - VECTOR_EPSILON ) {
+		tangentExtent = radius;
+	}
+	else {
+		tangentExtent = radius * sinHalf;
+	}
+
+	center = axisOrigin + axis[1] * ( radius * ( 1.0f + cosHalf ) * 0.5f );
+	extents[0] = 0.0f;
+	extents[1] = radius * ( 1.0f - cosHalf ) * 0.5f;
+	extents[2] = tangentExtent;
 }
 
 /*
@@ -721,7 +821,26 @@ idBox::FromBoxRotation
 ============
 */
 void idBox::FromBoxRotation( const idBox &box, const idRotation &rotation ) {
-	// FIXME: implement
+	idVec3 points[8];
+
+	if ( box.IsCleared() ) {
+		Clear();
+		return;
+	}
+
+	if ( idMath::Fabs( rotation.GetAngle() ) <= VECTOR_EPSILON || rotation.GetVec().LengthSqr() <= VECTOR_EPSILON * VECTOR_EPSILON ) {
+		*this = box;
+		return;
+	}
+
+	box.ToPoints( points );
+
+	Clear();
+	for ( int i = 0; i < 8; i++ ) {
+		idBox sweptPoint;
+		sweptPoint.FromPointRotation( points[i], rotation );
+		AddBox( sweptPoint );
+	}
 }
 
 /*

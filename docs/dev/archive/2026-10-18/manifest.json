@@ -1,0 +1,667 @@
+{
+  "schema_version": 1,
+  "archived_on": "2026-10-18",
+  "source_revision": "49a2710cc17fff014a9c1d67f328f206f264f7bd",
+  "roadmap": "docs/dev/roadmap.md",
+  "documents": [
+    {
+      "original_path": "docs/dev/high-framerate-rendering-plan.md",
+      "archived_path": "docs/dev/archive/2026-10-18/high-framerate-rendering-plan.md",
+      "source_sha256": "59fc744c1d2b8d1b733e6758a507ea33819d392cf438ac6608a9baa4c581c4cb",
+      "roadmap_sections": [
+        "high-refresh-presentation-and-input"
+      ],
+      "archived_sha256": "764cc4d15c92a277dd86319ae4f5eb02910533cc2348d17c2c3888f9fcb79528"
+    },
+    {
+      "original_path": "docs/dev/idtech5-modernization-roadmap.md",
+      "archived_path": "docs/dev/archive/2026-10-18/idtech5-modernization-roadmap.md",
+      "source_sha256": "8d79a8fc123a78b6b8c8dcfaaf67d99933ba90147c3047490eb1674efe5c2c10",
+      "roadmap_sections": [
+        "engine-loading-safety-and-developer-tools",
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "8c7657e31132407db3c21a492bfa7bf9ff3a2ddde870dec6c7d0d9f7d010cff1"
+    },
+    {
+      "original_path": "docs/dev/macos-moltenvk-decision.md",
+      "archived_path": "docs/dev/archive/2026-10-18/macos-moltenvk-decision.md",
+      "source_sha256": "39d358606c7a19ea4f8d9e8066df5a408c98418d2fea6c5bfdfcc07e8737ccdb",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging",
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "c62feb84d9363ae0c9259d2a4652fa5a10f357c1420366f65141d78300367c9d"
+    },
+    {
+      "original_path": "docs/dev/plan/2026-06-30-macos-compatibility-support.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plan/2026-06-30-macos-compatibility-support.md",
+      "source_sha256": "012d3e5109e86e92fcfccc483f0e7070b48126fb675dc2ce41b511fb0e2c2b6d",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging"
+      ],
+      "archived_sha256": "e1f67b6b5d790f82ca363e3c9befcfe06edc1cc58bbe69b8014da2279380f84b"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-05-11-high-performance-renderer.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-05-11-high-performance-renderer.md",
+      "source_sha256": "688085abe806c8be4bfe045b32491336444fc968c1a224811151be5cdd24c5c8",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "ec57c59a9bd40aacf92dd5c6db2492f0bf33b088e94d33273279cabf0520cf3c"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-05-13-clustered-hybrid-gl-renderer.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-05-13-clustered-hybrid-gl-renderer.md",
+      "source_sha256": "be7cd963f2c4f6746ff8d91f97f286d97658f863c1f1d60bbba89b876693b2a6",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "452fe60e072996558fdd117dc30bdca31cf71d2af685a7dd7d372cb007116475"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-05-14-renderer-audit-remediation-plan.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-05-14-renderer-audit-remediation-plan.md",
+      "source_sha256": "e99b31098a4aa9fab06e51079c89beccf6bc9f5f5f214689c5b489486b688f27",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "b5de600d3d1a73179c9dbbfd4147068e30ba7e66c610974f7d164a7adc8750f4"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-05-14-renderer-recovery-performance-parity.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-05-14-renderer-recovery-performance-parity.md",
+      "source_sha256": "7dc06b9427afcb98a35d12f3419c69a227439270ff88764a94acf694a2888c0b",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "afe65ab800ba39f1fb035ea10db9de456466fe949c68b186f244f266e3ab65a3"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-05-18-renderer-round-4.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-05-18-renderer-round-4.md",
+      "source_sha256": "3f3672c3833bc678f68bacaf6b322b527a443f7fb2bef43738d85eb5dc385c1c",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "58705b85ca6229b25253e47bb17b4db433983e5ccad4fa59fc4348765cfbfed1"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-05-19-pbr-material-support.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-05-19-pbr-material-support.md",
+      "source_sha256": "be5f99e91ea16d6e8e57ad7e7df3e6834a71715eaa8095100ca51e9707e918d3",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "351edd4fd6b9c019f6d8754163730fa2281339b028d762ec00b2dd676d3c2515"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-04-settings-menu-refactor.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-04-settings-menu-refactor.md",
+      "source_sha256": "959edc33d884e2897830ae857095a4c4ca78633a561b57ea274ef651bce327cf",
+      "roadmap_sections": [
+        "new-user-interface"
+      ],
+      "archived_sha256": "a649c7be1fc4563a09e8db45c56a7c53364fc604b77b399be38805aa979ac9b7"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-09-linux-compatibility.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-09-linux-compatibility.md",
+      "source_sha256": "c0760d6614c8bfcea3b8f988264629aab2fa6b2ee9ec53014737fbaff7088591",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging"
+      ],
+      "archived_sha256": "445ea320e1381f3455656bdb7aee3227828f3574eca945cb8554ce78f388ed5b"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-10-renderer-perf-pass-3.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-10-renderer-perf-pass-3.md",
+      "source_sha256": "29d4be1702f9ce923b2adae54336afd3b3ba339dfa1b4155ac53b68309cba311",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "bef150a7940e27817d4eb909be1ee1af76b61dd9ec03b80bf6de447c0cb15f74"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-10-renderer-rework-2.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-10-renderer-rework-2.md",
+      "source_sha256": "4ef31430c2542984c8ffc75b2a6815b96e60312aaa4614b2fc59f2a17dd14f6f",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "08d8a3da882001608b5b21dc7e56c51b4ebffc4f121186efeedc5888afdb8407"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-11-renderer-perf-pass-4.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-11-renderer-perf-pass-4.md",
+      "source_sha256": "ae85109d3ce56a0d36cde988fc778b25d8d47b301c1c9ea7908f584c2d352050",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "d73c88febeb2e3e7f3c2473c260439b22ac26d9b5b1d480388d7e5b57f9d4388"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-12-shadowmapping-rework.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-12-shadowmapping-rework.md",
+      "source_sha256": "21201e0cf5280b2ae72e2bc84d21e66be92226bf21a1c7559560578e0b2df855",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "2793fd56a6101360b2e28d28b4a0f42aea23ed01bde47d05d1eb2a0844fc1409"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-13-post-aa.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-13-post-aa.md",
+      "source_sha256": "eafd2a1328a2afa287a29118d4b038845a67d81057c6ee85c532fe751d39c523",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "dc3a41eb963704fc80abe671571151bb0d459692e0e6d499a731751e4f6d850e"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-13-shadowmapping.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-13-shadowmapping.md",
+      "source_sha256": "e60e0f067458dd4d2dc639f34a59d96ed104e163db3427f7f1e076d24412b6af",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "1ab87ab8a77348982be60b22c782208314d19be2c159679e7f77ca47cf3af597"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-13-steam-deck.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-13-steam-deck.md",
+      "source_sha256": "91913684bde573f378ee7e5ada1942346f1312634caa2542812b3565a0a7e972",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging"
+      ],
+      "archived_sha256": "313e20daffd319fabff6dd76154f2f67b375d8ad852bda5f0c9dc32d485eb892"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-15-renderer-optimization.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-15-renderer-optimization.md",
+      "source_sha256": "64bf578f11d4b292f6d6ff665b35a8aef5ea102e16f1ab997fdb6a0cb6b5d412",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "7b7d3f7214efd563ce472946d7a75dfc2f2d314d40b055276ecd2c400edeee23"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-20-linux.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-20-linux.md",
+      "source_sha256": "e9169d4cdb532674f1e6d1baa99e34172a2dc7c997eb8ce485853691acc1bec4",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging"
+      ],
+      "archived_sha256": "ce4042bb302ea9e239a7640a6ef1fc02a8bf2518ab190f3af4910374872e75d0"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-20-macos.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-20-macos.md",
+      "source_sha256": "a08ac489ed55d554933214bde52438aeeacfb0992a62cef3028b7c1cf423c006",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging"
+      ],
+      "archived_sha256": "f14836c6168afb209b0eb11901bf51559243cec5f87f9d40608d7bf9b4ce2da7"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-24-openal.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-24-openal.md",
+      "source_sha256": "e51472902ae5a365a96dc956412cdacd69b19f6ef0a5ac16123a2f92cd2ed9b4",
+      "roadmap_sections": [
+        "audio-and-voice"
+      ],
+      "archived_sha256": "510d267cf071e08550483e42da866adcbb333d12a708481b7d90798550adff4d"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-06-30-apple-support-no-macos-access.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-06-30-apple-support-no-macos-access.md",
+      "source_sha256": "51e9357e6bd7753367dfc735e7f62267fa0db74f35d1cab03a467aee9a4486d1",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging"
+      ],
+      "archived_sha256": "4d44a836a2084e61358cd2adffa0e4f0f7ff7224705eb161af72845ec267fe82"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-09-shadowmapping-production.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-09-shadowmapping-production.md",
+      "source_sha256": "e895fbe1739c6a9301e32e0402a4836747fc4739fffb6ba0dccaffe8869518b6",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "6e24dea84b31a062c2f1bc116652a39cde9131d039d860e72bb1b185c8e944ad"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-10-opengl-renderer-robustness-optimization.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-10-opengl-renderer-robustness-optimization.md",
+      "source_sha256": "2b02d5c67284876d5046387d9904478c2b968b43f12317a25cb3ca270231a468",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "15e59fa162fd8ce0b35e2346558e6aff199e50b5c52b1032dba18e14950e46ad"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-11-macos-runtime-renderer-closure.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-11-macos-runtime-renderer-closure.md",
+      "source_sha256": "d549f1de3c986b2e97ac84e8042f5f63414f9eb8de939414a8345557e12d87be",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging",
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "4a2cf8567acb5cc5c02da82a0d6980dcd43364eb3f80946e1d681e3166c4cc0e"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-16-vulkan-renderer-phase-b.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer-phase-b.md",
+      "source_sha256": "6dc906a5491dffb717ce54aec61a81dfb423031d1185eccc05e1d249d1e3c58d",
+      "roadmap_sections": [
+        "modern-rendering-engine",
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "cf4d0dab1e3e2ed4147063737ddfc2ee852c4990cd56c33fd93ca6f57d499477"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-16-vulkan-renderer.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer.md",
+      "source_sha256": "2403f978c12cb2eda0d67de57fcc09254a5bc61d29fdf6dc13c30c718e656296",
+      "roadmap_sections": [
+        "modern-rendering-engine",
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "1196bce8846db29e9bf964d53b08377f9325852002e005a87c3094e48bc8fb28"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-17-vulkan-phase-c.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-17-vulkan-phase-c.md",
+      "source_sha256": "731964ec7bb27194411a5eb8079b169e68bcc6afdeaebbfb12a720d7e352afb0",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "15c6b5924cdad27890d005a33c66863fed0681d214b04555b662be60c1c081ef"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-18-vulkan-phase-d.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-18-vulkan-phase-d.md",
+      "source_sha256": "ae62a284463e1203f892639e04935aa3ecdc242424c92a06d7c44c64006559f8",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "c67f2136edb8eedcec9080d57e4cf9260a3375741a17370158d3622263788f3e"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-18-vulkan-phase-e.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-18-vulkan-phase-e.md",
+      "source_sha256": "182c9423e981c43c0c098c7ee215434249c6c1923cefb0964f9ff224f022f745",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "61a4f3c8076276d8689510eb3b52b2582dc18f06062eb633de483dc997264d29"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-19-vulkan-phase-f.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-19-vulkan-phase-f.md",
+      "source_sha256": "81b564831aab386e17c9acc56644b0e823fb54fec023d9cea9755c5343ccd710",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "959f7edb89979088769dc95b7552ec51a342f8e773813ec2a6a3e639dc4d9be5"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-20-vulkan-phase-g.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-20-vulkan-phase-g.md",
+      "source_sha256": "dc5096c981865197b4ace030f8d2ae5a41e975bed087db34197b89ba461f7e61",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "2da304cdc53ca2300f910c72fa8859035de7c48d1539e4bc127b23b95eb8884b"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-22-vulkan-phase-h.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-22-vulkan-phase-h.md",
+      "source_sha256": "c9d073acd8a02ac9327981f3f785ea02a340a17557b1a59f01c1c78c66571fa8",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "b39280807d03046e548d54b044bb1731407371fcc1233bda4c4f48e8dd345301"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-25-macos-moltenvk.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-25-macos-moltenvk.md",
+      "source_sha256": "b73686a060f776a0094bde60bb7681cdba2d8ceaa76db0dbc5907a513d1c47df",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging",
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "61058a0a1a2c7cb9e7e03fb92eb3ef36fc776378a442afe04c60d000513ade61"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-25-macos-rendering-closure.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-25-macos-rendering-closure.md",
+      "source_sha256": "86125e2785768b83fe248505051670cd0ab612f2b0ecf3e3f564d5008d7baf51",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging"
+      ],
+      "archived_sha256": "fa721d4dfb51aa7847f3261dbb5b6dad5a8dbdfee42be3f1bc62d798f71cd728"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-28-competitive-multiplayer.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-28-competitive-multiplayer.md",
+      "source_sha256": "b4a6a7bc6bc4f6dcd9e0fccbd8bc1440207b74a4a1e42e60e8022e4ab4fb411e",
+      "roadmap_sections": [
+        "multiplayer-bots-arena-and-demos"
+      ],
+      "archived_sha256": "4895554ac2ab9bd41f94567b76999b90cb0a979c02ef518d07edeb762c824177"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-29-bot-characters.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-29-bot-characters.md",
+      "source_sha256": "0e20e9dfc797d4aa88a6d3d988708b77aa4867d222bff9dba5e8646d339d29eb",
+      "roadmap_sections": [
+        "multiplayer-bots-arena-and-demos"
+      ],
+      "archived_sha256": "402e603da066763b2a40808cb5db1a2a8069f0304d6e8f0c993e838d630e3ca9"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-07-30-mp-flat-pickup-shading.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-07-30-mp-flat-pickup-shading.md",
+      "source_sha256": "6b85a7fe90baafa6e250428a3e944d5967f7706f9e92bde104d9f007c9f69d10",
+      "roadmap_sections": [
+        "multiplayer-bots-arena-and-demos"
+      ],
+      "archived_sha256": "3bd3673df1a39358de6056731c6e7e71736c374854babd657cc5a0b4f80095ed"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-08-03-competitive-match-framework.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-08-03-competitive-match-framework.md",
+      "source_sha256": "21a210db9e68bfde7ce0221fccc2486d81b3e0c77e305e9f3b4683cf9d7a52ff",
+      "roadmap_sections": [
+        "multiplayer-bots-arena-and-demos"
+      ],
+      "archived_sha256": "2dd5f88e4365d49001fe50d3d05df7b84faf8c622391f632267dee22863e9ddd"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-08-07-liquid-support.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-08-07-liquid-support.md",
+      "source_sha256": "5412c38a04ecc933a5174a745bd2d2e1c187942e3ad2436ec14ff95de525ecb4",
+      "roadmap_sections": [
+        "multiplayer-bots-arena-and-demos"
+      ],
+      "archived_sha256": "2ca80adeb758ba8d9e0e07d6f0a2f22ba20df091f6ad2aafa197331eb40d8e3d"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-08-16-modern-visible-lighting-ownership.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-08-16-modern-visible-lighting-ownership.md",
+      "source_sha256": "7993bfb4e77451650def53e9b30107b7975c9c4c54af423ab1d82726ba43b2aa",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "2b95c8bffc3625697ab64a437fdefe481072abcf1354b2b1edc3465d04d5cd20"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-09-02-vulkan-shadow-gl-parity.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-09-02-vulkan-shadow-gl-parity.md",
+      "source_sha256": "021ecca170e10af072be47704d21efdfa73c1f458f1285dcab340bde6e5c4a7d",
+      "roadmap_sections": [
+        "modern-rendering-engine",
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "db43f243ea287eae53efa5841a6324ff9871937b80826730c1d2a34d420103c4"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-09-20-pbr-rendering-audit.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-09-20-pbr-rendering-audit.md",
+      "source_sha256": "98508c482cdafd3e6b2b78f0b893e3a2c224a847d27301b06c6e52a5958f5d02",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "46d5d40750439fde36d2f892d3057f4b8d32422377442216dcd200654c43ac2e"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-09-20-vulkan-gap-closure.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-09-20-vulkan-gap-closure.md",
+      "source_sha256": "0fcd52987c58a1b4cb585d0b8964c59e7aef4788b58d6bab0667bce01909a53b",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "b8292d82b47b578eb60ee5284766c7a8a67a1e1e50086904969a96ae81f0ae47"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-10-02-openxr-vr.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-10-02-openxr-vr.md",
+      "source_sha256": "a23f6bd5d1d8f367849299b6f5adb83d0427b6ce4ee6348aa280755d93cc334a",
+      "roadmap_sections": [
+        "android-and-mobile-rendering",
+        "virtual-reality"
+      ],
+      "archived_sha256": "1a58a0d63a3c9abce8d0dd2c295bdd692c39858ef725e8c9acbc84363aa87d81"
+    },
+    {
+      "original_path": "docs/dev/plans/2026-10-04-pbr-production-readiness.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/2026-10-04-pbr-production-readiness.md",
+      "source_sha256": "4af5c099aa2f916ad9d243e8b1d3cbf854afdca965eebf13a53bebd1ddb40d11",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "4c6e032f6ff8ca5886ed9b1571c2b3371485a1413a8c9a6bc90bfdf00e29b6be"
+    },
+    {
+      "original_path": "docs/dev/plans/game-source-consolidation.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/game-source-consolidation.md",
+      "source_sha256": "b16bb7f3ba6c8ff084398e4098901d45221b342afed6354676d8985df8e9051f",
+      "roadmap_sections": [
+        "engine-loading-safety-and-developer-tools",
+        "retail-quake-4-compatibility-and-campaigns"
+      ],
+      "archived_sha256": "17105ac22a248f15f36a4c86e196e045ae9a3d6e4f0bc9e9ce9b283075d1c054"
+    },
+    {
+      "original_path": "docs/dev/plans/idtech5-ui.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/idtech5-ui.md",
+      "source_sha256": "aced6eee0ec71cec75cbd4b6b1c81ab3a242dd9ea500f9f76701354405e5235c",
+      "roadmap_sections": [
+        "new-user-interface"
+      ],
+      "archived_sha256": "ebaec82239d525b1b0a47260c1573156953c108329408fefd1d816dfd5543df7"
+    },
+    {
+      "original_path": "docs/dev/plans/phase-f-recon/interaction-pass.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/phase-f-recon/interaction-pass.md",
+      "source_sha256": "baff632d35be5ad6fc142cf9ec4930fde855aca57392254ae16d9c4ca6809bd3",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "ae660e7a47a5e88bc571f0a2b3d3fe9c8f6098f6ed459eedb524a66873d59ffe"
+    },
+    {
+      "original_path": "docs/dev/plans/phase-f-recon/light-frontend.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/phase-f-recon/light-frontend.md",
+      "source_sha256": "088790787ce97f20b4d21838b9366ab2d79057cc091b58dd45143f94351da76b",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "ef8fbe268d4ed8283861cb8f02aba17fcc036448213fc5db1429b9d019cd312d"
+    },
+    {
+      "original_path": "docs/dev/plans/phase-f-recon/shadow-infra.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/phase-f-recon/shadow-infra.md",
+      "source_sha256": "a24490ac61a03d95e51e37080099056aab8da7dd4e3c8ffba74e9e27b26a99a4",
+      "roadmap_sections": [
+        "modern-rendering-engine",
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "60a97e9514897668daa7f8f0d09948347af871e42f04949c31792d5bc0fcd974"
+    },
+    {
+      "original_path": "docs/dev/plans/phase-g-recon/fog-blend.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/phase-g-recon/fog-blend.md",
+      "source_sha256": "d23b19c025f220273ba37e7b04367bd25418eea0140ced55f1fcffdf8981ed07",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "a822507ebc0b6940c3f20b365ac258b9967a7c31a70c350ea264403e7dd0a716"
+    },
+    {
+      "original_path": "docs/dev/plans/phase-g-recon/lightgrid-misc.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/phase-g-recon/lightgrid-misc.md",
+      "source_sha256": "d6c1eda3ac6b7c7f88a5b0c2dca027c12a4af27c60e1cefe270b6dbc573d7cec",
+      "roadmap_sections": [
+        "modern-rendering-engine",
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "e2924eaf7bbfbc8417238642df75633ae4f109a9a3d9d43456456330621ab99a"
+    },
+    {
+      "original_path": "docs/dev/plans/phase-g-recon/stencil-pass.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/phase-g-recon/stencil-pass.md",
+      "source_sha256": "aa41cbf7be2bd4d7b891a707a4b8248ec350ffce6186b1087ec8333ebfe3011f",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "8e16ed64b12752c5fac37345f51326af2742e375bf11d93086c3059811664f6a"
+    },
+    {
+      "original_path": "docs/dev/plans/phase-h-recon/captures-postsurf.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/phase-h-recon/captures-postsurf.md",
+      "source_sha256": "ffc26bda9be15a6f88e2e51ebc66069d8867cce17a489ec49dfa970834c3ac62",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "f6ef1394269c8e40a9d726913e670e28a4ff1f16299c4d2d5f609427b8fcec92"
+    },
+    {
+      "original_path": "docs/dev/plans/phase-h-recon/msaa-boundary.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/phase-h-recon/msaa-boundary.md",
+      "source_sha256": "bc8dd17d0b6d5c47151ffd64b206fd650791dbbce9a87f8c1210943a5b926919",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "cf68da68f40f178d05b94f99f0cd856e64041a3de5a627ba504cfff038a5ef0f"
+    },
+    {
+      "original_path": "docs/dev/plans/phase-h-recon/post-chain.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/phase-h-recon/post-chain.md",
+      "source_sha256": "eb946d6d9b7b7115a7dd5a5e4a1205dedea8552b7af79bfd863eabea7b5207e5",
+      "roadmap_sections": [
+        "vulkan-rendering"
+      ],
+      "archived_sha256": "77bf1570bd6ede7c75e6e6e6f5395a14d9eeaf4b4012eaa6bbe5ca89c38904bc"
+    },
+    {
+      "original_path": "docs/dev/plans/q4x-awakening.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/q4x-awakening.md",
+      "source_sha256": "aaa1591ae4932da567136822e7592de2a5b517555ee7f98f0ba5b40b8492a9e1",
+      "roadmap_sections": [
+        "retail-quake-4-compatibility-and-campaigns"
+      ],
+      "archived_sha256": "15f62bbdbc8b94484ad2504e5fe2536817d969663c534ad4e7b047eec18a7d78"
+    },
+    {
+      "original_path": "docs/dev/plans/quakelive-multiplayer-port.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/quakelive-multiplayer-port.md",
+      "source_sha256": "df61683782ec2ed7e5abedacd31c7f879a87c152904ebf2b314c4aec0af77af6",
+      "roadmap_sections": [
+        "multiplayer-bots-arena-and-demos"
+      ],
+      "archived_sha256": "8c67791134c8ebb0b6074570460ffdcb5c7cd09075d12b697713fd7077c259af"
+    },
+    {
+      "original_path": "docs/dev/plans/ui-product-completion.md",
+      "archived_path": "docs/dev/archive/2026-10-18/plans/ui-product-completion.md",
+      "source_sha256": "c530470ffc3cba6928133463d66558b0bb965ad003f6193dd45ca1b73da4ad63",
+      "roadmap_sections": [
+        "new-user-interface"
+      ],
+      "archived_sha256": "6afad60e3bf90221f63a25484bfd43d4692d50141d9d73891ce1761d3a4f9df0"
+    },
+    {
+      "original_path": "docs/dev/proposals/bloom-and-hdr-postprocessing-27-3-26.md",
+      "archived_path": "docs/dev/archive/2026-10-18/proposals/bloom-and-hdr-postprocessing-27-3-26.md",
+      "source_sha256": "2df435b25eeb4a365aa75fd53d2ae59f0e933b6573ee627701969205ba6f6b24",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "af7289beb8b092b1d6c7362baeb1e5156b8384e7c1aff806bd27b86245448b61"
+    },
+    {
+      "original_path": "docs/dev/proposals/lightgrids.md",
+      "archived_path": "docs/dev/archive/2026-10-18/proposals/lightgrids.md",
+      "source_sha256": "0b1d881bee369a6c0164fe1a3e0e3f24d22298d97e59c72a2d4c95f90b0f0725",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "470015aad0fd41045c19d365fe2aeaf0c6f9378b012878cb3b7c1de1b8c55a1a"
+    },
+    {
+      "original_path": "docs/dev/proposals/rbdoom3-bfg-parity-modernization-plan.md",
+      "archived_path": "docs/dev/archive/2026-10-18/proposals/rbdoom3-bfg-parity-modernization-plan.md",
+      "source_sha256": "411416a394b3f924e263cc1d0038289a0ee033740e6dae19d3cd53048727b22d",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "475e141ba03a661b23acc29f04395ee3e5b3644df4009cc7d5539af2edfe7c6b"
+    },
+    {
+      "original_path": "docs/dev/proposals/shader-robustness.md",
+      "archived_path": "docs/dev/archive/2026-10-18/proposals/shader-robustness.md",
+      "source_sha256": "04b4a158839497594fae265f4710dccf15b41f49e796ff2a6ba3810e4335315d",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "4235a3497ab0bbf289dc30b2649672f9431259df1c663b24537e08260e66d46b"
+    },
+    {
+      "original_path": "docs/dev/proposals/shadow-mapping-assessment-30-04-2026.md",
+      "archived_path": "docs/dev/archive/2026-10-18/proposals/shadow-mapping-assessment-30-04-2026.md",
+      "source_sha256": "b68eaf86781f4fba3f466207c72b5523a8965ec611f61566329c3d2eed6a79a6",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "d7623ccffc90e32b56b5bb45d6e3f3e933e562d593ace418db8bc6afecdd8148"
+    },
+    {
+      "original_path": "docs/dev/proposals/shadowmapping-deep-technical-review-27-3-26.md",
+      "archived_path": "docs/dev/archive/2026-10-18/proposals/shadowmapping-deep-technical-review-27-3-26.md",
+      "source_sha256": "f59043956b9864c3818339385e38a1b931b085a4c8d0e93b166b472b2f092af8",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "7a46e9af1229685bda8bc0b87516893c1c334b071fdc5763d85c149a661d3c53"
+    },
+    {
+      "original_path": "docs/dev/proposals/shadowmapping-new-improvements.md",
+      "archived_path": "docs/dev/archive/2026-10-18/proposals/shadowmapping-new-improvements.md",
+      "source_sha256": "97a74d079bda7cf9026c2d9ed2ec8080d4e2e48c6355397c49ad6a2b607f7f5b",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "f7bac3a608d8c5392936b152f31cc3a00dd024fd058f32b5eadb0a92380c2136"
+    },
+    {
+      "original_path": "docs/dev/proposals/transparency-shadowmapping.md",
+      "archived_path": "docs/dev/archive/2026-10-18/proposals/transparency-shadowmapping.md",
+      "source_sha256": "eb02616c0162dfd41fbae4c531187cdf7b4a0edba1a87fb25101784dce060ab9",
+      "roadmap_sections": [
+        "modern-rendering-engine"
+      ],
+      "archived_sha256": "60756a13dc006036dab098a0f6701544c263b404680a17e02c2034d8cd8007e7"
+    },
+    {
+      "original_path": "docs/dev/quake4-bse-research-and-implementation-plan.md",
+      "archived_path": "docs/dev/archive/2026-10-18/quake4-bse-research-and-implementation-plan.md",
+      "source_sha256": "a17f89658102ac29863d857c0e0ea9c2809d873f4b52afdb451bdc21a64e5ab2",
+      "roadmap_sections": [
+        "retail-quake-4-compatibility-and-campaigns"
+      ],
+      "archived_sha256": "066d6603e1ca11a95abba9a6eaf67e43b18df2b31bdd3d7100b9aa35891e3e0b"
+    },
+    {
+      "original_path": "docs/dev/sdl3-linux-macos-migration.md",
+      "archived_path": "docs/dev/archive/2026-10-18/sdl3-linux-macos-migration.md",
+      "source_sha256": "0ee75ad34fc31a5b17d79478052a85fd2471c284c5862e4e3568fd563d1cfeef",
+      "roadmap_sections": [
+        "desktop-platforms-and-packaging"
+      ],
+      "archived_sha256": "a8aaa6ab827c62695ab827e043e3cb516cb80873b2697b0920ccd43b93dde3f1"
+    }
+  ]
+}

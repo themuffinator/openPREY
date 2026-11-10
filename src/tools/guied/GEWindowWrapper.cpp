@@ -67,11 +67,11 @@ rvGEWindowWrapper::rvGEWindowWrapper( idWindow *window,EWindowType type ) {
 		mType = WT_NORMAL;
 	}
 
-	// Attach the wrapper to the window by adding a defined variable
-	// with the wrappers pointer stuffed into an integer
-	idWinInt *var = new idWinInt();
-	int x = (int)this;
-	*var = x;
+	// Attach the wrapper to the window without narrowing its address.  This is
+	// editor-only metadata; a string keeps the existing defined-variable
+	// association while preserving the full pointer width on 64-bit hosts.
+	idWinStr *var = new idWinStr();
+	var->Set( va( "%p", static_cast<void *>( this ) ) );
 	var->SetEval(false);
 	var->SetName("guied_wrapper");
 	mWindow->AddDefinedVar(var);
@@ -87,9 +87,12 @@ Static method that returns the window wrapper for the given window class
 ================
 */
 rvGEWindowWrapper * rvGEWindowWrapper::GetWrapper( idWindow *window ) {
-	idWinInt *var;
-	var = dynamic_cast< idWinInt*>(window->GetWinVarByName("guied_wrapper"));	
-	return var ? ((rvGEWindowWrapper *) (int) (*var)) : NULL;
+	idWinStr *var = dynamic_cast< idWinStr * >( window->GetWinVarByName( "guied_wrapper" ) );
+	void *wrapper = NULL;
+	if ( var == NULL || sscanf( var->c_str(), "%p", &wrapper ) != 1 ) {
+		return NULL;
+	}
+	return static_cast< rvGEWindowWrapper * >( wrapper );
 }
 
 /*

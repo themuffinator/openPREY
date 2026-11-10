@@ -1,241 +1,206 @@
-# a collection of utility functions to manipulate pak files
+#!/usr/bin/env python3
+"""Utility helpers for legacy Linux PK4 maintenance scripts."""
 
-import os, zipfile, md5, pdb
+from __future__ import annotations
 
-# sorts in reverse alphabetical order like doom does for searching
-def list_paks( path ):
-    files = os.listdir( path )
-    for i in files:
-        if ( i[-4:] != '.pk4' ):
-            files.remove( i )
-	files.sort()
-	files.reverse()
+import hashlib
+import os
+import zipfile
+from pathlib import PurePosixPath
+
+
+def list_paks(path):
+    """Return PK4 file names in reverse lexical search order."""
+    files = [name for name in os.listdir(path) if name.lower().endswith(".pk4")]
+    files.sort()
+    files.reverse()
     return files
 
-def list_files_in_pak( pak ):
-    files = []
-    zippy = zipfile.ZipFile( pak )
-    files += zippy.namelist()
+
+def list_files_in_pak(pak):
+    with zipfile.ZipFile(pak) as archive:
+        files = archive.namelist()
     files.sort()
     return files
 
-# no sorting, blunt list of everything
-def list_files_in_paks( path ):
+
+def list_files_in_paks(path):
     files = []
-    zippies = list_paks( path )
-    for fname in zippies:
-        print fname
-        zippy = zipfile.ZipFile( os.path.join( path, fname ) )
-        files += zippy.namelist()
-    # sort and remove dupes
-    dico = {}
-    for f in files:
-        dico[ f ] = 1
-    files = dico.keys()
-    files.sort()
-    return files
+    for fname in list_paks(path):
+        print(fname)
+        with zipfile.ZipFile(os.path.join(path, fname)) as archive:
+            files += archive.namelist()
+    return sorted(set(files))
 
-# build a dictionary of names -> ( pak name, md5 ) from a path of pk4s
-def md5_in_paks( path ):
-	ret = {}
-	zippies = list_paks( path )
-	for fname in zippies:
-		print fname
-		zippy = zipfile.ZipFile( os.path.join( path, fname ) )
-		for file in zippy.namelist():
-			if ( ret.has_key( file ) ):
-				continue
-			data = zippy.read( file )
-			m = md5.new()
-			m.update( data )
-			ret[ file ] = ( fname, m.hexdigest() )
-	return ret
 
-# find which files need to be updated in a set of paks from an expanded list
-# returns ( updated, not_found, {} )
-# ignores directories
-# by default, no case match is done
-# if case match is set, return ( updated, not_found, { zip case -> FS case } )
-#   updated will contain the zip case name
-def list_updated_files( pak_path, base_path, case_match = False ):
-	not_found = []
-	updated = []
-	case_table = {}
-	pak_md5 = md5_in_paks( pak_path )
-	for file in pak_md5.keys():
-		if ( file[-1] == '/' ):
-			continue
-		path = os.path.join( base_path, file )
-		if ( case_match ):
-			ret = ifind( base_path, file )
-			if ( not ret[ 0 ] ):
-				not_found.append( file )
-				continue
-			else:
-				case_table[ path ] = ret[ 1 ]
-				path = os.path.join( base_path, ret[ 1 ] )
-		try:
-			f = open( path )
-			data = f.read()
-			f.close()
-		except:
-			if ( case_match ):
-				raise "internal error: ifind success but later read failed"
-			not_found.append( file )
-		else:
-			m = md5.new()
-			m.update( data )
-			if ( m.hexdigest() != pak_md5[ file ][ 1 ] ):
-				print file
-				updated.append( file )
-	return ( updated, not_found, case_table )
+def md5_in_paks(path):
+    ret = {}
+    for fname in list_paks(path):
+        print(fname)
+        with zipfile.ZipFile(os.path.join(path, fname)) as archive:
+            for filename in archive.namelist():
+                if filename in ret:
+                    continue
+                digest = hashlib.md5()
+                digest.update(archive.read(filename))
+                ret[filename] = (fname, digest.hexdigest())
+    return ret
 
-# find which files are missing in the expanded path, and extract the directories
-# returns ( files, dirs, missing )
-def status_files_for_path( path, infiles ):
+
+def list_updated_files(pak_path, base_path, case_match=False):
+    not_found = []
+    updated = []
+    case_table = {}
+    pak_md5 = md5_in_paks(pak_path)
+    for filename in pak_md5.keys():
+        if filename.endswith("/"):
+            continue
+        path = os.path.join(base_path, filename)
+        if case_match:
+            found, cased_path = ifind(base_path, filename)
+            if not found:
+                not_found.append(filename)
+                continue
+            case_table[filename] = cased_path
+            path = os.path.join(base_path, cased_path)
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError as exc:
+            if case_match:
+                raise RuntimeError("internal error: ifind success but later read failed") from exc
+            not_found.append(filename)
+        else:
+            digest = hashlib.md5()
+            digest.update(data)
+            if digest.hexdigest() != pak_md5[filename][1]:
+                print(filename)
+                updated.append(filename)
+    return (updated, not_found, case_table)
+
+
+def status_files_for_path(path, infiles):
     files = []
     dirs = []
     missing = []
-    for i in infiles:
-        test_path = os.path.join( path, i )
-        if ( os.path.isfile( test_path ) ):
-            files.append( i )
-        elif ( os.path.isdir( test_path ) ):
-            dirs.append( i )
+    for name in infiles:
+        test_path = os.path.join(path, name)
+        if os.path.isfile(test_path):
+            files.append(name)
+        elif os.path.isdir(test_path):
+            dirs.append(name)
         else:
-            missing.append( i )
-    return ( files, dirs, missing )
+            missing.append(name)
+    return (files, dirs, missing)
 
-# build a pak from a base path and a list of files
-def build_pak( pak, path, files ):
-    zippy = zipfile.ZipFile( pak, 'w', zipfile.ZIP_DEFLATED )
-    for i in files:
-        source_path = os.path.join( path, i )
-        print source_path
-        zippy.write( source_path, i )
-    zippy.close()
 
-# process the list of files after a run to update media
-# dds/ -> verify all the .dds are present in zip ( case insensitive )
-# .wav -> verify that all .wav have a .ogg version in zip ( case insensitive )
-# .tga not in dds/ -> try to find a .dds for them
-# work from a list of files, and a path to the base pak files
-# files: text files with files line by line
-# pak_path: the path to the pak files to compare against
-# returns: ( [ missing ], [ bad ] )
-# bad are files the function didn't know what to do about ( bug )
-# missing are lowercased of all the files that where not matched in build
-# the dds/ ones are all forced to .dds extension
-# missing .wav are returned in the missing list both as .wav and .ogg
-# ( that's handy when you need to fetch next )
-def check_files_against_build( files, pak_path ):
-	pak_list = list_files_in_paks( pak_path )
-	# make it lowercase
-	tmp = []
-	for i in pak_list:
-		tmp.append( i.lower() )
-	pak_list = tmp
-	# read the files and make them lowercase
-	f = open( files )
-	check_files = f.readlines()
-	f.close()
-	tmp = []
-	for i in check_files:
-		s = i.lower()
-		s = s.replace( '\n', '' )
-		s = s.replace( '\r', '' )
-		tmp.append( s )
-	check_files = tmp
-	# start processing
-	bad = []
-	missing = []
-	for i in check_files:
-		if ( i[ :4 ] == 'dds/' ):
-			if ( i[ len(i)-4: ] == '.tga' ):
-				i = i[ :-4 ] + '.dds'
-			elif ( i[ len(i)-4: ] != '.dds' ):
-				print 'File not understood: ' + i
-				bad.append( i )
-				continue
-			try:
-				pak_list.index( i )
-			except:
-				print 'Not found: ' + i
-				missing.append( i )
-		elif ( i[ len(i)-4: ] == '.wav' ):
-			i = i[ :-4 ] + '.ogg'
-			try:
-				pak_list.index( i )
-			except:
-				print 'Not found: ' + i
-				missing.append( i )
-				missing.append( i[ :-4 ] + '.wav' )
-		elif ( i[ len(i)-4: ] == '.tga' ):
-			# tga, not from dds/
-			try:
-				pak_list.index( i )
-			except:
-				print 'Not found: ' + i
-				missing.append( i )
-				i = 'dds/' + i[ :-4 ] + '.dds'
-				print 'Add dds  : ' + i
-				missing.append( i )
-		else:
-			try:
-				pak_list.index( i )
-			except:
-				print 'Not found: ' + i
-				missing.append( i )
-	return ( missing, bad )
+def validate_archive_name(name):
+    normalized = name.replace("\\", "/")
+    parts = PurePosixPath(normalized).parts
+    if (
+        not normalized
+        or normalized != name
+        or normalized.startswith("/")
+        or "" in normalized.split("/")
+        or any(part in ("", ".", "..") for part in parts)
+        or ":" in (parts[0] if parts else "")
+    ):
+        raise ValueError(f"unsafe pak archive path: {name!r}")
+    return normalized
 
-# match a path to a file in a case insensitive way
-# return ( True/False, 'walked up to' )
-def ifind( base, path ):
-	refpath = path
-	path = os.path.normpath( path )
-	path = os.path.normcase( path )
-	# early out just in case
-	if ( os.path.exists( path ) ):
-		return ( True, path )
-	head = path
-	components = []
-	while ( len( head ) ):
-		( head, chunk ) = os.path.split( head )
-		components.append( chunk )
-		#print 'head: %s - components: %s' % ( head, repr( components ) )
-	components.reverse()
-	level = 0
-	for root, dirs, files in os.walk( base, topdown = True ):
-		if ( level < len( components ) - 1 ):
-			#print 'filter dirs: %s' % repr( dirs )
-			dirs_del = []
-			for i in dirs:
-				if ( not i.lower() == components[ level ].lower() ):
-					dirs_del.append( i )
-			for i in dirs_del:
-				dirs.remove( i )
-			level += 1
-			# we assume there is never going to be 2 dirs with only case difference
-			if ( len( dirs ) != 1 ):
-				#print '%s: ifind failed dirs matching at %s - dirs: %s' % ( refpath, root, repr( dirs ) )
-				return ( False, root[ len( base ) + 1: ] )
-		else:
-			# must find the file here
-			for i in files:
-				if ( i.lower() == components[-1].lower() ):
-					return ( True, os.path.join( root, i )[ len( base ) + 1: ] )
-			return ( False, root[ len( base ) + 1: ] )
 
-# do case insensitive FS search on files list
-# return [ cased files, not found (unmodified ) ]
-def ifind_list( base, files ):
-	cased = []
-	notfound = []
-	for i in files:
-		ret = ifind( base, i )
-		if ( ret[ 0 ] ):
-			cased.append( ret[ 1 ] )
-		else:
-			notfound.append( i )
-	return [ cased, notfound ]
+def _safe_source_path(base_path, relative_name):
+    arcname = validate_archive_name(relative_name)
+    source_path = os.path.abspath(os.path.join(base_path, arcname))
+    base_real = os.path.abspath(base_path)
+    if os.path.commonpath([base_real, source_path]) != base_real:
+        raise ValueError(f"pak source escapes base path: {relative_name!r}")
+    if os.path.islink(source_path):
+        raise ValueError(f"refusing to pack symlinked source file: {relative_name!r}")
+    if not os.path.isfile(source_path):
+        raise FileNotFoundError(f"pak source file not found: {relative_name!r}")
+    return source_path, arcname
 
+
+def build_pak(pak, path, files):
+    with zipfile.ZipFile(pak, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in files:
+            source_path, arcname = _safe_source_path(path, name)
+            print(source_path)
+            archive.write(source_path, arcname)
+
+
+def check_files_against_build(files, pak_path):
+    pak_list = [name.lower() for name in list_files_in_paks(pak_path)]
+    with open(files, encoding="utf-8") as handle:
+        check_files = [line.lower().strip() for line in handle]
+
+    bad = []
+    missing = []
+    for name in check_files:
+        if name.startswith("dds/"):
+            if name.endswith(".tga"):
+                name = name[:-4] + ".dds"
+            elif not name.endswith(".dds"):
+                print("File not understood: " + name)
+                bad.append(name)
+                continue
+            if name not in pak_list:
+                print("Not found: " + name)
+                missing.append(name)
+        elif name.endswith(".wav"):
+            ogg_name = name[:-4] + ".ogg"
+            if ogg_name not in pak_list:
+                print("Not found: " + ogg_name)
+                missing.append(ogg_name)
+                missing.append(name)
+        elif name.endswith(".tga"):
+            if name not in pak_list:
+                print("Not found: " + name)
+                missing.append(name)
+                dds_name = "dds/" + name[:-4] + ".dds"
+                print("Add dds  : " + dds_name)
+                missing.append(dds_name)
+        elif name not in pak_list:
+            print("Not found: " + name)
+            missing.append(name)
+    return (missing, bad)
+
+
+def ifind(base, path):
+    refpath = path
+    normalized = os.path.normpath(path)
+    if os.path.isabs(normalized) or normalized == ".." or normalized.startswith(".." + os.sep):
+        return (False, "")
+
+    components = [part for part in normalized.split(os.sep) if part]
+    root = base
+    walked = []
+    for index, component in enumerate(components):
+        try:
+            entries = os.listdir(root)
+        except OSError:
+            return (False, os.path.join(*walked) if walked else "")
+        matches = [entry for entry in entries if entry.lower() == component.lower()]
+        if not matches:
+            return (False, os.path.join(*walked) if walked else "")
+        match = matches[0]
+        walked.append(match)
+        root = os.path.join(root, match)
+        if index < len(components) - 1 and not os.path.isdir(root):
+            return (False, os.path.join(*walked))
+
+    result = os.path.join(*walked) if walked else refpath
+    return (os.path.isfile(os.path.join(base, result)) or os.path.isdir(os.path.join(base, result)), result)
+
+
+def ifind_list(base, files):
+    cased = []
+    notfound = []
+    for name in files:
+        found, cased_name = ifind(base, name)
+        if found:
+            cased.append(cased_name)
+        else:
+            notfound.append(name)
+    return [cased, notfound]

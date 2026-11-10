@@ -9,6 +9,9 @@ idCmdArgs::operator=
 */
 void idCmdArgs::operator=( const idCmdArgs &args ) {
 	int i;
+	if ( this == &args ) {
+		return;
+	}
 
 	argc = args.argc;
 	memcpy( tokenized, args.tokenized, MAX_COMMAND_STRING );
@@ -22,48 +25,52 @@ void idCmdArgs::operator=( const idCmdArgs &args ) {
 idCmdArgs::Args
 ============
 */
+static idStr cmd_args;
+
 const char *idCmdArgs::Args(  int start, int end, bool escapeArgs ) const {
-	static char cmd_args[MAX_COMMAND_STRING];
 	int		i;
 
+	if ( start < 0 ) {
+		start = 0;
+	}
 	if ( end < 0 ) {
 		end = argc - 1;
 	} else if ( end >= argc ) {
 		end = argc - 1;
 	}
-	cmd_args[0] = '\0';
+	// The previous result may have contained a private CVar value. Scrub the
+	// complete allocation before reusing this process-wide scratch string.
+	cmd_args.SecureClear();
 	if ( escapeArgs ) {
-		strcat( cmd_args, "\"" );
+		cmd_args += "\"";
 	}
 	for ( i = start; i <= end; i++ ) {
 		if ( i > start ) {
 			if ( escapeArgs ) {
-				strcat( cmd_args, "\" \"" );
+				cmd_args += "\" \"";
 			} else {
-				strcat( cmd_args, " " );
+				cmd_args += " ";
 			}
 		}
 		if ( escapeArgs && strchr( argv[i], '\\' ) ) {
 			char *p = argv[i];
 			while ( *p != '\0' ) {
 				if ( *p == '\\' ) {
-					strcat( cmd_args, "\\\\" );
+					cmd_args += "\\\\";
 				} else {
-					int l = strlen( cmd_args );
-					cmd_args[ l ] = *p;
-					cmd_args[ l+1 ] = '\0';
+					cmd_args += *p;
 				}
 				p++;
 			}
 		} else {
-			strcat( cmd_args, argv[i] );
+			cmd_args += argv[i];
 		}
 	}
 	if ( escapeArgs ) {
-		strcat( cmd_args, "\"" );
+		cmd_args += "\"";
 	}
 
-	return cmd_args;
+	return cmd_args.c_str();
 }
 
 /*
@@ -88,7 +95,7 @@ void idCmdArgs::TokenizeString( const char *text, bool keepAsStrings ) {
 		return;
 	}
 
-	lex.LoadMemory( text, strlen( text ), "idCmdSystemLocal::TokenizeString" );
+	lex.LoadMemory( text, idLib::SizeToInt( strlen( text ), "idCmdArgs::TokenizeString" ), "idCmdSystemLocal::TokenizeString" );
 	lex.SetFlags( LEXFL_NOERRORS
 				| LEXFL_NOWARNINGS
 				| LEXFL_NOSTRINGCONCAT
@@ -120,7 +127,12 @@ void idCmdArgs::TokenizeString( const char *text, bool keepAsStrings ) {
 				return;
 			}
 			if ( idLib::cvarSystem ) {
-				token = idLib::cvarSystem->GetCVarString( token.c_str() );
+				idCVar *expandedCVar = idLib::cvarSystem->Find( token.c_str() );
+				if ( expandedCVar != NULL && ( expandedCVar->GetFlags() & CVAR_PRIVATE ) ) {
+					token = "<redacted>";
+				} else {
+					token = idLib::cvarSystem->GetCVarString( token.c_str() );
+				}
 			} else {
 				token = "<unknown>";
 			}
@@ -173,9 +185,38 @@ void idCmdArgs::AppendArg( const char *text ) {
 		return;
 	}
 
+	const size_t used = static_cast<size_t>( next - tokenized );
+	const int remaining = idLib::SizeToInt( sizeof( tokenized ) - used, "idCmdArgs::AppendArg" );
 	argv[ argc ] = next;
-	idStr::Copynz( argv[ argc ], text, sizeof( tokenized ) - ( argv[ argc ] - tokenized ) );
+	idStr::Copynz( argv[ argc ], text, remaining );
 	argc++;
+}
+
+/*
+============
+idCmdArgs::ClearSensitive
+
+Clear command tokens that may have held a private CVar value. This is kept
+separate from the hot-path Clear() used for ordinary argument objects.
+============
+*/
+void idCmdArgs::ClearSensitive( void ) {
+	volatile byte *cursor = reinterpret_cast<volatile byte *>( this );
+	for ( size_t remaining = sizeof( *this ); remaining > 0; --remaining ) {
+		*cursor++ = 0;
+	}
+}
+
+/*
+============
+idCmdArgs::ClearArgsScratch
+
+Args() assembles its result in a shared idStr. Private command values must not
+survive there after the command object itself has been wiped.
+============
+*/
+void idCmdArgs::ClearArgsScratch( void ) {
+	cmd_args.SecureClear();
 }
 
 /*

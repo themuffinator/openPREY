@@ -1573,39 +1573,131 @@ void idEntity::Event_SetEntityKey( const char *key, const idEntity* value ) {
 // HUMANHEAD CJR
 //=============================================================================
 
+static idEntity *OpenPrey_PlayerCanSeeAttachmentBody( idEntity *entity ) {
+	if ( entity && entity->IsType( idAFAttachment::Type ) ) {
+		return static_cast<idAFAttachment *>( entity )->GetBody();
+	}
+	return NULL;
+}
+
+static idEntity *OpenPrey_PlayerCanSeeTraceEntity( idEntity *entity ) {
+	idEntity *master;
+	idEntity *body;
+
+	if ( !entity ) {
+		return NULL;
+	}
+
+	body = OpenPrey_PlayerCanSeeAttachmentBody( entity );
+	if ( body ) {
+		return body;
+	}
+
+	master = entity->GetBindMaster();
+	if ( master ) {
+		return master;
+	}
+
+	return entity;
+}
+
+static bool OpenPrey_PlayerCanSeeTraceHitMatches( idEntity *traceEntity, idEntity *expectedEntity ) {
+	if ( !traceEntity || !expectedEntity ) {
+		return false;
+	}
+
+	if ( traceEntity == expectedEntity ) {
+		return true;
+	}
+
+	idEntity *traceOwner = OpenPrey_PlayerCanSeeTraceEntity( traceEntity );
+	idEntity *expectedOwner = OpenPrey_PlayerCanSeeTraceEntity( expectedEntity );
+
+	return traceOwner && expectedOwner && traceOwner == expectedOwner;
+}
+
+static bool OpenPrey_PlayerCanSeePoint( hhPlayer *player, idEntity *pvsEntity, const idVec3 &targetOrigin, idEntity *selfCheck ) {
+	trace_t traceInfo;
+	idEntity *traceEntity;
+
+	if ( !player || !pvsEntity || !selfCheck ) {
+		return false;
+	}
+
+	// Check if this entity is in the player's PVS
+	if ( !gameLocal.InPlayerPVS( pvsEntity ) ) {
+		return false;
+	}
+
+	// Check if the entity is in the player's FOV, based upon the "fov" key/value
+	if ( !player->CheckFOV( targetOrigin ) ) {
+		return false;
+	}
+
+	// Check if a trace succeeds from the player to the entity
+	gameLocal.clip.TracePoint( traceInfo, player->GetEyePosition(), targetOrigin, MASK_SHOT_RENDERMODEL, player );
+	traceEntity = gameLocal.GetTraceEntity( traceInfo );
+	return ( traceInfo.fraction >= 1.0f ||
+		OpenPrey_PlayerCanSeeTraceHitMatches( traceEntity, selfCheck ) ||
+		OpenPrey_PlayerCanSeeTraceHitMatches( traceEntity, pvsEntity ) );
+}
+
+static bool OpenPrey_PlayerCanSeeActorBody( hhPlayer *player, idEntity *body ) {
+	if ( !body ) {
+		return false;
+	}
+
+	idEntity *traceEntity = OpenPrey_PlayerCanSeeTraceEntity( body );
+	if ( body->IsType( idActor::Type ) ) {
+		idActor *actor = static_cast<idActor *>( body );
+		if ( OpenPrey_PlayerCanSeePoint( player, body, actor->GetEyePosition(), traceEntity ) ) {
+			return true;
+		}
+	}
+
+	if ( body->GetPhysics() ) {
+		if ( OpenPrey_PlayerCanSeePoint( player, body, body->GetPhysics()->GetAbsBounds().GetCenter(), traceEntity ) ) {
+			return true;
+		}
+	}
+
+	return OpenPrey_PlayerCanSeePoint( player, body, body->GetOrigin(), traceEntity );
+}
+
 void idEntity::Event_PlayerCanSee() {
 	int			i;
 	idEntity	*ent;
 	hhPlayer	*player;
-	trace_t		traceInfo;
-	idEntity	*selfCheck; // Is either the entity or the master
 
-	// Check if this entity is in the player's PVS
-	if ( gameLocal.InPlayerPVS( this ) ) {
-		for ( i = 0; i < gameLocal.numClients ; i++ ) {
-			ent = gameLocal.entities[ i ];
+	for ( i = 0; i < gameLocal.numClients ; i++ ) {
+		ent = gameLocal.entities[ i ];
 
-			if ( !ent || !ent->IsType( hhPlayer::Type ) ) {
-				continue;
-			}
+		if ( !ent || !ent->IsType( hhPlayer::Type ) ) {
+			continue;
+		}
 
-			// Get the player
-			player = static_cast<hhPlayer *>( ent );
+		// Get the player
+		player = static_cast<hhPlayer *>( ent );
 
-			// Check if the entity is in the player's FOV, based upon the "fov" key/value
-			if ( !player->CheckFOV( this->GetOrigin() ) ) {
-				continue;
-			}
+		if ( OpenPrey_PlayerCanSeePoint( player, this, this->GetOrigin(), OpenPrey_PlayerCanSeeTraceEntity( this ) ) ) {
+			idThread::ReturnInt( true );
+			return;
+		}
 
-			if ( this->GetBindMaster() ) {
-				selfCheck = this->GetBindMaster();
-			} else {
-				selfCheck = this;
-			}
+		if ( this->IsType( idActor::Type ) && OpenPrey_PlayerCanSeeActorBody( player, this ) ) {
+			idThread::ReturnInt( true );
+			return;
+		}
 
-			// Check if a trace succeeds from the player to the entity
-			gameLocal.clip.TracePoint( traceInfo, player->GetEyePosition(), this->GetOrigin(), MASK_SHOT_RENDERMODEL, player );
-			if ( traceInfo.fraction >= 1.0f || ( gameLocal.GetTraceEntity( traceInfo ) == selfCheck ) ) {
+		// Prey map scripts commonly ask getHead().playerCanSee() for conversation
+		// gates.  Actor heads are bound idAFAttachments, and some retail maps place
+		// solid world geometry tightly enough that a point trace to the head origin
+		// can fail even while the actor body is plainly visible.  Treat a visible
+		// owning body as visible for attached-head script checks, matching the way
+		// head combat models are owned by their actor body elsewhere in the game.
+		if ( this->IsType( idAFAttachment::Type ) ) {
+			idEntity *body = OpenPrey_PlayerCanSeeAttachmentBody( this );
+			if ( OpenPrey_PlayerCanSeeActorBody( player, body ) ) {
 				idThread::ReturnInt( true );
 				return;
 			}

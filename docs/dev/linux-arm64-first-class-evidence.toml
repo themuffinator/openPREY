@@ -1,0 +1,34 @@
+schema_version = 2
+status = "pending"
+
+[review]
+reviewer = "pending"
+reviewed_at = "pending"
+hardware_and_os = "pending"
+compositor_and_graphics = "pending"
+audio_and_input_devices = "pending"
+sp_evidence = "pending"
+mp_evidence = "pending"
+dedicated_server_evidence = "pending"
+audio_input_display_evidence = "pending"
+logs_and_screenshots = "pending"
+accepted_limitations = "pending"
+
+[runtime_reports]
+stock_sp = "pending"
+dedicated = "pending"
+
+[candidate]
+openq4_commit = "pending"
+openq4_game_commit = "pending"
+release_version = "pending"
+version_tag = "pending"
+release_tag = "pending"
+package_filename = "pending"
+
+[sha256]
+archive = "pending"
+client = "pending"
+dedicated = "pending"
+game_sp = "pending"
+game_mp = "pending"

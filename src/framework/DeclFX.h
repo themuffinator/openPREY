@@ -105,7 +105,8 @@ class idDeclFX : public idDecl {
 public:
 	virtual size_t			Size( void ) const;
 	virtual const char *	DefaultDefinition( void ) const;
-	virtual bool			Parse( const char *text, const int textLength );
+	virtual bool			Parse( const char *text, const int textLength ) override;
+	virtual bool			Parse( const char *text, const int textLength, bool noCaching ) override;
 	virtual void			FreeData( void );
 	virtual void			Print( void ) const;
 	virtual void			List( void ) const;
@@ -114,7 +115,7 @@ public:
 	idStr					joint;
 
 private:
-	void					ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction );
+	void					ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction, bool noCaching );
 };
 
 #endif /* !__DECLFX_H__ */

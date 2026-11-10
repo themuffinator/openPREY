@@ -1,0 +1,69 @@
+--- a/Include/RmlUi/Core/Context.h
++++ b/Include/RmlUi/Core/Context.h
+@@ -55,7 +55,9 @@
+ 
+ 	/// Updates all elements in the context's documents.
+ 	/// This must be called before Context::Render, but after any elements have been changed, added, or removed.
+-	bool Update();
++	/// openQ4: Presentation-only callers without CSS animations or widget updates may
++	/// defer display:none descendants until shown; ordinary contexts keep full updates.
++	bool Update(bool defer_hidden_descendants = false);
+ 	/// Renders all visible elements in the context's documents.
+ 	bool Render();
+ 
+--- a/Include/RmlUi/Core/Element.h
++++ b/Include/RmlUi/Core/Element.h
+@@ -596,7 +596,7 @@
+ 	const ComputedValues& GetComputedValues() const;
+ 
+ protected:
+-	void Update(float dp_ratio, Vector2f vp_dimensions);
++	void Update(float dp_ratio, Vector2f vp_dimensions, bool defer_hidden_descendants = false);
+ 	void Render();
+ 
+ 	/// Updates definition, computed values, and runs OnPropertyChange on this element.
+--- a/Source/Core/Context.cpp
++++ b/Source/Core/Context.cpp
+@@ -178,7 +178,7 @@
+ 	return density_independent_pixel_ratio;
+ }
+ 
+-bool Context::Update()
++bool Context::Update(bool defer_hidden_descendants)
+ {
+ 	RMLUI_ZoneScoped;
+ 	DebugVerifyLocaleSetting();
+@@ -202,7 +202,7 @@
+ 	root->dirty_definition = false;
+ 	root->dirty_child_definitions = false;
+ 
+-	root->Update(density_independent_pixel_ratio, Vector2f(dimensions));
++	root->Update(density_independent_pixel_ratio, Vector2f(dimensions), defer_hidden_descendants);
+ 
+ 	for (int i = 0; i < root->GetNumChildren(); ++i)
+ 	{
+--- a/Source/Core/Element.cpp
++++ b/Source/Core/Element.cpp
+@@ -117,7 +117,7 @@
+ 	num_non_dom_children = 0;
+ }
+ 
+-void Element::Update(float dp_ratio, Vector2f vp_dimensions)
++void Element::Update(float dp_ratio, Vector2f vp_dimensions, bool defer_hidden_descendants)
+ {
+ #ifdef RMLUI_TRACY_PROFILING
+ 	auto name = GetAddress(false, false);
+@@ -145,8 +145,11 @@
+ 
+ 	meta->effects.InstanceEffects();
+ 
+-	for (size_t i = 0; i < children.size(); i++)
+-		children[i]->Update(dp_ratio, vp_dimensions);
++	// The caller owns presentation time outside RmlUi. Update this element
++	// first so revealing a hidden branch visits every pending descendant.
++	if (!defer_hidden_descendants || GetComputedValues().display() != Style::Display::None)
++		for (size_t i = 0; i < children.size(); i++)
++			children[i]->Update(dp_ratio, vp_dimensions, defer_hidden_descendants);
+ 
+ 	if (!animations.empty() && IsVisible(true))
+ 	{

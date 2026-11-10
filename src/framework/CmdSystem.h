@@ -67,8 +67,16 @@ public:
 						// Normally called once per frame, but may be explicitly invoked.
 	virtual void		ExecuteCommandBuffer( void ) = 0;
 
-						// Base for path/file auto-completion.
-	virtual void		ArgCompletion_FolderExtension( const idCmdArgs &args, void(*callback)( const char *s ), const char *folder, bool stripFolder, ... ) = 0;
+						// Base for path/file auto-completion. The extension list is a
+						// variadic run of const char* closed by a nullptr sentinel; pass
+						// nullptr rather than NULL so the sentinel fills the whole
+						// pointer-sized argument slot on AAPCS64, where a variadic
+						// argument past the register save area occupies only its own
+						// size on the stack. stripFolder is an int rather than a bool
+						// because it is the last named parameter before the ellipsis,
+						// and va_start on a parameter subject to the default argument
+						// promotions is undefined behavior.
+	virtual void		ArgCompletion_FolderExtension( const idCmdArgs &args, void(*callback)( const char *s ), const char *folder, int stripFolder, ... ) = 0;
 	
 	//virtual void		ArgCompletion_Models( const idCmdArgs &args, void(*callback)( const char *s ), bool strogg, bool marine ) = 0;
 	
@@ -82,7 +90,11 @@ public:
 //	virtual void		SetupCVarsForReloadEngine( const idDict &dict ) = 0;
 						// Setup a reloadEngine to happen on next command run, and give a command to execute after reload
 	virtual void		SetupReloadEngine( const idCmdArgs &args ) = 0;
+	virtual void		SetupReloadGameModule( const idCmdArgs &args ) = 0;
+						// Executes the saved post-reload command in the rebuilt session.
 	virtual bool		PostReloadEngine( void ) = 0;
+	// UI transitions rebuild the filesystem without showing the console.
+	virtual void        SetupReloadEngineMenu( const idCmdArgs &args ) = 0;
 
 						// There is a cache of the last completion operation that may need to be cleared sometimes
 	//virtual void		ClearCompletion( void ) = 0;
@@ -146,34 +158,34 @@ template<int type> ID_STATIC_TEMPLATE ID_INLINE void idCmdSystem::ArgCompletion_
 }
 
 ID_INLINE void idCmdSystem::ArgCompletion_FileName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "/", true, "", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "/", true, "", nullptr );
 }
 
 // RAVEN BEGIN
 // mekberg: added
 ID_INLINE void idCmdSystem::ArgCompletion_GuiName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "guis/", false, ".gui", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "guis/", false, ".gui", nullptr );
 }
 // RAVEN END
 
 ID_INLINE void idCmdSystem::ArgCompletion_MapName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "maps/", true, ".map", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "maps/", true, ".map", nullptr );
 }
 
 ID_INLINE void idCmdSystem::ArgCompletion_ModelName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "models/", false, ".lwo", ".ase", ".md5mesh", ".ma", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "models/", false, ".lwo", ".ase", ".md5mesh", ".ma", nullptr );
 }
 
 ID_INLINE void idCmdSystem::ArgCompletion_SoundName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "sound/", false, ".wav", ".ogg", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "sound/", false, ".wav", ".ogg", nullptr );
 }
 
 ID_INLINE void idCmdSystem::ArgCompletion_ImageName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "/", false, ".tga", ".dds", ".jpg", ".pcx", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "/", false, ".tga", ".dds", ".jpg", ".pcx", nullptr );
 }
 
 ID_INLINE void idCmdSystem::ArgCompletion_VideoName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "video/", false, ".roq", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "video/", false, ".roq", nullptr );
 }
 
 ID_INLINE void idCmdSystem::ArgCompletion_ForceModel( const idCmdArgs &args, void(*callback)( const char *s ) ) {
@@ -191,26 +203,26 @@ ID_INLINE void idCmdSystem::ArgCompletion_ForceModelMarine( const idCmdArgs &arg
 // RAVEN BEGIN
 // nrausch: standalone video support
 ID_INLINE void idCmdSystem::ArgCompletion_StandaloneVideoName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "video/", false, ".wmv", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "video/", false, ".wmv", nullptr );
 }
 
 // rjohnson: netdemo completion
 extern char netDemoExtension[16];
 ID_INLINE void idCmdSystem::ArgCompletion_NetDemoName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "demos/", true, netDemoExtension, NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "demos/", true, netDemoExtension, nullptr );
 }
 // RAVEN END
 
 ID_INLINE void idCmdSystem::ArgCompletion_ConfigName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "/", true, ".cfg", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "/", true, ".cfg", nullptr );
 }
 
 ID_INLINE void idCmdSystem::ArgCompletion_SaveGame( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "SaveGames/", true, ".save", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "SaveGames/", true, ".save", nullptr );
 }
 
 ID_INLINE void idCmdSystem::ArgCompletion_DemoName( const idCmdArgs &args, void(*callback)( const char *s ) ) {
-	cmdSystem->ArgCompletion_FolderExtension( args, callback, "demos/", true, ".demo", NULL );
+	cmdSystem->ArgCompletion_FolderExtension( args, callback, "demos/", true, ".demo", nullptr );
 }
 
 #endif /* !__CMDSYSTEM_H__ */

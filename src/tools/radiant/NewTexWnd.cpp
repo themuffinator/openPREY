@@ -35,6 +35,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "io.h"
 
 #include "../../renderer/tr_local.h"
+#include "../common/ToolGL.h"
 
 #ifdef _DEBUG
 	#define new DEBUG_NEW
@@ -257,6 +258,7 @@ void CNewTexWnd::OnPaint() {
 		common->Printf("ERROR: wglMakeCurrent failed..\n ");
 	}
 	else {
+		const GLboolean multisampleWasEnabled = ToolGL_DisableMultisampleForEditor();
 		const char	*name;
 		qglClearColor
 		(
@@ -362,6 +364,7 @@ void CNewTexWnd::OnPaint() {
 		globalImages->BindNull();
 		qglFinish();
 		qwglSwapBuffers(dc.GetSafeHdc());
+		ToolGL_RestoreMultisampleForEditor( multisampleWasEnabled );
 		TRACE("Texture Paint\n");
 	}
 
@@ -870,7 +873,7 @@ BOOL CNewTexWnd::OnToolTipNotify( UINT id, NMHDR * pNMHDR, LRESULT * pResult ) {
 
 	if (mat) {
 	    TOOLTIPTEXT *pTTT = (TOOLTIPTEXT *)pNMHDR;
-		strcpy(tip, mat->GetDescription());
+		idStr::Copynz(tip, mat->GetDescription(), sizeof(tip));
 	    pTTT->lpszText = tip;
 	    pTTT->hinst = NULL;
 	    return(TRUE);
@@ -878,9 +881,9 @@ BOOL CNewTexWnd::OnToolTipNotify( UINT id, NMHDR * pNMHDR, LRESULT * pResult ) {
     return(FALSE);
 }
 
-int CNewTexWnd::OnToolHitTest(CPoint point, TOOLINFO * pTI)
+INT_PTR CNewTexWnd::OnToolHitTest(CPoint point, TOOLINFO * pTI) const
 {
-	const idMaterial *mat = getMaterialAtPoint(point);
+	const idMaterial *mat = const_cast<CNewTexWnd *>( this )->getMaterialAtPoint(point);
 	if (mat) {
 		return 0;
 	}

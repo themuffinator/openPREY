@@ -28,6 +28,12 @@ If you have questions concerning this license or the applicable additional terms
 
 #ifndef __EVENTLOOP_H__
 #define __EVENTLOOP_H__
+#include "../sys/EventDisposition.h"
+namespace openq4 {
+class NativeInputRoute;
+class NativeInputCancellationPermit;
+struct NativeInputHead;
+}
 
 /*
 ===============================================================================
@@ -54,13 +60,26 @@ public:
 					// It is possible to get an event at the beginning of a frame that
 					// has a time stamp lower than the last event from the previous frame.
 	sysEvent_t		GetEvent( void );
+	// Private engine storage seam. No delivery, replay or journal authority.
+	// Ready transfers payload+sidecar; refusal/empty preserves both outputs.
+	sysEventTransfer_t TakeEventWithDisposition( sysEvent_t&, sysEventDispositionTag_t& ) noexcept;
+	bool PushEventWithDisposition( sysEvent_t&, sysEventDispositionTag_t& ) noexcept;
+	sysEventTransfer_t PeekEventDispositionTag(sysEventDispositionTag_t&) noexcept;
+	// Only the installed driver may feed an exact owned deferred event here.
+	void ContinueNativeInput();
+    // Aggregate retirement view/take preserves pushed-before-platform FIFO.
+    sysEventTransfer_t PeekEventForRetirement(openq4::NativeInputHead&) noexcept;
+    sysEventTransfer_t TakeEventForRetirement(openq4::NativeInputRoute&,
+        const openq4::NativeInputCancellationPermit&, sysEvent_t&, sysEventDispositionTag_t&) noexcept;
 
 					// Dispatches all pending events and returns the current time.
 	int				RunEventLoop( bool commandExecution = true );
 
 					// Gets the current time in a way that will be journaled properly,
 					// as opposed to Sys_Milliseconds(), which always reads a real timer.
-	int				Milliseconds( void );
+					// Inline so the renderer module can call it without a
+					// cross-DLL member reference (Phase B8).
+	int				Milliseconds( void ) { return Sys_Milliseconds() - initialTimeOffset; }
 
 					// Returns the journal level, 1 = record, 2 = play back.
 	int				JournalLevel( void ) const;
@@ -75,12 +94,15 @@ private:
 
 	int				com_pushedEventsHead, com_pushedEventsTail;
 	sysEvent_t		com_pushedEvents[MAX_PUSHED_EVENTS];
+	sysEventDispositionTag_t com_pushedDisposition[MAX_PUSHED_EVENTS];
+    std::uint64_t com_pushedRetirementSerials[MAX_PUSHED_EVENTS];
 
 	static idCVar	com_journal;
 
 	sysEvent_t		GetRealEvent( void );
 	void			ProcessEvent( sysEvent_t ev );
 	void			PushEvent( sysEvent_t *event );
+	void			ClearPushedEvents( void );
 };
 
 extern	idEventLoop	*eventLoop;

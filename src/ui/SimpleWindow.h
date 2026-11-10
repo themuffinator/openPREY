@@ -40,6 +40,7 @@ typedef struct {
 
 class idSimpleWindow {
 	friend class idWindow;
+	friend class idUserInterfaceLocal;
 public:
 					idSimpleWindow(idWindow* win);
 	virtual			~idSimpleWindow();
@@ -58,6 +59,7 @@ public:
 	virtual void	ReadFromSaveGame( idFile *savefile );
 // jmarshall - quake 4 gui
 	void			ResetCinematics(void);
+	bool			IsBackgroundCinematicComplete() const;
 // jmarshall end
 protected:
 	void 			CalcClientRect(float xofs, float yofs);
@@ -81,6 +83,8 @@ protected:
 	float 			textAligny;
 	float			forceAspectWidth;
 	float			forceAspectHeight;
+	int				textSpacing;
+	signed char		textStyle;
 	unsigned char	screenAlignX;
 	unsigned char	screenAlignY;
 	int				textShadow;

@@ -1,0 +1,8 @@
+// Retained UI speed streak: a view-space quad whose texture coordinate spans the view.
+varying vec2 streakTexCoord;
+
+void main(void)
+{
+	streakTexCoord = gl_MultiTexCoord0.xy;
+	gl_Position = ftransform();
+}

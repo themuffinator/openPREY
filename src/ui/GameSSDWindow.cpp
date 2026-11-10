@@ -43,6 +43,362 @@ If you have questions concerning this license or the applicable additional terms
 #define V_WIDTH 640.0f
 #define V_HEIGHT 480.0f
 
+static const int GAME_SSD_SAVE_MAGIC = 'O' | ( 'Q' << 8 ) | ( 'S' << 16 ) | ( 'D' << 24 );
+static const int GAME_SSD_SAVE_VERSION = 1;
+static const int GAME_SSD_MAX_SAVE_LEVELS = 64;
+static const int GAME_SSD_MAX_SAVE_WEAPONS = 16;
+static const int GAME_SSD_MAX_SAVE_ENTITY_REFS = MAX_ASTEROIDS + MAX_ASTRONAUT + MAX_EXPLOSIONS + MAX_POINTS + MAX_PROJECTILES + MAX_POWERUPS;
+static int gameSSDReadSaveVersion = 0;
+
+static void GameSSD_WriteSaveInt( idFile *savefile, const int value ) {
+	savefile->WriteInt( value );
+}
+
+static int GameSSD_ReadLegacySaveInt( idFile *savefile, const char *fieldName ) {
+	int value = 0;
+	const int offset = savefile->Tell();
+	const int bytesRead = savefile->Read( &value, sizeof( value ) );
+	if ( bytesRead != sizeof( value ) ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: truncated %s at offset %d (read %d of %d)",
+			fieldName ? fieldName : "integer", offset, bytesRead, static_cast<int>( sizeof( value ) ) );
+	}
+	return value;
+}
+
+static void GameSSD_ReadLegacySaveBlock( idFile *savefile, void *data, const int size, const char *fieldName ) {
+	const int offset = savefile->Tell();
+	const int bytesRead = savefile->Read( data, size );
+	if ( bytesRead != size ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: truncated legacy %s at offset %d (read %d of %d)",
+			fieldName ? fieldName : "block", offset, bytesRead, size );
+	}
+}
+
+static int GameSSD_ReadEndianSaveInt( idFile *savefile, const char *fieldName ) {
+	int value = 0;
+	const int offset = savefile->Tell();
+	const int bytesRead = savefile->ReadInt( value );
+	if ( bytesRead != sizeof( value ) ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: truncated %s at offset %d (read %d of %d)",
+			fieldName ? fieldName : "integer", offset, bytesRead, static_cast<int>( sizeof( value ) ) );
+	}
+	return value;
+}
+
+static int GameSSD_ReadSaveInt( idFile *savefile, const char *fieldName ) {
+	if ( gameSSDReadSaveVersion >= GAME_SSD_SAVE_VERSION ) {
+		return GameSSD_ReadEndianSaveInt( savefile, fieldName );
+	}
+	return GameSSD_ReadLegacySaveInt( savefile, fieldName );
+}
+
+static void GameSSD_ValidateSaveCount( const char *fieldName, const int count, const int maxCount ) {
+	if ( count < 0 || count > maxCount ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: invalid %s %d (max %d)",
+			fieldName ? fieldName : "count", count, maxCount );
+	}
+}
+
+static int GameSSD_ReadSaveCount( idFile *savefile, const char *fieldName, const int maxCount ) {
+	const int count = GameSSD_ReadSaveInt( savefile, fieldName );
+	GameSSD_ValidateSaveCount( fieldName, count, maxCount );
+	return count;
+}
+
+static void GameSSD_ValidateSaveIndex( const char *fieldName, const int index, const int count ) {
+	if ( index < 0 || index >= count ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: invalid %s %d (count %d)",
+			fieldName ? fieldName : "index", index, count );
+	}
+}
+
+static void GameSSD_ValidateSaveIndexOrEnd( const char *fieldName, const int index, const int count ) {
+	if ( index < 0 || index > count ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: invalid %s %d (count %d)",
+			fieldName ? fieldName : "index", index, count );
+	}
+}
+
+static void GameSSD_ValidatePoolId( const char *fieldName, const int id, const int maxCount ) {
+	if ( id < 0 || id >= maxCount ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: invalid %s %d (valid range 0..%d)",
+			fieldName ? fieldName : "pool id", id, maxCount - 1 );
+	}
+}
+
+static int GameSSD_ReadSavePoolId( idFile *savefile, const char *fieldName, const int maxCount ) {
+	const int id = GameSSD_ReadSaveInt( savefile, fieldName );
+	GameSSD_ValidatePoolId( fieldName, id, maxCount );
+	return id;
+}
+
+static int GameSSD_GetEntityPoolLimit( const int type ) {
+	switch( type ) {
+		case SSD_ENTITY_ASTEROID:
+			return MAX_ASTEROIDS;
+		case SSD_ENTITY_ASTRONAUT:
+			return MAX_ASTRONAUT;
+		case SSD_ENTITY_EXPLOSION:
+			return MAX_EXPLOSIONS;
+		case SSD_ENTITY_POINTS:
+			return MAX_POINTS;
+		case SSD_ENTITY_PROJECTILE:
+			return MAX_PROJECTILES;
+		case SSD_ENTITY_POWERUP:
+			return MAX_POWERUPS;
+		default:
+			return 0;
+	}
+}
+
+static void GameSSD_ValidateEntityType( const char *fieldName, const int type ) {
+	if ( GameSSD_GetEntityPoolLimit( type ) <= 0 ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: invalid %s type %d",
+			fieldName ? fieldName : "entity", type );
+	}
+}
+
+static void GameSSD_ValidateExpectedEntityType( const char *fieldName, const int type, const int expectedType ) {
+	if ( type != expectedType ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: invalid %s type %d (expected %d)",
+			fieldName ? fieldName : "entity", type, expectedType );
+	}
+}
+
+static void GameSSD_ValidateEntityReference( const char *fieldName, const int type, const int id ) {
+	GameSSD_ValidateEntityType( fieldName, type );
+	GameSSD_ValidatePoolId( fieldName, id, GameSSD_GetEntityPoolLimit( type ) );
+}
+
+static void GameSSD_WriteSaveFloat( idFile *savefile, const float value ) {
+	savefile->WriteFloat( value );
+}
+
+static float GameSSD_ReadSaveFloat( idFile *savefile, const char *fieldName ) {
+	float value = 0.0f;
+	const int offset = savefile->Tell();
+	int bytesRead = 0;
+	if ( gameSSDReadSaveVersion >= GAME_SSD_SAVE_VERSION ) {
+		bytesRead = savefile->ReadFloat( value );
+	} else {
+		bytesRead = savefile->Read( &value, sizeof( value ) );
+	}
+	if ( bytesRead != sizeof( value ) ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: truncated %s at offset %d (read %d of %d)",
+			fieldName ? fieldName : "float", offset, bytesRead, static_cast<int>( sizeof( value ) ) );
+	}
+	return value;
+}
+
+static void GameSSD_WriteSaveBool( idFile *savefile, const bool value ) {
+	savefile->WriteBool( value );
+}
+
+static bool GameSSD_ReadSaveBool( idFile *savefile, const char *fieldName ) {
+	bool value = false;
+	const int offset = savefile->Tell();
+	int bytesRead = 0;
+	if ( gameSSDReadSaveVersion >= GAME_SSD_SAVE_VERSION ) {
+		bytesRead = savefile->ReadBool( value );
+	} else {
+		bytesRead = savefile->Read( &value, sizeof( value ) );
+	}
+	if ( bytesRead != sizeof( value ) ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: truncated %s at offset %d (read %d of %d)",
+			fieldName ? fieldName : "bool", offset, bytesRead, static_cast<int>( sizeof( value ) ) );
+	}
+	return value;
+}
+
+// Raw copies of these fields wrote exactly the bytes the typed GUI encoders
+// write on every supported target (roadmap Q4-06).
+template< class type >
+static void GameSSD_ReadSaveField( idFile *savefile, type &value, const char *fieldName ) {
+	OpenQ4_ReadSaveGameField( savefile, value, "idGameSSDWindow::ReadFromSaveGame", fieldName );
+}
+
+template< class type >
+static void GameSSD_WriteSaveField( idFile *savefile, const type &value, const char *fieldName ) {
+	OpenQ4_WriteSaveGameField( savefile, value, "idGameSSDWindow::WriteToSaveGame", fieldName );
+}
+
+static int GameSSD_ReadSaveVersion( idFile *savefile ) {
+	const int markerOffset = savefile->Tell();
+	const int marker = GameSSD_ReadEndianSaveInt( savefile, "format marker" );
+	if ( marker != GAME_SSD_SAVE_MAGIC ) {
+		savefile->Seek( markerOffset, FS_SEEK_SET );
+		return 0;
+	}
+
+	const int version = GameSSD_ReadEndianSaveInt( savefile, "format version" );
+	if ( version <= 0 || version > GAME_SSD_SAVE_VERSION ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: unsupported format version %d", version );
+	}
+	return version;
+}
+
+static void GameSSD_WriteLevelData( idFile *savefile, const SSDLevelData_t &data ) {
+	GameSSD_WriteSaveFloat( savefile, data.spawnBuffer );
+	GameSSD_WriteSaveInt( savefile, data.needToWin );
+}
+
+static void GameSSD_ReadLevelData( idFile *savefile, SSDLevelData_t &data ) {
+	if ( gameSSDReadSaveVersion <= 0 ) {
+		GameSSD_ReadLegacySaveBlock( savefile, &data, sizeof( data ), "level data" );
+		return;
+	}
+	data.spawnBuffer = GameSSD_ReadSaveFloat( savefile, "level spawn buffer" );
+	data.needToWin = GameSSD_ReadSaveInt( savefile, "level win requirement" );
+}
+
+static void GameSSD_WriteAsteroidData( idFile *savefile, const SSDAsteroidData_t &data ) {
+	GameSSD_WriteSaveFloat( savefile, data.speedMin );
+	GameSSD_WriteSaveFloat( savefile, data.speedMax );
+	GameSSD_WriteSaveFloat( savefile, data.sizeMin );
+	GameSSD_WriteSaveFloat( savefile, data.sizeMax );
+	GameSSD_WriteSaveFloat( savefile, data.rotateMin );
+	GameSSD_WriteSaveFloat( savefile, data.rotateMax );
+	GameSSD_WriteSaveInt( savefile, data.spawnMin );
+	GameSSD_WriteSaveInt( savefile, data.spawnMax );
+	GameSSD_WriteSaveInt( savefile, data.asteroidHealth );
+	GameSSD_WriteSaveInt( savefile, data.asteroidPoints );
+	GameSSD_WriteSaveInt( savefile, data.asteroidDamage );
+}
+
+static void GameSSD_ReadAsteroidData( idFile *savefile, SSDAsteroidData_t &data ) {
+	if ( gameSSDReadSaveVersion <= 0 ) {
+		GameSSD_ReadLegacySaveBlock( savefile, &data, sizeof( data ), "asteroid data" );
+		return;
+	}
+	data.speedMin = GameSSD_ReadSaveFloat( savefile, "asteroid speed min" );
+	data.speedMax = GameSSD_ReadSaveFloat( savefile, "asteroid speed max" );
+	data.sizeMin = GameSSD_ReadSaveFloat( savefile, "asteroid size min" );
+	data.sizeMax = GameSSD_ReadSaveFloat( savefile, "asteroid size max" );
+	data.rotateMin = GameSSD_ReadSaveFloat( savefile, "asteroid rotation min" );
+	data.rotateMax = GameSSD_ReadSaveFloat( savefile, "asteroid rotation max" );
+	data.spawnMin = GameSSD_ReadSaveInt( savefile, "asteroid spawn min" );
+	data.spawnMax = GameSSD_ReadSaveInt( savefile, "asteroid spawn max" );
+	data.asteroidHealth = GameSSD_ReadSaveInt( savefile, "asteroid health" );
+	data.asteroidPoints = GameSSD_ReadSaveInt( savefile, "asteroid points" );
+	data.asteroidDamage = GameSSD_ReadSaveInt( savefile, "asteroid damage" );
+}
+
+static void GameSSD_WriteAstronautData( idFile *savefile, const SSDAstronautData_t &data ) {
+	GameSSD_WriteSaveFloat( savefile, data.speedMin );
+	GameSSD_WriteSaveFloat( savefile, data.speedMax );
+	GameSSD_WriteSaveFloat( savefile, data.rotateMin );
+	GameSSD_WriteSaveFloat( savefile, data.rotateMax );
+	GameSSD_WriteSaveInt( savefile, data.spawnMin );
+	GameSSD_WriteSaveInt( savefile, data.spawnMax );
+	GameSSD_WriteSaveInt( savefile, data.health );
+	GameSSD_WriteSaveInt( savefile, data.points );
+	GameSSD_WriteSaveInt( savefile, data.penalty );
+}
+
+static void GameSSD_ReadAstronautData( idFile *savefile, SSDAstronautData_t &data ) {
+	if ( gameSSDReadSaveVersion <= 0 ) {
+		GameSSD_ReadLegacySaveBlock( savefile, &data, sizeof( data ), "astronaut data" );
+		return;
+	}
+	data.speedMin = GameSSD_ReadSaveFloat( savefile, "astronaut speed min" );
+	data.speedMax = GameSSD_ReadSaveFloat( savefile, "astronaut speed max" );
+	data.rotateMin = GameSSD_ReadSaveFloat( savefile, "astronaut rotation min" );
+	data.rotateMax = GameSSD_ReadSaveFloat( savefile, "astronaut rotation max" );
+	data.spawnMin = GameSSD_ReadSaveInt( savefile, "astronaut spawn min" );
+	data.spawnMax = GameSSD_ReadSaveInt( savefile, "astronaut spawn max" );
+	data.health = GameSSD_ReadSaveInt( savefile, "astronaut health" );
+	data.points = GameSSD_ReadSaveInt( savefile, "astronaut points" );
+	data.penalty = GameSSD_ReadSaveInt( savefile, "astronaut penalty" );
+}
+
+static void GameSSD_WritePowerupData( idFile *savefile, const SSDPowerupData_t &data ) {
+	GameSSD_WriteSaveFloat( savefile, data.speedMin );
+	GameSSD_WriteSaveFloat( savefile, data.speedMax );
+	GameSSD_WriteSaveFloat( savefile, data.rotateMin );
+	GameSSD_WriteSaveFloat( savefile, data.rotateMax );
+	GameSSD_WriteSaveInt( savefile, data.spawnMin );
+	GameSSD_WriteSaveInt( savefile, data.spawnMax );
+}
+
+static void GameSSD_ReadPowerupData( idFile *savefile, SSDPowerupData_t &data ) {
+	if ( gameSSDReadSaveVersion <= 0 ) {
+		GameSSD_ReadLegacySaveBlock( savefile, &data, sizeof( data ), "powerup data" );
+		return;
+	}
+	data.speedMin = GameSSD_ReadSaveFloat( savefile, "powerup speed min" );
+	data.speedMax = GameSSD_ReadSaveFloat( savefile, "powerup speed max" );
+	data.rotateMin = GameSSD_ReadSaveFloat( savefile, "powerup rotation min" );
+	data.rotateMax = GameSSD_ReadSaveFloat( savefile, "powerup rotation max" );
+	data.spawnMin = GameSSD_ReadSaveInt( savefile, "powerup spawn min" );
+	data.spawnMax = GameSSD_ReadSaveInt( savefile, "powerup spawn max" );
+}
+
+static void GameSSD_WriteWeaponData( idFile *savefile, const SSDWeaponData_t &data ) {
+	GameSSD_WriteSaveFloat( savefile, data.speed );
+	GameSSD_WriteSaveInt( savefile, data.damage );
+	GameSSD_WriteSaveInt( savefile, data.size );
+}
+
+static void GameSSD_ReadWeaponData( idFile *savefile, SSDWeaponData_t &data ) {
+	if ( gameSSDReadSaveVersion <= 0 ) {
+		GameSSD_ReadLegacySaveBlock( savefile, &data, sizeof( data ), "weapon data" );
+		return;
+	}
+	data.speed = GameSSD_ReadSaveFloat( savefile, "weapon speed" );
+	data.damage = GameSSD_ReadSaveInt( savefile, "weapon damage" );
+	data.size = GameSSD_ReadSaveInt( savefile, "weapon size" );
+}
+
+static void GameSSD_WriteLevelStats( idFile *savefile, const SSDLevelStats_t &data ) {
+	GameSSD_WriteSaveInt( savefile, data.shotCount );
+	GameSSD_WriteSaveInt( savefile, data.hitCount );
+	GameSSD_WriteSaveInt( savefile, data.destroyedAsteroids );
+	GameSSD_WriteSaveInt( savefile, data.nextAsteroidSpawnTime );
+	GameSSD_WriteSaveInt( savefile, data.killedAstronauts );
+	GameSSD_WriteSaveInt( savefile, data.savedAstronauts );
+	GameSSD_WriteSaveInt( savefile, data.nextAstronautSpawnTime );
+	GameSSD_WriteSaveInt( savefile, data.nextPowerupSpawnTime );
+}
+
+static void GameSSD_ReadLevelStats( idFile *savefile, SSDLevelStats_t &data ) {
+	data.shotCount = GameSSD_ReadSaveInt( savefile, "shot count" );
+	data.hitCount = GameSSD_ReadSaveInt( savefile, "hit count" );
+	data.destroyedAsteroids = GameSSD_ReadSaveInt( savefile, "destroyed asteroid count" );
+	data.nextAsteroidSpawnTime = GameSSD_ReadSaveInt( savefile, "next asteroid spawn time" );
+	data.killedAstronauts = GameSSD_ReadSaveInt( savefile, "killed astronaut count" );
+	data.savedAstronauts = GameSSD_ReadSaveInt( savefile, "saved astronaut count" );
+	data.nextAstronautSpawnTime = GameSSD_ReadSaveInt( savefile, "next astronaut spawn time" );
+	data.nextPowerupSpawnTime = GameSSD_ReadSaveInt( savefile, "next powerup spawn time" );
+	data.targetEnt = NULL;
+}
+
+static void GameSSD_WriteGameStats( idFile *savefile, const SSDGameStats_t &data ) {
+	GameSSD_WriteSaveBool( savefile, data.gameRunning );
+	GameSSD_WriteSaveInt( savefile, data.score );
+	GameSSD_WriteSaveInt( savefile, data.prebonusscore );
+	GameSSD_WriteSaveInt( savefile, data.health );
+	GameSSD_WriteSaveInt( savefile, data.currentWeapon );
+	GameSSD_WriteSaveInt( savefile, data.currentLevel );
+	GameSSD_WriteSaveInt( savefile, data.nextLevel );
+	GameSSD_WriteLevelStats( savefile, data.levelStats );
+}
+
+static void GameSSD_ReadGameStats( idFile *savefile, SSDGameStats_t &data ) {
+	if ( gameSSDReadSaveVersion <= 0 ) {
+		GameSSD_ReadLegacySaveBlock( savefile, &data, sizeof( data ), "game stats" );
+		data.levelStats.targetEnt = NULL;
+		return;
+	}
+	data.gameRunning = GameSSD_ReadSaveBool( savefile, "game running" );
+	data.score = GameSSD_ReadSaveInt( savefile, "score" );
+	data.prebonusscore = GameSSD_ReadSaveInt( savefile, "pre-bonus score" );
+	data.health = GameSSD_ReadSaveInt( savefile, "health" );
+	data.currentWeapon = GameSSD_ReadSaveInt( savefile, "current weapon" );
+	data.currentLevel = GameSSD_ReadSaveInt( savefile, "current level" );
+	data.nextLevel = GameSSD_ReadSaveInt( savefile, "next level" );
+	GameSSD_ReadLevelStats( savefile, data.levelStats );
+}
+
 /*
 *****************************************************************************
 * SSDCrossHair
@@ -60,9 +416,9 @@ SSDCrossHair::~SSDCrossHair() {
 
 void SSDCrossHair::WriteToSaveGame( idFile *savefile ) {
 	
-	savefile->Write(&currentCrosshair, sizeof(currentCrosshair));
-	savefile->Write(&crosshairWidth, sizeof(crosshairWidth));
-	savefile->Write(&crosshairHeight, sizeof(crosshairHeight));
+	GameSSD_WriteSaveInt( savefile, currentCrosshair );
+	GameSSD_WriteSaveField( savefile, crosshairWidth, "crosshairWidth" );
+	GameSSD_WriteSaveField( savefile, crosshairHeight, "crosshairHeight" );
 
 }
 
@@ -70,9 +426,10 @@ void SSDCrossHair::ReadFromSaveGame( idFile *savefile ) {
 
 	InitCrosshairs();
 
-	savefile->Read(&currentCrosshair, sizeof(currentCrosshair));
-	savefile->Read(&crosshairWidth, sizeof(crosshairWidth));
-	savefile->Read(&crosshairHeight, sizeof(crosshairHeight));
+	currentCrosshair = GameSSD_ReadSaveInt( savefile, "crosshair index" );
+	GameSSD_ValidateSaveIndex( "crosshair index", currentCrosshair, SSDCrossHair::CROSSHAIR_COUNT );
+	GameSSD_ReadSaveField( savefile, crosshairWidth, "crosshair width" );
+	GameSSD_ReadSaveField( savefile, crosshairHeight, "crosshair height" );
 
 }
 
@@ -112,59 +469,60 @@ SSDEntity::~SSDEntity() {
 
 void SSDEntity::WriteToSaveGame( idFile *savefile ) {
 	
-	savefile->Write(&type, sizeof(type));
+	GameSSD_WriteSaveInt( savefile, type );
 	game->WriteSaveGameString(materialName, savefile);
-	savefile->Write(&position, sizeof(position));
-	savefile->Write(&size, sizeof(size));
-	savefile->Write(&radius, sizeof(radius));
-	savefile->Write(&hitRadius, sizeof(hitRadius));
-	savefile->Write(&rotation, sizeof(rotation));
+	GameSSD_WriteSaveField( savefile, position, "position" );
+	GameSSD_WriteSaveField( savefile, size, "size" );
+	GameSSD_WriteSaveField( savefile, radius, "radius" );
+	GameSSD_WriteSaveField( savefile, hitRadius, "hitRadius" );
+	GameSSD_WriteSaveField( savefile, rotation, "rotation" );
 
-	savefile->Write(&matColor, sizeof(matColor));
+	GameSSD_WriteSaveField( savefile, matColor, "matColor" );
 	
 	game->WriteSaveGameString(text, savefile);
-	savefile->Write(&textScale, sizeof(textScale));
-	savefile->Write(&foreColor, sizeof(foreColor));
+	GameSSD_WriteSaveField( savefile, textScale, "textScale" );
+	GameSSD_WriteSaveField( savefile, foreColor, "foreColor" );
 	
-	savefile->Write(&currentTime, sizeof(currentTime));
-	savefile->Write(&lastUpdate, sizeof(lastUpdate));
-	savefile->Write(&elapsed, sizeof(elapsed));
+	GameSSD_WriteSaveInt( savefile, currentTime );
+	GameSSD_WriteSaveInt( savefile, lastUpdate );
+	GameSSD_WriteSaveInt( savefile, elapsed );
 
-	savefile->Write(&destroyed, sizeof(destroyed));
-	savefile->Write(&noHit, sizeof(noHit));
-	savefile->Write(&noPlayerDamage, sizeof(noPlayerDamage));
+	GameSSD_WriteSaveField( savefile, destroyed, "destroyed" );
+	GameSSD_WriteSaveField( savefile, noHit, "noHit" );
+	GameSSD_WriteSaveField( savefile, noPlayerDamage, "noPlayerDamage" );
 
-	savefile->Write(&inUse, sizeof(inUse));
+	GameSSD_WriteSaveField( savefile, inUse, "inUse" );
 
 }
 
 void SSDEntity::ReadFromSaveGame( idFile *savefile,  idGameSSDWindow* _game ) {
 
-	savefile->Read(&type, sizeof(type));
+	type = GameSSD_ReadSaveInt( savefile, "entity type" );
+	GameSSD_ValidateEntityType( "entity", type );
 	game->ReadSaveGameString(materialName, savefile);
 	SetMaterial(materialName);
-	savefile->Read(&position, sizeof(position));
-	savefile->Read(&size, sizeof(size));
-	savefile->Read(&radius, sizeof(radius));
-	savefile->Read(&hitRadius, sizeof(hitRadius));
-	savefile->Read(&rotation, sizeof(rotation));
+	GameSSD_ReadSaveField( savefile, position, "entity position" );
+	GameSSD_ReadSaveField( savefile, size, "entity size" );
+	GameSSD_ReadSaveField( savefile, radius, "entity radius" );
+	GameSSD_ReadSaveField( savefile, hitRadius, "entity hit radius" );
+	GameSSD_ReadSaveField( savefile, rotation, "entity rotation" );
 
-	savefile->Read(&matColor, sizeof(matColor));
+	GameSSD_ReadSaveField( savefile, matColor, "entity material color" );
 
 	game->ReadSaveGameString(text, savefile);
-	savefile->Read(&textScale, sizeof(textScale));
-	savefile->Read(&foreColor, sizeof(foreColor));
+	GameSSD_ReadSaveField( savefile, textScale, "entity text scale" );
+	GameSSD_ReadSaveField( savefile, foreColor, "entity foreground color" );
 
 	game = _game;
-	savefile->Read(&currentTime, sizeof(currentTime));
-	savefile->Read(&lastUpdate, sizeof(lastUpdate));
-	savefile->Read(&elapsed, sizeof(elapsed));
+	currentTime = GameSSD_ReadSaveInt( savefile, "entity current time" );
+	lastUpdate = GameSSD_ReadSaveInt( savefile, "entity last update" );
+	elapsed = GameSSD_ReadSaveInt( savefile, "entity elapsed time" );
 
-	savefile->Read(&destroyed, sizeof(destroyed));
-	savefile->Read(&noHit, sizeof(noHit));
-	savefile->Read(&noPlayerDamage, sizeof(noPlayerDamage));
+	GameSSD_ReadSaveField( savefile, destroyed, "entity destroyed flag" );
+	GameSSD_ReadSaveField( savefile, noHit, "entity no-hit flag" );
+	GameSSD_ReadSaveField( savefile, noPlayerDamage, "entity no-player-damage flag" );
 
-	savefile->Read(&inUse, sizeof(inUse));
+	GameSSD_ReadSaveField( savefile, inUse, "entity in-use flag" );
 }
 
 void SSDEntity::EntityInit() {
@@ -350,15 +708,15 @@ SSDMover::~SSDMover() {
 void SSDMover::WriteToSaveGame( idFile *savefile ) {
 	SSDEntity::WriteToSaveGame(savefile);
 	
-	savefile->Write(&speed, sizeof(speed));
-	savefile->Write(&rotationSpeed, sizeof(rotationSpeed));
+	GameSSD_WriteSaveField( savefile, speed, "speed" );
+	GameSSD_WriteSaveField( savefile, rotationSpeed, "rotationSpeed" );
 }
 
 void SSDMover::ReadFromSaveGame( idFile *savefile,  idGameSSDWindow* _game  ) {
 	SSDEntity::ReadFromSaveGame(savefile, _game);
 
-	savefile->Read(&speed, sizeof(speed));
-	savefile->Read(&rotationSpeed, sizeof(rotationSpeed));
+	GameSSD_ReadSaveField( savefile, speed, "mover speed" );
+	GameSSD_ReadSaveField( savefile, rotationSpeed, "mover rotation speed" );
 }
 
 void SSDMover::MoverInit(const idVec3& _speed, float _rotationSpeed) {
@@ -405,13 +763,14 @@ SSDAsteroid::~SSDAsteroid() {
 void SSDAsteroid::WriteToSaveGame( idFile *savefile ) {
 	SSDMover::WriteToSaveGame(savefile);
 
-	savefile->Write(&health, sizeof(health));
+	GameSSD_WriteSaveInt( savefile, health );
 }
 
 void SSDAsteroid::ReadFromSaveGame( idFile *savefile,  idGameSSDWindow* _game  ) {
 	SSDMover::ReadFromSaveGame(savefile, _game);
+	GameSSD_ValidateExpectedEntityType( "asteroid entity", type, SSD_ENTITY_ASTEROID );
 
-	savefile->Read(&health, sizeof(health));
+	health = GameSSD_ReadSaveInt( savefile, "asteroid health" );
 }
 
 void SSDAsteroid::Init(idGameSSDWindow* _game, const idVec3& startPosition, const idVec2& _size, float _speed, float rotate, int _health) {
@@ -453,6 +812,9 @@ SSDAsteroid* SSDAsteroid::GetNewAsteroid(idGameSSDWindow* _game, const idVec3& s
 }
 
 SSDAsteroid* SSDAsteroid::GetSpecificAsteroid(int id) {
+	if ( id < 0 || id >= MAX_ASTEROIDS ) {
+		return NULL;
+	}
 	return &asteroidPool[id];
 }
 
@@ -463,10 +825,10 @@ void SSDAsteroid::WriteAsteroids(idFile* savefile) {
 			count++;
 		}
 	}
-	savefile->Write(&count, sizeof(count));
+	GameSSD_WriteSaveInt( savefile, count );
 	for(int i = 0; i < MAX_ASTEROIDS; i++) {
 		if(asteroidPool[i].inUse) {
-			savefile->Write(&(asteroidPool[i].id), sizeof(asteroidPool[i].id));
+			GameSSD_WriteSaveInt( savefile, asteroidPool[i].id );
 			asteroidPool[i].WriteToSaveGame(savefile);
 		}
 	}
@@ -475,11 +837,15 @@ void SSDAsteroid::WriteAsteroids(idFile* savefile) {
 void SSDAsteroid::ReadAsteroids(idFile* savefile, idGameSSDWindow* _game) {
 	
 	int count;
-	savefile->Read(&count, sizeof(count));
+	count = GameSSD_ReadSaveCount( savefile, "asteroid count", MAX_ASTEROIDS );
 	for(int i = 0; i < count; i++) {
 		int id;
-		savefile->Read(&id, sizeof(id));
+		id = GameSSD_ReadSavePoolId( savefile, "asteroid id", MAX_ASTEROIDS );
 		SSDAsteroid* ent = GetSpecificAsteroid(id);
+		if ( ent == NULL ) {
+			common->Error( "idGameSSDWindow::ReadFromSaveGame: missing asteroid id %d", id );
+		}
+		ent->id = id;
 		ent->ReadFromSaveGame(savefile, _game);
 	}
 }
@@ -503,13 +869,14 @@ SSDAstronaut::~SSDAstronaut() {
 void SSDAstronaut::WriteToSaveGame( idFile *savefile ) {
 	SSDMover::WriteToSaveGame(savefile);
 
-	savefile->Write(&health, sizeof(health));
+	GameSSD_WriteSaveInt( savefile, health );
 }
 
 void SSDAstronaut::ReadFromSaveGame( idFile *savefile,  idGameSSDWindow* _game  ) {
 	SSDMover::ReadFromSaveGame(savefile, _game);
+	GameSSD_ValidateExpectedEntityType( "astronaut entity", type, SSD_ENTITY_ASTRONAUT );
 
-	savefile->Read(&health, sizeof(health));
+	health = GameSSD_ReadSaveInt( savefile, "astronaut health" );
 }
 
 void SSDAstronaut::Init(idGameSSDWindow* _game, const idVec3& startPosition, float _speed, float rotate, int _health) {
@@ -543,6 +910,9 @@ SSDAstronaut* SSDAstronaut::GetNewAstronaut(idGameSSDWindow* _game, const idVec3
 }
 
 SSDAstronaut* SSDAstronaut::GetSpecificAstronaut(int id) {
+	if ( id < 0 || id >= MAX_ASTRONAUT ) {
+		return NULL;
+	}
 	return &astronautPool[id];
 	
 }
@@ -554,10 +924,10 @@ void SSDAstronaut::WriteAstronauts(idFile* savefile) {
 			count++;
 		}
 	}
-	savefile->Write(&count, sizeof(count));
+	GameSSD_WriteSaveInt( savefile, count );
 	for(int i = 0; i < MAX_ASTRONAUT; i++) {
 		if(astronautPool[i].inUse) {
-			savefile->Write(&(astronautPool[i].id), sizeof(astronautPool[i].id));
+			GameSSD_WriteSaveInt( savefile, astronautPool[i].id );
 			astronautPool[i].WriteToSaveGame(savefile);
 		}
 	}
@@ -566,11 +936,15 @@ void SSDAstronaut::WriteAstronauts(idFile* savefile) {
 void SSDAstronaut::ReadAstronauts(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
-	savefile->Read(&count, sizeof(count));
+	count = GameSSD_ReadSaveCount( savefile, "astronaut count", MAX_ASTRONAUT );
 	for(int i = 0; i < count; i++) {
 		int id;
-		savefile->Read(&id, sizeof(id));
+		id = GameSSD_ReadSavePoolId( savefile, "astronaut id", MAX_ASTRONAUT );
 		SSDAstronaut* ent = GetSpecificAstronaut(id);
+		if ( ent == NULL ) {
+			common->Error( "idGameSSDWindow::ReadFromSaveGame: missing astronaut id %d", id );
+		}
+		ent->id = id;
 		ent->ReadFromSaveGame(savefile, _game);
 	}
 }
@@ -604,38 +978,44 @@ SSDExplosion::~SSDExplosion() {
 void SSDExplosion::WriteToSaveGame( idFile *savefile ) {
 	SSDEntity::WriteToSaveGame(savefile);
 
-	savefile->Write(&finalSize, sizeof(finalSize));
-	savefile->Write(&length, sizeof(length));
-	savefile->Write(&beginTime, sizeof(beginTime));
-	savefile->Write(&endTime, sizeof(endTime));
-	savefile->Write(&explosionType, sizeof(explosionType));
+	GameSSD_WriteSaveField( savefile, finalSize, "finalSize" );
+	GameSSD_WriteSaveInt( savefile, length );
+	GameSSD_WriteSaveInt( savefile, beginTime );
+	GameSSD_WriteSaveInt( savefile, endTime );
+	GameSSD_WriteSaveInt( savefile, explosionType );
 
 	
-	savefile->Write(&(buddy->type), sizeof(buddy->type));
-	savefile->Write(&(buddy->id), sizeof(buddy->id));
+	GameSSD_WriteSaveInt( savefile, buddy->type );
+	GameSSD_WriteSaveInt( savefile, buddy->id );
 
-	savefile->Write(&killBuddy, sizeof(killBuddy));
-	savefile->Write(&followBuddy, sizeof(followBuddy));
+	GameSSD_WriteSaveField( savefile, killBuddy, "killBuddy" );
+	GameSSD_WriteSaveField( savefile, followBuddy, "followBuddy" );
 }
 
 void SSDExplosion::ReadFromSaveGame( idFile *savefile,  idGameSSDWindow* _game  ) {
 	SSDEntity::ReadFromSaveGame(savefile, _game);
+	GameSSD_ValidateExpectedEntityType( "explosion entity", type, SSD_ENTITY_EXPLOSION );
 
-	savefile->Read(&finalSize, sizeof(finalSize));
-	savefile->Read(&length, sizeof(length));
-	savefile->Read(&beginTime, sizeof(beginTime));
-	savefile->Read(&endTime, sizeof(endTime));
-	savefile->Read(&explosionType, sizeof(explosionType));
+	GameSSD_ReadSaveField( savefile, finalSize, "explosion final size" );
+	length = GameSSD_ReadSaveInt( savefile, "explosion length" );
+	beginTime = GameSSD_ReadSaveInt( savefile, "explosion begin time" );
+	endTime = GameSSD_ReadSaveInt( savefile, "explosion end time" );
+	explosionType = GameSSD_ReadSaveInt( savefile, "explosion type" );
+	GameSSD_ValidateSaveIndex( "explosion type", explosionType, EXPLOSION_MATERIAL_COUNT );
 
 	int type, id;
-	savefile->Read(&type, sizeof(type));
-	savefile->Read(&id, sizeof(id));
+	type = GameSSD_ReadSaveInt( savefile, "explosion buddy type" );
+	id = GameSSD_ReadSaveInt( savefile, "explosion buddy id" );
+	GameSSD_ValidateEntityReference( "explosion buddy", type, id );
 
 	//Get a pointer to my buddy
 	buddy = _game->GetSpecificEntity(type, id);
+	if ( buddy == NULL ) {
+		common->Error( "idGameSSDWindow::ReadFromSaveGame: missing explosion buddy type %d id %d", type, id );
+	}
 
-	savefile->Read(&killBuddy, sizeof(killBuddy));
-	savefile->Read(&followBuddy, sizeof(followBuddy));
+	GameSSD_ReadSaveField( savefile, killBuddy, "explosion kill-buddy flag" );
+	GameSSD_ReadSaveField( savefile, followBuddy, "explosion follow-buddy flag" );
 }
 
 void SSDExplosion::Init(idGameSSDWindow* _game, const idVec3& _position, const idVec2& _size, int _length, int _type, SSDEntity* _buddy, bool _killBuddy, bool _followBuddy) {
@@ -699,6 +1079,7 @@ SSDExplosion* SSDExplosion::GetNewExplosion(idGameSSDWindow* _game, const idVec3
 		if(!explosionPool[i].inUse) {
 			explosionPool[i].Init(_game, _position, _size, _length, _type, _buddy, _killBuddy, _followBuddy);
 			explosionPool[i].inUse = true;
+			explosionPool[i].id = i;
 			return &explosionPool[i];
 		}
 	}
@@ -706,6 +1087,9 @@ SSDExplosion* SSDExplosion::GetNewExplosion(idGameSSDWindow* _game, const idVec3
 }
 
 SSDExplosion* SSDExplosion::GetSpecificExplosion(int id) {
+	if ( id < 0 || id >= MAX_EXPLOSIONS ) {
+		return NULL;
+	}
 	return &explosionPool[id];
 }
 
@@ -716,10 +1100,10 @@ void SSDExplosion::WriteExplosions(idFile* savefile) {
 			count++;
 		}
 	}
-	savefile->Write(&count, sizeof(count));
+	GameSSD_WriteSaveInt( savefile, count );
 	for(int i = 0; i < MAX_EXPLOSIONS; i++) {
 		if(explosionPool[i].inUse) {
-			savefile->Write(&(explosionPool[i].id), sizeof(explosionPool[i].id));
+			GameSSD_WriteSaveInt( savefile, explosionPool[i].id );
 			explosionPool[i].WriteToSaveGame(savefile);
 		}
 	}
@@ -728,11 +1112,15 @@ void SSDExplosion::WriteExplosions(idFile* savefile) {
 void SSDExplosion::ReadExplosions(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
-	savefile->Read(&count, sizeof(count));
+	count = GameSSD_ReadSaveCount( savefile, "explosion count", MAX_EXPLOSIONS );
 	for(int i = 0; i < count; i++) {
 		int id;
-		savefile->Read(&id, sizeof(id));
+		id = GameSSD_ReadSavePoolId( savefile, "explosion id", MAX_EXPLOSIONS );
 		SSDExplosion* ent = GetSpecificExplosion(id);
+		if ( ent == NULL ) {
+			common->Error( "idGameSSDWindow::ReadFromSaveGame: missing explosion id %d", id );
+		}
+		ent->id = id;
 		ent->ReadFromSaveGame(savefile, _game);
 	}
 }
@@ -755,32 +1143,33 @@ SSDPoints::~SSDPoints() {
 void SSDPoints::WriteToSaveGame( idFile *savefile ) {
 	SSDEntity::WriteToSaveGame(savefile);
 
-	savefile->Write(&length, sizeof(length));
-	savefile->Write(&distance, sizeof(distance));
-	savefile->Write(&beginTime, sizeof(beginTime));
-	savefile->Write(&endTime, sizeof(endTime));
+	GameSSD_WriteSaveInt( savefile, length );
+	GameSSD_WriteSaveInt( savefile, distance );
+	GameSSD_WriteSaveInt( savefile, beginTime );
+	GameSSD_WriteSaveInt( savefile, endTime );
 
-	savefile->Write(&beginPosition, sizeof(beginPosition));
-	savefile->Write(&endPosition, sizeof(endPosition));
+	GameSSD_WriteSaveField( savefile, beginPosition, "beginPosition" );
+	GameSSD_WriteSaveField( savefile, endPosition, "endPosition" );
 
-	savefile->Write(&beginColor, sizeof(beginColor));
-	savefile->Write(&endColor, sizeof(endColor));
+	GameSSD_WriteSaveField( savefile, beginColor, "beginColor" );
+	GameSSD_WriteSaveField( savefile, endColor, "endColor" );
 	
 }
 
 void SSDPoints::ReadFromSaveGame( idFile *savefile,  idGameSSDWindow* _game  ) {
 	SSDEntity::ReadFromSaveGame(savefile, _game);
+	GameSSD_ValidateExpectedEntityType( "points entity", type, SSD_ENTITY_POINTS );
 
-	savefile->Read(&length, sizeof(length));
-	savefile->Read(&distance, sizeof(distance));
-	savefile->Read(&beginTime, sizeof(beginTime));
-	savefile->Read(&endTime, sizeof(endTime));
+	length = GameSSD_ReadSaveInt( savefile, "points length" );
+	distance = GameSSD_ReadSaveInt( savefile, "points distance" );
+	beginTime = GameSSD_ReadSaveInt( savefile, "points begin time" );
+	endTime = GameSSD_ReadSaveInt( savefile, "points end time" );
 
-	savefile->Read(&beginPosition, sizeof(beginPosition));
-	savefile->Read(&endPosition, sizeof(endPosition));
+	GameSSD_ReadSaveField( savefile, beginPosition, "points begin position" );
+	GameSSD_ReadSaveField( savefile, endPosition, "points end position" );
 
-	savefile->Read(&beginColor, sizeof(beginColor));
-	savefile->Read(&endColor, sizeof(endColor));
+	GameSSD_ReadSaveField( savefile, beginColor, "points begin color" );
+	GameSSD_ReadSaveField( savefile, endColor, "points end color" );
 }
 
 void SSDPoints::Init(idGameSSDWindow* _game, SSDEntity* _ent, int _points, int _length, int _distance, const idVec4& color) {
@@ -846,6 +1235,7 @@ SSDPoints* SSDPoints::GetNewPoints(idGameSSDWindow* _game, SSDEntity* _ent, int 
 		if(!pointsPool[i].inUse) {
 			pointsPool[i].Init(_game, _ent, _points, _length, _distance, color);
 			pointsPool[i].inUse = true;
+			pointsPool[i].id = i;
 			return &pointsPool[i];
 		}
 	}
@@ -853,6 +1243,9 @@ SSDPoints* SSDPoints::GetNewPoints(idGameSSDWindow* _game, SSDEntity* _ent, int 
 }
 
 SSDPoints* SSDPoints::GetSpecificPoints(int id) {
+	if ( id < 0 || id >= MAX_POINTS ) {
+		return NULL;
+	}
 	return &pointsPool[id];
 }
 
@@ -863,10 +1256,10 @@ void SSDPoints::WritePoints(idFile* savefile) {
 			count++;
 		}
 	}
-	savefile->Write(&count, sizeof(count));
+	GameSSD_WriteSaveInt( savefile, count );
 	for(int i = 0; i < MAX_POINTS; i++) {
 		if(pointsPool[i].inUse) {
-			savefile->Write(&(pointsPool[i].id), sizeof(pointsPool[i].id));
+			GameSSD_WriteSaveInt( savefile, pointsPool[i].id );
 			pointsPool[i].WriteToSaveGame(savefile);
 		}
 	}
@@ -875,11 +1268,15 @@ void SSDPoints::WritePoints(idFile* savefile) {
 void SSDPoints::ReadPoints(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
-	savefile->Read(&count, sizeof(count));
+	count = GameSSD_ReadSaveCount( savefile, "points count", MAX_POINTS );
 	for(int i = 0; i < count; i++) {
 		int id;
-		savefile->Read(&id, sizeof(id));
+		id = GameSSD_ReadSavePoolId( savefile, "points id", MAX_POINTS );
 		SSDPoints* ent = GetSpecificPoints(id);
+		if ( ent == NULL ) {
+			common->Error( "idGameSSDWindow::ReadFromSaveGame: missing points id %d", id );
+		}
+		ent->id = id;
 		ent->ReadFromSaveGame(savefile, _game);
 	}
 }
@@ -904,23 +1301,24 @@ SSDProjectile::~SSDProjectile() {
 void SSDProjectile::WriteToSaveGame( idFile *savefile ) {
 	SSDEntity::WriteToSaveGame(savefile);
 
-	savefile->Write(&dir, sizeof(dir));
-	savefile->Write(&speed, sizeof(speed));
-	savefile->Write(&beginTime, sizeof(beginTime));
-	savefile->Write(&endTime, sizeof(endTime));
+	GameSSD_WriteSaveField( savefile, dir, "dir" );
+	GameSSD_WriteSaveField( savefile, speed, "speed" );
+	GameSSD_WriteSaveInt( savefile, beginTime );
+	GameSSD_WriteSaveInt( savefile, endTime );
 
-	savefile->Write(&endPosition, sizeof(endPosition));
+	GameSSD_WriteSaveField( savefile, endPosition, "endPosition" );
 }
 
 void SSDProjectile::ReadFromSaveGame( idFile *savefile,  idGameSSDWindow* _game  ) {
 	SSDEntity::ReadFromSaveGame(savefile, _game);
+	GameSSD_ValidateExpectedEntityType( "projectile entity", type, SSD_ENTITY_PROJECTILE );
 
-	savefile->Read(&dir, sizeof(dir));
-	savefile->Read(&speed, sizeof(speed));
-	savefile->Read(&beginTime, sizeof(beginTime));
-	savefile->Read(&endTime, sizeof(endTime));
+	GameSSD_ReadSaveField( savefile, dir, "projectile direction" );
+	GameSSD_ReadSaveField( savefile, speed, "projectile speed" );
+	beginTime = GameSSD_ReadSaveInt( savefile, "projectile begin time" );
+	endTime = GameSSD_ReadSaveInt( savefile, "projectile end time" );
 
-	savefile->Read(&endPosition, sizeof(endPosition));
+	GameSSD_ReadSaveField( savefile, endPosition, "projectile end position" );
 }
 
 void SSDProjectile::Init(idGameSSDWindow* _game, const idVec3& _beginPosition, const idVec3& _endPosition, float _speed, float _size) {
@@ -963,6 +1361,7 @@ SSDProjectile* SSDProjectile::GetNewProjectile(idGameSSDWindow* _game, const idV
 		if(!projectilePool[i].inUse) {
 			projectilePool[i].Init(_game, _beginPosition, _endPosition, _speed, _size);
 			projectilePool[i].inUse = true;
+			projectilePool[i].id = i;
 			return &projectilePool[i];
 		}
 	}
@@ -970,6 +1369,9 @@ SSDProjectile* SSDProjectile::GetNewProjectile(idGameSSDWindow* _game, const idV
 }
 
 SSDProjectile* SSDProjectile::GetSpecificProjectile(int id) {
+	if ( id < 0 || id >= MAX_PROJECTILES ) {
+		return NULL;
+	}
 	return &projectilePool[id];
 }
 
@@ -980,10 +1382,10 @@ void SSDProjectile::WriteProjectiles(idFile* savefile) {
 			count++;
 		}
 	}
-	savefile->Write(&count, sizeof(count));
+	GameSSD_WriteSaveInt( savefile, count );
 	for(int i = 0; i < MAX_PROJECTILES; i++) {
 		if(projectilePool[i].inUse) {
-			savefile->Write(&(projectilePool[i].id), sizeof(projectilePool[i].id));
+			GameSSD_WriteSaveInt( savefile, projectilePool[i].id );
 			projectilePool[i].WriteToSaveGame(savefile);
 		}
 	}
@@ -992,11 +1394,15 @@ void SSDProjectile::WriteProjectiles(idFile* savefile) {
 void SSDProjectile::ReadProjectiles(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
-	savefile->Read(&count, sizeof(count));
+	count = GameSSD_ReadSaveCount( savefile, "projectile count", MAX_PROJECTILES );
 	for(int i = 0; i < count; i++) {
 		int id;
-		savefile->Read(&id, sizeof(id));
+		id = GameSSD_ReadSavePoolId( savefile, "projectile id", MAX_PROJECTILES );
 		SSDProjectile* ent = GetSpecificProjectile(id);
+		if ( ent == NULL ) {
+			common->Error( "idGameSSDWindow::ReadFromSaveGame: missing projectile id %d", id );
+		}
+		ent->id = id;
 		ent->ReadFromSaveGame(savefile, _game);
 	}
 }
@@ -1030,15 +1436,18 @@ SSDPowerup::~SSDPowerup() {
 void SSDPowerup::WriteToSaveGame( idFile *savefile ) {
 	SSDMover::WriteToSaveGame(savefile);
 
-	savefile->Write(&powerupState, sizeof(powerupState));
-	savefile->Write(&powerupType, sizeof(powerupType));
+	GameSSD_WriteSaveInt( savefile, powerupState );
+	GameSSD_WriteSaveInt( savefile, powerupType );
 }
 
 void SSDPowerup::ReadFromSaveGame( idFile *savefile,  idGameSSDWindow* _game  ) {
 	SSDMover::ReadFromSaveGame(savefile, _game);
+	GameSSD_ValidateExpectedEntityType( "powerup entity", type, SSD_ENTITY_POWERUP );
 
-	savefile->Read(&powerupState, sizeof(powerupState));
-	savefile->Read(&powerupType, sizeof(powerupType));
+	powerupState = GameSSD_ReadSaveInt( savefile, "powerup state" );
+	powerupType = GameSSD_ReadSaveInt( savefile, "powerup type" );
+	GameSSD_ValidateSaveIndex( "powerup state", powerupState, POWERUP_STATE_OPEN + 1 );
+	GameSSD_ValidateSaveIndex( "powerup type", powerupType, POWERUP_TYPE_MAX );
 }
 
 void SSDPowerup::OnHit(int key) {
@@ -1155,6 +1564,7 @@ SSDPowerup* SSDPowerup::GetNewPowerup(idGameSSDWindow* _game, float _speed, floa
 		if(!powerupPool[i].inUse) {
 			powerupPool[i].Init(_game, _speed, _rotation);
 			powerupPool[i].inUse = true;
+			powerupPool[i].id = i;
 			return &powerupPool[i];
 		}
 	}
@@ -1162,6 +1572,9 @@ SSDPowerup* SSDPowerup::GetNewPowerup(idGameSSDWindow* _game, float _speed, floa
 }
 
 SSDPowerup* SSDPowerup::GetSpecificPowerup(int id) {
+	if ( id < 0 || id >= MAX_POWERUPS ) {
+		return NULL;
+	}
 	return &powerupPool[id];
 }
 
@@ -1172,10 +1585,10 @@ void SSDPowerup::WritePowerups(idFile* savefile) {
 			count++;
 		}
 	}
-	savefile->Write(&count, sizeof(count));
+	GameSSD_WriteSaveInt( savefile, count );
 	for(int i = 0; i < MAX_POWERUPS; i++) {
 		if(powerupPool[i].inUse) {
-			savefile->Write(&(powerupPool[i].id), sizeof(powerupPool[i].id));
+			GameSSD_WriteSaveInt( savefile, powerupPool[i].id );
 			powerupPool[i].WriteToSaveGame(savefile);
 		}
 	}
@@ -1184,11 +1597,15 @@ void SSDPowerup::WritePowerups(idFile* savefile) {
 void SSDPowerup::ReadPowerups(idFile* savefile, idGameSSDWindow* _game) {
 
 	int count;
-	savefile->Read(&count, sizeof(count));
+	count = GameSSD_ReadSaveCount( savefile, "powerup count", MAX_POWERUPS );
 	for(int i = 0; i < count; i++) {
 		int id;
-		savefile->Read(&id, sizeof(id));
+		id = GameSSD_ReadSavePoolId( savefile, "powerup id", MAX_POWERUPS );
 		SSDPowerup* ent = GetSpecificPowerup(id);
+		if ( ent == NULL ) {
+			common->Error( "idGameSSDWindow::ReadFromSaveGame: missing powerup id %d", id );
+		}
+		ent->id = id;
 		ent->ReadFromSaveGame(savefile, _game);
 	}
 }
@@ -1219,7 +1636,9 @@ idGameSSDWindow::~idGameSSDWindow() {
 void idGameSSDWindow::WriteToSaveGame( idFile *savefile ) {
 	idWindow::WriteToSaveGame(savefile);
 
-	savefile->Write(&ssdTime, sizeof(ssdTime));
+	GameSSD_WriteSaveInt( savefile, GAME_SSD_SAVE_MAGIC );
+	GameSSD_WriteSaveInt( savefile, GAME_SSD_SAVE_VERSION );
+	GameSSD_WriteSaveInt( savefile, ssdTime );
 
 	beginLevel.WriteToSaveGame(savefile);
 	resetGame.WriteToSaveGame(savefile);
@@ -1227,23 +1646,23 @@ void idGameSSDWindow::WriteToSaveGame( idFile *savefile ) {
 	refreshGuiData.WriteToSaveGame(savefile);
 
 	crosshair.WriteToSaveGame(savefile);
-	savefile->Write(&screenBounds, sizeof(screenBounds));
+	GameSSD_WriteSaveField( savefile, screenBounds, "screenBounds" );
 
-	savefile->Write(&levelCount, sizeof(levelCount));
+	GameSSD_WriteSaveInt( savefile, levelCount );
 	for(int i = 0; i < levelCount; i++) {
-		savefile->Write(&(levelData[i]), sizeof(SSDLevelData_t));
-		savefile->Write(&(asteroidData[i]), sizeof(SSDAsteroidData_t));
-		savefile->Write(&(astronautData[i]), sizeof(SSDAstronautData_t));
-		savefile->Write(&(powerupData[i]), sizeof(SSDPowerupData_t));
+		GameSSD_WriteLevelData( savefile, levelData[i] );
+		GameSSD_WriteAsteroidData( savefile, asteroidData[i] );
+		GameSSD_WriteAstronautData( savefile, astronautData[i] );
+		GameSSD_WritePowerupData( savefile, powerupData[i] );
 	}
 
-	savefile->Write(&weaponCount, sizeof(weaponCount));
+	GameSSD_WriteSaveInt( savefile, weaponCount );
 	for(int i = 0; i < weaponCount; i++) {
-		savefile->Write(&(weaponData[i]), sizeof(SSDWeaponData_t));
+		GameSSD_WriteWeaponData( savefile, weaponData[i] );
 	}
 
-	savefile->Write(&superBlasterTimeout, sizeof(superBlasterTimeout));
-	savefile->Write(&gameStats, sizeof(SSDGameStats_t));
+	GameSSD_WriteSaveInt( savefile, superBlasterTimeout );
+	GameSSD_WriteGameStats( savefile, gameStats );
 
 	//Write All Static Entities
 	SSDAsteroid::WriteAsteroids(savefile);
@@ -1254,10 +1673,10 @@ void idGameSSDWindow::WriteToSaveGame( idFile *savefile ) {
 	SSDPowerup::WritePowerups(savefile);
 
 	int entCount = entities.Num();
-	savefile->Write(&entCount, sizeof(entCount));
+	GameSSD_WriteSaveInt( savefile, entCount );
 	for(int i = 0; i < entCount; i++) {
-		savefile->Write(&(entities[i]->type), sizeof(entities[i]->type));
-		savefile->Write(&(entities[i]->id), sizeof(entities[i]->id));
+		GameSSD_WriteSaveInt( savefile, entities[i]->type );
+		GameSSD_WriteSaveInt( savefile, entities[i]->id );
 	}
 }
 
@@ -1265,7 +1684,9 @@ void idGameSSDWindow::ReadFromSaveGame( idFile *savefile ) {
 	idWindow::ReadFromSaveGame(savefile);
 
 
-	savefile->Read(&ssdTime, sizeof(ssdTime));
+	gameSSDReadSaveVersion = GameSSD_ReadSaveVersion( savefile );
+	ssdTime = GameSSD_ReadSaveInt( savefile, "SSD time" );
+	ssdTimeAccumulator = static_cast<double>( ssdTime );
 
 	beginLevel.ReadFromSaveGame(savefile);
 	resetGame.ReadFromSaveGame(savefile);
@@ -1273,40 +1694,48 @@ void idGameSSDWindow::ReadFromSaveGame( idFile *savefile ) {
 	refreshGuiData.ReadFromSaveGame(savefile);
 
 	crosshair.ReadFromSaveGame(savefile);
-	savefile->Read(&screenBounds, sizeof(screenBounds));
+	GameSSD_ReadSaveField( savefile, screenBounds, "screen bounds" );
 
-	savefile->Read(&levelCount, sizeof(levelCount));
+	levelData.Clear();
+	asteroidData.Clear();
+	astronautData.Clear();
+	powerupData.Clear();
+
+	levelCount = GameSSD_ReadSaveCount( savefile, "level count", GAME_SSD_MAX_SAVE_LEVELS );
 	for(int i = 0; i < levelCount; i++) {
 		SSDLevelData_t newLevel;
-		savefile->Read(&newLevel, sizeof(SSDLevelData_t));
+		GameSSD_ReadLevelData( savefile, newLevel );
 		levelData.Append(newLevel);
 
 		SSDAsteroidData_t newAsteroid;
-		savefile->Read(&newAsteroid, sizeof(SSDAsteroidData_t));
+		GameSSD_ReadAsteroidData( savefile, newAsteroid );
 		asteroidData.Append(newAsteroid);
 
 		SSDAstronautData_t newAstronaut;
-		savefile->Read(&newAstronaut, sizeof(SSDAstronautData_t));
+		GameSSD_ReadAstronautData( savefile, newAstronaut );
 		astronautData.Append(newAstronaut);
 		
 		SSDPowerupData_t newPowerup;
-		savefile->Read(&newPowerup, sizeof(SSDPowerupData_t));
+		GameSSD_ReadPowerupData( savefile, newPowerup );
 		powerupData.Append(newPowerup);
 	}
 
-	savefile->Read(&weaponCount, sizeof(weaponCount));
+	weaponData.Clear();
+	weaponCount = GameSSD_ReadSaveCount( savefile, "weapon count", GAME_SSD_MAX_SAVE_WEAPONS );
 	for(int i = 0; i < weaponCount; i++) {
 		SSDWeaponData_t newWeapon;
-		savefile->Read(&newWeapon, sizeof(SSDWeaponData_t));
+		GameSSD_ReadWeaponData( savefile, newWeapon );
 		weaponData.Append(newWeapon);
 	}
 
-	savefile->Read(&superBlasterTimeout, sizeof(superBlasterTimeout));
+	superBlasterTimeout = GameSSD_ReadSaveInt( savefile, "super blaster timeout" );
 	
-	savefile->Read(&gameStats, sizeof(SSDGameStats_t));
-	//Reset this because it is no longer valid
-	gameStats.levelStats.targetEnt = NULL;
+	GameSSD_ReadGameStats( savefile, gameStats );
+	GameSSD_ValidateSaveIndex( "current level", gameStats.currentLevel, levelCount );
+	GameSSD_ValidateSaveIndexOrEnd( "next level", gameStats.nextLevel, levelCount );
+	GameSSD_ValidateSaveIndex( "current weapon", gameStats.currentWeapon, weaponCount );
 
+	ResetEntities();
 	SSDAsteroid::ReadAsteroids(savefile, this);
 	SSDAstronaut::ReadAstronauts(savefile, this);
 	SSDExplosion::ReadExplosions(savefile, this);
@@ -1315,17 +1744,19 @@ void idGameSSDWindow::ReadFromSaveGame( idFile *savefile ) {
 	SSDPowerup::ReadPowerups(savefile, this);
 
 	int entCount;
-	savefile->Read(&entCount, sizeof(entCount));
+	entCount = GameSSD_ReadSaveCount( savefile, "entity reference count", GAME_SSD_MAX_SAVE_ENTITY_REFS );
 
 	for(int i = 0; i < entCount; i++) {
 		int type, id;
-		savefile->Read(&type, sizeof(type));
-		savefile->Read(&id, sizeof(id));
+		type = GameSSD_ReadSaveInt( savefile, "entity reference type" );
+		id = GameSSD_ReadSaveInt( savefile, "entity reference id" );
+		GameSSD_ValidateEntityReference( "entity reference", type, id );
 
 		SSDEntity* ent = GetSpecificEntity(type, id);
-		if(ent) {
-			entities.Append(ent);
+		if( ent == NULL || !ent->inUse ) {
+			common->Error( "idGameSSDWindow::ReadFromSaveGame: invalid entity reference type %d id %d", type, id );
 		}
+		entities.Append(ent);
 	}
 }
 
@@ -1607,6 +2038,7 @@ void idGameSSDWindow::CommonInit() {
 	refreshGuiData = false;
 
 	ssdTime = 0;
+	ssdTimeAccumulator = 0.0;
 	levelCount = 0;
 	weaponCount = 0;
 	screenBounds = idBounds(idVec3(-320,-240,0), idVec3(320,240,0));
@@ -1778,8 +2210,10 @@ void idGameSSDWindow::UpdateGame() {
 
 	if(gameStats.gameRunning) {
 
-		//We assume an upate every 16 milliseconds
-		ssdTime += 16;
+		// The current UI frame loop still advances once per game tic, so keep
+		// the mini-game clock on the exact 60 Hz cadence instead of 16 ms.
+		ssdTimeAccumulator += static_cast<double>( common->GetUserCmdMsecFloat() );
+		ssdTime = static_cast<int>( ssdTimeAccumulator );
 
 		if(superBlasterTimeout && ssdTime > superBlasterTimeout) {
 			StopSuperBlaster();

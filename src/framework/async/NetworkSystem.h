@@ -29,6 +29,18 @@ If you have questions concerning this license or the applicable additional terms
 #ifndef __NETWORKSYSTEM_H__
 #define __NETWORKSYSTEM_H__
 
+#ifndef OPENPREY_ENABLE_BOTS
+#define OPENPREY_ENABLE_BOTS 0
+#endif
+
+#ifndef OPENPREY_ENABLE_MVD
+#define OPENPREY_ENABLE_MVD 0
+#endif
+
+#ifndef OPENPREY_ENABLE_REPEATER
+#define OPENPREY_ENABLE_REPEATER 0
+#endif
+
 
 /*
 ===============================================================================
@@ -63,6 +75,68 @@ typedef struct {
 //RAVEN END
 } scannedServer_t;
 
+// Fixed-width, append-only game-module ABI for the server MVD publisher.
+// The query that fills this value is fallible: false means that no recording
+// attempt has produced a result yet.  A pending result names only the staged
+// stream; a committed result names only the published stream; and a failed
+// result may name the recoverable staged stream that was left behind.
+static const int SERVER_MVD_RESULT_QPATH_BYTES = 160;
+
+typedef enum {
+	SERVER_MVD_RESULT_PENDING = 0,
+	SERVER_MVD_RESULT_COMMITTED,
+	SERVER_MVD_RESULT_FAILED,
+	SERVER_MVD_RESULT_STATE_COUNT
+} serverMVDResultState_t;
+
+typedef enum {
+	SERVER_MVD_REASON_NONE = 0,
+	SERVER_MVD_REASON_START_REJECTED,
+	SERVER_MVD_REASON_NAME_UNAVAILABLE,
+	SERVER_MVD_REASON_OPEN_FAILED,
+	SERVER_MVD_REASON_SCHEMA_INVALID,
+	SERVER_MVD_REASON_INITIALIZATION_FAILED,
+	SERVER_MVD_REASON_STREAM_WRITE_FAILED,
+	SERVER_MVD_REASON_FINALIZE_WRITE_FAILED,
+	SERVER_MVD_REASON_SYNC_FAILED,
+	SERVER_MVD_REASON_PROMOTE_FAILED,
+	SERVER_MVD_REASON_COUNT
+} serverMVDResultReason_t;
+
+typedef struct {
+	serverMVDResultState_t	state;
+	serverMVDResultReason_t	reason;
+	char					finalQPath[ SERVER_MVD_RESULT_QPATH_BYTES + 1 ];
+	char					partialQPath[ SERVER_MVD_RESULT_QPATH_BYTES + 1 ];
+} serverMVDRecordingResult_t;
+
+// Fixed-width, append-only game-module ABI for structured MVD markers. The
+// recorder stamps each marker with the server frame and time; text is display
+// data, limited to printable bytes, never an instruction for playback.
+static const int SERVER_MVD_MARKER_TEXT_BYTES = 120;
+
+typedef enum {
+	SERVER_MVD_MARKER_NONE = 0,
+	SERVER_MVD_MARKER_PHASE,		// value0 previous match phase, value1 new phase
+	SERVER_MVD_MARKER_ROUND,		// value0 previous round state, value1 new round state
+	SERVER_MVD_MARKER_PAUSE,		// value0 new pause state, value1 kind | ( owner side + 1 ) << 8
+	SERVER_MVD_MARKER_SCORE,		// value0 team, value1 new team score
+	SERVER_MVD_MARKER_KILL,			// client attacker (-1 world), value0 victim, value1 method of death
+	SERVER_MVD_MARKER_FLAG,			// client carrier (-1 none), value0 flag team, value1 new flag state
+	SERVER_MVD_MARKER_POWERUP,		// client holder, value0 powerup
+	SERVER_MVD_MARKER_NOTE,			// text from an operator
+	SERVER_MVD_MARKER_KIND_COUNT
+} serverMVDMarkerKind_t;
+
+typedef struct {
+	int						kind;
+	int						client;		// -1 when no player owns the event
+	int						instance;	// -1 for every instance
+	int						value0;
+	int						value1;
+	char					text[ SERVER_MVD_MARKER_TEXT_BYTES + 1 ];
+} serverMVDMarker_t;
+
 typedef enum {
 	SC_NONE = -1,
 	SC_FAVORITE,
@@ -90,12 +164,7 @@ class idNetworkSystem {
 public:
 	virtual					~idNetworkSystem( void ) {}
 
-// jmarshall
-	virtual int				AllocateClientSlotForBot(const char *botName, int maxPlayersOnServer);
-	virtual int				ServerSetBotUserCommand(int clientNum, int frameNum, const usercmd_t& cmd);
-	virtual int				ServerSetBotUserName(int clientNum, const char* playerName);
-// jmarshall end
-
+	// Keep this virtual prefix byte-for-byte compatible with Prey's v7 game API.
 	virtual void			ServerSendReliableMessage( int clientNum, const idBitMsg &msg );
 	virtual void			ServerSendReliableMessageExcluding( int clientNum, const idBitMsg &msg );
 	virtual int				ServerGetClientPing( int clientNum );
@@ -105,6 +174,10 @@ public:
 	virtual int				ServerGetClientOutgoingRate( int clientNum );
 	virtual int				ServerGetClientIncomingRate( int clientNum );
 	virtual float			ServerGetClientIncomingPacketLoss( int clientNum );
+	// Typed game-side moderation must not synthesize console command text.
+	// Returns false for an inactive server, invalid slot, local listen host or
+	// invalid reason; successful calls synchronously retire the connection.
+	virtual bool			ServerDropClient( int clientNum, const char *reason );
 
 	virtual void			ClientSendReliableMessage( const idBitMsg &msg );
 	virtual int				ClientGetPrediction( void );
@@ -113,46 +186,78 @@ public:
 	virtual int				ClientGetIncomingRate( void );
 	virtual float			ClientGetIncomingPacketLoss( void );
 
-public:
+	// Engine-only helpers below are deliberately non-virtual. Adding them to the
+	// vtable would shift every Prey idNetworkSystem call across the DLL boundary.
+	const char *			GetServerAddress( void );
+	void					SetLoadingText( const char *loadingText );
+	void					AddLoadingIcon( const char *icon );
+
+#if OPENPREY_ENABLE_MVD
+	// OPENPREY-GATED(D9): upstream MVD routing is outside game API v7.
+	void					ServerSendReliableMessageNoDemo( int clientNum, const idBitMsg &msg );
+	void					ServerSendReliableMessageExcludingNoDemo( int clientNum, const idBitMsg &msg );
+	void					ServerRecordInstanceReliableMessage( int instance, int excludeClient, const idBitMsg &msg );
+#endif
+
+#if OPENPREY_ENABLE_BOTS
+	// OPENPREY-GATED(D9): upstream bot entry points are outside game API v7.
+	int					AllocateClientSlotForBot( const char *botName, int maxPlayersOnServer );
+	int					ServerSetBotUserCommand( int clientNum, int frameNum, const usercmd_t &cmd );
+	int					ServerSetBotUserName( int clientNum, const char *playerName );
+	int					ServerConnectBot( void ) { return -1; }
+#endif
+
 	// RAVEN BEGIN
 // ddynerman: added some utility functions
 	// uses a static buffer, copy it before calling in game again
-	virtual const char* GetServerAddress(void);
-	virtual const char* GetClientAddress(int clientNum) { return 0; }
-	virtual	void			AddFriend(int clientNum) { }
-	virtual void			RemoveFriend(int clientNum) { }
+	const char* GetClientAddress(int clientNum) { return 0; }
+	void			AddFriend(int clientNum) { }
+	void			RemoveFriend(int clientNum) { }
 	// for MP games
-	virtual void			SetLoadingText(const char* loadingText);
-	virtual void			AddLoadingIcon(const char* icon);
-	virtual const char* GetClientGUID(int clientNum) { return 0; }
+	const char* GetClientGUID(int clientNum) { return 0; }
 	// RAVEN END
 
-	virtual void			GetTrafficStats(int& bytesSent, int& packetsSent, int& bytesReceived, int& packetsReceived) const { }
+	void			GetTrafficStats(int& bytesSent, int& packetsSent, int& bytesReceived, int& packetsReceived) const { }
 
 	// server browser
-	virtual int				GetNumScannedServers(void) { return 0; }
-	virtual const scannedServer_t* GetScannedServerInfo(int serverNum) { return 0; }
-	virtual const scannedClient_t* GetScannedServerClientInfo(int serverNum, int clientNum) { return 0; }
-	virtual void			AddSortFunction(const sortInfo_t& sortInfo) { }
-	virtual bool			RemoveSortFunction(const sortInfo_t& sortInfo) { return 0; }
-	virtual void			UseSortFunction(const sortInfo_t& sortInfo, bool use = true) { }
-	virtual bool			SortFunctionIsActive(const sortInfo_t& sortInfo) { return 0; }
+	int				GetNumScannedServers(void) { return 0; }
+	const scannedServer_t* GetScannedServerInfo(int serverNum) { return 0; }
+	const scannedClient_t* GetScannedServerClientInfo(int serverNum, int clientNum) { return 0; }
+	void			AddSortFunction(const sortInfo_t& sortInfo) { }
+	bool			RemoveSortFunction(const sortInfo_t& sortInfo) { return 0; }
+	void			UseSortFunction(const sortInfo_t& sortInfo, bool use = true) { }
+	bool			SortFunctionIsActive(const sortInfo_t& sortInfo) { return 0; }
 
 	// returns true if enabled
-	virtual bool			HTTPEnable(bool enable) { return 0; }
+	bool			HTTPEnable(bool enable) { return 0; }
 
-	virtual void			ClientSetServerInfo(const idDict& serverSI) { }
-	virtual void			RepeaterSetInfo(const idDict& info) { }
+	void			ClientSetServerInfo(const idDict& serverSI) { }
 
-	virtual const char* GetViewerGUID(int clientNum) { return 0; }
+#if OPENPREY_ENABLE_REPEATER
+	// OPENPREY-GATED(D9): repeater support is not exposed through game API v7.
+	void			RepeaterSetInfo(const idDict& info) { }
+	const char* GetViewerGUID(int clientNum) { return 0; }
+	int				RepeaterGetClientNum(int clientId) { return -1; }
+#endif
 
-	virtual int				ServerGetClientNum(int clientId) { return 0; }
-	virtual	int				ServerGetServerTime(void) { return 0; }
+	int				ServerGetClientNum(int clientId) { return 0; }
+	int				ServerGetServerTime(void) { return 0; }
 
-	// returns the new clientNum or -1 if there weren't any free.
-	virtual int				ServerConnectBot(void) { return 0; }
-
-	virtual int				RepeaterGetClientNum(int clientId) { return 0; }
+	// Upstream appends these to its game-module ABI. Prey's v7 game never calls
+	// them, so they stay non-virtual engine helpers like the block above.
+	// Server-owned multi-view demo lifecycle.
+	bool			ServerStartMVDRecording( const char *name );
+	bool			ServerStopMVDRecording( const char *reason );
+	bool			ServerIsMVDRecording( void ) const;
+	bool			ServerCopyMVDRecordingQPath( char *buffer, int bufferSize ) const;
+	bool			ServerCopyMVDRecordingResult( serverMVDRecordingResult_t &result ) const;
+	// Voice has exact recipients, no spectator/demo fanout and no reliable
+	// delivery. The server batches only the current frame, after snapshots.
+	// False means dropped; true never promises delivery of disposable media.
+	bool			ClientSendVoice( const idBitMsg &msg );
+	bool			ServerSendVoice( int clientNum, const idBitMsg &msg );
+	// False when no recording is active or the marker is malformed.
+	bool			ServerRecordMVDMarker( const serverMVDMarker_t &marker );
 };
 
 extern idNetworkSystem *	networkSystem;

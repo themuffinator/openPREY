@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Configure OpenPrey (Meson Debug)",
+      "label": "Regenerate openPREY Launch Configurations",
       "type": "shell",
       "command": "powershell",
       "args": [
@@ -10,21 +10,13 @@
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        "${workspaceFolder}\\tools\\build\\meson_setup.ps1",
-        "setup",
-        "--wipe",
-        "${workspaceFolder}\\builddir",
-        "${workspaceFolder}",
-        "--backend",
-        "ninja",
-        "--buildtype",
-        "debug",
-        "--wrap-mode=forcefallback"
+        "${workspaceFolder}\\.vscode\\generate-launch.ps1"
       ],
       "problemMatcher": []
     },
     {
-      "label": "Compile OpenPrey (Meson Debug)",
+      "label": "Configure openPREY (Meson Debug)",
+      "detail": "Configure builddir as a debug build, reconfiguring it in place when it exists.",
       "type": "shell",
       "command": "powershell",
       "args": [
@@ -32,44 +24,69 @@
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        "${workspaceFolder}\\tools\\build\\meson_setup.ps1",
-        "compile",
-        "-C",
-        "${workspaceFolder}\\builddir"
-      ],
-      "problemMatcher": [
-        "$msCompile"
-      ]
-    },
-    {
-      "label": "Stage OpenPrey Install Tree (Meson Debug)",
-      "type": "shell",
-      "command": "powershell",
-      "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}\\tools\\build\\meson_setup.ps1",
-        "install",
-        "-C",
-        "${workspaceFolder}\\builddir",
-        "--no-rebuild",
-        "--skip-subprojects"
+        "${workspaceFolder}\\.vscode\\meson-task.ps1",
+        "setup"
       ],
       "problemMatcher": []
     },
     {
-      "label": "Build OpenPrey (Meson Debug)",
-      "dependsOrder": "sequence",
-      "dependsOn": [
-        "Compile OpenPrey (Meson Debug)",
-        "Stage OpenPrey Install Tree (Meson Debug)"
+      "label": "Compile openPREY (Meson Debug)",
+      "detail": "Compile builddir without staging anything.",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\.vscode\\meson-task.ps1",
+        "compile"
+      ],
+      "problemMatcher": ["$msCompile"]
+    },
+    {
+      "label": "Stage openPREY Install Tree (Meson Debug)",
+      "detail": "Install builddir into .install with meson install (no rebuild, no subprojects).",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\.vscode\\meson-task.ps1",
+        "install"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Build openPREY (Meson Debug)",
+      "detail": "Compile builddir, then copy changed runtime files into .install for the launch configurations.",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\.vscode\\meson-task.ps1",
+        "fastbuild"
       ],
       "group": {
         "kind": "build",
         "isDefault": true
       },
+      "problemMatcher": ["$msCompile"]
+    },
+    {
+      "label": "Full Build and Stage openPREY (Meson Debug)",
+      "detail": "Configure, compile and fully install builddir into .install.",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Configure openPREY (Meson Debug)",
+        "Compile openPREY (Meson Debug)",
+        "Stage openPREY Install Tree (Meson Debug)"
+      ],
       "problemMatcher": []
     }
   ]

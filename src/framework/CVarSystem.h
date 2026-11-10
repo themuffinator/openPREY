@@ -81,6 +81,7 @@ typedef enum {
 	CVAR_SPECIAL_CONCAT		= BIT(22),	// special concatination of the incoming string to the cvar system, will remove space between ^ and the code that is produced by tokenzier
 	CVAR_STRIPTRAILING		= BIT(23),	// always strip trailing / on that cvar
 	CVAR_REPEATERINFO		= BIT(24),	// sent from repeaters, available to menu
+	CVAR_PRIVATE			= BIT(25),	// secret value: redact from console output and omit from generic serialization
 } cvarFlags_t;
 
 
@@ -253,6 +254,17 @@ public:
 							// Moves CVars to and from dictionaries.
 	virtual const idDict *	MoveCVarsToDict( int flags ) const = 0;
 	virtual void			SetCVarsFromDict( const idDict &dict ) = 0;
+	// Applies only CVars carrying exactly the authority represented by one of
+	// CVAR_USERINFO, CVAR_SERVERINFO, or CVAR_NETWORKSYNC.  Network decoders
+	// must use this entry point instead of granting a received dictionary the
+	// authority to force-set arbitrary registered CVars.
+	virtual bool			SetCVarsFromDictByFlags( const idDict &dict, int requiredFlag ) = 0;
+
+	// ABI rule: append new virtual methods here.  Inserting one above the
+	// legacy SetCVarsFromDict tail silently changes every later vtable slot for
+	// an otherwise version-compatible game module.
+	// Console front ends use this before echoing or retaining typed input.
+	virtual bool			CommandContainsPrivateCVar( const char *commandText ) const = 0;
 };
 
 extern idCVarSystem *		cvarSystem;
@@ -285,9 +297,7 @@ ID_INLINE void idCVar::Init( const char *name, const char *value, int flags, con
 	this->integerValue = 0;
 	this->floatValue = 0.0f;
 	this->internalVar = this;
-// jmarshall - 64bit was 0xFFFFFFFFFF
-	if ( staticVars != (idCVar *)-1 ) {
-// jmarshall end
+	if ( staticVars != reinterpret_cast< idCVar * >( static_cast<uintptr_t>( -1 ) ) ) {
 		this->next = staticVars;
 		staticVars = this;
 	} else {
@@ -300,15 +310,11 @@ ID_INLINE void idCVar::RegisterStaticVars( void ) {
 // jnewquist: Tag scope and callees to track allocations using "new".
 	MEM_SCOPED_TAG(tag,MA_CVAR);
 // RAVEN END
-// jmarshall - 64bit was 0xFFFFFFFFFF
-	if ( staticVars != (idCVar *)-1 ) {
-// jmarshall end
+	if ( staticVars != reinterpret_cast< idCVar * >( static_cast<uintptr_t>( -1 ) ) ) {
 		for ( idCVar *cvar = staticVars; cvar; cvar = cvar->next ) {
 			cvarSystem->Register( cvar );
 		}
-// jmarshall - 64bit was 0xFFFFFFFFFF
-		staticVars = (idCVar *)-1;
-// jmarshall end
+		staticVars = reinterpret_cast< idCVar * >( static_cast<uintptr_t>( -1 ) );
 	}
 }
 

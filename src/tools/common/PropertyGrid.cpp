@@ -75,13 +75,14 @@ bool rvPropertyGrid::Create ( HWND parent, int id, int style )
 	mStyle = style;
 
 	// Create the List view
-	mWindow = CreateWindowEx ( 0, "LISTBOX", "", WS_VSCROLL|WS_CHILD|WS_VISIBLE|LBS_OWNERDRAWFIXED|LBS_NOINTEGRALHEIGHT|LBS_NOTIFY, 0, 0, 0, 0, parent, (HMENU)id, win32.hInstance, 0 );	
-	mListWndProc = (WNDPROC)GetWindowLong ( mWindow, GWL_WNDPROC );
-	SetWindowLong ( mWindow, GWL_USERDATA, (LONG)this );
-	SetWindowLong ( mWindow, GWL_WNDPROC, (LONG)WndProc );
+	mWindow = CreateWindowEx( 0, "LISTBOX", "", WS_VSCROLL | WS_CHILD | WS_VISIBLE | LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
+		0, 0, 0, 0, parent, reinterpret_cast< HMENU >( static_cast< INT_PTR >( id ) ), win32.hInstance, 0 );
+	mListWndProc = reinterpret_cast< WNDPROC >( GetWindowLongPtr( mWindow, GWLP_WNDPROC ) );
+	SetWindowLongPtr( mWindow, GWLP_USERDATA, reinterpret_cast< LONG_PTR >( this ) );
+	SetWindowLongPtr( mWindow, GWLP_WNDPROC, reinterpret_cast< LONG_PTR >( WndProc ) );
 
 	LoadLibrary ( "Riched20.dll" );
-	mEdit = CreateWindowEx ( 0, "RichEdit20A", "", WS_CHILD, 0, 0, 0, 0, mWindow, (HMENU) 999, win32.hInstance, NULL );
+	mEdit = CreateWindowEx ( 0, "RichEdit20A", "", WS_CHILD, 0, 0, 0, 0, mWindow, reinterpret_cast< HMENU >( static_cast< INT_PTR >( 999 ) ), win32.hInstance, NULL );
 	SendMessage ( mEdit, EM_SETEVENTMASK, 0, ENM_KEYEVENTS );
 
 	// Set the font of the list box
@@ -194,11 +195,11 @@ void rvPropertyGrid::FinishEdit ( void )
 		NMPROPGRID nmpg;
 		nmpg.hdr.code = PGN_ITEMCHANGED;
 		nmpg.hdr.hwndFrom = mWindow;
-		nmpg.hdr.idFrom = GetWindowLong ( mWindow, GWL_ID );
+		nmpg.hdr.idFrom = static_cast< UINT_PTR >( GetWindowLongPtr( mWindow, GWLP_ID ) );
 		nmpg.mName  = item->mName;
 		nmpg.mValue = value;										
 
-		if ( !SendMessage ( GetParent ( mWindow ), WM_NOTIFY, 0, (LONG)&nmpg ) )
+		if ( !SendMessage( GetParent( mWindow ), WM_NOTIFY, 0, reinterpret_cast< LPARAM >( &nmpg ) ) )
 		{
 			mState = STATE_EDIT;
 			SetFocus ( mEdit );
@@ -281,7 +282,8 @@ int rvPropertyGrid::AddItem ( const char* name, const char* value, EItemType typ
 	
 	insert = SendMessage(mWindow,LB_GETCOUNT,0,0) - ((mStyle&PGS_ALLOWINSERT)?1:0);
 	
-	return SendMessage ( mWindow, LB_INSERTSTRING, insert, (LONG)item );
+	return static_cast< int >( SendMessage( mWindow, LB_INSERTSTRING, insert,
+		reinterpret_cast< LPARAM >( item ) ) );
 }
 
 /*
@@ -330,7 +332,7 @@ void rvPropertyGrid::RemoveAllItems ( void )
 		item = new rvPropertyGridItem;
 		item->mName = "";
 		item->mValue = "";
-		SendMessage ( mWindow, LB_ADDSTRING, 0, (LONG)item );
+		SendMessage( mWindow, LB_ADDSTRING, 0, reinterpret_cast< LPARAM >( item ) );
 	}
 }
 
@@ -383,7 +385,7 @@ Window procedure for property grid
 */
 LRESULT CALLBACK rvPropertyGrid::WndProc ( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
-	rvPropertyGrid* grid = (rvPropertyGrid*) GetWindowLong ( hWnd, GWL_USERDATA );
+	rvPropertyGrid* grid = reinterpret_cast< rvPropertyGrid * >( GetWindowLongPtr( hWnd, GWLP_USERDATA ) );
 	
 	switch ( msg )
 	{			
@@ -398,7 +400,7 @@ LRESULT CALLBACK rvPropertyGrid::WndProc ( HWND hWnd, UINT msg, WPARAM wParam, L
 			nmkey.hdr.hwndFrom = grid->mWindow;
 			nmkey.nVKey = wParam;
 			nmkey.uFlags = HIWORD(lParam);
-			nmkey.hdr.idFrom = GetWindowLong ( hWnd, GWL_ID );
+			nmkey.hdr.idFrom = static_cast< UINT_PTR >( GetWindowLongPtr( hWnd, GWLP_ID ) );
 			SendMessage ( GetParent ( hWnd ), WM_NOTIFY, nmkey.hdr.idFrom, (LPARAM)&nmkey );		
 			break;
 		}
@@ -462,7 +464,7 @@ LRESULT CALLBACK rvPropertyGrid::WndProc ( HWND hWnd, UINT msg, WPARAM wParam, L
 		}
 		
 		case WM_COMMAND:
-			if ( lParam == (long)grid->mEdit )
+			if ( lParam == reinterpret_cast< LPARAM >( grid->mEdit ) )
 			{
 				if ( HIWORD(wParam) == EN_KILLFOCUS )
 				{
@@ -545,7 +547,7 @@ LRESULT CALLBACK rvPropertyGrid::WndProc ( HWND hWnd, UINT msg, WPARAM wParam, L
 			ScreenToClient ( hWnd, &point );
 			if ( point.x >= grid->mSplitter - 2 && point.x <= grid->mSplitter + 2 )
 			{
-				SetCursor ( LoadCursor ( NULL, MAKEINTRESOURCE(IDC_SIZEWE)));
+				SetCursor( LoadCursor( NULL, IDC_SIZEWE ) );
 				return TRUE;
 			}
 			break;

@@ -31,11 +31,11 @@ public:
 	type				GetCurrentValue( float time ) const;
 	type				GetCurrentSpeed( float time ) const;
 	bool				IsDone( float time ) const { return ( !( extrapolationType & EXTRAPOLATION_NOSTOP ) && time >= startTime + duration ); }
-	void				SetStartTime( float time ) { startTime = time; currentTime = -1; }
+	void				SetStartTime( float time ) { startTime = time; cacheValid = false; }
 	float				GetStartTime( void ) const { return startTime; }
 	float				GetEndTime( void ) const { return ( !( extrapolationType & EXTRAPOLATION_NOSTOP ) && duration > 0 ) ? startTime + duration : 0; }
 	float				GetDuration( void ) const { return duration; }
-	void				SetStartValue( const type &value ) { startValue = value; currentTime = -1; }
+	void				SetStartValue( const type &value ) { startValue = value; cacheValid = false; }
 	const type &		GetStartValue( void ) const { return startValue; }
 	const type &		GetBaseSpeed( void ) const { return baseSpeed; }
 	const type &		GetSpeed( void ) const { return speed; }
@@ -58,6 +58,7 @@ private:
 	type				speed;
 	mutable float		currentTime;
 	mutable type		currentValue;
+	mutable bool		cacheValid;
 };
 
 /*
@@ -73,6 +74,7 @@ ID_INLINE idExtrapolate<type>::idExtrapolate() {
 	memset( &baseSpeed, 0, sizeof( baseSpeed ) );
 	memset( &speed, 0, sizeof( speed ) );
 	currentTime = -1;
+	cacheValid = false;
 	currentValue = startValue;
 }
 
@@ -90,6 +92,7 @@ ID_INLINE void idExtrapolate<type>::Init( const float startTime, const float dur
 	this->baseSpeed = baseSpeed;
 	this->speed = speed;
 	currentTime = -1;
+	cacheValid = false;
 	currentValue = startValue;
 }
 
@@ -102,14 +105,16 @@ template< class type >
 ID_INLINE type idExtrapolate<type>::GetCurrentValue( float time ) const {
 	float deltaTime, s;
 
-	if ( time == currentTime ) {
+	if ( cacheValid && time == currentTime ) {
 		return currentValue;
 	}
 
 	currentTime = time;
+	cacheValid = true;
 
 	if ( time < startTime ) {
-		return startValue;
+		currentValue = startValue;
+		return currentValue;
 	}
 
 	if ( !( extrapolationType &	EXTRAPOLATION_NOSTOP ) && ( time > startTime + duration ) ) {

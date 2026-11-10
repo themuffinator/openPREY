@@ -30,6 +30,24 @@ If you have questions concerning this license or the applicable additional terms
 
 idCVar s_subFraction( "s_subFraction", "0.5", CVAR_ARCHIVE | CVAR_FLOAT, "Amount of each sound to send to the LFE channel" );
 
+static float OpenQ4_SanitizeMixFraction( const float value, const float fallback )
+{
+	if( FLOAT_IS_NAN( value ) )
+	{
+		return fallback;
+	}
+	return idMath::ClampFloat( 0.0f, 1.0f, value );
+}
+
+static float OpenQ4_SanitizeMixScale( const float value )
+{
+	if( FLOAT_IS_NAN( value ) || value <= 0.0f )
+	{
+		return 0.0f;
+	}
+	return idMath::ClampFloat( 0.0f, 16.0f, value );
+}
+
 idVec2 idSoundVoice_Base::speakerPositions[idWaveFile::CHANNEL_INDEX_MAX];
 int idSoundVoice_Base::speakerLeft[idWaveFile::CHANNEL_INDEX_MAX] = {0 };
 int idSoundVoice_Base::speakerRight[idWaveFile::CHANNEL_INDEX_MAX] = {0 };
@@ -54,11 +72,20 @@ idSoundVoice_Base::idSoundVoice_Base() :
 	dryLevel( 1.0f ),
 	innerRadius( 32.0f ),
 	occlusion( 0.0f ),
+	environmentMuffle( 0.0f ),
+	reverbAreaSlot( -1 ),
+	eaxDirectGain( 1.0f ),
+	eaxDirectGainHF( 1.0f ),
+	eaxPrimaryGain( 0.0f ),
+	eaxPrimaryGainHF( 1.0f ),
+	eaxAreaGain( 0.0f ),
+	eaxAreaGainHF( 1.0f ),
 	channelMask( 0 ),
 	innerSampleRangeSqr( 0.0f ),
 	outerSampleRangeSqr( 0.0f )
 {
 	position.Zero();
+	velocity.Zero();
 }
 
 /*
@@ -107,7 +134,7 @@ void idSoundVoice_Base::InitSurround( int outputChannels, int channelMask )
 	speakerRight[idWaveFile::CHANNEL_INDEX_FRONT_CENTER] = idWaveFile::CHANNEL_INDEX_FRONT_CENTER;
 	speakerRight[idWaveFile::CHANNEL_INDEX_LOW_FREQUENCY] = idWaveFile::CHANNEL_INDEX_LOW_FREQUENCY;
 
-	dstChannels = outputChannels;
+	dstChannels = idMath::ClampInt( 0, MAX_CHANNELS_PER_VOICE, outputChannels );
 	dstMask = channelMask;
 
 	// dstMap maps a destination channel to a speaker
@@ -116,9 +143,9 @@ void idSoundVoice_Base::InitSurround( int outputChannels, int channelMask )
 	dstCenter = -1;
 	memset( dstMap, 0, sizeof( dstMap ) );
 	memset( invMap, 0, sizeof( invMap ) );
-	for( int i = 0, c = 0; i < idWaveFile::CHANNEL_INDEX_MAX && c < MAX_CHANNELS_PER_VOICE; i++ )
+	for( int i = 0, c = 0; i < idWaveFile::CHANNEL_INDEX_MAX; i++ )
 	{
-		if( dstMask & (1ULL << (i)))
+		if( ( dstMask & (1ULL << (i)) ) != 0 && c < dstChannels )
 		{
 			if( i == idWaveFile::CHANNEL_INDEX_LOW_FREQUENCY )
 			{
@@ -170,6 +197,18 @@ idSoundVoice_Base::CalculateSurround
 */
 void idSoundVoice_Base::CalculateSurround( int srcChannels, float pLevelMatrix[ MAX_CHANNELS_PER_VOICE * MAX_CHANNELS_PER_VOICE ], float scale )
 {
+	if( pLevelMatrix == NULL )
+	{
+		return;
+	}
+
+	memset( pLevelMatrix, 0, sizeof( float ) * MAX_CHANNELS_PER_VOICE * MAX_CHANNELS_PER_VOICE );
+	scale = OpenQ4_SanitizeMixScale( scale );
+	if( srcChannels <= 0 || srcChannels > MAX_CHANNELS_PER_VOICE || dstChannels <= 0 || dstChannels > MAX_CHANNELS_PER_VOICE )
+	{
+		return;
+	}
+
 	// Hack for mono
 	if( dstChannels == 1 )
 	{
@@ -187,16 +226,16 @@ void idSoundVoice_Base::CalculateSurround( int srcChannels, float pLevelMatrix[ 
 
 #define MATINDEX( src, dst ) ( srcChannels * dst + src )
 
-	float subFraction = s_subFraction.GetFloat();
+	float subFraction = OpenQ4_SanitizeMixFraction( s_subFraction.GetFloat(), 0.0f );
 
 	if( srcChannels == 1 )
 	{
 		idVec2 p2 = position.ToVec2();
 
-		float centerFraction = centerChannel;
+		float centerFraction = OpenQ4_SanitizeMixFraction( centerChannel, 0.0f );
 
 		float sqrLength = p2.LengthSqr();
-		if( sqrLength <= 0.01f )
+		if( FLOAT_IS_NAN( sqrLength ) || sqrLength <= 0.01f )
 		{
 			// If we are on top of the listener, simply route all channels to each speaker equally
 			for( int i = 0; i < dstChannels; i++ )
@@ -211,10 +250,11 @@ void idSoundVoice_Base::CalculateSurround( int srcChannels, float pLevelMatrix[ 
 			p2 *= invLength;
 
 			float spatialize = 1.0f;
-			if( distance < innerRadius )
+			if( innerRadius > 0.0f && distance < innerRadius )
 			{
 				spatialize = distance / innerRadius;
 			}
+			spatialize = OpenQ4_SanitizeMixFraction( spatialize, 1.0f );
 			float omni = omniLevel * ( 1.0f - spatialize );
 
 			if( dstCenter != -1 )
@@ -257,10 +297,18 @@ void idSoundVoice_Base::CalculateSurround( int srcChannels, float pLevelMatrix[ 
 			// Divide the amplitude between the 2 closest speakers
 			float distA = ( speakerPositions[speakerA] - p2 ).Length();
 			float distB = ( speakerPositions[speakerB] - p2 ).Length();
-			float distCinv = 1.0f / ( distA + distB );
 			float volumes[MAX_CHANNELS_PER_VOICE] = { 0 };
-			volumes[channelA] = ( distB * distCinv );
-			volumes[channelB] = ( distA * distCinv );
+			const float distSum = distA + distB;
+			if( FLOAT_IS_NAN( distSum ) || distSum <= 0.0f )
+			{
+				volumes[channelA] = 1.0f;
+			}
+			else
+			{
+				float distCinv = 1.0f / distSum;
+				volumes[channelA] = ( distB * distCinv );
+				volumes[channelB] = ( distA * distCinv );
+			}
 			for( int i = 0; i < dstChannels; i++ )
 			{
 				pLevelMatrix[MATINDEX( 0, i )] = ( volumes[i] * spatialize ) + omni;
@@ -288,6 +336,7 @@ void idSoundVoice_Base::CalculateSurround( int srcChannels, float pLevelMatrix[ 
 	else
 	{
 		idLib::Warning( "We don't support %d channel sound files", srcChannels );
+		return;
 	}
 	for( int i = 0; i < srcChannels * dstChannels; i++ )
 	{

@@ -2,12 +2,18 @@
 
 
 
-#define HONEYMAN_INIT_VALUE		0x00000000L
-#define HONEYMAN_XOR_VALUE		0x00000000L
+#include <stdint.h>
+
+typedef uint32_t honeymanWord_t;
+
+static_assert( sizeof( honeymanWord_t ) == 4, "Honeyman checksum requires a 32-bit word" );
+
+#define HONEYMAN_INIT_VALUE		UINT32_C( 0x00000000 )
+#define HONEYMAN_XOR_VALUE		UINT32_C( 0x00000000 )
 
 #ifdef CREATE_CRC_TABLE
 
-static unsigned long crctable[256];
+static honeymanWord_t crctable[256];
 
 /*
 	Create the CRC table for the simplified version of the pathalias hashing function.
@@ -31,10 +37,10 @@ static unsigned long crctable[256];
 
 void make_crc_table( void ) {
 
-	#define POLY 0x48000000L	/* 31-bit polynomial (avoids sign problems) */
+	#define POLY UINT32_C( 0x48000000 )	/* 31-bit polynomial (avoids sign problems) */
 
 	for ( int i = 0; i < 128; i++ ) {
-		int sum = 0;
+		honeymanWord_t sum = 0;
 		for ( int j = 7 - 1; j >= 0; --j ) {
 			if ( i & ( 1 << j ) ) {
 				sum ^= POLY >> j;
@@ -46,7 +52,7 @@ void make_crc_table( void ) {
 
 #else
 
-static unsigned long crctable[256] = {
+static const honeymanWord_t crctable[256] = {
 	0x00000000L, 0x48000000L, 0x24000000L, 0x6c000000L,
 	0x12000000L, 0x5a000000L, 0x36000000L, 0x7e000000L,
 	0x09000000L, 0x41000000L, 0x2d000000L, 0x65000000L,
@@ -83,31 +89,28 @@ static unsigned long crctable[256] = {
 
 #endif
 
-void Honeyman_InitChecksum( unsigned long &crcvalue ) {
+void Honeyman_InitChecksum( uint32_t &crcvalue ) {
 	crcvalue = HONEYMAN_INIT_VALUE;
 }
 
-void Honeyman_Update( unsigned long &crcvalue, const byte data ) {
-	crcvalue = ( ( crcvalue >> 7 ) ^ crctable[ ( crcvalue ^ data ) & 0x7f ] );
+void Honeyman_Update( uint32_t &crcvalue, const byte data ) {
+	crcvalue = ( crcvalue >> 7 ) ^ crctable[ ( crcvalue ^ data ) & 0x7fu ];
 }
 
-void Honeyman_UpdateChecksum( unsigned long &crcvalue, const void *data, int length ) {
-	unsigned long crc;
+void Honeyman_UpdateChecksum( uint32_t &crcvalue, const void *data, int length ) {
 	const unsigned char *buf = (const unsigned char *) data;
 
-	crc = crcvalue;
 	while( length-- ) {
-		crc = ( ( crc >> 7 ) ^ crctable[ ( crc ^ *buf++ ) & 0x7f ] );
+		crcvalue = ( crcvalue >> 7 ) ^ crctable[ ( crcvalue ^ *buf++ ) & 0x7fu ];
 	}
-	crcvalue = crc;
 }
 
-void Honeyman_FinishChecksum( unsigned long &crcvalue ) {
+void Honeyman_FinishChecksum( uint32_t &crcvalue ) {
 	crcvalue ^= HONEYMAN_XOR_VALUE;
 }
 
-unsigned long Honeyman_BlockChecksum( const void *data, int length ) {
-	unsigned long crc;
+uint32_t Honeyman_BlockChecksum( const void *data, int length ) {
+	uint32_t crc;
 
 	Honeyman_InitChecksum( crc );
 	Honeyman_UpdateChecksum( crc, data, length );

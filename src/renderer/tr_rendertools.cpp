@@ -30,6 +30,8 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "tr_local.h"
+#include "LevelShotDepth.h"
+#include "Model_local.h"
 #include "simplex.h"	// line font definition
 
 #define MAX_DEBUG_LINES			16384
@@ -77,6 +79,14 @@ int				rb_numDebugPolygons = 0;
 int				rb_debugPolygonTime = 0;
 
 static void RB_DrawText( const char *text, const idVec3 &origin, float scale, const idVec4 &color, const idMat3 &viewAxis, const int align );
+
+#if defined( OPENQ4_RENDERER_VK_MODULE )
+// Vulkan cannot read pixels back in the middle of a frame; the module's
+// versions of these (and RB_ScanStencilBuffer) are in Vulkan/vk_DebugTools.cpp
+void RB_CountStencilBuffer( void );
+void RB_ShowIntensity( void );
+void RB_ShowDepthBuffer( void );
+#endif
 
 /*
 ================
@@ -155,6 +165,188 @@ void RB_SimpleWorldSetup( void ) {
 		backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 }
 
+static bool RB_RendertoolsGetTriDebugGeometry( const srfTriangles_t *tri, const idDrawVert *&vertsOut, const glIndex_t *&indexesOut ) {
+	vertsOut = NULL;
+	indexesOut = NULL;
+
+	if ( tri == NULL ) {
+		return false;
+	}
+
+	vertsOut = tri->verts;
+	indexesOut = tri->indexes;
+
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	if ( tri->primBatchMesh != NULL && ( vertsOut == NULL || indexesOut == NULL ) ) {
+		if ( tri->numVerts <= 0 || tri->numIndexes <= 0 ) {
+			return false;
+		}
+
+		idDrawVert *tempVerts = (idDrawVert *)R_FrameAlloc( tri->numVerts * sizeof( tempVerts[0] ) );
+		glIndex_t *tempIndexes = (glIndex_t *)R_FrameAlloc( tri->numIndexes * sizeof( tempIndexes[0] ) );
+		renderSystem->CopyPrimBatchTriangles( tempVerts, tempIndexes, tri->primBatchMesh, tri->silTraceVerts );
+		vertsOut = tempVerts;
+		indexesOut = tempIndexes;
+	}
+#endif
+
+	return vertsOut != NULL && indexesOut != NULL;
+}
+
+static bool RB_RendertoolsPrepareInteractionVertexCache( const drawSurf_t *surf ) {
+	if ( surf == NULL || surf->geo == NULL ) {
+		return false;
+	}
+
+	const srfTriangles_t *tri = surf->geo;
+	srfTriangles_t *mutableTri = const_cast<srfTriangles_t *>( tri );
+	srfTriangles_t *ambientTri = ( tri->ambientSurface != NULL ) ? tri->ambientSurface : mutableTri;
+	const bool needsLighting = ( surf->material != NULL ) ? surf->material->ReceivesLighting() : false;
+
+	if ( ambientTri != NULL && ambientTri->ambientCache == NULL ) {
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+		if ( ambientTri->primBatchMesh != NULL ) {
+			if ( !R_CreatePackedSurfaceFrameCaches( ambientTri, needsLighting, false ) ) {
+				return false;
+			}
+		} else
+#endif
+		if ( ambientTri->verts != NULL ) {
+			if ( !R_CreateAmbientCache( ambientTri, needsLighting ) ) {
+				return false;
+			}
+		}
+	}
+
+	if ( mutableTri->ambientCache == NULL && ambientTri != NULL && ambientTri->ambientCache != NULL ) {
+		mutableTri->ambientCache = ambientTri->ambientCache;
+		mutableTri->tempAmbientCache = ambientTri->tempAmbientCache;
+	}
+
+	if ( mutableTri->ambientCache == NULL ) {
+		return false;
+	}
+
+	R_TouchVertexCache( mutableTri->ambientCache );
+	return true;
+}
+
+static bool RB_RendertoolsGetInteractionDrawIndexes( const srfTriangles_t *tri, const glIndex_t *&indexesOut, int &numIndexesOut ) {
+	indexesOut = NULL;
+	numIndexesOut = 0;
+
+	if ( tri == NULL || tri->indexes == NULL || tri->numIndexes <= 0 ) {
+		return false;
+	}
+
+	indexesOut = tri->indexes;
+	numIndexesOut = tri->numIndexes;
+
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	if ( tri->primBatchMesh == NULL || tri->ambientSurface == NULL ) {
+		return true;
+	}
+
+	const rvMD5RMesh *mesh = R_MD5R_GetMeshForTri( tri );
+	if ( mesh == NULL || mesh->primBatches.Num() <= 0 ) {
+		return true;
+	}
+
+	const int numPrimBatches = mesh->primBatches.Num();
+	bool hasHeaderedLightTris = ( tri->numAllocedIndices >= tri->numIndexes + numPrimBatches );
+	if ( hasHeaderedLightTris ) {
+		int headerIndexCount = 0;
+		for ( int primBatchIndex = 0; primBatchIndex < numPrimBatches; ++primBatchIndex ) {
+			const int batchIndexCount = tri->indexes[ primBatchIndex ];
+			if ( batchIndexCount < 0
+				|| ( batchIndexCount % 3 ) != 0
+				|| batchIndexCount > tri->numIndexes - headerIndexCount ) {
+				hasHeaderedLightTris = false;
+				break;
+			}
+			headerIndexCount += batchIndexCount;
+		}
+		hasHeaderedLightTris = hasHeaderedLightTris && ( headerIndexCount == tri->numIndexes );
+	}
+
+	if ( !hasHeaderedLightTris ) {
+		return true;
+	}
+
+	glIndex_t *flattenedIndexes = (glIndex_t *)R_FrameAlloc( tri->numIndexes * sizeof( flattenedIndexes[0] ) );
+	const glIndex_t *batchHeader = tri->indexes;
+	const glIndex_t *batchIndexes = tri->indexes + numPrimBatches;
+	int destVertexBase = 0;
+	int flattenedIndexCount = 0;
+
+	for ( int primBatchIndex = 0; primBatchIndex < numPrimBatches; ++primBatchIndex ) {
+		const rvMD5RPrimBatch &primBatch = mesh->primBatches[ primBatchIndex ];
+		const int batchIndexCount = batchHeader[ primBatchIndex ];
+		if ( !primBatch.hasDrawGeoSpec
+			|| primBatch.drawGeoSpec.vertexStart < 0
+			|| primBatch.drawGeoSpec.vertexCount < 0 ) {
+			return false;
+		}
+
+		for ( int batchIndex = 0; batchIndex < batchIndexCount; ++batchIndex ) {
+			const int drawIndex = batchIndexes[ batchIndex ];
+			if ( drawIndex < primBatch.drawGeoSpec.vertexStart
+				|| drawIndex >= primBatch.drawGeoSpec.vertexStart + primBatch.drawGeoSpec.vertexCount ) {
+				return false;
+			}
+
+			const int localIndex = drawIndex - primBatch.drawGeoSpec.vertexStart + destVertexBase;
+			if ( localIndex < 0 || localIndex >= tri->ambientSurface->numVerts ) {
+				return false;
+			}
+
+			flattenedIndexes[ flattenedIndexCount++ ] = localIndex;
+		}
+
+		batchIndexes += batchIndexCount;
+		destVertexBase += primBatch.drawGeoSpec.vertexCount;
+	}
+
+	indexesOut = flattenedIndexes;
+	numIndexesOut = flattenedIndexCount;
+#endif
+
+	return true;
+}
+
+static void RB_RendertoolsDrawLightCountSurface( const drawSurf_t *surf ) {
+	const srfTriangles_t *tri = ( surf != NULL ) ? surf->geo : NULL;
+	if ( tri == NULL || !RB_RendertoolsPrepareInteractionVertexCache( surf ) ) {
+		return;
+	}
+
+	const idDrawVert *ambientCache = (idDrawVert *)vertexCache.Position( tri->ambientCache );
+	glVertexPointer( 3, GL_FLOAT, sizeof( idDrawVert ), RB_DrawVertAttributePointer( ambientCache, offsetof( idDrawVert, xyz ) ) );
+
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	if ( tri->primBatchMesh != NULL && tri->ambientSurface != NULL ) {
+		const glIndex_t *drawIndexes = NULL;
+		int drawIndexCount = 0;
+		if ( !RB_RendertoolsGetInteractionDrawIndexes( tri, drawIndexes, drawIndexCount ) || drawIndexCount <= 0 ) {
+			return;
+		}
+
+		backEnd.pc.c_drawElements++;
+		backEnd.pc.c_drawIndexes += drawIndexCount;
+		backEnd.pc.c_drawVertexes += tri->numVerts;
+
+		vertexCache.UnbindIndex();
+		glDrawElements( GL_TRIANGLES,
+			r_singleTriangle.GetBool() ? 3 : drawIndexCount,
+			GL_INDEX_TYPE,
+			drawIndexes );
+		return;
+	}
+#endif
+
+	RB_DrawElementsWithCounters( tri );
+}
+
 /*
 =================
 RB_PolygonClear
@@ -195,23 +387,301 @@ void RB_ShowDestinationAlpha( void ) {
 }
 
 /*
+===============================================================================
+
+	Framebuffer readback for the stencil counts, r_showIntensity and r_showDepth
+
+	glReadPixels cannot read a multisampled framebuffer object: it raises
+	GL_INVALID_OPERATION and returns nothing. The view draws into one whenever
+	r_multiSamples puts the scene render target in MSAA, so these readbacks
+	resolve it into a single-sample copy with glBlitFramebuffer and read that.
+	A depth or stencil blit needs GL_NEAREST and a destination of exactly the
+	source's format, so the copy takes the source attachment's internal format.
+	The resolve keeps one sample's depth or stencil value per pixel.
+
+	OpenGL only, like the tools that use it: the Vulkan module has its own
+	versions of them in Vulkan/vk_DebugTools.cpp.
+
+===============================================================================
+*/
+#if !defined( OPENQ4_RENDERER_VK_MODULE )
+
+// The single-sample copies: [0] color, [1] depth/stencil. The names belong to
+// the GL context generation that made them; a new context forgets them.
+typedef struct debugResolveCopy_s {
+	GLuint		framebuffer;
+	GLuint		renderbuffer;
+	GLenum		internalFormat;
+	GLenum		attachment;
+	int			width;
+	int			height;
+	int			contextGeneration;
+} debugResolveCopy_t;
+
+static debugResolveCopy_t	rb_debugResolveCopies[2];
+static int					rb_debugResolveWarned[3] = { -1, -1, -1 };	// per buffer: the context generation it last warned in
+
+struct debugReadbackArea_t {
+	GLuint framebuffer;
+	int targetWidth, targetHeight;
+	int x, y, width, height;
+};
+
+// Colour/depth tools redraw the active viewport. Stencil statistics describe
+// the complete attachment, as Vulkan's deferred readback does. Neither may
+// use the window extent for a scaled game target or a VR stand-in.
+static bool RB_GetDebugReadbackArea( bool viewport, debugReadbackArea_t &area ) {
+	GLint framebuffer = 0;
+	if ( glBindFramebuffer != NULL ) {
+		glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer );
+	}
+	area.framebuffer = static_cast<GLuint>( framebuffer );
+	area.targetWidth = glConfig.vidWidth;
+	area.targetHeight = glConfig.vidHeight;
+	if ( framebuffer != 0 ) {
+		idRenderTexture *target = backEnd.renderTexture;
+		if ( target == NULL || target->GetDeviceHandle() != area.framebuffer ) {
+			target = R_GetDefaultRenderTarget();
+		}
+		if ( target == NULL || target->GetDeviceHandle() != area.framebuffer ) {
+			return false;
+		}
+		area.targetWidth = target->GetWidth();
+		area.targetHeight = target->GetHeight();
+	}
+	// All callers allocate at most four bytes per pixel through the renderer's
+	// signed-size allocator. Check before either multiplication or allocation.
+	if ( area.targetWidth <= 0 || area.targetHeight <= 0
+		|| area.targetWidth > idMath::INT_MAX / 4 / area.targetHeight ) {
+		return false;
+	}
+	area.x = area.y = 0;
+	area.width = area.targetWidth;
+	area.height = area.targetHeight;
+	if ( viewport ) {
+		GLint rectangle[4];
+		glGetIntegerv( GL_VIEWPORT, rectangle );
+		area.x = rectangle[0]; area.y = rectangle[1];
+		area.width = rectangle[2]; area.height = rectangle[3];
+	}
+	return area.x >= 0 && area.y >= 0 && area.width > 0 && area.height > 0
+		&& area.x <= area.targetWidth && area.y <= area.targetHeight
+		&& area.width <= area.targetWidth - area.x
+		&& area.height <= area.targetHeight - area.y;
+}
+
+// 0 color, 1 depth, 2 stencil
+static int RB_ReadbackBuffer( GLenum format ) {
+	if ( format == GL_DEPTH_COMPONENT ) {
+		return 1;
+	}
+	if ( format == GL_STENCIL_INDEX ) {
+		return 2;
+	}
+	return 0;
+}
+
+static void RB_WarnReadbackResolve( GLenum format, const char *reason ) {
+	static const char * const bufferNames[3] = { "color", "depth", "stencil" };
+	const int buffer = RB_ReadbackBuffer( format );
+	if ( rb_debugResolveWarned[buffer] == tr.glContextGeneration ) {
+		return;
+	}
+	rb_debugResolveWarned[buffer] = tr.glContextGeneration;
+	common->Warning( "RB_ReadFramebufferPixels: can't resolve the multisampled %s buffer (%s); the debug tool that reads it is skipped, set r_multiSamples 0 to use it",
+		bufferNames[buffer], reason );
+}
+
+/*
+===================
+RB_ResolveForReadback
+
+Blits the buffer that format reads from the multisampled framebuffer object
+source into its single-sample copy, and returns the copy's framebuffer, or 0
+after a one-time warning. The caller restores the framebuffer bindings.
+===================
+*/
+static GLuint RB_ResolveForReadback( GLuint source, GLenum format, int width, int height ) {
+	static const GLenum attachments[3] = { GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT };
+	static const GLbitfield masks[3] = { GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_STENCIL_BUFFER_BIT };
+	const int buffer = RB_ReadbackBuffer( format );
+
+	if ( glBlitFramebuffer == NULL || glGenRenderbuffers == NULL || glBindRenderbuffer == NULL
+		|| glRenderbufferStorage == NULL || glFramebufferRenderbuffer == NULL
+		|| glGetFramebufferAttachmentParameteriv == NULL || glCheckFramebufferStatus == NULL ) {
+		RB_WarnReadbackResolve( format, "no framebuffer blits" );
+		return 0;
+	}
+
+	// the source's internal format; the engine's multisampled render targets
+	// attach 2D multisample textures (idRenderTexture::InitRenderTexture)
+	glBindFramebuffer( GL_READ_FRAMEBUFFER, source );
+	GLint objectType = GL_NONE;
+	glGetFramebufferAttachmentParameteriv( GL_READ_FRAMEBUFFER, attachments[buffer], GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &objectType );
+	if ( objectType != GL_TEXTURE ) {
+		RB_WarnReadbackResolve( format, objectType == GL_NONE ? "the render target has none" : "it is not a texture" );
+		return 0;
+	}
+	GLint texture = 0;
+	GLint previousTexture = 0;
+	GLint internalFormat = 0;
+	glGetFramebufferAttachmentParameteriv( GL_READ_FRAMEBUFFER, attachments[buffer], GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &texture );
+	glGetIntegerv( GL_TEXTURE_BINDING_2D_MULTISAMPLE, &previousTexture );
+	glBindTexture( GL_TEXTURE_2D_MULTISAMPLE, static_cast<GLuint>( texture ) );
+	glGetTexLevelParameteriv( GL_TEXTURE_2D_MULTISAMPLE, 0, GL_TEXTURE_INTERNAL_FORMAT, &internalFormat );
+	glBindTexture( GL_TEXTURE_2D_MULTISAMPLE, static_cast<GLuint>( previousTexture ) );
+
+	// packed depth/stencil sits on both attachment points, as in the source
+	GLenum copyAttachment = attachments[buffer];
+	if ( internalFormat == GL_DEPTH24_STENCIL8 || internalFormat == GL_DEPTH32F_STENCIL8 || internalFormat == GL_DEPTH_STENCIL ) {
+		copyAttachment = GL_DEPTH_STENCIL_ATTACHMENT;
+	}
+
+	debugResolveCopy_t &copy = rb_debugResolveCopies[ buffer == 0 ? 0 : 1 ];
+	if ( copy.contextGeneration != tr.glContextGeneration ) {
+		memset( &copy, 0, sizeof( copy ) );
+		copy.contextGeneration = tr.glContextGeneration;
+	}
+	if ( copy.framebuffer == 0 ) {
+		glGenFramebuffers( 1, &copy.framebuffer );
+		glGenRenderbuffers( 1, &copy.renderbuffer );
+		if ( copy.framebuffer == 0 || copy.renderbuffer == 0 ) {
+			RB_WarnReadbackResolve( format, "no framebuffer object for the copy" );
+			return 0;
+		}
+	}
+	glBindFramebuffer( GL_FRAMEBUFFER, copy.framebuffer );
+	if ( copy.internalFormat != static_cast<GLenum>( internalFormat ) || copy.attachment != copyAttachment
+		|| copy.width != width || copy.height != height ) {
+		if ( copy.attachment != GL_NONE ) {
+			glFramebufferRenderbuffer( GL_FRAMEBUFFER, copy.attachment, GL_RENDERBUFFER, 0 );
+		}
+		glBindRenderbuffer( GL_RENDERBUFFER, copy.renderbuffer );
+		glRenderbufferStorage( GL_RENDERBUFFER, static_cast<GLenum>( internalFormat ), width, height );
+		glBindRenderbuffer( GL_RENDERBUFFER, 0 );
+		glFramebufferRenderbuffer( GL_FRAMEBUFFER, copyAttachment, GL_RENDERBUFFER, copy.renderbuffer );
+		// a copy without color must not name a color buffer, or it is incomplete
+		const GLenum colorBuffer = ( buffer == 0 ) ? GL_COLOR_ATTACHMENT0 : GL_NONE;
+		glDrawBuffer( colorBuffer );
+		glReadBuffer( colorBuffer );
+		copy.internalFormat = static_cast<GLenum>( internalFormat );
+		copy.attachment = copyAttachment;
+		copy.width = width;
+		copy.height = height;
+	}
+	const GLenum status = glCheckFramebufferStatus( GL_FRAMEBUFFER );
+	if ( status != GL_FRAMEBUFFER_COMPLETE ) {
+		RB_WarnReadbackResolve( format, va( "its copy is incomplete, status 0x%04x", status ) );
+		return 0;
+	}
+
+	glBindFramebuffer( GL_READ_FRAMEBUFFER, source );
+	GLint sourceReadBuffer = GL_NONE;
+	if ( buffer == 0 ) {
+		glGetIntegerv( GL_READ_BUFFER, &sourceReadBuffer );
+		glReadBuffer( GL_COLOR_ATTACHMENT0 );
+	}
+	// blits are scissored, and the copy has to be whole
+	const GLboolean scissorWasEnabled = glIsEnabled( GL_SCISSOR_TEST );
+	if ( scissorWasEnabled ) {
+		glDisable( GL_SCISSOR_TEST );
+	}
+	glBlitFramebuffer( 0, 0, width, height, 0, 0, width, height, masks[buffer], GL_NEAREST );
+	if ( scissorWasEnabled ) {
+		glEnable( GL_SCISSOR_TEST );
+	}
+	if ( buffer == 0 ) {
+		glReadBuffer( static_cast<GLenum>( sourceReadBuffer ) );
+	}
+	return copy.framebuffer;
+}
+
+/*
+===================
+RB_ReadFramebufferPixels
+
+glReadPixels of the validated rectangle in the framebuffer the view draws into,
+resolved at the attachment's full extent when multisampled. Returns false, after a
+one-time warning, when the resolve failed and there is nothing to read.
+===================
+*/
+static bool RB_ReadFramebufferPixels( const debugReadbackArea_t &area, GLenum format, GLenum type, void *pixels ) {
+	GLint readFramebuffer = 0;
+	GLint drawFramebuffer = 0;
+	GLint sampleBuffers = 0;
+	if ( glBindFramebuffer != NULL ) {
+		glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer );
+		glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebuffer );
+		glGetIntegerv( GL_SAMPLE_BUFFERS, &sampleBuffers );		// the draw framebuffer's
+	}
+	if ( static_cast<GLuint>( drawFramebuffer ) != area.framebuffer ) {
+		return false;
+	}
+
+	// Read what the tools draw into. The default framebuffer reads back
+	// resolved even when it is multisampled; a framebuffer object has to be
+	// resolved into a single-sample copy first.
+	GLuint source = static_cast<GLuint>( drawFramebuffer );
+	const bool resolve = ( source != 0 && sampleBuffers > 0 );
+	if ( resolve ) {
+		GL_CheckErrors();	// report what is pending, so an error below is the resolve's
+		source = RB_ResolveForReadback( source, format, area.targetWidth, area.targetHeight );
+	}
+
+	const bool read = ( !resolve || source != 0 );
+	if ( read ) {
+		if ( glBindFramebuffer != NULL ) {
+			glBindFramebuffer( GL_READ_FRAMEBUFFER, source );
+		}
+		GLint packAlignment = 4;
+		glGetIntegerv( GL_PACK_ALIGNMENT, &packAlignment );
+		glPixelStorei( GL_PACK_ALIGNMENT, 1 );	// stencil rows are not padded to 4 bytes
+		glReadPixels( area.x, area.y, area.width, area.height, format, type, pixels );
+		glPixelStorei( GL_PACK_ALIGNMENT, packAlignment );
+	}
+	if ( glBindFramebuffer != NULL ) {
+		glBindFramebuffer( GL_READ_FRAMEBUFFER, static_cast<GLuint>( readFramebuffer ) );
+		glBindFramebuffer( GL_DRAW_FRAMEBUFFER, static_cast<GLuint>( drawFramebuffer ) );
+	}
+	if ( read && resolve ) {
+		const GLenum error = glGetError();
+		if ( error != GL_NO_ERROR ) {
+			RB_WarnReadbackResolve( format, va( "GL error 0x%04x", error ) );
+			return false;
+		}
+	}
+	return read;
+}
+#endif
+
+/*
 ===================
 RB_ScanStencilBuffer
 
 Debugging tool to see what values are in the stencil buffer
 ===================
 */
+#if !defined( OPENQ4_RENDERER_VK_MODULE )	// Vulkan: Vulkan/vk_DebugTools.cpp
 void RB_ScanStencilBuffer( void ) {
 	int		counts[256];
 	int		i;
 	byte	*stencilReadback;
+	debugReadbackArea_t area;
+	if ( !RB_GetDebugReadbackArea( false, area ) ) {
+		common->Printf( "stencil values: the active framebuffer extent is unavailable\n" );
+		return;
+	}
 
 	memset( counts, 0, sizeof( counts ) );
 
-	stencilReadback = (byte *)R_StaticAlloc( glConfig.vidWidth * glConfig.vidHeight );
-	glReadPixels( 0, 0, glConfig.vidWidth, glConfig.vidHeight, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencilReadback );
+	stencilReadback = (byte *)R_StaticAlloc( area.width * area.height );
+	if ( !RB_ReadFramebufferPixels( area, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencilReadback ) ) {
+		R_StaticFree( stencilReadback );
+		common->Printf( "stencil values: the stencil buffer could not be read back\n" );
+		return;
+	}
 
-	for ( i = 0; i < glConfig.vidWidth * glConfig.vidHeight; i++ ) {
+	for ( i = 0; i < area.width * area.height; i++ ) {
 		counts[ stencilReadback[i] ]++;
 	}
 
@@ -225,6 +695,7 @@ void RB_ScanStencilBuffer( void ) {
 		}
 	}
 }
+#endif
 
 
 /*
@@ -234,25 +705,35 @@ RB_CountStencilBuffer
 Print an overdraw count based on stencil index values
 ===================
 */
+#if !defined( OPENQ4_RENDERER_VK_MODULE )	// Vulkan: Vulkan/vk_DebugTools.cpp
 void RB_CountStencilBuffer( void ) {
-	int		count;
+	double	count;
 	int		i;
 	byte	*stencilReadback;
+	debugReadbackArea_t area;
+	if ( !RB_GetDebugReadbackArea( false, area ) ) {
+		common->Printf( "overdraw: the active framebuffer extent is unavailable\n" );
+		return;
+	}
 
-
-	stencilReadback = (byte *)R_StaticAlloc( glConfig.vidWidth * glConfig.vidHeight );
-	glReadPixels( 0, 0, glConfig.vidWidth, glConfig.vidHeight, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencilReadback );
+	stencilReadback = (byte *)R_StaticAlloc( area.width * area.height );
+	if ( !RB_ReadFramebufferPixels( area, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencilReadback ) ) {
+		R_StaticFree( stencilReadback );
+		common->Printf( "overdraw: the stencil buffer could not be read back\n" );
+		return;
+	}
 
 	count = 0;
-	for ( i = 0; i < glConfig.vidWidth * glConfig.vidHeight; i++ ) {
+	for ( i = 0; i < area.width * area.height; i++ ) {
 		count += stencilReadback[i];
 	}
 
 	R_StaticFree( stencilReadback );
 
 	// print some stats (not supposed to do from back end in SMP...)
-	common->Printf( "overdraw: %5.1f\n", (float)count/(glConfig.vidWidth * glConfig.vidHeight)  );
+	common->Printf( "overdraw: %5.1f\n", (float)( count / ( area.width * area.height ) ) );
 }
+#endif
 
 /*
 ===================
@@ -329,7 +810,7 @@ void RB_ShowOverdraw( void ) {
 		}
 	}
 
-	drawSurf_t **newDrawSurfs = (drawSurf_t **)R_FrameAlloc( numDrawSurfs + interactions * sizeof( newDrawSurfs[0] ) );
+	drawSurf_t **newDrawSurfs = (drawSurf_t **)R_FrameAlloc( ( numDrawSurfs + interactions ) * sizeof( newDrawSurfs[0] ) );
 
 	for ( i = 0; i < numDrawSurfs; i++ ) {
 		surf = drawSurfs[i];
@@ -368,6 +849,316 @@ void RB_ShowOverdraw( void ) {
 	}
 }
 
+static int RB_CountDebugDrawSurfChain( const drawSurf_t *surf ) {
+	int count = 0;
+	for ( ; surf != NULL; surf = surf->nextOnLight ) {
+		count++;
+	}
+	return count;
+}
+
+struct viewLightDebugVisual_t {
+	int		lightIndex;
+	bool	affecting;
+	idVec3	lightOrigin;
+	idVec3	boxCenter;
+	idVec3	lightRadius;
+	idMat3	boxAxis;
+	idVec4	drawColor;
+	idStr	label;
+};
+
+static idList<viewLightDebugVisual_t> rb_viewLightDebugVisuals;
+
+static void RB_ClearViewLightDebugVisuals( void ) {
+	rb_viewLightDebugVisuals.Clear();
+}
+
+static idVec4 RB_ViewLightDebugColor( const renderLight_t *parms ) {
+	idVec4 color( 1.0f, 1.0f, 1.0f, 1.0f );
+
+	if ( parms != NULL ) {
+		color[0] = parms->shaderParms[0];
+		color[1] = parms->shaderParms[1];
+		color[2] = parms->shaderParms[2];
+	}
+
+	float maxComponent = Max( color[0], Max( color[1], color[2] ) );
+	if ( maxComponent <= 0.0f ) {
+		color[0] = 1.0f;
+		color[1] = 0.25f;
+		color[2] = 0.25f;
+		return color;
+	}
+
+	if ( maxComponent > 1.0f ) {
+		color *= 1.0f / maxComponent;
+	}
+
+	maxComponent = Max( color[0], Max( color[1], color[2] ) );
+	if ( maxComponent < 0.25f ) {
+		color *= 0.25f / maxComponent;
+	}
+
+	color[3] = 1.0f;
+	return color;
+}
+
+static void RB_AppendViewLightDebugVisual( const viewLight_t *vLight, bool affecting ) {
+	viewLightDebugVisual_t visual;
+	const idRenderLightLocal *light = vLight != NULL ? vLight->lightDef : NULL;
+	const renderLight_t *parms = light != NULL ? &light->parms : NULL;
+
+	visual.lightIndex = light != NULL ? light->index : -1;
+	visual.affecting = affecting;
+	visual.lightOrigin = light != NULL ? light->globalLightOrigin : vec3_origin;
+	visual.boxCenter = parms != NULL ? parms->origin : visual.lightOrigin;
+	visual.lightRadius = parms != NULL ? parms->lightRadius : vec3_origin;
+	visual.boxAxis = parms != NULL ? parms->axis : mat3_identity;
+	visual.drawColor = RB_ViewLightDebugColor( parms );
+	visual.label = va(
+		"%s[%d] rgb=(%.2f %.2f %.2f) radius=(%.1f %.1f %.1f)",
+		affecting ? "affect" : "visible",
+		visual.lightIndex,
+		parms != NULL ? parms->shaderParms[0] : 0.0f,
+		parms != NULL ? parms->shaderParms[1] : 0.0f,
+		parms != NULL ? parms->shaderParms[2] : 0.0f,
+		visual.lightRadius[0],
+		visual.lightRadius[1],
+		visual.lightRadius[2] );
+	rb_viewLightDebugVisuals.Append( visual );
+}
+
+static const char *RB_ViewLightDebugTypeName( const viewLight_t *vLight ) {
+	if ( vLight == NULL || vLight->lightShader == NULL ) {
+		return "<null>";
+	}
+	if ( vLight->lightShader->IsFogLight() ) {
+		return "fog";
+	}
+	if ( vLight->lightShader->IsBlendLight() ) {
+		return "blend";
+	}
+	if ( vLight->lightShader->IsAmbientLight() ) {
+		return "ambient";
+	}
+	if ( vLight->pointLight ) {
+		return vLight->parallel ? "point/parallel" : "point";
+	}
+	return vLight->parallel ? "projected/parallel" : "projected";
+}
+
+static unsigned int RB_ViewLightDebugHashStep( unsigned int hash, int value ) {
+	hash ^= static_cast<unsigned int>( value );
+	hash *= 16777619u;
+	return hash;
+}
+
+static void RB_DrawViewLightDebugBox( const idBox &box ) {
+	idVec3 points[8];
+
+	box.ToPoints( points );
+
+	glBegin( GL_LINES );
+	for ( int i = 0; i < 4; i++ ) {
+		glVertex3fv( points[i].ToFloatPtr() );
+		glVertex3fv( points[( i + 1 ) & 3].ToFloatPtr() );
+
+		glVertex3fv( points[4 + i].ToFloatPtr() );
+		glVertex3fv( points[4 + ( ( i + 1 ) & 3 )].ToFloatPtr() );
+
+		glVertex3fv( points[i].ToFloatPtr() );
+		glVertex3fv( points[4 + i].ToFloatPtr() );
+	}
+	glEnd();
+}
+
+static void RB_DrawViewLightDebugCross( const idVec3 &origin, float halfSize ) {
+	glBegin( GL_LINES );
+	glVertex3f( origin[0] - halfSize, origin[1], origin[2] );
+	glVertex3f( origin[0] + halfSize, origin[1], origin[2] );
+	glVertex3f( origin[0], origin[1] - halfSize, origin[2] );
+	glVertex3f( origin[0], origin[1] + halfSize, origin[2] );
+	glVertex3f( origin[0], origin[1], origin[2] - halfSize );
+	glVertex3f( origin[0], origin[1], origin[2] + halfSize );
+	glEnd();
+}
+
+static void RB_DrawCachedViewLightDebugVisuals( void ) {
+	if ( !r_showViewLightsVisuals.GetBool() ) {
+		return;
+	}
+	if ( idMath::ClampInt( 0, 3, r_showViewLights.GetInteger() ) <= 0 ) {
+		return;
+	}
+	if ( backEnd.viewDef == NULL || backEnd.viewDef != tr.primaryView || backEnd.viewDef->viewEntitys == NULL || rb_viewLightDebugVisuals.Num() <= 0 ) {
+		return;
+	}
+
+	RB_SimpleWorldSetup();
+
+	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
+	RB_BindNullDebugImage();
+	glDisable( GL_STENCIL_TEST );
+	glDisable( GL_DEPTH_TEST );
+	GL_Cull( CT_TWO_SIDED );
+	GL_State( GLS_POLYMODE_LINE );
+	glLineWidth( 2.0f );
+
+	for ( int i = 0; i < rb_viewLightDebugVisuals.Num(); i++ ) {
+		const viewLightDebugVisual_t &visual = rb_viewLightDebugVisuals[i];
+		const float maxRadius = Max( visual.lightRadius[0], Max( visual.lightRadius[1], visual.lightRadius[2] ) );
+		const float markerHalfSize = idMath::ClampFloat( 8.0f, 64.0f, maxRadius * 0.15f );
+		const float labelOffset = idMath::ClampFloat( 10.0f, 96.0f, maxRadius * 0.25f );
+		const float labelScale = idMath::ClampFloat( 0.015f, 0.05f, maxRadius * 0.00025f );
+		const idVec3 labelOrigin = visual.lightOrigin + idVec3( 0.0f, 0.0f, labelOffset );
+
+		glColor4fv( visual.drawColor.ToFloatPtr() );
+		RB_DrawViewLightDebugCross( visual.lightOrigin, markerHalfSize );
+
+		if ( visual.lightRadius.LengthSqr() > 0.0f ) {
+			RB_DrawViewLightDebugBox( idBox( visual.boxCenter, visual.lightRadius, visual.boxAxis ) );
+		}
+
+		if ( ( visual.boxCenter - visual.lightOrigin ).LengthSqr() > 1.0f ) {
+			glBegin( GL_LINES );
+			glVertex3fv( visual.lightOrigin.ToFloatPtr() );
+			glVertex3fv( visual.boxCenter.ToFloatPtr() );
+			glEnd();
+		}
+
+		RB_DrawText( visual.label.c_str(), labelOrigin, labelScale, visual.drawColor, backEnd.viewDef->renderView.viewaxis, 1 );
+	}
+
+	glLineWidth( 1.0f );
+	glEnable( GL_DEPTH_TEST );
+	GL_State( GLS_DEFAULT );
+	GL_Cull( CT_FRONT_SIDED );
+}
+
+/*
+=================
+RB_ReportViewLights
+
+Structured console report for lights affecting the current view origin.
+=================
+*/
+static void RB_ReportViewLights( void ) {
+	static int lastReportFrame = -1;
+	static unsigned int lastAffectingHash = 0;
+	static int lastAffectingCount = -1;
+	static bool wasEnabled = false;
+
+	const int reportMode = idMath::ClampInt( 0, 3, r_showViewLights.GetInteger() );
+	if ( reportMode <= 0 ) {
+		wasEnabled = false;
+		RB_ClearViewLightDebugVisuals();
+		return;
+	}
+	if ( backEnd.viewDef == NULL || backEnd.viewDef != tr.primaryView || backEnd.viewDef->viewEntitys == NULL || backEnd.viewDef->renderWorld == NULL ) {
+		return;
+	}
+
+	const idVec3 &viewOrigin = backEnd.viewDef->renderView.vieworg;
+	const int viewArea = backEnd.viewDef->renderWorld->PointInArea( viewOrigin );
+
+	int visibleCount = 0;
+	int affectingCount = 0;
+	unsigned int affectingHash = 2166136261u;
+
+	for ( const viewLight_t *vLight = backEnd.viewDef->viewLights; vLight != NULL; vLight = vLight->next ) {
+		visibleCount++;
+		if ( !vLight->viewInsideLight ) {
+			continue;
+		}
+
+		affectingCount++;
+		affectingHash = RB_ViewLightDebugHashStep( affectingHash, vLight->lightDef != NULL ? vLight->lightDef->index : -1 );
+	}
+
+	const bool affectingSetChanged = !wasEnabled || affectingCount != lastAffectingCount || affectingHash != lastAffectingHash;
+	if ( reportMode == 1 && !affectingSetChanged ) {
+		return;
+	}
+
+	const int reportInterval = Max( 1, r_showViewLightsInterval.GetInteger() );
+	if ( reportMode >= 2 && wasEnabled && lastReportFrame >= 0 && tr.frameCount - lastReportFrame < reportInterval ) {
+		return;
+	}
+
+	lastReportFrame = tr.frameCount;
+	lastAffectingHash = affectingHash;
+	lastAffectingCount = affectingCount;
+	wasEnabled = true;
+	RB_ClearViewLightDebugVisuals();
+
+	common->Printf(
+		"ViewLights frame=%d origin=(%.1f %.1f %.1f) area=%d affecting=%d visible=%d\n",
+		tr.frameCount,
+		viewOrigin[0], viewOrigin[1], viewOrigin[2],
+		viewArea,
+		affectingCount,
+		visibleCount );
+
+	if ( reportMode < 3 && visibleCount > affectingCount ) {
+		common->Printf(
+			"  note: %d additional visible lights do not contain the view origin and can still light surfaces in view; use r_showViewLights 3 to list them\n",
+			visibleCount - affectingCount );
+	}
+
+	if ( visibleCount <= 0 ) {
+		common->Printf( "  <no visible lights>\n" );
+		return;
+	}
+	if ( affectingCount <= 0 && reportMode < 3 ) {
+		common->Printf( "  <no lights affecting current view origin>\n" );
+		return;
+	}
+
+	for ( const viewLight_t *vLight = backEnd.viewDef->viewLights; vLight != NULL; vLight = vLight->next ) {
+		const bool affecting = vLight->viewInsideLight;
+		if ( !affecting && reportMode < 3 ) {
+			continue;
+		}
+
+		const idRenderLightLocal *light = vLight->lightDef;
+		const renderLight_t *parms = light != NULL ? &light->parms : NULL;
+		const char *shaderName = ( light != NULL && light->lightShader != NULL ) ? light->lightShader->GetName() : "<null>";
+		const idVec3 lightOrigin = light != NULL ? light->globalLightOrigin : vec3_origin;
+		const idVec3 lightRadius = parms != NULL ? parms->lightRadius : vec3_origin;
+		const idVec3 lightCenter = parms != NULL ? parms->lightCenter : vec3_origin;
+		const int localInteractions = RB_CountDebugDrawSurfChain( vLight->localInteractions );
+		const int globalInteractions = RB_CountDebugDrawSurfChain( vLight->globalInteractions );
+		const int translucentInteractions = RB_CountDebugDrawSurfChain( vLight->translucentInteractions );
+		const int localShadows = RB_CountDebugDrawSurfChain( vLight->localShadows );
+		const int globalShadows = RB_CountDebugDrawSurfChain( vLight->globalShadows );
+
+		common->Printf(
+			"  %s[%d] shader='%s' kind=%s origin=(%.1f %.1f %.1f) radius=(%.1f %.1f %.1f) center=(%.1f %.1f %.1f) color=(%.2f %.2f %.2f %.2f) area=%d shadows=%s seesOrigin=%d surfs(l=%d g=%d t=%d) shadowSurfs(l=%d g=%d)\n",
+			affecting ? "affect" : "visible",
+			light != NULL ? light->index : -1,
+			shaderName,
+			RB_ViewLightDebugTypeName( vLight ),
+			lightOrigin[0], lightOrigin[1], lightOrigin[2],
+			lightRadius[0], lightRadius[1], lightRadius[2],
+			lightCenter[0], lightCenter[1], lightCenter[2],
+			parms != NULL ? parms->shaderParms[0] : 0.0f,
+			parms != NULL ? parms->shaderParms[1] : 0.0f,
+			parms != NULL ? parms->shaderParms[2] : 0.0f,
+			parms != NULL ? parms->shaderParms[3] : 0.0f,
+			light != NULL ? light->areaNum : -1,
+			( parms != NULL && parms->noShadows ) ? "off" : "on",
+			vLight->viewSeesGlobalLightOrigin ? 1 : 0,
+			localInteractions,
+			globalInteractions,
+			translucentInteractions,
+			localShadows,
+			globalShadows );
+
+		RB_AppendViewLightDebugVisual( vLight, affecting );
+	}
+}
+
 /*
 ===================
 RB_ShowIntensity
@@ -377,6 +1168,7 @@ The greatest of the rgb values at each pixel will be used, with
 the resulting color shading from red at 0 to green at 128 to blue at 255
 ===================
 */
+#if !defined( OPENQ4_RENDERER_VK_MODULE )	// Vulkan: Vulkan/vk_DebugTools.cpp
 void RB_ShowIntensity( void ) {
 	byte	*colorReadback;
 	int		i, j, c;
@@ -384,11 +1176,18 @@ void RB_ShowIntensity( void ) {
 	if ( !r_showIntensity.GetBool() ) {
 		return;
 	}
+	debugReadbackArea_t area;
+	if ( !RB_GetDebugReadbackArea( true, area ) ) {
+		return;
+	}
 
-	colorReadback = (byte *)R_StaticAlloc( glConfig.vidWidth * glConfig.vidHeight * 4 );
-	glReadPixels( 0, 0, glConfig.vidWidth, glConfig.vidHeight, GL_RGBA, GL_UNSIGNED_BYTE, colorReadback );
+	colorReadback = (byte *)R_StaticAlloc( area.width * area.height * 4 );
+	if ( !RB_ReadFramebufferPixels( area, GL_RGBA, GL_UNSIGNED_BYTE, colorReadback ) ) {
+		R_StaticFree( colorReadback );
+		return;
+	}
 
-	c = glConfig.vidWidth * glConfig.vidHeight * 4;
+	c = area.width * area.height * 4;
 	for ( i = 0; i < c ; i+=4 ) {
 		j = colorReadback[i];
 		if ( colorReadback[i+1] > j ) {
@@ -418,13 +1217,14 @@ void RB_ShowIntensity( void ) {
 	glRasterPos2f( 0, 0 );
 	glPopMatrix();
 	glColor3f( 1, 1, 1 );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glMatrixMode( GL_MODELVIEW );
 
-	glDrawPixels( glConfig.vidWidth, glConfig.vidHeight, GL_RGBA , GL_UNSIGNED_BYTE, colorReadback );
+	glDrawPixels( area.width, area.height, GL_RGBA , GL_UNSIGNED_BYTE, colorReadback );
 
 	R_StaticFree( colorReadback );
 }
+#endif
 
 
 /*
@@ -434,10 +1234,15 @@ RB_ShowDepthBuffer
 Draw the depth buffer as colors
 ===================
 */
+#if !defined( OPENQ4_RENDERER_VK_MODULE )	// Vulkan: Vulkan/vk_DebugTools.cpp
 void RB_ShowDepthBuffer( void ) {
 	void	*depthReadback;
 
 	if ( !r_showDepth.GetBool() ) {
+		return;
+	}
+	debugReadbackArea_t area;
+	if ( !RB_GetDebugReadbackArea( true, area ) ) {
 		return;
 	}
 
@@ -454,25 +1259,30 @@ void RB_ShowDepthBuffer( void ) {
 
 	GL_State( GLS_DEPTHFUNC_ALWAYS );
 	glColor3f( 1, 1, 1 );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
-	depthReadback = R_StaticAlloc( glConfig.vidWidth * glConfig.vidHeight*4 );
-	memset( depthReadback, 0, glConfig.vidWidth * glConfig.vidHeight*4 );
+	depthReadback = R_StaticAlloc( area.width * area.height*4 );
+	memset( depthReadback, 0, area.width * area.height*4 );
 
-	glReadPixels( 0, 0, glConfig.vidWidth, glConfig.vidHeight, GL_DEPTH_COMPONENT , GL_FLOAT, depthReadback );
-
-#if 0
-	for ( i = 0 ; i < glConfig.vidWidth * glConfig.vidHeight ; i++ ) {
-		((byte *)depthReadback)[i*4] = 
-		((byte *)depthReadback)[i*4+1] = 
-		((byte *)depthReadback)[i*4+2] = 255 * ((float *)depthReadback)[i];
-		((byte *)depthReadback)[i*4+3] = 1;
+	if ( !RB_ReadFramebufferPixels( area, GL_DEPTH_COMPONENT, GL_FLOAT, depthReadback ) ) {
+		R_StaticFree( depthReadback );
+		return;
 	}
-#endif
 
-	glDrawPixels( glConfig.vidWidth, glConfig.vidHeight, GL_RGBA , GL_UNSIGNED_BYTE, depthReadback );
+	// each depth becomes a grey level, in place: the four bytes of float i
+	// turn into the RGBA of pixel i
+	for ( int i = 0 ; i < area.width * area.height ; i++ ) {
+		const byte grey = idMath::Ftob( 255.0f * ((float *)depthReadback)[i] + 0.5f );
+		((byte *)depthReadback)[i*4+0] = grey;
+		((byte *)depthReadback)[i*4+1] = grey;
+		((byte *)depthReadback)[i*4+2] = grey;
+		((byte *)depthReadback)[i*4+3] = 255;
+	}
+
+	glDrawPixels( area.width, area.height, GL_RGBA , GL_UNSIGNED_BYTE, depthReadback );
 	R_StaticFree( depthReadback );
 }
+#endif
 
 /*
 =================
@@ -508,19 +1318,13 @@ void RB_ShowLightCount( void ) {
 
 	glStencilFunc( GL_ALWAYS, 1, 255 );
 
-	globalImages->defaultImage->Bind();
+	RB_BindDebugImage( globalImages->defaultImage );
 
 	for ( vLight = backEnd.viewDef->viewLights ; vLight ; vLight = vLight->next ) {
 		for ( i = 0 ; i < 2 ; i++ ) {
 			for ( surf = i ? vLight->localInteractions: vLight->globalInteractions; surf; surf = (drawSurf_t *)surf->nextOnLight ) {
 				RB_SimpleSurfaceSetup( surf );
-				if ( !surf->geo->ambientCache ) {
-					continue;
-				}
-
-				const idDrawVert	*ac = (idDrawVert *)vertexCache.Position( surf->geo->ambientCache );
-				glVertexPointer( 3, GL_FLOAT, sizeof( idDrawVert ), &ac->xyz );
-				RB_DrawElementsWithCounters( surf->geo );
+				RB_RendertoolsDrawLightCountSurface( surf );
 			}
 		}
 	}
@@ -555,7 +1359,7 @@ void RB_ShowSilhouette( void ) {
 	// clear all triangle edges to black
 	//
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_TEXTURE_2D );
 	glDisable( GL_STENCIL_TEST );
 
@@ -646,7 +1450,7 @@ static void RB_ShowShadowCount( void ) {
 
 	glStencilFunc( GL_ALWAYS, 1, 255 );
 
-	globalImages->defaultImage->Bind();
+	RB_BindDebugImage( globalImages->defaultImage );
 
 	// draw both sides
 	GL_Cull( CT_TWO_SIDED );
@@ -675,7 +1479,7 @@ static void RB_ShowShadowCount( void ) {
 				}
 
 				shadowCache_t *cache = (shadowCache_t *)vertexCache.Position( tri->shadowCache );
-				glVertexPointer( 4, GL_FLOAT, sizeof( *cache ), &cache->xyz );
+				glVertexPointer( 4, GL_FLOAT, sizeof( *cache ), RB_DrawVertAttributePointer( cache, offsetof( shadowCache_t, xyz ) ) );
 				RB_DrawElementsWithCounters( tri );
 			}
 		}
@@ -708,8 +1512,15 @@ RB_T_RenderTriangleSurfaceAsLines
 */
 void RB_T_RenderTriangleSurfaceAsLines( const drawSurf_t *surf ) {
 	const srfTriangles_t *tri = surf->geo;
+	const idDrawVert *verts = NULL;
+	const glIndex_t *indexes = NULL;
 
-	if ( !tri->verts ) {
+	if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) ) {
+		return;
+	}
+
+	const glIndex_t *lineIndexes = ( tri->silIndexes != NULL ) ? tri->silIndexes : indexes;
+	if ( lineIndexes == NULL ) {
 		return;
 	}
 
@@ -717,8 +1528,8 @@ void RB_T_RenderTriangleSurfaceAsLines( const drawSurf_t *surf ) {
 	for ( int i = 0 ; i < tri->numIndexes ; i+= 3 ) {
 		for ( int j = 0 ; j < 3 ; j++ ) {
 			int k = ( j + 1 ) % 3;
-			glVertex3fv( tri->verts[ tri->silIndexes[i+j] ].xyz.ToFloatPtr() );
-			glVertex3fv( tri->verts[ tri->silIndexes[i+k] ].xyz.ToFloatPtr() );
+			glVertex3fv( verts[ lineIndexes[i+j] ].xyz.ToFloatPtr() );
+			glVertex3fv( verts[ lineIndexes[i+k] ].xyz.ToFloatPtr() );
 		}
 	}
 	glEnd();
@@ -741,7 +1552,7 @@ static void RB_ShowTris( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	}
 
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_TEXTURE_2D );
 	glDisable( GL_STENCIL_TEST );
 
@@ -800,7 +1611,7 @@ static void RB_ShowSurfaceInfo( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	}
 
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_TEXTURE_2D );
 	glDisable( GL_STENCIL_TEST );
 
@@ -852,7 +1663,7 @@ static void RB_ShowViewEntitys( viewEntity_t *vModels ) {
 	}
 
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_TEXTURE_2D );
 	glDisable( GL_STENCIL_TEST );
 
@@ -915,7 +1726,7 @@ static void RB_ShowTexturePolarity( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		return;
 	}
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 
 	GL_State( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
@@ -925,7 +1736,9 @@ static void RB_ShowTexturePolarity( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
 		drawSurf = drawSurfs[i];
 		tri = drawSurf->geo;
-		if ( !tri->verts ) {
+		const idDrawVert *verts = NULL;
+		const glIndex_t *indexes = NULL;
+		if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) ) {
 			continue;
 		}
 
@@ -933,13 +1746,13 @@ static void RB_ShowTexturePolarity( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 		glBegin( GL_TRIANGLES );
 		for ( j = 0 ; j < tri->numIndexes ; j+=3 ) {
-			idDrawVert	*a, *b, *c;
+			const idDrawVert	*a, *b, *c;
 			float		d0[5], d1[5];
 			float		area;
 
-			a = tri->verts + tri->indexes[j];
-			b = tri->verts + tri->indexes[j+1];
-			c = tri->verts + tri->indexes[j+2];
+			a = verts + indexes[j];
+			b = verts + indexes[j+1];
+			c = verts + indexes[j+2];
 
 			// VectorSubtract( b->xyz, a->xyz, d0 );
 			d0[3] = b->st[0] - a->st[0];
@@ -984,7 +1797,7 @@ static void RB_ShowUnsmoothedTangents( drawSurf_t **drawSurfs, int numDrawSurfs 
 		return;
 	}
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 
 	GL_State( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
@@ -1001,13 +1814,18 @@ static void RB_ShowUnsmoothedTangents( drawSurf_t **drawSurfs, int numDrawSurfs 
 		RB_SimpleSurfaceSetup( drawSurf );
 
 		tri = drawSurf->geo;
+		const idDrawVert *verts = NULL;
+		const glIndex_t *indexes = NULL;
+		if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) ) {
+			continue;
+		}
 		glBegin( GL_TRIANGLES );
 		for ( j = 0 ; j < tri->numIndexes ; j+=3 ) {
-			idDrawVert	*a, *b, *c;
+			const idDrawVert	*a, *b, *c;
 
-			a = tri->verts + tri->indexes[j];
-			b = tri->verts + tri->indexes[j+1];
-			c = tri->verts + tri->indexes[j+2];
+			a = verts + indexes[j];
+			b = verts + indexes[j+1];
+			c = verts + indexes[j+2];
 
 			glVertex3fv( a->xyz.ToFloatPtr() );
 			glVertex3fv( b->xyz.ToFloatPtr() );
@@ -1039,7 +1857,7 @@ static void RB_ShowTangentSpace( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		return;
 	}
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 
 	GL_State( GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
@@ -1050,14 +1868,16 @@ static void RB_ShowTangentSpace( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		RB_SimpleSurfaceSetup( drawSurf );
 
 		tri = drawSurf->geo;
-		if ( !tri->verts ) {
+		const idDrawVert *verts = NULL;
+		const glIndex_t *indexes = NULL;
+		if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) ) {
 			continue;
 		}
 		glBegin( GL_TRIANGLES );
 		for ( j = 0 ; j < tri->numIndexes ; j++ ) {
 			const idDrawVert *v;
 
-			v = &tri->verts[tri->indexes[j]];
+			v = &verts[indexes[j]];
 
 			if ( r_showTangentSpace.GetInteger() == 1 ) {
 				glColor4f( 0.5 + 0.5 * v->tangents[0][0],  0.5 + 0.5 * v->tangents[0][1],  
@@ -1093,7 +1913,7 @@ static void RB_ShowVertexColor( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		return;
 	}
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 
 	GL_State( GLS_DEPTHFUNC_LESS );
@@ -1104,14 +1924,16 @@ static void RB_ShowVertexColor( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		RB_SimpleSurfaceSetup( drawSurf );
 
 		tri = drawSurf->geo;
-		if ( !tri->verts ) {
+		const idDrawVert *verts = NULL;
+		const glIndex_t *indexes = NULL;
+		if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) ) {
 			continue;
 		}
 		glBegin( GL_TRIANGLES );
 		for ( j = 0 ; j < tri->numIndexes ; j++ ) {
 			const idDrawVert *v;
 
-			v = &tri->verts[tri->indexes[j]];
+			v = &verts[indexes[j]];
 			glColor4ubv( v->color );
 			glVertex3fv( v->xyz.ToFloatPtr() );
 		}
@@ -1145,7 +1967,7 @@ static void RB_ShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	GL_State( GLS_POLYMODE_LINE );
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 	if ( !r_debugLineDepthTest.GetBool() ) {
 		glDisable( GL_DEPTH_TEST );
@@ -1167,25 +1989,27 @@ static void RB_ShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		RB_SimpleSurfaceSetup( drawSurf );
 
 		tri = drawSurf->geo;
-		if ( !tri->verts ) {
+		const idDrawVert *verts = NULL;
+		const glIndex_t *indexes = NULL;
+		if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) ) {
 			continue;
 		}
 
 		glBegin( GL_LINES );
 		for ( j = 0 ; j < tri->numVerts ; j++ ) {
 			glColor3f( 0, 0, 1 );
-			glVertex3fv( tri->verts[j].xyz.ToFloatPtr() );
-			VectorMA( tri->verts[j].xyz, size, tri->verts[j].normal, end );
+			glVertex3fv( verts[j].xyz.ToFloatPtr() );
+			VectorMA( verts[j].xyz, size, verts[j].normal, end );
 			glVertex3fv( end.ToFloatPtr() );
 
 			glColor3f( 1, 0, 0 );
-			glVertex3fv( tri->verts[j].xyz.ToFloatPtr() );
-			VectorMA( tri->verts[j].xyz, size, tri->verts[j].tangents[0], end );
+			glVertex3fv( verts[j].xyz.ToFloatPtr() );
+			VectorMA( verts[j].xyz, size, verts[j].tangents[0], end );
 			glVertex3fv( end.ToFloatPtr() );
 
 			glColor3f( 0, 1, 0 );
-			glVertex3fv( tri->verts[j].xyz.ToFloatPtr() );
-			VectorMA( tri->verts[j].xyz, size, tri->verts[j].tangents[1], end );
+			glVertex3fv( verts[j].xyz.ToFloatPtr() );
+			VectorMA( verts[j].xyz, size, verts[j].tangents[1], end );
 			glVertex3fv( end.ToFloatPtr() );
 		}
 		glEnd();
@@ -1196,17 +2020,19 @@ static void RB_ShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		for ( i = 0 ; i < numDrawSurfs ; i++ ) {
 			drawSurf = drawSurfs[i];
 			tri = drawSurf->geo;
-			if ( !tri->verts ) {
+			const idDrawVert *verts = NULL;
+			const glIndex_t *indexes = NULL;
+			if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) ) {
 				continue;
 			}
 			
 			for ( j = 0 ; j < tri->numVerts ; j++ ) {
-				R_LocalPointToGlobal( drawSurf->space->modelMatrix, tri->verts[j].xyz + tri->verts[j].tangents[0] + tri->verts[j].normal * 0.2f, pos );
+				R_LocalPointToGlobal( drawSurf->space->modelMatrix, verts[j].xyz + verts[j].tangents[0] + verts[j].normal * 0.2f, pos );
 				RB_DrawText( va( "%d", j ), pos, 0.01f, colorWhite, backEnd.viewDef->renderView.viewaxis, 1 );
 			}
 
 			for ( j = 0 ; j < tri->numIndexes; j += 3 ) {
-				R_LocalPointToGlobal( drawSurf->space->modelMatrix, ( tri->verts[ tri->indexes[ j + 0 ] ].xyz + tri->verts[ tri->indexes[ j + 1 ] ].xyz + tri->verts[ tri->indexes[ j + 2 ] ].xyz ) * ( 1.0f / 3.0f ) + tri->verts[ tri->indexes[ j + 0 ] ].normal * 0.2f, pos );
+				R_LocalPointToGlobal( drawSurf->space->modelMatrix, ( verts[ indexes[ j + 0 ] ].xyz + verts[ indexes[ j + 1 ] ].xyz + verts[ indexes[ j + 2 ] ].xyz ) * ( 1.0f / 3.0f ) + verts[ indexes[ j + 0 ] ].normal * 0.2f, pos );
 				RB_DrawText( va( "%d", j / 3 ), pos, 0.01f, colorCyan, backEnd.viewDef->renderView.viewaxis, 1 );
 			}
 		}
@@ -1214,83 +2040,6 @@ static void RB_ShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 	glEnable( GL_STENCIL_TEST );
 }
-
-
-/*
-=====================
-RB_ShowNormals
-
-Debugging tool
-=====================
-*/
-static void RB_AltShowNormals( drawSurf_t **drawSurfs, int numDrawSurfs ) {
-	int			i, j, k;
-	drawSurf_t	*drawSurf;
-	idVec3		end;
-	const srfTriangles_t	*tri;
-
-	if ( r_showNormals.GetFloat() == 0.0f ) {
-		return;
-	}
-
-	GL_State( GLS_DEFAULT );
-	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-
-	globalImages->BindNull();
-	glDisable( GL_STENCIL_TEST );
-	glDisable( GL_DEPTH_TEST );
-
-	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
-		drawSurf = drawSurfs[i];
-
-		RB_SimpleSurfaceSetup( drawSurf );
-
-		tri = drawSurf->geo;
-		glBegin( GL_LINES );
-		for ( j = 0 ; j < tri->numIndexes ; j += 3 ) {
-			const idDrawVert *v[3];
-			idVec3		mid;
-
-			v[0] = &tri->verts[tri->indexes[j+0]];
-			v[1] = &tri->verts[tri->indexes[j+1]];
-			v[2] = &tri->verts[tri->indexes[j+2]];
-
-			// make the midpoint slightly above the triangle
-			mid = ( v[0]->xyz + v[1]->xyz + v[2]->xyz ) * ( 1.0f / 3.0f );
-			mid += 0.1f * tri->facePlanes[ j / 3 ].Normal();
-
-			for ( k = 0 ; k < 3 ; k++ ) {
-				idVec3	pos;
-
-				pos = ( mid + v[k]->xyz * 3.0f ) * 0.25f;
-
-				glColor3f( 0, 0, 1 );
-				glVertex3fv( pos.ToFloatPtr() );
-				VectorMA( pos, r_showNormals.GetFloat(), v[k]->normal, end );
-				glVertex3fv( end.ToFloatPtr() );
-
-				glColor3f( 1, 0, 0 );
-				glVertex3fv( pos.ToFloatPtr() );
-				VectorMA( pos, r_showNormals.GetFloat(), v[k]->tangents[0], end );
-				glVertex3fv( end.ToFloatPtr() );
-
-				glColor3f( 0, 1, 0 );
-				glVertex3fv( pos.ToFloatPtr() );
-				VectorMA( pos, r_showNormals.GetFloat(), v[k]->tangents[1], end );
-				glVertex3fv( end.ToFloatPtr() );
-
-				glColor3f( 1, 1, 1 );
-				glVertex3fv( pos.ToFloatPtr() );
-				glVertex3fv( v[k]->xyz.ToFloatPtr() );
-			}
-		}
-		glEnd();
-	}
-
-	glEnable( GL_DEPTH_TEST );
-	glEnable( GL_STENCIL_TEST );
-}
-
 
 
 /*
@@ -1312,14 +2061,16 @@ static void RB_ShowTextureVectors( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	GL_State( GLS_DEPTHFUNC_LESS );
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
 	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
 		drawSurf = drawSurfs[i];
 
 		tri = drawSurf->geo;
 
-		if ( !tri->verts ) {
+		const idDrawVert *verts = NULL;
+		const glIndex_t *indexes = NULL;
+		if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) ) {
 			continue;
 		}
 		if ( !tri->facePlanes ) {
@@ -1338,9 +2089,9 @@ static void RB_ShowTextureVectors( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 			idVec3		mid;
 			idVec3		tangents[2];
 
-			a = &tri->verts[tri->indexes[j+0]];
-			b = &tri->verts[tri->indexes[j+1]];
-			c = &tri->verts[tri->indexes[j+2]];
+			a = &verts[indexes[j+0]];
+			b = &verts[indexes[j+1]];
+			c = &verts[indexes[j+2]];
 
 			// make the midpoint slightly above the triangle
 			mid = ( a->xyz + b->xyz + c->xyz ) * ( 1.0f / 3.0f );
@@ -1411,14 +2162,16 @@ static void RB_ShowDominantTris( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	glPolygonOffset( -1, -2 );
 	glEnable( GL_POLYGON_OFFSET_LINE );
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
 	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
 		drawSurf = drawSurfs[i];
 
 		tri = drawSurf->geo;
 
-		if ( !tri->verts ) {
+		const idDrawVert *verts = NULL;
+		const glIndex_t *indexes = NULL;
+		if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) ) {
 			continue;
 		}
 		if ( !tri->dominantTris ) {
@@ -1435,9 +2188,9 @@ static void RB_ShowDominantTris( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 			// find the midpoint of the dominant tri
 
-			a = &tri->verts[j];
-			b = &tri->verts[tri->dominantTris[j].v2];
-			c = &tri->verts[tri->dominantTris[j].v3];
+			a = &verts[j];
+			b = &verts[tri->dominantTris[j].v2];
+			c = &verts[tri->dominantTris[j].v3];
 
 			mid = ( a->xyz + b->xyz + c->xyz ) * ( 1.0f / 3.0f );
 
@@ -1471,7 +2224,7 @@ static void RB_ShowEdges( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	GL_State( GLS_DEFAULT );
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_DEPTH_TEST );
 
 	for ( i = 0 ; i < numDrawSurfs ; i++ ) {
@@ -1479,8 +2232,9 @@ static void RB_ShowEdges( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 		tri = drawSurf->geo;
 
-		idDrawVert *ac = (idDrawVert *)tri->verts;
-		if ( !ac ) {
+		const idDrawVert *verts = NULL;
+		const glIndex_t *indexes = NULL;
+		if ( !RB_RendertoolsGetTriDebugGeometry( tri, verts, indexes ) ) {
 			continue;
 		}
 
@@ -1494,14 +2248,14 @@ static void RB_ShowEdges( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 			for ( k = 0 ; k < 3 ; k++ ) {
 				int		l, i1, i2;
 				l = ( k == 2 ) ? 0 : k + 1;
-				i1 = tri->indexes[j+k];
-				i2 = tri->indexes[j+l];
+				i1 = indexes[j+k];
+				i2 = indexes[j+l];
 
 				// if these are used backwards, the edge is shared
 				for ( m = 0 ; m < tri->numIndexes ; m += 3 ) {
 					for ( n = 0 ; n < 3 ; n++ ) {
 						o = ( n == 2 ) ? 0 : n + 1;
-						if ( tri->indexes[m+n] == i2 && tri->indexes[m+o] == i1 ) {
+						if ( indexes[m+n] == i2 && indexes[m+o] == i1 ) {
 							break;
 						}
 					}
@@ -1512,8 +2266,8 @@ static void RB_ShowEdges( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 
 				// if we didn't find a backwards listing, draw it in yellow
 				if ( m == tri->numIndexes ) {
-					glVertex3fv( ac[ i1 ].xyz.ToFloatPtr() );
-					glVertex3fv( ac[ i2 ].xyz.ToFloatPtr() );
+					glVertex3fv( verts[ i1 ].xyz.ToFloatPtr() );
+					glVertex3fv( verts[ i2 ].xyz.ToFloatPtr() );
 				}
 
 			}
@@ -1540,8 +2294,8 @@ static void RB_ShowEdges( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 				continue;
 			}
 
-			glVertex3fv( ac[ edge->v1 ].xyz.ToFloatPtr() );
-			glVertex3fv( ac[ edge->v2 ].xyz.ToFloatPtr() );
+			glVertex3fv( verts[ edge->v1 ].xyz.ToFloatPtr() );
+			glVertex3fv( verts[ edge->v2 ].xyz.ToFloatPtr() );
 		}
 		glEnd();
 	}
@@ -1573,7 +2327,7 @@ void RB_ShowLights( void ) {
 	RB_SimpleWorldSetup();
 
 	glDisableClientState( GL_TEXTURE_COORD_ARRAY );
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_STENCIL_TEST );
 
 
@@ -1642,7 +2396,7 @@ void RB_ShowPortals( void ) {
 	// all portals are expressed in world coordinates
 	RB_SimpleWorldSetup();
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 	glDisable( GL_DEPTH_TEST );
 
 	GL_State( GLS_DEFAULT );
@@ -1653,11 +2407,85 @@ void RB_ShowPortals( void ) {
 }
 
 /*
+=====================
+RB_ShowLightGrid
+=====================
+*/
+static void RB_ShowLightGrid( void ) {
+	const int showMode = r_showLightGrid.GetInteger();
+	if ( showMode <= 0 ) {
+		return;
+	}
+
+	idRenderWorldLocal *world = backEnd.viewDef ? backEnd.viewDef->renderWorld : NULL;
+	if ( world == NULL || world->portalAreas == NULL ) {
+		return;
+	}
+
+	RB_SimpleWorldSetup();
+	RB_BindNullDebugImage();
+	GL_State( GLS_DEFAULT );
+	GL_Cull( CT_TWO_SIDED );
+
+	glPointSize( 5.0f );
+	glBegin( GL_POINTS );
+	for ( int areaIndex = 0; areaIndex < world->numPortalAreas; areaIndex++ ) {
+		if ( showMode == 1 && areaIndex != backEnd.viewDef->areaNum ) {
+			continue;
+		}
+
+		const LightGrid &lightGrid = world->portalAreas[ areaIndex ].lightGrid;
+		if ( lightGrid.lightGridPoints.Num() <= 0 ) {
+			continue;
+		}
+
+		const int gridStepY = Max( lightGrid.lightGridBounds[0], 1 );
+		const int gridStepZ = Max( lightGrid.lightGridBounds[0] * lightGrid.lightGridBounds[1], 1 );
+
+		for ( int probeIndex = 0; probeIndex < lightGrid.lightGridPoints.Num(); probeIndex++ ) {
+			const lightGridPoint_t &gridPoint = lightGrid.lightGridPoints[ probeIndex ];
+			if ( gridPoint.valid == 0 && showMode < 3 ) {
+				continue;
+			}
+
+			idVec3 color( 0.35f, 0.0f, 0.0f );
+			if ( gridPoint.valid != 0 ) {
+				int gridCoord[3];
+				gridCoord[0] = probeIndex % gridStepY;
+				gridCoord[1] = ( probeIndex / gridStepY ) % Max( lightGrid.lightGridBounds[1], 1 );
+				gridCoord[2] = probeIndex / gridStepZ;
+				color = lightGrid.GetGridCoordDebugColor( gridCoord );
+				if ( gridPoint.valid == LIGHTGRID_POINT_RELOCATED || gridPoint.valid == LIGHTGRID_POINT_RELOCATED_NEAR_SOLID ) {
+					color = idVec3( 1.0f, 0.45f, 0.0f );
+				}
+				if ( gridPoint.valid == LIGHTGRID_POINT_NEAR_SOLID || gridPoint.valid == LIGHTGRID_POINT_RELOCATED_NEAR_SOLID ) {
+					color = idVec3( 1.0f, 1.0f, 0.0f );
+				}
+			}
+
+			glColor3fv( color.ToFloatPtr() );
+			glVertex3fv( gridPoint.origin.ToFloatPtr() );
+		}
+	}
+	glEnd();
+	glPointSize( 1.0f );
+}
+
+/*
 ================
 RB_ClearDebugText
 ================
 */
 void RB_ClearDebugText( int time ) {
+	if ( rb_numDebugText == 0 && time != 0 ) {
+		rb_debugTextTime = time;
+		return;
+	}
+	// Even a time-zero clear can release retained strings without waiting when
+	// there is no active text: the backend returns before reading the array.
+	if ( rb_numDebugText != 0 ) {
+		R_RenderThread_Sync( "debug text" );
+	}
 	int			i;
 	int			num;
 	debugText_t	*text;
@@ -1694,6 +2522,7 @@ RB_AddDebugText
 ================
 */
 void RB_AddDebugText( const char *text, const idVec3 &origin, float scale, const idVec4 &color, const idMat3 &viewAxis, const int align, const int lifetime, const bool depthTest ) {
+	R_RenderThread_Sync( "debug text" );
 	debugText_t *debugText;
 
 	if ( rb_numDebugText < MAX_DEBUG_TEXT ) {
@@ -1722,11 +2551,11 @@ float RB_DrawTextLength( const char *text, float scale, int len ) {
 
 	if ( text && *text ) {
 		if ( !len ) {
-			len = strlen(text);
+			len = idLib::SizeToInt( strlen( text ), "RB_DrawTextLength" );
 		}
 		for ( i = 0; i < len; i++ ) {
 			charIndex = text[i] - 32;
-			if ( charIndex < 0 || charIndex > NUM_SIMPLEX_CHARS ) {
+			if ( charIndex < 0 || charIndex >= NUM_SIMPLEX_CHARS ) {
 				continue;
 			}
 			num = simplex[charIndex][0] * 2;
@@ -1773,7 +2602,7 @@ static void RB_DrawText( const char *text, const idVec3 &origin, float scale, co
 			line = 0;
 		}
 
-		len = strlen( text );
+		len = idLib::SizeToInt( strlen( text ), "RB_DrawText" );
 		for ( i = 0; i < len; i++ ) {
 
 			if ( i == 0 || text[i] == '\n' ) {
@@ -1797,7 +2626,7 @@ static void RB_DrawText( const char *text, const idVec3 &origin, float scale, co
 			}
 
 			charIndex = text[i] - 32;
-			if ( charIndex < 0 || charIndex > NUM_SIMPLEX_CHARS ) {
+			if ( charIndex < 0 || charIndex >= NUM_SIMPLEX_CHARS ) {
 				continue;
 			}
 			num = simplex[charIndex][0] * 2;
@@ -1844,7 +2673,7 @@ void RB_ShowDebugText( void ) {
 	// all lines are expressed in world coordinates
 	RB_SimpleWorldSetup();
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
 	width = r_debugLineWidth.GetInteger();
 	if ( width < 1 ) {
@@ -1889,6 +2718,13 @@ RB_ClearDebugLines
 ================
 */
 void RB_ClearDebugLines( int time ) {
+	// Empty lists are common during ordinary gameplay. Only the main-thread
+	// lifetime clock changes; do not turn every game tic into an early sync.
+	if ( rb_numDebugLines == 0 ) {
+		rb_debugLineTime = time;
+		return;
+	}
+	R_RenderThread_Sync( "debug lines" );
 	int			i;
 	int			num;
 	debugLine_t	*line;
@@ -1920,6 +2756,7 @@ RB_AddDebugLine
 ================
 */
 void RB_AddDebugLine( const idVec4 &color, const idVec3 &start, const idVec3 &end, const int lifeTime, const bool depthTest ) {
+	R_RenderThread_Sync( "debug lines" );
 	debugLine_t *line;
 
 	if ( rb_numDebugLines < MAX_DEBUG_LINES ) {
@@ -1949,7 +2786,7 @@ void RB_ShowDebugLines( void ) {
 	// all lines are expressed in world coordinates
 	RB_SimpleWorldSetup();
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
 	width = r_debugLineWidth.GetInteger();
 	if ( width < 1 ) {
@@ -2005,6 +2842,11 @@ RB_ClearDebugPolygons
 ================
 */
 void RB_ClearDebugPolygons( int time ) {
+	if ( rb_numDebugPolygons == 0 ) {
+		rb_debugPolygonTime = time;
+		return;
+	}
+	R_RenderThread_Sync( "debug polygons" );
 	int				i;
 	int				num;
 	debugPolygon_t	*poly;
@@ -2037,6 +2879,7 @@ RB_AddDebugPolygon
 ================
 */
 void RB_AddDebugPolygon( const idVec4 &color, const idWinding &winding, const int lifeTime, const bool depthTest ) {
+	R_RenderThread_Sync( "debug polygons" );
 	debugPolygon_t *poly;
 
 	if ( rb_numDebugPolygons < MAX_DEBUG_POLYGONS ) {
@@ -2064,7 +2907,7 @@ void RB_ShowDebugPolygons( void ) {
 	// all lines are expressed in world coordinates
 	RB_SimpleWorldSetup();
 
-	globalImages->BindNull();
+	RB_BindNullDebugImage();
 
 	glDisable( GL_TEXTURE_2D );
 	glDisable( GL_STENCIL_TEST );
@@ -2089,7 +2932,8 @@ void RB_ShowDebugPolygons( void ) {
 
 			glBegin( GL_POLYGON );
 
-			for ( j = 0; j < poly->winding.GetNumPoints(); j++) {
+			const int windingPointCount = poly->winding.GetNumPoints();
+			for ( j = 0; j < windingPointCount; j++) {
 				glVertex3fv( poly->winding[j].ToFloatPtr() );
 			}
 
@@ -2300,7 +3144,7 @@ void RB_TestImage( void ) {
 	glLoadIdentity(); 
     glOrtho( 0, 1, 0, 1, -1, 1 );
 
-	tr.testImage->Bind();
+	RB_BindDebugImage( tr.testImage );
 	glBegin( GL_QUADS );
 	
 	glTexCoord2f( 0, 1 );
@@ -2323,6 +3167,82 @@ void RB_TestImage( void ) {
 
 /*
 =================
+RB_CaptureLevelshotDepth
+
+Copies the main view's depth buffer out for levelshotProbe. Runs before the debug
+tools draw, so nothing but the scene has touched depth yet. OpenGL only: in the
+Vulkan module the GL calls below are stubs, and LevelShotDepth.h promises that
+only the GL backend fills the capture.
+=================
+*/
+#if !defined( OPENQ4_RENDERER_VK_MODULE )
+static void RB_CaptureLevelshotDepth( void ) {
+	levelshotDepthCapture_t &capture = tr_levelshotDepthCapture;
+	if ( capture.linearDepth == NULL || capture.captured ) {
+		return;
+	}
+	if ( backEnd.viewDef->isSubview || ( backEnd.viewDef->renderFlags & RF_PORTAL_SKY ) != 0 ) {
+		return;
+	}
+
+	const idScreenRect &viewport = backEnd.viewDef->viewport;
+	const int width = viewport.x2 - viewport.x1 + 1;
+	const int height = viewport.y2 - viewport.y1 + 1;
+	if ( width != capture.width || height != capture.height ) {
+		common->Warning( "levelshotProbe: depth viewport is %dx%d, expected %dx%d", width, height, capture.width, capture.height );
+		return;
+	}
+
+	// The scene may be drawing into a render texture that is bound for draw only.
+	// Bind with raw GL and restore the exact previous binding afterwards: the
+	// state cache can hold a stale read binding and would skip the bind.
+	GLint previousReadFramebuffer = 0;
+	GLint drawFramebuffer = 0;
+	if ( glBindFramebuffer != NULL ) {
+		glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &previousReadFramebuffer );
+		glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebuffer );
+		if ( previousReadFramebuffer != drawFramebuffer ) {
+			glBindFramebuffer( GL_READ_FRAMEBUFFER, static_cast<GLuint>( drawFramebuffer ) );
+		}
+	}
+
+	idTempArray<float> windowDepth( width * height );
+	while ( glGetError() != GL_NO_ERROR ) {
+	}
+	GLint sampleBuffers = 0;
+	glGetIntegerv( GL_SAMPLE_BUFFERS, &sampleBuffers );
+	glPixelStorei( GL_PACK_ALIGNMENT, 4 );
+	glReadPixels( viewport.x1, viewport.y1, width, height, GL_DEPTH_COMPONENT, GL_FLOAT, windowDepth.Ptr() );
+	const GLenum readError = glGetError();
+
+	if ( glBindFramebuffer != NULL && previousReadFramebuffer != drawFramebuffer ) {
+		glBindFramebuffer( GL_READ_FRAMEBUFFER, static_cast<GLuint>( previousReadFramebuffer ) );
+	}
+
+	if ( readError != GL_NO_ERROR ) {
+		common->Warning( "levelshotProbe: depth readback failed (GL error 0x%x, draw fbo %d, read fbo %d, sample buffers %d)",
+			readError, drawFramebuffer, previousReadFramebuffer, sampleBuffers );
+		return;
+	}
+
+	// Invert the infinite-far projection: ndc = B / d - A with A = P[10], B = P[14].
+	const float *projection = backEnd.viewDef->projectionMatrix;
+	for ( int y = 0; y < height; y++ ) {
+		const float *srcRow = windowDepth.Ptr() + ( height - 1 - y ) * width;
+		float *dstRow = capture.linearDepth + y * width;
+		for ( int x = 0; x < width; x++ ) {
+			const float ndc = 2.0f * srcRow[ x ] - 1.0f;
+			const float denominator = ndc + projection[ 10 ];
+			const float distance = ( idMath::Fabs( denominator ) > 1e-9f ) ? projection[ 14 ] / denominator : -1.0f;
+			dstRow[ x ] = ( distance > 0.0f && distance < MAX_WORLD_SIZE * 4.0f ) ? distance : -1.0f;
+		}
+	}
+	capture.captured = true;
+}
+#endif
+
+/*
+=================
 RB_RenderDebugTools
 =================
 */
@@ -2331,6 +3251,10 @@ void RB_RenderDebugTools( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	if ( !backEnd.viewDef->viewEntitys ) {
 		return;
 	}
+
+#if !defined( OPENQ4_RENDERER_VK_MODULE )
+	RB_CaptureLevelshotDepth();
+#endif
 
 	RB_LogComment( "---------- RB_RenderDebugTools ----------\n" );
 
@@ -2341,6 +3265,12 @@ void RB_RenderDebugTools( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 		backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
 		backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 
+
+	// The tools clip to the view and to each surface's scissor (as the
+	// original backend kept the test on). Earlier passes leave the test in
+	// either state, SMAA among them disabling it, so set it here; the Vulkan
+	// translation sees the same call. R_ColorByStencilBuffer turns it off.
+	glEnable( GL_SCISSOR_TEST );
 
 	RB_ShowLightCount();
 	RB_ShowShadowCount();
@@ -2354,6 +3284,9 @@ void RB_RenderDebugTools( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	RB_ShowNormals( drawSurfs, numDrawSurfs );
 	RB_ShowViewEntitys( backEnd.viewDef->viewEntitys );
 	RB_ShowLights();
+	RB_ReportViewLights();
+	RB_DrawCachedViewLightDebugVisuals();
+	RB_ShowLightGrid();
 	RB_ShowTextureVectors( drawSurfs, numDrawSurfs );
 	RB_ShowDominantTris( drawSurfs, numDrawSurfs );
 	if ( r_testGamma.GetInteger() > 0 ) {	// test here so stack check isn't so damn slow on debug builds
@@ -2382,4 +3315,5 @@ void RB_ShutdownDebugTools( void ) {
 	for ( int i = 0; i < MAX_DEBUG_POLYGONS; i++ ) {
 		rb_debugPolygons[i].winding.Clear();
 	}
+	RB_ClearViewLightDebugVisuals();
 }

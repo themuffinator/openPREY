@@ -1,0 +1,9 @@
+# Blessed shadow-regression reference captures (local, not committed: ~11 MB each).
+# Regenerate + install: see tools/tests/references/README.md
+# Blessed at openQ4 shadow phase 4b (2026-07-09): point lights mapped by default,
+# r_shadowMapPointSize 512, packed point depth. windows-x64, 2560x1440, launch g_stopTime 1.
+d23052d06a2df158c69c640bc5cd6ee35fd32085d4be0b0e85f862a621aeac24   11059218  shadow-character-airdefense2_auto_fps240_vsync0_windowed_csm_best/screenshots/renderer-bench/sp_0.tga
+67ab4d85f8cd2c8021b38c2c4b3d05545c2aa1a5e5303966d4ed4528566c0435   11059218  shadow-csm-airdefense1_auto_fps240_vsync0_windowed_csm_best/screenshots/renderer-bench/sp_0.tga
+71240b2b98c7a4a8478380145478f437715569353440cc6da6f9b15934c4fd1e   11059218  shadow-cutout-storage2_auto_fps240_vsync0_windowed_csm_best/screenshots/renderer-bench/sp_0.tga
+71240b2b98c7a4a8478380145478f437715569353440cc6da6f9b15934c4fd1e   11059218  shadow-point-storage2_auto_fps240_vsync0_windowed_csm_best/screenshots/renderer-bench/sp_0.tga
+d23052d06a2df158c69c640bc5cd6ee35fd32085d4be0b0e85f862a621aeac24   11059218  shadow-projected-airdefense2_auto_fps240_vsync0_windowed_csm_best/screenshots/renderer-bench/sp_0.tga

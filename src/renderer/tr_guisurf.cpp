@@ -30,6 +30,35 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "tr_local.h"
 
+static ID_INLINE void R_ClearGuiTextureAxes( idVec3 &origin, idVec3 axis[3] ) {
+	origin.Zero();
+	axis[0].Zero();
+	axis[1].Zero();
+	axis[2].Zero();
+}
+
+static ID_INLINE bool R_GetGuiVertexPosition( const srfTriangles_t *tri, int index, idVec3 &position ) {
+	if ( tri == NULL || index < 0 || index >= tri->numVerts ) {
+		position.Zero();
+		return false;
+	}
+
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	if ( tri->silTraceVerts != NULL ) {
+		position = reinterpret_cast<const rvSilTraceVertT *>( tri->silTraceVerts )[index].xyzw.ToVec3();
+		return true;
+	}
+#endif
+
+	if ( tri->verts == NULL ) {
+		position.Zero();
+		return false;
+	}
+
+	position = tri->verts[index].xyz;
+	return true;
+}
+
 /*
 ==========================================================================================
 
@@ -54,6 +83,12 @@ void R_SurfaceToTextureAxis( const srfTriangles_t *tri, idVec3 &origin, idVec3 a
 	float		boundsOrg[2];
 	int			i, j;
 	float		v;
+	idVec3		aPos, bPos, cPos;
+
+	if ( tri == NULL || tri->verts == NULL || tri->numVerts <= 0 || tri->numIndexes < 3 ) {
+		R_ClearGuiTextureAxes( origin, axis );
+		return;
+	}
 	
 	// find the bounds of the texture
 	bounds[0][0] = bounds[0][1] = 999999;
@@ -81,19 +116,23 @@ void R_SurfaceToTextureAxis( const srfTriangles_t *tri, idVec3 &origin, idVec3 a
 	a = tri->verts + tri->indexes[0];
 	b = tri->verts + tri->indexes[1];
 	c = tri->verts + tri->indexes[2];
+	if ( !R_GetGuiVertexPosition( tri, tri->indexes[0], aPos )
+		|| !R_GetGuiVertexPosition( tri, tri->indexes[1], bPos )
+		|| !R_GetGuiVertexPosition( tri, tri->indexes[2], cPos ) ) {
+		R_ClearGuiTextureAxes( origin, axis );
+		return;
+	}
 
-	VectorSubtract( b->xyz, a->xyz, d0 );
+	VectorSubtract( bPos, aPos, d0 );
 	d0[3] = b->st[0] - a->st[0];
 	d0[4] = b->st[1] - a->st[1];
-	VectorSubtract( c->xyz, a->xyz, d1 );
+	VectorSubtract( cPos, aPos, d1 );
 	d1[3] = c->st[0] - a->st[0];
 	d1[4] = c->st[1] - a->st[1];
 
 	area = d0[3] * d1[4] - d0[4] * d1[3];
 	if ( area == 0.0 ) {
-		axis[0].Zero();
-		axis[1].Zero();
-		axis[2].Zero();
+		R_ClearGuiTextureAxes( origin, axis );
 		return;	// degenerate
 	}
 	inva = 1.0 / area;
@@ -107,14 +146,207 @@ void R_SurfaceToTextureAxis( const srfTriangles_t *tri, idVec3 &origin, idVec3 a
     axis[1][2] = (d0[3] * d1[2] - d0[2] * d1[3]) * inva;
 
 	idPlane plane;
-	plane.FromPoints( a->xyz, b->xyz, c->xyz );
+	plane.FromPoints( aPos, bPos, cPos );
 	axis[2][0] = plane[0];
 	axis[2][1] = plane[1];
 	axis[2][2] = plane[2];
 
 	// take point 0 and project the vectors to the texture origin
-	VectorMA( a->xyz, boundsOrg[0] - a->st[0], axis[0], origin );
-	VectorMA( origin, boundsOrg[1] - a->st[1], axis[1], origin );
+	origin = aPos + ( boundsOrg[0] - a->st[0] ) * axis[0];
+	origin += ( boundsOrg[1] - a->st[1] ) * axis[1];
+}
+
+static idScreenRect R_ScreenRectFromDrawSurf( const drawSurf_t *drawSurf ) {
+	idScreenRect rect;
+	rect.Clear();
+
+	if ( drawSurf == NULL || drawSurf->geo == NULL ) {
+		return rect;
+	}
+
+	const srfTriangles_t *geo = drawSurf->geo;
+	for ( int i = 0; i < geo->numVerts; ++i ) {
+		idVec3 local;
+		idVec3 global;
+		idVec3 ndc;
+
+		if ( !R_GetGuiVertexPosition( geo, i, local ) ) {
+			continue;
+		}
+
+		R_LocalPointToGlobal( drawSurf->space->modelMatrix, local, global );
+		R_GlobalToNormalizedDeviceCoordinates( global, ndc );
+
+		const float x = static_cast<float>( tr.viewDef->viewport.x2 - tr.viewDef->viewport.x1 ) * ( ndc[0] + 1.0f ) * 0.5f;
+		const float y = static_cast<float>( tr.viewDef->viewport.y2 ) -
+			static_cast<float>( tr.viewDef->viewport.y2 - tr.viewDef->viewport.y1 ) * ( ndc[1] + 1.0f ) * 0.5f;
+
+		rect.AddPoint( x, y );
+	}
+
+	return rect;
+}
+
+static void R_ConvertScreenToHudSpace( float &x, float &y ) {
+	if ( !cvarSystem->GetCVarBool( "ui_aspectCorrection" ) ) {
+		return;
+	}
+
+	float windowWidth = static_cast<float>( glConfig.uiViewportWidth );
+	float windowHeight = static_cast<float>( glConfig.uiViewportHeight );
+	if ( windowWidth <= 0.0f || windowHeight <= 0.0f ) {
+		windowWidth = static_cast<float>( glConfig.vidWidth );
+		windowHeight = static_cast<float>( glConfig.vidHeight );
+	}
+
+	if ( windowWidth <= 0.0f || windowHeight <= 0.0f ) {
+		return;
+	}
+
+	const float targetAspect = static_cast<float>( SCREEN_WIDTH ) / static_cast<float>( SCREEN_HEIGHT );
+	const float windowAspect = windowWidth / windowHeight;
+	const float uniformPhysicalScale = ( windowAspect >= targetAspect ) ?
+		( windowHeight / static_cast<float>( SCREEN_HEIGHT ) ) :
+		( windowWidth / static_cast<float>( SCREEN_WIDTH ) );
+	const float drawWidth = static_cast<float>( SCREEN_WIDTH ) * uniformPhysicalScale;
+	const float drawHeight = static_cast<float>( SCREEN_HEIGHT ) * uniformPhysicalScale;
+	const float virtualPerPhysicalX = static_cast<float>( SCREEN_WIDTH ) / windowWidth;
+	const float virtualPerPhysicalY = static_cast<float>( SCREEN_HEIGHT ) / windowHeight;
+	const float xScale = uniformPhysicalScale * virtualPerPhysicalX;
+	const float yScale = uniformPhysicalScale * virtualPerPhysicalY;
+	const float xOffset = ( windowWidth - drawWidth ) * 0.5f * virtualPerPhysicalX;
+	const float yOffset = ( windowHeight - drawHeight ) * 0.5f * virtualPerPhysicalY;
+
+	if ( xScale != 0.0f ) {
+		x = ( x - xOffset ) / xScale;
+	}
+	if ( yScale != 0.0f ) {
+		y = ( y - yOffset ) / yScale;
+	}
+}
+
+static void R_UpdateGuiScreenRectState( idUserInterface *gui, const drawSurf_t *drawSurf ) {
+	if ( gui == NULL || drawSurf == NULL || !gui->State().GetBool( "2d_calc" ) ) {
+		return;
+	}
+
+	const idScreenRect rect = R_ScreenRectFromDrawSurf( drawSurf );
+	const float viewportWidth = Max( 1.0f, static_cast<float>( tr.viewDef->viewport.x2 - tr.viewDef->viewport.x1 ) );
+	const float viewportHeight = Max( 1.0f, static_cast<float>( tr.viewDef->viewport.y2 - tr.viewDef->viewport.y1 ) );
+	const float ratioX = static_cast<float>( SCREEN_WIDTH ) / viewportWidth;
+	const float ratioY = static_cast<float>( SCREEN_HEIGHT ) / viewportHeight;
+	float minX = rect.x1 * ratioX;
+	float minY = rect.y1 * ratioY;
+	float maxX = rect.x2 * ratioX;
+	float maxY = rect.y2 * ratioY;
+
+	// Retail Quake 4 writes raw 640x480 HUD coords here. openQ4's optional HUD aspect
+	// correction remaps those coords into a centered 4:3 region, so undo that transform
+	// first or the bracket box will be squeezed inward on widescreen displays.
+	R_ConvertScreenToHudSpace( minX, minY );
+	R_ConvertScreenToHudSpace( maxX, maxY );
+
+	gui->SetStateFloat( "2d_min_x", minX );
+	gui->SetStateFloat( "2d_min_y", minY );
+	gui->SetStateFloat( "2d_max_x", maxX );
+	gui->SetStateFloat( "2d_max_y", maxY );
+	gui->SetStateBool( "2d_calc", false );
+}
+
+/*
+=================
+Stereo GUI sharing (VR-04)
+
+Both eyes of a stereo frame draw a world GUI at the same game time, and the
+quads a GUI emits are in its own 640x480 space, so they do not depend on the
+eye. The first eye keeps them; the second eye emits those instead of running
+the GUI again. A GUI that rendered a view of its own while drawing (a
+renderDef window) is drawn again, because its quads alone would drop that
+view from the second eye. Flat frames, subviews and nested GUIs never share.
+=================
+*/
+static const int STEREO_GUI_SHARE_SLOTS = 32;
+
+typedef struct {
+	const idUserInterface *	gui;
+	int						frameCount;
+	int						time;
+	idGuiModel *			model;
+} stereoGuiShare_t;
+
+static stereoGuiShare_t	stereoGuiShare[STEREO_GUI_SHARE_SLOTS];
+
+idCVar r_vrStereoGuiShare( "r_vrStereoGuiShare", "1", CVAR_RENDERER | CVAR_BOOL,
+	"the second eye of a stereo VR frame emits the world-GUI quads the first eye drew instead of running each GUI again" );
+
+static bool R_StereoGuiShareEligible( void ) {
+	return r_vrStereoGuiShare.GetBool() && R_VR_FrontEndEye() >= 0 && tr.guiRecursionLevel == 1 && tr.viewDef != NULL && !tr.viewDef->isSubview;
+}
+
+static stereoGuiShare_t *R_StereoGuiShareFind( const idUserInterface *gui ) {
+	for ( int i = 0; i < STEREO_GUI_SHARE_SLOTS; i++ ) {
+		stereoGuiShare_t &slot = stereoGuiShare[i];
+		if ( slot.gui == gui && slot.frameCount == tr.frameCount && slot.time == tr.viewDef->renderView.time
+				&& slot.model != NULL ) {
+			return &slot;
+		}
+	}
+	return NULL;
+}
+
+// The first eye's quads for this GUI, when the second eye can emit them.
+static idGuiModel *R_StereoGuiShareLookup( const idUserInterface *gui ) {
+	if ( R_VR_FrontEndEye() != 1 || !R_StereoGuiShareEligible() ) {
+		return NULL;
+	}
+	stereoGuiShare_t *slot = R_StereoGuiShareFind( gui );
+	return slot != NULL ? slot->model : NULL;
+}
+
+// Moves the GUI's freshly drawn quads (tr.guiModel) into a slot the second eye
+// can find, and returns the model holding them now.
+static idGuiModel *R_StereoGuiShareKeep( const idUserInterface *gui ) {
+	if ( R_VR_FrontEndEye() != 0 || !R_StereoGuiShareEligible() ) {
+		return tr.guiModel;
+	}
+	stereoGuiShare_t *slot = R_StereoGuiShareFind( gui );
+	if ( slot == NULL ) {
+		for ( int i = 0; i < STEREO_GUI_SHARE_SLOTS && slot == NULL; i++ ) {
+			if ( stereoGuiShare[i].frameCount != tr.frameCount || stereoGuiShare[i].gui == NULL ) {
+				slot = &stereoGuiShare[i];
+			}
+		}
+	}
+	if ( slot == NULL ) {
+		return tr.guiModel;	// more GUIs in view than slots: the rest draw per eye
+	}
+	if ( slot->model == NULL ) {
+		slot->model = new idGuiModel;
+	}
+	slot->gui = gui;
+	slot->frameCount = tr.frameCount;
+	slot->time = tr.viewDef->renderView.time;
+	slot->model->Swap( *tr.guiModel );
+	return slot->model;
+}
+
+// A GUI that rendered a view while drawing cannot be shared this frame.
+static void R_StereoGuiShareForget( const idUserInterface *gui ) {
+	for ( int i = 0; i < STEREO_GUI_SHARE_SLOTS; i++ ) {
+		if ( stereoGuiShare[i].gui == gui ) {
+			stereoGuiShare[i].gui = NULL;
+			stereoGuiShare[i].frameCount = -1;
+		}
+	}
+}
+
+void R_ShutdownStereoGuiShare( void ) {
+	for ( int i = 0; i < STEREO_GUI_SHARE_SLOTS; i++ ) {
+		delete stereoGuiShare[i].model;
+		stereoGuiShare[i].model = NULL;
+		stereoGuiShare[i].gui = NULL;
+		stereoGuiShare[i].frameCount = -1;
+	}
 }
 
 /*
@@ -125,7 +357,7 @@ Create a texture space on the given surface and
 call the GUI generator to create quads for it.
 =================
 */
-void R_RenderGuiSurf( idUserInterface *gui, drawSurf_t *drawSurf ) {
+void R_RenderGuiSurf( idUserInterface *gui, drawSurf_t *drawSurf, int entityGui ) {
 	idVec3	origin, axis[3];
 
 	// for testing the performance hit
@@ -169,15 +401,46 @@ void R_RenderGuiSurf( idUserInterface *gui, drawSurf_t *drawSurf ) {
 	myGlMultMatrix( guiModelMatrix, drawSurf->space->modelMatrix, 
 			modelMatrix );
 
+	// A render demo (v11) carries an entity's in-world GUI as the geometry it
+	// drew; playback has no live GUI behind the entity, so it draws that.
+	const idRenderEntityLocal *entityDef = drawSurf->space != NULL ? drawSurf->space->entityDef : NULL;
+	idRenderWorldLocal *world = tr.viewDef->renderWorld;
+	const bool demoWorld = entityGui >= 0 && entityDef != NULL && world != NULL && world == session->rw;
+	idGuiModel *recorded = demoWorld && session->readDemo != NULL
+		? world->DemoGuiSurface( entityDef->index, entityGui ) : NULL;
+
 	tr.guiRecursionLevel++;
 
 	// call the gui, which will call the 2D drawing functions
 	tr.guiModel->Clear();
-	UI_SetInWorldGuiRendering( true );
-	gui->Redraw( tr.viewDef->renderView.time );
-	UI_SetInWorldGuiRendering( false );
-	tr.guiModel->EmitToCurrentView( modelMatrix, drawSurf->space->weaponDepthHack );
+	idGuiModel *emitted = recorded;
+	if ( emitted == NULL ) {
+		// the second eye of a stereo frame emits the first eye's quads
+		emitted = R_StereoGuiShareLookup( gui );
+		if ( emitted != NULL ) {
+			tr.pc.c_guiSurfsShared++;
+		}
+	}
+	if ( emitted == NULL ) {
+		const int viewCountBeforeRedraw = tr.viewCount;
+		gui->Redraw( tr.viewDef->renderView.time, false );
+		if ( demoWorld && session->writeDemo != NULL && tr.guiRecursionLevel == 1 && !tr.viewDef->isSubview ) {
+			world->WriteGuiSurface( entityDef->index, entityGui, *tr.guiModel );
+		}
+		if ( tr.viewCount == viewCountBeforeRedraw ) {
+			emitted = R_StereoGuiShareKeep( gui );
+		} else {
+			R_StereoGuiShareForget( gui );
+			emitted = tr.guiModel;
+		}
+	}
+	// The generated quads become ordinary 3D drawSurfs. Preserve that origin
+	// explicitly so shared in-world ownership cannot claim root UI by sort.
+	tr.inWorldGuiEmissionDepth++;
+	emitted->EmitToCurrentView( modelMatrix, drawSurf->space->weaponDepthHack );
+	tr.inWorldGuiEmissionDepth--;
 	tr.guiModel->Clear();
+	R_UpdateGuiScreenRectState( gui, drawSurf );
 
 	tr.guiRecursionLevel--;
 }

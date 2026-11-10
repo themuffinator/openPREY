@@ -512,6 +512,7 @@ public:
 
 	static idRandom		random;	
 	int					ssdTime;
+	double				ssdTimeAccumulator;
 	
 private:
 	

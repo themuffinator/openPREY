@@ -2599,6 +2599,15 @@ idDeclModelDef::Parse
 ================
 */
 bool idDeclModelDef::Parse( const char *text, const int textLength ) {
+	return Parse( text, textLength, false );
+}
+
+/*
+================
+idDeclModelDef::Parse
+================
+*/
+bool idDeclModelDef::Parse( const char *text, const int textLength, bool noCaching ) {
 	int					i;
 	int					num;
 	idStr				filename;
@@ -2867,6 +2876,7 @@ bool idDeclModelDef::Parse( const char *text, const int textLength ) {
 	anims.SetGranularity( 1 );
 	anims.SetNum( anims.Num() );
 
+	(void)noCaching;
 	return true;
 }
 

@@ -81,39 +81,84 @@ void idInterpreter::Restore( idRestoreGame *savefile ) {
 	int func_index;
 
 	savefile->ReadInt( callStackDepth );
+	if ( callStackDepth < 0 || callStackDepth > MAX_STACK_DEPTH ) {
+		savefile->Error( "idInterpreter::Restore: invalid call stack depth %d", callStackDepth );
+	}
 	for( i = 0; i < callStackDepth; i++ ) {
 		savefile->ReadInt( callStack[i].s );
+		if ( callStack[i].s < -1 || callStack[i].s >= gameLocal.program.NumStatements() ) {
+			savefile->Error( "idInterpreter::Restore: invalid call stack statement %d at depth %d", callStack[i].s, i );
+		}
 
 		savefile->ReadInt( func_index );
 		if ( func_index >= 0 ) {
+			if ( func_index >= gameLocal.program.NumFunctions() ) {
+				savefile->Error( "idInterpreter::Restore: invalid call stack function index %d at depth %d", func_index, i );
+			}
 			callStack[i].f = gameLocal.program.GetFunction( func_index );
-		} else {
+		} else if ( func_index == -1 ) {
 			callStack[i].f = NULL;
+		} else {
+			savefile->Error( "idInterpreter::Restore: invalid call stack function index %d at depth %d", func_index, i );
 		}
 
 		savefile->ReadInt( callStack[i].stackbase );
+		if ( callStack[i].stackbase < 0 || callStack[i].stackbase > LOCALSTACK_SIZE ) {
+			savefile->Error( "idInterpreter::Restore: invalid call stack base %d at depth %d", callStack[i].stackbase, i );
+		}
 	}
 	savefile->ReadInt( maxStackDepth );
+	if ( maxStackDepth < callStackDepth || maxStackDepth > MAX_STACK_DEPTH ) {
+		savefile->Error( "idInterpreter::Restore: invalid max call stack depth %d for current depth %d", maxStackDepth, callStackDepth );
+	}
 
 	savefile->ReadInt( localstackUsed );
-	savefile->Read( &localstack, localstackUsed );
+	if ( localstackUsed < 0 || localstackUsed > LOCALSTACK_SIZE ) {
+		savefile->Error( "idInterpreter::Restore: invalid local stack byte count %d", localstackUsed );
+	}
+	memset( localstack, 0, sizeof( localstack ) );
+	if ( localstackUsed > 0 ) {
+		savefile->Read( localstack, localstackUsed );
+	}
 
 	savefile->ReadInt( localstackBase );
+	if ( localstackBase < 0 || localstackBase > localstackUsed ) {
+		savefile->Error( "idInterpreter::Restore: invalid local stack base %d for byte count %d", localstackBase, localstackUsed );
+	}
 	savefile->ReadInt( maxLocalstackUsed );
+	if ( maxLocalstackUsed < localstackUsed || maxLocalstackUsed > LOCALSTACK_SIZE ) {
+		savefile->Error( "idInterpreter::Restore: invalid max local stack byte count %d for current byte count %d", maxLocalstackUsed, localstackUsed );
+	}
 
 	savefile->ReadInt( func_index );
 	if ( func_index >= 0 ) {
+		if ( func_index >= gameLocal.program.NumFunctions() ) {
+			savefile->Error( "idInterpreter::Restore: invalid current function index %d", func_index );
+		}
 		currentFunction = gameLocal.program.GetFunction( func_index );
-	} else {
+	} else if ( func_index == -1 ) {
 		currentFunction = NULL;
+	} else {
+		savefile->Error( "idInterpreter::Restore: invalid current function index %d", func_index );
 	}
 	savefile->ReadInt( instructionPointer );
+	if ( instructionPointer < -1 || instructionPointer >= gameLocal.program.NumStatements() ) {
+		savefile->Error( "idInterpreter::Restore: invalid instruction pointer %d", instructionPointer );
+	}
 
 	savefile->ReadInt( popParms );
+	if ( popParms < 0 || popParms > localstackUsed ) {
+		savefile->Error( "idInterpreter::Restore: invalid pending parameter byte count %d for local stack byte count %d", popParms, localstackUsed );
+	}
 
 	savefile->ReadString( funcname );
 	if ( funcname.Length() ) {
 		multiFrameEvent = idEventDef::FindEvent( funcname );
+		if ( multiFrameEvent == NULL ) {
+			savefile->Error( "idInterpreter::Restore: unknown multi-frame event '%s'", funcname.c_str() );
+		}
+	} else {
+		multiFrameEvent = NULL;
 	}
 
 	savefile->ReadObject( reinterpret_cast<idClass *&>( eventEntity ) );

@@ -250,6 +250,7 @@ protected:
 	int				readByte;
 	int				readBit;
 	const byte *	readData;
+	bool			readDry;			// openQ4: the last refill from the file came back empty
 
 	int				writeTotalBytes;
 	int				writeLength;
@@ -284,6 +285,7 @@ void idCompressor_BitStream::Init( idFile *f, bool compress, int wordLength ) {
 	readByte = 0;
 	readBit = 0;
 	readData = NULL;
+	readDry = false;
 
 	writeTotalBytes = 0;
 	writeLength = 0;
@@ -321,6 +323,7 @@ ID_INLINE void idCompressor_BitStream::InitDecompress( void *outData, int outLen
 
 	if ( !readLength ) {
 		readLength = file->Read( buffer, sizeof( buffer ) );
+		readDry = ( readLength <= 0 );
 		readByte = 0;
 		readBit = 0;
 		readData = buffer;
@@ -401,7 +404,15 @@ int idCompressor_BitStream::ReadBits( int numBits ) {
 		if ( readBit == 0 ) {
 			if ( readByte >= readLength ) {
 				if ( readData == buffer ) {
-					readLength = file->Read( buffer, sizeof( buffer ) );
+					// openQ4: an empty refill leaves readLength at 0, so each further
+					// byte consumed asks for another refill and only looks at its
+					// first byte. Ask a dry source for that one byte, not the whole
+					// buffer: idFile_BitMsg zero-fills whatever it cannot supply, and
+					// at 64 KiB per consumed byte an 8-byte packet claiming a 16 KiB
+					// message cost its receiver about 2 GB of memset. The bytes
+					// decoded are the same either way.
+					readLength = file->Read( buffer, readDry ? 1 : (int)sizeof( buffer ) );
+					readDry = ( readLength <= 0 );
 					readByte = 0;
 				} else {
 					get = numBits - valueBits;
@@ -484,8 +495,15 @@ int idCompressor_BitStream::Compare( const byte *src1, int bitPtr1, const byte *
 
 		int remain = bitsRemain >> 3;
 
-		// Compare the middle bytes as ints
-		while ( remain >= 4 && (*(const int *)p1 == *(const int *)p2) ) {
+		// Compare the middle bytes without assuming the stream pointers are aligned.
+		while ( remain >= 4 ) {
+			uint32_t word1;
+			uint32_t word2;
+			memcpy( &word1, p1, sizeof( word1 ) );
+			memcpy( &word2, p2, sizeof( word2 ) );
+			if ( word1 != word2 ) {
+				break;
+			}
 			p1 += 4;
 			p2 += 4;
 			remain -= 4;
@@ -1483,7 +1501,9 @@ idCompressor_Arithmetic::GetCurrentCount
 ================
 */
 int idCompressor_Arithmetic::GetCurrentCount( void ) {
-    return (unsigned int) ( ( ( ( (long) code - low ) + 1 ) * scale - 1 ) / ( ( (long) high - low ) + 1 ) );
+	const int64_t scaledCode = ( ( static_cast<int64_t>( code ) - low ) + 1 ) * scale - 1;
+	const int64_t range = ( static_cast<int64_t>( high ) - low ) + 1;
+	return static_cast<int>( scaledCode / range );
 }
 
 /*
@@ -1552,9 +1572,9 @@ idCompressor_Arithmetic::RemoveSymbolFromStream
 ================
 */
 void idCompressor_Arithmetic::RemoveSymbolFromStream( acSymbol_t* symbol ) {
-    long range;
+	uint64_t range;
 
-	range	= ( long )( high - low ) + 1;
+	range	= static_cast<uint64_t>( high - low ) + 1;
 	high	= low + ( unsigned short )( ( range * symbol->high ) / scale - 1 );
 	low		= low + ( unsigned short )( ( range * symbol->low ) / scale );
 
@@ -1607,7 +1627,7 @@ idCompressor_Arithmetic::EncodeSymbol
 ================
 */
 void idCompressor_Arithmetic::EncodeSymbol( acSymbol_t* symbol ) {
-	unsigned int range;
+	uint64_t range;
 	
 	// rescale high and low for the new symbol.
 	range	= ( high - low ) + 1;
@@ -2266,6 +2286,8 @@ protected:
 
 	// Used by the decompressor
 	int				oldCode;
+	bool			streamCorrupt;		// openQ4: a code the dictionary cannot hold was read
+	bool			corruptReported;	// openQ4: and a reader has been told
 };
 
 /*
@@ -2290,6 +2312,8 @@ void idCompressor_LZW::Init( idFile *f, bool compress, int wordLength ) {
 
 	w = -1;
 	oldCode = -1;
+	streamCorrupt = false;
+	corruptReported = false;
 }
 
 /*
@@ -2310,6 +2334,14 @@ int idCompressor_LZW::Read( void *outData, int outLength ) {
 
 	for ( n = i = 0; i < outLength; i += n ) {
 		if ( !blockSize ) {
+			// openQ4: say so only when a reader wanted bytes the stream could
+			// not give. Blocks are decoded ahead of need, and a demo's trailer
+			// sits raw behind its stream, so the decoder meets bytes that are
+			// not codes at the end of an ordinary recording.
+			if ( streamCorrupt && !corruptReported ) {
+				corruptReported = true;
+				common->Warning( "idCompressor_LZW: corrupt stream" );
+			}
 			return i;
 		}
 		n = blockSize - blockIndex;
@@ -2450,6 +2482,11 @@ idCompressor_LZW::DecompressBlock
 void idCompressor_LZW::DecompressBlock() {
 	int code, firstChar;
 
+	if ( streamCorrupt ) {
+		blockSize = 0;
+		return;
+	}
+
 	InitDecompress( block, LZW_BLOCK_SIZE );
 
 	while( writeByte < writeLength - LZW_DICT_SIZE && readLength > 0 ) {
@@ -2457,6 +2494,19 @@ void idCompressor_LZW::DecompressBlock() {
 
 		code = ReadBits( codeBits );
 		if ( readLength == 0 ) {
+			break;
+		}
+
+		// openQ4: the codes come from the file, and only asserts checked them. A
+		// code past the next free entry, or a first code that is not a literal,
+		// made WriteChain follow links through entries nobody had written - out
+		// of the dictionary, or round a loop that ran off the end of its 4 KiB
+		// stack buffer. It takes no hostile file: decoding runs ahead into the
+		// raw trailer behind a demo's stream. With these two tests every entry
+		// links to a lower one, so a chain cannot outgrow the buffer. Read
+		// reports it if the bytes lost were wanted.
+		if ( code > nextCode || ( oldCode == -1 && code >= LZW_FIRST_CODE ) ) {
+			streamCorrupt = true;
 			break;
 		}
 

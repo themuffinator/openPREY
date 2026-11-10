@@ -35,6 +35,17 @@ If you have questions concerning this license or the applicable additional terms
 #include "SliderWindow.h"
 #include "EditWindow.h"
 
+static const int Q4_EDIT_WINDOW_TEXT_SPACING = 0;
+static const float Q4_EDIT_WINDOW_LINE_HEIGHT_SCALE = 1.25f;
+
+static float openQ4_EditWindowWrappedLineHeight( idEditWindow *window ) {
+	float lineHeight = window->GetMaxCharHeight() * Q4_EDIT_WINDOW_LINE_HEIGHT_SCALE;
+	return lineHeight > 0.0f ? lineHeight : 1.0f;
+}
+
+static int openQ4_EditWindowEscapeLength( const char *text ) {
+	return idStr::IsEscape( text );
+}
 
 bool idEditWindow::ParseInternalVar( const char *_name, idParser *src ) {
 	if ( idStr::Icmp( _name, "maxchars" ) == 0) {
@@ -43,6 +54,10 @@ bool idEditWindow::ParseInternalVar( const char *_name, idParser *src ) {
 	}
 	if ( idStr::Icmp( _name, "numeric" ) == 0) {
 		numeric = src->ParseBool();
+		return true;
+	}
+	if ( idStr::Icmp( _name, "numericNegative" ) == 0 ) {
+		numericNegative = src->ParseBool();
 		return true;
 	}
 	if ( idStr::Icmp( _name, "wrap" ) == 0) {
@@ -92,6 +107,7 @@ idWinVar *idEditWindow::GetWinVarByName( const char *_name, bool fixup, drawWin_
 void idEditWindow::CommonInit() {
 	maxChars = 128;
 	numeric = false;
+	numericNegative = false;
 	paintOffset = 0;
 	cursorPos = 0;
 	cursorLine = 0;
@@ -131,6 +147,39 @@ void idEditWindow::GainFocus() {
 	EnsureCursorVisible();
 }
 
+bool idEditWindow::GetTextInputState( idRectangle &area, float &cursorOffset ) {
+	if ( readonly || !visible || noEvents || ( flags & WIN_FOCUS ) == 0 ) {
+		return false;
+	}
+
+	area = textRect;
+	area.x += actualX - drawRect.x;
+	area.y += actualY - drawRect.y;
+	if ( area.w <= 0.0f || area.h <= 0.0f ) {
+		return false;
+	}
+
+	SetFont();
+	float cursorPixels = 0.0f;
+	const int boundedCursor = idMath::ClampInt( 0, text.Length(), cursorPos );
+	if ( password ) {
+		cursorPixels = boundedCursor * dc->CharWidth( '*', textScale, Q4_EDIT_WINDOW_TEXT_SPACING );
+	} else {
+		for ( int i = 0; i < boundedCursor; ) {
+			const int escapeLength = openQ4_EditWindowEscapeLength( &text[i] );
+			if ( escapeLength > 0 ) {
+				i += escapeLength;
+			} else {
+				cursorPixels += dc->CharWidth( text[i], textScale, Q4_EDIT_WINDOW_TEXT_SPACING );
+				i++;
+			}
+		}
+	}
+
+	cursorOffset = idMath::ClampFloat( 0.0f, area.w, cursorPixels - paintOffset );
+	return true;
+}
+
 void idEditWindow::Draw( int time, float x, float y ) {
 	idVec4 color = foreColor;
 
@@ -166,10 +215,10 @@ void idEditWindow::Draw( int time, float x, float y ) {
 	rect.w += paintOffset;
 
 	if ( wrap && scroller->GetHigh() > 0.0f ) {
-		float lineHeight = GetMaxCharHeight( ) + 5;
+		const float lineHeight = openQ4_EditWindowWrappedLineHeight( this );
 		rect.y -= scroller->GetValue() * lineHeight;
 		rect.w -= sizeBias;
-		rect.h = ( breaks.Num() + 1 ) * lineHeight;
+		rect.h = breaks.Num() * lineHeight;
 	}
 
 	if ( hover && !noEvents && Contains(gui->CursorX(), gui->CursorY()) ) {
@@ -181,7 +230,7 @@ void idEditWindow::Draw( int time, float x, float y ) {
 		color = hoverColor;
 	}
 
-	dc->DrawText( buffer, scale, 0, color, rect, wrap, (flags & WIN_FOCUS) ? cursorPos : -1);
+	dc->DrawText( buffer, scale, 0, color, rect, wrap, ( flags & WIN_FOCUS ) ? cursorPos : -1, false, NULL, 0, Q4_EDIT_WINDOW_TEXT_SPACING, static_cast<int>( textstyle ), ( flags & WIN_CHATWINDOW ) != 0 );
 }
 
 /*
@@ -205,9 +254,24 @@ const char *idEditWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 		return ret;
 	}
 
+	// openQ4: take the length first - for a gui:: bound string that is what
+	// re-reads the binding, and c_str() then returns the fresh text - and hold
+	// the cursor to it. Only Draw clamped the cursor, so a key that arrived after
+	// the text was shortened or cleared but before the next draw (Enter clears
+	// the chat line, and several events can share a frame) moved a negative
+	// number of bytes or wrote before the buffer.
+	int len = text.Length();
 	idStr::Copynz( buffer, text.c_str(), sizeof( buffer ) );
 	int key = event->evValue;
-	int len = text.Length();
+	if ( len > MAX_EDITFIELD - 1 ) {
+		len = MAX_EDITFIELD - 1;
+	}
+	if ( cursorPos > len ) {
+		cursorPos = len;
+	}
+	if ( cursorPos < 0 ) {
+		cursorPos = 0;
+	}
 
 	if ( event->evType == SE_CHAR ) {
 		if ( event->evValue == Sys_GetConsoleKey( false ) || event->evValue == Sys_GetConsoleKey( true ) ) {
@@ -264,19 +328,20 @@ const char *idEditWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 		}
 
 		if ( numeric ) {
-			if ( ( key < '0' || key > '9' ) && key != '.' ) {
+			const bool leadingMinus = numericNegative && key == '-' && cursorPos == 0 && buffer[0] != '-';
+			if ( ( key < '0' || key > '9' ) && key != '.' && !leadingMinus ) {
 	       		return "";
 			}
 		}
 
 		if ( dc->GetOverStrike() ) {
 			if ( maxChars && cursorPos >= maxChars ) {
-	       		RunScript( ON_MAXCHARS );
+				RunScript( ON_MAXCHARS );
 	       		return "";
 			}
 		} else {
 			if ( ( len == MAX_EDITFIELD - 1 ) || ( maxChars && len >= maxChars ) ) {
-	       		RunScript( ON_MAXCHARS );
+				RunScript( ON_MAXCHARS );
 	       		return "";
 			}
 			memmove( &buffer[ cursorPos + 1 ], &buffer[ cursorPos ], len + 1 - cursorPos );
@@ -297,6 +362,16 @@ const char *idEditWindow::HandleEvent(const sysEvent_t *event, bool *updateVisua
 
 		if ( updateVisuals ) {
 			*updateVisuals = true;
+		}
+
+		if ( wrap && key == K_MWHEELUP ) {
+			scroller->SetValue( scroller->GetValue() - 1.0f );
+			return ret;
+		}
+
+		if ( wrap && key == K_MWHEELDOWN ) {
+			scroller->SetValue( scroller->GetValue() + 1.0f );
+			return ret;
 		}
 
 		if ( key == K_DEL ) {
@@ -451,6 +526,23 @@ void idEditWindow::PostParse() {
 	flags |= WIN_CANFOCUS;
 }
 
+void idEditWindow::MouseEnter() {
+	idWindow::MouseEnter();
+
+	if ( !wrap || noEvents || gui == NULL ) {
+		return;
+	}
+
+	idWindow *desktop = gui->GetDesktop();
+	if ( desktop == NULL || desktop->GetCaptureChild() != NULL ) {
+		return;
+	}
+
+	if ( desktop->GetFocusedChild() != this ) {
+		desktop->SetFocus( this, false );
+	}
+}
+
 /*
 ================
 idEditWindow::InitScroller
@@ -511,14 +603,15 @@ void idEditWindow::EnsureCursorVisible()
 	if ( !wrap ) {
 		int cursorX = 0;
 		if ( password ) {
-			cursorX = cursorPos * dc->CharWidth( '*', textScale );
+			cursorX = cursorPos * dc->CharWidth( '*', textScale, Q4_EDIT_WINDOW_TEXT_SPACING );
 		} else {
 			int i = 0;
 			while ( i < text.Length() && i < cursorPos ) {
-				if ( idStr::IsColor( &text[i] ) ) {
-					i += 2;
+				const int escapeLength = openQ4_EditWindowEscapeLength( &text[i] );
+				if ( escapeLength > 0 ) {
+					i += escapeLength;
 				} else {
-					cursorX += dc->CharWidth( text[i], textScale );
+					cursorX += dc->CharWidth( text[i], textScale, Q4_EDIT_WINDOW_TEXT_SPACING );
 					i++;
 				}
 			}
@@ -544,15 +637,23 @@ void idEditWindow::EnsureCursorVisible()
 
 		breaks.Clear();
 		idRectangle rect = textRect;
-		rect.w -= sizeBias;
-		dc->DrawText(text, textScale, textAlign, colorWhite, rect, true, (flags & WIN_FOCUS) ? cursorPos : -1, true, &breaks );
+		if ( scroller->GetHigh() > 0.0f ) {
+			rect.w -= sizeBias;
+		}
+		dc->DrawText( text, textScale, textAlign, colorWhite, rect, true, ( flags & WIN_FOCUS ) ? cursorPos : -1, true, &breaks, 0, Q4_EDIT_WINDOW_TEXT_SPACING, static_cast<int>( textstyle ), ( flags & WIN_CHATWINDOW ) != 0 );
 
-		int fit = textRect.h / (GetMaxCharHeight() + 5);
-		if ( fit < breaks.Num() + 1 ) {
-			scroller->SetRange(0, breaks.Num() + 1 - fit, 1);
-		} else {
+		const int fit = static_cast<int>( textRect.h / openQ4_EditWindowWrappedLineHeight( this ) );
+		if ( breaks.Num() <= fit ) {
 			// The text fits completely in the box
 			scroller->SetRange(0.0f, 0.0f, 1.0f);
+		} else {
+			if ( scroller->GetHigh() == 0.0f ) {
+				breaks.Clear();
+				rect = textRect;
+				rect.w -= sizeBias;
+				dc->DrawText( text, textScale, textAlign, colorWhite, rect, true, ( flags & WIN_FOCUS ) ? cursorPos : -1, true, &breaks, 0, Q4_EDIT_WINDOW_TEXT_SPACING, static_cast<int>( textstyle ), ( flags & WIN_CHATWINDOW ) != 0 );
+			}
+			scroller->SetRange(0, breaks.Num() - fit, 1);
 		}
 
 		if ( forceScroll ) {
@@ -612,6 +713,13 @@ idEditWindow::UpdateCvar
 ============
 */
 void idEditWindow::UpdateCvar( bool read, bool force ) {
+	// A signed field needs an editable prefix before the first digit. Do not
+	// round-trip '-' through the integer CVar (which canonicalizes it to 0).
+	// Leaving the field restores the last valid value in the ordinary read.
+	if ( !force && numeric && numericNegative && ( flags & WIN_FOCUS ) != 0 &&
+		 ( text.Length() == 0 || idStr::Cmp( text, "-" ) == 0 ) ) {
+		return;
+	}
 	if ( force || liveUpdate ) {
 		if ( cvar ) {
 			if ( read ) {

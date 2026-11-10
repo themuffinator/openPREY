@@ -30,7 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 
 
 idDeclTable::idDeclTable() {
-
+	FreeData();
 }
 
 /*
@@ -44,6 +44,9 @@ float idDeclTable::TableLookup( float index ) const {
 	
 	int domain = values.Num() - 1;
 
+	// A single-value table (Parse appends a wrap copy, so two entries) evaluates
+	// to 1, as in Quake 4. That includes the "{ { 0 } }" default for a missing
+	// table, so an envelope or material naming one runs at full strength.
 	if ( domain <= 1 ) {
 		return 1.0f;
 	}
@@ -52,7 +55,10 @@ float idDeclTable::TableLookup( float index ) const {
 		index *= (domain-1);
 		if ( index >= domain - 1 ) {
 			return values[domain - 1];
-		} else if ( index <= 0 ) {
+		} else if ( !( index > 0 ) ) {
+			// openQ4: written so that a NaN index lands here too. It failed
+			// both tests as they were, and the integer it converts to indexed
+			// the table two billion entries before its start.
 			return values[0];
 		}
 		iIndex = idMath::Ftoi( index );
@@ -67,6 +73,10 @@ float idDeclTable::TableLookup( float index ) const {
 		iIndex = idMath::FtoiFast( idMath::Floor( index ) );
 		iFrac = index - iIndex;
 		iIndex = iIndex % domain;
+		if ( iIndex < 0 || iFrac < 0.0f ) {
+			iIndex = 0;
+			iFrac = 0.0f;
+		}
 	}
 
 	if ( !snap ) {
@@ -95,6 +105,8 @@ idDeclTable::FreeData
 void idDeclTable::FreeData( void ) {
 	snap = false;
 	clamp = false;
+	minValue = idMath::INFINITY;
+	maxValue = -idMath::INFINITY;
 	values.Clear();
 }
 
@@ -113,6 +125,15 @@ idDeclTable::Parse
 =================
 */
 bool idDeclTable::Parse( const char *text, const int textLength ) {
+	return Parse( text, textLength, false );
+}
+
+/*
+=================
+idDeclTable::Parse
+=================
+*/
+bool idDeclTable::Parse( const char *text, const int textLength, bool noCaching ) {
 	idLexer src;
 	idToken token;
 	float v;
@@ -123,6 +144,8 @@ bool idDeclTable::Parse( const char *text, const int textLength ) {
 
 	snap = false;
 	clamp = false;
+	minValue = idMath::INFINITY;
+	maxValue = -idMath::INFINITY;
 	values.Clear();
 
 	while ( 1 ) {
@@ -151,6 +174,12 @@ bool idDeclTable::Parse( const char *text, const int textLength ) {
 				}
 
 				values.Append( v );
+				if ( v < minValue ) {
+					minValue = v;
+				}
+				if ( v > maxValue ) {
+					maxValue = v;
+				}
 
 				src.ReadToken( &token );
 				if ( token == "}" ) {
@@ -171,10 +200,34 @@ bool idDeclTable::Parse( const char *text, const int textLength ) {
 		}
 	}
 
+	if ( values.Num() == 0 ) {
+		src.Warning( "table '%s' has no values", GetName() );
+		MakeDefault();
+		return false;
+	}
+
 	// copy the 0 element to the end, so lerping doesn't
 	// need to worry about the wrap case
 	float val = values[0];		// template bug requires this to not be in the Append()?
 	values.Append( val );
 
+	(void)noCaching;
 	return true;
+}
+
+/*
+================
+idDeclTable::Validate
+================
+*/
+bool idDeclTable::Validate( const char *psText, int iTextLength, idStr &strReportTo ) const {
+	(void)strReportTo;
+
+	idDecl *decl = declManager->AllocateDecl( DECL_TABLE );
+	const bool valid = DeclManager_ValidateParsedDecl( decl, DECL_TABLE, decl != NULL && decl->Parse( psText, iTextLength, false ) );
+	if ( decl != NULL ) {
+		decl->FreeData();
+	}
+	DeclManager_FreeAllocatedDecl( decl );
+	return valid;
 }

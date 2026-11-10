@@ -486,8 +486,8 @@ punctuation_t default_punctuations[] = {
 	{"#",P_PRECOMP},					// pre-compiler
 	{"$",P_DOLLAR},
 // RAVEN BEGIN
-	{"�",P_INVERTED_PLING},
-	{"�",P_INVERTED_QUERY},
+	{"\xa1",P_INVERTED_PLING},
+	{"\xbf",P_INVERTED_QUERY},
 // RAVEN END
 	{NULL, 0}
 };
@@ -545,9 +545,10 @@ void idLexer::CreatePunctuationTable( const punctuation_t *punctuations ) {
 	//add the punctuations in the list to the punctuation table
 	for (i = 0; punctuations[i].p; i++) {
 		newp = &punctuations[i];
+		const unsigned int tableIndex = static_cast<unsigned char>( newp->p[0] );
 		lastp = -1;
 		//sort the punctuations in this table entry on length (longer punctuations first)
-		for (n = idLexer::punctuationtable[(unsigned int) newp->p[0]]; n >= 0; n = idLexer::nextpunctuation[n] ) {
+		for (n = idLexer::punctuationtable[tableIndex]; n >= 0; n = idLexer::nextpunctuation[n] ) {
 			p = &punctuations[n];
 			if (strlen(p->p) < strlen(newp->p)) {
 				idLexer::nextpunctuation[i] = n;
@@ -555,7 +556,7 @@ void idLexer::CreatePunctuationTable( const punctuation_t *punctuations ) {
 					idLexer::nextpunctuation[lastp] = i;
 				}
 				else {
-					idLexer::punctuationtable[(unsigned int) newp->p[0]] = i;
+					idLexer::punctuationtable[tableIndex] = i;
 				}
 				break;
 			}
@@ -567,7 +568,7 @@ void idLexer::CreatePunctuationTable( const punctuation_t *punctuations ) {
 				idLexer::nextpunctuation[lastp] = i;
 			}
 			else {
-				idLexer::punctuationtable[(unsigned int) newp->p[0]] = i;
+				idLexer::punctuationtable[tableIndex] = i;
 			}
 		}
 	}
@@ -622,7 +623,7 @@ void idLexer::Error( const char *str, ... ) {
 	}
 
 	va_start(ap, str);
-	vsprintf(text, str, ap);
+	idStr::vsnPrintf(text, sizeof(text), str, ap);
 	va_end(ap);
 
 	if ( idLexer::flags & LEXFL_NOFATALERRORS ) {
@@ -646,7 +647,7 @@ void idLexer::Warning( const char *str, ... ) {
 	}
 
 	va_start( ap, str );
-	vsprintf( text, str, ap );
+	idStr::vsnPrintf( text, sizeof( text ), str, ap );
 	va_end( ap );
 	idLib::common->Warning( "file %s, line %d: %s", idLexer::filename.c_str(), idLexer::line, text );
 }
@@ -1082,7 +1083,10 @@ int idLexer::ReadNumber( idToken *token ) {
 					token->subtype |= TT_NAN;
 					c2++;
 				}
-				for ( i = 0; i < c2; i++ ) {
+				// openQ4: stop at the terminator. Text ending in "1.#" was read up
+				// to three bytes past its end, and lexing went on from there
+				// under the no-error flags decls and command lines use.
+				for ( i = 0; i < c2 && c != '\0'; i++ ) {
 					token->AppendDirty( c );
 					c = *(++idLexer::script_p);
 				}
@@ -1178,7 +1182,7 @@ int idLexer::ReadPunctuation( idToken *token ) {
 	const punctuation_t *punc;
 
 #ifdef PUNCTABLE
-	for (n = idLexer::punctuationtable[(unsigned int)*(idLexer::script_p)]; n >= 0; n = idLexer::nextpunctuation[n])
+	for (n = idLexer::punctuationtable[static_cast<unsigned char>( *(idLexer::script_p) )]; n >= 0; n = idLexer::nextpunctuation[n])
 	{
 		punc = &(idLexer::punctuations[n]);
 #else
@@ -1821,6 +1825,26 @@ const char *idLexer::ParseBracedSectionExact( idStr &out, int tabs ) {
 	skipWhite = false;
 	doTabs = tabs >= 0;
 
+	// openQ4: without re-indenting, the loop below copies every character as
+	// it stands, so find the end and take the section in one append. Appending
+	// a character at a time regrew and recopied the string every 32 bytes,
+	// which is quadratic in the section's size, and every decl is read this way.
+	if ( !doTabs ) {
+		const char *start = idLexer::script_p;
+		while( depth && *idLexer::script_p ) {
+			const char c = *(idLexer::script_p++);
+			if ( c == '\n' ) {
+				line++;
+			} else if ( c == '{' ) {
+				depth++;
+			} else if ( c == '}' ) {
+				depth--;
+			}
+		}
+		out.Append( start, static_cast<int>( idLexer::script_p - start ) );
+		return out.c_str();
+	}
+
 	while( depth && *idLexer::script_p ) {
 		char c = *(idLexer::script_p++);
 
@@ -2049,15 +2073,29 @@ int idLexer::LoadFile( const char *filename, bool OSPath ) {
 		return false;
 	}
 	length = fp->Length();
+	if ( length < 0 || length == idMath::INT_MAX ) {
+		idLib::common->Warning( "idLexer::LoadFile: invalid length %d for '%s'", length, pathname.c_str() );
+		idLib::fileSystem->CloseFile( fp );
+		return false;
+	}
 // RAVEN BEGIN
 // amccarthy: Added memory allocation tag
 	buf = (char *) Mem_Alloc( length + 1, MA_LEXER );
 	if( !buf ) {
+		idLib::fileSystem->CloseFile( fp );
 		common->FatalError( "Memory system failure : out of memory" );
+		return false;
 	}
 // RAVEN END
+	const int bytesRead = fp->Read( buf, length );
+	if ( bytesRead != length ) {
+		idLib::common->Warning( "idLexer::LoadFile: short read for '%s' (read %d of %d bytes)",
+			pathname.c_str(), bytesRead, length );
+		idLib::fileSystem->CloseFile( fp );
+		Mem_Free( buf );
+		return false;
+	}
 	buf[length] = '\0';
-	fp->Read( buf, length );
 	idLexer::fileTime = fp->Timestamp();
 	idLexer::filename = fp->GetFullPath();
 	idLib::fileSystem->CloseFile( fp );
@@ -2307,7 +2345,7 @@ void idLexer::WriteBinaryToken(idToken *tok)
 			{
 				if(tok->subtype & TT_UNSIGNED)
 				{
-					unsigned long val = tok->GetUnsignedLongValue();
+					unsigned int val = static_cast<unsigned int>( tok->GetUnsignedLongValue() );
 					unsigned char byteVal = (unsigned char)val;
 					unsigned short shortVal = (unsigned short)val;
 				
@@ -2332,15 +2370,15 @@ void idLexer::WriteBinaryToken(idToken *tok)
 				}
 				else
 				{
-					long val = tok->GetIntValue();
-					char byteVal = (char)val;
+					int val = tok->GetIntValue();
+					signed char byteVal = static_cast<signed char>( val );
 					short shortVal = (short)val;
 				
 					if(byteVal == val)
 					{
 						prefix = BTT_MAKENUMBER_PREFIX(BTT_NUMBER, BTT_SUBTYPE_INT, BTT_STORED_1BYTE);
 						TextCompiler::WriteValue<unsigned char>(prefix, mBinaryFile, swapBytes);
-						TextCompiler::WriteValue<char>(byteVal, mBinaryFile, swapBytes);
+						TextCompiler::WriteValue<signed char>(byteVal, mBinaryFile, swapBytes);
 					}
 					else if(shortVal == val)
 					{
@@ -2364,14 +2402,14 @@ void idLexer::WriteBinaryToken(idToken *tok)
 					int intval = tok->GetIntValue();
 					if(((float)intval) == val)		// integral check
 					{
-						char byteVal = (char)intval;
+						signed char byteVal = static_cast<signed char>( intval );
 						short shortVal = (short)intval;
 					
 						if(byteVal == intval)
 						{
 							prefix = BTT_MAKENUMBER_PREFIX(BTT_NUMBER, BTT_SUBTYPE_FLOAT, BTT_STORED_1BYTE);
 							TextCompiler::WriteValue<unsigned char>(prefix, mBinaryFile, swapBytes);
-							TextCompiler::WriteValue<char>(byteVal, mBinaryFile, swapBytes);
+							TextCompiler::WriteValue<signed char>(byteVal, mBinaryFile, swapBytes);
 						}
 						else if(shortVal == intval)
 						{
@@ -2400,14 +2438,14 @@ void idLexer::WriteBinaryToken(idToken *tok)
 					int intval = tok->GetIntValue();
 					if(((float)intval) == val)		// integral check
 					{
-						char byteVal = (char)intval;
+						signed char byteVal = static_cast<signed char>( intval );
 						short shortVal = (short)intval;
 					
 						if(byteVal == intval)
 						{
 							prefix = BTT_MAKENUMBER_PREFIX(BTT_NUMBER, BTT_SUBTYPE_FLOAT, BTT_STORED_1BYTE);
 							TextCompiler::WriteValue<unsigned char>(prefix, mBinaryFile, swapBytes);
-							TextCompiler::WriteValue<char>(byteVal, mBinaryFile, swapBytes);
+							TextCompiler::WriteValue<signed char>(byteVal, mBinaryFile, swapBytes);
 						}
 						else if(shortVal == intval)
 						{
@@ -2600,11 +2638,11 @@ void idLexer::WriteBinaryToken(idToken *tok)
 			{
 				TextCompiler::WriteValue<unsigned char>(BTT_MAKEPUNCTUATION_PREFIX(BTT_PUNC_TIMESEQUAL), mBinaryFile, swapBytes);
 			}
-			else if(*tok == "�")
+			else if(*tok == "\xa1")
 			{
 				TextCompiler::WriteValue<unsigned char>(BTT_PUNC_INVERTEDPLING, mBinaryFile, swapBytes);
 			}
-			else if(*tok == "�")
+			else if(*tok == "\xbf")
 			{
 				TextCompiler::WriteValue<unsigned char>(BTT_PUNC_INVERTEDQUERY, mBinaryFile, swapBytes);
 			}
@@ -2625,31 +2663,31 @@ void idLexer::WriteBinaryToken(idToken *tok)
 
 // jsinger: this method takes an existing file and causes a binary tokenized
 //          version of the file to be generated
-void idLexer::WriteBinaryFile(char const * const filename)
+void idLexer::WriteBinaryFile(char const * const filename, bool OSPath)
 {
-	if(!cvarSystem->GetCVarBool("com_BinaryRead"))
+	unsigned int swap=0;
+
+	switch(cvarSystem->GetCVarInteger("com_BinaryWrite"))
 	{
-		unsigned int swap=0;
+	case 1:
+		swap = 0;
+		break;
+	case 2:
+		swap = LEXFL_BYTESWAP;
+		break;
+	}
 
-		switch(cvarSystem->GetCVarInteger("com_BinaryWrite"))
+	// This helper explicitly tokenizes the named ASCII source. Binary-read
+	// policy only controls normal consumers and must not suppress a requested
+	// companion refresh (for example exportCmpMD5R with com_binaryRead 1).
+	idLexer src(filename, LEXFL_WRITEBINARY | swap, OSPath);
+	idToken token;
+	if(src.IsLoaded())
+	{
+		while(src.ReadToken(&token))
 		{
-		case 1:
-			swap = 0;
-			break;
-		case 2:
-			swap = LEXFL_BYTESWAP;
-			break;
-		}
-
-		idLexer src(filename, LEXFL_WRITEBINARY | swap);
-		idToken token;
-		if(src.IsLoaded())
-		{
-            while(src.ReadToken(&token))
-			{
-				// we don't need to do anything, because just reading the file
-				// causes it to write a tokenized version
-			}
+			// we don't need to do anything, because just reading the file
+			// causes it to write a tokenized version
 		}
 	}
 }
@@ -2674,7 +2712,7 @@ Lexer::Lexer(int flags)
 	}
 }
 
-Lexer::Lexer(char const * const ptr, int length, char const * const name, int flags)
+Lexer::Lexer(char const * const ptr, int length, char const * const name, int flags) : Lexer(flags)
 {
 	if(flags & LEXFL_READBINARY)
 	{
@@ -2687,7 +2725,7 @@ Lexer::Lexer(char const * const ptr, int length, char const * const name, int fl
 	}
 	else
 	{
-		mDelegate = new idLexer(ptr, length, name, flags);
+		mDelegate->LoadMemory(ptr, length, name);
 	}
 }
 
@@ -2747,7 +2785,7 @@ void Lexer::Warning(char const *str, ...)
 	va_list ap;
 
 	va_start( ap, str );
-	vsprintf( text, str, ap );
+	idStr::vsnPrintf( text, sizeof( text ), str, ap );
 	va_end( ap );
 	idLib::common->Warning( "Lexer: '%s'", text );
 }
@@ -2758,8 +2796,15 @@ void Lexer::Error(char const *str, ...)
 	va_list ap;
 
 	va_start( ap, str );
-	vsprintf( text, str, ap );
+	idStr::vsnPrintf( text, sizeof( text ), str, ap );
 	va_end( ap );
+
+	// Text lexers own their error policy and HadError state. In particular,
+	// authoring previews use NOFATALERRORS for incomplete user-authored geometry.
+	if (mDelegate) {
+		mDelegate->Error("%s", text);
+		return;
+	}
 
 	assert(false);
 
@@ -3290,15 +3335,8 @@ int idLexer::PeekTokenString(const char* string) {
 		return 0;
 	}
 
-	// unread token
-	script_p = lastScript_p;
-	line = lastline;
-
-	// if the given string is available
-	if (tok == string) {
-		return 1;
-	}
-	return 0;
+	UnreadToken( &tok );
+	return tok == string;
 }
 
 int Lexer::CheckTokenString(char const *string)
@@ -3322,6 +3360,25 @@ int Lexer::CheckTokenString(char const *string)
 
 		UnreadToken( &tok );
 		return 0;
+	}
+}
+
+int Lexer::PeekTokenString(char const *string)
+{
+	if(mDelegate)
+	{
+		return mDelegate->PeekTokenString(string);
+	}
+	else
+	{
+		idToken tok;
+
+		if (!ReadToken( &tok )) {
+			return 0;
+		}
+
+		UnreadToken( &tok );
+		return tok == string;
 	}
 }
 
@@ -3621,10 +3678,10 @@ int Lexer::ReadToken(idToken *token)
 					*token = "||";
 					break;
 				case BTT_PUNC_INVERTEDPLING:
-					*token = "�";
+					*token = "\xa1";
 					break;
 				case BTT_PUNC_INVERTEDQUERY:
-					*token = "�";
+					*token = "\xbf";
 					break;
 				default:
 					assert(false);		// unrecognized punctuation
@@ -3641,12 +3698,12 @@ int Lexer::ReadToken(idToken *token)
 
 					switch(BTT_GET_SUBTYPE(prefix))
 					{
-						case BTT_SUBTYPE_INT:
+						case BTT_SUBTYPE_INT: {
 							switch(size)
 							{
 							case BTT_STORED_1BYTE:
-								token->intvalue = ReadValue<char>(OBJ);
-								unreadSize = sizeof(char);
+								token->intvalue = ReadValue<signed char>(OBJ);
+								unreadSize = sizeof(signed char);
 								break;
 							case BTT_STORED_2BYTE:
 								token->intvalue = ReadValue<short>(OBJ);
@@ -3657,23 +3714,28 @@ int Lexer::ReadToken(idToken *token)
 								unreadSize = sizeof(int);
 								break;
 							default:
-								// invalid stored size for an integer
-								assert(false);
+								// Fail the read rather than asserting: release builds
+								// compile asserts out, and falling through here leaves
+								// unreadSize at 0, which desynchronizes every later
+								// token in the binary stream.
+								idLib::Warning( "binary lexer: invalid stored size %u for an integer token", (unsigned int)size );
+								return 0;
 							}
 
-							token->floatvalue = token->intvalue;
+							const int signedValue = static_cast<int>( token->intvalue );
+							token->floatvalue = signedValue;
 							// I hate the fact that I have to copy into the string, but there's no way
 							// of easily knowing whether it is used later or not
 
-							// This conversion to a string assumes that long and int are the same
-							assert(sizeof(long) == sizeof(int));
+							// Binary token integer payloads are always 32-bit.
+							static_assert( sizeof( token->intvalue ) == 4, "binary token integers must be 32-bit" );
 
-							//ltoa(token->intvalue, buffer, 10);
-							idStr::snPrintf( buffer, buffersize, "%ld", token->intvalue );
-							assert(token->intvalue == atol(buffer));
+							idStr::snPrintf( buffer, buffersize, "%d", signedValue );
+							assert( signedValue == atoi( buffer ) );
 							*token = buffer;
 							token->subtype = TT_INTEGER | TT_DECIMAL | TT_VALUESVALID;
 						break;
+						}
 						
 						case BTT_SUBTYPE_UNSIGNEDINT:
 							switch(size)
@@ -3691,20 +3753,21 @@ int Lexer::ReadToken(idToken *token)
 								unreadSize = sizeof(unsigned int);
 								break;
 							default:
-								// invalid stored size for an unsigned integer
-								assert(false);
+								// see the signed-integer case: an unhandled stored size
+								// must fail the read, not silently consume zero bytes
+								idLib::Warning( "binary lexer: invalid stored size %u for an unsigned integer token", (unsigned int)size );
+								return 0;
 							}
 							token->floatvalue = token->intvalue;
 
 							// I hate the fact that I have to copy into the string, but there's no way
 							// of easily knowing whether it is used later or not
 
-							// This conversion to a string assumes that long and int are the same
-							assert(sizeof(long) == sizeof(int));
+							// Binary token integer payloads are always 32-bit.
+							static_assert( sizeof( token->intvalue ) == 4, "binary token integers must be 32-bit" );
 
-							//ultoa(token->intvalue, buffer, 10);
-							idStr::snPrintf( buffer, buffersize, "%lu", token->intvalue );
-							assert(token->intvalue == ((unsigned long)atol(buffer)));
+							idStr::snPrintf( buffer, buffersize, "%u", token->intvalue );
+							assert( token->intvalue == static_cast<unsigned int>( strtoul( buffer, nullptr, 10 ) ) );
 							*token = buffer;
 							token->subtype = TT_INTEGER | TT_UNSIGNED | TT_DECIMAL | TT_VALUESVALID;
 							break;
@@ -3726,12 +3789,15 @@ int Lexer::ReadToken(idToken *token)
 								unreadSize = sizeof(short);
 								break;
 							case BTT_STORED_1BYTE:		// requested a float, but it was integral, so it was saved that way
-								token->floatvalue = ReadValue<char>(OBJ);
+								token->floatvalue = ReadValue<signed char>(OBJ);
 								token->intvalue = token->floatvalue;
-								unreadSize = sizeof(char);
+								unreadSize = sizeof(signed char);
 								break;
 							default:
-								assert(false);
+								// see the signed-integer case: an unhandled stored size
+								// must fail the read, not silently consume zero bytes
+								idLib::Warning( "binary lexer: invalid stored size %u for a float token", (unsigned int)size );
+								return 0;
 							}
 
 							// I hate the fact that I have to copy into the string, but there's no way
@@ -3763,12 +3829,15 @@ int Lexer::ReadToken(idToken *token)
 								unreadSize = sizeof(short);
 								break;
 							case BTT_STORED_1BYTE:		// requested a float, but it was integral, so it was saved that way
-								token->floatvalue = ReadValue<char>(OBJ);
+								token->floatvalue = ReadValue<signed char>(OBJ);
 								token->intvalue = token->floatvalue;
-								unreadSize = sizeof(char);
+								unreadSize = sizeof(signed char);
 								break;
 							default:
-								assert(false);
+								// see the signed-integer case: an unhandled stored size
+								// must fail the read, not silently consume zero bytes
+								idLib::Warning( "binary lexer: invalid stored size %u for a double token", (unsigned int)size );
+								return 0;
 							}
 
 							// I hate the fact that I have to copy into the string, but there's no way
@@ -3782,8 +3851,10 @@ int Lexer::ReadToken(idToken *token)
 				break;
 
 			default:
-				// unsupported binary type
-				assert(false);
+				// unsupported binary type; fail the read rather than returning a
+				// token that was never populated and advancing by a bogus size
+				idLib::Warning( "binary lexer: unsupported binary token type in '%s'", GetFileName() );
+				return 0;
 			}
 		}
 

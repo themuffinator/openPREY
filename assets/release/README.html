@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>openPREY Release Package</title>
+  <style>
+    :root { color-scheme: dark; --bg:#10141a; --panel:#19212b; --text:#edf2f7; --muted:#aebbc8; --accent:#d79a3b; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { width:min(860px,calc(100% - 32px)); margin:32px auto 64px; }
+    header,section { background:var(--panel); border:1px solid #2a3744; border-radius:12px; padding:24px; margin-bottom:18px; }
+    h1,h2 { line-height:1.2; } h1 { color:var(--accent); margin-top:0; }
+    a { color:#8fc8ff; } code { background:#0b0f14; padding:.1em .35em; border-radius:4px; }
+    .muted { color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>openPREY</h1>
+    <p><strong>Release package</strong> for the open-source Prey (2006) engine and game-code replacement.</p>
+    <p class="muted">Retail Prey assets are not included.</p>
+  </header>
+
+  <section>
+    <h2>Requirements</h2>
+    <ul>
+      <li>A 64-bit system matching this package architecture.</li>
+      <li>A legitimate Prey (2006) installation with its original <code>base/</code> data.</li>
+      <li>A compatible graphics driver and audio device.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Install and launch</h2>
+    <ol>
+      <li>Keep the complete openPREY package together; do not copy retail PK4 files into <code>basepr/</code>.</li>
+      <li>Run <code>openPREY-client_&lt;arch&gt;</code> (or the corresponding Windows executable/app bundle).</li>
+      <li>If retail-data discovery fails, add <code>+set fs_basepath "path/to/Prey"</code> and point it at the installation root containing <code>base/</code>.</li>
+    </ol>
+    <p>For Steam Deck packages, use <code>openPREY-steamdeck</code>. The dedicated server is <code>openPREY-ded_&lt;arch&gt;</code>.</p>
+    <p>A Linux AppImage, when provided, still requires your legitimate Prey (2006) assets. Mark it executable with <code>chmod +x openprey-*.AppImage</code>, launch it, and pass <code>+set fs_basepath "path/to/Prey"</code> if discovery does not find the retail install.</p>
+  </section>
+
+  <section>
+    <h2>Package contents</h2>
+    <ul>
+      <li><code>openPREY-client_&lt;arch&gt;</code> and <code>openPREY-ded_&lt;arch&gt;</code></li>
+      <li><code>basepr/game_&lt;arch&gt;</code>, the unified SP/MP game module</li>
+      <li><code>basepr/pak0.pk4</code>, <code>basepr/pak1.pk4</code>, and <code>basepr/mod.json</code></li>
+      <li>Platform launchers and runtime libraries where required</li>
+      <li>Optional Linux AppImage packages for <code>x86_64</code> or <code>aarch64</code></li>
+      <li><code>LICENSING.md</code>: component terms. <code>LICENSE</code> and the accompanying Additional Terms cover the engine; <code>LICENSES/PREY-SDK-EULA.rtf</code> covers the SDK-derived game code.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Support</h2>
+    <p>Logs default to the configured save path under <code>basepr/logs/openprey.log</code>. Include that log and any generated crash report when filing an issue.</p>
+    <p><a href="https://github.com/themuffinator/openPREY">Repository</a> · <a href="https://github.com/themuffinator/openPREY/releases">Releases</a> · <a href="https://github.com/themuffinator/openPREY/issues">Issue tracker</a></p>
+  </section>
+</main>
+</body>
+</html>

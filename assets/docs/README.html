@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>openPREY - Project Overview</title>
+  <style>
+    :root { color-scheme: dark; --bg:#10141a; --panel:#19212b; --text:#edf2f7; --muted:#aebbc8; --accent:#d79a3b; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { width:min(960px,calc(100% - 32px)); margin:32px auto 64px; }
+    header,.card { background:var(--panel); border:1px solid #2a3744; border-radius:12px; padding:24px; margin-bottom:18px; }
+    .banner { display:block; max-width:100%; height:auto; margin:0 auto 24px; border-radius:8px; }
+    h1,h2 { line-height:1.2; } h1 { color:var(--accent); margin-top:0; }
+    a { color:#8fc8ff; } code { background:#0b0f14; padding:.1em .35em; border-radius:4px; }
+    .muted { color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <img class="banner" src="img/banner.png" alt="openPREY banner">
+    <h1>openPREY</h1>
+    <p>Open-source engine and game-code replacement for Prey (2006), built for modern Windows, Linux, and macOS systems while retaining compatibility with the original retail assets.</p>
+    <p><a href="https://github.com/themuffinator/openPREY">Repository</a> · <a href="https://github.com/themuffinator/openPREY/releases">Releases</a> · <a href="../../README.md">README</a> · <a href="../../BUILDING.md">Build guide</a></p>
+  </header>
+
+  <section class="card">
+    <h2>What you need</h2>
+    <p>openPREY does not include Prey assets. You must own and install a legitimate copy of Prey (2006), including its retail <code>base/</code> data. Windows discovery supports registry and legacy CD-era install locations; a manual <code>fs_basepath</code> remains available.</p>
+  </section>
+
+  <section class="card">
+    <h2>Runtime layout</h2>
+    <p>openPREY uses a single <code>basepr/</code> overlay and one <code>game_&lt;arch&gt;</code> module for both single-player and multiplayer. Runtime packages contain the client, dedicated server, unified game module, and openPREY-owned <code>pak0.pk4</code>/<code>pak1.pk4</code> content.</p>
+  </section>
+
+  <section class="card">
+    <h2>Development model</h2>
+    <p>The engine is built with Meson. SDK-derived game code is maintained in-tree under <code>src/game/</code>, <code>src/Prey/</code> and <code>src/preyengine/</code> and built in place into the unified game module. It remains under the Prey SDK terms in <a href="../../LICENSES/PREY-SDK-EULA.rtf"><code>LICENSES/PREY-SDK-EULA.rtf</code></a>; see <a href="../../LICENSING.md">LICENSING.md</a>.</p>
+    <p class="muted">Always use windowed mode for automated validation: <code>+set r_fullscreen 0</code>.</p>
+  </section>
+
+  <section class="card">
+    <h2>Credits and licence</h2>
+    <p>openPREY is maintained by themuffinator / DarkMatter Productions and builds on idTech 4, OpenQ4, and related open-source modernization work. Prey was developed by Human Head Studios.</p>
+    <p>Engine code is distributed under GPLv3. SDK-derived game code remains subject to the Prey SDK terms, and retail game assets remain the property of their respective owners.</p>
+  </section>
+</main>
+</body>
+</html>

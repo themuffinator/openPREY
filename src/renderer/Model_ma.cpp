@@ -51,6 +51,39 @@ typedef struct {
 
 static ma_t maGlobal;
 
+static void MA_CopyString( char *dest, int destSize, const char *src )
+{
+	idStr::Copynz( dest, src ? src : "", destSize );
+}
+
+static void *MA_AllocArray( idParser& parser, int count, int elementSize, const char *name )
+{
+	if ( count < 0 ) {
+		throw idException( va( "Maya Loader '%s': %s has negative count %d.", parser.GetFileName(), name, count ) );
+	}
+	if ( elementSize <= 0 || count > 0x7fffffff / elementSize ) {
+		throw idException( va( "Maya Loader '%s': %s allocation size overflow.", parser.GetFileName(), name ) );
+	}
+	if ( count == 0 ) {
+		return NULL;
+	}
+	return Mem_Alloc( count * elementSize );
+}
+
+static void MA_ValidateHeaderRange( idParser& parser, int minIndex, int maxIndex, int count, const char *name )
+{
+	if ( minIndex < 0 || maxIndex < minIndex || maxIndex >= count ) {
+		throw idException( va( "Maya Loader '%s': %s range [%d:%d] outside count %d.", parser.GetFileName(), name, minIndex, maxIndex, count ) );
+	}
+}
+
+static void MA_ValidateFaceIndex( idParser& parser, const maMesh_t *mesh, int faceIndex, const char *name )
+{
+	if ( mesh == NULL || faceIndex < 0 || faceIndex >= mesh->numFaces ) {
+		throw idException( va( "Maya Loader '%s': %s face index %d outside count %d.", parser.GetFileName(), name, faceIndex, mesh ? mesh->numFaces : 0 ) );
+	}
+}
+
 
 void MA_ParseNodeHeader(idParser& parser, maNodeHeader_t* header) {
 
@@ -62,10 +95,10 @@ void MA_ParseNodeHeader(idParser& parser, maNodeHeader_t* header) {
 			parser.ReadToken(&token);
 			if (!token.Icmp("n")) {
 				parser.ReadToken(&token);
-				strcpy(header->name, token.c_str());
+				MA_CopyString( header->name, sizeof( header->name ), token.c_str() );
 			} else if (!token.Icmp("p")) {
 				parser.ReadToken(&token);
-				strcpy(header->parent, token.c_str());
+				MA_CopyString( header->parent, sizeof( header->parent ), token.c_str() );
 			}
 		} else if (!token.Icmp(";")) {
 			break;
@@ -78,7 +111,7 @@ bool MA_ParseHeaderIndex(maAttribHeader_t* header, int& minIndex, int& maxIndex,
 	idParser miniParse;
 	idToken token;
 
-	miniParse.LoadMemory(header->name, strlen(header->name), headerType);
+	miniParse.LoadMemory( header->name, idLib::SizeToInt( strlen( header->name ), "MA_ParseHeaderIndex" ), headerType );
 	if(skipString) {
 		miniParse.SkipUntilString(skipString);
 	}
@@ -111,7 +144,7 @@ bool MA_ParseAttribHeader(idParser &parser, maAttribHeader_t* header) {
 			parser.ReadToken(&token);
 		}
 	}
-	strcpy(header->name, token.c_str());
+	MA_CopyString( header->name, sizeof( header->name ), token.c_str() );
 	return true;
 }
 
@@ -202,7 +235,7 @@ bool MA_ParseVertex(idParser& parser, maAttribHeader_t* header) {
 	//Allocate enough space for all the verts if this is the first attribute for verticies
 	if(!pMesh->vertexes) {
 		pMesh->numVertexes = header->size;
-		pMesh->vertexes = (idVec3 *)Mem_Alloc( sizeof( idVec3 ) * pMesh->numVertexes );
+		pMesh->vertexes = (idVec3 *)MA_AllocArray( parser, pMesh->numVertexes, sizeof( idVec3 ), "vertex array" );
 	}
 
 	//Get the start and end index for this attribute
@@ -211,6 +244,7 @@ bool MA_ParseVertex(idParser& parser, maAttribHeader_t* header) {
 		//This was just a header
 		return true;
 	}
+	MA_ValidateHeaderRange( parser, minIndex, maxIndex, pMesh->numVertexes, "vertex" );
 	
 	//Read each vert
 	for(int i = minIndex; i <= maxIndex; i++) {
@@ -234,7 +268,7 @@ bool MA_ParseVertexTransforms(idParser& parser, maAttribHeader_t* header) {
 		}
 
 		pMesh->numVertTransforms = header->size;
-		pMesh->vertTransforms = (idVec4 *)Mem_Alloc( sizeof( idVec4 ) * pMesh->numVertTransforms );
+		pMesh->vertTransforms = (idVec4 *)MA_AllocArray( parser, pMesh->numVertTransforms, sizeof( idVec4 ), "vertex transform array" );
 		pMesh->nextVertTransformIndex = 0;
 	}
 
@@ -261,6 +295,9 @@ bool MA_ParseVertexTransforms(idParser& parser, maAttribHeader_t* header) {
 
 	//Read each vert
 	for(int i = minIndex; i <= maxIndex; i++) {
+		if( pMesh->nextVertTransformIndex < 0 || pMesh->nextVertTransformIndex >= pMesh->numVertTransforms ) {
+			throw idException(va("Maya Loader '%s': Too many vertex transforms.", parser.GetFileName()));
+		}
 		pMesh->vertTransforms[pMesh->nextVertTransformIndex].x = parser.ParseFloat();
 		pMesh->vertTransforms[pMesh->nextVertTransformIndex].z = parser.ParseFloat();
 		pMesh->vertTransforms[pMesh->nextVertTransformIndex].y = -parser.ParseFloat();
@@ -282,7 +319,7 @@ bool MA_ParseEdge(idParser& parser, maAttribHeader_t* header) {
 	//Allocate enough space for all the verts if this is the first attribute for verticies
 	if(!pMesh->edges) {
 		pMesh->numEdges = header->size;
-		pMesh->edges = (idVec3 *)Mem_Alloc( sizeof( idVec3 ) * pMesh->numEdges );
+		pMesh->edges = (idVec3 *)MA_AllocArray( parser, pMesh->numEdges, sizeof( idVec3 ), "edge array" );
 	}
 
 	//Get the start and end index for this attribute
@@ -291,6 +328,7 @@ bool MA_ParseEdge(idParser& parser, maAttribHeader_t* header) {
 		//This was just a header
 		return true;
 	}
+	MA_ValidateHeaderRange( parser, minIndex, maxIndex, pMesh->numEdges, "edge" );
 
 	//Read each vert
 	for(int i = minIndex; i <= maxIndex; i++) {
@@ -310,7 +348,7 @@ bool MA_ParseNormal(idParser& parser, maAttribHeader_t* header) {
 	//Allocate enough space for all the verts if this is the first attribute for verticies
 	if(!pMesh->normals) {
 		pMesh->numNormals = header->size;
-		pMesh->normals = (idVec3 *)Mem_Alloc( sizeof( idVec3 ) * pMesh->numNormals );
+		pMesh->normals = (idVec3 *)MA_AllocArray( parser, pMesh->numNormals, sizeof( idVec3 ), "normal array" );
 	}
 
 	//Get the start and end index for this attribute
@@ -319,6 +357,7 @@ bool MA_ParseNormal(idParser& parser, maAttribHeader_t* header) {
 		//This was just a header
 		return true;
 	}
+	MA_ValidateHeaderRange( parser, minIndex, maxIndex, pMesh->numNormals, "normal" );
 
 	
 	parser.ReadToken(&token);
@@ -364,7 +403,7 @@ bool MA_ParseFace(idParser& parser, maAttribHeader_t* header) {
 	//Allocate enough space for all the verts if this is the first attribute for verticies
 	if(!pMesh->faces) {
 		pMesh->numFaces = header->size;
-		pMesh->faces = (maFace_t *)Mem_Alloc( sizeof( maFace_t ) * pMesh->numFaces );
+		pMesh->faces = (maFace_t *)MA_AllocArray( parser, pMesh->numFaces, sizeof( maFace_t ), "face array" );
 	}
 
 	//Get the start and end index for this attribute
@@ -373,6 +412,7 @@ bool MA_ParseFace(idParser& parser, maAttribHeader_t* header) {
 		//This was just a header
 		return true;
 	}
+	MA_ValidateHeaderRange( parser, minIndex, maxIndex, pMesh->numFaces, "face" );
 
 	//Read the face data
 	int currentFace = minIndex-1;
@@ -390,6 +430,7 @@ bool MA_ParseFace(idParser& parser, maAttribHeader_t* header) {
 			}
 			//Increment the face number because a new face always starts with an "f" token
 			currentFace++;
+			MA_ValidateFaceIndex( parser, pMesh, currentFace, "face" );
 
 			//We cannot reorder edges until later because the normal processing
 			//assumes the edges are in the original order
@@ -401,12 +442,13 @@ bool MA_ParseFace(idParser& parser, maAttribHeader_t* header) {
 			pMesh->faces[currentFace].vertexColors[0] = pMesh->faces[currentFace].vertexColors[1] = pMesh->faces[currentFace].vertexColors[2] = -1;
 
 		} else if(!token.Icmp("mu")) {
-			int uvstIndex = parser.ParseInt();
+			parser.ParseInt(); // UV set index
 			int count = parser.ParseInt();
 			if(count != 3) {
 				throw idException(va("Maya Loader '%s': Invalid texture coordinates.", parser.GetFileName()));
 				return false;
 			}
+			MA_ValidateFaceIndex( parser, pMesh, currentFace, "texture coordinate" );
 			pMesh->faces[currentFace].tVertexNum[0] = parser.ParseInt();
 			pMesh->faces[currentFace].tVertexNum[1] = parser.ParseInt();
 			pMesh->faces[currentFace].tVertexNum[2] = parser.ParseInt();
@@ -417,6 +459,7 @@ bool MA_ParseFace(idParser& parser, maAttribHeader_t* header) {
 				throw idException(va("Maya Loader '%s': Invalid texture coordinates.", parser.GetFileName()));
 				return false;
 			}
+			MA_ValidateFaceIndex( parser, pMesh, currentFace, "texture coordinate" );
 			pMesh->faces[currentFace].tVertexNum[0] = parser.ParseInt();
 			pMesh->faces[currentFace].tVertexNum[1] = parser.ParseInt();
 			pMesh->faces[currentFace].tVertexNum[2] = parser.ParseInt();
@@ -428,6 +471,7 @@ bool MA_ParseFace(idParser& parser, maAttribHeader_t* header) {
 				throw idException(va("Maya Loader '%s': Invalid vertex color.", parser.GetFileName()));
 				return false;
 			}
+			MA_ValidateFaceIndex( parser, pMesh, currentFace, "vertex color" );
 			pMesh->faces[currentFace].vertexColors[0] = parser.ParseInt();
 			pMesh->faces[currentFace].vertexColors[1] = parser.ParseInt();
 			pMesh->faces[currentFace].vertexColors[2] = parser.ParseInt();
@@ -446,7 +490,7 @@ bool MA_ParseColor(idParser& parser, maAttribHeader_t* header) {
 	//Allocate enough space for all the verts if this is the first attribute for verticies
 	if(!pMesh->colors) {
 		pMesh->numColors = header->size;
-		pMesh->colors = (byte *)Mem_Alloc( sizeof( byte ) * pMesh->numColors * 4 );
+		pMesh->colors = (byte *)MA_AllocArray( parser, pMesh->numColors, sizeof( byte ) * 4, "color array" );
 	}
 
 	//Get the start and end index for this attribute
@@ -455,6 +499,7 @@ bool MA_ParseColor(idParser& parser, maAttribHeader_t* header) {
 		//This was just a header
 		return true;
 	}
+	MA_ValidateHeaderRange( parser, minIndex, maxIndex, pMesh->numColors, "color" );
 
 	//Read each vert
 	for(int i = minIndex; i <= maxIndex; i++) {
@@ -480,7 +525,7 @@ bool MA_ParseTVert(idParser& parser, maAttribHeader_t* header) {
 	//Allocate enough space for all the data
 	if(!pMesh->tvertexes) {
 		pMesh->numTVertexes = header->size;
-		pMesh->tvertexes = (idVec2 *)Mem_Alloc( sizeof( idVec2 ) * pMesh->numTVertexes );
+		pMesh->tvertexes = (idVec2 *)MA_AllocArray( parser, pMesh->numTVertexes, sizeof( idVec2 ), "texture coordinate array" );
 	}
 
 	//Get the start and end index for this attribute
@@ -489,6 +534,7 @@ bool MA_ParseTVert(idParser& parser, maAttribHeader_t* header) {
 		//This was just a header
 		return true;
 	}
+	MA_ValidateHeaderRange( parser, minIndex, maxIndex, pMesh->numTVertexes, "texture coordinate" );
 
 	parser.ReadToken(&token);
 	if(!token.Icmp("-")) {
@@ -594,7 +640,7 @@ void MA_ParseMesh(idParser& parser) {
 		}
 	}
 
-	strcpy(object->name, header.name);
+	MA_CopyString( object->name, sizeof( object->name ), header.name );
 
 	//Read the transform attributes
 	idToken token;
@@ -634,12 +680,18 @@ void MA_ParseMesh(idParser& parser) {
 	for(int i = 0; i < pMesh->numFaces; i++) {
 		for(int j = 0; j < 3; j++) {
 			int edge = pMesh->faces[i].edge[j];
+			const bool reversed = edge < 0;
 			if(edge < 0) {
-				edge = idMath::Fabs(edge)-1;
-				pMesh->faces[i].vertexNum[j] = pMesh->edges[edge].y;
-			} else {
-				pMesh->faces[i].vertexNum[j] = pMesh->edges[edge].x;
+				edge = -edge - 1;
 			}
+			if( edge < 0 || edge >= pMesh->numEdges ) {
+				throw idException(va("Maya Loader '%s': Face edge index out of range.", parser.GetFileName()));
+			}
+			const int vertexIndex = reversed ? (int)pMesh->edges[edge].y : (int)pMesh->edges[edge].x;
+			if( vertexIndex < 0 || vertexIndex >= pMesh->numVertexes ) {
+				throw idException(va("Maya Loader '%s': Face vertex index out of range.", parser.GetFileName()));
+			}
+			pMesh->faces[i].vertexNum[j] = vertexIndex;
 		}
 	}
 
@@ -694,12 +746,16 @@ void MA_ParseMesh(idParser& parser) {
 
 	//Now apply the pt transformations
 	for(int i = 0; i < pMesh->numVertTransforms; i++) {
-		pMesh->vertexes[(int)pMesh->vertTransforms[i].w] +=  pMesh->vertTransforms[i].ToVec3();
+		const int vertexIndex = (int)pMesh->vertTransforms[i].w;
+		if( vertexIndex < 0 || vertexIndex >= pMesh->numVertexes ) {
+			throw idException(va("Maya Loader '%s': Vertex transform index out of range.", parser.GetFileName()));
+		}
+		pMesh->vertexes[vertexIndex] +=  pMesh->vertTransforms[i].ToVec3();
 	}
 	
-	MA_VERBOSE((va("MESH %s - parent %s\n", header.name, header.parent)));
-	MA_VERBOSE((va("\tverts:%d\n",maGlobal.currentObject->mesh.numVertexes)));
-	MA_VERBOSE((va("\tfaces:%d\n",maGlobal.currentObject->mesh.numFaces)));
+	MA_VERBOSE(("MESH %s - parent %s\n", header.name, header.parent));
+	MA_VERBOSE(("\tverts:%d\n", maGlobal.currentObject->mesh.numVertexes));
+	MA_VERBOSE(("\tfaces:%d\n", maGlobal.currentObject->mesh.numFaces));
 }
 
 void MA_ParseFileNode(idParser& parser) {
@@ -728,8 +784,8 @@ void MA_ParseFileNode(idParser& parser) {
 
 				maFileNode_t* fileNode;
 				fileNode = (maFileNode_t*)Mem_Alloc( sizeof( maFileNode_t ) );
-				strcpy(fileNode->name, header.name);
-				strcpy(fileNode->path, token.c_str());
+				MA_CopyString( fileNode->name, sizeof( fileNode->name ), header.name );
+				MA_CopyString( fileNode->path, sizeof( fileNode->path ), token.c_str() );
 
 				maGlobal.model->fileNodes.Set(fileNode->name, fileNode);
 			} else {
@@ -749,7 +805,7 @@ void MA_ParseMaterialNode(idParser& parser) {
 	matNode = (maMaterialNode_t*)Mem_Alloc( sizeof( maMaterialNode_t ) );
 	memset(matNode, 0, sizeof(maMaterialNode_t));
 
-	strcpy(matNode->name, header.name);
+	MA_CopyString( matNode->name, sizeof( matNode->name ), header.name );
 	
 	maGlobal.model->materialNodes.Set(matNode->name, matNode);
 }
@@ -794,7 +850,7 @@ int MA_AddMaterial(const char* materialName) {
 			idStr qPath;
 			qPath = fileSystem->OSPathToRelativePath( matNode->file->path );
 			
-			strcpy(material->name, qPath.c_str());
+			MA_CopyString( material->name, sizeof( material->name ), qPath.c_str() );
 
 			maGlobal.model->materials.Append( material );
 			return maGlobal.model->materials.Num()-1;
@@ -862,7 +918,7 @@ bool MA_ParseConnectAttr(idParser& parser) {
 		for(int i = 0; i < maGlobal.model->objects.Num(); i++) {
 			if(!strcmp(maGlobal.model->objects[i]->name, srcName)) {
 				//maGlobal.model->objects[i]->materialRef = MA_AddMaterial(destName);
-				strcpy(maGlobal.model->objects[i]->materialName, destName); 
+				MA_CopyString( maGlobal.model->objects[i]->materialName, sizeof( maGlobal.model->objects[i]->materialName ), destName.c_str() );
 				break;
 			}
 		}
@@ -975,7 +1031,7 @@ maModel_t *MA_Parse( const char *buffer, const char* filename, bool verbose ) {
 
 	idParser parser;
 	parser.SetFlags(LEXFL_NOSTRINGCONCAT);
-	parser.LoadMemory(buffer, strlen(buffer), filename);
+	parser.LoadMemory( buffer, idLib::SizeToInt( strlen( buffer ), "MA_Parse" ), filename );
 
 	idToken token;
 	while(parser.ReadToken(&token)) {

@@ -1,0 +1,156 @@
+{
+  "scene": "QUAKE 4 | Cinematic remaster",
+  "objects": 477,
+  "meshes": 324,
+  "curves": 108,
+  "letters": 6,
+  "letter_topology": {
+    "Q": {
+      "vertices": 9714,
+      "faces": 18775,
+      "nonmanifold_edges": 0,
+      "physical_chamfer": true
+    },
+    "U": {
+      "vertices": 11344,
+      "faces": 22123,
+      "nonmanifold_edges": 0,
+      "physical_chamfer": true
+    },
+    "A": {
+      "vertices": 6340,
+      "faces": 12152,
+      "nonmanifold_edges": 0,
+      "physical_chamfer": true
+    },
+    "K": {
+      "vertices": 9804,
+      "faces": 19011,
+      "nonmanifold_edges": 0,
+      "physical_chamfer": true
+    },
+    "E": {
+      "vertices": 10388,
+      "faces": 20196,
+      "nonmanifold_edges": 0,
+      "physical_chamfer": true
+    },
+    "4": {
+      "vertices": 10414,
+      "faces": 20205,
+      "nonmanifold_edges": 0,
+      "physical_chamfer": true
+    }
+  },
+  "editable_curve_masters": 6,
+  "closed_castings": {
+    "RM planar twin-land forged jaw -1": {
+      "vertices": 108,
+      "faces": 106,
+      "nonmanifold_edges": 0
+    },
+    "RM planar twin-land forged jaw 1": {
+      "vertices": 108,
+      "faces": 106,
+      "nonmanifold_edges": 0
+    }
+  },
+  "articulation": {
+    "31": {
+      "jaw_x": 0.0,
+      "rail_length_scale": 2.06
+    },
+    "61": {
+      "jaw_x": 1.8792,
+      "rail_length_scale": 3.9392
+    },
+    "121": {
+      "jaw_x": 1.88,
+      "rail_length_scale": 3.94
+    }
+  },
+  "packed_textures": [
+    {
+      "name": "RM authored biological iris",
+      "size": [
+        1254,
+        1254
+      ]
+    }
+  ],
+  "samples": 96,
+  "frames": 180,
+  "fps": 30,
+  "resolution": [
+    1920,
+    1080
+  ],
+  "material_override": false,
+  "end_dark_olive_floor": true,
+  "display_consistent_fade": true,
+  "reference_checkpoints": 31,
+  "checkpoint_spacing_seconds": 0.2,
+  "logo": {
+    "vertices": 1928,
+    "faces": 2888,
+    "nonmanifold_edges": 0,
+    "local_top_y": 2.3659,
+    "local_bottom_y": -6.09676,
+    "width": 6.44578,
+    "unexpanded_master_curve": true,
+    "rim_parented_to_iron": true,
+    "no_tip_overshoot": true
+  },
+  "pivot_recesses": {
+    "RM rounded captive pivot": {
+      "center_floor_local_z": -0.0125,
+      "actual_recess": true
+    },
+    "RM rounded captive pivot.001": {
+      "center_floor_local_z": -0.0125,
+      "actual_recess": true
+    }
+  },
+  "overlays": {
+    "objects": 96,
+    "native_curves": 83,
+    "motion": {
+      "31": {
+        "center_pixels": [
+          448.76,
+          170.78
+        ],
+        "opacity_envelope": 0.0
+      },
+      "76": {
+        "center_pixels": [
+          437.24,
+          271.12
+        ],
+        "opacity_envelope": 0.19
+      },
+      "121": {
+        "center_pixels": [
+          450.0,
+          367.0
+        ],
+        "opacity_envelope": 0.19
+      },
+      "151": {
+        "center_pixels": [
+          457.0,
+          421.0
+        ],
+        "opacity_envelope": 0.171
+      }
+    },
+    "dedicated_logo_glow_aov": true
+  },
+  "optical_diffusion": {
+    "separate_core_aov": true,
+    "physical_pupil_aov": true,
+    "compact_diffraction_aov": true,
+    "smooth_flare_kernels": 3,
+    "wide_rectangular_streak_glare_bypassed": true
+  }
+}

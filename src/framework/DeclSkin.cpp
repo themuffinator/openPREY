@@ -39,7 +39,13 @@ idDeclSkin::Size
 =================
 */
 size_t idDeclSkin::Size( void ) const {
-	return sizeof( idDeclSkin );
+	size_t size = sizeof( idDeclSkin ) + mappings.Allocated() + associatedModels.Allocated();
+
+	for ( int i = 0; i < associatedModels.Num(); i++ ) {
+		size += associatedModels[i].Allocated();
+	}
+
+	return size;
 }
 
 /*
@@ -49,6 +55,7 @@ idDeclSkin::FreeData
 */
 void idDeclSkin::FreeData( void ) {
 	mappings.Clear();
+	associatedModels.Clear();
 }
 
 /*
@@ -57,6 +64,15 @@ idDeclSkin::Parse
 ================
 */
 bool idDeclSkin::Parse( const char *text, const int textLength ) {
+	return Parse( text, textLength, false );
+}
+
+/*
+================
+idDeclSkin::Parse
+================
+*/
+bool idDeclSkin::Parse( const char *text, const int textLength, bool noCaching ) {
 	idLexer src;
 	idToken	token, token2;
 
@@ -94,12 +110,31 @@ bool idDeclSkin::Parse( const char *text, const int textLength ) {
 			map.from = declManager->FindMaterial( token );
 		}
 
-		map.to = declManager->FindMaterial( token2 );
+		// The recovered machinegun skin names an unshipped arm variant. The
+		// matching retail variant uses the same mesh/UVs and burn effect.
+		// Never replace an authored declaration supplied by the installation.
+		map.to = NULL;
+		if ( idStr::Icmp( fileSystem->GetActiveGameDir(), "q4xbase" ) == 0 &&
+			idStr::Icmp( GetName(), "skins/monsters/q4x_strogg_marine/q4x_smv_machinegun" ) == 0 &&
+			token2.Icmp( "models/monsters/q4x_strogg_marine/q4x_smv_arms3_lo" ) == 0 &&
+			declManager->FindMaterial( token2, false ) == NULL ) {
+			map.to = declManager->FindMaterial( "models/monsters/strogg_marine/smv_arms3_lo", false );
+		}
+		if ( idStr::Icmp( fileSystem->GetActiveGameDir(), "q4xbase" ) == 0 &&
+			idStr::Icmp( GetName(), "skins/monsters/q4x_strogg_marine/q4x_smv_shotgun" ) == 0 &&
+			token2.Icmp( "models/monsters/q4x_strogg_marine/q4x_smv_arms2_lo" ) == 0 &&
+			declManager->FindMaterial( token2, false ) == NULL ) {
+			map.to = declManager->FindMaterial( "models/monsters/strogg_marine/smv_arms2_lo", false );
+		}
+		if ( map.to == NULL ) {
+			map.to = declManager->FindMaterial( token2 );
+		}
 
 		mappings.Append( map );
 	}
 
-	return true;
+	(void)noCaching;
+	return false;
 }
 
 /*
@@ -164,4 +199,21 @@ const idMaterial *idDeclSkin::RemapShaderBySkin( const idMaterial *shader ) cons
 
 	// didn't find a match or wildcard, so stay the same
 	return shader;
+}
+
+/*
+================
+idDeclSkin::Validate
+================
+*/
+bool idDeclSkin::Validate( const char *psText, int iTextLength, idStr &strReportTo ) const {
+	(void)strReportTo;
+
+	idDecl *decl = declManager->AllocateDecl( DECL_SKIN );
+	const bool valid = DeclManager_ValidateParsedDecl( decl, DECL_SKIN, decl != NULL && decl->Parse( psText, iTextLength, false ) );
+	if ( decl != NULL ) {
+		decl->FreeData();
+	}
+	DeclManager_FreeAllocatedDecl( decl );
+	return valid;
 }

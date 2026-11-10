@@ -32,6 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 #define __SND_LOCAL_H__
 
 #include "WaveFile.h"
+#include "SoundReverbCore.h"
 
 // Maximum number of voices we can have allocated
 #define MAX_HARDWARE_VOICES 48
@@ -55,11 +56,21 @@ SamplesToMsec
 */
 ID_INLINE_EXTERN uint32 MsecToSamples( uint32 msec, uint32 sampleRate )
 {
-	return ( msec * ( sampleRate / 100 ) ) / 10;
+	if( sampleRate == 0 )
+	{
+		return 0;
+	}
+	const uint64 samples = ( static_cast<uint64>( msec ) * static_cast<uint64>( sampleRate ) ) / 1000ULL;
+	return samples > static_cast<uint64>( idMath::INT_MAX ) ? static_cast<uint32>( idMath::INT_MAX ) : static_cast<uint32>( samples );
 }
 ID_INLINE_EXTERN uint32 SamplesToMsec( uint32 samples, uint32 sampleRate )
 {
-	return sampleRate < 100 ? 0 : ( samples * 10 ) / ( sampleRate / 100 );
+	if( sampleRate == 0 )
+	{
+		return 0;
+	}
+	const uint64 msec = ( static_cast<uint64>( samples ) * 1000ULL ) / static_cast<uint64>( sampleRate );
+	return msec > static_cast<uint64>( idMath::INT_MAX ) ? static_cast<uint32>( idMath::INT_MAX ) : static_cast<uint32>( msec );
 }
 
 /*
@@ -74,7 +85,7 @@ ID_INLINE_EXTERN float DBtoLinear( float db )
 }
 ID_INLINE_EXTERN float DBtoLinearClamped( float db )
 {
-	return ( db <= DB_SILENCE ) ? 0.0f : Max( 0.0f, DBtoLinear( db ) );
+	return db <= DB_SILENCE ? 0.0f : Max( 0.0f, DBtoLinear( db ) );
 }
 ID_INLINE_EXTERN float LinearToDB( float linear )
 {
@@ -215,6 +226,8 @@ public:
 	void	SetVolume( float to );
 	void	Fade( float to, int length, int soundTime );
 	void	FadeFrom( float to, int delay, int length, int soundTime );
+	void	FadeDB( float toDB, float overSeconds, int soundTime );
+	void	Sanitize();
 
 	float	GetVolume( int soundTime ) const;
 };
@@ -228,21 +241,28 @@ class idSoundChannel
 {
 public:
 	bool	CanMute() const;
+	bool	IsVoicePlayback() const;
 
 	void	Mute();
 	bool	CheckForCompletion( int currentTime );
 
 	void	UpdateVolume( int currentTime );
 	void	UpdateHardware( float volumeAdd, int currentTime );
+	int		MixPrioritySortKey( int currentTime ) const;
 
 	// returns true if this channel is marked as looping
 	bool	IsLooping() const;
+
+	// back to the freshly constructed state
+	void	Reset();
 
 	class idSoundEmitterLocal* 	emitter;
 
 	int						startTime;
 	int						endTime;
+	int						lastFrequencyShiftTime;
 	int						logicalChannel;
+	int						choice;
 	bool					allowSlow;
 
 	soundShaderParms_t		parms;				// combines shader parms and per-channel overrides
@@ -252,7 +272,9 @@ public:
 	idSoundFade				volumeFade;
 
 	float					volumeDB;			// last volume at which this channel will play (calculated in UpdateVolume)
-	float					currentAmplitude;	// current amplitude on the hardware voice
+	float					currentAmplitude;	// the sample's envelope at the current playback position
+	float					lastFrequencyShift;
+	float					elapsedFrequencyShiftTime;
 
 	// hardwareVoice will be freed and NULL'd when a sound is out of range,
 	// and reallocated when it comes back in range
@@ -296,25 +318,34 @@ public:
 
 	// for load games
 	virtual idSoundEmitter* EmitterForIndex( int index );
+	// a render demo's emitter index, where 0 is localSound
+	idSoundEmitter*		DemoEmitterForIndex( int index );
 
 	// query data from all emitters in the world
 	virtual float			CurrentShakeAmplitude();
+	virtual float			CurrentShakeAmplitudeForPosition( const int time, const idVec3& listenerPosition );
+	float					ShakeAmplitudeForPosition( const idVec3& listenerPosition );
+	float					CurrentRumbleAmplitude() const { return rumbleAmp; }
+	virtual int				GetSubtitles( soundSubtitle_t* cues, int capacity );
 
 	// where is the camera
 	virtual void			PlaceListener( const idVec3& origin, const idMat3& axis, const int listenerId );
+	virtual void			PlaceListener( const idVec3& origin, const idMat3& axis, const int listenerId, const int gameTime, const idStr& areaName );
 
 	virtual void			WriteSoundShaderLoad( const idSoundShader* snd );
 
 	// fade all sounds in the world with a given shader soundClass
 	// to is in Db, over is in seconds
 	virtual void			FadeSoundClasses( const int soundClass, const float to, const float over );
+	virtual void			RegisterLocation( int area, const char* locationName );
+	virtual void			ClearAreaLocations();
 
 	// dumps the current state and begins archiving commands
 	virtual void			StartWritingDemo( idDemoFile* demo );
 	virtual void			StopWritingDemo();
 
 	// read a sound command from a demo file
-	virtual void			ProcessDemoCommand( idDemoFile* readDemo );
+	virtual bool			ProcessDemoCommand( idDemoFile* readDemo );
 
 	// menu sounds
 	virtual int				PlayShaderDirectly( const char* name, int channel = -1 );
@@ -340,6 +371,8 @@ public:
 
 	virtual void			SetSlowmoSpeed( float speed );
 	virtual void			SetEnviroSuit( bool active );
+	virtual void			SetUnderwater( bool active );
+	virtual void			SetLiquidTest( liquidTest_t test );
 
 	//=======================================
 
@@ -352,6 +385,11 @@ public:
 	idSoundChannel* 	AllocSoundChannel();
 	void				FreeSoundChannel( idSoundChannel* );
 
+private:
+	// Shared save/demo state decoder. demoFile is non-NULL only for the
+	// non-fatal render-demo path.
+	bool			ReadSoundState( idFile* savefile, idDemoFile* demoFile );
+
 public:
 	// even though all these variables are public, nobody outside the sound system includes SoundWorld_local.h
 	// so this is equivalent to making it private and friending all the other classes in the sound system
@@ -363,10 +401,14 @@ public:
 	idDemoFile* 		writeDemo;		// if not NULL, archive commands here
 
 	float				currentCushionDB;	// channels at or below this level will be faded to 0
+	int					lastCushionTime;	// sound time of the last cushion update, 0 = none yet
 	float				shakeAmp;			// last calculated shake amplitude
+	float				rumbleAmp;			// last calculated controller rumble amplitude
 
 	listener_t			listener;
 	idList<idSoundEmitterLocal*>	emitters;
+	idStrList			areaLocations;
+	idStr				listenerAreaName;
 
 	idSoundEmitter* 	localSound;			// for PlayShaderDirectly()
 
@@ -380,6 +422,8 @@ public:
 
 	float					slowmoSpeed;
 	bool					enviroSuitActive;
+	bool					underwaterActive;
+	liquidTest_t			liquidTest;
 
 public:
 	struct soundPortalTrace_t
@@ -388,7 +432,7 @@ public:
 		const soundPortalTrace_t* prevStack;
 	};
 
-	void			ResolveOrigin( const int stackDepth, const soundPortalTrace_t* prevStack, const int soundArea, const float dist, const idVec3& soundOrigin, idSoundEmitterLocal* def );
+	void			ResolveOrigin( const int stackDepth, const soundPortalTrace_t* prevStack, const int soundArea, const float dist, const int occludingPortals, const idVec3& soundOrigin, idSoundEmitterLocal* def );
 };
 
 
@@ -405,11 +449,13 @@ public:
 	virtual void	Reset();
 
 	virtual void	UpdateEmitter( const idVec3& origin, int listenerId, const soundShaderParms_t* parms );
+	virtual void	UpdateEmitter( const idVec3& origin, const idVec3& velocity, int listenerId, const soundShaderParms_t* parms );
 
 	virtual int		StartSound( const idSoundShader* shader, const s_channelType channel, float diversity = 0, int shaderFlags = 0, bool allowSlow = true );
 
 	virtual void	ModifySound( const s_channelType channel, const soundShaderParms_t* parms );
-	virtual soundShaderParms_t *GetSoundParms( idSoundShader *shader, const s_channelType channel );
+	virtual void	ModifySound( idSoundShader* shader, const s_channelType channel, const hhSoundShaderParmsModifier& modifier );
+	virtual soundShaderParms_t* GetSoundParms( idSoundShader* shader, const s_channelType channel );
 	virtual void	StopSound( const s_channelType channel );
 
 	virtual void	FadeSound( const s_channelType channel, float to, float over );
@@ -417,8 +463,10 @@ public:
 	virtual bool	CurrentlyPlaying( const s_channelType channel = SCHANNEL_ANY ) const;
 
 	virtual	float	CurrentAmplitude();
-	virtual	float	CurrentAmplitude( const s_channelType channel );
-	virtual	float	CurrentVoiceAmplitude( const s_channelType channel );
+	virtual float	CurrentAmplitude( const s_channelType channel );
+	virtual float	CurrentVoiceAmplitude( const s_channelType channel );
+	float			ShakeAmplitudeForPosition( const int currentTime, const idVec3& listenerPosition );
+	virtual void	AmplitudeHistory( s_channelType channel, float *peaks, int count );
 
 	virtual	int		Index() const;
 
@@ -446,6 +494,7 @@ public:
 
 	//----- set by UpdateEmitter -----
 	idVec3				origin;
+	idVec3				velocity;
 	soundShaderParms_t	parms;
 	int					emitterId;						// sounds will be full volume when emitterId == listenerId
 
@@ -454,10 +503,83 @@ public:
 	float		directDistance;
 	float		spatializedDistance;
 	idVec3		spatializedOrigin;
+	int			occludingPortalCount;
+	bool		crossesLiquidBoundary;	// openQ4: emitter and listener are in different media
+
+	// The shaders and samples this emitter started most recently. Retail's fixed channel
+	// slots kept a finished sound's sample, so no_dups also skipped the variant that had
+	// just ended; openQ4 frees finished channels and needs to remember it here.
+	static const int	RECENT_SAMPLES = 8;
+	const idSoundShader*	recentShaders[ RECENT_SAMPLES ];
+	const idSoundSample*	recentSamples[ RECENT_SAMPLES ];
+	int					recentNext;
 
 	// sound emitters are only allocated by the soundWorld block allocator
 	idSoundEmitterLocal();
 	virtual			~idSoundEmitterLocal();
+};
+
+
+/*
+================================================
+idSoundReverb
+
+Retail Quake 4 environmental reverb (Quake4.exe 1.4.2): the efxs/<name>.efx preset
+file, the map's maps/<map>.reverb area table, and the four reverb slots that
+follow the listener's area and the three areas nearest it through its portals.
+Slot planning and the EAX to EFX arithmetic live in SoundReverbCore.h.
+================================================
+*/
+class idSoundReverb
+{
+public:
+						idSoundReverb();
+
+	// retail idSoundSystemLocal::EndLevelLoad: efxs/<map>.efx, else efxs/default.efx,
+	// then <map>.reverb against the areas of the game render world
+	void				LoadLevel( const char* mapName, const idRenderWorld* renderWorld );
+	void				Clear();
+
+	// once per sound world update, before the voices take their sends
+	void				Update( idSoundWorldLocal* world );
+
+	// the reverb slot holding an area, -1 when no slot holds it
+	int					SlotForArea( int area ) const;
+
+	// retail reverb editor interface
+	const char*			GetReverbName( int reverb ) const;
+	int					GetNumAreas() const;
+	int					GetReverb( int area ) const;
+	bool				SetReverb( int area, const char* reverbName, const char* fileName );
+
+	void				PrintInfo() const;
+
+private:
+	struct effect_t
+	{
+		idStr				name;
+		soundReverbEAX_t	properties;
+	};
+
+	idList<effect_t>	effects;				// efxs/*.efx in file order
+	bool				efxLoaded;
+	idStr				efxFileName;
+	idList<int>			areaReverbs;			// effect index per portal area
+	idStr				reverbFileName;			// empty when the map has no table
+	int					slotToArea[SOUND_REVERB_SLOTS];
+	int					numSlots;				// slots the hardware provided at the last update
+	int					primarySlot;
+	unsigned int		slotGeneration;
+	idList<soundReverbPortal_t>	portals;		// scratch, the listener area's portals
+	idStr				lastShownState;			// s_showReverb
+
+	bool				LoadEffectFile( const char* fileName );
+	bool				ReadEffect( idLexer& src, effect_t& effect );
+	void				LoadAreaTable( const char* mapName, int numAreas );
+	int					FindEffect( const char* name ) const;
+	void				ResetSlots();
+	void				ShowState( const listener_t& listener );
+	static int			EffectForArea( void* context, int area );
 };
 
 
@@ -488,6 +610,8 @@ public:
 	virtual idSoundWorld* 	GetPlayingSoundWorld();
 
 	virtual idSoundWorld* GetSoundWorldFromId(int worldId);
+	virtual float			CurrentShakeAmplitudeForPosition( int worldId, const int time, const idVec3& listenerPosition );
+	virtual void			FreeSoundEmitter(int worldId, int handle, bool immediate);
 
 	// sends the current playing sound world information to the sound hardware
 	virtual void			Render();
@@ -498,10 +622,16 @@ public:
 		musicMuted = mute;
 	}
 
-	// Explicit mute requests from gameplay, loading, tools, demos, etc.
+	// sets the final output volume to 0
+	// This should only be used when the app is deactivated
+	// Since otherwise there will be problems with different subsystems muting and unmuting at different times
 	virtual void			SetMute( bool mute )
 	{
 		muted = mute;
+	}
+	virtual bool			IsMuted()
+	{
+		return muted || focusMuted;
 	}
 	virtual void			SetMuteForFocus( bool mute )
 	{
@@ -514,10 +644,6 @@ public:
 	virtual bool			IsMutedExplicitly()
 	{
 		return muted;
-	}
-	virtual bool			IsMuted()
-	{
-		return muted || focusMuted;
 	}
 
 	virtual void			OnReloadSound( const idDecl* sound );
@@ -541,16 +667,30 @@ public:
 	virtual	void			BeginLevelLoad();
 
 	// We might want to defer the loading of new sounds to this point
-	virtual	void			EndLevelLoad();
+	virtual	void			EndLevelLoad( const char* mapName );
 
 	// prints memory info
 	virtual void			PrintMemInfo( MemInfo_t* mi );
 
-	// Prey subtitle table registration/runtime lookup.
 	virtual int				GetSubtitleIndex( const char* soundName );
 	virtual void			SetSubtitleData( int subIndex, int subNum, const char* subText, float subTime, int subChannel );
 	virtual soundSub_t*		GetSubtitle( int subIndex, int subNum );
 	virtual soundSubtitleList_t* GetSubtitleList( int subIndex );
+
+	// retail reverb editor interface
+	virtual const char*		GetReverbName( int reverb );
+	virtual int				GetNumAreas();
+	virtual int				GetReverb( int area );
+	virtual bool			SetReverb( int area, const char* reverbName, const char* fileName );
+
+	virtual void			ShutdownHW();
+	virtual bool			UpdateVoiceChat( bool active, bool transmit, bool localTest );
+	virtual int				GetVoiceData( byte* data, int capacity );
+	virtual void			PlayVoiceData( int clientNum, unsigned int generation, const byte* data, int size );
+	virtual void			StopVoiceData( int clientNum );
+	virtual void			ResetVoiceChat();
+	virtual int				GetVoiceTalker() const;
+	virtual float			GetVoiceLevel() const;
 
 	//-------------------------
 
@@ -566,6 +706,10 @@ public:
 	}
 
 	int						SoundTime() const;
+	// Brings the sound clock, otherwise advanced once per mixed frame, up to now: a
+	// pause and an unpause inside one long blocking step such as a level load would
+	// both read the frame before it and hold the clock for none of that time.
+	int						RefreshSoundTime();
 
 	// may return NULL if there are no more voices left
 	idSoundVoice* 			AllocateVoice( const idSoundSample* leadinSample, const idSoundSample* loopingSample );
@@ -616,6 +760,8 @@ public:
 
 	idSoundHardware				hardware;
 
+	idSoundReverb				reverb;
+
 	idRandom2					random;
 
 	int							soundTime;
@@ -625,30 +771,42 @@ public:
 	bool						needsRestart;
 
 	bool						insideLevelLoad;
+	// samples whose PCM is decoding on a job worker (LoadResourceAsync)
+	idList<idSoundSample*>		decodingSamples;
+	// uploads the samples whose decode has finished, or all of them, waiting
+	void						FinishSampleDecodes( bool all );
+	// frees the audio a low-memory notice may take (SoundMemoryTrim.h); idleSeconds < 0
+	// keeps the current level's samples
+	void						TrimMemory( const char* reason, int idleSeconds );
 
-private:
+	//-------------------------
 	struct queuedSubtitle_t
 	{
-		int						subIndex;			// subtitle list index
-		int						subNum;				// authored subtitle number
-		const soundSub_t*		subtitle;			// active subtitle entry
-		int						endTime;			// absolute end time in ms
+		int						subIndex;
+		int						subNum;
+		const idSoundChannel*	channel;
+		int						channelStartTime;
+		const soundSub_t*		subtitle;
+		int						endTime;
 	};
 
 	bool					SubtitleQueueContains( const soundSub_t* subtitle ) const;
-	bool					AppendSubtitleForChannel( const idSoundChannel* chan );
+	int						FindSubtitleQueueIndexForChannel( const idSoundChannel* channel ) const;
+	bool					AppendSubtitleForChannel( const idSoundChannel* channel, bool markQueueChanged = true );
 	void					CollectActiveSubtitles();
 	void					PruneExpiredSubtitles();
 	bool					SyncSubtitleQueues();
 	void					PresentSubtitles();
 	void					ClearSubtitleRuntimeQueue();
 
-	idList<queuedSubtitle_t>	sb_subtitleQueue;		// backend/runtime queue
-	bool						subtitleQueueChanged;	// backend/frontend dirty bit
-	idList<const soundSub_t*>	sf_subtitleQueue;		// frontend copy used by GUI
+	idList<queuedSubtitle_t>	sb_subtitleQueue;
+	bool						subtitleQueueChanged;
+	idList<const soundSub_t*>	sf_subtitleQueue;
 
 public:
-	idList<soundSubtitleList_t> soundSubtitleList;		// registered subtitle tables by sound shader
+	void					RemoveSubtitlesForChannel( const idSoundChannel* channel );
+
+	idList<soundSubtitleList_t> soundSubtitleList;
 
 	//-------------------------
 

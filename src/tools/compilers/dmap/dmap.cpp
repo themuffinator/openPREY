@@ -198,7 +198,6 @@ Dmap
 void Dmap( const idCmdArgs &args ) {
 	int			i;
 	int			start, end;
-	char		path[1024];
 	idStr		passedName;
 	bool		leaked = false;
 	bool		noCM = false;
@@ -309,8 +308,9 @@ void Dmap( const idCmdArgs &args ) {
 	bool region = false;
 	// if this isn't a regioned map, delete the last saved region map
 	if ( passedName.Right( 4 ) != ".reg" ) {
-		sprintf( path, "%s.reg", dmapGlobals.mapFileBase );
-		fileSystem->RemoveFile( path );
+		idStr regionPath = dmapGlobals.mapFileBase;
+		regionPath += ".reg";
+		fileSystem->RemoveFile( regionPath );
 	} else {
 		region = true;
 	}
@@ -319,8 +319,9 @@ void Dmap( const idCmdArgs &args ) {
 	passedName = stripped;
 
 	// delete any old line leak files
-	sprintf( path, "%s.lin", dmapGlobals.mapFileBase );
-	fileSystem->RemoveFile( path );
+	idStr leakPath = dmapGlobals.mapFileBase;
+	leakPath += ".lin";
+	fileSystem->RemoveFile( leakPath );
 
 
 	//
@@ -357,7 +358,9 @@ void Dmap( const idCmdArgs &args ) {
 			// create the collision map
 			start = Sys_Milliseconds();
 
-			collisionModelManager->LoadMap( dmapGlobals.dmapFile );
+			// A dmap compile must refresh collision data even when this map's
+			// previous .cm has already been cached by the running engine.
+			collisionModelManager->LoadMap( dmapGlobals.dmapFile, true );
 			collisionModelManager->FreeMap(NULL);
 
 			end = Sys_Milliseconds();
@@ -366,8 +369,18 @@ void Dmap( const idCmdArgs &args ) {
 		}
 
 		if ( !noAAS && !region ) {
-			// create AAS files
-			//RunAAS_f( args );
+			// rebuild the navigation meshes so AI matches the geometry that was
+			// just compiled into .proc/.cm
+			start = Sys_Milliseconds();
+
+			if ( !RunAASForMap( passedName, &args ) ) {
+				common->Warning( "AAS navigation for '%s' was not fully rebuilt; AI may not match the new geometry.",
+					passedName.c_str() );
+			}
+
+			end = Sys_Milliseconds();
+			common->Printf( "-------------------------------------\n" );
+			common->Printf( "%5.0f seconds to create AAS\n", ( end - start ) * 0.001f );
 		}
 	}
 
@@ -391,6 +404,9 @@ Dmap_f
 ============
 */
 void Dmap_f( const idCmdArgs &args ) {
+	// bind the offline shadow optimizer into the shared render-geometry
+	// library; only the SG_OFFLINE path (dmap shadow optimization) uses it
+	RenderGeo_SetShadowOptimizer( SuperOptimizeOccluders, CleanupOptimizedShadowTris );
 
 	common->ClearWarnings( "running dmap" );
 

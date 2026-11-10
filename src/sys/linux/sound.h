@@ -64,9 +64,9 @@ public:
 	bool		Initialize( void );
 
 	// Linux driver doesn't support memory map API
-	bool		Lock( void **pDSLockedBuffer, ulong *dwDSLockedBufferSize ) { return false; }
+	bool		Lock( void **pDSLockedBuffer, uint32_t *dwDSLockedBufferSize ) { return false; }
 	bool		Unlock( void *pDSLockedBuffer, dword dwDSLockedBufferSize ) { return false; }
-	bool		GetCurrentPosition( ulong *pdwCurrentWriteCursor ) { return false; }
+	bool		GetCurrentPosition( uint32_t *pdwCurrentWriteCursor ) { return false; }
 	
 	bool		Flush();
 	void		Write( bool flushing );
@@ -144,9 +144,9 @@ public:
 
 
 	// Linux driver doesn't support memory map API
-	bool				Lock( void **pDSLockedBuffer, ulong *dwDSLockedBufferSize ) { return false; }
+	bool				Lock( void **pDSLockedBuffer, uint32_t *dwDSLockedBufferSize ) { return false; }
 	bool				Unlock( void *pDSLockedBuffer, dword dwDSLockedBufferSize ) { return false; }
-	bool				GetCurrentPosition( ulong *pdwCurrentWriteCursor ) { return false; }
+	bool				GetCurrentPosition( uint32_t *pdwCurrentWriteCursor ) { return false; }
 	
 	bool				Flush();
 	void				Write( bool flushing );

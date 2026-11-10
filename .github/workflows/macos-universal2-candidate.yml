@@ -1,0 +1,630 @@
+name: DISABLED - inherited OpenQ4 reference (macOS Universal2 Release Candidate)
+
+on:
+  workflow_dispatch:
+    inputs:
+      graphics_bridge:
+        description: Graphics bridge package(s) to assemble
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - opengl
+          - metal
+      macos_signing_mode:
+        description: Candidate signing mode; Developer ID also notarizes and staples the DMG
+        required: true
+        default: ad-hoc
+        type: choice
+        options:
+          - ad-hoc
+          - developer-id
+
+concurrency:
+  group: openq4-macos-universal2-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    if: ${{ false }} # OPENPREY-GATED: split-module/OpenQ4 source contract
+    name: Resolve Universal2 Candidate Sources
+    runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      game_sha: ${{ steps.resolve.outputs.game_sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      version_tag: ${{ steps.resolve.outputs.version_tag }}
+      thin_matrix: ${{ steps.resolve.outputs.thin_matrix }}
+      bridge_matrix: ${{ steps.resolve.outputs.bridge_matrix }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Resolve clean source pair and candidate matrix
+        id: resolve
+        env:
+          OPENQ4_GRAPHICS_BRIDGE: ${{ inputs.graphics_bridge }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+            echo "Universal2 candidates require a clean openQ4 checkout."
+            exit 1
+          fi
+          source_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+
+          game_sha="${source_sha}"
+
+          version_info="$(python tools/build/openq4_version.py --source-root "${GITHUB_WORKSPACE}" --track stable)"
+          version="$(printf '%s\n' "${version_info}" | awk -F= '$1 == "base_version" { print $2; exit }')"
+          version_tag="$(printf '%s\n' "${version_info}" | awk -F= '$1 == "version_tag" { print $2; exit }')"
+          if [ -z "${version}" ] || [ -z "${version_tag}" ] || [[ "${version_tag}" == *dirty* ]]; then
+            echo "Universal2 candidate version metadata is invalid or dirty."
+            printf '%s\n' "${version_info}"
+            exit 1
+          fi
+
+          OPENQ4_SOURCE_SHA="${source_sha}" \
+          OPENQ4_GAME_SHA="${game_sha}" \
+          OPENQ4_GRAPHICS_BRIDGE="${OPENQ4_GRAPHICS_BRIDGE}" \
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          bridge_selector = os.environ["OPENQ4_GRAPHICS_BRIDGE"]
+          bridges_by_selector = {
+              "both": ("opengl", "metal"),
+              "opengl": ("opengl",),
+              "metal": ("metal",),
+          }
+          try:
+              bridges = bridges_by_selector[bridge_selector]
+          except KeyError as exc:
+              raise SystemExit(
+                  f"Unsupported macOS graphics bridge selector: {bridge_selector}"
+              ) from exc
+
+          source_sha = os.environ["OPENQ4_SOURCE_SHA"]
+          game_sha = os.environ["OPENQ4_GAME_SHA"]
+          if len(source_sha) != 40 or len(game_sha) != 40:
+              raise SystemExit("Universal2 candidate source revisions must be full commit SHAs")
+
+          thin_matrix = []
+          for bridge in bridges:
+              thin_matrix.extend(
+                  (
+                      {
+                          "runner": "macos-15",
+                          "binary_arch": "arm64",
+                          "bridge": bridge,
+                      },
+                      {
+                          "runner": "macos-15-intel",
+                          "binary_arch": "x64",
+                          "bridge": bridge,
+                      },
+                  )
+              )
+          print("thin_matrix=" + json.dumps({"include": thin_matrix}, separators=(",", ":")))
+          print(
+              "bridge_matrix="
+              + json.dumps(
+                  {"include": [{"bridge": bridge} for bridge in bridges]},
+                  separators=(",", ":"),
+              )
+          )
+          PY
+
+          echo "source_sha=${source_sha}" >> "$GITHUB_OUTPUT"
+          echo "game_sha=${game_sha}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "version_tag=${version_tag}" >> "$GITHUB_OUTPUT"
+
+  thin_build:
+    if: ${{ false }} # OPENPREY-GATED: split-module/OpenQ4 source contract
+    name: macOS ${{ matrix.binary_arch }} ${{ matrix.bridge }} Universal2 Thin Candidate
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.metadata.outputs.thin_matrix) }}
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+    steps:
+      - name: Checkout pinned openQ4 source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.metadata.outputs.source_sha }}
+
+      - name: Verify requested native architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_arch="arm64"
+          if [ "${{ matrix.binary_arch }}" = "x64" ]; then
+            expected_arch="x86_64"
+          fi
+          actual_arch="$(uname -m)"
+          if [ "${actual_arch}" != "${expected_arch}" ]; then
+            echo "Universal2 thin candidate requires ${expected_arch}, found ${actual_arch}."
+            exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson and Ninja
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja markdown
+
+      - name: Prepare pinned OpenAL Soft
+        shell: bash
+        run: |
+          set -euo pipefail
+          prepared_root="${GITHUB_WORKSPACE}/.tmp/openal-soft-macos-${{ matrix.binary_arch }}"
+          bash tools/build/prepare_macos_openal_soft.sh \
+            --architecture "${{ matrix.binary_arch }}" \
+            --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
+            --output-root "${prepared_root}" \
+            --stage-install-dir .install
+          echo "PKG_CONFIG_PATH=${prepared_root}/lib/pkgconfig" >> "${GITHUB_ENV}"
+
+      - name: Build and stage thin macOS runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          export OPENQ4_SKIP_GAMELIBS_SYNC=1
+          bash tools/build/meson_setup.sh \
+            setup \
+            --wipe \
+            builddir \
+            --backend ninja \
+            --buildtype=debugoptimized \
+            -Db_ndebug=true \
+            --wrap-mode=forcefallback \
+            -Dplatform_backend=sdl3 \
+            -Dmacos_graphics_bridge=${{ matrix.bridge }} \
+            -Dmacos_openal_provider=system \
+            -Dversion_track=stable \
+            -Dversion_base_override=${{ needs.metadata.outputs.version }}
+          bash tools/build/meson_setup.sh compile -C builddir
+          bash tools/build/meson_setup.sh install -C builddir --no-rebuild --skip-subprojects
+
+      - name: Verify thin source provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/build/verify_release_source_provenance.py \
+            --project-root "${GITHUB_WORKSPACE}" \
+            --expected-project-commit "${{ needs.metadata.outputs.source_sha }}" \
+            --build-dir builddir
+
+      - name: Normalize thin universal2 payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/build/assemble_macos_universal2.py prepare \
+            --install-root .install \
+            --arch "${{ matrix.binary_arch }}"
+
+      - name: Run thin dedicated-server smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/tests/macos_dedicated_server_smoke.py \
+            --arch "${{ matrix.binary_arch }}" \
+            --output-root ".tmp/macos-universal2-candidate/${{ matrix.bridge }}/${{ matrix.binary_arch }}/dedicated-smoke"
+
+      - name: Stage pinned MoltenVK for thin payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/prepare_macos_moltenvk.sh --output-dir .install
+          bash tools/build/prepare_macos_moltenvk.sh --verify-only --output-dir .install
+
+      - name: Record thin universal2 provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/build/assemble_macos_universal2.py record \
+            --install-root .install \
+            --source-manifest builddir/openq4_game_sources.json \
+            --arch "${{ matrix.binary_arch }}" \
+            --graphics-bridge "${{ matrix.bridge }}" \
+            --openal-provider system \
+            --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
+            --build-type debugoptimized
+
+      - name: Archive thin universal2 candidate payload with modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload_root=".tmp/macos-universal2-candidate/${{ matrix.bridge }}/${{ matrix.binary_arch }}"
+          payload_archive="${payload_root}/thin-payload.tar.gz"
+          mkdir -p "${payload_root}"
+          rm -f "${payload_archive}"
+          tar -C .install -czf "${payload_archive}" .
+          tar -tzf "${payload_archive}" >/dev/null
+
+      - name: Upload thin universal2 candidate payload
+        uses: actions/upload-artifact@v7
+        with:
+          name: openq4-macos-universal2-thin-${{ needs.metadata.outputs.source_sha }}-${{ matrix.bridge }}-${{ matrix.binary_arch }}
+          path: .tmp/macos-universal2-candidate/${{ matrix.bridge }}/${{ matrix.binary_arch }}/thin-payload.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+          include-hidden-files: true
+
+  assemble:
+    name: macOS universal2 ${{ matrix.bridge }} Release Candidate
+    needs: [metadata, thin_build]
+    if: ${{ false && needs.thin_build.result == 'success' }} # OPENPREY-GATED
+    runs-on: macos-15
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.metadata.outputs.bridge_matrix) }}
+
+    steps:
+      - name: Checkout pinned openQ4 source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.metadata.outputs.source_sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Install release documentation dependency
+        run: python -m pip install markdown
+
+      - name: Download ARM64 thin payload
+        uses: actions/download-artifact@v8
+        with:
+          name: openq4-macos-universal2-thin-${{ needs.metadata.outputs.source_sha }}-${{ matrix.bridge }}-arm64
+          path: .tmp/macos-universal2-candidate/${{ matrix.bridge }}/arm64
+
+      - name: Download Intel thin payload
+        uses: actions/download-artifact@v8
+        with:
+          name: openq4-macos-universal2-thin-${{ needs.metadata.outputs.source_sha }}-${{ matrix.bridge }}-x64
+          path: .tmp/macos-universal2-candidate/${{ matrix.bridge }}/x64
+
+      - name: Restore mode-preserving thin payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          corridor_root=".tmp/macos-universal2-candidate/${{ matrix.bridge }}"
+          for arch in arm64 x64; do
+            payload_archive="${corridor_root}/${arch}/thin-payload.tar.gz"
+            if [ -L "${payload_archive}" ] || [ ! -f "${payload_archive}" ]; then
+              echo "Missing regular thin payload archive: ${payload_archive}"
+              exit 1
+            fi
+            tar -tzf "${payload_archive}" >/dev/null
+            tar -xzf "${payload_archive}" -C "${corridor_root}/${arch}"
+            rm -f "${payload_archive}"
+          done
+
+      - name: Assemble exact universal2 staging tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          corridor_root=".tmp/macos-universal2-candidate/${{ matrix.bridge }}"
+          mkdir -p "${corridor_root}/package-output"
+          python tools/build/assemble_macos_universal2.py assemble \
+            --arm64-root "${corridor_root}/arm64" \
+            --x64-root "${corridor_root}/x64" \
+            --output-root "${corridor_root}/universal2" \
+            --assembly-manifest "${corridor_root}/assembly-manifest.json"
+
+      - name: Run universal2 dedicated-server smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          corridor_root=".tmp/macos-universal2-candidate/${{ matrix.bridge }}"
+          python tools/tests/macos_dedicated_server_smoke.py \
+            --install-root "${corridor_root}/universal2" \
+            --arch universal2 \
+            --output-root "${corridor_root}/dedicated-smoke"
+
+      - name: Import macOS Developer ID certificate
+        if: inputs.macos_signing_mode == 'developer-id'
+        id: macos_signing
+        env:
+          MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64 }}
+          MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          MACOS_DEVELOPER_ID_APPLICATION_IDENTITY: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_IDENTITY }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_APP_PASSWORD: ${{ secrets.MACOS_NOTARY_APP_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          required_vars=(
+            MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64
+            MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD
+            MACOS_DEVELOPER_ID_APPLICATION_IDENTITY
+            MACOS_NOTARY_APPLE_ID
+            MACOS_NOTARY_TEAM_ID
+            MACOS_NOTARY_APP_PASSWORD
+          )
+          for var_name in "${required_vars[@]}"; do
+            if [ -z "${!var_name}" ]; then
+              echo "${var_name} must be configured for a Developer ID universal2 candidate."
+              exit 1
+            fi
+          done
+          keychain_path="${RUNNER_TEMP}/openq4-universal2-candidate.keychain-db"
+          certificate_path="${RUNNER_TEMP}/openq4-universal2-developer-id.p12"
+          keychain_password="$(openssl rand -hex 24)"
+          notary_profile="openq4-universal2-notary"
+          printf '%s' "${MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64}" | base64 -D > "${certificate_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security import "${certificate_path}" -k "${keychain_path}" -P "${MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+          existing_keychains=()
+          while IFS= read -r keychain_line; do
+            if [ -n "${keychain_line}" ]; then
+              existing_keychains+=("${keychain_line}")
+            fi
+          done < <(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//')
+          security list-keychains -d user -s "${keychain_path}" "${existing_keychains[@]}"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${keychain_password}" "${keychain_path}"
+          xcrun notarytool store-credentials "${notary_profile}" \
+            --apple-id "${MACOS_NOTARY_APPLE_ID}" \
+            --team-id "${MACOS_NOTARY_TEAM_ID}" \
+            --password "${MACOS_NOTARY_APP_PASSWORD}" \
+            --keychain "${keychain_path}"
+          security find-identity -v -p codesigning "${keychain_path}" | grep -F "${MACOS_DEVELOPER_ID_APPLICATION_IDENTITY}" >/dev/null
+          echo "identity=${MACOS_DEVELOPER_ID_APPLICATION_IDENTITY}" >> "$GITHUB_OUTPUT"
+          echo "keychain_path=${keychain_path}" >> "$GITHUB_OUTPUT"
+          echo "notary_profile=${notary_profile}" >> "$GITHUB_OUTPUT"
+
+      - name: Package universal2 release candidate
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          corridor_root=".tmp/macos-universal2-candidate/${{ matrix.bridge }}"
+          package_suffix="-${{ matrix.bridge }}-candidate"
+          archive_format="tar.gz"
+          archive_ext=".tar.gz"
+          package_args=(
+            --platform macos
+            --arch universal2
+            --version "${{ needs.metadata.outputs.version }}"
+            --version-tag "${{ needs.metadata.outputs.version_tag }}"
+            "--package-suffix=${package_suffix}"
+            --archive-format "${archive_format}"
+            --source-root "${GITHUB_WORKSPACE}"
+            --install-dir "${corridor_root}/universal2"
+            --output-dir "${corridor_root}/package-output"
+          )
+          if [ "${{ inputs.macos_signing_mode }}" = "developer-id" ]; then
+            archive_format="dmg"
+            archive_ext=".dmg"
+            package_args=(
+              --platform macos
+              --arch universal2
+              --version "${{ needs.metadata.outputs.version }}"
+              --version-tag "${{ needs.metadata.outputs.version_tag }}"
+              "--package-suffix=${package_suffix}"
+              --archive-format "${archive_format}"
+              --source-root "${GITHUB_WORKSPACE}"
+              --install-dir "${corridor_root}/universal2"
+              --output-dir "${corridor_root}/package-output"
+              --macos-signing-mode developer-id
+              --macos-code-sign-identity "${{ steps.macos_signing.outputs.identity }}"
+              --macos-notarize
+              --macos-notary-keychain-profile "${{ steps.macos_signing.outputs.notary_profile }}"
+              --macos-notary-keychain "${{ steps.macos_signing.outputs.keychain_path }}"
+            )
+          else
+            package_args+=(--macos-signing-mode ad-hoc)
+          fi
+          python tools/build/package_release.py "${package_args[@]}"
+          package_name="openq4-${{ needs.metadata.outputs.version_tag }}-macos-universal2${package_suffix}"
+          archive_path="${corridor_root}/package-output/${package_name}${archive_ext}"
+          package_dir="${corridor_root}/package-output/${package_name}"
+          symbols_archive_path="${corridor_root}/package-output/${package_name}-symbols.tar.xz"
+          for required in "${archive_path}" "${symbols_archive_path}"; do
+            if [ -L "${required}" ] || [ ! -f "${required}" ]; then
+              echo "Missing universal2 candidate archive: ${required}"
+              exit 1
+            fi
+          done
+          if [ -L "${package_dir}" ] || [ ! -d "${package_dir}" ]; then
+            echo "Missing universal2 candidate package directory: ${package_dir}"
+            exit 1
+          fi
+          echo "archive_path=${archive_path}" >> "$GITHUB_OUTPUT"
+          echo "package_dir=${package_dir}" >> "$GITHUB_OUTPUT"
+          echo "symbols_archive_path=${symbols_archive_path}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate universal2 package signatures and Mach-O slices
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="${{ steps.package.outputs.package_dir }}"
+          app_root="${package_dir}/openQ4.app"
+          app_exec="${app_root}/Contents/MacOS/openQ4"
+          module_dir="${app_root}/Contents/Frameworks"
+          binaries=(
+            "${app_exec}"
+            "${package_dir}/openQ4-client_universal2"
+            "${package_dir}/openQ4-ded_universal2"
+            "${module_dir}/game-sp_universal2.dylib"
+            "${module_dir}/game-mp_universal2.dylib"
+          )
+          for binary in "${binaries[@]}"; do
+            if [ ! -f "${binary}" ]; then
+              echo "Missing universal2 candidate binary: ${binary}"
+              exit 1
+            fi
+            actual_arches="$(lipo -archs "${binary}" | tr ' ' '\n' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+            if [ "${actual_arches}" != "arm64 x86_64" ]; then
+              echo "Expected exact arm64 x86_64 slices, found ${actual_arches:-<none>}: ${binary}"
+              exit 1
+            fi
+            codesign --verify --strict --verbose=2 "${binary}"
+          done
+          codesign --verify --deep --strict --verbose=2 "${app_root}"
+          for module in game-sp game-mp; do
+            for macho_arch in arm64 x86_64; do
+              actual_id="$(otool -arch "${macho_arch}" -D "${module_dir}/${module}_universal2.dylib" | sed -n '2p' | tr -d '[:space:]')"
+              expected_id="@loader_path/${module}_universal2.dylib"
+              if [ "${actual_id}" != "${expected_id}" ]; then
+                echo "Universal2 ${module} install name mismatch for ${macho_arch}: ${actual_id:-<empty>}"
+                exit 1
+              fi
+            done
+          done
+          if [ "${{ inputs.macos_signing_mode }}" = "developer-id" ]; then
+            for target in "${app_root}" "${binaries[@]}"; do
+              details="$(codesign -dv --verbose=4 "${target}" 2>&1)"
+              grep -F "Authority=Developer ID Application:" <<< "${details}" >/dev/null
+              grep -F "Runtime Version=" <<< "${details}" >/dev/null
+              if grep -Fq "Signature=adhoc" <<< "${details}"; then
+                echo "Developer ID universal2 candidate is still ad-hoc signed: ${target}"
+                exit 1
+              fi
+            done
+            xcrun stapler validate "${app_root}"
+            spctl --assess --type execute --verbose=4 "${app_root}"
+            hdiutil imageinfo "${{ steps.package.outputs.archive_path }}"
+            xcrun stapler validate "${{ steps.package.outputs.archive_path }}"
+          else
+            for target in "${app_root}" "${binaries[@]}"; do
+              codesign -dv --verbose=4 "${target}" 2>&1 | grep -F "Signature=adhoc" >/dev/null
+            done
+          fi
+
+      - name: Smoke universal2 app runtime from a Finder-style directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="${GITHUB_WORKSPACE}/${{ steps.package.outputs.package_dir }}"
+          app_exec="${package_dir}/openQ4.app/Contents/MacOS/openQ4"
+          smoke_root="${RUNNER_TEMP}/openq4-universal2-candidate-${{ matrix.bridge }}"
+          smoke_cwd="${smoke_root}/finder-style-cwd"
+          smoke_save="${smoke_root}/save"
+          smoke_log="${smoke_save}/baseoq4/logs/macos_universal2_candidate_app_smoke.log"
+          smoke_console="${smoke_root}/console.log"
+          smoke_timeout_marker="${smoke_root}/timed-out"
+          smoke_exit_status="${smoke_root}/app-exit-status"
+          rm -rf "${smoke_root}"
+          mkdir -p "${smoke_cwd}" "${smoke_save}"
+          (
+            cd "${smoke_cwd}"
+            "${app_exec}" \
+              +set logFile 2 \
+              +set logFileName logs/macos_universal2_candidate_app_smoke.log \
+              +set fs_savepath "${smoke_save}" \
+              +set fs_game baseoq4 \
+              +set fs_validateOfficialPaks 0 \
+              +set g_allowAssetlessStartup 1 \
+              +set r_fullscreen 0 \
+              +set r_ignoreGLErrors 0 \
+              +rendererDefaultSafetySelfTest \
+              +quit > "${smoke_console}" 2>&1 &
+            app_pid=$!
+            (
+              sleep 90
+              if kill -0 "${app_pid}" 2>/dev/null; then
+                echo "Universal2 app smoke timed out after 90 seconds" >&2
+                touch "${smoke_timeout_marker}"
+                kill -TERM "${app_pid}" 2>/dev/null || true
+                sleep 5
+                kill -KILL "${app_pid}" 2>/dev/null || true
+              fi
+            ) &
+            watchdog_pid=$!
+            set +e
+            wait "${app_pid}"
+            app_status=$?
+            set -e
+            kill "${watchdog_pid}" 2>/dev/null || true
+            wait "${watchdog_pid}" 2>/dev/null || true
+            if [ -f "${smoke_timeout_marker}" ]; then
+              exit 124
+            fi
+            printf '%s\n' "${app_status}" > "${smoke_exit_status}"
+          )
+          if [ ! -f "${smoke_log}" ]; then
+            echo "Universal2 app smoke log was not created: ${smoke_log}"
+            exit 1
+          fi
+          if [ ! -f "${smoke_exit_status}" ]; then
+            echo "Universal2 app smoke did not record the application exit status."
+            exit 1
+          fi
+          if [ ! -f "${smoke_console}" ]; then
+            echo "Universal2 app smoke console output was not created: ${smoke_console}"
+            exit 1
+          fi
+          app_status="$(tr -d '[:space:]' < "${smoke_exit_status}")"
+          if ! [[ "${app_status}" =~ ^[0-9]+$ ]] || [ "${app_status}" -gt 127 ]; then
+            echo "Universal2 app smoke ended abnormally with status '${app_status}'."
+            exit 1
+          fi
+          require_smoke_output() {
+            local expected="$1"
+            if ! grep -Fq "${expected}" "${smoke_console}"; then
+              echo "Universal2 app smoke console output is missing: ${expected}"
+              tail -n 160 "${smoke_console}" || true
+              exit 1
+            fi
+          }
+          require_smoke_output "RendererDefaultSafety self-test passed"
+          require_smoke_output "Filesystem paths:"
+          require_smoke_output "fs_cdpath='${package_dir}/openQ4.app/Contents/Resources'"
+          require_smoke_output "Selected game module: logical='game_sp' binary='game-sp_universal2'"
+          if grep -Eiq '(^|[[:space:]])(FATAL|Sys_Error):' "${smoke_console}" "${smoke_log}"; then
+            echo "Universal2 app smoke output contains a fatal startup diagnostic."
+            exit 1
+          fi
+          if [ "${app_status}" -ne 0 ]; then
+            echo "Universal2 app smoke completed its startup and shutdown checks with SDL launcher status ${app_status}."
+          fi
+
+
+      - name: Upload universal2 candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: openq4-macos-universal2-candidate-${{ needs.metadata.outputs.version_tag }}-${{ needs.metadata.outputs.source_sha }}-${{ matrix.bridge }}
+          path: |
+            ${{ steps.package.outputs.archive_path }}
+            ${{ steps.package.outputs.symbols_archive_path }}
+            .tmp/macos-universal2-candidate/${{ matrix.bridge }}/assembly-manifest.json
+            .tmp/macos-universal2-candidate/${{ matrix.bridge }}/dedicated-smoke
+            ${{ runner.temp }}/openq4-universal2-candidate-${{ matrix.bridge }}
+          if-no-files-found: warn
+          retention-days: 90
+          include-hidden-files: true

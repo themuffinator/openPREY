@@ -57,11 +57,9 @@ public:
 
 								// handles a named event
 	virtual void				HandleNamedEvent( const char *eventName ) = 0;
-	virtual const char *		Translate( const char *string ) { return string; }
-	virtual void				CallStartup( void ) = 0;
 
 								// repaints the ui
-	virtual void				Redraw( int time ) = 0;
+	virtual void				Redraw( int time, bool useAspectCorrection = true ) = 0;
 
 								// repaints the cursor
 	virtual void				DrawCursor( void ) = 0;
@@ -92,9 +90,17 @@ public:
 //	virtual idVec3				GetStateVector( const char *varName, const char* defaultString = "0 0 0" ) const = 0;
 //	virtual idVec4				GetStateVec4( const char *varName, const char* defaultString = "0 0 0 0" ) const = 0;
 
-// jscott: added
-	virtual class idWindow *	GetDesktop( void ) const = 0;
-// RAVEN END
+	// Presentation values are distinct from the application State() dictionary.
+	// Names are document-owned aliases (legacy: root variable or element::variable).
+	// Queries copy the value without changing expression ownership. Failure leaves
+	// the output untouched. Missing names never create variables or elements.
+	virtual bool                GetPresentationValue( const char *name, idStr &value ) const = 0;
+	// Explicit overrides stop the expression driving this value. A transient write
+	// keeps its existing expression; StateChanged/Redraw remain the caller's choice.
+	virtual bool                SetPresentationValue( const char *name, const char *value, bool overrideExpression = true ) = 0;
+	// Focused editable field/caret in the GUI's cursor coordinate space. False means
+	// there is no editable focus; outputs remain unchanged. No window pointer escapes.
+	virtual bool                GetTextInputState( class idRectangle &area, float &cursorOffset ) const = 0;
 
 								// The state has changed and the gui needs to update from the state idDict.
 	virtual void				StateChanged( int time, bool redraw = false ) = 0;
@@ -104,6 +110,8 @@ public:
 
 								// Triggers the gui and runs the onTrigger scripts.
 	virtual void				Trigger( int time ) = 0;
+	virtual void				CallStartup() {}
+	virtual const char*			Translate( const char* text ) { return text != NULL ? text : ""; }
 
 //	virtual	void				ReadFromDemo( class idDemoFile *f ) = 0;
 //	virtual	void				WriteToDemo( class idDemoFile *f ) = 0;
@@ -115,9 +123,28 @@ public:
 	virtual void				SetCursor( float x, float y ) = 0;
 	virtual float				CursorX( void ) = 0;
 	virtual float				CursorY( void ) = 0;
+	virtual bool				GetMaxTextIndex( const char *windowName, const char *text, wrapInfo_t& wrapInfo ) const = 0;
 
+	// Restores a save written with an earlier definition of this GUI. A private
+	// parse of layoutPath consumes the saved window tree; the state dictionary,
+	// interaction flags, cursor, and every window value the save changed from that
+	// definition, together with whether it still follows its expression, move to
+	// this GUI where a same-named window and variable exist.
+	// Appended last so the vtable slots above stay where earlier modules expect.
+	virtual bool				ReadFromSaveGameWithLayout( idFile *savefile, const char *layoutPath, int &restoredWindowValues ) { restoredWindowValues = 0; return false; }
 };
 
+
+// Evaluated game-owned HUD geometry, in the same 640x480 submission space as
+// DrawStretchPic. The UI renderer owns presentation, never gameplay or input.
+class idMaterial;
+struct uiHudPrimitive_t {
+	idVec2 points[4];
+	idVec4 uv;
+	idVec4 color;
+	const idMaterial* material;
+	bool glyph;
+};
 
 class idUserInterfaceManager {
 public:
@@ -133,6 +160,7 @@ public:
 
 	virtual void				BeginLevelLoad( void ) = 0;
 	virtual void				EndLevelLoad( void ) = 0;
+	virtual bool DrawHudPrimitives( const char* source, const idList<uiHudPrimitive_t>& items ) { return false; }
 
 
 								// Reloads changed guis, or all guis.
@@ -170,15 +198,15 @@ public:
 	
 // RAVEN BEGIN
 // rjohnson: added option for guis to always think
-//	virtual void				RunAlwaysThinkGUIs ( int time ) = 0;
+	virtual void				RunAlwaysThinkGUIs ( int time ) = 0;
 //// bdube: embedded icons
 	virtual void				RegisterIcon ( const char* code, const char* shader, int x = -1, int y = -1, int w = -1, int h = -1 ) { }
 // RAVEN END
+	// Shape localized game-owned HUD text with the UI's current language/font
+	// policy. Returned quads are local to the supplied box, centered in white.
+	virtual void BuildHudText( const char* text, float scale, float width, float height,
+		idList<uiHudPrimitive_t>& output ) { output.Clear(); }
 };
-
-// World-surface GUI redraws should bypass 2D screen aspect correction.
-void UI_SetInWorldGuiRendering( bool enabled );
-bool UI_IsInWorldGuiRendering( void );
 
 extern idUserInterfaceManager *	uiManager;
 

@@ -1425,8 +1425,8 @@ WriteFileString
 ================
 */
 bool WriteFileString( FILE *fp, char *string, ... ) {
-	long i;
-	unsigned long u;
+	int i;
+	unsigned int u;
 	double f;
 	char *str;
 	idStr buf;
@@ -1456,27 +1456,27 @@ bool WriteFileString( FILE *fp, char *string, ... ) {
 						break;
 					case 'd':
 					case 'i':
-						i = va_arg( argPtr, long );
+						i = va_arg( argPtr, int );
 						fprintf( fp, "%d", i );
 						break;
 					case 'u':
-						u = va_arg( argPtr, unsigned long );
+						u = va_arg( argPtr, unsigned int );
 						fprintf( fp, "%u", u );
 						break;
 					case 'o':
-						u = va_arg( argPtr, unsigned long );
+						u = va_arg( argPtr, unsigned int );
 						fprintf( fp, "%o", u );
 						break;
 					case 'x':
-						u = va_arg( argPtr, unsigned long );
+						u = va_arg( argPtr, unsigned int );
 						fprintf( fp, "%x", u );
 						break;
 					case 'X':
-						u = va_arg( argPtr, unsigned long );
+						u = va_arg( argPtr, unsigned int );
 						fprintf( fp, "%X", u );
 						break;
 					case 'c':
-						i = va_arg( argPtr, long );
+						i = va_arg( argPtr, int );
 						fprintf( fp, "%c", (char) i );
 						break;
 					case 's':
@@ -1525,8 +1525,8 @@ MemFile_fprintf
 */
 void MemFile_fprintf( CMemFile *pMemFile, const char *string, ... ) {
 	char	Buffer[4096];
-	long i;
-	unsigned long u;
+	int i;
+	unsigned int u;
 	double f;
 	char *str;
 	idStr buf, out;
@@ -1558,27 +1558,27 @@ void MemFile_fprintf( CMemFile *pMemFile, const char *string, ... ) {
 						break;
 					case 'd':
 					case 'i':
-						i = va_arg( argPtr, long );
+						i = va_arg( argPtr, int );
 						sprintf( buff, "%d", i );
 						break;
 					case 'u':
-						u = va_arg( argPtr, unsigned long );
+						u = va_arg( argPtr, unsigned int );
 						sprintf( buff, "%u", u );
 						break;
 					case 'o':
-						u = va_arg( argPtr, unsigned long );
+						u = va_arg( argPtr, unsigned int );
 						sprintf( buff, "%o", u );
 						break;
 					case 'x':
-						u = va_arg( argPtr, unsigned long );
+						u = va_arg( argPtr, unsigned int );
 						sprintf( buff, "%x", u );
 						break;
 					case 'X':
-						u = va_arg( argPtr, unsigned long );
+						u = va_arg( argPtr, unsigned int );
 						sprintf( buff, "%X", u );
 						break;
 					case 'c':
-						i = va_arg( argPtr, long );
+						i = va_arg( argPtr, int );
 						sprintf( buff, "%c", (char) i );
 						break;
 					case 's':

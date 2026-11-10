@@ -1,0 +1,157 @@
+name: DISABLED - inherited OpenQ4 reference (Linux ARM64 Cross Build)
+
+on:
+  workflow_dispatch:
+concurrency:
+  group: linux-arm64-cross-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cross-build:
+    if: ${{ false }} # OPENPREY-GATED: split-module/OpenQ4 source contract
+    name: Linux ARM64 Cross Build (x64 host)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
+      PKG_CONFIG_ALLOW_CROSS: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson and Ninja
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Enable Ubuntu ARM64 multiarch packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(dpkg --print-architecture)" = "amd64"
+          sudo dpkg --add-architecture arm64
+
+          ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+          test -f "${ubuntu_sources}"
+          sudo sed -i '/^Architectures:/d; /^Signed-By:/a Architectures: amd64' "${ubuntu_sources}"
+          sudo tee /etc/apt/sources.list.d/ubuntu-arm64.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-backports
+          Components: main universe restricted multiverse
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble-security
+          Components: main universe restricted multiverse
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+
+          mapfile -t packages < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' tools/cross/ubuntu-linux-arm64-packages.txt)
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+
+      - name: Check cross-build contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/tests/linux_arm64_cross_compile.py
+
+      - name: Configure Linux ARM64 Wayland build
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh setup --wipe builddir-arm64-cross . \
+            --backend ninja \
+            --buildtype=debugoptimized \
+            --wrap-mode=forcefallback \
+            --cross-file tools/cross/linux-arm64.ini \
+            -Dplatform_backend=sdl3 \
+            -Dlinux_x11=disabled \
+            -Duse_pch=false
+
+      - name: Compile Linux ARM64 engine and game modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh compile -C builddir-arm64-cross
+
+      - name: Verify ARM64 ELF outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifacts=(
+            builddir-arm64-cross/openQ4-client_arm64
+            builddir-arm64-cross/openQ4-ded_arm64
+            builddir-arm64-cross/baseoq4/game-sp_arm64.so
+            builddir-arm64-cross/baseoq4/game-mp_arm64.so
+          )
+
+          for artifact in "${artifacts[@]}"; do
+            test -f "${artifact}"
+            file "${artifact}"
+            readelf -h "${artifact}" | grep -Eq 'Class:[[:space:]]+ELF64'
+            readelf -h "${artifact}" | grep -Eq 'Machine:[[:space:]]+AArch64'
+            if readelf -W -d "${artifact}" | grep -Eq 'libX11|libXext|libGLX'; then
+              echo "Wayland-only ARM64 artifact unexpectedly depends on X11/GLX: ${artifact}" >&2
+              exit 1
+            fi
+          done
+
+          for module in "${artifacts[@]:2}"; do
+            readelf --wide --dyn-syms "${module}" | awk '
+              $7 != "UND" &&
+              ($5 == "GLOBAL" || $5 == "WEAK" || $5 == "UNIQUE") &&
+              ($6 == "DEFAULT" || $6 == "PROTECTED") {
+                count++
+                if ($4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" && $8 == "GetGameAPI") {
+                  api++
+                } else if ($4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" && $8 == "openQ4_Mem_GetModuleStats") {
+                  stats++
+                } else {
+                  unexpected++
+                  print "Unexpected public game-module symbol: " $0 > "/dev/stderr"
+                }
+              }
+              END {
+                if (count != 2 || api != 1 || stats != 1 || unexpected != 0) {
+                  print "Expected only GLOBAL DEFAULT FUNC GetGameAPI and openQ4_Mem_GetModuleStats exports" > "/dev/stderr"
+                  exit 1
+                }
+              }
+            '
+          done
+
+          if cmp -s "${artifacts[2]}" "${artifacts[3]}"; then
+            echo "SP and MP game modules are byte-identical; src/mpgame was not compiled." >&2
+            exit 1
+          fi
+
+      - name: Stage and validate Linux ARM64 package
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh install -C builddir-arm64-cross --no-rebuild --skip-subprojects
+          python tools/validation/openq4_validate.py push \
+            --source-root . \
+            --build-dir builddir-arm64-cross \
+            --game-libs-repo "${OPENQ4_GAMELIBS_REPO}" \
+            --skip-python-tests \
+            --skip-build \
+            --install

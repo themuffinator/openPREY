@@ -127,6 +127,8 @@ idRenderWorldLocal::idRenderWorldLocal
 idRenderWorldLocal::idRenderWorldLocal() {
 	mapName.Clear();
 	mapTimeStamp = FILE_NOT_FOUND_TIMESTAMP;
+	worldFromGeneratedCache = false;
+	mapFileCRC = 0u;
 
 	generateAllInteractionsCalled = false;
 
@@ -136,12 +138,18 @@ idRenderWorldLocal::idRenderWorldLocal() {
 	portalAreas = NULL;
 	numPortalAreas = 0;
 
+	lightGridAvailabilityFrame = -1;
+	anyLightGridAvailable = false;
+	lightGridPackFile = NULL;
+
 	doublePortals = NULL;
 	numInterAreaPortals = 0;
+	md5rProcData = NULL;
 
 	interactionTable = 0;
 	interactionTableWidth = 0;
 	interactionTableHeight = 0;
+	pendingDemoTimeOffset = false;
 }
 
 /*
@@ -150,6 +158,7 @@ idRenderWorldLocal::~idRenderWorldLocal
 ===================
 */
 idRenderWorldLocal::~idRenderWorldLocal() {
+	R_RenderThread_Sync( "world" );
 	// free all the entityDefs, lightDefs, portals, etc
 	FreeWorld();
 
@@ -157,6 +166,140 @@ idRenderWorldLocal::~idRenderWorldLocal() {
 	RB_ClearDebugPolygons( 0 );
 	RB_ClearDebugLines( 0 );
 	RB_ClearDebugText( 0 );
+}
+
+/*
+===================
+idRenderWorldLocal::FreeDeferredLightDefs
+===================
+*/
+void idRenderWorldLocal::FreeDeferredLightDefs() {
+	for ( int i = 0; i < deferredFreeLightDefs.Num(); i++ ) {
+		idRenderLightLocal *light = deferredFreeLightDefs[i];
+		if ( light == NULL ) {
+			continue;
+		}
+		R_FreeLightDefDerivedData( light );
+		delete light;
+	}
+	deferredFreeLightDefs.Clear();
+
+	for ( int i = 0; i < deferredFreeEntityDefs.Num(); i++ ) {
+		delete deferredFreeEntityDefs[i];
+	}
+	deferredFreeEntityDefs.Clear();
+
+	for ( int i = 0; i < pendingModelDeletes.Num(); i++ ) {
+		delete pendingModelDeletes[i];
+	}
+	pendingModelDeletes.Clear();
+}
+
+/*
+===================
+idRenderWorldLocal::QueueDefOp
+
+Returns NULL when no frame is in flight on the render thread, and the caller
+applies its change immediately.
+===================
+*/
+idRenderWorldLocal::pendingDefOp_t *idRenderWorldLocal::QueueDefOp( pendingDefOpType_t type, qhandle_t handle ) {
+	if ( !R_RenderThread_InFlight() || R_RenderThread_OnRenderThread() || R_RenderThread_FrontEndMayOverlap() ) {
+		return NULL;
+	}
+	pendingDefOp_t &op = pendingDefOps.Alloc();
+	op.type = type;
+	op.handle = handle;
+	op.winding = NULL;
+	return &op;
+}
+
+/*
+===================
+idRenderWorldLocal::FindPendingDefOp
+
+The latest queued update or free of a def, so the game reads back what it
+last wrote.
+===================
+*/
+const idRenderWorldLocal::pendingDefOp_t *idRenderWorldLocal::FindPendingDefOp( qhandle_t handle, bool light ) const {
+	for ( int i = pendingDefOps.Num() - 1; i >= 0; i-- ) {
+		const pendingDefOp_t &op = pendingDefOps[i];
+		if ( op.handle != handle ) {
+			continue;
+		}
+		if ( light ? ( op.type == PENDING_UPDATE_LIGHT || op.type == PENDING_FREE_LIGHT )
+				: ( op.type == PENDING_UPDATE_ENTITY || op.type == PENDING_FREE_ENTITY ) ) {
+			return &op;
+		}
+	}
+	return NULL;
+}
+
+/*
+===================
+idRenderWorldLocal::ApplyPendingDefOps
+
+Main thread, from R_RenderThread_Sync once the frame on the render thread has
+finished. Nothing is in flight, so each call takes its immediate path.
+===================
+*/
+void idRenderWorldLocal::ApplyPendingDefOps( void ) {
+	for ( int i = 0; i < pendingDefOps.Num(); i++ ) {
+		// nothing is in flight, so an applied call queues nothing more
+		pendingDefOp_t &op = pendingDefOps[i];
+		switch ( op.type ) {
+			case PENDING_UPDATE_ENTITY:
+				UpdateEntityDef( op.handle, &op.entity );
+				break;
+			case PENDING_FREE_ENTITY:
+				FreeEntityDef( op.handle );
+				break;
+			case PENDING_UPDATE_LIGHT:
+				UpdateLightDef( op.handle, &op.light );
+				break;
+			case PENDING_FREE_LIGHT:
+				FreeLightDef( op.handle );
+				break;
+			case PENDING_DECAL_ONTO_WORLD:
+				ProjectDecalOntoWorld( *op.winding, op.projectionOrigin, op.parallel, op.fadeDepth, op.material, op.startTime );
+				break;
+			case PENDING_DECAL:
+				ProjectDecal( op.handle, *op.winding, op.projectionOrigin, op.parallel, op.fadeDepth, op.material, op.startTime );
+				break;
+			case PENDING_OVERLAY:
+				ProjectOverlay( op.handle, op.localTextureAxis, op.material );
+				break;
+			case PENDING_REMOVE_DECALS:
+				RemoveDecals( op.handle );
+				break;
+		}
+		delete op.winding;
+		op.winding = NULL;
+	}
+	// keep the storage; the next tic queues about as many
+	pendingDefOps.SetNum( 0, false );
+}
+
+/*
+===================
+idRenderWorldLocal::DeleteEffectModel
+
+Effect snapshots are rebuilt every view and freed as effects end, often
+during the game tic. Their surfaces are draw surfaces of the frame in
+flight, and deleting them reaches the vertex cache, so a frame on the render
+thread defers the delete to R_ToggleSmpFrame.
+===================
+*/
+void idRenderWorldLocal::DeleteEffectModel( idRenderModel *model ) {
+	if ( model == NULL ) {
+		return;
+	}
+	if ( R_RenderThread_InFlight() && !R_RenderThread_OnRenderThread() ) {
+		pendingModelDeletes.Append( model );
+		return;
+	}
+	delete model;
 }
 
 /*
@@ -182,33 +325,10 @@ qhandle_t idRenderWorldLocal::AddEffectDef(const renderEffect_t* reffect, int ti
 	if (effectHandle == -1) {
 		effectHandle = effectsDef.Append(NULL);
 	}
-
-	if (effectsDef[effectHandle] == NULL) {
-		effectsDef[effectHandle] = new rvRenderEffectLocal();
+	if ( UpdateEffectDef( effectHandle, reffect, time ) ) {
+		FreeEffectDef( effectHandle );
+		return -1;
 	}
-
-	rvRenderEffectLocal* def = effectsDef[effectHandle];
-	def->parms = *reffect;
-	def->gameTime = time;
-	def->serviceTime = time - 1;
-	def->newEffect = true;
-	def->expired = false;
-	def->effect = NULL;
-	def->index = effectHandle;
-	def->world = this;
-	def->dynamicModel = NULL;
-	def->dynamicModelFrameCount = 0;
-	def->referenceBounds.Clear();
-
-	// Use game-time seconds for effect simulation start to keep segment timing
-	// consistent across level transitions and loading screens.
-	const float startTimeSeconds = (reffect && reffect->startTime > 0.0f)
-		? reffect->startTime
-		: (static_cast<float>(time) * 0.001f);
-	if (!bse->PlayEffect(def, startTimeSeconds)) {
-		def->expired = true;
-	}
-
 	return effectHandle;
 }
 
@@ -222,13 +342,71 @@ bool idRenderWorldLocal::UpdateEffectDef(qhandle_t effectHandle, const renderEff
 	if (effectHandle < 0 || effectHandle > LUDICROUS_INDEX) {
 		common->Error("idRenderWorld::UpdateEffectDef: index = %i", effectHandle);
 	}
-	if (effectHandle >= effectsDef.Num() || effectsDef[effectHandle] == NULL) {
-		return true;
+	while ( effectHandle >= effectsDef.Num() ) {
+		effectsDef.Append( NULL );
 	}
 
+	bool createNew = false;
 	rvRenderEffectLocal* def = effectsDef[effectHandle];
+	if ( def == NULL ) {
+		def = new rvRenderEffectLocal();
+		effectsDef[effectHandle] = def;
+		def->index = effectHandle;
+		def->world = this;
+		def->dynamicModel = NULL;
+		def->dynamicModelFrameCount = 0;
+		def->updateFramenum = -1;
+		def->newEffect = false;
+		def->expired = true;
+		def->archived = false;
+		def->referenceBounds.Clear();
+		def->effect = NULL;
+		createNew = true;
+	}
+
+	const idDecl *previousDeclEffect = def->parms.declEffect;
 	def->parms = *reffect;
 	def->gameTime = time;
+	def->lastModifiedFrameNum = tr.frameCount;
+	if ( session->writeDemo ) {
+		def->archived = false;
+	}
+
+	const bool declChanged = ( !createNew && previousDeclEffect != reffect->declEffect );
+	// Expiry is a terminal state for the current effect instance. Callers such as
+	// rvClientEffect expect UpdateEffectDef() to report that completion so they can
+	// free the handle; auto-recreating an expired one-shot effect turns impact
+	// sounds/decals into per-frame replays as long as the owner keeps updating it.
+	const bool recreateEffect = createNew || declChanged || def->effect == NULL;
+	if ( recreateEffect ) {
+		if ( def->effect != NULL ) {
+			bse->FreeEffect( def );
+			def->effect = NULL;
+		}
+		def->serviceTime = time - 1;
+		def->updateFramenum = -1;
+		def->newEffect = true;
+		def->expired = false;
+		def->referenceBounds.Clear();
+
+		const float startTimeSeconds = static_cast<float>( time ) * 0.001f;
+		if ( !bse->PlayEffect( def, startTimeSeconds ) ) {
+			def->expired = true;
+			return true;
+		}
+	}
+
+	const float effectTimeSeconds = static_cast<float>( time ) * 0.001f;
+	def->updateFramenum = tr.frameCount;
+	if ( bse->ServiceEffect( def, effectTimeSeconds, effectTimeSeconds ) ) {
+		if ( def->dynamicModel ) {
+			DeleteEffectModel( def->dynamicModel );
+			def->dynamicModel = NULL;
+			def->dynamicModelFrameCount = 0;
+		}
+		def->expired = true;
+		return true;
+	}
 
 	return def->expired;
 }
@@ -241,8 +419,12 @@ void idRenderWorldLocal::FreeEffectDef(qhandle_t effectHandle) {
 		return;
 	}
 
+	if ( session->writeDemo && effectsDef[effectHandle]->archived ) {
+		WriteFreeEffect( effectHandle );
+	}
+
 	if (effectsDef[effectHandle]->dynamicModel) {
-		delete effectsDef[effectHandle]->dynamicModel;
+		DeleteEffectModel( effectsDef[effectHandle]->dynamicModel );
 		effectsDef[effectHandle]->dynamicModel = NULL;
 		effectsDef[effectHandle]->dynamicModelFrameCount = 0;
 	}
@@ -261,6 +443,11 @@ void idRenderWorldLocal::StopEffectDef(qhandle_t effectHandle) {
 	}
 	if (effectsDef[effectHandle] == NULL)
 		return;
+
+	if ( session->writeDemo ) {
+		WriteStopEffect( effectHandle );
+		effectsDef[effectHandle]->archived = false;
+	}
 
 	bse->StopEffect(effectsDef[effectHandle]);
 }
@@ -307,6 +494,13 @@ visible entities
 int c_callbackUpdate;
 
 void idRenderWorldLocal::UpdateEntityDef( qhandle_t entityHandle, const renderEntity_t *re ) {
+	if ( entityHandle >= 0 && entityHandle < entityDefs.Num() && entityDefs[entityHandle] != NULL ) {
+		// the frame on the render thread may still draw this def
+		if ( pendingDefOp_t *op = QueueDefOp( PENDING_UPDATE_ENTITY, entityHandle ) ) {
+			op->entity = *re;
+			return;
+		}
+	}
 	if ( r_skipUpdates.GetBool() ) {
 		return;
 	}
@@ -324,6 +518,17 @@ void idRenderWorldLocal::UpdateEntityDef( qhandle_t entityHandle, const renderEn
 	while ( entityHandle >= entityDefs.Num() ) {
 		entityDefs.Append( NULL );
 	}
+	// Growing the def list past the interaction table dimension would make the
+	// ldef*width+edef index used to address interactionTable run out of bounds;
+	// dump and rebuild the table exactly as AddEntityDef does on growth.
+	if ( interactionTable && entityDefs.Num() > interactionTableWidth ) {
+		ResizeInteractionTable();
+	}
+
+	// Track before the early-out paths below. Those return only when nothing that
+	// matters changed, which includes the flag, so tracking here is correct for
+	// every path rather than for the ones that happen to reach the bottom.
+	TrackThroughWorldOutlineEntity( entityHandle, re->outlineFlags );
 
 	idRenderEntityLocal	*def = entityDefs[entityHandle];
 	if ( def ) {
@@ -357,9 +562,59 @@ void idRenderWorldLocal::UpdateEntityDef( qhandle_t entityHandle, const renderEn
 			}
 		}
 
+		// a transform-only update (interpolated presentation frames, movers
+		// carrying riders) leaves the model-space skinned snapshot intact, so
+		// the renderer can skip regenerating it; interactions, shadow volumes,
+		// and area references still rebuild against the new transform below
+		bool keepDynamicModel = false;
+		if ( r_useRepeatedStateReuse.GetBool()
+			&& !re->forceUpdate
+			&& !session->readDemo
+			&& def->dynamicModel != NULL
+			&& re->hModel != NULL
+			&& re->hModel == def->parms.hModel
+			&& re->hModel->IsDynamicModel() == DM_CACHED
+			&& re->callback == NULL
+			&& def->parms.callback == NULL
+			&& re->callbackData == def->parms.callbackData
+			&& re->customShader == def->parms.customShader
+			&& re->customSkin == def->parms.customSkin
+			&& re->referenceShader == def->parms.referenceShader
+			&& re->suppressSurfaceMask == def->parms.suppressSurfaceMask
+			&& re->suppressLOD == def->parms.suppressLOD
+			&& re->numJoints == def->parms.numJoints
+			&& re->joints == def->parms.joints
+			&& memcmp( re->shaderParms, def->parms.shaderParms, sizeof( re->shaderParms ) ) == 0 ) {
+			if ( re->joints == NULL ) {
+				keepDynamicModel = true;
+			} else if ( def->dynamicModelJointsHashValid
+				&& R_HashJointMatrices( re->joints, re->numJoints ) == def->dynamicModelJointsHash ) {
+				keepDynamicModel = true;
+			}
+			if ( keepDynamicModel ) {
+				tr.pc.c_entitySnapshotsReused++;
+
+				// A bytewise-identical update whose joint contents also hashed equal
+				// derives nothing new: interactions, area references, and the model
+				// matrix would rebuild to exactly what they already are, so keep them.
+				// lastModifiedFrameNum must still advance: R_ShadowMapCasterIsDynamic
+				// has one frame of hysteresis, so letting the counter stall would
+				// oscillate tick-rate-animated entities between the static and dynamic
+				// caster sets at render rates above the game tick and churn the cached
+				// static shadow tiles through the caster signature hash.
+				if ( re->callbackData == NULL
+					&& !session->writeDemo
+					&& memcmp( re, &def->parms, sizeof( *re ) ) == 0 ) {
+					tr.pc.c_entityUpdatesElided++;
+					def->lastModifiedFrameNum = tr.frameCount;
+					return;
+				}
+			}
+		}
+
 		// save any decals if the model is the same, allowing marks to move with entities
 		if ( def->parms.hModel == re->hModel ) {
-			R_FreeEntityDefDerivedData( def, true, true );
+			R_FreeEntityDefDerivedData( def, true, true, keepDynamicModel );
 		} else {
 			R_FreeEntityDefDerivedData( def, false, false );
 		}
@@ -413,11 +668,25 @@ void idRenderWorldLocal::FreeEntityDef( qhandle_t entityHandle ) {
 		common->Printf( "idRenderWorld::FreeEntityDef: handle %i is NULL\n", entityHandle );
 		return;
 	}
+	if ( QueueDefOp( PENDING_FREE_ENTITY, entityHandle ) != NULL ) {
+		return;
+	}
+
+	// Drop the handle before the slot can be reused, or the next entity to take it
+	// inherits a ring it never asked for.
+	TrackThroughWorldOutlineEntity( entityHandle, 0 );
 
 	R_FreeEntityDefDerivedData( def, false, false );
 
 	if ( session->writeDemo && def->archived ) {
 		WriteFreeEntity( entityHandle );
+	}
+	// a later entity in this slot draws its own in-world GUI, if any
+	FreeDemoGuiSurfaces( entityHandle );
+	// and a recording writes its first joints in full; playback keeps the
+	// handle's history, since a demo's DC_DELETE_ENTITYDEF is not always a free
+	if ( session->writeDemo != NULL && this == session->rw ) {
+		ResetDemoJointHistory( entityHandle );
 	}
 
 	// if we are playing a demo, these will have been freed
@@ -427,9 +696,23 @@ void idRenderWorldLocal::FreeEntityDef( qhandle_t entityHandle ) {
 	def->parms.gui[ 0 ] = NULL;
 	def->parms.gui[ 1 ] = NULL;
 	def->parms.gui[ 2 ] = NULL;
+	if ( def->demoRemoteRenderView != NULL ) {
+		delete def->demoRemoteRenderView;
+		def->demoRemoteRenderView = NULL;
+	}
 
-	delete def;
+	// a later idRenderEntityLocal allocation recycling this address must not
+	// revive this def's memoized draw-surf areas
+	R_InvalidateDrawSurfAreaMemoForEntity( def );
+
 	entityDefs[ entityHandle ] = NULL;
+	if ( R_RenderThread_InFlight() ) {
+		// the frame on the render thread may still read def->parms through
+		// its viewEntitys; R_ToggleSmpFrame deletes it once that frame is done
+		deferredFreeEntityDefs.Append( def );
+		return;
+	}
+	delete def;
 }
 
 /*
@@ -451,6 +734,13 @@ const renderEntity_t *idRenderWorldLocal::GetRenderEntity( qhandle_t entityHandl
 		return NULL;
 	}
 
+	if ( const pendingDefOp_t *op = FindPendingDefOp( entityHandle, false ) ) {
+		if ( op->type == PENDING_FREE_ENTITY ) {
+			common->Printf( "idRenderWorld::GetRenderEntity: handle %i is NULL\n", entityHandle );
+			return NULL;
+		}
+		return &op->entity;
+	}
 	return &def->parms;
 }
 
@@ -485,6 +775,13 @@ Does not write to the demo file, which will only be done for visible lights
 =================
 */
 void idRenderWorldLocal::UpdateLightDef( qhandle_t lightHandle, const renderLight_t *rlight ) {
+	if ( lightHandle >= 0 && lightHandle < lightDefs.Num() && lightDefs[lightHandle] != NULL ) {
+		// the frame on the render thread may still read this light's parms
+		if ( pendingDefOp_t *op = QueueDefOp( PENDING_UPDATE_LIGHT, lightHandle ) ) {
+			op->light = *rlight;
+			return;
+		}
+	}
 	if ( r_skipUpdates.GetBool() ) {
 		static bool s_warned = false;
 		if ( !s_warned ) {
@@ -496,12 +793,21 @@ void idRenderWorldLocal::UpdateLightDef( qhandle_t lightHandle, const renderLigh
 
 	tr.pc.c_lightUpdates++;
 
+	renderLight_t sanitizedLight = *rlight;
+	sanitizedLight.prelightModel = R_SanitizePrelightModelPointer( sanitizedLight.prelightModel );
+	rlight = &sanitizedLight;
+
 	// create new slots if needed
 	if ( lightHandle < 0 || lightHandle > LUDICROUS_INDEX ) {
 		common->Error( "idRenderWorld::UpdateLightDef: index = %i", lightHandle );
 	}
 	while ( lightHandle >= lightDefs.Num() ) {
 		lightDefs.Append( NULL );
+	}
+	// Keep the interaction table sized to the light-def list, as AddLightDef
+	// does: the ldef*width+edef index would otherwise address out of bounds.
+	if ( interactionTable && lightDefs.Num() > interactionTableHeight ) {
+		ResizeInteractionTable();
 	}
 
 	bool justUpdate = false;
@@ -571,13 +877,22 @@ void idRenderWorldLocal::FreeLightDef( qhandle_t lightHandle ) {
 		common->Printf( "idRenderWorld::FreeLightDef: handle %i is NULL\n", lightHandle );
 		return;
 	}
-
-	R_FreeLightDefDerivedData( light );
+	if ( QueueDefOp( PENDING_FREE_LIGHT, lightHandle ) != NULL ) {
+		return;
+	}
 
 	if ( session->writeDemo && light->archived ) {
 		WriteFreeLight( lightHandle );
+		light->archived = false;
 	}
 
+	if ( light->referencedFrameNum == tr.frameCount || R_RenderThread_InFlight() ) {
+		deferredFreeLightDefs.Append( light );
+		lightDefs[lightHandle] = NULL;
+		return;
+	}
+
+	R_FreeLightDefDerivedData( light );
 	delete light;
 	lightDefs[lightHandle] = NULL;
 }
@@ -601,6 +916,13 @@ const renderLight_t *idRenderWorldLocal::GetRenderLight( qhandle_t lightHandle )
 		return NULL;
 	}
 
+	if ( const pendingDefOp_t *op = FindPendingDefOp( lightHandle, true ) ) {
+		if ( op->type == PENDING_FREE_LIGHT ) {
+			common->Printf( "idRenderWorld::GetRenderLight: handle %i is NULL\n", lightHandle );
+			return NULL;
+		}
+		return &op->light;
+	}
 	return &def->parms;
 }
 
@@ -610,6 +932,16 @@ idRenderWorldLocal::ProjectDecalOntoWorld
 ================
 */
 void idRenderWorldLocal::ProjectDecalOntoWorld( const idFixedWinding &winding, const idVec3 &projectionOrigin, const bool parallel, const float fadeDepth, const idMaterial *material, const int startTime ) {
+	// decal draw surfaces of the frame in flight index the decal arrays
+	if ( pendingDefOp_t *op = QueueDefOp( PENDING_DECAL_ONTO_WORLD, -1 ) ) {
+		op->winding = new idFixedWinding( winding );
+		op->projectionOrigin = projectionOrigin;
+		op->parallel = parallel;
+		op->fadeDepth = fadeDepth;
+		op->material = material;
+		op->startTime = startTime;
+		return;
+	}
 	int i, areas[10], numAreas;
 	const areaReference_t *ref;
 	const portalArea_t *area;
@@ -680,6 +1012,15 @@ void idRenderWorldLocal::ProjectDecal( qhandle_t entityHandle, const idFixedWind
 	if ( !def ) {
 		return;
 	}
+	if ( pendingDefOp_t *op = QueueDefOp( PENDING_DECAL, entityHandle ) ) {
+		op->winding = new idFixedWinding( winding );
+		op->projectionOrigin = projectionOrigin;
+		op->parallel = parallel;
+		op->fadeDepth = fadeDepth;
+		op->material = material;
+		op->startTime = startTime;
+		return;
+	}
 
 	const idRenderModel *model = def->parms.hModel;
 
@@ -725,19 +1066,33 @@ void idRenderWorldLocal::ProjectOverlay( qhandle_t entityHandle, const idPlane l
 	if ( !def ) {
 		return;
 	}
+	if ( pendingDefOp_t *op = QueueDefOp( PENDING_OVERLAY, entityHandle ) ) {
+		op->localTextureAxis[0] = localTextureAxis[0];
+		op->localTextureAxis[1] = localTextureAxis[1];
+		op->material = material;
+		return;
+	}
 
 	const renderEntity_t *refEnt = &def->parms;
 
 	idRenderModel *model = refEnt->hModel;
-	if ( model->IsDynamicModel() != DM_CACHED ) {	// FIXME: probably should be MD5 only
+	if ( model == NULL || model->IsDynamicModel() != DM_CACHED ) {	// FIXME: probably should be MD5 only
 		return;
 	}
-	model = R_EntityDefDynamicModel( def );
+	model = R_EntityDefDynamicModel( def, false );
+	if ( model == NULL ) {
+		return;
+	}
 
 	if ( def->overlay == NULL ) {
 		def->overlay = idRenderModelOverlay::Alloc();
 	}
 	def->overlay->CreateOverlay( model, localTextureAxis, material );
+
+	// the overlay surfaces are baked into the dynamic snapshot when it is
+	// generated; clear it so the new overlay appears on the next rendered
+	// frame even when the snapshot would otherwise be reused
+	R_ClearEntityDefDynamicModel( def );
 }
 
 /*
@@ -753,6 +1108,9 @@ void idRenderWorldLocal::RemoveDecals( qhandle_t entityHandle ) {
 
 	idRenderEntityLocal	*def = entityDefs[ entityHandle ];
 	if ( !def ) {
+		return;
+	}
+	if ( QueueDefOp( PENDING_REMOVE_DECALS, entityHandle ) != NULL ) {
 		return;
 	}
 
@@ -782,7 +1140,8 @@ Rendering a scene may require multiple views to be rendered
 to handle mirrors,
 ====================
 */
-void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
+void idRenderWorldLocal::RenderScene( const renderView_t *renderView, int renderFlags ) {
+	R_RenderThread_SyncFrontEnd( "render scene" );
 #ifndef	ID_DEDICATED
 	renderView_t	copy;
 
@@ -807,15 +1166,40 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 	tr.guiModel->Clear();
 
 	int startTime = Sys_Milliseconds();
+	const bool independent = (renderFlags & RF_INDEPENDENT_VIEW) != 0;
+	if ( !independent && tr.lastRenderTimeMsec > 0 ) {
+		const int elapsedMsec = startTime - tr.lastRenderTimeMsec;
+		tr.deltaTime = ( elapsedMsec > 0 ? elapsedMsec : 0 ) * 0.001f;
+	} else if ( !independent ) {
+		tr.deltaTime = 0.0f;
+	}
+	if (!independent) tr.lastRenderTimeMsec = startTime;
 
 	// setup view parms for the initial view
 	//
 	viewDef_t		*parms = (viewDef_t *)R_ClearedFrameAlloc( sizeof( *parms ) );
 	parms->renderView = *renderView;
+	parms->renderFlags = renderFlags;
+
+	// an off-axis eye frustum must enclose its axis with finite, ordered
+	// tangents; anything else renders through the symmetric fov_x/fov_y
+	if ( parms->renderView.asymmetricFov && !R_ViewFovTangentsValid( parms->renderView ) ) {
+		parms->renderView.asymmetricFov = false;
+	}
 
 	if ( tr.takingScreenshot ) {
 		parms->renderView.forceUpdate = true;
 	}
+
+	// r_screenFraction below native on ES, or the legacy mode 0 crop anywhere:
+	// render the world into a smaller rect before any 2D is drawn, so the HUD and
+	// menus keep their own resolution. On ES the back end blits it back out to the
+	// view's native extents. Everything derived from the viewport below -- this
+	// view's scissor, and the viewports of any mirror or portal subviews
+	// R_RenderView spawns from it -- picks the smaller space up from the crop
+	// automatically.
+	const bool sceneResolutionScaled = !independent && tr.PushSceneResolutionScale( parms->renderView );
+	parms->sceneResolutionScaled = sceneResolutionScaled;
 
 	// set up viewport, adjusted for resolution and OpenGL style 0 at the bottom
 	tr.RenderViewToViewport( &parms->renderView, &parms->viewport );
@@ -836,7 +1220,7 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 
 	// use this time for any subsequent 2D rendering, so damage blobs/etc 
 	// can use level time
-	tr.frameShaderTime = parms->floatTime;
+	if (!independent) tr.SetFrameShaderTime( parms->renderView.time );
 
 	// see if the view needs to reverse the culling sense in mirrors
 	// or environment cube sides
@@ -850,13 +1234,18 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 
 	if ( r_lockSurfaces.GetBool() ) {
 		R_LockSurfaceScene( parms );
+		if ( sceneResolutionScaled ) {
+			tr.PopSceneResolutionScale();
+		}
 		return;
 	}
 
 	// save this world for use by some console commands
-	tr.primaryWorld = this;
-	tr.primaryRenderView = *renderView;
-	tr.primaryView = parms;
+	if (!independent) {
+		tr.primaryWorld = this;
+		tr.primaryRenderView = *renderView;
+		tr.primaryView = parms;
+	}
 
 	// rendering this view may cause other views to be rendered
 	// for mirrors / portals / shadows / environment maps
@@ -864,9 +1253,15 @@ void idRenderWorldLocal::RenderScene( const renderView_t *renderView ) {
 	// updated to the demo file
 	R_RenderView( parms );
 
+	// popped before any 2D is emitted, so the HUD is laid out against the full
+	// display and not against the crop the scene rendered into
+	if ( sceneResolutionScaled ) {
+		tr.PopSceneResolutionScale();
+	}
+
 	// now write delete commands for any modified-but-not-visible entities, and
 	// add the renderView command to the demo
-	if ( session->writeDemo ) {
+	if ( session->writeDemo && !independent ) {
 		WriteRenderView( renderView );
 	}
 
@@ -933,10 +1328,10 @@ exitPortal_t idRenderWorldLocal::GetPortal( int areaNum, int portalNum ) {
 	portalArea_t	*area;
 	int				count;
 	portal_t		*portal;
-	exitPortal_t	ret;
+	exitPortal_t	ret = {};
 
-	if ( areaNum > numPortalAreas ) {
-		common->Error( "idRenderWorld::GetPortal: areaNum > numAreas" );
+	if ( areaNum < 0 || areaNum >= numPortalAreas ) {
+		common->Error( "idRenderWorld::GetPortal: areaNum out of range" );
 	}
 	area = &portalAreas[areaNum];
 
@@ -1056,24 +1451,19 @@ BoundsInAreas
 */
 int idRenderWorldLocal::BoundsInAreas( const idBounds &bounds, int *areas, int maxAreas ) const {
 	int numAreas = 0;
+	idBounds queryBounds = bounds;
 
 	assert( areas );
-
-	if ( bounds[0][0] > bounds[1][0] || bounds[0][1] > bounds[1][1] || bounds[0][2] > bounds[1][2] ) {
-		return numAreas;
-	}
-
-	idBounds queryBounds = bounds;
 	const float spanX = bounds[1][0] - bounds[0][0];
 	const float spanY = bounds[1][1] - bounds[0][1];
 	const float spanZ = bounds[1][2] - bounds[0][2];
-	if ( spanX != spanX || spanY != spanY || spanZ != spanZ || spanX >= 1e4f || spanY >= 1e4f || spanZ >= 1e4f ) {
+	if ( spanX != spanX || spanY != spanY || spanZ != spanZ ||
+			spanX < 0.0f || spanY < 0.0f || spanZ < 0.0f ||
+			spanX >= 1e4f || spanY >= 1e4f || spanZ >= 1e4f ) {
 		const idVec3 center = bounds.GetCenter();
 		if ( center[0] != center[0] || center[1] != center[1] || center[2] != center[2] ) {
 			return numAreas;
 		}
-
-		// Clamp pathological bounds to a local region so PVS queries remain stable.
 		queryBounds = idBounds( center ).Expand( 4096.0f );
 	}
 
@@ -1094,22 +1484,42 @@ this doesn't do any occlusion testing, simply ignoring non-gui surfaces.
 start / end are in global world coordinates.
 ================
 */
+static idRenderModel *R_GuiTraceModelForEntity( idRenderEntityLocal *def ) {
+	idRenderModel *model = def->parms.hModel;
+	if ( model == NULL ) {
+		return NULL;
+	}
+
+	if ( model->IsDynamicModel() == DM_STATIC ) {
+		return def->parms.callback != NULL ? NULL : model;
+	}
+
+	return R_EntityDefDynamicModel( def );
+}
+
 guiPoint_t	idRenderWorldLocal::GuiTrace( qhandle_t entityHandle, const idVec3 start, const idVec3 end ) const {
 	return GuiTrace( entityHandle, start, end, 0 );
 }
 
 guiPoint_t	idRenderWorldLocal::GuiTrace( qhandle_t entityHandle, const idVec3 start, const idVec3 end, int interactiveMask ) const {
+	if ( FindPendingDefOp( entityHandle, false ) != NULL ) {
+		R_RenderThread_SyncFrontEnd( "trace" );
+	}
 	localTrace_t	local;
+	localTrace_t	bestLocal;
 	idVec3			localStart, localEnd;
+	idVec3			bestOrigin, bestAxis[3];
 	int				j;
 	idRenderModel	*model;
 	srfTriangles_t	*tri;
 	const idMaterial *shader;
+	const idMaterial *bestShader;
+	float			bestAxisLen[2];
 	guiPoint_t	pt;
 
 	pt.x = pt.y = -1;
-	pt.frac = 1.0f;
 	pt.guiId = 0;
+	pt.fraction = 1.0f;
 
 	if ( ( entityHandle < 0 ) || ( entityHandle >= entityDefs.Num() ) ) {
 		common->Printf( "idRenderWorld::GuiTrace: invalid handle %i\n", entityHandle );
@@ -1122,17 +1532,8 @@ guiPoint_t	idRenderWorldLocal::GuiTrace( qhandle_t entityHandle, const idVec3 st
 		return pt;
 	}
 
-	model = def->parms.hModel;
-	if ( !model || model->IsDynamicModel() == DM_CONTINUOUS ) {
-		return pt;
-	}
-	if ( def->parms.callback && model->IsDynamicModel() == DM_STATIC ) {
-		return pt;
-	}
-
-	// Retail Prey traces GUIs on cached animated models such as item cabinets.
-	model = R_EntityDefDynamicModel( def );
-	if ( !model ) {
+	model = R_GuiTraceModelForEntity( def );
+	if ( model == NULL ) {
 		return pt;
 	}
 
@@ -1141,7 +1542,11 @@ guiPoint_t	idRenderWorldLocal::GuiTrace( qhandle_t entityHandle, const idVec3 st
 	R_GlobalPointToLocal( def->modelMatrix, end, localEnd );
 
 
-	for ( j = 0 ; j < model->NumSurfaces() ; j++ ) {
+	float best = 1.0f;
+	bestShader = NULL;
+
+	const int surfaceCount = model->NumSurfaces();
+	for ( j = 0 ; j < surfaceCount ; j++ ) {
 		const modelSurface_t *surf = model->Surface( j );
 
 		tri = surf->geometry;
@@ -1160,36 +1565,163 @@ guiPoint_t	idRenderWorldLocal::GuiTrace( qhandle_t entityHandle, const idVec3 st
 
 		if ( interactiveMask != 0 ) {
 			const int guiId = shader->GetEntityGui();
-			if ( guiId < 1 || guiId > MAX_RENDERENTITY_GUI ) {
-				continue;
-			}
-			if ( ( interactiveMask & ( 1 << ( guiId - 1 ) ) ) == 0 ) {
+			if ( guiId < 1 || guiId > MAX_RENDERENTITY_GUI || ( interactiveMask & ( 1 << ( guiId - 1 ) ) ) == 0 ) {
 				continue;
 			}
 		}
 
 		local = R_LocalTrace( localStart, localEnd, 0.0f, tri );
-		if ( local.fraction < 1.0 ) {
+		if ( local.fraction < best ) {
 			idVec3				origin, axis[3];
-			idVec3				cursor;
 			float				axisLen[2];
 
 			R_SurfaceToTextureAxis( tri, origin, axis );
-			cursor = local.point - origin;
 
 			axisLen[0] = axis[0].Length();
 			axisLen[1] = axis[1].Length();
+			if ( axisLen[0] <= 0.0f || axisLen[1] <= 0.0f ) {
+				continue;
+			}
 
-			pt.x = ( cursor * axis[0] ) / ( axisLen[0] * axisLen[0] );
-			pt.y = ( cursor * axis[1] ) / ( axisLen[1] * axisLen[1] );
-			pt.frac = local.fraction;
-			pt.guiId = shader->GetEntityGui();
-
-			return pt;
+			best = local.fraction;
+			bestLocal = local;
+			bestShader = shader;
+			bestOrigin = origin;
+			bestAxis[0] = axis[0];
+			bestAxis[1] = axis[1];
+			bestAxisLen[0] = axisLen[0];
+			bestAxisLen[1] = axisLen[1];
 		}
 	}
 
+	if ( bestShader != NULL ) {
+		const idVec3 cursor = bestLocal.point - bestOrigin;
+
+		pt.x = ( cursor * bestAxis[0] ) / ( bestAxisLen[0] * bestAxisLen[0] );
+		pt.y = ( cursor * bestAxis[1] ) / ( bestAxisLen[1] * bestAxisLen[1] );
+		pt.guiId = bestShader->GetEntityGui();
+		pt.fraction = bestLocal.fraction;
+	}
+
 	return pt;
+}
+
+/*
+================
+R_GuiTraceProbe_f
+
+Diagnostic command: replicates the game-side in-world GUI focus chain (entity
+gui pointer, IsInteractive, GuiTrace gate, and an actual trace through the
+center of every gui surface) against the primary render world so in-world GUI
+interactivity can be validated from a scripted map load. The optional 'click'
+argument additionally drives the same park/move/click event sequence
+idPlayer::UpdateFocus and Weapon_GUI send and reports what each interactive
+gui returns; note that clicking executes the gui's onAction side effects.
+================
+*/
+void R_GuiTraceProbe_f( const idCmdArgs &args ) {
+	idRenderWorldLocal *world = tr.primaryWorld;
+	if ( world == NULL ) {
+		common->Printf( "guiTraceProbe: no primary render world\n" );
+		return;
+	}
+
+	int guiEntities = 0;
+	int guiSurfaces = 0;
+	int hits = 0;
+
+	const int entityCount = world->entityDefs.Num();
+	for ( int i = 0; i < entityCount; i++ ) {
+		idRenderEntityLocal *def = world->entityDefs[i];
+		if ( def == NULL ) {
+			continue;
+		}
+		const idRenderModel *sourceModel = def->parms.hModel;
+		idRenderModel *model = R_GuiTraceModelForEntity( def );
+		if ( model == NULL ) {
+			continue;
+		}
+
+		bool reported = false;
+		const int surfaceCount = model->NumSurfaces();
+		for ( int j = 0; j < surfaceCount; j++ ) {
+			const modelSurface_t *surf = model->Surface( j );
+			if ( surf == NULL || surf->geometry == NULL ) {
+				continue;
+			}
+			const idMaterial *shader = R_RemapShaderBySkin( surf->shader, def->parms.customSkin, def->parms.customShader );
+			if ( shader == NULL || !shader->HasGui() ) {
+				continue;
+			}
+
+			const srfTriangles_t *tri = surf->geometry;
+
+			if ( !reported ) {
+				reported = true;
+				guiEntities++;
+				int guiNum = shader->GetEntityGui() - 1;
+				idUserInterface *gui = ( guiNum >= 0 && guiNum < MAX_RENDERENTITY_GUI ) ? def->parms.gui[guiNum] : NULL;
+				common->Printf( "guiTraceProbe: handle %d model '%s' traceModel '%s' dynamic=%d callback=%d gui='%s' interactive=%d\n",
+					i, sourceModel != NULL ? sourceModel->Name() : "NULL", model->Name(),
+					sourceModel != NULL ? (int)sourceModel->IsDynamicModel() : -1, def->parms.callback != NULL,
+					gui != NULL ? gui->Name() : "NULL",
+					gui != NULL ? (int)gui->IsInteractive() : -1 );
+			}
+
+			if ( tri->verts == NULL || tri->numVerts <= 0 || tri->numIndexes < 3 ) {
+				common->Printf( "guiTraceProbe:   surf %d shader '%s': NO CPU VERTS (verts=%p numVerts=%d numIndexes=%d)\n",
+					j, shader->GetName(), tri->verts, tri->numVerts, tri->numIndexes );
+				continue;
+			}
+			guiSurfaces++;
+
+			// trace through the centroid of the first triangle along its normal
+			const idVec3 a = tri->verts[ tri->indexes[0] ].xyz;
+			const idVec3 b = tri->verts[ tri->indexes[1] ].xyz;
+			const idVec3 c = tri->verts[ tri->indexes[2] ].xyz;
+			const idVec3 center = ( a + b + c ) * ( 1.0f / 3.0f );
+			idPlane plane;
+			plane.FromPoints( a, b, c );
+			const idVec3 localStart = center + plane.Normal() * 8.0f;
+			const idVec3 localEnd = center - plane.Normal() * 8.0f;
+
+			idVec3 start, end;
+			R_LocalPointToGlobal( def->modelMatrix, localStart, start );
+			R_LocalPointToGlobal( def->modelMatrix, localEnd, end );
+
+			const guiPoint_t pt = world->GuiTrace( i, start, end );
+			if ( pt.x != -1.0f ) {
+				hits++;
+			}
+			common->Printf( "guiTraceProbe:   surf %d shader '%s' entityGui=%d -> pt=(%.3f %.3f) guiId=%d fraction=%.3f\n",
+				j, shader->GetName(), shader->GetEntityGui(), pt.x, pt.y, pt.guiId, pt.fraction );
+
+			// optional 'click' mode: drive the same event sequence the game's
+			// focus/click path sends and report what the gui returns
+			if ( pt.x != -1.0f && idStr::Icmp( args.Argv( 1 ), "click" ) == 0 ) {
+				int guiNum = shader->GetEntityGui() - 1;
+				idUserInterface *clickGui = ( guiNum >= 0 && guiNum < MAX_RENDERENTITY_GUI ) ? def->parms.gui[guiNum] : NULL;
+				if ( clickGui != NULL && clickGui->IsInteractive() ) {
+					const int now = Sys_Milliseconds();
+					sysEvent_t ev = sys->GenerateMouseMoveEvent( -2000, -2000 );
+					const char *moveCmd1 = clickGui->HandleEvent( &ev, now );
+					ev = sys->GenerateMouseMoveEvent( pt.x * 640.0f, pt.y * 480.0f );
+					const char *moveCmd2 = clickGui->HandleEvent( &ev, now );
+					ev = sys->GenerateMouseButtonEvent( 1, true );
+					idStr downCmd = clickGui->HandleEvent( &ev, now );
+					ev = sys->GenerateMouseButtonEvent( 1, false );
+					idStr upCmd = clickGui->HandleEvent( &ev, now );
+					common->Printf( "guiTraceProbe:   CLICK cursor=(%.1f %.1f) move1='%s' move2='%s' down='%s' up='%s' interactiveAfter=%d\n",
+						clickGui->CursorX(), clickGui->CursorY(),
+						moveCmd1 ? moveCmd1 : "", moveCmd2 ? moveCmd2 : "",
+						downCmd.c_str(), upCmd.c_str(), (int)clickGui->IsInteractive() );
+				}
+			}
+		}
+	}
+
+	common->Printf( "guiTraceProbe: %d gui entities, %d traceable gui surfaces, %d trace hits\n",
+		guiEntities, guiSurfaces, hits );
 }
 
 /*
@@ -1197,7 +1729,40 @@ guiPoint_t	idRenderWorldLocal::GuiTrace( qhandle_t entityHandle, const idVec3 st
 idRenderWorldLocal::ModelTrace
 ===================
 */
+static const rvDeclMatType *R_GetMaterialTypeForTrace( const idMaterial *shader, const srfTriangles_t *tri, const localTrace_t &localTrace ) {
+	if ( shader == NULL ) {
+		return NULL;
+	}
+
+	if ( shader->GetMaterialTypeArray() == NULL || tri == NULL || tri->verts == NULL ) {
+		return shader->GetMaterialType();
+	}
+
+	const idVec3 points[3] = {
+		tri->verts[ localTrace.indexes[0] ].xyz,
+		tri->verts[ localTrace.indexes[1] ].xyz,
+		tri->verts[ localTrace.indexes[2] ].xyz
+	};
+	const idVec2 texCoords[3] = {
+		tri->verts[ localTrace.indexes[0] ].st,
+		tri->verts[ localTrace.indexes[1] ].st,
+		tri->verts[ localTrace.indexes[2] ].st
+	};
+	const float area = idMath::BarycentricTriangleArea( localTrace.normal, points[0], points[1], points[2] );
+	if ( area == 0.0f ) {
+		return shader->GetMaterialType();
+	}
+
+	idVec2 collisionTexCoord;
+	idMath::BarycentricEvaluate( collisionTexCoord, localTrace.point, localTrace.normal, area, points, texCoords );
+	return shader->GetMaterialType( collisionTexCoord );
+}
+
 bool idRenderWorldLocal::ModelTrace( modelTrace_t &trace, qhandle_t entityHandle, const idVec3 &start, const idVec3 &end, const float radius ) const {
+	if ( FindPendingDefOp( entityHandle, false ) != NULL ) {
+		// trace what the game last wrote: apply the queued update first
+		R_RenderThread_SyncFrontEnd( "trace" );
+	}
 	int i;
 	bool collisionSurface;
 	const modelSurface_t *surf;
@@ -1225,7 +1790,11 @@ bool idRenderWorldLocal::ModelTrace( modelTrace_t &trace, qhandle_t entityHandle
 
 	renderEntity_t *refEnt = &def->parms;
 
-	model = R_EntityDefDynamicModel( def );
+	// MD5/MD5R render snapshots omit collision-only meshes. Those meshes
+	// carry the retail per-pixel flesh/armour maps, so hitscan must request
+	// their posed collision snapshot. The helper falls back to visible
+	// geometry for models without an explicit collision surface.
+	model = R_EntityDefDynamicModel( def, true );
 	if ( !model ) {
 		return false;
 	}
@@ -1238,11 +1807,18 @@ bool idRenderWorldLocal::ModelTrace( modelTrace_t &trace, qhandle_t entityHandle
 	// if we have explicit collision surfaces, only collide against them
 	// (FIXME, should probably have a parm to control this)
 	collisionSurface = false;
-	for ( i = 0; i < model->NumBaseSurfaces(); i++ ) {
+	const int baseSurfaceCount = model->NumBaseSurfaces();
+	for ( i = 0; i < baseSurfaceCount; i++ ) {
 		surf = model->Surface( i );
 
 		shader = R_RemapShaderBySkin( surf->shader, def->parms.customSkin, def->parms.customShader );
 
+		// R_RemapShaderBySkin returns NULL for a deform surface under a
+		// customShader (and for a NULL surface shader); such a surface is never
+		// a collision surface, so skip it as the second loop already does.
+		if ( !shader ) {
+			continue;
+		}
 		if ( shader->GetSurfaceFlags() & SURF_COLLISION ) {
 			collisionSurface = true;
 			break;
@@ -1250,7 +1826,7 @@ bool idRenderWorldLocal::ModelTrace( modelTrace_t &trace, qhandle_t entityHandle
 	}
 
 	// only use baseSurfaces, not any overlays
-	for ( i = 0; i < model->NumBaseSurfaces(); i++ ) {
+	for ( i = 0; i < baseSurfaceCount; i++ ) {
 		surf = model->Surface( i );
 
 		shader = R_RemapShaderBySkin( surf->shader, def->parms.customSkin, def->parms.customShader );
@@ -1280,9 +1856,9 @@ bool idRenderWorldLocal::ModelTrace( modelTrace_t &trace, qhandle_t entityHandle
 			trace.material = shader;
 			trace.entity = &def->parms;
 // jmarshall
-			trace.materialType = trace.material->GetMaterialType();
+			trace.materialType = R_GetMaterialTypeForTrace( trace.material, surf->geometry, localTrace );
 // jmarshall end
-			trace.jointNumber = refEnt->hModel->NearestJoint( i, localTrace.indexes[0], localTrace.indexes[1], localTrace.indexes[2] );
+			trace.jointNumber = refEnt->hModel->NearestJoint( surf->id, localTrace.indexes[0], localTrace.indexes[1], localTrace.indexes[2] );
 		}
 	}
 
@@ -1294,7 +1870,7 @@ bool idRenderWorldLocal::ModelTrace( modelTrace_t &trace, qhandle_t entityHandle
 idRenderWorldLocal::Trace
 ===================
 */
-// Legacy model name fallbacks for skipPlayer traces.
+// FIXME: _D3XP added those.
 const char* playerModelExcludeList[] = {
 	"models/md5/characters/player/d3xp_spplayer.md5mesh",
 	"models/md5/characters/player/head/d3xp_head.md5mesh",
@@ -1307,45 +1883,31 @@ const char* playerMaterialExcludeList[] = {
 	NULL
 };
 
-static bool ShouldSkipPlayerTraceEntity( const idRenderEntityLocal* def, const idRenderModel* model ) {
-	// Preferred signal: player/world-weapon style view suppression flags.
-	// This covers Prey player models without hardcoding every mesh path.
-	if ( def != NULL ) {
-		if ( def->parms.suppressSurfaceInViewID != 0 || def->parms.allowSurfaceInViewID != 0 ) {
-			return true;
-		}
+static bool ShouldSkipPlayerTraceEntity( const idRenderEntityLocal *def, const idRenderModel *model ) {
+	if ( def != NULL && ( def->parms.suppressSurfaceInViewID != 0 || def->parms.allowSurfaceInViewID != 0 ) ) {
+		return true;
 	}
-
 	if ( model == NULL ) {
 		return false;
 	}
 
-	const idStr modelName = model->Name();
-	if ( modelName.IsEmpty() ) {
-		return false;
-	}
-
-	// Prey player/world models are authored under models/player/.
-	if ( modelName.Icmpn( "models/player/", 14 ) == 0 ) {
+	// Compare in place: this runs for every candidate entity of every trace.
+	const char *modelName = model->Name();
+	if ( idStr::Icmpn( modelName, "models/player/", 14 ) == 0 || idStr::Icmpn( modelName, "models/md5/characters/player/", 29 ) == 0 ) {
 		return true;
 	}
-
-	// Legacy Doom 3/D3XP player model locations.
-	if ( modelName.Icmpn( "models/md5/characters/player/", 29 ) == 0 ) {
-		return true;
-	}
-
-	// Keep exact legacy exclusions for compatibility.
-	for ( int k = 0; playerModelExcludeList[k]; ++k ) {
-		if ( modelName == playerModelExcludeList[k] ) {
+	for ( int i = 0; playerModelExcludeList[i] != NULL; ++i ) {
+		if ( idStr::Cmp( modelName, playerModelExcludeList[i] ) == 0 ) {
 			return true;
 		}
 	}
-
 	return false;
 }
 
 bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const idVec3 &end, const float radius, bool skipDynamic, bool skipPlayer /*_D3XP*/ ) const {
+	if ( pendingDefOps.Num() > 0 ) {
+		R_RenderThread_SyncFrontEnd( "trace" );
+	}
 	areaReference_t * ref;
 	idRenderEntityLocal *def;
 	portalArea_t * area;
@@ -1360,6 +1922,7 @@ bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const 
 
 	trace.fraction = 1.0f;
 	trace.point = end;
+	trace.materialType = NULL;
 
 	// bounds for the whole trace
 	traceBounds.Clear();
@@ -1407,8 +1970,16 @@ bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const 
 				continue;
 			}
 
+			// The model matrix and the local-space trace endpoints depend only on
+			// this entity's (post-callback) origin/axis, so build them once per
+			// model rather than once per surface.
+			R_AxisToModelMatrix( def->parms.axis, def->parms.origin, modelMatrix );
+			R_GlobalPointToLocal( modelMatrix, start, localStart );
+			R_GlobalPointToLocal( modelMatrix, end, localEnd );
+
 			// check all model surfaces
-			for ( j = 0; j < model->NumSurfaces(); j++ ) {
+			const int surfaceCount = model->NumSurfaces();
+			for ( j = 0; j < surfaceCount; j++ ) {
 				const modelSurface_t *surf = model->Surface( j );
 
 				shader = R_RemapShaderBySkin( surf->shader, def->parms.customSkin, def->parms.customShader );
@@ -1420,13 +1991,11 @@ bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const 
 
 #if 1 /* _D3XP addition. could use a cleaner approach */
 				if ( skipPlayer ) {
-					idStr name = shader->GetName();
-					const char *exclude;
+					const char *name = shader->GetName();
 					int k;
 
 					for ( k = 0; playerMaterialExcludeList[k]; k++ ) {
-						exclude = playerMaterialExcludeList[k];
-						if ( name == exclude ) {
+						if ( idStr::Cmp( name, playerMaterialExcludeList[k] ) == 0 ) {
 							break;
 						}
 					}
@@ -1448,11 +2017,7 @@ bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const 
 
 				numSurfaces++;
 
-				// transform the points into local space
-				R_AxisToModelMatrix( def->parms.axis, def->parms.origin, modelMatrix );
-				R_GlobalPointToLocal( modelMatrix, start, localStart );
-				R_GlobalPointToLocal( modelMatrix, end, localEnd );
-
+				// modelMatrix / localStart / localEnd are computed once per model above
 				localTrace = R_LocalTrace( localStart, localEnd, radius, surf->geometry );
 
 				if ( localTrace.fraction < trace.fraction ) {
@@ -1460,8 +2025,11 @@ bool idRenderWorldLocal::Trace( modelTrace_t &trace, const idVec3 &start, const 
 					R_LocalPointToGlobal( modelMatrix, localTrace.point, trace.point );
 					trace.normal = localTrace.normal * def->parms.axis;
 					trace.material = shader;
+					trace.materialType = R_GetMaterialTypeForTrace( trace.material, surf->geometry, localTrace );
 					trace.entity = &def->parms;
-					trace.jointNumber = model->NearestJoint( j, localTrace.indexes[0], localTrace.indexes[1], localTrace.indexes[2] );
+					// Dynamic snapshots don't own joint-weight metadata; use their stable
+					// surface ID to ask the source model for the matching authored mesh.
+					trace.jointNumber = def->parms.hModel->NearestJoint( surf->id, localTrace.indexes[0], localTrace.indexes[1], localTrace.indexes[2] );
 
 					traceBounds.Clear();
 					traceBounds.AddPoint( start );
@@ -1559,6 +2127,27 @@ This is called by R_PushVolumeIntoTree and also directly
 for the world model references that are precalculated.
 =================
 */
+/*
+===================
+idRenderWorldLocal::TrackThroughWorldOutlineEntity
+
+Keeps the through-world outline registry in step with the flag. Called on every
+entity update and on free, because a handle left behind here would put a ring
+around whatever entity next reused the slot.
+===================
+*/
+void idRenderWorldLocal::TrackThroughWorldOutlineEntity( qhandle_t entityHandle, int outlineFlags ) {
+	const int index = throughWorldOutlineEntities.FindIndex( entityHandle );
+
+	if ( ( outlineFlags & REF_OUTLINE_THROUGH_WORLD ) != 0 ) {
+		if ( index < 0 ) {
+			throughWorldOutlineEntities.Append( entityHandle );
+		}
+	} else if ( index >= 0 ) {
+		throughWorldOutlineEntities.RemoveIndex( index );
+	}
+}
+
 void idRenderWorldLocal::AddEntityRefToArea( idRenderEntityLocal *def, portalArea_t *area ) {
 	areaReference_t	*ref;
 
@@ -1621,6 +2210,7 @@ use it as an oportunity to size the interactionTable
 ===================
 */
 void idRenderWorldLocal::GenerateAllInteractions() {
+	R_RenderThread_Sync( "world" );
 	if ( !glConfig.isInitialized ) {
 		return;
 	}
@@ -1647,7 +2237,7 @@ void idRenderWorldLocal::GenerateAllInteractions() {
 	int end = Sys_Milliseconds();
 	int	msec = end - start;
 
-	common->Printf( "idRenderWorld::GenerateAllInteractions, msec = %i, staticAllocCount = %i.\n", msec, tr.staticAllocCount );
+	common->Printf( "idRenderWorld::GenerateAllInteractions, msec = %i, staticAllocCount = %zu.\n", msec, tr.staticAllocCount );
 
 
 	// build the interaction table
@@ -1674,7 +2264,7 @@ void idRenderWorldLocal::GenerateAllInteractions() {
 		}
 
 		common->Printf( "interactionTable size: %i bytes\n", size );
-		common->Printf( "%i interaction take %i bytes\n", count, count * sizeof( idInteraction ) );
+		common->Printf( "%i interaction take %zu bytes\n", count, count * sizeof( idInteraction ) );
 	}
 
 	// entities flagged as noDynamicInteractions will no longer make any
@@ -1687,6 +2277,7 @@ idRenderWorldLocal::FreeInteractions
 ===================
 */
 void idRenderWorldLocal::FreeInteractions() {
+	R_RenderThread_Sync( "world" );
 	int			i;
 	idRenderEntityLocal	*def;
 
@@ -1700,6 +2291,119 @@ void idRenderWorldLocal::FreeInteractions() {
 			def->firstInteraction->UnlinkAndFree();
 		}
 	}
+}
+
+/*
+==================
+PushPolytopeIntoTree
+
+Quake 4 uses an oriented-box BSP walk for entity refs. The older
+bounding-sphere path can drop thin inline models entirely when all of the
+derived AABB corner points classify into solid space.
+==================
+*/
+void idRenderWorldLocal::PushPolytopeIntoTree_r( idRenderEntityLocal *def, idRenderLightLocal *light, const idBox &box, const idVec3 *points, int numPoints, int nodeNum ) {
+	while ( nodeNum >= 0 ) {
+		areaNode_t *node = areaNodes + nodeNum;
+
+		if ( r_useNodeCommonChildren.GetBool() &&
+			node->commonChildrenArea != CHILDREN_HAVE_MULTIPLE_AREAS &&
+			portalAreas[ node->commonChildrenArea ].viewCount == tr.viewCount ) {
+			return;
+		}
+
+		const idVec3 normal = node->plane.Normal();
+		const idMat3 &axis = box.GetAxis();
+		const idVec3 &extents = box.GetExtents();
+		const float distance = box.GetCenter() * normal + node->plane[3];
+		const float radius =
+			idMath::Fabs( ( axis[0] * normal ) * extents[0] ) +
+			idMath::Fabs( ( axis[1] * normal ) * extents[1] ) +
+			idMath::Fabs( ( axis[2] * normal ) * extents[2] );
+
+		if ( distance - radius >= 0.0f ) {
+			nodeNum = node->children[0];
+			if ( !nodeNum ) {
+				return;
+			}
+			continue;
+		}
+
+		if ( distance + radius <= 0.0f ) {
+			nodeNum = node->children[1];
+			if ( !nodeNum ) {
+				return;
+			}
+			continue;
+		}
+
+		if ( points != NULL && numPoints > 0 ) {
+			bool front = false;
+			bool back = false;
+
+			for ( int i = 0; i < numPoints; ++i ) {
+				const float d = points[i] * normal + node->plane[3];
+				if ( d > 0.0f ) {
+					front = true;
+				} else if ( d < 0.0f ) {
+					back = true;
+				}
+
+				if ( front && back ) {
+					break;
+				}
+			}
+
+			if ( front && back ) {
+				if ( node->children[0] ) {
+					PushPolytopeIntoTree_r( def, light, box, points, numPoints, node->children[0] );
+				}
+				nodeNum = node->children[1];
+				if ( !nodeNum ) {
+					return;
+				}
+				continue;
+			}
+
+			if ( front ) {
+				nodeNum = node->children[0];
+				if ( !nodeNum ) {
+					return;
+				}
+				continue;
+			}
+		} else {
+			if ( node->children[0] ) {
+				PushPolytopeIntoTree_r( def, light, box, points, numPoints, node->children[0] );
+			}
+		}
+
+		nodeNum = node->children[1];
+		if ( !nodeNum ) {
+			return;
+		}
+	}
+
+	portalArea_t *area = &portalAreas[ -1 - nodeNum ];
+	if ( area->viewCount == tr.viewCount ) {
+		return;
+	}
+	area->viewCount = tr.viewCount;
+
+	if ( def ) {
+		AddEntityRefToArea( def, area );
+	}
+	if ( light ) {
+		AddLightRefToArea( light, area );
+	}
+}
+
+void idRenderWorldLocal::PushPolytopeIntoTree( idRenderEntityLocal *def, idRenderLightLocal *light, const idBox &box, const idVec3 *points, int numPoints ) {
+	if ( areaNodes == NULL ) {
+		return;
+	}
+
+	PushPolytopeIntoTree_r( def, light, box, points, numPoints, 0 );
 }
 
 /*
@@ -1972,12 +2676,13 @@ void idRenderWorldLocal::DebugWinding( const idVec4 &color, const idWinding &w, 
 	int i;
 	idVec3 point, lastPoint;
 
-	if ( w.GetNumPoints() < 2 ) {
+	const int windingPointCount = w.GetNumPoints();
+	if ( windingPointCount < 2 ) {
 		return;
 	}
 
-	lastPoint = origin + w[w.GetNumPoints()-1].ToVec3() * axis;
-	for ( i = 0; i < w.GetNumPoints(); i++ ) {
+	lastPoint = origin + w[windingPointCount - 1].ToVec3() * axis;
+	for ( i = 0; i < windingPointCount; i++ ) {
 		point = origin + w[i].ToVec3() * axis;
 		DebugLine( color, lastPoint, point, lifetime, depthTest );
 		lastPoint = point;
@@ -2048,7 +2753,7 @@ void idRenderWorldLocal::DebugSphere( const idVec4 &color, const idSphere &spher
 idRenderWorldLocal::DebugBounds
 ====================
 */
-void idRenderWorldLocal::DebugBounds( const idVec4 &color, const idBounds &bounds, const idVec3 &org, const int lifetime ) {
+void idRenderWorldLocal::DebugBounds( const idVec4 &color, const idBounds &bounds, const idVec3 &org, const int lifetime, bool depthTest ) {
 	int i;
 	idVec3 v[8];
 
@@ -2062,9 +2767,9 @@ void idRenderWorldLocal::DebugBounds( const idVec4 &color, const idBounds &bound
 		v[i][2] = org[2] + bounds[(i>>2)&1][2];
 	}
 	for ( i = 0; i < 4; i++ ) {
-		DebugLine( color, v[i], v[(i+1)&3], lifetime );
-		DebugLine( color, v[4+i], v[4+((i+1)&3)], lifetime );
-		DebugLine( color, v[i], v[4+i], lifetime );
+		DebugLine( color, v[i], v[(i+1)&3], lifetime, depthTest );
+		DebugLine( color, v[4+i], v[4+((i+1)&3)], lifetime, depthTest );
+		DebugLine( color, v[i], v[4+i], lifetime, depthTest );
 	}
 }
 
@@ -2260,6 +2965,7 @@ idRenderWorldLocal::RegenerateWorld
 ===============
 */
 void idRenderWorldLocal::RegenerateWorld() {
+	R_RenderThread_Sync( "world" );
 	R_RegenerateWorld_f( idCmdArgs() );
 }
 

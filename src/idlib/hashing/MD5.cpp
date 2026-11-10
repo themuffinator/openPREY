@@ -249,7 +249,7 @@ void MD5_Final( MD5_CTX *ctx, unsigned char digest[16] ) {
 
     MD5_Transform( ctx->state, (unsigned int *) ctx->in );
     memcpy( digest, ctx->state, 16 );
-    memset( ctx, 0, sizeof( *ctx ) );       /* In case it's sensitive */
+    memset( ctx, 0, sizeof( *ctx ) );        /* In case it's sensitive */
 }
 
 /*
@@ -257,9 +257,10 @@ void MD5_Final( MD5_CTX *ctx, unsigned char digest[16] ) {
 MD5_BlockChecksum
 ===============
 */
-unsigned long MD5_BlockChecksum( const void *data, int length ) {
-	unsigned long	digest[4];
-	unsigned long	val;
+uint32_t MD5_BlockChecksum( const void *data, int length ) {
+	static_assert( sizeof( unsigned int ) == 4, "MD5 requires 32-bit digest words" );
+	unsigned int	digest[4];
+	unsigned int	val;
 	MD5_CTX			ctx;
 
 	MD5_Init( &ctx );
@@ -269,4 +270,54 @@ unsigned long MD5_BlockChecksum( const void *data, int length ) {
 	val = digest[0] ^ digest[1] ^ digest[2] ^ digest[3];
 
 	return val;
+}
+
+/*
+===============
+MD5_FileChecksum
+===============
+*/
+bool MD5_FileChecksum( const char *path, char digestHex[33] ) {
+	static const char hex[] = "0123456789abcdef";
+	unsigned char	buffer[64 * 1024];
+	unsigned char	digest[16];
+	MD5_CTX			ctx;
+	FILE *			file;
+
+	if ( digestHex ) {
+		digestHex[0] = '\0';
+	}
+
+	if ( !path || !path[0] || !digestHex ) {
+		return false;
+	}
+
+	file = fopen( path, "rb" );
+	if ( !file ) {
+		return false;
+	}
+
+	MD5_Init( &ctx );
+	while ( 1 ) {
+		const size_t bytesRead = fread( buffer, 1, sizeof( buffer ), file );
+		if ( bytesRead > 0 ) {
+			MD5_Update( &ctx, buffer, static_cast<unsigned int>( bytesRead ) );
+		}
+		if ( bytesRead < sizeof( buffer ) ) {
+			if ( ferror( file ) ) {
+				fclose( file );
+				return false;
+			}
+			break;
+		}
+	}
+	fclose( file );
+
+	MD5_Final( &ctx, digest );
+	for ( int i = 0; i < 16; i++ ) {
+		digestHex[i * 2] = hex[( digest[i] >> 4 ) & 0x0f];
+		digestHex[i * 2 + 1] = hex[digest[i] & 0x0f];
+	}
+	digestHex[32] = '\0';
+	return true;
 }

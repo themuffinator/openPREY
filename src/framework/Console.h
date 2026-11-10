@@ -63,6 +63,10 @@ public:
 	// some console commands, like timeDemo, will force the console closed before they start
 	virtual void	Close( void ) = 0;
 
+	virtual void	SetProcFileOutOfDate( bool state ) = 0;
+	virtual void	SetAASFileOutOfDate( bool state ) = 0;
+
+	virtual void	SetMousePosition( float x, float y ) = 0;
 	virtual void	Draw( bool forceFullScreen ) = 0;
 	virtual void	Print( const char *text ) = 0;
 };

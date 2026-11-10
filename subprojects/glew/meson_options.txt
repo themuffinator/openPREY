@@ -1,0 +1,6 @@
+option(
+  'openq4_sdl3_loader',
+  type: 'boolean',
+  value: false,
+  description: 'Use openQ4 SDL3 OpenGL proc-address lookup and skip GLXEW init for Linux SDL3 builds.',
+)

@@ -159,7 +159,7 @@ public:
 	idDict					epairs;
 
 public:
-							idMapEntity( void ) { epairs.SetHashSize( 64 ); }
+							idMapEntity( void ) { epairs.SetHashSize( 64 ); fromEntityStringFile = false; }
 							~idMapEntity( void ) { primitives.DeleteContents( true ); }
 // RAVEN BEGIN
 // jsinger: changed to be Lexer instead of idLexer so that we have the ability to read binary files
@@ -171,9 +171,11 @@ public:
 	void					AddPrimitive( idMapPrimitive *p ) { primitives.Append( p ); }
 	unsigned int			GetGeometryCRC( void ) const;
 	void					RemovePrimitiveData();
+	bool					IsFromEntityStringFile( void ) const { return fromEntityStringFile; }
 
 protected:
 	idList<idMapPrimitive*>	primitives;
+	bool					fromEntityStringFile;
 };
 
 
@@ -190,6 +192,9 @@ public:
 							// which is what the game and dmap want, but the editor will want to always
 							// load a .map file
 	bool					Parse( const char *filename, bool ignoreRegion = false, bool osPath = false );
+	// Apply <map>.ent as a complete entity-string replacement, then append
+	// point entities from <map>.entx. Call only after collision geometry loads.
+	bool					ApplyEntityStringFiles( void );
 
 // RAVEN BEGIN
 // rjohnson: added resolve
@@ -248,8 +253,19 @@ protected:
 	bool					mHasBeenResolved;
 // RAVEN END
 
+	// Optional runtime entity-string companions (<map>.ent and <map>.entx).
+	idStr					loadedSourceFileName;
+	unsigned int			replacementEntityFileTime;
+	unsigned int			extenderEntityFileTime;
+	bool					parsedFromOSPath;
+	bool					entityStringFilesEnabled;
+	bool					replacementEntityFileLoaded;
+	bool					extenderEntityFileLoaded;
+
 private:
 	void					SetGeometryCRC( void );
+	bool					ParseEntityStringFile( const char *extension, bool replacement, bool osPath,
+							idList<idMapEntity *> &parsedEntities, unsigned int &timestamp, bool &found );
 };
 
 ID_INLINE idMapFile::idMapFile( void ) {
@@ -262,6 +278,12 @@ ID_INLINE idMapFile::idMapFile( void ) {
 // rhummer: Used to make sure func_groups don't disappear.
 	mHasFuncGroups = false;
 // RAVEN END
+	replacementEntityFileTime = 0;
+	extenderEntityFileTime = 0;
+	parsedFromOSPath = false;
+	entityStringFilesEnabled = false;
+	replacementEntityFileLoaded = false;
+	extenderEntityFileLoaded = false;
 }
 
 #endif /* !__MAPFILE_H__ */

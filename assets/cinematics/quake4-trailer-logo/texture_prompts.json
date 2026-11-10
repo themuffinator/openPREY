@@ -1,0 +1,14 @@
+{
+  "generator": "Built-in image_gen tool",
+  "usage": "Authored albedo maps applied to modeled 3D surfaces; both are packed into the Blender scene.",
+  "assets": [
+    {
+      "path": "textures/aged_olive_enamel.png",
+      "prompt": "Use case: photorealistic-natural. Asset type: PBR base-color texture for an existing full 3D Blender reconstruction. Image 1 is a MATERIAL REFERENCE ONLY: study the dirty yellow-olive military enamel on the circular plate surrounding the red eye in this Quake 4 trailer frame. Generate one square 2048 by 2048 flat, seamless, orthographic base-color texture covering the entire canvas edge to edge. The material is decades-old faded yellow-olive enamel on cast iron: very fine pitted sandy microstructure, irregular connected tiny dark charcoal flecks and scabs of coating loss, faint short scratches, larger subtle uneven olive discoloration. Match the dirty yellow-green color of the front plate, a subdued yellow ochre olive, not luminous lime. Only about 12 percent exposed dark substrate, with clustered organic flaking; 88 percent old intact paint. Dense fine detail at several scales, naturally nonuniform. Even diffuse lighting everywhere: no shadows, specular reflections, vignetting, depth cues or gradients from illumination. Do not reproduce the scene, circle, eye, ring, border, clamps, symbols or text. No objects, no large cracks, no wood grain, no long uniform parallel scratches, no panels or seams. Output is exclusively a flat tileable material swatch, not a render of an object."
+    },
+    {
+      "path": "textures/crimson_iris.png",
+      "prompt": "Use case: photorealistic-natural. Asset type: square PBR iris color texture for a fully modeled 3D eyeball in a Blender cinematic. Make one absolutely front-facing circular human iris centered at (50%,50%), outer iris radius 48% of the square, black central pupil radius 22% of the square. The iris is rich natural fiery orange-crimson with burnt burgundy red outer zone, irregular radial stromal fibers, dark branching crypts, wavy collarette, broken radial amber-orange fibers. Extremely detailed biological structure at macro scale, not mechanical or regular spokes. The pupil must be perfectly black and circular. Dark near-black burgundy limbal ring around the outer iris. Fill outside that circular iris with dark burgundy. Entire image evenly lit flat base color map: NO highlights, NO reflections, NO white glare spots, NO illumination gradient, NO drop shadows, NO eyelids, NO eyelashes, NO text, NO white sclera, NO perspective. The result will be curved over a 3D iris mesh, so it must be a clean unlit color texture alone."
+    }
+  ]
+}

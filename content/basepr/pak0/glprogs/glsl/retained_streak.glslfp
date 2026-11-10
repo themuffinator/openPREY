@@ -1,0 +1,30 @@
+// Retained UI speed streak: The Awakening's speeder blur (hs/SpeedBlur), which
+// its HUD never showed. Each pixel averages six samples of the view toward its
+// centre, 1 to 1.5 times its reach away. The reach follows the expansion's
+// square frame (speeder_blur's falloff, measured from its mask), from nothing a
+// quarter of the view in to 5% of the view at its edges, scaled by streak.x.
+// Source is the view alone, so the frame and the centre are the view's.
+uniform sampler2D Source;
+uniform vec4 streak;
+
+varying vec2 streakTexCoord;
+
+void main(void)
+{
+	vec2 uv = streakTexCoord;
+	float edge = min( min( uv.x, 1.0 - uv.x ), min( uv.y, 1.0 - uv.y ) );
+	float t = clamp( edge * 4.0, 0.0, 1.0 );
+	float frame = pow( max( 1.0 - pow( t, 1.2 ), 0.0 ), 1.6 );
+	float strength = clamp( streak.x, 0.0, 1.0 ) * frame;
+	vec2 away = uv - vec2( 0.5 );
+	vec3 colour = texture2D( Source, uv ).rgb;
+	if ( strength > 0.0 && dot( away, away ) > 0.0 ) {
+		vec2 reach = normalize( away ) * ( strength * 0.05 );
+		colour = vec3( 0.0 );
+		for ( int i = 0; i < 6; i++ ) {
+			colour += texture2D( Source, uv - reach * ( 1.0 + 0.1 * float( i ) ) ).rgb;
+		}
+		colour /= 6.0;
+	}
+	gl_FragColor = vec4( colour, 1.0 );
+}

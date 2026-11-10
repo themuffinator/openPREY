@@ -34,8 +34,6 @@ along with Doom 3 Source Code.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(_DEBUG)
-
 typedef BOOL(WINAPI* MiniDumpWriteDumpFn)(
 	HANDLE hProcess,
 	DWORD ProcessId,
@@ -49,10 +47,10 @@ typedef BOOL(WINAPI* MiniDumpWriteDumpFn)(
 static volatile LONG g_crashHandlerEntered = 0;
 static LPTOP_LEVEL_EXCEPTION_FILTER g_prevExceptionFilter = NULL;
 
-static const DWORD OPENPREY_EXCEPTION_INVALID_PARAMETER = 0xE0000001;
-static const DWORD OPENPREY_EXCEPTION_PURECALL = 0xE0000002;
-static const DWORD OPENPREY_EXCEPTION_ABORT = 0xE0000003;
-static const DWORD OPENPREY_EXCEPTION_TERMINATE = 0xE0000004;
+static const DWORD OPENQ4_EXCEPTION_INVALID_PARAMETER = 0xE0000001;
+static const DWORD OPENQ4_EXCEPTION_PURECALL = 0xE0000002;
+static const DWORD OPENQ4_EXCEPTION_ABORT = 0xE0000003;
+static const DWORD OPENQ4_EXCEPTION_TERMINATE = 0xE0000004;
 
 /*
 ====================
@@ -122,10 +120,10 @@ static const char* Sys_GetExceptionCodeName(DWORD code) {
 	case EXCEPTION_PRIV_INSTRUCTION: return "EXCEPTION_PRIV_INSTRUCTION";
 	case EXCEPTION_SINGLE_STEP: return "EXCEPTION_SINGLE_STEP";
 	case EXCEPTION_STACK_OVERFLOW: return "EXCEPTION_STACK_OVERFLOW";
-	case OPENPREY_EXCEPTION_INVALID_PARAMETER: return "OPENPREY_INVALID_PARAMETER";
-	case OPENPREY_EXCEPTION_PURECALL: return "OPENPREY_PURECALL";
-	case OPENPREY_EXCEPTION_ABORT: return "OPENPREY_ABORT";
-	case OPENPREY_EXCEPTION_TERMINATE: return "OPENPREY_TERMINATE";
+	case OPENQ4_EXCEPTION_INVALID_PARAMETER: return "OPENQ4_INVALID_PARAMETER";
+	case OPENQ4_EXCEPTION_PURECALL: return "OPENQ4_PURECALL";
+	case OPENQ4_EXCEPTION_ABORT: return "OPENQ4_ABORT";
+	case OPENQ4_EXCEPTION_TERMINATE: return "OPENQ4_TERMINATE";
 	default: return "EXCEPTION_UNKNOWN";
 	}
 }
@@ -145,7 +143,7 @@ Sys_InvalidParameterHandler
 ====================
 */
 static void __cdecl Sys_InvalidParameterHandler(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {
-	Sys_RaiseSyntheticException(OPENPREY_EXCEPTION_INVALID_PARAMETER);
+	Sys_RaiseSyntheticException(OPENQ4_EXCEPTION_INVALID_PARAMETER);
 }
 
 /*
@@ -154,7 +152,7 @@ Sys_PurecallHandler
 ====================
 */
 static void __cdecl Sys_PurecallHandler(void) {
-	Sys_RaiseSyntheticException(OPENPREY_EXCEPTION_PURECALL);
+	Sys_RaiseSyntheticException(OPENQ4_EXCEPTION_PURECALL);
 }
 
 /*
@@ -163,7 +161,7 @@ Sys_AbortSignalHandler
 ====================
 */
 static void __cdecl Sys_AbortSignalHandler(int) {
-	Sys_RaiseSyntheticException(OPENPREY_EXCEPTION_ABORT);
+	Sys_RaiseSyntheticException(OPENQ4_EXCEPTION_ABORT);
 }
 
 /*
@@ -172,7 +170,7 @@ Sys_TerminateHandler
 ====================
 */
 static void __cdecl Sys_TerminateHandler(void) {
-	Sys_RaiseSyntheticException(OPENPREY_EXCEPTION_TERMINATE);
+	Sys_RaiseSyntheticException(OPENQ4_EXCEPTION_TERMINATE);
 }
 
 /*
@@ -198,6 +196,49 @@ static bool Sys_GetExecutableDir(char* outDir, size_t outDirSize) {
 	}
 
 	return false;
+}
+
+/*
+====================
+Sys_GetAddressModuleInfo
+
+Resolve an instruction address without loading a new module or taking a
+reference on an existing one. This stays deliberately small and loader-safe so
+the crash path can identify driver and injected-hook faults even when symbol
+files are unavailable.
+====================
+*/
+static bool Sys_GetAddressModuleInfo(
+	const void* address,
+	char* outModulePath,
+	size_t outModulePathSize,
+	uintptr_t& outModuleBase,
+	uintptr_t& outModuleOffset
+) {
+	outModuleBase = 0;
+	outModuleOffset = 0;
+	if (!address || !outModulePath || outModulePathSize < 2) {
+		return false;
+	}
+
+	outModulePath[0] = '\0';
+	MEMORY_BASIC_INFORMATION memoryInfo;
+	memset(&memoryInfo, 0, sizeof(memoryInfo));
+	if (VirtualQuery(address, &memoryInfo, sizeof(memoryInfo)) != sizeof(memoryInfo) || !memoryInfo.AllocationBase) {
+		return false;
+	}
+
+	const HMODULE module = (HMODULE)memoryInfo.AllocationBase;
+	const DWORD pathLength = GetModuleFileNameA(module, outModulePath, (DWORD)outModulePathSize);
+	if (pathLength == 0 || pathLength >= outModulePathSize) {
+		outModulePath[0] = '\0';
+		return false;
+	}
+
+	outModuleBase = (uintptr_t)module;
+	const uintptr_t instruction = (uintptr_t)address;
+	outModuleOffset = instruction >= outModuleBase ? instruction - outModuleBase : 0;
+	return true;
 }
 
 /*
@@ -352,11 +393,20 @@ static void Sys_WriteCrashLog(
 
 	DWORD exceptionCode = er ? er->ExceptionCode : 0;
 	const void* exceptionAddress = er ? er->ExceptionAddress : NULL;
+	char exceptionModulePath[MAX_PATH];
+	uintptr_t exceptionModuleBase = 0;
+	uintptr_t exceptionModuleOffset = 0;
+	const bool exceptionModuleResolved = Sys_GetAddressModuleInfo(
+		exceptionAddress,
+		exceptionModulePath,
+		ARRAYSIZE(exceptionModulePath),
+		exceptionModuleBase,
+		exceptionModuleOffset);
 
 	Sys_StringPrintf(
 		logBuffer,
 		ARRAYSIZE(logBuffer),
-		"OpenPrey debug crash report\r\n"
+		"openPREY crash report\r\n"
 		"Timestamp: %04u-%02u-%02u %02u:%02u:%02u.%03u\r\n"
 		"ProcessId: %lu\r\n"
 		"ThreadId: %lu\r\n"
@@ -384,6 +434,19 @@ static void Sys_WriteCrashLog(
 		dumpPath,
 		(unsigned long)dumpError
 	);
+
+	if (exceptionModuleResolved) {
+		Sys_StringAppendf(
+			logBuffer,
+			ARRAYSIZE(logBuffer),
+			"ExceptionModule: %s\r\n"
+			"ExceptionModuleBase: 0x%p\r\n"
+			"ExceptionModuleOffset: 0x%llX\r\n",
+			exceptionModulePath,
+			(void*)exceptionModuleBase,
+			(unsigned long long)exceptionModuleOffset
+		);
+	}
 
 	if (er && er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2) {
 		const char* accessType = "unknown";
@@ -435,6 +498,28 @@ static void Sys_WriteCrashLog(
 			(unsigned long)ctx->Esi, (unsigned long)ctx->Edi, (unsigned long)ctx->Ebp, (unsigned long)ctx->Esp,
 			(unsigned long)ctx->Eip, (unsigned long)ctx->EFlags
 		);
+#elif defined(_M_ARM64)
+		Sys_StringAppendf(
+			logBuffer,
+			ARRAYSIZE(logBuffer),
+			"\r\n"
+			"PC =0x%016llX SP =0x%016llX FP =0x%016llX LR =0x%016llX\r\n"
+			"Cpsr=0x%08lX Fpcr=0x%08lX Fpsr=0x%08lX\r\n",
+			(unsigned long long)ctx->Pc, (unsigned long long)ctx->Sp,
+			(unsigned long long)ctx->Fp, (unsigned long long)ctx->Lr,
+			(unsigned long)ctx->Cpsr, (unsigned long)ctx->Fpcr, (unsigned long)ctx->Fpsr
+		);
+		// X0-X28. X29/X30 are reported above as FP/LR.
+		for (int reg = 0; reg < 29; reg++) {
+			Sys_StringAppendf(
+				logBuffer,
+				ARRAYSIZE(logBuffer),
+				"X%-2d=0x%016llX%s",
+				reg,
+				(unsigned long long)ctx->X[reg],
+				((reg % 4) == 3 || reg == 28) ? "\r\n" : " "
+			);
+		}
 #endif
 	}
 
@@ -445,10 +530,10 @@ static void Sys_WriteCrashLog(
 
 /*
 ====================
-Sys_DebugUnhandledExceptionFilter
+Sys_UnhandledExceptionFilter
 ====================
 */
-static LONG WINAPI Sys_DebugUnhandledExceptionFilter(LPEXCEPTION_POINTERS exceptionInfo) {
+static LONG WINAPI Sys_UnhandledExceptionFilter(LPEXCEPTION_POINTERS exceptionInfo) {
 	if (g_prevExceptionFilter) {
 		const LONG prevAction = g_prevExceptionFilter(exceptionInfo);
 		if (prevAction != EXCEPTION_CONTINUE_SEARCH) {
@@ -479,7 +564,7 @@ static LONG WINAPI Sys_DebugUnhandledExceptionFilter(LPEXCEPTION_POINTERS except
 		Sys_StringPrintf(
 			message,
 			ARRAYSIZE(message),
-			"OpenPrey encountered an unhandled exception.\n\n"
+			"openPREY encountered an unhandled exception.\n\n"
 			"Crash log:\n%s\n\n"
 			"Crash dump:\n%s\n\n"
 			"Please attach both files when reporting this issue.",
@@ -491,7 +576,7 @@ static LONG WINAPI Sys_DebugUnhandledExceptionFilter(LPEXCEPTION_POINTERS except
 		Sys_StringPrintf(
 			message,
 			ARRAYSIZE(message),
-			"OpenPrey encountered an unhandled exception.\n\n"
+			"openPREY encountered an unhandled exception.\n\n"
 			"Crash log:\n%s\n\n"
 			"Failed to create crash dump (error 0x%08lX).",
 			logPath,
@@ -499,29 +584,29 @@ static LONG WINAPI Sys_DebugUnhandledExceptionFilter(LPEXCEPTION_POINTERS except
 		);
 	}
 
-	MessageBoxA(NULL, message, "OpenPrey Debug Crash", MB_ICONERROR | MB_OK | MB_SYSTEMMODAL);
+	MessageBoxA(NULL, message, "openPREY Crash", MB_ICONERROR | MB_OK | MB_SYSTEMMODAL);
 
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
 /*
 ====================
-Sys_InstallDebugCrashHandler
+Sys_InstallCrashHandler
 ====================
 */
-void Sys_InstallDebugCrashHandler(void) {
+void Sys_InstallCrashHandler(void) {
+	// A stack overflow runs the exception filter in the few KB past the guard
+	// page. The 8 KB log buffer, the path buffers, LoadLibrary and
+	// MiniDumpWriteDump need more, so the report faulted again and the process
+	// died with no log or dump. Reserve headroom on this (the main) thread;
+	// its 16 MB stack makes 128 KB a small price.
+	ULONG stackGuarantee = 128 * 1024;
+	SetThreadStackGuarantee(&stackGuarantee);
 	_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 	_set_invalid_parameter_handler(Sys_InvalidParameterHandler);
 	_set_purecall_handler(Sys_PurecallHandler);
 	signal(SIGABRT, Sys_AbortSignalHandler);
 	std::set_terminate(Sys_TerminateHandler);
 
-	g_prevExceptionFilter = SetUnhandledExceptionFilter(Sys_DebugUnhandledExceptionFilter);
+	g_prevExceptionFilter = SetUnhandledExceptionFilter(Sys_UnhandledExceptionFilter);
 }
-
-#else
-
-void Sys_InstallDebugCrashHandler(void) {
-}
-
-#endif

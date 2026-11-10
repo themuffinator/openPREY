@@ -1,0 +1,152 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Vulkan port of openQ4's live smaa_weights.fs material program.
+
+layout(set = 0, binding = 0) uniform sampler2D EdgesTex;
+layout(set = 1, binding = 0) uniform sampler2D AreaTex;
+layout(set = 2, binding = 0) uniform sampler2D SearchTex;
+
+layout(set = 6, binding = 0, std140) uniform MaterialShaderParms {
+    vec4 shaderParms[16];
+} material;
+
+#include "material_image_coords.glsl"
+
+layout(location = 0) in vec2 vTexCoord;
+layout(location = 0) out vec4 outColor;
+
+const float kAreaMaxDistance = 16.0;
+const vec2 kAreaTexPixelSize = vec2(1.0 / 160.0, 1.0 / 560.0);
+const float kAreaTexSubtexSize = 1.0 / 7.0;
+const vec2 kSearchTexSize = vec2(66.0, 33.0);
+const vec2 kSearchTexPackedSize = vec2(64.0, 16.0);
+
+float MaxSearchSteps() {
+    return clamp(material.shaderParms[2].z, 1.0, 32.0);
+}
+
+vec2 RoundVec2(vec2 value) {
+    return floor(value + vec2(0.5));
+}
+
+float SampleSearchLength(vec2 e, float offsetValue) {
+    vec2 scale = kSearchTexSize * vec2(0.5, -1.0);
+    vec2 bias = kSearchTexSize * vec2(offsetValue, 1.0);
+    scale += vec2(-1.0, 1.0);
+    bias += vec2(0.5, -0.5);
+    scale /= kSearchTexPackedSize;
+    bias /= kSearchTexPackedSize;
+    return texture(SearchTex, MaterialImageCoord(scale * e + bias, 2u)).r;
+}
+
+float SearchXLeft(vec2 texcoord, float endValue) {
+    vec2 invTexSize = material.shaderParms[0].xy;
+    vec2 e = vec2(0.0, 1.0);
+    while (texcoord.x > endValue && e.g > 0.8281 && e.r == 0.0) {
+        e = texture(EdgesTex, MaterialImageCoord(texcoord, 0u)).rg;
+        texcoord -= vec2(2.0 * invTexSize.x, 0.0);
+    }
+    float offsetValue =
+        -(255.0 / 127.0) * SampleSearchLength(e, 0.0) + 3.25;
+    return invTexSize.x * offsetValue + texcoord.x;
+}
+
+float SearchXRight(vec2 texcoord, float endValue) {
+    vec2 invTexSize = material.shaderParms[0].xy;
+    vec2 e = vec2(0.0, 1.0);
+    while (texcoord.x < endValue && e.g > 0.8281 && e.r == 0.0) {
+        e = texture(EdgesTex, MaterialImageCoord(texcoord, 0u)).rg;
+        texcoord += vec2(2.0 * invTexSize.x, 0.0);
+    }
+    float offsetValue =
+        -(255.0 / 127.0) * SampleSearchLength(e, 0.5) + 3.25;
+    return -invTexSize.x * offsetValue + texcoord.x;
+}
+
+float SearchYUp(vec2 texcoord, float endValue) {
+    vec2 invTexSize = material.shaderParms[0].xy;
+    vec2 e = vec2(1.0, 0.0);
+    while (texcoord.y > endValue && e.r > 0.8281 && e.g == 0.0) {
+        e = texture(EdgesTex, MaterialImageCoord(texcoord, 0u)).rg;
+        texcoord -= vec2(0.0, 2.0 * invTexSize.y);
+    }
+    float offsetValue =
+        -(255.0 / 127.0) * SampleSearchLength(e.gr, 0.0) + 3.25;
+    return invTexSize.y * offsetValue + texcoord.y;
+}
+
+float SearchYDown(vec2 texcoord, float endValue) {
+    vec2 invTexSize = material.shaderParms[0].xy;
+    vec2 e = vec2(1.0, 0.0);
+    while (texcoord.y < endValue && e.r > 0.8281 && e.g == 0.0) {
+        e = texture(EdgesTex, MaterialImageCoord(texcoord, 0u)).rg;
+        texcoord += vec2(0.0, 2.0 * invTexSize.y);
+    }
+    float offsetValue =
+        -(255.0 / 127.0) * SampleSearchLength(e.gr, 0.5) + 3.25;
+    return -invTexSize.y * offsetValue + texcoord.y;
+}
+
+vec2 SampleArea(vec2 dist, float e1, float e2, float offsetValue) {
+    vec2 texcoord =
+        vec2(kAreaMaxDistance) * RoundVec2(4.0 * vec2(e1, e2)) + dist;
+    texcoord = kAreaTexPixelSize * texcoord + 0.5 * kAreaTexPixelSize;
+    texcoord.y = kAreaTexSubtexSize * offsetValue + texcoord.y;
+    return texture(AreaTex, MaterialImageCoord(texcoord, 1u)).rg;
+}
+
+void main() {
+    vec2 invTexSize = material.shaderParms[0].xy;
+    vec2 texSize = material.shaderParms[1].xy;
+    vec2 texcoord = vTexCoord;
+    vec2 rtSize = max(texSize, vec2(1.0));
+    vec2 pixcoord = texcoord * rtSize;
+    float maxSearchSteps = MaxSearchSteps();
+
+    vec4 offset0 =
+        invTexSize.xyxy * vec4(-0.25, -0.125, 1.25, -0.125)
+        + texcoord.xyxy;
+    vec4 offset1 =
+        invTexSize.xyxy * vec4(-0.125, -0.25, -0.125, 1.25)
+        + texcoord.xyxy;
+    vec4 offset2 =
+        vec4(invTexSize.x, invTexSize.x, invTexSize.y, invTexSize.y)
+        * (vec4(-2.0, 2.0, -2.0, 2.0) * maxSearchSteps)
+        + vec4(offset0.x, offset0.z, offset1.y, offset1.w);
+
+    vec4 weights = vec4(0.0);
+    vec2 e = texture(EdgesTex, MaterialImageCoord(texcoord, 0u)).rg;
+
+    if (e.g > 0.0) {
+        vec3 coords;
+        coords.x = SearchXLeft(offset0.xy, offset2.x);
+        coords.y = offset1.y;
+        float leftEdge = texture(EdgesTex, MaterialImageCoord(coords.xy, 0u)).r;
+
+        coords.z = SearchXRight(offset0.zw, offset2.y);
+        vec2 d = abs(RoundVec2(
+            rtSize.xx * vec2(coords.x, coords.z) - pixcoord.xx));
+        vec2 sqrtD = sqrt(d);
+        float rightEdge =
+            texture(EdgesTex, MaterialImageCoord(coords.zy + vec2(invTexSize.x, 0.0), 0u)).r;
+        weights.rg = SampleArea(sqrtD, leftEdge, rightEdge, 0.0);
+    }
+
+    if (e.r > 0.0) {
+        vec3 coords;
+        coords.y = SearchYUp(offset1.xy, offset2.z);
+        coords.x = offset0.x;
+        float topEdge = texture(EdgesTex, MaterialImageCoord(coords.xy, 0u)).g;
+
+        coords.z = SearchYDown(offset1.zw, offset2.w);
+        vec2 d = abs(RoundVec2(
+            rtSize.yy * vec2(coords.y, coords.z) - pixcoord.yy));
+        vec2 sqrtD = sqrt(d);
+        float bottomEdge =
+            texture(EdgesTex, MaterialImageCoord(coords.xz + vec2(0.0, invTexSize.y), 0u)).g;
+        weights.ba = SampleArea(sqrtD, topEdge, bottomEdge, 0.0);
+    }
+
+    outColor = weights;
+}

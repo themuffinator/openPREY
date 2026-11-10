@@ -6,15 +6,43 @@ int idHashIndex::INVALID_INDEX[1] = { -1 };
 
 /*
 ================
+idHashIndex::NormalizeHashSize
+================
+*/
+int idHashIndex::NormalizeHashSize( const int hashSize ) {
+	if ( hashSize <= 0 ) {
+		return DEFAULT_HASH_SIZE;
+	}
+	if ( idMath::IsPowerOfTwo( hashSize ) ) {
+		return hashSize;
+	}
+	if ( hashSize > ( 1 << 30 ) ) {
+		return ( 1 << 30 );
+	}
+	return idMath::CeilPowerOfTwo( hashSize );
+}
+
+/*
+================
+idHashIndex::NormalizeIndexSize
+================
+*/
+int idHashIndex::NormalizeIndexSize( const int indexSize ) {
+	return Max( 0, indexSize );
+}
+
+/*
+================
 idHashIndex::Init
 ================
 */
 void idHashIndex::Init( const int initialHashSize, const int initialIndexSize ) {
-	assert( idMath::IsPowerOfTwo( initialHashSize ) );
+	const int normalizedHashSize = NormalizeHashSize( initialHashSize );
+	assert( idMath::IsPowerOfTwo( normalizedHashSize ) );
 
-	hashSize = initialHashSize;
+	hashSize = normalizedHashSize;
 	hash = INVALID_INDEX;
-	indexSize = initialIndexSize;
+	indexSize = NormalizeIndexSize( initialIndexSize );
 	indexChain = INVALID_INDEX;
 	granularity = DEFAULT_HASH_GRANULARITY;
 	hashMask = hashSize - 1;
@@ -33,7 +61,9 @@ idHashIndex::Allocate
 ================
 */
 void idHashIndex::Allocate( const int newHashSize, const int newIndexSize ) {
-	assert( idMath::IsPowerOfTwo( newHashSize ) );
+	const int normalizedHashSize = NormalizeHashSize( newHashSize );
+	const int normalizedIndexSize = Max( 1, NormalizeIndexSize( newIndexSize ) );
+	assert( idMath::IsPowerOfTwo( normalizedHashSize ) );
 
 	Free();
 
@@ -47,10 +77,10 @@ void idHashIndex::Allocate( const int newHashSize, const int newIndexSize ) {
 #endif
 // RAVEN END
 
-	hashSize = newHashSize;
+	hashSize = normalizedHashSize;
 	hash = new int[hashSize];
 	memset( hash, 0xff, hashSize * sizeof( hash[0] ) );
-	indexSize = newIndexSize;
+	indexSize = normalizedIndexSize;
 	indexChain = new int[indexSize];
 	memset( indexChain, 0xff, indexSize * sizeof( indexChain[0] ) );
 	hashMask = hashSize - 1;
@@ -96,12 +126,16 @@ void idHashIndex::ResizeIndex( const int newIndexSize ) {
 		return;
 	}
 
+	granularity = Max( 1, granularity );
 	mod = newIndexSize % granularity;
 	if ( !mod ) {
+		newSize = newIndexSize;
+	} else if ( newIndexSize > idMath::INT_MAX - ( granularity - mod ) ) {
 		newSize = newIndexSize;
 	} else {
 		newSize = newIndexSize + granularity - mod;
 	}
+	newSize = NormalizeIndexSize( newSize );
 
 	if ( indexChain == INVALID_INDEX ) {
 		indexSize = newSize;
@@ -146,7 +180,7 @@ idHashIndex::GetSpread
 int idHashIndex::GetSpread( void ) const {
 	int i, index, totalItems, *numHashItems, average, error, e;
 
-	if ( hash == INVALID_INDEX ) {
+	if ( hash == INVALID_INDEX || indexChain == INVALID_INDEX || hashSize <= 0 || indexSize <= 0 ) {
 		return 100;
 	}
 
@@ -177,6 +211,9 @@ int idHashIndex::GetSpread( void ) const {
 	for ( i = 0; i < hashSize; i++ ) {
 		numHashItems[i] = 0;
 		for ( index = hash[i]; index >= 0; index = indexChain[index] ) {
+			if ( index >= indexSize ) {
+				break;
+			}
 			numHashItems[i]++;
 		}
 		totalItems += numHashItems[i];
@@ -195,7 +232,7 @@ int idHashIndex::GetSpread( void ) const {
 		}
 	}
 	delete[] numHashItems;
-	return 100 - (error * 100 / totalItems);
+	return idMath::ClampInt( 0, 100, 100 - (error * 100 / totalItems) );
 }
 
 // RAVEN BEGIN

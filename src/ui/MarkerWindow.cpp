@@ -29,15 +29,10 @@ If you have questions concerning this license or the applicable additional terms
 
 
 
-// included for image uploading for player stat graph
-#include "../renderer/Image.h"
-
 #include "DeviceContext.h"
 #include "Window.h"
 #include "UserInterfaceLocal.h"
 #include "MarkerWindow.h"
-
-class idImage;
 void idMarkerWindow::CommonInit() {
 	numStats = 0;
 	currentTime = -1;
@@ -321,7 +316,6 @@ void idMarkerWindow::Activate(bool activate, idStr &act) {
 			fileSystem->FreeFileList( markers );
 			memset(imageBuff, 0, 512*64*4);
 			float step = 511.0f / (numStats - 1);
-			float startX = 0;
 			float x1, y1, x2, y2;
 			x1 = 0 - step;
 			for (i = 0; i < numStats-1; i++) {
@@ -341,10 +335,7 @@ void idMarkerWindow::Activate(bool activate, idStr &act) {
 				y2 = 63 * ((float)loggedStats[i+1].combat / COMBAT_MAX);
 				Line(x1, y1, x2, y2, imageBuff, 0xff00ffff);
 			}
-			const shaderStage_t *stage = background->GetStage(0);
-			if (stage) {
-				stage->texture.image->UploadScratch((byte*)imageBuff, 512, 64);			
-			}
+			renderSystem->UploadMaterialStageScratchImage(background, 0, (byte*)imageBuff, 512, 64);
 			Mem_Free(imageBuff);
 		}
 	}

@@ -201,7 +201,7 @@ LONG CPropTreeItemCombo::FindCBData(LPARAM lParam)
 	
 	for (idx = 0; idx < GetCount(); idx++)
 	{
-		if (GetItemData(idx)==(DWORD)lParam)
+		if ( GetItemData( idx ) == static_cast< DWORD_PTR >( lParam ) )
 			return idx;
 	}
 

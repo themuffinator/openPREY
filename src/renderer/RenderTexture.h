@@ -47,30 +47,76 @@ public:
 							idRenderTexture(idImage *colorImage, idImage *depthImage);
 							~idRenderTexture();
 
-	ID_INLINE int			GetWidth() const { return ( colorImages.Num() > 0 ) ? colorImages[0]->GetUploadWidth() : depthImage->GetUploadWidth(); }
-	ID_INLINE int			GetHeight() const { return (colorImages.Num() > 0) ? colorImages[0]->GetUploadHeight() : depthImage->GetUploadHeight(); }
+	ID_INLINE int			GetWidth() const { return ( colorImages.Num() > 0 ) ? colorImages[0]->GetUploadWidth() : ( depthImage != NULL ? depthImage->GetUploadWidth() : 0 ); }
+	ID_INLINE int			GetHeight() const { return ( colorImages.Num() > 0 ) ? colorImages[0]->GetUploadHeight() : ( depthImage != NULL ? depthImage->GetUploadHeight() : 0 ); }
 
 	ID_INLINE idImage *		GetColorImage(int idx) const { return colorImages[idx]; }
 	ID_INLINE idImage *		GetDepthImage() const { return depthImage; }
 
 	int						GetNumColorImages() const { return colorImages.Num(); }
 
-	void					Resize( int width, int height );
-	void					EnsureDeviceHandle( void );
+	bool					Resize( int width, int height );
+	bool					EnsureDeviceHandle( void );
 
-	void					MakeCurrent( void );
-	void					MakeCurrent( int cubeFace );
+	bool					MakeCurrent( void );
+	bool					MakeCurrent( int cubeFace );
 	static void				BindNull(void);
 
-	GLuint					GetDeviceHandle(void) { return deviceHandle; }
+	unsigned int					GetDeviceHandle(void);
+	void					SetDebugLabel( const char *label );
 
 	void					AddRenderImage(idImage *image);
-	void					InitRenderTexture(void);
+	bool					InitRenderTexture(void);
+
+	// Compatibility no-op for older shadow-target call sites. FBO incompleteness
+	// is universally non-fatal now, including initial creation and resize.
+	ID_INLINE void			SetAllowIncomplete( void ) {}
+	ID_INLINE bool			IsKnownIncomplete( void ) const { return knownIncomplete; }
 private:
+	bool					HasCurrentDeviceHandle( void ) const;
+	void					ReleaseDeviceHandle( void );
+	bool					FailFramebuffer( unsigned int status, const char *operation );
+	void					ReportFramebufferFailure( unsigned int status, const char *operation ) const;
+	bool					NeedsAttachmentRefresh( void ) const;
+	void					CaptureAttachmentHandles( void );
+	void					ApplyDebugLabel( void ) const;
 
 	idList<idImage *>	colorImages;
 	idImage *			depthImage;
-	GLuint				deviceHandle;
+	unsigned int				deviceHandle;
+	int					deviceHandleGeneration;
+	unsigned int		validatedCubeFaces;
+	bool				knownIncomplete = false;
+	int					incompleteGeneration = -1;
+	idStr				debugLabel;
+	idList<unsigned int>		cachedColorHandles;
+	unsigned int				cachedDepthHandle;
+	idList<uint64_t>	cachedColorGenerations;
+	uint64_t			cachedDepthGeneration;
 };
+
+/*
+================================================
+openQ4: the frame's default target.
+
+Desktop frames draw to the window's framebuffer. A VR frame stands an eye or
+virtual-screen render texture in for it, and every "unbind"
+(idRenderTexture::BindNull) then binds that stand-in instead, so the backend's
+"present to the back buffer" paths land in the headset's targets unchanged.
+================================================
+*/
+void				R_SetDefaultRenderTarget( idRenderTexture *target );
+idRenderTexture *	R_GetDefaultRenderTarget( void );
+// GL framebuffer name of the default target (0 for the window)
+unsigned int		R_DefaultFramebufferHandle( void );
+// GL_BACK for the window, GL_COLOR_ATTACHMENT0 for a stand-in
+unsigned int		R_DefaultColorBuffer( void );
+// glDrawBuffer/glReadBuffer for the default target, which must be bound
+void				R_SetDefaultDrawAndReadBuffers( void );
+// The VR virtual screen is composited over the world as a premultiplied-alpha
+// layer, so drawing into it keeps a coverage alpha (GL_State blends alpha
+// separately) while the default target is bound.
+void				R_SetDefaultRenderTargetPremultiplied( bool premultiplied );
+bool				R_PremultipliedDefaultTargetBound( void );
 
 #endif //!__RENDERTEXTURE_H__

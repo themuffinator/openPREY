@@ -7,19 +7,27 @@
 ===============================================================================
 */
 
+#include "openq4_version_generated.h"
+
 // RAVEN BEGIN
 // rjohnson: this is the name of the game we are making
-#define PROJECT_NAME					"OpenPrey"
+#define PROJECT_NAME					"openPREY"
 #define PROJECT_AUTHOR					"themuffinator"
 #define PROJECT_COMPANY				"DarkMatter Productions"
-#define PROJECT_VERSION				"0.0.1"
+#define PROJECT_VERSION				OPENQ4_VERSION_SHORT
+#define PROJECT_VERSION_FULL			OPENQ4_VERSION
+#define PROJECT_VERSION_DATE			OPENQ4_VERSION_DATE
 #define PROJECT_WEBSITE				"www.darkmatter-quake.com"
-#define PROJECT_REPO					"https://github.com/themuffinator/OpenPrey"
+#define PROJECT_REPO					"https://github.com/themuffinator/openPREY"
+#define PROJECT_RELEASES_URL			PROJECT_REPO "/releases"
 
-#define GAME_NAME						PROJECT_NAME			// appears on window titles and errors
+#define GAME_NAME						PROJECT_NAME			// appears on errors and secondary windows
 #define GAME_ICON						"assets/icons/prey.ico"
 
-#define ENGINE_VERSION					PROJECT_NAME "-" PROJECT_VERSION
+// caption of the main game window: "openPREY - Version: 0.0.1-dev (2026-11-10)"
+#define GAME_WINDOW_TITLE				PROJECT_NAME " - Version: " PROJECT_VERSION " (" PROJECT_VERSION_DATE ")"
+
+#define ENGINE_VERSION					PROJECT_NAME " " PROJECT_VERSION
 
 // jnewquist: build type
 #if defined(_DEBUG)
@@ -38,30 +46,37 @@
 #endif
 
 // paths
-#define	CD_BASEDIR						"OpenPrey"
+#define	CD_BASEDIR						"openPREY"
 #define	BASE_GAMEDIR					"base"
 #define	BASE_MPGAMEDIR					"base"
 #define OPENPREY_GAMEDIR				"basepr"
+// Compatibility macro retained while inherited engine call sites are renamed.
+#define OPENQ4_GAMEDIR					OPENPREY_GAMEDIR
 #define	DEMO_GAMEDIR					"demo"
 #define	GAME_PLAYERDEFNAME				"player_tommy"
 #define GAME_PLAYERDEFNAME_MP			"player_tommy_mp"
 
 // filenames
 #if defined( _M_X64 ) || defined( __x86_64__ )
-	#define OPENPREY_BINARY_ARCH		"x64"
+	#define OPENQ4_BINARY_ARCH			"x64"
 #elif defined( _M_IX86 ) || defined( __i386__ )
-	#define OPENPREY_BINARY_ARCH		"x86"
+	#define OPENQ4_BINARY_ARCH			"x86"
 #elif defined( _M_ARM64 ) || defined( __aarch64__ )
-	#define OPENPREY_BINARY_ARCH		"arm64"
+	#define OPENQ4_BINARY_ARCH			"arm64"
 #else
-	#define OPENPREY_BINARY_ARCH		"unknown"
+	#define OPENQ4_BINARY_ARCH			"unknown"
 #endif
-#define	CD_EXE							PROJECT_NAME "-client_" OPENPREY_BINARY_ARCH ".exe"
+#define	CD_EXE							PROJECT_NAME "-client_" OPENQ4_BINARY_ARCH ".exe"
 
+// Read-only compatibility names for settings written before the openPREY casing settled.
 #ifdef _XENON
-#define CONFIG_FILE						"save:/OpenPreyConfig.cfg"
+#define CONFIG_FILE						"save:/openPREYConfig.cfg"
+#define INTERIM_CONFIG_FILE				"save:/OpenPREYConfig.cfg"
+#define LEGACY_CONFIG_FILE				"save:/OpenPreyConfig.cfg"
 #else
-#define CONFIG_FILE						"OpenPreyConfig.cfg"
+#define CONFIG_FILE						"openPREYConfig.cfg"
+#define INTERIM_CONFIG_FILE				"OpenPREYConfig.cfg"
+#define LEGACY_CONFIG_FILE				"OpenPreyConfig.cfg"
 #endif
 
 // base folder where the source code lives
@@ -118,24 +133,28 @@
 #define ASYNC_PROTOCOL_MAJOR			2
 // RAVEN END
 
-// Savegame Version
-// Update when you can no longer maintain compatibility with previous savegames.
-// For testing, we're using the build number to ensure no one ever tries to load a stale savegame
-#define SAVEGAME_VERSION				114
+// Savegame header compatibility. New openPREY saves use the Prey name while the
+// inherited Quake 4 and legacy openQ4 names remain readable during migration.
+#define SAVEGAME_GAME_NAME_PREY				"Prey"
+#define SAVEGAME_GAME_NAME_RETAIL				"Quake4"
+#define SAVEGAME_GAME_NAME_LEGACY_OPENQ4		"openQ4"
+#define SAVEGAME_VERSION						1834
+#define LEGACY_OPENQ4_SAVEGAME_VERSION			0
+#define LEGACY_OPENQ4_SAVEGAME_VERSION_ALT		1
 
 // editor info
 #define EDITOR_WINDOWTEXT				"QuakeEdit"
 
 // win32 info
-#define WIN32_CONSOLE_CLASS				"OpenPrey WinConsole"
-#define WIN32_SPLASH_CLASS				"OpenPrey Splash"
-#define	WIN32_WINDOW_CLASS_NAME			"OpenPrey"
+#define WIN32_CONSOLE_CLASS				"openPREY WinConsole"
+#define WIN32_SPLASH_CLASS				"openPREY Splash"
+#define	WIN32_WINDOW_CLASS_NAME			"openPREY"
 #define	WIN32_FAKE_WINDOW_CLASS_NAME	"OPENPREY_WGL_FAKE"
 
 #ifdef __linux__
 	#define DEFAULT_BASE_PATH				"/usr/local/games/basepr"
 #elif defined( MACOS_X )
-	#define DEFAULT_BASE_PATH				"/Applications/OpenPrey"
+	#define DEFAULT_BASE_PATH				"/Applications/openPREY"
 #endif
 
 // CD Key file info
@@ -179,11 +198,11 @@
 #endif
 
 #if 1
-#define GOLD							1
+#define GOLD								1
 #define CONSOLE_IDENTITY				0
 #define REMOTE_DMAP						0
 #else
-#define GOLD							0
+#define GOLD								0
 #define CONSOLE_IDENTITY				1
 #define REMOTE_DMAP						1
 #endif

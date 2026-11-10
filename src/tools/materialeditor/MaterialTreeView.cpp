@@ -773,7 +773,7 @@ void MaterialTreeView::OnTvnEndlabeledit(NMHDR *pNMHDR, LRESULT *pResult) {
 		//Convert any edited text to lower case to keep the name canonical
 		idStr newLabel = pTVDispInfo->item.pszText;
 		newLabel.ToLower();
-		strncpy( pTVDispInfo->item.pszText, newLabel.c_str(), pTVDispInfo->item.cchTextMax);
+		idStr::Copynz( pTVDispInfo->item.pszText, newLabel.c_str(), pTVDispInfo->item.cchTextMax );
 
 		CTreeCtrl& tree = GetTreeCtrl();
 		DWORD type = tree.GetItemData(pTVDispInfo->item.hItem);

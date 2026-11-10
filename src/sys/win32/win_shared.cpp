@@ -33,13 +33,166 @@ If you have questions concerning this license or the applicable additional terms
 #include <lmerr.h>
 #include <lmcons.h>
 #include <lmwksta.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <direct.h>
 #include <io.h>
-#include <conio.h>
 #include <dxgi.h>
+#include <bcrypt.h>
+#include <psapi.h>
+
+/*
+================
+Sys_GetSecureRandomBytes
+================
+*/
+bool Sys_GetSecureRandomBytes( void *buffer, int bytes ) {
+	if ( bytes < 0 || ( bytes > 0 && buffer == NULL ) ) {
+		return false;
+	}
+	if ( bytes == 0 ) {
+		return true;
+	}
+	return BCryptGenRandom( NULL, static_cast<PUCHAR>( buffer ),
+		static_cast<ULONG>( bytes ), BCRYPT_USE_SYSTEM_PREFERRED_RNG ) == 0;
+}
+
+namespace {
+
+static const int OPENQ4_WIN32_FALLBACK_VIDEO_RAM_MB = 2048;
+static const int OPENQ4_WIN32_MAX_REASONABLE_VIDEO_RAM_MB = 256 * 1024;
+
+typedef HRESULT ( WINAPI *openQ4_CreateDXGIFactoryFn )( REFIID riid, void **factory );
+
+bool Sys_TryGetDriveFreeSpaceBytes( const char *path, DWORDLONG &freeBytes ) {
+	DWORDLONG bytesAvailable;
+	DWORDLONG totalBytes;
+	DWORDLONG totalFreeBytes;
+
+	if ( path == NULL || path[0] == '\0' ) {
+		return false;
+	}
+
+	if ( ::GetDiskFreeSpaceExA(
+			path,
+			(PULARGE_INTEGER)&bytesAvailable,
+			(PULARGE_INTEGER)&totalBytes,
+			(PULARGE_INTEGER)&totalFreeBytes ) ) {
+		freeBytes = bytesAvailable;
+		return true;
+	}
+
+	return false;
+}
+
+int Sys_QueryDXGIVideoRamMB( void ) {
+	HMODULE dxgiModule = LoadLibraryA( "dxgi.dll" );
+	if ( dxgiModule == NULL ) {
+		return 0;
+	}
+
+	openQ4_CreateDXGIFactoryFn createDXGIFactory = reinterpret_cast<openQ4_CreateDXGIFactoryFn>( GetProcAddress( dxgiModule, "CreateDXGIFactory" ) );
+	if ( createDXGIFactory == NULL ) {
+		FreeLibrary( dxgiModule );
+		return 0;
+	}
+
+	IDXGIFactory *factory = NULL;
+	if ( FAILED( createDXGIFactory( __uuidof( IDXGIFactory ), reinterpret_cast<void **>( &factory ) ) ) || factory == NULL ) {
+		FreeLibrary( dxgiModule );
+		return 0;
+	}
+
+	unsigned long long maxDedicatedBytes = 0;
+	for ( UINT adapterIndex = 0; ; ++adapterIndex ) {
+		IDXGIAdapter *adapter = NULL;
+		const HRESULT enumResult = factory->EnumAdapters( adapterIndex, &adapter );
+		if ( enumResult == DXGI_ERROR_NOT_FOUND ) {
+			break;
+		}
+		if ( FAILED( enumResult ) || adapter == NULL ) {
+			break;
+		}
+
+		DXGI_ADAPTER_DESC desc;
+		if ( SUCCEEDED( adapter->GetDesc( &desc ) ) &&
+			 static_cast<unsigned long long>( desc.DedicatedVideoMemory ) > maxDedicatedBytes ) {
+			maxDedicatedBytes = static_cast<unsigned long long>( desc.DedicatedVideoMemory );
+		}
+		adapter->Release();
+	}
+
+	factory->Release();
+	FreeLibrary( dxgiModule );
+
+	if ( maxDedicatedBytes == 0 ) {
+		return 0;
+	}
+
+	const unsigned long long megabytes = ( maxDedicatedBytes + ( 1024ULL * 1024ULL - 1ULL ) ) / ( 1024ULL * 1024ULL );
+	if ( megabytes == 0 || megabytes > OPENQ4_WIN32_MAX_REASONABLE_VIDEO_RAM_MB ) {
+		return 0;
+	}
+	return static_cast<int>( megabytes );
+}
+
+void Sys_NormalizeDriveProbePath( char *path ) {
+	if ( path == NULL ) {
+		return;
+	}
+
+	for ( char *p = path; *p != '\0'; p++ ) {
+		if ( *p == '/' ) {
+			*p = '\\';
+		}
+	}
+
+	const size_t len = strlen( path );
+	if ( len >= 2 && path[0] == '"' && path[len - 1] == '"' ) {
+		memmove( path, path + 1, len - 2 );
+		path[len - 2] = '\0';
+	}
+}
+
+bool Sys_ResolveDriveProbePath( const char *path, char *resolvedPath, size_t resolvedPathSize ) {
+	char normalizedPath[MAX_OSPATH];
+	char fullPath[MAX_OSPATH];
+	char volumePath[MAX_OSPATH];
+	DWORD fullPathLen;
+
+	if ( path == NULL || path[0] == '\0' ) {
+		return false;
+	}
+	const int resolvedPathCapacity = idLib::SizeToInt( resolvedPathSize, "Sys_ResolveDriveProbePath" );
+
+	idStr::Copynz( normalizedPath, path, sizeof( normalizedPath ) );
+	Sys_NormalizeDriveProbePath( normalizedPath );
+
+	fullPathLen = ::GetFullPathNameA( normalizedPath, sizeof( fullPath ), fullPath, NULL );
+	if ( fullPathLen > 0 && fullPathLen < sizeof( fullPath ) ) {
+		Sys_NormalizeDriveProbePath( fullPath );
+
+		if ( ::GetVolumePathNameA( fullPath, volumePath, sizeof( volumePath ) ) ) {
+			idStr::Copynz( resolvedPath, volumePath, resolvedPathCapacity );
+			return true;
+		}
+
+		idStr::Copynz( resolvedPath, fullPath, resolvedPathCapacity );
+		return true;
+	}
+
+	if ( isalpha( (unsigned char)normalizedPath[0] ) && normalizedPath[1] == ':' ) {
+		idStr::snPrintf( resolvedPath, resolvedPathCapacity, "%c:\\", normalizedPath[0] );
+		return true;
+	}
+
+	return false;
+}
+
+}
+#include <conio.h>
 
 #ifndef	ID_DEDICATED
 #ifndef INT_MAX
@@ -118,15 +271,19 @@ returns in megabytes
 ================
 */
 int Sys_GetDriveFreeSpace(const char* path) {
-	DWORDLONG lpFreeBytesAvailable;
-	DWORDLONG lpTotalNumberOfBytes;
-	DWORDLONG lpTotalNumberOfFreeBytes;
-	int ret = 26;
-	//FIXME: see why this is failing on some machines
-	if (::GetDiskFreeSpaceEx(path, (PULARGE_INTEGER)&lpFreeBytesAvailable, (PULARGE_INTEGER)&lpTotalNumberOfBytes, (PULARGE_INTEGER)&lpTotalNumberOfFreeBytes)) {
-		ret = (double)(lpFreeBytesAvailable) / (1024.0 * 1024.0);
+	DWORDLONG freeBytes;
+	char probePath[MAX_OSPATH];
+
+	if ( Sys_TryGetDriveFreeSpaceBytes( path, freeBytes ) ) {
+		return (double)freeBytes / ( 1024.0 * 1024.0 );
 	}
-	return ret;
+
+	if ( Sys_ResolveDriveProbePath( path, probePath, sizeof( probePath ) ) &&
+			Sys_TryGetDriveFreeSpaceBytes( probePath, freeBytes ) ) {
+		return (double)freeBytes / ( 1024.0 * 1024.0 );
+	}
+
+	return 26;
 }
 
 
@@ -137,61 +294,52 @@ returns in megabytes
 ================
 */
 int Sys_GetVideoRam(void) {
-	typedef HRESULT ( WINAPI *createDxgiFactory_t )( REFIID, void** );
-
-	HMODULE dxgiModule = LoadLibraryA( "dxgi.dll" );
-	if ( dxgiModule != NULL ) {
-		createDxgiFactory_t createFactory = reinterpret_cast<createDxgiFactory_t>( GetProcAddress( dxgiModule, "CreateDXGIFactory" ) );
-		if ( createFactory != NULL ) {
-			IDXGIFactory *factory = NULL;
-			if ( SUCCEEDED( createFactory( __uuidof( IDXGIFactory ), reinterpret_cast<void **>( &factory ) ) ) && factory != NULL ) {
-				SIZE_T bestVideoMemory = 0;
-
-				for ( UINT adapterIndex = 0; ; adapterIndex++ ) {
-					IDXGIAdapter *adapter = NULL;
-					const HRESULT result = factory->EnumAdapters( adapterIndex, &adapter );
-					if ( result == DXGI_ERROR_NOT_FOUND ) {
-						break;
-					}
-					if ( FAILED( result ) || adapter == NULL ) {
-						continue;
-					}
-
-					DXGI_ADAPTER_DESC adapterDesc;
-					memset( &adapterDesc, 0, sizeof( adapterDesc ) );
-					if ( SUCCEEDED( adapter->GetDesc( &adapterDesc ) ) ) {
-						SIZE_T adapterMemory = adapterDesc.DedicatedVideoMemory;
-						if ( adapterMemory == 0 ) {
-							adapterMemory = adapterDesc.DedicatedSystemMemory;
-						}
-						if ( adapterMemory == 0 && adapterDesc.SharedSystemMemory > 0 ) {
-							adapterMemory = adapterDesc.SharedSystemMemory / 4;
-							const SIZE_T sharedMemoryCap = static_cast<SIZE_T>( 2ULL * 1024ULL * 1024ULL * 1024ULL );
-							if ( adapterMemory > sharedMemoryCap ) {
-								adapterMemory = sharedMemoryCap;
-							}
-						}
-						if ( adapterMemory > bestVideoMemory ) {
-							bestVideoMemory = adapterMemory;
-						}
-					}
-
-					adapter->Release();
-				}
-
-				factory->Release();
-
-				if ( bestVideoMemory > 0 ) {
-					FreeLibrary( dxgiModule );
-					return static_cast<int>( ( bestVideoMemory + ( 1024 * 1024 - 1 ) ) / ( 1024 * 1024 ) );
-				}
-			}
-		}
-
-		FreeLibrary( dxgiModule );
+	static int cachedVideoRam = 0;
+	if ( cachedVideoRam > 0 ) {
+		return cachedVideoRam;
 	}
 
-	return 1024;
+	cachedVideoRam = Sys_QueryDXGIVideoRamMB();
+	if ( cachedVideoRam > 0 ) {
+		return cachedVideoRam;
+	}
+
+	cachedVideoRam = OPENQ4_WIN32_FALLBACK_VIDEO_RAM_MB;
+	return cachedVideoRam;
+}
+
+/*
+================
+Sys_GetDesktopResolution
+================
+*/
+bool Sys_GetDesktopResolution( int *width, int *height ) {
+	if ( width == NULL || height == NULL ) {
+		return false;
+	}
+
+	int desktopWidth = win32.desktopWidth;
+	int desktopHeight = win32.desktopHeight;
+
+	if ( desktopWidth <= 0 || desktopHeight <= 0 ) {
+		HDC hDC = GetDC( GetDesktopWindow() );
+		if ( hDC == NULL ) {
+			return false;
+		}
+		desktopWidth = GetDeviceCaps( hDC, HORZRES );
+		desktopHeight = GetDeviceCaps( hDC, VERTRES );
+		ReleaseDC( GetDesktopWindow(), hDC );
+	}
+
+	if ( desktopWidth <= 0 || desktopHeight <= 0 ) {
+		return false;
+	}
+
+	win32.desktopWidth = desktopWidth;
+	win32.desktopHeight = desktopHeight;
+	*width = desktopWidth;
+	*height = desktopHeight;
+	return true;
 }
 
 /*
@@ -206,7 +354,7 @@ void Sys_GetCurrentMemoryStatus(sysMemoryStats_t& stats) {
 	MEMORYSTATUSEX statex;
 	unsigned __int64 work;
 
-	memset(&statex, sizeof(statex), 0);
+	memset(&statex, 0, sizeof(statex));
 	statex.dwLength = sizeof(statex);
 	GlobalMemoryStatusEx(&statex);
 
@@ -234,6 +382,39 @@ void Sys_GetCurrentMemoryStatus(sysMemoryStats_t& stats) {
 
 	work = statex.ullAvailExtendedVirtual >> 20;
 	stats.availExtendedVirtual = *(int*)&work;
+}
+
+/*
+================
+Sys_GetProcessMemoryUsage
+================
+*/
+bool Sys_GetProcessMemoryUsage( unsigned long long &privateBytes, unsigned long long &residentBytes ) {
+	privateBytes = residentBytes = 0;
+	// K32GetProcessMemoryInfo is exported by kernel32 since Windows 7; looking it up
+	// keeps psapi.lib out of the link.
+	typedef BOOL ( WINAPI *processMemoryInfo_t )( HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD );
+	static const processMemoryInfo_t query = reinterpret_cast<processMemoryInfo_t>(
+		reinterpret_cast<void *>( GetProcAddress( GetModuleHandleA( "kernel32.dll" ), "K32GetProcessMemoryInfo" ) ) );
+	PROCESS_MEMORY_COUNTERS_EX counters;
+	memset( &counters, 0, sizeof( counters ) );
+	counters.cb = sizeof( counters );
+	if ( query == NULL || !query( GetCurrentProcess(), reinterpret_cast<PPROCESS_MEMORY_COUNTERS>( &counters ), sizeof( counters ) ) ) {
+		return false;
+	}
+	privateBytes = counters.PrivateUsage;
+	residentBytes = counters.WorkingSetSize;
+	return true;
+}
+
+/*
+================
+Sys_ReleaseFreeHeapMemory
+
+The Windows heap decommits free memory itself; level loads level off without help.
+================
+*/
+void Sys_ReleaseFreeHeapMemory(void) {
 }
 
 /*
@@ -305,16 +486,22 @@ UNDNAME_NO_ALLOCATION_MODEL |
 UNDNAME_NO_ALLOCATION_LANGUAGE |
 UNDNAME_NO_MEMBER_TYPE;
 
+static void Sym_FormatAddress( address_t addr, idStr &funcName ) {
+	char addressString[ 32 ];
+	idStr::snPrintf( addressString, sizeof( addressString ), "0x%llx", (unsigned long long)addr );
+	funcName = addressString;
+}
+
 #if defined(_DEBUG) && 1
 
 typedef struct symbol_s {
-	int					address;
+	address_t			address;
 	char* name;
 	struct symbol_s* next;
 } symbol_t;
 
 typedef struct module_s {
-	int					address;
+	address_t			address;
 	char* name;
 	symbol_t* symbols;
 	struct module_s* next;
@@ -352,15 +539,25 @@ void SkipWhiteSpace(const char** ptr) {
 ParseHexNumber
 ==================
 */
-int ParseHexNumber(const char** ptr) {
-	int n = 0;
-	while ((**ptr) >= '0' && (**ptr) <= '9' || (**ptr) >= 'a' && (**ptr) <= 'f') {
-		n <<= 4;
-		if (**ptr >= '0' && **ptr <= '9') {
-			n |= ((**ptr) - '0');
+address_t ParseHexNumber(const char** ptr) {
+	address_t n = 0;
+	while (true) {
+		const char c = **ptr;
+		if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			n <<= 4;
 		}
 		else {
-			n |= 10 + ((**ptr) - 'a');
+			break;
+		}
+
+		if (c >= '0' && c <= '9') {
+			n |= (address_t)(c - '0');
+		}
+		else if (c >= 'a' && c <= 'f') {
+			n |= (address_t)(10 + c - 'a');
+		}
+		else {
+			n |= (address_t)(10 + c - 'A');
 		}
 		(*ptr)++;
 	}
@@ -372,7 +569,7 @@ int ParseHexNumber(const char** ptr) {
 Sym_Init
 ==================
 */
-void Sym_Init(long addr) {
+void Sym_Init(address_t addr) {
 	TCHAR moduleName[MAX_STRING_CHARS];
 	MEMORY_BASIC_INFORMATION mbi;
 
@@ -394,7 +591,7 @@ void Sym_Init(long addr) {
 	module_t* module = (module_t*)malloc(sizeof(module_t));
 	module->name = (char*)malloc(strlen(moduleName) + 1);
 	strcpy(module->name, moduleName);
-	module->address = (int)mbi.AllocationBase;
+	module->address = (address_t)mbi.AllocationBase;
 	module->symbols = NULL;
 	module->next = modules;
 	modules = module;
@@ -426,7 +623,7 @@ void Sym_Init(long addr) {
 		SkipRestOfLine(&ptr);
 	}
 
-	int symbolAddress;
+	address_t symbolAddress;
 	int symbolLength;
 	char symbolName[MAX_STRING_CHARS];
 	symbol_t* symbol;
@@ -502,7 +699,7 @@ void Sym_Shutdown(void) {
 Sym_GetFuncInfo
 ==================
 */
-void Sym_GetFuncInfo(long addr, idStr& module, idStr& funcName) {
+void Sym_GetFuncInfo(address_t addr, idStr& module, idStr& funcName) {
 	MEMORY_BASIC_INFORMATION mbi;
 	module_t* m;
 	symbol_t* s;
@@ -510,7 +707,7 @@ void Sym_GetFuncInfo(long addr, idStr& module, idStr& funcName) {
 	VirtualQuery((void*)addr, &mbi, sizeof(mbi));
 
 	for (m = modules; m != NULL; m = m->next) {
-		if (m->address == (int)mbi.AllocationBase) {
+		if (m->address == (address_t)mbi.AllocationBase) {
 			break;
 		}
 	}
@@ -540,13 +737,13 @@ void Sym_GetFuncInfo(long addr, idStr& module, idStr& funcName) {
 		}
 	}
 
-	sprintf(funcName, "0x%08x", addr);
+	Sym_FormatAddress(addr, funcName);
 	module = "";
 }
 
 #elif defined(_DEBUG)
 
-DWORD lastAllocationBase = -1;
+DWORD64 lastAllocationBase = 0;
 HANDLE processHandle;
 idStr lastModule;
 
@@ -555,12 +752,12 @@ idStr lastModule;
 Sym_Init
 ==================
 */
-void Sym_Init(long addr) {
+void Sym_Init(address_t addr) {
 	TCHAR moduleName[MAX_STRING_CHARS];
 	TCHAR modShortNameBuf[MAX_STRING_CHARS];
 	MEMORY_BASIC_INFORMATION mbi;
 
-	if (lastAllocationBase != -1) {
+	if (lastAllocationBase != 0) {
 		Sym_Shutdown();
 	}
 
@@ -574,14 +771,15 @@ void Sym_Init(long addr) {
 	if (!SymInitialize(processHandle, NULL, FALSE)) {
 		return;
 	}
-	if (!SymLoadModule(processHandle, NULL, moduleName, NULL, (DWORD)mbi.AllocationBase, 0)) {
+	DWORD64 moduleBase = (DWORD64)(uintptr_t)mbi.AllocationBase;
+	if (!SymLoadModule64(processHandle, NULL, moduleName, NULL, moduleBase, 0)) {
 		SymCleanup(processHandle);
 		return;
 	}
 
 	SymSetOptions(SymGetOptions() & ~SYMOPT_UNDNAME);
 
-	lastAllocationBase = (DWORD)mbi.AllocationBase;
+	lastAllocationBase = moduleBase;
 }
 
 /*
@@ -590,9 +788,11 @@ Sym_Shutdown
 ==================
 */
 void Sym_Shutdown(void) {
-	SymUnloadModule(GetCurrentProcess(), lastAllocationBase);
-	SymCleanup(GetCurrentProcess());
-	lastAllocationBase = -1;
+	if (lastAllocationBase != 0) {
+		SymUnloadModule64(GetCurrentProcess(), lastAllocationBase);
+		SymCleanup(GetCurrentProcess());
+		lastAllocationBase = 0;
+	}
 }
 
 /*
@@ -600,25 +800,26 @@ void Sym_Shutdown(void) {
 Sym_GetFuncInfo
 ==================
 */
-void Sym_GetFuncInfo(long addr, idStr& module, idStr& funcName) {
+void Sym_GetFuncInfo(address_t addr, idStr& module, idStr& funcName) {
 	MEMORY_BASIC_INFORMATION mbi;
 
 	VirtualQuery((void*)addr, &mbi, sizeof(mbi));
 
-	if ((DWORD)mbi.AllocationBase != lastAllocationBase) {
+	DWORD64 moduleBase = (DWORD64)(uintptr_t)mbi.AllocationBase;
+	if (moduleBase != lastAllocationBase) {
 		Sym_Init(addr);
 	}
 
-	BYTE symbolBuffer[sizeof(IMAGEHLP_SYMBOL) + MAX_STRING_CHARS];
-	PIMAGEHLP_SYMBOL pSymbol = (PIMAGEHLP_SYMBOL)&symbolBuffer[0];
-	pSymbol->SizeOfStruct = sizeof(symbolBuffer);
+	BYTE symbolBuffer[sizeof(IMAGEHLP_SYMBOL64) + MAX_STRING_CHARS];
+	PIMAGEHLP_SYMBOL64 pSymbol = (PIMAGEHLP_SYMBOL64)&symbolBuffer[0];
+	pSymbol->SizeOfStruct = sizeof(IMAGEHLP_SYMBOL64);
 	pSymbol->MaxNameLength = 1023;
 	pSymbol->Address = 0;
 	pSymbol->Flags = 0;
 	pSymbol->Size = 0;
 
-	DWORD symDisplacement = 0;
-	if (SymGetSymFromAddr(processHandle, addr, &symDisplacement, pSymbol)) {
+	DWORD64 symDisplacement = 0;
+	if (SymGetSymFromAddr64(processHandle, (DWORD64)addr, &symDisplacement, pSymbol)) {
 		// clean up name, throwing away decorations that don't affect uniqueness
 		char undName[MAX_STRING_CHARS];
 		if (UnDecorateSymbolName(pSymbol->Name, undName, sizeof(undName), UNDECORATE_FLAGS)) {
@@ -642,7 +843,7 @@ void Sym_GetFuncInfo(long addr, idStr& module, idStr& funcName) {
 		LocalFree(lpMsgBuf);
 
 		// Couldn't retrieve symbol (no debug info?, can't load dbghelp.dll?)
-		sprintf(funcName, "0x%08x", addr);
+		Sym_FormatAddress(addr, funcName);
 		module = "";
 	}
 }
@@ -654,7 +855,7 @@ void Sym_GetFuncInfo(long addr, idStr& module, idStr& funcName) {
 Sym_Init
 ==================
 */
-void Sym_Init(long addr) {
+void Sym_Init(address_t addr) {
 }
 
 /*
@@ -670,9 +871,9 @@ void Sym_Shutdown(void) {
 Sym_GetFuncInfo
 ==================
 */
-void Sym_GetFuncInfo(long addr, idStr& module, idStr& funcName) {
+void Sym_GetFuncInfo(address_t addr, idStr& module, idStr& funcName) {
 	module = "";
-	sprintf(funcName, "0x%08x", addr);
+	Sym_FormatAddress(addr, funcName);
 }
 
 #endif

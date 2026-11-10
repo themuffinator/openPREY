@@ -59,7 +59,7 @@ public:
 	virtual					~BOEntity();
 
 	virtual void			WriteToSaveGame( idFile *savefile );
-	virtual void			ReadFromSaveGame( idFile *savefile, idGameBustOutWindow* _game );
+	virtual void			ReadFromSaveGame( idFile *savefile, idGameBustOutWindow* _game, int saveVersion );
 
 	void					SetMaterial(const char* name);
 	void					SetSize( float _width, float _height );
@@ -98,7 +98,7 @@ public:
 					~BOBrick();
 
 	virtual void	WriteToSaveGame( idFile *savefile );
-	virtual void	ReadFromSaveGame( idFile *savefile, idGameBustOutWindow *game );
+	virtual void	ReadFromSaveGame( idFile *savefile, idGameBustOutWindow *game, int saveVersion );
 
 	void			SetColor( idVec4 bcolor );
 	collideDir_t	checkCollision( idVec2 pos, idVec2 vel );

@@ -44,9 +44,10 @@ public:
 	float				quadSize[MAX_BEAMS][2];
 	idList<beamCmd_t>	cmds[MAX_BEAMS];
 
-						hhDeclBeam();
+	hhDeclBeam();
 	virtual const char	*DefaultDefinition() const;
-	virtual bool		Parse( const char *text, const int textLength );
+	virtual bool		Parse( const char *text, const int textLength ) override;
+	virtual bool		Parse( const char *text, const int textLength, bool noCaching ) override;
 	virtual void		FreeData();
 };
 

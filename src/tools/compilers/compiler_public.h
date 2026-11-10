@@ -48,6 +48,14 @@ void RenderBumpFlat_f( const idCmdArgs &args );
 void RunAAS_f( const idCmdArgs &args );
 void RunAASDir_f( const idCmdArgs &args );
 void RunReach_f( const idCmdArgs &args );
+void RunAASTactical_f( const idCmdArgs &args );
+
+// Compiles every AAS type declared by the 'aas_types' entityDef for one map.
+// 'mapName' is a relative, extension-less map path such as "maps/game/hangar2";
+// 'optionArgs' is optional and supplies runAAS-style switches.  Shared by the
+// runAAS command and dmap's automatic navigation pass; the caller owns warning
+// collection and refresh state.
+bool RunAASForMap( const idStr &mapName, const idCmdArgs *optionArgs );
 
 // video file encoding
 void RoQFileEncode_f( const idCmdArgs &args );

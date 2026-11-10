@@ -31,6 +31,8 @@ If you have questions concerning this license or the applicable additional terms
 
 #include <stdint.h>
 
+class idStr;
+
 /*
 ===============================================================================
 
@@ -43,13 +45,27 @@ If you have questions concerning this license or the applicable additional terms
 // Win32
 #if defined(WIN32) || defined(_WIN32)
 
-#define	BUILD_STRING					"win-x64"
 #define BUILD_OS_ID						0
-#define	CPUSTRING						"x64"
-#if defined(_WIN64)
-#define CPU_EASYARGS					0
+#if defined( _M_X64 ) || defined( __x86_64__ )
+	#define	BUILD_STRING				"win-x64"
+	#define	CPUSTRING					"x64"
+#elif defined( _M_IX86 ) || defined( __i386__ )
+	#define	BUILD_STRING				"win-x86"
+	#define	CPUSTRING					"x86"
+#elif defined( _M_ARM64 ) || defined( __aarch64__ )
+	#define	BUILD_STRING				"win-arm64"
+	#define	CPUSTRING					"arm64"
 #else
-#define CPU_EASYARGS					1
+	#define	BUILD_STRING				"win-unknown"
+	#define	CPUSTRING					"unknown"
+#endif
+// MSVC's 64-bit ABI does not preserve the 32-bit all-integer event callback
+// shortcut for mixed float/pointer signatures. The Prey game event dispatcher
+// uses its generated format-specific callback table on Win64 instead.
+#if defined( _WIN64 )
+	#define CPU_EASYARGS				0
+#else
+	#define CPU_EASYARGS				1
 #endif
 
 #define ALIGN16( x )					__declspec(align(16)) x
@@ -71,23 +87,33 @@ If you have questions concerning this license or the applicable additional terms
 // Mac OSX
 #if defined(MACOS_X) || defined(__APPLE__)
 
-#define BUILD_STRING				"MacOSX-universal"
 #define BUILD_OS_ID					1
 #ifdef __ppc__
+	#define	BUILD_STRING				"macos-ppc"
 	#define	CPUSTRING					"ppc"
 	#define CPU_EASYARGS				0
-#elif defined(__x86_64__)
-	#define	CPUSTRING					"x64"
-	#define CPU_EASYARGS				0
-#elif defined(__aarch64__) || defined(__arm64__)
-	#define	CPUSTRING					"arm64"
-	#define CPU_EASYARGS				0
 #elif defined(__i386__)
+	#define	BUILD_STRING				"macos-x86"
 	#define	CPUSTRING					"x86"
+	#define CPU_EASYARGS				1
+#elif defined(__x86_64__)
+	#define	BUILD_STRING				"macos-x64"
+	#define	CPUSTRING					"x64"
+	#define CPU_EASYARGS				1
+#elif defined(__aarch64__) || defined(__arm64__)
+	#define	BUILD_STRING				"macos-arm64"
+	#define	CPUSTRING					"arm64"
+	#define CPU_EASYARGS				1
+#else
+	#define	BUILD_STRING				"macos-unknown"
+	#define	CPUSTRING					"unknown"
 	#define CPU_EASYARGS				1
 #endif
 
-#define ALIGN16( x )					x __attribute__ ((aligned (16)))
+// Clang rejects an alignment attribute that trails a declarator with a
+// constructor initialiser, so prefix the declaration the way the Linux
+// branch does and keep parenthesised initialisers building on macOS.
+#define ALIGN16( x )					__attribute__((aligned(16))) x
 
 #ifdef __MWERKS__
 #define PACKED
@@ -117,31 +143,32 @@ If you have questions concerning this license or the applicable additional terms
 // Linux
 #ifdef __linux__
 
-#ifdef __x86_64__
-	#define	BUILD_STRING				"linux-x64"
-	#define BUILD_OS_ID					2
-	#define CPUSTRING					"x64"
-	#define CPU_EASYARGS				0
-#elif defined(__aarch64__)
-	#define	BUILD_STRING				"linux-arm64"
-	#define BUILD_OS_ID					2
-	#define CPUSTRING					"arm64"
-	#define CPU_EASYARGS				0
-#elif defined(__i386__)
+#ifdef __i386__
 	#define	BUILD_STRING				"linux-x86"
 	#define BUILD_OS_ID					2
 	#define CPUSTRING					"x86"
 	#define CPU_EASYARGS				1
 #elif defined(__ppc__)
 	#define	BUILD_STRING				"linux-ppc"
+	#define BUILD_OS_ID					2
 	#define CPUSTRING					"ppc"
 	#define CPU_EASYARGS				0
+#elif defined(__x86_64__)
+	#define	BUILD_STRING				"linux-x64"
+	#define BUILD_OS_ID					2
+	#define CPUSTRING					"x64"
+	#define CPU_EASYARGS				1
+#elif defined(__aarch64__) || defined(__arm64__)
+	#define	BUILD_STRING				"linux-arm64"
+	#define BUILD_OS_ID					2
+	#define CPUSTRING					"arm64"
+	#define CPU_EASYARGS				1
 #endif
 
 #define _alloca							alloca
 #define _alloca16( x )					((void *)((((intptr_t)alloca( (x)+15 )) + 15) & ~15))
 
-#define ALIGN16( x )					x
+#define ALIGN16( x )					__attribute__((aligned(16))) x
 #define PACKED							__attribute__((packed))
 
 #define PATHSEPERATOR_STR				"/"
@@ -216,11 +243,12 @@ typedef enum {
 
 typedef enum {
 	SE_NONE,				// evTime is still valid
-	SE_KEY,					// evValue is a key code, evValue2 is the down flag
+	SE_KEY,					// key code/down flag; optional KeyEventMetadata.h payload captures modifiers/repeat
 	SE_CHAR,				// evValue is an ascii char
 	SE_MOUSE,				// evValue and evValue2 are reletive signed x / y moves
 	SE_JOYSTICK_AXIS,		// evValue is an axis number and evValue2 is the current state (-127 to 127)
-	SE_CONSOLE				// evPtr is a char*, from typing something at a non-game console
+	SE_CONSOLE,				// evPtr is a char*, from typing something at a non-game console
+	SE_RETAINED_UI			// engine-owned retained input payload; consumed before game/legacy GUI dispatch
 } sysEventType_t;
 
 typedef enum {
@@ -256,7 +284,13 @@ typedef struct sysMemoryStats_s {
 	int availExtendedVirtual;
 } sysMemoryStats_t;
 
-typedef unsigned long address_t;
+typedef uintptr_t address_t;
+
+#if defined( WIN32 ) || defined( _WIN32 )
+typedef uintptr_t idSocketHandle_t;
+#else
+typedef int idSocketHandle_t;
+#endif
 
 template<class type> class idList;		// for Sys_ListFiles
 
@@ -267,6 +301,9 @@ void			Sys_Error( const char *error, ...);
 void			Sys_Quit( void );
 
 bool			Sys_AlreadyRunning( void );
+// gives up the single-instance lock Sys_AlreadyRunning took, for a client that
+// became a dedicated server (which takes none), so the game can start again
+void			Sys_ReleaseInstanceLock( void );
 
 // note that this isn't journaled...
 char *			Sys_GetClipboardData( void );
@@ -291,9 +328,20 @@ void			Sys_Sleep( int msec );
 // any game related timing information should come from event timestamps
 int				Sys_Milliseconds( void );
 
-// for accurate performance testing
+// Fill a caller-owned buffer from the operating system CSPRNG. Gameplay
+// random generators and timing entropy are never substitutes for this API.
+// Implementations leave the buffer untouched when validation fails.
+bool			Sys_GetSecureRandomBytes( void *buffer, int bytes );
+
+// for accurate performance testing; a monotonic wall clock, not CPU cycles
 double			Sys_GetClockTicks( void );
 double			Sys_ClockTicksPerSecond( void );
+
+// display-only CPU frequency estimate, 0.0 when unavailable
+double			Sys_GetApproximateProcessorFrequencyHz( void );
+idStr			Sys_FormatFrequency( double hertz );
+idStr			Sys_FormatMemoryMB( int megabytes );
+idStr			Sys_FormatProcessorSummary( const char *modelName, const char *architecture, int physicalCores, int logicalCores, int packages, double hertz );
 
 // returns a selection of the CPUID_* flags
 cpuid_t			Sys_GetProcessorId( void );
@@ -328,6 +376,11 @@ int				Sys_GetSystemRam( void );
 
 // returns amount of video ram
 int				Sys_GetVideoRam( void );
+// queries the current desktop resolution for the active display selection
+bool			Sys_GetDesktopResolution( int *width, int *height );
+// counts display topology changes (SDL display events and a window moving to
+// another display or scale), so cached display lists know when to recapture
+unsigned long long	Sys_DisplayTopologyGeneration( void );
 
 // returns amount of drive space in path
 int				Sys_GetDriveFreeSpace( const char *path );
@@ -335,6 +388,13 @@ int				Sys_GetDriveFreeSpace( const char *path );
 // returns memory stats
 void			Sys_GetCurrentMemoryStatus( sysMemoryStats_t &stats );
 void			Sys_GetExeLaunchMemoryStatus( sysMemoryStats_t &stats );
+// this process's private memory (commit charge, or anonymous resident memory plus swap)
+// and resident set, in bytes; false where the OS reports neither
+bool			Sys_GetProcessMemoryUsage( unsigned long long &privateBytes, unsigned long long &residentBytes );
+
+// returns heap memory the allocator holds free to the OS; called after a level
+// load, where it is most worth its cost. A no-op where the allocator does this itself.
+void			Sys_ReleaseFreeHeapMemory( void );
 
 // lock and unlock memory
 bool			Sys_LockMemory( void *ptr, int bytes );
@@ -359,11 +419,61 @@ void			Sys_DLL_Unload(intptr_t dllHandle );
 void			Sys_GenerateEvents( void );
 sysEvent_t		Sys_GetEvent( void );
 void			Sys_ClearEvents( void );
+// true while queued events wait for Sys_GetEvent
+bool			Sys_HasQueuedEvents( void );
 
 // input is tied to windows, so it needs to be started up and shut down whenever 
 // the main window is recreated
 void			Sys_InitInput( void );
 void			Sys_ShutdownInput( void );
+
+
+/*
+===============================================================================
+
+	Engine-owned window state (Phase B5a of the renderer-module seam).
+
+	The platform window layer owns these fields; GUI/session code reads them
+	here instead of through the renderer's glConfig. Until the window seam
+	completes (B5b), the platform layer also mirrors each write into glConfig
+	so the statically-linked renderer keeps frame-exact values.
+
+===============================================================================
+*/
+
+typedef struct engineWindowState_s {
+	int			vidWidth;			// framebuffer pixel size
+	int			vidHeight;
+	int			uiViewportX;		// UI-safe viewport inside the framebuffer
+	int			uiViewportY;
+	int			uiViewportWidth;
+	int			uiViewportHeight;
+	int			displayFrequency;
+	bool		isFullscreen;
+	float		displayScale;     // physical pixels per density-independent UI unit
+	float		pixelDensityX;   // window-coordinate to framebuffer conversion
+	float		pixelDensityY;
+	// The window's safe area (clear of camera cutouts, rounded corners and
+	// system bars) as framebuffer-pixel insets from each framebuffer edge.
+	int			safeAreaLeft;
+	int			safeAreaTop;
+	int			safeAreaRight;
+	int			safeAreaBottom;
+} engineWindowState_t;
+
+extern engineWindowState_t engineWindowState;
+
+// NULL-terminated list of the sys_lang values the engine knows, in the order
+// the cvar offers them. Framework code matches string-table and pak names
+// against it so a stray file cannot invent a language with no font or codepage
+// policy behind it.
+extern const char *	sysLanguageNames[];
+
+// window/context teardown owned by the platform layer; declared here so
+// framework code does not need renderer-internal headers to reach them
+void			GLimp_Shutdown( void );
+void			GLimp_PreserveWindowOnShutdown( bool preserve );
+void			Sys_ClearInputEvents( void );
 void			Sys_InitScanTable( void );
 const unsigned char *Sys_GetScanTable( void );
 unsigned char	Sys_GetConsoleKey( bool shifted );
@@ -386,6 +496,18 @@ void			Sys_EndMouseInputEvents( void );
 int				Sys_PollJoystickInputEvents( void );
 int				Sys_ReturnJoystickInputEvent( const int n, int &axis, int &value );
 void			Sys_EndJoystickInputEvents( void );
+bool			Sys_GetJoystickAxisState( int axis, int &value );
+bool			Sys_SetJoystickRumble( float lowFrequency, float highFrequency, int durationMsec );
+// openQ4 VR: delivers a tracked-controller button exactly like a gamepad
+// button, to the event queue (menus, console) and the key poll queue (usercmd
+// bindings); mouse buttons are the menu pointer's clicks and take the mouse's
+// route instead. Main thread only; implemented by the SDL3 client backend, the
+// only one that builds OpenXR.
+void			Sys_PostVRControllerKey( int key, bool down );
+// openQ4 VR: the controller points at the virtual screen at (u, v), 0..1 left
+// to right and top to bottom, or has left it. Moves the open menu's cursor the
+// way the mouse would; returns false when no menu takes a pointer.
+bool			Sys_PostVRPointer( bool onScreen, float u, float v );
 
 // when the console is down, or the game is about to perform a lengthy
 // operation like map loading, the system can release the mouse cursor
@@ -394,8 +516,9 @@ void			Sys_GrabMouseCursor( bool grabIt );
 
 void			Sys_ShowWindow( bool show );
 bool			Sys_IsWindowVisible( void );
-bool			Sys_IsGameWindowFocused( void );
 void			Sys_ShowConsole( int visLevel, bool quitOnClose );
+void			Sys_ShowSplash( void );
+void			Sys_DestroySplash( void );
 
 
 void			Sys_Mkdir( const char *path );
@@ -406,6 +529,19 @@ const char *	Sys_DefaultCDPath( void );
 const char *	Sys_DefaultBasePath( void );
 const char *	Sys_DefaultSavePath( void );
 const char *	Sys_EXEPath( void );
+
+// When the executable is associated with a platform application bundle
+// (macOS openQ4.app), returns true and fills packageRoot with the trusted
+// runtime-content root. Self-contained macOS apps use Contents/Resources;
+// legacy adjacent packages return the directory beside the bundle. Returns
+// false on platforms and layouts without a separate package root.
+bool			Sys_GetPackageRootDirectory( char *packageRoot, int packageRootSize );
+
+// Returns the trusted root used only for dynamic game-module discovery.
+// Self-contained macOS apps keep flat Mach-O dylibs in Contents/Frameworks;
+// legacy packages use their adjacent package root. Other platforms return
+// false because their normal executable directory is already searched.
+bool			Sys_GetGameModuleRootDirectory( char *moduleRoot, int moduleRootSize );
 
 // use fs_debug to verbose Sys_ListFiles
 // returns -1 if directory was not found (the list is cleared)
@@ -430,14 +566,22 @@ typedef enum {
 	NA_LOOPBACK,
 	NA_BROADCAST,
 	NA_IP,
+	NA_IP6,
 // jmarshall
-	NA_BOT
+	NA_BOT,
 // jmarshall end
+	// IPv6 has no broadcast address. NA_MULTICAST6 stands in for it during LAN
+	// discovery and resolves to the net_mcast6addr group in the platform layer.
+	// It is appended so the values above keep the numbering the game module was
+	// built against.
+	NA_MULTICAST6
 } netadrtype_t;
 
 typedef struct {
 	netadrtype_t	type;
 	unsigned char	ip[4];
+	unsigned char	ip6[16];
+	unsigned int	scopeId;
 	unsigned short	port;
 } netadr_t;
 
@@ -445,7 +589,7 @@ typedef struct {
 
 class idPort {
 public:
-				idPort();				// this just zeros netSocket and port
+				idPort();				// initializes the platform socket state and port
 	virtual		~idPort();
 
 	// if the InitForPort fails, the idPort.port field will remain 0
@@ -466,7 +610,9 @@ public:
 
 private:
 	netadr_t	bound_to;		// interface and port
-	int			netSocket;		// OS specific socket
+	idSocketHandle_t	netSocket;		// OS specific socket
+	idSocketHandle_t	netSocket6;		// OS specific IPv6 socket
+	void *		platformData;		// OS specific per-socket state
 };
 
 class idTCP {
@@ -475,7 +621,7 @@ public:
 	virtual		~idTCP();
 
 	// if host is host:port, the value of port is ignored
-	bool		Init( const char *host, short port );
+	bool		Init( const char *host, int port );
 	void		Close();
 
 	// returns -1 on failure (and closes socket)
@@ -487,7 +633,7 @@ public:
 
 private:
 	netadr_t	address;		// remote address
-	int			fd;				// OS specific socket
+	idSocketHandle_t	fd;				// OS specific socket
 };
 
 				// parses the port number
@@ -495,12 +641,21 @@ private:
 				// NOTE: DNS resolve is a slow/blocking call, think before you use
 				// ( could be exploited for server DoS )
 bool			Sys_StringToNetAdr( const char *s, netadr_t *a, bool doDNSResolve );
+				// every distinct address s names, up to maxCandidates, in the order a
+				// connection should try them; the first is what Sys_StringToNetAdr
+				// returns. Returns how many were written.
+int				Sys_StringToNetAdrCandidates( const char *s, netadr_t *candidates, int maxCandidates, bool doDNSResolve );
 const char *	Sys_NetAdrToString( const netadr_t a );
 bool			Sys_IsLANAddress( const netadr_t a );
+				// this machine's first non-loopback IPv4 address (no port)
+bool			Sys_GetLocalIPAddress( netadr_t &out );
 bool			Sys_CompareNetAdrBase( const netadr_t a, const netadr_t b );
 
 void			Sys_InitNetworking( void );
 void			Sys_ShutdownNetworking( void );
+				// simulated network conditions (net_force*) and what each open port's
+				// delay lines have done with them
+void			Sys_NetImpairmentReport( void );
 
 
 /*
@@ -521,8 +676,9 @@ typedef enum {
 
 typedef struct {
 	const char *	name;
-	int				threadHandle;
-	unsigned long	threadId;
+	uintptr_t		threadHandle;
+	uint32_t		threadId;
+	volatile bool	stopRequested;
 } xthreadInfo;
 
 const int MAX_THREADS				= 10;
@@ -531,6 +687,9 @@ extern int			g_thread_count;
 
 void				Sys_CreateThread( xthread_t function, void *parms, xthreadPriority priority, xthreadInfo &info, const char *name, xthreadInfo *threads[MAX_THREADS], int *thread_count );
 void				Sys_DestroyThread( xthreadInfo& info ); // sets threadHandle back to 0
+void				Sys_RequestThreadStop( xthreadInfo& info );
+bool				Sys_IsThreadStopRequested( const xthreadInfo& info );
+bool				Sys_IsCurrentThreadStopRequested( void );
 
 // find the name of the calling thread
 // if index != NULL, set the index in g_threads array (use -1 for "main" thread)
@@ -621,6 +780,7 @@ public:
 	virtual void			LGLCD_DrawShape( int shapeType, int x, int y, int sizeX, int sizeY, int parm, bool layered ) {}
 
 	virtual int				Milliseconds(void) = 0;
+	virtual bool			SecureRandomBytes( void *buffer, int bytes ) = 0;
 };
 
 extern idSys *				sys;

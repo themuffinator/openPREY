@@ -35,6 +35,7 @@ public:
 	virtual bool			SetDefaultText( void );
 	virtual const char *	DefaultDefinition( void ) const;
 	virtual bool			Parse( const char *text, const int textLength ) override;
+	virtual bool			Parse( const char *text, const int textLength, bool noCaching ) override;
 	virtual void			FreeData( void );
 // RAVEN BEGIN
 // mwhitlock: Xenon texture streaming
@@ -43,25 +44,9 @@ public:
 	void					GetSkinTargetsList(idList<const idMaterial*>& outList) const;
 #endif
 // RAVEN END
-#ifdef GAME_DLL
-	ID_INLINE const idMaterial *	RemapShaderBySkin( const idMaterial *shader ) const {
-		if ( !shader ) {
-			return NULL;
-		}
-
-		for ( int i = 0; i < mappings.Num(); i++ ) {
-			const skinMapping_t *map = &mappings[ i ];
-			// NULL = wildcard match.
-			if ( !map->from || map->from == shader ) {
-				return map->to;
-			}
-		}
-
-		return shader;
-	}
-#else
-	const idMaterial *		RemapShaderBySkin( const idMaterial *shader ) const;
-#endif
+	// virtual so the renderer module reaches it across the DLL boundary
+	// (Phase B8, docs/dev/archive/2026-10-18/plans/2026-07-16-vulkan-renderer-phase-b.md)
+	virtual const idMaterial *	RemapShaderBySkin( const idMaterial *shader ) const;
 
 							// model associations are just for the preview dialog in the editor
 // RAVEN BEGIN
@@ -70,7 +55,7 @@ public:
 // jscott: to prevent a recursive crash
 	virtual	bool			RebuildTextSource( void ) { return( false ); }
 // scork: validation member for more detailed error-checks
-	//virtual bool			Validate( const char *psText, int iTextLength, idStr &strReportTo ) const;
+	virtual bool			Validate( const char *psText, int iTextLength, idStr &strReportTo ) const;
 // RAVEN END
 	const char *			GetAssociatedModel( int index ) const;
 

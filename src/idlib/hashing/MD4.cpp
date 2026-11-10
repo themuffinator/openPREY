@@ -6,6 +6,8 @@
    RSA Data Security, Inc., MD4 message-digest algorithm. (RFC1320)
 */
 
+#include <stdint.h>
+
 /*
 
 Copyright (C) 1991-2, RSA Data Security, Inc. Created 1991. All
@@ -38,7 +40,9 @@ typedef unsigned char *POINTER;
 typedef unsigned short int UINT2;
 
 /* UINT4 defines a four byte word */
-typedef unsigned long int UINT4;
+typedef uint32_t UINT4;
+
+static_assert( sizeof( UINT4 ) == 4, "MD4 requires 32-bit words" );
 
 /* MD4 context. */
 typedef struct {
@@ -244,9 +248,9 @@ void MD4_Final( MD4_CTX *context, unsigned char digest[16] ) {
 MD4_BlockChecksum
 ===============
 */
-unsigned long MD4_BlockChecksum( const void *data, int length ) {
-	unsigned long	digest[4];
-	unsigned long	val;
+uint32_t MD4_BlockChecksum( const void *data, int length ) {
+	UINT4			digest[4];
+	UINT4			val;
 	MD4_CTX			ctx;
 
 	MD4_Init( &ctx );

@@ -6,8 +6,11 @@
 #include <windows.h>
 #endif
 
-#if defined( MACOS_X )
+#if defined( MACOS_X ) || defined( __linux__ )
 #include <signal.h>
+#endif
+
+#if defined( MACOS_X )
 #include <sys/types.h>
 #include <unistd.h>
 #endif
@@ -25,6 +28,20 @@ idCommon *		idLib::common		= NULL;
 idCVarSystem *	idLib::cvarSystem	= NULL;
 idFileSystem *	idLib::fileSystem	= NULL;
 int				idLib::frameNumber	= 0;
+
+/*
+===============
+idLib::SizeToInt
+===============
+*/
+int idLib::SizeToInt( size_t value, const char *context ) {
+	if ( value > static_cast<size_t>( idMath::INT_MAX ) ) {
+		Error( "%s: size exceeds the supported 32-bit range", context ? context : "idLib::SizeToInt" );
+		return idMath::INT_MAX;
+	}
+
+	return static_cast<int>( value );
+}
 
 /*
 ================
@@ -603,9 +620,11 @@ Swap_Init
 */
 void Swap_Init( void ) {
 	byte	swaptest[2] = {1,0};
+	unsigned short swapvalue;
+	memcpy( &swapvalue, swaptest, sizeof( swapvalue ) );
 
 	// set the byte swapping variables in a portable manner	
-	if ( *(short *)swaptest == 1) {
+	if ( swapvalue == 1 ) {
 		// little endian ex: x86
 		_BigShort = ShortSwap;
 		_LittleShort = ShortNoSwap;
@@ -641,7 +660,9 @@ Swap_IsBigEndian
 */
 bool Swap_IsBigEndian( void ) {
 	byte	swaptest[2] = {1,0};
-	return *(short *)swaptest != 1;
+	unsigned short swapvalue;
+	memcpy( &swapvalue, swaptest, sizeof( swapvalue ) );
+	return swapvalue != 1;
 }
 
 /*
@@ -667,7 +688,7 @@ void AssertFailed( const char *file, int line, const char *expression ) {
 	}
 // RAVEN END
 #elif defined( __linux__ )
-	__asm__ __volatile__ ("int $0x03");
+	raise( SIGTRAP );
 #elif defined( MACOS_X )
 	kill( getpid(), SIGINT );
 #endif

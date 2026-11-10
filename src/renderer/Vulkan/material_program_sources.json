@@ -1,0 +1,160 @@
+{
+  "schema": 1,
+  "normalization": "CRLF to LF only",
+  "policy": "A source pair may select a native implementation only when both hashes match an explicitly reviewed pair. A canonical program with neither source file uses its built-in compatibility default. Partial, empty, modified and noncanonical sources do not select defaults.",
+  "programs": [
+    {
+      "program": "glsl/displacement.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_DISPLACEMENT",
+      "sources": [
+        {
+          "vertexSHA256": "a5a8214e6fc0d115a25dc60f79a291f8e2708a6fdf0586cd37c7c1b51bcefa0f",
+          "fragmentSHA256": "adb14ade8b91739e85238596bbc7ab732a1935db226d8ad06221b510f18fdaf0",
+          "origin": "Quake 4 retail pak001.pk4"
+        }
+      ]
+    },
+    {
+      "program": "glsl/displacementtwostage.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_DISPLACEMENT_TWO_STAGE",
+      "sources": []
+    },
+    {
+      "program": "glsl/ghostpulling.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_GHOST_PULLING",
+      "sources": []
+    },
+    {
+      "program": "glsl/displacement2.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_DISPLACEMENT2",
+      "sources": []
+    },
+    {
+      "program": "glsl/multiplyblend.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_MULTIPLY_BLEND",
+      "sources": [
+        {
+          "vertexSHA256": "38c85930dae950ab5610b00198d851b952d80100406b38c9bc0f344ae03753cd",
+          "fragmentSHA256": "0a706a9a25e8b5558dd3d50d98db39348907d34d5e64f10fa5380783f25938a1",
+          "origin": "Quake 4 retail pak001.pk4"
+        }
+      ]
+    },
+    {
+      "program": "glsl/displacementcube.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_DISPLACEMENT_CUBE",
+      "sources": [
+        {
+          "vertexSHA256": "583f851ea90020613717a219319798c6a62e5be1f0c4c86e4e4aa9dfeda6683f",
+          "fragmentSHA256": "f6b0624985a7fc6169c21f83cecd0252c390c38e948e92fa130d87e9329b8160",
+          "origin": "Quake 4 retail pak001.pk4"
+        }
+      ]
+    },
+    {
+      "program": "glsl/sniperstretch2.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_SNIPER_STRETCH2",
+      "sources": [
+        {
+          "vertexSHA256": "fe6410abb7f9ef224b6cc7c2dc51e5ab3be679b50c0c8f38c5de0bf27fef9f9c",
+          "fragmentSHA256": "bb04f74d50eed8f64d18f4382ec122bf360a31a323e95b194417db4c237e2fd1",
+          "origin": "Quake 4 retail pak001.pk4"
+        },
+        {
+          "vertexSHA256": "1f23bd1fadaf1aa2c6f5f6dea1896480e8a74d96415622c4ae109070e072b27b",
+          "fragmentSHA256": "354db7c6eb41aad13a4d26ba49ebc178704c6c76519061e943d6a0f5aaf5312d",
+          "origin": "openQ4 reviewed source"
+        },
+        {
+          "vertexSHA256": "1f23bd1fadaf1aa2c6f5f6dea1896480e8a74d96415622c4ae109070e072b27b",
+          "fragmentSHA256": "2ac8172e0586313ba1c8c759f17fd544a57ffc951b8453a4743030062a298e5e",
+          "origin": "openQ4 feathered legacy aperture; reviewed with native material_sniper_stretch2.frag"
+        }
+      ]
+    },
+    {
+      "program": "glsl/depthtexture.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_DEPTH_TEXTURE",
+      "sources": []
+    },
+    {
+      "program": "glsl/blur.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_BLUR",
+      "sources": []
+    },
+    {
+      "program": "glsl/medlabs.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_MEDLABS",
+      "sources": []
+    },
+    {
+      "program": "glsl/depthtexture2.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_DEPTH_TEXTURE2",
+      "sources": []
+    },
+    {
+      "program": "glsl/al.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_AL",
+      "sources": []
+    },
+    {
+      "program": "glsl/parallaxbump.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_PARALLAX_BUMP",
+      "sources": []
+    },
+    {
+      "program": "glsl/customlit.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_CUSTOM_LIT",
+      "sources": []
+    },
+    {
+      "program": "glsl/water.glsl",
+      "family": "VK_GLSL_PROGRAM_FAMILY_WATER",
+      "sources": []
+    },
+    {
+      "program": "blur.fs",
+      "family": "VK_GLSL_PROGRAM_FAMILY_DEPTH_AWARE_BLUR",
+      "sources": [
+        {
+          "vertexSHA256": "77a308f377fc95c3e0a206c91706cc489d73a32e560aad1a9c40f5c2a11421f1",
+          "fragmentSHA256": "189971e7aa42aef06f2e464abf254de8c62f15b969c19284c59faccd15344835",
+          "origin": "openQ4 reviewed source"
+        }
+      ]
+    },
+    {
+      "program": "smaa_edge.fs",
+      "family": "VK_GLSL_PROGRAM_FAMILY_SMAA_EDGE",
+      "sources": [
+        {
+          "vertexSHA256": "cbdbbbe08cfe40b4cac0ebdcbd97db2cae33ffdb9bc5245400eae80fa54ab3e1",
+          "fragmentSHA256": "c89b2777b0aba93f00be233dc1844710bad75d2e87702d956112e58e63b428af",
+          "origin": "openQ4 reviewed source"
+        }
+      ]
+    },
+    {
+      "program": "smaa_weights.fs",
+      "family": "VK_GLSL_PROGRAM_FAMILY_SMAA_WEIGHTS",
+      "sources": [
+        {
+          "vertexSHA256": "cbdbbbe08cfe40b4cac0ebdcbd97db2cae33ffdb9bc5245400eae80fa54ab3e1",
+          "fragmentSHA256": "d0df2a9847a623c872a23c852d78fb39fa88ca7f1515d7ebbe3888503d4d4180",
+          "origin": "openQ4 reviewed source"
+        }
+      ]
+    },
+    {
+      "program": "smaa_blend.fs",
+      "family": "VK_GLSL_PROGRAM_FAMILY_SMAA_BLEND",
+      "sources": [
+        {
+          "vertexSHA256": "cbdbbbe08cfe40b4cac0ebdcbd97db2cae33ffdb9bc5245400eae80fa54ab3e1",
+          "fragmentSHA256": "7a164d7be8963869380dceb06d23c852c9a00689762a5c22fe4b13dd52a1bc41",
+          "origin": "openQ4 reviewed source"
+        }
+      ]
+    }
+  ]
+}

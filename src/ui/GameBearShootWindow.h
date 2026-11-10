@@ -53,7 +53,7 @@ public:
 	virtual				~BSEntity();
 
 	virtual void		WriteToSaveGame( idFile *savefile );
-	virtual void		ReadFromSaveGame( idFile *savefile, idGameBearShootWindow* _game );
+	virtual void		ReadFromSaveGame( idFile *savefile, idGameBearShootWindow* _game, int saveVersion );
 
 	void				SetMaterial(const char* name);
 	void				SetSize( float _width, float _height );

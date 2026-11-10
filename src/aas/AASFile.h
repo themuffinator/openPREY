@@ -11,7 +11,11 @@
 */
 
 #define AAS_FILEID					"DewmAAS"
+#ifdef HUMANHEAD
+#define AAS_FILEVERSION				"1.07"
+#else
 #define AAS_FILEVERSION				"1.08"
+#endif
 
 // travel flags
 #define TFL_INVALID					BIT(0)		// not valid
@@ -83,7 +87,7 @@ struct rvMarker;
 
 #define MAX_AAS_BOUNDING_BOXES		4
 
-typedef enum {
+enum {
 
 	RE_WALK,
 	RE_WALKOFFLEDGE,
@@ -347,6 +351,21 @@ typedef struct sizeEstimate_s {
 	int			numNodes;
 } sizeEstimate_t;
 
+typedef enum aasDummySection_e {
+	AAS_DUMMY_PLANES,
+	AAS_DUMMY_VERTICES,
+	AAS_DUMMY_EDGES,
+	AAS_DUMMY_EDGE_INDEX,
+	AAS_DUMMY_FACES,
+	AAS_DUMMY_FACE_INDEX,
+	AAS_DUMMY_AREAS,
+	AAS_DUMMY_NODES,
+	AAS_DUMMY_PORTALS,
+	AAS_DUMMY_PORTAL_INDEX,
+	AAS_DUMMY_CLUSTERS,
+	AAS_DUMMY_SECTION_COUNT
+} aasDummySection_t;
+
 
 
 class idAASFile {
@@ -370,6 +389,7 @@ public:
 	int							GetNumFaceIndexes(void) const { return faceIndex.Num(); }
 	const aasIndex_t& GetFaceIndex(int index) const { return faceIndex[index]; }
 	int							GetNumAreas(void) const { return areas.Num(); }
+	aasArea_t& GetArea(int index) { return areas[index]; }
 	const aasArea_t& GetArea(int index) const { return areas[index]; }
 	int							GetNumNodes(void) const { return nodes.Num(); }
 	const aasNode_t& GetNode(int index) const { return nodes[index]; }
@@ -400,6 +420,21 @@ public:
 	virtual void				PushPointIntoAreaNum(int areaNum, idVec3& point) const = 0;
 	virtual bool				Trace(aasTrace_t& trace, const idVec3& start, const idVec3& end) const = 0;
 	virtual void				PrintInfo(void) const = 0;
+	bool						IsDummyFile( unsigned int mapFileCRC ) const {
+		int i;
+
+		if ( crc != mapFileCRC ) {
+			return false;
+		}
+
+		for ( i = 0; i < AAS_DUMMY_SECTION_COUNT; i++ ) {
+			if ( !isDummy[i] ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
 
 	// RAVEN BEGIN
 		// cdr: AASTactical
@@ -441,6 +476,7 @@ protected:
 	idList<int>					featureIndexes;
 	idList<aasFeature_t>		features;
 // jmarshall end
+	byte						isDummy[AAS_DUMMY_SECTION_COUNT];
 	idAASSettings				settings;
 };
 

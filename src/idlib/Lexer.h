@@ -246,10 +246,10 @@ public:
 
 	static void		SetBaseFolder(char const * const);
 
-// RAVEN BEGIN
+	// RAVEN BEGIN
 					// write a binary representation of a token
 	void			WriteBinaryToken(idToken *tok);
-	static void		WriteBinaryFile(char const * const filename);
+	static void		WriteBinaryFile(char const * const filename, bool OSPath = false);
 // RAVEN END
 
 // RAVEN BEGIN
@@ -343,6 +343,8 @@ public:
 	int						CheckTokenString( const char *string );
 							// returns true an reads the token when a token with the given type is available
 	int						CheckTokenType( int type, int subtype, idToken *token );
+							// returns true if the next token equals the given string but does not remove it
+	int						PeekTokenString( const char *string );
 							// skip tokens until the given token string is read
 	int						SkipUntilString( const char *string );
 							// skip the rest of the current line

@@ -1,0 +1,50 @@
+// Copyright (C) 2026 DarkMatter Productions. GPL-3.0-or-later.
+// Intersect one physical pixel with the clockwise convex mask. All area math
+// uses coordinates relative to that pixel to avoid large-coordinate cancellation.
+uniform sampler2D Source;
+uniform vec4 maskConfig;
+varying vec2 maskPoint;
+varying vec4 mask01;
+varying vec4 mask23;
+varying vec3 maskGradient;
+varying vec3 maskAlpha;
+float cross2(vec2 a,vec2 b) { return a.x*b.y-a.y*b.x; }
+float coverage(vec2 origin) {
+	vec2 p[4]; p[0]=mask01.xy; p[1]=mask01.zw; p[2]=mask23.xy; p[3]=mask23.zw;
+	vec2 v[8]; vec2 next[8];
+	v[0]=vec2(0.0); v[1]=vec2(1.0,0.0); v[2]=vec2(1.0); v[3]=vec2(0.0,1.0);
+	int count=4;
+	for(int e=0;e<4;++e) {
+		vec2 a=p[e]-origin; vec2 edge=p[(e+1)-((e+1)/4)*4]-p[e];
+		// Most pixels are wholly inside or outside an edge. The extrema of
+		// its linear half-plane over the unit square are opposite corners;
+		// only a boundary pixel needs polygon clipping and intersection math.
+		vec2 low=vec2(edge.y>0.0 ? 1.0 : 0.0,edge.x<0.0 ? 1.0 : 0.0);
+		if(cross2(edge,low-a)>=0.0) continue;
+		if(cross2(edge,(vec2(1.0)-low)-a)<=0.0) return 0.0;
+		int n=0;
+		vec2 before=v[count-1]; float bd=cross2(edge,before-a);
+		for(int j=0;j<8;++j) {
+			if(j>=count) break;
+			vec2 here=v[j]; float d=cross2(edge,here-a);
+			if((d>0.0 && bd<0.0) || (d<0.0 && bd>0.0)) { next[n]=mix(before,here,bd/(bd-d)); ++n; }
+			if(d>=0.0) { next[n]=here; ++n; }
+			before=here; bd=d;
+		}
+		if(n<3) return 0.0;
+		for(int j=0;j<8;++j) { if(j>=n) break; v[j]=next[j]; }
+		count=n;
+	}
+	float area=0.0; vec2 last=v[count-1];
+	for(int j=0;j<8;++j) { if(j>=count) break; area+=cross2(last,v[j]); last=v[j]; }
+	return clamp(area*0.5,0.0,1.0);
+}
+void main(void) {
+	vec2 cell=floor(maskPoint);
+	float t=clamp(dot(vec3(cell+vec2(0.5),1.0),maskGradient),0.0,1.0);
+	float alpha=t<=maskConfig.w ? mix(maskAlpha.x,maskAlpha.y,t/maskConfig.w) :
+		mix(maskAlpha.y,maskAlpha.z,(t-maskConfig.w)/(1.0-maskConfig.w));
+	if(alpha<=0.0) { gl_FragColor=vec4(0.0); return; }
+	alpha=floor(alpha*coverage(cell)*255.0+0.5)/255.0;
+	gl_FragColor=texture2D(Source,vec2(maskPoint.x/maskConfig.x,1.0-maskPoint.y/maskConfig.y))*(alpha*maskConfig.z);
+}

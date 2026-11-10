@@ -90,8 +90,8 @@ DialogDeclBrowser::~DialogDeclBrowser
 ================
 */
 DialogDeclBrowser::~DialogDeclBrowser() {
-	delete m_pwchTip;
-	delete m_pchTip;
+	delete[] m_pwchTip;
+	delete[] m_pchTip;
 }
 
 /*
@@ -514,12 +514,46 @@ void DeclBrowserReloadDeclarations( void ) {
 
 /*
 ================
+DeclBrowserPrint
+================
+*/
+bool DeclBrowserPrint( const char *text ) {
+	if ( g_DeclDialog == NULL ) {
+		return false;
+	}
+
+	return g_DeclDialog->SetStatusText( text );
+}
+
+/*
+================
 DialogDeclBrowser::ReloadDeclarations
 ================
 */
 void DialogDeclBrowser::ReloadDeclarations( void ) {
 	InitBaseDeclTree();
 	OnBnClickedFind();
+}
+
+/*
+================
+DialogDeclBrowser::SetStatusText
+================
+*/
+bool DialogDeclBrowser::SetStatusText( const char *text ) {
+	if ( !statusBar.GetSafeHwnd() ) {
+		return false;
+	}
+
+	idStr statusText = text != NULL ? text : "";
+	statusText.Replace( "\r", "" );
+	statusText.Replace( "\n", "" );
+	statusText.StripTrailingWhitespace();
+
+	statusBar.SetWindowText( statusText.c_str() );
+	statusBar.RedrawWindow( NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW );
+
+	return true;
 }
 
 BEGIN_MESSAGE_MAP(DialogDeclBrowser, CDialog)
@@ -574,24 +608,24 @@ BOOL DialogDeclBrowser::OnToolTipNotify( UINT id, NMHDR *pNMHDR, LRESULT *pResul
 
 #ifndef _UNICODE
 		if( pNMHDR->code == TTN_NEEDTEXTA ) {
-			delete m_pchTip;
+			delete[] m_pchTip;
 			m_pchTip = new TCHAR[toolTip.GetLength() + 2];
 			lstrcpyn( m_pchTip, toolTip, toolTip.GetLength() + 1 );
 			pTTTW->lpszText = (WCHAR*)m_pchTip;
 		} else {
-			delete m_pwchTip;
+			delete[] m_pwchTip;
 			m_pwchTip = new WCHAR[toolTip.GetLength() + 2];
 			_mbstowcsz( m_pwchTip, toolTip, toolTip.GetLength() + 1 );
 			pTTTW->lpszText = (WCHAR*)m_pwchTip;
 		}
 #else
 		if( pNMHDR->code == TTN_NEEDTEXTA ) {
-			delete m_pchTip;
+			delete[] m_pchTip;
 			m_pchTip = new TCHAR[toolTip.GetLength() + 2];
 			_wcstombsz( m_pchTip, toolTip, toolTip.GetLength() + 1 );
 			pTTTA->lpszText = (LPTSTR)m_pchTip;
 		} else {
-			delete m_pwchTip;
+			delete[] m_pwchTip;
 			m_pwchTip = new WCHAR[toolTip.GetLength() + 2];
 			lstrcpyn( m_pwchTip, toolTip, toolTip.GetLength() + 1 );
 			pTTTA->lpszText = (LPTSTR) m_pwchTip;

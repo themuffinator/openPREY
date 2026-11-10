@@ -33,10 +33,13 @@ If you have questions concerning this license or the applicable additional terms
 //
 
 #include "Rectangle.h"
+#include "retained/Hud.h"
 
 const int VIRTUAL_WIDTH = 640;
 const int VIRTUAL_HEIGHT = 480;
 const int BLINK_DIVISOR = 200;
+
+struct wrapInfo_t;
 
 class idDeviceContext {
 public:
@@ -47,36 +50,42 @@ public:
 	void				Shutdown();
 	bool				Initialized() { return initialized; }
 	void				EnableLocalization();
+	void				RegisterIcon( const char *code, const char *shader, int x = -1, int y = -1, int w = -1, int h = -1 );
+	void				SizeIcons();
 
 	void				GetTransformInfo(idVec3& origin, idMat3& mat );
 
 	void				SetTransformInfo(const idVec3 &origin, const idMat3 &mat);
 	void				DrawMaterial(float x, float y, float w, float h, const idMaterial *mat, const idVec4 &color, float scalex = 1.0, float scaley = 1.0);
-	void				DrawMaterialUV( float x, float y, float w, float h, const idMaterial *mat, const idVec4 &color, float s0, float t0, float s1, float t1 );
+	void				DrawMaterialUV(float x, float y, float w, float h, const idMaterial *mat, const idVec4 &color, float s0, float t0, float s1, float t1);
 	void				DrawRect(float x, float y, float width, float height, float size, const idVec4 &color);
 	void				DrawFilledRect(float x, float y, float width, float height, const idVec4 &color);
-	int					DrawText(const char *text, float textScale, int textAlign, idVec4 color, idRectangle rectDraw, bool wrap, int cursor = -1, bool calcOnly = false, idList<int> *breaks = NULL, int limit = 0 );
+	int					DrawText(const char *text, float textScale, int textAlign, idVec4 color, idRectangle rectDraw, bool wrap, int cursor = -1, bool calcOnly = false, idList<int> *breaks = NULL, int limit = 0, int adjust = 0, int style = 0, bool chatWindow = false );
 	void				DrawMaterialRect( float x, float y, float w, float h, float size, const idMaterial *mat, const idVec4 &color);
 	void				DrawStretchPic(float x, float y, float w, float h, float s0, float t0, float s1, float t1, const idMaterial *mat);
 
 	void				DrawMaterialRotated(float x, float y, float w, float h, const idMaterial *mat, const idVec4 &color, float scalex = 1.0, float scaley = 1.0, float angle = 0.0f);
 	void				DrawStretchPicRotated(float x, float y, float w, float h, float s0, float t0, float s1, float t1, const idMaterial *mat, float angle = 0.0f);
 
-	int					CharWidth( const char c, float scale );
-	int					TextWidth(const char *text, float scale, int limit);
-	int					TextHeight(const char *text, float scale, int limit);
+	int					CharWidth( const char c, float scale, int adjust = 0 );
+	int					CharWidthForCodePoint( unsigned int codePoint, float scale, int adjust = 0 );
+	int					TextWidth(const char *text, float scale, int limit, int adjust = 0);
+	int					TextHeight(const char *text, float scale, int limit, int adjust = 0);
 	int					MaxCharHeight(float scale);
 	int					MaxCharWidth(float scale);
+	bool				GetMaxTextIndex(const char *text, int limit, float textScale, wrapInfo_t &wrapInfo);
 
 	int					FindFont( const char *name );
 	void				SetupFonts();
+	bool				ReloadFonts();
 
 	idRegion			*GetTextRegion(const char *text, float textScale, idRectangle rectDraw, float xStart, float yStart);
 
 	void				SetSize(float width, float height);
 	void				SetAspectCorrection( bool enabled );
+	float				GetCanvasAspect() const;
 	void				GetVirtualScreenExpansion( float width, float height, float &xExpand, float &yExpand ) const;
-	void				GetCursorBounds( float &minX, float &maxX, float &minY, float &maxY ) const;
+	void				GetCinematic16x9Bars( float width, float height, idRectangle &topBar, idRectangle &bottomBar, idRectangle &leftBar, idRectangle &rightBar, idRectangle &visibleArea ) const;
 
 	const idMaterial	*GetScrollBarImage(int index);
 
@@ -84,6 +93,19 @@ public:
 	void				SetCursor(int n);
 
 	void				AdjustCoords(float *x, float *y, float *w, float *h);
+	// openQ4: the stock interface's HUD settings (idLegacyHudLayout). A group
+	// scales about its screen anchor, both in virtual units, as coordinates
+	// leave virtual space: after clipping, so a clip rectangle scales with what
+	// it clips. The opacity multiplies every colour's alpha; additive art,
+	// which ignores alpha, fades by its colour instead. 1 turns either off.
+	void				SetGroupScale( float anchorX, float anchorY, float scale ) { groupX = anchorX; groupY = anchorY; groupScale = scale; }
+	void				GetGroupScale( float &anchorX, float &anchorY, float &scale ) const { anchorX = groupX; anchorY = groupY; scale = groupScale; }
+	// Text with its key escapes (^ikHH, ^iKHH) written out as the keys' names,
+	// for a line that names a key in passing rather than showing its keycap.
+	// Returns whether anything changed.
+	static bool			PlainKeyNames( const char *text, idStr &plain );
+	void				SetDrawOpacity( float opacity ) { drawOpacity = opacity; }
+	float				GetDrawOpacity() const { return drawOpacity; }
 	bool				ClippedCoords(float *x, float *y, float *w, float *h);
 	bool				ClippedCoords(float *x, float *y, float *w, float *h, float *s1, float *t1, float *s2, float *t2);
 
@@ -93,13 +115,18 @@ public:
 
 	void				EnableClipping(bool b) { enableClipping = b; };
 	void				SetFont( int num );
+	void BeginHudCapture(std::vector<openq4::ui::HudPrimitive>& output) { hudCapture = &output; hudDiscard = false; }
+	void BeginHudDiscard() { hudCapture = nullptr; hudDiscard = true; }
+	void EndHudCapture() { hudCapture = nullptr; hudDiscard = false; }
+	void CaptureLegacyText(const char* text, const char* family, float scale, float width, float height,
+		int align, bool clip, std::vector<openq4::ui::HudPrimitive>& output);
 
 	void				SetOverStrike(bool b) { overStrikeMode = b; }
 
 	bool				GetOverStrike() { return overStrikeMode; }
 
 	void				DrawEditCursor(float x, float y, float scale);
-	void				SetRetailSplineEffect( float progress, int splinePoints );
+	bool				SetRetailSplineEffect( float progress, int splinePoints );
 	void				ClearRetailSplineEffect();
 
 	enum {
@@ -137,10 +164,62 @@ public:
 	static idVec4 colorNone;
 
 private:
+	std::vector<openq4::ui::HudPrimitive>* hudCapture = nullptr;
+	idVec4 hudColour = idVec4(1,1,1,1);
+	bool hudGlyph = false;
+	bool hudDiscard = false;
+	float groupX = 0.0f, groupY = 0.0f, groupScale = 1.0f, drawOpacity = 1.0f;
+	// The transform origin as the group scale places it.
+	idVec3 GroupOrigin() const;
+	void SetDrawColor(const idVec4& colour, const idMaterial* material = nullptr);
+	bool CaptureHud(const idDrawVert* vertices, const idMaterial* material);
+	struct embeddedIcon_t {
+		char				code[4];
+		const idMaterial	*material;
+		float				s1;
+		float				t1;
+		float				s2;
+		float				t2;
+		float				width;
+		float				height;
+		// authored sprite rect, kept so the icon can be re-sized once the
+		// material's image dimensions become resident
+		int					registeredX;
+		int					registeredY;
+		int					registeredWidth;
+		int					registeredHeight;
+		bool				sized;
+
+		embeddedIcon_t() :
+			material( NULL ),
+			s1( 0.0f ),
+			t1( 0.0f ),
+			s2( 1.0f ),
+			t2( 1.0f ),
+			width( 0.0f ),
+			height( 0.0f ),
+			registeredX( -1 ),
+			registeredY( -1 ),
+			registeredWidth( -1 ),
+			registeredHeight( -1 ),
+			sized( false ) {
+			code[0] = '\0';
+		}
+	};
+
 	void				CalcVirtualScaleOffset( float width, float height, float &outXScale, float &outYScale, float &outXOffset, float &outYOffset ) const;
-	int					DrawText(float x, float y, float scale, idVec4 color, const char *text, float adjust, int limit, int style, int cursor = -1);
+	void				RegisterBuiltinIcons();
+	void				SizeIcon( embeddedIcon_t &icon );
+	bool				FindIcon( const char *code, const embeddedIcon_t **icon );
+	float				GetIconDisplayWidth( const embeddedIcon_t &icon, float referenceHeight ) const;
+	float				GetKeyBindingIconHeight( float textScale, float heightRatio = 0.99f );
+	float				GetKeyBindingIconWidth( int keyNum, float textScale, float heightRatio = 0.99f );
+	void				DrawKeyBindingIcon( int keyNum, float x, float baselineY, float textScale, const idVec4 &color, float heightRatio = 0.99f );
+	int					DrawText(float x, float y, float scale, idVec4 color, const char *text, float adjust, int limit, int style, int cursor = -1, bool resetEscapes = false, bool suppressBackground = false);
 	void				PaintChar(float x,float y,float width,float height,float scale,float	s,float	t,float	s2,float t2,const idMaterial *hShader);
+	void				PaintGlyph(float x,float y,float scale,const fontInfo_t *font,const glyphInfo_t *glyph,const idMaterial *hShader);
 	void				SetFontByScale( float scale );
+	void				EnsureFontsCurrent();
 	void				Clear( void );
 
 	const idMaterial	*cursorImages[CURSOR_COUNT];
@@ -160,13 +239,18 @@ private:
 	int					cursor;
 
 	idList<idRectangle>	clipRects;
+	idHashTable<embeddedIcon_t> icons;
 	
 	static idList<fontInfoEx_t> fonts;
+	static int			fontsVideoRestartCount;
+	static int			fontsCodePageGeneration;
 	idStr fontLang;
 
 	bool				enableClipping;
 
 	bool				overStrikeMode;
+	idVec4				drawTextColor;
+	float				drawTextColorAdjust;
 
 	idMat3				mat;
 	idVec3				origin;
@@ -178,5 +262,7 @@ private:
 	float				retailSplineEffectProgress;
 	int					retailSplineEffectPoints;
 };
+
+bool UI_FontParity_RunSelfTest( void );
 
 #endif /* !__DEVICECONTEXT_H__ */

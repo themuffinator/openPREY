@@ -127,7 +127,7 @@ public:
 
 	// rvSilTraceVertT operations
 // dluetscher: added support for operations on idSilTraceVerts and idJointMats
-#ifdef _MD5R_SUPPORT
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
 	VIRTUAL void VPCALL JointMat_MultiplyMats( float * RESTRICT destMats, const idJointMat * RESTRICT src1Mats, const idJointMat * RESTRICT src2Mats, int * RESTRICT transformPalette, int transformCount );
 	VIRTUAL void VPCALL TransformVertsMinMax4Bone( rvSilTraceVertT * RESTRICT silTraceVertOutputData, idVec3 &min, idVec3 &max, byte * RESTRICT vertexInputData, int vertStride, int numVerts, float * RESTRICT skinToModelTransforms ); // transforms an array of index-weighted vertices into an array of idSilTraceVerts, while simulatenously calculating the bounds
 	VIRTUAL void VPCALL TransformVertsMinMax1Bone( rvSilTraceVertT * RESTRICT silTraceVertOutputData, idVec3 &min, idVec3 &max, byte * RESTRICT vertexInputData, int vertStride, int numVerts, float * RESTRICT skinToModelTransforms ); // transforms an array of index-weighted vertices into an array of idSilTraceVerts, while simulatenously calculating the bounds

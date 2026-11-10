@@ -1,6 +1,8 @@
 #ifndef __BLOCKPOOL_H__
 #define __BLOCKPOOL_H__
 
+#include <stddef.h>
+
 #ifdef _RV_MEM_SYS_SUPPORT
 
 /*
@@ -85,7 +87,7 @@ type *rvBlockPool<type,blockSize,memoryTag,heapID>::Alloc( void ) {
 
 template<class type, int blockSize, byte memoryTag, Rv_Sys_Heap_ID_t heapID>
 void rvBlockPool<type,blockSize,memoryTag,heapID>::Free( type *t ) {
-	element_t *element = (element_t *)( ( (unsigned char *) t ) - ( (int) &((element_t *)0)->t ) );
+	element_t *element = (element_t *)( ( (byte *) t ) - offsetof( element_t, t ) );
 	element->next = free;
 	free = element;
 	active--;

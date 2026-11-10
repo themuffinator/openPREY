@@ -162,7 +162,12 @@ void CPropTreeItemEditButton::SetItemValue(LPARAM lParam)
 	switch (m_nFormat)
 	{
 	case ValueFormatNumber:
-		m_sEdit.Format(_T("%d"), lParam);
+		if ( lParam < INT_MIN || lParam > INT_MAX ) {
+			ASSERT( false );
+			m_sEdit.Empty();
+			return;
+		}
+		m_sEdit.Format(_T("%d"), static_cast<int>( lParam ));
 		return;
 
 	case ValueFormatFloatPointer:

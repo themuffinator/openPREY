@@ -39,6 +39,24 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "CollisionModel_local.h"
 
+#ifdef HUMANHEAD
+// Prey/Human Head contents bits. Keep this table self-contained so the
+// collision library does not depend on game-module copies of Material.h.
+enum {
+	PREY_CONTENTS_FORCEFIELD			= BIT(16),
+	PREY_CONTENTS_SPIRITBRIDGE			= BIT(17),
+	PREY_CONTENTS_AREAPORTAL			= BIT(18),
+	PREY_CONTENTS_NOCSG					= BIT(19),
+	PREY_CONTENTS_BLOCK_RADIUSDAMAGE	= BIT(20),
+	PREY_CONTENTS_SHOOTABLE				= BIT(21),
+	PREY_CONTENTS_DEATHVOLUME			= BIT(22),
+	PREY_CONTENTS_VEHICLECLIP			= BIT(23),
+	PREY_CONTENTS_OWNER_TO_OWNER		= BIT(24),
+	PREY_CONTENTS_GAME_PORTAL			= BIT(25),
+	PREY_CONTENTS_SHOOTABLEBYARROW		= BIT(26),
+	PREY_CONTENTS_HUNTERCLIP			= BIT(27)
+};
+#endif
 
 /*
 ===============================================================================
@@ -115,18 +133,18 @@ int cm_contentsFlagByIndex[] = {
 	CONTENTS_AAS_OBSTACLE,			// 15
 	CONTENTS_FLASHLIGHT_TRIGGER,	// 16
 #ifdef HUMANHEAD
-	CONTENTS_FORCEFIELD,			// 17
-	CONTENTS_SPIRITBRIDGE,			// 18
-	CONTENTS_AREAPORTAL,			// 19
-	CONTENTS_NOCSG,					// 20
-	CONTENTS_BLOCK_RADIUSDAMAGE,	// 21
-	CONTENTS_SHOOTABLE,				// 22
-	CONTENTS_DEATHVOLUME,			// 23
-	CONTENTS_VEHICLECLIP,			// 24
-	CONTENTS_OWNER_TO_OWNER,		// 25
-	CONTENTS_GAME_PORTAL,			// 26
-	CONTENTS_SHOOTABLEBYARROW,		// 27
-	CONTENTS_HUNTERCLIP,			// 28
+	PREY_CONTENTS_FORCEFIELD,		// 17
+	PREY_CONTENTS_SPIRITBRIDGE,		// 18
+	PREY_CONTENTS_AREAPORTAL,		// 19
+	PREY_CONTENTS_NOCSG,			// 20
+	PREY_CONTENTS_BLOCK_RADIUSDAMAGE, // 21
+	PREY_CONTENTS_SHOOTABLE,		// 22
+	PREY_CONTENTS_DEATHVOLUME,		// 23
+	PREY_CONTENTS_VEHICLECLIP,		// 24
+	PREY_CONTENTS_OWNER_TO_OWNER,	// 25
+	PREY_CONTENTS_GAME_PORTAL,		// 26
+	PREY_CONTENTS_SHOOTABLEBYARROW,	// 27
+	PREY_CONTENTS_HUNTERCLIP,		// 28
 #else
 	CONTENTS_SIGHTCLIP,				// 17
 	CONTENTS_LARGESHOTCLIP,			// 18
@@ -154,12 +172,56 @@ idCVar cm_debugCollision(	"cm_debugCollision",	"0",		CVAR_GAME | CVAR_BOOL,	"deb
 
 idVec4 cm_color;
 
+// Quake 4 retail .cm files name contents through a shifted table. Prey's "1.00"
+// files use their own names, and Prey has none of these Quake 4 clip bits.
+#ifndef HUMANHEAD
+/*
+Quake 4 1.4.2 pairs its contents names and flags by index, but its name table
+has an extra "solid" entry after "largeShotClip", so every later name sits one
+slot away from the flag it was meant for. Retail .cm files (versions 2 and 3)
+were written and read through that pairing: "notacticalfeatures" means vehicle
+clip, "vehicleclip" fly clip, "flyclip" shot clip, "shotClip" item clip, and
+"opaque" also sets sight clip. Retail could not write CONTENTS_NOTACTICALFEATURES
+at all. These pairs reproduce retail's decoding of those files.
+*/
+static const struct {
+	const char *	name;
+	int				contents;
+} cm_retailContents[] = {
+	{ "solid",				CONTENTS_SOLID },
+	{ "opaque",				CONTENTS_OPAQUE | CONTENTS_SIGHTCLIP },
+	{ "water",				CONTENTS_WATER },
+	{ "playerclip",			CONTENTS_PLAYERCLIP },
+	{ "monsterclip",		CONTENTS_MONSTERCLIP },
+	{ "moveableclip",		CONTENTS_MOVEABLECLIP },
+	{ "ikclip",				CONTENTS_IKCLIP },
+	{ "blood",				CONTENTS_BLOOD },
+	{ "body",				CONTENTS_BODY },
+	{ "corpse",				CONTENTS_CORPSE },
+	{ "trigger",			CONTENTS_TRIGGER },
+	{ "aas_solid",			CONTENTS_AAS_SOLID },
+	{ "aas_obstacle",		CONTENTS_AAS_OBSTACLE },
+	{ "flashlight_trigger",	CONTENTS_FLASHLIGHT_TRIGGER },
+	{ "sightClip",			CONTENTS_SIGHTCLIP },
+	{ "largeShotClip",		CONTENTS_LARGESHOTCLIP },
+	{ "notacticalfeatures",	CONTENTS_VEHICLECLIP },
+	{ "vehicleclip",		CONTENTS_FLYCLIP },
+	{ "flyclip",			CONTENTS_PROJECTILE },
+	{ "shotClip",			CONTENTS_ITEMCLIP },
+	{ "itemclip",			0 },
+	{ NULL,					0 }
+};
+#endif
+
 /*
 ================
 idCollisionModelManagerLocal::ContentsFromString
+
+'retailNames' selects Quake 4's name pairing (.cm versions 2 and 3); names that
+pairing never wrote, such as openQ4's liquids, keep their openQ4 meaning.
 ================
 */
-int idCollisionModelManagerLocal::ContentsFromString( const char *string ) const {
+int idCollisionModelManagerLocal::ContentsFromString( const char *string, bool retailNames ) const {
 	int i, contents = 0;
 	idLexer src( string, idStr::Length( string ), "ContentsFromString" );
 	idToken token;
@@ -169,20 +231,34 @@ int idCollisionModelManagerLocal::ContentsFromString( const char *string ) const
 			continue;
 		}
 #ifdef HUMANHEAD
-		// Retail Prey uses underscore-separated names in .cm data.
-		// Keep accepting older no-underscore aliases for compatibility.
+		// Accept historical no-underscore aliases as well as retail spellings.
 		if ( token.Icmp( "blockradiusdamage" ) == 0 ) {
-			contents |= CONTENTS_BLOCK_RADIUSDAMAGE;
+			contents |= PREY_CONTENTS_BLOCK_RADIUSDAMAGE;
 			continue;
 		}
 		if ( token.Icmp( "ownertoowner" ) == 0 ) {
-			contents |= CONTENTS_OWNER_TO_OWNER;
+			contents |= PREY_CONTENTS_OWNER_TO_OWNER;
 			continue;
 		}
 		if ( token.Icmp( "gameportal" ) == 0 ) {
-			contents |= CONTENTS_GAME_PORTAL;
+			contents |= PREY_CONTENTS_GAME_PORTAL;
 			continue;
 		}
+#endif
+#ifndef HUMANHEAD
+		if ( retailNames ) {
+			for ( i = 0; cm_retailContents[i].name != NULL; i++ ) {
+				if ( token.Icmp( cm_retailContents[i].name ) == 0 ) {
+					break;
+				}
+			}
+			if ( cm_retailContents[i].name != NULL ) {
+				contents |= cm_retailContents[i].contents;
+				continue;
+			}
+		}
+#else
+		(void)retailNames;
 #endif
 		for ( i = 1; cm_contentsNameByIndex[i] != NULL; i++ ) {
 			if ( token.Icmp( cm_contentsNameByIndex[i] ) == 0 ) {
@@ -201,30 +277,23 @@ idCollisionModelManagerLocal::StringFromContents
 ================
 */
 const char *idCollisionModelManagerLocal::StringFromContents( const int contents ) const {
-	int i, length = 0;
+	int i;
 	static char contentsString[MAX_STRING_CHARS];
+	idStr contentsText;
 
 	contentsString[0] = '\0';
 
 	for ( i = 1; cm_contentsFlagByIndex[i] != 0; i++ ) {
 		if ( contents & cm_contentsFlagByIndex[i] ) {
-			if ( length != 0 ) {
-				length += idStr::snPrintf( contentsString + length, sizeof( contentsString ) - length, "," );
+			if ( contentsText.Length() != 0 ) {
+				contentsText += ",";
 			}
-			length += idStr::snPrintf( contentsString + length, sizeof( contentsString ) - length, cm_contentsNameByIndex[i] );
+			contentsText += cm_contentsNameByIndex[i];
 		}
 	}
 
+	idStr::Copynz( contentsString, contentsText.c_str(), sizeof( contentsString ) );
 	return contentsString;
-}
-
-/*
-================
-idCollisionModelManagerLocal::ContentsName
-================
-*/
-const char *idCollisionModelManagerLocal::ContentsName( const int contents ) const {
-	return StringFromContents( contents );
 }
 
 /*
@@ -386,6 +455,18 @@ void idCollisionModelManagerLocal::DrawNodePolygons( idCollisionModelLocal *mode
 	}
 }
 
+void idCollisionModelManagerLocal::DrawModel( idCollisionModel *model, const idVec3 &modelOrigin, const idMat3 &modelAxis,
+									const idVec3 &viewOrigin, const idMat3 &viewAxis, const float radius ) {
+	if ( model == NULL ) {
+		return;
+	}
+
+	(void)viewAxis;
+
+	checkCount++;
+	static_cast<idCollisionModelLocal *>( model )->DrawModel( modelOrigin, modelAxis, viewOrigin, radius );
+}
+
 /*
 ===============================================================================
 
@@ -395,6 +476,8 @@ Speed test code
 */
 
 static idCVar cm_testCollision(		"cm_testCollision",		"0",					CVAR_GAME | CVAR_BOOL,		"" );
+static idCVar cm_debugTranslation(	"cm_debugTranslation",	"0",					CVAR_GAME | CVAR_BOOL,		"" );
+static idCVar cm_debugRotation(		"cm_debugRotation",		"0",					CVAR_GAME | CVAR_BOOL,		"" );
 static idCVar cm_testRotation(		"cm_testRotation",		"1",					CVAR_GAME | CVAR_BOOL,		"" );
 static idCVar cm_testModel(			"cm_testModel",			"0",					CVAR_GAME | CVAR_INTEGER,	"" );
 static idCVar cm_testTimes(			"cm_testTimes",			"1000",					CVAR_GAME | CVAR_INTEGER,	"" );
@@ -419,12 +502,159 @@ static int num_rotation = 0;
 static idVec3 start;
 static idVec3 *testend;
 
+static const float CM_DEBUG_DRAW_RADIUS = 1024.0f;
+
+struct cm_debugTranslationFailure_t {
+	bool				valid = false;
+	bool				hasTrm = false;
+	idCollisionModel *	trmModel = NULL;
+	idVec3				start;
+	idVec3				end;
+	idTraceModel		trm;
+	idMat3				trmAxis;
+	int					contentMask = 0;
+	idCollisionModel *	model = NULL;
+	idVec3				modelOrigin;
+	idMat3				modelAxis;
+};
+
+struct cm_debugRotationFailure_t {
+	bool				valid = false;
+	bool				hasTrm = false;
+	idCollisionModel *	trmModel = NULL;
+	idVec3				start;
+	idRotation			rotation;
+	idTraceModel		trm;
+	idMat3				trmAxis;
+	int					contentMask = 0;
+	idCollisionModel *	model = NULL;
+	idVec3				modelOrigin;
+	idMat3				modelAxis;
+};
+
+static cm_debugTranslationFailure_t translationFailure;
+static cm_debugRotationFailure_t rotationFailure;
+
+static void CM_FreeDebugTrmModel( idCollisionModel *&trmModel ) {
+	if ( trmModel == NULL ) {
+		return;
+	}
+
+	collisionModelManager->FreeModel( trmModel );
+	trmModel = NULL;
+}
+
 #include "../sys/sys_public.h"
 
-void idCollisionModelManagerLocal::DebugOutput( const idVec3 &origin ) {
+void idCollisionModelManagerLocal::ClearDebugFailures( void ) {
+	CM_FreeDebugTrmModel( translationFailure.trmModel );
+	translationFailure.valid = false;
+	translationFailure.hasTrm = false;
+	translationFailure.model = NULL;
+
+	CM_FreeDebugTrmModel( rotationFailure.trmModel );
+	rotationFailure.valid = false;
+	rotationFailure.hasTrm = false;
+	rotationFailure.model = NULL;
+}
+
+void idCollisionModelManagerLocal::CaptureTranslationFailure( const idVec3 &start, const idVec3 &end,
+													const idTraceModel *trm, const idMat3 &trmAxis, int contentMask,
+													idCollisionModel *model, const idVec3 &modelOrigin, const idMat3 &modelAxis ) {
+	CM_FreeDebugTrmModel( translationFailure.trmModel );
+
+	translationFailure.valid = true;
+	translationFailure.hasTrm = ( trm != NULL );
+	translationFailure.start = start;
+	translationFailure.end = end;
+	if ( trm != NULL ) {
+		translationFailure.trm = *trm;
+		translationFailure.trmModel = ModelFromTrm( NULL, "_cm_debug_translation", *trm, NULL );
+	}
+	translationFailure.trmAxis = trmAxis;
+	translationFailure.contentMask = contentMask;
+	translationFailure.model = model;
+	translationFailure.modelOrigin = modelOrigin;
+	translationFailure.modelAxis = modelAxis;
+}
+
+void idCollisionModelManagerLocal::CaptureRotationFailure( const idVec3 &start, const idRotation &rotation,
+												const idTraceModel *trm, const idMat3 &trmAxis, int contentMask,
+												idCollisionModel *model, const idVec3 &modelOrigin, const idMat3 &modelAxis ) {
+	CM_FreeDebugTrmModel( rotationFailure.trmModel );
+
+	rotationFailure.valid = true;
+	rotationFailure.hasTrm = ( trm != NULL );
+	rotationFailure.start = start;
+	rotationFailure.rotation = rotation;
+	if ( trm != NULL ) {
+		rotationFailure.trm = *trm;
+		rotationFailure.trmModel = ModelFromTrm( NULL, "_cm_debug_rotation", *trm, NULL );
+	}
+	rotationFailure.trmAxis = trmAxis;
+	rotationFailure.contentMask = contentMask;
+	rotationFailure.model = model;
+	rotationFailure.modelOrigin = modelOrigin;
+	rotationFailure.modelAxis = modelAxis;
+}
+
+void idCollisionModelManagerLocal::DebugTranslationFailure( const idVec3 &viewOrigin, const idMat3 &viewAxis ) {
+	if ( !translationFailure.valid || !cm_debugTranslation.GetBool() ) {
+		return;
+	}
+
+	const idTraceModel *debugTrm = translationFailure.hasTrm ? &translationFailure.trm : NULL;
+	trace_t trace;
+	const idVec4 oldColor = cm_color;
+
+	cm_color.Set( 1.0f, 0.0f, 0.0f, 0.5f );
+	if ( translationFailure.trmModel != NULL ) {
+		DrawModel( translationFailure.trmModel, translationFailure.start, translationFailure.trmAxis, viewOrigin, viewAxis, CM_DEBUG_DRAW_RADIUS );
+	}
+	DrawModel( translationFailure.model, translationFailure.modelOrigin, translationFailure.modelAxis, viewOrigin, viewAxis, CM_DEBUG_DRAW_RADIUS );
+
+	Translation( &trace, translationFailure.start, translationFailure.end, debugTrm, translationFailure.trmAxis,
+				translationFailure.contentMask, translationFailure.model, translationFailure.modelOrigin, translationFailure.modelAxis );
+	Contents( trace.endpos, debugTrm, trace.endAxis, -1, translationFailure.model, translationFailure.modelOrigin, translationFailure.modelAxis );
+
+	if ( translationFailure.trmModel != NULL ) {
+		cm_color.Set( 1.0f, 1.0f, 0.0f, 0.5f );
+		DrawModel( translationFailure.trmModel, trace.endpos, trace.endAxis, viewOrigin, viewAxis, CM_DEBUG_DRAW_RADIUS );
+	}
+
+	cm_color = oldColor;
+}
+
+void idCollisionModelManagerLocal::DebugRotationFailure( const idVec3 &viewOrigin, const idMat3 &viewAxis ) {
+	if ( !rotationFailure.valid || !cm_debugRotation.GetBool() ) {
+		return;
+	}
+
+	const idTraceModel *debugTrm = rotationFailure.hasTrm ? &rotationFailure.trm : NULL;
+	trace_t trace;
+	const idVec4 oldColor = cm_color;
+
+	cm_color.Set( 1.0f, 0.0f, 0.0f, 0.5f );
+	if ( rotationFailure.trmModel != NULL ) {
+		DrawModel( rotationFailure.trmModel, rotationFailure.start, rotationFailure.trmAxis, viewOrigin, viewAxis, CM_DEBUG_DRAW_RADIUS );
+	}
+	DrawModel( rotationFailure.model, rotationFailure.modelOrigin, rotationFailure.modelAxis, viewOrigin, viewAxis, CM_DEBUG_DRAW_RADIUS );
+
+	Rotation( &trace, rotationFailure.start, rotationFailure.rotation, debugTrm, rotationFailure.trmAxis,
+			rotationFailure.contentMask, rotationFailure.model, rotationFailure.modelOrigin, rotationFailure.modelAxis );
+	Contents( trace.endpos, debugTrm, trace.endAxis, -1, rotationFailure.model, rotationFailure.modelOrigin, rotationFailure.modelAxis );
+
+	if ( rotationFailure.trmModel != NULL ) {
+		cm_color.Set( 1.0f, 1.0f, 0.0f, 0.5f );
+		DrawModel( rotationFailure.trmModel, trace.endpos, trace.endAxis, viewOrigin, viewAxis, CM_DEBUG_DRAW_RADIUS );
+	}
+
+	cm_color = oldColor;
+}
+
+void idCollisionModelManagerLocal::SpeedTest( const idVec3 &origin ) {
 	int i, k, t;
 	char buf[128];
-	idVec3 end;
 	idAngles boxAngles;
 	idMat3 modelAxis, boxAxis;
 	idBounds bounds;
@@ -546,4 +776,13 @@ void idCollisionModelManagerLocal::DebugOutput( const idVec3 &origin ) {
 
 	Mem_Free( testend );
 	testend = NULL;
+}
+
+void idCollisionModelManagerLocal::DebugOutput( const idVec3 &viewOrigin ) {
+	idMat3 viewAxis;
+	viewAxis.Identity();
+
+	SpeedTest( viewOrigin );
+	DebugTranslationFailure( viewOrigin, viewAxis );
+	DebugRotationFailure( viewOrigin, viewAxis );
 }

@@ -1,0 +1,346 @@
+# Native text delivery
+
+Status: implementation in progress. The portable broker, wire codec, SDL record
+decoder and reviewed Windows observer are implemented. The observer remains
+disabled until the engine owner boundary, ordered event delivery and native
+dispatch fence are connected and qualified. This does not complete the
+[UI product plan](../archive/2026-10-18/plans/idtech5-ui.md) or its international text requirements.
+
+Until then, committed characters reach a focused retained field through the
+engine's ordered character events, as they reach a stock edit field
+([typed characters](numeric-fields.md#typed-characters)). That route carries no
+composition: an input method composes in its own window. The native route
+below adds in-field composition, candidate geometry and provenance; when it
+is enabled for a field, the character route must stand aside for it.
+
+## Ownership and ordering
+
+Native callbacks collect bounded data and never call Session, GUI or renderer
+code. The engine resolves the actual editor after earlier commands and actions
+have completed. Ownership includes the managed allocation, backend/document and
+modal lifetimes, native window/session, control, and current edit session/revision.
+Paths, numeric SDL window IDs and pointer addresses are insufficient identities.
+
+The broker binds a composition once, preserves that association through empty
+preedit, and advances it only after an exact successful delivery receipt. A
+focus change, external revision or rejected delivery retires the association.
+Old retained text never falls through to a newly focused legacy field. Native
+Result records are metadata; only a validated admitted Commit can insert text.
+Unknown origin never becomes proven input for the current retained editor.
+
+The 80-byte versioned wire header encodes integers explicitly in little endian.
+It carries bounded NUL-free UTF-8 plus explicit optional preedit byte offsets,
+not raw C++ objects, editor leases or callback addresses. The decoder validates
+every enum, reserved field, length and payload shape before replacing its output.
+Only Unknown composition metadata may have no native text session: it advances
+the ordered sequence and is discarded without adopting an editor.
+
+The SDL decoder validates the actual private provider record and converts UTF-16
+preedit offsets to strict UTF-8 boundaries. A bounded ledger associates each
+public SDL text echo with its exact canonical Commit, once. It never compares
+strings to guess duplicate input. Failed, missing, reused or overflowing marker
+associations latch failure. Engine queue loss/flush and native provider failure
+must also retire delivery before any editor mutation; the ledger cannot observe
+a loss inside the existing void event-queue API by itself.
+
+The engine now exposes a process-local queue continuity token. Both platform
+queues invalidate it before overflow discards an event and before every explicit
+clear, including an empty clear after the final event was removed. The pushed
+event queue and event-loop initialization/shutdown invalidate the same token.
+Ordinary enqueue/dequeue preserves it. Exhaustion produces permanent zero;
+neither zero nor a recorded token can authorize native input. Native integration
+must capture the token before collection and check it before each mutation and
+acknowledgement, alongside provider health and the exact native fence. This signal
+does not make the existing queues safe for concurrent producers.
+
+## Windows provider and remaining integration
+
+The bundled SDL patch observes native composition scope and exact admission of
+the resulting public SDL text event. Event filters cannot lend that scope to a
+nested synthetic event, mutate a private marker into another event, or strand its
+storage silently. Build support requires the private reviewed package capability;
+a matching system SDL version does not enable the decoder. Unsupported builds
+use a stub that reports unavailable without calling SDL.
+
+IMM messages do not provide a durable composition object identity. After an
+ambiguous cancellation, ending or overlap, the current observer conservatively
+taints the surviving window. Repeated production IME editing therefore requires
+the planned TSF text-store provider, with immutable document/composition identity,
+atomic range transactions, checked locks and separate native/engine revisions.
+The current observer is not production IME qualification.
+
+The portable native text-document model is now implemented. It keeps an immutable
+document/editor lease, separate native-shadow and accepted engine revisions,
+checked read/write callback scopes, strict UTF-8/UTF-16 ACP boundaries and bounded
+FIFO range transactions. A failed operation prevents partial publication, and a
+rejected front transaction retires its dependent work. Composition identity is
+transient and never restored from an editor save. Classification occurs at the
+complete transaction boundary, including insertion before a composition begins
+inside that boundary. The model does not prove that all TSF callbacks share one lock.
+
+The Windows-only text store now implements the actual SDK `ITextStoreACP`,
+composition-sink and edit-sink interfaces. It checks apartment ownership,
+callback-scoped locks, context identity, deferred write upgrades, copied range
+layout revisions and transaction acknowledgements. It is not activated or
+connected to a field. Composition metadata outside a write callback uses a
+copied revision/sequence observation and revalidates it after foreign range
+queries. Metadata within a write callback stays in its atomic transaction.
+Update uses the supplied range; End does not query a terminated composition's
+range or imply acceptance/cancellation. A failed
+callback retires the document because a text service may already have accepted
+the synchronous edit. Counted SDK callback tests do not qualify an installed TIP.
+
+Application-origin snapshots use a separate exact-revision `SyncEngine` call.
+It refuses pending native edits, locks or composition, updates the document
+atomically and then reports actual text/selection changes outside the native
+lock. A revision-only synchronization produces no false text change or native
+shadow increment. Notification callbacks can obtain read locks. Outside an
+explicit collection, all writes are refused; inside a lifecycle collection,
+asynchronous writes are served once after the whole notification batch.
+Application mutations and sink replacement cannot reenter that
+batch. A failing callback retires the store and requires retirement of the
+paired engine binding. Native edits and acknowledgements never emit these
+application-origin notifications. A fresh copied layout emits its own layout
+notification after installation. These rules follow Microsoft's
+[OnTextChange](https://learn.microsoft.com/en-us/windows/win32/api/textstor/nf-textstor-itextstoreacpsink-ontextchange),
+[RequestLock](https://learn.microsoft.com/en-us/windows/win32/api/textstor/nf-textstor-itextstoreacp-requestlock)
+and [OnLayoutChange](https://learn.microsoft.com/en-us/windows/win32/api/textstor/nf-textstor-itextstoreacpsink-onlayoutchange)
+contracts; the engine-to-native receipt path remains to be connected.
+
+The adapter follows the SDK's range-query and insertion contracts, including
+query-only insertion and unavailable stale layout. See Microsoft's
+[ITextStoreACP interface](https://learn.microsoft.com/en-us/windows/win32/api/textstor/nn-textstor-itextstoreacp),
+[InsertTextAtSelection](https://learn.microsoft.com/en-us/windows/win32/api/textstor/nf-textstor-itextstoreacp-inserttextatselection)
+and [GetTextExt](https://learn.microsoft.com/en-us/windows/win32/api/textstor/nf-textstor-itextstoreacp-gettextext).
+
+SDL can collect several native messages before Session handles the resulting
+events. A private dispatch fence must hold collection after a native group until
+the engine completes those events and their effects, updates the actual editor,
+and acknowledges that exact fence. One group includes the synchronous callbacks
+inside message collection and dispatch. A later pump must not bypass the hold;
+teardown must retire ownership before draining its native messages.
+
+The bundled SDL queue now associates each admitted entry with its exact provider
+generation, queue sequence and native group ordinal. A checked poll consumes
+one entry; copying or acknowledging a fence requires that exact consumed fence.
+Another consumer, filtering or flushing the held group retires its validity.
+Ordinary poll-sentinel maintenance can leave sequence gaps without inventing
+missing group members. Provider enablement remains off by default.
+
+The portable `NativeQueueIngress` owns copied event values and bounded text or
+candidate payloads before a complete native collection becomes available to
+Session. It verifies the group and copied fence before publication and exposes
+`Validate` for the caller to recheck provider generation and engine queue
+continuity before each effect. This caller integration remains pending. It requires
+the exact external acknowledgement before finishing a collection. A provider
+reset requires an observed disabled generation followed by a fresh generation.
+Queue membership alone does not prove physical input or native text origin.
+Connecting this ingress to Session and qualifying SDL's actual temporary-payload
+lifetime are still required; counted queue tests cannot establish either.
+
+The private SDL provider also supports copied Prepare/Finish collection hooks.
+Registration requires a disabled, idle main-thread provider; caller-owned hook
+storage remains alive through successful unregister. Prepare precedes native
+processing, and Finish pairs with every attempted Prepare, including failure,
+retirement and supported abnormal unwind. An exact context can mark native
+activity even without SDL events. Controlled lifecycle work produces a held
+fence without pumping or acknowledging it. These hooks remain disabled until
+the engine supplies the complete ownership and provider integration.
+
+The Windows store separately opens and closes explicit Pump or Lifecycle
+collections. A dispatch number alone grants no write or composition authority.
+Close removes callback admission and returns a copied final queue watermark;
+it performs no acknowledgement or editor settlement. Exact-scope abort retires
+without allocating, including with MSVC debug iterators. Queries distinguish
+native quiescence from the separate editor/provider proof needed for renewal.
+
+The portable `NativeTextEditor` reconciler keeps stable local text/history
+separate from a complete native snapshot, including directional selection and
+all concurrent composition ranges. It validates every ordered ACP operation
+against the full editor/document/revision barrier. A checked collection spans
+all offers up to its explicitly observed final transaction sequence, so an
+insertion before Begin and later composition metadata share one undo group.
+Stable history remains frozen until the collection is complete and composition
+has ended; an explicit settlement makes the group one local edit. Clone/swap
+publication checks the originating barrier again, and retirement restores the
+stable draft.
+
+Number interaction now owns the reconciler and exposes immutable full native
+presentation independently from stable local text/history. Local commands,
+clipboard authority and setting commit require native retirement first, even
+when a native group has settled. Save-only copies carry no native mutation
+authority; checked adoption must succeed before Runtime state or motion can
+change. The Number view paints every concurrent nonempty composition range
+using bounded copies of the authored vector underline and invalidates cached
+geometry on exact native snapshot changes. Native provider activation and
+platform qualification remain in development.
+
+`NativeTextCollectionCoordinator` joins a checked owned event batch, an exact
+closed Pump receipt and the original editor lease. It validates again after
+foreign observations, applies and acknowledges the complete FIFO, and prepares
+all stable-text/history allocations before native synchronization. Final local
+publication checks the original authority and allocates nothing. Fence
+completion is separate: Session must account for every ordinary event first.
+Failure retires only the original lease and never consumes another owner's
+input. Runtime exposes the matching checked methods; its allocation-free exact
+retirement preserves stable draft/history. An explicit lifecycle entry requires
+the exact copied closed receipt from the caller's checked application operation;
+the ordinary entry still accepts Pump scopes only. Lifecycle callbacks retain
+the same owner, revision, FIFO, settlement and fence checks. Cleanup of an
+ineligible editor cannot use this path to publish edits.
+An idle coordinator can return an owned copy of its last complete barrier.
+The query refuses busy, retired and wrong-thread calls, preserves output on
+allocation failure, and performs no owner or provider callbacks. The caller
+must still establish current route eligibility before using that snapshot.
+
+`WindowsTextCollectionBridge` connects the copied SDL hook table to the actual
+SDK store. Fresh attachment requires no prior collection or composition lease;
+the externally checked module epoch and provider generation are bound before
+pumping. Prepare opens an exact scope, and Finish closes only its own successful
+Open. Callback activity preserves a fence even without SDL text events. The
+bridge validates the immutable closed watermark through acknowledgements and
+native synchronization, including allocation-free terminal checks. Lifecycle
+scopes cannot silently adopt a changed application revision. Destruction and
+final COM release remain on the creating apartment, after disabled hook removal.
+`ManagedNativeTextOwner` supplies the coordinator's private GUI endpoints. Each
+call re-observes an engine-owned, callback-free route probe and resolves the
+original allocation/backend/document again. Resource preparation returns before
+the manager resolves the backend for the next effect. Native calls interlock
+with ordinary text and clipboard boundaries; exact retirement preserves the
+stable draft even after route eligibility changes. Current-owner checks, prepared
+publication and exact retirement allocate nothing. Unloaded deferred GUIs and
+dedicated builds refuse native entry without loading a retained backend.
+Dedicated builds also omit settlement preparation: a prepared settlement owns
+retained models, and optimized MSVC builds emit its destructor wherever one is
+returned by value, which the dedicated link cannot resolve.
+Session routing, the route probe implementation and native activation remain open.
+
+The Windows activation audit confirms that this SDL version owns IMM, with no
+active SDL TSF thread manager to deactivate. The engine provider still requires
+an exclusive per-window handoff, collection scope established before Peek,
+activity marking for callbacks that produce no SDL events, and controlled
+lifecycle collections. Ordinary character association, native candidate
+geometry, graceful termination before store retirement, and fresh-context
+renewal of the bounded composition identity budget remain explicit dependencies.
+
+Activation must establish a newly observed text session: enabling the observer
+while SDL text input is already active emits no retroactive SessionBegin.
+Likewise, native Reset clears its active session without emitting SessionEnd,
+while broker Reset preserves the old-session barrier. Integration must drain a
+real ordered End before resetting or introduce an explicitly checked reset
+protocol. It must not invent lifecycle records or silently adopt old input.
+
+Candidate placement needs a current range-layout snapshot tied to the exact
+document and text revision. Current scalar LTR numeric caret geometry does not
+qualify shaping, graphemes, bidi affinity, CJK composition or general text layout.
+Native process IDs also confer no journal replay authority; live editor delivery
+must reject recorded native origins until a separate replay design is qualified.
+
+## Windows text-session lifecycle
+
+`WindowsTextSession` owns one non-renewable editor, native document, window and
+provider lease. Its SDK construction creates the thread manager, document,
+context and subscriptions inside a checked lifecycle collection. The previous
+window association is retained for guarded restoration. Activation returns a
+closed collection; it requires both native reconciliation and an exact ledger
+receipt for every ordinary event before its fence can complete.
+
+Graceful cleanup first retires the original engine adoption lease, terminates
+composition from an idle native scope, restores the owned window association,
+unsubscribes, pops the context and deactivates the manager. Cleanup edits cannot
+replace the stable engine draft. After all ordinary events receive their
+disposition, the controller retires the store, completes the checked fence,
+disables the provider, removes its hooks and releases SDK objects on their
+constructing apartment.
+
+Fault cleanup preserves queued ordinary events. It cannot retire or unregister
+a replacement module or provider registration. Failed unregister retains the
+object and hook userdata; checked destruction refuses an incompletely released
+session. Engine-owned window, association and registration probes must remain
+valid through their respective release boundaries.
+
+The actual SDK/controller tests use counted COM and SDL providers. They cover
+construction/cleanup failures, stale leases, ordinary disposition, reentry and
+allocation denial. A regression changes provider ownership during the final
+queue observation after store retirement: the final fence check rejects that
+change before acknowledgement. The corrected standalone Windows suite passes
+4,544 checks and rejects 19 compiled mutations; the actual MSVC debug-library
+run also passes 4,544 checks. These do not invoke the system COM factory or an
+installed text service.
+
+Production activation remains disabled. Session must provide the checked
+route/window/registration probes and account for deferred engine events before
+the ledger can issue a receipt. The Windows fallback message loop also needs
+the same held-collection policy as SDL. Exclusive IMM handoff, native character
+association, TSF keystroke routing, candidate geometry, renewal and live platform
+qualification remain required.
+
+## Ordinary event ownership and delivery accounting
+
+`EventDisposition` supplies a private, fixed-size ownership tag beside platform
+and pushed event storage. It leaves `sysEvent_t` and the journal wire format
+unchanged. Tracked admission transfers the payload and tag together only after
+storage succeeds. A legacy getter encountering a tagged head leaves it queued
+and invalidates continuity; it cannot silently strip the tag and deliver the
+event. Clear, overflow and shutdown release pending payloads without claiming
+delivery. The storage epoch belongs to the constructing main thread and is
+retired with the event loop. This does not qualify asynchronous input.
+
+`NativeEventDispositionLedger` separately accounts for immutable source
+records and every resulting emission. Translation reserves tickets before
+storage admission. Real delivery must begin and complete against the exact
+ticket; issuing a ticket or calling a poll function is insufficient. Keyboard
+delivery may admit only its pre-reserved, same-record deferred Session child.
+A parent cannot complete while that child remains unadmitted. Every pass,
+including a sealed empty pass, needs an explicit checkpoint. Completion requires
+all tickets to be terminal and fresh ingress/ownership observations before the
+final receipt.
+
+There are two fixed schedules. Collection before the normal Session drain uses
+Session, mouse polling, keyboard polling, then deferred Session delivery.
+Collection at the POSIX mouse-poll entry uses mouse, keyboard, initial Session,
+then deferred Session delivery. The entry point selects the schedule once;
+SP/MP mode and GUI visibility cannot infer it. Neither schedule adds a frame,
+forces an early Session drain, or treats an uncalled user-command loop as
+delivery. A later poll cannot consume an already completed ticket again.
+
+Failed collection retains its safely copied prefix in `NativeQueueQuarantine`,
+with a failure boundary describing uncertainty around removal/copying. It emits
+no successful batch receipt. Unpolled queue entries remain untouched. Taking
+the quarantine and retiring the actual provider are separate required steps;
+reset cannot discard a held quarantine or manufacture acknowledgement.
+
+The platform/pushed-storage harness passes 66,581 checks and rejects 15 compiled
+mutations. The combined ingress and two-schedule accounting harness passes
+117,398 checks on Windows Clang, MSVC debug STL and Linux GCC; Clang and
+sanitized GCC each reject 43 compiled mutations. These exercise actual storage
+and accounting source with counted delivery boundaries.
+
+SDL keyboard and mouse rings now carry parallel bounded tags into immutable
+polled slices. Checked enqueue refuses full rings without eviction; checked
+polling refuses unread prior ownership, validates the whole ring, and never
+pumps SDL. Peek/Take/End require exact lane, epoch, continuity, slice serial and
+next-slot identity. Legacy polling stops before a tagged head and cannot consume
+a checked slice. Clear and ordinary overflow invalidate continuity before loss.
+The shared lock order is SDL storage, then the disposition mutex; no disposition
+method acquires an SDL lock. The constructing-thread query remains available
+after epoch retirement without making stale tags current.
+
+The actual polled-method harness passes 122,976 checks across its Windows and
+POSIX branches on Windows Clang, MSVC debug STL and sanitized Linux GCC; Clang
+and GCC each reject 21 compiled mutations. These are scalar storage transfers,
+not proof that user-command or Session effects ran. Deferred modifier emission
+still requires checked admission around the actual keyboard route. Session
+delivery, stale-route retirement and production native text activation remain
+disconnected and unqualified.
+
+## Validation boundary
+
+Pure tests exercise production broker/codec/decoder source, explicit echo
+association, stale owners, UTF-16 surrogate boundaries, result-versus-commit
+separation, queue bounds, and unsupported compilation. Windows and Linux
+sanitizer runs cover those value contracts. The observer tests compile the
+actual pinned SDL headers and patched Windows translation units and reject
+behavioral mutations. These tests do not operate a physical device or establish
+native TSF/IMM coexistence, candidate key consumption, monitor/DPI movement,
+clipboard field behavior, or full menu/editor completion.

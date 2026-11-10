@@ -35,6 +35,97 @@ Contains the Image implementation for OpenGL.
 */
 
 #include "../tr_local.h"
+#include "../RendererResourceSettings.h"
+
+/*
+================================================================================================
+ALPHA8, LUMINANCE8, LUMINANCE8_ALPHA8 and INTENSITY8 are compatibility-profile
+sized internal formats. OpenGL ES 3.0 has none of them, so the tokens only
+compile here because the GLES dispatch header defines their values -- the driver
+rejects the upload at runtime and the texture is left without valid storage.
+
+ES needs exactly the R8/RG8-plus-swizzle emulation the desktop core profile
+already uses, and ES 3.0 supports GL_TEXTURE_SWIZZLE_* natively, so route the
+GLES module through the same branches rather than duplicating them.
+================================================================================================
+*/
+#if defined( USE_CORE_PROFILE ) || defined( OPENQ4_RENDERER_GLES_MODULE )
+#define OPENQ4_GL_SWIZZLED_LEGACY_FORMATS 1
+#endif
+#include "../GLPixelTransferScope.h"
+
+bool idImage::ReadPixelsRGBA8( idList<byte> &pixels ) {
+	pixels.Clear();
+	if ( !IsLoaded() || opts.textureType != TT_2D || opts.format != FMT_RGBA8
+			|| opts.numMSAASamples != 0 || opts.width < 1 || opts.height < 1
+			|| opts.width > 8192 || opts.height > 8192 ) {
+		return false;
+	}
+	idGLPixelTransferScope transfer;
+	R_GLStateCache().BindTexture( 0, GL_TEXTURE_2D, texnum );
+	GLint width = 0, height = 0, format = 0;
+	glGetTexLevelParameteriv( GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width );
+	glGetTexLevelParameteriv( GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height );
+	glGetTexLevelParameteriv( GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &format );
+	if ( width != opts.width || height != opts.height || format != GL_RGBA8
+			|| glGetTexImage == NULL ) {
+		return false;
+	}
+	pixels.SetNum( width * height * 4 );
+	glGetTexImage( GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.Ptr() );
+	const GLenum error = glGetError();
+	if ( error != GL_NO_ERROR ) {
+		common->Warning( "OpenGL image readback failed: 0x%x", error );
+		pixels.Clear();
+		return false;
+	}
+	return true;
+}
+
+#ifndef GL_SRGB8
+#define GL_SRGB8 0x8C41
+#endif
+
+#ifndef GL_SRGB8_ALPHA8
+#define GL_SRGB8_ALPHA8 0x8C43
+#endif
+
+#ifndef GL_COMPRESSED_RGBA_BPTC_UNORM
+#define GL_COMPRESSED_RGBA_BPTC_UNORM 0x8E8C
+#endif
+
+// core in ES 3.0 and in desktop GL 4.3, but the desktop GL headers this file
+// sees are older than either
+#ifndef GL_COMPRESSED_RGB8_ETC2
+#define GL_COMPRESSED_RGB8_ETC2 0x9274
+#endif
+#ifndef GL_COMPRESSED_RGBA8_ETC2_EAC
+#define GL_COMPRESSED_RGBA8_ETC2_EAC 0x9278
+#endif
+#ifndef GL_COMPRESSED_RG11_EAC
+#define GL_COMPRESSED_RG11_EAC 0x9272
+#endif
+
+static int R_CompressedTextureSizeInBytes( textureFormat_t format, int width, int height ) {
+	if ( width <= 0 || height <= 0 ) {
+		return 0;
+	}
+
+	// shared with the cache-file validator in BinaryImage.cpp, so the two cannot
+	// drift about how large a compressed level is
+	const int bytesPerBlock = BytesPerBlockForFormat( format );
+	if ( bytesPerBlock <= 0 ) {
+		idLib::Error( "Invalid compressed texture format %d", format );
+	}
+
+	const int64 blocksWide = Max( (int64)1, ( (int64)width + 3 ) >> 2 );
+	const int64 blocksHigh = Max( (int64)1, ( (int64)height + 3 ) >> 2 );
+	const int64 compressedSize = blocksWide * blocksHigh * (int64)bytesPerBlock;
+	if ( compressedSize <= 0 || compressedSize > 0x7fffffff ) {
+		idLib::Error( "Compressed texture %dx%d format %d is too large", width, height, format );
+	}
+	return (int)compressedSize;
+}
 
 /*
 ========================
@@ -42,7 +133,12 @@ idImage::SubImageUpload
 ========================
 */
 void idImage::SubImageUpload( int mipLevel, int x, int y, int z, int width, int height, const void * pic, int pixelPitch ) const {
+	renderImageOperation_t imageOperation( this, true, mipLevel, z, x == 0 && y == 0 ? width : 0, height );
+	if ( !imageOperation.Allowed() ) return;
+
 	assert( x >= 0 && y >= 0 && mipLevel >= 0 && width >= 0 && height >= 0 && mipLevel < opts.numLevels );
+	const int mipWidth = Max( 1, opts.width >> mipLevel );
+	const int mipHeight = Max( 1, opts.height >> mipLevel );
 
 	int compressedSize = 0;
 
@@ -50,25 +146,23 @@ void idImage::SubImageUpload( int mipLevel, int x, int y, int z, int width, int 
 		assert( !(x&3) && !(y&3) );
 
 		// compressed size may be larger than the dimensions due to padding to quads
-		int quadW = ( width + 3 ) & ~3;
-		int quadH = ( height + 3 ) & ~3;
-		compressedSize = quadW * quadH * BitsForFormat( opts.format ) / 8;
+		compressedSize = R_CompressedTextureSizeInBytes( opts.format, width, height );
 
-		int padW = ( opts.width + 3 ) & ~3;
-		int padH = ( opts.height + 3 ) & ~3;
+		int padW = ( mipWidth + 3 ) & ~3;
+		int padH = ( mipHeight + 3 ) & ~3;
 		(void)padH;
 		(void)padW;
 		assert( x + width <= padW && y + height <= padH );
 		// upload the non-aligned value, OpenGL understands that there
 		// will be padding
-		if ( x + width > opts.width ) {
-			width = opts.width - x;
+		if ( x + width > mipWidth ) {
+			width = mipWidth - x;
 		}
-		if ( y + height > opts.height ) {
-			height = opts.height - x;
+		if ( y + height > mipHeight ) {
+			height = mipHeight - y;
 		}
 	} else {
-		assert( x + width <= opts.width && y + height <= opts.height );
+		assert( x + width <= mipWidth && y + height <= mipHeight );
 	}
 
 	int target;
@@ -85,14 +179,42 @@ void idImage::SubImageUpload( int mipLevel, int x, int y, int z, int width, int 
 		uploadTarget = GL_TEXTURE_2D;
 	}
 
-	glBindTexture( target, texnum );
+	R_BindTextureForDirectAccess( target, texnum );
 
 	if ( pixelPitch != 0 ) {
 		glPixelStorei( GL_UNPACK_ROW_LENGTH, pixelPitch );
 	}
+
+	// BinaryImage writes FMT_RGB565 big-endian (high byte first), so a
+	// little-endian host needs the 16-bit pairs reversed before
+	// GL_UNSIGNED_SHORT_5_6_5 reads them.
+	//
+	// GL_UNPACK_SWAP_BYTES is compatibility/desktop only -- OpenGL ES has no such
+	// pixel-store parameter, so on ES the call raises GL_INVALID_ENUM and the swap
+	// silently does not happen, scrambling the 5/6/5 bit fields. Swap in software
+	// there instead.
+	const void *uploadPic = pic;
+#if defined( OPENQ4_RENDERER_GLES_MODULE )
+	const int swapRowPixels = ( pixelPitch != 0 ) ? pixelPitch : width;
+	const int swapPixelCount =
+		( opts.format == FMT_RGB565 && !Swap_IsBigEndian() && !IsCompressed() && pic != NULL && swapRowPixels > 0 && height > 0 )
+			? swapRowPixels * ( height - 1 ) + width
+			: 0;
+	idTempArray<byte> swappedPic( (unsigned int)( swapPixelCount * 2 ) );
+	if ( swapPixelCount > 0 ) {
+		const byte *src = (const byte *)pic;
+		byte *dst = swappedPic.Ptr();
+		for ( int i = 0; i < swapPixelCount; i++ ) {
+			dst[ i * 2 + 0 ] = src[ i * 2 + 1 ];
+			dst[ i * 2 + 1 ] = src[ i * 2 + 0 ];
+		}
+		uploadPic = dst;
+	}
+#else
 	if ( opts.format == FMT_RGB565 ) {
 		glPixelStorei( GL_UNPACK_SWAP_BYTES, GL_TRUE );
 	}
+#endif
 #ifdef DEBUG
 	GL_CheckErrors();
 #endif
@@ -103,24 +225,33 @@ void idImage::SubImageUpload( int mipLevel, int x, int y, int z, int width, int 
 		// make sure the pixel store alignment is correct so that lower mips get created
 		// properly for odd shaped textures - this fixes the mip mapping issues with
 		// fonts
-		int unpackAlignment = width * BitsForFormat( (textureFormat_t)opts.format ) / 8;
+		// GL aligns the complete source row, not the subrectangle width. This
+		// must agree with the software RGB565 byte swap when pixelPitch is set.
+		int unpackAlignment = ( pixelPitch != 0 ? pixelPitch : width ) * BitsForFormat( (textureFormat_t)opts.format ) / 8;
 		if ( ( unpackAlignment & 3 ) == 0 ) {
 			glPixelStorei( GL_UNPACK_ALIGNMENT, 4 );
 		} else {
 			glPixelStorei( GL_UNPACK_ALIGNMENT, 1 );
 		}
 
-		glTexSubImage2D( uploadTarget, mipLevel, x, y, width, height, dataFormat, dataType, pic );
+		glTexSubImage2D( uploadTarget, mipLevel, x, y, width, height, dataFormat, dataType, uploadPic );
 	}
 #ifdef DEBUG
 	GL_CheckErrors();
 #endif
+#if !defined( OPENQ4_RENDERER_GLES_MODULE )
 	if ( opts.format == FMT_RGB565 ) {
 		glPixelStorei( GL_UNPACK_SWAP_BYTES, GL_FALSE );
 	}
+#endif
 	if ( pixelPitch != 0 ) {
 		glPixelStorei( GL_UNPACK_ROW_LENGTH, 0 );
 	}
+
+	if ( ( R_ImagePolicyActive() || imageConsumedLoad_t::Active(this) ) && !idImageUploadErrorScope::Defer() ) {
+		GL_CheckErrors();
+	}
+	imageOperation.Succeeded();
 }
 
 /*
@@ -157,7 +288,15 @@ void idImage::SetTexParameters() {
 
 	// ALPHA, LUMINANCE, LUMINANCE_ALPHA, and INTENSITY have been removed
 	// in OpenGL 3.2. In order to mimic those modes, we use the swizzle operators
-#if defined( USE_CORE_PROFILE )
+	// Exported GL entry points do not imply texture swizzle support on a
+	// legacy desktop context. ES 3.0 has swizzles in core under its own
+	// version numbering; desktop contexts retain the actual-context gate.
+	const bool esTextureSwizzle = glConfig.backendCaps.profile == RENDERER_CONTEXT_PROFILE_ES &&
+		glConfig.backendCaps.glVersion >= 3.0f;
+	if ( esTextureSwizzle || glConfig.backendCaps.glVersion >= 3.3f ||
+		GLCapabilityProbe_HasExtension( "GL_ARB_texture_swizzle" ) ||
+		GLCapabilityProbe_HasExtension( "GL_EXT_texture_swizzle" ) ) {
+#if defined( OPENQ4_GL_SWIZZLED_LEGACY_FORMATS )
 	if ( opts.colorFormat == CFM_GREEN_ALPHA ) {
 		glTexParameteri( target, GL_TEXTURE_SWIZZLE_R, GL_ONE );
 		glTexParameteri( target, GL_TEXTURE_SWIZZLE_G, GL_ONE );
@@ -183,6 +322,11 @@ void idImage::SetTexParameters() {
 		glTexParameteri( target, GL_TEXTURE_SWIZZLE_G, GL_RED );
 		glTexParameteri( target, GL_TEXTURE_SWIZZLE_B, GL_RED );
 		glTexParameteri( target, GL_TEXTURE_SWIZZLE_A, GL_RED );
+	} else if ( opts.format == FMT_XRGB8 ) {
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_R, GL_RED );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_G, GL_GREEN );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_B, GL_BLUE );
+		glTexParameteri( target, GL_TEXTURE_SWIZZLE_A, GL_ONE );
 	} else if ( duplicateBumpXToAlpha ) {
 		glTexParameteri( target, GL_TEXTURE_SWIZZLE_R, GL_RED );
 		glTexParameteri( target, GL_TEXTURE_SWIZZLE_G, GL_GREEN );
@@ -212,11 +356,22 @@ void idImage::SetTexParameters() {
 		glTexParameteri( target, GL_TEXTURE_SWIZZLE_A, GL_RED );
 	}
 #endif
+	}
 
+	const bool hasMipChain = opts.numLevels > 1;
+
+	const imageFilterState_t defaultFilter = R_GetDefaultImageFilterState();
 	switch( filter ) {
 		case TF_DEFAULT:
-			glTexParameterf(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-			glTexParameterf( target, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+			if ( hasMipChain && defaultFilter.usesMipmaps ) {
+				const int minFilter = defaultFilter.minLinear
+					? ( defaultFilter.mipLinear ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST )
+					: ( defaultFilter.mipLinear ? GL_NEAREST_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST );
+				glTexParameterf( target, GL_TEXTURE_MIN_FILTER, minFilter );
+			} else {
+				glTexParameterf( target, GL_TEXTURE_MIN_FILTER, defaultFilter.minLinear ? GL_LINEAR : GL_NEAREST );
+			}
+			glTexParameterf( target, GL_TEXTURE_MAG_FILTER, defaultFilter.magLinear ? GL_LINEAR : GL_NEAREST );
 			break;
 		case TF_LINEAR:
 			glTexParameterf( target, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
@@ -232,13 +387,11 @@ void idImage::SetTexParameters() {
 
 	{
 		// only do aniso filtering on mip mapped images
-		if ( filter == TF_DEFAULT ) {
-			int aniso = glConfig.maxTextureAnisotropy;
-			if ( aniso < 0 ) {
-				aniso = 0;
-			}
+		if ( filter == TF_DEFAULT && hasMipChain && defaultFilter.usesMipmaps && defaultFilter.minLinear ) {
+			const float requestedAniso = static_cast<float>( Max( 1, cvarSystem->GetCVarInteger( "image_anisotropy" ) ) );
+			const float aniso = Min( requestedAniso, Max( 1.0f, glConfig.maxTextureAnisotropy ) );
 			glTexParameterf(target, GL_TEXTURE_MAX_ANISOTROPY_EXT, aniso );
-		} else {
+		} else if ( glConfig.anisotropicAvailable ) {
 			glTexParameterf(target, GL_TEXTURE_MAX_ANISOTROPY_EXT, 1 );
 		}
 	}
@@ -246,6 +399,14 @@ void idImage::SetTexParameters() {
 	//	// use a blurring LOD bias in combination with high anisotropy to fix our aliasing grate textures...
 	//	glTexParameterf(target, GL_TEXTURE_LOD_BIAS_EXT, r_lodBias.GetFloat() );
 	//}
+
+	// Border clamp is optional on ES 3.0. When absent, use the authored
+	// texture edge instead of leaving the driver's default repeat mode active.
+	const bool borderClampSupported = glConfig.backendCaps.profile != RENDERER_CONTEXT_PROFILE_ES ||
+		glConfig.backendCaps.glVersion >= 3.2f ||
+		GLCapabilityProbe_HasExtension( "GL_EXT_texture_border_clamp" ) ||
+		GLCapabilityProbe_HasExtension( "GL_OES_texture_border_clamp" );
+	const GLenum borderWrap = borderClampSupported ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE;
 
 	// set the wrap/clamp modes
 	switch( repeat ) {
@@ -259,16 +420,20 @@ void idImage::SetTexParameters() {
 			break;
 		case TR_CLAMP_TO_ZERO: {
 			float color[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-			glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, color );
-			glTexParameterf( target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER );
-			glTexParameterf( target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER );
+			if ( borderClampSupported ) {
+				glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, color );
+			}
+			glTexParameterf( target, GL_TEXTURE_WRAP_S, borderWrap );
+			glTexParameterf( target, GL_TEXTURE_WRAP_T, borderWrap );
 			}
 			break;
 		case TR_CLAMP_TO_ZERO_ALPHA: {
 			float color[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-			glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, color );
-			glTexParameterf( target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER );
-			glTexParameterf( target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER );
+			if ( borderClampSupported ) {
+				glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, color );
+			}
+			glTexParameterf( target, GL_TEXTURE_WRAP_S, borderWrap );
+			glTexParameterf( target, GL_TEXTURE_WRAP_T, borderWrap );
 			}
 			break;
 		case TR_CLAMP:
@@ -278,6 +443,14 @@ void idImage::SetTexParameters() {
 		default:
 			common->FatalError( "%s: bad texture repeat %d", GetName(), repeat );
 	}
+}
+
+void idImage::RefreshSamplerState() {
+	if ( !IsLoaded() ) {
+		return;
+	}
+	R_BindTextureForDirectAccess( ( opts.textureType == TT_CUBIC ) ? GL_TEXTURE_CUBE_MAP_EXT : GL_TEXTURE_2D, texnum );
+	SetTexParameters();
 }
 
 /*
@@ -291,17 +464,42 @@ This should not be done during normal game-play, if you can avoid it.
 ========================
 */
 void idImage::AllocImage() {
+	renderImageOperation_t imageOperation( this );
+	if ( !imageOperation.Allowed() ) return;
+
 	GL_CheckErrors();
 	PurgeImage();
+	storageGeneration++;
+
+	// Stock formats retain Quake 4's encoded-value lighting contract. Authored
+	// PBR colour uses the explicit FMT_SRGBA8 case, isolated by image usage/cache
+	// identity, so its decode/filtering cannot change classic materials.
+	const bool useSRGBTextureDecode = false;
 
 	switch ( opts.format ) {
-	case FMT_RGBA8:
-		internalFormat = GL_RGBA8;
+	case FMT_SRGBA8:
+		internalFormat = GL_SRGB8_ALPHA8;
 		dataFormat = GL_RGBA;
 		dataType = GL_UNSIGNED_BYTE;
 		break;
+	case FMT_RGBA8:
+		internalFormat = useSRGBTextureDecode ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+		dataFormat = GL_RGBA;
+		dataType = GL_UNSIGNED_BYTE;
+		break;
+	case FMT_RGBA16F:
+		internalFormat = GL_RGBA16F;
+		dataFormat = GL_RGBA;
+		dataType = GL_HALF_FLOAT;
+		break;
 	case FMT_XRGB8:
-		internalFormat = GL_RGB;
+#if defined( OPENQ4_RENDERER_GLES_MODULE )
+		// XRGB source/cache pixels have four bytes. ES requires the upload
+		// format to match storage; allocate RGBA and swizzle alpha to one.
+		internalFormat = useSRGBTextureDecode ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+#else
+		internalFormat = useSRGBTextureDecode ? GL_SRGB8 : GL_RGB;
+#endif
 		dataFormat = GL_RGBA;
 		dataType = GL_UNSIGNED_BYTE;
 		break;
@@ -311,7 +509,7 @@ void idImage::AllocImage() {
 		dataType = GL_UNSIGNED_SHORT_5_6_5;
 		break;
 	case FMT_ALPHA:
-#if defined( USE_CORE_PROFILE )
+#if defined( OPENQ4_GL_SWIZZLED_LEGACY_FORMATS )
 		internalFormat = GL_R8;
 		dataFormat = GL_RED;
 #else
@@ -321,7 +519,7 @@ void idImage::AllocImage() {
 		dataType = GL_UNSIGNED_BYTE;
 		break;
 	case FMT_L8A8:
-#if defined( USE_CORE_PROFILE )
+#if defined( OPENQ4_GL_SWIZZLED_LEGACY_FORMATS )
 		internalFormat = GL_RG8;
 		dataFormat = GL_RG;
 #else
@@ -331,7 +529,7 @@ void idImage::AllocImage() {
 		dataType = GL_UNSIGNED_BYTE;
 		break;
 	case FMT_LUM8:
-#if defined( USE_CORE_PROFILE )
+#if defined( OPENQ4_GL_SWIZZLED_LEGACY_FORMATS )
 		internalFormat = GL_R8;
 		dataFormat = GL_RED;
 #else
@@ -341,7 +539,7 @@ void idImage::AllocImage() {
 		dataType = GL_UNSIGNED_BYTE;
 		break;
 	case FMT_INT8:
-#if defined( USE_CORE_PROFILE )
+#if defined( OPENQ4_GL_SWIZZLED_LEGACY_FORMATS )
 		internalFormat = GL_R8;
 		dataFormat = GL_RED;
 #else
@@ -360,10 +558,62 @@ void idImage::AllocImage() {
 		dataFormat = GL_RGBA;
 		dataType = GL_UNSIGNED_BYTE;
 		break;
+	case FMT_BC7:
+		if ( !glConfig.bptcTextureCompressionAvailable ) {
+			R_ImagePolicyObserveError( "Requested GL BC7/BPTC image format is unsupported" );
+			// This used to be a fatal idLib::Error raised from inside texture
+			// upload, i.e. in the middle of a map load. Every other BC7 gate in
+			// the tree warns and degrades (R_BinaryImageHeaderSupportedByRenderer,
+			// the lightgrid chunk loader), so match them: an unexpected BC7 image
+			// on a driver without BPTC must cost one texture, not the session.
+			common->Warning( "%s holds BC7/BPTC data but this renderer does not expose BPTC; uploading as uncompressed RGBA8", GetName() );
+			internalFormat = GL_RGBA8;
+			dataFormat = GL_RGBA;
+			dataType = GL_UNSIGNED_BYTE;
+			break;
+		}
+		internalFormat = GL_COMPRESSED_RGBA_BPTC_UNORM;
+		dataFormat = GL_RGBA;
+		dataType = GL_UNSIGNED_BYTE;
+		break;
+	case FMT_ETC2_RGB8:
+	case FMT_ETC2_RGBA8:
+	case FMT_EAC_RG11:
+		if ( !glConfig.etc2TextureCompressionAvailable ) {
+			R_ImagePolicyObserveError( "Requested GL ETC2/EAC image format is unsupported" );
+			// Same shape as the BC7 gate above: degrade one texture rather than
+			// take the session down from inside a mid-load upload. Reaching here
+			// means a generated cache file outlived the context that produced
+			// it, which R_BinaryImageHeaderSupportedByRenderer should have
+			// caught first.
+			common->Warning( "%s holds ETC2/EAC data but this renderer does not expose ETC2; uploading as uncompressed RGBA8", GetName() );
+			internalFormat = GL_RGBA8;
+			dataFormat = GL_RGBA;
+			dataType = GL_UNSIGNED_BYTE;
+			break;
+		}
+		if ( opts.format == FMT_ETC2_RGB8 ) {
+			internalFormat = GL_COMPRESSED_RGB8_ETC2;
+		} else if ( opts.format == FMT_ETC2_RGBA8 ) {
+			internalFormat = GL_COMPRESSED_RGBA8_ETC2_EAC;
+		} else {
+			internalFormat = GL_COMPRESSED_RG11_EAC;
+		}
+		dataFormat = GL_RGBA;
+		dataType = GL_UNSIGNED_BYTE;
+		break;
 	case FMT_DEPTH:
+#if defined( OPENQ4_RENDERER_GLES_MODULE )
+		// ES rejects UNSIGNED_BYTE depth uploads, including storage-only NULL
+		// uploads. Use a sized renderable depth format with a valid data type.
+		internalFormat = GL_DEPTH_COMPONENT24;
+		dataFormat = GL_DEPTH_COMPONENT;
+		dataType = GL_UNSIGNED_INT;
+#else
 		internalFormat = GL_DEPTH_COMPONENT;
 		dataFormat = GL_DEPTH_COMPONENT;
 		dataType = GL_UNSIGNED_BYTE;
+#endif
 		break;
 	case FMT_DEPTH_STENCIL:
 		internalFormat = GL_DEPTH24_STENCIL8;
@@ -381,6 +631,7 @@ void idImage::AllocImage() {
 		dataType = GL_UNSIGNED_SHORT;
 		break;
 	default:
+		if ( R_ImagePolicyActive() ) { R_ImagePolicyObserveError( "Unhandled GL image format" ); return; }
 		idLib::Error( "Unhandled image format %d in %s\n", opts.format, GetName() );
 	}
 
@@ -405,7 +656,9 @@ void idImage::AllocImage() {
 	int uploadTarget;
 	bool wantsMSAA = ( opts.textureType == TT_2D && opts.numMSAASamples > 0 );
 	if ( wantsMSAA ) {
-		if ( !( GLEW_ARB_texture_multisample || GLEW_VERSION_3_2 ) ) {
+		if ( glTexImage2DMultisample == NULL || !( glConfig.backendCaps.glVersion >= 3.2f ||
+			GLCapabilityProbe_HasExtension( "GL_ARB_texture_multisample" ) ) ) {
+			R_ImagePolicyObserveError( "Requested GL image capability is unsupported" );
 			common->Warning( "MSAA textures not supported, disabling for %s", GetName() );
 			opts.numMSAASamples = 0;
 			wantsMSAA = false;
@@ -431,7 +684,7 @@ void idImage::AllocImage() {
 		numSides = 1;
 	}
 
-	glBindTexture( target, texnum );
+	R_BindTextureForDirectAccess( target, texnum );
 
 	if ( wantsMSAA ) {
 		int samples = opts.numMSAASamples;
@@ -446,10 +699,30 @@ void idImage::AllocImage() {
 #endif
 		glTexImage2DMultisample( GL_TEXTURE_2D_MULTISAMPLE, samples, internalFormat, opts.width, opts.height, GL_TRUE );
 		GL_CheckErrors();
+		imageOperation.Succeeded();
 		return;
 	}
 
-	for ( int side = 0; side < numSides; side++ ) {
+	// Immutable storage allocates every level of a compressed image in one call
+	// and uploads nothing. The per-level path below hands the driver an
+	// uninitialized buffer of each level's full size (a 2011 workaround for
+	// drivers that would not allocate otherwise), so every compressed texture
+	// a map loads crossed to the driver twice, with two error queries per level.
+	// Compressed images are only ever re-specified by PurgeImage + AllocImage,
+	// which creates a new texture object.
+	int fullChainLevels = 1;
+	for ( int size = Max( opts.width, opts.height ); size > 1; size >>= 1 ) {
+		fullChainLevels++;
+	}
+	const bool immutableStorage = IsCompressed() && glConfig.backendCaps.hasTextureStorage
+		&& opts.numLevels >= 1 && opts.numLevels <= fullChainLevels
+		&& ( opts.textureType != TT_CUBIC || opts.width == opts.height );
+	if ( immutableStorage ) {
+		glTexStorage2D( target, opts.numLevels, internalFormat, opts.width,
+			opts.textureType == TT_CUBIC ? opts.width : opts.height );
+	}
+
+	for ( int side = 0; side < numSides && !immutableStorage; side++ ) {
 		int w = opts.width;
 		int h = opts.height;
 		if ( opts.textureType == TT_CUBIC ) {
@@ -461,7 +734,7 @@ void idImage::AllocImage() {
 			GL_CheckErrors();
 
 			if ( IsCompressed() ) {
-				int compressedSize = ( ((w+3)/4) * ((h+3)/4) * int64_t( 16 ) * BitsForFormat( opts.format ) ) / 8;
+				const int compressedSize = R_CompressedTextureSizeInBytes( opts.format, w, h );
 
 				// Even though the OpenGL specification allows the 'data' pointer to be NULL, for some
 				// drivers we actually need to upload data to get it to allocate the texture.
@@ -504,6 +777,8 @@ void idImage::AllocImage() {
 	SetTexParameters();
 
 	GL_CheckErrors();
+
+	imageOperation.Succeeded();
 }
 
 /*
@@ -512,6 +787,8 @@ idImage::PurgeImage
 ========================
 */
 void idImage::PurgeImage() {
+	if ( !R_ImagePolicyContentMutation() ) return;
+	InvalidateConsumedPolicy();
 	if ( texnum != TEXTURE_NOT_LOADED ) {
 		glDeleteTextures( 1, (GLuint *)&texnum );	// this should be the ONLY place it is ever called!
 		texnum = TEXTURE_NOT_LOADED;
@@ -532,6 +809,24 @@ void idImage::Resize( int width, int height ) {
 	if ( opts.width == width && opts.height == height ) {
 		return;
 	}
+	if ( !R_ImagePolicyContentMutation() ) return;
+	opts.width = width;
+	opts.height = height;
+	AllocImage();
+}
+
+/*
+========================
+idImage::RespecifyColorCopyTarget
+
+See NeedsColorCopyRespecification. File textures load as immutable storage,
+so the copy target gets a new texture object instead of a glTexImage2D.
+========================
+*/
+void idImage::RespecifyColorCopyTarget( int width, int height ) {
+	if ( width <= 0 || height <= 0 || !R_ImagePolicyContentMutation() ) return;
+	opts.format = FMT_RGBA8;
+	opts.numLevels = 1;
 	opts.width = width;
 	opts.height = height;
 	AllocImage();

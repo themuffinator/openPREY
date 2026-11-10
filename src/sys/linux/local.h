@@ -28,7 +28,13 @@ If you have questions concerning this license or the applicable additional terms
 #ifndef __LINUX_LOCAL_H__
 #define __LINUX_LOCAL_H__
 
+#include "linux_shared.h"
+
+#ifdef OPENQ4_RENDERER_VK_MODULE
+extern thread_local glconfig_t glConfig;
+#else
 extern glconfig_t glConfig;
+#endif
 
 // glimp.cpp
 

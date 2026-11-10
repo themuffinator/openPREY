@@ -49,7 +49,7 @@
 #  endif
 #elif defined(GLEW_EGL)
 #  include <GL/eglew.h>
-#elif defined(_WIN32)
+#elif defined(_WIN32) && !defined(OPENQ4_GLEW_SDL3_LOADER)
 /*
  * If NOGDI is defined, wingdi.h won't be included by windows.h, and thus
  * wglGetProcAddress won't be declared. It will instead be implicitly declared,
@@ -59,11 +59,16 @@
 #    undef NOGDI
 #  endif
 #  include "wglew.h"
-#elif !defined(__ANDROID__) && !defined(__native_client__) && !defined(__HAIKU__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
+#elif !defined(OPENQ4_GLEW_SDL3_LOADER) && !defined(__ANDROID__) && !defined(__native_client__) && !defined(__HAIKU__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
 #  include <GL/glxew.h>
 #endif
 
 #include <stddef.h>  /* For size_t */
+
+#if defined(OPENQ4_GLEW_SDL3_LOADER)
+typedef void ( *openQ4GlewProcAddress_t ) (void);
+extern openQ4GlewProcAddress_t OpenQ4_GlewGetProcAddress(const unsigned char *name);
+#endif
 
 #if defined(GLEW_EGL)
 #elif defined(GLEW_REGAL)
@@ -168,6 +173,8 @@ void* NSGLGetProcAddress (const GLubyte *name)
  */
 #if defined(GLEW_REGAL)
 #  define glewGetProcAddress(name) regalGetProcAddress((const GLchar *)name)
+#elif defined(OPENQ4_GLEW_SDL3_LOADER)
+#  define glewGetProcAddress(name) OpenQ4_GlewGetProcAddress(name)
 #elif defined(GLEW_OSMESA)
 #  define glewGetProcAddress(name) OSMesaGetProcAddress((const char *)name)
 #elif defined(GLEW_EGL)
@@ -21669,7 +21676,7 @@ GLenum eglewInit (EGLDisplay display)
   return GLEW_OK;
 }
 
-#elif defined(_WIN32)
+#elif defined(_WIN32) && !defined(OPENQ4_GLEW_SDL3_LOADER)
 
 PFNWGLSETSTEREOEMITTERSTATE3DLPROC __wglewSetStereoEmitterState3DL = NULL;
 
@@ -22615,7 +22622,7 @@ GLenum GLEWAPIENTRY wglewInit (void)
   return GLEW_OK;
 }
 
-#elif !defined(__ANDROID__) && !defined(__native_client__) && !defined(__HAIKU__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
+#elif !defined(OPENQ4_GLEW_SDL3_LOADER) && !defined(__ANDROID__) && !defined(__native_client__) && !defined(__HAIKU__) && (!defined(__APPLE__) || defined(GLEW_APPLE_GLX))
 
 PFNGLXGETCURRENTDISPLAYPROC __glewXGetCurrentDisplay = NULL;
 
@@ -23757,6 +23764,8 @@ GLenum GLEWAPIENTRY glewInit (void)
   getCurrentDisplay = (PFNEGLGETCURRENTDISPLAYPROC) glewGetProcAddress("eglGetCurrentDisplay");
   return eglewInit(getCurrentDisplay());
 #elif defined(GLEW_OSMESA) || defined(__ANDROID__) || defined(__native_client__) || defined(__HAIKU__)
+  return r;
+#elif defined(OPENQ4_GLEW_SDL3_LOADER)
   return r;
 #elif defined(_WIN32)
   return wglewInit();

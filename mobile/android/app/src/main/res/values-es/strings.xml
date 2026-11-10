@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name_emulator">Emulador openQ4</string>
+    <string name="setup_title">Configuración de openQ4</string>
+    <string name="setup_language">Idioma</string>
+    <string name="setup_sample">Prepara los archivos del juego y vuelve al frente.</string>
+    <string name="setup_continue">Continuar</string>
+    <string name="setup_data">Datos del juego</string>
+    <string name="setup_data_help">Elige la carpeta q4base de tu propia instalación de Quake 4 1.4.2. openQ4 copia y comprueba los archivos; los originales se conservan. Puedes usar una subcarpeta de Descargas o una unidad USB conectada. Esta aplicación no incluye los datos del juego.</string>
+    <string name="setup_choose">Elegir carpeta del juego</string>
+    <string name="setup_check">Comprobar archivos instalados</string>
+    <string name="setup_retry">Reintentar la última operación</string>
+    <string name="setup_cancel">Cancelar</string>
+    <string name="setup_stopping">Deteniendo de forma segura…</string>
+    <string name="setup_cancelled">Detenido. Se conservan los archivos completados. Reintenta para continuar; el archivo incompleto se copiará de nuevo.</string>
+    <string name="setup_interrupted">La configuración se interrumpió. Reintenta para comprobar los archivos completados y continuar, o vuelve a elegir la carpeta del juego.</string>
+    <string name="setup_ready">Los archivos del juego están listos.</string>
+    <string name="setup_needs_data">Hay problemas con los archivos del juego. Sigue las indicaciones y vuelve a comprobarlos.</string>
+    <string name="setup_idle">Elige una carpeta para importar o comprueba los archivos ya copiados a esta aplicación.</string>
+    <string name="setup_no_data">Los archivos instalados no están disponibles. Elige la carpeta q4base de Quake 4 para importarlos o vuelve a conectar el almacenamiento que los contiene.</string>
+    <string name="setup_size_bytes">%1$,d B</string>
+    <string name="setup_issue_problem">Necesario: %1$s</string>
+    <string name="setup_issue_warning">Aviso: %1$s</string>
+    <string name="setup_game_active">El juego está en marcha o cerrándose. Puedes volver al juego; podrás cambiar los archivos cuando termine.</string>
+    <string name="setup_return">Volver al juego</string>
+    <string name="setup_play_sp">Un jugador</string>
+    <string name="setup_play_mp">Multijugador</string>
+    <string name="setup_change_language">Cambiar idioma</string>
+    <string name="setup_no_picker">El selector de carpetas del sistema no está disponible. Activa la aplicación Archivos de Android y vuelve a intentarlo.</string>
+    <string name="setup_no_grant">No se pudo abrir la carpeta elegida. Vuelve a elegirla y permite el acceso de lectura.</string>
+    <string name="setup_temporary_grant">El proveedor no conservó el acceso a la carpeta. La importación actual puede continuar; tras reiniciar la aplicación, vuelve a elegir la carpeta.</string>
+    <string name="setup_picker_cancelled">No se eligió ninguna carpeta. Tus archivos no han cambiado.</string>
+    <string name="setup_checking_data">Comprobando archivos del juego…</string>
+    <string name="setup_checking_existing">Comprobando archivo instalado…</string>
+    <string name="setup_copying_data">Copiando archivo del juego…</string>
+    <string name="setup_verifying_data">Verificando datos del juego…</string>
+    <string name="setup_checking_package">Comprobando archivos incluidos…</string>
+    <string name="setup_copying_package">Preparando archivos incluidos…</string>
+    <string name="setup_exporting">Exportando…</string>
+    <string name="setup_file_count">Archivos completados: %1$d / %2$d</string>
+    <string name="setup_bytes">%1$s de %2$s</string>
+    <string name="setup_eta">Tiempo restante estimado en este paso: %1$d s</string>
+    <string name="setup_missing_required">Falta %1$s. Cópialo desde tu instalación de Quake 4 1.4.2.</string>
+    <string name="setup_missing_optional">Falta el archivo opcional %1$s. Su contenido podría no estar disponible.</string>
+    <string name="setup_missing_language">No se encontró un archivo base de idioma. Copia los archivos zpak de idioma de tu instalación para oír los diálogos.</string>
+    <string name="setup_wrong_version">%1$s no coincide con el archivo oficial. Sustitúyelo por una copia verificada de Quake 4 1.4.2.</string>
+    <string name="setup_unknown_archive">%1$s supera la comprobación de integridad, pero no está en el catálogo oficial de sumas de comprobación.</string>
+    <string name="setup_damaged_archive">%1$s está dañado o no es compatible. Copia un archivo original sin modificar y vuelve a intentarlo.</string>
+    <string name="setup_duplicate">Más de un archivo se llama %1$s. Conserva una copia verificada y vuelve a intentarlo.</string>
+    <string name="setup_changed">%1$s cambió durante la comprobación. Termina de copiarlo antes de reintentarlo.</string>
+    <string name="setup_unreadable">No se pudo leer %1$s. Reconecta el almacenamiento o elige una copia accesible y vuelve a intentarlo.</string>
+    <string name="setup_limits">La carpeta o el archivo supera los límites admitidos. Elige una carpeta que contenga los archivos originales de Quake 4.</string>
+    <string name="setup_storage_unavailable">El almacenamiento de la aplicación no está disponible. Reconéctalo, comprueba los ajustes de almacenamiento de la aplicación en Android y vuelve a intentarlo.</string>
+    <string name="setup_no_space">Se necesita más espacio: %1$s necesarios, %2$s disponibles para el siguiente archivo. Libera espacio y vuelve a intentarlo.</string>
+    <string name="setup_invalid_name">El nombre de %1$s no es compatible. Elige la carpeta q4base original.</string>
+    <string name="setup_copy_failed">No se pudo copiar %1$s. Comprueba la conexión con el origen y el espacio libre y vuelve a intentarlo.</string>
+    <string name="setup_commit_failed">No se pudo sustituir %1$s. Comprueba el almacenamiento de la aplicación y vuelve a intentarlo. El archivo anterior se conservó.</string>
+    <string name="setup_prepare_failed">No se pudieron preparar los archivos incluidos. Libera espacio y reintenta. Si el problema persiste, actualiza la aplicación con el mismo distribuidor o certificado de firma; no la desinstales para conservar las partidas guardadas.</string>
+    <string name="setup_launch_failed">El juego no pudo iniciarse. Comprueba los archivos y vuelve a intentarlo.</string>
+    <string name="setup_exports">Copias y diagnóstico</string>
+    <string name="setup_export_help">Crea una copia ZIP de tus partidas guardadas, con sus descripciones y vistas previas, o exporta los registros de diagnóstico. Elige el destino en el selector de archivos de Android. Los originales permanecen en la aplicación. Los registros pueden incluir rutas locales y direcciones de servidores; revísalos antes de compartirlos.</string>
+    <string name="setup_export_saves">Copiar partidas guardadas</string>
+    <string name="setup_export_logs">Exportar registros</string>
+    <string name="setup_saves_filename">openQ4-partidas.zip</string>
+    <string name="setup_logs_filename">openQ4-registros.zip</string>
+    <string name="setup_no_document_picker">El selector de archivos del sistema no está disponible. Activa la aplicación Archivos de Android y vuelve a intentarlo.</string>
+    <string name="setup_export_picker_cancelled">No se eligió un destino de exportación. Tus archivos no han cambiado.</string>
+    <string name="setup_export_no_grant">No se pudo abrir el destino para escribir. Vuelve a intentarlo y elige una ubicación accesible. Tus archivos originales no han cambiado.</string>
+    <string name="setup_packing_export">Preparando el archivo de exportación…</string>
+    <string name="setup_export_file_count">Archivos preparados: %1$d / %2$d</string>
+    <string name="setup_export_done">Archivos exportados: %1$d. Tamaño del ZIP: %2$s. Si elegiste almacenamiento en la nube, espera a que termine la subida antes de confiar en la copia.</string>
+    <string name="setup_export_cancelled">Exportación detenida. Tus archivos originales no han cambiado. El destino puede contener un ZIP vacío o incompleto; elimina esa copia en Archivos y vuelve a intentarlo con otro destino.</string>
+    <string name="setup_export_interrupted">La exportación se interrumpió. Tus archivos originales no han cambiado. El destino puede contener un ZIP incompleto. Reintenta para elegir otro destino y empezar de nuevo.</string>
+    <string name="setup_export_empty">Todavía no hay archivos disponibles para esta exportación.</string>
+    <string name="setup_export_unreadable">No se pudo leer %1$s. Reinicia la aplicación y vuelve a intentarlo. Tus archivos originales no han cambiado.</string>
+    <string name="setup_export_unsafe">La ruta %1$s no se puede incluir en una copia portátil. Tus archivos no han cambiado. Si el problema persiste, exporta los registros para el diagnóstico.</string>
+    <string name="setup_export_limit">La exportación supera los límites admitidos: 2 GiB, 4096 elementos o la longitud de ruta o profundidad de carpetas permitidas. Tus archivos no han cambiado.</string>
+    <string name="setup_export_changed">Los archivos cambiaron mientras se preparaba el ZIP. Espera a que terminen las operaciones con archivos y vuelve a intentarlo.</string>
+    <string name="setup_export_cache">No se pudo preparar el ZIP temporal en el almacenamiento de la aplicación. Libera espacio y reintenta. Mantén la aplicación instalada y conserva sus datos para guardar tus partidas.</string>
+    <string name="setup_export_write">El destino no aceptó el ZIP completo. Comprueba su conexión y espacio libre y reintenta con otro destino. La copia fallida puede estar incompleta; tus archivos originales no han cambiado.</string>
+    <string name="setup_export_no_space">El ZIP temporal necesita %1$s de espacio libre en la aplicación; hay %2$s disponibles. Libera espacio y reintenta. Tus archivos originales no han cambiado.</string>
+    <string name="setup_export_failed">La exportación no pudo terminar. Reintenta con otro destino. El anterior puede contener un ZIP incompleto; tus archivos originales no han cambiado.</string>
+    <string name="setup_open_failed">No se pudo abrir la configuración de Android. Vuelve al juego e inténtalo de nuevo.</string>
+    <string name="setup_controls">Controles</string>
+    <string name="setup_controls_help">Elige la distribución táctil, el tamaño de los botones y la velocidad de la vista. Aplicar guarda los cambios para el próximo inicio o regreso al juego.</string>
+    <string name="setup_controller_none">No se detectó ningún mando. Los controles táctiles siguen disponibles.</string>
+    <string name="setup_controller_detected">Mando detectado: %1$s. Al usarlo se ocultan los controles táctiles; toca la vista del juego para mostrarlos de nuevo.</string>
+    <string name="setup_touch_preset">Distribución táctil</string>
+    <string name="setup_touch_default_help">Predeterminada: movimiento a la izquierda; vista y disparo a la derecha.</string>
+    <string name="setup_touch_compact_help">Compacta: controles más pequeños, con zonas táctiles de al menos 48 dp de ancho.</string>
+    <string name="setup_touch_left_help">Para zurdos: movimiento a la derecha; vista y disparo a la izquierda.</string>
+    <string name="setup_touch_sensitivity">Sensibilidad de la vista: %1$.1f×</string>
+    <string name="setup_touch_sensitivity_label">Sensibilidad de la vista</string>
+    <string name="setup_touch_size">Tamaño de los botones: %1$d%%</string>
+    <string name="setup_touch_size_label">Tamaño de los botones</string>
+    <string name="setup_look_test_help">Prueba de vista: arrastra aquí para girar la cuadrícula. Ajusta la sensibilidad arriba; esta prueba no controla el juego.</string>
+    <string name="setup_touch_apply">Aplicar controles</string>
+    <string name="setup_touch_discard">Descartar cambios</string>
+    <string name="setup_touch_applied">Controles guardados. Se aplicarán al volver al juego o iniciarlo.</string>
+    <string name="setup_touch_save_failed">No se pudieron guardar los controles. Se conservan los ajustes anteriores; comprueba el espacio libre de la aplicación y vuelve a intentarlo.</string>
+    <string-array name="setup_touch_presets">
+        <item>Predeterminada</item>
+        <item>Compacta</item>
+        <item>Para zurdos</item>
+    </string-array>
+    <string name="setup_layout_edit">Editar disposición</string>
+    <string name="setup_layout">Editor de controles táctiles</string>
+    <string name="setup_layout_help">Arrastra un control para moverlo. Se ajusta a una cuadrícula de 8 dp y se mantiene alejado de los demás controles, de los bordes de la pantalla y de la mira. Elige un control para cambiar su tamaño, atenuarlo u ocultarlo. Horizontal y vertical tienen su propia disposición. Aplicar guarda la disposición para el próximo inicio del juego o al volver a él.</string>
+    <string name="setup_layout_orientation">Orientación</string>
+    <string name="setup_layout_control">Control</string>
+    <string name="setup_layout_size">Tamaño: %1$d %%</string>
+    <string name="setup_layout_size_label">Tamaño del control</string>
+    <string name="setup_layout_opacity">Opacidad: %1$d %%</string>
+    <string name="setup_layout_opacity_label">Opacidad del control</string>
+    <string name="setup_layout_hide">Ocultar este control</string>
+    <string name="setup_layout_pause_note">Pausa siempre está visible: también omite las cinemáticas.</string>
+    <string name="setup_layout_multiplayer_note">Este control solo aparece en multijugador.</string>
+    <string name="setup_layout_reset_control">Restablecer este control</string>
+    <string name="setup_layout_reset">Restablecer esta orientación</string>
+    <string name="setup_layout_no_fit">No cabe. Prueba con un tamaño menor u otro lugar.</string>
+    <string name="setup_layout_apply">Aplicar disposición</string>
+    <string name="setup_layout_applied">Disposición guardada. Se aplica al volver al juego o al iniciarlo.</string>
+    <string name="setup_layout_save_failed">No se pudo guardar la disposición. Se conserva la disposición aplicada anterior; comprueba el almacenamiento libre de la aplicación y vuelve a intentarlo.</string>
+    <string name="setup_layout_preview">Vista previa de la disposición. Arrastra un control para moverlo o elígelo abajo.</string>
+    <string-array name="setup_layout_orientations">
+        <item>Horizontal</item>
+        <item>Vertical</item>
+    </string-array>
+    <string-array name="setup_layout_controls">
+        <item>Disparar</item>
+        <item>Saltar</item>
+        <item>Agacharse</item>
+        <item>Arma</item>
+        <item>Recargar</item>
+        <item>Zoom</item>
+        <item>Pausa</item>
+        <item>Marcador</item>
+        <item>Chat</item>
+    </string-array>
+    <string name="setup_interface">Interfaz</string>
+    <string name="setup_interface_help">Elige el tamaño de los menús y del texto del juego. Automático elige Teléfono o Tableta según este dispositivo. En Teléfono y Tableta, el texto parte del tamaño de fuente de Android. Aplicar fija estos tamaños una vez, en el próximo inicio o regreso al juego; los cambios posteriores en los ajustes del juego se conservan.</string>
+    <string name="setup_viewing_profile">Perfil de visualización</string>
+    <string name="setup_interface_size">Tamaño de la interfaz</string>
+    <string name="setup_profile_size">Valor del perfil</string>
+    <string name="setup_text_size">Tamaño del texto</string>
+    <string name="setup_profile_text_size">Valor del perfil</string>
+    <string name="setup_interface_effective">Menús del juego: tamaño %1$d %%, texto %2$d %%</string>
+    <string name="setup_interface_sample_title">Objetivo actualizado</string>
+    <string name="setup_interface_sample_body">Reúnete con el escuadrón Rhino en el hangar. Este ejemplo muestra el tamaño del texto de los menús del juego.</string>
+    <string name="setup_interface_apply">Aplicar interfaz</string>
+    <string name="setup_interface_applied">Interfaz guardada. Se aplicará al volver al juego o iniciarlo.</string>
+    <string name="setup_interface_save_failed">No se pudieron guardar los ajustes de la interfaz. Se conservan los ajustes anteriores; comprueba el espacio libre de la aplicación y vuelve a intentarlo.</string>
+    <string name="setup_interface_percent">%1$d %%</string>
+    <string name="setup_orientation">Orientación de la pantalla</string>
+    <string name="setup_orientation_help">Horizontal y vertical gira el juego con el dispositivo, salvo que el bloqueo de rotación de Android esté activado. En vertical, los controles táctiles se agrupan en la franja bajo la vista.</string>
+    <string-array name="setup_orientations">
+        <item>Horizontal</item>
+        <item>Horizontal y vertical</item>
+    </string-array>
+    <string-array name="setup_viewing_profiles">
+        <item>Automático (este dispositivo)</item>
+        <item>Escritorio (monitor)</item>
+        <item>Sofá (televisor)</item>
+        <item>Consola portátil</item>
+        <item>Teléfono</item>
+        <item>Tableta</item>
+    </string-array>
+</resources>

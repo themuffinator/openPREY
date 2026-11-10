@@ -59,7 +59,6 @@ idRenderModelPrt::TouchData
 =================
 */
 void idRenderModelPrt::TouchData( void ) {
-	// Ensure the particle decl stays referenced by this model.
 	particleSystem = static_cast<const idDeclParticle *>( declManager->FindType( DECL_PARTICLE, name ) );
 }
 
@@ -71,18 +70,11 @@ idRenderModelPrt::InstantiateDynamicModel
 idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEntity_s *renderEntity, const struct viewDef_s *viewDef, idRenderModel *cachedModel ) {
 	idRenderModelStatic *staticModel;
 
-	if ( cachedModel && !r_useCachedDynamicModels.GetBool() ) {
+	if ( cachedModel != NULL && !r_useCachedDynamicModels.GetBool() ) {
 		delete cachedModel;
 		cachedModel = NULL;
 	}
-
-	// If this is called outside a render view context, treat as empty.
-	if ( renderEntity == NULL || viewDef == NULL ) {
-		delete cachedModel;
-		return NULL;
-	}
-
-	if ( r_skipParticles.GetBool() || particleSystem == NULL ) {
+	if ( renderEntity == NULL || viewDef == NULL || r_skipParticles.GetBool() || particleSystem == NULL ) {
 		delete cachedModel;
 		return NULL;
 	}
@@ -102,101 +94,96 @@ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEnt
 	g.origin.Zero();
 	g.axis.Identity();
 
-	for ( int stageNum = 0; stageNum < particleSystem->stages.Num(); stageNum++ ) {
-		idParticleStage *stage = particleSystem->stages[ stageNum ];
-
-		if ( !stage->material || !stage->cycleMsec ) {
-			continue;
+	// Particle declarations may be reloaded with fewer stages.  Cached snapshot
+	// surfaces use the stage number as their id, so discard any ids that no
+	// longer name a stage before updating the remaining surfaces.
+	for ( int surfaceNum = staticModel->surfaces.Num() - 1; surfaceNum >= 0; --surfaceNum ) {
+		const int surfaceId = staticModel->surfaces[ surfaceNum ].id;
+		if ( surfaceId < 0 || surfaceId >= particleSystem->stages.Num() ) {
+			staticModel->DeleteSurfaceWithId( surfaceId );
 		}
+	}
 
-		if ( stage->hidden ) {
-			// Hidden stages are editor-only.
+	for ( int stageNum = 0; stageNum < particleSystem->stages.Num(); ++stageNum ) {
+		idParticleStage *stage = particleSystem->stages[ stageNum ];
+		if ( stage == NULL || stage->material == NULL || stage->cycleMsec == 0 ||
+			stage->particleLife <= 0.0f || stage->hidden ) {
 			staticModel->DeleteSurfaceWithId( stageNum );
 			continue;
 		}
 
-		idRandom steppingRandom, steppingRandom2;
-		int stageAge = g.renderView->time + renderEntity->shaderParms[ SHADERPARM_TIMEOFFSET ] * 1000 - stage->timeOffset * 1000;
-		int stageCycle = stageAge / stage->cycleMsec;
+		particleGeometryCounts_t geometryCounts;
+		if ( !R_GetParticleGeometryCounts( stage->totalParticles, stage->NumQuadsPerParticle(),
+			idMath::INT_MAX - 16, geometryCounts ) ) {
+			staticModel->DeleteSurfaceWithId( stageNum );
+			continue;
+		}
 
-		// Some particles are from this cycle, some from the previous one.
-		steppingRandom.SetSeed( ( ( stageCycle << 10 ) & idRandom::MAX_RAND ) ^ (int)( renderEntity->shaderParms[ SHADERPARM_DIVERSITY ] * idRandom::MAX_RAND ) );
-		steppingRandom2.SetSeed( ( ( ( stageCycle - 1 ) << 10 ) & idRandom::MAX_RAND ) ^ (int)( renderEntity->shaderParms[ SHADERPARM_DIVERSITY ] * idRandom::MAX_RAND ) );
-
-		const int count = stage->totalParticles * stage->NumQuadsPerParticle();
+		idRandom steppingRandom;
+		idRandom previousCycleRandom;
+		const int stageAge = g.renderView->time + renderEntity->shaderParms[ SHADERPARM_TIMEOFFSET ] * 1000 - stage->timeOffset * 1000;
+		const int stageCycle = stageAge / stage->cycleMsec;
+		const int diversitySeed = static_cast<int>( renderEntity->shaderParms[ SHADERPARM_DIVERSITY ] * idRandom::MAX_RAND );
+		steppingRandom.SetSeed( R_ParticleCycleSeed( stageCycle, false, diversitySeed ) );
+		previousCycleRandom.SetSeed( R_ParticleCycleSeed( stageCycle, true, diversitySeed ) );
 
 		int surfaceNum;
 		modelSurface_t *surf;
-
 		if ( staticModel->FindSurfaceWithId( stageNum, surfaceNum ) ) {
 			surf = &staticModel->surfaces[ surfaceNum ];
-			R_FreeStaticTriSurfVertexCaches( surf->geometry );
+			if ( surf->geometry == NULL ||
+				surf->geometry->numAllocedVerts < geometryCounts.numVerts ||
+				surf->geometry->numAllocedIndices < geometryCounts.numIndexes ) {
+				staticModel->DeleteSurfaceWithId( stageNum );
+				surf = NULL;
+			} else {
+				R_FreeStaticTriSurfVertexCaches( surf->geometry );
+			}
 		} else {
+			surf = NULL;
+		}
+		if ( surf == NULL ) {
 			surf = &staticModel->surfaces.Alloc();
 			surf->id = stageNum;
-			surf->shader = stage->material;
 			surf->geometry = R_AllocStaticTriSurf();
-			R_AllocStaticTriSurfVerts( surf->geometry, 4 * count );
-			R_AllocStaticTriSurfIndexes( surf->geometry, 6 * count );
-			R_AllocStaticTriSurfPlanes( surf->geometry, 6 * count );
+			R_AllocStaticTriSurfVerts( surf->geometry, geometryCounts.numVerts );
+			R_AllocStaticTriSurfIndexes( surf->geometry, geometryCounts.numIndexes );
+			R_AllocStaticTriSurfPlanes( surf->geometry, geometryCounts.numIndexes );
 		}
+		// A declaration reload can change a stage's material without changing its
+		// geometry requirements, so cached surfaces must refresh the shader too.
+		surf->shader = stage->material;
 
 		int numVerts = 0;
 		idDrawVert *verts = surf->geometry->verts;
-
-		for ( int index = 0; index < stage->totalParticles; index++ ) {
+		for ( int index = 0; index < stage->totalParticles; ++index ) {
 			g.index = index;
-
-			// Bump random streams for deterministic per-particle variation.
 			steppingRandom.RandomInt();
-			steppingRandom2.RandomInt();
+			previousCycleRandom.RandomInt();
 
-			// Calculate local age for this particle index.
-			int bunchOffset = stage->particleLife * 1000 * stage->spawnBunching * index / stage->totalParticles;
-
-			int particleAge = stageAge - bunchOffset;
-			int particleCycle = particleAge / stage->cycleMsec;
-			if ( particleCycle < 0 ) {
-				// Particle system has not reached this particle yet.
+			const int bunchOffset = stage->particleLife * 1000 * stage->spawnBunching * index / stage->totalParticles;
+			const int particleAge = stageAge - bunchOffset;
+			const int particleCycle = particleAge / stage->cycleMsec;
+			if ( particleCycle < 0 || ( stage->cycles != 0 && particleCycle >= stage->cycles ) ) {
 				continue;
 			}
-			if ( stage->cycles && particleCycle >= stage->cycles ) {
-				// Cycled systems only run for a finite number of cycles.
-				continue;
-			}
-
-			if ( particleCycle == stageCycle ) {
-				g.random = steppingRandom;
-			} else {
-				g.random = steppingRandom2;
-			}
-
-			int inCycleTime = particleAge - particleCycle * stage->cycleMsec;
-
-			if ( renderEntity->shaderParms[ SHADERPARM_PARTICLE_STOPTIME ] &&
-				g.renderView->time - inCycleTime >= renderEntity->shaderParms[ SHADERPARM_PARTICLE_STOPTIME ] * 1000 ) {
-				// Stop spawning new particles after stop time.
+			g.random = particleCycle == stageCycle ? steppingRandom : previousCycleRandom;
+			const int inCycleTime = particleAge - particleCycle * stage->cycleMsec;
+			if ( renderEntity->shaderParms[ SHADERPARM_PARTICLE_STOPTIME ] != 0.0f &&
+					g.renderView->time - inCycleTime >= renderEntity->shaderParms[ SHADERPARM_PARTICLE_STOPTIME ] * 1000 ) {
 				continue;
 			}
 
-			// Suppress particles before spawn or after life span.
-			g.frac = (float)inCycleTime / ( stage->particleLife * 1000 );
+			g.frac = static_cast<float>( inCycleTime ) / ( stage->particleLife * 1000 );
 			if ( g.frac < 0.0f || g.frac > 1.0f ) {
 				continue;
 			}
-
-			// Needed so aimed particles can calculate origins at different times.
 			g.originalRandom = g.random;
 			g.age = g.frac * stage->particleLife;
-
-			// If particle is faded/killed, CreateParticle returns 0 verts.
 			numVerts += stage->CreateParticle( &g, verts + numVerts );
 		}
 
-		// numVerts must be a multiple of 4.
-		assert( ( numVerts & 3 ) == 0 && numVerts <= 4 * count );
-
-		// Build indexes.
+		assert( ( numVerts & 3 ) == 0 && numVerts <= geometryCounts.numVerts );
 		int numIndexes = 0;
 		glIndex_t *indexes = surf->geometry->indexes;
 		for ( int i = 0; i < numVerts; i += 4 ) {
@@ -208,7 +195,6 @@ idRenderModel *idRenderModelPrt::InstantiateDynamicModel( const struct renderEnt
 			indexes[ numIndexes + 5 ] = i + 1;
 			numIndexes += 6;
 		}
-
 		surf->geometry->tangentsCalculated = false;
 		surf->geometry->facePlanesCalculated = false;
 		surf->geometry->numVerts = numVerts;
@@ -234,11 +220,10 @@ idRenderModelPrt::Bounds
 ====================
 */
 idBounds idRenderModelPrt::Bounds( const struct renderEntity_s *ent ) const {
-	if ( particleSystem ) {
+	if ( particleSystem != NULL ) {
 		return particleSystem->bounds;
 	}
-
-	return ent ? ent->bounds : bounds_zero;
+	return ent != NULL ? ent->bounds : bounds_zero;
 }
 
 /*
@@ -247,7 +232,7 @@ idRenderModelPrt::DepthHack
 ====================
 */
 float idRenderModelPrt::DepthHack() const {
-	return particleSystem ? particleSystem->depthHack : 0.0f;
+	return particleSystem != NULL ? particleSystem->depthHack : 0.0f;
 }
 
 /*
@@ -256,17 +241,12 @@ idRenderModelPrt::Memory
 ====================
 */
 int idRenderModelPrt::Memory() const {
-	int total = 0;
-
-	total += idRenderModelStatic::Memory();
-
-	if ( particleSystem ) {
+	int total = idRenderModelStatic::Memory();
+	if ( particleSystem != NULL ) {
 		total += sizeof( *particleSystem );
-
-		for ( int i = 0; i < particleSystem->stages.Num(); i++ ) {
-			total += sizeof( particleSystem->stages[ i ] );
+		for ( int i = 0; i < particleSystem->stages.Num(); ++i ) {
+			total += sizeof( particleSystem->stages[i] );
 		}
 	}
-
 	return total;
 }

@@ -1,13 +1,13 @@
-# Building OpenPrey from Source
+# Building openPREY from Source
 
-This guide covers everything required to compile OpenPrey from source on Windows, Linux, and macOS.
+This guide covers everything required to compile openPREY from source on Windows, Linux, and macOS.
 
 ---
 
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
-- [GameLibs Companion Repository](#gamelibs-companion-repository)
+- [Game Library Sources](#game-library-sources)
 - [Build Setup](#build-setup)
 - [Build Options](#build-options)
 - [Building on Windows](#building-on-windows)
@@ -55,48 +55,21 @@ powershell -ExecutionPolicy Bypass -File tools/build/meson_setup.ps1 <meson-comm
 Alternatively, open `tools/build/openprey_devcmd.cmd` first to initialise the Visual Studio environment, then call `meson` directly.
 
 > [!NOTE]
-> Windows builds use Meson's `b_vscrt=static_from_buildtype` policy so OpenPrey itself does not require a separate Visual C++ redistributable install.
+> Windows builds use Meson's `b_vscrt=static_from_buildtype` policy so openPREY itself does not require a separate Visual C++ redistributable install.
 
 ---
 
-## GameLibs Companion Repository
+## Game Library Sources
 
-OpenPrey's game code lives in a separate companion repository — [OpenPrey-GameLibs](https://github.com/themuffinator/OpenPrey-GameLibs). This separation clearly identifies the SDK-licensed components derived from the Prey Software Development Kit.
+openPREY's game library builds from this checkout. The SDK-derived trees are
+`src/game/`, `src/Prey/` and `src/preyengine/`; they compile into the unified
+`game_<arch>` module against the engine headers in the rest of `src/`. No
+companion checkout, staging step or environment variable is needed.
 
-> [!IMPORTANT]
-> **The OpenPrey build expects OpenPrey-GameLibs to be checked out alongside OpenPrey**, at `../OpenPrey-GameLibs` relative to this repository. If the companion repository is missing or at a different path, game-module builds will fail.
-
-### Setting Up
-
-```bash
-# Clone both repositories side-by-side:
-git clone https://github.com/themuffinator/OpenPrey.git
-git clone https://github.com/themuffinator/OpenPrey-GameLibs.git
-
-# Result:
-#   ./OpenPrey/            ← this repository
-#   ./OpenPrey-GameLibs/   ← game library source
-```
-
-To use a custom location, set the environment variable before configuring:
-
-```bash
-export OPENPREY_GAMELIBS_REPO=/path/to/OpenPrey-GameLibs   # Linux / macOS
-$env:OPENPREY_GAMELIBS_REPO = "C:\path\to\OpenPrey-GameLibs"  # PowerShell
-```
-
-### Companion Build Environment Variables
-
-| Variable | What it does |
-|---|---|
-| `OPENPREY_GAMELIBS_REPO=<path>` | Override the companion repo location |
-| `OPENPREY_SKIP_GAMELIBS_SYNC=1` | Suppress automatic companion mirror sync |
-| `OPENPREY_BUILD_GAMELIBS=1` | Build companion game libraries during `compile` |
-| `OPENPREY_SKIP_GAMELIBS_BUILD=1` | Skip the additional companion build step |
-
-`tools/build/meson_setup.ps1` syncs the companion repo before `setup`, `compile`, and `install` automatically. Set `OPENPREY_SKIP_GAMELIBS_SYNC=1` if you intentionally want to build only from the in-repo mirror.
-
-Legacy `OPENQ4_*` environment variable names are still accepted as temporary migration aliases.
+The game trees stay under the Prey SDK EULA while the engine is GPLv3. See
+[LICENSING.md](LICENSING.md) for the boundary and
+[docs/dev/game-source-provenance.md](docs/dev/game-source-provenance.md) for the
+import record. The former `OpenPrey-game` companion repository is historical.
 
 ---
 
@@ -112,8 +85,8 @@ Pass any of these with `-D<option>=<value>` on the `meson setup` command line:
 
 | Option | Default | Description |
 |---|---|---|
-| `build_engine` | `true` | Build `OpenPrey-client_<arch>` and `OpenPrey-ded_<arch>` |
-| `build_games` | `true` | Build the unified game module from the synchronized mirror |
+| `build_engine` | `true` | Build `openPREY-client_<arch>` and `openPREY-ded_<arch>` |
+| `build_games` | `true` | Build the unified game module from the in-tree game sources |
 | `platform_backend` | `sdl3` | `sdl3`, `legacy_win32`, or `native` |
 | `use_pch` | `true` | Use precompiled headers |
 | `enforce_msvc_2026` | `false` | Fail configure if MSVC is older than 19.46+ (Windows only) |
@@ -135,7 +108,7 @@ powershell -ExecutionPolicy Bypass -File tools/build/meson_setup.ps1 setup --wip
 powershell -ExecutionPolicy Bypass -File tools/build/meson_setup.ps1 compile -C builddir
 
 # 3. Run directly from builddir
-builddir\OpenPrey-client_x64.exe +set r_fullscreen 0
+builddir\openPREY-client_x64.exe +set r_fullscreen 0
 ```
 
 ### Release Build
@@ -166,7 +139,7 @@ meson install -C builddir --no-rebuild --skip-subprojects
 ## Building on Linux / macOS
 
 > [!NOTE]
-> The Linux runtime currently uses an X11/GLX path. On Wayland desktops, run OpenPrey through XWayland (`DISPLAY` must be set).
+> SDL3 selects the available Wayland or X11 display path on Linux. Use `OPENPREY_FORCE_X11=1` only when an XWayland fallback is required.
 
 ### Debug Build
 
@@ -178,7 +151,7 @@ bash tools/build/meson_setup.sh setup --wipe builddir . --backend ninja --buildt
 bash tools/build/meson_setup.sh compile -C builddir
 
 # 3. Run directly from builddir
-./builddir/OpenPrey-client_x64 +set r_fullscreen 0
+./builddir/openPREY-client_x64 +set r_fullscreen 0
 ```
 
 ### Release Build
@@ -202,8 +175,8 @@ bash tools/build/meson_setup.sh install -C builddir --no-rebuild --skip-subproje
 
 | File | Description |
 |---|---|
-| `OpenPrey-client_x64[.exe]` | Main engine executable |
-| `OpenPrey-ded_x64[.exe]` | Dedicated server |
+| `openPREY-client_x64[.exe]` | Main engine executable |
+| `openPREY-ded_x64[.exe]` | Dedicated server |
 | `basepr/game_x64[.dll/.so/.dylib]` | Unified game module |
 
 - On Windows, import libraries (`.lib`), program databases (`.pdb`), and export files (`.exp`) may be present in debug builds; these are development-only artifacts.
@@ -215,17 +188,14 @@ After running the install step, `.install/` is a self-contained distributable pa
 
 ```
 .install/
-├── OpenPrey-client_x64.exe     # Main executable
-├── OpenPrey-ded_x64.exe        # Dedicated server
+├── openPREY-client_x64.exe     # Main executable
+├── openPREY-ded_x64.exe        # Dedicated server
 ├── OpenAL32.dll                # (Windows) runtime dependency
 └── basepr/
     ├── game_x64.dll            # Unified game module
-    ├── glprogs/
-    ├── guis/
-    ├── maps/
-    ├── materials/
-    ├── script/
-    └── strings/
+    ├── pak0.pk4                # openPREY text/code/config content
+    ├── pak1.pk4                # openPREY binary assets
+    └── mod.json
 ```
 
 > [!NOTE]
@@ -237,20 +207,26 @@ After running the install step, `.install/` is a self-contained distributable pa
 
 The `meson install` step stages all required binaries into `.install/`. This directory is the input for release packaging.
 
-CI nightly builds set `version_track=nightly` to produce a version string such as `X.Y.Z-nightly.20260330.1+gabcdef12`.
-
-Nightly packages are structured as:
+The retained packaging tools can produce archives such as:
 
 - `openprey-<version-tag>-windows.zip`
 - `openprey-<version-tag>-linux.tar.xz`
 - `openprey-<version-tag>-macos.tar.gz`
+- `openprey-<version-tag>-x86_64.AppImage`
+- `openprey-<version-tag>-aarch64.AppImage`
 
 Package contents:
 - `basepr/game_<arch>.(dll|so|dylib)` stays as a loose runtime module
 - Staged overlay content is bundled into `basepr/pak0.pk4`
 - Linux packages include `share/applications` and `share/icons` payloads
-- macOS packages include an `OpenPrey.app` launcher bundle
-- The CI workflow publishes or updates a `nightly-<version-tag>` GitHub release with generated notes
+- macOS packages include an `openPREY.app` launcher bundle
+- `tools/build/package_linux_appimage.py` assembles AppImages from a verified staged
+  package. Set `APPIMAGE_EXTRACT_AND_RUN=1` only when the host cannot execute the
+  AppImage runtime directly.
+
+The inherited nightly/manual publishing workflows are disabled until they are rebuilt
+around the in-tree game library, `basepr`, and the unified module. Local packaging tools remain
+available for candidate validation; they do not imply a published release.
 
 ---
 

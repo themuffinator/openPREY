@@ -56,7 +56,7 @@ public:
 	virtual void			ResetTime(int time);
 
 private:
-	size_t					mcomp[256];
+	ptrdiff_t				mcomp[256];
 	byte** qStatus[2];
 	idStr					fileName;
 	int						CIN_WIDTH, CIN_HEIGHT;
@@ -74,11 +74,11 @@ private:
 	byte* buf;
 	int						samplesPerPixel;				// defaults to 2
 	unsigned int			xsize, ysize, maxsize, minsize;
-	int						normalBuffer0;
+	ptrdiff_t				normalBuffer0;
 	int						roq_flags;
 	int						roqF0;
 	int						roqF1;
-	int						t[2];
+	ptrdiff_t				t[2];
 	int						roqFPS;
 	int						drawX, drawY;
 
@@ -87,15 +87,17 @@ private:
 	float					frameRate;
 
 	byte* image;
+	size_t					imageCapacity;
 
 	bool					looping;
 	bool					dirty;
+	int						lastDecodeSerial;
 	bool					half;
 	bool					smootheddouble;
 	bool					inMemory;
 
 	void					RoQ_init(void);
-	void					blitVQQuad32fs(byte** status, unsigned char* data);
+	void					blitVQQuad32fs(byte** status, unsigned char* data, const unsigned char* dataEnd);
 	void					RoQShutdown(void);
 	void					RoQInterrupt(void);
 
@@ -111,7 +113,7 @@ private:
 	void					decodeCodeBook(byte* input, unsigned short roq_flags);
 	void					recurseQuad(int startX, int startY, int quadSize, int xOff, int yOff);
 	void					setupQuad(int xOff, int yOff);
-	void					readQuadInfo(byte* qData);
+	bool					readQuadInfo(byte* qData);
 	void					RoQPrepMcomp(int xoff, int yoff);
 	void					RoQReset();
 };
@@ -120,6 +122,7 @@ const int DEFAULT_CIN_WIDTH = 512;
 const int DEFAULT_CIN_HEIGHT = 512;
 const int MAXSIZE = 8;
 const int MINSIZE = 4;
+const int MAX_QUAD_STATUS = 32768;
 
 const int ROQ_FILE = 0x1084;
 const int ROQ_QUAD = 0x1000;
@@ -142,6 +145,10 @@ static byte* file = NULL;
 static unsigned short* vq2 = NULL;
 static unsigned short* vq4 = NULL;
 static unsigned short* vq8 = NULL;
+
+// single monotonic serial shared by all cinematic instances in this binary;
+// a (instance pointer, serial) pair therefore never repeats
+static int cinematicFrameSerial = 0;
 
 
 
@@ -171,7 +178,12 @@ void idCinematic::InitCinematic(void) {
 		ROQ_YY_tab[i] = (int)((i << 6) | (i >> 2));
 	}
 
-	file = (byte*)Mem_Alloc(65536);
+	// RoQInterrupt reads RoQFrameSize + 8 bytes (chunk payload plus next chunk
+	// header). The extra 64-byte tail is slack: blitVQQuad32fs bounds its walk
+	// at the chunk-payload end, but a single decode iteration may over-advance
+	// the read cursor by a few bytes past that checkpoint, so keep those reads
+	// inside the allocation.
+	file = (byte*)Mem_Alloc(65536 + 8 + 64);
 	vq2 = (word*)Mem_Alloc(256 * 16 * 4 * sizeof(word));
 	vq4 = (word*)Mem_Alloc(256 * 64 * 4 * sizeof(word));
 	vq8 = (word*)Mem_Alloc(256 * 256 * 4 * sizeof(word));
@@ -265,9 +277,26 @@ idCinematicLocal::idCinematicLocal
 */
 idCinematicLocal::idCinematicLocal() {
 	image = NULL;
+	imageCapacity = 0;
+	lastDecodeSerial = 0;
 	status = FMV_EOF;
 	buf = NULL;
 	iFile = NULL;
+	numQuads = 0;
+	ROQSize = 0;
+	RoQFrameSize = 0;
+	frameRate = 0.0f;
+	startTime = 0;
+	looping = false;
+	// a failed-to-load object can still be forced back to FMV_PLAY (gui
+	// resetCinematics); zeroed RoQPlayed/roq_id keep the first RoQInterrupt on
+	// the default switch case so it parks at FMV_EOF instead of decoding garbage
+	RoQPlayed = 0;
+	roq_id = 0;
+	roq_flags = 0;
+	inMemory = false;
+	CIN_WIDTH = 0;
+	CIN_HEIGHT = 0;
 
 	qStatus[0] = (byte**)Mem_Alloc(32768 * sizeof(byte*));
 	qStatus[1] = (byte**)Mem_Alloc(32768 * sizeof(byte*));
@@ -301,10 +330,11 @@ bool idCinematicLocal::InitFromFile(const char* qpath, bool amilooping) {
 	animationLength = 100000;
 
 	if (strstr(qpath, "/") == NULL && strstr(qpath, "\\") == NULL) {
-		sprintf(fileName, "video/%s", qpath);
+		fileName = "video/";
+		fileName += qpath;
 	}
 	else {
-		sprintf(fileName, "%s", qpath);
+		fileName = qpath;
 	}
 
 	iFile = fileSystem->OpenFileRead(fileName);
@@ -353,9 +383,10 @@ void idCinematicLocal::Close() {
 	if (image) {
 		Mem_Free((void*)image);
 		image = NULL;
-		buf = NULL;
-		status = FMV_EOF;
 	}
+	imageCapacity = 0;
+	buf = NULL;
+	status = FMV_EOF;
 	RoQShutdown();
 }
 
@@ -374,7 +405,7 @@ idCinematicLocal::ResetTime
 ==============
 */
 void idCinematicLocal::ResetTime(int time) {
-	startTime = (backEnd.viewDef) ? 1000 * backEnd.viewDef->floatTime : -1;
+	startTime = time;
 	status = FMV_PLAY;
 }
 
@@ -417,7 +448,7 @@ cinData_t idCinematicLocal::ImageForTime(int thisTime) {
 	}
 
 	if (buf == NULL) {
-		while (buf == NULL) {
+		while (buf == NULL && status == FMV_PLAY) {
 			RoQInterrupt();
 		}
 	}
@@ -457,6 +488,7 @@ cinData_t idCinematicLocal::ImageForTime(int thisTime) {
 	cinData.imageHeight = CIN_HEIGHT;
 	cinData.status = status;
 	cinData.image = buf;
+	cinData.frameSerial = lastDecodeSerial;
 
 	return cinData;
 }
@@ -818,7 +850,7 @@ void idCinematicLocal::blit2_32(byte* src, byte* dst, int spl) {
 idCinematicLocal::blitVQQuad32fs
 ==============
 */
-void idCinematicLocal::blitVQQuad32fs(byte** status, unsigned char* data) {
+void idCinematicLocal::blitVQQuad32fs(byte** status, unsigned char* data, const unsigned char* dataEnd) {
 	unsigned short	newd, celdata, code;
 	unsigned int	index, i;
 
@@ -827,6 +859,13 @@ void idCinematicLocal::blitVQQuad32fs(byte** status, unsigned char* data) {
 	index = 0;
 
 	do {
+		// A well-formed VQ frame terminates on the NULL status sentinel before
+		// its cel stream is exhausted; a corrupt one can keep consuming codes,
+		// so stop once the read cursor reaches the chunk-payload end rather than
+		// walking off the shared file buffer.
+		if (data >= dataEnd) {
+			break;
+		}
 		if (!newd) {
 			newd = 7;
 			celdata = data[0] + data[1] * 256;
@@ -875,7 +914,16 @@ void idCinematicLocal::blitVQQuad32fs(byte** status, unsigned char* data) {
 					data++;
 					break;
 				case	0x4000:										// motion compensation
-					move4_32(status[index] + mcomp[(*data)], status[index], samplesPerLine);
+					{
+						// mcomp[] is built from attacker-controllable frame-header
+						// offsets; validate the 4x4 source block stays inside the
+						// decode image before reading it, else drop the block.
+						const ptrdiff_t srcOff = (status[index] - image) + mcomp[(*data)];
+						const ptrdiff_t span4 = (ptrdiff_t)3 * samplesPerLine + 16;
+						if (image != NULL && srcOff >= 0 && (size_t)srcOff + (size_t)span4 <= imageCapacity) {
+							move4_32(image + srcOff, status[index], samplesPerLine);
+						}
+					}
 					data++;
 					break;
 				}
@@ -883,7 +931,15 @@ void idCinematicLocal::blitVQQuad32fs(byte** status, unsigned char* data) {
 			}
 			break;
 		case	0x4000:													// motion compensation
-			move8_32(status[index] + mcomp[(*data)], status[index], samplesPerLine);
+			{
+				// See the 4x4 case: bound the 8x8 motion-compensation source
+				// block against the decode image before reading it.
+				const ptrdiff_t srcOff = (status[index] - image) + mcomp[(*data)];
+				const ptrdiff_t span8 = (ptrdiff_t)7 * samplesPerLine + 32;
+				if (image != NULL && srcOff >= 0 && (size_t)srcOff + (size_t)span8 <= imageCapacity) {
+					move8_32(image + srcOff, status[index], samplesPerLine);
+				}
+			}
 			data++;
 			index += 5;
 			break;
@@ -1204,16 +1260,8 @@ idCinematicLocal::setupQuad
 ==============
 */
 void idCinematicLocal::setupQuad(int xOff, int yOff) {
-	int numQuadCels, i, x, y;
+	int i, x, y;
 	byte* temp;
-
-	numQuadCels = (CIN_WIDTH * CIN_HEIGHT) / (16);
-	numQuadCels += numQuadCels / 4 + numQuadCels / 16;
-	numQuadCels += 64;							  // for overflow
-
-	numQuadCels = (xsize * ysize) / (16);
-	numQuadCels += numQuadCels / 4;
-	numQuadCels += 64;							  // for overflow
 
 	onQuad = 0;
 
@@ -1223,7 +1271,7 @@ void idCinematicLocal::setupQuad(int xOff, int yOff) {
 
 	temp = NULL;
 
-	for (i = (numQuadCels - 64); i < numQuadCels; i++) {
+	for (i = onQuad; i < onQuad + 64; i++) {
 		qStatus[0][i] = temp;			  // eoq
 		qStatus[1][i] = temp;			  // eoq
 	}
@@ -1234,30 +1282,52 @@ void idCinematicLocal::setupQuad(int xOff, int yOff) {
 idCinematicLocal::readQuadInfo
 ==============
 */
-void idCinematicLocal::readQuadInfo(byte* qData) {
+bool idCinematicLocal::readQuadInfo(byte* qData) {
 	xsize = qData[0] + qData[1] * 256;
 	ysize = qData[2] + qData[3] * 256;
 	maxsize = qData[4] + qData[5] * 256;
 	minsize = qData[6] + qData[7] * 256;
 
-	CIN_HEIGHT = ysize;
-	CIN_WIDTH = xsize;
+	const uint64 pixelCount = static_cast<uint64>( xsize ) * ysize;
+	const uint64 imageBytes = pixelCount * samplesPerPixel * 2;
+	const uint64 quadBlocksWide = ( static_cast<uint64>( xsize ) + 15 ) / 16;
+	const uint64 quadBlocksHigh = ( static_cast<uint64>( ysize ) + 15 ) / 16;
+	const uint64 quadStatusCount = quadBlocksWide * quadBlocksHigh * 20 + 64;
+	if ( xsize == 0 || ysize == 0 || imageBytes > static_cast<uint64>( idMath::INT_MAX ) ||
+			quadStatusCount > MAX_QUAD_STATUS ) {
+		common->Warning( "RoQ dimensions %ux%u exceed the cinematic decoder limits", xsize, ysize );
+		status = FMV_EOF;
+		return false;
+	}
+
+	CIN_HEIGHT = static_cast<int>( ysize );
+	CIN_WIDTH = static_cast<int>( xsize );
 
 	samplesPerLine = CIN_WIDTH * samplesPerPixel;
 	screenDelta = CIN_HEIGHT * samplesPerLine;
 
-	if (!image) {
-		image = (byte*)Mem_Alloc(CIN_WIDTH * CIN_HEIGHT * samplesPerPixel * 2);
+	if ( imageBytes > imageCapacity ) {
+		byte *newImage = (byte *)Mem_Alloc( static_cast<int>( imageBytes ) );
+		if ( newImage == NULL ) {
+			status = FMV_EOF;
+			return false;
+		}
+		if ( image != NULL ) {
+			Mem_Free( image );
+		}
+		image = newImage;
+		imageCapacity = static_cast<size_t>( imageBytes );
 	}
 
 	half = false;
 	smootheddouble = false;
 
-	t[0] = (0 - (ptrdiff_t)image) + (ptrdiff_t)image + screenDelta;
-	t[1] = (0 - ((ptrdiff_t)image + screenDelta)) + (ptrdiff_t)image;
+	t[0] = screenDelta;
+	t[1] = -screenDelta;
 
 	drawX = CIN_WIDTH;
 	drawY = CIN_HEIGHT;
+	return true;
 }
 
 /*
@@ -1286,6 +1356,16 @@ idCinematicLocal::RoQReset
 ==============
 */
 void idCinematicLocal::RoQReset() {
+
+	// the initial open may have failed, or Close()/RoQShutdown released the
+	// file while the object stayed alive; reopen or stay inert
+	if (iFile == NULL) {
+		iFile = fileSystem->OpenFileRead(fileName);
+		if (iFile == NULL) {
+			status = FMV_EOF;
+			return;
+		}
+	}
 
 	iFile->Seek(0, FS_SEEK_SET);
 	iFile->Read(file, 16);
@@ -1432,6 +1512,16 @@ idCinematicLocal::RoQInterrupt
 void idCinematicLocal::RoQInterrupt(void) {
 	byte* framedata;
 
+	if (iFile == NULL) {
+		status = FMV_EOF;
+		return;
+	}
+	// RoQ_init parses RoQFrameSize from the header without any bounds check
+	if (RoQFrameSize > 65536) {
+		common->DPrintf("roq_size>65536\n");
+		status = FMV_EOF;
+		return;
+	}
 	iFile->Read(file, RoQFrameSize + 8);
 	if (RoQPlayed >= ROQSize) {
 		if (looping) {
@@ -1451,16 +1541,24 @@ redump:
 	switch (roq_id)
 	{
 	case	ROQ_QUAD_VQ:
+		// A ROQ_QUAD_INFO chunk (which allocates qStatus/image and leaves
+		// numQuads >= 0) must precede any VQ frame. A malformed stream that
+		// sends VQ first leaves numQuads at its -1 init value and would walk
+		// the uninitialized qStatus pointer arrays as blit destinations.
+		if (numQuads < 0) {
+			status = FMV_EOF;
+			return;
+		}
 		if ((numQuads & 1)) {
 			normalBuffer0 = t[1];
 			RoQPrepMcomp(roqF0, roqF1);
-			blitVQQuad32fs(qStatus[1], framedata);
+			blitVQQuad32fs(qStatus[1], framedata, framedata + RoQFrameSize);
 			buf = image + screenDelta;
 		}
 		else {
 			normalBuffer0 = t[0];
 			RoQPrepMcomp(roqF0, roqF1);
-			blitVQQuad32fs(qStatus[0], framedata);
+			blitVQQuad32fs(qStatus[0], framedata, framedata + RoQFrameSize);
 			buf = image;
 		}
 		if (numQuads == 0) {		// first frame
@@ -1468,6 +1566,7 @@ redump:
 		}
 		numQuads++;
 		dirty = true;
+		lastDecodeSerial = ++cinematicFrameSerial;
 		break;
 	case	ROQ_CODEBOOK:
 		decodeCodeBook(framedata, (unsigned short)roq_flags);
@@ -1478,7 +1577,9 @@ redump:
 		break;
 	case	ROQ_QUAD_INFO:
 		if (numQuads == -1) {
-			readQuadInfo(framedata);
+			if ( !readQuadInfo(framedata) ) {
+				return;
+			}
 			setupQuad(0, 0);
 		}
 		if (numQuads != 1) numQuads = 0;
@@ -1496,6 +1597,7 @@ redump:
 			JPEGBlit(image, framedata, RoQFrameSize);
 			memcpy(image + screenDelta, image, samplesPerLine * ysize);
 			numQuads++;
+			lastDecodeSerial = ++cinematicFrameSerial;
 		}
 		break;
 	default:
@@ -1578,7 +1680,7 @@ void idCinematicLocal::RoQShutdown(void) {
 		iFile = NULL;
 	}
 
-	fileName = "";
+	// fileName is kept so RoQReset can reopen the file for replay
 }
 
 //===========================================

@@ -50,7 +50,28 @@ All fragments will have the same sequence numbers.
 
 #define	MAX_PACKETLEN			1400		// max size of a network packet
 #define	FRAGMENT_SIZE			(MAX_PACKETLEN - 100)
-#define	FRAGMENT_BIT			(1<<31)
+// IPv6 guarantees only a 1280 byte path MTU and forbids routers from
+// fragmenting in transit: an oversized datagram is dropped and answered with an
+// ICMPv6 Packet Too Big that a filtering path frequently never delivers. A
+// 1400 byte fragment would then be silently black-holed while small packets
+// kept flowing, which reads as "connects, then hangs awaiting snapshot".
+#define	MAX_PACKETLEN6			1232		// 1280 minus the 40 byte IPv6 and 8 byte UDP headers
+#define	FRAGMENT_SIZE6			(MAX_PACKETLEN6 - 100)
+#define	FRAGMENT_BIT			(1u<<31)
+
+/*
+===============
+Net_FragmentSize
+
+Both endpoints of a connection see the same remote address family, so they
+agree on the fragment size without negotiating it. That agreement is required:
+the receiver detects the final fragment by comparing its length against this
+value.
+===============
+*/
+static int Net_FragmentSize( const netadr_t &adr ) {
+	return adr.type == NA_IP6 ? FRAGMENT_SIZE6 : FRAGMENT_SIZE;
+}
 
 idCVar net_channelShowPackets( "net_channelShowPackets", "0", CVAR_SYSTEM | CVAR_BOOL, "show all packets" );
 idCVar net_channelShowDrop( "net_channelShowDrop", "0", CVAR_SYSTEM | CVAR_BOOL, "show dropped packets" );
@@ -62,6 +83,7 @@ idMsgChannel::idMsgChannel
 */
 idMsgChannel::idMsgChannel() {
 	id = -1;
+	compressor = NULL;
 }
 
 /*
@@ -75,7 +97,14 @@ void idMsgChannel::Init( const netadr_t adr, const int id ) {
 	this->remoteAddress = adr;
 	this->id = id;
 	this->maxRate = 50000;
-	this->compressor = idCompressor::AllocRunLength_ZeroBased();
+	// openQ4: a channel is opened again without a Shutdown when a client
+	// reconnects onto its old slot, when a listen server changes map and when a
+	// pure restart reconnects, and each used to leak the previous compressor
+	// and its 64 KiB buffer. The compressor is re-initialised per message, so
+	// the one already here serves.
+	if ( this->compressor == NULL ) {
+		this->compressor = idCompressor::AllocRunLength_ZeroBased();
+	}
 
 	lastSendTime = 0;
 	lastDataBytes = 0;
@@ -94,6 +123,8 @@ void idMsgChannel::Init( const netadr_t adr, const int id ) {
 	unsentFragmentStart = 0;
 	fragmentSequence = 0;
 	fragmentLength = 0;
+	fragmentExpectedLength = -1;
+	fragmentReceived = 0;
 	reliableSend.Init( 1 );
 	reliableReceive.Init( 0 );
 }
@@ -145,9 +176,17 @@ bool idMsgChannel::ReadyToSend( const int time ) const {
 idMsgChannel::WriteMessageData
 ================
 */
-void idMsgChannel::WriteMessageData( idBitMsg &out, const idBitMsg &msg ) {
+bool idMsgChannel::WriteMessageData( idBitMsg &out, const idBitMsg &msg ) {
 	idBitMsg tmp;
 	byte tmpBuf[MAX_MESSAGE_SIZE];
+	idBitMsg packed;
+	// openQ4: the zero-run coder spends six bits on a lone three-bit zero word,
+	// so data chosen for it grows - 0x88 bytes by a quarter, and never by more
+	// than double. Packing straight into the caller's MAX_MESSAGE_SIZE buffer
+	// made a 13 KiB backlog of such bytes a fatal idBitMsg overflow, which a
+	// client could arrange in a server's queues. Pack here first and refuse
+	// what does not fit.
+	byte packedBuf[MAX_MESSAGE_SIZE * 2 + 64];
 
 	tmp.Init( tmpBuf, sizeof( tmpBuf ) );
 
@@ -162,15 +201,23 @@ void idMsgChannel::WriteMessageData( idBitMsg &out, const idBitMsg &msg ) {
 	// write data
 	tmp.WriteData( msg.GetData(), msg.GetSize() );
 
-	// write message size
-	out.WriteShort( tmp.GetSize() );
-
 	// compress message
-	idFile_BitMsg file( out );
+	packed.Init( packedBuf, sizeof( packedBuf ) );
+	idFile_BitMsg file( packed );
 	compressor->Init( &file, true, 3 );
 	compressor->Write( tmp.GetData(), tmp.GetSize() );
 	compressor->FinishCompress();
 	outgoingCompression = compressor->GetCompressionRatio();
+
+	// the receiver reassembles into MAX_MESSAGE_SIZE as well
+	if ( (int)sizeof( short ) + packed.GetSize() > out.GetMaxSize() - out.GetSize() ) {
+		return false;
+	}
+
+	// write message size
+	out.WriteShort( tmp.GetSize() );
+	out.WriteData( packed.GetData(), packed.GetSize() );
+	return true;
 }
 
 /*
@@ -179,15 +226,26 @@ idMsgChannel::ReadMessageData
 ================
 */
 bool idMsgChannel::ReadMessageData( idBitMsg &out, const idBitMsg &msg ) {
-	int reliableAcknowledge, reliableMessageSize, reliableSequence;
+	int reliableAcknowledge, reliableMessageSize, reliableSequence, messageSize;
 
 	// read message size
-	out.SetSize( msg.ReadShort() );
+	messageSize = msg.ReadShort();
+	if ( messageSize < (int)sizeof( int ) + (int)sizeof( short ) || messageSize > out.GetMaxSize() ) {
+		common->Printf( "%s: bad message size %d\n", Sys_NetAdrToString( remoteAddress ), messageSize );
+		return false;
+	}
+	out.SetSize( messageSize );
 
 	// decompress message
 	idFile_BitMsg file( msg );
 	compressor->Init( &file, false, 3 );
-	compressor->Read( out.GetData(), out.GetSize() );
+	const int decompressedBytes = compressor->Read( out.GetData(), out.GetSize() );
+	// Bitstream decompressors report their cursor, which can step past the logical
+	// output size on the final partial word.
+	if ( decompressedBytes < out.GetSize() ) {
+		common->Printf( "%s: truncated compressed message\n", Sys_NetAdrToString( remoteAddress ) );
+		return false;
+	}
 	incomingCompression = compressor->GetCompressionRatio();
 	out.BeginReading();
 
@@ -196,7 +254,7 @@ bool idMsgChannel::ReadMessageData( idBitMsg &out, const idBitMsg &msg ) {
 
 	// remove acknowledged reliable messages
 	while( reliableSend.GetFirst() <= reliableAcknowledge ) {
-		if ( !reliableSend.Get( NULL, 0, reliableMessageSize, false ) ) {
+		if ( !reliableSend.Get( NULL, 0, reliableMessageSize, true ) ) {
 			break;
 		}
 	}
@@ -204,7 +262,8 @@ bool idMsgChannel::ReadMessageData( idBitMsg &out, const idBitMsg &msg ) {
 	// read reliable messages
 	reliableMessageSize = out.ReadShort();
 	while( reliableMessageSize != 0 ) {
-		if ( reliableMessageSize <= 0 || reliableMessageSize > out.GetSize() - out.GetReadCount() ) {
+		const int remaining = out.GetSize() - out.GetReadCount();
+		if ( reliableMessageSize <= 0 || remaining < (int)sizeof( int ) || reliableMessageSize > remaining - (int)sizeof( int ) ) {
 			common->Printf( "%s: bad reliable message\n", Sys_NetAdrToString( remoteAddress ) );
 			return false;
 		}
@@ -242,9 +301,9 @@ void idMsgChannel::SendNextFragment( idPort &port, const int time ) {
 	// write the packet
 	msg.Init( msgBuf, sizeof( msgBuf ) );
 	msg.WriteShort( id );
-	msg.WriteLong( outgoingSequence | FRAGMENT_BIT );
+	msg.WriteLong( static_cast<int>( static_cast<unsigned int>( outgoingSequence ) | FRAGMENT_BIT ) );
 
-	fragLength = FRAGMENT_SIZE;
+	fragLength = Net_FragmentSize( remoteAddress );
 	if ( unsentFragmentStart + fragLength > unsentMsg.GetSize() ) {
 		fragLength = unsentMsg.GetSize() - unsentFragmentStart;
 	}
@@ -269,10 +328,32 @@ void idMsgChannel::SendNextFragment( idPort &port, const int time ) {
 	// that is exactly the fragment length still needs to send
 	// a second packet of zero length so that the other side
 	// can tell there aren't more to follow
-	if ( unsentFragmentStart == unsentMsg.GetSize() && fragLength != FRAGMENT_SIZE ) {
+	if ( unsentFragmentStart == unsentMsg.GetSize() && fragLength != Net_FragmentSize( remoteAddress ) ) {
 		outgoingSequence++;
 		unsentFragments = false;
 	}
+}
+
+/*
+===============
+idMsgChannel::GetMaxSendMessageSize
+
+  How large a message SendMessage will still accept right now.
+================
+*/
+int idMsgChannel::GetMaxSendMessageSize( void ) const {
+	// mirrors the totalLength test in SendMessage below
+	const int overhead = 4 + reliableSend.GetTotalSize() + 4;
+	return Max( 0, MAX_MESSAGE_SIZE - overhead );
+}
+
+bool idMsgChannel::CanSendUnfragmented( int time, int payloadBytes, int burstMsec ) const {
+	const int64 bytes = 8 + int64( reliableSend.GetTotalSize() ) + payloadBytes;
+	if ( payloadBytes < 0 || unsentFragments || bytes >= Net_FragmentSize( remoteAddress ) ) return false;
+	if ( burstMsec <= 0 || !maxRate ) return ReadyToSend( time );
+	const int elapsed = idMath::ClampInt( 0, 1000, time - lastSendTime );
+	const int64 debt = Max<int64>( 0, int64( lastDataBytes ) - int64( elapsed ) * maxRate / 1000 );
+	return debt + bytes <= int64( maxRate ) * idMath::ClampInt( 0, 20, burstMsec ) / 1000;
 }
 
 /*
@@ -286,7 +367,10 @@ idMsgChannel::SendMessage
 int idMsgChannel::SendMessage( idPort &port, const int time, const idBitMsg &msg ) {
 	int totalLength;
 
-	if ( remoteAddress.type == NA_BAD ) {
+	// openQ4: a bot slot has a channel but no remote end.  Without this every
+	// unreliable send aimed at one reached idPort::SendPacket and produced an
+	// "unsupported address type" warning - a wall of them on every map load.
+	if ( remoteAddress.type == NA_BAD || remoteAddress.type == NA_BOT ) {
 		return -1;
 	}
 
@@ -306,12 +390,15 @@ int idMsgChannel::SendMessage( idPort &port, const int time, const idBitMsg &msg
 	unsentMsg.BeginWriting();
 
 	// fragment large messages
-	if ( totalLength >= FRAGMENT_SIZE ) {
+	if ( totalLength >= Net_FragmentSize( remoteAddress ) ) {
+		// write out the message data
+		if ( !WriteMessageData( unsentMsg, msg ) ) {
+			common->Printf( "idMsgChannel::SendMessage: message too large once packed, length = %i\n", totalLength );
+			return -1;
+		}
+
 		unsentFragments = true;
 		unsentFragmentStart = 0;
-
-		// write out the message data
-		WriteMessageData( unsentMsg, msg );
 
 		// send the first fragment now
 		SendNextFragment( port, time );
@@ -368,11 +455,16 @@ bool idMsgChannel::Process( const netadr_t from, int time, idBitMsg &msg, int &s
 	UpdateIncomingRate( time, msg.GetSize() );
 
 	// get sequence numbers
+	if ( msg.GetRemaingData() < (int)sizeof( int ) ) {
+		common->Printf( "%s: runt packet\n", Sys_NetAdrToString( remoteAddress ) );
+		return false;
+	}
 	sequence = msg.ReadLong();
 
 	// check for fragment information
-	if ( sequence & FRAGMENT_BIT ) {
-		sequence &= ~FRAGMENT_BIT;
+	const unsigned int sequenceBits = static_cast<unsigned int>( sequence );
+	if ( sequenceBits & FRAGMENT_BIT ) {
+		sequence = static_cast<int>( sequenceBits & ~FRAGMENT_BIT );
 		fragmented = true;
 	} else {
 		fragmented = false;
@@ -380,6 +472,10 @@ bool idMsgChannel::Process( const netadr_t from, int time, idBitMsg &msg, int &s
 
 	// read the fragment information
 	if ( fragmented ) {
+		if ( msg.GetRemaingData() < (int)sizeof( short ) * 2 ) {
+			common->Printf( "%s: runt fragment header\n", Sys_NetAdrToString( remoteAddress ) );
+			return false;
+		}
 		fragStart = msg.ReadShort();
 		fragLength = msg.ReadShort();
 	} else {
@@ -405,6 +501,12 @@ bool idMsgChannel::Process( const netadr_t from, int time, idBitMsg &msg, int &s
 		return false;
 	}
 
+	// An older message must not overwrite the assembly buffer of a newer one,
+	// whether the delayed packet is fragmented or carries its entire payload.
+	if ( sequence < fragmentSequence ) {
+		return false;
+	}
+
 	//
 	// dropped packets don't keep this message from being used
 	//
@@ -420,44 +522,62 @@ bool idMsgChannel::Process( const netadr_t from, int time, idBitMsg &msg, int &s
 	// if the message is fragmented
 	//
 	if ( fragmented ) {
+		const int fragmentSize = Net_FragmentSize( remoteAddress );
+		if ( fragStart < 0 || fragLength < 0 || fragLength > Net_FragmentSize( remoteAddress ) || fragLength > msg.GetRemaingData() || fragStart + fragLength > (int)sizeof( fragmentBuffer ) || fragStart % fragmentSize != 0 || fragStart / fragmentSize >= 32 ) {
+			if ( net_channelShowDrop.GetBool() || net_channelShowPackets.GetBool() ) {
+				common->Printf( "%s: illegal fragment range\n", Sys_NetAdrToString( remoteAddress ) );
+			}
+			UpdatePacketLoss( time, 0, 1 );
+			return false;
+		}
+
 		// make sure we have the correct sequence number
 		if ( sequence != fragmentSequence ) {
 			fragmentSequence = sequence;
 			fragmentLength = 0;
+			fragmentExpectedLength = -1;
+			fragmentReceived = 0;
 		}
 
-		// if we missed a fragment, dump the message
-		if ( fragStart != fragmentLength ) {
-			if ( net_channelShowDrop.GetBool() || net_channelShowPackets.GetBool() ) {
-				common->Printf( "%s: dropped a message fragment at seq %d\n", Sys_NetAdrToString( remoteAddress ), sequence );
-			}
-			// we can still keep the part that we have so far,
-			// so we don't need to clear fragmentLength
-			UpdatePacketLoss( time, 0, 1 );
+		const unsigned int fragmentBit = 1u << ( fragStart / fragmentSize );
+		if ( fragmentReceived & fragmentBit ) {
+			// A duplicate cannot count twice or overwrite an accepted fragment.
 			return false;
 		}
 
-		// copy the fragment to the fragment buffer
-		if ( fragLength < 0 || fragLength > msg.GetRemaingData() || fragmentLength + fragLength > sizeof( fragmentBuffer ) ) {
-			if ( net_channelShowDrop.GetBool() || net_channelShowPackets.GetBool() ) {
-				common->Printf( "%s: illegal fragment length\n", Sys_NetAdrToString( remoteAddress ) );
-			}
-			UpdatePacketLoss( time, 0, 1 );
+		const int fragmentEnd = fragStart + fragLength;
+		if ( fragmentExpectedLength >= 0 && fragmentEnd > fragmentExpectedLength ) {
 			return false;
 		}
+		if ( fragLength < fragmentSize ) {
+			// The final fragment may arrive first, including an empty terminator.
+			// Refuse a conflicting second end or an end before buffered data.
+			if ( fragmentExpectedLength >= 0 || ( fragmentReceived & ~( fragmentBit | ( fragmentBit - 1u ) ) ) != 0 ) {
+				return false;
+			}
+			fragmentExpectedLength = fragmentEnd;
+		}
 
-		memcpy( fragmentBuffer + fragmentLength, msg.GetData() + msg.GetReadCount(), fragLength );
-
+		memcpy( fragmentBuffer + fragStart, msg.GetData() + msg.GetReadCount(), fragLength );
+		fragmentReceived |= fragmentBit;
 		fragmentLength += fragLength;
-
 		UpdatePacketLoss( time, 1, 0 );
 
-		// if this wasn't the last fragment, don't process anything
-		if ( fragLength == FRAGMENT_SIZE ) {
+		// All non-final fragments have the family's fixed size and distinct,
+		// aligned offsets. Their byte sum reaches the final length only when
+		// every preceding fragment arrived, in any order and without duplicates.
+		if ( fragmentExpectedLength < 0 || fragmentLength != fragmentExpectedLength ) {
 			return false;
 		}
 
 	} else {
+		if ( msg.GetRemaingData() > (int)sizeof( fragmentBuffer ) ) {
+			if ( net_channelShowDrop.GetBool() || net_channelShowPackets.GetBool() ) {
+				common->Printf( "%s: packet payload too large\n", Sys_NetAdrToString( remoteAddress ) );
+			}
+			UpdatePacketLoss( time, 0, 1 );
+			return false;
+		}
 		memcpy( fragmentBuffer, msg.GetData() + msg.GetReadCount(), msg.GetRemaingData() );
 		fragmentLength = msg.GetRemaingData();
 		UpdatePacketLoss( time, 1, 0 );
@@ -494,7 +614,7 @@ bool idMsgChannel::SendReliableMessage( const idBitMsg &msg ) {
 	if ( remoteAddress.type == NA_BAD ) {
 		return false;
 	}
-	result = reliableSend.Add( msg.GetData(), msg.GetSize(), false );
+	result = reliableSend.Add( msg.GetData(), msg.GetSize(), true );
 	if ( !result ) {
 		common->Warning( "idMsgChannel::SendReliableMessage: overflowed" );
 		return false;
@@ -511,7 +631,7 @@ bool idMsgChannel::GetReliableMessage( idBitMsg &msg ) {
 	int size;
 	bool result;
 // jmarshall
-	result = reliableReceive.Get( msg.GetData(), msg.GetSize(), size, false );
+	result = reliableReceive.Get( msg.GetData(), msg.GetMaxSize(), size, false );
 // jmarshall end
 	msg.SetSize( size );
 	msg.BeginReading();

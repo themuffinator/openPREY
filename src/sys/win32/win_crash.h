@@ -25,6 +25,6 @@ along with Doom 3 Source Code.  If not, see <http://www.gnu.org/licenses/>.
 #ifndef __WIN_CRASH_H__
 #define __WIN_CRASH_H__
 
-void Sys_InstallDebugCrashHandler(void);
+void Sys_InstallCrashHandler(void);
 
 #endif /* !__WIN_CRASH_H__ */

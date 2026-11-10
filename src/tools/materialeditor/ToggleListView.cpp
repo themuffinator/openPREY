@@ -36,6 +36,13 @@ If you have questions concerning this license or the applicable additional terms
 
 IMPLEMENT_DYNCREATE(ToggleListView, CListView)
 
+static void ToggleListView_DestroyIcon( HICON &icon ) {
+	if ( icon != NULL ) {
+		DestroyIcon( icon );
+		icon = NULL;
+	}
+}
+
 BEGIN_MESSAGE_MAP(ToggleListView, CListView)
 	ON_WM_CREATE()
 	ON_WM_SIZE()
@@ -57,6 +64,9 @@ ToggleListView::ToggleListView() {
 * Destructor.
 */
 ToggleListView::~ToggleListView() {
+	ToggleListView_DestroyIcon( onIcon );
+	ToggleListView_DestroyIcon( offIcon );
+	ToggleListView_DestroyIcon( disabledIcon );
 }
 
 
@@ -71,6 +81,10 @@ ToggleListView::~ToggleListView() {
 * @param off The icon to draw when the state is TOGGLE_STATE_OFF.
 */
 void ToggleListView::SetToggleIcons(LPCSTR disabled, LPCSTR on, LPCSTR off) {
+	ToggleListView_DestroyIcon( onIcon );
+	ToggleListView_DestroyIcon( offIcon );
+	ToggleListView_DestroyIcon( disabledIcon );
+
 	if(on) {
 		onIcon = (HICON)LoadImage ( AfxGetInstanceHandle(), on, IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR|LR_LOADMAP3DCOLORS );
 	} else {

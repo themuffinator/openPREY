@@ -46,6 +46,8 @@ If you have questions concerning this license or the applicable additional terms
 
 const int NUM_DECAL_BOUNDING_PLANES = 6;
 
+class idRenderModelDecal;
+
 typedef struct decalProjectionInfo_s {
 	idVec3						projectionOrigin;
 	idBounds					projectionBounds;
@@ -59,6 +61,10 @@ typedef struct decalProjectionInfo_s {
 	float						maxAngle;
 	bool						force;
 } decalProjectionInfo_t;
+
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+bool R_MD5R_CreateDecalTriangles( idRenderModelDecal *decalModel, const srfTriangles_t &sourceTri, const decalProjectionInfo_t &localInfo );
+#endif
 
 
 class idRenderModelDecal {
@@ -88,7 +94,7 @@ public:
 								// Returns the next decal in the chain.
 	idRenderModelDecal *		Next( void ) const { return nextDecal; }
 
-	void						ReadFromDemoFile( class idDemoFile *f );
+	bool						ReadFromDemoFile( class idDemoFile *f );
 	void						WriteToDemoFile( class idDemoFile *f ) const;
 
 private:
@@ -99,10 +105,14 @@ private:
 	srfTriangles_t				tri;
 	idDrawVert					verts[MAX_DECAL_VERTS];
 	float						vertDepthFade[MAX_DECAL_VERTS];
-	float						vertStartTime[MAX_DECAL_VERTS];
+	float						vertLifeSpan[MAX_DECAL_VERTS];
 	glIndex_t					indexes[MAX_DECAL_INDEXES];
-	int							indexStartTime[MAX_DECAL_INDEXES];
+	float						indexStartTime[MAX_DECAL_INDEXES];
 	idRenderModelDecal *		nextDecal;
+
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	friend bool					R_MD5R_CreateDecalTriangles( idRenderModelDecal *decalModel, const srfTriangles_t &sourceTri, const decalProjectionInfo_t &localInfo );
+#endif
 
 								// Adds the winding triangles to the appropriate decal in the
 								// chain, creating a new one if necessary.

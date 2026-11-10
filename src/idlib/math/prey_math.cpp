@@ -29,7 +29,7 @@ float hhMath::dB2Scale( float dB ) {
 	} else if ( dB <= -60.0f ) {
 		return 0.0f;				// infinitly quiet
 	}
-	return (Pow(2,(dB/6.0f))); 
+	return (Pow(2,(dB/6.0f)));
 }
 
 float hhMath::Scale2dB( float scale ) {
@@ -74,7 +74,7 @@ float hhMath::MidPointLerp( const float startVal, const float midVal, const floa
 		return endVal;
 	}
 
-	return ( alpha < 0.5f ) ? Lerp( startVal, midVal, 2.0f * alpha ) : Lerp( midVal, endVal, 2.0f * ( alpha - 0.5f ) );	
+	return ( alpha < 0.5f ) ? Lerp( startVal, midVal, 2.0f * alpha ) : Lerp( midVal, endVal, 2.0f * ( alpha - 0.5f ) );
 }
 
 /*
@@ -112,14 +112,14 @@ idVec3	hhMath::GetClosestPtOnBoundary(const idVec3 &pt, const idBounds &bnds )
 {
 	idVec3 closePt;
 
-	
+
 	idVec3 ul;
 	idVec3 lr;
 	int i;
 
 	ul = bnds[0];
-	lr = bnds[1];	
-	
+	lr = bnds[1];
+
 
 	// We are INSIDE looking for closest boundary
 	if(bnds.ContainsPoint(pt))
@@ -135,16 +135,16 @@ idVec3	hhMath::GetClosestPtOnBoundary(const idVec3 &pt, const idBounds &bnds )
 		{
 			float ulDist = pt[i] - ul[i];
 			float lrDist = lr[i] - pt[i];
-			if(ulDist < lrDist )			
+			if(ulDist < lrDist )
 			{
-				closestSides[i]		= 0; 
+				closestSides[i]		= 0;
 				closestSideDists[i]	= ulDist;
 			}
 			else
 			{
-				closestSides[i] = 1; 
+				closestSides[i] = 1;
 				closestSideDists[i]	= lrDist;
-			}		
+			}
 		}
 
 		// Now find closest axis
@@ -159,16 +159,16 @@ idVec3	hhMath::GetClosestPtOnBoundary(const idVec3 &pt, const idBounds &bnds )
 			closePt[closestAxis] = ul[closestAxis];
 		else
 			closePt[closestAxis] = lr[closestAxis];
-        
-	}	
+
+	}
 	else // OUTSIDE looking for closest boundary - so just clamp
 	{
 		for(i=0;i<3;i++)
-		{			
-			if(pt[i] < ul[i])		
-				closePt[i] = ul[i];	
-			else if(pt[i] > lr[i])		
-				closePt[i] = lr[i];	
+		{
+			if(pt[i] < ul[i])
+				closePt[i] = ul[i];
+			else if(pt[i] > lr[i])
+				closePt[i] = lr[i];
 			else // INSIDE
 			{
 				closePt[i] = pt[i];

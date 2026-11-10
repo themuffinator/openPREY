@@ -44,6 +44,9 @@ const int ASYNC_PROTOCOL_VERSION	= ( ASYNC_PROTOCOL_MAJOR << 16 ) + ASYNC_PROTOC
 const int MAX_ASYNC_CLIENTS			= 32;
 
 const int MAX_USERCMD_BACKUP		= 256;
+// The wire protocol sends the current command plus at most ten backups.
+// Keep packet work bounded independently of the larger circular history.
+const int MAX_USERCMD_PACKET_COMMANDS = 11;
 const int MAX_USERCMD_DUPLICATION	= 25;
 const int MAX_USERCMD_RELAY			= 10;
 
@@ -65,6 +68,7 @@ const int GAME_INIT_ID_MAP_LOAD		= -2;
 #include "AsyncServer.h"
 #include "ServerScan.h"
 #include "AsyncClient.h"
+#include "MultiViewDemo.h"
 
 /*
 ===============================================================================
@@ -80,7 +84,8 @@ enum {
 	SERVER_UNRELIABLE_MESSAGE_EMPTY = 0,
 	SERVER_UNRELIABLE_MESSAGE_PING,
 	SERVER_UNRELIABLE_MESSAGE_GAMEINIT,
-	SERVER_UNRELIABLE_MESSAGE_SNAPSHOT
+	SERVER_UNRELIABLE_MESSAGE_SNAPSHOT,
+	SERVER_UNRELIABLE_MESSAGE_VOICE
 };
 
 // reliable server -> client messages
@@ -100,7 +105,8 @@ enum {
 enum {
 	CLIENT_UNRELIABLE_MESSAGE_EMPTY = 0,
 	CLIENT_UNRELIABLE_MESSAGE_PINGRESPONSE,
-	CLIENT_UNRELIABLE_MESSAGE_USERCMD
+	CLIENT_UNRELIABLE_MESSAGE_USERCMD,
+	CLIENT_UNRELIABLE_MESSAGE_VOICE
 };
 
 // reliable client -> server messages
@@ -150,7 +156,7 @@ public:
 	static void				RunFrame( void );
 
 	static void				WriteUserCmdDelta( idBitMsg &msg, const usercmd_t &cmd, const usercmd_t *base );
-	static void				ReadUserCmdDelta( const idBitMsg &msg, usercmd_t &cmd, const usercmd_t *base );
+	static bool				ReadUserCmdDelta( const idBitMsg &msg, usercmd_t &cmd, const usercmd_t *base );
 
 	static bool				DuplicateUsercmd( const usercmd_t &previousUserCmd, usercmd_t &currentUserCmd, int frame, int time );
 	static bool				UsercmdInputChanged( const usercmd_t &previousUserCmd, const usercmd_t &currentUserCmd );
@@ -165,9 +171,11 @@ public:
 	static void				ExecuteSessionCommand( const char *sessCmd );
 	static bool				AreCheatsEnabled( void );
 	static void				SetCheatsEnabled( bool enabled );
+	static void				ShowClientDisconnectMessage( const char *clientName, const char *reason );
 
 	static idAsyncServer	server;
 	static idAsyncClient	client;
+	static idMultiViewDemo	multiViewDemo;
 	
 	static idCVar			verbose;						// verbose output
 	static idCVar			allowCheats;					// legacy cheats toggle
@@ -182,11 +190,13 @@ public:
 	static idCVar			clientServerTimeout;			// time out in seconds for server
 	static idCVar			serverDrawClient;				// the server draws the view of this client
 	static idCVar			serverRemoteConsolePassword;	// remote console password
+	static idCVar			serverAllowLegacyRcon;			// explicit plaintext compatibility opt-in
 	static idCVar			clientPrediction;				// how many additional milliseconds the clients runs ahead
 	static idCVar			clientMaxPrediction;			// max milliseconds into the future a client can run prediction
 	static idCVar			clientUsercmdBackup;			// how many usercmds the client sends from previous frames
 	static idCVar			clientRemoteConsoleAddress;		// remote console address
 	static idCVar			clientRemoteConsolePassword;	// remote console password
+	static idCVar			clientUseLegacyRcon;				// explicit plaintext compatibility opt-in
 	static idCVar			master0;						// idnet master server
 	static idCVar			master1;						// 1st master server
 	static idCVar			master2;						// 2nd master server
@@ -201,9 +211,14 @@ public:
 	// same message used for offline check and network reply
 	static void				BuildInvalidKeyMsg( idStr &msg, bool valid[ 2 ] );
 
+							// a failed game-module swap drops the spawnServer it was
+							// for, and with it a dedicated server it was holding back
+	static void				AbandonDeferredDedicatedSpawn( void );
+
 private:
 	static int				realTime;
 	static master_t			masters[ MAX_MASTER_SERVERS];	// master1 etc.
+	static bool				dedicatedSpawnDeferred;			// net_serverDedicated 1 held back across the reload before a spawn
 
 	static void				SpawnServer_f( const idCmdArgs &args );
 	static void				NextMap_f( const idCmdArgs &args );

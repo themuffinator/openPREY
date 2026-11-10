@@ -721,6 +721,8 @@ ID_INLINE int idList<type>::Append( type const & obj ) {
 	}
 
 	if ( num == size ) {
+		// obj may refer to an element that Resize is about to destroy.
+		const type value = obj;
 		int newsize;
 
 		if ( granularity == 0 ) {	// this is a hack to fix our memset classes
@@ -728,9 +730,11 @@ ID_INLINE int idList<type>::Append( type const & obj ) {
 		}
 		newsize = size + granularity;
 		Resize( newsize - newsize % granularity );
+		list[ num ] = value;
+	} else {
+		list[ num ] = obj;
 	}
 
-	list[ num ] = obj;
 	num++;
 
 	return num - 1;
@@ -749,6 +753,8 @@ Returns the index of the new element.
 */
 template< class type >
 ID_INLINE int idList<type>::Insert( type const & obj, int index ) {
+	// Preserve aliased values before either reallocating or shifting elements.
+	const type value = obj;
 	if ( !list ) {
 		Resize( granularity );
 	}
@@ -773,7 +779,7 @@ ID_INLINE int idList<type>::Insert( type const & obj, int index ) {
 		list[i] = list[i-1];
 	}
 	num++;
-	list[index] = obj;
+	list[index] = value;
 	return index;
 }
 
@@ -788,17 +794,21 @@ Returns the size of the new combined list
 */
 template< class type >
 ID_INLINE int idList<type>::Append( const idList<type> &other ) {
-	if ( !list ) {
+	const int n = other.Num();
+	if ( num + n > size ) {
 		if ( granularity == 0 ) {	// this is a hack to fix our memset classes
 			granularity = 16;
 		}
-		Resize( granularity );
+		const int newsize = num + n + granularity - 1;
+		Resize( newsize - newsize % granularity );
 	}
 
-	int n = other.Num();
-	for (int i = 0; i < n; i++) {
-		Append(other[i]);
+	// Reserve once, including for self-append, so large concatenations copy
+	// each source element once rather than reallocating every granularity items.
+	for ( int i = 0; i < n; i++ ) {
+		list[ num + i ] = other[i];
 	}
+	num += n;
 
 	return Num();
 }
@@ -1103,7 +1113,7 @@ Adds a value to the list as if the list was a heap by doing a bubble swap sort
 First it appends the object, then swaps up the heap at successive parent positions
 as needed
 
-Complexity: O[n log n]
+Complexity: O[log n], excluding storage growth
 ================
 */
 template< class type >
@@ -1128,7 +1138,7 @@ element, destroys the lowest element (wich was the top),
 and then sorts the new top element down the heap as
 needed
 
-Complexity: O[n log n]
+Complexity: O[log n]
 ================
 */
 template< class type >
@@ -1145,30 +1155,16 @@ ID_INLINE void idList<type>::HeapPop( void ) {
 
 	int pos = 0;
 
-	int largestChild = pos;
-	if (((2*pos)+1)<num)
-	{
-		if (((2*pos)+2)<num)
-		{
-			largestChild = ( (list[((2*pos)+2)] < list[((2*pos)+1)]) ? (((2*pos)+1)) : (((2*pos)+2)) );
+	while ( pos < num / 2 ) {
+		int largestChild = 2 * pos + 1;
+		if ( largestChild + 1 < num && list[largestChild] < list[largestChild + 1] ) {
+			largestChild++;
 		}
-		largestChild = ((2*pos)+1);
-	}
-
-	while (largestChild!=pos && list[pos]<list[largestChild])
-	{
-		idSwap(list[largestChild], list[pos]);
+		if ( !( list[pos] < list[largestChild] ) ) {
+			break;
+		}
+		idSwap( list[largestChild], list[pos] );
 		pos = largestChild;
-
-		largestChild = pos;
-		if (((2*pos)+1)<num)
-		{
-			if (((2*pos)+2)<num)
-			{
-				largestChild = ( (list[((2*pos)+2)] < list[((2*pos)+1)]) ? (((2*pos)+1)) : (((2*pos)+2)) );
-			}
-			largestChild = ((2*pos)+1);
-		}
 	}
 }
 

@@ -178,7 +178,7 @@ void idDeclParticle::ParseParms( idLexer &src, float *parms, int maxParms ) {
 idDeclParticle::ParseParametric
 ================
 */
-void idDeclParticle::ParseParametric( idLexer &src, idParticleParm *parm ) {
+void idDeclParticle::ParseParametric( idLexer &src, idParticleParm *parm, bool noCaching ) {
 	idToken token;
 	bool negative = false;
 
@@ -239,7 +239,7 @@ void idDeclParticle::ParseParametric( idLexer &src, idParticleParm *parm ) {
 		}
 	} else {
 		// table
-		parm->table = static_cast<const idDeclTable *>( declManager->FindType( DECL_TABLE, token, false ) );
+		parm->table = static_cast<const idDeclTable *>( declManager->FindType( DECL_TABLE, token, false, noCaching ) );
 	}
 
 }
@@ -249,7 +249,7 @@ void idDeclParticle::ParseParametric( idLexer &src, idParticleParm *parm ) {
 idDeclParticle::ParseParticleStage
 ================
 */
-idParticleStage *idDeclParticle::ParseParticleStage( idLexer &src ) {
+idParticleStage *idDeclParticle::ParseParticleStage( idLexer &src, bool noCaching ) {
 	idToken token;
 
 	idParticleStage *stage = new idParticleStage;
@@ -267,7 +267,7 @@ idParticleStage *idDeclParticle::ParseParticleStage( idLexer &src ) {
 		}
 		if ( !token.Icmp( "material" ) ) {
 			src.ReadToken( &token );
-			stage->material = declManager->FindMaterial( token.c_str() );
+			stage->material = static_cast<const idMaterial *>( declManager->FindType( DECL_MATERIAL, token.c_str(), true, noCaching ) );
 			continue;
 		}
 		if ( !token.Icmp( "count" ) ) {
@@ -364,11 +364,11 @@ idParticleStage *idDeclParticle::ParseParticleStage( idLexer &src ) {
 		}
 
 		if ( !token.Icmp( "speed" ) ) {
-			ParseParametric( src, &stage->speed );
+			ParseParametric( src, &stage->speed, noCaching );
 			continue;
 		}
 		if ( !token.Icmp( "rotation" ) ) {
-			ParseParametric( src, &stage->rotationSpeed );
+			ParseParametric( src, &stage->rotationSpeed, noCaching );
 			continue;
 		}
 		if ( !token.Icmp( "angle" ) ) {
@@ -380,11 +380,11 @@ idParticleStage *idDeclParticle::ParseParticleStage( idLexer &src ) {
 			continue;
 		}
 		if ( !token.Icmp( "size" ) ) {
-			ParseParametric( src, &stage->size );
+			ParseParametric( src, &stage->size, noCaching );
 			continue;
 		}
 		if ( !token.Icmp( "aspect" ) ) {
-			ParseParametric( src, &stage->aspect );
+			ParseParametric( src, &stage->aspect, noCaching );
 			continue;
 		}
 		if ( !token.Icmp( "fadeIn" ) ) {
@@ -450,7 +450,7 @@ idParticleStage *idDeclParticle::ParseParticleStage( idLexer &src ) {
 			common->Warning( "Particle %s from %s has stage with \"softeningRadius\" attribute, which is currently ignored (we soften all suitable particles)\n",
 					this->GetName(), src.GetFileName() );
 			// DG: disable this for now to avoid breaking the game ABI
-			//stage->softeningRadius = src.ParseFloat();
+			src.ParseFloat();
 			continue;
 		}
 
@@ -469,6 +469,15 @@ idDeclParticle::Parse
 ================
 */
 bool idDeclParticle::Parse( const char *text, const int textLength ) {
+	return Parse( text, textLength, false );
+}
+
+/*
+================
+idDeclParticle::Parse
+================
+*/
+bool idDeclParticle::Parse( const char *text, const int textLength, bool noCaching ) {
 	idLexer src;
 	idToken	token;
 
@@ -488,7 +497,7 @@ bool idDeclParticle::Parse( const char *text, const int textLength ) {
 		}
 
 		if ( !token.Icmp( "{" ) ) {
-			idParticleStage *stage = ParseParticleStage( src );
+			idParticleStage *stage = ParseParticleStage( src, noCaching );
 			if ( !stage ) {
 				src.Warning( "Particle stage parse failed" );
 				MakeDefault();

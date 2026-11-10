@@ -29,7 +29,7 @@ If you have questions concerning this license or the applicable additional terms
 
 
 
-#include "QE3.H"
+#include "qe3.h"
 #include "TabsDlg.h"
 // CTabsDlg dialog
 

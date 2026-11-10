@@ -32,6 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "qe3.h"
 #include "Radiant.h"
 #include "GLWidget.h"
+#include "../common/ToolGL.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -168,6 +169,7 @@ void idGLWidget::OnPaint()
 	if (!qwglMakeCurrent(dc.m_hDC, win32.hGLRC)) {
 	}
 
+	const GLboolean multisampleWasEnabled = ToolGL_DisableMultisampleForEditor();
 	qglViewport(0, 0, rect.Width(), rect.Height());
 	qglScissor(0, 0, rect.Width(), rect.Height());
 	qglMatrixMode(GL_PROJECTION);
@@ -193,6 +195,7 @@ void idGLWidget::OnPaint()
 
 	qwglSwapBuffers(dc);
 	qglFlush();
+	ToolGL_RestoreMultisampleForEditor( multisampleWasEnabled );
 	qwglMakeCurrent(win32.hDC, win32.hGLRC);
 
 }
@@ -806,7 +809,7 @@ void idGLWidget::setDrawable(idGLDrawable *d) {
 }
 
 
-void idGLWidget::OnTimer(UINT nIDEvent) {
+void idGLWidget::OnTimer(UINT_PTR nIDEvent) {
 	if (drawable && drawable->getRealTime()) {
 		Invalidate(FALSE);
 	} else {

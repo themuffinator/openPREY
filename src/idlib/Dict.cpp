@@ -4,6 +4,7 @@
 
 idStrPool		idDict::globalKeys;
 idStrPool		idDict::globalValues;
+bool			idDict::globalPoolsShutdown = false;
 
 /*
 ================
@@ -54,6 +55,7 @@ void idDict::Copy( const idDict &other ) {
 	}
 
 	n = other.args.Num();
+	contentIdentity.Invalidate();
 
 	if ( args.Num() ) {
 		found = (int *) _alloca16( other.args.Num() * sizeof( int ) );
@@ -111,6 +113,7 @@ void idDict::TransferKeyValues( idDict &other ) {
 	}
 	argHash = other.argHash;
 
+	other.contentIdentity.Invalidate();
 	other.args.Clear();
 	other.argHash.Free();
 }
@@ -167,6 +170,7 @@ void idDict::SetDefaults( const idDict *dict ) {
 		def = &dict->args[i];
 		kv = FindKey( def->GetKey() );
 		if ( !kv ) {
+			contentIdentity.Invalidate();
 			newkv.key = globalKeys.CopyString( def->key );
 			newkv.value = globalValues.CopyString( def->value );
 			argHash.Add( argHash.GenerateKey( newkv.GetKey(), false ), args.Append( newkv ) );
@@ -181,10 +185,13 @@ idDict::Clear
 */
 void idDict::Clear( void ) {
 	int i;
+	contentIdentity.Invalidate();
 
-	for( i = 0; i < args.Num(); i++ ) {
-		globalKeys.FreeString( args[i].key );
-		globalValues.FreeString( args[i].value );
+	if ( !globalPoolsShutdown ) {
+		for( i = 0; i < args.Num(); i++ ) {
+			globalKeys.FreeString( args[i].key );
+			globalValues.FreeString( args[i].value );
+		}
 	}
 
 	args.Clear();
@@ -216,7 +223,7 @@ idDict::Checksum
 ================
 */
 int	idDict::Checksum( void ) const {
-	unsigned long ret;
+	uint32_t ret;
 	int i, n;
 
 	idList<idKeyValue> sorted = args;
@@ -266,6 +273,7 @@ void idDict::Set( const char *key, const char *value ) {
 	}
 
 	i = FindKeyIndex( key );
+	contentIdentity.Invalidate();
 	if ( i != -1 ) {
 		// first set the new value and then free the old value to allow proper self copying
 		const idPoolStr *oldValue = args[i].value;
@@ -420,12 +428,25 @@ bool idDict::GetMatrix( const char *key, const char *defaultString, idMat3 &out 
 WriteString
 ================
 */
+static const int MAX_DICT_FILE_KV = 16384;
+
+static void DictWriteChecked( idFile *f, int bytesWritten, int expected, const char *detail, int offset ) {
+	if ( bytesWritten != expected ) {
+		idLib::common->Error( "idDict::WriteToFileHandle: failed to write %s at offset %d (wrote %d of %d)",
+			detail ? detail : "data", offset, bytesWritten, expected );
+	}
+}
+
 static void WriteString( const char *s, idFile *f ) {
-	int	len = strlen( s );
+	if ( s == NULL ) {
+		s = "";
+	}
+	int	len = idLib::SizeToInt( strlen( s ), "WriteString" );
 	if ( len >= MAX_STRING_CHARS-1 ) {
 		idLib::common->Error( "idDict::WriteToFileHandle: bad string" );
 	}
-	f->Write( s, strlen(s) + 1 );
+	const int offset = f->Tell();
+	DictWriteChecked( f, f->Write( s, len + 1 ), len + 1, "string", offset );
 }
 
 /*
@@ -460,7 +481,7 @@ int idDict::FindKeyIndex( const char *key ) const {
 
 	if ( key == NULL || key[0] == '\0' ) {
 		idLib::common->DWarning( "idDict::FindKeyIndex: empty key" );
-		return NULL;
+		return -1;
 	}
 
 	int hash = argHash.GenerateKey( key, false );
@@ -484,6 +505,7 @@ void idDict::Delete( const char *key ) {
 	hash = argHash.GenerateKey( key, false );
 	for ( i = argHash.First( hash ); i != -1; i = argHash.Next( i ) ) {
 		if ( args[i].GetKey().Icmp( key ) == 0 ) {
+			contentIdentity.Invalidate();
 			globalKeys.FreeString( args[i].key );
 			globalValues.FreeString( args[i].value );
 			args.RemoveIndex( i );
@@ -511,7 +533,7 @@ const idKeyValue *idDict::MatchPrefix( const char *prefix, const idKeyValue *las
 	int start;
 
 	assert( prefix );
-	len = strlen( prefix );
+	len = idLib::SizeToInt( strlen( prefix ), "idDict::MatchPrefix" );
 
 	start = -1;
 	if ( lastMatch ) {
@@ -559,8 +581,12 @@ idDict::WriteToFileHandle
 ================
 */
 void idDict::WriteToFileHandle( idFile *f ) const {
+	if ( args.Num() < 0 || args.Num() > MAX_DICT_FILE_KV ) {
+		idLib::common->Error( "idDict::WriteToFileHandle: invalid key/value count %d", args.Num() );
+	}
 	int c = LittleLong( args.Num() );
-	f->Write( &c, sizeof( c ) );
+	const int offset = f->Tell();
+	DictWriteChecked( f, f->Write( &c, sizeof( c ) ), static_cast<int>( sizeof( c ) ), "key/value count", offset );
 // RAVEN BEGIN
 // jnewquist: For loop was looking at c, which got swapped on Xenon!
 	for ( int i = 0; i < args.Num(); i++ ) {
@@ -580,7 +606,9 @@ static idStr ReadString( idFile *f ) {
 	int		len;
 
 	for ( len = 0; len < MAX_STRING_CHARS; len++ ) {
-		f->Read( (void *)&str[len], 1 );
+		if ( f->Read( (void *)&str[len], 1 ) != 1 ) {
+			idLib::common->Error( "idDict::ReadFromFileHandle: truncated string" );
+		}
 		if ( str[len] == 0 ) {
 			break;
 		}
@@ -603,8 +631,13 @@ void idDict::ReadFromFileHandle( idFile *f ) {
 
 	Clear();
 
-	f->Read( &c, sizeof( c ) );
+	if ( f->Read( &c, sizeof( c ) ) != sizeof( c ) ) {
+		idLib::common->Error( "idDict::ReadFromFileHandle: truncated key/value count" );
+	}
 	c = LittleLong( c );
+	if ( c < 0 || c > MAX_DICT_FILE_KV ) {
+		idLib::common->Error( "idDict::ReadFromFileHandle: invalid key/value count %d", c );
+	}
 	for ( int i = 0; i < c; i++ ) {
 		key = ReadString( f );
 		val = ReadString( f );
@@ -712,6 +745,7 @@ idDict::Init
 ================
 */
 void idDict::Init( void ) {
+	globalPoolsShutdown = false;
 	globalKeys.SetCaseSensitive( false );
 	globalValues.SetCaseSensitive( true );
 
@@ -730,8 +764,12 @@ idDict::Shutdown
 ================
 */
 void idDict::Shutdown( void ) {
+	if ( globalPoolsShutdown ) {
+		return;
+	}
 	globalKeys.Clear();
 	globalValues.Clear();
+	globalPoolsShutdown = true;
 }
 
 /*
@@ -740,8 +778,8 @@ idDict::ShowMemoryUsage_f
 ================
 */
 void idDict::ShowMemoryUsage_f( const idCmdArgs &args ) {
-	idLib::common->Printf( "%5d KB in %d keys\n", globalKeys.Size() >> 10, globalKeys.Num() );
-	idLib::common->Printf( "%5d KB in %d values\n", globalValues.Size() >> 10, globalValues.Num() );
+	idLib::common->Printf( "%5zu KB in %d keys\n", globalKeys.Size() >> 10, globalKeys.Num() );
+	idLib::common->Printf( "%5zu KB in %d values\n", globalValues.Size() >> 10, globalValues.Num() );
 }
 
 /*

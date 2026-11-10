@@ -43,6 +43,30 @@ rvGENavigator::rvGENavigator ( )
 	mScriptsIcon = NULL;
 	mVisibleIconDisabled = NULL;
 	mScriptsLightIcon = NULL;
+	mCollapseIcon = NULL;
+	mExpandIcon = NULL;
+}
+
+rvGENavigator::~rvGENavigator ( )
+{
+	if ( mVisibleIcon != NULL ) {
+		DestroyIcon( mVisibleIcon );
+	}
+	if ( mVisibleIconDisabled != NULL ) {
+		DestroyIcon( mVisibleIconDisabled );
+	}
+	if ( mScriptsIcon != NULL ) {
+		DestroyIcon( mScriptsIcon );
+	}
+	if ( mScriptsLightIcon != NULL ) {
+		DestroyIcon( mScriptsLightIcon );
+	}
+	if ( mCollapseIcon != NULL ) {
+		DestroyIcon( mCollapseIcon );
+	}
+	if ( mExpandIcon != NULL ) {
+		DestroyIcon( mExpandIcon );
+	}
 }
 
 /*
@@ -139,7 +163,7 @@ Window Procedure
 */
 LRESULT CALLBACK rvGENavigator::WndProc ( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
-	rvGENavigator* nav = (rvGENavigator*) GetWindowLong ( hWnd, GWL_USERDATA );
+	rvGENavigator* nav = reinterpret_cast< rvGENavigator * >( GetWindowLongPtr( hWnd, GWLP_USERDATA ) );
 
 	switch ( msg )
 	{
@@ -273,16 +297,16 @@ LRESULT CALLBACK rvGENavigator::WndProc ( HWND hWnd, UINT msg, WPARAM wParam, LP
 			// Attach the class to the window first
 			cs = (LPCREATESTRUCT) lParam;
 			nav = (rvGENavigator*) cs->lpCreateParams;
-			SetWindowLong ( hWnd, GWL_USERDATA, (LONG)nav );
+			SetWindowLongPtr( hWnd, GWLP_USERDATA, reinterpret_cast< LONG_PTR >( nav ) );
 
 			// Create the List view
-			nav->mTree = CreateWindowEx ( 0, "SysListView32", "", WS_VSCROLL|WS_CHILD|WS_VISIBLE|LVS_REPORT|LVS_OWNERDRAWFIXED|LVS_NOCOLUMNHEADER|LVS_SHOWSELALWAYS, 0, 0, 0, 0, hWnd, (HMENU)IDC_GUIED_WINDOWTREE, win32.hInstance, 0 );
+			nav->mTree = CreateWindowEx ( 0, "SysListView32", "", WS_VSCROLL|WS_CHILD|WS_VISIBLE|LVS_REPORT|LVS_OWNERDRAWFIXED|LVS_NOCOLUMNHEADER|LVS_SHOWSELALWAYS, 0, 0, 0, 0, hWnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_GUIED_WINDOWTREE ) ), win32.hInstance, 0 );
 			ListView_SetExtendedListViewStyle ( nav->mTree, LVS_EX_FULLROWSELECT );
 			ListView_SetBkColor ( nav->mTree, GetSysColor ( COLOR_3DFACE ) );
 			ListView_SetTextBkColor ( nav->mTree, GetSysColor ( COLOR_3DFACE ) );
-			nav->mListWndProc = (WNDPROC)GetWindowLong ( nav->mTree, GWL_WNDPROC );
-			SetWindowLong ( nav->mTree, GWL_USERDATA, (LONG)nav );
-			SetWindowLong ( nav->mTree, GWL_WNDPROC, (LONG)ListWndProc );
+			nav->mListWndProc = reinterpret_cast< WNDPROC >( GetWindowLongPtr( nav->mTree, GWLP_WNDPROC ) );
+			SetWindowLongPtr( nav->mTree, GWLP_USERDATA, reinterpret_cast< LONG_PTR >( nav ) );
+			SetWindowLongPtr( nav->mTree, GWLP_WNDPROC, reinterpret_cast< LONG_PTR >( ListWndProc ) );
 
 			// Insert the only column
 			col.mask = 0;	
@@ -429,7 +453,7 @@ Window Procedure for the embedded list control
 */
 LRESULT CALLBACK rvGENavigator::ListWndProc ( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
-	rvGENavigator* nav = (rvGENavigator*) GetWindowLong ( hWnd, GWL_USERDATA );
+	rvGENavigator* nav = reinterpret_cast< rvGENavigator * >( GetWindowLongPtr( hWnd, GWLP_USERDATA ) );
 	assert ( nav );
 	
 	switch ( msg )
@@ -472,7 +496,7 @@ void rvGENavigator::AddWindow ( idWindow* window )
 	ZeroMemory ( &item, sizeof(item) );
 	item.mask = LVIF_PARAM|LVIF_STATE|LVIF_IMAGE;
 	item.iItem = ListView_GetItemCount ( mTree );	
-	item.lParam = (LONG) window;
+	item.lParam = reinterpret_cast< LPARAM >( window );
 	item.iImage = 0;
 	item.state = rvGEWindowWrapper::GetWrapper(window)->IsSelected ()? LVIS_SELECTED:0;
 	item.stateMask = LVIS_SELECTED;

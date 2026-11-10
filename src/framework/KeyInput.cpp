@@ -38,7 +38,7 @@ typedef struct {
 // keys that can be set without a special name
 static const char unnamedkeys[] = "*,-=./[\\]1234567890abcdefghijklmnopqrstuvwxyz";
 
-#if MACOS_X
+#if defined( MACOS_X )
 const char* OSX_GetLocalizedString( const char* );
 #endif
 
@@ -56,7 +56,7 @@ keyname_t keynames[] =
 	{"RIGHTARROW",		K_RIGHTARROW,		"#str_07026"},
 
 	{"ALT",				K_ALT,				"#str_07027"},
-	{"RIGHTALT",		K_RIGHT_ALT,		"#str_07027"},
+	{"RIGHTALT",		K_RIGHT_ALT,		"#str_107651"},
 	{"LEFTALT",			K_ALT,				"#str_07027"},
 	{"CTRL",			K_CTRL,				"#str_07028"},
 	{"LEFTCTRL",		K_CTRL,				"#str_07028"},
@@ -200,6 +200,39 @@ public:
 bool		key_overstrikeMode = false;
 idKey *		keys = NULL;
 
+enum keyInputFamily_t {
+	KEY_INPUT_FAMILY_DESKTOP,
+	KEY_INPUT_FAMILY_CONTROLLER
+};
+
+static keyInputFamily_t key_lastInputFamily = KEY_INPUT_FAMILY_DESKTOP;
+static bool key_lastPointerTouch = false;
+
+static bool Key_IsValidKeyNum( int keynum ) {
+	return keys != NULL && keynum >= 0 && keynum < MAX_KEYS;
+}
+
+static bool BindingsEquivalent( const char *lhs, const char *rhs ) {
+	if ( !lhs || !rhs || !lhs[0] || !rhs[0] ) {
+		return false;
+	}
+
+	if ( idStr::Icmp( lhs, rhs ) == 0 ) {
+		return true;
+	}
+
+	if ( usercmdGen == NULL ) {
+		return false;
+	}
+
+	const int lhsAction = usercmdGen->CommandStringUsercmdData( lhs );
+	if ( lhsAction == 0 ) {
+		return false;
+	}
+
+	return lhsAction == usercmdGen->CommandStringUsercmdData( rhs );
+}
+
 #define ID_DOOM_LEGACY
 
 #ifdef ID_DOOM_LEGACY
@@ -274,11 +307,92 @@ idKeyInput::IsDown
 ===================
 */
 bool idKeyInput::IsDown( int keynum ) {
-	if ( keynum == -1 ) {
+	if ( !Key_IsValidKeyNum( keynum ) ) {
 		return false;
 	}
 
 	return keys[keynum].down;
+}
+
+/*
+===================
+idKeyInput::LastInputWasController
+
+Whether the latest key, button or axis input came from a controller, for
+prompts that show the active device's glyphs.
+===================
+*/
+bool idKeyInput::LastInputWasController( void ) {
+	return key_lastInputFamily == KEY_INPUT_FAMILY_CONTROLLER;
+}
+
+/*
+===================
+idKeyInput::NotePointerSource / LastPointerWasTouch
+
+The platform layer names each pointer input's source: a finger routed as the
+primary pointer, or a mouse.
+===================
+*/
+void idKeyInput::NotePointerSource( bool touch ) {
+	key_lastPointerTouch = touch;
+}
+
+bool idKeyInput::LastPointerWasTouch( void ) {
+	return key_lastPointerTouch;
+}
+
+/*
+===================
+Key_MenuConfirmSwapped
+
+in_swapConfirmBack 1 keeps confirm on the south face button and 2 moves it
+east; 0 follows the controller, swapping for a Nintendo layout, whose A sits
+east (section 13.5). A prompt style forced to a family (in_promptStyle 1-4)
+stands for the controller a remapping layer hides, so its layout decides;
+generic prompts (5) name positions and leave the layout to the controller.
+===================
+*/
+static idCVar in_swapConfirmBack( "in_swapConfirmBack", "0", CVAR_SYSTEM | CVAR_INTEGER | CVAR_ARCHIVE,
+	"menu confirm and back on a controller: 0 automatic (Nintendo layouts confirm on the east button), "
+	"1 the south button confirms, 2 the east button confirms", 0, 2 );
+
+static bool Key_MenuConfirmSwapped( int setting, int promptStyle, const char *family ) {
+	if ( setting == 1 ) {
+		return false;
+	}
+	if ( setting == 2 ) {
+		return true;
+	}
+	if ( promptStyle >= 1 && promptStyle <= 4 ) {
+		return promptStyle == 3;
+	}
+	return family != NULL && idStr::Icmp( family, "nintendo" ) == 0;
+}
+
+/*
+===================
+idKeyInput::MenuConfirmSwapped
+===================
+*/
+bool idKeyInput::MenuConfirmSwapped( void ) {
+	return Key_MenuConfirmSwapped( in_swapConfirmBack.GetInteger(), cvarSystem->GetCVarInteger( "in_promptStyle" ),
+		cvarSystem->GetCVarString( "in_gamepadFamily" ) );
+}
+
+/*
+===================
+idKeyInput::MenuControllerKey
+
+The south and east face buttons trade places in menus while the confirm
+button is swapped; every other key is itself.
+===================
+*/
+int idKeyInput::MenuControllerKey( int keynum ) {
+	if ( ( keynum == K_JOY3 || keynum == K_JOY4 ) && MenuConfirmSwapped() ) {
+		return keynum == K_JOY3 ? K_JOY4 : K_JOY3;
+	}
+	return keynum;
 }
 
 /*
@@ -372,7 +486,7 @@ const char *idKeyInput::KeyNumToString( int keynum, bool localized ) {
 			if ( !localized || kn->strId[0] != '#' ) {
 				return kn->name;
 			} else {
-#if MACOS_X
+#if defined( MACOS_X )
 				
 				switch ( kn->keynum ) {
 					case K_ENTER:		
@@ -418,7 +532,7 @@ idKeyInput::SetBinding
 ===================
 */
 void idKeyInput::SetBinding( int keynum, const char *binding ) {
-	if ( keynum == -1 ) {
+	if ( !Key_IsValidKeyNum( keynum ) ) {
 		return;
 	}
 
@@ -443,7 +557,7 @@ idKeyInput::GetBinding
 ===================
 */
 const char *idKeyInput::GetBinding( int keynum ) {
-	if ( keynum == -1 ) {
+	if ( !Key_IsValidKeyNum( keynum ) ) {
 		return "";
 	}
 
@@ -456,7 +570,38 @@ idKeyInput::GetUsercmdAction
 ===================
 */
 int idKeyInput::GetUsercmdAction( int keynum ) {
+	if ( !Key_IsValidKeyNum( keynum ) ) {
+		return 0;
+	}
+
 	return keys[ keynum ].usercmdAction;
+}
+
+static bool Key_IsControllerKey( int keynum ) {
+	const char *keyCode = idKeyInput::KeyNumToString( keynum, false );
+	return idStr::Icmpn( keyCode, "JOY", 3 ) == 0 || idStr::Icmpn( keyCode, "AUX", 3 ) == 0;
+}
+
+static bool Key_IsMouseKey( int keynum ) {
+	return keynum >= K_MOUSE1 && keynum <= K_MWHEELUP;
+}
+
+static idStr &Key_NextBindingPresentationBuffer( void ) {
+	// Several shipped HUD strings request two bindings in one va() call.  A
+	// rotating set keeps those values independent while idStr avoids fixed-buffer
+	// truncation in both compact prompts and settings rows.
+	static idStr buffers[16];
+	static int bufferIndex = 0;
+	idStr &result = buffers[bufferIndex++ & 15];
+	result.Clear();
+	return result;
+}
+
+static void Key_AppendBindingPresentation( idStr &result, int keynum, bool emphasized = false ) {
+	if ( result.Length() > 0 ) {
+		result.Append( common->GetLanguageDict()->GetString( "#str_07183" ) );
+	}
+	result.Append( va( "^i%c%02x", emphasized ? 'K' : 'k', keynum & 0xff ) );
 }
 
 /*
@@ -503,7 +648,7 @@ Key_Bind_f
 */
 void Key_Bind_f( const idCmdArgs &args ) {
 	int			i, c, b;
-	char		cmd[MAX_STRING_CHARS];
+	idStr		cmd;
 	
 	c = args.Argc();
 
@@ -528,15 +673,14 @@ void Key_Bind_f( const idCmdArgs &args ) {
 	}
 	
 	// copy the rest of the command line
-	cmd[0] = 0;		// start out with a null string
 	for ( i = 2; i < c; i++ ) {
-		strcat( cmd, args.Argv( i ) );
+		cmd += args.Argv( i );
 		if ( i != (c-1) ) {
-			strcat( cmd, " " );
+			cmd += " ";
 		}
 	}
 
-	idKeyInput::SetBinding( b, cmd );
+	idKeyInput::SetBinding( b, cmd.c_str() );
 }
 
 /*
@@ -605,30 +749,124 @@ void Key_ListBinds_f( const idCmdArgs &args ) {
 
 /*
 ============
+Key_TestPromptDevice_f
+
+openQ4: testPromptDevice controller|desktop sets the device the prompts name
+until the next real input, so headless captures can show controller glyphs.
+============
+*/
+static void Key_TestPromptDevice_f( const idCmdArgs &args ) {
+	if ( args.Argc() == 2 ) {
+		key_lastInputFamily = idStr::Icmp( args.Argv( 1 ), "controller" ) == 0 ? KEY_INPUT_FAMILY_CONTROLLER : KEY_INPUT_FAMILY_DESKTOP;
+	}
+	common->Printf( "prompt device: %s\n", key_lastInputFamily == KEY_INPUT_FAMILY_CONTROLLER ? "controller" : "desktop" );
+}
+
+/*
+============
 idKeyInput::KeysFromBinding
 returns the localized name of the key for the binding
 ============
 */
-const char *idKeyInput::KeysFromBinding( const char *bind ) {
-	int i;
-	static char keyName[MAX_STRING_CHARS];
+static const char *Key_KeysFromBinding( const char *bind, bool emphasized ) {
+	// GUI text understands ^ikHH as a procedural key presentation, where HH is
+	// the full eight-bit id key number.  ^iKHH carries the same key with the
+	// larger center-prompt presentation. Runtime hints deliberately show one key
+	// from the device family the player used most recently; presenting every
+	// persistent desktop and controller binding makes short HUD prompts noisy.
+	idStr &keyName = Key_NextBindingPresentationBuffer();
+	int firstKeyboard = -1;
+	int firstMouse = -1;
+	int firstController = -1;
 
-	keyName[0] = '\0';
 	if ( bind && *bind ) {
-		for ( i = 0; i < MAX_KEYS; i++ ) {
-			if ( keys[i].binding.Icmp( bind ) == 0 ) {
-				if ( keyName[0] != '\0' ) {
-					idStr::Append( keyName, sizeof( keyName ), common->GetLanguageDict()->GetString( "#str_07183" ) );
-				} 
-				idStr::Append( keyName, sizeof( keyName ), KeyNumToString( i, true ) );
+		for ( int i = 0; i < MAX_KEYS; i++ ) {
+			if ( BindingsEquivalent( idKeyInput::GetBinding( i ), bind ) ) {
+				if ( Key_IsControllerKey( i ) ) {
+					if ( firstController < 0 ) {
+						firstController = i;
+					}
+				} else if ( Key_IsMouseKey( i ) ) {
+					if ( firstMouse < 0 ) {
+						firstMouse = i;
+					}
+				} else if ( firstKeyboard < 0 ) {
+					firstKeyboard = i;
+				}
 			}
 		}
 	}
-	if ( keyName[0] == '\0' ) {
-		idStr::Copynz( keyName, common->GetLanguageDict()->GetString( "#str_07133" ), sizeof( keyName ) );
+
+	int selected = -1;
+	if ( key_lastInputFamily == KEY_INPUT_FAMILY_CONTROLLER ) {
+		selected = firstController;
+		if ( selected < 0 ) {
+			selected = firstMouse >= 0 ? firstMouse : firstKeyboard;
+		}
+	} else {
+		selected = firstMouse >= 0 ? firstMouse : firstKeyboard;
+		if ( selected < 0 ) {
+			selected = firstController;
+		}
 	}
-	idStr::ToLower( keyName );
-	return keyName;
+
+	if ( selected >= 0 ) {
+		Key_AppendBindingPresentation( keyName, selected, emphasized );
+	} else {
+		keyName = common->GetLanguageDict()->GetString( "#str_07133" );
+	}
+	return keyName.c_str();
+}
+
+const char *idKeyInput::KeysFromBinding( const char *bind ) {
+	return Key_KeysFromBinding( bind, false );
+}
+
+/*
+============
+idKeyInput::KeysFromBindingForPrompt
+
+Returns the active-family binding using the emphasized center-prompt token.
+============
+*/
+const char *idKeyInput::KeysFromBindingForPrompt( const char *bind ) {
+	return Key_KeysFromBinding( bind, true );
+}
+
+/*
+============
+idKeyInput::KeysFromBindingForMenu
+
+The settings widget shows a broader, device-independent list than gameplay
+hints.  Bound pathological console-authored sets so the GUI's fixed line
+buffer and stock-width row remain deterministic; the +N suffix preserves an
+honest indication that additional bindings exist.
+============
+*/
+const char *idKeyInput::KeysFromBindingForMenu( const char *bind ) {
+	static const int MAX_MENU_BINDINGS = 6;
+	idStr &keyName = Key_NextBindingPresentationBuffer();
+	int shown = 0;
+	int omitted = 0;
+	if ( bind && *bind ) {
+		for ( int i = 0; i < MAX_KEYS; i++ ) {
+			if ( BindingsEquivalent( keys[i].binding.c_str(), bind ) ) {
+				if ( shown < MAX_MENU_BINDINGS ) {
+					Key_AppendBindingPresentation( keyName, i );
+					shown++;
+				} else {
+					omitted++;
+				}
+			}
+		}
+	}
+	if ( omitted > 0 ) {
+		keyName.Append( va( " +%d", omitted ) );
+	}
+	if ( keyName.IsEmpty() ) {
+		keyName = common->GetLanguageDict()->GetString( "#str_07133" );
+	}
+	return keyName.c_str();
 }
 
 /*
@@ -656,7 +894,7 @@ bool idKeyInput::UnbindBinding( const char *binding ) {
 
 	if ( binding && *binding ) {
 		for ( i = 0; i < MAX_KEYS; i++ ) {
-			if ( keys[i].binding.Icmp( binding ) == 0 ) {
+			if ( BindingsEquivalent( keys[i].binding.c_str(), binding ) ) {
 				SetBinding( i, "" );
 				unbound = true;
 			}
@@ -675,7 +913,7 @@ int idKeyInput::NumBinds( const char *binding ) {
 
 	if ( binding && *binding ) {
 		for ( i = 0; i < MAX_KEYS; i++ ) {
-			if ( keys[i].binding.Icmp( binding ) == 0 ) {
+			if ( BindingsEquivalent( keys[i].binding.c_str(), binding ) ) {
 				count++;
 			}
 		}
@@ -690,7 +928,7 @@ idKeyInput::KeyIsBountTo
 */
 bool idKeyInput::KeyIsBoundTo( int keynum, const char *binding ) {
 	if ( keynum >= 0 && keynum < MAX_KEYS ) {
-		return ( keys[keynum].binding.Icmp( binding ) == 0 );
+		return BindingsEquivalent( keys[keynum].binding.c_str(), binding );
 	}
 	return false;
 }
@@ -704,7 +942,14 @@ Called by the system for both key up and key down events
 ===================
 */
 void idKeyInput::PreliminaryKeyEvent( int keynum, bool down ) {
+	if ( !Key_IsValidKeyNum( keynum ) ) {
+		return;
+	}
+
 	keys[keynum].down = down;
+	if ( down ) {
+		key_lastInputFamily = Key_IsControllerKey( keynum ) ? KEY_INPUT_FAMILY_CONTROLLER : KEY_INPUT_FAMILY_DESKTOP;
+	}
 
 #ifdef ID_DOOM_LEGACY
 	if ( down ) {
@@ -712,7 +957,7 @@ void idKeyInput::PreliminaryKeyEvent( int keynum, bool down ) {
 		lastKeys[16 + ( lastKeyIndex & 15 )] = keynum;
 		lastKeyIndex = ( lastKeyIndex + 1 ) & 15;
 		for ( int i = 0; cheatCodes[i] != NULL; i++ ) {
-			int l = strlen( cheatCodes[i] );
+			int l = idLib::SizeToInt( strlen( cheatCodes[i] ), "idKeyInput::PreliminaryKeyEvent" );
 			assert( l <= 16 );
 			if ( idStr::Icmpn( lastKeys + 16 + ( lastKeyIndex & 15 ) - l, cheatCodes[i], l ) == 0 ) {
 				common->Printf( "your memory serves you well!\n" );
@@ -724,11 +969,40 @@ void idKeyInput::PreliminaryKeyEvent( int keynum, bool down ) {
 }
 
 /*
+===================
+idKeyInput::PreliminaryMouseEvent
+===================
+*/
+void idKeyInput::PreliminaryMouseEvent( int deltaX, int deltaY ) {
+	if ( deltaX != 0 || deltaY != 0 ) {
+		key_lastInputFamily = KEY_INPUT_FAMILY_DESKTOP;
+	}
+}
+
+/*
+===================
+idKeyInput::PreliminaryJoystickEvent
+
+System joystick axes use the normalized -127..127 range.  Ignore small values
+so a resting stick cannot continually steal hint ownership from the mouse.
+===================
+*/
+void idKeyInput::PreliminaryJoystickEvent( int value ) {
+	if ( idMath::Abs( value ) >= 16 ) {
+		key_lastInputFamily = KEY_INPUT_FAMILY_CONTROLLER;
+	}
+}
+
+/*
 =================
 idKeyInput::ExecKeyBinding
 =================
 */
 bool idKeyInput::ExecKeyBinding( int keynum ) {
+	if ( !Key_IsValidKeyNum( keynum ) ) {
+		return false;
+	}
+
 	// commands that are used by the async thread
 	// don't add text
 	if ( keys[keynum].usercmdAction ) {
@@ -750,6 +1024,9 @@ idKeyInput::ClearStates
 */
 void idKeyInput::ClearStates( void ) {
 	int i;
+	// Lifecycle events may arrive before input initialization or after shutdown
+	// while the fatal-error console still pumps the platform event queue.
+	if ( keys == NULL ) return;
 
 	for ( i = 0; i < MAX_KEYS; i++ ) {
 		if ( keys[i].down ) {
@@ -768,6 +1045,7 @@ idKeyInput::Init
 ===================
 */
 void idKeyInput::Init( void ) {
+	key_lastInputFamily = KEY_INPUT_FAMILY_DESKTOP;
 
 	keys = new idKey[MAX_KEYS];
 
@@ -777,6 +1055,7 @@ void idKeyInput::Init( void ) {
 	cmdSystem->AddCommand( "unbind", Key_Unbind_f, CMD_FL_SYSTEM, "unbinds any command from a key", idKeyInput::ArgCompletion_KeyName );
 	cmdSystem->AddCommand( "unbindall", Key_Unbindall_f, CMD_FL_SYSTEM, "unbinds any commands from all keys" );
 	cmdSystem->AddCommand( "listBinds", Key_ListBinds_f, CMD_FL_SYSTEM, "lists key bindings" );
+	cmdSystem->AddCommand( "testPromptDevice", Key_TestPromptDevice_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "sets the device prompts name until the next input: controller or desktop" );
 }
 
 /*

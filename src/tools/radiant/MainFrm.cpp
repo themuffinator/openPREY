@@ -714,32 +714,39 @@ static UINT indicators[] = {
  =======================================================================================================================
  =======================================================================================================================
  */
-void CMainFrame::OnDisplayChange(UINT wParam, long lParam) {
-	int n = wParam;
+LRESULT CMainFrame::OnDisplayChange(WPARAM wParam, LPARAM lParam) {
+	(void)wParam;
+	(void)lParam;
+	return 0;
 }
 
 /*
  =======================================================================================================================
  =======================================================================================================================
  */
-void CMainFrame::OnBSPStatus(UINT wParam, long lParam) {
+LRESULT CMainFrame::OnBSPStatus(WPARAM wParam, LPARAM lParam) {
+	(void)wParam;
 	// lparam is an atom contain the text
 	char buff[1024];
 	if (::GlobalGetAtomName(static_cast<ATOM>(lParam), buff, sizeof(buff))) {
 		common->Printf("%s", buff);
 		::GlobalDeleteAtom(static_cast<ATOM>(lParam));
 	}
+	return 0;
 }
 
 /*
  =======================================================================================================================
  =======================================================================================================================
  */
-void CMainFrame::OnBSPDone(UINT wParam, long lParam) {
+LRESULT CMainFrame::OnBSPDone(WPARAM wParam, LPARAM lParam) {
+	(void)wParam;
+	(void)lParam;
 	idStr str = cvarSystem->GetCVarString( "radiant_bspdone" );
 	if (str.Length()) {
 	    sndPlaySound(str.c_str(), SND_FILENAME | SND_ASYNC);
 	}
+	return 0;
 }
 
 //
@@ -1399,7 +1406,7 @@ bool MouseDown() {
  =======================================================================================================================
  */
 
-void CMainFrame::OnTimer(UINT nIDEvent) {
+void CMainFrame::OnTimer(UINT_PTR nIDEvent) {
 	static bool autoSavePending = false;
 
 	if ( nIDEvent == QE_TIMER0 && !MouseDown() ) {
@@ -2714,7 +2721,8 @@ LPCSTR String_ToLower(LPCSTR psString)
 	if (strlen(psString)>=iBufferSize)
 	{
 		assert(0);
-		common->Printf("String_ToLower(): Warning, input string was %d bytes too large, performing strlwr() inline!\n",strlen(psString)-(iBufferSize-1));
+			common->Printf( "String_ToLower(): Warning, input string was %zu bytes too large, performing strlwr() inline!\n",
+				strlen( psString ) - ( iBufferSize - 1 ) );
 		return strlwr(const_cast<char*>(psString));
 	}
 
@@ -6762,11 +6770,20 @@ void CMainFrame::OnNurbEditor() {
 			::EmptyClipboard();
 	        HGLOBAL clip;
 			char* buff;
-			clip = ::GlobalAlloc(GMEM_DDESHARE, temp.Length()+1);
-			buff = (char*)::GlobalLock(clip);
-			strcpy(buff, temp);
-			::GlobalUnlock(clip);
-			::SetClipboardData(CF_TEXT, clip);
+			clip = ::GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, temp.Length()+1);
+			if (clip != NULL) {
+				buff = (char*)::GlobalLock(clip);
+				if (buff != NULL) {
+					strcpy(buff, temp);
+					::GlobalUnlock(clip);
+					if (::SetClipboardData(CF_TEXT, clip) != NULL) {
+						clip = NULL;
+					}
+				}
+				if (clip != NULL) {
+					::GlobalFree(clip);
+				}
+			}
 			::CloseClipboard();
 		}
 		nurb.Clear();

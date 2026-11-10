@@ -91,6 +91,51 @@ void local_free(void *ptr)
 }
 // RAVEN END
 
+// The usable-size query local_msize needs lives in a different header on every
+// platform, and precompiled.h only pulls <malloc.h> in for the Windows build.
+#if !defined( RV_UNIFIED_ALLOCATOR )
+	#if defined( __APPLE__ )
+		#include <malloc/malloc.h>
+	#elif defined( __ANDROID__ ) || defined( __linux__ ) || defined( _WIN32 )
+		#include <malloc.h>
+	#endif
+#endif
+
+/*
+==================
+local_msize
+
+USE_LIBC_MALLOC hands allocation off to the C library, which leaves Mem_Free
+with a bare pointer and no record of how large the block was. Every libc we
+target can answer that question about a live pointer, so ask it rather than
+threading a size header through every allocation: the stats are diagnostics and
+must not change the layout of what they measure.
+
+Returns the usable size, which is the requested size rounded up to the
+allocator's bucket. That is the honest number -- it is what the process
+actually holds -- and using it on both sides keeps alloc and free symmetric.
+==================
+*/
+inline size_t local_msize( void *ptr )
+{
+	if ( ptr == NULL ) {
+		return 0;
+	}
+#ifdef RV_UNIFIED_ALLOCATOR
+	return Memory::MSize( ptr );
+#elif defined( __APPLE__ )
+	return malloc_size( ptr );
+#elif defined( _WIN32 )
+	return _msize( ptr );
+#elif defined( __ANDROID__ ) || defined( __linux__ )
+	return malloc_usable_size( ptr );
+#else
+	// No portable way to recover the size: report zero so the running total
+	// stays consistent (nothing added, nothing subtracted) instead of drifting.
+	return 0;
+#endif
+}
+
 //===============================================================
 //
 //	idHeap
@@ -109,6 +154,7 @@ void local_free(void *ptr)
 #define SMALL_HEADER_SIZE		( (int) ( sizeof( byte ) + sizeof( byte ) ) )
 #define MEDIUM_HEADER_SIZE		( (int) ( sizeof( mediumHeapEntry_s ) + sizeof( byte ) ) )
 #define LARGE_HEADER_SIZE		( (int) ( sizeof( dword * ) + sizeof( byte ) ) )
+#define MALLOC_HEADER_SIZE		0
 #endif
 // RAVEN END
 
@@ -185,7 +231,7 @@ void PrintOutstandingMemAlloc()
 {
 	
 	int i;
-	unsigned long totalOutstanding = 0;
+	long long totalOutstanding = 0;
 	for (i=0;i<MA_MAX;i++)
 	{
 		if (OutstandingXMallocTagSize[i] || PeakXMallocTagSize[i])
@@ -194,7 +240,7 @@ void PrintOutstandingMemAlloc()
 			totalOutstanding += OutstandingXMallocTagSize[i];
 		}
 	}
-	idLib::common->Printf("Mem_Alloc Outstanding: %d\n",totalOutstanding);
+	idLib::common->Printf("Mem_Alloc Outstanding: %lld\n",totalOutstanding);
 	
 }
 
@@ -301,7 +347,8 @@ private:
 	dword			pageRequests;					// page requests
 	dword			OSAllocs;						// number of allocs made to the OS
 
-	int				c_heapAllocRunningCount;
+	// allocations reach the heap from worker threads too (inflate, decode)
+	std::atomic<int>	c_heapAllocRunningCount;
 
 	void			*defragBlock;					// a single huge block that can be allocated
 													// at startup, then freed when needed
@@ -353,7 +400,7 @@ void idHeap::Init () {
 	mediumLastFreePage	= NULL;
 	mediumFirstUsedPage	= NULL;
 
-	c_heapAllocRunningCount = 0;
+	c_heapAllocRunningCount.store( 0, std::memory_order_relaxed );
 
 //RAVEN BEGIN
 //amccarthy:  initalize allocation tracking
@@ -469,7 +516,7 @@ void *idHeap::Allocate( const dword bytes, byte tag ) {
 	if ( !bytes ) {
 		return NULL;
 	}
-	c_heapAllocRunningCount++;
+	c_heapAllocRunningCount.fetch_add( 1, std::memory_order_relaxed );
 
 #if USE_LIBC_MALLOC
 
@@ -506,7 +553,7 @@ void idHeap::Free( void *p ) {
 	if ( !p ) {
 		return;
 	}
-	c_heapAllocRunningCount--;
+	c_heapAllocRunningCount.fetch_sub( 1, std::memory_order_relaxed );
 
 #if USE_LIBC_MALLOC
 
@@ -551,7 +598,7 @@ void *idHeap::Allocate16( const dword bytes, byte tag ) {
 //amccarthy: Added allocation tag
 #ifdef  _DEBUG
 	ptr = (byte *) Allocate(bytes+16, tag);
-	alignedPtr = (byte *)( ( (uintptr_t)ptr + 15 ) & ~( (uintptr_t)15 ) );
+	alignedPtr = (byte *)( ( (uintptr_t)ptr + 15 ) & ~(uintptr_t)15 );
 	int padSize = alignedPtr - ptr;
 	if ( padSize == 0 ) {
 		alignedPtr += 16;
@@ -559,14 +606,12 @@ void *idHeap::Allocate16( const dword bytes, byte tag ) {
 	}
 	*((byte *)(alignedPtr - 1)) = (byte) padSize;
 
-	assert( ( (uintptr_t)alignedPtr & 15 ) == 0 );
-
 	return (void *) alignedPtr;
 #else
 //RAVEN END
 // RAVEN BEGIN
 // jnewquist: send all allocations through one place on the Xenon
-	ptr = (byte *) local_malloc( bytes + 16 + 4 );
+	ptr = (byte *) local_malloc( bytes + 16 + sizeof( uintptr_t ) );
 // RAVEN END
 	if ( !ptr ) {
 		if ( defragBlock ) {
@@ -587,13 +632,12 @@ void *idHeap::Allocate16( const dword bytes, byte tag ) {
 		}
 	}
 
-	alignedPtr = (byte *)( ( (uintptr_t)ptr + 15 ) & ~( (uintptr_t)15 ) );
+	alignedPtr = (byte *)( ( (uintptr_t)ptr + 15 ) & ~(uintptr_t)15 );
   	if ( alignedPtr - ptr < sizeof( uintptr_t ) ) {
    		alignedPtr += 16;
 
    	}
   	*((uintptr_t *)(alignedPtr - sizeof( uintptr_t ))) = (uintptr_t)ptr;
-   	assert( ( (uintptr_t)alignedPtr & 15 ) == 0 );
    	return (void *) alignedPtr;
 
 //RAVEN BEGIN
@@ -617,10 +661,26 @@ void idHeap::Free16( void *p ) {
 	ptr -= padSize;
 	Free( ptr );
 #else
-	local_free( (void *)*((uintptr_t *)( ( (byte *)p ) - sizeof( uintptr_t ) )) );
+	local_free( (void *) *((uintptr_t *) (( (byte *) p ) - sizeof( uintptr_t ))) );
 #endif
 //RAVEN END
 }
+
+#if USE_LIBC_MALLOC && defined( _WINDOWS )
+/*
+================
+HeapSizeToDword
+================
+*/
+static dword HeapSizeToDword( size_t allocationSize ) {
+	if ( allocationSize > static_cast<size_t>( UINT_MAX ) ) {
+		idLib::Error( "idHeap::Msize: allocation exceeds the supported dword range" );
+		return UINT_MAX;
+	}
+
+	return static_cast<dword>( allocationSize );
+}
+#endif
 
 /*
 ================
@@ -646,15 +706,15 @@ dword idHeap::Msize( void *p ) {
 			byte *ptr = ((byte *)p) - MALLOC_HEADER_SIZE;
 // jsinger: attempt to eliminate cross-DLL allocation issues
 			#ifdef RV_UNIFIED_ALLOCATOR
-						return Memory::MSize(ptr);
+						return HeapSizeToDword( Memory::MSize( ptr ) );
 			#else
-						return _msize(ptr);
+						return HeapSizeToDword( _msize( ptr ) );
 			#endif  // RV_UNIFIED_ALLOCATOR
 		#else
 			#ifdef RV_UNIFIED_ALLOCATOR
-						return Memory::MSize(p);
+						return HeapSizeToDword( Memory::MSize( p ) );
 			#else
-						return _msize(p);
+						return HeapSizeToDword( _msize( p ) );
 			#endif  // RV_UNIFIED_ALLOCATOR
 		#endif
 //RAVEN END
@@ -670,7 +730,7 @@ dword idHeap::Msize( void *p ) {
 			return ((mediumHeapEntry_s *)(((byte *)(p)) - ALIGN_SIZE( MEDIUM_HEADER_SIZE )))->size - ALIGN_SIZE( MEDIUM_HEADER_SIZE );
 		}
 		case LARGE_ALLOC: {
-			return ((idHeap::page_s *)(*((uintptr_t *)(((byte *)p) - ALIGN_SIZE( LARGE_HEADER_SIZE )))))->dataSize - ALIGN_SIZE( LARGE_HEADER_SIZE );
+			return ((idHeap::page_s*)(*((uintptr_t *)(((byte *)p) - ALIGN_SIZE( LARGE_HEADER_SIZE )))))->dataSize - ALIGN_SIZE( LARGE_HEADER_SIZE );
 		}
 		default: {
 			idLib::common->FatalError( "idHeap::Msize: invalid memory block (%s)", idLib::sys->GetCallStackCurStr( 4 ) );
@@ -790,7 +850,7 @@ idHeap::page_s* idHeap::AllocatePage( dword bytes ) {
 			}
 		}
 
-		p->data		= (void *)ALIGN_SIZE( (uintptr_t)((byte *)p) + sizeof( idHeap::page_s ) );
+		p->data		= (void *) ALIGN_SIZE( (uintptr_t)((byte *)(p)) + sizeof( idHeap::page_s ) );
 		p->dataSize	= size - sizeof(idHeap::page_s);
 		p->firstFree = NULL;
 		p->largestFree = 0;
@@ -845,7 +905,7 @@ idHeap::SmallAllocate
 //amccarthy:  Added allocation tag
 void *idHeap::SmallAllocate( dword bytes, byte tag ) {
 //RAVEN END
-	// We store the next free pointer inside the block when it is on the free list.
+	// we need at least a pointer-sized payload for the free-list link
 	if ( bytes < sizeof( uintptr_t ) ) {
 		bytes = sizeof( uintptr_t );
 	}
@@ -880,7 +940,7 @@ void *idHeap::SmallAllocate( dword bytes, byte tag ) {
 		return (void *)(link);
 	}
 
-	dword bytesLeft = (long)(pageSize) - smallCurPageOffset;
+	const dword bytesLeft = pageSize - smallCurPageOffset;
 	// if we need to allocate a new page
 	if ( bytes >= bytesLeft ) {
 
@@ -1320,8 +1380,8 @@ void *idHeap::LargeAllocate( dword bytes, byte tag ) {
 	}
 
 	byte *	d	= (byte*)(p->data) + ALIGN_SIZE( LARGE_HEADER_SIZE );
-	uintptr_t *dw = (uintptr_t *)(d - ALIGN_SIZE( LARGE_HEADER_SIZE ));
-	dw[0]		= (uintptr_t)p;			// write pointer back to page table
+	uintptr_t *	dw	= (uintptr_t*)(d - ALIGN_SIZE( LARGE_HEADER_SIZE ));
+	dw[0]		= (uintptr_t)p;				// write pointer back to page table
 //RAVEN BEGIN
 //amccarthy:  Added allocation tag
 #ifdef _DEBUG
@@ -1401,9 +1461,46 @@ void idHeap::LargeFree( void *ptr) {
 #undef new
 
 static idHeap *			mem_heap = NULL;
-static memoryStats_t	mem_total_allocs = { 0, 0x0fffffff, -1, 0 };
-static memoryStats_t	mem_frame_allocs;
-static memoryStats_t	mem_frame_frees;
+
+/*
+================================================
+Allocation counters are written from every thread that allocates -- the game
+thread, the renderer, the sound mixer -- so they cannot be plain ints. The
+counts are pure diagnostics and never gate a decision, so each field is updated
+with relaxed ordering: no barriers on the allocation hot path, and a reader
+sees a consistent-enough snapshot for a debug overlay.
+
+minSize/maxSize are maintained with the usual relaxed compare-exchange climb.
+After warmup the comparison fails immediately and no exchange is attempted.
+================================================
+*/
+// The initialisers are constant expressions, so these statics are constant
+// initialised. That matters: idLib allocates during static construction, before
+// any explicit init would have had a chance to run.
+struct memoryStatsCounters_t {
+	std::atomic<int>		num{ 0 };
+	std::atomic<int>		minSize{ 0x0fffffff };
+	std::atomic<int>		maxSize{ -1 };
+	std::atomic<int64_t>	totalSize{ 0 };
+};
+
+static memoryStatsCounters_t	mem_total_allocs;
+static memoryStatsCounters_t	mem_frame_allocs;
+static memoryStatsCounters_t	mem_frame_frees;
+
+static void Mem_ResetCounters( memoryStatsCounters_t &counters ) {
+	counters.num.store( 0, std::memory_order_relaxed );
+	counters.minSize.store( 0x0fffffff, std::memory_order_relaxed );
+	counters.maxSize.store( -1, std::memory_order_relaxed );
+	counters.totalSize.store( 0, std::memory_order_relaxed );
+}
+
+static void Mem_ReadCounters( const memoryStatsCounters_t &counters, memoryStats_t &stats ) {
+	stats.num = counters.num.load( std::memory_order_relaxed );
+	stats.minSize = counters.minSize.load( std::memory_order_relaxed );
+	stats.maxSize = counters.maxSize.load( std::memory_order_relaxed );
+	stats.totalSize = counters.totalSize.load( std::memory_order_relaxed );
+}
 
 /*
 ==================
@@ -1411,10 +1508,8 @@ Mem_ClearFrameStats
 ==================
 */
 void Mem_ClearFrameStats( void ) {
-	mem_frame_allocs.num = mem_frame_frees.num = 0;
-	mem_frame_allocs.minSize = mem_frame_frees.minSize = 0x0fffffff;
-	mem_frame_allocs.maxSize = mem_frame_frees.maxSize = -1;
-	mem_frame_allocs.totalSize = mem_frame_frees.totalSize = 0;
+	Mem_ResetCounters( mem_frame_allocs );
+	Mem_ResetCounters( mem_frame_frees );
 }
 
 /*
@@ -1423,8 +1518,8 @@ Mem_GetFrameStats
 ==================
 */
 void Mem_GetFrameStats( memoryStats_t &allocs, memoryStats_t &frees ) {
-	allocs = mem_frame_allocs;
-	frees = mem_frame_frees;
+	Mem_ReadCounters( mem_frame_allocs, allocs );
+	Mem_ReadCounters( mem_frame_frees, frees );
 }
 
 /*
@@ -1433,12 +1528,129 @@ Mem_GetStats
 ==================
 */
 void Mem_GetStats( memoryStats_t &stats ) {
-	stats = mem_total_allocs;
+	Mem_ReadCounters( mem_total_allocs, stats );
+}
+
+/*
+==================
+openQ4_Mem_GetModuleStats
+
+The cross-binary half of Mem_GetProcessStats. Exported with default visibility
+so it survives the hidden-visibility preset the modules are built with, and
+resolved by name rather than through the versioned module ABI: a renderer or
+game module built before this existed simply fails the lookup and is left out
+of the total, instead of failing to load.
+==================
+*/
+extern "C" MEM_MODULE_STATS_EXPORT void openQ4_Mem_GetModuleStats( memoryStats_t *stats ) {
+	if ( stats == NULL ) {
+		return;
+	}
+	Mem_ReadCounters( mem_total_allocs, *stats );
+}
+
+/*
+================================================
+Registered module providers. Written once per module load, from the loader,
+before anything reads them; a fixed array keeps registration allocation-free,
+which matters because this is reachable from the allocator's own header.
+================================================
+*/
+static const int			MAX_MEM_MODULE_STATS = 8;
+static memModuleStats_t		mem_moduleStats[MAX_MEM_MODULE_STATS];
+static int					mem_numModuleStats = 0;
+
+/*
+==================
+Mem_RegisterModuleStats
+==================
+*/
+void Mem_RegisterModuleStats( memModuleStats_t provider ) {
+	if ( provider == NULL ) {
+		return;
+	}
+	// A vid_restart reloads the renderer module and would otherwise register
+	// the same provider a second time, counting that module twice.
+	for ( int i = 0; i < mem_numModuleStats; i++ ) {
+		if ( mem_moduleStats[i] == provider ) {
+			return;
+		}
+	}
+	if ( mem_numModuleStats >= MAX_MEM_MODULE_STATS ) {
+		return;
+	}
+	mem_moduleStats[mem_numModuleStats++] = provider;
+}
+
+/*
+==================
+Mem_UnregisterModuleStats
+
+Must be called before the module is unloaded: the function pointer dies with it.
+==================
+*/
+void Mem_UnregisterModuleStats( memModuleStats_t provider ) {
+	for ( int i = 0; i < mem_numModuleStats; i++ ) {
+		if ( mem_moduleStats[i] != provider ) {
+			continue;
+		}
+		mem_moduleStats[i] = mem_moduleStats[mem_numModuleStats - 1];
+		mem_moduleStats[--mem_numModuleStats] = NULL;
+		return;
+	}
+}
+
+/*
+==================
+Mem_GetProcessStats
+==================
+*/
+void Mem_GetProcessStats( memoryStats_t &stats ) {
+	Mem_GetStats( stats );
+
+	for ( int i = 0; i < mem_numModuleStats; i++ ) {
+		memoryStats_t moduleStats;
+		memset( &moduleStats, 0, sizeof( moduleStats ) );
+		mem_moduleStats[i]( &moduleStats );
+
+		stats.num += moduleStats.num;
+		stats.totalSize += moduleStats.totalSize;
+		if ( moduleStats.num > 0 ) {
+			if ( moduleStats.minSize < stats.minSize ) {
+				stats.minSize = moduleStats.minSize;
+			}
+			if ( moduleStats.maxSize > stats.maxSize ) {
+				stats.maxSize = moduleStats.maxSize;
+			}
+		}
+	}
 }
 
 /*
 ==================
 Mem_UpdateStats
+==================
+*/
+static void Mem_UpdateStats( memoryStatsCounters_t &counters, int size ) {
+	counters.num.fetch_add( 1, std::memory_order_relaxed );
+	counters.totalSize.fetch_add( size, std::memory_order_relaxed );
+
+	int observed = counters.minSize.load( std::memory_order_relaxed );
+	while ( size < observed && !counters.minSize.compare_exchange_weak(
+				observed, size, std::memory_order_relaxed, std::memory_order_relaxed ) ) {
+	}
+	observed = counters.maxSize.load( std::memory_order_relaxed );
+	while ( size > observed && !counters.maxSize.compare_exchange_weak(
+				observed, size, std::memory_order_relaxed, std::memory_order_relaxed ) ) {
+	}
+}
+
+/*
+==================
+Mem_UpdateStats
+
+Kept for the published idlib signature; the internal callers use the atomic
+counters directly.
 ==================
 */
 void Mem_UpdateStats( memoryStats_t &stats, int size ) {
@@ -1469,8 +1681,28 @@ Mem_UpdateFreeStats
 */
 void Mem_UpdateFreeStats( int size ) {
 	Mem_UpdateStats( mem_frame_frees, size );
-	mem_total_allocs.num--;
-	mem_total_allocs.totalSize -= size;
+	mem_total_allocs.num.fetch_sub( 1, std::memory_order_relaxed );
+	mem_total_allocs.totalSize.fetch_sub( size, std::memory_order_relaxed );
+}
+
+/*
+==================
+Mem_ValidateAllocSize
+
+The legacy heap stores allocation sizes and statistics in signed 32-bit
+fields. Accept native size_t at public boundaries, but reject values that
+cannot be represented before converting them for the internal heap.
+==================
+*/
+static bool Mem_ValidateAllocSize( const size_t size, const size_t overhead, const char *functionName ) {
+	const size_t maxHeapSize = static_cast<size_t>( idMath::INT_MAX );
+	if ( overhead > maxHeapSize || size > maxHeapSize - overhead ) {
+		if ( idLib::common ) {
+			idLib::common->FatalError( "%s: allocation of %zu bytes exceeds the 32-bit heap limit", functionName, size );
+		}
+		return false;
+	}
+	return true;
 }
 
 
@@ -1483,19 +1715,25 @@ Mem_Alloc
 */
 // RAVEN BEGIN
 // amccarthy: Added allocation tag
-void *Mem_Alloc( const int size, byte tag ) {
+void *Mem_Alloc( const size_t size, byte tag ) {
 	if ( !size ) {
 		return NULL;
 	}
+	if ( !Mem_ValidateAllocSize( size, MALLOC_HEADER_SIZE, "Mem_Alloc" ) ) {
+		return NULL;
+	}
+	const int heapSize = static_cast<int>( size );
 	if ( !mem_heap ) {
 #ifdef CRASH_ON_STATIC_ALLOCATION
 		*((int*)0x0) = 1;
 #endif
 // jnewquist: send all allocations through one place on the Xenon
-		return local_malloc( size );
+		void *mem = local_malloc( size );
+		Mem_UpdateAllocStats( static_cast<int>( local_msize( mem ) ) );
+		return mem;
 	}
 // amccarthy: Added allocation tag
-	void *mem = mem_heap->Allocate( size, tag );
+	void *mem = mem_heap->Allocate( static_cast<dword>( heapSize ), tag );
 	Mem_UpdateAllocStats( mem_heap->Msize( mem ) );
 	return mem;
 }
@@ -1516,6 +1754,8 @@ void Mem_Free( void *ptr ) {
 #endif
 // RAVEN BEGIN
 // jnewquist: send all allocations through one place on the Xenon
+		// measure before the free: the pointer is not queryable afterwards
+		Mem_UpdateFreeStats( static_cast<int>( local_msize( ptr ) ) );
 		local_free( ptr );
 // RAVEN END
 		return;
@@ -1531,22 +1771,29 @@ Mem_Alloc16
 */
 // RAVEN BEGIN
 // amccarthy: Added allocation tag
-void *Mem_Alloc16( const int size, byte tag ) {
+void *Mem_Alloc16( const size_t size, byte tag ) {
 	if ( !size ) {
 		return NULL;
 	}
+	if ( !Mem_ValidateAllocSize( size, MALLOC_HEADER_SIZE + 16 + sizeof( uintptr_t ), "Mem_Alloc16" ) ) {
+		return NULL;
+	}
+	const int heapSize = static_cast<int>( size );
 	if ( !mem_heap ) {
 #ifdef CRASH_ON_STATIC_ALLOCATION
 		*((int*)0x0) = 1;
 #endif
 // jnewquist: send all allocations through one place on the Xenon
-		return local_malloc( size );
+		void *mem = local_malloc( size );
+		Mem_UpdateAllocStats( static_cast<int>( local_msize( mem ) ) );
+		return mem;
 	}
 
 // amccarthy: Added allocation tag
-	void *mem = mem_heap->Allocate16( size, tag );
+	void *mem = mem_heap->Allocate16( static_cast<dword>( heapSize ), tag );
 	// make sure the memory is 16 byte aligned
-	assert( ( ((int)mem) & 15) == 0 );
+	assert( ( ((uintptr_t)mem) & 15 ) == 0 );
+	Mem_UpdateAllocStats( mem_heap->Msize( mem ) );
 	return mem;
 }
 // RAVEN END
@@ -1566,12 +1813,15 @@ void Mem_Free16( void *ptr ) {
 #endif
 // RAVEN BEGIN
 // jnewquist: send all allocations through one place on the Xenon
+		// measure before the free: the pointer is not queryable afterwards
+		Mem_UpdateFreeStats( static_cast<int>( local_msize( ptr ) ) );
 		local_free( ptr );
 // RAVEN END
 		return;
 	}
 	// make sure the memory is 16 byte aligned
-	assert( ( ((int)ptr) & 15) == 0 );
+	assert( ( ((uintptr_t)ptr) & 15 ) == 0 );
+	Mem_UpdateFreeStats( mem_heap->Msize( ptr ) );
  	mem_heap->Free16( ptr );
 }
 
@@ -1582,10 +1832,15 @@ Mem_ClearedAlloc
 */
 // RAVEN BEGIN
 // amccarthy: Added allocation tag
-void *Mem_ClearedAlloc( const int size, byte tag ) {
+void *Mem_ClearedAlloc( const size_t size, byte tag ) {
 	void *mem = Mem_Alloc( size, tag );
 // RAVEN END
-	SIMDProcessor->Memset( mem, 0, size );
+	if ( mem ) {
+		// Plain memset rather than SIMDProcessor->Memset: allocations happen before
+		// idSIMD::Init and after idSIMD::Shutdown, when SIMDProcessor is NULL, and the
+		// int cast the SIMD signature forces would truncate allocations over 2 GB.
+		memset( mem, 0, size );
+	}
 	return mem;
 }
 
@@ -1617,9 +1872,41 @@ char *Mem_CopyString( const char *in ) {
 /*
 ==================
 Mem_Dump_f
+
+The per-allocation dump needs ID_DEBUG_MEMORY, which a release build does not
+have. It can still report the totals, and those are the numbers worth having in
+a bug report: a console command can be scripted and captured in a condump,
+where the com_showMemoryUsage overlay cannot.
 ==================
 */
 void Mem_Dump_f( const idCmdArgs &args ) {
+	memoryStats_t local;
+	Mem_GetStats( local );
+
+	// Split the total by binary. Each of the engine, renderer and game links its
+	// own idlib archive, so this says which one is holding the memory -- and on
+	// Android the renderer's line covers the image data, which is usually the
+	// answer being looked for.
+	idLib::common->Printf( "this binary: %d live allocations, %.1f MB\n",
+		local.num, local.totalSize / ( 1024.0 * 1024.0 ) );
+	for ( int i = 0; i < mem_numModuleStats; i++ ) {
+		memoryStats_t moduleStats;
+		memset( &moduleStats, 0, sizeof( moduleStats ) );
+		mem_moduleStats[i]( &moduleStats );
+		idLib::common->Printf( "  module %d: %d live allocations, %.1f MB\n",
+			i, moduleStats.num, moduleStats.totalSize / ( 1024.0 * 1024.0 ) );
+	}
+
+	memoryStats_t stats;
+	Mem_GetProcessStats( stats );
+	idLib::common->Printf( "total: %d live allocations, %.1f MB (%lld bytes)\n",
+		stats.num, stats.totalSize / ( 1024.0 * 1024.0 ), (long long)stats.totalSize );
+	if ( stats.num > 0 ) {
+		idLib::common->Printf( "smallest %d bytes, largest %d bytes, mean %lld bytes\n",
+			stats.minSize, stats.maxSize, (long long)( stats.totalSize / stats.num ) );
+	}
+	idLib::common->Printf( "sizes are the allocator's usable block size, so they include its rounding\n" );
+	idLib::common->Printf( "build has no per-allocation tracking; rebuild with ID_DEBUG_MEMORY for a full dump\n" );
 }
 
 /*
@@ -1724,7 +2011,7 @@ const char *Mem_CleanupFileName( const char *fileName ) {
 		newFileName = newFileName.Left( i2 - 1 ) + newFileName.Right( newFileName.Length() - ( i1 + 4 ) );
 	}
 	index = ( index + 1 ) & 3;
-	strncpy( newFileNames[index], newFileName.c_str(), sizeof( newFileNames[index] ) );
+	idStr::Copynz( newFileNames[index], newFileName.c_str(), sizeof( newFileNames[index] ) );
 	return newFileNames[index];
 }
 
@@ -2051,7 +2338,7 @@ Mem_AllocDebugMemory
 ==================
 */
 // RAVEN BEGIN
-void *Mem_AllocDebugMemory( const int size, const char *fileName, const int lineNumber, const bool align16, byte tag ) {
+void *Mem_AllocDebugMemory( const size_t size, const char *fileName, const int lineNumber, const bool align16, byte tag ) {
 // RAVEN END
 	void *p;
 	debugMemory_t *m;
@@ -2059,6 +2346,11 @@ void *Mem_AllocDebugMemory( const int size, const char *fileName, const int line
 	if ( !size ) {
 		return NULL;
 	}
+	const size_t alignmentOverhead = align16 ? 16 + sizeof( uintptr_t ) : 0;
+	if ( !Mem_ValidateAllocSize( size, sizeof( debugMemory_t ) + alignmentOverhead + MALLOC_HEADER_SIZE, "Mem_AllocDebugMemory" ) ) {
+		return NULL;
+	}
+	const int heapSize = static_cast<int>( size );
 
 	if ( !mem_heap ) {
 #ifdef CRASH_ON_STATIC_ALLOCATION
@@ -2073,14 +2365,14 @@ void *Mem_AllocDebugMemory( const int size, const char *fileName, const int line
 
 	if ( align16 ) {
 // RAVEN BEGIN
-		p = mem_heap->Allocate16( size + sizeof( debugMemory_t ), tag );
+		p = mem_heap->Allocate16( static_cast<dword>( heapSize + sizeof( debugMemory_t ) ), tag );
 	}
 	else {
-		p = mem_heap->Allocate( size + sizeof( debugMemory_t ), tag );
+		p = mem_heap->Allocate( static_cast<dword>( heapSize + sizeof( debugMemory_t ) ), tag );
 // RAVEN END
 	}
 
-	Mem_UpdateAllocStats( size );
+	Mem_UpdateAllocStats( heapSize );
 
 	m = (debugMemory_t *) p;
 // RAVEN BEGIN
@@ -2090,7 +2382,7 @@ void *Mem_AllocDebugMemory( const int size, const char *fileName, const int line
 	m->fileName = fileName;
 	m->lineNumber = lineNumber;
 	m->frameNumber = idLib::frameNumber;
-	m->size = size;
+	m->size = heapSize;
 	m->next = mem_debugMemory;
 	m->prev = NULL;
 	if ( mem_debugMemory ) {
@@ -2164,7 +2456,7 @@ void Mem_FreeDebugMemory( void *p, const char *fileName, const int lineNumber, c
 Mem_Alloc
 ==================
 */
-void *Mem_Alloc( const int size, const char *fileName, const int lineNumber, byte tag ) {
+void *Mem_Alloc( const size_t size, const char *fileName, const int lineNumber, byte tag ) {
 	if ( !size ) {
 		return NULL;
 	}
@@ -2188,13 +2480,13 @@ void Mem_Free( void *ptr, const char *fileName, const int lineNumber ) {
 Mem_Alloc16
 ==================
 */
-void *Mem_Alloc16( const int size, const char *fileName, const int lineNumber, byte tag ) {
+void *Mem_Alloc16( const size_t size, const char *fileName, const int lineNumber, byte tag ) {
 	if ( !size ) {
 		return NULL;
 	}
 	void *mem = Mem_AllocDebugMemory( size, fileName, lineNumber, true, tag );
 	// make sure the memory is 16 byte aligned
-	assert( ( ((int)mem) & 15) == 0 );
+	assert( ( ((uintptr_t)mem) & 15 ) == 0 );
 	return mem;
 }
 
@@ -2208,7 +2500,7 @@ void Mem_Free16( void *ptr, const char *fileName, const int lineNumber ) {
 		return;
 	}
 	// make sure the memory is 16 byte aligned
-	assert( ( ((int)ptr) & 15) == 0 );
+	assert( ( ((uintptr_t)ptr) & 15 ) == 0 );
 	Mem_FreeDebugMemory( ptr, fileName, lineNumber, true );
 }
 
@@ -2217,9 +2509,13 @@ void Mem_Free16( void *ptr, const char *fileName, const int lineNumber ) {
 Mem_ClearedAlloc
 ==================
 */
-void *Mem_ClearedAlloc( const int size, const char *fileName, const int lineNumber, byte tag ) {
+void *Mem_ClearedAlloc( const size_t size, const char *fileName, const int lineNumber, byte tag ) {
 	void *mem = Mem_Alloc( size, fileName, lineNumber, tag );
-	SIMDProcessor->Memset( mem, 0, size );
+	if ( mem ) {
+		// See the shipping Mem_ClearedAlloc above: SIMDProcessor is NULL outside the
+		// idSIMD lifetime and the int cast truncates allocations over 2 GB.
+		memset( mem, 0, size );
+	}
 	return mem;
 }
 

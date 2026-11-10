@@ -32,6 +32,94 @@ If you have questions concerning this license or the applicable additional terms
 #include "tr_local.h"
 #include "Model_local.h"
 
+namespace {
+
+void R_WriteDrawVertToDemo( idDemoFile *f, const idDrawVert &vert ) {
+	f->WriteVec3( vert.xyz );
+	f->WriteVec2( vert.st );
+	f->WriteVec3( vert.normal );
+	f->WriteVec3( vert.tangents[0] );
+	f->WriteVec3( vert.tangents[1] );
+	f->WriteUnsignedChar( vert.color[0] );
+	f->WriteUnsignedChar( vert.color[1] );
+	f->WriteUnsignedChar( vert.color[2] );
+	f->WriteUnsignedChar( vert.color[3] );
+}
+
+bool R_ReadDrawVertFromDemo( idDemoFile *f, idDrawVert &vert ) {
+	if ( f->ReadVec3( vert.xyz ) != sizeof( vert.xyz ) ||
+		f->ReadVec2( vert.st ) != sizeof( vert.st ) ||
+		f->ReadVec3( vert.normal ) != sizeof( vert.normal ) ||
+		f->ReadVec3( vert.tangents[0] ) != sizeof( vert.tangents[0] ) ||
+		f->ReadVec3( vert.tangents[1] ) != sizeof( vert.tangents[1] ) ||
+		f->ReadUnsignedChar( vert.color[0] ) != sizeof( vert.color[0] ) ||
+		f->ReadUnsignedChar( vert.color[1] ) != sizeof( vert.color[1] ) ||
+		f->ReadUnsignedChar( vert.color[2] ) != sizeof( vert.color[2] ) ||
+		f->ReadUnsignedChar( vert.color[3] ) != sizeof( vert.color[3] ) ) {
+		return false;
+	}
+	memset( vert.color2, 0, sizeof( vert.color2 ) );
+	return true;
+}
+
+bool R_IsFiniteDecalDemoDrawVert( const idDrawVert &vert ) {
+	for ( int component = 0; component < 3; component++ ) {
+		if ( !std::isfinite( vert.xyz[component] ) || !std::isfinite( vert.normal[component] ) ||
+			 !std::isfinite( vert.tangents[0][component] ) || !std::isfinite( vert.tangents[1][component] ) ) {
+			return false;
+		}
+	}
+	return std::isfinite( vert.st[0] ) && std::isfinite( vert.st[1] );
+}
+
+bool R_IsFiniteDecalProjectionPoint( const idVec3 &point ) {
+	return std::isfinite( point.x ) && std::isfinite( point.y ) && std::isfinite( point.z );
+}
+
+bool R_RejectDecalDemo( idDemoFile *f, const char *reason ) {
+	common->Warning( "Malformed render demo decal: %s; playback stopped safely", reason );
+	if ( f != NULL ) {
+		f->Close();
+	}
+	return false;
+}
+
+bool R_MaterializePrimBatchDecalTriangles( const srfTriangles_t &sourceTri, srfTriangles_t &tempTri, idDrawVert *tempVerts, glIndex_t *tempIndexes ) {
+	memset( &tempTri, 0, sizeof( tempTri ) );
+	tempTri.bounds = sourceTri.bounds;
+	tempTri.facePlanesCalculated = sourceTri.facePlanesCalculated;
+	tempTri.facePlanes = sourceTri.facePlanes;
+	tempTri.numVerts = sourceTri.numVerts;
+	tempTri.verts = tempVerts;
+	tempTri.numIndexes = sourceTri.numIndexes;
+	tempTri.indexes = tempIndexes;
+
+	if ( sourceTri.numVerts <= 0 || sourceTri.numIndexes <= 0 ) {
+		return false;
+	}
+
+	// If the packed surface already exposed a live classic tri view, prefer it
+	// for fallback decal projection so dynamic MD5R recipients stay on their
+	// current skinned pose instead of reconstructing from packed bind-pose data.
+	if ( sourceTri.verts != NULL && sourceTri.indexes != NULL ) {
+		memcpy( tempVerts, sourceTri.verts, sourceTri.numVerts * sizeof( tempVerts[0] ) );
+		memcpy( tempIndexes, sourceTri.indexes, sourceTri.numIndexes * sizeof( tempIndexes[0] ) );
+		return true;
+	}
+
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	return R_MD5R_CopyPrimBatchTriangles(
+		tempVerts,
+		tempIndexes,
+		reinterpret_cast<const rvMesh *>( sourceTri.primBatchMesh ),
+		reinterpret_cast<const rvSilTraceVertT *>( sourceTri.silTraceVerts ) );
+#else
+	return false;
+#endif
+}
+
+}
+
 // decalFade	filter 5 0.1
 // polygonOffset
 // {
@@ -87,7 +175,8 @@ idRenderModelDecal::CreateProjectionInfo
 */
 bool idRenderModelDecal::CreateProjectionInfo( decalProjectionInfo_t &info, const idFixedWinding &winding, const idVec3 &projectionOrigin, const bool parallel, const float fadeDepth, const idMaterial *material, const int startTime ) {
 
-	if ( winding.GetNumPoints() != NUM_DECAL_BOUNDING_PLANES - 2 ) {
+	const int windingPointCount = winding.GetNumPoints();
+	if ( windingPointCount != NUM_DECAL_BOUNDING_PLANES - 2 ) {
 		common->Printf( "idRenderModelDecal::CreateProjectionInfo: winding must have %d points\n", NUM_DECAL_BOUNDING_PLANES - 2 );
 		return false;
 	}
@@ -112,7 +201,7 @@ bool idRenderModelDecal::CreateProjectionInfo( decalProjectionInfo_t &info, cons
 	if ( parallel ) {
 		const idVec3 transToProj = windingPlane.Normal() * depth;
 		const idVec3 transToFade = windingPlane.Normal() * fadeDepth;
-		for ( int i = 0; i < winding.GetNumPoints(); i++ ) {
+		for ( int i = 0; i < windingPointCount; i++ ) {
 			const idVec3 point = winding[i].ToVec3();
 			info.projectionBounds.AddPoint( point + transToProj );
 			info.projectionBounds.AddPoint( point - transToFade );
@@ -123,15 +212,15 @@ bool idRenderModelDecal::CreateProjectionInfo( decalProjectionInfo_t &info, cons
 
 	// calculate the world space projection volume bounding planes, positive sides face outside the decal
 	if ( parallel ) {
-		for ( int i = 0; i < winding.GetNumPoints(); i++ ) {
-			idVec3 edge = winding[(i+1)%winding.GetNumPoints()].ToVec3() - winding[i].ToVec3();
+		for ( int i = 0; i < windingPointCount; i++ ) {
+			idVec3 edge = winding[(i+1)%windingPointCount].ToVec3() - winding[i].ToVec3();
 			info.boundingPlanes[i].Normal().Cross( windingPlane.Normal(), edge );
 			info.boundingPlanes[i].Normalize();
 			info.boundingPlanes[i].FitThroughPoint( winding[i].ToVec3() );
 		}
 	} else {
-		for ( int i = 0; i < winding.GetNumPoints(); i++ ) {
-			info.boundingPlanes[i].FromPoints( projectionOrigin, winding[i].ToVec3(), winding[(i+1)%winding.GetNumPoints()].ToVec3() );
+		for ( int i = 0; i < windingPointCount; i++ ) {
+			info.boundingPlanes[i].FromPoints( projectionOrigin, winding[i].ToVec3(), winding[(i+1)%windingPointCount].ToVec3() );
 		}
 	}
 	info.boundingPlanes[NUM_DECAL_BOUNDING_PLANES - 2] = windingPlane;
@@ -217,17 +306,18 @@ idRenderModelDecal::AddWinding
 void idRenderModelDecal::AddWinding( const idWinding &w, const idMaterial *decalMaterial, const idPlane fadePlanes[2], float fadeDepth, int startTime ) {
 	int i;
 	float invFadeDepth, fade;
+	const int windingPointCount = w.GetNumPoints();
 
 	if ( ( material == NULL || material == decalMaterial ) &&
-			tri.numVerts + w.GetNumPoints() < MAX_DECAL_VERTS &&
-				tri.numIndexes + ( w.GetNumPoints() - 2 ) * 3 < MAX_DECAL_INDEXES ) {
+			tri.numVerts + windingPointCount < MAX_DECAL_VERTS &&
+				tri.numIndexes + ( windingPointCount - 2 ) * 3 < MAX_DECAL_INDEXES ) {
 
 		material = decalMaterial;
 
 		// add to this decal
 		invFadeDepth = -1.0f / fadeDepth;
 
-		for ( i = 0; i < w.GetNumPoints(); i++ ) {
+		for ( i = 0; i < windingPointCount; i++ ) {
 			fade = fadePlanes[0].Distance( w[i].ToVec3() ) * invFadeDepth;
 			if ( fade < 0.0f ) {
 				fade = fadePlanes[1].Distance( w[i].ToVec3() ) * invFadeDepth;
@@ -239,7 +329,8 @@ void idRenderModelDecal::AddWinding( const idWinding &w, const idMaterial *decal
 			}
 			fade = 1.0f - fade;
 			vertDepthFade[tri.numVerts + i] = fade;
-			vertStartTime[tri.numVerts + i] = (float)startTime;
+			vertLifeSpan[tri.numVerts + i] = 0.0f;
+			tri.verts[tri.numVerts + i].Clear();
 			tri.verts[tri.numVerts + i].xyz = w[i].ToVec3();
 			tri.verts[tri.numVerts + i].st[0] = w[i].s;
 			tri.verts[tri.numVerts + i].st[1] = w[i].t;
@@ -248,16 +339,18 @@ void idRenderModelDecal::AddWinding( const idWinding &w, const idMaterial *decal
 			tri.verts[tri.numVerts + i].color[2] = 255;
 			tri.verts[tri.numVerts + i].color[3] = 255;
 		}
-		for ( i = 2; i < w.GetNumPoints(); i++ ) {
+		for ( i = 2; i < windingPointCount; i++ ) {
 			tri.indexes[tri.numIndexes + 0] = tri.numVerts;
 			tri.indexes[tri.numIndexes + 1] = tri.numVerts + i - 1;
 			tri.indexes[tri.numIndexes + 2] = tri.numVerts + i;
 			indexStartTime[tri.numIndexes] =
 			indexStartTime[tri.numIndexes + 1] =
-			indexStartTime[tri.numIndexes + 2] = startTime;
+			indexStartTime[tri.numIndexes + 2] = (float)startTime;
 			tri.numIndexes += 3;
 		}
-		tri.numVerts += w.GetNumPoints();
+		tri.numVerts += windingPointCount;
+		tri.tangentsCalculated = false;
+		tri.facePlanesCalculated = false;
 		return;
 	}
 
@@ -295,9 +388,9 @@ idRenderModelDecal::CreateDecal
 =================
 */
 void idRenderModelDecal::CreateDecal( const idRenderModel *model, const decalProjectionInfo_t &localInfo ) {
-
 	// check all model surfaces
-	for ( int surfNum = 0; surfNum < model->NumSurfaces(); surfNum++ ) {
+	const int surfaceCount = model->NumSurfaces();
+	for ( int surfNum = 0; surfNum < surfaceCount; surfNum++ ) {
 		const modelSurface_t *surf = model->Surface( surfNum );
 
 		// if no geometry or no shader
@@ -317,8 +410,28 @@ void idRenderModelDecal::CreateDecal( const idRenderModel *model, const decalPro
 			continue;
 		}
 
+		// Packed MD5R surfaces keep their canonical draw data in the prim batch.
+		// Prefer the native sil-trace projector when the packed mesh state is
+		// usable; fall back to a transient classic view otherwise.
+		#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+		if ( stri->primBatchMesh != NULL ) {
+			if ( R_MD5R_CreateDecalTriangles( this, *stri, localInfo ) ) {
+				continue;
+			}
+
+			srfTriangles_t tempTri;
+			idDrawVert *tempVerts = (idDrawVert *)_alloca16( stri->numVerts * sizeof( tempVerts[0] ) );
+			glIndex_t *tempIndexes = (glIndex_t *)_alloca16( stri->numIndexes * sizeof( tempIndexes[0] ) );
+			if ( !R_MaterializePrimBatchDecalTriangles( *stri, tempTri, tempVerts, tempIndexes ) ) {
+				continue;
+			}
+			stri = &tempTri;
+		}
+		#endif
+
 		// allocate memory for the cull bits
-		byte *cullBits = (byte *)_alloca16( stri->numVerts * sizeof( cullBits[0] ) );
+		const int cullByteCount = ( stri->numVerts + 3 ) & ~3;
+		byte *cullBits = (byte *)_alloca16( cullByteCount );
 
 		// catagorize all points by the planes
 		SIMDProcessor->DecalPointCull( cullBits, localInfo.boundingPlanes, stri->verts, stri->numVerts );
@@ -335,32 +448,50 @@ void idRenderModelDecal::CreateDecal( const idRenderModel *model, const decalPro
 			}
 
 			// skip back facing triangles
-			if ( stri->facePlanes && stri->facePlanesCalculated &&
-					idMath::Fabs( stri->facePlanes[triNum].Normal() * localInfo.boundingPlanes[NUM_DECAL_BOUNDING_PLANES - 2].Normal() ) < localInfo.maxAngle ) {
-				continue;
+			if ( stri->facePlanes && stri->facePlanesCalculated ) {
+				const float facing = stri->facePlanes[triNum].Normal() * localInfo.boundingPlanes[NUM_DECAL_BOUNDING_PLANES - 2].Normal();
+				if ( facing < localInfo.maxAngle ) {
+					continue;
+				}
 			}
 
 			// create a winding with texture coordinates for the triangle
 			idFixedWinding fw;
 			fw.SetNumPoints( 3 );
-			if ( localInfo.parallel ) {
-				for ( int j = 0; j < 3; j++ ) {
-					fw[j] = stri->verts[stri->indexes[index+j]].xyz;
-					fw[j].s = localInfo.textureAxis[0].Distance( fw[j].ToVec3() );
-					fw[j].t = localInfo.textureAxis[1].Distance( fw[j].ToVec3() );
+			bool projectionValid = true;
+			for ( int j = 0; j < 3; j++ ) {
+				const idVec3 position = stri->verts[stri->indexes[index+j]].xyz;
+				if ( !R_IsFiniteDecalProjectionPoint( position ) ) {
+					projectionValid = false;
+					break;
 				}
-			} else {
-				for ( int j = 0; j < 3; j++ ) {
-					idVec3 dir;
-					float scale;
 
-					fw[j] = stri->verts[stri->indexes[index+j]].xyz;
-					dir = fw[j].ToVec3() - localInfo.projectionOrigin;
-					localInfo.boundingPlanes[NUM_DECAL_BOUNDING_PLANES - 1].RayIntersection( fw[j].ToVec3(), dir, scale );
-					dir = fw[j].ToVec3() + scale * dir;
-					fw[j].s = localInfo.textureAxis[0].Distance( dir );
-					fw[j].t = localInfo.textureAxis[1].Distance( dir );
+				fw[j] = position;
+				idVec3 texturePoint = position;
+				if ( !localInfo.parallel ) {
+					const idVec3 dir = position - localInfo.projectionOrigin;
+					float scale;
+					if ( !localInfo.boundingPlanes[NUM_DECAL_BOUNDING_PLANES - 1].RayIntersection( position, dir, scale ) ||
+						 !std::isfinite( scale ) ) {
+						projectionValid = false;
+						break;
+					}
+					texturePoint = position + scale * dir;
+					if ( !R_IsFiniteDecalProjectionPoint( texturePoint ) ) {
+						projectionValid = false;
+						break;
+					}
 				}
+
+				fw[j].s = localInfo.textureAxis[0].Distance( texturePoint );
+				fw[j].t = localInfo.textureAxis[1].Distance( texturePoint );
+				if ( !std::isfinite( fw[j].s ) || !std::isfinite( fw[j].t ) ) {
+					projectionValid = false;
+					break;
+				}
+			}
+			if ( !projectionValid ) {
+				continue;
 			}
 
 			int orBits = cullBits[v1] | cullBits[v2] | cullBits[v3];
@@ -393,10 +524,14 @@ idRenderModelDecal *idRenderModelDecal::RemoveFadedDecals( idRenderModelDecal *d
 	int inUse[MAX_DECAL_VERTS];
 	decalInfo_t	decalInfo;
 	idRenderModelDecal *nextDecal;
+	bool geometryChanged;
 
 	if ( decals == NULL ) {
 		return NULL;
 	}
+
+	const int oldNumIndexes = decals->tri.numIndexes;
+	const int oldNumVerts = decals->tri.numVerts;
 
 	// recursively free any next decals
 	decals->nextDecal = RemoveFadedDecals( decals->nextDecal, time );
@@ -410,10 +545,11 @@ idRenderModelDecal *idRenderModelDecal::RemoveFadedDecals( idRenderModelDecal *d
 	
 	decalInfo = decals->material->GetDecalInfo();
 	minTime = time - ( decalInfo.stayTime + decalInfo.fadeTime );
+	geometryChanged = false;
 
 	newNumIndexes = 0;
 	for ( i = 0; i < decals->tri.numIndexes; i += 3 ) {
-		if ( decals->indexStartTime[i] > minTime ) {
+		if ( decals->indexStartTime[i] > (float)minTime ) {
 			// keep this triangle
 			if ( newNumIndexes != i ) {
 				for ( j = 0; j < 3; j++ ) {
@@ -433,6 +569,9 @@ idRenderModelDecal *idRenderModelDecal::RemoveFadedDecals( idRenderModelDecal *d
 	}
 
 	decals->tri.numIndexes = newNumIndexes;
+	if ( newNumIndexes != oldNumIndexes ) {
+		geometryChanged = true;
+	}
 
 	memset( inUse, 0, sizeof( inUse ) );
 	for ( i = 0; i < decals->tri.numIndexes; i++ ) {
@@ -442,18 +581,35 @@ idRenderModelDecal *idRenderModelDecal::RemoveFadedDecals( idRenderModelDecal *d
 	newNumVerts = 0;
 	for ( i = 0; i < decals->tri.numVerts; i++ ) {
 		if ( !inUse[i] ) {
+			geometryChanged = true;
 			continue;
+		}
+		if ( newNumVerts != i ) {
+			geometryChanged = true;
 		}
 		decals->tri.verts[newNumVerts] = decals->tri.verts[i];
 		decals->vertDepthFade[newNumVerts] = decals->vertDepthFade[i];
-		decals->vertStartTime[newNumVerts] = decals->vertStartTime[i];
+		decals->vertLifeSpan[newNumVerts] = decals->vertLifeSpan[i];
 		inUse[i] = newNumVerts;
 		newNumVerts++;
+	}
+	if ( newNumVerts != oldNumVerts ) {
+		geometryChanged = true;
 	}
 	decals->tri.numVerts = newNumVerts;
 
 	for ( i = 0; i < decals->tri.numIndexes; i++ ) {
-		decals->tri.indexes[i] = inUse[decals->tri.indexes[i]];
+		const glIndex_t oldIndex = decals->tri.indexes[i];
+		const glIndex_t newIndex = inUse[oldIndex];
+		if ( newIndex != oldIndex ) {
+			geometryChanged = true;
+		}
+		decals->tri.indexes[i] = newIndex;
+	}
+
+	if ( geometryChanged ) {
+		decals->tri.tangentsCalculated = false;
+		decals->tri.facePlanesCalculated = false;
 	}
 
 	return decals;
@@ -465,7 +621,7 @@ idRenderModelDecal::AddDecalDrawSurf
 =====================
 */
 void idRenderModelDecal::AddDecalDrawSurf( viewEntity_t *space ) {
-	if ( tri.numIndexes == 0 ) {
+	if ( r_skipDecals.GetBool() || tri.numIndexes == 0 || tri.numVerts == 0 ) {
 		return;
 	}
 
@@ -473,70 +629,109 @@ void idRenderModelDecal::AddDecalDrawSurf( viewEntity_t *space ) {
 	const int stayTime = Max( decalInfo.stayTime, 0 );
 	const int fadeTime = Max( decalInfo.fadeTime, 0 );
 	const int maxTime = Max( stayTime + fadeTime, 1 );
+	const float maxTimeFloat = (float)maxTime;
+	const float renderTime = (float)tr.viewDef->renderView.time;
 	const int numStages = material->GetNumStages();
-	vertCache_s *decalColorCache = NULL;
-	int decalColorStride = 0;
+	const int vertexBytes = tri.numVerts * sizeof( idDrawVert );
+	const int decalColorStride = tri.numVerts * 4;
+	const int totalColorBytes = decalColorStride * numStages;
+	const int totalAmbientBytes = vertexBytes + totalColorBytes;
+	byte *vertexAndColorData = (byte *)R_FrameAlloc( totalAmbientBytes );
+	idDrawVert *uploadedVerts = reinterpret_cast<idDrawVert *>( vertexAndColorData );
+	byte *stageColors = vertexAndColorData + vertexBytes;
+
+	// Projected decals are built from clipped positions/UVs only. Rebuild the
+	// tangent basis from that projected mesh so direct-light and shadow-map
+	// receivers don't use stale or undefined normals/tangents.
+	if ( tri.numVerts > 0 && tri.numIndexes > 0 && !tri.tangentsCalculated ) {
+		R_DeriveTangents( &tri, false );
+	}
+
+	memcpy( vertexAndColorData, tri.verts, vertexBytes );
+
+	memset( vertLifeSpan, 0, tri.numVerts * sizeof( vertLifeSpan[0] ) );
+	for ( int indexBase = 0; indexBase < tri.numIndexes; indexBase += 3 ) {
+		float life = renderTime - indexStartTime[indexBase];
+		if ( life > maxTimeFloat ) {
+			continue;
+		}
+		if ( life < 0.0f ) {
+			life = 0.0f;
+		}
+		life /= maxTimeFloat;
+		vertLifeSpan[tri.indexes[indexBase + 0]] = life;
+		vertLifeSpan[tri.indexes[indexBase + 1]] = life;
+		vertLifeSpan[tri.indexes[indexBase + 2]] = life;
+	}
+
+	tr.pc.c_numDecalIndexes += tri.numIndexes;
 
 	if ( numStages > 0 && tri.numVerts > 0 ) {
 		const int numRegisters = ( material->GetNumRegisters() > EXP_REG_NUM_PREDEFINED ) ? material->GetNumRegisters() : EXP_REG_NUM_PREDEFINED;
-		const int colorStride = tri.numVerts * 4;
-		const int totalColorBytes = colorStride * numStages;
-		byte *stageColors = (byte *)_alloca16( totalColorBytes );
 		float *regs = (float *)_alloca16( numRegisters * sizeof( regs[0] ) );
 		float shaderParms[MAX_ENTITY_SHADER_PARMS];
 
+		memset( stageColors, 0, totalColorBytes );
 		memset( shaderParms, 0, sizeof( shaderParms ) );
-		// Match stock render-entity defaults so decal stages that rely on Parm0..3
-		// (without explicit rgb/rgba terms) still evaluate to visible colors.
 		shaderParms[SHADERPARM_RED] = 1.0f;
 		shaderParms[SHADERPARM_GREEN] = 1.0f;
 		shaderParms[SHADERPARM_BLUE] = 1.0f;
 		shaderParms[SHADERPARM_ALPHA] = 1.0f;
 		shaderParms[SHADERPARM_BRIGHTNESS] = 1.0f;
 
-		for ( int v = 0; v < tri.numVerts; v++ ) {
-			const float deltaTime = (float)tr.viewDef->renderView.time - vertStartTime[v];
-			float fadeFraction = 0.0f;
-			if ( fadeTime > 0 && deltaTime > stayTime ) {
-				fadeFraction = ( deltaTime - stayTime ) / (float)fadeTime;
-			}
-			fadeFraction = idMath::ClampFloat( 0.0f, 1.0f, fadeFraction );
+		for ( int stage = 0; stage < numStages; stage++ ) {
+			const shaderStage_t *pStage = material->GetStage( stage );
+			byte *stageColor = stageColors + stage * decalColorStride;
 
-			float life = deltaTime / (float)maxTime;
-			life = idMath::ClampFloat( 0.0f, 1.0f, life );
-			shaderParms[4] = life;
-			shaderParms[5] = vertStartTime[v];
+			// consecutive triangles of one impact share identical
+			// (life, spawn time) pairs and the register interpreter is
+			// deterministic, so only re-evaluate when the pair changes -
+			// decal-heavy firefights otherwise re-interpret the same
+			// expression ops hundreds of times per frame per decal model
+			float lastLife = -1.0f;		// vertLifeSpan is always in [0, 1]
+			float lastStartTime = 0.0f;
 
-			material->EvaluateRegisters( regs, shaderParms, tr.viewDef, NULL );
+			for ( int indexBase = 0; indexBase < tri.numIndexes; indexBase += 3 ) {
+				const glIndex_t triVertIndex0 = tri.indexes[indexBase + 0];
+				const glIndex_t triVertIndex1 = tri.indexes[indexBase + 1];
+				const glIndex_t triVertIndex2 = tri.indexes[indexBase + 2];
 
-			for ( int stage = 0; stage < numStages; stage++ ) {
-				const shaderStage_t *pStage = material->GetStage( stage );
-				byte *vertexColor = stageColors + stage * colorStride + v * 4;
+				// DecalLife / DecalSpawn map to parm4 / parm5 and are evaluated per
+				// triangle before the stage colors are baked into the draw surf.
+				shaderParms[4] = vertLifeSpan[triVertIndex0];
+				shaderParms[5] = indexStartTime[indexBase];
+				if ( shaderParms[4] != lastLife || shaderParms[5] != lastStartTime ) {
+					material->EvaluateStageRegisters( stage, regs, shaderParms, tr.frameShaderTime );
+					lastLife = shaderParms[4];
+					lastStartTime = shaderParms[5];
+				}
 
+				const float deltaTime = renderTime - indexStartTime[indexBase];
+				float fadeFraction = 0.0f;
+				if ( fadeTime > 0 && deltaTime > stayTime ) {
+					fadeFraction = ( deltaTime - stayTime ) / (float)fadeTime;
+				}
+				fadeFraction = idMath::ClampFloat( 0.0f, 1.0f, fadeFraction );
+				const float colorScale = vertDepthFade[triVertIndex0] * 255.0f;
 				for ( int k = 0; k < 4; k++ ) {
 					const float decalColor = decalInfo.start[k] + ( decalInfo.end[k] - decalInfo.start[k] ) * fadeFraction;
-					int icolor = idMath::FtoiFast( regs[pStage->color.registers[k]] * decalColor * vertDepthFade[v] * 255.0f );
-					if ( icolor < 0 ) {
-						icolor = 0;
-					} else if ( icolor > 255 ) {
-						icolor = 255;
-					}
-					vertexColor[k] = (byte)icolor;
+					const int icolor = idMath::FtoiFast( regs[pStage->color.registers[k]] * decalColor * colorScale );
+					const byte colorByte = (byte)idMath::ClampInt( 0, 255, icolor );
+					stageColor[triVertIndex0 * 4 + k] = colorByte;
+					stageColor[triVertIndex1 * 4 + k] = colorByte;
+					stageColor[triVertIndex2 * 4 + k] = colorByte;
 				}
 			}
 		}
 
-		// Keep the first stage color in the vertices as a fallback path.
+		// Keep the first stage color in the uploaded vertices as a fallback path
+		// without mutating the persistent decal mesh.
 		for ( int v = 0; v < tri.numVerts; v++ ) {
 			const byte *vertexColor = stageColors + v * 4;
-			tri.verts[v].color[0] = vertexColor[0];
-			tri.verts[v].color[1] = vertexColor[1];
-			tri.verts[v].color[2] = vertexColor[2];
-			tri.verts[v].color[3] = vertexColor[3];
+			for ( int k = 0; k < 4; k++ ) {
+				uploadedVerts[v].color[k] = vertexColor[k];
+			}
 		}
-
-		decalColorCache = vertexCache.AllocFrameTemp( stageColors, totalColorBytes );
-		decalColorStride = colorStride;
 	}
 
 	// copy the tri and indexes to temp heap memory,
@@ -544,15 +739,23 @@ void idRenderModelDecal::AddDecalDrawSurf( viewEntity_t *space ) {
 	// be able to reorganize the index list
 	srfTriangles_t *newTri = (srfTriangles_t *)R_FrameAlloc( sizeof( *newTri ) );
 	*newTri = tri;
+	newTri->gpuSkinningJointPaletteAlloc = NULL;
+	newTri->numGpuSkinningJointPaletteAllocJoints = 0;
+	newTri->previousPositions = NULL;
+	newTri->numPreviousPositions = 0;
+	newTri->previousPositionsFrame = -1;
+	R_ClearStaticGpuSkinningJointPalette( newTri );
 
-	// copy the current vertexes to temp vertex cache
-	newTri->ambientCache = vertexCache.AllocFrameTemp( tri.verts, tri.numVerts * sizeof( idDrawVert ) );
+	// Snapshot the vertices plus any per-stage color blocks into one transient
+	// upload so the draw surf matches Quake 4's frame-temp decal submission.
+	newTri->ambientCache = vertexCache.AllocFrameTemp( vertexAndColorData, totalAmbientBytes );
 
 	// create the drawsurf
 	R_AddDrawSurf( newTri, space, &space->entityDef->parms, material, space->scissorRect );
 
 	drawSurf_t *drawSurf = tr.viewDef->drawSurfs[tr.viewDef->numDrawSurfs - 1];
-	drawSurf->decalColorCache = decalColorCache;
+	drawSurf->decalColorCache = ( totalColorBytes > 0 ) ? newTri->ambientCache : NULL;
+	drawSurf->decalColorOffset = ( totalColorBytes > 0 ) ? vertexBytes : 0;
 	drawSurf->decalColorStride = decalColorStride;
 	drawSurf->decalColorStageCount = numStages;
 }
@@ -562,8 +765,95 @@ void idRenderModelDecal::AddDecalDrawSurf( viewEntity_t *space ) {
 idRenderModelDecal::ReadFromDemoFile
 ====================
 */
-void idRenderModelDecal::ReadFromDemoFile( idDemoFile *f ) {
-	// FIXME: implement
+bool idRenderModelDecal::ReadFromDemoFile( idDemoFile *f ) {
+	int numDecals = 0;
+	idRenderModelDecal *decal;
+
+	while ( nextDecal != NULL ) {
+		idRenderModelDecal *next = nextDecal->nextDecal;
+		idRenderModelDecal::Free( nextDecal );
+		nextDecal = next;
+	}
+
+	memset( &tri, 0, sizeof( tri ) );
+	memset( verts, 0, sizeof( verts ) );
+	memset( vertDepthFade, 0, sizeof( vertDepthFade ) );
+	memset( vertLifeSpan, 0, sizeof( vertLifeSpan ) );
+	memset( indexes, 0, sizeof( indexes ) );
+	memset( indexStartTime, 0, sizeof( indexStartTime ) );
+	tri.verts = verts;
+	tri.indexes = indexes;
+	material = NULL;
+
+	if ( f == NULL || f->ReadInt( numDecals ) != sizeof( numDecals ) ) {
+		return R_RejectDecalDemo( f, "truncated decal count" );
+	}
+	if ( numDecals < 0 || numDecals > 1024 ) {
+		return R_RejectDecalDemo( f, va( "decal count %d is out of range", numDecals ) );
+	}
+
+	if ( numDecals == 0 ) {
+		return true;
+	}
+
+	decal = this;
+	for ( int decalIndex = 0; decalIndex < numDecals; decalIndex++ ) {
+		const char *materialName = f->ReadHashString();
+		if ( !f->IsOpen() ) {
+			return false;
+		}
+
+		decal->material = ( materialName[0] != '\0' ) ? declManager->FindMaterial( materialName ) : NULL;
+
+		if ( f->ReadInt( decal->tri.numVerts ) != sizeof( decal->tri.numVerts ) ) {
+			return R_RejectDecalDemo( f, "truncated vertex count" );
+		}
+		if ( decal->tri.numVerts < 0 || decal->tri.numVerts > MAX_DECAL_VERTS ) {
+			return R_RejectDecalDemo( f, va( "vertex count %d is out of range", decal->tri.numVerts ) );
+		}
+
+		for ( int vertIndex = 0; vertIndex < decal->tri.numVerts; vertIndex++ ) {
+			if ( !R_ReadDrawVertFromDemo( f, decal->tri.verts[vertIndex] ) ||
+				 f->ReadFloat( decal->vertDepthFade[vertIndex] ) != sizeof( decal->vertDepthFade[vertIndex] ) ||
+				 f->ReadFloat( decal->vertLifeSpan[vertIndex] ) != sizeof( decal->vertLifeSpan[vertIndex] ) ) {
+				return R_RejectDecalDemo( f, "truncated vertex payload" );
+			}
+			if ( !R_IsFiniteDecalDemoDrawVert( decal->tri.verts[vertIndex] ) ||
+				 !std::isfinite( decal->vertDepthFade[vertIndex] ) || !std::isfinite( decal->vertLifeSpan[vertIndex] ) ) {
+				return R_RejectDecalDemo( f, "non-finite vertex payload" );
+			}
+		}
+
+		if ( f->ReadInt( decal->tri.numIndexes ) != sizeof( decal->tri.numIndexes ) ) {
+			return R_RejectDecalDemo( f, "truncated index count" );
+		}
+		if ( decal->tri.numIndexes < 0 || decal->tri.numIndexes > MAX_DECAL_INDEXES || ( decal->tri.numIndexes % 3 ) != 0 ) {
+			return R_RejectDecalDemo( f, va( "index count %d is invalid", decal->tri.numIndexes ) );
+		}
+
+		for ( int index = 0; index < decal->tri.numIndexes; index++ ) {
+			int storedIndex;
+			int storedStartTime;
+
+			if ( f->ReadInt( storedIndex ) != sizeof( storedIndex ) ) {
+				return R_RejectDecalDemo( f, "truncated vertex index" );
+			}
+			if ( storedIndex < 0 || storedIndex >= decal->tri.numVerts ) {
+				return R_RejectDecalDemo( f, va( "vertex index %d is out of range", storedIndex ) );
+			}
+			decal->tri.indexes[index] = storedIndex;
+			if ( f->ReadInt( storedStartTime ) != sizeof( storedStartTime ) ) {
+				return R_RejectDecalDemo( f, "truncated index start time" );
+			}
+			decal->indexStartTime[index] = (float)storedStartTime;
+		}
+
+		if ( decalIndex + 1 < numDecals ) {
+			decal->nextDecal = idRenderModelDecal::Alloc();
+			decal = decal->nextDecal;
+		}
+	}
+	return true;
 }
 
 /*
@@ -572,5 +862,31 @@ idRenderModelDecal::WriteToDemoFile
 ====================
 */
 void idRenderModelDecal::WriteToDemoFile( idDemoFile *f ) const {
-	// FIXME: implement
+	int numDecals;
+	const idRenderModelDecal *decal;
+
+	numDecals = 0;
+	for ( decal = this; decal != NULL; decal = decal->nextDecal ) {
+		numDecals++;
+	}
+
+	f->WriteInt( numDecals );
+
+	for ( decal = this; decal != NULL; decal = decal->nextDecal ) {
+		const char *materialName = ( decal->material != NULL ) ? decal->material->GetName() : "";
+
+		f->WriteHashString( materialName );
+		f->WriteInt( decal->tri.numVerts );
+		for ( int vertIndex = 0; vertIndex < decal->tri.numVerts; vertIndex++ ) {
+			R_WriteDrawVertToDemo( f, decal->tri.verts[vertIndex] );
+			f->WriteFloat( decal->vertDepthFade[vertIndex] );
+			f->WriteFloat( decal->vertLifeSpan[vertIndex] );
+		}
+
+		f->WriteInt( decal->tri.numIndexes );
+		for ( int index = 0; index < decal->tri.numIndexes; index++ ) {
+			f->WriteInt( decal->tri.indexes[index] );
+			f->WriteInt( idMath::FtoiFast( decal->indexStartTime[index] ) );
+		}
+	}
 }

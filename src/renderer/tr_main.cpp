@@ -30,6 +30,9 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "tr_local.h"
+#include "LevelShotDepth.h"
+#include "RendererMetrics.h"
+#include "ScenePackets.h"
 #ifdef __ppc__
 #include <vecLib/vecLib.h>
 #endif
@@ -145,16 +148,102 @@ bool idScreenRect::IsEmpty() const {
 
 /*
 ======================
+R_ClampedScreenCoord
+
+idScreenRect stores shorts, and nothing upstream bounds what reaches this
+conversion.
+
+idFrustum::ProjectionBounds divides by the distance along the frustum axis when
+it projects a box corner (Frustum.cpp, AddLocalLineToProjectionBoundsSetCull:
+"if ( cull1 == 0 && start.x > 0.0f )" then "start.y * dFar / ( start.x * dLeft
+)"). A corner sitting essentially on the eye point satisfies that test and
+divides by a near-zero, so the projection comes back as a huge finite y or z --
+with the function still returning true, so a caller checking the return value
+learns nothing.
+
+0.5 * ( 1 - y ) * width then overflows a short at y < -26 on a 2400-pixel-wide
+viewport, but only at y < -50 on a 1280-pixel one. That is why this reproduces
+on a phone and not in a desktop test window, and idMath::FtoiFast is lrintf on
+Android, which saturates the opposite way from x86-64 before the truncation.
+
+The overflowed value wraps back into range, so the rect looks plausible:
+IsEmpty() does not reject it, and the Intersect in R_AddModelSurfaces takes a
+min and so cannot undo it either. The entity ends up drawn clipped to a bogus
+small box. Nothing clears the colour buffer, so everything that box stops
+covering keeps the previous frame -- a frozen screen with one small live box
+moving around in it.
+
+Clamping in float, ahead of the narrowing conversion, is what makes that
+impossible. This is behaviour-preserving for every value that was not already
+wrapping: callers all intersect the result into a rect no larger than the
+viewport, and that Intersect takes the min either way. The one pixel of slack
+matches idScreenRect::Expand.
+======================
+*/
+static int r_screenRectClampReports = 0;
+
+static short R_ClampedScreenCoord( float coord, int dimension, bool &clamped ) {
+	const float low = -1.0f;
+	const float high = ( float )( dimension + 1 );
+
+	// ordered so a NaN fails the test and is clamped rather than converted
+	if ( coord >= low && coord <= high ) {
+		return ( short )idMath::FtoiFast( coord );
+	}
+
+	clamped = true;
+	return ( coord < low ) ? ( short )-1 : ( short )( dimension + 1 );
+}
+
+/*
+======================
 R_ScreenRectFromViewFrustumBounds
 ======================
 */
 idScreenRect R_ScreenRectFromViewFrustumBounds( const idBounds &bounds ) {
 	idScreenRect screenRect;
 
-	screenRect.x1 = idMath::FtoiFast( 0.5f * ( 1.0f - bounds[1].y ) * ( tr.viewDef->viewport.x2 - tr.viewDef->viewport.x1 ) );
-	screenRect.x2 = idMath::FtoiFast( 0.5f * ( 1.0f - bounds[0].y ) * ( tr.viewDef->viewport.x2 - tr.viewDef->viewport.x1 ) );
-	screenRect.y1 = idMath::FtoiFast( 0.5f * ( 1.0f + bounds[0].z ) * ( tr.viewDef->viewport.y2 - tr.viewDef->viewport.y1 ) );
-	screenRect.y2 = idMath::FtoiFast( 0.5f * ( 1.0f + bounds[1].z ) * ( tr.viewDef->viewport.y2 - tr.viewDef->viewport.y1 ) );
+	const int width = tr.viewDef->viewport.x2 - tr.viewDef->viewport.x1;
+	const int height = tr.viewDef->viewport.y2 - tr.viewDef->viewport.y1;
+	bool clamped = false;
+
+	// The bounds are normalized to the culling frustum's half extents. For a
+	// symmetric view that is the screen; a VR eye's culling frustum encloses
+	// its off-axis projection, so map the tangents through the real extents.
+	float xBias = 0.5f, xScale = 0.5f, yBias = 0.5f, yScale = 0.5f;
+	const renderView_t &renderView = tr.viewDef->renderView;
+	if ( renderView.asymmetricFov && tr.viewDef->viewFrustum.GetFarDistance() > 0.0f ) {
+		const float invFar = 1.0f / tr.viewDef->viewFrustum.GetFarDistance();
+		const float tanX = tr.viewDef->viewFrustum.GetLeft() * invFar;
+		const float tanY = tr.viewDef->viewFrustum.GetUp() * invFar;
+		const float spanX = renderView.fovTanRight - renderView.fovTanLeft;
+		const float spanY = renderView.fovTanUp - renderView.fovTanDown;
+		if ( spanX > 0.0f && spanY > 0.0f ) {
+			xBias = -renderView.fovTanLeft / spanX;
+			xScale = tanX / spanX;
+			yBias = -renderView.fovTanDown / spanY;
+			yScale = tanY / spanY;
+		}
+	}
+
+	screenRect.x1 = R_ClampedScreenCoord( ( xBias - xScale * bounds[1].y ) * width, width, clamped );
+	screenRect.x2 = R_ClampedScreenCoord( ( xBias - xScale * bounds[0].y ) * width, width, clamped );
+	screenRect.y1 = R_ClampedScreenCoord( ( yBias + yScale * bounds[0].z ) * height, height, clamped );
+	screenRect.y2 = R_ClampedScreenCoord( ( yBias + yScale * bounds[1].z ) * height, height, clamped );
+
+	// Loud and self-limiting. Bounds this far out are a real anomaly, and the
+	// whole reason this survived so long is that it was silent: the value
+	// wrapped into a plausible-looking rect instead of an obviously broken one.
+	// If the frozen-frame bug reproduces without these lines in the log, the
+	// cause is somewhere else and this fix is not it.
+	if ( clamped && r_screenRectClampReports < 8 ) {
+		r_screenRectClampReports++;
+		common->Printf( "R_ScreenRectFromViewFrustumBounds: bounds out of range, clamped -- "
+				"y %f..%f z %f..%f, viewport %ix%i, rect %i,%i..%i,%i\n",
+				bounds[0].y, bounds[1].y, bounds[0].z, bounds[1].z,
+				width, height,
+				screenRect.x1, screenRect.y1, screenRect.x2, screenRect.y2 );
+	}
 
 	if ( r_useDepthBoundsTest.GetInteger() ) {
 		R_TransformEyeZToWin( -bounds[0].x, tr.viewDef->projectionMatrix, screenRect.zmin );
@@ -181,29 +270,54 @@ void R_ShowColoredScreenRect( const idScreenRect &rect, int colorIndex ) {
 R_ToggleSmpFrame
 ====================
 */
+static frameData_t *smpFrames[2];
+static thread_local frameData_t *backEndFrameData;
+
+frameData_t *R_BackEndFrameData( void ) {
+	return backEndFrameData != NULL ? backEndFrameData : frameData;
+}
+
+void R_SetBackEndFrameData( frameData_t *frame ) {
+	backEndFrameData = frame;
+}
+
+// Ambient surfaces and interaction surfaces may share vertices across both
+// deferred lists. Drain them as one batch, so the reference-count prepass runs
+// before either arena's ambient owners can be returned to the tri allocator.
+void R_FreeDeferredFrameSurfaces( void ) {
+	frameData_t deferred = {};
+	for ( int i = 0; i < 2; ++i ) {
+		frameData_t *frame = smpFrames[i];
+		if ( frame == NULL || frame->firstDeferredFreeTriSurf == NULL ) continue;
+		if ( deferred.lastDeferredFreeTriSurf != NULL ) {
+			deferred.lastDeferredFreeTriSurf->nextDeferredFree = frame->firstDeferredFreeTriSurf;
+		} else {
+			deferred.firstDeferredFreeTriSurf = frame->firstDeferredFreeTriSurf;
+		}
+		deferred.lastDeferredFreeTriSurf = frame->lastDeferredFreeTriSurf;
+		frame->firstDeferredFreeTriSurf = frame->lastDeferredFreeTriSurf = NULL;
+	}
+	R_FreeDeferredTriSurfs( &deferred );
+}
+
 void R_ToggleSmpFrame( void ) {
+	R_RenderThread_Sync( "frame reset" );
+	R_AdvanceFrameData();
+}
+
+void R_AdvanceFrameData( void ) {
 	if ( r_lockSurfaces.GetBool() ) {
 		return;
 	}
-	R_FreeDeferredTriSurfs( frameData );
-
-	// clear frame-temporary data
-	frameData_t		*frame;
-	frameMemoryBlock_t	*block;
-
-	// update the highwater mark
-	R_CountFrameData();
-
-	frame = frameData;
-
-	// reset the memory allocation to the first block
-	frame->alloc = frame->memory;
-
-	// clear all the blocks
-	for ( block = frame->memory ; block ; block = block->next ) {
+	if ( !R_RenderThread_InFlight() ) R_CountFrameData();
+	// Full overlap drains before waking the worker. Never touch either
+	// deferred list while the consumer can append defensive frees to its slot.
+	if ( !R_RenderThread_InFlight() ) R_FreeDeferredFrameSurfaces();
+	frameData = smpFrames[frameData->slot ^ 1];
+	frameData->alloc = frameData->memory;
+	for ( frameMemoryBlock_t *block = frameData->memory; block; block = block->next ) {
 		block->used = 0;
 	}
-
 	R_ClearCommandChain();
 }
 
@@ -217,52 +331,47 @@ void R_ToggleSmpFrame( void ) {
 R_ShutdownFrameData
 =====================
 */
+void R_ClearRetainedSnapshotIndexes();
 void R_ShutdownFrameData( void ) {
-	frameData_t *frame;
-	frameMemoryBlock_t *block;
-
-	// free any current data
-	frame = frameData;
-	if ( !frame ) {
-		return;
+	R_RenderThread_Sync( "frame shutdown" );
+	R_ClearRetainedSnapshotIndexes();
+	R_FreeDeferredFrameSurfaces();
+	frameData = NULL;
+	R_SetBackEndFrameData( NULL );
+	for ( int i = 0; i < 2; ++i ) {
+		frameData_t *frame = smpFrames[i];
+		if ( frame == NULL ) {
+			continue;
+		}
+		for ( frameMemoryBlock_t *block = frame->memory; block; ) {
+			frameMemoryBlock_t *next = block->next;
+			Mem_Free16( block );
+			block = next;
+		}
+		Mem_Free( frame );
+		smpFrames[i] = NULL;
 	}
-
-	R_FreeDeferredTriSurfs( frame );
-
-	frameMemoryBlock_t *nextBlock;
-	for ( block = frame->memory ; block ; block = nextBlock ) {
-		nextBlock = block->next;
-		Mem_Free( block );
-	}
-	Mem_Free( frame );
 	frameData = NULL;
 }
 
-/*
-=====================
-R_InitFrameData
-=====================
-*/
+void R_FrameOwnershipSelfTest_f( const idCmdArgs &args );
+void R_FrameSnapshotStats_f( const idCmdArgs &args );
+
 void R_InitFrameData( void ) {
-	int size;
-	frameData_t *frame;
-	frameMemoryBlock_t *block;
-
+	cmdSystem->AddCommand( "rendererFrameOwnershipSelfTest", R_FrameOwnershipSelfTest_f, CMD_FL_RENDERER, "validates submitted frame snapshots without input or rendering" );
+	cmdSystem->AddCommand( "rendererFrameSnapshotStats", R_FrameSnapshotStats_f, CMD_FL_RENDERER, "reset starts snapshot copy/timing accounting; a label prints and stops it" );
 	R_ShutdownFrameData();
-
-	frameData = (frameData_t *)Mem_ClearedAlloc( sizeof( *frameData ));
-	frame = frameData;
-	size = MEMORY_BLOCK_SIZE;
-	block = (frameMemoryBlock_t *)Mem_Alloc( size + sizeof( *block ) );
-	if ( !block ) {
-		common->FatalError( "R_InitFrameData: Mem_Alloc() failed" );
+	for ( int i = 0; i < 2; ++i ) {
+		frameData_t *frame = (frameData_t *)Mem_ClearedAlloc( sizeof( *frame ) );
+		frameMemoryBlock_t *block = (frameMemoryBlock_t *)Mem_Alloc16( MEMORY_BLOCK_SIZE + sizeof( *block ) );
+		block->size = MEMORY_BLOCK_SIZE;
+		block->used = 0;
+		block->next = NULL;
+		frame->memory = frame->alloc = block;
+		frame->slot = i;
+		smpFrames[i] = frame;
 	}
-	block->size = size;
-	block->used = 0;
-	block->next = NULL;
-	frame->memory = block;
-	frame->memoryHighwater = 0;
-
+	frameData = smpFrames[1];
 	R_ToggleSmpFrame();
 }
 
@@ -295,46 +404,131 @@ int R_CountFrameData( void ) {
 
 /*
 =================
-R_StaticAlloc
+R_ImageToolsCounters
+
+R_StaticAlloc/R_StaticFree moved into the shared imagetools library; the
+renderer keeps its performance counters through these installed hooks.
 =================
 */
-void *R_StaticAlloc( int bytes ) {
-	void	*buf;
-
+static void R_ImageToolsOnStaticAlloc( size_t bytes ) {
+	if ( R_RenderThread_OnRenderThread() ) { R_BackEndFrameData()->backendAllocCount++; R_BackEndFrameData()->backendStaticAllocBytes += bytes; return; }
 	tr.pc.c_alloc++;
-
 	tr.staticAllocCount += bytes;
-
-    buf = Mem_Alloc( bytes );
-
-	// don't exit on failure on zero length allocations since the old code didn't
-	if ( !buf && ( bytes != 0 ) ) {
-		common->FatalError( "R_StaticAlloc failed on %i bytes", bytes );
-	}
-	return buf;
 }
 
-/*
-=================
-R_ClearedStaticAlloc
-=================
-*/
-void *R_ClearedStaticAlloc( int bytes ) {
-	void	*buf;
-
-	buf = R_StaticAlloc( bytes );
-	SIMDProcessor->Memset( buf, 0, bytes );
-	return buf;
-}
-
-/*
-=================
-R_StaticFree
-=================
-*/
-void R_StaticFree( void *data ) {
+static void R_ImageToolsOnStaticFree( void ) {
+	if ( R_RenderThread_OnRenderThread() ) { R_BackEndFrameData()->backendFreeCount++; return; }
 	tr.pc.c_free++;
-    Mem_Free( data );
+}
+
+void R_InstallImageToolsHooks( void ) {
+	imageToolsAllocHooks_t allocHooks;
+
+	allocHooks.onStaticAlloc = R_ImageToolsOnStaticAlloc;
+	allocHooks.onStaticFree = R_ImageToolsOnStaticFree;
+	ImageTools_SetStaticAllocHooks( allocHooks );
+}
+
+/*
+=================
+R_RenderGeoHooks
+
+Live renderer behavior for the shared render-geometry library. The library's
+defaults are the dmap-correct behavior; these bind the renderer's cvars,
+performance counters, vertex-cache lifetime, deferred frees, and the dynamic
+turbo-shadow path.
+=================
+*/
+static bool R_GeoUseSilRemap( void ) {
+	return r_useSilRemap.GetBool();
+}
+
+static bool R_GeoReportSilEdgeWarnings( void ) {
+	return r_reportSilhouetteEdgeWarnings.GetBool();
+}
+
+static bool R_GeoShadowsEnabled( void ) {
+	return r_shadows.GetBool();
+}
+
+static void R_GeoCountTangentIndexes( int amount ) {
+	if ( R_RenderThread_OnRenderThread() ) { R_BackEndFrameData()->backendTangentIndexes += amount; return; }
+	tr.pc.c_tangentIndexes += amount;
+}
+
+static void R_GeoCountShadowVolume( void ) {
+	if ( R_RenderThread_OnRenderThread() ) { R_BackEndFrameData()->backendShadowVolumes++; return; }
+	tr.pc.c_createShadowVolumes++;
+}
+
+static void R_GeoFreeTriSurfVertCache( vertCache_t *&cache ) {
+	if ( cache != NULL ) {
+		if ( cache->tag != TAG_TEMP ) {
+			vertexCache.Free( cache );
+		}
+		cache = NULL;
+	}
+}
+
+static void R_GeoFreeVertexCaches( srfTriangles_t *tri ) {
+	if ( tri->ambientSurface == NULL ) {
+		// this is a real model surface
+		R_GeoFreeTriSurfVertCache( tri->ambientCache );
+	} else {
+		// this is a light interaction surface that references
+		// a different ambient model surface
+		R_GeoFreeTriSurfVertCache( tri->lightingCache );
+	}
+	R_GeoFreeTriSurfVertCache( tri->indexCache );
+	if ( tri->shadowCache && ( tri->shadowVertexes != NULL || tri->verts != NULL ) ) {
+		// if we don't have tri->shadowVertexes, these are a reference to a
+		// shadowCache on the original surface, which a vertex program
+		// will take care of making unique for each light
+		R_GeoFreeTriSurfVertCache( tri->shadowCache );
+	}
+}
+
+static bool R_GeoDeferFree( srfTriangles_t *tri ) {
+	frameData_t *frame = R_BackEndFrameData();
+
+	if ( !frame ) {
+		// command line utility, or rendering in editor preview mode
+		return false;
+	}
+	tri->nextDeferredFree = NULL;
+	if ( frame->lastDeferredFreeTriSurf ) {
+		frame->lastDeferredFreeTriSurf->nextDeferredFree = tri;
+	} else {
+		frame->firstDeferredFreeTriSurf = tri;
+	}
+	frame->lastDeferredFreeTriSurf = tri;
+	return true;
+}
+
+static bool R_GeoTryTurboShadow( const idRenderEntityLocal *ent, const srfTriangles_t *tri,
+								 const idRenderLightLocal *light, srfCullInfo_t &cullInfo, srfTriangles_t **out ) {
+	if ( !r_useTurboShadow.GetBool() ) {
+		return false;
+	}
+	*out = R_CreateTurboShadowVolumeForSurface( ent, tri, light, cullInfo );
+	return true;
+}
+
+void R_InstallRenderGeoHooks( void ) {
+	renderGeoHooks_t geoHooks;
+
+	memset( &geoHooks, 0, sizeof( geoHooks ) );
+	geoHooks.useSilRemap = R_GeoUseSilRemap;
+	geoHooks.reportSilEdgeWarnings = R_GeoReportSilEdgeWarnings;
+	geoHooks.shadowsEnabled = R_GeoShadowsEnabled;
+	geoHooks.countTangentIndexes = R_GeoCountTangentIndexes;
+	geoHooks.countShadowVolume = R_GeoCountShadowVolume;
+	geoHooks.freeVertexCaches = R_GeoFreeVertexCaches;
+	geoHooks.deferFree = R_GeoDeferFree;
+	geoHooks.tryTurboShadow = R_GeoTryTurboShadow;
+	// superOptimize/cleanupOptimizedShadowTris stay dmap-bound; SetHooks
+	// preserves them
+	RenderGeo_SetHooks( geoHooks );
 }
 
 /*
@@ -366,10 +560,22 @@ void *R_FrameAlloc( int bytes ) {
 	frameData_t		*frame;
 	frameMemoryBlock_t	*block;
 	void			*buf;
-    
+
+	// a frame on the render thread owns frame memory until it completes;
+	// the backend's own allocations run on that thread
+	R_RenderThread_SyncFrontEnd( "frame memory" );
+
+	// A negative size (an overflowed count*sizeof in a caller) would round to a
+	// still-negative value, pass the first-fit test below, rewind block->used,
+	// and silently hand back overlapping live memory. Reject it, and fold the
+	// oversize fatal up here so a huge positive request that wraps to negative
+	// after the +16 rounding is also caught before the block math runs.
+	if ( bytes < 0 || bytes > idMath::INT_MAX - 16 ) {
+		common->FatalError( "R_FrameAlloc: invalid size %i", bytes );
+	}
 	bytes = (bytes+16)&~15;
 	// see if it can be satisfied in the current block
-	frame = frameData;
+	frame = R_BackEndFrameData();
 	block = frame->alloc;
 
 	if ( block->size - block->used >= bytes ) {
@@ -378,28 +584,18 @@ void *R_FrameAlloc( int bytes ) {
 		return buf;
 	}
 
-	// advance to the next memory block if available
+	// Reuse a sufficiently large block, or insert one after the current
+	// allocation block. Large frame-owned skin/cache copies need not fit the
+	// ordinary one-megabyte arena granule.
 	block = block->next;
-	// create a new block if we are at the end of
-	// the chain
-	if ( !block ) {
-		int		size;
-
-		size = MEMORY_BLOCK_SIZE;
-		block = (frameMemoryBlock_t *)Mem_Alloc( size + sizeof( *block ) );
-		if ( !block ) {
-			common->FatalError( "R_FrameAlloc: Mem_Alloc() failed" );
-		}
-		block->size = size;
-		block->used = 0;
-		block->next = NULL;
-		frame->alloc->next = block;
-	}
-
-	// we could fix this if we needed to...
-	if ( bytes > block->size ) {
-		common->FatalError( "R_FrameAlloc of %i exceeded MEMORY_BLOCK_SIZE",
-			bytes );
+	if ( block == NULL || block->size < bytes ) {
+		const int size = Max( MEMORY_BLOCK_SIZE, bytes );
+		frameMemoryBlock_t *fresh = (frameMemoryBlock_t *)Mem_Alloc16( static_cast<size_t>( size ) + sizeof( *fresh ) );
+		fresh->size = size;
+		fresh->used = 0;
+		fresh->next = block;
+		frame->alloc->next = fresh;
+		block = fresh;
 	}
 
 	frame->alloc = block;
@@ -442,123 +638,16 @@ void R_FrameFree( void *data ) {
 
 //==========================================================================
 
-void R_AxisToModelMatrix( const idMat3 &axis, const idVec3 &origin, float modelMatrix[16] ) {
-	modelMatrix[0] = axis[0][0];
-	modelMatrix[4] = axis[1][0];
-	modelMatrix[8] = axis[2][0];
-	modelMatrix[12] = origin[0];
-
-	modelMatrix[1] = axis[0][1];
-	modelMatrix[5] = axis[1][1];
-	modelMatrix[9] = axis[2][1];
-	modelMatrix[13] = origin[1];
-
-	modelMatrix[2] = axis[0][2];
-	modelMatrix[6] = axis[1][2];
-	modelMatrix[10] = axis[2][2];
-	modelMatrix[14] = origin[2];
-
-	modelMatrix[3] = 0;
-	modelMatrix[7] = 0;
-	modelMatrix[11] = 0;
-	modelMatrix[15] = 1;
-}
 
 
 // FIXME: these assume no skewing or scaling transforms
 
-void R_LocalPointToGlobal( const float modelMatrix[16], const idVec3 &in, idVec3 &out ) {
-#if defined(MACOS_X) && defined(__i386__)
-	__m128 m0, m1, m2, m3;
-	__m128 in0, in1, in2;
-	float i0,i1,i2;
-	i0 = in[0];
-	i1 = in[1];
-	i2 = in[2];
-	
-	m0 = _mm_loadu_ps(&modelMatrix[0]);
-	m1 = _mm_loadu_ps(&modelMatrix[4]);
-	m2 = _mm_loadu_ps(&modelMatrix[8]);
-	m3 = _mm_loadu_ps(&modelMatrix[12]);
-	
-	in0 = _mm_load1_ps(&i0);
-	in1 = _mm_load1_ps(&i1);
-	in2 = _mm_load1_ps(&i2);
-	
-	m0 = _mm_mul_ps(m0, in0);
-	m1 = _mm_mul_ps(m1, in1);
-	m2 = _mm_mul_ps(m2, in2);
 
-	m0 = _mm_add_ps(m0, m1);
-	m0 = _mm_add_ps(m0, m2);
-	m0 = _mm_add_ps(m0, m3);
-	
-	_mm_store_ss(&out[0], m0);
-	m1 = (__m128) _mm_shuffle_epi32((__m128i)m0, 0x55);
-	_mm_store_ss(&out[1], m1);
-	m2 = _mm_movehl_ps(m2, m0);
-	_mm_store_ss(&out[2], m2);
-#else	
-	out[0] = in[0] * modelMatrix[0] + in[1] * modelMatrix[4]
-		+ in[2] * modelMatrix[8] + modelMatrix[12];
-	out[1] = in[0] * modelMatrix[1] + in[1] * modelMatrix[5]
-		+ in[2] * modelMatrix[9] + modelMatrix[13];
-	out[2] = in[0] * modelMatrix[2] + in[1] * modelMatrix[6]
-		+ in[2] * modelMatrix[10] + modelMatrix[14];
-#endif
-}
 
-void R_PointTimesMatrix( const float modelMatrix[16], const idVec4 &in, idVec4 &out ) {
-	out[0] = in[0] * modelMatrix[0] + in[1] * modelMatrix[4]
-		+ in[2] * modelMatrix[8] + modelMatrix[12];
-	out[1] = in[0] * modelMatrix[1] + in[1] * modelMatrix[5]
-		+ in[2] * modelMatrix[9] + modelMatrix[13];
-	out[2] = in[0] * modelMatrix[2] + in[1] * modelMatrix[6]
-		+ in[2] * modelMatrix[10] + modelMatrix[14];
-	out[3] = in[0] * modelMatrix[3] + in[1] * modelMatrix[7]
-		+ in[2] * modelMatrix[11] + modelMatrix[15];
-}
 
-void R_GlobalPointToLocal( const float modelMatrix[16], const idVec3 &in, idVec3 &out ) {
-	idVec3	temp;
 
-	VectorSubtract( in, &modelMatrix[12], temp );
 
-	out[0] = DotProduct( temp, &modelMatrix[0] );
-	out[1] = DotProduct( temp, &modelMatrix[4] );
-	out[2] = DotProduct( temp, &modelMatrix[8] );
-}
 
-void R_LocalVectorToGlobal( const float modelMatrix[16], const idVec3 &in, idVec3 &out ) {
-	out[0] = in[0] * modelMatrix[0] + in[1] * modelMatrix[4]
-		+ in[2] * modelMatrix[8];
-	out[1] = in[0] * modelMatrix[1] + in[1] * modelMatrix[5]
-		+ in[2] * modelMatrix[9];
-	out[2] = in[0] * modelMatrix[2] + in[1] * modelMatrix[6]
-		+ in[2] * modelMatrix[10];
-}
-
-void R_GlobalVectorToLocal( const float modelMatrix[16], const idVec3 &in, idVec3 &out ) {
-	out[0] = DotProduct( in, &modelMatrix[0] );
-	out[1] = DotProduct( in, &modelMatrix[4] );
-	out[2] = DotProduct( in, &modelMatrix[8] );
-}
-
-void R_GlobalPlaneToLocal( const float modelMatrix[16], const idPlane &in, idPlane &out ) {
-	out[0] = DotProduct( in, &modelMatrix[0] );
-	out[1] = DotProduct( in, &modelMatrix[4] );
-	out[2] = DotProduct( in, &modelMatrix[8] );
-	out[3] = in[3] + modelMatrix[12] * in[0] + modelMatrix[13] * in[1] + modelMatrix[14] * in[2];
-}
-
-void R_LocalPlaneToGlobal( const float modelMatrix[16], const idPlane &in, idPlane &out ) {
-	float	offset;
-
-	R_LocalVectorToGlobal( modelMatrix, in.Normal(), out.Normal() );
-
-	offset = modelMatrix[12] * out[0] + modelMatrix[13] * out[1] + modelMatrix[14] * out[2];
-	out[3] = in[3] - offset;
-}
 
 // transform Z in eye coordinates to window coordinates
 void R_TransformEyeZToWin( float src_z, const float *projectionMatrix, float &dst_z ) {
@@ -633,7 +722,6 @@ bool R_CornerCullLocalBox( const idBounds &bounds, const float modelMatrix[16], 
 	if ( r_useCulling.GetInteger() < 2 ) {
 		return false;
 	}
-
 	if ( numPlanes <= 0 || numPlanes > 6 || planes == NULL || modelMatrix == NULL ) {
 		return false;
 	}
@@ -832,6 +920,44 @@ void R_TransposeGLMatrix( const float in[16], float out[16] ) {
 	}
 }
 
+bool tr_levelshotProjectionShiftActive = false;
+float tr_levelshotProjectionShiftX = 0.0f;
+float tr_levelshotProjectionShiftY = 0.0f;
+levelshotDepthCapture_t tr_levelshotDepthCapture = { NULL, 0, 0, false };
+
+/*
+=================
+R_ViewFovTangentsValid
+
+An off-axis (head-mounted display) frustum: finite tangents with left < right
+and down < up, short of 88 degrees off axis. See VRMathCore.h.
+=================
+*/
+bool R_ViewFovTangentsValid( const renderView_t &renderView ) {
+	const float limit = 30.0f;
+	const float tangents[4] = { renderView.fovTanLeft, renderView.fovTanRight, renderView.fovTanUp, renderView.fovTanDown };
+	for ( int i = 0; i < 4; i++ ) {
+		if ( FLOAT_IS_NAN( tangents[i] ) || idMath::Fabs( tangents[i] ) > limit ) {
+			return false;
+		}
+	}
+	return renderView.fovTanLeft < renderView.fovTanRight && renderView.fovTanDown < renderView.fovTanUp;
+}
+
+/*
+=================
+R_ViewUsesOffAxisFrustum
+
+Levelshot tiles and VR eyes both build their projection and culling planes
+from near-plane extents instead of the symmetric fov_x/fov_y.
+=================
+*/
+static bool R_ViewUsesOffAxisFrustum( void ) {
+	return tr_levelshotProjectionShiftActive || tr.viewDef->renderView.asymmetricFov;
+}
+
+static void R_GetViewFrustumExtents( float &zNear, float &xmin, float &xmax, float &ymin, float &ymax );
+
 /*
 =================
 R_SetViewMatrix
@@ -903,6 +1029,14 @@ void R_SetupProjection( void ) {
 	float	jitterx, jittery;
 	static	idRandom random;
 
+	R_TemporalPresentation_PrepareView( tr.viewDef );
+
+	// Temporal AA owns a deterministic, backend-neutral sub-pixel sequence.
+	// The legacy random path remains for multi-frame screenshot accumulation.
+	if ( tr.viewDef->temporalJitterEnabled ) {
+		jitterx = tr.viewDef->temporalJitterPixels.x;
+		jittery = tr.viewDef->temporalJitterPixels.y;
+	} else
 	// random jittering is usefull when multiple
 	// frames are going to be blended together
 	// for motion blurred anti-aliasing
@@ -916,19 +1050,17 @@ void R_SetupProjection( void ) {
 	//
 	// set up projection matrix
 	//
-	zNear	= r_znear.GetFloat();
-	if ( tr.viewDef->renderView.cramZNear ) {
-		zNear *= 0.25;
-	}
-
-	ymax = zNear * tan( tr.viewDef->renderView.fov_y * idMath::PI / 360.0f );
-	ymin = -ymax;
-
-	xmax = zNear * tan( tr.viewDef->renderView.fov_x * idMath::PI / 360.0f );
-	xmin = -xmax;
+	R_GetViewFrustumExtents( zNear, xmin, xmax, ymin, ymax );
 
 	width = xmax - xmin;
 	height = ymax - ymin;
+
+	// Post effects with their own camera history (motion blur) compare and
+	// reproject without the sub-pixel jitter; the backend may also recenter
+	// the applied offsets, so record the jitter-free values explicitly.
+	tr.viewDef->temporalNeutralProjectionOffset.Set(
+		( xmax + xmin ) / width, ( ymax + ymin ) / height );
+	tr.viewDef->temporalNeutralProjectionValid = true;
 
 	jitterx = jitterx * width / ( tr.viewDef->viewport.x2 - tr.viewDef->viewport.x1 + 1 );
 	xmin += jitterx;
@@ -959,6 +1091,41 @@ void R_SetupProjection( void ) {
 	tr.viewDef->projectionMatrix[7] = 0;
 	tr.viewDef->projectionMatrix[11] = -1;
 	tr.viewDef->projectionMatrix[15] = 0;
+
+	R_TemporalPresentation_FinalizeViewProjection( tr.viewDef );
+}
+
+static void R_GetViewFrustumExtents( float &zNear, float &xmin, float &xmax, float &ymin, float &ymax ) {
+	zNear = r_znear.GetFloat();
+	if ( tr.viewDef->renderView.cramZNear ) {
+		zNear *= 0.25f;
+	}
+
+	if ( tr.viewDef->renderView.asymmetricFov ) {
+		// a VR eye: the runtime's tangents are the frustum (validated in RenderScene)
+		xmin = zNear * tr.viewDef->renderView.fovTanLeft;
+		xmax = zNear * tr.viewDef->renderView.fovTanRight;
+		ymin = zNear * tr.viewDef->renderView.fovTanDown;
+		ymax = zNear * tr.viewDef->renderView.fovTanUp;
+		return;
+	}
+
+	ymax = zNear * tan( tr.viewDef->renderView.fov_y * idMath::PI / 360.0f );
+	ymin = -ymax;
+
+	xmax = zNear * tan( tr.viewDef->renderView.fov_x * idMath::PI / 360.0f );
+	xmin = -xmax;
+
+	if ( tr_levelshotProjectionShiftActive ) {
+		const float width = xmax - xmin;
+		const float height = ymax - ymin;
+		const float xShift = 0.5f * width * tr_levelshotProjectionShiftX;
+		const float yShift = 0.5f * height * tr_levelshotProjectionShiftY;
+		xmin += xShift;
+		xmax += xShift;
+		ymin += yShift;
+		ymax += yShift;
+	}
 }
 
 /*
@@ -971,23 +1138,57 @@ FIXME: derive from modelview matrix times projection matrix
 */
 static void R_SetupViewFrustum( void ) {
 	int		i;
+	float	zNear;
+	float	xmin, xmax, ymin, ymax;
 	float	xs, xc;
 	float	ang;
 
-	ang = DEG2RAD( tr.viewDef->renderView.fov_x ) * 0.5f;
-	idMath::SinCos( ang, xs, xc );
+	const bool offAxis = R_ViewUsesOffAxisFrustum();
+	if ( offAxis ) {
+		const idVec3 &forward = tr.viewDef->renderView.viewaxis[0];
+		const idVec3 &horizontal = tr.viewDef->renderView.viewaxis[1];
+		const idVec3 &vertical = tr.viewDef->renderView.viewaxis[2];
 
-	tr.viewDef->frustum[0] = xs * tr.viewDef->renderView.viewaxis[0] + xc * tr.viewDef->renderView.viewaxis[1];
-	tr.viewDef->frustum[1] = xs * tr.viewDef->renderView.viewaxis[0] - xc * tr.viewDef->renderView.viewaxis[1];
+		R_GetViewFrustumExtents( zNear, xmin, xmax, ymin, ymax );
 
-	ang = DEG2RAD( tr.viewDef->renderView.fov_y ) * 0.5f;
-	idMath::SinCos( ang, xs, xc );
+		// Off-axis levelshot tiles and VR eyes need frustum planes that match
+		// their projection. Keep this branch isolated so ordinary gameplay stays
+		// on the stock frustum setup. The horizontal pair carries the s_flipMatrix sign
+		// flip (engine left -> GL -x); the vertical axis maps to GL +y unflipped,
+		// so its planes take the opposite extents.
+		tr.viewDef->frustum[0] = xmax * forward + zNear * horizontal;
+		tr.viewDef->frustum[1] = -xmin * forward - zNear * horizontal;
+		tr.viewDef->frustum[2] = -ymin * forward + zNear * vertical;
+		tr.viewDef->frustum[3] = ymax * forward - zNear * vertical;
 
-	tr.viewDef->frustum[2] = xs * tr.viewDef->renderView.viewaxis[0] + xc * tr.viewDef->renderView.viewaxis[2];
-	tr.viewDef->frustum[3] = xs * tr.viewDef->renderView.viewaxis[0] - xc * tr.viewDef->renderView.viewaxis[2];
+		// Unit normals, as the stock branch's sine and cosine give: built from the
+		// near-plane extents these come out zNear * sqrt( 1 + tan^2 ) long, four
+		// to five times too long for a VR eye, and R_RadiusCullLocalBox compares
+		// plane distances against a world radius. Unnormalized, it threw away
+		// boxes reaching well into the eye: a whole outdoor area's world model
+		// (terrain and buildings) in one eye of airdefense1.
+		for ( i = 0; i < 4; i++ ) {
+			tr.viewDef->frustum[i].Normal().Normalize();
+		}
 
-	// plane four is the front clipping plane
-	tr.viewDef->frustum[4] = /* vec3_origin - */ tr.viewDef->renderView.viewaxis[0];
+		// plane four is the front clipping plane
+		tr.viewDef->frustum[4] = /* vec3_origin - */ forward;
+	} else {
+		ang = DEG2RAD( tr.viewDef->renderView.fov_x ) * 0.5f;
+		idMath::SinCos( ang, xs, xc );
+
+		tr.viewDef->frustum[0] = xs * tr.viewDef->renderView.viewaxis[0] + xc * tr.viewDef->renderView.viewaxis[1];
+		tr.viewDef->frustum[1] = xs * tr.viewDef->renderView.viewaxis[0] - xc * tr.viewDef->renderView.viewaxis[1];
+
+		ang = DEG2RAD( tr.viewDef->renderView.fov_y ) * 0.5f;
+		idMath::SinCos( ang, xs, xc );
+
+		tr.viewDef->frustum[2] = xs * tr.viewDef->renderView.viewaxis[0] + xc * tr.viewDef->renderView.viewaxis[2];
+		tr.viewDef->frustum[3] = xs * tr.viewDef->renderView.viewaxis[0] - xc * tr.viewDef->renderView.viewaxis[2];
+
+		// plane four is the front clipping plane
+		tr.viewDef->frustum[4] = /* vec3_origin - */ tr.viewDef->renderView.viewaxis[0];
+	}
 
 	for ( i = 0; i < 5; i++ ) {
 		// flip direction so positive side faces out (FIXME: globally unify this)
@@ -1003,10 +1204,16 @@ static void R_SetupViewFrustum( void ) {
 	if ( tr.viewDef->renderView.cramZNear ) {
 		dNear *= 0.25f;
 	}
-
 	dFar = MAX_WORLD_SIZE;
-	dLeft = dFar * tan( DEG2RAD( tr.viewDef->renderView.fov_x * 0.5f ) );
-	dUp = dFar * tan( DEG2RAD( tr.viewDef->renderView.fov_y * 0.5f ) );
+	if ( offAxis ) {
+		// the culling volume encloses the off-axis frustum symmetrically;
+		// R_ScreenRectFromViewFrustumBounds maps it back through the real extents
+		dLeft = dFar * Max( idMath::Fabs( xmin ), idMath::Fabs( xmax ) ) / Max( dNear, idMath::FLOAT_EPSILON );
+		dUp = dFar * Max( idMath::Fabs( ymin ), idMath::Fabs( ymax ) ) / Max( dNear, idMath::FLOAT_EPSILON );
+	} else {
+		dLeft = dFar * tan( DEG2RAD( tr.viewDef->renderView.fov_x * 0.5f ) );
+		dUp = dFar * tan( DEG2RAD( tr.viewDef->renderView.fov_y * 0.5f ) );
+	}
 	tr.viewDef->viewFrustum.SetOrigin( tr.viewDef->renderView.vieworg );
 	tr.viewDef->viewFrustum.SetAxis( tr.viewDef->renderView.viewaxis );
 	tr.viewDef->viewFrustum.SetSize( dNear, dFar, dLeft, dUp );
@@ -1045,36 +1252,101 @@ DRAWSURF SORTING
 
 
 /*
-=======================
-R_QsortSurfaces
-
-=======================
-*/
-static int R_QsortSurfaces( const void *a, const void *b ) {
-	const drawSurf_t	*ea, *eb;
-
-	ea = *(drawSurf_t **)a;
-	eb = *(drawSurf_t **)b;
-
-	if ( ea->sort < eb->sort ) {
-		return -1;
-	}
-	if ( ea->sort > eb->sort ) {
-		return 1;
-	}
-	return 0;
-}
-
-
-/*
 =================
 R_SortDrawSurfs
+
+Sorts the drawsurfs by sort type, then orientation, then shader.
+
+Replaces the indirect-call CRT qsort with a stable LSD radix sort on the
+IEEE-754 bit pattern of the float sort key (small lists use an insertion
+sort). This runs every view at presentation rate, so the constant factor
+matters; the radix passes also skip bytes that are constant across all keys,
+which covers the exponent bytes of typical material sort values.
 =================
 */
+typedef struct {
+	unsigned int	key;
+	drawSurf_t *	surf;
+} sortRecord_t;
+
 static void R_SortDrawSurfs( void ) {
-	// sort the drawsurfs by sort type, then orientation, then shader
-	qsort( tr.viewDef->drawSurfs, tr.viewDef->numDrawSurfs, sizeof( tr.viewDef->drawSurfs[0] ),
-		R_QsortSurfaces );
+	const int count = tr.viewDef->numDrawSurfs;
+	drawSurf_t **surfs = tr.viewDef->drawSurfs;
+
+	if ( count < 2 ) {
+		return;
+	}
+
+	// small per-view lists: insertion sort beats the radix setup cost
+	if ( count <= 64 ) {
+		for ( int i = 1; i < count; i++ ) {
+			drawSurf_t *s = surfs[i];
+			const float key = s->sort;
+			int j = i - 1;
+			while ( j >= 0 && surfs[j]->sort > key ) {
+				surfs[j + 1] = surfs[j];
+				j--;
+			}
+			surfs[j + 1] = s;
+		}
+		return;
+	}
+
+	sortRecord_t *a = (sortRecord_t *)R_FrameAlloc( count * sizeof( sortRecord_t ) );
+	sortRecord_t *b = (sortRecord_t *)R_FrameAlloc( count * sizeof( sortRecord_t ) );
+
+	// map the float keys to unsigned ints with the same ordering:
+	// flip all bits of negatives, flip only the sign bit of positives
+	for ( int i = 0; i < count; i++ ) {
+		unsigned int bits;
+		memcpy( &bits, &surfs[i]->sort, sizeof( bits ) );
+		bits ^= ( bits & 0x80000000u ) ? 0xFFFFFFFFu : 0x80000000u;
+		a[i].key = bits;
+		a[i].surf = surfs[i];
+	}
+
+	for ( int shift = 0; shift < 32; shift += 8 ) {
+		int hist[256] = { 0 };
+		for ( int i = 0; i < count; i++ ) {
+			hist[( a[i].key >> shift ) & 255]++;
+		}
+		// all keys share this byte, nothing to reorder
+		if ( hist[( a[0].key >> shift ) & 255] == count ) {
+			continue;
+		}
+		int offset = 0;
+		for ( int j = 0; j < 256; j++ ) {
+			const int bucketCount = hist[j];
+			hist[j] = offset;
+			offset += bucketCount;
+		}
+		for ( int i = 0; i < count; i++ ) {
+			b[hist[( a[i].key >> shift ) & 255]++] = a[i];
+		}
+		sortRecord_t *swap = a;
+		a = b;
+		b = swap;
+	}
+
+	for ( int i = 0; i < count; i++ ) {
+		surfs[i] = a[i].surf;
+	}
+}
+
+static int R_CountViewEntityList( const viewEntity_t *viewEntity ) {
+	int count = 0;
+	for ( const viewEntity_t *current = viewEntity; current != NULL; current = current->next ) {
+		count++;
+	}
+	return count;
+}
+
+static int R_CountViewLightList( const viewLight_t *viewLight ) {
+	int count = 0;
+	for ( const viewLight_t *current = viewLight; current != NULL; current = current->next ) {
+		count++;
+	}
+	return count;
 }
 
 
@@ -1112,59 +1384,255 @@ void R_RenderView( viewDef_t *parms ) {
 
 	tr.sortOffset = 0;
 
+	const int viewBuildReportMode = r_showViewBuildTimes.GetInteger();
+	const int viewBuildInterval = Max( 1, r_showViewBuildTimesInterval.GetInteger() );
+	const bool reportViewBuildTimes =
+		viewBuildReportMode > 0 &&
+		( viewBuildReportMode >= 2 || parms->renderView.viewID >= 0 ) &&
+		( tr.frameCount % viewBuildInterval ) == 0;
+	int viewBuildTotalStart = 0;
+	int viewBuildLastMark = 0;
+	int viewBuildMatrixMsec = 0;
+	int viewBuildFrustumMsec = 0;
+	int viewBuildProjectionMsec = 0;
+	int viewBuildVisibilityMsec = 0;
+	int viewBuildConstrainMsec = 0;
+	int viewBuildLightMsec = 0;
+	int viewBuildModelMsec = 0;
+	int viewBuildEffectMsec = 0;
+	int viewBuildPruneMsec = 0;
+	int viewBuildSortMsec = 0;
+	int viewBuildSubviewMsec = 0;
+	int viewBuildPacketMsec = 0;
+	int viewBuildCommandMsec = 0;
+
+	if ( reportViewBuildTimes ) {
+		viewBuildTotalStart = Sys_Milliseconds();
+		viewBuildLastMark = viewBuildTotalStart;
+	}
+
 	// set the matrix for world space to eye space
 	R_SetViewMatrix( tr.viewDef );
+	if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildMatrixMsec = now - viewBuildLastMark;
+		viewBuildLastMark = now;
+	}
 
 	// the four sides of the view frustum are needed
 	// for culling and portal visibility
 	R_SetupViewFrustum();
+	if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildFrustumMsec = now - viewBuildLastMark;
+		viewBuildLastMark = now;
+	}
 
 	// we need to set the projection matrix before doing
 	// portal-to-screen scissor box calculations
 	R_SetupProjection();
+	if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildProjectionMsec = now - viewBuildLastMark;
+		viewBuildLastMark = now;
+	}
+
+	// drawSurf->area only feeds light-grid eligibility checks (legacy indirect
+	// pass and scene-packet capture), all of which reject every surface when no
+	// usable grid exists; skip the per-surface PointInArea BSP descent in
+	// R_AddDrawSurf whenever no light grid is available.
+	parms->skipDrawSurfAreaResolve =
+		parms->renderWorld == NULL
+		|| !static_cast<idRenderWorldLocal *>( parms->renderWorld )->AnyLightGridAvailable();
 
 	// identify all the visible portalAreas, and the entityDefs and
 	// lightDefs that are in them and pass culling.
+	const int visibilityStart = Sys_Milliseconds();
 	static_cast<idRenderWorldLocal *>(parms->renderWorld)->FindViewLightsAndEntities();
+	viewBuildVisibilityMsec = Sys_Milliseconds() - visibilityStart;
+	R_RendererMetrics_AddVisibilityMsec( viewBuildVisibilityMsec );
+	if ( reportViewBuildTimes ) {
+		viewBuildLastMark = Sys_Milliseconds();
+	}
 
 	// constrain the view frustum to the view lights and entities
 	R_ConstrainViewFrustum();
+	if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildConstrainMsec = now - viewBuildLastMark;
+		viewBuildLastMark = now;
+	}
 
 	// make sure that interactions exist for all light / entity combinations
 	// that are visible
 	// add any pre-generated light shadows, and calculate the light shader values
 	R_AddLightSurfaces();
+	if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildLightMsec = now - viewBuildLastMark;
+		viewBuildLastMark = now;
+	}
 
 	// adds ambient surfaces and create any necessary interaction surfaces to add to the light
 	// lists
 	R_AddModelSurfaces();
+	if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildModelMsec = now - viewBuildLastMark;
+		viewBuildLastMark = now;
+	}
 
 	// submit dynamic effect surfaces after the model pass has initialized drawSurf lists
 	R_AddEffectSurfaces();
+	if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildEffectMsec = now - viewBuildLastMark;
+		viewBuildLastMark = now;
+	}
+
+	// Force in the entities that want an outline wherever they are, now that every
+	// pass which walks viewEntitys or builds interactions has run. Their surfaces
+	// land on their own list, so R_SortDrawSurfs below never sees them either.
+	R_AddThroughWorldOutlines();
 
 	// any viewLight that didn't have visible surfaces can have it's shadows removed
 	R_RemoveUnecessaryViewLights();
+	// the lights that remain share the projected shadow atlas: size their tiles
+	// so they all fit, before anything reads a tile size
+	R_ShadowMapAssignAtlasTiles( tr.viewDef );
+	if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildPruneMsec = now - viewBuildLastMark;
+		viewBuildLastMark = now;
+	}
 
 	// sort all the ambient surfaces for translucency ordering
 	R_SortDrawSurfs();
+	if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildSortMsec = now - viewBuildLastMark;
+		viewBuildLastMark = now;
+	}
 
 	// generate any subviews (mirrors, cameras, etc) before adding this view
 	if ( R_GenerateSubViews() ) {
+		if ( reportViewBuildTimes ) {
+			const int now = Sys_Milliseconds();
+			viewBuildSubviewMsec = now - viewBuildLastMark;
+			viewBuildLastMark = now;
+		}
 		// if we are debugging subviews, allow the skipping of the
 		// main view draw
 		if ( r_subviewOnly.GetBool() ) {
 			return;
 		}
+	} else if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildSubviewMsec = now - viewBuildLastMark;
+		viewBuildLastMark = now;
 	}
 
 	// write everything needed to the demo file
-	if ( session->writeDemo ) {
+	if ( session->writeDemo && !(parms->renderFlags & RF_INDEPENDENT_VIEW) ) {
 		static_cast<idRenderWorldLocal *>(parms->renderWorld)->WriteVisibleDefs( tr.viewDef );
 	}
 
-	// add the rendering commands for this viewDef
+	R_SnapshotRenderView( parms );
+	if ( R_ScenePackets_FrontEndCaptureRequired() ) {
+		const int packetBuildStart = Sys_Milliseconds();
+		R_ScenePackets_AddRenderView( parms );
+		viewBuildPacketMsec = Sys_Milliseconds() - packetBuildStart;
+		R_RendererMetrics_AddPacketBuildMsec( viewBuildPacketMsec );
+		if ( reportViewBuildTimes ) {
+			viewBuildLastMark = Sys_Milliseconds();
+		}
+	}
+	// Raven's MedLabs / Alpha Labs controllers capture their source data
+	// immediately before the matching view draw, then composite from within
+	// that view. Keep the command adjacent so both renderer backends consume
+	// the same viewDef lifetime and ordering contract.
+	R_AddSpecialEffects( parms );
 	R_AddDrawViewCmd( parms );
+	if ( reportViewBuildTimes ) {
+		const int now = Sys_Milliseconds();
+		viewBuildCommandMsec = now - viewBuildLastMark;
+		common->Printf(
+			"viewBuild frame=%d viewID=%d subview=%d surfs=%d entities=%d lights=%d matrix=%d frustum=%d projection=%d visibility=%d constrain=%d light=%d model=%d effects=%d prune=%d sort=%d subviews=%d packet=%d command=%d total=%d\n",
+			tr.frameCount,
+			parms->renderView.viewID,
+			parms->isSubview ? 1 : 0,
+			parms->numDrawSurfs,
+			R_CountViewEntityList( parms->viewEntitys ),
+			R_CountViewLightList( parms->viewLights ),
+			viewBuildMatrixMsec,
+			viewBuildFrustumMsec,
+			viewBuildProjectionMsec,
+			viewBuildVisibilityMsec,
+			viewBuildConstrainMsec,
+			viewBuildLightMsec,
+			viewBuildModelMsec,
+			viewBuildEffectMsec,
+			viewBuildPruneMsec,
+			viewBuildSortMsec,
+			viewBuildSubviewMsec,
+			viewBuildPacketMsec,
+			viewBuildCommandMsec,
+			now - viewBuildTotalStart );
+	}
 
 	// restore view in case we are a subview
 	tr.viewDef = oldView;
+}
+
+
+// frame-memory-coupled triangle-surface maintenance stays renderer-side;
+// the allocators live in the shared render_geo library
+
+/*
+===============
+R_PurgeTriSurfData
+===============
+*/
+void R_PurgeTriSurfData( frameData_t *frame ) {
+	// free deferred triangle surfaces
+	R_FreeDeferredTriSurfs( frame );
+
+	// free empty base blocks (allocators live in the render_geo library)
+	RenderGeo_FreeEmptyBaseBlocks();
+}
+
+/*
+==================
+R_FreeDeferredTriSurfs
+==================
+*/
+void R_FreeDeferredTriSurfs( frameData_t *frame ) {
+	srfTriangles_t	*tri, *next;
+
+	if ( !frame ) {
+		return;
+	}
+
+	for ( tri = frame->firstDeferredFreeTriSurf; tri; tri = next ) {
+		next = tri->nextDeferredFree;
+
+		if ( tri->ambientSurface == NULL ) {
+			continue;
+		}
+
+		if ( tri->topAmbientSurface != NULL
+			&& tri->verts == tri->topAmbientSurface->verts
+			&& tri->topAmbientSurface->referenceCount > 0 ) {
+			--tri->topAmbientSurface->referenceCount;
+			tri->topAmbientSurface = NULL;
+		}
+	}
+
+	for ( tri = frame->firstDeferredFreeTriSurf; tri; tri = next ) {
+		next = tri->nextDeferredFree;
+		R_ReallyFreeStaticTriSurf( tri );
+	}
+
+	frame->firstDeferredFreeTriSurf = NULL;
+	frame->lastDeferredFreeTriSurf = NULL;
 }

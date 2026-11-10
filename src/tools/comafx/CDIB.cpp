@@ -118,7 +118,11 @@ BOOL CDIB::Create(BITMAPINFOHEADER& bmInfo)
 int i;
 BYTE **ptr;
 	m_pLinePtr = (BYTE **)malloc(sizeof(BYTE *)*height);
-	if(!m_pLinePtr) return FALSE;
+	if(!m_pLinePtr)
+	{
+		DestroyDIB();
+		return FALSE;
+	}
 	for(i=0,ptr=m_pLinePtr; i < height; i++,ptr++)
 	{
 		//*ptr = (int)(m_pBits)+(i*bytes);
@@ -264,15 +268,24 @@ CBitmap *temp;
 		LPVOID lpVoid;
 		temp->GetBitmap(&bmp);
 		lpVoid = malloc(bmp.bmWidthBytes*bmp.bmHeight);
-		if(!lpVoid) return NULL;
+		if(!lpVoid)
+		{
+			DeleteObject(hBitmap);
+			return NULL;
+		}
 		temp->GetBitmapBits(bmp.bmWidthBytes*bmp.bmHeight,lpVoid);
 		CBitmap *newBmp = new CBitmap;
 		newBmp->CreateBitmapIndirect(&bmp);
 		newBmp->SetBitmapBits(bmp.bmWidthBytes*bmp.bmHeight,lpVoid);
 		free(lpVoid);
+		DeleteObject(hBitmap);
 		return newBmp;
 	}
-	else return NULL;
+	else
+	{
+		DeleteObject(hBitmap);
+		return NULL;
+	}
 
 }
 
@@ -410,6 +423,7 @@ int xMod,yMod;
 
 unsigned char *tempPtr,*srcPix,*destPix,*q;
 	tempPtr = (unsigned char *)malloc(nDWidth+20);
+	if(!tempPtr) return;
 int i,j,k,l,x,y,m;
 int xErr,yErr;
 	for(i=yErr=m=0; i < nSHeight; i++)
@@ -609,50 +623,57 @@ UCHAR *lpVoid,*pBits;
 LPBITMAPINFOHEADER pHead;
 RGBQUAD *pRgb;
 	lpVoid = (UCHAR *)GlobalLock(hMem);
+	if(lpVoid == NULL)
+	{
+		GlobalFree(hMem);
+		return NULL;
+	}
 	pHead = (LPBITMAPINFOHEADER )lpVoid;
 	memcpy(pHead,&m_pInfo->bmiHeader,sizeof(BITMAPINFOHEADER));
 	pRgb = (RGBQUAD *)(lpVoid + sizeof(BITMAPINFOHEADER) );
 	memcpy(pRgb,m_pRGB,sizeof(RGBQUAD)*GetPaletteSize());
 	pBits = lpVoid + sizeof(BITMAPINFOHEADER) + sizeof(RGBQUAD)*GetPaletteSize();
 	memcpy(pBits,m_pBits,height*bytes);
-	GlobalUnlock(lpVoid);
+	GlobalUnlock(hMem);
 	return hMem;
 }
 
 BOOL CDIB::CreateFromHandle(HANDLE hMem,int bits)
 {
 	DestroyDIB();
+	if(hMem == NULL) return FALSE;
 UCHAR *lpVoid,*pBits;
 LPBITMAPINFOHEADER pHead;
 RGBQUAD *pRgb;
 	lpVoid = (UCHAR *)GlobalLock(hMem);
+	if(lpVoid == NULL) return FALSE;
 	pHead = (LPBITMAPINFOHEADER )lpVoid;
 	width = pHead->biWidth;
 	height = pHead->biHeight;
 	m_nBits = pHead->biBitCount;
 	if(pHead->biCompression != BI_RGB) 
 	{
-		GlobalUnlock(lpVoid);
+		GlobalUnlock(hMem);
 		return FALSE;
 	}
 	if(pHead->biBitCount >= 15)
 	{
 		if(pHead->biBitCount != 24) 
 		{
-			GlobalUnlock(lpVoid);
+			GlobalUnlock(hMem);
 			return FALSE;
 		}
 	}
 	if(!Create(*pHead))
 	{
-		GlobalUnlock(lpVoid);
+		GlobalUnlock(hMem);
 		return FALSE;
 	}
 	pRgb = (RGBQUAD *)(lpVoid + sizeof(BITMAPINFOHEADER) );
 	memcpy(m_pRGB,pRgb,sizeof(RGBQUAD)*GetPaletteSize());
 	pBits = lpVoid + sizeof(BITMAPINFOHEADER) + sizeof(RGBQUAD)*GetPaletteSize();
 	memcpy(m_pBits,pBits,height*bytes);
-	GlobalUnlock(lpVoid);
+	GlobalUnlock(hMem);
 	return TRUE;
 }
 

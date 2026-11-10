@@ -217,7 +217,19 @@ private:
 #endif
 };
 
-	#define BIG32(v) ((((uint32)(v)) >> 24) | (((uint32)(v) & 0x00FF0000) >> 8) | (((uint32)(v) & 0x0000FF00) << 8) | ((uint32)(v) << 24))
-	#define BIG16(v) ((((uint16)(v)) >> 8) | ((uint16)(v) << 8))
+static constexpr uint32_t idSwapBig32( const uint32_t value ) {
+	return ( value >> 24 ) | ( ( value & 0x00FF0000u ) >> 8 ) |
+		( ( value & 0x0000FF00u ) << 8 ) | ( value << 24 );
+}
+
+static constexpr uint16_t idSwapBig16( const uint16_t value ) {
+	return static_cast<uint16_t>( ( value >> 8 ) | ( value << 8 ) );
+}
+
+static_assert( idSwapBig32( 0x12345678u ) == 0x78563412u, "BIG32 must swap all four bytes" );
+static_assert( idSwapBig16( 0x1234u ) == 0x3412u, "BIG16 must swap and truncate both bytes" );
+
+	#define BIG32(v) idSwapBig32( static_cast<uint32_t>( v ) )
+	#define BIG16(v) idSwapBig16( static_cast<uint16_t>( v ) )
 
 #endif // !__SWAP_H__

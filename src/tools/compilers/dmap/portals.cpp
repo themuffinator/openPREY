@@ -907,7 +907,8 @@ static void FindInterAreaPortals_r( node_t *node ) {
 		iap->side = side;
 		iap->cullNear = side->material->GetPortalNear();
 		iap->cullFar = side->material->GetPortalFar();
-		iap->portalImage = side->material->GetPortalImage();
+		const char *portalImageName = side->material->GetPortalImageName();
+		iap->portalImageName = ( portalImageName != NULL ) ? portalImageName : "";
 
 	}
 }

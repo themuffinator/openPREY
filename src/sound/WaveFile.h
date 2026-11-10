@@ -50,13 +50,17 @@ public:
 	uint32		SeekToChunk( uint32 id );
 	size_t		Read( void* buffer, size_t len )
 	{
-		return file->Read( buffer, len );
+		if( file == NULL || buffer == NULL || len == 0 || len > (size_t)idMath::INT_MAX )
+		{
+			return 0;
+		}
+		return file->Read( buffer, (int)len );
 	}
 	uint32		GetChunkOffset( uint32 id );
 
 	ID_TIME_T	Timestamp()
 	{
-		return file->Timestamp();
+		return ( file == NULL ) ? 0 : file->Timestamp();
 	}
 	const char* Name()
 	{

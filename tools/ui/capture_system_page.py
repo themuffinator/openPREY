@@ -1,0 +1,774 @@
+#!/usr/bin/env python3
+"""Capture the opt-in production SYSTEM child through the normal Session route.
+
+No testGUI, preview document, physical input, or OS screenshot is used. The fixed
+script runs after three seconds of map gameplay. This is a bounded integration
+probe; full SYSTEM, widget, editor and replacement acceptance remain open.
+"""
+from __future__ import annotations
+
+import argparse
+from functools import cmp_to_key
+from functools import reduce
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import struct
+import subprocess
+import time
+from zipfile import BadZipFile, ZipFile
+
+ROOT = Path(__file__).resolve().parents[2]
+PAGE = 'guis/menu/settings/system.q4ui'
+# Match the retained document loader's source bound, including CRLF checkouts.
+MAX_SOURCE_BYTES = 16 * 1024 * 1024
+PARENT = 'guis/mainmenu.gui'
+STAGE_MARKER = 'SYSTEM_PAGE_STAGE'
+COMPLETE = 'SYSTEM_PAGE_CAPTURE_COMPLETE'
+FIELDS = ('open', 'dirty', 'busy', 'canApply', 'phase', 'discardVisible',
+          'draftBrightness', 'baselineBrightness', 'draftShadows', 'baselineShadows',
+          'draftPostAA', 'baselinePostAA')
+CONTROLS = ('settings_brightness', 'settings_shadows', 'settings_postaa')
+EXTRA_ROWS = (('settings_bloom','Bloom','r_bloom',1,0),
+              ('settings_ssao','SSAO','r_ssao',1,0),
+              ('settings_tonemap','Tonemap','r_hdrToneMap',1,0),
+              ('settings_crt','CRT','r_crt',1,0),
+              ('settings_irradiance','Irradiance','r_useLightGrid',1,0),
+              ('settings_resolution_scale','ResolutionScale','r_screenFraction',3,100),
+              ('settings_ui_aspect','UIAspect','ui_aspectCorrection',1,1))
+EXTRA_SEED = tuple(row[4] for row in EXTRA_ROWS)
+EXTRA_CHANGED = (1,1,1,1,1,85,0)
+FIELDS += tuple(prefix+row[1] for row in EXTRA_ROWS for prefix in ('draft','baseline'))
+CONTROLS += tuple(row[0] for row in EXTRA_ROWS)
+ROLES = (2,1,3)+tuple(row[3] for row in EXTRA_ROWS)
+TYPES = tuple(1 if role==1 else 0 for role in ROLES)
+VALUE_INDICES = tuple(range(6,len(FIELDS),2))
+SCREENSHOTS = ('draft', 'applied', 'discard', 'choice', 'reloaded', 'extrasapplied', 'extrasrestored', 'returned', 'reopened')
+# The tab (the page's tab_<name> event) holding each probed control. Only the
+# current tab's rows answer, and every opening starts on GRAPHICS.
+TABS = {**{control:'image' for control in CONTROLS}, 'settings_ui_aspect':'graphics'}
+FIRST_TAB = 'graphics'
+TAB_WRITES = 2  # A switch writes page.leaving and page.tab.
+CLOSED = ('ondeactivate', 0, 0)  # Every close runs the page's onDeactivate.
+# Other sessions run clients too; a second instance otherwise exits at once.
+MULTIPLE_INSTANCES = 'win_allowMultipleInstances' if os.name == 'nt' else 'sys_allowMultipleInstances'
+
+
+def digest(path: Path) -> str:
+    result = hashlib.sha256()
+    with path.open('rb') as source:
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            result.update(block)
+    return result.hexdigest()
+
+
+def _compare_packages(left: Path, right: Path) -> int:
+    # FileSystem.cpp FS_ParseNumberedPakName / FS_ComparePk4LoadOrder.
+    # Later entries win. Preserve its capped numeric accumulator as well as
+    # padded-number priority; ordinary lexical sorting is insufficient.
+    a, b = left.name.lower(), right.name.lower()
+    ma, mb = re.fullmatch(r'pak([0-9]+)\.pk4', a), re.fullmatch(r'pak([0-9]+)\.pk4', b)
+    def number(digits):
+        value = 0
+        for digit in digits:
+            if value < 1000000: value = value * 10 + int(digit)
+        return value
+    if ma and mb:
+        ka, kb = (-len(ma[1]), number(ma[1])), (-len(mb[1]), number(mb[1]))
+        if ka != kb: return (ka > kb) - (ka < kb)
+    if bool(ma) != bool(mb):
+        ka, kb = ('pak' if ma else a), ('pak' if mb else b)
+        if ka != kb: return (ka > kb) - (ka < kb)
+        return -1 if ma else 1
+    return (a > b) - (a < b)
+
+
+def staged_source(runtime: Path) -> tuple[bytes, dict]:
+    """Resolve this page in the highest-priority cdpath/baseoq4 mount.
+
+    No extraction or source copy. SetupGameDirectories mounts cdpath last;
+    AddGameDirectory puts loose files before packages and later-loaded packages
+    before earlier ones. Addon activation and duplicate archive members require
+    runtime information this bounded probe does not have, so fail closed.
+    """
+    game = runtime / 'baseoq4'
+    if not game.is_dir(): raise ValueError('Staged baseoq4 directory is missing')
+    packages = [path for path in game.iterdir() if path.suffix.lower() == '.pk4']
+    names = [path.name.lower() for path in packages]
+    if len(set(names)) != len(names) or any(not name.isascii() for name in names):
+        raise ValueError('Ambiguous package names in staged baseoq4')
+    packages.sort(key=cmp_to_key(_compare_packages))
+    candidates, selected = [], None
+    for package in packages:
+        try:
+            with ZipFile(package) as archive:
+                members = []
+                addon = False
+                for item in archive.infolist():
+                    name = item.filename.replace('\\', '/').lower()
+                    addon |= name == 'addon.conf'
+                    if name.replace(':', '/') == PAGE:
+                        if name != PAGE or item.orig_filename != item.filename or item.is_dir():
+                            raise ValueError(f'Ambiguous SYSTEM member in {package.name}')
+                        members.append(item)
+                if len(members) > 1:
+                    raise ValueError(f'Duplicate SYSTEM members in {package.name}')
+                if not members: continue
+                if addon: raise ValueError(f'Addon-dependent SYSTEM source in {package.name}')
+                member = members[0]
+                if member.file_size > MAX_SOURCE_BYTES or member.flag_bits & 1 or member.compress_type not in (0, 8):
+                    raise ValueError(f'Unsupported SYSTEM member encoding or size in {package.name}')
+                raw = archive.read(member)  # Also verifies the member CRC.
+                binding = {'kind':'package', 'package':str(package), 'package_sha256':digest(package),
+                           'member':member.filename, 'member_sha256':hashlib.sha256(raw).hexdigest(),
+                           'member_size':len(raw), 'member_crc32':f'{member.CRC:08x}'}
+                candidates.append(binding)
+                selected = raw, binding
+        except (BadZipFile, RuntimeError, NotImplementedError) as error:
+            raise ValueError(f'Cannot verify staged package {package.name}: {error}') from error
+    loose = game
+    for part in PAGE.split('/'):
+        if not loose.is_dir(): loose = None; break
+        matches = [path for path in loose.iterdir() if path.name.lower() == part]
+        if len(matches) > 1: raise ValueError('Ambiguous loose SYSTEM path')
+        if not matches: loose = None; break
+        loose = matches[0]
+    if loose is not None:
+        if not loose.is_file(): raise ValueError('Loose SYSTEM override is not a regular file')
+        if loose.stat().st_size > MAX_SOURCE_BYTES:
+            raise ValueError('Unsupported loose SYSTEM source size')
+        raw = loose.read_bytes()
+        binding = {'kind':'loose', 'path':str(loose), 'sha256':hashlib.sha256(raw).hexdigest(), 'size':len(raw)}
+        candidates.append(binding)
+        selected = raw, binding
+    if selected is None: raise ValueError('Production SYSTEM source is absent from staged packages and loose files')
+    return selected[0], {'effective':selected[1], 'candidates_low_to_high':candidates,
+                         'packages_low_to_high':[path.name for path in packages],
+                         'mount':str(game), 'precedence':'cdpath/baseoq4: loose, then reverse engine PK4 load order'}
+
+
+def key(action: str) -> list[str]:
+    return [f'openq4_retainedGui menu "{action}" 1', f'openq4_retainedGui menu "{action}" 0']
+
+
+def activate(control: str) -> list[str]:
+    return [f'openq4_retainedGui focus "{control}"'] + key('accept')
+
+
+def open_choice(control: str) -> list[str]:
+    # A bounded popup accepts an option only once a painted frame has measured
+    # it inside the settings panel. A player always sees the list before
+    # choosing from it; batched console input must allow that frame too.
+    return activate(control) + ['wait 3']
+
+
+def show_tab(name: str) -> list[str]:
+    # The page's own tab event, as its strip fires it; the wait lets the page
+    # switched to lay out before one of its rows takes the focus.
+    return [f'openq4_retainedGui event tab_{name}', 'wait 3']
+
+
+class Tabs:
+    """The current tab while the fixed script runs: each probe of a control on
+    another tab switches first, and the stage expects that switch's program."""
+    def __init__(self, tabs: dict):
+        self.tabs, self.current, self.events = tabs, FIRST_TAB, []
+
+    def on(self, control: str) -> list[str]:
+        name = self.tabs[control]
+        if name == self.current: return []
+        self.current = name; self.events.append((f'tab_{name}', 0, TAB_WRITES))
+        return show_tab(name)
+
+    def take(self, opening: bool) -> list:
+        events, self.events = self.events, []
+        if opening: self.current = FIRST_TAB
+        return events
+
+
+def stages() -> list[dict]:
+    rows = []
+    tabs = Tabs(TABS)
+
+    def add(name, commands, *, brightness=1.1, baseline=1.1, shadows=1, postaa=0,
+            dirty=0, discard=0, popup=0, live=1.1, page=True, actions=(), events=(),
+            screenshot=None, resets=0, opening=False, extras=EXTRA_SEED,
+            extra_baseline=EXTRA_SEED, resolution_measured=0):
+        # Tab switches precede the stage's own programs; a close ends with onDeactivate.
+        events = tabs.take(opening) + list(events) + ([] if page else [CLOSED])
+        rows.append(dict(name=name, commands=commands, page=page,
+                         values=(1, dirty, 0, dirty, 1, discard, brightness, baseline, shadows, 1, postaa, 0)
+                                +tuple(value for pair in zip(extras,extra_baseline) for value in pair),
+                         popup=popup, live=live, actions=list(actions), events=events,
+                         screenshot=screenshot, resets=resets, opening=opening, resolution_measured=resolution_measured))
+
+    add('open', ['openq4_system open'], brightness=1, baseline=1, live=1,
+        actions=[('begin', 0)], events=[('onactivate', 1, 1)], opening=True)
+    add('brightness_dirty', tabs.on('settings_brightness') + ['openq4_retainedGui focus "settings_brightness"'] + key('right'),
+        baseline=1, dirty=1, live=1, actions=[('edit', 1)], screenshot='draft')
+    add('applied', activate('settings_apply'), actions=[('apply', 0)], events=[('apply', 1, 0)], screenshot='applied')
+    add('shadow_dirty', tabs.on('settings_shadows') + activate('settings_shadows'), shadows=0, dirty=1, actions=[('edit', 1)])
+    add('discard_dialog', activate('settings_back'), shadows=0, dirty=1, discard=1,
+        events=[('onback', 0, 1)], screenshot='discard')
+    add('keep_editing', activate('discard_keep_editing'), shadows=0, dirty=1,
+        events=[('continueediting', 1, 1)])
+    add('discarded', activate('settings_back') + ['wait 3'] + activate('discard_changes'),
+        page=False, actions=[('cancel', 0)], events=[('onback', 0, 1), ('discard', 2, 1)])
+    add('reopen_discarded', ['openq4_system open'], actions=[('begin', 0)],
+        events=[('onactivate', 1, 1)], opening=True)
+    add('choice_tentative', tabs.on('settings_postaa') + open_choice('settings_postaa') + key('down'), popup=1, screenshot='choice')
+    add('choice_cancelled', key('back'))
+    add('choice_dirty', tabs.on('settings_postaa') + open_choice('settings_postaa') + key('down') + key('down') + key('accept'),
+        postaa=2, dirty=1, actions=[('edit', 1)])
+    add('choice_restored', activate('settings_back') + ['wait 3'] + activate('discard_changes'),
+        page=False, actions=[('cancel', 0)], events=[('onback', 0, 1), ('discard', 2, 1)])
+    add('reopen_choice', ['openq4_system open'], actions=[('begin', 0)],
+        events=[('onactivate', 1, 1)], opening=True)
+    add('reload_draft', tabs.on('settings_brightness') + ['openq4_retainedGui focus "settings_brightness"'] + key('right'),
+        brightness=1.2, dirty=1, actions=[('edit', 1)])
+    add('language', ['reloadLanguage', 'wait 30'], brightness=1.2, dirty=1, resets=1)
+    add('video', ['vid_restart windowed', 'wait 60'], brightness=1.2, dirty=1, resets=1, screenshot='reloaded')
+    add('final_clean', activate('settings_back') + ['wait 3'] + activate('discard_changes'),
+        page=False, actions=[('cancel', 0)], events=[('onback', 0, 1), ('discard', 2, 1)])
+    add('reopen_clean', ['openq4_system open'], actions=[('begin', 0)],
+        events=[('onactivate', 1, 1)], opening=True)
+    def extras(down):
+        commands = []
+        for control,_,_,role,_ in EXTRA_ROWS:
+            commands += tabs.on(control)
+            commands += activate(control) if role==1 else open_choice(control)+key('home')+key('down')*down+key('accept')
+        # Settle on the Resolution Scale list's tab, so the readback measures
+        # the list it inspects.
+        return commands + tabs.on('settings_resolution_scale')
+    # The list shows eight of its nine rows within the pages, so neither 85 %
+    # nor 100 % scrolls it: its kept offset stays at the top, measured.
+    add('extras_dirty', extras(4), extras=EXTRA_CHANGED, dirty=1, actions=[('edit',1)]*7, resolution_measured=1)
+    add('extras_applied', activate('settings_apply'), extras=EXTRA_CHANGED,
+        extra_baseline=EXTRA_CHANGED, actions=[('apply',0)], events=[('apply',1,0)], screenshot='extrasapplied',
+        resolution_measured=1)
+    add('extras_restore_draft', extras(5), extra_baseline=EXTRA_CHANGED, dirty=1,
+        actions=[('edit',1)]*7, resolution_measured=1)
+    add('extras_restored', activate('settings_apply'), actions=[('apply',0)], events=[('apply',1,0)], resolution_measured=1,
+        screenshot='extrasrestored')
+    add('returned', activate('settings_back'), page=False, events=[('onback', 1, 0)], screenshot='returned')
+    add('reopened', ['openq4_system open'], actions=[('begin', 0)], events=[('onactivate', 1, 1)],
+        opening=True, screenshot='reopened')
+    add('finished', activate('settings_back'), page=False, events=[('onback', 1, 0)])
+    return rows
+
+
+def script() -> str:
+    lines = ['openq4_assertMenuActivation 10000', 'wait 3']
+    for stage in stages():
+        lines += [f'echo {STAGE_MARKER} {stage["name"]}'] + stage['commands'] + ['wait 6', 'openq4_system report']
+        if stage['page']:
+            lines += [f'openq4_guiGet "{field}"' for field in FIELDS]
+            lines += [f'openq4_retainedGui widget "{control}"' for control in CONTROLS]
+            lines += ['openq4_retainedGui report']
+        if stage['screenshot']:
+            lines += [f'screenshot "screenshots/system-{stage["screenshot"]}.tga"']
+    lines += ['gfxInfo', f'echo {COMPLETE}', 'quit']
+    return '\n'.join(lines) + '\n'
+
+
+def source_contract(runtime: Path) -> dict:
+    source = ROOT / 'content/baseoq4/pak0' / PAGE
+    staged, binding = staged_source(runtime)
+    if not source.is_file() or source.read_bytes() != staged:
+        raise ValueError('Production SYSTEM source must exactly match its effective staged member or loose override')
+    # The first-party page uses JSON plus standalone copyright comments. Do not
+    # silently rewrite or copy the source into a test-specific loader location.
+    model = json.loads('\n'.join(line for line in source.read_text(encoding='utf-8').splitlines()
+                                 if not line.lstrip().startswith('//')))
+    if model.get('id') != 'openq4.system':
+        raise ValueError('Unexpected production SYSTEM document identity')
+    nodes, pending = {}, [model['root']]
+    while pending:
+        node = pending.pop()
+        if node['id'] in nodes: raise ValueError('Duplicate SYSTEM node')
+        nodes[node['id']] = node
+        pending.extend(node.get('children', []))
+    required = CONTROLS + ('settings_apply', 'settings_back', 'discard_changes', 'discard_keep_editing')
+    if any(node not in nodes for node in required) or any(field not in model.get('aliases', {}) for field in FIELDS):
+        raise ValueError('Production SYSTEM probe controls or readback aliases changed')
+    number_contract(model,nodes)
+    tab_contract(model,nodes,TABS)
+    slider = nodes['settings_brightness']['control']
+    if (slider.get('role') != 'slider' or slider.get('minimum') != .5 or slider.get('maximum') != 2 or slider.get('step') != .1):
+        raise ValueError('Production brightness tick contract changed')
+    choice = nodes['settings_postaa']['control']
+    if [option.get('value') for option in choice.get('options', [])] != list(range(5)):
+        raise ValueError('Production PostAA option contract changed')
+    for field, state in {'draftBrightness':'settings.draft.r_brightness', 'baselineBrightness':'settings.baseline.r_brightness',
+                         'draftShadows':'settings.draft.r_shadows', 'baselineShadows':'settings.baseline.r_shadows',
+                         'draftPostAA':'settings.draft.r_postAA', 'baselinePostAA':'settings.baseline.r_postAA'}.items():
+        target = model['aliases'][field].get('variable')
+        if model.get('presentationVariables', {}).get(target, {}).get('value') != {'state':state}:
+            raise ValueError(f'Production service readback alias changed: {field}')
+    for control,alias,key,role,_ in EXTRA_ROWS:
+        spec=nodes[control].get('control',{})
+        if spec.get('role')!=('toggle' if role==1 else 'choice') or spec.get('value')!={'state':'settings.draft.'+key}:
+            raise ValueError(f'Production immediate control readback changed: {control}')
+        action=model.get('actions',{}).get(spec.get('action'))
+        wanted={'input':'boolean' if role==1 else 'number','operation':'settings.system.edit','arguments':{key:{'input':'value'}}}
+        if action!=wanted: raise ValueError(f'Production immediate control proposal changed: {control}')
+        if role==3 and [option.get('value') for option in spec.get('options',[])]!=[10,25,50,75,85,100,125,150,200]:
+            raise ValueError('Production resolution scale option contract changed')
+        for prefix in ('draft','baseline'):
+            field=prefix+alias; target=model['aliases'][field].get('variable')
+            if model.get('presentationVariables',{}).get(target,{}).get('value')!={'state':'settings.'+prefix+'.'+key}:
+                raise ValueError(f'Production service readback alias changed: {field}')
+    return {'document':model['id'], 'source':str(source), 'staged':binding, 'sha256':digest(source),
+            'normal_filesystem_path':PAGE, 'replacement_acceptance':False}
+
+
+def tab_contract(model: dict, nodes: dict, tabs: dict) -> None:
+    """Bind the scripts' tab switches and expected program traces to the page.
+
+    Each probed control stands in its tab's scrolling rows (the page's one
+    child, settings-<tab>-rows); an opening starts on GRAPHICS; a switch writes
+    page.leaving and page.tab and runs no action; the close program
+    (onDeactivate) writes nothing and runs no action. The captures run at a
+    chosen --text-scale: the page reads the runtime's text size (view.text),
+    standing a tab's rows in one column above 100 % that the focus scrolls to
+    each probed row.
+    """
+    def steps(program):
+        for step in program:
+            yield step
+            for branch in ('then','else'): yield from steps(step.get(branch,[]))
+    events = model.get('events',{})
+    body = [node.get('id') for node in nodes.get('settings-body',{}).get('children',[])]
+    if model.get('state',{}).get('page.tab') != {'type':'number','initial':0} or body[:1] != ['settings-page-'+FIRST_TAB]:
+        raise ValueError('Production SYSTEM first tab changed')
+    if model.get('state',{}).get('view.text') != {'type':'number','initial':1,'view':'text'}:
+        raise ValueError('Production SYSTEM no longer follows the text size')
+    for control,name in tabs.items():
+        rows = nodes.get(f'settings-{name}-rows',{})
+        scrolled = ([node.get('id') for node in nodes.get('settings-page-'+name,{}).get('children',[])] == [rows.get('id')] and
+                    rows.get('properties',{}).get('overflow') == {'type':'keyword','value':'auto'})
+        pending, found = [rows], False
+        while pending:
+            node = pending.pop(); found |= node.get('id') == control; pending.extend(node.get('children',[]))
+        program = list(steps(events.get('tab_'+name,[])))
+        writes = [sorted(step.get('values',{})) for step in program if step.get('op') == 'setState']
+        if not scrolled or not found or writes != [['page.leaving','page.tab']] or any(step.get('op') == 'action' for step in program):
+            raise ValueError(f'Production SYSTEM tab placement or switch changed: {control}')
+    closing = list(steps(events.get('onDeactivate',[])))
+    if not closing or any(step.get('op') in ('action','setState','call') for step in closing):
+        raise ValueError('Production SYSTEM close program changed')
+
+
+def number_contract(model: dict, nodes: dict) -> None:
+    """Pin authored local-draft guards independently of the content generator.
+
+    Both capture profiles still gesture the original sliders. This source
+    preflight verifies their paired Number ownership and exact guard programs;
+    it does not claim that either script exercises native text entry.
+    """
+    def same(actual, expected):
+        # Python's True == 1 must not turn a malformed typed JSON guard into
+        # the expected boolean/number declaration or comparison operand.
+        if isinstance(actual,bool) or isinstance(expected,bool):return type(actual) is type(expected) and actual == expected
+        if isinstance(expected,dict):return isinstance(actual,dict) and actual.keys()==expected.keys() and all(same(actual[k],v) for k,v in expected.items())
+        if isinstance(expected,list):return isinstance(actual,list) and len(actual)==len(expected) and all(same(a,b) for a,b in zip(actual,expected))
+        return actual == expected
+    def require(actual, expected, label):
+        if not same(actual,expected): raise ValueError('Production numeric draft contract changed: '+label)
+    state = lambda key: {'state':key}
+    op = lambda name,*args: {'op':name,'args':list(args)}
+    both = lambda *args: reduce(lambda a,b:op('&&',a,b),args)
+    pending = state('ui.numberDraftsPending')
+    editing = both(state('settings.open'),op('==',state('settings.phase'),1))
+    closed = both(op('!',state('settings.open')),op('==',state('settings.phase'),0))
+    idle = both(op('!',state('settings.busy')),op('!',state('settings.confirmationVisible')))
+    dialog = both(state('page.discardVisible'),idle,op('||',editing,both(closed,pending)))
+    continuing = both(state('page.discardVisible'),idle,editing)
+    apply = both(state('settings.canApply'),op('!',pending))
+    apply_exit = both(continuing,state('settings.dirty'),apply)
+    local_message = both(pending,idle,op('||',op('==',state('settings.phase'),0),op('==',state('settings.phase'),1)))
+    declarations=model.get('state',{});actions=model.get('actions',{});events=model.get('events',{})
+    require(declarations.get('ui.numberDraftsPending'),{'type':'boolean','initial':False},'pending authority')
+    require(declarations.get('ui.numberDraftMessage'),{'type':'string','initial':'#str_230007'},'message authority')
+    for name,operation in (('focusNumberDraft','ui.numberDrafts.focus'),('apply','settings.system.apply'),
+                           ('applyExit','settings.system.applyExit'),('cancel','settings.system.cancel'),('dismiss','ui.dismiss')):
+        require(actions.get(name),{'operation':operation,'arguments':{}},'action '+name)
+    continue_program=[{'op':'setState','values':{'page.discardVisible':False}}, {'op':'action','action':'focusNumberDraft'}]
+    require(events.get('continueEditing'),continue_program,'continueEditing hide before focus')
+    require(events.get('onBack'),[{'op':'if','condition':state('page.discardVisible'),
+        'then':[{'op':'call','event':'continueEditing'}],
+        'else':[{'op':'if','condition':both(op('!',state('settings.busy')),op('||',op('==',state('settings.phase'),0),op('==',state('settings.phase'),1))),
+            'then':[{'op':'if','condition':op('||',state('settings.dirty'),pending),
+                'then':[{'op':'setState','values':{'page.discardVisible':True}}],
+                'else':[{'op':'action','action':'dismiss'}]}]}]}],'onBack service-or-local dirty decision')
+    require(events.get('apply'),[{'op':'if','condition':apply,'then':[{'op':'action','action':'apply'}]}],'Apply one action and no state write')
+    require(events.get('applyExit'),[{'op':'if','condition':apply_exit,'then':[
+        {'op':'setState','values':{'page.discardVisible':False}},{'op':'action','action':'applyExit'}]}],'ApplyExit guard')
+    require(events.get('discard'),[{'op':'if','condition':dialog,'then':[
+        {'op':'action','action':'cancel'},{'op':'setState','values':{'page.discardVisible':False}},
+        {'op':'action','action':'dismiss'}]}],'Discard closed local-only recovery and action order')
+    for control,event in (('settings_apply','apply'),('settings_back','onBack'),('discard_keep_editing','continueEditing'),
+                          ('discard_changes','discard'),('discard_apply_changes','applyExit')):
+        spec=nodes.get(control,{}).get('control',{})
+        require(spec.get('event'),event,'control '+control)
+        if 'action' in spec: raise ValueError('Production numeric guard bypassed by direct action: '+control)
+    bindings={}
+    for binding in model.get('bindings',[]):
+        key=(binding.get('node'),binding.get('property'))
+        if key in bindings: raise ValueError('Duplicate SYSTEM bound property')
+        bindings[key]=binding.get('value')
+    for control,condition in (('settings_apply',apply),('discard_apply_changes',apply_exit),
+                               ('discard_changes',dialog),('discard_keep_editing',continuing)):
+        require(bindings.get((control,'enabled')),condition,'availability '+control)
+        require(bindings.get((control,'opacity')),op('select',condition,1,.4),'disabled presentation '+control)
+    require(bindings.get(('discard-panel','display')),op('select',dialog,'flex','none'),'closed local-only dialog visibility')
+    require(bindings.get(('settings-message','text')),op('select',local_message,state('ui.numberDraftMessage'),state('settings.message')),'urgent service message priority')
+    pairs={'settings_brightness':('r_brightness',.5,2), 'settings_ambient':('r_forceAmbient',0,1)}
+    require({id for id,node in nodes.items() if node.get('control',{}).get('role')=='number'},
+            {id+'_number' for id in pairs} | {'settings_window_width','settings_window_height','settings_custom_width','settings_custom_height'},'complete Number inventory')
+    for slider_id,(key,minimum,maximum) in pairs.items():
+        number_id=slider_id+'_number';slider=nodes.get(slider_id,{}).get('control',{});number=nodes[number_id].get('control',{})
+        require(slider.get('role'),'slider','original slider identity '+slider_id)
+        for spec in (slider,number):
+            require(spec.get('value'),state('settings.draft.'+key),'paired draft source '+slider_id)
+            require((spec.get('minimum'),spec.get('maximum')),(minimum,maximum),'paired finite range '+slider_id)
+            require(actions.get(spec.get('action')),{'input':'number','operation':'settings.system.edit','arguments':{key:{'input':'value'}}},'paired typed proposal '+slider_id)
+        require(number.get('maxBytes'),128,'bounded Number '+number_id);require(number.get('exponent'),True,'precise Number syntax')
+        if 'step' in number or 'decimals' in number: raise ValueError('Production Number was quantized to slider increments')
+        parts={part:number_id+'-'+part for part in ('viewport','text','selection','caret','composition','validation')}
+        require(number.get('parts'),parts,'authored Number parts')
+        viewport=nodes.get(parts['viewport'],{})
+        require(viewport.get('properties',{}).get('overflow'),{'type':'keyword','value':'hidden'},'clipped numeric text viewport')
+        direct={node.get('id') for node in viewport.get('children',[])}
+        if not {parts[p] for p in ('text','selection','caret','composition')} <= direct:
+            raise ValueError('Production Number paint parts no longer share a viewport')
+        # One row reads the slider, then its Number; the Number shows the value.
+        row=nodes.get(slider_id+'_row',{})
+        def controls(node):
+            if 'control' in node: return [node.get('id')]
+            return [found for child in node.get('children',[]) for found in controls(child)]
+        require(controls(row),[slider_id,number_id],'sibling focus order')
+        require((slider.get('navigation',{}).get('down'),number.get('navigation',{}).get('up')),(number_id,slider_id),'paired navigation')
+        require(nodes.get(slider_id+'-value',{}).get('properties',{}).get('display'),{'type':'keyword','value':'none'},'single paired readout')
+        if 'control' in row or 'control' in nodes.get(slider_id+'_row-controls',{}):
+            raise ValueError('Production paired numeric row acquired a nested semantic control')
+        require(bindings.get((number_id,'enabled')),bindings.get((slider_id,'enabled')),'paired availability')
+
+
+def _fields(line: str, prefix: str, expected: set[str]) -> dict | None:
+    parts = [token.split('=', 1) for token in line[len(prefix):].split()]
+    if any(len(part) != 2 for part in parts):
+        return None
+    result = dict(parts)
+    return result if len(parts) == len(expected) and set(result) == expected else None
+
+
+def _number(value: str, expected: float) -> bool:
+    if len(value) > 64 or re.fullmatch(r'-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', value) is None:
+        return False
+    number = float(value)
+    return math.isfinite(number) and math.isclose(number, expected, rel_tol=1e-8, abs_tol=1e-8)
+
+
+def tga_dimensions(raw: bytes, expected_size: tuple[int, int] = (1280,720)) -> tuple[int, int] | None:
+    if len(raw) < 18 or raw[1] != 0 or raw[2] not in (2, 10) or raw[16] not in (24, 32): return None
+    size = struct.unpack_from('<HH',raw,12)
+    if size != expected_size or not all(0 < value <= 16384 for value in size): return None
+    channels, offset, pixels = raw[16]//8, 18+raw[0], size[0]*size[1]
+    if raw[2] == 2: return size if len(raw) >= offset+pixels*channels else None
+    decoded = 0
+    while decoded < pixels:
+        if offset >= len(raw): return None
+        packet = raw[offset]; offset += 1
+        count = (packet & 127)+1; decoded += count
+        offset += channels if packet & 128 else count*channels
+        if decoded > pixels or offset > len(raw): return None
+    return size
+
+
+def peer_documents(log: str) -> set[str]:
+    """The other retained documents the session runs beside the page, such as
+    the gameplay HUD's essential document in the classic layout. Each holds a
+    context of its own; their loads and restores are not this page's evidence."""
+    prefix = 'RETAINED_GUI_LOADED '
+    return {line[len(prefix):].strip() for line in log.splitlines()
+            if line.startswith(prefix) and line[len(prefix):].strip() != PAGE}
+
+
+def peer_line(line: str, peers: set[str]) -> bool:
+    if line.startswith('RETAINED_GUI_LOADED '): return line[len('RETAINED_GUI_LOADED '):].strip() in peers
+    match = re.match(r'RETAINED_GUI_RESOURCE path=(\S+) ', line)
+    return bool(match) and match[1] in peers
+
+
+def qualify(log: str, mode: str) -> dict:
+    errors, records, activation, completion = [], [], [], []
+    current = None
+    peers = peer_documents(log)
+    for line in log.splitlines():
+        stripped = line.strip()
+        if peer_line(line, peers): continue
+        if STAGE_MARKER in line:
+            match = re.fullmatch(STAGE_MARKER + r' ([a-z_]+)', stripped)
+            if not match:
+                errors.append('Malformed standalone stage marker'); continue
+            current = {'name':match.group(1), 'lines':[]}; records.append(current)
+        elif COMPLETE in line:
+            completion.append(stripped)
+            if stripped != COMPLETE: errors.append('Malformed standalone completion marker')
+        elif line.startswith('OPENQ4_MENU_ACTIVATION '):
+            activation.append(line)
+            if records: errors.append('Menu activation occurred after SYSTEM observations')
+        elif line.startswith(('OPENQ4_SYSTEM ', 'GUI_VALUE ', 'RETAINED_GUI_', 'RETAINED_GUI ', 'UI_SETTINGS ')):
+            if current is None or completion: errors.append('Observation outside the ordered stage interval')
+            else: current['lines'].append(line)
+    if len(activation) != 1 or not re.fullmatch(r'OPENQ4_MENU_ACTIVATION PASS elapsed=\d+ms limit=10000ms', activation[0]):
+        errors.append('Missing bounded normal menu activation from map gameplay')
+    elif len(re.search(r'elapsed=(\d+)', activation[0]).group(1)) > 5 or int(re.search(r'elapsed=(\d+)', activation[0]).group(1)) > 10000:
+        errors.append('Menu activation exceeded its limit')
+    if completion != [COMPLETE]: errors.append('Missing or duplicate standalone completion')
+    expected_stages = stages()
+    if [record['name'] for record in records] != [stage['name'] for stage in expected_stages]:
+        errors.append('Missing, reordered, duplicate or extra SYSTEM stages')
+    owners = []
+    route_fields = set('enabled active parent child guiTest menu map multiplayer menuSound canReturn'.split())
+    widget_fields = set('id role type accepted pending proposed rejected token popup firstVisible'.split())
+    report_fields = set('path focus revision active brightness shadows contexts'.split())
+    scroll_fields = set(('id open opening revision offsetDp available usable density viewport '
+                         'range offset track thumb position travel geometry').split())
+    for record, stage in zip(records, expected_stages):
+        at = stage['name']; lines = record['lines']
+        routes, reads, widgets, reports, operations, actions, events, resources, loads, observed, dispatches = [], [], [], [], [], [], [], [], [], [], []
+        scrolls = []
+        for line in lines:
+            if line.startswith('OPENQ4_SYSTEM operation='):
+                operations.append(line)
+            elif line.startswith('OPENQ4_SYSTEM '):
+                routes.append(_fields(line, 'OPENQ4_SYSTEM ', route_fields)); observed.append('route')
+            elif line.startswith('GUI_VALUE '):
+                parts = line[len('GUI_VALUE '):].split('=', 1); reads.append(parts); observed.append('read:' + parts[0])
+            elif line.startswith('RETAINED_GUI_WIDGET '):
+                widgets.append(_fields(line, 'RETAINED_GUI_WIDGET ', widget_fields)); observed.append('widget')
+            elif line.startswith('RETAINED_GUI_CHOICE_SCROLL '):
+                scrolls.append(_fields(line, 'RETAINED_GUI_CHOICE_SCROLL ', scroll_fields)); observed.append('scroll')
+            elif line.startswith('RETAINED_GUI path='):
+                reports.append(_fields(line, 'RETAINED_GUI ', report_fields)); observed.append('report')
+            elif line.startswith('RETAINED_GUI_OPERATION '):
+                match = re.fullmatch(r'RETAINED_GUI_OPERATION (focus|menu|event) passed', line)
+                if not match: errors.append(f'{at}: failed or unexpected semantic operation')
+                else: events.append(('operation', match.group(1)))
+            elif line.startswith('UI_SETTINGS '):
+                match = re.fullmatch(r'UI_SETTINGS operation=settings\.system\.(\w+) result=(\d+) phase=(\d+) owner=(\d+) dirty=(\d+)', line)
+                if not match: errors.append(f'{at}: malformed settings result')
+                else: actions.append(match.groups())
+            elif line.startswith('RETAINED_GUI_EVENT '):
+                match = re.fullmatch(r'RETAINED_GUI_EVENT name=(\w+) actions=(\d+) writes=(\d+)', line)
+                if not match: errors.append(f'{at}: malformed program trace')
+                else: events.append(('event', match[1].lower(), int(match[2]), int(match[3])))
+            elif line.startswith('RETAINED_GUI_RESOURCE '): resources.append(line)
+            elif line.startswith('RETAINED_GUI_LOADED '): loads.append(line)
+            elif line.startswith('RETAINED_GUI_DISPATCH '):
+                dispatches.append(_fields(line,'RETAINED_GUI_DISPATCH ',set('path operation value brightness shadows close'.split())))
+            else: errors.append(f'{at}: unexpected traced observation')
+        if operations != (['OPENQ4_SYSTEM operation=open result=1'] if stage['opening'] else []):
+            errors.append(f'{at}: normal SYSTEM route failed or repeated')
+        settled = [index for index,line in enumerate(lines) if line.startswith('OPENQ4_SYSTEM ') and not line.startswith('OPENQ4_SYSTEM operation=')]
+        if settled and any(index > settled[-1] for index,line in enumerate(lines)
+                           if line.startswith(('UI_SETTINGS ', 'RETAINED_GUI_EVENT ', 'RETAINED_GUI_RESOURCE ',
+                                               'RETAINED_GUI_OPERATION ', 'RETAINED_GUI_LOADED ', 'RETAINED_GUI_DISPATCH '))):
+            errors.append(f'{at}: work occurred after the settled observations')
+        if loads != (['RETAINED_GUI_LOADED '+PAGE] if stage['opening'] else []):
+            errors.append(f'{at}: page was not loaded through the expected normal route or was replayed')
+        if resources != ['RETAINED_GUI_RESOURCE path='+PAGE+' event=restored'] * stage['resets']:
+            errors.append(f'{at}: resource restoration missing, replayed or failed')
+        if len(dispatches) != int(not stage['page']): errors.append(f'{at}: unexpected direct host action or repeated dismissal')
+        for row in dispatches:
+            if not row or any(row[key] != value for key,value in {'path':PAGE,'operation':'ui.dismiss','value':'-','shadows':'1','close':'1'}.items()) or not _number(row['brightness'],stage['live']):
+                errors.append(f'{at}: invalid direct host dismissal')
+        expected_observed = ['route'] * (2 if stage['opening'] else 1)
+        # A choice widget record is immediately followed by its popup geometry.
+        if stage['page']: expected_observed += ['read:'+field for field in FIELDS] + [
+            entry for index in range(len(CONTROLS)) for entry in (['widget','scroll'] if ROLES[index]==3 else ['widget'])] + ['report']
+        if observed != expected_observed: errors.append(f'{at}: readback order/count differs from fixed script')
+        for route in routes:
+            expected_route = {'enabled':'1', 'active':PAGE if stage['page'] else PARENT, 'parent':PARENT if stage['page'] else '-',
+                              'child':str(int(stage['page'])), 'guiTest':'0', 'menu':'1', 'map':'1', 'multiplayer':str(int(mode=='mp')),
+                              'menuSound':'1', 'canReturn':str(int(stage['page'] and not stage['values'][1]))}
+            if route != expected_route: errors.append(f'{at}: actual Session parent/child/gameplay ownership mismatch')
+        if stage['page']:
+            if len(reads) != len(FIELDS) or any(len(row)!=2 or row[0]!=field or not _number(row[1],value)
+                                              for row,field,value in zip(reads,FIELDS,stage['values'])):
+                errors.append(f'{at}: service-backed aliases differ from expected draft/baseline')
+            values = tuple(stage['values'][index] for index in VALUE_INDICES)
+            for index, widget in enumerate(widgets):
+                if not widget or index >= len(CONTROLS):
+                    errors.append(f'{at}: malformed widget readback'); continue
+                fixed = {'id':CONTROLS[index], 'role':str(ROLES[index]), 'type':str(TYPES[index]),
+                         'pending':'0', 'rejected':'0', 'token':'0', 'popup':str(stage['popup'] if index==2 else 0),
+                         'firstVisible':'0'}
+                if any(widget[key] != value for key,value in fixed.items()) or not _number(widget['accepted'],values[index]) or not _number(widget['proposed'],0):
+                    errors.append(f'{at}: widget accepted/pending/popup state mismatch')
+            # Every choice reports its popup geometry beside its widget record.
+            # An open bounded popup must have reached a measured frame: the
+            # engine pumps input between the opening and its first paint, and a
+            # popup that never measures is one the player can never see or use.
+            choices = [control for index,control in enumerate(CONTROLS) if ROLES[index]==3]
+            if [row['id'] if row else None for row in scrolls] != choices:
+                errors.append(f'{at}: choice popup geometry readbacks missing or reordered')
+            else:
+                for row in scrolls:
+                    open_popup = row['id']=='settings_postaa' and stage['popup']
+                    if row['open'] != ('1' if open_popup else '0'):
+                        errors.append(f'{at}: choice popup geometry disagrees with its widget record')
+                    elif open_popup and (row['available'] != '1' or row['opening'] == '0'):
+                        errors.append(f'{at}: open bounded popup never reached a measured frame')
+                    # A bar-equipped choice keeps its scroll position in offsetDp,
+                    # and a list once opened keeps its measured geometry.
+                    # firstVisible belongs to the older bar-less model and stays zero.
+                    if row['id'] == 'settings_resolution_scale':
+                        if float(row['offsetDp']) != 0 or (row['available'] == '1') != bool(stage['resolution_measured']):
+                            errors.append(f'{at}: retained choice scroll offset or measured geometry differs from the fixed script')
+            for report in reports:
+                if (not report or report['path'] != PAGE or report['active'] != '1' or report['contexts'] != str(1+len(peers)) or
+                    not re.fullmatch(r'\d+',report['revision']) or not _number(report['brightness'],stage['live']) or report['shadows'] != '1'):
+                    errors.append(f'{at}: actual host/rendered owner readback mismatch')
+        expected_actions = [(operation,'0','0' if operation=='cancel' else '1',str(dirty)) for operation,dirty in stage['actions']]
+        if [(row[0],row[1],row[2],row[4]) for row in actions] != expected_actions:
+            errors.append(f'{at}: settings operation failed, repeated or mutated the wrong draft')
+        for row in actions:
+            if not re.fullmatch(r'[1-9]\d{0,19}',row[3]) or int(row[3]) >= 2**64: errors.append(f'{at}: invalid service owner token')
+            owners.append((at,row[0],row[3]))
+        expected_operations = [('operation', line.split()[1]) for line in stage['commands'] if line.startswith('openq4_retainedGui ')]
+        if [event for event in events if event[0]=='operation'] != expected_operations:
+            errors.append(f'{at}: semantic input operation sequence mismatch')
+        if [event[1:] for event in events if event[0]=='event'] != stage['events']:
+            errors.append(f'{at}: authored lifecycle/Back program replay or omission')
+        if ('apply',1,0) in stage['events']:
+            program = [i for i,line in enumerate(lines) if line == 'RETAINED_GUI_EVENT name=apply actions=1 writes=0']
+            service = [i for i,line in enumerate(lines) if line.startswith('UI_SETTINGS operation=settings.system.apply ')]
+            if len(program)!=1 or len(service)!=1 or program[0]>=service[0]:
+                errors.append(f'{at}: Apply service dispatch preceded or bypassed its guarded program')
+    if owners:
+        current_owner, prior_owners = None, set()
+        for at,operation,owner in owners:
+            if operation == 'begin':
+                if owner in prior_owners: errors.append(f'{at}: reopened SYSTEM page reused an old owner')
+                prior_owners.add(owner); current_owner = owner
+            elif owner != current_owner:
+                errors.append(f'{at}: SYSTEM editing owner changed before close or across resource restoration')
+    else: errors.append('No real settings service operations were observed')
+    for line in log.splitlines():
+        if ('ERROR:' in line or 'FATAL:' in line or 'openq4_guiGet: unknown' in line or
+            line.startswith(('usage: openq4_', 'openq4_retainedGui: requires'))): errors.append('Engine error or unsupported semantic command')
+    return {'passed':not errors, 'errors':errors, 'stages':records, 'service_owners':owners,
+            'normal_session_route':not errors, 'replacement_acceptance':False, 'full_system_acceptance':False,
+            'widget_editor_acceptance':False, 'host_input_injection':False}
+
+
+def capture(args) -> int:
+    output, runtime = args.output.resolve(), args.runtime.resolve()
+    if output.exists(): raise ValueError('Use a new output directory to preserve evidence')
+    if not output.is_relative_to((ROOT/'.tmp').resolve()): raise ValueError('Capture evidence must use a private repository .tmp directory')
+    executable = runtime / ('openQ4-client_x64.exe' if os.name=='nt' else 'openQ4-client_x64')
+    if not executable.is_file() or not (args.assets/'q4base').is_dir(): raise ValueError('Staged client and installed q4base assets are required')
+    source = source_contract(runtime)
+    profiles = json.loads((ROOT/'.vscode/launch.json').read_text(encoding='utf-8-sig'))['configurations']
+    prefix = '(SP) airdefense1 ' if args.mode=='sp' else '(MP) q4dm1 '
+    profile = next(row for row in profiles if row['name'].startswith(prefix) and row['name'].endswith('GL'))
+    game = output/'save/baseoq4'; game.mkdir(parents=True)
+    cfg = game/'system-page.cfg'; cfg.write_text(script(),encoding='utf-8')
+    density = args.density if args.density is not None else (1.25 if args.mode=='sp' else 2)
+    overrides = {'fs_basepath':str(args.assets.resolve()), 'fs_savepath':str(output/'save'), 'fs_devpath':str(output/'save'),
+        'fs_game':'baseoq4', 'logFile':'2', 'logFileName':'logs/openq4.log',
+        'r_fullscreen':'0', 'r_fullscreenDesktop':'0', 'r_borderless':'0', 'r_borderlessDefaultMigrated':'1', 'r_hiddenWindow':'1',
+        'r_windowWidth':'1280', 'r_windowHeight':'720', 'r_mode':'-1', 'r_customWidth':'1280', 'r_customHeight':'720',
+        'r_renderApi':args.renderer, 'r_rendererSharedGui':'1', 'r_rendererSharedInWorldGui':'0', 'r_multiSamples':'0', 'r_swapInterval':'1',
+        'r_gamma':'1', 'r_brightness':'1', 'r_shadows':'1', 'r_postAA':'0',
+        **{row[2]:str(row[4]) for row in EXTRA_ROWS},
+        'in_mouse':'0', 'in_joystick':'0', 'in_joystickRumble':'0', 'g_autoScreenshot':'0', 'g_autoSkipCinematics':'1',
+        'g_autoExecAfterMapLoad':'system-page.cfg', 'g_autoExecAfterMapLoadDelayMs':'3000',
+        'com_skipLoadingContinue':'1', 'com_loadingContinueAutoAdvance':'1', 'com_maxfps':'60',
+        'ui_autoJoin':'1' if args.mode=='mp' else '0', 'ui_retainedScale':'1', 'ui_retainedDensity':str(density),
+        'ui_retainedTextScale':str(args.text_scale),
+        'sys_lang':args.language, MULTIPLE_INSTANCES:'1',
+        'ui_retainedTrace':'1', 'ui_retained':'0', 'ui_retainedSystem':'1', 'ui_retainedReducedMotion':'0'}
+    command = [str(executable)]
+    for key,value in overrides.items(): command += ['+set',key,value]
+    original, index = profile['args'], 0
+    while index < len(original):
+        count = 3 if original[index].lower() in ('+set','+seta') and index+2 < len(original) else 1
+        if count==1 or original[index+1].lower() not in {key.lower() for key in overrides}:
+            command += [value.replace('${workspaceFolder}',str(ROOT)) for value in original[index:index+count]]
+        index += count
+    binaries = [executable] + sorted(runtime.glob('renderer-*')) + sorted((runtime/'baseoq4').glob('game-*'))
+    metadata = {'status':'running', 'profile':profile['name'], 'mode':args.mode, 'renderer':args.renderer,
+        'command':command, 'cwd':str(runtime), 'source':source, 'script_sha256':digest(cfg), 'density':density, 'ui_scale':1, 'text_scale':args.text_scale, 'language':args.language,
+        'windowed':True, 'hidden_window':True, 'host_input_injection':False, 'capture_method':'engine screenshot after active map gameplay',
+        'timeout_seconds':args.timeout,
+        'binaries':{str(path.relative_to(runtime)):digest(path) for path in binaries if path.is_file()}}
+    report = output/'capture.json'
+    def save(): report.write_text(json.dumps(metadata,indent=2)+'\n',encoding='utf-8')
+    save(); started = time.monotonic()
+    with (output/'process.log').open('w',encoding='utf-8') as process_log:
+        options = {'env':{**os.environ,'TEMP':str(ROOT/'.tmp'),'TMP':str(ROOT/'.tmp')}}
+        if os.name=='nt':
+            startup = subprocess.STARTUPINFO(); startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW; startup.wShowWindow=0
+            options.update(startupinfo=startup,creationflags=subprocess.CREATE_NO_WINDOW)
+        process = subprocess.Popen(command,cwd=runtime,stdout=process_log,stderr=subprocess.STDOUT,**options)
+        print(f'SYSTEM page {args.mode}/{args.renderer}: PID {process.pid}, hidden/windowed, no host input.',flush=True)
+        try: metadata['returncode'] = process.wait(timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try: process.wait(timeout=10)
+            except subprocess.TimeoutExpired: process.kill(); process.wait()
+            metadata['status']='timeout'; save(); return 1
+    metadata['seconds'] = round(time.monotonic()-started,3)
+    log_path = game/'logs/openq4.log'
+    log = re.sub(r'\^[0-9]','',log_path.read_text(encoding='utf-8',errors='replace')) if log_path.is_file() else ''
+    metadata['log_sha256'] = digest(log_path) if log_path.is_file() else None
+    metadata['qualification'] = qualify(log,args.mode)
+    metadata['diagnostics'] = [line for line in log.splitlines() if any(word in line for word in ('WARNING:','ERROR:','FATAL:'))]
+    active = re.findall(r'Renderer API: requested=\S+ active=(\S+)',log)
+    metadata['active_renderer'] = active[-1] if active else None
+    valid = metadata['returncode']==0 and metadata['qualification']['passed'] and metadata['active_renderer']==args.renderer
+    metadata['screenshots'] = []
+    for name in SCREENSHOTS:
+        path = game/f'screenshots/system-{name}.tga'
+        if not path.is_file() or path.stat().st_size < 18: valid=False; continue
+        raw = path.read_bytes(); size = tga_dimensions(raw)
+        if size is None: valid=False
+        metadata['screenshots'].append({'path':str(path.relative_to(output)), 'size':size, 'sha256':digest(path)})
+    try:
+        metadata['source_after'] = source_contract(runtime)
+        metadata['source_unchanged'] = metadata['source_after'] == source
+    except (OSError,ValueError) as error:
+        metadata['source_unchanged'] = False; metadata['source_change_error'] = str(error)
+    valid = valid and metadata['source_unchanged']
+    metadata['status'] = 'captured_pending_visual_and_warning_review' if valid else 'failed'
+    save(); print(f'{metadata["status"]}: {report}',flush=True); return 0 if valid else 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--mode',choices=('sp','mp'),required=True)
+    parser.add_argument('--renderer',choices=('gl','vulkan'),required=True)
+    parser.add_argument('--assets',type=Path,required=True)
+    parser.add_argument('--runtime',type=Path,default=ROOT/'.install')
+    parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--density',type=float,choices=(1.25,2.0))
+    parser.add_argument('--text-scale',type=float,choices=(1.0,1.5,2.0),default=1.0)
+    parser.add_argument('--language',choices=('english','spanish','polish','russian','french','italian','german',
+        'brazilian','czech','hungarian','turkish','ukrainian'),default='english')
+    parser.add_argument('--timeout',type=int,default=240,help='Maximum game-process duration in seconds')
+    args = parser.parse_args()
+    if args.timeout <= 0: parser.error('--timeout must be positive')
+    try: return capture(args)
+    except (OSError,ValueError,StopIteration) as error:
+        print(f'SYSTEM page capture failed: {error}',flush=True); return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

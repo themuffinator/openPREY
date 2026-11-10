@@ -29,6 +29,8 @@ If you have questions concerning this license or the applicable additional terms
 
 
 
+#include <unordered_set>
+
 #include "Window.h"
 #include "Winvar.h"
 #include "GuiScript.h"
@@ -37,16 +39,24 @@ If you have questions concerning this license or the applicable additional terms
 idCVar gui_debugScript( "gui_debugScript", "0", CVAR_GUI | CVAR_INTEGER, "log gui script execution details (0=off, 1=key events, 2=verbose, 3=sets/transitions/cmds, 4=state changes, 5=redraw trace)" );
 
 namespace {
-	idList<const idGuiScriptList*> g_guiScriptLists;
+	// openQ4: every live script list, for IsValid. This was an idList searched
+	// from the front: Execute asks before every statement it runs, so each
+	// statement cost a walk over every script list of every loaded GUI, and
+	// each list's destruction another to remove itself. Never destroyed, so
+	// lists torn down at exit still find it.
+	std::unordered_set<const idGuiScriptList*> &GuiScriptLists( void ) {
+		static std::unordered_set<const idGuiScriptList*> *lists = new std::unordered_set<const idGuiScriptList*>;
+		return *lists;
+	}
 }
 
 idGuiScriptList::idGuiScriptList() {
 	list.SetGranularity( 4 );
-	g_guiScriptLists.Append( this );
+	GuiScriptLists().insert( this );
 }
 
 idGuiScriptList::~idGuiScriptList() {
-	g_guiScriptLists.Remove( this );
+	GuiScriptLists().erase( this );
 	list.DeleteContents( true );
 }
 
@@ -54,7 +64,7 @@ bool idGuiScriptList::IsValid( const idGuiScriptList *list ) {
 	if ( list == NULL ) {
 		return false;
 	}
-	return g_guiScriptLists.FindIndex( list ) != -1;
+	return GuiScriptLists().count( list ) != 0;
 }
 
 
@@ -90,16 +100,8 @@ void Script_Set(idWindow *window, idList<idGSWinVar> *src) {
 					window && window->GetGui() ? window->GetGui()->GetSourceFile() : "<null>" );
 			}
 			return;
-		} 
-
-		if ( window && src->Num() > 1 && window->SetInternalVarValue( dest->c_str(), (*src)[1].var->c_str() ) ) {
-			if ( gui_debugScript.GetInteger() > 2 ) {
-				common->Printf( "GUI: set %s = %s (caller=%s gui=%s)\n",
-					dest->c_str(),
-					(*src)[1].var->c_str(),
-					window ? window->GetName() : "<null>",
-					window && window->GetGui() ? window->GetGui()->GetSourceFile() : "<null>" );
-			}
+		}
+		if ( window != NULL && src->Num() > 1 && window->SetInternalVarValue( dest->c_str(), (*src)[1].var->c_str() ) ) {
 			return;
 		}
 	}
@@ -122,40 +124,37 @@ void Script_Set(idWindow *window, idList<idGSWinVar> *src) {
 	}
 }
 
-/*
-=========================
-Script_Inc
-=========================
-*/
 void Script_Inc(idWindow *window, idList<idGSWinVar> *src) {
 	if ( src == NULL || src->Num() < 2 || (*src)[0].var == NULL || (*src)[1].var == NULL ) {
 		return;
 	}
-
-	const float currentValue = static_cast<float>( atof( (*src)[0].var->c_str() ) );
-	const float incrementValue = static_cast<float>( atof( (*src)[1].var->c_str() ) );
-	const float newValue = currentValue + incrementValue;
-
-	(*src)[0].var->Set( va( "%g", newValue ) );
+	const float value = static_cast<float>( atof( (*src)[0].var->c_str() ) );
+	const float increment = static_cast<float>( atof( (*src)[1].var->c_str() ) );
+	(*src)[0].var->Set( va( "%g", value + increment ) );
 	(*src)[0].var->SetEval( false );
+	idWinFloatPtr* floatPtr = dynamic_cast<idWinFloatPtr*>( (*src)[0].var );
+	if ( floatPtr != NULL && floatPtr->GetOwnerVec4() != NULL ) {
+		floatPtr->GetOwnerVec4()->SetEval( false );
+	}
+	(void)window;
+}
 
-	idWinFloatPtr *floatPtr = dynamic_cast<idWinFloatPtr *>( (*src)[0].var );
-	if ( floatPtr ) {
-		idWinVec4 *owner = floatPtr->GetOwnerVec4();
-		if ( owner ) {
-			owner->SetEval( false );
+void Script_ResetCapture(idWindow *window, idList<idGSWinVar> *src) {
+	if ( window == NULL || window->GetGui() == NULL || window->GetGui()->GetDesktop() == NULL ) {
+		return;
+	}
+	idWindow* desktop = window->GetGui()->GetDesktop();
+	if ( src != NULL && src->Num() > 0 ) {
+		idWinStr* name = dynamic_cast<idWinStr*>( (*src)[0].var );
+		if ( name != NULL && name->Length() > 0 ) {
+			drawWin_t* target = desktop->FindChildByName( name->c_str() );
+			if ( target != NULL && target->win != NULL ) {
+				target->win->ResetCapture();
+				return;
+			}
 		}
 	}
-
-	if ( gui_debugScript.GetInteger() > 2 ) {
-		const char *varName = (*src)[0].var ? (*src)[0].var->GetName() : "<null>";
-		common->Printf( "GUI: inc %s by %s -> %g (caller=%s gui=%s)\n",
-			varName,
-			(*src)[1].var->c_str(),
-			newValue,
-			window ? window->GetName() : "<null>",
-			window && window->GetGui() ? window->GetGui()->GetSourceFile() : "<null>" );
-	}
+	desktop->ResetCapture();
 }
 
 /*
@@ -290,31 +289,32 @@ void Script_ResetCinematics(idWindow *window, idList<idGSWinVar> *src) {
 
 /*
 =========================
-Script_ResetCapture
+GuiScript_ReadTransitionOperand
+
+Retail Quake 4 snapshots a "$var" transition operand at parse time only when it
+names a rect. Any other var is read here, when the transition starts, so a
+fade can begin from the current colour or end on one set after the gui loaded.
 =========================
 */
-void Script_ResetCapture(idWindow *window, idList<idGSWinVar> *src) {
-	if ( window == NULL || window->GetGui() == NULL ) {
-		return;
-	}
-
-	idWindow *desktop = window->GetGui()->GetDesktop();
-	if ( desktop == NULL ) {
-		return;
-	}
-
-	if ( src->Num() > 0 ) {
-		idWinStr *parm = dynamic_cast<idWinStr*>((*src)[0].var);
-		if ( parm && parm->Length() > 0 ) {
-			drawWin_t *namedWindow = desktop->FindChildByName( parm->c_str() );
-			if ( namedWindow && namedWindow->win ) {
-				namedWindow->win->ResetCapture();
-				return;
-			}
+static bool GuiScript_ReadTransitionOperand( const idGSWinVar &parm, idVec4 &value ) {
+	if ( parm.live == NULL ) {
+		const idWinVec4 *literal = dynamic_cast<const idWinVec4 *>( parm.var );
+		if ( literal == NULL ) {
+			return false;
 		}
+		value = *literal;
+		return true;
 	}
-
-	desktop->ResetCapture();
+	const idWinVec4 *vec4 = dynamic_cast<const idWinVec4 *>( parm.live );
+	if ( vec4 != NULL ) {
+		value = *vec4;
+		return true;
+	}
+	// Other var types convert through their text, as the parse-time copy did.
+	idWinVec4 parsed;
+	parsed.Set( parm.live->c_str() );
+	value = parsed;
+	return true;
 }
 
 /*
@@ -346,12 +346,14 @@ void Script_Transition(idWindow *window, idList<idGSWinVar> *src) {
 			valp = dynamic_cast<idWinFloatPtr*>((*src)[0].var);
 		}
 
-		idWinVec4 *from = dynamic_cast<idWinVec4*>((*src)[1].var);
-		idWinVec4 *to = dynamic_cast<idWinVec4*>((*src)[2].var);
+		idVec4 from = vec4_zero;
+		idVec4 to = vec4_zero;
+		const bool hasFrom = GuiScript_ReadTransitionOperand( (*src)[1], from );
+		const bool hasTo = GuiScript_ReadTransitionOperand( (*src)[2], to );
 		idWinStr *timeStr = dynamic_cast<idWinStr*>((*src)[3].var);
 		// 
 		//  added float variable					
-		if (!((vec4 || rect || val || valp) && from && to && timeStr)) {
+		if (!((vec4 || rect || val || valp) && hasFrom && hasTo && timeStr)) {
 			// 
 			common->Warning("Bad transition in gui %s in window %s\n", window->GetGui()->GetSourceFile(), window->GetName());
 			return;
@@ -369,12 +371,12 @@ void Script_Transition(idWindow *window, idList<idGSWinVar> *src) {
 				
 		if (vec4) {
 			vec4->SetEval(false);
-			window->AddTransition(vec4, *from, *to, time, ac, dc);
+			window->AddTransition(vec4, from, to, time, ac, dc);
 			// 
 			//  added float variable					
 		} else if ( val ) {
 			val->SetEval ( false );
-			window->AddTransition(val, *from, *to, time, ac, dc);
+			window->AddTransition(val, from, to, time, ac, dc);
 			// 
 		}
 		else if (valp) {
@@ -383,19 +385,19 @@ void Script_Transition(idWindow *window, idList<idGSWinVar> *src) {
 			if ( owner ) {
 				owner->SetEval( false );
 			}
-			window->AddTransition(valp, *from, *to, time, ac, dc);
+			window->AddTransition(valp, from, to, time, ac, dc);
 			// 
 		} else {
 			rect->SetEval(false);
-			window->AddTransition(rect, *from, *to, time, ac, dc);
+			window->AddTransition(rect, from, to, time, ac, dc);
 		}
 		window->StartTransition();
 		if ( gui_debugScript.GetInteger() > 2 ) {
 			const char *varName = (*src)[0].var ? (*src)[0].var->GetName() : "<null>";
 			common->Printf( "GUI: transition %s from=%s to=%s time=%d ac=%.3f dc=%.3f (caller=%s gui=%s)\n",
 				varName,
-				from ? from->c_str() : "<null>",
-				to ? to->c_str() : "<null>",
+				from.ToString(),
+				to.ToString(),
 				time, ac, dc,
 				window ? window->GetName() : "<null>",
 				window && window->GetGui() ? window->GetGui()->GetSourceFile() : "<null>" );
@@ -523,6 +525,43 @@ void Script_ResetVideo(idWindow* window, idList<idGSWinVar>* src) {
 
 /*
 ===================
+Script_VideoCompleteEvent
+===================
+*/
+void Script_VideoCompleteEvent( idWindow *window, idList<idGSWinVar> *src ) {
+	idWinStr *windowName = dynamic_cast<idWinStr *>( (*src)[0].var );
+	idWinStr *eventName = dynamic_cast<idWinStr *>( (*src)[1].var );
+
+	if ( windowName == NULL || eventName == NULL || window == NULL || window->GetGui() == NULL ) {
+		return;
+	}
+
+	drawWin_t *childWindow = NULL;
+	idWindow *desktop = window->GetGui()->GetDesktop();
+	if ( desktop ) {
+		childWindow = desktop->FindChildByName( windowName->c_str() );
+	}
+	if ( childWindow == NULL ) {
+		childWindow = window->FindChildByName( windowName->c_str() );
+	}
+	if ( childWindow == NULL ) {
+		return;
+	}
+
+	bool completed = false;
+	if ( childWindow->win ) {
+		completed = childWindow->win->IsBackgroundCinematicComplete();
+	} else if ( childWindow->simp ) {
+		completed = childWindow->simp->IsBackgroundCinematicComplete();
+	}
+
+	if ( completed ) {
+		window->GetGui()->HandleNamedEvent( eventName->c_str() );
+	}
+}
+
+/*
+===================
 Script_NonInteractive
 ===================
 */
@@ -530,7 +569,8 @@ void Script_NonInteractive(idWindow* window, idList<idGSWinVar>* src) {
 	idWinStr* parm = dynamic_cast<idWinStr*>((*src)[0].var);
 	int val = atoi(parm->c_str());
 
-	window->GetGui()->SetInteractive(val == 1);
+	// Quake 4 GUI scripts use "nonInteractive 1" to disable input.
+	window->GetGui()->SetInteractive( val == 0 );
 }
 // jmarshall end
 
@@ -544,12 +584,12 @@ typedef struct {
 guiCommandDef_t commandList[] = {
 	{ "set", Script_Set, 2, 999 },
 	{ "inc", Script_Inc, 2, 2 },
+	{ "resetCapture", Script_ResetCapture, 0, 1 },
 	{ "setFocus", Script_SetFocus, 1, 1 },
 	{ "endGame", Script_EndGame, 0, 0 },
 	{ "resetTime", Script_ResetTime, 0, 2 },
 	{ "showCursor", Script_ShowCursor, 1, 1 },
 	{ "resetCinematics", Script_ResetCinematics, 0, 2 },
-	{ "resetCapture", Script_ResetCapture, 0, 1 },
 	{ "transition", Script_Transition, 4, 6 },
 	{ "localSound", Script_LocalSound, 1, 1 },
 	{ "setlightcolor", Script_SetLightColor, 1, 1 },
@@ -560,6 +600,7 @@ guiCommandDef_t commandList[] = {
 	{ "stoptransitions", Script_StopTransitions, 1, 1},
 	{ "consolecmd", Script_ConsoleCmd, 1, 1},
 	{ "resetVideo", Script_ResetVideo, 1, 1},
+	{ "videoCompleteEvent", Script_VideoCompleteEvent, 2, 2},
 	{ "nonInteractive", Script_NonInteractive, 1, 1}
 // jmarshall end
 };
@@ -601,20 +642,41 @@ idGuiScript::~idGuiScript() {
 idGuiScript::WriteToSaveGame
 =========================
 */
-void idGuiScript::WriteToSaveGame( idFile *savefile ) {
+void idGuiScript::WriteToSaveGame( idFile *savefile, const char *context ) {
 	int i;
+	if ( savefile == NULL ) {
+		common->Error( "idGuiScript::WriteToSaveGame: NULL output file for %s", context );
+	}
 
 	if ( ifList ) {
-		ifList->WriteToSaveGame( savefile );
+		ifList->WriteToSaveGame( savefile, context );
 	}
 	if ( elseList ) {
-		elseList->WriteToSaveGame( savefile );
+		elseList->WriteToSaveGame( savefile, context );
 	}
 
-	savefile->Write( &conditionReg, sizeof( conditionReg ) );
+	if ( conditionReg < -1 || conditionReg >= MAX_EXPRESSION_REGISTERS ) {
+		common->Error( "idGuiScript::WriteToSaveGame: invalid condition register %d for %s", conditionReg, context );
+	}
+	const int conditionOffset = savefile->Tell();
+	const int conditionBytes = savefile->WriteInt( conditionReg );
+	if ( conditionBytes != static_cast<int>( sizeof( conditionReg ) ) ) {
+		common->Error( "idGuiScript::WriteToSaveGame: failed to write condition register at offset %d (%d of %d bytes)",
+			conditionOffset, conditionBytes, static_cast<int>( sizeof( conditionReg ) ) );
+	}
 
 	for ( i = 0; i < parms.Num(); i++ ) {
 		if ( parms[i].own ) {
+			if ( parms[i].var == NULL ) {
+				common->Error( "idGuiScript::WriteToSaveGame: owned parameter %d has no variable for %s", i, context );
+			}
+			// A script parameter is an evaluated GUI expression result and owns no name.
+			// Zero the affected components rather than refusing the save over one.
+			if ( !parms[i].var->IsFinite() ) {
+				common->Warning( "idGuiScript::WriteToSaveGame: %s owned parameter %d holds a non-finite value; "
+					"saving zero for the affected components", context, i );
+				parms[i].var->SanitizeNonFinite();
+			}
 			parms[i].var->WriteToSaveGame( savefile );
 		}
 	}
@@ -627,6 +689,9 @@ idGuiScript::ReadFromSaveGame
 */
 void idGuiScript::ReadFromSaveGame( idFile *savefile ) {
 	int i;
+	if ( savefile == NULL ) {
+		common->Error( "idGuiScript::ReadFromSaveGame: NULL input file" );
+	}
 
 	if ( ifList ) {
 		ifList->ReadFromSaveGame( savefile );
@@ -635,10 +700,30 @@ void idGuiScript::ReadFromSaveGame( idFile *savefile ) {
 		elseList->ReadFromSaveGame( savefile );
 	}
 
-	savefile->Read( &conditionReg, sizeof( conditionReg ) );
+	int savedConditionReg = -1;
+	const int conditionOffset = savefile->Tell();
+	const int conditionBytes = savefile->ReadInt( savedConditionReg );
+	if ( conditionBytes != static_cast<int>( sizeof( savedConditionReg ) ) ) {
+		common->Error( "idGuiScript::ReadFromSaveGame: truncated condition register at offset %d (%d of %d bytes)",
+			conditionOffset, conditionBytes, static_cast<int>( sizeof( savedConditionReg ) ) );
+	}
+	if ( savedConditionReg < -1 || savedConditionReg >= MAX_EXPRESSION_REGISTERS ) {
+		common->Error( "idGuiScript::ReadFromSaveGame: invalid saved condition register %d at offset %d",
+			savedConditionReg, conditionOffset );
+	}
+	if ( conditionReg < -1 || conditionReg >= MAX_EXPRESSION_REGISTERS ) {
+		common->Error( "idGuiScript::ReadFromSaveGame: invalid parsed condition register %d", conditionReg );
+	}
+	if ( savedConditionReg != conditionReg ) {
+		common->Error( "idGuiScript::ReadFromSaveGame: saved condition register %d does not match parsed register %d; GUI script structure changed",
+			savedConditionReg, conditionReg );
+	}
 
 	for ( i = 0; i < parms.Num(); i++ ) {
 		if ( parms[i].own ) {
+			if ( parms[i].var == NULL ) {
+				common->Error( "idGuiScript::ReadFromSaveGame: owned parameter %d has no parsed variable", i );
+			}
 			parms[i].var->ReadFromSaveGame( savefile );
 		}
 	}
@@ -767,7 +852,7 @@ void idGuiScript::FixupParms(idWindow *win) {
 			if ( dynamic_cast<idWinBackground *>(dest) != NULL ) {
 				precacheBackground = true;
 			}
-		} else if ( handler == &Script_Set && idStr::Icmp( str->c_str(), "cmd" ) == 0 ) {
+		} else if ( idStr::Icmp( str->c_str(), "cmd" ) == 0 ) {
 			precacheSounds = true;
 		}
 		int parmCount = parms.Num();
@@ -869,6 +954,12 @@ void idGuiScript::FixupParms(idWindow *win) {
 
 			if ( (*str[0]) == '$' ) {
 				dest = win->GetWinVarByName ( (const char*)(*str) + 1, true, &owner );
+				if ( !dest ) {
+					// The unresolved token stays the operand, and none of it parses as a number,
+					// so the transition runs from zero rather than from the var it names.
+					common->Warning( "Window %s in gui %s: transition parameter %d references %s, which is not a valid var; the transition uses zero for it",
+						win->GetName(), win->GetGui()->GetSourceFile(), c, str->c_str() );
+				}
 			} else {
 				dest = NULL;
 			}
@@ -896,6 +987,11 @@ void idGuiScript::FixupParms(idWindow *win) {
 					}
 				} else {
 					v4->Set ( dest->c_str ( ) );
+				}
+				// Retail keeps this parse-time copy only for a rect. Any other var
+				// is read when the transition starts (GuiScript_ReadTransitionOperand).
+				if ( dynamic_cast<idWinRectangle*>( dest ) == NULL ) {
+					parms[c].live = dest;
 				}
 			} else {
 				v4->Set(*str);
@@ -937,11 +1033,17 @@ void idGuiScriptList::FixupParms(idWindow *win) {
 idGuiScriptList::WriteToSaveGame
 =========================
 */
-void idGuiScriptList::WriteToSaveGame( idFile *savefile ) {
+void idGuiScriptList::WriteToSaveGame( idFile *savefile, const char *context ) {
 	int i;
+	if ( savefile == NULL ) {
+		common->Error( "idGuiScriptList::WriteToSaveGame: NULL output file for %s", context );
+	}
 
 	for ( i = 0; i < list.Num(); i++ ) {
-		list[i]->WriteToSaveGame( savefile );
+		if ( list[i] == NULL ) {
+			common->Error( "idGuiScriptList::WriteToSaveGame: NULL script at index %d for %s", i, context );
+		}
+		list[i]->WriteToSaveGame( savefile, context );
 	}
 }
 
@@ -952,8 +1054,14 @@ idGuiScriptList::ReadFromSaveGame
 */
 void idGuiScriptList::ReadFromSaveGame( idFile *savefile ) {
 	int i;
+	if ( savefile == NULL ) {
+		common->Error( "idGuiScriptList::ReadFromSaveGame: NULL input file" );
+	}
 
 	for ( i = 0; i < list.Num(); i++ ) {
+		if ( list[i] == NULL ) {
+			common->Error( "idGuiScriptList::ReadFromSaveGame: NULL parsed script at index %d", i );
+		}
 		list[i]->ReadFromSaveGame( savefile );
 	}
 }

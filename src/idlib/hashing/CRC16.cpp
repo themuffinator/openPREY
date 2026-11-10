@@ -15,7 +15,7 @@
 
 #ifdef CREATE_CRC_TABLE
 
-static unsigned short crctable[256];
+static uint16_t crctable[256];
 
 /*
    Generate a table for a byte-wise 16-bit CRC calculation on the polynomial:
@@ -24,14 +24,14 @@ static unsigned short crctable[256];
 
 void make_crc_table( void ) {
 	int i, j;
-	unsigned long poly, c;
+	uint32_t poly, c;
 	/* terms of polynomial defining this crc (except x^16): */
-	static const byte p[] = {0,5,12};
+	static const uint8_t p[] = {0,5,12};
 
 	/* make exclusive-or pattern from polynomial (0x1021) */
-	poly = 0L;
-	for ( i = 0; i < sizeof( p ) / sizeof( byte ); i++ ) {
-		poly |= 1L << p[i];
+	poly = 0u;
+	for ( i = 0; i < static_cast<int>( sizeof( p ) / sizeof( p[0] ) ); i++ ) {
+		poly |= 1u << p[i];
 	}
 
 	for ( i = 0; i < 256; i++ ) {
@@ -39,7 +39,7 @@ void make_crc_table( void ) {
 		for ( j = 0; j < 8; j++ ) {
 			c = ( c & 0x8000 ) ? poly ^ ( c << 1 ) : ( c << 1 );
 		}
-		crctable[i] = (unsigned short) c;
+		crctable[i] = static_cast<uint16_t>( c );
 	}
 }
 
@@ -48,7 +48,7 @@ void make_crc_table( void ) {
 /*
   Table of CRC-16's of all single-byte values (made by make_crc_table)
 */
-static unsigned short crctable[256] = {
+static const uint16_t crctable[256] = {
 	0x0000,	0x1021,	0x2042,	0x3063,	0x4084,	0x50a5,	0x60c6,	0x70e7,
 	0x8108,	0x9129,	0xa14a,	0xb16b,	0xc18c,	0xd1ad,	0xe1ce,	0xf1ef,
 	0x1231,	0x0210,	0x3273,	0x2252,	0x52b5,	0x4294,	0x72f7,	0x62d6,
@@ -85,17 +85,17 @@ static unsigned short crctable[256] = {
 
 #endif
 
-void CRC16_InitChecksum( unsigned short &crcvalue ) {
+void CRC16_InitChecksum( uint16_t &crcvalue ) {
 	crcvalue = CRC16_INIT_VALUE;
 }
 
-void CRC16_Update( unsigned short &crcvalue, const byte data ) {
+void CRC16_Update( uint16_t &crcvalue, const byte data ) {
 	crcvalue = ( crcvalue << 8 ) ^ crctable[ ( crcvalue >> 8 ) ^ data ];
 }
 
-void CRC16_UpdateChecksum( unsigned short &crcvalue, const void *data, int length ) {
-	unsigned short crc;
-	const unsigned char *buf = (const unsigned char *) data;
+void CRC16_UpdateChecksum( uint16_t &crcvalue, const void *data, int length ) {
+	uint16_t crc;
+	const uint8_t *buf = static_cast<const uint8_t *>( data );
 
 	crc = crcvalue;
 	while( length-- ) {
@@ -104,12 +104,12 @@ void CRC16_UpdateChecksum( unsigned short &crcvalue, const void *data, int lengt
 	crcvalue = crc;
 }
 
-void CRC16_FinishChecksum( unsigned short &crcvalue ) {
+void CRC16_FinishChecksum( uint16_t &crcvalue ) {
 	crcvalue ^= CRC16_XOR_VALUE;
 }
 
-unsigned short CRC16_BlockChecksum( const void *data, int length ) {
-	unsigned short crc;
+uint16_t CRC16_BlockChecksum( const void *data, int length ) {
+	uint16_t crc;
 
 	CRC16_InitChecksum( crc );
 	CRC16_UpdateChecksum( crc, data, length );

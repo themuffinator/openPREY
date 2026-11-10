@@ -2,35 +2,98 @@ option(
   'use_pch',
   type: 'boolean',
   value: true,
-  description: 'Enable precompiled headers (src/idlib/precompiled.h).',
+  description: 'Compile src/idlib/precompiled.h as a PCH. When disabled, force-include it as a normal common header.',
 )
 
 option(
   'build_engine',
   type: 'boolean',
   value: true,
-  description: 'Build engine executables (OpenPrey-client_<arch>/OpenPrey-ded_<arch>).',
+  description: 'Build engine executables (openPREY-client_<arch>/openPREY-ded_<arch>).',
 )
 
 option(
   'build_games',
   type: 'boolean',
   value: true,
-  description: 'Build the unified game module from the synchronized game source mirror.',
+  description: 'Build the unified game_<arch> module from the in-tree src/game, src/Prey and src/preyengine sources.',
 )
 
 option(
   'build_game_sp',
   type: 'boolean',
-  value: false,
-  description: 'Legacy no-op compatibility option. Unified game module builds when -Dbuild_games=true.',
+  value: true,
+  description: 'Legacy compatibility option; accepted but the unified Prey game module always provides SP and MP.',
 )
 
 option(
   'build_game_mp',
   type: 'boolean',
+  value: true,
+  description: 'Legacy compatibility option; accepted but the unified Prey game module always provides SP and MP.',
+)
+
+option(
+  'build_renderer_gles',
+  type: 'feature',
+  value: 'auto',
+  description: 'Build the OpenGL ES 3 renderer module. Auto enables it on Android; enable explicitly on desktop (native GLES on Linux or an ANGLE SDK).',
+)
+
+option(
+  'gles_root',
+  type: 'string',
+  value: '',
+  description: 'Optional desktop GLES/ANGLE SDK prefix containing lib/ (and bin/ on Windows). Runtime libraries must be supplied and licensed separately.',
+)
+
+option(
+  'android_deps_root',
+  type: 'string',
+  value: '',
+  description: 'Android target dependency prefix containing include/SDL3, include/AL, lib/libSDL3.so and lib/libopenal.so. See docs/dev/android-build.md.',
+)
+
+option(
+  'android_headset',
+  type: 'boolean',
   value: false,
-  description: 'Legacy no-op compatibility option. Unified game module builds when -Dbuild_games=true.',
+  description: 'Android arm64-v8a only: stage the experimental Meta Quest headset flavor (package variant "quest", with the openq4-headset marker that starts the game in VR). The Gradle flavor and its distribution are AND-05; see docs/dev/android-build.md.',
+)
+
+option(
+  'sigmatouch_root',
+  type: 'string',
+  value: '',
+  description: 'Optional external Clibs_OpenTouch source directory for the Sigma Touch host adapter (Android only).',
+)
+
+option(
+  'sigmatouch_controls_root',
+  type: 'string',
+  value: '',
+  description: 'External touchcontrols include root; required with sigmatouch_root. Target touchcontrols/saffal libraries come from android_deps_root/lib.',
+)
+
+option(
+  'build_renderer_vk',
+  type: 'boolean',
+  value: true,
+  description: 'Build the Vulkan renderer module (renderer-vk_<arch>). Requires the SDL3 platform backend. On macOS the module runs through MoltenVK, a Vulkan-on-Metal translation layer, and stays opt-in behind r_renderApi vulkan; see docs/dev/archive/2026-10-18/macos-moltenvk-decision.md.',
+)
+
+option(
+  'build_renderer_gl',
+  type: 'boolean',
+  value: true,
+  description: 'Build the OpenGL renderer module (renderer-gl_<arch>) from the same renderer sources the engine still links statically. Requires the SDL3 platform backend; skipped on macOS until the module path is validated there.',
+)
+
+option(
+  'openxr',
+  type: 'feature',
+  value: 'auto',
+  description: 'OpenXR virtual reality in the client (vr_enable). Links the Khronos OpenXR loader statically into the SDL3 client on Windows and Linux; macOS, Android and dedicated servers never build it. See docs/dev/archive/2026-10-18/plans/2026-10-02-openxr-vr.md.',
 )
 
 option(
@@ -38,7 +101,58 @@ option(
   type: 'combo',
   choices: ['sdl3', 'legacy_win32', 'native'],
   value: 'sdl3',
-  description: 'Window/input backend on Windows (SDL3 is the portability default; legacy_win32 is transitional). Non-Windows hosts always use native platform sources.',
+  description: 'Window/input backend. Windows: sdl3 or legacy_win32. Linux/macOS: sdl3 or native. The macOS native backend is comparison-only; release packages use sdl3.',
+)
+
+option(
+  'linux_x11',
+  type: 'feature',
+  value: 'auto',
+  description: 'Linux SDL3 X11/XWayland driver and optional engine X11 helpers. Disable for a native Wayland/EGL-only build.',
+)
+
+option(
+  'macos_graphics_bridge',
+  type: 'combo',
+  choices: ['opengl', 'metal'],
+  value: 'opengl',
+  description: 'macOS graphics bridge. metal keeps the SDL3/OpenGL renderer path but enables the Metal-ready SDL3/Cocoa integration surface for translation-layer bring-up.',
+)
+
+option(
+  'macos_openal_provider',
+  type: 'combo',
+  choices: ['apple_framework', 'system'],
+  value: 'apple_framework',
+  description: 'macOS OpenAL provider. Release workflows use system with the pinned, bundled OpenAL Soft runtime and OpenAL Soft-style AL/... headers; apple_framework remains available for compatibility diagnostics.',
+)
+
+option(
+  'version_track',
+  type: 'string',
+  value: 'dev',
+  description: 'Version track embedded into the build. Use stable for release builds, dev for local builds, or labels such as beta/rc for prerelease builds.',
+)
+
+option(
+  'version_iteration',
+  type: 'string',
+  value: '',
+  description: 'Optional dot-separated track iteration (for example 20260307.1). Only used for prerelease tracks.',
+)
+
+option(
+  'version_base_override',
+  type: 'string',
+  value: '',
+  description: 'Optional release version override used for generated build metadata without changing meson.build.',
+)
+
+option(
+  'openal_root_override',
+  type: 'string',
+  value: '',
+  description: 'Optional Windows OpenAL Soft root containing include/, lib/, and bin/ payloads. Useful for ARM64 builds that provide a custom OpenAL package.',
 )
 
 option(
@@ -46,4 +160,25 @@ option(
   type: 'boolean',
   value: false,
   description: 'Fail configure when MSVC is older than the VS 2026 baseline (19.46+).',
+)
+
+option(
+  'idlib_asserts',
+  type: 'boolean',
+  value: false,
+  description: 'Compile idlib assert()/verify() into live checks on GCC/Clang. src/idlib/Lib.h keys them off _DEBUG, which no GCC/Clang openPREY build defines, so every ownership and alignment assert is otherwise a no-op there. Enabled by the sanitizer lanes; note that AssertFailed raises SIGTRAP/SIGINT, so a firing assert stops the process.',
+)
+
+option(
+  'build_native_tests',
+  type: 'boolean',
+  value: false,
+  description: 'Build focused dependency-light native engine tests used by validation profiles.',
+)
+
+option(
+  'prebuilt_content_packs',
+  type: 'string',
+  value: '',
+  description: 'Directory holding prebuilt openPREY content packs and their content-packs.json (tools/build/content_pack_release.py build). Each pack target copies the prebuilt file after checking that its recorded source digest matches the checked-out sources, so every platform build of a release carries the same pack bytes. Empty packs from source.',
 )

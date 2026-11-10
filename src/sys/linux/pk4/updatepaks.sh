@@ -1,27 +1,66 @@
 #!/bin/sh
+set -eu
 
-echo "current pak files:       $1"
-echo "expanded updated source: $2"
-echo "new pak file:            $3"
-echo "press a key"
-read
+usage() {
+    echo "usage: $0 <current-pk4-dir> <expanded-source-dir> <new-pk4>" >&2
+}
 
-TMPDIR=`mktemp -d -t`
+if [ "$#" -ne 3 ]; then
+    usage
+    exit 2
+fi
 
-ls "$1/"*.pk4 | while read i ; do unzip -l $i | cut -b 29- | tee $TMPDIR/`basename $i`.log ; done
+current_pak_dir=$1
+expanded_source_dir=$2
+new_pak=$3
 
-ls $TMPDIR/*.log | while read i ; do lines=`cat $i | wc -l` ; tail +4 $i | head -$(( $lines - 5 )) | tee $TMPDIR/`basename $i`.2 ; done
+if [ ! -d "$current_pak_dir" ]; then
+    echo "error: current PK4 directory not found: $current_pak_dir" >&2
+    exit 1
+fi
+if [ ! -d "$expanded_source_dir" ]; then
+    echo "error: expanded source directory not found: $expanded_source_dir" >&2
+    exit 1
+fi
+if ! command -v unzip >/dev/null 2>&1; then
+    echo "error: unzip is required" >&2
+    exit 1
+fi
+if ! command -v zip >/dev/null 2>&1; then
+    echo "error: zip is required" >&2
+    exit 1
+fi
 
-# check cutting off
-#ls $TMPDIR/*.log | while read i ; do diff $i $i.2 ; done
+tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/openq4-updatepaks.XXXXXX")
+cleanup() {
+    rm -rf "$tmpdir"
+}
+trap cleanup EXIT HUP INT TERM
 
-cat $TMPDIR/*.log.2 | sort -u | tee $TMPDIR/sorted-unique.log
+echo "current pak files:       $current_pak_dir"
+echo "expanded updated source: $expanded_source_dir"
+echo "new pak file:            $new_pak"
+if [ "${OPENQ4_UPDATEPAKS_ASSUME_YES:-0}" != "1" ]; then
+    printf "press enter to continue, or Ctrl-C to abort"
+    read _answer
+fi
 
-# now the magical zip command
-cd $2
-rm $3
-cat $TMPDIR/sorted-unique.log | zip -b $TMPDIR $3 -@ 1>/dev/null
+find "$current_pak_dir" -maxdepth 1 -type f -name '*.pk4' -print | sort | while IFS= read -r pak; do
+    unzip -Z1 "$pak" > "$tmpdir/$(basename "$pak").log"
+done
 
-md5sum $3
+if ! find "$tmpdir" -maxdepth 1 -type f -name '*.log' | grep -q .; then
+    echo "error: no PK4 files found in $current_pak_dir" >&2
+    exit 1
+fi
+
+cat "$tmpdir"/*.log | sort -u > "$tmpdir/sorted-unique.log"
+
+(
+    cd "$expanded_source_dir"
+    rm -f -- "$new_pak"
+    zip -b "$tmpdir" "$new_pak" -@ < "$tmpdir/sorted-unique.log" >/dev/null
+    md5sum "$new_pak"
+)
+
 echo "done."
-

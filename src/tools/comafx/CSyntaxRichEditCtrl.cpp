@@ -85,6 +85,7 @@ CSyntaxRichEditCtrl::CSyntaxRichEditCtrl
 */
 CSyntaxRichEditCtrl::CSyntaxRichEditCtrl( void ) {
 	m_TextDoc = NULL;
+	m_DefaultFont = NULL;
 	keyWords = defaultKeyWords;
 	keyWordColors = NULL;
 	keyWordLengths = NULL;
@@ -117,9 +118,13 @@ CSyntaxRichEditCtrl::~CSyntaxRichEditCtrl
 */
 CSyntaxRichEditCtrl::~CSyntaxRichEditCtrl( void ) {
 	FreeKeyWordsFromFile();
-	delete m_pchTip;
-	delete m_pwchTip;
-	m_DefaultFont->Release();
+	delete[] keyWordColors;
+	delete[] keyWordLengths;
+	delete[] m_pchTip;
+	delete[] m_pwchTip;
+	if ( m_DefaultFont != NULL ) {
+		m_DefaultFont->Release();
+	}
 }
 
 /*
@@ -298,14 +303,14 @@ void CSyntaxRichEditCtrl::SetKeyWords( const keyWord_t kws[] ) {
 	for ( numKeyWords = 0; keyWords[numKeyWords].keyWord; numKeyWords++ ) {
 	}
 
-	delete keyWordColors;
+	delete[] keyWordColors;
 	keyWordColors = new COLORREF[numKeyWords];
 
 	for ( i = 0; i < numKeyWords; i++ ) {
 		keyWordColors[i] = keyWords[i].color;
 	}
 
-	delete keyWordLengths;
+	delete[] keyWordLengths;
 	keyWordLengths = new int[numKeyWords];
 
 	for ( i = 0; i < numKeyWords; i++ ) {
@@ -1361,7 +1366,7 @@ void CSyntaxRichEditCtrl::GoToLine( int line ) {
 CSyntaxRichEditCtrl::OnToolHitTest
 ================
 */
-int CSyntaxRichEditCtrl::OnToolHitTest( CPoint point, TOOLINFO* pTI ) const {
+INT_PTR CSyntaxRichEditCtrl::OnToolHitTest( CPoint point, TOOLINFO* pTI ) const {
 	CRichEditCtrl::OnToolHitTest( point, pTI );
 
     pTI->hwnd = GetSafeHwnd();
@@ -1411,24 +1416,24 @@ BOOL CSyntaxRichEditCtrl::OnToolTipNotify( UINT id, NMHDR *pNMHDR, LRESULT *pRes
 
 #ifndef _UNICODE
 		if( pNMHDR->code == TTN_NEEDTEXTA ) {
-			delete m_pchTip;
+			delete[] m_pchTip;
 			m_pchTip = new TCHAR[toolTip.GetLength() + 2];
 			lstrcpyn( m_pchTip, toolTip, toolTip.GetLength() + 1 );
 			pTTTW->lpszText = (WCHAR*)m_pchTip;
 		} else {
-			delete m_pwchTip;
+			delete[] m_pwchTip;
 			m_pwchTip = new WCHAR[toolTip.GetLength() + 2];
 			_mbstowcsz( m_pwchTip, toolTip, toolTip.GetLength() + 1 );
 			pTTTW->lpszText = (WCHAR*)m_pwchTip;
 		}
 #else
 		if( pNMHDR->code == TTN_NEEDTEXTA ) {
-			delete m_pchTip;
+			delete[] m_pchTip;
 			m_pchTip = new TCHAR[toolTip.GetLength() + 2];
 			_wcstombsz( m_pchTip, toolTip, toolTip.GetLength() + 1 );
 			pTTTA->lpszText = (LPTSTR)m_pchTip;
 		} else {
-			delete m_pwchTip;
+			delete[] m_pwchTip;
 			m_pwchTip = new WCHAR[toolTip.GetLength() + 2];
 			lstrcpyn( m_pwchTip, toolTip, toolTip.GetLength() + 1 );
 			pTTTA->lpszText = (LPTSTR) m_pwchTip;

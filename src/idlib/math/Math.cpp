@@ -91,7 +91,7 @@ int idMath::FloatToBits( float f, int exponentBits, int mantissaBits ) {
 	}
 
 	exponentBits--;
-	i = *reinterpret_cast<int *>(&f);
+	i = static_cast<int>( idMath_FloatBits( f ) );
 	sign = ( i >> IEEE_FLT_SIGN_BIT ) & 1;
 	exponent = ( ( i >> IEEE_FLT_MANTISSA_BITS ) & ( ( 1 << IEEE_FLT_EXPONENT_BITS ) - 1 ) ) - IEEE_FLT_EXPONENT_BIAS;
 	mantissa = i & ( ( 1 << IEEE_FLT_MANTISSA_BITS ) - 1 );
@@ -117,7 +117,7 @@ float idMath::BitsToFloat( int i, int exponentBits, int mantissaBits ) {
 	exponent = ( ( i >> mantissaBits ) & ( ( 1 << exponentBits ) - 1 ) ) * exponentSign[( i >> ( exponentBits + mantissaBits ) ) & 1];
 	mantissa = ( i & ( ( 1 << mantissaBits ) - 1 ) ) << ( IEEE_FLT_MANTISSA_BITS - mantissaBits );
 	value = sign << IEEE_FLT_SIGN_BIT | ( exponent + IEEE_FLT_EXPONENT_BIAS ) << IEEE_FLT_MANTISSA_BITS | mantissa;
-	return *reinterpret_cast<float *>(&value);
+	return idMath_FloatFromBits( static_cast<unsigned int>( value ) );
 }
 
 // RAVEN BEGIN
@@ -148,13 +148,13 @@ void idMath::PolarFromArtesian( idVec3 &view, idVec3 artesian )
 // jscott: fast and reliable random routines
 // ================================================================================================
 
-unsigned long rvRandom::mSeed;
+unsigned int rvRandom::mSeed;
 
 float rvRandom::flrand( float min, float max )
 {
 	float	result;
 
-	mSeed = ( mSeed * 214013L ) + 2531011;
+	mSeed = ( mSeed * 214013u ) + 2531011u;
 	// Note: the shift and divide cannot be combined as this breaks the routine
 	result = ( float )( mSeed >> 17 );						// 0 - 32767 range
 	result = ( ( result * ( max - min ) ) * ( 1.0f / 32768.0f ) ) + min;
@@ -174,7 +174,7 @@ int rvRandom::irand( int min, int max )
 	int		result;
 
 	max++;
-	mSeed = ( mSeed * 214013L ) + 2531011;
+	mSeed = ( mSeed * 214013u ) + 2531011u;
 	result = mSeed >> 17;
 	result = ( ( result * ( max - min ) ) >> 15 ) + min;
 	return( result );
@@ -182,9 +182,9 @@ int rvRandom::irand( int min, int max )
 
 // Try to get a seed independent of the random number system
 
-int rvRandom::Init( void )
+unsigned int rvRandom::Init( void )
 {
-	mSeed *= ( unsigned long )sys->Milliseconds();
+	mSeed *= static_cast<unsigned int>( sys->Milliseconds() );
 
 	return( mSeed );
 }

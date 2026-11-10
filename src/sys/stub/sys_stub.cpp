@@ -43,24 +43,53 @@ If you have questions concerning this license or the applicable additional terms
 static	int		frameNum;
 
 int Sys_Milliseconds( void ) {
-	return frameNum * 16;
+	return common->GetUserCmdTime( frameNum );
+}
+
+bool Sys_GetSecureRandomBytes( void *buffer, int bytes ) {
+	(void)buffer;
+	(void)bytes;
+	return false;
 }
 
 double Sys_GetClockTicks( void ) {
-	return frameNum * 16.0;
+	return static_cast<double>( common->GetUserCmdTime( frameNum ) );
 }
 
 double Sys_ClockTicksPerSecond( void ) {
 	return 1000.0;
 }
 
+double Sys_GetApproximateProcessorFrequencyHz( void ) {
+	return 0.0;
+}
+
 void	Sys_Sleep( int msec ) {
 }
 
-void	Sys_CreateThread(  xthread_t function, void *parms, xthreadPriority priority, xthreadInfo& info ) {
+void Sys_CreateThread( xthread_t function, void *parms, xthreadPriority priority, xthreadInfo& info, const char *name, xthreadInfo *threads[MAX_THREADS], int *thread_count ) {
+	info.name = name;
+	info.threadHandle = 0;
+	info.threadId = 0;
+	info.stopRequested = false;
 }
 
 void Sys_DestroyThread( xthreadInfo& info ) {
+	info.threadHandle = 0;
+	info.threadId = 0;
+	info.stopRequested = false;
+}
+
+void Sys_RequestThreadStop( xthreadInfo& info ) {
+	info.stopRequested = true;
+}
+
+bool Sys_IsThreadStopRequested( const xthreadInfo& info ) {
+	return info.stopRequested;
+}
+
+bool Sys_IsCurrentThreadStopRequested( void ) {
+	return false;
 }
 
 void	Sys_FlushCacheMemory( void *base, int bytes ) {
@@ -124,6 +153,9 @@ void Sys_InitInput( void ) {
 void Sys_ShutdownInput( void ) {
 }
 
+void Sys_ClearInputEvents( void ) {
+}
+
 sysEvent_t	Sys_GetEvent( void ) {
 	sysEvent_t	ev;
 
@@ -142,6 +174,20 @@ const char *Sys_DefaultCDPath(void) {
 
 const char *Sys_DefaultBasePath(void) {
 	return "";
+}
+
+bool Sys_GetPackageRootDirectory( char *packageRoot, int packageRootSize ) {
+	if ( packageRoot != NULL && packageRootSize > 0 ) {
+		packageRoot[0] = '\0';
+	}
+	return false;
+}
+
+bool Sys_GetGameModuleRootDirectory( char *moduleRoot, int moduleRootSize ) {
+	if ( moduleRoot != NULL && moduleRootSize > 0 ) {
+		moduleRoot[0] = '\0';
+	}
+	return false;
 }
 
 int Sys_ListFiles( const char *directory, const char *extension, idStrList &list )
@@ -195,10 +241,6 @@ int Sys_ListFiles( const char *directory, const char *extension, idStrList &list
 void	Sys_GrabMouseCursor( bool grabIt ) {
 }
 
-bool Sys_IsGameWindowFocused( void ) {
-	return true;
-}
-
 bool	Sys_StringToNetAdr( const char *s, netadr_t *a ) {
 	return false;
 }
@@ -211,6 +253,8 @@ const char *Sys_NetAdrToString( const netadr_t a ) {
 	} else if ( a.type == NA_IP ) {
 		idStr::snPrintf( s, sizeof(s), "%i.%i.%i.%i:%i",
 			a.ip[0], a.ip[1], a.ip[2], a.ip[3], BigShort(a.port) );
+	} else if ( a.type == NA_IP6 ) {
+		idStr::snPrintf( s, sizeof(s), "[ipv6]:%i", BigShort(a.port) );
 	}
 	return s;
 }
@@ -220,15 +264,14 @@ void Sys_DoPreferences( void ) {
 
 int main( int argc, char **argv ) {
 	// combine the args into a windows-style command line
-	char	cmdline[4096];
-	cmdline[0] = 0;
+	idStr cmdline;
 	for ( int i = 1 ; i < argc ; i++ ) {
-		strcat( cmdline, argv[i] );
-		if ( i < argc - 1 ) {
-			strcat( cmdline, " " );
+		if ( i > 1 ) {
+			cmdline += " ";
 		}
+		cmdline += argv[i];
 	}
-	common->Init( cmdline );
+	common->Init( cmdline.c_str() );
 
 	while( 1 ) {
 		common->Async();

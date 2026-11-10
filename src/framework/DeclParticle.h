@@ -216,7 +216,8 @@ public:
 
 	virtual size_t			Size( void ) const;
 	virtual const char *	DefaultDefinition( void ) const;
-	virtual bool			Parse( const char *text, const int textLength );
+	virtual bool			Parse( const char *text, const int textLength ) override;
+	virtual bool			Parse( const char *text, const int textLength, bool noCaching ) override;
 	virtual void			FreeData( void );
 
 	bool					Save( const char *fileName = NULL );
@@ -228,9 +229,9 @@ public:
 private:
 	bool					RebuildTextSource( void );
 	void					GetStageBounds( idParticleStage *stage );
-	idParticleStage *		ParseParticleStage( idLexer &src );
+	idParticleStage *		ParseParticleStage( idLexer &src, bool noCaching );
 	void					ParseParms( idLexer &src, float *parms, int maxParms );
-	void					ParseParametric( idLexer &src, idParticleParm *parm );
+	void					ParseParametric( idLexer &src, idParticleParm *parm, bool noCaching );
 	void					WriteStage( idFile *f, idParticleStage *stage );
 	void					WriteParticleParm( idFile *f, idParticleParm *parm, const char *name );
 };

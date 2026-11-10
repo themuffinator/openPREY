@@ -1,0 +1,341 @@
+name: DISABLED - inherited OpenQ4 reference (macOS Debug)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bridge:
+        description: "macOS graphics bridge to build"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - opengl
+          - metal
+      run_runtime_assetless:
+        description: "Try assetless renderer startup probes on the macOS runner"
+        required: true
+        default: false
+        type: boolean
+      retention_days:
+        description: "Artifact retention days"
+        required: true
+        default: "14"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openq4-macos-debug-${{ github.ref }}-${{ inputs.bridge }}
+  cancel-in-progress: false
+
+jobs:
+  macos-debug:
+    if: ${{ false }} # OPENPREY-GATED: split-module/OpenQ4 source contract
+    name: macOS ${{ matrix.bridge_label }} Debug
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bridge_label: OpenGL
+            bridge: opengl
+            artifact_suffix: opengl
+          - bridge_label: Metal
+            bridge: metal
+            artifact_suffix: metal
+
+    steps:
+      - name: Select bridge
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.bridge }}"
+          bridge="${{ matrix.bridge }}"
+          if [[ "${requested}" != "both" && "${requested}" != "${bridge}" ]]; then
+            echo "selected=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "selected=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Checkout
+        if: steps.select.outputs.selected == 'true'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        if: steps.select.outputs.selected == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Setup Java for Android host storage validation
+        if: steps.select.outputs.selected == 'true'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Meson and Ninja
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Prepare pinned OpenAL Soft
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          prepared_root="${GITHUB_WORKSPACE}/.tmp/openal-soft-macos-arm64"
+          bash tools/build/prepare_macos_openal_soft.sh \
+            --architecture arm64 \
+            --deployment-target 11.0 \
+            --output-root "${prepared_root}" \
+            --stage-install-dir .install
+          echo "PKG_CONFIG_PATH=${prepared_root}/lib/pkgconfig" >> "${GITHUB_ENV}"
+
+      - name: Host diagnostics
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Host"
+            sw_vers
+            uname -a
+            echo
+            echo "## Xcode"
+            xcodebuild -version || true
+            xcode-select -p || true
+            echo
+            echo "## Displays"
+            system_profiler SPDisplaysDataType || true
+          } | tee macos-debug-host.txt
+
+      - name: Static macOS guards
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/tests/macos_apple_gl21_arb2_corridor.py
+          python tools/tests/macos_renderer_startup_guard.py
+          python tools/tests/macos_renderer_phase_breadcrumbs.py
+          python tools/tests/macos_support_intake.py
+          python tools/tests/macos_symbolication_policy.py
+          python tools/tests/macos_gamelibs_alignment.py
+          python tools/tests/macos_local_validation_track.py
+          python tools/tests/macos_native_backend_containment.py
+          python tools/tests/macos_openal_provider_policy.py
+          python tools/tests/macos_package_robustness.py
+          python tools/tests/macos_metal_bridge.py
+          python tools/tests/filesystem_case_segments.py
+          bash -n tools/macos/collect_macos_support_info.sh
+          bash -n tools/validation/validate_macos_static.sh
+          bash -n tools/macos/guest/openq4-macos-bootstrap.sh
+          bash -n tools/macos/guest/openq4-macos-install-quake4-assets.sh
+          bash -n tools/macos/guest/openq4-macos-sync-build-test.sh
+          python tools/validation/openq4_validate.py push --skip-build --no-install
+
+      - name: Record hosted evidence scope
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.bridge }}"
+          bridge="${{ matrix.bridge }}"
+          openq4_commit="$(git rev-parse HEAD)"
+          openq4_game_commit="$(git -C "${OPENQ4_GAMELIBS_REPO}" rev-parse HEAD)"
+          openq4_dirty=0
+          openq4_game_dirty=0
+          if [[ -n "$(git status --porcelain)" ]]; then
+            openq4_dirty=1
+          fi
+          if [[ -n "$(git -C "${OPENQ4_GAMELIBS_REPO}" status --porcelain)" ]]; then
+            openq4_game_dirty=1
+          fi
+          {
+            echo "workflow=macOS Debug"
+            echo "evidence_scope=hosted build/package validation only; not a completed manual Apple-hardware gameplay signoff"
+            echo "requested_bridge=${requested}"
+            echo "artifact_bridge=${bridge}"
+            echo "run_runtime_assetless=${{ inputs.run_runtime_assetless }}"
+            echo "openq4_commit=${openq4_commit}"
+            echo "openq4_game_commit=${openq4_game_commit}"
+            echo "openq4_dirty=${openq4_dirty}"
+            echo "openq4_game_dirty=${openq4_game_dirty}"
+            if [[ "${requested}" == "both" ]]; then
+              echo "bridge_coverage=both requested; this artifact contains only ${bridge}"
+            else
+              echo "bridge_coverage=${bridge} only; the other bridge was intentionally not selected"
+            fi
+          } > macos-debug-evidence-scope.txt
+
+      - name: Fetch MoltenVK
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # macOS has no native Vulkan driver: the renderer module runs on
+          # MoltenVK, a Vulkan-on-Metal translation layer staged into the
+          # package. Pinned and checksum-verified; see
+          # docs/dev/macos-moltenvk-provider-policy.md.
+          bash tools/build/prepare_macos_moltenvk.sh --output-dir .install
+          bash tools/build/prepare_macos_moltenvk.sh --verify-only --output-dir .install \
+            | tee macos-debug-moltenvk-provenance.txt
+
+      - name: Configure
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        env:
+          # Keep Meson subprojects (SDL3, GLEW, stb_vorbis) on the same macOS 11.0
+          # floor as the main project's -mmacosx-version-min=11.0 flags.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh setup --wipe builddir . \
+            --backend ninja \
+            --buildtype=debug \
+            --wrap-mode=forcefallback \
+            -Dplatform_backend=sdl3 \
+            -Dbuild_renderer_vk=true \
+            -Dmacos_graphics_bridge=${{ matrix.bridge }} \
+            -Dmacos_openal_provider=system
+
+      - name: Compile
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh compile -C builddir
+
+      - name: Install
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh install -C builddir --no-rebuild --skip-subprojects
+
+      - name: Validate staged payload
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/validation/openq4_validate.py push --skip-build --no-install
+
+      - name: Assetless renderer probes
+        if: steps.select.outputs.selected == 'true' && inputs.run_runtime_assetless
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/tests/renderer_validation_matrix.py \
+            --tiers auto,gl41 \
+            --cases tier-auto,tier-gl41,renderer-modern-visible-selftest \
+            --timeout 180 \
+            --basepath "" \
+            --skip-official-pak-validation \
+            --output-dir ".tmp/macos-debug-${{ matrix.artifact_suffix }}-renderer"
+
+      - name: MoltenVK capability probe
+        if: steps.select.outputs.selected == 'true' && inputs.run_runtime_assetless
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          # rendererVkProbe records what MoltenVK decides at runtime: advertised
+          # Vulkan version, portability-subset feature values, maxBoundDescriptorSets,
+          # BC/R5G6B5 format support, VkFormatProperties3 population and the depth
+          # resolve modes. These are the facts the renderer negotiates rather than
+          # assumes, and this log is the only place the project can observe them
+          # without Apple hardware. Best-effort: a hosted runner may not be able to
+          # create a Metal device or a window in a non-interactive session.
+          python tools/tests/renderer_validation_matrix.py \
+            --cases renderer-vk-clear-startup,renderer-vk-fallback-drill \
+            --timeout 180 \
+            --basepath "" \
+            --skip-official-pak-validation \
+            --output-dir ".tmp/macos-debug-${{ matrix.artifact_suffix }}-moltenvk"
+
+      - name: Publish debug artifacts
+        if: always() && steps.select.outputs.selected == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-debug-${{ matrix.artifact_suffix }}
+          path: |
+            macos-debug-host.txt
+            macos-debug-evidence-scope.txt
+            macos-debug-moltenvk-provenance.txt
+            .tmp/macos-debug-${{ matrix.artifact_suffix }}-moltenvk
+            builddir/meson-logs
+            .install
+            .home
+            .tmp/macos-debug-${{ matrix.artifact_suffix }}-renderer
+          if-no-files-found: warn
+          retention-days: ${{ fromJSON(inputs.retention_days) }}
+          include-hidden-files: true
+
+  # Compatibility-only compile check for Apple's deprecated framework. Release,
+  # package, and standard validation paths use pinned OpenAL Soft instead.
+  macos-openal-migration:
+    if: ${{ false }} # OPENPREY-GATED: split-module/OpenQ4 source contract
+    name: macOS Apple OpenAL Compatibility Corridor (compile only)
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Setup Java for Android host storage validation
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Meson and Ninja
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Configure (Apple framework)
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh setup --wipe builddir . \
+            --backend ninja \
+            --buildtype=debug \
+            --wrap-mode=forcefallback \
+            -Dplatform_backend=sdl3 \
+            -Dmacos_graphics_bridge=opengl \
+            -Dmacos_openal_provider=apple_framework
+
+      - name: Compile (Apple framework)
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh compile -C builddir

@@ -1,6 +1,7 @@
 #ifndef __LIB_H__
 #define __LIB_H__
 
+#include <stddef.h>
 
 /*
 ===============================================================================
@@ -37,6 +38,9 @@ public:
 	static void					FatalError(const char* fmt, ...);
 	static void					Warning(const char* fmt, ...);
 	static void					WarningIf(const bool test, const char* fmt, ...);
+	// Converts byte/string/container sizes at legacy int API boundaries.
+	// Oversized inputs are rejected instead of being silently truncated.
+	static int					SizeToInt( size_t value, const char *context );
 };
 
 
@@ -59,7 +63,12 @@ if ( !verify(game) ) {
 }
 */
 
-#ifdef _DEBUG
+// MSVC defines _DEBUG for us through /MTd and /MDd, but no GCC or Clang openQ4
+// build ever defines it -- precompiled.h defines NDEBUG instead when neither is
+// set -- so every assert() and verify() in idlib, including the allocator
+// ownership and 16-byte alignment checks, compiled away to nothing on Linux and
+// macOS even in a debug build. -Didlib_asserts=true brings them back.
+#if defined( _DEBUG ) || defined( OPENQ4_ENABLE_IDLIB_ASSERTS )
 
 	#define ID_CONDITIONAL_ASSERT
 
@@ -121,7 +130,15 @@ class idException {
 public:
 	char error[2048];
 
-	idException( const char *text = "" ) { strcpy( error, text ); }
+	idException( const char *text = "" ) {
+		int i = 0;
+		if ( text != NULL ) {
+			for ( ; i < (int)sizeof( error ) - 1 && text[i] != '\0'; i++ ) {
+				error[i] = text[i];
+			}
+		}
+		error[i] = '\0';
+	}
 };
 
 
@@ -137,7 +154,6 @@ typedef unsigned char			byte;		// 8 bits
 typedef unsigned short			word;		// 16 bits
 typedef unsigned int			dword;		// 32 bits
 typedef unsigned int			uint;
-typedef unsigned long			ulong;
 
 typedef int						qhandle_t;
 
@@ -284,7 +300,7 @@ bool IsSignedType(const _type_ t) {
 
 // RAVEN BEGIN
 // dluetscher: added some headers for new vertex formats
-#ifdef _MD5R_SUPPORT
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
 #include "geometry/rvVertex.h"
 #endif
 // RAVEN END
@@ -339,8 +355,8 @@ bool IsSignedType(const _type_ t) {
 #ifdef _XENON
 #include "math/Simd_generic.h"
 #include "math/Simd_Xenon.h"
-#include "threads/ThreadEventManager.h"
-#include "threads/WorkerThreadManager.h"
+#include "Threads/ThreadEventManager.h"
+#include "Threads/WorkerThreadManager.h"
 #endif
 // RAVEN END
 

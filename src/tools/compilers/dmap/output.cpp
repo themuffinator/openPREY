@@ -31,6 +31,12 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "dmap.h"
 
+#include <array>
+#include <cmath>
+#include <functional>
+#include <unordered_map>
+#include <vector>
+
 //=================================================================================
 
 
@@ -110,29 +116,71 @@ void Write1DMatrix( idFile *f, int x, float *m ) {
 	f->WriteFloatString( ") " );
 }
 
+/*
+Groups become one surface when their material and merge group match. Curved
+surfaces leave one group per plane, so an area can hold many thousands of groups;
+comparing each with every other made writing the .proc quadratic in them
+(issue #209). SurfaceBuckets chains each group to the next compatible group in
+list order, in one pass.
+*/
+static int SurfaceKey( const optimizeGroup_t *group ) {
+	const uintptr_t m = reinterpret_cast<uintptr_t>( group->material );
+	const uintptr_t g = reinterpret_cast<uintptr_t>( group->mergeGroup );
+	const unsigned int key = static_cast<unsigned int>( m >> 4 ) ^ static_cast<unsigned int>( m >> 20 )
+		^ static_cast<unsigned int>( g >> 4 ) * 2654435761u ^ static_cast<unsigned int>( g >> 20 );
+	return static_cast<int>( key & 0x7fffffffu );
+}
+
+// groups[] in list order; next[i] is the next group compatible with groups[i]
+static void SurfaceBuckets( optimizeGroup_t *list, idList<optimizeGroup_t *> &groups, idList<int> &next ) {
+	idHashIndex	lastOfKey;
+	idList<int>	last;
+
+	groups.Clear();
+	for ( optimizeGroup_t *group = list ; group ; group = group->nextGroup ) {
+		groups.Append( group );
+	}
+	next.SetNum( groups.Num() );
+	lastOfKey.Clear( 1024, groups.Num() > 0 ? groups.Num() : 1 );
+	for ( int i = 0 ; i < groups.Num() ; i++ ) {
+		next[i] = -1;
+		const int key = SurfaceKey( groups[i] );
+		int bucket;
+		for ( bucket = lastOfKey.First( key ) ; bucket != -1 ; bucket = lastOfKey.Next( bucket ) ) {
+			const optimizeGroup_t *other = groups[last[bucket]];
+			if ( other->material == groups[i]->material && other->mergeGroup == groups[i]->mergeGroup ) {
+				break;
+			}
+		}
+		if ( bucket == -1 ) {
+			bucket = last.Append( i );
+			lastOfKey.Add( key, bucket );
+		} else {
+			next[last[bucket]] = i;
+			last[bucket] = i;
+		}
+	}
+}
+
 static int CountUniqueShaders( optimizeGroup_t *groups ) {
-	optimizeGroup_t		*a, *b;
-	int					count;
+	idList<optimizeGroup_t *>	list;
+	idList<int>					next;
+	idList<bool>				counted;
+	int							count = 0;
 
-	count = 0;
-
-	for ( a = groups ; a ; a = a->nextGroup ) {
-		if ( !a->triList ) {	// ignore groups with no tris
+	// a surface is written for every bucket with at least one triangle
+	SurfaceBuckets( groups, list, next );
+	counted.AssureSize( list.Num(), false );
+	for ( int i = 0 ; i < list.Num() ; i++ ) {
+		if ( counted[i] ) {
 			continue;
 		}
-		for ( b = groups ; b != a ; b = b->nextGroup ) {
-			if ( !b->triList ) {
-				continue;
-			}
-			if ( a->material != b->material ) {
-				continue;
-			}
-			if ( a->mergeGroup != b->mergeGroup ) {
-				continue;
-			}
-			break;
+		bool hasTris = false;
+		for ( int j = i ; j != -1 ; j = next[j] ) {
+			counted[j] = true;
+			hasTris |= ( list[j]->triList != NULL );
 		}
-		if ( a == b ) {
+		if ( hasTris ) {
 			count++;
 		}
 	}
@@ -181,6 +229,22 @@ static bool MatchVert( const idDrawVert *a, const idDrawVert *b ) {
 	return true;
 }
 
+// Unit-sized spatial buckets keep the epsilon search local. Search both sides
+// of a bucket boundary and retain the earliest matching vertex, just as the
+// original linear search did. Float keys avoid narrowing large map coordinates
+// to an integer; floor() still makes every key an integral position.
+typedef std::array<float, 3> mapTriVertexCell_t;
+
+struct mapTriVertexCellHash_t {
+	size_t operator()( const mapTriVertexCell_t &cell ) const {
+		size_t hash = 0;
+		for ( int i = 0; i < 3; i++ ) {
+			hash ^= std::hash<float>()( cell[i] ) + size_t( 0x9e3779b9u ) + ( hash << 6 ) + ( hash >> 2 );
+		}
+		return hash;
+	}
+};
+
 /*
 ====================
 ShareMapTriVerts
@@ -189,47 +253,85 @@ Converts independent triangles to shared vertex triangles
 ====================
 */
 srfTriangles_t	*ShareMapTriVerts( const mapTri_t *tris ) {
-	const mapTri_t	*step;
-	int			count;
-	int			i, j;
-	int			numVerts;
-	int			numIndexes;
-	srfTriangles_t	*uTri;
+	const int count = CountTriList( tris );
+	if ( count < 0 || count > idMath::INT_MAX / 3 ) {
+		common->Error( "ShareMapTriVerts: too many triangles (%i)", count );
+		return NULL;
+	}
 
-	// unique the vertexes
-	count = CountTriList( tris );
+	srfTriangles_t *uTri = R_AllocStaticTriSurf();
+	const int numIndexes = count * 3;
+	R_AllocStaticTriSurfIndexes( uTri, numIndexes );
+	if ( numIndexes != 0 && uTri->indexes == NULL ) {
+		R_FreeStaticTriSurf( uTri );
+		common->Error( "ShareMapTriVerts: could not allocate %i indexes", numIndexes );
+		return NULL;
+	}
 
-	uTri = R_AllocStaticTriSurf();
-	R_AllocStaticTriSurfVerts( uTri, count * 3 );
-	R_AllocStaticTriSurfIndexes( uTri, count * 3 );
+	// Keep references to the first occurrence of each vertex until sharing is
+	// complete. Reserving three full vertices per triangle can exceed the heap's
+	// single-allocation limit even when the shared surface is small (#181).
+	std::vector<const idDrawVert *> uniqueVerts;
+	std::unordered_map<mapTriVertexCell_t, std::vector<int>, mapTriVertexCellHash_t> cells;
+	int index = 0;
+	for ( const mapTri_t *step = tris; step; step = step->next ) {
+		for ( int i = 0; i < 3; i++ ) {
+			const idDrawVert *dv = &step->v[i];
+			mapTriVertexCell_t cell;
+			float neighbors[3][2];
+			int numNeighbors[3];
+			for ( int axis = 0; axis < 3; axis++ ) {
+				if ( !std::isfinite( dv->xyz[axis] ) ) {
+					R_FreeStaticTriSurf( uTri );
+					common->Error( "ShareMapTriVerts: non-finite vertex position" );
+					return NULL;
+				}
+				cell[axis] = float( std::floor( double( dv->xyz[axis] ) ) );
+				// Leave room for rounding in MatchVert's float subtraction.
+				neighbors[axis][0] = float( std::floor( double( dv->xyz[axis] ) - 2 * XYZ_EPSILON ) );
+				neighbors[axis][1] = float( std::floor( double( dv->xyz[axis] ) + 2 * XYZ_EPSILON ) );
+				numNeighbors[axis] = neighbors[axis][0] == neighbors[axis][1] ? 1 : 2;
+			}
 
-	numVerts = 0;
-	numIndexes = 0;
-
-	for ( step = tris ; step ; step = step->next ) {
-		for ( i = 0 ; i < 3 ; i++ ) {
-			const idDrawVert	*dv;
-
-			dv = &step->v[i];
-
-			// search for a match
-			for ( j = 0 ; j < numVerts ; j++ ) {
-				if ( MatchVert( &uTri->verts[j], dv ) ) {
-					break;
+			int match = int( uniqueVerts.size() );
+			for ( int x = 0; x < numNeighbors[0]; x++ ) {
+				for ( int y = 0; y < numNeighbors[1]; y++ ) {
+					for ( int z = 0; z < numNeighbors[2]; z++ ) {
+						const mapTriVertexCell_t neighbor = { neighbors[0][x], neighbors[1][y], neighbors[2][z] };
+						const auto found = cells.find( neighbor );
+						if ( found == cells.end() ) {
+							continue;
+						}
+						for ( int candidate : found->second ) {
+							if ( candidate < match && MatchVert( uniqueVerts[candidate], dv ) ) {
+								match = candidate;
+								break;
+							}
+						}
+					}
 				}
 			}
-			if ( j == numVerts ) {
-				numVerts++;
-				uTri->verts[j].xyz = dv->xyz;
-				uTri->verts[j].normal = dv->normal;
-				uTri->verts[j].st[0] = dv->st[0];
-				uTri->verts[j].st[1] = dv->st[1];
+			if ( match == int( uniqueVerts.size() ) ) {
+				uniqueVerts.push_back( dv );
+				cells[cell].push_back( match );
 			}
-
-			uTri->indexes[numIndexes++] = j;
+			uTri->indexes[index++] = match;
 		}
 	}
 
+	const int numVerts = int( uniqueVerts.size() );
+	R_AllocStaticTriSurfVerts( uTri, numVerts );
+	if ( numVerts != 0 && uTri->verts == NULL ) {
+		R_FreeStaticTriSurf( uTri );
+		common->Error( "ShareMapTriVerts: could not allocate %i shared vertices", numVerts );
+		return NULL;
+	}
+	for ( int i = 0; i < numVerts; i++ ) {
+		uTri->verts[i].Clear();
+		uTri->verts[i].xyz = uniqueVerts[i]->xyz;
+		uTri->verts[i].normal = uniqueVerts[i]->normal;
+		uTri->verts[i].st = uniqueVerts[i]->st;
+	}
 	uTri->numVerts = numVerts;
 	uTri->numIndexes = numIndexes;
 
@@ -357,24 +459,6 @@ static void WriteShadowTriangles( const srfTriangles_t *tri ) {
 
 
 /*
-=======================
-GroupsAreSurfaceCompatible
-
-Planes, texcoords, and groupLights can differ,
-but the material and mergegroup must match
-=======================
-*/
-static bool GroupsAreSurfaceCompatible( const optimizeGroup_t *a, const optimizeGroup_t *b ) {
-	if ( a->material != b->material ) {
-		return false;
-	}
-	if ( a->mergeGroup != b->mergeGroup ) {
-		return false;
-	}
-	return true;
-}
-
-/*
 ====================
 WriteOutputSurfaces
 ====================
@@ -385,18 +469,10 @@ static void WriteOutputSurfaces( int entityNum, int areaNum ) {
 	int			numSurfaces;
 	idMapEntity	*entity;
 	uArea_t		*area;
-	optimizeGroup_t	*group, *groupStep;
-	int			i; // , j;
-//	int			col;
+	optimizeGroup_t	*group;
 	srfTriangles_t	*uTri;
-//	mapTri_t	*tri;
-typedef struct interactionTris_s {
-	struct interactionTris_s	*next;
-	mapTri_t	*triList;
-	mapLight_t	*light;
-} interactionTris_t;
-
-	interactionTris_t	*interactions, *checkInter; //, *nextInter;
+	idList<optimizeGroup_t *>	groups;
+	idList<int>					nextCompatible;
 
 
 	area = &dmapGlobals.uEntities[entityNum].areas[areaNum];
@@ -423,8 +499,11 @@ typedef struct interactionTris_s {
 // jmarshall end
 	}
 
+	SurfaceBuckets( area->groups, groups, nextCompatible );
+
 	surfaceNum = 0;
-	for ( group = area->groups ; group ; group = group->nextGroup ) {
+	for ( int g = 0 ; g < groups.Num() ; g++ ) {
+		group = groups[g];
 		if ( group->surfaceEmited ) {
 			continue;
 		}
@@ -434,42 +513,24 @@ typedef struct interactionTris_s {
 		// surface, even though they couldn't be merged together to save
 		// vertexes because they had different planes, texture coordinates, or lights.
 		// Different mergeGroups will stay in separate surfaces.
+		// The Quake 4 .proc carries no per-light interaction surfaces, so only
+		// the ambient triangles are gathered.
 		ambient = NULL;
+		mapTri_t **ambientTail = &ambient;
 
-		// each light that illuminates any of the groups in the surface will
-		// get its own list of indexes out of the original surface
-		interactions = NULL;
-
-		for ( groupStep = group ; groupStep ; groupStep = groupStep->nextGroup ) {
+		for ( int step = g ; step != -1 ; step = nextCompatible[step] ) {
+			optimizeGroup_t *groupStep = groups[step];
 			if ( groupStep->surfaceEmited ) {
-				continue;
-			}
-			if ( !GroupsAreSurfaceCompatible( group, groupStep ) ) {
 				continue;
 			}
 
 			// copy it out to the ambient list
 			copy = CopyTriList( groupStep->triList );
-			ambient = MergeTriLists( ambient, copy );
-			groupStep->surfaceEmited = true;
-
-			// duplicate it into an interaction for each groupLight
-			for ( i = 0 ; i < groupStep->numGroupLights ; i++ ) {
-				for ( checkInter = interactions ; checkInter ; checkInter = checkInter->next ) {
-					if ( checkInter->light == groupStep->groupLights[i] ) {
-						break;
-					}
-				}
-				if ( !checkInter ) {
-					// create a new interaction
-					checkInter = (interactionTris_t *)Mem_ClearedAlloc( sizeof( *checkInter ) );
-					checkInter->light = groupStep->groupLights[i];
-					checkInter->next = interactions;
-					interactions = checkInter;
-				}
-				copy = CopyTriList( groupStep->triList );
-				checkInter->triList = MergeTriLists( checkInter->triList, copy );
+			*ambientTail = copy;
+			while ( *ambientTail ) {
+				ambientTail = &(*ambientTail)->next;
 			}
+			groupStep->surfaceEmited = true;
 		}
 
 		if ( !ambient ) {
@@ -593,8 +654,8 @@ static void WriteOutputPortals( uEntity_t *e ) {
 			Write1DMatrix( procFile, 3, (*w)[j].ToFloatPtr() );
 		}
 
-		if ( iap->portalImage ) {
-			procFile->WriteFloatString( "( \"%s\" %.2f %.2f )", iap->portalImage->GetName(), iap->cullNear, iap->cullFar );
+		if ( iap->portalImageName.Length() > 0 ) {
+			procFile->WriteFloatString( "( \"%s\" %.2f %.2f )", iap->portalImageName.c_str(), iap->cullNear, iap->cullFar );
 		} else if ( iap->cullNear < 262144.0f || iap->cullFar < 262144.0f ) {
 			procFile->WriteFloatString( "( \"_black\" %.2f %.2f )", iap->cullNear, iap->cullFar );
 		}
@@ -654,16 +715,21 @@ void WriteOutputFile( void ) {
 
 	sprintf( qpath, "%s." PROC_FILE_EXT, dmapGlobals.mapFileBase );
 
-	common->Printf( "writing %s\n", qpath.c_str() );
-	// _D3XP used fs_cdpath
-	procFile = fileSystem->OpenFileWrite( qpath, "fs_cdpath" );
+	// _D3XP used fs_cdpath; com_compilerOutput can redirect it (AASFile.cpp)
+	extern const char *Compiler_OutputBasePath( void );
+	procFile = fileSystem->OpenFileWrite( qpath, Compiler_OutputBasePath() );
 	if ( !procFile ) {
 		common->Error( "Error opening %s", qpath.c_str() );
 	}
+
+	// dmap writes beside the engine rather than beside the .map it read, so
+	// report where the output actually landed instead of leaving map authors
+	// to hunt for it
+	common->Printf( "writing %s\n", procFile->GetFullPath() );
 // jmarshall - Quake 4 proc support
 	procFile->WriteFloatString( "%s \"%s\"\n\n", PROC_FILE_ID, PROC_FILEVERSION);
 
-	procFile->WriteFloatString("%d\n", 1105723392); // Fake CRC
+	procFile->WriteFloatString( "%u\n", dmapGlobals.dmapFile->GetGeometryCRC() );
 // jmarshall end
 
 	// write the entity models and information, writing entities first

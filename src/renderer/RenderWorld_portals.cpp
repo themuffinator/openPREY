@@ -30,6 +30,19 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "tr_local.h"
+#include "../sound/sound.h"
+
+static ID_INLINE idSoundEmitter *R_GetPortalShaderSoundEmitter( idSoundEmitter *referenceSound, int soundEmitterHandle ) {
+	if ( referenceSound != NULL ) {
+		return referenceSound;
+	}
+
+	if ( soundEmitterHandle == 0 || soundSystem == NULL ) {
+		return NULL;
+	}
+
+	return soundSystem->EmitterForIndex( SOUNDWORLD_GAME, soundEmitterHandle );
+}
 
 /*
 
@@ -56,13 +69,21 @@ typedef struct portalStack_s {
 	// positive side is outside the visible frustum
 } portalStack_t;
 
-// Mirrors/remote subviews must evaluate suppress/allow as viewID 0.
-static ID_INLINE int R_EffectiveViewIDForSubview() {
-	if ( tr.viewDef != NULL && tr.viewDef->isSubview ) {
-		return 0;
-	}
-	return ( tr.viewDef != NULL ) ? tr.viewDef->renderView.viewID : 0;
-}
+
+// RenderPortalFades runs in the backend, after later subview floods and
+// entity updates have advanced tr.viewCount past this view's area stamps,
+// so the flooded areas are snapshotted per view at frontend time
+typedef struct portalFadeView_s {
+	const viewDef_t *	viewDef;
+	const bool *		areaVisible;	// in frame temporary memory, numPortalAreas entries
+} portalFadeView_t;
+
+const int MAX_PORTAL_FADE_VIEWS = 64;
+
+static portalFadeView_t	portalFadeViews[MAX_PORTAL_FADE_VIEWS];
+static int				numPortalFadeViews;
+static int				portalFadeViewFrameCount = -1;
+
 
 //====================================================================
 
@@ -80,7 +101,8 @@ idScreenRect idRenderWorldLocal::ScreenRectFromWinding( const idWinding *w, view
 	float			windowX, windowY;
 
 	r.Clear();
-	for ( i = 0 ; i < w->GetNumPoints() ; i++ ) {
+	const int windingPointCount = w->GetNumPoints();
+	for ( i = 0 ; i < windingPointCount ; i++ ) {
 		R_LocalPointToGlobal( space->modelMatrix, (*w)[i].ToVec3(), v );
 		R_GlobalToNormalizedDeviceCoordinates( v, ndc );
 
@@ -115,8 +137,9 @@ bool idRenderWorldLocal::PortalIsFoggedOut( const portal_t *p ) {
 	const idMaterial	*lightShader = ldef->lightShader;
 	int		size = sizeof( float ) *lightShader->GetNumRegisters();
 	float	*regs =(float *)_alloca( size );
+	idSoundEmitter *soundEmitter = R_GetPortalShaderSoundEmitter( ldef->parms.referenceSound, ldef->parms.referenceSoundHandle );
 
-	lightShader->EvaluateRegisters( regs, ldef->parms.shaderParms, tr.viewDef, NULL);
+	lightShader->EvaluateRegisters( regs, ldef->parms.shaderParms, tr.viewDef, soundEmitter );
 
 	const shaderStage_t	*stage = lightShader->GetStage(0);
 
@@ -139,7 +162,8 @@ bool idRenderWorldLocal::PortalIsFoggedOut( const portal_t *p ) {
 	forward[3] = a * tr.viewDef->worldSpace.modelViewMatrix[14];
 
 	w = p->w;
-	for ( i = 0 ; i < w->GetNumPoints() ; i++ ) {
+	const int windingPointCount = w->GetNumPoints();
+	for ( i = 0 ; i < windingPointCount ; i++ ) {
 		float	d;
 
 		d = forward.Distance( (*w)[i].ToVec3() );
@@ -149,6 +173,114 @@ bool idRenderWorldLocal::PortalIsFoggedOut( const portal_t *p ) {
 	}
 
 	return true;
+}
+
+/*
+===================
+idRenderWorldLocal::RenderPortalFades
+===================
+*/
+void idRenderWorldLocal::RenderPortalFades( void ) {
+	// use the visibility snapshot captured for this view at frontend time
+	const bool *areaVisible = NULL;
+	for ( int i = 0; i < numPortalFadeViews; i++ ) {
+		if ( portalFadeViews[i].viewDef == backEnd.viewDef ) {
+			areaVisible = portalFadeViews[i].areaVisible;
+			break;
+		}
+	}
+	if ( areaVisible == NULL ) {
+		return;
+	}
+
+	backEnd.currentSpace = &backEnd.viewDef->worldSpace;
+	glLoadMatrixf( backEnd.viewDef->worldSpace.modelViewMatrix );
+
+	backEnd.currentScissor = backEnd.viewDef->scissor;
+	glScissor( backEnd.viewDef->viewport.x1 + backEnd.currentScissor.x1,
+		backEnd.viewDef->viewport.y1 + backEnd.currentScissor.y1,
+		backEnd.currentScissor.x2 + 1 - backEnd.currentScissor.x1,
+		backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
+
+	GL_State( GLS_DEPTHMASK | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA );
+	GL_Cull( CT_FRONT_SIDED );
+	GL_SelectTexture( 0 );
+
+	for ( int areaIndex = 0; areaIndex < numPortalAreas; areaIndex++ ) {
+		portalArea_t *area = &portalAreas[areaIndex];
+		if ( !areaVisible[areaIndex] ) {
+			continue;
+		}
+
+		for ( portal_t *portal = area->portals; portal; portal = portal->next ) {
+			const idWinding *w = portal->w;
+			if ( w == NULL || w->GetNumPoints() < 2 || portal->image == NULL ) {
+				continue;
+			}
+
+			const float d = portal->plane.Distance( backEnd.viewDef->renderView.vieworg );
+			if ( d <= portal->cullNear ) {
+				continue;
+			}
+
+			float alpha = 1.0f;
+			if ( d < portal->cullFar && portal->cullFar > portal->cullNear ) {
+				alpha = 1.0f - ( portal->cullFar - d ) / ( portal->cullFar - portal->cullNear );
+			}
+			alpha = idMath::ClampFloat( 0.0f, 1.0f, alpha );
+
+			const idVec3 &origin = ( *w )[0].ToVec3();
+			const idVec3 edge = ( *w )[1].ToVec3() - origin;
+			if ( edge.LengthSqr() <= idMath::FLOAT_EPSILON ) {
+				continue;
+			}
+			const idVec3 vAxis = portal->plane.Normal().Cross( edge );
+			if ( vAxis.LengthSqr() <= idMath::FLOAT_EPSILON ) {
+				continue;
+			}
+
+			float minU = idMath::INFINITY;
+			float maxU = -idMath::INFINITY;
+			float minV = idMath::INFINITY;
+			float maxV = -idMath::INFINITY;
+
+			const int windingPointCount = w->GetNumPoints();
+			for ( int pointIndex = 0; pointIndex < windingPointCount; pointIndex++ ) {
+				const idVec3 delta = ( *w )[pointIndex].ToVec3() - origin;
+				const float u = delta * edge;
+				const float v = delta * vAxis;
+
+				minU = Min( minU, u );
+				maxU = Max( maxU, u );
+				minV = Min( minV, v );
+				maxV = Max( maxV, v );
+			}
+
+			const float uRange = maxU - minU;
+			const float vRange = maxV - minV;
+			if ( uRange <= idMath::FLOAT_EPSILON || vRange <= idMath::FLOAT_EPSILON ) {
+				continue;
+			}
+
+			glColor4f( 1.0f, 1.0f, 1.0f, alpha );
+			portal->image->Bind();
+
+			glBegin( GL_POLYGON );
+			for ( int pointIndex = 0; pointIndex < windingPointCount; pointIndex++ ) {
+				const idVec3 &point = ( *w )[pointIndex].ToVec3();
+				const idVec3 delta = point - origin;
+				const float u = ( ( delta * edge ) - minU ) / uRange;
+				const float v = 1.0f - ( ( delta * vAxis ) - minV ) / vRange;
+
+				glTexCoord2f( u, v );
+				glVertex3fv( point.ToFloatPtr() );
+			}
+			glEnd();
+		}
+	}
+
+	glColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
+	globalImages->BindNull();
 }
 
 /*
@@ -325,6 +457,62 @@ void idRenderWorldLocal::FlowViewThroughPortals( const idVec3 origin, int numPla
 }
 
 //==================================================================================================
+
+/*
+===================
+FindVisibleAreas_r
+
+Coarse topological portal flood used by game-side portal-sky PVS setup. This
+intentionally avoids render-time scissor, fog, and distance culling because the
+caller only needs to know whether any currently reachable visible area contains
+skybox surfaces.
+===================
+*/
+void idRenderWorldLocal::FindVisibleAreas_r( const idVec3 origin, int areaNum, bool *visibleAreas ) {
+	(void)origin;
+
+	if ( areaNum < 0 || areaNum >= numPortalAreas || visibleAreas == NULL ) {
+		return;
+	}
+	if ( visibleAreas[ areaNum ] ) {
+		return;
+	}
+
+	visibleAreas[ areaNum ] = true;
+	portalArea_t *area = &portalAreas[ areaNum ];
+	for ( portal_t *portal = area->portals; portal != NULL; portal = portal->next ) {
+		if ( portal->doublePortal != NULL && ( portal->doublePortal->blockingBits & PS_BLOCK_VIEW ) ) {
+			continue;
+		}
+		if ( portal->intoArea < 0 || portal->intoArea >= numPortalAreas ) {
+			continue;
+		}
+		if ( visibleAreas[ portal->intoArea ] ) {
+			continue;
+		}
+
+		FindVisibleAreas_r( origin, portal->intoArea, visibleAreas );
+	}
+}
+
+/*
+===================
+FindVisibleAreas
+===================
+*/
+void idRenderWorldLocal::FindVisibleAreas( idVec3 origin, int areaNum, bool *visibleAreas ) {
+	if ( visibleAreas == NULL ) {
+		return;
+	}
+	if ( areaNum < 0 || areaNum >= numPortalAreas ) {
+		for ( int i = 0; i < numPortalAreas; i++ ) {
+			visibleAreas[ i ] = true;
+		}
+		return;
+	}
+
+	FindVisibleAreas_r( origin, areaNum, visibleAreas );
+}
 
 
 /*
@@ -569,6 +757,9 @@ Return true if the entity reference bounds do not intersect the current portal c
 ================
 */
 bool idRenderWorldLocal::CullEntityByPortals( const idRenderEntityLocal *entity, const portalStack_t *ps ) {
+	if ( R_ShouldDisableEntityCullingForLevelshot() ) {
+		return false;
+	}
 
 	if ( !r_useEntityCulling.GetBool() ) {
 		return false;
@@ -601,7 +792,6 @@ void idRenderWorldLocal::AddAreaEntityRefs( int areaNum, const portalStack_t *ps
 	portalArea_t		*area;
 	viewEntity_t		*vEnt;
 	idBounds			b;
-	const int			viewID = R_EffectiveViewIDForSubview();
 
 	area = &portalAreas[ areaNum ];
 
@@ -612,6 +802,10 @@ void idRenderWorldLocal::AddAreaEntityRefs( int areaNum, const portalStack_t *ps
 		if ( r_singleEntity.GetInteger() >= 0 && r_singleEntity.GetInteger() != entity->index ) {
 			continue;
 		}
+		if ( r_skipEntities.GetBool() &&
+			 ( entity->parms.hModel == NULL || !entity->parms.hModel->IsStaticWorldModel() ) ) {
+			continue;
+		}
 
 		// remove decals that are completely faded away
 		R_FreeEntityDefFadedDecals( entity, tr.viewDef->renderView.time );
@@ -620,20 +814,23 @@ void idRenderWorldLocal::AddAreaEntityRefs( int areaNum, const portalStack_t *ps
 			if ( entity->parms.onlyInvisibleInSpirit ) {
 				continue;
 			}
-		} else {
-			if ( entity->parms.onlyVisibleInSpirit ) {
-				continue;
-			}
+		} else if ( entity->parms.onlyVisibleInSpirit ) {
+			continue;
+		}
+
+		const int effectiveViewID = R_EffectiveViewIDForSubview();
+		if ( R_ShouldSuppressViewModelForLevelshot( effectiveViewID, entity->parms.allowSurfaceInViewID, entity->parms.weaponDepthHackInViewID ) ) {
+			continue;
 		}
 
 		// check for completely suppressing the model
 		if ( !r_skipSuppress.GetBool() ) {
 			if ( entity->parms.suppressSurfaceInViewID
-					&& entity->parms.suppressSurfaceInViewID == viewID ) {
+					&& entity->parms.suppressSurfaceInViewID == effectiveViewID ) {
 				continue;
 			}
 			if ( entity->parms.allowSurfaceInViewID 
-					&& entity->parms.allowSurfaceInViewID != viewID ) {
+					&& entity->parms.allowSurfaceInViewID != effectiveViewID ) {
 				continue;
 			}
 		}
@@ -751,6 +948,10 @@ void idRenderWorldLocal::AddAreaLightRefs( int areaNum, const portalStack_t *ps 
 
 		// debug tool to allow viewing of only one light at a time
 		if ( r_singleLight.GetInteger() >= 0 && r_singleLight.GetInteger() != light->index ) {
+			continue;
+		}
+
+		if ( light->parms.detailLevel < r_lightDetailLevel.GetFloat() ) {
 			continue;
 		}
 
@@ -904,6 +1105,34 @@ void idRenderWorldLocal::FindViewLightsAndEntities( void ) {
 		// may have the viewOrigin in a solid/invalid area
 		FlowViewThroughPortals( tr.viewDef->renderView.vieworg, 5, tr.viewDef->frustum );
 	}
+
+	if ( R_ShouldDisableEntityCullingForLevelshot() ) {
+		portalStack_t ps;
+
+		memset( &ps, 0, sizeof( ps ) );
+		ps.rect = tr.viewDef->scissor;
+
+		for ( int i = 0; i < numPortalAreas; i++ ) {
+			AddAreaEntityRefs( i, &ps );
+		}
+	}
+
+	// snapshot the flooded areas for RenderPortalFades, which runs in the
+	// backend after later subview floods and entity updates have advanced
+	// tr.viewCount past the stamps made above
+	if ( portalFadeViewFrameCount != tr.frameCount ) {
+		portalFadeViewFrameCount = tr.frameCount;
+		numPortalFadeViews = 0;
+	}
+	if ( numPortalFadeViews < MAX_PORTAL_FADE_VIEWS && numPortalAreas > 0 ) {
+		bool *areaVisible = (bool *)R_FrameAlloc( numPortalAreas * sizeof( areaVisible[0] ) );
+		for ( int i = 0; i < numPortalAreas; i++ ) {
+			areaVisible[i] = ( portalAreas[i].viewCount == tr.viewCount );
+		}
+		portalFadeViews[numPortalFadeViews].viewDef = tr.viewDef;
+		portalFadeViews[numPortalFadeViews].areaVisible = areaVisible;
+		numPortalFadeViews++;
+	}
 }
 
 /*
@@ -934,7 +1163,8 @@ qhandle_t idRenderWorldLocal::FindPortal( const idBounds &b ) const {
 		w = portal->portals[0]->w;
 
 		wb.Clear();
-		for ( j = 0 ; j < w->GetNumPoints() ; j++ ) {
+		const int windingPointCount = w->GetNumPoints();
+		for ( j = 0 ; j < windingPointCount ; j++ ) {
 			wb.AddPoint( (*w)[j].ToVec3() );
 		}
 		if ( wb.IntersectsBounds( b ) ) {
@@ -973,7 +1203,7 @@ bool	idRenderWorldLocal::AreasAreConnected( int areaNum1, int areaNum2, portalCo
 	if ( areaNum1 == -1 || areaNum2 == -1 ) {
 		return false;
 	}
-	if ( areaNum1 > numPortalAreas || areaNum2 > numPortalAreas || areaNum1 < 0 || areaNum2 < 0 ) {
+	if ( areaNum1 >= numPortalAreas || areaNum2 >= numPortalAreas || areaNum1 < 0 || areaNum2 < 0 ) {
 		common->Error( "idRenderWorldLocal::AreAreasConnected: bad parms: %i, %i", areaNum1, areaNum2 );
 	}
 
@@ -1082,7 +1312,8 @@ void idRenderWorldLocal::ShowPortals() {
 			}
 
 			glBegin( GL_LINE_LOOP );
-			for ( j = 0 ; j < w->GetNumPoints() ; j++ ) {
+			const int windingPointCount = w->GetNumPoints();
+			for ( j = 0 ; j < windingPointCount ; j++ ) {
 				glVertex3fv( (*w)[j].ToFloatPtr() );
 			}
 			glEnd();

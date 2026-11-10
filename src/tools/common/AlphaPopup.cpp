@@ -91,7 +91,7 @@ LRESULT CALLBACK AlphaSlider_WndProc ( HWND hwnd, UINT msg, WPARAM wParam, LPARA
 			v = (float)((short)LOWORD(lParam)-5) / (float)(rClient.right - rClient.left - 10);
 			if ( v < 0 ) v = 0;
 			if ( v > 1.0f ) v = 1.0f;
-			SetWindowLong ( hwnd, GWL_USERDATA, MAKELONG(0x8000,(unsigned short)(255.0f * v)) );
+			SetWindowLongPtr( hwnd, GWLP_USERDATA, MAKELONG( 0x8000, static_cast< unsigned short >( 255.0f * v ) ) );
 			InvalidateRect ( hwnd, NULL, FALSE );
 			
 			SetCapture ( hwnd );
@@ -100,7 +100,7 @@ LRESULT CALLBACK AlphaSlider_WndProc ( HWND hwnd, UINT msg, WPARAM wParam, LPARA
 		}
 		
 		case WM_MOUSEMOVE:		
-			if ( LOWORD(GetWindowLong ( hwnd, GWL_USERDATA ) ) & 0x8000 )
+			if ( LOWORD( GetWindowLongPtr( hwnd, GWLP_USERDATA ) ) & 0x8000 )
 			{
 				RECT  rClient;
 				float v;
@@ -109,13 +109,13 @@ LRESULT CALLBACK AlphaSlider_WndProc ( HWND hwnd, UINT msg, WPARAM wParam, LPARA
 				v = (float)((short)LOWORD(lParam)-5) / (float)(rClient.right - rClient.left - 10);
 				if ( v < 0 ) v = 0;
 				if ( v > 1.0f ) v = 1.0f;
-				SetWindowLong ( hwnd, GWL_USERDATA, MAKELONG(0x8000,(unsigned short)(255.0f * v)) );
+				SetWindowLongPtr( hwnd, GWLP_USERDATA, MAKELONG( 0x8000, static_cast< unsigned short >( 255.0f * v ) ) );
 				InvalidateRect ( hwnd, NULL, FALSE );
 			}
 			break;
 
 		case WM_LBUTTONUP:		
-			if ( LOWORD(GetWindowLong ( hwnd, GWL_USERDATA ) ) & 0x8000 )
+			if ( LOWORD( GetWindowLongPtr( hwnd, GWLP_USERDATA ) ) & 0x8000 )
 			{
 				RECT  rClient;
 				float v;
@@ -124,10 +124,11 @@ LRESULT CALLBACK AlphaSlider_WndProc ( HWND hwnd, UINT msg, WPARAM wParam, LPARA
 				v = (float)((short)LOWORD(lParam)-5) / (float)(rClient.right - rClient.left - 10);
 				if ( v < 0 ) v = 0;
 				if ( v > 1.0f ) v = 1.0f;
-				SetWindowLong ( hwnd, GWL_USERDATA, MAKELONG(0x8000,(unsigned short)(255.0f * v)) );
+				SetWindowLongPtr( hwnd, GWLP_USERDATA, MAKELONG( 0x8000, static_cast< unsigned short >( 255.0f * v ) ) );
 				InvalidateRect ( hwnd, NULL, FALSE );
 				ReleaseCapture ( );
-				SendMessage ( GetParent ( hwnd ), WM_COMMAND, MAKELONG(GetWindowLong (hwnd,GWL_ID),0), 0 );
+				SendMessage( GetParent( hwnd ), WM_COMMAND,
+					MAKELONG( static_cast< WORD >( GetWindowLongPtr( hwnd, GWLP_ID ) ), 0 ), 0 );
 			}
 			break;
 	
@@ -172,7 +173,7 @@ LRESULT CALLBACK AlphaSlider_WndProc ( HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 			// Draw the thumb
 			RECT rThumb;
-			short s = HIWORD(GetWindowLong ( hwnd, GWL_USERDATA ));
+			short s = HIWORD( GetWindowLongPtr( hwnd, GWLP_USERDATA ) );
 			float thumb = (float)(short)s;
 			thumb /= 255.0f;
 			thumb *= (float)(rDraw.right-rDraw.left);
@@ -242,10 +243,10 @@ INT_PTR CALLBACK AlphaSelectDlg_WndProc ( HWND hwnd, UINT msg, WPARAM wParam, LP
 			color      = GetRValue(ColorButton_GetColor ((HWND)lParam));
 
 			// The lParam for the alpha select dialog is the window handle of the button pressed
-			SetWindowLong ( hwnd, GWL_USERDATA, lParam );
+			SetWindowLongPtr( hwnd, GWLP_USERDATA, lParam );
 			
 			// Subclass the alpha 
-			SetWindowLong ( GetDlgItem ( hwnd, IDC_GUIED_ALPHASLIDER ), GWL_USERDATA, MAKELONG(0,color) );
+			SetWindowLongPtr( GetDlgItem( hwnd, IDC_GUIED_ALPHASLIDER ), GWLP_USERDATA, MAKELONG( 0, color ) );
 
 			// Numbers only on the edit box and start it with the current alpha value.
 			NumberEdit_Attach ( GetDlgItem ( hwnd, IDC_GUIED_ALPHA ) );		
@@ -288,15 +289,16 @@ INT_PTR CALLBACK AlphaSelectDlg_WndProc ( HWND hwnd, UINT msg, WPARAM wParam, LP
 					}
 
 					// Set the current alpha value in the slider
-					SetWindowLong ( GetDlgItem ( hwnd, IDC_GUIED_ALPHASLIDER ), GWL_USERDATA, MAKELONG(0,(255.0f * value)) );
+					SetWindowLongPtr( GetDlgItem( hwnd, IDC_GUIED_ALPHASLIDER ), GWLP_USERDATA,
+						MAKELONG( 0, static_cast< WORD >( 255.0f * value ) ) );
 					break;
 				}
 					
 				case IDC_GUIED_ALPHASLIDER:
 				case IDOK:
 				{
-					int color = (short)HIWORD(GetWindowLong ( GetDlgItem ( hwnd, IDC_GUIED_ALPHASLIDER ), GWL_USERDATA ));
-					ColorButton_SetColor ( (HWND)GetWindowLong ( hwnd, GWL_USERDATA ), RGB(color,color,color) );
+					int color = static_cast< short >( HIWORD( GetWindowLongPtr( GetDlgItem( hwnd, IDC_GUIED_ALPHASLIDER ), GWLP_USERDATA ) ) );
+					ColorButton_SetColor( reinterpret_cast< HWND >( GetWindowLongPtr( hwnd, GWLP_USERDATA ) ), RGB( color, color, color ) );
 					EndDialog ( hwnd, 0 );
 					break;
 				}

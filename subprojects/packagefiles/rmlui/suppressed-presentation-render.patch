@@ -1,0 +1,21 @@
+--- a/Include/RmlUi/Core/Element.h
++++ b/Include/RmlUi/Core/Element.h
+@@ -609,6 +609,8 @@
+ 	virtual void OnUpdate();
+ 	/// Called during render after backgrounds, borders, decorators, but before children, are rendered.
+ 	virtual void OnRender();
++	/// openQ4: skip painting this local stacking context, retaining layout/input/update.
++	virtual bool IsRenderSuppressed() { return false; }
+ 	/// Called during update if the element size has been changed.
+ 	virtual void OnResize();
+ 	/// Called during a layout operation, when the element is being positioned and sized.
+--- a/Source/Core/Element.cpp
++++ b/Source/Core/Element.cpp
+@@ -192,6 +192,7 @@
+ 
+ void Element::Render()
+ {
++	if (IsRenderSuppressed()) return;
+ #ifdef RMLUI_TRACY_PROFILING
+ 	auto name = GetAddress(false, false);
+ 	RMLUI_ZoneScoped;

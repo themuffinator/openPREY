@@ -84,6 +84,9 @@ void idAnimState::Restore( idRestoreGame *savefile ) {
 	savefile->ReadInt( animBlendFrames );
 	savefile->ReadInt( lastAnimBlendFrames );
 	savefile->ReadInt( channel );
+	if ( channel < ANIMCHANNEL_ALL || channel >= ANIM_NumAnimChannels ) {
+		savefile->Error( "idAnimState::Restore: invalid animation channel %d", channel );
+	}
 	savefile->ReadBool( idleAnim );
 	savefile->ReadBool( disabled );
 }
@@ -1038,10 +1041,16 @@ void idActor::Restore( idRestoreGame *savefile ) {
 	savefile->ReadInt( painTime );
 
 	savefile->ReadInt( num );
+	if ( num < 0 || num > MAX_SAVEGAME_ACTOR_ATTACHMENTS ) {
+		savefile->Error( "idActor::Restore: invalid attachment count %d", num );
+	}
 	for ( i = 0; i < num; i++ ) {
 		idAttachInfo &attach = attachments.Alloc();
 		attach.ent.Restore( savefile );
 		savefile->ReadInt( attach.channel );
+		if ( attach.channel < ANIMCHANNEL_ALL || attach.channel >= ANIM_NumAnimChannels ) {
+			savefile->Error( "idActor::Restore: invalid attachment animation channel %d", attach.channel );
+		}
 	}
 
 	savefile->ReadBool( finalBoss );
@@ -2201,6 +2210,26 @@ int idActor::GetAnim( int channel, const char *animname ) {
 	}
 
 	anim = animatorPtr->GetAnim( animname );
+	if ( !anim && channel == ANIMCHANNEL_LEGS && animatorPtr->ModelDef() &&
+			!idStr::Icmp( animatorPtr->ModelDef()->GetName(), "model_tommy" ) ) {
+		const char *fallbackAnim = NULL;
+
+		// The retail single-player Tommy model predates the explicit MP run
+		// aliases.  Match those aliases without changing any other actor model.
+		if ( !idStr::Icmp( animname, "run_forward" ) ) {
+			fallbackAnim = "walk";
+		} else if ( !idStr::Icmp( animname, "run_backwards" ) ) {
+			fallbackAnim = "walk_backwards";
+		} else if ( !idStr::Icmp( animname, "run_strafe_left" ) ) {
+			fallbackAnim = "walk_strafe_left";
+		} else if ( !idStr::Icmp( animname, "run_strafe_right" ) ) {
+			fallbackAnim = "walk_strafe_right";
+		}
+
+		if ( fallbackAnim ) {
+			anim = animatorPtr->GetAnim( fallbackAnim );
+		}
+	}
 
 	return anim;
 }
@@ -2865,14 +2894,20 @@ void idActor::Event_PlayAnim( int channel, const char *animname ) {
 	animFlags_t	flags;
 	idEntity *headEnt;
 	int	anim;
+	bool optionalPlayerLower;
 	
 	anim = GetAnim( channel, animname );
 	if ( !anim ) {
-		if ( ( channel == ANIMCHANNEL_HEAD ) && head.GetEntity() ) {
-			// HUMANHEAD pdm: changed from def_head to model_head for precaching
-			gameLocal.DPrintf( "missing '%s' animation on '%s' (%s)\n", animname, name.c_str(), spawnArgs.GetString( "model_head", "" ) );
-		} else {
-			gameLocal.DPrintf( "missing '%s' animation on '%s' (%s)\n", animname, name.c_str(), GetEntityDefName() );
+		optionalPlayerLower = channel == ANIMCHANNEL_TORSO && !animPrefix.Length() &&
+			animator.ModelDef() && !idStr::Icmp( animator.ModelDef()->GetName(), "model_tommy" ) &&
+			( !idStr::Icmp( animname, "lower" ) || !idStr::Icmp( animname, "altlower" ) );
+		if ( !optionalPlayerLower ) {
+			if ( ( channel == ANIMCHANNEL_HEAD ) && head.GetEntity() ) {
+				// HUMANHEAD pdm: changed from def_head to model_head for precaching
+				gameLocal.DPrintf( "missing '%s' animation on '%s' (%s)\n", animname, name.c_str(), spawnArgs.GetString( "model_head", "" ) );
+			} else {
+				gameLocal.DPrintf( "missing '%s' animation on '%s' (%s)\n", animname, name.c_str(), GetEntityDefName() );
+			}
 		}
 		idThread::ReturnInt( 0 );
 		return;

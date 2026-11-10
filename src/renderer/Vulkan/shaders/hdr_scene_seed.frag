@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define VK_HDR_SEED
+#include "hdr_scene_composite.glsl"

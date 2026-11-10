@@ -37,6 +37,16 @@ static const int FX_AXIS_BOUNCE = 2;
 static const int FX_AXIS_INCOMING = 3;
 static const int FX_AXIS_CUSTOMLOCAL = 4;
 
+static const idMaterial *DeclFX_FindMaterial( const char *name, bool noCaching ) {
+	return static_cast<const idMaterial *>( declManager->FindType( DECL_MATERIAL, name, true, noCaching ) );
+}
+
+static void DeclFX_PrecacheModel( const char *name, bool noCaching ) {
+	if ( !noCaching ) {
+		renderModelManager->FindModel( name );
+	}
+}
+
 static int ParseUseAxisMode( const idToken &axisToken ) {
 	if ( !axisToken.Icmp( "current" ) ) {
 		return FX_AXIS_CURRENT;
@@ -131,7 +141,7 @@ void idDeclFX::List( void ) const {
 idDeclFX::ParseSingleFXAction
 ================
 */
-void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
+void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction, bool noCaching ) {
 	idToken token;
 
 	FXAction.type = -1;
@@ -327,7 +337,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_LIGHT;
 
 			// precache the light material
-			declManager->FindMaterial( FXAction.data );
+			DeclFX_FindMaterial( FXAction.data, noCaching );
 			continue;
 		}
 
@@ -337,7 +347,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_ATTACHLIGHT;
 
 			// precache it
-			declManager->FindMaterial( FXAction.data );
+			DeclFX_FindMaterial( FXAction.data, noCaching );
 			continue;
 		}
 
@@ -347,7 +357,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_ATTACHENTITY;
 
 			// precache the model
-			renderModelManager->FindModel( FXAction.data );
+			DeclFX_PrecacheModel( FXAction.data, noCaching );
 			continue;
 		}
 
@@ -357,7 +367,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_LAUNCH;
 
 			// precache the entity def
-			declManager->FindType( DECL_ENTITYDEF, FXAction.data );
+			declManager->FindType( DECL_ENTITYDEF, FXAction.data, true, noCaching );
 			continue;
 		}
 
@@ -372,7 +382,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_MODEL;
 
 			// precache the model
-			renderModelManager->FindModel( FXAction.data );
+			DeclFX_PrecacheModel( FXAction.data, noCaching );
 			continue;
 		}
 
@@ -390,7 +400,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_LIGHT;
 
 			// precache the light material
-			declManager->FindMaterial( FXAction.data );
+			DeclFX_FindMaterial( FXAction.data, noCaching );
 			continue;
 		}
 
@@ -400,7 +410,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_MODEL;
 
 			// precache it
-			renderModelManager->FindModel( FXAction.data );
+			DeclFX_PrecacheModel( FXAction.data, noCaching );
 			continue;
 		}
 
@@ -410,7 +420,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_PARTICLE;
 
 			// precache it
-			renderModelManager->FindModel( FXAction.data );
+			DeclFX_PrecacheModel( FXAction.data, noCaching );
 			continue;
 		}
 
@@ -420,7 +430,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_DECAL;
 
 			// precache it
-			declManager->FindMaterial( FXAction.data );
+			DeclFX_FindMaterial( FXAction.data, noCaching );
 			continue;
 		}
 
@@ -435,7 +445,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_SOUND;
 
 			// precache it
-			declManager->FindSound( FXAction.data );
+			declManager->FindType( DECL_SOUND, FXAction.data, true, noCaching );
 			continue;
 		}
 
@@ -450,7 +460,7 @@ void idDeclFX::ParseSingleFXAction( idLexer &src, idFXSingleAction& FXAction ) {
 			FXAction.type = FX_SHOCKWAVE;
 
 			// precache the entity def
-			declManager->FindType( DECL_ENTITYDEF, FXAction.data );
+			declManager->FindType( DECL_ENTITYDEF, FXAction.data, true, noCaching );
 			continue;
 		}
 
@@ -465,6 +475,15 @@ idDeclFX::Parse
 ================
 */
 bool idDeclFX::Parse( const char *text, const int textLength ) {
+	return Parse( text, textLength, false );
+}
+
+/*
+================
+idDeclFX::Parse
+================
+*/
+bool idDeclFX::Parse( const char *text, const int textLength, bool noCaching ) {
 	idLexer src;
 	idToken token;
 
@@ -491,7 +510,7 @@ bool idDeclFX::Parse( const char *text, const int textLength ) {
 
 		if ( !token.Icmp( "{" ) ) {
 			idFXSingleAction action;
-			ParseSingleFXAction( src, action );
+			ParseSingleFXAction( src, action, noCaching );
 			events.Append( action );
 			continue;
 		}

@@ -29,30 +29,798 @@ If you have questions concerning this license or the applicable additional terms
 
 
 
+#ifndef ID_DEDICATED
+#include "../sys/sdl3/TextClipboard.h"
+#endif
+#include "../framework/NativeInputPublications.h"
 #include "ListGUILocal.h"
 #include "DeviceContext.h"
 #include "Window.h"
+#include "LegacyGuiImport.h"
 #include "UserInterfaceLocal.h"
+#include "GuiStateNumber.h"
+#include "UserInterfaceDeferred.h"
+#ifndef ID_DEDICATED
+#include "UserInterfaceRetained.h"
+#endif
+#include "ChatWindow.h"
+#include "EditWindow.h"
+#include "SimpleWindow.h"
+#include "../framework/Session.h"
+#include "RetainedUI.h"
+#include "RetainedHud.h"
+#include <limits>
+#include <cstring>
+#include <unordered_set>
+#include <functional>
+#include <typeinfo>
+#include "../idlib/ParserSourceObserver.h"
+#include "../framework/DeclReferenceObserver.h"
 
 extern idCVar r_skipGuiShaders;		// 1 = don't render any gui elements on surfaces
 extern idCVar gui_debugScript;
 idCVar ui_aspectCorrection( "ui_aspectCorrection", "1", CVAR_GUI | CVAR_ARCHIVE | CVAR_BOOL,
 	"preserve classic 4:3 layout for 2D UI (menu, HUD, console, loading/init); 0 = stretch to full 2D viewport" );
+static idCVar ui_retainedHudStateCache( "ui_retainedHudStateCache", "1", CVAR_GUI | CVAR_BOOL | CVAR_NOCHEAT,
+	"reuse unchanged stock HUD state evaluation between events while its retained peer draws" );
 
 idUserInterfaceManagerLocal	uiManagerLocal;
 idUserInterfaceManager *	uiManager = &uiManagerLocal;
-static int uiWorldGuiRedrawDepth = 0;
 
-void UI_SetInWorldGuiRendering( bool enabled ) {
-	if ( enabled ) {
-		uiWorldGuiRedrawDepth++;
-	} else if ( uiWorldGuiRedrawDepth > 0 ) {
-		uiWorldGuiRedrawDepth--;
+// Only loaded source bytes and declaration identities are cached, never a
+// timestamp-only promise. Explicit reload and language changes still parse.
+struct LegacyLevelLoadCache {
+    struct Source { std::string path, bytes; bool missing; };
+    struct Resource { const idDecl* parsed; declType_t type; std::string name; bool guiSort; };
+    std::vector<Source> sources;
+    std::vector<Resource> resources;
+    std::unordered_set<const idDecl*> seen;
+    std::string windowDefaults;
+    bool valid = false;
+    static void SourceRead(void* context, const char* path, const char* data, int size) {
+        auto& cache = *static_cast<LegacyLevelLoadCache*>(context);
+        for (const auto& source : cache.sources) if (source.path == path) return;
+        cache.sources.push_back({path, data && size >= 0 ? std::string(data, size) : std::string(), size < 0});
+    }
+    static void Referenced(void* context, const idDecl* decl) {
+        auto& cache = *static_cast<LegacyLevelLoadCache*>(context);
+        if (decl && cache.seen.insert(decl).second) cache.resources.push_back({decl, decl->GetType(), decl->GetName(), false});
+    }
+    void Finish(bool loaded) {
+        valid = loaded && !sources.empty();
+        if (!valid) return;
+        for (auto& resource : resources) {
+            if (resource.type == DECL_MATERIAL)
+                resource.guiSort = static_cast<const idMaterial*>(resource.parsed)->GetSort() == SS_GUI;
+            resource.parsed = nullptr;
+        }
+        std::unordered_set<const idDecl*>().swap(seen);
+    }
+    size_t Size() const {
+        size_t size = sizeof(*this) + sources.capacity() * sizeof(Source) + resources.capacity() * sizeof(Resource);
+        for (const auto& source : sources) size += source.path.capacity() + source.bytes.capacity();
+        for (const auto& resource : resources) size += resource.name.capacity();
+        return size + windowDefaults.capacity();
+    }
+    bool Unchanged() const {
+        if (!valid) return false;
+        for (const auto& source : sources) {
+            void* data = nullptr;
+            const int size = fileSystem->ReadFile(source.path.c_str(), &data);
+            const bool same = source.missing ? size < 0 : size >= 0 && data &&
+                static_cast<size_t>(size) == source.bytes.size() &&
+                std::memcmp(data, source.bytes.data(), source.bytes.size()) == 0;
+            if (data) fileSystem->FreeFile(data);
+            if (!same) return false;
+        }
+        return true;
+    }
+    void Reference() const {
+        for (const auto& resource : resources) {
+            const idDecl* decl = declManager->FindType(resource.type, resource.name.c_str());
+            if (resource.guiSort) static_cast<const idMaterial*>(decl)->SetSort(SS_GUI);
+        }
+    }
+};
+
+idUserInterfaceManaged::idUserInterfaceManaged( bool managed ) : refs( 1 ), allocationId( 0 ), managed( managed ) {
+	if ( managed ) {
+		uiManagerLocal.RegisterAllocation( this );
 	}
 }
 
-bool UI_IsInWorldGuiRendering( void ) {
-	return ( uiWorldGuiRedrawDepth > 0 );
+void idUserInterfaceManaged::MarkNativeInputClosing() noexcept {
+    openq4::NativeInputBeforeUiChange(allocationId);
+    nativeInputClosing = true;
+}
+void idUserInterfaceManaged::SetNativeInputChanging(bool changing) noexcept {
+    openq4::NativeInputBeforeUiChange(allocationId);
+    nativeInputChanging = changing;
+}
+idUserInterfaceManaged::~idUserInterfaceManaged() {
+    MarkNativeInputClosing();
+	if ( managed ) {
+		uiManagerLocal.UnregisterGui( this );
+	}
+}
+
+void idUserInterfaceManaged::RegisterLoaded() {
+	if ( managed ) {
+		uiManagerLocal.RegisterGui( this );
+	}
+}
+
+void idUserInterfaceManaged::RegisterDemo() {
+	if ( managed ) {
+		uiManagerLocal.RegisterDemoGui( this );
+	}
+}
+
+void idUserInterfaceManaged::RefreshThinking() {
+	if ( managed ) {
+		uiManagerLocal.UpdateAlwaysThinkGui( this );
+	}
+}
+
+bool UI_IsRetainedPath( const char *qpath ) {
+	if ( qpath == NULL ) { return false; }
+	const int length = idStr::Length( qpath );
+	return length >= 5 && idStr::Icmp( qpath + length - 5, ".q4ui" ) == 0;
+}
+
+idUserInterfaceManaged *UI_CreateForPath( const char *qpath, bool managed ) {
+	if ( UI_IsRetainedPath( qpath ) ) {
+#ifndef ID_DEDICATED
+		return new idUserInterfaceRetained( managed );
+#else
+		return NULL;
+#endif
+	}
+	return new idUserInterfaceLocal( managed );
+}
+
+bool UI_DispatchApplicationActions( idUserInterface *gui, const char *command, bool &closeRequested ) {
+	return uiManagerLocal.DispatchApplicationActions( gui, command, closeRequested );
+}
+
+bool UI_TakeSessionRequest( idUserInterface *gui, const char *command, idStr &request ) {
+	return uiManagerLocal.TakeSessionRequest( gui, command, request );
+}
+
+void UI_RunTimeEvents( idUserInterface *gui, int time ) {
+	uiManagerLocal.RunTimeEvents( gui, time );
+}
+
+void UI_ReloadForLevelLoad() {
+	uiManagerLocal.ReloadForLevelLoad();
+}
+
+void idUserInterfaceManagerLocal::RunTimeEvents( idUserInterface *gui, int time ) {
+	for ( int i = 0; i < allocations.Num(); ++i ) {
+		if ( allocations[i] == gui ) { allocations[i]->RunTimeEvents( time ); return; }
+	}
+}
+
+bool idUserInterfaceManagerLocal::TakeSessionRequest( idUserInterface *gui, const char *command, idStr &request ) {
+	// Only a live allocation may hand its accepted verbs to the session.
+	for ( int i = 0; i < allocations.Num(); ++i ) {
+		if ( allocations[i] == gui ) return allocations[i]->TakeSessionRequest( command, request );
+	}
+	return false;
+}
+
+std::uint64_t UI_NextTextLifetime() {
+	// Engine-thread confined; never reset on manager or renderer shutdown.
+	static std::uint64_t next = 0;
+	if (next == (std::numeric_limits<std::uint64_t>::max)()) return 0;
+	return ++next;
+}
+
+openq4::ui::TextBrokerContext UI_QueryTextContext(idUserInterface* current,
+	std::uint64_t nativeWindow, std::uint64_t nativeSession) {
+	return uiManagerLocal.QueryTextContext(current,nativeWindow,nativeSession);
+}
+
+uiTextDeliveryResult_t UI_DeliverTextInput(idUserInterface* current,
+	std::uint64_t nativeWindow, std::uint64_t nativeSession,
+	const openq4::ui::TextBrokerContext& authorizedContext,
+	const openq4::ui::TextBrokerDelivery& delivery) {
+	return uiManagerLocal.DeliverTextInput(current,nativeWindow,nativeSession,authorizedContext,delivery);
+}
+
+openq4::ui::TextBrokerContext idUserInterfaceManagerLocal::QueryTextContext(idUserInterface* current,
+	std::uint64_t nativeWindow, std::uint64_t nativeSession) {
+#ifdef ID_DEDICATED
+	(void)current; (void)nativeWindow; (void)nativeSession;
+	return {};
+#else
+	if (textBoundaryActive || nativeBoundaryActive) { textBoundaryFailed = true; if(nativeBoundaryActive)nativeBoundaryFailed=true; return {}; }
+	if (!current || !nativeWindow || !nativeSession) return {};
+	textBoundaryActive = true; textBoundaryFailed = false;
+	struct Guard { bool& active; ~Guard() { active = false; } } guard{textBoundaryActive};
+	try {
+		for (int i = 0; i < allocations.Num(); ++i) {
+			if (allocations[i] != current || !allocations[i]->allocationId) continue;
+			const auto allocation = allocations[i]->allocationId;
+			const auto result = allocations[i]->QueryTextContext(allocation,nativeWindow,nativeSession);
+			if (textBoundaryFailed) return {};
+			// Refresh may invalidate membership. Do not dereference a saved pointer.
+			for (int j = 0; j < allocations.Num(); ++j)
+				if (allocations[j] == current && allocations[j]->allocationId == allocation) return result;
+			return {};
+		}
+	} catch (...) { return {}; }
+	return {};
+#endif
+}
+
+uiTextDeliveryResult_t idUserInterfaceManagerLocal::DeliverTextInput(idUserInterface* current,
+	std::uint64_t nativeWindow, std::uint64_t nativeSession,
+	const openq4::ui::TextBrokerContext& authorizedContext,
+	const openq4::ui::TextBrokerDelivery& delivery) {
+#ifdef ID_DEDICATED
+	(void)current; (void)nativeWindow; (void)nativeSession; (void)authorizedContext; (void)delivery;
+	return {openq4::ui::TextDeliveryOutcome::Rejected,{},"GUI text delivery is unavailable in a dedicated server"};
+#else
+	using namespace openq4::ui;
+	uiTextDeliveryResult_t result;
+	if (textBoundaryActive || nativeBoundaryActive) {
+		textBoundaryFailed = true; if(nativeBoundaryActive)nativeBoundaryFailed=true; result.diagnostic = "Reentrant GUI text delivery"; return result;
+	}
+	if (!current || !nativeWindow || !nativeSession || !delivery.token || !delivery.sequence || !delivery.target.allocation) {
+		result.diagnostic = "Invalid GUI text delivery identity"; return result;
+	}
+	textBoundaryActive = true; textBoundaryFailed = false;
+	struct Guard { bool& active; ~Guard() { active = false; } } guard{textBoundaryActive};
+	try {
+		// Freeze the authorized context and payload before callbacks can refresh
+		// resources. Native session and edit session are different identities.
+		const TextBrokerContext expected = authorizedContext;
+		if (expected.route != TextBrokerRoute::Retained || !expected.editor || *expected.editor != delivery.target) {
+			result.diagnostic = "GUI text authorization does not match its delivery"; return result;
+		}
+		if (!ValidateTextInputEvent(delivery.input,result.diagnostic)) return result;
+		const TextBrokerDelivery request = delivery;
+		const auto resolve = [&]() -> idUserInterfaceManaged* {
+			for (int i = 0; i < allocations.Num(); ++i)
+				if (allocations[i] == current && allocations[i]->allocationId == request.target.allocation) return allocations[i];
+			return NULL;
+		};
+		auto* gui = resolve();
+		if (!gui) { result.diagnostic = "GUI text allocation is no longer current"; return result; }
+		result.context = gui->QueryTextContext(request.target.allocation,nativeWindow,nativeSession);
+		gui = resolve();
+		if (textBoundaryFailed || !gui) {
+			result.context = {}; result.diagnostic = "GUI text query invalidated its owner"; return result;
+		}
+		if (result.context != expected) { result.diagnostic = "GUI text editor identity changed"; return result; }
+		const bool applied = gui->ApplyTextInput(expected,request.input,result.diagnostic);
+		gui = resolve();
+		if (textBoundaryFailed || !gui) {
+			result.context = {}; result.diagnostic = "GUI text delivery invalidated its owner"; return result;
+		}
+		result.context = gui->QueryTextContext(request.target.allocation,nativeWindow,nativeSession);
+		if (textBoundaryFailed || !resolve()) {
+			result.context = {}; result.diagnostic = "GUI text receipt invalidated its owner"; return result;
+		}
+		if (applied) result.outcome = result.context.editor && result.context.editor->revision == request.target.revision ?
+			TextDeliveryOutcome::AppliedNoChange : TextDeliveryOutcome::AppliedChanged;
+		// Complete() checks this actual receipt; never relabel a new editor as old.
+	} catch (...) { result.context = {}; result.diagnostic = "GUI text boundary failed"; }
+	return result;
+#endif
+}
+
+
+// Private native collection owner boundary. All manager re-resolution happens
+// outside backend method stacks; pure publication and teardown allocate nothing.
+namespace {
+struct NativeOwnerBoundaryScope {
+    bool& active;
+    ~NativeOwnerBoundaryScope() { active=false; }
+};
+void NativeOwnerDiagnostic(std::string& error,const char* message) noexcept {
+    try {error=message;} catch (...) {error.clear();}
+}
+}
+openq4::ui::NativeTextPresence idUserInterfaceManagerLocal::NativeTextPresence(openq4::ui::NativeTextIdentity native,
+    const openq4::ui::TextEditorIdentity& owner) const noexcept {
+    using Presence=openq4::ui::NativeTextPresence;
+    if (std::this_thread::get_id()!=nativePresenceThread || nativeBoundaryActive || textBoundaryActive ||
+        clipboardBoundaryActive || applicationPumpDepth || !native.document || !native.editorLease ||
+        !owner.allocation || owner.allocation>nextAllocationId || !owner.backend || !owner.document ||
+        !owner.modal || !owner.window || !owner.session || !owner.revision || owner.control.empty() ||
+        owner.control.size()>128 || owner.control.find('\0')!=std::string::npos) return Presence::BusyOrUnknown;
+#ifdef ID_DEDICATED
+    return Presence::BusyOrUnknown;
+#else
+    for (int i=0;i<allocations.Num();++i)
+        if (allocations[i]->allocationId==owner.allocation) return (allocations[i]->nativeInputClosing || allocations[i]->nativeInputChanging) ? Presence::BusyOrUnknown : allocations[i]->QueryNativeTextPresence(native,owner);
+    return Presence::AbsentOriginal;
+#endif
+}
+bool idUserInterfaceManagerLocal::QueryNativeInputAllocation(std::uintptr_t current,std::uint64_t& out) const noexcept {
+    if (std::this_thread::get_id()!=nativePresenceThread || nativeBoundaryActive || textBoundaryActive ||
+        clipboardBoundaryActive || applicationPumpDepth || !current) return false;
+    for (int i=0;i<allocations.Num();++i) {
+        const auto* allocation=allocations[i];
+        if (reinterpret_cast<std::uintptr_t>(allocation)==current && allocation->allocationId && !(allocation->nativeInputClosing || allocation->nativeInputChanging)) {
+            out=allocation->allocationId;return true;
+        }
+    }
+    return false;
+}
+bool openq4::UI_QueryNativeInputAllocation(std::uintptr_t current,std::uint64_t& out) noexcept {
+    return uiManagerLocal.QueryNativeInputAllocation(current,out);
+}
+bool idUserInterfaceManagerLocal::NativeTextEnter() noexcept {
+    if(nativeBoundaryActive || textBoundaryActive || clipboardBoundaryActive) {
+        nativeBoundaryFailed=true;
+        if(textBoundaryActive)textBoundaryFailed=true;
+        if(clipboardBoundaryActive)clipboardBoundaryFailed=true;
+        return false;
+    }
+    nativeBoundaryActive=true;nativeBoundaryFailed=false;return true;
+}
+idUserInterfaceManaged* idUserInterfaceManagerLocal::NativeTextResolve(uiNativeTextRouteProbe_t probe,void* context,
+    const openq4::ui::TextEditorIdentity& owner) const noexcept {
+#ifdef ID_DEDICATED
+    (void)probe;(void)context;(void)owner;return nullptr;
+#else
+    if(!probe || !owner.allocation || !owner.window)return nullptr;
+    const auto route=probe(context);
+    if(!route.current || !route.inputAllowed || route.window!=owner.window)return nullptr;
+    for(int i=0;i<allocations.Num();++i)
+        if(allocations[i]==route.current && allocations[i]->allocationId==owner.allocation && !allocations[i]->nativeInputClosing && !allocations[i]->nativeInputChanging)return allocations[i];
+    return nullptr;
+#endif
+}
+bool idUserInterfaceManagerLocal::NativeTextCheck(uiNativeTextRouteProbe_t probe,void* context,
+    const openq4::ui::NativeTextEditorBarrier& expected) const noexcept {
+    if(nativeBoundaryFailed)return false;
+    auto* owner=NativeTextResolve(probe,context,expected.editor);
+    return owner && owner->CurrentNativeText(expected);
+}
+bool idUserInterfaceManagerLocal::NativeTextCurrent(uiNativeTextRouteProbe_t probe,void* context,
+    const openq4::ui::NativeTextEditorBarrier& expected) noexcept {
+    if(!NativeTextEnter())return false;
+    NativeOwnerBoundaryScope scope{nativeBoundaryActive};
+    return NativeTextCheck(probe,context,expected);
+}
+bool idUserInterfaceManagerLocal::NativeTextPublishSettlement(uiNativeTextRouteProbe_t probe,void* context,
+    openq4::ui::Interaction::NativeSettlement& prepared,openq4::ui::NativeTextEditorReceipt& out) noexcept {
+#ifdef ID_DEDICATED
+    (void)probe;(void)context;(void)prepared;(void)out;return false;
+#else
+    if(!NativeTextEnter())return false;
+    NativeOwnerBoundaryScope scope{nativeBoundaryActive};
+    const auto& expected=prepared.Receipt().before;
+    if(!NativeTextCheck(probe,context,expected))return false;
+    auto* owner=NativeTextResolve(probe,context,expected.editor);
+    return owner && owner->PublishNativeTextSettlement(prepared,out);
+#endif
+}
+bool idUserInterfaceManagerLocal::NativeTextRetireExact(openq4::ui::NativeTextIdentity native,
+    const openq4::ui::TextEditorIdentity& owner) noexcept {
+    openq4::NativeInputBeforeUiChange(owner.allocation,owner.backend);
+    // Retirement is permitted inside a failed boundary. Poison its in-flight
+    // receipt first, then touch only the original registered lease without any
+    // resource preparation, host observation or current-route requirement.
+    if(nativeBoundaryActive)nativeBoundaryFailed=true;
+    if(textBoundaryActive)textBoundaryFailed=true;
+    if(clipboardBoundaryActive)clipboardBoundaryFailed=true;
+#ifdef ID_DEDICATED
+    (void)native;(void)owner;return false;
+#else
+    if(!owner.allocation || !native.document || !native.editorLease)return false;
+    for(int i=0;i<allocations.Num();++i)
+        if(allocations[i]->allocationId==owner.allocation) {
+            if(allocations[i]->nativeInputClosing || allocations[i]->nativeInputChanging)return false;
+            return allocations[i]->RetireNativeTextExact(native,owner);
+        }
+    return false;
+#endif
+}
+
+bool idUserInterfaceManagerLocal::NativeTextAttach(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::TextEditorIdentity& owner, openq4::ui::NativeTextIdentity native, openq4::ui::NativeTextEditorBarrier& out, std::string& error) {
+    openq4::NativeInputBeforeUiChange(owner.allocation,owner.backend);
+    if(!NativeTextEnter()){NativeOwnerDiagnostic(error,"Reentrant native GUI owner boundary");return false;}
+    NativeOwnerBoundaryScope scope{nativeBoundaryActive};
+    try {
+        const auto frozen=owner;const auto nativeCopy=native;
+        openq4::ui::NativeTextEditorBarrier candidate;
+        const bool ready=[&]{auto* backend=NativeTextResolve(probe,context,frozen);return backend && backend->PrepareNativeText(frozen);}();
+        if(!ready || nativeBoundaryFailed)return false;
+        const bool accepted=[&]{auto* backend=NativeTextResolve(probe,context,frozen);return backend && backend->AttachNativeText(frozen,nativeCopy,candidate,error);}();
+        if(!accepted || nativeBoundaryFailed || !NativeTextCheck(probe,context,candidate))return false;
+        out=std::move(candidate);return true;
+    } catch (...) {NativeOwnerDiagnostic(error,"Native GUI owner allocation or callback failed");return false;}
+}
+
+bool idUserInterfaceManagerLocal::NativeTextRefresh(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected, openq4::ui::NativeTextEditorView& out, std::string& error) {
+    if(!NativeTextEnter()){NativeOwnerDiagnostic(error,"Reentrant native GUI owner boundary");return false;}
+    NativeOwnerBoundaryScope scope{nativeBoundaryActive};
+    try {
+        const auto frozen=expected;
+        openq4::ui::NativeTextEditorView candidate;
+        const bool ready=[&]{auto* backend=NativeTextResolve(probe,context,frozen.editor);return backend && backend->PrepareNativeText(frozen.editor);}();
+        if(!ready || nativeBoundaryFailed)return false;
+        const bool accepted=[&]{auto* backend=NativeTextResolve(probe,context,frozen.editor);return backend && backend->RefreshNativeText(frozen,candidate,error);}();
+        if(!accepted || nativeBoundaryFailed || !NativeTextCheck(probe,context,candidate.barrier))return false;
+        if(candidate.barrier!=frozen)return false;out=std::move(candidate);return true;
+    } catch (...) {NativeOwnerDiagnostic(error,"Native GUI owner allocation or callback failed");return false;}
+}
+
+bool idUserInterfaceManagerLocal::NativeTextBegin(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected, const openq4::ui::NativeTextCollection& collection, openq4::ui::NativeTextEditorBarrier& out, std::string& error) {
+    if(!NativeTextEnter()){NativeOwnerDiagnostic(error,"Reentrant native GUI owner boundary");return false;}
+    NativeOwnerBoundaryScope scope{nativeBoundaryActive};
+    try {
+        const auto frozen=expected;const auto collectionCopy=collection;
+        openq4::ui::NativeTextEditorBarrier candidate;
+        if(!NativeTextCheck(probe,context,frozen))return false;
+        const bool accepted=[&]{auto* backend=NativeTextResolve(probe,context,frozen.editor);return backend && backend->BeginNativeText(frozen,collectionCopy,candidate,error);}();
+        if(!accepted || nativeBoundaryFailed || !NativeTextCheck(probe,context,candidate))return false;
+        out=std::move(candidate);return true;
+    } catch (...) {NativeOwnerDiagnostic(error,"Native GUI owner allocation or callback failed");return false;}
+}
+
+bool idUserInterfaceManagerLocal::NativeTextApply(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected, const openq4::ui::NativeTextOffer& offer, openq4::ui::NativeTextEditorReceipt& out, std::string& error) {
+    if(!NativeTextEnter()){NativeOwnerDiagnostic(error,"Reentrant native GUI owner boundary");return false;}
+    NativeOwnerBoundaryScope scope{nativeBoundaryActive};
+    try {
+        const auto frozen=expected;const auto offerCopy=offer;
+        openq4::ui::NativeTextEditorReceipt candidate;
+        if(!NativeTextCheck(probe,context,frozen))return false;
+        const bool accepted=[&]{auto* backend=NativeTextResolve(probe,context,frozen.editor);return backend && backend->ApplyNativeText(frozen,offerCopy,candidate,error);}();
+        if(!accepted || nativeBoundaryFailed || !NativeTextCheck(probe,context,candidate.after))return false;
+        out=std::move(candidate);return true;
+    } catch (...) {NativeOwnerDiagnostic(error,"Native GUI owner allocation or callback failed");return false;}
+}
+
+bool idUserInterfaceManagerLocal::NativeTextComplete(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected, const openq4::ui::NativeTextCollection& collection, openq4::ui::NativeTextEditorBarrier& out, std::string& error) {
+    if(!NativeTextEnter()){NativeOwnerDiagnostic(error,"Reentrant native GUI owner boundary");return false;}
+    NativeOwnerBoundaryScope scope{nativeBoundaryActive};
+    try {
+        const auto frozen=expected;const auto collectionCopy=collection;
+        openq4::ui::NativeTextEditorBarrier candidate;
+        if(!NativeTextCheck(probe,context,frozen))return false;
+        const bool accepted=[&]{auto* backend=NativeTextResolve(probe,context,frozen.editor);return backend && backend->CompleteNativeText(frozen,collectionCopy,candidate,error);}();
+        if(!accepted || nativeBoundaryFailed || !NativeTextCheck(probe,context,candidate))return false;
+        out=std::move(candidate);return true;
+    } catch (...) {NativeOwnerDiagnostic(error,"Native GUI owner allocation or callback failed");return false;}
+}
+
+#ifndef ID_DEDICATED
+std::unique_ptr<openq4::ui::Interaction::NativeSettlement> idUserInterfaceManagerLocal::NativeTextPrepareSettlement(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected, std::string& error) {
+    if(!NativeTextEnter()){NativeOwnerDiagnostic(error,"Reentrant native GUI owner boundary");return nullptr;}
+    NativeOwnerBoundaryScope scope{nativeBoundaryActive};
+    try {
+        const auto frozen=expected;
+        std::unique_ptr<openq4::ui::Interaction::NativeSettlement> candidate;
+        if(!NativeTextCheck(probe,context,frozen))return nullptr;
+        const bool accepted=[&]{auto* backend=NativeTextResolve(probe,context,frozen.editor);return backend && (candidate=backend->PrepareNativeTextSettlement(frozen,error)) != nullptr;}();
+        if(!accepted || nativeBoundaryFailed || !NativeTextCheck(probe,context,frozen))return nullptr;
+        return candidate;
+    } catch (...) {NativeOwnerDiagnostic(error,"Native GUI owner allocation or callback failed");return nullptr;}
+}
+#endif
+
+bool UI_NativeTextCurrent(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected) noexcept {
+    return uiManagerLocal.NativeTextCurrent(probe,context,expected);
+}
+
+bool UI_NativeTextPublishSettlement(uiNativeTextRouteProbe_t probe,void* context, openq4::ui::Interaction::NativeSettlement& prepared,openq4::ui::NativeTextEditorReceipt& out) noexcept {
+    return uiManagerLocal.NativeTextPublishSettlement(probe,context,prepared,out);
+}
+
+bool UI_NativeTextAttach(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::TextEditorIdentity& owner, openq4::ui::NativeTextIdentity native, openq4::ui::NativeTextEditorBarrier& out, std::string& error) {
+    return uiManagerLocal.NativeTextAttach(probe,context,owner,native,out,error);
+}
+
+bool UI_NativeTextRefresh(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected, openq4::ui::NativeTextEditorView& out, std::string& error) {
+    return uiManagerLocal.NativeTextRefresh(probe,context,expected,out,error);
+}
+
+bool UI_NativeTextBegin(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected, const openq4::ui::NativeTextCollection& collection, openq4::ui::NativeTextEditorBarrier& out, std::string& error) {
+    return uiManagerLocal.NativeTextBegin(probe,context,expected,collection,out,error);
+}
+
+bool UI_NativeTextApply(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected, const openq4::ui::NativeTextOffer& offer, openq4::ui::NativeTextEditorReceipt& out, std::string& error) {
+    return uiManagerLocal.NativeTextApply(probe,context,expected,offer,out,error);
+}
+
+bool UI_NativeTextComplete(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected, const openq4::ui::NativeTextCollection& collection, openq4::ui::NativeTextEditorBarrier& out, std::string& error) {
+    return uiManagerLocal.NativeTextComplete(probe,context,expected,collection,out,error);
+}
+
+#ifndef ID_DEDICATED
+std::unique_ptr<openq4::ui::Interaction::NativeSettlement> UI_NativeTextPrepareSettlement(uiNativeTextRouteProbe_t probe,void* context, const openq4::ui::NativeTextEditorBarrier& expected, std::string& error) {
+    return uiManagerLocal.NativeTextPrepareSettlement(probe,context,expected,error);
+}
+#endif
+
+openq4::ui::NativeTextPresence UI_NativeTextPresence(openq4::ui::NativeTextIdentity native,
+    const openq4::ui::TextEditorIdentity& owner) noexcept {
+    return uiManagerLocal.NativeTextPresence(native,owner);
+}
+bool UI_NativeTextRetireExact(openq4::ui::NativeTextIdentity native,const openq4::ui::TextEditorIdentity& owner) noexcept {
+    return uiManagerLocal.NativeTextRetireExact(native,owner);
+}
+
+bool idUserInterfaceManagerLocal::DispatchApplicationActions( idUserInterface *gui, const char *command, bool &closeRequested ) {
+	closeRequested = false;
+#ifdef ID_DEDICATED
+	for (int i = 0; i < allocations.Num(); ++i) {
+		if (allocations[i] == gui) return allocations[i]->DispatchApplicationActions(command,closeRequested);
+	}
+	return false;
+#else
+	using namespace openq4::ui;
+	if (clipboardBoundaryActive || nativeBoundaryActive) { clipboardBoundaryFailed = true; if(nativeBoundaryActive)nativeBoundaryFailed=true; return true; }
+	unsigned long long allocation = 0;
+	for (int i = 0; i < allocations.Num(); ++i) if (allocations[i] == gui) { allocation = allocations[i]->allocationId; break; }
+	if (!allocation) return false;
+	// command may point into the backend being replaced by the native callback.
+	const std::string marker = command ? command : "";
+	auto resolve = [&]() -> idUserInterfaceManaged* {
+		for (int i = 0; i < allocations.Num(); ++i)
+			if (allocations[i] == gui && allocations[i]->allocationId == allocation) return allocations[i];
+		return nullptr;
+	};
+	clipboardBoundaryActive = true; clipboardBoundaryFailed = false;
+	struct Guard { bool& active; ~Guard() { active = false; } } guard{clipboardBoundaryActive};
+	bool handled = false;
+	try {
+		for (unsigned count = 0; count <= 256; ++count) {
+			auto* owner = resolve(); if (!owner || clipboardBoundaryFailed) { closeRequested = false; return true; }
+			handled = owner->DispatchApplicationActions(marker.c_str(),closeRequested);
+			owner = resolve();
+			if (!owner || clipboardBoundaryFailed) { closeRequested = false; return true; }
+			if (!handled || closeRequested) return handled;
+			uiClipboardRequest_t request;
+			if (count == 256 || !owner->TakeClipboardRequest(marker.c_str(),request)) return handled;
+			// All following work uses copied values. No backend method is on the
+			// stack when clipboard access can pump/re-enter or replace that backend.
+			uiNumberEditorSnapshot_t before; std::string error;
+			auto query = [&](uiNumberEditorSnapshot_t& out) {
+				auto* live = resolve();
+				if (!live || clipboardBoundaryFailed || !live->QueryClipboardEditor(out,error)) return false;
+				return !clipboardBoundaryFailed && resolve() && out.target == request.target &&
+					out.target.backend && out.target.document && out.target.modal && !out.target.control.empty() &&
+					out.target.edit.session && out.target.edit.revision && out.editor.identity == out.target.edit &&
+					out.editor.active && !out.editor.conflict && !out.editor.composition;
+			};
+			if (!query(before)) continue;
+			const auto& state = before.editor.state;
+			TextInputEvent checked;
+			if (!MakeTextInputCommit(state.text,checked,error) || state.anchor > state.text.size() || state.caret > state.text.size()) continue;
+			const auto boundary = [&](std::size_t offset) {
+				return offset == state.text.size() || (static_cast<unsigned char>(state.text[offset]) & 0xc0) != 0x80;
+			};
+			if (!boundary(state.anchor) || !boundary(state.caret)) continue;
+			const auto first = (std::min)(state.anchor,state.caret), last = (std::max)(state.anchor,state.caret);
+			const std::string selection = state.text.substr(first,last-first);
+			if (!MakeTextInputCommit(selection,checked,error)) continue;
+			if (request.operation != uiClipboardOperation_t::Copy && request.operation != uiClipboardOperation_t::Cut &&
+				request.operation != uiClipboardOperation_t::Paste) continue;
+			// A masked field's text never reaches the clipboard: copying or
+			// cutting a selection there is refused and said. Paste still works.
+			if (before.editor.masked && request.operation != uiClipboardOperation_t::Paste) {
+				if (!selection.empty() && !clipboardBoundaryFailed) if (auto* live = resolve())
+					live->SetClipboardNotice(request.target,NumberEditNotice::ClipboardMasked,error);
+				continue;
+			}
+			std::string paste; bool succeeded = true;
+			NumberEditNotice notice = NumberEditNotice::None;
+			try {
+				if (request.operation == uiClipboardOperation_t::Paste) {
+					succeeded = openq4::SDL3_ReadTextClipboard(paste,error);
+					if (!succeeded) notice = NumberEditNotice::ClipboardReadFailed;
+				} else if (!selection.empty()) {
+					succeeded = openq4::SDL3_WriteTextClipboard(selection,error);
+					if (!succeeded) notice = NumberEditNotice::ClipboardWriteFailed;
+				}
+			} catch (...) {
+				succeeded = false;
+				notice = request.operation == uiClipboardOperation_t::Paste ? NumberEditNotice::ClipboardReadFailed : NumberEditNotice::ClipboardWriteFailed;
+			}
+			uiNumberEditorSnapshot_t after;
+			if (!query(after) || after.editor.state.text != state.text || after.editor.state.anchor != state.anchor ||
+				after.editor.state.caret != state.caret) continue;
+			// Empty Paste is a successful no-op, never deletion of the selection.
+			if (succeeded && ((request.operation == uiClipboardOperation_t::Cut && !selection.empty()) ||
+				(request.operation == uiClipboardOperation_t::Paste && !paste.empty()))) {
+				if (!MakeTextInputCommit(paste,checked,error)) notice = NumberEditNotice::ClipboardRejected;
+				else if (auto* live = resolve()) {
+					if (live->ReplaceClipboardSelection(request.target,paste,error)) continue;
+					notice = NumberEditNotice::ClipboardRejected;
+				}
+			}
+			// A refusal reports only a fixed localized category to the same live
+			// editor. Native diagnostics never become authored field contents.
+			if (!clipboardBoundaryFailed) if (auto* live = resolve()) live->SetClipboardNotice(request.target,notice,error);
+		}
+	} catch (...) { closeRequested = false; return true; }
+	return handled;
+#endif
+}
+
+void UI_PumpApplicationActions( UI_ApplicationCommandCallback callback, void *context, idUserInterface *only ) {
+	uiManagerLocal.PumpApplicationActions( callback, context, only );
+}
+
+void idUserInterfaceManagerLocal::PumpApplicationActions( UI_ApplicationCommandCallback callback, void *context, idUserInterface *only ) {
+	// Nested global pumps cannot replay the current batch. A targeted lifecycle
+	// drain may run inside a close callback, before an outgoing test GUI is freed.
+	if ( callback == NULL || ( applicationPumpDepth != 0 && only == NULL ) || applicationPumpDepth >= 8 ) return;
+	if ( applicationPumpDepth == 0 ) applicationPumpBudget = 256;
+	struct DepthScope {
+		int &depth;
+		explicit DepthScope( int &value ) : depth( value ) { ++depth; }
+		~DepthScope() { --depth; }
+	} scope( applicationPumpDepth );
+	idList<idUserInterfaceManaged*> ready;
+	idList<unsigned long long> identities;
+	idList<idStr> commands;
+	for ( int i = 0; i < allocations.Num() && ready.Num() < applicationPumpBudget; ++i ) {
+		idUserInterfaceManaged *gui = allocations[ i ];
+		if ( only != NULL && only != gui ) continue;
+		const char *command = gui->PendingApplicationCommand();
+		if ( command == NULL || command[ 0 ] == '\0' ) continue;
+		ready.Append( gui );
+		identities.Append( gui->allocationId );
+		commands.Append( idStr( command ) );
+	}
+	for ( int i = 0; i < ready.Num() && applicationPumpBudget > 0; ++i ) {
+		idUserInterfaceManaged *gui = ready[ i ];
+		if ( allocations.Find( gui ) == NULL || gui->allocationId != identities[ i ] ) continue;
+		--applicationPumpBudget;
+		callback( gui, commands[ i ].c_str(), context );
+		// The callback may delete this or any peer, including reusing its address.
+		// Never retain a registry iterator or dereference the owner afterward.
+	}
+}
+
+namespace {
+
+// Resolve presentation aliases without parser fixup. GetWinVarByName(..., true)
+// can disable a root expression or allocate a gui:: variable as a side effect.
+// External value queries must do neither, including when used by diagnostics.
+static idWinVar *FindPresentationVariable( idWindow *desktop, const char *name ) {
+	if ( desktop == NULL || name == NULL || name[ 0 ] == '\0' ) {
+		return NULL;
+	}
+	idStr key = name;
+	const int separator = key.Find( "::" );
+	if ( separator < 0 ) {
+		return desktop->GetWinVarByName( key.c_str(), false );
+	}
+	if ( separator == 0 || separator + 2 == key.Length() ) {
+		return NULL;
+	}
+	const idStr element = key.Left( separator );
+	key = key.Right( key.Length() - separator - 2 );
+	if ( key.Find( "::" ) >= 0 ) {
+		return NULL;
+	}
+	drawWin_t *target = desktop->FindChildByName( element.c_str() );
+	if ( target == NULL ) {
+		return NULL;
+	}
+	if ( target->win != NULL ) {
+		return target->win->GetWinVarByName( key.c_str(), false );
+	}
+	return target->simp != NULL ? target->simp->GetWinVarByName( key.c_str() ) : NULL;
+}
+
+static void SetStateRectangleComponents( idUserInterfaceLocal *gui, const char *const (&names)[4], const idRectangle &rect ) {
+	gui->SetStateFloat( names[0], rect.x );
+	gui->SetStateFloat( names[1], rect.y );
+	gui->SetStateFloat( names[2], rect.w );
+	gui->SetStateFloat( names[3], rect.h );
+}
+
+}
+
+bool idUserInterfaceLocal::GetPresentationValue( const char *name, idStr &value ) const {
+	if (name && !idStr::Icmp(name,"__retained::hudDrawSucceeded")) {
+		value = retainedHud && retainedHud->DrawSucceeded() ? "1" : "0"; return true;
+	}
+	if (name && !idStr::Icmp(name,"__remastered::active")) {
+		value = RemasteredActive() ? "1" : "0"; return true;
+	}
+	idWinVar *variable = FindPresentationVariable( desktop, name );
+	if ( variable == NULL ) {
+		return false;
+	}
+	value = variable->c_str();
+	return true;
+}
+
+bool idUserInterfaceLocal::SetPresentationValue( const char *name, const char *value, bool overrideExpression ) {
+	evaluatedHudValid = false;
+	if ( value == NULL ) {
+		return false;
+	}
+	idWinVar *variable = FindPresentationVariable( desktop, name );
+	if ( variable == NULL ) {
+		return false;
+	}
+	variable->Set( value );
+	if ( overrideExpression ) {
+		variable->SetEval( false );
+	}
+	return true;
+}
+
+// Only a window a click could reach qualifies: it and every ancestor must be
+// visible and accept events. The command comes back instead of being queued,
+// so the caller dispatches it as the click's own HandleEvent result would be.
+bool idUserInterfaceLocal::RunWindowAction( const char *windowName, bool back, idStr &command ) {
+	evaluatedHudValid = false;
+	command.Clear();
+	if ( desktop == NULL || windowName == NULL || windowName[ 0 ] == '\0' ) {
+		return false;
+	}
+	drawWin_t *found = desktop->FindChildByName( windowName );
+	idWindow *window = found != NULL ? found->win : NULL;
+	if ( window == NULL ) {
+		return false;
+	}
+	for ( idWindow *reach = window; reach != NULL; reach = reach->GetParent() ) {
+		if ( !reach->visible || reach->noEvents ) {
+			return false;
+		}
+	}
+	window->cmd = "";
+	if ( !window->RunScript( back ? idWindow::ON_BACKACTION : idWindow::ON_ACTION ) ) {
+		return false;
+	}
+	command = window->cmd;
+	window->cmd = "";
+	return true;
+}
+
+bool UI_RunLegacyWindowAction( idUserInterface *gui, const char *windowName, bool back, idStr &command ) {
+	idUserInterfaceLocal *legacy = dynamic_cast<idUserInterfaceLocal *>( gui );
+	if ( legacy == NULL ) {
+		command.Clear();
+		return false;
+	}
+	return legacy->RunWindowAction( windowName, back, command );
+}
+
+bool idUserInterfaceLocal::HasWindow( const char *windowName ) const {
+	return desktop != NULL && windowName != NULL && windowName[ 0 ] != '\0' && desktop->FindChildByName( windowName ) != NULL;
+}
+
+bool UI_LegacyWindowExists( idUserInterface *gui, const char *windowName ) {
+	const idUserInterfaceLocal *legacy = dynamic_cast<idUserInterfaceLocal *>( gui );
+	return legacy != NULL && legacy->HasWindow( windowName );
+}
+
+bool idUserInterfaceLocal::HasNamedEvent( const char *eventName ) const {
+	return desktop != NULL && eventName != NULL && eventName[ 0 ] != '\0' && desktop->HasNamedEvent( eventName );
+}
+
+bool UI_LegacyNamedEventExists( idUserInterface *gui, const char *eventName ) {
+	const idUserInterfaceLocal *legacy = dynamic_cast<idUserInterfaceLocal *>( gui );
+	return legacy != NULL && legacy->HasNamedEvent( eventName );
+}
+
+bool idUserInterfaceLocal::GetTextInputState( idRectangle &area, float &cursorOffset ) const {
+	if ( desktop == NULL ) {
+		return false;
+	}
+	idEditWindow *edit = dynamic_cast<idEditWindow *>( desktop->GetFocusedChild() );
+	idRectangle candidateArea;
+	float candidateOffset = 0.0f;
+	if ( edit == NULL || !edit->GetTextInputState( candidateArea, candidateOffset ) ) {
+		return false;
+	}
+	area = candidateArea;
+	cursorOffset = candidateOffset;
+	return true;
 }
 
 /*
@@ -64,30 +832,50 @@ bool UI_IsInWorldGuiRendering( void ) {
 */
 
 void idUserInterfaceManagerLocal::Init() {
+	nativePresenceThread = std::this_thread::get_id();
+	RetainedUI_Init();
+	cmdSystem->AddCommand("ui_hudTest",[](const idCmdArgs& args) { uiManagerLocal.HudTest(args); },CMD_FL_SYSTEM|CMD_FL_CHEAT,"inspect or drive HUD GUI state without device input");
+	cmdSystem->AddCommand("ui_observeLegacy",UI_ObserveLegacy,CMD_FL_SYSTEM,"observe exact legacy parse/fixup/alpha decisions without activation");
+	cmdSystem->AddCommand("chatHistory", idChatWindow::History_f, CMD_FL_SYSTEM, "browse open chat: up, down, top, bottom, status");
+	cmdSystem->AddCommand("chatInput", idChatWindow::Input_f, CMD_FL_SYSTEM, "set the open chat entry without device input, the caret at its end");
+	cmdSystem->AddCommand("chatCaret", idChatWindow::Input_f, CMD_FL_SYSTEM, "move the open chat entry's caret to a byte offset without device input");
 	screenRect = idRectangle(0, 0, 640, 480);
 	dc.Init();
 }
 
 void idUserInterfaceManagerLocal::Shutdown() {
-	guis.DeleteContents( true );
-	demoGuis.DeleteContents( true );
+	ClearHudPrimitives();
+	cmdSystem->RemoveCommand("ui_hudTest");
+	cmdSystem->RemoveCommand("chatHistory");
+	cmdSystem->RemoveCommand("chatInput");
+	cmdSystem->RemoveCommand("chatCaret");
+	cmdSystem->RemoveCommand("ui_observeLegacy");
+	idChatWindow::Reset();
+	// Destruction unregisters from every list. Take one live allocation at a
+	// time instead of iterating a container that its destructor will mutate.
+	while ( allocations.Num() > 0 ) {
+		delete allocations[ allocations.Num() - 1 ];
+	}
+	RetainedUI_Shutdown();
 	dc.Shutdown();
 }
 
 void idUserInterfaceManagerLocal::Touch( const char *name ) {
 	idUserInterface *gui = Alloc();
-	gui->InitFromFile( name );
-//	delete gui;
+	if ( !gui->InitFromFile( name ) ) {
+		delete gui;
+	}
 }
 
 void idUserInterfaceManagerLocal::WritePrecacheCommands( idFile *f ) {
 
 	int c = guis.Num();
 	for( int i = 0; i < c; i++ ) {
-		char	str[1024];
-		sprintf( str, "touchGui %s\n", guis[i]->Name() );
-		common->Printf( "%s", str );
-		f->Printf( "%s", str );
+		idStr command = "touchGui ";
+		command += guis[i]->Name();
+		command += "\n";
+		common->Printf( "%s", command.c_str() );
+		f->Printf( "%s", command.c_str() );
 	}
 }
 
@@ -103,22 +891,19 @@ void idUserInterfaceManagerLocal::SetAspectCorrection( bool enabled ) {
 }
 
 void idUserInterfaceManagerLocal::BeginLevelLoad() {
+	RetainedUI_PrecacheModelWorlds();
+	ClearHudPrimitives();
+	idRetainedHud::Precache();
 	int c = guis.Num();
 	for ( int i = 0; i < c; i++ ) {
-		if ( (guis[ i ]->GetDesktop()->GetFlags() & WIN_MENUGUI) == 0 ) {
+		if ( !guis[ i ]->IsMenuGui() ) {
 			guis[ i ]->ClearRefs();
-			/*
-			delete guis[ i ];
-			guis.RemoveIndex( i );
-			i--; c--;
-			*/
 		}
 	}
 }
 
 void idUserInterfaceManagerLocal::EndLevelLoad() {
-	int c = guis.Num();
-	for ( int i = 0; i < c; i++ ) {
+	for ( int i = 0; i < guis.Num(); ) {
 		if ( guis[i]->GetRefs() == 0 ) {
 			//common->Printf( "purging %s.\n", guis[i]->GetSourceFile() );
 
@@ -133,27 +918,70 @@ void idUserInterfaceManagerLocal::EndLevelLoad() {
 			}
 			if ( remove ) {
 				delete guis[ i ];
-				guis.RemoveIndex( i );
-				i--; c--;
+				continue;
 			}
 		}
+		i++;
 	}
+
+	// icons registered before their image was resident can be sized now
+	dc.SizeIcons();
 }
 
+// RAVEN BEGIN
+// bdube: embedded icons
+// The game registers the inline text icons it needs ( weapon and means-of-death
+// obituary icons, team/ready/voice icons ) from "icon <code>" spawn args while
+// caching entity def media, so this has to reach the device context or every
+// ^i escape in game text silently draws nothing.
+void idUserInterfaceManagerLocal::RegisterIcon( const char *code, const char *shader, int x, int y, int w, int h ) {
+	dc.RegisterIcon( code, shader, x, y, w, h );
+}
+// RAVEN END
+
 void idUserInterfaceManagerLocal::Reload( bool all ) {
+	ReloadGuis( all, false );
+}
+
+// A map change's reload, after BeginLevelLoad: every GUI re-initializes so
+// that the media it references resolve again inside the load, whose purge
+// defaulted them. A GUI that can keep what it has loaded does so instead.
+void idUserInterfaceManagerLocal::ReloadForLevelLoad() {
+	ReloadGuis( true, true );
+}
+
+void idUserInterfaceManagerLocal::ReloadGuis( bool all, bool levelLoad ) {
 	ID_TIME_T ts;
 
-	int c = guis.Num();
-	for ( int i = 0; i < c; i++ ) {
+	const idList<idUserInterfaceManaged*> reloadGuis = guis;
+	idList<unsigned long long> identities;
+	for ( int i = 0; i < reloadGuis.Num(); i++ ) {
+		identities.Append( reloadGuis[ i ]->allocationId );
+	}
+	for ( int i = 0; i < reloadGuis.Num(); i++ ) {
+		idUserInterfaceManaged *gui = reloadGuis[ i ];
+		if ( guis.Find( gui ) == NULL || gui->allocationId != identities[ i ] ) {
+			continue;
+		}
+		if ( levelLoad && gui->KeepForLevelLoad() ) {
+			continue;
+		}
+		// InitFromFile may replace the owned source string while parsing.
+		const idStr sourcePath = gui->GetSourceFile();
 		if ( !all ) {
-			fileSystem->ReadFile( guis[i]->GetSourceFile(), NULL, &ts );
-			if ( ts <= guis[i]->GetTimeStamp() ) {
+			fileSystem->ReadFile( sourcePath, NULL, &ts );
+			if ( ts <= gui->GetTimeStamp() ) {
 				continue;
 			}
 		}
 
-		guis[i]->InitFromFile( guis[i]->GetSourceFile() );
-		common->Printf( "reloading %s.\n", guis[i]->GetSourceFile() );
+		const bool wasActive = gui->Active();
+		gui->InitFromFile( sourcePath );
+		if ( guis.Find( gui ) != NULL && gui->allocationId == identities[ i ] && wasActive ) {
+			// Restore onActivate setup after language reload, including menu fades.
+			gui->Activate( true, common->GetPresentationTime() );
+		}
+		common->Printf( "reloading %s.\n", sourcePath.c_str() );
 	}
 }
 
@@ -164,15 +992,15 @@ void idUserInterfaceManagerLocal::ListGuis() const {
 	int copies = 0;
 	int unique = 0;
 	for ( int i = 0; i < c; i++ ) {
-		idUserInterfaceLocal *gui = guis[i];
+		idUserInterfaceManaged *gui = guis[i];
 		size_t sz = gui->Size();
-		bool isUnique = guis[i]->interactive;
+		bool isUnique = gui->IsInteractive();
 		if ( isUnique ) {
 			unique++;
 		} else {
 			copies++;
 		}
-		common->Printf( "%6.1fk %4i (%s) %s ( %i transitions )\n", sz / 1024.0f, guis[i]->GetRefs(), isUnique ? "unique" : "copy", guis[i]->GetSourceFile(), guis[i]->desktop->NumTransitions() );
+		common->Printf( "%6.1fk %4i (%s) %s ( %i transitions )\n", sz / 1024.0f, gui->GetRefs(), isUnique ? "unique" : "copy", gui->GetSourceFile(), gui->NumTransitions() );
 		total += sz;
 	}
 	common->Printf( "===========\n  %i total Guis ( %i copies, %i unique ), %.2f total Mbytes", c, copies, unique, total / ( 1024.0f * 1024.0f ) );
@@ -188,16 +1016,15 @@ bool idUserInterfaceManagerLocal::CheckGui( const char *qpath ) const {
 }
 
 idUserInterface *idUserInterfaceManagerLocal::Alloc( void ) const {
-	return new idUserInterfaceLocal();
+	return new idUserInterfaceDeferred();
 }
 
 void idUserInterfaceManagerLocal::DeAlloc( idUserInterface *gui ) {
 	if ( gui ) {
-		int c = guis.Num();
+		int c = allocations.Num();
 		for ( int i = 0; i < c; i++ ) {
-			if ( guis[i] == gui ) {
-				delete guis[i];
-				guis.RemoveIndex( i );
+			if ( allocations[i] == gui ) {
+				delete allocations[i];
 				return;
 			}
 		}
@@ -205,12 +1032,15 @@ void idUserInterfaceManagerLocal::DeAlloc( idUserInterface *gui ) {
 }
 
 idUserInterface *idUserInterfaceManagerLocal::FindGui( const char *qpath, bool autoLoad, bool needUnique, bool forceNOTUnique ) {
+	if ( qpath == NULL || qpath[ 0 ] == '\0' ) {
+		return NULL;
+	}
 	int c = guis.Num();
 
 	for ( int i = 0; i < c; i++ ) {
-		idUserInterfaceLocal *gui = guis[i];
 		if ( !idStr::Icmp( guis[i]->GetSourceFile(), qpath ) ) {
-			if ( !forceNOTUnique && ( needUnique || guis[i]->IsInteractive() ) ) {
+			// Retail keeps unique GUI instances isolated even when state changes make them temporarily noninteractive.
+			if ( !forceNOTUnique && ( needUnique || guis[i]->IsInteractive() || guis[i]->IsUniqued() ) ) {
 				break;
 			}
 			guis[i]->AddRef();
@@ -219,9 +1049,12 @@ idUserInterface *idUserInterfaceManagerLocal::FindGui( const char *qpath, bool a
 	}
 
 	if ( autoLoad ) {
-		idUserInterface *gui = Alloc();
-		if ( gui->InitFromFile( qpath ) ) {
+		// Editors use concrete legacy access for .guied documents. Only pathless
+		// Alloc needs a deferred identity; named loads select their backend now.
+		idUserInterface *gui = UI_CreateForPath( qpath );
+		if ( gui != NULL && gui->InitFromFile( qpath ) ) {
 			gui->SetUniqued( forceNOTUnique ? false : needUnique );
+			openQ4_UpdateInitialization();
 			return gui;
 		} else {
 			delete gui;
@@ -231,6 +1064,9 @@ idUserInterface *idUserInterfaceManagerLocal::FindGui( const char *qpath, bool a
 }
 
 idUserInterface *idUserInterfaceManagerLocal::FindDemoGui( const char *qpath ) {
+	if ( qpath == NULL || qpath[ 0 ] == '\0' ) {
+		return NULL;
+	}
 	int c = demoGuis.Num();
 	for ( int i = 0; i < c; i++ ) {
 		if ( !idStr::Icmp( demoGuis[i]->GetSourceFile(), qpath ) ) {
@@ -248,6 +1084,71 @@ void idUserInterfaceManagerLocal::FreeListGUI( idListGUI *listgui ) {
 	delete listgui;
 }
 
+void idUserInterfaceManagerLocal::RegisterAllocation( idUserInterfaceManaged *gui ) {
+	if (nextAllocationId == (std::numeric_limits<unsigned long long>::max)()) {
+		common->FatalError("GUI allocation identity exhausted"); return;
+	}
+	gui->allocationId = ++nextAllocationId;
+	allocations.AddUnique( gui );
+}
+
+void idUserInterfaceManagerLocal::RegisterGui( idUserInterfaceManaged *gui ) {
+	guis.AddUnique( gui );
+	UpdateAlwaysThinkGui( gui );
+}
+
+void idUserInterfaceManagerLocal::RegisterDemoGui( idUserInterfaceManaged *gui ) {
+	demoGuis.AddUnique( gui );
+}
+
+void idUserInterfaceManagerLocal::UnregisterGui( idUserInterfaceManaged *gui ) {
+	openq4::NativeInputBeforeUiChange(gui->allocationId);
+	RemoveAlwaysThinkGui( gui );
+	guis.Remove( gui );
+	demoGuis.Remove( gui );
+	allocations.Remove( gui );
+}
+
+void idUserInterfaceManagerLocal::UpdateAlwaysThinkGui( idUserInterfaceManaged *gui ) {
+	if ( gui == NULL || guis.Find( gui ) == NULL || !gui->AlwaysThink() ) {
+		RemoveAlwaysThinkGui( gui );
+		return;
+	}
+
+	alwaysThinkGUIs.AddUnique( gui );
+}
+
+void idUserInterfaceManagerLocal::RemoveAlwaysThinkGui( idUserInterfaceManaged *gui ) {
+	if ( gui == NULL ) {
+		return;
+	}
+
+	alwaysThinkGUIs.Remove( gui );
+}
+
+void idUserInterfaceManagerLocal::RunAlwaysThinkGUIs( int time ) {
+	// A callback can remove a view. Visit the starting set once, checking
+	// membership and allocation identity before dereferencing it; a new view
+	// at a deleted object's address still waits until the next tick.
+	const idList<idUserInterfaceManaged*> thinkers = alwaysThinkGUIs;
+	idList<unsigned long long> identities;
+	for ( int i = 0; i < thinkers.Num(); i++ ) {
+		identities.Append( thinkers[ i ]->allocationId );
+	}
+	for ( int i = 0; i < thinkers.Num(); i++ ) {
+		idUserInterfaceManaged *gui = thinkers[i];
+		if ( gui == NULL || guis.Find( gui ) == NULL || gui->allocationId != identities[ i ] ) {
+			continue;
+		}
+		if ( !gui->AlwaysThink() ) {
+			RemoveAlwaysThinkGui( gui );
+			continue;
+		}
+
+		gui->RunTimeEvents( time );
+	}
+}
+
 /*
 ===============================================================================
 
@@ -256,7 +1157,10 @@ void idUserInterfaceManagerLocal::FreeListGUI( idListGUI *listgui ) {
 ===============================================================================
 */
 
-idUserInterfaceLocal::idUserInterfaceLocal() {
+idUserInterfaceLocal::idUserInterfaceLocal( bool managed ) : idUserInterfaceManaged( managed ) {
+	retainedHud = NULL;
+	remastered = NULL;
+	chatWindow = NULL;
 	cursorX = cursorY = 0.0;
 	desktop = NULL;
 	loading = false;
@@ -264,14 +1168,18 @@ idUserInterfaceLocal::idUserInterfaceLocal() {
 	interactive = false;
 	uniqued = false;
 	initialized = false;
+	controllerNavigation = false;
 	bindHandler = NULL;
 	lightColorVar = NULL;
 	//so the reg eval in gui parsing doesn't get bogus values
 	time = 0;
-	refs = 1;
+	timeStamp = 0;
 }
 
 idUserInterfaceLocal::~idUserInterfaceLocal() {
+	delete retainedHud;
+	delete remastered;
+	delete essentialHud; essentialHud = nullptr;
 	delete desktop;
 	desktop = NULL;
 }
@@ -292,36 +1200,63 @@ bool idUserInterfaceLocal::IsInteractive() const {
 }
 
 void idUserInterfaceLocal::SetInteractive(bool interactive) {
+	evaluatedHudValid = false;
 	this->interactive = interactive;
 }
 
+// Everything the HUD presentations derive from the dictionary (what was last
+// written to it, the evaluated-state cache, the pickup lines) and, when the
+// source changes, from the source (its routes).
+void idUserInterfaceLocal::ResetHudPresentation( bool sourceChanged ) {
+	evaluatedHudValid = false;
+	legacyPublishedValid = false;
+	publishedFrameValid = false;
+	legacyPickups[0] = LegacyPickupLine();
+	legacyPickups[1] = LegacyPickupLine();
+	legacyPickupNewest = 0;
+	if ( sourceChanged ) {
+		hudRoute = HudRoute();
+	}
+}
+
 bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool cache ) { 
+	ResetHudPresentation( true );
+	evaluatedHudState.Clear();
+	delete retainedHud; retainedHud = NULL;
+	delete remastered;
+	delete essentialHud; essentialHud = nullptr; remastered = NULL;
 
 	if ( !( qpath && *qpath ) ) { 
-		// FIXME: Memory leak!!
 		return false;
 	}
 
-	int sz = sizeof( idWindow );
-	sz = sizeof( idSimpleWindow );
 	loading = true;
+	levelLoadCache.reset( new LegacyLevelLoadCache );
+	idDeclReferenceObserver mediaObserver( levelLoadCache.get(), LegacyLevelLoadCache::Referenced );
 
 	if ( rebuild ) {
 		delete desktop;
+		chatWindow = NULL;
 		desktop = new idWindow( this );
 	} else if ( desktop == NULL ) {
 		desktop = new idWindow( this );
 	}
 
 	source = qpath;
+	// openQ4: The Awakening's HUDs are parsed from openQ4's laid-out
+	// definitions of them; a GUI keeps the name the game and its saves know.
+	definition = literalDefinition ? qpath : idLegacyHudLayout::DefinitionFor( qpath );
 	state.Set( "text", "Test Text!" );
 
+	bool parseOk = true;
 	idParser src( LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT );
+
+	idParserSourceObserver sourceObserver( &src, levelLoadCache.get(), LegacyLevelLoadCache::SourceRead );
 
 	//Load the timestamp so reload guis will work correctly
 	fileSystem->ReadFile(qpath, NULL, &timeStamp);
 
-	src.LoadFile( qpath );
+	if (!UI_LegacyObservationLoad(this,src,qpath)) src.LoadFile( definition );
 
 	if ( src.IsLoaded() ) {
 		idToken token;
@@ -332,6 +1267,8 @@ bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool c
 				if ( desktop->Parse( &src, rebuild ) ) {
 					desktop->SetFlag( WIN_DESKTOP );
 					desktop->FixupParms();
+				} else {
+					parseOk = false;
 				}
 				continue;
 			}
@@ -347,15 +1284,12 @@ bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool c
 					  idStr::Icmp( token, "bindKeyDef" ) == 0 ) {
 				const idStr childDefType = token;
 				idToken childName;
-				idWindow *child = NULL;
-
 				desktop->SetDC( &uiManagerLocal.dc );
 				if ( !src.ExpectTokenType( TT_NAME, 0, &childName ) ) {
 					continue;
 				}
-
 				src.UnreadToken( &childName );
-				child = new idWindow( &uiManagerLocal.dc, this );
+				idWindow *child = new idWindow( &uiManagerLocal.dc, this );
 				child->SetWindowDefType( childDefType.c_str() );
 				if ( child->Parse( &src, rebuild ) ) {
 					desktop->SetFlag( WIN_DESKTOP );
@@ -385,11 +1319,55 @@ bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool c
 		common->Warning( "Couldn't load gui: '%s'", qpath );
 	}
 
+	// Replace only the two stock chat surfaces. Installing the native control
+	// here also supports retail PK4 GUIs without shipping replacement GUI art
+	// or depending on openQ4's optional HUD scripts.
+	summaryExitKey = !idStr::Icmp(qpath, "guis/summary.gui") ? -1 : -2;
+	const bool chatInput = !idStr::Icmp(qpath, "guis/mpmsgmode.gui");
+	const bool chatHud = !idStr::Icmp(qpath, "guis/mphud.gui");
+	if ((chatInput || chatHud) && chatWindow == NULL) {
+		drawWin_t *legacy = desktop->FindChildByName(chatInput ? "MainWindow" : "p_history");
+		if (legacy != NULL) {
+			idWinVar *visibility = legacy->win != NULL ? legacy->win->GetWinVarByName("visible") : legacy->simp->GetWinVarByName("visible");
+			if (visibility != NULL) { visibility->Set("0"); visibility->SetEval(false); }
+		}
+		chatWindow = new idChatWindow(&uiManagerLocal.dc, this, chatInput);
+		desktop->InsertChild(chatWindow, NULL);
+		chatWindow->SetParent(desktop);
+		chatWindow->FixupParms();
+		if (chatInput && active) {
+			idStr ignored;
+			chatWindow->Activate(true, ignored);
+			desktop->SetFocus(chatWindow, false);
+		}
+	}
+	// The Remastered layout's document loads with its stock HUD, inside the
+	// level load, so the first gameplay frame draws it without loading it
+	// then: the documents the level's prefetch expects, since a HUD a level
+	// only precaches never draws. A save restore keeps the load for the first draw.
+	if ( const char *document = idRemasteredHud::DocumentFor( source.c_str() );
+			document != NULL && idRemasteredHud::Enabled() && src.IsLoaded() && parseOk && UI_RetainedPrefetched( document ) ) {
+		remastered = new idRemasteredHud( document );
+		remastered->Preload( source.c_str() );
+	}
+	if ( const char *document = idRemasteredHud::AirDocumentFor( source.c_str() );
+            document && !idRemasteredHud::Enabled() && src.IsLoaded() && parseOk ) {
+        essentialHud = new idRemasteredHud( document );
+        essentialHud->Preload( source.c_str() );
+    }
+	UI_LegacyObservationLoaded(this,src.IsLoaded());
+	levelLoadCache->Finish( src.IsLoaded() && parseOk && rebuild );
+	if (levelLoadCache->valid && desktop->CanKeepForLevelLoad()) {
+		// Restore authored window/script values, not a previous menu subpage.
+		// The dictionary remains live, exactly as it does across InitFromFile.
+		desktop->CaptureForLevelLoad();
+		idFile_Memory defaults;
+		desktop->WriteToSaveGame(&defaults);
+		levelLoadCache->windowDefaults.assign(defaults.GetDataPtr(), defaults.Length());
+	}
 	interactive = desktop->Interactive();
 
-	if ( uiManagerLocal.guis.Find( this ) == NULL ) {
-		uiManagerLocal.guis.Append( this );
-	}
+	RegisterLoaded();
 
 	loading = false;
 	lightColorVar = NULL;
@@ -398,9 +1376,46 @@ bool idUserInterfaceLocal::InitFromFile( const char *qpath, bool rebuild, bool c
 	return true; 
 }
 
+bool idUserInterfaceLocal::KeepForLevelLoad() {
+    if (!desktop || !levelLoadCache || !desktop->CanKeepForLevelLoad() || !levelLoadCache->Unchanged()) return false;
+    // Re-find parse-time references before touching live pointers: a purged
+    // declaration retains its identity but its contents have been defaulted.
+    levelLoadCache->Reference();
+    state.Set("text", "Test Text!");
+    state.Set("name", source.c_str());
+    idFile_Memory defaults("GUI level-load defaults", levelLoadCache->windowDefaults.c_str(),
+        static_cast<int>(levelLoadCache->windowDefaults.size()));
+    desktop->ReadFromSaveGame(&defaults);
+    desktop->RefreshForLevelLoad();
+    // The windows are back at their authored defaults, as a reload leaves
+    // them. The Remastered peers were joined to the previous map's windows:
+    // they join again at their next draw, and the pickup lines start empty.
+    ResetHudPresentation( false );
+    evaluatedHudState.Clear();
+    if ( remastered ) { remastered->Rejoin(); }
+    if ( essentialHud ) { essentialHud->Rejoin(); }
+    // Preserve the parsed tree, but repeat the backend initialization and
+    // activation work that a map-change reload performed.
+    initialized = false;
+    lightColorVar = NULL;
+    interactive = desktop->Interactive();
+    if (active) Activate(true, common->GetPresentationTime());
+    bindHandler = NULL;
+    pendingCmd.Clear();
+    returnCmd.Clear();
+    common->Printf("STOCK_GUI_KEPT %s\n", source.c_str());
+    return true;
+}
+
 const char *idUserInterfaceLocal::HandleEvent( const sysEvent_t *event, int _time, bool *updateVisuals ) {
+	evaluatedHudValid = false;
 
 	time = _time;
+
+	const bool controllerKey = event->evType == SE_KEY && event->evValue >= K_JOY1 && event->evValue <= K_JOY32;
+	if (chatWindow != NULL && chatWindow->IsInput() && active && !controllerKey) {
+		return chatWindow->HandleEvent(event, updateVisuals);
+	}
 
 	if ( bindHandler && event->evType == SE_KEY && event->evValue2 == 1 ) {
 		const char *ret = bindHandler->HandleEvent( event, updateVisuals );
@@ -409,16 +1424,8 @@ const char *idUserInterfaceLocal::HandleEvent( const sysEvent_t *event, int _tim
 	}
 
 	if ( event->evType == SE_MOUSE ) {
-		cursorX += event->evValue;
-		cursorY += event->evValue2;
-
-		float minX = 0.0f;
-		float maxX = static_cast<float>( VIRTUAL_WIDTH );
-		float minY = 0.0f;
-		float maxY = static_cast<float>( VIRTUAL_HEIGHT );
-		uiManagerLocal.dc.GetCursorBounds( minX, maxX, minY, maxY );
-		cursorX = idMath::ClampFloat( minX, maxX, cursorX );
-		cursorY = idMath::ClampFloat( minY, maxY, cursorY );
+		SetCursor( cursorX + static_cast<float>( event->evValue ),
+			cursorY + static_cast<float>( event->evValue2 ) );
 	}
 
 	if ( desktop ) {
@@ -429,17 +1436,27 @@ const char *idUserInterfaceLocal::HandleEvent( const sysEvent_t *event, int _tim
 }
 
 void idUserInterfaceLocal::HandleNamedEvent ( const char* eventName ) {
-	desktop->RunNamedEvent( eventName );
-}
-
-void idUserInterfaceLocal::CallStartup( void ) {
-	if ( desktop != NULL ) {
-		desktop->RunScript( idWindow::ON_STARTUP );
-		desktop->RunNamedEvent( "onStartup" );
+	evaluatedHudValid = false;
+	// The stock interface's Remastered pickup lines read their slots in the event.
+	if ( !idStr::Icmp( eventName, "itemPickup" ) ) {
+		PublishLegacyPickup();
 	}
+	desktop->RunNamedEvent( eventName );
+	// The Remastered layout answers the same events as the stock windows,
+	// including those sent before its first frame, which it replays.
+	if ( !remastered ) {
+		const char *document = ResolveHudRoute().document;
+		if ( document && idRemasteredHud::Enabled() ) {
+			remastered = new idRemasteredHud( document );
+		}
+	}
+	if ( remastered ) {
+		remastered->ForwardEvent( eventName );
+	}
+	if ( essentialHud ) { essentialHud->ForwardEvent( eventName ); }
 }
 
-void idUserInterfaceLocal::Redraw( int _time ) {
+void idUserInterfaceLocal::Redraw( int _time, bool useAspectCorrection ) {
 	SetStateInt( "mousex", (int)CursorX() );
 	SetStateInt( "mousey", (int)CursorY() );
 	if ( r_skipGuiShaders.GetInteger() > 5 ) {
@@ -447,14 +1464,69 @@ void idUserInterfaceLocal::Redraw( int _time ) {
 	}
 	if ( !loading && desktop ) {
 		time = _time;
+		renderSystem->SetFrameShaderTime( _time );
 		if ( !initialized ) {
 			initialized = true;
 			desktop->Init();
 		}
 
-		const bool aspectCorrect = ui_aspectCorrection.GetBool() && !UI_IsInWorldGuiRendering();
+		const bool aspectCorrect = useAspectCorrection && ui_aspectCorrection.GetBool();
 		uiManagerLocal.SetAspectCorrection( aspectCorrect );
 		uiManagerLocal.SetSize( desktop->forceAspectWidth, desktop->forceAspectHeight );
+		float xExpand = 0.0f;
+		float yExpand = 0.0f;
+		uiManagerLocal.dc.GetVirtualScreenExpansion( desktop->forceAspectWidth, desktop->forceAspectHeight, xExpand, yExpand );
+		// A HUD's layout setting, which its stock windows follow (idLegacyHudLayout).
+		PublishLegacyHud( xExpand, yExpand );
+		// openQ4: the match summary's way back names the active device's key
+		// (ui-visual-design.md 14.14): Escape, or a controller's east button,
+		// which menus take as Escape.
+		if ( summaryExitKey != -2 ) {
+			const int exitKey = idKeyInput::LastInputWasController() ? K_JOY4 : K_ESCAPE;
+			if ( exitKey != summaryExitKey ) {
+				summaryExitKey = exitKey;
+				idStr glyph = va( "^ik%02X", exitKey );
+				SetStateString( "oq4_summary_exit", va( common->GetLanguageDict()->GetString( "#str_231257" ), glyph.c_str() ) );
+			}
+		}
+
+		idRectangle cinematicTopBar;
+		idRectangle cinematicBottomBar;
+		idRectangle cinematicLeftBar;
+		idRectangle cinematicRightBar;
+		idRectangle cinematicVisibleArea;
+		uiManagerLocal.dc.GetCinematic16x9Bars( desktop->forceAspectWidth, desktop->forceAspectHeight, cinematicTopBar, cinematicBottomBar, cinematicLeftBar, cinematicRightBar, cinematicVisibleArea );
+		// Physical aspect of the region the authored canvas covers.  The expanded
+		// logical area always maps onto the whole 2D viewport, so this is the only
+		// value a gui needs to size cinematic framing that has to look the same on
+		// every display, and it stays correct when aspect correction is disabled
+		// and the canvas is stretched instead of expanded.
+		const float canvasAspect = uiManagerLocal.dc.GetCanvasAspect();
+		// These follow the view's shape, which changes with a resize, not with a
+		// frame: every GUI drawn wrote all 23 of them to its dictionary every
+		// frame. They are written when one changes, or when the dictionary was
+		// replaced (ResetHudPresentation).
+		const idRectangle *const frameRects[5] = { &cinematicTopBar, &cinematicBottomBar, &cinematicLeftBar, &cinematicRightBar, &cinematicVisibleArea };
+		float frame[23] = { xExpand, yExpand, canvasAspect };
+		for ( int i = 0; i < 5; i++ ) {
+			frame[3 + 4 * i] = frameRects[i]->x;
+			frame[4 + 4 * i] = frameRects[i]->y;
+			frame[5 + 4 * i] = frameRects[i]->w;
+			frame[6 + 4 * i] = frameRects[i]->h;
+		}
+		if ( !publishedFrameValid || memcmp( frame, publishedFrame, sizeof( frame ) ) != 0 ) {
+			publishedFrameValid = true;
+			memcpy( publishedFrame, frame, sizeof( frame ) );
+			SetStateFloat( "virtual_screen_x_expand", xExpand );
+			SetStateFloat( "virtual_screen_y_expand", yExpand );
+			SetStateFloat( "virtual_screen_aspect", uiManagerLocal.dc.GetCanvasAspect() );
+			SetStateRectangleComponents( this, { "cinematic_bar_top_x", "cinematic_bar_top_y", "cinematic_bar_top_w", "cinematic_bar_top_h" }, cinematicTopBar );
+			SetStateRectangleComponents( this, { "cinematic_bar_bottom_x", "cinematic_bar_bottom_y", "cinematic_bar_bottom_w", "cinematic_bar_bottom_h" }, cinematicBottomBar );
+			SetStateRectangleComponents( this, { "cinematic_bar_left_x", "cinematic_bar_left_y", "cinematic_bar_left_w", "cinematic_bar_left_h" }, cinematicLeftBar );
+			SetStateRectangleComponents( this, { "cinematic_bar_right_x", "cinematic_bar_right_y", "cinematic_bar_right_w", "cinematic_bar_right_h" }, cinematicRightBar );
+			SetStateRectangleComponents( this, { "cinematic_visible_area_x", "cinematic_visible_area_y", "cinematic_visible_area_w", "cinematic_visible_area_h" }, cinematicVisibleArea );
+		}
+
 		if ( gui_debugScript.GetInteger() > 4 ) {
 			static int lastDebugRedrawTime = -10000;
 			if ( _time - lastDebugRedrawTime >= 250 ) {
@@ -469,13 +1541,31 @@ void idUserInterfaceLocal::Redraw( int _time ) {
 				lastDebugRedrawTime = _time;
 			}
 		}
-		uiManagerLocal.dc.PushClipRect( uiManagerLocal.screenRect );
-		desktop->Redraw( 0, 0 );
-		uiManagerLocal.dc.PopClipRect();
+		if ( useAspectCorrection && DrawRemasteredHud( _time ) ) return;
+		evaluatedHudValid = false;
+		if ( !useAspectCorrection || !DrawRetainedHud() ) {
+			// The stock interface's HUD opacity and scale (idLegacyHudLayout):
+			// the windows start their scale groups from the centre.
+			uiManagerLocal.dc.SetDrawOpacity( useAspectCorrection ? legacyOpacity : 1.0f );
+			legacyGroupX = legacyGroupY = 0;
+			uiManagerLocal.dc.PushClipRect( uiManagerLocal.screenRect );
+			desktop->Redraw( 0, 0 );
+			uiManagerLocal.dc.PopClipRect();
+			uiManagerLocal.dc.SetDrawOpacity( 1.0f );
+			uiManagerLocal.dc.SetGroupScale( 0.0f, 0.0f, 1.0f );
+		}
+		if ( useAspectCorrection ) DrawEssentialHud( _time );
 	}
 }
 
 void idUserInterfaceLocal::DrawCursor() {
+	if ( controllerNavigation ) {
+		return;
+	}
+	// A finger points for itself: touch draws no cursor (section 13.6).
+	if ( idKeyInput::LastPointerWasTouch() ) {
+		return;
+	}
 	if ( !desktop || desktop->GetFlags() & WIN_MENUGUI ) {
 		uiManagerLocal.dc.DrawCursor(&cursorX, &cursorY, 15.0f );
 	} else {
@@ -489,47 +1579,93 @@ const idDict &idUserInterfaceLocal::State() const {
 
 void idUserInterfaceLocal::DeleteStateVar( const char *varName ) {
 	state.Delete( varName );
+	if ( remastered ) {
+		remastered->ForwardDelete( varName );
+	}
+	if ( essentialHud ) { essentialHud->ForwardDelete( varName ); }
+}
+
+// Game HUDs republish many unchanged fields between simulation tics. Preserve
+// publication to the replacement (events may have changed its value), while
+// avoiding a redundant pooled-string allocation and release in the stock dict.
+static const char *SetGuiDictionaryValue( idDict &state, const char *name, const char *value ) {
+	const idKeyValue *entry = state.FindKey( name );
+	if ( entry && entry->GetValue() == value ) return entry->GetValue().c_str();
+	state.Set( name, value );
+	// Updating an existing entry keeps its address. Its old pooled value may
+	// have supplied name, so do not look up that potentially freed string again.
+	return entry ? entry->GetValue().c_str() : state.GetString( name );
 }
 
 void idUserInterfaceLocal::SetStateString( const char *varName, const char *value ) {
-	const char *oldValue = state.GetString( varName, "" );
-	state.Set( varName, value );
+	// Log before storing: Set frees the pooled old string once nothing else
+	// shares it, and the caller's pointers may point into that string too.
 	if ( gui_debugScript.GetInteger() > 3 ) {
+		const char *oldValue = state.GetString( varName, "" );
 		const char *newValue = value ? value : "";
 		if ( idStr::Icmp( oldValue, newValue ) != 0 ) {
 			common->Printf( "GUI: state %s = \"%s\" (was \"%s\") gui=%s\n", varName, newValue, oldValue, source.c_str() );
 		}
 	}
+	const char *stored = SetGuiDictionaryValue( state, varName, value );
+	if ( remastered ) {
+		remastered->ForwardState( varName, stored );
+	}
+	if ( essentialHud ) { essentialHud->ForwardState( varName, stored ); }
 }
 
 void idUserInterfaceLocal::SetStateBool( const char *varName, const bool value ) {
-	bool oldValue = state.GetBool( varName, "0" );
-	state.SetBool( varName, value );
-	if ( gui_debugScript.GetInteger() > 3 ) {
+	const bool debug = gui_debugScript.GetInteger() > 3;
+	const bool oldValue = debug ? state.GetBool( varName, "0" ) : false;
+	const char *stored = SetGuiDictionaryValue( state, varName, value ? "1" : "0" );
+	if ( debug ) {
 		if ( oldValue != value ) {
 			common->Printf( "GUI: state %s = %d (was %d) gui=%s\n", varName, value ? 1 : 0, oldValue ? 1 : 0, source.c_str() );
 		}
 	}
+	if ( remastered ) {
+		remastered->ForwardState( varName, stored );
+	}
+	if ( essentialHud ) { essentialHud->ForwardState( varName, stored ); }
 }
 
 void idUserInterfaceLocal::SetStateInt( const char *varName, const int value ) {
-	int oldValue = state.GetInt( varName, "0" );
-	state.SetInt( varName, value );
-	if ( gui_debugScript.GetInteger() > 3 ) {
+	const bool debug = gui_debugScript.GetInteger() > 3;
+	const int oldValue = debug ? state.GetInt( varName, "0" ) : 0;
+	char text[64];
+	const char *stored = SetGuiDictionaryValue( state, varName, openq4::ui::GuiStateInteger( value, text ) );
+	if ( debug ) {
 		if ( oldValue != value ) {
 			common->Printf( "GUI: state %s = %d (was %d) gui=%s\n", varName, value, oldValue, source.c_str() );
 		}
 	}
+	if ( remastered ) {
+		remastered->ForwardState( varName, stored );
+	}
+	if ( essentialHud ) { essentialHud->ForwardState( varName, stored ); }
 }
 
 void idUserInterfaceLocal::SetStateFloat( const char *varName, const float value ) {
-	float oldValue = state.GetFloat( varName, "0" );
-	state.SetFloat( varName, value );
-	if ( gui_debugScript.GetInteger() > 3 ) {
+	const bool debug = gui_debugScript.GetInteger() > 3;
+	const float oldValue = debug ? state.GetFloat( varName, "0" ) : 0;
+	char text[64];
+	const char *integral = openq4::ui::GuiStateIntegralFloat( value, text );
+	const char *stored = SetGuiDictionaryValue( state, varName, integral ? integral : va( "%f", value ) );
+	if ( debug ) {
 		if ( oldValue != value ) {
 			common->Printf( "GUI: state %s = %.4f (was %.4f) gui=%s\n", varName, value, oldValue, source.c_str() );
 		}
 	}
+	if ( remastered ) {
+		remastered->ForwardState( varName, stored );
+	}
+	if ( essentialHud ) { essentialHud->ForwardState( varName, stored ); }
+}
+
+void idUserInterfaceLocal::SetStateVec4( const char *varName, const idVec4 &vector ) {
+	// Stored as two-decimal text, as the retail GUI does. The interface's empty
+	// default dropped it, and with it the match summary's top-three row tints.
+	SetStateString( varName, vector.ToString( 2 ) );
 }
 
 const char* idUserInterfaceLocal::GetStateString( const char *varName, const char* defaultString ) const {
@@ -557,6 +1693,20 @@ idVec4 idUserInterfaceLocal::GetLightColor( void ) {
 
 void idUserInterfaceLocal::StateChanged( int _time, bool redraw ) {
 	time = _time;
+	// UpdateHudStats can publish an identical dictionary and simulation time
+	// thousands of times while paused. Only the stock peer's expression walk
+	// is redundant: the replacement and stock timelines still run in Redraw.
+	const bool cache = !redraw && desktop && !loading && remastered && !remastered->Failed() &&
+		idRemasteredHud::Enabled() && ui_retainedHudStateCache.GetBool() &&
+		!idWindow::gui_edit.GetBool() && gui_debugScript.GetInteger() == 0;
+	if ( cache && evaluatedHudValid && evaluatedHudTime == _time &&
+		evaluatedHudState.GetNumKeyVals() == state.GetNumKeyVals() ) {
+		bool same = true;
+		for ( int i = 0; same && i < state.GetNumKeyVals(); ++i )
+			same = *state.GetKeyVal( i ) == *evaluatedHudState.GetKeyVal( i );
+		if ( same ) return;
+	}
+	evaluatedHudValid = false;
 	if (desktop) {
 		desktop->StateChanged( redraw );
 	}
@@ -570,27 +1720,52 @@ void idUserInterfaceLocal::StateChanged( int _time, bool redraw ) {
 			interactive = false;
 		}
 	}
+	if ( cache ) {
+		evaluatedHudState = state;
+		evaluatedHudTime = _time;
+		evaluatedHudValid = true;
+	}
 }
 
 const char *idUserInterfaceLocal::Activate(bool activate, int _time) {
+	evaluatedHudValid = false;
 	time = _time;
 	active = activate;
 	if ( desktop ) {
 		activateStr = "";
 		desktop->Activate( activate, activateStr );
+		if (activate && chatWindow != NULL && chatWindow->IsInput()) {
+			desktop->SetFocus(chatWindow, false);
+		}
 		return activateStr;
 	}
 	return "";
 }
 
 void idUserInterfaceLocal::Trigger(int _time) {
+	evaluatedHudValid = false;
 	time = _time;
 	if ( desktop ) {
 		desktop->Trigger();
 	}
 }
 
+void idUserInterfaceLocal::CallStartup() {
+	if ( desktop ) {
+		desktop->RunScript( idWindow::ON_STARTUP );
+		desktop->RunNamedEvent( "onStartup" );
+	}
+}
+
+const char* idUserInterfaceLocal::Translate( const char* text ) {
+	return common->GetLanguageDict()->GetString( text != NULL ? text : "" );
+}
+
 void idUserInterfaceLocal::ReadFromDemoFile( class idDemoFile *f ) {
+	ResetHudPresentation( true );
+	evaluatedHudState.Clear();
+	// Restore may add legacy compatibility events beyond the parsed tree.
+	levelLoadCache.reset();
 	idStr work;
 	f->ReadDict( state );
 	source = state.GetString("name");
@@ -606,21 +1781,13 @@ void idUserInterfaceLocal::ReadFromDemoFile( class idDemoFile *f ) {
 		desktop->ReadFromDemoFile(f, false);
 	}
 
-	f->ReadFloat( cursorX );
-	f->ReadFloat( cursorY );
+	float restoredCursorX = 0.0f;
+	float restoredCursorY = 0.0f;
+	f->ReadFloat( restoredCursorX );
+	f->ReadFloat( restoredCursorY );
+	SetCursor( restoredCursorX, restoredCursorY );
 
-	bool add = true;
-	int c = uiManagerLocal.demoGuis.Num();
-	for ( int i = 0; i < c; i++ ) {
-		if ( uiManagerLocal.demoGuis[i] == this ) {
-			add = false;
-			break;
-		}
-	}
-
-	if (add) {
-		uiManagerLocal.demoGuis.Append(this);
-	}
+	RegisterDemo();
 }
 
 void idUserInterfaceLocal::WriteToDemoFile( class idDemoFile *f ) {
@@ -634,106 +1801,504 @@ void idUserInterfaceLocal::WriteToDemoFile( class idDemoFile *f ) {
 	f->WriteFloat( cursorY );
 }
 
+// openPREY: a stream marker and version lead the GUI state, so a stream from
+// another build fails closed instead of misreading the window tree. Version 2
+// follows upstream's checked encoding (one-byte bools, bounded strings).
+static const int OPENPREY_GUI_SAVE_MAGIC = 'P' | ( 'G' << 8 ) | ( 'U' << 16 ) | ( 'I' << 24 );
+static const int OPENPREY_GUI_SAVE_VERSION = 2;
+
+static const int UI_MAX_SAVEGAME_STATE_ENTRIES = 16384;
+static const int UI_MAX_SAVEGAME_STRING_LENGTH = 64 * 1024;
+static const int UI_MAX_SAVEGAME_STATE_BYTES = 16 * 1024 * 1024;
+
+static bool UI_SaveGameStringContainsNul( const idStr &string ) {
+	for ( int i = 0; i < string.Length(); i++ ) {
+		if ( string[i] == '\0' ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool UI_WriteSaveGameChecked( idFile *savefile, int bytesWritten, int expectedBytes, int offset, const char *detail ) {
+	if ( bytesWritten == expectedBytes ) {
+		return true;
+	}
+	common->Warning( "idUserInterfaceLocal::WriteToSaveGame: failed to write %s at offset %d (%d of %d bytes)",
+		detail ? detail : "data", offset, bytesWritten, expectedBytes );
+	return false;
+}
+
+static bool UI_WriteSaveGameInt( idFile *savefile, int value, const char *detail ) {
+	const int offset = savefile->Tell();
+	return UI_WriteSaveGameChecked( savefile, savefile->WriteInt( value ), static_cast<int>( sizeof( value ) ), offset, detail );
+}
+
+static bool UI_WriteSaveGameBool( idFile *savefile, bool value, const char *detail ) {
+	const int offset = savefile->Tell();
+	return UI_WriteSaveGameChecked( savefile, savefile->WriteUnsignedChar( value ? 1 : 0 ), 1, offset, detail );
+}
+
+static bool UI_WriteSaveGameFloat( idFile *savefile, float value, const char *detail ) {
+	if ( !std::isfinite( value ) ) {
+		common->Warning( "idUserInterfaceLocal::WriteToSaveGame: refusing non-finite %s",
+			detail ? detail : "float" );
+		return false;
+	}
+	const int offset = savefile->Tell();
+	return UI_WriteSaveGameChecked( savefile, savefile->WriteFloat( value ), static_cast<int>( sizeof( value ) ), offset, detail );
+}
+
+static bool UI_WriteSaveGameString( idFile *savefile, const idStr &string, const char *detail ) {
+	const int len = string.Length();
+	if ( len < 0 || len > UI_MAX_SAVEGAME_STRING_LENGTH || UI_SaveGameStringContainsNul( string ) ) {
+		common->Warning( "idUserInterfaceLocal::WriteToSaveGame: invalid %s length/content (%d bytes)",
+			detail ? detail : "string", len );
+		return false;
+	}
+	if ( !UI_WriteSaveGameInt( savefile, len, detail ) ) {
+		return false;
+	}
+	if ( len == 0 ) {
+		return true;
+	}
+	const int offset = savefile->Tell();
+	return UI_WriteSaveGameChecked( savefile, savefile->Write( string.c_str(), len ), len, offset, detail );
+}
+
 bool idUserInterfaceLocal::WriteToSaveGame( idFile *savefile ) const {
-	int len;
-	const idKeyValue *kv;
-	const char *string;
-
-	int num = state.GetNumKeyVals();
-	savefile->Write( &num, sizeof( num ) );
-
-	for( int i = 0; i < num; i++ ) {
-		kv = state.GetKeyVal( i );
-		len = kv->GetKey().Length();
-		string = kv->GetKey().c_str();
-		savefile->Write( &len, sizeof( len ) );
-		savefile->Write( string, len );
-
-		len = kv->GetValue().Length();
-		string = kv->GetValue().c_str();
-		savefile->Write( &len, sizeof( len ) );
-		savefile->Write( string, len );
+	if ( savefile == NULL || desktop == NULL ) {
+		common->Warning( "idUserInterfaceLocal::WriteToSaveGame: gui '%s' has no valid output file/desktop",
+			source.c_str() );
+		return false;
 	}
 
-	savefile->Write( &active, sizeof( active ) );
-	savefile->Write( &interactive, sizeof( interactive ) );
-	savefile->Write( &uniqued, sizeof( uniqued ) );
-	savefile->Write( &time, sizeof( time ) );
-	len = activateStr.Length();
-	savefile->Write( &len, sizeof( len ) );
-	savefile->Write( activateStr.c_str(), len );
-	len = pendingCmd.Length();
-	savefile->Write( &len, sizeof( len ) );
-	savefile->Write( pendingCmd.c_str(), len );
-	len = returnCmd.Length();
-	savefile->Write( &len, sizeof( len ) );
-	savefile->Write( returnCmd.c_str(), len );
+	if ( !UI_WriteSaveGameInt( savefile, OPENPREY_GUI_SAVE_MAGIC, "GUI save magic" ) ||
+		 !UI_WriteSaveGameInt( savefile, OPENPREY_GUI_SAVE_VERSION, "GUI save version" ) ) {
+		return false;
+	}
 
-	savefile->Write( &cursorX, sizeof( cursorX ) );
-	savefile->Write( &cursorY, sizeof( cursorY ) );
+	const int num = state.GetNumKeyVals();
+	if ( num < 0 || num > UI_MAX_SAVEGAME_STATE_ENTRIES || !UI_WriteSaveGameInt( savefile, num, "state count" ) ) {
+		common->Warning( "idUserInterfaceLocal::WriteToSaveGame: gui '%s' has invalid state count %d",
+			source.c_str(), num );
+		return false;
+	}
+
+	int64 totalStateBytes = 0;
+	for ( int i = 0; i < num; i++ ) {
+		const idKeyValue *kv = state.GetKeyVal( i );
+		if ( kv == NULL || kv->GetKey().IsEmpty() ) {
+			common->Warning( "idUserInterfaceLocal::WriteToSaveGame: gui '%s' has an invalid state entry at index %d",
+				source.c_str(), i );
+			return false;
+		}
+		totalStateBytes += kv->GetKey().Length();
+		totalStateBytes += kv->GetValue().Length();
+		if ( totalStateBytes > UI_MAX_SAVEGAME_STATE_BYTES ||
+			 !UI_WriteSaveGameString( savefile, kv->GetKey(), "state key" ) ||
+			 !UI_WriteSaveGameString( savefile, kv->GetValue(), "state value" ) ) {
+			common->Warning( "idUserInterfaceLocal::WriteToSaveGame: gui '%s' state entry %d exceeds the savegame budget or could not be written",
+				source.c_str(), i );
+			return false;
+		}
+	}
+
+	if ( !UI_WriteSaveGameBool( savefile, active, "active flag" ) ||
+		 !UI_WriteSaveGameBool( savefile, interactive, "interactive flag" ) ||
+		 !UI_WriteSaveGameBool( savefile, uniqued, "unique flag" ) ||
+		 !UI_WriteSaveGameInt( savefile, time, "time" ) ||
+		 !UI_WriteSaveGameString( savefile, activateStr, "activate command" ) ||
+		 !UI_WriteSaveGameString( savefile, pendingCmd, "pending command" ) ||
+		 !UI_WriteSaveGameString( savefile, returnCmd, "return command" ) ||
+		 !UI_WriteSaveGameFloat( savefile, cursorX, "cursor x" ) ||
+		 !UI_WriteSaveGameFloat( savefile, cursorY, "cursor y" ) ) {
+		return false;
+	}
 
 	desktop->WriteToSaveGame( savefile );
+	return true;
+}
 
+static bool UI_ReadSaveGameBytes( idFile *savefile, void *buffer, int len, const char *detail ) {
+	const int offset = savefile->Tell();
+	const int bytesRead = savefile->Read( buffer, len );
+	if ( bytesRead != len ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: truncated %s at offset %d (read %d of %d)",
+			detail ? detail : "data", offset, bytesRead, len );
+		return false;
+	}
+	return true;
+}
+
+static bool UI_ReadSaveGameInt( idFile *savefile, int &value, const char *detail ) {
+	const int offset = savefile->Tell();
+	const int bytesRead = savefile->ReadInt( value );
+	if ( bytesRead != static_cast<int>( sizeof( value ) ) ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: truncated %s at offset %d (read %d of %d)",
+			detail ? detail : "integer", offset, bytesRead, static_cast<int>( sizeof( value ) ) );
+		return false;
+	}
+	return true;
+}
+
+static bool UI_ReadSaveGameBool( idFile *savefile, bool &value, const char *detail ) {
+	unsigned char savedValue = 0;
+	const int offset = savefile->Tell();
+	const int bytesRead = savefile->ReadUnsignedChar( savedValue );
+	if ( bytesRead != 1 || savedValue > 1 ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: invalid %s at offset %d (read %d bytes, value %u)",
+			detail ? detail : "boolean", offset, bytesRead, static_cast<unsigned int>( savedValue ) );
+		return false;
+	}
+	value = savedValue != 0;
+	return true;
+}
+
+static bool UI_ReadSaveGameFloat( idFile *savefile, float &value, const char *detail ) {
+	const int offset = savefile->Tell();
+	const int bytesRead = savefile->ReadFloat( value );
+	if ( bytesRead != static_cast<int>( sizeof( value ) ) ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: truncated %s at offset %d (read %d of %d)",
+			detail ? detail : "float", offset, bytesRead, static_cast<int>( sizeof( value ) ) );
+		return false;
+	}
+	if ( !std::isfinite( value ) ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: non-finite %s at offset %d",
+			detail ? detail : "float", offset );
+		return false;
+	}
+	return true;
+}
+
+static bool UI_ReadSaveGameString( idFile *savefile, idStr &string, const char *detail ) {
+	int len = 0;
+	const int offset = savefile->Tell();
+	if ( !UI_ReadSaveGameInt( savefile, len, detail ) ) {
+		string.Clear();
+		return false;
+	}
+
+	const int remainingBytes = Max( 0, savefile->Length() - savefile->Tell() );
+	if ( len < 0 || len > UI_MAX_SAVEGAME_STRING_LENGTH || len > remainingBytes ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: invalid %s length %d at offset %d (remaining %d)",
+			detail ? detail : "string", len, offset, remainingBytes );
+		string.Clear();
+		return false;
+	}
+
+	string.Fill( ' ', len );
+	if ( len > 0 && !UI_ReadSaveGameBytes( savefile, &string[0], len, detail ) ) {
+		string.Clear();
+		return false;
+	}
 	return true;
 }
 
 bool idUserInterfaceLocal::ReadFromSaveGame( idFile *savefile ) {
-	int num;
-	int i, len;
+	ResetHudPresentation( false );
+	evaluatedHudState.Clear();
+	// Restore may add legacy compatibility events beyond the parsed tree.
+	levelLoadCache.reset();
+	if ( savefile == NULL || desktop == NULL ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: gui '%s' has no valid input file/parsed desktop",
+			source.c_str() );
+		return false;
+	}
+	// The Remastered peer rejoins the restored dictionary at its next draw.
+	delete remastered;
+	delete essentialHud; essentialHud = nullptr;
+	remastered = NULL;
+
+	int magic = 0;
+	int version = 0;
+	int num = 0;
 	idStr key;
 	idStr value;
 
-	savefile->Read( &num, sizeof( num ) );
-
-	state.Clear();
-	for( i = 0; i < num; i++ ) {
-		savefile->Read( &len, sizeof( len ) );
-		key.Fill( ' ', len );
-		savefile->Read( &key[0], len );
-
-		savefile->Read( &len, sizeof( len ) );
-		value.Fill( ' ', len );
-		savefile->Read( &value[0], len );
-		
-		state.Set( key, value );
+	if ( !UI_ReadSaveGameInt( savefile, magic, "GUI save magic" ) ||
+		!UI_ReadSaveGameInt( savefile, version, "GUI save version" ) ) {
+		return false;
+	}
+	if ( magic != OPENPREY_GUI_SAVE_MAGIC || version != OPENPREY_GUI_SAVE_VERSION ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: unsupported GUI stream marker 0x%08x version %d",
+			magic, version );
+		return false;
 	}
 
-	savefile->Read( &active, sizeof( active ) );
-	savefile->Read( &interactive, sizeof( interactive ) );
-	savefile->Read( &uniqued, sizeof( uniqued ) );
-	savefile->Read( &time, sizeof( time ) );
+	if ( !UI_ReadSaveGameInt( savefile, num, "state count" ) ) {
+		return false;
+	}
+	if ( num < 0 || num > UI_MAX_SAVEGAME_STATE_ENTRIES ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: invalid state count %d", num );
+		return false;
+	}
 
-	savefile->Read( &len, sizeof( len ) );
-	activateStr.Fill( ' ', len );
-	savefile->Read( &activateStr[0], len );
-	savefile->Read( &len, sizeof( len ) );
-	pendingCmd.Fill( ' ', len );
-	savefile->Read( &pendingCmd[0], len );
-	savefile->Read( &len, sizeof( len ) );
-	returnCmd.Fill( ' ', len );
-	savefile->Read( &returnCmd[0], len );
+	idDict restoredState;
+	int64 totalStateBytes = 0;
+	for ( int i = 0; i < num; i++ ) {
+		if ( !UI_ReadSaveGameString( savefile, key, "state key" ) ) {
+			return false;
+		}
+		if ( !UI_ReadSaveGameString( savefile, value, "state value" ) ) {
+			return false;
+		}
+		totalStateBytes += key.Length();
+		totalStateBytes += value.Length();
+		if ( key.IsEmpty() || UI_SaveGameStringContainsNul( key ) || UI_SaveGameStringContainsNul( value ) ||
+			 totalStateBytes > UI_MAX_SAVEGAME_STATE_BYTES ) {
+			common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: invalid state entry %d in gui '%s' (aggregate %lld bytes)",
+				i, source.c_str(), static_cast<long long>( totalStateBytes ) );
+			return false;
+		}
+		if ( restoredState.FindKey( key ) != NULL ) {
+			common->Warning( "idUserInterfaceLocal::ReadFromSaveGame: duplicate state key '%s' in gui '%s'",
+				key.c_str(), source.c_str() );
+			return false;
+		}
+		restoredState.Set( key, value );
+	}
 
-	savefile->Read( &cursorX, sizeof( cursorX ) );
-	savefile->Read( &cursorY, sizeof( cursorY ) );
+	bool restoredActive = false;
+	bool restoredInteractive = false;
+	bool restoredUniqued = false;
+	int restoredTime = 0;
+	if ( !UI_ReadSaveGameBool( savefile, restoredActive, "active flag" ) ||
+		 !UI_ReadSaveGameBool( savefile, restoredInteractive, "interactive flag" ) ||
+		 !UI_ReadSaveGameBool( savefile, restoredUniqued, "unique flag" ) ||
+		 !UI_ReadSaveGameInt( savefile, restoredTime, "time" ) ) {
+		return false;
+	}
 
+	idStr restoredActivateStr;
+	idStr restoredPendingCmd;
+	idStr restoredReturnCmd;
+	if ( !UI_ReadSaveGameString( savefile, restoredActivateStr, "activate command" ) ||
+		 !UI_ReadSaveGameString( savefile, restoredPendingCmd, "pending command" ) ||
+		 !UI_ReadSaveGameString( savefile, restoredReturnCmd, "return command" ) ) {
+		return false;
+	}
+
+	float restoredCursorX = 0.0f;
+	float restoredCursorY = 0.0f;
+	if ( !UI_ReadSaveGameFloat( savefile, restoredCursorX, "cursor x" ) ||
+		 !UI_ReadSaveGameFloat( savefile, restoredCursorY, "cursor y" ) ) {
+		return false;
+	}
+
+	state = restoredState;
+	// The pickup line a save holds as the newest stays the newest: the next
+	// pickup takes the other slot instead of overwriting the line still shown.
+	legacyPickupNewest = idMath::ClampInt( 0, 1, state.GetInt( "oq4_pick_newest" ) );
+	active = restoredActive;
+	interactive = restoredInteractive;
+	uniqued = restoredUniqued;
+	time = restoredTime;
+	activateStr = restoredActivateStr;
+	pendingCmd = restoredPendingCmd;
+	returnCmd = restoredReturnCmd;
 	desktop->ReadFromSaveGame( savefile );
+	SetCursor( restoredCursorX, restoredCursorY );
 
 	return true;
 }
 
+namespace {
+
+struct uiSavedWindowVar_t {
+	const char *	name;
+	idWinVar *		var;
+};
+
+}
+
+bool idUserInterfaceLocal::ReadFromSaveGameWithLayout( idFile *savefile, const char *layoutPath, int &restoredWindowValues ) {
+	restoredWindowValues = 0;
+	if ( savefile == NULL || desktop == NULL || layoutPath == NULL || layoutPath[ 0 ] == '\0' ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGameWithLayout: gui '%s' has no valid input file, parsed desktop or layout",
+			source.c_str() );
+		return false;
+	}
+
+	// Two private parses of the saved definition: one consumes the save with every
+	// normal check, the other shows what that definition starts with. A window
+	// value that differs between them was changed while the game ran -- a boss bar
+	// a script made visible, for example -- and is what this GUI must keep.
+	// openQ4: a GUI that is still parsed from the saved definition (a mod's own
+	// q4xhud.gui, which no openQ4 definition replaces) reads its record directly.
+	if ( definition.Icmp( layoutPath ) == 0 ) {
+		return ReadFromSaveGame( savefile );
+	}
+	idUserInterfaceLocal saved( false );
+	idUserInterfaceLocal initial( false );
+	saved.literalDefinition = initial.literalDefinition = true;
+	if ( !saved.InitFromFile( layoutPath, true, false ) || !initial.InitFromFile( layoutPath, true, false ) ||
+		 saved.desktop == NULL || initial.desktop == NULL ) {
+		common->Warning( "idUserInterfaceLocal::ReadFromSaveGameWithLayout: gui '%s' could not parse its saved layout '%s'",
+			source.c_str(), layoutPath );
+		return false;
+	}
+	if ( !saved.ReadFromSaveGame( savefile ) ) {
+		return false;
+	}
+
+	// The same window variables the window save code writes, by script name.
+	const auto windowVars = []( const drawWin_t &window, idList<uiSavedWindowVar_t> &vars ) {
+		vars.Clear();
+		if ( window.win != NULL ) {
+			idWindow *w = window.win;
+			const uiSavedWindowVar_t fixed[] = {
+				{ "notime", &w->noTime }, { "visible", &w->visible }, { "rect", &w->rect },
+				{ "backcolor", &w->backColor }, { "matcolor", &w->matColor }, { "forecolor", &w->foreColor },
+				{ "hovercolor", &w->hoverColor }, { "bordercolor", &w->borderColor }, { "textscale", &w->textScale },
+				{ "noevents", &w->noEvents }, { "rotate", &w->rotate }, { "text", &w->text },
+				{ "background", &w->backGroundName }, { "nocursor", &w->hideCursor },
+			};
+			for ( int i = 0; i < static_cast<int>( sizeof( fixed ) / sizeof( fixed[ 0 ] ) ); i++ ) {
+				vars.Append( fixed[ i ] );
+			}
+			for ( int i = 0; i < w->definedVars.Num(); i++ ) {
+				if ( w->definedVars[ i ] != NULL && w->definedVars[ i ]->GetName()[ 0 ] != '\0' ) {
+					const uiSavedWindowVar_t defined = { w->definedVars[ i ]->GetName(), w->definedVars[ i ] };
+					vars.Append( defined );
+				}
+			}
+		} else if ( window.simp != NULL ) {
+			idSimpleWindow *s = window.simp;
+			const uiSavedWindowVar_t fixed[] = {
+				{ "text", &s->text }, { "visible", &s->visible }, { "rect", &s->rect },
+				{ "backcolor", &s->backColor }, { "matcolor", &s->matColor }, { "forecolor", &s->foreColor },
+				{ "bordercolor", &s->borderColor }, { "textscale", &s->textScale }, { "rotate", &s->rotate },
+				{ "shear", &s->shear }, { "background", &s->backGroundName }, { "nocursor", &s->hideCursor },
+			};
+			for ( int i = 0; i < static_cast<int>( sizeof( fixed ) / sizeof( fixed[ 0 ] ) ); i++ ) {
+				vars.Append( fixed[ i ] );
+			}
+		}
+	};
+	const auto findVar = []( const idList<uiSavedWindowVar_t> &vars, const char *name ) -> idWinVar * {
+		for ( int i = 0; i < vars.Num(); i++ ) {
+			if ( idStr::Icmp( vars[ i ].name, name ) == 0 ) {
+				return vars[ i ].var;
+			}
+		}
+		return NULL;
+	};
+	const auto findWindow = []( idWindow *root, const char *name, drawWin_t &found ) {
+		drawWin_t *match = root->FindChildByName( name );
+		if ( match == NULL ) {
+			return false;
+		}
+		found = *match;	// FindChildByName returns a shared static for the root itself
+		return true;
+	};
+
+	int changedValues = 0;
+	idList<uiSavedWindowVar_t> savedVars, initialVars, liveVars;
+	std::function<void( const drawWin_t & )> transfer = [&]( const drawWin_t &savedWindow ) {
+		const char *windowName = savedWindow.win != NULL ? savedWindow.win->name.c_str() : savedWindow.simp->name.c_str();
+		drawWin_t initialWindow;
+		drawWin_t liveWindow;
+		if ( windowName[ 0 ] != '\0' && findWindow( initial.desktop, windowName, initialWindow ) &&
+			 findWindow( desktop, windowName, liveWindow ) &&
+			 ( initialWindow.win != NULL ) == ( savedWindow.win != NULL ) ) {
+			windowVars( savedWindow, savedVars );
+			windowVars( initialWindow, initialVars );
+			windowVars( liveWindow, liveVars );
+			for ( int i = 0; i < savedVars.Num(); i++ ) {
+				idWinVar *savedVar = savedVars[ i ].var;
+				idWinVar *initialVar = findVar( initialVars, savedVars[ i ].name );
+				idWinVar *liveVar = findVar( liveVars, savedVars[ i ].name );
+				// GUI-state-bound variables already arrived with the state dictionary.
+				if ( initialVar == NULL || liveVar == NULL || liveVar->GetDict() != NULL ||
+					 typeid( *savedVar ) != typeid( *initialVar ) || typeid( *savedVar ) != typeid( *liveVar ) ) {
+					continue;
+				}
+				// A script `set` stores its value and clears eval, so the variable no
+				// longer follows its expression (idRegister::GetFromRegs skips it). That
+				// override matters even when the value equals the definition's: carry
+				// the saved eval with the value, or the next evaluation rewrites it.
+				// A variable still following its expression keeps eval and stays live.
+				const bool valueChanged = idStr::Cmp( savedVar->c_str(), initialVar->c_str() ) != 0;
+				const bool evalChanged = savedVar->GetEval() != initialVar->GetEval();
+				if ( !valueChanged && !evalChanged ) {
+					continue;
+				}
+				common->DPrintf( "gui '%s': restored saved %s::%s '%s' eval %d (layout '%s' starts with '%s' eval %d)\n",
+					source.c_str(), windowName, savedVars[ i ].name, savedVar->c_str(), savedVar->GetEval() ? 1 : 0,
+					layoutPath, initialVar->c_str(), initialVar->GetEval() ? 1 : 0 );
+				liveVar->Set( savedVar->c_str() );
+				liveVar->SetEval( savedVar->GetEval() );
+				changedValues++;
+			}
+		}
+		if ( savedWindow.win != NULL ) {
+			for ( int i = 0; i < savedWindow.win->drawWindows.Num(); i++ ) {
+				transfer( savedWindow.win->drawWindows[ i ] );
+			}
+		}
+	};
+
+	// The Remastered peer rejoins the restored state at its next draw, as after
+	// an ordinary restore.
+	delete remastered;
+	remastered = NULL;
+	delete essentialHud;
+	essentialHud = nullptr;
+	ResetHudPresentation( false );
+	state = saved.state;
+	legacyPickupNewest = idMath::ClampInt( 0, 1, state.GetInt( "oq4_pick_newest" ) );
+	active = saved.active;
+	interactive = saved.interactive;
+	uniqued = saved.uniqued;
+	time = saved.time;
+	activateStr = saved.activateStr;
+	pendingCmd = saved.pendingCmd;
+	returnCmd = saved.returnCmd;
+
+	drawWin_t savedDesktop;
+	savedDesktop.simp = NULL;
+	savedDesktop.win = saved.desktop;
+	transfer( savedDesktop );
+	SetCursor( saved.cursorX, saved.cursorY );
+
+	restoredWindowValues = changedValues;
+	return true;
+}
+
 size_t idUserInterfaceLocal::Size() {
-	size_t sz = sizeof(*this) + state.Size() + source.Allocated();
+	size_t sz = sizeof(*this) + state.Size() + evaluatedHudState.Allocated() + source.Allocated();
+	if ( levelLoadCache ) sz += levelLoadCache->Size();
 	if ( desktop ) {
 		sz += desktop->Size();
 	}
 	return sz;
 }
 
+bool idUserInterfaceLocal::IsMenuGui() const {
+	return desktop != NULL && ( desktop->GetFlags() & WIN_MENUGUI ) != 0;
+}
+
+bool idUserInterfaceLocal::AlwaysThink() const {
+	return desktop != NULL && desktop->AlwaysThink();
+}
+
+void idUserInterfaceLocal::RunTimeEvents( int _time ) {
+	time = _time;
+	if ( desktop != NULL ) {
+		if ( desktop->RunTimeEvents( _time ) ) evaluatedHudValid = false;
+	}
+}
+
+int idUserInterfaceLocal::NumTransitions() {
+	return desktop != NULL ? desktop->NumTransitions() : 0;
+}
+
 void idUserInterfaceLocal::RecurseSetKeyBindingNames( idWindow *window ) {
 	int i;
 	idWinVar *v = window->GetWinVarByName( "bind" );
 	if ( v ) {
-		SetStateString( v->GetName(), idKeyInput::KeysFromBinding( v->GetName() ) );
+		SetStateString( v->GetName(), idKeyInput::KeysFromBindingForMenu( v->GetName() ) );
 	}
 	i = 0;
 	while ( i < window->GetChildCount() ) {
@@ -751,6 +2316,7 @@ idUserInterfaceLocal::SetKeyBindingNames
 ==============
 */
 void idUserInterfaceLocal::SetKeyBindingNames( void ) {
+	evaluatedHudValid = false;
 	if ( !desktop ) {
 		return;
 	}
@@ -764,12 +2330,86 @@ idUserInterfaceLocal::SetCursor
 ==============
 */
 void idUserInterfaceLocal::SetCursor( float x, float y ) {
-	float minX = 0.0f;
-	float maxX = static_cast<float>( VIRTUAL_WIDTH );
-	float minY = 0.0f;
-	float maxY = static_cast<float>( VIRTUAL_HEIGHT );
-	uiManagerLocal.dc.GetCursorBounds( minX, maxX, minY, maxY );
-	cursorX = idMath::ClampFloat( minX, maxX, x );
-	cursorY = idMath::ClampFloat( minY, maxY, y );
+	cursorX = x;
+	cursorY = y;
+	ClampCursor();
 }
 
+/*
+==============
+idUserInterfaceLocal::ClampCursor
+==============
+*/
+void idUserInterfaceLocal::ClampCursor( void ) {
+	if ( !std::isfinite( cursorX ) ) {
+		cursorX = 0.0f;
+	}
+	if ( !std::isfinite( cursorY ) ) {
+		cursorY = 0.0f;
+	}
+
+	// Retail clamps the cursor to the virtual screen, and the game's in-world
+	// GUI interaction depends on it: idPlayer::UpdateFocus parks the cursor at
+	// the corner before every absolute reposition. Menu GUIs may extend past
+	// the 4:3 canvas, so retain their aspect-corrected bounds.
+	float minX = 0.0f;
+	float minY = 0.0f;
+	float maxX = static_cast<float>( VIRTUAL_WIDTH );
+	float maxY = static_cast<float>( VIRTUAL_HEIGHT );
+	if ( desktop != NULL ) {
+		if ( std::isfinite( desktop->forceAspectWidth ) && desktop->forceAspectWidth > 0.0f ) {
+			maxX = desktop->forceAspectWidth;
+		}
+		if ( std::isfinite( desktop->forceAspectHeight ) && desktop->forceAspectHeight > 0.0f ) {
+			maxY = desktop->forceAspectHeight;
+		}
+		if ( ( desktop->GetFlags() & WIN_MENUGUI ) && ui_aspectCorrection.GetBool() ) {
+			float xExpand = 0.0f;
+			float yExpand = 0.0f;
+			uiManagerLocal.dc.GetVirtualScreenExpansion( maxX, maxY, xExpand, yExpand );
+			if ( std::isfinite( xExpand ) && xExpand >= 0.0f ) {
+				minX -= xExpand;
+				maxX += xExpand;
+			}
+			if ( std::isfinite( yExpand ) && yExpand >= 0.0f ) {
+				minY -= yExpand;
+				maxY += yExpand;
+			}
+		}
+	}
+	cursorX = idMath::ClampFloat( minX, maxX, cursorX );
+	cursorY = idMath::ClampFloat( minY, maxY, cursorY );
+}
+
+bool idUserInterfaceLocal::GetMaxTextIndex( const char *windowName, const char *text, wrapInfo_t& wrapInfo ) const {
+	if ( desktop == NULL ) {
+		return false;
+	}
+
+	drawWin_t *drawWindow = desktop->FindChildByName( windowName );
+	if ( drawWindow == NULL ) {
+		return false;
+	}
+
+	idDeviceContext *measureDc = NULL;
+	int pixelLimit = 0;
+	float textScale = 0.0f;
+
+	if ( drawWindow->win != NULL ) {
+		drawWindow->win->SetFont();
+		measureDc = drawWindow->win->dc;
+		pixelLimit = static_cast<int>( drawWindow->win->textRect.w );
+		textScale = drawWindow->win->textScale;
+	} else if ( drawWindow->simp != NULL ) {
+		drawWindow->simp->dc->SetFont( drawWindow->simp->fontNum );
+		measureDc = drawWindow->simp->dc;
+		pixelLimit = static_cast<int>( drawWindow->simp->textRect.w );
+		textScale = drawWindow->simp->textScale;
+	}
+
+	if ( measureDc == NULL ) {
+		return false;
+	}
+
+	return measureDc->GetMaxTextIndex( text, pixelLimit, textScale, wrapInfo );
+}

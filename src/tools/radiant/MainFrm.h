@@ -176,11 +176,11 @@ public:
 	// these are public so i can easily reflect messages
 	// from child windows..
 	//{{AFX_MSG(CMainFrame)
-	afx_msg void OnBSPStatus(UINT wParam, long lParam);
-	afx_msg void OnBSPDone(UINT wParam, long lParam);
+	afx_msg LRESULT OnBSPStatus(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnBSPDone(WPARAM wParam, LPARAM lParam);
 	afx_msg void OnParentNotify(UINT message, LPARAM lParam);
 	afx_msg int OnCreate(LPCREATESTRUCT lpCreateStruct);
-	afx_msg void OnTimer(UINT nIDEvent);
+	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg void OnDestroy();
 	afx_msg void OnClose();
 	afx_msg void OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags);
@@ -542,7 +542,7 @@ public:
 	afx_msg void OnTextureWad(unsigned int nID);
 	afx_msg void OnBspCommand(unsigned int nID);
 	afx_msg void OnGrid1(unsigned int nID);
-	afx_msg void OnDisplayChange(WPARAM wp, LPARAM lp);
+	afx_msg LRESULT OnDisplayChange(WPARAM wp, LPARAM lp);
 	afx_msg void OnSelectAlltargets();
 
 	//}}AFX_MSG

@@ -2,6 +2,8 @@
 #ifndef __PARSER_H__
 #define __PARSER_H__
 
+#include <stdint.h>
+
 /*
 ===============================================================================
 
@@ -198,9 +200,9 @@ private:
 	int				Directive_ifndef( void );
 	int				Directive_else( void );
 	int				Directive_endif( void );
-	int				EvaluateTokens( idToken *tokens, signed long int *intvalue, double *floatvalue, int integer );
-	int				Evaluate( signed long int *intvalue, double *floatvalue, int integer );
-	int				DollarEvaluate( signed long int *intvalue, double *floatvalue, int integer);
+	int				EvaluateTokens( idToken *tokens, int32_t *intvalue, double *floatvalue, int integer );
+	int				Evaluate( int32_t *intvalue, double *floatvalue, int integer );
+	int				DollarEvaluate( int32_t *intvalue, double *floatvalue, int integer );
 	int				Directive_define( void );
 	int				Directive_elif( void );
 	int				Directive_if( void );

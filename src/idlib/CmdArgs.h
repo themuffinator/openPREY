@@ -13,6 +13,8 @@
 class idCmdArgs {
 public:
 							idCmdArgs( void ) { argc = 0; }
+							// Copies must own their argv pointers, including container growth and reload replay.
+							idCmdArgs( const idCmdArgs &args ) { *this = args; }
 							idCmdArgs( const char *text, bool keepAsStrings ) { TokenizeString( text, keepAsStrings ); }
 
 	void					operator=( const idCmdArgs &args );
@@ -32,6 +34,8 @@ public:
 
 	void					AppendArg( const char *text );
 	void					Clear( void ) { argc = 0; }
+	void					ClearSensitive( void );
+	static void			ClearArgsScratch( void );
 	const char **			GetArgs( int *argc );
 
 private:

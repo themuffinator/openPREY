@@ -11,7 +11,7 @@
 
 #ifdef CREATE_CRC_TABLE
 
-static byte crctable[256];
+static uint8_t crctable[256];
 
 /*
    Generate a table for a byte-wise 8-bit CRC calculation on the polynomial:
@@ -20,14 +20,14 @@ static byte crctable[256];
 
 void make_crc_table( void ) {
 	int i, j;
-	unsigned long poly, c;
+	uint32_t poly, c;
 	/* terms of polynomial defining this crc (except x^8): */
-	static const byte p[] = {0,1,2};
+	static const uint8_t p[] = {0,1,2};
 
 	/* make exclusive-or pattern from polynomial (0x07) */
-	poly = 0L;
-	for ( i = 0; i < sizeof( p ) / sizeof( byte ); i++ ) {
-		poly |= 1L << p[i];
+	poly = 0u;
+	for ( i = 0; i < static_cast<int>( sizeof( p ) / sizeof( p[0] ) ); i++ ) {
+		poly |= 1u << p[i];
 	}
 
 	for ( i = 0; i < 256; i++ ) {
@@ -35,7 +35,7 @@ void make_crc_table( void ) {
 		for ( j = 0; j < 8; j++ ) {
 			c = ( c & 0x80 ) ? poly ^ ( c << 1 ) : ( c << 1 );
 		}
-		crctable[i] = (byte) c;
+		crctable[i] = static_cast<uint8_t>( c );
 	}
 }
 
@@ -44,7 +44,7 @@ void make_crc_table( void ) {
 /*
   Table of CRC-8's of all single-byte values (made by make_crc_table)
 */
-static byte crctable[256] = {
+static const uint8_t crctable[256] = {
 	0x00, 0x07, 0x0E, 0x09, 0x1C, 0x1B, 0x12, 0x15,
 	0x38, 0x3F, 0x36, 0x31, 0x24, 0x23, 0x2A, 0x2D,
 	0x70, 0x77, 0x7E, 0x79, 0x6C, 0x6B, 0x62, 0x65,
@@ -81,17 +81,17 @@ static byte crctable[256] = {
 
 #endif
 
-void CRC8_InitChecksum( unsigned char &crcvalue ) {
+void CRC8_InitChecksum( uint8_t &crcvalue ) {
 	crcvalue = CRC8_INIT_VALUE;
 }
 
-void CRC8_Update( unsigned char &crcvalue, const byte data ) {
+void CRC8_Update( uint8_t &crcvalue, const byte data ) {
 	crcvalue = crctable[crcvalue ^ data];
 }
 
-void CRC8_UpdateChecksum( unsigned char &crcvalue, const void *data, int length ) {
-	unsigned char crc;
-	const unsigned char *buf = (const unsigned char *) data;
+void CRC8_UpdateChecksum( uint8_t &crcvalue, const void *data, int length ) {
+	uint8_t crc;
+	const uint8_t *buf = static_cast<const uint8_t *>( data );
 
 	crc = crcvalue;
 	while( length-- ) {
@@ -100,12 +100,12 @@ void CRC8_UpdateChecksum( unsigned char &crcvalue, const void *data, int length 
 	crcvalue = crc;
 }
 
-void CRC8_FinishChecksum( unsigned char &crcvalue ) {
+void CRC8_FinishChecksum( uint8_t &crcvalue ) {
 	crcvalue ^= CRC8_XOR_VALUE;
 }
 
-unsigned char CRC8_BlockChecksum( const void *data, int length ) {
-	unsigned char crc;
+uint8_t CRC8_BlockChecksum( const void *data, int length ) {
+	uint8_t crc;
 
 	CRC8_InitChecksum( crc );
 	CRC8_UpdateChecksum( crc, data, length );

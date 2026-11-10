@@ -367,7 +367,7 @@ byte *rvHeap::AllocateMemory( uint sizeBytes, int allocationTag, bool align16Fla
 
 	if ( align16Flag )
 	{
-		while ( ((ulong) allocation & 0x0F) != 0 )
+		while ( ((uintptr_t) allocation & 0x0F) != 0 )
 		{
 			*(dword*)allocation = rvHeapAlignmentPadding;
 			allocation += sizeof(rvHeapAlignmentPadding);
@@ -580,9 +580,9 @@ rvMemoryBlock_s *rvHeap::AllocateMemoryLargeBlock( uint sizeBytes )
 		// a free block
 		block->SetDistToNextBlock( sizeBytes );
 		freeBlock = (rvFreeMemoryBlock_s *) ((byte *) block + sizeBytes);
-		assert( !((uint) freeBlock & 0x03) );	
+		assert( !((uintptr_t) freeBlock & 0x03) );
 
-		if ( ((uint) block >> PAGE_SIZE_SHIFT) == (((uint) block + sizeBytes) >> PAGE_SIZE_SHIFT) )
+		if ( ((uintptr_t) block >> PAGE_SIZE_SHIFT) == (((uintptr_t) block + sizeBytes) >> PAGE_SIZE_SHIFT) )
 		{
 			// new free block is on the same page
 			freeBlock->m_prev = block;
@@ -610,7 +610,7 @@ void rvHeap::FixUpNextBlocksPrev( byte *newBlock, uint blockSize )
 {
 	rvMemoryBlock_s* nextBlockPastNew;
 
-	if ( ((uint) newBlock >> PAGE_SIZE_SHIFT) == ((uint) (newBlock + blockSize) >> PAGE_SIZE_SHIFT) )
+	if ( ((uintptr_t) newBlock >> PAGE_SIZE_SHIFT) == ((uintptr_t) (newBlock + blockSize) >> PAGE_SIZE_SHIFT) )
 	{
 		// the next block remains on the same page, the previous pointer must be fixed up
 		nextBlockPastNew = (rvMemoryBlock_s*) (newBlock + blockSize);
@@ -733,7 +733,7 @@ void rvHeap::Free( void *p )
 		return;
 	}
 
-	assert( !((uint) p & 0x03) );
+	assert( !((uintptr_t) p & 0x03) );
 
 	// back up over any heap alignment padding
 	allocation = (byte *) p;
@@ -758,7 +758,7 @@ void rvHeap::Free( void *p )
 	extraBytes += OVERWRITE_HEADER_SIZE + OVERWRITE_TRAILER_SIZE;
 	if ( memcmp( allocation, rvHeapAllocHeader, OVERWRITE_HEADER_SIZE ) )
 	{
-		idLib::common->FatalError( "rvHeap::Free: memory block header overwrite (0x%x)", (dword) allocation );
+		idLib::common->FatalError( "rvHeap::Free: memory block header overwrite (%p)", (void *) allocation );
 	}
 #endif
 
@@ -770,20 +770,20 @@ void rvHeap::Free( void *p )
 	nextBlockAddress -= OVERWRITE_TRAILER_SIZE;
 	if ( memcmp( nextBlockAddress, rvHeapAllocTrailer, OVERWRITE_TRAILER_SIZE ) )
 	{
-		idLib::common->FatalError( "rvHeap::Free: memory block trailer overwrite (0x%x)", (dword) nextBlockAddress );
+		idLib::common->FatalError( "rvHeap::Free: memory block trailer overwrite (%p)", (void *) nextBlockAddress );
 	}
 #endif
 
-	pageAddress = (byte *) (((dword) allocation) & ~PAGE_SIZE_MASK);
+	pageAddress = (byte *) (((uintptr_t) allocation) & ~(uintptr_t) PAGE_SIZE_MASK);
 
     if ( ( block->m_prev != NULL && (byte *) block->m_prev < pageAddress ) ) 
 	{
-		idLib::common->FatalError( "rvHeap::Free: memory block header corrupted (0x%x)", (dword) allocation );
+		idLib::common->FatalError( "rvHeap::Free: memory block header corrupted (%p)", (void *) allocation );
 	}
 
 	if ( block->m_tag == MA_NONE )
 	{
-		idLib::common->FatalError( "rvHeap::Free: attempt to free allocation that is already freed (0x%x)", (dword) allocation );
+		idLib::common->FatalError( "rvHeap::Free: attempt to free allocation that is already freed (%p)", (void *) allocation );
 	}
 
 	assert( (byte*) block >= m_heapStorageStart && ((byte*) block + block->GetDistToNextBlock()) <= (m_heapStorageStart + m_maxHeapSizeBytes) );
@@ -905,7 +905,7 @@ int rvHeap::Msize( void *p )
 		return 0;
 	}
 
-	assert( !((uint) p & 0x03) );
+	assert( !((uintptr_t) p & 0x03) );
 
 	// back up over any heap alignment padding
 	allocation = (byte *) p;
@@ -927,7 +927,7 @@ int rvHeap::Msize( void *p )
 	allocation -= OVERWRITE_HEADER_SIZE;
 	if ( memcmp( allocation, rvHeapAllocHeader, OVERWRITE_HEADER_SIZE ) )
 	{
-		idLib::common->FatalError( "rvHeap::Free: memory block header overwrite (0x%x)", (dword) allocation );
+		idLib::common->FatalError( "rvHeap::Free: memory block header overwrite (%p)", (void *) allocation );
 	}
 #endif
 
@@ -935,7 +935,7 @@ int rvHeap::Msize( void *p )
 	block = (rvMemoryBlock_s *) (allocation - sizeof(rvMemoryBlock_s));
 
 	size = block->GetDistToNextBlock();
-	size -= ((dword)p-(dword)block) + OVERWRITE_TRAILER_SIZE;
+	size -= (uint) ((uintptr_t) p - (uintptr_t) block) + OVERWRITE_TRAILER_SIZE;
 
 	ExitHeapCriticalSection( );
 
@@ -1077,7 +1077,7 @@ void rvHeap::PageUncommit( byte *pageAddress, uint numPages )
 	uint startPageOffset, prevPageOffset, nextPageOffset, listOffset;
 	uint curDWordOffset, freeBlockPageCount, largeRangeCount, orgStartPageOffset, orgNumPages;
 
-	pageAddress = (byte *) (((dword) pageAddress) & ~PAGE_SIZE_MASK);
+	pageAddress = (byte *) (((uintptr_t) pageAddress) & ~(uintptr_t) PAGE_SIZE_MASK);
 
 	startPageOffset = (uint) (pageAddress - m_heapStorageStart) >> PAGE_SIZE_SHIFT;
 
@@ -1442,7 +1442,7 @@ dword rvHeap::GetBlockFreeSize( rvFreeMemoryBlock_s* currentBlock ) const
    			dword initialBlockSize = blockSize;
 #endif			
 			// Round up to the next block boundary
-			dword rem = (dword)currentBlock & ~PAGE_SIZE_MASK;
+			dword rem = (dword)((uintptr_t)currentBlock & (uintptr_t)PAGE_SIZE_MASK);
 			blockSize-=rem;
 			
 			// Subtract off the pages that should be decomitted
@@ -1540,7 +1540,7 @@ void rvHeap::TestFreeBlockValidity()
 			}
 
 			nextBlock = (rvMemoryBlock_s *) ((byte*) freeBlock + freeBlock->GetDistToNextBlock());
-			pageAddress = (byte *) (((dword) freeBlock) & ~PAGE_SIZE_MASK);
+			pageAddress = (byte *) (((uintptr_t) freeBlock) & ~(uintptr_t) PAGE_SIZE_MASK);
 			
 			if ( (byte*) nextBlock < pageAddress+PAGE_SIZE && nextBlock->m_tag == MA_NONE )
 			{

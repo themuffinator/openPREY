@@ -79,6 +79,10 @@ class idLocationEntity;
 #define	ENTITYNUM_WORLD			(MAX_GENTITIES-2)
 #define	ENTITYNUM_MAX_NORMAL	(MAX_GENTITIES-2)
 
+const int MAX_SAVEGAME_ELEVATOR_FLOORS = 256;
+const int MAX_SAVEGAME_ACTOR_ATTACHMENTS = 256;
+const int MAX_SAVEGAME_ANIMATED_ANIMS = 256;
+
 //HUMANHEAD: aob - put here it can be used anywhere.  hhSafeEntity wouldn't compile otherwise.
 #if GOLD
 // mdl:  Disable if we're gold
@@ -119,6 +123,7 @@ class idLocationEntity;
 
 #include "Pvs.h"
 #include "MultiplayerGame.h"
+#include "bots/BotCharacter.h"
 
 // HUMANHEAD
 #include "../Prey/prey_camerainterpolator.h"	// HUMANHEAD
@@ -242,9 +247,9 @@ private:
 
 //============================================================================
 
-int						OpenPrey_GetSpawnId( int index );
-idEntity *				OpenPrey_GetEntity( int index );
-int						OpenPrey_GetSpawnIdForEntity( const idEntity *ent );
+int						openPREY_GetSpawnId( int index );
+idEntity *				openPREY_GetEntity( int index );
+int						openPREY_GetSpawnIdForEntity( const idEntity *ent );
 
 template< class type >
 class idEntityPtr {
@@ -352,7 +357,7 @@ ID_INLINE idEntityPtr<type> &idEntityPtr<type>::Assign( const idEntity *ent ) {
 		spawnId = 0;
 	} else {
 		//HUMANHEAD rww - take cent bits into account
-		spawnId = OpenPrey_GetSpawnIdForEntity( ent );
+		spawnId = openPREY_GetSpawnIdForEntity( ent );
 	}
 	return *this;
 }
@@ -372,7 +377,7 @@ ID_INLINE idEntityPtr<type> &idEntityPtr<type>::operator=( type *ent ) {
 	if ( ent == NULL ) {
 		spawnId = 0;
 	} else {
-		spawnId = ( OpenPrey_GetSpawnId( ent->entityNumber ) << GENTITYNUM_BITS ) | ent->entityNumber;
+		spawnId = ( openPREY_GetSpawnId( ent->entityNumber ) << GENTITYNUM_BITS ) | ent->entityNumber;
 	}
 	return *this;
 }
@@ -385,7 +390,7 @@ ID_INLINE bool idEntityPtr<type>::SetSpawnId( int id ) {
 		return false;
 	}
 	//HUMANHEAD rww - take cent bits into account
-	if ( ( id >> GENTITYNUM_BITS_PLUSCENT ) == OpenPrey_GetSpawnId( id & ( ( 1 << GENTITYNUM_BITS_PLUSCENT ) - 1 ) ) ) {
+	if ( ( id >> GENTITYNUM_BITS_PLUSCENT ) == openPREY_GetSpawnId( id & ( ( 1 << GENTITYNUM_BITS_PLUSCENT ) - 1 ) ) ) {
 		spawnId = id;
 		return true;
 	}
@@ -395,15 +400,15 @@ ID_INLINE bool idEntityPtr<type>::SetSpawnId( int id ) {
 template< class type >
 ID_INLINE bool idEntityPtr<type>::IsValid( void ) const {
 	//HUMANHEAD rww - take cent bits into account
-	return ( OpenPrey_GetSpawnId( spawnId & ( ( 1 << GENTITYNUM_BITS_PLUSCENT ) - 1 ) ) == ( spawnId >> GENTITYNUM_BITS_PLUSCENT ) );
+	return ( openPREY_GetSpawnId( spawnId & ( ( 1 << GENTITYNUM_BITS_PLUSCENT ) - 1 ) ) == ( spawnId >> GENTITYNUM_BITS_PLUSCENT ) );
 }
 
 template< class type >
 ID_INLINE type *idEntityPtr<type>::GetEntity( void ) const {
 	//HUMANHEAD rww - take cent bits into account
 	int entityNum = spawnId & ( ( 1 << GENTITYNUM_BITS_PLUSCENT ) - 1 );
-	if ( ( OpenPrey_GetSpawnId( entityNum ) == ( spawnId >> GENTITYNUM_BITS_PLUSCENT ) ) ) {
-		return static_cast<type *>( OpenPrey_GetEntity( entityNum ) );
+	if ( ( openPREY_GetSpawnId( entityNum ) == ( spawnId >> GENTITYNUM_BITS_PLUSCENT ) ) ) {
+		return static_cast<type *>( openPREY_GetEntity( entityNum ) );
 	}
 	return NULL;
 }
@@ -421,6 +426,7 @@ public:
 	idDict					serverInfo;				// all the tunable parameters, like numclients, etc
 	int						numClients;				// pulled from serverInfo and verified
 	idDict					userInfo[MAX_CLIENTS];	// client specific settings
+	bool					clientConnectionPending[MAX_CLIENTS]; // async slot reserved between connect and begin
 	usercmd_t				usercmds[MAX_CLIENTS];	// client input commands
 	idDict					persistentPlayerInfo[MAX_CLIENTS];
 	//HUMANHEAD rww - introducing client entities.
@@ -679,12 +685,14 @@ public:
 	virtual void			PrintMemInfo( MemInfo_t *mi );
 
 // HUMANHEAD pdm: Support for level appending
-	bool					DeathwalkMapLoaded() const	{	return bShouldAppend;	}
 #if DEATHWALK_AUTOLOAD
+	bool					DeathwalkMapLoaded() const	{	return bShouldAppend;	}
 	bool					bShouldAppend;			// Taken from serverinfo
 protected:
 	idMapFile *				additionalMapFile;
 	virtual void			SpawnAppendedMapEntities() {}
+#else
+	bool					DeathwalkMapLoaded() const	{	return false;	}
 #endif
 // HUMANHEAD END
 
@@ -742,8 +750,15 @@ public:
 	bool					EntInClientSnapshot(int entNum) { return (!isClient || (clientPVS[localClientNum][entNum >> 5] & ( 1 << ( entNum & 31 ) ))); }
 	int						GetMapSpawnCount(void) { return mapSpawnCount; }
 
-	void					GetAPUserInfo(idDict &dict, int clientNum);
-	void					SpawnArtificialPlayer(void);
+	void					GetAPUserInfo( idDict &dict, int clientNum,
+							const rvBotCharacter *character = NULL, int skillLevel = -1 );
+	bool					SpawnArtificialPlayer( const char *characterName = NULL,
+							int skillLevel = -1 );
+	bool					RemoveArtificialPlayer( const char *name = NULL );
+	int					RemoveArtificialPlayers( void );
+	int					NumArtificialPlayers( void ) const;
+	void					ListArtificialPlayers( void ) const;
+	void					RebindArtificialPlayers( void );
 	//HUMANHEAD END
 
 	//HUMANHEAD rww - keep track of layered spawning
@@ -902,11 +917,11 @@ protected:	// HUMANHEAD
 //extern idGameLocal			gameLocal;
 //#endif	// HUMANHEAD
 
-ID_INLINE int OpenPrey_GetSpawnId( int index ) {
+ID_INLINE int openPREY_GetSpawnId( int index ) {
 	return gameLocal.spawnIds[ index ];
 }
 
-ID_INLINE idEntity *OpenPrey_GetEntity( int index ) {
+ID_INLINE idEntity *openPREY_GetEntity( int index ) {
 	return gameLocal.entities[ index ];
 }
 

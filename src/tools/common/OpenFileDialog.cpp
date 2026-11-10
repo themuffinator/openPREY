@@ -248,7 +248,10 @@ void rvOpenFileDialog::HandleCommandOK ( void )
 	{
 		if ( strlen( mLookin ) )
 		{
-			idStr::snPrintf( mLookin, sizeof( mLookin ), "%s/%s", mLookin, temp );
+			idStr newLookin = mLookin;
+			newLookin.Append( "/" );
+			newLookin.Append( temp );
+			idStr::Copynz( mLookin, newLookin.c_str(), sizeof( mLookin ) );
 		} else {
 			idStr::Copynz( mLookin, temp, sizeof( mLookin ) );
 		}
@@ -306,7 +309,8 @@ void rvOpenFileDialog::HandleInitDialog ( void )
 	SendMessage( mWndLookin,CBEM_SETIMAGELIST,0,(LPARAM) mImageList );
 	
 	// Back button is a bitmap button
-	SendMessage( GetDlgItem ( mWnd, IDC_TOOLS_BACK ), BM_SETIMAGE, IMAGE_BITMAP, (LONG) mBackBitmap );
+	SendMessage( GetDlgItem( mWnd, IDC_TOOLS_BACK ), BM_SETIMAGE, IMAGE_BITMAP,
+		reinterpret_cast< LPARAM >( mBackBitmap ) );
 	
 	// Allow custom titles
 	SetWindowText ( mWnd, mTitle );
@@ -357,12 +361,14 @@ void rvOpenFileDialog::HandleLookInChange ( void )
 	if ( sel >= 1 )
 	{
 		SendMessage ( mWndLookin, CB_GETLBTEXT, 1, (LPARAM)temp );
-		idStr::snPrintf( mLookin, sizeof( mLookin ), "%s", temp );
+		lookin = temp;
 		for ( i = 2; i <= sel; i ++ )
 		{
 			SendMessage ( mWndLookin, CB_GETLBTEXT, i, (LPARAM)temp );
-			idStr::snPrintf( mLookin, sizeof( mLookin ), "%s/%s", mLookin, temp );
+			lookin.Append( "/" );
+			lookin.Append( temp );
 		}			
+		idStr::Copynz( mLookin, lookin.c_str(), sizeof( mLookin ) );
 	}
 	else
 	{
@@ -413,13 +419,13 @@ Dialog Procedure for the open file dialog
 */
 INT_PTR rvOpenFileDialog::DlgProc ( HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
-	rvOpenFileDialog* dlg = (rvOpenFileDialog*) GetWindowLong ( wnd, GWL_USERDATA );
+	rvOpenFileDialog* dlg = reinterpret_cast< rvOpenFileDialog * >( GetWindowLongPtr( wnd, GWLP_USERDATA ) );
 	
 	switch ( msg )
 	{
 		case WM_INITDIALOG:			
 			dlg = (rvOpenFileDialog*) lparam;
-			SetWindowLong ( wnd, GWL_USERDATA, lparam );
+			SetWindowLongPtr( wnd, GWLP_USERDATA, lparam );
 			dlg->mWnd = wnd;
 			dlg->HandleInitDialog ( );
 			return TRUE;

@@ -2,6 +2,8 @@
 #ifndef __TOKEN_H__
 #define __TOKEN_H__
 
+#include <stdint.h>
+
 /*
 ===============================================================================
 
@@ -150,7 +152,7 @@ public:
 
 	double			GetDoubleValue( void );				// double value of TT_NUMBER
 	float			GetFloatValue( void );				// float value of TT_NUMBER
-	unsigned long	GetUnsignedLongValue( void );		// unsigned long value of TT_NUMBER
+	uint32_t		GetUnsignedLongValue( void );		// 32-bit unsigned value of TT_NUMBER
 	int				GetIntValue( void );				// int value of TT_NUMBER
 	int				WhiteSpaceBeforeToken( void ) const;// returns length of whitespace before token
 	void			ClearTokenWhiteSpace( void );		// forget whitespace before token
@@ -158,7 +160,7 @@ public:
 	void			NumberValue( void );				// calculate values for a TT_NUMBER
 
 private:
-	unsigned long	intvalue;							// integer value
+	unsigned int	intvalue;							// 32-bit integer value used by the binary token format
 	double			floatvalue;							// floating point value
 	const char *	whiteSpaceStart_p;					// start of white space before token, only used by idLexer
 	const char *	whiteSpaceEnd_p;					// end of white space before token, only used by idLexer
@@ -169,9 +171,20 @@ private:
 
 // RAVEN BEGIN
 // rjohnson: initialized floatvalue to prevent fpu exceptin
+// openQ4: initialize the complete token state so default-constructed parser
+// temporaries are deterministic and safe to inspect before a successful read.
 
 ID_INLINE idToken::idToken( void ) :
-	floatvalue(0.0)
+	type( 0 ),
+	subtype( 0 ),
+	line( 0 ),
+	linesCrossed( 0 ),
+	flags( 0 ),
+	intvalue( 0 ),
+	floatvalue( 0.0 ),
+	whiteSpaceStart_p( NULL ),
+	whiteSpaceEnd_p( NULL ),
+	next( NULL )
 {
 }
 
@@ -206,7 +219,7 @@ ID_INLINE float idToken::GetFloatValue( void ) {
 	return (float) GetDoubleValue();
 }
 
-ID_INLINE unsigned long	idToken::GetUnsignedLongValue( void ) {
+ID_INLINE uint32_t idToken::GetUnsignedLongValue( void ) {
 	if ( type != TT_NUMBER ) {
 		return 0;
 	}
@@ -221,7 +234,7 @@ ID_INLINE int idToken::GetIntValue( void ) {
 }
 
 ID_INLINE int idToken::WhiteSpaceBeforeToken( void ) const {
-	return ( whiteSpaceEnd_p > whiteSpaceStart_p );
+	return ( whiteSpaceStart_p != NULL && whiteSpaceEnd_p != NULL && whiteSpaceEnd_p > whiteSpaceStart_p );
 }
 
 ID_INLINE void idToken::AppendDirty( const char a ) {

@@ -33,7 +33,13 @@ idCVar idDemoFile::com_logDemos( "com_logDemos", "0", CVAR_SYSTEM | CVAR_BOOL, "
 idCVar idDemoFile::com_compressDemos( "com_compressDemos", "1", CVAR_SYSTEM | CVAR_INTEGER | CVAR_ARCHIVE, "Compression scheme for demo files\n0: None    (Fast, large files)\n1: LZW     (Fast to compress, Fast to decompress, medium/small files)\n2: LZSS    (Slow to compress, Fast to decompress, small files)\n3: Huffman (Fast to compress, Slow to decompress, medium files)\nSee also: The 'CompressDemo' command" );
 idCVar idDemoFile::com_preloadDemos( "com_preloadDemos", "0", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE, "Load the whole demo in to RAM before running it" );
 
-#define DEMO_MAGIC GAME_NAME " RDEMO"
+static const char DEMO_MAGIC[] = GAME_NAME " RDEMO";
+static const char INTERIM_DEMO_MAGIC[] = "OpenPREY RDEMO";
+static const char LEGACY_DEMO_MAGIC[] = "OpenPrey RDEMO";
+static_assert( sizeof( DEMO_MAGIC ) == sizeof( INTERIM_DEMO_MAGIC ), "render-demo magic length changed" );
+static_assert( sizeof( DEMO_MAGIC ) == sizeof( LEGACY_DEMO_MAGIC ), "render-demo magic length changed" );
+#define MAX_DEMO_HASH_STRINGS 65536
+#define MAX_DEMO_DICT_ENTRIES 4096
 
 /*
 ================
@@ -66,10 +72,10 @@ idDemoFile::AllocCompressor
 idCompressor *idDemoFile::AllocCompressor( int type ) {
 	switch ( type ) {
 	case 0: return idCompressor::AllocNoCompression();
-	default:
 	case 1: return idCompressor::AllocLZW();
 	case 2: return idCompressor::AllocLZSS();
 	case 3: return idCompressor::AllocHuffman();
+	default: return NULL;
 	}
 }
 
@@ -78,11 +84,12 @@ idCompressor *idDemoFile::AllocCompressor( int type ) {
 idDemoFile::OpenForReading
 ================
 */
-bool idDemoFile::OpenForReading( const char *fileName ) {
+bool idDemoFile::OpenForReading( const char *fileName, bool allowPreload, bool quiet ) {
 	static const int magicLen = sizeof(DEMO_MAGIC) / sizeof(DEMO_MAGIC[0]);
 	char magicBuffer[magicLen];
 	int compression;
 	int fileLength;
+	(void)quiet;
 
 	Close();
 
@@ -92,10 +99,17 @@ bool idDemoFile::OpenForReading( const char *fileName ) {
 	}
 
 	fileLength = f->Length();
+	if ( fileLength <= 0 ) {
+		Close();
+		return false;
+	}
 
-	if ( com_preloadDemos.GetBool() ) {
+	if ( allowPreload && com_preloadDemos.GetBool() ) {
 		fileImage = (byte *)Mem_Alloc( fileLength );
-		f->Read( fileImage, fileLength );
+		if ( f->Read( fileImage, fileLength ) != fileLength ) {
+			Close();
+			return false;
+		}
 		fileSystem->CloseFile( f );
 		f = new idFile_Memory( va( "preloaded(%s)", fileName ), (const char *)fileImage, fileLength );
 	}
@@ -106,9 +120,17 @@ bool idDemoFile::OpenForReading( const char *fileName ) {
 
 	writing = false;
 
-	f->Read(magicBuffer, magicLen);
-	if ( memcmp(magicBuffer, DEMO_MAGIC, magicLen) == 0 ) {
-		f->ReadInt( compression );
+	if ( f->Read( magicBuffer, magicLen ) != magicLen ) {
+		Close();
+		return false;
+	}
+	if ( memcmp( magicBuffer, DEMO_MAGIC, magicLen ) == 0 ||
+		 memcmp( magicBuffer, INTERIM_DEMO_MAGIC, magicLen ) == 0 ||
+		 memcmp( magicBuffer, LEGACY_DEMO_MAGIC, magicLen ) == 0 ) {
+		if ( f->ReadInt( compression ) != sizeof( compression ) ) {
+			Close();
+			return false;
+		}
 	} else {
 		// Ideally we would error out if the magic string isn't there,
 		// but for backwards compatibility we are going to assume it's just an uncompressed demo file
@@ -117,6 +139,10 @@ bool idDemoFile::OpenForReading( const char *fileName ) {
 	}
 
 	compressor = AllocCompressor( compression );
+	if ( compressor == NULL ) {
+		Close();
+		return false;
+	}
 	compressor->Init( f, false, 8 );
 
 	return true;
@@ -141,7 +167,7 @@ idDemoFile::Log
 */
 void idDemoFile::Log(const char *p) {
 	if ( fLog && p && *p ) {
-		fLog->Write( p, strlen(p) );
+		fLog->Write( p, idLib::SizeToInt( strlen( p ), "idDemoFile::Log" ) );
 	}
 }
 
@@ -165,10 +191,15 @@ bool idDemoFile::OpenForWriting( const char *fileName ) {
 	writing = true;
 
 	f->Write(DEMO_MAGIC, sizeof(DEMO_MAGIC));
-	f->WriteInt( com_compressDemos.GetInteger() );
+	int compression = com_compressDemos.GetInteger();
+	compressor = AllocCompressor( compression );
+	if ( compressor == NULL ) {
+		Close();
+		return false;
+	}
+	f->WriteInt( compression );
 	f->Flush();
 
-	compressor = AllocCompressor( com_compressDemos.GetInteger() );
 	compressor->Init( f, true, 8 );
 
 	return true;
@@ -201,7 +232,112 @@ void idDemoFile::Close() {
 		compressor = NULL;
 	}
 
+	ResetHashStrings();
+}
+
+/*
+================
+idDemoFile::ResetHashStrings
+================
+*/
+void idDemoFile::ResetHashStrings() {
 	demoStrings.DeleteContents( true );
+	demoStringHash.Clear();
+}
+
+/*
+================
+idDemoFile::CloseWithTrailer
+
+The trailer lies outside the compressed stream, so it is written raw after
+the compressor has flushed. Readers stop at the stream's DSC_END record and
+never decode these bytes.
+================
+*/
+bool idDemoFile::CloseWithTrailer( const idDict &summary ) {
+	if ( !writing || compressor == NULL || f == NULL ) {
+		Close();
+		return false;
+	}
+	compressor->FinishCompress();
+	delete compressor;
+	compressor = NULL;
+
+	idFile_Memory payload( "demoTrailer" );
+	const int count = Min( summary.GetNumKeyVals(), MAX_DEMO_DICT_ENTRIES );
+	payload.WriteInt( count );
+	for ( int i = 0; i < count; i++ ) {
+		const idKeyValue *kv = summary.GetKeyVal( i );
+		payload.WriteString( kv->GetKey() );
+		payload.WriteString( kv->GetValue() );
+	}
+	const int length = payload.Length();
+	bool written = length > 0 && length <= DEMO_TRAILER_MAX_PAYLOAD;
+	if ( written ) {
+		const unsigned int crc = CRC32_BlockChecksum( payload.GetDataPtr(), length );
+		written =
+			f->Write( payload.GetDataPtr(), length ) == length &&
+			f->WriteInt( length ) == static_cast<int>( sizeof( length ) ) &&
+			f->WriteUnsignedInt( crc ) == static_cast<int>( sizeof( crc ) ) &&
+			f->Write( DEMO_TRAILER_MAGIC, DEMO_TRAILER_MAGIC_LENGTH ) == DEMO_TRAILER_MAGIC_LENGTH;
+	}
+	writing = false;
+	Close();
+	return written;
+}
+
+/*
+================
+idDemoFile::ReadTrailer
+================
+*/
+bool idDemoFile::ReadTrailer( const char *fileName, idDict &summary ) {
+	summary.Clear();
+	idFile *file = fileSystem->OpenFileRead( fileName, false );
+	if ( file == NULL ) {
+		return false;
+	}
+	const int footerBytes = static_cast<int>( sizeof( int ) + sizeof( unsigned int ) ) + DEMO_TRAILER_MAGIC_LENGTH;
+	const int fileLength = file->Length();
+	bool valid = fileLength > footerBytes &&
+		file->Seek( fileLength - footerBytes, FS_SEEK_SET ) == 0;
+	int length = 0;
+	unsigned int crc = 0;
+	char magic[DEMO_TRAILER_MAGIC_LENGTH];
+	valid = valid &&
+		file->ReadInt( length ) == static_cast<int>( sizeof( length ) ) &&
+		file->ReadUnsignedInt( crc ) == static_cast<int>( sizeof( crc ) ) &&
+		file->Read( magic, DEMO_TRAILER_MAGIC_LENGTH ) == DEMO_TRAILER_MAGIC_LENGTH &&
+		memcmp( magic, DEMO_TRAILER_MAGIC, DEMO_TRAILER_MAGIC_LENGTH ) == 0 &&
+		length > 0 && length <= DEMO_TRAILER_MAX_PAYLOAD &&
+		length <= fileLength - footerBytes &&
+		file->Seek( fileLength - footerBytes - length, FS_SEEK_SET ) == 0;
+	idList<byte> payload;
+	if ( valid ) {
+		payload.SetNum( length );
+		valid = file->Read( payload.Ptr(), length ) == length &&
+			CRC32_BlockChecksum( payload.Ptr(), length ) == crc;
+	}
+	fileSystem->CloseFile( file );
+	if ( !valid ) {
+		return false;
+	}
+
+	idFile_Memory reader( "demoTrailer", reinterpret_cast<const char *>( payload.Ptr() ), length );
+	int count = 0;
+	if ( reader.ReadInt( count ) != static_cast<int>( sizeof( count ) ) ||
+		 count < 0 || count > MAX_DEMO_DICT_ENTRIES ) {
+		return false;
+	}
+	for ( int i = 0; i < count; i++ ) {
+		idStr key, value;
+		if ( reader.ReadString( key ) <= 0 || reader.ReadString( value ) < 0 ) {
+			summary.Clear();
+			return false;
+		}
+		summary.Set( key, value );
+	}
+	return true;
 }
 
 /*
@@ -214,17 +350,41 @@ const char *idDemoFile::ReadHashString() {
 
 	if ( log && fLog ) {
 		const char *text = va( "%s > Reading hash string\n", logStr.c_str() );
-		fLog->Write( text, strlen( text ) );
+		fLog->Write( text, idLib::SizeToInt( strlen( text ), "idDemoFile::ReadHashString" ) );
 	} 
 
-	ReadInt( index );
+	if ( ReadInt( index ) != sizeof( index ) ) {
+		Close();
+		common->Warning( "Malformed render demo: truncated hash index; playback stopped safely" );
+		return "";
+	}
 
 	if ( index == -1 ) {
 		// read a new string for the table
-		idStr	*str = new idStr;
-		
+		if ( demoStrings.Num() >= MAX_DEMO_HASH_STRINGS ) {
+			Close();
+			common->Warning( "Malformed render demo: hash table exceeds %d entries; playback stopped safely", MAX_DEMO_HASH_STRINGS );
+			return "";
+		}
+
+		int length = 0;
+		if ( ReadInt( length ) != sizeof( length ) || length < 0 || length >= MAX_STRING_CHARS ) {
+			Close();
+			common->Warning( "Malformed render demo: invalid hash string length %d; playback stopped safely", length );
+			return "";
+		}
+
 		idStr data;
-		ReadString( data );
+		if ( length > 0 ) {
+			data.Fill( ' ', length );
+			if ( Read( &data[0], length ) != length ) {
+				Close();
+				common->Warning( "Malformed render demo: truncated hash string payload; playback stopped safely" );
+				return "";
+			}
+		}
+
+		idStr	*str = new idStr;
 		*str = data;
 		
 		demoStrings.Append( str );
@@ -234,7 +394,8 @@ const char *idDemoFile::ReadHashString() {
 
 	if ( index < -1 || index >= demoStrings.Num() ) {
 		Close();
-		common->Error( "demo hash index out of range" );
+		common->Warning( "Malformed render demo: hash index %d is out of range; playback stopped safely", index );
+		return "";
 	}
 
 	return demoStrings[index]->c_str();
@@ -246,12 +407,18 @@ idDemoFile::WriteHashString
 ================
 */
 void idDemoFile::WriteHashString( const char *str ) {
+	if ( str == NULL ) {
+		str = "";
+	}
+
 	if ( log && fLog ) {
 		const char *text = va( "%s > Writing hash string\n", logStr.c_str() );
-		fLog->Write( text, strlen( text ) );
+		fLog->Write( text, idLib::SizeToInt( strlen( text ), "idDemoFile::WriteHashString" ) );
 	}
-	// see if it is already in the has table
-	for ( int i = 0 ; i < demoStrings.Num() ; i++ ) {
+	// see if it is already in the table; a campaign recording sees tens of
+	// thousands of names, so this must not be a linear search
+	const int key = demoStringHash.GenerateKey( str, true );
+	for ( int i = demoStringHash.First( key ); i != -1; i = demoStringHash.Next( i ) ) {
 		if ( !strcmp( demoStrings[i]->c_str(), str ) ) {
 			WriteInt( i );
 			return;
@@ -261,6 +428,7 @@ void idDemoFile::WriteHashString( const char *str ) {
 	// add it to our table and the demo table
 	idStr	*copy = new idStr( str );
 //common->Printf( "hash:%i = %s\n", demoStrings.Num(), str );
+	demoStringHash.Add( key, demoStrings.Num() );
 	demoStrings.Append( copy );
 	int cmd = -1;	
 	WriteInt( cmd );
@@ -277,10 +445,20 @@ void idDemoFile::ReadDict( idDict &dict ) {
 	idStr key, val;
 
 	dict.Clear();
-	ReadInt( c );
+	if ( ReadInt( c ) != sizeof( c ) || c < 0 || c > MAX_DEMO_DICT_ENTRIES ) {
+		Close();
+		common->Warning( "Malformed render demo: dictionary count is out of range; playback stopped safely" );
+		return;
+	}
 	for ( i = 0; i < c; i++ ) {
 		key = ReadHashString();
+		if ( !IsOpen() ) {
+			return;
+		}
 		val = ReadHashString();
+		if ( !IsOpen() ) {
+			return;
+		}
 		dict.Set( key, val );
 	}
 }
@@ -307,6 +485,9 @@ void idDemoFile::WriteDict( const idDict &dict ) {
  ================
  */
 int idDemoFile::Read( void *buffer, int len ) {
+	if ( compressor == NULL ) {
+		return 0;
+	}
 	int read = compressor->Read( buffer, len );
 	if ( read == 0 && len >= 4 ) {
 		*(demoSystem_t *)buffer = DS_FINISHED;
@@ -320,6 +501,9 @@ int idDemoFile::Read( void *buffer, int len ) {
  ================
  */
 int idDemoFile::Write( const void *buffer, int len ) {
+	if ( compressor == NULL || buffer == NULL || len <= 0 ) {
+		return 0;
+	}
 	return compressor->Write( buffer, len );
 }
 

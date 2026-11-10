@@ -1,0 +1,46 @@
+--- a/Include/RmlUi/Core/Context.h
++++ b/Include/RmlUi/Core/Context.h
+@@ -125,7 +125,10 @@
+ 	/// @param[in] ignore_element If set, this element and its descendents will be ignored.
+ 	/// @param[in] element Used internally.
+ 	/// @return The element under the point, or nullptr if nothing is.
+-	Element* GetElementAtPoint(Vector2f point, const Element* ignore_element = nullptr, Element* element = nullptr) const;
++	/// openQ4: Optional application filter, evaluated for each candidate before projection.
++	/// Rejected candidates do not occlude eligible elements behind them.
++	Element* GetElementAtPoint(Vector2f point, const Element* ignore_element = nullptr, Element* element = nullptr,
++		const Function<bool(Element*)>& hit_test_filter = {}) const;
+ 
+ 	/// Brings the document to the front of the document stack.
+ 	/// @param[in] document The document to pull to the front of the stack.
+--- a/Source/Core/Context.cpp
++++ b/Source/Core/Context.cpp
+@@ -1379,7 +1379,8 @@
+ 	active = nullptr;
+ }
+ 
+-Element* Context::GetElementAtPoint(Vector2f point, const Element* ignore_element, Element* element) const
++Element* Context::GetElementAtPoint(Vector2f point, const Element* ignore_element, Element* element,
++	const Function<bool(Element*)>& hit_test_filter) const
+ {
+ 	if (!element)
+ 	{
+@@ -1433,7 +1434,7 @@
+ 					continue;
+ 			}
+ 
+-			Element* child_element = GetElementAtPoint(point, ignore_element, stacking_child);
++			Element* child_element = GetElementAtPoint(point, ignore_element, stacking_child, hit_test_filter);
+ 			if (child_element)
+ 				return child_element;
+ 		}
+@@ -1441,6 +1442,10 @@
+ 
+ 	// Ignore elements whose pointer events are disabled.
+ 	if (element->GetComputedValues().pointer_events() == Style::PointerEvents::None)
++		return nullptr;
++
++	// Application masks and input ownership use the original document point.
++	if (hit_test_filter && !hit_test_filter(element))
+ 		return nullptr;
+ 
+ 	// Projection may fail if we have a singular transformation matrix.

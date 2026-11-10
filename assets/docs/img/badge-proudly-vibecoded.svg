@@ -1,0 +1,67 @@
+<!-- openQ4 "proudly vibecoded" badge, shields.io flat style.
+Logo: 14x14 pixel-art robot heart, one path per colour.
+  ......cc......
+  ......SS......
+  ..ooooSSoooo..
+  .owhrroorrrro.
+  ohrrrrrrrrrrRo
+  orrwcrrrrwcrRo
+  orrccrrrrccrRo
+  orrrrrrrrrrrRo
+  .orrorrrrorRo.
+  ..orroooorRo..
+  ...orrrrRRo...
+  ....orrRRo....
+  .....orRo.....
+  ......oo......
+  R #a3172c
+  S #6c7886
+  c #3ef0ff
+  h #ff8597
+  o #16181d
+  r #e8304a
+  w #ffffff
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="133" height="20" role="img" aria-label="proudly: vibecoded">
+<title>proudly: vibecoded</title>
+<filter id="blur">
+<feGaussianBlur stdDeviation="16"/>
+</filter>
+<linearGradient id="s" x2="0" y2="100%">
+<stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+<stop offset="1" stop-opacity=".1"/>
+</linearGradient>
+<clipPath id="r">
+<rect width="133" height="20" rx="3"/>
+</clipPath>
+<g clip-path="url(#r)">
+<rect width="68" height="20" fill="#555"/>
+<rect x="68" width="65" height="20" fill="#ff3d7f"/>
+<rect width="133" height="20" fill="url(#s)"/>
+</g>
+<g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110">
+<svg x="5" y="3" width="14" height="14" viewBox="0 0 14 14" shape-rendering="crispEdges">
+<path fill="#3ef0ff" d="M6 0h2v1h-2zM4 5h1v1h-1zM10 5h1v1h-1zM3 6h2v1h-2zM9 6h2v1h-2z"/>
+<path fill="#6c7886" d="M6 1h2v1h-2zM6 2h2v1h-2z"/>
+<path fill="#16181d" d="M2 2h4v1h-4zM8 2h4v1h-4zM1 3h1v1h-1zM6 3h2v1h-2zM12 3h1v1h-1zM0 4h1v1h-1zM13 4h1v1h-1zM0 5h1v1h-1zM13 5h1v1h-1zM0 6h1v1h-1zM13 6h1v1h-1zM0 7h1v1h-1zM13 7h1v1h-1zM1 8h1v1h-1zM4 8h1v1h-1zM9 8h1v1h-1zM12 8h1v1h-1zM2 9h1v1h-1zM5 9h4v1h-4zM11 9h1v1h-1zM3 10h1v1h-1zM10 10h1v1h-1zM4 11h1v1h-1zM9 11h1v1h-1zM5 12h1v1h-1zM8 12h1v1h-1zM6 13h2v1h-2z"/>
+<path fill="#ffffff" d="M2 3h1v1h-1zM3 5h1v1h-1zM9 5h1v1h-1z"/>
+<path fill="#ff8597" d="M3 3h1v1h-1zM1 4h1v1h-1z"/>
+<path fill="#e8304a" d="M4 3h2v1h-2zM8 3h4v1h-4zM2 4h10v1h-10zM1 5h2v1h-2zM5 5h4v1h-4zM11 5h1v1h-1zM1 6h2v1h-2zM5 6h4v1h-4zM11 6h1v1h-1zM1 7h11v1h-11zM2 8h2v1h-2zM5 8h4v1h-4zM10 8h1v1h-1zM3 9h2v1h-2zM9 9h1v1h-1zM4 10h4v1h-4zM5 11h2v1h-2zM6 12h1v1h-1z"/>
+<path fill="#a3172c" d="M12 4h1v1h-1zM12 5h1v1h-1zM12 6h1v1h-1zM12 7h1v1h-1zM11 8h1v1h-1zM10 9h1v1h-1zM8 10h2v1h-2zM7 11h2v1h-2zM7 12h1v1h-1z"/>
+</svg>
+<g transform="scale(.1)">
+<g aria-hidden="true" fill="#010101">
+<text x="435" y="150" fill-opacity=".8" filter="url(#blur)" textLength="410">proudly</text>
+<text x="435" y="150" fill-opacity=".3" textLength="410">proudly</text>
+</g>
+<text x="435" y="140" textLength="410">proudly</text>
+</g>
+<g transform="scale(.1)">
+<g aria-hidden="true" fill="#010101">
+<text x="995" y="150" fill-opacity=".8" filter="url(#blur)" textLength="550">vibecoded</text>
+<text x="995" y="150" fill-opacity=".3" textLength="550">vibecoded</text>
+</g>
+<text x="995" y="140" textLength="550">vibecoded</text>
+</g>
+</g>
+</svg>

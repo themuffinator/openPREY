@@ -47,12 +47,29 @@ static int poll_keyboard_event_count;
 static poll_mouse_event_t poll_events_mouse[MAX_POLL_EVENTS + POLL_EVENTS_HEADROOM];
 static int poll_mouse_event_count;
 
+static bool Posix_IsMousePollActionValid( int action ) {
+	return action >= M_ACTION1 && action <= M_DELTAZ;
+}
+
+static bool Posix_ShouldQueueMousePollEvent( int action, int value ) {
+	if ( !Posix_IsMousePollActionValid( action ) ) {
+		return false;
+	}
+	if ( ( action == M_DELTAX || action == M_DELTAY || action == M_DELTAZ ) && value == 0 ) {
+		return false;
+	}
+	return true;
+}
+
 /*
 ==========
 Posix_AddKeyboardPollEvent
 ==========
 */
 bool Posix_AddKeyboardPollEvent(int key, bool state) {
+	if ( key <= 0 || key >= K_LAST_KEY ) {
+		return true;
+	}
 	if (poll_keyboard_event_count >= MAX_POLL_EVENTS + POLL_EVENTS_HEADROOM)
 		common->FatalError( "poll_keyboard_event_count exceeded MAX_POLL_EVENT + POLL_EVENTS_HEADROOM\n");
 	poll_events_keyboard[poll_keyboard_event_count].key = key;
@@ -70,6 +87,9 @@ Posix_AddMousePollEvent
 ==========
 */
 bool Posix_AddMousePollEvent(int action, int value) {
+	if ( !Posix_ShouldQueueMousePollEvent( action, value ) ) {
+		return true;
+	}
 	if (poll_mouse_event_count >= MAX_POLL_EVENTS + POLL_EVENTS_HEADROOM)
 		common->FatalError( "poll_mouse_event_count exceeded MAX_POLL_EVENT + POLL_EVENTS_HEADROOM\n");
 	poll_events_mouse[poll_mouse_event_count].action = action;
@@ -95,11 +115,18 @@ int Sys_PollKeyboardInputEvents( void ) {
 }
 
 int Sys_ReturnKeyboardInputEvent( const int n, int &key, bool &state ) {
-	if ( n >= poll_keyboard_event_count ) {
+	if ( n < 0 || n >= poll_keyboard_event_count ) {
+		key = 0;
+		state = false;
 		return 0;
 	}
 	key = poll_events_keyboard[n].key;
 	state = poll_events_keyboard[n].state;
+	if ( key <= 0 || key >= K_LAST_KEY ) {
+		key = 0;
+		state = false;
+		return 0;
+	}
 	return 1;
 }
 
@@ -108,13 +135,18 @@ void Sys_EndKeyboardInputEvents( void ) {
 	poll_keyboard_event_count = 0;	
  }
 
+void Sys_ClearInputEvents( void ) {
+	poll_keyboard_event_count = 0;
+	poll_mouse_event_count = 0;
+}
+
 int Sys_PollMouseInputEvents( void ) {
 #if 0 //moved to the Sys_End functions
 	poll_keyboard_event_count = 0;
 	poll_mouse_event_count = 0;
 #endif
 
-	// that's OS specific, implemented in osx/ and linux/
+	// that's OS specific, implemented in macos/ and linux/
 	Posix_PollInput( );
 
 	return poll_mouse_event_count;
@@ -122,11 +154,18 @@ int Sys_PollMouseInputEvents( void ) {
 
 int	Sys_ReturnMouseInputEvent( const int n, int &action, int &value )
 {
-	if ( n>=poll_mouse_event_count ) {
+	if ( n < 0 || n >= poll_mouse_event_count ) {
+		action = 0;
+		value = 0;
 		return 0;
 	}
 	action = poll_events_mouse[ n ].action;
 	value = poll_events_mouse[ n ].value;
+	if ( !Posix_ShouldQueueMousePollEvent( action, value ) ) {
+		action = 0;
+		value = 0;
+		return 0;
+	}
 	return 1;
 }
 
@@ -146,4 +185,14 @@ int Sys_ReturnJoystickInputEvent( const int n, int &axis, int &value ) {
 }
 
 void Sys_EndJoystickInputEvents( void ) {
+}
+
+bool Sys_GetJoystickAxisState( int axis, int &value ) {
+	axis = 0;
+	value = 0;
+	return false;
+}
+
+bool Sys_SetJoystickRumble( float lowFrequency, float highFrequency, int durationMsec ) {
+	return false;
 }

@@ -31,14 +31,21 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "DeviceContext.h"
 #include "Window.h"
+#include "LegacyGuiImport.h"
 #include "UserInterfaceLocal.h"
+#include "RetainedHud.h"
+#include "LegacyGuiLayout.h"
+#include "AudioGraph.h"
 #include "../framework/Session.h"
+#include "../framework/SaveGameReleases.h"
+#include "../idlib/SaveCodec.h"
 #include "EditWindow.h"
 #include "ChoiceWindow.h"
 #include "SliderWindow.h"
 #include "BindWindow.h"
 #include "ListWindow.h"
 #include "RenderWindow.h"
+#include "LevelEditorWindow.h"
 #include "MarkerWindow.h"
 #include "FieldWindow.h"
 
@@ -49,6 +56,561 @@ If you have questions concerning this license or the applicable additional terms
 // 
 //  gui editor is more integrated into the window now
 #include "../tools/guied/GEWindowWrapper.h"
+
+namespace {
+static bool IsFullscreenBackdropRect( const idRectangle &drawRect ) {
+	const float epsilon = 0.01f;
+	if ( idMath::Fabs( drawRect.x ) > epsilon || idMath::Fabs( drawRect.y ) > epsilon ||
+		 idMath::Fabs( drawRect.w - 640.0f ) > epsilon ) {
+		return false;
+	}
+	// Some intro videos are authored as 640x479.
+	return idMath::Fabs( drawRect.h - 480.0f ) <= 1.01f;
+}
+
+static bool ShouldDrawCinematicUnderlay( const idMaterial *background, const idRectangle &drawRect ) {
+	if ( background == NULL || !IsFullscreenBackdropRect( drawRect ) ) {
+		return false;
+	}
+
+	const char *materialName = background->GetName();
+	const bool isVideoMaterial = ( materialName != NULL && idStr::Icmpn( materialName, "video/", 6 ) == 0 );
+	return isVideoMaterial || ( background->CinematicLength() > 0 );
+}
+
+static bool ShouldDrawSplashUnderlay( const idMaterial *background, const idRectangle &drawRect ) {
+	if ( background == NULL || !IsFullscreenBackdropRect( drawRect ) ) {
+		return false;
+	}
+
+	const char *materialName = background->GetName();
+	if ( materialName == NULL || materialName[0] == '\0' ) {
+		return false;
+	}
+
+	return idStr::Icmp( materialName, "gfx/guis/mainmenu/splash" ) == 0 ||
+		idStr::Icmp( materialName, "gfx/guis/mainmenu/splash.dds" ) == 0 ||
+		idStr::Icmp( materialName, "gfx/splashScreen" ) == 0 ||
+		idStr::Icmp( materialName, "gfx/guis/loadscreens/generic" ) == 0 ||
+		idStr::Icmp( materialName, "gfx/guis/loadscreens/generic.dds" ) == 0;
+}
+
+static void DrawCinematicUnderlay( idDeviceContext *dc ) {
+	const bool previousUIViewportMode = renderSystem->GetUseUIViewportFor2D();
+	renderSystem->SetUseUIViewportFor2D( false );
+	renderSystem->SetColor( colorBlack );
+	renderSystem->DrawStretchPic( 0.0f, 0.0f, SCREEN_WIDTH, SCREEN_HEIGHT, 0.0f, 0.0f, 1.0f, 1.0f, declManager->FindMaterial( "_white" ) );
+	renderSystem->SetColor( colorWhite );
+	renderSystem->SetUseUIViewportFor2D( previousUIViewportMode );
+}
+
+static void DrawSplashUnderlay( idDeviceContext *dc ) {
+	const idVec4 underlayColor( 24.0f / 255.0f, 26.0f / 255.0f, 8.0f / 255.0f, 1.0f );
+	dc->DrawFilledRect( 0.0f, 0.0f, 640.0f, 480.0f, underlayColor );
+}
+
+static bool IsLegacyVehicleDamageOverlay( const idUserInterfaceLocal *gui, const char *windowName, const idMaterial *background, const idRectangle &drawRect ) {
+	if ( gui == NULL || background == NULL || windowName == NULL || !IsFullscreenBackdropRect( drawRect ) ) {
+		return false;
+	}
+
+	if ( idStr::Icmp( windowName, "damage" ) != 0 ) {
+		return false;
+	}
+
+	const char *materialName = background->GetName();
+	if ( materialName == NULL || idStr::Icmp( materialName, "gfx/guis/common/add_box2" ) != 0 ) {
+		return false;
+	}
+
+	const char *sourceFile = gui->GetSourceFile();
+	return idStr::Icmp( sourceFile, "guis/vehicles/hud.gui" ) == 0 ||
+		idStr::Icmp( sourceFile, "guis/vehicles/medchange.gui" ) == 0;
+}
+
+static bool ShouldDrawNativeScreenOverlay( const idUserInterfaceLocal *gui, const char *windowName, const idMaterial *background, const idRectangle &drawRect, int flags ) {
+	if ( ( flags & WIN_NATIVESCREENOVERLAY ) != 0 ) {
+		return IsFullscreenBackdropRect( drawRect );
+	}
+
+	// Preserve stock vehicle hit flashes across the full native render area even
+	// though the rest of the vehicle HUD remains constrained to the UI viewport.
+	return IsLegacyVehicleDamageOverlay( gui, windowName, background, drawRect );
+}
+
+static void DrawNativeScreenOverlay( const idMaterial *background, const idVec4 &matColor ) {
+	if ( background == NULL ) {
+		return;
+	}
+
+	const bool previousUIViewportMode = renderSystem->GetUseUIViewportFor2D();
+	renderSystem->SetUseUIViewportFor2D( false );
+	renderSystem->SetColor( matColor );
+	renderSystem->DrawStretchPic( 0.0f, 0.0f, SCREEN_WIDTH, SCREEN_HEIGHT, 0.0f, 0.0f, 1.0f, 1.0f, background );
+	renderSystem->SetColor( colorWhite );
+	renderSystem->SetUseUIViewportFor2D( previousUIViewportMode );
+}
+
+static void AdjustTournamentWarmupLayout( const idUserInterfaceLocal *gui, const char *windowName, const char *parentName, float xofs, float xExpand, idRectangle &drawRect ) {
+	if ( gui == NULL || windowName == NULL || xExpand <= 0.0f ) {
+		return;
+	}
+
+	if ( idStr::Icmp( gui->GetSourceFile(), "guis/mphud.gui" ) != 0 ) {
+		return;
+	}
+
+	// Stretch the tournament pre-game bar across the native render width while
+	// keeping its title centered in the middle 640-wide virtual HUD canvas.
+	if ( idStr::Icmp( windowName, "tourn_warmupbar" ) == 0 || idStr::Icmp( windowName, "d_tourn_warmupbar" ) == 0 ) {
+		drawRect.x = xofs - xExpand;
+		drawRect.w = 640.0f + ( xExpand * 2.0f );
+		return;
+	}
+
+	if ( parentName != NULL && idStr::Icmp( parentName, "tourn_warmupbar" ) == 0 &&
+		 idStr::Icmp( windowName, "tourn_warmup_title" ) == 0 ) {
+		drawRect.x = xofs + xExpand;
+		drawRect.w = 640.0f;
+	}
+}
+
+static rvNamedEvent *openQ4_CreateLegacyCinematicNamedEvent( idWindow *window, const char *eventName ) {
+	if ( window == NULL || window->GetGui() == NULL ) {
+		return NULL;
+	}
+
+	if ( idStr::Icmp( window->GetGui()->GetSourceFile(), "guis/cinematic.gui" ) != 0 ||
+		 idStr::Icmp( eventName, "showLetterbox" ) != 0 ) {
+		return NULL;
+	}
+
+	static const char legacyShowLetterboxScript[] =
+		"{ "
+		"set \"blackbar_top::visible\" \"1\"; "
+		"set \"blackbar_bottom::visible\" \"1\"; "
+		"set \"blackbar_left::visible\" \"1\"; "
+		"set \"blackbar_right::visible\" \"1\"; "
+		"set \"anim_bars::visible\" \"1\"; "
+		"}";
+
+	idParser src( legacyShowLetterboxScript, sizeof( legacyShowLetterboxScript ) - 1,
+		"legacy_cinematic_showLetterbox",
+		LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT );
+
+	rvNamedEvent *event = new rvNamedEvent( eventName );
+	if ( !window->ParseScript( &src, *event->mEvent ) ) {
+		delete event;
+		return NULL;
+	}
+	event->mEvent->FixupParms( window );
+
+	return event;
+}
+
+static bool TranslateControllerMenuKey( const sysEvent_t *sourceEvent, sysEvent_t &translatedEvent, int &focusDirection ) {
+	if ( sourceEvent == NULL || sourceEvent->evType != SE_KEY ) {
+		return false;
+	}
+
+	translatedEvent = *sourceEvent;
+	focusDirection = 0;
+
+	// Confirm and Back may trade the south and east buttons (section 13.5).
+	switch ( idKeyInput::MenuControllerKey( sourceEvent->evValue ) ) {
+		case K_JOY1:
+			translatedEvent.evValue = K_PGUP;
+			return true;
+		case K_JOY2:
+			translatedEvent.evValue = K_PGDN;
+			return true;
+		case K_JOY3:
+			translatedEvent.evValue = K_ENTER;
+			return true;
+		case K_JOY4:
+		case K_JOY7:
+		case K_JOY8:
+			translatedEvent.evValue = K_ESCAPE;
+			return true;
+		case K_JOY9:
+			translatedEvent.evValue = K_UPARROW;
+			focusDirection = -1;
+			return true;
+		case K_JOY10:
+			translatedEvent.evValue = K_DOWNARROW;
+			focusDirection = 1;
+			return true;
+		case K_JOY11:
+			translatedEvent.evValue = K_RIGHTARROW;
+			focusDirection = 1;
+			return true;
+		case K_JOY12:
+			translatedEvent.evValue = K_LEFTARROW;
+			focusDirection = -1;
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool WindowConsumesDirectionalNavigation( idWindow *window, int key ) {
+	if ( window == NULL ) {
+		return false;
+	}
+
+	if ( dynamic_cast<idChoiceWindow *>( window ) != NULL || dynamic_cast<idSliderWindow *>( window ) != NULL ) {
+		return key == K_LEFTARROW || key == K_KP_LEFTARROW || key == K_RIGHTARROW || key == K_KP_RIGHTARROW;
+	}
+
+	if ( dynamic_cast<idListWindow *>( window ) != NULL ) {
+		return key == K_UPARROW || key == K_KP_UPARROW || key == K_DOWNARROW || key == K_KP_DOWNARROW ||
+			key == K_PGUP || key == K_PGDN;
+	}
+
+	if ( dynamic_cast<idEditWindow *>( window ) != NULL ) {
+		return key == K_LEFTARROW || key == K_KP_LEFTARROW || key == K_RIGHTARROW || key == K_KP_RIGHTARROW ||
+			key == K_UPARROW || key == K_KP_UPARROW || key == K_DOWNARROW || key == K_KP_DOWNARROW ||
+			key == K_HOME || key == K_END || key == K_DEL || key == K_INS || key == K_BACKSPACE;
+	}
+
+	return false;
+}
+
+/*
+================
+KeyboardMenuFocusDirection
+
+The focus step an arrow key asks of a menu: none while the focused control
+uses that key itself (a list's rows, a slider's or choice's value, an edit
+field's caret) or while a control holds the capture.
+================
+*/
+static bool KeyboardMenuFocusDirection( idWindow *desktop, const sysEvent_t *event, int &focusDirection ) {
+	if ( desktop == NULL || event == NULL || event->evType != SE_KEY ) {
+		return false;
+	}
+	int direction = 0;
+	switch ( event->evValue ) {
+		case K_UPARROW:
+		case K_KP_UPARROW:
+		case K_LEFTARROW:
+		case K_KP_LEFTARROW:
+			direction = -1;
+			break;
+		case K_DOWNARROW:
+		case K_KP_DOWNARROW:
+		case K_RIGHTARROW:
+		case K_KP_RIGHTARROW:
+			direction = 1;
+			break;
+		default:
+			return false;
+	}
+	if ( desktop->GetCaptureChild() != NULL ) {
+		return false;
+	}
+	idWindow *focused = desktop->GetFocusedChild();
+	if ( dynamic_cast<idBindWindow *>( focused ) != NULL || WindowConsumesDirectionalNavigation( focused, event->evValue ) ) {
+		return false;
+	}
+	focusDirection = direction;
+	return true;
+}
+
+static bool WindowHasNativeEnterHandling( idWindow *window ) {
+	return dynamic_cast<idBindWindow *>( window ) != NULL ||
+		dynamic_cast<idEditWindow *>( window ) != NULL ||
+		dynamic_cast<idListWindow *>( window ) != NULL;
+}
+
+static void CollectFocusWindows( idWindow *window, idList<idWindow *> &candidates ) {
+	for ( int i = 0; i < window->GetChildCount(); ++i ) {
+		idWindow *child = window->GetChild( i );
+		if ( child == NULL || !child->IsVisible() || child->HasNoEvents() ) {
+			continue;
+		}
+		if ( child->GetFlags() & WIN_CANFOCUS ) {
+			candidates.Append( child );
+		} else {
+			CollectFocusWindows( child, candidates );
+		}
+	}
+}
+
+static bool NavigateFocus( idWindow *window, int direction, bool runHoverScripts = false ) {
+	if ( window == NULL || direction == 0 ) {
+		return false;
+	}
+
+	// Build one visible traversal order in both directions. Hidden pages can
+	// retain focus, and walking their parents used to trap navigation there.
+	idList<idWindow *> candidates;
+	CollectFocusWindows( window, candidates );
+	if ( candidates.Num() == 0 ) {
+		return false;
+	}
+	idWindow *currentFocus = window->GetFocusedChild();
+	const int currentIndex = candidates.FindIndex( currentFocus );
+	const int nextIndex = currentIndex < 0
+		? ( direction < 0 ? candidates.Num() - 1 : 0 )
+		: ( currentIndex + ( direction < 0 ? -1 : 1 ) + candidates.Num() ) % candidates.Num();
+	idWindow *nextFocus = candidates[ nextIndex ];
+	if ( nextFocus != currentFocus ) {
+		window->SetFocus( nextFocus, false );
+		if ( runHoverScripts ) {
+			if ( currentFocus != NULL ) {
+				currentFocus->MouseExit();
+			}
+			nextFocus->MouseEnter();
+		}
+	}
+	return true;
+}
+
+static const idMaterial *FindWindowBackgroundSlice( idWindow *window, const char *materialVarName ) {
+	if ( window == NULL || materialVarName == NULL ) {
+		return NULL;
+	}
+	idWinVar *materialVar = window->GetWinVarByName( materialVarName, false );
+	if ( materialVar == NULL || materialVar->c_str() == NULL || materialVar->c_str()[0] == '\0' ) {
+		return NULL;
+	}
+	return declManager->FindMaterial( materialVar->c_str() );
+}
+
+struct retailTabLayout_t {
+	bool verticalTabs;
+	float tabThickness;
+	float spanStart;
+	float spanEnd;
+	float spanPerTab;
+};
+
+static bool ParseRetailFloatPair( const char *value, float &first, float &second ) {
+	return value != NULL && value[0] != '\0' &&
+		( sscanf( value, "%f , %f", &first, &second ) == 2 || sscanf( value, "%f %f", &first, &second ) == 2 );
+}
+
+static bool ParseRetailFloatQuad( const char *value, float &a, float &b, float &c, float &d ) {
+	return value != NULL && value[0] != '\0' &&
+		( sscanf( value, "%f , %f , %f , %f", &a, &b, &c, &d ) == 4 ||
+		  sscanf( value, "%f %f %f %f", &a, &b, &c, &d ) == 4 );
+}
+
+static bool ParseRetailVec4( const char *value, idVec4 &out ) {
+	return ParseRetailFloatQuad( value, out.x, out.y, out.z, out.w );
+}
+
+static bool ParseRetailBool( const char *value, bool &out ) {
+	if ( value == NULL || value[0] == '\0' ) {
+		return false;
+	}
+	idStr work = value;
+	work.StripLeading( ' ' );
+	work.StripTrailing( ' ' );
+	if ( !work.Icmp( "true" ) || !work.Icmp( "yes" ) || !work.Icmp( "on" ) ) {
+		out = true;
+		return true;
+	}
+	if ( !work.Icmp( "false" ) || !work.Icmp( "no" ) || !work.Icmp( "off" ) ) {
+		out = false;
+		return true;
+	}
+	out = atof( work.c_str() ) != 0.0f;
+	return true;
+}
+
+static const idMaterial *FindRetailWindowMaterial( idWindow *window, const char *name ) {
+	if ( window == NULL ) {
+		return NULL;
+	}
+	idWinVar *var = window->GetWinVarByName( name, false );
+	if ( var == NULL || var->c_str() == NULL || var->c_str()[0] == '\0' ) {
+		return NULL;
+	}
+	return declManager->FindMaterial( var->c_str() );
+}
+
+static idRectangle GetRetailMarginsInsetRect( idWindow *window, const idRectangle &rect ) {
+	idRectangle inset = rect;
+	idWinVar *var = window != NULL ? window->GetWinVarByName( "margins", false ) : NULL;
+	float left = 0.0f;
+	float right = 0.0f;
+	float top = 0.0f;
+	float bottom = 0.0f;
+	if ( var != NULL && ParseRetailFloatQuad( var->c_str(), left, right, top, bottom ) ) {
+		inset.x += left;
+		inset.y += top;
+		inset.w -= left + right;
+		inset.h -= top + bottom;
+	}
+	return inset;
+}
+
+static bool BuildRetailTabLayout( idWindow *window, const idRectangle &rect, int tabCount, retailTabLayout_t &layout ) {
+	if ( window == NULL || tabCount <= 0 ) {
+		return false;
+	}
+	layout.verticalTabs = false;
+	layout.tabThickness = 20.0f;
+	idWinVar *var = window->GetWinVarByName( "tabheight", false );
+	if ( var != NULL && atof( var->c_str() ) > 0.0f ) {
+		layout.tabThickness = static_cast<float>( atof( var->c_str() ) );
+	}
+	var = window->GetWinVarByName( "horizontal", false );
+	if ( var != NULL ) {
+		ParseRetailBool( var->c_str(), layout.verticalTabs );
+	}
+	float marginStart = 0.0f;
+	float marginEnd = 0.0f;
+	var = window->GetWinVarByName( "tabmargins", false );
+	if ( var != NULL ) {
+		ParseRetailFloatPair( var->c_str(), marginStart, marginEnd );
+	}
+	if ( layout.verticalTabs ) {
+		layout.tabThickness = idMath::ClampFloat( 0.0f, rect.w, layout.tabThickness );
+		layout.spanStart = rect.y + marginStart;
+		layout.spanEnd = rect.y + rect.h - marginEnd;
+		if ( layout.spanEnd <= layout.spanStart ) {
+			layout.spanStart = rect.y;
+			layout.spanEnd = rect.y + rect.h;
+		}
+	} else {
+		layout.tabThickness = idMath::ClampFloat( 0.0f, rect.h, layout.tabThickness );
+		layout.spanStart = rect.x + marginStart;
+		layout.spanEnd = rect.x + rect.w - marginEnd;
+		if ( layout.spanEnd <= layout.spanStart ) {
+			layout.spanStart = rect.x;
+			layout.spanEnd = rect.x + rect.w;
+		}
+	}
+	layout.spanPerTab = ( layout.spanEnd - layout.spanStart ) / tabCount;
+	return layout.tabThickness > 0.0f && layout.spanPerTab > 0.0f;
+}
+
+static idRectangle GetRetailTabButtonRect( const idRectangle &rect, const retailTabLayout_t &layout, int tabIndex ) {
+	if ( layout.verticalTabs ) {
+		return idRectangle( rect.x, layout.spanStart + layout.spanPerTab * tabIndex, layout.tabThickness, layout.spanPerTab );
+	}
+	return idRectangle( layout.spanStart + layout.spanPerTab * tabIndex, rect.y, layout.spanPerTab, layout.tabThickness );
+}
+
+static bool IsRetailWindowDescendantOf( idWindow *window, idWindow *ancestor ) {
+	for ( idWindow *current = window; current != NULL; current = current->GetParent() ) {
+		if ( current == ancestor ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void DrawRetailSegments( idDeviceContext *dc, const idRectangle &rect, bool vertical, float edgeSize,
+		const idMaterial *startMat, const idMaterial *middleMat, const idMaterial *endMat,
+		const idVec4 &materialColor, const idVec4 &fallbackColor ) {
+	if ( dc == NULL ) {
+		return;
+	}
+	if ( startMat == NULL && middleMat == NULL && endMat == NULL ) {
+		if ( fallbackColor.w > 0.0f ) {
+			dc->DrawFilledRect( rect.x, rect.y, rect.w, rect.h, fallbackColor );
+		}
+		return;
+	}
+	if ( vertical ) {
+		const float start = startMat != NULL ? idMath::ClampFloat( 0.0f, rect.h, edgeSize ) : 0.0f;
+		const float end = ( endMat != NULL || startMat != NULL ) ? idMath::ClampFloat( 0.0f, rect.h - start, edgeSize ) : 0.0f;
+		if ( start > 0.0f ) dc->DrawMaterial( rect.x, rect.y, rect.w, start, startMat, materialColor );
+		if ( rect.h - start - end > 0.0f ) {
+			if ( middleMat != NULL ) dc->DrawMaterial( rect.x, rect.y + start, rect.w, rect.h - start - end, middleMat, materialColor );
+			else dc->DrawFilledRect( rect.x, rect.y + start, rect.w, rect.h - start - end, fallbackColor );
+		}
+		if ( end > 0.0f ) {
+			if ( endMat != NULL ) dc->DrawMaterial( rect.x, rect.y + rect.h - end, rect.w, end, endMat, materialColor );
+			else dc->DrawMaterial( rect.x, rect.y + rect.h - end, rect.w, -end, startMat, materialColor );
+		}
+		return;
+	}
+	const float start = startMat != NULL ? idMath::ClampFloat( 0.0f, rect.w, edgeSize ) : 0.0f;
+	const float end = ( endMat != NULL || startMat != NULL ) ? idMath::ClampFloat( 0.0f, rect.w - start, edgeSize ) : 0.0f;
+	if ( start > 0.0f ) dc->DrawMaterial( rect.x, rect.y, start, rect.h, startMat, materialColor );
+	if ( rect.w - start - end > 0.0f ) {
+		if ( middleMat != NULL ) dc->DrawMaterial( rect.x + start, rect.y, rect.w - start - end, rect.h, middleMat, materialColor );
+		else dc->DrawFilledRect( rect.x + start, rect.y, rect.w - start - end, rect.h, fallbackColor );
+	}
+	if ( end > 0.0f ) {
+		if ( endMat != NULL ) dc->DrawMaterial( rect.x + rect.w - end, rect.y, end, rect.h, endMat, materialColor );
+		else dc->DrawMaterial( rect.x + rect.w - end, rect.y, -end, rect.h, startMat, materialColor );
+	}
+}
+
+static void DrawRetailSuperWindowFrame( idDeviceContext *dc, const idRectangle &rect, const idMaterial *cornerMat,
+		const idMaterial *sideMat, const idMaterial *topMat, float cornerWidth, float cornerHeight,
+		float edgeSizeX, float edgeSizeY, const idVec4 &color ) {
+	if ( dc == NULL ) {
+		return;
+	}
+	cornerWidth = idMath::Fabs( cornerWidth );
+	cornerHeight = idMath::Fabs( cornerHeight );
+	edgeSizeX = idMath::Fabs( edgeSizeX );
+	edgeSizeY = idMath::Fabs( edgeSizeY );
+	const bool drawTop = rect.h > cornerHeight;
+	if ( cornerMat != NULL && cornerWidth > 0.0f && cornerHeight > 0.0f ) {
+		if ( drawTop ) {
+			dc->DrawMaterial( rect.x, rect.y, cornerWidth, cornerHeight, cornerMat, color );
+			dc->DrawMaterial( rect.x + rect.w - cornerWidth, rect.y, -cornerWidth, cornerHeight, cornerMat, color );
+		}
+		dc->DrawMaterial( rect.x, rect.y + rect.h - cornerHeight, cornerWidth, -cornerHeight, cornerMat, color );
+		dc->DrawMaterial( rect.x + rect.w - cornerWidth, rect.y + rect.h - cornerHeight, -cornerWidth, -cornerHeight, cornerMat, color );
+	}
+	const float horizontalWidth = rect.w - cornerWidth * 2.0f;
+	if ( topMat != NULL && edgeSizeY > 0.0f && horizontalWidth > 0.0f ) {
+		if ( drawTop ) dc->DrawMaterial( rect.x + cornerWidth, rect.y, horizontalWidth, edgeSizeY, topMat, color );
+		dc->DrawMaterial( rect.x + cornerWidth, rect.y + rect.h - edgeSizeY, horizontalWidth, -edgeSizeY, topMat, color );
+	}
+	const float verticalHeight = rect.h - cornerHeight * 2.0f;
+	if ( sideMat != NULL && edgeSizeX > 0.0f && verticalHeight > 0.0f ) {
+		dc->DrawMaterial( rect.x, rect.y + cornerHeight, edgeSizeX, verticalHeight, sideMat, color );
+		dc->DrawMaterial( rect.x + rect.w - edgeSizeX, rect.y + cornerHeight, -edgeSizeX, verticalHeight, sideMat, color );
+	}
+}
+
+enum backgroundExpansionEdge_t {
+	BACKGROUND_EXPANSION_LEFT,
+	BACKGROUND_EXPANSION_RIGHT,
+	BACKGROUND_EXPANSION_TOP,
+	BACKGROUND_EXPANSION_BOTTOM
+};
+
+static void DrawBackgroundExpansionSlice( idDeviceContext *dc, const idRectangle &backgroundRect,
+		float expansionSize, float baseExtent, const idMaterial *material, const idVec4 &color,
+		backgroundExpansionEdge_t edge ) {
+	if ( dc == NULL || material == NULL || expansionSize <= 0.0f || baseExtent <= 0.0f ) {
+		return;
+	}
+	const float fraction = idMath::ClampFloat( 0.0f, 1.0f, expansionSize / baseExtent );
+	if ( fraction <= 0.0f ) {
+		return;
+	}
+	switch ( edge ) {
+		case BACKGROUND_EXPANSION_LEFT:
+			dc->DrawMaterialUV( backgroundRect.x - expansionSize, backgroundRect.y, expansionSize, backgroundRect.h,
+				material, color, 1.0f - fraction, 0.0f, 1.0f, 1.0f );
+			break;
+		case BACKGROUND_EXPANSION_RIGHT:
+			dc->DrawMaterialUV( backgroundRect.x + backgroundRect.w, backgroundRect.y, expansionSize, backgroundRect.h,
+				material, color, 0.0f, 0.0f, fraction, 1.0f );
+			break;
+		case BACKGROUND_EXPANSION_TOP:
+			dc->DrawMaterialUV( backgroundRect.x, backgroundRect.y - expansionSize, backgroundRect.w, expansionSize,
+				material, color, 0.0f, 1.0f - fraction, 1.0f, 1.0f );
+			break;
+		case BACKGROUND_EXPANSION_BOTTOM:
+			dc->DrawMaterialUV( backgroundRect.x, backgroundRect.y + backgroundRect.h, backgroundRect.w, expansionSize,
+				material, color, 0.0f, 0.0f, 1.0f, fraction );
+			break;
+	}
+}
+}
 
 bool idWindow::registerIsTemporary[MAX_EXPRESSION_REGISTERS];		// statics to assist during parsing
 //float idWindow::shaderRegisters[MAX_EXPRESSION_REGISTERS];
@@ -105,13 +667,39 @@ const idRegEntry idWindow::RegisterVars[] = {
 	{ "varbackground", idRegister::STRING },
 	{ "cvar", idRegister::STRING },
 	{ "choices", idRegister::STRING },
+	{ "values", idRegister::STRING },
 	{ "choiceVar", idRegister::STRING },
+	{ "gui", idRegister::STRING },
 	{ "bind", idRegister::STRING },
+	// Render window properties must stay register-backed so gui:: bindings update correctly.
+	{ "model", idRegister::STRING },
+	{ "anim", idRegister::STRING },
+	{ "animClass", idRegister::STRING },
 	{ "modelRotate", idRegister::VEC4 },
 	{ "modelOrigin", idRegister::VEC4 },
 	{ "lightOrigin", idRegister::VEC4 },
 	{ "lightColor", idRegister::VEC4 },
 	{ "viewOffset", idRegister::VEC4 },
+	{ "customShader", idRegister::STRING },
+	{ "skin", idRegister::STRING },
+	{ "model1", idRegister::STRING },
+	{ "joint1", idRegister::STRING },
+	{ "anim1", idRegister::STRING },
+	{ "animClass1", idRegister::STRING },
+	{ "model2", idRegister::STRING },
+	{ "joint2", idRegister::STRING },
+	{ "anim2", idRegister::STRING },
+	{ "animClass2", idRegister::STRING },
+	{ "lightOrigin0", idRegister::VEC4 },
+	{ "lightColor0", idRegister::VEC4 },
+	{ "lightOrigin1", idRegister::VEC4 },
+	{ "lightColor1", idRegister::VEC4 },
+	{ "lightOrigin2", idRegister::VEC4 },
+	{ "lightColor2", idRegister::VEC4 },
+	{ "lightOrigin3", idRegister::VEC4 },
+	{ "lightColor3", idRegister::VEC4 },
+	{ "lightOrigin4", idRegister::VEC4 },
+	{ "lightColor4", idRegister::VEC4 },
 	{ "hideCursor", idRegister::BOOL},
 	{ "maxchars", idRegister::INT},
 	{ "backgroundHover", idRegister::STRING },
@@ -138,14 +726,10 @@ const char *idWindow::ScriptNames[] = {
 // jmarshall - quake 4
 	"onBackAction",
 	"onTabRelease",
-	"onTabActivate",
 	"onGainFocus",
 	"onLoseFocus",
 	"onSelChange",
-	"onSliderChange",
 	"onInit",
-	"onStartup",
-	"onMaxChars",
 	"onJoyStart",
 	"onJoySelect",
 	"onJoyBack",
@@ -157,8 +741,12 @@ const char *idWindow::ScriptNames[] = {
 	"onJoyRight",
 	"onJoyButton1",
 	"onJoyButton2",
-	"onJoyBackButton"
+	"onJoyBackButton",
 // jmarshall end
+	"onTabActivate",
+	"onSliderChange",
+	"onStartup",
+	"onMaxChars"
 };
 
 static bool ParseScreenAlignXToken( const idToken &token, unsigned char &outAlign ) {
@@ -201,566 +789,14 @@ static bool ParseScreenAlignYToken( const idToken &token, unsigned char &outAlig
 	return false;
 }
 
-struct tabContainerLayout_t {
-	bool	verticalTabs;
-	float	tabThickness;
-	float	spanStart;
-	float	spanEnd;
-	float	spanPerTab;
-};
-
-struct tabSeparatorStyle_t {
-	float left;
-	float top;
-	float right;
-	float bottom;
-	bool useFullRect;
-};
-
-static idWinVar *GetWindowVarForTabLayout( const idWindow *window, const char *name ) {
-	return const_cast<idWindow *>( window )->GetWinVarByName( name, false );
-}
-
-static bool ParseFloatPairValue( const char *value, float &first, float &second ) {
-	if ( value == NULL || value[0] == '\0' ) {
-		return false;
-	}
-
-	return ( sscanf( value, "%f , %f", &first, &second ) == 2 ) ||
-		   ( sscanf( value, "%f %f", &first, &second ) == 2 );
-}
-
-static bool ParseFloatQuadValue( const char *value, float &a, float &b, float &c, float &d ) {
-	if ( value == NULL || value[0] == '\0' ) {
-		return false;
-	}
-
-	return ( sscanf( value, "%f , %f , %f , %f", &a, &b, &c, &d ) == 4 ) ||
-		   ( sscanf( value, "%f %f %f %f", &a, &b, &c, &d ) == 4 );
-}
-
-static idRectangle GetWindowMarginsInsetRect( const idWindow *window, const idRectangle &rect ) {
-	idRectangle inset = rect;
-	if ( window == NULL ) {
-		return inset;
-	}
-
-	idWinVar *marginsVar = GetWindowVarForTabLayout( window, "margins" );
-	if ( marginsVar == NULL ) {
-		return inset;
-	}
-
-	float marginLeft = 0.0f;
-	float marginRight = 0.0f;
-	float marginTop = 0.0f;
-	float marginBottom = 0.0f;
-	if ( !ParseFloatQuadValue( marginsVar->c_str(), marginLeft, marginRight, marginTop, marginBottom ) ) {
-		return inset;
-	}
-
-	inset.x += marginLeft;
-	inset.y += marginTop;
-	inset.w -= ( marginLeft + marginRight );
-	inset.h -= ( marginTop + marginBottom );
-	return inset;
-}
-
-static void DrawRetailSuperWindowFrame( idDeviceContext *dc, const idRectangle &drawRect, const idMaterial *cornerMat, const idMaterial *sideMat, const idMaterial *topMat, float cornerWidth, float cornerHeight, float edgeSizeX, float edgeSizeY ) {
-	if ( dc == NULL ) {
-		return;
-	}
-
-	cornerWidth = idMath::Fabs( cornerWidth );
-	cornerHeight = idMath::Fabs( cornerHeight );
-	edgeSizeX = idMath::Fabs( edgeSizeX );
-	edgeSizeY = idMath::Fabs( edgeSizeY );
-	const idVec4 &frameColor = idDeviceContext::colorWhite;
-
-	const bool drawTopSegments = ( drawRect.h > cornerHeight );
-
-	if ( cornerMat != NULL && cornerWidth > 0.0f && cornerHeight > 0.0f ) {
-		if ( drawTopSegments ) {
-			dc->DrawMaterial( drawRect.x, drawRect.y, cornerWidth, cornerHeight, cornerMat, frameColor );
-			dc->DrawMaterial( drawRect.x + drawRect.w - cornerWidth, drawRect.y, -cornerWidth, cornerHeight, cornerMat, frameColor );
-		}
-
-		dc->DrawMaterial( drawRect.x, drawRect.y + drawRect.h - cornerHeight, cornerWidth, -cornerHeight, cornerMat, frameColor );
-		dc->DrawMaterial( drawRect.x + drawRect.w - cornerWidth, drawRect.y + drawRect.h - cornerHeight, -cornerWidth, -cornerHeight, cornerMat, frameColor );
-	}
-
-	const float horizontalX = drawRect.x + cornerWidth;
-	const float horizontalW = drawRect.w - cornerWidth - cornerWidth;
-	if ( topMat != NULL && edgeSizeY > 0.0f && horizontalW > 0.0f ) {
-		if ( drawTopSegments ) {
-			dc->DrawMaterial( horizontalX, drawRect.y, horizontalW, edgeSizeY, topMat, frameColor );
-		}
-
-		dc->DrawMaterial( horizontalX, drawRect.y + drawRect.h - edgeSizeY, horizontalW, -edgeSizeY, topMat, frameColor );
-	}
-
-	const float verticalY = drawRect.y + cornerHeight;
-	const float verticalH = drawRect.h - cornerHeight - cornerHeight;
-	if ( sideMat != NULL && edgeSizeX > 0.0f && verticalH > 0.0f ) {
-		dc->DrawMaterial( drawRect.x, verticalY, edgeSizeX, verticalH, sideMat, frameColor );
-		dc->DrawMaterial( drawRect.x + drawRect.w - edgeSizeX, verticalY, -edgeSizeX, verticalH, sideMat, frameColor );
-	}
-}
-
-static bool ParseVec4Value( const char *value, idVec4 &outColor ) {
-	if ( value == NULL || value[0] == '\0' ) {
-		return false;
-	}
-
-	return ( sscanf( value, "%f , %f , %f , %f", &outColor.x, &outColor.y, &outColor.z, &outColor.w ) == 4 ) ||
-		   ( sscanf( value, "%f %f %f %f", &outColor.x, &outColor.y, &outColor.z, &outColor.w ) == 4 );
-}
-
-static bool ParseSingleFloatValue( const char *value, float &outFloat ) {
-	if ( value == NULL || value[0] == '\0' ) {
-		return false;
-	}
-
-	float parsed = 0.0f;
-	if ( sscanf( value, "%f", &parsed ) != 1 ) {
-		return false;
-	}
-
-	outFloat = parsed;
-	return true;
-}
-
-static bool ParseBoolValue( const char *value, bool &outValue ) {
-	if ( value == NULL || value[0] == '\0' ) {
-		return false;
-	}
-
-	idStr work = value;
-	work.StripLeading( ' ' );
-	work.StripTrailing( ' ' );
-	if ( work.Length() == 0 ) {
-		return false;
-	}
-
-	if ( !work.Icmp( "true" ) || !work.Icmp( "yes" ) || !work.Icmp( "on" ) ) {
-		outValue = true;
-		return true;
-	}
-	if ( !work.Icmp( "false" ) || !work.Icmp( "no" ) || !work.Icmp( "off" ) ) {
-		outValue = false;
-		return true;
-	}
-
-	outValue = ( atof( work.c_str() ) != 0.0f );
-	return true;
-}
-
-static bool BuildTabContainerLayout( const idWindow *window, const idRectangle &containerRect, int tabCount, tabContainerLayout_t &layout ) {
-	if ( tabCount <= 0 ) {
-		return false;
-	}
-
-	layout.verticalTabs = false;
-	layout.tabThickness = 20.0f;
-	layout.spanStart = 0.0f;
-	layout.spanEnd = 0.0f;
-	layout.spanPerTab = 0.0f;
-
-	idWinVar *tabHeightVar = GetWindowVarForTabLayout( window, "tabheight" );
-	if ( tabHeightVar != NULL ) {
-		const float parsedHeight = static_cast<float>( atof( tabHeightVar->c_str() ) );
-		if ( parsedHeight > 0.0f ) {
-			layout.tabThickness = parsedHeight;
-		}
-	}
-
-	// Legacy Q4/Prey convention: horizontal 1 stacks tabs vertically along the left edge.
-	idWinVar *horizontalVar = GetWindowVarForTabLayout( window, "horizontal" );
-	if ( horizontalVar != NULL ) {
-		bool parsedHorizontal = false;
-		if ( ParseBoolValue( horizontalVar->c_str(), parsedHorizontal ) ) {
-			layout.verticalTabs = parsedHorizontal;
-		}
-	}
-
-	float marginStart = 0.0f;
-	float marginEnd = 0.0f;
-	idWinVar *tabMarginsVar = GetWindowVarForTabLayout( window, "tabmargins" );
-	if ( tabMarginsVar != NULL ) {
-		if ( !ParseFloatPairValue( tabMarginsVar->c_str(), marginStart, marginEnd ) ) {
-			marginStart = 0.0f;
-			marginEnd = 0.0f;
-		}
-	}
-
-	if ( layout.verticalTabs ) {
-		layout.tabThickness = idMath::ClampFloat( 0.0f, containerRect.w, layout.tabThickness );
-		layout.spanStart = containerRect.y + marginStart;
-		layout.spanEnd = containerRect.y + containerRect.h - marginEnd;
-		if ( layout.spanEnd <= layout.spanStart ) {
-			layout.spanStart = containerRect.y;
-			layout.spanEnd = containerRect.y + containerRect.h;
-		}
-	} else {
-		layout.tabThickness = idMath::ClampFloat( 0.0f, containerRect.h, layout.tabThickness );
-		layout.spanStart = containerRect.x + marginStart;
-		layout.spanEnd = containerRect.x + containerRect.w - marginEnd;
-		if ( layout.spanEnd <= layout.spanStart ) {
-			layout.spanStart = containerRect.x;
-			layout.spanEnd = containerRect.x + containerRect.w;
-		}
-	}
-
-	if ( layout.tabThickness <= 0.0f ) {
-		return false;
-	}
-
-	layout.spanPerTab = ( layout.spanEnd - layout.spanStart ) / tabCount;
-	return layout.spanPerTab > 0.0f;
-}
-
-static idRectangle GetTabButtonRect( const idRectangle &containerRect, const tabContainerLayout_t &layout, int tabIndex ) {
-	if ( layout.verticalTabs ) {
-		return idRectangle( containerRect.x, layout.spanStart + layout.spanPerTab * tabIndex, layout.tabThickness, layout.spanPerTab );
-	}
-
-	return idRectangle( layout.spanStart + layout.spanPerTab * tabIndex, containerRect.y, layout.spanPerTab, layout.tabThickness );
-}
-
-static bool TabButtonRectContainsCursor( const idRectangle &tabRect, bool verticalTabs, bool isLastTab, float x, float y ) {
-	if ( x < tabRect.x || y < tabRect.y ) {
-		return false;
-	}
-
-	if ( verticalTabs ) {
-		return ( x <= tabRect.Right() ) && ( isLastTab ? ( y <= tabRect.Bottom() ) : ( y < tabRect.Bottom() ) );
-	}
-
-	return ( y <= tabRect.Bottom() ) && ( isLastTab ? ( x <= tabRect.Right() ) : ( x < tabRect.Right() ) );
-}
-
-static bool IsWindowDescendantOf( idWindow *window, idWindow *ancestor ) {
-	for ( idWindow *current = window; current != NULL; current = current->GetParent() ) {
-		if ( current == ancestor ) {
-			return true;
-		}
-	}
-
-	return false;
-}
-
-static const idMaterial *FindWindowMaterial( const idWindow *window, const char *materialVarName ) {
-	idWinVar *materialVar = GetWindowVarForTabLayout( window, materialVarName );
-	if ( materialVar == NULL ) {
-		return NULL;
-	}
-
-	const char *materialName = materialVar->c_str();
-	if ( materialName == NULL || materialName[0] == '\0' ) {
-		return NULL;
-	}
-
-	return declManager->FindMaterial( materialName );
-}
-
-enum backgroundExpansionEdge_t {
-	BACKGROUND_EXPANSION_LEFT,
-	BACKGROUND_EXPANSION_RIGHT,
-	BACKGROUND_EXPANSION_TOP,
-	BACKGROUND_EXPANSION_BOTTOM
-};
-
-static void DrawBackgroundExpansionSlice( idDeviceContext *dc, const idRectangle &backgroundRect, float expansionSize, float baseExtent, const idMaterial *material, const idVec4 &color, backgroundExpansionEdge_t edge ) {
-	if ( dc == NULL || material == NULL || expansionSize <= 0.0f || baseExtent <= 0.0f ) {
-		return;
-	}
-
-	const float fraction = idMath::ClampFloat( 0.0f, 1.0f, expansionSize / baseExtent );
-	if ( fraction <= 0.0f ) {
-		return;
-	}
-
-	switch ( edge ) {
-		case BACKGROUND_EXPANSION_LEFT:
-			dc->DrawMaterialUV( backgroundRect.x - expansionSize, backgroundRect.y, expansionSize, backgroundRect.h, material, color, 1.0f - fraction, 0.0f, 1.0f, 1.0f );
-			break;
-
-		case BACKGROUND_EXPANSION_RIGHT:
-			dc->DrawMaterialUV( backgroundRect.x + backgroundRect.w, backgroundRect.y, expansionSize, backgroundRect.h, material, color, 0.0f, 0.0f, fraction, 1.0f );
-			break;
-
-		case BACKGROUND_EXPANSION_TOP:
-			dc->DrawMaterialUV( backgroundRect.x, backgroundRect.y - expansionSize, backgroundRect.w, expansionSize, material, color, 0.0f, 1.0f - fraction, 1.0f, 1.0f );
-			break;
-
-		case BACKGROUND_EXPANSION_BOTTOM:
-			dc->DrawMaterialUV( backgroundRect.x, backgroundRect.y + backgroundRect.h, backgroundRect.w, expansionSize, material, color, 0.0f, 0.0f, 1.0f, fraction );
-			break;
-	}
-}
-
-static void DrawTabButtonSegments( idDeviceContext *dc, const idRectangle &tabRect, bool verticalTabs, float edgeSize, const idMaterial *startMat, const idMaterial *middleMat, const idMaterial *endMat, const idVec4 &materialColor, const idVec4 &fallbackColor ) {
-	if ( dc == NULL ) {
-		return;
-	}
-
-	const bool hasAnyMaterial = ( startMat != NULL ) || ( middleMat != NULL ) || ( endMat != NULL );
-	if ( !hasAnyMaterial ) {
-		dc->DrawFilledRect( tabRect.x, tabRect.y, tabRect.w, tabRect.h, fallbackColor );
-		return;
-	}
-
-	if ( verticalTabs ) {
-		const float topEdge = ( startMat != NULL ) ? idMath::ClampFloat( 0.0f, tabRect.h, edgeSize ) : 0.0f;
-		const bool mirrorStartToEnd = ( endMat == NULL && startMat != NULL );
-		const float bottomEdge = ( endMat != NULL || mirrorStartToEnd ) ? idMath::ClampFloat( 0.0f, tabRect.h - topEdge, edgeSize ) : 0.0f;
-		const float middleHeight = tabRect.h - topEdge - bottomEdge;
-
-		if ( startMat != NULL && topEdge > 0.0f ) {
-			dc->DrawMaterial( tabRect.x, tabRect.y, tabRect.w, topEdge, startMat, materialColor );
-		}
-
-		if ( middleHeight > 0.0f ) {
-			if ( middleMat != NULL ) {
-				dc->DrawMaterial( tabRect.x, tabRect.y + topEdge, tabRect.w, middleHeight, middleMat, materialColor );
-			} else {
-				dc->DrawFilledRect( tabRect.x, tabRect.y + topEdge, tabRect.w, middleHeight, fallbackColor );
-			}
-		}
-
-		if ( bottomEdge > 0.0f ) {
-			if ( endMat != NULL ) {
-				dc->DrawMaterial( tabRect.x, tabRect.y + tabRect.h - bottomEdge, tabRect.w, bottomEdge, endMat, materialColor );
-			} else if ( mirrorStartToEnd ) {
-				dc->DrawMaterial( tabRect.x, tabRect.y + tabRect.h - bottomEdge, tabRect.w, -bottomEdge, startMat, materialColor );
-			}
-		}
-		return;
-	}
-
-	const float leftEdge = ( startMat != NULL ) ? idMath::ClampFloat( 0.0f, tabRect.w, edgeSize ) : 0.0f;
-	const bool mirrorStartToEnd = ( endMat == NULL && startMat != NULL );
-	const float rightEdge = ( endMat != NULL || mirrorStartToEnd ) ? idMath::ClampFloat( 0.0f, tabRect.w - leftEdge, edgeSize ) : 0.0f;
-	const float middleWidth = tabRect.w - leftEdge - rightEdge;
-
-	if ( startMat != NULL && leftEdge > 0.0f ) {
-		dc->DrawMaterial( tabRect.x, tabRect.y, leftEdge, tabRect.h, startMat, materialColor );
-	}
-
-	if ( middleWidth > 0.0f ) {
-		if ( middleMat != NULL ) {
-			dc->DrawMaterial( tabRect.x + leftEdge, tabRect.y, middleWidth, tabRect.h, middleMat, materialColor );
-		} else {
-			dc->DrawFilledRect( tabRect.x + leftEdge, tabRect.y, middleWidth, tabRect.h, fallbackColor );
-		}
-	}
-
-	if ( rightEdge > 0.0f ) {
-		if ( endMat != NULL ) {
-			dc->DrawMaterial( tabRect.x + tabRect.w - rightEdge, tabRect.y, rightEdge, tabRect.h, endMat, materialColor );
-		} else if ( mirrorStartToEnd ) {
-			dc->DrawMaterial( tabRect.x + tabRect.w - rightEdge, tabRect.y, -rightEdge, tabRect.h, startMat, materialColor );
-		}
-	}
-}
-
-static void GetTabSeparatorStyle( const idWindow *tab, tabSeparatorStyle_t &style ) {
-	style.left = 1.0f;
-	style.top = 1.0f;
-	style.right = 1.0f;
-	style.bottom = 1.0f;
-	style.useFullRect = false;
-
-	idVec4 parsedLines;
-	idWinVar *separatorLinesVar = GetWindowVarForTabLayout( tab, "seperatorlines" );
-	if ( separatorLinesVar == NULL ) {
-		separatorLinesVar = GetWindowVarForTabLayout( tab, "separatorlines" );
-	}
-	if ( separatorLinesVar != NULL && ParseVec4Value( separatorLinesVar->c_str(), parsedLines ) ) {
-		style.left = parsedLines.x;
-		style.top = parsedLines.y;
-		style.right = parsedLines.z;
-		style.bottom = parsedLines.w;
-	}
-
-	idWinVar *separatorMarginVar = GetWindowVarForTabLayout( tab, "seperatormargin" );
-	if ( separatorMarginVar == NULL ) {
-		separatorMarginVar = GetWindowVarForTabLayout( tab, "separatormargin" );
-	}
-	bool parsedUseFullRect = false;
-	if ( separatorMarginVar != NULL && ParseBoolValue( separatorMarginVar->c_str(), parsedUseFullRect ) ) {
-		style.useFullRect = parsedUseFullRect;
-	}
-}
-
-static void GetTabContainerMargins( const idWindow *window, float &marginStart, float &marginEnd ) {
-	marginStart = 0.0f;
-	marginEnd = 0.0f;
-
-	if ( window == NULL ) {
-		return;
-	}
-
-	idWinVar *tabMarginsVar = GetWindowVarForTabLayout( window, "tabmargins" );
-	if ( tabMarginsVar == NULL ) {
-		return;
-	}
-
-	ParseFloatPairValue( tabMarginsVar->c_str(), marginStart, marginEnd );
-}
-
-static void DrawBorderLineWithCutouts( idDeviceContext *dc, const idRectangle &lineRect, bool horizontal, const idVec4 &separatorColor, const idList<idRectangle> *cutouts ) {
-	if ( dc == NULL || lineRect.w <= 0.0f || lineRect.h <= 0.0f ) {
-		return;
-	}
-
-	if ( cutouts == NULL || cutouts->Num() <= 0 ) {
-		dc->DrawFilledRect( lineRect.x, lineRect.y, lineRect.w, lineRect.h, separatorColor );
-		return;
-	}
-
-	idList<idVec2> intervals;
-	for ( int i = 0; i < cutouts->Num(); ++i ) {
-		const idRectangle &cut = ( *cutouts )[ i ];
-
-		if ( horizontal ) {
-			const float lineMinY = lineRect.y;
-			const float lineMaxY = lineRect.y + lineRect.h;
-			const float cutMinY = cut.y;
-			const float cutMaxY = cut.y + cut.h;
-			if ( cutMaxY < lineMinY || cutMinY > lineMaxY ) {
-				continue;
-			}
-
-			const float start = idMath::ClampFloat( lineRect.x, lineRect.x + lineRect.w, cut.x );
-			const float end = idMath::ClampFloat( lineRect.x, lineRect.x + lineRect.w, cut.x + cut.w );
-			if ( end > start ) {
-				intervals.Append( idVec2( start, end ) );
-			}
-		} else {
-			const float lineMinX = lineRect.x;
-			const float lineMaxX = lineRect.x + lineRect.w;
-			const float cutMinX = cut.x;
-			const float cutMaxX = cut.x + cut.w;
-			if ( cutMaxX < lineMinX || cutMinX > lineMaxX ) {
-				continue;
-			}
-
-			const float start = idMath::ClampFloat( lineRect.y, lineRect.y + lineRect.h, cut.y );
-			const float end = idMath::ClampFloat( lineRect.y, lineRect.y + lineRect.h, cut.y + cut.h );
-			if ( end > start ) {
-				intervals.Append( idVec2( start, end ) );
-			}
-		}
-	}
-
-	if ( intervals.Num() <= 0 ) {
-		dc->DrawFilledRect( lineRect.x, lineRect.y, lineRect.w, lineRect.h, separatorColor );
-		return;
-	}
-
-	idList<int> used;
-	used.SetNum( intervals.Num() );
-	for ( int i = 0; i < used.Num(); ++i ) {
-		used[ i ] = 0;
-	}
-
-	const float lineStart = horizontal ? lineRect.x : lineRect.y;
-	const float lineEnd = horizontal ? ( lineRect.x + lineRect.w ) : ( lineRect.y + lineRect.h );
-	float segmentStart = lineStart;
-
-	idList<idVec2> mergedGaps;
-	for ( int picked = 0; picked < intervals.Num(); ++picked ) {
-		int nextIndex = -1;
-		float nextStart = idMath::INFINITY;
-		for ( int i = 0; i < intervals.Num(); ++i ) {
-			if ( used[ i ] == 0 && intervals[ i ].x < nextStart ) {
-				nextStart = intervals[ i ].x;
-				nextIndex = i;
-			}
-		}
-
-		if ( nextIndex < 0 ) {
-			break;
-		}
-
-		used[ nextIndex ] = 1;
-		const idVec2 gap = intervals[ nextIndex ];
-		if ( mergedGaps.Num() == 0 ) {
-			mergedGaps.Append( gap );
-			continue;
-		}
-
-		idVec2 &lastGap = mergedGaps[ mergedGaps.Num() - 1 ];
-		if ( gap.x <= lastGap.y ) {
-			if ( gap.y > lastGap.y ) {
-				lastGap.y = gap.y;
-			}
-		} else {
-			mergedGaps.Append( gap );
-		}
-	}
-
-	for ( int i = 0; i < mergedGaps.Num(); ++i ) {
-		const float gapStart = idMath::ClampFloat( lineStart, lineEnd, mergedGaps[ i ].x );
-		const float gapEnd = idMath::ClampFloat( lineStart, lineEnd, mergedGaps[ i ].y );
-		if ( gapEnd <= gapStart ) {
-			continue;
-		}
-
-		if ( gapStart > segmentStart ) {
-			const float length = gapStart - segmentStart;
-			if ( horizontal ) {
-				dc->DrawFilledRect( segmentStart, lineRect.y, length, lineRect.h, separatorColor );
-			} else {
-				dc->DrawFilledRect( lineRect.x, segmentStart, lineRect.w, length, separatorColor );
-			}
-		}
-
-		segmentStart = gapEnd;
-	}
-
-	if ( lineEnd > segmentStart ) {
-		const float length = lineEnd - segmentStart;
-		if ( horizontal ) {
-			dc->DrawFilledRect( segmentStart, lineRect.y, length, lineRect.h, separatorColor );
-		} else {
-			dc->DrawFilledRect( lineRect.x, segmentStart, lineRect.w, length, separatorColor );
-		}
-	}
-}
-
-static void DrawTabSeparatorLines( idDeviceContext *dc, const idRectangle &tabRect, const tabSeparatorStyle_t &style, const idVec4 &separatorColor, const idList<idRectangle> *cutouts = NULL ) {
-	if ( dc == NULL ) {
-		return;
-	}
-
-	if ( style.left > 0.0f && tabRect.h > 0.0f ) {
-		const float lineW = idMath::ClampFloat( 0.0f, tabRect.w, style.left );
-		DrawBorderLineWithCutouts( dc, idRectangle( tabRect.x, tabRect.y, lineW, tabRect.h ), false, separatorColor, cutouts );
-	}
-
-	if ( style.top > 0.0f && tabRect.w > 0.0f ) {
-		const float lineH = idMath::ClampFloat( 0.0f, tabRect.h, style.top );
-		DrawBorderLineWithCutouts( dc, idRectangle( tabRect.x, tabRect.y, tabRect.w, lineH ), true, separatorColor, cutouts );
-	}
-
-	if ( style.right > 0.0f && tabRect.h > 0.0f ) {
-		const float lineW = idMath::ClampFloat( 0.0f, tabRect.w, style.right );
-		DrawBorderLineWithCutouts( dc, idRectangle( tabRect.x + tabRect.w - lineW, tabRect.y, lineW, tabRect.h ), false, separatorColor, cutouts );
-	}
-
-	if ( style.bottom > 0.0f && tabRect.w > 0.0f ) {
-		const float lineH = idMath::ClampFloat( 0.0f, tabRect.h, style.bottom );
-		DrawBorderLineWithCutouts( dc, idRectangle( tabRect.x, tabRect.y + tabRect.h - lineH, tabRect.w, lineH ), true, separatorColor, cutouts );
-	}
-}
-
 /*
 ================
 idWindow::CommonInit
 ================
 */
 void idWindow::CommonInit() {
+	// An off-screen GUI can be saved before CalcRects/Redraw ever runs.
+	actualX = actualY = 0.0f;
 	childID = 0;
 	flags = 0;
 	lastTimeRun = 0;
@@ -776,18 +812,18 @@ void idWindow::CommonInit() {
 	borderSize = 0;
 	noTime = false;
 	visible = true;
+	alwaysThink = false;
 	textAlign = 0;
 	textAlignx = 0;
 	textAligny = 0;
 	screenAlignX = SCREEN_ALIGN_X_MIDDLE;
 	screenAlignY = SCREEN_ALIGN_Y_MIDDLE;
-	windowDefType = "windowDef";
-	activeTabIndex = -1;
-	tabContainerInitialized = false;
 	noEvents = false;
 	rotate = 0;
 	shear.Zero();
 	textScale = 0.35f;
+	textspacing = 0.0f;
+	textstyle = 0.0f;
 	backColor.Zero();
 	foreColor = idVec4(1, 1, 1, 1);
 	hoverColor = idVec4(1, 1, 1, 1);
@@ -808,6 +844,9 @@ void idWindow::CommonInit() {
 	timeLine = -1;
 	textShadow = 0;
 	hover = false;
+	windowDefType = "windowDef";
+	activeTabIndex = -1;
+	tabContainerInitialized = false;
 	retailCreditArmed = false;
 	retailTextEffectStartTime = -1;
 
@@ -817,7 +856,7 @@ void idWindow::CommonInit() {
 
 	hideCursor = false;
 
-// jmarshall - gui crash
+	ops.clear();
 	numOps = 0;
 
 	backColor_r.Bind(backColor, 0);
@@ -850,7 +889,7 @@ idWindow::Size
 */
 size_t idWindow::Size() {
 	int c = children.Num();
-	int sz = 0;
+	size_t sz = 0;
 	for (int i = 0; i < c; i++) {
 		sz += children[i]->Size();
 	}
@@ -865,7 +904,8 @@ idWindow::Allocated
 */
 size_t idWindow::Allocated() {
 	int i, c;
-	int sz = name.Allocated();
+	size_t sz = name.Allocated();
+	sz += ops.size() * sizeof( wexpOp_t );
 	sz += text.Size();
 	sz += backGroundName.Size();
 	sz += backgroundLeft.Size();
@@ -931,6 +971,13 @@ idWindow::CleanUp
 ================
 */
 void idWindow::CleanUp() {
+	if ( gui != NULL ) {
+		idWindow *desktop = gui->GetDesktop();
+		if ( desktop != NULL && desktop != this ) {
+			desktop->ClearTrackedWindowReference( this );
+		}
+	}
+
 	int i, c = drawWindows.Num();
 	for (i = 0; i < c; i++) {
 		delete drawWindows[i].simp;
@@ -961,6 +1008,7 @@ idWindow::~idWindow
 ================
 */
 idWindow::~idWindow() {
+	UI_LegacyObservationDestroyed(this);
 	CleanUp();
 }
 
@@ -1009,148 +1057,96 @@ float idWindow::GetMaxCharWidth() {
 	return dc->MaxCharWidth(textScale);
 }
 
-/*
-================
-idWindow::CreateRetailGuiVar
-================
-*/
-idWinVar *idWindow::CreateRetailGuiVar( const char *name ) {
-	if ( name == NULL ) {
+idWinVar *idWindow::CreateRetailGuiVar( const char *varName ) {
+	if ( varName == NULL ) {
 		return NULL;
 	}
 
 	idWinVar *var = NULL;
-	if ( idStr::Icmp( name, "onstart" ) == 0 ||
-		idStr::Icmp( name, "oncallenable" ) == 0 ||
-		idStr::Icmp( name, "oncalldisable" ) == 0 ||
-		idStr::Icmp( name, "oncallreset" ) == 0 ) {
+	if ( idStr::Icmp( varName, "onstart" ) == 0 ||
+		idStr::Icmp( varName, "oncallenable" ) == 0 ||
+		idStr::Icmp( varName, "oncalldisable" ) == 0 ||
+		idStr::Icmp( varName, "oncallreset" ) == 0 ) {
 		var = new idWinBool();
 		var->Set( "0" );
-	} else if ( idStr::Icmp( name, "splinein" ) == 0 ) {
+	} else if ( idStr::Icmp( varName, "splinein" ) == 0 ) {
 		var = new idWinBool();
 		var->Set( "1" );
-	} else if ( idStr::Icmp( name, "duration" ) == 0 ||
-		idStr::Icmp( name, "trailoffset" ) == 0 ) {
+	} else if ( idStr::Icmp( varName, "duration" ) == 0 || idStr::Icmp( varName, "trailoffset" ) == 0 ) {
 		var = new idWinFloat();
-		var->Set( idStr::Icmp( name, "duration" ) == 0 ? "1000" : "0.01" );
-	} else if ( idStr::Icmp( name, "splinepoints" ) == 0 ||
-		idStr::Icmp( name, "trails" ) == 0 ) {
+		var->Set( idStr::Icmp( varName, "duration" ) == 0 ? "1000" : "0.01" );
+	} else if ( idStr::Icmp( varName, "splinepoints" ) == 0 || idStr::Icmp( varName, "trails" ) == 0 ) {
 		var = new idWinInt();
-		var->Set( idStr::Icmp( name, "splinepoints" ) == 0 ? "5" : "10" );
+		var->Set( idStr::Icmp( varName, "splinepoints" ) == 0 ? "5" : "10" );
 	}
 
 	if ( var != NULL ) {
-		var->SetName( name );
+		var->SetName( varName );
 		AddDefinedVar( var );
 	}
-
 	return var;
 }
 
-/*
-================
-idWindow::FindDefinedVarByNameNoCreate
-================
-*/
-idWinVar *idWindow::FindDefinedVarByNameNoCreate( const char *name ) {
-	if ( name == NULL ) {
-		return NULL;
-	}
-
-	const int count = definedVars.Num();
-	for ( int i = 0; i < count; ++i ) {
-		if ( definedVars[ i ] != NULL && idStr::Icmp( definedVars[ i ]->GetName(), name ) == 0 ) {
-			return definedVars[ i ];
+idWinVar *idWindow::FindDefinedVarByNameNoCreate( const char *varName ) {
+	for ( int i = 0; varName != NULL && i < definedVars.Num(); ++i ) {
+		if ( definedVars[i] != NULL && idStr::Icmp( definedVars[i]->GetName(), varName ) == 0 ) {
+			return definedVars[i];
 		}
 	}
-
 	return NULL;
 }
 
-/*
-================
-idWindow::GetWinVarIntValue
-================
-*/
-int idWindow::GetWinVarIntValue( const char *name, int defaultValue ) {
-	idWinVar *var = GetWinVarByName( name, false );
-	return ( var != NULL ) ? atoi( var->c_str() ) : defaultValue;
+int idWindow::GetWinVarIntValue( const char *varName, int defaultValue ) {
+	idWinVar *var = GetWinVarByName( varName, false );
+	return var != NULL ? atoi( var->c_str() ) : defaultValue;
 }
 
-/*
-================
-idWindow::GetWinVarFloatValue
-================
-*/
-float idWindow::GetWinVarFloatValue( const char *name, float defaultValue ) {
-	idWinVar *var = GetWinVarByName( name, false );
-	return ( var != NULL ) ? static_cast<float>( atof( var->c_str() ) ) : defaultValue;
+float idWindow::GetWinVarFloatValue( const char *varName, float defaultValue ) {
+	idWinVar *var = GetWinVarByName( varName, false );
+	return var != NULL ? static_cast<float>( atof( var->c_str() ) ) : defaultValue;
 }
 
-/*
-================
-idWindow::HandleRetailSpecialVars
-================
-*/
 void idWindow::HandleRetailSpecialVars() {
 	idWindow *eventTarget = this;
 	if ( gui != NULL && gui->GetDesktop() != NULL ) {
 		eventTarget = gui->GetDesktop();
 	}
 
-	idWinBool *onCallEnableVar = dynamic_cast<idWinBool *>( FindDefinedVarByNameNoCreate( "onCallEnable" ) );
-	if ( onCallEnableVar != NULL && *onCallEnableVar ) {
-		*onCallEnableVar = false;
+	idWinBool *onCallEnable = dynamic_cast<idWinBool *>( FindDefinedVarByNameNoCreate( "onCallEnable" ) );
+	if ( onCallEnable != NULL && *onCallEnable ) {
+		*onCallEnable = false;
 		eventTarget->RunNamedEvent( "Enable" );
 	}
-
-	idWinBool *onCallDisableVar = dynamic_cast<idWinBool *>( FindDefinedVarByNameNoCreate( "onCallDisable" ) );
-	if ( onCallDisableVar != NULL && *onCallDisableVar ) {
-		*onCallDisableVar = false;
+	idWinBool *onCallDisable = dynamic_cast<idWinBool *>( FindDefinedVarByNameNoCreate( "onCallDisable" ) );
+	if ( onCallDisable != NULL && *onCallDisable ) {
+		*onCallDisable = false;
 		eventTarget->RunNamedEvent( "Disable" );
 	}
-
-	idWinBool *onCallResetVar = dynamic_cast<idWinBool *>( FindDefinedVarByNameNoCreate( "onCallReset" ) );
-	if ( onCallResetVar != NULL && *onCallResetVar ) {
-		*onCallResetVar = false;
+	idWinBool *onCallReset = dynamic_cast<idWinBool *>( FindDefinedVarByNameNoCreate( "onCallReset" ) );
+	if ( onCallReset != NULL && *onCallReset ) {
+		*onCallReset = false;
 		eventTarget->RunNamedEvent( "Reset" );
 	}
-
-	idWinBool *onStartVar = dynamic_cast<idWinBool *>( FindDefinedVarByNameNoCreate( "onStart" ) );
-	if ( onStartVar != NULL && *onStartVar ) {
-		*onStartVar = false;
-		idWinBool *splineInVar = dynamic_cast<idWinBool *>( GetWinVarByName( "splineIn", false ) );
-		if ( IsRetailSplineWindow() && splineInVar != NULL && *splineInVar && gui != NULL ) {
+	idWinBool *onStart = dynamic_cast<idWinBool *>( FindDefinedVarByNameNoCreate( "onStart" ) );
+	if ( onStart != NULL && *onStart ) {
+		*onStart = false;
+		idWinBool *splineIn = dynamic_cast<idWinBool *>( GetWinVarByName( "splineIn", false ) );
+		if ( IsRetailSplineWindow() && splineIn != NULL && *splineIn && gui != NULL ) {
 			retailTextEffectStartTime = gui->GetTime();
 		}
 	}
 }
 
-/*
-================
-idWindow::UpdateRetailCreditActivation
-================
-*/
 void idWindow::UpdateRetailCreditActivation() {
-	if ( !IsCreditDef() || !retailCreditArmed || gui == NULL || !noTime ) {
+	if ( !IsCreditDef() || !retailCreditArmed || gui == NULL || !noTime || drawRect.y > 350.0f ) {
 		return;
 	}
-
-	if ( drawRect.y > 350.0f ) {
-		return;
-	}
-
 	ResetTime( 0 );
 	EvalRegs( -1, true );
 	Time();
 	HandleRetailSpecialVars();
 }
 
-/*
-================
-idWindow::DrawRetailTextEffect
-================
-*/
 bool idWindow::DrawRetailTextEffect( const idVec4 &color ) {
 	if ( retailTextEffectStartTime < 0 || gui == NULL || dc == NULL ) {
 		return false;
@@ -1160,63 +1156,130 @@ bool idWindow::DrawRetailTextEffect( const idVec4 &color ) {
 	if ( duration <= 0.0f ) {
 		duration = 1000.0f;
 	}
+	const int trails = idMath::ClampInt( 1, 1000, GetWinVarIntValue( "trails", 10 ) );
+	const int splinePoints = idMath::ClampInt( 3, 100, GetWinVarIntValue( "splinePoints", 5 ) );
+	if ( !dc->SetRetailSplineEffect( 0.0f, splinePoints ) ) {
+		return false;
+	}
+	dc->ClearRetailSplineEffect();
 
 	const float elapsed = static_cast<float>( gui->GetTime() - retailTextEffectStartTime );
 	if ( elapsed <= 0.0f ) {
 		return true;
 	}
-
-	const int trails = idMath::ClampInt( 1, 1000, GetWinVarIntValue( "trails", 10 ) );
-	const int splinePoints = idMath::ClampInt( 3, 100, GetWinVarIntValue( "splinePoints", 5 ) );
 	const float trailOffset = idMath::ClampFloat( 0.0f, 1.0f, GetWinVarFloatValue( "trailOffset", 0.01f ) );
-	const float totalDuration = duration * ( 1.0f + trailOffset * trails );
-	if ( elapsed >= totalDuration ) {
+	if ( elapsed >= duration * ( 1.0f + trailOffset * trails ) ) {
 		retailTextEffectStartTime = -1;
-		dc->ClearRetailSplineEffect();
 		return false;
 	}
 
 	const float trailDelay = duration * trailOffset;
-
-	auto drawSample = [&]( float sampleElapsed, float alphaScale, bool drawShadow ) {
-		if ( sampleElapsed <= 0.0f ) {
+	const int textAdjust = static_cast<int>( textspacing );
+	const int textStyle = static_cast<int>( textstyle );
+	const bool chatWindow = ( flags & WIN_CHATWINDOW ) != 0;
+	auto drawSample = [&]( float sampleElapsed, float alphaScale, bool finalSample ) {
+		if ( sampleElapsed <= 0.0f || !dc->SetRetailSplineEffect( sampleElapsed / duration, splinePoints ) ) {
 			return;
 		}
-
 		const float progress = idMath::ClampFloat( 0.0f, 1.0f, sampleElapsed / duration );
-		dc->SetRetailSplineEffect( progress, splinePoints );
-
-		if ( drawShadow && textShadow ) {
+		if ( textShadow ) {
 			idStr shadowText = text;
 			idRectangle shadowRect = textRect;
 			idVec4 shadowColor = colorBlack;
-
 			shadowText.RemoveColors();
 			shadowRect.x += textShadow;
 			shadowRect.y += textShadow;
-			shadowColor[ 3 ] = color[ 3 ] * alphaScale * ( 0.35f + 0.65f * progress );
-			dc->DrawText( shadowText, textScale, textAlign, shadowColor, shadowRect, !( flags & WIN_NOWRAP ), -1 );
+			shadowColor[3] = color[3] * alphaScale * ( 0.35f + 0.65f * progress );
+			dc->DrawText( shadowText, textScale, textAlign, shadowColor, shadowRect, !( flags & WIN_NOWRAP ), -1,
+				false, NULL, 0, textAdjust, finalSample ? textStyle : 0, chatWindow );
 		}
-
 		idVec4 drawColor = color;
-		drawColor[ 3 ] *= alphaScale * ( 0.22f + 0.78f * progress );
-		dc->DrawText( text, textScale, textAlign, drawColor, textRect, !( flags & WIN_NOWRAP ), -1 );
+		drawColor[3] *= alphaScale * ( 0.22f + 0.78f * progress );
+		dc->DrawText( text, textScale, textAlign, drawColor, textRect, !( flags & WIN_NOWRAP ), -1,
+			false, NULL, 0, textAdjust, finalSample ? textStyle : 0, chatWindow );
 		dc->ClearRetailSplineEffect();
 	};
 
 	for ( int i = trails; i > 0; --i ) {
 		const float sampleElapsed = elapsed - trailDelay * static_cast<float>( i );
-		if ( sampleElapsed <= 0.0f ) {
-			continue;
-		}
-
 		const float trailBlend = 1.0f - static_cast<float>( i - 1 ) / static_cast<float>( trails );
-		const float alphaScale = 0.06f + 0.34f * trailBlend;
-		drawSample( sampleElapsed, alphaScale, false );
+		drawSample( sampleElapsed, 0.06f + 0.34f * trailBlend, false );
 	}
-
 	drawSample( elapsed, 0.2f + 0.8f * idMath::ClampFloat( 0.0f, 1.0f, elapsed / duration ), true );
 	return true;
+}
+
+/*
+================
+idWindow::MeasureText
+
+openQ4: "textwidth" and "textlines" for the windows something reads them from,
+and the "ellipsis" line. The widest of the text's explicit lines, up to the
+text rectangle; a single line too wide for an ellipsis window is shortened to
+fit with "...". Measured again only when the text, its scale, font or spacing
+or the rectangle's width changes: fitted plates read these every frame.
+================
+*/
+void idWindow::MeasureText() {
+	const float scale = textScale;
+	const float spacing = textspacing;
+	const bool remastered = gui != NULL && gui->LegacyRemastered();
+	if ( measuredFont == fontNum && measuredScale == scale && measuredSpacing == spacing && measuredRect == textRect.w &&
+			measuredRemastered == remastered && measuredText.Cmp( text.c_str() ) == 0 ) {
+		return;
+	}
+	measuredRemastered = remastered;
+	measuredFont = fontNum;
+	measuredScale = scale;
+	measuredSpacing = spacing;
+	measuredRect = textRect.w;
+	measuredText = text.c_str();
+	// What draws: the text, with its keys named and its lines joined where a
+	// Remastered layout's window asks for that.
+	measuredShortened = remastered && textKeyNames && idDeviceContext::PlainKeyNames( measuredText.c_str(), measuredDrawn );
+	idStr shownText = measuredShortened ? measuredDrawn : measuredText;
+	if ( remastered && textOneLine && shownText.Find( '\n' ) >= 0 ) {
+		shownText.Replace( "\n", " " );
+		measuredDrawn = shownText;
+		measuredShortened = true;
+	}
+	const int adjust = static_cast<int>( spacing );
+	float widest = 0.0f;
+	int lines = 0;
+	const char *line = shownText.c_str();
+	while ( line != NULL && *line != '\0' ) {
+		const char *end = strchr( line, '\n' );
+		const idStr part = end != NULL ? idStr( line, 0, static_cast<int>( end - line ) ) : idStr( line );
+		widest = Max( widest, static_cast<float>( dc->TextWidth( part, scale, 0, adjust ) ) );
+		++lines;
+		line = end != NULL ? end + 1 : NULL;
+	}
+	if ( textEllipsis && lines == 1 && widest > textRect.w && textRect.w > 0.0f ) {
+		// Drop whole characters (UTF-8 continuation bytes with their lead, a
+		// color escape whole) until the line and its dots fit.
+		const float dots = static_cast<float>( dc->TextWidth( "...", scale, 0, adjust ) );
+		idStr shown = shownText;
+		while ( shown.Length() > 0 ) {
+			int cut = shown.Length() - 1;
+			while ( cut > 0 && ( static_cast<unsigned char>( shown[cut] ) & 0xC0 ) == 0x80 ) {
+				cut--;
+			}
+			shown.CapLength( cut );
+			shown.StripTrailingWhitespace();
+			// never leave half of a "^N" color escape behind
+			if ( shown.Length() > 0 && shown[shown.Length() - 1] == '^' ) {
+				shown.CapLength( shown.Length() - 1 );
+			}
+			widest = static_cast<float>( dc->TextWidth( shown, scale, 0, adjust ) ) + dots;
+			if ( widest <= textRect.w ) {
+				break;
+			}
+		}
+		measuredDrawn = shown + "...";
+		measuredShortened = true;
+	}
+	measuredWidth = Min( textRect.w, widest );
+	measuredLines = static_cast<float>( lines );
 }
 
 /*
@@ -1229,38 +1292,44 @@ void idWindow::Draw( int time, float x, float y ) {
 		DrawTabContainerTabs();
 		return;
 	}
-
 	if ( IsTabDef() && parent != NULL && parent->IsTabContainerDef() ) {
-		// Tab labels are rendered by the owning tab container header.
+		// The owning tab container renders the tab label in its header strip.
 		return;
 	}
-
+	if ( measureTextWidth || textEllipsis || textKeyNames || textOneLine ) {
+		MeasureText();
+		if ( measureTextWidth ) {
+			textWidth = measuredWidth;
+			textLines = measuredLines;
+		}
+	}
 	if ( text.Length() == 0 ) {
 		return;
 	}
-
 	idVec4 drawTextColor = foreColor;
 	if ( parent != NULL && parent->overChild == this && !noEvents ) {
 		drawTextColor = hoverColor;
 	}
-
 	if ( DrawRetailTextEffect( drawTextColor ) ) {
 		return;
 	}
-
+	const int textAdjust = static_cast<int>( textspacing );
+	const int style = static_cast<int>( textstyle );
+	const bool isChatWindow = ( flags & WIN_CHATWINDOW ) != 0;
+	const char *drawn = ( textEllipsis || textKeyNames || textOneLine ) && measuredShortened ? measuredDrawn.c_str() : text.c_str();
 	if ( textShadow ) {
-		idStr shadowText = text;
+		idStr shadowText = drawn;
 		idRectangle shadowRect = textRect;
 		idVec4 shadowColor = colorBlack;
-
 		shadowText.RemoveColors();
 		shadowRect.x += textShadow;
 		shadowRect.y += textShadow;
 		shadowColor[3] = drawTextColor[3];
-
-		dc->DrawText( shadowText, textScale, textAlign, shadowColor, shadowRect, !( flags & WIN_NOWRAP ), -1 );
+		dc->DrawText( shadowText, textScale, textAlign, shadowColor, shadowRect, !( flags & WIN_NOWRAP ), -1,
+			false, NULL, 0, textAdjust, style, isChatWindow );
 	}
-	dc->DrawText( text, textScale, textAlign, drawTextColor, textRect, !( flags & WIN_NOWRAP ), -1 );
+	dc->DrawText( drawn, textScale, textAlign, drawTextColor, textRect, !( flags & WIN_NOWRAP ), -1,
+		false, NULL, 0, textAdjust, style, isChatWindow );
 
 	if ( gui_edit.GetBool() ) {
 		dc->EnableClipping( false );
@@ -1338,6 +1407,22 @@ void idWindow::MouseExit() {
 	RunScript(ON_MOUSEEXIT);
 }
 
+void idWindow::ClearMouseHover() {
+	// Hover is a path through nested containers, independent of focusedChild.
+	// Clear the whole path so an old mouse highlight cannot outlive takeover.
+	for ( int i = 0; i < children.Num(); ++i ) {
+		children[i]->ClearMouseHover();
+	}
+	hover = false;
+	if ( overChild != NULL ) {
+		overChild->MouseExit();
+		gui->GetPendingCmd() += overChild->cmd;
+		gui->GetPendingCmd() += " ; ";
+		overChild->cmd.Clear();
+		overChild = NULL;
+	}
+}
+
 
 /*
 ================
@@ -1346,6 +1431,8 @@ idWindow::RouteMouseCoords
 */
 const char *idWindow::RouteMouseCoords(float xd, float yd) {
 	idStr str;
+	ValidateTrackedWindowPointers();
+
 	if (GetCaptureChild()) {
 		//FIXME: unkludge this whole mechanism
 		return GetCaptureChild()->RouteMouseCoords(xd, yd);
@@ -1379,10 +1466,9 @@ const char *idWindow::RouteMouseCoords(float xd, float yd) {
 					gui->GetDesktop()->AddCommand(str);
 					overChild->cmd = "";
 				}
-			} else {
-				if (!(child->flags & WIN_HOLDCAPTURE)) {
-					child->RouteMouseCoords(xd, yd);
-				}
+			}
+			if (!(child->flags & WIN_HOLDCAPTURE)) {
+				child->RouteMouseCoords(xd, yd);
 			}
 			return "";
 		}
@@ -1504,35 +1590,23 @@ idWindow *idWindow::SetCapture(idWindow *w) {
 		}
 	}
 
-	w->flags |= WIN_CAPTURE;
-	w->GainCapture();
+	if ( w ) {
+		w->flags |= WIN_CAPTURE;
+		w->GainCapture();
+	}
 	gui->GetDesktop()->captureChild = w;
 	return last;
 }
 
-/*
-================
-idWindow::ResetCapture
-================
-*/
 void idWindow::ResetCapture() {
-	if ( parent && parent->GetGui() && gui != parent->GetGui() ) {
-		gui = parent->GetGui();
-	}
-	if ( gui == NULL ) {
-		return;
-	}
-
-	idWindow *desktop = gui->GetDesktop();
+	idWindow* desktop = gui != NULL ? gui->GetDesktop() : NULL;
 	if ( desktop == NULL ) {
 		return;
 	}
-
 	if ( desktop->captureChild != NULL ) {
 		desktop->captureChild->LoseCapture();
 		desktop->captureChild = NULL;
 	}
-
 	desktop->overChild = NULL;
 }
 
@@ -1543,6 +1617,34 @@ idWindow::AddUpdateVar
 */
 void idWindow::AddUpdateVar(idWinVar *var) {
 	updateVars.AddUnique(var);
+}
+
+bool idWindow::SetInternalVarValue( const char* name, const char* value ) {
+	if ( name == NULL || value == NULL ) {
+		return false;
+	}
+	idStr key = name;
+	const int separator = key.Find( "::" );
+	if ( separator > 0 && gui != NULL && gui->GetDesktop() != NULL ) {
+		const idStr windowName = key.Left( separator );
+		const idStr varName = key.Right( key.Length() - separator - 2 );
+		drawWin_t* target = gui->GetDesktop()->FindChildByName( windowName );
+		return target != NULL && target->win != NULL && target->win->SetInternalVarValue( varName, value );
+	}
+
+	idParser parser( value, idStr::Length( value ), "SetInternalVarValue",
+		LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT );
+	idToken token;
+	if ( !parser.ReadToken( &token ) ) {
+		return false;
+	}
+	if ( key.Icmp( "screenalignx" ) == 0 || key.Icmp( "screenalignh" ) == 0 ) {
+		return ParseScreenAlignXToken( token, screenAlignX );
+	}
+	if ( key.Icmp( "screenaligny" ) == 0 || key.Icmp( "screenalignv" ) == 0 ) {
+		return ParseScreenAlignYToken( token, screenAlignY );
+	}
+	return false;
 }
 
 /*
@@ -1570,7 +1672,18 @@ bool idWindow::RunTimeEvents(int time) {
 		return false;
 	}
 
-	if ( time - lastTimeRun < USERCMD_MSEC ) {
+	// Save/load and other clock resets can move GUI time backwards.
+	// Clamp stale timestamps so timed HUD events can recover instead of
+	// remaining frozen for the rest of the level.
+	const float userCmdMsec = common->GetUserCmdMsecFloat();
+	if ( lastTimeRun > time ) {
+		lastTimeRun = time - static_cast<int>( idMath::Ceil( userCmdMsec ) );
+	}
+	if ( timeLine > time ) {
+		timeLine = time;
+	}
+
+	if ( static_cast<float>( time - lastTimeRun ) < userCmdMsec ) {
 		//common->Printf("Skipping gui time events at %i\n", time);
 		return false;
 	}
@@ -1651,6 +1764,20 @@ void idWindow::RunNamedEvent ( const char* eventName )
 
 /*
 ================
+idWindow::HasNamedEvent
+================
+*/
+bool idWindow::HasNamedEvent( const char* eventName ) const {
+	for ( int i = 0; i < namedEvents.Num(); i++ ) {
+		if ( !namedEvents[i]->mName.Icmp( eventName ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+================
 idWindow::Contains
 ================
 */
@@ -1697,12 +1824,23 @@ idWindow::HandleEvent
 const char *idWindow::HandleEvent(const sysEvent_t *event, bool *updateVisuals) {
 	static bool actionDownRun;
 	static bool actionUpRun;
+	sysEvent_t translatedEvent;
+	int controllerFocusDirection = 0;
 
 	if ( parent && parent->GetGui() && gui != parent->GetGui() ) {
 		gui = parent->GetGui();
 	}
 	if ( gui == NULL ) {
 		return "";
+	}
+
+	bool controllerEvent = TranslateControllerMenuKey( event, translatedEvent, controllerFocusDirection );
+	if ( controllerEvent ) {
+		event = &translatedEvent;
+	} else if ( ( flags & WIN_DESKTOP ) && ( flags & WIN_MENUGUI ) && KeyboardMenuFocusDirection( this, event, controllerFocusDirection ) ) {
+		// The arrow keys move a menu's focus and light the item they reach,
+		// as the D-pad does. The stock menus answered only Tab, unseen.
+		controllerEvent = true;
 	}
 
 	cmd = "";
@@ -1716,6 +1854,26 @@ const char *idWindow::HandleEvent(const sysEvent_t *event, bool *updateVisuals) 
 		RunTimeEvents(gui->GetTime());
 		CalcRects(0,0);
 		dc->SetCursor( idDeviceContext::CURSOR_MENU );
+
+		if ( controllerEvent && event->evValue2 && !gui->ControllerNavigation() && !GetCaptureChild() ) {
+			ClearMouseHover();
+			gui->SetControllerNavigation( true );
+			if ( focusedChild != NULL ) {
+				focusedChild->MouseEnter();
+			}
+		} else if ( gui->ControllerNavigation() ) {
+			const bool mouseMoved = event->evType == SE_MOUSE && ( event->evValue != 0 || event->evValue2 != 0 );
+			const bool mousePressed = event->evType == SE_KEY && event->evValue2 &&
+				event->evValue >= K_MOUSE1 && event->evValue <= K_MWHEELUP;
+			if ( mouseMoved || mousePressed ) {
+				if ( focusedChild != NULL ) {
+					focusedChild->MouseExit();
+				}
+				ClearMouseHover();
+				gui->SetControllerNavigation( false );
+				RouteMouseCoords( 0, 0 );
+			}
+		}
 	}
 
 	if (visible && !noEvents) {
@@ -1832,6 +1990,12 @@ const char *idWindow::HandleEvent(const sysEvent_t *event, bool *updateVisuals) 
 						}
 					}
 				}
+				// Quake 4 runs a window's onBackAction on a right-click press, as a
+				// left-click press runs onAction. The Game Options crosshair preview
+				// steps back through the custom crosshairs with it.
+				if ( event->evValue2 && !actionDownRun ) {
+					actionDownRun = RunScript( ON_BACKACTION );
+				}
 			} else if (event->evValue == K_MOUSE3) {
 				if (gui_edit.GetBool()) {
 					for ( int i = 0; i < children.Num(); i++ ) {
@@ -1854,103 +2018,66 @@ const char *idWindow::HandleEvent(const sysEvent_t *event, bool *updateVisuals) 
 					}
 				}
 			} else if (event->evValue == K_TAB && event->evValue2) {
-				if (GetFocusedChild()) {
-					const char *childRet = GetFocusedChild()->HandleEvent(event, updateVisuals);
+				idWindow *focusedChild = GetFocusedChild();
+				if (focusedChild && focusedChild != this) {
+					const char *childRet = focusedChild->HandleEvent(event, updateVisuals);
 					if (childRet && *childRet) {
 						return childRet;
 					}
-
-					// If the window didn't handle the tab, then move the focus to the next window
-					// or the previous window if shift is held down
-
-					int direction = 1;
-					if ( idKeyInput::IsDown( K_SHIFT ) ) {
-						direction = -1;
-					}
-
-					idWindow *currentFocus = GetFocusedChild();
-					idWindow *child = GetFocusedChild();
-					idWindow *parent = child->GetParent();
-					while ( parent ) {
-						bool foundFocus = false;
-						bool recurse = false;
-						int index = 0;
-						if ( child ) {
-							index = parent->GetChildIndex( child ) + direction;
-						} else if ( direction < 0 ) {
-							index = parent->GetChildCount() - 1;
-						}
-						while ( index < parent->GetChildCount() && index >= 0) {
-							idWindow *testWindow = parent->GetChild( index );
-							if ( testWindow == currentFocus ) {
-								// we managed to wrap around and get back to our starting window
-								foundFocus = true;
-								break;
-							}
-							if ( testWindow && !testWindow->noEvents && testWindow->visible ) {
-								if ( testWindow->flags & WIN_CANFOCUS ) {
-									SetFocus( testWindow );
-									foundFocus = true;
-									break;
-								} else if ( testWindow->GetChildCount() > 0 ) {
-									parent = testWindow;
-									child = NULL;
-									recurse = true;
-									break;
-								}
-							}
-							index += direction;
-						}
-						if ( foundFocus ) {
-							// We found a child to focus on
-							break;
-						} else if ( recurse ) {
-							// We found a child with children
-							continue;
-						} else {
-							// We didn't find anything, so go back up to our parent
-							child = parent;
-							parent = child->GetParent();
-							if ( parent == gui->GetDesktop() ) {
-								// We got back to the desktop, so wrap around but don't actually go to the desktop
-								parent = NULL;
-								child = NULL;
-							}
-						}
-					}
 				}
+				int direction = idKeyInput::IsDown( K_SHIFT ) ? -1 : 1;
+				NavigateFocus( this, direction );
 			} else if (event->evValue == K_ESCAPE && event->evValue2) {
-				if (GetFocusedChild()) {
-					const char *childRet = GetFocusedChild()->HandleEvent(event, updateVisuals);
+				idWindow *focusedChild = GetFocusedChild();
+				if (focusedChild && focusedChild != this) {
+					const char *childRet = focusedChild->HandleEvent(event, updateVisuals);
 					if (childRet && *childRet) {
 						return childRet;
 					}
 				}
 				RunScript( ON_ESC );
-			} else if (event->evValue == K_ENTER ) {
-				if (GetFocusedChild()) {
-					const char *childRet = GetFocusedChild()->HandleEvent(event, updateVisuals);
+			} else if (event->evValue == K_ENTER || event->evValue == K_KP_ENTER ) {
+				idWindow *focusedChild = GetFocusedChild();
+				if (focusedChild && focusedChild != this) {
+					const char *childRet = focusedChild->HandleEvent(event, updateVisuals);
 					if (childRet && *childRet) {
 						return childRet;
 					}
 				}
-				if ( flags & WIN_WANTENTER ) {
+				if ( ( flags & WIN_WANTENTER ) || ( scripts[ ON_ACTION ] != NULL && !WindowHasNativeEnterHandling( this ) ) ) {
 					if ( event->evValue2 ) {
 						RunScript( ON_ACTION );
 					} else {
 						RunScript( ON_ACTIONRELEASE );
 					}
 				}
+			} else if (controllerFocusDirection != 0 && event->evValue2) {
+				idWindow *focusedChild = GetFocusedChild();
+				const bool selfConsumesDirection = ( focusedChild == this ) && WindowConsumesDirectionalNavigation( this, event->evValue );
+				const bool childConsumesDirection = WindowConsumesDirectionalNavigation( focusedChild, event->evValue );
+				if (focusedChild && focusedChild != this) {
+					const char *childRet = focusedChild->HandleEvent(event, updateVisuals);
+					if (childRet && *childRet) {
+						return childRet;
+					}
+					if ( childConsumesDirection ) {
+						return "";
+					}
+				}
+				if ( !selfConsumesDirection ) {
+					NavigateFocus( this, controllerFocusDirection, true );
+				}
 			} else {
-				if (GetFocusedChild()) {
-					const char *childRet = GetFocusedChild()->HandleEvent(event, updateVisuals);
+				idWindow *focusedChild = GetFocusedChild();
+				if (focusedChild && focusedChild != this) {
+					const char *childRet = focusedChild->HandleEvent(event, updateVisuals);
 					if (childRet && *childRet) {
 						return childRet;
 					}
 				}
 			}
 
-		} else if (event->evType == SE_MOUSE) {
+		} else if (event->evType == SE_MOUSE && !gui->ControllerNavigation()) {
 			if (updateVisuals) {
 				*updateVisuals = true;
 			}
@@ -1960,8 +2087,9 @@ const char *idWindow::HandleEvent(const sysEvent_t *event, bool *updateVisuals) 
 			}
 		} else if (event->evType == SE_NONE) {
 		} else if (event->evType == SE_CHAR) {
-			if (GetFocusedChild()) {
-				const char *childRet = GetFocusedChild()->HandleEvent(event, updateVisuals);
+			idWindow *focusedChild = GetFocusedChild();
+			if (focusedChild && focusedChild != this) {
+				const char *childRet = focusedChild->HandleEvent(event, updateVisuals);
 				if (childRet && *childRet) {
 					return childRet;
 				}
@@ -1993,34 +2121,30 @@ idWindow::DebugDraw
 ================
 */
 void idWindow::DebugDraw(int time, float x, float y) {
-	static char buff[16384];
 	if (dc) {
 		dc->EnableClipping(false);
 		if (gui_debug.GetInteger() == 1) {
 			dc->DrawRect(drawRect.x, drawRect.y, drawRect.w, drawRect.h, 1, idDeviceContext::colorRed);
 		} else if (gui_debug.GetInteger() == 2) {
-			char out[1024];
+			idStr buff;
 			idStr str;
 			str = text.c_str();
 			
 			if (str.Length()) {
-				sprintf(buff, "%s\n", str.c_str());
+				buff = str;
+				buff += "\n";
 			}
 
-			sprintf(out, "Rect: %0.1f, %0.1f, %0.1f, %0.1f\n", rect.x(), rect.y(), rect.w(), rect.h());
-			strcat(buff, out);
-			sprintf(out, "Draw Rect: %0.1f, %0.1f, %0.1f, %0.1f\n", drawRect.x, drawRect.y, drawRect.w, drawRect.h);
-			strcat(buff, out);
-			sprintf(out, "Client Rect: %0.1f, %0.1f, %0.1f, %0.1f\n", clientRect.x, clientRect.y, clientRect.w, clientRect.h);
-			strcat(buff, out);
-			sprintf(out, "Cursor: %0.1f : %0.1f\n", gui->CursorX(), gui->CursorY());
-			strcat(buff, out);
+			buff += va("Rect: %0.1f, %0.1f, %0.1f, %0.1f\n", rect.x(), rect.y(), rect.w(), rect.h());
+			buff += va("Draw Rect: %0.1f, %0.1f, %0.1f, %0.1f\n", drawRect.x, drawRect.y, drawRect.w, drawRect.h);
+			buff += va("Client Rect: %0.1f, %0.1f, %0.1f, %0.1f\n", clientRect.x, clientRect.y, clientRect.w, clientRect.h);
+			buff += va("Cursor: %0.1f : %0.1f\n", gui->CursorX(), gui->CursorY());
 
 
 			//idRectangle tempRect = textRect;
 			//tempRect.x += offsetX;
 			//drawRect.y += offsetY;
-			dc->DrawText(buff, textScale, textAlign, foreColor, textRect, true);
+			dc->DrawText(buff.c_str(), textScale, textAlign, foreColor, textRect, true);
 		} 
 		dc->EnableClipping(true);
 	}
@@ -2104,6 +2228,10 @@ void idWindow::Time() {
 		return;
 	}
 
+	if ( timeLine > gui->GetTime() ) {
+		timeLine = gui->GetTime();
+	}
+
 	if ( timeLine == -1 ) {
 		timeLine = gui->GetTime();
 	}
@@ -2142,6 +2270,7 @@ idWindow::EvalRegs
 float idWindow::EvalRegs(int test, bool force) {
 	static float regs[MAX_EXPRESSION_REGISTERS];
 	static idWindow *lastEval = NULL;
+	UI_LegacyObservationCache(this,&lastEval);
 
 	if (!force && test >= 0 && test < MAX_EXPRESSION_REGISTERS && lastEval == this) {
 		return regs[test];
@@ -2153,6 +2282,7 @@ float idWindow::EvalRegs(int test, bool force) {
 		regList.SetToRegs(regs);
 		EvaluateRegisters(regs);
 		regList.GetFromRegs(regs);
+		if (UI_LegacyObservationActive(this)) UI_LegacyObservationEvaluation(this,regs,expressionRegisters.Num(),&matColor,matColor.w());
 	}
 
 	if (test >= 0 && test < MAX_EXPRESSION_REGISTERS) {
@@ -2168,10 +2298,9 @@ idWindow::DrawBackground
 ================
 */
 void idWindow::DrawBackground(const idRectangle &drawRect) {
-	const bool hasFrameDecoration = ( GetWinVarByName( "cornermat", false ) != NULL ) || ( GetWinVarByName( "topmat", false ) != NULL );
-	const bool usesRetailSuperWindowFrame = hasFrameDecoration && ( windowDefType.Icmp( "superWindowDef" ) == 0 );
-	const idRectangle backgroundRect = usesRetailSuperWindowFrame ? GetWindowMarginsInsetRect( this, drawRect ) : drawRect;
-
+	const bool hasFrameDecoration = GetWinVarByName( "cornermat", false ) != NULL || GetWinVarByName( "topmat", false ) != NULL;
+	const bool usesRetailSuperWindowFrame = hasFrameDecoration && windowDefType.Icmp( "superWindowDef" ) == 0;
+	const idRectangle backgroundRect = usesRetailSuperWindowFrame ? GetRetailMarginsInsetRect( this, drawRect ) : drawRect;
 	if ( backColor.w() && backgroundRect.w > 0.0f && backgroundRect.h > 0.0f ) {
 		dc->DrawFilledRect( backgroundRect.x, backgroundRect.y, backgroundRect.w, backgroundRect.h, backColor );
 	}
@@ -2180,23 +2309,166 @@ void idWindow::DrawBackground(const idRectangle &drawRect) {
 		float xExpand = 0.0f;
 		float yExpand = 0.0f;
 		dc->GetVirtualScreenExpansion( forceAspectWidth, forceAspectHeight, xExpand, yExpand );
-
 		if ( xExpand > 0.0f ) {
-			const float baseWidth = ( forceAspectWidth > 0.0f ) ? forceAspectWidth : backgroundRect.w;
-			DrawBackgroundExpansionSlice( dc, backgroundRect, xExpand, baseWidth, FindWindowMaterial( this, "backgroundleft" ), matColor, BACKGROUND_EXPANSION_LEFT );
-			DrawBackgroundExpansionSlice( dc, backgroundRect, xExpand, baseWidth, FindWindowMaterial( this, "backgroundright" ), matColor, BACKGROUND_EXPANSION_RIGHT );
+			const float baseWidth = forceAspectWidth > 0.0f ? forceAspectWidth : backgroundRect.w;
+			DrawBackgroundExpansionSlice( dc, backgroundRect, xExpand, baseWidth,
+				FindWindowBackgroundSlice( this, "backgroundLeft" ), matColor, BACKGROUND_EXPANSION_LEFT );
+			DrawBackgroundExpansionSlice( dc, backgroundRect, xExpand, baseWidth,
+				FindWindowBackgroundSlice( this, "backgroundRight" ), matColor, BACKGROUND_EXPANSION_RIGHT );
 		} else if ( yExpand > 0.0f ) {
-			const float baseHeight = ( forceAspectHeight > 0.0f ) ? forceAspectHeight : backgroundRect.h;
-			DrawBackgroundExpansionSlice( dc, backgroundRect, yExpand, baseHeight, FindWindowMaterial( this, "backgroundtop" ), matColor, BACKGROUND_EXPANSION_TOP );
-			DrawBackgroundExpansionSlice( dc, backgroundRect, yExpand, baseHeight, FindWindowMaterial( this, "backgroundbottom" ), matColor, BACKGROUND_EXPANSION_BOTTOM );
+			const float baseHeight = forceAspectHeight > 0.0f ? forceAspectHeight : backgroundRect.h;
+			DrawBackgroundExpansionSlice( dc, backgroundRect, yExpand, baseHeight,
+				FindWindowBackgroundSlice( this, "backgroundTop" ), matColor, BACKGROUND_EXPANSION_TOP );
+			DrawBackgroundExpansionSlice( dc, backgroundRect, yExpand, baseHeight,
+				FindWindowBackgroundSlice( this, "backgroundBottom" ), matColor, BACKGROUND_EXPANSION_BOTTOM );
 		}
 	}
 
-	if ( background && matColor.w() && backgroundRect.w > 0.0f && backgroundRect.h > 0.0f ) {
+	if ( background && matColor.w() ) {
+		if ( DrawPlaybackGraph( dc, gui, GetName(), background, drawRect, matColor ) ) {
+			return;
+		}
+		if ( ShouldDrawCinematicUnderlay( background, drawRect ) ) {
+			DrawCinematicUnderlay( dc );
+		} else if ( ShouldDrawSplashUnderlay( background, drawRect ) ) {
+			DrawSplashUnderlay( dc );
+		}
+		if ( ShouldDrawNativeScreenOverlay( gui, GetName(), background, drawRect, flags ) ) {
+			DrawNativeScreenOverlay( background, matColor );
+			return;
+		}
+
+		if ( flags & WIN_MATCANVASFILL ) {
+			const float imageWidth = background->GetImageWidth();
+			const float imageHeight = background->GetImageHeight();
+			if ( imageWidth > 0.0f && imageHeight > 0.0f && drawRect.w > 0.0f && drawRect.h > 0.0f ) {
+				float s0 = 0.0f;
+				float s1 = 1.0f;
+				float t0 = 0.0f;
+				float t1 = 1.0f;
+
+				const float imageAspect = imageWidth / imageHeight;
+				const float canvasAspect = ( dc != NULL ) ? dc->GetCanvasAspect() : ( drawRect.w / drawRect.h );
+				if ( imageAspect > canvasAspect ) {
+					// Uniform fill on canvas: crop equally from left/right.
+					const float keptWidth = canvasAspect / imageAspect;
+					s0 = ( 1.0f - keptWidth ) * 0.5f;
+					s1 = s0 + keptWidth;
+				} else if ( imageAspect < canvasAspect ) {
+					// Uniform fill on canvas: crop equally from top/bottom.
+					const float keptHeight = imageAspect / canvasAspect;
+					t0 = ( 1.0f - keptHeight ) * 0.5f;
+					t1 = t0 + keptHeight;
+				}
+
+				float drawX = drawRect.x;
+				float drawY = drawRect.y;
+				float drawW = drawRect.w;
+				float drawH = drawRect.h;
+				if ( dc->ClippedCoords( &drawX, &drawY, &drawW, &drawH, &s0, &t0, &s1, &t1 ) ) {
+					return;
+				}
+				dc->AdjustCoords( &drawX, &drawY, &drawW, &drawH );
+
+				renderSystem->SetColor( matColor );
+				dc->DrawStretchPic( drawX, drawY, drawW, drawH, s0, t0, s1, t1, background );
+				return;
+			}
+		}
+
+		float axisScaleX = 1.0f;
+		float axisScaleY = 1.0f;
+		if ( dc != NULL ) {
+			dc->AdjustCoords( NULL, NULL, &axisScaleX, &axisScaleY );
+		}
+		if ( axisScaleX <= 0.0f ) {
+			axisScaleX = 1.0f;
+		}
+		if ( axisScaleY <= 0.0f ) {
+			axisScaleY = 1.0f;
+		}
+
+		if ( flags & WIN_MATCOVER ) {
+			const float imageWidth = background->GetImageWidth();
+			const float imageHeight = background->GetImageHeight();
+			if ( imageWidth > 0.0f && imageHeight > 0.0f && drawRect.w > 0.0f && drawRect.h > 0.0f ) {
+				float s0 = 0.0f;
+				float s1 = 1.0f;
+				float t0 = 0.0f;
+				float t1 = 1.0f;
+
+				const float imageAspect = imageWidth / imageHeight;
+				const float rectAspect = ( drawRect.w * axisScaleX ) / ( drawRect.h * axisScaleY );
+				if ( imageAspect > rectAspect ) {
+					// Image is wider than the destination: crop equally from left/right.
+					const float keptWidth = rectAspect / imageAspect;
+					s0 = ( 1.0f - keptWidth ) * 0.5f;
+					s1 = s0 + keptWidth;
+				} else if ( imageAspect < rectAspect ) {
+					// Image is taller than the destination: crop equally from top/bottom.
+					const float keptHeight = imageAspect / rectAspect;
+					t0 = ( 1.0f - keptHeight ) * 0.5f;
+					t1 = t0 + keptHeight;
+				}
+
+				float drawX = drawRect.x;
+				float drawY = drawRect.y;
+				float drawW = drawRect.w;
+				float drawH = drawRect.h;
+				if ( dc->ClippedCoords( &drawX, &drawY, &drawW, &drawH, &s0, &t0, &s1, &t1 ) ) {
+					return;
+				}
+				dc->AdjustCoords( &drawX, &drawY, &drawW, &drawH );
+
+				renderSystem->SetColor( matColor );
+				dc->DrawStretchPic( drawX, drawY, drawW, drawH, s0, t0, s1, t1, background );
+				return;
+			}
+		}
+		if ( flags & WIN_MATFIT ) {
+			const float imageWidth = background->GetImageWidth();
+			const float imageHeight = background->GetImageHeight();
+			if ( imageWidth > 0.0f && imageHeight > 0.0f && drawRect.w > 0.0f && drawRect.h > 0.0f ) {
+				float fitX = drawRect.x;
+				float fitY = drawRect.y;
+				float fitW = drawRect.w;
+				float fitH = drawRect.h;
+
+				const float imageAspect = imageWidth / imageHeight;
+				const float rectAspect = ( drawRect.w * axisScaleX ) / ( drawRect.h * axisScaleY );
+				if ( imageAspect > rectAspect ) {
+					// Fit to width; center vertically.
+					fitH = ( drawRect.w * axisScaleX ) / ( imageAspect * axisScaleY );
+					fitY = drawRect.y + ( ( drawRect.h - fitH ) * 0.5f );
+				} else if ( imageAspect < rectAspect ) {
+					// Fit to height; center horizontally.
+					fitW = ( drawRect.h * axisScaleY * imageAspect ) / axisScaleX;
+					fitX = drawRect.x + ( ( drawRect.w - fitW ) * 0.5f );
+				}
+
+				float drawX = fitX;
+				float drawY = fitY;
+				float drawW = fitW;
+				float drawH = fitH;
+				float s0 = 0.0f;
+				float t0 = 0.0f;
+				float s1 = 1.0f;
+				float t1 = 1.0f;
+				if ( dc->ClippedCoords( &drawX, &drawY, &drawW, &drawH, &s0, &t0, &s1, &t1 ) ) {
+					return;
+				}
+				dc->AdjustCoords( &drawX, &drawY, &drawW, &drawH );
+
+				renderSystem->SetColor( matColor );
+				dc->DrawStretchPic( drawX, drawY, drawW, drawH, s0, t0, s1, t1, background );
+				return;
+			}
+		}
+
 		float scalex, scaley;
 		if ( flags & WIN_NATURALMAT ) {
-			scalex = backgroundRect.w / background->GetImageWidth();
-			scaley = backgroundRect.h / background->GetImageHeight();
+			scalex = drawRect.w / background->GetImageWidth();
+			scaley = drawRect.h / background->GetImageHeight();
 		} else {
 			scalex = matScalex;
 			scaley = matScaley;
@@ -2204,52 +2476,30 @@ void idWindow::DrawBackground(const idRectangle &drawRect) {
 		dc->DrawMaterial( backgroundRect.x, backgroundRect.y, backgroundRect.w, backgroundRect.h, background, matColor, scalex, scaley );
 	}
 
-	const bool isHovered = ( parent != NULL && parent->overChild == this && !noEvents );
 	if ( hasFrameDecoration ) {
 		return;
 	}
-
-	const idMaterial *leftMat = NULL;
-	const idMaterial *middleMat = NULL;
-	const idMaterial *rightMat = NULL;
-	if ( isHovered ) {
-		leftMat = FindWindowMaterial( this, "lefthovermat" );
-		middleMat = FindWindowMaterial( this, "middlehovermat" );
-		rightMat = FindWindowMaterial( this, "righthovermat" );
-	}
-	if ( leftMat == NULL ) {
-		leftMat = FindWindowMaterial( this, "leftmat" );
-	}
-	if ( middleMat == NULL ) {
-		middleMat = FindWindowMaterial( this, "middlemat" );
-	}
-	if ( rightMat == NULL ) {
-		rightMat = FindWindowMaterial( this, "rightmat" );
-	}
-
+	const bool isHovered = parent != NULL && parent->overChild == this && !noEvents;
+	const idMaterial *leftMat = isHovered ? FindRetailWindowMaterial( this, "lefthovermat" ) : NULL;
+	const idMaterial *middleMat = isHovered ? FindRetailWindowMaterial( this, "middlehovermat" ) : NULL;
+	const idMaterial *rightMat = isHovered ? FindRetailWindowMaterial( this, "righthovermat" ) : NULL;
+	if ( leftMat == NULL ) leftMat = FindRetailWindowMaterial( this, "leftmat" );
+	if ( middleMat == NULL ) middleMat = FindRetailWindowMaterial( this, "middlemat" );
+	if ( rightMat == NULL ) rightMat = FindRetailWindowMaterial( this, "rightmat" );
 	if ( leftMat == NULL && middleMat == NULL && rightMat == NULL ) {
 		return;
 	}
-
 	float edgeWidth = drawRect.h * 0.5f;
-	idWinVar *edgeWidthVar = GetWinVarByName( "edgewidth", false );
-	if ( edgeWidthVar != NULL ) {
-		const float parsedEdge = static_cast<float>( atof( edgeWidthVar->c_str() ) );
-		if ( parsedEdge >= 0.0f ) {
-			edgeWidth = parsedEdge;
-		}
+	idWinVar *edgeVar = GetWinVarByName( "edgewidth", false );
+	if ( edgeVar != NULL && atof( edgeVar->c_str() ) >= 0.0f ) {
+		edgeWidth = static_cast<float>( atof( edgeVar->c_str() ) );
 	}
-
 	idVec4 materialColor = matColor;
 	if ( isHovered ) {
-		idWinVar *hoverMatColorVar = GetWinVarByName( "hovermatcolor", false );
-		idVec4 parsed = materialColor;
-		if ( hoverMatColorVar != NULL && ParseVec4Value( hoverMatColorVar->c_str(), parsed ) ) {
-			materialColor = parsed;
-		}
+		idWinVar *hoverColorVar = GetWinVarByName( "hovermatcolor", false );
+		if ( hoverColorVar != NULL ) ParseRetailVec4( hoverColorVar->c_str(), materialColor );
 	}
-
-	DrawTabButtonSegments( dc, drawRect, false, edgeWidth, leftMat, middleMat, rightMat, materialColor, backColor );
+	DrawRetailSegments( dc, drawRect, false, edgeWidth, leftMat, middleMat, rightMat, materialColor, backColor );
 }
 
 /*
@@ -2261,182 +2511,34 @@ void idWindow::DrawBorderAndCaption(const idRectangle &drawRect) {
 	if ( flags & WIN_BORDER && borderSize && borderColor.w() ) {
 		dc->DrawRect(drawRect.x, drawRect.y, drawRect.w, drawRect.h, borderSize, borderColor);
 	}
-
-	if ( GetWinVarByName( "cornermat", false ) != NULL || GetWinVarByName( "topmat", false ) != NULL ) {
-		const idMaterial *cornerMat = FindWindowMaterial( this, "cornermat" );
-		const idMaterial *topMat = FindWindowMaterial( this, "topmat" );
-		const idMaterial *leftMat = FindWindowMaterial( this, "leftmat" );
-		const idMaterial *rightMat = FindWindowMaterial( this, "rightmat" );
-		const idMaterial *bottomMat = FindWindowMaterial( this, "bottommat" );
-
-		if ( topMat != NULL || leftMat != NULL || rightMat != NULL || bottomMat != NULL || cornerMat != NULL ) {
-			if ( rightMat == NULL ) {
-				rightMat = leftMat;
-			}
-			if ( bottomMat == NULL ) {
-				bottomMat = topMat;
-			}
-
-			float cornerWidth = 16.0f;
-			float cornerHeight = 16.0f;
-			idWinVar *cornerSizeVar = GetWinVarByName( "cornersize", false );
-			if ( cornerSizeVar != NULL ) {
-				float parsedW = cornerWidth;
-				float parsedH = cornerHeight;
-				if ( ParseFloatPairValue( cornerSizeVar->c_str(), parsedW, parsedH ) ) {
-					cornerWidth = parsedW;
-					cornerHeight = parsedH;
-				}
-			} else if ( cornerMat != NULL ) {
-				cornerWidth = static_cast<float>( cornerMat->GetImageWidth() );
-				cornerHeight = static_cast<float>( cornerMat->GetImageHeight() );
-			}
-
-			float edgeSizeX = 4.0f;
-			float edgeSizeY = 4.0f;
-			idWinVar *edgeSizeVar = GetWinVarByName( "edgesize", false );
-			if ( edgeSizeVar != NULL ) {
-				float parsedX = edgeSizeX;
-				float parsedY = edgeSizeY;
-				if ( ParseFloatPairValue( edgeSizeVar->c_str(), parsedX, parsedY ) ) {
-					edgeSizeX = parsedX;
-					edgeSizeY = parsedY;
-				}
-			}
-
-			if ( windowDefType.Icmp( "superWindowDef" ) == 0 ) {
-				DrawRetailSuperWindowFrame( dc, drawRect, cornerMat, leftMat, topMat, cornerWidth, cornerHeight, edgeSizeX, edgeSizeY );
-				return;
-			}
-
-			cornerWidth = idMath::ClampFloat( 0.0f, drawRect.w * 0.5f, idMath::Fabs( cornerWidth ) );
-			cornerHeight = idMath::ClampFloat( 0.0f, drawRect.h * 0.5f, idMath::Fabs( cornerHeight ) );
-			edgeSizeX = idMath::ClampFloat( 0.0f, drawRect.w, idMath::Fabs( edgeSizeX ) );
-			edgeSizeY = idMath::ClampFloat( 0.0f, drawRect.h, idMath::Fabs( edgeSizeY ) );
-
-			const float horizontalX = drawRect.x + cornerWidth;
-			const float horizontalW = drawRect.w - cornerWidth - cornerWidth;
-			const float verticalY = drawRect.y + cornerHeight;
-			const float verticalH = drawRect.h - cornerHeight - cornerHeight;
-
-			if ( topMat != NULL && edgeSizeY > 0.0f && horizontalW > 0.0f ) {
-				dc->DrawMaterial( horizontalX, drawRect.y, horizontalW, edgeSizeY, topMat, matColor );
-				if ( bottomMat != NULL ) {
-					dc->DrawMaterial( horizontalX, drawRect.y + drawRect.h - edgeSizeY, horizontalW, edgeSizeY, bottomMat, matColor );
-				} else {
-					dc->DrawMaterial( horizontalX, drawRect.y + drawRect.h - edgeSizeY, horizontalW, -edgeSizeY, topMat, matColor );
-				}
-			}
-
-			if ( leftMat != NULL && edgeSizeX > 0.0f && verticalH > 0.0f ) {
-				dc->DrawMaterial( drawRect.x, verticalY, edgeSizeX, verticalH, leftMat, matColor );
-				if ( rightMat != NULL ) {
-					dc->DrawMaterial( drawRect.x + drawRect.w - edgeSizeX, verticalY, edgeSizeX, verticalH, rightMat, matColor );
-				} else {
-					dc->DrawMaterial( drawRect.x + drawRect.w - edgeSizeX, verticalY, -edgeSizeX, verticalH, leftMat, matColor );
-				}
-			}
-
-			if ( cornerMat != NULL && cornerWidth > 0.0f && cornerHeight > 0.0f ) {
-				dc->DrawMaterial( drawRect.x, drawRect.y, cornerWidth, cornerHeight, cornerMat, matColor );
-				dc->DrawMaterial( drawRect.x + drawRect.w - cornerWidth, drawRect.y, -cornerWidth, cornerHeight, cornerMat, matColor );
-				dc->DrawMaterial( drawRect.x, drawRect.y + drawRect.h - cornerHeight, cornerWidth, -cornerHeight, cornerMat, matColor );
-				dc->DrawMaterial( drawRect.x + drawRect.w - cornerWidth, drawRect.y + drawRect.h - cornerHeight, -cornerWidth, -cornerHeight, cornerMat, matColor );
-			}
-		}
+	if ( windowDefType.Icmp( "superWindowDef" ) == 0 &&
+		 ( GetWinVarByName( "cornermat", false ) != NULL || GetWinVarByName( "topmat", false ) != NULL ) ) {
+		const idMaterial *cornerMat = FindRetailWindowMaterial( this, "cornermat" );
+		const idMaterial *topMat = FindRetailWindowMaterial( this, "topmat" );
+		const idMaterial *sideMat = FindRetailWindowMaterial( this, "leftmat" );
+		float cornerWidth = cornerMat != NULL ? static_cast<float>( cornerMat->GetImageWidth() ) : 16.0f;
+		float cornerHeight = cornerMat != NULL ? static_cast<float>( cornerMat->GetImageHeight() ) : 16.0f;
+		idWinVar *cornerSize = GetWinVarByName( "cornersize", false );
+		if ( cornerSize != NULL ) ParseRetailFloatPair( cornerSize->c_str(), cornerWidth, cornerHeight );
+		float edgeSizeX = 4.0f;
+		float edgeSizeY = 4.0f;
+		idWinVar *edgeSize = GetWinVarByName( "edgesize", false );
+		if ( edgeSize != NULL ) ParseRetailFloatPair( edgeSize->c_str(), edgeSizeX, edgeSizeY );
+		DrawRetailSuperWindowFrame( dc, drawRect, cornerMat, sideMat, topMat, cornerWidth, cornerHeight, edgeSizeX, edgeSizeY, matColor );
 	}
 	if ( IsTabDef() && parent != NULL && parent->IsTabContainerDef() ) {
-		const bool hasSolidBackColor = ( backColor.w() > 0.0f );
-		const bool hasBackgroundMaterial = ( background != NULL && matColor.w() > 0.0f );
-		const bool hasSegmentBackground =
-			( GetWinVarByName( "leftmat", false ) != NULL ) ||
-			( GetWinVarByName( "middlemat", false ) != NULL ) ||
-			( GetWinVarByName( "rightmat", false ) != NULL );
-
-		bool hasNestedTabContainer = false;
-		for ( int i = 0; i < drawWindows.Num(); ++i ) {
-			idWindow *child = drawWindows[ i ].win;
-			if ( child != NULL && child->IsTabContainerDef() ) {
-				hasNestedTabContainer = true;
-				break;
-			}
-		}
-
-		// Retail-style host tabs (for nested tab matrices) do not draw their own page separator
-		// when they have no page fill of their own.
-		if ( !hasSolidBackColor && !hasBackgroundMaterial && !hasSegmentBackground && hasNestedTabContainer ) {
-			return;
-		}
-
-		tabSeparatorStyle_t separatorStyle;
-		GetTabSeparatorStyle( this, separatorStyle );
-
 		idVec4 separatorColor( 0.74f, 0.81f, 0.88f, 1.0f );
 		idWinVar *separatorVar = GetWinVarByName( "sepcolor", false );
-		if ( separatorVar == NULL ) {
-			separatorVar = parent->GetWinVarByName( "sepcolor", false );
-		}
-		if ( separatorVar != NULL ) {
-			idVec4 parsed = separatorColor;
-			if ( ParseVec4Value( separatorVar->c_str(), parsed ) ) {
-				separatorColor = parsed;
-			}
-		}
-
-		bool parentVerticalTabs = false;
-		idWinVar *horizontalVar = parent->GetWinVarByName( "horizontal", false );
-		if ( horizontalVar != NULL ) {
-			bool parsedHorizontal = false;
-			if ( ParseBoolValue( horizontalVar->c_str(), parsedHorizontal ) ) {
-				parentVerticalTabs = parsedHorizontal;
-			}
-		}
-
-		idList<idRectangle> tabCutouts;
-		const int parentTabCount = parent->GetTabContainerTabCount();
-		if ( parentTabCount > 0 ) {
-			int tabIndex = -1;
-			int tabOrdinal = 0;
-			for ( int i = 0; i < parent->drawWindows.Num(); ++i ) {
-				idWindow *child = parent->drawWindows[ i ].win;
-				if ( child == NULL || !child->IsTabDef() ) {
-					continue;
-				}
-				if ( child == this ) {
-					tabIndex = tabOrdinal;
-					break;
-				}
-				++tabOrdinal;
-			}
-
-			tabContainerLayout_t parentLayout;
-			if ( tabIndex >= 0 && BuildTabContainerLayout( parent, parent->drawRect, parentTabCount, parentLayout ) ) {
-				tabCutouts.Append( GetTabButtonRect( parent->drawRect, parentLayout, tabIndex ) );
-			}
-		}
-
-		idRectangle separatorRect = drawRect;
-		if ( !separatorStyle.useFullRect ) {
-			// PREY treats "seperatorMargin" as a bool: when false, the page separator
-			// is inset by the parent tab container's tabMargins before the edge lines are drawn.
-			float marginStart = 0.0f;
-			float marginEnd = 0.0f;
-			GetTabContainerMargins( parent, marginStart, marginEnd );
-
-			if ( parentVerticalTabs ) {
-				separatorRect.y += marginStart;
-				separatorRect.h -= ( marginStart + marginEnd );
-			} else {
-				separatorRect.x += marginStart;
-				separatorRect.w -= ( marginStart + marginEnd );
-			}
-
-			if ( separatorRect.w <= 0.0f || separatorRect.h <= 0.0f ) {
-				return;
-			}
-		}
-
-		DrawTabSeparatorLines( dc, separatorRect, separatorStyle, separatorColor, tabCutouts.Num() > 0 ? &tabCutouts : NULL );
+		if ( separatorVar == NULL ) separatorVar = parent->GetWinVarByName( "sepcolor", false );
+		if ( separatorVar != NULL ) ParseRetailVec4( separatorVar->c_str(), separatorColor );
+		idVec4 lines( 1.0f, 1.0f, 1.0f, 1.0f );
+		idWinVar *linesVar = GetWinVarByName( "seperatorlines", false );
+		if ( linesVar == NULL ) linesVar = GetWinVarByName( "separatorlines", false );
+		if ( linesVar != NULL ) ParseRetailVec4( linesVar->c_str(), lines );
+		if ( lines.x > 0.0f ) dc->DrawFilledRect( drawRect.x, drawRect.y, Min( lines.x, drawRect.w ), drawRect.h, separatorColor );
+		if ( lines.y > 0.0f ) dc->DrawFilledRect( drawRect.x, drawRect.y, drawRect.w, Min( lines.y, drawRect.h ), separatorColor );
+		if ( lines.z > 0.0f ) dc->DrawFilledRect( drawRect.Right() - Min( lines.z, drawRect.w ), drawRect.y, Min( lines.z, drawRect.w ), drawRect.h, separatorColor );
+		if ( lines.w > 0.0f ) dc->DrawFilledRect( drawRect.x, drawRect.Bottom() - Min( lines.w, drawRect.h ), drawRect.w, Min( lines.w, drawRect.h ), separatorColor );
 	}
 }
 
@@ -2531,13 +2633,31 @@ void idWindow::Redraw(float x, float y) {
 
 	if ( flags & WIN_SHOWCOORDS ) {
 		dc->EnableClipping(false);
-		sprintf(str, "x: %i y: %i  cursorx: %i cursory: %i", (int)rect.x(), (int)rect.y(), (int)gui->CursorX(), (int)gui->CursorY());
+		str = va( "x: %i y: %i  cursorx: %i cursory: %i", (int)rect.x(), (int)rect.y(), (int)gui->CursorX(), (int)gui->CursorY() );
 		dc->DrawText(str, 0.25f, 0, dc->colorWhite, idRectangle(0, 0, 100, 20), false);
 		dc->EnableClipping(true);
 	}
 
 	UpdateTabContainerState( true );
 	CalcClientRect(0, 0);
+
+	// openQ4: the stock interface's HUD scale. This window's group scales
+	// about its screen anchor for as long as it and its children draw.
+	const bool hudScaled = !( flags & WIN_DESKTOP ) && gui->LegacyScale() != 1.0f;
+	const idLegacyHudGroup hudGroup( hudScaled ? gui : NULL, dc, hudScaled ? HudGroupAnchorX() : -1, hudScaled ? HudGroupAnchorY() : -1 );
+	// A window that fills the canvas is a full-screen layer (a fade, a damage
+	// vignette), not a HUD group: it draws itself unscaled, so a smaller HUD
+	// leaves no uncovered border, unless it names its anchor. Its children
+	// keep their groups.
+	const bool hudWholeCanvas = hudScaled && hudAnchorX == HUD_ANCHOR_UNSET && hudAnchorY == HUD_ANCHOR_UNSET &&
+		rect.w() >= forceAspectWidth && rect.h() >= forceAspectHeight;
+	float hudGroupX = 0.0f, hudGroupY = 0.0f, hudGroupScale = 1.0f;
+	if ( hudWholeCanvas ) {
+		dc->GetGroupScale( hudGroupX, hudGroupY, hudGroupScale );
+		dc->SetGroupScale( 0.0f, 0.0f, 1.0f );
+	}
+
+	SetFont();
 	//if (flags & WIN_DESKTOP) {
 		// see if this window forces a new aspect ratio
 		dc->SetSize(forceAspectWidth, forceAspectHeight);
@@ -2552,15 +2672,12 @@ void idWindow::Redraw(float x, float y) {
 
 	HandleRetailSpecialVars();
 	UpdateRetailCreditActivation();
-
 	if ( !visible ) {
-		drawRect.Offset(-x, -y);
-		clientRect.Offset(-x, -y);
-		textRect.Offset(-x, -y);
+		drawRect.Offset( -x, -y );
+		clientRect.Offset( -x, -y );
+		textRect.Offset( -x, -y );
 		return;
 	}
-
-	SetFont();
 
 	idVec3	oldOrg;
 	idMat3	oldTrans;
@@ -2571,7 +2688,8 @@ void idWindow::Redraw(float x, float y) {
 	DrawBackground(drawRect);
 	DrawBorderAndCaption(drawRect);
 
-	if ( !( flags & WIN_NOCLIP) ) {
+	const bool pushWindowClip = !( flags & WIN_NOCLIP ) && !UsesSimpleWindowClipBehavior();
+	if ( pushWindowClip ) {
 		idRectangle clipRect = clientRect;
 		if ( flags & WIN_DESKTOP ) {
 			float xExpand = 0.0f;
@@ -2597,14 +2715,17 @@ void idWindow::Redraw(float x, float y) {
 		DebugDraw(time, x, y);
 	}
 
+	if ( hudWholeCanvas ) {
+		dc->SetGroupScale( hudGroupX, hudGroupY, hudGroupScale );
+	}
+
 	int c = drawWindows.Num();
 	int tabOrdinal = 0;
 	for ( int i = 0; i < c; i++ ) {
 		if ( drawWindows[i].win ) {
 			if ( IsTabContainerDef() && drawWindows[i].win->IsTabDef() ) {
-				const bool isActiveTab = ( tabOrdinal == activeTabIndex );
-				tabOrdinal++;
-				if ( !isActiveTab ) {
+				const bool active = tabOrdinal++ == activeTabIndex;
+				if ( !active ) {
 					continue;
 				}
 			}
@@ -2617,7 +2738,7 @@ void idWindow::Redraw(float x, float y) {
 	// Put transforms back to what they were before the children were processed
 	dc->SetTransformInfo(oldOrg, oldTrans);
 
-	if ( ! ( flags & WIN_NOCLIP ) ) {
+	if ( pushWindowClip ) {
 		dc->PopClipRect();
 	} 
 
@@ -2628,7 +2749,7 @@ void idWindow::Redraw(float x, float y) {
 
 	if (gui_debug.GetInteger() && flags & WIN_DESKTOP) {
 		dc->EnableClipping(false);
-		sprintf(str, "x: %1.f y: %1.f",  gui->CursorX(), gui->CursorY());
+		str = va( "x: %1.f y: %1.f",  gui->CursorX(), gui->CursorY() );
 		dc->DrawText(str, 0.25, 0, dc->colorWhite, idRectangle(0, 0, 100, 20), false);
 		dc->DrawText(gui->GetSourceFile(), 0.25, 0, dc->colorWhite, idRectangle(0, 20, 300, 20), false);
 		dc->EnableClipping(true);
@@ -2683,6 +2804,31 @@ void idWindow::InitFromDictionary(idDict *dict, bool byName) {
 
 /*
 ================
+idWindow::HudGroupAnchorX / HudGroupAnchorY
+
+openQ4: the anchor this window gives its HUD scale group on each axis: the one
+it names (hudanchorx, hudanchory), else the screen edge its alignment moves it
+to, where that alignment applies (CalcClientRect), else its ancestors'.
+================
+*/
+int idWindow::HudGroupAnchorX() const {
+	if ( hudAnchorX != HUD_ANCHOR_UNSET ) {
+		return hudAnchorX;
+	}
+	const bool applies = ( parent == NULL ) || ( ( parent->GetFlags() & WIN_DESKTOP ) != 0 ) || ( parent->GetScreenAlignX() == SCREEN_ALIGN_X_MIDDLE );
+	return applies && screenAlignX != SCREEN_ALIGN_X_MIDDLE ? screenAlignX : -1;
+}
+
+int idWindow::HudGroupAnchorY() const {
+	if ( hudAnchorY != HUD_ANCHOR_UNSET ) {
+		return hudAnchorY;
+	}
+	const bool applies = ( parent == NULL ) || ( ( parent->GetFlags() & WIN_DESKTOP ) != 0 ) || ( parent->GetScreenAlignY() == SCREEN_ALIGN_Y_MIDDLE );
+	return applies && screenAlignY != SCREEN_ALIGN_Y_MIDDLE ? screenAlignY : -1;
+}
+
+/*
+================
 idWindow::CalcClientRect
 ================
 */
@@ -2699,7 +2845,8 @@ void idWindow::CalcClientRect(float xofs, float yofs) {
 		// and ignore the original positioning
 		if (flags & WIN_HCENTER) {
 			drawRect.x = (parent->rect.w() - rect.w()) / 2;
-		} else {
+		}
+		if (flags & WIN_VCENTER) {
 			drawRect.y = (parent->rect.h() - rect.h()) / 2;
 		}
 	}
@@ -2709,26 +2856,36 @@ void idWindow::CalcClientRect(float xofs, float yofs) {
 
 	const bool applyScreenAlignX = ( parent == NULL ) || ( ( parent->GetFlags() & WIN_DESKTOP ) != 0 ) || ( parent->GetScreenAlignX() == SCREEN_ALIGN_X_MIDDLE );
 	const bool applyScreenAlignY = ( parent == NULL ) || ( ( parent->GetFlags() & WIN_DESKTOP ) != 0 ) || ( parent->GetScreenAlignY() == SCREEN_ALIGN_Y_MIDDLE );
-	if ( dc != NULL && ( applyScreenAlignX || applyScreenAlignY ) ) {
+	if ( dc != NULL && ( applyScreenAlignX || applyScreenAlignY ) &&
+			!( gui != NULL && gui->ClassicCanvas() ) ) {
 		float xExpand = 0.0f;
 		float yExpand = 0.0f;
 		dc->GetVirtualScreenExpansion( forceAspectWidth, forceAspectHeight, xExpand, yExpand );
+		// A HUD in the stock interface's Remastered layout caps its side screens
+		// and insets its edges (idLegacyHudLayout); the inset also moves edge
+		// groups on a 4:3 view, where nothing expands.
+		float edges[4] = { xExpand, yExpand, xExpand, yExpand };
+		const bool legacyEdges = gui != NULL && gui->LegacyEdges( edges );
 
-		if ( xExpand > 0.0f && applyScreenAlignX ) {
+		if ( ( legacyEdges || xExpand > 0.0f ) && applyScreenAlignX ) {
 			if ( screenAlignX == SCREEN_ALIGN_X_LEFT ) {
-				drawRect.x -= xExpand;
+				drawRect.x -= edges[0];
 			} else if ( screenAlignX == SCREEN_ALIGN_X_RIGHT ) {
-				drawRect.x += xExpand;
+				drawRect.x += edges[2];
 			}
 		}
 
-		if ( yExpand > 0.0f && applyScreenAlignY ) {
+		if ( ( legacyEdges || yExpand > 0.0f ) && applyScreenAlignY ) {
 			if ( screenAlignY == SCREEN_ALIGN_Y_TOP ) {
-				drawRect.y -= yExpand;
+				drawRect.y -= edges[1];
 			} else if ( screenAlignY == SCREEN_ALIGN_Y_BOTTOM ) {
-				drawRect.y += yExpand;
+				drawRect.y += edges[3];
 			}
 		}
+
+		AdjustTournamentWarmupLayout( gui, GetName(), parent != NULL ? parent->GetName() : NULL, xofs, xExpand, drawRect );
+		OpenQ4_ExpandLegacyMessageBackdrop( gui != NULL ? gui->GetSourceFile() : NULL,
+			GetName(), xExpand, yExpand, drawRect );
 	}
 
 	clientRect = drawRect;
@@ -2761,14 +2918,74 @@ idWindow::SetupBackground
 ================
 */
 void idWindow::SetupBackground() {
+	background = NULL;
 	if (backGroundName.Length()) {
 		background = declManager->FindMaterial(backGroundName);
-		background->SetImageClassifications( 1 );	// just for resource tracking
-		if ( background && !background->TestMaterialFlag( MF_DEFAULTED ) ) {
+		if ( background ) {
+			background->SetImageClassifications( 1 );	// just for resource tracking
+		}
+		// Retail stamps GUI backgrounds to SS_GUI unless they are defaulted or
+		// explicitly post-process sorted. This preserves GUI file emission order
+		// for authored materials as well as implicit image materials.
+		if ( background && !background->TestMaterialFlag( MF_DEFAULTED )
+				&& background->GetSort() < SS_POST_PROCESS ) {
 			background->SetSort(SS_GUI );
 		}
 	}
 	backGroundName.SetMaterialPtr(&background);
+}
+
+bool idWindow::CanKeepForLevelLoad() const {
+    // Custom game/editor widgets can own state outside the ordinary window
+    // tree. Keep their existing full reload until they have a refresh path.
+    const auto& type = typeid(*this);
+    if (type != typeid(idWindow) && type != typeid(idBindWindow) && type != typeid(idChoiceWindow) &&
+        type != typeid(idEditWindow) && type != typeid(idFieldWindow) && type != typeid(idListWindow) &&
+        type != typeid(idSliderWindow) && type != typeid(idRenderWindow)) return false;
+    for (int i = 0; i < children.Num(); ++i) {
+        // Prey GUIs can hand a child to another window (tab and list
+        // containers). The defaults snapshot is a savegame stream, which
+        // refuses such a tree, so those GUIs keep the full reload instead.
+        if (children[i] == NULL || children[i]->parent != this) return false;
+        if (!children[i]->CanKeepForLevelLoad()) return false;
+    }
+    return true;
+}
+
+void idWindow::CaptureForLevelLoad() {
+    // The save stream stores authored background names; scrollers also have
+    // constructor-assigned backgrounds with no name variable to serialize.
+    levelLoadDirectBackground = background && !backGroundName.c_str()[0] ? background : NULL;
+    for (int i = 0; i < children.Num(); ++i) children[i]->CaptureForLevelLoad();
+}
+
+void idWindow::RefreshForLevelLoad() {
+    if (!background && levelLoadDirectBackground) background = levelLoadDirectBackground;
+    // Scrollers install a background directly, without backGroundName. Use
+    // the live material identity so their defaults survive too.
+    if (background) {
+        const idStr materialName = background->GetName();
+        background = declManager->FindMaterial(materialName);
+        background->SetImageClassifications(1);
+        if (!background->TestMaterialFlag(MF_DEFAULTED) && background->GetSort() < SS_POST_PROCESS)
+            background->SetSort(SS_GUI);
+    }
+    for (int i = 0; i < numOps; ++i) {
+        if (ops[i].opType == WOP_TYPE_TABLE) {
+            const idDecl* table = declManager->DeclByIndex(DECL_TABLE, ops[i].a, false);
+            declManager->FindType(DECL_TABLE, table->GetName());
+        }
+    }
+    for (int i = 0; i < drawWindows.Num(); ++i) {
+        if (drawWindows[i].simp) {
+            idSimpleWindow* simple = drawWindows[i].simp;
+            if (simple->background) {
+                simple->background = declManager->FindMaterial(simple->background->GetName());
+                simple->background->SetSort(SS_GUI);
+            }
+        }
+    }
+    for (int i = 0; i < children.Num(); ++i) children[i]->RefreshForLevelLoad();
 }
 
 /*
@@ -2888,6 +3105,11 @@ idWindow::GetCaptureChild
 */
 idWindow *idWindow::GetCaptureChild() {
 	if (flags & WIN_DESKTOP) {
+		ValidateTrackedWindowPointers();
+		return captureChild;
+	}
+	if ( gui && gui->GetDesktop() ) {
+		gui->GetDesktop()->ValidateTrackedWindowPointers();
 		return gui->GetDesktop()->captureChild;
 	}
 	return NULL;
@@ -2900,6 +3122,11 @@ idWindow::GetFocusedChild
 */
 idWindow *idWindow::GetFocusedChild() {
 	if (flags & WIN_DESKTOP) {
+		ValidateTrackedWindowPointers();
+		return focusedChild;
+	}
+	if ( gui && gui->GetDesktop() ) {
+		gui->GetDesktop()->ValidateTrackedWindowPointers();
 		return gui->GetDesktop()->focusedChild;
 	}
 	return NULL;
@@ -2913,9 +3140,16 @@ idWindow::SetFocus
 */
 idWindow *idWindow::SetFocus(idWindow *w, bool scripts) {
 	// only one child can have the focus
+	if ( gui == NULL || gui->GetDesktop() == NULL || w == NULL ) {
+		return NULL;
+	}
+
+	idWindow *desktop = gui->GetDesktop();
+	desktop->ValidateTrackedWindowPointers();
+
 	idWindow *lastFocus = NULL;
 	if (w->flags & WIN_CANFOCUS) {
-		lastFocus = gui->GetDesktop()->focusedChild;
+		lastFocus = desktop->focusedChild;
 		if ( lastFocus ) {
 			lastFocus->flags &= ~WIN_FOCUS;
 			lastFocus->LoseFocus();
@@ -2934,10 +3168,80 @@ idWindow *idWindow::SetFocus(idWindow *w, bool scripts) {
 
 		w->flags |= WIN_FOCUS;
 		w->GainFocus();
-		gui->GetDesktop()->focusedChild = w;
+		desktop->focusedChild = w;
 	}
 
 	return lastFocus;
+}
+
+bool idWindow::HasDirectChildReference( const idWindow *window ) const {
+	if ( window == NULL ) {
+		return false;
+	}
+
+	for ( int i = 0; i < children.Num(); ++i ) {
+		if ( children[i] == window ) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool idWindow::HasDescendantReference( const idWindow *window ) const {
+	if ( window == NULL ) {
+		return false;
+	}
+	if ( this == window ) {
+		return true;
+	}
+
+	for ( int i = 0; i < children.Num(); ++i ) {
+		idWindow *child = children[i];
+		if ( child != NULL && child->HasDescendantReference( window ) ) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void idWindow::ClearTrackedWindowReference( const idWindow *window ) {
+	if ( window == NULL ) {
+		return;
+	}
+
+	if ( focusedChild == window ) {
+		focusedChild = NULL;
+	}
+	if ( captureChild == window ) {
+		captureChild = NULL;
+	}
+	if ( overChild == window ) {
+		overChild = NULL;
+	}
+
+	for ( int i = 0; i < children.Num(); ++i ) {
+		idWindow *child = children[i];
+		if ( child != NULL && child != window ) {
+			child->ClearTrackedWindowReference( window );
+		}
+	}
+}
+
+void idWindow::ValidateTrackedWindowPointers() {
+	if ( overChild != NULL && !HasDirectChildReference( overChild ) ) {
+		overChild = NULL;
+	}
+
+	if ( ( flags & WIN_DESKTOP ) != 0 ) {
+		if ( focusedChild != NULL && !HasDescendantReference( focusedChild ) ) {
+			focusedChild = NULL;
+		}
+		if ( captureChild != NULL && !HasDescendantReference( captureChild ) ) {
+			captureChild = NULL;
+		}
+	}
 }
 
 /*
@@ -3220,6 +3524,14 @@ idWinVar *idWindow::GetWinVarByName(const char *_name, bool fixup, drawWin_t** o
 		*owner = NULL;
 	}
 
+	if (idStr::Icmp(_name, "textwidth") == 0) {
+		measureTextWidth = true;
+		retVar = &textWidth;
+	}
+	if (idStr::Icmp(_name, "textlines") == 0) {
+		measureTextWidth = true;
+		retVar = &textLines;
+	}
 	if (idStr::Icmp(_name, "notime") == 0) {
 		retVar = &noTime;
 	}
@@ -3251,10 +3563,19 @@ idWinVar *idWindow::GetWinVarByName(const char *_name, bool fixup, drawWin_t** o
 	if (idStr::Icmp(_name, "backColor_r") == 0) {
 		retVar = &backColor_r;
 	}
+	if (idStr::Icmp(_name, "backColor_x") == 0) {
+		retVar = &backColor_r;
+	}
 	if (idStr::Icmp(_name, "backColor_g") == 0) {
 		retVar = &backColor_g;
 	}
+	if (idStr::Icmp(_name, "backColor_y") == 0) {
+		retVar = &backColor_g;
+	}
 	if (idStr::Icmp(_name, "backColor_b") == 0) {
+		retVar = &backColor_b;
+	}
+	if (idStr::Icmp(_name, "backColor_z") == 0) {
 		retVar = &backColor_b;
 	}
 	if (idStr::Icmp(_name, "backColor_w") == 0) {
@@ -3268,10 +3589,19 @@ idWinVar *idWindow::GetWinVarByName(const char *_name, bool fixup, drawWin_t** o
 	if (idStr::Icmp(_name, "matColor_r") == 0) {
 		retVar = &matColor_r;
 	}
+	if (idStr::Icmp(_name, "matColor_x") == 0) {
+		retVar = &matColor_r;
+	}
 	if (idStr::Icmp(_name, "matColor_g") == 0) {
 		retVar = &matColor_g;
 	}
+	if (idStr::Icmp(_name, "matColor_y") == 0) {
+		retVar = &matColor_g;
+	}
 	if (idStr::Icmp(_name, "matColor_b") == 0) {
+		retVar = &matColor_b;
+	}
+	if (idStr::Icmp(_name, "matColor_z") == 0) {
 		retVar = &matColor_b;
 	}
 	if (idStr::Icmp(_name, "matColor_w") == 0) {
@@ -3285,10 +3615,19 @@ idWinVar *idWindow::GetWinVarByName(const char *_name, bool fixup, drawWin_t** o
 	if (idStr::Icmp(_name, "foreColor_r") == 0) {
 		retVar = &foreColor_r;
 	}
+	if (idStr::Icmp(_name, "foreColor_x") == 0) {
+		retVar = &foreColor_r;
+	}
 	if (idStr::Icmp(_name, "foreColor_g") == 0) {
 		retVar = &foreColor_g;
 	}
+	if (idStr::Icmp(_name, "foreColor_y") == 0) {
+		retVar = &foreColor_g;
+	}
 	if (idStr::Icmp(_name, "foreColor_b") == 0) {
+		retVar = &foreColor_b;
+	}
+	if (idStr::Icmp(_name, "foreColor_z") == 0) {
 		retVar = &foreColor_b;
 	}
 	if (idStr::Icmp(_name, "foreColor_w") == 0) {
@@ -3302,10 +3641,19 @@ idWinVar *idWindow::GetWinVarByName(const char *_name, bool fixup, drawWin_t** o
 	if (idStr::Icmp(_name, "hoverColor_r") == 0) {
 		retVar = &hoverColor_r;
 	}
+	if (idStr::Icmp(_name, "hoverColor_x") == 0) {
+		retVar = &hoverColor_r;
+	}
 	if (idStr::Icmp(_name, "hoverColor_g") == 0) {
 		retVar = &hoverColor_g;
 	}
+	if (idStr::Icmp(_name, "hoverColor_y") == 0) {
+		retVar = &hoverColor_g;
+	}
 	if (idStr::Icmp(_name, "hoverColor_b") == 0) {
+		retVar = &hoverColor_b;
+	}
+	if (idStr::Icmp(_name, "hoverColor_z") == 0) {
 		retVar = &hoverColor_b;
 	}
 	if (idStr::Icmp(_name, "hoverColor_w") == 0) {
@@ -3319,10 +3667,19 @@ idWinVar *idWindow::GetWinVarByName(const char *_name, bool fixup, drawWin_t** o
 	if (idStr::Icmp(_name, "borderColor_r") == 0) {
 		retVar = &borderColor_r;
 	}
+	if (idStr::Icmp(_name, "borderColor_x") == 0) {
+		retVar = &borderColor_r;
+	}
 	if (idStr::Icmp(_name, "borderColor_g") == 0) {
 		retVar = &borderColor_g;
 	}
+	if (idStr::Icmp(_name, "borderColor_y") == 0) {
+		retVar = &borderColor_g;
+	}
 	if (idStr::Icmp(_name, "borderColor_b") == 0) {
+		retVar = &borderColor_b;
+	}
+	if (idStr::Icmp(_name, "borderColor_z") == 0) {
 		retVar = &borderColor_b;
 	}
 	if (idStr::Icmp(_name, "borderColor_w") == 0) {
@@ -3533,7 +3890,7 @@ bool idWindow::ParseInternalVar(const char *_name, idParser *src) {
 	}
 // jmarshall - quake 4
 	if (idStr::Icmp(_name, "textSpacing") == 0) {
-		src->ParseInt();
+		textspacing = src->ParseFloat();
 		return true;
 	}
 // jmarshall end
@@ -3573,9 +3930,51 @@ bool idWindow::ParseInternalVar(const char *_name, idParser *src) {
 		}
 		return true;
 	}
+	if ( idStr::Icmp( _name, "hudanchorx" ) == 0 ) {
+		idToken token;
+		if ( !src->ReadToken( &token ) ) {
+			return false;
+		}
+		unsigned char anchor = SCREEN_ALIGN_X_MIDDLE;
+		if ( token.Icmp( "none" ) == 0 ) {
+			hudAnchorX = HUD_ANCHOR_NONE;
+		} else if ( ParseScreenAlignXToken( token, anchor ) ) {
+			hudAnchorX = anchor;
+		} else {
+			src->Warning( "Unknown hudanchorx value '%s' in window '%s' (expected: middle|left|right)", token.c_str(), GetName() );
+		}
+		return true;
+	}
+	if ( idStr::Icmp( _name, "hudanchory" ) == 0 ) {
+		idToken token;
+		if ( !src->ReadToken( &token ) ) {
+			return false;
+		}
+		unsigned char anchor = SCREEN_ALIGN_Y_MIDDLE;
+		if ( token.Icmp( "none" ) == 0 ) {
+			hudAnchorY = HUD_ANCHOR_NONE;
+		} else if ( ParseScreenAlignYToken( token, anchor ) ) {
+			hudAnchorY = anchor;
+		} else {
+			src->Warning( "Unknown hudanchory value '%s' in window '%s' (expected: middle|top|bottom)", token.c_str(), GetName() );
+		}
+		return true;
+	}
+	if ( idStr::Icmp( _name, "ellipsis" ) == 0 ) {
+		textEllipsis = src->ParseBool();
+		return true;
+	}
+	if ( idStr::Icmp( _name, "keynames" ) == 0 ) {
+		textKeyNames = src->ParseBool();
+		return true;
+	}
+	if ( idStr::Icmp( _name, "oneline" ) == 0 ) {
+		textOneLine = src->ParseBool();
+		return true;
+	}
 // jmarshall - quake 4
 	if (idStr::Icmp(_name, "textStyle") == 0) {
-		src->ParseInt();
+		textstyle = src->ParseInt();
 		return true;
 	}
 // jmarshall end
@@ -3588,6 +3987,38 @@ bool idWindow::ParseInternalVar(const char *_name, idParser *src) {
 	if (idStr::Icmp(_name, "naturalmatscale") == 0) {
 		if ( src->ParseBool() ) {
 			flags |= WIN_NATURALMAT;
+		}
+		return true;
+	}
+	if ( idStr::Icmp( _name, "matcover" ) == 0 ) {
+		if ( src->ParseBool() ) {
+			flags |= WIN_MATCOVER;
+		} else {
+			flags &= ~WIN_MATCOVER;
+		}
+		return true;
+	}
+	if ( idStr::Icmp( _name, "matfit" ) == 0 ) {
+		if ( src->ParseBool() ) {
+			flags |= WIN_MATFIT;
+		} else {
+			flags &= ~WIN_MATFIT;
+		}
+		return true;
+	}
+	if ( idStr::Icmp( _name, "matcanvasfill" ) == 0 ) {
+		if ( src->ParseBool() ) {
+			flags |= WIN_MATCANVASFILL;
+		} else {
+			flags &= ~WIN_MATCANVASFILL;
+		}
+		return true;
+	}
+	if ( idStr::Icmp( _name, "nativescreenoverlay" ) == 0 ) {
+		if ( src->ParseBool() ) {
+			flags |= WIN_NATIVESCREENOVERLAY;
+		} else {
+			flags &= ~WIN_NATIVESCREENOVERLAY;
 		}
 		return true;
 	}
@@ -3617,11 +4048,13 @@ bool idWindow::ParseInternalVar(const char *_name, idParser *src) {
 	}
 // jmarshall - quake 4
 	if (idStr::Icmp(_name, "alwaysThink") == 0) {
-		src->ParseInt();
+		alwaysThink = src->ParseBool();
 		return true;
 	}
 	if (idStr::Icmp(_name, "chatWindow") == 0) {
-		src->ParseInt();
+		if ( src->ParseBool() ) {
+			flags |= WIN_CHATWINDOW;
+		}
 		return true;
 	}
 // jmarshall end
@@ -3760,396 +4193,259 @@ void idWindow::SetInitialState(const char *_name) {
 	forceAspectHeight = 480.0;
 	noTime = false;
 	visible = true;
+	alwaysThink = false;
 	flags = 0;
 }
 
-/*
-================
-idWindow::SetWindowDefType
-================
-*/
 void idWindow::SetWindowDefType( const char *defType ) {
-	if ( defType != NULL && defType[0] != '\0' ) {
-		windowDefType = defType;
-	} else {
-		windowDefType = "windowDef";
-	}
+	windowDefType = defType != NULL && defType[0] != '\0' ? defType : "windowDef";
 }
 
-/*
-================
-idWindow::IsTabContainerDef
-================
-*/
 bool idWindow::IsTabContainerDef() const {
 	return windowDefType.Icmp( "tabContainerDef" ) == 0;
 }
 
-/*
-================
-idWindow::IsTabDef
-================
-*/
 bool idWindow::IsTabDef() const {
 	return windowDefType.Icmp( "tabDef" ) == 0;
 }
 
-/*
-================
-idWindow::IsCreditDef
-================
-*/
 bool idWindow::IsCreditDef() const {
 	return windowDefType.Icmp( "creditDef" ) == 0;
 }
 
-/*
-================
-idWindow::IsSplineDef
-================
-*/
 bool idWindow::IsSplineDef() const {
 	return windowDefType.Icmp( "splineDef" ) == 0;
 }
 
-/*
-================
-idWindow::IsRetailSplineWindow
-================
-*/
 bool idWindow::IsRetailSplineWindow() const {
 	return IsCreditDef() || IsSplineDef();
 }
 
-/*
-================
-idWindow::GetTabContainerTabCount
-================
-*/
 int idWindow::GetTabContainerTabCount() const {
 	if ( !IsTabContainerDef() ) {
 		return 0;
 	}
-
 	int count = 0;
 	for ( int i = 0; i < drawWindows.Num(); ++i ) {
-		const idWindow *child = drawWindows[ i ].win;
+		const idWindow *child = drawWindows[i].win;
 		if ( child != NULL && child->IsTabDef() ) {
 			++count;
 		}
 	}
-
 	return count;
 }
 
-/*
-================
-idWindow::GetTabContainerTabWindow
-================
-*/
 idWindow *idWindow::GetTabContainerTabWindow( int tabIndex ) const {
-	if ( tabIndex < 0 || !IsTabContainerDef() ) {
+	if ( !IsTabContainerDef() || tabIndex < 0 ) {
 		return NULL;
 	}
-
-	int current = 0;
+	int ordinal = 0;
 	for ( int i = 0; i < drawWindows.Num(); ++i ) {
-		idWindow *child = drawWindows[ i ].win;
+		idWindow *child = drawWindows[i].win;
 		if ( child == NULL || !child->IsTabDef() ) {
 			continue;
 		}
-		if ( current == tabIndex ) {
+		if ( ordinal++ == tabIndex ) {
 			return child;
 		}
-		++current;
 	}
-
 	return NULL;
 }
 
-/*
-================
-idWindow::GetTabContainerRequestedTabIndex
-================
-*/
 int idWindow::GetTabContainerRequestedTabIndex() const {
-	idWindow *self = const_cast<idWindow *>( this );
-	idWinVar *activeTabVar = self->GetWinVarByName( "activetab", false );
-	if ( activeTabVar == NULL ) {
-		return 0;
-	}
-
-	return idMath::Ftoi( atof( activeTabVar->c_str() ) );
+	idWinVar *var = const_cast<idWindow *>( this )->GetWinVarByName( "activetab", false );
+	return var != NULL ? idMath::Ftoi( static_cast<float>( atof( var->c_str() ) ) ) : 0;
 }
 
-/*
-================
-idWindow::GetTabContainerTabAt
-================
-*/
 int idWindow::GetTabContainerTabAt( float x, float y ) const {
-	if ( !IsTabContainerDef() ) {
+	const int count = GetTabContainerTabCount();
+	if ( count <= 0 ) {
 		return -1;
 	}
-
-	const int tabCount = GetTabContainerTabCount();
-	if ( tabCount <= 0 ) {
-		return -1;
-	}
-
 	const idRectangle containerRect( actualX, actualY, drawRect.w, drawRect.h );
-
-	tabContainerLayout_t layout;
-	if ( !BuildTabContainerLayout( this, containerRect, tabCount, layout ) ) {
+	retailTabLayout_t layout;
+	if ( !BuildRetailTabLayout( const_cast<idWindow *>( this ), containerRect, count, layout ) ) {
 		return -1;
 	}
-
-	for ( int tabIndex = 0; tabIndex < tabCount; ++tabIndex ) {
-		const idRectangle tabRect = GetTabButtonRect( containerRect, layout, tabIndex );
-		if ( TabButtonRectContainsCursor( tabRect, layout.verticalTabs, tabIndex == ( tabCount - 1 ), x, y ) ) {
-			return tabIndex;
+	for ( int i = 0; i < count; ++i ) {
+		const idRectangle tabRect = GetRetailTabButtonRect( containerRect, layout, i );
+		if ( x >= tabRect.x && y >= tabRect.y && x <= tabRect.Right() && y <= tabRect.Bottom() ) {
+			return i;
 		}
 	}
-
 	return -1;
 }
 
-/*
-================
-idWindow::UpdateTabContainerState
-================
-*/
 void idWindow::UpdateTabContainerState( bool runActivateScript ) {
 	if ( !IsTabContainerDef() ) {
 		return;
 	}
-
-	const int tabCount = GetTabContainerTabCount();
-	if ( tabCount <= 0 ) {
+	const int count = GetTabContainerTabCount();
+	if ( count <= 0 ) {
 		activeTabIndex = -1;
 		tabContainerInitialized = true;
 		return;
 	}
-
-	int requestedTab = GetTabContainerRequestedTabIndex();
-	if ( requestedTab < 0 ) {
-		requestedTab = 0;
-	} else if ( requestedTab >= tabCount ) {
-		requestedTab = tabCount - 1;
-	}
-
-	const bool changed = !tabContainerInitialized || ( requestedTab != activeTabIndex );
-	if ( !changed ) {
+	const int requested = idMath::ClampInt( 0, count - 1, GetTabContainerRequestedTabIndex() );
+	if ( tabContainerInitialized && requested == activeTabIndex ) {
 		return;
 	}
-
-	activeTabIndex = requestedTab;
+	activeTabIndex = requested;
 	tabContainerInitialized = true;
-
 	idWinVar *activeTabVar = GetWinVarByName( "activetab", false );
 	if ( activeTabVar != NULL ) {
 		activeTabVar->Set( va( "%d", activeTabIndex ) );
 	}
-
 	idWindow *activeTab = NULL;
-	int tabOrdinal = 0;
+	int ordinal = 0;
 	for ( int i = 0; i < drawWindows.Num(); ++i ) {
-		idWindow *child = drawWindows[ i ].win;
+		idWindow *child = drawWindows[i].win;
 		if ( child == NULL || !child->IsTabDef() ) {
 			continue;
 		}
-
-		const bool isActiveTab = ( tabOrdinal == activeTabIndex );
-		child->visible = isActiveTab;
-		if ( isActiveTab ) {
+		const bool active = ordinal++ == activeTabIndex;
+		child->visible = active;
+		if ( active ) {
 			activeTab = child;
 		}
-		++tabOrdinal;
 	}
-
 	if ( overChild != NULL && overChild->IsTabDef() && overChild != activeTab ) {
 		overChild->MouseExit();
 		overChild = NULL;
 	}
-
-	idWindow *desktop = ( gui != NULL ) ? gui->GetDesktop() : NULL;
+	idWindow *desktop = gui != NULL ? gui->GetDesktop() : NULL;
 	if ( desktop != NULL ) {
-		idWindow *desktopCapture = desktop->captureChild;
-		if ( desktopCapture != NULL && desktopCapture != activeTab && !IsWindowDescendantOf( desktopCapture, activeTab ) ) {
-			for ( int i = 0; i < drawWindows.Num(); ++i ) {
-				idWindow *child = drawWindows[ i ].win;
-				if ( child == NULL || !child->IsTabDef() || child == activeTab ) {
-					continue;
-				}
-				if ( IsWindowDescendantOf( desktopCapture, child ) ) {
-					desktopCapture->LoseCapture();
-					desktop->captureChild = NULL;
-					break;
-				}
+		for ( int i = 0; i < drawWindows.Num(); ++i ) {
+			idWindow *tab = drawWindows[i].win;
+			if ( tab == NULL || !tab->IsTabDef() || tab == activeTab ) {
+				continue;
 			}
-		}
-
-		idWindow *desktopFocus = desktop->focusedChild;
-		if ( desktopFocus != NULL && desktopFocus != activeTab && !IsWindowDescendantOf( desktopFocus, activeTab ) ) {
-			for ( int i = 0; i < drawWindows.Num(); ++i ) {
-				idWindow *child = drawWindows[ i ].win;
-				if ( child == NULL || !child->IsTabDef() || child == activeTab ) {
-					continue;
-				}
-				if ( IsWindowDescendantOf( desktopFocus, child ) ) {
-					desktopFocus->LoseFocus();
-					desktop->focusedChild = NULL;
-					break;
-				}
+			if ( desktop->captureChild != NULL && IsRetailWindowDescendantOf( desktop->captureChild, tab ) ) {
+				desktop->captureChild->LoseCapture();
+				desktop->captureChild = NULL;
+			}
+			if ( desktop->focusedChild != NULL && IsRetailWindowDescendantOf( desktop->focusedChild, tab ) ) {
+				desktop->focusedChild->LoseFocus();
+				desktop->focusedChild = NULL;
 			}
 		}
 	}
-
 	if ( activeTab != NULL && runActivateScript ) {
 		activeTab->RunScript( ON_TABACTIVATE );
 	}
 }
 
-/*
-================
-idWindow::DrawTabContainerTabs
-================
-*/
 void idWindow::DrawTabContainerTabs() {
-	if ( !IsTabContainerDef() ) {
+	const int count = GetTabContainerTabCount();
+	if ( count <= 0 ) {
 		return;
 	}
-
-	const int tabCount = GetTabContainerTabCount();
-	if ( tabCount <= 0 ) {
+	retailTabLayout_t layout;
+	if ( !BuildRetailTabLayout( this, drawRect, count, layout ) ) {
 		return;
 	}
-
-	tabContainerLayout_t layout;
-	if ( !BuildTabContainerLayout( this, drawRect, tabCount, layout ) ) {
-		return;
-	}
-
-	const int hoveredTab = GetTabContainerTabAt( gui != NULL ? gui->CursorX() : -1.0f, gui != NULL ? gui->CursorY() : -1.0f );
-
-	for ( int tabIndex = 0; tabIndex < tabCount; ++tabIndex ) {
-		idWindow *tab = GetTabContainerTabWindow( tabIndex );
+	const int hovered = gui != NULL ? GetTabContainerTabAt( gui->CursorX(), gui->CursorY() ) : -1;
+	for ( int index = 0; index < count; ++index ) {
+		idWindow *tab = GetTabContainerTabWindow( index );
 		if ( tab == NULL ) {
 			continue;
 		}
-
-		const bool isActive = ( tabIndex == activeTabIndex );
-		const bool isHovered = ( tabIndex == hoveredTab );
-		const idRectangle tabRect = GetTabButtonRect( drawRect, layout, tabIndex );
-
-		idVec4 fillColor = idVec4( 0.10f, 0.14f, 0.19f, 0.55f );
-		if ( tab->backColor.w() > 0.0f ) {
-			fillColor = tab->backColor;
+		const bool active = index == activeTabIndex;
+		const bool hoverTab = index == hovered;
+		const idRectangle tabRect = GetRetailTabButtonRect( drawRect, layout, index );
+		idVec4 fillColor = tab->backColor;
+		if ( fillColor.w <= 0.0f ) {
+			fillColor = active ? idVec4( 0.22f, 0.29f, 0.36f, 0.75f ) :
+				( hoverTab ? idVec4( 0.17f, 0.23f, 0.30f, 0.68f ) : idVec4( 0.10f, 0.14f, 0.19f, 0.55f ) );
 		}
-		if ( isActive && tab->backColor.w() <= 0.0f ) {
-			fillColor = idVec4( 0.22f, 0.29f, 0.36f, 0.75f );
-		} else if ( isHovered && tab->backColor.w() <= 0.0f ) {
-			fillColor = idVec4( 0.17f, 0.23f, 0.30f, 0.68f );
+		idVec4 textColor = active ? tab->foreColor : ( hoverTab ? tab->hoverColor : tab->foreColor );
+		if ( active ) {
+			idWinVar *var = tab->GetWinVarByName( "activecolor", false );
+			if ( var != NULL ) ParseRetailVec4( var->c_str(), textColor );
 		}
-
-		idVec4 textColor = tab->foreColor;
-		if ( isActive ) {
-			idWinVar *activeColorVar = tab->GetWinVarByName( "activecolor", false );
-			if ( activeColorVar != NULL ) {
-				idVec4 parsed = textColor;
-				if ( ParseVec4Value( activeColorVar->c_str(), parsed ) ) {
-					textColor = parsed;
-				}
-			}
-		} else if ( isHovered ) {
-			textColor = tab->hoverColor;
-		}
-
 		idVec4 materialColor = tab->matColor;
-		if ( isHovered && !isActive ) {
-			idWinVar *hoverMatColorVar = tab->GetWinVarByName( "hovermatcolor", false );
-			if ( hoverMatColorVar != NULL ) {
-				idVec4 parsed = materialColor;
-				if ( ParseVec4Value( hoverMatColorVar->c_str(), parsed ) ) {
-					materialColor = parsed;
-				}
-			}
+		if ( hoverTab && !active ) {
+			idWinVar *var = tab->GetWinVarByName( "hovermatcolor", false );
+			if ( var != NULL ) ParseRetailVec4( var->c_str(), materialColor );
 		}
-
 		const idMaterial *startMat = NULL;
 		const idMaterial *middleMat = NULL;
 		const idMaterial *endMat = NULL;
-		if ( isActive ) {
-			startMat = FindWindowMaterial( tab, "buttonactiveleftmat" );
-			if ( startMat == NULL ) {
-				startMat = FindWindowMaterial( tab, "activeleftmat" );
-			}
-			middleMat = FindWindowMaterial( tab, "buttonactivemiddlemat" );
-			if ( middleMat == NULL ) {
-				middleMat = FindWindowMaterial( tab, "activemiddlemat" );
-			}
-			endMat = FindWindowMaterial( tab, "buttonactiverightmat" );
-			if ( endMat == NULL ) {
-				endMat = FindWindowMaterial( tab, "activerightmat" );
-			}
+		if ( active ) {
+			startMat = FindRetailWindowMaterial( tab, "buttonactiveleftmat" );
+			middleMat = FindRetailWindowMaterial( tab, "buttonactivemiddlemat" );
+			endMat = FindRetailWindowMaterial( tab, "buttonactiverightmat" );
 		}
-		if ( startMat == NULL ) {
-			startMat = FindWindowMaterial( tab, "buttonleftmat" );
-			if ( startMat == NULL ) {
-				startMat = FindWindowMaterial( tab, "leftmat" );
-			}
-		}
-		if ( middleMat == NULL ) {
-			middleMat = FindWindowMaterial( tab, "buttonmiddlemat" );
-			if ( middleMat == NULL ) {
-				middleMat = FindWindowMaterial( tab, "middlemat" );
-			}
-		}
-		if ( endMat == NULL ) {
-			endMat = FindWindowMaterial( tab, "buttonrightmat" );
-			if ( endMat == NULL ) {
-				endMat = FindWindowMaterial( tab, "rightmat" );
-			}
-		}
-
-		// Retail defaults for horizontal tab strips when no explicit materials are provided.
+		if ( startMat == NULL ) startMat = FindRetailWindowMaterial( tab, "buttonleftmat" );
+		if ( middleMat == NULL ) middleMat = FindRetailWindowMaterial( tab, "buttonmiddlemat" );
+		if ( endMat == NULL ) endMat = FindRetailWindowMaterial( tab, "buttonrightmat" );
+		if ( startMat == NULL ) startMat = FindRetailWindowMaterial( tab, active ? "activeleftmat" : "leftmat" );
+		if ( middleMat == NULL ) middleMat = FindRetailWindowMaterial( tab, active ? "activemiddlemat" : "middlemat" );
+		if ( endMat == NULL ) endMat = FindRetailWindowMaterial( tab, active ? "activerightmat" : "rightmat" );
 		if ( !layout.verticalTabs && startMat == NULL && middleMat == NULL && endMat == NULL ) {
-			startMat = declManager->FindMaterial( isActive ? "guis/assets/menu/tabedgeactive.tga" : "guis/assets/menu/tabedge.tga" );
-			middleMat = declManager->FindMaterial( isActive ? "guis/assets/menu/tabstripactive.tga" : "guis/assets/menu/tabstrip.tga" );
+			startMat = declManager->FindMaterial( active ? "guis/assets/menu/tabedgeactive.tga" : "guis/assets/menu/tabedge.tga" );
+			middleMat = declManager->FindMaterial( active ? "guis/assets/menu/tabstripactive.tga" : "guis/assets/menu/tabstrip.tga" );
 		}
-
-		float edgeSize = 8.0f;
-		idWinVar *edgeWidthVar = tab->GetWinVarByName( "buttonedgewidth", false );
-		if ( edgeWidthVar != NULL ) {
-			const float parsedEdge = static_cast<float>( atof( edgeWidthVar->c_str() ) );
-			if ( parsedEdge >= 0.0f ) {
-				edgeSize = parsedEdge;
-			}
+		float edgeWidth = 8.0f;
+		idWinVar *edgeVar = tab->GetWinVarByName( "buttonedgewidth", false );
+		if ( edgeVar != NULL && atof( edgeVar->c_str() ) >= 0.0f ) {
+			edgeWidth = static_cast<float>( atof( edgeVar->c_str() ) );
 		}
-
-		DrawTabButtonSegments( dc, tabRect, layout.verticalTabs, edgeSize, startMat, middleMat, endMat, materialColor, fillColor );
-		idRectangle textDrawRect = tabRect;
-		textDrawRect.x += tab->textAlignx;
-		textDrawRect.y += tab->textAligny;
-
+		DrawRetailSegments( dc, tabRect, layout.verticalTabs, edgeWidth, startMat, middleMat, endMat, materialColor, fillColor );
+		idRectangle labelRect = tabRect;
+		labelRect.x += tab->textAlignx;
+		labelRect.y += tab->textAligny;
 		tab->SetFont();
-
 		if ( tab->textShadow ) {
-			idStr shadowText = tab->text;
-			idRectangle shadowRect = textDrawRect;
-			idVec4 shadowColor = idDeviceContext::colorBlack;
-
-			shadowText.RemoveColors();
+			idStr shadow = tab->text;
+			shadow.RemoveColors();
+			idRectangle shadowRect = labelRect;
 			shadowRect.x += tab->textShadow;
 			shadowRect.y += tab->textShadow;
-			shadowColor[3] = textColor.w;
-			dc->DrawText( shadowText, tab->textScale, 1, shadowColor, shadowRect, false, -1 );
+			idVec4 shadowColor = colorBlack;
+			shadowColor.w = textColor.w;
+			dc->DrawText( shadow, tab->textScale, 1, shadowColor, shadowRect, false );
 		}
+		dc->DrawText( tab->text, tab->textScale, 1, textColor, labelRect, false );
+	}
+	SetFont();
+}
 
-		dc->DrawText( tab->text, tab->textScale, 1, textColor, textDrawRect, false, -1 );
+/*
+================
+OpenQ4_ParseTimelineMilliseconds
+================
+*/
+static bool OpenQ4_ParseTimelineMilliseconds( const char *text, int &milliseconds ) {
+	if ( text == NULL || text[0] == '\0' ) {
+		return false;
 	}
 
-	SetFont();
+	bool negative = false;
+	if ( text[0] == '+' || text[0] == '-' ) {
+		negative = text[0] == '-';
+		text++;
+	}
+	if ( text[0] == '\0' ) {
+		return false;
+	}
+
+	uint64 magnitude = 0;
+	const uint64 magnitudeLimit = negative ? 2147483648ULL : 2147483647ULL;
+	for ( ; text[0] != '\0'; text++ ) {
+		if ( text[0] < '0' || text[0] > '9' ) {
+			return false;
+		}
+		const uint64 digit = static_cast<uint64>( text[0] - '0' );
+		if ( magnitude > ( magnitudeLimit - digit ) / 10ULL ) {
+			return false;
+		}
+		magnitude = magnitude * 10ULL + digit;
+	}
+
+	const int64 signedValue = negative ? -static_cast<int64>( magnitude ) : static_cast<int64>( magnitude );
+	milliseconds = static_cast<int>( signedValue );
+	return true;
 }
 
 /*
@@ -4158,6 +4454,7 @@ idWindow::Parse
 ================
 */
 bool idWindow::Parse( idParser *src, bool rebuild) {
+	UI_LegacyObservationParse(this,true,false);
 	idToken token, token2, token3, token4, token5, token6, token7;
 	idStr work;
 
@@ -4194,8 +4491,9 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 		// track what was parsed so we can maintain it for the guieditor
 		src->SetMarker ( );
 
-		if ( !token.Icmp( "windowDef" ) || !token.Icmp( "animationDef" ) || !token.Icmp( "buttonDef" ) ||
-			 !token.Icmp( "superWindowDef" ) || !token.Icmp( "tabContainerDef" ) || !token.Icmp( "tabDef" ) ||
+		if ( !token.Icmp( "windowDef" ) || !token.Icmp( "animationDef" ) ||
+			 !token.Icmp( "buttonDef" ) || !token.Icmp( "superWindowDef" ) ||
+			 !token.Icmp( "tabContainerDef" ) || !token.Icmp( "tabDef" ) ||
 			 !token.Icmp( "keyDef" ) || !token.Icmp( "creditDef" ) || !token.Icmp( "splineDef" ) ) {
 			const idStr childDefType = token;
 			if ( !token.Icmp( "animationDef" ) ) {
@@ -4310,6 +4608,18 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 			dwt.win = win;
 			drawWindows.Append(dwt);
 		}
+		else if ( token == "editorViewDef" ) {
+			idLevelEditorWindow *win = new idLevelEditorWindow( gui );
+			win->SetDC( dc );
+			SaveExpressionParseState();
+			win->Parse( src, rebuild );
+			RestoreExpressionParseState();
+			AddChild( win );
+			win->SetParent( this );
+			dwt.simp = NULL;
+			dwt.win = win;
+			drawWindows.Append( dwt );
+		}
 		else if ( token == "renderDef" ) {
 			idRenderWindow *win = new idRenderWindow(dc, gui);
 		  	SaveExpressionParseState();
@@ -4368,6 +4678,7 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 			src->SetMarker ( );
 			
 			if ( !ParseScript ( src, *ev->mEvent ) ) {
+				delete ev;
 				ret = false;
 				break;
 			}
@@ -4393,8 +4704,6 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 			namedEvents.Append(ev);
 		}
 		else if ( token == "onTime" ) {
-			idTimeLineEvent *ev = new idTimeLineEvent;
-
 			if ( !src->ReadToken(&token) ) {
 				src->Error( "Unexpected end of file" );
 				return false;
@@ -4418,16 +4727,29 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 				return false;
 			}
 
-			ev->time = atoi( timeToken );
+			int eventTime = 0;
+			if ( !OpenQ4_ParseTimelineMilliseconds( timeToken, eventTime ) ) {
+				src->Error( "Invalid onTime value '%s'", timeToken );
+				return false;
+			}
 			if ( relativeTime ) {
 				const int previousTime = ( timeLineEvents.Num() > 0 ) ? timeLineEvents[ timeLineEvents.Num() - 1 ]->time : 0;
-				ev->time += previousTime;
+				const int64 combinedTime = static_cast<int64>( eventTime ) + static_cast<int64>( previousTime );
+				if ( combinedTime < idMath::INT_MIN || combinedTime > idMath::INT_MAX ) {
+					src->Error( "onTime value '%s' overflows the timeline", timeToken );
+					return false;
+				}
+				eventTime = static_cast<int>( combinedTime );
 			}
+
+			idTimeLineEvent *ev = new idTimeLineEvent;
+			ev->time = eventTime;
 			
 			// reset the mark since we dont want it to include the time
 			src->SetMarker ( );
 
 			if (!ParseScript(src, *ev->event, &ev->time)) {
+				delete ev;
 				ret = false;
 				break;
 			}
@@ -4512,9 +4834,40 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 		}
 // jmarshall - quake 4 guis
 		else if (token == "defineicon") {
-			// TODO needs implementation
-			src->ReadToken(&token); // key
-			src->ReadToken(&token); // value
+			idToken keyToken;
+			idToken valueToken;
+			idToken extraToken;
+			int iconX = -1;
+			int iconY = -1;
+			int iconW = -1;
+			int iconH = -1;
+
+			if ( !src->ReadToken( &keyToken ) || !src->ReadToken( &valueToken ) ) {
+				common->Warning( "Window '%s' in gui '%s': malformed defineicon", GetName(), gui ? gui->GetSourceFile() : "" );
+				continue;
+			}
+
+			if ( src->ReadToken( &extraToken ) ) {
+				if ( extraToken == "," ) {
+					src->ReadToken( &extraToken );
+					iconX = extraToken.GetIntValue();
+					src->ExpectTokenString( "," );
+					src->ReadToken( &extraToken );
+					iconY = extraToken.GetIntValue();
+					src->ExpectTokenString( "," );
+					src->ReadToken( &extraToken );
+					iconW = extraToken.GetIntValue();
+					src->ExpectTokenString( "," );
+					src->ReadToken( &extraToken );
+					iconH = extraToken.GetIntValue();
+				} else {
+					src->UnreadToken( &extraToken );
+				}
+			}
+
+			if ( dc != NULL ) {
+				dc->RegisterIcon( keyToken.c_str(), valueToken.c_str(), iconX, iconY, iconW, iconH );
+			}
 		}
 // jmarshall end
 		else if ( token == "float" ) {
@@ -4611,6 +4964,7 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 	}
 #endif
 
+	UI_LegacyObservationParse(this,false,ret);
 	return ret;
 }
 
@@ -4703,6 +5057,20 @@ void idWindow::ResetCinematics() {
 	if ( background ) {
 		background->ResetCinematicTime( gui->GetTime() );
 	}
+}
+
+/*
+================
+idWindow::IsBackgroundCinematicComplete
+================
+*/
+bool idWindow::IsBackgroundCinematicComplete() const {
+	if ( background == NULL || gui == NULL || background->CinematicLength() <= 0 ) {
+		return false;
+	}
+
+	const int status = background->CinematicStatus( gui->GetTime() );
+	return ( status == FMV_EOF || status == FMV_IDLE || status == FMV_LOOPED );
 }
 
 /*
@@ -4818,15 +5186,12 @@ idWindow::ExpressionOp
 ================
 */
 wexpOp_t *idWindow::ExpressionOp() {
-// jmarshall - gui crash
 	if (numOps == MAX_EXPRESSION_OPS ) {
 		common->Warning( "expressionOp: gui %s hit MAX_EXPRESSION_OPS", gui->GetSourceFile());
 		return &ops[0];
 	}
-	wexpOp_t wop;
-	memset(&wop, 0, sizeof(wexpOp_t));	
+	ops.emplace_back();
 	return &ops[numOps++];
-// jmarshall end
 }
 
 /*
@@ -4931,13 +5296,20 @@ intptr_t idWindow::ParseTerm( idParser *src,	idWinVar *var, intptr_t component )
 
 	// see if it is a table name
 	const idDeclTable *table = static_cast<const idDeclTable *>( declManager->FindType( DECL_TABLE, token.c_str(), false ) );
+	const unsigned observation = UI_LegacyObservationActive(this) ?
+		UI_LegacyObservationTerm(this,src,token,table ? table->Index() : -1) : 0;
+	const auto emit = [&](intptr_t left, intptr_t right, wexpOpType_t type) {
+		const int result = EmitOp(left,right,type);
+		UI_LegacyObservationOp(this,observation,numOps-1,result,type,left,right);
+		return result;
+	};
 	if ( table ) {
 		a = table->Index();
 		// parse a table expression
 		src->ExpectTokenString("[");
 		b = ParseExpression(src);
 		src->ExpectTokenString("]");
-		return EmitOp( a, b, WOP_TYPE_TABLE );
+		return emit( a, b, WOP_TYPE_TABLE );
 	}
 	
 	if (var == NULL) {
@@ -4957,15 +5329,15 @@ intptr_t idWindow::ParseTerm( idParser *src,	idWinVar *var, intptr_t component )
 					src->UnreadToken(&token);
 				}
 			}
-			return EmitOp(a, b, WOP_TYPE_VAR);
+			return emit(a, b, WOP_TYPE_VAR);
 		} else if (dynamic_cast<idWinFloat*>(var)) {
-			return EmitOp(a, b, WOP_TYPE_VARF);
+			return emit(a, b, WOP_TYPE_VARF);
 		} else if (dynamic_cast<idWinInt*>(var)) {
-			return EmitOp(a, b, WOP_TYPE_VARI);
+			return emit(a, b, WOP_TYPE_VARI);
 		} else if (dynamic_cast<idWinBool*>(var)) {
-			return EmitOp(a, b, WOP_TYPE_VARB);
+			return emit(a, b, WOP_TYPE_VARB);
 		} else if (dynamic_cast<idWinStr*>(var)) {
-			return EmitOp(a, b, WOP_TYPE_VARS);
+			return emit(a, b, WOP_TYPE_VARS);
 		} else {
 			src->Warning("Var expression not vec4, float or int '%s'", token.c_str());
 		}
@@ -4973,10 +5345,10 @@ intptr_t idWindow::ParseTerm( idParser *src,	idWinVar *var, intptr_t component )
 	} else {
 		// ugly but used for post parsing to fixup named vars
 		char *p = new char[token.Length()+1];
-		strcpy(p, token);
+		idStr::Copynz( p, token.c_str(), token.Length() + 1 );
 		a = (intptr_t)p;
 		b = -2;
-		return EmitOp(a, b, WOP_TYPE_VAR);
+		return emit(a, b, WOP_TYPE_VAR);
 	}
 
 }
@@ -5178,9 +5550,10 @@ void idWindow::EvaluateRegisters(float *registers) {
 				break;
 			}
 			if ( op->b >= 0 && registers[op->b] >= 0 && registers[op->b] < 4 ) {
-				// grabs vector components
+				// grabs vector components. The inherited ((idVec4&)var) cast
+				// read the local pointer's own bytes and the stack beyond them.
 				idWinVec4 *var = (idWinVec4 *)( op->a );
-				registers[op->c] = ((idVec4&)var)[registers[op->b]];
+				registers[op->c] = static_cast<const idVec4 &>( *var )[ static_cast<int>( registers[op->b] ) ];
 			} else {
 				registers[op->c] = ((idWinVar*)(op->a))->x();
 			}
@@ -5349,7 +5722,8 @@ void idWindow::ReadFromDemoFile( class idDemoFile *f, bool rebuild ) {
 			f->ReadInt( w.b );
 			f->ReadInt( w.c );
 			f->ReadInt( w.d );
-			ops.Append(w);
+			ops.push_back(w);
+			++numOps;
 		}
 
 		f->ReadInt( c );
@@ -5473,36 +5847,200 @@ void idWindow::WriteToDemoFile( class idDemoFile *f ) {
 idWindow::WriteString
 ===============
 */
-void idWindow::WriteSaveGameString( const char *string, idFile *savefile ) {
-	int len = strlen( string );
-
-	savefile->Write( &len, sizeof( len ) );
-	savefile->Write( string, len );
+static bool OpenQ4_IsFiniteSaveGameRectangle( const idRectangle &rect ) {
+	return std::isfinite( rect.x ) && std::isfinite( rect.y ) &&
+		std::isfinite( rect.w ) && std::isfinite( rect.h );
 }
+
+static bool OpenQ4_IsFiniteSaveGameVec2( const idVec2 &vec ) {
+	return std::isfinite( vec.x ) && std::isfinite( vec.y );
+}
+
+bool idWindow::WriteSaveGameString( const char *string, idFile *savefile ) {
+	if ( savefile == NULL || string == NULL ) {
+		common->Error( "idWindow::WriteSaveGameString: invalid output file/string for window '%s'",
+			name.c_str() );
+		return false;
+	}
+	const int len = idLib::SizeToInt( strlen( string ), "idWindow::WriteSaveGameString" );
+	const int maxSavedStringLength = 64 * 1024;
+	if ( len > maxSavedStringLength ) {
+		common->Error( "idWindow::WriteSaveGameString: string for window '%s' in gui '%s' is too long (%d bytes)",
+			name.c_str(), gui ? gui->GetSourceFile() : "<null>", len );
+		return false;
+	}
+	if ( !OpenQ4_WriteSaveGameInt( savefile, len, "idWindow::WriteSaveGameString", "length" ) ) {
+		return false;
+	}
+	if ( len > 0 ) {
+		if ( !OpenQ4_WriteSaveGameBytes( savefile, string, len, "idWindow::WriteSaveGameString", "string" ) ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
+The floats of a transition's interpolator through the typed GUI field helpers,
+as a SaveCodec writer and reader (idlib/SaveCodec.h). The helpers report a
+failed write or a truncated read through common->Error. A GUI expression can
+leave a non-finite value in a transition; it is saved as zero, as
+OpenQ4_SanitizeSaveGameWinVar saves the variables themselves.
+*/
+struct windowSaveGameFloats_t {
+	idFile *	file;
+	bool		ok;
+
+	void		WriteFloat( float value ) {
+					ok = ok && OpenQ4_WriteSaveGameFloat( file, std::isfinite( value ) ? value : 0.0f,
+						"idWindow::WriteSaveGameTransition", "interpolate state" );
+				}
+	void		ReadFloat( float &value ) {
+					value = 0.0f;
+					ok = ok && OpenQ4_ReadSaveGameFloat( file, value, "idWindow::ReadSaveGameTransition", "interpolate state" );
+				}
+};
 
 /*
 ===============
 idWindow::WriteSaveGameTransition
 ===============
 */
-void idWindow::WriteSaveGameTransition( idTransitionData &trans, idFile *savefile ) {
-	drawWin_t dw, *fdw;
-	idStr winName("");
+bool idWindow::WriteSaveGameTransition( idTransitionData &trans, idFile *savefile ) {
+	if ( savefile == NULL || gui == NULL || gui->GetDesktop() == NULL || trans.data == NULL ) {
+		common->Error( "idWindow::WriteSaveGameTransition: invalid transition context for window '%s'",
+			name.c_str() );
+		return false;
+	}
+	drawWin_t dw;
 	dw.simp = NULL;
 	dw.win = NULL;
-	int offset = gui->GetDesktop()->GetWinVarOffset( trans.data, &dw );
-	if ( dw.win || dw.simp ) {
-		winName = ( dw.win ) ? dw.win->GetName() : dw.simp->name.c_str();
+	const intptr_t transitionOffset = gui->GetDesktop()->GetWinVarOffset( trans.data, &dw );
+	if ( transitionOffset == -1 && dw.win == NULL && dw.simp == NULL ) {
+		// A gui-declared var ("float rotate1", "definevec4 ...") is not a member of
+		// idWindow, so it has no offset and can never be re-addressed on restore.
+		// The original engine dropped these from the save rather than failing, and
+		// ReadSaveGameTransition still treats -1 as "no transition", so keep that
+		// behaviour: erroring here aborts an autosave the player cannot avoid.
+		// A resolved offset with a mismatched or missing owner is still genuinely
+		// inconsistent and keeps failing below.
+		common->DPrintf( "idWindow::WriteSaveGameTransition: dropping transition on non-member var"
+			" for window '%s' in gui '%s'\n", name.c_str(), gui->GetSourceFile() );
+		return OpenQ4_WriteSaveGameInt( savefile, -1, "idWindow::WriteSaveGameTransition", "target offset" );
 	}
-	fdw = gui->GetDesktop()->FindChildByName( winName );
-	if ( offset != -1 && fdw && ( fdw->win || fdw->simp ) ) {
-		savefile->Write( &offset, sizeof( offset ) );
-		WriteSaveGameString( winName, savefile );
-		savefile->Write( &trans.interp, sizeof( trans.interp ) );
-	} else {
-		offset = -1;
-		savefile->Write( &offset, sizeof( offset ) );
+	if ( transitionOffset < 0 || transitionOffset > 0x7fffffff || ( dw.win == NULL ) == ( dw.simp == NULL ) ) {
+		common->Error( "idWindow::WriteSaveGameTransition: could not resolve transition target for window '%s' in gui '%s'",
+			name.c_str(), gui->GetSourceFile() );
+		return false;
 	}
+	const idStr winName = ( dw.win != NULL ) ? dw.win->GetName() : dw.simp->name.c_str();
+	drawWin_t *foundWindow = gui->GetDesktop()->FindChildByName( winName );
+	if ( winName.IsEmpty() || foundWindow == NULL || foundWindow->win != dw.win || foundWindow->simp != dw.simp ) {
+		common->Error( "idWindow::WriteSaveGameTransition: transition target '%s' for window '%s' in gui '%s' is missing or ambiguous",
+			winName.c_str(), name.c_str(), gui->GetSourceFile() );
+		return false;
+	}
+	const int savedTarget = TransitionFieldIndex( dw.simp != NULL, transitionOffset );
+	if ( savedTarget < 0 ) {
+		common->Error( "idWindow::WriteSaveGameTransition: transition target '%s' for window '%s' in gui '%s' drives no saved field",
+			winName.c_str(), name.c_str(), gui->GetSourceFile() );
+		return false;
+	}
+	windowSaveGameFloats_t out = { savefile, true };
+	if ( !OpenQ4_WriteSaveGameInt( savefile, savedTarget, "idWindow::WriteSaveGameTransition", "target field" ) ||
+		 !WriteSaveGameString( winName, savefile ) ) {
+		return false;
+	}
+	SaveCodec_WriteInterpolate( out, trans.interp );
+	return out.ok;
+}
+
+openQ4SaveGameRestore_t openQ4_saveGameRestore = { NULL, 0, 0 };
+
+/*
+===============
+idWindow::TransitionFieldOffset
+
+The window variables a transition can drive, in a fixed order. Payload version
+5 saves a transition's target variable as its index here. Earlier payloads saved
+the variable's byte offset in its window class, which follows the compiler's
+layout of that class, so it only resolved on the ABI that wrote it.
+===============
+*/
+intptr_t idWindow::TransitionFieldOffset( bool simple, int index ) {
+	if ( simple ) {
+		switch ( index ) {
+			case 0: return (intptr_t)&( ( idSimpleWindow * ) 0 )->rect;
+			case 1: return (intptr_t)&( ( idSimpleWindow * ) 0 )->backColor;
+			case 2: return (intptr_t)&( ( idSimpleWindow * ) 0 )->matColor;
+			case 3: return (intptr_t)&( ( idSimpleWindow * ) 0 )->foreColor;
+			case 4: return (intptr_t)&( ( idSimpleWindow * ) 0 )->borderColor;
+			case 5: return (intptr_t)&( ( idSimpleWindow * ) 0 )->textScale;
+			case 6: return (intptr_t)&( ( idSimpleWindow * ) 0 )->rotate;
+			default: return -1;
+		}
+	}
+	switch ( index ) {
+		case 0: return (intptr_t)&( ( idWindow * ) 0 )->rect;
+		case 1: return (intptr_t)&( ( idWindow * ) 0 )->backColor;
+		case 2: return (intptr_t)&( ( idWindow * ) 0 )->backColor_r;
+		case 3: return (intptr_t)&( ( idWindow * ) 0 )->backColor_g;
+		case 4: return (intptr_t)&( ( idWindow * ) 0 )->backColor_b;
+		case 5: return (intptr_t)&( ( idWindow * ) 0 )->backColor_w;
+		case 6: return (intptr_t)&( ( idWindow * ) 0 )->matColor;
+		case 7: return (intptr_t)&( ( idWindow * ) 0 )->matColor_r;
+		case 8: return (intptr_t)&( ( idWindow * ) 0 )->matColor_g;
+		case 9: return (intptr_t)&( ( idWindow * ) 0 )->matColor_b;
+		case 10: return (intptr_t)&( ( idWindow * ) 0 )->matColor_w;
+		case 11: return (intptr_t)&( ( idWindow * ) 0 )->foreColor;
+		case 12: return (intptr_t)&( ( idWindow * ) 0 )->foreColor_r;
+		case 13: return (intptr_t)&( ( idWindow * ) 0 )->foreColor_g;
+		case 14: return (intptr_t)&( ( idWindow * ) 0 )->foreColor_b;
+		case 15: return (intptr_t)&( ( idWindow * ) 0 )->foreColor_w;
+		case 16: return (intptr_t)&( ( idWindow * ) 0 )->hoverColor;
+		case 17: return (intptr_t)&( ( idWindow * ) 0 )->hoverColor_r;
+		case 18: return (intptr_t)&( ( idWindow * ) 0 )->hoverColor_g;
+		case 19: return (intptr_t)&( ( idWindow * ) 0 )->hoverColor_b;
+		case 20: return (intptr_t)&( ( idWindow * ) 0 )->hoverColor_w;
+		case 21: return (intptr_t)&( ( idWindow * ) 0 )->borderColor;
+		case 22: return (intptr_t)&( ( idWindow * ) 0 )->borderColor_r;
+		case 23: return (intptr_t)&( ( idWindow * ) 0 )->borderColor_g;
+		case 24: return (intptr_t)&( ( idWindow * ) 0 )->borderColor_b;
+		case 25: return (intptr_t)&( ( idWindow * ) 0 )->borderColor_w;
+		case 26: return (intptr_t)&( ( idWindow * ) 0 )->textScale;
+		case 27: return (intptr_t)&( ( idWindow * ) 0 )->rotate;
+		default: return -1;
+	}
+}
+
+// The index of the transition field at a byte offset, or -1.
+int idWindow::TransitionFieldIndex( bool simple, intptr_t offset ) {
+	for ( int index = 0; ; index++ ) {
+		const intptr_t field = TransitionFieldOffset( simple, index );
+		if ( field < 0 || field == offset ) {
+			return field < 0 ? -1 : index;
+		}
+	}
+}
+
+// A transition's interpolator is saved by its defining values from payload
+// version 5. Earlier payloads hold raw bytes, and one written before build
+// 1582 has the shorter layout described in SaveGameReleases.h.
+static bool Window_ReadSaveGameTransitionInterpolate( idFile *savefile, idInterpolateAccelDecelLinear<idVec4> &interp ) {
+	if ( OpenQ4_SaveGameRestoreIsPortable( savefile ) ) {
+		windowSaveGameFloats_t saved = { savefile, true };
+		SaveCodec_ReadInterpolate( saved, interp );
+		return saved.ok;
+	}
+	if ( OpenQ4_SaveGameHasInterpolatorCacheFlag( OpenQ4_SaveGameRestoreLayoutBuild( savefile ) ) ) {
+		return OpenQ4_ReadSaveGameRawField( savefile, interp, "idWindow::ReadSaveGameTransition", "interpolate state" );
+	}
+	openQ4SaveGameLegacyInterpolate_t<idVec4> saved;
+	if ( !OpenQ4_ReadSaveGameRawField( savefile, saved, "idWindow::ReadSaveGameTransition", "interpolate state" ) ) {
+		return false;
+	}
+	saved.ToInterpolate( interp );
+	return true;
 }
 
 /*
@@ -5510,22 +6048,333 @@ void idWindow::WriteSaveGameTransition( idTransitionData &trans, idFile *savefil
 idWindow::ReadSaveGameTransition
 ===============
 */
-void idWindow::ReadSaveGameTransition( idTransitionData &trans, idFile *savefile ) {
-	int offset;
+bool idWindow::ReadSaveGameTransition( idTransitionData &trans, idFile *savefile ) {
+	int offset = -1;
+	trans.data = NULL;
 
-	savefile->Read( &offset, sizeof( offset ) );
+	if ( !OpenQ4_ReadSaveGameInt( savefile, offset, "idWindow::ReadSaveGameTransition", "offset" ) ) {
+		return false;
+	}
 	if ( offset != -1 ) {
+		if ( offset < 0 ) {
+			common->Error( "idWindow::ReadSaveGameTransition: invalid target offset %d for window '%s' in gui '%s'",
+				offset, name.c_str(), gui ? gui->GetSourceFile() : "<null>" );
+			return false;
+		}
 		idStr winName;
-		ReadSaveGameString( winName, savefile );
-		savefile->Read( &trans.interp, sizeof( trans.interp ) );
-		trans.data = NULL;
+		if ( !ReadSaveGameString( winName, savefile ) ||
+			 !Window_ReadSaveGameTransitionInterpolate( savefile, trans.interp ) ) {
+			return false;
+		}
 		trans.offset = offset;
-		if ( winName.Length() ) {
-			idWinStr *strVar = new idWinStr();
-			strVar->Set( winName );
-			trans.data = dynamic_cast< idWinVar* >( strVar );
+		if ( winName.IsEmpty() ) {
+			common->Error( "idWindow::ReadSaveGameTransition: transition for window '%s' in gui '%s' has an empty target name",
+				name.c_str(), gui ? gui->GetSourceFile() : "<null>" );
+			return false;
+		}
+		idWinStr *strVar = new idWinStr();
+		strVar->Set( winName );
+		trans.data = dynamic_cast< idWinVar* >( strVar );
+	}
+	return true;
+}
+
+static const int SAVEGAME_WINDOW_REFERENCE_NULL = -1;
+static const int SAVEGAME_WINDOW_REFERENCE_DESCENDANT_BASE = -2;
+static const int SAVEGAME_MAX_WINDOW_DESCENDANTS = 1024 * 1024;
+static const int SAVEGAME_MAX_WINDOW_DEPTH = 1024;
+
+int idWindow::SaveGameChildIDCompare( idWindow * const *left, idWindow * const *right ) {
+	if ( ( *left )->childID < ( *right )->childID ) {
+		return -1;
+	}
+	if ( ( *left )->childID > ( *right )->childID ) {
+		return 1;
+	}
+	return 0;
+}
+
+bool idWindow::BuildSaveGameChildOrder( idList<idWindow *> &orderedChildren, const char *operation ) const {
+	orderedChildren.SetNum( children.Num() );
+	for ( int i = 0; i < children.Num(); i++ ) {
+		idWindow *child = children[i];
+		if ( child == NULL ) {
+			common->Error( "%s: window '%s' in gui '%s' has a NULL child at index %d",
+				operation, name.c_str(), gui ? gui->GetSourceFile() : "<null>", i );
+			orderedChildren.Clear();
+			return false;
+		}
+		if ( child->parent != this ) {
+			common->Error( "%s: child '%s' of window '%s' in gui '%s' has an inconsistent parent",
+				operation, child->name.c_str(), name.c_str(), gui ? gui->GetSourceFile() : "<null>" );
+			orderedChildren.Clear();
+			return false;
+		}
+		if ( child->childID < 0 ) {
+			common->Error( "%s: child '%s' of window '%s' in gui '%s' has invalid id %d",
+				operation, child->name.c_str(), name.c_str(), gui ? gui->GetSourceFile() : "<null>", child->childID );
+			orderedChildren.Clear();
+			return false;
+		}
+		orderedChildren[i] = child;
+	}
+	orderedChildren.Sort( SaveGameChildIDCompare );
+	for ( int i = 1; i < orderedChildren.Num(); i++ ) {
+		if ( orderedChildren[i - 1]->childID == orderedChildren[i]->childID ) {
+			common->Error( "%s: children '%s' and '%s' of window '%s' in gui '%s' have duplicate id %d",
+				operation, orderedChildren[i - 1]->name.c_str(), orderedChildren[i]->name.c_str(), name.c_str(),
+				gui ? gui->GetSourceFile() : "<null>", orderedChildren[i]->childID );
+			orderedChildren.Clear();
+			return false;
 		}
 	}
+	return true;
+}
+
+bool idWindow::FindSaveGameDescendantOrdinal( const idWindow *window, int &nextOrdinal, int &foundOrdinal, int depth ) const {
+	if ( depth > SAVEGAME_MAX_WINDOW_DEPTH ) {
+		common->Error( "idWindow::WriteToSaveGame: gui '%s' exceeds the maximum window nesting depth",
+			gui ? gui->GetSourceFile() : "<null>" );
+		return false;
+	}
+	idList<idWindow *> orderedChildren;
+	if ( !BuildSaveGameChildOrder( orderedChildren, "idWindow::WriteToSaveGame" ) ) {
+		return false;
+	}
+	for ( int i = 0; i < orderedChildren.Num(); i++ ) {
+		if ( nextOrdinal >= SAVEGAME_MAX_WINDOW_DESCENDANTS ) {
+			common->Error( "idWindow::WriteToSaveGame: gui '%s' exceeds the maximum descendant count",
+				gui ? gui->GetSourceFile() : "<null>" );
+			return false;
+		}
+		idWindow *child = orderedChildren[i];
+		const int childOrdinal = nextOrdinal++;
+		if ( child == window ) {
+			foundOrdinal = childOrdinal;
+			return true;
+		}
+		if ( child->FindSaveGameDescendantOrdinal( window, nextOrdinal, foundOrdinal, depth + 1 ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+idWindow *idWindow::FindSaveGameDescendantByOrdinal( int targetOrdinal, int &nextOrdinal, int depth ) {
+	if ( depth > SAVEGAME_MAX_WINDOW_DEPTH ) {
+		common->Error( "idWindow::ReadFromSaveGame: gui '%s' exceeds the maximum window nesting depth",
+			gui ? gui->GetSourceFile() : "<null>" );
+		return NULL;
+	}
+	idList<idWindow *> orderedChildren;
+	if ( !BuildSaveGameChildOrder( orderedChildren, "idWindow::ReadFromSaveGame" ) ) {
+		return NULL;
+	}
+	for ( int i = 0; i < orderedChildren.Num(); i++ ) {
+		if ( nextOrdinal >= SAVEGAME_MAX_WINDOW_DESCENDANTS ) {
+			common->Error( "idWindow::ReadFromSaveGame: gui '%s' exceeds the maximum descendant count",
+				gui ? gui->GetSourceFile() : "<null>" );
+			return NULL;
+		}
+		idWindow *child = orderedChildren[i];
+		if ( nextOrdinal++ == targetOrdinal ) {
+			return child;
+		}
+		idWindow *resolved = child->FindSaveGameDescendantByOrdinal( targetOrdinal, nextOrdinal, depth + 1 );
+		if ( resolved != NULL ) {
+			return resolved;
+		}
+	}
+	return NULL;
+}
+
+bool idWindow::FindSaveGameFlaggedDescendants( unsigned int flag, idWindow *&match, int &matches, int &visited, int depth ) {
+	if ( depth > SAVEGAME_MAX_WINDOW_DEPTH ) {
+		common->Error( "idWindow::ReadFromSaveGame: gui '%s' exceeds the maximum window nesting depth",
+			gui ? gui->GetSourceFile() : "<null>" );
+		return false;
+	}
+	idList<idWindow *> orderedChildren;
+	if ( !BuildSaveGameChildOrder( orderedChildren, "idWindow::ReadFromSaveGame" ) ) {
+		return false;
+	}
+	for ( int i = 0; i < orderedChildren.Num(); i++ ) {
+		if ( visited++ >= SAVEGAME_MAX_WINDOW_DESCENDANTS ) {
+			common->Error( "idWindow::ReadFromSaveGame: gui '%s' exceeds the maximum descendant count",
+				gui ? gui->GetSourceFile() : "<null>" );
+			return false;
+		}
+		idWindow *child = orderedChildren[i];
+		if ( ( child->flags & flag ) != 0 ) {
+			match = child;
+			matches++;
+		}
+		if ( !child->FindSaveGameFlaggedDescendants( flag, match, matches, visited, depth + 1 ) ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool idWindow::ValidateRestoredTrackedWindowPointers( bool hadSavedFocusReference, bool hadSavedCaptureReference ) {
+	if ( ( flags & WIN_DESKTOP ) == 0 ) {
+		return true;
+	}
+
+	idWindow *flaggedFocus = NULL;
+	int focusMatches = 0;
+	int visited = 0;
+	if ( !FindSaveGameFlaggedDescendants( WIN_FOCUS, flaggedFocus, focusMatches, visited, 0 ) ) {
+		return false;
+	}
+	if ( focusMatches > 1 ) {
+		common->Error( "idWindow::ReadFromSaveGame: gui '%s' restored %d focused windows",
+			gui ? gui->GetSourceFile() : "<null>", focusMatches );
+		return false;
+	}
+	if ( focusMatches == 1 ) {
+		// Legacy v2 saves could serialize a nested window using only its parent-local
+		// child id. The focus flag identifies the intended descendant unambiguously.
+		focusedChild = flaggedFocus;
+	} else if ( hadSavedFocusReference || focusedChild != NULL ) {
+		common->Error( "idWindow::ReadFromSaveGame: gui '%s' restored a focused child reference without a focused window",
+			gui ? gui->GetSourceFile() : "<null>" );
+		return false;
+	}
+
+	idWindow *flaggedCapture = NULL;
+	int captureMatches = 0;
+	visited = 0;
+	if ( !FindSaveGameFlaggedDescendants( WIN_CAPTURE, flaggedCapture, captureMatches, visited, 0 ) ) {
+		return false;
+	}
+	if ( captureMatches > 1 ) {
+		common->Error( "idWindow::ReadFromSaveGame: gui '%s' restored %d captured windows",
+			gui ? gui->GetSourceFile() : "<null>", captureMatches );
+		return false;
+	}
+	if ( captureMatches == 1 ) {
+		captureChild = flaggedCapture;
+	} else if ( hadSavedCaptureReference || captureChild != NULL ) {
+		common->Error( "idWindow::ReadFromSaveGame: gui '%s' restored a capture child reference without a captured window",
+			gui ? gui->GetSourceFile() : "<null>" );
+		return false;
+	}
+	return true;
+}
+
+bool idWindow::WriteSaveGameChildReference( idWindow *child, idFile *savefile, const char *fieldName, bool allowDescendant ) {
+	if ( savefile == NULL ) {
+		common->Error( "idWindow::WriteToSaveGame: invalid output file while writing %s for window '%s'",
+			fieldName ? fieldName : "child reference", name.c_str() );
+		return false;
+	}
+	int childId = -1;
+	if ( child != NULL ) {
+		idList<idWindow *> orderedChildren;
+		if ( !BuildSaveGameChildOrder( orderedChildren, "idWindow::WriteToSaveGame" ) ) {
+			return false;
+		}
+		bool isDirectChild = false;
+		for ( int i = 0; i < orderedChildren.Num(); i++ ) {
+			if ( orderedChildren[i] == child ) {
+				isDirectChild = true;
+				break;
+			}
+		}
+		if ( isDirectChild ) {
+			childId = child->childID;
+		} else if ( allowDescendant ) {
+			int nextOrdinal = 0;
+			int foundOrdinal = -1;
+			if ( !FindSaveGameDescendantOrdinal( child, nextOrdinal, foundOrdinal, 0 ) ) {
+				common->Error( "idWindow::WriteToSaveGame: %s for window '%s' in gui '%s' is not a descendant",
+					fieldName ? fieldName : "child reference", name.c_str(), gui ? gui->GetSourceFile() : "<null>" );
+				return false;
+			}
+			childId = SAVEGAME_WINDOW_REFERENCE_DESCENDANT_BASE - foundOrdinal;
+		} else {
+			common->Error( "idWindow::WriteToSaveGame: %s for window '%s' in gui '%s' is not a valid direct child",
+				fieldName ? fieldName : "child reference", name.c_str(), gui ? gui->GetSourceFile() : "<null>" );
+			return false;
+		}
+	}
+	return OpenQ4_WriteSaveGameInt( savefile, childId, "idWindow::WriteToSaveGame",
+		fieldName ? fieldName : "child reference" );
+}
+
+idWindow *idWindow::ReadSaveGameChildReference( idFile *savefile, const char *fieldName, bool allowDescendant,
+		bool *hadSerializedReference, bool *readSucceeded ) {
+	int savedChildId = -1;
+	if ( readSucceeded != NULL ) {
+		*readSucceeded = false;
+	}
+	if ( hadSerializedReference != NULL ) {
+		*hadSerializedReference = false;
+	}
+	if ( !OpenQ4_ReadSaveGameInt( savefile, savedChildId, "idWindow::ReadFromSaveGame",
+			fieldName ? fieldName : "child reference" ) ) {
+		return NULL;
+	}
+	if ( hadSerializedReference != NULL ) {
+		*hadSerializedReference = savedChildId != SAVEGAME_WINDOW_REFERENCE_NULL;
+	}
+	if ( savedChildId == SAVEGAME_WINDOW_REFERENCE_NULL ) {
+		if ( readSucceeded != NULL ) {
+			*readSucceeded = true;
+		}
+		return NULL;
+	}
+	if ( savedChildId < 0 ) {
+		if ( !allowDescendant || savedChildId > SAVEGAME_WINDOW_REFERENCE_DESCENDANT_BASE ) {
+			common->Error( "idWindow::ReadFromSaveGame: invalid %s %d for window '%s' in gui '%s'",
+				fieldName ? fieldName : "child reference", savedChildId, name.c_str(), gui ? gui->GetSourceFile() : "<null>" );
+			return NULL;
+		}
+		const int64 targetOrdinal64 = static_cast<int64>( SAVEGAME_WINDOW_REFERENCE_DESCENDANT_BASE ) - static_cast<int64>( savedChildId );
+		if ( targetOrdinal64 < 0 || targetOrdinal64 >= SAVEGAME_MAX_WINDOW_DESCENDANTS ) {
+			common->Error( "idWindow::ReadFromSaveGame: invalid descendant ordinal %lld for %s in window '%s' in gui '%s'",
+				static_cast<long long>( targetOrdinal64 ), fieldName ? fieldName : "child reference", name.c_str(), gui ? gui->GetSourceFile() : "<null>" );
+			return NULL;
+		}
+		const int targetOrdinal = static_cast<int>( targetOrdinal64 );
+		int nextOrdinal = 0;
+		idWindow *resolved = FindSaveGameDescendantByOrdinal( targetOrdinal, nextOrdinal, 0 );
+		if ( resolved == NULL ) {
+			common->Error( "idWindow::ReadFromSaveGame: descendant ordinal %d for %s in window '%s' in gui '%s' could not be resolved",
+				targetOrdinal, fieldName ? fieldName : "child reference", name.c_str(), gui ? gui->GetSourceFile() : "<null>" );
+			return NULL;
+		}
+		if ( readSucceeded != NULL ) {
+			*readSucceeded = true;
+		}
+		return resolved;
+	}
+
+	idList<idWindow *> orderedChildren;
+	if ( !BuildSaveGameChildOrder( orderedChildren, "idWindow::ReadFromSaveGame" ) ) {
+		return NULL;
+	}
+	for ( int i = 0; i < orderedChildren.Num(); i++ ) {
+		if ( orderedChildren[i]->childID == savedChildId ) {
+			if ( readSucceeded != NULL ) {
+				*readSucceeded = true;
+			}
+			return orderedChildren[i];
+		}
+	}
+	if ( allowDescendant ) {
+		// Legacy v2 wrote a nested desktop focus/capture target as its parent-local
+		// positive child id. It cannot be resolved here, but its restored flag can
+		// identify the intended descendant after the complete window tree is read.
+		if ( readSucceeded != NULL ) {
+			*readSucceeded = true;
+		}
+		return NULL;
+	}
+	common->Error( "idWindow::ReadFromSaveGame: %s %d for window '%s' in gui '%s' does not match a direct child",
+		fieldName ? fieldName : "child reference", savedChildId, name.c_str(), gui ? gui->GetSourceFile() : "<null>" );
+	return NULL;
 }
 
 /*
@@ -5535,36 +6384,75 @@ idWindow::WriteToSaveGame
 */
 void idWindow::WriteToSaveGame( idFile *savefile ) {
 	int i;
+	if ( savefile == NULL || gui == NULL ) {
+		common->Error( "idWindow::WriteToSaveGame: invalid save context for window '%s'", name.c_str() );
+		return;
+	}
 
-	WriteSaveGameString( cmd, savefile );
+	const float savedTextStyleValue = textstyle;
+	const float savedTextSpacing = textspacing;
+	if ( !std::isfinite( actualX ) || !std::isfinite( actualY ) ||
+		 !OpenQ4_IsFiniteSaveGameRectangle( drawRect ) || !OpenQ4_IsFiniteSaveGameRectangle( clientRect ) ||
+		 !OpenQ4_IsFiniteSaveGameRectangle( textRect ) || !OpenQ4_IsFiniteSaveGameVec2( origin ) ||
+		 !std::isfinite( xOffset ) || !std::isfinite( yOffset ) ||
+		 !std::isfinite( forceAspectWidth ) || !std::isfinite( forceAspectHeight ) ||
+		 !std::isfinite( matScalex ) || !std::isfinite( matScaley ) || !std::isfinite( borderSize ) ||
+		 !std::isfinite( textAlignx ) || !std::isfinite( textAligny ) ||
+		 !std::isfinite( savedTextStyleValue ) || savedTextStyleValue < -128.0f || savedTextStyleValue > 127.0f ||
+		 !std::isfinite( savedTextSpacing ) || !OpenQ4_IsFiniteSaveGameVec2( shear ) ) {
+		common->Error( "idWindow::WriteToSaveGame: refusing non-finite or out-of-range layout state for window '%s' in gui '%s'",
+			name.c_str(), gui->GetSourceFile() );
+		return;
+	}
 
-	savefile->Write( &actualX, sizeof( actualX ) );
-	savefile->Write( &actualY, sizeof( actualY ) );
-	savefile->Write( &childID, sizeof( childID ) );
-	savefile->Write( &flags, sizeof( flags ) );
-	savefile->Write( &lastTimeRun, sizeof( lastTimeRun ) );
-	savefile->Write( &drawRect, sizeof( drawRect ) );
-	savefile->Write( &clientRect, sizeof( clientRect ) );
-	savefile->Write( &origin, sizeof( origin ) );
-	savefile->Write( &fontNum, sizeof( fontNum ) );
-	savefile->Write( &timeLine, sizeof( timeLine ) );
-	savefile->Write( &xOffset, sizeof( xOffset ) );
-	savefile->Write( &yOffset, sizeof( yOffset ) );
-	savefile->Write( &cursor, sizeof( cursor ) );
-	savefile->Write( &forceAspectWidth, sizeof( forceAspectWidth ) );
-	savefile->Write( &forceAspectHeight, sizeof( forceAspectHeight ) );
-	savefile->Write( &matScalex, sizeof( matScalex ) );
-	savefile->Write( &matScaley, sizeof( matScaley ) );
-	savefile->Write( &borderSize, sizeof( borderSize ) );
-	savefile->Write( &textAlign, sizeof( textAlign ) );
-	savefile->Write( &textAlignx, sizeof( textAlignx ) );
-	savefile->Write( &textAligny, sizeof( textAligny ) );
-	savefile->Write( &textShadow, sizeof( textShadow ) );
+	if ( !WriteSaveGameString( cmd, savefile ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, actualX, "idWindow::WriteToSaveGame", "actualX" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, actualY, "idWindow::WriteToSaveGame", "actualY" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, childID, "idWindow::WriteToSaveGame", "childID" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, flags, "idWindow::WriteToSaveGame", "flags" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, lastTimeRun, "idWindow::WriteToSaveGame", "last time run" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, drawRect, "idWindow::WriteToSaveGame", "draw rect" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, clientRect, "idWindow::WriteToSaveGame", "client rect" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, origin, "idWindow::WriteToSaveGame", "origin" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, fontNum, "idWindow::WriteToSaveGame", "font number" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, timeLine, "idWindow::WriteToSaveGame", "timeline" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, xOffset, "idWindow::WriteToSaveGame", "x offset" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, yOffset, "idWindow::WriteToSaveGame", "y offset" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, cursor, "idWindow::WriteToSaveGame", "cursor" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, forceAspectWidth, "idWindow::WriteToSaveGame", "force aspect width" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, forceAspectHeight, "idWindow::WriteToSaveGame", "force aspect height" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, matScalex, "idWindow::WriteToSaveGame", "material scale x" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, matScaley, "idWindow::WriteToSaveGame", "material scale y" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, borderSize, "idWindow::WriteToSaveGame", "border size" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, textAlign, "idWindow::WriteToSaveGame", "text align" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, textAlignx, "idWindow::WriteToSaveGame", "text align x" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, textAligny, "idWindow::WriteToSaveGame", "text align y" ) ) {
+		return;
+	}
+	const signed char savedTextStyle = static_cast<signed char>( static_cast<int>( textstyle ) );
+	if ( !OpenQ4_WriteSaveGameField( savefile, savedTextStyle, "idWindow::WriteToSaveGame", "text style" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, savedTextSpacing, "idWindow::WriteToSaveGame", "text spacing" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, textShadow, "idWindow::WriteToSaveGame", "text shadow" ) ||
+		 !OpenQ4_WriteSaveGameField( savefile, static_cast<const idVec2 &>( shear ), "idWindow::WriteToSaveGame", "shear" ) ) {
+		return;
+	}
 
-	WriteSaveGameString( name, savefile );
-	WriteSaveGameString( comment, savefile );
+	if ( !WriteSaveGameString( name, savefile ) || !WriteSaveGameString( comment, savefile ) ) {
+		return;
+	}
 
 	// WinVars
+	OpenQ4_SanitizeSaveGameWinVar( noTime, "idWindow::WriteToSaveGame", name.c_str(), "noTime" );
+	OpenQ4_SanitizeSaveGameWinVar( visible, "idWindow::WriteToSaveGame", name.c_str(), "visible" );
+	OpenQ4_SanitizeSaveGameWinVar( rect, "idWindow::WriteToSaveGame", name.c_str(), "rect" );
+	OpenQ4_SanitizeSaveGameWinVar( backColor, "idWindow::WriteToSaveGame", name.c_str(), "backColor" );
+	OpenQ4_SanitizeSaveGameWinVar( matColor, "idWindow::WriteToSaveGame", name.c_str(), "matColor" );
+	OpenQ4_SanitizeSaveGameWinVar( foreColor, "idWindow::WriteToSaveGame", name.c_str(), "foreColor" );
+	OpenQ4_SanitizeSaveGameWinVar( hoverColor, "idWindow::WriteToSaveGame", name.c_str(), "hoverColor" );
+	OpenQ4_SanitizeSaveGameWinVar( borderColor, "idWindow::WriteToSaveGame", name.c_str(), "borderColor" );
+	OpenQ4_SanitizeSaveGameWinVar( textScale, "idWindow::WriteToSaveGame", name.c_str(), "textScale" );
+	OpenQ4_SanitizeSaveGameWinVar( noEvents, "idWindow::WriteToSaveGame", name.c_str(), "noEvents" );
+	OpenQ4_SanitizeSaveGameWinVar( rotate, "idWindow::WriteToSaveGame", name.c_str(), "rotate" );
 	noTime.WriteToSaveGame( savefile );
 	visible.WriteToSaveGame( savefile );
 	rect.WriteToSaveGame( savefile );
@@ -5576,66 +6464,85 @@ void idWindow::WriteToSaveGame( idFile *savefile ) {
 	textScale.WriteToSaveGame( savefile );
 	noEvents.WriteToSaveGame( savefile );
 	rotate.WriteToSaveGame( savefile );
-	shear.WriteToSaveGame( savefile );
 	text.WriteToSaveGame( savefile );
 	backGroundName.WriteToSaveGame( savefile );
 	hideCursor.WriteToSaveGame(savefile);
 
 	// Defined Vars
 	for ( i = 0; i < definedVars.Num(); i++ ) {
+		if ( definedVars[i] == NULL ) {
+			common->Error( "idWindow::WriteToSaveGame: NULL defined variable %d for window '%s' in gui '%s'",
+				i, name.c_str(), gui->GetSourceFile() );
+			return;
+		}
+		OpenQ4_SanitizeSaveGameWinVar( *definedVars[i], "idWindow::WriteToSaveGame", name.c_str(),
+			definedVars[i]->GetName() );
 		definedVars[i]->WriteToSaveGame( savefile );
 	}
 
-	savefile->Write( &textRect, sizeof( textRect ) );
+	if ( !OpenQ4_WriteSaveGameField( savefile, textRect, "idWindow::WriteToSaveGame", "text rect" ) ) {
+		return;
+	}
 
 	// Window pointers saved as the child ID of the window
-	int winID;
+	const bool desktopTrackedDescendants = ( flags & WIN_DESKTOP ) != 0;
+	if ( !WriteSaveGameChildReference( focusedChild, savefile, "focused child id", desktopTrackedDescendants ) ||
+		 !WriteSaveGameChildReference( captureChild, savefile, "capture child id", desktopTrackedDescendants ) ||
+		 !WriteSaveGameChildReference( overChild, savefile, "hovered child id", false ) ) {
+		return;
+	}
 
-	winID = focusedChild ? focusedChild->childID : -1 ;
-	savefile->Write( &winID, sizeof( winID ) );
 
-	winID = captureChild ? captureChild->childID : -1 ;
-	savefile->Write( &winID, sizeof( winID ) );
-
-	winID = overChild ? overChild->childID : -1 ;
-	savefile->Write( &winID, sizeof( winID ) );
-
+	// The scripts and events below have no back-pointer to this window, so a
+	// diagnostic raised inside one could not say where it came from. Name it here.
+	const idStr scriptContext = idStr( "window '" ) + name.c_str() + "' in gui '" +
+		( gui != NULL ? gui->GetSourceFile() : "<none>" ) + "'";
 
 	// Scripts
 	for ( i = 0; i < SCRIPT_COUNT; i++ ) {
 		if ( scripts[i] ) {
-			scripts[i]->WriteToSaveGame( savefile );
+			scripts[i]->WriteToSaveGame( savefile, scriptContext.c_str() );
 		}
 	}
 
 	// TimeLine Events
 	for ( i = 0; i < timeLineEvents.Num(); i++ ) {
-		if ( timeLineEvents[i] ) {
-			savefile->Write( &timeLineEvents[i]->pending, sizeof( timeLineEvents[i]->pending ) );
-			savefile->Write( &timeLineEvents[i]->time, sizeof( timeLineEvents[i]->time ) );
-			if ( timeLineEvents[i]->event ) {
-				timeLineEvents[i]->event->WriteToSaveGame( savefile );
-			}
+		if ( timeLineEvents[i] == NULL || timeLineEvents[i]->event == NULL ) {
+			common->Error( "idWindow::WriteToSaveGame: incomplete timeline event %d for window '%s' in gui '%s'",
+				i, name.c_str(), gui->GetSourceFile() );
+			return;
 		}
+		if ( !OpenQ4_WriteSaveGameBool( savefile, timeLineEvents[i]->pending, "idWindow::WriteToSaveGame", "timeline pending flag" ) ||
+			 !OpenQ4_WriteSaveGameInt( savefile, timeLineEvents[i]->time, "idWindow::WriteToSaveGame", "timeline event time" ) ) {
+			return;
+		}
+		timeLineEvents[i]->event->WriteToSaveGame( savefile, scriptContext.c_str() );
 	}
 
 	// Transitions
 	int num = transitions.Num();
 
-	savefile->Write( &num, sizeof( num ) );
+	if ( !OpenQ4_WriteSaveGameInt( savefile, num, "idWindow::WriteToSaveGame", "transition count" ) ) {
+		return;
+	}
 	for ( i = 0; i < transitions.Num(); i++ ) {
-		WriteSaveGameTransition( transitions[ i ], savefile );
+		if ( !WriteSaveGameTransition( transitions[ i ], savefile ) ) {
+			return;
+		}
 	}
 
 
 	// Named Events
 	for ( i = 0; i < namedEvents.Num(); i++ ) {
-		if ( namedEvents[i] ) {
-			WriteSaveGameString( namedEvents[i]->mName, savefile );
-			if ( namedEvents[i]->mEvent ) {
-				namedEvents[i]->mEvent->WriteToSaveGame( savefile );
-			}
+		if ( namedEvents[i] == NULL || namedEvents[i]->mEvent == NULL || namedEvents[i]->mName.IsEmpty() ) {
+			common->Error( "idWindow::WriteToSaveGame: incomplete named event %d for window '%s' in gui '%s'",
+				i, name.c_str(), gui->GetSourceFile() );
+			return;
 		}
+		if ( !WriteSaveGameString( namedEvents[i]->mName, savefile ) ) {
+			return;
+		}
+		namedEvents[i]->mEvent->WriteToSaveGame( savefile, scriptContext.c_str() );
 	}
 
 	// regList
@@ -5645,10 +6552,14 @@ void idWindow::WriteToSaveGame( idFile *savefile ) {
 	// Save children
 	for ( i = 0; i < drawWindows.Num(); i++ ) {
 		drawWin_t	window = drawWindows[i];
-
-		if ( window.simp ) {
+		if ( ( window.simp == NULL ) == ( window.win == NULL ) ) {
+			common->Error( "idWindow::WriteToSaveGame: draw window %d for '%s' in gui '%s' has invalid simple/full ownership",
+				i, name.c_str(), gui->GetSourceFile() );
+			return;
+		}
+		if ( window.simp != NULL ) {
 			window.simp->WriteToSaveGame( savefile );
-		} else if ( window.win ) {
+		} else {
 			window.win->WriteToSaveGame( savefile );
 		}
 	}
@@ -5659,16 +6570,34 @@ void idWindow::WriteToSaveGame( idFile *savefile ) {
 idWindow::ReadSaveGameString
 ===============
 */
-void idWindow::ReadSaveGameString( idStr &string, idFile *savefile ) {
-	int len;
+bool idWindow::ReadSaveGameString( idStr &string, idFile *savefile ) {
+	string.Clear();
+	if ( savefile == NULL ) {
+		common->Error( "idWindow::ReadSaveGameString: invalid input file for window '%s'", name.c_str() );
+		return false;
+	}
+	int len = 0;
+	const int offset = savefile->Tell();
 
-	savefile->Read( &len, sizeof( len ) );
-	if ( len < 0 ) {
-		common->Warning( "idWindow::ReadSaveGameString: invalid length" );
+	if ( !OpenQ4_ReadSaveGameInt( savefile, len, "idWindow::ReadSaveGameString", "length" ) ) {
+		return false;
+	}
+	const int remainingBytes = Max( 0, savefile->Length() - savefile->Tell() );
+	const int maxSavedStringLength = 64 * 1024;
+	if ( len < 0 || len > maxSavedStringLength || len > remainingBytes ) {
+		common->Error( "idWindow::ReadSaveGameString: invalid length %d at offset %d (remaining %d)",
+			len, offset, remainingBytes );
+		return false;
 	}
 
 	string.Fill( ' ', len );
-	savefile->Read( &string[0], len );
+	if ( len > 0 ) {
+		if ( !OpenQ4_ReadSaveGameBytes( savefile, &string[0], len, "idWindow::ReadSaveGameString", "string" ) ) {
+			string.Clear();
+			return false;
+		}
+	}
+	return true;
 }
 
 /*
@@ -5678,36 +6607,128 @@ idWindow::ReadFromSaveGame
 */
 void idWindow::ReadFromSaveGame( idFile *savefile ) {
 	int i;
+	if ( savefile == NULL || gui == NULL ) {
+		common->Error( "idWindow::ReadFromSaveGame: invalid restore context for parsed window '%s'", name.c_str() );
+		return;
+	}
 
 	transitions.Clear();
 
-	ReadSaveGameString( cmd, savefile );
+	idStr savedCmd;
+	float savedActualX;
+	float savedActualY;
+	int savedChildID = -1;
+	unsigned int savedFlags = 0;
+	int savedLastTimeRun;
+	idRectangle savedDrawRect;
+	idRectangle savedClientRect;
+	idVec2 savedOrigin;
+	unsigned char savedFontNum;
+	int savedTimeLine;
+	float savedXOffset;
+	float savedYOffset;
+	unsigned char savedCursor;
+	float savedForceAspectWidth;
+	float savedForceAspectHeight;
+	float savedMatScaleX;
+	float savedMatScaleY;
+	float savedBorderSize;
+	signed char savedTextAlign;
+	float savedTextAlignX;
+	float savedTextAlignY;
+	signed char savedTextStyle = 0;
+	float savedTextSpacing = 0.0f;
+	signed char savedTextShadow;
+	idVec2 savedShear;
 
-	savefile->Read( &actualX, sizeof( actualX ) );
-	savefile->Read( &actualY, sizeof( actualY ) );
-	savefile->Read( &childID, sizeof( childID ) );
-	savefile->Read( &flags, sizeof( flags ) );
-	savefile->Read( &lastTimeRun, sizeof( lastTimeRun ) );
-	savefile->Read( &drawRect, sizeof( drawRect ) );
-	savefile->Read( &clientRect, sizeof( clientRect ) );
-	savefile->Read( &origin, sizeof( origin ) );
-	savefile->Read( &fontNum, sizeof( fontNum ) );
-	savefile->Read( &timeLine, sizeof( timeLine ) );
-	savefile->Read( &xOffset, sizeof( xOffset ) );
-	savefile->Read( &yOffset, sizeof( yOffset ) );
-	savefile->Read( &cursor, sizeof( cursor ) );
-	savefile->Read( &forceAspectWidth, sizeof( forceAspectWidth ) );
-	savefile->Read( &forceAspectHeight, sizeof( forceAspectHeight ) );
-	savefile->Read( &matScalex, sizeof( matScalex ) );
-	savefile->Read( &matScaley, sizeof( matScaley ) );
-	savefile->Read( &borderSize, sizeof( borderSize ) );
-	savefile->Read( &textAlign, sizeof( textAlign ) );
-	savefile->Read( &textAlignx, sizeof( textAlignx ) );
-	savefile->Read( &textAligny, sizeof( textAligny ) );
-	savefile->Read( &textShadow, sizeof( textShadow ) );
+	if ( !ReadSaveGameString( savedCmd, savefile ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedActualX, "idWindow::ReadFromSaveGame", "actualX" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedActualY, "idWindow::ReadFromSaveGame", "actualY" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedChildID, "idWindow::ReadFromSaveGame", "childID" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedFlags, "idWindow::ReadFromSaveGame", "flags" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedLastTimeRun, "idWindow::ReadFromSaveGame", "last time run" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedDrawRect, "idWindow::ReadFromSaveGame", "draw rect" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedClientRect, "idWindow::ReadFromSaveGame", "client rect" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedOrigin, "idWindow::ReadFromSaveGame", "origin" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedFontNum, "idWindow::ReadFromSaveGame", "font number" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedTimeLine, "idWindow::ReadFromSaveGame", "timeline" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedXOffset, "idWindow::ReadFromSaveGame", "x offset" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedYOffset, "idWindow::ReadFromSaveGame", "y offset" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedCursor, "idWindow::ReadFromSaveGame", "cursor" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedForceAspectWidth, "idWindow::ReadFromSaveGame", "force aspect width" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedForceAspectHeight, "idWindow::ReadFromSaveGame", "force aspect height" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedMatScaleX, "idWindow::ReadFromSaveGame", "material scale x" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedMatScaleY, "idWindow::ReadFromSaveGame", "material scale y" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedBorderSize, "idWindow::ReadFromSaveGame", "border size" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedTextAlign, "idWindow::ReadFromSaveGame", "text align" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedTextAlignX, "idWindow::ReadFromSaveGame", "text align x" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedTextAlignY, "idWindow::ReadFromSaveGame", "text align y" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedTextStyle, "idWindow::ReadFromSaveGame", "text style" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedTextSpacing, "idWindow::ReadFromSaveGame", "text spacing" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedTextShadow, "idWindow::ReadFromSaveGame", "text shadow" ) ||
+		 !OpenQ4_ReadSaveGameField( savefile, savedShear, "idWindow::ReadFromSaveGame", "shear" ) ) {
+		return;
+	}
 
-	ReadSaveGameString( name, savefile );
-	ReadSaveGameString( comment, savefile );
+	idStr savedName;
+	idStr savedComment;
+	if ( !ReadSaveGameString( savedName, savefile ) || !ReadSaveGameString( savedComment, savefile ) ) {
+		return;
+	}
+	if ( !std::isfinite( savedActualX ) || !std::isfinite( savedActualY ) ||
+		 !OpenQ4_IsFiniteSaveGameRectangle( savedDrawRect ) || !OpenQ4_IsFiniteSaveGameRectangle( savedClientRect ) ||
+		 !OpenQ4_IsFiniteSaveGameVec2( savedOrigin ) || !std::isfinite( savedXOffset ) || !std::isfinite( savedYOffset ) ||
+		 !std::isfinite( savedForceAspectWidth ) || !std::isfinite( savedForceAspectHeight ) ||
+		 !std::isfinite( savedMatScaleX ) || !std::isfinite( savedMatScaleY ) || !std::isfinite( savedBorderSize ) ||
+		 !std::isfinite( savedTextAlignX ) || !std::isfinite( savedTextAlignY ) ||
+		 !std::isfinite( savedTextSpacing ) || !OpenQ4_IsFiniteSaveGameVec2( savedShear ) ) {
+		common->Error( "idWindow::ReadFromSaveGame: non-finite layout state for saved window '%s' in gui '%s'",
+			savedName.c_str(), gui->GetSourceFile() );
+		return;
+	}
+	if ( savedChildID != childID ) {
+		common->Error( "idWindow::ReadFromSaveGame: saved child id %d for window '%s' does not match parsed window '%s' (id %d, parent '%s') in gui '%s'",
+			savedChildID, savedName.c_str(), name.c_str(), childID,
+			parent ? parent->name.c_str() : "<root>", gui->GetSourceFile() );
+		return;
+	}
+	const unsigned int structuralFlagMask = WIN_CHILD | WIN_DESKTOP;
+	if ( ( savedFlags & structuralFlagMask ) != ( flags & structuralFlagMask ) ) {
+		common->Error( "idWindow::ReadFromSaveGame: saved structural flags 0x%08x for window '%s' do not match parsed flags 0x%08x in gui '%s'",
+			savedFlags & structuralFlagMask, savedName.c_str(), flags & structuralFlagMask, gui->GetSourceFile() );
+		return;
+	}
+	if ( savedName.Icmp( name ) != 0 ) {
+		common->Error( "idWindow::ReadFromSaveGame: saved window '%s' does not match parsed window '%s' in gui '%s'",
+			savedName.c_str(), name.c_str(), gui->GetSourceFile() );
+		return;
+	}
+	cmd = savedCmd;
+	actualX = savedActualX;
+	actualY = savedActualY;
+	lastTimeRun = savedLastTimeRun;
+	drawRect = savedDrawRect;
+	clientRect = savedClientRect;
+	origin = savedOrigin;
+	fontNum = savedFontNum;
+	timeLine = savedTimeLine;
+	xOffset = savedXOffset;
+	yOffset = savedYOffset;
+	cursor = savedCursor;
+	forceAspectWidth = savedForceAspectWidth;
+	forceAspectHeight = savedForceAspectHeight;
+	matScalex = savedMatScaleX;
+	matScaley = savedMatScaleY;
+	borderSize = savedBorderSize;
+	textAlign = savedTextAlign;
+	textAlignx = savedTextAlignX;
+	textAligny = savedTextAlignY;
+	textstyle = static_cast<float>( savedTextStyle );
+	textspacing = savedTextSpacing;
+	textShadow = savedTextShadow;
+	shear = savedShear;
+	flags = savedFlags;
+	comment = savedComment;
 
 	// WinVars
 	noTime.ReadFromSaveGame( savefile );
@@ -5721,43 +6742,47 @@ void idWindow::ReadFromSaveGame( idFile *savefile ) {
 	textScale.ReadFromSaveGame( savefile );
 	noEvents.ReadFromSaveGame( savefile );
 	rotate.ReadFromSaveGame( savefile );
-	shear.ReadFromSaveGame( savefile );
 	text.ReadFromSaveGame( savefile );
 	backGroundName.ReadFromSaveGame( savefile );
-
-	if ( session->GetSaveGameVersion() >= 17 ) {
-		hideCursor.ReadFromSaveGame(savefile);
-	} else {
-		hideCursor = false;
-	}
+	// Quake 4 GUI save streams serialize hideCursor unconditionally.
+	// Skipping this read desynchronizes the restore stream and eventually crashes object restore.
+	hideCursor.ReadFromSaveGame( savefile );
 
 	// Defined Vars
 	for ( i = 0; i < definedVars.Num(); i++ ) {
+		if ( definedVars[i] == NULL ) {
+			common->Error( "idWindow::ReadFromSaveGame: NULL parsed defined variable %d for window '%s' in gui '%s'",
+				i, name.c_str(), gui->GetSourceFile() );
+			return;
+		}
 		definedVars[i]->ReadFromSaveGame( savefile );
 	}
 
-	savefile->Read( &textRect, sizeof( textRect ) );
+	idRectangle savedTextRect;
+	if ( !OpenQ4_ReadSaveGameField( savefile, savedTextRect, "idWindow::ReadFromSaveGame", "text rect" ) ) {
+		return;
+	}
+	if ( !OpenQ4_IsFiniteSaveGameRectangle( savedTextRect ) ) {
+		common->Error( "idWindow::ReadFromSaveGame: non-finite text rectangle for window '%s' in gui '%s'",
+			name.c_str(), gui->GetSourceFile() );
+		return;
+	}
+	textRect = savedTextRect;
 
 	// Window pointers saved as the child ID of the window
-	int winID = -1;
-
-	savefile->Read( &winID, sizeof( winID ) );
-	for ( i = 0; i < children.Num(); i++ ) {
-		if ( children[i]->childID == winID ) {
-			focusedChild = children[i];
-		}
-	}
-	savefile->Read( &winID, sizeof( winID ) );
-	for ( i = 0; i < children.Num(); i++ ) {
-		if ( children[i]->childID == winID ) {
-			captureChild = children[i];
-		}
-	}
-	savefile->Read( &winID, sizeof( winID ) );
-	for ( i = 0; i < children.Num(); i++ ) {
-		if ( children[i]->childID == winID ) {
-			overChild = children[i];
-		}
+	const bool desktopTrackedDescendants = ( flags & WIN_DESKTOP ) != 0;
+	bool hadSavedFocusReference = false;
+	bool hadSavedCaptureReference = false;
+	bool focusReadSucceeded = false;
+	bool captureReadSucceeded = false;
+	bool overReadSucceeded = false;
+	focusedChild = ReadSaveGameChildReference( savefile, "focused child id", desktopTrackedDescendants,
+		&hadSavedFocusReference, &focusReadSucceeded );
+	captureChild = ReadSaveGameChildReference( savefile, "capture child id", desktopTrackedDescendants,
+		&hadSavedCaptureReference, &captureReadSucceeded );
+	overChild = ReadSaveGameChildReference( savefile, "hovered child id", false, NULL, &overReadSucceeded );
+	if ( !focusReadSucceeded || !captureReadSucceeded || !overReadSucceeded ) {
+		return;
 	}
 	
 	// Scripts
@@ -5769,23 +6794,34 @@ void idWindow::ReadFromSaveGame( idFile *savefile ) {
 
 	// TimeLine Events
 	for ( i = 0; i < timeLineEvents.Num(); i++ ) {
-		if ( timeLineEvents[i] ) {
-			savefile->Read( &timeLineEvents[i]->pending, sizeof( timeLineEvents[i]->pending ) );
-			savefile->Read( &timeLineEvents[i]->time, sizeof( timeLineEvents[i]->time ) );
-			if ( timeLineEvents[i]->event ) {
-				timeLineEvents[i]->event->ReadFromSaveGame( savefile );
-			}
+		if ( timeLineEvents[i] == NULL || timeLineEvents[i]->event == NULL ) {
+			common->Error( "idWindow::ReadFromSaveGame: incomplete parsed timeline event %d for window '%s' in gui '%s'",
+				i, name.c_str(), gui->GetSourceFile() );
+			return;
 		}
+		if ( !OpenQ4_ReadSaveGameBool( savefile, timeLineEvents[i]->pending, "idWindow::ReadFromSaveGame", "timeline pending flag" ) ||
+			 !OpenQ4_ReadSaveGameInt( savefile, timeLineEvents[i]->time, "idWindow::ReadFromSaveGame", "timeline event time" ) ) {
+			return;
+		}
+		timeLineEvents[i]->event->ReadFromSaveGame( savefile );
 	}
 
 
 	// Transitions
-	int num;
-	savefile->Read( &num, sizeof( num ) );
+	int num = 0;
+	if ( !OpenQ4_ReadSaveGameInt( savefile, num, "idWindow::ReadFromSaveGame", "transition count" ) ) {
+		return;
+	}
+	if ( num < 0 || num > 4096 ) {
+		common->Error( "idWindow::ReadFromSaveGame: invalid transition count %d for window '%s'", num, name.c_str() );
+		return;
+	}
 	for ( i = 0; i < num; i++ ) {
 		idTransitionData trans;
 		trans.data = NULL;
-		ReadSaveGameTransition( trans, savefile );
+		if ( !ReadSaveGameTransition( trans, savefile ) ) {
+			return;
+		}
 		if ( trans.data ) {
 			transitions.Append( trans );
 		}
@@ -5794,12 +6830,51 @@ void idWindow::ReadFromSaveGame( idFile *savefile ) {
 
 	// Named Events
 	for ( i = 0; i < namedEvents.Num(); i++ ) {
-		if ( namedEvents[i] ) {
-			ReadSaveGameString( namedEvents[i]->mName, savefile );
-			if ( namedEvents[i]->mEvent ) {
-				namedEvents[i]->mEvent->ReadFromSaveGame( savefile );
+		if ( namedEvents[i] == NULL || namedEvents[i]->mEvent == NULL ) {
+			common->Error( "idWindow::ReadFromSaveGame: incomplete parsed named event %d for window '%s' in gui '%s'",
+				i, name.c_str(), gui->GetSourceFile() );
+			return;
+		}
+
+		idStr savedEventName;
+		if ( !ReadSaveGameString( savedEventName, savefile ) ) {
+			return;
+		}
+
+		int matchedIndex = -1;
+		for ( int j = i; j < namedEvents.Num(); j++ ) {
+			if ( namedEvents[j] != NULL && namedEvents[j]->mName.Icmp( savedEventName ) == 0 ) {
+				matchedIndex = j;
+				break;
 			}
 		}
+
+		if ( matchedIndex == -1 ) {
+			rvNamedEvent *legacyEvent = openQ4_CreateLegacyCinematicNamedEvent( this, savedEventName );
+			if ( legacyEvent != NULL ) {
+				namedEvents.Insert( legacyEvent, i );
+				matchedIndex = i;
+			}
+		}
+
+		if ( matchedIndex == -1 ) {
+			common->Error( "idWindow::ReadFromSaveGame: saved named event '%s' is missing from parsed window '%s' in gui '%s'; restore cannot continue without desynchronizing the stream",
+				savedEventName.c_str(), name.c_str(), gui->GetSourceFile() );
+			return;
+		}
+
+		if ( matchedIndex != i ) {
+			rvNamedEvent *swap = namedEvents[i];
+			namedEvents[i] = namedEvents[matchedIndex];
+			namedEvents[matchedIndex] = swap;
+		}
+
+		if ( namedEvents[i] == NULL || namedEvents[i]->mEvent == NULL ) {
+			common->Error( "idWindow::ReadFromSaveGame: named event '%s' for window '%s' in gui '%s' has no script payload target",
+				savedEventName.c_str(), name.c_str(), gui->GetSourceFile() );
+			return;
+		}
+		namedEvents[i]->mEvent->ReadFromSaveGame( savefile );
 	}
 
 	// regList
@@ -5808,16 +6883,25 @@ void idWindow::ReadFromSaveGame( idFile *savefile ) {
 	// Read children
 	for ( i = 0; i < drawWindows.Num(); i++ ) {
 		drawWin_t	window = drawWindows[i];
-
-		if ( window.simp ) {
+		if ( ( window.simp == NULL ) == ( window.win == NULL ) ) {
+			common->Error( "idWindow::ReadFromSaveGame: draw window %d for '%s' in gui '%s' has invalid simple/full ownership",
+				i, name.c_str(), gui->GetSourceFile() );
+			return;
+		}
+		if ( window.simp != NULL ) {
 			window.simp->ReadFromSaveGame( savefile );
-		} else if ( window.win ) {
+		} else {
 			window.win->ReadFromSaveGame( savefile );
 		}
 	}
 
 	if ( flags & WIN_DESKTOP ) {
-		FixupTransitions();
+		if ( !ValidateRestoredTrackedWindowPointers( hadSavedFocusReference, hadSavedCaptureReference ) ) {
+			return;
+		}
+		if ( !FixupTransitions( OpenQ4_SaveGameRestoreIsPortable( savefile ) ) ) {
+			return;
+		}
 	}
 }
 
@@ -5838,16 +6922,35 @@ int idWindow::NumTransitions() {
 /*
 ===============
 idWindow::FixupTransitions
+
+Each saved target is a field index (TransitionFieldOffset) when fieldIndexes is
+set, and a byte offset from an earlier payload otherwise.
 ===============
 */
-void idWindow::FixupTransitions() {
+bool idWindow::FixupTransitions( bool fieldIndexes ) {
+	if ( gui == NULL || gui->GetDesktop() == NULL ) {
+		common->Error( "idWindow::FixupTransitions: window '%s' has no gui desktop during savegame restore", name.c_str() );
+		return false;
+	}
 	int i, c = transitions.Num();
 	for ( i = 0; i < c; i++ ) {
-		drawWin_t *dw = gui->GetDesktop()->FindChildByName( ( ( idWinStr* )transitions[i].data )->c_str() );
+		if ( transitions[i].data == NULL ) {
+			common->Error( "idWindow::FixupTransitions: transition %d for window '%s' in gui '%s' has no saved target",
+				i, name.c_str(), gui->GetSourceFile() );
+			return false;
+		}
+		const idStr transitionTarget = static_cast<idWinStr *>( transitions[i].data )->c_str();
+		drawWin_t *dw = gui->GetDesktop()->FindChildByName( transitionTarget );
 		delete transitions[i].data;
 		transitions[i].data = NULL;
+		if ( dw != NULL && ( ( dw->win == NULL ) == ( dw->simp == NULL ) ) ) {
+			common->Error( "idWindow::FixupTransitions: target '%s' for window '%s' in gui '%s' has invalid simple/full ownership",
+				transitionTarget.c_str(), name.c_str(), gui->GetSourceFile() );
+			return false;
+		}
 		if ( dw && ( dw->win || dw->simp ) ){
-			const intptr_t transitionOffset = (intptr_t)transitions[i].offset;
+			const intptr_t transitionOffset = fieldIndexes ?
+				TransitionFieldOffset( dw->simp != NULL, transitions[i].offset ) : (intptr_t)transitions[i].offset;
 			if ( dw->win ) {
 				if ( transitionOffset == (intptr_t)&( ( idWindow * ) 0 )->rect ) {
 					transitions[i].data = &dw->win->rect;
@@ -5925,14 +7028,22 @@ void idWindow::FixupTransitions() {
 			}
 		}
 		if ( transitions[i].data == NULL ) {
-			transitions.RemoveIndex( i );
-			i--;
-			c--;
+			common->Error( "idWindow::FixupTransitions: could not resolve saved transition target '%s' offset %d for window '%s' in gui '%s'",
+				transitionTarget.c_str(), transitions[i].offset, name.c_str(), gui->GetSourceFile() );
+			return false;
 		}
 	}
 	for ( c = 0; c < children.Num(); c++ ) {
-		children[c]->FixupTransitions();
+		if ( children[c] == NULL ) {
+			common->Error( "idWindow::FixupTransitions: window '%s' in gui '%s' has a NULL child at index %d",
+				name.c_str(), gui->GetSourceFile(), c );
+			return false;
+		}
+		if ( !children[c]->FixupTransitions( fieldIndexes ) ) {
+			return false;
+		}
 	}
+	return true;
 }
 
 
@@ -5958,13 +7069,11 @@ void idWindow::AddChildWindow(idWindow *win) {
 	if ( win == NULL ) {
 		return;
 	}
-
-	drawWin_t dwt;
-	dwt.simp = NULL;
-	dwt.win = win;
-
+	drawWin_t childWindow;
+	childWindow.simp = NULL;
+	childWindow.win = win;
 	AddChild( win );
-	drawWindows.Append( dwt );
+	drawWindows.Append( childWindow );
 }
 
 /*
@@ -6000,9 +7109,11 @@ void idWindow::FixupParms() {
 			// need to fix this up
 			const char *p = (const char*)(ops[i].a);
 			idWinVar *var = GetWinVarByName(p, true);
+			UI_LegacyObservationFixup(this,i,p,var);
 			delete []p;
 			ops[i].a = (intptr_t)var;
 			ops[i].b = -1;
+			UI_LegacyObservationResolved(this,i,ops[i].a,ops[i].b);
 		}
 	}
 	
@@ -6010,6 +7121,7 @@ void idWindow::FixupParms() {
 	if (flags & WIN_DESKTOP) {
 		CalcRects(0,0);
 	}
+	UI_LegacyObservationFixed(this);
 
 }
 
@@ -6019,37 +7131,44 @@ idWindow::IsSimple
 ================
 */
 bool idWindow::IsSimple() {
-// jmarshall - quake 4 guis
+	// Quake 4 GUI scripts frequently animate per-component aliases such as
+	// "forecolor_w" and "matcolor_w" on otherwise simple leaf windows.  The
+	// compact idSimpleWindow path does not expose the full idWindow alias
+	// surface, so keep retail-style GUI semantics for all windows.
 	return false;
-// jmarshall end
-	// dont do simple windows when in gui editor
-	//if ( com_editors & EDITOR_GUI ) {
-	//	return false;
-	//}
-	//
-	//if (numOps) {
-	//	return false;
-	//}
-	//if (flags & (WIN_HCENTER | WIN_VCENTER)) {
-	//	return false;
-	//}
-	//if (children.Num() || drawWindows.Num()) {
-	//	return false;
-	//}
-	//for (int i = 0; i < SCRIPT_COUNT; i++) {
-	//	if (scripts[i]) {
-	//		return false;
-	//	}
-	//}
-	//if (timeLineEvents.Num()) {
-	//	return false;
-	//}
-	//
-	//if ( namedEvents.Num() ) {
-	//	return false;
-	//}
-	//
-	//return true;
+}
+
+/*
+================
+idWindow::UsesSimpleWindowClipBehavior
+================
+*/
+bool idWindow::UsesSimpleWindowClipBehavior() const {
+	// Keep full idWindow instances for alias lookup while preserving retail's
+	// simple-window drawing behavior: simple leaves do not push a child clip.
+#ifdef ID_ALLOW_TOOLS
+	if ( com_editors & EDITOR_GUI ) {
+		return false;
+	}
+#endif
+	if ( numOps ) {
+		return false;
+	}
+	if ( flags & ( WIN_HCENTER | WIN_VCENTER ) ) {
+		return false;
+	}
+	if ( children.Num() || drawWindows.Num() ) {
+		return false;
+	}
+	for ( int i = 0; i < SCRIPT_COUNT; i++ ) {
+		if ( scripts[i] ) {
+			return false;
+		}
+	}
+	if ( timeLineEvents.Num() || namedEvents.Num() ) {
+		return false;
+	}
+	return forceAspectWidth == 640.0f && forceAspectHeight == 480.0f;
 }
 
 /*
@@ -6085,58 +7204,6 @@ bool idWindow::Interactive() {
 			return true;
 		}
 	}
-	return false;
-}
-
-/*
-================
-idWindow::SetInternalVarValue
-================
-*/
-bool idWindow::SetInternalVarValue( const char *name, const char *value ) {
-	if ( name == NULL || value == NULL ) {
-		return false;
-	}
-
-	idStr key = name;
-	const int scopeSeparator = key.Find( "::" );
-	if ( scopeSeparator > 0 ) {
-		idStr winName = key.Left( scopeSeparator );
-		idStr varName = key.Right( key.Length() - scopeSeparator - 2 );
-
-		if ( gui != NULL && gui->GetDesktop() != NULL ) {
-			drawWin_t *target = gui->GetDesktop()->FindChildByName( winName );
-			if ( target != NULL && target->win != NULL ) {
-				return target->win->SetInternalVarValue( varName, value );
-			}
-		}
-
-		return false;
-	}
-
-	idParser src( value, static_cast<int>( strlen( value ) ), "SetInternalVarValue",
-		LEXFL_NOFATALERRORS | LEXFL_NOSTRINGCONCAT | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT );
-	idToken token;
-	if ( !src.ReadToken( &token ) ) {
-		return false;
-	}
-
-	if ( idStr::Icmp( key, "screenalignx" ) == 0 || idStr::Icmp( key, "screenalignh" ) == 0 ) {
-		if ( !ParseScreenAlignXToken( token, screenAlignX ) ) {
-			common->Warning( "Window %s in gui %s: unknown screenalignx value '%s' (expected: middle|left|right)",
-				GetName(), gui ? gui->GetSourceFile() : "<unknown>", token.c_str() );
-		}
-		return true;
-	}
-
-	if ( idStr::Icmp( key, "screenaligny" ) == 0 || idStr::Icmp( key, "screenalignv" ) == 0 ) {
-		if ( !ParseScreenAlignYToken( token, screenAlignY ) ) {
-			common->Warning( "Window %s in gui %s: unknown screenaligny value '%s' (expected: middle|top|bottom)",
-				GetName(), gui ? gui->GetSourceFile() : "<unknown>", token.c_str() );
-		}
-		return true;
-	}
-
 	return false;
 }
 
@@ -6366,6 +7433,8 @@ void idWindow::SetDefaults ( void ) {
 	rotate = 0;
 	shear.Zero();
 	textScale = 0.35f;
+	textspacing = 0.0f;
+	textstyle = 0.0f;
 	backColor.Zero();
 	foreColor = idVec4(1, 1, 1, 1);
 	hoverColor = idVec4(1, 1, 1, 1);
@@ -6399,7 +7468,7 @@ bool idWindow::UpdateFromDictionary ( idDict& dict ) {
 	// Clear all registers since they will get recreated
 	regList.Reset ( );
 	expressionRegisters.Clear ( );
-	//ops.Clear ( );
+	ops.clear();
 	numOps = 0;
 	
 	for ( i = 0; i < dict.GetNumKeyVals(); i ++ ) {

@@ -22,15 +22,15 @@
 #include "../Prey/game_zone.h"
 //HUMANHEAD END
 
-static ID_INLINE bool OpenPrey_IsFiniteFloat( const float value ) {
+static ID_INLINE bool openPREY_IsFiniteFloat( const float value ) {
 	return ( value == value ) && ( idMath::Fabs( value ) < idMath::INFINITY );
 }
 
-static bool OpenPrey_IsReasonablePVSBounds( const idBounds &bounds ) {
+static bool openPREY_IsReasonablePVSBounds( const idBounds &bounds ) {
 	for ( int axis = 0; axis < 3; axis++ ) {
 		const float mins = bounds[0][axis];
 		const float maxs = bounds[1][axis];
-		if ( !OpenPrey_IsFiniteFloat( mins ) || !OpenPrey_IsFiniteFloat( maxs ) ) {
+		if ( !openPREY_IsFiniteFloat( mins ) || !openPREY_IsFiniteFloat( maxs ) ) {
 			return false;
 		}
 		if ( mins > maxs ) {
@@ -103,6 +103,7 @@ const idEventDef EV_StartSoundShader( "startSoundShader", "sd", 'f' );
 const idEventDef EV_StartSound( "startSound", "sdd", 'f' );
 const idEventDef EV_StopSound( "stopSound", "dd" );
 const idEventDef EV_FadeSound( "fadeSound", "dff" );
+static const idEventDef EV_OpenPreyScriptSilenceDone( "<openprey_script_silence_done>", NULL );
 const idEventDef EV_SetGuiParm( "setGuiParm", "ss" );
 const idEventDef EV_SetGuiFloat( "setGuiFloat", "sf" );
 const idEventDef EV_GetNextKey( "getNextKey", "ss", 's' );
@@ -185,6 +186,7 @@ ABSTRACT_DECLARATION( idClass, idEntity )
 	EVENT( EV_StartSound,			idEntity::Event_StartSound )
 	EVENT( EV_StopSound,			idEntity::Event_StopSound )
 	EVENT( EV_FadeSound,			idEntity::Event_FadeSound )
+	EVENT( EV_OpenPreyScriptSilenceDone,	idEntity::Event_ScriptSilenceDone )
 	EVENT( EV_GetWorldOrigin,		idEntity::Event_GetWorldOrigin )
 	EVENT( EV_SetWorldOrigin,		idEntity::Event_SetWorldOrigin )
 	EVENT( EV_GetOrigin,			idEntity::Event_GetOrigin )
@@ -526,6 +528,9 @@ idEntity::idEntity() : reactions(1) { // HUMANHEAD JRM
 	memset( &renderEntity, 0, sizeof( renderEntity ) );
 	modelDefHandle	= -1;
 	memset( &refSound, 0, sizeof( refSound ) );
+	scriptSilenceWaitingThread = 0;
+	scriptSilenceSilentTimeOffset = 0;
+	scriptSilenceNextSilentTime = 0;
 
 	mpGUIState = -1;
 
@@ -732,6 +737,11 @@ idEntity::~idEntity( void ) {
 
 	DeconstructScriptObject();
 	scriptObject.Free();
+	if ( scriptSilenceWaitingThread ) {
+		idThread::ObjectMoveDone( scriptSilenceWaitingThread, this );
+		scriptSilenceWaitingThread = 0;
+	}
+	CancelEvents( &EV_OpenPreyScriptSilenceDone );
 
 	if ( thinkFlags ) {
 		BecomeInactive( thinkFlags );
@@ -822,6 +832,9 @@ void idEntity::Save( idSaveGame *savefile ) const {
 	savefile->WriteRenderEntity( renderEntity );
 	savefile->WriteInt( modelDefHandle );
 	savefile->WriteRefSound( refSound );
+	savefile->WriteInt( scriptSilenceWaitingThread );
+	savefile->WriteInt( scriptSilenceSilentTimeOffset );
+	savefile->WriteInt( scriptSilenceNextSilentTime );
 
 	savefile->WriteObject( bindMaster );
 	savefile->WriteJoint( bindJoint );
@@ -909,6 +922,9 @@ void idEntity::Restore( idRestoreGame *savefile ) {
 	savefile->ReadRenderEntity( renderEntity );
 	savefile->ReadInt( modelDefHandle );
 	savefile->ReadRefSound( refSound );
+	savefile->ReadInt( scriptSilenceWaitingThread );
+	savefile->ReadInt( scriptSilenceSilentTimeOffset );
+	savefile->ReadInt( scriptSilenceNextSilentTime );
 
 	savefile->ReadObject( reinterpret_cast<idClass *&>( bindMaster ) );
 	savefile->ReadJoint( bindJoint );
@@ -1538,9 +1554,9 @@ void idEntity::UpdatePVSAreas( void ) {
 	int i;
 
 	modelAbsBounds.FromTransformedBounds( renderEntity.bounds, renderEntity.origin, renderEntity.axis );
-	if ( !OpenPrey_IsReasonablePVSBounds( modelAbsBounds ) ) {
+	if ( !openPREY_IsReasonablePVSBounds( modelAbsBounds ) ) {
 		modelAbsBounds = idBounds( renderEntity.origin ).Expand( 256.0f );
-		if ( !OpenPrey_IsReasonablePVSBounds( modelAbsBounds ) ) {
+		if ( !openPREY_IsReasonablePVSBounds( modelAbsBounds ) ) {
 			numPVSAreas = 0;
 			for ( i = 0; i < MAX_PVS_AREAS; i++ ) {
 				PVSAreas[i] = 0;
@@ -1991,11 +2007,76 @@ bool idEntity::StartSoundShader( const idSoundShader *shader, const s_channelTyp
 	if ( length ) {
 		*length = len;
 	}
+	TrackScriptVoiceSilence( channel, len );
 
 	// set reference to the sound for shader synced effects
 	renderEntity.referenceSound = refSound.referenceSound;
 
 	return true;
+}
+
+/*
+================
+idEntity::TrackScriptVoiceSilence
+
+Prey scripts use waitForSilence() on the entity that owns voice playback. Several
+retail maps wait on $player1, so this support must live on idEntity rather than
+only on Prey-specific animated-entity subclasses.
+================
+*/
+void idEntity::TrackScriptVoiceSilence( const s_channelType channel, int length ) {
+	if ( channel != SND_CHANNEL_VOICE || length <= 0 ) {
+		return;
+	}
+
+	const int endTime = gameLocal.time + length;
+	if ( endTime <= scriptSilenceNextSilentTime ) {
+		return;
+	}
+
+	scriptSilenceNextSilentTime = endTime;
+
+	if ( scriptSilenceWaitingThread ) {
+		int time = length + scriptSilenceSilentTimeOffset;
+		time = idMath::ClampInt( 1, time, time );
+		CancelEvents( &EV_OpenPreyScriptSilenceDone );
+		PostEventMS( &EV_OpenPreyScriptSilenceDone, time );
+	}
+}
+
+/*
+================
+idEntity::SetSilenceCallbackForCurrentThread
+================
+*/
+bool idEntity::SetSilenceCallbackForCurrentThread( float plusOrMinusSeconds ) {
+	if ( scriptSilenceWaitingThread ) {
+		return false;
+	}
+
+	scriptSilenceWaitingThread = idThread::CurrentThreadNum();
+	scriptSilenceSilentTimeOffset = SEC2MS( plusOrMinusSeconds );
+
+	if ( scriptSilenceNextSilentTime > gameLocal.time ) {
+		int time = ( scriptSilenceNextSilentTime - gameLocal.time ) + scriptSilenceSilentTimeOffset;
+		time = idMath::ClampInt( 1, time, time );
+		CancelEvents( &EV_OpenPreyScriptSilenceDone );
+		PostEventMS( &EV_OpenPreyScriptSilenceDone, time );
+	}
+
+	return true;
+}
+
+/*
+================
+idEntity::Event_ScriptSilenceDone
+================
+*/
+void idEntity::Event_ScriptSilenceDone( void ) {
+	if ( scriptSilenceWaitingThread ) {
+		idThread::ObjectMoveDone( scriptSilenceWaitingThread, this );
+		scriptSilenceWaitingThread = 0;
+	}
 }
 
 /*
@@ -4117,20 +4198,20 @@ bool idEntity::TouchTriggers( void ) const {
 	idClipModel *	cm;
 	idClipModel *	clipModels[ MAX_GENTITIES ];
 	idEntity *		ent;
-	trace_t			trace;
 	const idBounds	currentBounds = GetPhysics()->GetAbsBounds();
 	idBounds			queryBounds = currentBounds;
 	idBounds			oldBounds;
 	const idVec3 *	sweptStart = NULL;
+	trace_t			baseTrace;
 
-	memset( &trace, 0, sizeof( trace ) );
-	trace.endpos = GetPhysics()->GetOrigin();
-	trace.endAxis = GetPhysics()->GetAxis();
+	memset( &baseTrace, 0, sizeof( baseTrace ) );
+	baseTrace.endpos = GetPhysics()->GetOrigin();
+	baseTrace.endAxis = GetPhysics()->GetAxis();
 
 	if ( IsType( idPlayer::Type ) && GetPhysics()->IsType( hhPhysics_Player::Type ) ) {
 		const hhPhysics_Player *playerPhysics = static_cast<const hhPhysics_Player *>( GetPhysics() );
-		if ( playerPhysics->GetOldOrigin() != trace.endpos ) {
-			oldBounds = currentBounds.Translate( playerPhysics->GetOldOrigin() - trace.endpos );
+		if ( playerPhysics->GetOldOrigin() != baseTrace.endpos ) {
+			oldBounds = currentBounds.Translate( playerPhysics->GetOldOrigin() - baseTrace.endpos );
 			queryBounds.AddBounds( oldBounds );
 			sweptStart = &playerPhysics->GetOldOrigin();
 		}
@@ -4159,18 +4240,28 @@ bool idEntity::TouchTriggers( void ) const {
 		}
 		//HUMANHEAD END
 
+		trace_t touchTrace = baseTrace;
 		bool triggerHit = ( GetPhysics()->ClipContents( cm ) != 0 );
-		if ( !triggerHit && IsType( idPlayer::Type ) ) {
-			// Thin trigger volumes can be skipped when the player moves quickly
-			// or on a rotated gravity axis, so fall back to a swept AABB test.
-			const idBounds &triggerBounds = cm->GetAbsBounds();
-			triggerHit = currentBounds.IntersectsBounds( triggerBounds );
-			if ( !triggerHit && sweptStart ) {
-				triggerHit = oldBounds.IntersectsBounds( triggerBounds );
-				if ( !triggerHit ) {
-					idBounds expandedTrigger = triggerBounds;
-					expandedTrigger.ExpandSelf( currentBounds.Size() * 0.5f );
-					triggerHit = expandedTrigger.LineIntersection( *sweptStart, trace.endpos );
+		if ( !triggerHit && IsType( idPlayer::Type ) && sweptStart ) {
+			const idClipModel *entityClipModel = GetPhysics()->GetClipModel();
+			if ( entityClipModel ) {
+				trace_t sweepTrace;
+				// Confirm trigger crossings with the actual player hull instead of
+				// broad bounds overlap so thin hallway triggers remain reliable.
+				gameLocal.clip.TranslationModel(
+					sweepTrace,
+					*sweptStart,
+					baseTrace.endpos,
+					entityClipModel,
+					baseTrace.endAxis,
+					cm->GetContents(),
+					cm->Handle(),
+					cm->GetOrigin(),
+					cm->GetAxis()
+				);
+				if ( sweepTrace.fraction < 1.0f ) {
+					touchTrace = sweepTrace;
+					triggerHit = true;
 				}
 			}
 		}
@@ -4180,12 +4271,12 @@ bool idEntity::TouchTriggers( void ) const {
 
 		numEntities++;
 
-		trace.c.contents = cm->GetContents();
-		trace.c.entityNum = cm->GetEntity()->entityNumber;
-		trace.c.id = cm->GetId();
+		touchTrace.c.contents = cm->GetContents();
+		touchTrace.c.entityNum = cm->GetEntity()->entityNumber;
+		touchTrace.c.id = cm->GetId();
 
 		ent->Signal( SIG_TOUCH );
-		ent->ProcessEvent( &EV_Touch, this, &trace );
+		ent->ProcessEvent( &EV_Touch, this, &touchTrace );
 
 		if ( !gameLocal.entities[ entityNumber ] ) {
 			gameLocal.Printf( "entity was removed while touching triggers\n" );

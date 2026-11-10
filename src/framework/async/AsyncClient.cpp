@@ -30,10 +30,171 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "AsyncNetwork.h"
+#include "ConnectRoster.h"
+#include "Rcon2Protocol.h"
 
+#include "../ArenaCampaign.h"
 #include "../Session_local.h"
+#include "../../sys/NetworkEndpoint.h"
+#include "../../sys/URLPolicy.h"
+
+#include <cstdint>
+
+static const int ASYNC_CLIENT_MAX_NETWORK_TIME = idMath::INT_MAX - 65536;
+static const int ASYNC_CLIENT_MAX_PREDICTION_MSEC = 60000;
+
+static ID_INLINE int AsyncClient_MaxNetworkGameFrame() {
+	const std::int64_t msecNumerator = common->GetUserCmdMsecNumerator();
+	const std::int64_t msecDenominator = common->GetUserCmdMsecDenominator();
+	const std::int64_t legacyTickMsec = common->GetUserCmdMSec();
+	if ( msecNumerator <= 0 || msecDenominator <= 0 || legacyTickMsec <= 0 ) {
+		return 0;
+	}
+
+	// Both exact-tic and legacy integer-tic conversions are used below. Leave
+	// one frame of headroom for GetUserCmdTime( frame + 1 ) as well.
+	const std::int64_t exactLimit =
+		( static_cast<std::int64_t>( ASYNC_CLIENT_MAX_NETWORK_TIME ) * msecDenominator ) / msecNumerator;
+	const std::int64_t legacyLimit =
+		static_cast<std::int64_t>( ASYNC_CLIENT_MAX_NETWORK_TIME ) / legacyTickMsec;
+	const std::int64_t maximumFrame = ( exactLimit < legacyLimit ? exactLimit : legacyLimit ) - 1;
+	return maximumFrame > 0 ? static_cast<int>( maximumFrame ) : 0;
+}
+
+static ID_INLINE bool AsyncClient_ValidNetworkTiming( int gameFrame, int gameTime ) {
+	return gameFrame >= 0 && gameFrame <= AsyncClient_MaxNetworkGameFrame() &&
+		gameTime >= 0 && gameTime <= ASYNC_CLIENT_MAX_NETWORK_TIME;
+}
+
+static void AsyncClient_StopAfterMalformedSnapshot() {
+	// ClientReadSnapshot may already have published timing, entities, or PVS state
+	// before a later field proves that the packet is malformed.  Disconnecting the
+	// channel alone leaves that partially updated map available to the remainder of
+	// the outer frame, so tear down the loaded session immediately.
+	arenaCampaign.AbortMatch();
+	session->Stop();
+}
+
+static ID_INLINE int AsyncClient_MaxPredictionMsec() {
+	return idMath::ClampInt( 0, ASYNC_CLIENT_MAX_PREDICTION_MSEC,
+		idAsyncNetwork::clientMaxPrediction.GetInteger() );
+}
+
+static ID_INLINE int AsyncClient_NextGameFrameMsec( int gameFrame ) {
+	return common->GetUserCmdDeltaMsec( gameFrame + 1 );
+}
+
+static ID_INLINE int AsyncClient_ConfiguredPredictionMsec( int gameFrame ) {
+	// Preserve the legacy default as "one exact tic" instead of a literal 16 ms.
+	if ( idAsyncNetwork::clientPrediction.GetInteger() == 16 ) {
+		return Min( AsyncClient_NextGameFrameMsec( gameFrame ), AsyncClient_MaxPredictionMsec() );
+	}
+	return idMath::ClampInt( 0, AsyncClient_MaxPredictionMsec(),
+		idAsyncNetwork::clientPrediction.GetInteger() );
+}
+
+static ID_INLINE bool AsyncClient_SameEndpoint( const netadr_t &left, const netadr_t &right ) {
+	return left.port == right.port && Sys_CompareNetAdrBase( left, right );
+}
+
+static ID_INLINE std::uint32_t AsyncClient_Elapsed( int now, int then ) {
+	return static_cast<std::uint32_t>( now ) - static_cast<std::uint32_t>( then );
+}
+
+static bool AsyncClient_SecureConnectionId( int &identifier ) {
+	std::uint32_t randomValue = 0;
+	if ( !Sys_GetSecureRandomBytes( &randomValue, sizeof( randomValue ) ) ) {
+		return false;
+	}
+	identifier = static_cast<int>( randomValue & CONNECTIONLESS_MESSAGE_ID_MASK );
+	if ( identifier == CONNECTIONLESS_MESSAGE_ID_MASK ) {
+		identifier = 0;
+	}
+	return true;
+}
+
+static const int RCON2_CLIENT_TIMEOUT_MSEC = 10000;
+static const int RCON2_CLIENT_RESEND_MSEC = 1000;
+
+static bool AsyncClient_IsWindowsDevicePathSegment( const char *segment, int segmentLength ) {
+	int stemLength = 0;
+	while ( stemLength < segmentLength && segment[ stemLength ] != '.' ) {
+		stemLength++;
+	}
+
+	if ( stemLength == 3 ) {
+		return idStr::Icmpn( segment, "con", 3 ) == 0 ||
+			idStr::Icmpn( segment, "prn", 3 ) == 0 ||
+			idStr::Icmpn( segment, "aux", 3 ) == 0 ||
+			idStr::Icmpn( segment, "nul", 3 ) == 0;
+	}
+
+	const bool portPrefix = stemLength >= 4 &&
+		( idStr::Icmpn( segment, "com", 3 ) == 0 || idStr::Icmpn( segment, "lpt", 3 ) == 0 );
+	if ( !portPrefix ) {
+		return false;
+	}
+
+	const unsigned char digit = static_cast<unsigned char>( segment[ 3 ] );
+	if ( stemLength == 4 ) {
+		return ( digit >= '1' && digit <= '9' ) || digit == 0xB9 || digit == 0xB2 || digit == 0xB3;
+	}
+
+	return stemLength == 5 && digit == 0xC2 &&
+		( static_cast<unsigned char>( segment[ 4 ] ) == 0xB9 ||
+		  static_cast<unsigned char>( segment[ 4 ] ) == 0xB2 ||
+		  static_cast<unsigned char>( segment[ 4 ] ) == 0xB3 );
+}
+
+static bool AsyncClient_IsSafeDownloadPath( const char *path ) {
+	if ( path == NULL || path[ 0 ] == '\0' || path[ 0 ] == '/' || path[ 0 ] == '\\' ) {
+		return false;
+	}
+
+	const char *segmentStart = path;
+	for ( const char *scan = path; ; scan++ ) {
+		const char c = *scan;
+		if ( c == '\\' || c == ':' ) {
+			return false;
+		}
+		if ( c != '\0' && ( static_cast<unsigned char>( c ) < 32 ||
+			 c == '<' || c == '>' || c == '"' || c == '|' || c == '?' || c == '*' ) ) {
+			return false;
+		}
+		if ( c != '/' && c != '\0' ) {
+			continue;
+		}
+
+		const int segmentLength = static_cast<int>( scan - segmentStart );
+		if ( segmentLength == 0 ||
+			 ( segmentLength == 1 && segmentStart[ 0 ] == '.' ) ||
+			 ( segmentLength == 2 && segmentStart[ 0 ] == '.' && segmentStart[ 1 ] == '.' ) ||
+			 segmentStart[ 0 ] == ' ' ||
+			 segmentStart[ segmentLength - 1 ] == '.' || segmentStart[ segmentLength - 1 ] == ' ' ) {
+			return false;
+		}
+		if ( AsyncClient_IsWindowsDevicePathSegment( segmentStart, segmentLength ) ) {
+			return false;
+		}
+		if ( c == '\0' ) {
+			return segmentLength > 4 && idStr::Icmp( scan - 4, ".pk4" ) == 0;
+		}
+		segmentStart = scan + 1;
+	}
+}
+
+static void AsyncClient_CloseBackgroundDownloadFile( backgroundDownload_t &download ) {
+	idFile *file = download.f;
+	download.f = NULL;
+	if ( file != NULL ) {
+		fileSystem->CloseFile( file );
+	}
+}
 
 const int SETUP_CONNECTION_RESEND_TIME	= 1000;
+// getInfo requests a challenge answer naming another game directory waits for
+// before it is followed without knowing the server's protocol.
+const int CONNECT_PROTOCOL_INFO_REQUESTS	= 3;
 const int EMPTY_RESEND_TIME				= 500;
 const int PREDICTION_FAST_ADJUST		= 4;
 
@@ -46,7 +207,86 @@ idAsyncClient::idAsyncClient
 idAsyncClient::idAsyncClient( void ) {
 	guiNetMenu = NULL;
 	updateState = UPDATE_NONE;
+	resumeReconnectTime = 0;
 	Clear();
+}
+
+bool idAsyncClient::IsActive( void ) const {
+	return active || idAsyncNetwork::multiViewDemo.IsPlaying();
+}
+
+static idCVar net_resumeReconnect( "net_resumeReconnect", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_ARCHIVE | CVAR_NOCHEAT,
+	"reconnect to the server after the app returns from the background if the connection did not survive" );
+static idCVar net_resumeProbe( "net_resumeProbe", "5000", CVAR_SYSTEM | CVAR_INTEGER | CVAR_NOCHEAT,
+	"after a return from the background, milliseconds without a packet before reconnecting", 1000, 30000 );
+
+/*
+==================
+idAsyncClient::ApplicationResumed
+
+ui-visual-design.md 13.6: after a stay in the background multiplayer
+reconnects or shows a connection-lost state. The server drops a silent client
+after its time-out; waiting out ours meant a frozen game for 40 seconds. A
+stay longer than the time-out reconnects at once. After a shorter one the
+backlog queued while away is dropped, so only a packet the server sends now
+proves the connection; without one in net_resumeProbe ms, reconnect. A failed
+reconnect reports the lost connection as any failed connect does.
+==================
+*/
+void idAsyncClient::ApplicationResumed( int suspendedMs ) {
+	resumeProbeTime = -1;
+	if ( !active || clientState < CS_CONNECTED || !net_resumeReconnect.GetBool() || idAsyncNetwork::server.IsActive()
+			|| idAsyncNetwork::multiViewDemo.IsPlaying() ) {
+		return;
+	}
+	// Whatever queued while away is stale, including a disconnect the server
+	// sent when it dropped the client.
+	ClearPendingPackets();
+	if ( suspendedMs >= idAsyncNetwork::clientServerTimeout.GetInteger() * 1000 ) {
+		ResumeReconnect( va( "away %d s, beyond the time-out", suspendedMs / 1000 ) );
+		return;
+	}
+	resumeProbeTime = clientTime;
+	common->Printf( "Network: back from %d ms in the background; awaiting the server\n", suspendedMs );
+}
+
+void idAsyncClient::ResumeReconnect( const char *reason ) {
+	resumeProbeTime = -1;
+	resumeReconnectTime = Sys_Milliseconds();
+	common->Printf( "Network: reconnecting after the background (%s)\n", reason );
+	cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "reconnect\n" );
+}
+
+// The server that dropped the client can still answer the old channel with a
+// disconnect while the new connection is being set up; that must not end the
+// reconnect behind a message box. Only before the new connection exists, and
+// only briefly after the reconnect began.
+bool idAsyncClient::StaleDisconnectAfterResume( void ) const {
+	return resumeReconnectTime != 0 && clientState < CS_CONNECTED
+		&& Sys_Milliseconds() - resumeReconnectTime < 10000;
+}
+
+// True once a reconnect is on its way: the frame stops there.
+bool idAsyncClient::CheckResume( void ) {
+	if ( resumeProbeTime < 0 ) {
+		return false;
+	}
+	// Strictly later: the first frame back reads the backlog before the session
+	// reports the return, at the same client time.
+	if ( lastPacketTime > resumeProbeTime ) {
+		common->Printf( "Network: the connection survived the background\n" );
+		resumeProbeTime = -1;
+		return false;
+	}
+	if ( clientTime - resumeProbeTime < net_resumeProbe.GetInteger() ) {
+		return false;
+	}
+	ResumeReconnect( "no packet since the return" );
+	return true;
+}
+
+int idAsyncClient::GetLocalClientNum( void ) const {
+	return idAsyncNetwork::multiViewDemo.IsPlaying() ? MAX_ASYNC_CLIENTS : clientNum;
 }
 
 /*
@@ -64,12 +304,20 @@ void idAsyncClient::Clear( void ) {
 	clientState = CS_DISCONNECTED;
 	clientPrediction = 0;
 	clientPredictTime = 0;
+	memset( connectCandidates, 0, sizeof( connectCandidates ) );
+	connectCandidateCount = 0;
+	connectCandidateIndex = 0;
+	connectChallengesSent = 0;
+	connectInfoRequests = 0;
+	connectProtocolKnown = false;
+	connectChallengeDeferred = false;
 	serverId = 0;
 	serverChallenge = 0;
 	serverMessageSequence = 0;
 	lastConnectTime = -9999;
 	lastEmptyTime = -9999;
 	lastPacketTime = -9999;
+	resumeProbeTime = -1;
 	lastSnapshotTime = -9999;
 	snapshotGameFrame = 0;
 	snapshotGameTime = 0;
@@ -80,7 +328,15 @@ void idAsyncClient::Clear( void ) {
 	gameTime = 0;
 	memset( userCmds, 0, sizeof( userCmds ) );
 	backgroundDownload.completed = true;
+	backgroundDownload.url.expectedSize = 0;
 	lastRconTime = 0;
+	memset( &lastRconAddress, 0, sizeof( lastRconAddress ) );
+	idCrypto::SecureZero( &rcon2Request, sizeof( rcon2Request ) );
+	rcon2Request.state = RCON_REPLY_NONE;
+	rconVerifyPending = false;
+	rconVerifyRefused = false;
+	memset( &rconVerifyAddress, 0, sizeof( rconVerifyAddress ) );
+	rconVerifyTime = 0;
 	showUpdateMessage = false;
 	lastFrameDelta = 0;
 
@@ -99,9 +355,6 @@ idAsyncClient::Shutdown
 void idAsyncClient::Shutdown( void ) {
 	guiNetMenu = NULL;
 	updateMSG.Clear();
-	updateURL.Clear();
-	updateFile.Clear();
-	updateFallback.Clear();
 	backgroundDownload.url.url.Clear();
 	dlList.Clear();
 }
@@ -131,6 +384,7 @@ idAsyncClient::ClosePort
 ==================
 */
 void idAsyncClient::ClosePort( void ) {
+	ClearRemoteConsoleRequest();
 	clientPort.Close();
 }
 
@@ -180,6 +434,11 @@ idAsyncClient::ConnectToServer
 */
 void idAsyncClient::ConnectToServer( const netadr_t adr ) {
 	// shutdown any current game. that includes network disconnect
+	// A console connect/reconnect can arrive during Arena's pre-server entrance,
+	// or replace its loopback client. Release that campaign transaction before
+	// Stop dismantles the session so its temporary multiplayer settings cannot
+	// survive into the remote connection.
+	arenaCampaign.AbortMatch();
 	session->Stop();
 
 	if ( !InitPort() ) {
@@ -199,11 +458,25 @@ void idAsyncClient::ConnectToServer( const netadr_t adr ) {
 	// clear the client state
 	Clear();
 
-	// get a pseudo random client id, but don't use the id which is reserved for connectionless packets
-	clientId = Sys_Milliseconds() & CONNECTIONLESS_MESSAGE_ID_MASK;
+	// A numeric address, a server-list entry or a reconnect is one candidate;
+	// ConnectToServer( const char * ) installs a host name's others afterwards.
+	connectCandidates[0] = adr;
+	connectCandidateCount = 1;
+	connectCandidateIndex = 0;
+	connectChallengesSent = 0;
+	connectInfoRequests = 0;
+	connectProtocolKnown = false;
+	connectChallengeDeferred = false;
+
+	// Keep the legacy 15-bit wire field but remove the predictable clock seed.
+	if ( !AsyncClient_SecureConnectionId( clientId ) ) {
+		common->Warning( "OS secure random unavailable; connection attempt cancelled" );
+		return;
+	}
 
 	// calculate a checksum on some of the essential data used
 	clientDataChecksum = declManager->GetChecksum();
+	common->DPrintf( "Client decl checksum: 0x%08x\n", static_cast<unsigned int>( clientDataChecksum ) );
 
 	// start challenging the server
 	clientState = CS_CHALLENGING;
@@ -231,7 +504,8 @@ idAsyncClient::ConnectToServer
 */
 void idAsyncClient::ConnectToServer( const char *address ) {
 	int serverNum;
-	netadr_t adr;
+	netadr_t candidates[MAX_CONNECT_CANDIDATES];
+	int candidateCount = 0;
 
 	if ( idStr::IsNumeric( address ) ) {
 		serverNum = atoi( address );
@@ -239,20 +513,37 @@ void idAsyncClient::ConnectToServer( const char *address ) {
 			session->MessageBox( MSG_OK, va( common->GetLanguageDict()->GetString( "#str_06733" ), serverNum ), common->GetLanguageDict()->GetString( "#str_06735" ), true );
 			return;
 		}
-		adr = serverList[ serverNum ].adr;
+		candidates[0] = serverList[ serverNum ].adr;
+		candidateCount = 1;
 	} else {
-		if ( !Sys_StringToNetAdr( address, &adr, true ) ) {
+		// A host name can carry several A and AAAA records. The first is the one
+		// Sys_StringToNetAdr always chose; the others are tried in turn if it
+		// never answers (SetupConnection).
+		candidateCount = Sys_StringToNetAdrCandidates( address, candidates, MAX_CONNECT_CANDIDATES, true );
+		if ( candidateCount <= 0 ) {
 			session->MessageBox( MSG_OK, va( common->GetLanguageDict()->GetString( "#str_06734" ), address ), common->GetLanguageDict()->GetString( "#str_06735" ), true );
 			return;
 		}
 	}
-	if ( !adr.port ) {
-		adr.port = PORT_SERVER;
+	for ( int i = 0; i < candidateCount; i++ ) {
+		if ( !candidates[ i ].port ) {
+			candidates[ i ].port = PORT_SERVER;
+		}
 	}
 
-	common->Printf( "\"%s\" resolved to %s\n", address, Sys_NetAdrToString( adr ) );
+	common->Printf( "\"%s\" resolved to %s\n", address, Sys_NetAdrToString( candidates[ 0 ] ) );
+	for ( int i = 1; i < candidateCount; i++ ) {
+		common->Printf( "  alternative address %d of %d: %s\n", i + 1, candidateCount, Sys_NetAdrToString( candidates[ i ] ) );
+	}
 
-	ConnectToServer( adr );
+	ConnectToServer( candidates[ 0 ] );
+	if ( !active || clientState != CS_CHALLENGING ) {
+		return;
+	}
+	for ( int i = 1; i < candidateCount; i++ ) {
+		connectCandidates[ i ] = candidates[ i ];
+	}
+	connectCandidateCount = candidateCount;
 }
 
 /*
@@ -264,6 +555,17 @@ void idAsyncClient::DisconnectFromServer( void ) {
 	idBitMsg	msg;
 	byte		msgBuf[MAX_MESSAGE_SIZE];
 
+	// openQ4: the pure lock is taken while still connecting, when the server's
+	// pak list arrives. It was only released from a full connection, so an
+	// attempt that ended first - a full server, a refusal, a cancelled download
+	// or the player backing out - left it on: loose files and every pak the
+	// server had not listed stayed hidden in the menus, in single player and
+	// on the next server. A pure restart is in CS_PURERESTART by the time it
+	// reconnects, and keeps the list it rebuilt.
+	if ( clientState == CS_CHALLENGING || clientState == CS_CONNECTING ) {
+		fileSystem->ClearPureChecksums();
+	}
+
 	if ( clientState >= CS_CONNECTED ) {
 		// if we were actually connected, clear the pure list
 		fileSystem->ClearPureChecksums();
@@ -273,8 +575,11 @@ void idAsyncClient::DisconnectFromServer( void ) {
 		msg.WriteByte( CLIENT_RELIABLE_MESSAGE_DISCONNECT );
 		msg.WriteString( "disconnect" );
 
+		// openQ4: a full reliable queue is ordinary backpressure, not a programming
+		// error, and here the connection is already being torn down - there is nothing
+		// left to salvage by killing the process.  Drop the backlog and carry on.
 		if ( !channel.SendReliableMessage( msg ) ) {
-			common->Error( "client->server reliable messages overflow\n" );
+			common->Warning( "client->server reliable message queue is full, disconnecting without notifying the server" );
 		}
 
 		SendEmptyToServer( true );
@@ -367,10 +672,25 @@ void idAsyncClient::GetLANServers( void ) {
 	msg.WriteString( "getInfo" );
 	msg.WriteLong( serverList.GetChallenge() );
 
+	// Only .type and .port were ever assigned here, leaving the address bytes
+	// and the scope id holding stack garbage that the IPv6 sweep below reads.
+	memset( &broadcastAddress, 0, sizeof( broadcastAddress ) );
 	broadcastAddress.type = NA_BROADCAST;
 	for ( i = 0; i < MAX_SERVER_PORTS; i++ ) {
 		broadcastAddress.port = PORT_SERVER + i;
 		clientPort.SendPacket( broadcastAddress, msg.GetData(), msg.GetSize() );
+	}
+
+	// IPv6 has no broadcast address, so the same sweep goes to the link-local
+	// discovery group. The platform layer expands one send into one datagram
+	// per attached link. Without this an IPv6-only server is permanently
+	// invisible to the server browser.
+	netadr_t multicastAddress;
+	memset( &multicastAddress, 0, sizeof( multicastAddress ) );
+	multicastAddress.type = NA_MULTICAST6;
+	for ( i = 0; i < MAX_SERVER_PORTS; i++ ) {
+		multicastAddress.port = PORT_SERVER + i;
+		clientPort.SendPacket( multicastAddress, msg.GetData(), msg.GetSize() );
 	}
 }
 
@@ -395,13 +715,34 @@ void idAsyncClient::GetNETServers( void ) {
 	msg.WriteString( "getServers" );
 	msg.WriteLong( ASYNC_PROTOCOL_VERSION );
 	msg.WriteString( cvarSystem->GetCVarString( "fs_game" ) );
-	msg.WriteBits( cvarSystem->GetCVarInteger( "gui_filter_password" ), 2 );
-	msg.WriteBits( cvarSystem->GetCVarInteger( "gui_filter_players" ), 2 );
-	msg.WriteBits( cvarSystem->GetCVarInteger( "gui_filter_gameType" ), 2 );
+	// The master is asked for every server: the list filters by password,
+	// players and the full game type registry itself (idServerScan::IsFiltered),
+	// so a filter changed after a scan never needs a new list, and the legacy
+	// two-bit fields, which cannot name openQ4's added modes, never withhold a
+	// server the list would show.
+	msg.WriteBits( 0, 2 );
+	msg.WriteBits( 0, 2 );
+	msg.WriteBits( 0, 2 );
 
 	netadr_t adr;
 	if ( idAsyncNetwork::GetMasterAddress( 0, adr ) ) {
 		clientPort.SendPacket( adr, msg.GetData(), msg.GetSize() );
+
+		// Ask for the address-family tagged list as well. A master that does
+		// not implement it simply ignores the request, and the legacy reply
+		// above still arrives, so this costs one datagram and never regresses
+		// an IPv4-only deployment.
+		idBitMsg	extMsg;
+		byte		extMsgBuf[MAX_MESSAGE_SIZE];
+		extMsg.Init( extMsgBuf, sizeof( extMsgBuf ) );
+		extMsg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
+		extMsg.WriteString( "getServersExt" );
+		extMsg.WriteLong( ASYNC_PROTOCOL_VERSION );
+		extMsg.WriteString( cvarSystem->GetCVarString( "fs_game" ) );
+		extMsg.WriteBits( 0, 2 );
+		extMsg.WriteBits( 0, 2 );
+		extMsg.WriteBits( 0, 2 );
+		clientPort.SendPacket( adr, extMsg.GetData(), extMsg.GetSize() );
 	}
 }
 
@@ -434,33 +775,274 @@ idAsyncClient::RemoteConsole
 */
 void idAsyncClient::RemoteConsole( const char *command ) {
 	netadr_t	adr;
-	idBitMsg	msg;
-	byte		msgBuf[MAX_MESSAGE_SIZE];
+
+	// The Admin page's password check is answered to the game whatever
+	// becomes of it: by the server's reply, or false when it is refused here
+	// or times out (UpdateRemoteConsoleRequest).
+	const bool verify = command != NULL && idStr::Icmp( command, "verifyRconPass" ) == 0;
+	if ( verify ) {
+		rconVerifyPending = true;
+		rconVerifyRefused = true;
+		rconVerifyTime = realTime;
+		memset( &rconVerifyAddress, 0, sizeof( rconVerifyAddress ) );
+	}
 
 	if ( !InitPort() ) {
+		return;
+	}
+	if ( command == NULL || command[0] == '\0' || strlen( command ) >= MAX_STRING_CHARS ) {
+		common->Printf( "usage: rcon <command> (maximum %d bytes)\n", MAX_STRING_CHARS - 1 );
 		return;
 	}
 
 	if ( active ) {
 		adr = serverAddress;
 	} else {
-		Sys_StringToNetAdr( idAsyncNetwork::clientRemoteConsoleAddress.GetString(), &adr, true );
+		const char *address = idAsyncNetwork::clientRemoteConsoleAddress.GetString();
+		if ( !Sys_StringToNetAdr( address, &adr, true ) ) {
+			common->Printf( "Couldn't resolve remote console address \"%s\"\n", address );
+			return;
+		}
 	}
 	
 	if ( !adr.port ) {
 		adr.port = PORT_SERVER;
 	}
 
+	ClearRemoteConsoleRequest();
 	lastRconAddress = adr;
 	lastRconTime = realTime;
 
+	const char *password = idAsyncNetwork::clientRemoteConsolePassword.GetString();
+	if ( password[0] == '\0' ) {
+		common->Printf( "Set net_clientRemoteConsolePassword before using rcon.\n" );
+		ClearRemoteConsoleRequest();
+		return;
+	}
+
+	if ( idAsyncNetwork::clientUseLegacyRcon.GetBool() ) {
+		byte msgBuf[MAX_MESSAGE_SIZE];
+		idBitMsg msg;
+		msg.Init( msgBuf, sizeof( msgBuf ) );
+		msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
+		msg.WriteString( "rcon" );
+		msg.WriteString( password );
+		msg.WriteString( command );
+		rcon2Request.state = RCON_REPLY_LEGACY;
+		rcon2Request.address = adr;
+		rcon2Request.startTime = realTime;
+		common->Warning( "sending legacy rcon password as plaintext because net_clientUseLegacyRcon is enabled" );
+		clientPort.SendPacket( adr, msg.GetData(), msg.GetSize() );
+		idCrypto::SecureZero( msgBuf, sizeof( msgBuf ) );
+		if ( verify ) {
+			rconVerifyRefused = false;
+			rconVerifyAddress = adr;
+		}
+		return;
+	}
+
+	if ( strlen( password ) < idRcon2::MIN_PASSWORD_BYTES ) {
+		common->Printf( "rcon2 requires a password of at least %u bytes.\n",
+			static_cast<unsigned int>( idRcon2::MIN_PASSWORD_BYTES ) );
+		ClearRemoteConsoleRequest();
+		return;
+	}
+
+	rcon2Request.state = RCON_REPLY_CHALLENGE;
+	rcon2Request.address = adr;
+	rcon2Request.startTime = realTime;
+	rcon2Request.lastSendTime = realTime;
+	idStr::Copynz( rcon2Request.command, command, sizeof( rcon2Request.command ) );
+	if ( !Sys_GetSecureRandomBytes( rcon2Request.clientNonce, sizeof( rcon2Request.clientNonce ) ) ) {
+		common->Warning( "OS secure random unavailable; rcon2 request cancelled" );
+		ClearRemoteConsoleRequest();
+		return;
+	}
+	idRcon2::HashRequest( rcon2Request.command, rcon2Request.requestDigest );
+	if ( verify ) {
+		rconVerifyRefused = false;
+		rconVerifyAddress = adr;
+	}
+	SendRemoteConsole2Challenge();
+}
+
+/*
+==================
+idAsyncClient::ClearRemoteConsoleRequest
+==================
+*/
+void idAsyncClient::ClearRemoteConsoleRequest( void ) {
+	idCrypto::SecureZero( &rcon2Request, sizeof( rcon2Request ) );
+	rcon2Request.state = RCON_REPLY_NONE;
+	memset( &lastRconAddress, 0, sizeof( lastRconAddress ) );
+	lastRconTime = 0;
+}
+
+void idAsyncClient::SendRemoteConsole2Challenge( void ) {
+	if ( rcon2Request.state != RCON_REPLY_CHALLENGE ) {
+		return;
+	}
+	byte msgBuf[128];
+	idBitMsg msg;
 	msg.Init( msgBuf, sizeof( msgBuf ) );
 	msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
-	msg.WriteString( "rcon" );
-	msg.WriteString( idAsyncNetwork::clientRemoteConsolePassword.GetString() );
-	msg.WriteString( command );
+	msg.WriteString( "rcon2Challenge" );
+	msg.WriteByte( idRcon2::PROTOCOL_VERSION );
+	msg.WriteData( rcon2Request.clientNonce, sizeof( rcon2Request.clientNonce ) );
+	msg.WriteData( rcon2Request.requestDigest, sizeof( rcon2Request.requestDigest ) );
+	clientPort.SendPacket( rcon2Request.address, msg.GetData(), msg.GetSize() );
+	rcon2Request.lastSendTime = realTime;
+	lastRconTime = realTime;
+	idCrypto::SecureZero( msgBuf, sizeof( msgBuf ) );
+}
 
-	clientPort.SendPacket( adr, msg.GetData(), msg.GetSize() );	
+void idAsyncClient::SendRemoteConsole2Proof( void ) {
+	if ( rcon2Request.state != RCON_REPLY_OUTPUT ) {
+		return;
+	}
+	byte msgBuf[MAX_MESSAGE_SIZE];
+	idBitMsg msg;
+	msg.Init( msgBuf, sizeof( msgBuf ) );
+	msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
+	msg.WriteString( "rcon2" );
+	msg.WriteByte( idRcon2::PROTOCOL_VERSION );
+	msg.WriteData( rcon2Request.clientNonce, sizeof( rcon2Request.clientNonce ) );
+	msg.WriteData( rcon2Request.serverNonce, sizeof( rcon2Request.serverNonce ) );
+	msg.WriteString( rcon2Request.command );
+	msg.WriteData( rcon2Request.proof, sizeof( rcon2Request.proof ) );
+	clientPort.SendPacket( rcon2Request.address, msg.GetData(), msg.GetSize() );
+	rcon2Request.lastSendTime = realTime;
+	lastRconTime = realTime;
+	idCrypto::SecureZero( msgBuf, sizeof( msgBuf ) );
+}
+
+void idAsyncClient::UpdateRemoteConsoleRequest( void ) {
+	if ( rconVerifyPending && ( rconVerifyRefused ||
+		AsyncClient_Elapsed( realTime, rconVerifyTime ) > RCON2_CLIENT_TIMEOUT_MSEC ) ) {
+		AnswerRconVerify( false );
+	}
+	if ( rcon2Request.state == RCON_REPLY_NONE ) {
+		return;
+	}
+	if ( AsyncClient_Elapsed( realTime, rcon2Request.startTime ) > RCON2_CLIENT_TIMEOUT_MSEC ) {
+		common->Printf( "remote console request timed out\n" );
+		ClearRemoteConsoleRequest();
+		return;
+	}
+	if ( rcon2Request.state == RCON_REPLY_LEGACY ) {
+		return;
+	}
+	if ( AsyncClient_Elapsed( realTime, rcon2Request.lastSendTime ) < RCON2_CLIENT_RESEND_MSEC ) {
+		return;
+	}
+	if ( rcon2Request.state == RCON_REPLY_CHALLENGE ) {
+		SendRemoteConsole2Challenge();
+	} else if ( rcon2Request.state == RCON_REPLY_OUTPUT ) {
+		SendRemoteConsole2Proof();
+	}
+}
+
+/*
+==================
+idAsyncClient::AnswerRconVerify
+
+Quake 4's Admin page asks "rcon verifyRconPass" to check the password it was
+given, then waits for the game to hear the answer.
+==================
+*/
+void idAsyncClient::AnswerRconVerify( bool success ) {
+	rconVerifyPending = false;
+	rconVerifyRefused = false;
+	memset( &rconVerifyAddress, 0, sizeof( rconVerifyAddress ) );
+	rconVerifyTime = 0;
+#if !defined( HUMANHEAD )
+	// OPENPREY-GATED(D9): Prey's v7 idGame has no rcon admin page callback.
+	if ( game != NULL ) {
+		game->ProcessRconReturn( success );
+	}
+#else
+	(void)success;
+#endif
+}
+
+/*
+==================
+idAsyncClient::ProcessRemoteConsole2ChallengeResponse
+==================
+*/
+void idAsyncClient::ProcessRemoteConsole2ChallengeResponse( const netadr_t from, const idBitMsg &msg ) {
+	const int responseBytes = 1 + idRcon2::NONCE_BYTES + idRcon2::NONCE_BYTES +
+		idRcon2::SALT_BYTES + 4 + idRcon2::ENDPOINT_BINDING_BYTES + idRcon2::REQUEST_DIGEST_BYTES;
+	if ( rcon2Request.state != RCON_REPLY_CHALLENGE ||
+		!AsyncClient_SameEndpoint( from, rcon2Request.address ) ||
+		msg.GetRemainingData() != responseBytes ||
+		msg.ReadByte() != idRcon2::PROTOCOL_VERSION ) {
+		return;
+	}
+	byte clientNonce[idRcon2::NONCE_BYTES];
+	byte serverNonce[idRcon2::NONCE_BYTES];
+	byte salt[idRcon2::SALT_BYTES];
+	byte endpointBinding[idRcon2::ENDPOINT_BINDING_BYTES];
+	byte requestDigest[idRcon2::REQUEST_DIGEST_BYTES];
+	byte verifier[idRcon2::VERIFIER_BYTES];
+	msg.ReadData( clientNonce, sizeof( clientNonce ) );
+	msg.ReadData( serverNonce, sizeof( serverNonce ) );
+	msg.ReadData( salt, sizeof( salt ) );
+	const int iterations = msg.ReadLong();
+	msg.ReadData( endpointBinding, sizeof( endpointBinding ) );
+	msg.ReadData( requestDigest, sizeof( requestDigest ) );
+
+	const bool responseMatches = iterations == static_cast<int>( idRcon2::PBKDF2_ITERATIONS ) &&
+		idCrypto::ConstantTimeEquals( clientNonce, rcon2Request.clientNonce, sizeof( clientNonce ) ) &&
+		idCrypto::ConstantTimeEquals( requestDigest, rcon2Request.requestDigest, sizeof( requestDigest ) );
+	if ( !responseMatches || !idRcon2::DeriveVerifier(
+		idAsyncNetwork::clientRemoteConsolePassword.GetString(), salt, verifier ) ) {
+		common->Warning( "invalid rcon2 challenge response" );
+		idCrypto::SecureZero( clientNonce, sizeof( clientNonce ) );
+		idCrypto::SecureZero( serverNonce, sizeof( serverNonce ) );
+		idCrypto::SecureZero( salt, sizeof( salt ) );
+		idCrypto::SecureZero( endpointBinding, sizeof( endpointBinding ) );
+		idCrypto::SecureZero( requestDigest, sizeof( requestDigest ) );
+		idCrypto::SecureZero( verifier, sizeof( verifier ) );
+		ClearRemoteConsoleRequest();
+		return;
+	}
+
+	memcpy( rcon2Request.serverNonce, serverNonce, sizeof( rcon2Request.serverNonce ) );
+	idRcon2::ComputeProof( verifier, rcon2Request.clientNonce, serverNonce,
+		endpointBinding, rcon2Request.requestDigest, rcon2Request.proof );
+	rcon2Request.state = RCON_REPLY_OUTPUT;
+	rcon2Request.lastSendTime = realTime;
+	SendRemoteConsole2Proof();
+
+	idCrypto::SecureZero( clientNonce, sizeof( clientNonce ) );
+	idCrypto::SecureZero( serverNonce, sizeof( serverNonce ) );
+	idCrypto::SecureZero( salt, sizeof( salt ) );
+	idCrypto::SecureZero( endpointBinding, sizeof( endpointBinding ) );
+	idCrypto::SecureZero( requestDigest, sizeof( requestDigest ) );
+	idCrypto::SecureZero( verifier, sizeof( verifier ) );
+}
+
+void idAsyncClient::ProcessRemoteConsole2Complete( const netadr_t from, const idBitMsg &msg ) {
+	const int completeBytes = 1 + idRcon2::NONCE_BYTES + idRcon2::NONCE_BYTES;
+	if ( rcon2Request.state != RCON_REPLY_OUTPUT ||
+		!AsyncClient_SameEndpoint( from, rcon2Request.address ) ||
+		msg.GetRemainingData() != completeBytes ||
+		msg.ReadByte() != idRcon2::PROTOCOL_VERSION ) {
+		return;
+	}
+	byte clientNonce[idRcon2::NONCE_BYTES];
+	byte serverNonce[idRcon2::NONCE_BYTES];
+	msg.ReadData( clientNonce, sizeof( clientNonce ) );
+	msg.ReadData( serverNonce, sizeof( serverNonce ) );
+	const bool matches = idCrypto::ConstantTimeEquals( clientNonce,
+		rcon2Request.clientNonce, sizeof( clientNonce ) ) &&
+		idCrypto::ConstantTimeEquals( serverNonce, rcon2Request.serverNonce, sizeof( serverNonce ) );
+	idCrypto::SecureZero( clientNonce, sizeof( clientNonce ) );
+	idCrypto::SecureZero( serverNonce, sizeof( serverNonce ) );
+	if ( matches ) {
+		ClearRemoteConsoleRequest();
+	}
 }
 
 /*
@@ -592,8 +1174,20 @@ void idAsyncClient::SendUserInfoToServer( void ) {
 	msg.WriteByte( CLIENT_RELIABLE_MESSAGE_CLIENTINFO );
 	msg.WriteDeltaDict( info, &sessLocal.mapSpawnData.userInfo[ clientNum ] );
 
+	// openQ4: a full reliable queue is backpressure, not a programming error, so it
+	// must not bring the whole process down through common->Error.  Warn and take the
+	// ordinary disconnect path, the way idAsyncServer::SendReliableMessage drops a
+	// client it can no longer talk to.  Unlike the server we deliberately leave the
+	// queue intact - see below.
 	if ( !channel.SendReliableMessage( msg ) ) {
-		common->Error( "client->server reliable messages overflow\n" );
+		common->Warning( "client->server reliable message queue overflowed, disconnecting" );
+		// Deliberately NOT ClearReliableMessages(): that re-inits reliableSend to
+		// sequence 1 while the server still expects the next sequence after the one
+		// it last accepted, so every later message - including the disconnect notice
+		// itself - would be silently discarded and the server would hold a ghost slot
+		// until the client timeout.  The queue dies with the channel a moment later.
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "disconnect\n" );
+		return;
 	}
 
 	sessLocal.mapSpawnData.userInfo[clientNum] = info;
@@ -675,6 +1269,10 @@ void idAsyncClient::SendUsercmdsToServer( void ) {
 	if ( idAsyncNetwork::verbose.GetInteger() == 2 ) {
 		common->Printf( "sending usercmd to server: gameInitId = %d, gameFrame = %d, gameTime = %d\n", gameInitId, gameFrame, gameTime );
 	}
+	if ( gameFrame < 0 || gameFrame > AsyncClient_MaxNetworkGameFrame() ) {
+		common->Warning( "cannot send a user command for invalid game frame %d", gameFrame );
+		return;
+	}
 
 	// generate user command for this client
 	index = gameFrame & ( MAX_USERCMD_BACKUP - 1 );
@@ -690,7 +1288,9 @@ void idAsyncClient::SendUsercmdsToServer( void ) {
 	msg.WriteByte( CLIENT_UNRELIABLE_MESSAGE_USERCMD );
 	msg.WriteShort( clientPrediction );
 
-	numUsercmds = idMath::ClampInt( 0, 10, idAsyncNetwork::clientUsercmdBackup.GetInteger() ) + 1;
+	const int requestedUsercmds = idMath::ClampInt( 0, MAX_USERCMD_PACKET_COMMANDS - 1,
+		idAsyncNetwork::clientUsercmdBackup.GetInteger() ) + 1;
+	numUsercmds = gameFrame >= requestedUsercmds - 1 ? requestedUsercmds : gameFrame + 1;
 
 	// write the user commands
 	msg.WriteLong( gameFrame );
@@ -705,6 +1305,20 @@ void idAsyncClient::SendUsercmdsToServer( void ) {
 	while( channel.UnsentFragmentsLeft() ) {
 		channel.SendNextFragment( clientPort, clientTime );
 	}
+}
+
+bool idAsyncClient::SendVoiceMessage( const idBitMsg &payload ) {
+	if ( clientState != CS_INGAME || payload.GetSize() <= 0 || payload.GetSize() > 384 ||
+		!channel.CanSendUnfragmented( clientTime, 13 + payload.GetSize() ) ) return false;
+	byte buffer[397];
+	idBitMsg msg;
+	msg.Init( buffer, sizeof( buffer ) );
+	msg.WriteLong( serverMessageSequence );
+	msg.WriteLong( gameInitId );
+	msg.WriteLong( snapshotSequence );
+	msg.WriteByte( CLIENT_UNRELIABLE_MESSAGE_VOICE );
+	msg.WriteData( payload.GetData(), payload.GetSize() );
+	return channel.SendMessage( clientPort, clientTime, msg ) >= 0;
 }
 
 /*
@@ -738,10 +1352,36 @@ void idAsyncClient::ProcessUnreliableServerMessage( const idBitMsg &msg ) {
 	usercmd_t *last;
 	bool pureWait;
 
+	if ( msg.GetRemainingReadBits() < 32 + 8 ) {
+		common->Warning( "server sent a truncated unreliable message; disconnecting safely" );
+		DisconnectFromServer();
+		return;
+	}
 	serverGameInitId = msg.ReadLong();
 
 	id = msg.ReadByte();
 	switch( id ) {
+		case SERVER_UNRELIABLE_MESSAGE_VOICE: {
+			const byte* batch = msg.GetReadData();
+			if ( clientState == CS_INGAME && serverGameInitId == gameInitId &&
+				oq4voice::ValidBatch( batch, msg.GetRemainingData() ) ) {
+				int offset = 1;
+				for ( int n = 0; n < batch[0]; ++n ) {
+					const int length = batch[offset] | ( int( batch[offset + 1] ) << 8 );
+					offset += 2;
+					idBitMsg frame;
+					frame.Init( batch + offset, length );
+					frame.SetSize( length );
+					frame.BeginReading();
+#if !defined( HUMANHEAD )
+					// OPENPREY-GATED(D9): Prey's v7 idGame has no voice recipients.
+					game->ClientReceiveVoice( frame );
+#endif
+					offset += length;
+				}
+			}
+			break;
+		}
 		case SERVER_UNRELIABLE_MESSAGE_EMPTY: {
 			if ( idAsyncNetwork::verbose.GetInteger() ) {
 				common->Printf( "received empty message from server\n" );
@@ -752,14 +1392,38 @@ void idAsyncClient::ProcessUnreliableServerMessage( const idBitMsg &msg ) {
 			if ( idAsyncNetwork::verbose.GetInteger() == 2 ) {
 				common->Printf( "received ping message from server\n" );
 			}
+			if ( msg.GetRemainingReadBits() < 32 ) {
+				common->Warning( "server sent a truncated ping; disconnecting safely" );
+				DisconnectFromServer();
+				return;
+			}
 			SendPingResponseToServer( msg.ReadLong() );
 			break;
 		}
 		case SERVER_UNRELIABLE_MESSAGE_GAMEINIT: {
+			if ( msg.GetRemainingReadBits() < 32 + 32 ) {
+				common->Warning( "server sent a truncated game-init message; disconnecting safely" );
+				DisconnectFromServer();
+				return;
+			}
 			serverGameFrame = msg.ReadLong();
 			serverGameTime = msg.ReadLong();
 			msg.ReadDeltaDict( serverSI, NULL );
+			if ( msg.IsReadOverflowed() || !AsyncClient_ValidNetworkTiming( serverGameFrame, serverGameTime ) ) {
+				common->Warning( "server sent invalid game-init timing; disconnecting safely" );
+				DisconnectFromServer();
+				return;
+			}
 			pureWait = serverSI.GetBool( "si_pure" );
+
+			// openQ4: the loading screen's server card lists the players this
+			// map starts with; InitGame below clears their user info.
+			sessLocal.ClearRetainedLoadingRoster();
+			for ( int slot = 0; slot < MAX_ASYNC_CLIENTS; slot++ ) {
+				if ( sessLocal.mapSpawnData.userInfo[ slot ].GetNumKeyVals() > 0 ) {
+					sessLocal.NoteRetainedLoadingPlayer( sessLocal.mapSpawnData.userInfo[ slot ] );
+				}
+			}
 
 			InitGame( serverGameInitId, serverGameFrame, serverGameTime, serverSI );
 
@@ -796,25 +1460,60 @@ void idAsyncClient::ProcessUnreliableServerMessage( const idBitMsg &msg ) {
 				break;
 			}
 
-			snapshotSequence = msg.ReadLong();
-			snapshotGameFrame = msg.ReadLong();
-			snapshotGameTime = msg.ReadLong();
+			if ( msg.GetRemainingReadBits() < 32 + 32 + 32 + 8 + 16 ) {
+				common->Warning( "server sent a truncated snapshot header; disconnecting safely" );
+				DisconnectFromServer();
+				return;
+			}
+			const int receivedSnapshotSequence = msg.ReadLong();
+			const int receivedSnapshotGameFrame = msg.ReadLong();
+			const int receivedSnapshotGameTime = msg.ReadLong();
 			numDuplicatedUsercmds = msg.ReadByte();
 			aheadOfServer = msg.ReadShort();
+			if ( msg.IsReadOverflowed() ||
+				 !AsyncClient_ValidNetworkTiming( receivedSnapshotGameFrame, receivedSnapshotGameTime ) ) {
+				common->Warning( "server sent invalid snapshot timing; disconnecting safely" );
+				DisconnectFromServer();
+				return;
+			}
+			snapshotSequence = receivedSnapshotSequence;
+			snapshotGameFrame = receivedSnapshotGameFrame;
+			snapshotGameTime = receivedSnapshotGameTime;
 
-			// read the game snapshot
-			game->ClientReadSnapshot( clientNum, snapshotSequence, snapshotGameFrame, snapshotGameTime, numDuplicatedUsercmds, aheadOfServer, msg );
+			// Prey API v7 has a void snapshot reader; malformed-message handling
+			// remains inside the game/bit-message readers rather than a v40 result.
+			game->ClientReadSnapshot(
+				clientNum, snapshotSequence, snapshotGameFrame, snapshotGameTime,
+				numDuplicatedUsercmds, aheadOfServer, msg );
 
 			// read user commands of other clients from the snapshot
-			for ( last = NULL, i = msg.ReadByte(); i < MAX_ASYNC_CLIENTS; i = msg.ReadByte() ) {
-				numUsercmds = msg.ReadByte();
-				if ( numUsercmds > MAX_USERCMD_RELAY ) {
-					common->Error( "snapshot %d contains too many user commands for client %d", snapshotSequence, i );
+			last = NULL;
+			while ( true ) {
+				i = msg.ReadByte();
+				if ( msg.IsReadOverflowed() || i > MAX_ASYNC_CLIENTS ) {
+					common->Warning( "snapshot %d has an invalid user-command terminator; disconnecting safely",
+						snapshotSequence );
+					AsyncClient_StopAfterMalformedSnapshot();
+					return;
+				}
+				if ( i == MAX_ASYNC_CLIENTS ) {
 					break;
+				}
+				numUsercmds = msg.ReadByte();
+				if ( msg.IsReadOverflowed() || numUsercmds < 1 || numUsercmds > MAX_USERCMD_RELAY ) {
+					common->Warning( "snapshot %d contains an invalid user-command count for client %d; disconnecting safely",
+						snapshotSequence, i );
+					AsyncClient_StopAfterMalformedSnapshot();
+					return;
 				}
 				for ( j = 0; j < numUsercmds; j++ ) {
 					index = ( snapshotGameFrame + j ) & ( MAX_USERCMD_BACKUP - 1 );
-					idAsyncNetwork::ReadUserCmdDelta( msg, userCmds[index][i], last );
+					if ( !idAsyncNetwork::ReadUserCmdDelta( msg, userCmds[index][i], last ) ) {
+						common->Warning( "snapshot %d contains a truncated user command for client %d; disconnecting safely",
+							snapshotSequence, i );
+						AsyncClient_StopAfterMalformedSnapshot();
+						return;
+					}
 					userCmds[index][i].gameFrame = snapshotGameFrame + j;
 					userCmds[index][i].duplicateCount = 0;
 					last = &userCmds[index][i];
@@ -838,23 +1537,45 @@ void idAsyncClient::ProcessUnreliableServerMessage( const idBitMsg &msg ) {
 			}
 
 			// if the snapshot is newer than the clients current game time
-			if ( gameTime < snapshotGameTime || gameTime > snapshotGameTime + idAsyncNetwork::clientMaxPrediction.GetInteger() ) {
+			const int maximumPredictionMsec = AsyncClient_MaxPredictionMsec();
+			const int predictedGameTime = gameTime;
+			const bool predictionResynced = gameTime < snapshotGameTime || gameTime > snapshotGameTime + maximumPredictionMsec;
+			if ( predictionResynced ) {
 				gameFrame = snapshotGameFrame;
 				gameTime = snapshotGameTime;
-				gameTimeResidual = idMath::ClampInt( -idAsyncNetwork::clientMaxPrediction.GetInteger(), idAsyncNetwork::clientMaxPrediction.GetInteger(), gameTimeResidual );
-				clientPredictTime = idMath::ClampInt( -idAsyncNetwork::clientMaxPrediction.GetInteger(), idAsyncNetwork::clientMaxPrediction.GetInteger(), clientPredictTime );
+				gameTimeResidual = idMath::ClampInt( -maximumPredictionMsec, maximumPredictionMsec, gameTimeResidual );
+				clientPredictTime = idMath::ClampInt( -maximumPredictionMsec, maximumPredictionMsec, clientPredictTime );
 			}
 
 			// adjust the client prediction time based on the snapshot time
-			clientPrediction -= ( 1 - ( INTSIGNBITSET( aheadOfServer - idAsyncNetwork::clientPrediction.GetInteger() ) << 1 ) );
-			clientPrediction = idMath::ClampInt( idAsyncNetwork::clientPrediction.GetInteger(), idAsyncNetwork::clientMaxPrediction.GetInteger(), clientPrediction );
+			// openQ4: the original wrote each one-unit step as ( 1 - ( INTSIGNBITSET( x ) << 1 ) ),
+			// which is unsigned: 1 or 4294967295, a -1 only once 32-bit arithmetic wraps it back.
+			// Widened to 64 bits below, 4294967295 stayed 4294967295, so every time this client was
+			// behind its target the catch-up was slammed to -maximumPredictionMsec - full slowdown
+			// instead of speeding up - and it ended one frame behind the server with every command
+			// late.  Step with signed values instead.
+			const int configuredPredictionMsec = AsyncClient_ConfiguredPredictionMsec( gameFrame );
+			clientPrediction += ( aheadOfServer < configuredPredictionMsec ) ? 1 : -1;
+			clientPrediction = idMath::ClampInt( configuredPredictionMsec, maximumPredictionMsec, clientPrediction );
 			delta = gameTime - ( snapshotGameTime + clientPrediction );
-			clientPredictTime -= ( delta / PREDICTION_FAST_ADJUST ) + ( 1 - ( INTSIGNBITSET( delta ) << 1 ) );
+			const int deltaStep = ( delta < 0 ) ? -1 : 1;
+			const std::int64_t adjustedPredictTime = static_cast<std::int64_t>( clientPredictTime ) -
+				( delta / PREDICTION_FAST_ADJUST ) - deltaStep;
+			clientPredictTime = adjustedPredictTime < -maximumPredictionMsec ? -maximumPredictionMsec :
+				( adjustedPredictTime > maximumPredictionMsec ? maximumPredictionMsec :
+					static_cast<int>( adjustedPredictTime ) );
 
 			lastSnapshotTime = clientTime;
 
 			if ( idAsyncNetwork::verbose.GetInteger() == 2 ) {
-				common->Printf( "received snapshot, gameInitId = %d, gameFrame = %d, gameTime = %d\n", gameInitId, gameFrame, gameTime );
+				// openQ4: with the prediction controller's state, so a lead that does not follow
+				// its target can be read from the log: the time this client had predicted to,
+				// whether the snapshot forced a resync, the server's view of how early this
+				// client's commands arrive, and the target and catch-up the controller now holds.
+				common->Printf( "received snapshot, gameInitId = %d, gameFrame = %d, gameTime = %d, snapshotGameTime = %d, "
+					"predictedGameTime = %d%s, aheadOfServer = %d, clientPrediction = %d, clientPredictTime = %d, gameTimeResidual = %d\n",
+					gameInitId, gameFrame, gameTime, snapshotGameTime, predictedGameTime, predictionResynced ? " (resync)" : "",
+					aheadOfServer, clientPrediction, clientPredictTime, gameTimeResidual );
 			}
 
 			if ( numDuplicatedUsercmds && ( idAsyncNetwork::verbose.GetInteger() == 2 ) ) {
@@ -917,8 +1638,15 @@ void idAsyncClient::ProcessReliableMessagePure( const idBitMsg &msg ) {
 	outMsg.WriteLong( 0 );
 	outMsg.WriteLong( gamePakChecksum );
 
+	// openQ4: backpressure, not a programming error - see SendUserInfoToServer.
 	if ( !channel.SendReliableMessage( outMsg ) ) {
-		common->Error( "client->server reliable messages overflow\n" );
+		common->Warning( "client->server reliable message queue overflowed, disconnecting" );
+		// Deliberately NOT ClearReliableMessages(): that re-inits reliableSend to
+		// sequence 1 while the server still expects the next sequence after the one
+		// it last accepted, so every later message - including the disconnect notice
+		// itself - would be silently discarded and the server would hold a ghost slot
+		// until the client timeout.  The queue dies with the channel a moment later.
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "disconnect\n" );
 	}
 }
 
@@ -928,9 +1656,13 @@ idAsyncClient::ReadLocalizedServerString
 ===============
 */
 void idAsyncClient::ReadLocalizedServerString( const idBitMsg &msg, char *out, int maxLen ) {
+	if ( out == NULL || maxLen <= 0 ) {
+		return;
+	}
 	msg.ReadString( out, maxLen );
 	// look up localized string. if the message is not an #str_ format, we'll just get it back unchanged
-	idStr::snPrintf( out, maxLen - 1, "%s", common->GetLanguageDict()->GetString( out ) );
+	const idStr localized = common->GetLanguageDict()->GetString( out );
+	idStr::Copynz( out, localized.c_str(), maxLen );
 }
 
 /*
@@ -945,15 +1677,34 @@ void idAsyncClient::ProcessReliableServerMessages( void ) {
 
 	msg.Init( msgBuf, sizeof( msgBuf ) );
 
-	while ( channel.GetReliableMessage( msg ) ) {
+	// openQ4: and none of the reliable messages queued behind that one
+	while ( clientState >= CS_CONNECTED && channel.GetReliableMessage( msg ) ) {
 		id = msg.ReadByte();
+		if ( msg.IsReadOverflowed() ) {
+			common->Warning( "server sent an empty reliable message; disconnecting safely" );
+			DisconnectFromServer();
+			return;
+		}
 		switch( id ) {
 			case SERVER_RELIABLE_MESSAGE_CLIENTINFO: {
 				int clientNum;
 				clientNum = msg.ReadByte();
 
+				// openQ4: wire value, so it indexes nothing until it is known to be a
+				// client slot.  userInfo only has MAX_ASYNC_CLIENTS entries.
+				if ( msg.IsReadOverflowed() || clientNum < 0 || clientNum >= MAX_ASYNC_CLIENTS ) {
+					common->Warning( "SERVER_RELIABLE_MESSAGE_CLIENTINFO: bad client number %d, ignored", clientNum );
+					DisconnectFromServer();
+					return;
+				}
+
 				idDict &info = sessLocal.mapSpawnData.userInfo[ clientNum ];
 				bool haveBase = ( msg.ReadBits( 1 ) != 0 );
+				if ( msg.IsReadOverflowed() ) {
+					common->Warning( "SERVER_RELIABLE_MESSAGE_CLIENTINFO: truncated base flag" );
+					DisconnectFromServer();
+					return;
+				}
 
 #if ID_CLIENTINFO_TAGS
 				int checksum = info.Checksum();
@@ -971,11 +1722,16 @@ void idAsyncClient::ProcessReliableServerMessages( void ) {
 				} else {
 					msg.ReadDeltaDict( info, NULL );
 				}
+				if ( msg.IsReadOverflowed() ) {
+					common->Warning( "SERVER_RELIABLE_MESSAGE_CLIENTINFO: malformed userinfo dictionary" );
+					DisconnectFromServer();
+					return;
+				}
 
 				// server forces us to a different userinfo
 				if ( clientNum == idAsyncClient::clientNum ) {
 					common->DPrintf( "local user info modified by server\n" );
-					cvarSystem->SetCVarsFromDict( info );
+					cvarSystem->SetCVarsFromDictByFlags( info, CVAR_USERINFO );
 					cvarSystem->ClearModifiedFlags( CVAR_USERINFO ); // don't emit back
 				}
 				game->SetUserInfo( clientNum, info, true, false );
@@ -984,7 +1740,12 @@ void idAsyncClient::ProcessReliableServerMessages( void ) {
 			case SERVER_RELIABLE_MESSAGE_SYNCEDCVARS: {
 				idDict &info = sessLocal.mapSpawnData.syncedCVars;
 				msg.ReadDeltaDict( info, &info );
-				cvarSystem->SetCVarsFromDict( info );
+				if ( msg.IsReadOverflowed() ) {
+					common->Warning( "SERVER_RELIABLE_MESSAGE_SYNCEDCVARS: malformed CVar dictionary" );
+					DisconnectFromServer();
+					return;
+				}
+				cvarSystem->SetCVarsFromDictByFlags( info, CVAR_NETWORKSYNC );
 				if ( !idAsyncNetwork::AreCheatsEnabled() ) {
 					cvarSystem->ResetFlaggedVariables( CVAR_CHEAT );
 				}
@@ -1001,13 +1762,22 @@ void idAsyncClient::ProcessReliableServerMessages( void ) {
 				char string[MAX_STRING_CHARS];
 				clientNum = msg.ReadLong( );
 				ReadLocalizedServerString( msg, string, MAX_STRING_CHARS );
+				// openQ4: wire value - see SERVER_RELIABLE_MESSAGE_CLIENTINFO above.
+				if ( clientNum < 0 || clientNum >= MAX_ASYNC_CLIENTS ) {
+					common->Warning( "SERVER_RELIABLE_MESSAGE_DISCONNECT: bad client number %d, ignored", clientNum );
+					break;
+				}
 				if ( clientNum == idAsyncClient::clientNum ) {
+					// Server-directed disconnects bypass the console disconnect command.
+					// Restore any Arena transaction before tearing down its listen session.
+					arenaCampaign.AbortMatch();
 					session->Stop();
 					session->MessageBox( MSG_OK, string, common->GetLanguageDict()->GetString ( "#str_04319" ), true );
 					session->StartMenu();
 				} else {
 					common->Printf( "client %d %s\n", clientNum, string );
-					cmdSystem->BufferCommandText( CMD_EXEC_NOW, va( "addChatLine \"%s^0 %s\"", sessLocal.mapSpawnData.userInfo[ clientNum ].GetString( "ui_name" ), string ) );
+					idAsyncNetwork::ShowClientDisconnectMessage(
+						sessLocal.mapSpawnData.userInfo[ clientNum ].GetString( "ui_name" ), string );
 					sessLocal.mapSpawnData.userInfo[ clientNum ].Clear();
 				}
 				break;
@@ -1066,18 +1836,48 @@ void idAsyncClient::ProcessChallengeResponseMessage( const netadr_t from, const 
 	msg.ReadString( serverGameBase, MAX_STRING_CHARS );
 	msg.ReadString( serverGame, MAX_STRING_CHARS );
 
+	const bool otherGameDirectory = idStr::Icmp( cvarSystem->GetCVarString( "fs_game_base" ), serverGameBase ) ||
+		idStr::Icmp( cvarSystem->GetCVarString( "fs_game" ), serverGame );
+	// Do not follow a server into its game directory before its protocol is
+	// known. A Quake 4 1.4.x server names q4mp here, which would be refused as
+	// a missing mod and hide the real reason (CheckConnectServerProtocol). A
+	// server that never answers getInfo is followed after a few tries, as before.
+	if ( otherGameDirectory && !connectProtocolKnown && connectInfoRequests < CONNECT_PROTOCOL_INFO_REQUESTS ) {
+		common->DPrintf( "%s runs game directory '%s'; waiting for its protocol before following it\n",
+			Sys_NetAdrToString( from ), serverGame );
+		connectChallengeDeferred = true;
+		return;
+	}
+
 	// the server is running a different game... we need to reload in the correct fs_game
 	// even pure pak checks would fail if we didn't, as there are files we may not even see atm
 	// NOTE: we could read the pure list from the server at the same time and set it up for the restart
 	// ( if the client can restart directly with the right pak order, then we avoid an extra reloadEngine later.. )
-	if ( idStr::Icmp( cvarSystem->GetCVarString( "fs_game_base" ), serverGameBase ) ||
-		idStr::Icmp( cvarSystem->GetCVarString( "fs_game" ), serverGame ) ) {
+	if ( otherGameDirectory ) {
 		// bug #189 - if the server is running ROE and ROE is not locally installed, refuse to connect or we might crash
 		if ( !fileSystem->HasD3XP() && ( !idStr::Icmp( serverGameBase, "d3xp" ) || !idStr::Icmp( serverGame, "d3xp" ) ) ) {
 			common->Printf( "The server is running an expansion pack that is not installed on this client. Aborting the connection..\n" );
 			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "disconnect\n" );
 			return;
 		}
+
+		idStr modReason;
+		idModInfo modInfo;
+		if ( serverGameBase[ 0 ] &&
+			 idStr::Icmp( serverGameBase, BASE_GAMEDIR ) &&
+			 !fileSystem->GetModInfo( serverGameBase, modInfo, &modReason ) ) {
+			common->Printf( "The server requires base mod '%s', but it is not runnable on this client: %s\n", serverGameBase, modReason.c_str() );
+			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "disconnect\n" );
+			return;
+		}
+		if ( serverGame[ 0 ] &&
+			 idStr::Icmp( serverGame, BASE_GAMEDIR ) &&
+			 !fileSystem->GetModInfo( serverGame, modInfo, &modReason ) ) {
+			common->Printf( "The server requires mod '%s', but it is not runnable on this client: %s\n", serverGame, modReason.c_str() );
+			cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "disconnect\n" );
+			return;
+		}
+
 		common->Printf( "The server is running a different mod (%s-%s). Restarting..\n", serverGameBase, serverGame );
 		cvarSystem->SetCVarString( "fs_game_base", serverGameBase );
 		cvarSystem->SetCVarString( "fs_game", serverGame );
@@ -1086,7 +1886,7 @@ void idAsyncClient::ProcessChallengeResponseMessage( const netadr_t from, const 
 		return;
 	}
 
-	common->Printf( "received challenge response 0x%x from %s\n", serverChallenge, Sys_NetAdrToString( from ) );
+	common->DPrintf( "received connection challenge response from %s\n", Sys_NetAdrToString( from ) );
 
 	// start sending connect packets instead of challenge request packets
 	clientState = CS_CONNECTING;
@@ -1095,6 +1895,45 @@ void idAsyncClient::ProcessChallengeResponseMessage( const netadr_t from, const 
 	// take this address as the new server address.  This allows
 	// a server proxy to hand off connections to multiple servers
 	serverAddress = from;
+}
+
+/*
+==================
+AsyncClient_ReadConnectRoster
+
+openQ4: the players already in the game when the server names them after its
+server info, and this client joining them, for the loading screen's card. A
+server that sends no block, or a malformed one, leaves the roster unknown;
+the connection goes on either way.
+==================
+*/
+static void AsyncClient_ReadConnectRoster( const idBitMsg &msg ) {
+	if ( msg.GetRemainingReadBits() < 48 || msg.ReadLong() != static_cast<int>( idConnectRoster::TAG ) ) {
+		common->DPrintf( "connect roster: none from this server\n" );
+		return;
+	}
+	const int size = msg.ReadShort();
+	if ( size <= 0 || size > static_cast<int>( idConnectRoster::MAX_BYTES ) || msg.GetRemainingReadBits() < size * 8 ) {
+		common->DPrintf( "connect roster: a %d-byte block does not fit the message\n", size );
+		return;
+	}
+	byte block[ idConnectRoster::MAX_BYTES ];
+	idConnectRoster::roster_t roster;
+	if ( msg.ReadData( block, size ) != size || msg.IsReadOverflowed() || !idConnectRoster::Decode( block, size, roster ) ) {
+		common->DPrintf( "connect roster: a malformed %d-byte block was ignored\n", size );
+		return;
+	}
+	common->DPrintf( "connect roster: %d players and %d connecting\n", roster.count, roster.connecting );
+	for ( int i = 0; i < roster.count; i++ ) {
+		const idConnectRoster::entry_t &entry = roster.entries[ i ];
+		idDict info;
+		info.Set( "ui_name", entry.name );
+		info.Set( "ui_team", entry.team ? "Strogg" : "Marine" );
+		info.Set( "ui_spectate", ( entry.flags & idConnectRoster::FLAG_SPECTATOR ) ? "Spectate" : "Play" );
+		sessLocal.NoteRetainedLoadingPlayer( info );
+	}
+	sessLocal.NoteRetainedLoadingConnecting( roster.connecting );
+	sessLocal.NoteRetainedLoadingPlayer( *cvarSystem->MoveCVarsToDict( CVAR_USERINFO ) );
 }
 
 /*
@@ -1120,17 +1959,35 @@ void idAsyncClient::ProcessConnectResponseMessage( const netadr_t from, const id
 		return;
 	}
 
-	common->Printf( "received connect response from %s\n", Sys_NetAdrToString( from ) );
-
-	channel.Init( from, clientId );
-	clientNum = msg.ReadLong();
-	clientState = CS_CONNECTED;
-	lastPacketTime = -9999;
-
+	if ( msg.GetRemainingReadBits() < 32 + 32 + 32 + 32 ) {
+		common->Warning( "server sent a truncated connect response - aborting the connection" );
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "disconnect\n" );
+		return;
+	}
+	const int serverClientNum = msg.ReadLong();
 	serverGameInitId = msg.ReadLong();
 	serverGameFrame = msg.ReadLong();
 	serverGameTime = msg.ReadLong();
 	msg.ReadDeltaDict( serverSI, NULL );
+
+	// openQ4: this wire value ends up indexing userInfo and userCmds for the whole
+	// session, so refuse the connection outright rather than accept a bad slot.
+	if ( msg.IsReadOverflowed() || serverClientNum < 0 || serverClientNum >= MAX_ASYNC_CLIENTS ||
+		 !AsyncClient_ValidNetworkTiming( serverGameFrame, serverGameTime ) ) {
+		common->Warning( "server sent a malformed connect response - aborting the connection" );
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "disconnect\n" );
+		return;
+	}
+	common->Printf( "received connect response from %s\n", Sys_NetAdrToString( from ) );
+	// Nothing from the last server shows: the card lists the players this
+	// server names, or none.
+	sessLocal.ClearRetainedLoadingRoster();
+	AsyncClient_ReadConnectRoster( msg );
+
+	channel.Init( from, clientId );
+	clientNum = serverClientNum;
+	clientState = CS_CONNECTED;
+	lastPacketTime = -9999;
 
 	InitGame( serverGameInitId, serverGameFrame, serverGameTime, serverSI );
 
@@ -1138,7 +1995,10 @@ void idAsyncClient::ProcessConnectResponseMessage( const netadr_t from, const id
 	session->SetGUI( NULL, NULL );
 	sessLocal.ExecuteMapChange();
 
-	clientPredictTime = clientPrediction = idMath::ClampInt( 0, idAsyncNetwork::clientMaxPrediction.GetInteger(), clientTime - lastConnectTime );
+	const std::uint32_t connectElapsed = AsyncClient_Elapsed( clientTime, lastConnectTime );
+	const std::uint32_t maximumPrediction = static_cast<std::uint32_t>( AsyncClient_MaxPredictionMsec() );
+	clientPredictTime = clientPrediction = static_cast<int>(
+		connectElapsed < maximumPrediction ? connectElapsed : maximumPrediction );
 }
 
 /*
@@ -1151,10 +2011,15 @@ void idAsyncClient::ProcessDisconnectMessage( const netadr_t from, const idBitMs
 		common->Printf( "Disconnect packet while not connected.\n" );
 		return;
 	}
-	if ( !Sys_CompareNetAdrBase( from, serverAddress ) ) {
+	if ( !AsyncClient_SameEndpoint( from, serverAddress ) ) {
 		common->Printf( "Disconnect packet from unknown server.\n" );
 		return;
 	}
+	if ( StaleDisconnectAfterResume() ) {
+		common->Printf( "Network: ignoring the dropped connection's disconnect while reconnecting\n" );
+		return;
+	}
+	arenaCampaign.AbortMatch();
 	session->Stop();
 	session->MessageBox( MSG_OK, common->GetLanguageDict()->GetString ( "#str_04320" ), NULL, true );
 	session->StartMenu();
@@ -1178,6 +2043,9 @@ void idAsyncClient::ProcessInfoResponseMessage( const netadr_t from, const idBit
 	serverInfo.adr = from;
 	serverInfo.challenge = msg.ReadLong();			// challenge
 	protocol = msg.ReadLong();
+	if ( CheckConnectServerProtocol( from, serverInfo.challenge, protocol ) ) {
+		return;
+	}
 	if ( protocol != ASYNC_PROTOCOL_VERSION ) {
 		common->Printf( "server %s ignored - protocol %d.%d, expected %d.%d\n", Sys_NetAdrToString( serverInfo.adr ), protocol >> 16, protocol & 0xffff, ASYNC_PROTOCOL_MAJOR, ASYNC_PROTOCOL_MINOR );
 		return;
@@ -1189,6 +2057,10 @@ void idAsyncClient::ProcessInfoResponseMessage( const netadr_t from, const idBit
 		serverInfo.serverInfo.Print();
 	}
 	for ( i = msg.ReadByte(); i < MAX_ASYNC_CLIENTS; i = msg.ReadByte() ) {
+		if ( serverInfo.clients >= MAX_ASYNC_CLIENTS ) {
+			common->Printf( "server %s ignored - too many clients in info response\n", Sys_NetAdrToString( serverInfo.adr ) );
+			return;
+		}
 		serverInfo.pings[ serverInfo.clients ] = msg.ReadShort();
 		serverInfo.rate[ serverInfo.clients ] = msg.ReadLong();
 		msg.ReadString( serverInfo.nickname[ serverInfo.clients ], MAX_NICKLEN );
@@ -1198,9 +2070,47 @@ void idAsyncClient::ProcessInfoResponseMessage( const netadr_t from, const idBit
 		serverInfo.clients++;
 	}
 	serverInfo.OSMask = msg.ReadLong();
+	if ( msg.IsReadOverflowed() ) {
+		common->DPrintf( "server %s ignored - truncated info response\n", Sys_NetAdrToString( from ) );
+		return;
+	}
 	index = serverList.InfoResponse( serverInfo );
 
 	common->Printf( "%d: server %s - protocol %d.%d - %s\n", index, Sys_NetAdrToString( serverInfo.adr ), protocol >> 16, protocol & 0xffff, serverInfo.serverInfo.GetString( "si_name" ) );
+}
+
+/*
+==================
+idAsyncClient::CheckConnectServerProtocol
+
+Handles the answer to the getInfo SetupConnection sends with each challenge.
+A server speaking another protocol is refused here, with the reason, before the
+connection follows it anywhere. Returns true when the answer was that one.
+==================
+*/
+bool idAsyncClient::CheckConnectServerProtocol( const netadr_t from, int challenge, int protocol ) {
+	if ( !active || ( clientState != CS_CHALLENGING && clientState != CS_CONNECTING ) ||
+		challenge != clientId || !AsyncClient_SameEndpoint( from, serverAddress ) ) {
+		return false;
+	}
+	if ( protocol == ASYNC_PROTOCOL_VERSION ) {
+		connectProtocolKnown = true;
+		if ( connectChallengeDeferred ) {
+			// Ask again at once rather than at the next resend.
+			connectChallengeDeferred = false;
+			lastConnectTime = -9999;
+		}
+		return true;
+	}
+
+	common->Printf( "server %s uses protocol %d.%d, expected %d.%d - connection refused\n", Sys_NetAdrToString( from ),
+		protocol >> 16, protocol & 0xffff, ASYNC_PROTOCOL_MAJOR, ASYNC_PROTOCOL_MINOR );
+	const idStr reason = va( common->GetLanguageDict()->GetString( "#str_231570" ), Sys_NetAdrToString( from ),
+		protocol >> 16, protocol & 0xffff, ASYNC_PROTOCOL_MAJOR, ASYNC_PROTOCOL_MINOR );
+	ClearPendingPackets();
+	cmdSystem->BufferCommandText( CMD_EXEC_NOW, "disconnect" );
+	session->MessageBox( MSG_OK, reason.c_str(), common->GetLanguageDict()->GetString( "#str_41561" ), false );
+	return true;
 }
 
 /*
@@ -1209,6 +2119,7 @@ idAsyncClient::ProcessPrintMessage
 ==================
 */
 void idAsyncClient::ProcessPrintMessage( const netadr_t from, const idBitMsg &msg ) {
+	char		raw[ MAX_STRING_CHARS ];
 	char		string[ MAX_STRING_CHARS ];
 	int			opcode;
 	int			game_opcode = ALLOW_YES;
@@ -1218,8 +2129,30 @@ void idAsyncClient::ProcessPrintMessage( const netadr_t from, const idBitMsg &ms
 	if ( opcode == SERVER_PRINT_GAMEDENY ) {
 		game_opcode = msg.ReadLong();
 	}
-	ReadLocalizedServerString( msg, string, MAX_STRING_CHARS );
+	msg.ReadString( raw, sizeof( raw ) );
+	// look up localized string. if the message is not an #str_ format, we'll just get it back unchanged
+	idStr::Copynz( string, common->GetLanguageDict()->GetString( raw ), sizeof( string ) );
 	common->Printf( "%s\n", string );
+#if !defined( HUMANHEAD )
+	// OPENPREY-GATED(D9): Prey's v7 idGame has no rcon admin page callback.
+	if ( opcode == SERVER_PRINT_RCON && game != NULL ) {
+		game->ReceiveRemoteConsoleOutput( string );
+	}
+#endif
+	// The server's answer to the Admin page's password check: "rcon
+	// verified", or the bad password reply, by Doom 3's id from openQ4
+	// servers or Quake 4's from retail ones.
+	if ( opcode != SERVER_PRINT_GAMEDENY && rconVerifyPending && !rconVerifyRefused &&
+		AsyncClient_SameEndpoint( from, rconVerifyAddress ) ) {
+		if ( idStr::Cmp( raw, "#str_107250" ) == 0 ) {
+			AnswerRconVerify( true );
+			return;
+		}
+		if ( idStr::Cmp( raw, "#str_04847" ) == 0 || idStr::Cmp( raw, "#str_104847" ) == 0 ) {
+			AnswerRconVerify( false );
+			return;
+		}
+	}
 	guiNetMenu->SetStateString( "status", string );
 	if ( opcode == SERVER_PRINT_GAMEDENY ) {
 		if ( game_opcode == ALLOW_BADPASS ) {
@@ -1254,10 +2187,89 @@ void idAsyncClient::ProcessServersListMessage( const netadr_t from, const idBitM
 		common->DPrintf( "received a server list from %s - not a valid master\n", Sys_NetAdrToString( from ) );
 		return;
 	}
-	while ( msg.GetRemaingData() ) {
+	while ( msg.GetRemaingData() >= 6 ) {
 		int a,b,c,d;
 		a = msg.ReadByte(); b = msg.ReadByte(); c = msg.ReadByte(); d = msg.ReadByte();
-		serverList.AddServer( serverList.Num(), va( "%i.%i.%i.%i:%i", a, b, c, d, msg.ReadShort() ) );
+		serverList.AddServer( serverList.Num(), va( "%i.%i.%i.%i:%i", a, b, c, d, msg.ReadUShort() ) );
+	}
+	if ( msg.GetRemaingData() != 0 ) {
+		common->DPrintf( "received a malformed server list from %s - trailing address data ignored\n", Sys_NetAdrToString( from ) );
+	}
+}
+
+/*
+==================
+idAsyncClient::ProcessServersListExtMessage
+
+The legacy "servers" reply is an untagged stream of four octet IPv4 records, so
+it cannot carry an IPv6 address without desynchronizing every reader. This
+extended reply tags each record with the separator convention shared by the
+dpmaster family of master servers: '\' introduces a four byte IPv4 record and
+'/' a sixteen byte IPv6 record, each followed by a two byte port in network
+byte order. Note that idBitMsg::ReadUShort is little-endian, so the port is
+assembled from explicit bytes rather than read as a short.
+==================
+*/
+void idAsyncClient::ProcessServersListExtMessage( const netadr_t from, const idBitMsg &msg ) {
+	if ( !Sys_CompareNetAdrBase( idAsyncNetwork::GetMasterAddress(), from ) ) {
+		common->DPrintf( "received an extended server list from %s - not a valid master\n", Sys_NetAdrToString( from ) );
+		return;
+	}
+
+	bool malformed = false;
+	while ( msg.GetRemaingData() > 0 ) {
+		const int separator = msg.ReadByte();
+		int addressBytes;
+		if ( separator == '\\' ) {
+			addressBytes = 4;
+		} else if ( separator == '/' ) {
+			addressBytes = 16;
+		} else {
+			// dpmaster terminates the payload with "EOT\0\0\0"; anything else
+			// here means the stream is no longer record aligned, so stop rather
+			// than reinterpret the remainder as addresses.
+			malformed = ( separator != 'E' );
+			break;
+		}
+
+		// The port always follows the address, so a record that does not fit
+		// the remaining payload is truncated and must not be read.
+		if ( msg.GetRemaingData() < addressBytes + 2 ) {
+			malformed = true;
+			break;
+		}
+
+		netadr_t server;
+		memset( &server, 0, sizeof( server ) );
+		if ( addressBytes == 4 ) {
+			for ( int octet = 0; octet < 4; octet++ ) {
+				server.ip[octet] = msg.ReadByte();
+			}
+			server.type = NA_IP;
+		} else {
+			for ( int octet = 0; octet < 16; octet++ ) {
+				server.ip6[octet] = msg.ReadByte();
+			}
+			server.type = NA_IP6;
+		}
+		const int portHigh = msg.ReadByte();
+		const int portLow = msg.ReadByte();
+		server.port = static_cast<unsigned short>( ( portHigh << 8 ) | portLow );
+
+		// A record with no port cannot be pinged, and the unspecified address
+		// is the master's own padding rather than a reachable server.
+		if ( server.port == 0 ) {
+			continue;
+		}
+		if ( server.type == NA_IP6 && idNetworkEndpoint::IsIPv6Unspecified( server.ip6 ) ) {
+			continue;
+		}
+
+		serverList.AddServer( serverList.Num(), Sys_NetAdrToString( server ) );
+	}
+
+	if ( malformed ) {
+		common->DPrintf( "received a malformed extended server list from %s - trailing address data ignored\n", Sys_NetAdrToString( from ) );
 	}
 }
 
@@ -1267,85 +2279,9 @@ idAsyncClient::ProcessAuthKeyMessage
 ==================
 */
 void idAsyncClient::ProcessAuthKeyMessage( const netadr_t from, const idBitMsg &msg ) {
-	authKeyMsg_t		authMsg;
-	char				read_string[ MAX_STRING_CHARS ];
-	const char			*retkey;
-	authBadKeyStatus_t	authBadStatus;
-	int					key_index;
-	bool				valid[ 2 ];
-	idStr				auth_msg;
-
-	if ( clientState != CS_CONNECTING && !session->WaitingForGameAuth() ) {
-		common->Printf( "clientState != CS_CONNECTING, not waiting for game auth, authKey ignored\n" );
-		return;
-	}
-
-	authMsg = (authKeyMsg_t)msg.ReadByte();
-	if ( authMsg == AUTHKEY_BADKEY ) {
-		valid[ 0 ] = valid[ 1 ] = true;
-		key_index = 0;
-		authBadStatus = (authBadKeyStatus_t)msg.ReadByte();
-		switch ( authBadStatus ) {
-		case AUTHKEY_BAD_INVALID:
-			valid[ 0 ] = ( msg.ReadByte() == 1 );
-			valid[ 1 ] = ( msg.ReadByte() == 1 );
-			idAsyncNetwork::BuildInvalidKeyMsg( auth_msg, valid );
-			break;
-		case AUTHKEY_BAD_BANNED:
-			key_index = msg.ReadByte();
-			auth_msg = common->GetLanguageDict()->GetString( va( "#str_0719%1d", 6 + key_index ) );
-			auth_msg += "\n";
-			auth_msg += common->GetLanguageDict()->GetString( "#str_04304" );
-			valid[ key_index ] = false;
-			break;
-		case AUTHKEY_BAD_INUSE:
-			key_index = msg.ReadByte();
-			auth_msg = common->GetLanguageDict()->GetString( va( "#str_0719%1d", 8 + key_index ) );
-			auth_msg += "\n";
-			auth_msg += common->GetLanguageDict()->GetString( "#str_04304" );
-			valid[ key_index ] = false;
-			break;
-		case AUTHKEY_BAD_MSG:
-			// a general message explaining why this key is denied
-			// no specific use for this atm. let's not clear the keys either
-			msg.ReadString( read_string, MAX_STRING_CHARS );
-			auth_msg = read_string;
-			break;
-		}
-		common->DPrintf( "auth deny: %s\n", auth_msg.c_str() );
-		
-		// keys to be cleared. applies to both net connect and game auth
-		session->ClearCDKey( valid );
-
-		// get rid of the bad key - at least that's gonna annoy people who stole a fake key
-		if ( clientState == CS_CONNECTING ) {
-			while ( 1 ) {
-				// here we use the auth status message
-				retkey = session->MessageBox( MSG_CDKEY, auth_msg, common->GetLanguageDict()->GetString( "#str_04325" ), true );
-				if ( retkey ) {
-					if ( session->CheckKey( retkey, true, valid ) ) {
-						cmdSystem->BufferCommandText( CMD_EXEC_NOW, "reconnect" );
-					} else {
-						// build a more precise message about the offline check failure
-						idAsyncNetwork::BuildInvalidKeyMsg( auth_msg, valid );
-						session->MessageBox( MSG_OK, auth_msg.c_str(), common->GetLanguageDict()->GetString( "#str_04327" ), true );
-						continue;
-					}
-				} else {
-					cmdSystem->BufferCommandText( CMD_EXEC_NOW, "disconnect" );
-				}
-				break;
-			}
-		} else {
-			// forward the auth status information to the session code
-			session->CDKeysAuthReply( false, auth_msg );
-		}
-	} else {
-		msg.ReadString( read_string, MAX_STRING_CHARS );
-		cvarSystem->SetCVarString( "com_guid", read_string );
-		common->Printf( "guid set to %s\n", read_string );
-		session->CDKeysAuthReply( true, NULL );
-	}
+	(void)from;
+	(void)msg;
+	common->DPrintf( "ignoring legacy authKey message (CD key auth disabled)\n" );
 }
 
 /*
@@ -1354,22 +2290,27 @@ idAsyncClient::ProcessVersionMessage
 ==================
 */
 void idAsyncClient::ProcessVersionMessage( const netadr_t from, const idBitMsg &msg ) {
-	char string[ MAX_STRING_CHARS ];
+	char ignoredNetworkField[ MAX_STRING_CHARS ];
+	(void)from;
 
 	if ( updateState != UPDATE_SENT ) {
 		common->Printf( "ProcessVersionMessage: version reply, != UPDATE_SENT\n" );
 		return;
 	}
 
+	// Consume the complete legacy payload so old master servers remain wire
+	// compatible. The message, direct-download flag, URL, MIME action, and
+	// fallback URL are intentionally ignored: an unauthenticated datagram must
+	// never supply instructions or choose what the client downloads, opens, or
+	// executes.
+	msg.ReadString( ignoredNetworkField, sizeof( ignoredNetworkField ) );
+	(void)msg.ReadByte();
+	msg.ReadString( ignoredNetworkField, sizeof( ignoredNetworkField ) );
+	(void)msg.ReadByte();
+	msg.ReadString( ignoredNetworkField, sizeof( ignoredNetworkField ) );
+
+	updateMSG = common->GetLanguageDict()->GetString( "#str_104330" );
 	common->Printf( "A new version is available\n" );
-	msg.ReadString( string, MAX_STRING_CHARS );
-	updateMSG = string;
-	updateDirectDownload = ( msg.ReadByte() != 0 );
-	msg.ReadString( string, MAX_STRING_CHARS );
-	updateURL = string;
-	updateMime = (dlMime_t)msg.ReadByte();
-	msg.ReadString( string, MAX_STRING_CHARS );
-	updateFallback = string;
 	updateState = UPDATE_READY;
 }
 
@@ -1392,6 +2333,15 @@ bool idAsyncClient::ValidatePureServerChecksums( const netadr_t from, const idBi
 	numChecksums = 0;
 	do {
 		i = msg.ReadLong( );
+		// openQ4: a list naming one pak twice passes every check here, asks for
+		// a pure restart, and the restart then cannot match the second copy to
+		// a pak and ends the client with a fatal error. Refuse the list.
+		for ( int j = 0; i != 0 && j < numChecksums; j++ ) {
+			if ( inChecksums[ j ] == i ) {
+				common->Warning( "server sent pak checksum 0x%x twice in its pure list; ignoring the list", i );
+				return false;
+			}
+		}
 		inChecksums[ numChecksums++ ] = i;
 		// just to make sure a broken message doesn't crash us
 		if ( numChecksums >= MAX_PURE_PAKS ) {
@@ -1403,6 +2353,18 @@ bool idAsyncClient::ValidatePureServerChecksums( const netadr_t from, const idBi
 	inGamePakChecksum = msg.ReadLong();
 
 	fsPureReply_t reply = fileSystem->SetPureServerChecksums( inChecksums, inGamePakChecksum, missingChecksums, &missingGamePakChecksum );
+	// Images drawn from the generated image cache, or from an expanded loading
+	// background file an older build left in the save folder, before the lock
+	// must not outlive it. The lock already refuses both, so this reload
+	// derives cached images from the pure paks and purges such backgrounds; if
+	// any cannot be replaced, restart as before. (The session's own wide
+	// loading screen is composed in memory and needs nothing here.)
+	if ( reply == PURE_OK && fileSystem->TakePureImageCacheEviction() ) {
+		if ( renderSystem == NULL || !renderSystem->ReloadGeneratedCacheImages() ) {
+			common->Printf( "Cached images could not be reloaded for the pure server; restarting\n" );
+			reply = PURE_RESTART;
+		}
+	}
 	switch ( reply ) {
 		case PURE_RESTART:
 			// need to restart the filesystem with a different pure configuration
@@ -1433,7 +2395,7 @@ bool idAsyncClient::ValidatePureServerChecksums( const netadr_t from, const idBi
 					message += va( common->GetLanguageDict()->GetString( "#str_06750" ), missingGamePakChecksum );
 				}
 
-				common->Printf( message );
+				common->Printf( "%s", message.c_str() );
 				cmdSystem->BufferCommandText( CMD_EXEC_NOW, "disconnect" );
 				session->MessageBox( MSG_OK, message, common->GetLanguageDict()->GetString( "#str_06735" ), true );
 			} else {
@@ -1448,7 +2410,10 @@ bool idAsyncClient::ValidatePureServerChecksums( const netadr_t from, const idBi
 					common->DPrintf( "game code pak: 0x%x\n", missingGamePakChecksum );
 				}
 				// store the requested downloads
-				GetDownloadRequest( missingChecksums, numMissingChecksums, missingGamePakChecksum );
+				if ( GetDownloadRequest( missingChecksums, numMissingChecksums, missingGamePakChecksum ) == -1 ) {
+					common->Warning( "OS secure random unavailable; download request cancelled" );
+					return false;
+				}
 				// build the download request message
 				// NOTE: in a specific function?
 				dlmsg.Init( msgBuf, sizeof( msgBuf ) );
@@ -1540,7 +2505,13 @@ void idAsyncClient::ConnectionlessMessage( const netadr_t from, const idBitMsg &
 			ProcessServersListMessage( from, msg );
 			return;
 		}
-	
+
+		// extended, address-family tagged server list
+		if ( idStr::Icmp( string, "serversExt" ) == 0 ) {
+			ProcessServersListExtMessage( from, msg );
+			return;
+		}
+
 		if ( idStr::Icmp( string, "authKey" ) == 0 ) {
 			ProcessAuthKeyMessage( from, msg );
 			return;
@@ -1552,9 +2523,51 @@ void idAsyncClient::ConnectionlessMessage( const netadr_t from, const idBitMsg &
 		}
 	}
 
-	// ignore if not from the current/last server
-	if ( !Sys_CompareNetAdrBase( from, serverAddress ) && ( lastRconTime + 10000 < realTime || !Sys_CompareNetAdrBase( from, lastRconAddress ) ) ) {
-		common->DPrintf( "got message '%s' from bad source: %s\n", string, Sys_NetAdrToString( from ) );
+	const bool fromCurrentServer = active && AsyncClient_SameEndpoint( from, serverAddress );
+	const bool fromPendingRcon = rcon2Request.state != RCON_REPLY_NONE &&
+		AsyncClient_Elapsed( realTime, rcon2Request.startTime ) <= RCON2_CLIENT_TIMEOUT_MSEC &&
+		AsyncClient_SameEndpoint( from, rcon2Request.address );
+	const bool fromPendingRconOutput = fromPendingRcon &&
+		( rcon2Request.state == RCON_REPLY_OUTPUT || rcon2Request.state == RCON_REPLY_LEGACY );
+
+	// Remote-console opcodes have their own exact-endpoint capability. A
+	// pending rcon request must not authorize this endpoint to inject game
+	// control messages, and the game server must not manufacture rcon replies
+	// when no matching request is pending.
+	if ( idStr::Icmp( string, "rcon2ChallengeResponse" ) == 0 ) {
+		if ( !fromPendingRcon ) {
+			common->DPrintf( "got rcon2 challenge response from bad source: %s\n", Sys_NetAdrToString( from ) );
+			return;
+		}
+		ProcessRemoteConsole2ChallengeResponse( from, msg );
+		return;
+	}
+	if ( idStr::Icmp( string, "rcon2Complete" ) == 0 ) {
+		if ( !fromPendingRcon ) {
+			common->DPrintf( "got rcon2 completion from bad source: %s\n", Sys_NetAdrToString( from ) );
+			return;
+		}
+		ProcessRemoteConsole2Complete( from, msg );
+		return;
+	}
+	if ( idStr::Icmp( string, "print" ) == 0 ) {
+		// A challenge request has not authorized an output window yet. Secure
+		// rcon2 opens it only after the proof is sent; legacy mode keeps its
+		// explicitly insecure bounded window for compatibility. Ordinary game
+		// prints remain tied to the exact current-server endpoint.
+		if ( !fromCurrentServer && !fromPendingRconOutput ) {
+			common->DPrintf( "got print from bad source: %s\n", Sys_NetAdrToString( from ) );
+			return;
+		}
+		ProcessPrintMessage( from, msg );
+		return;
+	}
+
+	// Everything below is game-session control and therefore requires the
+	// exact current server endpoint. Merely owning an rcon reply window is not
+	// sufficient authority.
+	if ( !fromCurrentServer ) {
+		common->DPrintf( "got game control message '%s' from bad source: %s\n", string, Sys_NetAdrToString( from ) );
 		return;
 	}
 
@@ -1577,12 +2590,6 @@ void idAsyncClient::ConnectionlessMessage( const netadr_t from, const idBitMsg &
 		return;
 	}
 
-	// print request from server
-	if ( idStr::Icmp( string, "print" ) == 0 ) {
-		ProcessPrintMessage( from, msg );
-		return;
-	}
-
 	// server pure list
 	if ( idStr::Icmp( string, "pureServer" ) == 0 ) {
 		ProcessPureMessage( from, msg );
@@ -1591,14 +2598,7 @@ void idAsyncClient::ConnectionlessMessage( const netadr_t from, const idBitMsg &
 
 	if ( idStr::Icmp( string, "downloadInfo" ) == 0 ) {
 		ProcessDownloadInfoMessage( from, msg );
-	}
-
-	if ( idStr::Icmp( string, "authrequired" ) == 0 ) {
-		// server telling us that he's expecting an auth mode connect, just in case we're trying to connect in LAN mode
-		if ( idAsyncNetwork::LANServer.GetBool() ) {
-			common->Warning( "server %s requests master authorization for this client. Turning off LAN mode\n", Sys_NetAdrToString( from ) );
-			idAsyncNetwork::LANServer.SetBool( false );
-		}
+		return;
 	}
 
 	common->DPrintf( "ignored message from %s: %s\n", Sys_NetAdrToString( from ), string );
@@ -1641,6 +2641,14 @@ void idAsyncClient::ProcessMessage( const netadr_t from, idBitMsg &msg ) {
 
 	lastPacketTime = clientTime;
 	ProcessReliableServerMessages();
+	// openQ4: a reliable message can end the connection - a disconnect, or
+	// one this client refuses - and that shuts the channel down. The packet's
+	// unreliable part was processed all the same: a ping then answered through
+	// the dead channel's compressor, and a snapshot was read into a game whose
+	// map had just been shut down.
+	if ( clientState < CS_CONNECTED ) {
+		return;
+	}
 	ProcessUnreliableServerMessage( msg );
 }
 
@@ -1658,6 +2666,40 @@ void idAsyncClient::SetupConnection( void ) {
 	}
 
 	if ( clientState == CS_CHALLENGING ) {
+		// A host name's next address gets its turn once this one has let
+		// CONNECT_CHALLENGES_PER_CANDIDATE challenges go unanswered. The first
+		// answer wins, wherever it comes from (ProcessChallengeResponseMessage).
+		idNetworkEndpoint::connectFailover_t failover;
+		failover.count = connectCandidateCount;
+		failover.index = connectCandidateIndex;
+		failover.sent = connectChallengesSent;
+		if ( idNetworkEndpoint::FailoverBeforeChallenge( failover ) ) {
+			common->Printf( "no answer from %s after %d challenges; trying %s (address %d of %d)\n",
+				Sys_NetAdrToString( serverAddress ), idNetworkEndpoint::CONNECT_CHALLENGES_PER_CANDIDATE,
+				Sys_NetAdrToString( connectCandidates[ failover.index ] ), failover.index + 1, failover.count );
+			serverAddress = connectCandidates[ failover.index ];
+			if ( guiNetMenu != NULL ) {
+				guiNetMenu->SetStateString( "status", va( common->GetLanguageDict()->GetString( "#str_06749" ), Sys_NetAdrToString( serverAddress ) ) );
+			}
+			connectInfoRequests = 0;
+			connectProtocolKnown = false;
+			connectChallengeDeferred = false;
+		}
+		connectCandidateIndex = failover.index;
+		connectChallengesSent = failover.sent;
+
+		// Ask for the server's info ahead of the challenge, so its protocol is
+		// normally known by the time the challenge answer arrives. The reply
+		// echoes clientId, which marks it as this request's.
+		if ( !connectProtocolKnown ) {
+			msg.Init( msgBuf, sizeof( msgBuf ) );
+			msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
+			msg.WriteString( "getInfo" );
+			msg.WriteLong( clientId );
+			clientPort.SendPacket( serverAddress, msg.GetData(), msg.GetSize() );
+			connectInfoRequests++;
+		}
+
 		common->Printf( "sending challenge to %s\n", Sys_NetAdrToString( serverAddress ) );
 		msg.Init( msgBuf, sizeof( msgBuf ) );
 		msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
@@ -1665,7 +2707,7 @@ void idAsyncClient::SetupConnection( void ) {
 		msg.WriteLong( clientId );
 		clientPort.SendPacket( serverAddress, msg.GetData(), msg.GetSize() );
 	} else if ( clientState == CS_CONNECTING ) {
-		common->Printf( "sending connect to %s with challenge 0x%x\n", Sys_NetAdrToString( serverAddress ), serverChallenge );
+		common->DPrintf( "sending authenticated connect request to %s\n", Sys_NetAdrToString( serverAddress ) );
 		msg.Init( msgBuf, sizeof( msgBuf ) );
 		msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
 		msg.WriteString( "connect" );
@@ -1688,24 +2730,6 @@ void idAsyncClient::SetupConnection( void ) {
 		
 		if ( idAsyncNetwork::LANServer.GetBool() ) {
 			common->Printf( "net_LANServer is set, connecting in LAN mode\n" );
-		} else {
-			// emit a cd key authorization request
-			// modified at protocol 1.37 for XP key addition
-			msg.BeginWriting();
-			msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
-			msg.WriteString( "clAuth" );
-			msg.WriteLong( ASYNC_PROTOCOL_VERSION );
-			msg.WriteNetadr( serverAddress );
-			// if we don't have a com_guid, this will request a direct reply from auth with it
-			msg.WriteByte( cvarSystem->GetCVarString( "com_guid" )[0] ? 1 : 0 );
-			// send the main key, and flag an extra byte to add XP key
-			msg.WriteString( session->GetCDKey( false ) );
-			const char *xpkey = session->GetCDKey( true );
-			msg.WriteByte( xpkey ? 1 : 0 );
-			if ( xpkey ) {
-				msg.WriteString( xpkey );
-			}
-			clientPort.SendPacket( idAsyncNetwork::GetMasterAddress(), msg.GetData(), msg.GetSize() );
 		}
 	} else {
 		return;
@@ -1720,6 +2744,9 @@ idAsyncClient::SendReliableGameMessage
 ==================
 */
 void idAsyncClient::SendReliableGameMessage( const idBitMsg &msg ) {
+	if ( idAsyncNetwork::multiViewDemo.IsPlaying() ) {
+		return;
+	}
 	idBitMsg	outMsg;
 	byte		msgBuf[MAX_MESSAGE_SIZE];
 
@@ -1730,8 +2757,16 @@ void idAsyncClient::SendReliableGameMessage( const idBitMsg &msg ) {
 	outMsg.Init( msgBuf, sizeof( msgBuf ) );
 	outMsg.WriteByte( CLIENT_RELIABLE_MESSAGE_GAME );
 	outMsg.WriteData( msg.GetData(), msg.GetSize() );
+	// openQ4: backpressure, not a programming error - see SendUserInfoToServer.  The
+	// disconnect is buffered rather than immediate because this runs from game code.
 	if ( !channel.SendReliableMessage( outMsg ) ) {
-		common->Error( "client->server reliable messages overflow\n" );
+		common->Warning( "client->server reliable message queue overflowed, disconnecting" );
+		// Deliberately NOT ClearReliableMessages(): that re-inits reliableSend to
+		// sequence 1 while the server still expects the next sequence after the one
+		// it last accepted, so every later message - including the disconnect notice
+		// itself - would be silently discarded and the server would hold a ghost slot
+		// until the client timeout.  The queue dies with the channel a moment later.
+		cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "disconnect\n" );
 	}
 }
 
@@ -1767,7 +2802,7 @@ int idAsyncClient::UpdateTime( int clamp ) {
 idAsyncClient::RunFrame
 ==================
 */
-void idAsyncClient::RunFrame( void ) {
+void idAsyncClient::RunFrame( bool allowBlocking ) {
 	int			msec, size;
 	bool		newPacket;
 	idBitMsg	msg;
@@ -1779,6 +2814,7 @@ void idAsyncClient::RunFrame( void ) {
 	if ( !clientPort.GetPort() ) {
 		return;
 	}
+	UpdateRemoteConsoleRequest();
 
 	// handle ongoing pk4 downloads and patch downloads
 	HandleDownloads();
@@ -1789,9 +2825,12 @@ void idAsyncClient::RunFrame( void ) {
 	do {
 
 		do {
+			const int nextGameFrameMsec = AsyncClient_NextGameFrameMsec( gameFrame );
+			const int packetTimeout = allowBlocking ? ( nextGameFrameMsec - ( gameTimeResidual + clientPredictTime ) - 1 ) : -1;
 
-			// blocking read with game time residual timeout
-			newPacket = clientPort.GetPacketBlocking( from, msgBuf, size, sizeof( msgBuf ), USERCMD_MSEC - ( gameTimeResidual + clientPredictTime ) - 1 );
+			// Foreground high-refresh netplay polls instead of blocking so presentation can
+			// continue between the authoritative 60 Hz client/server game frames.
+			newPacket = clientPort.GetPacketBlocking( from, msgBuf, size, sizeof( msgBuf ), packetTimeout );
 			if ( newPacket ) {
 				msg.Init( msgBuf, sizeof( msgBuf ) );
 				msg.SetSize( size );
@@ -1804,14 +2843,18 @@ void idAsyncClient::RunFrame( void ) {
 
 		} while( newPacket );
 
-	} while( gameTimeResidual + clientPredictTime < USERCMD_MSEC );
+		if ( !allowBlocking ) {
+			break;
+		}
+
+	} while( gameTimeResidual + clientPredictTime < AsyncClient_NextGameFrameMsec( gameFrame ) );
 
 	// update server list
 	serverList.RunFrame();
 
 	if ( clientState == CS_DISCONNECTED ) {
 		usercmdGen->GetDirectUsercmd();
-		gameTimeResidual = USERCMD_MSEC - 1;
+		gameTimeResidual = AsyncClient_NextGameFrameMsec( gameFrame ) - 1;
 		clientPredictTime = 0;
 		return;
 	}
@@ -1819,7 +2862,7 @@ void idAsyncClient::RunFrame( void ) {
 	if ( clientState == CS_PURERESTART ) {
 		clientState = CS_DISCONNECTED;
 		Reconnect();
-		gameTimeResidual = USERCMD_MSEC - 1;
+		gameTimeResidual = AsyncClient_NextGameFrameMsec( gameFrame ) - 1;
 		clientPredictTime = 0;
 		return;
 	}
@@ -1829,12 +2872,12 @@ void idAsyncClient::RunFrame( void ) {
 		// also need to read mouse for the connecting guis
 		usercmdGen->GetDirectUsercmd();
 		SetupConnection();
-		gameTimeResidual = USERCMD_MSEC - 1;
+		gameTimeResidual = AsyncClient_NextGameFrameMsec( gameFrame ) - 1;
 		clientPredictTime = 0;
 		return;
 	}
 
-	if ( CheckTimeout() ) {
+	if ( CheckResume() || CheckTimeout() ) {
 		return;
 	}
 
@@ -1853,20 +2896,31 @@ void idAsyncClient::RunFrame( void ) {
 		cvarSystem->ClearModifiedFlags( CVAR_USERINFO );
 	}
 
-	if ( gameTimeResidual + clientPredictTime >= USERCMD_MSEC ) {
+#if !defined( HUMANHEAD )
+	// Quake 4 services client work once per presentation frame, including
+	// reliable referee challenges and UI updates, even without a prediction tic.
+	// Prey's v7 idGame does its client work inside ClientPrediction.
+	game->ClientRun();
+#endif
+
+	if ( gameTimeResidual + clientPredictTime >= AsyncClient_NextGameFrameMsec( gameFrame ) ) {
 		lastFrameDelta = 0;
 	}
 
 	// generate user commands for the predicted time
-	while ( gameTimeResidual + clientPredictTime >= USERCMD_MSEC ) {
+	while ( gameTimeResidual + clientPredictTime >= AsyncClient_NextGameFrameMsec( gameFrame ) ) {
+		const int nextGameFrameMsec = AsyncClient_NextGameFrameMsec( gameFrame );
 
 		// send the user commands of this client to the server
 		SendUsercmdsToServer();
 
 		// update time
 		gameFrame++;
-		gameTime += USERCMD_MSEC;
-		gameTimeResidual -= USERCMD_MSEC;
+		// openQ4: keep the client's game clock on the same ladder the game itself
+		// uses (see idAsyncServer::RunFrame) so replicated timestamps compare
+		// against a clock that means the same thing on both ends.
+		gameTime = gameFrame * common->GetUserCmdMSec();
+		gameTimeResidual -= nextGameFrameMsec;
 
 		// run from the snapshot up to the local game frame
 		while ( snapshotGameFrame < gameFrame ) {
@@ -1876,16 +2930,18 @@ void idAsyncClient::RunFrame( void ) {
 			// duplicate usercmds for clients if no new ones are available
 			DuplicateUsercmds( snapshotGameFrame, snapshotGameTime );
 
-			// indicate the last prediction frame before a render
 			// run client prediction
 			gameReturn_t ret = game->ClientPrediction( clientNum, userCmds[ snapshotGameFrame & ( MAX_USERCMD_BACKUP - 1 ) ] );
 
 			idAsyncNetwork::ExecuteSessionCommand( ret.sessionCommand );
 
 			snapshotGameFrame++;
-			snapshotGameTime += USERCMD_MSEC;
+			snapshotGameTime = snapshotGameFrame * common->GetUserCmdMSec();
 		}
 	}
+#if !defined( HUMANHEAD )
+	game->ClientEndFrame();
+#endif
 }
 
 /*
@@ -1894,6 +2950,9 @@ idAsyncClient::PacifierUpdate
 ==================
 */
 void idAsyncClient::PacifierUpdate( void ) {
+	if ( idAsyncNetwork::multiViewDemo.IsPlaying() ) {
+		return;
+	}
 	if ( !IsActive() ) {
 		return;
 	}
@@ -1922,7 +2981,9 @@ void idAsyncClient::SendVersionCheck( bool fromMenu ) {
 	msg.WriteLong( ASYNC_PROTOCOL_VERSION );
 	msg.WriteShort( BUILD_OS_ID );
 	msg.WriteString( cvarSystem->GetCVarString( "si_version" ) );
-	msg.WriteString( cvarSystem->GetCVarString( "com_guid" ) );
+	// Retain the legacy field position without leaking the persistent client
+	// identifier to the unauthenticated UDP update service.
+	msg.WriteString( "" );
 	clientPort.SendPacket( idAsyncNetwork::GetMasterAddress(), msg.GetData(), msg.GetSize() );
 
 	common->DPrintf( "sent a version check request\n" );
@@ -1930,27 +2991,6 @@ void idAsyncClient::SendVersionCheck( bool fromMenu ) {
 	updateState = UPDATE_SENT;
 	updateSentTime = clientTime;
 	showUpdateMessage = fromMenu;
-}
-
-/*
-==================
-idAsyncClient::SendVersionDLUpdate
-
-sending those packets is not strictly necessary. just a way to tell the update server
-about what is going on. allows the update server to have a more precise view of the overall
-network load for the updates
-==================
-*/
-void idAsyncClient::SendVersionDLUpdate( int state ) {
-	idBitMsg	msg;
-	byte		msgBuf[MAX_MESSAGE_SIZE];
-
-	msg.Init( msgBuf, sizeof( msgBuf ) );
-	msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
-	msg.WriteString( "versionDL" );
-	msg.WriteLong( ASYNC_PROTOCOL_VERSION );
-	msg.WriteShort( state );
-	clientPort.SendPacket( idAsyncNetwork::GetMasterAddress(), msg.GetData(), msg.GetSize() );
 }
 
 /*
@@ -1971,63 +3011,14 @@ void idAsyncClient::HandleDownloads( void ) {
 	} else if ( backgroundDownload.completed ) {
 		// only enter these if the download slot is free
 		if ( updateState == UPDATE_READY ) {
-			// 
-			if ( session->MessageBox( MSG_YESNO, updateMSG, common->GetLanguageDict()->GetString ( "#str_04330" ), true, "yes" )[0] ) {
-				if ( !updateDirectDownload ) {
-					sys->OpenURL( updateURL, true );
-					updateState = UPDATE_DONE;
-				} else {
-
-					// we're just creating the file at toplevel inside fs_savepath
-					updateURL.ExtractFileName( updateFile );
-					idFile_Permanent *f = static_cast< idFile_Permanent *>( fileSystem->OpenFileWrite( updateFile ) );
-					dltotal = 0;
-					dlnow = 0;
-
-					backgroundDownload.completed = false;
-					backgroundDownload.opcode = DLTYPE_URL;
-					backgroundDownload.f = f;
-					backgroundDownload.url.status = DL_WAIT;
-					backgroundDownload.url.dlnow = 0;
-					backgroundDownload.url.dltotal = 0;
-					backgroundDownload.url.url = updateURL;
-					fileSystem->BackgroundDownload( &backgroundDownload );
-
-					updateState = UPDATE_DLING;
-					SendVersionDLUpdate( 0 );
-					session->DownloadProgressBox( &backgroundDownload, va( "Downloading %s\n", updateFile.c_str() ) );
-					updateState = UPDATE_DONE;
-					if ( backgroundDownload.url.status == DL_DONE ) {				
-						SendVersionDLUpdate( 1 );
-						idStr fullPath = f->GetFullPath();
-						fileSystem->CloseFile( f );
-						if ( session->MessageBox( MSG_YESNO, common->GetLanguageDict()->GetString ( "#str_04331" ), common->GetLanguageDict()->GetString ( "#str_04332" ), true, "yes" )[0] ) {
-							if ( updateMime == FILE_EXEC ) {
-								sys->StartProcess( fullPath, true );
-							} else {
-								sys->OpenURL( va( "file://%s", fullPath.c_str() ), true );
-							}
-						} else {
-							session->MessageBox( MSG_OK, va( common->GetLanguageDict()->GetString ( "#str_04333" ), fullPath.c_str() ), common->GetLanguageDict()->GetString ( "#str_04334" ), true );
-						}
-					} else {
-						if ( backgroundDownload.url.dlerror[ 0 ] ) {
-							common->Warning( "update download failed. curl error: %s", backgroundDownload.url.dlerror );
-						}
-						SendVersionDLUpdate( 2 );
-						idStr name = f->GetName();
-						fileSystem->CloseFile( f );
-						fileSystem->RemoveFile( name );
-						session->MessageBox( MSG_OK, common->GetLanguageDict()->GetString ( "#str_04335" ), common->GetLanguageDict()->GetString ( "#str_04336" ), true );
-						if ( updateFallback.Length() ) {
-							sys->OpenURL( updateFallback.c_str(), true );
-						} else {
-							common->Printf( "no fallback URL\n" );
-						}
-					}
-				}
-			} else {
-				updateState = UPDATE_DONE;
+			const bool openReleasePage = session->MessageBox( MSG_YESNO, updateMSG,
+				common->GetLanguageDict()->GetString( "#str_04330" ), true, "yes" )[ 0 ] != '\0';
+			updateState = UPDATE_DONE;
+			showUpdateMessage = false;
+			if ( openReleasePage ) {
+				// This compile-time HTTPS destination is the only action a legacy
+				// version reply may trigger. The network-provided URLs are inert.
+				sys->OpenURL( PROJECT_RELEASES_URL, false );
 			}
 		} else if ( dlList.Num() ) {
 
@@ -2056,13 +3047,24 @@ void idAsyncClient::HandleDownloads( void ) {
 				backgroundDownload.opcode = DLTYPE_URL;
 				backgroundDownload.f = f;
 				backgroundDownload.url.status = DL_WAIT;
+				backgroundDownload.url.expectedSize = dlList[ 0 ].size;
 				backgroundDownload.url.dlnow = 0;
-				backgroundDownload.url.dltotal = dlList[ 0 ].size;
+				backgroundDownload.url.dltotal = 0;
 				backgroundDownload.url.url = dlList[ 0 ].url;
 				fileSystem->BackgroundDownload( &backgroundDownload );
 				idStr dltitle;
 				// "Downloading %s"
-				sprintf( dltitle, common->GetLanguageDict()->GetString( "#str_07213" ), dlList[ 0 ].filename.c_str() );
+				const char *downloadFormat = common->GetLanguageDict()->GetString( "#str_07213" );
+				const char *downloadPlaceholder = strstr( downloadFormat, "%s" );
+				if ( downloadPlaceholder != NULL ) {
+					dltitle.Append( downloadFormat, static_cast<int>( downloadPlaceholder - downloadFormat ) );
+					dltitle += dlList[ 0 ].filename;
+					dltitle += downloadPlaceholder + 2;
+				} else {
+					dltitle = downloadFormat;
+					dltitle += " ";
+					dltitle += dlList[ 0 ].filename;
+				}
 				if ( numPaks > 1 ) {
 					dltitle += va( " (%d/%d)", pakCount, numPaks );
 				}
@@ -2086,9 +3088,25 @@ void idAsyncClient::HandleDownloads( void ) {
 					common->Printf( "file downloaded\n" );
 					idStr finalPath = cvarSystem->GetCVarString( "fs_savepath" );
 					finalPath.AppendPath( dlList[ 0 ].filename );
+					idFile *existingDestination = fileSystem->OpenExplicitFileRead( finalPath );
+					if ( existingDestination ) {
+						fileSystem->CloseFile( existingDestination );
+						common->Warning( "refusing to replace existing download destination '%s'", finalPath.c_str() );
+						AsyncClient_CloseBackgroundDownloadFile( backgroundDownload );
+						dlList.Clear();
+						session->MessageBox( MSG_OK, common->GetLanguageDict()->GetString( "#str_07215" ), common->GetLanguageDict()->GetString( "#str_07216" ), true );
+						return;
+					}
 					fileSystem->CreateOSPath( finalPath );
 					// do the final copy ourselves so we do by small chunks in case the file is big
 					saveas = fileSystem->OpenExplicitFileWrite( finalPath );
+					if ( !saveas ) {
+						common->Warning( "could not open download destination '%s'", finalPath.c_str() );
+						AsyncClient_CloseBackgroundDownloadFile( backgroundDownload );
+						dlList.Clear();
+						session->MessageBox( MSG_OK, common->GetLanguageDict()->GetString( "#str_07215" ), common->GetLanguageDict()->GetString( "#str_07216" ), true );
+						return;
+					}
 					buf = (byte*)Mem_Alloc( CHUNK_SIZE );
 					f->Seek( 0, FS_SEEK_END );
 					remainlen = f->Tell();
@@ -2105,7 +3123,7 @@ void idAsyncClient::HandleDownloads( void ) {
 						}
 						remainlen -= readlen;
 					}
-					fileSystem->CloseFile( f );
+					AsyncClient_CloseBackgroundDownloadFile( backgroundDownload );
 					fileSystem->CloseFile( saveas );
 					common->Printf( "saved as %s\n", finalPath.c_str() );
 					Mem_Free( buf );
@@ -2117,7 +3135,7 @@ void idAsyncClient::HandleDownloads( void ) {
 					if ( !checksum || checksum != dlList[ 0 ].checksum ) {
 						// "pak is corrupted ( checksum 0x%x, expected 0x%x )"
 						session->MessageBox( MSG_OK, va( common->GetLanguageDict()->GetString( "#str_07214" ) , checksum, dlList[0].checksum ), "Download failed", true );
-						fileSystem->RemoveFile( dlList[ 0 ].filename );
+						fileSystem->RemoveExplicitFile( finalPath );
 						dlList.Clear();
 						return;
 					}
@@ -2129,6 +3147,7 @@ void idAsyncClient::HandleDownloads( void ) {
 					if ( backgroundDownload.url.dlerror[ 0 ] ) {
 						common->Warning( "curl error: %s", backgroundDownload.url.dlerror );
 					}
+					AsyncClient_CloseBackgroundDownloadFile( backgroundDownload );
 					// "The download failed or was cancelled"
 					// "Download failed"
 					session->MessageBox( MSG_OK, common->GetLanguageDict()->GetString( "#str_07215" ), common->GetLanguageDict()->GetString( "#str_07216" ), true );
@@ -2152,20 +3171,9 @@ idAsyncClient::SendAuthCheck
 ===============
 */
 bool idAsyncClient::SendAuthCheck( const char *cdkey, const char *xpkey ) {
-	idBitMsg	msg;
-	byte		msgBuf[MAX_MESSAGE_SIZE];
-
-	msg.Init( msgBuf, sizeof( msgBuf ) );
-	msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
-	msg.WriteString( "gameAuth" );
-	msg.WriteLong( ASYNC_PROTOCOL_VERSION );
-	msg.WriteByte( cdkey ? 1 : 0 );
-	msg.WriteString( cdkey ? cdkey : "" );
-	msg.WriteByte( xpkey ? 1 : 0 );
-	msg.WriteString( xpkey ? xpkey : "" );
-	InitPort();
-	clientPort.SendPacket( idAsyncNetwork::GetMasterAddress(), msg.GetData(), msg.GetSize() );
-	return true;
+	(void)cdkey;
+	(void)xpkey;
+	return false;
 }
 
 /*
@@ -2210,6 +3218,10 @@ void idAsyncClient::ProcessDownloadInfoMessage( const netadr_t from, const idBit
 	if ( infoType == SERVER_DL_REDIRECT ) {
 		msg.ReadString( buf, MAX_STRING_CHARS );
 		cmdSystem->BufferCommandText( CMD_EXEC_NOW, "disconnect" );
+		if ( !idURLPolicy::IsAllowedHTTPURL( buf ) ) {
+			common->Warning( "server supplied an invalid download information URL; request ignored" );
+			return;
+		}
 		// "You are missing required pak files to connect to this server.\nThe server gave a web page though:\n%s\nDo you want to go there now?"
 		// "Missing required files"
 		if ( session->MessageBox( MSG_YESNO, va( common->GetLanguageDict()->GetString( "#str_07217" ), buf ),
@@ -2222,21 +3234,45 @@ void idAsyncClient::ProcessDownloadInfoMessage( const netadr_t from, const idBit
 			common->Warning( "tried to process a download list while already busy downloading things" );
 			return;
 		}
+		if ( dlCount < 0 || dlCount > MAX_PURE_PAKS ) {
+			common->Warning( "bad download count %d from pending request", dlCount );
+			return;
+		}
 		// read the URLs, check against what we requested, prompt for download
 		pakIndex = -1;
 		totalDlSize = 0;
 		do {
 			pakIndex++;
 			pakDl = msg.ReadByte();
+			if ( pakDl != SERVER_PAK_END && pakIndex >= dlCount ) {
+				common->Warning( "server sent more download entries than requested" );
+				dlList.Clear();
+				return;
+			}
 			if ( pakDl == SERVER_PAK_YES ) {
 				if ( pakIndex == 0 ) {
 					gotGame = true;
 				}
 				msg.ReadString( buf, MAX_STRING_CHARS );
+				if ( !AsyncClient_IsSafeDownloadPath( buf ) ) {
+					common->Warning( "server sent unsafe download path '%s'; download list ignored", buf );
+					dlList.Clear();
+					return;
+				}
 				entry.filename = buf;
 				msg.ReadString( buf, MAX_STRING_CHARS );
+				if ( !idURLPolicy::IsAllowedHTTPURL( buf ) ) {
+					common->Warning( "server supplied a package URL outside the bounded HTTP/HTTPS policy; download list ignored" );
+					dlList.Clear();
+					return;
+				}
 				entry.url = buf;
 				entry.size = msg.ReadLong();
+				if ( entry.size <= 0 || totalDlSize > idMath::INT_MAX - entry.size ) {
+					common->Warning( "server sent invalid download size %d for '%s'; download list ignored", entry.size, entry.filename.c_str() );
+					dlList.Clear();
+					return;
+				}
 				// checksums are not transmitted, we read them from the dl request we sent
 				entry.checksum = dlChecksums[ pakIndex ];
 				totalDlSize += entry.size;
@@ -2254,8 +3290,10 @@ void idAsyncClient::ProcessDownloadInfoMessage( const netadr_t from, const idBit
 					common->Printf( "no download offered for %s ( 0x%x )\n", entry.filename.c_str(), dlChecksums[ pakIndex ] );
 					gotAllFiles = false;
 				}
-			} else {
-				assert( pakDl == SERVER_PAK_END );
+			} else if ( pakDl != SERVER_PAK_END ) {
+				common->Warning( "server sent invalid download entry type %d", pakDl );
+				dlList.Clear();
+				return;
 			}			
 		} while ( pakDl != SERVER_PAK_END );
 		if ( dlList.Num() < dlCount ) {
@@ -2315,16 +3353,29 @@ idAsyncClient::GetDownloadRequest
 ===============
 */
 int idAsyncClient::GetDownloadRequest( const int checksums[ MAX_PURE_PAKS ], int count, int gamePakChecksum ) {
-	assert( !checksums[ count ] ); // 0-terminated
-	if ( memcmp( dlChecksums + 1, checksums, sizeof( int ) * count ) || gamePakChecksum != dlChecksums[ 0 ] ) {
-		idRandom newreq;
-
+	const int storedChecksumCount = idMath::ClampInt( 0, MAX_PURE_PAKS - 1, count );
+	assert( count == storedChecksumCount );
+	assert( !checksums[ storedChecksumCount ] ); // 0-terminated
+	if ( count != storedChecksumCount ) {
+		common->Warning( "download request checksum count %d exceeds storage capacity %d", count, storedChecksumCount );
+	}
+	if ( count != storedChecksumCount || memcmp( dlChecksums + 1, checksums, sizeof( int ) * storedChecksumCount ) || gamePakChecksum != dlChecksums[ 0 ] ) {
+		memset( dlChecksums, 0, sizeof( dlChecksums ) );
 		dlChecksums[ 0 ] = gamePakChecksum;
-		memcpy( dlChecksums + 1, checksums, sizeof( int ) * MAX_PURE_PAKS );
+		memcpy( dlChecksums + 1, checksums, sizeof( int ) * storedChecksumCount );
 
-		newreq.SetSeed( Sys_Milliseconds() );
-		dlRequest = newreq.RandomInt();
-		dlCount = count + ( gamePakChecksum ? 1 : 0 );
+		std::uint32_t secureRequest = 0;
+		if ( !Sys_GetSecureRandomBytes( &secureRequest, sizeof( secureRequest ) ) ) {
+			memset( dlChecksums, 0, sizeof( dlChecksums ) );
+			dlRequest = -1;
+			dlCount = -1;
+			return -1;
+		}
+		if ( secureRequest == static_cast<std::uint32_t>( -1 ) ) {
+			secureRequest = 0;
+		}
+		dlRequest = static_cast<int>( secureRequest );
+		dlCount = storedChecksumCount + 1;
 		return dlRequest;
 	}
 	// this is the same dlRequest, we haven't heard from the server. keep the same id

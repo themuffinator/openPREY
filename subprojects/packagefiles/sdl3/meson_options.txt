@@ -1,0 +1,6 @@
+option(
+  'x11',
+  type: 'feature',
+  value: 'auto',
+  description: 'Build SDL3 X11 video support alongside native Wayland.',
+)

@@ -30,7 +30,8 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "dmap.h"
-#include "../../../renderer/tr_local.h"
+// dmap uses the shared render-geometry library, not renderer internals
+#include "../../../imagetools/ImageTools.h"
 
 /*
 
@@ -1228,8 +1229,9 @@ srfTriangles_t *CreateLightShadow( optimizeGroup_t *shadowerGroups, const mapLig
 	mapTri_t	*combined;
 
 	combined = NULL;
+	mapTri_t *combinedTail = NULL;
 	for ( optimizeGroup_t *group = shadowerGroups ; group ; group = group->nextGroup ) {
-		combined = MergeTriLists( combined, CopyTriList( group->triList ) );
+		AppendTriList( &combined, &combinedTail, CopyTriList( group->triList ) );
 	}
 
 	if ( !combined ) {

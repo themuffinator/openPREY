@@ -197,43 +197,6 @@ static uBrush_t *FinishBrush( void ) {
 }
 
 /*
-================
-AdjustEntityForOrigin
-================
-*/
-static void AdjustEntityForOrigin( uEntity_t *ent ) {
-	primitive_t	*prim;
-	uBrush_t	*b;
-	int			i;
-	side_t		*s;
-
-	for ( prim = ent->primitives ; prim ; prim = prim->next ) {
-		b = prim->brush;
-		if ( !b ) {
-			continue;
-		}
-		for ( i = 0; i < b->numsides; i++ ) {
-			idPlane plane;
-
-			s = &b->sides[i];
-
-			plane = dmapGlobals.mapPlanes[s->planenum];
-			plane[3] += plane.Normal() * ent->origin;
-				
-			s->planenum = FindFloatPlane( plane );
-
-			s->texVec.v[0][3] += DotProduct( ent->origin, s->texVec.v[0] );
-			s->texVec.v[1][3] += DotProduct( ent->origin, s->texVec.v[1] );
-
-			// remove any integral shift
-			s->texVec.v[0][3] -= floor( s->texVec.v[0][3] );
-			s->texVec.v[1][3] -= floor( s->texVec.v[1][3] );
-		}
-		CreateBrushWindings(b);
-	}
-}
-
-/*
 =================
 RemoveDuplicateBrushPlanes
 
@@ -529,6 +492,11 @@ bool LoadDMapFile( const char *filename ) {
 		return false;
 	}
 
+	// Quake 4 maps preserve func_group entities in the editable source.  Resolve
+	// them before compiling so their primitives become world geometry, matching
+	// the retail compiler and the runtime map-loading path.
+	dmapGlobals.dmapFile->Resolve();
+
 	dmapGlobals.mapPlanes.Clear();
 	dmapGlobals.mapPlanes.SetGranularity( 1024 );
 
@@ -642,7 +610,9 @@ void FreeDMapFile( void ) {
 
 	// free the map lights
 	for ( i = 0; i < dmapGlobals.mapLights.Num(); i++ ) {
-		R_FreeLightDefDerivedData( &dmapGlobals.mapLights[i]->def );
+		// dmap lights are standalone (no world/interactions); freeing the
+		// frustum releases everything R_DeriveLightData built for them
+		R_FreeLightDefFrustum( &dmapGlobals.mapLights[i]->def );
 	}
 	dmapGlobals.mapLights.DeleteContents( true );
 }

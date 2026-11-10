@@ -38,6 +38,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "../../renderer/tr_local.h"
 #include "../../renderer/model_local.h"	// for idRenderModelMD5
+#include "../common/ToolGL.h"
 
 #ifdef _DEBUG
 	#define new DEBUG_NEW
@@ -123,7 +124,7 @@ END_MESSAGE_MAP()
  =======================================================================================================================
  =======================================================================================================================
  */
-LONG WINAPI CamWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+LRESULT CALLBACK CamWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 	RECT	rect;
 
 	GetClientRect(hWnd, &rect);
@@ -1063,6 +1064,8 @@ void CCamWnd::Cam_Draw() {
 		}
 	} 
 
+	const GLboolean multisampleWasEnabled = ToolGL_DisableMultisampleForEditor();
+
 	// non-zbuffered outline
 	qglDisable(GL_BLEND);
 	qglDisable(GL_DEPTH_TEST);
@@ -1134,6 +1137,7 @@ void CCamWnd::Cam_Draw() {
 	// using/modifying texture maps between contexts
 	//
 	globalImages->BindNull();
+	ToolGL_RestoreMultisampleForEditor( multisampleWasEnabled );
 
 	qglFinish();
 	QE_CheckOpenGLForErrors();
@@ -2118,7 +2122,7 @@ void CCamWnd::Cam_Render() {
 }
 
 
-void CCamWnd::OnTimer(UINT nIDEvent) 
+void CCamWnd::OnTimer(UINT_PTR nIDEvent)
 {
 	if (animationMode || nIDEvent == 1) {
 		Sys_UpdateWindows(W_CAMERA);

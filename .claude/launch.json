@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "atlas-upload",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8766", "--bind", "127.0.0.1", "--directory", "E:\\Repositories\\openQ4\\.tmp\\atlas-upload"],
+      "port": 8766
+    },
+    {
+      "name": "atlas-dev",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "C:\\Users\\djdac\\AppData\\Local\\Temp\\claude\\E--Repositories-openQ4\\9d69ba20-e94d-4b60-96ab-69c71e47873f\\scratchpad\\atlas"],
+      "port": 8765
+    }
+  ]
+}

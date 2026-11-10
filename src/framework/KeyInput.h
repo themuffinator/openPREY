@@ -199,7 +199,20 @@ public:
 
 	static void			ArgCompletion_KeyName( const idCmdArgs &args, void(*callback)( const char *s ) );
 	static void			PreliminaryKeyEvent( int keyNum, bool down );
+	static void			PreliminaryMouseEvent( int deltaX, int deltaY );
+	static void			PreliminaryJoystickEvent( int value );
 	static bool			IsDown( int keyNum );
+	static bool			LastInputWasController( void );
+	// Whether the latest pointer input was a touch (a finger the platform
+	// routes as the primary pointer) rather than a mouse: menus then draw no
+	// cursor and leave nothing lit where the finger lifted (section 13.6).
+	static void			NotePointerSource( bool touch );
+	static bool			LastPointerWasTouch( void );
+	// Menus on a controller (section 13.5): whether east confirms and south
+	// goes back, as Nintendo layouts do by default and in_swapConfirmBack can
+	// force either way, and a menu key with that swap applied.
+	static bool			MenuConfirmSwapped( void );
+	static int			MenuControllerKey( int keyNum );
 	static int			GetUsercmdAction( int keyNum );
 	static bool			GetOverstrikeMode( void );
 	static void			SetOverstrikeMode( bool state );
@@ -213,6 +226,8 @@ public:
 	static int			NumBinds( const char *binding );
 	static bool			ExecKeyBinding( int keyNum );
 	static const char *	KeysFromBinding( const char *bind );
+	static const char *	KeysFromBindingForPrompt( const char *bind );
+	static const char *	KeysFromBindingForMenu( const char *bind );
 	static const char *	BindingFromKey( const char *key );
 	static bool			KeyIsBoundTo( int keyNum, const char *binding );
 	static void			WriteBindings( idFile *f );

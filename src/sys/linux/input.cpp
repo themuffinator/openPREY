@@ -73,6 +73,24 @@ static byte s_scantokey[128] = {
 /* 78 */ 0, 0, 0, 0, 0, 0, 0, 0
 };
 
+static int IN_MapX11MouseButton( unsigned int button ) {
+	switch ( button ) {
+		case 1: return 0; // K_MOUSE1
+		case 2: return 2; // K_MOUSE3
+		case 3: return 1; // K_MOUSE2
+		case 6: return 3; // K_MOUSE4
+		case 7: return 4; // K_MOUSE5
+		case 8: return 5; // K_MOUSE6
+		case 9: return 6; // K_MOUSE7
+		case 10: return 7; // K_MOUSE8
+		default: return -1;
+	}
+}
+
+static int IN_MapX11KeyCode( unsigned int keyCode ) {
+	return s_scantokey[ keyCode & 0x7F ];
+}
+
 /*
 =================
 IN_Clear_f
@@ -113,18 +131,6 @@ void Sys_InitInput(void) {
 	common->Printf( "------------------------------------\n" );
 }
 
-bool Sys_IsGameWindowFocused( void ) {
-	if ( dpy == NULL || win == 0 ) {
-		return true;
-	}
-
-	Window focusedWindow = None;
-	int revertTo = RevertToNone;
-	XGetInputFocus( dpy, &focusedWindow, &revertTo );
-
-	return focusedWindow == win;
-}
-
 //#define XEVT_DBG
 //#define XEVT_DBG2
 
@@ -154,7 +160,7 @@ static void Sys_XInstallGrabs( void ) {
 
 	XWarpPointer( dpy, None, win,
 				 0, 0, 0, 0,
-				 glConfig.vidWidth / 2, glConfig.vidHeight / 2 );
+				 engineWindowState.vidWidth / 2, engineWindowState.vidHeight / 2 );
 
 	XSync( dpy, False );
 
@@ -188,8 +194,8 @@ static void Sys_XInstallGrabs( void ) {
 		XWarpPointer( dpy, None, win, 0, 0, 0, 0, 0, 0 );
 #endif
 	} else {
-		mwx = glConfig.vidWidth / 2;
-		mwy = glConfig.vidHeight / 2;
+		mwx = engineWindowState.vidWidth / 2;
+		mwy = engineWindowState.vidHeight / 2;
 		mx = my = 0;
 	}
 	
@@ -221,7 +227,7 @@ void Sys_XUninstallGrabs(void) {
 	
 	XWarpPointer( dpy, None, win,
 				 0, 0, 0, 0,
-				 glConfig.vidWidth / 2, glConfig.vidHeight / 2);
+				 engineWindowState.vidWidth / 2, engineWindowState.vidHeight / 2);
 	
 	XUndefineCursor( dpy, win );
 
@@ -241,7 +247,7 @@ void Sys_GrabMouseCursor( bool grabIt ) {
 		return;
 	}
 	
-	if ( glConfig.isFullscreen ) {
+	if ( engineWindowState.isFullscreen ) {
 		if ( !grabIt ) {
 			return; // never ungrab while fullscreen
 		}
@@ -332,8 +338,11 @@ static bool Sys_XRepeatPress( XEvent *event ) {
 			} else {
 				// shouldn't we be doing a release/press in this order rather?
 				// ( doesn't work .. but that's what I would have expected to do though )
-				Posix_QueEvent( SE_KEY, s_scantokey[peekevent.xkey.keycode], true, 0, NULL);
-				Posix_QueEvent( SE_KEY, s_scantokey[peekevent.xkey.keycode], false, 0, NULL);
+				const int doomKey = IN_MapX11KeyCode( peekevent.xkey.keycode );
+				if ( doomKey != 0 ) {
+					Posix_QueEvent( SE_KEY, doomKey, true, 0, NULL);
+					Posix_QueEvent( SE_KEY, doomKey, false, 0, NULL);
+				}
 			}
 		}
   	}
@@ -373,21 +382,26 @@ void Posix_PollInput() {
 				#ifdef XEVT_DBG2
 					printf("SE_KEY press %d\n", key_event->keycode);
 				#endif
-				Posix_QueEvent( SE_KEY, s_scantokey[key_event->keycode], true, 0, NULL);
+				b = IN_MapX11KeyCode( key_event->keycode );
+				if ( b != 0 ) {
+					Posix_QueEvent( SE_KEY, b, true, 0, NULL);
+				}
 				lookupRet = XLookupString(key_event, buf, sizeof(buf), &keysym, NULL);
 				if (lookupRet > 0) {
 					char s = buf[0];
 					#ifdef XEVT_DBG
 						if (buf[1]!=0)
-							common->DPrintf("WARNING: got XLookupString buffer '%s' (%d)\n", buf, strlen(buf));
+							common->DPrintf("WARNING: got XLookupString buffer '%s' (%zu)\n", buf, strlen(buf));
 					#endif
 					#ifdef XEVT_DBG2
 						printf("SE_CHAR %s\n", buf);
 					#endif
 					Posix_QueEvent( SE_CHAR, s, 0, 0, NULL);
 				}
-				if (!Posix_AddKeyboardPollEvent( s_scantokey[key_event->keycode], true ))
-					return;
+				if ( b != 0 ) {
+					if (!Posix_AddKeyboardPollEvent( b, true ))
+						return;
+				}
 			break;			
 				
 			case KeyRelease:
@@ -405,9 +419,12 @@ void Posix_PollInput() {
 				#ifdef XEVT_DBG2
 					printf("SE_KEY release %d\n", key_event->keycode);
 				#endif
-				Posix_QueEvent( SE_KEY, s_scantokey[key_event->keycode], false, 0, NULL);
-				if (!Posix_AddKeyboardPollEvent( s_scantokey[key_event->keycode], false ))
-					return;
+				b = IN_MapX11KeyCode( key_event->keycode );
+				if ( b != 0 ) {
+					Posix_QueEvent( SE_KEY, b, false, 0, NULL);
+					if (!Posix_AddKeyboardPollEvent( b, false ))
+						return;
+				}
 			break;
 				
 			case ButtonPress:
@@ -420,19 +437,8 @@ void Posix_PollInput() {
 					if (!Posix_AddMousePollEvent( M_DELTAZ, -1 ))
 						return;
 				} else {
-					b = -1;
-					if (event.xbutton.button == 1) {
-						b = 0;		// K_MOUSE1
-					} else if (event.xbutton.button == 2) {
-						b = 2;		// K_MOUSE3
-					} else if (event.xbutton.button == 3) {
-						b = 1;		// K_MOUSE2
-					} else if (event.xbutton.button == 6) {
-						b = 3;		// K_MOUSE4
-					} else if (event.xbutton.button == 7) {
-						b = 4;		// K_MOUSE5
-					}
-					if (b == -1 || b > 4) {
+					b = IN_MapX11MouseButton( event.xbutton.button );
+					if ( b == -1 ) {
 						common->DPrintf("X ButtonPress %d not supported\n", event.xbutton.button);
 					} else {
 						Posix_QueEvent( SE_KEY, K_MOUSE1 + b, true, 0, NULL);
@@ -448,19 +454,8 @@ void Posix_PollInput() {
 				} else if (event.xbutton.button == 5) {
 					Posix_QueEvent( SE_KEY, K_MWHEELDOWN, false, 0, NULL);
 				} else {
-					b = -1;
-					if (event.xbutton.button == 1) {
-						b = 0;
-					} else if (event.xbutton.button == 2) {
-						b = 2;
-					} else if (event.xbutton.button == 3) {
-						b = 1;
-					} else if (event.xbutton.button == 6) {
-						b = 3;		// K_MOUSE4
-					} else if (event.xbutton.button == 7) {
-						b = 4;		// K_MOUSE5
-					}
-					if (b == -1 || b > 4) {
+					b = IN_MapX11MouseButton( event.xbutton.button );
+					if ( b == -1 ) {
 						common->DPrintf("X ButtonRelease %d not supported\n", event.xbutton.button);
 					} else {
 						Posix_QueEvent( SE_KEY, K_MOUSE1 + b, false, 0, NULL);
@@ -486,10 +481,10 @@ void Posix_PollInput() {
 				} else {
 					// if it's a center motion, we've just returned from our warp
 					// FIXME: we generate mouse delta on wrap return, but that lags us quite a bit from the initial event..
-					if (event.xmotion.x == glConfig.vidWidth / 2 &&
-						event.xmotion.y == glConfig.vidHeight / 2) {
-						mwx = glConfig.vidWidth / 2;
-						mwy = glConfig.vidHeight / 2;
+					if (event.xmotion.x == engineWindowState.vidWidth / 2 &&
+						event.xmotion.y == engineWindowState.vidHeight / 2) {
+						mwx = engineWindowState.vidWidth / 2;
+						mwy = engineWindowState.vidHeight / 2;
 
 						Posix_QueEvent( SE_MOUSE, mx, my, 0, NULL);
 
@@ -507,7 +502,7 @@ void Posix_PollInput() {
 
 					mwx = event.xmotion.x;
 					mwy = event.xmotion.y;
-				    XWarpPointer(dpy,None,win,0,0,0,0, (glConfig.vidWidth/2),(glConfig.vidHeight/2));
+				    XWarpPointer(dpy,None,win,0,0,0,0, (engineWindowState.vidWidth/2),(engineWindowState.vidHeight/2));
 				}
 			break;
 		}

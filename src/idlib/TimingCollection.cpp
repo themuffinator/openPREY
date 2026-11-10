@@ -64,7 +64,6 @@ rvSingleTiming::rvSingleTiming( idStr &newName )
 
 void rvSingleTiming::OutputDataToFile( idFile *file, int framesRecorded )
 {
-	char	buffer[1024];
 	idStr	outputName = "";
 
 	for( int i = 0; i < mDisplayLevel; i++ )
@@ -73,10 +72,12 @@ void rvSingleTiming::OutputDataToFile( idFile *file, int framesRecorded )
 	}
 	outputName += mName;
 
-	sprintf(buffer, "%-36s %-9.3f %-9.3f %-9.3f %-9.3f %-9i %-9i %-9.3f\n", outputName.c_str(), 
-		(float)mTotalValue, (float)( mTotalValue / (float)framesRecorded), (float)mPeakValue,
-		(float)mLimit, mLimitExceeded, mLimitExceededTimesFive, (float)(mTotalUpdates / (float)framesRecorded) );
-	file->Write ( buffer, strlen( buffer ) );
+	const float invFrames = framesRecorded > 0 ? 1.0f / framesRecorded : 0.0f;
+	idStr buffer;
+	sprintf( buffer, "%-36s %-9.3f %-9.3f %-9.3f %-9.3f %-9i %-9i %-9.3f\n", outputName.c_str(),
+		(float)mTotalValue, (float)mTotalValue * invFrames, (float)mPeakValue,
+		(float)mLimit, mLimitExceeded, mLimitExceededTimesFive, (float)mTotalUpdates * invFrames );
+	file->Write ( buffer.c_str(), buffer.Length() );
 }
 
 //-----------------------------------------------------------------------------
@@ -87,13 +88,13 @@ void rvSingleTiming::OutputDataToFile( idFile *file, int framesRecorded )
 
 void rvSingleTiming::OutputInfoToFile( idFile *file )
 {
-	char	buffer[1024];
+	idStr	buffer;
 
-	sprintf(buffer, "Name: %s\nParent: %s\n", mName.c_str(), mParentName.c_str() );
-	file->Write ( buffer, strlen( buffer ) );
+	sprintf( buffer, "Name: %s\nParent: %s\n", mName.c_str(), mParentName.c_str() );
+	file->Write ( buffer.c_str(), buffer.Length() );
 
-	sprintf(buffer, "Starting at %s(%d)\nEnding at %s(%d)\n\n", mStartFile.c_str(), mStartLine, mEndFile.c_str(), mEndLine );
-	file->Write ( buffer, strlen( buffer ) );
+	sprintf( buffer, "Starting at %s(%d)\nEnding at %s(%d)\n\n", mStartFile.c_str(), mStartLine, mEndFile.c_str(), mEndLine );
+	file->Write ( buffer.c_str(), buffer.Length() );
 }
 
 
@@ -185,7 +186,6 @@ void rvTimingCollection::OutputToFile( void )
 {
 	idFile	*file	= NULL;
 	idStr	name;
-	char	buffer[1024];
 
 	// Fixme: Do we have any good information for building a better file name here?
 
@@ -197,25 +197,21 @@ void rvTimingCollection::OutputToFile( void )
 		return;
 	}
 
-	sprintf( buffer, "Total frames = %d\n\n", mFramesRecorded );
-	file->Write( buffer, strlen( buffer ) );
+	file->Printf( "Total frames = %d\n\n", mFramesRecorded );
 
-	sprintf( buffer, "%-36s %-9s %-9s %-9s %-9s %-9s %-9s %-9s\n\n",
+	file->Printf( "%-36s %-9s %-9s %-9s %-9s %-9s %-9s %-9s\n\n",
 		"Name", "Total", "Average", "Peak", "Limit", "Exceeded", "Exceed*5", "Calls" );
-	file->Write ( buffer, strlen( buffer ) );
 
 	for( int i = 0; i < mTimings.Num(); i++ )
 	{
 		mTimings[i].OutputDataToFile( file, mFramesRecorded );
 		if( !( ( i + 1 )%3) )	// break up the prints into groups of 3 to make scanning visually easier.
 		{
-			sprintf( buffer, "\n" );
-			file->Write( buffer, strlen( buffer ) );
+			file->Printf( "\n" );
 		}
 	}
 
-	sprintf(buffer, "\n\nInformation about categories\n\n" );
-	file->Write ( buffer, strlen( buffer ) );
+	file->Printf( "\n\nInformation about categories\n\n" );
 
 	for( int i = 0; i < mTimings.Num(); i++ )
 	{

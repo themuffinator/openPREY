@@ -62,7 +62,7 @@ struct silEdge_s;
 
 // RAVEN BEGIN
 // dluetscher: declared new vertex format
-#ifdef _MD5R_SUPPORT
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
 class rvSilTraceVertT;
 #endif
 // RAVEN END
@@ -205,7 +205,7 @@ public:
 	// rvSilTraceVertT operations
 // RAVEN BEGIN
 // dluetscher: added support for operations on idSilTraceVerts
-#ifdef _MD5R_SUPPORT
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
 	virtual void VPCALL JointMat_MultiplyMats( float *destMats, const idJointMat *src1Mats, const idJointMat *src2Mats, int *transformPalette, int transformCount ) = 0;
 	virtual void VPCALL TransformVertsMinMax4Bone( rvSilTraceVertT *silTraceVertOutputData, idVec3 &min, idVec3 &max, byte *vertexInputData, int vertStride, int numVerts, float *skinToModelTransforms ) = 0; // transforms an array of index-weighted vertices into an array of idSilTraceVerts, while simulatenously calculating the bounds
 	virtual void VPCALL TransformVertsMinMax1Bone( rvSilTraceVertT *silTraceVertOutputData, idVec3 &min, idVec3 &max, byte *vertexInputData, int vertStride, int numVerts, float *skinToModelTransforms ) = 0; // transforms an array of index-weighted vertices into an array of idSilTraceVerts, while simulatenously calculating the bounds

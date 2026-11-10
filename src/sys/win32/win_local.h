@@ -71,6 +71,7 @@ char	*Sys_GetCurrentUser( void );
 void	Win_SetErrorText( const char *text );
 
 cpuid_t	Sys_GetCPUId( void );
+void	Sys_CPUCount( int &numLogicalCPUCores, int &numPhysicalCPUCores, int &numCPUPackages );
 
 int		MapKey (int key);
 
@@ -93,7 +94,7 @@ void	DisableTaskKeys( BOOL bDisable, BOOL bBeep, BOOL bTaskMgr );
 
 
 // window procedure
-LONG WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK MainWndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam );
 
 void Conbuf_AppendText( const char *msg );
 
@@ -106,7 +107,7 @@ struct Win32Vars_t {
 	bool			movingWindow;		// inhibit mouse grab when dragging the window
 	bool			mouseGrabbed;		// current state of grab and hide
 
-	OSVERSIONINFOEX	osversion;
+	OSVERSIONINFOEXW	osversion;
 
 	cpuid_t			cpuid;
 
@@ -148,6 +149,7 @@ struct Win32Vars_t {
 	static idCVar	win_viewlog;
 	static idCVar	win_timerUpdate;
 	static idCVar	win_allowMultipleInstances;
+	static idCVar	win_printScreenToSystemTool;
 
 	CRITICAL_SECTION criticalSections[MAX_CRITICAL_SECTIONS];
 	HANDLE			backgroundDownloadSemaphore;
@@ -166,9 +168,12 @@ struct Win32Vars_t {
 	void			(*glimpRenderThread)( void );
 	void			*smpData;
 	int				wglErrors;
+	DWORD			printScreenFocusReleaseUntil;
 	// SMP acceleration vars
 };
 
 extern Win32Vars_t	win32;
+
+bool	Sys_HandlePrintScreenHotkey( bool pressed );
 
 #endif /* !__WIN_LOCAL_H__ */

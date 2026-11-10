@@ -34,6 +34,96 @@ If you have questions concerning this license or the applicable additional terms
 #include "UserInterfaceLocal.h"
 #include "ChoiceWindow.h"
 
+static const int Q4_CHOICE_WINDOW_TEXT_SPACING = 0;
+
+static void AppendChoiceListSegment( idStrList &list, const idStr &segment ) {
+	idStr choice = segment;
+	choice.Strip( ' ' );
+	choice.Strip( '\t' );
+	choice.Strip( '\r' );
+	choice.Strip( '\n' );
+	choice.StripTrailingWhitespace();
+	// The stock tables quote their choices ('Off';'2x') and the engine quotes
+	// the names it lists itself ("Default Device"), as the retail lexer read
+	// them: a choice wholly inside one pair of quotes shows without them.
+	const int length = choice.Length();
+	if ( length >= 2 && ( choice[0] == '\'' || choice[0] == '"' ) && choice[length - 1] == choice[0] ) {
+		const bool escapes = choice[0] == '"';
+		idStr bare;
+		for ( int i = 1; i < length - 1; i++ ) {
+			if ( escapes && choice[i] == '\\' && i + 1 < length - 1 ) {
+				i++;
+			}
+			bare.Append( choice[i] );
+		}
+		choice = bare;
+	}
+	if ( choice.Length() > 0 ) {
+		choice = common->GetLanguageDict()->GetString( choice.c_str() );
+		list.Append( choice );
+	}
+}
+
+/*
+============
+ChoiceListQuoteEnd
+
+Where the quoted choice that opens at source[start] closes: at its own quote
+mark followed by the separator or the end of the list. Returns -1 when the
+mark opens nothing, as an apostrophe that begins a plain word does.
+============
+*/
+static int ChoiceListQuoteEnd( const idStr &source, int start ) {
+	const char quote = source[start];
+	for ( int i = start + 1; i < source.Length(); i++ ) {
+		if ( quote == '"' && source[i] == '\\' ) {
+			i++;
+			continue;
+		}
+		if ( source[i] != quote ) {
+			continue;
+		}
+		int next = i + 1;
+		while ( next < source.Length() && ( source[next] == ' ' || source[next] == '\t' || source[next] == '\r' || source[next] == '\n' ) ) {
+			next++;
+		}
+		if ( next >= source.Length() || source[next] == ';' ) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void SplitChoiceList( const idStr &source, idStrList &list ) {
+	idStr segment;
+	bool leading = true;
+	for ( int i = 0; i < source.Length(); i++ ) {
+		const char ch = source[i];
+		if ( ch == ';' ) {
+			AppendChoiceListSegment( list, segment );
+			segment.Clear();
+			leading = true;
+			continue;
+		}
+		if ( leading && ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n' ) {
+			leading = false;
+			if ( ch == '\'' || ch == '"' ) {
+				// a separator inside the quotes belongs to the choice
+				const int end = ChoiceListQuoteEnd( source, i );
+				if ( end > i ) {
+					for ( ; i <= end; i++ ) {
+						segment.Append( source[i] );
+					}
+					i--;
+					continue;
+				}
+			}
+		}
+		segment.Append( ch );
+	}
+	AppendChoiceListSegment( list, segment );
+}
+
 /*
 ============
 idChoiceWindow::InitVars
@@ -111,7 +201,14 @@ void idChoiceWindow::UpdateVars( bool read, bool force ) {
 			}	
 		}
 		if ( !read && guiStr.NeedsUpdate() ) {
-			guiStr.Set( va( "%i", currentChoice ) );
+			// A GUI-only string choice carries its declared value just like a
+			// CVar-backed choice. Stock dual bindings still expose the numeric
+			// selection index to their GUI scripts.
+			if ( choiceType != 0 && cvar == NULL ) {
+				guiStr.Set( values.Num() ? values[ currentChoice ] : choices[ currentChoice ] );
+			} else {
+				guiStr.Set( va( "%i", currentChoice ) );
+			}
 		}
 	}
 }
@@ -161,7 +258,7 @@ const char *idChoiceWindow::HandleEvent(const sysEvent_t *event, bool *updateVis
 
 		int potentialChoice = -1;
 		for ( int i = 0; i < choices.Num(); i++ ) {
-			if ( toupper(key) == toupper(choices[i][0]) ) {
+			if ( toupper(key) == toupper( (unsigned char)choices[i][0] ) ) {
 				if ( i < currentChoice && potentialChoice < 0 ) {
 					potentialChoice = i;
 				} else if ( i > currentChoice ) {
@@ -226,11 +323,12 @@ void idChoiceWindow::UpdateChoice() {
 		}
 		ValidateChoice();
 	} else {
-		// ChoiceType 1 stores current as a cvar string
+		// ChoiceType 1 stores the declared value in its CVar or GUI binding.
+		const char *currentValue = cvar != NULL ? cvarStr.c_str() : guiStr.c_str();
 		int c = ( values.Num() ) ? values.Num() : choices.Num();
 		int i;
 		for ( i = 0; i < c; i++ ) {
-			if ( idStr::Icmp( cvarStr.c_str(), ( values.Num() ) ? values[i] : choices[i] ) == 0 ) {
+			if ( idStr::Icmp( currentValue, ( values.Num() ) ? values[i] : choices[i] ) == 0 ) {
 				break;
 			}
 		}
@@ -286,28 +384,7 @@ void idChoiceWindow::UpdateChoicesAndVals( void ) {
 
 	if ( latchedChoices.Icmp( choicesStr ) ) {
 		choices.Clear();
-		src.FreeSource();
-		src.SetFlags( LEXFL_NOFATALERRORS | LEXFL_ALLOWPATHNAMES | LEXFL_ALLOWMULTICHARLITERALS | LEXFL_ALLOWBACKSLASHSTRINGCONCAT );
-		src.LoadMemory( choicesStr, choicesStr.Length(), "<ChoiceList>" );
-		if ( src.IsLoaded() ) {
-			while( src.ReadToken( &token ) ) {
-				if ( token == ";" ) {
-					if ( str2.Length() ) {
-						str2.StripTrailingWhitespace();
-						str2 = common->GetLanguageDict()->GetString( str2 );
-						choices.Append(str2);
-						str2 = "";
-					}
-					continue;
-				}
-				str2 += token;
-				str2 += " ";
-			}
-			if ( str2.Length() ) {
-				str2.StripTrailingWhitespace();
-				choices.Append( str2 );
-			}
-		}
+		SplitChoiceList( choicesStr, choices );
 		latchedChoices = choicesStr.c_str();
 	}
 	if ( choiceVals.Length() && latchedVals.Icmp( choiceVals ) ) {
@@ -369,24 +446,10 @@ void idChoiceWindow::PostParse() {
 
 void idChoiceWindow::Draw(int time, float x, float y) {
 	idVec4 color = foreColor;
+	const int style = static_cast<int>( textstyle );
 
 	UpdateChoicesAndVals();
 	UpdateChoice();
-
-	const bool hasCurrentChoice = currentChoice >= 0 && currentChoice < choices.Num();
-
-	if ( textShadow && hasCurrentChoice ) {
-		idStr shadowText = choices[currentChoice];
-		idRectangle shadowRect = textRect;
-		idVec4 shadowColor = colorBlack;
-
-		shadowText.RemoveColors();
-		shadowRect.x += textShadow;
-		shadowRect.y += textShadow;
-		shadowColor[3] = color[3];
-
-		dc->DrawText( shadowText, textScale, textAlign, shadowColor, shadowRect, false, -1 );
-	}
 
 	if ( hover && !noEvents && Contains(gui->CursorX(), gui->CursorY()) ) {
 		color = hoverColor;
@@ -397,8 +460,21 @@ void idChoiceWindow::Draw(int time, float x, float y) {
 		color = hoverColor;
 	}
 
+	const bool hasCurrentChoice = choices.Num() > 0 && currentChoice >= 0 && currentChoice < choices.Num();
+	if ( textShadow && hasCurrentChoice ) {
+		idStr shadowText = choices[currentChoice];
+		idRectangle shadowRect = textRect;
+		idVec4 shadowColor = colorBlack;
+		shadowText.RemoveColors();
+		shadowRect.x += textShadow;
+		shadowRect.y += textShadow;
+		shadowColor[3] = color[3];
+		dc->DrawText( shadowText, textScale, textAlign, shadowColor, shadowRect, false, -1,
+			false, NULL, 0, Q4_CHOICE_WINDOW_TEXT_SPACING, style );
+	}
+
 	if ( hasCurrentChoice ) {
-		dc->DrawText(choices[currentChoice], textScale, textAlign, color, textRect, false, -1);
+		dc->DrawText( choices[currentChoice], textScale, textAlign, color, textRect, false, -1, false, NULL, 0, Q4_CHOICE_WINDOW_TEXT_SPACING, style );
 	}
 }
 

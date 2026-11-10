@@ -37,6 +37,47 @@ typedef struct {
 	idMat3		axis;
 } orientation_t;
 
+static ID_INLINE bool R_GetSubviewVertexPosition( const srfTriangles_t *tri, int index, idVec3 &position ) {
+	if ( tri == NULL || index < 0 || index >= tri->numVerts ) {
+		position.Zero();
+		return false;
+	}
+
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	if ( tri->silTraceVerts != NULL ) {
+		position = reinterpret_cast<const rvSilTraceVertT *>( tri->silTraceVerts )[index].xyzw.ToVec3();
+		return true;
+	}
+#endif
+
+	if ( tri->verts == NULL ) {
+		position.Zero();
+		return false;
+	}
+
+	position = tri->verts[index].xyz;
+	return true;
+}
+
+static ID_INLINE void R_SyncSubviewTime( viewDef_t *parms ) {
+	parms->floatTime = parms->renderView.time * 0.001f;
+}
+
+// A subview starts as a copy of its parent view, temporal metadata included.
+// Inheriting temporalPrepared made R_TemporalPresentation_PrepareView skip the
+// subview, so mirrors, x-ray, remote and refraction views were drawn with the
+// parent's temporal AA jitter; on Vulkan their direct render then retired the
+// main view's history every frame. Clear it so the subview's own projection
+// setup prepares it, unjittered, under its own identity (REN-04).
+static void R_ResetSubviewTemporalState( viewDef_t *parms ) {
+	parms->temporalPrepared = false;
+	parms->temporalJitterEnabled = false;
+	parms->temporalJitterPixels.Zero();
+	parms->temporalHistoryValid = false;
+	parms->temporalPreviousProjectionValid = false;
+	parms->temporalNeutralProjectionValid = false;
+}
+
 
 /*
 =================
@@ -76,148 +117,88 @@ static void R_MirrorVector( const idVec3 in, orientation_t *surface, orientation
 	}
 }
 
-/*
-========================
-R_BuildPortalOrientations
-
-Retail PREY.exe portal subviews transform the current viewer through the
-portal entity basis into a remote camera basis with forward/left flipped.
-========================
-*/
 static void R_BuildPortalOrientations( const renderEntity_t &portalEntity, const renderView_t &remoteRenderView,
-	orientation_t &surface, orientation_t &camera ) {
+		orientation_t &surface, orientation_t &camera ) {
 	surface.origin = portalEntity.origin;
 	surface.axis = portalEntity.axis;
-
 	camera.origin = remoteRenderView.vieworg;
 	camera.axis[0] = -remoteRenderView.viewaxis[0];
 	camera.axis[1] = -remoteRenderView.viewaxis[1];
 	camera.axis[2] = remoteRenderView.viewaxis[2];
 }
 
-/*
-========================
-R_TransformPortalSubview
-========================
-*/
-static void R_TransformPortalSubview( const renderEntity_t &portalEntity, const renderView_t &remoteRenderView, viewDef_t &parms ) {
+static void R_TransformPortalSubview( const renderEntity_t &portalEntity,
+		const renderView_t &remoteRenderView, viewDef_t &parms ) {
 	orientation_t surface, camera;
-
 	R_BuildPortalOrientations( portalEntity, remoteRenderView, surface, camera );
-
 	R_MirrorPoint( tr.viewDef->renderView.vieworg, &surface, &camera, parms.renderView.vieworg );
 	R_MirrorVector( tr.viewDef->renderView.viewaxis[0], &surface, &camera, parms.renderView.viewaxis[0] );
 	R_MirrorVector( tr.viewDef->renderView.viewaxis[1], &surface, &camera, parms.renderView.viewaxis[1] );
 	R_MirrorVector( tr.viewDef->renderView.viewaxis[2], &surface, &camera, parms.renderView.viewaxis[2] );
 }
 
-/*
-========================
-R_PortalViewerPassesRetailGate
-
-Retail PREY.exe rejects portal renders when the current viewpoint is on the
-wrong side of the source portal plane. Primary views use a 16-unit back-off;
-subviews use a 4-unit forward nudge.
-========================
-*/
 static bool R_PortalViewerPassesRetailGate( const renderEntity_t &portalEntity ) {
 	const idVec3 planePoint = tr.viewDef->isSubview
-		? ( portalEntity.origin + portalEntity.axis[0] * 4.0f )
-		: ( portalEntity.origin - portalEntity.axis[0] * 16.0f );
-
+		? portalEntity.origin + portalEntity.axis[0] * 4.0f
+		: portalEntity.origin - portalEntity.axis[0] * 16.0f;
 	return ( ( tr.viewDef->renderView.vieworg - planePoint ) * portalEntity.axis[0] ) > 0.0f;
 }
 
-/*
-========================
-R_TransformPortalSkyboxSubview
-
-Retail PREY.exe keeps the current view orientation for portal-sky renders and
-only relocates the eye to the remote skybox camera origin.
-========================
-*/
-static void R_TransformPortalSkyboxSubview( const renderView_t &remoteRenderView, viewDef_t &parms ) {
-	parms.renderView.vieworg = remoteRenderView.vieworg;
-	parms.renderView.viewaxis = tr.viewDef->renderView.viewaxis;
-}
-
-/*
-========================
-R_PortalSubviewBySurface
-
-Build the retail portal-camera viewDef used by both in-world portal subviews
-and portalRenderMap stage captures.
-========================
-*/
 static viewDef_t *R_PortalSubviewBySurface( drawSurf_t *drawSurf ) {
-	const renderView_t *remoteRenderView = drawSurf->space->entityDef->parms.remoteRenderView;
-	if ( !remoteRenderView ) {
+	if ( drawSurf->space == NULL || drawSurf->space->entityDef == NULL ) {
+		return NULL;
+	}
+	const renderEntity_t &portalEntity = drawSurf->space->entityDef->parms;
+	const renderView_t *remoteRenderView = portalEntity.remoteRenderView;
+	if ( remoteRenderView == NULL ) {
 		return NULL;
 	}
 
-	const renderEntity_t &portalEntity = drawSurf->space->entityDef->parms;
-	const int index = drawSurf->material->GetDirectPortalDistance();
-	if ( index >= 0 && index < drawSurf->material->GetNumRegisters() && drawSurf->shaderRegisters != NULL ) {
-		const int maxPortalDistanceLimit = idMath::FtoiFast( drawSurf->shaderRegisters[index] );
-		if ( maxPortalDistanceLimit < 0 ) {
-			return NULL;
-		}
-		if ( maxPortalDistanceLimit > 0 &&
-			( tr.viewDef->renderView.vieworg - portalEntity.origin ).LengthSqr() > Square( maxPortalDistanceLimit ) ) {
+	const int distanceRegister = drawSurf->material->GetDirectPortalDistance();
+	if ( distanceRegister >= 0 && distanceRegister < drawSurf->material->GetNumRegisters() && drawSurf->shaderRegisters != NULL ) {
+		const int maxDistance = idMath::FtoiFast( drawSurf->shaderRegisters[distanceRegister] );
+		if ( maxDistance < 0 || ( maxDistance > 0 &&
+				( tr.viewDef->renderView.vieworg - portalEntity.origin ).LengthSqr() > Square( maxDistance ) ) ) {
 			return NULL;
 		}
 	}
-
 	if ( !R_PortalViewerPassesRetailGate( portalEntity ) ) {
 		return NULL;
 	}
 
 	viewDef_t *parms = (viewDef_t *)R_FrameAlloc( sizeof( *parms ) );
-	if ( !parms ) {
-		return NULL;
-	}
-
 	*parms = *tr.viewDef;
 	parms->isSubview = true;
 	parms->isMirror = false;
-	parms->renderView.viewID = 0;	// clear to allow player bodies to show up, and suppress view weapons
-
-	parms->numClipPlanes = 1;
-	parms->clipPlanes[0] = remoteRenderView->viewaxis[0];
-	parms->clipPlanes[0][3] = -( remoteRenderView->vieworg * parms->clipPlanes[0].Normal() );
-
+	parms->renderView.viewID = 0;
+	// Keep the retail-compatible unclipped workaround until mirror/portal clip
+	// behavior has been validated against the original renderer.
+	parms->numClipPlanes = 0;
 	R_TransformPortalSubview( portalEntity, *remoteRenderView, *parms );
+	R_SyncSubviewTime( parms );
 	parms->initialViewAreaOrigin = remoteRenderView->vieworg;
-
 	return parms;
 }
 
-/*
-========================
-R_PortalSkyboxSubviewBySurface
-
-Build the retail portal-sky camera viewDef used by both in-world portal-sky
-subviews and skyboxRenderMap stage captures.
-========================
-*/
 static viewDef_t *R_PortalSkyboxSubviewBySurface( drawSurf_t *drawSurf ) {
-	const renderView_t *remoteRenderView = drawSurf->space->entityDef->parms.remoteRenderView;
-	if ( !remoteRenderView ) {
+	if ( drawSurf->space == NULL || drawSurf->space->entityDef == NULL ) {
 		return NULL;
 	}
+	const renderView_t *remoteRenderView = drawSurf->space->entityDef->parms.remoteRenderView;
+	if ( remoteRenderView == NULL || tr.SkyboxRenderedInFrame() || tr.viewDef->isSubview ) {
+		return NULL;
+	}
+	tr.RenderSkyboxInFrame();
 
 	viewDef_t *parms = (viewDef_t *)R_FrameAlloc( sizeof( *parms ) );
-	if ( !parms ) {
-		return NULL;
-	}
-
 	*parms = *tr.viewDef;
 	parms->isSubview = true;
 	parms->isMirror = false;
-	parms->renderView.viewID = 0;	// clear to allow player bodies to show up, and suppress view weapons
-	R_TransformPortalSkyboxSubview( *remoteRenderView, *parms );
+	parms->renderView.viewID = 0;
+	parms->renderView.vieworg = remoteRenderView->vieworg;
+	parms->renderView.viewaxis = tr.viewDef->renderView.viewaxis;
+	R_SyncSubviewTime( parms );
 	parms->initialViewAreaOrigin = remoteRenderView->vieworg;
-
 	return parms;
 }
 
@@ -230,12 +211,18 @@ FIXME: check for degenerate triangle?
 =============
 */
 static void R_PlaneForSurface( const srfTriangles_t *tri, idPlane &plane ) {
-	idDrawVert		*v1, *v2, *v3;
+	idVec3 v1, v2, v3;
 
-	v1 = tri->verts + tri->indexes[0];
-	v2 = tri->verts + tri->indexes[1];
-	v3 = tri->verts + tri->indexes[2];
-	plane.FromPoints( v1->xyz, v2->xyz, v3->xyz );
+	if ( tri == NULL || tri->numIndexes < 3
+		|| !R_GetSubviewVertexPosition( tri, tri->indexes[0], v1 )
+		|| !R_GetSubviewVertexPosition( tri, tri->indexes[1], v2 )
+		|| !R_GetSubviewVertexPosition( tri, tri->indexes[2], v3 ) ) {
+		plane.SetNormal( idVec3( 0.0f, 0.0f, 1.0f ) );
+		plane[3] = 0.0f;
+		return;
+	}
+
+	plane.FromPoints( v1, v2, v3 );
 }
 
 /*
@@ -256,14 +243,12 @@ bool R_PreciseCullSurface( const drawSurf_t *drawSurf, idBounds &ndcBounds ) {
 	int numTriangles;
 	idPlane clip, eye;
 	int i, j;
-	unsigned int pointOr;
 	unsigned int pointAnd;
 	idVec3 localView;
 	idFixedWinding w;
 
 	tri = drawSurf->geo;
 
-	pointOr = 0;
 	pointAnd = (unsigned int)~0;
 
 	// get an exact bounds of the triangles for scissor cropping
@@ -272,8 +257,13 @@ bool R_PreciseCullSurface( const drawSurf_t *drawSurf, idBounds &ndcBounds ) {
 	for ( i = 0; i < tri->numVerts; i++ ) {
 		int j;
 		unsigned int pointFlags;
+		idVec3 localPoint;
 
-		R_TransformModelToClip( tri->verts[i].xyz, drawSurf->space->modelViewMatrix,
+		if ( !R_GetSubviewVertexPosition( tri, i, localPoint ) ) {
+			return true;
+		}
+
+		R_TransformModelToClip( localPoint, drawSurf->space->modelViewMatrix,
 			tr.viewDef->projectionMatrix, eye, clip );
 
 		pointFlags = 0;
@@ -286,7 +276,6 @@ bool R_PreciseCullSurface( const drawSurf_t *drawSurf, idBounds &ndcBounds ) {
 		}
 
 		pointAnd &= pointFlags;
-		pointOr |= pointFlags;
 	}
 
 	// trivially reject
@@ -303,10 +292,13 @@ bool R_PreciseCullSurface( const drawSurf_t *drawSurf, idBounds &ndcBounds ) {
 		idVec3	dir, normal;
 		float	dot;
 		idVec3	d1, d2;
+		idVec3	v1, v2, v3;
 
-		const idVec3 &v1 = tri->verts[tri->indexes[i]].xyz;
-		const idVec3 &v2 = tri->verts[tri->indexes[i+1]].xyz;
-		const idVec3 &v3 = tri->verts[tri->indexes[i+2]].xyz;
+		if ( !R_GetSubviewVertexPosition( tri, tri->indexes[i], v1 )
+			|| !R_GetSubviewVertexPosition( tri, tri->indexes[i+1], v2 )
+			|| !R_GetSubviewVertexPosition( tri, tri->indexes[i+2], v3 ) ) {
+			continue;
+		}
 
 		// this is a hack, because R_GlobalPointToLocal doesn't work with the non-normalized
 		// axis that we get from the gui view transform.  It doesn't hurt anything, because
@@ -338,7 +330,8 @@ bool R_PreciseCullSurface( const drawSurf_t *drawSurf, idBounds &ndcBounds ) {
 				break;
 			}
 		}
-		for ( j = 0; j < w.GetNumPoints(); j++ ) {
+		const int windingPointCount = w.GetNumPoints();
+		for ( j = 0; j < windingPointCount; j++ ) {
 			idVec3	screen;
 
 			R_GlobalToNormalizedDeviceCoordinates( w[j].ToVec3(), screen );
@@ -371,6 +364,8 @@ static viewDef_t *R_MirrorViewBySurface( drawSurf_t *drawSurf ) {
 
 	parms->isSubview = true;
 	parms->isMirror = true;
+	R_SyncSubviewTime( parms );
+	R_ResetSubviewTemporalState( parms );
 
 	// create plane axis for the portal we are seeing
 	R_PlaneForSurface( drawSurf->geo, originalPlane );
@@ -399,7 +394,8 @@ static viewDef_t *R_MirrorViewBySurface( drawSurf_t *drawSurf ) {
 
 	R_LocalPointToGlobal( drawSurf->space->modelMatrix, viewOrigin, parms->initialViewAreaOrigin );
 
-	// Keep mirrors unclipped for now; retail parity work continues but this preserves Tommy reflection.
+	// Keep mirrors unclipped for retail Prey parity while the dedicated clip
+	// behavior remains an explicitly tracked validation gap.
 	parms->numClipPlanes = 0;
 	
 	return parms;
@@ -422,6 +418,8 @@ static viewDef_t *R_XrayViewBySurface( drawSurf_t *drawSurf ) {
 
 	parms->isSubview = true;
 	parms->isXraySubview = true;
+	R_SyncSubviewTime( parms );
+	R_ResetSubviewTemporalState( parms );
 
 	return parms;
 }
@@ -434,13 +432,16 @@ R_RemoteRender
 static void R_RemoteRender( drawSurf_t *surf, textureStage_t *stage ) {
 	viewDef_t		*parms;
 
-	// remote views can be reused in a single frame
+	// remote views can be reused in a single frame, by both eyes of a stereo
+	// one: the camera does not depend on the viewer
 	if ( stage->dynamicFrameCount == tr.frameCount ) {
 		return;
 	}
 
-	// if the entity doesn't have a remoteRenderView, do nothing
-	if ( !surf->space->entityDef->parms.remoteRenderView ) {
+	// if the entity doesn't have a remoteRenderView, do nothing. BSE effect
+	// surfaces and in-world GUI emits carry a NULL entityDef, so guard it: an
+	// entity-less surface can never supply a remoteRenderView.
+	if ( surf->space->entityDef == NULL || !surf->space->entityDef->parms.remoteRenderView ) {
 		return;
 	}
 
@@ -453,6 +454,8 @@ static void R_RemoteRender( drawSurf_t *surf, textureStage_t *stage ) {
 
 	parms->renderView = *surf->space->entityDef->parms.remoteRenderView;
 	parms->renderView.viewID = 0;	// clear to allow player bodies to show up, and suppress view weapons
+	R_SyncSubviewTime( parms );
+	R_ResetSubviewTemporalState( parms );
 	parms->initialViewAreaOrigin = parms->renderView.vieworg;
 
 	tr.CropRenderSize( stage->width, stage->height, true );
@@ -477,6 +480,7 @@ static void R_RemoteRender( drawSurf_t *surf, textureStage_t *stage ) {
 
 	// copy this rendering to the image
 	stage->dynamicFrameCount = tr.frameCount;
+	tr.pc.c_remoteSubviews++;
 	if (!stage->image) {
 		stage->image = globalImages->scratchImage;
 	}
@@ -485,92 +489,64 @@ static void R_RemoteRender( drawSurf_t *surf, textureStage_t *stage ) {
 	tr.UnCrop();
 }
 
-/*
-=================
-R_PortalRender
-=================
-*/
 static void R_PortalRender( drawSurf_t *surf, textureStage_t *stage ) {
-	viewDef_t *parms;
-
 	if ( stage->dynamicFrameCount == tr.frameCount ) {
 		return;
 	}
-
-	parms = R_PortalSubviewBySurface( surf );
-	if ( !parms ) {
+	viewDef_t *parms = R_PortalSubviewBySurface( surf );
+	if ( parms == NULL ) {
 		return;
 	}
 
 	tr.CropRenderSize( stage->width, stage->height, true );
-
 	parms->renderView.x = 0;
 	parms->renderView.y = 0;
 	parms->renderView.width = SCREEN_WIDTH;
 	parms->renderView.height = SCREEN_HEIGHT;
-
 	tr.RenderViewToViewport( &parms->renderView, &parms->viewport );
-
 	parms->scissor.x1 = 0;
 	parms->scissor.y1 = 0;
 	parms->scissor.x2 = parms->viewport.x2 - parms->viewport.x1;
 	parms->scissor.y2 = parms->viewport.y2 - parms->viewport.y1;
-
 	parms->superView = tr.viewDef;
 	parms->subviewSurface = surf;
-
 	R_RenderView( parms );
 
 	stage->dynamicFrameCount = tr.frameCount;
-	if ( !stage->image ) {
+	if ( stage->image == NULL ) {
 		stage->image = globalImages->scratchImage;
 	}
-
 	tr.CaptureRenderToImage( stage->image->GetName() );
 	tr.UnCrop();
 }
 
-/*
-=================
-R_SkyboxRender
-=================
-*/
 static void R_SkyboxRender( drawSurf_t *surf, textureStage_t *stage ) {
-	viewDef_t *parms;
-
 	if ( stage->dynamicFrameCount == tr.frameCount ) {
 		return;
 	}
-
-	parms = R_PortalSkyboxSubviewBySurface( surf );
-	if ( !parms ) {
+	viewDef_t *parms = R_PortalSkyboxSubviewBySurface( surf );
+	if ( parms == NULL ) {
 		return;
 	}
 
 	tr.CropRenderSize( stage->width, stage->height, true );
-
 	parms->renderView.x = 0;
 	parms->renderView.y = 0;
 	parms->renderView.width = SCREEN_WIDTH;
 	parms->renderView.height = SCREEN_HEIGHT;
-
 	tr.RenderViewToViewport( &parms->renderView, &parms->viewport );
-
 	parms->scissor.x1 = 0;
 	parms->scissor.y1 = 0;
 	parms->scissor.x2 = parms->viewport.x2 - parms->viewport.x1;
 	parms->scissor.y2 = parms->viewport.y2 - parms->viewport.y1;
-
 	parms->superView = tr.viewDef;
 	parms->subviewSurface = surf;
-
 	R_RenderView( parms );
 
 	stage->dynamicFrameCount = tr.frameCount;
-	if ( !stage->image ) {
+	if ( stage->image == NULL ) {
 		stage->image = globalImages->scratchImage;
 	}
-
 	tr.CaptureRenderToImage( stage->image->GetName() );
 	tr.UnCrop();
 }
@@ -583,8 +559,9 @@ R_MirrorRender
 void R_MirrorRender( drawSurf_t *surf, textureStage_t *stage, idScreenRect scissor ) {
 	viewDef_t		*parms;
 
-	// remote views can be reused in a single frame
-	if ( stage->dynamicFrameCount == tr.frameCount ) {
+	// reused within a frame, but rendered again for the other eye: the camera
+	// follows the viewer
+	if ( stage->dynamicFrameCount == R_VR_EyeSubviewFrameKey() ) {
 		return;
 	}
 
@@ -618,8 +595,108 @@ void R_MirrorRender( drawSurf_t *surf, textureStage_t *stage, idScreenRect sciss
 	R_RenderView( parms );
 
 	// copy this rendering to the image
-	stage->dynamicFrameCount = tr.frameCount;
-	stage->image = globalImages->scratchImage;
+	stage->dynamicFrameCount = R_VR_EyeSubviewFrameKey();
+	tr.pc.c_eyeSubviews++;
+	// its own image: OpenGL's post passes resize _scratch every frame, which
+	// reallocated it and reset the wrap the mirror's screen texgen needs
+	stage->image = globalImages->ImageFromFile( "_mirrorRender", TF_DEFAULT, TR_REPEAT, TD_DEFAULT );
+
+	tr.CaptureRenderToImage( stage->image->GetName() );
+	tr.UnCrop();
+}
+
+/*
+=================
+R_ReflectionRender
+=================
+*/
+void R_ReflectionRender( drawSurf_t *surf, textureStage_t *stage, idScreenRect scissor ) {
+	viewDef_t		*parms;
+
+	if ( stage->dynamicFrameCount == R_VR_EyeSubviewFrameKey() ) {
+		return;
+	}
+
+	parms = R_MirrorViewBySurface( surf );
+	if ( !parms ) {
+		return;
+	}
+
+	tr.CropRenderSize( stage->width, stage->height, true );
+
+	parms->renderView.x = 0;
+	parms->renderView.y = 0;
+	parms->renderView.width = SCREEN_WIDTH;
+	parms->renderView.height = SCREEN_HEIGHT;
+
+	tr.RenderViewToViewport( &parms->renderView, &parms->viewport );
+
+	parms->scissor.x1 = 0;
+	parms->scissor.y1 = 0;
+	parms->scissor.x2 = parms->viewport.x2 - parms->viewport.x1;
+	parms->scissor.y2 = parms->viewport.y2 - parms->viewport.y1;
+
+	parms->superView = tr.viewDef;
+	parms->subviewSurface = surf;
+	parms->isMirror = ( ( (int)parms->isMirror ^ (int)tr.viewDef->isMirror ) != 0 );
+
+	R_RenderView( parms );
+
+	stage->dynamicFrameCount = R_VR_EyeSubviewFrameKey();
+	tr.pc.c_eyeSubviews++;
+	stage->image = globalImages->ImageFromFile( "_reflectionRender", TF_DEFAULT, TR_REPEAT, TD_DEFAULT );
+
+	tr.CaptureRenderToImage( stage->image->GetName() );
+	tr.UnCrop();
+}
+
+/*
+=================
+R_RefractionRender
+=================
+*/
+static void R_RefractionRender( drawSurf_t *surf, textureStage_t *stage, idScreenRect scissor ) {
+	viewDef_t		*parms;
+
+	if ( stage->dynamicFrameCount == R_VR_EyeSubviewFrameKey() ) {
+		return;
+	}
+
+	// Raven exposes refractionRenderMap as a distinct dynamic image from reflection.
+	// The legacy implementation rendered through a removed special-effects path, so
+	// preserve the material contract by capturing the current view into a dedicated
+	// _refractionRender image without introducing that obsolete system.
+	parms = (viewDef_t *)R_FrameAlloc( sizeof( *parms ) );
+	*parms = *tr.viewDef;
+	parms->renderView.viewID = 0;
+	parms->isSubview = true;
+	parms->isMirror = false;
+	R_SyncSubviewTime( parms );
+	R_ResetSubviewTemporalState( parms );
+	parms->initialViewAreaOrigin = parms->renderView.vieworg;
+
+	tr.CropRenderSize( stage->width, stage->height, true );
+
+	parms->renderView.x = 0;
+	parms->renderView.y = 0;
+	parms->renderView.width = SCREEN_WIDTH;
+	parms->renderView.height = SCREEN_HEIGHT;
+
+	tr.RenderViewToViewport( &parms->renderView, &parms->viewport );
+
+	parms->scissor.x1 = 0;
+	parms->scissor.y1 = 0;
+	parms->scissor.x2 = parms->viewport.x2 - parms->viewport.x1;
+	parms->scissor.y2 = parms->viewport.y2 - parms->viewport.y1;
+
+	parms->superView = tr.viewDef;
+	parms->subviewSurface = surf;
+
+	R_RenderView( parms );
+
+	stage->dynamicFrameCount = R_VR_EyeSubviewFrameKey();
+	tr.pc.c_eyeSubviews++;
+	stage->image = globalImages->ImageFromFile( "_refractionRender", TF_DEFAULT, TR_REPEAT, TD_DEFAULT );
 
 	tr.CaptureRenderToImage( stage->image->GetName() );
 	tr.UnCrop();
@@ -633,8 +710,9 @@ R_XrayRender
 void R_XrayRender( drawSurf_t *surf, textureStage_t *stage, idScreenRect scissor ) {
 	viewDef_t		*parms;
 
-	// remote views can be reused in a single frame
-	if ( stage->dynamicFrameCount == tr.frameCount ) {
+	// reused within a frame, but rendered again for the other eye: the camera
+	// follows the viewer
+	if ( stage->dynamicFrameCount == R_VR_EyeSubviewFrameKey() ) {
 		return;
 	}
 
@@ -668,7 +746,8 @@ void R_XrayRender( drawSurf_t *surf, textureStage_t *stage, idScreenRect scissor
 	R_RenderView( parms );
 
 	// copy this rendering to the image
-	stage->dynamicFrameCount = tr.frameCount;
+	stage->dynamicFrameCount = R_VR_EyeSubviewFrameKey();
+	tr.pc.c_eyeSubviews++;
 	stage->image = globalImages->scratchImage2;
 
 	tr.CaptureRenderToImage( stage->image->GetName());
@@ -730,7 +809,8 @@ bool	R_GenerateSurfaceSubview( drawSurf_t *drawSurf ) {
 
 	// see what kind of subview we are making
 	if ( shader->GetSort() != SS_SUBVIEW ) {
-		for ( int i = 0 ; i < shader->GetNumStages() ; i++ ) {
+		const int stageCount = shader->GetNumStages();
+		for ( int i = 0 ; i < stageCount ; i++ ) {
 			const shaderStage_t	*stage = shader->GetStage( i );
 			switch ( stage->texture.dynamic ) {
 			case DI_REMOTE_RENDER:
@@ -738,6 +818,12 @@ bool	R_GenerateSurfaceSubview( drawSurf_t *drawSurf ) {
 				break;
 			case DI_MIRROR_RENDER:
 				R_MirrorRender( drawSurf, const_cast<textureStage_t *>(&stage->texture), scissor );
+				break;
+			case DI_REFLECTION_RENDER:
+				R_ReflectionRender( drawSurf, const_cast<textureStage_t *>(&stage->texture), scissor );
+				break;
+			case DI_REFRACTION_RENDER:
+				R_RefractionRender( drawSurf, const_cast<textureStage_t *>(&stage->texture), scissor );
 				break;
 			case DI_XRAY_RENDER:
 				R_XrayRender( drawSurf, const_cast<textureStage_t *>(&stage->texture), scissor );
@@ -754,53 +840,29 @@ bool	R_GenerateSurfaceSubview( drawSurf_t *drawSurf ) {
 	}
 
 	switch ( shader->GetSubviewClass() ) {
-		case SC_PORTAL: {
-			parms = R_PortalSubviewBySurface( drawSurf );
-			if ( !parms ) {
-				return false;
-			}
-			parms->scissor = scissor;
-
-			parms->superView = tr.viewDef;
-			parms->subviewSurface = drawSurf;
-
-			R_RenderView( parms );
-			return true;
-		}
-		case SC_PORTAL_SKYBOX: {
-			parms = R_PortalSkyboxSubviewBySurface( drawSurf );
-			if ( !parms ) {
-				return false;
-			}
-			parms->scissor = tr.viewDef->scissor;
-
-			parms->superView = tr.viewDef;
-			parms->subviewSurface = drawSurf;
-
-			R_RenderView( parms );
-			return true;
-		}
-		case SC_MIRROR:
-		default: {
-			// issue a new view command
-			parms = R_MirrorViewBySurface( drawSurf );
-			if ( !parms ) {
-				return false;
-			}
-
-			parms->scissor = scissor;
-			parms->superView = tr.viewDef;
-			parms->subviewSurface = drawSurf;
-
-			// triangle culling order changes with mirroring
-			parms->isMirror = ( ( (int)parms->isMirror ^ (int)tr.viewDef->isMirror ) != 0 );
-
-			// generate render commands for it
-			R_RenderView( parms );
-
-			return true;
-		}
+	case SC_PORTAL:
+		parms = R_PortalSubviewBySurface( drawSurf );
+		break;
+	case SC_PORTAL_SKYBOX:
+		parms = R_PortalSkyboxSubviewBySurface( drawSurf );
+		break;
+	case SC_MIRROR:
+	default:
+		parms = R_MirrorViewBySurface( drawSurf );
+		break;
 	}
+	if ( parms == NULL ) {
+		return false;
+	}
+
+	parms->scissor = scissor;
+	parms->superView = tr.viewDef;
+	parms->subviewSurface = drawSurf;
+	if ( shader->GetSubviewClass() == SC_MIRROR ) {
+		parms->isMirror = ( ( (int)parms->isMirror ^ (int)tr.viewDef->isMirror ) != 0 );
+	}
+	R_RenderView( parms );
+	return true;
 }
 
 /*

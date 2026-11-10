@@ -44,10 +44,10 @@ If you have questions concerning this license or the applicable additional terms
 ===============================================================================
 */
 
-// Sound shader minDistance / maxDistance are authored in meters.
-// Convert engine world units (Doom units / inches) to meters for attenuation.
-const float DOOM_TO_METERS = 0.0254f;					// doom to meters
-const float METERS_TO_DOOM = ( 1.0f / DOOM_TO_METERS );	// meters to doom
+// Prey sound shaders author min/max distance in meters while the renderer and
+// game use Doom units (inches).
+const float DOOM_TO_METERS = 0.0254f;
+const float METERS_TO_DOOM = ( 1.0f / DOOM_TO_METERS );
 
 const float DB_SILENCE = -60.0f;
 
@@ -64,32 +64,35 @@ static const int	SSF_PLAY_ONCE =			BIT( 6 );	// never restart if already playing
 static const int	SSF_UNCLAMPED =			BIT( 7 );	// don't clamp calculated volumes at 1.0
 static const int	SSF_NO_FLICKER =		BIT( 8 );	// always return 1.0 for volume queries
 static const int	SSF_NO_DUPS =			BIT( 9 );	// try not to play the same sound twice in a row
-static const int	SSF_VO =				BIT( 10 ); // VO - direct a portion of the sound through the center channel (set automatically on shaders that contain files that start with "sound/vo/")
-static const int	SSF_VOICEAMPLITUDE =	SSF_VO;		// legacy alias used by Prey game code
-static const int	SSF_MUSIC =				BIT( 11 ); // Music - Muted when the player is playing his own music
 
 // RAVEN BEGIN
-	static const int	SSF_USEDOPPLER = BIT(17);	// allow doppler pitch shifting effects
-	static const int	SSF_NO_RANDOMSTART = BIT(18);	// don't offset the start position for looping sounds
-	static const int	SSF_VO_FOR_PLAYER = BIT(12);	// Notifies a funcRadioChatter that this shader is directed at the player
-	static const int	SSF_IS_VO = BIT(13);	// this sound is VO
-	static const int	SSF_CAUSE_RUMBLE = BIT(14);	// causes joystick rumble
+static const int	SSF_USEDOPPLER = BIT(10);	// allow doppler pitch shifting effects
+static const int	SSF_NO_RANDOMSTART = BIT(11);	// don't offset the start position for looping sounds
+static const int	SSF_VO_FOR_PLAYER = BIT(12);	// Notifies a funcRadioChatter that this shader is directed at the player
+static const int	SSF_IS_VO = BIT(13);	// this sound is VO
+static const int	SSF_CAUSE_RUMBLE = BIT(14);	// causes joystick rumble
 static const int	SSF_CENTER = BIT(15);	// sound through center channel only
 static const int	SSF_HILITE = BIT(16);	// display debug info for this emitter
 // RAVEN END
 
-// Prey subtitle table entry metadata parsed from sound shaders.
+// OpenQ4-only runtime classifications. Keep these out of the retail flag range
+// because game modules and shipped Q4 data use bits 10/11 for Doppler/no-random-start.
+static const int	SSF_VO =				BIT( 22 ); // VO - direct a portion of the sound through the center channel (set automatically on shaders that contain files that start with "sound/vo/")
+static const int	SSF_VOICEAMPLITUDE =	SSF_VO;	 // Prey jawflap/amplitude-query alias
+static const int	SSF_MUSIC =				BIT( 23 ); // Music - Muted when the player is playing his own music
+
 typedef struct
 {
-	idStr					subText;				// language token or literal subtitle text
-	float					subTime;				// relative start time in seconds from sound start
-	int						subChannel;				// authored subtitle slot/index
+	idStr					subText;
+	float					subTime;
+	int						subNum;
+	int						subChannel;
 } soundSub_t;
 
 typedef struct
 {
-	idStr					soundName;				// shader name
-	idList<soundSub_t>		subList;					// ordered subtitle entries
+	idStr					soundName;
+	idList<soundSub_t>		subList;
 } soundSubtitleList_t;
 
 // these options can be overriden from sound shader defaults on a per-emitter and per-channel basis
@@ -98,13 +101,16 @@ typedef struct
 	float					minDistance;
 	float					maxDistance;
 	float					volume;					// linear scale (1.0 = nominal)
+	float					attenuatedVolume;		// Quake 4 archived field; retained for retail ABI/save-demo layout
+	// OPENPREY-ABI: Prey's unified game module requires these archived fields.
+	// Keep them immediately after the upstream ABI field in engine and staged SDK headers.
+	int						subIndex;
+	int						profanityIndex;
+	float					profanityDelay;
+	float					profanityDuration;
 	float					shakes;
 	int						soundShaderFlags;		// SSF_* bit flags
 	int						soundClass;				// for global fading of sounds
-	int						subIndex;				// Prey subtitle index
-	int						profanityIndex;			// Prey profanity subtitle index
-	float					profanityDelay;			// Prey profanity subtitle delay
-	float					profanityDuration;		// Prey profanity subtitle duration
 
 // RAVEN BEGIN
 // bdube: frequency shift
@@ -115,11 +121,12 @@ typedef struct
 // RAVEN END	
 } soundShaderParms_t;
 
-// Prey compatibility modifier used by game code to patch selected channel parms.
-class hhSoundShaderParmsModifier {
+class hhSoundShaderParmsModifier
+{
 public:
-	hhSoundShaderParmsModifier() {
-		memset( &parms, 0, sizeof( soundShaderParms_t ) );
+	hhSoundShaderParmsModifier()
+	{
+		memset( &parms, 0, sizeof( parms ) );
 		minDistanceIsSet = false;
 		maxDistanceIsSet = false;
 		volumeIsSet = false;
@@ -127,48 +134,45 @@ public:
 		soundShaderFlagsIsSet = false;
 	}
 
-	void ModifyParms( soundShaderParms_t &parmsToModify ) const {
-		if ( minDistanceIsSet ) {
-			parmsToModify.minDistance = parms.minDistance;
-		}
-		if ( maxDistanceIsSet ) {
-			parmsToModify.maxDistance = parms.maxDistance;
-		}
-		if ( volumeIsSet ) {
-			// Prey APIs pass volume in dB while this engine stores linear scale.
-			parmsToModify.volume = idMath::Pow( 2.0f, parms.volume / 6.0f );
-		}
-		if ( shakesIsSet ) {
-			parmsToModify.shakes = parms.shakes;
-		}
-		if ( soundShaderFlagsIsSet ) {
-			parmsToModify.soundShaderFlags = parms.soundShaderFlags;
-		}
+	void ModifyParms( soundShaderParms_t& target ) const
+	{
+		if( minDistanceIsSet )			{ target.minDistance = parms.minDistance; }
+		if( maxDistanceIsSet )			{ target.maxDistance = parms.maxDistance; }
+		if( volumeIsSet )				{ target.volume = idMath::dBToScale( parms.volume ); }
+		if( shakesIsSet )				{ target.shakes = parms.shakes; }
+		if( soundShaderFlagsIsSet )	{ target.soundShaderFlags = parms.soundShaderFlags; }
 	}
 
-	void SetMinDistance( const float minDistance ) { parms.minDistance = minDistance; minDistanceIsSet = true; }
-	void SetMaxDistance( const float maxDistance ) { parms.maxDistance = maxDistance; maxDistanceIsSet = true; }
-	void SetVolume( const float volume ) { parms.volume = volume; volumeIsSet = true; }
-	void SetShakes( const float shakes ) { parms.shakes = shakes; shakesIsSet = true; }
-	void SetSoundShaderFlags( const int flags ) { parms.soundShaderFlags = flags; soundShaderFlagsIsSet = true; }
+	void SetMinDistance( float value )		{ parms.minDistance = value; minDistanceIsSet = true; }
+	void SetMaxDistance( float value )		{ parms.maxDistance = value; maxDistanceIsSet = true; }
+	void SetVolume( float value )			{ parms.volume = value; volumeIsSet = true; }
+	void SetShakes( float value )			{ parms.shakes = value; shakesIsSet = true; }
+	void SetSoundShaderFlags( int value )	{ parms.soundShaderFlags = value; soundShaderFlagsIsSet = true; }
 
-protected:
-	soundShaderParms_t		parms;
-	bool					minDistanceIsSet;
-	bool					maxDistanceIsSet;
-	bool					volumeIsSet;
-	bool					shakesIsSet;
-	bool					soundShaderFlagsIsSet;
+	bool MinDistanceIsSet() const			{ return minDistanceIsSet; }
+	bool MaxDistanceIsSet() const			{ return maxDistanceIsSet; }
+	bool VolumeIsSet() const				{ return volumeIsSet; }
+	bool ShakesIsSet() const				{ return shakesIsSet; }
+	bool SoundShaderFlagsIsSet() const		{ return soundShaderFlagsIsSet; }
+
+private:
+	soundShaderParms_t	parms;
+	bool				minDistanceIsSet;
+	bool				maxDistanceIsSet;
+	bool				volumeIsSet;
+	bool				shakesIsSet;
+	bool				soundShaderFlagsIsSet;
 };
 
 // sound classes are used to fade most sounds down inside cinematics, leaving dialog
-// flagged with a non-zero class full volume.
+// flagged with a non-zero class full volume
 const int		SOUNDCLASS_NORMAL		= 0;
 const int		SOUNDCLASS_VOICEDUCKER	= 1;
 const int		SOUNDCLASS_SPIRITWALK	= 2;
 const int		SOUNDCLASS_VOICE		= 3;
 const int		SOUNDCLASS_MUSIC		= 4;
 const int		SOUND_MAX_CLASSES		= 5;
+const int		SOUND_CLASS_MUSICAL		= SOUNDCLASS_MUSIC;
 
 // it is somewhat tempting to make this a virtual class to hide the private
 // details here, but that doesn't fit easily with the decl manager at the moment.
@@ -182,8 +186,12 @@ public:
 	virtual bool			SetDefaultText();
 	virtual const char* 	DefaultDefinition() const;
 	virtual bool			Parse( const char* text, const int textLength ) override;
+	virtual bool			Parse( const char* text, const int textLength, bool noCaching ) override;
 	virtual void			FreeData();
 	virtual void			List() const;
+	virtual void			SetReferencedThisLevel() override;
+	virtual bool			Validate( const char* psText, int iTextLength, idStr& strReportTo ) const override;
+	virtual bool			RebuildTextSource() override;
 
 // jmarshall: eval
 	virtual bool			IsVO_ForPlayer(void) const;
@@ -205,6 +213,24 @@ public:
 	virtual const char* 	GetSound( int index ) const;
 	virtual float			GetTimeLength() const;
 
+	float					GetLeadinVolume() const { return leadinVolume; }
+	int						GetNumEntries() const { return entries.Num(); }
+	idSoundSample*			GetLeadin( int index ) const { return ( index >= 0 && index < leadins.Num() ) ? leadins[index] : NULL; }
+	idSoundSample*			GetEntry( int index ) const { return ( index >= 0 && index < entries.Num() ) ? entries[index] : NULL; }
+	const char*				GetShakeData( int index ) const;
+	void					SetShakeData( int index, const char* ampData );
+	void					Purge( bool freeBaseBlocks );
+	void					LoadSampleData( int langIndex = -1 );
+
+	const char*				GetSampleName( int index ) const;
+	int						GetSamplesPerSec( int index ) const;
+	int						GetNumChannels( int index ) const;
+	int						GetNumSamples( int index ) const;
+	int						GetMemorySize( int index ) const;
+	const byte*				GetNonCacheData( int index ) const;
+
+	void					ExpandSmallOggs( bool force );
+
 private:
 	friend class idSoundWorldLocal;
 	friend class idSoundEmitterLocal;
@@ -222,10 +248,35 @@ private:
 	idList<idSoundSample*>	entries;
 	idStrList				shakes;
 
+	idStr					desc;
+	float					minFrequencyShift;
+	float					maxFrequencyShift;
+	bool					noShakes;
+	bool					frequentlyUsed;
+
 private:
 	void					Init();
 	bool					ParseShader( idLexer& src );
+	idSoundSample*			GetSampleByIndex( int index ) const;
 };
+
+class rvSoundShaderEdit {
+public:
+	virtual					~rvSoundShaderEdit() {}
+	virtual const char*		GetSampleName( const idSoundShader* sound, int index ) const = 0;
+	virtual int				GetSamplesPerSec( const idSoundShader* sound, int index ) const = 0;
+	virtual int				GetNumChannels( const idSoundShader* sound, int index ) const = 0;
+	virtual int				GetNumSamples( const idSoundShader* sound, int index ) const = 0;
+	virtual int				GetMemorySize( const idSoundShader* sound, int index ) const = 0;
+	virtual const byte*		GetNonCacheData( const idSoundShader* sound, int index ) const = 0;
+	virtual void			LoadSampleData( idSoundShader* sound, int langIndex = -1 ) = 0;
+	virtual void			ExpandSmallOggs( idSoundShader* sound, bool force ) = 0;
+	virtual const char*		GetShakeData( idSoundShader* sound, int index ) = 0;
+	virtual void			SetShakeData( idSoundShader* sound, int index, const char* ampData ) = 0;
+	virtual void			Purge( idSoundShader* sound, bool freeBaseBlocks ) = 0;
+};
+
+extern rvSoundShaderEdit* soundShaderEdit;
 
 /*
 ===============================================================================
@@ -254,13 +305,10 @@ public:
 
 	// the parms specified will be the default overrides for all sounds started on this emitter.
 	// NULL is acceptable for parms
-	virtual void			UpdateEmitter( const idVec3& origin, int listenerId, const soundShaderParms_t* parms ) = 0;
-
-// jmarshall - todo add velocity
-	virtual void			UpdateEmitter(const idVec3& origin, const idVec3& velocity, int listenerId, const soundShaderParms_t* parms) {
-		UpdateEmitter(origin, listenerId, parms);
+	virtual void			UpdateEmitter( const idVec3& origin, int listenerId, const soundShaderParms_t* parms ) {
+		UpdateEmitter( origin, vec3_zero, listenerId, parms );
 	}
-// jmarshalll end
+	virtual void			UpdateEmitter( const idVec3& origin, const idVec3& velocity, int listenerId, const soundShaderParms_t* parms ) = 0;
 
 	// returns the length of the started sound in msec
 	virtual int				StartSound( const idSoundShader* shader, const s_channelType channel, float diversity = 0, int shaderFlags = 0, bool allowSlow = true ) = 0;
@@ -271,28 +319,11 @@ public:
 	// to is in Db, over is in seconds
 	virtual void			FadeSound( const s_channelType channel, float to, float over ) = 0;
 
-	virtual void			ModifySound( idSoundShader *shader, const s_channelType channel, const hhSoundShaderParmsModifier &parmModifier ) {
-		(void)shader;
-		soundShaderParms_t *parms = GetSoundParms( shader, channel );
-		if ( parms == NULL ) {
-			return;
-		}
-		soundShaderParms_t modified = *parms;
-		parmModifier.ModifyParms( modified );
-		ModifySound( channel, &modified );
-	}
-	virtual soundShaderParms_t *GetSoundParms( idSoundShader *shader, const s_channelType channel ) {
-		(void)shader;
-		(void)channel;
-		return NULL;
-	}
-	virtual float			CurrentAmplitude( const s_channelType channel ) {
-		(void)channel;
-		return CurrentAmplitude();
-	}
-	virtual float			CurrentVoiceAmplitude( const s_channelType channel ) {
-		return CurrentAmplitude( channel );
-	}
+	// Compatibility entry points used by Prey's unified game module.
+	virtual void			ModifySound( idSoundShader* shader, const s_channelType channel, const hhSoundShaderParmsModifier& modifier ) = 0;
+	virtual soundShaderParms_t* GetSoundParms( idSoundShader* shader, const s_channelType channel ) = 0;
+	virtual float			CurrentAmplitude( const s_channelType channel ) = 0;
+	virtual float			CurrentVoiceAmplitude( const s_channelType channel ) = 0;
 
 	// returns true if there are any sounds playing from this emitter.  There is some conservative
 	// slop at the end to remove inconsistent race conditions with the sound thread updates.
@@ -303,6 +334,11 @@ public:
 	// graphic effects to be modified in time with the audio.
 	// just samples the raw wav file, it doesn't account for volume overrides in the
 	virtual	float			CurrentAmplitude() = 0;
+
+	// Actual decoded sample peaks, oldest to newest, at 60 Hz ending at the
+	// channel's playback cursor. Missing, stopped and silent audio is zero.
+	// Pre-volume metering; never uses authored shake data or no_flicker.
+	virtual void			AmplitudeHistory( s_channelType channel, float *peaks, int count ) = 0;
 
 	// for save games.  Index will always be > 0
 	virtual	int				Index() const = 0;
@@ -318,6 +354,15 @@ independent render worlds.  The prime example is the editor sound preview
 option existing simultaniously with a live game.
 ===============================================================================
 */
+
+// A borrowed presentation snapshot, valid until the next decl/language reload.
+// Timing follows the sample clock, including pause and frequency/time shifts.
+struct soundSubtitle_t {
+	const char* text;
+	const char* shader;
+	int emitterIndex, speakerId, startTime, timeMsec, durationMsec;
+	bool radio;
+};
 
 class idSoundWorld
 {
@@ -336,24 +381,18 @@ public:
 
 	// query sound samples from all emitters reaching a given listener
 	virtual float			CurrentShakeAmplitude() = 0;
-	virtual float			CurrentShakeAmplitudeForPosition( const int time, const idVec3 &listenerPosition ) {
-		return CurrentShakeAmplitude();
-	}
+	virtual float			CurrentShakeAmplitudeForPosition( const int time, const idVec3& listenerPosition ) = 0;
 
 	// where is the camera/microphone
 	// listenerId allows listener-private and antiPrivate sounds to be filtered
 	virtual void			PlaceListener( const idVec3& origin, const idMat3& axis, const int listenerId ) = 0;
-	virtual void			PlaceListener( const idVec3& origin, const idMat3& axis, const int listenerId, const int gameTime, const idStr& areaName ) {
-		(void)gameTime;
-		(void)areaName;
-		PlaceListener( origin, axis, listenerId );
-	}
+	virtual void			PlaceListener( const idVec3& origin, const idMat3& axis, const int listenerId, const int gameTime, const idStr& areaName ) = 0;
 
 	// fade all sounds in the world with a given shader soundClass
 	// to is in Db, over is in seconds
 	virtual void			FadeSoundClasses( const int soundClass, const float to, const float over ) = 0;
-	virtual void			RegisterLocation( int area, const char *locationName ) {}
-	virtual void			ClearAreaLocations( void ) {}
+	virtual void			RegisterLocation( int area, const char* locationName ) = 0;
+	virtual void			ClearAreaLocations() = 0;
 
 	// menu sounds
 	virtual	int				PlayShaderDirectly( const char* name, int channel = -1 ) = 0;
@@ -363,7 +402,8 @@ public:
 	virtual void			StopWritingDemo() = 0;
 
 	// read a sound command from a demo file
-	virtual void			ProcessDemoCommand( idDemoFile* demo ) = 0;
+	// returns false when malformed or truncated input stops demo playback
+	virtual bool			ProcessDemoCommand( idDemoFile* demo ) = 0;
 
 	// when cinematics are skipped, we need to advance sound time this much
 	virtual void			Skip( int time ) = 0;
@@ -391,8 +431,20 @@ public:
 
 	virtual void			SetSlowmoSpeed( float speed ) = 0;
 	virtual void			SetEnviroSuit( bool active ) = 0;
-	virtual void			SetSpiritWalkEffect( bool active ) {}
-	virtual void			SetVoiceDucker( bool active ) {}
+	virtual void			SetSpiritWalkEffect( bool active ) { (void)active; /* TODO: retail Prey DSP parity */ }
+	virtual void			SetVoiceDucker( bool active ) { (void)active; /* TODO: retail Prey DSP parity */ }
+
+	// openQ4: muffles everything while the listener's head is under a liquid surface. Derived from
+	// the eye position every frame, so it is deliberately not part of the savegame.
+	virtual void			SetUnderwater( bool active ) = 0;
+
+	// openQ4: lets the sound world ask whether a point is inside a liquid, which only the game
+	// knows - liquid lives in the collision world, not the render world. Used to occlude sounds
+	// that have to cross the surface to reach the listener. Called from the same per-emitter
+	// spatialisation path that already does portal tracing, so it must be cheap and main-thread.
+	typedef bool ( *liquidTest_t )( const idVec3 &point );
+	virtual void			SetLiquidTest( liquidTest_t test ) = 0;
+	virtual int				GetSubtitles( soundSubtitle_t* cues, int capacity ) = 0;
 };
 
 
@@ -477,15 +529,15 @@ public:
 	// Free all sounds loaded during the last map load
 	virtual	void			BeginLevelLoad() = 0;
 
-	// Load all sounds marked as used this level
-	virtual	void			EndLevelLoad() = 0;
+	// Load all sounds marked as used this level. mapName is the session's
+	// "maps/<name>" path, which also selects the map's reverb tables.
+	virtual	void			EndLevelLoad( const char* mapName ) = 0;
 
 //	virtual void			Preload( idPreloadManifest& preload ) = 0;
 
 	// prints memory info
 	virtual void			PrintMemInfo( MemInfo_t* mi ) = 0;
 
-	// Prey subtitle table registration/runtime lookup.
 	virtual int				GetSubtitleIndex( const char* soundName ) = 0;
 	virtual void			SetSubtitleData( int subIndex, int subNum, const char* subText, float subTime, int subChannel ) = 0;
 	virtual soundSub_t*		GetSubtitle( int subIndex, int subNum ) = 0;
@@ -496,50 +548,118 @@ public:
 	// get a new emitter that can play sounds in this world
 	virtual idSoundWorld* GetSoundWorldFromId(int worldId) = 0;
 
+	// The sound worlds these helpers reach through belong to the session, which
+	// allocates them in idSessionLocal::Init and drops them in Shutdown. Engine
+	// teardown runs outside that window: idCommonLocal::FatalError shuts the
+	// session down from anywhere in startup, so a renderer that fails to bring
+	// up its device tears down before any world exists. A missing world is
+	// therefore ordinary state, not a programming error, and matches the NULL
+	// check idSoundSystemLocal::FreeSoundEmitter already makes on the same
+	// accessor (issue #96).
 	idSoundEmitter* EmitterForIndex(int worldId, int index) {
-		return GetSoundWorldFromId(worldId)->EmitterForIndex(index);
+		idSoundWorld* soundWorld = GetSoundWorldFromId(worldId);
+		if (soundWorld == NULL) {
+			return NULL;
+		}
+		return soundWorld->EmitterForIndex(index);
 	}
 
 	void			FadeSoundClasses(int worldId, const int soundClass, const float to, const float over) {
-		GetSoundWorldFromId(worldId)->FadeSoundClasses(soundClass, to, over);
+		idSoundWorld* soundWorld = GetSoundWorldFromId(worldId);
+		if (soundWorld == NULL) {
+			return;
+		}
+		soundWorld->FadeSoundClasses(soundClass, to, over);
 	}
 
 	void			PlayShaderDirectly(int worldId, const char* name, int channel = -1) {
-		GetSoundWorldFromId(worldId)->PlayShaderDirectly(name, channel);
+		idSoundWorld* soundWorld = GetSoundWorldFromId(worldId);
+		if (soundWorld == NULL) {
+			return;
+		}
+		soundWorld->PlayShaderDirectly(name, channel);
 	}
 
 	virtual int				AllocSoundEmitter(int worldId) {
-		return GetSoundWorldFromId(worldId)->AllocSoundEmitter()->Index();
+		idSoundWorld* soundWorld = GetSoundWorldFromId(worldId);
+		if (soundWorld == NULL) {
+			// index 0 is the reserved "no emitter" handle; EmitterForIndex and
+			// FreeSoundEmitter both already treat it as invalid
+			return 0;
+		}
+		return soundWorld->AllocSoundEmitter()->Index();
 	}
 	virtual void			FreeSoundEmitter(int worldId, int handle, bool immediate) {
 
 	}
 
 	virtual void StopAllSounds(int worldId) {
-		GetSoundWorldFromId(worldId)->StopAllSounds();
+		idSoundWorld* soundWorld = GetSoundWorldFromId(worldId);
+		if (soundWorld == NULL) {
+			return;
+		}
+		soundWorld->StopAllSounds();
 	}
 
 	virtual void SetActiveSoundWorld(bool val) {  }
 
 	virtual void			WriteToSaveGame(int worldId, idFile* savefile) {
-		GetSoundWorldFromId(worldId)->WriteToSaveGame(savefile);
+		idSoundWorld* soundWorld = GetSoundWorldFromId(worldId);
+		if (soundWorld == NULL) {
+			return;
+		}
+		soundWorld->WriteToSaveGame(savefile);
 	}
 	virtual void			ReadFromSaveGame(int worldId, idFile* savefile) {
-		GetSoundWorldFromId(worldId)->ReadFromSaveGame(savefile);
+		idSoundWorld* soundWorld = GetSoundWorldFromId(worldId);
+		if (soundWorld == NULL) {
+			return;
+		}
+		soundWorld->ReadFromSaveGame(savefile);
 	}
 
 	void			PlaceListener(const idVec3& origin, const idMat3& axis, const int listenerId, const int gameTime, const idStr& areaName) {
-		GetSoundWorldFromId(SOUNDWORLD_GAME)->PlaceListener(origin, axis, listenerId);
+		idSoundWorld* soundWorld = GetSoundWorldFromId(SOUNDWORLD_GAME);
+		if (soundWorld == NULL) {
+			return;
+		}
+		soundWorld->PlaceListener(origin, axis, listenerId, gameTime, areaName);
 	}
 
-	virtual	float			CurrentShakeAmplitudeForPosition(int worldId, const int time, const idVec3& listenerPosition) {
-		return 0.0f; // GetSoundWorldFromId(worldId)->CurrentShakeAmplitudeForPosition(time, listenerPosition);
-	}
+	// Query authored camera shake at this position, independently of the audio mix.
+	virtual	float			CurrentShakeAmplitudeForPosition( int worldId, const int time, const idVec3& listenerPosition ) = 0;
 
 	// RAVEN END
 // jmarshall end
+
+	// Quake 4 reverb editor interface: the map's portal areas and the efxs/*.efx
+	// reverb each one plays (see idSoundReverb).
+	virtual	const char*		GetReverbName( int reverb ) = 0;
+	virtual	int				GetNumAreas() = 0;
+	virtual	int				GetReverb( int area ) = 0;
+	virtual	bool			SetReverb( int area, const char* reverbName, const char* fileName ) = 0;
+
+	// Releases the audio device and every sample's audio data and sets s_noSound,
+	// for a client that turns into a dedicated server (SpawnServer_f). Unlike
+	// Shutdown() it keeps every sample object, because sound shaders keep
+	// pointers to them; samples loaded later become silent defaults, as on a
+	// dedicated server. Retail Quake4.exe 1.4.2 calls ShutdownHW there.
+	virtual void			ShutdownHW() = 0;
+
+	// Voice is session-owned, independent of map audio/time scale. Recording
+	// additionally requires explicit capture consent and push-to-talk (or a
+	// local microphone test); merely receiving never opens an input device.
+	virtual bool			UpdateVoiceChat( bool active, bool transmit, bool localTest ) = 0;
+	virtual int				GetVoiceData( byte* data, int capacity ) = 0;
+	virtual void			PlayVoiceData( int clientNum, unsigned int generation, const byte* data, int size ) = 0;
+	virtual void			StopVoiceData( int clientNum ) = 0;
+	virtual void			ResetVoiceChat() = 0;
+	virtual int				GetVoiceTalker() const = 0;
+	virtual float			GetVoiceLevel() const = 0;
 };
 
 extern idSoundSystem*	soundSystem;
+
+#define OPENQ4_SOUND_HAS_SOUNDWORLD_SKIP 1
 
 #endif /* !__SOUND__ */

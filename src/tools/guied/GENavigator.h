@@ -36,6 +36,7 @@ class rvGENavigator
 public:
 
 	rvGENavigator ( );
+	~rvGENavigator ( );
 	
 	bool	Create				( HWND parent, bool visible );
 	void	Show				( bool visibile );

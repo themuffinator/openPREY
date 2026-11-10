@@ -40,7 +40,26 @@ float idPluecker::Distance3DSqr( const idPluecker &a ) const {
 	dir[1] =  a.p[4] *  p[2] -  a.p[2] *  p[4];
 	dir[2] =  a.p[2] * -p[5] - -a.p[5] *  p[2];
 	if ( dir[0] == 0.0f && dir[1] == 0.0f && dir[2] == 0.0f ) {
-		return -1.0f;	// FIXME: implement for parallel lines
+		idVec3 start1, end1, start2, end2, offset, cross;
+		const float epsilonSqr = VECTOR_EPSILON * VECTOR_EPSILON;
+
+		if ( !ToLine( start1, end1 ) || !a.ToLine( start2, end2 ) ) {
+			return -1.0f;
+		}
+
+		dir = end1 - start1;
+		d = dir.LengthSqr();
+		if ( d <= epsilonSqr ) {
+			dir = end2 - start2;
+			d = dir.LengthSqr();
+			if ( d <= epsilonSqr ) {
+				return -1.0f;
+			}
+		}
+
+		offset = start2 - start1;
+		cross = offset.Cross( dir );
+		return cross.LengthSqr() / d;
 	}
 	d = a.p[4] * (  p[2] * dir[1] - -p[5] * dir[0] ) +
 		a.p[5] * (  p[2] * dir[2] -  p[4] * dir[0] ) +

@@ -7,12 +7,18 @@
    Copyright (C) 1995-1998 Mark Adler
 */
 
-#define CRC32_INIT_VALUE	0xffffffffL
-#define CRC32_XOR_VALUE		0xffffffffL
+#include <stdint.h>
+
+typedef uint32_t crc32Word_t;
+
+static_assert( sizeof( crc32Word_t ) == 4, "CRC-32 requires a 32-bit word" );
+
+#define CRC32_INIT_VALUE	UINT32_C( 0xffffffff )
+#define CRC32_XOR_VALUE		UINT32_C( 0xffffffff )
 
 #ifdef CREATE_CRC_TABLE
 
-static unsigned long crctable[256];
+static crc32Word_t crctable[256];
 
 /*
    Generate a table for a byte-wise 32-bit CRC calculation on the polynomial:
@@ -41,18 +47,18 @@ static unsigned long crctable[256];
 
 void make_crc_table( void ) {
 	int i, j;
-	unsigned long c, poly;
+	crc32Word_t c, poly;
 	/* terms of polynomial defining this crc (except x^32): */
 	static const byte p[] = {0,1,2,4,5,7,8,10,11,12,16,22,23,26};
 
 	/* make exclusive-or pattern from polynomial (0xedb88320L) */
-	poly = 0L;
+	poly = 0;
 	for ( i = 0; i < sizeof( p ) / sizeof( byte ); i++ ) {
-		poly |= 1L << ( 31 - p[i] );
+		poly |= UINT32_C( 1 ) << ( 31 - p[i] );
 	}
 
 	for ( i = 0; i < 256; i++ ) {
-		c = (unsigned long)i;
+		c = static_cast<crc32Word_t>( i );
 		for ( j = 0; j < 8; j++ ) {
 			c = ( c & 1 ) ? poly ^ ( c >> 1 ) : ( c >> 1 );
 		}
@@ -65,7 +71,7 @@ void make_crc_table( void ) {
 /*
   Table of CRC-32's of all single-byte values (made by make_crc_table)
 */
-static unsigned long crctable[256] = {
+static const crc32Word_t crctable[256] = {
 	0x00000000L, 0x77073096L, 0xee0e612cL, 0x990951baL,
 	0x076dc419L, 0x706af48fL, 0xe963a535L, 0x9e6495a3L,
 	0x0edb8832L, 0x79dcb8a4L, 0xe0d5e91eL, 0x97d2d988L,
@@ -134,31 +140,75 @@ static unsigned long crctable[256] = {
 
 #endif
 
-void CRC32_InitChecksum( unsigned long &crcvalue ) {
+void CRC32_InitChecksum( uint32_t &crcvalue ) {
 	crcvalue = CRC32_INIT_VALUE;
 }
 
-void CRC32_Update( unsigned long &crcvalue, const byte data ) {
-	crcvalue = crctable[ ( crcvalue ^ data ) & 0xff ] ^ ( crcvalue >> 8 );
+void CRC32_Update( uint32_t &crcvalue, const byte data ) {
+	crcvalue = crctable[ ( crcvalue ^ data ) & 0xffu ] ^ ( crcvalue >> 8 );
 }
 
-void CRC32_UpdateChecksum( unsigned long &crcvalue, const void *data, int length ) {
-	unsigned long crc;
+void CRC32_UpdateChecksum( uint32_t &crcvalue, const void *data, int length ) {
 	const unsigned char *buf = (const unsigned char *) data;
 
-	crc = crcvalue;
-	while( length-- ) {
-		crc = crctable[ ( crc ^ ( *buf++ ) ) & 0xff ] ^ ( crc >> 8 );
+	// Each table advances one input byte through up to sixteen zero bytes of
+	// the same polynomial. This separates the serial byte dependencies while
+	// preserving the incremental CRC state and existing save/PK4 checksums.
+	struct slicingTables_t {
+		uint32_t values[16][256];
+		slicingTables_t() {
+			for ( int byteValue = 0; byteValue < 256; ++byteValue ) {
+				uint32_t value = crctable[byteValue];
+				values[0][byteValue] = value;
+				for ( int slice = 1; slice < 16; ++slice ) {
+					value = crctable[value & 0xffu] ^ ( value >> 8 );
+					values[slice][byteValue] = value;
+				}
+			}
+		}
+	};
+	static const slicingTables_t tables;
+	while ( length >= 16 ) {
+		const uint32_t first = crcvalue ^ static_cast<uint32_t>( buf[0] ) ^
+			( static_cast<uint32_t>( buf[1] ) << 8 ) ^
+			( static_cast<uint32_t>( buf[2] ) << 16 ) ^
+			( static_cast<uint32_t>( buf[3] ) << 24 );
+		crcvalue = tables.values[15][first & 0xffu] ^ tables.values[14][( first >> 8 ) & 0xffu] ^
+			tables.values[13][( first >> 16 ) & 0xffu] ^ tables.values[12][first >> 24] ^
+			tables.values[11][buf[4]] ^ tables.values[10][buf[5]] ^
+			tables.values[9][buf[6]] ^ tables.values[8][buf[7]] ^
+			tables.values[7][buf[8]] ^ tables.values[6][buf[9]] ^
+			tables.values[5][buf[10]] ^ tables.values[4][buf[11]] ^
+			tables.values[3][buf[12]] ^ tables.values[2][buf[13]] ^
+			tables.values[1][buf[14]] ^ tables.values[0][buf[15]];
+		buf += 16;
+		length -= 16;
 	}
-	crcvalue = crc;
+	while ( length >= 8 ) {
+		// Explicit byte assembly is endian- and alignment-independent; compilers
+		// combine it into a word load on targets that support unaligned loads.
+		const uint32_t first = crcvalue ^ static_cast<uint32_t>( buf[0] ) ^
+			( static_cast<uint32_t>( buf[1] ) << 8 ) ^
+			( static_cast<uint32_t>( buf[2] ) << 16 ) ^
+			( static_cast<uint32_t>( buf[3] ) << 24 );
+		crcvalue = tables.values[7][first & 0xffu] ^ tables.values[6][( first >> 8 ) & 0xffu] ^
+			tables.values[5][( first >> 16 ) & 0xffu] ^ tables.values[4][first >> 24] ^
+			tables.values[3][buf[4]] ^ tables.values[2][buf[5]] ^
+			tables.values[1][buf[6]] ^ tables.values[0][buf[7]];
+		buf += 8;
+		length -= 8;
+	}
+	while( length-- > 0 ) {
+		crcvalue = crctable[ ( crcvalue ^ ( *buf++ ) ) & 0xffu ] ^ ( crcvalue >> 8 );
+	}
 }
 
-void CRC32_FinishChecksum( unsigned long &crcvalue ) {
+void CRC32_FinishChecksum( uint32_t &crcvalue ) {
 	crcvalue ^= CRC32_XOR_VALUE;
 }
 
-unsigned long CRC32_BlockChecksum( const void *data, int length ) {
-	unsigned long crc;
+uint32_t CRC32_BlockChecksum( const void *data, int length ) {
+	uint32_t crc;
 
 	CRC32_InitChecksum( crc );
 	CRC32_UpdateChecksum( crc, data, length );

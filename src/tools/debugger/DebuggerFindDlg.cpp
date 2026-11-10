@@ -53,7 +53,8 @@ Launch the dialog
 */
 bool rvDebuggerFindDlg::DoModal ( rvDebuggerWindow* parent )
 {	
-	if ( DialogBoxParam ( parent->GetInstance(), MAKEINTRESOURCE(IDD_DBG_FIND), parent->GetWindow(), DlgProc, (LONG)this ) )
+	if ( DialogBoxParam( parent->GetInstance(), MAKEINTRESOURCE( IDD_DBG_FIND ), parent->GetWindow(),
+		DlgProc, reinterpret_cast< LPARAM >( this ) ) )
 	{
 		return true;
 	}
@@ -70,7 +71,7 @@ Dialog Procedure for the find dialog
 */
 INT_PTR CALLBACK rvDebuggerFindDlg::DlgProc ( HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
-	rvDebuggerFindDlg* dlg = (rvDebuggerFindDlg*) GetWindowLong ( wnd, GWL_USERDATA );
+	rvDebuggerFindDlg* dlg = reinterpret_cast< rvDebuggerFindDlg * >( GetWindowLongPtr( wnd, GWLP_USERDATA ) );
 	
 	switch ( msg )
 	{	
@@ -80,7 +81,7 @@ INT_PTR CALLBACK rvDebuggerFindDlg::DlgProc ( HWND wnd, UINT msg, WPARAM wparam,
 	
 		case WM_INITDIALOG:	
 			dlg = (rvDebuggerFindDlg*) lparam;
-			SetWindowLong ( wnd, GWL_USERDATA, (LONG) dlg );
+			SetWindowLongPtr( wnd, GWLP_USERDATA, reinterpret_cast< LONG_PTR >( dlg ) );
 			dlg->mWnd = wnd;
 			SetWindowText ( GetDlgItem ( dlg->mWnd, IDC_DBG_FIND ), dlg->mFindText );
 			return TRUE;

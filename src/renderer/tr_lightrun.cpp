@@ -166,10 +166,6 @@ Bumps tr.viewCount.
 ===============
 */
 void R_CreateEntityRefs( idRenderEntityLocal *def ) {
-	int			i;
-	idVec3		transformed[8];
-	idVec3		v;
-
 	if ( !def->parms.hModel ) {
 		def->parms.hModel = renderModelManager->DefaultModel();
 	}
@@ -194,20 +190,20 @@ void R_CreateEntityRefs( idRenderEntityLocal *def ) {
 						def->referenceBounds[1][1] - def->referenceBounds[0][1] );
 	}
 
-	for (i = 0 ; i < 8 ; i++) {
-		v[0] = def->referenceBounds[i&1][0];
-		v[1] = def->referenceBounds[(i>>1)&1][1];
-		v[2] = def->referenceBounds[(i>>2)&1][2];
-
-		R_LocalPointToGlobal( def->modelMatrix, v, transformed[i] ); 
-	}
-
 	// bump the view count so we can tell if an
 	// area already has a reference
 	tr.viewCount++;
 
-	// push these points down the BSP tree into areas
-	def->world->PushVolumeIntoTree( def, NULL, 8, transformed );
+	idBounds placementBounds = def->referenceBounds;
+	for ( int axis = 0; axis < 3; ++axis ) {
+		if ( placementBounds[1][axis] - placementBounds[0][axis] <= 0.0f ) {
+			placementBounds[0][axis] -= 0.001f;
+			placementBounds[1][axis] += 0.001f;
+		}
+	}
+
+	// Quake 4 places entity refs with an oriented-box walk through the BSP.
+	def->world->PushPolytopeIntoTree( def, NULL, idBox( placementBounds, def->parms.origin, def->parms.axis ), NULL, 0 );
 }
 
 
@@ -219,224 +215,9 @@ CREATE LIGHT REFS
 =================================================================================
 */
 
-/*
-=====================
-R_SetLightProject
 
-All values are reletive to the origin
-Assumes that right and up are not normalized
-This is also called by dmap during map processing.
-=====================
-*/
-void R_SetLightProject( idPlane lightProject[4], const idVec3 origin, const idVec3 target,
-					   const idVec3 rightVector, const idVec3 upVector, const idVec3 start, const idVec3 stop ) {
-	float		dist;
-	float		scale;
-	float		rLen, uLen;
-	idVec3		normal;
-	float		ofs;
-	idVec3		right, up;
-	idVec3		startGlobal;
-	idVec4		targetGlobal;
 
-	right = rightVector;
-	rLen = right.Normalize();
-	up = upVector;
-	uLen = up.Normalize();
-	normal = up.Cross( right );
-//normal = right.Cross( up );
-	normal.Normalize();
 
-	dist = target * normal; //  - ( origin * normal );
-	if ( dist < 0 ) {
-		dist = -dist;
-		normal = -normal;
-	}
-
-	scale = ( 0.5f * dist ) / rLen;
-	right *= scale;
-	scale = -( 0.5f * dist ) / uLen;
-	up *= scale;
-
-	lightProject[2] = normal;
-	lightProject[2][3] = -( origin * lightProject[2].Normal() );
-
-	lightProject[0] = right;
-	lightProject[0][3] = -( origin * lightProject[0].Normal() );
-
-	lightProject[1] = up;
-	lightProject[1][3] = -( origin * lightProject[1].Normal() );
-
-	// now offset to center
-	targetGlobal.ToVec3() = target + origin;
-	targetGlobal[3] = 1;
-	ofs = 0.5f - ( targetGlobal * lightProject[0].ToVec4() ) / ( targetGlobal * lightProject[2].ToVec4() );
-	lightProject[0].ToVec4() += ofs * lightProject[2].ToVec4();
-	ofs = 0.5f - ( targetGlobal * lightProject[1].ToVec4() ) / ( targetGlobal * lightProject[2].ToVec4() );
-	lightProject[1].ToVec4() += ofs * lightProject[2].ToVec4();
-
-	// set the falloff vector
-	normal = stop - start;
-	dist = normal.Normalize();
-	if ( dist <= 0 ) {
-		dist = 1;
-	}
-	lightProject[3] = normal * ( 1.0f / dist );
-	startGlobal = start + origin;
-	lightProject[3][3] = -( startGlobal * lightProject[3].Normal() );
-}
-
-/*
-===================
-R_SetLightFrustum
-
-Creates plane equations from the light projection, positive sides
-face out of the light
-===================
-*/
-void R_SetLightFrustum( const idPlane lightProject[4], idPlane frustum[6] ) {
-	int		i;
-
-	// we want the planes of s=0, s=q, t=0, and t=q
-	frustum[0] = lightProject[0];
-	frustum[1] = lightProject[1];
-	frustum[2] = lightProject[2] - lightProject[0];
-	frustum[3] = lightProject[2] - lightProject[1];
-
-	// we want the planes of s=0 and s=1 for front and rear clipping planes
-	frustum[4] = lightProject[3];
-
-	frustum[5] = lightProject[3];
-	frustum[5][3] -= 1.0f;
-	frustum[5] = -frustum[5];
-
-	for ( i = 0 ; i < 6 ; i++ ) {
-		float	l;
-
-		frustum[i] = -frustum[i];
-		l = frustum[i].Normalize();
-		frustum[i][3] /= l;
-	}
-}
-
-/*
-====================
-R_FreeLightDefFrustum
-====================
-*/
-void R_FreeLightDefFrustum( idRenderLightLocal *ldef ) {
-	int i;
-
-	// free the frustum tris
-	if ( ldef->frustumTris ) {
-		R_FreeStaticTriSurf( ldef->frustumTris );
-		ldef->frustumTris = NULL;
-	}
-	// free frustum windings
-	for ( i = 0; i < 6; i++ ) {
-		if ( ldef->frustumWindings[i] ) {
-			delete ldef->frustumWindings[i];
-			ldef->frustumWindings[i] = NULL;
-		}
-	}
-}
-
-/*
-=================
-R_DeriveLightData
-
-Fills everything in based on light->parms
-=================
-*/
-void R_DeriveLightData( idRenderLightLocal *light ) {
-	int i;
-
-	// decide which light shader we are going to use
-	if ( light->parms.shader ) {
-		light->lightShader = light->parms.shader;
-	}
-	if ( !light->lightShader ) {
-		if ( light->parms.pointLight ) {
-			light->lightShader = declManager->FindMaterial( "lights/defaultPointLight" );
-		} else {
-			light->lightShader = declManager->FindMaterial( "lights/defaultProjectedLight" );
-		}
-	}
-
-	// get the falloff image
-	light->falloffImage = light->lightShader->LightFalloffImage();
-	if ( !light->falloffImage ) {
-		// use the falloff from the default shader of the correct type
-		const idMaterial	*defaultShader;
-
-		if ( light->parms.pointLight ) {
-			defaultShader = declManager->FindMaterial( "lights/defaultPointLight" );
-			light->falloffImage = defaultShader->LightFalloffImage();
-		} else {
-			// projected lights by default don't diminish with distance
-			defaultShader = declManager->FindMaterial( "lights/defaultProjectedLight" );
-			light->falloffImage = defaultShader->LightFalloffImage();
-		}
-	}
-
-	// set the projection
-	if ( !light->parms.pointLight ) {
-		// projected light
-
-		R_SetLightProject( light->lightProject, vec3_origin /* light->parms.origin */, light->parms.target, 
-			light->parms.right, light->parms.up, light->parms.start, light->parms.end);
-	} else {
-		// point light
-		memset( light->lightProject, 0, sizeof( light->lightProject ) );
-		light->lightProject[0][0] = 0.5f / light->parms.lightRadius[0];
-		light->lightProject[1][1] = 0.5f / light->parms.lightRadius[1];
-		light->lightProject[3][2] = 0.5f / light->parms.lightRadius[2];
-		light->lightProject[0][3] = 0.5f;
-		light->lightProject[1][3] = 0.5f;
-		light->lightProject[2][3] = 1.0f;
-		light->lightProject[3][3] = 0.5f;
-	}
-
-	// set the frustum planes
-	R_SetLightFrustum( light->lightProject, light->frustum );
-
-	// rotate the light planes and projections by the axis
-	R_AxisToModelMatrix( light->parms.axis, light->parms.origin, light->modelMatrix );
-
-	for ( i = 0 ; i < 6 ; i++ ) {
-		idPlane		temp;
-		temp = light->frustum[i];
-		R_LocalPlaneToGlobal( light->modelMatrix, temp, light->frustum[i] );
-	}
-	for ( i = 0 ; i < 4 ; i++ ) {
-		idPlane		temp;
-		temp = light->lightProject[i];
-		R_LocalPlaneToGlobal( light->modelMatrix, temp, light->lightProject[i] );
-	}
-
-	// adjust global light origin for off center projections and parallel projections
-	// we are just faking parallel by making it a very far off center for now
-	if ( light->parms.parallel ) {
-		idVec3	dir;
-
-		dir = light->parms.lightCenter;
-		if ( !dir.Normalize() ) {
-			// make point straight up if not specified
-			dir[2] = 1;
-		}
-		light->globalLightOrigin = light->parms.origin + dir * 100000;
-	} else {
-		light->globalLightOrigin = light->parms.origin + light->parms.axis * light->parms.lightCenter;
-	}
-
-	R_FreeLightDefFrustum( light );
-
-	light->frustumTris = R_PolytopeSurface( 6, light->frustum, light->frustumWindings );
-
-	// a projected light will have one shadowFrustum, a point light will have
-	// six unless the light center is outside the box
-	R_MakeShadowFrustums( light );
-}
 
 /*
 =================
@@ -483,54 +264,15 @@ void R_CreateLightRefs( idRenderLightLocal *light ) {
 	// we can limit the area references to those visible through the portals from the light center.
 	// We can't do this in the normal case, because shadows are cast from back facing triangles, which
 	// may be in areas not directly visible to the light projection center.
-	if ( light->parms.prelightModel && r_useLightPortalFlow.GetBool() && light->lightShader->LightCastsShadows() ) {
+	if ( R_LightHasRealPrelightModel( light->parms ) && r_useLightPortalFlow.GetBool() && light->lightShader->LightCastsShadows() ) {
 		light->world->FlowLightThroughPortals( light );
 	} else {
 		// push these points down the BSP tree into areas
 		light->world->PushVolumeIntoTree( NULL, light, tri->numVerts, points );
 	}
 
-	static int s_lightRefLogCount = 0;
-	if ( s_lightRefLogCount < 16 ) {
-		int refCount = 0;
-		for ( areaReference_t *ref = light->references; ref; ref = ref->ownerNext ) {
-			++refCount;
-		}
-		common->Printf( "LightRefs: index=%d area=%d numAreas=%d frustumVerts=%d refs=%d shader='%s' point=%d radius=(%.1f %.1f %.1f) origin=(%.1f %.1f %.1f)\n",
-			light->index,
-			light->areaNum,
-			light->world ? light->world->NumAreas() : -1,
-			tri ? tri->numVerts : -1,
-			refCount,
-			light->lightShader ? light->lightShader->GetName() : "<null>",
-			light->parms.pointLight ? 1 : 0,
-			light->parms.lightRadius[0], light->parms.lightRadius[1], light->parms.lightRadius[2],
-			light->parms.origin[0], light->parms.origin[1], light->parms.origin[2] );
-		++s_lightRefLogCount;
-	}
 }
 
-/*
-===============
-R_RenderLightFrustum
-
-Called by the editor and dmap to operate on light volumes
-===============
-*/
-void R_RenderLightFrustum( const renderLight_t &renderLight, idPlane lightFrustum[6] ) {
-	idRenderLightLocal	fakeLight;
-
-	memset( &fakeLight, 0, sizeof( fakeLight ) );
-	fakeLight.parms = renderLight;
-
-	R_DeriveLightData( &fakeLight );
-	
-	R_FreeStaticTriSurf( fakeLight.frustumTris );
-
-	for ( int i = 0 ; i < 6 ; i++ ) {
-		lightFrustum[i] = fakeLight.frustum[i];
-	}
-}
 
 
 //=================================================================================
@@ -543,7 +285,8 @@ WindingCompletelyInsideLight
 bool WindingCompletelyInsideLight( const idWinding *w, const idRenderLightLocal *ldef ) {
 	int		i, j;
 
-	for ( i = 0 ; i < w->GetNumPoints() ; i++ ) {
+	const int windingPointCount = w->GetNumPoints();
+	for ( i = 0 ; i < windingPointCount ; i++ ) {
 		for ( j = 0 ; j < 6 ; j++ ) {
 			float	d;
 
@@ -649,7 +392,7 @@ Used by both RE_FreeEntityDef and RE_UpdateEntityDef
 Does not actually free the entityDef.
 ===================
 */
-void R_FreeEntityDefDerivedData( idRenderEntityLocal *def, bool keepDecals, bool keepCachedDynamicModel ) {
+void R_FreeEntityDefDerivedData( idRenderEntityLocal *def, bool keepDecals, bool keepCachedDynamicModel, bool keepDynamicModel ) {
 	int i;
 	areaReference_t	*ref, *next;
 
@@ -677,9 +420,15 @@ void R_FreeEntityDefDerivedData( idRenderEntityLocal *def, bool keepDecals, bool
 		def->firstInteraction->UnlinkAndFree();
 	}
 
-	// clear the dynamic model if present
-	if ( def->dynamicModel ) {
-		def->dynamicModel = NULL;
+	// clear the dynamic model if present; a transform-only update can keep the
+	// model-space snapshot because interactions and refs still rebuild above
+	if ( !keepDynamicModel ) {
+		if ( def->dynamicModel ) {
+			def->dynamicModel = NULL;
+		}
+		if ( def->dynamicCollisionModel ) {
+			def->dynamicCollisionModel = NULL;
+		}
 	}
 
 	if ( !keepDecals ) {
@@ -690,6 +439,8 @@ void R_FreeEntityDefDerivedData( idRenderEntityLocal *def, bool keepDecals, bool
 	if ( !keepCachedDynamicModel ) {
 		delete def->cachedDynamicModel;
 		def->cachedDynamicModel = NULL;
+		delete def->cachedDynamicCollisionModel;
+		def->cachedDynamicCollisionModel = NULL;
 	}
 
 	// free the entityRefs from the areas
@@ -724,6 +475,9 @@ void R_ClearEntityDefDynamicModel( idRenderEntityLocal *def ) {
 	// clear the dynamic model if present
 	if ( def->dynamicModel ) {
 		def->dynamicModel = NULL;
+	}
+	if ( def->dynamicCollisionModel ) {
+		def->dynamicCollisionModel = NULL;
 	}
 }
 
@@ -770,6 +524,7 @@ ReloadModels and RegenerateWorld call this
 ===================
 */
 void R_FreeDerivedData( void ) {
+	R_RenderThread_Sync( "derived world data" );
 	int i, j;
 	idRenderWorldLocal *rw;
 	idRenderEntityLocal *def;
@@ -841,6 +596,11 @@ void R_ReCreateWorldReferences( void ) {
 	// a particular view
 	tr.viewDef = NULL;
 
+	// entityRefs are about to be rebuilt without touching lastModifiedFrameNum,
+	// and memoized draw-surf areas can depend on the old ref chains through the
+	// solid-bounds fallback path
+	R_ClearDrawSurfAreaMemo();
+
 	for ( j = 0; j < tr.worlds.Num(); j++ ) {
 		rw = tr.worlds[j];
 
@@ -887,5 +647,5 @@ void R_RegenerateWorld_f( const idCmdArgs &args ) {
 
 	R_ReCreateWorldReferences();
 
-	common->Printf( "Regenerated world, staticAllocCount = %i.\n", tr.staticAllocCount );
+	common->Printf( "Regenerated world, staticAllocCount = %zu.\n", tr.staticAllocCount );
 }

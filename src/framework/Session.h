@@ -46,6 +46,22 @@ typedef struct {
 } logStats_t;
 
 static const int	MAX_LOGGED_STATS = 60 * 120;		// log every half second 
+static const int	OPENQ4_RENDERDEMO_CURRENT_VERSION = 12;
+static const int	OPENQ4_RENDERDEMO_ENTITY_EXTRAS_VERSION = 3;
+static const int	OPENQ4_RENDERDEMO_LIGHT_EXTRAS_VERSION = 4;
+static const int	OPENQ4_RENDERDEMO_RENDER_VIEW_DECLS_VERSION = 5;
+static const int	OPENQ4_RENDERDEMO_REMOTE_VIEW_VERSION = 5;
+static const int	OPENQ4_RENDERDEMO_POINTER_FREE_VERSION = 6;
+static const int	OPENQ4_RENDERDEMO_EFFECTS_VERSION = 7;
+static const int	OPENQ4_RENDERDEMO_VISIBILITY_EFFECTS_VERSION = 8;
+static const int	OPENQ4_RENDERDEMO_BRIGHTSKIN_VERSION = 9;
+static const int	OPENQ4_RENDERDEMO_FLAT_DIFFUSE_VERSION = 10;
+// Session records (DS_SESSION): a header, one self-contained segment per level
+// a recording spans, gameplay-only frames, a clean end and a raw summary trailer.
+static const int	OPENQ4_RENDERDEMO_SESSION_VERSION = 11;
+// An animated entity's joints are predicted from the joints last recorded for
+// its handle; only the residuals of the joints that moved are stored.
+static const int	OPENQ4_RENDERDEMO_JOINT_PREDICTION_VERSION = 12;
 
 typedef enum {
 	MSG_OK,
@@ -53,7 +69,6 @@ typedef enum {
 	MSG_OKCANCEL,
 	MSG_YESNO,
 	MSG_PROMPT,
-	MSG_CDKEY,
 	MSG_INFO,
 	MSG_WAIT
 } msgBoxType_t;
@@ -106,6 +121,8 @@ public:
 	virtual bool	IsGUIActive() const = 0;
 	// Returns the GUI currently receiving input, or NULL when none is active.
 	virtual idUserInterface *GetActiveGUI() const = 0;
+	// Returns true while the main-menu logo intro sequence is playing.
+	virtual bool	IsMainMenuIntroPlaying() const = 0;
 
 	// Processes the given event.
 	virtual	bool	ProcessEvent( const sysEvent_t *event ) = 0;
@@ -120,7 +137,6 @@ public:
 
 	// fires up the optional GUI event, also returns them if you set wait to true
 	// if MSG_PROMPT and wait, returns the prompt string or NULL if aborted
-	// if MSG_CDKEY and want, returns the cd key or NULL if aborted
 	// network tells wether one should still run the network loop in a wait dialog
 	virtual const char *MessageBox( msgBoxType_t type, const char *message, const char *title = NULL, bool wait = false, const char *fire_yes = NULL, const char *fire_no = NULL, bool network = false ) = 0;
 	virtual void	StopBox( void ) = 0;
@@ -133,8 +149,7 @@ public:
 	// doesn't advance and get things out of sync
 	virtual void	TimeHitch( int msec ) = 0;
 
-	// read and write the cd key data to files
-	// doesn't perform any validity checks
+	// Legacy CD key API (kept for compatibility; openQ4 no longer requires keys).
 	virtual void	ReadCDKey( void ) = 0;
 	virtual void	WriteCDKey( void ) = 0;
 
@@ -150,9 +165,6 @@ public:
 	virtual bool	CDKeysAreValid( bool strict ) = 0;
 	// wipe the key on file if the network check finds it invalid
 	virtual void	ClearCDKey( bool valid[ 2 ] ) = 0;
-
-	// configure gui variables for mainmenu.gui and cd key state
-	virtual void	SetCDKeyGuiVars( void ) = 0;
 
 	virtual bool	WaitingForGameAuth( void ) = 0;
 
@@ -176,5 +188,9 @@ public:
 };
 
 extern	idSession *	session;
+
+// Engine-only: the GUI that menu input is routed to, which can be a retained
+// screen covering GetActiveGUI(). Platform cursor code follows this one.
+idUserInterface *	Session_MenuInputGUI( void );
 
 #endif /* !__SESSION_H__ */

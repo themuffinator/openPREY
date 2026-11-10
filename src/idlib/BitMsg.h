@@ -27,6 +27,8 @@ public:
 	int				GetMaxSize( void ) const;				// get the maximum message size
 	void			SetAllowOverflow( bool set );			// generate error if not set and message is overflowed
 	bool			IsOverflowed( void ) const;				// returns true if the message was overflowed
+	bool			IsReadOverflowed( void ) const;			// returns true after a read requested data beyond the message
+	void			MarkReadOverflowed( void ) const;			// fail a higher-level semantic decode without changing object layout
 
 	int				GetSize( void ) const;					// size of the message in bytes
 	void			SetSize( int size );					// set the message size
@@ -181,12 +183,23 @@ ID_INLINE bool idBitMsg::IsOverflowed( void ) const {
 	return overflowed;
 }
 
+ID_INLINE bool idBitMsg::IsReadOverflowed( void ) const {
+	return readBit == 8;
+}
+
+ID_INLINE void idBitMsg::MarkReadOverflowed( void ) const {
+	readCount = curSize;
+	readBit = 8;
+}
+
 ID_INLINE int idBitMsg::GetSize( void ) const {
 	return curSize;
 }
 
 ID_INLINE void idBitMsg::SetSize( int size ) {
-	if ( size > maxSize ) {
+	if ( size < 0 ) {
+		curSize = 0;
+	} else if ( size > maxSize ) {
 		curSize = maxSize;
 	} else {
 		curSize = size;
@@ -266,7 +279,7 @@ ID_INLINE void idBitMsg::SaveReadState( int &c, int &b ) const {
 
 ID_INLINE void idBitMsg::RestoreReadState( int c, int b ) const {
 	readCount = c;
-	readBit = b & 7;
+	readBit = b == 8 ? 8 : b & 7;
 }
 
 ID_INLINE void idBitMsg::BeginWriting( void ) {
@@ -362,7 +375,9 @@ ID_INLINE void idBitMsg::BeginReading( void ) const {
 }
 
 ID_INLINE void idBitMsg::ReadByteAlign( void ) const {
-	readBit = 0;
+	if ( !IsReadOverflowed() ) {
+		readBit = 0;
+	}
 }
 
 ID_INLINE int idBitMsg::ReadChar( void ) const {
@@ -467,6 +482,8 @@ public:
 	void			Init( const idBitMsg *base, idBitMsg *newBase, idBitMsg *delta );
 	void			Init( const idBitMsg *base, idBitMsg *newBase, const idBitMsg *delta );
 	bool			HasChanged( void ) const;
+	bool			IsReadOverflowed( void ) const;
+	void			MarkReadOverflowed( void ) const;
 
 	void			WriteBits( int value, int numBits );
 	void			WriteChar( int c );
@@ -558,6 +575,22 @@ ID_INLINE idBitMsgDelta::idBitMsgDelta() {
 	writeDelta = NULL;
 	readDelta = NULL;
 	changed = false;
+}
+
+ID_INLINE bool idBitMsgDelta::IsReadOverflowed( void ) const {
+	// A conditional delta tail may legitimately extend beyond its trusted old
+	// base. The readers below promote that condition to wire overflow only if
+	// the delta asks to reuse a base value that is not available.
+	return readDelta != NULL ? readDelta->IsReadOverflowed() :
+		( base != NULL && base->IsReadOverflowed() );
+}
+
+ID_INLINE void idBitMsgDelta::MarkReadOverflowed( void ) const {
+	if ( readDelta != NULL ) {
+		readDelta->MarkReadOverflowed();
+	} else if ( base != NULL ) {
+		base->MarkReadOverflowed();
+	}
 }
 
 ID_INLINE void idBitMsgDelta::InitWriting( const idBitMsg *base, idBitMsg *newBase, idBitMsg *delta ) {

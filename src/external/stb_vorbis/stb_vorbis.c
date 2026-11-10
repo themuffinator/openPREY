@@ -244,6 +244,15 @@ extern void stb_vorbis_flush_pushdata(stb_vorbis *f);
 #endif
 
 
+// openQ4: bounded virtual-filesystem input. The caller owns the handle and must
+// keep it alive until close. seek returns nonzero on success, read a byte count.
+typedef struct
+{
+   int (*read)(void *user, unsigned char *data, int bytes);
+   int (*seek)(void *user, unsigned int offset);
+   unsigned int (*tell)(void *user);
+} stb_vorbis_callbacks;
+
 //////////   PULLING INPUT API
 
 #ifndef STB_VORBIS_NO_PULLDATA_API
@@ -267,6 +276,9 @@ extern int stb_vorbis_decode_memory(const unsigned char *mem, int len, int *chan
 
 extern stb_vorbis * stb_vorbis_open_memory(const unsigned char *data, int len,
                                   int *error, const stb_vorbis_alloc *alloc_buffer);
+
+extern stb_vorbis * stb_vorbis_open_callbacks(const stb_vorbis_callbacks *callbacks,
+   void *user, unsigned int length, int *error, const stb_vorbis_alloc *alloc_buffer);
 // create an ogg vorbis decoder from an ogg vorbis stream in memory (note
 // this must be the entire stream!). on failure, returns NULL and sets *error
 
@@ -310,6 +322,19 @@ extern int stb_vorbis_seek_start(stb_vorbis *f);
 extern unsigned int stb_vorbis_stream_length_in_samples(stb_vorbis *f);
 extern float        stb_vorbis_stream_length_in_seconds(stb_vorbis *f);
 // these functions return the total length of the vorbis stream
+
+// openQ4: a stream whose final page carries no granule position (or whose
+// final page lies beyond trailing bytes) has no length, and stb_vorbis cannot
+// seek it. find_last_granule scans every page for the last one that carries a
+// position; set_length then supplies the length a complete decode counted, so
+// seeking bisects the pages up to that page and decodes forward from there.
+// set_length refuses a stream that already has a length.
+typedef struct
+{
+   unsigned int page_start, page_end, granule;
+} stb_vorbis_openq4_granule_page;
+extern int stb_vorbis_openq4_find_last_granule(stb_vorbis *f, stb_vorbis_openq4_granule_page *page);
+extern int stb_vorbis_openq4_set_length(stb_vorbis *f, unsigned int total_samples, const stb_vorbis_openq4_granule_page *page);
 
 extern int stb_vorbis_get_frame_float(stb_vorbis *f, int *channels, float ***output);
 // decode the next frame and return the number of samples. the number of
@@ -797,6 +822,8 @@ struct stb_vorbis
    char **comment_list;
 
   // input config
+   stb_vorbis_callbacks callbacks;
+   void *callback_user;
 #ifndef STB_VORBIS_NO_STDIO
    FILE *f;
    uint32 f_start;
@@ -1336,6 +1363,11 @@ static int STBV_CDECL point_compare(const void *p, const void *q)
 
 static uint8 get8(vorb *z)
 {
+   if (z->callbacks.read) {
+      uint8 value = 0;
+      if (z->callbacks.read(z->callback_user, &value, 1) != 1) z->eof = TRUE;
+      return value;
+   }
    if (USE_MEMORY(z)) {
       if (z->stream >= z->stream_end) { z->eof = TRUE; return 0; }
       return *z->stream++;
@@ -1362,6 +1394,11 @@ static uint32 get32(vorb *f)
 
 static int getn(vorb *z, uint8 *data, int n)
 {
+   if (z->callbacks.read) {
+      if (z->callbacks.read(z->callback_user, data, n) == n) return 1;
+      z->eof = TRUE;
+      return 0;
+   }
    if (USE_MEMORY(z)) {
       if (z->stream+n > z->stream_end) { z->eof = 1; return 0; }
       memcpy(data, z->stream, n);
@@ -1381,6 +1418,13 @@ static int getn(vorb *z, uint8 *data, int n)
 
 static void skip(vorb *z, int n)
 {
+   if (z->callbacks.read) {
+      unsigned int pos = z->callbacks.tell(z->callback_user);
+      if ((pos > z->stream_len) || (n < 0 && pos < (0u - (unsigned int)n)) ||
+          (n >= 0 && (unsigned int)n > z->stream_len - pos) ||
+          !z->callbacks.seek(z->callback_user, pos + n)) z->eof = TRUE;
+      return;
+   }
    if (USE_MEMORY(z)) {
       z->stream += n;
       if (z->stream >= z->stream_end) z->eof = 1;
@@ -1400,8 +1444,13 @@ static int set_file_offset(stb_vorbis *f, unsigned int loc)
    if (f->push_mode) return 0;
    #endif
    f->eof = 0;
+   if (f->callbacks.read) {
+      if (loc <= f->stream_len && f->callbacks.seek(f->callback_user, loc)) return 1;
+      f->eof = TRUE;
+      return 0;
+   }
    if (USE_MEMORY(f)) {
-      if (f->stream_start + loc >= f->stream_end || f->stream_start + loc < f->stream_start) {
+      if (loc >= (unsigned int) (f->stream_end - f->stream_start)) {
          f->stream = f->stream_end;
          f->eof = 1;
          return 0;
@@ -4544,6 +4593,7 @@ stb_vorbis *stb_vorbis_open_pushdata(
 
 unsigned int stb_vorbis_get_file_offset(stb_vorbis *f)
 {
+   if (f->callbacks.read) return f->callbacks.tell(f->callback_user);
    #ifndef STB_VORBIS_NO_PUSHDATA_API
    if (f->push_mode) return 0;
    #endif
@@ -5023,6 +5073,47 @@ float stb_vorbis_stream_length_in_seconds(stb_vorbis *f)
    return stb_vorbis_stream_length_in_samples(f) / (float) f->sample_rate;
 }
 
+// openQ4: see the declarations of these two functions.
+int stb_vorbis_openq4_find_last_granule(stb_vorbis *f, stb_vorbis_openq4_granule_page *out)
+{
+   ProbedPage page;
+   unsigned int restore_offset, end;
+   int found = 0;
+
+   if (IS_PUSH_MODE(f)) return error(f, VORBIS_invalid_api_mixing);
+   if (!out) return 0;
+   restore_offset = stb_vorbis_get_file_offset(f);
+   set_file_offset(f, f->first_audio_page_offset);
+   while (vorbis_find_page(f, &end, NULL)) {
+      if (!get_seek_page_info(f, &page)) break;
+      if (page.last_decoded_sample != ~0U) {
+         out->page_start = page.page_start;
+         out->page_end   = page.page_end;
+         out->granule    = page.last_decoded_sample;
+         found = 1;
+      }
+      if (end <= page.page_start) break;
+      set_file_offset(f, end);
+   }
+   set_file_offset(f, restore_offset);
+   return found;
+}
+
+int stb_vorbis_openq4_set_length(stb_vorbis *f, unsigned int total_samples, const stb_vorbis_openq4_granule_page *page)
+{
+   if (IS_PUSH_MODE(f)) return error(f, VORBIS_invalid_api_mixing);
+   if (stb_vorbis_stream_length_in_samples(f) != 0) return 0;
+   if (!page || !total_samples || total_samples == SAMPLE_unknown || page->granule == ~0U ||
+       page->granule > total_samples || page->page_end <= page->page_start ||
+       page->page_start < f->first_audio_page_offset || page->page_end > f->stream_len)
+      return 0;
+   f->p_last.page_start = page->page_start;
+   f->p_last.page_end   = page->page_end;
+   f->p_last.last_decoded_sample = page->granule;
+   f->total_samples = total_samples;
+   return 1;
+}
+
 
 
 int stb_vorbis_get_frame_float(stb_vorbis *f, int *channels, float ***output)
@@ -5095,6 +5186,33 @@ stb_vorbis * stb_vorbis_open_filename(const char *filename, int *error, const st
    return NULL;
 }
 #endif // STB_VORBIS_NO_STDIO
+
+stb_vorbis * stb_vorbis_open_callbacks(const stb_vorbis_callbacks *callbacks,
+   void *user, unsigned int length, int *error, const stb_vorbis_alloc *alloc)
+{
+   stb_vorbis *f, p;
+   if (!callbacks || !callbacks->read || !callbacks->seek || !callbacks->tell ||
+       !length || !callbacks->seek(user, 0)) {
+      if (error) *error = VORBIS_file_open_failure;
+      return NULL;
+   }
+   vorbis_init(&p, alloc);
+   p.callbacks = *callbacks;
+   p.callback_user = user;
+   p.stream_len = length;
+   if (start_decoder(&p)) {
+      f = vorbis_alloc(&p);
+      if (f) {
+         *f = p;
+         vorbis_pump_first_frame(f);
+         if (error) *error = VORBIS__no_error;
+         return f;
+      }
+   }
+   if (error) *error = p.error;
+   vorbis_deinit(&p);
+   return NULL;
+}
 
 stb_vorbis * stb_vorbis_open_memory(const unsigned char *data, int len, int *error, const stb_vorbis_alloc *alloc)
 {

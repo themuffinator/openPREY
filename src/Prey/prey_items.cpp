@@ -269,6 +269,16 @@ bool hhItem::MultiplayerPickup( idPlayer *player ) {
 		return false;
 	}
 
+	// A named bot may have committed to this visible pickup.  Tell it who won
+	// the race while both the item and picker are still authoritative, so the
+	// itemDenied voice event can use $item and $other safely.
+	for ( int i = 0; i < gameLocal.numClients; ++i ) {
+		idEntity *entity = gameLocal.entities[i];
+		if ( entity && entity->IsType( hhArtificialPlayer::Type ) ) {
+			static_cast<hhArtificialPlayer *>( entity )->OnBotItemPickedUp( this, player );
+		}
+	}
+
 	DetermineRemoveOrRespawn( AnnouncePickup(player) );
 	return true;
 }

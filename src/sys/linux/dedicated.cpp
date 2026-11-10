@@ -28,7 +28,10 @@ If you have questions concerning this license or the applicable additional terms
 #include "../../idlib/precompiled.h"
 #include "../../renderer/tr_local.h"
 #include "../posix/posix_public.h"
-#include "local.h"
+
+#if !defined( __linux__ ) || !defined( ID_DEDICATED )
+	#error "linux/dedicated.cpp is only for Linux dedicated-server builds"
+#endif
 
 /*
 ==========
@@ -39,28 +42,31 @@ input
 void Sys_InitInput( void ) { }
 
 void Sys_ShutdownInput( void ) { }
+void Sys_ClearInputEvents( void ) { }
 
 void Sys_GrabMouseCursor( bool ) { }
-
-bool Sys_IsGameWindowFocused( void ) { return true; }
 
 int Sys_PollMouseInputEvents( void ) { return 0; }
 
 void Sys_EndMouseInputEvents( void ) { }
 
-int Sys_ReturnMouseInputEvent( const int n, int &action, int &value ) { return 0; }
+int Sys_ReturnMouseInputEvent( const int n, int &action, int &value ) { action = 0; value = 0; return 0; }
 
 int Sys_PollKeyboardInputEvents( void ) { return 0; }
 
 void Sys_EndKeyboardInputEvents( void ) { }
 
-int Sys_ReturnKeyboardInputEvent( const int n, int &action, bool &state ) { return 0; }
+int Sys_ReturnKeyboardInputEvent( const int n, int &action, bool &state ) { action = 0; state = false; return 0; }
 
 int Sys_PollJoystickInputEvents( void ) { return 0; }
 
-int Sys_ReturnJoystickInputEvent( const int n, int &axis, int &value ) { return 0; }
+int Sys_ReturnJoystickInputEvent( const int n, int &axis, int &value ) { axis = 0; value = 0; return 0; }
 
 void Sys_EndJoystickInputEvents( void ) { }
+
+bool Sys_GetJoystickAxisState( int axis, int &value ) { value = 0; return false; }
+
+bool Sys_SetJoystickRumble( float lowFrequency, float highFrequency, int durationMsec ) { return false; }
 
 unsigned char Sys_MapCharForKey( int key ) { return (unsigned char)key; }
 
@@ -74,27 +80,13 @@ int Sys_GetVideoRam( void ) {
 	return 64;
 }
 
-/*
-==========
-GL
-==========
-*/
-
-void GLimp_EnableLogging( bool enable ) { }
-
-bool GLimp_Init( glimpParms_t a ) { return true; }
-
-void GLimp_SetGamma( unsigned short red[256], 
-				    unsigned short green[256],
-					unsigned short blue[256] ) { }
-
-void GLimp_Shutdown( void ) { }
-
-void GLimp_SwapBuffers( void ) { }
-
-void GLimp_DeactivateContext( void ) { }
-
-void GLimp_ActivateContext( void ) { }
-
-bool GLimp_SetScreenParms( glimpParms_t parms ) { return true; }
+bool Sys_GetDesktopResolution( int *width, int *height ) {
+	if ( width != NULL ) {
+		*width = 0;
+	}
+	if ( height != NULL ) {
+		*height = 0;
+	}
+	return false;
+}
 

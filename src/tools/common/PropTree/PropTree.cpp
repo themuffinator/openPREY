@@ -889,7 +889,7 @@ LRESULT CPropTree::SendNotify(UINT nNotifyCode, CPropTreeItem* pItem)
 
 	if (lpnm)
 	{
-		UINT id = (UINT)::GetMenu(m_hWnd);
+		const UINT_PTR id = static_cast< UINT_PTR >( ::GetDlgCtrlID( m_hWnd ) );
 		lpnm->code = nNotifyCode;
 		lpnm->hwndFrom = m_hWnd;
 		lpnm->idFrom = id;

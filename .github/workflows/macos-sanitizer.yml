@@ -1,0 +1,235 @@
+name: DISABLED - inherited OpenQ4 reference (macOS Sanitizer)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bridge:
+        description: "macOS graphics bridge to instrument"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - opengl
+          - metal
+      run_runtime_assetless:
+        description: "Run the fail-fast assetless sanitizer smoke"
+        required: true
+        default: true
+        type: boolean
+      retention_days:
+        description: "Diagnostic artifact retention"
+        required: true
+        default: "14"
+        type: choice
+        options:
+          - "7"
+          - "14"
+          - "30"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openq4-macos-sanitizer-${{ github.ref }}-${{ inputs.bridge }}
+  cancel-in-progress: false
+
+jobs:
+  macos-sanitizer:
+    if: ${{ false }} # OPENPREY-GATED: split-module/OpenQ4 source contract
+    name: macOS ${{ matrix.bridge_label }} ASan+UBSan
+    runs-on: macos-15
+    timeout-minutes: 150
+    env:
+      OPENQ4_GAMELIBS_REPO: ${{ github.workspace }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:detect_leaks=0
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      MallocNanoZone: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bridge_label: OpenGL
+            bridge: opengl
+            artifact_suffix: opengl
+          - bridge_label: Metal bridge
+            bridge: metal
+            artifact_suffix: metal
+
+    steps:
+      - name: Select bridge
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.bridge }}"
+          bridge="${{ matrix.bridge }}"
+          if [[ "${requested}" != "both" && "${requested}" != "${bridge}" ]]; then
+            echo "selected=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "selected=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Checkout
+        if: steps.select.outputs.selected == 'true'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        if: steps.select.outputs.selected == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Install Meson and Ninja
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja
+
+      - name: Prepare pinned OpenAL Soft
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          prepared_root="${GITHUB_WORKSPACE}/.tmp/openal-soft-macos-arm64"
+          bash tools/build/prepare_macos_openal_soft.sh \
+            --architecture arm64 \
+            --deployment-target "${MACOSX_DEPLOYMENT_TARGET}" \
+            --output-root "${prepared_root}" \
+            --stage-install-dir .install
+          echo "PKG_CONFIG_PATH=${prepared_root}/lib/pkgconfig" >> "${GITHUB_ENV}"
+
+      - name: Record host diagnostics
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Host"
+            sw_vers
+            uname -a
+            echo
+            echo "## Xcode"
+            xcodebuild -version
+            xcrun --show-sdk-version
+            xcrun --find clang
+            clang --version
+          } | tee macos-sanitizer-host-${{ matrix.artifact_suffix }}.txt
+
+      - name: Validate sanitizer workflow contract
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/tests/macos_sanitizer_ci.py
+
+      - name: Configure ASan and UBSan
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh setup --wipe builddir . \
+            --backend ninja \
+            --buildtype=debug \
+            --wrap-mode=forcefallback \
+            -Dplatform_backend=sdl3 \
+            -Dmacos_graphics_bridge=${{ matrix.bridge }} \
+            -Dmacos_openal_provider=system \
+            -Duse_pch=false \
+            -Didlib_asserts=true \
+            -Db_sanitize=address,undefined
+
+      - name: Compile instrumented engine and game modules
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh compile -C builddir
+
+      - name: Stage instrumented runtime
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build/meson_setup.sh install -C builddir --no-rebuild --skip-subprojects
+
+      - name: Verify sanitizer instrumentation
+        if: steps.select.outputs.selected == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="macos-sanitizer-binaries-${{ matrix.artifact_suffix }}.txt"
+          : > "${report}"
+          binaries=(
+            .install/openQ4-client_arm64
+            .install/openQ4-ded_arm64
+            .install/baseoq4/game-sp_arm64.dylib
+            .install/baseoq4/game-mp_arm64.dylib
+          )
+          for binary in "${binaries[@]}"; do
+            if [[ -L "${binary}" || ! -x "${binary}" ]]; then
+              echo "Missing or non-executable sanitizer binary: ${binary}" | tee -a "${report}"
+              exit 1
+            fi
+            {
+              echo "## ${binary}"
+              file "${binary}"
+              lipo -archs "${binary}"
+              otool -L "${binary}"
+              nm -u "${binary}" | grep -E '(__asan|__ubsan)' | sed -n '1,40p'
+              echo
+            } | tee -a "${report}"
+            if ! lipo -archs "${binary}" | tr ' ' '\n' | grep -Fx arm64 >/dev/null; then
+              echo "Sanitizer binary is missing the arm64 slice: ${binary}" | tee -a "${report}"
+              exit 1
+            fi
+            if ! otool -L "${binary}" | grep -F 'libclang_rt.asan_osx_dynamic.dylib' >/dev/null; then
+              echo "Sanitizer binary does not link the macOS ASan runtime: ${binary}" | tee -a "${report}"
+              exit 1
+            fi
+            if ! nm -u "${binary}" | grep -Eq '(__asan|__ubsan)'; then
+              echo "Sanitizer binary has no ASan/UBSan instrumentation references: ${binary}" | tee -a "${report}"
+              exit 1
+            fi
+          done
+
+      - name: Run fail-fast assetless sanitizer smoke
+        if: steps.select.outputs.selected == 'true' && inputs.run_runtime_assetless
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir=".tmp/macos-sanitizer-${{ matrix.artifact_suffix }}-runtime"
+          python tools/tests/renderer_validation_matrix.py \
+            --executable .install/openQ4-client_arm64 \
+            --cases renderer-default-safety-selftest \
+            --tiers auto \
+            --timeout 180 \
+            --basepath "" \
+            --savepath "${output_dir}/save" \
+            --skip-official-pak-validation \
+            --output-dir "${output_dir}/report"
+
+          if grep -R -E 'ERROR: AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:' "${output_dir}"; then
+            echo "Sanitizer diagnostics were found despite a zero-status runtime probe."
+            exit 1
+          fi
+
+      - name: Publish sanitizer diagnostics
+        if: always() && steps.select.outputs.selected == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-sanitizer-${{ matrix.artifact_suffix }}
+          path: |
+            macos-sanitizer-host-${{ matrix.artifact_suffix }}.txt
+            macos-sanitizer-binaries-${{ matrix.artifact_suffix }}.txt
+            builddir/meson-logs
+            builddir/openq4_game_sources.json
+            .tmp/macos-sanitizer-${{ matrix.artifact_suffix }}-runtime
+          if-no-files-found: warn
+          retention-days: ${{ fromJSON(inputs.retention_days) }}
+          include-hidden-files: true

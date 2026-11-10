@@ -44,6 +44,7 @@ public:
 	virtual void			FreeModel( idRenderModel *model );
 	virtual idRenderModel *	FindModel( const char *modelName );
 	virtual idRenderModel *	CheckModel( const char *modelName );
+	virtual bool			ContainsModel( const idRenderModel *model ) const;
 	virtual idRenderModel *	DefaultModel();
 	virtual void			AddModel( idRenderModel *model );
 	virtual void			RemoveModel( idRenderModel *model );
@@ -76,6 +77,147 @@ private:
 
 idRenderModelManagerLocal	localModelManager;
 idRenderModelManager *		renderModelManager = &localModelManager;
+
+/*
+=================
+R_ModelManager_BuildMD5RName
+
+Retail Quake 4 derives prebuilt companions from the canonical source model
+name. Static authored assets get a "_static" suffix before the .md5r
+extension, skeletal assets keep the base stem unchanged.
+=================
+*/
+static void R_ModelManager_BuildMD5RName( idStr &md5rName, const idStr &canonical, const idStr &extension ) {
+	md5rName = canonical;
+	md5rName.StripAbsoluteFileExtension();
+
+	if ( extension.Icmp( "ase" ) == 0
+		|| extension.Icmp( "lwo" ) == 0
+		|| extension.Icmp( "flt" ) == 0 ) {
+		md5rName += "_static";
+	}
+
+	md5rName += ".md5r";
+}
+
+/*
+=================
+R_ModelManager_FindLoadablePrebuiltMD5R
+
+ Retail prefers a compiled .md5rc companion when present, then falls back to
+ the plain .md5r file. openQ4 mirrors that probe order and always hands the
+ canonical .md5r name to the binary-aware lexer so it can resolve either form.
+=================
+*/
+static bool R_ModelManager_FindLoadablePrebuiltMD5R( const idStr &md5rName, idStr &loadableName ) {
+	loadableName.Clear();
+
+	if ( r_forceConvertMD5R.GetBool() ) {
+		return false;
+	}
+
+	idStr compiledName = md5rName;
+	compiledName += "c";
+
+	// The binary-aware lexer only probes the compiled companion when binary
+	// reads are enabled. Do not select an orphaned .md5rc while the ASCII lexer
+	// is active, because it can only open the canonical .md5r source.
+	if ( cvarSystem->GetCVarBool( "com_binaryRead" ) ) {
+		if ( idFile *compiledFile = fileSystem->OpenFileRead( compiledName ) ) {
+			fileSystem->CloseFile( compiledFile );
+			loadableName = md5rName;
+			return true;
+		}
+	}
+
+	if ( idFile *sourceFile = fileSystem->OpenFileRead( md5rName ) ) {
+		fileSystem->CloseFile( sourceFile );
+		loadableName = md5rName;
+		return true;
+	}
+
+	return false;
+}
+
+/*
+=================
+R_ModelManager_MaybeConvertMD5ToMD5R
+
+ Retail Quake 4 can swap authored MD5 assets over to rvRenderModelMD5R here.
+=================
+*/
+static idRenderModel *R_ModelManager_MaybeConvertMD5ToMD5R( idRenderModelMD5 *sourceModel ) {
+	if ( sourceModel == NULL ) {
+		return NULL;
+	}
+
+	// cvar-system lookup, not idAsyncNetwork::serverDedicated: the renderer
+	// module cannot reference engine cvar objects across the DLL boundary
+	if ( sourceModel->IsDefaultModel()
+		|| cvarSystem->GetCVarInteger( "net_serverDedicated" ) != 0 ) {
+		return sourceModel;
+	}
+
+	R_DisableUnavailableMD5RCVar( r_convertMD5toMD5R, "the rvRenderModelMD5R runtime" );
+
+	if ( !r_convertMD5toMD5R.GetBool() ) {
+		return sourceModel;
+	}
+
+	rvRenderModelMD5R *convertedModel = new rvRenderModelMD5R;
+	if ( convertedModel == NULL ) {
+		common->Error( "ModelManager: out of memory" );
+		return sourceModel;
+	}
+
+	if ( !convertedModel->InitFromMD5Model( *sourceModel ) ) {
+		common->Warning( "Failed to convert the MD5 '%s' to an MD5R", sourceModel->Name() );
+		delete convertedModel;
+		return sourceModel;
+	}
+
+	delete sourceModel;
+	return convertedModel;
+}
+
+/*
+=================
+R_ModelManager_MaybeConvertStaticToMD5R
+
+ This mirrors the loader-side seam retail uses for static-model MD5R conversion.
+=================
+*/
+static idRenderModel *R_ModelManager_MaybeConvertStaticToMD5R( idRenderModelStatic *sourceModel ) {
+	if ( sourceModel == NULL ) {
+		return NULL;
+	}
+
+	if ( sourceModel->IsDefaultModel() ) {
+		return sourceModel;
+	}
+
+	R_DisableUnavailableMD5RCVar( r_convertStaticToMD5R, "the rvRenderModelMD5R runtime" );
+
+	if ( !r_convertStaticToMD5R.GetBool() ) {
+		return sourceModel;
+	}
+
+	rvRenderModelMD5R *convertedModel = new rvRenderModelMD5R;
+	if ( convertedModel == NULL ) {
+		common->Error( "ModelManager: out of memory" );
+		return sourceModel;
+	}
+
+	if ( !convertedModel->InitFromStaticModel( *sourceModel, MD5R_SOURCE_LWO_ASE_FLT ) ) {
+		common->Warning( "Failed to convert the static model '%s' to an MD5R", sourceModel->Name() );
+		delete convertedModel;
+		return sourceModel;
+	}
+
+	collisionModelManager->ExtractCollisionModel( sourceModel, sourceModel->Name() );
+	delete sourceModel;
+	return convertedModel;
+}
 
 /*
 ==============
@@ -194,10 +336,11 @@ void idRenderModelManagerLocal::WritePrecacheCommands( idFile *f ) {
 			continue;
 		}
 
-		char	str[1024];
-		sprintf( str, "touchModel %s\n", model->Name() );
-		common->Printf( "%s", str );
-		f->Printf( "%s", str );
+		idStr command = "touchModel ";
+		command += model->Name();
+		command += "\n";
+		common->Printf( "%s", command.c_str() );
+		f->Printf( "%s", command.c_str() );
 	}
 }
 
@@ -254,6 +397,8 @@ idRenderModelManagerLocal::GetModel
 idRenderModel *idRenderModelManagerLocal::GetModel( const char *modelName, bool createIfNotFound ) {
 	idStr		canonical;
 	idStr		extension;
+	idStr		md5rName;
+	idStr		loadableMD5RName;
 
 	if ( !modelName || !modelName[0] ) {
 		return NULL;
@@ -290,14 +435,46 @@ idRenderModel *idRenderModelManagerLocal::GetModel( const char *modelName, bool 
 
 	canonical.ExtractFileExtension( extension );
 
-	if ( ( extension.Icmp( "ase" ) == 0 ) || ( extension.Icmp( "lwo" ) == 0 ) || ( extension.Icmp( "flt" ) == 0 ) ) {
-		model = new idRenderModelStatic;
-		model->InitFromFile( modelName );
+	if ( extension.Icmp( "ase" ) == 0
+		|| extension.Icmp( "lwo" ) == 0
+		|| extension.Icmp( "flt" ) == 0
+		|| extension.Icmp( MD5_MESH_EXT ) == 0 ) {
+		R_ModelManager_BuildMD5RName( md5rName, canonical, extension );
+
+		const int md5rKey = hash.GenerateKey( md5rName, false );
+		for ( int i = hash.First( md5rKey ); i != -1; i = hash.Next( i ) ) {
+			idRenderModel *cachedModel = models[i];
+
+			if ( md5rName.Icmp( cachedModel->Name() ) == 0 ) {
+				if ( !cachedModel->IsLoaded() ) {
+					cachedModel->LoadModel();
+				} else if ( insideLevelLoad && !cachedModel->IsLevelLoadReferenced() ) {
+					cachedModel->TouchData();
+				}
+				cachedModel->SetLevelLoadReferenced( true );
+				return cachedModel;
+			}
+		}
+
+		R_ModelManager_FindLoadablePrebuiltMD5R( md5rName, loadableMD5RName );
+	}
+
+	if ( loadableMD5RName.Length() != 0 ) {
+		model = new rvRenderModelMD5R;
+		model->InitFromFile( loadableMD5RName.c_str() );
+	} else if ( ( extension.Icmp( "ase" ) == 0 ) || ( extension.Icmp( "lwo" ) == 0 ) || ( extension.Icmp( "flt" ) == 0 ) ) {
+		idRenderModelStatic *staticModel = new idRenderModelStatic;
+		staticModel->InitFromFile( modelName );
+		model = R_ModelManager_MaybeConvertStaticToMD5R( staticModel );
 	} else if ( extension.Icmp( "ma" ) == 0 ) {
 		model = new idRenderModelStatic;
 		model->InitFromFile( modelName );
 	} else if ( extension.Icmp( MD5_MESH_EXT ) == 0 ) {
-		model = new idRenderModelMD5;
+		idRenderModelMD5 *md5Model = new idRenderModelMD5;
+		md5Model->InitFromFile( modelName );
+		model = R_ModelManager_MaybeConvertMD5ToMD5R( md5Model );
+	} else if ( extension.Icmp( MD5R_MODEL_EXT ) == 0 ) {
+		model = new rvRenderModelMD5R;
 		model->InitFromFile( modelName );
 	} else if ( extension.Icmp( "md3" ) == 0 ) {
 		model = new idRenderModelMD3;
@@ -402,6 +579,19 @@ idRenderModel *idRenderModelManagerLocal::CheckModel( const char *modelName ) {
 
 /*
 =================
+idRenderModelManagerLocal::ContainsModel
+=================
+*/
+bool idRenderModelManagerLocal::ContainsModel( const idRenderModel *model ) const {
+	if ( model == NULL ) {
+		return false;
+	}
+
+	return models.FindIndex( const_cast<idRenderModel *>( model ) ) >= 0;
+}
+
+/*
+=================
 idRenderModelManagerLocal::DefaultModel
 =================
 */
@@ -478,6 +668,7 @@ idRenderModelManagerLocal::FreeModelVertexCaches
 =================
 */
 void idRenderModelManagerLocal::FreeModelVertexCaches() {
+	R_RenderThread_Sync( "model caches" );
 	for ( int i = 0 ; i < models.Num() ; i++ ) {
 		idRenderModel *model = models[i];
 		model->FreeVertexCache();
@@ -492,15 +683,35 @@ idRenderModelManagerLocal::BeginLevelLoad
 void idRenderModelManagerLocal::BeginLevelLoad() {
 	insideLevelLoad = true;
 
+	// Models decoded from the generated cache must not outlive a pure lock
+	// (or fs_restrict): once the filesystem refuses those reads, purge them so
+	// this level derives them again from the pure paks. See
+	// idFileSystemLocal::GeneratedCacheReadsRefused.
+	const bool purgeGeneratedCacheContent =
+		!fileSystem->GeneratedCacheReadsEnabled( GENERATED_CACHE_RENDER_MODEL );
+	int generatedCachePurges = 0;
+
 	for ( int i = 0 ; i < models.Num() ; i++ ) {
 		idRenderModel *model = models[i];
+		const idRenderModelStatic *staticModel = dynamic_cast<const idRenderModelStatic *>( model );
+		const bool cacheContent = purgeGeneratedCacheContent && staticModel != NULL
+			&& staticModel->HoldsGeneratedCacheContent();
 
-		if ( com_purgeAll.GetBool() && model->IsReloadable() ) {
+		// a cache payload carries its own reloadable flag, so it is not
+		// consulted here; every cached model came from a file it can reload
+		if ( ( com_purgeAll.GetBool() && model->IsReloadable() ) || cacheContent ) {
 			R_CheckForEntityDefsUsingModel( model );
 			model->PurgeModel();
+			if ( cacheContent ) {
+				generatedCachePurges++;
+			}
 		}
 
 		model->SetLevelLoadReferenced( false );
+	}
+	if ( generatedCachePurges > 0 ) {
+		common->Printf( "%i models decoded from the generated cache purged: generated-cache reads are refused\n",
+			generatedCachePurges );
 	}
 
 	// purge unused triangle surface memory
@@ -637,7 +848,7 @@ void idRenderModelManagerLocal::PrintMemInfo( MemInfo_t *mi ) {
 		f->Printf( "%s %s\n", idStr::FormatNumber( mem ).c_str(), model->Name() );
 	}
 
-	delete sortIndex;
+	delete[] sortIndex;
 	mi->modelAssetsTotal = totalMem;
 
 	f->Printf( "\nTotal model bytes allocated: %s\n", idStr::FormatNumber( totalMem ).c_str() );

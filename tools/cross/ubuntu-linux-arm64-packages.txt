@@ -1,0 +1,18 @@
+# Native build-machine tools
+crossbuild-essential-arm64
+libc6-dev-arm64-cross
+pkg-config
+wayland-protocols
+libwayland-bin
+
+# Linux ARM64 target development packages
+libdbus-1-dev:arm64
+libdecor-0-dev:arm64
+libegl-dev:arm64
+libgl-dev:arm64
+libopengl-dev:arm64
+libopenal-dev:arm64
+libpipewire-0.3-dev:arm64
+libudev-dev:arm64
+libwayland-dev:arm64
+libxkbcommon-dev:arm64

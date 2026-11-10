@@ -30,9 +30,13 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "../../renderer/tr_local.h"
 
+#if !defined( __linux__ ) || !defined( ID_DEDICATED )
+	#error "stub_gl.cpp is only for Linux dedicated-server builds"
+#endif
+
 void glAccum(GLenum op, GLfloat value){};
 void glAlphaFunc(GLenum func, GLclampf ref){};
-GLboolean glAreTexturesResident(GLsizei n, const GLuint *textures, GLboolean *residences){};
+GLboolean glAreTexturesResident(GLsizei n, const GLuint *textures, GLboolean *residences){return GL_FALSE;};
 void glArrayElement(GLint i){};
 void glBegin(GLenum mode){};
 void glBindTexture(GLenum target, GLuint texture){};
@@ -184,9 +188,9 @@ void glIndexub(GLubyte c){};
 void glIndexubv(const GLubyte *c){};
 void glInitNames(void){};
 void glInterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer){};
-GLboolean glIsEnabled(GLenum cap){};
-GLboolean glIsList(GLuint list){};
-GLboolean glIsTexture(GLuint texture){};
+GLboolean glIsEnabled(GLenum cap){return GL_FALSE;};
+GLboolean glIsList(GLuint list){return GL_FALSE;};
+GLboolean glIsTexture(GLuint texture){return GL_FALSE;};
 void glLightModelf(GLenum pname, GLfloat param){};
 void glLightModelfv(GLenum pname, const GLfloat *params){};
 void glLightModeli(GLenum pname, GLint param){};
@@ -287,7 +291,7 @@ void glRecti(GLint x1, GLint y1, GLint x2, GLint y2){};
 void glRectiv(const GLint *v1, const GLint *v2){};
 void glRects(GLshort x1, GLshort y1, GLshort x2, GLshort y2){};
 void glRectsv(const GLshort *v1, const GLshort *v2){};
-GLint glRenderMode(GLenum mode){};
+GLint glRenderMode(GLenum mode){return 0;};
 void glRotated(GLdouble angle, GLdouble x, GLdouble y, GLdouble z){};
 void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z){};
 void glScaled(GLdouble x, GLdouble y, GLdouble z){};
@@ -382,14 +386,36 @@ void GLimp_WakeBackEnd(void*a) {};
 void GLimp_EnableLogging(bool) {};
 void GLimp_FrontEndSleep() {};
 void GLimp_ActivateContext() {};
+bool GLimp_EnsureActiveContext(const char *) {return true;};
 void GLimp_DeactivateContext() {};
 bool GLimp_SpawnRenderThread(void (*a)()) {return false;};
 
-static void StubFunction( void ) {};
-GLExtension_t GLimp_ExtensionPointer( const char *a) { return StubFunction; };
+void *GLimp_ExtensionPointer( const char *name ) {
+	(void)name;
+	return NULL;
+};
 
 bool GLimp_Init(glimpParms_t a) {return true;};
+bool GLimp_SetScreenParms(glimpParms_t a) {return true;};
 void GLimp_SetGamma(unsigned short*a, unsigned short*b, unsigned short*c) {};
+bool GLimp_UseNativeGammaRamps(void) {return false;};
+void GLimp_PreserveWindowOnShutdown(bool preserve) {(void)preserve;};
 void GLimp_Shutdown() {};
 void GLimp_SwapBuffers() {};
 void *GLimp_BackEndSleep() {return 0;};
+
+extern "C" {
+typedef void ( *openQ4GlewProcAddress_t ) (void);
+
+openQ4GlewProcAddress_t OpenQ4_GlewGetProcAddress( const unsigned char *name ) {
+	(void)name;
+	return NULL;
+}
+}
+
+// Phase B5b window-services seam: this backend does not implement it; the
+// SDL3 backend provides the real table
+#include "../../renderer/RenderModuleAPI.h"
+const renderWindowServices_t *Sys_GetRenderWindowServices( void ) {
+	return NULL;
+}

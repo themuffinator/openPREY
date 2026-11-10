@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "tr_local.h"
+#include "draw_pbr.h"
 
 /*
 
@@ -42,6 +43,15 @@ static ID_INLINE GLint R_SafeStencilClearValue() {
 	return 1 << ( stencilBits - 1 );
 }
 
+static ID_INLINE bool RB_HasPackedPrimBatchMesh( const srfTriangles_t *tri ) {
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	return tri != NULL && tri->primBatchMesh != NULL;
+#else
+	(void)tri;
+	return false;
+#endif
+}
+
 
 /*
 =================
@@ -52,6 +62,26 @@ This should never happen if the vertex cache is operating properly.
 =================
 */
 void RB_DrawElementsImmediate( const srfTriangles_t *tri ) {
+	const idDrawVert *drawVerts = tri->verts;
+	const glIndex_t *drawIndexes = tri->indexes;
+
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	if ( tri->primBatchMesh != NULL && ( drawVerts == NULL || drawIndexes == NULL ) ) {
+		if ( tri->numVerts <= 0 || tri->numIndexes <= 0 ) {
+			return;
+		}
+
+		idDrawVert *tempVerts = (idDrawVert *)R_FrameAlloc( tri->numVerts * sizeof( tempVerts[0] ) );
+		glIndex_t *tempIndexes = (glIndex_t *)R_FrameAlloc( tri->numIndexes * sizeof( tempIndexes[0] ) );
+		renderSystem->CopyPrimBatchTriangles( tempVerts, tempIndexes, tri->primBatchMesh, tri->silTraceVerts );
+		drawVerts = tempVerts;
+		drawIndexes = tempIndexes;
+	}
+#endif
+
+	if ( drawVerts == NULL || drawIndexes == NULL ) {
+		return;
+	}
 
 	backEnd.pc.c_drawElements++;
 	backEnd.pc.c_drawIndexes += tri->numIndexes;
@@ -68,10 +98,37 @@ void RB_DrawElementsImmediate( const srfTriangles_t *tri ) {
 
 	glBegin( GL_TRIANGLES );
 	for ( int i = 0 ; i < tri->numIndexes ; i++ ) {
-		glTexCoord2fv( tri->verts[ tri->indexes[i] ].st.ToFloatPtr() );
-		glVertex3fv( tri->verts[ tri->indexes[i] ].xyz.ToFloatPtr() );
+		glTexCoord2fv( drawVerts[ drawIndexes[i] ].st.ToFloatPtr() );
+		glVertex3fv( drawVerts[ drawIndexes[i] ].xyz.ToFloatPtr() );
 	}
 	glEnd();
+}
+
+static bool RB_EnsurePackedRenderTriangleCaches( const srfTriangles_t *tri, bool needsLighting, bool createIndexCache ) {
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	if ( tri == NULL || tri->primBatchMesh == NULL ) {
+		return true;
+	}
+
+	srfTriangles_t *mutableTri = const_cast<srfTriangles_t *>( tri );
+	const bool needsIndexCache = createIndexCache && r_useIndexBuffers.GetBool() && tri->numIndexes > 0;
+	if ( mutableTri->ambientCache == NULL || ( needsIndexCache && mutableTri->indexCache == NULL ) ) {
+		if ( !R_CreatePackedSurfaceFrameCaches( mutableTri, needsLighting, createIndexCache ) ) {
+			return false;
+		}
+	}
+
+	R_TouchVertexCache( mutableTri->ambientCache );
+	if ( mutableTri->indexCache != NULL ) {
+		R_TouchVertexCache( mutableTri->indexCache );
+	}
+#else
+	(void)tri;
+	(void)needsLighting;
+	(void)createIndexCache;
+#endif
+
+	return true;
 }
 
 
@@ -81,6 +138,14 @@ RB_DrawElementsWithCounters
 ================
 */
 void RB_DrawElementsWithCounters( const srfTriangles_t *tri ) {
+	if ( RB_HasPackedPrimBatchMesh( tri ) && tr.backEndRenderer == BE_ARB2 ) {
+		if ( RB_ARB2_DrawPreparedPackedMD5RStageBatches( tri ) ) {
+			return;
+		}
+		if ( RB_ARB2_DrawPreparedPackedMD5RDirectBatches( tri ) ) {
+			return;
+		}
+	}
 
 	backEnd.pc.c_drawElements++;
 	backEnd.pc.c_drawIndexes += tri->numIndexes;
@@ -102,9 +167,10 @@ void RB_DrawElementsWithCounters( const srfTriangles_t *tri ) {
 						(int *)vertexCache.Position( tri->indexCache ) );
 		backEnd.pc.c_vboIndexes += tri->numIndexes;
 	} else {
-		if ( r_useIndexBuffers.GetBool() ) {
-			vertexCache.UnbindIndex();
-		}
+		// The modern renderer can leave an element buffer on the legacy VAO
+		// even when classic index uploads are disabled. A CPU index pointer is
+		// valid only with EBO zero; otherwise GL interprets it as an offset.
+		vertexCache.UnbindIndex();
 		glDrawElements( GL_TRIANGLES, 
 						r_singleTriangle.GetBool() ? 3 : tri->numIndexes,
 						GL_INDEX_TYPE,
@@ -119,7 +185,14 @@ RB_DrawShadowElementsWithCounters
 May not use all the indexes in the surface if caps are skipped
 ================
 */
-void RB_DrawShadowElementsWithCounters( const srfTriangles_t *tri, int numIndexes ) {
+void RB_DrawShadowElementsWithCounters( const drawSurf_t *surf, int numIndexes ) {
+	const srfTriangles_t *tri = surf->geo;
+
+	if ( RB_HasPackedPrimBatchMesh( tri ) ) {
+		RB_ARB2_MD5R_DrawShadowElements( surf, numIndexes );
+		return;
+	}
+
 	backEnd.pc.c_shadowElements++;
 	backEnd.pc.c_shadowIndexes += numIndexes;
 	backEnd.pc.c_shadowVertexes += tri->numVerts;
@@ -131,9 +204,7 @@ void RB_DrawShadowElementsWithCounters( const srfTriangles_t *tri, int numIndexe
 						(int *)vertexCache.Position( tri->indexCache ) );
 		backEnd.pc.c_vboIndexes += numIndexes;
 	} else {
-		if ( r_useIndexBuffers.GetBool() ) {
-			vertexCache.UnbindIndex();
-		}
+		vertexCache.UnbindIndex();
 		glDrawElements( GL_TRIANGLES, 
 						r_singleTriangle.GetBool() ? 3 : numIndexes,
 						GL_INDEX_TYPE,
@@ -150,6 +221,10 @@ Sets texcoord and vertex pointers
 ===============
 */
 void RB_RenderTriangleSurface( const srfTriangles_t *tri ) {
+	if ( !RB_EnsurePackedRenderTriangleCaches( tri, false, true ) ) {
+		return;
+	}
+
 	if ( !tri->ambientCache ) {
 		RB_DrawElementsImmediate( tri );
 		return;
@@ -157,8 +232,8 @@ void RB_RenderTriangleSurface( const srfTriangles_t *tri ) {
 
 
 	idDrawVert *ac = (idDrawVert *)vertexCache.Position( tri->ambientCache );
-	glVertexPointer( 3, GL_FLOAT, sizeof( idDrawVert ), ac->xyz.ToFloatPtr() );
-	glTexCoordPointer( 2, GL_FLOAT, sizeof( idDrawVert ), ac->st.ToFloatPtr() );
+	glVertexPointer( 3, GL_FLOAT, sizeof( idDrawVert ), RB_DrawVertAttributePointer( ac, offsetof( idDrawVert, xyz ) ) );
+	glTexCoordPointer( 2, GL_FLOAT, sizeof( idDrawVert ), RB_DrawVertAttributePointer( ac, offsetof( idDrawVert, st ) ) );
 
 	RB_DrawElementsWithCounters( tri );
 }
@@ -170,6 +245,13 @@ RB_T_RenderTriangleSurface
 ===============
 */
 void RB_T_RenderTriangleSurface( const drawSurf_t *surf ) {
+	if ( !RB_EnsurePackedRenderTriangleCaches(
+		surf->geo,
+		( surf->material != NULL ) ? surf->material->ReceivesLighting() : false,
+		true ) ) {
+		return;
+	}
+
 	RB_RenderTriangleSurface( surf->geo );
 }
 
@@ -183,20 +265,31 @@ static float RB_CalcFovForAspect( float fovX, float width, float height ) {
 
 /*
 ===============
-RB_EnterWeaponDepthHack
+R_GetDepthHackProjectionMatrix
+
+Copies the view projection and applies the depth-hack transforms
+(modelDepthHack takes precedence; the weapon hack applies the optional
+cl_gunfov override before squashing depth). Single home for this math: the
+fixed-function depth-hack loads and the packed-MD5R env-param path both
+delegate here so the variants cannot diverge.
 ===============
 */
-void RB_EnterWeaponDepthHack() {
-	glDepthRange( 0.0f, 0.5f );
+void R_GetDepthHackProjectionMatrix( const viewDef_t *viewDef, bool weaponDepthHack, float modelDepthHack, float matrix[16] ) {
+	memcpy( matrix, viewDef->projectionMatrix, sizeof( float ) * 16 );
 
-	float	matrix[16];
+	if ( modelDepthHack != 0.0f ) {
+		matrix[14] -= modelDepthHack;
+		return;
+	}
+	if ( !weaponDepthHack ) {
+		return;
+	}
 
-	memcpy( matrix, backEnd.viewDef->projectionMatrix, sizeof( matrix ) );
-
+	// a VR eye's off-axis projection is the eye's; a symmetric gun FOV would tear it
 	const float weaponFovOverride = cl_gunfov.GetFloat();
-	if ( weaponFovOverride > 0.0f ) {
-		const float viewportWidth = static_cast<float>( Max( 1, backEnd.viewDef->viewport.x2 - backEnd.viewDef->viewport.x1 + 1 ) );
-		const float viewportHeight = static_cast<float>( Max( 1, backEnd.viewDef->viewport.y2 - backEnd.viewDef->viewport.y1 + 1 ) );
+	if ( weaponFovOverride > 0.0f && !viewDef->renderView.asymmetricFov ) {
+		const float viewportWidth = static_cast<float>( Max( 1, viewDef->viewport.x2 - viewDef->viewport.x1 + 1 ) );
+		const float viewportHeight = static_cast<float>( Max( 1, viewDef->viewport.y2 - viewDef->viewport.y1 + 1 ) );
 
 		float weaponFovX = idMath::ClampFloat( 30.0f, 160.0f, weaponFovOverride );
 		float weaponFovY = 0.0f;
@@ -214,7 +307,19 @@ void RB_EnterWeaponDepthHack() {
 		matrix[5] = 1.0f / idMath::Tan( DEG2RAD( weaponFovY ) * 0.5f );
 	}
 
-	matrix[14] *= 0.25;
+	matrix[14] *= 0.25f;
+}
+
+/*
+===============
+RB_EnterWeaponDepthHack
+===============
+*/
+void RB_EnterWeaponDepthHack() {
+	glDepthRange( 0.0f, 0.5f );
+
+	float	matrix[16];
+	R_GetDepthHackProjectionMatrix( backEnd.viewDef, true, 0.0f, matrix );
 
 	glMatrixMode(GL_PROJECTION);
 	glLoadMatrixf( matrix );
@@ -230,10 +335,7 @@ void RB_EnterModelDepthHack( float depth ) {
 	glDepthRange( 0.0f, 1.0f );
 
 	float	matrix[16];
-
-	memcpy( matrix, backEnd.viewDef->projectionMatrix, sizeof( matrix ) );
-
-	matrix[14] -= depth;
+	R_GetDepthHackProjectionMatrix( backEnd.viewDef, false, depth, matrix );
 
 	glMatrixMode(GL_PROJECTION);
 	glLoadMatrixf( matrix );
@@ -296,6 +398,46 @@ void RB_RenderDrawSurfListWithFunction( drawSurf_t **drawSurfs, int numDrawSurfs
 		}
 
 		// render it
+		triFunc_( drawSurf );
+
+		if ( drawSurf->space->weaponDepthHack || drawSurf->space->modelDepthHack != 0.0f ) {
+			RB_LeaveDepthHack();
+		}
+
+		backEnd.currentSpace = drawSurf->space;
+	}
+}
+
+/*
+====================
+RB_RenderDrawSurfListWithFunctionIgnoreScissor
+
+Special-effect capture passes render into fixed-size offscreen targets, so they must
+not inherit per-surface screen scissors from the main framebuffer view.
+====================
+*/
+void RB_RenderDrawSurfListWithFunctionIgnoreScissor( drawSurf_t **drawSurfs, int numDrawSurfs,
+											  void (*triFunc_)( const drawSurf_t *) ) {
+	int i;
+	const drawSurf_t *drawSurf;
+
+	backEnd.currentSpace = NULL;
+
+	for ( i = 0; i < numDrawSurfs; i++ ) {
+		drawSurf = drawSurfs[i];
+
+		if ( drawSurf->space != backEnd.currentSpace ) {
+			glLoadMatrixf( drawSurf->space->modelViewMatrix );
+		}
+
+		if ( drawSurf->space->weaponDepthHack ) {
+			RB_EnterWeaponDepthHack();
+		}
+
+		if ( drawSurf->space->modelDepthHack != 0.0f ) {
+			RB_EnterModelDepthHack( drawSurf->space->modelDepthHack );
+		}
+
 		triFunc_( drawSurf );
 
 		if ( drawSurf->space->weaponDepthHack || drawSurf->space->modelDepthHack != 0.0f ) {
@@ -402,6 +544,15 @@ void RB_LoadShaderTextureMatrix( const float *shaderRegisters, const textureStag
 	glMatrixMode( GL_MODELVIEW );
 }
 
+// Cross-frame dedupe for the shared cinematic scratch image. RoQ decodes at
+// ~30fps while the backend can bind the same decoded frame many times per
+// second; when the identical frame is already resident we only rebind.
+// frameSerial 0 = producer opted out (always upload). storageGeneration
+// invalidates across vid_restart / reloadImages (AllocImage bumps it).
+static const idCinematic *	rb_lastCinematic = NULL;
+static int					rb_lastCinematicSerial = 0;
+static uint64_t				rb_lastCinematicStorageGeneration = 0;
+
 /*
 ======================
 RB_BindVariableStageImage
@@ -424,7 +575,26 @@ void RB_BindVariableStageImage( const textureStage_t *texture, const float *shad
 		cin = texture->cinematic->ImageForTime( (int)(1000 * ( backEnd.viewDef->floatTime + backEnd.viewDef->renderView.shaderParms[11] ) ) );
 
 		if ( cin.image ) {
-			globalImages->cinematicImage->UploadScratch( cin.image, cin.imageWidth, cin.imageHeight );
+			idImage *cinImage = globalImages->cinematicImage;
+			const bool sameFrameResident =
+				cin.frameSerial != 0
+				&& texture->cinematic == rb_lastCinematic
+				&& cin.frameSerial == rb_lastCinematicSerial
+				&& cinImage->IsLoaded()
+				&& cinImage->GetStorageGeneration() == rb_lastCinematicStorageGeneration
+				&& cinImage->GetOpts().textureType == TT_2D
+				&& cin.imageHeight != cin.imageWidth * 6;
+			if ( sameFrameResident ) {
+				// identical pixels already resident: rebind exactly the way
+				// UploadScratch's SubImageUpload would have (direct access with
+				// tmu-tracker update, no Bind() texture-type enable dance)
+				R_BindTextureForDirectAccess( GL_TEXTURE_2D, cinImage->GetDeviceHandle() );
+			} else {
+				globalImages->cinematicImage->UploadScratch( cin.image, cin.imageWidth, cin.imageHeight );
+				rb_lastCinematic = texture->cinematic;
+				rb_lastCinematicSerial = cin.frameSerial;
+				rb_lastCinematicStorageGeneration = cinImage->GetStorageGeneration();
+			}
 		} else {
 			globalImages->blackImage->Bind();
 		}
@@ -447,7 +617,7 @@ void RB_BindStageTexture( const float *shaderRegisters, const textureStage_t *te
 
 	// texgens
 	if ( texture->texgen == TG_DIFFUSE_CUBE ) {
-		glTexCoordPointer( 3, GL_FLOAT, sizeof( idDrawVert ), ((idDrawVert *)vertexCache.Position( surf->geo->ambientCache ))->normal.ToFloatPtr() );
+		glTexCoordPointer( 3, GL_FLOAT, sizeof( idDrawVert ), RB_DrawVertAttributePointer( vertexCache.Position( surf->geo->ambientCache ), offsetof( idDrawVert, normal ) ) );
 	}
 	if ( texture->texgen == TG_SKYBOX_CUBE || texture->texgen == TG_WOBBLESKY_CUBE ) {
 		glTexCoordPointer( 3, GL_FLOAT, 0, vertexCache.Position( surf->dynamicTexCoords ) );
@@ -460,7 +630,7 @@ void RB_BindStageTexture( const float *shaderRegisters, const textureStage_t *te
 		glTexGenf( GL_T, GL_TEXTURE_GEN_MODE, GL_REFLECTION_MAP_EXT );
 		glTexGenf( GL_R, GL_TEXTURE_GEN_MODE, GL_REFLECTION_MAP_EXT );
 		glEnableClientState( GL_NORMAL_ARRAY );
-		glNormalPointer( GL_FLOAT, sizeof( idDrawVert ), ((idDrawVert *)vertexCache.Position( surf->geo->ambientCache ))->normal.ToFloatPtr() );
+		glNormalPointer( GL_FLOAT, sizeof( idDrawVert ), RB_DrawVertAttributePointer( vertexCache.Position( surf->geo->ambientCache ), offsetof( idDrawVert, normal ) ) );
 
 		glMatrixMode( GL_TEXTURE );
 		float	mat[16];
@@ -486,7 +656,7 @@ void RB_FinishStageTexture( const textureStage_t *texture, const drawSurf_t *sur
 	if ( texture->texgen == TG_DIFFUSE_CUBE || texture->texgen == TG_SKYBOX_CUBE 
 		|| texture->texgen == TG_WOBBLESKY_CUBE ) {
 		glTexCoordPointer( 2, GL_FLOAT, sizeof( idDrawVert ), 
-			(void *)&(((idDrawVert *)vertexCache.Position( surf->geo->ambientCache ))->st) );
+			RB_DrawVertAttributePointer( vertexCache.Position( surf->geo->ambientCache ), offsetof( idDrawVert, st ) ) );
 	}
 
 	if ( texture->texgen == TG_REFLECT_CUBE ) {
@@ -537,6 +707,13 @@ void RB_DetermineLightScale( void ) {
 	float				max;
 	int					i, j, numStages;
 	const shaderStage_t	*stage;
+
+	if ( tr.backEndRenderer == BE_ARB2 && glConfig.disableARB2Interactions ) {
+		backEnd.pc.maxLightValue = 1.0f;
+		backEnd.lightScale = 1.0f;
+		backEnd.overBright = 1.0f;
+		return;
+	}
 
 	// the light scale will be based on the largest color component of any surface
 	// that will be drawn.
@@ -593,14 +770,14 @@ void RB_BeginDrawingView (void) {
 	glMatrixMode(GL_MODELVIEW);
 
 	// set the window clipping
-	glViewport( tr.viewportOffset[0] + backEnd.viewDef->viewport.x1, 
-		tr.viewportOffset[1] + backEnd.viewDef->viewport.y1, 
+	glViewport( RB_TileOffsetX() + backEnd.viewDef->viewport.x1, 
+		RB_TileOffsetY() + backEnd.viewDef->viewport.y1, 
 		backEnd.viewDef->viewport.x2 + 1 - backEnd.viewDef->viewport.x1,
 		backEnd.viewDef->viewport.y2 + 1 - backEnd.viewDef->viewport.y1 );
 
 	// the scissor may be smaller than the viewport for subviews
-	glScissor( tr.viewportOffset[0] + backEnd.viewDef->viewport.x1 + backEnd.viewDef->scissor.x1, 
-		tr.viewportOffset[1] + backEnd.viewDef->viewport.y1 + backEnd.viewDef->scissor.y1, 
+	glScissor( RB_TileOffsetX() + backEnd.viewDef->viewport.x1 + backEnd.viewDef->scissor.x1, 
+		RB_TileOffsetY() + backEnd.viewDef->viewport.y1 + backEnd.viewDef->scissor.y1, 
 		backEnd.viewDef->scissor.x2 + 1 - backEnd.viewDef->scissor.x1,
 		backEnd.viewDef->scissor.y2 + 1 - backEnd.viewDef->scissor.y1 );
 	backEnd.currentScissor = backEnd.viewDef->scissor;
@@ -721,6 +898,10 @@ interaction into primitive interactions
 =============
 */
 void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInteraction)(const drawInteraction_t *) ) {
+	RB_CreateSingleDrawInteractionsFiltered( surf, DrawInteraction, NULL );
+}
+
+void RB_CreateSingleDrawInteractionsFiltered( const drawSurf_t *surf, void (*DrawInteraction)(const drawInteraction_t *), drawInteractionStageFilter_t StageFilter ) {
 	const idMaterial	*surfaceShader = surf->material;
 	const float			*surfaceRegs = surf->shaderRegisters;
 	const viewLight_t	*vLight = backEnd.vLight;
@@ -728,7 +909,13 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 	const float			*lightRegs = vLight->shaderRegisters;
 	drawInteraction_t	inter;
 
-	if ( r_skipInteractions.GetBool() || !surf->geo || !surf->geo->ambientCache ) {
+	if ( r_skipInteractions.GetBool() || !surf->geo || ( !surf->geo->ambientCache && !RB_HasPackedPrimBatchMesh( surf->geo ) ) ) {
+		return;
+	}
+
+	// Native PBR (draw_pbr.cpp) owns an admitted surface's interactions: a
+	// classic pass skips it and a native pass skips everything else.
+	if ( RB_GLPBR_DecompositionSkips( surf ) ) {
 		return;
 	}
 
@@ -751,9 +938,8 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 			backEnd.currentScissor.y2 + 1 - backEnd.currentScissor.y1 );
 	}
 
-	// Prey authors lit decals as polygon-offset interaction materials. The
-	// interaction pass must reuse the z-fill offset or GL_EQUAL rejects the
-	// lighting pass and leaves only the black depth prepass visible.
+	// Lit Prey decals need the same offset in the depth and interaction passes;
+	// otherwise the GL_EQUAL lighting pass can miss the displaced depth.
 	if ( surfaceShader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
 		glEnable( GL_POLYGON_OFFSET_FILL );
 		glPolygonOffset( r_offsetFactor.GetFloat(), r_offsetUnits.GetFloat() * surfaceShader->GetPolygonOffset() );
@@ -784,7 +970,9 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 		R_GlobalPlaneToLocal( surf->space->modelMatrix, backEnd.vLight->lightProject[i], lightProject[i] );
 	}
 
-	for ( int lightStageNum = 0 ; lightStageNum < lightShader->GetNumStages() ; lightStageNum++ ) {
+	const int lightStageCount = lightShader->GetNumStages();
+	const int surfaceStageCount = surfaceShader->GetNumStages();
+	for ( int lightStageNum = 0 ; lightStageNum < lightStageCount ; lightStageNum++ ) {
 		const shaderStage_t	*lightStage = lightShader->GetStage( lightStageNum );
 
 		// ignore stages that fail the condition
@@ -807,6 +995,7 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 		inter.alphaTestThreshold = -1.0f;
 		inter.diffuseColor[0] = inter.diffuseColor[1] = inter.diffuseColor[2] = inter.diffuseColor[3] = 0;
 		inter.specularColor[0] = inter.specularColor[1] = inter.specularColor[2] = inter.specularColor[3] = 0;
+		inter.flatDiffuseParams.Zero();
 
 		float lightColor[4];
 
@@ -818,8 +1007,11 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 		lightColor[3] = lightRegs[ lightStage->color.registers[3] ];
 
 		// go through the individual stages
-		for ( int surfaceStageNum = 0 ; surfaceStageNum < surfaceShader->GetNumStages() ; surfaceStageNum++ ) {
+		for ( int surfaceStageNum = 0 ; surfaceStageNum < surfaceStageCount ; surfaceStageNum++ ) {
 			const shaderStage_t	*surfaceStage = surfaceShader->GetStage( surfaceStageNum );
+			if ( StageFilter != NULL && !StageFilter( surfaceStage, surfaceRegs ) ) {
+				continue;
+			}
 
 			switch( surfaceStage->lighting ) {
 				case SL_AMBIENT: {
@@ -850,12 +1042,15 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 					}
 					R_SetDrawInteraction( surfaceStage, surfaceRegs, &inter.diffuseImage,
 											inter.diffuseMatrix, inter.diffuseColor.ToFloatPtr() );
+					RB_ApplyFlatDiffuseStage( surf, &inter.diffuseImage,
+						inter.diffuseColor.ToFloatPtr(), inter.flatDiffuseParams );
 					inter.diffuseColor[0] *= lightColor[0];
 					inter.diffuseColor[1] *= lightColor[1];
 					inter.diffuseColor[2] *= lightColor[2];
 					inter.diffuseColor[3] *= lightColor[3];
 					if ( surfaceStage->hasAlphaTest ) {
-						// Approximate GL_GREATER by nudging the threshold above the authored value.
+						// The retail program uses KIL; bias by one texture step to
+						// preserve GL_GREATER semantics at 8-bit alpha precision.
 						inter.alphaTestThreshold = surfaceRegs[ surfaceStage->alphaTestRegister ] + ( 1.0f / 255.0f );
 					}
 					inter.vertexColor = surfaceStage->vertexColor;
@@ -887,9 +1082,10 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 					inter.diffuseImage = NULL;
 					inter.specularImage = NULL;
 					inter.alphaTestThreshold = -1.0f;
-					inter.diffuseColor[0] = inter.diffuseColor[1] = inter.diffuseColor[2] = inter.diffuseColor[3] = 0;
-					inter.specularColor[0] = inter.specularColor[1] = inter.specularColor[2] = inter.specularColor[3] = 0;
-					if ( tr.backEndRenderer == BE_ARB2 && surfaceStage->newStage ) {
+					inter.diffuseColor.Zero();
+					inter.specularColor.Zero();
+					inter.flatDiffuseParams.Zero();
+					if ( tr.backEndRenderer == BE_ARB2 && surfaceStage->newStage != NULL ) {
 						RB_ARB2_DrawShaderInteraction( &inter, surfaceStage, surfaceRegs, lightColor );
 					}
 					break;
@@ -901,11 +1097,11 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 		RB_SubmittInteraction( &inter, DrawInteraction );
 	}
 
-	// unhack depth range if needed
 	if ( surfaceShader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
 		glDisable( GL_POLYGON_OFFSET_FILL );
 	}
 
+	// unhack depth range if needed
 	if ( surf->space->weaponDepthHack || surf->space->modelDepthHack != 0.0f ) {
 		RB_LeaveDepthHack();
 	}
@@ -926,6 +1122,7 @@ void RB_DrawView( const void *data ) {
 	// we will need to do a new copyTexSubImage of the screen
 	// when a SS_POST_PROCESS material is used
 	backEnd.currentRenderCopied = false;
+	backEnd.currentDepthCopied = false;
 
 	// if there aren't any drawsurfs, do nothing
 	if ( !backEnd.viewDef->numDrawSurfs ) {
@@ -949,12 +1146,8 @@ void RB_DrawView( const void *data ) {
 
 	RB_ShowOverdraw();
 
-	// Retail Prey routes authored glow views through a dedicated backend path.
-	if ( backEnd.viewDef->isGlowView ) {
-		RB_STD_DrawGlowView();
-	} else {
-		RB_STD_DrawView();
-	}
+	// render the scene, jumping to the hardware specific interaction renderers
+	RB_STD_DrawView();
 
 	// restore the context for 2D drawing if we were stubbing it out
 	if ( r_skipRenderContext.GetBool() && backEnd.viewDef->viewEntitys ) {

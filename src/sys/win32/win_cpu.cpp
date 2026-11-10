@@ -48,8 +48,11 @@ Sys_GetClockTicks
 double Sys_GetClockTicks(void) {
 	LARGE_INTEGER li;
 
-	QueryPerformanceCounter(&li);
-	return (double)li.LowPart + (double)0xFFFFFFFF * li.HighPart;
+	if ( !QueryPerformanceCounter( &li ) ) {
+		return 0.0;
+	}
+
+	return static_cast<double>( li.QuadPart );
 }
 
 /*
@@ -58,41 +61,16 @@ Sys_ClockTicksPerSecond
 ================
 */
 double Sys_ClockTicksPerSecond(void) {
-	static double ticks = 0;
-#if 0
+	static double ticks = 0.0;
 
-	if (!ticks) {
+	if ( ticks <= 0.0 ) {
 		LARGE_INTEGER li;
-		QueryPerformanceFrequency(&li);
-		ticks = li.QuadPart;
-	}
 
-#else
-
-	if (!ticks) {
-		HKEY hKey;
-		LPBYTE ProcSpeed;
-		DWORD buflen, ret;
-
-		if (!RegOpenKeyEx(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &hKey)) {
-			ProcSpeed = 0;
-			buflen = sizeof(ProcSpeed);
-			ret = RegQueryValueEx(hKey, "~MHz", NULL, NULL, (LPBYTE)&ProcSpeed, &buflen);
-			// If we don't succeed, try some other spellings.
-			if (ret != ERROR_SUCCESS) {
-				ret = RegQueryValueEx(hKey, "~Mhz", NULL, NULL, (LPBYTE)&ProcSpeed, &buflen);
-			}
-			if (ret != ERROR_SUCCESS) {
-				ret = RegQueryValueEx(hKey, "~mhz", NULL, NULL, (LPBYTE)&ProcSpeed, &buflen);
-			}
-			RegCloseKey(hKey);
-			if (ret == ERROR_SUCCESS) {
-				ticks = (double)((unsigned long)ProcSpeed) * 1000000;
-			}
+		if ( QueryPerformanceFrequency( &li ) ) {
+			ticks = static_cast<double>( li.QuadPart );
 		}
 	}
 
-#endif
 	return ticks;
 }
 
@@ -104,6 +82,8 @@ double Sys_ClockTicksPerSecond(void) {
 
 ==============================================================
 */
+
+#if defined( _M_IX86 ) || defined( __i386__ )
 
 /*
 ================
@@ -192,6 +172,8 @@ static bool HasSSE3(void) {
 	return false;
 }
 
+#endif
+
 
 /*
 ================
@@ -213,6 +195,8 @@ int CPUCount(int& logicalNum, int& physicalNum) {
 	physicalNum = 4;
 	return 1;
 }
+
+#if defined( _M_IX86 ) || defined( __i386__ )
 
 /*
 ================
@@ -247,13 +231,24 @@ static bool HasDAZ(void) {
 	return false;
 }
 
+#endif
+
 /*
 ================
 Sys_GetCPUId
 ================
 */
 cpuid_t Sys_GetCPUId(void) {
+#if defined(_M_ARM64) || defined(__aarch64__)
+	// Windows on ARM has no CPUID instruction and no x86 vendor to report.
+	// Claiming CPUID_INTEL here would make the engine print "Intel processor"
+	// on Snapdragon-class hardware and would put an x86 vendor bit in front of
+	// every consumer of win32.cpuid. Match what the Linux backend already
+	// returns on aarch64.
+	return CPUID_GENERIC;
+#else
 	return CPUID_INTEL;
+#endif
 }
 
 
@@ -266,7 +261,7 @@ cpuid_t Sys_GetCPUId(void) {
 */
 
 typedef struct bitFlag_s {
-	char* name;
+	const char* name;
 	int			bit;
 } bitFlag_t;
 
@@ -282,13 +277,13 @@ static bitFlag_t controlWordFlags[] = {
 	{ "Infinity control", 12 },
 	{ "", 0 }
 };
-static char* precisionControlField[] = {
+static const char* precisionControlField[] = {
 	"Single Precision (24-bits)",
 	"Reserved",
 	"Double Precision (53-bits)",
 	"Double Extended Precision (64-bits)"
 };
-static char* roundingControlField[] = {
+static const char* roundingControlField[] = {
 	"Round to nearest",
 	"Round down",
 	"Round up",
@@ -334,7 +329,7 @@ int Sys_FPU_PrintStateFlags(char* ptr, int ctrl, int stat, int tags, int inof, i
 
 	length += sprintf(ptr + length, "Status Word:\n");
 	for (i = 0; statusWordFlags[i].name[0]; i++) {
-		ptr += sprintf(ptr + length, "  %-30s = %s\n", statusWordFlags[i].name, (stat & (1 << statusWordFlags[i].bit)) ? "true" : "false");
+		length += sprintf(ptr + length, "  %-30s = %s\n", statusWordFlags[i].name, (stat & (1 << statusWordFlags[i].bit)) ? "true" : "false");
 	}
 	length += sprintf(ptr + length, "  %-30s = %d%d%d%d\n", "Condition code", (stat >> 8) & 1, (stat >> 9) & 1, (stat >> 10) & 1, (stat >> 14) & 1);
 	length += sprintf(ptr + length, "  %-30s = %d\n", "Top of stack pointer", (stat >> 11) & 7);

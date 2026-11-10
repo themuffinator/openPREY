@@ -8,6 +8,55 @@
 
 #include "TypeInfo.h"
 
+// Win64 passes float arguments in a different register class from integer and
+// pointer arguments. Keep a runtime smoke command for the exact mixed signature
+// that requires CPU_EASYARGS=0 and the generated callback table.
+static const idEventDef EV_EventDispatchSmoke( "<eventDispatchSmoke>", "fe" );
+
+class idEventDispatchSmokeTarget : public idClass {
+public:
+	CLASS_PROTOTYPE( idEventDispatchSmokeTarget );
+
+	idEventDispatchSmokeTarget() : callbackRan( false ), receivedValue( 0.0f ), receivedEntity( NULL ) {}
+
+	void Event_CheckArgs( float value, idEntity *entity ) {
+		callbackRan = true;
+		receivedValue = value;
+		receivedEntity = entity;
+	}
+
+	bool Passed( float expectedValue, const idEntity *expectedEntity ) const {
+		return callbackRan && idMath::Fabs( receivedValue - expectedValue ) < 0.0001f && receivedEntity == expectedEntity;
+	}
+
+private:
+	bool			callbackRan;
+	float			receivedValue;
+	const idEntity *receivedEntity;
+};
+
+CLASS_DECLARATION( idClass, idEventDispatchSmokeTarget )
+	EVENT( EV_EventDispatchSmoke, idEventDispatchSmokeTarget::Event_CheckArgs )
+END_CLASS
+
+static void Cmd_TestEventDispatch_f( const idCmdArgs &args ) {
+	const float expectedValue = 1234.25f;
+	idEntity *expectedEntity = gameLocal.GetLocalPlayer();
+	if ( expectedEntity == NULL ) {
+		gameLocal.Error( "testEventDispatch requires a loaded map and local player" );
+		return;
+	}
+
+	idEventDispatchSmokeTarget target;
+	if ( !target.ProcessEvent( &EV_EventDispatchSmoke, expectedValue, expectedEntity ) ||
+		 !target.Passed( expectedValue, expectedEntity ) ) {
+		gameLocal.Error( "eventDispatchSmoke: FAIL (mixed float/entity callback marshalling)" );
+		return;
+	}
+
+	gameLocal.Printf( "eventDispatchSmoke: PASS (CPU_EASYARGS=%d, float+entity)\n", CPU_EASYARGS );
+}
+
 /*
 ==================
 Cmd_GetFloatArg
@@ -952,7 +1001,88 @@ void Cmd_SpawnArtificialPlayer_f(const idCmdArgs &args) {
 		return;
 	}
 
-	gameLocal.SpawnArtificialPlayer();
+	if ( gameLocal.SpawnArtificialPlayer() ) {
+		g_artificialPlayerCount.SetInteger( gameLocal.NumArtificialPlayers() );
+	}
+}
+
+static bool BotCommandServerOk( void ) {
+	if ( !gameLocal.isMultiplayer || !gameLocal.isServer ) {
+		gameLocal.Printf( "Bot commands must be run by a multiplayer server.\n" );
+		return false;
+	}
+	return true;
+}
+
+/*
+===================
+Cmd_AddBot_f
+
+addbot [character] [skill]
+===================
+*/
+static void Cmd_AddBot_f( const idCmdArgs &args ) {
+	if ( !BotCommandServerOk() ) {
+		return;
+	}
+	const char *character = args.Argc() > 1 ? args.Argv( 1 ) : NULL;
+	int skill = bot_skill.GetInteger();
+	if ( args.Argc() > 2 ) {
+		skill = atoi( args.Argv( 2 ) );
+		if ( skill < 1 || skill > BOT_SKILL_LEVELS ) {
+			gameLocal.Printf( "Bot skill must be from 1 through %d.\n", BOT_SKILL_LEVELS );
+			return;
+		}
+	}
+	if ( gameLocal.SpawnArtificialPlayer( character, skill ) ) {
+		g_artificialPlayerCount.SetInteger( gameLocal.NumArtificialPlayers() );
+	}
+}
+
+/* removebot [character] */
+static void Cmd_RemoveBot_f( const idCmdArgs &args ) {
+	if ( !BotCommandServerOk() ) {
+		return;
+	}
+	const char *name = args.Argc() > 1 ? args.Argv( 1 ) : NULL;
+	if ( gameLocal.RemoveArtificialPlayer( name ) ) {
+		g_artificialPlayerCount.SetInteger( gameLocal.NumArtificialPlayers() );
+	}
+}
+
+static void Cmd_RemoveBots_f( const idCmdArgs &args ) {
+	if ( !BotCommandServerOk() ) {
+		return;
+	}
+	g_artificialPlayerCount.SetInteger( 0 );
+	gameLocal.Printf( "Removed %d bots.\n", gameLocal.RemoveArtificialPlayers() );
+}
+
+static void Cmd_BotList_f( const idCmdArgs &args ) {
+	if ( BotCommandServerOk() ) {
+		gameLocal.ListArtificialPlayers();
+	}
+}
+
+static void Cmd_BotCharacters_f( const idCmdArgs &args ) {
+	botCharacterManager.ListCharacters();
+}
+
+static void Cmd_BotReload_f( const idCmdArgs &args ) {
+	if ( !BotCommandServerOk() ) {
+		return;
+	}
+	const bool loaded = botCharacterManager.Reload();
+	// Reload is destructive even when every replacement file is invalid.  Live
+	// bots must therefore discard their old pointers unconditionally; with no
+	// usable character data they safely fall back to the baseline skill curve.
+	gameLocal.RebindArtificialPlayers();
+	if ( loaded ) {
+		gameLocal.Printf( "Reloaded %d bot characters and rebound live bots.\n",
+			botCharacterManager.NumCharacters() );
+	} else {
+		gameLocal.Warning( "Bot character reload found no usable bot content." );
+	}
 }
 
 /*
@@ -2743,6 +2873,7 @@ so it can perform tab completion
 =================
 */
 void idGameLocal::InitConsoleCommands( void ) {
+	cmdSystem->AddCommand( "testEventDispatch", Cmd_TestEventDispatch_f, CMD_FL_GAME | CMD_FL_CHEAT, "tests mixed float/entity event callback marshalling" );
 	cmdSystem->AddCommand( "listTypeInfo",			ListTypeInfo_f,				CMD_FL_GAME,				"list type info" );
 	cmdSystem->AddCommand( "writeGameState",		WriteGameState_f,			CMD_FL_GAME,				"write game state" );
 	cmdSystem->AddCommand( "testSaveGame",			TestSaveGame_f,				CMD_FL_GAME|CMD_FL_CHEAT,	"test a save game for a level" );
@@ -2772,6 +2903,13 @@ void idGameLocal::InitConsoleCommands( void ) {
 	cmdSystem->AddCommand( "spawn",					Cmd_Spawn_f,				CMD_FL_GAME|CMD_FL_CHEAT,	"spawns a game entity", idCmdSystem::ArgCompletion_Decl<DECL_ENTITYDEF> );
 	//HUMANHEAD rww
 	cmdSystem->AddCommand( "spawnArtificialPlayer",	Cmd_SpawnArtificialPlayer_f,CMD_FL_GAME|CMD_FL_CHEAT,	"spawns an artificial player entity" );
+	cmdSystem->AddCommand( "addbot",				Cmd_AddBot_f,			CMD_FL_GAME,				"addbot [character] [skill]" );
+	cmdSystem->AddCommand( "removebot",			Cmd_RemoveBot_f,		CMD_FL_GAME,				"removebot [character]" );
+	cmdSystem->AddCommand( "removebots",			Cmd_RemoveBots_f,		CMD_FL_GAME,				"remove every bot" );
+	cmdSystem->AddCommand( "kickbots",				Cmd_RemoveBots_f,		CMD_FL_GAME,				"remove every bot" );
+	cmdSystem->AddCommand( "botlist",				Cmd_BotList_f,			CMD_FL_GAME,				"list live bots and their resolved skill" );
+	cmdSystem->AddCommand( "botcharacters",			Cmd_BotCharacters_f,	CMD_FL_GAME,				"list available bot characters" );
+	cmdSystem->AddCommand( "botreload",				Cmd_BotReload_f,		CMD_FL_GAME,				"reload bot styles, characters and chat" );
 #if !GOLD
 	cmdSystem->AddCommand( "playerShadowToggle",	Cmd_PlayerShadowToggle_f,	CMD_FL_GAME|CMD_FL_CHEAT,	"debugging - toggles shadows on current spawned players" );
 #endif

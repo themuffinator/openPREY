@@ -1,10 +1,6 @@
 # Prerequisites
 *.d
 
-# Python cache artifacts
-__pycache__/
-*.pyc
-
 # Compiled Object files
 *.slo
 *.lo
@@ -37,31 +33,39 @@ __pycache__/
 
 # Debug folders
 /build/
-/builddir/
-/builddir-*/
-/builddir_*/
+/builddir*/
 /build_meson/
 /build_meson_msvc/
 /build_meson_clangcl/
 /_save/
 /.tmp/meson_extref_test*/
+# Meson subprojects: ignore everything meson extracts/downloads here,
+# keep only the wrap files and the vendored subprojects we maintain in-tree.
 /subprojects/.wraplock
 /subprojects/packagecache/
-/subprojects/SDL3-*/
-/.install/crashes/
-/.install/basepr/
-/.install/openbase/*.cfg
+/subprojects/*/
+!/subprojects/glew/
+!/subprojects/openal-soft-prebuilt/
+!/subprojects/packagefiles/
+!/subprojects/stb_vorbis/
+/.install/
+__pycache__/
+*.pyc
 _tmp_*
 /.tmp/
 /.home/
 /.home_*/
-/.install/.home/
 *.pdb
-$dst/
-$tmp/
-*.bimage
-/.install/*.cfg
-/repro_*.cfg
-/stdout*.txt
-/stderr*.txt
+.voice_eng/
+/$outDir
 /references/PREY.exe_disassembly.txt
+
+# Local diagnostic transcripts and runtime logs
+*.log
+*.log.*
+InstallationLog.txt
+logs/
+/.home-listen-server
+
+# Persistent local release credentials; never include these in packages or Git.
+/.private/

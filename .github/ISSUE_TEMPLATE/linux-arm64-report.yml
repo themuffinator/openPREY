@@ -1,0 +1,141 @@
+name: Linux ARM64 hardware report
+description: Report a Linux aarch64 result — a bug, or a successful run that can feed the ARM64 signoff evidence record.
+title: "[Linux ARM64]: "
+labels:
+  - linux
+  - arm64
+  - preview-support
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Linux ARM64 is currently a **preview** support tier. Hosted CI proves that the build, package, and
+        assetless startup paths work on native aarch64 runners, but real-hardware gameplay, audio, input,
+        dedicated-server, and display evidence is still required before the tier can move to first-class.
+
+        Both kinds of report are useful here:
+
+        - **A defect** — something is wrong on aarch64 that is not wrong on x64.
+        - **A clean run** — you played, it worked. That is evidence, and it is what the tier gate is waiting on.
+
+        Please paste terminal output and `openprey.log` as text rather than screenshots.
+  - type: input
+    id: version
+    attributes:
+      label: openPREY version
+      description: The version string printed at startup, or the release tag you downloaded.
+      placeholder: "0.0.1"
+    validations:
+      required: true
+  - type: input
+    id: artifact
+    attributes:
+      label: Package artifact name
+      description: Paste the exact downloaded file name, or say "built from source" and give the commit SHA.
+      placeholder: "openprey-0.0.1-linux-arm64-preview.tar.xz"
+    validations:
+      required: true
+  - type: dropdown
+    id: report_kind
+    attributes:
+      label: What kind of report is this?
+      options:
+        - Defect — something is broken
+        - Clean run — reporting a working session as evidence
+        - Performance observation
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: CPU / board
+      description: Exact part if you know it. `lscpu` output is ideal.
+      placeholder: "Ampere Altra Q80-30 / Raspberry Pi 5 / Snapdragon X Elite under Linux"
+    validations:
+      required: true
+  - type: dropdown
+    id: physical
+    attributes:
+      label: Is this physical hardware?
+      description: >-
+        Emulated and virtualized runs are still useful, but only physical aarch64 hardware counts toward the
+        first-class signoff evidence record.
+      options:
+        - Physical aarch64 hardware
+        - Virtual machine on an aarch64 host
+        - Emulated (qemu-user, qemu-system, Rosetta, box64, FEX)
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution and kernel
+      placeholder: "Ubuntu 24.04.1, kernel 6.8.0-45-generic aarch64"
+    validations:
+      required: true
+  - type: dropdown
+    id: session
+    attributes:
+      label: Display session
+      options:
+        - Native Wayland
+        - XWayland
+        - X11
+        - Headless / dedicated server only
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      placeholder: "Mali-G610 / panfrost 24.2, or AMD RX 6600 / mesa 24.2 radeonsi"
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: >-
+        For a defect, describe the symptom and how to reproduce it. For a clean run, say what you did —
+        which maps, single player or multiplayer, how long, and whether audio and input behaved.
+    validations:
+      required: true
+  - type: textarea
+    id: x64_comparison
+    attributes:
+      label: Does the same thing happen on x64?
+      description: >-
+        This is the single most valuable field for an architecture report. If you can run the same version
+        on an x86-64 machine, say whether the behavior differs. "Not tested" is a fine answer.
+      placeholder: "Not tested / same on x64 / x64 is fine, only aarch64 shows this"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terminal output and openprey.log
+      description: Paste as text. Include the startup banner — it carries the version, architecture, and CPU line.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: machine_spec
+    attributes:
+      label: Reported machine quality tier
+      description: >-
+        Run `com_machineSpec` in the console and paste the value. aarch64 hosts report no CPU frequency, so
+        this is a known problem area and the value is worth capturing.
+      placeholder: "com_machineSpec = 2"
+    validations:
+      required: false
+  - type: checkboxes
+    id: evidence_consent
+    attributes:
+      label: Evidence record
+      options:
+        - label: >-
+            This is a physical-hardware run and I am willing to have it referenced in
+            docs/dev/linux-arm64-signoff-evidence.md.
+          required: false

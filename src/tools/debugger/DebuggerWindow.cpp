@@ -103,6 +103,17 @@ rvDebuggerWindow::~rvDebuggerWindow ( )
 	}
 }
 
+static void Debugger_AddImageListIcon( HIMAGELIST imageList, HINSTANCE instance, int resourceId ) {
+	if ( imageList == NULL ) {
+		return;
+	}
+	HICON icon = (HICON)LoadImage( instance, MAKEINTRESOURCE( resourceId ), IMAGE_ICON, 16, 16, LR_DEFAULTSIZE | LR_DEFAULTCOLOR );
+	if ( icon != NULL ) {
+		ImageList_AddIcon( imageList, icon );
+		DestroyIcon( icon );
+	}
+}
+
 /*
 ================
 rvDebuggerWindow::RegisterClass
@@ -248,7 +259,7 @@ LRESULT CALLBACK rvDebuggerWindow::ScriptWndProc ( HWND wnd, UINT msg, WPARAM wp
 {
 	static int		  lastStart = -1;
 	static int		  lastEnd   = -1;
-	rvDebuggerWindow* window    = (rvDebuggerWindow*)GetWindowLong ( wnd, GWL_USERDATA );
+	rvDebuggerWindow* window    = reinterpret_cast< rvDebuggerWindow * >( GetWindowLongPtr( wnd, GWLP_USERDATA ) );
 	WNDPROC			  wndproc   = window->mOldScriptProc;
 	
 	switch ( msg )
@@ -354,7 +365,7 @@ LRESULT CALLBACK rvDebuggerWindow::ScriptWndProc ( HWND wnd, UINT msg, WPARAM wp
 
 LRESULT CALLBACK rvDebuggerWindow::MarginWndProc ( HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
-	rvDebuggerWindow* window = (rvDebuggerWindow*) GetWindowLong ( wnd, GWL_USERDATA );
+	rvDebuggerWindow* window = reinterpret_cast< rvDebuggerWindow * >( GetWindowLongPtr( wnd, GWLP_USERDATA ) );
 	
 	switch ( msg )
 	{	
@@ -759,12 +770,12 @@ int rvDebuggerWindow::HandleCreate ( WPARAM wparam, LPARAM lparam )
 	
 	// Create the script window
 	LoadLibrary ( "Riched20.dll" );
-	mWndScript = CreateWindow ( "RichEdit20A", "", WS_CHILD|WS_BORDER|ES_NOHIDESEL|ES_READONLY|ES_MULTILINE|ES_WANTRETURN|ES_AUTOVSCROLL|ES_AUTOHSCROLL|WS_VSCROLL|WS_HSCROLL, 0, 0, 100, 100, mWnd, (HMENU) IDC_DBG_SCRIPT, mInstance, 0 );
+	mWndScript = CreateWindow ( "RichEdit20A", "", WS_CHILD|WS_BORDER|ES_NOHIDESEL|ES_READONLY|ES_MULTILINE|ES_WANTRETURN|ES_AUTOVSCROLL|ES_AUTOHSCROLL|WS_VSCROLL|WS_HSCROLL, 0, 0, 100, 100, mWnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_DBG_SCRIPT ) ), mInstance, 0 );
 	SendMessage ( mWndScript, EM_SETEVENTMASK, 0, ENM_SCROLL|ENM_CHANGE  );
 	SendMessage ( mWndScript, EM_SETWORDBREAKPROC, 0, (LPARAM) ScriptWordBreakProc );
-	mOldScriptProc = (WNDPROC)GetWindowLong ( mWndScript, GWL_WNDPROC );
-	SetWindowLong ( mWndScript, GWL_USERDATA, (LONG)this );
-	SetWindowLong ( mWndScript, GWL_WNDPROC, (LONG)ScriptWndProc );
+	mOldScriptProc = reinterpret_cast< WNDPROC >( GetWindowLongPtr( mWndScript, GWLP_WNDPROC ) );
+	SetWindowLongPtr( mWndScript, GWLP_USERDATA, reinterpret_cast< LONG_PTR >( this ) );
+	SetWindowLongPtr( mWndScript, GWLP_WNDPROC, reinterpret_cast< LONG_PTR >( ScriptWndProc ) );
 
 	SendMessage ( mWndScript, EM_SETTABSTOPS, 1, (LPARAM)&tabsize );
 
@@ -778,27 +789,27 @@ int rvDebuggerWindow::HandleCreate ( WPARAM wparam, LPARAM lparam )
 	SendMessage ( mWndScript, EM_SETMARGINS, EC_LEFTMARGIN|EC_RIGHTMARGIN, MAKELONG(18,10) );
 	SendMessage ( mWndScript, EM_SETBKGNDCOLOR, 0, GetSysColor ( COLOR_3DFACE ) );
 
-	mWndOutput = CreateWindow ( "RichEdit20A", "", WS_CHILD|ES_READONLY|ES_MULTILINE|ES_WANTRETURN|ES_AUTOVSCROLL|ES_AUTOHSCROLL|WS_VSCROLL|WS_HSCROLL|WS_VISIBLE, 0, 0, 100, 100, mWnd, (HMENU) IDC_DBG_OUTPUT, mInstance, 0 );
+	mWndOutput = CreateWindow ( "RichEdit20A", "", WS_CHILD|ES_READONLY|ES_MULTILINE|ES_WANTRETURN|ES_AUTOVSCROLL|ES_AUTOHSCROLL|WS_VSCROLL|WS_HSCROLL|WS_VISIBLE, 0, 0, 100, 100, mWnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_DBG_OUTPUT ) ), mInstance, 0 );
 	SendMessage ( mWndOutput, WM_SETFONT, (WPARAM)CreateFontIndirect ( &lf ), 0 );
 	SendMessage ( mWndOutput, EM_SETMARGINS, EC_LEFTMARGIN|EC_RIGHTMARGIN, MAKELONG(18,10) );
 	SendMessage ( mWndOutput, EM_SETBKGNDCOLOR, 0, GetSysColor ( COLOR_3DFACE ) );
 			
-	mWndConsole = CreateWindow ( "RichEdit20A", "", WS_CHILD|ES_READONLY|ES_MULTILINE|ES_WANTRETURN|ES_AUTOVSCROLL|ES_AUTOHSCROLL|WS_VSCROLL|WS_HSCROLL, 0, 0, 100, 100, mWnd, (HMENU) IDC_DBG_CONSOLE, mInstance, 0 );
+	mWndConsole = CreateWindow ( "RichEdit20A", "", WS_CHILD|ES_READONLY|ES_MULTILINE|ES_WANTRETURN|ES_AUTOVSCROLL|ES_AUTOHSCROLL|WS_VSCROLL|WS_HSCROLL, 0, 0, 100, 100, mWnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_DBG_CONSOLE ) ), mInstance, 0 );
 	SendMessage ( mWndConsole, WM_SETFONT, (WPARAM)CreateFontIndirect ( &lf ), 0 );
 	SendMessage ( mWndConsole, EM_SETMARGINS, EC_LEFTMARGIN|EC_RIGHTMARGIN, MAKELONG(18,10) );
 	SendMessage ( mWndConsole, EM_SETBKGNDCOLOR, 0, GetSysColor ( COLOR_3DFACE ) );			
 
-	mWndMargin = CreateWindow ( "STATIC", "", WS_VISIBLE|WS_CHILD, 0, 0, 0, 0, mWndScript, (HMENU)IDC_DBG_SPLITTER, mInstance, NULL );
-	SetWindowLong ( mWndMargin, GWL_USERDATA, (LONG)this );
-	SetWindowLong ( mWndMargin, GWL_WNDPROC, (LONG)MarginWndProc );
+	mWndMargin = CreateWindow ( "STATIC", "", WS_VISIBLE|WS_CHILD, 0, 0, 0, 0, mWndScript, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_DBG_SPLITTER ) ), mInstance, NULL );
+	SetWindowLongPtr( mWndMargin, GWLP_USERDATA, reinterpret_cast< LONG_PTR >( this ) );
+	SetWindowLongPtr( mWndMargin, GWLP_WNDPROC, reinterpret_cast< LONG_PTR >( MarginWndProc ) );
 
-	mWndBorder = CreateWindow ( "STATIC", "", WS_VISIBLE|WS_CHILD|SS_GRAYFRAME, 0, 0, 0, 0, mWnd, (HMENU)IDC_DBG_BORDER, mInstance, NULL );
+	mWndBorder = CreateWindow ( "STATIC", "", WS_VISIBLE|WS_CHILD|SS_GRAYFRAME, 0, 0, 0, 0, mWnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_DBG_BORDER ) ), mInstance, NULL );
 
 	GetClientRect ( mWnd, &mSplitterRect );
 	mSplitterRect.top = (mSplitterRect.bottom-mSplitterRect.top) / 2;
 	mSplitterRect.bottom = mSplitterRect.top + 4;
 
-	mWndTabs = CreateWindow ( WC_TABCONTROL, "", TCS_BOTTOM|WS_CHILD|WS_VISIBLE|TCS_FOCUSNEVER, 0, 0, 0, 0, mWnd, (HMENU)IDC_DBG_TABS, mInstance, NULL );
+	mWndTabs = CreateWindow ( WC_TABCONTROL, "", TCS_BOTTOM|WS_CHILD|WS_VISIBLE|TCS_FOCUSNEVER, 0, 0, 0, 0, mWnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_DBG_TABS ) ), mInstance, NULL );
 	lf.lfHeight = -MulDiv(8, GetDeviceCaps(dc, LOGPIXELSY), 72);
 	strcpy ( lf.lfFaceName, "Arial" );	
 	SendMessage ( mWndTabs, WM_SETFONT, (WPARAM)CreateFontIndirect ( &lf ), 0 );
@@ -817,9 +828,9 @@ int rvDebuggerWindow::HandleCreate ( WPARAM wparam, LPARAM lparam )
 	item.pszText = "Threads";
 	TabCtrl_InsertItem ( mWndTabs, 4, &item );
 
-	mWndCallstack = CreateWindow ( WC_LISTVIEW, "", LVS_REPORT|WS_CHILD|LVS_SHAREIMAGELISTS, 0, 0, 0, 0, mWnd, (HMENU)IDC_DBG_CALLSTACK, mInstance, NULL );
-	mWndWatch     = CreateWindow ( WC_LISTVIEW, "", LVS_REPORT|WS_CHILD|LVS_EDITLABELS|LVS_OWNERDRAWFIXED, 0, 0, 0, 0, mWnd, (HMENU)IDC_DBG_WATCH, mInstance, NULL );
-	mWndThreads   = CreateWindow ( WC_LISTVIEW, "", LVS_REPORT|WS_CHILD|LVS_SHAREIMAGELISTS, 0, 0, 0, 0, mWnd, (HMENU)IDC_DBG_THREADS, mInstance, NULL );
+	mWndCallstack = CreateWindow ( WC_LISTVIEW, "", LVS_REPORT|WS_CHILD|LVS_SHAREIMAGELISTS, 0, 0, 0, 0, mWnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_DBG_CALLSTACK ) ), mInstance, NULL );
+	mWndWatch     = CreateWindow ( WC_LISTVIEW, "", LVS_REPORT|WS_CHILD|LVS_EDITLABELS|LVS_OWNERDRAWFIXED, 0, 0, 0, 0, mWnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_DBG_WATCH ) ), mInstance, NULL );
+	mWndThreads   = CreateWindow ( WC_LISTVIEW, "", LVS_REPORT|WS_CHILD|LVS_SHAREIMAGELISTS, 0, 0, 0, 0, mWnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_DBG_THREADS ) ), mInstance, NULL );
 
 	LVCOLUMN col;
 	col.mask = LVCF_WIDTH|LVCF_TEXT;
@@ -859,10 +870,10 @@ int rvDebuggerWindow::HandleCreate ( WPARAM wparam, LPARAM lparam )
 	// Create the image list that is used by the threads window, callstack window, and 
 	// margin window
 	mImageList = ImageList_Create ( 16, 16, ILC_COLOR|ILC_MASK, 0, 2 );
-	ImageList_AddIcon ( mImageList, (HICON)LoadImage ( mInstance, MAKEINTRESOURCE(IDI_DBG_EMPTY), IMAGE_ICON, 16, 16, LR_DEFAULTSIZE|LR_DEFAULTCOLOR) );
-	ImageList_AddIcon ( mImageList, (HICON)LoadImage ( mInstance, MAKEINTRESOURCE(IDI_DBG_CURRENT), IMAGE_ICON, 16, 16, LR_DEFAULTSIZE|LR_DEFAULTCOLOR) );
-	ImageList_AddIcon ( mImageList, (HICON)LoadImage ( mInstance, MAKEINTRESOURCE(IDI_DBG_BREAKPOINT), IMAGE_ICON, 16, 16, LR_DEFAULTSIZE|LR_DEFAULTCOLOR) );
-	ImageList_AddIcon ( mImageList, (HICON)LoadImage ( mInstance, MAKEINTRESOURCE(IDI_DBG_CURRENTLINE), IMAGE_ICON, 16, 16, LR_DEFAULTSIZE|LR_DEFAULTCOLOR) );
+	Debugger_AddImageListIcon( mImageList, mInstance, IDI_DBG_EMPTY );
+	Debugger_AddImageListIcon( mImageList, mInstance, IDI_DBG_CURRENT );
+	Debugger_AddImageListIcon( mImageList, mInstance, IDI_DBG_BREAKPOINT );
+	Debugger_AddImageListIcon( mImageList, mInstance, IDI_DBG_CURRENTLINE );
 	ListView_SetImageList ( mWndThreads, mImageList, LVSIL_SMALL );
 	ListView_SetImageList ( mWndCallstack, mImageList, LVSIL_SMALL );
 
@@ -1049,7 +1060,8 @@ int rvDebuggerWindow::HandleCommand ( WPARAM wparam, LPARAM lparam )
 			LONG	num;
 			LONG	dem;
 								
-			SendMessage ( mWndScript, EM_GETZOOM, (LONG)&num, (LONG)&dem );
+			SendMessage( mWndScript, EM_GETZOOM,
+				reinterpret_cast< WPARAM >( &num ), reinterpret_cast< LPARAM >( &dem ) );
 			if ( num != mZoomScaleNum || dem != mZoomScaleDem )
 			{
 				mZoomScaleNum = num;
@@ -1153,7 +1165,7 @@ Window procedure for the deubgger window
 */
 LRESULT CALLBACK rvDebuggerWindow::WndProc ( HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
-	rvDebuggerWindow* window = (rvDebuggerWindow*) GetWindowLong ( wnd, GWL_USERDATA );
+	rvDebuggerWindow* window = reinterpret_cast< rvDebuggerWindow * >( GetWindowLongPtr( wnd, GWLP_USERDATA ) );
 	
 	switch ( msg )
 	{
@@ -1176,7 +1188,7 @@ LRESULT CALLBACK rvDebuggerWindow::WndProc ( HWND wnd, UINT msg, WPARAM wparam, 
 			gDebuggerApp.GetOptions().SetString ( va("watch%d", i ), "" );
 			
 			window->mWnd = NULL;
-			SetWindowLong ( wnd, GWL_USERDATA, 0 );		
+			SetWindowLongPtr( wnd, GWLP_USERDATA, 0 );
 			break;
 		}
 	
@@ -1320,7 +1332,7 @@ LRESULT CALLBACK rvDebuggerWindow::WndProc ( HWND wnd, UINT msg, WPARAM wparam, 
 		{					
 			CREATESTRUCT* cs = (CREATESTRUCT*) lparam;
 			window = (rvDebuggerWindow*) cs->lpCreateParams;
-			SetWindowLong ( wnd, GWL_USERDATA, (LONG)cs->lpCreateParams );
+			SetWindowLongPtr( wnd, GWLP_USERDATA, reinterpret_cast< LONG_PTR >( cs->lpCreateParams ) );
 
 			window->mWnd = wnd;
 			window->HandleCreate ( wparam, lparam );
@@ -1874,7 +1886,7 @@ Create the toolbar and and all of its buttons
 void rvDebuggerWindow::CreateToolbar ( void )
 {
 	// Create the toolbar control
-	mWndToolbar = CreateWindowEx ( 0, TOOLBARCLASSNAME, "", WS_CHILD|WS_VISIBLE,0,0,0,0, mWnd, (HMENU)IDC_DBG_TOOLBAR, mInstance, NULL );
+	mWndToolbar = CreateWindowEx ( 0, TOOLBARCLASSNAME, "", WS_CHILD|WS_VISIBLE,0,0,0,0, mWnd, reinterpret_cast< HMENU >( static_cast< INT_PTR >( IDC_DBG_TOOLBAR ) ), mInstance, NULL );
 
 	// Initialize the toolbar
 	SendMessage ( mWndToolbar, TB_BUTTONSTRUCTSIZE, ( WPARAM )sizeof( TBBUTTON ), 0 );	

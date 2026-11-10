@@ -608,6 +608,7 @@ void idCollisionModelManagerLocal::RotateTrmEdgeThroughPolygon( cm_traceWork_t *
 		tw->trace.c.modelFeature = edgeNum;
 		tw->trace.c.trmFeature = trmEdge - tw->edges;
 		tw->trace.c.point = collisionPoint;
+		CM_GetMaterialType( tw, poly );
 		// if no collision can be closer
 		if ( tw->maxTan == 0.0f ) {
 			break;
@@ -970,9 +971,10 @@ void idCollisionModelManagerLocal::RotateTrmVertexThroughPolygon( cm_traceWork_t
 		tw->trace.c.contents = poly->contents;
 		tw->trace.c.material = poly->material;
 		tw->trace.c.type = CONTACT_TRMVERTEX;
-		tw->trace.c.modelFeature = *reinterpret_cast<int *>(&poly);
+		tw->trace.c.modelFeature = poly->featureIndex;
 		tw->trace.c.trmFeature = v - tw->vertices;
 		tw->trace.c.point = collisionPoint;
+		CM_GetMaterialType( tw, poly );
 	}
 }
 
@@ -1041,6 +1043,7 @@ void idCollisionModelManagerLocal::RotateVertexThroughTrmPolygon( cm_traceWork_t
 		tw->trace.c.modelFeature = v - tw->model->vertices;
 		tw->trace.c.trmFeature = trmpoly - tw->polys;
 		tw->trace.c.point = v->p;
+		CM_GetMaterialType( tw, poly );
 	}
 }
 
@@ -1221,12 +1224,15 @@ void idCollisionModelManagerLocal::BoundsForRotation( const idVec3 &origin, cons
 	for ( i = 0; i < 3; i++ ) {
 		// if the derivative changes sign along this axis during the rotation from start to end
 		if ( ( v1[i] > 0.0f && v2[i] < 0.0f ) || ( v1[i] < 0.0f && v2[i] > 0.0f ) ) {
+			// the axis is only nearly normalized: a component a hair above 1 must
+			// not take the square root of a negative number (NaN bounds)
+			const float extent = idMath::Sqrt( radiusSqr * Max( 0.0f, 1.0f - axis[i] * axis[i] ) );
 			if ( ( 0.5f * (start[i] + end[i]) - origin[i] ) > 0.0f ) {
 				bounds[0][i] = Min( start[i], end[i] );
-				bounds[1][i] = origin[i] + idMath::Sqrt( radiusSqr * ( 1.0f - axis[i] * axis[i] ) );
+				bounds[1][i] = origin[i] + extent;
 			}
 			else {
-				bounds[0][i] = origin[i] - idMath::Sqrt( radiusSqr * ( 1.0f - axis[i] * axis[i] ) );
+				bounds[0][i] = origin[i] - extent;
 				bounds[1][i] = Max( start[i], end[i] );
 			}
 		}
@@ -1270,6 +1276,9 @@ void idCollisionModelManagerLocal::Rotation180( trace_t *results, const idVec3 &
 	tw.trace.fraction = 1.0f;
 	tw.trace.c.contents = 0;
 	tw.trace.c.type = CONTACT_NONE;
+	tw.trace.c.id = 0;
+	tw.trace.c.material = NULL;
+	tw.trace.c.materialType = NULL;
 	tw.contents = contentMask;
 	tw.isConvex = true;
 	tw.rotation = true;
@@ -1616,14 +1625,14 @@ void idCollisionModelManagerLocal::Rotation( trace_t *results, const idVec3 &sta
 
 	memset( results, 0, sizeof( *results ) );
 
-	// Legacy game code may pass NULL to indicate the world model.
-	if ( model == NULL && models != NULL && numModels > 0 ) {
-		model = models[0];
+	// Legacy game code may pass NULL to indicate the current map's world model.
+	if ( model == NULL ) {
+		model = GetWorldModel();
 	}
 	if ( model == NULL ) {
 		static bool warnedNullModel = false;
 		if ( !warnedNullModel ) {
-			common->Warning( "%s: model passed was nullptr and no world model is available", __FUNCTION__ );
+			common->Warning( "%s: model passed was nullptr and no current world model is available", __FUNCTION__ );
 			warnedNullModel = true;
 		}
 		results->fraction = 1.0f;
@@ -1691,12 +1700,9 @@ void idCollisionModelManagerLocal::Rotation( trace_t *results, const idVec3 &sta
 			entered = 1;
 			// if the trm is stuck in the model
 			if ( idCollisionModelManagerLocal::Contents( results->endpos, trm, results->endAxis, -1, model, modelOrigin, modelAxis ) & contentMask ) {
-				trace_t tr;
-
 				// test where the trm is stuck in the model
 				idCollisionModelManagerLocal::Contents( results->endpos, trm, results->endAxis, -1, model, modelOrigin, modelAxis );
-				// re-run collision detection to find out where it failed
-				idCollisionModelManagerLocal::Rotation( &tr, start, rotation, trm, trmAxis, contentMask, model, modelOrigin, modelAxis );
+				CaptureRotationFailure( start, rotation, trm, trmAxis, contentMask, model, modelOrigin, modelAxis );
 			}
 			entered = 0;
 		}

@@ -39,6 +39,8 @@ If you have questions concerning this license or the applicable additional terms
 ======================================================================
 */
 
+static int lwIndicesInRange( const lwPointList *point, const lwPolygonList *polygon, const lwVMap *vmap );
+
 /*
 ======================================================================
 lwFreeClip()
@@ -338,7 +340,7 @@ Read an ENVL chunk from an LWO2 file.
 lwEnvelope *lwGetEnvelope( idFile *fp, int cksize )
 {
    lwEnvelope *env;
-   lwKey *key;
+   lwKey *key = NULL;
    lwPlugin *plug;
    unsigned int id;
    unsigned short sz;
@@ -1363,7 +1365,7 @@ char *sgetS0( unsigned char **bp )
 
    if ( flen == FLEN_ERROR ) return NULL;
 
-   len = strlen( (const char*)buf ) + 1;
+   len = idLib::SizeToInt( strlen( (const char*)buf ) + 1, "sgetS0" );
    if ( len == 1 ) {
       flen += 2;
       *bp += 2;
@@ -1624,6 +1626,7 @@ lwObject *lwGetObject( const char *filename, unsigned int *failID, int *failpos 
 
    layer = object->layer;
    while ( layer ) {
+      if ( !lwIndicesInRange( &layer->point, &layer->polygon, layer->vmap )) goto Fail;
       lwGetBoundingBox( &layer->point, layer->bbox );
       lwGetPolyNormals( &layer->point, &layer->polygon );
       if ( !lwGetPointPolygons( &layer->point, &layer->polygon )) goto Fail;
@@ -1782,8 +1785,12 @@ static lwTexture *get_texture( char *s )
 {
    lwTexture *tex;
 
+   if ( !s ) return NULL;
    tex = (lwTexture*)Mem_ClearedAlloc( sizeof( lwTexture ) );
-   if ( !tex ) return NULL;
+   if ( !tex ) {
+      Mem_Free( s );
+      return NULL;
+   }
 
    tex->tmap.size.val[ 0 ] =
    tex->tmap.size.val[ 1 ] =
@@ -1821,8 +1828,8 @@ Read an lwSurface from an LWOB file.
 lwSurface *lwGetSurface5( idFile *fp, int cksize, lwObject *obj )
 {
    lwSurface *surf;
-   lwTexture *tex;
-   lwPlugin *shdr;
+   lwTexture *tex = NULL;
+   lwPlugin *shdr = NULL;
    char *s;
    float v[ 3 ];
    unsigned int id, flags;
@@ -1945,47 +1952,56 @@ lwSurface *lwGetSurface5( idFile *fp, int cksize, lwObject *obj )
          case ID_BTEX:
             s = (char*)getbytes( fp, sz );
             tex = get_texture( s );
+            if ( !tex ) goto Fail;
             lwListAdd( (void**)&surf->bump.tex, tex );
             break;
 
          case ID_CTEX:
             s = (char*)getbytes( fp, sz );
             tex = get_texture( s );
+            if ( !tex ) goto Fail;
             lwListAdd( (void**)&surf->color.tex, tex );
             break;
 
          case ID_DTEX:
             s = (char*)getbytes( fp, sz );
             tex = get_texture( s );
+            if ( !tex ) goto Fail;
             lwListAdd( (void**)&surf->diffuse.tex, tex );
             break;
 
          case ID_LTEX:
             s = (char*)getbytes( fp, sz );
             tex = get_texture( s );
+            if ( !tex ) goto Fail;
             lwListAdd( (void**)&surf->luminosity.tex, tex );
             break;
 
          case ID_RTEX:
             s = (char*)getbytes( fp, sz );
             tex = get_texture( s );
+            if ( !tex ) goto Fail;
             lwListAdd( (void**)&surf->reflection.val.tex, tex );
             break;
 
          case ID_STEX:
             s = (char*)getbytes( fp, sz );
             tex = get_texture( s );
+            if ( !tex ) goto Fail;
             lwListAdd( (void**)&surf->specularity.tex, tex );
             break;
 
          case ID_TTEX:
             s = (char*)getbytes( fp, sz );
             tex = get_texture( s );
+            if ( !tex ) goto Fail;
             lwListAdd( (void**)&surf->transparency.val.tex, tex );
             break;
 
          case ID_TFLG:
+            if ( !tex ) goto Fail;
             flags = getU2( fp );
+            i = 0;
 
             if ( flags & 1 ) i = 0;
             if ( flags & 2 ) i = 1;
@@ -2006,21 +2022,25 @@ lwSurface *lwGetSurface5( idFile *fp, int cksize, lwObject *obj )
             break;
 
          case ID_TSIZ:
+            if ( !tex ) goto Fail;
             for ( i = 0; i < 3; i++ )
                tex->tmap.size.val[ i ] = getF4( fp );
             break;
 
          case ID_TCTR:
+            if ( !tex ) goto Fail;
             for ( i = 0; i < 3; i++ )
                tex->tmap.center.val[ i ] = getF4( fp );
             break;
 
          case ID_TFAL:
+            if ( !tex ) goto Fail;
             for ( i = 0; i < 3; i++ )
                tex->tmap.falloff.val[ i ] = getF4( fp );
             break;
 
          case ID_TVEL:
+            if ( !tex ) goto Fail;
             for ( i = 0; i < 3; i++ )
                v[ i ] = getF4( fp );
             tex->tmap.center.eindex = add_tvel( tex->tmap.center.val, v,
@@ -2028,44 +2048,53 @@ lwSurface *lwGetSurface5( idFile *fp, int cksize, lwObject *obj )
             break;
 
          case ID_TCLR:
+            if ( !tex ) goto Fail;
             if ( tex->type == ID_PROC )
                for ( i = 0; i < 3; i++ )
                   tex->param.proc.value[ i ] = getU1( fp ) / 255.0f;
             break;
 
          case ID_TVAL:
+            if ( !tex ) goto Fail;
             tex->param.proc.value[ 0 ] = getI2( fp ) / 256.0f;
             break;
 
          case ID_TAMP:
+            if ( !tex ) goto Fail;
             if ( tex->type == ID_IMAP )
                tex->param.imap.amplitude.val = getF4( fp );
             break;
 
          case ID_TIMG:
+            if ( !tex ) goto Fail;
             s = getS0( fp );
             tex->param.imap.cindex = add_clip( s, &obj->clip, &obj->nclips );
             break;
 
          case ID_TAAS:
+            if ( !tex ) goto Fail;
             tex->param.imap.aa_strength = getF4( fp );
             tex->param.imap.aas_flags = 1;
             break;
 
          case ID_TREF:
+            if ( !tex ) goto Fail;
             tex->tmap.ref_object = (char*)getbytes( fp, sz );
             break;
 
          case ID_TOPC:
+            if ( !tex ) goto Fail;
             tex->opacity.val = getF4( fp );
             break;
 
          case ID_TFP0:
+            if ( !tex ) goto Fail;
             if ( tex->type == ID_IMAP )
                tex->param.imap.wrapw.val = getF4( fp );
             break;
 
          case ID_TFP1:
+            if ( !tex ) goto Fail;
             if ( tex->type == ID_IMAP )
                tex->param.imap.wraph.val = getF4( fp );
             break;
@@ -2079,6 +2108,7 @@ lwSurface *lwGetSurface5( idFile *fp, int cksize, lwObject *obj )
             break;
 
          case ID_SDAT:
+            if ( !shdr ) goto Fail;
             shdr->data = getbytes( fp, sz );
             break;
 
@@ -2179,7 +2209,7 @@ int lwGetPolygons5( idFile *fp, int cksize, lwPolygonList *plist, int ptoffset )
          bp += 2;
       }
       j -= 1;
-      pp->surf = ( lwSurface * )(uintptr_t)j;
+      pp->surfIndex = j;
 
       pp++;
       pv += nv;
@@ -2319,6 +2349,7 @@ lwObject *lwGetObject5( const char *filename, unsigned int *failID, int *failpos
    fileSystem->CloseFile( fp );
    fp = NULL;
 
+   if ( !lwIndicesInRange( &layer->point, &layer->polygon, layer->vmap )) goto Fail2;
    lwGetBoundingBox( &layer->point, layer->bbox );
    lwGetPolyNormals( &layer->point, &layer->polygon );
    if ( !lwGetPointPolygons( &layer->point, &layer->polygon )) goto Fail2;
@@ -2589,6 +2620,40 @@ Fail:
 
 /*
 ======================================================================
+lwIndicesInRange()
+
+openQ4: the point and polygon numbers in an object are the file's own, and
+the passes that follow count, link and write through them without looking:
+a polygon naming point 0xFFFFFF incremented a counter 16 million points past
+the list. Check them all once, before any of those passes run.
+====================================================================== */
+
+static int lwIndicesInRange( const lwPointList *point, const lwPolygonList *polygon, const lwVMap *vmap )
+{
+   int i, j;
+
+   for ( i = 0; i < polygon->count; i++ ) {
+      for ( j = 0; j < polygon->pol[ i ].nverts; j++ ) {
+         if ( polygon->pol[ i ].v[ j ].index < 0 || polygon->pol[ i ].v[ j ].index >= point->count )
+            return 0;
+      }
+   }
+
+   for ( ; vmap; vmap = vmap->next ) {
+      for ( i = 0; i < vmap->nverts; i++ ) {
+         if ( vmap->vindex[ i ] < 0 || vmap->vindex[ i ] >= point->count )
+            return 0;
+         if ( vmap->perpoly && ( vmap->pindex[ i ] < 0 || vmap->pindex[ i ] >= polygon->count ))
+            return 0;
+      }
+   }
+
+   return 1;
+}
+
+
+/*
+======================================================================
 lwGetPolyNormals()
 
 Calculate the polygon normals.  By convention, LW's polygon normals
@@ -2696,8 +2761,8 @@ int lwResolvePolySurfaces( lwPolygonList *polygon, lwTagList *tlist,
    }
 
    for ( i = 0; i < polygon->count; i++ ) {
-      index = ( int )(uintptr_t)polygon->pol[ i ].surf;
-      if ( index < 0 || index > tlist->count ) return 0;
+      index = polygon->pol[ i ].surfIndex;
+      if ( index < 0 || index >= tlist->count ) return 0;
       if ( !s[ index ] ) {
          s[ index ] = lwDefaultSurface();
          if ( !s[ index ] ) return 0;
@@ -2813,7 +2878,7 @@ int lwGetTags( idFile *fp, int cksize, lwTagList *tlist )
 	ntags = 0;
 	bp = buf;
 	while ( bp < buf + cksize ) {
-		len = strlen( bp ) + 1;
+		len = idLib::SizeToInt( strlen( bp ) + 1, "lwGetTags" );
 		len += len & 1;
 		bp += len;
 		++ntags;
@@ -2874,9 +2939,11 @@ int lwGetPolygonTags( idFile *fp, int cksize, lwTagList *tlist, lwPolygonList *p
 		j = getVX( fp ) + tlist->offset;
 		rlen = get_flen();
 		if ( rlen < 0 || rlen > cksize ) return 0;
+		// openQ4: the polygon number is the file's and is written through below
+		if ( i < 0 || i >= plist->count ) return 0;
 
 		switch ( type ) {
-			case ID_SURF:  plist->pol[ i ].surf = ( lwSurface * )(uintptr_t)j;  break;
+			case ID_SURF:  plist->pol[ i ].surfIndex = j;  break;
 			case ID_PART:  plist->pol[ i ].part = j;  break;
 			case ID_SMGP:  plist->pol[ i ].smoothgrp = j;  break;
 		}

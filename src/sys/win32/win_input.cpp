@@ -715,13 +715,7 @@ void Sys_InitScanTable( void ) {
 	if ( lang.Length() == 0 ) {
 		lang = "english";
 	}
-	if ( lang.Icmp( "english" ) == 0 ) {
-		keyScanTable = s_scantokey;
-		// the only reason that english right alt binds as K_ALT is so that 
-		// users who were using right-alt before the patch don't suddenly find
-		// that only left-alt is working.
-		rightAltKey = K_ALT;
-	} else if ( lang.Icmp( "spanish" ) == 0 ) {
+	if ( lang.Icmp( "spanish" ) == 0 ) {
 		keyScanTable = s_scantokey_spanish;
 		rightAltKey = K_RIGHT_ALT;
 	} else if ( lang.Icmp( "french" ) == 0 ) {
@@ -733,6 +727,26 @@ void Sys_InitScanTable( void ) {
 	} else if ( lang.Icmp( "italian" ) == 0 ) {
 		keyScanTable = s_scantokey_italian;
 		rightAltKey = K_RIGHT_ALT;
+	} else if ( lang.Icmp( "polish" ) == 0 || lang.Icmp( "brazilian" ) == 0 || lang.Icmp( "czech" ) == 0 ||
+				lang.Icmp( "hungarian" ) == 0 || lang.Icmp( "turkish" ) == 0 || lang.Icmp( "ukrainian" ) == 0 ) {
+		// "Polish (Programmers)" is the layout essentially every Polish player
+		// uses, and it is the US layout with the alphabet's diacritics on the
+		// AltGr layer - so the scan codes are the English ones, but AltGr has to
+		// stay distinct from Alt or none of those letters can be typed. The
+		// Brazilian ABNT2, Czech, Hungarian, Turkish Q and Ukrainian layouts also
+		// put characters on AltGr (@, /, ? and the Ukrainian ghe), and they bind
+		// by key position like English rather than through a table of their own.
+		keyScanTable = s_scantokey;
+		rightAltKey = K_RIGHT_ALT;
+	} else {
+		// English, and any language without a layout of its own. The only reason
+		// english right alt binds as K_ALT is so that users who were using
+		// right-alt before the patch don't suddenly find that only left-alt is
+		// working. This is the default branch rather than an "english" test so
+		// that switching away from a language that does have a table cannot
+		// leave the previous one installed.
+		keyScanTable = s_scantokey;
+		rightAltKey = K_ALT;
 	}
 }
 
@@ -763,6 +777,15 @@ Called every frame, even if not generating commands
 */
 void IN_Frame( void ) {
 	bool	shouldGrab = true;
+
+	if ( win32.printScreenFocusReleaseUntil != 0 ) {
+		const DWORD now = GetTickCount();
+		if ( static_cast<LONG>( win32.printScreenFocusReleaseUntil - now ) > 0 ) {
+			shouldGrab = false;
+		} else {
+			win32.printScreenFocusReleaseUntil = 0;
+		}
+	}
 
 	if ( !win32.in_mouse.GetBool() ) {
 		shouldGrab = false;
@@ -932,8 +955,24 @@ Sys_PollKeyboardInputEvents
 ====================
 */
 int Sys_ReturnKeyboardInputEvent( const int n, int &ch, bool &state ) {
+	if ( n < 0 || n >= DINPUT_BUFFERSIZE ) {
+		ch = 0;
+		state = false;
+		return 0;
+	}
+
 	ch = IN_DIMapKey( polled_didod[ n ].dwOfs );
 	state = (polled_didod[ n ].dwData & 0x80) == 0x80;
+	if ( ch <= 0 || ch >= K_LAST_KEY ) {
+		ch = 0;
+		state = false;
+		return 0;
+	}
+	if ( ch == K_PRINT_SCR ) {
+		if ( Sys_HandlePrintScreenHotkey( state ) ) {
+			return 0;
+		}
+	}
 	if ( ch == K_PRINT_SCR || ch == K_CTRL || ch == K_ALT || ch == K_RIGHT_ALT ) {
 		// for windows, add a keydown event for print screen here, since
 		// windows doesn't send keydown events to the WndProc for this key.
@@ -948,6 +987,22 @@ int Sys_ReturnKeyboardInputEvent( const int n, int &ch, bool &state ) {
 void Sys_EndKeyboardInputEvents( void ) {
 }
 
+static void IN_ClearBufferedDeviceData( LPDIRECTINPUTDEVICE8 device ) {
+	if ( device == NULL ) {
+		return;
+	}
+
+	DWORD dwElements = DINPUT_BUFFERSIZE;
+	device->GetDeviceData( sizeof( DIDEVICEOBJECTDATA ), NULL, &dwElements, 0 );
+}
+
+void Sys_ClearInputEvents( void ) {
+	IN_ClearBufferedDeviceData( win32.g_pKeyboard );
+	IN_ClearBufferedDeviceData( win32.g_pMouse );
+	memset( polled_didod, 0, sizeof( polled_didod ) );
+	memset( toggleFetch, 0, sizeof( toggleFetch ) );
+	diFetch = 0;
+}
 void Sys_QueMouseEvents( int dwElements ) {
 	int i, value;
 
@@ -959,11 +1014,15 @@ void Sys_QueMouseEvents( int dwElements ) {
 			switch (polled_didod[i].dwOfs) {
 			case DIMOFS_X:
 				value = polled_didod[i].dwData;
-				Sys_QueEvent( polled_didod[i].dwTimeStamp, SE_MOUSE, value, 0, 0, NULL );
+				if ( value != 0 ) {
+					Sys_QueEvent( polled_didod[i].dwTimeStamp, SE_MOUSE, value, 0, 0, NULL );
+				}
 				break;
 			case DIMOFS_Y:
 				value = polled_didod[i].dwData;
-				Sys_QueEvent( polled_didod[i].dwTimeStamp, SE_MOUSE, 0, value, 0, NULL );
+				if ( value != 0 ) {
+					Sys_QueEvent( polled_didod[i].dwTimeStamp, SE_MOUSE, 0, value, 0, NULL );
+				}
 				break;
 			case DIMOFS_Z:
 				value = ( (int) polled_didod[i].dwData ) / WHEEL_DELTA;
@@ -1010,7 +1069,13 @@ int Sys_PollMouseInputEvents( void ) {
 }
 
 int Sys_ReturnMouseInputEvent( const int n, int &action, int &value ) {
-	int diaction = polled_didod[n].dwOfs;
+	if ( n < 0 || n >= DINPUT_BUFFERSIZE ) {
+		action = 0;
+		value = 0;
+		return 0;
+	}
+
+	const int diaction = polled_didod[n].dwOfs;
 
 	if ( diaction >= DIMOFS_BUTTON0 && diaction <= DIMOFS_BUTTON7 ) {
 		value = (polled_didod[n].dwData & 0x80) == 0x80;
@@ -1021,10 +1086,18 @@ int Sys_ReturnMouseInputEvent( const int n, int &action, int &value ) {
 	switch( diaction ) {
 		case DIMOFS_X:
 			value = polled_didod[n].dwData;
+			if ( value == 0 ) {
+				action = 0;
+				return 0;
+			}
 			action = M_DELTAX;
 			return 1;
 		case DIMOFS_Y:
 			value = polled_didod[n].dwData;
+			if ( value == 0 ) {
+				action = 0;
+				return 0;
+			}
 			action = M_DELTAY;
 			return 1;
 		case DIMOFS_Z:
@@ -1033,10 +1106,13 @@ int Sys_ReturnMouseInputEvent( const int n, int &action, int &value ) {
 			action = M_DELTAZ;
 			// a value of zero here should never happen
 			if ( value == 0 ) {
+				action = 0;
 				return 0;
 			}
 			return 1;
 	}
+	action = 0;
+	value = 0;
 	return 0;
 }
 
@@ -1057,4 +1133,13 @@ int Sys_ReturnJoystickInputEvent( const int n, int &axis, int &value ) {
 }
 
 void Sys_EndJoystickInputEvents( void ) {
+}
+
+bool Sys_GetJoystickAxisState( int axis, int &value ) {
+	value = 0;
+	return false;
+}
+
+bool Sys_SetJoystickRumble( float lowFrequency, float highFrequency, int durationMsec ) {
+	return false;
 }

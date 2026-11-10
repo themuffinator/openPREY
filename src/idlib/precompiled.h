@@ -49,6 +49,10 @@ typedef unsigned long long	uint64;
 class ThreadedAlloc;		// class that is only used to expand the AutoCrit template to tag allocs/frees called from inside the R_AddModelSurfaces call graph
 #define PC_CVAR_ARCHIVE CVAR_ARCHIVE
 
+#if defined( __APPLE__ ) && !defined( MACOS_X )
+#define MACOS_X 1
+#endif
+
 #ifdef _WINDOWS
 
 	// _WIN32 always defined
@@ -80,13 +84,13 @@ class ThreadedAlloc;		// class that is only used to expand the AutoCrit template
 		// to make things worse, only the windows version was compiled with _MD5R enabled, the Linux and Mac builds didn't
 		//#define Q4SDK_MD5R
 	#else	// Q4SDK
-		//#define Q4SDK_MD5R
+		#define Q4SDK_MD5R
 		//#define _MD5R_SUPPORT
 		//#define _MD5R_WRITE_SUPPORT
 	#endif	// !Q4SDK
 	#define _GLVAS_SUPPPORT
 	//#define RV_BINARYDECLS
-	//#define RV_SINGLE_DECL_FILE
+	#define RV_SINGLE_DECL_FILE
 	// this can't be used with _RV_MEM_SYS_SUPPORT and actually shouldn't be used at all on the Xenon at present
 	#if !defined(_RV_MEM_SYS_SUPPORT) && !defined(ID_REDIRECT_NEWDELETE)
 		//#define RV_UNIFIED_ALLOCATOR
@@ -145,6 +149,9 @@ public:
 	#define _LITTLE_ENDIAN
 	#define _CASE_SENSITIVE_FILESYSTEM
 	#define _USE_OPENAL
+	#ifndef Q4SDK
+		#define Q4SDK_MD5R
+	#endif
 
 	#define NEWLINE				"\n"
 
@@ -172,7 +179,7 @@ public:
 
 #endif
 
-#if defined(MACOS_X) || defined(__APPLE__)
+#ifdef MACOS_X
 
 // for offsetof
 #include <stddef.h>
@@ -199,6 +206,9 @@ public:
 	#endif
 	#define _CASE_SENSITIVE_FILESYSTEM
 	#define _USE_OPENAL
+	#ifndef Q4SDK
+		#define Q4SDK_MD5R
+	#endif
 	#define ID_INLINE inline
 	#define NEWLINE				"\n"
 
@@ -312,6 +322,20 @@ public:
 #include <time.h>
 #include <ctype.h>
 #include <typeinfo>
+#include <atomic>
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 #include <errno.h>
 #include <math.h>
 
@@ -324,8 +348,8 @@ public:
 #include "../idlib/Lib.h"
 
 // framework
-#include "../framework/BuildDefines.h"
 #include "../framework/BuildVersion.h"
+#include "../framework/BuildDefines.h"
 #include "../framework/licensee.h"
 #include "../framework/CmdSystem.h"
 #include "../framework/CVarSystem.h"
@@ -339,17 +363,21 @@ public:
 #include "../framework/declTable.h"
 #include "../framework/declSkin.h"
 #include "../framework/declEntityDef.h"
+#include "../framework/declAF.h"
+#include "../framework/DeclPDA.h"
 #include "../framework/DeclFX.h"
 #include "../framework/DeclParticle.h"
-#include "../framework/declAF.h"
+#include "../framework/declPreyBeam.h"
 // RAVEN BEGIN
 // jscott: new decl types
 #include "../framework/DeclPlayerModel.h"
 #include "../framework/declMatType.h"
 #include "../framework/declLipSync.h"
 #include "../framework/declPlayback.h"
-#include "../framework/declPreyBeam.h"
 // RAVEN END
+
+static_assert( DECL_FX == 11 && DECL_PARTICLE == 12 && DECL_BEAM == 13 && DECL_PLAYER_MODEL == 21,
+	"Prey declType_t ABI changed; update engine and staged game headers together" );
 
 // We have expression parsing and evaluation code in multiple places:
 // materials, sound shaders, and guis. We should unify them.
@@ -367,13 +395,14 @@ const float MAX_BOUND_SIZE = 65536.0f;
 #include "../renderer/ModelManager.h"
 #include "../renderer/RenderSystem.h"
 #include "../renderer/RenderWorld.h"
+#include "../framework/VRSystem.h"
 
 // sound engine
 #include "../sound/sound.h"
 
 // RAVEN BEGIN
 // jscott: Effects system interface
-#include "../bse_api/BSEInterface.h"
+#include "../bse/BSEInterface.h"
 // RAVEN END
 
 // asynchronous networking
@@ -390,7 +419,8 @@ const float MAX_BOUND_SIZE = 65536.0f;
 #include "../aas/AASFile.h"
 #include "../aas/AASFileManager.h"
 
-// Exposed to both engine and game.
+// Exposed to both engine and game. This resolves from the staged companion
+// source tree; the canonical header remains in openPREY-game.
 #include "../preyengine/profiler.h"
 
 // game
@@ -399,7 +429,11 @@ const float MAX_BOUND_SIZE = 65536.0f;
 //-----------------------------------------------------
 
 #ifdef GAME_DLL
+#ifdef GAME_MPAPI
+#include "../mpgame/Game_local.h"
+#else
 #include "../game/Game_local.h"
+#endif
 #endif
 
 #ifndef Q4SDK
@@ -443,3 +477,4 @@ const float MAX_BOUND_SIZE = 65536.0f;
 #endif	/* __cplusplus */
 
 #endif /* !__PRECOMPILED_H__ */
+

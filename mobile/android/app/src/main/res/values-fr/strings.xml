@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name_emulator">Émulateur openQ4</string>
+    <string name="setup_title">Configuration d’openQ4</string>
+    <string name="setup_language">Langue</string>
+    <string name="setup_sample">Préparez les fichiers du jeu, puis retournez au front.</string>
+    <string name="setup_continue">Continuer</string>
+    <string name="setup_data">Données du jeu</string>
+    <string name="setup_data_help">Choisissez le dossier q4base de votre propre installation de Quake 4 1.4.2. openQ4 copie et vérifie les archives ; les originaux restent en place. Vous pouvez utiliser un sous-dossier de Téléchargements ou un lecteur USB connecté. Cette application ne contient pas les données du jeu.</string>
+    <string name="setup_choose">Choisir le dossier du jeu</string>
+    <string name="setup_check">Vérifier les fichiers installés</string>
+    <string name="setup_retry">Réessayer la dernière opération</string>
+    <string name="setup_cancel">Annuler</string>
+    <string name="setup_stopping">Arrêt en cours…</string>
+    <string name="setup_cancelled">Arrêté. Les archives terminées sont conservées. Réessayez pour continuer ; l’archive incomplète sera copiée à nouveau.</string>
+    <string name="setup_interrupted">La configuration a été interrompue. Réessayez pour vérifier les fichiers terminés et continuer, ou choisissez à nouveau le dossier du jeu.</string>
+    <string name="setup_ready">Les fichiers du jeu sont prêts.</string>
+    <string name="setup_needs_data">Les fichiers du jeu nécessitent votre attention. Suivez les indications ci-dessous, puis relancez la vérification.</string>
+    <string name="setup_idle">Choisissez un dossier à importer ou vérifiez les fichiers déjà copiés dans cette application.</string>
+    <string name="setup_no_data">Les fichiers installés sont indisponibles. Choisissez votre dossier q4base de Quake 4 pour les importer, ou reconnectez le stockage qui les contient.</string>
+    <string name="setup_size_bytes">%1$,d o</string>
+    <string name="setup_issue_problem">Nécessaire : %1$s</string>
+    <string name="setup_issue_warning">Avertissement : %1$s</string>
+    <string name="setup_game_active">Le jeu est en cours ou se ferme. Vous pouvez y retourner ; les fichiers pourront être modifiés après sa fermeture.</string>
+    <string name="setup_return">Retour au jeu</string>
+    <string name="setup_play_sp">Un joueur</string>
+    <string name="setup_play_mp">Multijoueur</string>
+    <string name="setup_change_language">Changer de langue</string>
+    <string name="setup_no_picker">Le sélecteur de dossiers du système est indisponible. Activez l’application Fichiers d’Android, puis réessayez.</string>
+    <string name="setup_no_grant">Impossible d’ouvrir le dossier choisi. Choisissez-le à nouveau et autorisez l’accès en lecture.</string>
+    <string name="setup_temporary_grant">Le fournisseur n’a pas conservé l’accès au dossier. L’importation actuelle peut continuer ; après le redémarrage de l’application, choisissez à nouveau le dossier.</string>
+    <string name="setup_picker_cancelled">Aucun dossier sélectionné. Vos fichiers sont inchangés.</string>
+    <string name="setup_checking_data">Vérification des archives du jeu…</string>
+    <string name="setup_checking_existing">Vérification de l’archive installée…</string>
+    <string name="setup_copying_data">Copie de l’archive du jeu…</string>
+    <string name="setup_verifying_data">Vérification des données du jeu…</string>
+    <string name="setup_checking_package">Vérification des fichiers inclus…</string>
+    <string name="setup_copying_package">Préparation des fichiers inclus…</string>
+    <string name="setup_exporting">Exportation…</string>
+    <string name="setup_file_count">Archives terminées : %1$d / %2$d</string>
+    <string name="setup_bytes">%1$s sur %2$s</string>
+    <string name="setup_eta">Temps restant estimé pour cette étape : %1$d s</string>
+    <string name="setup_missing_required">%1$s est manquant. Copiez-le depuis votre installation de Quake 4 1.4.2.</string>
+    <string name="setup_missing_optional">L’archive facultative %1$s est manquante. Le contenu associé peut être indisponible.</string>
+    <string name="setup_missing_language">Aucune archive de langue de base trouvée. Copiez les fichiers de langue zpak de votre installation pour entendre les dialogues.</string>
+    <string name="setup_wrong_version">%1$s diffère de l’archive officielle. Remplacez-le par une copie vérifiée de Quake 4 1.4.2.</string>
+    <string name="setup_unknown_archive">%1$s réussit le contrôle d’intégrité, mais ne figure pas dans le catalogue officiel des sommes de contrôle.</string>
+    <string name="setup_damaged_archive">%1$s est endommagé ou non pris en charge. Copiez une archive originale intacte, puis réessayez.</string>
+    <string name="setup_duplicate">Plusieurs archives portent le nom %1$s. Conservez une copie vérifiée, puis réessayez.</string>
+    <string name="setup_changed">%1$s a changé pendant la vérification. Terminez sa copie avant de réessayer.</string>
+    <string name="setup_unreadable">Impossible de lire %1$s. Reconnectez le stockage ou choisissez une copie accessible, puis réessayez.</string>
+    <string name="setup_limits">Le dossier ou l’archive dépasse les limites prises en charge. Choisissez un dossier contenant les archives originales de Quake 4.</string>
+    <string name="setup_storage_unavailable">Le stockage de l’application est indisponible. Reconnectez-le, vérifiez les paramètres de stockage de l’application dans Android, puis réessayez.</string>
+    <string name="setup_no_space">Espace insuffisant : %1$s nécessaires, %2$s disponibles pour le prochain fichier. Libérez de l’espace, puis réessayez.</string>
+    <string name="setup_invalid_name">Le nom de fichier %1$s n’est pas pris en charge. Choisissez le dossier q4base original.</string>
+    <string name="setup_copy_failed">Impossible de copier %1$s. Vérifiez la connexion à la source et l’espace libre, puis réessayez.</string>
+    <string name="setup_commit_failed">Impossible de remplacer %1$s. Vérifiez le stockage de l’application, puis réessayez. L’archive précédente a été conservée.</string>
+    <string name="setup_prepare_failed">Impossible de préparer les fichiers inclus. Libérez de l’espace et réessayez. Si le problème persiste, mettez l’application à jour avec le même distributeur ou certificat de signature ; gardez l’application installée pour conserver vos sauvegardes.</string>
+    <string name="setup_launch_failed">Le jeu n’a pas pu démarrer. Vérifiez les fichiers, puis réessayez.</string>
+    <string name="setup_exports">Sauvegardes et diagnostic</string>
+    <string name="setup_export_help">Créez une copie ZIP de vos parties enregistrées, avec leurs descriptions et aperçus, ou exportez les journaux de diagnostic. Choisissez la destination dans le sélecteur de fichiers Android. Les originaux restent dans l’application. Les journaux peuvent contenir des chemins locaux et des adresses de serveurs ; vérifiez-les avant de les partager.</string>
+    <string name="setup_export_saves">Copier les parties enregistrées</string>
+    <string name="setup_export_logs">Exporter les journaux</string>
+    <string name="setup_saves_filename">openQ4-sauvegardes.zip</string>
+    <string name="setup_logs_filename">openQ4-journaux.zip</string>
+    <string name="setup_no_document_picker">Le sélecteur de fichiers du système est indisponible. Activez l’application Fichiers d’Android, puis réessayez.</string>
+    <string name="setup_export_picker_cancelled">Aucune destination d’exportation n’a été choisie. Vos fichiers sont inchangés.</string>
+    <string name="setup_export_no_grant">Impossible d’ouvrir la destination en écriture. Réessayez avec un emplacement accessible. Vos fichiers originaux sont inchangés.</string>
+    <string name="setup_packing_export">Préparation de l’archive d’exportation…</string>
+    <string name="setup_export_file_count">Fichiers préparés : %1$d / %2$d</string>
+    <string name="setup_export_done">Fichiers exportés : %1$d. Taille du ZIP : %2$s. Si vous avez choisi un stockage en ligne, attendez la fin de l’envoi avant de compter sur cette copie.</string>
+    <string name="setup_export_cancelled">Exportation arrêtée. Vos fichiers originaux sont inchangés. La destination peut contenir un ZIP vide ou incomplet ; supprimez cette copie dans Fichiers, puis réessayez avec une nouvelle destination.</string>
+    <string name="setup_export_interrupted">L’exportation a été interrompue. Vos fichiers originaux sont inchangés. La destination peut contenir un ZIP incomplet. Réessayez pour choisir une nouvelle destination et recommencer.</string>
+    <string name="setup_export_empty">Aucun fichier n’est encore disponible pour cette exportation.</string>
+    <string name="setup_export_unreadable">Impossible de lire %1$s. Redémarrez l’application et réessayez. Vos fichiers originaux sont inchangés.</string>
+    <string name="setup_export_unsafe">Le chemin %1$s ne peut pas être inclus dans une copie portable. Vos fichiers sont inchangés. Si le problème persiste, exportez les journaux pour le diagnostic.</string>
+    <string name="setup_export_limit">L’exportation dépasse les limites prises en charge : 2 Gio, 4 096 éléments, ou la longueur des chemins ou la profondeur des dossiers autorisées. Vos fichiers sont inchangés.</string>
+    <string name="setup_export_changed">Les fichiers ont changé pendant la préparation de l’archive. Attendez la fin des opérations sur les fichiers, puis réessayez.</string>
+    <string name="setup_export_cache">Impossible de préparer le ZIP temporaire dans le stockage de l’application. Libérez de l’espace et réessayez. Gardez l’application installée et conservez ses données pour préserver vos parties.</string>
+    <string name="setup_export_write">La destination n’a pas accepté le ZIP complet. Vérifiez sa connexion et son espace libre, puis réessayez avec une nouvelle destination. La copie échouée peut être incomplète ; vos fichiers originaux sont inchangés.</string>
+    <string name="setup_export_no_space">Le ZIP temporaire nécessite %1$s d’espace libre dans l’application ; %2$s sont disponibles. Libérez de l’espace, puis réessayez. Vos fichiers originaux sont inchangés.</string>
+    <string name="setup_export_failed">L’exportation n’a pas pu se terminer. Réessayez avec une nouvelle destination. La précédente peut contenir un ZIP incomplet ; vos fichiers originaux sont inchangés.</string>
+    <string name="setup_open_failed">Impossible d’ouvrir la configuration Android. Revenez au jeu et réessayez.</string>
+    <string name="setup_controls">Commandes</string>
+    <string name="setup_controls_help">Choisissez la disposition tactile, la taille des boutons et la vitesse de vue. Appliquer enregistre vos choix pour le prochain lancement ou retour au jeu.</string>
+    <string name="setup_controller_none">Aucune manette détectée. Les commandes tactiles restent disponibles.</string>
+    <string name="setup_controller_detected">Manette détectée : %1$s. Son utilisation masque les commandes tactiles ; touchez le jeu pour les afficher de nouveau.</string>
+    <string name="setup_touch_preset">Disposition tactile</string>
+    <string name="setup_touch_default_help">Par défaut : déplacement à gauche ; vue et tir à droite.</string>
+    <string name="setup_touch_compact_help">Compacte : commandes plus petites, avec des zones tactiles d’au moins 48 dp de large.</string>
+    <string name="setup_touch_left_help">Gaucher : déplacement à droite ; vue et tir à gauche.</string>
+    <string name="setup_touch_sensitivity">Sensibilité de la vue : %1$.1f×</string>
+    <string name="setup_touch_sensitivity_label">Sensibilité de la vue</string>
+    <string name="setup_touch_size">Taille des boutons : %1$d%%</string>
+    <string name="setup_touch_size_label">Taille des boutons</string>
+    <string name="setup_look_test_help">Test de vue : faites glisser ici pour tourner la grille. Réglez la sensibilité au-dessus ; ce test ne contrôle pas le jeu.</string>
+    <string name="setup_touch_apply">Appliquer les commandes</string>
+    <string name="setup_touch_discard">Annuler les modifications</string>
+    <string name="setup_touch_applied">Commandes enregistrées. Elles seront appliquées au retour au jeu ou à son lancement.</string>
+    <string name="setup_touch_save_failed">Impossible d’enregistrer les commandes. Les réglages précédents sont conservés ; vérifiez l’espace libre de l’application et réessayez.</string>
+    <string-array name="setup_touch_presets">
+        <item>Par défaut</item>
+        <item>Compacte</item>
+        <item>Gaucher</item>
+    </string-array>
+    <string name="setup_layout_edit">Modifier la disposition</string>
+    <string name="setup_layout">Éditeur des commandes tactiles</string>
+    <string name="setup_layout_help">Faites glisser une commande pour la déplacer. Elle s’aligne sur une grille de 8 dp et reste à l’écart des autres commandes, des bords de l’écran et du réticule. Choisissez une commande pour la redimensionner, l’estomper ou la masquer. Paysage et portrait ont chacun leur disposition. Appliquer enregistre la disposition pour le prochain lancement du jeu ou le retour au jeu.</string>
+    <string name="setup_layout_orientation">Orientation</string>
+    <string name="setup_layout_control">Commande</string>
+    <string name="setup_layout_size">Taille : %1$d %%</string>
+    <string name="setup_layout_size_label">Taille de la commande</string>
+    <string name="setup_layout_opacity">Opacité : %1$d %%</string>
+    <string name="setup_layout_opacity_label">Opacité de la commande</string>
+    <string name="setup_layout_hide">Masquer cette commande</string>
+    <string name="setup_layout_pause_note">Pause reste toujours visible : elle permet aussi de passer les cinématiques.</string>
+    <string name="setup_layout_multiplayer_note">Cette commande n’apparaît qu’en multijoueur.</string>
+    <string name="setup_layout_reset_control">Réinitialiser cette commande</string>
+    <string name="setup_layout_reset">Réinitialiser cette orientation</string>
+    <string name="setup_layout_no_fit">Cela ne tient pas. Essayez une taille plus petite ou un autre emplacement.</string>
+    <string name="setup_layout_apply">Appliquer la disposition</string>
+    <string name="setup_layout_applied">Disposition enregistrée. Elle s’applique au retour au jeu ou à son lancement.</string>
+    <string name="setup_layout_save_failed">Impossible d’enregistrer la disposition. La disposition appliquée précédente est conservée ; vérifiez l’espace libre de l’application et réessayez.</string>
+    <string name="setup_layout_preview">Aperçu de la disposition. Faites glisser une commande pour la déplacer, ou choisissez-la ci-dessous.</string>
+    <string-array name="setup_layout_orientations">
+        <item>Paysage</item>
+        <item>Portrait</item>
+    </string-array>
+    <string-array name="setup_layout_controls">
+        <item>Tirer</item>
+        <item>Sauter</item>
+        <item>S’accroupir</item>
+        <item>Arme</item>
+        <item>Recharger</item>
+        <item>Zoom</item>
+        <item>Pause</item>
+        <item>Scores</item>
+        <item>Discussion</item>
+    </string-array>
+    <string name="setup_interface">Interface</string>
+    <string name="setup_interface_help">Choisissez la taille des menus et du texte du jeu. Automatique choisit Téléphone ou Tablette selon cet appareil. Sur Téléphone et Tablette, le texte part de la taille de police Android. Appliquer définit ces tailles une seule fois, au prochain lancement ou retour au jeu ; les modifications faites ensuite dans les paramètres du jeu sont conservées.</string>
+    <string name="setup_viewing_profile">Profil d’affichage</string>
+    <string name="setup_interface_size">Taille de l’interface</string>
+    <string name="setup_profile_size">Valeur du profil</string>
+    <string name="setup_text_size">Taille du texte</string>
+    <string name="setup_profile_text_size">Valeur du profil</string>
+    <string name="setup_interface_effective">Menus du jeu : taille %1$d %%, texte %2$d %%</string>
+    <string name="setup_interface_sample_title">Objectif mis à jour</string>
+    <string name="setup_interface_sample_body">Rejoignez l’escouade Rhino au hangar. Cet exemple montre la taille du texte des menus du jeu.</string>
+    <string name="setup_interface_apply">Appliquer l’interface</string>
+    <string name="setup_interface_applied">Interface enregistrée. Elle sera appliquée au retour au jeu ou à son lancement.</string>
+    <string name="setup_interface_save_failed">Impossible d’enregistrer les réglages de l’interface. Les réglages précédents sont conservés ; vérifiez l’espace libre de l’application et réessayez.</string>
+    <string name="setup_interface_percent">%1$d %%</string>
+    <string name="setup_orientation">Orientation de l\'écran</string>
+    <string name="setup_orientation_help">Paysage et portrait fait pivoter le jeu avec l\'appareil, sauf si le verrouillage de la rotation d\'Android est activé. En portrait, les commandes tactiles se regroupent dans la bande sous la vue.</string>
+    <string-array name="setup_orientations">
+        <item>Paysage</item>
+        <item>Paysage et portrait</item>
+    </string-array>
+    <string-array name="setup_viewing_profiles">
+        <item>Automatique (cet appareil)</item>
+        <item>Bureau (écran)</item>
+        <item>Canapé (téléviseur)</item>
+        <item>Console portable</item>
+        <item>Téléphone</item>
+        <item>Tablette</item>
+    </string-array>
+</resources>

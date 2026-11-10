@@ -1,0 +1,4472 @@
+{
+  "version": 1,
+  "scope": "Initial registry for Settings menu surfaces touched by the June 4, 2026 refactor. Expand as additional legacy panes are split or normalized.",
+  "sources": {
+    "mainmenu": "content/baseoq4/pak0/guis/mainmenu.gui",
+    "controls": "content/baseoq4/pak0/guis/menu/settings/controls.gui",
+    "system": "content/baseoq4/pak0/guis/menu/settings/system.gui",
+    "audio": "content/baseoq4/pak0/guis/menu/settings/audio.gui",
+    "popups": "content/baseoq4/pak0/guis/menu/settings/popups.gui",
+    "game": "content/baseoq4/pak0/guis/menu/settings/game.gui",
+    "game_hovers": "content/baseoq4/pak0/guis/menu/settings/game_hovers.gui",
+    "session_menu": "src/framework/Session_menu.cpp",
+    "common": "src/framework/Common.cpp",
+    "default_cfg": "content/baseoq4/pak0/default.cfg",
+    "openq4_defaults_cfg": "content/baseoq4/pak0/openq4_defaults.cfg",
+    "system_retained": "content/baseoq4/pak0/guis/menu/settings/system.q4ui",
+    "settings_service": "src/ui/SettingsService.cpp"
+  },
+  "settings": [
+    {
+      "id": "controls.movement.move-forward",
+      "pane": "Controls",
+      "section": "Movement",
+      "path": "Settings > Controls > Movement > Forward",
+      "source": "controls",
+      "container": "p_set_ctrls_move",
+      "widgets": [
+        "set_ctrls_move_forward_key",
+        "set_ctrls_move_forward"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200094",
+      "target_type": "bind",
+      "target": "_forward",
+      "default": "UPARROW;w",
+      "default_keys": [
+        "UPARROW",
+        "w"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.movement.move-backpedal",
+      "pane": "Controls",
+      "section": "Movement",
+      "path": "Settings > Controls > Movement > Backpedal",
+      "source": "controls",
+      "container": "p_set_ctrls_move",
+      "widgets": [
+        "set_ctrls_move_backpedal_key",
+        "set_ctrls_move_backpedal"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200095",
+      "target_type": "bind",
+      "target": "_back",
+      "default": "DOWNARROW;s",
+      "default_keys": [
+        "DOWNARROW",
+        "s"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.movement.move-moveleft",
+      "pane": "Controls",
+      "section": "Movement",
+      "path": "Settings > Controls > Movement > Move Left",
+      "source": "controls",
+      "container": "p_set_ctrls_move",
+      "widgets": [
+        "set_ctrls_move_moveleft_key",
+        "set_ctrls_move_moveleft"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200096",
+      "target_type": "bind",
+      "target": "_moveleft",
+      "default": "a",
+      "default_keys": [
+        "a"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.movement.move-moveright",
+      "pane": "Controls",
+      "section": "Movement",
+      "path": "Settings > Controls > Movement > Move Right",
+      "source": "controls",
+      "container": "p_set_ctrls_move",
+      "widgets": [
+        "set_ctrls_move_moveright_key",
+        "set_ctrls_move_moveright"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200097",
+      "target_type": "bind",
+      "target": "_moveright",
+      "default": "d",
+      "default_keys": [
+        "d"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.movement.move-jump",
+      "pane": "Controls",
+      "section": "Movement",
+      "path": "Settings > Controls > Movement > Jump",
+      "source": "controls",
+      "container": "p_set_ctrls_move",
+      "widgets": [
+        "set_ctrls_move_jump_key",
+        "set_ctrls_move_jump"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200098",
+      "target_type": "bind",
+      "target": "_moveUp",
+      "default": "JOY3;JOY19;KP_INS;SPACE",
+      "default_keys": [
+        "JOY3",
+        "JOY19",
+        "KP_INS",
+        "SPACE"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.movement.move-crouch",
+      "pane": "Controls",
+      "section": "Movement",
+      "path": "Settings > Controls > Movement > Crouch",
+      "source": "controls",
+      "container": "p_set_ctrls_move",
+      "widgets": [
+        "set_ctrls_move_crouch_key",
+        "set_ctrls_move_crouch"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200099",
+      "target_type": "bind",
+      "target": "_moveDown",
+      "default": "JOY4;JOY20;c",
+      "default_keys": [
+        "JOY4",
+        "JOY20",
+        "c"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.movement.move-turnleft",
+      "pane": "Controls",
+      "section": "Movement",
+      "path": "Settings > Controls > Movement > Turn Left",
+      "source": "controls",
+      "container": "p_set_ctrls_move",
+      "widgets": [
+        "set_ctrls_move_turnleft_key",
+        "set_ctrls_move_turnleft"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200100",
+      "target_type": "bind",
+      "target": "_left",
+      "default": "LEFTARROW",
+      "default_keys": [
+        "LEFTARROW"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.movement.move-turnright",
+      "pane": "Controls",
+      "section": "Movement",
+      "path": "Settings > Controls > Movement > Turn Right",
+      "source": "controls",
+      "container": "p_set_ctrls_move",
+      "widgets": [
+        "set_ctrls_move_turnright_key",
+        "set_ctrls_move_turnright"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200101",
+      "target_type": "bind",
+      "target": "_right",
+      "default": "RIGHTARROW",
+      "default_keys": [
+        "RIGHTARROW"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.movement.move-strafe",
+      "pane": "Controls",
+      "section": "Movement",
+      "path": "Settings > Controls > Movement > Strafe",
+      "source": "controls",
+      "container": "p_set_ctrls_move",
+      "widgets": [
+        "set_ctrls_move_strafe_key",
+        "set_ctrls_move_strafe"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200102",
+      "target_type": "bind",
+      "target": "_strafe",
+      "default": "LEFTALT;RIGHTALT",
+      "default_keys": [
+        "LEFTALT",
+        "RIGHTALT"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.movement.move-walk",
+      "pane": "Controls",
+      "section": "Movement",
+      "path": "Settings > Controls > Movement > Walk",
+      "source": "controls",
+      "container": "p_set_ctrls_move",
+      "widgets": [
+        "set_ctrls_move_walk_key",
+        "set_ctrls_move_walk"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200103",
+      "target_type": "bind",
+      "target": "_speed",
+      "default": "JOY13;LEFTSHIFT;RIGHTSHIFT",
+      "default_keys": [
+        "JOY13",
+        "LEFTSHIFT",
+        "RIGHTSHIFT"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-blastergaunt",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Blaster/Gauntlet",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_blastergaunt_key",
+        "set_ctrls_weap_blastergaunt"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200966",
+      "target_type": "bind",
+      "target": "_impulse0",
+      "default": "1",
+      "default_keys": [
+        "1"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-mgun",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Machinegun",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_mgun_key",
+        "set_ctrls_weap_mgun"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200106",
+      "target_type": "bind",
+      "target": "_impulse1",
+      "default": "2",
+      "default_keys": [
+        "2"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-shotgun",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Shotgun",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_shotgun_key",
+        "set_ctrls_weap_shotgun"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200105",
+      "target_type": "bind",
+      "target": "_impulse2",
+      "default": "3",
+      "default_keys": [
+        "3"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-hblaster",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Hyperblaster",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_hblaster_key",
+        "set_ctrls_weap_hblaster"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200107",
+      "target_type": "bind",
+      "target": "_impulse3",
+      "default": "4",
+      "default_keys": [
+        "4"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-grenade",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Grenade Launcher",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_grenade_key",
+        "set_ctrls_weap_grenade"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200108",
+      "target_type": "bind",
+      "target": "_impulse4",
+      "default": "5",
+      "default_keys": [
+        "5"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-nailgun",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Nailgun",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_nailgun_key",
+        "set_ctrls_weap_nailgun"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200109",
+      "target_type": "bind",
+      "target": "_impulse5",
+      "default": "6",
+      "default_keys": [
+        "6"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-rocket",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Rocket Launcher",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_rocket_key",
+        "set_ctrls_weap_rocket"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200110",
+      "target_type": "bind",
+      "target": "_impulse6",
+      "default": "7",
+      "default_keys": [
+        "7"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-railgun",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Railgun",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_railgun_key",
+        "set_ctrls_weap_railgun"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200111",
+      "target_type": "bind",
+      "target": "_impulse7",
+      "default": "8",
+      "default_keys": [
+        "8"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-lgun",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Lightning Gun",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_lgun_key",
+        "set_ctrls_weap_lgun"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200112",
+      "target_type": "bind",
+      "target": "_impulse8",
+      "default": "9",
+      "default_keys": [
+        "9"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-dmg",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Dark Matter Gun",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_dmg_key",
+        "set_ctrls_weap_dmg"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200113",
+      "target_type": "bind",
+      "target": "_impulse9",
+      "default": "0",
+      "default_keys": [
+        "0"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-napalmlauncher",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Napalm Launcher",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_napalmlauncher_key",
+        "set_ctrls_weap_napalmlauncher"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_222001",
+      "target_type": "bind",
+      "target": "_impulse10",
+      "default": "-",
+      "default_keys": [
+        "-"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-buymenu",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Buy Menu",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_buymenu_key",
+        "set_ctrls_weap_buymenu"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_222014",
+      "target_type": "bind",
+      "target": "buymenu",
+      "default": "b",
+      "default_keys": [
+        "b"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.weapons.weap-quickchat",
+      "pane": "Controls",
+      "section": "Weapons",
+      "path": "Settings > Controls > Weapons > Quick Chat",
+      "source": "controls",
+      "container": "p_set_ctrls_weap",
+      "widgets": [
+        "set_ctrls_weap_quickchat_key",
+        "set_ctrls_weap_quickchat"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_231269",
+      "target_type": "bind",
+      "target": "_quickChat",
+      "default": "v;JOY10",
+      "default_keys": [
+        "v",
+        "JOY10"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-attack",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Attack",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_attack_key",
+        "set_ctrls_attk_attack"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200114",
+      "target_type": "bind",
+      "target": "_attack",
+      "default": "JOY15;LEFTCTRL;RIGHTCTRL;MOUSE1",
+      "default_keys": [
+        "JOY15",
+        "LEFTCTRL",
+        "RIGHTCTRL",
+        "MOUSE1"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-prevweap",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Previous Weapon",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_prevweap_key",
+        "set_ctrls_attk_prevweap"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200115",
+      "target_type": "bind",
+      "target": "_impulse15",
+      "default": "];MWHEELUP;JOY11",
+      "default_keys": [
+        "]",
+        "MWHEELUP",
+        "JOY11"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-nextweap",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Next Weapon",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_nextweap_key",
+        "set_ctrls_attk_nextweap"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200116",
+      "target_type": "bind",
+      "target": "_impulse14",
+      "default": "[;MWHEELDOWN;JOY12",
+      "default_keys": [
+        "[",
+        "MWHEELDOWN",
+        "JOY12"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-reload",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Reload",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_reload_key",
+        "set_ctrls_attk_reload"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200117",
+      "target_type": "bind",
+      "target": "_impulse13",
+      "default": "r;JOY6;JOY21",
+      "default_keys": [
+        "r",
+        "JOY6",
+        "JOY21"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-lookup",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Look Up",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_lookup_key",
+        "set_ctrls_attk_lookup"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200118",
+      "target_type": "bind",
+      "target": "_lookUp",
+      "default": "PGDN",
+      "default_keys": [
+        "PGDN"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-lookdown",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Look Down",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_lookdown_key",
+        "set_ctrls_attk_lookdown"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200119",
+      "target_type": "bind",
+      "target": "_lookDown",
+      "default": "DEL",
+      "default_keys": [
+        "DEL"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-mouselook",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Mouse Look",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_mouselook_key",
+        "set_ctrls_attk_mouselook"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200120",
+      "target_type": "bind",
+      "target": "_mlook",
+      "default": "unbound",
+      "default_keys": [],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-centerview",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Center View",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_centerview_key",
+        "set_ctrls_attk_centerview"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200121",
+      "target_type": "bind",
+      "target": "centerview",
+      "default": "JOY14;END",
+      "default_keys": [
+        "JOY14",
+        "END"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-zoomview",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Zoom View",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_zoomview_key",
+        "set_ctrls_attk_zoomview"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200122",
+      "target_type": "bind",
+      "target": "_zoom",
+      "default": "JOY16;MOUSE2;MOUSE3",
+      "default_keys": [
+        "JOY16",
+        "MOUSE2",
+        "MOUSE3"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-objectives",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Objectives",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_objectives_key",
+        "set_ctrls_attk_objectives"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200131",
+      "target_type": "bind",
+      "target": "_impulse19",
+      "default": "JOY9;JOY18;TAB",
+      "default_keys": [
+        "JOY9",
+        "JOY18",
+        "TAB"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-flashlight",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Flashlight",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_flashlight_key",
+        "set_ctrls_attk_flashlight"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200315",
+      "target_type": "bind",
+      "target": "_impulse50",
+      "default": "f;JOY5",
+      "default_keys": [
+        "f",
+        "JOY5"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-screenshot",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Screenshot",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_screenshot_key",
+        "set_ctrls_attk_screenshot"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200125",
+      "target_type": "bind",
+      "target": "screenshot",
+      "default": "F12",
+      "default_keys": [
+        "F12"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.attack_look.attk-weaponwheel",
+      "pane": "Controls",
+      "section": "Attack/Look",
+      "path": "Settings > Controls > Attack/Look > Weapon Wheel",
+      "source": "controls",
+      "container": "p_set_ctrls_attk",
+      "widgets": [
+        "set_ctrls_attk_weaponwheel_key",
+        "set_ctrls_attk_weaponwheel"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_229920",
+      "target_type": "bind",
+      "target": "_weaponWheel",
+      "default": "e;JOY1;JOY22;q",
+      "default_keys": [
+        "e",
+        "JOY1",
+        "JOY22",
+        "q"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-quicksave",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Quick Save",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_quicksave_key",
+        "set_ctrls_other_quicksave"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200123",
+      "target_type": "bind",
+      "target": "savegame quick",
+      "default": "F5",
+      "default_keys": [
+        "F5"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-quickload",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Quick Load",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_quickload_key",
+        "set_ctrls_other_quickload"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200124",
+      "target_type": "bind",
+      "target": "loadgame quick",
+      "default": "F9",
+      "default_keys": [
+        "F9"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-chat",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Chat",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_chat_key",
+        "set_ctrls_other_chat"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200126",
+      "target_type": "bind",
+      "target": "clientMessageMode",
+      "default": "t",
+      "default_keys": [
+        "t"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-teamchat",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Team Chat",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_teamchat_key",
+        "set_ctrls_other_teamchat"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200127",
+      "target_type": "bind",
+      "target": "clientMessageMode 1",
+      "default": "y",
+      "default_keys": [
+        "y"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-voteyes",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Vote Yes",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_voteyes_key",
+        "set_ctrls_other_voteyes"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200129",
+      "target_type": "bind",
+      "target": "_impulse28",
+      "default": "F1",
+      "default_keys": [
+        "F1"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-voteno",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Vote No",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_voteno_key",
+        "set_ctrls_other_voteno"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200130",
+      "target_type": "bind",
+      "target": "_impulse29",
+      "default": "F2",
+      "default_keys": [
+        "F2"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-stats",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Stats",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_stats_key",
+        "set_ctrls_other_stats"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200132",
+      "target_type": "bind",
+      "target": "_ingamestats",
+      "default": "z",
+      "default_keys": [
+        "z"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-ready",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Ready",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_ready_key",
+        "set_ctrls_other_ready"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_201009",
+      "target_type": "bind",
+      "target": "_impulse17",
+      "default": "F3",
+      "default_keys": [
+        "F3"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-salute",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Salute",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_salute_key",
+        "set_ctrls_other_salute"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200311",
+      "target_type": "bind",
+      "target": "emote salute",
+      "default": "unbound",
+      "default_keys": [],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-cheer",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Cheer",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_cheer_key",
+        "set_ctrls_other_cheer"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200312",
+      "target_type": "bind",
+      "target": "emote cheer",
+      "default": "unbound",
+      "default_keys": [],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-taunt",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Taunt",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_taunt_key",
+        "set_ctrls_other_taunt"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200313",
+      "target_type": "bind",
+      "target": "emote taunt",
+      "default": "unbound",
+      "default_keys": [],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-grab",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Grab",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_grab_key",
+        "set_ctrls_other_grab"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200314",
+      "target_type": "bind",
+      "target": "emote grab_a",
+      "default": "unbound",
+      "default_keys": [],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "controls.other.other-vchat",
+      "pane": "Controls",
+      "section": "Other",
+      "path": "Settings > Controls > Other > Voice Chat",
+      "source": "controls",
+      "container": "p_set_ctrls_other",
+      "widgets": [
+        "set_ctrls_other_vchat_key",
+        "set_ctrls_other_vchat"
+      ],
+      "widget_type": "bind",
+      "label_key": "#str_200959",
+      "target_type": "bind",
+      "target": "_voicechat",
+      "default": "unbound",
+      "default_keys": [],
+      "restart_required": false,
+      "accessibility": "Focusable bindDef row that captures the next key or button for this command."
+    },
+    {
+      "id": "audio.sound_volume",
+      "pane": "Audio",
+      "section": "Levels",
+      "path": "Settings > Audio > Levels > Sound Volume",
+      "source": "audio",
+      "container": "set_audio_vol",
+      "widgets": [
+        "set_audio_vol_slider",
+        "set_audio_vol_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_audio_vol_value",
+          "maxchars": 3,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_201029",
+      "target_type": "cvar",
+      "target": "s_volume",
+      "default": "1.0",
+      "ui_range": {
+        "low": "0",
+        "high": "1",
+        "step": "0.1"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "1"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "audio.sound_system",
+      "pane": "Audio",
+      "section": "Devices",
+      "path": "Settings > Audio > Devices > Sound System",
+      "source": "audio",
+      "container": "set_audio_backend",
+      "widgets": [
+        "set_audio_backend_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200971",
+      "choices_key": "#str_200970",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "s_useOpenAL",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "audio.sound_device",
+      "pane": "Audio",
+      "section": "Devices",
+      "path": "Settings > Audio > Devices > Sound Device",
+      "source": "audio",
+      "container": "set_audio_device",
+      "widgets": [
+        "set_audio_device_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_201005",
+      "dynamic_choices": [
+        {
+          "choices": "gui::device_name",
+          "values": "gui::device_value"
+        }
+      ],
+      "target_type": "cvar",
+      "target": "s_deviceName",
+      "default": "",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row populated from runtime device enumeration."
+    },
+    {
+      "id": "audio.eax_reverb",
+      "pane": "Audio",
+      "section": "Effects",
+      "path": "Settings > Audio > Effects > EAX Reverb",
+      "source": "audio",
+      "container": "set_audio_eax",
+      "widgets": [
+        "set_audio_eax_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200972",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "s_useEAXReverb",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "audio.surround_speakers",
+      "pane": "Audio",
+      "section": "Effects",
+      "path": "Settings > Audio > Effects > Surround Speakers",
+      "source": "audio",
+      "container": "set_audio_speakers",
+      "widgets": [
+        "set_audio_speakers_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200152",
+      "choices_key": "#str_229980",
+      "values": [
+        "0",
+        "2",
+        "6"
+      ],
+      "target_type": "cvar",
+      "target": "s_numberOfSpeakers",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "audio.headphone_hrtf",
+      "pane": "Audio",
+      "section": "Effects",
+      "path": "Settings > Audio > Effects > Headphone HRTF",
+      "source": "audio",
+      "container": "set_audio_hrtf",
+      "widgets": [
+        "set_audio_hrtf_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229981",
+      "choices_key": "#str_229980",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target_type": "cvar",
+      "target": "s_openALHRTF",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "audio.music_volume",
+      "pane": "Audio",
+      "section": "Levels",
+      "path": "Settings > Audio > Levels > Music Volume",
+      "source": "audio",
+      "container": "set_audio_music",
+      "widgets": [
+        "set_audio_music_slider",
+        "set_audio_music_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_audio_music_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_201006",
+      "target_type": "cvar",
+      "target": "s_musicVolume",
+      "default": "0.5",
+      "ui_range": {
+        "low": "0",
+        "high": "1",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "1"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "audio.dialogue_volume",
+      "pane": "Audio",
+      "section": "Levels",
+      "path": "Settings > Audio > Levels > Dialogue Volume",
+      "source": "audio",
+      "container": "set_audio_dialogue",
+      "widgets": [
+        "set_audio_dialogue_slider",
+        "set_audio_dialogue_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_audio_dialogue_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231300",
+      "target_type": "cvar",
+      "target": "s_dialogueVolume",
+      "default": "1",
+      "ui_range": {
+        "low": "0",
+        "high": "1",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "1"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "system.renderer_fallback",
+      "pane": "System",
+      "section": "Post Effects",
+      "path": "Settings > System > Post Effects > Renderer Fallback",
+      "source": "system",
+      "container": "set_sys_vidqual",
+      "widgets": [
+        "set_sys_vidqual_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41103",
+      "choices_key": "#str_41104",
+      "values": [
+        "best",
+        "arb2"
+      ],
+      "target_type": "cvar",
+      "target": "r_renderer",
+      "default": "best",
+      "restart_required": true,
+      "accessibility": "Advanced compatibility choice with only the automatic path and explicit ARB2 rollback exposed."
+    },
+    {
+      "id": "system.screen_size",
+      "pane": "System",
+      "section": "Video Basics",
+      "path": "Settings > System > Video Basics > Display Resolution",
+      "source": "system",
+      "container": "set_sys_screensize",
+      "widgets": [
+        "set_sys_screensize_val_0",
+        "set_sys_screensize_val_1",
+        "set_sys_screensize_val_2"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229975",
+      "dynamic_choices": [
+        {
+          "choices": "gui::display_mode_choices",
+          "values": "gui::display_mode_values"
+        }
+      ],
+      "target_type": "gui_state",
+      "target": "display_mode_choice",
+      "default": "0",
+      "adapter": {
+        "source": "session_menu",
+        "command": "applyDisplayModeChoice",
+        "writes": [
+          "r_mode",
+          "r_customWidth",
+          "r_customHeight"
+        ]
+      },
+      "restart_required": true,
+      "accessibility": "One focusable choiceDef is shown at a time; the engine adapter writes desktop-native or exact custom fullscreen cvars from the selected display's mode list."
+    },
+    {
+      "id": "system.fullscreen",
+      "pane": "System",
+      "section": "Video Basics",
+      "path": "Settings > System > Video Basics > Fullscreen",
+      "source": "system",
+      "container": "set_sys_fullscreen",
+      "widgets": [
+        "set_sys_fullscreen_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200147",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_fullscreen",
+      "default": "1",
+      "restart_required": true,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.brightness",
+      "pane": "System",
+      "section": "Video Basics",
+      "path": "Settings > System > Video Basics > Brightness",
+      "source": "system",
+      "container": "set_sys_gamma",
+      "widgets": [
+        "set_sys_gamma_slider",
+        "set_sys_gamma_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_sys_gamma_value",
+          "maxchars": 3,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_200148",
+      "target_type": "cvar",
+      "target": "r_brightness",
+      "default": "1",
+      "ui_range": {
+        "low": "0.5",
+        "high": "2.0",
+        "step": "0.1"
+      },
+      "cvar_range": {
+        "low": "0.5",
+        "high": "2.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "system.shadows",
+      "pane": "System",
+      "section": "Quality",
+      "path": "Settings > System > Quality > Shadows",
+      "source": "system",
+      "container": "set_sys_shadows",
+      "widgets": [
+        "set_sys_shadows_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200160",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_shadows",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.specular_enabled",
+      "pane": "System",
+      "section": "Quality",
+      "path": "Settings > System > Quality > Specular",
+      "source": "system",
+      "container": "set_sys_specular",
+      "widgets": [
+        "set_sys_specular_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200161",
+      "choices_key": "#str_200059",
+      "target_type": "gui_state",
+      "target": "r_specularEnabled",
+      "default": "1",
+      "writes": [
+        "r_skipSpecular"
+      ],
+      "write_tokens": [
+        "set r_skipSpecular 0",
+        "set r_skipSpecular 1"
+      ],
+      "restart_required": false,
+      "accessibility": "Positive Yes/No GUI state wraps the negative r_skipSpecular cvar."
+    },
+    {
+      "id": "system.bump_mapping_enabled",
+      "pane": "System",
+      "section": "Quality",
+      "path": "Settings > System > Quality > Bump Mapping",
+      "source": "system",
+      "container": "set_sys_bump",
+      "widgets": [
+        "set_sys_bump_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200162",
+      "choices_key": "#str_200059",
+      "target_type": "gui_state",
+      "target": "r_bumpEnabled",
+      "default": "1",
+      "writes": [
+        "r_skipBump"
+      ],
+      "write_tokens": [
+        "set r_skipBump 0",
+        "set r_skipBump 1"
+      ],
+      "restart_required": false,
+      "accessibility": "Positive Yes/No GUI state wraps the negative r_skipBump cvar."
+    },
+    {
+      "id": "system.sky_enabled",
+      "pane": "System",
+      "section": "Quality",
+      "path": "Settings > System > Quality > Sky",
+      "source": "system",
+      "container": "set_sys_sky",
+      "widgets": [
+        "set_sys_sky_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_223009",
+      "choices_key": "#str_200059",
+      "target_type": "gui_state",
+      "target": "r_skyEnabled",
+      "default": "1",
+      "writes": [
+        "r_skipSky"
+      ],
+      "write_tokens": [
+        "set r_skipSky 0",
+        "set r_skipSky 1"
+      ],
+      "restart_required": false,
+      "accessibility": "Positive Yes/No GUI state wraps the negative r_skipSky cvar."
+    },
+    {
+      "id": "system.ambient_light",
+      "pane": "System",
+      "section": "Quality",
+      "path": "Settings > System > Quality > Ambient Light",
+      "source": "system",
+      "container": "set_sys_ambient",
+      "widgets": [
+        "set_sys_ambient_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_223002",
+      "choices_key": "#str_200059",
+      "target_type": "gui_state",
+      "target": "r_forceAmbientOn",
+      "default": "0",
+      "writes": [
+        "r_forceAmbient"
+      ],
+      "write_tokens": [
+        "set r_forceAmbient 0.7",
+        "set r_forceAmbient 0"
+      ],
+      "restart_required": false,
+      "accessibility": "Positive Yes/No GUI state enables or disables the paired brightness row."
+    },
+    {
+      "id": "system.ambient_brightness",
+      "pane": "System",
+      "section": "Quality",
+      "path": "Settings > System > Quality > Ambient Brightness",
+      "source": "system",
+      "container": "set_sys_ambientbr",
+      "widgets": [
+        "set_sys_ambientbr_val",
+        "set_sys_ambientbr_valnum"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_sys_ambientbr_valnum",
+          "maxchars": 5,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_223003",
+      "target_type": "cvar",
+      "target": "r_forceAmbient",
+      "default": "0",
+      "ui_range": {
+        "low": "0.0",
+        "high": "1.0",
+        "step": "0.025"
+      },
+      "cvar_range": {
+        "low": "0.0",
+        "high": "1.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field; disabled when Ambient Light is off."
+    },
+    {
+      "id": "system.rendering_backend",
+      "pane": "System",
+      "section": "Performance",
+      "path": "Settings > System > Performance > Rendering Backend",
+      "source": "system_retained",
+      "container": "settings_backend",
+      "widgets": [
+        "settings_backend"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230141",
+      "target_type": "cvar",
+      "target": "r_renderApi",
+      "default": "best",
+      "adapter": {
+        "source": "settings_service",
+        "command": "settings.system.backend"
+      },
+      "restart_required": true,
+      "accessibility": "Localized backend choice; Apply persists the preference and a separate main-menu restart activates it."
+    },
+    {
+      "id": "system.rendering_device",
+      "pane": "System",
+      "section": "Performance",
+      "path": "Settings > System > Performance > Rendering Device",
+      "source": "system_retained",
+      "container": "settings_gpu",
+      "widgets": [
+        "settings_gpu"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230142",
+      "target_type": "cvar",
+      "target": "r_renderDevice",
+      "default": "auto",
+      "adapter": {
+        "source": "settings_service",
+        "command": "settings.system.renderDevice"
+      },
+      "restart_required": true,
+      "accessibility": "Automatic high-performance choice plus detected Vulkan device names; disabled incompatible entries, stable UUID persistence, and active-versus-pending feedback."
+    },
+    {
+      "id": "system.rendering_restart",
+      "pane": "System",
+      "section": "Performance",
+      "path": "Settings > System > Performance > Restart Renderer",
+      "source": "system_retained",
+      "container": "settings_restart_renderer",
+      "widgets": [
+        "settings_restart_renderer"
+      ],
+      "widget_type": "button",
+      "label_key": "#str_230153",
+      "target_type": "gui_state",
+      "target": "restartRenderer",
+      "default": "N/A",
+      "adapter": {
+        "source": "settings_service",
+        "command": "settings.system.restartRenderer"
+      },
+      "restart_required": false,
+      "accessibility": "Available only for a clean applied selection at the main menu; checked configuration persistence precedes owner teardown and module replacement."
+    },
+    {
+      "id": "system.performance_preset",
+      "pane": "System",
+      "section": "Performance",
+      "path": "Settings > System > Performance > Performance Preset",
+      "source": "system",
+      "container": "set_sys_perf_preset",
+      "widgets": [
+        "set_sys_perf_preset_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229976",
+      "choices_key": "#str_229977",
+      "values": [
+        "minimum",
+        "lowpower",
+        "low",
+        "performance",
+        "balanced",
+        "enhanced",
+        "quality",
+        "ultra",
+        "maximum"
+      ],
+      "target_type": "cvar",
+      "target": "com_performancePreset",
+      "default": "balanced",
+      "adapter": {
+        "source": "common",
+        "command": "Common_ApplyPerformancePresetCommand"
+      },
+      "restart_required": true,
+      "accessibility": "Standard focusable choiceDef row that applies a coordinated engine performance profile."
+    },
+    {
+      "id": "system.performance_autodetect",
+      "pane": "System",
+      "section": "Performance",
+      "path": "Settings > System > Performance > Auto-Detect",
+      "source": "system",
+      "container": "set_sys_perf_autodetect_button",
+      "widgets": [
+        "set_sys_perf_autodetect_button",
+        "set_sys_perf_autodetect_text"
+      ],
+      "widget_type": "button",
+      "label_key": "#str_229978",
+      "target_type": "gui_state",
+      "target": "autoDetectPerformancePreset",
+      "default": "N/A",
+      "adapter": {
+        "source": "common",
+        "command": "Common_AutoDetectPerformancePresetCommand"
+      },
+      "restart_required": true,
+      "accessibility": "Focusable button that applies the detected performance preset and refreshes the System page."
+    },
+    {
+      "id": "system.vsync",
+      "pane": "System",
+      "section": "Rendering",
+      "path": "Settings > System > Rendering > VSync",
+      "source": "system",
+      "container": "set_sys_vsync",
+      "widgets": [
+        "set_sys_vsync_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41092",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_swapInterval",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.msaa",
+      "pane": "System",
+      "section": "Rendering",
+      "path": "Settings > System > Rendering > MSAA",
+      "source": "system",
+      "container": "set_sys_msaa",
+      "widgets": [
+        "set_sys_msaa_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41093",
+      "choices_key": "#str_200165",
+      "values": [
+        "0",
+        "2",
+        "4",
+        "8",
+        "16"
+      ],
+      "target_type": "cvar",
+      "target": "r_multisamples",
+      "cvar_canonical": "r_multiSamples",
+      "default": "0",
+      "restart_required": true,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.post_aa",
+      "pane": "System",
+      "section": "Rendering",
+      "path": "Settings > System > Rendering > Post AA",
+      "source": "system",
+      "container": "set_sys_postaa",
+      "widgets": [
+        "set_sys_postaa_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41094",
+      "choices_key": "#str_41095",
+      "values": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4"
+      ],
+      "target_type": "cvar",
+      "target": "r_postAA",
+      "default": "0",
+      "cvar_range": {
+        "low": "0",
+        "high": "4"
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.resolution_scale",
+      "pane": "System",
+      "section": "Rendering",
+      "path": "Settings > System > Rendering > Resolution Scale",
+      "source": "system",
+      "container": "set_sys_supersample",
+      "widgets": [
+        "set_sys_supersample_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41091",
+      "choices": "10%;25%;50%;75%;85%;100%;125%;150%;200%",
+      "values": [
+        "10",
+        "25",
+        "50",
+        "75",
+        "85",
+        "100",
+        "125",
+        "150",
+        "200"
+      ],
+      "target_type": "cvar",
+      "target": "r_screenFraction",
+      "default": "100",
+      "cvar_range": {
+        "low": "10",
+        "high": "200"
+      },
+      "restart_required": true,
+      "accessibility": "Standard focusable choiceDef row with fixed percentage presets."
+    },
+    {
+      "id": "system.borderless",
+      "pane": "System",
+      "section": "Display",
+      "path": "Settings > System > Display > Borderless Window",
+      "source": "system",
+      "container": "set_sys_borderless",
+      "widgets": [
+        "set_sys_borderless_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229909",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_borderless",
+      "default": "0",
+      "restart_required": true,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.fullscreen_policy",
+      "pane": "System",
+      "section": "Display",
+      "path": "Settings > System > Display > Fullscreen Policy",
+      "source": "system",
+      "container": "set_sys_fullscreen_policy",
+      "widgets": [
+        "set_sys_fullscreen_policy_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229910",
+      "choices_key": "#str_229911",
+      "values": [
+        "1",
+        "0"
+      ],
+      "target_type": "cvar",
+      "target": "r_fullscreenDesktop",
+      "default": "1",
+      "restart_required": true,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.display_device",
+      "pane": "System",
+      "section": "Display",
+      "path": "Settings > System > Display > Display Device",
+      "source": "system",
+      "container": "set_sys_display_device",
+      "widgets": [
+        "set_sys_display_device_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229912",
+      "dynamic_choices": [
+        {
+          "choices": "gui::display_names",
+          "values": "gui::display_values"
+        }
+      ],
+      "target_type": "cvar",
+      "target": "r_screen",
+      "default": "-1",
+      "restart_required": true,
+      "accessibility": "Runtime display list is focusable when more than one display is detected."
+    },
+    {
+      "id": "system.multi_screen",
+      "pane": "System",
+      "section": "Display",
+      "path": "Settings > System > Display > Expand Across Displays",
+      "source": "system",
+      "container": "set_sys_multiscreen",
+      "widgets": [
+        "set_sys_multiscreen_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229915",
+      "choices_key": "#str_229916",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "r_multiScreen",
+      "default": "0",
+      "cvar_range": {
+        "low": "0",
+        "high": "1"
+      },
+      "restart_required": true,
+      "accessibility": "Standard focusable choiceDef row shown only for multi-display setups."
+    },
+    {
+      "id": "system.bloom",
+      "pane": "System",
+      "section": "Post Effects",
+      "path": "Settings > System > Post Effects > Bloom",
+      "source": "system",
+      "container": "set_sys_bloom",
+      "widgets": [
+        "set_sys_bloom_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41082",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_bloom",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.ssao",
+      "pane": "System",
+      "section": "Post Effects",
+      "path": "Settings > System > Post Effects > SSAO",
+      "source": "system",
+      "container": "set_sys_ssao",
+      "widgets": [
+        "set_sys_ssao_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41088",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_ssao",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.tone_mapping",
+      "pane": "System",
+      "section": "Post Effects",
+      "path": "Settings > System > Post Effects > Tone Mapping",
+      "source": "system",
+      "container": "set_sys_tonemap",
+      "widgets": [
+        "set_sys_tonemap_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41084",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_hdrToneMap",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.crt_filter",
+      "pane": "System",
+      "section": "Post Effects",
+      "path": "Settings > System > Post Effects > CRT Filter",
+      "source": "system",
+      "container": "set_sys_crt",
+      "widgets": [
+        "set_sys_crt_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41090",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_crt",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.irradiance_volumes",
+      "pane": "System",
+      "section": "Post Effects",
+      "path": "Settings > System > Post Effects > Irradiance Volumes",
+      "source": "system",
+      "container": "set_sys_irradiance",
+      "widgets": [
+        "set_sys_irradiance_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41107",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_useLightGrid",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.light_grid_preload",
+      "pane": "System",
+      "section": "Post Effects",
+      "path": "Settings > Display > Post FX > Preload Light Grids",
+      "source": "system",
+      "container": "set_sys_preload",
+      "widgets": [
+        "set_sys_preload_val",
+        "set_sys_preload_help"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_42820",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "r_lightGridPreload",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choice. Localized help explains loading and VRAM costs; applies on the next map load."
+    },
+    {
+      "id": "system.ui_aspect",
+      "pane": "System",
+      "section": "Display Sizing",
+      "path": "Settings > System > Display Sizing > UI Aspect",
+      "source": "system",
+      "container": "set_sys_ui_aspect",
+      "widgets": [
+        "set_sys_ui_aspect_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229944",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "ui_aspectCorrection",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.refresh_rate",
+      "pane": "System",
+      "section": "Display Sizing",
+      "path": "Settings > System > Display Sizing > Refresh Rate",
+      "source": "system",
+      "container": "set_sys_refresh",
+      "widgets": [
+        "set_sys_refresh_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229945",
+      "dynamic_choices": [
+        {
+          "choices": "gui::display_refresh_choices",
+          "values": "gui::display_refresh_values"
+        }
+      ],
+      "target_type": "cvar",
+      "target": "r_displayRefresh",
+      "default": "0",
+      "cvar_range": {
+        "low": "0",
+        "high": "1000"
+      },
+      "range_intent": "SDL3 builds expose the selected display's reported fullscreen refresh rates; fallback builds expose common presets.",
+      "restart_required": true,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "system.window_width",
+      "pane": "System",
+      "section": "Display Sizing",
+      "path": "Settings > System > Display Sizing > Window Width",
+      "source": "system",
+      "container": "set_sys_window_width",
+      "widgets": [
+        "set_sys_window_width_val"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_sys_window_width_val",
+          "maxchars": 5,
+          "numeric": true
+        }
+      ],
+      "widget_type": "edit",
+      "label_key": "#str_229946",
+      "target_type": "cvar",
+      "target": "r_windowWidth",
+      "default": "1280",
+      "restart_required": true,
+      "accessibility": "Focusable numeric edit field."
+    },
+    {
+      "id": "system.window_height",
+      "pane": "System",
+      "section": "Display Sizing",
+      "path": "Settings > System > Display Sizing > Window Height",
+      "source": "system",
+      "container": "set_sys_window_height",
+      "widgets": [
+        "set_sys_window_height_val"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_sys_window_height_val",
+          "maxchars": 5,
+          "numeric": true
+        }
+      ],
+      "widget_type": "edit",
+      "label_key": "#str_229947",
+      "target_type": "cvar",
+      "target": "r_windowHeight",
+      "default": "720",
+      "restart_required": true,
+      "accessibility": "Focusable numeric edit field."
+    },
+    {
+      "id": "system.custom_fullscreen_width",
+      "pane": "System",
+      "section": "Display Sizing",
+      "path": "Settings > System > Display Sizing > Custom FS Width",
+      "source": "system",
+      "container": "set_sys_custom_width",
+      "widgets": [
+        "set_sys_custom_width_val"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_sys_custom_width_val",
+          "maxchars": 5,
+          "numeric": true
+        }
+      ],
+      "widget_type": "edit",
+      "label_key": "#str_229948",
+      "target_type": "cvar",
+      "target": "r_customWidth",
+      "default": "1920",
+      "restart_required": true,
+      "accessibility": "Focusable numeric edit field."
+    },
+    {
+      "id": "system.custom_fullscreen_height",
+      "pane": "System",
+      "section": "Display Sizing",
+      "path": "Settings > System > Display Sizing > Custom FS Height",
+      "source": "system",
+      "container": "set_sys_custom_height",
+      "widgets": [
+        "set_sys_custom_height_val"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_sys_custom_height_val",
+          "maxchars": 5,
+          "numeric": true
+        }
+      ],
+      "widget_type": "edit",
+      "label_key": "#str_229949",
+      "target_type": "cvar",
+      "target": "r_customHeight",
+      "default": "1080",
+      "restart_required": true,
+      "accessibility": "Focusable numeric edit field."
+    },
+    {
+      "id": "game.free_look",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Free Look",
+      "source": "game",
+      "container": "set_game_freelook",
+      "widgets": [
+        "set_game_freelook_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200133",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "in_freeLook",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.auto_reload",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Auto Weapon Reload",
+      "source": "game",
+      "container": "set_game_autoreload",
+      "widgets": [
+        "set_game_autoreload_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200134",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "ui_autoReload",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.auto_switch",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Auto Weapon Switch",
+      "source": "game",
+      "container": "set_game_autoswitch",
+      "widgets": [
+        "set_game_autoswitch_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200135",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "ui_autoSwitch",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.toggle_zoom",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Toggle Zoom",
+      "source": "game",
+      "container": "set_game_togglezoom",
+      "widgets": [
+        "set_game_togglezoom_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41108",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "in_toggleZoom",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.scope_sensitivity",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Scope Sensitivity",
+      "source": "game",
+      "container": "set_game_scopesensitivity",
+      "widgets": [
+        "set_game_scopesensitivity_slider_bar",
+        "set_game_scopesensitivity_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_scopesensitivity_value",
+          "maxchars": 3,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229972",
+      "target_type": "cvar",
+      "target": "pm_zoomedSlow",
+      "default": "50",
+      "ui_range": {
+        "low": "1",
+        "high": "100",
+        "step": "1"
+      },
+      "cvar_range": {
+        "low": "1",
+        "high": "100"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field; scales mouse, gyro/touchpad mouse-look, and controller look speed while scoped."
+    },
+    {
+      "id": "game.show_decals",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Show Decals",
+      "source": "game",
+      "container": "set_game_showdecals",
+      "widgets": [
+        "set_game_showdecals_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200136",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "g_decals",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.show_gun",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Show Gun",
+      "source": "game",
+      "container": "set_game_showgun",
+      "widgets": [
+        "set_game_showgun_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200138",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "ui_showGun",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.simple_items",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Pickup Style",
+      "source": "game",
+      "container": "set_game_simpleitems",
+      "widgets": [
+        "set_game_simpleitems_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41215",
+      "choices_key": "#str_41216",
+      "values": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "target_type": "cvar",
+      "target": "g_simpleItems",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable four-style choiceDef row; the setting is client-side and takes effect without a restart."
+    },
+    {
+      "id": "game.opponent_weapon_style",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Opponent Weapon Style",
+      "source": "game",
+      "container": "set_game_opponentweaponstyle",
+      "widgets": [
+        "set_game_opponentweaponstyle_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_41217",
+      "choices_key": "#str_41218",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "g_mpFlatOpponentWeapons",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable client-side choiceDef row that leaves view weapons unchanged."
+    },
+    {
+      "id": "game.mouse.invert",
+      "pane": "Game Options",
+      "section": "Mouse Input",
+      "path": "Settings > Game Options > Mouse Input > Invert Mouse",
+      "source": "game",
+      "container": "set_game_mpitch",
+      "widgets": [
+        "set_game_mpitch_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200139",
+      "choices_key": "#str_200059",
+      "values": [
+        "0.022",
+        "-0.022"
+      ],
+      "target_type": "cvar",
+      "target": "m_pitch",
+      "default": "0.022",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row that maps the localized Yes/No choice to the m_pitch sign."
+    },
+    {
+      "id": "game.mouse.smoothing",
+      "pane": "Game Options",
+      "section": "Mouse Input",
+      "path": "Settings > Game Options > Mouse Input > Mouse Smoothing",
+      "source": "game",
+      "container": "set_game_msmooth",
+      "widgets": [
+        "set_game_msmooth_slider_bar",
+        "set_game_msmooth_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_msmooth_value",
+          "maxchars": 1,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_200140",
+      "target_type": "cvar",
+      "target": "m_smooth",
+      "default": "1",
+      "ui_range": {
+        "low": "1",
+        "high": "8",
+        "step": "1"
+      },
+      "cvar_range": {
+        "low": "1",
+        "high": "8"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.mouse.sensitivity",
+      "pane": "Game Options",
+      "section": "Mouse Input",
+      "path": "Settings > Game Options > Mouse Input > Mouse Sensitivity",
+      "source": "game",
+      "container": "set_game_msensitivity",
+      "widgets": [
+        "set_game_msensitivity_slider_bar",
+        "set_game_msensitivity_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_msensitivity_value",
+          "maxchars": 5,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_200141",
+      "target_type": "cvar",
+      "target": "sensitivity",
+      "default": "5",
+      "ui_range": {
+        "low": "0.01",
+        "high": "30",
+        "step": "0.01"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.mouse.cpi",
+      "pane": "Game Options",
+      "section": "Mouse Input",
+      "path": "Settings > Game Options > Mouse Input > Mouse CPI",
+      "source": "game",
+      "container": "set_game_mcpi",
+      "widgets": [
+        "set_game_mcpi_slider_bar",
+        "set_game_mcpi_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_mcpi_value",
+          "maxchars": 6,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229936",
+      "target_type": "cvar",
+      "target": "m_cpi",
+      "default": "0",
+      "ui_range": {
+        "low": "0",
+        "high": "32000",
+        "step": "50"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.mouse.view_filter",
+      "pane": "Game Options",
+      "section": "Mouse Input",
+      "path": "Settings > Game Options > Mouse Input > View Filter",
+      "source": "game",
+      "container": "set_game_mfilter",
+      "widgets": [
+        "set_game_mfilter_slider_bar",
+        "set_game_mfilter_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_mfilter_value",
+          "maxchars": 2,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229937",
+      "target_type": "cvar",
+      "target": "m_filter",
+      "default": "0",
+      "ui_range": {
+        "low": "0",
+        "high": "31",
+        "step": "1"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "31"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.mouse.accel",
+      "pane": "Game Options",
+      "section": "Mouse Input",
+      "path": "Settings > Game Options > Mouse Input > Mouse Accel",
+      "source": "game",
+      "container": "set_game_maccel",
+      "widgets": [
+        "set_game_maccel_slider_bar",
+        "set_game_maccel_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_maccel_value",
+          "maxchars": 6,
+          "numeric": false
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229938",
+      "target_type": "cvar",
+      "target": "cl_mouseAccel",
+      "default": "0",
+      "ui_range": {
+        "low": "-5",
+        "high": "5",
+        "step": "0.01"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field that accepts signed values."
+    },
+    {
+      "id": "game.mouse.accel_offset",
+      "pane": "Game Options",
+      "section": "Mouse Input",
+      "path": "Settings > Game Options > Mouse Input > Accel Offset",
+      "source": "game",
+      "container": "set_game_macceloffset",
+      "widgets": [
+        "set_game_macceloffset_slider_bar",
+        "set_game_macceloffset_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_macceloffset_value",
+          "maxchars": 5,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229939",
+      "target_type": "cvar",
+      "target": "cl_mouseAccelOffset",
+      "default": "0",
+      "ui_range": {
+        "low": "0",
+        "high": "50",
+        "step": "0.1"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.mouse.accel_curve",
+      "pane": "Game Options",
+      "section": "Mouse Input",
+      "path": "Settings > Game Options > Mouse Input > Accel Curve",
+      "source": "game",
+      "container": "set_game_maccelpower",
+      "widgets": [
+        "set_game_maccelpower_slider_bar",
+        "set_game_maccelpower_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_maccelpower_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229940",
+      "target_type": "cvar",
+      "target": "cl_mouseAccelPower",
+      "default": "2",
+      "ui_range": {
+        "low": "1",
+        "high": "8",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "1",
+        "high": "8"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.mouse.sensitivity_cap",
+      "pane": "Game Options",
+      "section": "Mouse Input",
+      "path": "Settings > Game Options > Mouse Input > Sensitivity Cap",
+      "source": "game",
+      "container": "set_game_msenscap",
+      "widgets": [
+        "set_game_msenscap_slider_bar",
+        "set_game_msenscap_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_msenscap_value",
+          "maxchars": 5,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229941",
+      "target_type": "cvar",
+      "target": "cl_mouseSensCap",
+      "default": "0",
+      "ui_range": {
+        "low": "0",
+        "high": "100",
+        "step": "0.1"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.enabled",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Controller Input",
+      "source": "game",
+      "container": "set_game_controller_enabled",
+      "widgets": [
+        "set_game_controller_enabled_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229925",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "in_joystick",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.controller.stick_layout",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Stick Layout",
+      "source": "game",
+      "container": "set_game_controller_layout",
+      "widgets": [
+        "set_game_controller_layout_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229930",
+      "choices_key": "#str_229934",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "in_joystickSouthpaw",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.controller.dead_zone",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Stick Dead Zone",
+      "source": "game",
+      "container": "set_game_controller_deadzone",
+      "widgets": [
+        "set_game_controller_deadzone_slider_bar",
+        "set_game_controller_deadzone_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_deadzone_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229926",
+      "target_type": "cvar",
+      "target": "in_joystickDeadZone",
+      "default": "0.18",
+      "ui_range": {
+        "low": "0",
+        "high": "0.95",
+        "step": "0.01"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "0.95"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.look_sensitivity",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Look Sensitivity",
+      "source": "game",
+      "container": "set_game_controller_look_sensitivity",
+      "widgets": [
+        "set_game_controller_look_sensitivity_slider_bar",
+        "set_game_controller_look_sensitivity_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_look_sensitivity_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229931",
+      "target_type": "cvar",
+      "target": "in_joystickLookSensitivity",
+      "default": "0.75",
+      "ui_range": {
+        "low": "0.1",
+        "high": "4.0",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0.1",
+        "high": "4.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.wheel_sensitivity",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Wheel Sensitivity",
+      "source": "game",
+      "container": "set_game_controller_wheel_sensitivity",
+      "widgets": [
+        "set_game_controller_wheel_sensitivity_slider_bar",
+        "set_game_controller_wheel_sensitivity_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_wheel_sensitivity_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_42840",
+      "target_type": "cvar",
+      "target": "in_weaponWheelSensitivity",
+      "default": "4.0",
+      "ui_range": {
+        "low": "0.25",
+        "high": "16.0",
+        "step": "0.25"
+      },
+      "cvar_range": {
+        "low": "0.25",
+        "high": "16.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.wheel_offset",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Wheel Horizontal Offset",
+      "source": "game",
+      "container": "set_game_wheel_offset",
+      "widgets": [
+        "set_game_wheel_offset_slider_bar",
+        "set_game_wheel_offset_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_wheel_offset_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_230140",
+      "target_type": "cvar",
+      "target": "ui_weaponWheelOffset",
+      "default": "27",
+      "ui_range": {
+        "low": "-40",
+        "high": "40",
+        "step": "1"
+      },
+      "cvar_range": {
+        "low": "-40",
+        "high": "40"
+      },
+      "restart_required": false,
+      "accessibility": "Signed numeric edit paired with a slider. Zero centers; positive moves right, negative left. Saved preference survives narrow-view fitting."
+    },
+    {
+      "id": "game.controller.look_curve",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Look Curve",
+      "source": "game",
+      "container": "set_game_controller_look_curve",
+      "widgets": [
+        "set_game_controller_look_curve_slider_bar",
+        "set_game_controller_look_curve_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_look_curve_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229932",
+      "target_type": "cvar",
+      "target": "in_joystickLookCurve",
+      "default": "1.35",
+      "ui_range": {
+        "low": "1.0",
+        "high": "3.0",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "1.0",
+        "high": "3.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.invert_look",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Invert Look",
+      "source": "game",
+      "container": "set_game_controller_invert",
+      "widgets": [
+        "set_game_controller_invert_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229933",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "in_joystickInvertLook",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.controller.trigger_threshold",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Trigger Press",
+      "source": "game",
+      "container": "set_game_controller_trigger",
+      "widgets": [
+        "set_game_controller_trigger_slider_bar",
+        "set_game_controller_trigger_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_trigger_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229927",
+      "target_type": "cvar",
+      "target": "in_joystickTriggerThreshold",
+      "default": "0.35",
+      "ui_range": {
+        "low": "0",
+        "high": "1.0",
+        "step": "0.01"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "1.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.rumble",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Rumble",
+      "source": "game",
+      "container": "set_game_controller_rumble",
+      "widgets": [
+        "set_game_controller_rumble_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229928",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "in_joystickRumble",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.controller.rumble_strength",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Rumble Strength",
+      "source": "game",
+      "container": "set_game_controller_rumble_strength",
+      "widgets": [
+        "set_game_controller_rumble_strength_slider_bar",
+        "set_game_controller_rumble_strength_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_rumble_strength_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229929",
+      "target_type": "cvar",
+      "target": "in_joystickRumbleScale",
+      "default": "1.0",
+      "ui_range": {
+        "low": "0",
+        "high": "2.0",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "2.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.gyro",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Gyro",
+      "source": "game",
+      "container": "set_game_controller_gyro",
+      "widgets": [
+        "set_game_controller_gyro_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229964",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "in_gyro",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.controller.gyro_sensitivity",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Gyro Sensitivity",
+      "source": "game",
+      "container": "set_game_controller_gyro_sensitivity",
+      "widgets": [
+        "set_game_controller_gyro_sensitivity_slider_bar",
+        "set_game_controller_gyro_sensitivity_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_gyro_sensitivity_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229965",
+      "target_type": "cvar",
+      "target": "in_gyroSensitivity",
+      "default": "1.0",
+      "ui_range": {
+        "low": "0",
+        "high": "8.0",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "8.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.touchpad_mode",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Touchpad Mode",
+      "source": "game",
+      "container": "set_game_controller_touchpad_mode",
+      "widgets": [
+        "set_game_controller_touchpad_mode_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229966",
+      "choices_key": "#str_229967",
+      "values": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "target_type": "cvar",
+      "target": "in_touchpadMode",
+      "default": "0",
+      "cvar_range": {
+        "low": "0",
+        "high": "3"
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row with fixed touchpad routing modes."
+    },
+    {
+      "id": "game.controller.touchpad_sensitivity",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Touchpad Sensitivity",
+      "source": "game",
+      "container": "set_game_controller_touchpad_sensitivity",
+      "widgets": [
+        "set_game_controller_touchpad_sensitivity_slider_bar",
+        "set_game_controller_touchpad_sensitivity_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_touchpad_sensitivity_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229968",
+      "target_type": "cvar",
+      "target": "in_touchpadSensitivity",
+      "default": "1.0",
+      "ui_range": {
+        "low": "0",
+        "high": "8.0",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "8.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.touchscreen",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Touchscreen",
+      "source": "game",
+      "container": "set_game_controller_touchscreen",
+      "widgets": [
+        "set_game_controller_touchscreen_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229969",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "in_touchscreen",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.controller.low_battery_rumble",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Low Battery Rumble",
+      "source": "game",
+      "container": "set_game_controller_low_battery_rumble",
+      "widgets": [
+        "set_game_controller_low_battery_rumble_slider_bar",
+        "set_game_controller_low_battery_rumble_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_low_battery_rumble_value",
+          "maxchars": 3,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229970",
+      "target_type": "cvar",
+      "target": "in_joystickLowBatteryRumbleThreshold",
+      "default": "0",
+      "ui_range": {
+        "low": "0",
+        "high": "100",
+        "step": "1"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "100"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.low_battery_rumble_cap",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Low Battery Rumble Cap",
+      "source": "game",
+      "container": "set_game_controller_low_battery_rumble_cap",
+      "widgets": [
+        "set_game_controller_low_battery_rumble_cap_slider_bar",
+        "set_game_controller_low_battery_rumble_cap_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_controller_low_battery_rumble_cap_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229971",
+      "target_type": "cvar",
+      "target": "in_joystickLowBatteryRumbleScale",
+      "default": "0.75",
+      "ui_range": {
+        "low": "0",
+        "high": "2.0",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "2.0"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.controller.prompt_style",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Prompt Style",
+      "source": "game",
+      "container": "set_game_controller_prompt_style",
+      "widgets": [
+        "set_game_controller_prompt_style_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231526",
+      "choices_key": "#str_231527",
+      "values": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "target_type": "cvar",
+      "target": "in_promptStyle",
+      "default": "0",
+      "cvar_range": {
+        "low": "0",
+        "high": "5"
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row: the controller prompt family for the menus and the HUD."
+    },
+    {
+      "id": "game.controller.swap_confirm",
+      "pane": "Game Options",
+      "section": "Controller",
+      "path": "Settings > Game Options > Controller > Swap Confirm and Back",
+      "source": "game",
+      "container": "set_game_controller_swap_confirm",
+      "widgets": [
+        "set_game_controller_swap_confirm_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231528",
+      "choices_key": "#str_231529",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target_type": "cvar",
+      "target": "in_swapConfirmBack",
+      "default": "0",
+      "cvar_range": {
+        "low": "0",
+        "high": "2"
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row: which face button confirms in menus; prompts follow it."
+    },
+    {
+      "id": "game.crosshair_custom",
+      "pane": "Game Options",
+      "section": "Crosshair",
+      "path": "Settings > Game Options > Crosshair > Custom Crosshair",
+      "source": "game",
+      "container": "set_game_customxhair",
+      "widgets": [
+        "set_game_customxhair_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200307",
+      "choices_key": "#str_200296",
+      "target_type": "cvar",
+      "target": "g_crosshairCustom",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row. Enabling custom crosshairs activates the preview picker."
+    },
+    {
+      "id": "game.crosshair_size",
+      "pane": "Game Options",
+      "section": "Crosshair",
+      "path": "Settings > Game Options > Crosshair > Crosshair Size",
+      "source": "game",
+      "container": "set_game_xhairsize",
+      "widgets": [
+        "set_game_xhairsize_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_201010",
+      "choices_key": "#str_201022",
+      "values": [
+        "16",
+        "24",
+        "32",
+        "40",
+        "48"
+      ],
+      "target_type": "cvar",
+      "target": "g_crosshairSize",
+      "default": "32",
+      "cvar_range": {
+        "low": "16",
+        "high": "48"
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row with fixed size presets."
+    },
+    {
+      "id": "game.corpse_sink",
+      "pane": "Game Options",
+      "section": "Corpse, Language, Console",
+      "path": "Settings > Game Options > Corpse, Language, Console > Corpse Sink",
+      "source": "game",
+      "container": "set_game_corpsesink",
+      "widgets": [
+        "set_game_corpsesink_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229917",
+      "choices_key": "#str_229921",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target_type": "cvar",
+      "target": "g_corpseSink",
+      "default": "0",
+      "cvar_range": {
+        "low": "0",
+        "high": "2"
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.language",
+      "pane": "Game Options",
+      "section": "Corpse, Language, Console",
+      "path": "Settings > Game Options > Corpse, Language, Console > Language",
+      "source": "game",
+      "container": "set_game_language",
+      "widgets": [
+        "set_game_language_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229907",
+      "choices_key": "#str_229908",
+      "values": [
+        "english",
+        "spanish",
+        "french",
+        "italian"
+      ],
+      "target_type": "cvar",
+      "target": "sys_lang",
+      "default": "english",
+      "write_tokens": [
+        "reloadLanguage",
+        "reloadGuis",
+        "CVarStrcmp sys_lang curr_lang English Spanish French Italian"
+      ],
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row that reloads menu language resources after selection."
+    },
+    {
+      "id": "game.console_access",
+      "pane": "Game Options",
+      "section": "Corpse, Language, Console",
+      "path": "Settings > Game Options > Corpse, Language, Console > Console Access",
+      "source": "game",
+      "container": "set_game_consoleaccess",
+      "widgets": [
+        "set_game_consoleaccess_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229922",
+      "choices_key": "#str_229923",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "con_allowConsole",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.crosshair_color",
+      "pane": "Game Options",
+      "section": "Crosshair",
+      "path": "Settings > Game Options > Crosshair > Crosshair Color",
+      "source": "game",
+      "container": "set_game_xhaircolor",
+      "widgets": [
+        "set_game_xhaircolor_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_200299",
+      "choices_key": "#str_229942",
+      "target_type": "gui_state",
+      "target": "g_crosshairColorChoice",
+      "default": "0",
+      "writes": [
+        "g_crosshairColor"
+      ],
+      "write_tokens": [
+        "g_crosshairColor 1 1 1 1",
+        "g_crosshairColor 1 0 0 1",
+        "g_crosshairColor 1 0.5 0 1",
+        "g_crosshairColor 1 1 0 1",
+        "g_crosshairColor 0 1 0 1",
+        "g_crosshairColor 0 1 1 1",
+        "g_crosshairColor 0 0 1 1",
+        "g_crosshairColor 1 0 0.5 1"
+      ],
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef replaces the old mouse-only swatch control."
+    },
+    {
+      "id": "game.crosshair_hit_marker",
+      "pane": "Game Options",
+      "section": "Crosshair",
+      "path": "Settings > Game Options > Crosshair > Hit Marker",
+      "source": "game",
+      "container": "set_game_hitmarker",
+      "widgets": [
+        "set_game_hitmarker_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229979",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "hud_hitMarker",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row. Turning the marker off restores stock Quake 4's crosshair recolour on a hit."
+    },
+    {
+      "id": "game.hud_layout",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > HUD Layout",
+      "container": "set_game_hudlayout",
+      "widgets": [
+        "set_game_hudlayout_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231236",
+      "choices_key": "#str_231237",
+      "values": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "target": "ui_hudLayout",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. Classic keeps the stock HUD, Remastered anchors it to the screen edges, Minimal keeps health, armor, ammunition and the crosshair, and Competitive adds the multiplayer match bar, team status and network quality."
+    },
+    {
+      "id": "game.hud_scale",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > HUD Size",
+      "container": "set_game_hudscale",
+      "widgets": [
+        "set_game_hudscale_slider_bar",
+        "set_game_hudscale_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_hudscale_value",
+          "maxchars": 4
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231238",
+      "target": "ui_hudScale",
+      "default": "1",
+      "ui_range": {
+        "low": "0.5",
+        "high": "2",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0.5",
+        "high": "2"
+      },
+      "accessibility": "Slider with paired edit field. Scales the HUD independently of the menus."
+    },
+    {
+      "id": "game.hud_width",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > HUD Width",
+      "container": "set_game_hudwidth",
+      "widgets": [
+        "set_game_hudwidth_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231239",
+      "choices_key": "#str_231240",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target": "ui_hudWidth",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. How far edge HUD groups spread on wide screens."
+    },
+    {
+      "id": "game.hud_inset",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Safe Area Inset",
+      "container": "set_game_hudinset",
+      "widgets": [
+        "set_game_hudinset_slider_bar",
+        "set_game_hudinset_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_hudinset_value",
+          "maxchars": 4
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231241",
+      "target": "ui_hudSafeInset",
+      "default": "0",
+      "ui_range": {
+        "low": "0",
+        "high": "10",
+        "step": "0.5"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "10"
+      },
+      "accessibility": "Slider with paired edit field. Moves the HUD inward by a percentage of the view."
+    },
+    {
+      "id": "game.objectives_toggle",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Toggle Objectives",
+      "container": "set_game_objectivestoggle",
+      "widgets": [
+        "set_game_objectivestoggle_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231247",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "g_objectivesToggle",
+      "default": "0",
+      "accessibility": "Focusable choiceDef row. No shows the objectives display while the scores button is held; Yes opens and closes it with each press and adds a Close prompt."
+    },
+    {
+      "id": "game.hudopacity",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > HUD Opacity",
+      "container": "set_game_hudopacity",
+      "widgets": [
+        "set_game_hudopacity_slider_bar",
+        "set_game_hudopacity_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_hudopacity_value",
+          "maxchars": 4
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231270",
+      "target": "ui_hudOpacity",
+      "default": "1",
+      "ui_range": {
+        "low": "0.25",
+        "high": "1",
+        "step": "0.05"
+      },
+      "cvar_range": {
+        "low": "0.25",
+        "high": "1"
+      },
+      "accessibility": "Slider with paired edit field. Fades the Remastered and Minimal HUD between 25% and fully opaque."
+    },
+    {
+      "id": "game.huddamagedir",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Damage Direction",
+      "container": "set_game_huddamagedir",
+      "widgets": [
+        "set_game_huddamagedir_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231271",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "ui_hudDamageDirection",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. No hides the damage direction indicator in the Remastered and Minimal HUD."
+    },
+    {
+      "id": "game.hudpickups",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Pickup Messages",
+      "container": "set_game_hudpickups",
+      "widgets": [
+        "set_game_hudpickups_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231272",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "ui_hudPickups",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. No hides the pickup messages in the Remastered and Minimal HUD."
+    },
+    {
+      "id": "game.hudstrip",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Weapon Strip",
+      "container": "set_game_hudstrip",
+      "widgets": [
+        "set_game_hudstrip_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231273",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "ui_hudWeaponStrip",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. No keeps the weapon strip hidden on a weapon change in the Remastered and Minimal HUD."
+    },
+    {
+      "id": "game.hudflash",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Reduced Flashing",
+      "container": "set_game_hudflash",
+      "widgets": [
+        "set_game_hudflash_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231274",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "ui_reducedFlashing",
+      "default": "0",
+      "accessibility": "Focusable choiceDef row. Yes caps the damage direction indicator and the vehicle hit glow at 0.40, dims full-screen white flashes and drops the death afterimage, in every HUD layout."
+    },
+    {
+      "id": "game.opaque_backing",
+      "pane": "Game Options",
+      "section": "HUD",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > HUD > Opaque Menu Backing",
+      "container": "set_game_opaquebacking",
+      "widgets": [
+        "set_game_opaquebacking_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231592",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target": "ui_retainedOpaqueBacking",
+      "default": "0",
+      "accessibility": "Focusable choiceDef row. Yes covers the screen behind the retained menus' dialogs and pause with the stock 0.94 black scrim instead of the softened view, for players who find the blurred backdrop distracting."
+    },
+    {
+      "id": "game.auto_skip_cinematics",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Auto Skip Cinematics",
+      "source": "game",
+      "container": "set_game_autoskipcinematics",
+      "widgets": [
+        "set_game_autoskipcinematics_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229951",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "g_autoSkipCinematics",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.cinematic_shake",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "source": "game",
+      "target_type": "cvar",
+      "restart_required": false,
+      "path": "Settings > Game Options > Gameplay And View > Cinematic Shake",
+      "container": "set_game_cinematicshake",
+      "widgets": [
+        "set_game_cinematicshake_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230157",
+      "choices_key": "#str_230136",
+      "values": [
+        "0",
+        "0.5",
+        "1"
+      ],
+      "target": "ui_cinematicShake",
+      "default": "1",
+      "accessibility": "Focusable choiceDef row. Off, Low or Full scales scripted cinematic camera shake, such as the Awakening dropship's."
+    },
+    {
+      "id": "game.gun_position",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Gun Position",
+      "source": "game",
+      "container": "set_game_gunXYZ",
+      "widgets": [
+        "set_game_gunXYZ_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_223007",
+      "choices_key": "#str_223008",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target_type": "gui_state",
+      "target": "g_gunXYZ",
+      "default": "2",
+      "adapter": {
+        "source": "session_menu",
+        "command": "applyGunPositionChoice",
+        "writes": [
+          "g_gunX",
+          "g_gunY",
+          "g_gunZ",
+          "g_weaponFovEffect"
+        ],
+        "write_tokens": [
+          "MAINMENU_GUN_POSITION_PRESETS",
+          "1.0f, 2.0f, -1.0f",
+          "1.0f, -5.0f, -1.0f"
+        ]
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row backed by a typed preset adapter."
+    },
+    {
+      "id": "game.force_model",
+      "pane": "Game Options",
+      "section": "Gameplay And View",
+      "path": "Settings > Game Options > Gameplay And View > Force Model",
+      "source": "game",
+      "container": "set_game_forcemodel",
+      "widgets": [
+        "set_game_forcemodel_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_223006",
+      "choices_key": "#str_200059",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "gui_state",
+      "target": "ui_proskins",
+      "default": "0",
+      "adapter": {
+        "source": "session_menu",
+        "command": "applyForceModelChoice",
+        "writes": [
+          "g_forceModel",
+          "g_forceMarineModel",
+          "g_forceStroggModel"
+        ],
+        "write_tokens": [
+          "MAINMENU_FORCE_MODEL_MARINE",
+          "MAINMENU_FORCE_MODEL_STROGG",
+          "model_player_marine_helmeted_bright",
+          "model_player_tactical_transfer_bright"
+        ]
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row backed by a typed force-model adapter. No clears the force-model cvars."
+    },
+    {
+      "id": "game.corpse_time",
+      "pane": "Game Options",
+      "section": "Corpse, Language, Console",
+      "path": "Settings > Game Options > Corpse, Language, Console > Corpse Time",
+      "source": "game",
+      "container": "set_game_corpsetime",
+      "widgets": [
+        "set_game_corpsetime_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229918",
+      "choices_key": "#str_229919",
+      "target_type": "gui_state",
+      "target": "corpse_time_choice",
+      "default": "0",
+      "adapter": {
+        "source": "session_menu",
+        "command": "applyCorpseTimeChoice",
+        "writes": [
+          "g_corpseRemoveDelaySP",
+          "g_corpseRemoveDelayMP"
+        ],
+        "write_tokens": [
+          "MAINMENU_CORPSE_TIME_PRESET_VALUES",
+          "0.0f",
+          "-1.0f",
+          "60.0f"
+        ]
+      },
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row backed by a typed SP/MP adapter. The Custom choice preserves an existing non-preset cvar value."
+    },
+    {
+      "id": "game.weapon_fov",
+      "pane": "Game Options",
+      "section": "View Weapon",
+      "path": "Settings > Game Options > View Weapon > Weapon FOV",
+      "source": "game",
+      "container": "set_game_cl_gunfov",
+      "widgets": [
+        "set_game_cl_gunfov_slider_bar",
+        "set_game_cl_gunfov_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_cl_gunfov_value",
+          "maxchars": 3,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229953",
+      "target_type": "cvar",
+      "target": "cl_gunfov",
+      "default": "0",
+      "ui_range": {
+        "low": "0",
+        "high": "179",
+        "step": "1"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "179"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.weapon_fov_aspect",
+      "pane": "Game Options",
+      "section": "View Weapon",
+      "path": "Settings > Game Options > View Weapon > Weapon FOV Aspect",
+      "source": "game",
+      "container": "set_game_cl_gunfov_adjust",
+      "widgets": [
+        "set_game_cl_gunfov_adjust_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229954",
+      "choices_key": "#str_229955",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "cl_gunfov_adjust",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.weapon_x_offset",
+      "pane": "Game Options",
+      "section": "View Weapon",
+      "path": "Settings > Game Options > View Weapon > Weapon X Offset",
+      "source": "game",
+      "container": "set_game_cl_gun_x",
+      "widgets": [
+        "set_game_cl_gun_x_slider_bar",
+        "set_game_cl_gun_x_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_cl_gun_x_value",
+          "maxchars": 5
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229956",
+      "target_type": "cvar",
+      "target": "cl_gun_x",
+      "default": "0",
+      "ui_range": {
+        "low": "-5",
+        "high": "5",
+        "step": "0.05"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.weapon_y_offset",
+      "pane": "Game Options",
+      "section": "View Weapon",
+      "path": "Settings > Game Options > View Weapon > Weapon Y Offset",
+      "source": "game",
+      "container": "set_game_cl_gun_y",
+      "widgets": [
+        "set_game_cl_gun_y_slider_bar",
+        "set_game_cl_gun_y_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_cl_gun_y_value",
+          "maxchars": 5
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229957",
+      "target_type": "cvar",
+      "target": "cl_gun_y",
+      "default": "0",
+      "ui_range": {
+        "low": "-5",
+        "high": "5",
+        "step": "0.05"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.weapon_z_offset",
+      "pane": "Game Options",
+      "section": "View Weapon",
+      "path": "Settings > Game Options > View Weapon > Weapon Z Offset",
+      "source": "game",
+      "container": "set_game_cl_gun_z",
+      "widgets": [
+        "set_game_cl_gun_z_slider_bar",
+        "set_game_cl_gun_z_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_game_cl_gun_z_value",
+          "maxchars": 5
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_229958",
+      "target_type": "cvar",
+      "target": "cl_gun_z",
+      "default": "0",
+      "ui_range": {
+        "low": "-5",
+        "high": "5",
+        "step": "0.05"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "game.weapon_kick",
+      "pane": "Game Options",
+      "section": "View Weapon",
+      "path": "Settings > Game Options > View Weapon > Weapon Kick",
+      "source": "game",
+      "container": "set_game_weaponkick",
+      "widgets": [
+        "set_game_weaponkick_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_229982",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "g_weaponMuzzleKick",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "game.vr_enable",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > VR Mode",
+      "source": "game",
+      "container": "set_game_vr_enable",
+      "widgets": [
+        "set_game_vr_enable_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230121",
+      "choices_key": "#str_200246",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_enable",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Starts or ends the OpenXR session at once (OpenGL renderer)."
+    },
+    {
+      "id": "game.vr_aimmode",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Aim With",
+      "source": "game",
+      "container": "set_game_vr_aimmode",
+      "widgets": [
+        "set_game_vr_aimmode_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230122",
+      "choices_key": "#str_230123",
+      "values": [
+        "1",
+        "0"
+      ],
+      "target_type": "cvar",
+      "target": "vr_aimMode",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Controller aim hides the screen crosshair; the laser sight marks shots."
+    },
+    {
+      "id": "game.vr_lefthanded",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Weapon Hand",
+      "source": "game",
+      "container": "set_game_vr_lefthanded",
+      "widgets": [
+        "set_game_vr_lefthanded_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230124",
+      "choices_key": "#str_230125",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_leftHanded",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Swaps the triggers, grips and sticks with the weapon."
+    },
+    {
+      "id": "game.vr_turnmode",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Turning",
+      "source": "game",
+      "container": "set_game_vr_turnmode",
+      "widgets": [
+        "set_game_vr_turnmode_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230126",
+      "choices_key": "#str_230127",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_turnMode",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Weapon-hand stick left and right."
+    },
+    {
+      "id": "game.vr_snapturnangle",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Snap Turn Angle",
+      "source": "game",
+      "container": "set_game_vr_snapturnangle",
+      "widgets": [
+        "set_game_vr_snapturnangle_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230128",
+      "choices_key": "#str_230129",
+      "values": [
+        "30",
+        "45",
+        "60",
+        "90"
+      ],
+      "target_type": "cvar",
+      "target": "vr_snapTurnAngle",
+      "default": "45",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Degrees per snap turn."
+    },
+    {
+      "id": "game.vr_movedirection",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Walk Direction",
+      "source": "game",
+      "container": "set_game_vr_movedirection",
+      "widgets": [
+        "set_game_vr_movedirection_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230130",
+      "choices_key": "#str_230131",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_moveDirection",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. What the off-hand stick's forward follows."
+    },
+    {
+      "id": "game.vr_roomscale",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Room Scale",
+      "source": "game",
+      "container": "set_game_vr_roomscale",
+      "widgets": [
+        "set_game_vr_roomscale_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230132",
+      "choices_key": "#str_200246",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_roomScale",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. The character walks after the player's steps; in multiplayer through its movement input."
+    },
+    {
+      "id": "game.vr_aimlaser",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Laser Sight",
+      "source": "game",
+      "container": "set_game_vr_aimlaser",
+      "widgets": [
+        "set_game_vr_aimlaser_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230133",
+      "choices_key": "#str_230134",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target_type": "cvar",
+      "target": "vr_aimLaser",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Marks where controller-aimed shots land, at the target's depth."
+    },
+    {
+      "id": "game.vr_hapticstrength",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Vibration",
+      "source": "game",
+      "container": "set_game_vr_hapticstrength",
+      "widgets": [
+        "set_game_vr_hapticstrength_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230135",
+      "choices_key": "#str_230136",
+      "values": [
+        "0",
+        "0.5",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_hapticStrength",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Controller pulses on each shot and hit."
+    },
+    {
+      "id": "game.vr_twohanded",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Two-Handed Grip",
+      "source": "game",
+      "container": "set_game_vr_twohanded",
+      "widgets": [
+        "set_game_vr_twohanded_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230137",
+      "choices_key": "#str_200246",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_twoHanded",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. The off-hand grip on the gun's foregrip holds it in both hands; elsewhere it opens the weapon wheel."
+    },
+    {
+      "id": "game.vr_vignette",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Comfort Vignette",
+      "source": "game",
+      "container": "set_game_vr_vignette",
+      "widgets": [
+        "set_game_vr_vignette_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230138",
+      "choices_key": "#str_230136",
+      "values": [
+        "0",
+        "0.5",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_comfortVignette",
+      "default": "0.5",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Darkens the edges of each eye while the stick moves or smoothly turns the player."
+    },
+    {
+      "id": "game.vr_physicalcrouch",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Physical Crouch",
+      "source": "game",
+      "container": "set_game_vr_physicalcrouch",
+      "widgets": [
+        "set_game_vr_physicalcrouch_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_230139",
+      "choices_key": "#str_200246",
+      "values": [
+        "0",
+        "1"
+      ],
+      "target_type": "cvar",
+      "target": "vr_physicalCrouch",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Crouching in the room crouches the character."
+    },
+    {
+      "id": "game.vr_playspace",
+      "pane": "Game Options",
+      "section": "Virtual Reality",
+      "path": "Settings > Game Options > Virtual Reality > Play Space",
+      "source": "game",
+      "container": "set_game_vr_playspace",
+      "widgets": [
+        "set_game_vr_playspace_value"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231760",
+      "choices_key": "#str_231761",
+      "values": [
+        "0",
+        "1",
+        "2"
+      ],
+      "target_type": "cvar",
+      "target": "vr_playSpace",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Focusable choiceDef row. Seated play measures height from where the player recentred; standing play measures it from the floor."
+    },
+    {
+      "id": "audio.subtitles",
+      "pane": "Audio",
+      "section": "Subtitles",
+      "path": "Settings > Audio > Dialogue Subtitles",
+      "source": "audio",
+      "container": "set_audio_subtitles",
+      "widgets": [
+        "set_audio_subtitles_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231308",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "ui_subtitles",
+      "default": "0",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    },
+    {
+      "id": "audio.subtitle_size",
+      "pane": "Audio",
+      "section": "Subtitles",
+      "path": "Settings > Audio > Subtitle Size",
+      "source": "audio",
+      "container": "set_audio_subtitle_size",
+      "widgets": [
+        "set_audio_subtitle_size_slider",
+        "set_audio_subtitle_size_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_audio_subtitle_size_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231309",
+      "target_type": "cvar",
+      "target": "ui_subtitleScale",
+      "default": "1",
+      "ui_range": {
+        "low": "1",
+        "high": "2",
+        "step": "0.1"
+      },
+      "cvar_range": {
+        "low": "1",
+        "high": "2"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "audio.subtitle_background",
+      "pane": "Audio",
+      "section": "Subtitles",
+      "path": "Settings > Audio > Subtitle Background",
+      "source": "audio",
+      "container": "set_audio_subtitle_background",
+      "widgets": [
+        "set_audio_subtitle_background_slider",
+        "set_audio_subtitle_background_value"
+      ],
+      "edit_fields": [
+        {
+          "name": "set_audio_subtitle_background_value",
+          "maxchars": 4,
+          "numeric": true
+        }
+      ],
+      "widget_type": "slider_edit",
+      "label_key": "#str_231310",
+      "target_type": "cvar",
+      "target": "ui_subtitleBackground",
+      "default": "0.6",
+      "ui_range": {
+        "low": "0",
+        "high": "1",
+        "step": "0.1"
+      },
+      "cvar_range": {
+        "low": "0",
+        "high": "1"
+      },
+      "restart_required": false,
+      "accessibility": "Slider with paired edit field."
+    },
+    {
+      "id": "audio.subtitle_speakers",
+      "pane": "Audio",
+      "section": "Subtitles",
+      "path": "Settings > Audio > Speaker Names",
+      "source": "audio",
+      "container": "set_audio_subtitle_speakers",
+      "widgets": [
+        "set_audio_subtitle_speakers_val"
+      ],
+      "widget_type": "choice",
+      "label_key": "#str_231311",
+      "choices_key": "#str_200059",
+      "target_type": "cvar",
+      "target": "ui_subtitleSpeakers",
+      "default": "1",
+      "restart_required": false,
+      "accessibility": "Standard focusable choiceDef row."
+    }
+  ],
+  "default_bind_sources": [
+    "default_cfg",
+    "openq4_defaults_cfg"
+  ]
+}

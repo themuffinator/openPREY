@@ -7,13 +7,41 @@ rvDeclPlayerModel::rvDeclPlayerModel() {
 	FreeData();
 }
 
+static int declPlayerModelMediaCachingSuppressed = 0;
+
+idSuppressPlayerModelMediaCaching::idSuppressPlayerModelMediaCaching() {
+	declPlayerModelMediaCachingSuppressed++;
+}
+
+idSuppressPlayerModelMediaCaching::~idSuppressPlayerModelMediaCaching() {
+	declPlayerModelMediaCachingSuppressed--;
+}
+
+static void DeclPlayerModel_CacheMedia(const rvDeclPlayerModel* decl) {
+	idDict media;
+
+	media.Set("model", decl->model.c_str());
+	media.Set("def_head", decl->head.c_str());
+	media.Set("def_head_ui", decl->uiHead.c_str());
+	media.Set("skin", decl->skin.c_str());
+	media.SetDefaults(&decl->sounds);
+	game->CacheDictionaryMedia(&media);
+}
+
 /*
 ===================
 rvDeclPlayerModel::Size
 ===================
 */
 size_t rvDeclPlayerModel::Size(void) const {
-	return sizeof(rvDeclPlayerModel);
+	return sizeof(rvDeclPlayerModel)
+		+ model.Allocated()
+		+ head.Allocated()
+		+ uiHead.Allocated()
+		+ team.Allocated()
+		+ skin.Allocated()
+		+ description.Allocated()
+		+ sounds.Allocated();
 }
 
 /*
@@ -22,17 +50,28 @@ rvDeclPlayerModel::DefaultDefinition
 ===================
 */
 const char* rvDeclPlayerModel::DefaultDefinition() const {
-	return "{\n\t\"model\"\t\"model_player_marine\"\n\t\"def_head\"\t\"char_marinehead_kane2_client\"\n\t\"def_head_ui\"\t\"char_marinehead_kane2_mp\"\n\t\"skin\"\t\"skins/multiplayer/marine\"\n}";
+	return "{\n\t\"model\"\t\"model_player_marine\"\n\t\"def_head\"\t\"char_marinehead_kane2_client\"\n}";
 }
 
 /*
 ===================
-rvDeclPlayerModel::FreeData
+rvDeclPlayerModel::Parse
 ===================
 */
 bool rvDeclPlayerModel::Parse(const char* text, const int textLength) {
+	return Parse(text, textLength, false);
+}
+
+/*
+===================
+rvDeclPlayerModel::Parse
+===================
+*/
+bool rvDeclPlayerModel::Parse(const char* text, const int textLength, bool noCaching) {
 	idLexer src;
 	idToken	token;
+	idToken	value;
+	bool parsed = true;
 
 	FreeData();
 
@@ -49,22 +88,30 @@ bool rvDeclPlayerModel::Parse(const char* text, const int textLength) {
 			break;
 		}
 
+		if ( token.type != TT_STRING ) {
+			src.Warning( "Expected quoted string, but found '%s'", token.c_str() );
+			MakeDefault();
+			parsed = false;
+			break;
+		}
+
 		if ( !token.Icmp( "head_offset" ) ) {
 			src.Parse1DMatrix( 3, headOffset.ToFloatPtr() );
 			continue;
 		}
 
-		idToken value;
 		if ( !src.ReadToken( &value ) ) {
-			src.Error( "Unexpected end of file parsing key '%s' in playerModel decl '%s'", token.c_str(), GetName() );
-			return false;
+			src.Warning( "Unexpected end of file" );
+			MakeDefault();
+			parsed = false;
+			break;
 		}
 
 		if ( !token.Icmp( "model" ) ) {
 			model = value;
-		} else if ( !token.Icmp( "def_head" ) || !token.Icmp( "head" ) ) {
+		} else if ( !token.Icmp( "def_head" ) ) {
 			head = value;
-		} else if ( !token.Icmp( "def_head_ui" ) || !token.Icmp( "ui_head" ) ) {
+		} else if ( !token.Icmp( "def_head_ui" ) ) {
 			uiHead = value;
 		} else if ( !token.Icmp( "skin" ) ) {
 			skin = value;
@@ -77,21 +124,34 @@ bool rvDeclPlayerModel::Parse(const char* text, const int textLength) {
 		}
 	}
 
-	if ( model.Length() <= 0 ) {
-		src.Error( "playerModel decl '%s' without model declaration", GetName() );
+	if ( !parsed ) {
 		return false;
 	}
 
-	if ( !head.Length() ) {
-		head = uiHead;
+	if ( model.Length() <= 0 ) {
+		src.Warning( "playerModel decl '%s' without model declaration", GetName() );
+		MakeDefault();
 	}
 
-	if ( !uiHead.Length() ) {
-		uiHead = head;
+	if ( !noCaching && declPlayerModelMediaCachingSuppressed == 0 ) {
+		DeclPlayerModel_CacheMedia(this);
 	}
 
+	return parsed;
+}
 
-	return true;
+/*
+===================
+DeclPlayerModel_CacheMediaForDecl
+
+Precache a decl that was parsed while caching was suppressed.
+===================
+*/
+void DeclPlayerModel_CacheMediaForDecl( const rvDeclPlayerModel *decl ) {
+	if ( decl == NULL ) {
+		return;
+	}
+	DeclPlayerModel_CacheMedia( decl );
 }
 
 /*
@@ -115,6 +175,30 @@ void rvDeclPlayerModel::FreeData(void) {
 rvDeclPlayerModel::DefaultDefinition
 ===================
 */
-void rvDeclPlayerModel::Print(void) {
+void rvDeclPlayerModel::Print(void) const {
+	common->Printf("model = %s\n", model.c_str());
+	common->Printf("head = %s\n", head.c_str());
+	common->Printf("ui head = %s\n", uiHead.c_str());
+	common->Printf("skin = %s\n", skin.c_str());
+	common->Printf("team = %s\n", team.c_str());
+	common->Printf("description = %s\n", description.c_str());
+	common->Printf("sounds (count) = %d\n", sounds.GetNumKeyVals());
+	sounds.Print();
+}
 
+/*
+===================
+rvDeclPlayerModel::Validate
+===================
+*/
+bool rvDeclPlayerModel::Validate( const char *psText, int iTextLength, idStr &strReportTo ) const {
+	(void)strReportTo;
+
+	idDecl *decl = declManager->AllocateDecl( DECL_PLAYER_MODEL );
+	const bool valid = DeclManager_ValidateParsedDecl( decl, DECL_PLAYER_MODEL, decl != NULL && decl->Parse( psText, iTextLength, false ) );
+	if ( decl != NULL ) {
+		decl->FreeData();
+	}
+	DeclManager_FreeAllocatedDecl( decl );
+	return valid;
 }

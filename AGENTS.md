@@ -1,14 +1,14 @@
-# OpenPrey Agent Guide
+# openPREY Agent Guide
 
-This file describes project goals, rules, and workflow expectations for anyone working on OpenPrey.
+This file describes project goals, rules, and workflow expectations for anyone working on openPREY.
 
 **Project Metadata**
-- Name: OpenPrey
+- Name: openPREY
 - Author: themuffinator
 - Company: DarkMatter Productions
 - Version: 0.0.1
-- Repository: `https://github.com/themuffinator/OpenPrey`
-- Companion GameLibs Repo (local): `E:\Repositories\OpenPrey-GameLibs`
+- Repository: `https://github.com/themuffinator/openPREY`
+- Game library: in-tree `src/game/`, `src/Prey/`, `src/preyengine/` (Prey SDK EULA; see `LICENSING.md`)
 
 **Goals**
 - Deliver a minimal, clean adaptation of the OpenQ4-derived engine for Prey (2006).
@@ -19,13 +19,16 @@ This file describes project goals, rules, and workflow expectations for anyone w
 - Keep a unified runtime game directory layout under `basepr/`.
 
 **Rules**
-- Treat `E:\Repositories\OpenPrey-GameLibs` as part of the same working set for planning, edits, and validation.
-- For SDK/game-library work, make canonical source edits in `OpenPrey-GameLibs` first; `src/game` in this repo is a synchronized mirror.
-- Keep `OpenPrey` free of references to the old OpenQ4 closed-source BSE companion-repo workflow.
+- The Prey game library is canonical in this repository: `src/game/`, `src/Prey/` and `src/preyengine/`. The former `OpenPrey-game` companion repository is historical; its history is a merge parent of the import commit (see `docs/dev/game-source-provenance.md`).
+- Keep the licence boundary explicit: engine code is GPLv3 (`LICENSE`); the game trees are SDK-derived and stay under the Prey SDK EULA (`LICENSES/PREY-SDK-EULA.rtf`). Never move engine code into the game trees or game code into engine directories, and never relicense either side. Preserve original notices.
+- Follow `docs/dev/source-layout.md` for directory placement and file naming: vendored code under `src/external/` or `subprojects/`, licence notices under `LICENSES/`.
+- Sync engine work from upstream OpenQ4 by merging `openq4-upstream/main`; keep the Prey game trees, `content/basepr/` and openPREY naming on the openPREY side, and never import Quake 4 game code (`src/mpgame`, Q4 `src/game`) or `content/baseoq4/`.
+- Prey's game API is v7 (`src/game/Game.h`). Where new upstream engine code calls Quake 4–only `idGame` methods, adapt it to v7 or gate it with the `OPENPREY-GATED(Dn)` markers documented in `docs/dev/prey-rebase/plan.md`.
+- Keep `openPREY` free of references to the old OpenQ4 closed-source BSE companion-repo workflow.
 - Do not assume Steam/GOG distribution paths for Prey (2006). Auto-detection must support CD-era installs.
 - Prefer robust install discovery from registry/app-path/uninstall entries and known legacy install roots.
-- Never launch OpenPrey in fullscreen from agent workflows; always force windowed mode with `+set r_fullscreen 0` (and equivalent config/cvar handling).
-- Keep Meson as the canonical OpenPrey build entry point.
+- Never launch openPREY in fullscreen from agent workflows; always force windowed mode with `+set r_fullscreen 0` (and equivalent config/cvar handling).
+- Keep Meson as the canonical openPREY build entry point.
 - Use `builddir/` as standard local build output.
 - Use `.install/` as staged runtime package root.
 - Keep compiler/linker intermediates in `builddir/`, not `.install/`.
@@ -34,22 +37,22 @@ This file describes project goals, rules, and workflow expectations for anyone w
 **Build/Tooling Conventions**
 - On Windows, use `tools/build/meson_setup.ps1 ...` (or `tools/build/openprey_devcmd.cmd`) so MSVC environment setup is consistent.
 - Use `meson install -C builddir --no-rebuild --skip-subprojects` when staging `.install/`.
-- GameLibs helper environment variables:
-  - `OPENPREY_GAMELIBS_REPO=<path>`
-  - `OPENPREY_SKIP_GAMELIBS_SYNC=1`
-  - `OPENPREY_BUILD_GAMELIBS=1`
-  - `OPENPREY_SKIP_GAMELIBS_BUILD=1`
 - Legacy `OPENQ4_*` variants are accepted only as temporary migration compatibility inputs.
 
 **Runtime Module Direction**
-- Treat Prey as primarily using a unified game module (`game`/`gamex86`) rather than hard split SP/MP DLL ownership.
-- OpenPrey may retain temporary split-module compatibility (`game_sp`/`game_mp`) during migration, but unified-module behavior is the target.
+- Build and package one unified Prey game module (`game_<arch>`) for both single-player and multiplayer.
+- Do not reintroduce split `game_sp`/`game_mp` build outputs; legacy retail module names may remain loader aliases only where compatibility requires them.
 
 **.install Layout (Staging Target)**
 - `.install/` is the runtime package root used by local staging and `fs_cdpath` overlays.
 - Keep executables in `.install/`.
 - Keep game modules and staged content in `.install/basepr/`.
+- Keep repo-authored runtime content under `content/basepr/pak0/` and `content/basepr/pak1/`; keep development-only fixtures under `content/basepr/dev/`.
 - Avoid shipping build-only artifacts (for example import libs) in `.install/`.
+
+**Stable Test Executable Paths**
+- Reuse `.install/openPREY-client_x64.exe` and `.install/openPREY-ded_x64.exe` across runtime tests so Windows Firewall permissions stay useful; re-stage in place rather than creating new executable names per task.
+- Isolate each test's writable configuration, saves, logs and captures under `.tmp/<task>/` with filesystem options; test-data isolation must not require copying the executable.
 
 **Development Procedure (Current Direction)**
 1. Develop against installed Prey assets (not repo-side replacement content when avoidable).
@@ -70,12 +73,13 @@ This file describes project goals, rules, and workflow expectations for anyone w
 **References (Local, Not Included In Repo)**
 - OpenQ4 source snapshot baseline: `E:\Repositories\OpenQ4`
 - dhewm3 reference baseline: `E:\_SOURCE\_CODE\dhewm3-master`
-- Prey game-library baseline: `E:\Repositories\OpenPrey-GameLibs`
+- Historical Prey game-library repository (retired, read-only): `E:\Repositories\OpenPrey-game`
 - Prey retail install (example legacy path): `C:\Program Files (x86)\Human Head Studios\Prey`
 
 **Upstream Credits**
+- [Emile Belanger (emileb)](https://github.com/emileb): original Android, SigmaTouch and GLES support in the upstream OpenQ4 engine.
 - Justin Marshall
-- Robert Backebans
+- Robert Beckebans
 - id Software
 - Raven Software
 - Human Head Studios

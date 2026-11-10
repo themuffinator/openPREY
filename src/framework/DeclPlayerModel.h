@@ -28,16 +28,36 @@ public:
 	idStr					description;
 	idDict					sounds;
 
-	virtual size_t			Size( void ) const;
-	virtual const char *	DefaultDefinition() const;
+	virtual size_t			Size( void ) const override;
+	virtual const char *	DefaultDefinition() const override;
 	virtual bool			Parse( const char *text, const int textLength ) override;
-	virtual void			FreeData( void );
-	virtual void			Print( void );
+	virtual bool			Parse( const char *text, const int textLength, bool noCaching ) override;
+	virtual void			FreeData( void ) override;
+	virtual void			Print( void ) const override;
 
-	virtual	bool			RebuildTextSource( void ) { return( false ); }
-// jmarshall - not used in quake 4 sdk.
-	virtual bool			Validate(const char* psText, int iTextLength, idStr& strReportTo) const { return true; }
-// jmarshall end
+	virtual	bool			RebuildTextSource( void ) override { return( false ); }
+	virtual bool			Validate( const char *psText, int iTextLength, idStr &strReportTo ) const override;
 };
+
+/*
+===============================================================================
+
+Parsing a playerModel decl precaches its model, head, skin and sounds. That is
+the right default when the decl is about to be used, but the main menu parses
+every one of them purely to read their names and teams for a dropdown, which
+loaded every multiplayer character's media before the menu could draw.
+
+Suppress the precache around bulk reads of that kind, then cache the one model
+that is actually shown.
+
+===============================================================================
+*/
+class idSuppressPlayerModelMediaCaching {
+public:
+			idSuppressPlayerModelMediaCaching();
+			~idSuppressPlayerModelMediaCaching();
+};
+
+void DeclPlayerModel_CacheMediaForDecl( const rvDeclPlayerModel *decl );
 
 #endif 

@@ -32,6 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "qe3.h"
 #include "Radiant.h"
 #include "ZWnd.h"
+#include "../common/ToolGL.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -149,11 +150,13 @@ void CZWnd::OnPaint()
   }
   else
   {
+	  const GLboolean multisampleWasEnabled = ToolGL_DisableMultisampleForEditor();
 	  QE_CheckOpenGLForErrors();
 
     Z_Draw ();
 	  //qwglSwapBuffers(m_dcZ);
 	  qwglSwapBuffers(dc.m_hDC);
+	  ToolGL_RestoreMultisampleForEditor( multisampleWasEnabled );
     TRACE("Z Paint\n");
   }
 }

@@ -29,6 +29,8 @@ If you have questions concerning this license or the applicable additional terms
 #ifndef __FILE_H__
 #define __FILE_H__
 
+#include <stdint.h>
+
 /*
 ==============================================================
 
@@ -62,12 +64,19 @@ public:
 	virtual int				Length( void );
 							// Return a time value for reload operations.
 	virtual ID_TIME_T			Timestamp( void );
+							// Return the checksum of the containing package, or zero for loose files.
+	virtual int				GetContainerChecksum( void ) const { return 0; }
+							// Return the identity generated caches compare: the timestamp for loose
+							// files, FS_PakMemberContentStamp for pk4 members.
+	virtual ID_TIME_T		ContentStamp( void ) { return Timestamp(); }
 							// Returns offset in file.
 	virtual int				Tell( void );
 							// Forces flush on files being writting to.
 	virtual void			ForceFlush( void );
 							// Causes any buffered data to be written to the file.
 	virtual void			Flush( void );
+							// Flushes buffered data and asks the operating system to persist it.
+	virtual bool			Sync( void );
 							// Seek on a file.
 	virtual int				Seek( long offset, fsOrigin_t origin );
 							// Go back to the beginning of the file.
@@ -119,21 +128,26 @@ public:
 	virtual void			ReadSyncId(const char* detail = "unspecified", const char* classname = NULL) { }
 // jmarshall end
 
+	// Append-only memory-file staging hooks.  Keeping these after the complete
+	// historical idFile vtable preserves old game-module dispatch positions.
+	virtual void			MakeReadOnly( void ) {}
+	virtual const char *	GetDataPtr( void ) const { return NULL; }
+
 	template<class type> ID_INLINE size_t ReadBig(type& c) {
 		size_t r = Read(&c, sizeof(c));
-		idSwap::Big(c);
+		BigRevBytes(&c, sizeof(c), 1);
 		return r;
 	}
 
 	template<class type> ID_INLINE size_t ReadBigArray(type* c, int count) {
 		size_t r = Read(c, sizeof(c[0]) * count);
-		idSwap::BigArray(c, count);
+		BigRevBytes(c, sizeof(c[0]), count);
 		return r;
 	}
 
 	template<class type> ID_INLINE size_t WriteBig(const type& c) {
 		type b = c;
-		idSwap::Big(b);
+		BigRevBytes(&b, sizeof(b), 1);
 		return Write(&b, sizeof(b));
 	}
 
@@ -170,12 +184,12 @@ public:
 
 							// changes memory file to read only
 	virtual void			MakeReadOnly( void );
-							// clear the file
+							// clear the file; freeMemory releases owned storage and detaches borrowed storage
 	virtual void			Clear( bool freeMemory = true );
-							// set data for reading
+							// set data for reading; releases old owned storage unless data is a slice of it
 	void					SetData( const char *data, int length );
 							// returns const pointer to the memory buffer
-	const char *			GetDataPtr( void ) const { return filePtr; }
+	virtual const char *	GetDataPtr( void ) const { return filePtr; }
 							// set the file granularity
 	void					SetGranularity( int g ) { assert( g > 0 ); granularity = g; }
 
@@ -233,6 +247,7 @@ public:
 	virtual int				Tell( void );
 	virtual void			ForceFlush( void );
 	virtual void			Flush( void );
+	virtual bool			Sync( void );
 	virtual int				Seek( long offset, fsOrigin_t origin );
 
 	// returns file pointer
@@ -261,6 +276,8 @@ public:
 	virtual int				Write( const void *buffer, int len );
 	virtual int				Length( void );
 	virtual ID_TIME_T			Timestamp( void );
+	virtual int				GetContainerChecksum( void ) const { return containerChecksum; }
+	virtual ID_TIME_T		ContentStamp( void );
 	virtual int				Tell( void );
 	virtual void			ForceFlush( void );
 	virtual void			Flush( void );
@@ -269,8 +286,10 @@ public:
 private:
 	idStr					name;			// name of the file in the pak
 	idStr					fullPath;		// full file path including pak file name
-	int						zipFilePos;		// zip file info position in pak
+	uint32_t				zipFilePos;		// classic-ZIP central-directory position
 	int						fileSize;		// size of the file
+	int						containerChecksum;
+	uint32_t				contentCrc;		// zip CRC-32 of the member's uncompressed bytes
 	void *					z;				// unzip info
 };
 

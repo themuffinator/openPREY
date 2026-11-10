@@ -30,18 +30,23 @@ public:
 	void				SetTranscribeText( const char *text ) { mTranscribeText = text; }
 	const char			*GetTranscribeText( int langIndex = -1 ) const { return( common->GetLocalizedString( mTranscribeText, langIndex ) ); }
 	const char			*GetRawTranscribeText( void ) const { return( mTranscribeText.c_str() ); }
+	const char* GetSubtitleText( void ) const {
+		return idStr::Cmpn(mTranscribeText.c_str(), "#str_", 5) == 0 ?
+			common->GetLanguageDict()->FindString(mTranscribeText.c_str()) : mTranscribeText.c_str();
+	}
 
 	void				SetLipSyncData( const char *lsd, const char *lang );
 	const char			*GetLipSyncData( int langIdx = -1 ) const;
 
 	virtual const char	*DefaultDefinition( void ) const;
 	virtual bool		Parse( const char *text, const int textLength ) override;
+	virtual bool		Parse( const char *text, const int textLength, bool noCaching ) override;
 	virtual void		FreeData( void );
-	//virtual	bool		RebuildTextSource( void );
+	virtual	bool		RebuildTextSource( void );
 	virtual size_t		Size( void ) const;
 
 	// scork: for detailed error-reporting
-	//virtual bool		Validate( const char *psText, int iTextLength, idStr &strReportTo ) const;
+	virtual bool		Validate( const char *psText, int iTextLength, idStr &strReportTo ) const;
 
 private:
 	idStr				mDescription;

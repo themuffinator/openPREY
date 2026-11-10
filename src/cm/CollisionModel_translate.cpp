@@ -201,11 +201,11 @@ CM_SetVertexSidedness
 ================
 */
 ID_INLINE void CM_SetVertexSidedness( cm_vertex_t *v, const idPluecker &vpl, const idPluecker &epl, const int bitNum ) {
-	if ( !(v->sideSet & (1<<bitNum)) ) {
+	if ( !(v->sideSet & (1u << bitNum)) ) {
 		float fl;
 		fl = vpl.PermutedInnerProduct( epl );
-		v->side = (v->side & ~(1<<bitNum)) | (FLOATSIGNBITSET(fl) << bitNum);
-		v->sideSet |= (1 << bitNum);
+		v->side = (v->side & ~(1u << bitNum)) | (FLOATSIGNBITSET(fl) << bitNum);
+		v->sideSet |= (1u << bitNum);
 	}
 }
 
@@ -217,11 +217,11 @@ CM_SetEdgeSidedness
 ================
 */
 ID_INLINE void CM_SetEdgeSidedness( cm_edge_t *edge, const idPluecker &vpl, const idPluecker &epl, const int bitNum ) {
-	if ( !(edge->sideSet & (1<<bitNum)) ) {
+	if ( !(edge->sideSet & (1u << bitNum)) ) {
 		float fl;
 		fl = vpl.PermutedInnerProduct( epl );
-		edge->side = (edge->side & ~(1<<bitNum)) | (FLOATSIGNBITSET(fl) << bitNum);
-		edge->sideSet |= (1 << bitNum);
+		edge->side = (edge->side & ~(1u << bitNum)) | (FLOATSIGNBITSET(fl) << bitNum);
+		edge->sideSet |= (1u << bitNum);
 	}
 }
 
@@ -264,7 +264,7 @@ void idCollisionModelManagerLocal::TranslateTrmEdgeThroughPolygon( cm_traceWork_
 		v2 = tw->model->vertices + edge->vertexNum[INTSIGNBITNOTSET(edgeNum)];
 		CM_SetVertexSidedness( v2, tw->polygonVertexPlueckerCache[i+1], trmEdge->pl, trmEdge->bitNum );
 		// if the polygon edge start and end vertex do not pass the trm edge at different sides
-		if ( !((v1->side ^ v2->side) & (1<<trmEdge->bitNum)) ) {
+		if ( !((v1->side ^ v2->side) & (1u << trmEdge->bitNum)) ) {
 			continue;
 		}
 		// if there is no possible collision between the trm edge and the polygon edge
@@ -321,6 +321,7 @@ void idCollisionModelManagerLocal::TranslateTrmEdgeThroughPolygon( cm_traceWork_
 			f1 = d1 / ( d1 - d2 );
 			//assert( f1 >= 0.0f && f1 <= 1.0f );
 			tw->trace.c.point = start + f1 * ( end - start );
+			CM_GetMaterialType( tw, poly );
 			// if retrieving contacts
 			if ( tw->getContacts ) {
 				CM_AddContact( tw );
@@ -419,9 +420,10 @@ void idCollisionModelManagerLocal::TranslateTrmVertexThroughPolygon( cm_traceWor
 		tw->trace.c.contents = poly->contents;
 		tw->trace.c.material = poly->material;
 		tw->trace.c.type = CONTACT_TRMVERTEX;
-		tw->trace.c.modelFeature = *reinterpret_cast<int *>(&poly);
+		tw->trace.c.modelFeature = poly->featureIndex;
 		tw->trace.c.trmFeature = v - tw->vertices;
 		tw->trace.c.point = v->p + tw->trace.fraction * ( v->endp - v->p );
+		CM_GetMaterialType( tw, poly );
 		// if retrieving contacts
 		if ( tw->getContacts ) {
 			CM_AddContact( tw );
@@ -472,9 +474,10 @@ void idCollisionModelManagerLocal::TranslatePointThroughPolygon( cm_traceWork_t 
 		tw->trace.c.contents = poly->contents;
 		tw->trace.c.material = poly->material;
 		tw->trace.c.type = CONTACT_TRMVERTEX;
-		tw->trace.c.modelFeature = *reinterpret_cast<int *>(&poly);
+		tw->trace.c.modelFeature = poly->featureIndex;
 		tw->trace.c.trmFeature = v - tw->vertices;
 		tw->trace.c.point = v->p + tw->trace.fraction * ( v->endp - v->p );
+		CM_GetMaterialType( tw, poly );
 		// if retrieving contacts
 		if ( tw->getContacts ) {
 			CM_AddContact( tw );
@@ -519,6 +522,7 @@ void idCollisionModelManagerLocal::TranslateVertexThroughTrmPolygon( cm_traceWor
 		tw->trace.c.modelFeature = v - tw->model->vertices;
 		tw->trace.c.trmFeature = trmpoly - tw->polys;
 		tw->trace.c.point = v->p + tw->trace.fraction * ( endp - v->p );
+		CM_GetMaterialType( tw, poly );
 		// if retrieving contacts
 		if ( tw->getContacts ) {
 			CM_AddContact( tw );
@@ -783,13 +787,13 @@ void idCollisionModelManagerLocal::Translation( trace_t *results, const idVec3 &
 
 	memset( results, 0, sizeof( *results ) );
 
-	if ( model == NULL && models != NULL && numModels > 0 ) {
-		model = models[0];
+	if ( model == NULL ) {
+		model = GetWorldModel();
 	}
 	if ( model == NULL ) {
 		static bool warnedNullModel = false;
 		if ( !warnedNullModel ) {
-			common->Warning( "%s: model passed was nullptr and no world model is available", __FUNCTION__ );
+			common->Warning( "%s: model passed was nullptr and no current world model is available", __FUNCTION__ );
 			warnedNullModel = true;
 		}
 		results->fraction = 1.0f;
@@ -829,6 +833,7 @@ void idCollisionModelManagerLocal::Translation( trace_t *results, const idVec3 &
 	tw.trace.c.contents = 0;
 	tw.trace.c.type = CONTACT_NONE;
 	tw.trace.c.id = 0; // jmarshall: fix so we don't get garbage values.
+	tw.trace.c.material = NULL;
 // jmarshall - quake 4
 	tw.trace.c.materialType = NULL;
 // jmarshall end
@@ -905,11 +910,11 @@ void idCollisionModelManagerLocal::Translation( trace_t *results, const idVec3 &
 			results->c.dist += modelOrigin * results->c.normal;
 		}
 // jmarshall - quake 4
-		if (results->c.material)
+		if ( results->c.materialType == NULL && results->c.material )
 		{
 			results->c.materialType = results->c.material->GetMaterialType();
 		}
-		else
+		else if ( results->c.material == NULL )
 		{
 			results->c.materialType = NULL;
 		}
@@ -1128,11 +1133,11 @@ void idCollisionModelManagerLocal::Translation( trace_t *results, const idVec3 &
 	}
 
 // jmarshall - quake 4
-	if (results->c.material)
+	if ( results->c.materialType == NULL && results->c.material )
 	{
 		results->c.materialType = results->c.material->GetMaterialType();
 	}
-	else
+	else if ( results->c.material == NULL )
 	{
 		results->c.materialType = NULL;
 	}
@@ -1145,12 +1150,9 @@ void idCollisionModelManagerLocal::Translation( trace_t *results, const idVec3 &
 			entered = 1;
 			// if the trm is stuck in the model
 			if ( idCollisionModelManagerLocal::Contents( results->endpos, trm, trmAxis, -1, model, modelOrigin, modelAxis ) & contentMask ) {
-				trace_t tr;
-
 				// test where the trm is stuck in the model
 				idCollisionModelManagerLocal::Contents( results->endpos, trm, trmAxis, -1, model, modelOrigin, modelAxis );
-				// re-run collision detection to find out where it failed
-				idCollisionModelManagerLocal::Translation( &tr, start, end, trm, trmAxis, contentMask, model, modelOrigin, modelAxis );
+				CaptureTranslationFailure( start, end, trm, trmAxis, contentMask, model, modelOrigin, modelAxis );
 			}
 			entered = 0;
 		}

@@ -41,18 +41,64 @@ idBase64::Encode
 static const char sixtet_to_base64[] = 
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+static bool Base64_IsWhiteSpace( const byte c ) {
+	return c == ' ' || c == '\n' || c == '\r' || c == '\t';
+}
+
+static int Base64_DecodeSixtet( const byte c ) {
+	if ( c >= 'A' && c <= 'Z' ) {
+		return c - 'A';
+	}
+	if ( c >= 'a' && c <= 'z' ) {
+		return c - 'a' + 26;
+	}
+	if ( c >= '0' && c <= '9' ) {
+		return c - '0' + 52;
+	}
+	if ( c == '+' ) {
+		return 62;
+	}
+	if ( c == '/' ) {
+		return 63;
+	}
+	return -1;
+}
+
 void idBase64::Encode( const byte *from, int size ) {
 	int i, j;
-	unsigned long w;
+	uint32_t w;
 	byte *to;
+
+	if ( from == NULL || size <= 0 ) {
+		EnsureAlloced( 1 );
+		if ( data != NULL ) {
+			data[0] = '\0';
+		}
+		len = 0;
+		return;
+	}
+
+	uint64 encodedSize = 4ULL * ( ( (uint64)size + 2ULL ) / 3ULL ) + 1ULL;
+	if ( encodedSize > (uint64)idMath::INT_MAX ) {
+		EnsureAlloced( 1 );
+		if ( data != NULL ) {
+			data[0] = '\0';
+		}
+		len = 0;
+		return;
+	}
 	
-	EnsureAlloced( 4*(size+3)/3 + 2 ); // ratio and padding + trailing \0
+	EnsureAlloced( (int)encodedSize ); // ratio and padding + trailing \0
+	if ( data == NULL ) {
+		len = 0;
+		return;
+	}
 	to = data;
 	
 	w = 0;
 	i = 0;
 	while (size > 0) {
-		w |= *from << i*8;
+		w |= static_cast<uint32_t>( *from ) << ( i * 8 );
 		++from;
 		--size;
 		++i;
@@ -73,7 +119,7 @@ void idBase64::Encode( const byte *from, int size ) {
 	}
 	
 	*to++ = '\0';
-	len = to - data;
+	len = (int)( to - data - 1 );
 }
 
 /*
@@ -84,7 +130,29 @@ returns the minimum size in bytes of the target buffer for decoding
 ============
 */
 int idBase64::DecodeLength( void ) const {
-	return 3*len/4;
+	if ( data == NULL || len <= 0 ) {
+		return 0;
+	}
+
+	int digits = 0;
+	for ( const byte *from = data; *from != '\0'; ++from ) {
+		if ( Base64_IsWhiteSpace( *from ) ) {
+			continue;
+		}
+		if ( *from == '=' ) {
+			break;
+		}
+		if ( Base64_DecodeSixtet( *from ) < 0 ) {
+			break;
+		}
+		digits++;
+	}
+
+	uint64 decodedLength = ( (uint64)digits * 6ULL ) / 8ULL;
+	if ( decodedLength > (uint64)idMath::INT_MAX ) {
+		return idMath::INT_MAX;
+	}
+	return (int)decodedLength;
 }
 
 /*
@@ -93,45 +161,51 @@ idBase64::Decode
 ============
 */
 int idBase64::Decode( byte *to ) const {
-	unsigned long w;
+	uint32_t w;
 	int i, j;
 	size_t n;
-	static char base64_to_sixtet[256];
-	static int tab_init = 0;
 	byte *from = data;
 	
-	if (!tab_init) {
-		memset( base64_to_sixtet, 0, 256 );
-		for (i = 0; (j = sixtet_to_base64[i]) != '\0'; ++i) {
-			base64_to_sixtet[j] = i;
-		}
-		tab_init = 1;
+	if ( to == NULL || from == NULL ) {
+		return 0;
 	}
 
-	w = 0;
 	i = 0;
 	n = 0;
 	byte in[4] = {0,0,0,0};
 	while (*from != '\0' && *from != '=' ) {
-		if (*from == ' ' || *from == '\n') {
+		if ( Base64_IsWhiteSpace( *from ) ) {
 			++from;
 			continue;
 		}
-		in[i] = base64_to_sixtet[* (unsigned char *) from];
+		int sixtet = Base64_DecodeSixtet( *from );
+		if ( sixtet < 0 ) {
+			return idLib::SizeToInt( n, "idBase64::Decode" );
+		}
+		in[i] = (byte)sixtet;
 		++i;
 		++from;
-		if (*from == '\0' || *from == '=' || i == 4) {
+		if ( i == 4 ) {
 			w = IntForSixtets( in );
-			for (j = 0; j*8 < i*6; ++j) {
+			for (j = 0; j < 3; ++j) {
 				*to++ = w & 0xff;
 				++n;
 				w >>= 8;
 			}
 			i = 0;
-			w = 0;
+			memset( in, 0, sizeof( in ) );
 		}
 	}
-	return n;
+	if ( i > 1 ) {
+		w = IntForSixtets( in );
+		int outBytes = ( i * 6 ) / 8;
+		for ( j = 0; j < outBytes; ++j ) {
+			*to++ = w & 0xff;
+			++n;
+			w >>= 8;
+		}
+	}
+	return idLib::SizeToInt( n, "idBase64::Decode" );
 }
 
 /*
@@ -149,7 +223,8 @@ idBase64::Decode
 ============
 */
 void idBase64::Decode( idStr &dest ) const {
-	byte *buf = new byte[ DecodeLength()+1 ]; // +1 for trailing \0
+	int decodedLength = DecodeLength();
+	byte *buf = new byte[ decodedLength + 1 ]; // +1 for trailing \0
 	int out = Decode( buf );
 	buf[out] = '\0';
 	dest = (const char *)buf;
@@ -162,9 +237,15 @@ idBase64::Decode
 ============
 */
 void idBase64::Decode( idFile *dest ) const {	
-	byte *buf = new byte[ DecodeLength()+1 ]; // +1 for trailing \0
+	if ( dest == NULL ) {
+		return;
+	}
+	int decodedLength = DecodeLength();
+	byte *buf = new byte[ decodedLength + 1 ]; // +1 for trailing \0
 	int out = Decode( buf );
-	dest->Write( buf, out );
+	if ( out > 0 ) {
+		dest->Write( buf, out );
+	}
 	delete[] buf;
 }
 

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "auditedOn": "2026-09-11",
+  "scope": "Tracked source files under src/ whose retained id Software header identifies a covered source family",
+  "textHashNormalization": "UTF-8; CRLF and CR normalized to LF",
+  "families": {
+    "doom3": {
+      "displayName": "Doom 3 GPL Source Code",
+      "headerMarker": "Doom 3 GPL Source Code",
+      "expectedFileCount": 595,
+      "officialRepository": "https://github.com/id-Software/DOOM-3",
+      "auditedCommit": "a9c49da5afb18201d31e3f0a429a037e56ce2b9a",
+      "officialCopying": "https://github.com/id-Software/DOOM-3/blob/a9c49da5afb18201d31e3f0a429a037e56ce2b9a/COPYING.txt",
+      "officialCopyingSha256": "f83520e077c35722a56889cd54da8e46105e31278f8f97fa39318957e865c5c7",
+      "localAdditionalTerms": "LICENSES/DOOM-3-ADDITIONAL-TERMS.txt",
+      "localAdditionalTermsSha256": "0745111e721bad901aa67e16af761f35598e2d92f971a134ef732d3519b09a3e"
+    },
+    "doom3_bfg": {
+      "displayName": "Doom 3 BFG Edition GPL Source Code",
+      "headerMarker": "Doom 3 BFG Edition GPL Source Code",
+      "expectedFileCount": 37,
+      "officialRepository": "https://github.com/id-Software/DOOM-3-BFG",
+      "auditedCommit": "1caba1979589971b5ed44e315d9ead30b278d8b4",
+      "officialCopying": "https://github.com/id-Software/DOOM-3-BFG/blob/1caba1979589971b5ed44e315d9ead30b278d8b4/COPYING.txt",
+      "officialCopyingSha256": "1689ee84a23d3985c7478b10080f45d10fef6f2945ddd2b67777d1990defe5c8",
+      "localAdditionalTerms": "LICENSES/DOOM-3-BFG-ADDITIONAL-TERMS.txt",
+      "localAdditionalTermsSha256": "de40806c9c1ab3cd2c180cc18cdc37c9b896f3e4ea4818739baad78a0abc45b2",
+      "officialPathRule": "src/<path> maps to neo/<path>, except src/imagetools/<path> maps to neo/renderer/<path>",
+      "intermediateSources": {
+        "rbdoom3_bfg": {
+          "repository": "https://github.com/RobertBeckebans/RBDOOM-3-BFG",
+          "auditedCommit": "ea29c006e84fedcc0e7c173c383a087ce0a8c0d5",
+          "pathOverrides": {
+            "src/sound/OpenAL/AL_SoundHardware.cpp": "neo/sound/OpenAL/AL_SoundHardware.cpp",
+            "src/sound/OpenAL/AL_SoundHardware.h": "neo/sound/OpenAL/AL_SoundHardware.h",
+            "src/sound/OpenAL/AL_SoundSample.cpp": "neo/sound/OpenAL/AL_SoundSample.cpp",
+            "src/sound/OpenAL/AL_SoundSample.h": "neo/sound/OpenAL/AL_SoundSample.h",
+            "src/sound/OpenAL/AL_SoundVoice.cpp": "neo/sound/OpenAL/AL_SoundVoice.cpp",
+            "src/sound/OpenAL/AL_SoundVoice.h": "neo/sound/OpenAL/AL_SoundVoice.h"
+          }
+        }
+      }
+    }
+  }
+}

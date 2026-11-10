@@ -32,7 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "win_local.h"
 #include "../../renderer/tr_local.h"
 
-LONG WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam );
+LRESULT CALLBACK MainWndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam );
 
 static bool s_alttab_disabled;
 
@@ -40,13 +40,7 @@ static void WIN_DisableAltTab( void ) {
 	if ( s_alttab_disabled || win32.win_allowAltTab.GetBool() ) {
 		return;
 	}
-	if ( !idStr::Icmp( cvarSystem->GetCVarString( "sys_arch" ), "winnt" ) ) {
-		RegisterHotKey( 0, 0, MOD_ALT, VK_TAB );
-	} else {
-		BOOL old;
-
-		SystemParametersInfo( SPI_SCREENSAVERRUNNING, 1, &old, 0 );
-	}
+	RegisterHotKey( 0, 0, MOD_ALT, VK_TAB );
 	s_alttab_disabled = true;
 }
 
@@ -54,14 +48,7 @@ static void WIN_EnableAltTab( void ) {
 	if ( !s_alttab_disabled || win32.win_allowAltTab.GetBool() ) {
 		return;
 	}
-	if ( !idStr::Icmp( cvarSystem->GetCVarString( "sys_arch" ), "winnt" ) ) {
-		UnregisterHotKey( 0, 0 );
-	} else {
-		BOOL old;
-
-		SystemParametersInfo( SPI_SCREENSAVERRUNNING, 0, &old, 0 );
-	}
-
+	UnregisterHotKey( 0, 0 );
 	s_alttab_disabled = false;
 }
 
@@ -273,15 +260,22 @@ MainWndProc
 main window procedure
 ====================
 */
-LONG WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam ) {
+LRESULT CALLBACK MainWndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam ) {
 	int key;
 	switch( uMsg ) {
 		case WM_WINDOWPOSCHANGED:
 			if (glConfig.isInitialized) {
 				RECT rect;
 				if (::GetClientRect(win32.hWnd, &rect)) {
-					glConfig.vidWidth = rect.right - rect.left;
-					glConfig.vidHeight = rect.bottom - rect.top;
+					// keep the last non-degenerate size when minimized
+					int w = rect.right - rect.left;
+					int h = rect.bottom - rect.top;
+					if (w > 0 && h > 0) {
+						engineWindowState.vidWidth = w;
+						engineWindowState.vidHeight = h;
+						glConfig.vidWidth = w;
+						glConfig.vidHeight = h;
+					}
 				}
 			}
 			break;
@@ -327,6 +321,7 @@ LONG WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam ) {
 
 				win32.activeApp = (fActive != WA_INACTIVE);
 				if ( win32.activeApp ) {
+					win32.printScreenFocusReleaseUntil = 0;
 					idKeyInput::ClearStates();
 					com_editorActive = false;
 					Sys_GrabMouseCursor( true );
@@ -334,6 +329,10 @@ LONG WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam ) {
 
 				if ( fActive == WA_INACTIVE ) {
 					win32.movingWindow = false;
+
+					if ( win32.cdsFullscreen && hWnd != NULL ) {
+						ShowWindow( hWnd, SW_MINIMIZE );
+					}
 				}
 
 				// start playing the game sound world

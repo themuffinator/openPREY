@@ -28,17 +28,18 @@ public:
 							idDeclEntityDef();
 	idDict					dict;
 
-	virtual size_t			Size( void ) const;
-	virtual const char *	DefaultDefinition() const;
+	virtual size_t			Size( void ) const override;
+	virtual const char *	DefaultDefinition() const override;
 	virtual bool			Parse( const char *text, const int textLength ) override;
-	virtual void			FreeData( void );
-	virtual void			Print( void );
+	virtual bool			Parse( const char *text, const int textLength, bool noCaching ) override;
+	virtual void			FreeData( void ) override;
+	virtual void			Print( void ) const override;
 
 // RAVEN BEGIN
 // jscott: to prevent a recursive crash
-	virtual	bool			RebuildTextSource( void ) { return( false ); }
+	virtual	bool			RebuildTextSource( void ) override { return( false ); }
 // scork: for detailed error-reporting
-	//virtual bool			Validate( const char *psText, int iTextLength, idStr &strReportTo ) const;
+	virtual bool			Validate( const char *psText, int iTextLength, idStr &strReportTo ) const override;
 // RAVEN END
 
 };

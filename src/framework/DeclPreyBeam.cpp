@@ -120,9 +120,13 @@ void hhDeclBeam::FreeData() {
 }
 
 bool hhDeclBeam::Parse( const char *text, const int textLength ) {
+	return Parse( text, textLength, false );
+}
+
+bool hhDeclBeam::Parse( const char *text, const int textLength, bool noCaching ) {
 	idLexer src;
 	idToken token;
-	const idMaterial *defaultShader = declManager->FindMaterial( "_default" );
+	const idMaterial *defaultShader = static_cast<const idMaterial *>( declManager->FindType( DECL_MATERIAL, "_default", true, noCaching ) );
 	int parsedBeams = 0;
 
 	FreeData();
@@ -154,7 +158,7 @@ bool hhDeclBeam::Parse( const char *text, const int textLength ) {
 		const int beamIndex = parsedBeams;
 		const bool storeBeam = beamIndex < MAX_BEAMS;
 		if ( storeBeam ) {
-			shader[beamIndex] = declManager->FindMaterial( token.c_str() );
+			shader[beamIndex] = static_cast<const idMaterial *>( declManager->FindType( DECL_MATERIAL, token.c_str(), true, noCaching ) );
 		} else {
 			src.Warning( "beam decl '%s' has more than %d beams, extras ignored", GetName(), MAX_BEAMS );
 		}
@@ -195,7 +199,7 @@ bool hhDeclBeam::Parse( const char *text, const int textLength ) {
 					return false;
 				}
 				if ( storeBeam ) {
-					quadShader[beamIndex][PREY_BEAM_QUAD_ORIGIN] = declManager->FindMaterial( shaderToken.c_str() );
+					quadShader[beamIndex][PREY_BEAM_QUAD_ORIGIN] = static_cast<const idMaterial *>( declManager->FindType( DECL_MATERIAL, shaderToken.c_str(), true, noCaching ) );
 				}
 				continue;
 			}
@@ -207,7 +211,7 @@ bool hhDeclBeam::Parse( const char *text, const int textLength ) {
 					return false;
 				}
 				if ( storeBeam ) {
-					quadShader[beamIndex][PREY_BEAM_QUAD_END] = declManager->FindMaterial( shaderToken.c_str() );
+					quadShader[beamIndex][PREY_BEAM_QUAD_END] = static_cast<const idMaterial *>( declManager->FindType( DECL_MATERIAL, shaderToken.c_str(), true, noCaching ) );
 				}
 				continue;
 			}

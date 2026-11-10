@@ -2,6 +2,8 @@
 #ifndef __QUEUE_H__
 #define __QUEUE_H__
 
+#include <stddef.h>
+
 /*
 ===============================================================================
 
@@ -86,7 +88,7 @@ void idQueue<type, nodePtr>::Test(void) {
 	delete element;
 }
 
-template< class type, int nextOffset >
+template< class type, size_t nextOffset >
 class idQueueTemplate {
 public:
 							idQueueTemplate( void );
@@ -101,12 +103,12 @@ private:
 
 #define QUEUE_NEXT_PTR( element )		(*((type**)(((byte*)element)+nextOffset)))
 
-template< class type, int nextOffset >
+template< class type, size_t nextOffset >
 idQueueTemplate<type,nextOffset>::idQueueTemplate( void ) {
 	first = last = NULL;
 }
 
-template< class type, int nextOffset >
+template< class type, size_t nextOffset >
 void idQueueTemplate<type,nextOffset>::Add( type *element ) {
 	QUEUE_NEXT_PTR(element) = NULL;
 	if ( last ) {
@@ -117,7 +119,7 @@ void idQueueTemplate<type,nextOffset>::Add( type *element ) {
 	last = element;
 }
 
-template< class type, int nextOffset >
+template< class type, size_t nextOffset >
 type *idQueueTemplate<type,nextOffset>::Get( void ) {
 	type *element;
 

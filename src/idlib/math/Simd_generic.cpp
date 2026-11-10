@@ -3,6 +3,7 @@
 
 
 #include "Simd_generic.h"
+#include <float.h>
 
 
 //===============================================================
@@ -590,6 +591,9 @@ idSIMD_Generic::Memcpy
 */
 void VPCALL idSIMD_Generic::Memcpy( void * RESTRICT dst, const void * RESTRICT src, const int count ) {
 	TIME_THIS_SCOPE("SIMD Memcpy");
+	if ( count <= 0 ) {
+		return;
+	}
 	memcpy( dst, src, count );
 }
 
@@ -600,6 +604,9 @@ idSIMD_Generic::Memset
 */
 void VPCALL idSIMD_Generic::Memset( void * RESTRICT dst, const int val, const int count ) {
 	TIME_THIS_SCOPE("SIMD Memset");
+	if ( count <= 0 ) {
+		return;
+	}
 	memset( dst, val, count );
 }
 
@@ -610,6 +617,9 @@ idSIMD_Generic::Zero16
 */
 void VPCALL idSIMD_Generic::Zero16( float * RESTRICT dst, const int count ) {
 	TIME_THIS_SCOPE("SIMD Zero16");
+	if ( count <= 0 ) {
+		return;
+	}
 	memset( dst, 0, count * sizeof( float ) );
 }
 
@@ -2634,7 +2644,7 @@ void VPCALL idSIMD_Generic::DeriveTangents( idPlane * RESTRICT planes, idDrawVer
 	idPlane * RESTRICT planesPtr = planes;
 	for ( i = 0; i < numIndexes; i += 3 ) {
 		idDrawVert * RESTRICT a, * RESTRICT b, * RESTRICT c;
-		unsigned long signBit;
+		unsigned int signBit;
 		float d0[5], d1[5], f, area;
 		idVec3 n, t0, t1;
 
@@ -2675,7 +2685,7 @@ void VPCALL idSIMD_Generic::DeriveTangents( idPlane * RESTRICT planes, idDrawVer
 
 		// area sign bit
 		area = d0[3] * d1[4] - d0[4] * d1[3];
-		signBit = ( *(unsigned long *)&area ) & ( 1 << 31 );
+		signBit = idMath_FloatBits( area ) & ( 1u << 31 );
 
 		// first tangent
 		t0[0] = d0[0] * d1[4] - d0[4] * d1[0];
@@ -2683,7 +2693,7 @@ void VPCALL idSIMD_Generic::DeriveTangents( idPlane * RESTRICT planes, idDrawVer
 		t0[2] = d0[2] * d1[4] - d0[4] * d1[2];
 
 		f = idMath::RSqrt( t0.x * t0.x + t0.y * t0.y + t0.z * t0.z );
-		*(unsigned long *)&f ^= signBit;
+		f = idMath_FloatXorBits( f, signBit );
 
 		t0.x *= f;
 		t0.y *= f;
@@ -2695,7 +2705,7 @@ void VPCALL idSIMD_Generic::DeriveTangents( idPlane * RESTRICT planes, idDrawVer
 		t1[2] = d0[3] * d1[2] - d0[2] * d1[3];
 
 		f = idMath::RSqrt( t1.x * t1.x + t1.y * t1.y + t1.z * t1.z );
-		*(unsigned long *)&f ^= signBit;
+		f = idMath_FloatXorBits( f, signBit );
 
 		t1.x *= f;
 		t1.y *= f;
@@ -3355,7 +3365,7 @@ void VPCALL idSIMD_Generic::MixedSoundToSamples( short * RESTRICT samples, const
 
 // RAVEN BEGIN
 // dluetscher: added support for operations on idSilTraceVerts and idJointMats
-#ifdef _MD5R_SUPPORT
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
 /*
 ============
 idSIMD_Generic::JointMat_MultiplyMats
@@ -3420,7 +3430,7 @@ void VPCALL idSIMD_Generic::JointMat_MultiplyMats( float * RESTRICT destMats,
 // RAVEN BEGIN
 // dluetscher: added TransformVertsMinMax to transform an array of index-weighted vertices into 
 //			   an array of idSilTraceVerts, while simulatenously calculating the bounds
-#ifdef _MD5R_SUPPORT
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
 void VPCALL idSIMD_Generic::TransformVertsMinMax4Bone( rvSilTraceVertT * RESTRICT silTraceVertOutputData, 
 													   idVec3 &min, idVec3 &max, 
 													   byte * RESTRICT vertexInputData, 
@@ -3796,4 +3806,4 @@ void VPCALL idSIMD_Generic::MinMax( idVec3 &min, idVec3 &max, const rvSilTraceVe
 	UNROLL1(OPER)
 #undef OPER
 }
-#endif	// #ifdef _MD5R_SUPPORT
+#endif	// #if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )

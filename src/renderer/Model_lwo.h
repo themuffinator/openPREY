@@ -502,6 +502,7 @@ typedef struct st_lwPolVert {
 
 typedef struct st_lwPolygon {
    lwSurface     *surf;
+   int            surfIndex;           /* tag index while the file is being read */
    int            part;                /* part index */
    int            smoothgrp;           /* smoothing group */
    int            flags;

@@ -309,6 +309,17 @@ void Mem_UpdateFreeStats( int size ) {
 	mem_total_allocs.totalSize -= size;
 }
 
+static bool MemSys_ValidateAllocSize( const size_t size, const size_t wrapperOverhead, const char *functionName ) {
+	const size_t maxAllocationSize = static_cast<size_t>( MAX_SINGLE_ALLOCATION_SIZE );
+	if ( wrapperOverhead > maxAllocationSize || size > maxAllocationSize - wrapperOverhead ) {
+		if ( idLib::common ) {
+			idLib::common->FatalError( "%s: allocation of %zu bytes exceeds the rvHeap limit", functionName, size );
+		}
+		return false;
+	}
+	return true;
+}
+
 /*
 ==================
 Mem_ClearFrameStats
@@ -431,7 +442,7 @@ const char *Mem_CleanupFileName( const char *fileName )
 		newFileName = newFileName.Left( i2 - 1 ) + newFileName.Right( newFileName.Length() - ( i1 + 4 ) );
 	}
 	index = ( index + 1 ) & 3;
-	strncpy( newFileNames[index], newFileName.c_str(), sizeof( newFileNames[index] ) );
+	idStr::Copynz( newFileNames[index], newFileName.c_str(), sizeof( newFileNames[index] ) );
 	return newFileNames[index];
 }
 
@@ -811,10 +822,14 @@ void Mem_DumpCompressed_f( const idCmdArgs &args )
 Mem_AllocDebugMemory
 ==================
 */
-void *Mem_AllocDebugMemory( const int size, const char *fileName, const int lineNumber, const bool align16, byte tag ) 
+void *Mem_AllocDebugMemory( const size_t size, const char *fileName, const int lineNumber, const bool align16, byte tag )
 {
 	void *p;
 	debugMemory_t *m;
+	if ( !MemSys_ValidateAllocSize( size, sizeof( debugMemory_t ), "Mem_AllocDebugMemory" ) ) {
+		return NULL;
+	}
+	const unsigned int heapSize = static_cast<unsigned int>( size );
 
 	// the following is necessary for memory allocations that take place
 	// in static/global object constructors
@@ -825,11 +840,11 @@ void *Mem_AllocDebugMemory( const int size, const char *fileName, const int line
 
 	if ( align16 ) 
 	{
-		p = currentHeapArena->Allocate16( size + sizeof( debugMemory_t ), tag );
+		p = currentHeapArena->Allocate16( heapSize + static_cast<unsigned int>( sizeof( debugMemory_t ) ), tag );
 	}
 	else 
 	{
-		p = currentHeapArena->Allocate( size + sizeof( debugMemory_t ), tag );
+		p = currentHeapArena->Allocate( heapSize + static_cast<unsigned int>( sizeof( debugMemory_t ) ), tag );
 	}
 
 	if ( NULL == p )
@@ -845,7 +860,7 @@ void *Mem_AllocDebugMemory( const int size, const char *fileName, const int line
 	m->heapId = currentHeapArena->GetHeap(p)->DebugID();
 	m->memTag = tag;
 	m->frameNumber = idLib::frameNumber;
-	m->size = size;
+	m->size = static_cast<int>( heapSize );
 	m->next = mem_debugMemory;
 	m->prev = NULL;
 	if ( mem_debugMemory ) {
@@ -917,7 +932,7 @@ void Mem_FreeDebugMemory( void *p, const char *fileName, const int lineNumber, c
 Mem_Alloc
 ==================
 */
-void *Mem_Alloc( const int size, const char *fileName, const int lineNumber, byte tag )
+void *Mem_Alloc( const size_t size, const char *fileName, const int lineNumber, byte tag )
 {
 	return Mem_AllocDebugMemory( size, fileName, lineNumber, false, tag );
 }
@@ -941,11 +956,11 @@ void Mem_Free( void *ptr, const char *fileName, const int lineNumber )
 Mem_Alloc16
 ==================
 */
-void *Mem_Alloc16( const int size, const char *fileName, const int lineNumber, byte tag ) 
+void *Mem_Alloc16( const size_t size, const char *fileName, const int lineNumber, byte tag )
 {
 	void *mem = Mem_AllocDebugMemory( size, fileName, lineNumber, true, tag );
 	// make sure the memory is 16 byte aligned
-	assert( ( ((int)mem) & 15) == 0 );
+	assert( ( ((uintptr_t)mem) & 15 ) == 0 );
 	return mem;
 }
 
@@ -960,7 +975,7 @@ void Mem_Free16( void *ptr, const char *fileName, const int lineNumber )
 		return;
 	}
 	// make sure the memory is 16 byte aligned
-	assert( ( ((int)ptr) & 15) == 0 );
+	assert( ( ((uintptr_t)ptr) & 15 ) == 0 );
 	Mem_FreeDebugMemory( ptr, fileName, lineNumber, true );
 }
 
@@ -969,13 +984,13 @@ void Mem_Free16( void *ptr, const char *fileName, const int lineNumber )
 Mem_ClearedAlloc
 ==================
 */
-void *Mem_ClearedAlloc( const int size, const char *fileName, const int lineNumber, byte tag ) 
+void *Mem_ClearedAlloc( const size_t size, const char *fileName, const int lineNumber, byte tag )
 {
 	void *mem = Mem_Alloc( size, fileName, lineNumber, tag );
 
 	if ( mem != NULL )
 	{
-		SIMDProcessor->Memset( mem, 0, size );
+		SIMDProcessor->Memset( mem, 0, static_cast<int>( size ) );
 	}
 	else 
 	{
@@ -1032,9 +1047,13 @@ Mem_Alloc
 Allocate memory from the heap at the top of the current arena stack
 ==================
 */
-void *Mem_Alloc( const int size, byte tag )
+void *Mem_Alloc( const size_t size, byte tag )
 {
 	void *p;
+	if ( !MemSys_ValidateAllocSize( size, 0, "Mem_Alloc" ) ) {
+		return NULL;
+	}
+	const unsigned int heapSize = static_cast<unsigned int>( size );
 
 	// the following is necessary for memory allocations that take place
 	// in static/global object constructors
@@ -1043,7 +1062,7 @@ void *Mem_Alloc( const int size, byte tag )
 		Mem_Init();
 	}
 
-	p = currentHeapArena->Allocate( size, tag );
+	p = currentHeapArena->Allocate( heapSize, tag );
 	if ( NULL == p )
 	{
 		return NULL;
@@ -1052,7 +1071,7 @@ void *Mem_Alloc( const int size, byte tag )
 	Mem_UpdateAllocStats( currentHeapArena->Msize( p ) );
 
 #if defined( _XENON ) && !defined( _FINAL )
-	MemTracker::OnAlloc(p, size);
+	MemTracker::OnAlloc(p, heapSize);
 #endif
 	
 	return p;
@@ -1062,7 +1081,7 @@ void *Mem_Alloc( const int size, byte tag )
 // 
 // Allocate memory from the heap at the top of the current arena stack,
 // clear that memory to zero before returning it.
-void *Mem_ClearedAlloc( const int size, byte tag )
+void *Mem_ClearedAlloc( const size_t size, byte tag )
 {
 	byte *allocation = (byte *) Mem_Alloc( size, tag );
 	
@@ -1072,7 +1091,7 @@ void *Mem_ClearedAlloc( const int size, byte tag )
 	
 	if ( allocation != NULL )
 	{
-		SIMDProcessor->Memset( allocation, 0, size );
+		SIMDProcessor->Memset( allocation, 0, static_cast<int>( size ) );
 	}
 	else 
 	{
@@ -1136,18 +1155,22 @@ Allocate memory from the heap at the top of the current arena
 stack that is aligned on a 16-byte boundary.
 ==================
 */
-void *Mem_Alloc16( const int size, byte tag )
+void *Mem_Alloc16( const size_t size, byte tag )
 {
+	if ( !MemSys_ValidateAllocSize( size, 0, "Mem_Alloc16" ) ) {
+		return NULL;
+	}
+	const unsigned int heapSize = static_cast<unsigned int>( size );
 	// the following is necessary for memory allocations that take place
 	// in static/global object constructors
 	if ( NULL == currentHeapArena )
 	{
 		Mem_Init();
 	}
-	void *mem = currentHeapArena->Allocate16( size, tag );
+	void *mem = currentHeapArena->Allocate16( heapSize, tag );
 
 #if defined( _XENON ) && !defined( _FINAL )
-	MemTracker::OnAlloc(mem, size);
+	MemTracker::OnAlloc(mem, heapSize);
 #endif
 
 	return mem;

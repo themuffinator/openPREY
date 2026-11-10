@@ -58,6 +58,14 @@ public:
 };
 
 ID_INLINE idRegister::idRegister( void ) {
+	enabled = false;
+	type = STRING;
+	regCount = 0;
+	regs[0] = 0;
+	regs[1] = 0;
+	regs[2] = 0;
+	regs[3] = 0;
+	var = NULL;
 }
 
 ID_INLINE idRegister::idRegister( const char *p, int t ) {
@@ -66,6 +74,10 @@ ID_INLINE idRegister::idRegister( const char *p, int t ) {
 	assert( t >= 0 && t < NUMTYPES );
 	regCount = REGCOUNT[t];
 	enabled = ( type == STRING ) ? false : true;
+	regs[0] = 0;
+	regs[1] = 0;
+	regs[2] = 0;
+	regs[3] = 0;
 	var = NULL;
 };
 

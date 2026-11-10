@@ -1,0 +1,218 @@
+postprocess/black
+{
+	sort postProcess
+	noShadows
+	{
+		blend gl_one, gl_zero
+		map _black
+	}
+}
+
+postprocess/resolvepostprocess
+{
+	sort postProcess
+	noShadows
+	{
+		blend gl_one, gl_zero
+		map _forwardRenderResolvedAlbedo
+		clamp
+	}
+}
+
+postprocess/nopostprocess
+{
+	sort postProcess
+	noShadows
+	{
+		blend gl_one, gl_zero
+		map _postProcessAlbedo0
+		clamp
+	}
+}
+
+postprocess/casupscale
+{
+	sort postProcess
+	noShadows
+	{
+		blend gl_one, gl_zero
+		map _postProcessAlbedo0
+		clamp
+	}
+}
+
+postprocess/copy_postprocess1
+{
+	sort postProcess
+	noShadows
+	{
+		blend gl_one, gl_zero
+		map _postProcessAlbedo1
+		clamp
+	}
+}
+
+postprocess/smaa_edge
+{
+	sort postProcess
+	noShadows
+	{
+		blend gl_one, gl_zero
+		glslProgram smaa_edge.fs
+		shaderParm invTexSize postProcessInvTexSize
+		shaderParm sourceColorSpace postProcessSourceColorSpace
+		shaderParm quality postProcessSMAAQuality
+		shaderTexture ColorTex nearest clamp _postProcessAlbedo2
+	}
+}
+
+postprocess/smaa_weights
+{
+	sort postProcess
+	noShadows
+	{
+		blend gl_one, gl_zero
+		glslProgram smaa_weights.fs
+		shaderParm invTexSize postProcessInvTexSize
+		shaderParm texSize postProcessTexSize
+		shaderParm quality postProcessSMAAQuality
+		shaderTexture EdgesTex linear clamp _postProcessAlbedo1
+		shaderTexture AreaTex linear clamp _smaaArea
+		shaderTexture SearchTex linear clamp _smaaSearch
+	}
+}
+
+postprocess/smaa_blend
+{
+	sort postProcess
+	noShadows
+	{
+		blend gl_one, gl_zero
+		glslProgram smaa_blend.fs
+		shaderParm invTexSize postProcessInvTexSize
+		shaderTexture ColorTex linear clamp _postProcessAlbedo2
+		shaderTexture BlendTex linear clamp _postProcessAlbedo0
+	}
+}
+
+postprocess/blur
+{
+	sort postProcess
+	noShadows
+	{
+		if ( glslPrograms ) == 1
+		blend gl_one, gl_zero
+		glslProgram blur.fs
+		shaderParm invTexSize 1.0 / VideoWidth, 1.0 / VideoHeight
+		shaderParm range global4
+		shaderParm focus global5
+		shaderParm approachColor global0, global1, global2, global3
+		shaderParm approachPercent global6
+		shaderParm distanceScale global7
+		shaderTexture Scene clamp _postProcessAlbedo0
+		shaderTexture DepthTex nearest clamp _forwardRenderResolvedDepth
+	}
+	{
+		if ( glslPrograms ) == 0
+		blend gl_one, gl_zero
+		map _postProcessAlbedo0
+		clamp
+	}
+}
+
+
+gfx/guis/mainmenu/load_top_edgetile
+{
+	noshadows
+	translucent
+	{
+		nopicmip
+		blend add
+		map gfx/guis/mainmenu/load_top_edgetile.tga
+		colored
+	}
+}
+
+gfx/guis/mainmenu/load_btm_edgetile
+{
+	noshadows
+	translucent
+	{
+		nopicmip
+		blend add
+		map gfx/guis/mainmenu/load_btm_edgetile.tga
+		colored
+	}
+}
+
+gfx/guis/mainmenu/topbar_tile_left
+{
+	noshadows
+	translucent
+	{
+		nopicmip
+		blend blend
+		map gfx/guis/mainmenu/topbar_tile_left.tga
+		colored
+	}
+}
+
+gfx/guis/mainmenu/topbar_tile_right
+{
+	noshadows
+	translucent
+	{
+		nopicmip
+		blend blend
+		map gfx/guis/mainmenu/topbar_tile_right.tga
+		colored
+	}
+}
+
+gfx/guis/mainmenu/btmbar_tile_left
+{
+	noshadows
+	translucent
+	{
+		nopicmip
+		blend blend
+		map gfx/guis/mainmenu/btmbar_tile_left.tga
+		colored
+	}
+}
+
+gfx/guis/mainmenu/btmbar_tile_right
+{
+	noshadows
+	translucent
+	{
+		nopicmip
+		blend blend
+		map gfx/guis/mainmenu/btmbar_tile_right.tga
+		colored
+	}
+}
+
+gfx/guis/mainmenu/level_edge_fade
+{
+	noshadows
+	translucent
+	{
+		nopicmip
+		blend blend
+		map gfx/guis/mainmenu/level_edge_fade.tga
+		colored
+	}
+}
+
+gfx/guis/loading/bg_grid_tiled
+{
+	noshadows
+	translucent
+	{
+		nopicmip
+		blend blend
+		map gfx/guis/mainmenu/bg_grid.tga
+		colored
+	}
+}

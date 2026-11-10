@@ -3,6 +3,9 @@
 
 
 #include "Simd_generic.h"
+#include "Simd_SSE2.h"
+
+#include <stdint.h>
 
 
 idSIMDProcessor	*	processor = NULL;			// pointer to SIMD processor
@@ -41,10 +44,29 @@ void idSIMD::InitProcessor( const char *module, bool forceGeneric ) {
 	idSIMDProcessor *newProcessor;
 
 	cpuid = idLib::sys->GetProcessorId();
-// jmarshall - temp disable SIMD
-	forceGeneric = true;
-// jmarshall end
-	newProcessor = generic;
+
+	if ( forceGeneric ) {
+		newProcessor = generic;
+	} else {
+		if ( processor == NULL ) {
+#if defined( ID_SIMD_SSE2_AVAILABLE ) && ( defined( _M_X64 ) || defined( __x86_64__ ) )
+			// SSE2 is architecturally guaranteed on x86-64
+			processor = new idSIMD_SSE2;
+#elif defined( ID_SIMD_SSE2_AVAILABLE )
+			if ( ( cpuid & CPUID_SSE2 ) != 0 ) {
+				processor = new idSIMD_SSE2;
+			} else {
+				processor = generic;
+			}
+#else
+			processor = generic;
+#endif
+			if ( processor != generic ) {
+				processor->cpuid = cpuid;
+			}
+		}
+		newProcessor = processor;
+	}
 
 	if ( newProcessor != SIMDProcessor ) {
 		SIMDProcessor = newProcessor;
@@ -87,34 +109,28 @@ void idSIMD::Shutdown( void ) {
 #define COUNT		1024		// data count
 #define NUMTESTS	2048		// number of tests
 
-#define RANDOM_SEED		1013904223L	//((int)idLib::sys->GetClockTicks())
+#define RANDOM_SEED		1013904223	//((int)idLib::sys->GetClockTicks())
+
+#define TIME_TYPE int64_t
 
 idSIMDProcessor *p_simd;
 idSIMDProcessor *p_generic;
-long baseClocks = 0;
+TIME_TYPE baseClocks = 0;
 
 #ifdef _WINDOWS
-
-#define TIME_TYPE int
-
-#pragma warning(disable : 4731)     // frame pointer register 'ebx' modified by inline assembly code
-
-long saved_ebx = 0;
 
 #define StartRecordTime( start )			\
 	{										\
 		LARGE_INTEGER li;					\
 		QueryPerformanceCounter( &li );		\
-		start = (double ) li.LowPart + (double) 0xFFFFFFFF * li.HighPart;	\
-		start *= 64; /* 50 MHz */			\
+		start = static_cast<TIME_TYPE>( li.QuadPart );	\
 	}
 
 #define StopRecordTime( end )				\
 	{										\
 		LARGE_INTEGER li;					\
 		QueryPerformanceCounter( &li );		\
-		end = (double ) li.LowPart + (double) 0xFFFFFFFF * li.HighPart;	\
-		end *= 64; /* 50 MHz */				\
+		end = static_cast<TIME_TYPE>( li.QuadPart );	\
 	}
 
 #elif defined(MACOS_X)
@@ -126,8 +142,6 @@ long saved_ebx = 0;
 #include <mach/mach_time.h>
 
 double ticksPerNanosecond;
-
-#define TIME_TYPE uint64_t
 
 /*
 
@@ -160,7 +174,7 @@ typedef struct {
 
 double TBToDoubleNano( U64 startTime, U64 stopTime, double ticksPerNanosecond );
 
-#if __MWERKS__
+#if defined( __MWERKS__ )
 asm void GetTB( U64 * );
 #else
 void GetTB( U64 * );
@@ -220,13 +234,24 @@ TIME_TYPE time_in_millisec( void ) {
 
 #else
 
-#define TIME_TYPE int
+#include <time.h>
+
+// The previous stub recorded a constant single tick, so every SIMD benchmark on
+// this path printed the same meaningless number and no before/after comparison
+// of a SIMD implementation was possible - including on Linux ARM64, the only
+// arm64 platform with CI. Sys_GetClockTicks in src/sys/linux/main.cpp already
+// uses this same source and documents why rdtsc is not an option here.
+static TIME_TYPE Sys_SimdMonotonicNanoseconds( void ) {
+	struct timespec ts;
+	clock_gettime( CLOCK_MONOTONIC, &ts );
+	return ( TIME_TYPE )ts.tv_sec * 1000000000LL + ( TIME_TYPE )ts.tv_nsec;
+}
 
 #define StartRecordTime( start )			\
-	start = 0;
+	start = Sys_SimdMonotonicNanoseconds();
 
 #define StopRecordTime( end )				\
-	end = 1;
+	end = Sys_SimdMonotonicNanoseconds();
 
 #endif // _WINDOWS
 
@@ -241,10 +266,10 @@ TIME_TYPE time_in_millisec( void ) {
 PrintClocks
 ============
 */
-void PrintClocks( char *string, int dataCount, int clocks, int otherClocks = 0 ) {
+void PrintClocks( const char *string, int dataCount, TIME_TYPE clocks, TIME_TYPE otherClocks = 0 ) {
 	int i;
 
-	idLib::common->Printf( string );
+	idLib::common->Printf( "%s", string );
 // RAVEN BEGIN
 // bdube: escape codes
 	for ( i = idStr::LengthWithoutEscapes(string); i < 48; i++ ) {
@@ -254,10 +279,10 @@ void PrintClocks( char *string, int dataCount, int clocks, int otherClocks = 0 )
 	clocks -= baseClocks;
 	if ( otherClocks ) {
 		otherClocks -= baseClocks;
-		int p = (int) ( (float) ( otherClocks - clocks ) * 100.0f / (float) otherClocks );
-		idLib::common->Printf( "c = %4d, clcks = %5d, %d%%\n", dataCount, clocks, p );
+		const int p = ( otherClocks != 0 ) ? static_cast<int>( static_cast<double>( otherClocks - clocks ) * 100.0 / static_cast<double>( otherClocks ) ) : 0;
+		idLib::common->Printf( "c = %4d, clcks = %5lld, %d%%\n", dataCount, static_cast<long long>( clocks ), p );
 	} else {
-		idLib::common->Printf( "c = %4d, clcks = %5d\n", dataCount, clocks );
+		idLib::common->Printf( "c = %4d, clcks = %5lld\n", dataCount, static_cast<long long>( clocks ) );
 	}
 }
 
@@ -267,7 +292,8 @@ GetBaseClocks
 ============
 */
 void GetBaseClocks( void ) {
-	int i, start, end, bestClocks;
+	int i;
+	TIME_TYPE start, end, bestClocks;
 
 	bestClocks = 0;
 	for ( i = 0; i < NUMTESTS; i++ ) {
@@ -712,8 +738,6 @@ void TestDot( void ) {
 	const char *result;
 
 	idRandom srnd( RANDOM_SEED );
-	v3constant.Set( 1.0f, 2.0f, 3.0f );
-	v4constant = idPlane( 1.0f, 2.0f, 3.0f, 4.0f );
 
 	for ( i = 0; i < COUNT; i++ ) {
 		fsrc0[i] = srnd.CRandomFloat() * 10.0f;
@@ -726,6 +750,9 @@ void TestDot( void ) {
 		v4src0[i][3] = srnd.CRandomFloat() * 10.0f;
 		drawVerts[i].xyz = v3src0[i];
 	}
+
+	v3constant = idVec3( 1.0f, 2.0f, 3.0f );
+	v4constant = idPlane( 1.0f, 2.0f, 3.0f, 4.0f );
 
 	idLib::common->Printf("====================================\n" );
 
@@ -1172,6 +1199,54 @@ void TestCompare( void ) {
 	}
 	result = ( i >= COUNT ) ? "ok" : S_COLOR_RED"X";
 	PrintClocks( va( "   simd->CmpLE( 2, float[] >= float ) %s", result ), COUNT, bestClocksSIMD, bestClocksGeneric );
+
+	// edge coverage: odd counts (vectorized implementations must run their
+	// scalar tails), the highest bit number, non-zero constants, and
+	// NaN / negative-zero inputs must all match the generic results exactly
+	{
+		const int edgeCount = COUNT - 3;
+		const float edgeConstant = 0.5f;
+		bool edgeOk = true;
+
+		fsrc0[1] = idMath::INFINITY - idMath::INFINITY;	// NaN
+		fsrc0[2] = -0.0f;
+		fsrc0[3] = 0.0f;
+		fsrc0[COUNT - 5] = idMath::INFINITY - idMath::INFINITY;
+
+		memset( bytedst, 0, sizeof( bytedst ) );
+		memset( bytedst2, 0, sizeof( bytedst2 ) );
+
+		p_generic->CmpGT( bytedst, fsrc0, edgeConstant, edgeCount );
+		p_simd->CmpGT( bytedst2, fsrc0, edgeConstant, edgeCount );
+		edgeOk &= ( memcmp( bytedst, bytedst2, COUNT ) == 0 );
+		p_generic->CmpGE( bytedst, fsrc0, edgeConstant, edgeCount );
+		p_simd->CmpGE( bytedst2, fsrc0, edgeConstant, edgeCount );
+		edgeOk &= ( memcmp( bytedst, bytedst2, COUNT ) == 0 );
+		p_generic->CmpLT( bytedst, fsrc0, edgeConstant, edgeCount );
+		p_simd->CmpLT( bytedst2, fsrc0, edgeConstant, edgeCount );
+		edgeOk &= ( memcmp( bytedst, bytedst2, COUNT ) == 0 );
+		p_generic->CmpLE( bytedst, fsrc0, edgeConstant, edgeCount );
+		p_simd->CmpLE( bytedst2, fsrc0, edgeConstant, edgeCount );
+		edgeOk &= ( memcmp( bytedst, bytedst2, COUNT ) == 0 );
+
+		memset( bytedst, 0, sizeof( bytedst ) );
+		memset( bytedst2, 0, sizeof( bytedst2 ) );
+
+		p_generic->CmpGT( bytedst, 7, fsrc0, edgeConstant, edgeCount );
+		p_simd->CmpGT( bytedst2, 7, fsrc0, edgeConstant, edgeCount );
+		edgeOk &= ( memcmp( bytedst, bytedst2, COUNT ) == 0 );
+		p_generic->CmpGE( bytedst, 5, fsrc0, edgeConstant, edgeCount );
+		p_simd->CmpGE( bytedst2, 5, fsrc0, edgeConstant, edgeCount );
+		edgeOk &= ( memcmp( bytedst, bytedst2, COUNT ) == 0 );
+		p_generic->CmpLT( bytedst, 0, fsrc0, edgeConstant, edgeCount );
+		p_simd->CmpLT( bytedst2, 0, fsrc0, edgeConstant, edgeCount );
+		edgeOk &= ( memcmp( bytedst, bytedst2, COUNT ) == 0 );
+		p_generic->CmpLE( bytedst, 3, fsrc0, edgeConstant, edgeCount );
+		p_simd->CmpLE( bytedst2, 3, fsrc0, edgeConstant, edgeCount );
+		edgeOk &= ( memcmp( bytedst, bytedst2, COUNT ) == 0 );
+
+		idLib::common->Printf( "   simd->Cmp* edge cases (tail/NaN/-0/bit7) %s\n", edgeOk ? "ok" : S_COLOR_RED"X" );
+	}
 }
 
 /*
@@ -2523,6 +2598,69 @@ void TestUntransformJoints( void ) {
 
 /*
 ============
+TestMultiplyJoints
+============
+*/
+void TestMultiplyJoints( void ) {
+	int i;
+	TIME_TYPE start, end, bestClocksGeneric, bestClocksSIMD;
+	ALIGN16( idJointMat joints1[COUNT] );
+	ALIGN16( idJointMat joints2[COUNT] );
+	ALIGN16( idJointMat result1[COUNT] );
+	ALIGN16( idJointMat result2[COUNT] );
+	const char *result;
+
+	idRandom srnd( RANDOM_SEED );
+
+	for ( i = 0; i < COUNT; i++ ) {
+		idAngles angles;
+		angles[0] = srnd.CRandomFloat() * 180.0f;
+		angles[1] = srnd.CRandomFloat() * 180.0f;
+		angles[2] = srnd.CRandomFloat() * 180.0f;
+		joints1[i].SetRotation( angles.ToMat3() );
+		idVec3 v;
+		v[0] = srnd.CRandomFloat() * 2.0f;
+		v[1] = srnd.CRandomFloat() * 2.0f;
+		v[2] = srnd.CRandomFloat() * 2.0f;
+		joints1[i].SetTranslation( v );
+		angles[0] = srnd.CRandomFloat() * 180.0f;
+		angles[1] = srnd.CRandomFloat() * 180.0f;
+		angles[2] = srnd.CRandomFloat() * 180.0f;
+		joints2[i].SetRotation( angles.ToMat3() );
+		v[0] = srnd.CRandomFloat() * 2.0f;
+		v[1] = srnd.CRandomFloat() * 2.0f;
+		v[2] = srnd.CRandomFloat() * 2.0f;
+		joints2[i].SetTranslation( v );
+	}
+
+	bestClocksGeneric = 0;
+	for ( i = 0; i < NUMTESTS; i++ ) {
+		StartRecordTime( start );
+		p_generic->MultiplyJoints( result1, joints1, joints2, COUNT );
+		StopRecordTime( end );
+		GetBest( start, end, bestClocksGeneric );
+	}
+	PrintClocks( "generic->MultiplyJoints()", COUNT, bestClocksGeneric );
+
+	bestClocksSIMD = 0;
+	for ( i = 0; i < NUMTESTS; i++ ) {
+		StartRecordTime( start );
+		p_simd->MultiplyJoints( result2, joints1, joints2, COUNT );
+		StopRecordTime( end );
+		GetBest( start, end, bestClocksSIMD );
+	}
+
+	for ( i = 0; i < COUNT; i++ ) {
+		if ( !result1[i].Compare( result2[i], 1e-4f ) ) {
+			break;
+		}
+	}
+	result = ( i >= COUNT ) ? "ok" : S_COLOR_RED"X";
+	PrintClocks( va( "   simd->MultiplyJoints() %s", result ), COUNT, bestClocksSIMD, bestClocksGeneric );
+}
+
+/*
+============
 TestTransformVertsNew
 ============
 */
@@ -2659,6 +2797,73 @@ void TestTransformVertsNew( void ) {
 	}
 	result = ( i >= NUMVERTS && bounds1.Compare( bounds2, 1e-4f ) ) ? "ok" : S_COLOR_RED"X";
 	PrintClocks( va( "   simd->TransformVertsAndTangentsFast() %s", result ), NUMVERTS, bestClocksSIMD, bestClocksGeneric );
+}
+
+/*
+============
+TestTransformVerts
+============
+*/
+void TestTransformVerts( void ) {
+	int i;
+	TIME_TYPE start, end, bestClocksGeneric, bestClocksSIMD;
+	ALIGN16( idDrawVert drawVerts1[NUMVERTS] );
+	ALIGN16( idDrawVert drawVerts2[NUMVERTS] );
+	ALIGN16( idJointMat joints[NUMJOINTS] );
+	ALIGN16( idVec4 weights[NUMWEIGHTS] );
+	ALIGN16( int weightIndex[NUMWEIGHTS*2] );
+	const char *result;
+
+	idRandom srnd( RANDOM_SEED );
+
+	for ( i = 0; i < NUMJOINTS; i++ ) {
+		idAngles angles;
+		angles[0] = srnd.CRandomFloat() * 180.0f;
+		angles[1] = srnd.CRandomFloat() * 180.0f;
+		angles[2] = srnd.CRandomFloat() * 180.0f;
+		joints[i].SetRotation( angles.ToMat3() );
+		idVec3 v;
+		v[0] = srnd.CRandomFloat() * 2.0f;
+		v[1] = srnd.CRandomFloat() * 2.0f;
+		v[2] = srnd.CRandomFloat() * 2.0f;
+		joints[i].SetTranslation( v );
+	}
+
+	for ( i = 0; i < NUMWEIGHTS; i++ ) {
+		weights[i][0] = srnd.CRandomFloat() * 2.0f;
+		weights[i][1] = srnd.CRandomFloat() * 2.0f;
+		weights[i][2] = srnd.CRandomFloat() * 2.0f;
+		weights[i][3] = srnd.CRandomFloat();
+		// even entries are BYTE offsets into the joint array, odd entries are
+		// non-zero only for the last weight of a vertex
+		weightIndex[i*2+0] = idMath::ClampInt( 0, NUMJOINTS-1, i * NUMJOINTS / NUMWEIGHTS ) * JOINTMAT_SIZE;
+		weightIndex[i*2+1] = ( ( i % NUMWEIGHTSPERVERT ) == NUMWEIGHTSPERVERT - 1 );
+	}
+
+	bestClocksGeneric = 0;
+	for ( i = 0; i < NUMTESTS; i++ ) {
+		StartRecordTime( start );
+		p_generic->TransformVerts( drawVerts1, NUMVERTS, joints, weights, weightIndex, NUMWEIGHTS );
+		StopRecordTime( end );
+		GetBest( start, end, bestClocksGeneric );
+	}
+	PrintClocks( "generic->TransformVerts()", NUMVERTS, bestClocksGeneric );
+
+	bestClocksSIMD = 0;
+	for ( i = 0; i < NUMTESTS; i++ ) {
+		StartRecordTime( start );
+		p_simd->TransformVerts( drawVerts2, NUMVERTS, joints, weights, weightIndex, NUMWEIGHTS );
+		StopRecordTime( end );
+		GetBest( start, end, bestClocksSIMD );
+	}
+
+	for ( i = 0; i < NUMVERTS; i++ ) {
+		if ( !drawVerts1[i].xyz.Compare( drawVerts2[i].xyz, 1e-4f ) ) {
+			break;
+		}
+	}
+	result = ( i >= NUMVERTS ) ? "ok" : S_COLOR_RED"X";
+	PrintClocks( va( "   simd->TransformVerts() %s", result ), NUMVERTS, bestClocksSIMD, bestClocksGeneric );
 }
 
 /*
@@ -2869,6 +3074,13 @@ void TestDeriveTriPlanes( void ) {
 		indexes[i*3+0] = ( i + 0 ) % COUNT;
 		indexes[i*3+1] = ( i + 1 ) % COUNT;
 		indexes[i*3+2] = ( i + 2 ) % COUNT;
+		if ( ( i % 7 ) == 0 ) {
+			// degenerate (zero-area) triangle: exercises the RSqrt( 0 )
+			// huge-finite path that skinned meshes hit on collapsed verts;
+			// an implementation that produces inf/NaN here fails the compare
+			indexes[i*3+1] = indexes[i*3+0];
+			indexes[i*3+2] = indexes[i*3+0];
+		}
 	}
 
 	bestClocksGeneric = 0;
@@ -4162,19 +4374,25 @@ void idSIMD::Test_f( const idCmdArgs &args ) {
 	SetThreadPriority( GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL );
 #endif // _WINDOWS
 
-	p_simd = processor;
+	p_simd = ( processor != NULL ) ? processor : generic;
 	p_generic = generic;
 
-	if ( idStr::Length( args.Argv( 1 ) ) != 0 ) {
-		cpuid_t cpuid = idLib::sys->GetProcessorId();
-		idStr argString = args.Args();
-
-		argString.Replace( " ", "" );
-	}
+	(void)args;
 
 	idLib::common->SetRefreshOnPrint( true );
 
 	idLib::common->Printf( "using %s for SIMD processing\n", p_simd->GetName() );
+
+	if ( p_simd == p_generic ) {
+		// InitProcessor only installs a specialized processor on architectures
+		// that have one; arm64 currently has none, so p_simd and p_generic are
+		// the same object and every comparison below compares a buffer against
+		// itself. Say so loudly: a page of "ok" results here would otherwise
+		// read as a passing SIMD validation on a platform where nothing is
+		// actually being validated.
+		idLib::common->Printf( "WARNING: no specialized SIMD processor is available on this architecture.\n" );
+		idLib::common->Printf( "WARNING: generic and SIMD paths are the same object, so every comparison below is vacuous.\n" );
+	}
 
 	GetBaseClocks();
 /*
@@ -4204,16 +4422,22 @@ void idSIMD::Test_f( const idCmdArgs &args ) {
 
 	idLib::common->Printf("====================================\n" );
 */
+	TestDot();
+	TestCompare();
+	TestMinMax();
 	TestBlendJoints();
 	TestConvertJointQuatsToJointMats();
 	TestConvertJointMatsToJointQuats();
 	TestTransformJoints();
 	TestUntransformJoints();
+	TestMultiplyJoints();
 	TestTransformVertsNew();
+	TestTransformVerts();
+	TestDeriveTriPlanes();
+	TestCreateShadowCache();
 /*	TestTracePointCull();
 	TestDecalPointCull();
 	TestOverlayPointCull();
-	TestDeriveTriPlanes();
 	TestDeriveTangents();
 	TestDeriveUnsmoothedTangents();
 	TestNormalizeTangents();
@@ -4228,7 +4452,7 @@ void idSIMD::Test_f( const idCmdArgs &args ) {
 */
 	idLib::common->SetRefreshOnPrint( false );
 
-	if ( p_simd != processor ) {
+	if ( p_simd != processor && p_simd != generic ) {
 		delete p_simd;
 	}
 	p_simd = NULL;

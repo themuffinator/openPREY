@@ -53,7 +53,7 @@ static bool CheckPow2(int Num)
 
 extern void Com_WriteConfigToFile( const char *filename );
 
-static BOOL CALLBACK RBFProc(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM lParam) 
+static INT_PTR CALLBACK RBFProc(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {  
     switch (message) 
     { 
@@ -104,7 +104,7 @@ void DoRBFDialog(const char *FileName)
 
 	Sys_GrabMouseCursor( false );
 
-	DialogBox(0, MAKEINTRESOURCE(IDD_RENDERBUMPFLAT), 0, (DLGPROC)RBFProc); 
+	DialogBox(0, MAKEINTRESOURCE(IDD_RENDERBUMPFLAT), 0, RBFProc);
 
 	Sys_GrabMouseCursor( true );
 }

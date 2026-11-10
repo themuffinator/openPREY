@@ -1,0 +1,8 @@
+// Retained UI soft focus: a view-space quad with one texture coordinate.
+varying vec2 blurTexCoord;
+
+void main(void)
+{
+	blurTexCoord = gl_MultiTexCoord0.xy;
+	gl_Position = ftransform();
+}

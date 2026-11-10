@@ -1,0 +1,108 @@
+#version 450
+
+// Backend-neutral GPU skinning contract:
+// - idDrawVert is sixteen 32-bit words (64 bytes)
+// - gpuSkinningVertex_t is four uint joint indices followed by four floats
+// - each joint is three row-major vec4 rows (twelve floats)
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer SourceWords {
+	uint words[];
+} sourceData;
+
+layout(std430, set = 0, binding = 1) readonly buffer SkinWords {
+	uint words[];
+} skinData;
+
+layout(std430, set = 0, binding = 2) readonly buffer JointWords {
+	uint words[];
+} jointData;
+
+layout(std430, set = 0, binding = 3) writeonly buffer OutputWords {
+	uint words[];
+} outputData;
+
+layout(push_constant) uniform SkinningPushConstants {
+	uint sourceWordOffset;
+	uint skinWordOffset;
+	uint jointWordOffset;
+	uint outputWordOffset;
+	uint vertexCount;
+	uint jointCount;
+} skinning;
+
+vec4 LoadJointRow( uint jointIndex, uint row ) {
+	uint base = skinning.jointWordOffset + jointIndex * 12u + row * 4u;
+	return vec4(
+		uintBitsToFloat( jointData.words[ base + 0u ] ),
+		uintBitsToFloat( jointData.words[ base + 1u ] ),
+		uintBitsToFloat( jointData.words[ base + 2u ] ),
+		uintBitsToFloat( jointData.words[ base + 3u ] ) );
+}
+
+vec3 TransformBasis( vec4 row0, vec4 row1, vec4 row2, vec3 value, float w ) {
+	vec4 source = vec4( value, w );
+	return vec3( dot( row0, source ), dot( row1, source ), dot( row2, source ) );
+}
+
+void StoreVec3( uint base, uint member, vec3 value ) {
+	outputData.words[ base + member + 0u ] = floatBitsToUint( value.x );
+	outputData.words[ base + member + 1u ] = floatBitsToUint( value.y );
+	outputData.words[ base + member + 2u ] = floatBitsToUint( value.z );
+}
+
+void main() {
+	uint vertex = gl_GlobalInvocationID.x;
+	if ( vertex >= skinning.vertexCount ) {
+		return;
+	}
+
+	uint sourceBase = skinning.sourceWordOffset + vertex * 16u;
+	uint outputBase = skinning.outputWordOffset + vertex * 16u;
+	for ( uint word = 0u; word < 16u; ++word ) {
+		outputData.words[ outputBase + word ] = sourceData.words[ sourceBase + word ];
+	}
+
+	uint skinBase = skinning.skinWordOffset + vertex * 8u;
+	vec4 row0 = vec4( 0.0 );
+	vec4 row1 = vec4( 0.0 );
+	vec4 row2 = vec4( 0.0 );
+	for ( uint influence = 0u; influence < 4u; ++influence ) {
+		float weight = uintBitsToFloat( skinData.words[ skinBase + 4u + influence ] );
+		if ( weight == 0.0 ) {
+			continue;
+		}
+		uint jointIndex = skinData.words[ skinBase + influence ];
+		// The CPU contract rejects this before dispatch. Retain a shader-side
+		// range guard so malformed data can never index outside the palette;
+		// the already-copied bind pose is the fail-closed output.
+		if ( jointIndex >= skinning.jointCount ) {
+			return;
+		}
+		row0 += LoadJointRow( jointIndex, 0u ) * weight;
+		row1 += LoadJointRow( jointIndex, 1u ) * weight;
+		row2 += LoadJointRow( jointIndex, 2u ) * weight;
+	}
+
+	vec3 position = vec3(
+		uintBitsToFloat( sourceData.words[ sourceBase + 0u ] ),
+		uintBitsToFloat( sourceData.words[ sourceBase + 1u ] ),
+		uintBitsToFloat( sourceData.words[ sourceBase + 2u ] ) );
+	vec3 normal = vec3(
+		uintBitsToFloat( sourceData.words[ sourceBase + 4u ] ),
+		uintBitsToFloat( sourceData.words[ sourceBase + 5u ] ),
+		uintBitsToFloat( sourceData.words[ sourceBase + 6u ] ) );
+	vec3 tangent0 = vec3(
+		uintBitsToFloat( sourceData.words[ sourceBase + 8u ] ),
+		uintBitsToFloat( sourceData.words[ sourceBase + 9u ] ),
+		uintBitsToFloat( sourceData.words[ sourceBase + 10u ] ) );
+	vec3 tangent1 = vec3(
+		uintBitsToFloat( sourceData.words[ sourceBase + 11u ] ),
+		uintBitsToFloat( sourceData.words[ sourceBase + 12u ] ),
+		uintBitsToFloat( sourceData.words[ sourceBase + 13u ] ) );
+
+	StoreVec3( outputBase, 0u, TransformBasis( row0, row1, row2, position, 1.0 ) );
+	StoreVec3( outputBase, 4u, TransformBasis( row0, row1, row2, normal, 0.0 ) );
+	StoreVec3( outputBase, 8u, TransformBasis( row0, row1, row2, tangent0, 0.0 ) );
+	StoreVec3( outputBase, 11u, TransformBasis( row0, row1, row2, tangent1, 0.0 ) );
+}

@@ -1,0 +1,8 @@
+This directory contains Prey SDK-derived game-library code, and openPREY
+additions to it, subject to the Prey Software Development Kit Limited Use
+License Agreement.
+
+The complete agreement is retained at ../../LICENSES/PREY-SDK-EULA.rtf.
+Original notices and explicitly identified third-party terms remain applicable.
+This notice does not relicense SDK code under the engine's GPL licence.
+See ../../LICENSING.md and ../../docs/dev/game-source-provenance.md.

@@ -1281,7 +1281,7 @@ void CDialogColorPicker::OnSysColorChange()
 	LoadMappedBitmap(m_RgbBitmap,IDB_BITMAP_RGB,size);
 }
 
-void CDialogColorPicker::OnTimer(UINT nIDEvent)  {
+void CDialogColorPicker::OnTimer(UINT_PTR nIDEvent)  {
 	if ( UpdateParent ) {
 		UpdateParent( color.r, color.g, color.b, 1.0f );
 	}

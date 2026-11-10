@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "AsyncNetwork.h"
 #ifndef ID_DEDICATED
 #include "../Session_local.h"
+#include "../../sys/NetworkEndpoint.h"
 #endif
 
 idNetworkSystem		networkSystemLocal;
@@ -78,6 +79,116 @@ void idNetworkSystem::ServerSendReliableMessageExcluding( int clientNum, const i
 	if ( idAsyncNetwork::server.IsActive() ) {
 		idAsyncNetwork::server.SendReliableGameMessageExcluding( clientNum, msg );
 	}
+}
+
+#if OPENPREY_ENABLE_MVD
+// OPENPREY-GATED(D9): MVD-only reliable-message routing is not part of the
+// Prey v7 idNetworkSystem interface.
+/*
+==================
+idNetworkSystem::ServerSendReliableMessageNoDemo
+==================
+*/
+void idNetworkSystem::ServerSendReliableMessageNoDemo( int clientNum, const idBitMsg &msg ) {
+	if ( idAsyncNetwork::server.IsActive() ) {
+		idAsyncNetwork::server.SendReliableGameMessage( clientNum, msg, false );
+	}
+}
+
+/*
+==================
+idNetworkSystem::ServerSendReliableMessageExcludingNoDemo
+==================
+*/
+void idNetworkSystem::ServerSendReliableMessageExcludingNoDemo( int clientNum, const idBitMsg &msg ) {
+	if ( idAsyncNetwork::server.IsActive() ) {
+		idAsyncNetwork::server.SendReliableGameMessageExcluding( clientNum, msg, false );
+	}
+}
+
+/*
+==================
+idNetworkSystem::ServerRecordInstanceReliableMessage
+==================
+*/
+void idNetworkSystem::ServerRecordInstanceReliableMessage( int instance, int excludeClient, const idBitMsg &msg ) {
+	if ( idAsyncNetwork::server.IsActive() && idAsyncNetwork::multiViewDemo.IsRecording() ) {
+		idAsyncNetwork::multiViewDemo.CaptureReliableMessage(
+			msg, DEMO_RECORD_INSTANCE, excludeClient, instance );
+	}
+}
+#endif
+
+/*
+==================
+idNetworkSystem::ServerStartMVDRecording
+==================
+*/
+bool idNetworkSystem::ServerStartMVDRecording( const char *name ) {
+	return idAsyncNetwork::multiViewDemo.StartNamedRecording( name );
+}
+
+/*
+==================
+idNetworkSystem::ServerStopMVDRecording
+==================
+*/
+bool idNetworkSystem::ServerStopMVDRecording( const char *reason ) {
+	return idAsyncNetwork::multiViewDemo.StopRecordingCleanly( reason );
+}
+
+/*
+==================
+idNetworkSystem::ServerIsMVDRecording
+==================
+*/
+bool idNetworkSystem::ServerIsMVDRecording( void ) const {
+	return idAsyncNetwork::multiViewDemo.IsRecording();
+}
+
+/*
+==================
+idNetworkSystem::ServerCopyMVDRecordingQPath
+==================
+*/
+bool idNetworkSystem::ServerCopyMVDRecordingQPath( char *buffer, int bufferSize ) const {
+	return idAsyncNetwork::multiViewDemo.CopyRecordingQPath( buffer, bufferSize );
+}
+
+/*
+==================
+idNetworkSystem::ServerCopyMVDRecordingResult
+==================
+*/
+bool idNetworkSystem::ServerCopyMVDRecordingResult(
+		serverMVDRecordingResult_t &result ) const {
+	return idAsyncNetwork::multiViewDemo.CopyRecordingResult( result );
+}
+
+/*
+==================
+idNetworkSystem::ServerRecordMVDMarker
+==================
+*/
+bool idNetworkSystem::ServerRecordMVDMarker( const serverMVDMarker_t &marker ) {
+	return idAsyncNetwork::server.IsActive() &&
+		idAsyncNetwork::multiViewDemo.RecordMarker( marker );
+}
+
+/*
+==================
+idNetworkSystem::ServerDropClient
+==================
+*/
+bool idNetworkSystem::ServerDropClient( int clientNum, const char *reason ) {
+	if ( !idAsyncNetwork::server.IsActive() || clientNum < 0 ||
+		clientNum >= MAX_ASYNC_CLIENTS ||
+		clientNum == idAsyncNetwork::server.GetLocalClientNum() ||
+		reason == NULL || reason[ 0 ] == '\0' ) {
+		return false;
+	}
+	idAsyncNetwork::server.DropClient( clientNum, reason );
+	return true;
 }
 
 /*
@@ -170,11 +281,25 @@ idNetworkSystem::ClientSendReliableMessage
 ==================
 */
 void idNetworkSystem::ClientSendReliableMessage( const idBitMsg &msg ) {
+	if ( idAsyncNetwork::multiViewDemo.IsPlaying() ) {
+		return;
+	}
 	if ( idAsyncNetwork::client.IsActive() ) {
 		idAsyncNetwork::client.SendReliableGameMessage( msg );
 	} else if ( idAsyncNetwork::server.IsActive() ) {
 		idAsyncNetwork::server.LocalClientSendReliableMessage( msg );
 	}
+}
+
+bool idNetworkSystem::ClientSendVoice( const idBitMsg &msg ) {
+	if ( idAsyncNetwork::multiViewDemo.IsPlaying() ) return false;
+	if ( idAsyncNetwork::client.IsActive() ) return idAsyncNetwork::client.SendVoiceMessage( msg );
+	if ( idAsyncNetwork::server.IsActive() ) return idAsyncNetwork::server.LocalClientSendVoiceMessage( msg );
+	return false;
+}
+
+bool idNetworkSystem::ServerSendVoice( int clientNum, const idBitMsg &msg ) {
+	return idAsyncNetwork::server.IsActive() && idAsyncNetwork::server.SendVoiceMessage( clientNum, msg );
 }
 
 /*
@@ -195,6 +320,9 @@ idNetworkSystem::ClientGetTimeSinceLastPacket
 ==================
 */
 int idNetworkSystem::ClientGetTimeSinceLastPacket( void ) {
+	if ( idAsyncNetwork::multiViewDemo.IsPlaying() ) {
+		return 0;
+	}
 	if ( idAsyncNetwork::client.IsActive() ) {
 		return idAsyncNetwork::client.GetTimeSinceLastPacket();
 	}
@@ -237,6 +365,8 @@ float idNetworkSystem::ClientGetIncomingPacketLoss( void ) {
 	return 0.0f;
 }
 
+#if OPENPREY_ENABLE_BOTS
+// OPENPREY-GATED(D9): bot allocation is outside the Prey v7 game contract.
 /*
 ==================
 idNetworkSystem::AllocateClientSlotForBot
@@ -263,6 +393,7 @@ idNetworkSystem::ServerSetBotUserName
 int idNetworkSystem::ServerSetBotUserName(int clientNum, const char* playerName) {
 	return 0;
 }
+#endif
 
 /*
 ==================
@@ -301,12 +432,10 @@ void idNetworkSystem::SetLoadingText( const char *loadingText ) {
 
 		idStr serverAddress = GetServerAddress();
 		if ( !serverAddress.Length() ) {
-			const char *netIP = cvarSystem->GetCVarString( "net_ip" );
-			const int netPort = cvarSystem->GetCVarInteger( "net_port" );
-			if ( netIP && netIP[ 0 ] ) {
-				serverAddress = va( "%s:%d", idStr::Icmp( netIP, "0.0.0.0" ) ? netIP : "127.0.0.1", netPort );
-			} else if ( netPort > 0 ) {
-				serverAddress = va( "127.0.0.1:%d", netPort );
+			char localEndpoint[idNetworkEndpoint::LOCAL_ENDPOINT_TEXT_SIZE];
+			if ( idNetworkEndpoint::FormatLocalServerEndpoint( cvarSystem->GetCVarString( "net_ip" ),
+					cvarSystem->GetCVarInteger( "net_port" ), localEndpoint, sizeof( localEndpoint ) ) ) {
+				serverAddress = localEndpoint;
 			}
 		}
 		if ( serverAddress.Length() && !sessLocal.guiLoading->State().GetString( "server_ip", "" )[ 0 ] ) {
@@ -361,7 +490,7 @@ void idNetworkSystem::SetLoadingText( const char *loadingText ) {
 		}
 	}
 
-	sessLocal.guiLoading->StateChanged( com_frameTime );
+	sessLocal.guiLoading->StateChanged( common->GetPresentationTime() );
 #endif
 }
 
@@ -388,6 +517,8 @@ void idNetworkSystem::AddLoadingIcon( const char *icon ) {
 	sessLocal.guiLoading->SetStateInt( "load_icons", numIcons );
 	sessLocal.guiLoading->SetStateInt( va( "load_icon_%d", numIcons ), 1 );
 	sessLocal.guiLoading->SetStateString( va( "load_icon_img_%d", numIcons ), icon );
-	sessLocal.guiLoading->StateChanged( com_frameTime );
+	sessLocal.guiLoading->StateChanged( common->GetPresentationTime() );
+	// The retained loading screen draws it in the arsenal as an image and tint.
+	sessLocal.PublishRetainedLoadingIcon( numIcons, icon );
 #endif
 }

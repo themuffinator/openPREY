@@ -71,7 +71,7 @@ public:
 	void LoadMaterials();
 	virtual ~CNewTexWnd();
 	BOOL OnToolTipNotify( UINT id, NMHDR * pNMHDR, LRESULT * pResult );
-	int CNewTexWnd::OnToolHitTest(CPoint point, TOOLINFO * pTI);
+	virtual INT_PTR OnToolHitTest(CPoint point, TOOLINFO * pTI) const;
 	virtual BOOL PreTranslateMessage(MSG* pMsg);
 
 protected:

@@ -31,6 +31,9 @@ If you have questions concerning this license or the applicable additional terms
 
 
 #include "tr_local.h"
+#include "RendererResourceSettings.h"
+#include "../external/smaa/AreaTex.h"
+#include "../external/smaa/SearchTex.h"
 
 #define	DEFAULT_SIZE	16
 
@@ -94,6 +97,7 @@ void idImage::MakeDefault() {
 		DEFAULT_SIZE, DEFAULT_SIZE, 
 		TF_DEFAULT, TR_REPEAT, TD_DEFAULT );
 
+	if ( !defaulted && !R_ImagePolicyContentMutation() ) return;
 	defaulted = true;
 }
 
@@ -124,6 +128,27 @@ static void R_BlackImage( idImage *image ) {
 		TF_DEFAULT, TR_REPEAT, TD_DEFAULT );
 }
 
+static void R_ThresholdImage( idImage *image ) {
+	static const int THRESHOLD_SIZE = 64;
+	byte data[THRESHOLD_SIZE][THRESHOLD_SIZE][4];
+
+	for ( int y = 0; y < THRESHOLD_SIZE; y++ ) {
+		for ( int x = 0; x < THRESHOLD_SIZE; x++ ) {
+			// Stable noise used by retail invisibility/dissolve materials.
+			unsigned int n = (unsigned int)( x * 73856093u ) ^ (unsigned int)( y * 19349663u );
+			n = ( n << 13 ) ^ n;
+			const byte alpha = (byte)( ( n * ( n * n * 15731u + 789221u ) + 1376312589u ) >> 24 );
+			data[y][x][0] = 255;
+			data[y][x][1] = 255;
+			data[y][x][2] = 255;
+			data[y][x][3] = alpha;
+		}
+	}
+
+	image->GenerateImage( (byte *)data, THRESHOLD_SIZE, THRESHOLD_SIZE,
+		TF_LINEAR, TR_REPEAT, TD_LOOKUP_TABLE_ALPHA );
+}
+
 static void R_RGBA8Image( idImage *image ) {
 	byte	data[DEFAULT_SIZE][DEFAULT_SIZE][4];
 
@@ -136,37 +161,39 @@ static void R_RGBA8Image( idImage *image ) {
 	image->GenerateImage( (byte *)data, DEFAULT_SIZE, DEFAULT_SIZE, TF_DEFAULT, TR_REPEAT, TD_LOOKUP_TABLE_RGBA );
 }
 
-static void R_ThresholdImage( idImage *image ) {
-	static const int THRESHOLD_SIZE = 64;
-	byte data[THRESHOLD_SIZE][THRESHOLD_SIZE][4];
+static void R_RGBA16FImage( idImage *image ) {
+	idImageOpts opts;
+	opts.textureType = TT_2D;
+	opts.format = FMT_RGBA16F;
+	opts.width = DEFAULT_SIZE;
+	opts.height = DEFAULT_SIZE;
+	opts.numLevels = 1;
 
-	for ( int y = 0; y < THRESHOLD_SIZE; y++ ) {
-		for ( int x = 0; x < THRESHOLD_SIZE; x++ ) {
-			// Deterministic noise map used by legacy Prey shaders (for example invisibility).
-			unsigned int n = static_cast<unsigned int>( x * 73856093u ) ^ static_cast<unsigned int>( y * 19349663u );
-			n = ( n << 13 ) ^ n;
-			const byte alpha = static_cast<byte>( ( n * ( n * n * 15731u + 789221u ) + 1376312589u ) >> 24 );
+	image->AllocImage( opts, TF_LINEAR, TR_CLAMP );
 
-			data[y][x][0] = 255;
-			data[y][x][1] = 255;
-			data[y][x][2] = 255;
-			data[y][x][3] = alpha;
-		}
+	if ( !tr.IsOpenGLRunning() ) {
+		return;
 	}
 
-	image->GenerateImage( (byte *)data, THRESHOLD_SIZE, THRESHOLD_SIZE, TF_LINEAR, TR_REPEAT, TD_LOOKUP_TABLE_ALPHA );
+	unsigned short data[DEFAULT_SIZE][DEFAULT_SIZE][4];
+	memset( data, 0, sizeof( data ) );
+	image->SubImageUpload( 0, 0, 0, 0, DEFAULT_SIZE, DEFAULT_SIZE, data );
 }
 
 static void R_DepthImage( idImage *image ) {
-	byte	data[DEFAULT_SIZE][DEFAULT_SIZE][4];
+	// Allocate real depth storage directly. Routing placeholder RGBA bytes
+	// through GenerateImage rewrites the format to FMT_RGBA8 inside
+	// idBinaryImage::Load2DFromMemory (it mutates formats it cannot encode),
+	// which leaves the texture non-depth-attachable and makes every later
+	// CopyDepthbuffer into it fail with GL_INVALID_FRAMEBUFFER_OPERATION.
+	idImageOpts opts;
+	opts.textureType = TT_2D;
+	opts.format = FMT_DEPTH;
+	opts.width = DEFAULT_SIZE;
+	opts.height = DEFAULT_SIZE;
+	opts.numLevels = 1;
 
-	memset( data, 0, sizeof( data ) );
-	data[0][0][0] = 16;
-	data[0][0][1] = 32;
-	data[0][0][2] = 48;
-	data[0][0][3] = 96;
-
-	image->GenerateImage( (byte *)data, DEFAULT_SIZE, DEFAULT_SIZE, TF_NEAREST, TR_CLAMP, TD_DEPTH );
+	image->AllocImage( opts, TF_NEAREST, TR_CLAMP );
 }
 
 static void R_AlphaNotchImage( idImage *image ) {
@@ -266,7 +293,9 @@ void R_FogImage( idImage *image ) {
 		}
 	}
 
-	image->GenerateImage( (byte *)data, FOG_SIZE, FOG_SIZE, TF_LINEAR, TR_CLAMP, TD_LOOKUP_TABLE_ALPHA );
+	// Retail Quake 4 keeps the fog lookup as a full RGBA texture. Treating it
+	// as alpha-only can zero the fog RGB contribution in the fixed-function pass.
+	image->GenerateImage( (byte *)data, FOG_SIZE, FOG_SIZE, TF_LINEAR, TR_CLAMP, TD_LOOKUP_TABLE_RGBA );
 }
 
 
@@ -373,7 +402,9 @@ void R_FogEnterImage( idImage *image ) {
 	}
 
 	// if mipmapped, acutely viewed surfaces fade wrong
-	image->GenerateImage( (byte *)data, FOG_ENTER_SIZE, FOG_ENTER_SIZE, TF_LINEAR, TR_CLAMP, TD_LOOKUP_TABLE_ALPHA );
+	// Match retail: this lookup needs RGB=white with alpha carrying the fade
+	// term, not an alpha-only texture classification.
+	image->GenerateImage( (byte *)data, FOG_ENTER_SIZE, FOG_ENTER_SIZE, TF_LINEAR, TR_CLAMP, TD_LOOKUP_TABLE_RGBA );
 }
 
 
@@ -564,48 +595,6 @@ static void makeNormalizeVectorCubeMap(idImage* image) {
 	Mem_Free(pixels[0]);
 }
 
-// the size determines how far away from the edge the blocks start fading
-static const int BORDER_CLAMP_SIZE = 32;
-static void R_BorderClampImage(idImage* image) {
-	byte	data[BORDER_CLAMP_SIZE][BORDER_CLAMP_SIZE][4];
-
-	// solid white texture with a single pixel black border
-	memset(data, 255, sizeof(data));
-	for (int i = 0; i < BORDER_CLAMP_SIZE; i++) {
-		data[i][0][0] =
-			data[i][0][1] =
-			data[i][0][2] =
-			data[i][0][3] =
-
-			data[i][BORDER_CLAMP_SIZE - 1][0] =
-			data[i][BORDER_CLAMP_SIZE - 1][1] =
-			data[i][BORDER_CLAMP_SIZE - 1][2] =
-			data[i][BORDER_CLAMP_SIZE - 1][3] =
-
-			data[0][i][0] =
-			data[0][i][1] =
-			data[0][i][2] =
-			data[0][i][3] =
-
-			data[BORDER_CLAMP_SIZE - 1][i][0] =
-			data[BORDER_CLAMP_SIZE - 1][i][1] =
-			data[BORDER_CLAMP_SIZE - 1][i][2] =
-			data[BORDER_CLAMP_SIZE - 1][i][3] = 0;
-	}
-
-	image->GenerateImage((byte*)data, BORDER_CLAMP_SIZE, BORDER_CLAMP_SIZE,
-		TF_LINEAR /* TF_NEAREST */, TR_CLAMP_TO_BORDER, TD_DEFAULT);
-
-	if (!glConfig.isInitialized) {
-		// can't call qglTexParameterfv yet
-		return;
-	}
-	// explicit zero border
-	float	color[4];
-	color[0] = color[1] = color[2] = color[3] = 0;
-	glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, color);
-}
-
 /*
 ================
 R_RampImage
@@ -626,6 +615,36 @@ static void R_RampImage(idImage* image) {
 
 	image->GenerateImage((byte*)data, 256, 1,
 		TF_NEAREST, TR_CLAMP, TD_DIFFUSE);
+}
+
+static void R_SMAAAreaImage( idImage *image ) {
+	const int pixelCount = AREATEX_WIDTH * AREATEX_HEIGHT;
+	byte *data = (byte *)Mem_Alloc( pixelCount * 4 );
+
+	for ( int src = 0, dst = 0; src < AREATEX_SIZE; src += 2, dst += 4 ) {
+		data[dst + 0] = areaTexBytes[src + 0];
+		data[dst + 1] = areaTexBytes[src + 1];
+		data[dst + 2] = 0;
+		data[dst + 3] = 255;
+	}
+
+	image->GenerateImage( data, AREATEX_WIDTH, AREATEX_HEIGHT, TF_LINEAR, TR_CLAMP, TD_LOOKUP_TABLE_RGBA );
+	Mem_Free( data );
+}
+
+static void R_SMAASearchImage( idImage *image ) {
+	const int pixelCount = SEARCHTEX_WIDTH * SEARCHTEX_HEIGHT;
+	byte *data = (byte *)Mem_Alloc( pixelCount * 4 );
+
+	for ( int src = 0, dst = 0; src < SEARCHTEX_SIZE; src++, dst += 4 ) {
+		data[dst + 0] = searchTexBytes[src];
+		data[dst + 1] = 0;
+		data[dst + 2] = 0;
+		data[dst + 3] = 255;
+	}
+
+	image->GenerateImage( data, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, TF_LINEAR, TR_CLAMP, TD_LOOKUP_TABLE_RGBA );
+	Mem_Free( data );
 }
 
 
@@ -665,15 +684,22 @@ void idImageManager::CreateIntrinsicImages() {
 	accumImage = ImageFromFunction("_accum", R_RGBA8Image);
 	glowScreenImage = ImageFromFunction("_glowScreen", R_RGBA8Image);
 	glowCompositeImage = ImageFromFunction("_glowComposite", R_RGBA8Image);
+	ImageFromFunction("_reflectionRender", R_RGBA8Image);
+	ImageFromFunction("_refractionRender", R_RGBA8Image);
+	ImageFromFunction("_mirrorRender", R_RGBA8Image);
 	//scratchCubeMapImage = ImageFromFunction("_scratchCubeMap", makeNormalizeVectorCubeMap);
 
-	currentRenderImage = ImageFromFunction("_currentRender", R_RGBA8Image);
+	currentRenderImage = ImageFromFunction("_currentRender", R_RGBA16FImage);
 	currentDepthImage = ImageFromFunction("_currentDepth", R_DepthImage);
+	ImageFromFunction("_smaaArea", R_SMAAAreaImage);
+	ImageFromFunction("_smaaSearch", R_SMAASearchImage);
 
 	// placeholders for runtime render targets referenced by materials
-	ImageFromFunction("_forwardRenderResolvedAlbedo", R_RGBA8Image);
-	ImageFromFunction("_postProcessAlbedo0", R_RGBA8Image);
-	ImageFromFunction("_postProcessAlbedo1", R_RGBA8Image);
+	ImageFromFunction("_forwardRenderResolvedAlbedo", R_RGBA16FImage);
+	ImageFromFunction("_forwardRenderResolvedDepth", R_DepthImage);
+	ImageFromFunction("_postProcessAlbedo0", R_RGBA16FImage);
+	ImageFromFunction("_postProcessAlbedo1", R_RGBA16FImage);
+	ImageFromFunction("_postProcessAlbedo2", R_RGBA16FImage);
 	ImageFromFunction("_threshold", R_ThresholdImage);
 	ImageFromFunction("_replay", R_RGBA8Image);
 
@@ -682,8 +708,8 @@ void idImageManager::CreateIntrinsicImages() {
 	// reassigned during stereo rendering
 	originalCurrentRenderImage = currentRenderImage;
 
-	loadingIconImage = ImageFromFile( "guis/assets/loading/loading", TF_DEFAULT, TR_CLAMP, TD_DEFAULT, CF_2D );
-	hellLoadingIconImage = ImageFromFile( "guis/assets/loading/loading", TF_DEFAULT, TR_CLAMP, TD_DEFAULT, CF_2D );
+	loadingIconImage = ImageFromFile("gfx/guis/loadscreens/generic", TF_DEFAULT, TR_CLAMP, TD_DEFAULT, CF_2D );
+	hellLoadingIconImage = ImageFromFile("gfx/guis/loadscreens/generic", TF_DEFAULT, TR_CLAMP, TD_DEFAULT, CF_2D );
 
 	//release_assert( loadingIconImage->referencedOutsideLevelLoad );
 	//release_assert( hellLoadingIconImage->referencedOutsideLevelLoad );

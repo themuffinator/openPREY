@@ -1,3 +1,4 @@
+#include "ParserSourceObserver.h"
 
 
 
@@ -9,6 +10,75 @@
 #define TOKEN_FL_RECURSIVE_DEFINE	1
 
 define_t * idParser::globaldefines;
+
+// Preprocessor integer expressions have the 32-bit wraparound semantics used
+// by the original engine. Perform the operations through unsigned bit patterns
+// so the result is independent of signed-overflow and signed-shift behavior.
+static ID_INLINE uint32_t idParser_Int32Bits( const int32_t value ) {
+	uint32_t bits;
+	memcpy( &bits, &value, sizeof( bits ) );
+	return bits;
+}
+
+static ID_INLINE int32_t idParser_Int32FromBits( const uint32_t bits ) {
+	int32_t value;
+	memcpy( &value, &bits, sizeof( value ) );
+	return value;
+}
+
+static ID_INLINE int32_t idParser_Int32Negate( const int32_t value ) {
+	return idParser_Int32FromBits( 0u - idParser_Int32Bits( value ) );
+}
+
+static ID_INLINE int32_t idParser_Int32Add( const int32_t lhs, const int32_t rhs ) {
+	return idParser_Int32FromBits( idParser_Int32Bits( lhs ) + idParser_Int32Bits( rhs ) );
+}
+
+static ID_INLINE int32_t idParser_Int32Subtract( const int32_t lhs, const int32_t rhs ) {
+	return idParser_Int32FromBits( idParser_Int32Bits( lhs ) - idParser_Int32Bits( rhs ) );
+}
+
+static ID_INLINE int32_t idParser_Int32Multiply( const int32_t lhs, const int32_t rhs ) {
+	return idParser_Int32FromBits( idParser_Int32Bits( lhs ) * idParser_Int32Bits( rhs ) );
+}
+
+static ID_INLINE bool idParser_IsValidShiftCount( const int32_t shift ) {
+	return shift >= 0 && shift < 32;
+}
+
+static ID_INLINE int32_t idParser_Int32LeftShift( const int32_t value, const uint32_t shift ) {
+	assert( shift < 32 );
+	return idParser_Int32FromBits( idParser_Int32Bits( value ) << shift );
+}
+
+static ID_INLINE int32_t idParser_Int32ArithmeticRightShift( const int32_t value, const uint32_t shift ) {
+	assert( shift < 32 );
+	if ( shift == 0 ) {
+		return value;
+	}
+
+	uint32_t bits = idParser_Int32Bits( value ) >> shift;
+	if ( value < 0 ) {
+		bits |= ~uint32_t( 0 ) << ( 32 - shift );
+	}
+	return idParser_Int32FromBits( bits );
+}
+
+static ID_INLINE int32_t idParser_Int32Divide( const int32_t lhs, const int32_t rhs ) {
+	assert( rhs != 0 );
+	if ( lhs == INT32_MIN && rhs == -1 ) {
+		return INT32_MIN;
+	}
+	return lhs / rhs;
+}
+
+static ID_INLINE int32_t idParser_Int32Modulo( const int32_t lhs, const int32_t rhs ) {
+	assert( rhs != 0 );
+	if ( lhs == INT32_MIN && rhs == -1 ) {
+		return 0;
+	}
+	return lhs % rhs;
+}
 
 /*
 ================
@@ -274,7 +344,7 @@ define_t *idParser::DefineFromString( const char *string ) {
 	idParser src;
 	define_t *def;
 
-	if ( !src.LoadMemory(string, strlen(string), "*defineString") ) {
+	if ( !src.LoadMemory( string, idLib::SizeToInt( strlen( string ), "idParser::DefineFromString" ), "*defineString" ) ) {
 		return NULL;
 	}
 	// create a define from the source
@@ -298,10 +368,10 @@ void idParser::Error( const char *str, ... ) const {
 	va_list ap;
 
 	va_start(ap, str);
-	vsprintf(text, str, ap);
+	idStr::vsnPrintf(text, sizeof(text), str, ap);
 	va_end(ap);
 	if ( idParser::scriptstack ) {
-		idParser::scriptstack->Error( text );
+		idParser::scriptstack->Error( "%s", text );
 	}
 }
 
@@ -315,10 +385,10 @@ void idParser::Warning( const char *str, ... ) const {
 	va_list ap;
 
 	va_start(ap, str);
-	vsprintf(text, str, ap);
+	idStr::vsnPrintf(text, sizeof(text), str, ap);
 	va_end(ap);
 	if ( idParser::scriptstack ) {
-		idParser::scriptstack->Warning( text );
+		idParser::scriptstack->Warning( "%s", text );
 	}
 }
 
@@ -912,6 +982,82 @@ int idParser::ReadLine( idToken *token ) {
 	return true;
 }
 
+static bool Parser_IsAbsolutePath( const idStr& path ) {
+	return path.Length() > 0 &&
+		( path[0] == '/' || path[0] == '\\' || ( path.Length() > 1 && path[1] == ':' ) );
+}
+
+static bool Parser_StripLeadingGameDirectory( idStr& path, const char* gameDirectory ) {
+	if ( gameDirectory == NULL || gameDirectory[0] == '\0' ) {
+		return false;
+	}
+	const int directoryLength = idStr::Length( gameDirectory );
+	if ( idStr::Icmpn( path, gameDirectory, directoryLength ) != 0 ) {
+		return false;
+	}
+	if ( path.Length() == directoryLength ) {
+		path.Clear();
+		return true;
+	}
+	if ( path[directoryLength] != '/' && path[directoryLength] != '\\' ) {
+		return false;
+	}
+	path = path.Mid( directoryLength + 1, path.Length() - directoryLength - 1 );
+	return true;
+}
+
+static bool Parser_StripPackArchivePrefix( idStr& path ) {
+	const int pakPathPos = path.Find( ".pk4/", false );
+	if ( pakPathPos >= 0 ) {
+		path = path.Mid( pakPathPos + 5, path.Length() - pakPathPos - 5 );
+		return true;
+	}
+
+	// An archive-root base can end in just "pak-name.pk4", without a slash.
+	const int pakSuffixPos = path.Length() - 4;
+	if ( pakSuffixPos >= 0 && idStr::Icmp( path.c_str() + pakSuffixPos, ".pk4" ) == 0 ) {
+		path.Clear();
+		return true;
+	}
+
+	return false;
+}
+
+static void Parser_NormalizeIncludeBase( idStr& basePath ) {
+	basePath.BackSlashesToSlashes();
+	if ( Parser_StripPackArchivePrefix( basePath ) ) {
+		return;
+	}
+
+	idStr configuredGame;
+	idStr configuredGameBase;
+	if ( idLib::cvarSystem != NULL ) {
+		configuredGame = idLib::cvarSystem->GetCVarString( "fs_game" );
+		configuredGameBase = idLib::cvarSystem->GetCVarString( "fs_game_base" );
+		configuredGame.BackSlashesToSlashes();
+		configuredGameBase.BackSlashesToSlashes();
+		configuredGame.StripTrailing( '/' );
+		configuredGameBase.StripTrailing( '/' );
+	}
+
+	if ( Parser_StripLeadingGameDirectory( basePath, configuredGame.c_str() ) ||
+		Parser_StripLeadingGameDirectory( basePath, configuredGameBase.c_str() ) ||
+		Parser_StripLeadingGameDirectory( basePath, OPENQ4_GAMEDIR ) ||
+		Parser_StripLeadingGameDirectory( basePath, BASE_GAMEDIR ) ||
+		Parser_StripLeadingGameDirectory( basePath, BASE_MPGAMEDIR ) ) {
+		return;
+	}
+
+	// OSPathToRelativePath expects an absolute path. Passing an already-relative
+	// qpath produces a warning for every script include on case-sensitive hosts.
+	if ( Parser_IsAbsolutePath( basePath ) ) {
+		const char* relativePath = idLib::fileSystem->OSPathToRelativePath( basePath );
+		if ( relativePath != NULL && relativePath[0] != '\0' ) {
+			basePath = relativePath;
+		}
+	}
+}
+
 /*
 ================
 idParser::Directive_include
@@ -919,6 +1065,11 @@ idParser::Directive_include
 */
 int idParser::Directive_include( void ) {
 	idLexer *script;
+	const auto loadInclude = [&]( const char *path ) {
+		const int loaded = script->LoadFile( path, OSPath );
+		idParserSourceObserver::Notify( this, path, loaded ? script->buffer : NULL, loaded ? script->length : -1 );
+		return loaded;
+	};
 	idToken token;
 	idStr path;
 
@@ -932,48 +1083,36 @@ int idParser::Directive_include( void ) {
 	}
 	if ( token.type == TT_STRING ) {
 		script = new idLexer;
-		// try relative to the current file
-		idStr basePath = scriptstack->GetFileName();
-		basePath.BackSlashesToSlashes();
-		basePath.StripFilename();
-
-		// Normalize to a game-relative path to avoid absolute OS/pk4 paths in includes.
-		idStr relBase = basePath;
-		int pakPos = relBase.Find( ".pk4/" );
-		if ( pakPos >= 0 ) {
-			relBase = relBase.Mid( pakPos + 5, relBase.Length() - ( pakPos + 5 ) );
-		} else {
-			const char *rel = idLib::fileSystem->OSPathToRelativePath( relBase );
-			if ( rel && rel[0] ) {
-				relBase = rel;
-			}
-		}
-
+		// Try relative to the current file, using a game-relative qpath even when
+		// the lexer reports an OS or pk4-backed filename.
+		idStr relBase = scriptstack->GetFileName();
+		relBase.BackSlashesToSlashes();
+		// Convert the complete filename first: an empty relative directory is
+		// the valid VFS root, but an empty OS-path conversion also means failure.
+		Parser_NormalizeIncludeBase( relBase );
+		relBase.StripFilename();
 		relBase.StripTrailing( '/' );
-		relBase.StripTrailing( '\\' );
 
 		idStr tokenStr = token.c_str();
 		tokenStr.BackSlashesToSlashes();
 
-		if ( relBase.Length() ) {
+		if ( relBase.Length() > 0 ) {
 			relBase += "/";
-			// Avoid duplicate prefixes when the include already starts with the base path.
-			if ( idStr::Icmpn( tokenStr, relBase, relBase.Length() ) == 0 ) {
-				path = tokenStr;
-			} else {
-				path = relBase + tokenStr;
-			}
+			// Avoid scripts/scripts/... when an include already carries its qpath.
+			path = ( idStr::Icmpn( tokenStr, relBase, relBase.Length() ) == 0 )
+				? tokenStr
+				: relBase + tokenStr;
 		} else {
 			path = tokenStr;
 		}
 
-		if ( !script->LoadFile( path, OSPath ) ) {
+		if ( !loadInclude( path ) ) {
 			// try absolute path
 			path = token;
-			if ( !script->LoadFile( path, OSPath ) ) {
+			if ( !loadInclude( path ) ) {
 				// try from the include path
 				path = includepath + token;
-				if ( !script->LoadFile( path, OSPath ) ) {
+				if ( !loadInclude( path ) ) {
 					delete script;
 					script = NULL;
 				}
@@ -1003,7 +1142,7 @@ int idParser::Directive_include( void ) {
 			return true;
 		}
 		script = new idLexer;
-		if ( !script->LoadFile( includepath + path, OSPath ) ) {
+		if ( !loadInclude( includepath + path ) ) {
 			delete script;
 			script = NULL;
 		}
@@ -1311,7 +1450,7 @@ typedef struct operator_s
 
 typedef struct value_s
 {
-	signed long int intvalue;
+	int32_t intvalue;
 	double floatvalue;
 	int parentheses;
 	struct value_s *prev, *next;
@@ -1382,7 +1521,7 @@ int PC_OperatorPriority(int op) {
 
 #define FreeOperator(op)
 
-int idParser::EvaluateTokens( idToken *tokens, signed long int *intvalue, double *floatvalue, int integer ) {
+int idParser::EvaluateTokens( idToken *tokens, int32_t *intvalue, double *floatvalue, int integer ) {
 	operator_t *o, *firstoperator, *lastoperator;
 	value_t *v, *firstvalue, *lastvalue, *v1, *v2;
 	idToken *t;
@@ -1468,7 +1607,7 @@ int idParser::EvaluateTokens( idToken *tokens, signed long int *intvalue, double
 				//v = (value_t *) GetClearedMemory(sizeof(value_t));
 				AllocValue(v);
 				if (negativevalue) {
-					v->intvalue = - t->GetIntValue();
+					v->intvalue = idParser_Int32Negate( static_cast<int32_t>( t->GetIntValue() ) );
 					v->floatvalue = - t->GetFloatValue();
 				}
 				else {
@@ -1667,9 +1806,9 @@ int idParser::EvaluateTokens( idToken *tokens, signed long int *intvalue, double
 		switch(o->op) {
 			case P_LOGIC_NOT:		v1->intvalue = !v1->intvalue;
 									v1->floatvalue = !v1->floatvalue; break;
-			case P_BIN_NOT:			v1->intvalue = ~v1->intvalue;
+			case P_BIN_NOT:			v1->intvalue = idParser_Int32FromBits( ~idParser_Int32Bits( v1->intvalue ) );
 									break;
-			case P_MUL:				v1->intvalue *= v2->intvalue;
+			case P_MUL:				v1->intvalue = idParser_Int32Multiply( v1->intvalue, v2->intvalue );
 									v1->floatvalue *= v2->floatvalue; break;
 			case P_DIV:				if (!v2->intvalue || !v2->floatvalue)
 									{
@@ -1677,7 +1816,7 @@ int idParser::EvaluateTokens( idToken *tokens, signed long int *intvalue, double
 										error = 1;
 										break;
 									}
-									v1->intvalue /= v2->intvalue;
+									v1->intvalue = idParser_Int32Divide( v1->intvalue, v2->intvalue );
 									v1->floatvalue /= v2->floatvalue; break;
 			case P_MOD:				if (!v2->intvalue)
 									{
@@ -1685,10 +1824,10 @@ int idParser::EvaluateTokens( idToken *tokens, signed long int *intvalue, double
 										error = 1;
 										break;
 									}
-									v1->intvalue %= v2->intvalue; break;
-			case P_ADD:				v1->intvalue += v2->intvalue;
+									v1->intvalue = idParser_Int32Modulo( v1->intvalue, v2->intvalue ); break;
+			case P_ADD:				v1->intvalue = idParser_Int32Add( v1->intvalue, v2->intvalue );
 									v1->floatvalue += v2->floatvalue; break;
-			case P_SUB:				v1->intvalue -= v2->intvalue;
+			case P_SUB:				v1->intvalue = idParser_Int32Subtract( v1->intvalue, v2->intvalue );
 									v1->floatvalue -= v2->floatvalue; break;
 			case P_LOGIC_AND:		v1->intvalue = v1->intvalue && v2->intvalue;
 									v1->floatvalue = v1->floatvalue && v2->floatvalue; break;
@@ -1706,15 +1845,25 @@ int idParser::EvaluateTokens( idToken *tokens, signed long int *intvalue, double
 									v1->floatvalue = v1->floatvalue > v2->floatvalue; break;
 			case P_LOGIC_LESS:		v1->intvalue = v1->intvalue < v2->intvalue;
 									v1->floatvalue = v1->floatvalue < v2->floatvalue; break;
-			case P_RSHIFT:			v1->intvalue >>= v2->intvalue;
+			case P_RSHIFT:			if ( !idParser_IsValidShiftCount( v2->intvalue ) ) {
+										idParser::Error( "shift count %d out of range in #if/#elif\n", v2->intvalue );
+										error = 1;
+										break;
+									}
+									v1->intvalue = idParser_Int32ArithmeticRightShift( v1->intvalue, static_cast<uint32_t>( v2->intvalue ) );
 									break;
-			case P_LSHIFT:			v1->intvalue <<= v2->intvalue;
+			case P_LSHIFT:			if ( !idParser_IsValidShiftCount( v2->intvalue ) ) {
+										idParser::Error( "shift count %d out of range in #if/#elif\n", v2->intvalue );
+										error = 1;
+										break;
+									}
+									v1->intvalue = idParser_Int32LeftShift( v1->intvalue, static_cast<uint32_t>( v2->intvalue ) );
 									break;
-			case P_BIN_AND:			v1->intvalue &= v2->intvalue;
+			case P_BIN_AND:			v1->intvalue = idParser_Int32FromBits( idParser_Int32Bits( v1->intvalue ) & idParser_Int32Bits( v2->intvalue ) );
 									break;
-			case P_BIN_OR:			v1->intvalue |= v2->intvalue;
+			case P_BIN_OR:			v1->intvalue = idParser_Int32FromBits( idParser_Int32Bits( v1->intvalue ) | idParser_Int32Bits( v2->intvalue ) );
 									break;
-			case P_BIN_XOR:			v1->intvalue ^= v2->intvalue;
+			case P_BIN_XOR:			v1->intvalue = idParser_Int32FromBits( idParser_Int32Bits( v1->intvalue ) ^ idParser_Int32Bits( v2->intvalue ) );
 									break;
 			case P_COLON:
 			{
@@ -1807,7 +1956,7 @@ int idParser::EvaluateTokens( idToken *tokens, signed long int *intvalue, double
 idParser::Evaluate
 ================
 */
-int idParser::Evaluate( signed long int *intvalue, double *floatvalue, int integer ) {
+int idParser::Evaluate( int32_t *intvalue, double *floatvalue, int integer ) {
 	idToken token, *firsttoken, *lasttoken;
 	idToken *t, *nexttoken;
 	define_t *define;
@@ -1898,7 +2047,7 @@ int idParser::Evaluate( signed long int *intvalue, double *floatvalue, int integ
 idParser::DollarEvaluate
 ================
 */
-int idParser::DollarEvaluate( signed long int *intvalue, double *floatvalue, int integer) {
+int idParser::DollarEvaluate( int32_t *intvalue, double *floatvalue, int integer ) {
 	int indent, defined = false;
 	idToken token, *firsttoken, *lasttoken;
 	idToken *t, *nexttoken;
@@ -2000,7 +2149,7 @@ idParser::Directive_elif
 ================
 */
 int idParser::Directive_elif( void ) {
-	signed long int value;
+	int32_t value;
 	int type, skip;
 
 	idParser::PopIndent( &type, &skip );
@@ -2022,7 +2171,7 @@ idParser::Directive_if
 ================
 */
 int idParser::Directive_if( void ) {
-	signed long int value;
+	int32_t value;
 	int skip;
 
 	if ( !idParser::Evaluate( &value, NULL, true ) ) {
@@ -2118,7 +2267,7 @@ idParser::Directive_eval
 ================
 */
 int idParser::Directive_eval( void ) {
-	signed long int value;
+	int32_t value;
 	idToken token;
 	char buf[128];
 
@@ -2131,7 +2280,10 @@ int idParser::Directive_eval( void ) {
 	token.whiteSpaceEnd_p = NULL;
 	token.linesCrossed = 0;
 	token.flags = 0;
-	sprintf(buf, "%d", abs(value));
+	const uint32_t magnitude = value < 0
+		? static_cast<uint32_t>( -static_cast<int64_t>( value ) )
+		: static_cast<uint32_t>( value );
+	sprintf( buf, "%u", magnitude );
 	token = buf;
 	token.type = TT_NUMBER;
 	token.subtype = TT_INTEGER|TT_LONG|TT_DECIMAL;
@@ -2161,7 +2313,7 @@ int idParser::Directive_evalfloat( void ) {
 	token.whiteSpaceEnd_p = NULL;
 	token.linesCrossed = 0;
 	token.flags = 0;
-	sprintf(buf, "%1.2f", idMath::Fabs(value));
+	idStr::snPrintf( buf, sizeof( buf ), "%1.2f", idMath::Fabs(value) );
 	token = buf;
 	token.type = TT_NUMBER;
 	token.subtype = TT_FLOAT|TT_LONG|TT_DECIMAL;
@@ -2257,7 +2409,7 @@ idParser::DollarDirective_evalint
 ================
 */
 int idParser::DollarDirective_evalint( void ) {
-	signed long int value;
+	int32_t value;
 	idToken token;
 	char buf[128];
 
@@ -2270,12 +2422,15 @@ int idParser::DollarDirective_evalint( void ) {
 	token.whiteSpaceEnd_p = NULL;
 	token.linesCrossed = 0;
 	token.flags = 0;
-	sprintf( buf, "%d", abs( value ) );
+	const uint32_t magnitude = value < 0
+		? static_cast<uint32_t>( -static_cast<int64_t>( value ) )
+		: static_cast<uint32_t>( value );
+	sprintf( buf, "%u", magnitude );
 	token = buf;
 	token.type = TT_NUMBER;
 	token.subtype = TT_INTEGER | TT_LONG | TT_DECIMAL | TT_VALUESVALID;
-	token.intvalue = abs( value );
-	token.floatvalue = abs( value );
+	token.intvalue = magnitude;
+	token.floatvalue = magnitude;
 	idParser::UnreadSourceToken( &token );
 	if ( value < 0 ) {
 		idParser::UnreadSignToken();
@@ -2291,7 +2446,11 @@ idParser::DollarDirective_evalfloat
 int idParser::DollarDirective_evalfloat( void ) {
 	double value;
 	idToken token;
-	char buf[128];
+	// openQ4: the evaluator multiplies in doubles and this one formats the
+	// double, so "%1.2f" can run past 300 digits ($evalfloat of
+	// 1e38*1e38*1e38*1e38 already needs 156) and overran the 128 bytes this
+	// used to be. #evalfloat narrows to float first and stays under 50.
+	char buf[512];
 
 	if ( !idParser::DollarEvaluate( NULL, &value, false ) ) {
 		return false;
@@ -2302,11 +2461,11 @@ int idParser::DollarDirective_evalfloat( void ) {
 	token.whiteSpaceEnd_p = NULL;
 	token.linesCrossed = 0;
 	token.flags = 0;
-	sprintf( buf, "%1.2f", fabs( value ) );
+	idStr::snPrintf( buf, sizeof( buf ), "%1.2f", fabs( value ) );
 	token = buf;
 	token.type = TT_NUMBER;
 	token.subtype = TT_FLOAT | TT_LONG | TT_DECIMAL | TT_VALUESVALID;
-	token.intvalue = (unsigned long) fabs( value );
+	token.intvalue = static_cast<unsigned int>( fabs( value ) );
 	token.floatvalue = fabs( value );
 	idParser::UnreadSourceToken( &token );
 	if ( value < 0 ) {
@@ -2755,7 +2914,7 @@ int idParser::ParseInt( void ) {
 	}
 	if ( token.type == TT_PUNCTUATION && token == "-" ) {
 		idParser::ExpectTokenType( TT_NUMBER, TT_INTEGER, &token );
-		return -((signed int) token.GetIntValue());
+		return idParser_Int32Negate( static_cast<int32_t>( token.GetIntValue() ) );
 	}
 	else if ( token.type != TT_NUMBER || token.subtype == TT_FLOAT ) {
 		idParser::Error( "expected integer value, found '%s'", token.c_str() );
@@ -2930,7 +3089,7 @@ void idParser::GetStringFromMarker( idStr& out, bool clean ) {
 	
 	// If cleaning then reparse
 	if ( clean ) {	
-		idParser temp( marker_p, strlen( marker_p ), "temp", flags );
+		idParser temp( marker_p, idLib::SizeToInt( strlen( marker_p ), "idParser::GetStringFromMarker" ), "temp", flags );
 		idToken token;
 		while ( temp.ReadToken ( &token ) ) {
 			out += token;
@@ -3004,6 +3163,8 @@ int idParser::LoadFile( const char *filename, bool OSPath ) {
 		return false;
 	}
 	script = new idLexer( filename, 0, OSPath );
+	idParserSourceObserver::Notify( this, filename, script->IsLoaded() ? script->buffer : NULL,
+		script->IsLoaded() ? script->length : -1 );
 	if ( !script->IsLoaded() ) {
 		delete script;
 		return false;

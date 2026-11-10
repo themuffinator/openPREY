@@ -1,7 +1,6 @@
-
-
-
 #include "Unzip.h"
+
+#include <stdint.h>
 
 /* unzip.h -- IO for uncompress .zip files using zlib 
    Version 0.15 beta, Mar 19th, 1998,
@@ -1100,68 +1099,32 @@ static int unzlocal_getByte(FILE *fin,int *pi)
 */
 static int unzlocal_getShort (FILE* fin, uLong *pX)
 {
-	short	v;
+	uint8_t bytes[2];
+	if ( fread( bytes, 1, sizeof( bytes ), fin ) != sizeof( bytes ) ) {
+		*pX = 0;
+		return ferror( fin ) ? UNZ_ERRNO : UNZ_EOF;
+	}
 
-	fread( &v, sizeof(v), 1, fin );
-
-	*pX = LittleShort( v);
+	const uint16_t value = static_cast<uint16_t>( bytes[0] ) |
+		( static_cast<uint16_t>( bytes[1] ) << 8 );
+	*pX = static_cast<uLong>( value );
 	return UNZ_OK;
-
-/*
-    uLong x ;
-    int i;
-    int err;
-
-    err = unzlocal_getByte(fin,&i);
-    x = (uLong)i;
-    
-    if (err==UNZ_OK)
-        err = unzlocal_getByte(fin,&i);
-    x += ((uLong)i)<<8;
-   
-    if (err==UNZ_OK)
-        *pX = x;
-    else
-        *pX = 0;
-    return err;
-*/
 }
 
 static int unzlocal_getLong (FILE *fin, uLong *pX)
 {
-	int		v;
+	uint8_t bytes[4];
+	if ( fread( bytes, 1, sizeof( bytes ), fin ) != sizeof( bytes ) ) {
+		*pX = 0;
+		return ferror( fin ) ? UNZ_ERRNO : UNZ_EOF;
+	}
 
-	fread( &v, sizeof(v), 1, fin );
-
-	*pX = LittleLong( v);
+	const uint32_t value = static_cast<uint32_t>( bytes[0] ) |
+		( static_cast<uint32_t>( bytes[1] ) << 8 ) |
+		( static_cast<uint32_t>( bytes[2] ) << 16 ) |
+		( static_cast<uint32_t>( bytes[3] ) << 24 );
+	*pX = static_cast<uLong>( value );
 	return UNZ_OK;
-
-/*
-    uLong x ;
-    int i;
-    int err;
-
-    err = unzlocal_getByte(fin,&i);
-    x = (uLong)i;
-    
-    if (err==UNZ_OK)
-        err = unzlocal_getByte(fin,&i);
-    x += ((uLong)i)<<8;
-
-    if (err==UNZ_OK)
-        err = unzlocal_getByte(fin,&i);
-    x += ((uLong)i)<<16;
-
-    if (err==UNZ_OK)
-        err = unzlocal_getByte(fin,&i);
-    x += ((uLong)i)<<24;
-   
-    if (err==UNZ_OK)
-        *pX = x;
-    else
-        *pX = 0;
-    return err;
-*/
 }
 
 
@@ -1702,7 +1665,7 @@ extern int unzSetCurrentFileInfoPosition (unzFile file, unsigned long pos )
 											   &s->cur_file_info_internal,
 											   NULL,0,NULL,0,NULL,0);
 	s->current_file_ok = (err == UNZ_OK);
-	return UNZ_OK;
+	return err;
 }
 
 /*
@@ -2007,7 +1970,15 @@ extern int unzReadCurrentFile  (unzFile file, void *buf, unsigned len)
 		if (pfile_in_zip_read_info->compression_method==0)
 		{
 			uInt uDoCopy,i ;
-			if (pfile_in_zip_read_info->stream.avail_out < 
+
+			// openQ4: a stored entry whose headers claim more uncompressed than
+			// compressed bytes runs out of input with output still wanted, and
+			// this loop then copied nothing forever. Later minizip returns here.
+			if ((pfile_in_zip_read_info->stream.avail_in == 0) &&
+				(pfile_in_zip_read_info->rest_read_compressed == 0))
+				return (iRead==0) ? UNZ_EOF : iRead;
+
+			if (pfile_in_zip_read_info->stream.avail_out <
                             pfile_in_zip_read_info->stream.avail_in)
 				uDoCopy = pfile_in_zip_read_info->stream.avail_out ;
 			else
@@ -2862,12 +2833,19 @@ int inflate_blocks(inflate_blocks_statef *s, z_streamp z, int r)
       s->sub.trees.bb = 7;
       t = inflate_trees_bits(s->sub.trees.blens, &s->sub.trees.bb,
                              &s->sub.trees.tb, s->hufts, z);
+      // openQ4: zlib 1.1.4's fix for the 1.1.3 double free (CVE-2002-0059).
+      // blens was freed here on every error but the mode only left BTREE/DTREE
+      // on a data error, so after a memory error inflate_blocks_reset freed it
+      // again - and a crafted block makes huft_build report one. Free it only
+      // together with the mode change, here and in DTREE below.
       if (t != Z_OK)
       {
-        ZFREE(z, s->sub.trees.blens);
         r = t;
         if (r == Z_DATA_ERROR)
+        {
+          ZFREE(z, s->sub.trees.blens);
           s->mode = BAD;
+        }
         LEAVE
       }
       s->sub.trees.index = 0;
@@ -2928,11 +2906,13 @@ int inflate_blocks(inflate_blocks_statef *s, z_streamp z, int r)
         t = inflate_trees_dynamic(257 + (t & 0x1f), 1 + ((t >> 5) & 0x1f),
                                   s->sub.trees.blens, &bl, &bd, &tl, &td,
                                   s->hufts, z);
-        ZFREE(z, s->sub.trees.blens);
         if (t != Z_OK)
         {
           if (t == (uInt)Z_DATA_ERROR)
+          {
+            ZFREE(z, s->sub.trees.blens);
             s->mode = BAD;
+          }
           r = t;
           LEAVE
         }
@@ -2944,6 +2924,7 @@ int inflate_blocks(inflate_blocks_statef *s, z_streamp z, int r)
         }
         s->sub.decode.codes = c;
       }
+      ZFREE(z, s->sub.trees.blens);
       s->mode = CODES;
     case CODES:
       UPDATE
@@ -3319,7 +3300,7 @@ static int huft_build(uInt *b, uInt n, uInt s, const uInt *d, const uInt *e, inf
 
         /* allocate new table */
         if (*hn + z > MANY)     /* (note: doesn't matter for fixed) */
-          return Z_MEM_ERROR;   /* not enough memory */
+          return Z_DATA_ERROR;  /* overflow of MANY (openQ4: as zlib 1.1.4) */
         u[h] = q = hp + *hn;
         *hn += z;
 
@@ -4460,7 +4441,7 @@ int inflateSyncPoint(z_streamp z)
 voidp zcalloc (voidp opaque, unsigned items, unsigned size)
 {
     if (opaque) items += size - size; /* make compiler happy */
-    return (voidp)Mem_ClearedAlloc(items*size);
+    return (voidp)Mem_ClearedAlloc(static_cast<size_t>(items) * static_cast<size_t>(size));
 }
 
 void  zcfree (voidp opaque, voidp ptr)

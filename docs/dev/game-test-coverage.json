@@ -1,0 +1,420 @@
+{
+  "revision": "4d87dbdb6934307988b371d3c794190a1380f322",
+  "tests": [
+    {
+      "historical": "tools/tests/arena_campaign_presentation_contract.py",
+      "current": "tools/tests/arena_campaign_presentation_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/arm64_abi_contract.py",
+      "current": "tools/tests/arm64_abi_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/binary_token_signed_char_probe.cpp",
+      "current": "tools/tests/binary_token_signed_char_probe.cpp",
+      "disposition": "Native probe registered with Meson; platform restriction follows its compiled contract"
+    },
+    {
+      "historical": "tools/tests/cmdargs_append_contract.py",
+      "current": "tools/tests/cmdargs_append_contract.py",
+      "disposition": "Existing in-tree coverage; do not overwrite"
+    },
+    {
+      "historical": "tools/tests/competitive_match_contracts.py",
+      "current": "tools/tests/game_regression_suite.py",
+      "disposition": "Superseded aggregate runner; all relevant member checks execute through the broader in-tree suite"
+    },
+    {
+      "historical": "tools/tests/crc_checksum_probe.cpp",
+      "current": "tools/tests/crc_checksum_probe.cpp",
+      "disposition": "Native probe registered with Meson; platform restriction follows its compiled contract"
+    },
+    {
+      "historical": "tools/tests/crosshair_cvar_refresh_contract.py",
+      "current": "tools/tests/crosshair_cvar_refresh_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/fixtures/mp_bot_regressions.cpp",
+      "current": "tools/tests/native/MpBotRegressionsFixture.cpp",
+      "disposition": "Existing native bot fixture; current Python/native runner owns this behavior"
+    },
+    {
+      "historical": "tools/tests/lexer_peek_contract.py",
+      "current": "tools/tests/lexer_peek_contract.py",
+      "disposition": "Existing in-tree coverage; do not overwrite"
+    },
+    {
+      "historical": "tools/tests/linux_portability_contract.py",
+      "current": "tools/tests/linux_arm64_source_portability.py",
+      "disposition": "Superseded companion build/idlib contract; current unified coverage owns this behavior"
+    },
+    {
+      "historical": "tools/tests/linux_portability_probe.cpp",
+      "current": "tools/tests/linux_portability_probe.cpp",
+      "disposition": "Native probe registered with Meson; platform restriction follows its compiled contract"
+    },
+    {
+      "historical": "tools/tests/lp64_semantics_probe.cpp",
+      "current": "tools/tests/lp64_semantics_probe.cpp",
+      "disposition": "Native probe registered with Meson; platform restriction follows its compiled contract"
+    },
+    {
+      "historical": "tools/tests/macos_meson_contract.py",
+      "current": "tools/tests/macos_gamelibs_alignment.py",
+      "disposition": "Superseded companion build/idlib contract; current unified coverage owns this behavior"
+    },
+    {
+      "historical": "tools/tests/md4_checksum_probe.cpp",
+      "current": "tools/tests/md4_checksum_probe.cpp",
+      "disposition": "Native probe registered with Meson; platform restriction follows its compiled contract"
+    },
+    {
+      "historical": "tools/tests/md5_checksum_probe.cpp",
+      "current": "tools/tests/md5_checksum_probe.cpp",
+      "disposition": "Native probe registered with Meson; platform restriction follows its compiled contract"
+    },
+    {
+      "historical": "tools/tests/mp_bot_combat.py",
+      "current": "tools/tests/mp_bot_combat.py",
+      "disposition": "Existing in-tree coverage; do not overwrite"
+    },
+    {
+      "historical": "tools/tests/mp_bot_intelligence.py",
+      "current": "tools/tests/mp_bot_intelligence.py",
+      "disposition": "Existing in-tree coverage; do not overwrite"
+    },
+    {
+      "historical": "tools/tests/mp_bot_objectives.py",
+      "current": "tools/tests/mp_bot_objectives.py",
+      "disposition": "Existing in-tree coverage; do not overwrite"
+    },
+    {
+      "historical": "tools/tests/mp_bot_regressions.py",
+      "current": "tools/tests/mp_bot_regressions.py",
+      "disposition": "Existing in-tree coverage; do not overwrite"
+    },
+    {
+      "historical": "tools/tests/mp_bot_team_balance.py",
+      "current": "tools/tests/mp_bot_team_balance.py",
+      "disposition": "Existing in-tree coverage; do not overwrite"
+    },
+    {
+      "historical": "tools/tests/mp_damage_numbers_contract.py",
+      "current": "tools/tests/mp_damage_numbers_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_gametype_selectability.py",
+      "current": "tools/tests/mp_gametype_selectability.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_authentication_contract.py",
+      "current": "tools/tests/mp_match_authentication_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_casual_rules_contract.py",
+      "current": "tools/tests/mp_match_casual_rules_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_control_actions_contract.py",
+      "current": "tools/tests/mp_match_control_actions_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_control_live_adapter_contract.py",
+      "current": "tools/tests/mp_match_control_live_adapter_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_control_model_contract.py",
+      "current": "tools/tests/mp_match_control_model_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_control_projection_contract.py",
+      "current": "tools/tests/mp_match_control_projection_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_deadzone_contract.py",
+      "current": "tools/tests/mp_match_deadzone_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_demo_follow_contract.py",
+      "current": "tools/tests/mp_match_demo_follow_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_disclosure_policy_contract.py",
+      "current": "tools/tests/mp_match_disclosure_policy_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_duel_queue_contract.py",
+      "current": "tools/tests/mp_match_duel_queue_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_duel_result_contract.py",
+      "current": "tools/tests/mp_match_duel_result_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_evidence_contract.py",
+      "current": "tools/tests/mp_match_evidence_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_evidence_observer_contract.py",
+      "current": "tools/tests/mp_match_evidence_observer_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_evidence_storage_contract.py",
+      "current": "tools/tests/mp_match_evidence_storage_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_evidence_view_contract.py",
+      "current": "tools/tests/mp_match_evidence_view_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_flag_map_contract.py",
+      "current": "tools/tests/mp_match_flag_map_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_flow_contract.py",
+      "current": "tools/tests/mp_match_flow_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_freeze_body_contract.py",
+      "current": "tools/tests/mp_match_freeze_body_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_freeze_rescue_contract.py",
+      "current": "tools/tests/mp_match_freeze_rescue_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_item_timing_contract.py",
+      "current": "tools/tests/mp_match_item_timing_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_legacy_admin_contract.py",
+      "current": "tools/tests/mp_match_legacy_admin_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_live_adapter_contract.py",
+      "current": "tools/tests/mp_match_live_adapter_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_local_view_contract.py",
+      "current": "tools/tests/mp_match_local_view_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_operations_contract.py",
+      "current": "tools/tests/mp_match_operations_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_pause_contract.py",
+      "current": "tools/tests/mp_match_pause_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_proposal_contract.py",
+      "current": "tools/tests/mp_match_proposal_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_proposal_lifecycle_contract.py",
+      "current": "tools/tests/mp_match_proposal_lifecycle_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_protocol_contract.py",
+      "current": "tools/tests/mp_match_protocol_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_ranking_contract.py",
+      "current": "tools/tests/mp_match_ranking_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_round_adapter_contract.py",
+      "current": "tools/tests/mp_match_round_adapter_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_round_restart_contract.py",
+      "current": "tools/tests/mp_match_round_restart_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_round_teams_contract.py",
+      "current": "tools/tests/mp_match_round_teams_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_rules_contract.py",
+      "current": "tools/tests/mp_match_rules_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_series_binding_contract.py",
+      "current": "tools/tests/mp_match_series_binding_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_series_checkpoint_contract.py",
+      "current": "tools/tests/mp_match_series_checkpoint_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_series_contract.py",
+      "current": "tools/tests/mp_match_series_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_series_live_transaction_contract.py",
+      "current": "tools/tests/mp_match_series_live_transaction_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_series_recovery_contract.py",
+      "current": "tools/tests/mp_match_series_recovery_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_series_recovery_filesystem_contract.py",
+      "current": "tools/tests/mp_match_series_recovery_filesystem_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_series_report_contract.py",
+      "current": "tools/tests/mp_match_series_report_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_series_report_filesystem_contract.py",
+      "current": "tools/tests/mp_match_series_report_filesystem_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_series_report_storage_contract.py",
+      "current": "tools/tests/mp_match_series_report_storage_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_session_contract.py",
+      "current": "tools/tests/mp_match_session_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_spectator_follow_contract.py",
+      "current": "tools/tests/mp_match_spectator_follow_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_summary_contract.py",
+      "current": "tools/tests/mp_match_summary_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_team_communication_contract.py",
+      "current": "tools/tests/mp_match_team_communication_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_teams_contract.py",
+      "current": "tools/tests/mp_match_teams_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_termination_policy_contract.py",
+      "current": "tools/tests/mp_match_termination_policy_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_transaction_hardening_contract.py",
+      "current": "tools/tests/mp_match_transaction_hardening_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_userinfo_mirror_contract.py",
+      "current": "tools/tests/mp_match_userinfo_mirror_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_view_contract.py",
+      "current": "tools/tests/mp_match_view_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_match_vote_electorate_contract.py",
+      "current": "tools/tests/mp_match_vote_electorate_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_vote_security_contract.py",
+      "current": "tools/tests/mp_vote_security_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/mp_warmup_arsenal_contract.py",
+      "current": "tools/tests/mp_warmup_arsenal_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/presentation_interpolation_contract.py",
+      "current": "tools/tests/presentation_interpolation_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/push_teleport_contract.py",
+      "current": "tools/tests/push_teleport_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    },
+    {
+      "historical": "tools/tests/savegame_corruption_contract.py",
+      "current": "tools/tests/savegame_corruption_contract.py",
+      "disposition": "Existing in-tree coverage; do not overwrite"
+    },
+    {
+      "historical": "tools/tests/source_input_contract.py",
+      "current": "tools/tests/gamelibs_staging.py",
+      "disposition": "Superseded companion build/idlib contract; current unified coverage owns this behavior"
+    },
+    {
+      "historical": "tools/tests/string_allocation_contract.py",
+      "current": "tools/tests/idstr_input_safety.py",
+      "disposition": "Superseded companion build/idlib contract; current unified coverage owns this behavior"
+    },
+    {
+      "historical": "tools/tests/string_allocation_probe.cpp",
+      "current": "tools/tests/string_allocation_probe.cpp",
+      "disposition": "Native probe registered with Meson; platform restriction follows its compiled contract"
+    },
+    {
+      "historical": "tools/tests/vehicle_sound_contract.py",
+      "current": "tools/tests/vehicle_sound_contract.py",
+      "disposition": "Recovered in-tree regression; adapted only where current contracts differ"
+    }
+  ]
+}
