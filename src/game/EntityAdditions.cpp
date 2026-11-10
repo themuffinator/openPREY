@@ -1757,6 +1757,11 @@ void idEntity::Event_Remove( void ) {
 		Hide();
 		return;
 	}
+	// The base destructor switches back to the default physics object, and
+	// hands it the bind master, after subclass-owned physics objects are gone.
+	// Detach while the entity is still whole so that switch never looks up a
+	// master that may itself be mid-removal.
+	Unbind();
 	delete this;
 }
 //HUMANHEAD END
