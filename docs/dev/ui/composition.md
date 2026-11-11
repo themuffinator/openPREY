@@ -91,9 +91,9 @@ channel mismatch above 4/255. It reads the engine's TGA screenshot directly.
 
 ```powershell
 $assets = 'C:\Program Files (x86)\Steam\steamapps\common\Quake 4'
-python tools/ui/capture_legacy_baseline.py --assets $assets --mode sp --renderer gl --retained-document tools/ui/fixtures/composition-smoke.q4ui --density 1.25 --shared-gui --video-restart --profile-frames 60 --output .tmp/ui/composition/sp-gl-review
+python tools/ui/capture_legacy_baseline.py --assets $assets --mode sp --renderer gl --retained-document tools/ui/fixtures/composition-smoke.rui --density 1.25 --shared-gui --video-restart --profile-frames 60 --output .tmp/ui/composition/sp-gl-review
 python tools/ui/verify_composition_capture.py .tmp/ui/composition/sp-gl-review/save/baseoq4/screenshots/ui-baseline.tga --density 1.25
-python tools/ui/capture_legacy_baseline.py --assets $assets --mode mp --renderer vulkan --retained-document tools/ui/fixtures/composition-smoke.q4ui --density 2 --width 1920 --height 1080 --shared-gui --profile-frames 60 --output .tmp/ui/composition/mp-vulkan-review
+python tools/ui/capture_legacy_baseline.py --assets $assets --mode mp --renderer vulkan --retained-document tools/ui/fixtures/composition-smoke.rui --density 2 --width 1920 --height 1080 --shared-gui --profile-frames 60 --output .tmp/ui/composition/mp-vulkan-review
 python tools/ui/verify_composition_capture.py .tmp/ui/composition/mp-vulkan-review/save/baseoq4/screenshots/ui-baseline.tga --density 2
 ```
 

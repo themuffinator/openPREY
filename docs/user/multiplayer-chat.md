@@ -78,5 +78,5 @@ panel. `chatHistory status` reports counts and position without printing message
 ## Quick chat
 
 openQ4's quick-chat wheel (`_quickChat`) belongs to its retained interface.
-Its HUD document, `guis/hud/quick_chat.q4ui`, isn't part of openPREY's `basepr`
+Its HUD document, `guis/hud/quick_chat.rui`, isn't part of openPREY's `basepr`
 content, so the wheel doesn't appear in openPREY.

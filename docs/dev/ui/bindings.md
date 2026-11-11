@@ -163,7 +163,7 @@ After building/staging through the standard Meson wrapper:
 
 ```powershell
 tools/build/meson_setup.ps1 test -C builddir --no-rebuild --print-errorlogs openq4-ui-state openq4-ui-document openq4-ui-vector openq4-retained-ui
-python tools/ui/capture_legacy_baseline.py --assets 'C:\Program Files (x86)\Steam\steamapps\common\Quake 4' --mode sp --renderer gl --retained-document tools/ui/fixtures/binding-smoke.q4ui --retained-script tools/ui/fixtures/binding-smoke.cfg --retained-data tools/ui/fixtures/binding-first.json --retained-data tools/ui/fixtures/binding-final.json --density 1.25 --ui-scale 1.25 --video-restart --output .tmp/ui/state/sp-gl
+python tools/ui/capture_legacy_baseline.py --assets 'C:\Program Files (x86)\Steam\steamapps\common\Quake 4' --mode sp --renderer gl --retained-document tools/ui/fixtures/binding-smoke.rui --retained-script tools/ui/fixtures/binding-smoke.cfg --retained-data tools/ui/fixtures/binding-first.json --retained-data tools/ui/fixtures/binding-final.json --density 1.25 --ui-scale 1.25 --video-restart --output .tmp/ui/state/sp-gl
 python tools/ui/verify_binding_capture.py .tmp/ui/state/sp-gl --output .tmp/ui/state/sp-gl/verification.json
 ```
 

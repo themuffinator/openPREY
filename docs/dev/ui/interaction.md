@@ -233,8 +233,8 @@ implementation or a completed production screen.
 Reproduce using the staged package and installed retail assets:
 
 ```powershell
-python tools/ui/capture_legacy_baseline.py --assets 'C:\Program Files (x86)\Steam\steamapps\common\Quake 4' --mode sp --renderer gl --retained-document tools/ui/fixtures/interaction-smoke.q4ui --retained-script tools/ui/fixtures/interaction-smoke.cfg --density 1.25 --video-restart --profile-frames 60 --output .tmp/ui/interaction/sp-gl-125-qualified
-python tools/ui/capture_legacy_baseline.py --assets 'C:\Program Files (x86)\Steam\steamapps\common\Quake 4' --mode mp --renderer vulkan --retained-document tools/ui/fixtures/interaction-smoke.q4ui --retained-script tools/ui/fixtures/interaction-smoke.cfg --density 2 --width 1920 --height 1080 --profile-frames 60 --output .tmp/ui/interaction/mp-vulkan-200-qualified
+python tools/ui/capture_legacy_baseline.py --assets 'C:\Program Files (x86)\Steam\steamapps\common\Quake 4' --mode sp --renderer gl --retained-document tools/ui/fixtures/interaction-smoke.rui --retained-script tools/ui/fixtures/interaction-smoke.cfg --density 1.25 --video-restart --profile-frames 60 --output .tmp/ui/interaction/sp-gl-125-qualified
+python tools/ui/capture_legacy_baseline.py --assets 'C:\Program Files (x86)\Steam\steamapps\common\Quake 4' --mode mp --renderer vulkan --retained-document tools/ui/fixtures/interaction-smoke.rui --retained-script tools/ui/fixtures/interaction-smoke.cfg --density 2 --width 1920 --height 1080 --profile-frames 60 --output .tmp/ui/interaction/mp-vulkan-200-qualified
 python tools/ui/verify_interaction_capture.py .tmp/ui/interaction/sp-gl-125-qualified
 python tools/ui/verify_interaction_capture.py .tmp/ui/interaction/mp-vulkan-200-qualified
 ```
