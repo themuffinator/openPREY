@@ -2990,6 +2990,12 @@ R_GlobalShaderOverride
 */
 bool R_GlobalShaderOverride( const idMaterial **shader ) {
 
+	// R_RemapShaderBySkin can return NULL, and callers test for that only
+	// after asking for the override.
+	if ( shader == NULL || *shader == NULL ) {
+		return false;
+	}
+
 	if ( !(*shader)->IsDrawn() ) {
 		return false;
 	}

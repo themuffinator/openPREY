@@ -1622,6 +1622,13 @@ void idRestoreGame::ReadRenderEntity( renderEntity_t &renderEntity ) {
 	int i;
 	int index;
 
+	// Fields the save does not carry (suppressSurfaceMask, overlayShader,
+	// referenceSoundHandle, weaponDepthHackInViewID, the LOD, outline and
+	// flat-diffuse parms) must restore to the zero state construction gives
+	// them. Callers such as the inlined static render entities and FX actions
+	// read into storage that was never cleared.
+	renderEntity = renderEntity_t();
+
 	ReadModel( renderEntity.hModel );
 
 	ReadInt( renderEntity.entityNum );

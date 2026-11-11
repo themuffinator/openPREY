@@ -7393,7 +7393,10 @@ idWindow::Interactive
 ================
 */
 bool idWindow::Interactive() {
-	if ( scripts[ ON_ACTION ] ) {
+	// Release-only controls are interactive too: retail Prey's shuttle console
+	// (guis/vehicles/shuttle1.gui) acts from onActionRelease and has no
+	// onAction, so without this it never takes focus and cannot be used.
+	if ( scripts[ ON_ACTION ] || scripts[ ON_ACTIONRELEASE ] ) {
 		return true;
 	}
 	int c = children.Num();

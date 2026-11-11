@@ -804,8 +804,12 @@ void Sys_InitNetworking(void)
 	ifc.ifc_len = MAX_INTERFACES*sizeof( ifreq );
 	ifc.ifc_buf = buf;
 	if ( ioctl( s, SIOCGIFCONF, &ifc ) < 0 ) {
+		// Without the IPv4 interface list only LAN address classification
+		// degrades; that is no reason to stop the engine. IPv6 interfaces are
+		// enumerated separately and may still be available.
 		close( s );
-		common->FatalError( "InitNetworking: SIOCGIFCONF error - %s\n", strerror( errno ) );
+		common->Warning( "Sys_InitNetworking: SIOCGIFCONF failed - %s", strerror( errno ) );
+		Sys_InitIPv6Interfaces();
 		return;
 	}
 	ifindex = 0;

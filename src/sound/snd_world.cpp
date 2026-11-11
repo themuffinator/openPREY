@@ -742,7 +742,13 @@ static float AdjustForCushionChannels( const idStaticList< idActiveChannel, MAX_
 	for( int i = 0; i < activeEmitterChannels.Num(); i++ )
 	{
 		idSoundChannel* chan = activeEmitterChannels[i].channel;
-		chan->volumeDB = MapVolumeFromFadeDB( chan->volumeDB, driftedDB );
+		// Dialogue is already exempt from muting because it cannot restart
+		// without breaking speech and lip sync; the cushion ramp must not fade
+		// it out either. Retail Prey never thinned voice-over under load.
+		if( chan->CanMute() )
+		{
+			chan->volumeDB = MapVolumeFromFadeDB( chan->volumeDB, driftedDB );
+		}
 	}
 
 	return driftedDB;

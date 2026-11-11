@@ -7580,8 +7580,9 @@ void idFileSystemLocal::Init( void ) {
 	if ( fs_cachepath.GetString()[0] == '\0' ) {
 		fs_cachepath.SetString( fs_savepath.GetString() );
 	}
-	// fs_cdpath is locked to the platform content root (the app's Resources
-	// directory on macOS, otherwise the process current directory).
+	// fs_cdpath is locked to the platform content root: the app's Resources
+	// directory on macOS, the executable's directory on Windows and Linux, and
+	// the extracted content root or working directory on Android.
 	fs_cdpath.SetString( Sys_DefaultCDPath() );
 	common->Printf(
 		"Filesystem paths: fs_basepath='%s' fs_homepath='%s' fs_savepath='%s' fs_cachepath='%s' fs_cdpath='%s' fs_devpath='%s' fs_game='%s' fs_game_base='%s'\n",

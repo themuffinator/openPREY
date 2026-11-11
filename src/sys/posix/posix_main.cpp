@@ -873,7 +873,7 @@ void Sys_DLL_Unload( intptr_t handle ) {
 // ---------------------------------------------------------------------------
 
 #if !defined( MACOS_X )
-// Only relevant when specified on the command line. macOS provides a
+// The staged package root that fs_cdpath is locked to. macOS provides a
 // bundle-aware implementation in macos_compat.mm so Finder launches can use
 // the adjacent package root even when their process working directory differs.
 const char *Sys_DefaultCDPath( void ) {
@@ -883,6 +883,17 @@ const char *Sys_DefaultCDPath( void ) {
 	const char *contentRoot = getenv( "OPENQ4_CONTENT_ROOT" );
 	if ( contentRoot != NULL && contentRoot[0] == '/' ) {
 		return contentRoot;
+	}
+#else
+	// Linux packages stage modules and content beside the executable, as on
+	// Windows, so a desktop launcher or a shell started elsewhere must still
+	// find them. Fall back to the working directory if /proc cannot say.
+	static idStr executableDirectory;
+
+	executableDirectory = Sys_EXEPath();
+	executableDirectory.StripFilename();
+	if ( executableDirectory.Length() > 0 ) {
+		return executableDirectory.c_str();
 	}
 #endif
 	return Posix_Cwd();
