@@ -35,7 +35,8 @@ public:
 	virtual bool				GetJointWorldTransform( const char* jointName, idVec3 &offset, idMat3 &axis );
 	virtual bool				GetJointWorldTransform( jointHandle_t jointHandle, idVec3 &offset, idMat3 &axis );
 
-	void						JawFlap(hhAnimator *theAnimator);
+	// openPREY: stillJoint names a joint the view rides; jaw flap leaves it and its ancestors still
+	void						JawFlap(hhAnimator *theAnimator, jointHandle_t stillJoint = INVALID_JOINT);
 
 	void						SpawnFxAlongBonePrefixLocal( const idDict* dict, const char* fxKeyPrefix, const char* bonePrefix, const hhFxInfo* const fxInfo = NULL, const idEventDef* eventDef = NULL );
 	virtual void				BroadcastFxInfoAlongBonePrefix( const idDict* args, const char* fxKey, const char* bonePrefix, const hhFxInfo* const fxInfo = NULL, const idEventDef* eventDef = NULL, bool broadcast = true ); //HUMANHEAD rww - added broadcast

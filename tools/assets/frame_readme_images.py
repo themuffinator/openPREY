@@ -9,10 +9,15 @@ ends, each with a raised 45-degree notch and a triangle marker. Everything
 outside the plate stays transparent, so the frame sits on GitHub's light and
 dark themes alike. See docs/dev/ui-visual-design.md, section 2.
 
-The sources are left untouched; each framed copy is written next to its
-source with a "-framed" suffix. Re-run after replacing a source image:
+This is upstream openQ4's Quake 4 frame. Its olive rails are among the
+divergences docs/dev/prey-ui-visual-design.md rules out, so restyle it to that
+document before framing any openPREY screenshot. openPREY ships no README
+screenshots yet; the upstream Quake 4 shots were removed.
 
-    python tools/assets/frame_readme_images.py
+The sources are left untouched; each framed copy is written next to its
+source with a "-framed" suffix:
+
+    python tools/assets/frame_readme_images.py <name.png> [...]
 """
 from __future__ import annotations
 
@@ -24,12 +29,6 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE_DIR = ROOT / "assets" / "docs" / "img"
-SOURCES = (
-    "readme-airdefense1-cinematic.png",
-    "readme-bloom-hdr.png",
-    "readme-lightgrid.png",
-    "readme-crt.png",
-)
 
 SS = 4  # supersampling factor for the vector layers
 
@@ -182,7 +181,7 @@ def frame_image(src: Image.Image) -> Image.Image:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("names", nargs="*", default=SOURCES, help="source file names under assets/docs/img")
+    parser.add_argument("names", nargs="+", help="source file names under assets/docs/img")
     args = parser.parse_args()
     for name in args.names:
         src_path = IMAGE_DIR / name

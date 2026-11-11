@@ -50,7 +50,7 @@ idVec4	g_color_table[COLOR_INDEX_COUNT] =
 	idVec4(0.0f, 0.0f, 0.0f, 1.0f), // S_COLOR_BLACK
 // RAVEN BEGIN
 // bdube: console color
-	idVec4(0.94f, 0.62f, 0.05f, 1.0f),	// S_COLOR_CONSOLE
+	idVec4(0.64f, 0.98f, 1.0f, 1.0f),	// S_COLOR_CONSOLE; openPREY: prey.portal.core #a4f9fe, was Quake 4 amber
 // RAVEN END	
 	// CPMA/CNQ3 alphabet rainbow colors, adapted via the FnQ3 implementation.
 	idVec4(1.00000f, 0.00000f, 0.00000f, 1.00000f), // a

@@ -14,7 +14,7 @@ code from the engine's GPL-covered code and dependencies.
   resolve against this repository's engine headers.
 - The companion repository's copies of SDK engine headers (`src/idLib/`,
   `src/framework/`, `src/renderer/` and similar), its Visual Studio 2005
-  projects and its `docs-user/` tree were never compiled by openPREY and are not
+  projects and its top-level user-documentation folder were never compiled by openPREY and are not
   imported. They remain available in the imported history.
 - The complete companion history is a merge parent of the import commit and
   remains reachable from openPREY's history, so `git log --follow` traces each

@@ -198,6 +198,7 @@ static idCVar r_borderlessDefaultMigrated( "r_borderlessDefaultMigrated", "0", C
 static idCVar net_rateDefaultMigrated( "net_rateDefaultMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the legacy 25600 B/s network rate caps" );
 static idCVar vr_weaponOffsetDefaultMigrated( "vr_weaponOffsetDefaultMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the VR weapon offsets that held weapons replaced" );
 static idCVar s_audioDefaultsMigrated( "s_audioDefaultsMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER, "number of one-time audio default migrations already applied" );
+static idCVar r_preyDefaultsMigrated( "r_preyDefaultsMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER, "number of one-time openPREY renderer default migrations already applied" );
 
 static void Common_MigrateLegacyConsoleAllowCVar( void ) {
 	idCVar *legacyAllowConsole = cvarSystem->Find( "com_allowConsole" );
@@ -380,6 +381,47 @@ static void Common_MigrateLegacyAudioDefaults( void ) {
 		}
 	}
 	s_audioDefaultsMigrated.SetInteger( OPENQ4_AUDIO_DEFAULTS_MIGRATION_STEPS );
+}
+
+/*
+==================
+Common_MigratePreyRendererDefaults
+
+OPENPREY: one-time moves of archived renderer settings to openPREY's defaults.
+Both cvars are archived, so a configuration written before the default changed
+kept the old value and the new default never reached it.
+
+Step 1:
+- r_useTrueTypeFonts 0 -> 1. The GUI text draws from the shipped .ttf faces at
+  the display's resolution; 0 was the default until 2026-11-11.
+- r_useShadowMap 0 -> 1 for every profile that draws shadows. Shadow maps are
+  the shadow technique on every recipe from Low up; 0 was the default, and
+  every recipe below Enhanced wrote it.
+==================
+*/
+static const int OPENPREY_RENDERER_DEFAULTS_MIGRATION_STEPS = 1;
+
+static void Common_MigratePreyRendererDefaults( void ) {
+	const int applied = r_preyDefaultsMigrated.GetInteger();
+	if ( applied >= OPENPREY_RENDERER_DEFAULTS_MIGRATION_STEPS ) {
+		return;
+	}
+	if ( applied < 1 ) {
+		// The renderer has not registered its cvars yet. A value the saved
+		// config set exists as an unregistered cvar, which registration keeps;
+		// an empty string means the config never set it and the new default
+		// applies on its own.
+		if ( cvarSystem->GetCVarString( "r_useTrueTypeFonts" )[0] != '\0' && !cvarSystem->GetCVarBool( "r_useTrueTypeFonts" ) ) {
+			common->Printf( "Migrating legacy renderer config: r_useTrueTypeFonts 0 -> 1 (scalable GUI text)\n" );
+			cvarSystem->SetCVarBool( "r_useTrueTypeFonts", true, CVAR_ARCHIVE );
+		}
+		const bool drawsShadows = cvarSystem->GetCVarString( "r_shadows" )[0] == '\0' || cvarSystem->GetCVarBool( "r_shadows" );
+		if ( drawsShadows && cvarSystem->GetCVarString( "r_useShadowMap" )[0] != '\0' && !cvarSystem->GetCVarBool( "r_useShadowMap" ) ) {
+			common->Printf( "Migrating legacy renderer config: r_useShadowMap 0 -> 1 (shadow maps are the default shadow technique)\n" );
+			cvarSystem->SetCVarBool( "r_useShadowMap", true, CVAR_ARCHIVE );
+		}
+	}
+	r_preyDefaultsMigrated.SetInteger( OPENPREY_RENDERER_DEFAULTS_MIGRATION_STEPS );
 }
 
 static int commonLastPresentationCap = -1;
@@ -3553,8 +3595,8 @@ r_shaderLevel picks each material's shaderLevelN/shaderFallbackN stages (skin,
 cloth, liquid and organic-wall programs). Retail chose it from the video card;
 every device above the two shadowless recipes runs the highest level.
 
-r_shadowMapPointLights is forced on for every recipe: see the note where it is
-set.
+r_shadowMapPointLights is forced on for every recipe, and r_useShadowMap for
+every recipe that draws shadows: see the note where they are set.
 ===============
 */
 struct openPREYPresetExtras_t {
@@ -3564,15 +3606,16 @@ struct openPREYPresetExtras_t {
 	int correctSpecular;
 	int normalizeBumpmap;
 	int fastSkinning;
+	int shadowMaps;		// 1 = r_useShadowMap 1; the shadowless recipes leave the table's 0
 };
 
 static const openPREYPresetExtras_t OPENPREY_PRESET_EXTRAS[] = {
-	{ "minimum",	0, 1, 0, 0, 1 },
-	{ "lowpower",	1, 1, 0, 0, 1 },
-	{ "low",		2, 0, 1, 1, 0 },
+	{ "minimum",	0, 1, 0, 0, 1, 0 },
+	{ "lowpower",	1, 1, 0, 0, 1, 0 },
+	{ "low",		2, 0, 1, 1, 0, 1 },
 };
 // Performance and every recipe above it.
-static const openPREYPresetExtras_t OPENPREY_PRESET_EXTRAS_FULL = { "", 3, 0, 1, 1, 0 };
+static const openPREYPresetExtras_t OPENPREY_PRESET_EXTRAS_FULL = { "", 3, 0, 1, 1, 0, 1 };
 
 static void Common_SetPreyPresetExtra( const char *name, int value, int defaultValue, bool firstLaunch ) {
 	idCVar *cvar = cvarSystem->Find( name );
@@ -3606,14 +3649,26 @@ static void Common_ApplyPreyPerformancePresetExtras( const char *presetName, boo
 	// Shadow maps mean point lights here. The shared table's Enhanced recipe
 	// leaves them on stencil volumes, which suits Quake 4's forty-light halls;
 	// in Prey all 602 lights of feedingtowerb are point lights (four of them
-	// parallel), so that recipe turned shadow maps on and mapped nothing. The
-	// recipes below Enhanced keep r_useShadowMap 0 and are unaffected. This one
-	// is set by the table itself, so only a launch option counts as the
+	// parallel), so that recipe turned shadow maps on and mapped nothing. This
+	// one is set by the table itself, so only a launch option counts as the
 	// player's own value on a first launch.
 	if ( !firstLaunch || !Common_HasStartupVariable( "r_shadowMapPointLights" ) ) {
 		idCVar *pointLights = cvarSystem->Find( "r_shadowMapPointLights" );
 		if ( pointLights != NULL ) {
 			pointLights->SetBool( true );
+		}
+	}
+
+	// Shadow maps are openPREY's shadow technique on every recipe that draws
+	// shadows, not only from Enhanced up as in the shared table: Prey's stencil
+	// volumes are the retail fallback, used per light when a map cannot be
+	// built. Each recipe keeps the table's map size, filter and update budget.
+	// As above, only a launch option counts as the player's own value on a
+	// first launch, because the table has just set this cvar itself.
+	if ( extras->shadowMaps && ( !firstLaunch || !Common_HasStartupVariable( "r_useShadowMap" ) ) ) {
+		idCVar *shadowMaps = cvarSystem->Find( "r_useShadowMap" );
+		if ( shadowMaps != NULL ) {
+			shadowMaps->SetBool( true );
 		}
 	}
 }
@@ -8195,6 +8250,7 @@ void idCommonLocal::InitGame( void ) {
 	Common_MigrateLegacyNetworkRateCaps();
 	Common_MigrateLegacyVRWeaponOffsets();
 	Common_MigrateLegacyAudioDefaults();
+	Common_MigratePreyRendererDefaults();	// OPENPREY
 
 	// cvars are initialized, but not the rendering system. Allow preference startup dialog
 	Sys_DoPreferences();

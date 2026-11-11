@@ -14,6 +14,9 @@ Engine changes merged from openQ4 are listed in openQ4's own release notes. They
 
 - Merged openQ4 engine work through upstream `b4d3fd700` (November 2026), adapted to PREY's v7 game API. It includes the extended graphics presets with Auto-Detect, the classic menus laid out like the new interface, and cached shadow casters and projected shadow maps on Vulkan.
 - Rebase hardening: guards for the render-demo header, the network rate defaults (32000), the GUI stream marker and window-flag layout, and the loading-music declaration scope; the missing autosave string `#str_107240`; lazy loading of dormant ARB programs; the particle deform implementation; and image alias handling.
+- Shadow maps are the default shadow technique (`r_useShadowMap 1`) on every preset that draws shadows, Low, Performance and Balanced included; stencil volumes remain the per-light fallback. TrueType text is the default (`r_useTrueTypeFonts 1`). Configurations saved with the old values are moved to the new defaults once (`r_preyDefaultsMigrated`).
+- Vulkan draws PREY's glow overlay: every `glowStage` material stage is redrawn into a black copy of the view, blurred per axis with `r_glowSteps`, `r_glowAlpha` and `r_glowAlphaChange`, and added over the scene at `r_glowStrength`, as the OpenGL renderer does.
+- The in-game and system consoles use the PREY palette instead of Quake 4 amber and olive: the in-game console keeps a black field with portal-cyan text and edge, and the system console is dark Sphere-shell slate.
 
 ## Build and CI
 

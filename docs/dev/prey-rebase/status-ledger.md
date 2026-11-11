@@ -189,7 +189,7 @@ conservative validation states unless that evidence directly exercises them.
 | TODO | Scope | Required closure evidence |
 |---|---|---|
 | TODO-D9 | MVD, bots, and repeater integration against Prey API v7 remain compile-time gated off by `OPENPREY_ENABLE_MVD=0`, `OPENPREY_ENABLE_BOTS=0`, and `OPENPREY_ENABLE_REPEATER=0`. | Adapt their schema/call sites without extending the v7 ABI; add focused automated and MP runtime coverage. |
-| TODO-D10 | TTF variant of `ui-02-retail-spline-text-effect`; bitmap-font implementation is ported. | Enable TTF only for a focused test, compare retail credits, adapt the glyph path if needed, then decide the default. |
+| TODO-D10 | TTF variant of `ui-02-retail-spline-text-effect`; bitmap-font implementation is ported. TrueType is the default (`r_useTrueTypeFonts 1`) since 2026-11-11. | Compare retail credits against the TTF path and adapt the glyph path if needed. |
 | TODO-RENDER-BACKENDS | Prey feature parity for ModernGL and Vulkan; legacy GL/ARB2 is the first target. | Backend-specific material, interaction, portal, spirit, glow, and beam captures from the engine `screenshot` command. |
 | TODO-BSE-NESTED-EFFECTS | Nested BSE `SEG_EFFECT` spawning is gated; the core BSE subsystem itself is active. | Add a Prey-v7-compatible callback/spawn path and validate stock nested FX with engine logs and screenshots. |
 | TODO-SOUND-DSP | `SetSpiritWalkEffect` and `SetVoiceDucker` are compatibility no-ops. | Implement DSP behavior or document a permanent compatibility no-op with audio tests. |

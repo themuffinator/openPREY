@@ -297,7 +297,7 @@ void hhAnimatedEntity::Event_SpawnFXAlongBone( idList<idStr>* fxParms ) {
 
 // HUMANHEAD pdm: Jaw flapping support
 // This provides generalized support for any animated entity to translate voice channel sound to bone movements
-void hhAnimatedEntity::JawFlap(hhAnimator *theAnimator) {
+void hhAnimatedEntity::JawFlap(hhAnimator *theAnimator, jointHandle_t stillJoint) {
 	PROFILE_SCOPE("Jaw Flap", PROFMASK_NORMAL);
 	float amplitude = 0.0f;
 
@@ -347,12 +347,28 @@ void hhAnimatedEntity::JawFlap(hhAnimator *theAnimator) {
 
 		lastAmplitude = amplitude;
 		//HUMANHEAD rww - changed to use a list and not do constant runtime joint lookups
+		const idDeclModelDef *modelDef = theAnimator->ModelDef();
 		for (int i = 0; i < jawFlapList.Num(); i++) {
 			jawFlapInfo_t &flapInfo = jawFlapList[i];
 
+			// openPREY: a bone that carries the joint the view rides (the player's head
+			// bone under the roadhouse mirror camera) stays put, or the view nods with
+			// every syllable. Its mods are reset so an earlier flap does not hold.
+			bool carriesView = false;
+			if (stillJoint != INVALID_JOINT && modelDef) {
+				for (int joint = stillJoint; joint != INVALID_JOINT; ) {
+					if (joint == flapInfo.bone) {
+						carriesView = true;
+						break;
+					}
+					const jointInfo_t *info = modelDef->GetJoint(joint);
+					joint = info ? info->parentNum : INVALID_JOINT;
+				}
+			}
+
 			// Handle Rotation
 			idAngles angles = ang_zero;
-			if (amplitude > flapInfo.rMinThreshold) {
+			if (!carriesView && amplitude > flapInfo.rMinThreshold) {
 				float factor = amplitude - flapInfo.rMinThreshold;
 				angles = idAngles(factor*flapInfo.rMagnitude[0], factor*flapInfo.rMagnitude[1], factor*flapInfo.rMagnitude[2]);
 			}
@@ -360,7 +376,7 @@ void hhAnimatedEntity::JawFlap(hhAnimator *theAnimator) {
 
 			// Handle translation
 			idVec3 translate = vec3_origin;
-			if (amplitude > flapInfo.tMinThreshold) {
+			if (!carriesView && amplitude > flapInfo.tMinThreshold) {
 				float factor = amplitude - flapInfo.tMinThreshold;
 				translate = idVec3(factor*flapInfo.tMagnitude[0], factor*flapInfo.tMagnitude[1], factor*flapInfo.tMagnitude[2]);
 			}

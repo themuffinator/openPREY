@@ -117,6 +117,9 @@ bool VK_PostProcess_PrepareSSAOField( const viewDef_t *viewDef );
 bool VK_PostProcess_DrawSceneEffects( const viewDef_t *viewDef );
 bool VK_SceneEffects_DrawPreFog( const viewDef_t *viewDef, int processed );
 bool VK_PostProcess_DrawUnderwater( const viewDef_t *viewDef );
+bool VK_PostProcess_GlowRequested( const viewDef_t *viewDef );
+bool VK_PostProcess_BeginGlow( const viewDef_t *viewDef );
+bool VK_PostProcess_FinishGlow( const viewDef_t *viewDef );
 void VK_DebugTools_DrawView( const viewDef_t *viewDef );
 #include "../SavePreviewCapture.h"
 static void VK_ConsumeSavePreview( int slot );
@@ -517,6 +520,7 @@ typedef struct vkGuiExecutor_s {
 	// (RB_UseAlphaToCoverage); VK_GuiExecutor_GetPipeline honours it on
 	// multisampled targets
 	bool				alphaToCoverageSurface;
+	bool				glowViewOnly;		// VK_Exec_DrawGlowOverlay: draw glowStage stages only
 	vkGuiPipeline_t		screenPipelines[ VK_MAX_SCREEN_PIPELINES ];
 	int					numScreenPipelines;
 	vkCubePipeline_t	cubePipelines[ VK_MAX_CUBE_PIPELINES ];
@@ -12549,7 +12553,7 @@ static void VK_Exec_DrawAmbientStages( const viewDef_t *viewDef, const drawSurf_
 	const idMaterial *shader = drawSurf->material;
 	const float *regs = drawSurf->shaderRegisters;
 	bool nativePBRDiagnosticDrawn = false;
-	if ( worldDepthState && shader->Coverage() != MC_TRANSLUCENT ) {
+	if ( worldDepthState && shader->Coverage() != MC_TRANSLUCENT && !vkExec.glowViewOnly ) {
 		const bool pbrSurfaceDrawn = VK_PBR_DrawEnvironment( cmd, viewDef, drawSurf, tri, mvp );
 		nativePBRDiagnosticDrawn = pbrSurfaceDrawn
 			&& r_pbrDebug.GetInteger() != 0 && r_pbrDebug.GetInteger() != 6;
@@ -12558,6 +12562,10 @@ static void VK_Exec_DrawAmbientStages( const viewDef_t *viewDef, const drawSurf_
 	for ( int stageNum = 0; stageNum < shader->GetNumStages(); stageNum++ ) {
 		const shaderStage_t *pStage = shader->GetStage( stageNum );
 
+		// RB_STD_T_RenderShaderPasses: a glow view draws its glow stages alone
+		if ( vkExec.glowViewOnly && !pStage->glowStage ) {
+			continue;
+		}
 		if ( regs != NULL && regs[ pStage->conditionRegister ] == 0 ) {
 			continue;
 		}
@@ -15316,6 +15324,121 @@ bool VK_Exec_DrawWorldDepth( const viewDef_t *viewDef, bool ( *accept )( const d
 	return true;
 }
 
+/*
+====================
+VK_Exec_DrawGlowOverlay
+
+RB_STD_GlowOverlay (draw_common.cpp). Prey marks emissive material stages
+glowStage; after the post-process surfaces OpenGL redraws only those stages
+into a black copy of the view, blurs it and adds it over the scene. Here the
+scene is kept and the colour cleared by VK_PostProcess_BeginGlow, the stages
+draw through the ordinary ambient-stage path against the view's own depth
+(OpenGL refills that depth first; the scene's is the same fill), and
+VK_PostProcess_FinishGlow blurs and composites.
+
+A view drawing into more than one colour attachment (the HDR preview's
+radiance target) is left alone: the glow-only stages would land in the
+extra attachments too, which the composite does not restore.
+====================
+*/
+static bool VK_Exec_MaterialHasGlowStage( const idMaterial *material ) {
+	if ( material == NULL ) {
+		return false;
+	}
+	for ( int i = 0; i < material->GetNumStages(); i++ ) {
+		if ( material->GetStage( i )->glowStage ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool VK_Exec_DrawGlowOverlay( const viewDef_t *viewDef, const VkViewport &sceneViewport ) {
+	if ( !VK_PostProcess_GlowRequested( viewDef ) || vkExec.activePipelineTarget.colorCount != 1 ) {
+		return false;
+	}
+	drawSurf_t **drawSurfs = viewDef->drawSurfs;
+	const int numDrawSurfs = viewDef->numDrawSurfs;
+	bool anyGlow = false;
+	for ( int i = 0; i < numDrawSurfs && !anyGlow; i++ ) {
+		anyGlow = drawSurfs[ i ] != NULL && VK_Exec_MaterialHasGlowStage( drawSurfs[ i ]->material );
+	}
+	if ( !anyGlow || !VK_PostProcess_BeginGlow( viewDef ) ) {
+		return false;
+	}
+
+	VkCommandBuffer cmd = vkExec.cmd;
+	const int slot = vkExec.frameSlot;
+	const int fbHeight = VK_Exec_ActiveFramebufferHeight();
+	VkViewport viewport = sceneViewport;
+	viewport.maxDepth = 1.0f;
+	vkCmdSetViewport( cmd, 0, 1, &viewport );
+	vkCmdSetStencilTestEnable( cmd, VK_FALSE );
+	const viewEntity_t *currentSpace = NULL;
+	bool weaponDepthRange = false;
+	float mvp[ 16 ];
+
+	vkExec.glowViewOnly = true;
+	for ( int surfNum = 0; surfNum < numDrawSurfs; surfNum++ ) {
+		const drawSurf_t *drawSurf = drawSurfs[ surfNum ];
+		if ( drawSurf == NULL || drawSurf->space == NULL ) {
+			continue;
+		}
+		const idMaterial *shader = drawSurf->material;
+		if ( !VK_Exec_MaterialHasGlowStage( shader ) || shader->IsPortalSky() ) {
+			continue;
+		}
+		if ( R_ClassicGuiDomain_IsLegacyInWorldDrawOwned( viewDef,
+				CLASSIC_GUI_DOMAIN_BACKEND_VULKAN, drawSurf ) ) {
+			continue;
+		}
+		const srfTriangles_t *tri = drawSurf->geo;
+		if ( tri == NULL || tri->numIndexes <= 0 || tri->indexes == NULL || tri->ambientCache == NULL ) {
+			continue;
+		}
+		if ( !VK_Exec_BindTriGeometry( cmd, slot, tri ) ) {
+			continue;
+		}
+		VK_Exec_SetSurfScissor( cmd, viewDef, drawSurf, fbHeight );
+		if ( drawSurf->space != currentSpace ) {
+			currentSpace = drawSurf->space;
+			const bool wantWeaponRange = drawSurf->space->weaponDepthHack;
+			if ( wantWeaponRange != weaponDepthRange ) {
+				weaponDepthRange = wantWeaponRange;
+				viewport.maxDepth = wantWeaponRange ? 0.5f : 1.0f;
+				vkCmdSetViewport( cmd, 0, 1, &viewport );
+			}
+		}
+		VK_BuildSurfMVP( viewDef, drawSurf, mvp );
+		switch ( shader->GetCullType() ) {
+			case CT_TWO_SIDED:
+				vkCmdSetCullMode( cmd, VK_CULL_MODE_NONE );
+				break;
+			case CT_BACK_SIDED:
+				vkCmdSetCullMode( cmd, viewDef->isMirror ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT );
+				break;
+			default:
+				vkCmdSetCullMode( cmd, viewDef->isMirror ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_FRONT_BIT );
+				break;
+		}
+		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+			vkCmdSetDepthBiasEnable( cmd, VK_TRUE );
+			vkCmdSetDepthBias( cmd, r_offsetUnits.GetFloat() * shader->GetPolygonOffset(), 0.0f, r_offsetFactor.GetFloat() );
+		}
+		vkCmdSetDepthTestEnable( cmd, VK_TRUE );
+		vkExec.alphaToCoverageSurface = VK_Exec_UseAlphaToCoverage( shader );
+		VK_Exec_DrawAmbientStages( viewDef, drawSurf, tri, mvp, true );
+		vkExec.alphaToCoverageSurface = false;
+		if ( shader->TestMaterialFlag( MF_POLYGONOFFSET ) ) {
+			vkCmdSetDepthBiasEnable( cmd, VK_FALSE );
+		}
+	}
+	vkExec.glowViewOnly = false;
+
+	VK_PostProcess_FinishGlow( viewDef );
+	return true;
+}
+
 void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 	VK_HDRScene_ResetView();
 	VK_PBR_PrepareBakedView( NULL );
@@ -15881,6 +16004,15 @@ void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 				CLASSIC_SPECIAL_FRAME_SCOPE_RENDER_DEMO,
 				CLASSIC_SPECIAL_FRAME_BACKEND_VULKAN, numDrawSurfs ) ) {
 		common->Warning( "Vulkan: shared render-demo coverage rejected after committed view" );
+	}
+
+	// RB_STD_DrawView isolates and blurs the authored glow stages once the
+	// post-process surfaces are in, before the underwater view
+	if ( VK_Exec_DrawGlowOverlay( viewDef, viewport ) ) {
+		currentSpace = NULL;
+		weaponDepthRange = false;
+		viewport.maxDepth = 1.0f;
+		vkCmdSetViewport( cmd, 0, 1, &viewport );
 	}
 
 	// RC_DRAW_SPECIAL_EFFECTS immediately precedes this view in the command

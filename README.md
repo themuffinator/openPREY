@@ -7,13 +7,13 @@
 **The modern way to play PREY.**<br>
 An open-source engine and game-code replacement that runs the original 2006 game on today's Windows and Linux PCs.
 
-[![Status](https://img.shields.io/badge/status-early%20development-d97a1f.svg)](TECHNICAL.md#prey-compatibility-status)
+[![Status](https://img.shields.io/badge/status-early%20development-d97a1f.svg)](docs/user/release-status.md)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-lightgrey.svg)](#platforms-and-requirements)
 [![Licensing](https://img.shields.io/badge/licence-GPL%20engine%20%7C%20SDK%20game%20code-blue.svg)](LICENSING.md)
 [![Proudly vibecoded](assets/docs/img/badge-proudly-vibecoded.svg)](AGENTS.md)
 
-<a href="BUILDING.md"><img src="https://img.shields.io/badge/Build-openPREY%20from%20source-2d8f4e?style=for-the-badge&logo=github" alt="Build openPREY from source"></a>
-<a href="https://discord.gg/T32mFejwR4"><img src="https://img.shields.io/badge/Join%20the-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the DarkMatter Discord"></a>
+[![Build openPREY from source](https://img.shields.io/badge/Build-openPREY%20from%20source-2d8f4e?style=for-the-badge&logo=github)](BUILDING.md)
+[![Join the DarkMatter Discord](https://img.shields.io/badge/Join%20the-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/T32mFejwR4)
 
 [Quick start](#quick-start) · [Features](#features) · [Platforms](#platforms-and-requirements) · [Guides](#player-guides) · [Help](#getting-help) · [Build from source](BUILDING.md)
 
@@ -27,7 +27,7 @@ openPREY replaces PREY's engine and game binaries with its own: a GPL engine bui
 > openPREY does **not** include any PREY game data. You need your own copy of PREY (2006), from the original discs or another legitimate source.
 
 > [!IMPORTANT]
-> openPREY is in **early development** and has no release yet. Representative campaign maps, save/load and a two-client multiplayer session have been played on it, but full campaign completion and multiplayer parity aren't claimed. See the [compatibility status](TECHNICAL.md#prey-compatibility-status).
+> openPREY is in **early development** and has no release yet. Representative campaign maps, save/load and a two-client multiplayer session have been played on it, but full campaign completion and multiplayer parity aren't claimed. See [release status](docs/user/release-status.md).
 
 ## Quick start
 
@@ -36,7 +36,7 @@ Until the first release, you build openPREY yourself:
 1. Install **PREY (2006)**. Leave it where it is; openPREY keeps to its own folder.
 2. Build and stage openPREY with [BUILDING.md](BUILDING.md). The staged package lands in `.install/`.
 3. Launch `openPREY-client_x64` (`.exe` on Windows) from `.install/`.
-4. openPREY finds your PREY install on its own. If it doesn't, launch with `+set fs_basepath "C:\path\to\Prey"`, pointing at the folder that contains `base`, not at `base` itself.
+4. openPREY finds your PREY install on its own. If it doesn't, launch with `+set r_fullscreen 0 +set fs_basepath "C:\path\to\Prey"`, pointing at the folder that contains `base`, not at `base` itself. See [If auto-detection fails](docs/user/getting-started.md#if-auto-detection-fails).
 
 > [!TIP]
 > Don't copy retail `.pk4` files into `basepr/`. That folder is for openPREY's own files.
@@ -52,7 +52,7 @@ What the current code does:
 - 🎮 **One module for every mode.** A single `game_x64` module, built from the PREY SDK, runs single-player and multiplayer.
 - 🖥️ **Modern window handling** through SDL3: windowed, borderless, desktop fullscreen and exclusive fullscreen, monitor selection with `r_screen`, and aspect ratio and FOV that follow the render size. Linux runs native Wayland or X11.
 - 🎨 **OpenGL or Vulkan.** OpenGL is the default and matches PREY's original interaction stages. The Vulkan renderer (`r_renderApi vulkan`) reaches gameplay in focused tests but isn't at full parity yet.
-- 💡 **Baked light grids** add indirect light to portal areas: bake them, inspect them and switch them on. See [Light grids](TECHNICAL.md#light-grids).
+- 💡 **Baked light grids** add indirect light to portal areas: bake them, inspect them and switch them on. See [Light Grids](docs/user/light-grids.md).
 - 🤖 **Multiplayer bots** (experimental): a cast of bot characters on PREY's own artificial player, each with a fighting style and chat. Retail maps ship no bot navigation, so bots fight what they can see and don't plan routes. See [the bot guide](docs/dev/mp-bots.md).
 - 🧪 **Inherited from openQ4, not yet checked against PREY**: shadow maps, cel shading, DDS texture replacements, controller support with a Steam Deck profile, performance presets with Auto-Detect, and the level-load cache. Their guides are [below](#player-guides).
 
@@ -60,31 +60,42 @@ The [rebase status ledger](docs/dev/prey-rebase/status-ledger.md) records what h
 
 ## Platforms and requirements
 
+Active CI builds Windows x64 and Linux x64 on every push. No packages are published yet: the Windows installer, Linux AppImage, ARM64 and macOS lanes inherited from openQ4 are switched off until they're rebuilt around `basepr/` and the unified game module. See [release status](docs/user/release-status.md).
+
 | Platform | State | Notes |
 |---|---|---|
 | **Windows x64** | Built in CI; most runtime testing happens here | Windows 10/11 recommended |
 | **Linux x64** | Built in CI | A modern 64-bit desktop, comparable to Ubuntu 24.04 or newer. SDL3 picks Wayland or X11; set `OPENPREY_FORCE_X11=1` to force XWayland |
-| **Steam Deck** | Launcher in Linux builds | Run `openPREY-steamdeck`; inherited from openQ4, not yet checked with PREY. See the [Steam Deck guide](docs/user/steam-deck.md) |
-| **macOS** | Not supported yet | The build files cover macOS hosts, but CI doesn't build or test it |
-| **Windows and Linux ARM64** | Not supported yet | openQ4's ARM64 lanes are switched off until they're rebuilt for openPREY |
+| **Steam Deck / SteamOS** | Launcher in Linux builds | Run `openPREY-steamdeck`; inherited from openQ4, not yet checked with PREY. See the [Steam Deck guide](docs/user/steam-deck.md) |
+| **Linux AppImage** | Not produced yet | `tools/build/package_linux_appimage.py` is rebranded for openPREY (`x86_64` and `aarch64` names), but nothing runs it until the release lane is rebuilt |
+| **Linux ARM64** | Not supported yet | openQ4's ARM64 lanes are switched off until they're rebuilt for openPREY |
+| **macOS** | Not supported yet | The build files cover macOS hosts, but CI doesn't build or test it and there's no package |
+| **Windows ARM64** | Not supported yet | Switched off, as for Linux ARM64 |
 
-You'll need a 64-bit CPU, a graphics driver with OpenGL ARB2-era vertex and fragment program support, and PREY (2006)'s retail `base/` files.
+You'll need a 64-bit CPU, a graphics driver with OpenGL ARB2-era vertex and fragment program support, and PREY (2006)'s retail `base/` files. Details are in [Getting Started](docs/user/getting-started.md#system-requirements).
 
 ## Player guides
 
-These guides describe engine features carried over from openQ4. Each one says where PREY testing is still pending.
+Start with [release status](docs/user/release-status.md): what works today and what isn't claimed yet. Most other guides describe engine features carried over from openQ4, and each one says where PREY testing is still pending.
 
 **Set up**
 - [Getting Started](docs/user/getting-started.md): install layout, platform notes and [what to do if auto-detection fails](docs/user/getting-started.md#if-auto-detection-fails)
 - [Client Settings](docs/user/client-settings.md): where the most useful options live
 - [Display Settings](docs/user/display-settings.md) · [Input Settings](docs/user/input-settings.md) · [Gameplay Settings](docs/user/gameplay-settings.md) · [Steam Deck](docs/user/steam-deck.md)
+- [Virtual Reality](docs/user/vr.md) (not yet checked with PREY) · [macOS Support Data](docs/user/macos-support-data.md) (macOS isn't supported yet)
+
+**Play**
+- [Multiplayer Networking](docs/user/multiplayer-networking.md) (experimental) · [Multiplayer Chat](docs/user/multiplayer-chat.md)
+- [Multi-View Demos](docs/user/multiview-demos.md): why MVD recording and playback are unavailable for now
 
 **Look and feel**
 - [Shadow Mapping](docs/user/shadow-mapping.md) · [Light Grids](docs/user/light-grids.md) · [Cel Shading](docs/user/cel-shading.md)
-- [DDS Texture Replacements](docs/user/texture-replacements.md) · [Level-Load Cache](docs/user/level-load-cache.md)
+- [Temporal AA and Dynamic Resolution](docs/user/temporal-presentation.md) · [Advanced Screen-Space Lighting](docs/user/advanced-screen-space-lighting.md) (both experimental)
+- [DDS Texture Replacements](docs/user/texture-replacements.md) · [PBR Materials](docs/user/pbr-materials.md) · [Level-Load Cache](docs/user/level-load-cache.md)
 
-**Host**
-- [Server Setup](docs/user/server-setup.md) · [Multiplayer Networking](docs/user/multiplayer-networking.md)
+**Host and create**
+- [Server Setup](docs/user/server-setup.md) · [Server Security](docs/user/server-security.md)
+- [Map Entity Strings](docs/user/map-entity-strings.md): for mappers and modders
 
 ## Compatibility
 
@@ -97,6 +108,7 @@ These guides describe engine features carried over from openQ4. Each one says wh
 
 - **Something broken?** Open an [issue](https://github.com/themuffinator/openPREY/issues) with your setup details and a log: launch with `+set logFile 2`, reproduce the problem and attach the `qconsole.log` it writes to your save folder.
 - **Crashed on Windows?** Attach the log and minidump from the `crashes/` folder beside the executable.
+- **Building on a Mac?** macOS isn't supported yet, but the [macOS support-data guide](docs/user/macos-support-data.md) shows what a useful report contains.
 - **Want to chat?** Find us on the [DarkMatter Discord](https://discord.gg/T32mFejwR4).
 
 ## For developers
@@ -106,6 +118,9 @@ These guides describe engine features carried over from openQ4. Each one says wh
 - [AGENTS.md](AGENTS.md): project rules, including the licence boundary between engine and game code
 - [Source layout](docs/dev/source-layout.md): where new code and vendored libraries go
 - [The rebase plan](docs/dev/prey-rebase/plan.md): how openPREY moved onto openQ4 and adapts upstream engine changes
+- [Platform support](docs/dev/platform-support.md): what each platform needs before openPREY claims it
+- [CONTRIBUTING.md](.github/CONTRIBUTING.md): project conventions for pull requests
+
 ## Credits
 
 **themuffinator** leads openPREY's development, with stewardship from **DarkMatter Productions**. openPREY stands on **Human Head Studios**' PREY and its SDK, and on the **[openQ4](https://github.com/themuffinator/openQ4)** engine, which brings the work of everyone credited there with it.

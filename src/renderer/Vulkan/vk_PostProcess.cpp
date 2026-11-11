@@ -153,7 +153,9 @@ enum vkPostPassKind_t {
 	VK_POST_HDR_LUMINANCE,
 	VK_POST_MOTION_VECTORS_PREVIOUS,
 	VK_POST_MOTION_VECTORS_REACTIVE,
-	VK_POST_SKY_MASK
+	VK_POST_SKY_MASK,
+	VK_POST_GLOW_BLUR,
+	VK_POST_GLOW_COMPOSITE
 };
 
 // scene shader modules, created the first time a pass needs one
@@ -174,6 +176,7 @@ enum vkPostSceneModule_t {
 	VK_POST_MODULE_MOTION_VECTORS_REACTIVE_VERT,
 	VK_POST_MODULE_MOTION_VECTORS_REACTIVE_FRAG,
 	VK_POST_MODULE_SKY_MASK,
+	VK_POST_MODULE_GLOW,
 	VK_POST_SCENE_MODULE_COUNT
 };
 
@@ -199,7 +202,8 @@ static const vkPostModuleSource_t vkPostSceneModuleSources[ VK_POST_SCENE_MODULE
 	{ vk_post_motionvectors_previous_vert_spv, vk_post_motionvectors_previous_vert_spv_size, "post posed motion vector vertex" },
 	{ vk_post_motionvectors_reactive_vert_spv, vk_post_motionvectors_reactive_vert_spv_size, "post reactive coverage vertex" },
 	{ vk_post_motionvectors_reactive_frag_spv, vk_post_motionvectors_reactive_frag_spv_size, "post reactive coverage fragment" },
-	{ vk_post_skymask_frag_spv, vk_post_skymask_frag_spv_size, "post portal-sky mask fragment" }
+	{ vk_post_skymask_frag_spv, vk_post_skymask_frag_spv_size, "post portal-sky mask fragment" },
+	{ vk_post_glow_frag_spv, vk_post_glow_frag_spv_size, "post Prey glow fragment" }
 };
 
 // RB_BLOOM_MAX_LEVELS and RB_BLOOM_BASE_WEIGHTS (draw_common.cpp)
@@ -287,6 +291,12 @@ typedef struct vkPostSceneState_s {
 
 	idImage *			bloomImages[ VK_POST_BLOOM_MAX_LEVELS ][ 2 ];
 	idRenderTexture *	bloomTargets[ VK_POST_BLOOM_MAX_LEVELS ][ 2 ];
+
+	// Prey's glow overlay (VK_PostProcess_BeginGlow): the scene under it,
+	// the glow-only view and its horizontal blur
+	idImage *			glowScene;
+	idImage *			glowSource;
+	idImage *			glowBlur;
 
 	idImage *			motionVectorImage;
 	idRenderTexture *	motionVectorTarget;
@@ -3759,6 +3769,136 @@ bool VK_PostProcess_DrawUnderwater( const viewDef_t *viewDef ) {
 	VK_Post_LogFirstDraw( logged, "underwater view", "" );
 	backEnd.currentRenderCopied = false;
 	return true;
+}
+
+/*
+===============================================================================
+
+	Prey glow overlay (RB_STD_GlowOverlay)
+
+	Every material stage marked glowStage is drawn again into a black copy
+	of the view, against the scene's own depth, blurred along each axis and
+	added over the finished scene at r_glowStrength. OpenGL does this after
+	the SS_POST_PROCESS surfaces and before the underwater view; the
+	executor's VK_Exec_DrawGlowOverlay does the same and draws the stages
+	between VK_PostProcess_BeginGlow and VK_PostProcess_FinishGlow.
+
+===============================================================================
+*/
+
+// std140 layout of GlowBlock in post_glow.frag
+typedef struct vkPostGlowBlock_s {
+	float	params[ 4 ];	// xy: one blur step in UV, z: steps, w: 1 = composite
+	float	weights[ 4 ];	// x: start alpha, y: alpha change, z: glow strength
+} vkPostGlowBlock_t;
+
+// RB_GlowEnabledForCurrentView (draw_common.cpp)
+bool VK_PostProcess_GlowRequested( const viewDef_t *viewDef ) {
+	if ( viewDef == NULL || viewDef->isSubview || viewDef->isEditor || viewDef->viewEntitys == NULL
+			|| viewDef->numDrawSurfs <= 0 ) {
+		return false;
+	}
+	if ( r_skipGlowOverlay.GetBool() || r_glowStrength.GetFloat() <= 0.0f ) {
+		return false;
+	}
+	return vkCtx.device != VK_NULL_HANDLE && VK_GuiExecutor_FrameIsOpen() && VK_Post_EnsureModules()
+		&& VK_Post_SceneModule( VK_POST_MODULE_GLOW ) != VK_NULL_HANDLE;
+}
+
+// Keeps the finished scene and clears the view's colour to black for the
+// glow-only stages. The depth stays: the stages test against it.
+bool VK_PostProcess_BeginGlow( const viewDef_t *viewDef ) {
+	const int width = VK_Post_ViewWidth( viewDef );
+	const int height = VK_Post_ViewHeight( viewDef );
+	if ( width <= 0 || height <= 0 ) {
+		return false;
+	}
+	idImage *scene = VK_Post_EnsureImage( vkPostScene.glowScene, "_vkGlowScene", VK_Post_FloatColorImage );
+	if ( scene == NULL || !VK_Exec_CopyRender( scene, viewDef->viewport.x1, viewDef->viewport.y1,
+			width, height, 0, false ) ) {
+		return false;
+	}
+	VkCommandBuffer cmd = VK_Exec_ActiveCmd();
+	if ( cmd == VK_NULL_HANDLE || !VK_Exec_MainRenderingScopeOpen() ) {
+		return false;
+	}
+	const int fbHeight = VK_Exec_ActiveFramebufferHeight();
+	const bool lowerOrigin = VK_Exec_ActiveLowerOrigin();
+	VkClearAttachment clear;
+	memset( &clear, 0, sizeof( clear ) );
+	clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	clear.colorAttachment = 0;
+	clear.clearValue.color.float32[ 3 ] = 1.0f;		// glClearColor( 0, 0, 0, 1 )
+	VkClearRect rect;
+	memset( &rect, 0, sizeof( rect ) );
+	const int y = lowerOrigin ? viewDef->viewport.y1 : fbHeight - viewDef->viewport.y1 - height;
+	rect.rect.offset.x = Max( 0, (int)viewDef->viewport.x1 );
+	rect.rect.offset.y = Max( 0, y );
+	rect.rect.extent.width = (uint32_t)width;
+	rect.rect.extent.height = (uint32_t)Min( height, fbHeight - rect.rect.offset.y );
+	rect.layerCount = 1;
+	vkCmdClearAttachments( cmd, 1, &clear, 1, &rect );
+	VK_Exec_MarkCanonicalWrites();
+	return true;
+}
+
+// Blurs the glow-only view (RB_GlowBlurPass, once per axis) and composites
+// it over the scene BeginGlow kept. Returns false with the view left as the
+// glow-only image only if a draw fails after the composite started; in every
+// earlier failure the scene is put back.
+bool VK_PostProcess_FinishGlow( const viewDef_t *viewDef ) {
+	const int width = VK_Post_ViewWidth( viewDef );
+	const int height = VK_Post_ViewHeight( viewDef );
+	idImage *scene = vkPostScene.glowScene;
+	idImage *source = VK_Post_EnsureImage( vkPostScene.glowSource, "_vkGlowSource", VK_Post_FloatColorImage );
+	idImage *blur = VK_Post_EnsureImage( vkPostScene.glowBlur, "_vkGlowBlur", VK_Post_FloatColorImage );
+	const VkShaderModule fragModule = VK_Post_SceneModule( VK_POST_MODULE_GLOW );
+	if ( scene == NULL || fragModule == VK_NULL_HANDLE ) {
+		return false;
+	}
+
+	vkPostGlowBlock_t block;
+	memset( &block, 0, sizeof( block ) );
+	block.params[ 2 ] = (float)idMath::ClampInt( 0, 256, r_glowSteps.GetInteger() );
+	block.weights[ 0 ] = idMath::ClampFloat( 0.0f, 8.0f, r_glowAlpha.GetFloat() );
+	block.weights[ 1 ] = idMath::ClampFloat( 0.0f, 8.0f, r_glowAlphaChange.GetFloat() );
+	block.weights[ 2 ] = r_glowStrength.GetFloat();
+
+	const VkPipeline blurPipeline = VK_Exec_PostPipeline( VK_POST_GLOW_BLUR, vkPost.fullscreenVert,
+			fragModule, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ZERO );
+	const VkPipeline compositePipeline = VK_Exec_PostPipeline( VK_POST_GLOW_COMPOSITE, vkPost.fullscreenVert,
+			fragModule, GLS_SRCBLEND_ONE | GLS_DSTBLEND_ZERO );
+
+	bool blurred = source != NULL && blur != NULL && width > 0 && height > 0
+		&& VK_Exec_CopyRender( source, viewDef->viewport.x1, viewDef->viewport.y1, width, height, 0, false );
+	if ( blurred ) {
+		block.params[ 0 ] = 1.0f / (float)width;
+		block.params[ 3 ] = 0.0f;
+		const VkDescriptorSet sets[ 2 ] = { VK_Post_Descriptor( source ), VK_Post_Descriptor( scene ) };
+		const int uniformOffset = VK_Exec_InteractionUniformAlloc( &block, sizeof( block ) );
+		blurred = VK_Post_DrawSceneRect( viewDef, blurPipeline, sets, 2, uniformOffset )
+			&& VK_Exec_CopyRender( blur, viewDef->viewport.x1, viewDef->viewport.y1, width, height, 0, false );
+	}
+
+	block.params[ 0 ] = 0.0f;
+	block.params[ 1 ] = blurred ? 1.0f / (float)height : 0.0f;
+	block.params[ 3 ] = 1.0f;
+	if ( !blurred ) {
+		// put the scene back untouched: no taps, no glow
+		block.params[ 2 ] = 0.0f;
+		block.weights[ 2 ] = 0.0f;
+	}
+	const VkDescriptorSet sets[ 2 ] = { VK_Post_Descriptor( blurred ? blur : scene ), VK_Post_Descriptor( scene ) };
+	const int uniformOffset = VK_Exec_InteractionUniformAlloc( &block, sizeof( block ) );
+	if ( !VK_Post_DrawSceneRect( viewDef, compositePipeline, sets, 2, uniformOffset ) ) {
+		static bool warned = false;
+		VK_Post_WarnOnce( warned, "glow overlay" );
+		return false;
+	}
+	static bool logged = false;
+	VK_Post_LogFirstDraw( logged, "glow overlay", blurred ? "" : " (blur failed; scene restored)" );
+	backEnd.currentRenderCopied = false;
+	return blurred;
 }
 
 /*
