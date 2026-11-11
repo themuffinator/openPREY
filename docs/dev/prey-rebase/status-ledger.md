@@ -129,7 +129,7 @@ conservative validation states unless that evidence directly exercises them.
 | `RD-17` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `RD-18` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `RD-19` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
-| `RD-20` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
+| `RD-20` | PORTED | IMPLEMENTED | RUNTIME-CHECKED | `spiritWalk`/`notSpiritWalk` follow the drawn view's `viewSpiritEntities`, since Prey's game code never calls `SetSpiritWalkView`; the `lotab` cave paintings glow only in spirit walk on OpenGL and Vulkan (11 November 2026). `scopeView` and `shuttleView` are not yet runtime-checked. See `docs/dev/prey-screen-effects.md`. |
 | `RD-21` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `RD-22` | DROPPED | NOT-APPLICABLE | STATIC-CHECKED | Upstream replaced the old pointer-as-surface-index trick with the integer `surfIndex` field, so the historical `uintptr_t` casts are obsolete; the active rebase-contract test guards that structure. |
 | `RD-23` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |

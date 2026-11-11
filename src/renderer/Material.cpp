@@ -4930,7 +4930,12 @@ void idMaterial::EvaluateRegisters( float *registers, const float shaderParms[MA
 	registers[EXP_REG_VERTEX_RANDOM] = shaderParms[SHADERPARM_DIVERSITY];
 	registers[EXP_REG_FRAGMENT_PROGRAMS] = R_MaterialFragmentProgramsAvailable() ? 1.0f : 0.0f;
 	registers[EXP_REG_SCOPE_VIEW] = renderSystem->IsScopeView() ? 1.0f : 0.0f;
-	registers[EXP_REG_SPIRIT_WALK] = renderSystem->IsSpiritWalkView() ? 1.0f : 0.0f;
+	// Prey's game code never calls SetSpiritWalkView. A spirit or death walk
+	// marks the player's view with viewSpiritEntities (hhPlayer::
+	// CalculateRenderView), and its mirrors and portals copy that view, so the
+	// spiritWalk / notSpiritWalk stages follow the view being drawn.
+	registers[EXP_REG_SPIRIT_WALK] = ( renderSystem->IsSpiritWalkView()
+		|| ( view != NULL && view->renderView.viewSpiritEntities ) ) ? 1.0f : 0.0f;
 	registers[EXP_REG_SHUTTLE_VIEW] = renderSystem->IsShuttleView() ? 1.0f : 0.0f;
 
 	op = ops;

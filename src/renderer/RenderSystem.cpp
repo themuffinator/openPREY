@@ -1670,8 +1670,10 @@ void idRenderSystemLocal::BeginFrame( int windowWidth, int windowHeight ) {
 	// or mirror render
 //	primaryWorld = NULL;
 
-	// set the time for shader effects in 2D rendering
-	SetFrameShaderTime( eventLoop->Milliseconds() );
+	// set the time for shader effects in 2D rendering; nothing drawn before the
+	// frame began is flushed here, so batch order does not change
+	frameShaderTimeMsec = eventLoop->Milliseconds();
+	frameShaderTime = static_cast<float>( frameShaderTimeMsec ) * 0.001f;
 	// the wall clock, not the event clock: the shadow-map static/live caster
 	// split follows rendered frames even while the game is paused or scaled
 	R_ShadowMapBeginFrame( Sys_Milliseconds() );
@@ -1733,6 +1735,19 @@ void idRenderSystemLocal::DrawDemoPics() {
 }
 
 void idRenderSystemLocal::SetFrameShaderTime( int timeMsec ) {
+	// A 2D batch evaluates its material registers, time included, when it is
+	// emitted, not when it is drawn. The player view draws its overlays at
+	// level time (RenderScene set it), and the subtitles GUI later moves the
+	// clock to presentation time in the same frame. Unflushed, the overlays'
+	// 'time + parm0' then counts from the wrong clock: Prey's scripted screen
+	// effects start already finished (the Sphere's voice outro turns the view
+	// black, the Keeper flashes never show). Emit what screen GUIs drew under
+	// the old time first. In-world GUIs (guiRecursionLevel > 0) clear and emit
+	// their own quads, so they are left alone.
+	if ( timeMsec != frameShaderTimeMsec && guiRecursionLevel == 0
+			&& guiModel != NULL && !guiModel->IsEmpty() ) {
+		FlushGui();
+	}
 	frameShaderTimeMsec = timeMsec;
 	frameShaderTime = static_cast<float>( timeMsec ) * 0.001f;
 }

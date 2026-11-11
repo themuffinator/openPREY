@@ -1909,6 +1909,59 @@ static void Cmd_TestDamage_f( const idCmdArgs &args ) {
 
 /*
 ==================
+Cmd_TestViewOverlay_f
+
+openPREY: drives the player's view overlay the way map scripts do with
+setOverlayMaterial and setOverlayColor, so every retail screen effect can be
+checked from the console or a cfg (the console strips the quotes a script
+string literal needs).
+==================
+*/
+static void Cmd_TestViewOverlay_f( const idCmdArgs &args ) {
+	hhPlayer *player = static_cast<hhPlayer *>( gameLocal.GetLocalPlayer() );
+	if ( !player || !gameLocal.CheatsOk() ) {
+		return;
+	}
+
+	if ( args.Argc() < 2 ) {
+		gameLocal.Printf( "usage: testViewOverlay <material> [r g b a] [requiresScratch]\n"
+			"       testViewOverlay off\n"
+			"r g b a become the material's parm0-parm3, as setOverlayColor passes them.\n"
+			"Any of them may be now: the negated game time in seconds, which scripts\n"
+			"pass as -sys.getTime() so a material's 'time + parm0' starts at zero.\n" );
+		return;
+	}
+
+	const char *materialName = args.Argv( 1 );
+	if ( !idStr::Icmp( materialName, "off" ) || !idStr::Icmp( materialName, "none" ) ) {
+		player->playerView.SetViewOverlayMaterial( NULL );
+		player->playerView.SetViewOverlayColor( colorWhite );
+		return;
+	}
+
+	const idMaterial *material = declManager->FindMaterial( materialName, false );
+	if ( material == NULL ) {
+		gameLocal.Printf( "testViewOverlay: material '%s' not found\n", materialName );
+		return;
+	}
+
+	idVec4 color = colorWhite;
+	if ( args.Argc() >= 6 ) {
+		for ( int i = 0; i < 4; i++ ) {
+			const char *value = args.Argv( 2 + i );
+			// The console lexer splits "-word" into two tokens, so the time
+			// marker is a plain word.
+			color[i] = !idStr::Icmp( value, "now" ) ? -MS2SEC( gameLocal.realClientTime ) : atof( value );
+		}
+	}
+	const int requiresScratch = args.Argc() >= 7 ? atoi( args.Argv( 6 ) ) : 0;
+
+	player->playerView.SetViewOverlayMaterial( material, requiresScratch );
+	player->playerView.SetViewOverlayColor( color );
+}
+
+/*
+==================
 Cmd_TestBoneFx_f
 ==================
 */
@@ -2953,6 +3006,7 @@ void idGameLocal::InitConsoleCommands( void ) {
 	cmdSystem->AddCommand( "listAnims",				Cmd_ListAnims_f,			CMD_FL_GAME,				"lists all animations" );
 	cmdSystem->AddCommand( "aasStats",				Cmd_AASStats_f,				CMD_FL_GAME,				"shows AAS stats" );
 	cmdSystem->AddCommand( "testDamage",			Cmd_TestDamage_f,			CMD_FL_GAME|CMD_FL_CHEAT,	"tests a damage def", idCmdSystem::ArgCompletion_Decl<DECL_ENTITYDEF> );
+	cmdSystem->AddCommand( "testViewOverlay",		Cmd_TestViewOverlay_f,		CMD_FL_GAME|CMD_FL_CHEAT,	"shows a material as the player's view overlay, as map scripts do", idCmdSystem::ArgCompletion_Decl<DECL_MATERIAL> );
 	cmdSystem->AddCommand( "weaponSplat",			Cmd_WeaponSplat_f,			CMD_FL_GAME|CMD_FL_CHEAT,	"projects a blood splat on the player weapon" );
 	cmdSystem->AddCommand( "saveSelected",			Cmd_SaveSelected_f,			CMD_FL_GAME|CMD_FL_CHEAT,	"saves the selected entity to the .map file" );
 	cmdSystem->AddCommand( "deleteSelected",		Cmd_DeleteSelected_f,		CMD_FL_GAME|CMD_FL_CHEAT,	"deletes selected entity" );
