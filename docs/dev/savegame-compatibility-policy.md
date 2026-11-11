@@ -1,6 +1,6 @@
 # Savegame Compatibility Policy
 
-> **Development status:** This document describes the current source tree and its evidence, not the contents of the latest available 0.13.2 package. The 0.14.0 release was withdrawn. See [release status](../user/release-status.md).
+> **Development status:** This document describes the current source tree and its evidence, not the contents of the latest available 0.13.2 package. The 0.14.0 release was withdrawn. See [release status](https://github.com/themuffinator/openQ4/blob/main/docs/user/release-status.md).
 
 > **openPREY:** this is upstream openQ4's policy for its own save history, kept
 > for the engine preflight it describes. Prey saves follow

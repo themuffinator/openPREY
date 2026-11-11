@@ -1,8 +1,7 @@
 # Light Grid and Irradiance Volume Guide
 
 > [!NOTE]
-> This page documents inherited engine/tooling capability. Retail Prey behavior remains
-> runtime-validation pending unless the rebase status ledger records specific evidence.
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
 This guide covers openPREY's user-facing light-grid system: what it does, how to enable or disable it, how to bake data for one map or many maps, where the baked files go, and how to troubleshoot common problems.
 
@@ -21,7 +20,7 @@ seta r_useLightGrid 1
 seta r_showLightGrid 0
 ```
 
-The same runtime toggle is available in the menu at `Settings -> System -> Irradiance Volumes`.
+openPREY's stock PREY menus have no light-grid option, so set it from the console. The retained interface inherited from openQ4 lists the same toggle under Settings → System → Irradiance Volumes when both `ui_retained 1` and `ui_retainedSystem 1` are set; it is not checked with PREY.
 
 Bake the currently loaded map from the in-game console:
 
@@ -29,11 +28,14 @@ Bake the currently loaded map from the in-game console:
 bakeLightGrids
 ```
 
-Bake every discovered multiplayer map from the command line, then quit when finished:
+Bake a list of maps from the command line, then quit when finished:
 
 ```text
-openPREY-client_x64.exe +bakeLightGrids all-mp -quit
+openPREY-client_x64.exe +bakeLightGrids game/roadhouse game/dmshuttle1 -quit
 ```
+
+> [!WARNING]
+> The bake command decides a map is multiplayer from an `mp/` prefix, a Quake 4 convention. PREY's multiplayer maps live under `game/` (`game/dmshuttle1`, `game/dmroadhouse` and so on), so `all-mp` currently finds none of them, `all` bakes them as single-player loads, and they don't need cheats. Name PREY multiplayer maps explicitly until the bake command learns PREY's layout.
 
 Show probe positions while testing a baked map:
 
@@ -118,7 +120,7 @@ This bakes the currently loaded map using default settings and writes the output
 Typical flow:
 
 ```cfg
-devmap game/tram1
+devmap game/roadhouse
 bakeLightGrids
 ```
 
@@ -147,7 +149,7 @@ openPREY-client_x64.exe +bakeLightGrids all-mp -quit
 Bake a selected list of maps:
 
 ```text
-openPREY-client_x64.exe +bakeLightGrids game/tram1 game/process1 mp/q4dm1 -quit
+openPREY-client_x64.exe +bakeLightGrids game/roadhouse game/feedingtowera game/dmshuttle1 -quit
 ```
 
 Behavior:
@@ -182,8 +184,8 @@ If map names, `all`, or `all-mp` are given:
 | Option | Example | What it does |
 |---|---|---|
 | `all` | `bakeLightGrids all` | Bake every discovered map. |
-| `all-mp` | `bakeLightGrids all-mp` | Bake every discovered multiplayer map only. |
-| map name(s) | `bakeLightGrids game/tram1 mp/q4dm1` | Bake only the listed maps. |
+| `all-mp` | `bakeLightGrids all-mp` | Bake every discovered map whose name starts with `mp/`. No PREY map does yet; see the warning above. |
+| map name(s) | `bakeLightGrids game/roadhouse game/dmshuttle1` | Bake only the listed maps. |
 | `force` | `bakeLightGrids force` | Remove existing outputs for the target map(s) and rebuild them even if all required files already exist. |
 | `-quit` | `+bakeLightGrids all -quit` | Quit after the batch completes. |
 | `limit<num>` | `limit2048` | Maximum probe count per area before the grid spacing grows. |
@@ -199,21 +201,21 @@ If map names, `all`, or `all-mp` are given:
 Fast test bake:
 
 ```text
-openPREY-client_x64.exe +bakeLightGrids game/tram1 size64 samples32 limit1024 -quit
+openPREY-client_x64.exe +bakeLightGrids game/roadhouse size64 samples32 limit1024 -quit
 ```
 
-For multiplayer maps or `all-mp`, enable cheats before starting the bake, for example `openPREY-client_x64.exe +set sv_cheats 1 +bakeLightGrids all-mp -quit`.
+Maps the bake command treats as multiplayer (an `mp/` prefix) need cheats enabled first, for example `openPREY-client_x64.exe +set sv_cheats 1 +bakeLightGrids <map> -quit`. PREY's `game/dm*` maps currently don't count.
 
 Balanced quality:
 
 ```text
-openPREY-client_x64.exe +bakeLightGrids game/tram1 size128 samples128 blends1 bounce1 grid 64 64 128 -quit
+openPREY-client_x64.exe +bakeLightGrids game/roadhouse size128 samples128 blends1 bounce1 grid 64 64 128 -quit
 ```
 
 Higher-quality bake:
 
 ```text
-openPREY-client_x64.exe +bakeLightGrids game/tram1 size256 samples256 blends2 bounce2 grid 48 48 96 -quit
+openPREY-client_x64.exe +bakeLightGrids game/roadhouse size256 samples256 blends2 bounce2 grid 48 48 96 -quit
 ```
 
 Practical tuning advice:
@@ -232,17 +234,17 @@ Practical tuning advice:
 
 The bake writes to `fs_savepath`.
 
-For a map such as `game/tram1`, the main outputs are:
+For a map such as `game/roadhouse`, the main outputs are:
 
 ```text
-maps/game/tram1.lightgridpack
-maps/game/tram1.lightgrid
-env/maps/game/tram1/area0_lightgrid_amb.tga
-env/maps/game/tram1/area0_lightgrid_vis.tga
-env/maps/game/tram1/area0_lightgrid_pos.tga
-env/maps/game/tram1/area1_lightgrid_amb.tga
-env/maps/game/tram1/area1_lightgrid_vis.tga
-env/maps/game/tram1/area1_lightgrid_pos.tga
+maps/game/roadhouse.lightgridpack
+maps/game/roadhouse.lightgrid
+env/maps/game/roadhouse/area0_lightgrid_amb.tga
+env/maps/game/roadhouse/area0_lightgrid_vis.tga
+env/maps/game/roadhouse/area0_lightgrid_pos.tga
+env/maps/game/roadhouse/area1_lightgrid_amb.tga
+env/maps/game/roadhouse/area1_lightgrid_vis.tga
+env/maps/game/roadhouse/area1_lightgrid_pos.tga
 ...
 ```
 
@@ -278,7 +280,7 @@ LIGHTGRID_PACK_TEST_DONE tested=<n> accepted=<n> rejected=0 loose_only=<n>
 ### 1. Bake One Map and Test It Immediately
 
 ```cfg
-devmap game/tram1
+devmap game/roadhouse
 bakeLightGrids
 r_showLightGrid 1
 ```
@@ -301,14 +303,16 @@ This gives you:
 
 ### 3. Re-Bake Only Multiplayer Maps
 
+Name them explicitly, since `all-mp` doesn't find PREY's multiplayer maps yet:
+
 ```text
-openPREY-client_x64.exe +bakeLightGrids all-mp -quit
+openPREY-client_x64.exe +bakeLightGrids force game/dmshuttle1 game/dmshuttle2 game/dmroadhouse -quit
 ```
 
 ### 4. Force a Clean Re-Bake of the Current Map
 
 ```cfg
-devmap game/tram1
+devmap game/roadhouse
 bakeLightGrids force
 ```
 
@@ -340,7 +344,7 @@ Fix:
 - Or use explicit map targets:
 
 ```text
-openPREY-client_x64.exe +bakeLightGrids game/tram1 -quit
+openPREY-client_x64.exe +bakeLightGrids game/roadhouse -quit
 ```
 
 ### `bakeLightGrids: no valid map targets were found.`
@@ -350,7 +354,7 @@ Cause:
 
 Fix:
 - Use map paths without the `.map` extension.
-- Prefer names such as `game/tram1` or `mp/q4dm1`.
+- Prefer names such as `game/roadhouse` or `game/dmshuttle1`.
 
 ### `bakeLightGrids: no valid probes were generated`
 
@@ -467,9 +471,9 @@ On a standard local setup, logs are written under `fs_savepath/basepr/logs/`.
 
 ### Reducing traversal stutter
 
-Use **Settings > Display > Post FX > Preload Light Grids** to load all baked light-grid atlases during the next map load. This can avoid upload-related pauses when entering new areas, at the cost of longer loading and more video memory. The default remains off. From the console, use `r_lightGridPreload 1`, then reload the map or load a save.
+Set `r_lightGridPreload 1` from the console, then reload the map or load a save, to load all baked light-grid atlases during the next map load. This can avoid upload-related pauses when entering new areas, at the cost of longer loading and more video memory. The default remains off. The stock PREY menus have no entry for it.
 
-The modern interface's Display page offers the same **Preload Light Grids** toggle under Irradiance Volumes. **Apply Changes** saves it without asking you to keep it, since nothing changes until the next map loads. A line under the toggle tells you whether the current map preloads or streams its light grids, has none, or keeps the previous setting until the next map loads.
+The retained interface's Display page, inherited from openQ4 and not checked with PREY, offers the same **Preload Light Grids** toggle under Irradiance Volumes. **Apply Changes** saves it without asking you to keep it, since nothing changes until the next map loads. A line under the toggle tells you whether the current map preloads or streams its light grids, has none, or keeps the previous setting until the next map loads.
 
 ## Related Documentation
 

@@ -1,6 +1,6 @@
 # Android, GLES and Sigma Touch
 
-> **Development status:** This document describes the current source tree and its evidence, not the contents of the latest available 0.13.2 package. The 0.14.0 release was withdrawn. See [release status](../user/release-status.md).
+> **Development status:** This document describes the current source tree and its evidence, not the contents of the latest available 0.13.2 package. The 0.14.0 release was withdrawn. See [release status](https://github.com/themuffinator/openQ4/blob/main/docs/user/release-status.md).
 
 The Android platform, GLES renderer and Sigma Touch adapter originate in
 [emileb's Android branch](https://github.com/emileb/openQ4/tree/android) and
@@ -24,7 +24,7 @@ The engine embeds BSE and each game mode keeps its own idlib archive.
 The [standalone Android application](../../mobile/android/README.md) packages
 these native outputs using Gradle and SDLActivity. It supports ordinary SDL
 gamepad, keyboard, mouse and menu input, plus the experimental first-party
-gameplay controls described in the [player guide](../user/android-setup.md).
+gameplay controls described in the [player guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/android-setup.md).
 Sigma Touch remains an optional compatible external host. Device gameplay
 remains a separate validation step.
 

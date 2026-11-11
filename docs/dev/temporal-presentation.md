@@ -257,7 +257,7 @@ SSAO on OpenGL and Vulkan, and with `r_vkRenderThread 1`/`2`. Below 10 FPS
 every interval exceeds the 100 ms gap and the scene stays sharp. Motion blur
 needs an offscreen scene target, so on Apple's OpenGL 2.1 compatibility profile
 it removes MSAA from the 3D scene (offscreen targets cannot be multisampled
-there; see [display settings](../user/display-settings.md#anti-aliasing-settings-new)).
+there; see [display settings](../user/display-settings.md#anti-aliasing-settings)).
 Vulkan's MSAA stops at 8x whatever the request. `r_jitter` (multi-frame
 screenshot accumulation) and `r_skipPostProcess` disable it, and the status
 command names the reason.

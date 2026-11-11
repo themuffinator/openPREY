@@ -1,19 +1,18 @@
 # Level-Load Cache
 
 > [!NOTE]
-> This page documents inherited engine/tooling capability. Retail Prey behavior remains
-> runtime-validation pending unless the rebase status ledger records specific evidence.
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
 openPREY learns which source files a map actually uses and can prepare those
 bytes during a later matching load. Worker jobs read or inflate the selected
 source, validate supported container framing and whole-buffer integrity, then
 hand immutable bytes back to the normal owner. openPREY also keeps validated local
 binary caches for parsed models, classic map worlds, and collision data, and the
-unified Prey game module keeps compact binary caches for MD5 animations.
+unified PREY game module keeps compact binary caches for MD5 animations.
 
 The experimental engine cache is disabled by default because current stock-map
 measurements do not yet prove a reliable improvement over classic loading. If
-enabled, the first visit still uses the installed Prey (2006) or mod sources and
+enabled, the first visit still uses the installed PREY (2006) or mod sources and
 may take longer while private cache files are written. A later visit can reuse work
 only when the map, game mode, entity filter, active search/PK4 set, source
 identity, and load-affecting settings still match.
@@ -24,7 +23,7 @@ directly instead of decompressing and parsing the much larger text source again,
 the first visit to animation-heavy maps can take slightly longer while cache files
 are written. Upstream reference testing generated 820 cache entries using about
 27 MiB and reduced an animation-heavy model-definition phase from roughly 2.7–2.8
-seconds to about 1.0 second on the tested Windows x64 system; Prey-specific
+seconds to about 1.0 second on the tested Windows x64 system; PREY-specific
 performance remains validation-pending.
 
 ## Safety and compatibility
@@ -45,7 +44,7 @@ rather than being flattened into an incompatible world cache.
 
 These files are disposable runtime data. They are not replacement assets, do
 not change pure-server package negotiation, and must not be copied into retail
-Prey (2006) PK4s.
+PREY (2006) PK4s.
 
 ## Location
 
@@ -71,7 +70,7 @@ a clean miss and rebuild.
 
 Each animation cache records the source path, source size, timestamp, and
 containing PK4 checksum where applicable. It stores fixed-width values and
-floating-point arrays in a portable byte order; x64 and ARM64 builds use the same
+floating-point arrays in a portable byte order; every build uses the same
 format. A stale, truncated, corrupt, or mismatched cache is ignored and rebuilt
 from the installed source animation. Loaded cache data becomes the normal runtime
 animation data; openPREY does not retain a second permanent copy in memory.
@@ -144,7 +143,7 @@ For a complete engine source-path comparison, leave `com_levelLoadModernization 
 and disable both animation-cache controls.
 
 Never delete the original `.proc`, `.cm`, model, image, sound, or
-`models/**/*.md5anim` files from the Prey (2006) installation. If a map still fails
+`models/**/*.md5anim` files from the PREY (2006) installation. If a map still fails
 with all generated caches disabled, the problem is not caused by this cache
 layer; include the active `fs_savepath` and `logs/openprey.log` when reporting it.
 

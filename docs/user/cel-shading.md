@@ -1,10 +1,9 @@
 # Cel Shading Guide
 
 > [!NOTE]
-> This page documents inherited engine/tooling capability. Retail Prey behavior remains
-> runtime-validation pending unless the rebase status ledger records specific evidence.
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
-openPREY can render Prey (2006) with a cel-shaded look: lighting quantized into flat bands, and black ink around the shapes. It ships off, so stock Prey (2006) still looks like Prey (2006) until you ask for something else.
+openPREY can render PREY (2006) with a cel-shaded look: lighting quantized into flat bands, and black ink around the shapes. It ships off, so stock PREY (2006) still looks like PREY (2006) until you ask for something else.
 
 ## Quick Start
 
@@ -47,7 +46,7 @@ seta r_celShadingWorldNormalThreshold 0.5
 
 ### Cel-Shaded Characters Only
 
-Leaves the level looking like retail Prey (2006) and costs almost nothing extra.
+Leaves the level looking like retail PREY (2006) and costs almost nothing extra.
 
 ```cfg
 seta r_celShading 1

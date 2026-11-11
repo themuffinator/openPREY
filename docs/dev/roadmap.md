@@ -1,6 +1,6 @@
 # openQ4 development roadmap
 
-> **Development status:** This document describes the current source tree and its evidence, not the contents of the latest available 0.13.2 package. The 0.14.0 release was withdrawn. See [release status](../user/release-status.md).
+> **Development status:** This document describes the current source tree and its evidence, not the contents of the latest available 0.13.2 package. The 0.14.0 release was withdrawn. See [release status](https://github.com/themuffinator/openQ4/blob/main/docs/user/release-status.md).
 
 Updated 8 November 2026 with the frame-rate recovery category (FPS). The progress
 review below otherwise dates from 4 November and uses the integrated source and

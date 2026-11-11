@@ -1,15 +1,25 @@
 # Map Entity Strings
 
-> **Development documentation:** This page follows the current source tree and may describe changes newer than the public download. See [release status and released-version guides](release-status.md) before using it with a release package.
+> [!NOTE]
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
-openQ4 can replace or extend the entities spawned by a retail map without
-editing, recompiling, or redistributing that map. This is intended for mods,
-server packages, compatibility fixes, and alternate gameplay layouts.
+> [!IMPORTANT]
+> **Not active in openPREY yet.** The engine's map loader (`src/idlib/MapFile.cpp`)
+> can read `.ent` and `.entx` companion files, but the game module has to apply
+> them once collision data has loaded. openQ4's Quake 4 game module does that;
+> PREY's game module doesn't call `idMapFile::ApplyEntityStringFiles` yet, so
+> openPREY currently ignores these files. The rest of this page documents the
+> format the loader accepts.
 
-For a map named `maps/mp/q4dm1.map`, place either or both companion files at:
+Entity-string files replace or extend the entities spawned by a retail map
+without editing, recompiling, or redistributing that map. They are meant for
+mods, server packages, compatibility fixes, and alternate gameplay layouts.
 
-- `maps/mp/q4dm1.ent`
-- `maps/mp/q4dm1.entx`
+For a map named `maps/game/roadhouse.map`, place either or both companion
+files at:
+
+- `maps/game/roadhouse.ent`
+- `maps/game/roadhouse.entx`
 
 The files use the normal virtual filesystem, so they may be loose development
 files or members of a PK4. Normal filesystem/package priority determines which
@@ -22,9 +32,10 @@ contain worldspawn and every other map entity that should still spawn.
 
 `.entx` appends point entities to whichever entity string is active: the
 original map entities when there is no `.ent`, or the complete `.ent`
-replacement when both files exist. The fixed load order is therefore:
+replacement when both files exist. Once a game module applies them, the load
+order is:
 
-1. Load and resolve the original `.map` or `.reg`.
+1. Load the original `.map`.
 2. Build the original map's collision data.
 3. Replace the entity string with `.ent`, when present.
 4. Append the entities from `.entx`, when present.
@@ -34,10 +45,9 @@ This timing lets a replacement change runtime entity behavior without making
 the original map's compiled geometry or collision unavailable. It also means
 these files cannot add, remove, or reshape map brushes and patches.
 
-The feature does not rewrite the original `.map`. Runtime-only entities are
-also excluded from map/export writes, and an editor write is refused while a
-complete `.ent` replacement is active. Map tools such as dmap continue to use
-the original map source rather than applying runtime companion files.
+The feature does not rewrite the original `.map`. Entities that came from
+these files are left out when a map is written back out. Map tools such as
+dmap use the original map source rather than applying runtime companion files.
 
 ## File syntax
 
@@ -66,7 +76,6 @@ Version 1
 {
     "classname" "worldspawn"
     "name" "world"
-    "gravity" "1066"
 }
 
 {
@@ -97,14 +106,15 @@ The following rules are enforced:
 - Nonempty entity names must be unique within a file, ignoring case. An
   `.entx` name also may not collide with the active original or replacement
   entity string.
-- `spawn_entnum` is reserved for the game and cannot be authored in either
+- `spawn_entnum` is reserved for the engine and cannot be authored in either
   file.
 - Only entity key/value dictionaries are accepted. Nested brush and patch
   blocks are rejected.
 - Each file is limited to 16 MiB, 4,096 entities, and 4,096 keys per entity.
-- The final runtime entity string must fit the game entity table. On normal
-  desktop builds, the initial map limit is 4,062 entities; leave additional
-  room for entities created during play.
+- The final runtime entity string must fit the game entity table. PREY's game
+  module has 4,096 entity slots, of which 32 are reserved for clients and 2 for
+  internal use, so a map can start with at most 4,062 entities; leave room for
+  entities created during play.
 
 The parser also rejects incomplete reads and embedded NUL bytes, accepts a
 UTF-8 byte-order mark, and tracks the selected `.ent` and `.entx` timestamps so

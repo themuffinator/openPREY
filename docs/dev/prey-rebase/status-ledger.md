@@ -195,9 +195,10 @@ conservative validation states unless that evidence directly exercises them.
 | TODO-SOUND-DSP | `SetSpiritWalkEffect` and `SetVoiceDucker` are compatibility no-ops. | Implement DSP behavior or document a permanent compatibility no-op with audio tests. |
 | TODO-PK4-CLASSIC | Classic-layout retail PK4 checksum values are not yet independently captured. | Record hashes from a verified CD-era install and add checksum tests without weakening unknown-layout startup. |
 | TODO-MIRROR-CLIP | Retail mirror clip-plane math parity. | Add the planned comparison fixture and renderer capture evidence. |
-| TODO-RELEASE-LANES | Inherited ARM64/macOS/signing/manual-publish fixtures, plus the legacy Linux sanitizer and native-Wayland workflow jobs, are manual-only and false-gated because they still encode OpenQ4 lane identities or split-module assumptions. | Rebuild lanes around `OpenPrey-game`, `basepr`, one `game_<arch>` module, and openPREY payload/signing identities before removing the gates. Platform-independent sanitizer source invariants remain active separately. |
+| TODO-RELEASE-LANES | Inherited ARM64/macOS/signing/manual-publish fixtures, plus the legacy Linux sanitizer and native-Wayland workflow jobs, are manual-only and false-gated because they still encode OpenQ4 lane identities or split-module assumptions. | Rebuild lanes around the in-tree game library, `basepr`, one `game_<arch>` module, and openPREY payload/signing identities before removing the gates. Platform-independent sanitizer source invariants remain active separately. |
 | TODO-UPSTREAM-PRS | Generic Doom 3/idTech 4 compatibility changes suitable for upstreaming. | Split title-neutral commits and submit them upstream after openPREY runtime validation. |
 
-The previous “companion-repo migration” deferral is closed as an architectural decision:
-`E:\Repositories\OpenPrey-game` is now canonical and openPREY stages it directly at
-configure time. There is no in-repository `src/game` mirror.
+The previous “companion-repo migration” deferral is closed. In November 2026 the game
+library was imported into this repository with its history: `src/game/`, `src/Prey/`
+and `src/preyengine/` are canonical and build in place, and `E:\Repositories\OpenPrey-game`
+is a retired, read-only reference (see `docs/dev/game-source-provenance.md`).

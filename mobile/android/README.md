@@ -105,14 +105,14 @@ the game's language setting. The normal gamepad and keyboard bindings work in
 gameplay. The standalone overlay supports independent move/look/fire contacts,
 jump/crouch, weapon tap/hold selection and weapon-dependent reload/zoom. Physical
 mouse/controller settings do not change touch motion. See the
-[player guide](../../docs/user/android-setup.md#play-with-touch-controls) for the
+[player guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/android-setup.md#play-with-touch-controls) for the
 current controls and remaining layout/setup limitations.
 
 The setup screen also exports saved games or diagnostic logs through Android's
 file picker. It prepares a ZIP from private save/log folders, including setup
 diagnostics and an integrity inventory, before copying it to the chosen new
 document. Cancellation and failures preserve the originals; a partial destination
-may need removal in Files. See the [player guide](../../docs/user/android-setup.md)
+may need removal in Files. See the [player guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/android-setup.md)
 for backup contents, limits, cloud-provider completion and upgrade guidance.
 
 Setup also provides touch controls presets, a touch layout editor that moves,
@@ -120,7 +120,7 @@ resizes, fades and hides each control per orientation (`TouchLayoutPage`, with
 `TouchLayout` porting the engine's placement), and an Interface page for the
 viewing profile, menu size and text size. The game's Settings can reopen setup
 during play, and its Controls page opens the layout editor directly. See the
-[player guide](../../docs/user/android-setup.md) for these pages.
+[player guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/android-setup.md) for these pages.
 Save/log exports to local Downloads and an exported-save restore round trip
 pass on the recorded S25 debug package. Physical folder-import providers,
 accessibility and visual qualification are still required; host fixtures do

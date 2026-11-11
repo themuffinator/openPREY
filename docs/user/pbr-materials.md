@@ -1,16 +1,24 @@
 # Authoring PBR materials
 
-> **Development documentation:** This page follows the current source tree and may describe changes newer than the public download. See [release status and released-version guides](release-status.md) before using it with a release package.
+> [!NOTE]
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
-PBR is a material extension for new openQ4 content, on by default. It does not
-convert retail Quake 4 materials, so stock content looks exactly as it always
-has; only materials with a `pbr` block change. On OpenGL and Vulkan, each PBR surface
-is drawn natively inside the regular light loop, so it renders in ordinary
-gameplay next to stock surfaces, and every light keeps its own shadows. A
-material the renderer cannot prove keeps its authored classic stages. See the
+PBR is a material extension for new content, inherited from openQ4 and on by
+default. It does not convert retail PREY materials, so stock content looks
+exactly as it always has; only materials with a `pbr` block change. On OpenGL
+and Vulkan, each PBR surface is drawn natively inside the regular light loop,
+so it renders in ordinary gameplay next to stock surfaces, and every light
+keeps its own shadows. A material the renderer cannot prove keeps its authored
+classic stages.
+
+openPREY's first rendering target is the legacy GL/ARB2 interaction path that
+matches PREY's original materials. Full PREY parity on the ModernGL and Vulkan
+paths is deferred (`TODO-RENDER-BACKENDS` in the
+[rebase status ledger](../dev/prey-rebase/status-ledger.md#explicit-deferral-register)),
+and no PBR content has been authored or tested for PREY maps yet. The
 [production-readiness plan](../dev/archive/2026-10-18/plans/2026-10-04-pbr-production-readiness.md)
 and the earlier [qualification ledger](../dev/archive/2026-10-18/plans/2026-09-20-pbr-rendering-audit.md)
-for current evidence and limitations.
+record openQ4's evidence and limitations, gathered on Quake 4.
 
 ## Material declaration
 
@@ -52,7 +60,7 @@ that a raw RGB normal and an A/G/B-swizzled normal contain the same channels.
 | `metallicMap`, `roughnessMap`, `aoMap` | Separate linear data maps (each map's red channel), used instead of packed ORM. The engine packs them into one ORM texture at load, sampled like the first map, so they shade exactly like the packed form; maps of different sizes are resampled to the largest. |
 | `normalFormat tangentXYZ` | Signed tangent-space XYZ reconstructed from RGB. |
 | `normalFormat tangentRG` | Signed tangent-space XY from red/green; positive Z is reconstructed. |
-| `normalFormat quake4AGB` | The Quake 4 alpha/green/blue channel convention. |
+| `normalFormat quake4AGB` | The Quake 4 alpha/green/blue channel convention; the keyword keeps its openQ4 name. |
 
 `metallic`, `roughness` and `ao` multiply their maps. Without maps they are
 scalar material values. For example, omit `ormMap` and use `metallic 0`,
@@ -124,8 +132,8 @@ stages). The experimental modern visible path (`r_rendererModernVisible 1`)
 still takes whole frames that qualify for it, with its own PBR, except a
 frame that uses SSAO with a PBR material, which stays with the light loop so
 that SSAO still darkens only indirect light. OpenGL PBR needs GLSL 1.30: on
-a context without it, such as macOS's OpenGL 2.1, PBR materials keep their
-classic stages and the console says so once.
+a context without it, PBR materials keep their classic stages and the console
+says so once.
 `r_hdrToneMap 1` presents the scene through the classic HDR tone map. The
 laboratory mode `r_pbrLinearScene 1` (default 0, not saved) instead accumulates
 PBR radiance in a separate linear scene, encoded once per pixel, and with
@@ -174,7 +182,8 @@ materials, unsupported receiver semantics, cropped/multiple-root views,
 portal/view-weapon grid blending and exhausted resource budgets retain the
 complete classic frame. This is not general classic-renderer parity.
 
-Authored probes use the existing `openQ4SpecularProbe` light-material block.
+Authored probes use the `openQ4SpecularProbe` light-material block; the keyword
+keeps its openQ4 name.
 The current atlas holds eight authored cubemaps plus the analytic environment,
 with at most 32 frame records and two selected probes per cluster. It filters
 rough reflections and diffuse irradiance.
@@ -191,27 +200,12 @@ its `cubeMap` names (`<name>_px.tga` to `_nz.tga`, 256 pixels by default) to
 your save folder and reloads them, so the probes show the capture at once.
 The capture leaves out display filters, the view weapon, mirrors and other
 probes' reflections, so baking the same scene again gives the same faces.
-openQ4 reads the save folder last: if another copy of those faces exists in
+The engine reads the save folder last: if another copy of those faces exists in
 the game or install folders, it still loads, and the command warns. Ship the
 baked faces with your map; probes are captured on request, not while playing.
 Give each probe light its own probe material, since a shared one is skipped.
 
-## Reproduce the laboratory
-
-After building and staging, run the complete native Vulkan material suite in
-an independent laboratory runtime (replace the retail asset path as needed):
-
-```powershell
-python tools/tests/renderer_pbr_laboratory.py --prepare --runtime-root .tmp/pbr-native --output-dir .tmp/pbr-native-proof0 --basepath "E:/SteamLibrary/steamapps/common/Quake 4" --backend vk --batch --suite vulkan-direct --samples 0 --timeout 480
-python tools/tests/renderer_pbr_laboratory.py --runtime-root .tmp/pbr-native --output-dir .tmp/pbr-native-proof4 --basepath "E:/SteamLibrary/steamapps/common/Quake 4" --backend vk --batch --suite vulkan-direct --samples 4 --timeout 480
-```
-
-The suite currently has 73 controls per sample count. Run the separate
-`--cases lit,ownership,emissive,master-off` full-map check to expose
-unsupported ownership. The emission control is required: transparency is
-proven by the difference between the two debug captures, which is the authored
-coverage alone, because a single capture also carries the background behind
-the surface.
+## Vulkan scope
 
 Vulkan currently implements opaque, matching alpha-tested and source-alpha
 direct lighting with scalar, packed ORM or separate metallic/roughness maps and
@@ -240,31 +234,11 @@ required record bound, recorded draws and composited surfaces; `reason=capacity`
 with zero recorded draws identifies this fallback. The decision resets every
 view, so reducing the light or surface count restores native ownership.
 
-The dedicated partial-light and model-instance regression uses the same prepared
-laboratory runtime:
-
-```text
-python tools/tests/renderer_vulkan_pbr_transparency.py --runtime-root .tmp/pbr-native --output-dir .tmp/pbr-alpha0 --basepath "E:/SteamLibrary/steamapps/common/Quake 4" --samples 0
-python tools/tests/renderer_vulkan_pbr_transparency.py --runtime-root .tmp/pbr-native --output-dir .tmp/pbr-alpha4 --basepath "E:/SteamLibrary/steamapps/common/Quake 4" --samples 4
-```
-
-`tools/tests/renderer_vulkan_pbr_capacity.py` accepts the same arguments and
-checks below-limit, exact-limit, overflow, restoration and image/video reload
-controls. Overflow captures must match the complete classic reference image.
-`tools/tests/renderer_vulkan_pbr_fog.py` uses the same arguments to verify that
-native lighting and authored alpha survive the intervening fog pass.
-`tools/tests/renderer_vulkan_pbr_resources.py` also accepts these arguments and
-checks complete classic fallback and native recovery when transparent PBR
-resources cannot be prepared, including across image and video reloads.
-
 Authored ambient lights are uniform PBR environments on every backend,
 including through source-alpha transparency: Fresnel-weighted diffuse and the
 split-sum specular, both occluded by material AO, so metals reflect them. The
-laboratory's ambient oracle predicts that view-dependent response pixel by
-pixel over the specimen sphere (`tools/tests/pbr_reference.py`).
-The [ambient-light qualification](../dev/vulkan-pbr-ambient.md) records numerical,
-capacity and recovery controls. Both capacity and resource harnesses accept
-`--ambient-lights` to exercise those light stages.
+[ambient-light qualification](../dev/vulkan-pbr-ambient.md) records openQ4's
+numerical, capacity and recovery controls.
 
 Mismatched masks/glows and unsupported stage combinations keep classic
 ownership. Vulkan filters environment reflections and diffuse irradiance
@@ -272,59 +246,31 @@ through `r_pbrIBL`, with material AO and roughness, from authored probes (and
 the analytic studio environment in the laboratory mode). The default
 light-grid setting preserves this lighting when no baked grid applies to the
 receiver. Experimental authored
-reflection probes now have [local LDR/0x/4x qualification](../dev/vulkan-pbr-probes.md)
+reflection probes have [local LDR/0x/4x qualification](../dev/vulkan-pbr-probes.md)
 through `r_rendererReflectionProbes`. A baked light grid lights admitted PBR
 surfaces on Vulkan as on OpenGL: [PBR-weighted baked diffuse](../dev/vulkan-pbr-baked.md)
 beside the environment specular, in ordinary frames and in the laboratory's
 linear HDR scene. Environment light
 also participates in the ordered transparent composite when no direct lights
 are present. See [native environment lighting](../dev/vulkan-pbr-environment.md)
-for its exact scope and qualification. Native material diagnostics now draw
+for its exact scope and qualification. Native material diagnostics draw
 albedo (1), normals (2), metallic (3), roughness (4), AO (5) and ownership (7)
 once over the full surface, including when direct and environment lights are
-off. Emission (6) retains the authored glow. These views are under
-[qualification](../dev/vulkan-pbr-diagnostics.md)
-with `renderer_vulkan_pbr_diagnostics.py` and its paired image comparator.
-Transparent diagnostics retain authored alpha. The native laboratory separately checks equivalent
-layouts, mapped shadows, emission, cutout and source-alpha coverage, rollback
-and restart. Its green marker proves the admitted native surface path, not
-complete environment lighting.
+off. Emission (6) retains the authored glow. See the
+[diagnostics qualification](../dev/vulkan-pbr-diagnostics.md).
+Transparent diagnostics retain authored alpha. The green ownership marker proves
+the admitted native surface path, not complete environment lighting.
 Vulkan filters both surface curvature and normal-map variation with the same
 bounded roughness kernel. `r_vkPBRSpecularAA 0` disables this filtering for
 diagnostic comparisons; it defaults to 1 and is not archived.
 Full scene linearization and display-color parity also remain unqualified on
 Vulkan; controlled material comparisons do not establish full scene parity.
 
-Build and stage the engine using the project's normal Meson wrapper first.
-From the repository root, the following creates an independent runtime,
-generates original test assets, compiles the map, and captures it through the
-engine's registered screenshot command:
+## Laboratory harnesses
 
-```text
-python tools/tests/renderer_pbr_laboratory.py --prepare --runtime-root .tmp/stock-runtime/pbr-lab --basepath "<retail Quake 4 directory>" --output-dir .tmp/pbr-proof --batch --linear --gl-debug --tier gl45 --cases lit,ownership,no-probes,direct,legacy,master-off
-```
-
-The retail directory must contain `q4base`. Choose new runtime/output paths;
-the harness refuses to replace an existing runtime. Subsequent runs reuse that
-runtime without `--prepare` and use a new output directory. All game runs are
-windowed, use isolated save paths and disable mouse capture. The harness does
-not inject input or capture the desktop.
-
-The 24-station map covers curved dielectric/metal roughness series, packed and
-separate channels, normal encodings, emissive, cutout/source alpha, authored
-probes, colored point lights and a projector. Additional scripted controls
-exercise moving shadows, skinning, baked lighting, fallback, resize and reloads.
-Reports retain binary/fixture/map/harness hashes, ownership diagnostics, display
-TGA images and pre-tone-map PFM radiance for completed linear HDR scenes.
-Use `screenshot linear screenshots/<name>.pfm` for a completed linear HDR scene
-(`r_pbrLinearScene 1` with `r_hdrToneMap 1`) on either backend; the laboratory's
-HDR controls set both. Native Vulkan exports the scene after fog and transparency,
-before exposure, bloom, tone mapping and HUD, at the active scene resolution.
-Views that cannot use complete linear HDR, menus and invalid paths are rejected.
-The engine rejects linear capture of the encoded non-HDR preview. Add `hdr`
-to the example's case list to capture linear radiance. Scene-target storage is
-bounded to finite, nonnegative half-float values (maximum 65,504) on the OpenGL
-path; the Vulkan emission test bounds one texture-modulated emission write,
-not arbitrary sums of many lights. Ordinary
-overbright energy is retained. Numerical and negative-control
-tests accompany the rendered map; a screenshot alone is not a passing result.
+The PBR laboratory and Vulkan regression scripts under `tools/tests/`
+(`renderer_pbr_laboratory.py` and the `renderer_vulkan_pbr_*.py` family) are
+inherited from openQ4. They still build their test runtime around openQ4's
+`baseoq4` game directory and a retail Quake 4 install, so they don't run
+against openPREY yet. Use the engine's `screenshot` command and `gfxInfo` to
+check PBR content by hand until they're ported.

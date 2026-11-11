@@ -1,7 +1,7 @@
-# openQ4 Code of Conduct
+# openPREY Code of Conduct
 
-We want openQ4 to be a welcoming, productive community for everyone interested in
-keeping Quake 4 playable on modern systems. This Code of Conduct applies to all
+We want openPREY to be a welcoming, productive community for everyone interested in
+keeping PREY playable on modern systems. This Code of Conduct applies to all
 project spaces, including the issue tracker, pull requests, discussions,
 Discord server, and any other channel where community members interact.
 
@@ -27,7 +27,7 @@ Examples of unacceptable behavior:
 - Publishing private information about others without permission.
 - Spamming, excessive self-promotion, or unsolicited advertising.
 - Advocating for, distributing, or using leaked proprietary materials, code, or
-  assets in project spaces. openQ4 does not target compatibility with leaked or
+  assets in project spaces. openPREY does not target compatibility with leaked or
   proprietary game code, and discussion of such materials is not welcome here.
 - Dismissing or demeaning contributors based on how a change was authored,
   provided the work is verified and meets project standards.

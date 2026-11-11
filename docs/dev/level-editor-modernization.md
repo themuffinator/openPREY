@@ -5,7 +5,7 @@ editor. The [development roadmap](roadmap.md#engine-loading-safety-and-developer
 TOOL-01 through TOOL-04, is the planning location. Work resumed on
 6 November 2026 and closed all four items; milestones 1 and 2 below record the
 earlier, initial scope, and milestones 3 to 6 the completion. The user guide is
-[level editor](../user/level-editor.md).
+[level editor](https://github.com/themuffinator/openQ4/blob/main/docs/user/level-editor.md).
 
 Target: a modern, integrated authoring environment at an idStudio-like standard.
 This describes the desired product standard, not compatibility with proprietary
@@ -433,7 +433,7 @@ and saves `game/airdefense1`, checks the original/copy/undo/backup/recovery byte
 enters that saved map and requests an engine screenshot. It neither sends input
 events nor captures the desktop. It also rejects a malformed numeric entity
 handle and verifies that the failed edit leaves the source unchanged. See the
-[user guide](../user/level-editor.md)
+[user guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/level-editor.md)
 for command usage.
 
 Local qualification on 24 September 2026:
