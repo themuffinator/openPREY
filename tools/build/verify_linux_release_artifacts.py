@@ -238,7 +238,7 @@ def validate_linux_runtime_payload(runtime_root: Path, arch: str) -> list[tuple[
     # carries it under Contents/Resources, so Linux is the only package that ships
     # it as a loose file - and the only one that can quietly lose it.
     require_regular_file(
-        runtime_root / "assets" / "splash" / "quake4_rt_bitmap_4001.bmp",
+        runtime_root / "assets" / "splash" / "prey_rt_bitmap_4001.bmp",
         "Linux startup splash bitmap",
     )
     game_dir = require_directory(runtime_root / "baseoq4", "Linux runtime game directory")

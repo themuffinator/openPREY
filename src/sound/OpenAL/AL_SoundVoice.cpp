@@ -100,7 +100,6 @@ static short soundRoutedQueueScratch[SOUND_QUEUE_MAX_FRAMES * 6];
 static LPALGETSOURCEDVSOFT qalGetSourcedvSOFT = NULL;
 #endif
 
-idCVar s_skipHardwareSets( "s_skipHardwareSets", "0", CVAR_BOOL, "Do all calculation, but skip XA2 calls" );
 idCVar s_debugHardware( "s_debugHardware", "0", CVAR_BOOL, "Print a message any time a hardware voice changes" );
 idCVar s_sourceRadiusScale( "s_sourceRadiusScale", "0.5", CVAR_ARCHIVE | CVAR_FLOAT, "size of a sound as a fraction of its minDistance: a sound you stand next to surrounds you instead of panning hard to one side; 0 = point sources", 0.0f, 1.0f );
 idCVar s_airAbsorption( "s_airAbsorption", "1", CVAR_ARCHIVE | CVAR_BOOL, "distant sounds lose high frequencies by the air absorption of the room's reverb preset" );

@@ -1145,11 +1145,11 @@ static bool Session_ValidateSaveGamePayload( idFile *file, const idStr &savePath
 			}
 			valid = false;
 		} else if ( layoutBuild < minimumBuild ) {
-			common->Warning( "Savegame '%s' was written by an older openQ4 (build %d, below build %d, the oldest this build can restore)",
+			common->Warning( "Savegame '%s' was written by an older openPREY (build %d, below build %d, the oldest this build can restore)",
 				savePath.c_str(), layoutBuild, minimumBuild );
 			valid = false;
 		} else if ( release != NULL ) {
-			common->DPrintf( "Savegame '%s' was written by openQ4 %s; reading it as build %d\n",
+			common->DPrintf( "Savegame '%s' was written by openPREY %s; reading it as build %d\n",
 				savePath.c_str(), release->version, release->build );
 		} else if ( payloadBuild != BUILD_NUMBER ||
 				OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT < 0 ||

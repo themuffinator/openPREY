@@ -520,7 +520,6 @@ idCVar r_useVertexBuffers( "r_useVertexBuffers", "1", CVAR_RENDERER | CVAR_INTEG
 // effect/character scenes). 1 (static geometry only) and 2 (everything) are
 // retained for per-machine A/B benchmarking.
 idCVar r_useIndexBuffers( "r_useIndexBuffers", "0", CVAR_RENDERER | CVAR_INTEGER, "use ARB_vertex_buffer_object for indexes: 0 = never, 1 = static geometry only, 2 = all geometry", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2>  );
-idCVar r_useSmp( "r_useSmp", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use SMP rendering" );
 
 idCVar r_useStateCaching( "r_useStateCaching", "1", CVAR_RENDERER | CVAR_BOOL, "avoid redundant state changes in GL_*() calls" );
 idCVar r_useRedundantStateFiltering( "r_useRedundantStateFiltering", "1", CVAR_RENDERER | CVAR_BOOL, "skip redundant legacy-backend GL calls: repeated program env parameters, vertex attrib array toggles, and vertex/index buffer rebinds" );

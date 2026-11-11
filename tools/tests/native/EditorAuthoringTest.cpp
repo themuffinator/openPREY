@@ -408,7 +408,7 @@ public:
 		}
 		return result;
 	}
-	std::string OSPath( const std::string &relative ) override { return "C:/save/baseoq4/" + relative; }
+	std::string OSPath( const std::string &relative ) override { return "C:/save/basepr/" + relative; }
 };
 
 // A scripted child: appends its log over a few polls, writes outputs, exits.
@@ -430,7 +430,7 @@ public:
 		return false;
 	}
 	void Kill() override { killed = true; }
-	std::string log = "editor_experimental/build/baseoq4/logs/editor_build.log";
+	std::string log = "editor_experimental/build/basepr/logs/editor_build.log";
 private:
 	FakeFiles &files;
 	std::vector<std::string> lines, produce;
@@ -439,7 +439,7 @@ private:
 };
 
 static void Builds() {
-	const std::string sandboxMaps = "editor_experimental/build/baseoq4/maps/custom/";
+	const std::string sandboxMaps = "editor_experimental/build/basepr/maps/custom/";
 	const std::vector<std::string> goodLog = { "---- dmap ----", "--- LoadDMapFile ---", "--- FloodEntities ---", "WARNING: brush primitive 0 on entity 1 is degenerate",
 		"----- WriteOutputFile -----", "   12 seconds for dmap", "   1 seconds to create collision map", "   4 seconds to create AAS" };
 	const std::vector<std::string> outputs = { sandboxMaps + "room.proc", sandboxMaps + "room.cm", sandboxMaps + "room.aas32", sandboxMaps + "room.aas48" };
@@ -464,7 +464,7 @@ static void Builds() {
 		Expect( files.files[sandboxMaps + "room.map"] == request.mapText, "sandbox receives the saved source" );
 		bool savepathArg = false, outputArg = false;
 		for ( std::size_t i = 0; i + 1 < child->arguments.size(); ++i ) {
-			if ( child->arguments[i] == "fs_savepath" && child->arguments[i + 1] == "C:/save/baseoq4/editor_experimental/build" ) { savepathArg = true; }
+			if ( child->arguments[i] == "fs_savepath" && child->arguments[i + 1] == "C:/save/basepr/editor_experimental/build" ) { savepathArg = true; }
 			if ( child->arguments[i] == "com_compilerOutput" && child->arguments[i + 1] == "fs_savepath" ) { outputArg = true; }
 		}
 		Expect( savepathArg && outputArg && child->arguments.back() == "+quit", "child runs in the sandbox and writes outputs there" );

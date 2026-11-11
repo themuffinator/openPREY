@@ -165,7 +165,7 @@ public:
 TESTS = r'''
 static std::string testRoot;
 static std::string Error;
-static std::string Path(const char* filename){return variables.saveRoot+"/baseoq4/"+filename;}
+static std::string Path(const char* filename){return variables.saveRoot+"/basepr/"+filename;}
 static std::string Read(const std::string& path){
     std::string result;
     Check(openq4::DurableReadExact(path,openq4::DurableFileMaxBytes,result,Error)==openq4::DurableReadResult::Present,"read test config");

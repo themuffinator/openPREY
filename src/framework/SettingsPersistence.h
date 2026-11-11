@@ -10,7 +10,7 @@ bool Common_SettingsPersistencePaths(std::string& journal, std::string& lock, st
 
 // Engine-private configuration commit, with no idCommon/Game API change.
 // A true coordinatorOwnsLock asserts ownership of the exact
-// fs_savepath/baseoq4/.settings-recovery.lock lease for the entire journal
+// fs_savepath/basepr/.settings-recovery.lock lease for the entire journal
 // lifecycle. Only that caller may persist a coordinator-qualified pending batch.
 // Ordinary callers acquire the lease themselves and refuse any recovery journal.
 // Success means complete checked serialization and acknowledged durable replace;
