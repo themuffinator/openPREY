@@ -1,7 +1,7 @@
 # UI acceptance transition
 
-The [requirement register](product-requirements.md) and the
-[migration manifest](migration-manifest.json) record product acceptance, but
+The requirement register and the
+migration manifest record product acceptance, but
 their checkpoint, revision, archive and inventory audits never grant it. This
 transition (roadmap UI-11) is the one audit that may mark a requirement
 verified, accept a milestone or final gate, or accept a migration resource.

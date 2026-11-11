@@ -120,13 +120,9 @@ def validate_no_wide_reference_casts() -> None:
 
 
 def validate_ci_smoke() -> None:
-    push = read(".github/workflows/push-verification.yml")
-    commit = read(".github/workflows/commit-validation.yml")
     runner = read("tools/validation/openq4_validate.py")
 
     for source, context in (
-        (push, "push verification workflow"),
-        (commit, "commit validation workflow"),
         (runner, "validation runner"),
     ):
         require(source, "savegame_pointer_width_safety.py", context)

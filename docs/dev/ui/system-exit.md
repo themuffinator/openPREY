@@ -146,7 +146,7 @@ paths before accepting output-resolution UI or the complete settings effects.
 The replacement remains a default-off development option: `ui_retained`
 includes it only once every setting of the stock SYSTEM page works there, and
 until then `ui_retainedSystem 1` opts into it (see
-[the retained screens' gate](retained-screens.md#one-gate)). The
+the retained screens' gate). The
 complete 31-option SYSTEM contract still requires precise numeric text entry,
 preset and Auto-Detect application, all effect executors, Defaults, full modal and scrollbar behavior,
 source-derived artwork and transitions, editor round trips and the full

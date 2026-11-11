@@ -67,14 +67,14 @@ declaring that choice proven for the whole product.
 
 ### Current implementation progress
 
-A fifth [1 October register revision](../../../ui/product-requirements.md) follows
+A fifth 1 October register revision follows
 [visual specification](../../../ui-visual-design.md) 1.14, which measures the modal
 against the stock: its title hangs in the lit slot, its silhouette is inset in
 its rectangle and its body is placed. Register schema 13 supersedes one row and
 appends its successor. The register now holds 340 rows, of which 307 define
 acceptance.
 
-A fourth [1 October register revision](../../../ui/product-requirements.md) follows
+A fourth 1 October register revision follows
 [visual specification](../../../ui-visual-design.md) 1.13, which replaces the
 vehicles' bracketed exit and boost lines with HUD prompts, keeps the
 transmission display in the right-hand screen's corner on every HUD and
@@ -82,7 +82,7 @@ confirms that the MCC side gun reports the ship's hull. Register schema 12
 supersedes one row and appends two. The register now holds 339 rows, of which
 307 define acceptance.
 
-A third [1 October register revision](../../../ui/product-requirements.md) follows
+A third 1 October register revision follows
 [visual specification](../../../ui-visual-design.md) 1.12, which adds the 9:16
 portrait view, a multiplayer weapon wheel, the Competitive HUD's match bar and a
 spectator follow camera, outlines the modal title and widens its glow, and gives
@@ -90,7 +90,7 @@ the initializing screen Remastered accents. Register schema 11 supersedes five
 rows and appends four. The register now holds 336 rows, of which 305 define
 acceptance.
 
-A second [1 October register revision](../../../ui/product-requirements.md) follows
+A second 1 October register revision follows
 [visual specification](../../../ui-visual-design.md) 1.11, which takes the waveform
 out of the weapon wheel, keeps the multiplayer chat clear of the status bar,
 rebuilds the scopes from their stock layers, catalogues the squad patches and
@@ -98,38 +98,38 @@ brings The Awakening's weapons, icons, crosshairs and vehicle displays into the
 HUD. Register schema 10 supersedes three rows and appends five. The register
 now holds 327 rows, of which 301 define acceptance.
 
-A [1 October register revision](../../../ui/product-requirements.md) follows
+A 1 October register revision follows
 [visual specification](../../../ui-visual-design.md) 1.10, which adds a sub-page level
 beneath the menu pages. Register schema 9 supersedes the band motion rules with
 a successor that adds the Remastered sub-page dock state, and appends the menu
 levels. The register now holds 319 rows, of which 296 define acceptance.
 
-A third [29 September register revision](../../../ui/product-requirements.md) follows
+A third 29 September register revision follows
 [visual specification](../../../ui-visual-design.md) 1.9, in which modals soft-focus
 the screen beneath them instead of blacking it out. Register schema 8
 supersedes two rows and appends three: the tokens and the modal construction
 are restated without the 0.94 scrim, and backdrop soft focus becomes a renderer
 capability. The register now holds 317 rows, of which 295 define acceptance.
 
-A second [29 September register revision](../../../ui/product-requirements.md)
+A second 29 September register revision
 follows [visual specification](../../../ui-visual-design.md) 1.8. Register schema 7
 appends two rows and supersedes none: the initializing screen and its picture
 rebuilt as separate layers. The register now holds 314 rows, of which 294
 define acceptance.
 
-A [29 September register revision](../../../ui/product-requirements.md) follows
+A 29 September register revision follows
 [visual specification](../../../ui-visual-design.md) 1.7. Register schema 6 appends
 two rows and supersedes none: the title and pause menus, including the Strogg
 pause menu, and the Quake emblem watermark. The register now holds 312 rows, of
 which 292 define acceptance.
 
-A [28 September register revision](../../../ui/product-requirements.md) follows
+A 28 September register revision follows
 [visual specification](../../../ui-visual-design.md) 1.6. Register schema 5 appends
 three rows and supersedes none: the Welcome and Escape multiplayer menus, the
 loading screens, and the HUD's instrument traces. The register now holds 310
 rows, of which 290 define acceptance.
 
-A second [27 September register revision](../../../ui/product-requirements.md)
+A second 27 September register revision
 follows [visual specification](../../../ui-visual-design.md) 1.5. Register schema 4
 supersedes seven rows and appends four. The new scope covers the HUD's screens,
 the centered status bar, the Remastered multiplayer top, chat and kill feed, the
@@ -137,7 +137,7 @@ side-screen notices, the crosshair and item icon catalogues, and the weapon
 wheel's transitions. The register now holds 307 rows, of which 287 define
 acceptance.
 
-The [27 September register revision](../../../ui/product-requirements.md) follows
+The 27 September register revision follows
 [visual specification](../../../ui-visual-design.md) 1.3 and 1.4. Register schema 3
 records five supersessions and appends 29 requirements for band motion, the
 pop-up frame catalogue, detailing, modern components and the HUD: gauges, the
@@ -146,7 +146,7 @@ displays, the multiplayer HUD and the scoreboard. The register now holds 296
 rows, of which 283 define acceptance. No requirement is accepted, and all 271
 migrations and seven final gates remain open.
 
-The [26 September register revision](../../../ui/product-requirements.md) follows
+The 26 September register revision follows
 [visual specification](../../../ui-visual-design.md) 1.1 and 1.2. Register schema 2
 records eight supersessions and appends 40 requirements for the measured stock
 tokens and the modern direction: viewing profiles and size classes, controller,
@@ -317,7 +317,7 @@ authoring standard. Both must be resolved before final acceptance.
 | UI-02 | P0 | `RetainedUI_ProcessEvent` queues activation requests; `Events_f` prints and drains them. There is no production dispatcher for those requests. State bindings read CVars, but do not implement settings transactions or the legacy event language. | Typed action/state bridge to session and canonical SP/MP game code; named events, presentation aliases and command results with exactly-once dispatch. |
 | UI-03 | P0 | [Document.cpp](https://github.com/themuffinator/openQ4/blob/80bb39392299b1efc1e33a836818896b70e1d2c8/src/ui/retained/Document.cpp), `ReadNode`, accepts group/text/vector and only the button control role. [RetainedUI.h](https://github.com/themuffinator/openQ4/blob/80bb39392299b1efc1e33a836818896b70e1d2c8/src/ui/RetainedUI.h) carries key/pointer/focus/cancel events, with no text/composition or wheel payload. | Functional compound widgets, scrolling, editable text, IME, binding capture and complete device behavior. An enabled-looking control must perform its advertised task. |
 | UI-04 | P0 | Core contexts are independent, but the engine host still has mutable global viewport fields and `Close`/restart call `host.Reset()`. Layer zero means the default output, and [VectorElement.cpp](https://github.com/themuffinator/openQ4/blob/80bb39392299b1efc1e33a836818896b70e1d2c8/src/ui/retained/VectorElement.cpp) explicitly limits projection to affine transforms. | A per-view render-surface contract, coordinated invalidation, world projection/density/input and durable instance snapshots. Native multi-context tests alone do not establish this. |
-| UI-05 | P0 | The [migration manifest](../../../ui/migration-manifest.json) has 271 effective resources, all pending; there are no production `.q4ui` files under `content/`. [Legacy import](../../../ui/legacy-import.md) records 269 syntax-clean resources and two unresolved alpha expressions. | Complete semantic lowering and reviewed behavioral/visual evidence for every root/include/special widget. Preserve unusual expression grouping and integer remainder semantics. |
+| UI-05 | P0 | The migration manifest has 271 effective resources, all pending; there are no production `.q4ui` files under `content/`. [Legacy import](../../../ui/legacy-import.md) records 269 syntax-clean resources and two unresolved alpha expressions. | Complete semantic lowering and reviewed behavioral/visual evidence for every root/include/special widget. Preserve unusual expression grouping and integer remainder semantics. |
 | UI-06 | P1 | The retained `Fonts` adapter in [Runtime.cpp](https://github.com/themuffinator/openQ4/blob/80bb39392299b1efc1e33a836818896b70e1d2c8/src/ui/retained/Runtime.cpp) measures and emits individual code points, ignores requested style/weight and has no shaped-run/caret contract. EngineHost reuses the large font slot. The engine already has [TrueType rasterization](https://github.com/themuffinator/openQ4/blob/80bb39392299b1efc1e33a836818896b70e1d2c8/src/renderer/tr_fontTTF.cpp), so this is not an absence of scalable font support. | A density-aware retained font/run service, kerning/shaping/fallback and text editing using the same measured glyph runs. Qualify existing languages and define missing-glyph behavior. |
 | UI-07 | P1 | `VectorGeometry::Render` keys coverage on fractional transform phase; `Renderer::RenderGeometry` transforms/clips CPU meshes; `EngineHost::Draw` expands indexed triangles into temporary engine vertices on each draw. Current CPU profiles are unoptimized and GPU cost is unqualified. | Release-build CPU/GPU measurement, persistent indexed submissions, reduced allocation/copying and a fractional-motion strategy that meets the quality/performance budget. |
 | UI-08 | P1 | All composition targets are viewport-sized. The pool tracks 48 slots and 256 MiB of RGBA8 attachments. `GenerateTexture` fails explicitly; the separate RmlUi clip-mask interface is not implemented. | Cropped/cached composition, actual renderer resource accounting/reclamation, generated-image support where required, and exact transformed clipping. Keep allocation failure diagnosable and the next frame recoverable. |
@@ -534,7 +534,7 @@ Keep the paired revisions and evidence above. Refresh the effective inventory
 before translation and retain source hashes. Derive a requirement register from
 the normative specification and the findings here, with milestone ownership and
 evidence fields. The final requirement register is a required implementation
-deliverable; the [product requirement register](../../../ui/product-requirements.md)
+deliverable; the product requirement register
 now records this scope, refreshed inventory evidence and milestone ownership.
 
 ### M1 — Normal application integration and durable instances

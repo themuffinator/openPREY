@@ -7,7 +7,20 @@ import sys
 import tempfile
 
 from filesystem_case_segments import function_body
-from presentation_clock_ownership import definition
+import re
+
+
+def definition(text, name):
+    match = re.search(r'\b(?:int|float)\s+' + re.escape(name) + r'\([^;{}]*\)\s*const\s*\{', text)
+    if not match:
+        raise RuntimeError('Missing production clock definition: ' + name)
+    start = text.index('{', match.start())
+    depth = 1
+    end = start + 1
+    while depth:
+        depth += (text[end] == '{') - (text[end] == '}')
+        end += 1
+    return text[match.start():end]
 
 ROOT = Path(__file__).resolve().parents[2]
 SUPPORT = r'''

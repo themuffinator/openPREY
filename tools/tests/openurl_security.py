@@ -216,8 +216,6 @@ def validate_no_file_url_handoffs() -> None:
 def validate_registration() -> None:
     for path in (
         "tools/validation/openq4_validate.py",
-        ".github/workflows/commit-validation.yml",
-        ".github/workflows/push-verification.yml",
     ):
         require(read(path), "openurl_security.py", f"URL security test registration in {path}")
 

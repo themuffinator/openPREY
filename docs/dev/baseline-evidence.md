@@ -36,12 +36,12 @@ mean every renderer, optional feature or current package is qualified.
 | PC OpenXR GL, VR off by default | Implemented opt-in; Vulkan/EGL/Quest recovery is not active implementation | XR workstream, [recovery review](platform-recovery-review.md), VR-01/VR-02/VR-06 |
 | MP prediction / lag compensation | `src/mpgame/gamesys/SysCvar.cpp`: both `0`; enhanced modes remain optional | Multiplayer workstream, MP-01/MP-07; corrected [player guide](../user/multiplayer-networking.md) |
 | Pure assets, dual-stack network, rcon2 | Existing bounded implementations; proprietary game DLL and retail protocol 2.85 interoperability intentionally unsupported | Network/security workstream, capability matrix, MP-08 / REL-01 |
-| Retained interface | `ui_retained 1` in `Session_menu.cpp`; stock fallback remains `0`. Withdrawn 0.14.000 notes describe that historical build's earlier default | UI workstream, [register](ui/product-requirements.md), UI-01 through UI-11 |
+| Retained interface | `ui_retained 1` in `Session_menu.cpp`; stock fallback remains `0`. Withdrawn 0.14.000 notes describe that historical build's earlier default | UI workstream, register, UI-01 through UI-11 |
 | TAA / GPU skinning / dynamic resolution | `r_temporalAA 2`; GPU skinning and dynamic resolution remain opt-in. VR/crop/nearest exclusions remain | Rendering workstream, [temporal contract](temporal-presentation.md), REN-04/REN-05 |
 | Authored PBR and shared classic domains | Native authored PBR default-on does not promote shared classic domains; `r_rendererShared*` domains remain `0`; aggregate modern-lighting proven domains remains zero | Rendering workstream, capability matrix, REN-01/REN-02 |
 | Room reverb / audio distance | `s_useEAXReverb 1`; `DOOM_TO_METERS` and `METERS_TO_DOOM` both `1.0f`. The old metre-conversion diagnosis is withdrawn | Audio workstream, [audio contract](audio-modernization.md), AUD-01 through AUD-03 |
 | Exact scheduling / game time | 60 Hz scheduler and 16 ms ordinary game/snapshot time remain separate | Game/presentation workstream, [clock contract](presentation-clock.md), HF-01/HF-02 |
-| Retail SP, MP and additive Awakening SP | In-tree canonical modules; no expansion multiplayer module | Compatibility/game workstream, [retail ledger](retail-baseline-ledger.md), Q4-02 through Q4-07 |
+| Retail SP, MP and additive Awakening SP | In-tree canonical modules; no expansion multiplayer module | Compatibility/game workstream, retail ledger, Q4-02 through Q4-07 |
 | Save readers, BSE, jobs, caches, native tools | Existing implementation is preserved. Full progression, effect, memory and tool qualification remain separate | Game/core/tools workstreams; capability matrix's linked evidence, Q4-03/Q4-05/Q4-07/CORE-01 through CORE-06; paused TOOL scope |
 
 No default or support tier was changed to match stale prose. Historical resolved
@@ -52,12 +52,12 @@ capability matrix retains its more specific source/evidence owner.
 
 ## Executable coverage and clock ownership
 
-The [coverage map](game-test-coverage.json) accounts for all 83 tests/probes from
+The coverage map accounts for all 83 tests/probes from
 the imported game history. The unified suite runs 74 relevant Python contracts
 and compiled fixtures against this repository; obsolete companion-layout checks
 map to current checks. Meson registers the native probes and production clock
 test, and the push-validation profile runs Meson tests. See
-[coverage and provenance](game-test-coverage.md) for the SDK-EULA boundary.
+coverage and provenance for the SDK-EULA boundary.
 
 The clock test executes the shared production policy, including submillisecond
 reads, 16/17 ms scheduling, one million ticks, non-divisor caps, jitter, catch-up,
@@ -164,8 +164,8 @@ controls qualify their own explicitly narrower workload only.
 ## Retained local evidence
 
 All paths below are repository-relative and deliberately outside the release
-package. The [retail ledger](retail-baseline-ledger.md) records observed results;
-the UI [inventory report](ui/inventory-report.md) records source reconciliation.
+package. The retail ledger records observed results;
+the UI inventory report records source reconciliation.
 
 | Evidence | Location |
 | --- | --- |

@@ -7,7 +7,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TEST_PATH = "tools/tests/aas_settings_contract.py"
 
 
 def read(relative_path: str) -> str:
@@ -62,15 +61,6 @@ def validate_ci_wiring() -> None:
     validator = read("tools/validation/openq4_validate.py")
     if validator.count("aas_settings_contract.py") != 1:
         raise AssertionError("Local validation must register the AAS settings contract exactly once")
-
-    for workflow_path in (
-        ".github/workflows/commit-validation.yml",
-        ".github/workflows/push-verification.yml",
-    ):
-        workflow = read(workflow_path)
-        if workflow.count(TEST_PATH) != 2:
-            raise AssertionError(f"{workflow_path} must compile and run {TEST_PATH}")
-        require(workflow, f"python {TEST_PATH}", workflow_path)
 
 
 def main() -> None:

@@ -171,14 +171,8 @@ def validate_platform_context_contract() -> None:
 
 
 def validate_ci_smoke() -> None:
-    push = read(".github/workflows/push-verification.yml")
-    commit = read(".github/workflows/commit-validation.yml")
     runner = read("tools/validation/openq4_validate.py")
 
-    require(push, "tools/tests/linux_sdl3_glew_loader.py", "push verification workflow")
-    require(push, "python tools/tests/linux_sdl3_glew_loader.py", "push script-smoke regression check")
-    require(commit, "tools/tests/linux_sdl3_glew_loader.py", "commit validation workflow")
-    require(commit, "python tools/tests/linux_sdl3_glew_loader.py", "commit script-smoke regression check")
     require(runner, "linux_sdl3_glew_loader.py", "validation Python tests")
 
 

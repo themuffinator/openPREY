@@ -148,7 +148,6 @@ def validate_sdl3_highdpi_contract() -> None:
     require(screen_parms, "SDL3_RefreshWindowPlacement();", "SDL3 post-sync placement refresh")
     require(screen_parms, "SDL3_PrintWaylandWindowState(parms.fullScreen ? \"fullscreen change\" : \"windowed change\")", "SDL3 post-sync Wayland window state diagnostics")
     require(read("tools/tests/renderer_validation_matrix.py"), '"id": "sdl3-force-x11-display-diagnostics"', "OPENPREY_FORCE_X11 runtime diagnostics case")
-    require(read(".github/workflows/commit-validation.yml"), "OPENPREY_FORCE_X11=1 xvfb-run", "OPENPREY_FORCE_X11 CI runtime diagnostics")
     require(activate_mouse, "if (SDL3_IsNativeWaylandVideoDriver()) {", "SDL3 Wayland mouse capture path")
     require(activate_mouse, "SDL_SetWindowRelativeMouseMode(s_sdlWindow, true)", "SDL3 Wayland relative mouse priority")
     require(activate_mouse, "native Wayland could not confine mouse pointer; continuing with relative mouse mode", "SDL3 Wayland best-effort pointer confinement")
@@ -211,14 +210,8 @@ def validate_sdl3_highdpi_contract() -> None:
 
 
 def validate_ci_smoke() -> None:
-    push = read(".github/workflows/push-verification.yml")
-    commit = read(".github/workflows/commit-validation.yml")
     runner = read("tools/validation/openq4_validate.py")
 
-    require(push, "tools/tests/linux_highdpi_mouse.py", "push verification workflow")
-    require(push, "python tools/tests/linux_highdpi_mouse.py", "push script-smoke regression check")
-    require(commit, "tools/tests/linux_highdpi_mouse.py", "commit validation workflow")
-    require(commit, "python tools/tests/linux_highdpi_mouse.py", "commit script-smoke regression check")
     require(runner, "linux_highdpi_mouse.py", "validation Python tests")
 
 

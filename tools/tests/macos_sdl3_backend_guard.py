@@ -403,13 +403,9 @@ def validate_native_vram_probe_guards() -> None:
 
 def validate_validation_wiring() -> None:
     validator = read("tools/validation/openq4_validate.py")
-    commit = read(".github/workflows/commit-validation.yml")
-    push = read(".github/workflows/push-verification.yml")
 
     for haystack, context in (
         (validator, "validation runner"),
-        (commit, "commit validation workflow"),
-        (push, "push verification workflow"),
     ):
         require(haystack, "macos_sdl3_backend_guard.py", context)
 

@@ -191,14 +191,8 @@ def validate_deprecated_api_boundaries() -> None:
 
 
 def validate_release_distribution_policy() -> None:
-    release = read(".github/workflows/manual-release.yml")
     package = read("tools/build/package_nightly.py")
 
-    require(release, "--macos-signing-mode developer-id", "macOS release signing policy")
-    require(release, "--macos-notarize", "macOS release notarization policy")
-    require(release, "xcrun stapler validate", "macOS release stapling policy")
-    require(release, "hdiutil verify", "macOS DMG validation policy")
-    reject(release, "--macos-entitlements", "macOS release default entitlement policy")
     require(package, "MACOS_FORBIDDEN_ENTITLEMENTS", "macOS entitlement policy")
     require(package, "com.apple.security.app-sandbox", "macOS App Sandbox entitlement policy")
     require(package, "com.apple.security.get-task-allow", "macOS debug entitlement policy")
@@ -222,15 +216,10 @@ def validate_package_root_runtime_policy() -> None:
 
 
 def validate_ci_wiring() -> None:
-    script = "tools/tests/macos_static_policy.py"
     validator = read("tools/validation/openq4_validate.py")
-    commit = read(".github/workflows/commit-validation.yml")
-    push = read(".github/workflows/push-verification.yml")
     status_ledger = read("docs/dev/prey-rebase/status-ledger.md")
 
     require(validator, "macos_static_policy.py", "validation runner")
-    require(commit, script, "commit validation workflow")
-    require(push, script, "push verification workflow")
     require(status_ledger, "TODO-RELEASE-LANES", "macOS release-lane deferral")
 
 

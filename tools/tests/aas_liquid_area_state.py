@@ -9,7 +9,16 @@ import shutil
 import subprocess
 import tempfile
 
-from mp_lag_compensation_state import block
+
+def block(source: str, signature: str) -> str:
+    """Return one brace-delimited block, from its signature to the matching closing brace."""
+    start = source.index(signature)
+    brace = source.index("{", start)
+    depth, end = 1, brace + 1
+    while depth:
+        depth += (source[end] == "{") - (source[end] == "}")
+        end += 1
+    return source[start:end]
 
 ROOT = Path(__file__).resolve().parents[2]
 

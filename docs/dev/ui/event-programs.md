@@ -5,7 +5,7 @@ connects it to normal GUI lifecycle and session delivery. It extends
 [presentation aliases](presentation-aliases.md) and
 [application integration](managed-application.md). The
 [product completion plan](../archive/2026-10-18/plans/ui-product-completion.md) and
-[requirement register](product-requirements.md) still require the complete GUI
+requirement register still require the complete GUI
 corpus, controls, production screen, editor and platform qualification.
 
 ## Canonical programs
@@ -200,9 +200,9 @@ use host/backend doubles; the following captures exercise the built engine.
 Both runs use the mode-specific launch profile, installed stock assets, a hidden
 window, disabled host mouse/controller input and the engine `screenshot` command.
 MP explicitly sets `ui_autoJoin 1`. The
-[event fixture](../../../tools/ui/fixtures/event-program-smoke.q4ui),
-[semantic script](../../../tools/ui/fixtures/event-program-smoke.cfg) and
-[read-only recovery script](../../../tools/ui/fixtures/event-program-smoke-resume.cfg)
+event fixture,
+semantic script and
+read-only recovery script
 are authored test assets. They are not production GUI replacements.
 
 The strict `--event-program-probe` oracle binds exact fixture/script bytes,

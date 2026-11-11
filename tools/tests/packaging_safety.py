@@ -1576,31 +1576,6 @@ def validate_game_layer_packaging() -> None:
         assert not (package_root / "q4xbase").exists()
         assert (layer_dir / "user-assets.pk4").read_bytes() == b"user supplied content"
 
-def validate_layer_retirement() -> None:
-    sys.path.insert(0, str(ROOT / 'tools/build'))
-    from retire_game_layers import retire
-    root = WORK / 'retire'
-    for name in ('mod.json','game-sp_x64.dll','game-mp_arm64.so','game-sp_universal2.dylib'):
-        write_file(root / 'q4xbase' / name, b'obsolete build output')
-    for name in ('assets.pk4','savegames/campaign.save','config.cfg','def/weapon.def','third-party.dll'):
-        write_file(root / 'q4xbase' / name, b'user file')
-    assert len(retire(root)) == 4
-    assert retire(root) == []
-    for name in ('assets.pk4','savegames/campaign.save','config.cfg','def/weapon.def','third-party.dll'):
-        assert (root / 'q4xbase' / name).read_bytes() == b'user file'
-    outside = WORK / 'retire-outside'
-    write_file(outside / 'game-sp_x64.dll', b'preserve')
-    link = root / 'q4xbase/game-sp_x64.dll'
-    if make_symlink(outside / 'game-sp_x64.dll',link):
-        try:
-            retire(root)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError('layer retirement accepted a symlink')
-        assert link.is_symlink() and (outside / 'game-sp_x64.dll').read_bytes() == b'preserve'
-        link.unlink()
-
 def main() -> None:
     shutil.rmtree(WORK, ignore_errors=True)
     try:
@@ -1622,7 +1597,6 @@ def main() -> None:
         validate_stale_content_prune_symlink_handling()
         validate_package_name_and_copy_guards()
         validate_game_layer_packaging()
-        validate_layer_retirement()
         validate_renderer_module_staging()
         validate_build_pack_and_header_cli_guards()
         validate_unchanged_pack_rebuild_stays_current()

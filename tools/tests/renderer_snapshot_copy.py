@@ -5,7 +5,25 @@ import os
 import shutil
 import subprocess
 from filesystem_case_segments import function_body
-from game_regression_suite import RegressionTemporaryDirectory
+import tempfile
+import time
+
+
+class RegressionTemporaryDirectory(tempfile.TemporaryDirectory):
+    """Allow Windows to release a completed fixture executable before removal."""
+
+    def cleanup(self):
+        for attempt in range(21):
+            try:
+                super().cleanup()
+                return
+            except (PermissionError, NotADirectoryError) as error:
+                # A completed child can retain a short-lived image lock on
+                # Windows. Never suppress persistent errors or retry tests.
+                sharing = isinstance(error, PermissionError) or isinstance(error.__context__, PermissionError)
+                if os.name != 'nt' or not sharing or attempt == 20:
+                    raise
+                time.sleep(0.1)
 
 ROOT = Path(__file__).resolve().parents[2]
 PREPARATION = r'''

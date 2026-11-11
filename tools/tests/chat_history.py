@@ -14,7 +14,7 @@ def main():
     exe = OUT / ('chat_history.exe' if os.name == 'nt' else 'chat_history')
     if os.name == 'nt':
         command = OUT / 'build.cmd'
-        command.write_text('@echo off\ncall "' + str(ROOT / 'tools/build/openq4_devcmd.cmd') + '"\n'
+        command.write_text('@echo off\ncall "' + str(ROOT / 'tools/build/openprey_devcmd.cmd') + '"\n'
             'if errorlevel 1 exit /b 1\n' + subprocess.list2cmdline([
                 'cl', '/nologo', '/std:c++17', '/EHsc', '/W4', str(source),
                 '/Fo:' + str(OUT / 'chat_history.obj'), '/Fe:' + str(exe)]) + '\n', encoding='utf-8')

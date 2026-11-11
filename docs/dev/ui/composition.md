@@ -80,11 +80,11 @@ The document and vector test targets also pass. The benchmark now uses no-op
 layer host calls alongside its existing empty draw host, so its timings exclude
 the engine and GPU composition cost.
 
-The [composition fixture](../../../tools/ui/fixtures/composition-smoke.q4ui)
+The composition fixture
 places matching Quake 4-style vector panels at full and half group opacity over
 a constant, brighter backdrop that exposes errors in translucent edges. Both
 contain a nested translucent control. The
-[capture verifier](../../../tools/ui/verify_composition_capture.py) compares each
+capture verifier compares each
 matching pixel against `(full-opacity result + backdrop) / 2`, including frames,
 gradients, controls and localized glyph edges. It rejects empty output and any
 channel mismatch above 4/255. It reads the engine's TGA screenshot directly.

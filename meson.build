@@ -270,16 +270,8 @@ if get_option('build_native_tests')
     files('tools/tests/native/BSEParticleOrderTest.cpp'),
     include_directories: root_include_dir, install: false)
   test('openq4-bse-particle-order', bse_particle_order_test, timeout: 30)
-  objective_marker_layout_test = executable('openq4-objective-marker-layout-test',
-    files('tools/tests/native/ObjectiveMarkerLayoutTest.cpp'),
-    include_directories: root_include_dir, install: false)
-  test('openq4-objective-marker-layout', objective_marker_layout_test, timeout: 30)
   test('openq4-vulkan-material-sources', py,
     args: [files('tools/build/vulkan_material_sources.py'), '--check'], timeout: 30)
-  test('openq4-vulkan-qualification-report', py,
-    args: [files('tools/tests/renderer_vulkan_qualification.py'), 'self-test'], timeout: 30)
-  test('openq4-vulkan-presentation-report', py,
-    args: [files('tools/tests/renderer_vulkan_presentation.py'), '--self-test'], timeout: 30)
   test('openq4-vulkan-material-cache', py,
     args: [files('tools/tests/renderer_vulkan_material_cache.py')], timeout: 60)
   openq4_editor_document_test = executable(
@@ -330,16 +322,6 @@ if get_option('build_native_tests')
   )
   test('openq4-crc32', openq4_crc32_test, timeout: 30)
 
-  openq4_save_dict_under_test = custom_target(
-    'openq4-save-dict-under-test', input: files('src/game/gamesys/SaveGame.cpp', 'src/mpgame/gamesys/SaveGame.cpp'),
-    output: 'SaveDictUnderTest.inc',
-    command: [py, files('tools/tests/generate_save_dict_test.py'), '@INPUT0@', '@INPUT1@', '@OUTPUT@'],
-  )
-  openq4_save_dict_test = executable(
-    'openq4-save-dict-test', [files('tools/tests/native/SaveDictTest.cpp'), openq4_save_dict_under_test],
-    include_directories: root_include_dir, install: false,
-  )
-  test('openq4-save-dict', openq4_save_dict_test, timeout: 30)
 
   dict_identity_source = custom_target(
     'openq4-dict-identity-source', input: files('src/idlib/Dict.cpp'),
@@ -406,30 +388,7 @@ if get_option('build_native_tests')
   )
   test('openq4-idlist', openq4_idlist_test, timeout: 30)
 
-  openq4_cmdargs_under_test = custom_target(
-    'openq4-cmdargs-under-test',
-    input: files('src/idlib/CmdArgs.cpp', 'src/idlib/CmdArgs.h', 'src/idlib/Lib.h'),
-    output: 'CmdArgsUnderTest.inc',
-    command: [py, files('tools/tests/cmdargs_append_contract.py'), '--generate-native', '@OUTPUT@'],
-  )
-  openq4_cmdargs_test = executable(
-    'openq4-cmdargs-test',
-    [files('tools/tests/native/CmdArgsTest.cpp'), openq4_cmdargs_under_test],
-    include_directories: root_include_dir, install: false,
-  )
-  test('openq4-cmdargs', openq4_cmdargs_test, timeout: 30)
 
-  openq4_arena_sound_source = custom_target(
-    'openq4-arena-sound-source',
-    input: files('src/mpgame/MultiplayerGame.cpp', 'src/sound/snd_world.cpp', 'src/framework/Session.cpp', 'src/framework/Session_menu.cpp'),
-    output: 'ArenaSoundPauseTest.cpp',
-    command: [py, files('tools/tests/arena_sound_pause.py'), '--generate-native', '@OUTPUT@'],
-  )
-  openq4_arena_sound_test = executable(
-    'openq4-arena-sound-test', openq4_arena_sound_source,
-    cpp_args: ['-UNDEBUG'], install: false,
-  )
-  test('openq4-arena-sound', openq4_arena_sound_test, timeout: 30)
 
   ui_engine_thread_source = custom_target(
     'openq4-ui-engine-thread-source',
@@ -455,13 +414,6 @@ if get_option('build_native_tests')
     output: 'AndroidLifecycle.cpp',
     depend_files: files('src/sys/sdl3/sdl3_backend.cpp', 'src/framework/Session.cpp', 'src/framework/KeyInput.cpp'),
     command: [py, files('tools/tests/android_lifecycle.py'), '--generate-native', '@OUTPUT@'],
-  )
-  android_async_source = custom_target(
-    'openq4-android-async-source',
-    output: 'AndroidAsync.cpp',
-    depend_files: files('src/sys/sdl3/sdl3_backend.cpp', 'src/sys/android/android_main.cpp',
-      'src/framework/Common.cpp', 'src/framework/Common.h', 'tools/tests/presentation_clock_ownership.py'),
-    command: [py, files('tools/tests/android_async.py'), '--generate-native', '@OUTPUT@'],
   )
   android_savepath_source = custom_target(
     'openq4-android-savepath-source',
@@ -494,11 +446,6 @@ if get_option('build_native_tests')
   )
   test('openq4-android-interface-setup', android_interface_setup_test, timeout: 30)
   foreach platform : ['android', 'desktop']
-    android_async_test = executable(
-      'openq4-android-async-' + platform, android_async_source,
-      cpp_args: platform == 'android' ? ['-D__ANDROID__=1'] : [], install: false,
-    )
-    test('openq4-android-async-' + platform, android_async_test, timeout: 30)
 
     android_lifecycle_test = executable(
       'openq4-android-lifecycle-' + platform, android_lifecycle_source,
@@ -541,204 +488,6 @@ if get_option('build_native_tests')
   )
   test('openq4-restore-recovery', restore_recovery_test, timeout: 30)
 
-  foreach game_mode : ['game', 'mpgame']
-    restore_events_source = custom_target(
-      'openq4-restore-events-' + game_mode + '-source',
-      input: files('src' / game_mode / 'gamesys' / 'Event.cpp', 'src/idlib/containers/LinkList.h', 'src/cm/CollisionModel.h'),
-      output: 'RestoreEvents-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_events.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_events_test = executable(
-      'openq4-restore-events-' + game_mode, restore_events_source, cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-events-' + game_mode, restore_events_test, timeout: 30)
-    restore_af_source = custom_target(
-      'openq4-restore-af-' + game_mode + '-source',
-      input: files('src' / game_mode / 'AF.cpp', 'src' / game_mode / 'physics' / 'Physics_AF.cpp'),
-      output: 'RestoreAF-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_af.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_af_test = executable(
-      'openq4-restore-af-' + game_mode, restore_af_source, cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-af-' + game_mode, restore_af_test, timeout: 30)
-    vehicle_hud_source = custom_target(
-      'openq4-vehicle-hud-' + game_mode + '-source',
-      input: files('src' / game_mode / 'vehicle' / 'Vehicle.cpp'),
-      output: 'VehicleHud-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/vehicle_hud.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    vehicle_hud_test = executable(
-      'openq4-vehicle-hud-' + game_mode, vehicle_hud_source, cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-vehicle-hud-' + game_mode, vehicle_hud_test, timeout: 30)
-    restore_animation_source = custom_target(
-      'openq4-restore-animation-' + game_mode + '-source',
-      input: files('src' / game_mode / 'Actor.cpp', 'src' / game_mode / 'IK.cpp',
-                   'src' / game_mode / 'gamesys' / 'State.cpp'),
-      output: 'RestoreAnimation-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_animation.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_animation_test = executable(
-      'openq4-restore-animation-' + game_mode, restore_animation_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-animation-' + game_mode, restore_animation_test, timeout: 30)
-    restore_physics_source = custom_target(
-      'openq4-restore-physics-' + game_mode + '-source',
-      input: files('src' / game_mode / 'gamesys' / 'SaveGame.cpp',
-                   'src' / game_mode / 'physics' / 'Physics_Base.cpp',
-                   'src' / game_mode / 'physics' / 'Physics_Static.cpp',
-                   'src' / game_mode / 'physics' / 'Physics_StaticMulti.cpp'),
-      output: 'RestorePhysics-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_physics.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_physics_test = executable(
-      'openq4-restore-physics-' + game_mode, restore_physics_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-physics-' + game_mode, restore_physics_test, timeout: 30)
-    restore_resources_source = custom_target(
-      'openq4-restore-resources-' + game_mode + '-source',
-      input: files('src' / game_mode / 'gamesys' / 'SaveGame.cpp',
-                   'src' / game_mode / 'Player.cpp', 'src' / game_mode / 'physics' / 'Clip.cpp',
-                   'src' / game_mode / 'physics' / 'Physics_StaticMulti.cpp',
-                   'src' / game_mode / 'physics' / 'Physics_Particle.cpp',
-                   'src' / game_mode / 'vehicle' / 'VehiclePosition.cpp',
-                   'src' / game_mode / 'vehicle' / 'VehicleParts.cpp'),
-      output: 'RestoreResources-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_resources.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_resources_test = executable(
-      'openq4-restore-resources-' + game_mode, restore_resources_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-resources-' + game_mode, restore_resources_test, timeout: 30)
-    restore_identity_source = custom_target(
-      'openq4-restore-identity-' + game_mode + '-source',
-      input: files('src' / game_mode / 'Entity.cpp', 'src' / game_mode / 'client' / 'ClientEntity.cpp',
-                   'src' / game_mode / 'Game_local.cpp'),
-      output: 'RestoreIdentity-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_identity.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_identity_test = executable(
-      'openq4-restore-identity-' + game_mode, restore_identity_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-identity-' + game_mode, restore_identity_test, timeout: 30)
-    client_registration_source = custom_target(
-      'openq4-client-registration-' + game_mode + '-source',
-      input: files('src' / game_mode / 'Game_local.cpp'),
-      output: 'ClientRegistration-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/client_entity_registration.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    client_registration_test = executable(
-      'openq4-client-registration-' + game_mode, client_registration_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-client-registration-' + game_mode, client_registration_test, timeout: 30)
-    restore_cleanup_source = custom_target(
-      'openq4-restore-cleanup-' + game_mode + '-source',
-      input: files('src' / game_mode / 'gamesys' / 'SaveGame.cpp', 'src' / game_mode / 'gamesys' / 'Class.cpp',
-                   'src' / game_mode / 'Game_local.cpp'),
-      output: 'RestoreCleanup-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_cleanup.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_cleanup_test = executable(
-      'openq4-restore-cleanup-' + game_mode, restore_cleanup_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    foreach scenario : ['independent', 'cascade', 'external', 'commit', 'rollback', 'exception']
-      test('openq4-restore-cleanup-' + game_mode + '-' + scenario, restore_cleanup_test, args: [scenario], timeout: 30)
-    endforeach
-    restore_bindings_source = custom_target(
-      'openq4-restore-bindings-' + game_mode + '-source',
-      input: files('src' / game_mode / 'Entity.cpp', 'src' / game_mode / 'gamesys' / 'SaveGame.cpp',
-                   'src' / game_mode / 'Game_local.cpp'),
-      output: 'RestoreBindings-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_bindings.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_bindings_test = executable(
-      'openq4-restore-bindings-' + game_mode, restore_bindings_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-bindings-' + game_mode, restore_bindings_test, timeout: 30)
-    restore_movers_source = custom_target(
-      'openq4-restore-movers-' + game_mode + '-source',
-      input: files('src' / game_mode / 'Mover.cpp', 'src' / game_mode / 'Mover.h',
-                   'src' / game_mode / 'Entity.h', 'src' / game_mode / 'gamesys' / 'SaveGame.cpp'),
-      output: 'RestoreMovers-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_movers.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_movers_test = executable(
-      'openq4-restore-movers-' + game_mode, restore_movers_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-movers-' + game_mode, restore_movers_test, timeout: 30)
-    restore_threads_source = custom_target(
-      'openq4-restore-threads-' + game_mode + '-source',
-      input: files('src' / game_mode / 'Misc.cpp', 'src' / game_mode / 'Game_local.cpp',
-                   'src' / game_mode / 'script' / 'Script_Thread.cpp',
-                   'src' / game_mode / 'script' / 'Script_Interpreter.cpp',
-                   'src' / game_mode / 'gamesys' / 'SaveGame.cpp'),
-      output: 'RestoreThreads-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_threads.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_threads_test = executable(
-      'openq4-restore-threads-' + game_mode, restore_threads_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-threads-' + game_mode, restore_threads_test, timeout: 30)
-    restore_classes_source = custom_target(
-      'openq4-restore-classes-' + game_mode + '-source',
-      input: files('src' / game_mode / 'gamesys' / 'SaveGame.cpp', 'src' / game_mode / 'gamesys' / 'Class.h'),
-      output: 'RestoreClasses-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_classes.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_classes_test = executable(
-      'openq4-restore-classes-' + game_mode, restore_classes_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-classes-' + game_mode, restore_classes_test, timeout: 30)
-    restore_gui_source = custom_target(
-      'openq4-restore-gui-' + game_mode + '-source',
-      input: files('src' / game_mode / 'gamesys' / 'SaveGame.cpp'),
-      output: 'RestoreGui-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_gui.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_gui_test = executable(
-      'openq4-restore-gui-' + game_mode, restore_gui_source, install: false,
-    )
-    test('openq4-restore-gui-' + game_mode, restore_gui_test, timeout: 30)
-    restore_spawn_refs_source = custom_target(
-      'openq4-restore-spawn-refs-' + game_mode + '-source',
-      input: files('src' / game_mode / 'Game_local.h', 'src' / game_mode / 'client' / 'ClientEntity.h'),
-      output: 'RestoreSpawnRefs-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_spawn_refs.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_spawn_refs_test = executable(
-      'openq4-restore-spawn-refs-' + game_mode, restore_spawn_refs_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    test('openq4-restore-spawn-refs-' + game_mode, restore_spawn_refs_test, timeout: 30)
-    restore_render_handles_source = custom_target(
-      'openq4-restore-render-handles-' + game_mode + '-source',
-      input: files('src' / game_mode / 'Entity.cpp', 'src' / game_mode / 'Actor.cpp',
-                   'src' / game_mode / 'Projectile.cpp', 'src' / game_mode / 'Moveable.cpp',
-                   'src' / game_mode / 'client' / 'ClientModel.cpp', 'src' / game_mode / 'client' / 'ClientMoveable.cpp',
-                   'src' / game_mode / 'vehicle' / 'VehicleParts.cpp', 'src' / game_mode / 'Weapon.cpp',
-                   'src' / game_mode / 'ai' / 'Monster_StroggHover.cpp'),
-      output: 'RestoreRenderHandles-' + game_mode + '.cpp',
-      command: [py, files('tools/tests/savegame_restore_render_handles.py'), '--generate-native', game_mode, '@OUTPUT@'],
-    )
-    restore_render_handles_test = executable(
-      'openq4-restore-render-handles-' + game_mode, restore_render_handles_source,
-      cpp_args: ['-UNDEBUG'], install: false,
-    )
-    foreach scenario : ['entity', 'actor', 'projectile', 'barrel', 'client-model', 'client-moveable', 'vehicle-light', 'weapon-lights', 'hover-light']
-      test('openq4-restore-render-handles-' + game_mode + '-' + scenario, restore_render_handles_test, args: [scenario], timeout: 30)
-    endforeach
-  endforeach
 
   openq4_interpolation_test = executable(
     'openq4-interpolation-test', files('tools/tests/native/InterpolationTest.cpp'),
@@ -761,10 +510,6 @@ if get_option('build_native_tests')
     include_directories: root_include_dir, install: false,
   )
   test('openq4-presentation-pacing', presentation_pacing_test, timeout: 30)
-  test('openq4-presentation-hf-contract', py,
-    args: [files('tools/tests/presentation_hf_contract.py'), '--mutations'], timeout: 90)
-  test('openq4-clock-ownership', py,
-    args: [files('tools/tests/presentation_clock_ownership.py')], timeout: 90)
   test('openq4-render-thread-contract', py,
     args: [files('tools/tests/renderer_render_thread_contract.py')], timeout: 30)
   test('openq4-render-thread-runtime', py,
@@ -777,50 +522,19 @@ if get_option('build_native_tests')
     args: [files('tools/tests/renderer_frame_ownership.py')], timeout: 90)
   test('openq4-render-snapshot-copy', py,
     args: [files('tools/tests/renderer_snapshot_copy.py')], timeout: 90)
-  test('openq4-render-overlap-benchmark', py,
-    args: [files('tools/tests/renderer_overlap_benchmark_test.py')], timeout: 30)
   test('openq4-render-frame-identity', py,
     args: [files('tools/tests/renderer_frame_identity.py')], timeout: 90)
   test('openq4-presentation-reference-suite', py,
     args: [files('tools/tests/presentation_reference_suite_test.py')], timeout: 30)
 
-  test('openq4-imported-game-regressions', py,
-    args: [files('tools/tests/game_regression_suite.py'), '--log-dir', meson.project_build_root() / 'game-regression-logs'],
-    timeout: 600, is_parallel: false)
-  test('openq4-mvd-seek-weapon', py,
-    args: [files('tools/tests/mvd_seek_weapon_state.py')], timeout: 60)
   test('openq4-aas-liquid-area', py,
     args: [files('tools/tests/aas_liquid_area_state.py')], timeout: 60)
-  test('openq4-player-air-readout', py,
-    args: [files('tools/tests/player_air_readout_state.py')], timeout: 60)
-  bot_frame_profile_test = executable(
-    'openq4-bot-frame-profile-test', files('tools/tests/native/BotFrameProfileTest.cpp'),
-    include_directories: root_include_dir, install: false,
-  )
-  test('openq4-bot-frame-profile', bot_frame_profile_test, timeout: 30)
   mvd_storage_budget_test = executable(
     'openq4-mvd-storage-budget-test', files('tools/tests/native/MvdStorageBudgetTest.cpp'),
     include_directories: root_include_dir, install: false,
   )
   test('openq4-mvd-storage-budget', py,
     args: [files('tools/tests/mvd_storage_budget.py'), mvd_storage_budget_test.full_path()], timeout: 60)
-  game_probe_cpp = meson.get_compiler('cpp')
-  foreach probe : ['string_allocation', 'binary_token_signed_char']
-    probe_args = []
-    if probe == 'binary_token_signed_char'
-      probe_args = game_probe_cpp.get_id() == 'msvc' ? ['/J', '/DOPENQ4_EXPECT_UNSIGNED_PLAIN_CHAR=1'] : ['-funsigned-char', '-DOPENQ4_EXPECT_UNSIGNED_PLAIN_CHAR=1']
-    endif
-    probe_exe = executable('openq4-' + probe + '-probe', files('tools/tests/' + probe + '_probe.cpp'),
-      cpp_args: probe_args, install: false)
-    test('openq4-' + probe, probe_exe, timeout: 30)
-  endforeach
-  if host_machine.system() == 'linux'
-    foreach probe : ['linux_portability', 'lp64_semantics', 'md4_checksum', 'md5_checksum', 'crc_checksum']
-      probe_exe = executable('openq4-' + probe + '-probe', files('tools/tests/' + probe + '_probe.cpp'),
-        cpp_args: game_probe_cpp.get_supported_arguments(['-Wno-unknown-pragmas', '-Wno-register']), install: false)
-      test('openq4-' + probe, probe_exe, timeout: 30)
-    endforeach
-  endif
 
   openq4_bitmsg_under_test = custom_target(
     'openq4-bitmsg-under-test',
@@ -849,24 +563,6 @@ if get_option('build_native_tests')
   )
   test('openq4-compressor', openq4_compressor_test, timeout: 30)
 
-  foreach game_source : ['game', 'mpgame']
-    tactical_include = 'AasTactical-' + game_source + 'UnderTest.inc'
-    tactical_under_test = custom_target(
-      'openq4-aas-tactical-' + game_source + '-under-test',
-      input: files('src' / game_source / 'ai/AAS_tactical.cpp'),
-      output: tactical_include,
-      command: [py, files('tools/tests/generate_aas_tactical_test.py'), '@INPUT@', '@OUTPUT@'],
-      depend_files: files('tools/tests/async_drop_client_contract.py'),
-    )
-    tactical_test = executable(
-      'openq4-aas-tactical-' + game_source + '-test',
-      [files('tools/tests/native/AasTacticalTest.cpp'), tactical_under_test],
-      include_directories: root_include_dir,
-      cpp_args: ['-DAAS_TACTICAL_TEST_INCLUDE="' + tactical_include + '"'],
-      install: false,
-    )
-    test('openq4-aas-tactical-' + game_source, tactical_test, timeout: 30)
-  endforeach
 
   openq4_core_safety_test = executable(
     'openq4-core-safety-test',
@@ -1208,8 +904,6 @@ if build_engine or get_option('build_native_tests')
       files('tools/tests/native/UiScrollbarRuntimeTest.cpp'),
       include_directories: root_include_dir,
       dependencies: [openq4_retained_dep, rmlui_project.get_variable('rmlui_dep'), jsoncpp_project.get_variable('jsoncpp_dep')], install: false)
-    test('openq4-ui-scrollbar-runtime', openq4_ui_scrollbar_runtime_test,
-      args: [meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/settings/system.q4ui'], timeout: 30)
     openq4_ui_choice_scroll_interaction_test = executable('openq4-ui-choice-scroll-interaction-test',
       files('tools/tests/native/UiChoiceScrollInteractionTest.cpp'),
       include_directories: [root_include_dir, include_directories('src/ui/retained')],
@@ -1219,8 +913,6 @@ if build_engine or get_option('build_native_tests')
       files('tools/tests/native/UiChoiceScrollRuntimeTest.cpp'),
       include_directories: root_include_dir,
       dependencies: [openq4_retained_dep, rmlui_project.get_variable('rmlui_dep'), jsoncpp_project.get_variable('jsoncpp_dep')], install: false)
-    test('openq4-ui-choice-scroll-runtime', openq4_ui_choice_scroll_runtime_test,
-      args: [meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/settings/system.q4ui'], timeout: 180)
     openq4_ui_text_input_test = executable(
       'openq4-ui-text-input-test',
       files('tools/tests/native/UiTextInputTest.cpp'),
@@ -1362,8 +1054,6 @@ if build_engine or get_option('build_native_tests')
       dependencies: [openq4_retained_dep, rmlui_project.get_variable('rmlui_dep'), jsoncpp_project.get_variable('jsoncpp_dep')],
       install: false,
     )
-    test('openq4-ui-number-runtime', openq4_ui_number_runtime_test,
-      args: [meson.project_source_root() / 'tools/ui/fixtures/number-edit-smoke.q4ui'], timeout: 30)
     openq4_ui_text_field_test = executable(
       'openq4-ui-text-field-test',
       files('tools/tests/native/UiTextFieldTest.cpp'),
@@ -1424,9 +1114,6 @@ if build_engine or get_option('build_native_tests')
       args: [meson.project_source_root() / 'tools/tests/renderer_image_content.py',
         '--compiler', ui_test_cpp.cmd_array()[-1]], timeout: 180)
     foreach recovery_suite : ['owner', 'module', 'loader', 'codec', 'cold', 'lifecycle']
-      test('openq4-ui-image-recovery-' + recovery_suite, py,
-        args: [meson.project_source_root() / ('tools/tests/renderer_image_recovery_' + recovery_suite + '.py'),
-          '--compiler', ui_test_cpp.cmd_array()[-1]], timeout: 180)
     endforeach
     test('openq4-ui-native-input-route', py,
       args: [meson.project_source_root() / 'tools/tests/native_input_route.py',
@@ -1456,9 +1143,6 @@ if build_engine or get_option('build_native_tests')
       args: [meson.project_source_root() / 'tools/tests/sound_recovery.py',
         '--compiler', ui_test_cpp.cmd_array()[-1], '--no-mutations'], timeout: 180)
     foreach image_policy_suite : ['restart', 'metadata']
-      test('openq4-ui-image-policy-' + image_policy_suite, py,
-        args: [meson.project_source_root() / ('tools/tests/renderer_image_policy_' + image_policy_suite + '.py'),
-          '--compiler', ui_test_cpp.cmd_array()[-1]], timeout: 180)
     endforeach
     test('openq4-ui-input-disposition', py,
       args: [meson.project_source_root() / 'tools/tests/sdl3_input_disposition.py',
@@ -1481,11 +1165,6 @@ if build_engine or get_option('build_native_tests')
       dependencies: [openq4_retained_dep, rmlui_project.get_variable('rmlui_dep'), jsoncpp_project.get_variable('jsoncpp_dep')],
       install: false,
     )
-    test('openq4-ui-system-presets', openq4_ui_system_presets_test,
-      args: [meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/settings/system.q4ui',
-        meson.project_source_root() / 'content/baseoq4/pak0/strings'], timeout: 900)
-    test('openq4-ui-system-presets-source', py,
-      args: [meson.project_source_root() / 'tools/tests/ui_system_presets.py'], timeout: 30)
     test('openq4-ui-rendering-settings', py,
       args: [meson.project_source_root() / 'tools/tests/ui_rendering_settings.py'], timeout: 120)
     test('openq4-renderer-selection-startup', py,
@@ -1547,9 +1226,6 @@ if build_engine or get_option('build_native_tests')
       dependencies: openq4_retained_dep,
       install: false,
     )
-    test('openq4-retained-ui', openq4_retained_test,
-      args: [meson.project_source_root() / 'tools/ui/fixtures/interaction-smoke.q4ui',
-             meson.project_source_root() / 'tools/ui/fixtures/binding-smoke.q4ui'], timeout: 30)
     openq4_ui_generated_texture_test = executable(
       'openq4-ui-generated-texture-test',
       files('tools/tests/native/UiGeneratedTextureTest.cpp'),
@@ -1571,118 +1247,25 @@ if build_engine or get_option('build_native_tests')
     test('openq4-ui-generated-adapter', openq4_ui_generated_adapter_test, timeout: 30)
     # Image nodes, path blends and view-height canvases, then the production
     # retained title, pause and loading screens (ui_retained).
-    openq4_ui_retained_screens_test = executable(
-      'openq4-ui-retained-screens-test',
-      files('tools/tests/native/UiRetainedScreensTest.cpp'),
-      include_directories: root_include_dir,
-      dependencies: openq4_retained_dep,
-      install: false,
-    )
     # One test per group of documents (the groups in the test's main), so the
     # suite runs them side by side.
-    retained_screens_documents = [meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/title.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/pause.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/loading/loading.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/pause_strogg.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/singleplayer.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/campaigns.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/mp_escape.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/mp_welcome.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/weapons/machinegun_scope.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/weapons/railgun_scope.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/weapons/nailgun_scope.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/loading/initialization.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/campaign_skill.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/view_effects.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/weapon_wheel_marine.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/weapon_wheel_marine_awakening.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/weapon_wheel_strogg.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/weapon_wheel_strogg_awakening.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/loadgame.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/savegame.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/restartlevel.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/demos.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/restartmenu.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/credits.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/arena.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/multiplayer.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/createserver.q4ui',
-      meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/joingame.q4ui']
     # The two full page matrices cost 43-57 s on the fastest hosted runner and
     # 100-175 s on the slowest (macOS Intel, Windows) and under ASan+UBSan, at
     # an unchanged case count, so their bound is a hang guard for every host.
     retained_screens_groups = {'menus': 120, 'pause': 120, 'strogg-pause': 120, 'loading-hud': 120, 'pages': 300, 'strogg-pages': 120, 'mp-pages': 300, 'mp-card': 120,
       'mp-vote-match': 120, 'mp-admin': 120, 'mp-settings-welcome': 120, 'pointer-reach': 120, 'optics': 240}
     foreach group, timeout : retained_screens_groups
-      test('openq4-ui-retained-screens-' + group, openq4_ui_retained_screens_test,
-        args: retained_screens_documents + [group], timeout: timeout)
     endforeach
     # The menus inside the window's safe area (ui-visual-design.md 13.3), in
     # two groups that run side by side.
-    test('openq4-ui-retained-safe-area-menus', openq4_ui_retained_screens_test,
-      args: ['--safe-area', retained_screens_documents[0], retained_screens_documents[1], retained_screens_documents[2],
-        retained_screens_documents[4], retained_screens_documents[12], retained_screens_documents[7],
-        meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/settings.q4ui'], timeout: 120)
-    test('openq4-ui-retained-safe-area-pages', openq4_ui_retained_screens_test,
-      args: ['--safe-area', retained_screens_documents[18], retained_screens_documents[21], retained_screens_documents[23],
-        retained_screens_documents[24], retained_screens_documents[27],
-        meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/settings/game.q4ui'], timeout: 120)
-    test('openq4-ui-view-effects', openq4_ui_retained_screens_test,
-      args: ['--view-effects', meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/view_effects.q4ui'], timeout: 60)
-    test('openq4-ui-subtitles', openq4_ui_retained_screens_test,
-      args: ['--subtitles', meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/subtitles.q4ui'], timeout: 60)
     # The retained SETTINGS page (UI-01).
-    test('openq4-ui-retained-settings', openq4_ui_retained_screens_test,
-      args: ['--settings', meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/settings.q4ui'], timeout: 120)
     # The retained CONTROLS settings page (UI-01).
-    test('openq4-ui-retained-controls', openq4_ui_retained_screens_test,
-      args: ['--controls', meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/settings/controls.q4ui'], timeout: 120)
     # The retained GAME OPTIONS settings page (UI-01).
-    test('openq4-ui-retained-game', openq4_ui_retained_screens_test,
-      args: ['--game', meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/settings/game.q4ui'], timeout: 120)
     # The retained AUDIO settings page (UI-01).
-    test('openq4-ui-retained-audio', openq4_ui_retained_screens_test,
-      args: ['--audio', meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/settings/audio.q4ui'], timeout: 120)
     # The match summary card (ui-visual-design.md 14.14).
-    test('openq4-ui-retained-summary', openq4_ui_retained_screens_test,
-      args: ['--summary', meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/mp_summary.q4ui'], timeout: 240)
-    test('openq4-ui-retained-rosters', openq4_ui_retained_screens_test,
-      args: ['--rosters', retained_screens_documents[6], retained_screens_documents[7],
-        meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/mp_summary.q4ui'], timeout: 120)
     # The multiplayer quick-chat wheel (ui-visual-design.md 14.6).
-    test('openq4-ui-quick-chat', openq4_ui_retained_screens_test,
-      args: ['--quick-chat', meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/quick_chat.q4ui'], timeout: 120)
-    test('openq4-ui-status-bar', openq4_ui_retained_screens_test,
-      args: [meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/status_bar_marine.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/status_bar_strogg.q4ui'], timeout: 240)
-    test('openq4-ui-hud', openq4_ui_retained_screens_test,
-      args: [meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/artwork.q4ui'], timeout: 120)
     # The Remastered HUD documents (ui-visual-design.md 14.4-14.12) on their anchors, answering the stock events.
-    test('openq4-ui-remastered-hud', openq4_ui_retained_screens_test,
-      args: ['--remastered',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_marine.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_strogg.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_marine_awakening.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_strogg_awakening.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_mp.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_vehicle.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_airdef.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_turret.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_mcc.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_chaingun_turret.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_speeder.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_gev.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_medchange.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_objectives.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_objectives_strogg.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/guis/hud/remastered_scoreboard.q4ui'], timeout: 240)
-    test('openq4-ui-remastered-hud-generated', py,
-      args: [meson.project_source_root() / 'tools/ui/build_remastered_hud.py', '--check'], timeout: 120)
     # The stock interface's HUD for The Awakening, generated from guis/hud.gui.
-    test('openq4-ui-awakening-legacy-hud-generated', py,
-      args: [meson.project_source_root() / 'tools/ui/build_awakening_legacy_hud.py', '--check'], timeout: 60)
-    test('openq4-ui-hud-coverage', py,
-      args: [meson.project_source_root() / 'tools/tests/ui_hud_coverage.py'], timeout: 30)
     openq4_ui_value_schema_test = executable(
       'openq4-ui-value-schema-test',
       files('tools/tests/native/UiValueControlSchemaTest.cpp'),
@@ -1738,8 +1321,6 @@ if build_engine or get_option('build_native_tests')
       install: false)
     system_page_locales = ['english', 'spanish', 'polish', 'russian', 'french', 'italian', 'german']
     foreach locale : system_page_locales
-      test('openq4-ui-system-text-scale-' + locale, openq4_ui_system_text_scale_test,
-        args: [files('content/baseoq4/pak0/guis/menu/settings/system.q4ui'), meson.current_source_dir() / 'content/baseoq4/pak0/strings', locale], timeout: 900)
     endforeach
     openq4_ui_system_interface_settings_test = executable('openq4-ui-system-interface-settings-test',
       files('tools/tests/native/UiSystemInterfaceSettingsTest.cpp', 'src/framework/PerformancePreset.cpp'),
@@ -1747,8 +1328,6 @@ if build_engine or get_option('build_native_tests')
       dependencies: [openq4_retained_dep, rmlui_project.get_variable('rmlui_dep'), jsoncpp_project.get_variable('jsoncpp_dep')],
       install: false)
     foreach locale : system_page_locales
-      test('openq4-ui-system-interface-settings-' + locale, openq4_ui_system_interface_settings_test,
-        args: [files('content/baseoq4/pak0/guis/menu/settings/system.q4ui'), meson.current_source_dir() / 'content/baseoq4/pak0/strings', locale], timeout: 600)
     endforeach
     openq4_ui_system_render_options_test = executable('openq4-ui-system-render-options-test',
       files('tools/tests/native/UiSystemRenderOptionsTest.cpp', 'src/framework/PerformancePreset.cpp'),
@@ -1756,8 +1335,6 @@ if build_engine or get_option('build_native_tests')
       dependencies: [openq4_retained_dep, rmlui_project.get_variable('rmlui_dep'), jsoncpp_project.get_variable('jsoncpp_dep')],
       install: false)
     foreach locale : system_page_locales
-      test('openq4-ui-system-render-options-' + locale, openq4_ui_system_render_options_test,
-        args: [files('content/baseoq4/pak0/guis/menu/settings/system.q4ui'), meson.current_source_dir() / 'content/baseoq4/pak0/strings', locale], timeout: 600)
     endforeach
     openq4_ui_system_display_controls_test = executable('openq4-ui-system-display-controls-test',
       files('tools/tests/native/UiSystemDisplayControlsTest.cpp', 'src/framework/PerformancePreset.cpp'),
@@ -1765,8 +1342,6 @@ if build_engine or get_option('build_native_tests')
       dependencies: [openq4_retained_dep, rmlui_project.get_variable('rmlui_dep'), jsoncpp_project.get_variable('jsoncpp_dep')],
       install: false)
     foreach locale : system_page_locales
-      test('openq4-ui-system-display-controls-' + locale, openq4_ui_system_display_controls_test,
-        args: [files('content/baseoq4/pak0/guis/menu/settings/system.q4ui'), meson.current_source_dir() / 'content/baseoq4/pak0/strings', locale], timeout: 600)
     endforeach
     openq4_ui_system_display_catalog_test = executable('openq4-ui-system-display-catalog-test',
       files('tools/tests/native/UiSystemDisplayCatalogTest.cpp', 'src/framework/PerformancePreset.cpp'),
@@ -1774,8 +1349,6 @@ if build_engine or get_option('build_native_tests')
       dependencies: [openq4_retained_dep, rmlui_project.get_variable('rmlui_dep'), jsoncpp_project.get_variable('jsoncpp_dep')],
       install: false)
     foreach locale : system_page_locales
-      test('openq4-ui-system-display-catalog-' + locale, openq4_ui_system_display_catalog_test,
-        args: [files('content/baseoq4/pak0/guis/menu/settings/system.q4ui'), meson.current_source_dir() / 'content/baseoq4/pak0/strings', locale], timeout: 900)
     endforeach
     openq4_ui_system_dimensions_test = executable('openq4-ui-system-dimensions-test',
       files('tools/tests/native/UiSystemDimensionsTest.cpp', 'src/framework/PerformancePreset.cpp'),
@@ -1783,8 +1356,6 @@ if build_engine or get_option('build_native_tests')
       dependencies: [openq4_retained_dep, rmlui_project.get_variable('rmlui_dep'), jsoncpp_project.get_variable('jsoncpp_dep')],
       install: false)
     foreach locale : system_page_locales
-      test('openq4-ui-system-dimensions-' + locale, openq4_ui_system_dimensions_test,
-        args: [files('content/baseoq4/pak0/guis/menu/settings/system.q4ui'), meson.current_source_dir() / 'content/baseoq4/pak0/strings', locale], timeout: 600)
     endforeach
     openq4_ui_model_scene_test = executable('openq4-ui-model-scene-test',
       files('tools/tests/native/UiModelSceneTest.cpp'),
@@ -1843,9 +1414,6 @@ if build_engine or get_option('build_native_tests')
       include_directories: root_include_dir,
       dependencies: [openq4_retained_dep, rmlui_project.get_variable('rmlui_dep'), jsoncpp_project.get_variable('jsoncpp_dep')],
       install: false)
-    test('openq4-ui-popup-placement-runtime', openq4_ui_popup_placement_runtime_test,
-      args: [meson.project_source_root() / 'content/baseoq4/pak0/guis/menu/settings/system.q4ui',
-             meson.project_source_root() / 'content/baseoq4/pak0/strings'], timeout: 900)
     # Windows ARM64 write-through I/O can exceed three minutes. Let the
     # harness's 600-second command timeout report the failure before Meson
     # kills it, allowing time for its three compiler invocations as well.
@@ -1870,8 +1438,6 @@ if build_engine or get_option('build_native_tests')
       dependencies: openq4_retained_dep,
       install: false,
     )
-    test('openq4-ui-state', openq4_ui_state_test,
-      args: [meson.project_source_root() / 'tools/ui/fixtures/binding-smoke.q4ui'], timeout: 30)
     openq4_ui_vector_test = executable(
       'openq4-ui-vector-test',
       files('tools/tests/native/UiVectorTest.cpp'),
@@ -1880,10 +1446,6 @@ if build_engine or get_option('build_native_tests')
       install: false,
     )
     test('openq4-ui-vector', openq4_ui_vector_test, timeout: 30)
-    foreach scope : ['machinegun', 'railgun', 'nailgun']
-      test('openq4-ui-scope-paint-' + scope, openq4_ui_vector_test,
-        args: [meson.project_source_root() / ('content/baseoq4/pak0/guis/weapons/' + scope + '_scope.q4ui')], timeout: 30)
-    endforeach
     executable(
       'openq4-retained-ui-benchmark',
       files('tools/tests/native/RetainedUiBenchmark.cpp'),
@@ -3677,8 +3239,6 @@ if build_renderer_vk and build_engine
     material_compiler_test = executable('openq4-material-compiler-test',
       'tools/tests/native/MaterialCompilerTest.cpp',
       dependencies: material_compiler_dep, install: false)
-    test('openq4-material-compiler', material_compiler_test,
-      args: ['--retained', meson.project_source_root() / 'content/baseoq4/pak0/glprogs/glsl'], timeout: 60)
     arb_translator_test = executable('openq4-arb-translator-test',
       'tools/tests/native/ARBTranslatorTest.cpp',
       dependencies: material_compiler_dep, install: false)

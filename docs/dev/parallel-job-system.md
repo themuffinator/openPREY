@@ -267,7 +267,7 @@ backends sampled the starting lift still rising. The scene contract now also
 waits 6 s of real time (`stock-entry-view-v2`), and the case passes on both
 backends.
 
-The [retail baseline](stock-asset-baseline.md) ran the Windows package against a
+The retail baseline ran the Windows package against a
 view of the 40 retail PK4s alone, bound to a manifest approved in a separate dry
 run. SP capture on `storage1`, save and load, demo playback and the `q4dm1`
 listen server and client all pass, within their per-map budgets on a quiet
@@ -295,4 +295,4 @@ load, and would need image programs and their buffers to cross threads; it is
 not justified on this evidence. The profile did find work that was wasted
 outright: dedicated servers read every prefetched image and discarded it. Only
 a running renderer now prefetches (see
-[Air Defense 1 evidence](airdefense1-optimization-evidence.md)).
+Air Defense 1 evidence).

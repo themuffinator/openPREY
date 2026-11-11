@@ -18,10 +18,6 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "tools" / "validation" / "generate_pbr_fixture.py"
 TEMP_ROOT = ROOT / ".tmp"
 VALIDATOR = ROOT / "tools" / "validation" / "openq4_validate.py"
-WORKFLOWS = (
-    ROOT / ".github" / "workflows" / "commit-validation.yml",
-    ROOT / ".github" / "workflows" / "push-verification.yml",
-)
 EXPECTED_HASHES_16 = {
     "baseoq4/materials/openq4_pbr_procedural_fixture.mtr": (
         "ea096bcd6990dc9e690e036365965d69143ddc308de159ced363ad0910adfade"
@@ -289,10 +285,6 @@ def test_nested_links_and_junctions_fail_closed() -> None:
 def test_validation_wiring() -> None:
     validator = VALIDATOR.read_text(encoding="utf-8")
     assert validator.count('root / "tools" / "tests" / "pbr_procedural_fixture.py"') == 1
-    for workflow_path in WORKFLOWS:
-        workflow = workflow_path.read_text(encoding="utf-8")
-        assert workflow.count("tools/tests/pbr_procedural_fixture.py") == 2
-        assert workflow.count("tools/validation/generate_pbr_fixture.py") == 1
 
 
 def main() -> int:

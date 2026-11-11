@@ -575,7 +575,7 @@ light-injected volumetrics, roughness-aware G-buffer reflections, world-space
 GI, or whole-frame modern lighting ownership. All leaves remain default off;
 clean committed-package, target-platform/driver, and retained visual-review
 promotion remain open. See the [user controls and limitations](../user/advanced-screen-space-lighting.md)
-and [`airdefense1` optimization evidence](airdefense1-optimization-evidence.md).
+and `airdefense1` optimization evidence.
 
 #### Frozen same-process leaf and rollback captures, 6 November 2026 (REN-06)
 

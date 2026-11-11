@@ -8,7 +8,7 @@ deliberately left for later. The retail parity work that came before it is in
 The 2026-10-21 follow-up adds dialogue volume, byte-based
 Vorbis admission and compressed streaming, the mod reverb reference-distance repair
 and bounded multiplayer voice capture/codec/transport/playback with explicit consent. See
-[audio and voice evidence](audio-voice-evidence.md) for its measured scope and
+audio and voice evidence for its measured scope and
 remaining roadmap gates; this page's October 6 measurements remain historical.
 The [23 October round](#output-changes-and-memory-pressure-october-23) makes playback
 survive output loss and layout changes, adds the low-memory response and streams Ogg
@@ -187,7 +187,7 @@ The stock `airdefense_cannon_fire` (`shakes 1`, -4 dB) has a nearby peak of abou
 degrees, about 0.183 at 2750 map units, and zero at its 5000-unit maximum. Rumble and
 sound-driven lights retain their existing envelope, including the measured PCM fallback.
 `s_showVoices 1` prints the separate shake and rumble totals. See
-[screen-shake regression evidence](screen-shake-regression.md) for the retail verification
+screen-shake regression evidence for the retail verification
 and tests.
 
 ### Memory and loading
@@ -265,9 +265,9 @@ The repository's MIT/public-domain stb_vorbis has a small read/seek/tell callbac
 extension; both checked-in copies match, and Meson pins this bundled variant.
 Full and streamed PCM compare exactly in tests, including seek and mixed
 static/streamed loop seams. Stock and Awakening gameplay checks cover gain,
-pause, slow motion, restart and save/load. See the [current evidence](audio-voice-evidence.md#compressed-streaming)
+pause, slow motion, restart and save/load. See the current evidence
 for memory measurements and remaining device limits. The subsequent
-[aggregate admission](audio-voice-evidence.md#aggregate-payload-admission) also
+aggregate admission also
 covers CPU/OpenAL payloads and non-Vorbis loading under `s_audioMemoryMB`.
 
 ### Mod reverb room rolloff (October 21)

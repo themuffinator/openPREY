@@ -4,7 +4,7 @@ This increment starts from engine `a8bad0f5bf69b08493714ad4faaeae7585d5abf2`
 and companion `1cd33980f072ac3d78978a07b388b4b6fe6b5eb2`. The
 implementation is qualified by the final integrated production-method checks
 and separately bound actual before/after pixel evidence below. This is partial evidence for
-[SUR-006](product-requirements.md), not completion of that requirement or M6.
+SUR-006, not completion of that requirement or M6.
 
 ## Behavior
 

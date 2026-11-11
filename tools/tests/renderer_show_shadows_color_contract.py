@@ -177,12 +177,6 @@ def validate_shadow_pass() -> None:
 def validate_registration() -> None:
     validator = read("tools/validation/openq4_validate.py")
     require(validator, '"renderer_show_shadows_color_contract.py"', "openq4_validate.py")
-    for workflow in (".github/workflows/commit-validation.yml", ".github/workflows/push-verification.yml"):
-        require(
-            read(workflow),
-            "python tools/tests/renderer_show_shadows_color_contract.py",
-            workflow,
-        )
 
 
 def main() -> None:

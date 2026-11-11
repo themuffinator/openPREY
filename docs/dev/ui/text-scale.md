@@ -6,7 +6,7 @@ engine `85c011754b800409e5e471b454ac4d658b6f3d00` and companion
 
 The retained runtime supports independent 100–200% text size through the archived
 `ui_retainedTextScale` CVar (default `1`). This is partial implementation of
-`LAY-004` in the [product register](product-requirements.md). Normal settings
+`LAY-004` in the product register. Normal settings
 controls and a reachable reset were subsequent work at this checkpoint; they
 are now implemented in the [interface preference increment](interface-size-preferences.md).
 Complete screen/editor integration and product acceptance remain required.
@@ -101,7 +101,7 @@ fresh view does.
 Before the stale-box rule one of those openings was refused.
 
 Author the page through
-[`retained_system.py`](../../../tools/ui/retained_system.py), which
+`retained_system.py`, which
 `build_retained_screens.py --check` verifies without writing staged output. `capture_system_page.py --text-scale`
 records the explicit text multiplier and language alongside density and exact
 source/binary bindings. Its optional `--timeout` records a longer process budget

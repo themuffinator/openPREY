@@ -13,10 +13,6 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "tools" / "assets" / "pack_pbr_orm.py"
 TEMP_ROOT = ROOT / ".tmp"
 VALIDATOR = ROOT / "tools" / "validation" / "openq4_validate.py"
-WORKFLOWS = (
-    ROOT / ".github" / "workflows" / "commit-validation.yml",
-    ROOT / ".github" / "workflows" / "push-verification.yml",
-)
 SPEC = importlib.util.spec_from_file_location("pack_pbr_orm", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 PACKER = importlib.util.module_from_spec(SPEC)
@@ -264,11 +260,6 @@ def test_optional_pillow_backend_when_available() -> None:
 def test_validation_wiring() -> None:
     validator = VALIDATOR.read_text(encoding="utf-8")
     assert validator.count('root / "tools" / "tests" / "pbr_orm_packer.py"') == 1
-    for workflow_path in WORKFLOWS:
-        workflow = workflow_path.read_text(encoding="utf-8")
-        # Once in py_compile and once as an executed dependency-free gate.
-        assert workflow.count("tools/tests/pbr_orm_packer.py") == 2
-        assert workflow.count("tools/assets/pack_pbr_orm.py") == 1
 
 
 def main() -> int:

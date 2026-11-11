@@ -214,7 +214,7 @@ to the host, checking inherited rectangular clipping at two densities and paint
 alpha multiplied by parent and child opacity. Existing document/motion regression
 checks remain in place. All three native targets pass on Windows.
 
-The [fixture](../../../tools/ui/fixtures/vector-smoke.q4ui) demonstrates 12/8 dp
+The fixture demonstrates 12/8 dp
 panel cuts, two rails, header wash, lower-left button cuts, fading action rails,
 triangle markers, a cubic ring with a hole and a rounded stroke. It uses existing
 localized strings and the normative family colors. It is a geometry fixture,

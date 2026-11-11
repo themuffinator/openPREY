@@ -275,7 +275,7 @@ so the buy menu no longer appears in the four modes added since.
 - The former client round-reset issue now has an append-only
   `GAME_RELIABLE_MESSAGE_ROUNDRESTART` message that calls `LocalMapRestart`
   without recreating the game state. Runtime qualification is tracked in the
-  [competitive reference audit](../../../competitive-match-reference-audit.md).
+  competitive reference audit.
 - Managed Red Rover uses a dedicated authoritative conversion path. Ordinary
   live joins and voluntary side changes still use the normal admission policy.
   A conversion may fill one side, while locked roster seats and captain roles

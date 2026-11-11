@@ -76,10 +76,10 @@ density changes. Failures at each of eight mask/content/snapshot/scratch
 allocations must restore base output and recover without leaking target leases.
 Document, retained runtime and vector native suites pass.
 
-The [mask fixture](../../../tools/ui/fixtures/mask-smoke.q4ui) compares matching
+The mask fixture compares matching
 panels containing localized text and a nested chamfered control mask. One panel
 also has a larger outer chamfer, an offset cubic hole and a horizontal alpha
-gradient. The [capture verifier](../../../tools/ui/verify_mask_capture.py)
+gradient. The capture verifier
 integrates horizontal spans at 128 subpixel rows, solving the cubic directly.
 It does not call the runtime tessellator. Each masked pixel is checked against
 `reference * maskAlpha + backdrop * (1 - maskAlpha)`, with a five-level maximum
