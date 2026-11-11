@@ -35,7 +35,6 @@ idCVar gui_filter_password( "gui_filter_password", "0", CVAR_GUI | CVAR_INTEGER 
 idCVar gui_filter_players( "gui_filter_players", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARCHIVE, "Players filter: 0 shows every server, 1 hides full ones, 2 empty ones, 3 both" );
 idCVar gui_filter_gameType( "gui_filter_gameType", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARCHIVE, "Gametype filter" );
 idCVar gui_filter_idle( "gui_filter_idle", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARCHIVE, "Idle servers filter" );
-idCVar gui_filter_game( "gui_filter_game", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARCHIVE, "Game filter" );
 idCVar gui_filter_mod( "gui_filter_mod", "", CVAR_GUI | CVAR_ARCHIVE, "Server browser mod filter; empty shows every mod" );
 
 static const int MAX_BROWSER_SERVERS = 4096;
@@ -90,7 +89,7 @@ static idStr ServerBrowserText( const char *text, int limit = 96 ) {
 // Reject malformed folder identifiers rather than inventing a sanitized token.
 static idStr ServerBrowserMod( const char *mod ) {
 	if ( !mod || !mod[0] ) {
-		return "baseoq4";
+		return OPENPREY_GAMEDIR;
 	}
 	if ( strlen( mod ) > 64 || !strcmp( mod, "." ) || !strcmp( mod, ".." ) ) {
 		return "";
@@ -745,7 +744,7 @@ void idServerScan::AddFavoriteServers() {
 void idServerScan::UpdateFilterByMod( int direction ) {
 	idStrList mods;
 	mods.Append( "" );
-	mods.Append( "baseoq4" );
+	mods.Append( OPENPREY_GAMEDIR );
 	for ( int i = 0; i < Num(); ++i ) {
 		const idStr mod = ServerBrowserMod( (*this)[i].serverInfo.GetString( "fs_game" ) );
 		if ( mod.Length() ) {

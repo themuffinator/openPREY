@@ -7,7 +7,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TEST_PATH = "tools/tests/renderer_vulkan_gui_residency.py"
 
 
 def read(relative_path: str) -> str:
@@ -135,20 +134,11 @@ def validate_vulkan_lazy_residency_contract() -> None:
 
 def validate_ci_registration() -> None:
     validator = read("tools/validation/openq4_validate.py")
-    commit = read(".github/workflows/commit-validation.yml")
-    push = read(".github/workflows/push-verification.yml")
 
     if validator.count("renderer_vulkan_gui_residency.py") != 1:
         raise AssertionError(
             "Local validation must register the Vulkan GUI residency test exactly once"
         )
-    for workflow, context in (
-        (commit, "commit validation workflow"),
-        (push, "push verification workflow"),
-    ):
-        if workflow.count(TEST_PATH) != 2:
-            raise AssertionError(f"{context} must compile and directly run {TEST_PATH}")
-        require(workflow, f"python {TEST_PATH}", context)
 
 
 def main() -> None:

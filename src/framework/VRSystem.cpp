@@ -68,8 +68,6 @@ idCVar vr_physicalCrouch( "vr_physicalCrouch", "1", CVAR_SYSTEM | CVAR_ARCHIVE |
 	"1 = crouching in your room (your head 40 cm below where you recentred) crouches your character" );
 idCVar vr_twoHanded( "vr_twoHanded", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL,
 	"1 = squeezing the off-hand grip on the gun's foregrip, in front of the weapon hand, holds the gun in both hands; elsewhere that squeeze opens the weapon wheel" );
-idCVar vr_vehicleStereo( "vr_vehicleStereo", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL,
-	"single player vehicles and turrets: 1 = in stereo around your head, the turret following your aim; 0 = flat on the floating screen" );
 idCVar vr_hudOnSight( "vr_hudOnSight", "0", CVAR_SYSTEM | CVAR_BOOL | CVAR_ROM,
 	"set by the game each frame: the head aims (a vehicle's turret follows it), so the HUD hangs on the line of sight as in head aim" );
 idCVar vr_roomScale( "vr_roomScale", "1", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL,

@@ -409,8 +409,7 @@ def main() -> None:
     validate_switch_and_consumers(material)
     validate_runtime_self_test(material)
 
-    for registry in ("tools/validation/openq4_validate.py", ".github/workflows/commit-validation.yml",
-                     ".github/workflows/push-verification.yml"):
+    for registry in ("tools/validation/openq4_validate.py",):
         if "material_constant_registers_contract.py" not in read(registry):
             raise AssertionError(f"{registry} does not run the constant-register contract")
 

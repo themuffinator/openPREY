@@ -5705,7 +5705,7 @@ void idFileSystemLocal::AddGameDirectory( const char *path, const char *dir ) {
 		numberedPakName_t numberedPak;
 		if ( !idStr::Icmp( dir, OPENQ4_GAMEDIR ) && FS_ParseNumberedPakName( pakfiles[ i ].c_str(), numberedPak ) &&
 			 numberedPak.digitCount == 1 && FS_FindOpenQ4PackTableEntry( pakfiles[ i ].c_str() ) == NULL ) {
-			common->Warning( "Ignoring %s: this version of openQ4 does not use it. It was left by another release and can be deleted.",
+			common->Warning( "Ignoring %s: this version of openPREY does not use it. It was left by another release and can be deleted.",
 				BuildOSPath( path, dir, pakfiles[ i ] ) );
 			continue;
 		}
@@ -6464,7 +6464,7 @@ then where to get it. The English checksum details follow for support.
 */
 static idStr FS_FormatOpenQ4PackProblems( void ) {
 	idStr message = FS_LocalizedOr( "#str_231700",
-		"openQ4 cannot start because a content pack is missing or does not match this version." );
+		"openPREY cannot start because a content pack is missing or does not match this version." );
 	message += "\n\n";
 	for ( int i = 0; i < fs_openQ4PackProblems.Num(); i++ ) {
 		const openQ4PackProblem_t &problem = fs_openQ4PackProblems[ i ];
@@ -6473,14 +6473,14 @@ static idStr FS_FormatOpenQ4PackProblems( void ) {
 			message += va( FS_LocalizedOr( "#str_231704", "%s (%s) is missing from the %s folder." ),
 				problem.pack->name, contents, OPENQ4_GAMEDIR );
 		} else {
-			message += va( FS_LocalizedOr( "#str_231705", "%s (%s) in the %s folder does not match this version of openQ4." ),
+			message += va( FS_LocalizedOr( "#str_231705", "%s (%s) in the %s folder does not match this version of openPREY." ),
 				problem.pack->name, contents, OPENQ4_GAMEDIR );
 		}
 		message += "\n";
 	}
 	message += "\n";
 	message += va( FS_LocalizedOr( "#str_231706",
-		"Install the full openQ4 %s package, or download each listed pack for that version from %s and save it in the %s folder under the same name." ),
+		"Install the full openPREY %s package, or download each listed pack for that version from %s and save it in the %s folder under the same name." ),
 		PROJECT_VERSION, PROJECT_RELEASES_URL, OPENQ4_GAMEDIR );
 	if ( fs_openQ4PackProblemDetails.Length() ) {
 		message += "\n\n";
@@ -7175,7 +7175,7 @@ bool idFileSystemLocal::UpdateGamePakChecksums( void ) {
 	memset( gamePakForOS, 0, sizeof( gamePakForOS ) );
 	if ( gameDLLChecksum == 0 || gamePakChecksum != OPENQ4_Q4_142_GAME300_PAK_CHECKSUM ||
 		 gameModuleOrigin == GAME_MODULE_ORIGIN_NONE ) {
-		common->Warning( "No trusted openQ4 game module is loaded for pure-server startup" );
+		common->Warning( "No trusted openPREY game module is loaded for pure-server startup" );
 		return false;
 	}
 	if ( gameModuleOrigin == GAME_MODULE_ORIGIN_ACTIVE_MOD &&

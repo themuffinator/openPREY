@@ -783,7 +783,7 @@ const char *helpText =
 	"mapEdit rename <handle> <name> | refs <name> | prefab save <file> | prefab insert <file> <x> <y> <z>\n"
 	"mapEdit validate | build [noaas] | buildstatus | cancel | outputs | play | playstatus\n"
 	"mapEdit index | find <entitydef|material|model|sound|map> <filter> | latency\n"
-	"Writes go to fs_savepath/baseoq4; builds compile the saved map in a sandbox and publish beside it.\n";
+	"Writes go to fs_savepath/basepr; builds compile the saved map in a sandbox and publish beside it.\n";
 
 bool PrefabPath( const std::string &name, std::string &path, std::string &error ) {
 	if ( name.empty() || name.size() > 120 || name.find_first_not_of( "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" ) != std::string::npos ) {

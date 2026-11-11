@@ -2,7 +2,7 @@
 
 This audit checks openPREY's decl system against the shipped Prey (2006) decl
 files and the retail engine (`PREY.exe`, 1.4 patch, November 2007). The Quake 4
-audit in [retail-q4-decl-parity-audit.md](retail-q4-decl-parity-audit.md)
+audit in retail-q4-decl-parity-audit.md
 covers the inherited Raven parsers. This one covers what Prey's own assets and
 engine need.
 

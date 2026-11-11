@@ -2,13 +2,13 @@
 
 Status: Stage 1 translation input, 8 September 2026. All 271 inventoried GUI
 resources have native preprocessed token exports and structured import records.
-No resource is accepted as a replacement. The [migration manifest](migration-manifest.json)
+No resource is accepted as a replacement. The migration manifest
 and [full plan](../archive/2026-10-18/plans/idtech5-ui.md) retain the complete migration, runtime,
 artwork and editor requirements.
 
 ## Pipeline and provenance
 
-1. [Inventory](inventory-report.md) establishes the effective source paths and
+1. Inventory establishes the effective source paths and
    SHA-256 hashes under explicit retail/openQ4 mounts. Its `--export-requests`
    option writes the source/hash request list consumed by the capture harness.
 2. `ui_exportLegacy` reads each source through the engine filesystem, snapshots
@@ -21,12 +21,12 @@ artwork and editor requirements.
    records of token type, subtype, line, lines crossed, active parser source and
    value. Bytes use an explicitly tagged Latin-1 mapping with ASCII JSON
    escapes; this is a lossless byte transport, not a localization encoding choice.
-4. [The capture harness](../../../tools/ui/capture_legacy_baseline.py) binds the
+4. The capture harness binds the
    `UI_GUI_EXPORT_BEGIN/END` log interval to every output, rejects preprocessing
    warnings/errors, verifies root source hashes against the inventory, and
    records token counts and output hashes. An exported file alone is insufficient:
    `idParser` can report a nonfatal error before reaching the export command's end.
-5. [The structured importer](../../../tools/ui/legacy_syntax.py) verifies each
+5. The structured importer verifies each
    token file against capture metadata, then writes ordered window/property/event
    records, expression trees, script branches, dependencies and diagnostics.
    Grammar tables and their hashes come from the local `Window.cpp`,

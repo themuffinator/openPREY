@@ -140,8 +140,6 @@ def validate_game_relative_include_paths() -> None:
 
 def validate_linux_build_path_casing() -> None:
     root_meson = read("meson.build")
-    push = read(".github/workflows/push-verification.yml")
-    commit = read(".github/workflows/commit-validation.yml")
 
     require(root_meson, 'game_libs_repo_root = meson.project_source_root()', "canonical game source path")
     reject(root_meson, "../OpenPrey-game", "retired companion source input")
@@ -157,17 +155,6 @@ def validate_linux_build_path_casing() -> None:
     require_exact_child("assets/linux", "openPREY-steamdeck.in", "Steam Deck launcher template")
     require_exact_child("assets/linux", "openprey-steamdeck.desktop.in", "Steam Deck desktop template")
 
-    for workflow, context in (
-        (push, "push verification workflow"),
-        (commit, "commit validation workflow"),
-    ):
-        reject(workflow, "OPENPREY_GAMELIBS_REPO", context)
-        reject(workflow, "../OpenPrey-game", context)
-        reject(workflow, "OpenPrey-game.git", context)
-        reject(workflow, "../openQ4-game", context)
-        reject(workflow, "openQ4-game.git", context)
-        reject(workflow, "../OpenQ4-game", context)
-
 
 def validate_release_note() -> None:
     source = read("docs/dev/release-completion.md")
@@ -178,13 +165,9 @@ def validate_release_note() -> None:
 
 def validate_validation_coverage() -> None:
     validator = read("tools/validation/openq4_validate.py")
-    push = read(".github/workflows/push-verification.yml")
-    commit = read(".github/workflows/commit-validation.yml")
 
     for haystack, context in (
         (validator, "validation runner"),
-        (push, "push verification workflow"),
-        (commit, "commit validation workflow"),
     ):
         require(haystack, "filesystem_case_segments.py", context)
 

@@ -43,7 +43,7 @@ reversible without converting or modifying retail assets.
 
 openQ4's derived caches are never trusted on a pure server: an entry names its
 source by public pak metadata, and nothing binds its payload to that source
-([decision](mp-network-qualification.md#level-load-caches-on-pure-servers-9-november-2026)).
+(decision).
 For the level-load caches that means:
 
 - While a pure lock (the server's pak list) or `fs_restrict` holds,
@@ -423,7 +423,7 @@ every load:
 
 `com_showLevelLoadTimes 1` prints `Loose search directories: N opens skipped,
 M directory checks` at the end of each load. The measurements are in the
-[Air Defense 1 evidence](airdefense1-optimization-evidence.md#2026-10-06-search-path-lookup-cost).
+Air Defense 1 evidence.
 
 ## Generated image source identity
 
@@ -480,7 +480,7 @@ source an entry claims to come from, and anyone can copy it into an entry with
 edited pixels. That is why the image cache is never read on a pure server, and
 why a client reloads its cached images when it takes a pure lock, instead of
 restarting the engine
-([decision](mp-network-qualification.md#generated-image-cache-on-pure-servers-9-november-2026)).
+(decision).
 The level-load caches follow the same rule ([Pure servers](#pure-servers)).
 
 ## Evidence status
@@ -521,7 +521,7 @@ Decision: the experiment is **not promoted**. `com_levelLoadModernization`
 stays `0`, and it remains an opt-in evaluation tool. The investigation found a
 loading cost elsewhere instead: dedicated servers read and discarded every
 level image prefetch (see
-[Air Defense 1 evidence](airdefense1-optimization-evidence.md)).
+Air Defense 1 evidence).
 
 ### Required run identity
 

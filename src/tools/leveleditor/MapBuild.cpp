@@ -48,8 +48,8 @@ const Marker markers[] = {
 
 }
 
-std::string MapBuild::SandboxMaps() const { return request.sandbox + "/baseoq4/" + Directory( request.mapPath ); }
-std::string MapBuild::LogPath() const { return request.sandbox + "/baseoq4/logs/editor_build.log"; }
+std::string MapBuild::SandboxMaps() const { return request.sandbox + "/basepr/" + Directory( request.mapPath ); }
+std::string MapBuild::LogPath() const { return request.sandbox + "/basepr/logs/editor_build.log"; }
 
 std::vector<std::string> MapBuild::ChildArguments( const BuildRequest &request, const std::string &sandboxOS ) {
 	std::vector<std::string> args = {
@@ -84,7 +84,7 @@ bool MapBuild::Start( const BuildRequest &input, const CompileIndex &index, unsi
 	diagnostics.clear(); outputs.clear(); failure.clear(); partialLine.clear();
 	logOffset = 0; progress = 0; geometryDone = leaked = aasStarted = sawError = false;
 	ClearSandbox();
-	const std::string sandboxMap = request.sandbox + "/baseoq4/" + request.mapPath;
+	const std::string sandboxMap = request.sandbox + "/basepr/" + request.mapPath;
 	if ( !storage.WriteAndSync( sandboxMap, request.mapText, error ) ) { error = "could not prepare the build sandbox: " + error; return false; }
 	std::vector<std::string> arguments = request.launch;
 	for ( const auto &argument : ChildArguments( request, storage.OSPath( request.sandbox ) ) ) { arguments.push_back( argument ); }

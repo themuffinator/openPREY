@@ -96,7 +96,7 @@ and found not to pay for stock content, or deferred for a stated reason:
 | Item | Outcome |
 |---|---|
 | Temporal AA / upscaling (idTech 6 TSSAA) | **Done, default.** Complete per-pixel motion ownership; `r_temporalAA 2` upscales whenever the scene renders below native resolution ([temporal presentation](../../temporal-presentation.md)). |
-| Level-load streaming | **Done for images, default.** Worker-thread DDS reads, hardware SHA-256, immutable OpenGL texture storage and the loose-file memo: warm OpenGL Air Defense 1 about 14 s to about 9 s ([evidence](../../airdefense1-optimization-evidence.md)). General asset streaming stays open. |
+| Level-load streaming | **Done for images, default.** Worker-thread DDS reads, hardware SHA-256, immutable OpenGL texture storage and the loose-file memo: warm OpenGL Air Defense 1 about 14 s to about 9 s (evidence). General asset streaming stays open. |
 | Shader/pipeline caches | **Done; no background compilation needed.** Vulkan's pipeline cache is written atomically per level; a whole stock session creates 33 pipelines (49 ms cold, 4 ms warm). |
 | GPU skinning | **Not beneficial for stock content.** Vulkan no longer pays the CPU work it replaces, but stock maps skin about 1,500 vertices per frame (about 15 microseconds of CPU); `r_gpuSkinning` stays opt-in ([evidence](../../gpu-skinning-modernization.md#2026-10-06-promotion-attempt-not-beneficial-for-stock-content)). |
 | True HDR display output | **Deferred:** needs HDR display hardware to verify. |
@@ -399,7 +399,7 @@ or PBR work multiplies the parity surface.
   hashing uses the CPU's SHA instructions, OpenGL compressed textures take
   immutable storage, and a level load stops failing loose-file opens; together
   about 14 s to about 9 s for a warm OpenGL Air Defense 1 load on the test
-  machine ([evidence](../../airdefense1-optimization-evidence.md)).
+  machine (evidence).
 - Add portal-aware live priority changes to the current exact-match learned
   manifest. The implemented replay is a bounded, deterministically ordered
   subset rather than an unconditional whole-level preload, but it does not
@@ -758,7 +758,7 @@ The same staged package passed default
 the complete 11/11 native suite, and a fresh four-role compatibility run
 against 40 verified retail PK4s with zero loose retail files.
 See the [user guide](../../../user/advanced-screen-space-lighting.md) and retained
-[`airdefense1` optimization evidence](../../airdefense1-optimization-evidence.md).
+`airdefense1` optimization evidence.
 
 ## Promotion evidence for every milestone
 

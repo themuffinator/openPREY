@@ -88,7 +88,7 @@ static const int POSIX_CONSOLE_FATAL_SIZE = 4096;
 static const int POSIX_CONSOLE_MAX_WHEEL_STEPS_PER_EVENT = 64;
 static const int POSIX_SPLASH_WIDTH = 512;
 static const int POSIX_SPLASH_HEIGHT = 384;
-static const char POSIX_SPLASH_BMP[] = "assets/splash/quake4_rt_bitmap_4001.bmp";
+static const char POSIX_SPLASH_BMP[] = "assets/splash/prey_rt_bitmap_4001.bmp";
 
 struct posixConsoleBuffer_t {
 	pthread_mutex_t mutex;

@@ -3,7 +3,7 @@
 This M1 checkpoint implements named presentation reads and writes for retained
 documents. It extends the [public presentation boundary](presentation-bridge.md)
 and [normal application integration](managed-application.md). The complete
-[product requirement register](product-requirements.md) still governs acceptance;
+product requirement register still governs acceptance;
 this work does not accept a production settings page, translated GUI or editor.
 
 ## Canonical contract
@@ -149,9 +149,9 @@ hashes, warning comparisons and review results. The baseline engine revision is
 48/13. The tested client SHA-256 is
 `3c7bf81479b9a869a4743f559be6dea40a6715b045999b26f8e4da26e00b9793`.
 
-The authored [document](../../../tools/ui/fixtures/presentation-alias-smoke.q4ui),
-[setup](../../../tools/ui/fixtures/presentation-alias-smoke.cfg) and
-[resume](../../../tools/ui/fixtures/presentation-alias-smoke-resume.cfg) use actual
+The authored document,
+setup and
+resume use actual
 public presentation calls, framed GUI save/restore and typed shadow operations.
 The oracle requires byte-identical fixture inputs and ordered readbacks. It
 checks shared/case-insensitive aliases, both ownership modes, unchanged updates,

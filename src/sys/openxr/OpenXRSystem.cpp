@@ -1323,7 +1323,7 @@ bool idVRSystemOpenXR::CreateSession( void ) {
 			static bool warned = false;
 			if ( !warned ) {
 				common->Warning( "OpenXR: the OpenGL renderer runs on EGL (native Wayland) and the active runtime cannot bind it (%s); "
-					"use r_renderApi vulkan, or start openQ4 with OPENQ4_FORCE_X11=1", VR_EGL_ENABLE_EXTENSION_NAME );
+					"use r_renderApi vulkan, or start openPREY with OPENPREY_FORCE_X11=1", VR_EGL_ENABLE_EXTENSION_NAME );
 				warned = true;
 			}
 			return false;

@@ -165,12 +165,8 @@ def validate_platform_sources() -> None:
 
 
 def validate_ci_smoke() -> None:
-    push = read(".github/workflows/push-verification.yml")
-    commit = read(".github/workflows/commit-validation.yml")
     runner = read("tools/validation/openq4_validate.py")
 
-    require(push, "python tools/tests/loading_continue_input.py", "push script-smoke regression check")
-    require(commit, "python tools/tests/loading_continue_input.py", "commit script-smoke regression check")
     require(runner, "loading_continue_input.py", "validation Python tests")
 
 

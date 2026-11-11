@@ -103,7 +103,7 @@ captures. Different game frames/backgrounds prevent a whole-image pixel equality
 claim. The Vulkan log reports `vertex array range in virtual memory (SLOW)` and
 `post-process surfaces skipped because feedback capture failed` before the
 retained preview loads; these renderer issues remain open. Previous MP reference
-warnings are recorded in the [inventory report](inventory-report.md).
+warnings are recorded in the inventory report.
 
 Screenshot SHA-256, in table order:
 

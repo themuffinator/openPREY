@@ -18,27 +18,27 @@ delivery order without reducing the complete scope below. A representative scree
 is an intermediate milestone; full implementation must deliver the complete,
 high-quality UI product at an id Tech 5 standard.
 
-The [product requirement register](../../../ui/product-requirements.md) tracks the
+The product requirement register tracks the
 full normative scope, milestone ownership and acceptance evidence.
 
-The ammo/health/armor [status bar](../../../ui/status-bar.md) now has a shared SP/MP
+The ammo/health/armor status bar now has a shared SP/MP
 player bridge and separate Marine/Strogg vector documents, with live values,
-centered bottom placement and stock fallback. The [HUD presentation bridge](../../../ui/hud-coverage.md)
+centered bottom placement and stock fallback. The HUD presentation bridge
 now covers the remaining screen-space HUD families and game-owned overlays.
-The [Remastered HUD](../../../ui/remastered-hud.md) now lays out the on-foot,
+The Remastered HUD now lays out the on-foot,
 multiplayer, vehicle, objectives and scoreboard HUDs on the section 14.4
 anchors; the remaining displays and world-surface migration requirements remain.
 
 The 11 October status-bar review retains centered placement while matching
 legacy gauge dimensions, internal offsets, background saturation and shading.
-The [Remastered HUD record](../../../ui/remastered-hud.md) documents the vector
+The Remastered HUD record documents the vector
 construction and validation location.
 
 The 7 October scope and screen increment removes pointer-driven vector
 recompilation from the title's framing, anchors loading furniture to the
 leading/trailing screens (including portrait), and supplies the three retained
 weapon scopes through the shared SP/MP preference gate. Source, tests and
-engine capture evidence are recorded in [retained screens](../../../ui/retained-screens.md).
+engine capture evidence are recorded in retained screens.
 Visual specification 1.15 and the editable implant atlas sheet explicitly cover
 Medical Labs `medchange`, including its full-view wide/tall composition and
 activation/hurt timing. Its vector presentation now routes through the HUD bridge;
@@ -49,12 +49,12 @@ measured stock geometry, palette, type, motion and composition from the
 effective retail GUIs, and corrects plate, panel, checkbox and slider anatomy.
 Version 1.2 adds the modern interface direction: viewing profiles, adaptive
 layout, controller and touch input, Android lifecycle and first-run setup, and
-a first-party touch gameplay overlay. [Register schema 2](../../../ui/product-requirements.md)
+a first-party touch gameplay overlay. Register schema 2
 records eight supersessions and appends 40 requirements for both versions.
 Version 1.3 measures the band motion, HUD and pop-up frames, and adds detailing
 rules, modern components and a HUD section with the weapon wheel; version 1.4
 adds the objectives display, boss, vehicle and scope displays, the multiplayer
-HUD and scoreboard, and the Strogg weapon wheel. [Register schema 3](../../../ui/product-requirements.md)
+HUD and scoreboard, and the Strogg weapon wheel. Register schema 3
 records five supersessions and appends 29 requirements for both versions.
 Version 1.5 lays the HUD out in screens with a centered status bar. It
 rebuilds the multiplayer HUD's top, chat and kill feed, catalogues every
@@ -96,7 +96,7 @@ share player logic with MP's reliable equip route. Visual 1.18 explicitly keeps
 the original 77% horizontal default through archived `ui_weaponWheelOffset 27`;
 zero centers, negative moves left, and narrow views fit without changing the
 preference. Visual 1.19 adds smooth Gaussian scene focus before the HUD,
-shared by SP and MP and faded with the wheel. See [weapon wheels](../../../ui/weapon-wheels.md) for runtime evidence, the
+shared by SP and MP and faded with the wheel. See weapon wheels for runtime evidence, the
 multiplayer quick-chat wheel and the remaining wider section 14.6 work.
 openQ4-game's hit marker is on by default in single player and multiplayer and
 replaces the stock pop, where section 14.7 keeps the pop and offers markers in
@@ -158,7 +158,7 @@ fields take typed digits since committed characters reach retained fields
 display path, and MSAA applies on Vulkan. `BEH-002` and `FLOW-002` stay
 partial.
 
-The [retained screen increment](../../../ui/retained-screens.md) builds the title
+The retained screen increment builds the title
 screen, the single-player pause menu and the stock loading screens from
 visual specification 1.7 and the design atlas, behind one `ui_retained` gate
 (on by default for new profiles again since 14 October, after the 12 October
@@ -181,7 +181,7 @@ Single Player's Campaign opens as a sub-page with the band step and crumb.
 Single player loads run localized tips. The multiplayer server card lists the
 players by team and the server's message, on the host, on a map change and on
 a fresh connection (an optional roster block after the connect response's
-server info). The [multiplayer Escape card](../../../ui/multiplayer-menus.md) now
+server info). The multiplayer Escape card now
 covers the game's in-match menu by default: the card, its header, the
 eight-tab strip, the prompt bar, the Disconnect confirmation and the
 softening, with every page built: Team, Players, Vote, Settings (name and
@@ -202,49 +202,49 @@ otherwise. The initializing screen and the weapon wheels are the ones
 described above; the retained page line built its own of both, and of the
 campaign difficulty page, and gave them up when it merged into main on
 14 October. LOAD GAME on the title and the
-Marine pause opens the retained [Load Game page](../../../ui/retained-screens.md#load-game-page),
+Marine pause opens the retained Load Game page,
 the stock page's content over the home that handed off to it, with selection,
 loading, deletion with confirmation, failures in context, the empty state and
 paging. SAVE GAME on the Marine pause opens the retained
-[Save Game page](../../../ui/retained-screens.md#save-game-page) the same way, its
+Save Game page the same way, its
 name in a new `text` field ([text fields](../../../ui/numeric-fields.md#text-fields)),
 with the overwrite confirmation, the autosave refusal and the session's
 reasons in context. Committed characters now type into a focused retained
 field ([typed characters](../../../ui/numeric-fields.md#typed-characters)), so the
 SYSTEM page's size fields take typed digits and only presets keep it opt-in.
 RESTART LEVEL on the Marine pause opens the retained
-[Restart Level page](../../../ui/retained-screens.md#restart-level-page): the
+Restart Level page: the
 difficulty plates beside their description and the enlarged primary plate of
 the stock New Game layout.
 Accepting a campaign on the Campaign sub-page descends to its difficulty and
 Turbo setup, the fourth level (`campaign_skill.q4ui`).
 DEMOS on the title opens the retained
-[Demos page](../../../ui/retained-screens.md#demos-page): the demo library under
+Demos page: the demo library under
 filter tags, the selected demo's picture and lines, and PLAY, DELETE and
 REFRESH, on the Load Game page's construction.
 MODS on the title opens a retained list dialog, the modal construction grown
 to 280 u, with the installed mods, their details, LOAD MOD and CANCEL.
 After the player dies the retained
-[restart screen](../../../ui/retained-screens.md#restart-screen) offers RESTART,
+restart screen offers RESTART,
 LOAD GAME, MAIN MENU and EXIT GAME over the stock popup art.
-CREDITS on the title opens the retained [Credits page](../../../ui/retained-screens.md#credits-page):
+CREDITS on the title opens the retained Credits page:
 the stock credits' choreography compiled into one repeating timeline, its words
 read from the stock menu at runtime.
-ARENA on the Single Player page opens the retained [Arena page](../../../ui/retained-screens.md#arena-page),
+ARENA on the Single Player page opens the retained Arena page,
 its second sub-page: the Arena campaign's tier ladder, matches, detail column,
 entrance and result ledger, the campaign publishing into it and keeping its
 authority.
-MULTIPLAYER on the title opens the retained [Multiplayer page](../../../ui/retained-screens.md#multiplayer-page),
+MULTIPLAYER on the title opens the retained Multiplayer page,
 the stock Multiplayer page's level: JOIN GAME, CREATE SERVER and PLAYER SETUP
 open the stock browser, Create Server and Settings pages, whose Back returns
 to it. CREATE SERVER goes deeper to the retained
-[Create Server sub-page](../../../ui/retained-screens.md#create-server-sub-page), the
+Create Server sub-page, the
 stock page's map selection and options with the session owning each setting,
 the passwords on masked text fields
 ([text fields](../../../ui/numeric-fields.md#text-fields)) and the ban list in a
 nested dialog; it is the default, as it offers all the stock page does.
 JOIN GAME goes deeper to the retained
-[Join Game sub-page](../../../ui/retained-screens.md#join-game-sub-page), the
+Join Game sub-page, the
 server browser's list with its sources, column sorts, symbols, mod filter,
 a filter row under the list (the game type's spinner and the NOT FULL, NOT
 EMPTY and NO PASSWORD tags), favorite toggle and the chosen server's levelshot, JOIN IP ADDRESS and FIND
@@ -256,7 +256,7 @@ west refreshing the list and north sorting it by the next column, the session
 publishing the scan as it finds servers; it is the default, as it offers every control the stock page does.
 After Kane's stroggification the pause's SAVE GAME, LOAD GAME and RESTART
 LEVEL open the same pages in the Strogg family
-([Strogg pause pages](../../../ui/retained-screens.md#strogg-pause-pages)).
+(Strogg pause pages).
 In-field composition remains. No gate closes.
 
 ## Objective and immutable completion scope
@@ -526,7 +526,7 @@ successful commit/push, verify remote heads before saying the stage is published
 | 2026-09-08 | 2 | Retained engine rendering, density and rectangular clipping integrated; canonical documents, value edits, presentation tracks, controls, SDL/session ownership and typed application/CVar expression bindings implemented | Complete component/event/binding semantics, game bridge and legacy lowering, text/IME and broader input qualification, transformed overflow clipping, text backend and representative screen/editor qualification |
 | 2026-09-08 | 3 | Editable responsive paths, winding fills, stroke unions, linear paints, analytic coverage, isolated subtree opacity and editable alpha masks integrated | Broader composition effects, complete paints/strokes/fonts, production components and all artwork, performance and broader platform/visual qualification |
 
-Inventory methodology and limitations: [inventory report](../../../ui/inventory-report.md).
+Inventory methodology and limitations: inventory report.
 The [native import checkpoint](../../../ui/legacy-import.md) records source/hash-bound
 preprocessing, ordered declarations, expression/script trees and dependency
 records. SP/OpenGL and MP/Vulkan produce identical exports; none of the 271
@@ -764,8 +764,8 @@ lacks a page the title and pause screens hand off to (a mod's own menu), or when
 its view fails after a renderer or language change. The SYSTEM page and the
 campaign selectors fall back the same way, from the click that asked for them,
 and CONTINUE shows a save's picture only when its file exists.
-`ui_retainedStatus` lists the fallbacks after `stock=`. See [falling back to the
-stock screens](../../../ui/retained-screens.md#falling-back-to-the-stock-screens). The
+`ui_retainedStatus` lists the fallbacks after `stock=`. See falling back to the
+stock screens. The
 remaining stock pages, the editor and every migration and final gate stay open;
 `SHIP-001` and `GATE-007` still require every stock route to have a qualified
 retained replacement.
@@ -777,7 +777,7 @@ shade to death, and follows the three Air Defense crash wake-ups and two
 blackouts with warm soft focus and feathered eyelids. Stock camera and script
 timing remain authoritative. Reduced motion/flashing removes the transient
 focus/afterimage accents. Qualification is recorded in
-[retained screens](../../../ui/retained-screens.md) under `.tmp/view-effects-refinement/`;
+retained screens under `.tmp/view-effects-refinement/`;
 this does not close the wider migration or platform gates.
 
 11 October follow-up: initialization now redraws at cooperative startup
@@ -803,7 +803,7 @@ Loading begins after a short smooth fade has reached full black. These effects
 fill wide and tall views without stretching the optical center or obscuring HUD
 text. The shared SP/MP implementation preserves the original game-state timing.
 
-The [implementation record](../../../ui/retained-screens.md) links native geometry,
+The implementation record links native geometry,
 menu-routing and adapter checks, and engine screenshots from windowed OpenGL
 and Vulkan gameplay. Evidence under `.tmp/ui-continuity/` also covers portrait,
 German labels, reduced motion, real campaign progression and native 4K mesh
@@ -824,7 +824,7 @@ Remastered HUD layout/behavior migration and other platform acceptance remain op
 
 ### 7 October 2026: complete screen-space HUD presentation routing
 
-The [HUD presentation bridge](../../../ui/hud-coverage.md) routes the
+The HUD presentation bridge routes the
 17 retail and 10 expansion screen-space HUD roots through the retained
 renderer, with canonical vector art, preserved gameplay GUI state and atomic
 stock fallback. Game-owned hit markers, damage numbers, movement input and
@@ -834,7 +834,7 @@ GUI migration and product/editor/platform gates remain open.
 
 ### 8 October 2026: the Remastered HUD layout
 
-The [Remastered HUD](../../../ui/remastered-hud.md) pairs each covered stock HUD GUI
+The Remastered HUD pairs each covered stock HUD GUI
 with a generated retained document that answers the same state and events and
 lays its groups out on the section 14.4 anchors: the on-foot Marine and Strogg
 HUDs (with The Awakening's), the multiplayer HUD, the walker and hover tank

@@ -26,7 +26,6 @@ missing in openPREY:
 - physical crouching: the engine flags a crouched head, but PREY's game
   doesn't read the flag, so use your crouch button;
 - vibration on shots and hits, and room-scale collision feedback;
-- vehicles and turrets in stereo (`vr_vehicleStereo`);
 - the comfort changes openQ4 made to view bob, weapon kick and screen shake.
 
 The engine-side parts described below still apply.

@@ -70,7 +70,7 @@ def main():
   includes=[ROOT,folder,ROOT/'src/ui/retained',rml/'Include',rml/'Source/Core',jsonroot/'include',tess/'Include']
   others=[obj for source,obj in objects.items() if source!=unit]
   cmd='cl /nologo /MTd /DNDEBUG /DRMLUI_STATIC_LIB /DRMLUI_NO_THIRDPARTY_CONTAINERS /std:c++20 /EHsc /utf-8 /W3 /WX '+' '.join('/I"'+str(v)+'"' for v in includes)+' /Fo"'+str(folder)+'/" "'+str(compile_unit)+'" '+' '.join('"'+str(v)+'"' for v in others)+' /Fe"'+str(folder/'test.exe')+'" /link '+' '.join('"'+str(v)+'"' for v in libs)+' /SUBSYSTEM:CONSOLE user32.lib'
-  batch=folder/'compile.cmd';batch.write_text('@echo off\ncall "'+str(repo/'tools/build/openq4_devcmd.cmd')+'"\nif errorlevel 1 exit /b %errorlevel%\n'+cmd+'\n')
+  batch=folder/'compile.cmd';batch.write_text('@echo off\ncall "'+str(repo/'tools/build/openprey_devcmd.cmd')+'"\nif errorlevel 1 exit /b %errorlevel%\n'+cmd+'\n')
   c=subprocess.run(['cmd','/c',str(batch)],cwd=folder,env=env,capture_output=True,text=True,encoding='utf-8',errors='replace');(folder/'compile.log').write_text(c.stdout+c.stderr);r=None
   if not c.returncode:
    r=subprocess.run([str(folder/'test.exe')],cwd=folder,env=env,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=120);(folder/'run.log').write_text(r.stdout+r.stderr)

@@ -7,7 +7,7 @@ keeps its controller buttons when a keyboard key is bound to it. The stock
 menus step their focus in the order a page reads, scroll a settings page to
 the row that takes the focus, and no longer hold the arrow keys on a key row,
 a number field or a scroll bar. It follows the
-[stock interface menus](legacy-menu-layout.md) record of the same day.
+stock interface menus record of the same day.
 
 `docs/dev/ui/retained-screens.md` and `docs/dev/ui/document-format.md` are
 bound by hash in the UI register and were not edited in this round. This

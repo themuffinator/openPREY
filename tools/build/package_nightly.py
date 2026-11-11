@@ -33,7 +33,6 @@ from linux_metadata import (
     desktop_exec_command as parse_linux_desktop_exec_command,
 )
 from generate_release_docs import GeneratedDocSite, generate_release_docs_site
-from gamelibs_stage_path import MANIFEST_NAME as GAMELIBS_STAGE_MANIFEST_NAME, stage_root as gamelibs_stage_root
 from game_layer import PACKAGED_LAYER_GAME_DIRS, RETIRED_LAYER_GAME_DIRS, LayerError, read_layer_mod_json
 from openq4_pak import (
     OPENQ4_BULK_PACK_NAMES,
@@ -88,7 +87,7 @@ ARCHIVE_SUFFIX = {
 # Shared macOS compatibility floor: written to Info.plist LSMinimumSystemVersion
 # and enforced against each packaged binary's Mach-O minimum-OS load command.
 MACOS_MIN_SYSTEM_VERSION = "11.0"
-MACOS_RUNTIME_LAYOUT_KEY = "OpenPREYRuntimeLayout"
+MACOS_RUNTIME_LAYOUT_KEY = "openPREYRuntimeLayout"
 MACOS_RUNTIME_LAYOUT_VALUE = "self-contained-v1"
 MACOS_EXPECTED_PLIST_VALUES = {
     "CFBundleExecutable": "openPREY",
@@ -129,19 +128,19 @@ MACOS_LOCALIZED_INFO_LOCALES = (
     "English",
     "French",
 )
-MACOS_PACKAGE_ROOT_ERROR_STRINGS_NAME = "OpenPREYPackageRoot.strings"
+MACOS_PACKAGE_ROOT_ERROR_STRINGS_NAME = "openPREYPackageRoot.strings"
 MACOS_PACKAGE_ROOT_ERROR_STRINGS = {
     "English": {
-        "OpenPREYPackageRootMissingTitle": "openPREY.app adjacent package root is incomplete",
-        "OpenPREYPackageRootMissingBody": "This legacy package layout needs openPREY.app, basepr/, openPREY-client_<arch>, and openPREY-ded_<arch> together in the same package folder. Current self-contained packages support moving only openPREY.app to /Applications; reinstall this package to use that layout.",
-        "OpenPREYBundleRuntimeMissingTitle": "openPREY.app is incomplete",
-        "OpenPREYBundleRuntimeMissingBody": "Reinstall the complete openPREY.app. Its game data and signed game module must remain inside the application bundle.",
+        "openPREYPackageRootMissingTitle": "openPREY.app adjacent package root is incomplete",
+        "openPREYPackageRootMissingBody": "This legacy package layout needs openPREY.app, basepr/, openPREY-client_<arch>, and openPREY-ded_<arch> together in the same package folder. Current self-contained packages support moving only openPREY.app to /Applications; reinstall this package to use that layout.",
+        "openPREYBundleRuntimeMissingTitle": "openPREY.app is incomplete",
+        "openPREYBundleRuntimeMissingBody": "Reinstall the complete openPREY.app. Its game data and signed game module must remain inside the application bundle.",
     },
     "French": {
-        "OpenPREYPackageRootMissingTitle": "La racine de paquet adjacente a openPREY.app est incomplete",
-        "OpenPREYPackageRootMissingBody": "Cette ancienne disposition de paquet necessite que openPREY.app, basepr/, openPREY-client_<arch> et openPREY-ded_<arch> restent ensemble dans le meme dossier. Les paquets autonomes actuels permettent de deplacer seulement openPREY.app vers /Applications ; reinstallez ce paquet pour utiliser cette disposition.",
-        "OpenPREYBundleRuntimeMissingTitle": "openPREY.app est incomplete",
-        "OpenPREYBundleRuntimeMissingBody": "Reinstallez l'application openPREY.app complete. Ses donnees de jeu et son module de jeu signe doivent rester dans l'application.",
+        "openPREYPackageRootMissingTitle": "La racine de paquet adjacente a openPREY.app est incomplete",
+        "openPREYPackageRootMissingBody": "Cette ancienne disposition de paquet necessite que openPREY.app, basepr/, openPREY-client_<arch> et openPREY-ded_<arch> restent ensemble dans le meme dossier. Les paquets autonomes actuels permettent de deplacer seulement openPREY.app vers /Applications ; reinstallez ce paquet pour utiliser cette disposition.",
+        "openPREYBundleRuntimeMissingTitle": "openPREY.app est incomplete",
+        "openPREYBundleRuntimeMissingBody": "Reinstallez l'application openPREY.app complete. Ses donnees de jeu et son module de jeu signe doivent rester dans l'application.",
     },
 }
 # macOS renderer payload. The Vulkan renderer module runs on macOS through
@@ -1576,6 +1575,22 @@ def clean_version_metadata_value(value: object) -> str:
     if not text or "\n" in text or "\r" in text:
         return "unavailable"
     return text
+
+
+# Legacy GameLibs source-stage manifest. The game library is in-tree now and
+# Meson stages nothing, but older evidence fixtures still carry this layout.
+GAMELIBS_STAGE_MANIFEST_NAME = "openq4_gamelibs_stage_manifest.json"
+
+
+def gamelibs_stage_root(source_root: Path, system: str, cpu_family: str) -> Path:
+    system = {"macos": "darwin"}.get(system, system)
+    arch = {"x86_64": "x64", "aarch64": "arm64"}.get(cpu_family, cpu_family)
+    if system not in {"windows", "linux", "darwin", "android"}:
+        raise ValueError(f"unsupported GameLibs target system: {system}")
+    if arch not in {"x64", "x86", "arm64"}:
+        raise ValueError(f"unsupported GameLibs target architecture: {arch}")
+    name = "gamelibs_stage" if system == "windows" else f"gamelibs_stage-{system}-{arch}"
+    return source_root / ".tmp" / name
 
 
 def read_staged_repository_metadata(source_root: Path, platform: str = "windows", arch: str = "x64") -> dict[str, str]:

@@ -6,7 +6,7 @@ source edits use the same evaluator. This advances Stage 2; it accepts no GUI
 as translated and does not implement the complete game action bridge. The
 [archived replacement plan](../archive/2026-10-18/plans/idtech5-ui.md) preserves
 the full technical scope. The [development roadmap](../roadmap.md#new-user-interface)
-coordinates current work; the [product register](product-requirements.md) retains
+coordinates current work; the product register retains
 the detailed acceptance requirements.
 
 ## State and binding schema
@@ -152,8 +152,8 @@ bounds. These internal developer operations do not synthesize platform input.
 The capture harness accepts up to 16 `--retained-data` files and records their
 hashes with the document, script, executable, log and engine screenshot.
 
-The [fixture](../../../tools/ui/fixtures/binding-smoke.q4ui) reuses existing Marine
-vector qualification art. Its [script](../../../tools/ui/fixtures/binding-smoke.cfg)
+The fixture reuses existing Marine
+vector qualification art. Its script
 changes progress 25→40→75, disables a pressed control and releases it without
 an action, then reenables it and obtains exactly one activation. A read-only
 CVar supplies the displayed UI scale. Existing feedback timelines operate
@@ -173,7 +173,7 @@ gameplay map before loading the fixture. Runs are hidden/windowed with host
 mouse/controller input disabled. Images come from engine `screenshot`.
 
 Final captures: `.tmp/ui/state/sp-gl-125-r2` and `mp-vulkan-200-r2`. The
-[verifier](../../../tools/ui/verify_binding_capture.py) checks source/log/image
+verifier checks source/log/image
 hashes, exact data/action traces, restart restoration, actual gauge bounds and
 filled/unfilled interior pixels. Every sampled pixel passes: GL 3,136 filled/
 1,022 unfilled; Vulkan 5,184/1,692. Both screenshots were reviewed for text,

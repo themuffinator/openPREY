@@ -4,7 +4,7 @@ This checkpoint connects explicit `.q4ui` documents to normal engine GUI
 allocation and session dispatch. It is part of M1 in the
 [product completion plan](../archive/2026-10-18/plans/ui-product-completion.md). It does not accept
 any of the 271 shipped GUI resources or complete the production settings page.
-The [full requirement register](product-requirements.md) remains authoritative.
+The full requirement register remains authoritative.
 
 The method coverage and validation below describe commit `e075e4a2`. The
 subsequent [presentation alias checkpoint](presentation-aliases.md) implements

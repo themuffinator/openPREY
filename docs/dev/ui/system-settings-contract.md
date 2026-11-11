@@ -3,7 +3,7 @@
 This is the implementation contract for the complete production SYSTEM page in
 M2 of the [product completion plan](../archive/2026-10-18/plans/ui-product-completion.md). It follows
 the [visual design requirements](../ui-visual-design.md) and the
-[full requirement register](product-requirements.md). It is not a new diagnostic
+full requirement register. It is not a new diagnostic
 screen or an acceptance record for the shipped GUI corpus.
 
 The transaction core, fixed 53-field engine catalog and typed application service
@@ -140,7 +140,7 @@ Resolution and Refresh Rate ([SYSTEM resolution rows](system-resolution-rows.md)
 `fromMp_toSystem` targets desktop page 22 for the stock page; with the retained
 page available it asks the session to open the retained page over the main menu
 instead, falling back to this stock route
-([retained screens](retained-screens.md#falling-back-to-the-stock-screens)).
+(retained screens).
 On entry, the menu issues
 `refreshSystemSettings`, which refreshes display data, inverse quality booleans
 and renderer capabilities, then calls `StateChanged`. `forceAspect0` selects the

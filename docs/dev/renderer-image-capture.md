@@ -37,13 +37,10 @@ Ordinary rendering does not perform these transfers.
 
 ## Runtime validation
 
-`tools/tests/renderer_image_capture.py` uses the existing procedural PBR
-laboratory with hidden windowed rendering, engine commands and input disabled.
-Its thirteen controls check repeated and interleaved reads, unchanged displayed
-frames, orientation, scene/window resizing, image reload, both video-restart
-paths, PBR/HDR switches and rejection of invalid images, formats and paths.
-The report retains raw-image hashes alongside the laboratory's runtime, fixture,
-configuration, log and harness provenance.
+The runtime capture harness inherited from openQ4 (`renderer_image_capture.py`
+and the procedural PBR laboratory it drove) ran against Quake 4 content and was
+removed with the rest of the openQ4 test fixtures. A PREY-content replacement
+has not been written yet, so the checks below are static and GPU self-tests only.
 
 The v38 Windows captures exposed two rendering differences independently of
 the capture checks: a one-byte classic resolve discrepancy amplified by SMAA,
@@ -75,13 +72,3 @@ ties can use either adjacent byte. The 159.375 case must therefore produce 159.
 These checks supplement the existing mixed-attachment, depth, alias-rejection,
 resize and retirement tests. Shader sources and the embedded header are pinned
 by `vk_shader_header_pin.py`.
-
-```powershell
-python -B tools/tests/renderer_image_capture.py --backend vk --samples 8 `
-  --runtime-root .tmp/runtime/candidate --output-dir .tmp/image-capture-vk `
-  --basepath "E:\SteamLibrary\steamapps\common\Quake 4"
-```
-
-Use `--backend gl` with a separate output directory for the OpenGL reference.
-The runtime must already contain the compiled laboratory and matching staged
-engine, game and renderer modules.

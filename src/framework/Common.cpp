@@ -133,7 +133,6 @@ static const char *com_performancePresetValueStrings[] = { "balanced", "minimum"
 idCVar com_performancePreset( "com_performancePreset", "balanced", CVAR_ARCHIVE | CVAR_SYSTEM, "coherent system performance preset: minimum, lowpower (both without shadows), low, performance, balanced, enhanced, quality, ultra, maximum (everything on, no frame-rate target)", com_performancePresetValueStrings, idCmdSystem::ArgCompletion_String<com_performancePresetArgs> );
 idCVar com_purgeAll( "com_purgeAll", "0", CVAR_BOOL | CVAR_ARCHIVE | CVAR_SYSTEM, "purge everything between level loads" );
 idCVar com_WriteSingleDeclFile( "com_WriteSingleDeclFile", "0", CVAR_SYSTEM | CVAR_BOOL, "write a packed decl file after startup or map loads; use com_singleDeclFileWriteMode for compatibility or exact-retail game-type coverage" );
-idCVar com_memoryMarker( "com_memoryMarker", "-1", CVAR_INTEGER | CVAR_SYSTEM | CVAR_INIT, "used as a marker for memory stats" );
 idCVar com_preciseTic( "com_preciseTic", "1", CVAR_BOOL|CVAR_SYSTEM, "run one game tick every async thread update" );
 idCVar com_asyncInput( "com_asyncInput", "0", CVAR_BOOL|CVAR_SYSTEM, "sample input from the async thread" );
 #if defined( ID_DEDICATED )
@@ -2661,7 +2660,7 @@ static bool Common_SettingsSaveDirectory( std::string& directory, std::string& e
 		return false;
 	}
 	if ( root.back() != '/' ) root += '/';
-	directory = root + "baseoq4/";
+	directory = root + "basepr/";
 	error.clear();
 	return true;
 }
@@ -3558,7 +3557,7 @@ r_shadowMapPointLights is forced on for every recipe: see the note where it is
 set.
 ===============
 */
-struct openPreyPresetExtras_t {
+struct openPREYPresetExtras_t {
 	const char *preset;
 	int shaderLevel;
 	int skipGlowOverlay;
@@ -3567,13 +3566,13 @@ struct openPreyPresetExtras_t {
 	int fastSkinning;
 };
 
-static const openPreyPresetExtras_t OPENPREY_PRESET_EXTRAS[] = {
+static const openPREYPresetExtras_t OPENPREY_PRESET_EXTRAS[] = {
 	{ "minimum",	0, 1, 0, 0, 1 },
 	{ "lowpower",	1, 1, 0, 0, 1 },
 	{ "low",		2, 0, 1, 1, 0 },
 };
 // Performance and every recipe above it.
-static const openPreyPresetExtras_t OPENPREY_PRESET_EXTRAS_FULL = { "", 3, 0, 1, 1, 0 };
+static const openPREYPresetExtras_t OPENPREY_PRESET_EXTRAS_FULL = { "", 3, 0, 1, 1, 0 };
 
 static void Common_SetPreyPresetExtra( const char *name, int value, int defaultValue, bool firstLaunch ) {
 	idCVar *cvar = cvarSystem->Find( name );
@@ -3589,8 +3588,8 @@ static void Common_SetPreyPresetExtra( const char *name, int value, int defaultV
 }
 
 static void Common_ApplyPreyPerformancePresetExtras( const char *presetName, bool firstLaunch = false ) {
-	const openPreyPresetExtras_t &full = OPENPREY_PRESET_EXTRAS_FULL;
-	const openPreyPresetExtras_t *extras = &full;
+	const openPREYPresetExtras_t &full = OPENPREY_PRESET_EXTRAS_FULL;
+	const openPREYPresetExtras_t *extras = &full;
 	for ( int i = 0; i < (int)( sizeof( OPENPREY_PRESET_EXTRAS ) / sizeof( OPENPREY_PRESET_EXTRAS[0] ) ); ++i ) {
 		if ( presetName != NULL && idStr::Icmp( presetName, OPENPREY_PRESET_EXTRAS[i].preset ) == 0 ) {
 			extras = &OPENPREY_PRESET_EXTRAS[i];

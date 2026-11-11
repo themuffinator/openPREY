@@ -71,7 +71,6 @@ bool R_IsMutableRenderImage( const idImage *image ) {
 idImageManager	imageManager;
 idImageManager * globalImages = &imageManager;
 
-idCVar preLoad_Images( "preLoad_Images", "1", CVAR_SYSTEM | CVAR_BOOL, "preload images during beginlevelload" );
 static const char *image_filterArgs[] = {
 	"GL_LINEAR_MIPMAP_LINEAR",
 	"GL_LINEAR_MIPMAP_NEAREST",

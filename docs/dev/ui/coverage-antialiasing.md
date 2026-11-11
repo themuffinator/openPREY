@@ -145,7 +145,7 @@ DLLs. The final successful evidence includes both rebuilt/staged modules and
 supersedes those failed attempts. The MP warnings are the existing AAS, optional
 sound and non-precached-content diagnostics, not a clean-log result.
 
-Reproduction uses the [capture harness](../../../tools/ui/capture_legacy_baseline.py)
+Reproduction uses the capture harness
 and new output directories:
 
 ```powershell

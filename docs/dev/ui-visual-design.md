@@ -6,7 +6,7 @@ Specification version 1.39, 9 November 2026 (1.38 on 5 November, 1.37 on 3 Novem
 implementation target; the replacement has not shipped. Applies to every
 player-facing GUI and to the visual editor's Quake 4 preview. Implementation is
 coordinated in the [development roadmap](roadmap.md#new-user-interface), with
-acceptance and evidence in the [product register](ui/product-requirements.md).
+acceptance and evidence in the product register.
 The [archived replacement plan](archive/2026-10-18/plans/idtech5-ui.md) preserves
 the original scope and historical stage evidence.
 
@@ -83,7 +83,7 @@ and replacing interface furniture with vector artwork. This supersedes the
 old requirement to draw all furniture from retail bitmaps. It does not
 authorize a different game's visual identity or bundling extracted retail art.
 Existing bitmap references identify appearance, not implementation assets.
-The [legacy guide](ui-legacy-gui-reference.md) records old layout conventions
+The legacy guide records old layout conventions
 and script traps for translators; it is not the replacement design contract.
 
 Read this specification before composing a screen, component, icon or editor
@@ -3543,7 +3543,7 @@ when activation is hidden. Reduced motion preserves the timed activation,
 readouts and damage feedback using steady low-alpha cells and a gentle fade,
 without travelling noise or repeated flashes. It must not alter the map script.
 
-The editable [implant atlas sheet](ui/atlas/medlabs-implant.html) exposes a
+The editable implant atlas sheet exposes a
 timeline, Replay and Hurt, and 4:3, 16:9, 21:9, 32:9 and 9:16 previews.
 `tools/ui/update_design_atlas.py` merges it into the full atlas. This specifies
 the retained replacement; its vehicle HUD migration remains tracked in the
@@ -3787,7 +3787,7 @@ Gauge art is 256x128 texels drawn at 125x59 u (0.488 u per texel across,
 | Motion | `hover.leave` cubic; `modal.enter` 180 ms with scale; `modal.leave` 120 ms | Linear `hover.leave`; stock modal choreography; stock screen choreography tokens | Stock timelines |
 | Added | — | Measured tokens and family values, composition modes, stock grid, band geometry, HUD geometry, symbol inventory, bitmap classification, stock screen reference | Survey |
 
-[Register schema 2](ui/product-requirements.json) records the supersessions
+Register schema 2 records the supersessions
 this version requires: ART-003 (alpha ladder and tokens) by ART-018, ART-004
 (panel cuts and inset rail) by ART-019, ART-006 (button anatomy) by ART-020,
 MOT-003 (motion tokens) by MOT-009, TXT-006 (type ramp) by TXT-010, WID-002

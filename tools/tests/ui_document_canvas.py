@@ -34,7 +34,7 @@ def main():
     command+=' '.join('/I"'+str(p)+'"' for p in includes)+' /Fo"'+str(out)+'/" '
     command+=' '.join('"'+str(p)+'"' for p in [s for s in sources if s not in reused]+list(reused.values()))
     command+=' /Fe"'+str(out/'test.exe')+'" /link '+' '.join('"'+str(p)+'"' for p in libraries)+' /SUBSYSTEM:CONSOLE user32.lib'
-    batch=out/'compile.cmd';batch.write_text('@echo off\ncall "'+str(repo/'tools/build/openq4_devcmd.cmd')+'"\nif errorlevel 1 exit /b %errorlevel%\n'+command+'\n')
+    batch=out/'compile.cmd';batch.write_text('@echo off\ncall "'+str(repo/'tools/build/openprey_devcmd.cmd')+'"\nif errorlevel 1 exit /b %errorlevel%\n'+command+'\n')
     compile=subprocess.run(['cmd','/c',str(batch)],cwd=out,env=env,text=True,encoding='utf-8',errors='replace',capture_output=True)
     (out/'compile.log').write_text(compile.stdout+compile.stderr,encoding='utf-8');run=None
     if not compile.returncode:

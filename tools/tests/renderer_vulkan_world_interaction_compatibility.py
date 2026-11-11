@@ -8,7 +8,6 @@ import re
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TEST_PATH = "tools/tests/renderer_vulkan_world_interaction_compatibility.py"
 
 
 def read(relative_path: str) -> str:
@@ -713,20 +712,11 @@ def validate_shared_interaction_consumer() -> None:
 
 def validate_ci_registration() -> None:
     validator = read("tools/validation/openq4_validate.py")
-    commit = read(".github/workflows/commit-validation.yml")
-    push = read(".github/workflows/push-verification.yml")
 
     if validator.count("renderer_vulkan_world_interaction_compatibility.py") != 1:
         raise AssertionError(
             "Local validation must register the Vulkan world-interaction test exactly once"
         )
-    for workflow, context in (
-        (commit, "commit validation workflow"),
-        (push, "push verification workflow"),
-    ):
-        if workflow.count(TEST_PATH) != 2:
-            raise AssertionError(f"{context} must compile and directly run {TEST_PATH}")
-        require(workflow, f"python {TEST_PATH}", context)
 
 
 def main() -> None:

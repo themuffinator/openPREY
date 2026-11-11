@@ -82,7 +82,6 @@ idCVar s_releaseSamplePayload( "s_releaseSamplePayload", "1", CVAR_ARCHIVE | CVA
 	idCVar s_maxSoundsPerShader( "s_maxSoundsPerShader", "0", CVAR_ARCHIVE | CVAR_INTEGER, "max samples to load per shader, 0 loads all" );
 #endif
 
-idCVar preLoad_Samples( "preLoad_Samples", "1", CVAR_SYSTEM | CVAR_BOOL, "preload samples during beginlevelload" );
 idCVar s_trimIdleSeconds( "s_trimIdleSeconds", "30", CVAR_SOUND | CVAR_INTEGER,
 	"on a low-memory notice, also free this level's samples that no sound has started for this many seconds; they reload when next played (-1 keeps them)", -1, 3600 );
 

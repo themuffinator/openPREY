@@ -57,7 +57,7 @@ State changes play the authored timeline through the existing monotonic motion
 evaluator. Interruption retargets from the current sample; reduced motion follows
 the same evaluator policy as other UI motion. Feedback is initialized at document
 load, before subsequent explicit application timelines acquire ownership.
-The [fixture](../../../tools/ui/fixtures/interaction-smoke.q4ui) uses separate
+The fixture uses separate
 editable orange inset rails, label color and a 1 dp pressed label offset. Its
 right-hand panel is a test input scope, not an accepted production modal design.
 
@@ -196,15 +196,15 @@ text, including IDs containing hyphens. These commands alone do not qualify
 platform input. The later [input integration](input-routing.md) adds a distinct
 `ui_retainedOpen` host and tracks its device-routing/ownership evidence.
 
-The [capture harness](../../../tools/ui/capture_legacy_baseline.py) accepts
+The capture harness accepts
 `--retained-script` for a bounded sequence of these commands and waits. It rejects
 other commands, unquoted IDs and excessive script size/waits. Scripts are hashed
 in capture metadata and replayed after an optional video restart. Command-usage
 failures are retained diagnostics, not successful interaction. The
-[qualification script](../../../tools/ui/fixtures/interaction-smoke.cfg) checks
+qualification script checks
 deduplicated activation, disabled navigation, modal containment/restoration,
 release cancellation and live enable/disable. It leaves a pressed control visible.
-The [verifier](../../../tools/ui/verify_interaction_capture.py) checks exact
+The verifier checks exact
 action/state traces, the rendered disabled plate's alpha and the pressed orange
 rail in the engine TGA. Screenshots require separate visual inspection.
 

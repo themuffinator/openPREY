@@ -81,7 +81,7 @@ def main():
         command += ' /Fe"' + str(exe) + '" /link '
         command += ' '.join('"' + str(path) + '"' for path in libraries) + ' /SUBSYSTEM:CONSOLE user32.lib'
         batch = directory / 'compile.cmd'
-        batch.write_text('@echo off\ncall "' + str(repository / 'tools/build/openq4_devcmd.cmd') +
+        batch.write_text('@echo off\ncall "' + str(repository / 'tools/build/openprey_devcmd.cmd') +
                          '"\nif errorlevel 1 exit /b %errorlevel%\n' + command + '\n', encoding='utf-8')
         result = subprocess.run(['cmd', '/c', str(batch)], cwd=directory, env=env, text=True,
                                 encoding='utf-8', errors='replace', capture_output=True)

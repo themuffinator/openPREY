@@ -4,7 +4,7 @@
 
 Status: in progress. This is the living plan for running the unreleased Raven/Ritual
 expansion on openQ4. The gap analysis it works from is
-[the support audit](../../../q4x-awakening-support-audit.md). What has changed for players
+the support audit. What has changed for players
 is summarised in [The Awakening on openQ4](https://github.com/themuffinator/openQ4/blob/main/docs/user/awakening.md); keep that page
 current when a change here reaches the campaign.
 
@@ -87,7 +87,7 @@ harness `.tmp/awakening/run_q4x.py` (local, untracked) used to boot each map.
   else kills it) `damage_freezegib` shatters it with `fx_freezegib`. Version 4 saves
   preserve the status, timer and animation modifiers; v3 solid ice recovers with
   a fresh shatter timer and partial chill thaws. See the
-  [status and targeting regression record](../../../awakening-status-targeting.md).
+  status and targeting regression record.
 - **Turrets** (done, `riMonsterTurret` substituted for `rvMonsterTurret`):
   `dynamicAccuracy` (spread tightens over `accuracyLerpTime` of firing),
   `delayedTracking` / `lockDelay` (turn sounds, and a pause before firing again),

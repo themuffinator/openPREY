@@ -285,7 +285,7 @@ and [catalog lists](value-controls.md#catalog-lists). Other roles reject it.
 A button may declare `prompt`, the verb a prompt bar shows for Accept while it
 holds focus: a localization key, or a string expression over state whose
 result is one. A result that is not a key leaves the bar's own verb. Other
-roles reject it ([page prompt bars](retained-screens.md#page-prompt-bars)).
+roles reject it (page prompt bars).
 [Input ownership](input-routing.md) connects
 these declarations to SDL and session routing and records its qualification limits.
 
@@ -477,7 +477,7 @@ pause/resume, hold/base cancellation, loops, editor scrubbing and live reduced
 motion. These are synthetic sampling checks, not measured game frame rates.
 
 The canonical fixture is
-[`document-smoke.q4ui`](../../../tools/ui/fixtures/document-smoke.q4ui). It uses
+`document-smoke.q4ui`. It uses
 stock localization keys and diagnostic rectangles; the production vector
 component/artwork gate remains open. It is not shipped as runtime content.
 Gameplay capture commands and reviewed evidence are recorded alongside the

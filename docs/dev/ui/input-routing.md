@@ -222,7 +222,7 @@ a dialog. The two screens with an Apply declare it:
   Back does there (`confirmationBack`, `continueEditing`), so Menu never
   keeps a display change unseen; the adapter already routes those dialogs
   to Back.
-- The Escape card's [Admin page](multiplayer-menus.md#the-admin-page)
+- The Escape card's Admin page
   presses Apply changes while its Server section has something to apply
   (`mp.admin.apply.available`); otherwise Menu closes the card, as Back
   does. The Welcome and summary cards keep the button Back. The Apply
@@ -414,7 +414,7 @@ Game Options to the rows, sets both cvars from the console and reads them back
 in the rows, then shows the page's last step.
 
 Evidence for the settings rows, list paging and Join Game's row focus
-([retained screens](retained-screens.md#join-game-sub-page)):
+(retained screens):
 `.tmp/ui/controller-settings-paging/validation-evidence.json`, SHA-256
 `4ee88d83dbf0f98347f95fa70529aeb463fc20bb7725aaad1f905b6a5a82831c`.
 

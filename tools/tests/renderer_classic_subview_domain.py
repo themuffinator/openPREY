@@ -7,7 +7,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TEST_PATH = "tools/tests/renderer_classic_subview_domain.py"
 
 
 def read(relative_path: str) -> str:
@@ -291,15 +290,6 @@ def validate_controls_diagnostics_and_registration() -> None:
         "classic fallback",
     ):
         require(docs, token, "subview contract documentation")
-    for workflow_path in (
-        ".github/workflows/commit-validation.yml",
-        ".github/workflows/push-verification.yml",
-    ):
-        workflow = read(workflow_path)
-        if workflow.count(TEST_PATH) != 2:
-            raise AssertionError(
-                f"Expected compile and execution registration in {workflow_path}"
-            )
 
 
 def main() -> int:
