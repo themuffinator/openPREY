@@ -125,7 +125,7 @@ OPTION ARB_precision_hint_fastest;
 # texture 6 is the specular lookup table
 
 # env[0] is the diffuse modifier
-# env[1] is the specular modifier
+# env[1] is the specular modifier, already doubled by the engine
 # env[2] selects retail Prey's specular model (R_InteractionSpecularParms):
 #   x = specularExp exponent, y = specularExp brightness,
 #   z = 1 for r_correctspecular's pow( N.H, x ) * y with a per-pixel half
@@ -233,9 +233,13 @@ LRP	R1, program.env[2].z, R2.w, R1;
 # modulate by the constant specular factor
 MUL	R1, R1, program.env[1];
 
-# modulate by the specular map * 2
+# modulate by the specular map. Retail's program doubled the map here
+# (ADD R2, R2, R2) because retail passed the bare specular colour in env[1].
+# This engine passes it already doubled (RB_ARB2_DrawInteraction), as every
+# other interaction path does in its shader, so doubling again drew stock
+# specular at four times the specular colour and twice what the Vulkan,
+# GLSL and shadow-map receiver paths draw.
 TEX	R2, fragment.texcoord[5], texture[5], 2D;
-ADD	R2, R2, R2;
 MAD	color, R1, R2, color;
 
 MUL	color, light, color;

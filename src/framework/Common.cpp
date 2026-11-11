@@ -3553,6 +3553,9 @@ table alone.
 r_shaderLevel picks each material's shaderLevelN/shaderFallbackN stages (skin,
 cloth, liquid and organic-wall programs). Retail chose it from the video card;
 every device above the two shadowless recipes runs the highest level.
+
+r_shadowMapPointLights is forced on for every recipe: see the note where it is
+set.
 ===============
 */
 struct openPreyPresetExtras_t {
@@ -3600,6 +3603,20 @@ static void Common_ApplyPreyPerformancePresetExtras( const char *presetName, boo
 	Common_SetPreyPresetExtra( "r_correctspecular", extras->correctSpecular, full.correctSpecular, firstLaunch );
 	Common_SetPreyPresetExtra( "r_normalizebumpmap", extras->normalizeBumpmap, full.normalizeBumpmap, firstLaunch );
 	Common_SetPreyPresetExtra( "r_useFastSkinning", extras->fastSkinning, full.fastSkinning, firstLaunch );
+
+	// Shadow maps mean point lights here. The shared table's Enhanced recipe
+	// leaves them on stencil volumes, which suits Quake 4's forty-light halls;
+	// in Prey all 602 lights of feedingtowerb are point lights (four of them
+	// parallel), so that recipe turned shadow maps on and mapped nothing. The
+	// recipes below Enhanced keep r_useShadowMap 0 and are unaffected. This one
+	// is set by the table itself, so only a launch option counts as the
+	// player's own value on a first launch.
+	if ( !firstLaunch || !Common_HasStartupVariable( "r_shadowMapPointLights" ) ) {
+		idCVar *pointLights = cvarSystem->Find( "r_shadowMapPointLights" );
+		if ( pointLights != NULL ) {
+			pointLights->SetBool( true );
+		}
+	}
 }
 
 // Retain the stock console command, but never revive its separate resolution,

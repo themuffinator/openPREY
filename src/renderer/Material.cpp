@@ -400,6 +400,7 @@ void idMaterial::CommonInit() {
 	numStages = 0;
 	numAmbientStages = 0;
 	hasCustomGLSLLightingStage = false;
+	hasInteractionProgramStage = false;
 	stages = NULL;
 	editorImage = NULL;
 	lightFalloffImage = NULL;
@@ -4619,6 +4620,15 @@ bool idMaterial::Parse( const char *text, const int textLength ) {
 		}
 	}
 
+	// OPENPREY
+	hasInteractionProgramStage = false;
+	for ( i = 0 ; i < numStages ; i++ ) {
+		if ( stages[i].lighting == SL_INTERACTION ) {
+			hasInteractionProgramStage = true;
+			break;
+		}
+	}
+
 	if ( numOps ) {
 		ops = (expOp_t *)R_StaticAlloc( numOps * sizeof( ops[0] ) );
 		memcpy( ops, pd->shaderOps, numOps * sizeof( ops[0] ) );
@@ -5531,6 +5541,26 @@ bool idMaterial::HasActiveCustomGLSLLighting( const float *registers ) const {
 
 /*
 ===================
+idMaterial::HasActiveInteractionProgramStage
+
+OPENPREY: Prey's shaderLevelN stages put per-light ARB programs on characters
+and some walls. The flag keeps the common material at one test.
+===================
+*/
+bool idMaterial::HasActiveInteractionProgramStage( const float *registers ) const {
+	if ( !hasInteractionProgramStage ) {
+		return false;
+	}
+	for ( int i = 0 ; i < numStages ; i++ ) {
+		if ( stages[i].lighting == SL_INTERACTION && MaterialStageIsActive( stages[i], registers ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+===================
 idMaterial::HasActiveStockLightingInteractions
 ===================
 */
@@ -5795,13 +5825,20 @@ static bool R_MaterialConstantRegistersSelfTest( void ) {
 		"rgb sound", "rgb glslPrograms",
 		"rgb 0.5 + 0.25 * ( time > 2 )", "alphaTest 0.25 + parm3", "if ( global2 )",
 		"colored",
+		// OPENPREY: Prey's thirteenth parm and its alias, the view registers the
+		// game sets per view, their stage keywords, and fragmentPrograms, which
+		// is a register here and a parse-time literal upstream
+		"rgb parm12", "rgb distance",
+		"rgb scopeView", "rgb spiritWalk", "rgb shuttleView",
+		"scopeView", "notScopeView", "spiritWalk", "notSpiritWalk", "shuttleView",
+		"rgb fragmentPrograms",
 	};
 	// folded to a literal while parsing, so a surface that evaluates reads the
 	// same number as the block does
 	static const char *const constantStages[] = {
 		"rgb 0.25",
 		"rgb 0.75 - 0.25", "rgb ( 3 / 4 ) > 0.5", "alphaTest 7 % 4",
-		"rgb fragmentPrograms", "rgb POTCorrectionX", "rgb POTCorrectionY",
+		"rgb POTCorrectionX", "rgb POTCorrectionY",
 		"rgb VideoWidth", "rgb VideoHeight", "rgb IsMultiplayer",
 	};
 

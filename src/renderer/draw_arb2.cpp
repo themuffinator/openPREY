@@ -2212,6 +2212,7 @@ typedef enum {
 	SHADOWMAP_RECEIVER_FALLBACK_INVALID_SURFACE = 0,
 	SHADOWMAP_RECEIVER_FALLBACK_CUSTOM_GLSL,
 	SHADOWMAP_RECEIVER_FALLBACK_GENERATED_GEOMETRY,
+	SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM,	// OPENPREY: Prey per-light ARB program
 	SHADOWMAP_RECEIVER_FALLBACK_COUNT
 } shadowMapReceiverFallbackReason_t;
 
@@ -2579,6 +2580,8 @@ static const char *RB_ShadowMapReceiverFallbackReasonName( const shadowMapReceiv
 		return "customGLSL";
 	case SHADOWMAP_RECEIVER_FALLBACK_GENERATED_GEOMETRY:
 		return "generatedSkinned";
+	case SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM:
+		return "interactionProgram";
 	default:
 		return "none";
 	}
@@ -6900,7 +6903,10 @@ static void RB_ShadowMapStatsReport( void ) {
 	const int receiverFallbackInvalid = g_shadowMapStats.receiverFallbackSurfaces[SHADOWMAP_RECEIVER_FALLBACK_INVALID_SURFACE];
 	const int receiverFallbackCustomGLSL = g_shadowMapStats.receiverFallbackSurfaces[SHADOWMAP_RECEIVER_FALLBACK_CUSTOM_GLSL];
 	const int receiverFallbackGenerated = g_shadowMapStats.receiverFallbackSurfaces[SHADOWMAP_RECEIVER_FALLBACK_GENERATED_GEOMETRY];
-	const int receiverFallbackSurfaces = receiverFallbackInvalid + receiverFallbackCustomGLSL + receiverFallbackGenerated;
+	// OPENPREY: Prey's per-light ARB programs count in the total; the line keeps
+	// the reasons upstream's report readers know.
+	const int receiverFallbackSurfaces = receiverFallbackInvalid + receiverFallbackCustomGLSL + receiverFallbackGenerated
+		+ g_shadowMapStats.receiverFallbackSurfaces[SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM];
 
 	idStr unsupportedSummary;
 	for ( int i = 0; i < SHADOWMAP_SUPPORT_COUNT; i++ ) {
@@ -9718,6 +9724,8 @@ static float RB_ShadowMapReceiverDebugReasonValue( const drawSurf_t *surf, const
 		return 3.0f;
 	case SHADOWMAP_RECEIVER_FALLBACK_GENERATED_GEOMETRY:
 		return 4.0f;
+	case SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM:
+		return 3.0f;	// drawn as the other authored-lighting receivers are
 	default:
 		return 2.0f;
 	}
@@ -10174,6 +10182,15 @@ static shadowMapReceiverFallbackReason_t RB_SurfaceShadowMapReceiverFallbackReas
 	}
 	if ( RB_SurfaceHasActiveCustomGLSLLighting( surf ) && !RB_SurfaceUsesWrappedCustomGLSLShadowReceiver( surf ) ) {
 		return SHADOWMAP_RECEIVER_FALLBACK_CUSTOM_GLSL;
+	}
+	// OPENPREY: a Prey per-light ARB program (skin, cloth, hair, parallax,
+	// masked interaction) has no shadow-map sampler, and the stock receiver
+	// cannot draw its stage. Sending such a surface through the stock receiver
+	// with that stage filtered out left it unlit by every mapped light: black
+	// characters and organic walls at Shader Detail above Low. It keeps its own
+	// program and the light's stencil volumes instead.
+	if ( surf->material->HasActiveInteractionProgramStage( surf->shaderRegisters ) ) {
+		return SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM;
 	}
 	if ( RB_SurfaceUsesGPUPosedGeometry( surf ) ) {
 		return SHADOWMAP_RECEIVER_FALLBACK_GENERATED_GEOMETRY;
@@ -12511,9 +12528,15 @@ static void RB_ShadowMapDrawReceiverFallbacks( const viewLight_t *vLight, const 
 	// Fallback receivers are shadowed by the light's stencil volumes even on
 	// mapped frames. If the front end elided those volumes, restore them from
 	// the next frame on so these receivers do not stay unshadowed.
-	if ( primaryShadowSurfs == NULL && secondaryShadowSurfs == NULL ) {
-		RB_ShadowMapMarkStencilFallbackSticky( vLight );
-	}
+	//
+	// OPENPREY: and keep asking while such a receiver is lit. Asked only when
+	// the volumes were already missing, the light counted every view that had
+	// them as a clean one, left the fallback after
+	// r_shadowMapStencilFallbackViews, drew these receivers unshadowed for a
+	// frame and built its volumes again: a shadow that blinked every 240 views
+	// on each character and organic wall, which here are the common receivers
+	// of this kind rather than the rare one.
+	RB_ShadowMapMarkStencilFallbackSticky( vLight );
 
 	if ( passKind == SHADOWMAP_PASS_LOCAL ) {
 		g_shadowMapStats.receiverFallbackLocalPasses++;

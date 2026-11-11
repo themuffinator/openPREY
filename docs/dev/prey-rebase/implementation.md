@@ -649,7 +649,10 @@ Items: RD-05, RD-09.
   param 7; polygon-offset move into `RB_CreateSingleDrawInteractions` (verify against
   upstream's current shape); `r_useFragmentProgramMaterials` cvar. MUST-CHECK list
   from ledger: shadow-map receiver paths honor or skip SL_INTERACTION stages
-  coherently; Apple GL2.1 simple-interaction path ignores them gracefully; ModernGL
+  coherently (a surface with an active SL_INTERACTION stage is a receiver
+  fallback, `SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM`: its own ARB
+  program under the light's stencil volumes, not the stock receiver with the
+  stage filtered out, which left it unlit); Apple GL2.1 simple-interaction path ignores them gracefully; ModernGL
   executor either skips (with one-time warning) or is gated off for materials using
   them (legacy-path-first per D2).
 - RD-09 glow overlay: re-sequence `RB_STD_DrawGlowView`/`RB_STD_GlowOverlay` against

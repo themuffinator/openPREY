@@ -161,6 +161,16 @@ supplies the exponent and brightness through fragment environment parameter 2;
 the specular colour and the `× 2` on the specular map are unchanged, so the
 two models differ only in the falloff term.
 
+Retail applies that `× 2` in the fragment program (`ADD R2, R2, R2`) and passes
+the bare specular colour in environment parameter 1. This engine passes the
+colour already doubled (`RB_ARB2_DrawInteraction`, inherited from openQ4, whose
+Quake 4 program does not double), so openPREY's `interaction.vfp` does not
+double the map again. Until 11 November 2026 it did, and the stock OpenGL path
+drew specular at twice the brightness of every other path: the Vulkan
+interaction, the GLSL material interaction and the shadow-map receivers all
+apply the factor once. That is what made a shadow-mapped light look dimmer
+than the same light under stencil shadows.
+
 openPREY renders this on every backend. `R_InteractionSpecularParms`
 (`tr_local.h`) packs the specular stage's exponent and brightness with the two
 cvars, and each stock interaction path consumes the same four values:

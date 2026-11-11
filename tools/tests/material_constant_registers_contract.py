@@ -25,11 +25,19 @@ ROOT = Path(__file__).resolve().parents[2]
 # Terms whose value can change after the material is parsed. Each clears the flag.
 PREDEFINED_TERMS = {
     "time": "EXP_REG_TIME",
-    **{f"parm{i}": f"EXP_REG_PARM{i}" for i in range(12)},
+    **{f"parm{i}": f"EXP_REG_PARM{i}" for i in range(13)},  # openPREY: Prey adds parm12
     "DecalLife": "EXP_REG_PARM4",
     "DecalSpawn": "EXP_REG_PARM5",
     "VertexRandomizer": "EXP_REG_VERTEX_RANDOM",
     **{f"global{i}": f"EXP_REG_GLOBAL{i}" for i in range(8)},
+    # openPREY: Prey's view registers, set per view by the game, and
+    # fragmentPrograms, which Prey reads from a register each evaluation where
+    # openQ4 folds it to a literal while parsing.
+    "distance": "EXP_REG_PARM12",
+    "fragmentPrograms": "EXP_REG_FRAGMENT_PROGRAMS",
+    "scopeView": "EXP_REG_SCOPE_VIEW",
+    "spiritWalk": "EXP_REG_SPIRIT_WALK",
+    "shuttleView": "EXP_REG_SHUTTLE_VIEW",
 }
 RUNTIME_OP_TERMS = {
     "sound": "OP_TYPE_SOUND",
@@ -41,7 +49,7 @@ VARYING_TERMS = set(PREDEFINED_TERMS) | set(RUNTIME_OP_TERMS)
 # copies the same literal, so the constant block is exactly as fresh as an
 # evaluation; a video mode or session change reaches neither without a reparse.
 PARSE_TIME_TERMS = {
-    "fragmentPrograms", "POTCorrectionX", "POTCorrectionY",
+    "POTCorrectionX", "POTCorrectionY",
     "VideoWidth", "VideoHeight", "IsMultiplayer",
 }
 
@@ -168,7 +176,13 @@ def validate_initialisation(material: str) -> None:
 
 def validate_terms(material: str, header: str) -> None:
     body = function_body(material, "int idMaterial::ParseTerm( idLexer &src )", "Material.cpp")
-    blocks = re.findall(r'if \( !token\.Icmp\( "(\w+)" \) \) \{(.*?)\n\t\}', body, re.S)
+    # openPREY: a term may name aliases in one condition ("parm12" || "distance")
+    blocks = [
+        (name, block)
+        for condition, block in re.findall(
+            r'if \( (!token\.Icmp\( "\w+" \)(?: \|\| !token\.Icmp\( "\w+" \))*) \) \{(.*?)\n\t\}', body, re.S)
+        for name in re.findall(r'"(\w+)"', condition)
+    ]
     names = [name for name, _ in blocks]
     if len(names) != len(set(names)):
         raise AssertionError("ParseTerm names a term twice")
@@ -238,7 +252,26 @@ def validate_terms(material: str, header: str) -> None:
     ):
         remainder = remainder.replace(function_body(material, signature, "Material.cpp"), "")
     remainder = remainder.replace(colored.group(1), "")
-    stray = sorted(set(re.findall(r"\bEXP_REG_(?!NUM_PREDEFINED\b)\w+", remainder)))
+
+    # openPREY: Prey's view stage keywords read the view registers without an
+    # expression, as "colored" reads the entity colour, and clear the flag too
+    view = re.search(
+        r'if \( !token\.Icmp\( "scopeView" \) \|\| !token\.Icmp\( "notScopeView" \) \|\|(.*?)\n\t\t\}', stage, re.S)
+    if view is None:
+        raise AssertionError("missing Prey's view stage keywords")
+    require_order(
+        view.group(1),
+        (
+            "viewRegister = EXP_REG_SCOPE_VIEW;",
+            "viewRegister = EXP_REG_SPIRIT_WALK;",
+            "viewRegister = EXP_REG_SHUTTLE_VIEW;",
+            "pd->registersAreConstant = false;",
+            "ss->conditionRegister = EmitOp( ss->conditionRegister, viewRegister, OP_TYPE_AND );",
+        ),
+        "a view stage keyword clears the flag before it conditions the stage",
+    )
+    remainder = remainder.replace(view.group(1), "")
+    stray =sorted(set(re.findall(r"\bEXP_REG_(?!NUM_PREDEFINED\b)\w+", remainder)))
     if stray:
         raise AssertionError(f"predefined registers used outside the classified terms: {stray}")
 
@@ -276,8 +309,9 @@ def validate_operations(material: str, header: str) -> None:
     for line in cases[0].splitlines():
         if ("view->" in line or "shaderParms[" in line) and not re.match(r"\s*registers\[EXP_REG_\w+\] = ", line):
             raise AssertionError(f"EvaluateRegisters reads the view or the entity outside a predefined register: {line.strip()}")
-    if evaluate.count("view->") != 9 or len(re.findall(r"= shaderParms\[", evaluate)) != 13:
-        raise AssertionError("EvaluateRegisters seeds the time, eight globals, twelve parms and the vertex randomizer")
+    # openPREY: thirteen parms (Prey adds parm12)
+    if evaluate.count("view->") != 9 or len(re.findall(r"= shaderParms\[", evaluate)) != 14:
+        raise AssertionError("EvaluateRegisters seeds the time, eight globals, thirteen parms and the vertex randomizer")
 
 
 def validate_switch_and_consumers(material: str) -> None:
