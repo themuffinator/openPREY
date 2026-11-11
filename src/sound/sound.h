@@ -656,6 +656,13 @@ public:
 	virtual void			ResetVoiceChat() = 0;
 	virtual int				GetVoiceTalker() const = 0;
 	virtual float			GetVoiceLevel() const = 0;
+
+	// Map-load music. Plays a streamed shader on a source and thread of its own,
+	// so a blocking level load cannot starve it. False when the shader is not a
+	// streamed track; the caller then plays it in the menu sound world, where a
+	// resident sample loops in OpenAL without main-thread service anyway.
+	virtual bool			StartLoadingMusic( const char* shaderName ) = 0;
+	virtual void			StopLoadingMusic() = 0;
 };
 
 extern idSoundSystem*	soundSystem;

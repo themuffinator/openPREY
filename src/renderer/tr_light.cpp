@@ -965,6 +965,25 @@ viewLight_t *R_SetLightDefViewLight( idRenderLightLocal *light ) {
 	}
 	light->viewCount = tr.viewCount;
 
+	// A light whose map failed builds its stencil volumes again so that it has
+	// a fallback. It still tries its map in every view, and once it has been
+	// through enough views with nothing asking for the fallback (a failed pass
+	// in either renderer, or a caster its map cannot hold) it stops building
+	// them. Kept for good, one bad frame cost the light its volume elision for
+	// the rest of the level. Decided here, before any of the light's
+	// interactions are looked at for this view, so that a view never has some
+	// volumes and not others.
+	if ( light->shadowMapStencilFallbackSticky ) {
+		const int holdViews = r_shadowMapStencilFallbackViews.GetInteger();
+		if ( holdViews > 0
+				&& ++light->shadowMapStencilFallbackCleanViews > holdViews ) {
+			light->shadowMapStencilFallbackSticky = false;
+			light->shadowMapStencilFallbackCleanViews = 0;
+			common->DPrintf( "shadow map light %d left the stencil fallback after %d views without a failure\n",
+				light->index, holdViews );
+		}
+	}
+
 	// add to the view light chain
 	vLight = (viewLight_t *)R_ClearedFrameAlloc( sizeof( *vLight ) );
 	vLight->lightDef = light;
@@ -2442,6 +2461,9 @@ idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def, bool collision
 
 	// if we don't have a snapshot of the dynamic model, generate it now
 	if ( !def->dynamicModel ) {
+		// A snapshot that replaces an earlier one is a model changing. The
+		// first one is only the model being looked at for the first time.
+		const bool replacesSnapshot = def->cachedDynamicModel != NULL;
 
 		// instantiate the snapshot of the dynamic model, possibly reusing memory from the cached snapshot
 		def->cachedDynamicModel = model->InstantiateDynamicModel( &def->parms, tr.viewDef, def->cachedDynamicModel,
@@ -2471,6 +2493,9 @@ idRenderModel *R_EntityDefDynamicModel( idRenderEntityLocal *def, bool collision
 
 		def->dynamicModel = def->cachedDynamicModel;
 		def->dynamicModelFrameCount = tr.frameCount;
+		if ( replacesSnapshot ) {
+			def->dynamicModelRegenFrame = tr.frameCount;
+		}
 
 		// record the joint-content hash this snapshot was built from so a later
 		// transform-only UpdateEntityDef can prove the snapshot is still valid
@@ -2758,6 +2783,8 @@ static bool R_ShouldUseExpandedDeformScissor( const idMaterial *shader ) {
 		case DFRM_RECTSPRITE:
 		case DFRM_TUBE:
 		case DFRM_FLARE:
+		case DFRM_BEAM:
+		case DFRM_JITTER:
 			return true;
 		default:
 			return false;

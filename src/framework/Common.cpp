@@ -157,8 +157,8 @@ idCVar com_productionMode("com_productionMode", "0", CVAR_SYSTEM | CVAR_BOOL, "0
 idCVar gui_filter_pb( "gui_filter_pb", "0", CVAR_ARCHIVE | CVAR_SYSTEM | CVAR_BOOL, "filter PunkBuster-protected servers in browser" );
 idCVar g_subtitles( "g_subtitles", "1", CVAR_ARCHIVE | CVAR_GAME | CVAR_BOOL, "enable subtitle display" );
 idCVar com_profanity( "com_profanity", "0", CVAR_ARCHIVE | CVAR_SYSTEM | CVAR_BOOL, "0 censors profanity; 1 plays and displays uncensored dialogue" );
-idCVar r_correctspecular( "r_correctspecular", "1", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_BOOL, "toggle corrected specular calculations" );
-idCVar r_normalizebumpmap( "r_normalizebumpmap", "0", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_BOOL, "toggle bump-map normalization" );
+// r_correctspecular and r_normalizebumpmap drive the renderer's stock
+// interaction and are registered there (ClassicInteractionDomain.cpp).
 idCVar r_lowParticleDetail( "r_lowParticleDetail", "0", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_BOOL, "reduce particle quality when non-zero" );
 idCVar s_musicvolume_dB( "s_musicvolume_dB", "-6", CVAR_ARCHIVE | CVAR_SOUND | CVAR_FLOAT, "music volume in decibels", -60.0f, 0.0f );
 idCVar s_reverse( "s_reverse", "0", CVAR_ARCHIVE | CVAR_SOUND | CVAR_BOOL, "reverse stereo channels" );
@@ -3539,6 +3539,86 @@ static bool Common_ApplyPerformancePreset( const openQ4PerformancePreset_t &pres
 	return applied;
 }
 
+/*
+===============
+Common_ApplyPreyPerformancePresetExtras
+
+OPENPREY: Prey's own quality cvars follow the chosen preset too. They stay out
+of the shared preset table, whose 55 keys the upstream settings catalog and its
+tests pin, and are set only on a player's choice: the console and menu
+commands, execMachineSpec and a first launch's detection. Self-tests and the
+first-launch bootstrap, which back up and restore the shared table, apply that
+table alone.
+
+r_shaderLevel picks each material's shaderLevelN/shaderFallbackN stages (skin,
+cloth, liquid and organic-wall programs). Retail chose it from the video card;
+every device above the two shadowless recipes runs the highest level.
+
+r_shadowMapPointLights is forced on for every recipe: see the note where it is
+set.
+===============
+*/
+struct openPreyPresetExtras_t {
+	const char *preset;
+	int shaderLevel;
+	int skipGlowOverlay;
+	int correctSpecular;
+	int normalizeBumpmap;
+	int fastSkinning;
+};
+
+static const openPreyPresetExtras_t OPENPREY_PRESET_EXTRAS[] = {
+	{ "minimum",	0, 1, 0, 0, 1 },
+	{ "lowpower",	1, 1, 0, 0, 1 },
+	{ "low",		2, 0, 1, 1, 0 },
+};
+// Performance and every recipe above it.
+static const openPreyPresetExtras_t OPENPREY_PRESET_EXTRAS_FULL = { "", 3, 0, 1, 1, 0 };
+
+static void Common_SetPreyPresetExtra( const char *name, int value, int defaultValue, bool firstLaunch ) {
+	idCVar *cvar = cvarSystem->Find( name );
+	if ( cvar == NULL ) {
+		return;		// a dedicated server registers no renderer cvars
+	}
+	// As for the shared table, a value from autoexec or the launch options wins
+	// on a first launch. Each of these cvars defaults to the full recipe's value.
+	if ( firstLaunch && ( Common_HasStartupVariable( name ) || cvar->GetInteger() != defaultValue ) ) {
+		return;
+	}
+	cvar->SetInteger( value );
+}
+
+static void Common_ApplyPreyPerformancePresetExtras( const char *presetName, bool firstLaunch = false ) {
+	const openPreyPresetExtras_t &full = OPENPREY_PRESET_EXTRAS_FULL;
+	const openPreyPresetExtras_t *extras = &full;
+	for ( int i = 0; i < (int)( sizeof( OPENPREY_PRESET_EXTRAS ) / sizeof( OPENPREY_PRESET_EXTRAS[0] ) ); ++i ) {
+		if ( presetName != NULL && idStr::Icmp( presetName, OPENPREY_PRESET_EXTRAS[i].preset ) == 0 ) {
+			extras = &OPENPREY_PRESET_EXTRAS[i];
+			break;
+		}
+	}
+	Common_SetPreyPresetExtra( "r_skipNewAmbient", 0, 0, firstLaunch );
+	Common_SetPreyPresetExtra( "r_shaderLevel", extras->shaderLevel, full.shaderLevel, firstLaunch );
+	Common_SetPreyPresetExtra( "r_skipGlowOverlay", extras->skipGlowOverlay, full.skipGlowOverlay, firstLaunch );
+	Common_SetPreyPresetExtra( "r_correctspecular", extras->correctSpecular, full.correctSpecular, firstLaunch );
+	Common_SetPreyPresetExtra( "r_normalizebumpmap", extras->normalizeBumpmap, full.normalizeBumpmap, firstLaunch );
+	Common_SetPreyPresetExtra( "r_useFastSkinning", extras->fastSkinning, full.fastSkinning, firstLaunch );
+
+	// Shadow maps mean point lights here. The shared table's Enhanced recipe
+	// leaves them on stencil volumes, which suits Quake 4's forty-light halls;
+	// in Prey all 602 lights of feedingtowerb are point lights (four of them
+	// parallel), so that recipe turned shadow maps on and mapped nothing. The
+	// recipes below Enhanced keep r_useShadowMap 0 and are unaffected. This one
+	// is set by the table itself, so only a launch option counts as the
+	// player's own value on a first launch.
+	if ( !firstLaunch || !Common_HasStartupVariable( "r_shadowMapPointLights" ) ) {
+		idCVar *pointLights = cvarSystem->Find( "r_shadowMapPointLights" );
+		if ( pointLights != NULL ) {
+			pointLights->SetBool( true );
+		}
+	}
+}
+
 // Retain the stock console command, but never revive its separate resolution,
 // texture, vsync and obsolete card-specific recipes.
 void Com_ExecMachineSpec_f( const idCmdArgs &args ) {
@@ -3547,7 +3627,9 @@ void Com_ExecMachineSpec_f( const idCmdArgs &args ) {
   common->Printf("execMachineSpec requires no arguments and com_machineSpec 0..3. Settings were preserved.\n");
   return;
  }
- Common_ApplyPerformancePreset(*preset);
+ if ( Common_ApplyPerformancePreset(*preset) ) {
+  Common_ApplyPreyPerformancePresetExtras( preset->name );	// OPENPREY
+ }
 }
 
 static int Common_SanitizePerformancePresetMemoryMB( int rawMegabytes, int fallbackMegabytes, int maxReasonableMegabytes ) {
@@ -3660,7 +3742,11 @@ static bool Common_ApplyPerformancePresetCommand( const idCmdArgs &args, bool qu
 		preset = defaultPreset;
 	}
 
-	return Common_ApplyPerformancePreset( *preset, quiet );
+	const bool applied = Common_ApplyPerformancePreset( *preset, quiet );
+	if ( applied && !quiet ) {
+		Common_ApplyPreyPerformancePresetExtras( preset->name );	// OPENPREY
+	}
+	return applied;
 }
 
 static void Com_ApplyPerformancePreset_f( const idCmdArgs &args ) {
@@ -3686,7 +3772,11 @@ static bool Common_AutoDetectPerformancePresetCommand( const idCmdArgs &args, bo
 	if ( !quiet ) {
 		common->Printf( "Auto-detected performance preset '%s' (%s).\n", preset.name, reason.c_str() );
 	}
-	return Common_ApplyPerformancePreset( preset, quiet );
+	const bool applied = Common_ApplyPerformancePreset( preset, quiet );
+	if ( applied && !quiet ) {
+		Common_ApplyPreyPerformancePresetExtras( preset.name );	// OPENPREY
+	}
+	return applied;
 }
 
 static void Com_AutoDetectPerformancePreset_f( const idCmdArgs &args ) {
@@ -3757,6 +3847,7 @@ static bool Common_ApplyStartupPerformancePreset(
 		Common_RestorePerformancePresetModifiedFlags( modifiedFlags );
 		return false;
 	}
+	Common_ApplyPreyPerformancePresetExtras( preset->name, true );	// OPENPREY
 	// The bootstrap ran before a device existed; record what the device reported.
 	if ( detectedVideoRamMB > 0 ) com_videoRam.SetInteger( detectedVideoRamMB );
 	common->Printf( "First-launch performance preset '%s'%s%s; preserving configured overrides.\n",

@@ -907,8 +907,11 @@ name contains GetName() upon entry
 	if ( downsizeSignature != 0 ) {
 		_name += va( "d%08x", downsizeSignature );
 	}
-	if ( flags != 0 ) {
-		_name += va( "f%08x", flags );
+	// IMAGEFLAG_HIGHRES only changes the size, which the downsize signature
+	// already carries, so it never renames an otherwise identical cache file
+	const unsigned int cacheFlags = flags & ~IMAGEFLAG_HIGHRES;
+	if ( cacheFlags != 0 ) {
+		_name += va( "f%08x", cacheFlags );
 	}
 	if ( extension.Length() > 0 ) {
 		_name.SetFileExtension( extension );

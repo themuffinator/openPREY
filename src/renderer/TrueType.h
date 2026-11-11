@@ -88,9 +88,10 @@ public:
 
 	bool				GetGlyphMetrics( int glyphIndex, ttGlyphMetrics_t &metrics ) const;
 
-	// Rasterises at 'scale' font-units-to-pixels.  The caller owns
+	// Rasterises at 'scale' font-units-to-pixels, with the outline stretched
+	// vertically about the baseline by 'verticalScale'.  The caller owns
 	// bitmap.pixels and must release it with FreeGlyphBitmap().
-	bool				RasterizeGlyph( int glyphIndex, float scale, ttGlyphBitmap_t &bitmap ) const;
+	bool				RasterizeGlyph( int glyphIndex, float scale, ttGlyphBitmap_t &bitmap, float verticalScale = 1.0f ) const;
 	static void			FreeGlyphBitmap( ttGlyphBitmap_t &bitmap );
 
 	// Scale that maps this font's em square onto the given pixel height.

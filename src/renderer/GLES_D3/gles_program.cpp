@@ -288,6 +288,7 @@ static void GLESD3_ResolveUniforms( glesProgram_t *program ) {
 	program->uSpecularMatrixT = glGetUniformLocation( program->program, "uSpecularMatrixT" );
 	program->uDiffuseColor = glGetUniformLocation( program->program, "uDiffuseColor" );
 	program->uSpecularColor = glGetUniformLocation( program->program, "uSpecularColor" );
+	program->uSpecularParams = glGetUniformLocation( program->program, "uSpecularParams" );
 	program->uAmbientDir = glGetUniformLocation( program->program, "uAmbientDir" );
 	program->uLightOrigin = glGetUniformLocation( program->program, "uLightOrigin" );
 
@@ -360,7 +361,7 @@ static bool GLESD3_BuildProgram( glesD3ProgramId_t id, glesD3ProgramVariant_t va
 	program->uLightFalloffS = program->uBumpMatrixS = program->uBumpMatrixT = -1;
 	program->uDiffuseMatrixS = program->uDiffuseMatrixT = -1;
 	program->uSpecularMatrixS = program->uSpecularMatrixT = -1;
-	program->uDiffuseColor = program->uSpecularColor = -1;
+	program->uDiffuseColor = program->uSpecularColor = program->uSpecularParams = -1;
 	program->uAmbientDir = program->uLightOrigin = -1;
 	program->uFogDistanceS = program->uFogEnterS = program->uFogEnterT = -1;
 	program->uCubeMap = -1;

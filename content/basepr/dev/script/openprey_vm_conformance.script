@@ -1,0 +1,436 @@
+/***********************************************************************
+
+openprey_vm_conformance.script
+
+Development fixture for tools/tests/script_vm_conformance.py. The runner
+copies it over maps/<map>.script inside an isolated fs_savepath, so WorldSpawn
+compiles it after the retail program and starts the global main().
+
+Retail Prey ran its script VM on 32-bit x86. openPREY widens the VM's scalar
+slots to pointer size on 64-bit, so every place where the interpreter, the
+compiler and the event system agree on a size or offset is a parity risk:
+function parameters after a vector, stack locals, vector components, object
+fields, thread arguments and event marshaling. Each check below compares a
+result against the value the 32-bit VM produces for the same code.
+
+Output lines (read by the runner):
+	VMTEST PASS <name>
+	VMTEST FAIL <name> got '<value>' expected '<value>'
+	VMTEST DONE pass=<n> fail=<n>
+
+***********************************************************************/
+
+float	openprey_vm_pass;
+float	openprey_vm_fail;
+float	openprey_vm_gFloat = 2.5;
+vector	openprey_vm_gVector = '1 2 3';
+string	openprey_vm_gString = "global";
+float	openprey_vm_gAfterVector = 7;
+float	openprey_vm_threadResult;
+vector	openprey_vm_threadVector;
+string	openprey_vm_threadString;
+
+object openprey_vm_base {
+	float	f;
+	vector	v;
+	string	s;
+	entity	e;
+	float	tail;
+
+	void	init();
+	float	describe( float a, vector b );
+	float	fieldSum();
+};
+
+object openprey_vm_obj : openprey_vm_base {
+	vector	v2;
+	float	f2;
+
+	float	describe( float a, vector b );
+	float	mixed( vector a, float b, string c, entity d, vector e2, float f3 );
+};
+
+void openprey_vm_base::init() {
+	f = 11;
+	v = '4 5 6';
+	s = "field";
+	tail = 13;
+}
+
+float openprey_vm_base::describe( float a, vector b ) {
+	return 1;
+}
+
+float openprey_vm_base::fieldSum() {
+	return f + v_x + v_y + v_z + tail;
+}
+
+float openprey_vm_obj::describe( float a, vector b ) {
+	return a + b_x + b_y + b_z + 100;
+}
+
+float openprey_vm_obj::mixed( vector a, float b, string c, entity d, vector e2, float f3 ) {
+	if ( c != "vmObj" ) {
+		return -1;
+	}
+	if ( d != self ) {
+		return -2;
+	}
+	return a_x + a_y + a_z + b + e2_x + e2_y + e2_z + f3;
+}
+
+namespace openprey_vm {
+
+	void check( string name, float got, float expected ) {
+		if ( got == expected ) {
+			openprey_vm_pass++;
+			sys.println( "VMTEST PASS " + name );
+		} else {
+			openprey_vm_fail++;
+			sys.println( "VMTEST FAIL " + name + " got '" + got + "' expected '" + expected + "'" );
+		}
+	}
+
+	void checkNear( string name, float got, float expected ) {
+		float diff = got - expected;
+		if ( diff < 0 ) {
+			diff = -diff;
+		}
+		if ( diff < 0.001 ) {
+			openprey_vm_pass++;
+			sys.println( "VMTEST PASS " + name );
+		} else {
+			openprey_vm_fail++;
+			sys.println( "VMTEST FAIL " + name + " got '" + got + "' expected '" + expected + "'" );
+		}
+	}
+
+	void checkVec( string name, vector got, vector expected ) {
+		if ( got == expected ) {
+			openprey_vm_pass++;
+			sys.println( "VMTEST PASS " + name );
+		} else {
+			openprey_vm_fail++;
+			sys.println( "VMTEST FAIL " + name + " got '" + got + "' expected '" + expected + "'" );
+		}
+	}
+
+	void checkStr( string name, string got, string expected ) {
+		if ( got == expected ) {
+			openprey_vm_pass++;
+			sys.println( "VMTEST PASS " + name );
+		} else {
+			openprey_vm_fail++;
+			sys.println( "VMTEST FAIL " + name + " got '" + got + "' expected '" + expected + "'" );
+		}
+	}
+
+	void checkEnt( string name, entity got, entity expected ) {
+		if ( got == expected ) {
+			openprey_vm_pass++;
+			sys.println( "VMTEST PASS " + name );
+		} else {
+			openprey_vm_fail++;
+			sys.println( "VMTEST FAIL " + name + " got '" + got.getName() + "' expected '" + expected.getName() + "'" );
+		}
+	}
+
+	// ---- function parameters: every order of scalar, vector, string, entity ----
+
+	float parmsFV( float a, vector b ) {
+		return a * 1000 + b_x * 100 + b_y * 10 + b_z;
+	}
+
+	float parmsVF( vector a, float b ) {
+		return a_x * 1000 + a_y * 100 + a_z * 10 + b;
+	}
+
+	float parmsVVF( vector a, vector b, float c ) {
+		return ( a * b ) + c;
+	}
+
+	float parmsSVF( string a, vector b, float c ) {
+		if ( a != "abc" ) {
+			return -1;
+		}
+		return b_x + b_y + b_z + c;
+	}
+
+	float parmsVSE( vector a, string b, entity c ) {
+		if ( b != "mid" ) {
+			return -1;
+		}
+		if ( c != sys.getEntity( "player1" ) ) {
+			return -2;
+		}
+		return a_x + a_y + a_z;
+	}
+
+	float parmsEVF( entity a, vector b, float c ) {
+		if ( a != sys.getEntity( "player1" ) ) {
+			return -2;
+		}
+		return b_z * c;
+	}
+
+	float parmsBVB( boolean a, vector b, boolean c ) {
+		float result = b_x;
+		if ( a ) {
+			result = result + 10;
+		}
+		if ( c ) {
+			result = result + 100;
+		}
+		return result;
+	}
+
+	// eight parameters, the most an event can carry, mixing every slot size
+	float parmsMany( float a, vector b, string c, float d, vector e, entity f, boolean g, float h ) {
+		float result = a + b_x + b_y + b_z + d + e_x + e_y + e_z + h;
+		if ( c != "many" ) {
+			result = result - 1000;
+		}
+		if ( f != sys.getEntity( "player1" ) ) {
+			result = result - 2000;
+		}
+		if ( g ) {
+			result = result + 0.5;
+		}
+		return result;
+	}
+
+	// a vector parameter whose components are written by the callee must not
+	// alias the next parameter
+	float parmsWriteComponents( vector a, float b ) {
+		a_x = 9;
+		a_y = 8;
+		a_z = 7;
+		return b;
+	}
+
+	// ---- return values ----
+
+	vector retVector( float a, float b, float c ) {
+		vector v;
+		v_x = a;
+		v_y = b;
+		v_z = c;
+		return v;
+	}
+
+	string retString( string a, float b ) {
+		return a + b;
+	}
+
+	entity retEntity( string name ) {
+		return sys.getEntity( name );
+	}
+
+	// Retail compiler quirk, kept for parity: ParseReturnStatement looks up the
+	// "=" conversion with source and destination swapped, so returning a float
+	// expression from a boolean function emits STORE_BOOLTOF instead of
+	// STORE_FTOBOOL. The 32-bit VM returns the same bit pattern (1.0f read as an
+	// int, converted back to float), so truthiness is preserved but the value is
+	// not 1. Retail scripts only test such results for truth.
+	boolean retBool( float a ) {
+		return a > 1;
+	}
+
+	boolean retBoolDirect( boolean a ) {
+		return a;
+	}
+
+	float retFromNested( vector a, float b ) {
+		return parmsVF( retVector( a_x, a_y, a_z ), b + parmsFV( 0, '0 0 1' ) );
+	}
+
+	float recurse( float depth, vector carry, string tag ) {
+		vector local = carry + '1 1 1';
+		string localTag = tag;
+		if ( depth <= 0 ) {
+			if ( localTag != "deep" ) {
+				return -1;
+			}
+			return local_x + local_y + local_z;
+		}
+		return recurse( depth - 1, local, localTag );
+	}
+
+	// ---- stack locals ----
+
+	float localsMixed() {
+		float a = 1;
+		vector b = '2 3 4';
+		float c = 5;
+		string d = "six";
+		vector e = '7 8 9';
+		float f = 10;
+		entity g = sys.getEntity( "player1" );
+		boolean h = true;
+		float i = 12;
+
+		b_y = 30;
+		e_z = 90;
+		if ( d != "six" || !h || g == $null_entity ) {
+			return -1;
+		}
+		return a + b_x + b_y + b_z + c + e_x + e_y + e_z + f + i;
+	}
+
+	// ---- threads ----
+
+	void threadBody( vector a, float b, string c, entity d ) {
+		openprey_vm_threadVector = a;
+		openprey_vm_threadString = c;
+		if ( d == sys.getEntity( "player1" ) ) {
+			openprey_vm_threadResult = b;
+		} else {
+			openprey_vm_threadResult = -1;
+		}
+	}
+
+	void threadWaitBody( vector a, float b ) {
+		vector keep = a;
+		float keepB = b;
+		sys.wait( 0.05 );
+		openprey_vm_threadVector = keep;
+		openprey_vm_threadResult = keepB;
+	}
+
+	// ---- the run ----
+
+	void run() {
+		entity vmPlayer;
+		entity vmEnt;
+		openprey_vm_obj vmObj;
+		openprey_vm_base vmBase;
+		vector v;
+		float f;
+		string s;
+
+		sys.waitFrame();
+		vmPlayer = sys.getEntity( "player1" );
+		if ( vmPlayer == $null_entity ) {
+			sys.println( "VMTEST FAIL setup got 'no player1' expected 'player1'" );
+			openprey_vm_fail++;
+		}
+
+		// parameters
+		check( "parms.float_vector", parmsFV( 1, '2 3 4' ), 1234 );
+		check( "parms.vector_float", parmsVF( '1 2 3', 4 ), 1234 );
+		check( "parms.vector_vector_float", parmsVVF( '1 2 3', '4 5 6', 0.5 ), 32.5 );
+		check( "parms.string_vector_float", parmsSVF( "abc", '1 2 3', 4 ), 10 );
+		check( "parms.vector_string_entity", parmsVSE( '1 2 3', "mid", vmPlayer ), 6 );
+		check( "parms.entity_vector_float", parmsEVF( vmPlayer, '0 0 3', 4 ), 12 );
+		check( "parms.bool_vector_bool", parmsBVB( true, '1 0 0', true ), 111 );
+		check( "parms.bool_vector_bool_false", parmsBVB( false, '1 0 0', true ), 101 );
+		check( "parms.eight_mixed", parmsMany( 1, '2 3 4', "many", 5, '6 7 8', vmPlayer, true, 9 ), 45.5 );
+		v = '1 2 3';
+		check( "parms.write_vector_components", parmsWriteComponents( v, 42 ), 42 );
+		checkVec( "parms.caller_vector_unchanged", v, '1 2 3' );
+
+		// returns
+		checkVec( "return.vector", retVector( 1, 2, 3 ), '1 2 3' );
+		checkStr( "return.string_float_concat", retString( "x", 1.5 ), "x1.500000" );
+		checkEnt( "return.entity", retEntity( "player1" ), vmPlayer );
+		check( "return.bool_from_float_expr_retail_value", retBool( 2 ), 1316880384 );
+		f = 0;
+		if ( retBool( 2 ) ) {
+			f = 1;
+		}
+		check( "return.bool_from_float_expr_is_true", f, 1 );
+		check( "return.bool_from_float_expr_false", retBool( 0 ), 0 );
+		check( "return.bool_direct_true", retBoolDirect( true ), 1 );
+		check( "return.bool_direct_false", retBoolDirect( false ), 0 );
+		check( "return.nested", retFromNested( '1 2 3', 3 ), 1234 );
+		check( "return.recurse_vector_string", recurse( 20, '0 0 0', "deep" ), 63 );
+
+		// locals and globals
+		check( "locals.mixed", localsMixed(), 1 + 2 + 30 + 4 + 5 + 7 + 8 + 90 + 10 + 12 );
+		check( "globals.float", openprey_vm_gFloat, 2.5 );
+		checkVec( "globals.vector", openprey_vm_gVector, '1 2 3' );
+		check( "globals.vector_component", openprey_vm_gVector_y, 2 );
+		openprey_vm_gVector_z = 30;
+		checkVec( "globals.vector_component_write", openprey_vm_gVector, '1 2 30' );
+		check( "globals.after_vector", openprey_vm_gAfterVector, 7 );
+		checkStr( "globals.string", openprey_vm_gString, "global" );
+
+		// arithmetic and conversion
+		check( "math.vector_dot", '1 2 3' * '4 5 6', 32 );
+		checkVec( "math.vector_scale", '1 2 3' * 2, '2 4 6' );
+		checkVec( "math.vector_add", '1 2 3' + '4 5 6', '5 7 9' );
+		check( "math.modulo", 7 % 3, 1 );
+		check( "math.bitand", 6 & 3, 2 );
+		check( "math.bitor", 4 | 1, 5 );
+		checkStr( "string.float_whole", "n" + 3, "n3" );
+		checkStr( "string.float_negative", "n" + -2.25, "n-2.250000" );
+		checkStr( "string.vector", "v" + '1 2 3', "v1 2 3" );
+
+		// events: sys events with mixed and vector arguments and returns
+		checkNear( "event.sys_vecLength", sys.vecLength( '3 4 0' ), 5 );
+		checkVec( "event.sys_vecNormalize", sys.vecNormalize( '0 0 9' ), '0 0 1' );
+		checkNear( "event.sys_sqrt", sys.sqrt( 16 ), 4 );
+		checkNear( "event.sys_sin", sys.sin( 90 ), 1 );
+		check( "event.sys_strLength", sys.strLength( "abcdef" ), 6 );
+		v = sys.angToForward( '0 90 0' );
+		checkNear( "event.sys_angToForward_y", v_y, 1 );
+		f = sys.trace( '0 0 0', '0 0 0', '0 0 0', '0 0 0', 0, vmPlayer );
+		check( "event.sys_trace_vvvvfe", f, 1 );
+
+		// events on an entity, through a spawned script object
+		sys.setSpawnArg( "scriptobject", "openprey_vm_obj" );
+		sys.setSpawnArg( "origin", "16 32 48" );
+		vmEnt = sys.spawn( "target_null" );
+		sys.waitFrame();
+		checkVec( "event.entity_getOrigin", vmEnt.getOrigin(), '16 32 48' );
+		vmEnt.setOrigin( '1 2 3' );
+		checkVec( "event.entity_setOrigin", vmEnt.getOrigin(), '1 2 3' );
+		vmEnt.setKey( "vmkey", "abc" );
+		checkStr( "event.entity_getKey", vmEnt.getKey( "vmkey" ), "abc" );
+		vmEnt.setFloatKey( "vmfloat", 2.5 );
+		check( "event.entity_setFloatKey", vmEnt.getFloatKey( "vmfloat" ), 2.5 );
+		vmEnt.setKey( "vmvec", "1 2 3" );
+		checkVec( "event.entity_getVectorKey", vmEnt.getVectorKey( "vmvec" ), '1 2 3' );
+
+		// script object fields, virtual calls and object method parameters
+		vmObj = vmEnt;
+		vmBase = vmEnt;
+		check( "object.init_float_field", vmObj.f, 11 );
+		checkVec( "object.init_vector_field", vmObj.v, '4 5 6' );
+		checkStr( "object.init_string_field", vmObj.s, "field" );
+		check( "object.field_after_vector_and_string", vmObj.tail, 13 );
+		vmObj.v2 = '7 8 9';
+		vmObj.f2 = 3;
+		vmObj.e = vmPlayer;
+		checkVec( "object.derived_vector_field", vmObj.v2, '7 8 9' );
+		check( "object.derived_float_field", vmObj.f2, 3 );
+		checkEnt( "object.entity_field", vmObj.e, vmPlayer );
+		vmObj.v_y = 50;
+		checkVec( "object.vector_field_component_write", vmObj.v, '4 50 6' );
+		check( "object.field_sum", vmObj.fieldSum(), 11 + 4 + 50 + 6 + 13 );
+		check( "object.virtual_call_derived", vmBase.describe( 1, '2 3 4' ), 110 );
+		check( "object.method_mixed_parms", vmObj.mixed( '1 2 3', 4, "vmObj", vmEnt, '5 6 7', 8 ), 36 );
+
+		// threads with arguments
+		openprey_vm_threadResult = 0;
+		thread threadBody( '1 2 3', 4, "thr", vmPlayer );
+		sys.waitFrame();
+		check( "thread.float_after_vector", openprey_vm_threadResult, 4 );
+		checkVec( "thread.vector", openprey_vm_threadVector, '1 2 3' );
+		checkStr( "thread.string", openprey_vm_threadString, "thr" );
+
+		openprey_vm_threadResult = 0;
+		thread threadWaitBody( '4 5 6', 7 );
+		sys.wait( 0.2 );
+		check( "thread.locals_survive_wait", openprey_vm_threadResult, 7 );
+		checkVec( "thread.vector_survives_wait", openprey_vm_threadVector, '4 5 6' );
+
+		vmEnt.remove();
+
+		sys.println( "VMTEST DONE pass=" + openprey_vm_pass + " fail=" + openprey_vm_fail );
+	}
+}
+
+void main() {
+	thread openprey_vm::run();
+}

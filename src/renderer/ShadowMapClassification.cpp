@@ -266,7 +266,27 @@ int R_ShadowMapDynamicCasterFramesFor( float frameMsec ) {
 	return Max( SHADOWMAP_DYNAMIC_CASTER_MIN_FRAMES, static_cast<int>( frames ) );
 }
 
+// A moving light is updated once a game tic, so on a fast display it holds
+// still on the frames between tics. Seventy milliseconds bridge two tics at
+// thirty or sixty a second. The casters' quarter second is not used: it would
+// keep a light that has stopped out of the cache that long, drawing its maps
+// afresh every frame meanwhile.
+static const int SHADOWMAP_MOVING_LIGHT_WINDOW_MSEC = 70;
+
+int R_ShadowMapMovingLightFramesFor( float frameMsec ) {
+	if ( !std::isfinite( static_cast<double>( frameMsec ) ) || frameMsec <= 0.0f ) {
+		return SHADOWMAP_DYNAMIC_CASTER_MIN_FRAMES;
+	}
+	const double frames = std::ceil(
+		static_cast<double>( SHADOWMAP_MOVING_LIGHT_WINDOW_MSEC ) / frameMsec ) + 1.0;
+	if ( frames >= static_cast<double>( SHADOWMAP_DYNAMIC_CASTER_MAX_FRAMES ) ) {
+		return SHADOWMAP_DYNAMIC_CASTER_MAX_FRAMES;
+	}
+	return Max( 2, static_cast<int>( frames ) );
+}
+
 // Written once per frame before the front end runs; front-end jobs only read.
+static int shadowMapMovingLightFrames = SHADOWMAP_DYNAMIC_CASTER_MIN_FRAMES;
 static int shadowMapDynamicCasterFrames = SHADOWMAP_DYNAMIC_CASTER_MIN_FRAMES;
 static int shadowMapLastFrameMsec = 0;
 static float shadowMapSmoothedFrameMsec = 0.0f;
@@ -291,6 +311,18 @@ void R_ShadowMapBeginFrame( int nowMsec ) {
 	}
 	shadowMapDynamicCasterFrames =
 		R_ShadowMapDynamicCasterFramesFor( shadowMapSmoothedFrameMsec );
+	shadowMapMovingLightFrames =
+		R_ShadowMapMovingLightFramesFor( shadowMapSmoothedFrameMsec );
+}
+
+bool R_ShadowMapLightIsMoving( const idRenderLightLocal *lightDef, int frame ) {
+	return lightDef != NULL && lightDef->lastMovedFrameNum > 0
+		&& lightDef->lastMovedFrameNum >= frame - shadowMapMovingLightFrames;
+}
+
+bool R_ShadowMapMovingLightSkipsCache( const viewLight_t *vLight, int frame ) {
+	return !r_shadowMapCacheMovingLights.GetBool() && vLight != NULL
+		&& R_ShadowMapLightIsMoving( vLight->lightDef, frame );
 }
 
 int R_ShadowMapDynamicCasterFrames( void ) {
@@ -676,9 +708,9 @@ bool R_ShadowMapCasterOutsidePointFace( const viewLight_t *vLight,
 // is constant when the parser folded it to a literal; one that follows time,
 // an entity parm, a global or a table is written by an expression every view
 // (idMaterial::GetConstantRegisterValue). The material's whole-register
-// constness is not asked: an animated glow stage beside a fixed alpha stage
-// does not move the holes, and idMaterial::ConstantRegisters() is NULL for
-// every material in this engine.
+// constness (idMaterial::ConstantRegisters()) is not asked: an animated glow
+// stage beside a fixed alpha stage does not move the holes, and that answer
+// also follows r_useConstantMaterials.
 static bool R_ShadowMapCutoutStageRegistersConstant( const idMaterial *shader, const shaderStage_t *pStage ) {
 	float value = 0.0f;
 	if ( !shader->GetConstantRegisterValue( pStage->conditionRegister, value )

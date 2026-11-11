@@ -162,7 +162,9 @@ typedef enum {
 	DFRM_EYEBALL,
 	DFRM_PARTICLE,
 	DFRM_PARTICLE2,
-	DFRM_TURB
+	DFRM_TURB,
+	DFRM_BEAM,		// Prey: re-orients a beam mesh about its axis to face the viewer
+	DFRM_JITTER		// Prey: offsets/scales the mesh by bits of an expression
 } deform_t;
 
 typedef enum {
@@ -418,7 +420,16 @@ typedef struct {
 	float				privatePolygonOffset;	// a per-stage polygon offset
 
 	newShaderStage_t* newStage;			// vertex / fragment program based stage
+
+	// Prey's per-stage specular power ("specularExp <exponent>, <brightness>").
+	// Retail's corrected-specular interactions shade specular as
+	// pow( N.H, exponent ) * brightness; every stage defaults to 22, 1.4.
+	float				specularExponent;
+	float				specularBrightness;
 } shaderStage_t;
+
+const float MATERIAL_DEFAULT_SPECULAR_EXPONENT = 22.0f;
+const float MATERIAL_DEFAULT_SPECULAR_BRIGHTNESS = 1.4f;
 
 typedef enum {
 	MC_BAD,
@@ -690,6 +701,12 @@ public:
 	bool				HasActiveCustomGLSLLighting(const float* registers) const;
 	bool				HasActiveStockLightingInteractions(const float* registers) const;
 	bool				CanUseStockShadowMapReceiverForCustomGLSLLighting(const float* registers) const;
+
+	// OPENPREY: whether a stage that passes its condition is one of Prey's
+	// per-light ARB interaction programs (SL_INTERACTION: skin, cloth, hair,
+	// parallax and masked interactions). Only the ARB2 interaction path can
+	// draw such a stage.
+	bool				HasActiveInteractionProgramStage(const float* registers) const;
 
 	// returns true if the material will draw anything at all.  Triggers, portals,
 	// etc, will not have anything to draw.  A not drawn surface can still castShadow,
@@ -1098,6 +1115,7 @@ private:
 	// per-surface interaction and shadow-receiver chain scans early-out without
 	// walking every stage; register conditions are still evaluated when set.
 	bool				hasCustomGLSLLightingStage;
+	bool				hasInteractionProgramStage;	// OPENPREY: any SL_INTERACTION stage
 	int					refCount;
 };
 

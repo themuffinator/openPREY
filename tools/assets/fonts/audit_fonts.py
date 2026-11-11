@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from q4font.charset import byte_to_unicode  # noqa: E402
 from q4font.donor import _record_to_path  # noqa: E402
-from q4font.fontdat import SourceFont, load_source_font  # noqa: E402
+from q4font.fontdat import SourceFont, load_source_font, slot_stretch  # noqa: E402
 from q4font.grid import load_grid_font  # noqa: E402
 from q4font.path import Path2D  # noqa: E402
 from q4font.raster import rasterize  # noqa: E402
@@ -125,8 +125,13 @@ def render_in_atlas_space(face: Face, codepoint: int, source: SourceFont, slot, 
 		return None
 	path, _ = result
 	scale = face.upem / source.point_size
-	# Inverse of the generator's placement: font units -> slot-local pixels.
-	local = path.transformed(1.0 / scale, -1.0 / scale, -slot.bearing_x, slot.bearing_y)
+	# Inverse of the generator's placement: font units -> slot-local pixels,
+	# undoing the stretch the bitmap renderer applies across the image rect.
+	stretch_x, stretch_y = slot_stretch(slot, shape)
+	local = path.transformed(
+		1.0 / (scale * stretch_x), -1.0 / (scale * stretch_y),
+		-slot.bearing_x / stretch_x, slot.bearing_y / stretch_y,
+	)
 	return rasterize(local, shape[1], shape[0])
 
 

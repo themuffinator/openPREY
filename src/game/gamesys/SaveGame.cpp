@@ -79,6 +79,53 @@ static bool SaveGame_IsValidRenderBounds( const idBounds &bounds ) {
 
 /*
 ================
+SaveGame_NativeWireABI
+
+The wire-ABI stamp of this build: <os>-<compiler abi>-<architecture>-<byte
+order>-raw1. Prey's game records still hold native-layout blocks (bitfields,
+script storage, structures written whole), so a payload is only read back by
+the build family that wrote it. The engine session derives the same name for
+itself and compares it during preflight, before the running map is torn down;
+if the two ever disagree on a platform, every save there fails its staged
+validation instead of being written with a stamp nothing can load.
+================
+*/
+static const char *SaveGame_NativeWireABI( void ) {
+	static char stamp[64];
+
+	if ( stamp[0] == '\0' ) {
+#if defined( _WIN32 )
+		const char *platform = "windows-msvcabi";
+#elif defined( __APPLE__ )
+		const char *platform = "macos-itaniumabi";
+#elif defined( __linux__ )
+		const char *platform = "linux-itaniumabi";
+#else
+		const char *platform = "unknownos-unknownabi";
+#endif
+
+#if defined( _M_X64 ) || defined( __x86_64__ )
+		const char *architecture = "x64";
+#elif defined( _M_ARM64 ) || defined( __aarch64__ )
+		const char *architecture = "arm64";
+#elif defined( _M_IX86 ) || defined( __i386__ )
+		const char *architecture = "x86";
+#elif defined( _M_ARM ) || defined( __arm__ )
+		const char *architecture = "arm32";
+#else
+		const char *architecture = "unknownarch";
+#endif
+
+		const int one = 1;
+		const bool littleEndian = *reinterpret_cast<const byte *>( &one ) == 1;
+
+		idStr::snPrintf( stamp, sizeof( stamp ), "%s-%s-%s-raw1", platform, architecture, littleEndian ? "le" : "be" );
+	}
+	return stamp;
+}
+
+/*
+================
 idSaveGame::idSaveGame()
 ================
 */
@@ -913,6 +960,7 @@ void idSaveGame::WriteBuildNumber( const int value ) {
 	WriteInt( value );
 	WriteString( OPENQ4_SAVEGAME_COMPAT_SOURCE_HASH );
 	WriteInt( OPENQ4_SAVEGAME_COMPAT_SOURCE_FILE_COUNT );
+	WriteString( SaveGame_NativeWireABI() );
 }
 
 /*
@@ -1922,6 +1970,16 @@ void idRestoreGame::ReadBuildNumber( void ) {
 			openQ4SaveGameCompatibilityVersion, OPENQ4_SAVEGAME_COMPATIBILITY_VERSION );
 		return;
 	}
+
+	// The version 5 header ends with the wire ABI of the build that wrote it.
+	idStr savedWireABI;
+	ReadString( savedWireABI );
+	if ( savedWireABI.Icmp( SaveGame_NativeWireABI() ) != 0 ) {
+		openQ4SaveGameCompatibilityError = va(
+			"wire ABI %s does not match this build's %s",
+			savedWireABI.c_str(), SaveGame_NativeWireABI() );
+		return;
+	}
 	if ( buildNumber != BUILD_NUMBER ) {
 		openQ4SaveGameCompatibilityError = va(
 			"payload build %d does not match current build %d", buildNumber, BUILD_NUMBER );
@@ -1987,6 +2045,33 @@ void idRestoreGame::ReadSaveGameFooter( void ) {
 	if ( savedSyncCount != openQ4SaveGameNextSyncId ) {
 		Error( "idRestoreGame::ReadSaveGameFooter: saved sync marker count %d does not match restored count %d",
 			savedSyncCount, openQ4SaveGameNextSyncId );
+	}
+
+	// The session appends its integrity trailer directly after the footer and
+	// verifies the checksum during preflight. Here it only has to be the last
+	// thing in the file and to cover everything up to this point.
+	const int integrityOffset = file->Tell();
+	int integrityMarker;
+	int integrityVersion;
+	int protectedLength;
+	int checksum;
+
+	ReadInt( integrityMarker );
+	ReadInt( integrityVersion );
+	ReadInt( protectedLength );
+	ReadInt( checksum );
+
+	if ( integrityMarker != OPENQ4_SAVEGAME_INTEGRITY_MAGIC ) {
+		Error( "idRestoreGame::ReadSaveGameFooter: integrity marker mismatch at offset %d (got 0x%08x, expected 0x%08x)",
+			integrityOffset, integrityMarker, OPENQ4_SAVEGAME_INTEGRITY_MAGIC );
+	}
+	if ( integrityVersion != OPENQ4_SAVEGAME_INTEGRITY_VERSION ) {
+		Error( "idRestoreGame::ReadSaveGameFooter: integrity version %d does not match current version %d",
+			integrityVersion, OPENQ4_SAVEGAME_INTEGRITY_VERSION );
+	}
+	if ( protectedLength != integrityOffset ) {
+		Error( "idRestoreGame::ReadSaveGameFooter: integrity length %d does not match its offset %d",
+			protectedLength, integrityOffset );
 	}
 
 	const int fileLength = file->Length();

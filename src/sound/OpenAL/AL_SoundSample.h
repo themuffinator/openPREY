@@ -178,6 +178,8 @@ public:
 		return payloadReleased || IsStreamed() ? 0 : totalBufferSize;
 	}
 	bool IsStreamed() const { return streamName.Length() > 0; }
+	// The Ogg file a streamed sample decodes from, language variant included.
+	const char*		GetStreamName() const { return streamName.c_str(); }
 	bool			PayloadReleased() const
 	{
 		return payloadReleased;

@@ -12,6 +12,11 @@ uniform float uMaterialNormalScale;
 uniform float uMaterialSpecularBoost;
 uniform float uMaterialFresnel;
 uniform float uStockInteraction;
+// Retail Prey's stock specular model (R_InteractionSpecularParms): x exponent,
+// y brightness from the specular stage's specularExp, z = 1 for
+// r_correctspecular's per-pixel pow( N.H, x ) * y instead of the table ramp,
+// w = 1 for r_normalizebumpmap. Only the stock branch reads it.
+uniform vec4 uStockSpecularParams;
 uniform float uAmbientLight;
 uniform samplerCube uAmbientNormalMap;
 uniform vec4 uCelParams;
@@ -118,7 +123,8 @@ vec3 DecodeLocalNormal( vec4 bumpSample ) {
 }
 
 vec3 DecodeStockLocalNormal( vec4 bumpSample ) {
-	return vec3( bumpSample.a, bumpSample.g, bumpSample.b ) * 2.0 - 1.0;
+	vec3 localNormal = vec3( bumpSample.a, bumpSample.g, bumpSample.b ) * 2.0 - 1.0;
+	return ( uStockSpecularParams.w > 0.5 ) ? SafeNormalize( localNormal ) : localNormal;
 }
 
 float EnhancedSpecularTerm( vec3 halfAngle, vec3 viewDir, vec3 localNormal, vec3 specularSample ) {
@@ -130,7 +136,16 @@ float EnhancedSpecularTerm( vec3 halfAngle, vec3 viewDir, vec3 localNormal, vec3
 	return pow( ndoth, specularPower ) * max( uMaterialSpecularBoost, 0.0 ) * fresnel;
 }
 
-float StockSpecularTerm( vec3 halfAngle, vec3 localNormal ) {
+// The _specularTable ramp, or with r_correctspecular retail's
+// interactionNormBumpH.vfp term, whose half angle is rebuilt per pixel from
+// the light direction and the normalized vector to the viewer. Both keep the
+// stock x2 of the specular map.
+float StockSpecularTerm( vec3 halfAngle, vec3 lightDir, vec3 viewDir, vec3 localNormal ) {
+	if ( uStockSpecularParams.z > 0.5 ) {
+		vec3 correctedHalfAngle = SafeNormalize( lightDir + viewDir );
+		float ndoth = max( clamp( dot( correctedHalfAngle, localNormal ), 0.0, 1.0 ), 1.0e-6 );
+		return pow( ndoth, uStockSpecularParams.x ) * uStockSpecularParams.y * 2.0;
+	}
 	float specular = clamp( dot( halfAngle, localNormal ) * 4.0 - 3.0, 0.0, 1.0 );
 	return specular * specular * 2.0;
 }
@@ -167,7 +182,7 @@ void main() {
 	vec3 halfAngle = SafeNormalize( vHalfAngleVector );
 	vec3 viewDir = SafeNormalize( vViewVector );
 	float specularTerm = ( uStockInteraction > 0.5 )
-		? StockSpecularTerm( halfAngle, localNormal )
+		? StockSpecularTerm( halfAngle, lightDir, viewDir, localNormal )
 		: EnhancedSpecularTerm( halfAngle, viewDir, localNormal, specularSample );
 	vec3 specular = specularSample * uSpecularColor.rgb * CelSpecularTerm( specularTerm );
 

@@ -152,6 +152,8 @@ openPREY-client_x64 +set fs_basepath "C:\path\to\Prey"
 2. Inspect `.home\logs\openprey.log` after each run
 3. Fix warnings and errors in engine/game/parser/loader code before resorting to content-side workarounds
 
+**Useful log cvars:** `s_logSpeech 1` prints each speech start (`SOUND_SPEECH`). `s_logSubtitles 1` prints each change to the Prey sound-shader caption queue (`SOUND_SUBTITLE`). Set `s_muteUnfocused 0` for unattended runs: an unfocused window otherwise plays no sound world, which also clears captions.
+
 **Build automation helpers:**
 
 - `tools/build/meson_setup.ps1` auto-detects and initialises the Visual Studio developer environment
@@ -213,6 +215,8 @@ Use `r_showLightGrid 1` to inspect only the current portal area, `2` to draw val
 
 openPREY's game code is derived from the Prey Software Development Kit and lives in this repository under `src/game/`, `src/Prey/` and `src/preyengine/`. Meson compiles those trees in place against the engine headers in the rest of `src/`. The former `OpenPrey-game` companion repository is historical; its history was merged in with the import (see `docs/dev/game-source-provenance.md`).
 
+Retail map-script compatibility is audited against the retail 32-bit game module in [`docs/dev/retail-script-parity.md`](docs/dev/retail-script-parity.md). It covers the event surface, the 64-bit callback ABI check, the script VM conformance test (`tools/tests/script_vm_conformance.py`), retail quirks kept on purpose, and the remaining known divergences.
+
 The SDK is subject to the original Human Head Studios EULA, which permits non-commercial modification for use with a legitimate copy of Prey, but prohibits commercial exploitation and standalone redistribution of the SDK-derived code. For complete terms, see [`LICENSES/PREY-SDK-EULA.rtf`](LICENSES/PREY-SDK-EULA.rtf) and [`LICENSING.md`](LICENSING.md).
 
 ### Game Library Workflow
@@ -220,6 +224,15 @@ The SDK is subject to the original Human Head Studios EULA, which permits non-co
 - Edit the game library in place under `src/game/`, `src/Prey/` and `src/preyengine/`
 - Keep engine code out of the game trees and game code out of the engine directories; the two sides carry different licences
 - Stage targets: `builddir/basepr/` and `.install/basepr/`
+
+### Script VM on 64-bit
+
+Script stack slots are pointer-sized on 64-bit, and a vector is pushed as `E_EVENT_SIZEOF_VEC` (16 bytes). A vector stack variable reserves exactly one vector slot. Its `_x`, `_y` and `_z` defs alias that slot at +0, +4 and +8 and do not reserve slots of their own. Before this was fixed, the three component defs each reserved a pointer-sized float slot, 24 bytes in all. Every parameter after a vector parameter was then read 8 bytes past where the caller pushed it. Two retail scripts broke this way:
+
+- In `game/roadhouse`, `DistanceToXY( vector, vector )` measured the player against the wrong point, so Enisi never saw the player arrive and repeated his "come back" callbacks.
+- In `game/feedingtowera`, `SlabNPCGetOffsetOrigin( float, vector, float, float )` placed the slab victims off their slabs.
+
+The compiler now fails a function whose parameter frame differs from what its callers push. The script checksum now includes each function's frame sizes, so a save written with the old frames is not resumed with misaligned locals. Such a save takes the level-restart path with the player's persistent data.
 
 ---
 

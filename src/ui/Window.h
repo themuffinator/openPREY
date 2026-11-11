@@ -274,6 +274,8 @@ public:
 	void ClearFlag(unsigned int f);
 	unsigned GetFlags() {return flags;};
 	bool IsVisible() const { return visible; }
+	// The window's rectangle within its parent, as last laid out.
+	const idRectangle &GetDrawRect() const { return drawRect; }
 	bool HasNoEvents() const { return noEvents; }
 	unsigned char GetScreenAlignX() const { return screenAlignX; }
 	unsigned char GetScreenAlignY() const { return screenAlignY; }
@@ -527,6 +529,9 @@ protected:
 
 	signed char	textShadow;
 	unsigned char fontNum;
+	// Prey's "notranslation": alien text that never turns English (11.4).
+	// Fixed at parse, like retail's window flag; never serialized.
+	bool	noTranslation;
 	unsigned char cursor;					//
 	signed char	textAlign;
 

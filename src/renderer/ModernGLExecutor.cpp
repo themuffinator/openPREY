@@ -494,7 +494,7 @@ static const viewDef_t *rg_modernGLBakedGridView = NULL;
 // is sampled only by its own receivers, before their single linear decode.
 struct modernClassicPrimitive_t {
 	modernGLSubmitCommand_t command;
-	float params[15][4];
+	float params[16][4];
 	GLuint textures[6];
 };
 static idList<modernClassicPrimitive_t> rg_modernClassicPrimitives;
@@ -7053,6 +7053,7 @@ static void R_ModernGLExecutor_CollectClassicInteraction( const drawInteraction_
 	}
 	primitive.params[14][0] = interaction->vertexColor == SVC_MODULATE ? 1.0f : interaction->vertexColor == SVC_INVERSE_MODULATE ? -1.0f : 0.0f;
 	primitive.params[14][1] = interaction->vertexColor == SVC_MODULATE ? 0.0f : 1.0f;
+	R_InteractionSpecularParms( interaction->specularExponent, interaction->specularBrightness, primitive.params[15] );
 	idImage *images[] = { interaction->bumpImage, interaction->lightFalloffImage, interaction->lightImage, interaction->diffuseImage, interaction->specularImage };
 	for ( int i = 0; i < 5; ++i ) {
 		if ( images[i] == NULL || !images[i]->IsLoaded() || images[i]->IsDefaulted()
@@ -7178,7 +7179,7 @@ static void R_ModernGLExecutor_SubmitClassicLighting( modernGLExecutorStats_t &s
 			offset = allocation.offset;
 		}
 		glUniformMatrix4fv( rg_modernClassicMVP, 1, GL_FALSE, command.modelViewProjectionMatrix );
-		glUniform4fv( rg_modernClassicParams, 15, &primitive.params[0][0] );
+		glUniform4fv( rg_modernClassicParams, 16, &primitive.params[0][0] );
 		for ( int unit = 0; unit < 6; ++unit ) {
 			R_GLStateCache().BindTexture( unit, unit == 5 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D, primitive.textures[unit] );
 			if ( glBindSampler != NULL ) { R_GLStateCache().BindSampler( unit, 0 ); }

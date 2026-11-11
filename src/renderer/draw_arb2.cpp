@@ -1839,6 +1839,7 @@ typedef struct {
 	GLint			materialEnhanced;
 	GLint			materialNormalScale;
 	GLint			materialSpecularBoost;
+	GLint			stockSpecularParams;
 	GLint			materialFresnel;
 	GLint			shadowTexelSize;
 	GLint			shadowBias;
@@ -1961,6 +1962,7 @@ typedef struct {
 	GLint			materialEnhanced;
 	GLint			materialNormalScale;
 	GLint			materialSpecularBoost;
+	GLint			stockSpecularParams;
 	GLint			materialFresnel;
 	GLint			shadowBias;
 	GLint			shadowNormalBias;
@@ -2015,6 +2017,7 @@ typedef struct {
 	GLint			flatDiffuseParams;
 	GLint			materialNormalScale;
 	GLint			materialSpecularBoost;
+	GLint			stockSpecularParams;
 	GLint			materialFresnel;
 	GLint			stockInteraction;
 	GLint			ambientLight;
@@ -2209,6 +2212,7 @@ typedef enum {
 	SHADOWMAP_RECEIVER_FALLBACK_INVALID_SURFACE = 0,
 	SHADOWMAP_RECEIVER_FALLBACK_CUSTOM_GLSL,
 	SHADOWMAP_RECEIVER_FALLBACK_GENERATED_GEOMETRY,
+	SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM,	// OPENPREY: Prey per-light ARB program
 	SHADOWMAP_RECEIVER_FALLBACK_COUNT
 } shadowMapReceiverFallbackReason_t;
 
@@ -2576,6 +2580,8 @@ static const char *RB_ShadowMapReceiverFallbackReasonName( const shadowMapReceiv
 		return "customGLSL";
 	case SHADOWMAP_RECEIVER_FALLBACK_GENERATED_GEOMETRY:
 		return "generatedSkinned";
+	case SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM:
+		return "interactionProgram";
 	default:
 		return "none";
 	}
@@ -3190,7 +3196,13 @@ static int g_shadowMapSubviewFallbackPasses = 0;
 // would otherwise repeat every frame with an empty fallback; the sticky flag
 // restores volume generation for that light from the next frame on.
 static void RB_ShadowMapMarkStencilFallbackSticky( const viewLight_t *vLight ) {
-	if ( vLight == NULL || vLight->lightDef == NULL || vLight->lightDef->shadowMapStencilFallbackSticky ) {
+	if ( vLight == NULL || vLight->lightDef == NULL ) {
+		return;
+	}
+	// every failure restarts the wait before the light may leave the fallback
+	vLight->lightDef->shadowMapStencilFallbackFrame = backEnd.frameCount;
+	vLight->lightDef->shadowMapStencilFallbackCleanViews = 0;
+	if ( vLight->lightDef->shadowMapStencilFallbackSticky ) {
 		return;
 	}
 	vLight->lightDef->shadowMapStencilFallbackSticky = true;
@@ -3747,6 +3759,10 @@ static bool RB_ShadowMapPointComposeAvailable( void ) {
 }
 
 static bool RB_ShadowMapStaticCacheable( const viewLight_t *vLight, const shadowMapPassKind_t passKind, const bool pointLight, const bool haveTranslucentCasters ) {
+	// A moving light has a new map every view, so it is drawn directly.
+	if ( R_ShadowMapMovingLightSkipsCache( vLight, backEnd.frameCount ) ) {
+		return false;
+	}
 	if ( !r_shadowMapStaticCache.GetBool() || vLight == NULL || RB_ShadowMapLightIndex( vLight ) < 0 ) {
 		return false;
 	}
@@ -3791,6 +3807,10 @@ static bool RB_ShadowMapStaticCacheable( const viewLight_t *vLight, const shadow
 }
 
 static bool RB_ShadowMapStaticCacheableReadOnly( const viewLight_t *vLight, const shadowMapPassKind_t passKind, const bool pointLight, const bool haveTranslucentCasters ) {
+	// A moving light has a new map every view, so it is drawn directly.
+	if ( R_ShadowMapMovingLightSkipsCache( vLight, backEnd.frameCount ) ) {
+		return false;
+	}
 	if ( !r_shadowMapStaticCache.GetBool() || vLight == NULL || RB_ShadowMapLightIndex( vLight ) < 0 ) {
 		return false;
 	}
@@ -5417,6 +5437,7 @@ static bool RB_MaterialInteractionLoadProgram( void ) {
 	g_materialInteractionProgram.flatDiffuseParams = glGetUniformLocationARB( programObject, "uFlatDiffuseParams" );
 	g_materialInteractionProgram.materialNormalScale = glGetUniformLocationARB( programObject, "uMaterialNormalScale" );
 	g_materialInteractionProgram.materialSpecularBoost = glGetUniformLocationARB( programObject, "uMaterialSpecularBoost" );
+	g_materialInteractionProgram.stockSpecularParams = glGetUniformLocationARB( programObject, "uStockSpecularParams" );
 	g_materialInteractionProgram.materialFresnel = glGetUniformLocationARB( programObject, "uMaterialFresnel" );
 	g_materialInteractionProgram.celParams = glGetUniformLocationARB( programObject, "uCelParams" );
 	g_materialInteractionProgram.stockInteraction = glGetUniformLocationARB( programObject, "uStockInteraction" );
@@ -5550,6 +5571,7 @@ static const char *programBaseName = "glprogs/shadow_interaction";
 	g_shadowMapProgram.materialEnhanced = glGetUniformLocationARB( programObject, "uMaterialEnhanced" );
 	g_shadowMapProgram.materialNormalScale = glGetUniformLocationARB( programObject, "uMaterialNormalScale" );
 	g_shadowMapProgram.materialSpecularBoost = glGetUniformLocationARB( programObject, "uMaterialSpecularBoost" );
+	g_shadowMapProgram.stockSpecularParams = glGetUniformLocationARB( programObject, "uStockSpecularParams" );
 	g_shadowMapProgram.materialFresnel = glGetUniformLocationARB( programObject, "uMaterialFresnel" );
 	g_shadowMapProgram.celParams = glGetUniformLocationARB( programObject, "uCelParams" );
 	g_shadowMapProgram.shadowTexelSize = glGetUniformLocationARB( programObject, "uShadowTexelSize" );
@@ -5946,6 +5968,7 @@ static const char *programBaseName = "glprogs/shadow_point_interaction";
 	g_pointShadowMapProgram.materialEnhanced = glGetUniformLocationARB( programObject, "uMaterialEnhanced" );
 	g_pointShadowMapProgram.materialNormalScale = glGetUniformLocationARB( programObject, "uMaterialNormalScale" );
 	g_pointShadowMapProgram.materialSpecularBoost = glGetUniformLocationARB( programObject, "uMaterialSpecularBoost" );
+	g_pointShadowMapProgram.stockSpecularParams = glGetUniformLocationARB( programObject, "uStockSpecularParams" );
 	g_pointShadowMapProgram.materialFresnel = glGetUniformLocationARB( programObject, "uMaterialFresnel" );
 	g_pointShadowMapProgram.celParams = glGetUniformLocationARB( programObject, "uCelParams" );
 	g_pointShadowMapProgram.shadowBias = glGetUniformLocationARB( programObject, "uShadowBias" );
@@ -6880,7 +6903,10 @@ static void RB_ShadowMapStatsReport( void ) {
 	const int receiverFallbackInvalid = g_shadowMapStats.receiverFallbackSurfaces[SHADOWMAP_RECEIVER_FALLBACK_INVALID_SURFACE];
 	const int receiverFallbackCustomGLSL = g_shadowMapStats.receiverFallbackSurfaces[SHADOWMAP_RECEIVER_FALLBACK_CUSTOM_GLSL];
 	const int receiverFallbackGenerated = g_shadowMapStats.receiverFallbackSurfaces[SHADOWMAP_RECEIVER_FALLBACK_GENERATED_GEOMETRY];
-	const int receiverFallbackSurfaces = receiverFallbackInvalid + receiverFallbackCustomGLSL + receiverFallbackGenerated;
+	// OPENPREY: Prey's per-light ARB programs count in the total; the line keeps
+	// the reasons upstream's report readers know.
+	const int receiverFallbackSurfaces = receiverFallbackInvalid + receiverFallbackCustomGLSL + receiverFallbackGenerated
+		+ g_shadowMapStats.receiverFallbackSurfaces[SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM];
 
 	idStr unsupportedSummary;
 	for ( int i = 0; i < SHADOWMAP_SUPPORT_COUNT; i++ ) {
@@ -9493,6 +9519,7 @@ enum {
 	GLSL_INTERACTION_CACHE_MODEL_MATRIX_ROW_2,
 	GLSL_INTERACTION_CACHE_GLOBAL_LIGHT_ORIGIN,
 	GLSL_INTERACTION_CACHE_VERTEX_COLOR_PARAMS,
+	GLSL_INTERACTION_CACHE_STOCK_SPECULAR_PARAMS,
 	GLSL_INTERACTION_CACHE_SLOTS
 };
 typedef struct {
@@ -9603,6 +9630,14 @@ static void RB_MaterialInteractionSetEnhancementUniforms( const GLint normalScal
 	}
 }
 
+// uStockSpecularParams: retail Prey's stock specular model for this
+// interaction (R_InteractionSpecularParms); the enhanced branches ignore it
+static void RB_GLSLSetStockSpecularParams( const GLint location, const drawInteraction_t *din ) {
+	float parms[4];
+	R_InteractionSpecularParms( din->specularExponent, din->specularBrightness, parms );
+	RB_GLSLInteractionUniform4fv( location, GLSL_INTERACTION_CACHE_STOCK_SPECULAR_PARAMS, parms );
+}
+
 static void RB_GLSLMaterial_DrawInteraction( const drawInteraction_t *din ) {
 	RB_GLSLInteractionUniform4fv( g_materialInteractionProgram.localLightOrigin, GLSL_INTERACTION_CACHE_LOCAL_LIGHT_ORIGIN, din->localLightOrigin.ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_materialInteractionProgram.localViewOrigin, GLSL_INTERACTION_CACHE_LOCAL_VIEW_ORIGIN, din->localViewOrigin.ToFloatPtr() );
@@ -9618,6 +9653,7 @@ static void RB_GLSLMaterial_DrawInteraction( const drawInteraction_t *din ) {
 	RB_GLSLInteractionUniform4fv( g_materialInteractionProgram.specularMatrixT, GLSL_INTERACTION_CACHE_SPECULAR_MATRIX_T, din->specularMatrix[1].ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_materialInteractionProgram.diffuseColor, GLSL_INTERACTION_CACHE_DIFFUSE_COLOR, din->diffuseColor.ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_materialInteractionProgram.specularColor, GLSL_INTERACTION_CACHE_SPECULAR_COLOR, din->specularColor.ToFloatPtr() );
+	RB_GLSLSetStockSpecularParams( g_materialInteractionProgram.stockSpecularParams, din );
 	if ( g_materialInteractionProgram.flatDiffuseParams >= 0 ) {
 		glUniform4fvARB( g_materialInteractionProgram.flatDiffuseParams, 1, din->flatDiffuseParams.ToFloatPtr() );
 	}
@@ -9688,6 +9724,8 @@ static float RB_ShadowMapReceiverDebugReasonValue( const drawSurf_t *surf, const
 		return 3.0f;
 	case SHADOWMAP_RECEIVER_FALLBACK_GENERATED_GEOMETRY:
 		return 4.0f;
+	case SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM:
+		return 3.0f;	// drawn as the other authored-lighting receivers are
 	default:
 		return 2.0f;
 	}
@@ -9742,6 +9780,7 @@ static void RB_GLSLShadowMap_DrawInteraction( const drawInteraction_t *din ) {
 	RB_GLSLInteractionUniform4fv( g_shadowMapProgram.specularMatrixT, GLSL_INTERACTION_CACHE_SPECULAR_MATRIX_T, din->specularMatrix[1].ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_shadowMapProgram.diffuseColor, GLSL_INTERACTION_CACHE_DIFFUSE_COLOR, din->diffuseColor.ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_shadowMapProgram.specularColor, GLSL_INTERACTION_CACHE_SPECULAR_COLOR, din->specularColor.ToFloatPtr() );
+	RB_GLSLSetStockSpecularParams( g_shadowMapProgram.stockSpecularParams, din );
 	if ( g_shadowMapProgram.flatDiffuseParams >= 0 ) {
 		glUniform4fvARB( g_shadowMapProgram.flatDiffuseParams, 1, din->flatDiffuseParams.ToFloatPtr() );
 	}
@@ -9833,6 +9872,7 @@ static void RB_GLSLPointShadowMap_DrawInteraction( const drawInteraction_t *din 
 	// re-upload here (and its sqrt in R_ShadowMapPointFarDistance) was redundant.
 	RB_GLSLInteractionUniform4fv( g_pointShadowMapProgram.diffuseColor, GLSL_INTERACTION_CACHE_DIFFUSE_COLOR, din->diffuseColor.ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_pointShadowMapProgram.specularColor, GLSL_INTERACTION_CACHE_SPECULAR_COLOR, din->specularColor.ToFloatPtr() );
+	RB_GLSLSetStockSpecularParams( g_pointShadowMapProgram.stockSpecularParams, din );
 	if ( g_pointShadowMapProgram.flatDiffuseParams >= 0 ) {
 		glUniform4fvARB( g_pointShadowMapProgram.flatDiffuseParams, 1, din->flatDiffuseParams.ToFloatPtr() );
 	}
@@ -10142,6 +10182,15 @@ static shadowMapReceiverFallbackReason_t RB_SurfaceShadowMapReceiverFallbackReas
 	}
 	if ( RB_SurfaceHasActiveCustomGLSLLighting( surf ) && !RB_SurfaceUsesWrappedCustomGLSLShadowReceiver( surf ) ) {
 		return SHADOWMAP_RECEIVER_FALLBACK_CUSTOM_GLSL;
+	}
+	// OPENPREY: a Prey per-light ARB program (skin, cloth, hair, parallax,
+	// masked interaction) has no shadow-map sampler, and the stock receiver
+	// cannot draw its stage. Sending such a surface through the stock receiver
+	// with that stage filtered out left it unlit by every mapped light: black
+	// characters and organic walls at Shader Detail above Low. It keeps its own
+	// program and the light's stencil volumes instead.
+	if ( surf->material->HasActiveInteractionProgramStage( surf->shaderRegisters ) ) {
+		return SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM;
 	}
 	if ( RB_SurfaceUsesGPUPosedGeometry( surf ) ) {
 		return SHADOWMAP_RECEIVER_FALLBACK_GENERATED_GEOMETRY;
@@ -11124,6 +11173,7 @@ static void RB_ARB2_CreateCustomGLSLDrawInteractionsForSurface( const drawSurf_t
 			RB_ApplyFlatDiffuseStage( surf, &flatDiffuseImage,
 				inter.diffuseColor.ToFloatPtr(), inter.flatDiffuseParams );
 			inter.vertexColor = surfaceStage->vertexColor;
+			R_SetInteractionSpecularStage( &inter, surfaceStage );
 
 			RB_ARB2_DrawCustomGLSLInteractionStage( surfaceStage, surfaceRegs, &inter );
 		}
@@ -12478,9 +12528,15 @@ static void RB_ShadowMapDrawReceiverFallbacks( const viewLight_t *vLight, const 
 	// Fallback receivers are shadowed by the light's stencil volumes even on
 	// mapped frames. If the front end elided those volumes, restore them from
 	// the next frame on so these receivers do not stay unshadowed.
-	if ( primaryShadowSurfs == NULL && secondaryShadowSurfs == NULL ) {
-		RB_ShadowMapMarkStencilFallbackSticky( vLight );
-	}
+	//
+	// OPENPREY: and keep asking while such a receiver is lit. Asked only when
+	// the volumes were already missing, the light counted every view that had
+	// them as a clean one, left the fallback after
+	// r_shadowMapStencilFallbackViews, drew these receivers unshadowed for a
+	// frame and built its volumes again: a shadow that blinked every 240 views
+	// on each character and organic wall, which here are the common receivers
+	// of this kind rather than the rare one.
+	RB_ShadowMapMarkStencilFallbackSticky( vLight );
 
 	if ( passKind == SHADOWMAP_PASS_LOCAL ) {
 		g_shadowMapStats.receiverFallbackLocalPasses++;
@@ -12985,6 +13041,11 @@ void	RB_ARB2_DrawInteraction( const drawInteraction_t *din ) {
 	RB_ARB2_SetVertexEnvParm( interactionParamBase + PP_DIFFUSE_MATRIX_T, din->diffuseMatrix[1].ToFloatPtr() );
 	RB_ARB2_SetVertexEnvParm( interactionParamBase + PP_SPECULAR_MATRIX_S, din->specularMatrix[0].ToFloatPtr() );
 	RB_ARB2_SetVertexEnvParm( interactionParamBase + PP_SPECULAR_MATRIX_T, din->specularMatrix[1].ToFloatPtr() );
+
+	// retail Prey's specular model selection, see R_InteractionSpecularParms
+	float specularParms[4];
+	R_InteractionSpecularParms( din->specularExponent, din->specularBrightness, specularParms );
+	RB_ARB2_SetFragmentEnvParm( 2, specularParms );
 
 	// testing fragment based normal mapping
 	if ( r_testARBProgram.GetBool() ) {
@@ -16280,6 +16341,7 @@ static void RB_SharedWorldInteractionGLLoadPrimitiveParameters(
 	};
 	RB_ARB2_SetFragmentEnvParm( 0, primitive.diffuseColor );
 	RB_ARB2_SetFragmentEnvParm( 1, specularColorX2 );
+	RB_ARB2_SetFragmentEnvParm( 2, primitive.specularParms );
 }
 
 static void RB_SharedWorldInteractionGLBeginInteractionState( void ) {

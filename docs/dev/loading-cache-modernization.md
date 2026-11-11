@@ -133,6 +133,7 @@ image_ignoreHighQuality
 image_picmip
 image_picmipFilter
 image_picmipMinSize
+image_useHighRes
 image_usePrecompressedTextures
 s_useCompression
 sys_lang

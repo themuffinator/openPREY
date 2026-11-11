@@ -17,6 +17,11 @@ uniform sampler2D uTranslucentShadowMapB;
 uniform vec4 uDiffuseColor;
 uniform vec4 uSpecularColor;
 uniform float uMaterialEnhanced;
+// Retail Prey's stock specular model (R_InteractionSpecularParms): x exponent,
+// y brightness from the specular stage's specularExp, z = 1 for
+// r_correctspecular's per-pixel pow( N.H, x ) * y instead of the table ramp,
+// w = 1 for r_normalizebumpmap. Enhanced materials ignore it.
+uniform vec4 uStockSpecularParams;
 uniform float uMaterialNormalScale;
 uniform float uMaterialSpecularBoost;
 uniform float uMaterialFresnel;
@@ -191,7 +196,8 @@ float CelSpecularTerm( float term ) {
 
 vec3 DecodeLocalNormal( vec4 bumpSample ) {
 	if ( uMaterialEnhanced < 0.5 ) {
-		return SafeNormalize( vec3( bumpSample.a, bumpSample.g, bumpSample.b ) * 2.0 - 1.0 );
+		vec3 stockNormal = vec3( bumpSample.a, bumpSample.g, bumpSample.b ) * 2.0 - 1.0;
+		return ( uStockSpecularParams.w > 0.5 ) ? SafeNormalize( stockNormal ) : stockNormal;
 	}
 
 	vec2 localNormalXY = vec2( bumpSample.a, bumpSample.g ) * 2.0 - 1.0;
@@ -217,16 +223,24 @@ float EnhancedSpecularTerm( vec3 halfAngle, vec3 viewDir, vec3 localNormal, vec3
 	return pow( ndoth, specularPower ) * max( uMaterialSpecularBoost, 0.0 ) * fresnel;
 }
 
-float LegacySpecularTerm( vec3 halfAngle, vec3 localNormal ) {
+// The _specularTable ramp, or with r_correctspecular retail's
+// interactionNormBumpH.vfp term, whose half angle is rebuilt per pixel from
+// the light direction and the normalized vector to the viewer.
+float LegacySpecularTerm( vec3 halfAngle, vec3 lightDir, vec3 viewDir, vec3 localNormal ) {
+	if ( uStockSpecularParams.z > 0.5 ) {
+		vec3 correctedHalfAngle = SafeNormalize( lightDir + viewDir );
+		float ndoth = max( clamp( dot( correctedHalfAngle, localNormal ), 0.0, 1.0 ), 1.0e-6 );
+		return pow( ndoth, uStockSpecularParams.x ) * uStockSpecularParams.y;
+	}
 	float specular = clamp( dot( halfAngle, localNormal ) * 4.0 - 3.0, 0.0, 1.0 );
 	return specular * specular;
 }
 
-vec3 InteractionSpecular( vec3 halfAngle, vec3 viewDir, vec3 localNormal, vec3 specularSample ) {
+vec3 InteractionSpecular( vec3 halfAngle, vec3 lightDir, vec3 viewDir, vec3 localNormal, vec3 specularSample ) {
 	if ( uMaterialEnhanced >= 0.5 ) {
 		return specularSample * uSpecularColor.rgb * CelSpecularTerm( EnhancedSpecularTerm( halfAngle, viewDir, localNormal, specularSample ) );
 	}
-	return specularSample * ( uSpecularColor.rgb * 2.0 ) * CelSpecularTerm( LegacySpecularTerm( halfAngle, localNormal ) );
+	return specularSample * ( uSpecularColor.rgb * 2.0 ) * CelSpecularTerm( LegacySpecularTerm( halfAngle, lightDir, viewDir, localNormal ) );
 }
 
 float ApproxErf( float x ) {
@@ -249,11 +263,15 @@ float StableShadowHash( vec3 value ) {
 	return fract( sin( dot( value, vec3( 12.9898, 78.233, 37.719 ) ) ) * 43758.5453 );
 }
 
-mat2 ShadowOffsetRotation( vec2 uv, float depth ) {
+// The kernel turns by a hash of the texel within the tile, not within the
+// image, so a soft shadow's grain is the same wherever its tile lives: a
+// cached cell of the atlas, another cell later, or the scratch target.
+// Keyed on the image texel, the grain changed each time the tile moved.
+mat2 ShadowOffsetRotation( vec2 tileTexel, float depth ) {
 	if ( uShadowFilterMode < 0.5 ) {
 		return mat2( 1.0, 0.0, 0.0, 1.0 );
 	}
-	float angle = StableShadowHash( vec3( floor( uv / max( uShadowTexelSize.x, 1.0e-6 ) ), floor( depth * 1024.0 ) ) ) * 6.2831853;
+	float angle = StableShadowHash( vec3( floor( tileTexel ), floor( depth * 1024.0 ) ) ) * 6.2831853;
 	float s = sin( angle );
 	float c = cos( angle );
 	return mat2( c, s, -s, c );
@@ -516,7 +534,14 @@ vec4 SampleShadowCascade( vec4 shadowCoord, vec4 atlasRect, int cascadeIndex ) {
 	uv = clamp( uv, clampMin, clampMax );
 	// Blocker search and PCF use the same stable kernel orientation. Computing
 	// the hash/trigonometry once also keeps PCSS cost bounded per receiver.
-	mat2 rotation = ShadowOffsetRotation( uv, depth );
+	// localUv is the same bit for bit in every placement of the tile, and the
+	// tile's edge in texels is exact, so the rotation is too. The clamp is
+	// the guard band's, in texels.
+	vec2 shadowTexel = max( abs( uShadowTexelSize.xy ), vec2( 1.0e-6 ) );
+	vec2 tileTexels = floor( abs( atlasMax - atlasMin ) / shadowTexel + vec2( 0.5 ) );
+	vec2 guardTexels = guardBand / shadowTexel;
+	vec2 tileTexel = clamp( localUv * tileTexels, guardTexels, max( tileTexels - guardTexels, guardTexels ) );
+	mat2 rotation = ShadowOffsetRotation( tileTexel, depth );
 
 	float filterRadius = EffectiveShadowFilterRadius();
 #ifndef OPENQ4_SHADOW_COMPARE
@@ -987,7 +1012,7 @@ void main() {
 	vec3 specularSample = texture2D( uSpecularMap, vSpecularTexCoord ).rgb;
 	vec3 halfAngle = SafeNormalize( vHalfAngleVector );
 	vec3 viewDir = SafeNormalize( vViewVector );
-	vec3 specular = InteractionSpecular( halfAngle, viewDir, localNormal, specularSample );
+	vec3 specular = InteractionSpecular( halfAngle, lightDir, viewDir, localNormal, specularSample );
 
 	vec3 color = ( diffuse + specular ) * CelQuantizeLight( light ) * vVertexColor;
 	if ( ShadowVisualDebugMode() ) {

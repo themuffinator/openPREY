@@ -2572,6 +2572,11 @@ struct sessionLoadingBackground_t {
 	int				width = 0;
 	int				height = 0;
 	int				restartCount = 0;	// renderSystem->GetVideoRestartCount() at the upload
+	// What the held picture was composed from, so a screen drawn every frame
+	// (the fallback loading screen) reuses it instead of composing again.
+	idStr			sourcePath;
+	int				viewportWidth = 0;
+	int				viewportHeight = 0;
 };
 static sessionLoadingBackground_t sessionLoadingBackground;
 
@@ -2621,6 +2626,9 @@ static void Session_ReleaseLoadingBackground( bool shrinkImage ) {
 	background.width = 0;
 	background.height = 0;
 	background.restartCount = 0;
+	background.sourcePath.Clear();
+	background.viewportWidth = 0;
+	background.viewportHeight = 0;
 }
 
 // Each session frame, before any GUI draws: a video restart reallocated the held
@@ -2881,8 +2889,54 @@ static bool Session_PrepareExpandedLoadingBackground( const idStr &backgroundPat
 		return false;
 	}
 	common->DPrintf( "Expanded loading background '%s' composed in memory from '%s'\n", name.c_str(), resolvedCenterPath.c_str() );
+	background.sourcePath = backgroundPath;
+	background.viewportWidth = viewportWidth;
+	background.viewportHeight = viewportHeight;
 	imageName = name;
 	return true;
+}
+
+/*
+================
+Session_EnsureExpandedLoadingBackground
+
+The expanded picture for backgroundPath at the current window shape, composing
+it only when the held one was made from another source or for another window.
+A source that cannot be expanded is remembered for that window too, so a screen
+redrawn every frame does not retry the image reads each time.
+================
+*/
+static bool Session_EnsureExpandedLoadingBackground( const idStr &backgroundPath, idStr &imageName ) {
+	static idStr failedPath;
+	static int failedWidth = -1;
+	static int failedHeight = -1;
+
+	float windowAspect = 0.0f;
+	bool expandHorizontally = false;
+	bool expandVertically = false;
+	int viewportWidth = 0;
+	int viewportHeight = 0;
+	if ( !Session_GetLoadingCanvasExpansion( windowAspect, expandHorizontally, expandVertically, viewportWidth, viewportHeight ) ) {
+		return false;
+	}
+
+	const sessionLoadingBackground_t &background = sessionLoadingBackground;
+	if ( background.pixels.Num() > 0 && background.sourcePath.Icmp( backgroundPath ) == 0 &&
+		background.viewportWidth == viewportWidth && background.viewportHeight == viewportHeight ) {
+		imageName = background.imageName;
+		return true;
+	}
+	if ( failedPath.Icmp( backgroundPath ) == 0 && failedWidth == viewportWidth && failedHeight == viewportHeight ) {
+		return false;
+	}
+	if ( Session_PrepareExpandedLoadingBackground( backgroundPath, imageName ) ) {
+		failedPath.Clear();
+		return true;
+	}
+	failedPath = backgroundPath;
+	failedWidth = viewportWidth;
+	failedHeight = viewportHeight;
+	return false;
 }
 
 void idSessionLocal::SetMainMenuBackgroundMontageGuiVars( void ) {
@@ -2956,30 +3010,6 @@ static idUserInterface *Session_FindFallbackLoadingGui() {
 		}
 	}
 	return NULL;
-}
-
-static void Session_SetLoadingBackgroundExpansionStates( idUserInterface *gui, const char *loadingBackground ) {
-	static const char *suffixes[] = { "_left", "_right", "_top", "_bottom" };
-	static const char *imageStates[] = { "image_left", "image_right", "image_top", "image_bottom" };
-	static const char *backgroundStates[] = {
-		"loading_bkgnd_left", "loading_bkgnd_right", "loading_bkgnd_top", "loading_bkgnd_bottom"
-	};
-	if ( gui == NULL ) {
-		return;
-	}
-	for ( int i = 0; i < 4; i++ ) {
-		idStr materialName;
-		if ( loadingBackground != NULL && loadingBackground[0] != '\0' ) {
-			materialName = loadingBackground;
-			materialName += suffixes[i];
-			const idMaterial *material = declManager->FindMaterial( materialName.c_str(), false );
-			if ( material == NULL || material->GetState() == DS_DEFAULTED ) {
-				materialName.Clear();
-			}
-		}
-		gui->SetStateString( imageStates[i], materialName.c_str() );
-		gui->SetStateString( backgroundStates[i], materialName.c_str() );
-	}
 }
 
 void idSessionLocal::PrimeMainMenuGuiResources( void ) {
@@ -3063,7 +3093,24 @@ static void Session_DrawFallbackLoadingScreen() {
 		static_cast<int>( sizeof( splashMaterialCandidates ) / sizeof( splashMaterialCandidates[0] ) ) );
 	if ( splashMaterial ) {
 		renderSystem->SetColor( colorWhite );
-		renderSystem->DrawStretchPic( splashX, splashY, splashW, splashH, 0, 0, 1, 1, splashMaterial );
+		// As the level loading screen does: in a window that is not 4:3, draw the
+		// picture composed from the art and its _left/_right/_top/_bottom tiles
+		// across the whole canvas instead of the 4:3 art between black bars.
+		idStr expandedImage;
+		const idMaterial *expandedMaterial = NULL;
+		if ( cvarSystem->GetCVarBool( "ui_aspectCorrection" ) &&
+			Session_EnsureExpandedLoadingBackground( splashMaterial->GetName(), expandedImage ) ) {
+			expandedMaterial = declManager->FindMaterial( expandedImage.c_str() );
+			if ( expandedMaterial != NULL && expandedMaterial->TestMaterialFlag( MF_DEFAULTED ) ) {
+				expandedMaterial = NULL;
+			}
+		}
+		if ( expandedMaterial != NULL ) {
+			const_cast<idMaterial *>( expandedMaterial )->SetSort( SS_GUI );
+			renderSystem->DrawStretchPic( 0, 0, virtualWidth, virtualHeight, 0, 0, 1, 1, expandedMaterial );
+		} else {
+			renderSystem->DrawStretchPic( splashX, splashY, splashW, splashH, 0, 0, 1, 1, splashMaterial );
+		}
 	}
 
 	renderSystem->SetColor( colorWhite );
@@ -4607,6 +4654,10 @@ void idSessionLocal::StopInternal( bool preserveWipe ) {
 		if ( sw ) {
 			sw->StopAllSounds();
 		}
+		// A load that errored out never reached ExecuteMapChange's own stop.
+		if ( soundSystem != NULL ) {
+			soundSystem->StopLoadingMusic();
+		}
 
 		insideUpdateScreen = false;
 		openq4::NativeInputBeforeSessionChange();
@@ -5169,6 +5220,26 @@ static void Session_OpenQ4GuiAction_f( const idCmdArgs &args ) {
 	}
 }
 
+/*
+================
+Session_OpenQ4GuiFocus_f
+
+openQ4: openq4_guiFocus [next|previous] steps the active classic GUI's focus
+as a menu's Down or Up arrow does and reports where it stands, touching no
+device; without an argument it only reports.
+================
+*/
+static void Session_OpenQ4GuiFocus_f( const idCmdArgs &args ) {
+	idUserInterface *gui = session->GetActiveGUI();
+	const int direction = args.Argc() != 2 ? 0 : !idStr::Icmp( args.Argv( 1 ), "next" ) ? 1 : !idStr::Icmp( args.Argv( 1 ), "previous" ) ? -1 : 0;
+	idStr report;
+	if ( gui == NULL || args.Argc() > 2 || ( args.Argc() == 2 && direction == 0 ) || !UI_StepLegacyFocus( gui, direction, report ) ) {
+		common->Printf( "usage: openq4_guiFocus [next|previous] with an active classic GUI\n" );
+		return;
+	}
+	common->Printf( "GUI_FOCUS %s\n", report.c_str() );
+}
+
 static void Session_RetainedGui_f( const idCmdArgs &args ) {
 #ifndef ID_DEDICATED
 	// While a retained home screen covers the legacy menu, or the multiplayer
@@ -5244,7 +5315,7 @@ static void Session_SystemSettings_f( const idCmdArgs &args ) {
 			return;
 		}
 	}
-	common->Printf( "usage: openq4_system open | report | back (requires ui_retainedSystem 1, or ui_retained 1 once every stock setting works on the retained page, and the normal main menu)\n" );
+	common->Printf( "usage: openq4_system open | report | back (requires ui_retained 1 or ui_retainedSystem 1, and the normal main menu)\n" );
 }
 
 // Reports the ui_retained gate, the retained screen presenting now and the
@@ -6774,6 +6845,7 @@ static void Session_BuildLevelLoadCacheSettings( idStr &settings ) {
 		"image_picmip",
 		"image_picmipFilter",
 		"image_picmipMinSize",
+		"image_useHighRes",
 		"image_usePrecompressedTextures",
 		"s_useCompression",
 		"sys_lang"
@@ -7164,7 +7236,7 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 	}
 
 	idStr expandedLoadingBackground;
-	if ( Session_PrepareExpandedLoadingBackground( loadingBackground, expandedLoadingBackground ) ) {
+	if ( Session_EnsureExpandedLoadingBackground( loadingBackground, expandedLoadingBackground ) ) {
 		loadingBackground = expandedLoadingBackground;
 		loadingBackgroundCanvasFill = true;
 	} else {
@@ -7200,7 +7272,6 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 		// the full-canvas branch used by dynamically expanded levelshots.
 		guiLoading->SetStateInt( "loading_bkgnd_wide", loadingBackgroundCanvasFill ? 1 : 0 );
 		guiLoading->SetStateString( "image", loadingBackground.c_str() );
-		Session_SetLoadingBackgroundExpansionStates( guiLoading, loadingBackground.c_str() );
 		guiLoading->SetStateString( "loading_levelname", loadingLevelName );
 		guiLoading->SetStateString( "friendlyname", loadingLevelName );
 		guiLoading->SetStateString( "loading_objectives", loadingObjectives );
@@ -7266,12 +7337,19 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 				common->Warning( "Loading GUI background '%s' could not be resolved, falling back to '%s'",
 					loadingBackground.c_str(), fallbackLoadingBackground );
 				loadingBackground = fallbackLoadingBackground;
-				loadingBackgroundCanvasFill = false;
+				// The generic art widens the same way, from its loading_left/_right/
+				// _top/_bottom tiles.
+				idStr expandedFallback;
+				loadingBackgroundCanvasFill = Session_EnsureExpandedLoadingBackground( loadingBackground, expandedFallback );
+				if ( loadingBackgroundCanvasFill ) {
+					loadingBackground = expandedFallback;
+				} else {
+					Session_ReleaseLoadingBackground( true );
+				}
 				guiLoading->SetStateString( "loading_bkgnd", loadingBackground.c_str() );
 				guiLoading->SetStateString( "image", loadingBackground.c_str() );
-				Session_SetLoadingBackgroundExpansionStates( guiLoading, loadingBackground.c_str() );
-				guiLoading->SetStateInt( "loading_bkgnd_canvasfill", 0 );
-				guiLoading->SetStateInt( "loading_bkgnd_wide", 0 );
+				guiLoading->SetStateInt( "loading_bkgnd_canvasfill", loadingBackgroundCanvasFill ? 1 : 0 );
+				guiLoading->SetStateInt( "loading_bkgnd_wide", loadingBackgroundCanvasFill ? 1 : 0 );
 				guiLoading->StateChanged( common->GetPresentationTime() );
 				mat = declManager->FindMaterial( loadingBackground.c_str() );
 			}
@@ -7906,7 +7984,12 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 			if ( menuSoundWorld->IsPaused() ) {
 				menuSoundWorld->UnPause();
 			}
-			menuSoundWorld->PlayShaderDirectly( loadMusic.c_str() );
+			// A streamed track plays on the sound system's own loading-music
+			// thread: the pacifier services the menu world only between blocking
+			// load steps, which run longer than a world voice's queue lasts.
+			if ( !soundSystem->StartLoadingMusic( loadMusic.c_str() ) ) {
+				menuSoundWorld->PlayShaderDirectly( loadMusic.c_str() );
+			}
 			Session_ServiceLoadingSound();
 		}
 		declManager->SetInsideLoad( oldDeclInsideLoad );
@@ -8351,8 +8434,11 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	Sys_SetPhysicalWorkMemory( -1, -1 );
 
 	// Stop load/menu emitters before handing playback back to the new game world.
-	if ( playLevelLoadMusic && menuSoundWorld != NULL ) {
-		menuSoundWorld->ClearAllSoundEmitters();
+	if ( playLevelLoadMusic ) {
+		soundSystem->StopLoadingMusic();
+		if ( menuSoundWorld != NULL ) {
+			menuSoundWorld->ClearAllSoundEmitters();
+		}
 	}
 
 	// set the game sound world for playback
@@ -11156,6 +11242,7 @@ void idSessionLocal::Init() {
 	cmdSystem->AddCommand( "openq4_guiSet", Session_OpenQ4GuiSet_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "sets an existing active GUI variable for engine-scripted layout validation" );
 	cmdSystem->AddCommand( "openq4_guiGet", Session_OpenQ4GuiGet_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "reports an existing active GUI variable for engine-scripted layout validation" );
 	cmdSystem->AddCommand( "openq4_guiAction", Session_OpenQ4GuiAction_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "runs a classic GUI window's onAction, or onBackAction with back, as a click would, for engine-scripted validation" );
+	cmdSystem->AddCommand( "openq4_guiFocus", Session_OpenQ4GuiFocus_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "steps a classic GUI's focus as a menu's arrow key does (next, previous) and reports the focused window, for engine-scripted validation" );
 	cmdSystem->AddCommand( "openq4_browser", Session_OpenQ4Browser_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "reports and exercises main-menu server-browser operations for engine-scripted validation" );
 	cmdSystem->AddCommand( "saveGame", SaveGame_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "saves a game" );
 	cmdSystem->AddCommand( "testAutoSave", TestAutoSave_f, CMD_FL_SYSTEM|CMD_FL_CHEAT, "writes a named autosave for developer lifecycle validation" );

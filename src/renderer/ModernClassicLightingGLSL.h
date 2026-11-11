@@ -12,7 +12,7 @@ layout(location = 10) in vec3 attr_Tangent1;
 layout(location = 11) in vec3 attr_Normal;
 uniform mat4 uModelViewProjection;
 uniform vec4 uFrameJitter;
-uniform vec4 uClassicParams[15];
+uniform vec4 uClassicParams[16];
 out vec2 vBumpUV;
 out vec2 vDiffuseUV;
 out vec2 vSpecularUV;
@@ -20,6 +20,7 @@ out vec4 vProjection;
 out float vFalloff;
 out vec3 vLight;
 out vec3 vHalf;
+out vec3 vView;
 out vec3 vColor;
 invariant gl_Position;
 vec3 TangentVector(vec3 v) {
@@ -32,6 +33,7 @@ void main() {
     vec3 v = uClassicParams[1].xyz - p.xyz;
     vLight = TangentVector(l);
     vHalf = TangentVector(l * inversesqrt(max(dot(l, l), 1e-8)) + v * inversesqrt(max(dot(v, v), 1e-8)));
+    vView = TangentVector(v);
     vBumpUV = vec2(dot(uv, uClassicParams[6]), dot(uv, uClassicParams[7]));
     vDiffuseUV = vec2(dot(uv, uClassicParams[8]), dot(uv, uClassicParams[9]));
     vSpecularUV = vec2(dot(uv, uClassicParams[10]), dot(uv, uClassicParams[11]));
@@ -43,7 +45,7 @@ void main() {
 )GLSL";
 
 static const char *modernClassicLightingFragment = R"GLSL(#version 330
-uniform vec4 uClassicParams[15];
+uniform vec4 uClassicParams[16];
 uniform sampler2D uBump;
 uniform sampler2D uFalloff;
 uniform sampler2D uProjection;
@@ -57,15 +59,27 @@ in vec4 vProjection;
 in float vFalloff;
 in vec3 vLight;
 in vec3 vHalf;
+in vec3 vView;
 in vec3 vColor;
 layout(location = 0) out vec4 out_Color;
 vec3 SafeNormalize(vec3 v) { return v * inversesqrt(max(dot(v, v), 1e-8)); }
 void main() {
     vec4 bump = texture(uBump, vBumpUV);
     vec3 n = vec3(bump.a, bump.g, bump.b) * 2.0 - 1.0;
-    float lambert = max(dot(texture(uNormalizationCube, vLight).rgb * 2.0 - 1.0, n), 0.0);
-    float specular = clamp(dot(SafeNormalize(vHalf), n) * 4.0 - 3.0, 0.0, 1.0);
-    specular = specular * specular * 2.0;
+    // uClassicParams[15] is R_InteractionSpecularParms: exponent, brightness,
+    // r_correctspecular, r_normalizebumpmap
+    if (uClassicParams[15].w > 0.5) n = SafeNormalize(n);
+    vec3 l = texture(uNormalizationCube, vLight).rgb * 2.0 - 1.0;
+    float lambert = max(dot(l, n), 0.0);
+    float specular;
+    if (uClassicParams[15].z > 0.5) {
+        // retail interactionNormBumpH.vfp: per-pixel half angle, material power
+        float ndoth = max(clamp(dot(SafeNormalize(l + SafeNormalize(vView)), n), 0.0, 1.0), 1e-6);
+        specular = pow(ndoth, uClassicParams[15].x) * uClassicParams[15].y * 2.0;
+    } else {
+        specular = clamp(dot(SafeNormalize(vHalf), n) * 4.0 - 3.0, 0.0, 1.0);
+        specular = specular * specular * 2.0;
+    }
     vec3 lighting = textureProj(uProjection, vProjection).rgb * texture(uFalloff, vec2(vFalloff, 0.5)).rgb * lambert;
     vec3 diffuse = texture(uDiffuse, vDiffuseUV).rgb * uClassicParams[12].rgb;
     vec3 highlight = texture(uSpecular, vSpecularUV).rgb * uClassicParams[13].rgb * specular;

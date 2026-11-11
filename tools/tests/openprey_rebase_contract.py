@@ -203,7 +203,7 @@ def main() -> None:
     require(
         benchmark_path,
         benchmark,
-        '"g_skipCinematics"',
+        '"g_autoSkipCinematics"',
         '"exec_savepath"',
         "append_post_map_autoexec",
         '"profileLaunchCvars"',
@@ -216,7 +216,7 @@ def main() -> None:
     forbid(
         benchmark_path,
         benchmark,
-        "g_autoSkipCinematics",
+        "g_skipCinematics",
         "g_autoExecAfterMapLoad",
         "g_autoExecAfterMapLoadDelayMs",
     )

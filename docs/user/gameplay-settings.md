@@ -13,10 +13,11 @@ The auto-skip cinematics, corpse cleanup, and corpse sink controls are also avai
 | Setting | Default | Scope | What it does |
 |---|---:|---|---|
 | `ui_weaponWheelOffset` | `27` | SP and MP client | Horizontal wheel offset as a percentage of screen width from center, −40 to +40. `0` centers it; `27` preserves the usual right-side position. Also in Game Options > Controller, beside wheel sensitivity. |
-| `g_autoSkipCinematics` | `0` | SP and MP game code | Automatically skips cinematics as soon as they begin. Disabled by default. |
+| `g_autoSkipCinematics` | `0` | Single-player | Automatically skips cinematics and other scripted sections where the player has no control, as soon as they begin. Ignored in multiplayer. Disabled by default. |
 | `g_corpseRemoveDelaySP` | `0` | Single-player | Controls how long SP corpses remain before disappearing. `0` uses stock timing, `-1` disables corpse removal. |
 | `g_corpseRemoveDelayMP` | `0` | Multiplayer | Controls how long MP corpses remain before disappearing. `0` uses stock timing, `-1` disables corpse removal. |
 | `g_corpseSink` | `0` | SP and MP game code | Selects corpse sink mode instead of the normal dissolve or burn-away behavior. |
+| `g_showPlayerShadow` | `1` | SP and MP client | Shows your own player model's shadow, with the weapon in your hand, in your own first-person view. Other players' shadows always show, in single-player and multiplayer. Retail Prey shipped `0` and gave multiplayer players no shadow at all; a config saved with the retail `0` is switched on once (`g_showPlayerShadowMigrated`). |
 | `s_musicVolume` | `0.5` | Client audio | Controls music volume independently of the main sound mix. |
 | `s_dialogueVolume` | `1` | Client audio | Spoken dialogue volume, from `0` (mute) to `1` (full), independently of effects and music. |
 | `s_useEAXReverb` | `1` | Client audio | The map's per-area room reverb, as the level designers set it up. See [Room Reverb](#room-reverb). |

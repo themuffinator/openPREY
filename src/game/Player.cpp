@@ -1269,24 +1269,17 @@ void idPlayer::Spawn( void ) {
 	// supress model in non-player views, but allow it in mirrors and remote views
 	renderEntity.suppressSurfaceInViewID = entityNumber+1;
 
-	// don't project shadow on self or weapon
 	//HUMANHEAD rww - preserve the same look in sp where we have been self-shadowing
-	if (gameLocal.isMultiplayer)
-	//HUMANHEAD END
-	{
+	// openPREY: multiplayer players keep that look as well. Retail also made them
+	// noSelfShadow, which together with MP_PLAYERNOSHADOW_DEFAULT left a player
+	// model in multiplayer with no shadow of its own at all.
+	if (gameLocal.isMultiplayer) {
 		renderEntity.noShadow = MP_PLAYERNOSHADOW_DEFAULT;
-		renderEntity.noSelfShadow = true;
 	}
 
 	idAFAttachment *headEnt = head.GetEntity();
 	if ( headEnt ) {
 		headEnt->GetRenderEntity()->suppressSurfaceInViewID = entityNumber+1;
-		//HUMANHEAD rww - preserve the same look in sp where we have been self-shadowing
-		if (gameLocal.isMultiplayer)
-		//HUMANHEAD END
-		{
-			headEnt->GetRenderEntity()->noSelfShadow = true;
-		}
 	}
 
 	if ( gameLocal.isMultiplayer ) {
@@ -5362,7 +5355,8 @@ void idPlayer::Think( void ) {
 		}
 	}
 
-	if ( gameLocal.isMultiplayer || g_showPlayerShadow.GetBool() ) {
+	// openPREY: g_showPlayerShadow decides in multiplayer too (see MP_PLAYERNOSHADOW_DEFAULT)
+	if ( g_showPlayerShadow.GetBool() ) {
 		renderEntity.suppressShadowInViewID	= 0;
 		if ( headRenderEnt ) {
 			headRenderEnt->suppressShadowInViewID = 0;
@@ -6740,7 +6734,8 @@ void idPlayer::ClientPredictionThink( void ) {
 		headRenderEnt = NULL;
 	}
 
-	if ( gameLocal.isMultiplayer || g_showPlayerShadow.GetBool() ) {
+	// openPREY: g_showPlayerShadow decides in multiplayer too (see MP_PLAYERNOSHADOW_DEFAULT)
+	if ( g_showPlayerShadow.GetBool() ) {
 		renderEntity.suppressShadowInViewID	= 0;
 		if ( headRenderEnt ) {
 			headRenderEnt->suppressShadowInViewID = 0;

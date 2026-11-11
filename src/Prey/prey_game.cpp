@@ -868,7 +868,7 @@ gameReturn_t hhGameLocal::RunFrame( const usercmd_t *clientCmds ) {
 		timer_events.Stop();
 
 		controlLockedCinematic = HH_ControlLockedCinematicActive( player );
-		if ( !isMultiplayer && g_skipCinematics.GetBool() && !skipCinematic && ( inCinematic || controlLockedCinematic ) ) {
+		if ( !isMultiplayer && g_autoSkipCinematics.GetBool() && !skipCinematic && ( inCinematic || controlLockedCinematic ) ) {
 			SkipCinematic();
 		}
 

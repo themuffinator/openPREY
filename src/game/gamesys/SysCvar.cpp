@@ -147,7 +147,7 @@ idCVar ui_modelNum(					"ui_modelNum",				"0",			CVAR_GAME | CVAR_USERINFO | CVA
 idCVar developer(					"developer",				"0",			CVAR_GAME | CVAR_BOOL, "" );
 
 idCVar g_cinematic(					"g_cinematic",				"1",			CVAR_GAME | CVAR_BOOL, "skips updating entities that aren't marked 'cinematic' '1' during cinematics" );
-idCVar g_skipCinematics(			"g_skipCinematics",			"0",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "automatically skips scripted sections where the player has no control" );
+idCVar g_autoSkipCinematics(	"g_autoSkipCinematics",			"0",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "automatically skips scripted sections where the player has no control" );
 idCVar g_cinematicMaxSkipTime(		"g_cinematicMaxSkipTime",	"600",			CVAR_GAME | CVAR_FLOAT, "# of seconds to allow game to run when skipping cinematic.  prevents lock-up when cinematic doesn't end.", 0, 3600 );
 
 idCVar g_muzzleFlash(				"g_muzzleFlash",			"1",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "show muzzle flashes" );
@@ -343,7 +343,9 @@ idCVar pm_thirdPersonDeathMP(		"pm_thirdPersonDeathMP",	"1",			CVAR_GAME | CVAR_
 //HUMANHEAD rww
 idCVar g_showAimHealth(				"g_showAimHealth",			"0",			CVAR_GAME | CVAR_BOOL, "health display of target (gameplay testing)" );
 //HUMANHEAD END
-idCVar g_showPlayerShadow(			"g_showPlayerShadow",		"0",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "enables shadow of player model" );
+idCVar g_showPlayerShadow(			"g_showPlayerShadow",		"1",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "show your own player model's shadow in your own view, in single-player and multiplayer" );
+// openPREY: retail shipped g_showPlayerShadow 0 and every saved config archives it
+idCVar g_showPlayerShadowMigrated(	"g_showPlayerShadowMigrated",	"0",		CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL | CVAR_NOCHEAT, "one-time migration flag that turns on g_showPlayerShadow in configs saved with the retail default" );
 idCVar g_showHud(					"g_showHud",				"1",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "" );
 idCVar g_showProjectilePct(			"g_showProjectilePct",		"0",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "enables display of player hit percentage" );
 idCVar g_showBrass(					"g_showBrass",				"1",			CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "enables ejected shells from weapon" );

@@ -89,6 +89,7 @@ typedef struct glesProgram_s {
 	GLint		uSpecularMatrixT;
 	GLint		uDiffuseColor;
 	GLint		uSpecularColor;
+	GLint		uSpecularParams;	// vec4, R_InteractionSpecularParms
 	GLint		uAmbientDir;
 
 	// stencil shadow program only

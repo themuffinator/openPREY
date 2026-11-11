@@ -282,6 +282,101 @@ static bool R_IsSceneCaptureImage( const idImage *image ) {
 
 /*
 =============
+Prey shader levels
+
+A material's shaderLevelN and shaderFallbackN stages are kept or dropped while
+it is parsed, from r_shaderLevel and r_skipNewAmbient as they stood then. Retail
+Prey asked for a restart after changing either. Here every material that names
+such a stage is remembered together with the selection it was parsed under, and
+R_CheckShaderLevelCvars reparses the stale ones, so the Shader Detail row and a
+performance preset take effect at once.
+=============
+*/
+static idList<idMaterial *>	r_shaderLevelMaterials;
+static idList<int>			r_shaderLevelMaterialKeys;
+static int					r_shaderLevelCheckedKey = -1;
+
+/*
+=============
+R_EffectiveShaderLevel
+
+The stages a shader level adds are mostly Prey's custom ARB interaction
+programs (skin, cloth, masked interactions). The Vulkan module cannot run those
+yet and draws nothing for them (vk_Interactions.cpp), which left such surfaces
+black at any level above the fallbacks. Until it can, it parses every material
+at level 0, the fallback stages it draws correctly.
+=============
+*/
+static int R_EffectiveShaderLevel( void ) {
+#if defined( OPENQ4_RENDERER_VK_MODULE )
+	return 0;
+#else
+	return idMath::ClampInt( 0, 3, r_shaderLevel.GetInteger() );
+#endif
+}
+
+static int R_ShaderLevelKey( void ) {
+	return R_EffectiveShaderLevel() * 2 + ( r_skipNewAmbient.GetBool() ? 1 : 0 );
+}
+
+static void R_NoteShaderLevelMaterial( idMaterial *material ) {
+	const int key = R_ShaderLevelKey();
+	const int index = r_shaderLevelMaterials.FindIndex( material );
+	if ( index >= 0 ) {
+		r_shaderLevelMaterialKeys[index] = key;
+		return;
+	}
+	r_shaderLevelMaterials.Append( material );
+	r_shaderLevelMaterialKeys.Append( key );
+}
+
+/*
+=============
+R_CheckShaderLevelCvars
+
+Called once a frame with the backend idle (R_CheckCvars). Costs two cvar reads
+until the selection changes.
+=============
+*/
+void R_CheckShaderLevelCvars( void ) {
+	const int key = R_ShaderLevelKey();
+	if ( key == r_shaderLevelCheckedKey ) {
+		return;
+	}
+	r_shaderLevelCheckedKey = key;
+
+	int reparsed = 0;
+	for ( int i = 0; i < r_shaderLevelMaterials.Num(); i++ ) {
+		if ( r_shaderLevelMaterialKeys[i] == key ) {
+			continue;
+		}
+		// Parsing notes the material again, which stores the new key in place.
+		idMaterial *material = r_shaderLevelMaterials[i];
+		material->Invalidate();
+		material->EnsureNotPurged();
+		r_shaderLevelMaterialKeys[i] = key;
+		reparsed++;
+	}
+	if ( reparsed > 0 ) {
+		common->Printf( "Shader detail changed, reparsed %d materials\n", reparsed );
+	}
+}
+
+/*
+=============
+R_ShutdownShaderLevelMaterials
+
+The decl manager frees the materials at shutdown; drop the stale pointers.
+=============
+*/
+void R_ShutdownShaderLevelMaterials( void ) {
+	r_shaderLevelMaterials.Clear();
+	r_shaderLevelMaterialKeys.Clear();
+	r_shaderLevelCheckedKey = -1;
+}
+
+/*
+=============
 idMaterial::CommonInit
 =============
 */
@@ -305,6 +400,7 @@ void idMaterial::CommonInit() {
 	numStages = 0;
 	numAmbientStages = 0;
 	hasCustomGLSLLightingStage = false;
+	hasInteractionProgramStage = false;
 	stages = NULL;
 	editorImage = NULL;
 	lightFalloffImage = NULL;
@@ -561,8 +657,15 @@ static infoParm_t	infoParms[] = {
 	{"aasobstacle",	0,	0,	CONTENTS_AAS_OBSTACLE },// used to compile an obstacle into AAS that can be enabled/disabled
 	{"flashlight_trigger",	0,	0,	CONTENTS_FLASHLIGHT_TRIGGER }, // used for triggers that are activated by the flashlight
 #ifdef HUMANHEAD
-	{"forcefield",	0,	0,	CONTENTS_FORCEFIELD },	// forcefield matter
-	{"forcefield_nobullets",	1,	SURFTYPE_FORCEFIELD,	CONTENTS_FORCEFIELD },
+	// Retail Prey's forcefield is non-solid, shootable, blocks splash damage and
+	// carries the forcefield surface type; the bullet-proof variant has no type.
+	{"forcefield",	CONTENTS_SOLID,	SURFTYPE_FORCEFIELD,	CONTENTS_FORCEFIELD | CONTENTS_BLOCK_RADIUSDAMAGE | CONTENTS_SHOOTABLE },
+	{"forcefield_nobullets",	CONTENTS_SOLID,	0,	CONTENTS_FORCEFIELD },
+	// clearSolid is a contents mask in retail Prey: seeThru removes
+	// CONTENTS_OPAQUE and noSeeThru adds it. Opaque coverage still re-adds
+	// CONTENTS_OPAQUE once parsing finishes, exactly as retail does.
+	{"seeThru",		CONTENTS_OPAQUE,	0,	0 },
+	{"noSeeThru",	0,	0,	CONTENTS_OPAQUE },
 	{"spiritbridge",0,	0,	CONTENTS_SPIRITBRIDGE },	// spirit-walk-only collision
 	{"blockradiusdamage",	0,	0,	CONTENTS_BLOCK_RADIUSDAMAGE },	// blocks splash damage
 	{"block_radiusdamage",	0,	0,	CONTENTS_BLOCK_RADIUSDAMAGE },	// compatibility alias
@@ -620,7 +723,6 @@ static infoParm_t	infoParms[] = {
 	{"tile",		0,	SURFTYPE_TILE,		0 },	// tile
 	{"wallwalk",	0,	SURFTYPE_WALLWALK,	0 },	// wallwalk
 	{"altmetal",	0,	SURFTYPE_ALTMETAL,	0 },	// alternate metal
-	{"forcefield",	0,	SURFTYPE_FORCEFIELD,0 },	// forcefield
 	{"pipe",		0,	SURFTYPE_PIPE,		0 },	// pipe
 	{"spirit",		0,	SURFTYPE_SPIRIT,	0 },	// spirit
 	{"chaff",		0,	SURFTYPE_CHAFF,		0 },	// chaff
@@ -658,9 +760,9 @@ bool idMaterial::CheckSurfaceParm( idToken *token ) {
 			}
 			surfaceFlags |= infoParms[i].surfaceFlags;
 			contentFlags |= infoParms[i].contents;
-			if ( infoParms[i].clearSolid ) {
-				contentFlags &= ~CONTENTS_SOLID;
-			}
+			// clearSolid is the mask of contents bits the parm removes; the
+			// 1 used by most entries is CONTENTS_SOLID
+			contentFlags &= ~infoParms[i].clearSolid;
 			return true;
 		}
 	}
@@ -1167,6 +1269,8 @@ void idMaterial::ClearStage( shaderStage_t *ss ) {
 	ss->conditionRegister = GetExpressionConstant( 1 );
 	ss->alphaTestMode = GL_GREATER;
 	ss->alphaTestRegister = GetExpressionConstant( 0.5f );
+	ss->specularExponent = MATERIAL_DEFAULT_SPECULAR_EXPONENT;
+	ss->specularBrightness = MATERIAL_DEFAULT_SPECULAR_BRIGHTNESS;
 	ss->color.registers[0] =
 	ss->color.registers[1] =
 	ss->color.registers[2] =
@@ -1507,6 +1611,10 @@ void idMaterial::ParseFragmentMap( idLexer &src, newShaderStage_t *newStage ) {
 		}
 		if ( !token.Icmp( "nomips" ) ) {
 			imageFlags = R_ResolveMaterialNoMipFlags( pd->qualityInputs, imageFlags );
+			continue;
+		}
+		if ( !token.Icmp( "highres" ) ) {
+			imageFlags |= IMAGEFLAG_HIGHRES;
 			continue;
 		}
 
@@ -1858,6 +1966,10 @@ void idMaterial::ParseShaderTexture( idLexer &src, newShaderStage_t *newStage ) 
 		}
 		if ( !token.Icmp( "nomips" ) ) {
 			imageFlags = R_ResolveMaterialNoMipFlags( pd->qualityInputs, imageFlags );
+			continue;
+		}
+		if ( !token.Icmp( "highres" ) ) {
+			imageFlags |= IMAGEFLAG_HIGHRES;
 			continue;
 		}
 
@@ -2225,7 +2337,7 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 			continue;
 		}
 		if ( !token.Icmp( "highres" ) ) {
-			// Legacy authoring quality hint; modern image selection is automatic.
+			imageFlags |= IMAGEFLAG_HIGHRES;
 			continue;
 		}
 		if ( !token.Icmp( "nopicmip" ) ) {
@@ -2591,7 +2703,8 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 				return;
 			}
 			const int requestedLevel = suffix[0] - '0';
-			if ( r_shaderLevel.GetInteger() < requestedLevel || r_skipNewAmbient.GetBool() ) {
+			R_NoteShaderLevelMaterial( this );
+			if ( R_EffectiveShaderLevel() < requestedLevel || r_skipNewAmbient.GetBool() ) {
 				src.SkipBracedSection( false );
 				return;
 			}
@@ -2605,16 +2718,22 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 				return;
 			}
 			const int requestedLevel = suffix[0] - '0';
-			if ( r_shaderLevel.GetInteger() >= requestedLevel && !r_skipNewAmbient.GetBool() ) {
+			R_NoteShaderLevelMaterial( this );
+			if ( R_EffectiveShaderLevel() >= requestedLevel && !r_skipNewAmbient.GetBool() ) {
 				src.SkipBracedSection( false );
 				return;
 			}
 			continue;
 		}
 		if ( !token.Icmp( "specularExp" ) ) {
-			// Legacy fixed-function hint. Consume its authored value(s).
-			while ( src.ReadTokenOnLine( &token ) ) {
+			// Retail Prey: "specularExp <exponent>, <brightness>", a missing
+			// comma defaults the material.
+			ss->specularExponent = src.ParseFloat();
+			if ( !src.ExpectTokenString( "," ) ) {
+				SetMaterialFlag( MF_DEFAULTED );
+				return;
 			}
+			ss->specularBrightness = src.ParseFloat();
 			continue;
 		}
 		if ( !token.Icmp( "scopeView" ) || !token.Icmp( "notScopeView" ) ||
@@ -3513,18 +3632,16 @@ void idMaterial::ParseDeform( idLexer &src ) {
 		return;
 	}
 	if ( !token.Icmp( "beam" ) ) {
-		// Retail Prey uses beam as the authored synonym for Doom 3's tube deform.
-		deform = DFRM_TUBE;
-		cullType = CT_TWO_SIDED;
-		SetMaterialFlag( MF_NOSHADOWS );
+		// Retail Prey's own deform, distinct from tube: it changes neither the
+		// cull type nor shadowing (beam materials say noShadows themselves).
+		deform = DFRM_BEAM;
 		return;
 	}
 	if ( !token.Icmp( "jitter" ) ) {
-		// Obsolete fixed-function effect. Consume all same-line parameters so the
-		// declaration remains aligned and render the undeformed geometry.
-		while ( src.ReadTokenOnLine( &token ) ) {
-		}
-		deform = DFRM_NONE;
+		// Retail Prey evaluates one expression whose integer bits select the
+		// offsets and scales applied by R_JitterDeform.
+		deform = DFRM_JITTER;
+		deformRegisters[0] = ParseExpression( src );
 		return;
 	}
 	if ( !token.Icmp( "corona" ) ) {
@@ -3729,6 +3846,12 @@ void idMaterial::ParseMaterial( idLexer &src ) {
 		pd->registerIsTemporary[i] = true;		// they aren't constants that can be folded
 	}
 	numStages = 0;
+	// The parse data is zeroed before every parse, so without this line no
+	// material was ever constant and every surface evaluated its registers
+	// every view. Each term that can vary at run time clears it: time, the
+	// entity and global parms, their decal and vertex aliases, "sound",
+	// "glslPrograms", and the "colored" stage shorthand.
+	pd->registersAreConstant = true;	// until shown otherwise
 
 	textureRepeat_t	trpDefault = TR_REPEAT;		// allow a global setting for repeat
 
@@ -3816,9 +3939,9 @@ void idMaterial::ParseMaterial( idLexer &src ) {
 			SetMaterialFlag( MF_NEED_CURRENT_RENDER );
 			continue;
 		}
-		else if ( !token.Icmp( "skipClip" ) || !token.Icmp( "noseethru" ) ||
-				!token.Icmp( "lightWholeMesh" ) ) {
-			// Legacy Prey editor/authoring metadata with no runtime effect.
+		else if ( !token.Icmp( "skipClip" ) || !token.Icmp( "lightWholeMesh" ) ) {
+			// Retail Prey records these as MF_SKIPCLIP / MF_LIGHT_WHOLE_MESH, but
+			// neither PREY.exe nor the game library ever tests either flag.
 			continue;
 		}
 // jmarshall end
@@ -4107,33 +4230,60 @@ void idMaterial::ParseMaterial( idLexer &src ) {
 			newSrc.FreeSource();
 			continue;
 		}
-		// DECAL_MACRO for backwards compatibility with the preprocessor macros
-		else if ( !token.Icmp( "DECAL_MACRO" ) || !token.Icmp( "decal_alphatest_macro" ) ||
-				!token.Icmp( "scorch_macro" ) ) {
-			// polygonOffset
-			SetMaterialFlag( MF_POLYGONOFFSET );
-			polygonOffset = 1;
+		// Retail Prey's built-in material macros, matched case-insensitively and
+		// with the exact state PREY.exe applies for each one.
+		else if ( !token.Icmp( "DECAL_MACRO" ) || !token.Icmp( "DECAL_ALPHATEST_MACRO" ) ||
+				!token.Icmp( "SCORCH_MACRO" ) || !token.Icmp( "OVERLAY_MACRO" ) ) {
+			// the alpha-tested decal is the only one without a polygon offset
+			if ( token.Icmp( "DECAL_ALPHATEST_MACRO" ) ) {
+				SetMaterialFlag( MF_POLYGONOFFSET );
+				polygonOffset = 1;
+			}
 
-			// keep separately clipped decal geometry
-			surfaceFlags |= SURF_DISCRETE;
+			// keep separately clipped decal geometry that never spawns impacts
+			surfaceFlags |= SURF_DISCRETE | SURF_NOIMPACT;
 			contentFlags &= ~CONTENTS_SOLID;
 
-			// sort decal
 			sort = SS_DECAL;
-
-			// noShadows
 			SetMaterialFlag( MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT );
 			coverage = MC_TRANSLUCENT;
+			allowOverlays = false;
 			continue;
 		}
-		else if ( !token.Icmp( "overlay_macro" ) ) {
-			// Authored metadata; unlike decal macros this does not change coverage.
+		else if ( !token.Icmp( "GLASS_MACRO" ) ) {
+			SetMaterialFlag( MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT );
+			coverage = MC_TRANSLUCENT;
+			pd->forceOverlays = true;
+			sort = SS_MEDIUM;
+			contentFlags &= ~CONTENTS_OPAQUE;
+			surfaceFlags = ( surfaceFlags & ~SURF_TYPE_MASK ) | SURFTYPE_GLASS;
 			continue;
 		}
-		else if ( !token.Icmp( "skipClip" ) || !token.Icmp( "glass_macro" ) ||
-				!token.Icmp( "skybox_macro" ) || !token.Icmp( "seeThru" ) ||
-				!token.Icmp( "noSeeThru" ) ) {
-			// Legacy authoring macros whose declarations already contain stages.
+		else if ( !token.Icmp( "SKYBOX_MACRO" ) ) {
+			SetMaterialFlag( MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT | MF_NOSELFSHADOW );
+			surfaceFlags |= SURF_NOIMPACT | SURF_NOFRAGMENT;
+			allowOverlays = false;
+			coverage = MC_OPAQUE;
+			continue;
+		}
+		else if ( !token.Icmp( "SPRITE_MACRO" ) ) {
+			surfaceFlags |= SURF_DISCRETE;
+			contentFlags &= ~CONTENTS_SOLID;
+			SetMaterialFlag( MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT );
+			coverage = MC_TRANSLUCENT;
+			deform = DFRM_SPRITE;
+			cullType = CT_TWO_SIDED;
+			continue;
+		}
+		else if ( !token.Icmp( "EFFECT_MACRO" ) || !token.Icmp( "ALPHA_MACRO" ) ) {
+			// the effect macro is also non-solid; the alpha macro keeps its contents
+			if ( !token.Icmp( "EFFECT_MACRO" ) ) {
+				contentFlags &= ~CONTENTS_SOLID;
+			}
+			SetMaterialFlag( MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT );
+			surfaceFlags |= SURF_NOIMPACT;
+			coverage = MC_TRANSLUCENT;
+			cullType = CT_TWO_SIDED;
 			continue;
 		}
 		else if ( token == "{" ) {
@@ -4466,6 +4616,15 @@ bool idMaterial::Parse( const char *text, const int textLength ) {
 		const newShaderStage_t *newStage = stages[i].newStage;
 		if ( newStage != NULL && newStage->customLighting && newStage->glslProgram ) {
 			hasCustomGLSLLightingStage = true;
+			break;
+		}
+	}
+
+	// OPENPREY
+	hasInteractionProgramStage = false;
+	for ( i = 0 ; i < numStages ; i++ ) {
+		if ( stages[i].lighting == SL_INTERACTION ) {
+			hasInteractionProgramStage = true;
 			break;
 		}
 	}
@@ -5382,6 +5541,26 @@ bool idMaterial::HasActiveCustomGLSLLighting( const float *registers ) const {
 
 /*
 ===================
+idMaterial::HasActiveInteractionProgramStage
+
+OPENPREY: Prey's shaderLevelN stages put per-light ARB programs on characters
+and some walls. The flag keeps the common material at one test.
+===================
+*/
+bool idMaterial::HasActiveInteractionProgramStage( const float *registers ) const {
+	if ( !hasInteractionProgramStage ) {
+		return false;
+	}
+	for ( int i = 0 ; i < numStages ; i++ ) {
+		if ( stages[i].lighting == SL_INTERACTION && MaterialStageIsActive( stages[i], registers ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+===================
 idMaterial::HasActiveStockLightingInteractions
 ===================
 */
@@ -5625,6 +5804,128 @@ bool R_SpecularProbeMaterialParserSelfTest( void ) {
 
 /*
 ===================
+R_MaterialConstantRegistersSelfTest
+
+A material hands every surface the one register block evaluated at parse time
+(idMaterial::ConstantRegisters) only when no term in it can vary at run time.
+Every such term has to withhold the block; a material built from literals and
+parse-time constants has to supply one equal to a fresh evaluation under any
+view and entity; and r_useConstantMaterials 0 withholds them all.
+===================
+*/
+static bool R_MaterialConstantRegistersSelfTest( void ) {
+	// keep in step with idMaterial::ParseTerm and the "colored" stage shorthand
+	static const char *const varyingStages[] = {
+		"rgb time",
+		"rgb parm0", "rgb parm1", "rgb parm2", "rgb parm3", "rgb parm4", "rgb parm5",
+		"rgb parm6", "rgb parm7", "rgb parm8", "rgb parm9", "rgb parm10", "rgb parm11",
+		"rgb global0", "rgb global1", "rgb global2", "rgb global3",
+		"rgb global4", "rgb global5", "rgb global6", "rgb global7",
+		"rgb DecalLife", "rgb DecalSpawn", "rgb VertexRandomizer",
+		"rgb sound", "rgb glslPrograms",
+		"rgb 0.5 + 0.25 * ( time > 2 )", "alphaTest 0.25 + parm3", "if ( global2 )",
+		"colored",
+		// OPENPREY: Prey's thirteenth parm and its alias, the view registers the
+		// game sets per view, their stage keywords, and fragmentPrograms, which
+		// is a register here and a parse-time literal upstream
+		"rgb parm12", "rgb distance",
+		"rgb scopeView", "rgb spiritWalk", "rgb shuttleView",
+		"scopeView", "notScopeView", "spiritWalk", "notSpiritWalk", "shuttleView",
+		"rgb fragmentPrograms",
+	};
+	// folded to a literal while parsing, so a surface that evaluates reads the
+	// same number as the block does
+	static const char *const constantStages[] = {
+		"rgb 0.25",
+		"rgb 0.75 - 0.25", "rgb ( 3 / 4 ) > 0.5", "alphaTest 7 % 4",
+		"rgb POTCorrectionX", "rgb POTCorrectionY",
+		"rgb VideoWidth", "rgb VideoHeight", "rgb IsMultiplayer",
+	};
+
+	auto parseStage = []( const char *stageText, idDecl *&decl ) -> idMaterial * {
+		decl = declManager->AllocateDecl( DECL_MATERIAL );
+		if ( decl == NULL ) {
+			return NULL;
+		}
+		const idStr text = va( "material _selftest_constant_registers {\n {\n  blend add\n  map _white\n  %s\n }\n}\n", stageText );
+		idMaterial *material = static_cast<idMaterial *>( decl );
+		if ( !material->Parse( text.c_str(), text.Length() ) ) {
+			DeclManager_FreeAllocatedDecl( decl );
+			decl = NULL;
+			return NULL;
+		}
+		return material;
+	};
+
+	const bool savedConstantMaterials = r_useConstantMaterials.GetBool();
+	r_useConstantMaterials.SetBool( true );
+	const char *failure = NULL;
+	const char *failedStage = "";
+
+	for ( int i = 0; failure == NULL && i < static_cast<int>( sizeof( varyingStages ) / sizeof( varyingStages[0] ) ); ++i ) {
+		idDecl *decl = NULL;
+		const idMaterial *material = parseStage( varyingStages[i], decl );
+		if ( material == NULL ) {
+			failure = "did not parse";
+		} else if ( material->ConstantRegisters() != NULL ) {
+			failure = "varies at run time but was given a constant block";
+		}
+		failedStage = varyingStages[i];
+		if ( decl != NULL ) {
+			DeclManager_FreeAllocatedDecl( decl );
+		}
+	}
+
+	for ( int i = 0; failure == NULL && i < static_cast<int>( sizeof( constantStages ) / sizeof( constantStages[0] ) ); ++i ) {
+		idDecl *decl = NULL;
+		const idMaterial *material = parseStage( constantStages[i], decl );
+		failedStage = constantStages[i];
+		if ( material == NULL ) {
+			failure = "did not parse";
+			continue;
+		}
+		const float *constants = material->ConstantRegisters();
+		if ( constants == NULL ) {
+			failure = "is constant but was given no block";
+		} else {
+			// a view and an entity that would move any register that reads them
+			float evaluated[MAX_EXPRESSION_REGISTERS];
+			float entityParms[MAX_ENTITY_SHADER_PARMS];
+			viewDef_t evaluationView;
+			memset( evaluated, 0, sizeof( evaluated ) );
+			memset( &evaluationView, 0, sizeof( evaluationView ) );
+			evaluationView.floatTime = 3.25f;
+			for ( int parm = 0; parm < MAX_ENTITY_SHADER_PARMS; ++parm ) {
+				entityParms[parm] = 0.125f * ( parm + 1 );
+			}
+			for ( int parm = 0; parm < MAX_GLOBAL_SHADER_PARMS; ++parm ) {
+				evaluationView.renderView.shaderParms[parm] = 0.0625f * ( parm + 1 );
+			}
+			material->EvaluateRegisters( evaluated, entityParms, &evaluationView );
+			const int count = material->GetNumRegisters() - EXP_REG_NUM_PREDEFINED;
+			if ( count <= 0 || memcmp( constants + EXP_REG_NUM_PREDEFINED, evaluated + EXP_REG_NUM_PREDEFINED,
+					count * sizeof( float ) ) != 0 ) {
+				failure = "constant block differs from an evaluation";
+			}
+		}
+		r_useConstantMaterials.SetBool( false );
+		if ( failure == NULL && material->ConstantRegisters() != NULL ) {
+			failure = "r_useConstantMaterials 0 still hands out the constant block";
+		}
+		r_useConstantMaterials.SetBool( true );
+		DeclManager_FreeAllocatedDecl( decl );
+	}
+
+	r_useConstantMaterials.SetBool( savedConstantMaterials );
+	if ( failure != NULL ) {
+		common->Printf( "RendererPBRMaterial parser self-test: constant registers: stage '%s' %s\n", failedStage, failure );
+		return false;
+	}
+	return true;
+}
+
+/*
+===================
 R_PBRMaterialParserSelfTest
 
 Runtime parser test using only intrinsic images.  It proves metadata parsing,
@@ -5755,6 +6056,9 @@ bool R_PBRMaterialParserSelfTest( void ) {
 	DeclManager_FreeAllocatedDecl( mixedDecl );
 	if ( !ok ) {
 		common->Printf( "RendererPBRMaterial parser self-test: individual constant-register proof failed\n" );
+		return false;
+	}
+	if ( !R_MaterialConstantRegistersSelfTest() ) {
 		return false;
 	}
 

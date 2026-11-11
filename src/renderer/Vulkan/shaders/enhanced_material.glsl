@@ -2,7 +2,8 @@
 // DecodeLocalNormal / EnhancedSpecularTerm math of OpenGL's
 // material_interaction.fs and shadow_interaction.fs. Classic draws push
 // pc.c.w = 1 to enable it, with pc.d.y specular boost, pc.d.z Fresnel and
-// pc.d.w normal scale (those components belong to native PBR draws otherwise).
+// pc.d.w normal scale (those components belong to native PBR draws, and to
+// stock_specular.glsl on stock classic draws, otherwise).
 // Include after SafeNormalize.
 
 bool EnhancedMaterialActive() {

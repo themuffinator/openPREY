@@ -1383,6 +1383,13 @@ idVarDef *idProgram::AllocDef( idTypeDef *type, const char *name, idVarDef *scop
 			if ( scope->Type() == ev_function ) {
 				def_y->value.stackOffset = def_x->value.stackOffset + sizeof( float );
 				def_z->value.stackOffset = def_x->value.stackOffset + ( 2 * sizeof( float ) );
+				// The three component defs each reserved a type_float slot, which is
+				// pointer-sized on 64-bit: 24 bytes for a vector that callers push as
+				// E_EVENT_SIZEOF_VEC (16). Every parameter after a vector parameter was
+				// then read 8 bytes past where the caller pushed it (Prey's roadhouse
+				// DistanceToXY, feeding tower SlabNPCGetOffsetOrigin). The components
+				// alias the vector, so reserve exactly one vector slot.
+				scope->value.functionPtr->locals = def_x->value.stackOffset + type->Size();
 			} else {
 				def_y->value.bytePtr = def_x->value.bytePtr + sizeof( float );
 				def_z->value.bytePtr = def_x->value.bytePtr + ( 2 * sizeof( float ) );
@@ -2196,6 +2203,21 @@ int idProgram::CalculateChecksum( void ) const {
 	result = MD4_BlockChecksum( statementList, ( sizeof(statementBlock_t) * statements.Num() ) );
 
 	delete [] statementList;
+
+	// openPREY: saved threads hold raw stack frames, so the frame layout is part
+	// of what a savegame depends on. Statements alone did not change when vector
+	// stack variables stopped over-reserving on 64-bit; a save made with the old
+	// frames must take the restart-with-persistent-data path, not resume with
+	// misaligned locals.
+	if ( functions.Num() > 0 ) {
+		idList<int> frameLayout;
+		frameLayout.SetNum( functions.Num() * 2 );
+		for ( i = 0; i < functions.Num(); i++ ) {
+			frameLayout[ i * 2 + 0 ] = functions[ i ].parmTotal;
+			frameLayout[ i * 2 + 1 ] = functions[ i ].locals;
+		}
+		result ^= MD4_BlockChecksum( frameLayout.Ptr(), sizeof( int ) * frameLayout.Num() );
+	}
 
 	return result;
 }

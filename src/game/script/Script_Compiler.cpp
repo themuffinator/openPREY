@@ -2162,6 +2162,13 @@ void idCompiler::ParseFunctionDef( idTypeDef *returnType, const char *name ) {
 		parm = gameLocal.program.AllocDef( type->GetParmType( i ), type->GetParmName( i ), def, false );
 	}
 
+	// openPREY: callers push exactly parmSize bytes per argument. If the
+	// parameter defs reserve a different amount, every later parameter is read
+	// from the wrong stack slot (as vector parameters did on 64-bit).
+	if ( func->locals != func->parmTotal ) {
+		Error( "parameter frame of '%s' is %d bytes but callers push %d", def->GlobalName(), func->locals, func->parmTotal );
+	}
+
 	oldscope = scope;
 	scope = def;
 

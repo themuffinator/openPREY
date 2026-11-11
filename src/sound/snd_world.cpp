@@ -135,7 +135,6 @@ private:
 static bool ReadDemoShaderParms( idSoundDemoCommandReader& reader, soundShaderParms_t& parms )
 {
 	memset( &parms, 0, sizeof( parms ) );
-	parms.subIndex = -1;
 	if( !reader.ReadFloat( parms.minDistance, "minimum distance" ) ||
 		!reader.ReadFloat( parms.maxDistance, "maximum distance" ) ||
 		!reader.ReadFloat( parms.volume, "volume" ) ||
@@ -1290,6 +1289,12 @@ void idSoundWorldLocal::ResolveOrigin( const int stackDepth, const soundPortalTr
 	newStack.portalArea = soundArea;
 	newStack.prevStack = prevStack;
 
+	if( soundArea < 0 || soundArea >= renderWorld->NumAreas() )
+	{
+		// an area left over from a previously loaded map; NumPortalsInArea would Error()
+		return;
+	}
+
 	int numPortals = renderWorld->NumPortalsInArea( soundArea );
 	for( int p = 0; p < numPortals; p++ )
 	{
@@ -1973,6 +1978,9 @@ bool idSoundWorldLocal::ReadSoundState( idFile* savefile, idDemoFile* demoFile )
 		{
 			return AbortRead();
 		}
+		// Emitter parms are overrides and never name a subtitle table; older
+		// states stored -1 or a position in that session's table.
+		emitter->parms.subIndex = 0;
 
 		int numChannels = 0;
 		if( !reader.ReadInt( numChannels, "emitter channel count" ) )
@@ -2034,6 +2042,10 @@ bool idSoundWorldLocal::ReadSoundState( idFile* savefile, idDemoFile* demoFile )
 				reader.Fail( va( "could not resolve sound shader '%s'", shaderName.c_str() ) );
 				return AbortRead();
 			}
+			// A subtitle handle is a position in this session's table, which
+			// follows decl parse order. Take it from the resolved shader rather
+			// than trusting a saved handle (only shaders carry subtitles).
+			channel->parms.subIndex = channel->soundShader->GetParms()->subIndex;
 			// Saves and demos from before the retail area reverb stored the old
 			// shader default wet level of 0, which no override can produce now: a
 			// zero override is ignored, so only a shader saying "reverb 0" can.

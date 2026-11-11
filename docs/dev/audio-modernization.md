@@ -365,6 +365,23 @@ identifiers only. The overlay and the audit share one transcript lookup
 client, cinematics included, and probes the audible voices and subtitle cues at full
 and muted Dialogue Volume. After each opening it records the map's audio residency.
 
+**Prey subtitle tables.** Prey sound shaders carry their own captions
+(`subtitleN [cK] <seconds> "#str_…"`). Each shader's cues form a table, and
+`soundShaderParms_t::subIndex` holds a 1-based handle to it, with 0 meaning none:
+retail `Prey.exe` returns position + 1 from its lookup. The field is part of the
+game ABI, and the game zero-fills its per-entity override parms, so an override
+replaces the shader's handle only when it is non-zero. Earlier openPREY builds used
+0-based handles with -1 for none. Every entity sound then picked up table 0: in
+`game/roadhouse`, the opening mirror monologue showed over footsteps, passing cars
+and other characters' lines, well before the mirror scene. A cue lasts until the
+next cue starts, and the last cue lasts until the channel ends. The last cue used to
+take the previous cue's end time, so a shader's final line was dropped or flickered.
+Saved sound states take the handle from the resolved shader, because handles follow
+decl parse order and can differ between sessions. `s_logSubtitles 1` prints a
+`SOUND_SUBTITLE` line whenever the caption queue changes. Each line gives the sound
+time, the shader, the cue and its string key, the channel's start time, the cue's end
+time and whether a hardware voice is playing.
+
 **Streams on recycled voices.** The voice pool hands out its least recently used
 voice, so after the first minute or so of play every new sound reuses a source that
 has played. OpenAL keeps such a source `AL_STOPPED` and counts every buffer queued on
@@ -573,6 +590,34 @@ Receiver baseline movement remains in the report, but its sign is not a clock
 test: varying network delay can exceed the 10 ms drift injected over ten seconds.
 This diagnostic observes the existing timestamp; it does not alter admission or
 the wire protocol.
+
+### Map-load music off the main thread (November 11)
+
+A mapDef's `snd_loadmusic` used to play as a menu-world channel. Every
+`mapload_*` track is a compressed stream, and a world voice refills its queue
+(about one second of audio) only when the loading pacifier calls
+`soundSystem->Render()`. On `game/roadhouse` the pacifier fired up to 1.0-1.6 s
+apart, so the voice underran and was recreated further into the track several
+times per load. The music stuttered and skipped forward, and it began only after
+the first stall (the first block "waited 1020 ms"). Retail Doom 3 and Prey mixed
+on an asynchronous timer that a load could not starve.
+
+`idSoundSystem::StartLoadingMusic` (`src/sound/OpenAL/AL_LoadingMusic.cpp`)
+now plays a streamed load track on its own OpenAL source and thread. The file
+is read into memory once and decoded with libvorbisfile, which recovers retail
+OV_HOLE pages. Four 8192-frame buffers are topped up every 5 ms. Nothing is
+shared with the sound worlds or the voice pool, and the thread makes no call
+that can raise an AL error, so it never consumes an error the main thread's
+`CheckALErrors` expects. The gain matches what the menu-world channel had
+(shader volume, `s_volume`, and `s_musicVolume` for music-class shaders) and
+updates from `Render()`. Mute and focus-mute act through the listener gain. A
+looping shader keeps retail's random start position. Shaders with a leadin, and
+samples that are not streamed, still play in the menu world, where a resident
+buffer loops inside OpenAL without main-thread service. `ExecuteMapChange`
+stops the music when the load finishes, `idSessionLocal::Stop` stops it when a
+load aborts, and hardware shutdown stops it before the context goes away. With
+`s_debugHardware 1` the stop reports its duration and underrun count. A cold
+13.5 s roadhouse load reported 0 underruns over 16 s.
 
 ## Deferred
 

@@ -267,9 +267,13 @@ static bool WindowConsumesDirectionalNavigation( idWindow *window, int key ) {
 			key == K_PGUP || key == K_PGDN;
 	}
 
-	if ( dynamic_cast<idEditWindow *>( window ) != NULL ) {
+	if ( const idEditWindow *edit = dynamic_cast<idEditWindow *>( window ) ) {
+		// A one-line field has no use for Up and Down, so they step on: a
+		// settings page's number field would otherwise hold the focus for good.
+		if ( key == K_UPARROW || key == K_KP_UPARROW || key == K_DOWNARROW || key == K_KP_DOWNARROW ) {
+			return edit->IsMultiLine();
+		}
 		return key == K_LEFTARROW || key == K_KP_LEFTARROW || key == K_RIGHTARROW || key == K_KP_RIGHTARROW ||
-			key == K_UPARROW || key == K_KP_UPARROW || key == K_DOWNARROW || key == K_KP_DOWNARROW ||
 			key == K_HOME || key == K_END || key == K_DEL || key == K_INS || key == K_BACKSPACE;
 	}
 
@@ -282,7 +286,8 @@ KeyboardMenuFocusDirection
 
 The focus step an arrow key asks of a menu: none while the focused control
 uses that key itself (a list's rows, a slider's or choice's value, an edit
-field's caret) or while a control holds the capture.
+field's caret, a field of several lines' scroll) or while a control holds the
+capture.
 ================
 */
 static bool KeyboardMenuFocusDirection( idWindow *desktop, const sysEvent_t *event, int &focusDirection ) {
@@ -310,7 +315,11 @@ static bool KeyboardMenuFocusDirection( idWindow *desktop, const sysEvent_t *eve
 		return false;
 	}
 	idWindow *focused = desktop->GetFocusedChild();
-	if ( dynamic_cast<idBindWindow *>( focused ) != NULL || WindowConsumesDirectionalNavigation( focused, event->evValue ) ) {
+	// A key row steps like any other control: while it waits for its key the
+	// GUI hands the next key to the row before this window sees it
+	// (idUserInterfaceLocal::HandleEvent's bind handler), so no arrow arrives
+	// here to be mistaken for a step.
+	if ( WindowConsumesDirectionalNavigation( focused, event->evValue ) ) {
 		return false;
 	}
 	focusDirection = direction;
@@ -323,14 +332,159 @@ static bool WindowHasNativeEnterHandling( idWindow *window ) {
 		dynamic_cast<idListWindow *>( window ) != NULL;
 }
 
+/*
+================
+SortFocusRows
+
+Reading order within one column: rows from the top, each from its leading
+edge (SortFocusOrder).
+================
+*/
+static void SortFocusRows( idList<idWindow *> &windows ) {
+	const int count = windows.Num();
+	for ( int i = 1; i < count; ++i ) {
+		idWindow *moving = windows[ i ];
+		const float center = moving->GetDrawRect().y + moving->GetDrawRect().h * 0.5f;
+		int at = i;
+		while ( at > 0 && windows[ at - 1 ]->GetDrawRect().y + windows[ at - 1 ]->GetDrawRect().h * 0.5f > center ) {
+			windows[ at ] = windows[ at - 1 ];
+			--at;
+		}
+		windows[ at ] = moving;
+	}
+	for ( int start = 0; start < count; ) {
+		const idRectangle &first = windows[ start ]->GetDrawRect();
+		int end = start + 1;
+		while ( end < count ) {
+			const idRectangle &next = windows[ end ]->GetDrawRect();
+			const float apart = ( next.y + next.h * 0.5f ) - ( first.y + first.h * 0.5f );
+			if ( apart > Min( first.h, next.h ) * 0.5f ) {
+				break;
+			}
+			++end;
+		}
+		for ( int i = start + 1; i < end; ++i ) {
+			idWindow *moving = windows[ i ];
+			int at = i;
+			while ( at > start && windows[ at - 1 ]->GetDrawRect().x > moving->GetDrawRect().x ) {
+				windows[ at ] = windows[ at - 1 ];
+				--at;
+			}
+			windows[ at ] = moving;
+		}
+		start = end;
+	}
+}
+
+/*
+================
+SortFocusOrder
+
+The order a window's children are stepped in: column by column from the
+leading edge, each column in reading order. Windows whose horizontal extents
+overlap, directly or through others, form one column, so a page's list of
+tiers stands apart from the list of matches beside it while a settings row's
+value and the button after it stay together. Within a column rows run from
+the top, each from its leading edge; two windows share a row when their
+vertical centers lie within half the shorter one's height. Windows in one
+place keep their file order, so full-size pages stay as the GUI lists them.
+A settings page authored out of order (the stock DISPLAY page lists V-Sync
+after Ambient brightness) then steps the way it reads.
+================
+*/
+static void SortFocusOrder( idList<idWindow *> &windows ) {
+	const int count = windows.Num();
+	if ( count < 2 ) {
+		return;
+	}
+	// Columns: the connected groups of overlapping horizontal extents.
+	idList<int> column;
+	column.SetNum( count );
+	for ( int i = 0; i < count; ++i ) {
+		column[ i ] = i;
+	}
+	for ( bool merged = true; merged; ) {
+		merged = false;
+		for ( int i = 0; i < count; ++i ) {
+			const idRectangle &a = windows[ i ]->GetDrawRect();
+			for ( int j = i + 1; j < count; ++j ) {
+				if ( column[ i ] == column[ j ] ) {
+					continue;
+				}
+				const idRectangle &b = windows[ j ]->GetDrawRect();
+				if ( Min( a.x + a.w, b.x + b.w ) - Max( a.x, b.x ) > 1.0f ) {
+					const int from = column[ j ], to = column[ i ];
+					for ( int k = 0; k < count; ++k ) {
+						if ( column[ k ] == from ) {
+							column[ k ] = to;
+						}
+					}
+					merged = true;
+				}
+			}
+		}
+	}
+	idList<idWindow *> ordered;
+	idList<bool> taken;
+	taken.SetNum( count );
+	for ( int i = 0; i < count; ++i ) {
+		taken[ i ] = false;
+	}
+	for ( int placed = 0; placed < count; ) {
+		// The leftmost column not yet placed; the first listed where two start together.
+		int pick = -1;
+		float leading = 0.0f;
+		for ( int i = 0; i < count; ++i ) {
+			if ( taken[ i ] ) {
+				continue;
+			}
+			float edge = windows[ i ]->GetDrawRect().x;
+			for ( int k = 0; k < count; ++k ) {
+				if ( column[ k ] == column[ i ] ) {
+					edge = Min( edge, windows[ k ]->GetDrawRect().x );
+				}
+			}
+			if ( pick < 0 || edge < leading ) {
+				pick = i;
+				leading = edge;
+			}
+		}
+		idList<idWindow *> members;
+		for ( int k = 0; k < count; ++k ) {
+			if ( column[ k ] == column[ pick ] ) {
+				members.Append( windows[ k ] );
+				taken[ k ] = true;
+				++placed;
+			}
+		}
+		SortFocusRows( members );
+		for ( int k = 0; k < members.Num(); ++k ) {
+			ordered.Append( members[ k ] );
+		}
+	}
+	windows = ordered;
+}
+
 static void CollectFocusWindows( idWindow *window, idList<idWindow *> &candidates ) {
+	idList<idWindow *> children;
 	for ( int i = 0; i < window->GetChildCount(); ++i ) {
 		idWindow *child = window->GetChild( i );
 		if ( child == NULL || !child->IsVisible() || child->HasNoEvents() ) {
 			continue;
 		}
+		children.Append( child );
+	}
+	SortFocusOrder( children );
+	for ( int i = 0; i < children.Num(); ++i ) {
+		idWindow *child = children[ i ];
 		if ( child->GetFlags() & WIN_CANFOCUS ) {
-			candidates.Append( child );
+			// A page's scroll bar is the pointer's: a step that landed on it
+			// had nowhere to go, since Up and Down are the bar's own. The page
+			// follows the focus instead.
+			const idSliderWindow *slider = dynamic_cast<idSliderWindow *>( child );
+			if ( slider == NULL || !slider->IsVertical() ) {
+				candidates.Append( child );
+			}
 		} else {
 			CollectFocusWindows( child, candidates );
 		}
@@ -802,6 +956,7 @@ void idWindow::CommonInit() {
 	lastTimeRun = 0;
 	origin.Zero();
 	fontNum = 0;
+	noTranslation = false;
 	timeLine = -1;
 	xOffset = yOffset = 0.0;
 	cursor = 0;
@@ -1317,6 +1472,16 @@ void idWindow::Draw( int time, float x, float y ) {
 	const int style = static_cast<int>( textstyle );
 	const bool isChatWindow = ( flags & WIN_CHATWINDOW ) != 0;
 	const char *drawn = ( textEllipsis || textKeyNames || textOneLine ) && measuredShortened ? measuredDrawn.c_str() : text.c_str();
+	// Prey's translation (prey-ui-visual-design.md 11.4), as the 2007 engine
+	// draws it: text in the alien face, shadow included, fades out as the GUI's
+	// translationAlpha rises, notranslation windows too. Then, unless the window
+	// is notranslation, the same text fades in over it in the default face:
+	// six units higher, in the text colour at translationAlpha itself.
+	const float translation = gui != NULL ? gui->TranslationAlpha() : 0.0f;
+	const bool translating = translation > 0.0f && dc->FontIs( fontNum, "fonts/alien" );
+	if ( translating ) {
+		drawTextColor[3] *= 1.0f - translation;
+	}
 	if ( textShadow ) {
 		idStr shadowText = drawn;
 		idRectangle shadowRect = textRect;
@@ -1330,6 +1495,15 @@ void idWindow::Draw( int time, float x, float y ) {
 	}
 	dc->DrawText( drawn, textScale, textAlign, drawTextColor, textRect, !( flags & WIN_NOWRAP ), -1,
 		false, NULL, 0, textAdjust, style, isChatWindow );
+	if ( translating && !noTranslation ) {
+		idRectangle translatedRect = textRect;
+		translatedRect.y -= 6.0f;
+		const idVec4 translatedColor( drawTextColor.x, drawTextColor.y, drawTextColor.z, translation );
+		dc->SetFont( 0 );	// the default face, "fonts" (idDeviceContext::SetupFonts)
+		dc->DrawText( drawn, textScale, textAlign, translatedColor, translatedRect, !( flags & WIN_NOWRAP ), -1,
+			false, NULL, 0, textAdjust, style, isChatWindow );
+		SetFont();
+	}
 
 	if ( gui_edit.GetBool() ) {
 		dc->EnableClipping( false );
@@ -3012,6 +3186,12 @@ void idWindow::SetupFromState() {
 		cursor = idDeviceContext::CURSOR_HAND;
 		flags |= WIN_CANFOCUS;
 	}
+
+	// Retail parsed "notranslation" into a window flag. Here it stays the
+	// defined variable earlier builds made of it, so a window's saved
+	// variables keep their order, and is read once the window is parsed.
+	idWinVar *noTranslationVar = FindDefinedVarByNameNoCreate( "notranslation" );
+	noTranslation = noTranslationVar != NULL && atoi( noTranslationVar->c_str() ) != 0;
 }
 
 /*
@@ -4459,9 +4639,17 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 	idStr work;
 
 	if (rebuild) {
+		// A second definition under a name that already exists is parsed into the
+		// existing window. CleanUp resets the window to its constructed state, so
+		// its place in the tree has to be carried over: its parent still lists it
+		// as a child under its original id.
 		const idStr preservedWindowDefType = windowDefType;
+		idWindow *preservedParent = parent;
+		const int preservedChildID = childID;
 		CleanUp();
 		windowDefType = preservedWindowDefType;
+		parent = preservedParent;
+		childID = preservedChildID;
 	}
 
 	drawWin_t dwt;
@@ -4504,10 +4692,20 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 			token2 = token;
 			src->UnreadToken(&token);
 			drawWin_t *dw = FindChildByName(token2.c_str());
-			if (dw && dw->win) {
+			idWindow *redefined = dw != NULL ? dw->win : NULL;
+			if ( redefined != NULL && redefined != this && redefined->UsesSimpleWindowClipBehavior() ) {
+				// Retail turned a plain leaf window into an idSimpleWindow, which this
+				// lookup reports without a window, so a later definition under the same
+				// name made a second window rather than replacing the first. Stock
+				// scripts depend on it: guis/elevatorcall.gui draws two text lines both
+				// named "elevatortext". IsSimple no longer collapses such windows, so
+				// make the same choice here.
+				redefined = NULL;
+			}
+			if ( redefined != NULL ) {
 				SaveExpressionParseState();
-				dw->win->SetWindowDefType( childDefType.c_str() );
-				dw->win->Parse(src, rebuild);
+				redefined->SetWindowDefType( childDefType.c_str() );
+				redefined->Parse(src, rebuild);
 				RestoreExpressionParseState();
 			} else {
 				idWindow *win = new idWindow(dc, gui);

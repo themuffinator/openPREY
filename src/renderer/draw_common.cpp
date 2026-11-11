@@ -208,6 +208,15 @@ static bool RB_DrawSurfIsPostFogMaterialPass( const drawSurf_t *surf ) {
 	return material->GetSort() >= SS_MEDIUM && material->GetSort() < SS_POST_PROCESS;
 }
 
+// A fullscreen 2D view has no lights or fog, and the GUI model emits its
+// surfaces in submission order without sorting them. Draw both material
+// ranges in that order in one walk, as the retail renderer did: splitting them
+// around fog drew every SS_GUI label and fill before any SS_MEDIUM image, so a
+// plate drawn under its text (a stock tab, say) covered it.
+static bool RB_DrawSurfIsOrdered2DMaterialPass( const drawSurf_t *surf ) {
+	return RB_DrawSurfIsPreFogMaterialPass( surf ) || RB_DrawSurfIsPostFogMaterialPass( surf );
+}
+
 static bool RB_DrawSurfNeedsPreFogLegacyFeedback( const drawSurf_t *surf ) {
 	return RB_DrawSurfNeedsLegacyFeedback( surf ) && RB_DrawSurfIsPreFogMaterialPass( surf );
 }
@@ -1649,34 +1658,50 @@ static bool RB_ViewRequestsSceneRenderTarget( const viewDef_t *viewDef ) {
 		|| scaledSceneRequested;
 }
 
-static bool RB_IsInlineSubviewOfScenePostProcessView( const viewDef_t *viewDef ) {
-	if ( viewDef == NULL || viewDef->superView == NULL || viewDef->subviewSurface == NULL ) {
-		return false;
-	}
-	if ( !viewDef->isSubview || viewDef->isXraySubview ) {
-		return false;
-	}
-	if ( viewDef->subviewSurface->material == NULL || viewDef->subviewSurface->material->GetSort() != SS_SUBVIEW ) {
-		return false;
+/*
+=============
+RB_InlineSubviewSceneRoot
+
+A direct SS_SUBVIEW subview (a mirror, a Prey portal or skybox portal) draws
+straight into its parent's viewport, so it has to draw into whatever target
+the root of its chain draws into. Returns that root when it is a main scene
+view, NULL for a view that keeps its own target.
+
+The whole chain is walked. A sky seen through a portal is a direct subview of
+a direct subview; testing only the immediate parent left it in the window
+while the portal view around it went to the scene target.
+=============
+*/
+static const viewDef_t *RB_InlineSubviewSceneRoot( const viewDef_t *viewDef ) {
+	if ( viewDef == NULL || !viewDef->isSubview ) {
+		return NULL;
 	}
 
-	const viewDef_t *superView = viewDef->superView;
-	if ( !RB_IsMainScenePostProcessView( superView ) ) {
-		return false;
+	const viewDef_t *candidate = viewDef;
+	while ( candidate->isSubview ) {
+		const viewDef_t *superView = candidate->superView;
+		if ( superView == NULL || candidate->subviewSurface == NULL || candidate->isXraySubview ) {
+			return NULL;
+		}
+		if ( candidate->subviewSurface->material == NULL
+			|| candidate->subviewSurface->material->GetSort() != SS_SUBVIEW ) {
+			return NULL;
+		}
+
+		// Inline subviews inherit the parent viewport and render directly into
+		// it. Dynamic render-map subviews are cropped to scratch images and
+		// must stay isolated from the parent scene target.
+		if ( !candidate->viewport.Equals( superView->viewport ) ) {
+			return NULL;
+		}
+		if ( candidate->renderView.width != superView->renderView.width
+			|| candidate->renderView.height != superView->renderView.height ) {
+			return NULL;
+		}
+		candidate = superView;
 	}
 
-	// Inline portal-sky subviews inherit the parent viewport and render
-	// directly into it. Dynamic render-map subviews are cropped to scratch
-	// images and must stay isolated from the parent scene target.
-	if ( !viewDef->viewport.Equals( superView->viewport ) ) {
-		return false;
-	}
-	if ( viewDef->renderView.width != superView->renderView.width
-		|| viewDef->renderView.height != superView->renderView.height ) {
-		return false;
-	}
-
-	return true;
+	return RB_IsMainScenePostProcessView( candidate ) ? candidate : NULL;
 }
 
 static bool RB_IsPortalSkyView( const viewDef_t *viewDef ) {
@@ -1990,14 +2015,47 @@ static bool RB_SceneRenderTargetRequested( void ) {
 	return RB_ViewRequestsSceneRenderTarget( backEnd.viewDef );
 }
 
-static bool RB_InlineSubviewSceneRenderTargetRequested( void ) {
+// The root whose scene target the current direct subview draws into, or NULL.
+static const viewDef_t *RB_InlineSubviewSceneRenderTargetRoot( void ) {
 	if ( backEnd.renderTexture != NULL ) {
-		return false;
+		return NULL;
 	}
-	if ( !RB_IsInlineSubviewOfScenePostProcessView( backEnd.viewDef ) ) {
-		return false;
+	const viewDef_t *rootView = RB_InlineSubviewSceneRoot( backEnd.viewDef );
+	return rootView != NULL && RB_ViewRequestsSceneRenderTarget( rootView ) ? rootView : NULL;
+}
+
+/*
+=============
+RB_ClearSceneRenderTargetForInlineSubviews
+
+The window is cleared as a frame starts (r_clear). The scene target is not,
+and a root view never clears colour: its opaque surfaces cover the view. A sky
+scene does not cover its view (nothing lies below its horizon), so the first
+direct subview of a root left last frame's finished image in those gaps, where
+it was post-processed again every frame until it burned out to white. Start
+the root's part of the target from black instead, as the window and Vulkan do.
+Called with the scene target bound and the view's rectangles scaled to it.
+=============
+*/
+static int rbSceneRenderTargetInlineClearFrame = -1;
+static const viewDef_t *rbSceneRenderTargetInlineClearRoot = NULL;
+
+static void RB_ClearSceneRenderTargetForInlineSubviews( const viewDef_t *rootView ) {
+	if ( rbSceneRenderTargetInlineClearFrame == backEnd.frameCount
+			&& rbSceneRenderTargetInlineClearRoot == rootView ) {
+		return;
 	}
-	return RB_ViewRequestsSceneRenderTarget( backEnd.viewDef->superView );
+	rbSceneRenderTargetInlineClearFrame = backEnd.frameCount;
+	rbSceneRenderTargetInlineClearRoot = rootView;
+
+	// a direct subview shares its root's viewport
+	const idScreenRect &viewport = backEnd.viewDef->viewport;
+	glEnable( GL_SCISSOR_TEST );
+	glScissor( RB_TileOffsetX() + viewport.x1, RB_TileOffsetY() + viewport.y1,
+		viewport.x2 + 1 - viewport.x1, viewport.y2 + 1 - viewport.y1 );
+	GL_State( GLS_DEFAULT );
+	glClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
+	glClear( GL_COLOR_BUFFER_BIT );
 }
 
 static void RB_BeginFullscreenPostProcessPass( int scissorX, int scissorY, int scissorWidth, int scissorHeight ) {
@@ -8133,6 +8191,8 @@ void RB_ShutdownScenePostProcess( void ) {
 	rbSceneRenderTargetPreserveFarDepthView = NULL;
 	rbSceneRenderTargetBackdropImportedFrame = -1;
 	rbSceneRenderTargetBackdropImportedView = NULL;
+	rbSceneRenderTargetInlineClearFrame = -1;
+	rbSceneRenderTargetInlineClearRoot = NULL;
 	rbPortalSkyBackdropFrame = -1;
 	rbPortalSkyBackdropImage = NULL;
 	rbSceneRenderTargetPortalSkyFrame = -1;
@@ -16558,7 +16618,8 @@ void	RB_STD_DrawView( void ) {
 	rbSceneScaleState_t &sceneScaleState = g_sceneScaleState;
 	RB_ClearSceneScaleState( sceneScaleState );
 	const bool rootSceneRenderTargetRequested = RB_SceneRenderTargetRequested();
-	const bool inlineSubviewSceneRenderTargetRequested = RB_InlineSubviewSceneRenderTargetRequested();
+	const viewDef_t *inlineSubviewSceneRoot = RB_InlineSubviewSceneRenderTargetRoot();
+	const bool inlineSubviewSceneRenderTargetRequested = inlineSubviewSceneRoot != NULL;
 	int feedbackTargetWidth = 0;
 	int feedbackTargetHeight = 0;
 	int feedbackEffectivePercent = RB_SCREEN_FRACTION_NATIVE;
@@ -16571,7 +16632,7 @@ void	RB_STD_DrawView( void ) {
 		RB_MarkSceneRenderTargetPreserveFarDepth( portalSkySceneTargetView );
 	}
 	const viewDef_t *sceneTargetView = inlineSubviewSceneRenderTargetRequested
-		? backEnd.viewDef->superView
+		? inlineSubviewSceneRoot
 		: backEnd.viewDef;
 	const bool sceneRenderTargetReady =
 		( rootSceneRenderTargetRequested || inlineSubviewSceneRenderTargetRequested )
@@ -16600,6 +16661,9 @@ void	RB_STD_DrawView( void ) {
 	if (backEnd.renderTexture)
 	{
 		backEnd.renderTexture->MakeCurrent();
+	}
+	if ( inlineSubviewSceneRenderTargetRequested && sceneRenderTargetReady ) {
+		RB_ClearSceneRenderTargetForInlineSubviews( inlineSubviewSceneRoot );
 	}
 	RB_DrawPortalSkyBackdrop( portalSkyBackdrop );
 
@@ -16696,6 +16760,7 @@ void	RB_STD_DrawView( void ) {
 	// surfaces are held until after fog so additive BSE layers are not painted
 	// over by fog volumes that only owned the opaque scene depth.
 	const int processed = RB_STD_FindPostProcessStart( drawSurfs, numDrawSurfs );
+	const bool ordered2DView = backEnd.viewDef->viewEntitys == NULL;
 	const bool ambientLegacySkipped = !sharedWorldAmbientOwned
 		&& R_ModernGLExecutor_LegacyPassCanSkipForView(
 			RENDER_PASS_AMBIENT, backEnd.viewDef );
@@ -16719,7 +16784,8 @@ void	RB_STD_DrawView( void ) {
 		// Some pre-post materials legitimately populate _currentRender; if the
 		// full list is submitted here, SS_POST_PROCESS surfaces can consume that
 		// stale pre-light-grid copy before the indirect overlay has been added.
-		RB_STD_DrawShaderPasses( drawSurfs, processed, RB_DrawSurfIsPreFogMaterialPass );
+		RB_STD_DrawShaderPasses( drawSurfs, processed, ordered2DView
+			? RB_DrawSurfIsOrdered2DMaterialPass : RB_DrawSurfIsPreFogMaterialPass );
 	}
 
 	// Modern visible color/depth must be handed back before legacy overlay
@@ -16778,7 +16844,7 @@ void	RB_STD_DrawView( void ) {
 			backEnd.currentDepthCopied = false;
 			RB_STD_DrawShaderPasses( drawSurfs, processed, RB_DrawSurfNeedsPostFogLegacyFeedback );
 		}
-	} else if ( processed > 0 ) {
+	} else if ( processed > 0 && !ordered2DView ) {
 		RB_STD_DrawShaderPasses( drawSurfs, processed, RB_DrawSurfIsPostFogMaterialPass );
 	}
 

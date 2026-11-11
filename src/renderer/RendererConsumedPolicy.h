@@ -9,11 +9,22 @@
 struct imageDownsizeInputs_t {
     int downSize, downSizeLimit, downSizeSpecular, downSizeSpecularLimit;
     int downSizeBump, downSizeBumpLimit, picmip, picmipFilter, picmipMinSize;
+    int useHighRes = 1; // image_useHighRes: keep IMAGEFLAG_HIGHRES sources at full size
 };
 struct imageDownsizePolicy_t {
     int maxDimension = 0, mipShift = 0, minDimension = 1;
     bool IsActive() const { return maxDimension > 0 || mipShift > 0; }
 };
+// Prey's "highres" stage option: the source is authored at twice its intended
+// size. Retail PREY.exe halved such an image once, even under nopicmip, unless
+// image_useHighRes was set. The flag is not part of an image's identity, so
+// the first material to reference an image decides, exactly as in retail.
+static const unsigned int IMAGEFLAG_HIGHRES = 1u << 2;
+inline void R_ApplyImageHighResPolicy( const imageDownsizeInputs_t& inputs, unsigned int flags, imageDownsizePolicy_t& policy ) {
+    if ( ( flags & IMAGEFLAG_HIGHRES ) != 0 && inputs.useHighRes == 0 ) {
+        policy.mipShift += 1;
+    }
+}
 // Exact CPU/header dimension evidence, not content identity. Generated caches do
 // not contain original source extents and therefore retain IR_UNOBSERVED.
 enum imageReductionStatus_t : uint32_t {

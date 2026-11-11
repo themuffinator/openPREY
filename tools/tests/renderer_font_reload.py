@@ -16,8 +16,8 @@ import renderer_hdr_linear_capture as capture
 
 lab = capture.lab
 ATLASES = {
-    'gui': '_ttfatlas_fonts_english_chain_48',
-    'extended': '_ttfatlasx_fonts_english_chain_48',
+    'gui': '_ttfatlas_fonts_english_48',
+    'extended': '_ttfatlasx_fonts_english_48',
     'console': '_ttfconsolefont',
 }
 

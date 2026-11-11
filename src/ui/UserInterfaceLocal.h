@@ -110,6 +110,9 @@ public:
 	void						SetControllerNavigation( bool enabled ) { controllerNavigation = enabled; }
 	int							GetTime() const { return time; }
 	void						SetTime( int _time ) { time = _time; }
+	// Prey's translation of the alien face, 0..1: the state float
+	// "translationAlpha", read once per Redraw (prey-ui-visual-design.md 11.4).
+	float						TranslationAlpha() const { return translationAlpha; }
 
 	void						RecurseSetKeyBindingNames( idWindow *window );
 	idStr						&GetPendingCmd() { return pendingCmd; };
@@ -118,6 +121,14 @@ public:
 	// Engine-scripted validation: runs a window's onAction script, or its
 	// onBackAction when back is set, as a click on the window would.
 	bool						RunWindowAction( const char *windowName, bool back, idStr &command );
+	// Steps the focus as a menu's Down (1) or Up (-1) arrow does, or leaves
+	// it (0), and reports the focused window: its name, its screen rectangle
+	// and whether it and every parent are shown.
+	bool						StepFocus( int direction, idStr &report );
+	// The focused window when it stands inside the window `ancestorName`:
+	// its name, its rectangle in that window's coordinates, and the height
+	// of the view that window scrolls in (its parent).
+	bool						FocusWithin( const char *ancestorName, idStr &focusName, idRectangle &rect, float &viewHeight );
 	bool						HasWindow( const char *windowName ) const;
 	bool						HasNamedEvent( const char *eventName ) const;
 
@@ -216,6 +227,7 @@ private:
 	void						ClampCursor( void );
 
 	int							time;
+	float						translationAlpha = 0.0f; // derived from state each Redraw; never serialized
 
 	idWinVec4 *					lightColorVar;
 };

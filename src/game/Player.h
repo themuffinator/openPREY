@@ -29,7 +29,10 @@ const int	FOCUS_GUI_TIME = 300;	//HUMANHEAD bjk
 
 const int MAX_WEAPONS = 16;
 
-#define MP_PLAYERNOSHADOW_DEFAULT	true //HUMANEHAD rww - subject to (frequent) change
+// openPREY: retail set this true, so no multiplayer player cast a shadow. Players
+// cast shadows in both modes; g_showPlayerShadow decides whether your own shows
+// in your own view.
+#define MP_PLAYERNOSHADOW_DEFAULT	false //HUMANEHAD rww - subject to (frequent) change
 
 const int DEAD_HEARTRATE = 0;			// fall to as you die
 const int LOWHEALTH_HEARTRATE_ADJ = 20; // 

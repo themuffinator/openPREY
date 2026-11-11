@@ -148,7 +148,7 @@ CLASS_DECLARATION( idActor, idAI )
 	EVENT( AI_ClearEnemy,						idAI::Event_ClearEnemy )
 	EVENT( AI_MuzzleFlash,						idAI::Event_MuzzleFlash )
 	EVENT( AI_CreateMissile,					idAI::Event_CreateMissile )
-	EVENT( AI_AttackMissile,					idAI::Event_AttackMissile )
+	EVENT( AI_AttackMissile,					idAI::Event_ScriptAttackMissile )
 	EVENT( AI_FireMissileAtTarget,				idAI::Event_FireMissileAtTarget )
 	EVENT( AI_LaunchMissile,					idAI::Event_LaunchMissile )
 	EVENT( AI_AttackMelee,						idAI::Event_AttackMelee )
@@ -552,6 +552,22 @@ void idAI::Event_AttackMissile( const char *jointname, const idDict *projDef, in
 
 	proj = LaunchProjectile( jointname, enemy.GetEntity(), true, projDef );	//HUMANHEAD mdc - pass projDef on for multiple proj support
 	idThread::ReturnEntity( proj );
+}
+
+/*
+=====================
+idAI::Event_ScriptAttackMissile
+
+openPREY: "attackMissile" carries only the joint name. Binding the event
+straight to Event_AttackMissile left projDef and boneDir to whatever the
+caller's registers held on Win64, so a script call could launch from a
+garbage projectile dictionary. Event_AttackMissile is virtual (HUMANHEAD), so
+call it unqualified to keep reaching the hhMonsterAI/hhCreatureX overrides,
+which aim at shootTarget.
+=====================
+*/
+void idAI::Event_ScriptAttackMissile( const char *jointname ) {
+	Event_AttackMissile( jointname, NULL, 0 );
 }
 
 /*

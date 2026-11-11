@@ -82,6 +82,8 @@ static classicDeformKind_t KindForMaterial( const idMaterial *material ) {
 	case DFRM_MOVE: return CLASSIC_DEFORM_KIND_MOVE;
 	case DFRM_TURB: return CLASSIC_DEFORM_KIND_TURBULENT;
 	case DFRM_EYEBALL: return CLASSIC_DEFORM_KIND_EYEBALL;
+	case DFRM_BEAM: return CLASSIC_DEFORM_KIND_BEAM;
+	case DFRM_JITTER: return CLASSIC_DEFORM_KIND_JITTER;
 	case DFRM_PARTICLE: return CLASSIC_DEFORM_KIND_PARTICLE;
 	case DFRM_PARTICLE2: return CLASSIC_DEFORM_KIND_PARTICLE2;
 	default: return CLASSIC_DEFORM_KIND_UNKNOWN;
@@ -90,7 +92,7 @@ static classicDeformKind_t KindForMaterial( const idMaterial *material ) {
 
 static bool KindIsSupportedCPUDeform( classicDeformKind_t kind ) {
 	return kind >= CLASSIC_DEFORM_KIND_SPRITE
-		&& kind <= CLASSIC_DEFORM_KIND_EYEBALL;
+		&& kind <= CLASSIC_DEFORM_KIND_JITTER;
 }
 
 static bool KindIsUnsupported( classicDeformKind_t kind ) {
@@ -104,6 +106,7 @@ static int ParameterCountForKind( classicDeformKind_t kind ) {
 	case CLASSIC_DEFORM_KIND_FLARE:
 	case CLASSIC_DEFORM_KIND_EXPAND:
 	case CLASSIC_DEFORM_KIND_MOVE:
+	case CLASSIC_DEFORM_KIND_JITTER:
 		return 1;
 	case CLASSIC_DEFORM_KIND_TURBULENT:
 		return 3;
@@ -782,6 +785,8 @@ const char *ClassicDeformKind_Name( classicDeformKind_t kind ) {
 	case CLASSIC_DEFORM_KIND_MOVE: return "move";
 	case CLASSIC_DEFORM_KIND_TURBULENT: return "turbulent";
 	case CLASSIC_DEFORM_KIND_EYEBALL: return "eyeball";
+	case CLASSIC_DEFORM_KIND_BEAM: return "beam";
+	case CLASSIC_DEFORM_KIND_JITTER: return "jitter";
 	case CLASSIC_DEFORM_KIND_PARTICLE: return "particle";
 	case CLASSIC_DEFORM_KIND_PARTICLE2: return "particle2";
 	case CLASSIC_DEFORM_KIND_UNKNOWN: return "unknown";

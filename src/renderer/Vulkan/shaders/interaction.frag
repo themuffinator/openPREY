@@ -9,6 +9,9 @@
 // samples, diffuse map Ã— diffuseColor, and specular through the REAL
 // _specularTable ramp â€” the table carries clamp((NÂ·H)Â·4âˆ’3)Â² and the CPU-side
 // ARB2 path doubles the specular env constant, so the Ã—2 lives here.
+// r_correctspecular (default on, as in retail Prey) swaps the ramp for the
+// material's pow( N.H, exponent ) * brightness and r_normalizebumpmap
+// renormalizes the bump normal; see stock_specular.glsl.
 // Direction vectors normalize in-shader (no normalization cube map, locked
 // Phase F decision). Ambient lights substitute the constant tangent-space
 // direction the ambient normal-map cube decodes to (pushed as pc.b, with
@@ -77,6 +80,7 @@ vec3 SafeNormalize(vec3 value) {
 }
 
 #include "enhanced_material.glsl"
+#include "stock_specular.glsl"
 
 vec3 ApplyFlatDiffuseSweep(vec3 diffuse, float localZ) {
     if (inter.flatDiffuseParams.x <= 0.0) {
@@ -191,7 +195,7 @@ void main() {
         return;
     }
     vec3 localNormal = EnhancedMaterialActive() ? EnhancedLocalNormal(bumpSample)
-        : vec3(bumpSample.a, bumpSample.g, bumpSample.b) * 2.0 - 1.0;
+        : StockLocalNormal(bumpSample);
 
     vec3 lightDir = (pc.a.z > 0.5) ? pc.b.xyz : SafeNormalize(vLightVector);
     float ndotl = max(dot(lightDir, localNormal), 0.0);
@@ -209,8 +213,7 @@ void main() {
     if (EnhancedMaterialActive()) {
         specularTerm = EnhancedSpecularTerm(halfAngle, SafeNormalize(vViewVector), localNormal, specularSample);
     } else {
-        float specularDot = clamp(dot(halfAngle, localNormal), 0.0, 1.0);
-        specularTerm = texture(specularTableMap, vec2(specularDot, 0.5)).r * 2.0;
+        specularTerm = StockSpecularTerm(halfAngle, lightDir, SafeNormalize(vViewVector), localNormal) * 2.0;
     }
     specularTerm = CelSpecularTerm(specularTerm);
     vec3 specular = specularSample * inter.specularColor.rgb * specularTerm;

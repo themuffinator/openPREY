@@ -858,9 +858,9 @@ static void R_AccumulateEdge( float *accumulate, int width, int height, idVec2 f
 
 }
 
-bool idTrueTypeFont::RasterizeGlyph( int glyphIndex, float scale, ttGlyphBitmap_t &bitmap ) const {
+bool idTrueTypeFont::RasterizeGlyph( int glyphIndex, float scale, ttGlyphBitmap_t &bitmap, float verticalScale ) const {
 	memset( &bitmap, 0, sizeof( bitmap ) );
-	if ( !IsLoaded() || scale <= 0.0f ) {
+	if ( !IsLoaded() || scale <= 0.0f || verticalScale <= 0.0f ) {
 		return false;
 	}
 
@@ -875,8 +875,8 @@ bool idTrueTypeFont::RasterizeGlyph( int glyphIndex, float scale, ttGlyphBitmap_
 	// One texel of slack on each side keeps antialiased edges from clipping.
 	const int left = (int)idMath::Floor( metrics.xMin * scale ) - 1;
 	const int right = (int)idMath::Ceil( metrics.xMax * scale ) + 1;
-	const int top = (int)idMath::Floor( -metrics.yMax * scale ) - 1;
-	const int bottom = (int)idMath::Ceil( -metrics.yMin * scale ) + 1;
+	const int top = (int)idMath::Floor( -metrics.yMax * scale * verticalScale ) - 1;
+	const int bottom = (int)idMath::Ceil( -metrics.yMin * scale * verticalScale ) + 1;
 
 	const int width = right - left;
 	const int height = bottom - top;
@@ -885,7 +885,7 @@ bool idTrueTypeFont::RasterizeGlyph( int glyphIndex, float scale, ttGlyphBitmap_
 	}
 
 	ttOutline_t outline;
-	if ( !AppendGlyphOutline( glyphIndex, scale, -(float)left, -(float)top, 1.0f, 0.0f, 0.0f, 1.0f, 0, outline ) ) {
+	if ( !AppendGlyphOutline( glyphIndex, scale, -(float)left, -(float)top, 1.0f, 0.0f, 0.0f, verticalScale, 0, outline ) ) {
 		return false;
 	}
 	if ( outline.contourStarts.Num() == 0 ) {

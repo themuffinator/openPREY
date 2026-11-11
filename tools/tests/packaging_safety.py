@@ -691,15 +691,21 @@ def validate_dev_only_fixtures_not_in_pak_sources() -> None:
         dev / "maps" / "game" / "roadhouse_quick.proc",
         dev / "maps" / "game" / "roadhouse_quick.aas48",
         dev / "script" / "map_roadhouse_quick.script",
+        dev / "script" / "openprey_vm_conformance.script",
     )
     for fixture_path in required_dev_fixture_paths:
         if not fixture_path.is_file():
             raise AssertionError(f"development-only fixture is missing: {fixture_path}")
 
-    shipped_fixture_sources = sorted(path for path in pak0.rglob("*roadhouse_quick*") if path.is_file())
+    shipped_fixture_sources = sorted(
+        path
+        for pattern in ("*roadhouse_quick*", "*openprey_vm_conformance*")
+        for path in pak0.rglob(pattern)
+        if path.is_file()
+    )
     if shipped_fixture_sources:
         formatted = "\n".join(str(path) for path in shipped_fixture_sources)
-        raise AssertionError(f"roadhouse_quick fixture leaked into pak0 sources:\n{formatted}")
+        raise AssertionError(f"development-only fixture leaked into pak0 sources:\n{formatted}")
 
 
 def validate_plain_install_cleanup() -> None:

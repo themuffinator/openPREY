@@ -22,7 +22,6 @@
 			transition "Options_Menu::rect" MENU_INITIAL_RECT_TEXT MENU_MIDDLE_RECT_TEXT "200" ;
 			set "Options_Titlebar::visible" "0" ;
 
-			resetTime "OVN_QualityLevels" "0";
 			resetTime "OVA_ShaderDetail" "0";
 			set "cmd" "play2 guisounds_menu_slidein";
 		}
@@ -2489,16 +2488,14 @@
 						buttonActiveMiddleMat	"guis/assets/menu/tabhstripactive.tga"
 						buttonActiveRightMat	"guis/assets/menu/tabbottomactive.tga"
 						text					"#str_20280"
-						textaligny				30
+						textaligny				21
 						buttonEdgeWidth			16
 						seperatorLines			1, 1, 1, 1
 						seperatorMargin			1
 
 						onTabActivate {
 							set "cmd" "play guisounds_menu_tabflip" ;
-							resetTime "OVN_QualityLevels" "0";
 						}
-
 						windowDef OVN_Page {
 							rect		25, 18, 420, 350
 
@@ -2522,7 +2519,7 @@
 								middleMat		"guis/assets/menu/text_titlebox.tga"
 								rightMat		"guis/assets/menu/text_titlebox_right.tga"
 								noTime			1
-								
+
 								windowDef OVN_AutodetectTitle {
 									rect				0, 5, 200, 25
 									text				"#str_41177"
@@ -2532,7 +2529,7 @@
 									shadow				1
 									forecolor			STATIC_FORECOLOR_COMMA
 								}
-								
+
 								buttonDef OVN_LoadRecommended {
 									rect				225, 5, 150, 25
 									text				"#str_41178"	// Detect
@@ -2549,143 +2546,57 @@
 									rightHoverMat		"guis/assets/menu/button/rollover_invcorner"
 									edgeWidth			12
 									onAction {
-										set	"cmd" "play guisounds_menu_clickin" ;
-										set	"cmd" "video recommended" ;
-										resetTime "OVN_QualityLevels" "0";
+										// Picks one of the nine presets for this machine and applies it
+										set	"cmd" "play guisounds_menu_clickin ; autoDetectPerformancePreset" ;
 										resetTime "OVA_ShaderDetail" "0";
 										namedEvent "NeedVidRestart";
 									}
 								}
 							}
 
-							buttonDef OVN_QualityLevels {
-								rect			10, 80, 400, 75
-								leftMat			"guis/assets/menu/text_titlebox_left.tga"
-								middleMat		"guis/assets/menu/text_titlebox.tga"
-								rightMat		"guis/assets/menu/text_titlebox_right.tga"
-								noTime			1
-								onNamedEvent	videoupdated {
-									resetTime "OVN_QualityLevels" "0";
+							buttonDef OVN_Preset {
+								rect			10, 80, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVN_PresetTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122025"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
 								}
 
-								onTime 100 {	// Wait for a bit, the video change doesn't happen til next frame
-									if ("gui::com_imageQuality" == 0) {
-										set "OVN_RadioQualityLow::backcolor" RADIO_ACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityLow::noevents" "1";
-										set "OVN_RadioQualityMedium::backcolor" RADIO_INACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityMedium::noevents" "0";
-										set "OVN_RadioQualityHigh::backcolor" RADIO_INACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityHigh::noevents" "0";
-									}
-									else if ("gui::com_imageQuality" == 1) {
-										set "OVN_RadioQualityLow::backcolor" RADIO_INACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityLow::noevents" "0";
-										set "OVN_RadioQualityMedium::backcolor" RADIO_ACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityMedium::noevents" "1";
-										set "OVN_RadioQualityHigh::backcolor" RADIO_INACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityHigh::noevents" "0";
-									}
-									else if ("gui::com_imageQuality" == 2) {
-										set "OVN_RadioQualityLow::backcolor" RADIO_INACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityLow::noevents" "0";
-										set "OVN_RadioQualityMedium::backcolor" RADIO_INACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityMedium::noevents" "0";
-										set "OVN_RadioQualityHigh::backcolor" RADIO_ACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityHigh::noevents" "1";
-									}
-									else {	// Ultra or invalid, leave all buttons valid
-										set "OVN_RadioQualityLow::backcolor" RADIO_INACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityLow::noevents" "0";
-										set "OVN_RadioQualityMedium::backcolor" RADIO_INACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityMedium::noevents" "0";
-										set "OVN_RadioQualityHigh::backcolor" RADIO_INACTIVE_BACKCOLOR_STRING;
-										set "OVN_RadioQualityHigh::noevents" "0";
-									}
-								}
-
-								windowDef OVN_TextureQualityTitle {
-									rect				0, 5, 200, 25
-									text				"#str_41179"
-									textaligny			0
-									textalign			1
-									textscale			0.33
-									shadow				1
-									forecolor			STATIC_FORECOLOR_COMMA
-								}
-
-								buttonDef OVN_RadioQualityLow {
-									rect				50, 40, 100, 18
-									backcolor			RADIO_INACTIVE_BACKCOLOR_COMMA
-									forecolor			RADIO_FORECOLOR_COMMA
-									hovercolor			RADIO_HOVERCOLOR_COMMA
-									bordercolor			RADIO_BORDERCOLOR_COMMA
-									hoverbordercolor	RADIO_BORDERCOLOR_COMMA
-									bordersize			1
-									text				"#str_20283"
-									textscale			0.28
-									textalign			1
-									textaligny			-4
-									shadow				1
-
+								choiceDef OVN_PresetChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"#str_122026"
+									values		"minimum;lowpower;low;performance;balanced;enhanced;quality;ultra;maximum"
+									cvar		"com_performancePreset"
+									choiceType	1
 									onAction {
-										set	"cmd" "play guisounds_menu_tick" ;
-										set	"cmd" "video low" ;
-										resetTime "OVN_QualityLevels" "0";
-										namedEvent "NeedVidRestart";
-									}
-								}
-
-								buttonDef OVN_RadioQualityMedium {
-									rect				150, 40, 100, 18
-									backcolor			RADIO_INACTIVE_BACKCOLOR_COMMA
-									forecolor			RADIO_FORECOLOR_COMMA
-									hovercolor			RADIO_HOVERCOLOR_COMMA
-									bordercolor			RADIO_BORDERCOLOR_COMMA
-									hoverbordercolor	RADIO_BORDERCOLOR_COMMA
-									bordersize			1
-									text				"#str_20284"
-									textscale			0.28
-									textalign			1
-									textaligny			-4
-									shadow				1
-
-									onAction {
-										set	"cmd" "play guisounds_menu_tick" ;
-										set	"cmd" "video medium" ;
-										resetTime "OVN_QualityLevels" "0";
-										namedEvent "NeedVidRestart";
-									}
-								}
-
-								buttonDef OVN_RadioQualityHigh {
-									rect				250, 40, 100, 18
-									backcolor			RADIO_INACTIVE_BACKCOLOR_COMMA
-									forecolor			RADIO_FORECOLOR_COMMA
-									hovercolor			RADIO_HOVERCOLOR_COMMA
-									bordercolor			RADIO_BORDERCOLOR_COMMA
-									hoverbordercolor	RADIO_BORDERCOLOR_COMMA
-									bordersize			1
-									text				"#str_20285"
-									textscale			0.28
-									textalign			1
-									textaligny			-4
-									shadow				1
-
-									onAction {
-										set	"cmd" "play guisounds_menu_tick" ;
-										set	"cmd" "video high" ;
-										resetTime "OVN_QualityLevels" "0";
+										// The choice writes com_performancePreset; with no argument the command applies it
+										set "cmd" "applyPerformancePreset" ;
+										resetTime "OVA_ShaderDetail" "0";
 										namedEvent "NeedVidRestart";
 									}
 								}
 							}
 
 							buttonDef OVN_Resolution {
-								rect			10, 160, 400, 25
+								rect			10, 110, 400, 25
 								leftMat			"guis/assets/menu/textbar_corner.tga"
 								middleMat		"guis/assets/menu/textbarstrip.tga"
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
-							
+
 								windowDef OVN_ResolutionTitle {
 									rect		0, 0, 200, 25
 									text		"#str_20287"
@@ -2704,23 +2615,24 @@
 									shadow		1
 									forecolor	EDITABLE_FORECOLOR_COMMA
 									hovercolor	EDITABLE_HOVERCOLOR_COMMA
-									choices		"#str_20288"
-									values		"3;4;5;7;8;9;10;11;12;13;14;15;16"
-									cvar		"r_mode"
-									updateGroup	render
-									choiceType	1
+									choices		"gui::display_mode_choices"
+									values		"gui::display_mode_values"
+									gui			"display_mode_choice"
+									choiceType	0
 									onAction {
+										// Desktop Native, each mode the selected display reports, then Custom
+										set "cmd" "applyDisplayModeChoice" ;
 										namedEvent "NeedVidRestart";
 									}
 								}
 							}
-							
+
 							buttonDef OVN_Fullscreen {
-								rect			10, 190, 400, 25
+								rect			10, 140, 400, 25
 								leftMat			"guis/assets/menu/textbar_corner.tga"
 								middleMat		"guis/assets/menu/textbarstrip.tga"
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
-								
+
 								windowDef OVN_FullscreenTitle {
 									rect		0, 0, 200, 25
 									text		"#str_20289"
@@ -2730,7 +2642,7 @@
 									shadow		1
 									forecolor	STATIC_FORECOLOR_COMMA
 								}
-								
+
 								choiceDef OVN_FullscreenChoice {
 									rect		200, 0, 200, 25
 									textalign	1
@@ -2749,8 +2661,69 @@
 								}
 							}
 
+							buttonDef OVN_RenderScale {
+								rect			10, 170, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVN_RenderScaleTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122039"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVN_RenderScaleChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"10%;25%;50%;75%;85%;100%;125%;150%;200%"
+									values		"10;25;50;75;85;100;125;150;200"
+									cvar		"r_screenFraction"
+									choiceType	1
+								}
+							}
+
+							buttonDef OVN_VerticalSync {
+								rect			10, 200, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVN_VerticalSyncTitle {
+									rect		0, 0, 200, 25
+									text		"#str_20303"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVN_VerticalSyncChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"#str_20152"
+									cvar		"r_swapInterval"
+									choiceType	0
+								}
+							}
+
 							buttonDef OVN_Brightness {
-								rect			10, 220, 400, 25
+								rect			10, 230, 400, 25
 								leftMat			"guis/assets/menu/textbar_corner.tga"
 								middleMat		"guis/assets/menu/textbarstrip.tga"
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
@@ -2782,7 +2755,7 @@
 							}
 
 							buttonDef OVN_Gamma {
-								rect			10, 250, 400, 25
+								rect			10, 260, 400, 25
 								leftMat			"guis/assets/menu/textbar_corner.tga"
 								middleMat		"guis/assets/menu/textbarstrip.tga"
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
@@ -2850,6 +2823,458 @@
 						}
 					}
 
+					tabDef Options_Video_Display {
+						rect					100, 0, 470, 370
+						backcolor				TAB_PAGE_BACKCOLOR_COMMA
+						background				"guis/assets/menu/fadebg.tga"
+						forecolor				TAB_FORECOLOR_COMMA
+						hovercolor				TAB_HOVERCOLOR_COMMA
+						activeColor				TAB_ACTIVECOLOR_COMMA
+						matcolor				1, 1, 1, 1
+						hoverMatColor			TAB_HOVERMAT_COLOR_COMMA
+						buttonLeftMat			"guis/assets/menu/tabtop.tga"
+						buttonMiddleMat			"guis/assets/menu/tabhstrip.tga"
+						buttonRightMat			"guis/assets/menu/tabbottom.tga"
+						buttonActiveLeftMat		"guis/assets/menu/tabtopactive.tga"
+						buttonActiveMiddleMat	"guis/assets/menu/tabhstripactive.tga"
+						buttonActiveRightMat	"guis/assets/menu/tabbottomactive.tga"
+						text					"#str_122027"
+						textaligny				21
+						buttonEdgeWidth			16
+						seperatorLines			1, 1, 1, 1
+						seperatorMargin			1
+
+						onTabActivate {
+							set "cmd" "play guisounds_menu_tabflip" ;
+						}
+						windowDef OVD_Page {
+							rect		25, 18, 420, 350
+
+							buttonDef OVD_Headings {
+								rect		0, 0, 420, 30
+								leftMat		"guis/assets/menu/text_titlebar_corner.tga"
+								middleMat	"guis/assets/menu/text_titlebarstrip.tga"
+								noevents	1
+								forecolor	HEADING_FORECOLOR_DARK_COMMA
+								font		"fonts/menu"
+								text		"#str_122028"
+								textalign	1
+								textaligny	-3
+								textscale	0.45
+								shadow		1
+							}
+
+							buttonDef OVD_RenderApi {
+								rect			10, 40, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVD_RenderApiTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122042"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVD_RenderApiChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"#str_122043"
+									values		"best;gl;vulkan"
+									cvar		"r_renderApi"
+									choiceType	1
+									onAction {
+										// The renderer module is chosen when the engine starts
+										resetTime "AnimMustRestart_Up" "0" ;
+									}
+								}
+							}
+
+							buttonDef OVD_Monitor {
+								rect			10, 70, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVD_MonitorTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122029"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVD_MonitorChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"gui::display_names"
+									values		"gui::display_values"
+									cvar		"r_screen"
+									choiceType	1
+									onAction {
+										// Each display has its own modes and refresh rates
+										set "cmd" "refreshDisplayChoices" ;
+										namedEvent "NeedVidRestart";
+									}
+								}
+							}
+
+							buttonDef OVD_FullscreenMode {
+								rect			10, 100, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVD_FullscreenModeTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122030"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVD_FullscreenModeChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"#str_122031"
+									values		"1;0"
+									cvar		"r_fullscreenDesktop"
+									choiceType	1
+									onAction {
+										namedEvent "NeedVidRestart";
+									}
+								}
+							}
+
+							buttonDef OVD_Borderless {
+								rect			10, 130, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVD_BorderlessTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122032"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVD_BorderlessChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"#str_20152"
+									cvar		"r_borderless"
+									choiceType	0
+									onAction {
+										namedEvent "NeedVidRestart";
+									}
+								}
+							}
+
+							buttonDef OVD_RefreshRate {
+								rect			10, 160, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVD_RefreshRateTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122033"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVD_RefreshRateChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"gui::display_refresh_choices"
+									values		"gui::display_refresh_values"
+									cvar		"r_displayRefresh"
+									choiceType	1
+									onAction {
+										namedEvent "NeedVidRestart";
+									}
+								}
+							}
+
+							buttonDef OVD_FrameLimit {
+								rect			10, 190, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVD_FrameLimitTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122034"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVD_FrameLimitChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"gui::display_maxfps_choices"
+									values		"gui::display_maxfps_values"
+									cvar		"com_maxfps"
+									choiceType	1
+								}
+							}
+
+							buttonDef OVD_SpanDisplays {
+								rect			10, 220, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVD_SpanDisplaysTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122036"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVD_SpanDisplaysChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"#str_20152"
+									cvar		"r_multiScreen"
+									choiceType	0
+									onAction {
+										namedEvent "NeedVidRestart";
+									}
+								}
+							}
+
+							buttonDef OVD_WindowSize {
+								rect			10, 250, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVD_WindowSizeTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122037"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								editDef OVD_WindowSizeWidth {
+									rect		250, 3, 44, 19
+									backcolor	LISTCONTENT_BACKGROUND
+									cvar		"r_windowWidth"
+									maxchars	5
+									numeric		1
+									textscale	0.33
+									textalignx	5
+									textaligny	-4
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									onAction {
+										namedEvent "NeedVidRestart";
+									}
+									onEnter {
+										setFocus "OVD_WindowSizeTitle";	// leave the field
+									}
+								}
+
+								windowDef OVD_WindowSizeBy {
+									rect		294, 0, 12, 25
+									text		"x"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								editDef OVD_WindowSizeHeight {
+									rect		306, 3, 44, 19
+									backcolor	LISTCONTENT_BACKGROUND
+									cvar		"r_windowHeight"
+									maxchars	5
+									numeric		1
+									textscale	0.33
+									textalignx	5
+									textaligny	-4
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									onAction {
+										namedEvent "NeedVidRestart";
+									}
+									onEnter {
+										setFocus "OVD_WindowSizeTitle";	// leave the field
+									}
+								}
+							}
+
+							buttonDef OVD_CustomSize {
+								rect			10, 280, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVD_CustomSizeTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122038"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								editDef OVD_CustomSizeWidth {
+									rect		250, 3, 44, 19
+									backcolor	LISTCONTENT_BACKGROUND
+									cvar		"r_customWidth"
+									maxchars	5
+									numeric		1
+									textscale	0.33
+									textalignx	5
+									textaligny	-4
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									onAction {
+										// Typing a size selects Custom in the Video Resolution row
+										set "cmd" "applyCustomDisplaySize" ;
+										namedEvent "NeedVidRestart";
+									}
+									onEnter {
+										setFocus "OVD_CustomSizeTitle";	// leave the field
+									}
+								}
+
+								windowDef OVD_CustomSizeBy {
+									rect		294, 0, 12, 25
+									text		"x"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								editDef OVD_CustomSizeHeight {
+									rect		306, 3, 44, 19
+									backcolor	LISTCONTENT_BACKGROUND
+									cvar		"r_customHeight"
+									maxchars	5
+									numeric		1
+									textscale	0.33
+									textalignx	5
+									textaligny	-4
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									onAction {
+										// Typing a size selects Custom in the Video Resolution row
+										set "cmd" "applyCustomDisplaySize" ;
+										namedEvent "NeedVidRestart";
+									}
+									onEnter {
+										setFocus "OVD_CustomSizeTitle";	// leave the field
+									}
+								}
+							}
+
+							buttonDef OVD_ApplyChanges {
+								rect			280, 315, 115, 28
+								text			"#str_20294"
+								textalign		1
+								textaligny		-1
+								shadow			1
+								forecolor		BUTTON_FORECOLOR_GREYED_COMMA
+								hoverColor		BUTTON_HOVERCOLOR_COMMA
+								leftMat			"guis/assets/menu/button/corner"
+								middleMat		"guis/assets/menu/button/strip"
+								leftHoverMat	"guis/assets/menu/button/rollover_corner"
+								middleHoverMat	"guis/assets/menu/button/rollover_strip"
+								rightMat		"guis/assets/menu/button/invcorner"
+								rightHoverMat	"guis/assets/menu/button/rollover_invcorner"
+								edgeWidth		12
+								noEvents		1
+
+								onNamedEvent NeedVidRestart {
+									set "noevents" "0";
+									set "forecolor" BUTTON_FORECOLOR_STRING;
+									set "hovercolor" BUTTON_HOVERCOLOR_STRING;
+								}
+
+								onNamedEvent VidRestart {
+									set "noevents" "1";
+									set "forecolor" BUTTON_FORECOLOR_GREYED_STRING;
+									set "hovercolor" BUTTON_FORECOLOR_GREYED_STRING;
+								}
+
+								onAction {
+									set	"cmd"	"play guisounds_menu_clickin" ;
+									namedEvent "VidRestart";
+								}
+							}
+						}
+					}
+
 					tabDef Options_Video_Advanced {
 						rect					100, 0, 470, 370
 						backcolor				TAB_PAGE_BACKCOLOR_COMMA
@@ -2866,7 +3291,7 @@
 						buttonActiveMiddleMat	"guis/assets/menu/tabhstripactive.tga"
 						buttonActiveRightMat	"guis/assets/menu/tabbottomactive.tga"
 						text					"#str_41146"
-						textaligny				30
+						textaligny				21
 						buttonEdgeWidth			16
 						seperatorLines			1, 1, 1, 1
 						seperatorMargin			1
@@ -2918,9 +3343,9 @@
 									shadow		1
 									choices		"#str_20297"
 									cvar		"r_skipNewAmbient"
+									gui			"r_skipNewAmbient"	// read by OVA_ShaderDetail
 									choiceType	0
 									onAction {
-										namedEvent "NeedVidRestart";
 										resetTime "OVA_ShaderDetail" "0";
 									}
 								}
@@ -2933,7 +3358,8 @@
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
 								notime			1
 								onTime 100 {
-									if ("gui::r_skipNewAmbient" != 0) {
+									// Greyed while shader programs are off, and on Vulkan, which draws the fallback stages only
+									if ("gui::r_skipNewAmbient" != 0 || "gui::r_shaderLevelUnavailable" != 0) {
 										set "OVA_Choice_ShaderDetail::noevents" "1" ;
 										set "OVA_Choice_ShaderDetail::forecolor" EDITABLE_FORECOLOR_GRAYED_STRING ;
 									}
@@ -2962,13 +3388,8 @@
 									shadow		1
 									choices		"#str_20299"
 									values		"0;1;2;3"
-									cvar		"r_shaderlevel"
+									cvar		"r_shaderLevel"
 									choiceType	1
-									onAction {
-										// Could also set a var to make the next applychanges display the message but I think this is clearer
-										resetTime "AnimMustRestart_Up" "0" ;
-										//namedEvent "NeedVidRestart";
-									}
 								}
 							}
 
@@ -3001,8 +3422,39 @@
 								}
 							}
 
-							buttonDef OVA_Specular {
+							buttonDef OVA_ShadowMaps {
 								rect			10, 130, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVA_ShadowMapsTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122040"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVA_ShadowMapsChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"#str_20152"
+									cvar		"r_useShadowMap"
+									choiceType	0
+								}
+							}
+
+
+							buttonDef OVA_Specular {
+								rect			10, 160, 400, 25
 								leftMat			"guis/assets/menu/textbar_corner.tga"
 								middleMat		"guis/assets/menu/textbarstrip.tga"
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
@@ -3031,7 +3483,7 @@
 							}
 
 							buttonDef OVA_BumpMaps {
-								rect			10, 160, 400, 25
+								rect			10, 190, 400, 25
 								leftMat			"guis/assets/menu/textbar_corner.tga"
 								middleMat		"guis/assets/menu/textbarstrip.tga"
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
@@ -3059,70 +3511,8 @@
 								}
 							}
 
-							buttonDef OVA_VerticalSync {
-								rect			10, 190, 400, 25
-								leftMat			"guis/assets/menu/textbar_corner.tga"
-								middleMat		"guis/assets/menu/textbarstrip.tga"
-								rightMat		"guis/assets/menu/textbar_invcorner.tga"
-
-								windowDef OVA_Title_VerticalSync {
-									rect		0, 0, 200, 25
-									forecolor	STATIC_FORECOLOR_COMMA
-									textalign	1
-									textaligny	0
-									textscale	0.33
-									shadow		1
-									text		"#str_20303"
-								}
-								choiceDef OVA_Choice_VerticalSync {
-									rect		200, 0, 200, 25
-									forecolor	EDITABLE_FORECOLOR_COMMA
-									hovercolor	EDITABLE_HOVERCOLOR_COMMA
-									textalign	1
-									textaligny	0
-									textscale	0.33
-									shadow		1
-									choices		"#str_20152"
-									cvar		"r_swapInterval"
-									choiceType	0
-								}
-							}
-
-							buttonDef OVA_Antialiasing {
-								rect			10, 220, 400, 25
-								leftMat			"guis/assets/menu/textbar_corner.tga"
-								middleMat		"guis/assets/menu/textbarstrip.tga"
-								rightMat		"guis/assets/menu/textbar_invcorner.tga"
-
-								windowDef OVA_Title_Antialiasing {
-									rect		0, 0, 200, 25
-									forecolor	STATIC_FORECOLOR_COMMA
-									textalign	1
-									textaligny	0
-									textscale	0.33
-									shadow		1
-									text		"#str_20304"
-								}
-								choiceDef OVA_Choice_Antialiasing {
-									rect		200, 0, 200, 25
-									forecolor	EDITABLE_FORECOLOR_COMMA
-									hovercolor	EDITABLE_HOVERCOLOR_COMMA
-									textalign	1
-									textaligny	0
-									textscale	0.33
-									shadow		1
-									choices		"#str_122023"
-									values		"0;2;4;8"
-									cvar		"r_multiSamples"
-									choiceType	1
-									onAction {
-										namedEvent "NeedVidRestart";
-									}
-								}
-							}
-
 							buttonDef OVA_HighQualitySpecular {
-								rect			10, 250, 400, 25
+								rect			10, 220, 400, 25
 								leftMat			"guis/assets/menu/textbar_corner.tga"
 								middleMat		"guis/assets/menu/textbarstrip.tga"
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
@@ -3151,7 +3541,7 @@
 							}
 
 							buttonDef OVA_NormalizeBumpmap {
-								rect			10, 280, 400, 25
+								rect			10, 250, 400, 25
 								leftMat			"guis/assets/menu/textbar_corner.tga"
 								middleMat		"guis/assets/menu/textbarstrip.tga"
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
@@ -3232,7 +3622,7 @@
 						buttonActiveMiddleMat	"guis/assets/menu/tabhstripactive.tga"
 						buttonActiveRightMat	"guis/assets/menu/tabbottomactive.tga"
 						text					"#str_41147"
-						textaligny				30
+						textaligny				21
 						buttonEdgeWidth			16
 						seperatorLines			1, 1, 1, 1
 						seperatorMargin			1
@@ -3287,37 +3677,8 @@
 								}
 							}
 
-							buttonDef OVM_LowParticleDetail {
-								rect			10, 70, 400, 25
-								leftMat			"guis/assets/menu/textbar_corner.tga"
-								middleMat		"guis/assets/menu/textbarstrip.tga"
-								rightMat		"guis/assets/menu/textbar_invcorner.tga"
-
-								windowDef OVM_Title_LowParticleDetail {
-									rect		0, 0, 200, 25
-									forecolor	STATIC_FORECOLOR_COMMA
-									textalign	1
-									textaligny	0
-									textscale	0.33
-									shadow		1
-									text		"#str_41071"
-								}
-								choiceDef OVM_Choice_LowParticleDetail {
-									rect		200, 0, 200, 25
-									forecolor	EDITABLE_FORECOLOR_COMMA
-									hovercolor	EDITABLE_HOVERCOLOR_COMMA
-									textalign	1
-									textaligny	0
-									textscale	0.33
-									shadow		1
-									choices		"#str_20297"
-									cvar		"r_lowParticleDetail"
-									choiceType	0
-								}
-							}
-
 							buttonDef OVM_FastSkinning {
-								rect			10, 100, 400, 25
+								rect			10, 70, 400, 25
 								leftMat			"guis/assets/menu/textbar_corner.tga"
 								middleMat		"guis/assets/menu/textbarstrip.tga"
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
@@ -3346,7 +3707,7 @@
 							}
 
 							buttonDef OVM_Anisotropy {
-								rect			10, 130, 400, 25
+								rect			10, 100, 400, 25
 								leftMat			"guis/assets/menu/textbar_corner.tga"
 								middleMat		"guis/assets/menu/textbarstrip.tga"
 								rightMat		"guis/assets/menu/textbar_invcorner.tga"
@@ -3478,7 +3839,7 @@
 						buttonActiveMiddleMat	"guis/assets/menu/tabhstripactive.tga"
 						buttonActiveRightMat	"guis/assets/menu/tabbottomactive.tga"
 						text					"#str_122003"
-						textaligny				30
+						textaligny				21
 						buttonEdgeWidth			16
 						seperatorLines			1, 1, 1, 1
 						seperatorMargin			1
@@ -3528,7 +3889,7 @@
 									textscale	0.33
 									shadow		1
 									choices		"#str_122023"
-									values		"0;2;4;8"
+									values		"0;2;4;8;16"
 									cvar		"r_multiSamples"
 									choiceType	1
 									onAction {
@@ -3745,6 +4106,37 @@
 								}
 							}
 
+							buttonDef OVP_MotionBlur {
+								rect			10, 264, 400, 25
+								leftMat			"guis/assets/menu/textbar_corner.tga"
+								middleMat		"guis/assets/menu/textbarstrip.tga"
+								rightMat		"guis/assets/menu/textbar_invcorner.tga"
+
+								windowDef OVP_MotionBlurTitle {
+									rect		0, 0, 200, 25
+									text		"#str_122041"
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	STATIC_FORECOLOR_COMMA
+								}
+
+								choiceDef OVP_MotionBlurChoice {
+									rect		200, 0, 200, 25
+									textalign	1
+									textaligny	0
+									textscale	0.33
+									shadow		1
+									forecolor	EDITABLE_FORECOLOR_COMMA
+									hovercolor	EDITABLE_HOVERCOLOR_COMMA
+									choices		"#str_20152"
+									cvar		"r_motionBlur"
+									choiceType	0
+								}
+							}
+
+
 							buttonDef OVP_ApplyChanges {
 								rect			280, 320, 115, 28
 								text			"#str_20294"
@@ -3798,7 +4190,7 @@
 						buttonActiveMiddleMat	"guis/assets/menu/tabhstripactive.tga"
 						buttonActiveRightMat	"guis/assets/menu/tabbottomactive.tga"
 						text					"#str_122004"
-						textaligny				30
+						textaligny				21
 						buttonEdgeWidth			16
 						seperatorLines			1, 1, 1, 1
 						seperatorMargin			1

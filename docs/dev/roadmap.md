@@ -646,6 +646,17 @@ and untested drivers remain open, with no tolerance or support-tier change.
   now records hidden/offscreen versus synchronous-benchmark scope explicitly and
   refuses configuration overrides of its window/input/filesystem invariants.
   Physical AMD, Linux and Apple hardware results are still required.
+  Progress, 10 November: Windows x64 support was rechecked on a clean
+  debugoptimized build of `8735ad1b`, the first since the 4 October sign-off,
+  with OpenGL as the warning reference on the RTX 4060 (591.74) and Iris Xe
+  (101.5590). All 29 SP maps passed (87 runs), as did the two-cycle, eight-map
+  soak with a video restart: process growth at most 1.09x on NVIDIA, 1.15x on
+  Intel and 1.11x on OpenGL. The MP sweep passed 59 of 60 runs. The NVIDIA
+  q4dm6 run logged three bot-dependent decl and ragdoll warnings that OpenGL
+  did not, and a full rerun of that map passed on all three. The validation
+  layers logged nothing in any of the 102 Vulkan runs. This does not cover
+  later Vulkan back-end commits on main, AMD, VK-02 pacing or the VK-04 image
+  gates.
 - [ ] **VK-02 — P1, investigation and qualification: visible presentation pacing.**
   Reproduce the hybrid-adapter/power-state conditions using current foreground
   windowed workloads and unchanged budgets. Separate host scheduling, fence waits,
@@ -1508,7 +1519,7 @@ optimization has landed.
 | FPS-05 — Not started | 16x MSAA measured as the largest single Ultra cost on OpenGL; the Vulkan backend found to clamp the preset's 16 samples to the device's 8, so the two backends render different Ultra images. FPS-02's Ultra uses 4x MSAA with SMAA ultra, which both backends honour; only Maximum still requests 16. | Sample-count policy per tier, resolve cost, one sample count on both backends, MSAA 4 + SMAA as the Ultra candidate. |
 | FPS-06 — Not started | Equal-settings deltas attributed: in storage2 the retained HUD's layer composition (17 two-dimensional views and 34 render-target commands per frame against the classic HUD's 7 and 17; about 0.4 ms of main-thread time); on Vulkan the soft-particle depth capture (1.3 ms in airdefense1). The 2 October build equals 0.13.2 and the 15 October build carries the storage2 step, bracketing the 8 October retained-HUD commit (bisection); interpolation, light grid, reverb, portal cull and the five new Vulkan backend features cost nothing measurable. | Bisection pass 2 for the remainder, the retained HUD composed in one pass, the Vulkan soft-particle capture made cheap, closure within 3% average and 10% p99 of 0.13.2 on every suite scene on both backends. |
 | FPS-07 — Not started | Hitch classes recorded: 2-3 s cold draw stalls at Ultra, periodic 100 ms hub2 frames, a 393 ms storage2 frame, first-use events. | Attribution per class, fixes or declared budgets, clean first-use catalog on both backends. |
-| FPS-08 — Not started | HF-07 attribution: the Quality frame is CPU-bound on one thread; Vulkan render-thread stage 1 landed and gains nothing at the GPU-bound Ultra (within 0.4 ms, longer tails). | Front-end and submission cost, stage 2 overlap, game-tic cost; shared with HF-07 and REN-07. |
+| FPS-08 — Not started | HF-07 attribution: the Quality frame is CPU-bound on one thread; Vulkan render-thread stage 1 landed and gains nothing at the GPU-bound Ultra (within 0.4 ms, longer tails). Constant material registers restored on both renderers (they were never marked constant, so every surface evaluated its registers every view): 69-87% of register set-ups now take the parse-time block, saving 5-22 µs per frame in hub2, convoy2 and the airdefense1 arena, which whole-frame timings cannot resolve; see [Constant material registers](material-constant-registers.md). | Front-end and submission cost, stage 2 overlap, game-tic cost; shared with HF-07 and REN-07. |
 | FPS-09 — Not started | Prevention plan written (report section 9). | Suite in the release checklist, budgets as gates, cvar-default diff and attribution checks in CI. |
 
 ### FPS task evidence and acceptance
@@ -1716,10 +1727,39 @@ optimization has landed.
   with no moving caster is now read where it lives (`r_vkShadowSampleResident`, on
   by default): in convoy2's start view the cache phase fell from 0.54 to 0.04 ms and
   all shadow phases from 0.68 to 0.18 ms, with captures identical to the byte and
-  the validation layers silent. Remaining, in order:
-  the fullscreen budgets, including whether Enhanced can map point lights, one
-  static cube for both ownerships of a composed Vulkan light, and static-world
-  volumes, which are still built once per mapped light for the fallback.
+  the validation layers silent.
+  Walking (10 November 2026). The cache had only been measured with the camera
+  turning on the spot. Moving the player through the level showed lights rendering
+  their maps again with unchanged casters: the static signature hashed whether the
+  view also saw each caster's stencil volume, which flips as the player walks past.
+  Without that bit a 1,200 unit walk through hub2 renders 24 fresh maps where it
+  rendered 48 on Vulkan and 18 where it rendered 41 on OpenGL, and the views that
+  render any fall from about 20 to 4 to 7. The picture check for it found the
+  projected filter's grain following a light's tile around the atlas, so a cached
+  map and the same map drawn fresh differed (19,000 pixels in hub2's start view,
+  both renderers); the kernel now turns by the texel within the tile and they agree
+  to within 1 pixel on Vulkan and 77 on OpenGL. One static cube for both ownerships
+  of a composed Vulkan light was measured at 4 of 24 fresh maps on that walk and
+  not built.
+  Static membership (10 November 2026). Which still casters a map held also
+  followed the camera: the shadow LOD admitted an entity's shadow within 768 units
+  and dropped it beyond, and a model's first snapshot counted as the model moving
+  for a quarter of a second. A static caster of a still light is now in the map at
+  any distance and a first snapshot is not motion; fresh maps on four walks fall
+  from 24 to 18, 79 to 63, 10 to 8 and 11 to 7, and shadow-mapped lights cast the
+  shadows of still scenery beyond 768 units.
+  Scratch cube pool (10 November 2026). Vulkan's pool of scratch point cubes only
+  grew, to 512 cubes: one view from outside a level left 2.0 GB resident. It now has
+  the cache's memory figure again as its ceiling (85 cubes at Quality) and releases
+  what no view has needed for five seconds: 1.1 GB at that view, 0.6 GB ten seconds
+  after it. Remaining, in order:
+  the fullscreen budgets, including whether Enhanced can map point lights; and
+  static-world volumes, which are still built once per mapped light for the
+  fallback. (A light that moves now draws its maps directly instead of publishing
+  each one to the cache, copying it and composing over the copy: 560 passes on one
+  hub2 route, `r_shadowMapCacheMovingLights`.) (A light whose map failed once now stops building its stencil volumes
+  again after 240 views without another failure, `r_shadowMapStencilFallbackViews`;
+  before, it built them for the rest of the level.)
 - [ ] **FPS-04 — P1, implementation: post-processing chain cost.** Price and reduce the
   screen-space passes the current Ultra adds: SSAO (full resolution on OpenGL; the
   half-resolution path exists only on Vulkan and only below 32 samples), motion blur
@@ -2336,7 +2376,7 @@ seven final gates remain pending.
 
 | Task / state | Completed points and evidence | Remaining completion subpoints |
 | --- | --- | --- |
-| UI-01 — Partial | Settings hub, GAME/CONTROLS/AUDIO, Load Defaults, opt-in DISPLAY and Player Setup exist; current scaling/tall layouts and effect/readback increments recorded. | Complete settings transactions/failure/restart/capability matrix; real-font/state coverage; production SYSTEM editor round trip and device/platform acceptance. |
+| UI-01 — Partial | Settings hub, GAME/CONTROLS/AUDIO, Load Defaults, DISPLAY (with presets applied there) and Player Setup exist; current scaling/tall layouts and effect/readback increments recorded. | Complete settings transactions/failure/restart/capability matrix; real-font/state coverage; production SYSTEM editor round trip and device/platform acceptance. |
 | UI-02 — Partial | Binding capture, contextual prompts, controller navigation, touch scrolling and right-stick detail/preview handling exist. | Production native IME wiring, shaping/fallback/graphemes, accessibility exposure; physical controller families, composition/focus/hotplug and locale/layout matrix. |
 | UI-03 — Partial | Roster scrolling/identity guards, save-browser/details, Strogg confirmations, server focus/empty states and objective markers have scoped evidence. | Tourney/watch and Match Control flows, catalogs beyond 128, remaining target-identity/role operations, handoffs and actual task/failure completion. |
 | UI-04 — Partial | Retained menus/HUDs and specific implant/vehicle/cinematic surfaces have implementation or captures. | Accept every required source/include variant's behavior and artwork; world terminals, script/timeline provenance, per-instance state and exactly-once commands. |
@@ -2365,8 +2405,8 @@ Completion must advance through the existing dependencies:
 - [ ] **UI-01 — P1, implementation: complete production settings and essential
   pages.** GAME, CONTROLS, AUDIO, Load Defaults and Player Setup are implemented
   in the retained interface, with the bounded evidence below. Finish their full
-  transaction and qualification scope; complete preset and mixed-effect
-  transactions before SYSTEM leaves its current opt-in scope. Demonstrate real
+  transaction and qualification scope. Preset and mixed-effect transactions
+  apply since 10 November, when SYSTEM left its opt-in scope (below). Demonstrate real
   effect/readback, persistence, cancel/revert, failed Apply,
   interrupted writes, restart, device/capability changes and stale-owner rejection
   in SP/MP. Localize every display string and preserve current working pages.
@@ -2486,6 +2526,15 @@ Completion must advance through the existing dependencies:
   [Opaque Menu Backing](ui/retained-screens.md#opaque-menu-backing-5-november-2026),
   the accessibility alternative to the softened backdrop, on the retained and
   stock pages in every shipped language.
+  Progress, 10 November: the retained DISPLAY page is the default under
+  `ui_retained`. A Performance Preset or Auto-Detect chosen there applies
+  through the [combined executor](ui/settings-effect-execution.md#combined-executor):
+  one journaled attempt with a device restart, a sound restart for a layout or
+  EFX change and cold recovery in both directions. That emptied
+  `RETAINED_SYSTEM_INCOMPLETE_SETTINGS`
+  ([the gate](ui/system-resolution-rows.md#the-gate)). The checked image and
+  audio results, a visible exclusive-fullscreen Apply, the editor round trip
+  and platform acceptance remain open.
 - [ ] **UI-02 — P1, implementation and qualification: text, input and accessibility.**
   Finish in-field IME/composition, shaping/kerning/fallback/styles, grapheme editing,
   caret/candidate placement, binding capture, accessibility exposure and contextual
@@ -2662,8 +2711,11 @@ Completion must advance through the existing dependencies:
   The stock interface's Single Player, Campaign, Arena and Demos pages stand in
   the stock page frame the retained pages share, its Multiplayer page lists the
   retained page's sections, and its menus answer the arrow keys
-  ([stock interface menus](ui/legacy-menu-layout.md)). This does not migrate or
-  accept a GUI either.
+  ([stock interface menus](ui/legacy-menu-layout.md)). Both CONTROLS pages
+  draw keys as glyphs and keep an action's controller buttons when a key is
+  bound, and the stock menus step their focus as a page reads and scroll a
+  settings page to it ([key glyphs and focus](ui/key-bind-glyphs.md)). This
+  does not migrate or accept a GUI either.
 - [ ] **UI-05 — P1, decision and qualification: resolve visual policy conflicts.**
   Reconcile SP/MP hit-marker defaults with visual specification section 14.7 and
   other recorded deviations before acceptance. Preserve editable vector framing,

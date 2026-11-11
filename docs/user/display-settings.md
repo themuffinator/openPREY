@@ -11,6 +11,40 @@ This guide covers openPREY display/window settings for end users, including mult
 - `Settings -> System` groups **Rendering Backend**, **Rendering Device**, **Performance Preset** and **Auto-Detect** above the display controls in the retained interface.
 - After changing video cvars, run `vid_restart` (or `vid_restart partial` for quick window/fullscreen transitions).
 
+## Video Options in the Prey Menu
+
+Prey's own menu holds these settings under **Options -> Video**, on six side
+tabs. The `Settings -> System` page described in the rest of this guide is the
+upstream retained interface; the cvars and behaviour are the same.
+
+| Tab | Rows |
+|---|---|
+| **Video** | Auto Detect, Quality Preset, Video Resolution, Full Screen, Render Scale, Vertical Sync, Brightness, Gamma |
+| **Display** | Rendering API, Monitor, Fullscreen Mode, Borderless Window, Refresh Rate, Frame Rate Limit, Span All Monitors, Window Size, Custom Resolution |
+| **Advanced 1** | Use Shader Programs, Shader Detail, Enable Shadows, Shadow Maps, Enable Specular, Enable Bump Maps, High Quality Specular, Sharpen Bumpmaps |
+| **Advanced 2** | Use Glow, High Quality Skinning, Image Anisotropy |
+| **Post FX** | MSAA Samples, Post Anti-Aliasing, SSAO, Bloom, Bloom Intensity, HDR Tone Mapping, HDR Exposure, CRT Monitor, Motion Blur |
+| **Advanced FX** | Tuning sliders for MSAA alpha coverage, SSAO, bloom, HDR and CRT |
+
+- **Quality Preset** offers all nine presets, and **Detect** picks one for the
+  machine. Either one also sets the rows on the other tabs, so a preset is a
+  starting point you can adjust.
+- **Video Resolution** lists Desktop Native, every mode the selected monitor
+  reports, and Custom. Typing a size into **Custom Resolution** selects Custom.
+- Display changes, multisampling and presets light **Apply Changes**; pressing
+  it, or leaving Options, restarts video once. The other rows take effect at once.
+- **Rendering API** is read when the engine starts, so the menu asks for a
+  restart of the game.
+- **Shader Detail** (`r_shaderLevel`) selects Prey's skin, cloth, liquid and
+  organic-wall shaders. It applies immediately; retail asked for a restart.
+  Presets set it: Highest from Performance up, High for Low, Medium for Low
+  Power and Low for Minimum, which also turn off glow overlays, high quality
+  specular and bumpmap sharpening and use fast skinning. The Vulkan backend
+  cannot run these shaders yet and always draws the Low versions; the row is
+  greyed there.
+- High Particle Detail is not offered: nothing in the engine reads
+  `r_lowParticleDetail` yet.
+
 ## Rendering Backend and Device
 
 The retained **Settings -> System** page puts backend and GPU selection beside
@@ -55,12 +89,12 @@ Running `applyPerformancePreset` without a name applies the stored `com_performa
 | `low` | 75% scale, no AA, the original stencil shadows, 60 FPS cap | Texture downsizing, 2x anisotropy, one sound sample per shader, automatic speaker layout, room reverb, lower emitter budget | PCs at the [minimum requirements](getting-started.md#system-requirements). |
 | `performance` | 85% scale, SMAA medium, 60 FPS cap | Full-size textures, 2x anisotropy, automatic speaker layout, room reverb, moderate emitter budget | Modest desktops and handhelds aiming for smoother frame pacing. |
 | `balanced` | 100% scale, 2x MSAA, SMAA medium, 120 FPS cap | Full-size textures, 4x anisotropy, automatic speaker layout, room reverb, full emitter budget | General desktop default. |
-| `enhanced` | 100% scale, SMAA high (no MSAA), 144 FPS cap, 1024 projected shadow maps; point lights keep stencil shadows | 16x anisotropy, full-size textures, automatic speaker layout, room reverb | High-refresh play with modern effects: holds 144 FPS on the reference laptop. |
+| `enhanced` | 100% scale, SMAA high (no MSAA), 144 FPS cap, 1024 projected shadow maps and 512 point-light cubes | 16x anisotropy, full-size textures, automatic speaker layout, room reverb | High-refresh play with modern effects: holds 144 FPS on the reference laptop. |
 | `quality` | 100% scale, 2x MSAA, SMAA high, 144 FPS cap, 2048 projected / 512 point shadows | 16x anisotropy, DDS replacements enabled, larger upload budget, automatic speaker layout, room reverb | Every light shadow-mapped; holds 100 FPS on the reference laptop. |
 | `ultra` | 100% scale, 4x MSAA, SMAA Ultra, 240 FPS cap, 4096 projected / 512 point shadows | 16x anisotropy, full-size textures and DDS replacements enabled, high-end benchmark tag, automatic speaker layout, room reverb | The best image that holds 75 FPS on the reference laptop. Manual choice. |
 | `maximum` | 100% scale, 16x MSAA request, SMAA Ultra, 240 FPS cap, 4096 projected / 2048 point shadows | As Ultra | Everything on. No frame-rate target. Manual choice. |
 
-`enhanced`, `quality`, `ultra` and `maximum` enable [shadow maps](shadow-mapping.md), bloom, SSAO and tone mapping. Enhanced shadow-maps projected and parallel lights with 5-tap fixed filtering in a 4096 atlas, keeps the original stencil shadows for point lights, and uses 12 SSAO samples. Quality shadow-maps every light: 2048 projected maps with 9-tap PCSS, 512 point cubes, a 4096 atlas and 20 SSAO samples. Ultra raises projected maps to 4096 with 13-tap PCSS in an 8192 atlas and uses 32 SSAO samples; its point cubes stay at 512 because larger cubes cost more than every other upgrade together. None of these three uses cascades or motion blur. Maximum requests every supported maximum: 2048 point cubes, 13-tap projected and point filtering, four stabilized cascades, a 16384 shadow atlas, 32 SSAO samples and 16-sample motion blur with object vectors. All modern-effects tiers keep unlimited shadow updates and five bloom levels; reducing the level count changes the glow's appearance, not just sampling quality. Low, Performance and Balanced retain the original stencil shadows and leave these post effects and the HDR scene target off. Minimum and Low Power draw no shadows at all, so that the two presets below the minimum requirements remove rendering work rather than only resolution. On Intel Iris Xe graphics that took 12 to 16 percent off each frame in the hub and combat scenes upstream openQ4 measured, about as much as lowering the scene from 75% to 50%. Changing down from Maximum restores the lower tier's sample counts and shadow sizes, including settings for effects currently disabled.
+`enhanced`, `quality`, `ultra` and `maximum` enable [shadow maps](shadow-mapping.md), bloom, SSAO and tone mapping. Enhanced shadow-maps every light with 5-tap fixed filtering: 1024 projected maps in a 4096 atlas and 512 point cubes, with 12 SSAO samples. (The shared preset table leaves point lights on stencil shadows at this tier; openPREY maps them, because Prey lights its levels almost entirely with point lights and the tier would otherwise map nothing.) Quality shadow-maps every light: 2048 projected maps with 9-tap PCSS, 512 point cubes, a 4096 atlas and 20 SSAO samples. Ultra raises projected maps to 4096 with 13-tap PCSS in an 8192 atlas and uses 32 SSAO samples; its point cubes stay at 512 because larger cubes cost more than every other upgrade together. None of these three uses cascades or motion blur. Maximum requests every supported maximum: 2048 point cubes, 13-tap projected and point filtering, four stabilized cascades, a 16384 shadow atlas, 32 SSAO samples and 16-sample motion blur with object vectors. All modern-effects tiers keep unlimited shadow updates and five bloom levels; reducing the level count changes the glow's appearance, not just sampling quality. Low, Performance and Balanced retain the original stencil shadows and leave these post effects and the HDR scene target off. Minimum and Low Power draw no shadows at all, so that the two presets below the minimum requirements remove rendering work rather than only resolution. On Intel Iris Xe graphics that took 12 to 16 percent off each frame in the hub and combat scenes upstream openQ4 measured, about as much as lowering the scene from 75% to 50%. Changing down from Maximum restores the lower tier's sample counts and shadow sizes, including settings for effects currently disabled.
 
 ### Frame-rate targets
 
@@ -78,7 +112,9 @@ MSAA is clamped to the highest sample count supported by the active device and r
 
 To adopt the revised settings on an existing configuration, select the preset again or run `applyPerformancePreset ultra`. Merely storing `com_performancePreset=ultra` does not reapply the profile. A configuration saved with the earlier Ultra keeps those settings until you select a preset again; select **Maximum** to keep that everything-on image, or **Ultra** for the new 75 FPS recipe.
 
-Performance presets write video, texture-allocation, texture-sampling, and audio backend cvars. Anisotropy is capped to the maximum supported by the active GPU. Run `vid_restart` after applying one so renderer, texture allocation, and sampler changes take effect; run `s_restart` as well if you want speaker/EAX/emitter-budget changes to rebuild the active sound backend immediately.
+Performance presets write video, texture-allocation, texture-sampling, and audio backend cvars. Anisotropy is capped to the maximum supported by the active GPU. Run `vid_restart` after applying one from the console so renderer, texture allocation, and sampler changes take effect; run `s_restart` as well if you want speaker/EAX/emitter-budget changes to rebuild the active sound backend immediately.
+
+In the modern interface, choose the preset on **Settings > Display** and press **Apply Changes**. That restarts the renderer once and, when the speaker layout or reverb setting changed, the sound device. A preset that changes anti-aliasing asks you to keep or revert. High-quality texture flags and the per-sound sample limit fully change when the game next starts; the page tells you when your changes include one of them.
 
 `autoDetectPerformancePreset` takes no arguments. It recommends and applies a starting point using the **active renderer and GPU**, system RAM, CPU concurrency, platform power hints and current drawable resolution. It does not run a benchmark or promise a particular frame rate. Every preset but Maximum can be recommended; Maximum has no frame-rate target and remains a manual choice.
 
@@ -162,6 +198,7 @@ stays sharp while the bulk of texture memory still comes down.
 | `image_picmip` | `0` | Mip levels to drop from diffuse textures. `0` = full resolution. Each step halves the texture. |
 | `image_picmipFilter` | `1` | Which image paths `image_picmip` may reduce. `0` = every diffuse texture, `1` = `textures/*` (world surfaces), `2` = `models/*` (characters, weapons, props), `4` = any other namespace. Add values to combine. |
 | `image_picmipMinSize` | `32` | Reduction stops once a texture's longest axis reaches this size, so small textures never turn to mush. |
+| `image_useHighRes` | `1` | Loads textures that Prey materials mark `highres` at full size. `0` halves them, as the original game did below its highest quality setting. |
 | `image_downSize` | `0` | Enables the general texture size ceiling. |
 | `image_downSizeLimit` | `0` | That ceiling, in pixels. `0` = no limit. |
 | `image_downSizeBump` / `image_downSizeBumpLimit` | `0` / `256` | Separate ceiling for normal maps. |

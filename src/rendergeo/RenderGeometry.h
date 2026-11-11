@@ -149,11 +149,15 @@ public:
 
 	renderLight_t			parms;					// specification
 
+	int						lastMovedFrameNum;		// the frame its shape last changed (origin, axes, radius,
+													// projection): lastModifiedFrameNum also follows colour
 	bool					lightHasMoved;			// the light has changed its position since it was
 													// first added, so the prelight model is not valid
 
 	bool					shadowMapStencilFallbackSticky;	// the backend hit a shadow-map render failure on this
 													// light; keep generating stencil volumes for its fallback
+	int						shadowMapStencilFallbackFrame;	// the frame something last asked for that fallback
+	int						shadowMapStencilFallbackCleanViews;	// views the light has been through since
 
 	float					modelMatrix[16];		// this is just a rearrangement of parms.axis and parms.origin
 
@@ -228,6 +232,8 @@ public:
 	idRenderModel *			dynamicModel;			// if parms.model->IsDynamicModel(), this is the generated data
 	int						dynamicModelFrameCount;	// continuously animating dynamic models will recreate
 													// dynamicModel if this doesn't == tr.viewCount
+	int						dynamicModelRegenFrame;	// the frame a snapshot last replaced an earlier one.
+													// That is a model changing; its first snapshot is not
 	idRenderModel *			cachedDynamicModel;
 	idRenderModel *			dynamicCollisionModel;	// collision-only dynamic snapshot for traces / sil-trace parity
 	idRenderModel *			cachedDynamicCollisionModel;

@@ -426,7 +426,7 @@ idCVar r_useSilRemap( "r_useSilRemap", "1", CVAR_RENDERER | CVAR_BOOL, "consider
 idCVar r_useNodeCommonChildren( "r_useNodeCommonChildren", "1", CVAR_RENDERER | CVAR_BOOL, "stop pushing reference bounds early when possible" );
 idCVar r_useShadowProjectedCull( "r_useShadowProjectedCull", "1", CVAR_RENDERER | CVAR_BOOL, "discard triangles outside light volume before shadowing" );
 idCVar r_useShadowVertexProgram( "r_useShadowVertexProgram", "1", CVAR_RENDERER | CVAR_BOOL, "do the shadow projection in the vertex program on capable cards" );
-idCVar r_useTrueTypeFonts( "r_useTrueTypeFonts", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render GUI text from the shipped .ttf faces, rasterised at the display's own resolution, instead of scaling up the fixed 12/24/48 point bitmap atlases" );
+idCVar r_useTrueTypeFonts( "r_useTrueTypeFonts", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render GUI text from the shipped .ttf faces, rasterised at the display's own resolution, instead of scaling up the fixed 12/24/48 point bitmap atlases" );
 idCVar r_ttfFontResolution( "r_ttfFontResolution", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "multiplier on the resolution the TrueType glyph atlases are rasterised at; raise for sharper text at the cost of atlas memory", 0.25f, 4.0f );
 idCVar r_ttfFontDebug( "r_ttfFontDebug", "0", CVAR_RENDERER | CVAR_BOOL, "dump each TrueType glyph atlas to fs_savepath/ttfatlas and log its layout" );
 idCVar r_useShadowMap( "r_useShadowMap", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use a simple shadow-map path for projected and point lights when supported" );
@@ -469,7 +469,9 @@ idCVar r_shadowMapStaticHysteresisFrames( "r_shadowMapStaticHysteresisFrames", "
 idCVar r_shadowMapResidentFrames( "r_shadowMapResidentFrames", "120", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "frames a resident static shadow map may remain unused before its cache slot can be expired", 1, 3600, idCmdSystem::ArgCompletion_Integer<1,3600> );
 idCVar r_shadowMapProjectedCacheSize( "r_shadowMapProjectedCacheSize", "8", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "how many full-size (r_shadowMapSize) static projected-light shadow maps the cache keeps; a map cut down for a crowded view takes its share of one, and 0 turns the cache off. Bounds the cache's memory on Vulkan; OpenGL caches into the atlas, which is its bound", 0, 16, idCmdSystem::ArgCompletion_Integer<0,16> );
 idCVar r_shadowMapPointCacheSize( "r_shadowMapPointCacheSize", "64", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "static point-light cubemap cache slots; a dense Quake 4 view lights forty point lights at once, and one without a slot re-renders its cube every frame. r_shadowMapPointCacheMegs bounds the memory the slots may take", 0, 96, idCmdSystem::ArgCompletion_Integer<0,96> );
-idCVar r_shadowMapPointCacheMegs( "r_shadowMapPointCacheMegs", "512", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "video memory the static point-light cubemap cache may fill, in MiB: slots beyond it stay unused, except that the first twelve are always available", 64, 8192 );
+idCVar r_shadowMapCacheMovingLights( "r_shadowMapCacheMovingLights", "0", CVAR_RENDERER | CVAR_BOOL, "send a moving light's shadow maps through the static cache like a still light's, for comparison: each view then publishes a map the next cannot use" );
+idCVar r_shadowMapStencilFallbackViews( "r_shadowMapStencilFallbackViews", "240", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "views a light whose shadow map failed goes through without another failure before it stops building stencil volumes for its fallback again; 0 keeps building them for the rest of the level", 0, 100000 );
+idCVar r_shadowMapPointCacheMegs( "r_shadowMapPointCacheMegs", "512", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "video memory the static point-light cubemap cache may fill, in MiB: slots beyond it stay unused, except that the first twelve are always available. Vulkan allows the scratch cubes of a view (uncached and composed point lights) the same figure again", 64, 8192 );
 idCVar r_shadowMapStaticCutouts( "r_shadowMapStaticCutouts", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "cache cutout (alpha-tested) shadow casters with the static shadow depth when their coverage cannot change: constant material registers, ordinary alpha images, no deform. 0 draws every cutout caster every view, over the cached depth" );
 idCVar r_shadowMapPointCompose( "r_shadowMapPointCompose", "1", CVAR_RENDERER | CVAR_BOOL, "draw a point light's moving and cutout casters over a copy of its cached static cube instead of re-rendering all six faces every view; 0 restores the full re-render for comparison" );
 idCVar r_shadowMapCacheCSM( "r_shadowMapCacheCSM", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "allow static-cache reuse for view-fitted CSM/global shadow-map passes" );
@@ -494,7 +496,7 @@ idCVar r_useCachedDynamicModels( "r_useCachedDynamicModels", "1", CVAR_RENDERER 
 idCVar r_useRepeatedStateReuse( "r_useRepeatedStateReuse", "1", CVAR_RENDERER | CVAR_BOOL, "keep model-space dynamic snapshots across transform-only entity updates so repeated-state presentation frames skip CPU re-skinning" );
 idCVar r_useNewSkinning( "r_useNewSkinning", "1", CVAR_RENDERER | CVAR_BOOL, "use retail-style SIMD MD5 skinning data" );
 idCVar r_gpuSkinning( "r_gpuSkinning", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use exact four-weight GPU deformation for eligible animated surfaces" );
-idCVar r_useFastSkinning( "r_useFastSkinning", "0", CVAR_RENDERER | CVAR_BOOL, "approximate MD5 tangent skinning with the dominant joint only" );
+idCVar r_useFastSkinning( "r_useFastSkinning", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "approximate MD5 tangent skinning with the dominant joint only" );
 idCVar r_deriveBiTangents( "r_deriveBiTangents", "0", CVAR_RENDERER | CVAR_BOOL, "derive bitangents from skinned normals and tangents" );
 idCVar r_forceConvertMD5R( "r_forceConvertMD5R", "0", CVAR_RENDERER | CVAR_BOOL, "prefer source md5/proc assets over any future prebuilt MD5R companions" );
 idCVar r_convertMD5toMD5R( "r_convertMD5toMD5R", "0", CVAR_RENDERER | CVAR_BOOL, "convert loaded MD5 meshes to packed MD5R form when the build includes rvRenderModelMD5R support" );
@@ -666,7 +668,7 @@ idCVar r_skipRenderContext( "r_skipRenderContext", "0", CVAR_RENDERER | CVAR_BOO
 idCVar r_skipTranslucent( "r_skipTranslucent", "0", CVAR_RENDERER | CVAR_BOOL, "skip the translucent interaction rendering" );
 idCVar r_skipAmbient( "r_skipAmbient", "0", CVAR_RENDERER | CVAR_BOOL, "bypasses all non-interaction drawing" );
 idCVar r_skipNewAmbient( "r_skipNewAmbient", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "bypasses all vertex/fragment program ambient drawing" );
-idCVar r_shaderLevel( "r_shaderLevel", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "Prey material shader quality level; reload declarations after changing", 0, 3, idCmdSystem::ArgCompletion_Integer<0,3> );
+idCVar r_shaderLevel( "r_shaderLevel", "3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "Prey material shader detail: 0 = low, 1 = medium, 2 = high, 3 = highest; selects shaderLevelN/shaderFallbackN stages and reparses the affected materials when changed", 0, 3, idCmdSystem::ArgCompletion_Integer<0,3> );
 idCVar r_forceAmbient( "r_forceAmbient", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "force ambient lighting level", 0.0f, 1.0f );
 idCVar r_useLightGrid( "r_useLightGrid", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use precomputed irradiance-volume atlases when present" );
 idCVar r_lightGridIntensity( "r_lightGridIntensity", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "scales baked light-grid indirect diffuse contribution", 0.0f, 16.0f );
@@ -6336,7 +6338,6 @@ void idRenderSystemLocal::Clear( void ) {
 	registered = false;
 	frameCount = 0;
 	viewCount = 0;
-	lastRenderSkybox = -1;
 	videoRestartCount = 0;
 	glContextGeneration = 0;
 	staticAllocCount = 0;
@@ -6520,6 +6521,7 @@ void idRenderSystemLocal::Shutdown( void ) {
 	idCinematic::ShutdownCinematic( );
 
 	globalImages->Shutdown();
+	R_ShutdownShaderLevelMaterials();
 
 	// close the r_logFile
 	if ( logFile ) {
@@ -6678,6 +6680,11 @@ static bool R_InitRendererDevice( bool legacyPolicy, bool forceWindow, char *err
 			common->Printf( "glGetError() = 0x%x\n", err );
 		}
 #endif
+		// Every image the device holds was just built under the image settings
+		// in effect, and one loaded later reads them then. A change made
+		// before this start is therefore applied: swallow its modified state so
+		// the next frame's check does not reload every image a second time.
+		globalImages->PrimeCvars();
 	}
 	r_initialRendererDevicePending = false;
 	if ( glConfig.isInitialized ) {

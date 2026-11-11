@@ -183,6 +183,15 @@ idCVar image_picmipFilter(
 	"image paths image_picmip may reduce:\n 0: every diffuse texture\n 1: textures/* (world surfaces)\n 2: models/* (characters, weapons, props)\n 4: any other namespace\nAdd values to combine categories.",
 	0,
 	PICMIP_FILTER_MASK );
+// Retail Prey's "use high resolution version": materials mark double-size
+// sources with the stage option "highres", and retail loaded them one level
+// smaller unless this was set. Retail only set it for its top machine spec;
+// openPREY keeps the full-size default.
+idCVar image_useHighRes(
+	"image_useHighRes",
+	"1",
+	CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
+	"load full-size versions of images that materials mark highres; 0 halves them as retail's lower machine specs did" );
 idCVar image_picmipMinSize(
 	"image_picmipMinSize",
 	"32",
@@ -263,7 +272,8 @@ imageDownsizeInputs_t R_ReadImageDownsizeInputs() {
     return {image_downSize.GetInteger(), image_downSizeLimit.GetInteger(),
         image_downSizeSpecular.GetInteger(), image_downSizeSpecularLimit.GetInteger(),
         image_downSizeBump.GetInteger(), image_downSizeBumpLimit.GetInteger(),
-        image_picmip.GetInteger(), image_picmipFilter.GetInteger(), image_picmipMinSize.GetInteger()};
+        image_picmip.GetInteger(), image_picmipFilter.GetInteger(), image_picmipMinSize.GetInteger(),
+        image_useHighRes.GetBool() ? 1 : 0};
 }
 void R_GetImageDownsizePolicy( const char* name, textureUsage_t usage, bool allowDownSize, imageDownsizePolicy_t& policy ) {
     const imageDownsizeInputs_t inputs = R_ReadImageDownsizeInputs();
@@ -307,7 +317,7 @@ two can never drift apart.
 */
 static bool R_ImageReductionCvarsChanged( bool clear ) {
 	idCVar *const reductionCvars[] = {
-		&image_picmip, &image_picmipFilter, &image_picmipMinSize,
+		&image_picmip, &image_picmipFilter, &image_picmipMinSize, &image_useHighRes,
 		&image_downSize, &image_downSizeLimit,
 		&image_downSizeSpecular, &image_downSizeSpecularLimit,
 		&image_downSizeBump, &image_downSizeBumpLimit
@@ -1077,7 +1087,7 @@ idImage	*idImageManager::GetImageWithParameters( const char *_name, textureFilte
 				// share the image data
 				continue;
 			}
-			if ( image->usage != usage || image->allowDownSize != allowDownSize || image->flags != flags ) {
+			if ( image->usage != usage || image->allowDownSize != allowDownSize || ( image->flags & ~IMAGEFLAG_HIGHRES ) != ( flags & ~IMAGEFLAG_HIGHRES ) ) {
 				// If an image is used differently then we need 2 copies of it because usage affects the way it's compressed and swizzled
 				continue;
 			}
@@ -1135,7 +1145,7 @@ idImage	*idImageManager::ImageFromFile( const char *_name, textureFilter_t filte
 				// share the image data
 				continue;
 			}
-			if ( image->usage != usage || image->flags != flags ) {
+			if ( image->usage != usage || ( image->flags & ~IMAGEFLAG_HIGHRES ) != ( flags & ~IMAGEFLAG_HIGHRES ) ) {
 				// If an image is used differently then we need 2 copies of it because usage affects the way it's compressed and swizzled
 				continue;
 			}
@@ -1216,7 +1226,7 @@ idImage *idImageManager::ImageHandleDeferred( const char *_name, textureFilter_t
 			if ( image->filter != filter || image->repeat != repeat ) {
 				continue;
 			}
-			if ( image->usage != usage || image->flags != flags ) {
+			if ( image->usage != usage || ( image->flags & ~IMAGEFLAG_HIGHRES ) != ( flags & ~IMAGEFLAG_HIGHRES ) ) {
 				continue;
 			}
 			const bool mergedAllowDownSize = image->allowDownSize && allowDownSize;

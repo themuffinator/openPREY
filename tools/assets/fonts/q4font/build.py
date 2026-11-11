@@ -23,7 +23,7 @@ from .charset import (
 	unicode_ranges,
 )
 from .donor import get_face, solve_instance
-from .fontdat import SourceFont, load_prey_source_font, load_source_font
+from .fontdat import SourceFont, load_prey_source_font, load_source_font, slot_stretch
 from .grid import load_grid_font
 from .path import Contour, Path2D
 from .trace import TraceOptions, trace_coverage
@@ -363,11 +363,9 @@ class FaceBuilder:
 				# squeezed out of shape can keep a usable mark, such as the
 				# console's C-cedilla, which is shortened yet keeps its cedilla.
 				if slot.has_outline:
-					retail = self._trace(self.source.coverage(slot))
+					retail = self._trace_slot(slot)
 					if retail.contours:
-						self.retail[codepoint] = retail.transformed(
-							self.scale, -self.scale, slot.bearing_x * self.scale, slot.bearing_y * self.scale
-						)
+						self.retail[codepoint] = retail
 				continue
 
 			if not slot.has_outline:
@@ -379,8 +377,7 @@ class FaceBuilder:
 					self._add(name, codepoint, None, advance)
 				continue
 
-			coverage = self.source.coverage(slot)
-			traced = self._trace(coverage)
+			traced = self._trace_slot(slot)
 			if not traced.contours:
 				# Some Prey slots (notably non-breaking space) serialize a useful
 				# advance and UV rectangle even though their source page has no ink.
@@ -394,17 +391,34 @@ class FaceBuilder:
 				# absent lets a donor supply a real glyph where one is available.
 				self.report["blank_slots"] = self.report.get("blank_slots", 0) + 1
 				continue
-			# Pixel space (y down, glyph-local) -> font units (y up, on the pen).
-			path = traced.transformed(
-				self.scale,
-				-self.scale,
-				slot.bearing_x * self.scale,
-				slot.bearing_y * self.scale,
-			)
-			self._add(name, codepoint, path, advance)
+			self._add(name, codepoint, traced, advance)
 			self.traced.add(name)
 
 		self.report["traced"] = len(self.paths)
+
+	def _trace_slot(self, slot) -> Path2D:
+		"""Trace one retail slot and place it in font units on the pen.
+
+		The bitmap renderer draws a glyph's atlas block across its recorded
+		image rect, so where the two differ the ink is stretched to fill the
+		rect. Prey's menu face records every image 3 units taller than its
+		atlas block at 48 point (1 unit at 24); tracing the block 1:1 squashed
+		those letters and lifted them off the baseline. Map the trace onto the
+		image rect exactly as the bitmap path draws it.
+		"""
+		coverage = self.source.coverage(slot)
+		traced = self._trace(coverage)
+		if not traced.contours:
+			return traced
+		# Grid sheets (bigchars) are sliced by cell, not by a recorded rect.
+		stretch_x, stretch_y = (1.0, 1.0) if self.spec.grid_atlas is not None else slot_stretch(slot, coverage.shape)
+		# Pixel space (y down, glyph-local) -> font units (y up, on the pen).
+		return traced.transformed(
+			self.scale * stretch_x,
+			-self.scale * stretch_y,
+			slot.bearing_x * self.scale,
+			slot.bearing_y * self.scale,
+		)
 
 	def _trace(self, coverage) -> Path2D:
 		"""Trace one glyph, resampling first when the source is small."""

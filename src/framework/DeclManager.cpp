@@ -1472,7 +1472,6 @@ void idDeclManagerLocal::Init( void ) {
 		StartLoadingDecls();
 		LoadDeclsFromFile();
 		cmdSystem->AddCommand( "flushDecls", FlushDecls_f, CMD_FL_SYSTEM, "deallocates current decl data" );
-		cmdSystem->AddCommand( "checkDecls", CheckDecls_f, CMD_FL_SYSTEM, "parses every loaded decl" );
 	} else {
 		cmdSystem->AddCommand( "writeDeclFile", WriteDeclFile_f, CMD_FL_SYSTEM, "writes parsed decls to a packed .decls file (optional mode: openq4 or retail)" );
 
@@ -1492,6 +1491,9 @@ void idDeclManagerLocal::Init( void ) {
 	}
 
 	// add console commands
+	// parses every loaded decl from either a packed .decls file or loose folders,
+	// so retail decl coverage can be audited without loading every map
+	cmdSystem->AddCommand( "checkDecls", CheckDecls_f, CMD_FL_SYSTEM, "parses every loaded decl" );
 	cmdSystem->AddCommand( "listDecls", ListDecls_f, CMD_FL_SYSTEM, "lists all decls" );
 	cmdSystem->AddCommand( "listAllDecls", ListAllDecls_f, CMD_FL_SYSTEM, "lists every decl name grouped by type" );
 
@@ -1527,6 +1529,7 @@ void idDeclManagerLocal::Init( void ) {
 	cmdSystem->AddCommand( "printEntityDef", idPrintDecls_f<DECL_ENTITYDEF>, CMD_FL_SYSTEM, "prints an entity def", idCmdSystem::ArgCompletion_Decl<DECL_ENTITYDEF> );
 	cmdSystem->AddCommand( "printFX", idPrintDecls_f<DECL_FX>, CMD_FL_SYSTEM, "prints an FX system", idCmdSystem::ArgCompletion_Decl<DECL_FX> );
 	cmdSystem->AddCommand( "printParticle", idPrintDecls_f<DECL_PARTICLE>, CMD_FL_SYSTEM, "prints a particle system", idCmdSystem::ArgCompletion_Decl<DECL_PARTICLE> );
+	cmdSystem->AddCommand( "printBeam", idPrintDecls_f<DECL_BEAM>, CMD_FL_SYSTEM, "prints a beam", idCmdSystem::ArgCompletion_Decl<DECL_BEAM> );
 	cmdSystem->AddCommand( "printAF", idPrintDecls_f<DECL_AF>, CMD_FL_SYSTEM, "prints an articulated figure", idCmdSystem::ArgCompletion_Decl<DECL_AF> );
 	cmdSystem->AddCommand( "printPDA", idPrintDecls_f<DECL_PDA>, CMD_FL_SYSTEM, "prints an PDA", idCmdSystem::ArgCompletion_Decl<DECL_PDA> );
 	cmdSystem->AddCommand( "printEmail", idPrintDecls_f<DECL_EMAIL>, CMD_FL_SYSTEM, "prints an Email", idCmdSystem::ArgCompletion_Decl<DECL_EMAIL> );
@@ -3002,6 +3005,16 @@ const idDeclSkin *idDeclManagerLocal::SkinByIndex( int index, bool forceParse ) 
 /********************************************************************/
 
 const idSoundShader *idDeclManagerLocal::FindSound( const char *name, bool makeDefault ) {
+	// Retail Prey ships "<shader>_nogore" variants (the possessed children on
+	// the feeding tower maps) and its engine prefers them whenever the game's
+	// g_nogore cvar is set. The cvar is game-owned, so it reads false before the
+	// game library registers it.
+	if ( name != NULL && name[0] != '\0' && cvarSystem->GetCVarBool( "g_nogore" ) ) {
+		const idDecl *nogore = FindType( DECL_SOUND, va( "%s_nogore", name ), false );
+		if ( nogore != NULL ) {
+			return static_cast<const idSoundShader *>( nogore );
+		}
+	}
 	return static_cast<const idSoundShader *>( FindType( DECL_SOUND, name, makeDefault ) );
 }
 

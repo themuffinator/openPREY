@@ -146,18 +146,6 @@ static float openPREY_RetailHashSigned( unsigned int seed ) {
 	return openPREY_RetailHashFloat( seed ) * 2.0f - 1.0f;
 }
 
-static bool openPREY_IsTrueTypeFont( const fontInfo_t *font ) {
-	return font != NULL && idStr::Icmpn( font->name, "ttf/", 4 ) == 0;
-}
-
-static void openPREY_LogTTFSplineNotice() {
-	static bool warned = false;
-	if ( !warned ) {
-		warned = true;
-		common->Warning( "Retail spline text is currently available only for bitmap GUI fonts; drawing TrueType text without the effect" );
-	}
-}
-
 // Count the things that actually occupy a glyph slot in the current text
 // dialect. Colour/brightness escapes do not count; embedded icons and their
 // repeat escapes do. This keeps the scatter distribution stable when retail
@@ -954,7 +942,9 @@ static float openQ4_FontSelectionScaleForViewport( float authoredScale, float ca
 // 12/24/48 point, so their point-size-normalised metrics agree and picking a
 // larger slot only buys resolution.  The retail .fontdat atlases were authored
 // by hand per size and do not agree to the pixel, so picking a different one
-// there moves text.  Only the scalable slots carry the "ttf/" name prefix.
+// there moves text.  Only uniformly rescaled scalable slots carry the "ttf/"
+// name prefix; slots fitted to the retail atlases ("ttfretail/") inherit their
+// per-size differences and are selected like the retail atlases.
 static bool openQ4_FontAtlasesAreProportional( const fontInfoEx_t *font ) {
 	if ( font == NULL ) {
 		return false;
@@ -1290,8 +1280,15 @@ static bool openQ4_RegisterFontForLanguage( const char *logicalName, const idStr
 
 }
 
-int idDeviceContext::FindFont( const char *name ) {
+int idDeviceContext::FindFont( const char *requestedName ) {
 	EnsureFontsCurrent();
+
+	// Look Quake 4 face names up as the Prey face that stands in for them, so
+	// "fonts/lowpixel" shares the default face's entry instead of registering
+	// a second copy of its atlases (see R_CanonicalFontName).
+	idStr canonicalName;
+	R_CanonicalFontName( requestedName, canonicalName );
+	const char *name = canonicalName.c_str();
 
 	int c = fonts.Num();
 
@@ -1361,6 +1358,10 @@ int idDeviceContext::FindFont( const char *name ) {
 		}
 		return -1;
 	}
+}
+
+bool idDeviceContext::FontIs( int num, const char *name ) const {
+	return num >= 0 && num < fonts.Num() && name != NULL && idStr::Icmp( fonts[num].name, name ) == 0;
 }
 
 void idDeviceContext::SetupFonts() {
@@ -1629,6 +1630,13 @@ float idDeviceContext::GetKeyBindingIconWidth( int keyNum, float textScale, floa
 		const float labelWidth = static_cast<float>( TextWidth( info.label, labelScale, -1 ) );
 		const float maximumWidth = height * ( info.kind == Q4_KEY_BINDING_PAD_GENERIC ? 1.90f : 2.20f );
 		width = Min( maximumWidth, Max( width, labelWidth + sidePadding * 2.0f ) );
+		if ( keyBindingWideLabels && info.kind == Q4_KEY_BINDING_KEYBOARD ) {
+			// A settings row: the keycap takes its name at the size the draw
+			// path gives a label that fits (0.68 of the text scale against the
+			// 0.54 measured above), up to four heights.
+			const float drawnWidth = labelWidth * ( 0.68f / 0.54f );
+			width = Max( width, Min( height * 4.0f, drawnWidth + sidePadding * 2.0f ) );
+		}
 		SetFontByScale( textScale );
 	}
 
@@ -2037,6 +2045,7 @@ void idDeviceContext::Clear() {
 	aspectCorrect = true;
 	drawTextColor.Zero();
 	drawTextColorAdjust = 0.0f;
+	keyBindingWideLabels = false;
 	icons.Clear();
 	retailSplineEffectActive = false;
 	retailSplineEffectProgress = 0.0f;
@@ -2048,11 +2057,8 @@ idDeviceContext::idDeviceContext() {
 }
 
 bool idDeviceContext::SetRetailSplineEffect( float progress, int splinePoints ) {
-	if ( cvarSystem->GetCVarBool( "r_useTrueTypeFonts" ) ) {
-		ClearRetailSplineEffect();
-		openPREY_LogTTFSplineNotice();
-		return false;
-	}
+	// The effect only moves and fades each glyph's quad; it never reads the
+	// glyph's pixels, so a TrueType atlas animates exactly as a retail one does.
 	retailSplineEffectActive = true;
 	retailSplineEffectProgress = idMath::ClampFloat( 0.0f, 1.0f, progress );
 	retailSplineEffectPoints = idMath::ClampInt( 3, 100, splinePoints );
@@ -2758,15 +2764,11 @@ int idDeviceContext::DrawText(float x, float y, float scale, idVec4 color, const
 		len = limit;
 	}
 
-	const bool retailSplineTTF = retailSplineEffectActive && openPREY_IsTrueTypeFont( scaledFont.font );
-	if ( retailSplineTTF ) {
-		openPREY_LogTTFSplineNotice();
-	}
-	const bool retailSplineBitmap = retailSplineEffectActive && !retailSplineTTF;
+	const bool retailSpline = retailSplineEffectActive;
 	const float retailLineStartX = x;
-	const float retailLineWidth = retailSplineBitmap ? static_cast<float>( TextWidth( text, scale, len, static_cast<int>( adjust ) ) ) : 0.0f;
-	const float retailLineHeight = retailSplineBitmap ? static_cast<float>( MaxCharHeight( scale ) ) : 0.0f;
-	const int retailGlyphCount = retailSplineBitmap ? openPREY_CountRetailGlyphs( s, len ) : 0;
+	const float retailLineWidth = retailSpline ? static_cast<float>( TextWidth( text, scale, len, static_cast<int>( adjust ) ) ) : 0.0f;
+	const float retailLineHeight = retailSpline ? static_cast<float>( MaxCharHeight( scale ) ) : 0.0f;
+	const int retailGlyphCount = retailSpline ? openPREY_CountRetailGlyphs( s, len ) : 0;
 	int retailGlyphIndex = 0;
 
 	int count = 0;
@@ -2816,7 +2818,7 @@ int idDeviceContext::DrawText(float x, float y, float scale, idVec4 color, const
 							if ( iconWidth > 0.0f ) {
 								float iconX = x;
 								float iconY = openQ4_GlyphDrawY( y, scaledFont.renderScale, referenceGlyph );
-								if ( retailSplineBitmap && retailGlyphCount > 0 ) {
+								if ( retailSpline && retailGlyphCount > 0 ) {
 									const unsigned int iconHash = static_cast<unsigned int>( iconCode[0] ) |
 										( static_cast<unsigned int>( iconCode[1] ) << 8 ) |
 										( static_cast<unsigned int>( iconCode[2] ) << 16 );
@@ -2839,14 +2841,14 @@ int idDeviceContext::DrawText(float x, float y, float scale, idVec4 color, const
 								}
 								PaintChar( iconX, iconY, iconWidth, referenceHeight, scaledFont.renderScale,
 									icon->s1, icon->t1, icon->s2, icon->t2, icon->material );
-								if ( retailSplineBitmap ) {
+								if ( retailSpline ) {
 									renderSystem->SetColor( currentColor );
 								}
 								x += iconWidth;
 							}
 						}
 					}
-					if ( retailSplineBitmap ) {
+					if ( retailSpline ) {
 						++retailGlyphIndex;
 					}
 				} else {
@@ -2912,7 +2914,7 @@ int idDeviceContext::DrawText(float x, float y, float scale, idVec4 color, const
 		float drawX = openQ4_GlyphDrawX( x, scaledFont.renderScale, glyph );
 		float drawY = openQ4_GlyphDrawY( y, scaledFont.renderScale, glyph );
 		openPreyRetailSplineGlyph_t splineGlyph = {};
-		if ( retailSplineBitmap && retailGlyphCount > 0 ) {
+		if ( retailSpline && retailGlyphCount > 0 ) {
 			splineGlyph = openPREY_RetailSplineGlyph( drawX, drawY, retailLineStartX, retailLineWidth,
 				retailLineHeight, retailGlyphIndex, retailGlyphCount, next.codePoint,
 				retailSplineEffectProgress, retailSplineEffectPoints );
@@ -2949,13 +2951,13 @@ int idDeviceContext::DrawText(float x, float y, float scale, idVec4 color, const
 			SetDrawColor( currentColor );
 		}
 
-		if ( retailSplineBitmap ) {
+		if ( retailSpline ) {
 			idVec4 glyphColor = currentColor;
 			glyphColor[3] *= splineGlyph.glyphAlpha;
 			renderSystem->SetColor( glyphColor );
 		}
 		PaintGlyph( drawX, drawY, scaledFont.renderScale, scaledFont.font, glyph, glyphMaterial );
-		if ( retailSplineBitmap ) {
+		if ( retailSpline ) {
 			renderSystem->SetColor( currentColor );
 			++retailGlyphIndex;
 		}
