@@ -502,7 +502,7 @@ static void Sys_AppendAlternateMacOSPackageRootEntries( const idStr &packageDire
 static idStr Sys_LocalizedMacOSPackageRootString( const char *key, const char *fallback ) {
 	NSString *keyString = [NSString stringWithUTF8String:key != NULL ? key : ""];
 	NSString *fallbackString = [NSString stringWithUTF8String:fallback != NULL ? fallback : ""];
-	NSString *localizedString = [[NSBundle mainBundle] localizedStringForKey:keyString value:fallbackString table:@"OpenPREYPackageRoot"];
+	NSString *localizedString = [[NSBundle mainBundle] localizedStringForKey:keyString value:fallbackString table:@"openPREYPackageRoot"];
 	if ( localizedString == nil || [localizedString length] == 0 ) {
 		localizedString = fallbackString;
 	}
@@ -566,17 +566,17 @@ static bool Sys_MacOSAppBundleHasEmbeddedRuntimeMarker( const idStr &resourceDir
 static bool Sys_MacOSAppBundleDeclaresSelfContainedRuntime( const idStr &appDirectory ) {
 	NSString *appPath = [NSString stringWithUTF8String:appDirectory.c_str()];
 	NSBundle *appBundle = appPath != nil ? [NSBundle bundleWithPath:appPath] : nil;
-	NSString *runtimeLayout = [appBundle objectForInfoDictionaryKey:@"OpenPREYRuntimeLayout"];
+	NSString *runtimeLayout = [appBundle objectForInfoDictionaryKey:@"openPREYRuntimeLayout"];
 	return runtimeLayout != nil && [runtimeLayout isEqualToString:@"self-contained-v1"];
 }
 
 static void Sys_ErrorIfMacOSAppBundleRuntimeIncomplete( const idStr &appDirectory, const idStr &resourceDirectory, const idStr &frameworkDirectory, const idStr &missingEntries ) {
 	idStr title = Sys_LocalizedMacOSPackageRootString(
-		"OpenPREYBundleRuntimeMissingTitle",
+		"openPREYBundleRuntimeMissingTitle",
 		"openPREY.app is incomplete"
 	);
 	idStr body = Sys_LocalizedMacOSPackageRootString(
-		"OpenPREYBundleRuntimeMissingBody",
+		"openPREYBundleRuntimeMissingBody",
 		"Reinstall the complete openPREY.app. Its game data and signed game module must remain inside the application bundle."
 	);
 
@@ -616,11 +616,11 @@ static void Sys_ErrorIfMacOSAppBundlePackageRootIncomplete( const idStr &appDire
 	Sys_AppendAlternateMacOSPackageRootEntries( packageDirectory, arch, foundMismatchedEntries );
 
 	idStr title = Sys_LocalizedMacOSPackageRootString(
-		"OpenPREYPackageRootMissingTitle",
+		"openPREYPackageRootMissingTitle",
 		"openPREY.app adjacent package root is incomplete"
 	);
 	idStr body = Sys_LocalizedMacOSPackageRootString(
-		"OpenPREYPackageRootMissingBody",
+		"openPREYPackageRootMissingBody",
 		"This legacy package layout needs openPREY.app, basepr/, openPREY-client_<arch>, and openPREY-ded_<arch> together in the same package folder. Current self-contained packages support moving only openPREY.app to /Applications; reinstall this package to use that layout."
 	);
 

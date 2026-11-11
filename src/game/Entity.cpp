@@ -103,7 +103,7 @@ const idEventDef EV_StartSoundShader( "startSoundShader", "sd", 'f' );
 const idEventDef EV_StartSound( "startSound", "sdd", 'f' );
 const idEventDef EV_StopSound( "stopSound", "dd" );
 const idEventDef EV_FadeSound( "fadeSound", "dff" );
-static const idEventDef EV_OpenPreyScriptSilenceDone( "<openprey_script_silence_done>", NULL );
+static const idEventDef EV_openPREYScriptSilenceDone( "<openprey_script_silence_done>", NULL );
 const idEventDef EV_SetGuiParm( "setGuiParm", "ss" );
 const idEventDef EV_SetGuiFloat( "setGuiFloat", "sf" );
 const idEventDef EV_GetNextKey( "getNextKey", "ss", 's' );
@@ -186,7 +186,7 @@ ABSTRACT_DECLARATION( idClass, idEntity )
 	EVENT( EV_StartSound,			idEntity::Event_StartSound )
 	EVENT( EV_StopSound,			idEntity::Event_StopSound )
 	EVENT( EV_FadeSound,			idEntity::Event_FadeSound )
-	EVENT( EV_OpenPreyScriptSilenceDone,	idEntity::Event_ScriptSilenceDone )
+	EVENT( EV_openPREYScriptSilenceDone,	idEntity::Event_ScriptSilenceDone )
 	EVENT( EV_GetWorldOrigin,		idEntity::Event_GetWorldOrigin )
 	EVENT( EV_SetWorldOrigin,		idEntity::Event_SetWorldOrigin )
 	EVENT( EV_GetOrigin,			idEntity::Event_GetOrigin )
@@ -743,7 +743,7 @@ idEntity::~idEntity( void ) {
 		idThread::ObjectMoveDone( scriptSilenceWaitingThread, this );
 		scriptSilenceWaitingThread = 0;
 	}
-	CancelEvents( &EV_OpenPreyScriptSilenceDone );
+	CancelEvents( &EV_openPREYScriptSilenceDone );
 
 	if ( thinkFlags ) {
 		BecomeInactive( thinkFlags );
@@ -2043,8 +2043,8 @@ void idEntity::TrackScriptVoiceSilence( const s_channelType channel, int length 
 	if ( scriptSilenceWaitingThread ) {
 		int time = length + scriptSilenceSilentTimeOffset;
 		time = idMath::ClampInt( 1, time, time );
-		CancelEvents( &EV_OpenPreyScriptSilenceDone );
-		PostEventMS( &EV_OpenPreyScriptSilenceDone, time );
+		CancelEvents( &EV_openPREYScriptSilenceDone );
+		PostEventMS( &EV_openPREYScriptSilenceDone, time );
 	}
 }
 
@@ -2064,8 +2064,8 @@ bool idEntity::SetSilenceCallbackForCurrentThread( float plusOrMinusSeconds ) {
 	if ( scriptSilenceNextSilentTime > gameLocal.time ) {
 		int time = ( scriptSilenceNextSilentTime - gameLocal.time ) + scriptSilenceSilentTimeOffset;
 		time = idMath::ClampInt( 1, time, time );
-		CancelEvents( &EV_OpenPreyScriptSilenceDone );
-		PostEventMS( &EV_OpenPreyScriptSilenceDone, time );
+		CancelEvents( &EV_openPREYScriptSilenceDone );
+		PostEventMS( &EV_openPREYScriptSilenceDone, time );
 	}
 
 	return true;

@@ -34,7 +34,7 @@ the `basepr` payload is not duplicated beside the bundle.
 moves that staged payload into the app's code/data locations through
 `tools/build/package_nightly.py` without changing the repository staging
 layout. `Contents/Info.plist` declares
-`OpenPREYRuntimeLayout=self-contained-v1`, so a damaged current app still gets
+`openPREYRuntimeLayout=self-contained-v1`, so a damaged current app still gets
 the self-contained-runtime diagnostic even when its embedded data or module
 directories have been removed completely.
 

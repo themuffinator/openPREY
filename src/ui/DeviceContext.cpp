@@ -184,7 +184,7 @@ static int openPREY_CountRetailGlyphs( const unsigned char *text, int len ) {
 	return glyphs;
 }
 
-struct openPreyRetailSplineGlyph_t {
+struct openPREYRetailSplineGlyph_t {
 	float drawX;
 	float drawY;
 	float ghostX;
@@ -194,10 +194,10 @@ struct openPreyRetailSplineGlyph_t {
 	bool drawGhost;
 };
 
-static openPreyRetailSplineGlyph_t openPREY_RetailSplineGlyph( float targetX, float targetY,
+static openPREYRetailSplineGlyph_t openPREY_RetailSplineGlyph( float targetX, float targetY,
 		float lineStartX, float lineWidth, float lineHeight, int glyphIndex, int glyphCount,
 		unsigned int glyphCode, float effectProgress, int splinePoints ) {
-	openPreyRetailSplineGlyph_t result = {};
+	openPREYRetailSplineGlyph_t result = {};
 	const float normalizedIndex = glyphCount > 1 ? static_cast<float>( glyphIndex ) / static_cast<float>( glyphCount - 1 ) : 0.5f;
 	const unsigned int seedBase = static_cast<unsigned int>( glyphIndex * 131 ) + glyphCode * 911u + static_cast<unsigned int>( splinePoints ) * 37u;
 	const float startDelay = 0.03f + 0.09f * openPREY_RetailHashFloat( seedBase + 0x11u );
@@ -1108,16 +1108,16 @@ static bool openQ4_CheckInt( const char *label, int actual, int expected ) {
 }
 
 #if defined(HUMANHEAD)
-struct openPreyRetailFontPageAudit_t {
+struct openPREYRetailFontPageAudit_t {
 	int pageCount;
 	bool namesMatch;
 	bool visibleGlyphsCovered;
 	bool imagesPresent;
 };
 
-static openPreyRetailFontPageAudit_t openPREY_AuditRetailFontPages( const fontInfo_t &fontSlot,
+static openPREYRetailFontPageAudit_t openPREY_AuditRetailFontPages( const fontInfo_t &fontSlot,
 		const char *expectedMaterialPrefix ) {
-	openPreyRetailFontPageAudit_t result = {};
+	openPREYRetailFontPageAudit_t result = {};
 	result.namesMatch = true;
 	result.visibleGlyphsCovered = true;
 	result.imagesPresent = true;
@@ -2822,7 +2822,7 @@ int idDeviceContext::DrawText(float x, float y, float scale, idVec4 color, const
 									const unsigned int iconHash = static_cast<unsigned int>( iconCode[0] ) |
 										( static_cast<unsigned int>( iconCode[1] ) << 8 ) |
 										( static_cast<unsigned int>( iconCode[2] ) << 16 );
-									const openPreyRetailSplineGlyph_t splineGlyph = openPREY_RetailSplineGlyph(
+									const openPREYRetailSplineGlyph_t splineGlyph = openPREY_RetailSplineGlyph(
 										iconX, iconY, retailLineStartX, retailLineWidth, retailLineHeight,
 										retailGlyphIndex, retailGlyphCount, iconHash,
 										retailSplineEffectProgress, retailSplineEffectPoints );
@@ -2913,7 +2913,7 @@ int idDeviceContext::DrawText(float x, float y, float scale, idVec4 color, const
 		const idMaterial *glyphMaterial = next.material;
 		float drawX = openQ4_GlyphDrawX( x, scaledFont.renderScale, glyph );
 		float drawY = openQ4_GlyphDrawY( y, scaledFont.renderScale, glyph );
-		openPreyRetailSplineGlyph_t splineGlyph = {};
+		openPREYRetailSplineGlyph_t splineGlyph = {};
 		if ( retailSpline && retailGlyphCount > 0 ) {
 			splineGlyph = openPREY_RetailSplineGlyph( drawX, drawY, retailLineStartX, retailLineWidth,
 				retailLineHeight, retailGlyphIndex, retailGlyphCount, next.codePoint,
@@ -3827,7 +3827,7 @@ bool UI_FontParity_RunSelfTest( void ) {
 				label = va( "Prey %s %d point size", retailFontCases[fontCaseIndex].label, pointSizes[slotIndex] );
 				ok &= openQ4_CheckNear( label.c_str(), fontSlot.pointSize, static_cast<float>( pointSizes[slotIndex] ) );
 
-				const openPreyRetailFontPageAudit_t pageAudit = openPREY_AuditRetailFontPages( fontSlot, materialPrefix.c_str() );
+				const openPREYRetailFontPageAudit_t pageAudit = openPREY_AuditRetailFontPages( fontSlot, materialPrefix.c_str() );
 				label = va( "Prey %s %d point material page count", retailFontCases[fontCaseIndex].label, pointSizes[slotIndex] );
 				ok &= openQ4_CheckInt( label.c_str(), pageAudit.pageCount, retailFontCases[fontCaseIndex].expectedPages[slotIndex] );
 				label = va( "Prey %s %d point material page names", retailFontCases[fontCaseIndex].label, pointSizes[slotIndex] );

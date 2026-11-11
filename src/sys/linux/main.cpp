@@ -445,37 +445,37 @@ static void Sys_ReportWaylandRuntime( void ) {
 	const char *x11Display = getenv( "DISPLAY" );
 	const char *sdlVideoDriver = getenv( "SDL_VIDEO_DRIVER" );
 	const char *legacySdlVideoDriver = getenv( "SDL_VIDEODRIVER" );
-	const char *openPreyForceX11 = getenv( "OPENPREY_FORCE_X11" );
-	const char *openPreyDisableLibdecor = getenv( "OPENPREY_WAYLAND_DISABLE_LIBDECOR" );
-	const char *openPreyPreferLibdecor = getenv( "OPENPREY_WAYLAND_PREFER_LIBDECOR" );
-	const char *openPreySyncWindowOps = getenv( "OPENPREY_WAYLAND_SYNC_WINDOW_OPS" );
+	const char *openPREYForceX11 = getenv( "OPENPREY_FORCE_X11" );
+	const char *openPREYDisableLibdecor = getenv( "OPENPREY_WAYLAND_DISABLE_LIBDECOR" );
+	const char *openPREYPreferLibdecor = getenv( "OPENPREY_WAYLAND_PREFER_LIBDECOR" );
+	const char *openPREYSyncWindowOps = getenv( "OPENPREY_WAYLAND_SYNC_WINDOW_OPS" );
 	// Temporary migration aliases for environments configured before the rebase.
-	if ( openPreyForceX11 == NULL || openPreyForceX11[0] == '\0' ) {
-		openPreyForceX11 = getenv( "OPENQ4_FORCE_X11" );
+	if ( openPREYForceX11 == NULL || openPREYForceX11[0] == '\0' ) {
+		openPREYForceX11 = getenv( "OPENQ4_FORCE_X11" );
 	}
-	if ( openPreyDisableLibdecor == NULL || openPreyDisableLibdecor[0] == '\0' ) {
-		openPreyDisableLibdecor = getenv( "OPENQ4_WAYLAND_DISABLE_LIBDECOR" );
+	if ( openPREYDisableLibdecor == NULL || openPREYDisableLibdecor[0] == '\0' ) {
+		openPREYDisableLibdecor = getenv( "OPENQ4_WAYLAND_DISABLE_LIBDECOR" );
 	}
-	if ( openPreyPreferLibdecor == NULL || openPreyPreferLibdecor[0] == '\0' ) {
-		openPreyPreferLibdecor = getenv( "OPENQ4_WAYLAND_PREFER_LIBDECOR" );
+	if ( openPREYPreferLibdecor == NULL || openPREYPreferLibdecor[0] == '\0' ) {
+		openPREYPreferLibdecor = getenv( "OPENQ4_WAYLAND_PREFER_LIBDECOR" );
 	}
-	if ( openPreySyncWindowOps == NULL || openPreySyncWindowOps[0] == '\0' ) {
-		openPreySyncWindowOps = getenv( "OPENQ4_WAYLAND_SYNC_WINDOW_OPS" );
+	if ( openPREYSyncWindowOps == NULL || openPREYSyncWindowOps[0] == '\0' ) {
+		openPREYSyncWindowOps = getenv( "OPENQ4_WAYLAND_SYNC_WINDOW_OPS" );
 	}
 	const char *effectiveSdlVideoDriver = ( sdlVideoDriver != NULL && sdlVideoDriver[0] != '\0' )
 		? sdlVideoDriver
 		: legacySdlVideoDriver;
-	const char *effectiveOpenPreyForceX11 = ( openPreyForceX11 != NULL && openPreyForceX11[0] != '\0' )
-		? openPreyForceX11
+	const char *effectiveOpenPREYForceX11 = ( openPREYForceX11 != NULL && openPREYForceX11[0] != '\0' )
+		? openPREYForceX11
 		: "<unset>";
-	const char *effectiveOpenPreyDisableLibdecor = ( openPreyDisableLibdecor != NULL && openPreyDisableLibdecor[0] != '\0' )
-		? openPreyDisableLibdecor
+	const char *effectiveOpenPREYDisableLibdecor = ( openPREYDisableLibdecor != NULL && openPREYDisableLibdecor[0] != '\0' )
+		? openPREYDisableLibdecor
 		: "<unset>";
-	const char *effectiveOpenPreyPreferLibdecor = ( openPreyPreferLibdecor != NULL && openPreyPreferLibdecor[0] != '\0' )
-		? openPreyPreferLibdecor
+	const char *effectiveOpenPREYPreferLibdecor = ( openPREYPreferLibdecor != NULL && openPREYPreferLibdecor[0] != '\0' )
+		? openPREYPreferLibdecor
 		: "<unset>";
-	const char *effectiveOpenPreySyncWindowOps = ( openPreySyncWindowOps != NULL && openPreySyncWindowOps[0] != '\0' )
-		? openPreySyncWindowOps
+	const char *effectiveOpenPREYSyncWindowOps = ( openPREYSyncWindowOps != NULL && openPREYSyncWindowOps[0] != '\0' )
+		? openPREYSyncWindowOps
 		: "<unset>";
 
 	if ( waylandDisplay == NULL || waylandDisplay[0] == '\0' ) {
@@ -510,10 +510,10 @@ static void Sys_ReportWaylandRuntime( void ) {
 		waylandDisplay,
 		x11Display,
 		( effectiveSdlVideoDriver != NULL && effectiveSdlVideoDriver[0] != '\0' ) ? effectiveSdlVideoDriver : "<unset>",
-		effectiveOpenPreyForceX11,
-		effectiveOpenPreyDisableLibdecor,
-		effectiveOpenPreyPreferLibdecor,
-		effectiveOpenPreySyncWindowOps
+		effectiveOpenPREYForceX11,
+		effectiveOpenPREYDisableLibdecor,
+		effectiveOpenPREYPreferLibdecor,
+		effectiveOpenPREYSyncWindowOps
 	);
 #else
 	Sys_Printf(
