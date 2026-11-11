@@ -40,12 +40,79 @@ windowDef desktop {
 		transition "scope::matcolor"			"0 0 0 0"		"1.0 1.0 1.0 1.0" "500" ;
 	}
 	
-	windowDef overlay {
+	// openPREY: the lens covers the whole screen at every aspect
+	// (prey-ui-visual-design.md 10.8). The stock drew one window of
+	// models/weapons/rifle/scopeview over the 4:3 canvas, so a wide or tall
+	// screen saw the view untinted beside or above it. The lens's banded tint
+	// and its turning veins are drawn apart (materials/rifle_scope_aspect.mtr)
+	// so that each covers the screen at its stock scale. The instrument below
+	// stays on the canvas: a circle on the screen's centre.
+
+	// The tint: whole stock tiles, so its bands keep their 15 u pitch and scroll
+	// one canvas height a second. Tiles above and below fill a tall screen; the
+	// bands wrap seamlessly there because they scroll. Tiles beside the canvas
+	// fill a wide one, mirrored so their texture meets the canvas edge without
+	// a seam. Together they cover aspects from 4:1 down to 1:3.75.
+	windowDef lensTint {
 		rect		0, 0, 640, 480
-		background	"models/weapons/rifle/scopeview"
-		matcolor	1, 1, 1, "gui::fov"
+		background	"models/weapons/rifle/scopeview_lens_tint"
+		matcolor	1, 1, 1, 1
 	}
-	
+	windowDef lensTintLeft {
+		rect		( 0 - 640 ), 0, 640, 480
+		visible		( "gui::virtual_screen_x_expand" > 0 )
+		background	"models/weapons/rifle/scopeview_lens_tint"
+		matcolor	1, 1, 1, 1
+		matscalex	-1
+		noclip		1
+	}
+	windowDef lensTintRight {
+		rect		640, 0, 640, 480
+		visible		( "gui::virtual_screen_x_expand" > 0 )
+		background	"models/weapons/rifle/scopeview_lens_tint"
+		matcolor	1, 1, 1, 1
+		matscalex	-1
+		noclip		1
+	}
+	windowDef lensTintAbove {
+		rect		0, ( 0 - 480 ), 640, 480
+		visible		( "gui::virtual_screen_y_expand" > 0 )
+		background	"models/weapons/rifle/scopeview_lens_tint"
+		matcolor	1, 1, 1, 1
+		noclip		1
+	}
+	windowDef lensTintBelow {
+		rect		0, 480, 640, 480
+		visible		( "gui::virtual_screen_y_expand" > 0 )
+		background	"models/weapons/rifle/scopeview_lens_tint"
+		matcolor	1, 1, 1, 1
+		noclip		1
+	}
+	windowDef lensTintAbove2 {
+		rect		0, ( 0 - 960 ), 640, 480
+		visible		( "gui::virtual_screen_y_expand" > 480 )
+		background	"models/weapons/rifle/scopeview_lens_tint"
+		matcolor	1, 1, 1, 1
+		noclip		1
+	}
+	windowDef lensTintBelow2 {
+		rect		0, 960, 640, 480
+		visible		( "gui::virtual_screen_y_expand" > 480 )
+		background	"models/weapons/rifle/scopeview_lens_tint"
+		matcolor	1, 1, 1, 1
+		noclip		1
+	}
+
+	// The veins: a square as wide as the screen's diagonal on the screen's
+	// centre, so the network stays round and no turn bares a corner. Their
+	// strength is the zoom value, as in the stock.
+	windowDef lensVeins {
+		rect		( 320 - ( "gui::virtual_screen_diagonal" * 0.5 ) ), ( 240 - ( "gui::virtual_screen_diagonal" * 0.5 ) ), "gui::virtual_screen_diagonal", "gui::virtual_screen_diagonal"
+		background	"models/weapons/rifle/scopeview_lens_veins"
+		matcolor	1, 1, 1, "gui::fov"
+		noclip		1
+	}
+
 	windowDef FieldOfViewParent {
 		rect		80, 0, 480, 480
 		// FOV comes in the range [0.3-1.0] so that's why this is a little complex

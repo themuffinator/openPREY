@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.11, 11 November 2026.
+Specification version 1.12, 11 November 2026.
 
 Status: reference survey and design contract. openPREY still renders the stock
 Prey GUIs; no replacement interface has been built. Sections 1 to 11 record
@@ -200,7 +200,10 @@ that drops one of them is not visually complete.
 
 The stock grid is the 640x480 canvas. openPREY expands it to the screen's
 aspect: `gui::virtual_screen_x_expand` and `gui::virtual_screen_y_expand`
-report the extra canvas on each side, `screenalignx` and `screenaligny` pin a
+report the extra canvas on each side, `gui::virtual_screen_diagonal` the
+diagonal of the whole screen in canvas units (the size of a square that
+covers the screen at any turn, which GUI expressions cannot work out without
+a square root), `screenalignx` and `screenaligny` pin a
 window to a screen edge, and `backgroundLeft`, `backgroundRight`,
 `backgroundTop` and `backgroundBottom` add edge slices that continue a
 full-screen menu background (section 12). Loading screens instead use the
@@ -950,6 +953,36 @@ view (`src/Prey/prey_weaponrifle.cpp:255-372`).
    The compass and the pointer still move: they are readings.
 8. The spirit bow keeps no overlay. The spirit realm has no instruments.
 
+#### Aspect expansion as built
+
+openPREY's `guis/weapons/sniperoverlay.gui` builds rules 2 to 4 with the stock
+art, in the legacy GUI. The instrument, the zoom scale and pointer, the text
+block and the key tips keep their canvas rectangles; the canvas scales
+uniformly, so the instrument is a circle on the screen's centre at every
+aspect, filling the height of a wide screen and the width of a tall one. The
+lens is drawn in two parts whose stages are the stock `scopeview` stages
+unchanged, split into `models/weapons/rifle/scopeview_lens_tint` and
+`models/weapons/rifle/scopeview_lens_veins` (`materials/rifle_scope_aspect.mtr`):
+
+- The tint is laid in whole 640x480 tiles: the canvas, one tile on each side
+  for a wide screen and up to two above and below for a tall one, so the
+  bands keep their 15 u pitch and their speed. Its texture wraps vertically,
+  so the bands run on across tiles without a seam; it does not wrap
+  horizontally, so the side tiles are mirrored (`matscalex -1`) to meet the
+  canvas edge without one. The tiles cover aspects from 4:1 to 1:3.75.
+- The veins lie on a square `gui::virtual_screen_diagonal` wide on the
+  screen's centre, with their strength still the zoom value.
+
+Laying the veins on that square moves their dark rim to the screen's corners.
+The stock stretched them over the 640x480 canvas, so every point of the
+canvas edge sat on the texture's rim, about 0.76 of the view covered at full
+strength through the three layers. On the square only the corners do: at
+full strength the middle of the top edge is about 0.24 covered and of the
+side edge 0.56 at 4:3, 0.09 and 0.65 at 16:9. That is the cost of rules 2
+and 3 together: a round field dark at the middle of a long edge is as dark at
+that radius everywhere, over the instrument too, and a field small enough for
+that leaves the corners bare when it turns.
+
 ### 10.9 Rules for HUD changes
 
 - Do not add numeric health or ammo readouts to the stock HUD. An optional
@@ -1658,6 +1691,17 @@ does not change them.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.12, 11 November 2026
+
+Section 10.8 records the rifle scope's aspect expansion as built in the
+legacy GUI: the instrument stays on the canvas, the lens tint is tiled over
+the whole screen at its stock pitch, and the veins turn on a square as wide
+as the screen's diagonal. It measures what that square costs: the veins'
+dark rim moves from the canvas edge to the screen's corners, so the middles
+of the long edges are lighter than in the stock. Section 3 adds
+`gui::virtual_screen_diagonal`, which the legacy GUI now publishes beside the
+expansion values.
 
 ### Version 1.11, 11 November 2026
 

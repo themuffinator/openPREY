@@ -1572,23 +1572,35 @@ void idUserInterfaceLocal::Redraw( int _time, bool useAspectCorrection ) {
 		// every display, and it stays correct when aspect correction is disabled
 		// and the canvas is stretched instead of expanded.
 		const float canvasAspect = uiManagerLocal.dc.GetCanvasAspect();
+		// The diagonal of the whole screen in canvas units. A layer that turns
+		// about the screen's centre covers every corner at every angle only when
+		// it is a square this wide (the rifle scope's lens veins); GUI
+		// expressions have no square root to work it out themselves.
+		const float canvasWidth = desktop->forceAspectWidth > 0.0f ? desktop->forceAspectWidth : static_cast<float>( VIRTUAL_WIDTH );
+		const float canvasHeight = desktop->forceAspectHeight > 0.0f ? desktop->forceAspectHeight : static_cast<float>( VIRTUAL_HEIGHT );
+		const float screenWidth = canvasWidth + 2.0f * xExpand;
+		const float screenHeight = canvasHeight + 2.0f * yExpand;
+		const float screenDiagonal = idMath::Sqrt( screenWidth * screenWidth + screenHeight * screenHeight );
 		// These follow the view's shape, which changes with a resize, not with a
-		// frame: every GUI drawn wrote all 23 of them to its dictionary every
+		// frame: every GUI drawn wrote all 24 of them to its dictionary every
 		// frame. They are written when one changes, or when the dictionary was
 		// replaced (ResetHudPresentation).
 		const idRectangle *const frameRects[5] = { &cinematicTopBar, &cinematicBottomBar, &cinematicLeftBar, &cinematicRightBar, &cinematicVisibleArea };
-		float frame[23] = { xExpand, yExpand, canvasAspect };
+		float frame[24] = { xExpand, yExpand, canvasAspect };
+		static_assert( sizeof( frame ) == sizeof( publishedFrame ), "publishedFrame must hold every published screen value" );
 		for ( int i = 0; i < 5; i++ ) {
 			frame[3 + 4 * i] = frameRects[i]->x;
 			frame[4 + 4 * i] = frameRects[i]->y;
 			frame[5 + 4 * i] = frameRects[i]->w;
 			frame[6 + 4 * i] = frameRects[i]->h;
 		}
+		frame[23] = screenDiagonal;
 		if ( !publishedFrameValid || memcmp( frame, publishedFrame, sizeof( frame ) ) != 0 ) {
 			publishedFrameValid = true;
 			memcpy( publishedFrame, frame, sizeof( frame ) );
 			SetStateFloat( "virtual_screen_x_expand", xExpand );
 			SetStateFloat( "virtual_screen_y_expand", yExpand );
+			SetStateFloat( "virtual_screen_diagonal", screenDiagonal );
 			SetStateFloat( "virtual_screen_aspect", uiManagerLocal.dc.GetCanvasAspect() );
 			SetStateRectangleComponents( this, { "cinematic_bar_top_x", "cinematic_bar_top_y", "cinematic_bar_top_w", "cinematic_bar_top_h" }, cinematicTopBar );
 			SetStateRectangleComponents( this, { "cinematic_bar_bottom_x", "cinematic_bar_bottom_y", "cinematic_bar_bottom_w", "cinematic_bar_bottom_h" }, cinematicBottomBar );

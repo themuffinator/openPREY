@@ -1,0 +1,55 @@
+/*
+	The Hunter rifle scope's lens, split for aspect expansion.
+
+	The stock draws models/weapons/rifle/scopeview once over the 4:3 canvas, so a
+	wider or taller screen sees the view untinted beside or above the scope. Its
+	two parts cover the screen in different ways, so guis/weapons/sniperoverlay.gui
+	draws them apart (prey-ui-visual-design.md, section 10.8):
+
+	- the banded tint repeats across the screen at the stock 15 u pitch;
+	- the three turning vein layers sit on a square as wide as the screen's
+	  diagonal, so that no turn bares a corner and the network stays round.
+
+	Each stage is the stock stage unchanged, on the stock images.
+*/
+
+models/weapons/rifle/scopeview_lens_tint
+{
+	qer_editorimage	textures/editor/camera.tga
+	noshadows
+
+	{
+		blend blend
+		map models/weapons/rifle/scope_blur.tga
+		alpha 0.4
+		scroll 0, time
+	}
+}
+
+models/weapons/rifle/scopeview_lens_veins
+{
+	qer_editorimage	textures/editor/camera.tga
+	noshadows
+
+	{
+		blend blend
+		map textures/interface/crosshairs/rifle_scope1.tga
+		linear
+		colored
+		rotate time * 0.015
+	}
+	{
+		blend blend
+		map textures/interface/crosshairs/rifle_scope1.tga
+		linear
+		colored
+		rotate time * -0.015
+	}
+	{
+		blend blend
+		map textures/interface/crosshairs/rifle_scope1.tga
+		linear
+		colored
+		rotate time * -0.01
+	}
+}
