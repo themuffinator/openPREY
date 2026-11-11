@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.10, 11 November 2026.
+Specification version 1.11, 11 November 2026.
 
 Status: reference survey and design contract. openPREY still renders the stock
 Prey GUIs; no replacement interface has been built. Sections 1 to 11 record
@@ -1433,6 +1433,7 @@ openPREY's own marks live in `assets/`:
 | Application icon | `assets/icons/prey.*` | The hawk Talon in red and orange flame with a cyan electric edge; executables, desktop entries, installers |
 | Splash | `assets/splash/prey_rt_bitmap_4001.bmp` | Windows startup splash: the stone hawk with the dark extended wordmark |
 | README banner | `assets/docs/img/banner.png` | "open" in a white geometric sans beside "PREY" in dark navy extended capitals, over the Sphere and the glowing spirit hawk |
+| Consoles | `kConsole*Color` in `src/framework/Console.cpp`, `S_COLOR_CONSOLE` in `src/idlib/Str.cpp`, `src/sys/sys_console_theme.h` | In-game console: black field (`prey.space`), text, edge and accents in `prey.portal.core` `#A4F9FE`, selection `prey.portal.body` `#2F64DC`, version `#6D7F95`. System console (Win32 and SDL): dark slate from `prey.sphere.shell`, never black: window `#0F171B`, log `#172229`, input `#121B21`, buttons `#1F2D36`/`#2A3D48`, borders `#2A3D48`/`#4A6F84`, text `#A4F9FE`, secondary text `#7F95AA`; the fatal-error strip keeps its red-orange |
 
 Rules for project material:
 
@@ -1653,6 +1654,13 @@ does not change them.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.11, 11 November 2026
+
+Section 13 records the console palette. Both consoles leave the Quake 4
+amber and olive: the in-game console keeps its black field with portal-rim
+cyan text and edge, and the system console moves to the Sphere shell's dark
+slate, which is deliberately not black.
 
 ### Version 1.10, 11 November 2026
 

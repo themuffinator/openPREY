@@ -55,7 +55,7 @@ void SCR_DrawTextRightAlign( float &y, const char *text, ... ) id_attribute((for
 #define CON_SCROLLBAR_SIDE_PAD			2.0f
 #define CON_SCROLLBAR_MIN_THUMB			18.0f
 #define CON_SCROLLBAR_LERP_SPEED		12.0f
-#define CON_SELECTION_ALPHA				0.35f
+#define CON_SELECTION_ALPHA				0.55f
 #define CON_COMPLETION_MAX_MATCHES		oq4completion::MAX_MATCHES
 #define CON_COMPLETION_MAX_FUZZY_MATCHES	oq4completion::MAX_FUZZY_MATCHES
 #define CON_COMPLETION_MAX_VISIBLE		8
@@ -64,12 +64,15 @@ void SCR_DrawTextRightAlign( float &y, const char *text, ... ) id_attribute((for
 #define	COMMAND_HISTORY			64
 static const char *kConsoleHistoryFileName = "consolehistory.dat";
 
-static const idVec4 kConsoleBorderColor( 0.9411765f, 0.6196079f, 0.0509804f, 1.0f ); // #f09e0d
-static const idVec4 kConsoleVersionColor( 0.4509804f, 0.4509804f, 0.4509804f, 1.0f ); // #737373
+// openPREY: the Prey palette from docs/dev/prey-ui-visual-design.md section 4.
+// The accent is the portal-rim cyan (prey.portal.core) that the wordmark and
+// portals share; the field behind the log stays black like Prey's space.
+static const idVec4 kConsoleBorderColor( 0.6431373f, 0.9764706f, 0.9960784f, 1.0f ); // #a4f9fe prey.portal.core
+static const idVec4 kConsoleVersionColor( 0.4274510f, 0.4980392f, 0.5843137f, 1.0f ); // #6d7f95 prey.plate.header rim
 static const idVec4 kConsoleBackgroundColor( 0.0f, 0.0f, 0.0f, 1.0f );
 static const idVec4 kConsolePopupTextColor( 1.0f, 1.0f, 1.0f, 0.95f );
-static const idVec4 kConsolePopupValueColor( 0.96862745f, 0.85882353f, 0.6117647f, 0.8f );
-static const idVec4 kConsoleSelectionColor( 0.9411765f, 0.6196079f, 0.0509804f, CON_SELECTION_ALPHA );
+static const idVec4 kConsolePopupValueColor( 0.7215686f, 0.7882353f, 0.9019608f, 0.8f ); // #b8c9e6 prey.text.value
+static const idVec4 kConsoleSelectionColor( 0.1843137f, 0.3921569f, 0.8627451f, CON_SELECTION_ALPHA ); // #2f64dc prey.portal.body
 
 // the console will query the cvar and command systems for
 // command completion information

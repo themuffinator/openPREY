@@ -14,6 +14,7 @@ Engine changes merged from openQ4 are listed in openQ4's own release notes. They
 
 - Merged openQ4 engine work through upstream `b4d3fd700` (November 2026), adapted to PREY's v7 game API. It includes the extended graphics presets with Auto-Detect, the classic menus laid out like the new interface, and cached shadow casters and projected shadow maps on Vulkan.
 - Rebase hardening: guards for the render-demo header, the network rate defaults (32000), the GUI stream marker and window-flag layout, and the loading-music declaration scope; the missing autosave string `#str_107240`; lazy loading of dormant ARB programs; the particle deform implementation; and image alias handling.
+- The in-game and system consoles use the PREY palette instead of Quake 4 amber and olive: the in-game console keeps a black field with portal-cyan text and edge, and the system console is dark Sphere-shell slate.
 
 ## Build and CI
 

@@ -39,72 +39,77 @@ This file is part of the openQ4 Source Code. See docs/legal for details.
 ===============================================================================
 */
 
-// Window chrome behind the panels.
-#define SYSCON_WINDOW_R				0x0c
-#define SYSCON_WINDOW_G				0x0f
-#define SYSCON_WINDOW_B				0x07
+// openPREY: the palette follows docs/dev/prey-ui-visual-design.md section 4.
+// Surfaces are the Sphere's slate shell (prey.sphere.shell and its lit rim),
+// dark but never black so the window reads apart from the black in-game
+// console; text and focus use the portal-rim cyan the in-game console shares.
 
-// Log and status surface. This is the historical Quake 4 console green-black
-// and is deliberately unchanged; it carries the product identity.
-#define SYSCON_PANEL_R				0x1b
-#define SYSCON_PANEL_G				0x20
-#define SYSCON_PANEL_B				0x0a
+// Window chrome behind the panels: prey.sphere.shell.
+#define SYSCON_WINDOW_R			0x0f
+#define SYSCON_WINDOW_G			0x17
+#define SYSCON_WINDOW_B			0x1b
+
+// Log and status surface, one step lighter than the chrome.
+#define SYSCON_PANEL_R			0x17
+#define SYSCON_PANEL_G			0x22
+#define SYSCON_PANEL_B			0x29
 
 // Command input surface, sunk one step below the log so the caret line reads
 // as an editable field rather than as more log.
-#define SYSCON_INPUT_R				0x11
-#define SYSCON_INPUT_G				0x15
-#define SYSCON_INPUT_B				0x0a
+#define SYSCON_INPUT_R			0x12
+#define SYSCON_INPUT_G			0x1b
+#define SYSCON_INPUT_B			0x21
 
-// Button face, hover, and pressed states.
-#define SYSCON_BUTTON_R				0x24
-#define SYSCON_BUTTON_G				0x2b
-#define SYSCON_BUTTON_B				0x12
+// Button face, hover (the shell's lit rim), and pressed states.
+#define SYSCON_BUTTON_R			0x1f
+#define SYSCON_BUTTON_G			0x2d
+#define SYSCON_BUTTON_B			0x36
 
-#define SYSCON_BUTTON_HOT_R			0x32
-#define SYSCON_BUTTON_HOT_G			0x3b
-#define SYSCON_BUTTON_HOT_B			0x18
+#define SYSCON_BUTTON_HOT_R		0x2a
+#define SYSCON_BUTTON_HOT_G		0x3d
+#define SYSCON_BUTTON_HOT_B		0x48
 
-#define SYSCON_BUTTON_DOWN_R		0x15
-#define SYSCON_BUTTON_DOWN_G		0x1a
-#define SYSCON_BUTTON_DOWN_B		0x0a
+#define SYSCON_BUTTON_DOWN_R	0x12
+#define SYSCON_BUTTON_DOWN_G	0x1b
+#define SYSCON_BUTTON_DOWN_B	0x21
 
-// Resting and emphasised borders.
-#define SYSCON_BORDER_R				0x3a
-#define SYSCON_BORDER_G				0x44
-#define SYSCON_BORDER_B				0x23
+// Resting and emphasised borders: the shell's lit rim and its brightest edge.
+#define SYSCON_BORDER_R			0x2a
+#define SYSCON_BORDER_G			0x3d
+#define SYSCON_BORDER_B			0x48
 
-#define SYSCON_BORDER_LIT_R			0x5b
-#define SYSCON_BORDER_LIT_G			0x66
-#define SYSCON_BORDER_LIT_B			0x36
+#define SYSCON_BORDER_LIT_R		0x4a
+#define SYSCON_BORDER_LIT_G		0x6f
+#define SYSCON_BORDER_LIT_B		0x84
 
-// Primary text and focus accent: the historical Quake 4 amber.
-#define SYSCON_TEXT_R				0xf0
-#define SYSCON_TEXT_G				0x9e
-#define SYSCON_TEXT_B				0x0d
+// Primary text and focus accent: prey.portal.core.
+#define SYSCON_TEXT_R			0xa4
+#define SYSCON_TEXT_G			0xf9
+#define SYSCON_TEXT_B			0xfe
 
 // Secondary text: prompts, placeholder status, scroll position readout.
-#define SYSCON_TEXT_DIM_R			0x9a
-#define SYSCON_TEXT_DIM_G			0x83
-#define SYSCON_TEXT_DIM_B			0x30
+// prey.tab.top's active steel.
+#define SYSCON_TEXT_DIM_R		0x7f
+#define SYSCON_TEXT_DIM_G		0x95
+#define SYSCON_TEXT_DIM_B		0xaa
 
 // Fatal-error status strip.
-#define SYSCON_ALERT_R				0xff
-#define SYSCON_ALERT_G				0x53
-#define SYSCON_ALERT_B				0x24
+#define SYSCON_ALERT_R			0xff
+#define SYSCON_ALERT_G			0x53
+#define SYSCON_ALERT_B			0x24
 
-#define SYSCON_ALERT_PANEL_R		0x2b
-#define SYSCON_ALERT_PANEL_G		0x0f
-#define SYSCON_ALERT_PANEL_B		0x06
+#define SYSCON_ALERT_PANEL_R	0x2b
+#define SYSCON_ALERT_PANEL_G	0x0f
+#define SYSCON_ALERT_PANEL_B	0x06
 
 // Scrollbar track and thumb.
-#define SYSCON_SCROLL_TRACK_R		0x14
-#define SYSCON_SCROLL_TRACK_G		0x18
-#define SYSCON_SCROLL_TRACK_B		0x09
+#define SYSCON_SCROLL_TRACK_R	0x13
+#define SYSCON_SCROLL_TRACK_G	0x1d
+#define SYSCON_SCROLL_TRACK_B	0x23
 
-#define SYSCON_SCROLL_THUMB_R		0x4e
-#define SYSCON_SCROLL_THUMB_G		0x5a
-#define SYSCON_SCROLL_THUMB_B		0x2c
+#define SYSCON_SCROLL_THUMB_R	0x3b
+#define SYSCON_SCROLL_THUMB_G	0x55
+#define SYSCON_SCROLL_THUMB_B	0x66
 
 // Expands a palette name to the byte triplet both platforms consume, e.g.
 // SDL_SetRenderDrawColor( renderer, SYSCON_RGB( PANEL ), 0xff ).
