@@ -285,4 +285,4 @@ These results validate the character, lifecycle, chat, packaging, and current
 gravity-aware combat fallback. They do not broaden the stated navigation claim.
 
 The living subsystem and authoring reference is
-[`docs/dev/mp-bots.md`](../mp-bots.md).
+[`docs/dev/mp-bots.md`](../../../mp-bots.md).

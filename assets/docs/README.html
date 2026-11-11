@@ -1,51 +1,764 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
   <title>openPREY - Project Overview</title>
+  <!--
+    Project overview, viewed from the repository. It shares the release package home's styling
+    (assets/release/README.html), which follows docs/dev/prey-ui-visual-design.md.
+  -->
   <style>
-    :root { color-scheme: dark; --bg:#10141a; --panel:#19212b; --text:#edf2f7; --muted:#aebbc8; --accent:#d79a3b; }
-    * { box-sizing:border-box; }
-    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif; }
-    main { width:min(960px,calc(100% - 32px)); margin:32px auto 64px; }
-    header,.card { background:var(--panel); border:1px solid #2a3744; border-radius:12px; padding:24px; margin-bottom:18px; }
-    .banner { display:block; max-width:100%; height:auto; margin:0 auto 24px; border-radius:8px; }
-    h1,h2 { line-height:1.2; } h1 { color:var(--accent); margin-top:0; }
-    a { color:#8fc8ff; } code { background:#0b0f14; padding:.1em .35em; border-radius:4px; }
-    .muted { color:var(--muted); }
+/* Prey's display and body faces, written to assets/docs/fonts/ by tools/assets/fonts/embed_atlas_fonts.py. */
+@font-face{font-family:"openPREY Menu";src:url("fonts/openprey-menu.woff") format("woff");font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:"openPREY Default";src:url("fonts/openprey-default.woff") format("woff");font-weight:400;font-style:normal;font-display:swap}
+  </style>
+  <style>
+    :root {
+      --u: 1.2px;                     /* one unit of the stock 640x480 canvas */
+      --space: #04060A;               /* prey.space, with the atlas's blue bias */
+      --rail: #B3C6E2;                /* prey.rail */
+      --nav: #B3CCE6;                 /* prey.text.nav */
+      --nav-hover: #CCE6FF;           /* prey.text.navHover */
+      --label: rgba(255, 255, 255, 0.9);  /* prey.text.label */
+      --prose: rgba(255, 255, 255, 0.84);
+      --value: #B8C9E6;               /* prey.text.value */
+      --button: #CCDEFA;              /* prey.text.button */
+      --list: #A6BAD4;                /* prey.text.list */
+      --plate: #6F86A1;               /* prey.plate.button */
+      --row: #546579;                 /* prey.plate.row */
+      --title: rgba(92, 108, 129, 0.69);  /* prey.plate.title */
+      --wash: rgba(166, 196, 230, 0.15);  /* prey.list.wash */
+      --arc: #9AB1CA;                 /* prey.arc bars */
+      --portal-body: #2F64DC;         /* prey.portal.body */
+      --portal-core: #A4F9FE;         /* prey.portal.core */
+      --f-display: "openPREY Menu", "Eurostile Extended", "Microgramma", "Bahnschrift", sans-serif;
+      --f-body: "openPREY Default", "Bahnschrift SemiCondensed", "Arial Narrow", sans-serif;
+      --f-prose: "Bahnschrift", "Saira Condensed", "Roboto Condensed", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      --f-mono: "Cascadia Code", "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
+      --f-open: "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+      /* The claw corner (window_cornerUL, 38x32 u): a pale-railed hook around a dark oval socket,
+         mirrored into each corner of a frame. */
+      --claw-tl: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient id='b' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23576272'/%3E%3Cstop offset='.55' stop-color='%233B4351'/%3E%3Cstop offset='1' stop-color='%232E3541'/%3E%3C/linearGradient%3E%3CradialGradient id='s'%3E%3Cstop offset='0' stop-color='%2314171B'/%3E%3Cstop offset='.72' stop-color='%23171B20'/%3E%3Cstop offset='1' stop-color='%23363E4A'/%3E%3C/radialGradient%3E%3CclipPath id='c'%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z'/%3E%3C/clipPath%3E%3C/defs%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z' fill='url(%23b)'/%3E%3Cellipse cx='43.5' cy='66.5' rx='16.5' ry='21.5' fill='url(%23s)'/%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z' fill='none' stroke='%23B3C6E2' stroke-width='14' clip-path='url(%23c)'/%3E%3C/svg%3E");
+      --claw-tr: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient id='b' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23576272'/%3E%3Cstop offset='.55' stop-color='%233B4351'/%3E%3Cstop offset='1' stop-color='%232E3541'/%3E%3C/linearGradient%3E%3CradialGradient id='s'%3E%3Cstop offset='0' stop-color='%2314171B'/%3E%3Cstop offset='.72' stop-color='%23171B20'/%3E%3Cstop offset='1' stop-color='%23363E4A'/%3E%3C/radialGradient%3E%3CclipPath id='c'%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z'/%3E%3C/clipPath%3E%3C/defs%3E%3Cg transform='translate(128 0) scale(-1 1)'%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z' fill='url(%23b)'/%3E%3Cellipse cx='43.5' cy='66.5' rx='16.5' ry='21.5' fill='url(%23s)'/%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z' fill='none' stroke='%23B3C6E2' stroke-width='14' clip-path='url(%23c)'/%3E%3C/g%3E%3C/svg%3E");
+      --claw-bl: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient id='b' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23576272'/%3E%3Cstop offset='.55' stop-color='%233B4351'/%3E%3Cstop offset='1' stop-color='%232E3541'/%3E%3C/linearGradient%3E%3CradialGradient id='s'%3E%3Cstop offset='0' stop-color='%2314171B'/%3E%3Cstop offset='.72' stop-color='%23171B20'/%3E%3Cstop offset='1' stop-color='%23363E4A'/%3E%3C/radialGradient%3E%3CclipPath id='c'%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z'/%3E%3C/clipPath%3E%3C/defs%3E%3Cg transform='translate(0 128) scale(1 -1)'%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z' fill='url(%23b)'/%3E%3Cellipse cx='43.5' cy='66.5' rx='16.5' ry='21.5' fill='url(%23s)'/%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z' fill='none' stroke='%23B3C6E2' stroke-width='14' clip-path='url(%23c)'/%3E%3C/g%3E%3C/svg%3E");
+      --claw-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient id='b' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23576272'/%3E%3Cstop offset='.55' stop-color='%233B4351'/%3E%3Cstop offset='1' stop-color='%232E3541'/%3E%3C/linearGradient%3E%3CradialGradient id='s'%3E%3Cstop offset='0' stop-color='%2314171B'/%3E%3Cstop offset='.72' stop-color='%23171B20'/%3E%3Cstop offset='1' stop-color='%23363E4A'/%3E%3C/radialGradient%3E%3CclipPath id='c'%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z'/%3E%3C/clipPath%3E%3C/defs%3E%3Cg transform='translate(128 128) scale(-1 -1)'%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z' fill='url(%23b)'/%3E%3Cellipse cx='43.5' cy='66.5' rx='16.5' ry='21.5' fill='url(%23s)'/%3E%3Cpath d='M47 0H128V7.5C116 9.5 103 14.5 93 18.5C89 42 84 74 71.5 106C64 115 36 117 17 104.5C6 96 1 79 2 60C3 42 10 28 19 19C28 10 37 3.5 47 0Z' fill='none' stroke='%23B3C6E2' stroke-width='14' clip-path='url(%23c)'/%3E%3C/g%3E%3C/svg%3E");
+    }
+
+    @media (max-width: 640px) {
+      :root { --u: 0.9px; }
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: var(--space);
+      scroll-behavior: smooth;
+    }
+
+    /* Space: a dim star field (stars to #161616, a few brighter) over black. */
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--prose);
+      font: 400 17px/1.62 var(--f-prose);
+      background-color: var(--space);
+      background-image:
+        radial-gradient(1px 1px at 23px 41px, rgba(220, 232, 248, 0.75), transparent 1.5px),
+        radial-gradient(1px 1px at 151px 97px, rgba(220, 232, 248, 0.45), transparent 1.5px),
+        radial-gradient(1px 1px at 87px 183px, rgba(220, 232, 248, 0.6), transparent 1.5px),
+        radial-gradient(1.5px 1.5px at 211px 13px, rgba(240, 248, 255, 0.85), transparent 2px),
+        radial-gradient(1px 1px at 302px 211px, rgba(220, 232, 248, 0.35), transparent 1.5px),
+        radial-gradient(1px 1px at 47px 263px, rgba(220, 232, 248, 0.3), transparent 1.5px),
+        radial-gradient(1px 1px at 263px 141px, rgba(200, 214, 236, 0.25), transparent 1.5px),
+        radial-gradient(1px 1px at 129px 307px, rgba(200, 214, 236, 0.4), transparent 1.5px);
+      background-size: 331px 331px, 331px 331px, 331px 331px, 331px 331px, 331px 331px, 331px 331px, 331px 331px, 331px 331px;
+      background-attachment: fixed;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    a {
+      color: var(--nav);
+      text-decoration: underline;
+      text-decoration-color: rgba(179, 198, 226, 0.45);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+      transition: color 150ms linear, text-decoration-color 150ms linear;
+    }
+
+    a:hover,
+    a:focus-visible {
+      color: #FFFFFF;
+      text-decoration-color: #FFFFFF;
+    }
+
+    :focus-visible {
+      outline: 1.5px solid var(--rail);
+      outline-offset: 3px;
+    }
+
+    strong { color: #FFFFFF; font-weight: 600; }
+
+    code {
+      padding: 0.08em 0.4em;
+      background: var(--wash);
+      color: var(--value);
+      font: 0.88em/1.4 var(--f-mono);
+      overflow-wrap: anywhere;
+    }
+
+    a code { color: inherit; }
+
+    ::selection { background: rgba(166, 186, 212, 0.3); color: #FFFFFF; }
+
+    .shell {
+      width: min(940px, 100%);
+      margin: 0 auto;
+      padding: 0 16px 56px;
+    }
+
+    /* ---------- home screen: the portal onto the Sphere ---------- */
+
+    .home {
+      position: relative;
+      isolation: isolate;
+      overflow: hidden;
+      min-height: min(720px, 100vh);
+      padding: 34px 16px 28px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      justify-items: center;
+      background: #000;
+    }
+
+    .home > svg.scene,
+    .home > svg.rim {
+      position: absolute;
+      z-index: -1;
+      pointer-events: none;
+    }
+
+    .home > svg.scene { inset: 0; width: 100%; height: 100%; }
+    .home > svg.rim { top: 0; left: 0; height: 100%; width: auto; }
+
+    .masthead {
+      display: grid;
+      justify-items: center;
+      gap: 10px;
+      width: min(760px, 100%);
+      text-align: center;
+    }
+
+    .masthead .hawk { width: 64px; height: auto; }
+
+    /* "open" in a plain geometric sans beside "PREY" in the wordmark's wide extended capitals. */
+    .brand {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      width: 100%;
+      margin: 0;
+      font-weight: 400;
+    }
+
+    .brand .open {
+      font: 500 clamp(26px, 5.4vw, 44px)/1 var(--f-open);
+      color: #F2F6FB;
+      letter-spacing: 0.01em;
+      margin: 0 -0.55em 0.06em 0;
+      position: relative;
+      z-index: 1;
+    }
+
+    .brand svg { width: min(470px, 72%); height: auto; }
+
+    .tagline {
+      margin: 4px 0 0;
+      font: 400 clamp(14px, 2.2vw, 19px)/1.4 var(--f-display);
+      color: var(--nav);
+      text-shadow: 1px 1px 0 #000;
+    }
+
+    .lede {
+      max-width: 62ch;
+      margin: 2px 0 0;
+      color: var(--label);
+      text-shadow: 1px 1px 0 #000, 0 0 12px #000;
+    }
+
+    /* The arc of hooks: navigation hanging from a silver-blue arc. */
+    .arc-nav {
+      justify-self: start;
+      align-self: end;
+      width: clamp(250px, 34vw, 340px);
+      margin: 28px 0 22px clamp(96px, 11vw, 150px);
+    }
+
+    .arc-nav svg { display: block; width: 100%; height: auto; overflow: visible; }
+
+    .arc-nav a { text-decoration: none; }
+    .arc-nav a .bar { opacity: 0.6; transition: opacity 150ms linear, transform 150ms linear; }
+    .arc-nav a text { fill: #B3CCE6; fill-opacity: 0.9; transition: fill 150ms linear, transform 150ms linear; }
+    .arc-nav a:hover .bar,
+    .arc-nav a:focus-visible .bar { opacity: 1; transform: translateX(-5px); }
+    .arc-nav a:hover text,
+    .arc-nav a:focus-visible text { fill: var(--nav-hover); fill-opacity: 1; transform: translateX(-8px); }
+    .arc-nav a:focus-visible { outline: none; }
+    .arc-nav a:focus-visible text { text-decoration: underline; }
+
+    /* The home bottom bar: a claw frame no taller than its corners, so only the lower claws draw. */
+    .bottom-bar {
+      position: relative;
+      isolation: isolate;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 4px 28px;
+      width: min(calc(450 * var(--u) * 1.4), 100%);
+      min-height: calc(32 * var(--u));
+      padding: calc(6 * var(--u)) calc(40 * var(--u)) calc(7 * var(--u));
+      margin: 0;
+      list-style: none;
+    }
+
+    .bottom-bar::before {
+      content: "";
+      position: absolute;
+      inset: calc(1 * var(--u)) calc(25 * var(--u)) 0;
+      z-index: -1;
+      background: rgba(0, 0, 0, 0.5);
+    }
+
+    .bottom-bar::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      background:
+        var(--claw-bl) left bottom / calc(38 * var(--u)) calc(32 * var(--u)) no-repeat,
+        var(--claw-br) right bottom / calc(38 * var(--u)) calc(32 * var(--u)) no-repeat,
+        linear-gradient(var(--rail), var(--rail)) center bottom / calc(100% - 76 * var(--u)) calc(1.53 * var(--u)) no-repeat;
+    }
+
+    .bottom-bar li { margin: 0; }
+
+    .bottom-bar a {
+      display: inline-block;
+      padding: 4px 2px;
+      font: 400 clamp(14px, 1.9vw, 17px)/1.3 var(--f-display);
+      color: var(--nav);
+      text-decoration: none;
+      text-shadow: 1px 1px 0 #000;
+    }
+
+    .bottom-bar a:hover,
+    .bottom-bar a:focus-visible { color: var(--nav-hover); }
+
+    /* ---------- claw-cornered frames ---------- */
+
+    .frame {
+      --pad-x: calc(25 * var(--u) + 18px);
+      position: relative;
+      isolation: isolate;
+      margin-top: 22px;
+      padding: calc(40 * var(--u) + 14px) var(--pad-x) calc(16 * var(--u) + 14px);
+      scroll-margin-top: 16px;
+    }
+
+    /* The black body stops 25 u inside each end, so the claws stand clear of it. */
+    .frame::before {
+      content: "";
+      position: absolute;
+      inset: calc(1 * var(--u)) calc(25 * var(--u)) 0;
+      z-index: -1;
+      background:
+        linear-gradient(180deg, rgba(34, 42, 49, 0.55), rgba(34, 42, 49, 0) 140px),
+        rgba(0, 0, 0, 0.7);
+    }
+
+    /* Four mirrored claws, and a 1.5 u rail along the top and bottom between them. No side rails. */
+    .frame::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      background:
+        var(--claw-tl) left top / calc(38 * var(--u)) calc(32 * var(--u)) no-repeat,
+        var(--claw-tr) right top / calc(38 * var(--u)) calc(32 * var(--u)) no-repeat,
+        var(--claw-bl) left bottom / calc(38 * var(--u)) calc(32 * var(--u)) no-repeat,
+        var(--claw-br) right bottom / calc(38 * var(--u)) calc(32 * var(--u)) no-repeat,
+        linear-gradient(var(--rail), var(--rail)) center top / calc(100% - 76 * var(--u)) calc(1.53 * var(--u)) no-repeat,
+        linear-gradient(var(--rail), var(--rail)) center bottom / calc(100% - 76 * var(--u)) calc(1.53 * var(--u)) no-repeat;
+    }
+
+    /* Title bar: 32 u in from each end, wider at the top, the page title in the display face. */
+    .frame > h2 {
+      position: absolute;
+      top: calc(8 * var(--u));
+      left: calc(32 * var(--u));
+      right: calc(32 * var(--u));
+      margin: 0;
+      padding: 0 calc(14 * var(--u));
+      min-height: calc(24 * var(--u));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--title);
+      clip-path: polygon(0 0, 100% 0, calc(100% - 7.5 * var(--u)) 100%, calc(7.5 * var(--u)) 100%);
+      font: 400 clamp(15px, 2.3vw, 20px)/1.25 var(--f-display);
+      color: var(--nav);
+      text-align: center;
+      text-shadow: 1px 1px 0 #000;
+    }
+
+    .frame > h2 + * { margin-top: 0; }
+
+    .frame p { margin: 0 0 12px; }
+    .frame > :last-child { margin-bottom: 0; }
+
+    .frame h3 {
+      margin: 18px 0 8px;
+      font: 400 clamp(14px, 1.9vw, 16px)/1.3 var(--f-display);
+      color: var(--nav);
+      text-shadow: 1px 1px 0 #000;
+    }
+
+    /* Header bar: a flat band with rims, for sub-sections inside a frame. */
+    .frame h3.band {
+      padding: 4px 14px;
+      background: rgba(17, 26, 37, 0.6);
+      border-top: 1px solid #6D7F95;
+      border-bottom: 1px solid #6D7F95;
+      border-radius: 9px 9px 9px 9px / 50%;
+      text-align: center;
+    }
+
+    /* Lists hang from small rings, like the trailing end of a navigation bar. */
+    .frame ul {
+      margin: 0 0 12px;
+      padding: 0;
+      list-style: none;
+    }
+
+    .frame ul > li {
+      position: relative;
+      margin: 6px 0;
+      padding-left: 22px;
+    }
+
+    .frame ul > li::before {
+      content: "";
+      position: absolute;
+      left: 3px;
+      top: 0.62em;
+      width: 7px;
+      height: 7px;
+      border: 1.3px solid var(--arc);
+      border-radius: 50%;
+      background: #05080C;
+    }
+
+    .frame ol {
+      margin: 0 0 12px;
+      padding: 0;
+      list-style: none;
+      counter-reset: step;
+    }
+
+    .frame ol > li {
+      position: relative;
+      margin: 9px 0;
+      padding-left: 42px;
+      counter-increment: step;
+    }
+
+    .frame ol > li::before {
+      content: counter(step);
+      position: absolute;
+      left: 0;
+      top: 0.05em;
+      width: 30px;
+      font: 400 22px/1.15 var(--f-display);
+      color: var(--nav);
+      text-align: center;
+      border-bottom: 1px solid rgba(154, 177, 202, 0.6);
+    }
+
+    /* Setting rows: label in the leading part, value in the trailing part; the plate fades from the
+       leading edge (0.77) to almost nothing (0.06) and begins with a slanted cut, wider at the top. */
+    .rows {
+      display: grid;
+      gap: 6px;
+      margin: 0 0 12px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: minmax(118px, 30%) 1fr;
+      align-items: center;
+      gap: 4px 16px;
+      min-height: calc(25 * var(--u) + 8px);
+      padding: 6px 18px 6px 14px;
+      background: linear-gradient(90deg, rgba(84, 101, 121, 0.77), rgba(84, 101, 121, 0.06));
+      border-top: 1px solid var(--row);
+      border-bottom: 1px solid var(--row);
+      border-right: 1px solid rgba(84, 101, 121, 0.5);
+      border-radius: 0 16px 16px 0 / 0 50% 50% 0;
+      clip-path: polygon(0 0, 100% 0, 100% 100%, 9px 100%);
+    }
+
+    .row > .key {
+      font: 400 18px/1.25 var(--f-body);
+      color: var(--label);
+      text-align: center;
+      text-shadow: 1px 1px 0 #000;
+    }
+
+    .row > .val {
+      color: var(--value);
+      font-size: 16px;
+      line-height: 1.5;
+    }
+
+    .row > .val strong { color: #FFFFFF; }
+
+    /* 3-slice buttons: a curved slope on the leading end, a slanted chamfer on the trailing end. */
+    .buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 12px;
+      margin: 14px 0 4px;
+    }
+
+    .button {
+      --bp: polygon(11.4px 6%, calc(100% - 10.8px) 6%, calc(100% - 3.6px) 50%, calc(100% - 2.8px) 95%, 3.6px 95%, 2.2px 80%, 3.4px 50%, 5px 26%, 7.6px 12%);
+      position: relative;
+      isolation: isolate;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 150px;
+      min-height: calc(28 * var(--u) + 8px);
+      padding: 6px 24px;
+      background: var(--plate);
+      clip-path: var(--bp);
+      font: 400 17px/1.2 var(--f-body);
+      color: var(--button);
+      text-align: center;
+      text-decoration: none;
+      text-shadow: 1px 1px 0 #000;
+      transition: color 150ms linear;
+    }
+
+    .button::before {
+      content: "";
+      position: absolute;
+      inset: 1.2px;
+      z-index: -1;
+      clip-path: var(--bp);
+      background: linear-gradient(90deg, rgba(111, 134, 161, 0.77), rgba(111, 134, 161, 0.06)), #05080C;
+      transition: background 150ms linear;
+    }
+
+    .button:hover,
+    .button:focus-visible { color: #FFFFFF; outline: none; }
+
+    .button:hover::before,
+    .button:focus-visible::before {
+      background: rgba(111, 134, 161, 0.3), #05080C;
+      background: linear-gradient(rgba(111, 134, 161, 0.3), rgba(111, 134, 161, 0.3)), #05080C;
+    }
+
+    .note {
+      padding: 10px 14px;
+      margin: 0 0 12px;
+      background: var(--wash);
+      border-left: 2px solid var(--rail);
+      color: var(--label);
+    }
+
+    /* ---------- footer: the closing bottom bar ---------- */
+
+    footer.frame {
+      padding-top: calc(16 * var(--u) + 12px);
+      font-size: 14.5px;
+      line-height: 1.6;
+      color: var(--list);
+    }
+
+    footer.frame::after {
+      background:
+        var(--claw-bl) left bottom / calc(38 * var(--u)) calc(32 * var(--u)) no-repeat,
+        var(--claw-br) right bottom / calc(38 * var(--u)) calc(32 * var(--u)) no-repeat,
+        linear-gradient(var(--rail), var(--rail)) center bottom / calc(100% - 76 * var(--u)) calc(1.53 * var(--u)) no-repeat;
+    }
+
+    footer.frame p { margin: 0 0 8px; }
+
+    footer .links {
+      font: 400 15px/1.8 var(--f-display);
+    }
+
+    @media (max-width: 760px) {
+      .home { min-height: 0; padding-bottom: 22px; }
+      .arc-nav { justify-self: center; margin: 22px 0 18px; }
+      .row { grid-template-columns: 1fr; padding-left: 16px; }
+      .row > .key { text-align: left; }
+      .button { flex: 1 1 100%; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition: none !important; }
+    }
+
+    /* ---------- overview additions ---------- */
+
+    .overview-home { min-height: 0; padding-top: 40px; grid-template-rows: auto auto; gap: 26px; }
+    .overview-home .masthead { width: min(900px, 100%); }
+
+    /* Picture frame: an outline only, rounded, in prey.frame.picture. */
+    .picture {
+      margin: 0 0 6px;
+      padding: 4px;
+      border: 2px solid #A7C4E8;
+      border-radius: 10px;
+      background: #000;
+      box-shadow: 0 0 24px rgba(47, 100, 220, 0.25);
+    }
+
+    .picture img { display: block; width: 100%; height: auto; border-radius: 6px; }
+
+    h1.tagline { margin: 6px 0 0; font-weight: 400; font-size: clamp(17px, 2.8vw, 24px); }
+
+    /* Group boxes: a horizontal fade with a rim and rounded ends. */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 0 0 12px;
+    }
+
+    .cards.two { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 14px; }
+
+    .card {
+      padding: 12px 16px 14px;
+      background: linear-gradient(90deg, rgba(84, 101, 121, 0.5), rgba(84, 101, 121, 0.05));
+      border: 1.5px solid rgba(84, 101, 121, 0.95);
+      border-radius: 14px 14px 14px 14px / 18px;
+    }
+
+    .frame .card h3.band { margin: 0 0 10px; font-size: 15px; }
+    .card p { margin: 0 0 8px; color: var(--label); }
+    .card ul { margin: 0; }
+    .card li { font-size: 15.5px; }
+
+    .doc-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
+
+    @media (max-width: 760px) {
+      .cards, .cards.two, .doc-columns { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-<main>
-  <header>
-    <img class="banner" src="img/banner.png" alt="openPREY banner">
-    <h1>openPREY</h1>
-    <p>Open-source engine and game-code replacement for Prey (2006), built for modern Windows, Linux, and macOS systems while retaining compatibility with the original retail assets.</p>
-    <p><a href="https://github.com/themuffinator/openPREY">Repository</a> · <a href="https://github.com/themuffinator/openPREY/releases">Releases</a> · <a href="../../README.md">README</a> · <a href="../../BUILDING.md">Build guide</a></p>
+  <header class="home overview-home" id="top">
+    <svg class="rim" viewBox="0 0 220 720" preserveAspectRatio="xMinYMid slice" aria-hidden="true" focusable="false">
+      <defs>
+        <filter id="rimGlow" x="-50%" y="-10%" width="200%" height="120%"><feGaussianBlur stdDeviation="9"/></filter>
+        <filter id="rimSoft" x="-50%" y="-10%" width="200%" height="120%"><feGaussianBlur stdDeviation="2.2"/></filter>
+      </defs>
+      <path d="M0 -40C110 120 132 300 120 380C110 480 76 610 0 760V-40Z" fill="#000" opacity=".9"/>
+      <path d="M0 -40C110 120 132 300 120 380C110 480 76 610 0 760" fill="none" stroke="#2F64DC" stroke-width="30" opacity=".55" filter="url(#rimGlow)"/>
+      <path d="M0 -40C110 120 132 300 120 380C110 480 76 610 0 760" fill="none" stroke="#2F64DC" stroke-width="7" opacity=".9" filter="url(#rimSoft)"/>
+      <path d="M0 -40C110 120 132 300 120 380C110 480 76 610 0 760" fill="none" stroke="#A4F9FE" stroke-width="2.2"/>
+      <path d="M0 -40C110 120 132 300 120 380C110 480 76 610 0 760" fill="none" stroke="#DDFFFF" stroke-width=".8" opacity=".9"/>
+    </svg>
+
+    <div class="masthead">
+      <figure class="picture">
+        <img src="img/banner.png" alt="openPREY: the Sphere and the spirit hawk behind the openPREY wordmark" width="1280" height="320">
+      </figure>
+      <h1 class="tagline">The Modern Way to Play Prey</h1>
+      <p class="lede">An open-source engine and game-code replacement that runs the original 2006 game on today's Windows and Linux PCs, with modern display handling, a choice of OpenGL or Vulkan rendering and one game module for single-player and multiplayer.</p>
+    </div>
+
+    <ul class="bottom-bar" aria-label="Quick links">
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#highlights">Highlights</a></li>
+      <li><a href="#getting-started">Getting Started</a></li>
+      <li><a href="#compatibility">Compatibility</a></li>
+      <li><a href="#build">Building</a></li>
+      <li><a href="#docs">Documentation</a></li>
+      <li><a href="#credits">Credits</a></li>
+    </ul>
   </header>
 
-  <section class="card">
-    <h2>What you need</h2>
-    <p>openPREY does not include Prey assets. You must own and install a legitimate copy of Prey (2006), including its retail <code>base/</code> data. Windows discovery supports registry and legacy CD-era install locations; a manual <code>fs_basepath</code> remains available.</p>
-  </section>
+  <main class="shell">
+    <section class="frame" id="overview">
+      <h2>Overview</h2>
+      <p>openPREY replaces Prey's engine and game binaries with its own: a GPL engine built on <a href="https://github.com/themuffinator/openQ4">openQ4</a> and a source-available game module built from the Prey SDK. The original campaign and multiplayer maps load from your retail game files.</p>
+      <p class="note">openPREY does not include any Prey game data. You need your own copy of Prey (2006), from the original discs or another legitimate source.</p>
+      <p class="note">openPREY is in early development. Representative campaign maps, save and load, and a two-client multiplayer session have been played on it, but full campaign completion and multiplayer parity are not claimed yet. See the <a href="../../TECHNICAL.md">technical reference</a> for the compatibility status.</p>
+    </section>
 
-  <section class="card">
-    <h2>Runtime layout</h2>
-    <p>openPREY uses a single <code>basepr/</code> overlay and one <code>game_&lt;arch&gt;</code> module for both single-player and multiplayer. Runtime packages contain the client, dedicated server, unified game module, and openPREY-owned <code>pak0.pk4</code>/<code>pak1.pk4</code> content.</p>
-  </section>
+    <section class="frame" id="highlights">
+      <h2>Highlights</h2>
+      <div class="cards">
+        <article class="card">
+          <h3 class="band">Stock Content First</h3>
+          <ul>
+            <li>Finds CD-era installs through the Windows registry, App Paths, uninstall entries and the usual install folders, with no dependence on Steam or GOG.</li>
+            <li>Checks the official base packs at startup.</li>
+            <li>One <code>game_&lt;arch&gt;</code> module, built from the Prey SDK, runs single-player and multiplayer.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3 class="band">Modern Presentation</h3>
+          <ul>
+            <li>OpenGL by default, matching Prey's original interaction stages; an optional Vulkan renderer.</li>
+            <li>Baked light grids add indirect light to portal areas.</li>
+            <li>Shadow maps, cel shading and DDS texture replacements, inherited from openQ4 and still being checked against Prey.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3 class="band">Built for Current Systems</h3>
+          <ul>
+            <li>SDL3 window handling: windowed, borderless, desktop and exclusive fullscreen, and monitor selection.</li>
+            <li>Native Wayland or X11 on Linux, and a Steam Deck launcher.</li>
+            <li>Experimental multiplayer bots on Prey's own artificial player.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
 
-  <section class="card">
-    <h2>Development model</h2>
-    <p>The engine is built with Meson. SDK-derived game code is maintained in-tree under <code>src/game/</code>, <code>src/Prey/</code> and <code>src/preyengine/</code> and built in place into the unified game module. It remains under the Prey SDK terms in <a href="../../LICENSES/PREY-SDK-EULA.rtf"><code>LICENSES/PREY-SDK-EULA.rtf</code></a>; see <a href="../../LICENSING.md">LICENSING.md</a>.</p>
-    <p class="muted">Always use windowed mode for automated validation: <code>+set r_fullscreen 0</code>.</p>
-  </section>
+    <section class="frame" id="getting-started">
+      <h2>Getting Started</h2>
+      <ol>
+        <li><strong>Install Prey (2006).</strong> Leave it where it is; openPREY keeps to its own folder.</li>
+        <li><strong>Get openPREY.</strong> Build and stage it with the <a href="../../BUILDING.md">build guide</a>, or unpack a package from the <a href="https://github.com/themuffinator/openPREY/releases">releases page</a> once one is published.</li>
+        <li><strong>Keep folders distinct.</strong> Prefer separate Prey and openPREY folders. Never copy retail <code>.pk4</code> files into <code>basepr/</code>.</li>
+        <li><strong>Launch the client.</strong> Run <code>openPREY-client_x64</code> (<code>.exe</code> on Windows). openPREY finds your Prey install on its own.</li>
+      </ol>
+      <div class="cards two">
+        <article class="card">
+          <h3 class="band">Platform Notes</h3>
+          <ul>
+            <li>Windows x64 gets most of the runtime testing; Linux x64 is built in CI.</li>
+            <li>Set <code>OPENPREY_FORCE_X11=1</code> on Linux to force the XWayland fallback.</li>
+            <li>On a Steam Deck, run <code>openPREY-steamdeck</code>.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3 class="band">If Auto-Detection Fails</h3>
+          <p>Launch with <code>+set fs_basepath "C:\path\to\Prey"</code>, pointing at the Prey root that contains <code>base/</code>, not at <code>base/</code> itself. The <a href="../../docs/user/getting-started.md">getting-started guide</a> lists every location openPREY checks.</p>
+        </article>
+      </div>
+    </section>
 
-  <section class="card">
-    <h2>Credits and licence</h2>
-    <p>openPREY is maintained by themuffinator / DarkMatter Productions and builds on idTech 4, OpenQ4, and related open-source modernization work. Prey was developed by Human Head Studios.</p>
-    <p>Engine code is distributed under GPLv3. SDK-derived game code remains subject to the Prey SDK terms, and retail game assets remain the property of their respective owners.</p>
-  </section>
-</main>
+    <section class="frame" id="compatibility">
+      <h2>Compatibility and Scope</h2>
+      <div class="cards two">
+        <article class="card">
+          <h3 class="band">In Place</h3>
+          <ul>
+            <li>Runs the official retail Prey (2006) assets with its own engine and game module.</li>
+            <li>Unified <code>basepr/</code> runtime layout with openPREY's own <code>pak0.pk4</code> and <code>pak1.pk4</code>.</li>
+            <li>Doom 3-lineage behaviour restored where Prey depends on it.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3 class="band">Boundaries</h3>
+          <ul>
+            <li>Mods built for the original proprietary Prey game DLLs won't load.</li>
+            <li>Every client and server in a multiplayer game needs a matching openPREY build.</li>
+            <li>Engine code stays GPL; SDK-derived game code stays under the Prey SDK EULA.</li>
+          </ul>
+        </article>
+      </div>
+      <p>Compatibility work is ongoing. The <a href="../../docs/dev/prey-rebase/status-ledger.md">rebase status ledger</a> records what has been ported and how each piece was tested, and the <a href="../../docs/dev/roadmap.md">development roadmap</a> lists what comes next.</p>
+    </section>
+
+    <section class="frame" id="build">
+      <h2>Building from Source</h2>
+      <p>Meson is the canonical build entry point. Builds go to <code>builddir/</code> and the runtime package is staged into <code>.install/</code>.</p>
+      <div class="cards two">
+        <article class="card">
+          <h3 class="band">What Matters</h3>
+          <ul>
+            <li>The game library is built in place from <code>src/game/</code>, <code>src/Prey/</code> and <code>src/preyengine/</code>.</li>
+            <li>One <code>game_&lt;arch&gt;</code> module for every mode.</li>
+            <li>Automated runs always stay windowed: <code>+set r_fullscreen 0</code>.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3 class="band">Windows Example</h3>
+          <p><code>tools/build/meson_setup.ps1 setup builddir . --backend ninja --buildtype=release --wrap-mode=forcefallback</code><br>
+          <code>tools/build/meson_setup.ps1 compile -C builddir</code><br>
+          <code>tools/build/meson_setup.ps1 install -C builddir --no-rebuild --skip-subprojects</code></p>
+          <p>See the <a href="../../BUILDING.md">build guide</a> for Linux and packaging.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="frame" id="docs">
+      <h2>Documentation</h2>
+      <div class="doc-columns">
+        <ul>
+          <li><a href="../../README.md">README</a>: the project front page</li>
+          <li><a href="../../BUILDING.md">Build guide</a>: Windows and Linux builds, validation and packaging</li>
+          <li><a href="../../TECHNICAL.md">Technical reference</a>: compatibility, layout, settings and file paths</li>
+          <li><a href="../../LICENSING.md">Licensing</a>: component terms</li>
+        </ul>
+        <ul>
+          <li><a href="../../docs/user/getting-started.md">Getting started</a>: install layout and first launch</li>
+          <li><a href="../../docs/user/display-settings.md">Display settings</a> and <a href="../../docs/user/input-settings.md">input settings</a></li>
+          <li><a href="../../docs/user/server-setup.md">Server setup</a>: hosting multiplayer</li>
+          <li><a href="../../docs/dev/prey-ui-visual-design.md">Prey UI visual design</a>: the interface specification</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="frame" id="credits">
+      <h2>Credits</h2>
+      <div class="cards">
+        <article class="card">
+          <h3 class="band">Project</h3>
+          <ul>
+            <li><strong>themuffinator</strong>: openPREY development and maintenance; author of openQ4</li>
+            <li><strong>DarkMatter Productions</strong>: project stewardship and <a href="https://www.darkmatter-quake.com">website</a></li>
+            <li><strong><a href="https://github.com/emileb">Emile Belanger (emileb)</a></strong>: original Android, SigmaTouch and OpenGL ES support, carried in with the openQ4 engine</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3 class="band">Foundations</h3>
+          <ul>
+            <li><strong>Human Head Studios</strong>: Prey (2006) and the Prey SDK</li>
+            <li><strong><a href="https://github.com/themuffinator/openQ4">openQ4</a></strong>: the engine openPREY is built on</li>
+            <li><strong>Justin Marshall</strong> and <strong>Robert Beckebans</strong>: reverse-engineering and renderer reference work</li>
+            <li><strong>id Software</strong> and <strong>Raven Software</strong>: idTech 4 and the Quake 4 codebase behind openQ4</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3 class="band">Libraries</h3>
+          <ul>
+            <li><strong>SDL</strong>, <strong>OpenAL Soft</strong>, <strong>GLEW</strong>, <strong>libogg and libvorbis</strong>, <strong>stb_vorbis</strong></li>
+            <li><strong>RmlUi</strong>, <strong>JsonCpp</strong>, <strong>libtess2</strong>, <strong>glslang</strong>, the <strong>OpenXR SDK</strong> and <strong>The Khronos Group</strong>'s OpenGL ES headers</li>
+            <li>The full list, with licence notices, is in the <a href="../../README.md">README</a> and <a href="../../LICENSES/">LICENSES/</a>.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <footer class="frame">
+      <p><strong>Licence.</strong> The openPREY engine is licensed under the <a href="../../LICENSE">GNU GPL version 3</a>, with the applicable <a href="../../LICENSES/DOOM-3-ADDITIONAL-TERMS.txt">Doom 3</a> or <a href="../../LICENSES/DOOM-3-BFG-ADDITIONAL-TERMS.txt">Doom 3 BFG</a> Additional Terms. The game code in <code>src/game</code>, <code>src/Prey</code> and <code>src/preyengine</code> is derived from the Prey SDK and remains under <a href="../../LICENSES/PREY-SDK-EULA.rtf">Human Head Studios' SDK EULA</a>. <a href="../../LICENSING.md">LICENSING.md</a> explains each component's terms. Prey's game assets remain the property of their rights holders and are not included.</p>
+      <p>openPREY is an independent project and is not affiliated with, endorsed by or sponsored by Human Head Studios, 2K, Bethesda, ZeniMax Media, id Software or Raven Software. PREY is a trademark of ZeniMax Media Inc.</p>
+      <p class="links"><a href="https://www.darkmatter-quake.com">Website</a> &middot; <a href="https://github.com/themuffinator/openPREY">Repository</a> &middot; <a href="https://github.com/themuffinator/openPREY/tree/main/src/game">Game Sources</a> &middot; <a href="https://github.com/themuffinator/openPREY/issues">Issue Tracker</a> &middot; <a href="#top">Back to Top</a></p>
+    </footer>
+  </main>
 </body>
 </html>

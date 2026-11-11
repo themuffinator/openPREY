@@ -56,6 +56,17 @@ makes no signed-package or first-class runtime claim. One unified game module mu
 used by any future app bundle. OpenGL is the first compatibility target; Vulkan through
 MoltenVK and other backend parity remain explicit validation TODOs.
 
+The inherited upstream policies,
+[`docs/dev/macos-support-matrix-policy.md`](macos-support-matrix-policy.md) and
+[`docs/dev/macos-renderer-backend-policy.md`](macos-renderer-backend-policy.md),
+still describe openQ4's macOS preview and are the starting point if openPREY ever
+ungates macOS. In upstream terms: packages are `arm64 only`, signed off on the
+`macOS 11` floor and the latest public macOS release; Intel Mac, universal2 and
+Rosetta are not release targets; the two package variants are OpenGL and a
+Metal bridge, which is not a native Metal renderer; and the legacy native backend is
+comparison-only and not a supported release backend. None of this is an openPREY
+claim until the macOS lanes are rebuilt and backed by PREY runtime evidence.
+
 ## Validation requirements
 
 First-class support for a platform requires all of the following on real target

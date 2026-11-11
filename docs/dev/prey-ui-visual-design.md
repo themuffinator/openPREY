@@ -1433,6 +1433,9 @@ openPREY's own marks live in `assets/`:
 | Application icon | `assets/icons/prey.*` | The hawk Talon in red and orange flame with a cyan electric edge; executables, desktop entries, installers |
 | Splash | `assets/splash/prey_rt_bitmap_4001.bmp` | Windows startup splash: the stone hawk with the dark extended wordmark |
 | README banner | `assets/docs/img/banner.png` | "open" in a white geometric sans beside "PREY" in dark navy extended capitals, over the Sphere and the glowing spirit hawk |
+| Release package home | `assets/release/README.html` | The `README.html` at the root of every package: the portal rim, Sphere and Earth's limb behind the hawk and wordmark, the arc of hooks as its section menu, the home bottom bar for its documentation links, and claw-cornered frames with setting-row plates and 3-slice buttons for its content |
+| Project overview and documentation portal | `assets/docs/README.html`; `SITE_CSS` in `tools/build/generate_release_docs.py` | The same vocabulary for the repository overview page and every packaged documentation page; side columns are tab containers whose links are side tabs |
+| Web faces | `assets/docs/fonts/openprey-{menu,default}.woff` | The display and body tracings, subset for the pages above by `tools/assets/fonts/embed_atlas_fonts.py`; the release home embeds them so it works offline from an unpacked archive |
 | Consoles | `kConsole*Color` in `src/framework/Console.cpp`, `S_COLOR_CONSOLE` in `src/idlib/Str.cpp`, `src/sys/sys_console_theme.h` | In-game console: black field (`prey.space`), text, edge and accents in `prey.portal.core` `#A4F9FE`, selection `prey.portal.body` `#2F64DC`, version `#6D7F95`. System console (Win32 and SDL): dark slate from `prey.sphere.shell`, never black: window `#0F171B`, log `#172229`, input `#121B21`, buttons `#1F2D36`/`#2A3D48`, borders `#2A3D48`/`#4A6F84`, text `#A4F9FE`, secondary text `#7F95AA`; the fatal-error strip keeps its red-orange |
 
 Rules for project material:
@@ -1469,7 +1472,8 @@ dressing are placeholders and are labelled as such.
   as the TrueType tracings openPREY ships in `content/basepr/pak0/fonts`
   ([ttf-font-system.md](ttf-font-system.md)), subset to Latin and embedded as
   WOFF by `tools/assets/fonts/embed_atlas_fonts.py`; run that tool after any
-  font rebuild. Sizes follow the engine (a `textscale` of s is a 48 s u em),
+  font rebuild. The same run refreshes the release package home and the web
+  faces under `assets/docs/fonts/` (section 13). Sizes follow the engine (a `textscale` of s is a 48 s u em),
   and display text is lowered by the menu face's 6/48 em baseline lift. Only
   page prose (Saira Condensed) and captions (IBM Plex Mono) load from Google
   Fonts.

@@ -282,7 +282,7 @@ packages or turn historical suite counts into current results.
   that are untested, not obsolete filenames or duplicate token assertions. Verify
   test discovery, native suite registration and CI actually execute the checks.
   Close when validation runs those checks without either archived companion repo.
-  Completed: [83 historical entries mapped](game-test-coverage.md), 74 relevant
+  Completed: 83 historical entries mapped, 74 relevant
   Python contracts/compiled fixtures recovered, production native clock and
   platform probes registered with Meson and push/PR CI. The current Windows
   Meson run passes all 184 tests; Linux portability/checksum probes pass in WSL.
@@ -2198,10 +2198,10 @@ checks are bounded evidence, not the complete Adreno/Mali/API/lifecycle matrix.
   overlay configuration. Select mobile presets from device results; explicitly
   handle GLES feature limits rather than assuming desktop temporal/post parity.
   The retained menus now keep their text and controls inside the window's
-  [safe area](ui/retained-screens.md#the-windows-safe-area-1-november-2026)
+  safe area
   while their bands and backdrops run full-bleed (`LAY-016` partial), and
   the Remastered HUD's edge readouts follow the same
-  [safe area](ui/remastered-hud.md#the-windows-safe-area-2-november-2026);
+  safe area;
   cutout, gesture-bar, fold and multi-window qualification on devices
   remains. In portrait the Remastered HUD's bottom readouts now rise above the
   touch thumb deck while the overlay is active, and **Landscape and portrait**
@@ -2353,9 +2353,9 @@ as evidence for an integrated openQ4 Apple-mobile package.
 ## New user interface
 
 The [visual specification](ui-visual-design.md),
-[product register](ui/product-requirements.md),
-[machine-readable requirements](ui/product-requirements.json) and
-[migration manifest](ui/migration-manifest.json) retain the full product contract.
+product register,
+machine-readable requirements and
+migration manifest retain the full product contract.
 This roadmap adopts all **312 active requirements, 358 current source/include-bound
 migration variants and seven final gates**. UI-10 reconciled retail/base/Awakening
 mounts while preserving the historical 271-entry manifest. The denominator follows
@@ -2369,9 +2369,9 @@ archived provenance; new scheduling belongs here.
 
 **Estimate: 30%; 1/11 tasks closed.** The full product denominator includes
 runtime/toolkit, editor, artwork, source-bound migration and platform acceptance,
-not just the visible menu pages. The current [register](ui/product-requirements.json)
+not just the visible menu pages. The current register
 has **117 partial and 195 pending active requirements**, with none verified;
-the [manifest](ui/migration-manifest.json) has **358 pending variants** and all
+the manifest has **358 pending variants** and all
 seven final gates remain pending.
 
 | Task / state | Completed points and evidence | Remaining completion subpoints |
@@ -2416,15 +2416,15 @@ Completion must advance through the existing dependencies:
   unfinished numeric text remain protected, with explicit conflict feedback.
   Native and windowed SP/OpenGL/MP/Vulkan gameplay checks cover this subset.
   The remaining settings/effect/editor and platform qualification stays open.
-  Progress, 25 October: the [AUDIO page](ui/retained-screens.md#the-audio-page-25-october-2026)
+  Progress, 25 October: the AUDIO page
   is reconstructed in the retained interface with every stock row; each change
   applies at once and every value reads back from the engine. Later that day
-  the [GAME OPTIONS page](ui/retained-screens.md#the-game-options-page-25-october-2026)
+  the GAME OPTIONS page
   followed with its 79 rows in eight sections, then the
-  [CONTROLS page](ui/retained-screens.md#the-controls-page-25-october-2026)
+  CONTROLS page
   with its 49 bindings and key capture; the stock settings screen now arrives
   on no panel, so its buttons choose the retained pages. Progress, 26 October:
-  the [SETTINGS page](ui/retained-screens.md#the-settings-page-26-october-2026)
+  the SETTINGS page
   replaces the settings screen's level from the title and the pause, with
   Load Defaults' question; DISPLAY still opens the stock panel unless the
   SYSTEM page is on. Player Setup remained at this checkpoint; its later
@@ -2444,59 +2444,59 @@ Completion must advance through the existing dependencies:
   This foundation did not itself deliver Player Setup; the later page and its
   bounded verification are recorded below.
   Progress, 31 October: CONTROLS, GAME OPTIONS and AUDIO are now
-  [sub-pages of the SETTINGS page](ui/retained-screens.md#the-settings-sub-pages-31-october-2026)
+  sub-pages of the SETTINGS page
   in the main menu's construction (visual specification 1.29, `FLOW-068`),
   replacing the drafted full-screen panels: sections are tabs and no tab has
   more than two columns. The opt-in SYSTEM page followed the same day as the
-  [DISPLAY sub-page](ui/retained-screens.md#the-system-page-as-a-settings-sub-page-31-october-2026)
+  DISPLAY sub-page
   (GRAPHICS, SCREEN and IMAGE QUALITY tabs, generated by
   `tools/ui/retained_system.py`; visual specification 1.30), and the
   settings rows then learned to
-  [follow the text size](ui/retained-screens.md#settings-rows-follow-the-text-size-31-october-2026)
+  follow the text size
   (visual specification 1.31).
   Portrait views of 3:4 and taller now stand each tab in one larger,
   scrolling column, and GAME OPTIONS' fine sliders take typed values
-  ([portrait and typed numbers](ui/retained-screens.md#portrait-views-and-typed-numbers-31-october-2026)).
+  (portrait and typed numbers).
   The menu levels (title, pauses, SETTINGS, Single Player, Campaign and
   Multiplayer) then met the
-  [text-scale contract](ui/retained-screens.md#menu-levels-follow-the-text-size-31-october-2026)
+  text-scale contract
   too (visual specification 1.32, `LAY-004`); at that checkpoint Player Setup,
   the Mods dialog, Objectives and the list/form pages still kept their 100 %
   rows. The 2-3 November increments below extend their scaling.
   In views of 3:4 and taller the same menu levels now
-  [stand in one column](ui/retained-screens.md#menu-levels-in-tall-views-31-october-2026)
+  stand in one column
   that uses the height (visual specification 1.33, `LAY-021`), and so do
-  [the list pages](ui/retained-screens.md#list-pages-in-tall-views-31-october-2026)
+  the list pages
   (Load and Save Game, Demos, Create Server and Join Game; visual
   specification 1.34) and
-  [the remaining pages](ui/retained-screens.md#more-pages-in-tall-views-1-november-2026),
+  the remaining pages,
   the Arena page in
-  [two blocks of its own](ui/retained-screens.md#the-arena-page-in-tall-views-1-november-2026)
+  two blocks of its own
   (visual specification 1.35). Menu levels and the fixed-growth pages then
   took their column in
-  [every portrait view that holds it](ui/retained-screens.md#every-portrait-view-and-other-aspect-ratios-1-november-2026)
+  every portrait view that holds it
   (visual specification 1.36). On a touchscreen the menus' lists now
-  [drag with the finger](ui/retained-screens.md#touch-in-the-menus-1-november-2026),
+  drag with the finger,
   a moved touch is no longer a tap and a finger leaves no cursor or hover
   behind; a press lights at touch-down, a released list keeps going as
   inertia and lights its rim at either end, a swipe across a tab strip
   changes tab and a 500 ms long-press opens a button's detail (`INP-014`
   partial; haptics and device qualification remain).
   Progress, 2 November: Player Setup has
-  [edited in place](ui/retained-screens.md#player-setup-edits-in-place-2-november-2026)
+  edited in place
   on the Multiplayer page since 28 October; an engine capture now confirms
   each change applies and reads back. Text size and tall views remained at that
   checkpoint and gained implementation in the 3 November increment below.
   The Multiplayer page also gained DEMOS, which opens the
-  [Demos page as a sub-page](ui/retained-screens.md#demos-as-a-multiplayer-sub-page-2-november-2026)
+  Demos page as a sub-page
   (`FLOW-050`); the title's plinth keeps MODS, UPDATES, CREDITS and EXIT.
   The same day the list pages' rows began to
-  [follow the text size](ui/retained-screens.md#list-pages-follow-the-text-size-2-november-2026)
+  follow the text size
   (Load and Save Game, Demos, Join Game and Create Server's maps), with Load
   Game's and Demos' details stacked over a shrinking picture and their
   furniture at its size (`LAY-004` partial).
   Progress, 3 November: the
-  [remaining pages follow the text size](ui/retained-screens.md#the-remaining-pages-follow-the-text-size-3-november-2026)
+  remaining pages follow the text size
   too: Create Server's options and advanced dialog, Player Setup and Join
   Game's search stack each setting's value under its label in a scrolling
   column; Restart Level, the campaign's difficulty and chapters, the Mods
@@ -2507,23 +2507,23 @@ Completion must advance through the existing dependencies:
   qualification of real fonts across every state and the native editor
   remain.
   The same day Campaign became the campaign choice with
-  [NEW GAME and CHAPTERS as its fourth-level children](ui/retained-screens.md#chapters-as-a-level-of-its-own-3-november-2026)
+  NEW GAME and CHAPTERS as its fourth-level children
   (`FLOW-050`): CHAPTERS is a page of its own through the same helper, and
   the difficulty page keeps only the difficulty, Turbo and START GAME. The
   classic campaign page is unchanged. Join Game gained
-  [SPECTATE](ui/retained-screens.md#spectate-on-join-game-3-november-2026)
+  SPECTATE
   beside JOIN SERVER and the favorite toggle; a press of the left stick
   spectates and of the right one toggles the favorite, their glyphs on the
   plates since the prompt bar has no room for them (`FLOW-050`, `INP-011`).
   The menu levels' sections (Single Player, Campaign, Multiplayer and
   SETTINGS) now
-  [summarize themselves](ui/retained-screens.md#section-summaries-3-november-2026)
+  summarize themselves
   in the content column while they are the subject, CAMPAIGN, ARENA, NEW
   GAME, CHAPTERS and CREATE SERVER over a levelshot, through a cardless detail
   definition (`FLOW-050`). Join Game's docked detail column for expanded
   layouts and the section layout remain.
   Progress, 5 November: Game Options > HUD gains
-  [Opaque Menu Backing](ui/retained-screens.md#opaque-menu-backing-5-november-2026),
+  Opaque Menu Backing,
   the accessibility alternative to the softened backdrop, on the retained and
   stock pages in every shipped language.
   Progress, 10 November: the retained DISPLAY page is the default under
@@ -2545,7 +2545,7 @@ Completion must advance through the existing dependencies:
   bootstrap, activation and disposal; they currently have tests but no normal
   construction path. Require native-message/SDL routing, focus/loss/recreation,
   held-source handling and a working fallback before claiming live IME support.
-  Progress, 23 October: [focus-following prompts](ui/retained-screens.md#page-prompt-bars)
+  Progress, 23 October: focus-following prompts
   give the pages' prompt bars Accept verbs that follow focus in the same frame:
   LOAD, DELETE, SAVE, PLAY and JOIN, from a button's new `prompt`, in every
   shipped language. Accept leaves the bar while no focused control can act.
@@ -2563,7 +2563,7 @@ Completion must advance through the existing dependencies:
   on the SYSTEM page and the Escape card's Admin page, and stays Back while a
   dialog or an open list holds the input. The Escape card's Match and Admin
   section strips end with [trigger glyphs](ui/input-routing.md#trigger-glyphs-24-october-2026)
-  for each controller family. The [joined lines](ui/retained-screens.md#joined-lines-and-capitals-24-october-2026)
+  for each controller family. The joined lines
   that C++ assembled (list separators, the time in the mission, a save's date
   and time, the load time's decimal mark and unit) and the Demos page's
   capitals come from every language's table. The Admin page's Apply changes
@@ -2575,8 +2575,8 @@ Completion must advance through the existing dependencies:
   focus when a move comes back into them. The [View button](ui/input-routing.md#view-button-24-october-2026)
   hides or shows Join Game's server details and, by default, shows the scores
   while held in play. The home screens, menu pages and multiplayer cards
-  [fit views narrower than 4:3](ui/retained-screens.md#narrow-views-24-october-2026)
-  (5:4, portrait), and the list pages [grow their lists](ui/retained-screens.md#tall-views-grow-the-lists-25-october-2026)
+  fit views narrower than 4:3
+  (5:4, portrait), and the list pages grow their lists
   into a tall view's extra height.
   Progress, 3 November: the [right stick](ui/input-routing.md#right-stick-3-november-2026)
   scrolls a retained menu's detail area (a scrolling area that holds no
@@ -2592,7 +2592,7 @@ Completion must advance through the existing dependencies:
   Complete save chapter and
   objective/play-time details, Strogg confirmations, loading handoffs, remote-load
   arsenal and MVD rosters. Qualify real task completion and failure/cancellation.
-  Progress, 23 October: [full roster scrolling](ui/multiplayer-menus.md#full-roster-scrolling-23-october-2026)
+  Progress, 23 October: full roster scrolling
   removes the 16-row publication/document limit from Welcome, Players and the
   summary's Statistics/Scoreboard pages. Rows keep a 24 dp pitch beneath fixed
   headings; kick choices cover the engine's connection table. This bounded
@@ -2602,34 +2602,34 @@ Completion must advance through the existing dependencies:
   generations. Held and queued controls cannot follow a replacement occupant;
   stale selections return to the local player. Remote voice transport and other
   player-targeted flows remain open.
-  Progress, 23 October: [save browser controls](ui/save-browser.md) add date/name/
+  Progress, 23 October: save browser controls add date/name/
   location sorting, manual/autosave filters and explicit refresh to both page
   families. Selection and row focus follow filenames, typed names survive refresh,
   and catalog generations reject stale actions. The remaining save details and
   wider device/platform acceptance stay open.
-  Progress, 23 October: [Strogg confirmations](ui/retained-screens.md#strogg-confirmations)
+  Progress, 23 October: Strogg confirmations
   give the Strogg pause and its Save/Load pages dialogs in the Strogg family,
   translating from runes as they open. Ids, focus, soft focus and timing stay
   the stock dialog's. The construction derives from section 13.7's family rules
   and awaits art review under UI-05.
-  Progress, 24 October: the Vote and Admin pages' [map catalogs](ui/multiplayer-menus.md#map-catalogs-24-october-2026)
+  Progress, 24 October: the Vote and Admin pages' map catalogs
   hold 128 maps a game type instead of 48.
-  Progress, 24 October: Join Game's [row focus follows its server](ui/retained-screens.md#join-game-sub-page)
+  Progress, 24 October: Join Game's row focus follows its server
   through new orders, refreshes and filters, onto its page, as the choice
   already did; a server that leaves the list leaves the focus in place.
-  Progress, 24 October: the lists' [empty states](ui/retained-screens.md#empty-states-24-october-2026)
+  Progress, 24 October: the lists' empty states
   offer the action that fixes them: CLEAR FILTERS on Load and Save Game,
   Demos and Join Game while a filter hides everything, and GET NEW LIST when
   Join Game's scan found no server, under a heading in every language.
-  While a scan has found nothing yet, Join Game shows [loading rows](ui/retained-screens.md#loading-rows-24-october-2026)
+  While a scan has found nothing yet, Join Game shows loading rows
   at rest, and its first servers replace them with `row.reveal`. Retained pages
-  gain section 13.13's [notices](ui/retained-screens.md#notices-24-october-2026);
+  gain section 13.13's notices;
   Join Game's favorites use them, and a removal offers Undo for 8 s. The
-  [notices are shared](ui/retained-screens.md#shared-notices-and-a-lost-controller-25-october-2026)
+  notices are shared
   across the retained menus and say when a controller disconnects. Join
-  Game's details card names its server [in full](ui/retained-screens.md#full-server-names-25-october-2026),
+  Game's details card names its server in full,
   which the list cuts.
-  Progress, 23 October: [save details](ui/retained-screens.md#save-details)
+  Progress, 23 October: save details
   record each run's play time and difficulty in the persistent player info
   that every save header carries, without a save format change. CONTINUE and
   the Load Game page name them, the pause adds the run's total time, and
@@ -2637,7 +2637,7 @@ Completion must advance through the existing dependencies:
   builds show neither. Chapter numbers on saves are not shown: the list names
   each save's mission.
   Progress, 23 October (landed 26 October): multiplayer
-  [objective markers](ui/remastered-hud.md#multiplayer-objective-markers-23-october-2026)
+  objective markers
   now cover permanent flag bases, Arena CTF assault points and DeadZone zones,
   with icon-based status, distance only, bounded overlap and off-screen directions.
   Preserve their gameplay/state and projection coverage while completing the
@@ -2661,19 +2661,19 @@ Completion must advance through the existing dependencies:
   carry the selected identity and reject stale requests before server admission.
   Match Control rows and broader remote/device/platform qualification remain.
   Progress, 5 November: the multiplayer cards' Players lists gained the held
-  scoreboard's [marks](ui/multiplayer-menus.md#players-list-marks-and-team-refusals-5-november-2026):
+  scoreboard's marks:
   a skull with the row at half while dead or out of the Tourney, a BOT tag,
   and network-quality bars stepped by the game. French and Italian players now
   read the stock team-refusal messages in their language. Native card checks
   cover each mark, and a live OpenGL deathmatch with bots shows them in play;
   Vulkan and device qualification remain.
   Progress, 5 November: Kick and Ban on the Escape card's Admin page now
-  [ask first](ui/multiplayer-menus.md#kick-and-ban-confirmations-5-november-2026)
+  ask first
   in the stock confirmation, naming the player; YES acts on exactly that
   player's captured connection. Native checks and a Vulkan listen-server
   capture that kicks a bot cover the flow.
   The Match page's lists now hold a
-  [full server's rows](ui/multiplayer-menus.md#match-list-capacities-5-november-2026):
+  full server's rows:
   64 team rows, 32 replacements, every proposal template and 32 pool maps,
   checked against Match Control's model at compile time. The model's 128
   team rows and history steps would put the Escape card past the runtime's
@@ -2687,31 +2687,31 @@ Completion must advance through the existing dependencies:
   and input, saves/checkpoints and exactly-once commands. Require accepted behavior
   and artwork for every resource; conversion counts do not close migration.
   Progress, 24 October: the Medical Labs implant overlay has
-  [engine captures](ui/remastered-hud.md#medical-labs-implant-captures-24-october-2026)
+  engine captures
   through the level's own script at 4:3, 16:9, 21:9, 32:9 and 9:16 (`FLOW-062`).
   Progress, 9 November: the stock interface's player, multiplayer and vehicle HUD
   GUIs follow the Remastered layout outside Classic, with matching settings, the
   pickup merge, chat and standing, and save-compat revisions
-  ([stock interface HUD layout](ui/legacy-hud-layout.md)). This does not migrate
+  (stock interface HUD layout). This does not migrate
   or accept a GUI. The next inventory refresh (UI-10) picks up the edited
   GUIs and their revisions. The same day the stock multiplayer HUD gained the
   team modes' panels and flags, Tourney's strip and message bar, and the kill
-  feed ([multiplayer groups](ui/legacy-hud-layout.md#multiplayer-groups)).
+  feed (multiplayer groups).
   Progress, 10 November: the stock HUDs take the HUD scale and opacity, the
   multiplayer one gained the follow card, vote card and respawn prompt, and
   sizes and offsets were measured against the retained HUD in paired captures
-  ([evidence](ui/legacy-hud-layout.md#evidence-10-november-2026)). The
+  (evidence). The
   Awakening's on-foot HUD follows the layout too, from a definition generated
   from `hud.gui` that the engine reads in place of the expansion's script
-  ([evidence](ui/legacy-hud-layout.md#the-awakening-10-november-2026)), and so
+  (evidence), and so
   do its dropship gun, MCC gun and speeder bike HUDs, generated from
   `vehicles/hud.gui`
-  ([evidence](ui/legacy-hud-layout.md#the-awakenings-vehicles-10-november-2026)).
+  (evidence).
   Its GEV HUD, which no map uses, keeps the expansion's script.
   The stock interface's Single Player, Campaign, Arena and Demos pages stand in
   the stock page frame the retained pages share, its Multiplayer page lists the
   retained page's sections, and its menus answer the arrow keys
-  ([stock interface menus](ui/legacy-menu-layout.md)). Both CONTROLS pages
+  (stock interface menus). Both CONTROLS pages
   draw keys as glyphs and keep an action's controller buttons when a key is
   bound, and the stock menus step their focus as a page reads and scroll a
   settings page to it ([key glyphs and focus](ui/key-bind-glyphs.md)). This
@@ -2721,12 +2721,12 @@ Completion must advance through the existing dependencies:
   other recorded deviations before acceptance. Preserve editable vector framing,
   controls, symbols, 45-degree geometry and continuous motion; use bitmaps only for
   approved complex imagery. Keep stock references without adding proprietary art.
-  Progress, 21 October: [register revision 19](ui/product-requirements.md#revision-19-awakening-single-player-scope)
+  Progress, 21 October: register revision 19
   preserves `FLOW-054`/`WID-034` as history and replaces their active scope with
   `FLOW-066`/`WID-038`. Awakening single-player and ordinary Quake 4 multiplayer
   obligations remain; an expansion multiplayer module is explicitly excluded.
   This resolves the stale scope clauses without accepting a GUI. The
-  [hit-feedback default correction](ui/remastered-hud.md#hit-feedback-defaults-21-october-2026)
+  hit-feedback default correction
   restores stock feedback for fresh SP/MP profiles and preserves archived opt-ins;
   four actual-map default/write/restore/reset runs pass. Optional marker artwork,
   timing and the remaining visual-policy qualification stay open.
@@ -2837,7 +2837,7 @@ Completion must advance through the existing dependencies:
   catalog through dispatch. Native and GL/Vulkan gameplay checks pass; full
   toolkit and device/platform acceptance remain open.
 - [x] **UI-10 — P0, investigation and implementation: refresh effective scope and
-  source inventory.** Completed [retail/base/Awakening inventory](ui/inventory-report.md):
+  source inventory.** Completed retail/base/Awakening inventory:
   264/276/324 effective paths, 358 distinct source/include-bound variants, 18
   changed loose overlays and five added base paths. Historical hashes/evidence
   remain; stale inventory acceptance was invalidated and no GUI was accepted.
@@ -2873,18 +2873,18 @@ Completion must advance through the existing dependencies:
   [Review details](ui/acceptance-transition.md). The changed tooling still needs
   separate review before product acceptance; no requirement or resource is accepted.
 
-Detailed current evidence: [menu audit](ui/menu-audit.md),
-[retained screens](ui/retained-screens.md), [multiplayer menus](ui/multiplayer-menus.md),
+Detailed current evidence: menu audit,
+retained screens, multiplayer menus,
 [runtime performance](ui/runtime-performance.md), [document editing](ui/document-editing.md),
 and [settings transactions](ui/settings-effect-execution.md).
 
 ## Retail Quake 4 compatibility and campaigns
 
-Sources: [retail decl audit](retail-q4-decl-parity-audit.md),
-[BSE retail audit](archive/2026-10-18/quake4-bse-research-and-implementation-plan.md#retail-parity-audit-2026-10-02),
+Sources: retail decl audit,
+[BSE retail audit (openQ4)](https://github.com/themuffinator/openQ4/blob/main/docs/dev/archive/2026-10-18/quake4-bse-research-and-implementation-plan.md#retail-parity-audit-2026-10-02),
 [Awakening history](archive/2026-10-18/plans/q4x-awakening.md), [save reliability](savegame-reliability.md),
 [save compatibility policy](savegame-compatibility-policy.md),
-[retail asset baseline](stock-asset-baseline.md).
+retail asset baseline.
 
 ### Q4 completion checkpoints
 
@@ -2926,7 +2926,7 @@ Completion substeps must keep three forms of evidence distinct:
   replace bootstrap workarounds with engine/game fixes where possible. Separate
   compatibility workarounds from intentional new UI/campaign content; retain the
   original-asset-only baseline and record each overlay used by a qualification.
-  Completed: [current ledger and 165-path overlay audit](retail-baseline-ledger.md),
+  Completed: current ledger and 165-path overlay audit,
   both-API four-map controls plus lit Recomp, original-content SP/MP gameplay,
   and retained complete-baseline failures with source/package identities. The
   connecting pure-client timeout belongs to MP-08/Q4-02; unsynchronized lighting
@@ -2937,7 +2937,7 @@ Completion substeps must keep three forms of evidence distinct:
   on supported render paths. Test SP/MP and campaign switches with original assets;
   classify expected warnings individually. Map initialization or a single capture
   is insufficient evidence of playable progression.
-  Progress, 2 November: a hidden [campaign transition chain](retail-baseline-ledger.md#campaign-transition-chain-2-november-2026)
+  Progress, 2 November: a hidden campaign transition chain
   saves, restores and fires each map's own end-level trigger across all 31
   stock stages, airdefense1 to core2's end of game, on OpenGL and Vulkan with
   retail assets.
@@ -2945,7 +2945,7 @@ Completion substeps must keep three forms of evidence distinct:
   (radio-chatter reference, see Q4-05), and its 96 warning kinds are classified.
   This covers level changes, persistent state and save/restore at map start, not
   the gameplay between triggers; full playthroughs on each render path remain.
-  Progress, 4 November: the [fresh Hangar Perimeter lift sequence](retail-baseline-ledger.md#hangar-perimeter-lift-4-november-2026)
+  Progress, 4 November: the fresh Hangar Perimeter lift sequence
   passes in Turbo mode on OpenGL and Vulkan: all three marines board, the lift
   rises fully and Tech Li leaves scripted control and reaches his exit tether.
   An isolated module with the old Turbo mover behaviour reproduces his idle
@@ -2981,7 +2981,7 @@ Completion substeps must keep three forms of evidence distinct:
   Later on 3 November: the zero counters were traced to missing instrumentation.
   Particle units, collision queries and serviced segments now update
   `bse_speeds`; unmeasured texel coverage is no longer printed as zero.
-  The [stock spark lifecycle probe](retail-baseline-ledger.md#effect-lifecycle-telemetry-3-november-2026)
+  The stock spark lifecycle probe
   passes start, stop, restart, owner deletion and saved-loop restoration on both
   OpenGL and Vulkan, including nonzero particle/trace activity and quiet frames
   after stop/delete. Immediate resaves contain no unresolved references. This is
@@ -2994,7 +2994,7 @@ Completion substeps must keep three forms of evidence distinct:
   no expansion MP module or resurrection of obsolete companion-layer architecture.
   M05/M06 encounter work, 4 November: the Pain Lord's shield phases, final
   processing window and cleanup, MCC arrival continuity, and cannon/fighter
-  lifecycle are reviewed in the [mission audit](awakening-m05-m06.md). A second
+  lifecycle are reviewed in the mission audit. A second
   pass fixes normal callback cancellation, escape-teleporter shutdown/re-entry
   and the service-lift lamp, with versioned scripts preserving v1 saves. A third
   pass addresses the blocked medic approach, unused freight panel and incomplete
@@ -3037,7 +3037,7 @@ Completion substeps must keep three forms of evidence distinct:
   pose, lock and HUD values survive each fresh process. The turret exits normally;
   the walker keeps the repair sequence's authored exit lock. The probe exposed
   division by zero in invulnerable/unshielded vehicle HUDs, now fixed in both
-  game libraries. See [vehicle evidence and limits](retail-baseline-ledger.md#awakening-vehicle-saves-and-hud-fractions-4-november-2026).
+  game libraries. See vehicle evidence and limits.
   Walker repair completion, unlock and traversal, sustained turret bursts and
   visual/audio parity remain open; this checks one shot and its engine capture.
   Progress, 9 November (chaingun turret): the expansion's turret file redefined
@@ -3058,7 +3058,7 @@ Completion substeps must keep three forms of evidence distinct:
   hits fully dim their lights. M02's repair-bot attachment, generator defence
   gate, objective timing and animation sequencing are corrected under a separate
   saved script identity. Original M02 saves retain the installed program.
-  See [mission intent, findings and bounded runtime evidence](awakening-missions.md).
+  See mission intent, findings and bounded runtime evidence.
   Follow-up checkpointed game-input runs cover M01/M02 squad routing, both
   walker demolition defences and courtyard traversal, generator/download
   defence, normal Tank victory, extraction framing and M03's autosave. They
@@ -3075,7 +3075,7 @@ Completion substeps must keep three forms of evidence distinct:
   joint-following tool effects and a completed descent sound transition.
   Original/v2 scripts remain immutable for saves. The localized shake control,
   reduced-flashing treatment and VR motion suppression are implemented.
-  The [dropship audit and beat acceptance](m01-interior-feedback-audit.md#implemented-revision-3-4-november-2026)
+  The dropship audit and beat acceptance
   records the ordered plan's delivered scope and limits:
 
   1. **Audio continuity — implemented and checked.** Full production stereo/HRTF
@@ -3097,7 +3097,7 @@ Completion substeps must keep three forms of evidence distinct:
      remain wider campaign qualification. Candidate release notes are updated.
 
 
-  Progress, 4 November: [M03/M04 review](awakening-missions.md#m03-and-m04-review-4-november-2026)
+  Progress, 4 November: M03/M04 review
   repairs the Falcon's shared cockpit screens, false initial lock, missing
   reticle coverage, ship-state routing, hull repair accounting and duplicate
   engine completion. Prison cellblock routing, maintenance-bot references,
@@ -3117,7 +3117,7 @@ Completion substeps must keep three forms of evidence distinct:
   corrections for late clock callbacks, single stage transitions, time
   carryover, objective ordering, zero-clamped expiry and a completed HUD. Boost
   cancellation respects seat exit, movement disablement and destruction while
-  preserving recharge. See the [M07 audit and qualification limits](awakening-m07.md).
+  preserving recharge. See the M07 audit and qualification limits.
   Bomber cleanup now targets each attack's own assembly; the two missing
   destruction callbacks use the existing authored sequence.
   A second review added v2 terminal-state guards: repeatable progress volumes
@@ -3158,7 +3158,7 @@ Completion substeps must keep three forms of evidence distinct:
   follow-up evidence remains in the late-mission audit.
   Original script
   programs remain available to older saves. See the
-  [late-mission audit and runtime limits](awakening-missions.md#m08-cryofac-and-m09-valkaryne--4-november-2026).
+  late-mission audit and runtime limits.
   Normal combat, complete traversal and timed extraction remain qualification
   requirements; focused script callbacks do not close this work item.
 - [ ] **Q4-05 — P1, decision and implementation: save failure recovery.** Preserve
@@ -3664,11 +3664,11 @@ enhanced solver. The product rules below are requirements, not current features.
 
 ## Multiplayer bots Arena and demos
 
-Sources: [competitive closure audit](competitive-match-reference-audit.md),
-[bot implementation](mp-bots.md), [Arena ceremony](arena-campaign-ceremony.md),
-[demo architecture](multiview-demos.md), [MVD qualification](mvd-qualification-2026-09-07.md),
+Sources: competitive closure audit,
+[bot implementation](mp-bots.md), Arena ceremony,
+[demo architecture](multiview-demos.md), MVD qualification,
 [liquid implementation history](archive/2026-10-18/plans/2026-08-07-liquid-support.md),
-[human qualification checklists](mp-human-qualification.md).
+human qualification checklists.
 
 Current delivery scope, 28 October: the user deferred real WAN and
 cross-architecture peer qualification for now. MP-07/MP-08 retain those gates for
@@ -3680,7 +3680,7 @@ Human gates, 5 November: the owner chose to run, in person, the gates that need
 a person or physical hardware. These are keyboard/controller workflows, Arena pause
 and audio endpoints, real swimming and effects by eye, weapon visuals, physical
 networks and bot difficulty. They follow the
-[human qualification checklists](mp-human-qualification.md), because automated
+human qualification checklists, because automated
 fixtures never synthesize input. Each such gate stays open until its checklist
 result is recorded.
 
@@ -3695,15 +3695,15 @@ prediction/rewind defaults.
 
 | Task / state | Completed points and evidence | Remaining completion subpoints |
 | --- | --- | --- |
-| MP-01 — Partial | Roster/identity/vote fixes; eight live edge scenarios, failed-map retry, writer fault controls, live team-forfeit side ballots and post-commit map-load release pass scoped checks; side ballots pass on OpenGL and Vulkan. | Physical keyboard/controller flows ([checklist](mp-human-qualification.md#mp-01-competitive-match-control-by-hand)) and other platforms. |
+| MP-01 — Partial | Roster/identity/vote fixes; eight live edge scenarios, failed-map retry, writer fault controls, live team-forfeit side ballots and post-commit map-load release pass scoped checks; side ballots pass on OpenGL and Vulkan. | Physical keyboard/controller flows (checklist) and other platforms. |
 | MP-02 — Closed with accepted timing caveat | Final `f6aa481e6` four-map long matches and all 33 catalog variants pass death/duration checks with zero navigation deaths after strict policy-2 assessment; targeted recovery, traffic and Windows/Linux controls pass. | CTF3 timing meets numerical limits but SP contention invalidates controlled qualification; no uncontended repeat was completed. Owner accepted this caveat for closeout; failed report retained, other maps/platforms unqualified. |
 | MP-03 — Closed | Trench jumps and debug-pool defects fixed; route-cost, collision, graph/cache and ladder/lift subjects have recorded dispositions. | Custom lifts remain unsupported; final safety evidence and the accepted timing-contention caveat are recorded under completed MP-02. |
-| MP-04 — Partial | Arena audio pause/result persistence, in-place restart and ceremony disconnect/quit preservation checked. | Physical navigation and endpoint loss/return ([checklist](mp-human-qualification.md#mp-04-arena-by-hand)); retain failure-path and UI/audio dependencies. |
+| MP-04 — Partial | Arena audio pause/result persistence, in-place restart and ceremony disconnect/quit preservation checked. | Physical navigation and endpoint loss/return (checklist); retain failure-path and UI/audio dependencies. |
 | MP-05 — Closed at selected scope | Seek repairs, quota/retention policy and MVD 1.3 markers/keyframes/late-join identity/autotracking pass selected runtime checks. | Reverse scrub, timedemo, AVI, thumbnails and named list remain deferred; 1.3 Vulkan/Linux/macOS playback breadth belongs to release qualification. |
-| MP-06 — Partial | Static-liquid compiler output, bot swimming, remote air/HUD/demo state, muffle and projectile crossings checked. | Real player swimming, wade sound and a by-eye pass at play distance ([checklist](mp-human-qualification.md#mp-06-swimming-and-liquid-effects-by-eye)); captured splash/bubble presentation passes after the slime/lava splash fix. Swimming monsters, new animations and moving volumes remain deferred. |
-| MP-07 — Partial | Coupled pose-age/rewind, signed timing controller, impairment simulation and weapon geometry fixes tested; defaults remain off. | Firing player's same-fire-frame visuals and remaining peer transitions ([checklist](mp-human-qualification.md#mp-07-weapon-visuals-under-prediction)); remote weapon play passes from spectator captures after the casual follow fix; real WAN and default promotion only when selected and qualified. |
-| MP-08 — Partial | Local IPv4/IPv6 pure/discovery/reconnect/content checks, family fallback and fragment repair pass; Windows/Linux peer evidence exists. | Physical MTU/multi-record DNS, cross-machine load and the elevated retail-binary run ([checklist](mp-human-qualification.md#mp-08-real-network-conditions)); deferred WAN/other-architecture peers. No interoperability claim. |
-| MP-09 — Partial | Aim/turn/trigger fixes and five-level combat ladder measured over a round robin. | People verify skill 1 accessibility and skill 5 difficulty/fairness ([checklist](mp-human-qualification.md#mp-09-bot-difficulty-against-people)); retune from that evidence. |
+| MP-06 — Partial | Static-liquid compiler output, bot swimming, remote air/HUD/demo state, muffle and projectile crossings checked. | Real player swimming, wade sound and a by-eye pass at play distance (checklist); captured splash/bubble presentation passes after the slime/lava splash fix. Swimming monsters, new animations and moving volumes remain deferred. |
+| MP-07 — Partial | Coupled pose-age/rewind, signed timing controller, impairment simulation and weapon geometry fixes tested; defaults remain off. | Firing player's same-fire-frame visuals and remaining peer transitions (checklist); remote weapon play passes from spectator captures after the casual follow fix; real WAN and default promotion only when selected and qualified. |
+| MP-08 — Partial | Local IPv4/IPv6 pure/discovery/reconnect/content checks, family fallback and fragment repair pass; Windows/Linux peer evidence exists. | Physical MTU/multi-record DNS, cross-machine load and the elevated retail-binary run (checklist); deferred WAN/other-architecture peers. No interoperability claim. |
+| MP-09 — Partial | Aim/turn/trigger fixes and five-level combat ladder measured over a round robin. | People verify skill 1 accessibility and skill 5 difficulty/fairness (checklist); retune from that evidence. |
 
 Completion substeps:
 
@@ -3724,7 +3724,7 @@ Completion substeps:
   localized keyboard/controller workflows. Keep captain spectator invitations
   fail-closed and record remaining exact runtime scenarios from the current audit.
   Progress, 18 October: current staged GL role/follow and roster/reconnect runs
-  pass, including replacement identity isolation. The [audit evidence](competitive-match-reference-audit.md#stage-two-current-runtime-rerun-2026-10-18)
+  pass, including replacement identity isolation. The audit evidence
   retains their precise scope; the remaining release checks are still open.
   Progress, 23 October: a review fixed three pipeline defects. Passed
   ballots kept the session revision their proposer saw, so any ready change
@@ -3733,7 +3733,7 @@ Completion substeps:
   adapter. Veto turns are held to the series side the view shows, and a
   spectator's follow latches the target's spawn identity. Extended asset-free
   contracts fail against each reverted fix; all 52 asset-free `mp_match_*`
-  contracts pass. [Details](competitive-match-reference-audit.md#proposal-revalidation-veto-side-and-follow-identity-2026-10-23).
+  contracts pass. Details.
   The live runtime scenarios above remain open.
   Progress, 3 November: the eight live scenarios from that review now pass on
   one staged OpenGL build of `1e1f3e88a`, with reports bound to its binary
@@ -3747,17 +3747,17 @@ Completion substeps:
   to READY twice, then plays the retry. No product defect surfaced. Side
   proposals cannot be qualified: every Match Control creation template is
   global by contract, so no shipped surface creates a side ballot
-  ([evidence and limits](competitive-match-reference-audit.md#live-closure-scenarios-2026-11-03)).
+  (evidence and limits).
   Physical keyboard/controller workflows, side ballots, the post-commit
   map-load limit and the rest of the release order remain open.
-  Follow-through, 3 November: the [artifact adapter fault-injection fixture](competitive-match-reference-audit.md#artifact-adapter-failure-boundaries-3-november-2026)
+  Follow-through, 3 November: the artifact adapter fault-injection fixture
   executes all three production writers at every short-write failure boundary
   of a 257-byte payload, their capacity edges, failed sync/open/promotion/cleanup
   and invalid input. Twelve reversal controls fail. This qualifies adapter
   handling, not physical disk exhaustion, power loss or process interruption;
   the live and physical-workflow gates remain open.
   Progress, 5 November: side ballots and the post-commit map-load limit are
-  closed ([evidence](competitive-match-reference-audit.md#side-ballots-and-post-commit-map-load-release-2026-11-05)).
+  closed (evidence).
   The owner chose a targeted template: **Forfeit | Side** is a team forfeit
   vote. Its scope and target are always the recipient's own side. The server
   accepts it only from an active member of that side while forfeit is legal,
@@ -3770,11 +3770,11 @@ Completion substeps:
   later session refused to bind. `mp_series_smoke.py --broken-map-retry` passes
   the whole path live. Five native reversal controls fail, and all 53 asset-free
   `mp_match_*` contracts pass. Remaining: the physical keyboard/controller
-  workflows in the [human checklist](mp-human-qualification.md#mp-01-competitive-match-control-by-hand),
+  workflows in the human checklist,
   and other renderers and platforms.
   Follow-through, 5 November: the side-ballot smoke also passes on Vulkan. Both
   ballots and the Strogg forfeit won by Marine match the OpenGL run, with clean
-  exits ([evidence](competitive-match-reference-audit.md#side-ballots-and-post-commit-map-load-release-2026-11-05)).
+  exits (evidence).
   Other platforms and the physical workflows remain.
 - [x] **MP-02 — P1, qualification and targeted fixes: bot traversal safety.** Rerun
   staged q4dm8/q4ctf3/q4ctf5/q4dz3 after the exact-state jump/unroutable-pad fixes,
@@ -4068,10 +4068,10 @@ Completion substeps:
   pause navigation. Capture victory/defeat/draw ledgers, progression and ceremony
   through save/reload and failure paths; an aborted-launch ledger is not completion
   evidence. Coordinate with UI-03, HF-01 and AUD-02.
-  Progress, 18 October: [Arena sound ownership and result evidence](arena-campaign-ceremony.md#current-pause-and-result-evidence-18-october-2026)
+  Progress, 18 October: Arena sound ownership and result evidence
   closes the continuing game-audio clock gap. Native ownership tests and final
   GL/Vulkan gameplay runs pass pause/resume, victory/defeat/draw and persisted
-  best-result ordering. The [19 October headphone check](arena-campaign-ceremony.md#headphone-pause-and-resume-19-october-2026)
+  best-result ordering. The 19 October headphone check
   also passes two audible pause/resume cycles. Restart/navigation cost, physical
   controls, endpoint loss/return and remaining failure-path coverage keep MP-04 open.
   Progress, 24 October: Restart match now resets the live match in place
@@ -4081,7 +4081,7 @@ Completion substeps:
   server or a due result falls back to the fresh-server relaunch. Six no-input
   runs cover the card and the stock menu, warmup, Team DM, Clan Arena, the
   fallback and a recorded result after a restart
-  ([in-place restart](arena-campaign-ceremony.md#in-place-restart-24-october-2026)).
+  (in-place restart).
   Physical controls, endpoint loss/return and remaining failure-path coverage
   keep MP-04 open.
   Later on 24 October: a failure path lost decided results. Leaving the match
@@ -4090,7 +4090,7 @@ Completion substeps:
   decided result while the handoff waits, and a disconnect, quit or error drop
   records it; a disconnect also reports it. Two no-input runs keep a win's
   progress and best result through a disconnect and through a quit
-  ([evidence](arena-campaign-ceremony.md#leaving-during-the-ceremony-24-october-2026)).
+  (evidence).
   Physical controls and endpoint loss/return remain.
 - [x] **MP-05 — P1, investigation and implementation: demo reliability and
   operator workflow.** Reproduce the recorded Red Rover seek/debris distortion
@@ -4202,13 +4202,13 @@ Completion substeps:
   floor/no-floor, reused and empty nodes and rejects the old compiler. Actual
   compiled-water-map/consumer qualification and broader liquid presentation remain
   open; this does not add swimming AI, animations or moving volumes.
-  Follow-through: the [actual dedicated compiler](liquid-qualification.md)
+  Follow-through: the actual dedicated compiler
   emits 26 swim and 16 water-jump links in the partitioned liquid-lab fixture;
   all nine serialized water areas carry `AREA_LIQUID`. The independently copied
   fixed compiler runtime preserves its hashes and writes outside `.install/`.
   This closes the compiler-output check; routing/movement consumers and wider
   liquid presentation remain open, and stock nonswimming AAS defaults stay intact.
-  Progress, 2 November: [replicated air and bot swimming](liquid-qualification.md#replicated-air-and-bot-swimming-2-november-2026)
+  Progress, 2 November: replicated air and bot swimming
   are qualified on Windows/GL. `mp_liquid_air_smoke.py` passes: a remote
   observer receives the host's air as it drains and recovers, the underwater
   muffle switches, and paused demo seeks restore air on the followed HUD (100,
@@ -4224,15 +4224,15 @@ Completion substeps:
   liquid-lab audit recorded 58 hyperblaster and rocket crossings of water,
   lava and slime. Shots fired under water leave the pool, shots fired into it
   carry on to impacts below the surface, and every crossing plays the splash
-  at the boundary ([evidence](liquid-qualification.md#projectile-liquid-crossings-3-november-2026)).
+  at the boundary (evidence).
   Remaining: player-controlled swimming (real input only), and splash, bubble
   and wade presentation checked by eye.
-  Follow-through, 3 November: the [current GL regression](liquid-qualification.md#current-mp-regression-run-3-november-2026)
+  Follow-through, 3 November: the current GL regression
   passes remote air replication and four paused MVD seeks with matching air/HUD
   values of 100, 56, 100 and 56. The engine capture shows the underwater view
   and AIR gauge. This does not close physical swimming or the remaining effects
   presentation checks.
-  Progress, 5 November: [splash and bubble presentation](liquid-qualification.md#splash-and-bubble-presentation-by-eye-5-november-2026)
+  Progress, 5 November: splash and bubble presentation
   is checked from engine captures, using `mp_liquid_effects_capture.py` with
   effect logging. The water splash and head bubble trail play and the splash
   shows. The slime and lava splashes played but could not be seen: the shared
@@ -4240,7 +4240,7 @@ Completion substeps:
   player-scale stock effects (`pipesplash`, `wastesplash`), and both show
   in the rebuilt package. Wading has no visual effect, only its moving sound.
   Remaining: swimming under player control, wade sound and a by-eye pass at
-  play distance ([checklist](mp-human-qualification.md#mp-06-swimming-and-liquid-effects-by-eye)).
+  play distance (checklist).
 - [ ] **MP-07 — P1, implementation and qualification: coupled prediction and
   rewind.** In `src/mpgame/gamesys/SysCvar.cpp` both enhanced prediction and lag
   compensation default off. Preserve the coupled displayed-pose-age and rewind
@@ -4287,7 +4287,7 @@ Completion substeps:
   now follow the real lead: legacy rewinds 56 and 182-185 ms, enhanced 16 ms,
   and 120-124 ms with a 4-tic cap. Defaults stay off; real peers under
   jitter, loss and reordering remain open.
-  Progress, 24 October: [simulated network conditions](mp-network-qualification.md)
+  Progress, 24 October: simulated network conditions
   now cover delay, jitter (with the reordering it causes), loss and duplication on
   Windows and POSIX, seeded for repeatable runs (`net_forceJitter`,
   `net_forceDuplicate`, `net_forceSeed`, `netImpairment`). They replace a
@@ -4305,7 +4305,7 @@ Completion substeps:
   `net_forceQueue`) and burst loss (`net_forceDropBurst`), and `netImpairment`
   reports the data rate. Bursts of about five losses at 10% held with no
   resyncs, at a 32 ms higher lead than single losses
-  ([congestion evidence](mp-network-qualification.md#congestion-rate-control-and-burst-loss-24-october-2026)).
+  (congestion evidence).
   Progress, 26 October: a positive `net_mpLagCompBiasMS` no longer rewinds a
   bot, a listen host or an unmeasured slot by the bias alone; the rewind now
   returns before the bias when the lead or the measured round trip is missing.
@@ -4315,14 +4315,14 @@ Completion substeps:
   prerequisite as the rewind path, so positive bias cannot report a fictitious
   rewind for a bot, listen host or unmeasured slot. The state and wiring checks
   pass; enhanced prediction and compensation remain off by default.
-  Progress, 3 November: [weapon geometry fixtures](mp-network-qualification.md#weapon-hit-geometry-and-fragment-ordering-3-november-2026)
+  Progress, 3 November: weapon geometry fixtures
   found and fixed stale gauntlet/lightning effect endpoints and a penetrating
   rail ray shifted by impact translation. Contacts and chain directions now
   follow present targets, while rail continuation retains the historical ray.
   The executable state fixture includes the production weapon resolution blocks
   and rejects nine reversals. Remote weapon-play and same-fire-frame visual
   qualification remain open, and defaults are unchanged.
-  Progress, 5 November: [remote weapon play](mp-network-qualification.md#remote-weapon-play-and-live-spectator-follows-5-november-2026)
+  Progress, 5 November: remote weapon play
   is checked from a loopback spectator's captures with `mp_remote_weapon_capture.py`.
   A followed bot's lightning beam runs from the drawn gun to its target, and the
   impact, damage numbers and hit marker sit on the target. The run found and
@@ -4331,7 +4331,7 @@ Completion substeps:
   countdown. Casual sessions now mirror participation in every phase, and the
   follow contract pins this with a failing reversal. Remaining: the firing
   player's same-fire-frame view, impaired and WAN peers
-  ([checklist](mp-human-qualification.md#mp-07-weapon-visuals-under-prediction)).
+  (checklist).
 - [ ] **MP-08 — P1, qualification and decision: network and content interoperability.**
   Qualify real cross-platform/architecture peers over IPv4 and IPv6, fragmentation/
   MTU/rate limits, congestion, high player counts, discovery and reconnect. Preserve
@@ -4345,7 +4345,7 @@ Completion substeps:
   not a version-number change to openQ4 2.41 or a prerequisite for retail assets.
   Progress, 18 October: fixed command-argument ownership during list growth and
   reload replay, which dropped the baseline client's `connect` command. The
-  [retail ledger](retail-baseline-ledger.md#stage-two-connection-regression)
+  retail ledger
   records a passing four-role stock baseline, 185 native checks and a failing
   shallow-copy control. The broader peer/architecture/interoperability gate
   remains open. The player [networking guide](../user/multiplayer-networking.md#ipv6-connections)
@@ -4356,8 +4356,8 @@ Completion substeps:
   checksum mismatch without it. The four scenarios produce no unknown voice
   messages, but no mixed-release peer joins or transmits; they do not qualify
   mixed-release voice. Capability-gating regression checks pass separately.
-  [Exact compatibility scope](audio-voice-evidence.md#mixed-release-voice-check-22-october-2026).
-  The [cross-platform peer evidence](retail-baseline-ledger.md#cross-platform-pure-peers-18-october-2026)
+  Exact compatibility scope.
+  The cross-platform peer evidence
   adds passing Windows-client/Linux-server IPv4 and scoped IPv6 pure joins and
   successive reconnects. Canonical ZIP metadata fixes otherwise identical
   host-built PK4s failing package identity. WAN impairment, concurrent load,
@@ -4376,7 +4376,7 @@ Completion substeps:
   latency, 10% loss and 20% duplication, with no deferred snapshots or
   overflowing messages. Earlier resync bursts traced to CPU starvation on the
   shared machine; a client that cannot hold 60 Hz still falls behind toward the
-  1 s cap ([evidence](mp-network-qualification.md#high-player-count-24-october-2026)).
+  1 s cap (evidence).
   Real WAN peers, load across machines and discovery remain open.
   Later on 24 October: congestion and rate limits on a simulated bottleneck. A
   three-bot match needs about 6 KB/s downstream; links with spare capacity add
@@ -4384,12 +4384,12 @@ Completion substeps:
   1.7 times the demand, snapshots fall 28% and the lead reaches 224 ms. A
   client connecting with `net_clientMaxRate 5000` removes the congestion (no
   drops, 160 ms lead) at the cost of snapshot rate
-  ([evidence](mp-network-qualification.md#congestion-rate-control-and-burst-loss-24-october-2026)).
+  (evidence).
   Whether the server should adapt its rate on its own is a design decision;
   the networking guide tells players to lower `net_clientMaxRate`.
   Progress, 3 November: the checks one machine can qualify pass, and three
   defects are fixed
-  ([evidence](mp-network-qualification.md#discovery-reconnects-content-and-retail-refusal-3-november-2026)).
+  (evidence).
   A LAN scan lists a pure dedicated server over IPv4 loopback and over this
   host's own scoped link-local IPv6 address. The client then joins it three
   times in a row, through the scan, by endpoint and by `reconnect`, in the same
@@ -4408,7 +4408,7 @@ Completion substeps:
   cryptographic module verification or anti-cheat. Real WAN, cross-machine and
   other-architecture peers, real multi-record DNS and the retail client binary
   itself remain open; the user deferred the peer gates on 28 October.
-  Follow-through, 3 November: [fragment assembly qualification](mp-network-qualification.md#weapon-hit-geometry-and-fragment-ordering-3-november-2026)
+  Follow-through, 3 November: fragment assembly qualification
   fixes delayed older packets discarding a newer message prefix, refuses
   fragments larger than the family's limit, and assembles aligned fragments in
   any order with bounded storage. The impaired IPv6 run exposed a reliable-queue
@@ -4427,7 +4427,7 @@ Completion substeps:
   installed `Quake4.exe` windowed and loopback-bound, connects it to the openQ4
   server and requires the protocol refusal in its own log. The Steam 1.4.2
   executable demands elevation (WinError 740) and the harness never elevates,
-  so the check is step 8.4 of the [human checklist](mp-human-qualification.md#mp-08-real-network-conditions),
+  so the check is step 8.4 of the human checklist,
   run from an elevated prompt. The default run passes again on the current
   stage. The retail 2.85 server is refused for its protocol and never joined,
   and the openQ4 server answers a 1.4.2 challenge with `server uses protocol 2.41`.
@@ -4437,18 +4437,18 @@ Completion substeps:
   longer restarts the engine, though; the client reloads those images once the
   lock is in place (render API 33). A first pure join on `mp/q4dm1` now reaches
   gameplay in 7–10 s instead of 50–58 s
-  ([decision and evidence](mp-network-qualification.md#generated-image-cache-on-pure-servers-9-november-2026)).
+  (decision and evidence).
   The level-load caches of the experimental `com_levelLoadModernization 1`
   follow the same rule: none is read while pure, and models, worlds, collision
   and animations decoded from them before the lock are derived again at the
   next level load
-  ([evidence](mp-network-qualification.md#level-load-caches-on-pure-servers-9-november-2026)).
+  (evidence).
   The session's expanded loading background for windows that are not 4:3 is
   now composed in memory from VFS reads the lock admits and never saved, so
   pure clients show it too and a widescreen client that loaded a map first no
   longer restarts on its pure connect; files older builds saved are still
   purged at the lock
-  ([evidence](mp-network-qualification.md#expanded-loading-backgrounds-on-pure-servers-9-november-2026)).
+  (evidence).
 - [ ] **MP-09 — P1, implementation and qualification: bot combat strength.**
   Each skill level fights as [its description](mp-bots.md#what-each-skill-level-feels-like)
   says, and skill 5 threatens a strong player. Gates: on the plain skill curve,
@@ -4526,14 +4526,14 @@ automatically satisfied by a listening pass.
   the change resumes in place instead of from its first sample. A simulated
   outage (`s_testDeviceInterruption`) qualifies this path in stock gameplay;
   physical endpoint loss, hotplug and OS breadth remain the gate.
-  [Output recovery evidence](audio-voice-evidence.md#output-recovery-layout-changes-and-memory-pressure-23-october-2026).
+  Output recovery evidence.
   October 24: the output-recovery, subtitle and scene harnesses pass on Linux x64.
   That is Ubuntu 24.04 under WSL2 with Mesa llvmpipe and the system OpenAL Soft 1.23.1,
   covering output loss, paused resume, live layout and HRTF resets and both stream
   fixtures. A long session replays six maps' openings three times in one client
   with flat audio residency, voices and stream reservations. Physical devices,
   hotplug, macOS and other distributions remain the gate.
-  [Linux and long-session evidence](audio-voice-evidence.md#linux-voice-output-loss-and-long-sessions-24-october-2026).
+  Linux and long-session evidence.
   October 24, second round: loading a saved game no longer moves every restored sound
   forward by the load time. The sound clock advances once per mixed frame and none is
   mixed during a load, so the session's pause and unpause read the same stale time;
@@ -4544,7 +4544,7 @@ automatically satisfied by a listening pass.
   so their earlier save/restore passes were vacuous; both now check a real save and
   load. No Apple host is available for macOS. Physical devices, hotplug, macOS and
   other distributions remain the gate.
-  [Save and load evidence](audio-voice-evidence.md#real-saves-in-the-subtitle-and-dialogue-harnesses).
+  Save and load evidence.
   October 25: Linux builds of main crashed before `main` (the multiview demo's
   constructor reset a cvar not yet constructed under GCC's link order); fixed. A real
   save and load then passes on Linux with Dialogue Volume and subtitles intact, once the
@@ -4552,7 +4552,7 @@ automatically satisfied by a listening pass.
   its own saves, which an earlier note here took for a Linux defect. The Arena
   pause/resume harness also passes on Linux (won and lost matches; the game world's clock
   holds through each pause). Hearing it on Linux remains a listening check.
-  [Linux evidence](audio-voice-evidence.md#saves-on-linux).
+  Linux evidence.
 - [ ] **AUD-03 — P2, implementation and qualification: bounded decode and compressed
   streaming.** Byte-budget admission, backpressure and bounded compressed streaming
   are implemented as recorded below, replacing the earlier job-count-only bound.
@@ -4577,7 +4577,7 @@ automatically satisfied by a listening pass.
   and survives repeated restart without reservation growth. Metadata/provider
   process memory, lengthless streaming, loading-performance, Android low-memory
   callbacks and device breadth remain open.
-  [Implementation and evidence](audio-voice-evidence.md#aggregate-payload-admission).
+  Implementation and evidence.
   The October 22 queue correction retains about one second of audio within the
   same reserved bytes. This item still includes automated and implementation
   work as well as physical/mobile qualification; it is not a listening-only gate.
@@ -4589,7 +4589,7 @@ automatically satisfied by a listening pass.
   a small stb_vorbis extension; the one-hour streamed-track limit is gone, and
   the envelope pass runs on job workers during level loads. A notice from a real
   Android/iOS device, provider/process memory and device breadth remain open.
-  [Memory and streaming evidence](audio-voice-evidence.md#output-recovery-layout-changes-and-memory-pressure-23-october-2026).
+  Memory and streaming evidence.
   October 23, second round: a streamed track started on a recycled voice never
   played, because OpenAL counts buffers queued on a stopped source as already
   processed. Once the voice pool had cycled, music, long lines and late ambience
@@ -4599,7 +4599,7 @@ automatically satisfied by a listening pass.
   residency: at most 193.8 and 242.1 MiB after an opening, with a managed-payload
   peak of 255.7 MiB under the 256 MiB budget and no refusals. Device and mobile budgets
   remain open.
-  [Scene and residency evidence](audio-voice-evidence.md#authored-scenes-centred-reverb-and-portrait-captions-23-october-2026).
+  Scene and residency evidence.
   October 24: replaying six maps' openings three times in one client leaves each
   map's residency flat, within 83 KiB of its first pass, with voices and stream
   reservations unchanged. On Linux the trim, both stream fixtures and recycled-voice
@@ -4613,14 +4613,14 @@ automatically satisfied by a listening pass.
   runs, so that overhead is bounded rather than measured exactly. Real Android/iOS
   low-memory notices, device and mobile budgets and provider memory on those devices
   remain open.
-  [Process memory evidence](audio-voice-evidence.md#process-memory).
+  Process memory evidence.
   October 25: `testLowMemoryNotice` pushes the operating system's low-memory event
   through SDL's queue and event watchers, and the output-recovery harness now trims
   through it on Windows and Linux. That found every notice trimmed twice (the watcher's
   pending pass and then the queued event); one notice now trims once. A notice from a
   real Android or iOS device remains open: the Android emulator set-up used for the port
   was removed with its worktree, and restoring it needs a download approved by the user.
-  [Low-memory notice evidence](audio-voice-evidence.md#the-operating-systems-low-memory-notice).
+  Low-memory notice evidence.
   November 3: running PCM and stream-envelope jobs now observe cancellation between
   codec blocks instead of decoding the entire track before releasing it. A retained
   cancelled job resumes at its cursor; discarded jobs keep reservations until joined.
@@ -4631,7 +4631,7 @@ automatically satisfied by a listening pass.
   byte budgets, with signed sound-on/off load-time comparisons. This supplies the
   loading-performance measurement path; target-device budgets and real mobile
   low-memory notices remain open.
-  [Cancellation and loading evidence](audio-voice-evidence.md#decode-cancellation-and-loading-measurements-3-november-2026).
+  Cancellation and loading evidence.
   November 5: HF-07's long-frame attribution found streamed voices opening,
   seeking and decoding on the main thread: 7.4 ms per start on average over
   four stock openings, and up to 105 ms. Each stream block now decodes on a job
@@ -4657,7 +4657,7 @@ automatically satisfied by a listening pass.
   quad and HRTF fallback PCM; stock compressed and Awakening PCM
   gameplay pass pause, time scale, restart and restore. Physical surround
   devices, output-layout transitions and positional mod wet sends remain open.
-  [Centre evidence](audio-voice-evidence.md#centre-channel-placement).
+  Centre evidence.
   October 23: speaker-layout, HRTF and limiter changes reset the open device in
   place instead of reloading every sample, and playing voices re-route at their
   scene clock when the output gains or loses a centre speaker, including after
@@ -4695,14 +4695,14 @@ automatically satisfied by a listening pass.
   pass. The harness now measures through the requested endpoint and excludes
   shutdown time. The requested two-hour rerun was cancelled at the user's
   direction; it is not required to record the useful existing evidence honestly.
-  [Session evidence and limits](audio-voice-evidence.md#long-session-voice-evidence-22-october-2026).
-  [Implementation and evidence](audio-voice-evidence.md#multiplayer-voice).
+  Session evidence and limits.
+  Implementation and evidence.
   October 24: voice playback follows an output loss like every other source.
   Frames are dropped while the endpoint is gone instead of being queued late, and
   playback starts again with the next frame after it returns. A simulated outage
   during the local test qualifies this with the real settings adapter. Physical
   capture and playback endpoints remain open.
-  [Voice output-loss evidence](audio-voice-evidence.md#voice-chat-across-output-loss).
+  Voice output-loss evidence.
   October 24, second round: voice chat passes on Linux x64 (Ubuntu 24.04 under WSL2,
   OpenAL Soft 1.23.1): all 20 checks against a listen server and against the
   dedicated server, each with three real client processes, covering both directions,
@@ -4710,14 +4710,14 @@ automatically satisfied by a listening pass.
   reconnect. Software rendering could not keep the clients above the 50 Hz voice
   cadence, so the runs use WSL's GPU paravirtualization. Physical capture and playback
   devices, independent machines and their clock drift, and other systems remain open.
-  [Linux voice evidence](audio-voice-evidence.md#linux-voice-chat).
+  Linux voice evidence.
   October 25: `s_voiceTestClockRate` (test only) runs a sender's voice clock fast or slow,
   and `voice_chat_runtime.py` drives the peer 0.1% slow and then 0.1% fast through 10 s
   of speech each: the host's admission baseline follows it up and down and rejects no
   frame. On Linux x64 all 22 checks pass through a listen server and the dedicated
   server; the baseline rose 8–9 ms and fell 7–10 ms over about 10 s each, rejecting
   nothing. Separate machines with their own clocks remain open.
-  [Drift evidence](audio-voice-evidence.md#voice-clock-drift-between-real-peers).
+  Drift evidence.
   November 4: switching between the local microphone test and push-to-talk now
   closes the previous capture stream before reopening, discarding its resampler,
   queued audio and partial frame. Buffered test audio can no longer become network
@@ -4730,7 +4730,7 @@ automatically satisfied by a listening pass.
   Windows listen and dedicated peers each pass all 31 checks with dummy capture;
   the native production capture regressions pass on Windows and Linux.
   Physical microphones, hotplug, independent-machine clocks and target-OS breadth
-  remain open. [Capture evidence](audio-voice-evidence.md#local-test-isolation-and-partial-capture-age-4-november-2026).
+  remain open. Capture evidence.
 - [ ] **AUD-06 — P2, implementation and qualification: independent dialogue volume.**
   Address [#187](https://github.com/themuffinator/openQ4/issues/187) with a localized,
   persistent spoken-dialogue control in UI-01. Inventory actual dialogue routing
@@ -4743,14 +4743,14 @@ automatically satisfied by a listening pass.
   implemented. Stock/Awakening gameplay tests cover overlapping speech/effect
   fixtures, mute, pause, time scale, restart, save/load and Turkish text with
   English audio fallback. Complete authored NPC/script/BSE/cinematic scene and
-  physical device coverage remains open. [Evidence](audio-voice-evidence.md).
+  physical device coverage remains open. Evidence.
   October 23: an installed-asset routing audit classifies every reference to a
   speech shader with the production classifier. All 3,672 stock and 5,153
   Awakening-layer speech shaders are dialogue by sample path. Their 3,495 and
   4,912 references in NPC lip-sync keys, definitions, maps and scripts all
   follow the control, and no effect or GUI references one. Audible scene and
   device coverage remains open.
-  [Routing audit](audio-voice-evidence.md#dialogue-routing-audit).
+  Routing audit.
   October 23, second round: `s_logSpeech` and `audio_scene_audit.py` check speech
   as it plays. The first 30 s of all 29 stock and 13 Awakening maps, cinematics
   included, start 148 dialogue lines. No declared or flagged speech misses the
@@ -4767,7 +4767,7 @@ automatically satisfied by a listening pass.
   Volume's 0.6 now also holds across a real Awakening save and load. Scenes play out
   of their gameplay order, so this is routing coverage, not a playthrough; physical
   devices remain open.
-  [Scripted-scene evidence](audio-voice-evidence.md#scripted-scenes).
+  Scripted-scene evidence.
   October 25: with 90 s for each map's last conversations, the walk starts 1,766
   dialogue lines across both campaigns and silences every dialogue voice in 1,949 muted
   probes while effects continue; Dialogue Volume's 0.6 holds across a real save and load
@@ -4780,7 +4780,7 @@ automatically satisfied by a listening pass.
   invalidate the scene chain. The previous run's three failed chains are retained
   as failures. Attempts and missing entities remain explicit; these probes do not
   replace an ordered playthrough or physical listening.
-  [Progression-audit evidence](audio-voice-evidence.md#progression-audit-recovery-26-october-2026).
+  Progression-audit evidence.
   November 6: the progression audit now fights. `openq4_killHostiles` kills the AI
   fighting the player through ordinary damage halfway through each step, so the
   conversations scripts hold until a fight is won run too. All 42 maps ran
@@ -4793,7 +4793,7 @@ automatically satisfied by a listening pass.
   dies at `walker`'s step 11 (on foot, cause not identified), so its later steps
   remain uncovered.
   This is still not an ordered playthrough; physical devices remain open.
-  [Fight evidence](audio-voice-evidence.md#fights-in-the-progression-audit-6-november-2026).
+  Fight evidence.
 - [ ] **AUD-07 — P1, decision, implementation and qualification: dialogue subtitles.**
   Address [#186](https://github.com/themuffinator/openQ4/issues/186) with UI-02/UI-04.
   Inventory dialogue-to-text/localization data available from installed assets and
@@ -4814,7 +4814,7 @@ automatically satisfied by a listening pass.
   text fallback under Turkish. Pagination and native layout checks pass; missing
   transcripts are skipped. Portrait Awakening title-card collisions, the full
   scene/locale corpus and physical stereo-HUD qualification remain open.
-  [Subtitle evidence and mapping policy](audio-voice-evidence.md#dialogue-subtitles).
+  Subtitle evidence and mapping policy.
   October 23: the inventory reports per-language transcript coverage. The Steam
   install's 2,268 mapped lines exist only in English tables; its French,
   Italian and Spanish tables carry no lip-sync text. Awakening's 1,512 lines are
@@ -4839,7 +4839,7 @@ automatically satisfied by a listening pass.
   load, and captions resume where they were saved. The rest of the scene corpus,
   overlapping captions below a portrait picture at the largest text and physical
   stereo-HUD qualification remain open.
-  [Caption evidence](audio-voice-evidence.md#the-largest-captions).
+  Caption evidence.
   October 25: two overlapping captions at the largest portrait text now take one line
   each, the newer above the cinematic artwork and the older below it, both clear of the
   picture (visual specification 1.27). Subtitles pass a real save and load on Linux too,
@@ -4848,12 +4848,12 @@ automatically satisfied by a listening pass.
   with a transcript and no dialogue heard while muted. Lines that wait on the player
   moving or fighting and physical stereo-HUD qualification remain open; the installed
   game has transcripts in English only, so other languages show English captions.
-  [Two-speaker evidence](audio-voice-evidence.md#two-speakers-at-the-largest-text).
+  Two-speaker evidence.
   October 26: progression probes pair current-channel dialogue attribution with
   subtitle identifiers and transcript status, without recording proprietary text.
   Interrupted map chains are not accepted as full scene coverage. Complete
   gameplay-order coverage and physical stereo-HUD placement remain open.
-  [Progression-audit evidence](audio-voice-evidence.md#progression-audit-recovery-26-october-2026).
+  Progression-audit evidence.
   November 6: with fights, the 42-map progression sweep starts 993 distinct
   dialogue lines (679 transcribed); every cue shown had a transcript. Two
   transcribed lines were heard without a cue, both at their very end: one voice
@@ -4862,7 +4862,7 @@ automatically satisfied by a listening pass.
   report the corpus is now 1,546 distinct lines (954 stock, 592 Awakening). The
   installed game has English transcripts only, which the player guide states;
   ordered human play and physical stereo-HUD placement remain open.
-  [Fight evidence](audio-voice-evidence.md#fights-in-the-progression-audit-6-november-2026).
+  Fight evidence.
 
 ## Desktop platforms and packaging
 

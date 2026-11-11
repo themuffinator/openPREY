@@ -314,7 +314,12 @@ def validate_generated_docs_links(work: Path) -> None:
     package_root = work / "package"
     shutil.rmtree(package_root, ignore_errors=True)
     package_root.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ROOT / "assets" / "release" / "README.html", package_root / "README.html")
+    # Stage the README and the licence collateral beside it exactly as the packager does.
+    package_module = load_module(
+        "release_package_link_integrity_under_test",
+        ROOT / "tools" / "build" / "package_nightly.py",
+    )
+    package_module.copy_release_collateral(ROOT, package_root, "windows")
     shutil.copytree(output_root, package_root / "docs")
     validate_html_tree_links(package_root, package_root)
 

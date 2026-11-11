@@ -1,14 +1,21 @@
-"""Embed openPREY's traced Prey faces into the Interface Atlas.
+"""Embed openPREY's traced Prey faces into the Interface Atlas and the release pages.
 
 Usage:
     python tools/assets/fonts/embed_atlas_fonts.py
 
 Subsets ``content/basepr/pak0/fonts/{menu,english,alien}.ttf`` to the Latin
-range the atlas draws, packs each as WOFF and rewrites the ``@font-face`` block
-between the ``openprey-atlas-fonts`` markers in
-``docs/dev/prey-ui/atlas/prey-interface-atlas.html``. Run it after rebuilding
-the faces with ``build_openprey_fonts.py`` so the atlas never drifts from what
-the engine ships. The retail atlases are not read here.
+range the pages draw and packs each as WOFF. It then rewrites the ``@font-face``
+block between each target's markers:
+
+- ``docs/dev/prey-ui/atlas/prey-interface-atlas.html`` (all three faces,
+  ``openprey-atlas-fonts`` markers);
+- ``assets/release/README.html`` (display and body faces,
+  ``openprey-release-fonts`` markers);
+
+and writes the display and body faces to ``assets/docs/fonts/`` for the
+packaged documentation portal and project overview, which load them by URL.
+Run it after rebuilding the faces with ``build_openprey_fonts.py`` so no page
+drifts from what the engine ships. The retail atlases are not read here.
 """
 from __future__ import annotations
 
@@ -23,16 +30,22 @@ from fontTools.ttLib import TTFont
 
 ROOT = Path(__file__).resolve().parents[3]
 FONTS = ROOT / "content" / "basepr" / "pak0" / "fonts"
-ATLAS = ROOT / "docs" / "dev" / "prey-ui" / "atlas" / "prey-interface-atlas.html"
-START = "/* openprey-atlas-fonts-start */"
-END = "/* openprey-atlas-fonts-end */"
+WOFF_DIR = ROOT / "assets" / "docs" / "fonts"
 
-# CSS family name -> shipped face
+# CSS family name -> (shipped face, file written to WOFF_DIR or None)
 FACES = {
-    "openPREY Menu": "menu.ttf",
-    "openPREY Default": "english.ttf",
-    "openPREY Alien": "alien.ttf",
+    "openPREY Menu": ("menu.ttf", "openprey-menu.woff"),
+    "openPREY Default": ("english.ttf", "openprey-default.woff"),
+    "openPREY Alien": ("alien.ttf", None),
 }
+
+# page -> (marker name, families embedded in it)
+TARGETS = (
+    (ROOT / "docs" / "dev" / "prey-ui" / "atlas" / "prey-interface-atlas.html", "openprey-atlas-fonts",
+     ("openPREY Menu", "openPREY Default", "openPREY Alien")),
+    (ROOT / "assets" / "release" / "README.html", "openprey-release-fonts",
+     ("openPREY Menu", "openPREY Default")),
+)
 
 # Basic Latin, Latin-1, general punctuation, arrows, multiplication and minus.
 UNICODES = (
@@ -44,7 +57,7 @@ UNICODES = (
 )
 
 
-def packed(path: Path) -> tuple[str, int]:
+def packed(path: Path) -> bytes:
     font = TTFont(path)
     options = subset.Options()
     options.flavor = "woff"
@@ -59,30 +72,40 @@ def packed(path: Path) -> tuple[str, int]:
     buffer = io.BytesIO()
     font.flavor = "woff"
     font.save(buffer)
-    data = buffer.getvalue()
-    return base64.b64encode(data).decode("ascii"), len(data)
+    return buffer.getvalue()
+
+
+def font_face(family: str, data: bytes) -> str:
+    encoded = base64.b64encode(data).decode("ascii")
+    return (
+        f'@font-face{{font-family:"{family}";src:url(data:font/woff;base64,{encoded}) format("woff");'
+        f"font-weight:400;font-style:normal;font-display:block}}"
+    )
 
 
 def main() -> int:
-    rules = [START]
-    for family, filename in FACES.items():
-        encoded, size = packed(FONTS / filename)
-        rules.append(
-            f'@font-face{{font-family:"{family}";src:url(data:font/woff;base64,{encoded}) format("woff");'
-            f"font-weight:400;font-style:normal;font-display:block}}"
-        )
-        print(f"{family}: {filename} -> {size} bytes woff")
-    rules.append(END)
-    block = "\n".join(rules)
+    packs: dict[str, bytes] = {}
+    for family, (filename, woff_name) in FACES.items():
+        packs[family] = packed(FONTS / filename)
+        print(f"{family}: {filename} -> {len(packs[family])} bytes woff")
+        if woff_name:
+            WOFF_DIR.mkdir(parents=True, exist_ok=True)
+            (WOFF_DIR / woff_name).write_bytes(packs[family])
+            print(f"wrote {(WOFF_DIR / woff_name).relative_to(ROOT)}")
 
-    text = ATLAS.read_text(encoding="utf-8")
-    pattern = re.compile(re.escape(START) + r".*?" + re.escape(END), re.S)
-    if not pattern.search(text):
-        print(f"{ATLAS}: markers not found", file=sys.stderr)
-        return 1
-    ATLAS.write_text(pattern.sub(lambda _: block, text, count=1), encoding="utf-8", newline="\n")
-    print(f"updated {ATLAS.relative_to(ROOT)}")
-    return 0
+    status = 0
+    for page, marker, families in TARGETS:
+        start, end = f"/* {marker}-start */", f"/* {marker}-end */"
+        block = "\n".join([start, *(font_face(family, packs[family]) for family in families), end])
+        text = page.read_text(encoding="utf-8")
+        pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.S)
+        if not pattern.search(text):
+            print(f"{page}: markers not found", file=sys.stderr)
+            status = 1
+            continue
+        page.write_text(pattern.sub(lambda _: block, text, count=1), encoding="utf-8", newline="\n")
+        print(f"updated {page.relative_to(ROOT)}")
+    return status
 
 
 if __name__ == "__main__":

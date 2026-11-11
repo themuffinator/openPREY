@@ -34,3 +34,4 @@ Process:
 - [ ] Complete retail parity checks for the restored Doom 3/Prey particle, FX, and beam paths.
 - [ ] Extend CI/runtime checks for openPREY-specific smoke tests.
 - [ ] Rebuild and enable manual/nightly/AppImage publication lanes only after unified-module runtime signoff.
+- [ ] Before any macOS package ships: macOS floor-version evidence is recorded for the documented `macOS 11` floor under the inherited `docs/dev/macos-support-matrix-policy.md`, and its notes do not imply native Metal or native Cocoa/OpenGL backend support (`docs/dev/macos-renderer-backend-policy.md`).

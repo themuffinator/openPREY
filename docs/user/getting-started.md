@@ -3,7 +3,7 @@
 This guide gets openPREY running against your copy of PREY (2006).
 
 > [!IMPORTANT]
-> openPREY has no release yet, so for now you build it yourself from this repository. The [Releases page](https://github.com/themuffinator/openPREY/releases) still lists nightly builds from April 2026. They predate openPREY's move onto the current openQ4 engine and don't match these guides.
+> openPREY has no release yet, so for now you build it yourself from this repository. The [Releases page](https://github.com/themuffinator/openPREY/releases) still lists nightly builds from April 2026. They predate openPREY's move onto the current openQ4 engine and don't match these guides. [Release status](release-status.md) lists what works today on each platform.
 
 ## What You Need
 
@@ -87,6 +87,7 @@ openPREY's files sit in the `basepr/` folder inside it. To keep a separate set, 
 - SDL3 picks native Wayland or X11 automatically. Set `OPENPREY_FORCE_X11=1` to force the XWayland fallback.
 - If a Wayland compositor has trouble with window decorations at startup, set `OPENPREY_WAYLAND_DISABLE_LIBDECOR=1` for that launch.
 - Install the system development packages listed in [BUILDING.md](../../BUILDING.md) before you build.
+- There's no openPREY `.AppImage` yet. Run the client staged in `.install/`.
 
 ## If Auto-Detection Fails
 
@@ -110,3 +111,4 @@ Open an [issue](https://github.com/themuffinator/openPREY/issues) with your setu
 - [Display Settings](display-settings.md): window modes, resolution, monitors and anti-aliasing
 - [Input Settings](input-settings.md): bindings, mouse and controllers
 - [Server Setup](server-setup.md): hosting a multiplayer game
+- [Release Status](release-status.md): platform and feature support today
