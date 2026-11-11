@@ -1,0 +1,97 @@
+name: Bug report
+description: Report a crash, a broken map or menu, a rendering or audio fault, or anything else that behaves differently from retail PREY.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        openPREY has no release yet, so please report bugs against a build of the current source, not the April 2026 nightlies on the Releases page. Those predate the move onto the current openQ4 engine.
+
+        Before filing, check the [existing issues](https://github.com/themuffinator/openPREY/issues) and make sure the problem reproduces with your unmodified retail `base/` packs. Paste logs and terminal output as text rather than screenshots.
+  - type: input
+    id: commit
+    attributes:
+      label: openPREY commit
+      description: The output of `git rev-parse HEAD` for the checkout you built, and the version string printed at startup if you have it.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows x64
+        - Linux x64
+        - Steam Deck / SteamOS
+        - Other (macOS, ARM64 or anything else; not supported yet)
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System details
+      description: Operating system and version, CPU, GPU and graphics driver version. On Linux, say whether you run Wayland or X11.
+    validations:
+      required: true
+  - type: dropdown
+    id: renderer
+    attributes:
+      label: Renderer
+      description: OpenGL is the default; Vulkan is used only with `r_renderApi vulkan`.
+      options:
+        - OpenGL (default)
+        - Vulkan
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: install
+    attributes:
+      label: PREY install
+      description: Where your PREY (2006) install came from (original discs or another source), its install path, and whether `base/` holds `pak000.pk4`–`pak004.pk4` or the `pak_*.pk4` set.
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Single-player
+        - Multiplayer client
+        - Listen server
+        - Dedicated server
+        - Menus or startup
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The map and the exact steps, starting from launch. Include any command-line options and cvars you changed.
+      placeholder: |
+        1. Launch openPREY-client_x64 +set r_fullscreen 0
+        2. Start a new game on roadhouse
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected and what happened
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Launch with `+set logFile 2 +set logFileName logs/openprey.log`, reproduce the problem and paste `logs/openprey.log` from the `basepr/` folder in your save path (`%LOCALAPPDATA%\openPREY` on Windows, `~/.local/share/openprey` on Linux).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: crash
+    attributes:
+      label: Crash files
+      description: For a crash on Windows, attach the log and minidump from the `crashes/` folder beside the executable. On Linux, paste the terminal output or a backtrace.

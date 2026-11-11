@@ -1,6 +1,6 @@
 # Building openPREY from Source
 
-This guide covers everything required to compile openPREY from source on Windows, Linux, and macOS.
+This guide covers building openPREY on Windows and Linux, the two x64 platforms CI builds. The build files also cover macOS hosts, but macOS isn't supported yet: nothing builds or tests it for openPREY.
 
 ---
 
@@ -11,9 +11,9 @@ This guide covers everything required to compile openPREY from source on Windows
 - [Build Setup](#build-setup)
 - [Build Options](#build-options)
 - [Building on Windows](#building-on-windows)
-- [Building on Linux / macOS](#building-on-linux--macos)
+- [Building on Linux](#building-on-linux)
 - [Output Files](#output-files)
-- [Packaging a Distributable](#packaging-a-distributable)
+- [Packaging](#packaging)
 
 ---
 
@@ -23,25 +23,24 @@ This guide covers everything required to compile openPREY from source on Windows
 
 | Platform | Minimum | Notes |
 |---|---|---|
-| **Windows** | MSVC 19.46+ (Visual Studio 2026+) | Use the Developer PowerShell or run `tools/build/openprey_devcmd.cmd` to initialise the environment |
-| **Linux** | GCC 13+ or Clang 17+ | Distro packages are fine |
-| **macOS** | Xcode 16+ / Clang 17+ | Install Command Line Tools via `xcode-select --install` |
+| **Windows x64** | MSVC 19.46+ (Visual Studio 2026+) | Use the Developer PowerShell or run `tools/build/openprey_devcmd.cmd` to initialise the environment |
+| **Linux x64** | GCC 13+ or Clang 17+ | Distro packages are fine |
 
 ### Build Tools
 
-- **[Meson](https://mesonbuild.com/)** 1.2.0 or newer
+- **[Meson](https://mesonbuild.com/)** 1.6.0 or newer
 - **[Ninja](https://ninja-build.org/)** (recommended backend)
-- **Python 3** (used by build wrapper scripts)
+- **Python 3** (used by the build wrapper scripts and code generators)
 
 ### Linux System Packages
 
-Linux builds require the following development packages:
+The engine links against the system OpenGL and OpenAL libraries, and SDL3, which builds from its Meson subproject, needs the usual Linux desktop development headers for X11, Wayland, input and audio. On Ubuntu 24.04 this is the set the Linux CI lane installs:
 
-```
-glew  openal  x11  xext  xxf86vm
+```bash
+sudo apt-get install binutils libasound2-dev libdbus-1-dev libdecor-0-dev libdrm-dev libegl1-mesa-dev libfribidi-dev libgbm-dev libgl1-mesa-dri libgl1-mesa-dev libglx-mesa0 libibus-1.0-dev libjack-dev libopenal-dev libpipewire-0.3-dev libpulse-dev libsndio-dev libthai-dev libudev-dev libwayland-dev libx11-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxkbcommon-dev libxrandr-dev libxss-dev libxtst-dev libxxf86dga-dev libxxf86vm-dev
 ```
 
-Install them through your distro's package manager before configuring (e.g. `libglew-dev`, `libopenal-dev`, `libx11-dev`, `libxext-dev`, `libxxf86vm-dev` on Debian/Ubuntu).
+A Wayland-only build (`-Dlinux_x11=disabled`) can do without the X11 packages. Other distributions package the same libraries under their own names.
 
 ### Windows Note
 
@@ -57,6 +56,27 @@ Alternatively, open `tools/build/openprey_devcmd.cmd` first to initialise the Vi
 > [!NOTE]
 > Windows builds use Meson's `b_vscrt=static_from_buildtype` policy so openPREY itself does not require a separate Visual C++ redistributable install.
 
+### Windows OpenAL Runtime
+
+Windows builds link against OpenAL, so the client needs `OpenAL32.dll` beside it. The DLL isn't in the repository. After `compile` and `install`, the `meson_setup.ps1` wrapper copies it into `builddir/` and `.install/`, and stops with "OpenAL32.dll runtime not found" when it has none. It takes the DLL from `<OPENPREY_OPENAL_ROOT>\bin\OpenAL32.dll` when that environment variable is set, and from `src\external\openal-soft\bin\win64\OpenAL32.dll` otherwise.
+
+Prepare one once per checkout, the way CI does:
+
+```powershell
+# Downloads and builds OpenAL Soft 1.25.2 into .tmp\openal-soft-windows-x64\ (bin\, lib\ and include\).
+# Needs network access and the Visual Studio C++ tools, including CMake.
+powershell -ExecutionPolicy Bypass -File tools/build/prepare_windows_openal.ps1 -Architecture x64
+
+# Point the wrapper at it in each shell you build from...
+$env:OPENPREY_OPENAL_ROOT = (Resolve-Path .tmp\openal-soft-windows-x64).Path
+
+# ...or copy the DLL to the location the wrapper checks by default.
+New-Item -ItemType Directory -Force src\external\openal-soft\bin\win64 | Out-Null
+Copy-Item .tmp\openal-soft-windows-x64\bin\OpenAL32.dll src\external\openal-soft\bin\win64\
+```
+
+To link against a different OpenAL package, pass `-Dopenal_root_override=<path>` (a folder with `include\` and `lib\`) at configure time, and set `OPENPREY_OPENAL_ROOT` to the same folder so its `bin\OpenAL32.dll` is staged.
+
 ---
 
 ## Game Library Sources
@@ -66,7 +86,7 @@ openPREY's game library builds from this checkout. The SDK-derived trees are
 `game_<arch>` module against the engine headers in the rest of `src/`. No
 companion checkout, staging step or environment variable is needed.
 
-The game trees stay under the Prey SDK EULA while the engine is GPLv3. See
+The game trees stay under the PREY SDK EULA while the engine is GPLv3. See
 [LICENSING.md](LICENSING.md) for the boundary and
 [docs/dev/game-source-provenance.md](docs/dev/game-source-provenance.md) for the
 import record. The former `OpenPrey-game` companion repository is historical.
@@ -75,7 +95,7 @@ import record. The former `OpenPrey-game` companion repository is historical.
 
 ## Build Setup
 
-All engine dependencies (SDL3, GLEW, OpenAL Soft, stb\_vorbis) are managed as Meson subprojects — no manual dependency installation is required on Windows. Linux requires system development packages (see [Linux System Packages](#linux-system-packages) above). The first configure step downloads and builds subproject dependencies automatically.
+Third-party libraries come from Meson subprojects (`subprojects/`) and vendored sources (`src/external/`): SDL3, GLEW, libogg, libvorbis, stb_vorbis, glslang, RmlUi, JsonCpp, libtess2 and the OpenXR SDK, plus a prebuilt OpenAL Soft runtime on Windows. With `--wrap-mode=forcefallback`, the first configure step unpacks and builds the subprojects, so Windows needs nothing installed beyond the compiler, the build tools and the [OpenAL runtime](#windows-openal-runtime). Linux also needs the [system packages](#linux-system-packages) above.
 
 ---
 
@@ -87,16 +107,19 @@ Pass any of these with `-D<option>=<value>` on the `meson setup` command line:
 |---|---|---|
 | `build_engine` | `true` | Build `openPREY-client_<arch>` and `openPREY-ded_<arch>` |
 | `build_games` | `true` | Build the unified game module from the in-tree game sources |
-| `platform_backend` | `sdl3` | `sdl3`, `legacy_win32`, or `native` |
+| `build_renderer_gl` | `true` | Build the OpenGL renderer module (`renderer-gl_<arch>`) |
+| `build_renderer_vk` | `true` | Build the Vulkan renderer module (`renderer-vk_<arch>`) |
+| `openxr` | `auto` | Build OpenXR VR support into the SDL3 client on Windows and Linux |
+| `platform_backend` | `sdl3` | `sdl3`; or `legacy_win32` on Windows and `native` on Linux, both transitional |
+| `linux_x11` | `auto` | SDL3's X11/XWayland driver on Linux; `disabled` gives a Wayland-only build |
 | `use_pch` | `true` | Use precompiled headers |
 | `enforce_msvc_2026` | `false` | Fail configure if MSVC is older than 19.46+ (Windows only) |
+
+`meson_options.txt` lists the rest. Options for Android, OpenGL ES and macOS are carried over from openQ4 and aren't used by openPREY.
 
 ---
 
 ## Building on Windows
-
-> [!NOTE]
-> Release packaging targets the static MSVC CRT so end users do not need a separate Visual C++ Redistributable install.
 
 ### Debug Build
 
@@ -120,7 +143,7 @@ powershell -ExecutionPolicy Bypass -File tools/build/meson_setup.ps1 setup build
 # 2. Compile
 powershell -ExecutionPolicy Bypass -File tools/build/meson_setup.ps1 compile -C builddir
 
-# 3. Stage distributable package into .install/
+# 3. Stage the runtime package into .install/
 powershell -ExecutionPolicy Bypass -File tools/build/meson_setup.ps1 install -C builddir --no-rebuild --skip-subprojects
 ```
 
@@ -129,14 +152,14 @@ powershell -ExecutionPolicy Bypass -File tools/build/meson_setup.ps1 install -C 
 Once the MSVC environment is initialised via `tools/build/openprey_devcmd.cmd` you can call `meson` directly:
 
 ```batch
-meson setup builddir . --backend ninja --buildtype=release
+meson setup builddir . --backend ninja --buildtype=release --wrap-mode=forcefallback
 meson compile -C builddir
 meson install -C builddir --no-rebuild --skip-subprojects
 ```
 
 ---
 
-## Building on Linux / macOS
+## Building on Linux
 
 > [!NOTE]
 > SDL3 selects the available Wayland or X11 display path on Linux. Use `OPENPREY_FORCE_X11=1` only when an XWayland fallback is required.
@@ -145,7 +168,7 @@ meson install -C builddir --no-rebuild --skip-subprojects
 
 ```bash
 # 1. Configure
-bash tools/build/meson_setup.sh setup --wipe builddir . --backend ninja --buildtype=debug --wrap-mode=forcefallback -Dplatform_backend=sdl3
+bash tools/build/meson_setup.sh setup --wipe builddir . --backend ninja --buildtype=debug --wrap-mode=forcefallback
 
 # 2. Compile
 bash tools/build/meson_setup.sh compile -C builddir
@@ -158,12 +181,12 @@ bash tools/build/meson_setup.sh compile -C builddir
 
 ```bash
 # 1. Configure
-bash tools/build/meson_setup.sh setup builddir . --backend ninja --buildtype=release --wrap-mode=forcefallback -Dplatform_backend=sdl3
+bash tools/build/meson_setup.sh setup builddir . --backend ninja --buildtype=release --wrap-mode=forcefallback
 
 # 2. Compile
 bash tools/build/meson_setup.sh compile -C builddir
 
-# 3. Stage distributable package into .install/
+# 3. Stage the runtime package into .install/
 bash tools/build/meson_setup.sh install -C builddir --no-rebuild --skip-subprojects
 ```
 
@@ -177,23 +200,28 @@ bash tools/build/meson_setup.sh install -C builddir --no-rebuild --skip-subproje
 |---|---|
 | `openPREY-client_x64[.exe]` | Main engine executable |
 | `openPREY-ded_x64[.exe]` | Dedicated server |
-| `basepr/game_x64[.dll/.so/.dylib]` | Unified game module |
+| `renderer-gl_x64[.dll/.so]`, `renderer-vk_x64[.dll/.so]` | OpenGL and Vulkan renderer modules |
+| `basepr/game_x64[.dll/.so]` | Unified game module |
 
 - On Windows, import libraries (`.lib`), program databases (`.pdb`), and export files (`.exp`) may be present in debug builds; these are development-only artifacts.
-- The wrapper stages `OpenAL32.dll` next to the executables on Windows where a bundled runtime is available.
 
 ### Install directory (`.install/`)
 
-After running the install step, `.install/` is a self-contained distributable package:
+After the install step, `.install/` holds the runtime package:
 
 ```
 .install/
-├── openPREY-client_x64.exe     # Main executable
-├── openPREY-ded_x64.exe        # Dedicated server
-├── OpenAL32.dll                # (Windows) runtime dependency
+├── openPREY-client_x64[.exe]   # Main executable
+├── openPREY-ded_x64[.exe]      # Dedicated server
+├── renderer-gl_x64.dll/.so     # OpenGL renderer module (the default)
+├── renderer-vk_x64.dll/.so     # Vulkan renderer module (r_renderApi vulkan)
+├── OpenAL32.dll                # (Windows) OpenAL Soft runtime
+├── openPREY-steamdeck          # (Linux) Steam Deck launcher
+├── share/                      # (Linux) desktop entries and icons
+├── openPREY.ico / openPREY.icns
 └── basepr/
-    ├── game_x64.dll            # Unified game module
-    ├── pak0.pk4                # openPREY text/code/config content
+    ├── game_x64.dll/.so        # Unified game module
+    ├── pak0.pk4                # openPREY text, script, GUI and config content
     ├── pak1.pk4                # openPREY binary assets
     └── mod.json
 ```
@@ -203,30 +231,13 @@ After running the install step, `.install/` is a self-contained distributable pa
 
 ---
 
-## Packaging a Distributable
+## Packaging
 
-The `meson install` step stages all required binaries into `.install/`. This directory is the input for release packaging.
+openPREY has no published release yet. The `meson install` step stages everything into `.install/`, which is the input for packaging.
 
-The retained packaging tools can produce archives such as:
+The packaging scripts in `tools/build/` (`package_release.py`, `package_nightly.py`, `package_linux_appimage.py`) are carried over from openQ4. A Windows x64 archive built from `.install/` has been produced, inspected and launched in isolation; the other formats the scripts know about, such as Linux AppImages and macOS archives, haven't been checked for openPREY.
 
-- `openprey-<version-tag>-windows.zip`
-- `openprey-<version-tag>-linux.tar.xz`
-- `openprey-<version-tag>-macos.tar.gz`
-- `openprey-<version-tag>-x86_64.AppImage`
-- `openprey-<version-tag>-aarch64.AppImage`
-
-Package contents:
-- `basepr/game_<arch>.(dll|so|dylib)` stays as a loose runtime module
-- Staged overlay content is bundled into `basepr/pak0.pk4`
-- Linux packages include `share/applications` and `share/icons` payloads
-- macOS packages include an `openPREY.app` launcher bundle
-- `tools/build/package_linux_appimage.py` assembles AppImages from a verified staged
-  package. Set `APPIMAGE_EXTRACT_AND_RUN=1` only when the host cannot execute the
-  AppImage runtime directly.
-
-The inherited nightly/manual publishing workflows are disabled until they are rebuilt
-around the in-tree game library, `basepr`, and the unified module. Local packaging tools remain
-available for candidate validation; they do not imply a published release.
+The inherited nightly, release and signing workflows in `.github/workflows/` are switched off until they're rebuilt around the in-tree game library, `basepr` and the unified module. Active CI (`openprey-validation.yml`) builds and stages Windows x64 and Linux x64 on every push and pull request, and uploads no packages.
 
 ---
 

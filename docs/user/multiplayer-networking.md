@@ -1,71 +1,38 @@
 # Multiplayer Networking Guide
 
 > [!NOTE]
-> This page documents inherited engine/tooling capability. Retail Prey behavior remains
-> runtime-validation pending unless the rebase status ledger records specific evidence.
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
-> **Experimental.** Multiplayer is under active development and is not yet
-> considered stable. Expect rough edges, changing behaviour between builds, and
-> bugs. It is not representative of the finished feature.
+Multiplayer is experimental in openPREY. A listen server with two clients has been played; wider testing hasn't been recorded yet.
 
-This guide covers openPREY multiplayer networking behavior and the cvars used to tune or revert prediction/lag-comp behavior.
+This guide covers the engine's multiplayer networking: finding and joining servers, IPv4 and IPv6 addressing, bandwidth settings and simulated network conditions for testing.
 
 ## Quick Summary
 
-- The server browser lists discovered servers, keeps your selection through sorting, and remembers favorite server addresses.
 - Direct connections accept numeric IPv4 addresses, IPv6 addresses, and hostnames with either kind of DNS record.
 - IPv4 ports use the complete unsigned 16-bit range, including high ports above `32767`.
 - IPv6 is enabled by default. A server binds both families on the same port, so one address works for every client.
 - LAN scanning finds IPv6 servers through link-local multicast, which replaces the IPv4 broadcast that IPv6 does not have.
-- Server-side hitscan lag compensation is off by default (`net_mpLagCompensation 0`).
-- Remote-client prediction uses legacy mode by default (`net_mpPredictMode 0`).
-- Enhanced prediction and lag compensation are opt-in experiments. Each client tells the server how far ahead it draws other players, and the server rewinds only the rest, so the two settings no longer correct the same delay twice. Their combined behavior is still being measured on real connections.
 - Use matching openPREY builds and content on the server and clients: pure servers report missing packages, while non-pure servers report data out of sync. Voice packets are sent only to peers advertising the supported voice protocol.
 
 ## Find and join a server
 
-Open **Multiplayer > Join Game**, then choose **Internet** or **LAN**. The
-list shows the server name, ping, player count, game type and map, with the
-stock icons for favorites, passwords and dedicated servers.
-Select a row to see its map preview, then choose **Join Server** to play, or
-in the new menus **Spectate** to join it watching. Passworded servers use the
-existing password prompt.
+Open **Multiplayer** from PREY's main menu, then choose **Internet** or **LAN**.
+Choose a column heading to sort the list. The filter controls hide servers by
+game type, password, player count or idle state; they set the matching
+`gui_filter_*` console settings. One refresh button re-queries the servers
+already listed and the other runs discovery again. The IP connect button
+joins an address you type, in any form the direct connections below accept.
 
-Choose a column heading to sort, and **Clear Sorting** to list servers in the
-order they answered. **Mod** shows one mod's servers; the `gui_filter_*`
-console settings can also hide full or empty servers, passworded servers or
-game types. When a filter hides the selected server, Join Server is disabled
-until you select a visible server, and the list tells you when the filters
-hide every server. **Refresh List** updates the currently known addresses;
-**Get New List** runs discovery again. The bar under the list fills as
-servers answer and names the step the scan is on. Bars beside each ping
-show the connection's quality: four up to 60 ms, three to 120 ms, two to
-200 ms and one above, turning amber at two bars and red at one. Point at a server, or
-move to it with the keyboard or a controller, to see its address, players
-and settings in a card beside it. With a controller, the left face button
-refreshes the list and the top one sorts it by the next column; pressing the
-left stick spectates the selected server and pressing the right stick adds
-it to or removes it from your favorites, as the stick symbols beside
-**Spectate** and the favorite control show.
-
-**Join IP Address** connects to an address you type, in any form the direct
-connections below accept, and shows your own IP address to pass on to
-friends. An address that cannot be joined keeps the dialog open with the
-reason.
-
-**Find Player/Clan** shows only the listed servers with a player whose name
-contains what you type, ignoring colors and case; a clan tag counts as part of
-the name. The search shows as a tag below the list: select it to end the
-search. Get New List ends it as well.
-
-The favorite control saves the selected server's address locally. Favorites
-are queried alongside Internet discovery, so a saved address can still appear
-when it is absent from the master list. Removing a favorite leaves the server
-available in ordinary discovery results.
+The engine also carries openQ4's saved favorites, player search, spectate-on-join
+and connection-quality bars, but PREY's stock multiplayer menu has no controls
+for them.
 
 LAN discovery probes ports `28004` through `28011`. Use a direct connection
-for a server on another port. Internet results depend on the configured master
-service and reachable servers; direct connections remain available below.
+for a server on another port. Internet results depend on a reachable master
+server: the built-in `net_master0` still names the Quake 4 master address
+inherited from openQ4, and `net_master1` to `net_master4` can add others.
+Direct connections always work.
 Over IPv6 the scan reaches servers on the same network link, including
 IPv6-only servers on Windows. A server that listens only on the IPv6 loopback
 address `::1` has no link to scan, so join it with `connect [::1]:<port>`.
@@ -93,8 +60,8 @@ Server operators should configure `net_ip`, `net_port`, host firewall rules, and
 An IPv6 address contains colons, so it must be wrapped in brackets whenever a port follows it. Without the brackets the last colon would be read as the port separator and eat part of the address.
 
 ```text
-connect [2001:db8::1]:27650
-connect [fe80::1%12]:27650
+connect [2001:db8::1]:28004
+connect [fe80::1%12]:28004
 connect 2001:db8::1
 connect play.example.net:28004
 ```
@@ -109,7 +76,7 @@ the first server to answer is the one you join. A numeric address and a server
 list entry are a single address, so they keep retrying that address until you
 cancel.
 
-Addresses are displayed in the canonical [RFC 5952](https://www.rfc-editor.org/rfc/rfc5952) form — lowercase, with the longest run of zero groups collapsed to `::` — so `[2001:0db8:0000:0000:0000:0000:0000:0001]:27650` is shown as `[2001:db8::1]:27650`. The same text is used by the server browser and by server-side ban lists, so one address always has exactly one spelling.
+Addresses are displayed in the canonical [RFC 5952](https://www.rfc-editor.org/rfc/rfc5952) form — lowercase, with the longest run of zero groups collapsed to `::` — so `[2001:0db8:0000:0000:0000:0000:0000:0001]:28004` is shown as `[2001:db8::1]:28004`. The same text is used by the server browser and by server-side ban lists, so one address always has exactly one spelling.
 
 A client reaching a dual-stack server over IPv4 is recorded as an IPv4 client even though the server also listens on IPv6, so bans and client-slot handling see a single identity per host.
 
@@ -131,77 +98,6 @@ IPv6 guarantees only a 1280-byte path MTU and forbids routers from splitting a d
 | `net_mcast6iface` | `0` | index | Client and server | IPv6 interface index for the LAN scan. `0` scans every attached link. |
 | `net_clientMaxRate` | `128000` | bytes/s | Client | The most a server may send you each second, sent when you connect. Lower it below your connection's real download speed if matches stutter on a slow or shared line. |
 | `net_serverMaxClientRate` | `128000` | bytes/s | Server | The most the server sends any one player each second, whatever they ask for. |
-| `net_mpLagCompensation` | `0` | `0..1` | Server gameplay | Enables server-side lag compensation for multiplayer hitscan traces. |
-| `net_mpLagCompMaxMS` | `200` | `0..1000` | Server gameplay | Caps rewind window in milliseconds used by lag compensation. |
-| `net_mpLagCompBiasMS` | `0` | `-200..200` | Server gameplay | Adds/subtracts additional rewind bias in milliseconds. |
-| `net_mpLagCompDebug` | `0` | `0..2` | Server gameplay | Debug logging for lag compensation (`0` off, `1` summary, `2` verbose). |
-| `net_mpLagCompSlackMS` | `48` | `0..200` | Server gameplay | How far past the round trip the server measured a rewind may reach. |
-| `net_mpPredictMode` | `0` | `0..1` | MP client prediction | Selects remote-player prediction mode (`0` legacy limited, `1` enhanced per-frame). |
-| `net_mpPredictMaxFrames` | `16` | `1..64` | MP client prediction | The most game frames (16 ms each) enhanced prediction draws another player ahead. |
-| `net_mpRemoteExtrapolation` | derived | read-only | MP client prediction | What this client tells servers it draws other players ahead by, in frames: `0` in legacy mode, otherwise `net_mpPredictMaxFrames`. |
-
-## How prediction and lag compensation fit together
-
-Your own movement is predicted, so you see it at once. Other players are
-shown from the last update the server sent, which is a little old by the time
-it arrives.
-
-- **Legacy prediction** (`net_mpPredictMode 0`) shows other players about one
-  round trip behind where the server has them.
-- **Enhanced prediction** (`net_mpPredictMode 1`) re-simulates them from their
-  relayed inputs, drawing them up to `net_mpPredictMaxFrames` frames closer to
-  the present.
-- **Lag compensation** (`net_mpLagCompensation 1`, server only) briefly moves
-  other players back to where your screen showed them when your hitscan
-  attack lands.
-
-Each client advertises how far ahead it draws other players
-(`net_mpRemoteExtrapolation`). The server takes that off the rewind, so a shot
-is rewound only by the delay the client really showed. Every figure the client
-reports is capped by the round trip the server measured itself, so a client
-cannot claim a longer rewind. Damage, blood, impact effects and knockback are
-always applied where the target is now.
-
-Server operators can run `lagCompStatus` to see, for each player, the reported
-lead, the measured round trip, the advertised extrapolation and the rewind a
-shot from that player would get. It works whether or not lag compensation is
-on. `net_mpLagCompDebug 1` logs the same figures for each compensated shot,
-and `net_mpPredictDebug 1` makes a client log how old each remote player was
-on its screen when a server update arrived. `net_verbose 2` also logs, for
-each server update, how far ahead the client is predicting, the target it is
-steering towards and how early the server says its commands arrive.
-
-## Legacy Compatibility Switch
-
-Use this to restore legacy multiplayer behavior:
-
-```cfg
-seta net_mpLagCompensation 0
-seta net_mpPredictMode 0
-```
-
-## Experimental Settings
-
-Both features are still being measured on real connections with delay,
-jitter and packet loss, so neither is on by default. To try them:
-
-### Clients: enhanced prediction
-
-```cfg
-seta net_mpPredictMode 1
-```
-
-### Servers: lag compensation
-
-```cfg
-seta net_mpLagCompensation 1
-seta net_mpLagCompMaxMS 200
-seta net_mpLagCompBiasMS 0
-```
-
-On a LAN, a smaller `net_mpLagCompMaxMS` such as `80` keeps the rewind short.
-Clients may use either prediction mode on a lag-compensated server; the rewind
-follows each client's own setting.
 
 ## Testing under simulated network conditions
 
@@ -231,16 +127,10 @@ set net_forceDrop 5
 
 `netImpairment` prints the settings and, for each open connection, how many
 packets were delayed, lost, duplicated and delivered out of order, the bytes
-sent through it, and how many packets the slow line dropped. A match with three
-bots needs about 6 KB a second downstream. On a line slower than that the game
-stutters and falls behind, and setting `net_clientMaxRate` a little below the
-line's speed before connecting keeps it smooth, with fewer updates a second.
+sent through it, and how many packets the slow line dropped. On a line slower
+than the match needs, the game stutters and falls behind; setting
+`net_clientMaxRate` a little below the line's speed before connecting keeps it
+smooth, with fewer updates a second.
 These settings count as cheats: hosting or joining a server that does not allow
 cheats (`net_allowCheats 1` or `sv_cheats 1`) resets them to `0`, and they
 cannot be changed during such a match. They are for testing only.
-
-## Notes
-
-- Lag compensation applies to authoritative multiplayer hitscan traces on the server.
-- `net_mpLagCompDebug` output is intended for server diagnostics and tuning.
-- Tune `net_mpLagCompMaxMS` before using large `net_mpLagCompBiasMS` offsets.

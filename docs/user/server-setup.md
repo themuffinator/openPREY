@@ -1,10 +1,12 @@
 # Server Setup Guide
 
-> **Experimental.** Multiplayer is under active development and is not yet
-> considered stable. Expect rough edges, changing behaviour between builds, and
-> bugs. It is not representative of the finished feature.
+> [!NOTE]
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
-This guide covers a simple way to host an openPREY dedicated server.
+Multiplayer is experimental in openPREY. A listen server with two clients has
+been played; dedicated servers and larger matches haven't been tested yet.
+
+This guide covers a simple way to host an openPREY server.
 
 ## Hosting from the Game
 
@@ -12,7 +14,9 @@ The multiplayer menu's **Create Server** page hosts a listen server: you play
 on it while it serves the other players. **Server Type** decides who can join.
 **Internet** advertises the server to the master servers and accepts players
 from anywhere; **LAN** keeps it off the master servers and accepts only players
-on your local network.
+on your local network. The built-in master address (`net_master0`) is still the
+Quake 4 one inherited from openQ4, so players may need to join an Internet
+server by address with `connect`.
 
 Set **Dedicated** to **Yes** to host without playing, as in the original game.
 When you start the server, the game window closes and the openPREY console window
@@ -33,20 +37,20 @@ On a machine without a display, use the dedicated server executable below.
 
 ## What You Need
 
-- A working openPREY install
-- Access to the original Prey (2006) retail assets
-- The `openPREY-ded_<arch>` executable from your openPREY release or local build
-- A 64-bit host that matches the package architecture
+- A working openPREY build, staged to `.install/` as described in [BUILDING.md](../../BUILDING.md); there is no openPREY release yet
+- Access to the original PREY (2006) retail assets
+- The `openPREY-ded_x64` executable from that build
+- A 64-bit Windows or Linux x64 host
 
 ## Dedicated Server Requirements
 
-The dedicated server does not need a GPU or an OpenGL-capable desktop session, but it still needs the same retail `base/` assets and matching openPREY game modules as the client.
+The dedicated server does not need a GPU or an OpenGL-capable desktop session, but it still needs the same retail `base/` assets and the same openPREY game module (`basepr/game_x64`) as the clients.
 
-For light testing, plan on a modern 64-bit host with at least 2 GB RAM available to the operating system and server, plus the same package and Prey (2006) asset storage described in the [Getting Started system requirements](getting-started.md#system-requirements). For public servers, prefer 4 GB+ RAM, a stable wired connection, and enough upload bandwidth for the player count you advertise.
+For light testing, plan on a modern 64-bit host with at least 2 GB RAM available to the operating system and server, plus room for openPREY and the PREY assets, as described in the [Getting Started system requirements](getting-started.md#system-requirements). For public servers, prefer 4 GB+ RAM, a stable wired connection, and enough upload bandwidth for the player count you advertise.
 
 ## Quick Start
 
-1. Make sure openPREY can see your Prey (2006) assets.
+1. Make sure openPREY can see your PREY assets.
 2. Launch the dedicated server executable.
 3. Set a server name, map, and game type.
 4. Start the server with `spawnServer`.
@@ -152,10 +156,9 @@ them does not route multiplayer traffic through a SOCKS proxy.
 | `bot_skill` | Bot difficulty, 1 (easiest) to 5 (hardest) |
 | `bot_skillVariance` | Spread bot skill this many levels either side of `bot_skill`, so a match is not all one difficulty |
 | `bot_characters` | Give bots named characters with their own play style and voice (`0` for plain skill-curve bots) |
+| `bot_forceCharacter` | Put every bot on one character, by name; for tuning a single personality (empty by default) |
 | `bot_chat` | Bot chat: `0` silent, `1` normal, `2` chatty |
 | `bot_chatCPM` | Bot typing speed in visible characters per minute (`900` by default) |
-
-Default multiplayer values are seeded from `content/basepr/pak0/default.cfg`.
 
 ## Useful Console Commands
 
@@ -170,7 +173,7 @@ Default multiplayer values are seeded from `content/basepr/pak0/default.cfg`.
 
 ## Bots
 
-openPREY multiplayer servers can add Prey artificial players, so a server can
+openPREY multiplayer servers can add PREY's artificial players, so a server can
 stay populated while it is quiet. Use `addbot [character] [skill]` to add one,
 and `removebot [character]` or `removebots` to release the slots again.
 
@@ -187,15 +190,15 @@ enough. For the full command list, the character file format, and how to add
 your own characters, see [Multiplayer bots](../dev/mp-bots.md).
 
 > [!NOTE]
-> The inherited repeater system is intentionally default-off while its extended
-> OpenQ4 game-API calls are adapted to Prey's unified v7 game API.
+> The inherited openQ4 repeater is compiled out (`OPENPREY_ENABLE_REPEATER 0`)
+> until its extended game-API calls are adapted to PREY's v7 game API.
 
 ## Multiplayer Tuning
 
-For IPv4 connection behavior and prediction or lag compensation tuning, see [Multiplayer Networking](multiplayer-networking.md).
+For connection behavior, IPv6, bandwidth limits and simulated network conditions, see [Multiplayer Networking](multiplayer-networking.md).
 
 ## Notes
 
 - openPREY uses its own engine and game modules.
-- openPREY is not a drop-in runtime for the original proprietary Prey (2006) DLL mods.
+- openPREY is not a drop-in runtime for mods built for the original proprietary PREY game DLLs.
 - For advanced configuration, file layout, and path behavior, see [TECHNICAL.md](../../TECHNICAL.md).

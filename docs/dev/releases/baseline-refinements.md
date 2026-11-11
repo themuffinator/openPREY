@@ -1,6 +1,6 @@
 # Baseline refinements (unreleased)
 
-> **Unreleased development notes.** 0.13.2 is the latest available release; 0.14.0 was withdrawn. These changes are not a new download. See [release status](../../user/release-status.md).
+> **Unreleased development notes.** 0.13.2 is the latest available release; 0.14.0 was withdrawn. These changes are not a new download. See [release status](https://github.com/themuffinator/openQ4/blob/main/docs/user/release-status.md).
 
 ## Highlights
 
@@ -244,7 +244,7 @@
   or export diagnostic logs to a ZIP through the system file picker. Setup
   failures are included in the logs. Cancelled or failed exports keep the
   original files; retry uses a new destination. See the
-  [Android setup guide](../../user/android-setup.md) for backup limits and
+  [Android setup guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/android-setup.md) for backup limits and
   upgrade guidance. Physical device/provider qualification remains in progress.
 - Open **Android setup** from the game's Settings and use **Return to game**
   to keep playing the same session. Quit the game before importing files or
@@ -257,12 +257,12 @@
   Phone, Tablet or Couch, or set the menu and text size yourself, with a live
   preview. Applied sizes reach the game at its next launch or return from
   setup; size changes you make later in the game are kept. See the
-  [Android setup guide](../../user/android-setup.md#adjust-menu-and-text-size).
+  [Android setup guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/android-setup.md#adjust-menu-and-text-size).
 - The standalone Android app now provides experimental touch gameplay controls:
   move, look and fire together, tap to cycle weapons or hold for the selector,
   and pause without a controller. Reload and zoom appear for supported weapons.
   Layout editing and portrait presentation are still in development; see the
-  [touch controls guide](../../user/android-setup.md#play-with-touch-controls).
+  [touch controls guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/android-setup.md#play-with-touch-controls).
 
 - Experimental OpenXR mode now returns safely to desktop play after frame or
   session failures and clears held VR controls. A lost session retries after a

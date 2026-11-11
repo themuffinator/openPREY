@@ -1,11 +1,12 @@
 # Server and Remote-Console Security
 
-> **Development documentation:** This page follows the current source tree and may describe changes newer than the public download. See [release status and released-version guides](release-status.md) before using it with a release package.
+> [!NOTE]
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
-openQ4 uses an authenticated remote-console protocol, `rcon2`, by default.
-It replaces Quake 4's legacy packet, which sent the administration password
-verbatim over UDP. Gameplay, server discovery, the connection handshake's wire
-layout, and the retail Quake 4 asset format are unchanged.
+openPREY's engine uses an authenticated remote-console protocol, `rcon2`, by
+default. It replaces the legacy idTech 4 packet, which sent the administration
+password verbatim over UDP. Gameplay, server discovery, the connection
+handshake's wire layout and the retail PREY asset format are unchanged.
 
 ## Configure a strong password
 
@@ -47,14 +48,11 @@ network flag; unrelated and private settings are ignored. Dictionary decoding
 is all-or-nothing, so a truncated update does not leave a partially changed
 settings set behind.
 
-## The in-match Admin page
+## Menu administration
 
-The multiplayer menu's Admin page asks for the same password, checks it with
-the server and then opens its player, server and console controls; a wrong
-password returns to Join Team. Type the password into the page's field, or set
-`net_clientRemoteConsolePassword` at the console first. The field takes 16
-characters, so for a longer password set the CVar at the console, then open
-Admin and choose Accept without typing in the field.
+The engine carries the password-checked in-match Admin page from openQ4's
+menus, but it hasn't been checked with PREY's multiplayer menus. Administer a
+server from the console with `rcon`, as shown above.
 
 ## Server-provided package links
 
@@ -65,7 +63,7 @@ credentials, ambiguous authorities, control characters, and every other URL
 scheme (including `file:` and SMB-style paths) are rejected before prompting or
 queueing. The generic background downloader applies the same check again.
 
-Standard Meson packages do not enable libcurl. They can show a validated web
+Standard Meson builds do not enable libcurl. They can show a validated web
 redirect offered by a server, but in-process direct PK4 transfer reports
 unavailable; obtain any required package separately from a source you trust.
 This is intentional and should not be diagnosed as a broken downloader.
@@ -79,8 +77,8 @@ These restrictions bound that optional legacy path and prevent
 local-file/protocol substitution; they do not prove DNS ownership, make an
 untrusted server trustworthy, or certify arbitrary package content.
 
-The platform URL opener follows the same HTTP(S)-only syntax policy on Windows,
-Linux, and macOS. In particular, macOS no longer accepts local `file:` URLs.
+The platform URL opener follows the same HTTP(S)-only syntax policy on every
+platform and refuses local `file:` URLs.
 
 ## What rcon2 protects
 
@@ -105,49 +103,46 @@ matters.
 
 ## Pure multiplayer and local game modules
 
-`si_pure 1` is supported and remains enabled when selected; openQ4 no longer
-silently turns it off at server startup. Pure mode compares the ordered PK4
-asset list used by the server and client. The protocol can identify missing
-asset PK4s, but standard packages do not enable in-process direct transfer. Any
-separately integrated curl-enabled package path remains asset-only and never
-supplies executable game code.
+`si_pure 1` is supported and stays enabled when selected; the server doesn't
+quietly turn it off at startup. Pure mode compares the ordered PK4 asset list
+used by the server and client. The protocol can identify missing asset PK4s,
+but standard builds do not enable in-process direct transfer. Any separately
+integrated curl-enabled package path remains asset-only and never supplies
+executable game code.
 
-The pure handshake also carries a game-code checksum. openQ4 sends a fixed
-token, `0x68fb90b1`, which is the checksum of the official Quake 4 1.4.2
-`q4base/game300.pk4`. It does not require, mount, download, extract, or execute
-that archive.
-The engine accepts the token only when the required `game_sp` or `game_mp`
-module was already loaded from trusted local openQ4 package/module roots. A missing
-module, an unsupported platform ID, an empty pure asset list, or a different
-token fails closed instead of weakening pure mode or starting a code download.
+The pure handshake also carries a game-code checksum. The engine sends a fixed
+token, `0x68fb90b1`, inherited unchanged from openQ4's network protocol (it is
+the checksum of a Quake 4 game pak). openPREY doesn't require, mount, download,
+extract or execute any archive for it. The engine accepts the token only when
+the game module (`game_x64`) was already loaded from openPREY's trusted local
+package and module roots. A missing module, an unsupported platform ID, an
+empty pure asset list, or a different token fails closed instead of weakening
+pure mode or starting a code download.
 
 By default, `net_serverAllowServerMod 0` also prevents a selected mod from
 supplying its own game module. Content-only mods can continue to use the base
-openQ4 module. An administrator who intentionally operates a code-bearing mod
+openPREY module. An administrator who intentionally operates a code-bearing mod
 must set `net_serverAllowServerMod 1` and distribute a complete, trusted package
 to clients separately; the setting does not make module code downloadable.
-openQ4 never loads a game module from the save folder or from inside a PK4.
+openPREY never loads a game module from the save folder or from inside a PK4.
 
 A mod is recognised only with a complete `mod.json` (`name`, `version`,
-`releaseDate`, `website`, `author` and `requiredopenQ4Version`). If a field is
-missing, the log says `Ignoring fs_game '<mod>'` and the server runs the normal
-openQ4 game, so clients without that mod can join it.
+`releaseDate`, `website`, `author` and `requiredopenPREYVersion`; the older
+`requiredopenQ4Version` key is still read). If a field is missing, the log says
+`Ignoring fs_game '<mod>'` and the server runs the normal openPREY game, so
+clients without that mod can join it.
 
-The token is the same on Windows, Linux, and macOS, and it only works between
-openQ4 builds. Retail multiplayer servers expect the checksum of a `q4mp` game
-pak instead. The token is not a cryptographic measurement of the loaded module
-and does not turn pure mode into an anti-cheat system.
+The token is the same on every platform. It is not a cryptographic measurement
+of the loaded module and does not turn pure mode into an anti-cheat system.
 
 On a pure server a client never uses its own generated image cache
 (`generated/images` in the save or cache folder). A cache entry names the game
 file it came from, but an edited copy looks the same, and the only way to tell
 them apart is to rebuild the image. So when a client connects, any image it
 loaded from that cache is rebuilt from the original game files, and images
-needed during the match are rebuilt instead of read. Before 9 November this
-restarted the whole engine on the first pure connect of each session; now only
-those images are rebuilt. A loose file read from a game folder before
-connecting, such as an extracted texture or map, still makes the client restart
-into pure mode.
+needed during the match are rebuilt instead of read. A loose file read from a
+game folder before connecting, such as an extracted texture or map, still makes
+the client restart into pure mode.
 
 The experimental level-load option (`com_levelLoadModernization 1`, off by
 default) keeps similar caches of decoded models, maps, collision data and
@@ -155,34 +150,26 @@ animations under `generated/`. A pure server's clients never read those either.
 Anything a client loaded from them before connecting is loaded again from the
 original game files when the server's map loads.
 
-In a window that is not 4:3, openQ4 widens each map's loading screen to fit.
-It builds that picture in memory from the game files the server allows and
+In a window that is not 4:3, the engine widens each map's loading screen to
+fit. It builds that picture in memory from the game files the server allows and
 saves nothing, so a pure server's clients see the wide loading screen too.
-Versions before 9 November saved it in the save folder
-(`guis/assets/generated/loadscreens/`), which a pure server cannot trust: their
-clients showed the map's standard picture there, and at first restarted the
-whole engine on connect. Those saved files are no longer used and can be
-deleted; one that is somehow still read before connecting is dropped on
-connect rather than restarting the engine.
 
 ## Malformed network traffic
 
 The shared bit-message reader records attempts to read beyond the received
 payload, including through delta messages. Covered queue and user-command
-decoders check their encoded sizes, while audited SP and MP leaf readers stage
-decoded fields until their payload is valid and check referenced entity/player
-types and bounds, spectator and weapon values, tournament instances, projectile
-owners, PVS and game state, and hit-scan fields. A late malformed top-level
-snapshot tears down the affected session before another game or presentation
-frame. The legacy entity lifecycle is not a whole-snapshot rollback
-transaction.
+decoders check their encoded sizes. openQ4 also audited its Quake 4 game
+module's snapshot readers; PREY's game module comes from the PREY SDK and its
+readers haven't had that audit. A late malformed top-level snapshot that the
+engine detects tears down the affected session before another game or
+presentation frame. The legacy entity lifecycle is not a whole-snapshot
+rollback transaction.
 
 A server also limits what one client can make it store or relay. A client's
 player info is held to 128 entries and 4 KB in total, and a client that sends
-more is disconnected. Emotes are limited to two a second for each player.
-Messages that follow a client's disconnect in the same packet are ignored. A
-message that would no longer fit a packet once compressed is not sent, where it
-used to stop the server.
+more is disconnected. Messages that follow a client's disconnect in the same
+packet are ignored. A message that would no longer fit a packet once
+compressed is not sent, where it used to stop the server.
 
 This is targeted hardening of the audited legacy paths. It is not a claim that
 every parser is formally verified, and malformed-packet regression tests do not
@@ -199,12 +186,12 @@ tool:
 // Server: accept legacy packets.
 net_serverAllowLegacyRcon 1
 
-// openQ4 client: send a legacy packet.
+// openPREY client: send a legacy packet.
 net_clientUseLegacyRcon 1
 ```
 
-An openQ4 client talking to an openQ4 server needs both settings to use the
-legacy path. A third-party legacy tool needs the server setting; an openQ4
+An openPREY client talking to an openPREY server needs both settings to use the
+legacy path. A third-party legacy tool needs the server setting; an openPREY
 client talking to an old server needs the client setting. Legacy mode sends the
 password and command in plaintext and should be enabled only temporarily on a
 trusted network. Return both variables to `0` when compatibility testing ends.
@@ -212,22 +199,16 @@ trusted network. Return both variables to `0` when compatibility testing ends.
 Old plaintext-rcon tools receive no response until the server operator
 explicitly enables the legacy path.
 
-## Retail Quake 4 clients and servers
+## Retail PREY clients and servers
 
-Retail Quake 4 clients cannot join an openQ4 server, and openQ4 cannot join a
-retail server. openQ4 uses network protocol 2.41, while retail Quake 4 1.4.2
-uses 2.85. The two protocols also differ beyond the version number, including
-the reliable message numbering and the player input format.
+openPREY speaks network protocol 2.41, inherited from openQ4, not the retail
+PREY protocol. Retail PREY clients can't join an openPREY server, and openPREY
+can't join a retail server.
 
-Each side is told why instead of being left waiting:
-
-- A LAN scan leaves retail servers out of the server list. Connecting to one
-  directly shows **Network protocol mismatch** with both protocol versions.
-  openQ4 checks the protocol before it would switch to the retail server's
-  `q4mp` folder, so it no longer stops with a message about a missing mod.
-- A retail client that tries an openQ4 server is answered with `server uses
-  protocol 2.41`, the same message a retail server sends for a protocol
-  mismatch.
+- A server scan leaves servers with another protocol out of the list; the
+  console logs `server <address> ignored - protocol ...` for each one.
+- A client with another protocol that tries an openPREY server is answered with
+  `server uses protocol 2.41`.
 
 Joining retail servers would be a separate project, not a version-number
 change.
@@ -235,7 +216,7 @@ change.
 ## Standards and provenance
 
 The engine implementation is original GPL code based on the public algorithm
-specifications, not on the Quake 4 SDK game-library implementation:
+specifications, not on any game SDK implementation:
 
 - [FIPS 180-4: Secure Hash Standard (SHA-256)](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)
 - [RFC 2104: HMAC](https://www.rfc-editor.org/rfc/rfc2104)

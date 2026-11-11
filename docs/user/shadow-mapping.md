@@ -1,8 +1,7 @@
 # Shadow Mapping and Transparency Shadowing Guide
 
 > [!NOTE]
-> This page documents inherited engine/tooling capability. Retail Prey behavior remains
-> runtime-validation pending unless the rebase status ledger records specific evidence.
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
 This guide covers openPREY's user-facing shadow-map settings, including projected-light shadow maps, experimental point-light shadow maps, cascaded shadow maps (CSM), alpha-tested transparency shadows, and the current experimental translucent-shadow path.
 
@@ -31,7 +30,7 @@ Notes:
 - `r_shadows` must stay enabled for any shadow path to render.
 - If a light cannot use a complete shadow map, openPREY uses its stencil representation when available. Vulkan logs a missing-resource warning and preserves direct illumination if neither representation can be submitted.
 - If only part of a receiver ownership can be represented in a shadow map, the classic renderer combines that exact map with the missing casters' stencil supplements. If those supplements are incomplete, the complete ownership falls back to stencil instead of publishing a partial shadow.
-- Point lights shadow-map by default (`r_shadowMapPointLights 1`); they are the dominant light class in Prey (2006) content. Set `r_shadowMapPointLights 0` to fall back to stencil shadows for point lights only.
+- Point lights shadow-map by default (`r_shadowMapPointLights 1`); they are the dominant light class in PREY (2006) content. Set `r_shadowMapPointLights 0` to fall back to stencil shadows for point lights only.
 - Lights touching animated, deformed, or packed character receivers can also fall back to the legacy stencil path so stock character lighting, mirrored seams, and eye materials retain retail-style interaction behavior.
 - The player flashlight uses its authored single projected shadow map; disabling flashlight cascades does not select stencil shadows. `testFlashlight 1` enables the current SP weapon's flashlight for rendering tests without simulated player input (`testFlashlight 0` turns it off).
 - Light-emitting panels that cast no stencil volume no longer force an entire point light into fallback. Panels with a real surface volume are admitted to the depth map. A real missing caster still requires a complete map or stencil supplement.
@@ -44,7 +43,7 @@ Notes:
 
 openPREY currently supports:
 - Projected-light shadow maps for regular projected lights.
-- Point-light cubemap shadow maps for omni/point lights (the dominant Prey (2006) light class), on by default.
+- Point-light cubemap shadow maps for omni/point lights (the dominant PREY (2006) light class), on by default.
 - Fitted perspective shadow maps for off-centre point sources whose entire light volume lies in front of the source. Distant outdoor lights can use the projected cascade machinery without changing their authored illumination.
 - Optional projected-light cascaded shadow maps (CSM).
 - Alpha-tested transparency shadows for cutout materials such as fences, grates, and foliage cards.
@@ -167,7 +166,7 @@ vid_restart
 | `r_shadowMapPointDepthCompare` | `1` | `0..1` | Uses hardware comparison sampling for point-light depth cubemaps when GLSL 1.30 support is available. |
 | `r_shadowMapPointDepthOnly` | `1` | `0..1` | OpenGL: keeps point-light shadow cubes as depth only while nothing samples their packed colour cube, which halves their memory and stops the caster pass writing colour. The colour cube comes back by itself when something reads it: without hardware compare (`r_shadowMapPointDepthCompare 0`, or a driver that lacks it), under the opt-in modern renderers or the shared interaction stream, and while the debug overlay is on. `0` always keeps it. Vulkan cubes were always depth only. |
 | `r_shadowMapPointHighPrecision` | `0` | `0..1` | Stores point-light shadow depth in an fp16 color cubemap instead of packed RGBA8. The packed path quantizes finer at half the memory, and the default hardware-compare path samples the depth cubemap directly and stores no colour cubemap at all (`r_shadowMapPointDepthOnly`), so this only affects the manual fallback. |
-| `r_shadowMapPointLights` | `1` | `0..1` | Shadow-maps point lights when `r_useShadowMap 1` is enabled. Point lights are the dominant light class in Prey (2006) content, so disabling this makes shadow mapping nearly a no-op; set `0` to fall back to stencil shadows for point lights only. |
+| `r_shadowMapPointLights` | `1` | `0..1` | Shadow-maps point lights when `r_useShadowMap 1` is enabled. Point lights are the dominant light class in PREY (2006) content, so disabling this makes shadow mapping nearly a no-op; set `0` to fall back to stencil shadows for point lights only. |
 | `r_shadowMapPointSize` | `512` | `128..2048` | Point-light cube face resolution, separate from `r_shadowMapSize`: each cached point light stores six faces of depth (and of colour as well on OpenGL when something samples it, see `r_shadowMapPointDepthOnly`), so cube resolution dominates shadow VRAM. |
 | `r_shadowMapHashedAlpha` | `1` | `0..1` | Uses hashed alpha testing for perforated/alpha-tested casters when supported. |
 | `r_shadowMapStableAlphaHash` | `1` | `0..1` | Seeds hashed alpha from world-space caster coordinates to reduce atlas/camera-space dither drift. |
@@ -309,7 +308,7 @@ Shadow artifacts are usually one of two classes:
 
 Projected-light tuning:
 
-Projected shadow maps store Prey (2006)'s authored light falloff depth directly, so the projected defaults are intentionally small. Raise them only when you see acne or speckling.
+Projected shadow maps store PREY (2006)'s authored light falloff depth directly, so the projected defaults are intentionally small. Raise them only when you see acne or speckling.
 
 Soft projected shadows sample the shadow map at several points around each pixel. On a wall or floor lit at a shallow angle, the surface itself is nearer the light at some of those points, so each sample allows for the surface's tilt in proportion to its distance from the centre. Wide filters such as the default `2.0` texels therefore stay free of speckles on grazing surfaces, while the centre sample keeps the ordinary bias, so shadows still meet the objects that cast them. OpenGL and Vulkan do this automatically; it needs no tuning.
 
@@ -410,11 +409,10 @@ Useful workflow:
 
 | Platform | Shadow maps | Notes |
 |---|---|---|
-| Windows (GL3.3+) | Supported | Primary development and validation platform; the bit-exact regression net runs here. |
-| Linux (GL3.3+) | Supported | Same GL feature path as Windows. |
-| Steam Deck | Supported | Recommended: `r_shadowMapSize 1024`, `r_shadowMapPointSize 512`, `r_shadowMapMaxUpdatesPerView 2`, `r_shadowMapCSM 1` with `r_shadowMapCascadeCount 3`. The importance-ordered update budget keeps per-frame shadow cost bounded. |
-| macOS (Apple legacy GL2.1 tier) | Stencil only | The Apple compatibility corridor lacks the GLSL/FBO feature set the shadow-map receiver and caster programs require. Lights fall back to the retail stencil path automatically; this is expected and documented behavior, not an error. |
-| macOS (Vulkan through MoltenVK) | Implemented, shadows untested on Apple hardware | Used when Automatic or `r_renderApi vulkan` starts Vulkan. MoltenVK is a Vulkan-on-Metal translation layer bundled in both macOS packages, not a Metal renderer. This path uses the same Vulkan shadow implementation as Windows and Linux — projected, point, parallel, and global lights, cascades, PCF/PCSS-lite, and static caching — but no real-Mac shadow evidence exists yet (upstream openQ4 has one player report of the Vulkan renderer running on an Apple Silicon Mac), so treat it as experimental and expect problems. OpenGL, the fallback and any saved OpenGL choice, uses the row above. |
+| Windows x64 (GL3.3+) | Implemented, PREY validation pending | Primary development platform; openQ4's bit-exact regression net runs here against Quake 4 maps. |
+| Linux x64 (GL3.3+) | Implemented, PREY validation pending | Same GL feature path as Windows. |
+| Steam Deck | Implemented, PREY validation pending | Recommended: `r_shadowMapSize 1024`, `r_shadowMapPointSize 512`, `r_shadowMapMaxUpdatesPerView 2`, `r_shadowMapCSM 1` with `r_shadowMapCascadeCount 3`. The importance-ordered update budget keeps per-frame shadow cost bounded. |
+| macOS | Not supported | openPREY doesn't build or test macOS yet. The inherited code keeps the retail stencil path on Apple's legacy GL 2.1 tier and the Vulkan shadow path through MoltenVK, neither checked with PREY. |
 
 The shadow-map pipeline rejects incomplete maps and uses complete stencil coverage when available. If Vulkan temporarily has neither usable representation, it preserves direct illumination and logs the missing resource while requesting stencil ownership for later frames. This recovery case and unsupported material/platform paths still prevent treating shadow mapping as a universal replacement.
 
@@ -442,5 +440,5 @@ reports ([individual map tests](../dev/shadowmapping-map-tests-2026-09-05.md),
 [transitions](../dev/shadowmapping-transition-tests-2026-09-05.md),
 [replacement progress](../dev/shadowmapping-replacement-progress-2026-09-05.md), and the
 [final audit](../dev/shadowmapping-final-audit-2026-09-05.md)) were recorded against Quake 4 maps;
-equivalent Prey (2006) map coverage remains validation-pending, and images still require visual
+equivalent PREY (2006) map coverage remains validation-pending, and images still require visual
 inspection.

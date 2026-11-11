@@ -5,7 +5,7 @@
 Status: in progress. This is the living plan for running the unreleased Raven/Ritual
 expansion on openQ4. The gap analysis it works from is
 [the support audit](../../../q4x-awakening-support-audit.md). What has changed for players
-is summarised in [The Awakening on openQ4](../../../../user/awakening.md); keep that page
+is summarised in [The Awakening on openQ4](https://github.com/themuffinator/openQ4/blob/main/docs/user/awakening.md); keep that page
 current when a change here reaches the campaign.
 
 ## Current architecture (1 October 2026)
@@ -31,7 +31,7 @@ The original leaked game binary and reconstructed GPL source remain behaviour
 references only. No recovered implementation or proprietary art is imported.
 Awakening multiplayer code, maps and pricing changes are excluded from this
 integration. No expansion assets are distributed; installation is described in
-the [campaign guide](../../../../user/campaigns.md).
+the [campaign guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/campaigns.md).
 
 The sections below retain the historical feature and content investigation.
 References to separately linked layer modules describe the pre-consolidation

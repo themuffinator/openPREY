@@ -5,7 +5,7 @@
 > shared `baseoq4` SP module and an isolated campaign content mount. Historical
 > layer/module findings below remain useful content evidence; expansion MP is
 > excluded. See [current architecture](archive/2026-10-18/plans/q4x-awakening.md) and
-> [campaign installation](../user/campaigns.md).
+> [campaign installation](https://github.com/themuffinator/openQ4/blob/main/docs/user/campaigns.md).
 
 Audit of the unreleased Raven/Ritual Quake 4 expansion drop at
 `E:\Games\Quake_4_Alpha-main\q4xbase` against the current openQ4 engine

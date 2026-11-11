@@ -1039,7 +1039,7 @@ establish its inclusion in subsequent log exports.
 
 Other providers, process-death recovery, accessibility/visual acceptance and
 release signing continuity remain separate AND-03 gates. The
-[player guide](../user/android-setup.md) describes use, limits and the current
+[player guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/android-setup.md) describes use, limits and the current
 absence of backup-ZIP import.
 
 ## S25 original-save restore round trip, 20 October 2026

@@ -1,23 +1,29 @@
 # Advanced Screen-Space Lighting
 
-> **Development documentation:** This page follows the current source tree and may describe changes newer than the public download. See [release status and released-version guides](release-status.md) before using it with a release package.
+> [!NOTE]
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
-openQ4 provides three experimental, independently controlled screen-space
-lighting effects on OpenGL and Vulkan:
+The engine carries three experimental, independently controlled screen-space
+lighting effects from openQ4, on OpenGL and Vulkan:
 
 - view-aligned froxel volumetrics;
 - screen-space reflections (SSR); and
 - screen-space diffuse global illumination (SSGI).
 
-They are optional, default off, and do not alter the installed Quake 4 assets.
+They are optional, default off, and do not alter the installed PREY assets.
 The effects share the native scene-presentation pass, run before temporal AA
 when TAA is enabled, and leave the HUD, menus, and console at native resolution.
 Engine screenshots include the effect result.
 
+openPREY's first rendering target is the legacy GL/ARB2 interaction path that
+matches PREY's original materials. Full PREY parity on the ModernGL and Vulkan
+paths is deferred (`TODO-RENDER-BACKENDS` in the ledger), and these effects
+haven't been tried on PREY's maps, portals or spirit walk.
+
 ## Enable and roll back
 
-The Milestone F master permit must be on. It defaults to `1`, while each effect
-leaf defaults to `0`:
+The master switch, `r_rendererModernQuality`, must be on. It defaults to `1`,
+while each effect defaults to `0`:
 
 ```text
 set r_rendererModernQuality 1
@@ -26,9 +32,9 @@ set r_rendererSSR 1
 set r_rendererSSGI 1
 ```
 
-Use any subset of the three leaf settings. Set
-`r_rendererModernQuality 0` for immediate one-setting rollback of these effects
-and the other experimental Milestone F lighting domains. The renderer publishes
+Use any subset of the three effect settings. Set
+`r_rendererModernQuality 0` to switch these effects and the engine's other
+experimental modern lighting features off at once. The renderer publishes
 an exact zero-feature packet when the master is off, even if archived leaf
 settings remain enabled.
 

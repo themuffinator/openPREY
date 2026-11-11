@@ -1,120 +1,112 @@
 # Getting Started with openPREY
 
-This guide is for players who want to install openPREY and start playing as quickly as possible.
+This guide gets openPREY running against your copy of PREY (2006).
+
+> [!IMPORTANT]
+> openPREY has no release yet, so for now you build it yourself from this repository. The [Releases page](https://github.com/themuffinator/openPREY/releases) still lists nightly builds from April 2026. They predate openPREY's move onto the current openQ4 engine and don't match these guides.
 
 ## What You Need
 
-- A legitimate installed copy of **Prey (2006)** from original media or another lawful distribution
-- The latest openPREY release from the [Releases page](https://github.com/themuffinator/openPREY/releases)
-- A release package that matches your operating system and CPU architecture (`x64` or `arm64`); Linux ARM64 downloads are currently preview packages, and Windows ARM64 downloads are experimental
-- Enough free disk space for both the openPREY package and the retail Prey (2006) `base/` assets
-
-> [!NOTE]
-> openPREY does not include Prey (2006) assets. It uses the original retail game files from your existing installation.
+- **PREY (2006)**, installed from the original discs or another legitimate source. openPREY reads the retail `base/` files from your install and ships none of them.
+- A **Windows x64** or **Linux x64** PC that meets the [system requirements](#system-requirements).
+- The compiler and tools listed in [BUILDING.md](../../BUILDING.md).
 
 ## System Requirements
 
-These requirements are practical guidance for the current beta packages. openPREY can scale down through performance presets, but old or incomplete OpenGL drivers may still fail even when the raw hardware looks fast enough.
+| Component | Requirement |
+|---|---|
+| Operating system | Windows 10 or 11 (x64), or a 64-bit Linux desktop comparable to Ubuntu 24.04 or newer, running Wayland or X11 |
+| CPU | 64-bit x86 (x64) |
+| Graphics | An OpenGL driver with the ARB2-era vertex and fragment program support PREY's renderer path relies on. The optional Vulkan renderer needs a working Vulkan driver |
+| Game files | The official retail PREY (2006) `base/` packs, left unmodified so startup validation can recognise them |
+| Input and audio | Keyboard and mouse and a working audio device. Controllers are optional |
 
-| Component | Minimum | Recommended |
-|---|---|---|
-| CPU | 64-bit CPU matching the package architecture; dual-core class or better | Modern quad-core or better x64/arm64 CPU |
-| Operating system | Windows 7 or later for x64 packages, or Windows on Arm for the experimental ARM64 package; a modern 64-bit Linux desktop userspace comparable to Ubuntu 24.04; preview Linux ARM64 on 64-bit little-endian AArch64 hardware; experimental macOS 11 or later on Apple Silicon/arm64; SteamOS 3.x on Steam Deck | Windows 10/11, a current Linux distribution or SteamOS release, or an up-to-date Apple Silicon macOS install with maintained graphics drivers for experimental Mac testing |
-| Memory | 4 GB RAM | 8 GB RAM for balanced play; 16 GB if you want higher presets, high resolutions, or room for background apps |
-| Graphics | OpenGL compatibility driver with the ARB2-era features openPREY requires, including vertex/fragment program support; 1 GB VRAM is the practical low-end target | OpenGL 4.1+ compatibility-class GPU with 2 GB+ VRAM for balanced 1080p play; 6 GB+ VRAM for `quality`, `ultra`, high-resolution displays, or heavier post-processing |
-| Storage | About 12 GB free for openPREY plus the retail Prey (2006) assets | 15 GB+ free for the package, assets, saves, logs, crash dumps, and future updates |
-| Assets | Official retail Prey (2006) `base/` PK4 files | The same assets left unmodified so validation can identify a known layout |
-| Input and audio | Keyboard/mouse and a working audio output | Controller optional; Steam Deck controls use the Deck profile; broadband network recommended for online multiplayer |
+Windows x64 gets most of the runtime testing. Linux x64 is built in CI on every push.
 
-Use the `Settings -> System` Performance Preset dropdown or its adjacent Auto-Detect button after first launch if you are unsure where to start. The console command is `autoDetectPerformancePreset`. Auto-Detect places a system at these minimum requirements on `low`, which keeps the original shadows at a reduced scene size. Systems below them should use `lowpower` or `minimum`, which draw no shadows, and systems a little above them `performance`, before enabling expensive options such as high MSAA, high resolution scale, shadow maps, or heavier post-processing.
+macOS, Windows on Arm and Linux ARM64 aren't supported yet. Parts of the build files still cover them, but nothing builds or tests them for openPREY.
 
-## Recommended Install Flow
+If the game runs slowly, the console command `autoDetectPerformancePreset` picks one of the inherited performance presets for your hardware. The presets come from openQ4 and haven't been checked against PREY yet.
 
-1. Install **Prey (2006)** from your original media or lawful distribution.
-2. Download the openPREY release that matches your platform and CPU architecture.
-3. Install or extract openPREY to its **own folder**, or use the matching Linux AppImage directly.
-4. Launch `openPREY-client_<arch>` from an extracted package, or launch the Linux AppImage.
-5. On Steam Deck, launch `openPREY-steamdeck` when it is included in the package.
+## Build and Launch
 
-openPREY will try to find your Prey (2006) install automatically.
+1. Install PREY (2006). Leave it where it is; openPREY keeps to its own folder.
+2. Build and stage openPREY by following [BUILDING.md](../../BUILDING.md). The staged package lands in `.install/`: the client, the dedicated server, the renderer modules, and `basepr/` with the game module and openPREY's own packs.
+3. Launch `openPREY-client_x64` from `.install/` (`openPREY-client_x64.exe` on Windows).
+4. openPREY looks for your PREY install by itself. If it can't find it, see [If Auto-Detection Fails](#if-auto-detection-fails).
 
-## Folder Layout Options
+On a Steam Deck or another SteamOS device, a Linux build also stages an `openPREY-steamdeck` launcher. See the [Steam Deck guide](steam-deck.md).
+
+## How openPREY Finds PREY
+
+openPREY uses the first of these locations that contains PREY's `base/` folder:
+
+1. An `fs_basepath` you set on the command line.
+2. The folder openPREY was started from.
+3. On Windows, the registry: the Human Head Studios, 2K Games and 3D Realms install keys, the `prey.exe` App Paths entry, and uninstall entries.
+4. The usual install folders. On Windows that means `Human Head Studios\Prey`, `2K Games\Prey`, `3D Realms\Prey` and `Prey` under Program Files, and `Games\Prey` on the system drive. On Linux it means `~/Games/Prey`.
+5. Steam and GOG library folders, if you have them. openPREY doesn't need either one.
+
+## Folder Layout
 
 ### Recommended
 
-- Leave retail Prey (2006) in its original installation folder.
-- Keep openPREY in a separate folder.
-- Let openPREY detect the retail `base/` assets automatically.
+- Leave PREY in its original install folder.
+- Keep openPREY in its own folder, such as the staged `.install/`.
+- Let openPREY find the retail `base/` folder by itself.
 
-### Portable / Manual
+### Portable
 
-If you prefer a self-contained setup, keep these side by side in the same root folder:
+If you'd rather keep everything in one place, put these side by side in the same folder and start openPREY from there:
 
-- `basepr/` from openPREY
-- `base/` copied from your Prey (2006) install
+- `base/`, copied from your PREY install
+- `basepr/` and the executables from openPREY's `.install/`
 
 > [!IMPORTANT]
-> Do **not** copy retail PK4 files into `basepr/`. That folder is for openPREY runtime files.
+> Don't copy retail `.pk4` files into `basepr/`. That folder is for openPREY's own files.
+
+## Where Your Files Go
+
+Configs, saves and logs go to a per-user folder, not to the PREY install:
+
+| Platform | Default folder |
+|---|---|
+| Windows | `%LOCALAPPDATA%\openPREY` |
+| Linux | `$XDG_DATA_HOME/openprey`, or `~/.local/share/openprey` when `XDG_DATA_HOME` isn't set |
+
+openPREY's files sit in the `basepr/` folder inside it. To keep a separate set, for example while testing, launch with `+set fs_savepath "<folder>"`.
 
 ## Platform Notes
 
 ### Windows
 
-- You can use the matching installer or the `.zip` release.
-- Windows release packages are meant to be self-contained.
-- Current validation focuses on Windows 11 and Windows 10. Windows 7/8/8.1 remain legacy compatibility targets rather than the main test matrix.
-- If openPREY crashes, check the `crashes/` folder beside the executable for log and dump files.
-- Windows ARM64 packages are experimental. Nothing has started an openPREY Windows ARM64 binary automatically yet, and no real-hardware report has confirmed that the packages run. If the renderer does not start on a Windows on Arm device, launch with `+set r_renderApi vulkan`. Please report what happens, including runs that simply work, with the Windows ARM64 issue template.
+- The staged package carries everything it needs: the static runtime, so no Visual C++ redistributable, and the `OpenAL32.dll` that [BUILDING.md](../../BUILDING.md#windows-openal-runtime) has you prepare before staging.
+- If openPREY crashes, look in the `crashes/` folder beside the executable for the crash log and minidump.
 
 ### Linux
 
-- For the simplest desktop launch, download `openprey-<version>-x86_64.AppImage` on x64 or the clearly marked `openprey-<version>-preview-aarch64.AppImage` on ARM64, then run `chmod +x openprey-*.AppImage` and launch the file. It does not need system-wide installation.
-- The AppImage contains openPREY and its packaged runtime dependencies, but it does **not** contain Prey (2006) assets. Point it at your existing install with `+set fs_basepath "/path/to/Prey"` when automatic discovery does not find it.
-- The `.tar.xz` archive remains available when you want the loose client, dedicated server, Steam Deck launcher, desktop metadata, or offline documentation as ordinary files. Extract it to a folder of your choice.
-- Linux packages default to the SDL3 runtime path and should be treated as targeting an Ubuntu 24.04-class 64-bit desktop userspace with working OpenGL plus Wayland/EGL or X11/GLX support.
-- Linux ARM64 packages are preview builds until real ARM64 hardware completes native-Wayland SP/MP gameplay, dedicated-server, audio, input, and package signoff.
-- Linux ARM64 requires 64-bit little-endian AArch64 hardware and a desktop OpenGL compatibility driver. GLES-only boards are not covered by the current package.
-
-### Experimental macOS
-
-- macOS support is experimental. Current packages are for Apple Silicon/arm64 Macs on macOS 11 or later. Intel Mac and universal2 packages are not published yet, and Rosetta is not a supported release target.
-- Packaged macOS release/signing lanes are not currently enabled. Build from source only if you are prepared to diagnose an experimental target.
-- The Metal bridge package still uses openPREY's OpenGL renderer path; it is not a native Metal renderer.
-- Both macOS packages also carry openPREY's experimental Vulkan renderer. Apple ships no Vulkan driver, so on macOS it runs on top of MoltenVK, a Vulkan-on-Metal translation layer bundled inside the package. It is a translation layer, not a Metal renderer.
-- macOS builds bundle OpenAL Soft for audio; no Homebrew or separate audio install is required.
-- Fresh macOS configurations use Automatic, which tries Vulkan through MoltenVK and falls back to OpenGL; a saved OpenGL choice stays on OpenGL. Vulkan is a runtime option rather than a separate download, so there is no third macOS package to install.
-- Expect problems if you try it. macOS support is experimental, the Vulkan renderer is experimental on macOS, and this combination has no accepted openPREY testing on real Apple hardware yet. If it cannot start, including while creating the window, openPREY logs the reason and renders with OpenGL instead. To stay on OpenGL, run `r_renderApi gl` and restart. See [Display Settings](display-settings.md#vulkan-on-macos-through-moltenvk).
-- Unsigned macOS archives are ad-hoc signed only for bundle validity, are not notarized, and may require normal Gatekeeper approval on first launch.
-- A future macOS app bundle will contain openPREY's `basepr` data and one unified game module. Do not copy retail `base` assets into an app bundle.
-- For crashes like GitHub issue #73, attach full terminal output as text plus `openprey.log` and any `.ips` report. See [Experimental macOS Support Data](macos-support-data.md), and run `collect_macos_support_info.sh` from the package root when it is included.
-
-### Steam Deck
-
-- Use `openPREY-steamdeck` when it is included in the package. It enables the `steamdeck` platform profile and sets `OPENPREY_STEAMDECK=1`.
-- Direct `openPREY-client_<arch>` launches on Steam Deck or SteamOS also auto-select the Deck profile while `com_platformProfile` is still `default`.
-- Native Wayland is the default SDL path when available. Set `OPENPREY_FORCE_X11=1` to force the XWayland fallback from either the Steam Deck launcher or a direct client launch.
-- If a native Wayland compositor has libdecor-related startup or window-decoration trouble, set `OPENPREY_WAYLAND_DISABLE_LIBDECOR=1` for that launch.
-- Tune Deck controller behavior under `Settings -> Game Options -> Controller`, including gyro, touchpad mode, touchscreen routing, and low-battery rumble caps.
-- Run `listControllers` from the console when reporting Deck input, battery, gyro, touchpad, or touchscreen issues.
-- For more detail, see the [Steam Deck guide](steam-deck.md).
+- SDL3 picks native Wayland or X11 automatically. Set `OPENPREY_FORCE_X11=1` to force the XWayland fallback.
+- If a Wayland compositor has trouble with window decorations at startup, set `OPENPREY_WAYLAND_DISABLE_LIBDECOR=1` for that launch.
+- Install the system development packages listed in [BUILDING.md](../../BUILDING.md) before you build.
 
 ## If Auto-Detection Fails
 
-Point openPREY at the **Prey (2006) root folder** that contains `base/`.
-
-Example:
+Point openPREY at the **PREY root folder**, the one that contains `base/`:
 
 ```text
-openPREY-client_x64 +set fs_basepath "C:\path\to\Prey (2006)"
+openPREY-client_x64 +set fs_basepath "C:\path\to\Prey"
 ```
 
-Do not point it directly at `base/` or `basepr/`.
+Don't point it at `base/` or `basepr/` themselves.
 
-For advanced path behavior and file layout details, see [TECHNICAL.md](../../TECHNICAL.md).
+For more on paths and file layout, see the [Technical Reference](../../TECHNICAL.md#file-system-and-validation).
+
+## Reporting a Problem
+
+Open an [issue](https://github.com/themuffinator/openPREY/issues) with your setup and a log. Launch with `+set logFile 2`, reproduce the problem, and attach the `qconsole.log` it writes to `basepr/` in your save folder. On Windows, attach anything new in `crashes/` too.
 
 ## Next Steps
 
-- Want better video options? See [Display Settings](display-settings.md).
-- Want to tune controls? See [Input Settings](input-settings.md).
-- Want a quick overview of player-facing options? See [Client Settings Guide](client-settings.md).
-- Want to host games? See [Server Setup Guide](server-setup.md).
+- [Client Settings](client-settings.md): where the most useful options live
+- [Display Settings](display-settings.md): window modes, resolution, monitors and anti-aliasing
+- [Input Settings](input-settings.md): bindings, mouse and controllers
+- [Server Setup](server-setup.md): hosting a multiplayer game

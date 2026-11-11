@@ -1,10 +1,9 @@
 # DDS Texture Replacements
 
 > [!NOTE]
-> This page documents inherited engine/tooling capability. Retail Prey behavior remains
-> runtime-validation pending unless the rebase status ledger records specific evidence.
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
-openPREY can use DDS texture-pack replacements without changing the original Prey (2006) materials. This includes the stock game's `progimg/` image-program results, dhewm3-style `dds/` packs, and same-folder replacements used by some Prey (2006) packs.
+openPREY can use DDS texture-pack replacements without changing the original PREY (2006) materials. This includes the stock game's `progimg/` image-program results, dhewm3-style `dds/` packs, and same-folder replacements used by some PREY (2006) packs.
 
 ## Where files belong
 
@@ -23,13 +22,13 @@ basepr/
         wall01.dds
 ```
 
-A `.dds` placed next to the original asset path instead — `basepr/textures/stone/wall01.dds`, the layout some Prey (2006) packs use — also works. The `dds/` tree is preferred and wins if both exist.
+A `.dds` placed next to the original asset path instead — `basepr/textures/stone/wall01.dds`, the layout some PREY (2006) packs use — also works. The `dds/` tree is preferred and wins if both exist.
 
-`base/dds/...` is on the search path too, but keep your files in `basepr` so a Steam file verification does not delete them.
+`base/dds/...` is on the search path too, but keep your files in `basepr` so they stay apart from the retail install and survive a reinstall or repair of PREY.
 
 ### Bump maps and other image programs
 
-Prey (2006) materials rarely name a bump texture directly. They usually write an image *program*:
+PREY (2006) materials rarely name a bump texture directly. They usually write an image *program*:
 
 ```text
 bumpmap addnormals( textures/stone/wall01_local, heightmap( textures/stone/wall01_h, 4 ) )
@@ -37,7 +36,7 @@ bumpmap addnormals( textures/stone/wall01_local, heightmap( textures/stone/wall0
 
 You can replace either end of that:
 
-- **Replace an input.** Shipping `dds/textures/stone/wall01_local.dds` replaces the source texture and openPREY recomputes the program result on load. This is the simplest option and is what a Prey (2006)-shaped pack normally does.
+- **Replace an input.** Shipping `dds/textures/stone/wall01_local.dds` replaces the source texture and openPREY recomputes the program result on load. This is the simplest option and is what a PREY (2006)-shaped pack normally does.
 - **Replace the finished result.** Name the file after the whole program using dhewm3's mangling:
 
   ```text
@@ -55,7 +54,7 @@ For each image, openPREY probes in this order and takes the first usable file:
 
 1. `dds/<image program name>.dds` — the dhewm3 naming scheme
 2. `dds/<asset path>.dds` — for plain image references
-3. `<asset path>.dds` — beside the original `.tga`/`.jpg`, the Prey (2006) style
+3. `<asset path>.dds` — beside the original `.tga`/`.jpg`, the PREY (2006) style
 4. `progimg/...` — the stock precomputed results shipped in the retail PK4s
 
 The retail `progimg/` tree is probed **last**, so a user replacement always wins. openPREY recognizes those retail paths automatically, including nested image programs and plain `gfx/env/` cube sides; you do not need to extract, rename, or regenerate the retail files.
@@ -65,19 +64,11 @@ The retail `progimg/` tree is probed **last**, so a user replacement always wins
 Set `image_usePrecompressedTextures` before loading a map:
 
 - `0` disables automatic DDS replacements entirely, including your own packs.
-- `1` (default) uses any supported DDS replacement — DXT1, DXT5, RXGB and BC7 — and also reuses the stock `progimg/` files shipped in the Prey (2006) PK4s. **This is the right setting for a BC7 pack.**
+- `1` (default) uses any supported DDS replacement — DXT1, DXT5, RXGB and BC7 — and also reuses the stock `progimg/` files shipped in the PREY (2006) PK4s. **This is the right setting for a BC7 pack.**
 - `2` uses only BC7/BPTC replacements and ignores DXT/RXGB data, including the stock `progimg/` tree. Use this only if you specifically want everything else to come from the uncompressed sources.
 
 BC7 requires a renderer with BPTC support. Run `gfxInfo` and look for the BC7/BPTC capability line if a pack is not being selected.
 DXT/RXGB files fall back to CPU decoding when direct texture-compression upload is unavailable. A BC7 file on a renderer without BPTC support is uploaded uncompressed rather than failing the load.
-
-> **macOS has no BC7.** BPTC entered OpenGL in 4.2, and Apple's OpenGL
-> implementation stops at 4.1 — and at 2.1 on the compatibility profile openPREY
-> actually runs there. `gfxInfo` reports `BC7/BPTC=0` on every Mac, Apple
-> Silicon and Intel alike, and every BC7 file is uploaded uncompressed. This is
-> a platform limit, not a configuration problem: no cvar, driver update or
-> `image_usePrecompressedTextures` value changes it. Ship DXT/RXGB alongside BC7
-> if Mac users matter to your pack.
 
 ## BC7 file requirements
 

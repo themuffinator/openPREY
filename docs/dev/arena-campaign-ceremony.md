@@ -2,7 +2,7 @@
 
 The single-player Arena Campaign (`src/framework/ArenaCampaign.*`) runs each
 match as an offline listen server hosted by `game_mp`. Player-facing behaviour
-is described in [the player guide](../user/arena-campaign.md); this note records
+is described in [the player guide](https://github.com/themuffinator/openQ4/blob/main/docs/user/arena-campaign.md); this note records
 how the match ceremony is built, the contracts between the framework and the
 game module, and the 2026-10 audit that reworked it.
 

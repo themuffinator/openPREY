@@ -1,6 +1,6 @@
 # Android/GLES — integration and release notes
 
-> **Unreleased development notes.** 0.13.2 has no Android APK; the 0.14.0 release was withdrawn. See [release status](../../user/release-status.md).
+> **Unreleased development notes.** 0.13.2 has no Android APK; the 0.14.0 release was withdrawn. See [release status](https://github.com/themuffinator/openQ4/blob/main/docs/user/release-status.md).
 
 ## Highlights
 

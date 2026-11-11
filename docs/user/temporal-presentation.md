@@ -1,10 +1,17 @@
 # Temporal AA And Dynamic Resolution
 
-> **Development documentation:** This page follows the current source tree and may describe changes newer than the public download. See [release status and released-version guides](release-status.md) before using it with a release package.
+> [!NOTE]
+> Inherited from openQ4 and not yet checked against PREY. This page describes what the engine code does; PREY behavior stays validation-pending until the [rebase status ledger](../dev/prey-rebase/status-ledger.md) records evidence for it.
 
-openQ4's temporal anti-aliasing (TAA) collects detail from several frames. On
-OpenGL and Vulkan it smooths edges and upscales a lower-resolution 3D scene
-back to your screen far more cleanly than a plain stretch.
+The engine's temporal anti-aliasing (TAA), inherited from openQ4, collects
+detail from several frames. On OpenGL and Vulkan it smooths edges and upscales
+a lower-resolution 3D scene back to your screen far more cleanly than a plain
+stretch.
+
+openPREY's first rendering target is the legacy GL/ARB2 interaction path that
+matches PREY's original materials. Full PREY parity on the ModernGL and Vulkan
+paths is deferred (`TODO-RENDER-BACKENDS` in the ledger), and nobody has yet
+checked how TAA treats PREY's portals, spirit walk or glow effects.
 
 ## Automatic upscaling (default)
 
@@ -13,11 +20,11 @@ when the 3D scene renders below your screen's resolution, either because
 `r_screenFraction` is below `100` or because dynamic resolution is on. At
 native resolution it stays off, and your MSAA and SMAA settings apply as
 before. The **Performance**, **Low**, **Low Power** and **Minimum** presets render below
-native resolution, so they now get temporal upscaling.
+native resolution, so they get temporal upscaling.
 
 Automatic mode leaves the `0` (cropped) and `3` (nearest-neighbour) scale modes
 alone, because those looks are chosen on purpose. It also stays off on
-OpenGL ES and on OpenGL contexts without GLSL 1.30.
+OpenGL contexts without GLSL 1.30.
 
 | Setting | Default | What it does |
 |---|---:|---|
@@ -73,6 +80,6 @@ last frame's motion tracking covered (`Temporal ownership`). Set
 `r_temporalAA 0` and `r_rendererDynamicResolution 0` to restore the plain
 SMAA/spatial presentation path immediately.
 
-Profiles saved by an earlier version that had `r_temporalAA 0` move to the
-automatic default once. Set `r_temporalAA 0` again afterwards to keep temporal
-AA off; that choice is kept.
+A saved configuration with `r_temporalAA 0` from before the automatic default
+existed moves to the automatic default once. Set `r_temporalAA 0` again
+afterwards to keep temporal AA off; that choice is kept.
