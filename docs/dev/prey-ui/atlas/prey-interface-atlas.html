@@ -196,7 +196,7 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
 
 <div class="wrap">
 <header class="top">
-  <div class="eyebrow">openPREY · visual specification 1.8 · 11 November 2026</div>
+  <div class="eyebrow">openPREY · visual specification 1.9 · 11 November 2026</div>
   <div class="mark">
     <svg id="hdrMark" viewBox="0 0 476 64" role="img" aria-label="PREY wordmark reconstruction"></svg>
     <h1>Interface Atlas</h1>
@@ -305,7 +305,7 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
   <div class="stage"><svg id="ctlSvg" viewBox="0 0 640 400" role="group" aria-label="Options page controls"></svg></div>
   <div class="ctl"><span class="seg"><span class="lbl">Edit field</span></span><label class="edit" for="nameField"><input id="nameField" maxlength="32" placeholder="Profile name" value="Tawodi" aria-label="Edit field"></label><button class="pb" id="dlgBtn">Open the Reset Defaults dialog</button></div>
   <div class="notes">
-    <p class="cap"><b>Top tabs</b> inactive opaque <b>#252831</b>; active <b>#7F95AA</b> → <b>#222A31</b> top to foot under a <b>#B3C6E2</b> rim. <b>Side tabs</b> inactive <b>#3E4C61</b> 0.45; active <b>#5A6E80</b> → <b>#222A31</b> with a <b>#A7BFD7</b> rim. Labels <b>#B5C9E3</b> 0.7, hover <b>#CCDEFA</b>, active white. <b>No seam</b> the active tab ends in <b>#222A31</b>, the page's fade begins in it at 0.93, and the <b>#BDCFE0</b> outline breaks across the active tab.</p>
+    <p class="cap"><b>Top tabs</b> inactive opaque <b>#252831</b>; active <b>#7F95AA</b> → <b>#222A31</b> top to foot under a <b>#B3C6E2</b> rim. <b>Side tabs</b> inactive <b>#3E4C61</b> 0.45; active <b>#5A6E80</b> → <b>#222A31</b> with a <b>#A7BFD7</b> rim. Labels <b>#B5C9E3</b> 0.7, hover <b>#CCDEFA</b>, active white. <b>No seam</b> the active tab ends in <b>#222A31</b>, the page's fade begins in it at 0.93, and the <b>#BDCFE0</b> outline breaks across the active tab only. <b>Inactive tabs</b> stop at the outline, which runs whole beneath them.</p>
     <p class="cap"><b>Check box</b> 12×12 u, ground <b>#39424A</b>, cross <b>#ABC5DD</b>, 1 u border <b>#B8C9E6</b> → white on hover; label 8 u after the box. <b>Radio</b> 1 u <b>#CCDEFA</b> border, selected fill <b>#99ABC7</b> 0.7. <b>Slider</b> 100×16 u, dark rail, ring knob <b>#BBCDDE</b>.</p>
     <p class="cap"><b>List</b> rows body face 0.25–0.34 <b>#A6BAD4</b>; selection <b>#A6BAD4</b> 0.30 with a <b>#B5C9E3</b> 0.7 outline; headings white, <em>#E6CC73</em> on hover in the server browser. <b>Dialog</b> Reset Defaults: 0.80 black scrim, 360×250 u claw frame.</p>
   </div>
@@ -537,17 +537,20 @@ function portrait(p, x, y, s) {
   return g;
 }
 /* An active tab and its page are one surface: the tab's art ends in opaque #222A31 where it meets the page,
-   the page's fade begins in the same colour, and the page's outline breaks across the active tab. `page` is the
+   the page's fade begins in the same colour, and the page's outline breaks across the active tab. An inactive
+   tab is a separate plate: it stops short of the page's outline, which runs whole beneath it. `page` is the
    tabPage the tabs belong to; coordinates are those of the shared parent. */
 function topTabs(p, x, y, w, h, labels, active, onPick, page) {
   const g = el("g", { transform: `translate(${x} ${y})` }, p), tw_ = w / labels.length, items = [];
   labels.forEach((s, i) => {
     const t = el("g", { transform: `translate(${i * tw_} 0)`, tabindex: 0, role: "button", "aria-label": s }, g); t.style.cursor = "pointer";
-    /* the plate runs a hair into the page; its rim covers the top and both ends, never the foot */
-    const sh = el("path", { d: `M0 ${h}C3 ${h} 4 0 11 0H${tw_ - 3}L${tw_ - 1} ${h}V${h + .6}H0Z` }, t);
+    /* active: the plate runs a hair into the page; its rim covers the top and both ends, never the foot.
+       inactive: the plate ends on the upper side of the page's 1 u outline and leaves it uncovered */
+    const on = `M0 ${h}C3 ${h} 4 0 11 0H${tw_ - 3}L${tw_ - 1} ${h}V${h + .6}H0Z`, off = `M0 ${h - .5}C3 ${h - .5} 4 0 11 0H${tw_ - 3}L${tw_ - 1} ${h - .5}Z`;
+    const sh = el("path", { d: off }, t);
     const rim = el("path", { d: `M0 ${h}C3 ${h} 4 0 11 0H${tw_ - 3}L${tw_ - 1} ${h}`, fill: "none", stroke: "#B3C6E2", "stroke-width": 1 }, t);
     const lb = txt(t, tw_ / 2, h / 2 + em(.28) * BODY_CAP / 2, s, em(.28), {});
-    items.push({ sh, rim, lb, t });
+    items.push({ sh, rim, lb, t, on, off });
     const pick = () => { set(i); if (onPick) onPick(i); };
     t.addEventListener("click", pick); t.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
     /* hoverMatColor: the plate takes a 0.7 grey tint */
@@ -555,7 +558,7 @@ function topTabs(p, x, y, w, h, labels, active, onPick, page) {
   });
   let cur = active;
   function paint() {
-    items.forEach((it, i) => { const a = i === cur; it.sh.setAttribute("fill", a ? "url(#gTabA)" : "#252831"); it.rim.style.display = a ? "" : "none"; it.lb.setAttribute("fill", a ? "#fff" : "#B5C9E3"); it.lb.setAttribute("fill-opacity", a ? 1 : .7); it.t.setAttribute("aria-pressed", a); });
+    items.forEach((it, i) => { const a = i === cur; it.sh.setAttribute("d", a ? it.on : it.off); it.sh.setAttribute("fill", a ? "url(#gTabA)" : "#252831"); it.rim.style.display = a ? "" : "none"; it.lb.setAttribute("fill", a ? "#fff" : "#B5C9E3"); it.lb.setAttribute("fill-opacity", a ? 1 : .7); it.t.setAttribute("aria-pressed", a); });
     if (page) page.gap("top", x + cur * tw_, x + (cur + 1) * tw_ - 1);
   }
   function set(i) { cur = i; paint(); }
@@ -567,17 +570,19 @@ function sideTabs(p, x, y, w, h, labels, active, page) {
   let cur = active;
   labels.forEach((s, i) => {
     const t = el("g", { transform: `translate(0 ${i * th})`, tabindex: 0, role: "button", "aria-label": s }, g); t.style.cursor = "pointer";
-    /* the rim runs along the top, the leading edge and the foot; the trailing edge is the page */
-    const sh = el("path", { d: `M9 1.5H${w + .6}V${th - 1.5}H0V10.5Z` }, t);
+    /* active: the rim runs along the top, the leading edge and the foot; the trailing edge is the page.
+       inactive: the plate ends on the near side of the page's outline and leaves it uncovered */
+    const on = `M9 1.5H${w + .6}V${th - 1.5}H0V10.5Z`, off = `M9 1.5H${w - .5}V${th - 1.5}H0V10.5Z`;
+    const sh = el("path", { d: off }, t);
     const rim = el("path", { d: `M${w} 1.5H9L0 10.5V${th - 1.5}H${w}`, fill: "none", stroke: "#A7BFD7", "stroke-width": 1 }, t);
     const lb = txt(t, w / 2, th / 2 + em(.33) * BODY_CAP / 2, s, em(.33), {});
-    items.push({ sh, rim, lb, t });
+    items.push({ sh, rim, lb, t, on, off });
     const pick = () => { cur = i; paint(); };
     t.addEventListener("click", pick); t.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
     hover(t, () => { if (i !== cur) { lb.setAttribute("fill", "#CCDEFA"); lb.setAttribute("fill-opacity", 1); } }, () => paint());
   });
   function paint() {
-    items.forEach((it, i) => { const a = i === cur; it.sh.setAttribute("fill", a ? "url(#gSide)" : "#3E4C61"); it.sh.setAttribute("fill-opacity", a ? 1 : .45); it.rim.style.display = a ? "" : "none"; it.lb.setAttribute("fill", a ? "#fff" : "#B5C9E3"); it.lb.setAttribute("fill-opacity", a ? 1 : .7); it.t.setAttribute("aria-pressed", a); });
+    items.forEach((it, i) => { const a = i === cur; it.sh.setAttribute("d", a ? it.on : it.off); it.sh.setAttribute("fill", a ? "url(#gSide)" : "#3E4C61"); it.sh.setAttribute("fill-opacity", a ? 1 : .45); it.rim.style.display = a ? "" : "none"; it.lb.setAttribute("fill", a ? "#fff" : "#B5C9E3"); it.lb.setAttribute("fill-opacity", a ? 1 : .7); it.t.setAttribute("aria-pressed", a); });
     if (page) page.gap("left", y + cur * th + 1.5, y + (cur + 1) * th - 1.5);
   }
   paint();

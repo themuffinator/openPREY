@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.8, 11 November 2026.
+Specification version 1.9, 11 November 2026.
 
 Status: reference survey and design contract. openPREY still renders the stock
 Prey GUIs; no replacement interface has been built. Sections 1 to 11 record
@@ -536,13 +536,19 @@ exceptions.
   2. The active tab's rim covers only its free edges: the top and both ends
      of a top tab; the top, leading edge and foot of a side tab. No rim, line
      or shadow runs along the edge that touches the page.
-  3. The tab and the page meet without a gap or an overlap that shows: the
-     tab's plate runs to the page's edge at every scale, and nothing is drawn
-     between them.
+  3. The active tab and the page meet without a gap or an overlap that shows:
+     the active tab's plate runs to the page's edge at every scale, and
+     nothing is drawn between them.
+- **Only the active tab is joined. Every inactive tab keeps its seam.** The
+  page's outline runs whole and at full strength along each inactive tab,
+  top tabs and side tabs alike, and parts it from the page. An inactive
+  tab's plate stops at the outline and never covers, dims or interrupts it,
+  under hover and focus as well as at rest. When the selection moves, the
+  line returns under the tab that was left in the same frame as it opens
+  under the tab that was chosen.
 
-  Inactive tabs keep the page's outline beneath them. The rule holds in
-  every state: at rest, under hover and focus, while a page grows, and at
-  every aspect and resolution.
+  Both rules hold in every state: at rest, under hover and focus, while a
+  page grows, and at every aspect and resolution.
 
 ### Controls
 
@@ -1626,6 +1632,16 @@ does not change them.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.9, 11 November 2026
+
+Section 6 states the other half of the tab rule in its own right: only the
+active tab is joined to its page, and every inactive tab keeps the page's
+outline beneath it, whole and at full strength. Version 1.7 said so in one
+sentence, and the Interface Atlas broke it: its tab plates all ran 0.6 u
+into the page, so the opaque inactive top tabs covered the outline and the
+translucent inactive side tabs dimmed it. The atlas now ends an inactive
+plate at the outline and runs only the active plate into the page.
 
 ### Version 1.8, 11 November 2026
 
