@@ -115,7 +115,7 @@ conservative validation states unless that evidence directly exercises them.
 | `RD-03` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `RD-04` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `RD-05` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
-| `RD-06` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
+| `RD-06` | PORTED | IMPLEMENTED | RUNTIME-CHECKED | Subview order, skybox scissor and nesting follow retail `PREY.exe`; skybox portals, direct portals and the Roadhouse mirror match between OpenGL and Vulkan in `screenshot` captures (11 November 2026). Mirror and portal clip planes stay disabled. See `docs/dev/prey-subviews.md`. |
 | `RD-07` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `RD-08` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `RD-09` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |

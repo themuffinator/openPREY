@@ -15064,6 +15064,7 @@ typedef struct vkDepthFillState_s {
 	VkPipeline					boundPipeline;	// same-value re-binds are skipped
 	VkDescriptorSet				boundSet;
 	VkViewport					viewport;		// maxDepth follows the weapon range
+	bool						depthOnly;		// leave colour alone (see the prepass in VK_GuiExecutor_Draw3DView)
 } vkDepthFillState_t;
 
 static bool VK_Exec_FillDepthSurface( VkCommandBuffer cmd, int slot, const viewDef_t *viewDef,
@@ -15139,7 +15140,8 @@ static bool VK_Exec_FillDepthSurface( VkCommandBuffer cmd, int slot, const viewD
 	push.params[ 2 ] = 0.0f;
 	push.params[ 3 ] = 0.0f;	// no texmatrix
 
-	const int fillBlendBits = isSubview ? ( GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO ) : 0;
+	const int fillBlendBits = isSubview ? ( GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO )
+		: ( fill.depthOnly ? ( GLS_COLORMASK | GLS_ALPHAMASK ) : 0 );
 
 	bool drawSolid = shader->Coverage() == MC_OPAQUE;
 
@@ -15292,6 +15294,7 @@ bool VK_Exec_DrawWorldDepth( const viewDef_t *viewDef, bool ( *accept )( const d
 
 	fill.currentSpace = NULL;
 	fill.weaponDepthRange = false;
+	fill.depthOnly = false;
 	VK_FixupClipSpaceZ( fill.mvp, viewDef->projectionMatrix );
 	fill.boundPipeline = VK_NULL_HANDLE;
 	fill.boundSet = VK_NULL_HANDLE;
@@ -15479,6 +15482,7 @@ void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 	fill.boundPipeline = VK_NULL_HANDLE;
 	fill.boundSet = VK_NULL_HANDLE;
 	fill.viewport = viewport;
+	fill.depthOnly = false;
 
 	// ---- pass 1: depth fill (RB_STD_FillDepthBuffer contract) ----
 	// SSAO and the cel world ink want depth snapshots of part of the scene
@@ -15486,9 +15490,23 @@ void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 	// than a separate fill and clear, the fill draws those surfaces first
 	// and vk_PostProcess.cpp copies depth between the phases.
 	const int worldDepthCaptures = VK_PostProcess_WorldDepthCaptures( viewDef );
+	// A direct subview surface (a mirror, a Prey portal or skybox portal) keeps
+	// the image its subview drew: its fill only modulates colour, while every
+	// other surface fills black. The classic prepass protects that image with
+	// sort order alone, SS_SUBVIEW first, so a wall behind a portal fails the
+	// depth test before it can paint. The capture phases draw the world ahead
+	// of the subview surfaces and so blacked out any portal with world behind
+	// it. With such a surface in the view they write depth only, and phase 4
+	// lays their black down once the subview surfaces' depth is in place.
+	bool deferCaptureColor = false;
+	for ( int surfNum = 0; worldDepthCaptures != 0 && !deferCaptureColor && surfNum < numDrawSurfs; surfNum++ ) {
+		const idMaterial *material = drawSurfs[ surfNum ]->material;
+		deferCaptureColor = material != NULL && material->GetSort() == SS_SUBVIEW;
+	}
+	const int lastFillPhase = deferCaptureColor ? 4 : 3;
 	int fillPhaseDrawn[ 4 ] = { 0, 0, 0, 0 };
 	vkGpuPhaseScope depthTiming( cmd, VK_GPU_PHASE_WORLD_DEPTH, profileMainView );
-	for ( int fillPhase = worldDepthCaptures != 0 ? 0 : 3; fillPhase < 4; fillPhase++ ) {
+	for ( int fillPhase = worldDepthCaptures != 0 ? 0 : 3; fillPhase <= lastFillPhase; fillPhase++ ) {
 		vkCmdSetDepthTestEnable( cmd, VK_TRUE );
 		vkCmdSetDepthWriteEnable( cmd, VK_TRUE );
 		vkCmdSetDepthCompareOp( cmd, VK_COMPARE_OP_LESS_OR_EQUAL );
@@ -15496,14 +15514,18 @@ void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 		// the GL fill runs under RB_BeginDrawingView's front-sided cull
 		vkCmdSetFrontFace( cmd, VK_Exec_CanonicalFrontFace() );
 		vkCmdSetCullMode( cmd, viewDef->isMirror ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_FRONT_BIT );
+		fill.depthOnly = deferCaptureColor && fillPhase < 3;
 
 		for ( int surfNum = 0; surfNum < numDrawSurfs; surfNum++ ) {
 			const drawSurf_t *drawSurf = drawSurfs[ surfNum ];
-			if ( worldDepthCaptures != 0
-					&& VK_PostProcess_DepthFillPhase( drawSurf, worldDepthCaptures ) != fillPhase ) {
-				continue;
+			if ( worldDepthCaptures != 0 ) {
+				const int surfPhase = VK_PostProcess_DepthFillPhase( drawSurf, worldDepthCaptures );
+				// phase 4 redraws the capture phases' surfaces for their colour
+				if ( fillPhase == 4 ? surfPhase >= 3 : surfPhase != fillPhase ) {
+					continue;
+				}
 			}
-			if ( VK_Exec_FillDepthSurface( cmd, slot, viewDef, drawSurf, fbHeight, fill ) ) {
+			if ( VK_Exec_FillDepthSurface( cmd, slot, viewDef, drawSurf, fbHeight, fill ) && fillPhase < 4 ) {
 				fillPhaseDrawn[ fillPhase ]++;
 			}
 		}
