@@ -120,6 +120,8 @@ the pages in the engine (below) found four faults, all fixed:
 `openq4_guiFocus [next|previous]` steps a classic GUI's focus as the arrow
 keys do and reports the focused window, its rectangle and whether it is
 shown. It raises the same event inside the engine and touches no device.
+`openq4_guiCursor <x> <y>` places a classic GUI's pointer at x,y of its
+640x480 canvas, as the mouse would, so a capture can show the pointer.
 
 ## Focus on the retained settings pages
 

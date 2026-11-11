@@ -1147,7 +1147,14 @@ alien hand (`def/player.def:490`, `def/items.def:90`). The 2D cursors are a
 faceted silver-blue arrow, a white pointing hand and the organic chrome menu
 cursor (`guis/assets/guicursor_*.tga`). Roadhouse cabinets ask for the
 "Earth" cursor (`cursor 2`). The retail mapping of cursor numbers to images is
-not in the data.
+not in the data; retail `PREY.exe` 1.4 loads them as arrow 0, hand 1 and menu
+2, as Doom 3 does.
+
+All three are 32-texel art. Retail draws the pointer's box at 16 units of the
+640x480 canvas on a menu GUI (`menugui 1`) and at 32 on a world GUI, half
+Doom 3's 32 and 64 (`idUserInterfaceLocal::DrawCursor` in `PREY.exe` 1.4). The
+hotspot is the box's top-left corner. With aspect correction the box stays
+square and scales with the canvas height, as the menu does.
 
 ### 11.7 Rules for device changes
 

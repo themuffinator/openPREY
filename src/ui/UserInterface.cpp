@@ -1648,10 +1648,13 @@ void idUserInterfaceLocal::DrawCursor() {
 	if ( idKeyInput::LastPointerWasTouch() ) {
 		return;
 	}
+	// openPREY: retail Prey's pointer box (PREY.exe 1.4), half Doom 3's for the
+	// same 32-texel art: 16 units of the 640x480 canvas on a menu, 32 on a
+	// world GUI.
 	if ( !desktop || desktop->GetFlags() & WIN_MENUGUI ) {
-		uiManagerLocal.dc.DrawCursor(&cursorX, &cursorY, 15.0f );
+		uiManagerLocal.dc.DrawCursor(&cursorX, &cursorY, 16.0f );
 	} else {
-		uiManagerLocal.dc.DrawCursor(&cursorX, &cursorY, 64.0f );
+		uiManagerLocal.dc.DrawCursor(&cursorX, &cursorY, 32.0f );
 	}
 }
 

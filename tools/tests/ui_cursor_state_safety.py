@@ -51,6 +51,12 @@ def main() -> None:
     ):
         require(clamp_cursor, token, "GUI cursor normalization")
 
+    # openPREY: retail Prey's pointer box (PREY.exe 1.4), 16 canvas units on a
+    # menu GUI and 32 on a world GUI.
+    draw_cursor = between(source, "void idUserInterfaceLocal::DrawCursor()", "const idDict &idUserInterfaceLocal::State()")
+    require(draw_cursor, "DrawCursor(&cursorX, &cursorY, 16.0f );", "menu GUI pointer size")
+    require(draw_cursor, "DrawCursor(&cursorX, &cursorY, 32.0f );", "world GUI pointer size")
+
     demo_restore = between(source, "void idUserInterfaceLocal::ReadFromDemoFile", "void idUserInterfaceLocal::WriteToDemoFile")
     require(demo_restore, "SetCursor( restoredCursorX, restoredCursorY );", "GUI demo cursor restore")
     save_restore = between(source, "bool idUserInterfaceLocal::ReadFromSaveGame", "void idUserInterfaceLocal::SetKeyBindingNames")
