@@ -1855,6 +1855,12 @@ if host_system == 'windows' and resource_compiler.found()
     # rc.exe reports no header dependencies, so without this the version
     # strings stay at whichever commit first compiled the resource.
     depends: generated_version_header,
+    # Nor does it report the files it embeds: rebuild when the icon or the
+    # startup splash changes.
+    depend_files: files(
+      'assets/icons/prey.ico',
+      'assets/splash/prey_rt_bitmap_4001.bmp',
+    ),
   )
   openq4_engine_sources += openq4_version_resources
 endif

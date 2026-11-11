@@ -5,8 +5,11 @@
 #include "../../../framework/licensee.h"
 
 #define IDI_ICON1 4001
+#define IDB_BITMAP_LOGO 4000
 
 IDI_ICON1 ICON "..\\..\\..\\..\\assets\\icons\\prey.ico"
+// The 512x384 startup splash shown by Sys_ShowSplash (win_syscon.cpp).
+IDB_BITMAP_LOGO BITMAP "..\\..\\..\\..\\assets\\splash\\prey_rt_bitmap_4001.bmp"
 
 #define VER_FILEVERSION VERSION_MAJOR_RELEASE,VERSION_MINOR_RELEASE,VERSION_INTERNAL_BUILD,VERSION_BUILD_NUMBER
 #define VER_FILEVERSION_STR VERSION_STRING_DOTTED

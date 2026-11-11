@@ -18,6 +18,7 @@ Engine changes merged from openQ4 are listed in openQ4's own release notes. They
 - Vulkan draws PREY's glow overlay: every `glowStage` material stage is redrawn into a black copy of the view, blurred per axis with `r_glowSteps`, `r_glowAlpha` and `r_glowAlphaChange`, and added over the scene at `r_glowStrength`, as the OpenGL renderer does.
 - The classic GUI pointer is retail PREY's size: 16 canvas units on the menus (it was 15) and 32 on world GUIs (it was Doom 3's 64, twice retail's). `openq4_guiCursor <x> <y>` places a classic GUI's pointer for scripted captures.
 - The in-game and system consoles use the PREY palette instead of Quake 4 amber and olive: the in-game console keeps a black field with portal-cyan text and edge, and the system console is dark Sphere-shell slate.
+- Windows builds show the startup splash, as openQ4 does: a 512x384 borderless window, centred while the engine loads and closed when the game window opens. The Windows resource script never embedded `assets/splash/prey_rt_bitmap_4001.bmp`, so the splash had nothing to show.
 
 ## Build and CI
 
