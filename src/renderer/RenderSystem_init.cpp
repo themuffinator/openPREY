@@ -446,7 +446,7 @@ idCVar r_shadowMapProjectedCSM( "r_shadowMapProjectedCSM", "1", CVAR_RENDERER | 
 idCVar r_shadowMapDepthCompare( "r_shadowMapDepthCompare", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use hardware comparison sampling for projected depth shadow maps when supported; PCSS-lite (r_shadowMapFilterMode 2) implies the manual path" );
 idCVar r_shadowMapTexelBiasScale( "r_shadowMapTexelBiasScale", "0.45", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "texel-aware receiver bias scale for projected and point shadow maps", 0.0f, 8.0f );
 idCVar r_shadowMapNormalOffsetScale( "r_shadowMapNormalOffsetScale", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "normal-offset shadow bias in shadow texels; reduces slope acne but excessive values can move contact edges (point-light use is bounded by r_shadowMapPointMaxWorldBias)", 0.0f, 8.0f );
-idCVar r_shadowMapCasterCulling( "r_shadowMapCasterCulling", "2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow caster face culling: 0 = always two-sided, 1 = force material-oriented near faces, 2 = automatic (near faces for sealed hulls outside the light, two-sided for open/uncertain/enclosing geometry)", 0, 2, idCmdSystem::ArgCompletion_Integer<0,2> );
+idCVar r_shadowMapCasterCulling( "r_shadowMapCasterCulling", "2", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "shadow caster face culling: 0 = always two-sided, 1 = force material-oriented near faces, 2 = automatic (near faces for sealed hulls outside the light, the faces a stencil volume is built from for open geometry: those turned away from the light), 3 = the faces turned away from the light for every caster, 4 = the earlier automatic mode (near faces for sealed hulls, two-sided for everything else)", 0, 4, idCmdSystem::ArgCompletion_Integer<0,4> );
 idCVar r_shadowMapReceiverPlaneBias( "r_shadowMapReceiverPlaneBias", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "enable the experimental derivative receiver-plane depth-bias approximation for projected shadow filters" );
 idCVar r_shadowMapFilterTaps( "r_shadowMapFilterTaps", "9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "projected-light PCF tap budget: 1, 5, 9, or 13", 1, 13, idCmdSystem::ArgCompletion_Integer<1,13> );
 idCVar r_shadowMapPointFilterTaps( "r_shadowMapPointFilterTaps", "9", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light PCF tap budget: 1, 5, 9, or 13", 1, 13, idCmdSystem::ArgCompletion_Integer<1,13> );
@@ -480,6 +480,7 @@ idCVar r_shadowMapTranslucentMinVariance( "r_shadowMapTranslucentMinVariance", "
 idCVar r_shadowMapTranslucentBleedReduction( "r_shadowMapTranslucentBleedReduction", "0.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "light-bleed reduction applied to translucent shadow moment resolve", 0.0f, 0.95f );
 idCVar r_shadowMapGpuSyncTimings( "r_shadowMapGpuSyncTimings", "0", CVAR_RENDERER | CVAR_BOOL, "diagnostic-only: glFinish around shadow-map passes to report GPU-synchronized milliseconds" );
 idCVar r_shadowMapGpuTimerQueries( "r_shadowMapGpuTimerQueries", "1", CVAR_RENDERER | CVAR_BOOL, "use non-blocking GL timer queries for shadow-map GPU diagnostics when available" );
+idCVar r_heatHazeDepthReject( "r_heatHazeDepthReject", "1", CVAR_RENDERER | CVAR_BOOL, "keep heat haze from refracting the first-person weapon and other geometry in front of the haze: a refracted sample nearer than the haze reads the undistorted pixel instead" );
 idCVar r_softParticles( "r_softParticles", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "depth-fade eligible BSE particles against opaque scene depth when GLSL is available" );
 idCVar r_softParticleFadeDistance( "r_softParticleFadeDistance", "64", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "world-unit distance over which r_softParticles fades particle intersections", 1.0f, 512.0f );
 idCVar r_enhancedMaterials( "r_enhancedMaterials", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use enhanced GLSL interaction shading for existing materials when supported" );
@@ -3986,7 +3987,7 @@ void R_ScreenShot_f( const idCmdArgs &args ) {
 		}
 		idList<byte> pixels;
 		if ( !image->ReadPixelsRGBA8( pixels ) ) {
-			common->Printf( "screenshot image: readback requires a loaded single-sample RGBA8 2D image up to 8192x8192\n" );
+			common->Printf( "screenshot image: readback requires a loaded single-sample RGBA8 or RGBA16F 2D image up to 8192x8192\n" );
 			return;
 		}
 		const int width = image->GetUploadWidth(), height = image->GetUploadHeight();
@@ -4733,9 +4734,9 @@ static bool R_GfxInfoObservedMSAA( const int requestedMSAA, const int glMaxSampl
 			// image allocation clamps a multisample texture to the limit
 			msaaReason = "gl-max-clamp";
 		} else {
-			// A target keeps the count it was created with: an r_multiSamples
-			// change waits for vid_restart or a map load, and a refused count
-			// retries lower.
+			// A target keeps the count it was created with: the game rebuilds
+			// its targets on the first scene after an r_multiSamples change,
+			// and a refused count retries lower.
 			msaaReason = "scene-target";
 		}
 	} else {
@@ -5890,6 +5891,83 @@ static GLenum R_ClearPendingGLErrors( void ) {
 		lastErr = err;
 	}
 	return lastErr;
+}
+
+/*
+=================
+R_TryDisplayTransition
+
+Applies a strict display request to the running device. The window changes
+mode, size, display, borders or swap interval in place: OpenGL keeps its
+context and Vulkan rebuilds its swapchain. Every image, buffer and font atlas
+and the world's derived data stay, which is what a full restart spends its
+time rebuilding, and videoRestartCount stays where it was.
+
+The request is refused before anything changes when it needs a new device: a
+window's sample count is fixed when its context is created. A failure once the
+window has started to change leaves the device running; the caller restores
+the display it captured, or restarts the device on the request.
+=================
+*/
+bool R_TryDisplayTransition( const renderWindowRequest_t *request, char *error, int errorSize ) {
+	if ( R_ImagePolicyActive() ) { R_ImagePolicyObserveError( "Reentrant display transition during image policy work" ); return R_RendererRestartError( error, errorSize, "Image policy restart is active" ); }
+	if ( error != NULL && errorSize > 0 ) error[0] = '\0';
+	if ( request == NULL ) return R_RendererRestartError( error, errorSize, "A display request is required" );
+	R_RenderThread_Sync( "display transition" );
+	if ( r_recoverableRendererRestart ) return R_RendererRestartError( error, errorSize, "A renderer device operation is already in progress" );
+	if ( !glConfig.isInitialized || r_recoverableRendererRestore || frameData == NULL || frameData->cmdHead == NULL ||
+		frameData->cmdHead->commandId != RC_NOP || frameData->cmdHead->next != NULL )
+		return R_RendererRestartError( error, errorSize, "A display transition requires a running renderer with its commands submitted" );
+	const renderWindowRequest_t immutable = *request;
+	if ( immutable.parms.multiSamples != R_NormalizeMultiSamplesValue( immutable.parms.multiSamples ) ||
+		immutable.parms.displayHz < 0 || immutable.parms.displayHz > 1000 )
+		return R_RendererRestartError( error, errorSize, "Requested display samples or refresh rate are invalid" );
+	if ( immutable.displayIndex < -1 || immutable.swapInterval < -1 || immutable.swapInterval > 1 ||
+		immutable.parms.stereo || ( immutable.parms.hiddenWindow && ( immutable.parms.fullScreen || immutable.parms.borderless ) ) ||
+		( immutable.parms.fullScreen && immutable.parms.borderless ) )
+		return R_RendererRestartError( error, errorSize, "Requested display policy is invalid" );
+	renderDisplayPresentation_t before = {};
+	R_GetDisplayPresentation( &before );
+	if ( !before.available || !( before.parametersValid & RDP_PARAMETER_SAMPLES ) || before.samples != immutable.parms.multiSamples )
+		return R_RendererRestartError( error, errorSize, "The requested window samples need a new device" );
+
+	struct Scope {
+		explicit Scope( const renderWindowRequest_t *request ) {
+			r_recoverableRendererRestart = true; r_forceWindowRendererRestart = false; r_recoverableWindowRequest = request;
+		}
+		~Scope() { r_recoverableRendererRestart = false; r_forceWindowRendererRestart = false; r_recoverableWindowRequest = NULL; }
+	} scope( &immutable );
+	glimpParms_t parms;
+	parms.width = immutable.parms.width;
+	parms.height = immutable.parms.height;
+	parms.fullScreen = immutable.parms.fullScreen;
+	parms.borderless = immutable.parms.borderless;
+	parms.hiddenWindow = immutable.parms.hiddenWindow;
+	parms.displayHz = immutable.parms.displayHz;
+	parms.multiSamples = immutable.parms.multiSamples;
+	parms.stereo = false;
+	bool applied = false;
+	try {
+		// Inside the scope both back ends apply the strict request and its swap
+		// interval, and report a new presentation generation.
+		applied = GLimp_SetScreenParms( parms );
+	} catch ( const rendererRestartFailure_t &failure ) {
+		return R_RendererRestartError( error, errorSize, failure.reason.c_str() );
+	}
+	if ( !applied ) return R_RendererRestartError( error, errorSize, "The running device could not take the requested display" );
+	(void)R_ClearPendingGLErrors();
+	// The context survived, but the UI viewport may have changed. Re-rasterise
+	// the fixed-cell sheet at the new display scale.
+	//
+	// videoRestartCount does not advance: it tells its readers that every GPU
+	// resource was lost, and none was. The retained interface answers it by
+	// shutting down and reloading every document, which held the first frame
+	// after a transition for seconds (and for over half a minute on a busy
+	// machine). Whatever depends on the output size already follows the size
+	// itself, as it does when the window is resized by hand; the caller
+	// re-rasterises the classic GUI fonts, which are sized for the display.
+	R_RefreshConsoleFontAtlas();
+	return true;
 }
 
 void R_VidRestart_f( const idCmdArgs &args ) {

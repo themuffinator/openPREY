@@ -191,22 +191,24 @@ float EnhancedSpecularTerm( vec3 halfAngle, vec3 viewDir, vec3 localNormal, vec3
 
 // The _specularTable ramp, or with r_correctspecular retail's
 // interactionNormBumpH.vfp term, whose half angle is rebuilt per pixel from
-// the light direction and the normalized vector to the viewer.
+// the light direction and the normalized vector to the viewer. Both carry the
+// stock x2 inside, as material_interaction.fs has it: cel banding then clamps
+// and steps the same value on both paths.
 float LegacySpecularTerm( vec3 halfAngle, vec3 lightDir, vec3 viewDir, vec3 localNormal ) {
 	if ( uStockSpecularParams.z > 0.5 ) {
 		vec3 correctedHalfAngle = SafeNormalize( lightDir + viewDir );
 		float ndoth = max( clamp( dot( correctedHalfAngle, localNormal ), 0.0, 1.0 ), 1.0e-6 );
-		return pow( ndoth, uStockSpecularParams.x ) * uStockSpecularParams.y;
+		return pow( ndoth, uStockSpecularParams.x ) * uStockSpecularParams.y * 2.0;
 	}
 	float specular = clamp( dot( halfAngle, localNormal ) * 4.0 - 3.0, 0.0, 1.0 );
-	return specular * specular;
+	return specular * specular * 2.0;
 }
 
 vec3 InteractionSpecular( vec3 halfAngle, vec3 lightDir, vec3 viewDir, vec3 localNormal, vec3 specularSample ) {
 	if ( uMaterialEnhanced >= 0.5 ) {
 		return specularSample * uSpecularColor.rgb * CelSpecularTerm( EnhancedSpecularTerm( halfAngle, viewDir, localNormal, specularSample ) );
 	}
-	return specularSample * ( uSpecularColor.rgb * 2.0 ) * CelSpecularTerm( LegacySpecularTerm( halfAngle, lightDir, viewDir, localNormal ) );
+	return specularSample * uSpecularColor.rgb * CelSpecularTerm( LegacySpecularTerm( halfAngle, lightDir, viewDir, localNormal ) );
 }
 
 float ApproxErf( float x ) {

@@ -3081,16 +3081,28 @@ def validate_shadow_contact_and_gl_robustness_contract() -> None:
         "bool R_ShadowMapCasterTransformNeedsTwoSided(",
         "shared unsafe-transform caster guard",
     )
-    require_order(
+    require(
         transform_guard,
+        "return R_ShadowMapCasterTransformWinding( modelMatrix ) <= 0;",
+        "unsafe-transform guard built on the winding sign",
+    )
+    transform_winding = braced_body(
+        classification,
+        "int R_ShadowMapCasterTransformWinding(",
+        "shared caster transform winding",
+    )
+    require_order(
+        transform_winding,
         (
             "if ( modelMatrix == NULL )",
-            "return true;",
+            "return 0;",
             "const double determinant =",
             "static_cast<double>( modelMatrix[ 0 ] )",
-            "return !std::isfinite( determinant ) || determinant <= 0.0;",
+            "!std::isfinite( determinant ) || determinant == 0.0",
+            "return 0;",
+            "return determinant > 0.0 ? 1 : -1;",
         ),
-        "fail-conservative mirrored/non-finite transform guard",
+        "mirrored transforms are told from ones with no usable winding",
     )
     enclosing_guard = braced_body(
         classification,
@@ -3109,111 +3121,307 @@ def validate_shadow_contact_and_gl_robustness_contract() -> None:
         "fail-conservative enclosing-light bounds guard",
     )
 
-    def expected_cull(
+    def swap(faces: str) -> str:
+        return {"near": "far", "far": "near"}.get(faces, faces)
+
+    def expected_faces(
         mode: int,
         material: str,
-        perfect_hull: bool | None,
+        perfect_hull: bool,
         light_inside_bounds: bool,
-        unsafe_transform: bool = False,
+        winding: int = 1,
+        mirrored: bool = False,
+        geometry: bool = True,
     ) -> str:
-        if mode == 0 or material == "two":
-            return "none"
-        if mode == 2 and (
-            perfect_hull is not True or unsafe_transform or light_inside_bounds
-        ):
-            return "none"
-        return "back" if material == "back" else "front"
+        """R_ShadowMapCasterFaces, in the rasterizer faces a caster keeps."""
+        if mode == 0:
+            return "both"
+        near = {"two": "both", "back": "far", "front": "near"}[material]
+        if mirrored:
+            near = swap(near)
+        if mode == 1:
+            return near
+        if not geometry or winding == 0:
+            return "both"
+        if mode in (2, 4) and perfect_hull:
+            if winding < 0 or light_inside_bounds:
+                return "both"
+            return near
+        if mode == 4:
+            return "both"
+        return "near" if (winding < 0) != mirrored else "far"
 
     for material in ("front", "back", "two"):
-        if expected_cull(0, material, True, False) != "none":
+        if expected_faces(0, material, True, False) != "both":
             raise AssertionError("Caster culling mode 0 must be unconditionally two-sided")
-    if expected_cull(1, "front", False, True) != "front":
+    if expected_faces(1, "front", False, True) != "near":
         raise AssertionError("Caster culling mode 1 must force the near-shell orientation")
-    if expected_cull(1, "back", True, False) != "back":
+    if expected_faces(1, "back", True, False) != "far":
         raise AssertionError("Back-sided material orientation must reverse forced near-shell culling")
-    for topology, inside in ((False, False), (None, False), (True, True)):
-        if expected_cull(2, "front", topology, inside) != "none":
-            raise AssertionError("AUTO culling must fail conservatively to two-sided depth")
-    if expected_cull(2, "front", True, False) != "front":
-        raise AssertionError("AUTO may cull only a sealed hull whose bounds exclude the light")
-    if expected_cull(2, "front", True, False, True) != "none":
-        raise AssertionError("AUTO must render mirrored/non-finite transforms two-sided")
-    if expected_cull(1, "front", True, False, True) != "front":
-        raise AssertionError("Explicit caster culling mode 1 must retain force semantics")
+    if expected_faces(2, "front", True, False) != "near":
+        raise AssertionError("AUTO keeps the near shell of a sealed hull whose bounds exclude the light")
+    if expected_faces(2, "front", True, True) != "both":
+        raise AssertionError("AUTO must store both sides of a sealed hull that encloses the light")
+    if expected_faces(2, "front", True, False, winding=-1) != "both":
+        raise AssertionError("AUTO must store both sides of a mirrored sealed hull")
+    # the stencil rule: an open caster keeps the triangles that face away from
+    # the light, whatever side its material shows
+    for material in ("front", "back", "two"):
+        if expected_faces(2, material, False, False) != "far":
+            raise AssertionError("AUTO must store the away-facing triangles of open geometry")
+        if expected_faces(3, material, True, False) != "far":
+            raise AssertionError("Mode 3 must apply the stencil rule to every caster")
+    if expected_faces(2, "front", False, False, winding=-1) != "near":
+        raise AssertionError("A mirrored transform must swap the discarded face")
+    if expected_faces(2, "front", False, False, mirrored=True) != "near":
+        raise AssertionError("A mirrored projection must swap the discarded face")
+    if expected_faces(2, "front", False, False, winding=-1, mirrored=True) != "far":
+        raise AssertionError("A mirrored transform under a mirrored projection cancels out")
+    if expected_faces(2, "front", True, False, mirrored=True) != "far":
+        raise AssertionError("A sealed hull's near shell must follow a mirrored projection")
+    if expected_faces(2, "front", False, False, winding=0) != "both":
+        raise AssertionError("A transform with no usable winding must store both sides")
+    if expected_faces(4, "front", False, False) != "both" or expected_faces(4, "front", True, False) != "near":
+        raise AssertionError("Mode 4 must keep the earlier automatic rule")
 
+    require(
+        classification_h,
+        "static const int SHADOWMAP_CASTER_CULLING_MAX = 4;",
+        "five caster culling modes",
+    )
+    shared_faces = braced_body(
+        classification,
+        "shadowMapCasterFaces_t R_ShadowMapCasterFaces(",
+        "shared caster face policy",
+    )
+    require_order(
+        shared_faces,
+        (
+            "if ( mode == 0 )",
+            "return SHADOWMAP_CASTER_FACES_BOTH;",
+            "materialCull == CT_TWO_SIDED ? SHADOWMAP_CASTER_FACES_BOTH",
+            "materialCull == CT_BACK_SIDED ? SHADOWMAP_CASTER_FACES_FAR",
+            "if ( windingMirrored )",
+            "nearShell = R_ShadowMapSwapCasterFaces( nearShell );",
+            "if ( mode == 1 )",
+            "return nearShell;",
+            "if ( !haveGeometry )",
+            "R_ShadowMapCasterTransformWinding( modelMatrix )",
+            "if ( winding == 0 )",
+            "( mode == 2 || mode == 4 ) && perfectHull",
+            "winding < 0 || R_ShadowMapLightOriginInsideCasterBounds( vLight,",
+            "return nearShell;",
+            "if ( mode == 4 )",
+            "const bool swapped = ( winding < 0 ) != windingMirrored;",
+            "return swapped ? SHADOWMAP_CASTER_FACES_NEAR",
+            ": SHADOWMAP_CASTER_FACES_FAR;",
+        ),
+        "sealed hulls keep the near shell, open geometry follows the stencil rule",
+    )
+    culling_mode = braced_body(
+        classification,
+        "int R_ShadowMapCasterCullingMode(",
+        "shared caster culling mode",
+    )
+    require(
+        culling_mode,
+        "idMath::ClampInt( 0, SHADOWMAP_CASTER_CULLING_MAX,",
+        "one clamp for every user of the culling mode",
+    )
+    for source, label in ((gl, "OpenGL"), (vk, "Vulkan"), (domain, "packet builder")):
+        if "r_shadowMapCasterCulling.GetInteger()" in source:
+            raise AssertionError(f"{label} must read the culling mode through R_ShadowMapCasterCullingMode")
+
+    projected_cpp = read("src/renderer/ShadowMapProjected.cpp")
+    mirror = braced_body(
+        projected_cpp,
+        "bool R_ShadowMapClipPlanesMirrorWinding(",
+        "projection handedness",
+    )
+    require_order(
+        mirror,
+        (
+            "clipPlanes[0].Normal()",
+            "clipPlanes[1].Normal()",
+            "idVec3 away = clipPlanes[3].Normal();",
+            "away.LengthSqr() <= 0.0f",
+            "away = clipPlanes[2].Normal();",
+            "return determinant < 0.0;",
+        ),
+        "a projection is mirrored when S, T and the light's direction form a left-handed set",
+    )
+    light_mirror = braced_body(
+        projected_cpp,
+        "bool R_ShadowMapLightMirrorsCasterWinding(",
+        "per-light projection handedness",
+    )
+    require_order(
+        light_mirror,
+        (
+            "R_ClassifyShadowMapLight( vLight ).pointLight",
+            "return false;",
+            "R_ShadowMapBuildBaseClipPlanesForLight( vLight, clipPlanes );",
+            "return R_ShadowMapClipPlanesMirrorWinding( clipPlanes );",
+        ),
+        "cube faces are cameras; projected maps answer from their own planes",
+    )
+    faces_selftest = braced_body(
+        projected_cpp,
+        "bool R_ShadowMapCasterFacesSelfTest(",
+        "in-engine caster face self-test",
+    )
+    for token in (
+        "R_ShadowMapBuildClipPlanes( lightProject, clipPlanes );",
+        "R_ShadowMapBuildDistantPointClipPlanes( &light, clipPlanes, NULL )",
+        "R_ShadowMapBuildParallelClipPlanes( &light, clipPlanes )",
+        "R_ShadowMapCasterFaces( c.mode,",
+    ):
+        require(faces_selftest, token, "the self-test covers every projection kind and the face table")
+    require(
+        read("src/renderer/ModernShadowPlanner.cpp"),
+        "if ( !R_ShadowMapCasterFacesSelfTest() ) {",
+        "rendererShadowProjectedDiagnosticSelfTest runs the caster face self-test",
+    )
+
+    gl_faces = braced_body(
+        gl,
+        "static int RB_ShadowMapCasterFacesCullFace(",
+        "OpenGL face mapping",
+    )
+    require_order(
+        gl_faces,
+        (
+            "case SHADOWMAP_CASTER_FACES_NEAR:",
+            "GL_FRONT",
+            "case SHADOWMAP_CASTER_FACES_FAR:",
+            "GL_BACK",
+        ),
+        "OpenGL discards its front face for the near shell and its back face for the far one",
+    )
     gl_cull = braced_body(
         gl,
         "static void RB_ShadowMapApplyCasterCull(",
-        "direct OpenGL topology-aware caster culling",
+        "direct OpenGL caster culling",
     )
     require_order(
         gl_cull,
         (
-            "mode == 2",
-            "casterGeo == NULL || !casterGeo->perfectHull",
-            "R_ShadowMapCasterTransformNeedsTwoSided( modelMatrix )",
-            "R_ShadowMapLightOriginInsideCasterBounds( backEnd.vLight",
-            "mode != 0 && !automaticTwoSided",
-            "GLenum cullFace = GL_FRONT;",
-            "materialCull == CT_BACK_SIDED",
+            "RB_ShadowMapCasterFacesCullFace(",
+            "R_ShadowMapCasterFaces( R_ShadowMapCasterCullingMode(),",
+            "backEnd.vLight, g_shadowMapCasterWindingMirrored,",
+            "casterGeo != NULL && casterGeo->perfectHull, modelMatrix,",
+            "materialCull ) );",
         ),
-        "direct OpenGL near-shell/uncertain-hull policy",
+        "direct OpenGL culling asks the shared policy",
+    )
+    gl_reset = braced_body(
+        gl,
+        "static void RB_ShadowMapResetCasterCull(",
+        "OpenGL caster pass start",
+    )
+    require_order(
+        gl_reset,
+        (
+            "g_shadowMapCasterWindingMirrored =",
+            "R_ShadowMapLightMirrorsCasterWinding( backEnd.vLight );",
+            "g_shadowMapCasterCullApplied = -1;",
+        ),
+        "each OpenGL caster pass takes its light's projection handedness",
     )
     gl_shared_cull = braced_body(
         gl,
         "static void RB_SharedWorldInteractionGLApplyMapCasterCull(",
-        "shared OpenGL topology-aware caster culling",
+        "shared OpenGL caster culling",
     )
     require_order(
         gl_shared_cull,
         (
-            "pass.casterCullMode == 2",
-            "!caster.perfectHull",
-            "R_ShadowMapLightOriginInsideCasterBounds(",
-            "pass.legacyViewLight",
-            "pass.casterCullMode != 0 && !automaticTwoSided",
-            "GLenum face = GL_FRONT;",
+            "caster.cull == RENDERER_CULL_NONE ? CT_TWO_SIDED",
+            "R_ShadowMapCasterFaces( pass.casterCullMode, pass.legacyViewLight,",
+            "pass.casterWindingMirrored, true, caster.perfectHull,",
         ),
-        "shared OpenGL near-shell/uncertain-hull policy",
+        "shared OpenGL culling asks the shared policy",
+    )
+    vk_faces = braced_body(
+        vk,
+        "static VkCullModeFlags VK_ShadowMap_CasterFacesCullMode(",
+        "Vulkan face mapping",
+    )
+    require_order(
+        vk_faces,
+        (
+            "case SHADOWMAP_CASTER_FACES_NEAR:",
+            "return VK_CULL_MODE_FRONT_BIT;",
+            "case SHADOWMAP_CASTER_FACES_FAR:",
+            "return VK_CULL_MODE_BACK_BIT;",
+            "return VK_CULL_MODE_NONE;",
+        ),
+        "Vulkan discards its front face for the near shell and its back face for the far one",
     )
     vk_cull = braced_body(
         vk,
         "static VkCullModeFlags VK_ShadowMap_CasterCullMode(",
-        "direct Vulkan topology-aware caster culling",
+        "direct Vulkan caster culling",
     )
     require_order(
         vk_cull,
         (
-            "mode == 0 || materialCull == CT_TWO_SIDED",
-            "casterGeo == NULL || !casterGeo->perfectHull",
-            "surf == NULL || surf->space == NULL",
-            "R_ShadowMapCasterTransformNeedsTwoSided(",
-            "surf->space->modelMatrix",
-            "R_ShadowMapLightOriginInsideCasterBounds( vLight",
-            "bool cullFront = true;",
+            "const bool haveGeometry = casterGeo != NULL && surf != NULL",
+            "VK_ShadowMap_CasterFacesCullMode(",
+            "R_ShadowMapCasterFaces( R_ShadowMapCasterCullingMode(), vLight,",
+            "windingMirrored,",
+            "haveGeometry && casterGeo->perfectHull,",
         ),
-        "direct Vulkan near-shell/uncertain-hull policy",
+        "direct Vulkan culling asks the shared policy",
+    )
+    vk_draw = braced_body(
+        vk,
+        "static bool VK_ShadowMap_DrawResolvedCaster(",
+        "direct Vulkan caster draw",
+    )
+    require_order(
+        vk_draw,
+        (
+            "if ( ctx.windingLight != vLight )",
+            "ctx.windingMirrored = R_ShadowMapLightMirrorsCasterWinding( vLight );",
+            "VK_ShadowMap_CasterCullMode( vLight, ctx.windingMirrored, surf,",
+        ),
+        "each Vulkan light works its projection handedness out once",
     )
     vk_shared_cull = braced_body(
         vk,
         "static VkCullModeFlags VK_ClassicShadow_EffectiveCull(",
-        "shared Vulkan topology-aware caster culling",
+        "shared Vulkan caster culling",
     )
     require_order(
         vk_shared_cull,
         (
-            "pass.casterCullMode == 0",
-            "pass.casterCullMode == 2",
-            "!casterPlan.caster->perfectHull",
-            "R_ShadowMapLightOriginInsideCasterBounds(",
-            "pass.legacyViewLight",
-            "bool cullFront = true;",
+            "casterPlan.cullMode == VK_CULL_MODE_NONE",
+            "R_ShadowMapCasterFaces( pass.casterCullMode, pass.legacyViewLight,",
+            "pass.casterWindingMirrored, true,",
+            "casterPlan.caster->perfectHull,",
         ),
-        "shared Vulkan near-shell/uncertain-hull policy",
+        "shared Vulkan culling asks the shared policy",
     )
-    for forbidden in ("mode == 1 ) ? GL_FRONT : GL_BACK", "mode 2 (default) stores engine-back"):
-        if forbidden in gl or forbidden in vk:
-            raise AssertionError(f"Far-shell caster policy survived: {forbidden!r}")
+    # the policy lives in one place: no site decides a face from the mode itself
+    for body, label in (
+        (gl_cull, "direct OpenGL"),
+        (gl_shared_cull, "shared OpenGL"),
+        (vk_cull, "direct Vulkan"),
+        (vk_shared_cull, "shared Vulkan"),
+    ):
+        for forbidden in ("== 2", "perfectHull ||", "R_ShadowMapLightOriginInsideCasterBounds"):
+            if forbidden in body:
+                raise AssertionError(f"{label} caster culling re-implements the shared policy: {forbidden!r}")
+    require_order(
+        domain,
+        (
+            "pass.casterCullMode = R_ShadowMapCasterCullingMode();",
+            "pass.casterWindingMirrored =",
+            "R_ShadowMapLightMirrorsCasterWinding( viewLight );",
+        ),
+        "shared passes carry the culling mode and the projection handedness",
+    )
 
     gl_signature = braced_body(
         gl,
@@ -8866,6 +9074,58 @@ def validate_static_signature_view_independence_contract() -> None:
             "a new snapshot still changes the signature")
 
 
+def validate_receiver_stock_lighting_parity_contract() -> None:
+    """A shadow receiver lights a stock surface exactly as the unshadowed
+    interaction does: a shadow map may only take light away.
+
+    OpenGL's two receivers normalized the stock normal-map sample, which the
+    classic interaction and the three Vulkan interactions use as stored. A
+    filtered sample is shorter than a unit vector wherever the bump detail
+    turns, so every such edge was lit harder with shadow maps on than with
+    stencil shadows or with none.
+    """
+    classic = read("content/baseoq4/pak0/glprogs/material_interaction.fs")
+    require_order(
+        braced_body(classic, "vec3 DecodeStockLocalNormal(", "classic stock normal"),
+        ("return vec3( bumpSample.a, bumpSample.g, bumpSample.b ) * 2.0 - 1.0;",),
+        "the classic interaction uses the stock normal as stored",
+    )
+    require(
+        braced_body(classic, "float StockSpecularTerm(", "classic stock specular"),
+        "return specular * specular * 2.0;",
+        "the classic stock specular term carries its doubling",
+    )
+    for name in ("shadow_interaction.fs", "shadow_point_interaction.fs"):
+        shader = read(f"content/baseoq4/pak0/glprogs/{name}")
+        require_order(
+            braced_body(shader, "vec3 DecodeLocalNormal(", f"{name} normal decode"),
+            (
+                "if ( uMaterialEnhanced < 0.5 ) {",
+                "return vec3( bumpSample.a, bumpSample.g, bumpSample.b ) * 2.0 - 1.0;",
+                "localNormalXY *= max( uMaterialNormalScale, 0.0 );",
+            ),
+            f"{name}: the stock normal as stored, the enhanced one rebuilt",
+        )
+        if "SafeNormalize( vec3( bumpSample.a, bumpSample.g, bumpSample.b )" in shader:
+            raise AssertionError(f"{name} must not normalize the stock normal-map sample")
+        require(
+            braced_body(shader, "float LegacySpecularTerm(", f"{name} stock specular"),
+            "return specular * specular * 2.0;",
+            f"{name}: the stock specular term as the classic interaction has it",
+        )
+        require(
+            shader,
+            "return specularSample * uSpecularColor.rgb * CelSpecularTerm( LegacySpecularTerm( halfAngle, localNormal ) );",
+            f"{name}: cel banding steps the same specular value as the classic interaction",
+        )
+    for name in ("interaction.frag", "interaction_shadow.frag", "interaction_shadow_point.frag"):
+        require(
+            read(f"src/renderer/Vulkan/shaders/{name}"),
+            ": vec3(bumpSample.a, bumpSample.g, bumpSample.b) * 2.0 - 1.0;",
+            f"{name}: the stock normal as stored",
+        )
+
+
 def validate_moving_light_cache_bypass_contract() -> None:
     """A moving light draws its shadow maps directly, on both renderers.
 
@@ -9024,6 +9284,29 @@ def validate_stencil_fallback_release_contract() -> None:
             ),
             f"{path}: every failed pass restarts the count, marked or not",
         )
+
+    # A receiver that can only be shadowed by stencil volumes needs them in
+    # every view it is drawn. The hold is renewed whether or not the volumes
+    # are there: renewed only when they were missing, the light counted the
+    # views that had them as clean and left the fallback again and again,
+    # drawing those receivers unshadowed for a frame each time.
+    receiver_fallbacks = braced_body(
+        read("src/renderer/draw_arb2.cpp"),
+        "static void RB_ShadowMapDrawReceiverFallbacks(",
+        "OpenGL receiver fallback draw",
+    )
+    require_order(
+        receiver_fallbacks,
+        (
+            "if ( receiverFallbackSurfaces <= 0 ) {",
+            "return;",
+            "RB_ShadowMapMarkStencilFallbackSticky( vLight );",
+            "if ( passKind == SHADOWMAP_PASS_LOCAL ) {",
+        ),
+        "every view that draws a fallback receiver renews the light's hold on its volumes",
+    )
+    if "primaryShadowSurfs == NULL && secondaryShadowSurfs == NULL" in receiver_fallbacks:
+        raise AssertionError("The receiver fallback hold must not depend on the volumes being absent")
 
     # A render-thread snapshot carries the flag it was taken with. Copied back
     # as it stands it would undo a release decided meanwhile; only a failure
@@ -9385,6 +9668,7 @@ def main() -> None:
     validate_static_signature_view_independence_contract()
     validate_moving_light_cache_bypass_contract()
     validate_stencil_fallback_release_contract()
+    validate_receiver_stock_lighting_parity_contract()
     validate_scratch_cube_pool_contract()
     validate_resident_projected_sampling_contract()
     validate_ci_registration()

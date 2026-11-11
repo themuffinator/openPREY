@@ -382,7 +382,10 @@ typedef struct viewDef_s {
 	idVec2				temporalJitterPixels;
 	idVec3				temporalPreviousViewOrigin;
 	idMat3				temporalPreviousViewAxis;
+	// previous camera: xy = projection scale, zw = its jitter-free offsets
+	// aligned to this frame's applied jitter (FinalizeViewProjection)
 	idVec4				temporalPreviousProjectInfo;
+	idVec2				temporalPreviousNeutralProjectionOffset;
 	idVec2				temporalPreviousJitterPixels;
 	// projectionMatrix[8]/[9] before any jitter (R_SetupProjection)
 	idVec2				temporalNeutralProjectionOffset;
@@ -1582,7 +1585,7 @@ extern idCVar r_shadowMapDistantFilterScale;	// filter-radius scale for parallel
 extern idCVar r_shadowMapPCSSLightRadius;	// projected PCSS-lite blocker search radius
 extern idCVar r_shadowMapPCSSMaxRadius;	// projected PCSS-lite maximum filter radius
 extern idCVar r_shadowMapNormalOffsetScale;	// normal-offset receiver bias in shadow texels
-extern idCVar r_shadowMapCasterCulling;	// caster face culling: 0 = two-sided, 1 = near shell, 2 = topology-aware automatic
+extern idCVar r_shadowMapCasterCulling;	// caster face culling: 0 = two-sided, 1 = near shell, 2 = automatic (sealed hulls near shell, open geometry the stencil facing rule), 3 = the stencil facing rule everywhere, 4 = the earlier automatic
 extern idCVar r_shadowMapPointHighPrecision;	// 1 = store point shadow depth as high-precision float color
 extern idCVar r_shadowMapPointLights;	// 1 = shadow-map point lights (the dominant Q4 light class); 0 = stencil fallback for point lights
 extern idCVar r_shadowMapPointSize;	// point-light cube face resolution, separate from r_shadowMapSize
@@ -1618,6 +1621,7 @@ extern idCVar r_shadowMapTranslucentMinVariance;	// minimum variance for translu
 extern idCVar r_shadowMapTranslucentBleedReduction;	// moment light-bleed reduction
 extern idCVar r_shadowMapGpuSyncTimings;	// 1 = glFinish-bracket shadow-map passes for GPU-synchronized diagnostics
 extern idCVar r_shadowMapGpuTimerQueries;	// 1 = use GL timer queries for shadow-map GPU diagnostics when available
+extern idCVar r_heatHazeDepthReject;	// 1 = heat haze does not refract the view weapon or other geometry in front of it
 extern idCVar r_softParticles;			// 1 = depth-fade eligible BSE particle surfaces against the opaque scene depth
 extern idCVar r_softParticleFadeDistance;	// world-unit fade distance for r_softParticles
 extern idCVar r_enhancedMaterials;		// 1 = use enhanced GLSL interaction shading for stock materials when supported
@@ -1917,6 +1921,9 @@ struct renderWindowRequest_s;
 bool R_TryFullVidRestartForImagePolicy(const renderWindowRequest_s* request, char* error, int errorSize);
 bool R_TryFullVidRestart( const renderWindowRequest_s *request, char *error, int errorSize );
 bool R_TryInitializeDisplay( const renderWindowRequest_s *request, char *error, int errorSize );
+// The request on the running device, without a teardown. False before any
+// change when the request needs a new device; see the definition.
+bool R_TryDisplayTransition( const renderWindowRequest_s *request, char *error, int errorSize );
 bool R_IsRecoverableRendererRestart( void );
 bool R_ForceWindowForRendererRestart( void );
 const renderWindowRequest_s *R_GetRecoverableWindowRequest( void );
@@ -2408,6 +2415,8 @@ bool	R_ARBProgramUsesInteractionInputs( unsigned int target, const char *program
 bool	R_IsARBProgramValid( unsigned int target, unsigned int ident );
 vkMaterialProgramFamily_t R_GetARBProgramFamily( unsigned int target, unsigned int ident );
 bool	R_BindARBProgram( unsigned int target, unsigned int ident, const char *usage, bool required );
+// a stock heat-haze fragment program rewritten to test its refracted read against the scene depth
+bool	R_ARBProgramUsesSceneDepthReject( int ident );
 
 // Stable identities for every GLSL family named by the shipped Quake 4
 // materials. Native replacements require an approved source-pair identity,

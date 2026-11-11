@@ -141,8 +141,9 @@ struct demoLibraryEntry_t {
 	idStr					details;
 };
 
-// A v11 render demo's time at a frame index: each recorded frame is
+// A v11 or v12 render demo's time at a frame index: each recorded frame is
 // USERCMD_PER_DEMO_FRAME tics at the recording's tic rate (Session_demo.cpp).
+// v13 frames carry their own times instead.
 int Session_RenderDemoFramesToMS( int frames, int userCmdHz );
 
 // A level's localized name from its map declaration, or the map path when it
@@ -222,7 +223,7 @@ const char *Session_SkillName( int skill );
 idStr Session_RetainedPlayTime( int seconds );
 idStr Session_RetainedList( const char *first, const char *second );
 
-const int USERCMD_PER_DEMO_FRAME	= 2;
+const int USERCMD_PER_DEMO_FRAME	= 2;		// tics per frame of a render demo before v13
 const int CONNECT_TRANSMIT_TIME		= 1000;
 const int MAX_LOGGED_USERCMDS		= 60*60*60;	// one hour of single player, 15 minutes of four player
 
@@ -348,6 +349,7 @@ public:
 	// Starts parsing PreloadRetainedScreens' documents on the job system's
 	// workers, while the stock menus load.
 	void				PrefetchRetainedScreens();
+	void				PrefetchRetainedNextPages();
 	void				PrepareRetainedLevel( const char *mapPath, bool multiplayer );
 	// As a map change begins, starts parsing the level's retained documents on
 	// the job system's workers: the pages PrepareRetainedLevel loads, and the
@@ -495,6 +497,10 @@ public:
 	void				PublishRetainedControls( idUserInterface *gui );
 	void				HandleRetainedControlsRequest( idUserInterface *gui, const char *request );
 	bool				SaveForSuspension( void );
+	// Single player carried across a renderer restart, which is an engine reload.
+	bool				CanSaveForRendererRestart( void ) const;
+	bool				SaveForRendererRestart( void );
+	void				QueueRendererRestart( void );
 	bool				RetainedControlsKey( const sysEvent_t *event );
 	void				PushRetainedNotice( const char *text, int kind, const char *action, const char *subject, int undo,
 							bool persistent );
@@ -683,7 +689,6 @@ public:
 
 	int					latchedTicNumber;	// set to com_ticNumber each frame
 	int					lastGameTic;		// while latchedTicNumber > lastGameTic, run game frames
-	int					lastDemoTic;
 	bool				syncNextGameFrame;
 	bool				syncNextGameFrameAwaitingAsyncTicLog;
 	bool				cinematicStateValid;
@@ -1034,7 +1039,6 @@ public:
 	bool				renderDemoSeekMuteOwned;
 	bool				renderDemoSeekRestoreMute;
 	float				renderDemoPlaybackRate;
-	double				renderDemoFrameAccumulator;
 	int					renderDemoStartViewTime;
 	int					renderDemoKnownDurationMS;
 	int					renderDemoSeekTargetMS;
@@ -1053,7 +1057,9 @@ public:
 		RENDER_DEMO_RECORD_SUSPENDED	// between levels
 	};
 	struct renderDemoSegment_t {
+						renderDemoSegment_t() : startFrame( 0 ), startMS( -1 ) {}
 		int				startFrame;		// frames recorded before the segment
+		int				startMS;		// its first frame on the timeline, -1 until known
 		idStr			map;
 		idStr			entityFilter;
 		idStr			reason;			// start, level, load or restart
@@ -1065,12 +1071,29 @@ public:
 	int					renderDemoRecordStartMsec;
 	idList<renderDemoSegment_t> renderDemoRecordSegments;
 	idStr				renderDemoNextSegmentReason;	// set by the map change that ends one
+	// The recording's own clock (v13): every gameplay draw is a frame, stamped
+	// with the time since the previous one. Menus, pauses and level loads leave
+	// no frames, so a frame after one of them is one tic after the frame before.
+	int64				renderDemoRecordTimeUS;			// the last frame's time on the timeline
+	double				renderDemoRecordLastFrameClockUS;	// when it was drawn, real time
+	int					renderDemoRecordLastFrameDraw;	// renderDemoDrawSerial it was drawn on
+	int					renderDemoDrawSerial;			// counts idSessionLocal::Draw calls
 
-	// Playback of a v11 recording. Its timeline counts recorded frames, each
-	// USERCMD_PER_DEMO_FRAME tics at the recording's tic rate, so it runs on
-	// across levels whose game clocks restart.
+	// Playback of a v11 recording. Its timeline is the time of its recorded
+	// frames, so it runs on across levels whose game clocks restart: each v13
+	// frame carries its own duration; earlier frames are USERCMD_PER_DEMO_FRAME
+	// tics at the recording's tic rate.
 	bool				renderDemoFrameClock;
 	int					renderDemoUserCmdHz;
+	// Every render demo is paced on the time of its frames: the frame on screen
+	// is the first whose time is past the playback clock, which runs at the
+	// playback rate in real time.
+	bool				renderDemoTimedFrames;			// v13: frames carry DSC_FRAME_TIME
+	int64				renderDemoFrameTimeUS;			// the frame on screen
+	int64				renderDemoPrevFrameTimeUS;		// the frame before it
+	int					renderDemoPendingFrameDeltaUS;	// read for the frame being read, or -1
+	double				renderDemoPlayClockUS;
+	double				renderDemoPlayRealClockUS;		// last real-time sample, < 0 to re-anchor
 	idDict				renderDemoPlayHeader;
 	idList<renderDemoSegment_t> renderDemoPlaySegments;	// from the trailer, then as met
 	int					renderDemoPlaySegment;		// the segment playing, or -1
@@ -1087,6 +1110,12 @@ public:
 	bool				ProcessRenderDemoSessionRecord( bool &finished );
 	void				CloseRenderDemoLevelLoad();
 	int					RenderDemoFramesToMS( int frames ) const;
+	int					RenderDemoCurrentTimeMS() const;
+	bool				CompleteRenderDemoFrame();
+	void				SyncRenderDemoPlayClock();
+	double				RenderDemoPlaybackElapsedUS();
+	double				RenderDemoCaptureStepUS() const;
+	void				EndRenderDemoRecordFrame();
 	bool				SeekRenderDemoSegment( int direction );
 	idStr				RenderDemoSegmentLabel() const;
 

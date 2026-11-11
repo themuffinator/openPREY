@@ -301,7 +301,9 @@ const std::vector<SystemSettingDescriptor>& SystemSettingsHost::Catalog() {
 		Number("r_screenFraction", 10, 200, "#str_41091", SystemSettingImmediate, {10,25,50,75,85,100,125,150,200}),
 		Boolean("r_shadows", "#str_200160"), Boolean("r_skipBump", "#str_200162"),
 		Boolean("r_skipSky", "#str_223009"), Boolean("r_skipSpecular", "#str_200161"), Boolean("r_ssao", "#str_41088"),
-		Number("r_swapInterval", 0, 1, "#str_41092", SystemSettingDisplayRestart, {0,1}),
+		// Both back ends apply the interval to the running device: OpenGL on its
+		// next swap, Vulkan by rebuilding its swapchain.
+		Number("r_swapInterval", 0, 1, "#str_41092", SystemSettingImmediate, {0,1}),
 		Boolean("r_useLightGrid", "#str_41107"),
 		Number("r_windowHeight", 240, 16384, "#str_229947", SystemSettingDisplayRestart),
 		Number("r_windowWidth", 320, 16384, "#str_229946", SystemSettingDisplayRestart),
@@ -368,7 +370,9 @@ SystemApplyClass SystemSettingsHost::ApplyClassOf(const StateValues& before, con
 		deferred ? SystemApplyClass::Deferred : SystemApplyClass::Immediate;
 }
 bool SystemSettingsHost::ChangedNeedsNextStart(const StateValues& before, const StateValues& target) {
-	return Changed(before,target,"image_ignoreHighQuality") || Changed(before,target,"s_maxSoundsPerShader");
+	// image_ignoreHighQuality left this list when the renderer began re-parsing
+	// the materials that read it (R_CheckMaterialQualityInputs).
+	return Changed(before,target,"s_maxSoundsPerShader");
 }
 bool SystemSettingsHost::RequiresDeviceWork(const StateValues& before, const StateValues& target) {
 	return (ChangedEffects(before,target) & ~SystemSettingEngineRestart) != 0;

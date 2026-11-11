@@ -1032,10 +1032,21 @@ diagnostics establish whole-frame ownership or production performance.
   refraction views were jittered and retired the main history every frame),
   withheld presents retried a 1 s acquire per command (~27 s per frame), and
   capture frames presented screen-space effects without depth. See
-  [temporal qualification](temporal-presentation.md#validation). Remaining:
-  human review of ghosting/shimmer/disocclusion on the reference display, and
-  physical Linux/macOS/Android. Native UI separation stays covered natively;
-  capture frames cannot show it.
+  [temporal qualification](temporal-presentation.md#validation).
+  Progress, 11 November (#216): the resolved image moved by the whole jitter
+  step every frame on both backends, because history was reprojected through
+  each frame's jittered projection. History now lives on the unjittered grid
+  (aligned previous camera, recentered upscaling input, the unjittered portal
+  sky sampled in place), posed surfaces that were not re-posed keep exact
+  motion, and `renderer_temporal_stability.py` measures the picture at rest.
+  See [stability qualification](temporal-presentation.md#stability-qualification-11-november-2026-issue-216).
+  Remaining: human review of ghosting and disocclusion on the reference
+  display, and physical Linux/macOS/Android; a negative texture LOD bias while
+  upscaling (at 50% scale the image holds about half the native texture
+  detail, and neither backend has LOD-bias plumbing); and the 8% lower texture
+  sharpness of plain Vulkan frames against OpenGL, which temporal AA only
+  preserves. Native UI separation stays covered natively; capture frames
+  cannot show it.
 - [ ] **REN-05 — P1, qualification: remaining PBR quality and portability.**
   Reproduce strict residual Intel SSAO and lavapipe scalar/texture differences and
   recorded cutout/normal diagnostic mismatches; fix or explicitly bound exceptions.
@@ -1759,7 +1770,14 @@ optimization has landed.
   each one to the cache, copying it and composing over the copy: 560 passes on one
   hub2 route, `r_shadowMapCacheMovingLights`.) (A light whose map failed once now stops building its stencil volumes
   again after 240 views without another failure, `r_shadowMapStencilFallbackViews`;
-  before, it built them for the rest of the level.)
+  before, it built them for the rest of the level.) (Shadow maps now follow the
+  stencil rule for which triangles cast: open geometry stores the ones that face
+  away from the light, sealed hulls keep their near shell, and the face to discard
+  follows the handedness of each light's projection, `r_shadowMapCasterCulling`.
+  storage2's alarm lights had been blocked by a one-sided floor.) (OpenGL's
+  shadow receivers no longer normalize the stock normal-map sample, which lit
+  every raised edge harder under a shadow map than without one; OpenGL now
+  agrees with stencil as closely as Vulkan does.)
 - [ ] **FPS-04 — P1, implementation: post-processing chain cost.** Price and reduce the
   screen-space passes the current Ultra adds: SSAO (full resolution on OpenGL; the
   half-resolution path exists only on Vulkan and only below 32 samples), motion blur
@@ -2535,6 +2553,35 @@ Completion must advance through the existing dependencies:
   ([the gate](ui/system-resolution-rows.md#the-gate)). The checked image and
   audio results, a visible exclusive-fullscreen Apply, the editor round trip
   and platform acceptance remain open.
+  Progress, 11 November: the DISPLAY page starts
+  [applying to the running renderer](ui/settings-live-apply.md). V-Sync is an
+  immediate setting, a texture batch reloads images in place, and a
+  Performance Preset restarts no device on Vulkan unless it changes MSAA.
+  The same day a display change (window size, fullscreen, borderless,
+  display, mode, refresh) became a transition on the running device
+  (`TryDisplayTransition`, render API 34), with Keep/Revert, recovery and a
+  fallback to the restart unchanged.
+  On a visible desktop every mode change and undo was a transition on both
+  back ends, and Vulkan kept fullscreen and the return to a window.
+  A transition no longer advances the restart count, which had made the
+  retained interface reload every document (2 to 5 s to the first frame, now
+  under 0.3 s), and a window that leaves fullscreen is centred.
+  The game now rebuilds its scene targets when `r_multiSamples` changes, on
+  both back ends, and Vulkan applies an MSAA change as a transition, so no
+  Performance Preset restarts Vulkan's device.
+  Remaining, in order: a focused Keep under borderless and exclusive
+  fullscreen, and any Keep on OpenGL (the test window had no focus);
+  OpenGL's MSAA Apply (a single-sample window with the direct 3D views
+  through a multisampled target, as Vulkan has; the record lists what it
+  touches); and an image reload spread across frames.
+  OpenGL now resizes its upload stream on the running device, so a preset
+  restarts OpenGL only when it changes MSAA.
+  Stage 4, the same day: a changed `image_ignoreHighQuality` re-parses the
+  materials that read the hint, in the session, and Restart Renderer works
+  inside a single-player game, which is saved, reloaded around and resumed
+  (both directions between OpenGL and Vulkan ran in Air Defense 1). A GPU
+  change, the Awakening campaign and multiplayer were not run; multiplayer
+  is not carried.
 - [ ] **UI-02 — P1, implementation and qualification: text, input and accessibility.**
   Finish in-field IME/composition, shaping/kerning/fallback/styles, grapheme editing,
   caret/candidate placement, binding capture, accessibility exposure and contextual
@@ -2903,7 +2950,7 @@ historical saves and recovering safely from damage.
 | Q4-06 — Partial; optional P3 | Raw inventory and field codecs restored; v5 portable stamp/encoding implemented; Windows/Linux bidirectional stock/Awakening cross-loads pass. | Confirm outstanding CI/Apple codec runs; macOS and another ARM64 runtime cross-load/resave directions; publish player migration guidance with accepted scope. |
 | Q4-07 — Partial | Original-writer Windows corpus substantially qualified; v2 stamp reporting repaired; exact HiDef fixture investigated. | Resolve #123 against the reporter's actual GUI/content; other ABIs; recover/reproduce absent stage-two artifacts before claiming independently reviewable acceptance. |
 | Q4-08 — Partial | Durable commit/recovery implemented; 56 process-interruption points, locked-file failure and NTFS/ext4/WSL 9p checks recorded. | APFS result, removable/network filesystems and actual power-cut behavior; retain measured CRC/sync costs and last-valid-save preservation. |
-| Q4-09 — Partial | Render demo v11: one recording spans levels, save loads, death reloads and restarts as self-contained segments; gameplay-only frames; level loads, continuous timeline and level markers in playback; campaign-aware library and gate; whole retained HUD and in-world screens recorded. Render demo v12 predicts animated-entity joints exactly, a quarter smaller. Windows checks pass with stock and Awakening content: GL recording, GL and Vulkan playback. | Vulkan recording, Linux and macOS, a long multi-level session with seek timing and file size, the 2D, sound and effect records that now dominate the size, the masked retained HUD groups that replay unmasked, and local sounds already playing at a segment start. |
+| Q4-09 — Partial | Render demo v11: one recording spans levels, save loads, death reloads and restarts as self-contained segments; gameplay-only frames; level loads, continuous timeline and level markers in playback; campaign-aware library and gate; whole retained HUD and in-world screens recorded. Render demo v12 predicts animated-entity joints exactly, a quarter smaller. Render demo v13 records every frame at the played frame rate instead of 30 Hz. Windows checks pass with stock and Awakening content: GL recording, GL and Vulkan playback. | Vulkan recording, Linux and macOS, a long multi-level session with seek timing and file size, the 2D, sound and effect records that now dominate the size, the masked retained HUD groups that replay unmasked, and local sounds already playing at a segment start. |
 
 Completion substeps must keep three forms of evidence distinct:
 
@@ -3545,6 +3592,19 @@ Completion substeps must keep three forms of evidence distinct:
   0.92 MB per second); it replayed all 500 frames on GL and Vulkan with every
   record verified, the three-level v11 demo still played in full, and paused
   frames of the two recordings matched in view and pose.
+  Render demo v13 (11 November 2026) records at the frame rate the game is played
+  at ([frame-rate recording](multiview-demos.md#frame-rate-recording-v13-11-november-2026)).
+  Recording had held the live game to two tics a frame, 30 Hz, and multiplayer
+  render demos, which recorded every frame, played back in slow motion. Every
+  gameplay frame now carries its own time and playback paces every demo on frame
+  times. Hidden-window GL checks: the game kept its 60 Hz (and a 45 Hz) cap while
+  recording, both recordings and the v11 and v12 demos replayed every frame,
+  recorded action played at real time at 1x, 2x and 0.5x, and a multiplayer
+  recording that `main` played at 0.48x speed played at real time. A review
+  of the change also found that playback stopped on a joint checksum when an
+  animated entity took a freed handle with the same joint count (v12 too);
+  playback now starts a fresh joint history at every raw record, and both
+  reproductions play in full.
   Remaining: Vulkan recording, Linux and macOS, a long session with measured seek
   times (rewinds replay from the start) and size, the 2D model, sound and effect
   records that now make up most of a recording, the retained HUD's masked

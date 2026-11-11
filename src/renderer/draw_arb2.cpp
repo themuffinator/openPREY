@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "tr_local.h"
 #include "draw_pbr.h"
 #include "ARBColorZeroFloor.h"
+#include "ARBHeatHazeDepthReject.h"
 #include "CelShading.h"
 #include "Model_local.h"
 #include "ShadowMapClassification.h"
@@ -3135,39 +3136,37 @@ bool RB_ShadowMapResourcesKnownGood( bool pointLight ) {
 // Shadow casters render in light space, where the mirrored-view logic in
 // GL_Cull does not apply. idTech4 winding makes the engine-front (visible)
 // side of a front-sided material the GL_BACK face, so culling GL_FRONT stores
-// the light-facing, near shell. The automatic mode only does that for sealed
-// hulls. Open, non-manifold, or otherwise uncertain geometry is rendered
-// two-sided: either authored winding can then contribute and props cannot
-// silently disappear from the depth map. Storing the far shell is deliberately
-// avoided because mesh thickness turns into contact-shadow detachment.
-//   r_shadowMapCasterCulling 0: always two-sided
-//   r_shadowMapCasterCulling 1: always store the light-facing near shell
-//   r_shadowMapCasterCulling 2: automatic (near shell for perfect hulls whose
-//     bounds do not contain the light and whose transform preserves winding,
-//     two-sided otherwise)
-// The authored material orientation is honored whenever one-sided culling is
-// active. Mode 0 and AUTO's conservative fallbacks intentionally override it.
+// the light-facing near shell and culling GL_BACK the triangles that face
+// away from the light. Which of the two a caster stores is the shared policy
+// of R_ShadowMapCasterFaces (r_shadowMapCasterCulling); this only turns its
+// answer into GL state.
 static int g_shadowMapCasterCullApplied = -1; // 0 = culling disabled, else the GLenum face
+// whether the light whose casters are being drawn has a mirrored projection
+static bool g_shadowMapCasterWindingMirrored = false;
+
+static int RB_ShadowMapCasterFacesCullFace( const shadowMapCasterFaces_t faces ) {
+	switch ( faces ) {
+	case SHADOWMAP_CASTER_FACES_NEAR:
+		return static_cast<int>( GL_FRONT );
+	case SHADOWMAP_CASTER_FACES_FAR:
+		return static_cast<int>( GL_BACK );
+	default:
+		return 0;
+	}
+}
 
 static void RB_ShadowMapApplyCasterCull( const idMaterial *shader,
 		const srfTriangles_t *casterGeo = NULL,
 		const float *modelMatrix = NULL ) {
-	const int mode = idMath::ClampInt( 0, 2, r_shadowMapCasterCulling.GetInteger() );
 	const int materialCull = ( shader != NULL ) ? shader->GetCullType() : CT_FRONT_SIDED;
-	const bool automaticTwoSided = mode == 2
-		&& ( casterGeo == NULL || !casterGeo->perfectHull
-			|| R_ShadowMapCasterTransformNeedsTwoSided( modelMatrix )
-			|| R_ShadowMapLightOriginInsideCasterBounds( backEnd.vLight,
-				modelMatrix, casterGeo->bounds[0].ToFloatPtr(),
-				casterGeo->bounds[1].ToFloatPtr() ) );
-	int desired = 0;
-	if ( mode != 0 && !automaticTwoSided && materialCull != CT_TWO_SIDED ) {
-		GLenum cullFace = GL_FRONT;
-		if ( materialCull == CT_BACK_SIDED ) {
-			cullFace = ( cullFace == GL_FRONT ) ? GL_BACK : GL_FRONT;
-		}
-		desired = static_cast<int>( cullFace );
-	}
+	const int desired = RB_ShadowMapCasterFacesCullFace(
+		R_ShadowMapCasterFaces( R_ShadowMapCasterCullingMode(),
+			backEnd.vLight, g_shadowMapCasterWindingMirrored,
+			casterGeo != NULL,
+			casterGeo != NULL && casterGeo->perfectHull, modelMatrix,
+			casterGeo != NULL ? casterGeo->bounds[0].ToFloatPtr() : NULL,
+			casterGeo != NULL ? casterGeo->bounds[1].ToFloatPtr() : NULL,
+			materialCull ) );
 	if ( desired == g_shadowMapCasterCullApplied ) {
 		return;
 	}
@@ -3180,7 +3179,10 @@ static void RB_ShadowMapApplyCasterCull( const idMaterial *shader,
 	glCullFace( static_cast<GLenum>( desired ) );
 }
 
+// Called once at the start of every caster pass, with the pass's light current.
 static void RB_ShadowMapResetCasterCull( void ) {
+	g_shadowMapCasterWindingMirrored =
+		R_ShadowMapLightMirrorsCasterWinding( backEnd.vLight );
 	g_shadowMapCasterCullApplied = -1;
 	RB_ShadowMapApplyCasterCull( NULL );
 }
@@ -3605,7 +3607,7 @@ static int RB_ShadowMapBuildPassSignatureForView( const viewLight_t *vLight, con
 	hash = RB_ShadowMapHashInt( hash, r_shadowMapStableAlphaHash.GetBool() ? 1 : 0 );
 	hash = RB_ShadowMapHashFloat( hash, RB_ShadowMapPolygonFactor() );
 	hash = RB_ShadowMapHashFloat( hash, RB_ShadowMapPolygonOffset() );
-	hash = RB_ShadowMapHashFloat( hash, static_cast<float>( idMath::ClampInt( 0, 2, r_shadowMapCasterCulling.GetInteger() ) ) );
+	hash = RB_ShadowMapHashFloat( hash, static_cast<float>( R_ShadowMapCasterCullingMode() ) );
 	if ( pointLight ) {
 		hash = RB_ShadowMapHashInt( hash, RB_ShadowMapPointSizeValue() );
 		hash = RB_ShadowMapHashInt( hash, RB_PointShadowMapHighPrecisionEnabled() ? 1 : 0 );
@@ -12526,16 +12528,11 @@ static void RB_ShadowMapDrawReceiverFallbacks( const viewLight_t *vLight, const 
 	}
 
 	// Fallback receivers are shadowed by the light's stencil volumes even on
-	// mapped frames. If the front end elided those volumes, restore them from
-	// the next frame on so these receivers do not stay unshadowed.
-	//
-	// OPENPREY: and keep asking while such a receiver is lit. Asked only when
-	// the volumes were already missing, the light counted every view that had
-	// them as a clean one, left the fallback after
-	// r_shadowMapStencilFallbackViews, drew these receivers unshadowed for a
-	// frame and built its volumes again: a shadow that blinked every 240 views
-	// on each character and organic wall, which here are the common receivers
-	// of this kind rather than the rare one.
+	// mapped frames, so the light needs those volumes for as long as it draws
+	// one. Every such view renews the hold. Marked only when the volumes were
+	// missing, the light counted each view that had them as clean, left the
+	// fallback after r_shadowMapStencilFallbackViews, drew these receivers
+	// unshadowed for a frame and was marked again, over and over.
 	RB_ShadowMapMarkStencilFallbackSticky( vLight );
 
 	if ( passKind == SHADOWMAP_PASS_LOCAL ) {
@@ -14064,9 +14061,7 @@ static bool RB_SharedWorldInteractionGLMapPassValuesValid(
 			|| ( !pass.allowCacheReuse && !pass.allowCacheUpdate )
 			|| pass.casterSignature
 				!= light.legacyViewLight->shadowMapCasterSignature
-			|| pass.casterCullMode
-				!= idMath::ClampInt( 0, 2,
-					r_shadowMapCasterCulling.GetInteger() )
+			|| pass.casterCullMode != R_ShadowMapCasterCullingMode()
 			|| idMath::Fabs( pass.polygonFactor
 				- RB_ShadowMapPolygonFactor() ) > 0.00001f
 			|| idMath::Fabs( pass.polygonOffset
@@ -14675,19 +14670,13 @@ static bool RB_SharedWorldInteractionGLPointEntryMatches(
 static void RB_SharedWorldInteractionGLApplyMapCasterCull(
 		const classicInteractionDomainShadowMapPass_t &pass,
 		const classicInteractionDomainShadowCaster_t &caster ) {
-	int desired = 0;
-	const bool automaticTwoSided = pass.casterCullMode == 2
-		&& ( !caster.perfectHull
-			|| R_ShadowMapLightOriginInsideCasterBounds(
-				pass.legacyViewLight, caster.modelMatrix,
-				caster.boundsMin, caster.boundsMax ) );
-	if ( pass.casterCullMode != 0 && !automaticTwoSided && caster.cull != RENDERER_CULL_NONE ) {
-		GLenum face = GL_FRONT;
-		if ( caster.cull == RENDERER_CULL_BACK ) {
-			face = face == GL_FRONT ? GL_BACK : GL_FRONT;
-		}
-		desired = static_cast<int>( face );
-	}
+	const int materialCull = caster.cull == RENDERER_CULL_NONE ? CT_TWO_SIDED
+		: ( caster.cull == RENDERER_CULL_BACK ? CT_BACK_SIDED : CT_FRONT_SIDED );
+	const int desired = RB_ShadowMapCasterFacesCullFace(
+		R_ShadowMapCasterFaces( pass.casterCullMode, pass.legacyViewLight,
+			pass.casterWindingMirrored, true, caster.perfectHull,
+			caster.modelMatrix, caster.boundsMin, caster.boundsMax,
+			materialCull ) );
 	if ( desired == 0 ) {
 		glDisable( GL_CULL_FACE );
 	} else {
@@ -17530,6 +17519,7 @@ typedef struct {
 	int				errorPosition;
 	char			failureReason[256];
 	char			normalizedPath[96];
+	bool			sceneDepthReject;	// heat haze rewritten to read texture[oq4arbhaze::TEXTURE_UNIT]
 } progDef_t;
 
 static	const int	MAX_GLPROGS = 200;
@@ -17642,6 +17632,7 @@ static void RB_ResetARBProgramStatus( progDef_t &prog ) {
 	prog.requiredForLighting = RB_IsRequiredLightingARBProgram( prog );
 	prog.errorPosition = -1;
 	prog.failureReason[0] = '\0';
+	prog.sceneDepthReject = false;
 	RB_SetARBProgramPath( prog );
 }
 
@@ -17772,6 +17763,47 @@ static bool RB_ARBProgramNeedsColorZeroFloor( const progDef_t &prog ) {
 		( prog.ident == FPROG_INTERACTION ||
 		  prog.ident == FPROG_SIMPLE_INTERACTION ||
 		  prog.ident == FPROG_TEST );
+}
+
+/*
+==================
+RB_ARBProgramNeedsHeatHazeDepthReject
+
+The stock heat-haze fragment programs, which refract _currentRender. Their
+refracted read must not pick up the first-person weapon or other geometry in
+front of the haze; ARBHeatHazeDepthReject.h has the whole story.
+==================
+*/
+static bool RB_ARBProgramNeedsHeatHazeDepthReject( const progDef_t &prog ) {
+	return prog.target == GL_FRAGMENT_PROGRAM_ARB && idStr::Icmpn( prog.name, "heatHaze", 8 ) == 0;
+}
+
+static const char *RB_ARBHeatHazeDepthRejectResultName( oq4arbhaze::rewriteResult_t result ) {
+	switch ( result ) {
+	case oq4arbhaze::REWRITE_DONE:
+		return "done";
+	case oq4arbhaze::REWRITE_NO_SCREEN_READ:
+		return "no _currentRender read";
+	case oq4arbhaze::REWRITE_UNSUPPORTED:
+		return "unsupported program";
+	case oq4arbhaze::REWRITE_NO_ROOM:
+		return "rewrite buffer too small";
+	default:
+		return "unknown";
+	}
+}
+
+/*
+==================
+R_ARBProgramUsesSceneDepthReject
+
+True when the loaded fragment program ident reads the scene depth on
+texture[oq4arbhaze::TEXTURE_UNIT] and program.local[oq4arbhaze::LOCAL_INDEX].
+==================
+*/
+bool R_ARBProgramUsesSceneDepthReject( int ident ) {
+	const progDef_t *prog = RB_FindARBProgramRecord( GL_FRAGMENT_PROGRAM_ARB, static_cast<GLuint>( ident ) );
+	return prog != NULL && prog->valid && prog->sceneDepthReject;
 }
 
 static const char *RB_ARBColorZeroFloorResultName( oq4arbfloor::rewriteResult_t result ) {
@@ -18097,6 +18129,23 @@ void R_LoadARBProgram( int progIndex ) {
 		}
 	}
 
+	// The heat-haze programs get a scene depth test on their refracted read.
+	// Like the zero floor it is our rewrite, so a driver that refuses it gets
+	// the program as shipped.
+	idList<char> hazeDepthRejectProgram;
+	bool hazeDepthReject = false;
+	if ( RB_ARBProgramNeedsHeatHazeDepthReject( prog ) ) {
+		hazeDepthRejectProgram.SetNum( idLib::SizeToInt( oq4arbhaze::RewriteBufferSize( start ), "R_LoadARBProgram" ) );
+		const oq4arbhaze::rewriteResult_t hazeResult = oq4arbhaze::RewriteWithDepthReject( start,
+			hazeDepthRejectProgram.Ptr(), static_cast<size_t>( hazeDepthRejectProgram.Num() ) );
+		if ( hazeResult == oq4arbhaze::REWRITE_DONE ) {
+			programText = hazeDepthRejectProgram.Ptr();
+			hazeDepthReject = true;
+		} else {
+			common->Printf( ": heat-haze depth test not applied (%s)", RB_ARBHeatHazeDepthRejectResultName( hazeResult ) );
+		}
+	}
+
 	glBindProgramARB( prog.target, prog.ident );
 	glGetError();
 
@@ -18108,11 +18157,18 @@ void R_LoadARBProgram( int progIndex ) {
 	if ( programText != start && ( err == GL_INVALID_OPERATION || ofs != -1 ) ) {
 		const GLubyte *str = glGetString( GL_PROGRAM_ERROR_STRING_ARB );
 		common->Printf( "\n" );
-		common->Warning( "R_LoadARBProgram: the driver rejected the colour zero floor for %s (%s); loading it unchanged, "
-			"so a light behind a surface can darken it on a float scene target",
-			fullPath.c_str(), ( str != NULL ) ? (const char *)str : "unknown" );
+		if ( hazeDepthReject ) {
+			common->Warning( "R_LoadARBProgram: the driver rejected the heat-haze depth test for %s (%s); loading it unchanged, "
+				"so the haze can refract the view weapon",
+				fullPath.c_str(), ( str != NULL ) ? (const char *)str : "unknown" );
+		} else {
+			common->Warning( "R_LoadARBProgram: the driver rejected the colour zero floor for %s (%s); loading it unchanged, "
+				"so a light behind a surface can darken it on a float scene target",
+				fullPath.c_str(), ( str != NULL ) ? (const char *)str : "unknown" );
+		}
 		common->Printf( "%s", fullPath.c_str() );
 		programText = start;
+		hazeDepthReject = false;
 		glProgramStringARB( prog.target, GL_PROGRAM_FORMAT_ASCII_ARB,
 			idLib::SizeToInt( strlen( programText ), "R_LoadARBProgram" ), (unsigned char *)programText );
 		err = glGetError();
@@ -18140,7 +18196,12 @@ void R_LoadARBProgram( int progIndex ) {
 	}
 
 	prog.valid = true;
-	common->Printf( programText != start ? ": colour floored at zero\n" : "\n" );
+	prog.sceneDepthReject = hazeDepthReject;
+	if ( programText == start ) {
+		common->Printf( "\n" );
+	} else {
+		common->Printf( hazeDepthReject ? ": heat-haze depth test added\n" : ": colour floored at zero\n" );
+	}
 }
 
 bool R_ARBProgramUsesInteractionInputs( unsigned int target, const char *program ) {
