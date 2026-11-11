@@ -429,7 +429,7 @@ idCVar r_useShadowVertexProgram( "r_useShadowVertexProgram", "1", CVAR_RENDERER 
 idCVar r_useTrueTypeFonts( "r_useTrueTypeFonts", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "render GUI text from the shipped .ttf faces, rasterised at the display's own resolution, instead of scaling up the fixed 12/24/48 point bitmap atlases" );
 idCVar r_ttfFontResolution( "r_ttfFontResolution", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "multiplier on the resolution the TrueType glyph atlases are rasterised at; raise for sharper text at the cost of atlas memory", 0.25f, 4.0f );
 idCVar r_ttfFontDebug( "r_ttfFontDebug", "0", CVAR_RENDERER | CVAR_BOOL, "dump each TrueType glyph atlas to fs_savepath/ttfatlas and log its layout" );
-idCVar r_useShadowMap( "r_useShadowMap", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use a simple shadow-map path for projected and point lights when supported" );
+idCVar r_useShadowMap( "r_useShadowMap", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use shadow maps for projected, parallel and point lights when supported; 0 draws the stencil shadow volumes retail used" );
 idCVar r_shadowMapCSM( "r_shadowMapCSM", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use projected-light cascaded shadow maps when shadow maps are enabled" );
 idCVar r_shadowMapHashedAlpha( "r_shadowMapHashedAlpha", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use hashed alpha testing for perforated shadow-map casters when supported" );
 idCVar r_shadowMapTranslucentMoments( "r_shadowMapTranslucentMoments", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "accumulate experimental translucent shadow moments for blended casters" );

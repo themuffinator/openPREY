@@ -6863,7 +6863,16 @@ bool hhPlayer::UpdateAnimationControllers( void ) {
 	else {
 		theAnimator = GetAnimator();
 	}
-	JawFlap(theAnimator);
+
+	// openPREY: a "playerBoundCamera" view (roadhouse's mirror intro) follows the head's
+	// camera joint, so the head bone that joint hangs from must not flap with the voice.
+	// That flap only stayed still while voice amplitude read a constant 1.
+	jointHandle_t viewJoint = INVALID_JOINT;
+	idCamera *camera = GetPrivateCameraView();
+	if ( camera && camera->spawnArgs.GetBool( "playerBoundCamera" ) ) {
+		viewJoint = theAnimator->GetJointHandle( spawnArgs.GetString( "bone_camera", "camera" ) );
+	}
+	JawFlap(theAnimator, viewJoint);
 
 	return retValue;
 }
