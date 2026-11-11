@@ -3703,7 +3703,12 @@ bool R_BakeCurrentLightGrids( const lightGridBakeOptions_t &options, const char 
 	// captureSize x captureSize face. Window pixels drew a larger view and kept
 	// only its corner unless the window was 640x480. The synchronous and the
 	// async PBO capture paths both render through this view.
-	renderView_t captureView = tr.primaryView->renderView;
+	// Copy tr.primaryRenderView, the by-value copy RenderScene keeps:
+	// tr.primaryView points into per-frame memory that later frames reuse, so
+	// its renderView can hold garbage (a bad globalMaterial crashed the bake).
+	// Clear globalMaterial so a full-view material effect is never baked in.
+	renderView_t captureView = tr.primaryRenderView;
+	captureView.globalMaterial = NULL;
 	captureView.x = 0;
 	captureView.y = 0;
 	captureView.width = SCREEN_WIDTH;
