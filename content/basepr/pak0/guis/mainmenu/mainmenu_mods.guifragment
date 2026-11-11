@@ -109,6 +109,9 @@
 				focuscolor	LISTCONTENT_SELECTION_OUTLINE
 				textscale	0.25
 				listName	"modsList"
+				// rows are "name<TAB>version": the version right-aligned short of the scroll bar
+				tabstops	"4, 170, 248"
+				tabaligns	"0, 2, 0"
 
 				onAction {
 					set "cmd" "play guisounds_menu_tick" ;

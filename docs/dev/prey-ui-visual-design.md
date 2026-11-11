@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.12, 11 November 2026.
+Specification version 1.13, 11 November 2026.
 
 Status: reference survey and design contract. openPREY still renders the stock
 Prey GUIs; no replacement interface has been built. Sections 1 to 11 record
@@ -238,7 +238,13 @@ on a 27 u pitch. A replacement makes the whole pitch the target, with the 30 u
 Keep the following anchors under aspect expansion:
 
 - The portal rim stays on the leading screen edge. The wordmark, Sphere and
-  sub-menu frames stay on the central 4:3 axis.
+  sub-menu frames stay on the central 4:3 axis. The portal's view is the 4:3
+  view scaled up to the screen's width about the canvas centre (its rect is
+  `-x, -0.75x, 640 + 2x, 480 + 1.5x` for an expansion of `x` a side), so the
+  rim keeps its stock place against the leading edge and the far side of the
+  ring, just past the 4:3 canvas, stays off screen. The rim is therefore
+  larger on wider screens. On a screen taller than 4:3 the view keeps its
+  scale and shows more of the ring above and below.
 - The navigation arc stays in the leading half of the 4:3 canvas; it does not
   slide to the screen edge.
 - The star field, Earth's limb and loading art fill the full screen width.
@@ -1161,9 +1167,22 @@ not in the data.
 openPREY's overrides in `content/basepr/pak0/` change eleven stock scripts.
 They extend the stock vocabulary rather than replace it:
 
-- **Aspect expansion.** The menu and death backgrounds gain edge slices
-  (`background_left`, `_right`, `_top`, `_bottom` in `pak1`) and `noclip`,
-  so wide screens show more space rather than black bars. The loading screens
+- **Aspect expansion.** Wide and tall screens show more space rather than
+  black bars. The main menu draws the stock layers over black, as the stock
+  does: the star layers widen with the screen (`naturalmatscale` holds their
+  density), Earth continues through its window's edge slices
+  (`preymenu/earth_left`, `_right`, `_bottom`, whose materials repeat the
+  stock Earth stages so the drifting clouds run on across the join), and the
+  portal's view spans the screen (section 3; `canvasfill`, section 12.2).
+  `restart.gui` keeps the flat painting with its own edge slices
+  (`background_left`, `_right`, `_top`, `_bottom`). Every tile is generated
+  from the retail art by `tools/assets/generate_menu_backdrop_tiles.py`,
+  which continues each painting's Earth in polar strips about its disc so
+  the limb, glow and foreshortening carry on as painted; the side tiles are
+  the faithful ones, and the bottom tiles, seen only on screens taller than
+  4:3, are plainer. A colour fill over exactly the 4:3 canvas (the scrims
+  under dialogs, fades, `msg.gui`'s dimmed desktop) covers the expanded
+  canvas, so dialogs dim the whole screen. The loading screens
   (`guis/map/loading.gui` and the session's fallback screen) compose the
   levelshot or `guis/assets/loading/loading` with its `loading_left`/`_right`/
   `_top`/`_bottom` tiles into one canvas-filling picture, as openQ4 does; the
@@ -1374,7 +1393,9 @@ for the portal. The scene needs four things it lacks:
 
 1. **Field of view.** A `renderDef` draws with a fixed 90° horizontal field
    of view; the scene needs 30° vertical. The retained-UI entry
-   `DrawModelScene` already takes one.
+   `DrawModelScene` already takes one. `canvasfill 1` already draws a
+   `renderDef` across the whole expanded canvas through an off-axis frustum
+   that keeps the projection its rect defines; the portal uses it.
 2. **A camera that turns.** A `renderDef` moves its camera with `viewOffset`
    and always looks along one axis. The curve needs a view axis as well.
 3. **Independent bodies.** Models after the first share the first model's
@@ -1614,6 +1635,22 @@ composition.
 These were seen while capturing and are recorded for follow-up; this document
 does not change them.
 
+- Open (front-end survey, 11 November 2026): the Reset Defaults dialog's Game
+  Options, Video and Audio boxes send `resetgame`, `resetvideo` and
+  `resetaudio`, which nothing handles (Controls and "Reset all settings"
+  work); which cvars each covers is still to be decided. The Controls
+  Profiles page's five commands are unhandled. MultiPrey's Game Key Status has
+  no value and `SetCDKey` no handler. Resume Game never shows: nothing sets
+  `gui::hasrecentsave` or handles `resumegame`. Updates says "Prey is up to
+  date" after two seconds whether or not a reply came. A long sound device
+  name still runs past the stock value column. The Mods list shows the
+  version from the build's base version, taken from upstream openQ4 tags
+  (0.13.2), and lists `basepr` itself.
+- The Earth layer's last texel column (`preymenu/background2.tga`) is brighter
+  than its neighbours. The stock hides it on the screen edge; under aspect
+  expansion the main menu's Earth window stops 1.5 texels short of it
+  (`matscalex 0.9985`) so it does not draw a line at the right slice's join.
+
 - Fixed (`70b9d052a`): in openPREY's Options and MultiPrey pages, the four top
   tab labels and the active side tab's label did not draw under OpenGL. They
   were drawn, then covered by their own tab plates: `RB_STD_DrawView` split 2D
@@ -1691,6 +1728,31 @@ does not change them.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.13, 11 November 2026
+
+Sections 3 and 12.1 describe the main menu's aspect expansion as rebuilt.
+The stale flat painting under the stock layers is gone (it showed through
+the additive stars and put a second Earth limb beside the layered one); the
+star layers widen with the screen; Earth continues through new edge slices;
+the portal's view scales to the screen's width, so the rim keeps its place
+and no longer ends in a hard edge at the canvas, and its shimmer covers the
+whole screen. Every edge tile, the flat painting's included, is regenerated
+from the retail art by `tools/assets/generate_menu_backdrop_tiles.py`; the
+previous ones continued only the flat painting and the bottom one was a
+photograph of a desert Earth. Full-canvas colour fills now cover the
+expanded canvas, so dialog scrims and fades dim the whole screen. Section
+12.2 notes the `renderDef` `canvasfill` key.
+
+Engine fixes that bring stock screens back to the stock: a repeated window
+name makes a second window again, as in Prey's Doom 3 engine (the credits'
+Writing section had collapsed to its last line); an active tab's page
+outline now breaks across the tab (section 6, rule 1). Apply Changes sits at
+the same height on all six Video pages, the Mods list puts each version in
+its own column, the Sound Device choice stores the device name rather than
+its label (and drops OpenAL Soft's "OpenAL Soft on" prefix from labels), the
+Create Server page shows Prey's map pictures, and the Reset Defaults
+dialog's Controls box restores Prey's key layout.
 
 ### Version 1.12, 11 November 2026
 

@@ -284,7 +284,14 @@ void idSimpleWindow::SetupTransforms(float x, float y) {
 
 void idSimpleWindow::DrawBackground(const idRectangle &drawRect) {
 	if (backColor.w() > 0) {
-		dc->DrawFilledRect(drawRect.x, drawRect.y, drawRect.w, drawRect.h, backColor);
+		idRectangle fillRect = drawRect;
+		if ( dc != NULL && !( gui != NULL && gui->ClassicCanvas() ) ) {
+			float xExpand = 0.0f;
+			float yExpand = 0.0f;
+			dc->GetVirtualScreenExpansion( forceAspectWidth, forceAspectHeight, xExpand, yExpand );
+			fillRect = OpenQ4_LegacyScreenFillRect( drawRect, xExpand, yExpand );
+		}
+		dc->DrawFilledRect(fillRect.x, fillRect.y, fillRect.w, fillRect.h, backColor);
 	}
 
 	if (background) {

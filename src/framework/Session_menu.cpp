@@ -5105,6 +5105,14 @@ void idSessionLocal::HandleMainMenuCommands( const char *menuCommand ) {
 			continue;
 		}
 
+		// OPENPREY: Prey's Reset Defaults dialog sends this for its Controls
+		// box. Prey's default.cfg is its key layout: unbindall, then the binds.
+		if ( !idStr::Icmp( cmd, "resetbindings" ) ) {
+			cmdSystem->BufferCommandText( CMD_EXEC_NOW, "exec default.cfg" );
+			guiMainMenu->SetKeyBindingNames();
+			continue;
+		}
+
 
 		if ( !idStr::Icmp( cmd, "bind" ) ) {
 			if ( args.Argc() - icmd >= 2 ) {

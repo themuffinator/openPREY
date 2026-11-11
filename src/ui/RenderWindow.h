@@ -94,6 +94,9 @@ private:
 	int animEndTime[MAX_RENDERWINDOW_MODELS];
 	bool useLight[MAX_RENDERWINDOW_LIGHTS];
 	bool updateAnimation;
+	// "canvasfill": draw the scene across the whole canvas, aspect expansion
+	// included, keeping the projection the rect defines (RenderWindow.cpp).
+	bool canvasFill;
 };
 
 #endif // __RENDERWINDOW_H

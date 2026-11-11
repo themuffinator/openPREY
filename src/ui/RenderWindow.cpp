@@ -105,6 +105,77 @@ static bool RenderWindowResolveViewport( idDeviceContext *dc, const idRectangle 
 	return true;
 }
 
+/*
+================
+RenderWindowResolveCanvasView
+
+"canvasfill 1". The scene keeps the projection its rect defines, centred on
+the rect with the 90 degree horizontal field every renderDef uses, but is drawn
+across the whole canvas, aspect expansion included, through an off-axis
+frustum. The main menu pins its portal rim to the leading screen edge; drawn
+inside its rect, the portal's view, and the shimmer it lays over the backdrop,
+would stop at the rect's trailing edge.
+
+Returns false, and the caller draws the rect alone, when the rect is too small
+for the canvas to stay inside the renderer's tangent limit: the portal opening
+grows from a point.
+================
+*/
+static bool RenderWindowResolveCanvasView( idDeviceContext *dc, const idRectangle &drawRect,
+		float forceAspectWidth, float forceAspectHeight, renderView_t &view ) {
+	if ( dc == NULL || drawRect.w <= 0.0f || drawRect.h <= 0.0f ) {
+		return false;
+	}
+
+	float xExpand = 0.0f;
+	float yExpand = 0.0f;
+	dc->GetVirtualScreenExpansion( forceAspectWidth, forceAspectHeight, xExpand, yExpand );
+	const idRectangle canvas( -xExpand, -yExpand, VIRTUAL_WIDTH + 2.0f * xExpand, VIRTUAL_HEIGHT + 2.0f * yExpand );
+
+	// The frustum has to describe the viewport as it will be clipped.
+	float clipX = canvas.x;
+	float clipY = canvas.y;
+	float clipW = canvas.w;
+	float clipH = canvas.h;
+	if ( dc->ClippedCoords( &clipX, &clipY, &clipW, &clipH, NULL, NULL, NULL, NULL ) || clipW <= 0.0f || clipH <= 0.0f ) {
+		return false;
+	}
+
+	// A 90 degree horizontal field puts a tangent of 1 at the rect's sides;
+	// GUI y runs down, a frustum's up.
+	const float unitsPerTangent = drawRect.w * 0.5f;
+	const float centreX = drawRect.x + drawRect.w * 0.5f;
+	const float centreY = drawRect.y + drawRect.h * 0.5f;
+	const float tanLeft = ( clipX - centreX ) / unitsPerTangent;
+	const float tanRight = ( clipX + clipW - centreX ) / unitsPerTangent;
+	const float tanUp = ( centreY - clipY ) / unitsPerTangent;
+	const float tanDown = ( centreY - ( clipY + clipH ) ) / unitsPerTangent;
+
+	// The renderer drops an off-axis frustum with a tangent past 30
+	// (R_ViewFovTangentsValid); keep clear of that limit.
+	const float tangentLimit = 25.0f;
+	if ( tanLeft >= tanRight || tanDown >= tanUp ||
+			idMath::Fabs( tanLeft ) > tangentLimit || idMath::Fabs( tanRight ) > tangentLimit ||
+			idMath::Fabs( tanUp ) > tangentLimit || idMath::Fabs( tanDown ) > tangentLimit ) {
+		return false;
+	}
+
+	float canvasFovY = 0.0f;
+	if ( !RenderWindowResolveViewport( dc, canvas, view.x, view.y, view.width, view.height, canvasFovY ) ) {
+		return false;
+	}
+
+	view.asymmetricFov = true;
+	view.fovTanLeft = tanLeft;
+	view.fovTanRight = tanRight;
+	view.fovTanUp = tanUp;
+	view.fovTanDown = tanDown;
+	// fov_x and fov_y hold the enclosing field for consumers that only estimate.
+	view.fov_x = 2.0f * RAD2DEG( idMath::ATan( Max( -tanLeft, tanRight ) ) );
+	view.fov_y = 2.0f * RAD2DEG( idMath::ATan( Max( tanUp, -tanDown ) ) );
+	return true;
+}
+
 static bool RenderWindowNeedsPreviewBounds( const idBounds &bounds ) {
 	if ( bounds.IsCleared() ) {
 		return true;
@@ -196,6 +267,7 @@ void idRenderWindow::CommonInit() {
 	}
 
 	updateAnimation = true;
+	canvasFill = false;
 }
 
 void idRenderWindow::BuildAnimation( int time ) {
@@ -444,10 +516,12 @@ void idRenderWindow::Draw( int time, float x, float y ) {
 	refdef.shaderParms[1] = 1.0f;
 	refdef.shaderParms[2] = 1.0f;
 	refdef.shaderParms[3] = 1.0f;
-	if ( !RenderWindowResolveViewport( dc, drawRect, refdef.x, refdef.y, refdef.width, refdef.height, refdef.fov_y ) ) {
-		return;
+	if ( !canvasFill || !RenderWindowResolveCanvasView( dc, drawRect, forceAspectWidth, forceAspectHeight, refdef ) ) {
+		if ( !RenderWindowResolveViewport( dc, drawRect, refdef.x, refdef.y, refdef.width, refdef.height, refdef.fov_y ) ) {
+			return;
+		}
+		refdef.fov_x = 90.0f;
 	}
-	refdef.fov_x = 90.0f;
 	refdef.time = time;
 	world->RenderScene( &refdef );
 }
@@ -613,6 +687,15 @@ idWinVar *idRenderWindow::GetWinVarByName( const char *_name, bool fixup, drawWi
 bool idRenderWindow::ParseInternalVar( const char *_name, idParser *src ) {
 	if ( idStr::Icmp( _name, "needUpdate" ) == 0 ) {
 		ParseString( src, needUpdate );
+		return true;
+	}
+	if ( idStr::Icmp( _name, "canvasfill" ) == 0 ) {
+		canvasFill = src->ParseBool();
+		// The scene is meant to reach past the rect, which a renderDef otherwise
+		// pushes as its own clip before it draws.
+		if ( canvasFill ) {
+			flags |= WIN_NOCLIP;
+		}
 		return true;
 	}
 	return idWindow::ParseInternalVar( _name, src );

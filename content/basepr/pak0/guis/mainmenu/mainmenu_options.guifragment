@@ -4138,7 +4138,7 @@
 
 
 							buttonDef OVP_ApplyChanges {
-								rect			280, 320, 115, 28
+								rect			280, 315, 115, 28
 								text			"#str_20294"
 								textalign		1
 								textaligny		-1
@@ -4494,7 +4494,7 @@
 							}
 
 							buttonDef OVT_ApplyChanges {
-								rect			280, 320, 115, 28
+								rect			280, 315, 115, 28
 								text			"#str_20294"
 								textalign		1
 								textaligny		-1
@@ -4932,6 +4932,7 @@
 									forecolor	EDITABLE_FORECOLOR_COMMA
 									hovercolor	EDITABLE_HOVERCOLOR_COMMA
 									choices		"gui::device_name"
+									values		"gui::device_value"
 									cvar		"s_deviceName"
 									choiceType	1
 

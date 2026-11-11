@@ -9531,7 +9531,14 @@ void idFileSystemLocal::FindMapScreenshot( const char *path, char *buf, int len 
 
 	mapname.StripPath();
 	mapname.StripFileExtension();
-	
+
+	// OPENPREY: Prey keeps a picture of each multiplayer map beside its loading
+	// art; the Create Server page showed the generic one without this.
+	idStr::snPrintf( buf, len, "guis/assets/loading/thumbs/%s.tga", mapname.c_str() );
+	if ( ReadFile( buf, NULL, NULL ) != -1 ) {
+		return;
+	}
+
 	idStr::snPrintf( buf, len, "gfx/guis/loadscreens/%s.tga", mapname.c_str() );
 	if ( ReadFile( buf, NULL, NULL ) == -1 ) {
 		// try to extract from an addon

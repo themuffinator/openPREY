@@ -2476,7 +2476,14 @@ void idWindow::DrawBackground(const idRectangle &drawRect) {
 	const bool usesRetailSuperWindowFrame = hasFrameDecoration && windowDefType.Icmp( "superWindowDef" ) == 0;
 	const idRectangle backgroundRect = usesRetailSuperWindowFrame ? GetRetailMarginsInsetRect( this, drawRect ) : drawRect;
 	if ( backColor.w() && backgroundRect.w > 0.0f && backgroundRect.h > 0.0f ) {
-		dc->DrawFilledRect( backgroundRect.x, backgroundRect.y, backgroundRect.w, backgroundRect.h, backColor );
+		idRectangle fillRect = backgroundRect;
+		if ( dc != NULL && !( gui != NULL && gui->ClassicCanvas() ) ) {
+			float xExpand = 0.0f;
+			float yExpand = 0.0f;
+			dc->GetVirtualScreenExpansion( forceAspectWidth, forceAspectHeight, xExpand, yExpand );
+			fillRect = OpenQ4_LegacyScreenFillRect( backgroundRect, xExpand, yExpand );
+		}
+		dc->DrawFilledRect( fillRect.x, fillRect.y, fillRect.w, fillRect.h, backColor );
 	}
 
 	if ( dc != NULL && backgroundRect.w > 0.0f && backgroundRect.h > 0.0f && matColor.w() > 0.0f ) {
@@ -2709,8 +2716,52 @@ void idWindow::DrawBorderAndCaption(const idRectangle &drawRect) {
 		idWinVar *linesVar = GetWinVarByName( "seperatorlines", false );
 		if ( linesVar == NULL ) linesVar = GetWinVarByName( "separatorlines", false );
 		if ( linesVar != NULL ) ParseRetailVec4( linesVar->c_str(), lines );
-		if ( lines.x > 0.0f ) dc->DrawFilledRect( drawRect.x, drawRect.y, Min( lines.x, drawRect.w ), drawRect.h, separatorColor );
-		if ( lines.y > 0.0f ) dc->DrawFilledRect( drawRect.x, drawRect.y, drawRect.w, Min( lines.y, drawRect.h ), separatorColor );
+		// An active tab and its page are one surface (prey-ui-visual-design.md,
+		// section 6): the outline breaks across the active tab's span on the
+		// edge that faces the tabs and resumes at the tab's ends. Inactive tabs
+		// keep the line.
+		float gapStart = 0.0f;
+		float gapEnd = 0.0f;
+		bool gapOnLeading = false;
+		bool gapOnTop = false;
+		const int tabCount = parent->GetTabContainerTabCount();
+		retailTabLayout_t layout;
+		if ( tabCount > 0 && parent->GetTabContainerTabWindow( parent->activeTabIndex ) == this &&
+				BuildRetailTabLayout( parent, parent->drawRect, tabCount, layout ) ) {
+			const idRectangle activeRect = GetRetailTabButtonRect( parent->drawRect, layout, parent->activeTabIndex );
+			const float joinTolerance = 2.0f;
+			if ( layout.verticalTabs && idMath::Fabs( activeRect.Right() - drawRect.x ) <= joinTolerance ) {
+				gapOnLeading = true;
+				gapStart = activeRect.y;
+				gapEnd = activeRect.Bottom();
+			} else if ( !layout.verticalTabs && idMath::Fabs( activeRect.Bottom() - drawRect.y ) <= joinTolerance ) {
+				gapOnTop = true;
+				gapStart = activeRect.x;
+				gapEnd = activeRect.Right();
+			}
+		}
+		if ( lines.x > 0.0f ) {
+			const float width = Min( lines.x, drawRect.w );
+			if ( gapOnLeading ) {
+				const float upper = idMath::ClampFloat( drawRect.y, drawRect.Bottom(), gapStart );
+				const float lower = idMath::ClampFloat( drawRect.y, drawRect.Bottom(), gapEnd );
+				if ( upper > drawRect.y ) dc->DrawFilledRect( drawRect.x, drawRect.y, width, upper - drawRect.y, separatorColor );
+				if ( lower < drawRect.Bottom() ) dc->DrawFilledRect( drawRect.x, lower, width, drawRect.Bottom() - lower, separatorColor );
+			} else {
+				dc->DrawFilledRect( drawRect.x, drawRect.y, width, drawRect.h, separatorColor );
+			}
+		}
+		if ( lines.y > 0.0f ) {
+			const float height = Min( lines.y, drawRect.h );
+			if ( gapOnTop ) {
+				const float left = idMath::ClampFloat( drawRect.x, drawRect.Right(), gapStart );
+				const float right = idMath::ClampFloat( drawRect.x, drawRect.Right(), gapEnd );
+				if ( left > drawRect.x ) dc->DrawFilledRect( drawRect.x, drawRect.y, left - drawRect.x, height, separatorColor );
+				if ( right < drawRect.Right() ) dc->DrawFilledRect( right, drawRect.y, drawRect.Right() - right, height, separatorColor );
+			} else {
+				dc->DrawFilledRect( drawRect.x, drawRect.y, drawRect.w, height, separatorColor );
+			}
+		}
 		if ( lines.z > 0.0f ) dc->DrawFilledRect( drawRect.Right() - Min( lines.z, drawRect.w ), drawRect.y, Min( lines.z, drawRect.w ), drawRect.h, separatorColor );
 		if ( lines.w > 0.0f ) dc->DrawFilledRect( drawRect.x, drawRect.Bottom() - Min( lines.w, drawRect.h ), drawRect.w, Min( lines.w, drawRect.h ), separatorColor );
 	}
@@ -4693,13 +4744,14 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 			src->UnreadToken(&token);
 			drawWin_t *dw = FindChildByName(token2.c_str());
 			idWindow *redefined = dw != NULL ? dw->win : NULL;
-			if ( redefined != NULL && redefined != this && redefined->UsesSimpleWindowClipBehavior() ) {
-				// Retail turned a plain leaf window into an idSimpleWindow, which this
-				// lookup reports without a window, so a later definition under the same
-				// name made a second window rather than replacing the first. Stock
-				// scripts depend on it: guis/elevatorcall.gui draws two text lines both
-				// named "elevatortext". IsSimple no longer collapses such windows, so
-				// make the same choice here.
+			if ( redefined != NULL && redefined != this ) {
+				// Prey's engine, like Doom 3's, made every definition a new window; the
+				// Quake 4 rule that reopens a sibling of the same name collapses stock
+				// Prey scripts that repeat a name. The credits list twelve lines as
+				// "CreditWriting3" (only the last one drew), guis/elevatorcall.gui
+				// draws two text lines both named "elevatortext", and the load-game
+				// list, dialog_elhuit and two noninteract screens repeat names too.
+				// Name lookups still find the first of them.
 				redefined = NULL;
 			}
 			if ( redefined != NULL ) {

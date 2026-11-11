@@ -717,11 +717,19 @@ bool idSoundHardware_OpenAL::IsDefaultDeviceChoiceValue( const char* deviceName 
 	idStr choice = deviceName;
 	choice.StripLeading( ' ' );
 	choice.StripTrailingWhitespace();
-	return choice.IsEmpty() ||
+	if ( choice.IsEmpty() ||
 		idStr::Icmp( choice.c_str(), OPENQ4_AUDIO_DEVICE_DEFAULT_CHOICE ) == 0 ||
 		idStr::Icmp( choice.c_str(), "default" ) == 0 ||
 		idStr::Icmp( choice.c_str(), "system default" ) == 0 ||
-		idStr::Icmp( choice.c_str(), "<system default>" ) == 0;
+		idStr::Icmp( choice.c_str(), "<system default>" ) == 0 ) {
+		return true;
+	}
+	// Prey's audio page once stored the default entry's label rather than its
+	// value: "Default Device (OpenAL Soft on ...)". Read that as the default.
+	const idStr defaultLabel = common->GetLanguageDict()->GetString( "#str_229913" );
+	return defaultLabel.Length() > 0 && choice.Length() > defaultLabel.Length() + 1 &&
+		idStr::Icmpn( choice.c_str(), defaultLabel.c_str(), defaultLabel.Length() ) == 0 &&
+		choice[ defaultLabel.Length() ] == ' ' && choice[ defaultLabel.Length() + 1 ] == '(';
 }
 
 idStr idSoundHardware_OpenAL::NormalizeRequestedDeviceName( const char* deviceName ) {
@@ -742,6 +750,14 @@ idStr idSoundHardware_OpenAL::SanitizeDeviceLabel( const char* deviceName ) {
 	sanitized.Replace( "\t", " " );
 	sanitized.StripLeading( ' ' );
 	sanitized.StripTrailingWhitespace();
+	// OpenAL Soft names every endpoint "OpenAL Soft on <device>"; the prefix
+	// says nothing in a list of them and pushed the device out of the menu's
+	// value column. Only the label drops it: the choice values keep full names.
+	static const char *const openALSoftPrefix = "OpenAL Soft on ";
+	const int prefixLength = idStr::Length( openALSoftPrefix );
+	if ( sanitized.Length() > prefixLength && idStr::Icmpn( sanitized.c_str(), openALSoftPrefix, prefixLength ) == 0 ) {
+		sanitized = sanitized.Right( sanitized.Length() - prefixLength );
+	}
 	return sanitized;
 }
 

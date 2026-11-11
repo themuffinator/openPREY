@@ -33,6 +33,11 @@ windowDef desktop {
 	float inSubmenu	0
 	float inModal	0
 
+	// The portal's view spans the screen's width: on a wider screen it is the
+	// 4:3 view scaled up about the canvas centre, so the rim stays on the
+	// leading screen edge and the far side of the ring stays off screen.
+	definevec4 "portalRect" ( 0 - "gui::virtual_screen_x_expand" ), ( 0 - ( "gui::virtual_screen_x_expand" * 0.75 ) ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 480 + ( "gui::virtual_screen_x_expand" * 1.5 ) )
+
 	onTime 0 {
 /*
 		set "gui::server_name"			"The SchoolYard"
@@ -157,7 +162,7 @@ windowDef desktop {
 			transition "PortalModel::viewOffset" "-120 0 0 0" "-120 0 0 0" "1" ;
 		}
 		onTime 100 {
-			transition "PortalModel::rect" "320 240 0 0" "0 0 640 480" "200";
+			transition "PortalModel::rect" "320 240 0 0" "$desktop::portalRect" "200";
 		}
 		onTime 300 {
 			transition "PortalModel::viewOffset" "-120 0 0 0" "-43 7 0 0" "200" ;
@@ -255,7 +260,8 @@ windowDef desktop {
 	}
 
 	windowDef ScreenShotBackground {
-		rect		0, 0, 640, 480
+		// The shot is the whole frame; fill the expanded canvas with it.
+		rect		( 0 - "gui::virtual_screen_x_expand" ), ( 0 - "gui::virtual_screen_y_expand" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 480 + ( "gui::virtual_screen_y_expand" * 2 ) )
 		backcolor	0, 0, 0, 0
 		matcolor	1, 1, 1, 1
 		background	"guis/assets/menu/menuscreenshot"
@@ -263,7 +269,7 @@ windowDef desktop {
 		noEvents	1
 		
 		windowDef ScreenShotBackgroundDarken {
-			rect		0, 0, 640, 480
+			rect		0, 0, ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 480 + ( "gui::virtual_screen_y_expand" * 2 ) )
 			backcolor	0, 0, 0, 0.3
 			noEvents	1
 			visible	0		// Use this if there are any anomalies that need to be hidden
@@ -275,7 +281,10 @@ windowDef desktop {
 		noclip		1
 
 		renderDef PortalModel {
-			rect		0, 0, 640, 480
+			rect		( 0 - "gui::virtual_screen_x_expand" ), ( 0 - ( "gui::virtual_screen_x_expand" * 0.75 ) ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 480 + ( "gui::virtual_screen_x_expand" * 1.5 ) )
+			// Drawn across the whole screen, so a screen taller than 4:3
+			// sees more of the ring rather than a cut-off one.
+			canvasfill	1
 			backcolor 	0, 0, 0, 0
 			model		"models/sfx/menu/portal.lwo"
 			modelRotate 0, 180, 0, 0
@@ -288,16 +297,15 @@ windowDef desktop {
 		}
 		windowDef Background {
 			rect		0, 0, 640, 480
+			noclip		1
 			backcolor	0, 0, 0, 0
 			matcolor	1, 1, 1, 1
-			background	"guis/assets/menu/background_center"
-			backgroundLeft	"guis/assets/menu/background_left"
-			backgroundRight	"guis/assets/menu/background_right"
-			backgroundTop	"guis/assets/menu/background_top"
-			backgroundBottom "guis/assets/menu/background_bottom"
 
+			// The stock layers draw over black. Under aspect expansion the star
+			// field widens with the screen (naturalmatscale holds its density) and
+			// Earth continues through its own edge slices.
 			windowDef Stars {
-				rect		0, -80, 640, 640
+				rect		( 0 - "gui::virtual_screen_x_expand" ), ( -80 - "gui::virtual_screen_y_expand" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 640 + ( "gui::virtual_screen_y_expand" * 2 ) )
 				background	"guis/assets/menu/preymenu/stars"
 				naturalmatscale 1
 				matscalex 1
@@ -318,13 +326,22 @@ windowDef desktop {
 			windowDef Earth {
 				rect		0, 330, 640, 150
 				background	"guis/assets/menu/preymenu/earth"
-				matscalex 1
+				backgroundLeft	"guis/assets/menu/preymenu/earth_left"
+				backgroundRight	"guis/assets/menu/preymenu/earth_right"
+				backgroundBottom "guis/assets/menu/preymenu/earth_bottom"
+				// The art's last texel column is brighter than its neighbours. On a
+				// 4:3 screen it sits on the screen edge; on a wider one it would draw
+				// a hairline where the right slice joins, so stop 1.5 texels short.
+				matscalex 0.9985
 				matscaley 1
 			}
 		}
 		
 		renderDef PortalModelFront {
-			rect		0, 0, 640, 480
+			rect		( 0 - "gui::virtual_screen_x_expand" ), ( 0 - ( "gui::virtual_screen_x_expand" * 0.75 ) ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 480 + ( "gui::virtual_screen_x_expand" * 1.5 ) )
+			// Drawn across the whole screen, so a screen taller than 4:3
+			// sees more of the ring rather than a cut-off one.
+			canvasfill	1
 			backcolor 	0, 0, 0, 0
 			model		"models/sfx/menu/portal2.lwo"
 			modelRotate 0, 180, 0, 0
