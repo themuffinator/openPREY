@@ -91,7 +91,7 @@ idCVar gui_set_game_scroll( "gui_set_game_scroll", "0", CVAR_GUI | CVAR_INTEGER,
 // CVAR_NOCHEAT, because the engine counts any other unarchived CVar as a
 // cheat: joining or hosting a server without cheats resets it to its default,
 // and a player cannot set it during a match, where both pages open.
-idCVar ui_retainedSystem( "ui_retainedSystem", "0", CVAR_GUI | CVAR_BOOL | CVAR_NOCHEAT, "use the in-development retained SYSTEM page, which ui_retained includes only once every stock setting works there" );
+idCVar ui_retainedSystem( "ui_retainedSystem", "0", CVAR_GUI | CVAR_BOOL | CVAR_NOCHEAT, "use the retained SYSTEM page even while ui_retained is 0; ui_retained includes it while every stock setting works there" );
 idCVar ui_retainedMultiplayer( "ui_retainedMultiplayer", "0", CVAR_GUI | CVAR_BOOL | CVAR_NOCHEAT, "use the in-development retained multiplayer menu card, which ui_retained includes only once all its pages are built" );
 // The single gate for the retained (RmlUi) interface, enabled by default. Each
 // screen presents its stock GUI instead when its retained document is missing
@@ -124,14 +124,13 @@ static const char *const RETAINED_SYSTEM_MISSING_SETTINGS[] = {
 	NULL
 };
 // Settings the retained page has a control for that cannot yet do what the
-// stock page did, which keep it out of the gate too: a Performance Preset or
-// Auto-Detect cannot be applied (its image, audio and renderer resource
-// effects have no apply path). The size fields take typed digits since the
-// adapter types committed characters into the focused field.
-// ui_retained_gate.py derives this list from those reasons, so the page joins
-// the gate once both lists are empty.
+// stock page did, which keep it out of the gate too. None remain: a
+// Performance Preset or Auto-Detect applies through the combined executor
+// (SystemApplyClass::Combined), and the size fields take typed digits.
+// ui_retained_gate.py derives this list from the code, so the page stays in
+// the gate while both lists are empty and leaves it when a reason returns.
 static const char *const RETAINED_SYSTEM_INCOMPLETE_SETTINGS[] = {
-	"com_performancePreset", NULL
+	NULL
 };
 
 static bool Session_RetainedSystemEnabled( void ) {
@@ -3260,8 +3259,8 @@ idSessionLocal::RetainedControlsKey
 
 While the CONTROLS page waits for a key it takes the next key pressed, as
 the stock binding field does: Escape, Start or Back cancel, Backspace or
-Delete clear the row, any other key joins its keys (at most two, as the stock
-bindunbindtwo keeps). The key's release and characters are its own. Out of
+Delete clear the row, any other key joins its keys (at most two of each device
+family, idKeyInput::BindForMenu). The key's release and characters are its own. Out of
 a wait, Delete or Backspace on a row clears it.
 ===============
 */
@@ -3295,10 +3294,7 @@ bool idSessionLocal::RetainedControlsKey( const sysEvent_t *event ) {
 	if ( key == K_BACKSPACE || key == K_DEL ) {
 		idKeyInput::UnbindBinding( binding );
 	} else if ( key != K_ESCAPE && key != K_JOY7 && key != K_JOY8 ) {
-		if ( idKeyInput::NumBinds( binding ) >= 2 && !idKeyInput::KeyIsBoundTo( key, binding ) ) {
-			idKeyInput::UnbindBinding( binding );
-		}
-		idKeyInput::SetBinding( key, binding );
+		idKeyInput::BindForMenu( key, binding );
 	}
 	if ( guiMainMenu != NULL ) {
 		guiMainMenu->SetKeyBindingNames();
@@ -5072,10 +5068,7 @@ void idSessionLocal::HandleMainMenuCommands( const char *menuCommand ) {
 			if ( args.Argc() - icmd >= 2 ) {
 				int key = atoi( args.Argv( icmd++ ) );
 				idStr bind = args.Argv( icmd++ );
-				if ( idKeyInput::NumBinds( bind ) >= 2 && !idKeyInput::KeyIsBoundTo( key, bind ) ) {
-					idKeyInput::UnbindBinding( bind );
-				}
-				idKeyInput::SetBinding( key, bind );
+				idKeyInput::BindForMenu( key, bind );
 				guiMainMenu->SetKeyBindingNames();
 			}
 			continue;
@@ -5914,6 +5907,17 @@ static int MainMenuSettingsSectionChoiceForScroll( const mainMenuSettingsScrollP
 	return 0;
 }
 
+// A page's content height and scroll step: the DISPLAY page is shorter with
+// one display, whose rows the multi-monitor section leaves out.
+static void MainMenuSettingsScrollGeometry( idUserInterface *gui, const mainMenuSettingsScrollPage_t &page, int &contentHeight, float &stepY ) {
+	contentHeight = page.contentHeight;
+	stepY = page.stepY;
+	if ( idStr::Icmp( page.name, "system" ) == 0 && gui->GetStateInt( "display_count", "0" ) <= 1 ) {
+		contentHeight = 902;
+		stepY = 19.5f;
+	}
+}
+
 static bool ApplyMainMenuSettingsScrollPage( idUserInterface *gui, const mainMenuSettingsScrollPage_t &page, int requestedValue, bool requireVisiblePage ) {
     if (!NativeInput_SessionCurrent()) return false;
 	if ( gui == NULL ) {
@@ -5949,10 +5953,7 @@ static bool ApplyMainMenuSettingsScrollPage( idUserInterface *gui, const mainMen
 
 	int contentHeight = page.contentHeight;
 	float stepY = page.stepY;
-	if ( idStr::Icmp( page.name, "system" ) == 0 && gui->GetStateInt( "display_count", "0" ) <= 1 ) {
-		contentHeight = 902;
-		stepY = 19.5f;
-	}
+	MainMenuSettingsScrollGeometry( gui, page, contentHeight, stepY );
 
 	const int scrollOffset = idMath::Ftoi( stepY * static_cast<float>( scrollValue ) + 0.5f );
 	const int contentY = page.baseY - scrollOffset;
@@ -6075,6 +6076,67 @@ static bool HandleMainMenuSettingsScrollInput( idUserInterface *gui, int key ) {
 	return false;
 }
 
+/*
+===============
+ScrollMainMenuSettingsFocusIntoView
+
+A stock settings page scrolls under a fixed view, and the keyboard and the
+controller step its focus through every row, shown or not. When the focus
+moves to a row outside the view the page scrolls just far enough to show it,
+with a little room so the row's plate is whole. Only a change of focus
+scrolls: the wheel, the bar and the section list stay free to move the page
+away from a row that keeps the focus.
+===============
+*/
+static void ScrollMainMenuSettingsFocusIntoView( idUserInterface *gui ) {
+	static idStr lastFocus;
+	static const float margin = 6.0f;
+	for ( int i = 0; i < static_cast<int>( sizeof( MAINMENU_SETTINGS_SCROLL_PAGES ) / sizeof( MAINMENU_SETTINGS_SCROLL_PAGES[ 0 ] ) ); ++i ) {
+		const mainMenuSettingsScrollPage_t &page = MAINMENU_SETTINGS_SCROLL_PAGES[ i ];
+		if ( page.maxValue <= page.minValue || !MainMenuWindowStateIsNonZero( gui, page.pageVisibleState ) ) {
+			continue;
+		}
+		idStr content = page.contentRectState;
+		const int member = content.Find( "::" );
+		if ( member > 0 ) {
+			content.CapLength( member );
+		}
+		idStr focus;
+		idRectangle rect;
+		float viewHeight = 0.0f;
+		if ( !UI_LegacyFocusWithin( gui, content.c_str(), focus, rect, viewHeight ) || viewHeight <= 0.0f ) {
+			continue;
+		}
+		if ( focus == lastFocus ) {
+			return;
+		}
+		lastFocus = focus;
+		int contentHeight = 0;
+		float stepY = 0.0f;
+		MainMenuSettingsScrollGeometry( gui, page, contentHeight, stepY );
+		if ( stepY <= 0.0f ) {
+			return;
+		}
+		// The content stands at baseY less the scroll's offset in the view.
+		const int current = idMath::ClampInt( page.minValue, page.maxValue, gui->GetStateInt( page.scrollStateName, va( "%d", page.scrollCvar->GetInteger() ) ) );
+		const int highest = static_cast<int>( idMath::Floor( ( rect.y - margin + page.baseY ) / stepY ) );
+		const int lowest = static_cast<int>( idMath::Ceil( ( rect.y + rect.h + margin + page.baseY - viewHeight ) / stepY ) );
+		int next = current;
+		if ( next > highest ) {
+			next = highest;
+		}
+		if ( next < lowest ) {
+			next = lowest;
+		}
+		next = idMath::ClampInt( page.minValue, page.maxValue, next );
+		if ( next != current ) {
+			ApplyMainMenuSettingsScrollPage( gui, page, next, true );
+		}
+		return;
+	}
+	lastFocus.Clear();
+}
+
 static void SyncMainMenuSettingsScrollPages( idUserInterface *gui ) {
 	if ( gui == NULL ) {
 		return;
@@ -6083,6 +6145,7 @@ static void SyncMainMenuSettingsScrollPages( idUserInterface *gui ) {
 	for ( int i = 0; i < static_cast<int>( sizeof( MAINMENU_SETTINGS_SCROLL_PAGES ) / sizeof( MAINMENU_SETTINGS_SCROLL_PAGES[ 0 ] ) ); ++i ) {
 		ApplyMainMenuSettingsScrollPage( gui, MAINMENU_SETTINGS_SCROLL_PAGES[ i ], idMath::INT_MIN, true );
 	}
+	ScrollMainMenuSettingsFocusIntoView( gui );
 }
 
 void idSessionLocal::MenuEvent( const sysEvent_t *event ) {

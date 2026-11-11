@@ -3193,7 +3193,13 @@ static int g_shadowMapSubviewFallbackPasses = 0;
 // would otherwise repeat every frame with an empty fallback; the sticky flag
 // restores volume generation for that light from the next frame on.
 static void RB_ShadowMapMarkStencilFallbackSticky( const viewLight_t *vLight ) {
-	if ( vLight == NULL || vLight->lightDef == NULL || vLight->lightDef->shadowMapStencilFallbackSticky ) {
+	if ( vLight == NULL || vLight->lightDef == NULL ) {
+		return;
+	}
+	// every failure restarts the wait before the light may leave the fallback
+	vLight->lightDef->shadowMapStencilFallbackFrame = backEnd.frameCount;
+	vLight->lightDef->shadowMapStencilFallbackCleanViews = 0;
+	if ( vLight->lightDef->shadowMapStencilFallbackSticky ) {
 		return;
 	}
 	vLight->lightDef->shadowMapStencilFallbackSticky = true;
@@ -3750,6 +3756,10 @@ static bool RB_ShadowMapPointComposeAvailable( void ) {
 }
 
 static bool RB_ShadowMapStaticCacheable( const viewLight_t *vLight, const shadowMapPassKind_t passKind, const bool pointLight, const bool haveTranslucentCasters ) {
+	// A moving light has a new map every view, so it is drawn directly.
+	if ( R_ShadowMapMovingLightSkipsCache( vLight, backEnd.frameCount ) ) {
+		return false;
+	}
 	if ( !r_shadowMapStaticCache.GetBool() || vLight == NULL || RB_ShadowMapLightIndex( vLight ) < 0 ) {
 		return false;
 	}
@@ -3794,6 +3804,10 @@ static bool RB_ShadowMapStaticCacheable( const viewLight_t *vLight, const shadow
 }
 
 static bool RB_ShadowMapStaticCacheableReadOnly( const viewLight_t *vLight, const shadowMapPassKind_t passKind, const bool pointLight, const bool haveTranslucentCasters ) {
+	// A moving light has a new map every view, so it is drawn directly.
+	if ( R_ShadowMapMovingLightSkipsCache( vLight, backEnd.frameCount ) ) {
+		return false;
+	}
 	if ( !r_shadowMapStaticCache.GetBool() || vLight == NULL || RB_ShadowMapLightIndex( vLight ) < 0 ) {
 		return false;
 	}

@@ -2067,12 +2067,45 @@ def validate_shadow_filtering_contract() -> None:
         (
             "if (shadow.filterParams.z < 0.5)",
             "StableShadowHash(vec3(",
-            "floor(uv / max(shadow.texelSize.x, 1.0e-6))",
+            # the texel within the tile, not within the sampled image
+            "floor(tileTexel)",
             "floor(depth * 1024.0)",
             "* 6.2831853",
             "return mat2(c, s, -s, c);",
         ),
         "projected stable Poisson rotation",
+    )
+    # A soft shadow's grain must not follow where its tile lives: an atlas
+    # block, another block the next view, or the cached map read in place.
+    # Keyed on the image texel, cached and fresh pictures of one light
+    # differed in 19,000 pixels in hub2 and the grain moved with the tile.
+    if "texelSize" in projected_rotation or "uv" in projected_rotation.replace("tileTexel", ""):
+        raise AssertionError("The projected kernel rotation must hash the tile-local texel only")
+    require_order(
+        braced_body(projected, "float SampleShadowCascade(", "projected cascade sampling"),
+        (
+            "vec2 uv = mix(atlasRect.xy, atlasRect.zw, localUv);",
+            "vec2 tileTexels = floor(abs(atlasRect.zw - atlasRect.xy)",
+            "/ max(abs(shadow.texelSize.xy), vec2(1.0e-6)) + vec2(0.5));",
+            "vec2 tileTexel = clamp(localUv * tileTexels, vec2(guardRadius),",
+            "mat2 rotation = ShadowOffsetRotation(tileTexel, depth);",
+        ),
+        "the rotation is taken from the tile-local texel",
+    )
+    gl_projected_source = read("content/baseoq4/pak0/glprogs/shadow_interaction.fs")
+    gl_rotation = braced_body(gl_projected_source, "mat2 ShadowOffsetRotation(", "OpenGL projected rotation")
+    require(gl_rotation, "floor( tileTexel )", "OpenGL hashes the tile-local texel")
+    if "uShadowTexelSize" in gl_rotation:
+        raise AssertionError("The OpenGL projected kernel rotation must hash the tile-local texel only")
+    require_order(
+        braced_body(gl_projected_source, "vec4 SampleShadowCascade(", "OpenGL projected cascade sampling"),
+        (
+            "vec2 uv = atlasMin + localUv * ( atlasMax - atlasMin );",
+            "vec2 tileTexels = floor( abs( atlasMax - atlasMin ) / shadowTexel + vec2( 0.5 ) );",
+            "vec2 tileTexel = clamp( localUv * tileTexels, guardTexels, max( tileTexels - guardTexels, guardTexels ) );",
+            "mat2 rotation = ShadowOffsetRotation( tileTexel, depth );",
+        ),
+        "OpenGL takes the rotation from the tile-local texel",
     )
 
     receiver_bias = braced_body(
@@ -2275,7 +2308,7 @@ def validate_shadow_filtering_contract() -> None:
     require_order(
         gl_projected_samples,
         (
-            "mat2 rotation = ShadowOffsetRotation( uv, depth );",
+            "mat2 rotation = ShadowOffsetRotation( tileTexel, depth );",
             "ProjectedPCSSRadius( uv, depth, cascadeIndex, clampMin, clampMax, rotation )",
             "shadow += SampleShadowCompare( uv, depth, cascadeIndex, 0.0 );",
             "if ( uShadowFilterTaps <= 1.0 )",
@@ -5130,7 +5163,7 @@ def validate_exact_static_cache_and_admission_contract() -> None:
             "if ( schedule.cacheEntry >= 0 )",
             "pass.cacheUpdate = true;",
             "cache.reserved = false;",
-            "vkShadow.pointCubesUsed >= VK_SHADOW_MAX_POINT_CUBES",
+            "vkShadow.pointCubesUsed >= VK_ShadowMap_ScratchCubeLimit()",
             "VK_ShadowMap_EnsurePointCube(",
             "vkShadow.pointCubesUsed++;",
         ),
@@ -6083,7 +6116,7 @@ def validate_dynamic_caster_composition_contract() -> None:
     require_order(
         claim,
         (
-            "vkShadow.pointCubesUsed >= VK_SHADOW_MAX_POINT_CUBES",
+            "vkShadow.pointCubesUsed >= VK_ShadowMap_ScratchCubeLimit()",
             "!VK_ShadowMap_EnsurePointCube( vkShadow.pointCubesUsed )",
             "pass.composeDynamic = true;",
             "pass.cubeIndex = cubeIndex;",
@@ -8077,10 +8110,14 @@ def validate_stencil_elision_contract() -> None:
         require(braced_body(interaction, marker, context), "shadowVolumesSuppressed",
                 f"{context} forgets suppressed volumes")
 
-    # The map and the stencil volume agree on which casters LOD admitted.
+    # The map and the stencil volume agree on which casters LOD admitted: a
+    # surface with a volume is always a map caster. The map may hold more (a
+    # static caster of a still light, whatever the distance), never less.
     require_compact(
         active,
         """const bool casterLODAdmitted = sint->shadowStencilEligible
+            || ( lightHoldsStill
+                && !R_ShadowMapCasterIsDynamic( entityDef, shadowShader ) )
             || R_CachedInteractionShadowLODAdmitted( sint, entityDef );""",
         "a surface with a stencil volume stays a map caster",
     )
@@ -8576,10 +8613,10 @@ def validate_static_cutout_caster_contract() -> None:
     result was the same every frame.
 
     The rule asks about the registers the coverage is read from, one by one.
-    idMaterial::ConstantRegisters() cannot be asked: it is NULL for every
-    material in this engine (ParseMaterial never marks a material's registers
-    constant), and it would also refuse a cutout for an animated glow stage
-    that does not move its holes.
+    idMaterial::ConstantRegisters() is not asked: it would refuse a cutout for
+    an animated glow stage that does not move its holes, and its answer follows
+    r_useConstantMaterials. (When this rule was written it was also NULL for
+    every material; material_constant_registers_contract.py pins its repair.)
     """
     policy = read("src/renderer/ShadowMapClassification.cpp")
     interaction = read("src/renderer/Interaction.cpp")
@@ -8626,7 +8663,7 @@ def validate_static_cutout_caster_contract() -> None:
         "every register the coverage is read from has to be a parse-time literal",
     )
     if "ConstantRegisters()" in animates or "ConstantRegisters()" in registers.replace("idMaterial::ConstantRegisters()", ""):
-        raise AssertionError("idMaterial::ConstantRegisters() is NULL for every material here; ask per register")
+        raise AssertionError("whole-material constness refuses cutouts with an animated glow stage; ask per register")
     material = read("src/renderer/Material.cpp")
     require_order(
         braced_body(material, "bool idMaterial::GetConstantRegisterValue(", "per-register constness"),
@@ -8718,6 +8755,396 @@ def validate_ci_registration() -> None:
         if workflow.count(TEST_PATH) != 2:
             raise AssertionError(f"{context} must compile and directly run {TEST_PATH}")
         require(workflow, f"python {TEST_PATH}", context)
+
+
+def validate_static_signature_view_independence_contract() -> None:
+    """A light's static caster signature does not follow the camera.
+
+    The signature names the depth a light's cached maps hold. It used to hash,
+    for each static caster, whether the view also saw that caster's stencil
+    volume (a caster kept for the map alone is "expanded"). That bit flips as
+    the player walks past a caster, the depth it writes does not change, and
+    every flip rendered all of the light's maps again: on a walk through hub2
+    half of the shadow maps rendered fresh, on both renderers, were for this.
+
+    The caster's identity, material, geometry and placement stay hashed, and
+    the count of expanded casters is still kept for the reports.
+    """
+    interaction = read("src/renderer/Interaction.cpp")
+    record = braced_body(interaction, "static void R_RecordShadowMapCaster(", "static caster signature")
+    require_order(
+        record,
+        (
+            "const bool dynamicCaster = R_ShadowMapCasterIsDynamic( entityDef, shader );",
+            # counted for the reports, live or static
+            "if ( expandedCaster ) {",
+            "vLight->shadowMapExpandedCasterCount++;",
+            # live casters never reach the signature
+            "if ( dynamicCaster ) {",
+            "return;",
+            "hash = R_ShadowMapHashInt( hash, entityDef != NULL ? entityDef->index : -1 );",
+            "hash = R_ShadowMapHashString( hash, shader != NULL ? shader->GetName() : NULL );",
+            "hash = R_ShadowMapHashInt( hash, translucent ? 1 : 0 );",
+            "hash = R_ShadowMapCutoutCoverageSignature( shader, hash );",
+            "hash = R_ShadowMapHashInt( hash, casterTris->numVerts );",
+            "hash = R_ShadowMapHashInt( hash, casterTris->numIndexes );",
+            "hash = R_ShadowMapHashInt( hash, entityDef->lastModifiedFrameNum );",
+            "hash = R_ShadowMapHashInt( hash, entityDef->dynamicModelFrameCount );",
+            "hash = R_ShadowMapHashFloat( hash, entityDef->modelMatrix[i] );",
+            "vLight->shadowMapCasterSignature = hash;",
+        ),
+        "what a static caster contributes to the signature",
+    )
+    hashed = [line for line in record.splitlines() if "Hash" in line and "expandedCaster" in line]
+    if hashed:
+        raise AssertionError(
+            "The caster-only state follows the view and must not enter the static signature: " + hashed[0].strip()
+        )
+    # The state only decides stencil work: whether the volume is linked and culled.
+    add = braced_body(interaction, "void idInteraction::AddActiveInteraction(", "active interaction")
+    require_compact(
+        add,
+        "const bool shadowMapCasterOnly = ( shadowScissorWasEmpty || shadowMapViewFrustumCulled ) && shadowMapConservativeCandidate;",
+        "caster-only is a property of the view",
+    )
+    for backend in ("src/renderer/Vulkan/vk_ShadowMap.cpp",):
+        source = read(backend)
+        for token in ("surf->scissorRect", "caster->scissorRect"):
+            if token in source:
+                raise AssertionError(f"{backend} must not read a caster's view scissor when it draws a map")
+
+    # Which static casters a still light's map holds does not follow the
+    # camera either. The shadow LOD drops a far entity's shadow to save drawing
+    # it every frame; a static caster is drawn into the map once, and admitted
+    # by distance it rendered the map again each time the player crossed its
+    # range. A light that moves draws its map every frame and keeps the LOD.
+    require_order(
+        add,
+        (
+            "const bool lightHoldsStill =",
+            "!R_ShadowMapLightIsMoving( lightDef, tr.frameCount );",
+            "const bool casterLODAdmitted = sint->shadowStencilEligible",
+            "|| ( lightHoldsStill",
+            "&& !R_ShadowMapCasterIsDynamic( entityDef, shadowShader ) )",
+            "|| R_CachedInteractionShadowLODAdmitted( sint, entityDef );",
+        ),
+        "a static caster of a still light is a map caster at any distance",
+    )
+
+    # A model's first snapshot is not the model moving. Counted as a change,
+    # a still machine or a corpse stood outside the static map for a quarter
+    # of a second when first seen and rendered the map again on joining it.
+    dynamic = braced_body(interaction, "static bool R_ShadowMapCasterIsDynamic(", "live caster rule")
+    require_order(
+        dynamic,
+        (
+            "if ( entityDef->lastModifiedFrameNum >= recentFrame ) {",
+            "return true;",
+            "return hasDynamicGeometry && entityDef->dynamicModelRegenFrame >= recentFrame;",
+        ),
+        "a caster is live while it is updated or its snapshot is replaced",
+    )
+    if "dynamicModelFrameCount >= recentFrame" in dynamic:
+        raise AssertionError("A first dynamic-model snapshot must not class a caster as live")
+    light = read("src/renderer/tr_light.cpp")
+    require_order(
+        braced_body(light, "idRenderModel *R_EntityDefDynamicModel(", "dynamic model snapshot"),
+        (
+            "if ( !def->dynamicModel ) {",
+            "const bool replacesSnapshot = def->cachedDynamicModel != NULL;",
+            "def->cachedDynamicModel = model->InstantiateDynamicModel(",
+            "def->dynamicModelFrameCount = tr.frameCount;",
+            "if ( replacesSnapshot ) {",
+            "def->dynamicModelRegenFrame = tr.frameCount;",
+        ),
+        "only a snapshot that replaces an earlier one is stamped as a change",
+    )
+    require(read("src/rendergeo/RenderGeometry.h"), "dynamicModelRegenFrame;", "entity field")
+    require(read("src/rendergeo/RenderGeometryLocalDefs.cpp"), "dynamicModelRegenFrame\t= 0;", "entity field starts at zero")
+    # the signature still follows every snapshot, first or not
+    require(record, "hash = R_ShadowMapHashInt( hash, entityDef->dynamicModelFrameCount );",
+            "a new snapshot still changes the signature")
+
+
+def validate_moving_light_cache_bypass_contract() -> None:
+    """A moving light draws its shadow maps directly, on both renderers.
+
+    The static cache keeps a light's still casters so that a view only has to
+    draw the moving ones over them. A light that itself moves has a new map
+    every view: through the cache, each view published a map the next could
+    not use, copied it, and drew the live casters over the copy, and took a
+    cache record to do it. On one route through hub2 two lights riding the
+    data router did that 590 times in 504 views.
+
+    "Moving" is the light's shape changing (origin, axes, radius, projection),
+    stamped apart from lastModifiedFrameNum, which also follows a colour that
+    animates. A light whose colour alone changes keeps its cache.
+    """
+    policy = read("src/renderer/ShadowMapClassification.cpp")
+    require_order(
+        braced_body(policy, "bool R_ShadowMapLightIsMoving(", "moving light rule"),
+        (
+            "lightDef != NULL && lightDef->lastMovedFrameNum > 0",
+            "&& lightDef->lastMovedFrameNum >= frame - shadowMapMovingLightFrames;",
+        ),
+        "a light is moving while its shape changed within two game tics",
+    )
+    # Not the casters' quarter second: a light that has stopped would draw its
+    # maps afresh every frame for that long before it was cached again.
+    require_order(
+        braced_body(policy, "int R_ShadowMapMovingLightFramesFor(", "moving light window"),
+        (
+            "static_cast<double>( SHADOWMAP_MOVING_LIGHT_WINDOW_MSEC ) / frameMsec ) + 1.0;",
+            "return Max( 2, static_cast<int>( frames ) );",
+        ),
+        "the window bridges two game tics",
+    )
+    require(policy, "static const int SHADOWMAP_MOVING_LIGHT_WINDOW_MSEC = 70;", "seventy milliseconds")
+    require_order(
+        braced_body(policy, "bool R_ShadowMapMovingLightSkipsCache(", "cache bypass rule"),
+        (
+            "!r_shadowMapCacheMovingLights.GetBool() && vLight != NULL",
+            "&& R_ShadowMapLightIsMoving( vLight->lightDef, frame );",
+        ),
+        "the bypass has a comparison switch",
+    )
+    # the stamp is set where a light update finds the shape changed, and only there
+    world = read("src/renderer/RenderWorld.cpp")
+    require_order(
+        world,
+        (
+            "rlight->origin == light->parms.origin &&",
+            "justUpdate = true;",
+            "light->lightHasMoved = true;",
+            # the geometry alone: the shape test above also fails for a
+            # dropped prelight model, on every update of a light that once moved
+            "if ( !( rlight->origin == light->parms.origin && rlight->axis == light->parms.axis",
+            "&& rlight->lightRadius == light->parms.lightRadius",
+            "&& rlight->parallel == light->parms.parallel ) ) {",
+            "light->lastMovedFrameNum = tr.frameCount;",
+            "R_FreeLightDefDerivedData( light );",
+            "light->lastModifiedFrameNum = tr.frameCount;",
+        ),
+        "a change of shape stamps the move; any update stamps the modification",
+    )
+    if world.count("lastMovedFrameNum = tr.frameCount;") != 1:
+        raise AssertionError("Only a change of the light's shape counts as a move")
+    require(read("src/rendergeo/RenderGeometryLocalDefs.cpp"), "lastMovedFrameNum = 0;", "a new light has not moved")
+
+    # all four cacheable rules ask first, so the planner's estimate agrees with the draw
+    guard = "if ( R_ShadowMapMovingLightSkipsCache( vLight, backEnd.frameCount ) ) { return false; }"
+    for path, markers in (
+            ("src/renderer/Vulkan/vk_ShadowMap.cpp",
+             ("static bool VK_ShadowMap_StaticCacheable(", "static bool VK_ShadowMap_StaticCacheableReadOnly(")),
+            ("src/renderer/draw_arb2.cpp",
+             ("static bool RB_ShadowMapStaticCacheable(", "static bool RB_ShadowMapStaticCacheableReadOnly("))):
+        source = read(path)
+        for marker in markers:
+            body = braced_body(source, marker, marker)
+            require_order(
+                body,
+                (
+                    "if ( R_ShadowMapMovingLightSkipsCache( vLight, backEnd.frameCount ) ) {",
+                    "return false;",
+                ),
+                f"{path}: {marker} refuses a moving light",
+            )
+            # before any other statement of the rule
+            if compact(body).find(compact("R_ShadowMapMovingLightSkipsCache(")) > 400:
+                raise AssertionError(f"{path}: {marker} must refuse a moving light before anything else")
+    # the distance rule for static casters uses the same notion of a still light
+    require(read("src/renderer/Interaction.cpp"), "!R_ShadowMapLightIsMoving( lightDef, tr.frameCount );",
+            "the static-caster rule and the cache agree on what a still light is")
+    require_compact(
+        read("src/renderer/RenderSystem_init.cpp"),
+        'idCVar r_shadowMapCacheMovingLights( "r_shadowMapCacheMovingLights", "0", CVAR_RENDERER | CVAR_BOOL,',
+        "off by default, not archived",
+    )
+    require(read("docs/user/shadow-mapping.md"), "`r_shadowMapCacheMovingLights`", "the switch is in the user guide")
+
+
+def validate_stencil_fallback_release_contract() -> None:
+    """A light leaves the stencil fallback once it stops failing.
+
+    A light whose shadow map fails builds its stencil volumes again so that it
+    has a fallback. It keeps trying its map in every view, so it is not stuck
+    on stencil shadows, but the flag was never cleared and one bad frame cost
+    the light its volume elision for the rest of the level.
+
+    The light now counts the views it goes through with nothing asking for the
+    fallback. A failed pass in either renderer, or a caster its map cannot
+    hold, restarts the count, so a light that keeps failing is never released
+    and never flickers; a light out of view is not counted at all. The release
+    is decided before any of the light's interactions are looked at for a
+    view, so that a view never has some volumes and not others.
+    """
+    light = read("src/renderer/tr_light.cpp")
+    set_view = braced_body(light, "viewLight_t *R_SetLightDefViewLight(", "light set up for a view")
+    require_order(
+        set_view,
+        (
+            "if ( light->viewCount == tr.viewCount ) {",
+            "return light->viewLight;",
+            "light->viewCount = tr.viewCount;",
+            "if ( light->shadowMapStencilFallbackSticky ) {",
+            "const int holdViews = r_shadowMapStencilFallbackViews.GetInteger();",
+            "if ( holdViews > 0",
+            "&& ++light->shadowMapStencilFallbackCleanViews > holdViews ) {",
+            "light->shadowMapStencilFallbackSticky = false;",
+            "light->shadowMapStencilFallbackCleanViews = 0;",
+            "vLight = (viewLight_t *)R_ClearedFrameAlloc( sizeof( *vLight ) );",
+        ),
+        "the release is decided once a view, before the light's interactions",
+    )
+    if light.count("shadowMapStencilFallbackSticky = false;") != 1:
+        raise AssertionError("A light leaves the stencil fallback in one place only")
+
+    # everything that asks for the fallback restarts the count
+    interaction = read("src/renderer/Interaction.cpp")
+    require_compact(
+        interaction,
+        """lightDef->shadowMapStencilFallbackSticky = true;
+            lightDef->shadowMapStencilFallbackFrame = tr.frameCount;
+            lightDef->shadowMapStencilFallbackCleanViews = 0;""",
+        "a caster the map cannot hold restarts the count",
+    )
+    for path, marker in (("src/renderer/draw_arb2.cpp", "static void RB_ShadowMapMarkStencilFallbackSticky("),
+                         ("src/renderer/Vulkan/vk_ShadowMap.cpp", "void VK_ShadowMap_MarkStencilFallbackSticky(")):
+        require_order(
+            braced_body(read(path), marker, "back-end failure mark"),
+            (
+                "if ( vLight == NULL || vLight->lightDef == NULL ) {",
+                "return;",
+                # before the early return for a light already marked
+                "vLight->lightDef->shadowMapStencilFallbackFrame = backEnd.frameCount;",
+                "vLight->lightDef->shadowMapStencilFallbackCleanViews = 0;",
+                "if ( vLight->lightDef->shadowMapStencilFallbackSticky ) {",
+                "return;",
+                "vLight->lightDef->shadowMapStencilFallbackSticky = true;",
+            ),
+            f"{path}: every failed pass restarts the count, marked or not",
+        )
+
+    # A render-thread snapshot carries the flag it was taken with. Copied back
+    # as it stands it would undo a release decided meanwhile; only a failure
+    # stamped on the snapshot afterwards is news.
+    retire = braced_body(read("src/renderer/FrameSnapshot.cpp"), "void R_RetireRenderSnapshots(", "snapshot retire")
+    require_order(
+        retire,
+        (
+            "snapshot->shadowMapStencilFallbackSticky && snapshot->world != NULL",
+            "&& source->lastModifiedFrameNum == snapshot->lastModifiedFrameNum",
+            "&& snapshot->shadowMapStencilFallbackFrame > source->shadowMapStencilFallbackFrame ) {",
+            "source->shadowMapStencilFallbackSticky = true;",
+            "source->shadowMapStencilFallbackFrame = snapshot->shadowMapStencilFallbackFrame;",
+            "source->shadowMapStencilFallbackCleanViews = 0;",
+        ),
+        "a retiring snapshot marks the light only for a failure newer than the light knows",
+    )
+    header = read("src/rendergeo/RenderGeometry.h")
+    for token in ("shadowMapStencilFallbackFrame;", "shadowMapStencilFallbackCleanViews;"):
+        require(header, token, "light fields")
+    defs = read("src/rendergeo/RenderGeometryLocalDefs.cpp")
+    require_order(
+        defs,
+        ("shadowMapStencilFallbackSticky = false;", "shadowMapStencilFallbackFrame = 0;",
+         "shadowMapStencilFallbackCleanViews = 0;"),
+        "a new light starts outside the fallback",
+    )
+    require_compact(
+        read("src/renderer/RenderSystem_init.cpp"),
+        'idCVar r_shadowMapStencilFallbackViews( "r_shadowMapStencilFallbackViews", "240", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,',
+        "240 views by default; 0 keeps the old behaviour",
+    )
+    require(read("docs/user/shadow-mapping.md"), "`r_shadowMapStencilFallbackViews`", "the setting is in the user guide")
+
+
+def validate_scratch_cube_pool_contract() -> None:
+    """Vulkan's scratch point cubes have a memory ceiling and are given back.
+
+    A view takes a scratch cube for each point pass that is not read from the
+    resident cache: an uncached map, or the copy a cached one composes over.
+    The pool was created cube by cube up to 512 and never released. One view
+    from outside the level, from where every area is visible, mapped 289 point
+    lights and left 2.0 GB resident for the rest of the session, beside a cache
+    bounded at 512 MiB; at the Maximum preset's 2048 faces the pool could reach
+    51 GB.
+
+    The pool now has the cache's memory figure again as its ceiling, with the
+    cache's floor of twelve, and a pass beyond it fails as an allocation does.
+    Cubes that no view has needed for a whole window of wall time are released
+    between frames, when no command buffer in flight can still name them.
+    """
+    vk = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+
+    limit = braced_body(vk, "static int VK_ShadowMap_ScratchCubeLimit(", "scratch cube ceiling")
+    require_order(
+        limit,
+        (
+            "const double cubeBytes = 6.0 * faceSize * faceSize",
+            "* VK_ShadowMap_DepthBytesPerPixel();",
+            "r_shadowMapPointCacheMegs.GetInteger()",
+            "const double affordable = floor( budgetBytes / cubeBytes );",
+            "return idMath::ClampInt( SHADOWMAP_POINT_CACHE_MIN_BUDGET_SLOTS,",
+            "VK_SHADOW_MAX_POINT_CUBES, cubes );",
+        ),
+        "the pool's ceiling is the cache's memory figure, with its floor",
+    )
+    # both places that claim a scratch cube ask the ceiling
+    if vk.count("vkShadow.pointCubesUsed >= VK_ShadowMap_ScratchCubeLimit()") != 2:
+        raise AssertionError("A composed copy and an uncached map must both respect the scratch cube ceiling")
+    if "vkShadow.pointCubesUsed >= VK_SHADOW_MAX_POINT_CUBES" in vk:
+        raise AssertionError("No scratch cube may be claimed against the array size alone")
+
+    # every view's use is folded into the frame's peak before it is reset
+    if compact(vk).count(compact(
+            "vkShadow.pointCubesPeakFrame = Max( vkShadow.pointCubesPeakFrame, vkShadow.pointCubesUsed ); "
+            "vkShadow.pointCubesUsed = 0;")) != 2:
+        raise AssertionError("Both view resets must record how many scratch cubes the view used")
+
+    trim = braced_body(vk, "static void VK_ShadowMap_TrimScratchCubes(", "scratch cube trim")
+    require_order(
+        trim,
+        (
+            "vkShadow.pointCubesPeakRecent[ 0 ] = Max(",
+            "Max( vkShadow.pointCubesPeakFrame, vkShadow.pointCubesUsed ) );",
+            "vkShadow.pointCubesPeakFrame = 0;",
+            # wall time, so a high refresh rate does not shorten the window
+            "const int now = Sys_Milliseconds();",
+            "if ( now - vkShadow.pointCubesWindowStart < VK_SHADOW_SCRATCH_TRIM_MSEC ) {",
+            "return;",
+            # what this window and the last one needed, and some to spare
+            "const int needed = Max( vkShadow.pointCubesPeakRecent[ 0 ],",
+            "vkShadow.pointCubesPeakRecent[ 1 ] );",
+            "+ Max( VK_SHADOW_SCRATCH_SPARE_CUBES, needed / 4 );",
+            "for ( int i = VK_SHADOW_MAX_POINT_CUBES - 1 ; i >= keep ; i-- ) {",
+            "VK_ShadowMap_DestroyPointCube( vkShadow.pointCubes[ i ] );",
+            "vkShadow.pointCubesPeakRecent[ 1 ] = vkShadow.pointCubesPeakRecent[ 0 ];",
+            "vkShadow.pointCubesPeakRecent[ 0 ] = 0;",
+            "vkShadow.pointCubesWindowStart = now;",
+        ),
+        "only cubes no view needed for a whole window are released",
+    )
+    # between frames only: a recording frame may have bound a cube's sets
+    require_order(
+        braced_body(vk, "void VK_ShadowMap_BeginFrame(", "frame begin"),
+        (
+            "if ( vkCtx.device == VK_NULL_HANDLE || VK_GuiExecutor_FrameIsOpen() ) {",
+            "return;",
+            "VK_ShadowMap_TrimScratchCubes();",
+        ),
+        "the trim runs between frames",
+    )
+    if vk.count("VK_ShadowMap_TrimScratchCubes();") != 1:
+        raise AssertionError("Scratch cubes are released at the frame boundary and nowhere else")
+
+    report = braced_body(vk, "static void VK_ShadowMap_ReportViewCache(", "cache report")
+    require(report, "scratchCubes=%d/%d", "the report shows the pool against its ceiling")
+    require_order(
+        report,
+        ("VK_ShadowMap_ScratchCubesAllocated(),", "VK_ShadowMap_ScratchCubeLimit(),"),
+        "the report shows the pool against its ceiling",
+    )
 
 
 def validate_resident_projected_sampling_contract() -> None:
@@ -8955,6 +9382,10 @@ def main() -> None:
     validate_projected_cache_memory_bound_contract()
     validate_depth_only_point_cube_contract()
     validate_static_cutout_caster_contract()
+    validate_static_signature_view_independence_contract()
+    validate_moving_light_cache_bypass_contract()
+    validate_stencil_fallback_release_contract()
+    validate_scratch_cube_pool_contract()
     validate_resident_projected_sampling_contract()
     validate_ci_registration()
     print("renderer_vulkan_shadow_compatibility: ok")
