@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.9, 11 November 2026.
+Specification version 1.10, 11 November 2026.
 
 Status: reference survey and design contract. openPREY still renders the stock
 Prey GUIs; no replacement interface has been built. Sections 1 to 11 record
@@ -693,7 +693,7 @@ brightens without sliding, and ambient rotation stops.
 | Load Game | Full page: a three-column list (Name, Date, Time) in a framed table beside a level-shot frame, Time Played, Load and Delete buttons |
 | Save Game | Full page: the same list, a captioned name field and one 145x25 u Save button |
 | MultiPrey | Full page with top tabs Player Settings, Create Server and Find Servers; Find Servers holds a server table (status icons, Server, Players, Ping, Type, Map), Quick Refresh, Refresh All, Internet/LAN segments, a details panel with side tabs, PunkBuster state, Join Game |
-| Options | Full page with four top tabs (Controls, Game Options, Video, Audio). All but Audio have side tabs (Controls: Movement, Combat, Weapons, Look, System, MultiPrey, Profiles; Video: three stock pages plus openPREY's Post FX and Advanced FX). Each page is a header bar, then setting rows on a 30 u pitch. Bottom title: Return to Main Menu, Reset to defaults. Apply Changes is a button on the Video page |
+| Options | Full page with four top tabs (Controls, Game Options, Video, Audio). All but Audio have side tabs (Controls: Movement, Combat, Weapons, Look, System, MultiPrey, Profiles; Video: the stock Video, Advanced 1 and Advanced 2 pages plus openPREY's Display, Post FX and Advanced FX). Each page is a header bar, then setting rows on a 30 u pitch. Bottom title: Return to Main Menu, Reset to defaults. Apply Changes is a button on the Video page |
 | Exit / Quit Game | Small frame: "Are you sure?", Yes and No; Exit adds "Exit to Operating System" above the prompt |
 | Dialog: Reset Defaults | 0.80 black scrim; a 360x250 u claw frame with a centred title, explanation, five check boxes and two buttons |
 | Dialog: confirmations | Load, delete, overwrite, restart-required and PunkBuster notices: 0.40–0.50 black scrim; a 360x140 u claw frame at 142,132 with a message and buttons |
@@ -1139,9 +1139,30 @@ They extend the stock vocabulary rather than replace it:
 - **Loading.** The level name comes from `gui::loading_levelname`, an optional
   author line sits under it (display face 0.3, `#D9D9FF` at 0.75), and
   per-map backgrounds can fill the canvas (`matcanvasfill`).
-- **Video settings.** Post FX and Advanced FX side tabs add multisampling,
-  post-process anti-aliasing, SSAO, bloom, CRT, HDR tone mapping, colour
-  saturation and contrast, built from stock setting rows, choices and sliders.
+- **Video settings.** Six side tabs, built from stock setting rows, choices,
+  sliders and edit fields:
+  - *Video* keeps the stock Detect plate and replaces the three Texture
+    Quality radio segments with a Quality Preset row over the engine's nine
+    presets (Minimum to Maximum), which three segments cannot hold. Video
+    Resolution lists what the selected display reports (Desktop Native, its
+    modes, Custom) instead of the stock fixed list. Render Scale and Vertical
+    Sync join Full Screen, Brightness and Gamma.
+  - *Display* is new: Rendering API, Monitor, Fullscreen Mode, Borderless
+    Window, Refresh Rate, Frame Rate Limit, Span All Monitors, and Window
+    Size and Custom Resolution as two numeric edit fields each (44x19 u,
+    `prey.list.wash`, either side of an "x") centred in the value column.
+  - *Advanced 1* gains Shadow Maps; Vertical Sync moved to Video and
+    Antialiasing to Post FX. Shader Detail is drawn at 0.40 while shader
+    programs are off or the Vulkan backend is active, where it has no effect.
+  - *Advanced 2* drops High Particle Detail until the engine reads
+    `r_lowParticleDetail`.
+  - *Post FX* and *Advanced FX* add multisampling (to 16x), post-process
+    anti-aliasing, SSAO, bloom, HDR tone mapping, CRT, motion blur, colour
+    saturation and contrast.
+
+  Six side tabs are 55 u tall (`textaligny 21`); the stock five were 66 u
+  (`textaligny 30`). A change that needs a video restart lights Apply Changes
+  on every page, as in the stock.
 
 New pages and settings follow that precedent: build them from the stock plates,
 rows, tabs and faces, at stock sizes and colours, inside the claw frame.
@@ -1632,6 +1653,14 @@ does not change them.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.10, 11 November 2026
+
+Sections 9 and 12.1 describe the reworked Video pages: a sixth side tab,
+Display; the Quality Preset row that replaces the Texture Quality radio
+segments; the display-reported resolution list; Render Scale, Frame Rate
+Limit, Shadow Maps and Motion Blur rows; and numeric edit fields for window
+and custom sizes. The Interface Atlas lists the six side tabs.
 
 ### Version 1.9, 11 November 2026
 

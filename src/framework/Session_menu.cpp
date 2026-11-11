@@ -1413,6 +1413,38 @@ static void BuildMainMenuRefreshChoices( idStr &choiceNames, idStr &choiceValues
 	}
 }
 
+/*
+=================
+BuildMainMenuFrameLimitChoices
+
+OPENPREY: the Frame Rate Limit row of Prey's Display page. A preset writes its
+tier's cap to com_maxfps and detection writes the display's own rate, so the
+current value joins the list rather than reading as the first entry.
+=================
+*/
+static void BuildMainMenuFrameLimitChoices( idStr &choiceNames, idStr &choiceValues ) {
+	static const int limits[] = { 30, 60, 72, 75, 90, 100, 120, 144, 165, 180, 240, 360 };
+	idList<int> rates;
+	for ( int i = 0; i < static_cast<int>( sizeof( limits ) / sizeof( limits[0] ) ); ++i ) {
+		rates.Append( limits[i] );
+	}
+	const int current = cvarSystem->GetCVarInteger( "com_maxfps" );
+	if ( current > 0 && rates.FindIndex( current ) < 0 ) {
+		int insertIndex = 0;
+		while ( insertIndex < rates.Num() && rates[insertIndex] < current ) {
+			insertIndex++;
+		}
+		rates.Insert( current, insertIndex );
+	}
+
+	choiceNames.Clear();
+	choiceValues.Clear();
+	AppendMainMenuChoice( choiceNames, choiceValues, common->GetLanguageDict()->GetString( "#str_122035" ), 0 );
+	for ( int i = 0; i < rates.Num(); ++i ) {
+		AppendMainMenuChoice( choiceNames, choiceValues, va( "%d", rates[i] ), rates[i] );
+	}
+}
+
 static void SetMainMenuVideoGuiVars( idUserInterface *gui ) {
 	if ( gui == NULL ) {
 		return;
@@ -1438,6 +1470,10 @@ static void SetMainMenuVideoGuiVars( idUserInterface *gui ) {
 	BuildMainMenuRefreshChoices( choiceNames, choiceValues );
 	gui->SetStateString( "display_refresh_choices", choiceNames.c_str() );
 	gui->SetStateString( "display_refresh_values", choiceValues.c_str() );
+
+	BuildMainMenuFrameLimitChoices( choiceNames, choiceValues );
+	gui->SetStateString( "display_maxfps_choices", choiceNames.c_str() );
+	gui->SetStateString( "display_maxfps_values", choiceValues.c_str() );
 }
 
 static void SetMainMenuQualityGuiVars( idUserInterface *gui ) {
@@ -1454,6 +1490,12 @@ static void SetMainMenuQualityGuiVars( idUserInterface *gui ) {
 	const glconfig_t &rendererConfig = renderSystem->GetGLConfig();
 	gui->SetStateInt( "r_interactionsBypassed", rendererConfig.disableARB2Interactions ? 1 : 0 );
 	gui->SetStateInt( "r_postAAAvailable", ( rendererConfig.GLSLProgramAvailable && rendererConfig.GLSL130Available ) ? 1 : 0 );
+	// OPENPREY: Prey's Shader Detail row is greyed while shader programs are off
+	// (the stock script reads this state) and on Vulkan, which draws the
+	// fallback stages only (R_EffectiveShaderLevel in Material.cpp).
+	gui->SetStateInt( "r_skipNewAmbient", cvarSystem->GetCVarBool( "r_skipNewAmbient" ) ? 1 : 0 );
+	gui->SetStateInt( "r_shaderLevelUnavailable",
+		idStr::Icmp( cvarSystem->GetCVarString( "r_actualRenderApi" ), "vulkan" ) == 0 ? 1 : 0 );
 }
 
 static void SyncMainMenuAspectVisibility( idUserInterface *gui ) {
@@ -5319,6 +5361,9 @@ void idSessionLocal::HandleMainMenuCommands( const char *menuCommand ) {
 			if ( idStr::Icmp( vcmd, "restart" )  == 0) {
 				guiActive->HandleNamedEvent( "cvar write render" );
 				cmdSystem->BufferCommandText( CMD_EXEC_NOW, "vid_restart\n" );
+				// The restart can normalise the request (a display that went away,
+				// a mode the device refused); show the rows what is now in effect.
+				RefreshMainMenuDisplayChoices( guiActive );
 			}
 
 			continue;

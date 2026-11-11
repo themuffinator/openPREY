@@ -11,6 +11,40 @@ This guide covers openPREY display/window settings for end users, including mult
 - `Settings -> System` groups **Rendering Backend**, **Rendering Device**, **Performance Preset** and **Auto-Detect** above the display controls in the retained interface.
 - After changing video cvars, run `vid_restart` (or `vid_restart partial` for quick window/fullscreen transitions).
 
+## Video Options in the Prey Menu
+
+Prey's own menu holds these settings under **Options -> Video**, on six side
+tabs. The `Settings -> System` page described in the rest of this guide is the
+upstream retained interface; the cvars and behaviour are the same.
+
+| Tab | Rows |
+|---|---|
+| **Video** | Auto Detect, Quality Preset, Video Resolution, Full Screen, Render Scale, Vertical Sync, Brightness, Gamma |
+| **Display** | Rendering API, Monitor, Fullscreen Mode, Borderless Window, Refresh Rate, Frame Rate Limit, Span All Monitors, Window Size, Custom Resolution |
+| **Advanced 1** | Use Shader Programs, Shader Detail, Enable Shadows, Shadow Maps, Enable Specular, Enable Bump Maps, High Quality Specular, Sharpen Bumpmaps |
+| **Advanced 2** | Use Glow, High Quality Skinning, Image Anisotropy |
+| **Post FX** | MSAA Samples, Post Anti-Aliasing, SSAO, Bloom, Bloom Intensity, HDR Tone Mapping, HDR Exposure, CRT Monitor, Motion Blur |
+| **Advanced FX** | Tuning sliders for MSAA alpha coverage, SSAO, bloom, HDR and CRT |
+
+- **Quality Preset** offers all nine presets, and **Detect** picks one for the
+  machine. Either one also sets the rows on the other tabs, so a preset is a
+  starting point you can adjust.
+- **Video Resolution** lists Desktop Native, every mode the selected monitor
+  reports, and Custom. Typing a size into **Custom Resolution** selects Custom.
+- Display changes, multisampling and presets light **Apply Changes**; pressing
+  it, or leaving Options, restarts video once. The other rows take effect at once.
+- **Rendering API** is read when the engine starts, so the menu asks for a
+  restart of the game.
+- **Shader Detail** (`r_shaderLevel`) selects Prey's skin, cloth, liquid and
+  organic-wall shaders. It applies immediately; retail asked for a restart.
+  Presets set it: Highest from Performance up, High for Low, Medium for Low
+  Power and Low for Minimum, which also turn off glow overlays, high quality
+  specular and bumpmap sharpening and use fast skinning. The Vulkan backend
+  cannot run these shaders yet and always draws the Low versions; the row is
+  greyed there.
+- High Particle Detail is not offered: nothing in the engine reads
+  `r_lowParticleDetail` yet.
+
 ## Rendering Backend and Device
 
 The retained **Settings -> System** page puts backend and GPU selection beside

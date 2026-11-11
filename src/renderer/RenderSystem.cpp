@@ -689,6 +689,9 @@ static void R_CheckCvars( void ) {
 	// texture reduction cvars only reach the GPU through a reload
 	globalImages->CheckCvars();
 
+	// Prey shader levels are chosen while a material is parsed
+	R_CheckShaderLevelCvars();
+
 	// gamma stuff
 	if ( r_gamma.IsModified() || r_brightness.IsModified() ) {
 		r_gamma.ClearModified();

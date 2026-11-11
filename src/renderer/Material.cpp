@@ -282,6 +282,101 @@ static bool R_IsSceneCaptureImage( const idImage *image ) {
 
 /*
 =============
+Prey shader levels
+
+A material's shaderLevelN and shaderFallbackN stages are kept or dropped while
+it is parsed, from r_shaderLevel and r_skipNewAmbient as they stood then. Retail
+Prey asked for a restart after changing either. Here every material that names
+such a stage is remembered together with the selection it was parsed under, and
+R_CheckShaderLevelCvars reparses the stale ones, so the Shader Detail row and a
+performance preset take effect at once.
+=============
+*/
+static idList<idMaterial *>	r_shaderLevelMaterials;
+static idList<int>			r_shaderLevelMaterialKeys;
+static int					r_shaderLevelCheckedKey = -1;
+
+/*
+=============
+R_EffectiveShaderLevel
+
+The stages a shader level adds are mostly Prey's custom ARB interaction
+programs (skin, cloth, masked interactions). The Vulkan module cannot run those
+yet and draws nothing for them (vk_Interactions.cpp), which left such surfaces
+black at any level above the fallbacks. Until it can, it parses every material
+at level 0, the fallback stages it draws correctly.
+=============
+*/
+static int R_EffectiveShaderLevel( void ) {
+#if defined( OPENQ4_RENDERER_VK_MODULE )
+	return 0;
+#else
+	return idMath::ClampInt( 0, 3, r_shaderLevel.GetInteger() );
+#endif
+}
+
+static int R_ShaderLevelKey( void ) {
+	return R_EffectiveShaderLevel() * 2 + ( r_skipNewAmbient.GetBool() ? 1 : 0 );
+}
+
+static void R_NoteShaderLevelMaterial( idMaterial *material ) {
+	const int key = R_ShaderLevelKey();
+	const int index = r_shaderLevelMaterials.FindIndex( material );
+	if ( index >= 0 ) {
+		r_shaderLevelMaterialKeys[index] = key;
+		return;
+	}
+	r_shaderLevelMaterials.Append( material );
+	r_shaderLevelMaterialKeys.Append( key );
+}
+
+/*
+=============
+R_CheckShaderLevelCvars
+
+Called once a frame with the backend idle (R_CheckCvars). Costs two cvar reads
+until the selection changes.
+=============
+*/
+void R_CheckShaderLevelCvars( void ) {
+	const int key = R_ShaderLevelKey();
+	if ( key == r_shaderLevelCheckedKey ) {
+		return;
+	}
+	r_shaderLevelCheckedKey = key;
+
+	int reparsed = 0;
+	for ( int i = 0; i < r_shaderLevelMaterials.Num(); i++ ) {
+		if ( r_shaderLevelMaterialKeys[i] == key ) {
+			continue;
+		}
+		// Parsing notes the material again, which stores the new key in place.
+		idMaterial *material = r_shaderLevelMaterials[i];
+		material->Invalidate();
+		material->EnsureNotPurged();
+		r_shaderLevelMaterialKeys[i] = key;
+		reparsed++;
+	}
+	if ( reparsed > 0 ) {
+		common->Printf( "Shader detail changed, reparsed %d materials\n", reparsed );
+	}
+}
+
+/*
+=============
+R_ShutdownShaderLevelMaterials
+
+The decl manager frees the materials at shutdown; drop the stale pointers.
+=============
+*/
+void R_ShutdownShaderLevelMaterials( void ) {
+	r_shaderLevelMaterials.Clear();
+	r_shaderLevelMaterialKeys.Clear();
+	r_shaderLevelCheckedKey = -1;
+}
+
+/*
+=============
 idMaterial::CommonInit
 =============
 */
@@ -2607,7 +2702,8 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 				return;
 			}
 			const int requestedLevel = suffix[0] - '0';
-			if ( r_shaderLevel.GetInteger() < requestedLevel || r_skipNewAmbient.GetBool() ) {
+			R_NoteShaderLevelMaterial( this );
+			if ( R_EffectiveShaderLevel() < requestedLevel || r_skipNewAmbient.GetBool() ) {
 				src.SkipBracedSection( false );
 				return;
 			}
@@ -2621,7 +2717,8 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 				return;
 			}
 			const int requestedLevel = suffix[0] - '0';
-			if ( r_shaderLevel.GetInteger() >= requestedLevel && !r_skipNewAmbient.GetBool() ) {
+			R_NoteShaderLevelMaterial( this );
+			if ( R_EffectiveShaderLevel() >= requestedLevel && !r_skipNewAmbient.GetBool() ) {
 				src.SkipBracedSection( false );
 				return;
 			}
