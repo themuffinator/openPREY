@@ -1954,6 +1954,8 @@ void R_TTFRestoreAtlasMaterials( void );
 void R_ShutdownTrueTypeFonts( bool preserveAtlasImages );
 
 void R_SetColorMappings( void );
+void R_CheckShaderLevelCvars( void );		// reparses Prey shaderLevel materials after a change
+void R_ShutdownShaderLevelMaterials( void );
 
 void R_ScreenShot_f( const idCmdArgs &args );
 void R_StencilShot( void );

@@ -496,7 +496,7 @@ idCVar r_useCachedDynamicModels( "r_useCachedDynamicModels", "1", CVAR_RENDERER 
 idCVar r_useRepeatedStateReuse( "r_useRepeatedStateReuse", "1", CVAR_RENDERER | CVAR_BOOL, "keep model-space dynamic snapshots across transform-only entity updates so repeated-state presentation frames skip CPU re-skinning" );
 idCVar r_useNewSkinning( "r_useNewSkinning", "1", CVAR_RENDERER | CVAR_BOOL, "use retail-style SIMD MD5 skinning data" );
 idCVar r_gpuSkinning( "r_gpuSkinning", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use exact four-weight GPU deformation for eligible animated surfaces" );
-idCVar r_useFastSkinning( "r_useFastSkinning", "0", CVAR_RENDERER | CVAR_BOOL, "approximate MD5 tangent skinning with the dominant joint only" );
+idCVar r_useFastSkinning( "r_useFastSkinning", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "approximate MD5 tangent skinning with the dominant joint only" );
 idCVar r_deriveBiTangents( "r_deriveBiTangents", "0", CVAR_RENDERER | CVAR_BOOL, "derive bitangents from skinned normals and tangents" );
 idCVar r_forceConvertMD5R( "r_forceConvertMD5R", "0", CVAR_RENDERER | CVAR_BOOL, "prefer source md5/proc assets over any future prebuilt MD5R companions" );
 idCVar r_convertMD5toMD5R( "r_convertMD5toMD5R", "0", CVAR_RENDERER | CVAR_BOOL, "convert loaded MD5 meshes to packed MD5R form when the build includes rvRenderModelMD5R support" );
@@ -668,7 +668,7 @@ idCVar r_skipRenderContext( "r_skipRenderContext", "0", CVAR_RENDERER | CVAR_BOO
 idCVar r_skipTranslucent( "r_skipTranslucent", "0", CVAR_RENDERER | CVAR_BOOL, "skip the translucent interaction rendering" );
 idCVar r_skipAmbient( "r_skipAmbient", "0", CVAR_RENDERER | CVAR_BOOL, "bypasses all non-interaction drawing" );
 idCVar r_skipNewAmbient( "r_skipNewAmbient", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "bypasses all vertex/fragment program ambient drawing" );
-idCVar r_shaderLevel( "r_shaderLevel", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "Prey material shader quality level; reload declarations after changing", 0, 3, idCmdSystem::ArgCompletion_Integer<0,3> );
+idCVar r_shaderLevel( "r_shaderLevel", "3", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "Prey material shader detail: 0 = low, 1 = medium, 2 = high, 3 = highest; selects shaderLevelN/shaderFallbackN stages and reparses the affected materials when changed", 0, 3, idCmdSystem::ArgCompletion_Integer<0,3> );
 idCVar r_forceAmbient( "r_forceAmbient", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "force ambient lighting level", 0.0f, 1.0f );
 idCVar r_useLightGrid( "r_useLightGrid", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use precomputed irradiance-volume atlases when present" );
 idCVar r_lightGridIntensity( "r_lightGridIntensity", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "scales baked light-grid indirect diffuse contribution", 0.0f, 16.0f );
@@ -6521,6 +6521,7 @@ void idRenderSystemLocal::Shutdown( void ) {
 	idCinematic::ShutdownCinematic( );
 
 	globalImages->Shutdown();
+	R_ShutdownShaderLevelMaterials();
 
 	// close the r_logFile
 	if ( logFile ) {
