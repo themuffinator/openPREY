@@ -312,6 +312,13 @@ void idGameLocal::Init( void ) {
 
 #endif
 
+	// openPREY: configs saved under the retail default hold g_showPlayerShadow 0,
+	// which would keep the player's own shadow hidden after the default changed.
+	if ( !g_showPlayerShadowMigrated.GetBool() ) {
+		g_showPlayerShadow.SetBool( true );
+		g_showPlayerShadowMigrated.SetBool( true );
+	}
+
 	//HUMANHEAD rww
 	ddaManager = new hhDDAManager;
 	//HUMANHEAD END
@@ -442,6 +449,18 @@ void idGameLocal::Shutdown( void ) {
 
 	// free memory allocated by class objects
 	Clear();
+
+	// The engine destroys the decls after this call returns, and each model def
+	// then releases its idAnim references into the animation manager. Release
+	// them here, while the animations they count on still exist.
+	if ( declManager->GetDeclTypeFromName( "model" ) == DECL_MODELDEF ) {
+		const int numModelDefs = declManager->GetNumDecls( DECL_MODELDEF );
+		for ( int i = 0; i < numModelDefs; i++ ) {
+			idDecl *modelDef = const_cast<idDecl *>( declManager->DeclByIndex( DECL_MODELDEF, i, false ) );
+			modelDef->FreeData();
+			modelDef->Invalidate();
+		}
+	}
 
 	// shut down the animation manager
 	animationLib.Shutdown();

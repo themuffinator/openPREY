@@ -83,9 +83,19 @@ The stamp a version 5 payload carries and must carry to load. A build outside
 the portable family (pointers other than 64 bits, or big-endian) stamps its own
 wire ABI instead, so it reads only its own payloads and refuses portable ones
 before map teardown.
+
+openPREY is such a build on every platform. The engine's own records use the
+version 5 encodings, but the Prey game library still writes native-layout
+records (bitfields, script storage, structures written whole), so its payload
+carries the exact raw1 stamp of the build that wrote it and loads only there.
 ====================
 */
+static const bool OPENQ4_SAVEGAME_GAME_RECORDS_ARE_PORTABLE = false;
+
 static inline const char *OpenQ4_SaveGamePortableWireABI( const char *nativeWireABI ) {
+	if ( !OPENQ4_SAVEGAME_GAME_RECORDS_ARE_PORTABLE ) {
+		return nativeWireABI;
+	}
 #if defined( __BYTE_ORDER__ ) && defined( __ORDER_BIG_ENDIAN__ ) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 	return nativeWireABI;
 #else

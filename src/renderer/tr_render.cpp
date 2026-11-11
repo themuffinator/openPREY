@@ -996,6 +996,7 @@ void RB_CreateSingleDrawInteractionsFiltered( const drawSurf_t *surf, void (*Dra
 		inter.diffuseColor[0] = inter.diffuseColor[1] = inter.diffuseColor[2] = inter.diffuseColor[3] = 0;
 		inter.specularColor[0] = inter.specularColor[1] = inter.specularColor[2] = inter.specularColor[3] = 0;
 		inter.flatDiffuseParams.Zero();
+		R_ResetInteractionSpecular( &inter );
 
 		float lightColor[4];
 
@@ -1066,6 +1067,7 @@ void RB_CreateSingleDrawInteractionsFiltered( const drawSurf_t *surf, void (*Dra
 					}
 					R_SetDrawInteraction( surfaceStage, surfaceRegs, &inter.specularImage,
 											inter.specularMatrix, inter.specularColor.ToFloatPtr() );
+					R_SetInteractionSpecularStage( &inter, surfaceStage );
 					inter.specularColor[0] *= lightColor[0];
 					inter.specularColor[1] *= lightColor[1];
 					inter.specularColor[2] *= lightColor[2];
@@ -1085,6 +1087,7 @@ void RB_CreateSingleDrawInteractionsFiltered( const drawSurf_t *surf, void (*Dra
 					inter.diffuseColor.Zero();
 					inter.specularColor.Zero();
 					inter.flatDiffuseParams.Zero();
+					R_ResetInteractionSpecular( &inter );
 					if ( tr.backEndRenderer == BE_ARB2 && surfaceStage->newStage != NULL ) {
 						RB_ARB2_DrawShaderInteraction( &inter, surfaceStage, surfaceRegs, lightColor );
 					}

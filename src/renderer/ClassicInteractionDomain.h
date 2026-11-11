@@ -360,6 +360,9 @@ typedef struct classicInteractionDomainPrimitive_s {
 	std::uint64_t		specularImageResourceId;
 	float			diffuseColor[ 4 ];
 	float			specularColor[ 4 ];
+	// R_InteractionSpecularParms: the specular stage's specularExp exponent
+	// and brightness, then the r_correctspecular / r_normalizebumpmap selection
+	float			specularParms[ 4 ];
 	float			flatDiffuseParams[ 4 ];
 	float			localLightOrigin[ 4 ];
 	float			localViewOrigin[ 4 ];

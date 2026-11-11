@@ -247,6 +247,39 @@ static float SoundChannelSampleAmplitude( idSoundChannel* chan, const int curren
 	return 0.0f;
 }
 
+/*
+========================
+SoundChannelLogicalAmplitude
+
+Amplitude of one logical channel for game-side queries (Prey jaw flap, the
+jukebox meter). Follows Doom 3's FindAmplitude with no listener: the raw wave
+at the playback cursor, unscaled by volume, peak-to-peak over 32767 through
+atan and normalised so 45 degrees reads 1. The cached envelope holds the
+absolute peak, so peak-to-peak is twice it. Authored shakeData is already on
+that curve. The OpenAL voice has no VU meter, so its GetAmplitude() is a
+constant 1 and must not be used here: it held every jaw wide open for the
+whole line instead of following the speech.
+========================
+*/
+static float SoundChannelLogicalAmplitude( idSoundChannel* chan, const int currentTime )
+{
+	if( chan == NULL || chan->leadinSample == NULL )
+	{
+		return 0.0f;
+	}
+	const char* shakeData = ( chan->soundShader != NULL ) ? chan->soundShader->GetShakeData( chan->choice ) : NULL;
+	const float sample = SoundChannelSampleAmplitude( chan, currentTime );
+	if( shakeData != NULL && shakeData[0] != '\0' )
+	{
+		return sample;
+	}
+	if( sample <= 0.0f )
+	{
+		return 0.0f;
+	}
+	return idMath::ATan( 2.0f * sample, 1.0f ) / DEG2RAD( 45.0f );
+}
+
 static bool SoundChannelHasCompleted( idSoundChannel* chan, const int currentTime )
 {
 	if( chan == NULL || chan->leadinSample == NULL )
@@ -1134,7 +1167,6 @@ void idSoundEmitterLocal::Init( int i, idSoundWorldLocal* sw )
 	crossesLiquidBoundary = false;
 
 	memset( &parms, 0, sizeof( parms ) );
-	parms.subIndex = -1;
 	memset( recentShaders, 0, sizeof( recentShaders ) );
 	memset( recentSamples, 0, sizeof( recentSamples ) );
 	recentNext = 0;
@@ -1214,7 +1246,9 @@ void idSoundEmitterLocal::OverrideParms( const soundShaderParms_t* base, const s
 	{
 		out->attenuatedVolume = base->attenuatedVolume;
 	}
-	if( over->subIndex >= 0 )
+	// Like every other override, only a non-zero handle overrides: the game's
+	// override parms are zero-filled and never name a subtitle table.
+	if( over->subIndex > 0 )
 	{
 		out->subIndex = over->subIndex;
 	}
@@ -1393,6 +1427,13 @@ void idSoundEmitterLocal::Update( int currentTime )
 		// Retail Spatialize: every emitter in range keeps the area it is in, which
 		// the area reverb routing reads even when occlusion is off.
 		int soundInArea = soundWorld->renderWorld->PointInArea( origin );
+		if( lastValidPortalArea >= soundWorld->renderWorld->NumAreas() )
+		{
+			// The render world loaded a smaller map since this emitter was last placed
+			// (the menu sound world shares the game render world and is not reset on a
+			// level change), so the remembered area does not exist any more.
+			lastValidPortalArea = -1;
+		}
 		if( soundInArea == -1 )
 		{
 			soundInArea = lastValidPortalArea;
@@ -2134,10 +2175,7 @@ float idSoundEmitterLocal::CurrentAmplitude( const s_channelType channel )
 		{
 			return 1.0f;
 		}
-		if( chan->hardwareVoice != NULL )
-		{
-			amplitude = Max( amplitude, chan->hardwareVoice->GetAmplitude() );
-		}
+		amplitude = Max( amplitude, SoundChannelLogicalAmplitude( chan, currentTime ) );
 	}
 	return amplitude;
 }
@@ -2159,10 +2197,7 @@ float idSoundEmitterLocal::CurrentVoiceAmplitude( const s_channelType channel )
 		{
 			return 1.0f;
 		}
-		if( chan->hardwareVoice != NULL )
-		{
-			amplitude = Max( amplitude, chan->hardwareVoice->GetAmplitude() );
-		}
+		amplitude = Max( amplitude, SoundChannelLogicalAmplitude( chan, currentTime ) );
 	}
 	return amplitude;
 }

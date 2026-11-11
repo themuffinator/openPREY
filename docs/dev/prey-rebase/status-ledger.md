@@ -142,7 +142,7 @@ conservative validation states unless that evidence directly exercises them.
 | `sound-07-iseax-available` | DROPPED | NOT-APPLICABLE | NOT-APPLICABLE | Upstream OpenAL capability path retained. |
 | `sound-08-openal-device-selection` | DROPPED | NOT-APPLICABLE | NOT-APPLICABLE | Upstream OpenAL device-selection and initialization path retained. |
 | `ui-01-retail-gui-def-dialect` | PORTED | IMPLEMENTED | STATIC-CHECKED; RUNTIME-PENDING | The retail dialect is present and the complete GUI window-bit set now has a compile-time no-overlap assertion; full retail GUI navigation remains pending. |
-| `ui-02-retail-spline-text-effect` | PORTED | IMPLEMENTED | COMPILE-CHECKED; RUNTIME-PENDING | Bitmap-font spline/credit path is ported and its objects compile. `r_useTrueTypeFonts=0` is the default; TODO-D10 covers the TTF variant, which currently no-ops/warns. |
+| `ui-02-retail-spline-text-effect` | PORTED | IMPLEMENTED | COMPILE-CHECKED; RUNTIME-PENDING | Spline/credit path is ported and draws with both bitmap and TTF fonts (D10); `r_useTrueTypeFonts=1` is the default. No shipped GUI sets `splineIn 1`, so the effect itself has no runtime capture yet. |
 | `ui-03-gui-events-startup` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `ui-04-guiscript-inc-resetcapture` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `ui-05-slider-volume-thumb` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |

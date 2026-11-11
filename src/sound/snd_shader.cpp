@@ -378,7 +378,7 @@ bool idSoundShader::RebuildTextSource() {
 	{
 		file.WriteFloatString( "\tbleep\t%d %.4g %.4g\r\n", parms.profanityIndex, parms.profanityDelay, parms.profanityDuration );
 	}
-	if( parms.subIndex >= 0 )
+	if( parms.subIndex > 0 )
 	{
 		const soundSubtitleList_t* subtitleList = soundSystemLocal.GetSubtitleList( parms.subIndex );
 		if( subtitleList != NULL )
@@ -497,7 +497,7 @@ bool idSoundShader::ParseShader( idLexer& src )
 	parms.maxDistance = 400.0f;
 	parms.volume = 1;
 	parms.attenuatedVolume = 0.0f;
-	parms.subIndex = -1;
+	parms.subIndex = 0;		// 1-based subtitle table handle; 0 = none (retail convention)
 	parms.profanityIndex = 0;
 	parms.profanityDelay = 0.0f;
 	parms.profanityDuration = 0.0f;

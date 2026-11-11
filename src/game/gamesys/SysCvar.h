@@ -66,7 +66,7 @@ extern idCVar	g_forceSingleSmokeView;
 extern idCVar	developer;
 
 extern idCVar	g_cinematic;
-extern idCVar	g_skipCinematics;
+extern idCVar	g_autoSkipCinematics;
 extern idCVar	g_cinematicMaxSkipTime;
 
 extern idCVar	g_monsters;
@@ -246,6 +246,7 @@ extern idCVar	pm_airTics;
 
 extern idCVar	g_showAimHealth; //HUMANHEAD rww
 extern idCVar	g_showPlayerShadow;
+extern idCVar	g_showPlayerShadowMigrated;
 extern idCVar	g_showHud;
 extern idCVar	g_showProjectilePct;
 extern idCVar	g_showBrass;

@@ -365,6 +365,8 @@ void idClass::Init( void ) {
 		c->Init();
 	}
 
+	ValidateEventCallbackSignatures();
+
 	// number the types according to the class hierarchy so we can quickly determine if a class
 	// is a subclass of another
 	num = 0;
@@ -391,6 +393,87 @@ void idClass::Init( void ) {
 	initialized = true;
 
 	gameLocal.Printf( "...%i classes, %i bytes for event callbacks\n", types.Num(), eventCallbackMemory );
+}
+
+/*
+================
+idClass::ValidateEventCallbackSignatures
+
+openPREY: compares each EVENT() binding's C++ parameter register classes with
+the event's format string. See idEventCallbackSignature in Class.h.
+================
+*/
+int idClass::ValidateEventCallbackSignatures( void ) {
+	idTypeInfo				*c;
+	idEventFunc<idClass>	*def;
+	int						i;
+	int						j;
+	int						mismatches;
+
+	mismatches = 0;
+	for( c = typelist; c != NULL; c = c->next ) {
+		def = c->eventCallbacks;
+		if ( !def ) {
+			continue;
+		}
+		for( i = 0; def[ i ].event != NULL; i++ ) {
+			const char *format = def[ i ].event->GetArgFormat();
+			const char *signature = def[ i ].signature;
+			if ( !signature ) {
+				continue;
+			}
+
+			// A callback may ignore trailing arguments; that is safe on every ABI.
+			bool match = ( strlen( signature ) <= strlen( format ) );
+			for( j = 0; match && signature[ j ] != '\0'; j++ ) {
+				const char expected = ( format[ j ] == D_EVENT_FLOAT ) ? 'f' : 'i';
+				if ( signature[ j ] != expected ) {
+					match = false;
+				}
+			}
+
+			if ( !match ) {
+				gameLocal.Warning( "event '%s' (format '%s') is bound on '%s' to a callback with parameter classes '%s'",
+					def[ i ].event->GetName(), format, c->classname, signature );
+				mismatches++;
+			}
+		}
+	}
+
+	if ( mismatches ) {
+		gameLocal.Warning( "%d event callback signature mismatch(es); these callbacks receive the wrong arguments on 64-bit builds", mismatches );
+	}
+	return mismatches;
+}
+
+/*
+================
+idClass::ListEventCallbacks_f
+
+openPREY: prints every event definition and every class's own EVENT() bindings
+in a stable, machine-readable form, for comparing the game module's script
+event surface against the retail binary.
+================
+*/
+void idClass::ListEventCallbacks_f( const idCmdArgs &args ) {
+	idTypeInfo				*c;
+	idEventFunc<idClass>	*def;
+	int						i;
+
+	for( i = 0; i < idEventDef::NumEventCommands(); i++ ) {
+		const idEventDef *ev = idEventDef::GetEventCommand( i );
+		const char ret = ev->GetReturnType();
+		gameLocal.Printf( "eventDef\t%s\t%s\t%c\n", ev->GetName(), ev->GetArgFormat(), ret ? ret : '-' );
+	}
+	for( c = typelist; c != NULL; c = c->next ) {
+		def = c->eventCallbacks;
+		if ( !def ) {
+			continue;
+		}
+		for( i = 0; def[ i ].event != NULL; i++ ) {
+			gameLocal.Printf( "eventCallback\t%s\t%s\t%s\n", def[ i ].event->GetName(), c->classname, def[ i ].signature ? def[ i ].signature : "?" );
+		}
+	}
 }
 
 /*

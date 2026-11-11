@@ -33,6 +33,7 @@ This file describes project goals, rules, and workflow expectations for anyone w
 - Use `.install/` as staged runtime package root.
 - Keep compiler/linker intermediates in `builddir/`, not `.install/`.
 - Keep documentation current whenever workflow, naming, or repository structure changes.
+- For any GUI, HUD, menu, icon or branding work, follow `docs/dev/prey-ui-visual-design.md` and its Interface Atlas. `docs/dev/ui-visual-design.md` is the upstream Quake 4 specification and does not apply to Prey screens.
 
 **Build/Tooling Conventions**
 - On Windows, use `tools/build/meson_setup.ps1 ...` (or `tools/build/openprey_devcmd.cmd`) so MSVC environment setup is consistent.

@@ -993,6 +993,121 @@ static void  R_MoveDeform( drawSurf_t *surf ) {
 	R_FinishDeform( surf, newTri, ac );
 }
 
+/*
+=====================
+R_BeamDeform
+
+Retail Prey's "deform beam": the mesh is authored along its local X axis with
+its cross-section in Y/Z. The beam axis is taken from two vertices a third of
+the way in from each end, and every vertex is re-expressed in a basis whose
+second and third axes face the view origin, so the beam always shows its
+broad side. Recovered from PREY.exe; the view origin is used as a direction
+from the model origin, exactly as retail does.
+=====================
+*/
+static void R_BeamDeform( drawSurf_t *surf ) {
+	const srfTriangles_t *tri = surf->geo;
+	if ( tri == NULL || tri->numVerts < 6 ) {
+		return;
+	}
+
+	srfTriangles_t *newTri = (srfTriangles_t *)R_ClearedFrameAlloc( sizeof( *newTri ) );
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	idDrawVert *ac = (idDrawVert *)_alloca16( tri->numVerts * sizeof( idDrawVert ) );
+	R_CopyDeformSourceTriangles( tri, newTri, ac );
+#else
+	newTri->numVerts = tri->numVerts;
+	newTri->numIndexes = tri->numIndexes;
+	newTri->indexes = tri->indexes;
+	idDrawVert *ac = (idDrawVert *)_alloca16( newTri->numVerts * sizeof( idDrawVert ) );
+	for ( int i = 0; i < newTri->numVerts; i++ ) {
+		ac[i] = *(idDrawVert *)&tri->verts[i];
+	}
+#endif
+
+	idVec3 localView;
+	R_GlobalPointToLocal( surf->space->modelMatrix, tr.viewDef->renderView.vieworg, localView );
+
+	const int third = newTri->numVerts / 3;
+	idVec3 axis = ac[ newTri->numVerts - third - 1 ].xyz - ac[ third ].xyz;
+	axis.Normalize();
+	idVec3 right = localView.Cross( axis );
+	right.Normalize();
+	idVec3 up = axis.Cross( right );
+	up.Normalize();
+
+	for ( int i = 0; i < newTri->numVerts; i++ ) {
+		const idVec3 v = ac[i].xyz;
+		ac[i].xyz = axis * v.x + right * v.y + up * v.z;
+	}
+
+	R_FinishDeform( surf, newTri, ac );
+}
+
+/*
+=====================
+R_JitterDeform
+
+Retail Prey's "deform jitter <expression>": the expression is truncated to an
+integer whose bits pick the effect, usually driven by a table such as
+jacobladder[time * 20]:
+
+	0x01 / 0x02		x offset +1 / -1
+	0x04 / 0x08		y offset +1 / -1
+	0x10 / 0x20		z offset +1 / -1
+	0x40 0x80 0x100	scale x / y / z by 1.1
+	0x1000			double the offset
+=====================
+*/
+static void R_JitterDeform( drawSurf_t *surf ) {
+	const srfTriangles_t *tri = surf->geo;
+	if ( tri == NULL || tri->numVerts <= 0 ) {
+		return;
+	}
+
+	srfTriangles_t *newTri = (srfTriangles_t *)R_ClearedFrameAlloc( sizeof( *newTri ) );
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	idDrawVert *ac = (idDrawVert *)_alloca16( tri->numVerts * sizeof( idDrawVert ) );
+	R_CopyDeformSourceTriangles( tri, newTri, ac );
+#else
+	newTri->numVerts = tri->numVerts;
+	newTri->numIndexes = tri->numIndexes;
+	newTri->indexes = tri->indexes;
+	idDrawVert *ac = (idDrawVert *)_alloca16( newTri->numVerts * sizeof( idDrawVert ) );
+	for ( int i = 0; i < newTri->numVerts; i++ ) {
+		ac[i] = *(idDrawVert *)&tri->verts[i];
+	}
+#endif
+
+	const float value = surf->shaderRegisters[ surf->material->GetDeformRegister( 0 ) ];
+	const int bits = ( FLOAT_IS_INVALID( value ) || idMath::Fabs( value ) >= 2147483648.0f ) ? 0 : static_cast<int>( value );
+
+	idVec3 offset( 0.0f, 0.0f, 0.0f );
+	if ( bits & 0x01 ) { offset.x = 1.0f; }
+	if ( bits & 0x02 ) { offset.x = -1.0f; }
+	if ( bits & 0x04 ) { offset.y = 1.0f; }
+	if ( bits & 0x08 ) { offset.y = -1.0f; }
+	if ( bits & 0x10 ) { offset.z = 1.0f; }
+	if ( bits & 0x20 ) { offset.z = -1.0f; }
+	if ( bits & 0x1000 ) {
+		offset *= 2.0f;
+	}
+
+	idVec3 scale( 1.0f, 1.0f, 1.0f );
+	if ( bits & 0x40 ) { scale.x = 1.1f; }
+	if ( bits & 0x80 ) { scale.y = 1.1f; }
+	if ( bits & 0x100 ) { scale.z = 1.1f; }
+
+	for ( int i = 0; i < newTri->numVerts; i++ ) {
+		idVec3 &xyz = ac[i].xyz;
+		xyz.x = xyz.x * scale.x + offset.x;
+		xyz.y = xyz.y * scale.y + offset.y;
+		xyz.z = xyz.z * scale.z + offset.z;
+	}
+
+	R_FinishDeform( surf, newTri, ac );
+}
+
 //=====================================================================================
 
 /*
@@ -1486,6 +1601,12 @@ void R_DeformDrawSurf( drawSurf_t *drawSurf ) {
 		break;
 	case DFRM_PARTICLE2:
 		R_ParticleDeform( drawSurf, false );
+		break;
+	case DFRM_BEAM:
+		R_BeamDeform( drawSurf );
+		break;
+	case DFRM_JITTER:
+		R_JitterDeform( drawSurf );
 		break;
 	}
 }

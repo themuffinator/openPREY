@@ -2758,6 +2758,8 @@ static bool R_ShouldUseExpandedDeformScissor( const idMaterial *shader ) {
 		case DFRM_RECTSPRITE:
 		case DFRM_TUBE:
 		case DFRM_FLARE:
+		case DFRM_BEAM:
+		case DFRM_JITTER:
 			return true;
 		default:
 			return false;

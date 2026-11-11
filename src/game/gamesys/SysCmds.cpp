@@ -2874,6 +2874,7 @@ so it can perform tab completion
 */
 void idGameLocal::InitConsoleCommands( void ) {
 	cmdSystem->AddCommand( "testEventDispatch", Cmd_TestEventDispatch_f, CMD_FL_GAME | CMD_FL_CHEAT, "tests mixed float/entity event callback marshalling" );
+	cmdSystem->AddCommand( "listEventCallbacks", idClass::ListEventCallbacks_f, CMD_FL_GAME, "lists event definitions and per-class event callbacks" );
 	cmdSystem->AddCommand( "listTypeInfo",			ListTypeInfo_f,				CMD_FL_GAME,				"list type info" );
 	cmdSystem->AddCommand( "writeGameState",		WriteGameState_f,			CMD_FL_GAME,				"write game state" );
 	cmdSystem->AddCommand( "testSaveGame",			TestSaveGame_f,				CMD_FL_GAME|CMD_FL_CHEAT,	"test a save game for a level" );

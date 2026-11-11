@@ -122,6 +122,7 @@ imageConsumedLoad_t::imageConsumedLoad_t(idImage& target) : image(target), initi
     // cache key and CPU reduction. Observation never changes the legacy result.
     candidate.inputs = R_ReadImageDownsizeInputs();
     R_ResolveImageDownsizePolicy(candidate.inputs, image.GetName(), image.usage, image.allowDownSize, candidate.resolved);
+    R_ApplyImageHighResPolicy(candidate.inputs, image.flags, candidate.resolved);
     if (!R_ConsumedPolicyThread()) return;
     image.consumedPolicy = {};
     if (!image.IsFileBacked()) return;

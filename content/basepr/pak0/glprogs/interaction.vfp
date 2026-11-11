@@ -34,6 +34,7 @@
 # texture 4 is the per-surface diffuse map
 # texture 5 is the per-surface specular map
 # texture 6 is the specular lookup table
+# texcoord 7 is the vector to the viewer, for the per-pixel half angle
 
 TEMP	R0, R1, R2;
 
@@ -82,6 +83,13 @@ MUL		R0, R0, R1.x;
 
 # calculate normalized vector to viewer in R1
 SUB		R1, program.env[5], vertex.position;
+
+# texture 7 takes the (unnormalized) vector to the viewer in texture space,
+# which retail Prey's interactionNormBumpH.vfp turns into a per-pixel half angle
+DP3		result.texcoord[7].x, vertex.attrib[9], R1;
+DP3		result.texcoord[7].y, vertex.attrib[10], R1;
+DP3		result.texcoord[7].z, vertex.attrib[11], R1;
+
 DP3		R2, R1, R1;
 RSQ		R2, R2.x;
 MUL		R1, R1, R2.x;
@@ -118,9 +126,14 @@ OPTION ARB_precision_hint_fastest;
 
 # env[0] is the diffuse modifier
 # env[1] is the specular modifier
+# env[2] selects retail Prey's specular model (R_InteractionSpecularParms):
+#   x = specularExp exponent, y = specularExp brightness,
+#   z = 1 for r_correctspecular's pow( N.H, x ) * y with a per-pixel half
+#       angle (interactionNormBumpH.vfp), 0 for the _specularTable ramp,
+#   w = 1 for r_normalizebumpmap's renormalized bump normal
 # env[7].x is the optional alpha-test threshold, negative disables clipping
 
-TEMP	light, color, R1, R2, localNormal, specular;
+TEMP	light, color, R1, R2, localNormal, specular, toLight;
 
 PARAM	subOne = { -1, -1, -1, -1 };
 PARAM	scaleTwo = { 2, 2, 2, 2 };
@@ -152,6 +165,7 @@ MUL		specular, specular.x, fragment.texcoord[6];
 #-----------------
 TEX	light, fragment.texcoord[0], texture[0], CUBE;
 MAD	light, light, scaleTwo, subOne;
+MOV	toLight, light;
 
 # instead of using the normalization cube map, normalize with math
 #DP3		light, fragment.texcoord[0], fragment.texcoord[0];
@@ -166,6 +180,13 @@ MOV localNormal.x, localNormal.a;
 # HUMANHEAD
 
 MAD	localNormal, localNormal, scaleTwo, subOne;
+
+# r_normalizebumpmap: blend to the renormalized normal by env[2].w (0 or 1)
+DP3	R1.w, localNormal, localNormal;
+MAX	R1.w, R1.w, 0.00000001;
+RSQ	R1.w, R1.w;
+MUL	R1.xyz, localNormal, R1.w;
+LRP	localNormal.xyz, program.env[2].w, R1, localNormal;
 
 DP3	light, light, localNormal;
 
@@ -193,6 +214,21 @@ DP3_SAT specular.w, specular, localNormal;
 
 # perform a dependent table read for the specular falloff
 TEX	R1, specular.w, texture[6], 2D;
+
+# r_correctspecular: rebuild the half angle per pixel from the light direction
+# and the normalized vector to the viewer, then use the material's power
+DP3	R2.w, fragment.texcoord[7], fragment.texcoord[7];
+RSQ	R2.w, R2.w;
+MAD	R2.xyz, fragment.texcoord[7], R2.w, toLight;
+DP3	R2.w, R2, R2;
+RSQ	R2.w, R2.w;
+MUL	R2.xyz, R2, R2.w;
+DP3_SAT	R2.w, R2, localNormal;
+# keep POW finite (LG2 of 0) so the unselected term cannot poison the LRP
+MAX	R2.w, R2.w, 0.000001;
+POW	R2.w, R2.w, program.env[2].x;
+MUL	R2.w, R2.w, program.env[2].y;
+LRP	R1, program.env[2].z, R2.w, R1;
 
 # modulate by the constant specular factor
 MUL	R1, R1, program.env[1];

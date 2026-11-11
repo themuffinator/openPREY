@@ -11,6 +11,7 @@ instancing of objects.
 #define __SYS_CLASS_H__
 
 #include <stdint.h>
+#include <type_traits>
 
 class idClass;
 class idTypeInfo;
@@ -24,11 +25,45 @@ template< class Type >
 struct idEventFunc {
 	const idEventDef	*event;
 	eventCallback_t		function;
+	const char			*signature;		// openPREY: register class of each C++ parameter, see idEventCallbackSignature
 };
 
+/*
+openPREY: event callbacks are stored type-erased and invoked through the
+generated Callbacks.cpp table, which picks the call signature from the event's
+format string. On 32-bit x86 every argument travelled on the stack, so a
+callback whose C++ parameters disagreed with its format string still received
+the right bits. Win64 passes float arguments in XMM registers and everything
+else in integer registers, so the same mismatch reads an unrelated register.
+EVENT() records the register class of each C++ parameter ('f' float, 'i'
+integer/pointer/reference, 'X' anything else) so idClass::Init can reject
+bindings that would only have worked on retail's 32-bit ABI.
+*/
+template< typename T >
+struct idEventParmCode {
+	typedef typename std::remove_cv<T>::type bare;
+	static constexpr char value =
+		std::is_same<bare, float>::value ? 'f' :
+		( std::is_integral<bare>::value || std::is_enum<bare>::value || std::is_pointer<bare>::value || std::is_reference<T>::value ) ? 'i' : 'X';
+};
+
+template< typename... Args >
+struct idEventParmSignature {
+	static constexpr char value[ sizeof...( Args ) + 1 ] = { idEventParmCode<Args>::value..., '\0' };
+};
+
+template< typename... Args >
+constexpr char idEventParmSignature<Args...>::value[ sizeof...( Args ) + 1 ];
+
+template< class C, class R, class... Args >
+constexpr const char *idEventCallbackSignature( R ( C::* )( Args... ) ) { return idEventParmSignature<Args...>::value; }
+
+template< class C, class R, class... Args >
+constexpr const char *idEventCallbackSignature( R ( C::* )( Args... ) const ) { return idEventParmSignature<Args...>::value; }
+
 // added & so gcc could compile this
-#define EVENT( event, function )	{ &( event ), ( void ( idClass::* )( void ) )( &function ) },
-#define END_CLASS					{ NULL, NULL } };
+#define EVENT( event, function )	{ &( event ), ( void ( idClass::* )( void ) )( &function ), idEventCallbackSignature( &function ) },
+#define END_CLASS					{ NULL, NULL, NULL } };
 
 
 class idEventArg {
@@ -215,6 +250,8 @@ public:
 
 	// Static functions
 	static void					Init( void );
+	static int					ValidateEventCallbackSignatures( void );	// openPREY
+	static void					ListEventCallbacks_f( const idCmdArgs &args );	// openPREY
 	static void					Shutdown( void );
 	static idTypeInfo *			GetClass( const char *name );
 	static void					DisplayInfo_f( const idCmdArgs &args );

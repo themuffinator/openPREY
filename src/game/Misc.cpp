@@ -1261,7 +1261,9 @@ void idAnimated::Event_LaunchMissilesUpdate( int launchjoint, int targetjoint, i
 idAnimated::Event_LaunchMissiles
 =====================
 */
-void idAnimated::Event_LaunchMissiles( const char *projectilename, const char *sound, const char *launchjoint, const char *targetjoint, int numshots, int framedelay ) {
+void idAnimated::Event_LaunchMissiles( const char *projectilename, const char *sound, const char *launchjoint, const char *targetjoint, int numshots, float framedelayArg ) {
+	// openPREY: the event format ends in 'f'; an int parameter read the wrong register on Win64
+	const int		framedelay = static_cast<int>( framedelayArg );
 	const idDict *	projectileDef;
 	jointHandle_t	launch;
 	jointHandle_t	target;

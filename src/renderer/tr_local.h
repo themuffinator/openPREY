@@ -489,6 +489,11 @@ typedef struct {
 	idVec4				diffuseColor;	// may have a light color baked into it, will be < tr.backEndRendererMaxLight
 	idVec4				specularColor;	// may have a light color baked into it, will be < tr.backEndRendererMaxLight
 	idVec4				flatDiffuseParams;	// sweep strength, local min Z, inverse height, upward phase
+	// the specular stage's "specularExp <exponent>, <brightness>" (retail
+	// defaults 22, 1.4); drives the corrected specular term, see
+	// R_InteractionSpecularParms
+	float				specularExponent;
+	float				specularBrightness;
 	stageVertexColor_t	vertexColor;	// applies to both diffuse and specular
 
 	int					ambientLight;	// use tr.ambientNormalMap instead of normalization cube map 
@@ -1085,9 +1090,6 @@ public:
 	bool					scopeViewEnabled;
 	bool					spiritWalkViewEnabled;
 	bool					shuttleViewEnabled;
-	int						lastRenderSkybox;
-	ID_INLINE bool			SkyboxRenderedInFrame() const { return frameCount == lastRenderSkybox; }
-	ID_INLINE void			RenderSkyboxInFrame() { lastRenderSkybox = frameCount; }
 
 	int						viewportOffset[2];	// for doing larger-than-window tiled renderings
 	int						tiledViewport[2];
@@ -1931,6 +1933,14 @@ void R_DoneFreeType( bool preserveAtlasImages = false );
 // resolution instead of scaling up the fixed 12/24/48 point retail atlases.
 // Returns false when no usable face exists, leaving the bitmap path in charge.
 bool R_RegisterTrueTypeFont( const char *fontName, fontInfoEx_t &font );
+// Vertical layout of one retail Prey font slot, read from its .dat. The
+// scalable path fits its slots to it (see R_ReadLegacyFontSlotMetrics).
+struct legacyFontSlotMetrics_t {
+	float				top[GLYPHS_PER_FONT];		// image rect top, units above the baseline
+	float				height[GLYPHS_PER_FONT];	// image rect height; 0 for an empty slot
+	float				maxHeight;					// line height the bitmap path uses
+};
+bool R_ReadLegacyFontSlotMetrics( const char *fontName, int pointSize, legacyFontSlotMetrics_t &out );
 // Rebuilds the fixed-cell 'bigchars' console sheet at display resolution and
 // retargets its material, so the console and loading screen sharpen too.
 bool R_BuildConsoleFontAtlas( void );
@@ -2251,6 +2261,34 @@ void RB_CreateSingleDrawInteractions( const drawSurf_t *surf, void (*DrawInterac
 void RB_CreateSingleDrawInteractionsFiltered( const drawSurf_t *surf, void (*DrawInteraction)(const drawInteraction_t *), drawInteractionStageFilter_t StageFilter );
 void R_SetDrawInteraction( const shaderStage_t *surfaceStage, const float *surfaceRegs,
 						  idImage **image, idVec4 matrix[2], float color[4] );
+
+/*
+Retail Prey's stock interaction programs, selected by r_correctspecular and
+r_normalizebumpmap (both default 1 in PREY.exe):
+
+  normalize  correct  retail program            specular term
+  0          0        interaction.vfp           _specularTable ramp of N.H
+  1          0        interactionNormBump.vfp   ramp, renormalized bump normal
+  0          1        interactionUpdate.vfp     pow( N.H, exponent ) * brightness
+  1          1        interactionNormBumpH.vfp  pow, renormalized bump normal
+
+With correct specular, H is rebuilt per pixel from the light direction and
+the normalized vector to the viewer, and exponent/brightness come from the
+interaction's specular stage. Every backend's stock interaction consumes the
+same packed parameters:
+
+  parms[0] = exponent, parms[1] = brightness,
+  parms[2] = 1 for the corrected pow() term, 0 for the table ramp,
+  parms[3] = 1 to renormalize the decoded bump normal.
+
+r_enhancedMaterials and native PBR keep their own specular models and ignore
+these parameters.
+*/
+extern idCVar r_correctspecular;
+extern idCVar r_normalizebumpmap;
+void R_ResetInteractionSpecular( drawInteraction_t *din );
+void R_SetInteractionSpecularStage( drawInteraction_t *din, const shaderStage_t *surfaceStage );
+void R_InteractionSpecularParms( float specularExponent, float specularBrightness, float parms[4] );
 bool RB_FlatDiffuseSurfaceActive( const drawSurf_t *surf );
 // representability of a surface's baked indirect contribution for the modern
 // light-grid pipeline; sets *reason to a stable blocker token when false

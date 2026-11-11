@@ -10,13 +10,12 @@ windowDef Desktop {
 	onTime 0 {
 		if ( "gui::loading_bkgnd" == "" ) {
 			set "gui::loading_bkgnd" "guis/assets/loading/loading"
-			set "gui::loading_bkgnd_left" "guis/assets/loading/loading_left"
-			set "gui::loading_bkgnd_right" "guis/assets/loading/loading_right"
-			set "gui::loading_bkgnd_top" "guis/assets/loading/loading_top"
-			set "gui::loading_bkgnd_bottom" "guis/assets/loading/loading_bottom"
 		}
 	}
 
+	// In a window that is not 4:3 the session composes the art and its
+	// _left/_right/_top/_bottom tiles into one picture of the window's shape
+	// and sets loading_bkgnd_canvasfill; otherwise the 4:3 art is drawn alone.
 	windowDef BackgroundWide {
 		rect		( 0 - "gui::virtual_screen_x_expand" ), ( 0 - "gui::virtual_screen_y_expand" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 480 + ( "gui::virtual_screen_y_expand" * 2 ) )
 		visible		( "gui::loading_bkgnd_canvasfill" == 1 )
@@ -33,10 +32,6 @@ windowDef Desktop {
 		backcolor	0, 0, 0, 0
 		matcolor	1, 1, 1, 1
 		background	"gui::loading_bkgnd"
-		backgroundLeft "gui::loading_bkgnd_left"
-		backgroundRight "gui::loading_bkgnd_right"
-		backgroundTop "gui::loading_bkgnd_top"
-		backgroundBottom "gui::loading_bkgnd_bottom"
 		noclip		1
 	}
 

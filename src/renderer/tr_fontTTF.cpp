@@ -149,6 +149,15 @@ struct q4TTFSlotSpec_t {
 
 static const q4TTFSlotSpec_t Q4_TTF_SLOTS[3] = { { 12 }, { 24 }, { 48 } };
 
+// How one slot is fitted to the retail atlas of the same size (see
+// R_TTFFitSlotsToRetail). Unfitted slots are a uniform rescale of the face.
+struct q4TTFSlotFit_t {
+	bool		fitted;
+	float		verticalScale;		// outline stretch about the baseline
+	float		lineHeight;			// retail line height, in slot units
+	float		resolutionScale;	// extra rasterisation scale for the slot
+};
+
 /*
 ================
 q4TTFShelfPacker
@@ -588,8 +597,10 @@ and then the shared location.
 ================
 */
 idTrueTypeFont *q4TTFFontManager::FindFace( const char *fontName ) {
-	idStr key = fontName;
-	key.BackSlashesToSlashes();
+	// The retained interface reaches here without going through RegisterFont,
+	// so fold Quake 4 face names here as well.
+	idStr key;
+	R_CanonicalFontName( fontName, key );
 	key.StripFileExtension();
 
 	for ( int i = 0; i < faces.Num(); i++ ) {
@@ -718,7 +729,7 @@ struct q4TTFAtlasResult_t {
 };
 
 static bool R_TTFPackAtlas( idTrueTypeFont &face, const char *fontName, int pointSize, float requestedUpscale,
-							const unsigned int *codePoints, int count, bool measureLayout,
+							float verticalScale, const unsigned int *codePoints, int count, bool measureLayout,
 							const char *imageName, const char *materialName,
 							glyphInfo_t *outGlyphs, bool *outCovered, q4TTFAtlasResult_t &result ) {
 	result.material = NULL;
@@ -752,7 +763,7 @@ static bool R_TTFPackAtlas( idTrueTypeFont &face, const char *fontName, int poin
 				continue;
 			}
 			const double width = ( metrics.xMax - metrics.xMin ) * probeScale + 2.0 + padding * 2.0;
-			const double height = ( metrics.yMax - metrics.yMin ) * probeScale + 2.0 + padding * 2.0;
+			const double height = ( metrics.yMax - metrics.yMin ) * probeScale * verticalScale + 2.0 + padding * 2.0;
 			requiredArea += width * height;
 		}
 		const double capArea = (double)Q4_TTF_MAX_PAGE_AREA;
@@ -800,7 +811,7 @@ static bool R_TTFPackAtlas( idTrueTypeFont &face, const char *fontName, int poin
 			// Not covered by this face; leave a blank slot but keep the advance.
 			continue;
 		}
-		if ( !face.RasterizeGlyph( glyphIndex, scale, rasters[i].bitmap ) ) {
+		if ( !face.RasterizeGlyph( glyphIndex, scale, rasters[i].bitmap, verticalScale ) ) {
 			continue;
 		}
 		if ( rasters[i].bitmap.pixels == NULL ) {
@@ -1014,8 +1025,8 @@ extended pages at all rather than a page full of blanks.
 ================
 */
 static void R_TTFBuildExtendedPages( idTrueTypeFont &face, const char *fontName, const idStr &safeName,
-									 int pointSize, float upscale, const idList<unsigned int> &requested,
-									 fontInfo_t &out ) {
+									 int pointSize, float upscale, float verticalScale,
+									 const idList<unsigned int> &requested, fontInfo_t &out ) {
 	if ( requested.Num() == 0 ) {
 		return;
 	}
@@ -1038,7 +1049,7 @@ static void R_TTFBuildExtendedPages( idTrueTypeFont &face, const char *fontName,
 	bool *isCovered = (bool *)Mem_ClearedAlloc( covered.Num() * sizeof( bool ) );
 
 	q4TTFAtlasResult_t result;
-	const bool packed = R_TTFPackAtlas( face, fontName, pointSize, upscale, covered.Ptr(), covered.Num(),
+	const bool packed = R_TTFPackAtlas( face, fontName, pointSize, upscale, verticalScale, covered.Ptr(), covered.Num(),
 										false, imageName.c_str(), materialName.c_str(),
 										glyphs, isCovered, result );
 	if ( !packed || result.material == NULL ) {
@@ -1085,7 +1096,7 @@ active language and the loaded string tables need above them.
 ================
 */
 static bool R_TTFBuildSlot( idTrueTypeFont &face, const char *fontName, const q4TTFSlotSpec_t &slot,
-							float upscale, const idList<unsigned int> &extendedCodePoints,
+							float upscale, const q4TTFSlotFit_t &fit, const idList<unsigned int> &extendedCodePoints,
 							fontInfo_t &out, float &outMaxWidth, float &outMaxHeight ) {
 	memset( &out, 0, sizeof( out ) );
 	outMaxWidth = 0.0f;
@@ -1105,7 +1116,7 @@ static bool R_TTFBuildSlot( idTrueTypeFont &face, const char *fontName, const q4
 	const idStr materialName = imageName;
 
 	q4TTFAtlasResult_t result;
-	const bool packed = R_TTFPackAtlas( face, fontName, slot.pointSize, upscale, codePoints, count, true,
+	const bool packed = R_TTFPackAtlas( face, fontName, slot.pointSize, upscale * fit.resolutionScale, fit.verticalScale, codePoints, count, true,
 										imageName.c_str(), materialName.c_str(),
 										&out.glyphs[Q4_TTF_FIRST_CODE], NULL, result );
 	Mem_Free( codePoints );
@@ -1117,18 +1128,23 @@ static bool R_TTFBuildSlot( idTrueTypeFont &face, const char *fontName, const q4
 	const float unitsToPoint = (float)slot.pointSize / (float)face.UnitsPerEm();
 
 	outMaxWidth = result.maxWidth;
-	outMaxHeight = result.maxHeight;
+	outMaxHeight = fit.fitted ? fit.lineHeight : result.maxHeight;
 	out.material = result.material;
 	out.glyphIndexing = GLYPH_INDEX_UNICODE;
 	out.pointSize = (float)slot.pointSize;
 	out.ascender = face.Ascender() * unitsToPoint;
 	out.descender = -face.Descender() * unitsToPoint;
 	out.fontHeight = out.ascender + out.descender;
-	idStr::Copynz( out.name, va( "ttf/%s_%i", safeName.c_str(), slot.pointSize ), sizeof( out.name ) );
+	// A slot fitted to its retail counterpart is no longer a uniform rescale of
+	// the other two, so it must not carry the "ttf/" prefix the GUI reads as
+	// permission to sample a larger slot in its place (see
+	// openQ4_FontAtlasesAreProportional): that would draw the 48 point design
+	// and line height where the bitmap path drew the 24 point ones.
+	idStr::Copynz( out.name, va( "%s/%s_%i", fit.fitted ? "ttfretail" : "ttf", safeName.c_str(), slot.pointSize ), sizeof( out.name ) );
 
 	// Built at the scale the base atlas settled on, so both halves of one point
 	// size are rasterised alike even when the area cap pulled the base back.
-	R_TTFBuildExtendedPages( face, fontName, safeName, slot.pointSize, result.usedUpscale,
+	R_TTFBuildExtendedPages( face, fontName, safeName, slot.pointSize, result.usedUpscale, fit.verticalScale,
 							 extendedCodePoints, out );
 
 	return true;
@@ -1231,6 +1247,144 @@ static bool R_UseScalableFonts( void ) {
 
 /*
 ============
+R_TTFFitSlotsToRetail
+
+The bitmap path draws each size from its own hand-made atlas, and Prey's are not
+rescales of one another: the menu face's 24 point capitals are 86% as tall as
+its 48 point ones and its 12 point capitals 67%, and every slot reserves its own
+line height (the menu face's 48 point cell is 50 units, far taller than its
+letters). The GUI picks the slot from the authored text scale. One outline
+rasterised uniformly at 12/24/48 point therefore sat on a different baseline
+and drew taller than the bitmap text.
+
+When the retail .dat files are present - always, for a Prey install - each slot
+is fitted to its retail counterpart instead:
+
+- its line height becomes the retail one, from which DrawText positions the
+  first baseline of a text rect;
+- its outline is stretched about the baseline so glyph tops land on the retail
+  tops: the median, over letters and digits, of the retail top over the face's
+  own top at that size. Retail tops include the atlas border where the face has
+  one (english does, menu and alien do not); the border is measured at 48
+  point, where the face was traced, and taken off;
+- a fitted slot is no longer a rescale of the others, so the GUI selects it by
+  authored scale exactly as it selects a retail atlas. The medium slot serves
+  scales up to gui_mediumFontLimit (0.6: a 28.8 unit em against its 24), so it
+  is rasterised that much finer to stay sharp. The small slot only serves
+  scales below its own size, and the large slot is the last resort either way.
+
+Widths and advances are untouched; the face already matches them.
+============
+*/
+static float R_TTFMedian( float *values, int count ) {
+	if ( count <= 0 ) {
+		return 0.0f;
+	}
+	for ( int i = 1; i < count; i++ ) {
+		const float value = values[i];
+		int j = i - 1;
+		while ( j >= 0 && values[j] > value ) {
+			values[j + 1] = values[j];
+			j--;
+		}
+		values[j + 1] = value;
+	}
+	return ( count & 1 ) ? values[count / 2] : 0.5f * ( values[count / 2 - 1] + values[count / 2] );
+}
+
+static void R_TTFFitSlotsToRetail( const idTrueTypeFont &face, const char *fontName, q4TTFSlotFit_t fits[3] ) {
+	for ( int i = 0; i < 3; i++ ) {
+		fits[i].fitted = false;
+		fits[i].verticalScale = 1.0f;
+		fits[i].lineHeight = 0.0f;
+		fits[i].resolutionScale = 1.0f;
+	}
+
+	legacyFontSlotMetrics_t *retail = new legacyFontSlotMetrics_t[3];
+	for ( int i = 0; i < 3; i++ ) {
+		if ( !R_ReadLegacyFontSlotMetrics( fontName, Q4_TTF_SLOTS[i].pointSize, retail[i] ) ) {
+			delete[] retail;
+			return;
+		}
+	}
+
+	// The face's own top for each reference character, in 48 point units.
+	const int largeSlot = 2;
+	const float largePoint = (float)Q4_TTF_SLOTS[largeSlot].pointSize;
+	const float unitsToLarge = largePoint / (float)face.UnitsPerEm();
+	const int maxReferences = 64;
+	int codes[maxReferences];
+	float faceTops[maxReferences];
+	int referenceCount = 0;
+	for ( int code = '0'; code <= 'z' && referenceCount < maxReferences; code++ ) {
+		if ( !idStr::CharIsAlpha( code ) && !idStr::CharIsNumeric( code ) ) {
+			continue;
+		}
+		ttGlyphMetrics_t metrics;
+		const int glyphIndex = face.GlyphForCodepoint( code );
+		if ( glyphIndex == 0 || !face.GetGlyphMetrics( glyphIndex, metrics ) || metrics.yMax <= metrics.yMin ) {
+			continue;
+		}
+		const float top = metrics.yMax * unitsToLarge;
+		// A short mark would turn one unit of rounding into a large ratio.
+		if ( top < largePoint * 0.25f ) {
+			continue;
+		}
+		codes[referenceCount] = code;
+		faceTops[referenceCount] = top;
+		referenceCount++;
+	}
+
+	float samples[maxReferences];
+	int sampleCount = 0;
+	for ( int r = 0; r < referenceCount; r++ ) {
+		if ( retail[largeSlot].height[codes[r]] > 0.0f ) {
+			samples[sampleCount++] = retail[largeSlot].top[codes[r]] - faceTops[r];
+		}
+	}
+	if ( sampleCount < 8 ) {
+		delete[] retail;
+		return;
+	}
+	const float border = idMath::ClampFloat( 0.0f, 2.0f, idMath::Rint( R_TTFMedian( samples, sampleCount ) ) );
+
+	const float slotLimits[3] = {
+		cvarSystem->GetCVarFloat( "gui_smallFontLimit" ),
+		cvarSystem->GetCVarFloat( "gui_mediumFontLimit" ),
+		0.0f
+	};
+
+	for ( int i = 0; i < 3; i++ ) {
+		const float pointSize = (float)Q4_TTF_SLOTS[i].pointSize;
+		sampleCount = 0;
+		for ( int r = 0; r < referenceCount; r++ ) {
+			if ( retail[i].height[codes[r]] > 0.0f ) {
+				samples[sampleCount++] = ( retail[i].top[codes[r]] - border ) / ( faceTops[r] * pointSize / largePoint );
+			}
+		}
+		float verticalScale = ( sampleCount >= 8 ) ? R_TTFMedian( samples, sampleCount ) : 1.0f;
+		verticalScale = idMath::ClampFloat( 0.5f, 1.5f, verticalScale );
+		if ( idMath::Fabs( verticalScale - 1.0f ) < 0.02f ) {
+			verticalScale = 1.0f;
+		}
+
+		fits[i].fitted = true;
+		fits[i].verticalScale = verticalScale;
+		fits[i].lineHeight = retail[i].maxHeight;
+		// GUI scale 1 is a 48 point em.
+		fits[i].resolutionScale = Max( 1.0f, slotLimits[i] * largePoint / pointSize );
+
+		if ( r_ttfFontDebug.GetBool() ) {
+			common->Printf( "TTF font: '%s' %ipt fitted to retail: vertical %.3f, line height %.0f, border %.0f, resolution x%.2f\n",
+							fontName, Q4_TTF_SLOTS[i].pointSize, verticalScale, fits[i].lineHeight, border,
+							fits[i].resolutionScale );
+		}
+	}
+	delete[] retail;
+}
+
+/*
+============
 R_RegisterTrueTypeFont
 
 Fills 'font' from a shipped .ttf face, matching the layout the bitmap loader
@@ -1259,9 +1413,12 @@ bool R_RegisterTrueTypeFont( const char *fontName, fontInfoEx_t &font ) {
 	float *maxWidths[3] = { &font.maxWidthSmall, &font.maxWidthMedium, &font.maxWidthLarge };
 	float *maxHeights[3] = { &font.maxHeightSmall, &font.maxHeightMedium, &font.maxHeightLarge };
 
+	q4TTFSlotFit_t fits[3];
+	R_TTFFitSlotsToRetail( *face, fontName, fits );
+
 	int built = 0;
 	for ( int i = 0; i < 3; i++ ) {
-		if ( R_TTFBuildSlot( *face, fontName, Q4_TTF_SLOTS[i], upscale, extendedCodePoints,
+		if ( R_TTFBuildSlot( *face, fontName, Q4_TTF_SLOTS[i], upscale, fits[i], extendedCodePoints,
 							 *slots[i], *maxWidths[i], *maxHeights[i] ) ) {
 			built++;
 		}

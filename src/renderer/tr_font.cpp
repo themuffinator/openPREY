@@ -404,6 +404,44 @@ static bool R_LoadFontSlot( fontInfoEx_t &font, const char *fontName, const q4Fo
 
 /*
 ============
+R_ReadLegacyFontSlotMetrics
+
+The vertical metrics the bitmap path lays one retail Prey slot out with, read
+straight from its .dat without touching materials or atlas pages: each glyph's
+top (units above the baseline) and image height, and the slot's line height,
+which is the tallest image rect. The scalable path fits its slots to these so
+TrueType text sits where the bitmap text did.
+============
+*/
+bool R_ReadLegacyFontSlotMetrics( const char *fontName, int pointSize, legacyFontSlotMetrics_t &out ) {
+	memset( &out, 0, sizeof( out ) );
+	idStr fontDataName = va( "%s/fontImage_%i.dat", fontName, pointSize );
+	if ( fileSystem->ReadFile( fontDataName.c_str(), NULL, NULL ) != PREY_FONTDAT_SIZE ) {
+		return false;
+	}
+	idFile *fontFile = fileSystem->OpenFileRead( fontDataName.c_str(), true );
+	if ( fontFile == NULL ) {
+		return false;
+	}
+
+	bool valid = true;
+	for ( int glyphIndex = 0; glyphIndex < GLYPHS_PER_FONT; ++glyphIndex ) {
+		glyphInfo_t glyph;
+		char shaderName[PREY_FONTDAT_SHADER_NAME_BYTES + 1];
+		if ( !R_ReadPreyFontGlyph( fontFile, glyph, shaderName ) ) {
+			valid = false;
+			break;
+		}
+		out.top[glyphIndex] = glyph.horiBearingY;
+		out.height[glyphIndex] = glyph.height;
+		out.maxHeight = Max( out.maxHeight, glyph.height );
+	}
+	fileSystem->CloseFile( fontFile );
+	return valid && out.maxHeight > 0.0f;
+}
+
+/*
+============
 R_SyncFontCodePage
 
 The renderer is a module with its own copy of idlib, so the active codepage the
@@ -436,8 +474,12 @@ RegisterFont
 Loads 3 point sizes, 12, 24, and 48
 ============
 */
-bool idRenderSystemLocal::RegisterFont( const char *fontName, fontInfoEx_t &font ) {
+bool idRenderSystemLocal::RegisterFont( const char *requestedFontName, fontInfoEx_t &font ) {
 	memset( &font, 0, sizeof( font ) );
+
+	idStr canonicalFontName;
+	R_CanonicalFontName( requestedFontName, canonicalFontName );
+	const char *fontName = canonicalFontName.c_str();
 
 	// Every atlas below is rasterised through the active codepage, so this
 	// module's copy of it has to agree with the string tables before any glyph

@@ -11,6 +11,39 @@
 #include <cstring>
 #include <limits>
 
+// Retail PREY.exe registers both with default "1" (and r_cubemapNormalize
+// "0", which only chose a slower normalization). See R_InteractionSpecularParms.
+idCVar r_correctspecular( "r_correctspecular", "1", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_BOOL,
+	"per pixel half angle calculation: shade stock interaction specular as pow( N.H, exponent ) * brightness from the material's specularExp; 0 uses the Doom 3 specular table ramp" );
+idCVar r_normalizebumpmap( "r_normalizebumpmap", "1", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_BOOL,
+	"per pixel renormalization of bumpmaps in the stock interaction" );
+
+void R_ResetInteractionSpecular( drawInteraction_t *din ) {
+	din->specularExponent = MATERIAL_DEFAULT_SPECULAR_EXPONENT;
+	din->specularBrightness = MATERIAL_DEFAULT_SPECULAR_BRIGHTNESS;
+}
+
+void R_SetInteractionSpecularStage( drawInteraction_t *din, const shaderStage_t *surfaceStage ) {
+	din->specularExponent = surfaceStage->specularExponent;
+	din->specularBrightness = surfaceStage->specularBrightness;
+}
+
+void R_InteractionSpecularParms( float specularExponent, float specularBrightness, float parms[4] ) {
+	// A non-finite or negative stage value would turn pow() into NaN or an
+	// unbounded spike; fall back to the retail default instead. Exponent 0
+	// stays legal (a flat highlight), as in retail.
+	if ( !( specularExponent >= 0.0f ) || specularExponent > 1.0e4f ) {
+		specularExponent = MATERIAL_DEFAULT_SPECULAR_EXPONENT;
+	}
+	if ( !( specularBrightness >= 0.0f ) || specularBrightness > 1.0e4f ) {
+		specularBrightness = MATERIAL_DEFAULT_SPECULAR_BRIGHTNESS;
+	}
+	parms[0] = specularExponent;
+	parms[1] = specularBrightness;
+	parms[2] = r_correctspecular.GetBool() ? 1.0f : 0.0f;
+	parms[3] = r_normalizebumpmap.GetBool() ? 1.0f : 0.0f;
+}
+
 namespace {
 
 const std::uint64_t HASH_OFFSET = 1469598103934665603ull;
@@ -72,6 +105,8 @@ typedef struct classicInteractionWork_s {
 	std::uint64_t specularImageResourceId;
 	float diffuseColor[ 4 ];
 	float specularColor[ 4 ];
+	float specularExponent;
+	float specularBrightness;
 	float bumpMatrix[ 2 ][ 4 ];
 	float diffuseMatrix[ 2 ][ 4 ];
 	float specularMatrix[ 2 ][ 4 ];
@@ -241,6 +276,8 @@ static void InitWork( classicInteractionWork_t &work ) {
 	work.diffuseStageIndex = -1;
 	work.specularStageIndex = -1;
 	work.vertexColor = RENDERER_VERTEX_COLOR_IGNORE;
+	work.specularExponent = MATERIAL_DEFAULT_SPECULAR_EXPONENT;
+	work.specularBrightness = MATERIAL_DEFAULT_SPECULAR_BRIGHTNESS;
 	InitTextureMatrix( work.bumpMatrix );
 	InitTextureMatrix( work.diffuseMatrix );
 	InitTextureMatrix( work.specularMatrix );
@@ -843,6 +880,7 @@ static std::uint64_t HashPrimitive(
 	for ( int component = 0; component < 4; ++component ) {
 		HashFloat( hash, primitive.diffuseColor[ component ] );
 		HashFloat( hash, primitive.specularColor[ component ] );
+		HashFloat( hash, primitive.specularParms[ component ] );
 		HashFloat( hash, primitive.flatDiffuseParams[ component ] );
 		HashFloat( hash, primitive.localLightOrigin[ component ] );
 		HashFloat( hash, primitive.localViewOrigin[ component ] );
@@ -2887,6 +2925,8 @@ static bool SubmitPrimitive( const classicInteractionDomainPrimitive_t &base,
 		sizeof( primitive.diffuseColor ) );
 	std::memcpy( primitive.specularColor, work.specularColor,
 		sizeof( primitive.specularColor ) );
+	R_InteractionSpecularParms( work.specularExponent,
+		work.specularBrightness, primitive.specularParms );
 	std::memcpy( primitive.bumpMatrix, work.bumpMatrix,
 		sizeof( primitive.bumpMatrix ) );
 	std::memcpy( primitive.diffuseMatrix, work.diffuseMatrix,
@@ -3159,6 +3199,8 @@ static bool PrepareSurfacePrimitives(
 				}
 				work.specularImage = surfaceStage.texture.image;
 				work.specularStageIndex = surfaceStageIndex;
+				work.specularExponent = surfaceStage.specularExponent;
+				work.specularBrightness = surfaceStage.specularBrightness;
 				if ( !EvaluateTextureMatrix( surfaceStage.texture,
 						surfaceRegisters, surfaceRegisterCount,
 						work.specularMatrix, error, surfaceStageIndex )

@@ -561,8 +561,15 @@ static infoParm_t	infoParms[] = {
 	{"aasobstacle",	0,	0,	CONTENTS_AAS_OBSTACLE },// used to compile an obstacle into AAS that can be enabled/disabled
 	{"flashlight_trigger",	0,	0,	CONTENTS_FLASHLIGHT_TRIGGER }, // used for triggers that are activated by the flashlight
 #ifdef HUMANHEAD
-	{"forcefield",	0,	0,	CONTENTS_FORCEFIELD },	// forcefield matter
-	{"forcefield_nobullets",	1,	SURFTYPE_FORCEFIELD,	CONTENTS_FORCEFIELD },
+	// Retail Prey's forcefield is non-solid, shootable, blocks splash damage and
+	// carries the forcefield surface type; the bullet-proof variant has no type.
+	{"forcefield",	CONTENTS_SOLID,	SURFTYPE_FORCEFIELD,	CONTENTS_FORCEFIELD | CONTENTS_BLOCK_RADIUSDAMAGE | CONTENTS_SHOOTABLE },
+	{"forcefield_nobullets",	CONTENTS_SOLID,	0,	CONTENTS_FORCEFIELD },
+	// clearSolid is a contents mask in retail Prey: seeThru removes
+	// CONTENTS_OPAQUE and noSeeThru adds it. Opaque coverage still re-adds
+	// CONTENTS_OPAQUE once parsing finishes, exactly as retail does.
+	{"seeThru",		CONTENTS_OPAQUE,	0,	0 },
+	{"noSeeThru",	0,	0,	CONTENTS_OPAQUE },
 	{"spiritbridge",0,	0,	CONTENTS_SPIRITBRIDGE },	// spirit-walk-only collision
 	{"blockradiusdamage",	0,	0,	CONTENTS_BLOCK_RADIUSDAMAGE },	// blocks splash damage
 	{"block_radiusdamage",	0,	0,	CONTENTS_BLOCK_RADIUSDAMAGE },	// compatibility alias
@@ -620,7 +627,6 @@ static infoParm_t	infoParms[] = {
 	{"tile",		0,	SURFTYPE_TILE,		0 },	// tile
 	{"wallwalk",	0,	SURFTYPE_WALLWALK,	0 },	// wallwalk
 	{"altmetal",	0,	SURFTYPE_ALTMETAL,	0 },	// alternate metal
-	{"forcefield",	0,	SURFTYPE_FORCEFIELD,0 },	// forcefield
 	{"pipe",		0,	SURFTYPE_PIPE,		0 },	// pipe
 	{"spirit",		0,	SURFTYPE_SPIRIT,	0 },	// spirit
 	{"chaff",		0,	SURFTYPE_CHAFF,		0 },	// chaff
@@ -658,9 +664,9 @@ bool idMaterial::CheckSurfaceParm( idToken *token ) {
 			}
 			surfaceFlags |= infoParms[i].surfaceFlags;
 			contentFlags |= infoParms[i].contents;
-			if ( infoParms[i].clearSolid ) {
-				contentFlags &= ~CONTENTS_SOLID;
-			}
+			// clearSolid is the mask of contents bits the parm removes; the
+			// 1 used by most entries is CONTENTS_SOLID
+			contentFlags &= ~infoParms[i].clearSolid;
 			return true;
 		}
 	}
@@ -1167,6 +1173,8 @@ void idMaterial::ClearStage( shaderStage_t *ss ) {
 	ss->conditionRegister = GetExpressionConstant( 1 );
 	ss->alphaTestMode = GL_GREATER;
 	ss->alphaTestRegister = GetExpressionConstant( 0.5f );
+	ss->specularExponent = MATERIAL_DEFAULT_SPECULAR_EXPONENT;
+	ss->specularBrightness = MATERIAL_DEFAULT_SPECULAR_BRIGHTNESS;
 	ss->color.registers[0] =
 	ss->color.registers[1] =
 	ss->color.registers[2] =
@@ -1507,6 +1515,10 @@ void idMaterial::ParseFragmentMap( idLexer &src, newShaderStage_t *newStage ) {
 		}
 		if ( !token.Icmp( "nomips" ) ) {
 			imageFlags = R_ResolveMaterialNoMipFlags( pd->qualityInputs, imageFlags );
+			continue;
+		}
+		if ( !token.Icmp( "highres" ) ) {
+			imageFlags |= IMAGEFLAG_HIGHRES;
 			continue;
 		}
 
@@ -1858,6 +1870,10 @@ void idMaterial::ParseShaderTexture( idLexer &src, newShaderStage_t *newStage ) 
 		}
 		if ( !token.Icmp( "nomips" ) ) {
 			imageFlags = R_ResolveMaterialNoMipFlags( pd->qualityInputs, imageFlags );
+			continue;
+		}
+		if ( !token.Icmp( "highres" ) ) {
+			imageFlags |= IMAGEFLAG_HIGHRES;
 			continue;
 		}
 
@@ -2225,7 +2241,7 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 			continue;
 		}
 		if ( !token.Icmp( "highres" ) ) {
-			// Legacy authoring quality hint; modern image selection is automatic.
+			imageFlags |= IMAGEFLAG_HIGHRES;
 			continue;
 		}
 		if ( !token.Icmp( "nopicmip" ) ) {
@@ -2612,9 +2628,14 @@ void idMaterial::ParseStage( idLexer &src, const textureRepeat_t trpDefault ) {
 			continue;
 		}
 		if ( !token.Icmp( "specularExp" ) ) {
-			// Legacy fixed-function hint. Consume its authored value(s).
-			while ( src.ReadTokenOnLine( &token ) ) {
+			// Retail Prey: "specularExp <exponent>, <brightness>", a missing
+			// comma defaults the material.
+			ss->specularExponent = src.ParseFloat();
+			if ( !src.ExpectTokenString( "," ) ) {
+				SetMaterialFlag( MF_DEFAULTED );
+				return;
 			}
+			ss->specularBrightness = src.ParseFloat();
 			continue;
 		}
 		if ( !token.Icmp( "scopeView" ) || !token.Icmp( "notScopeView" ) ||
@@ -3513,18 +3534,16 @@ void idMaterial::ParseDeform( idLexer &src ) {
 		return;
 	}
 	if ( !token.Icmp( "beam" ) ) {
-		// Retail Prey uses beam as the authored synonym for Doom 3's tube deform.
-		deform = DFRM_TUBE;
-		cullType = CT_TWO_SIDED;
-		SetMaterialFlag( MF_NOSHADOWS );
+		// Retail Prey's own deform, distinct from tube: it changes neither the
+		// cull type nor shadowing (beam materials say noShadows themselves).
+		deform = DFRM_BEAM;
 		return;
 	}
 	if ( !token.Icmp( "jitter" ) ) {
-		// Obsolete fixed-function effect. Consume all same-line parameters so the
-		// declaration remains aligned and render the undeformed geometry.
-		while ( src.ReadTokenOnLine( &token ) ) {
-		}
-		deform = DFRM_NONE;
+		// Retail Prey evaluates one expression whose integer bits select the
+		// offsets and scales applied by R_JitterDeform.
+		deform = DFRM_JITTER;
+		deformRegisters[0] = ParseExpression( src );
 		return;
 	}
 	if ( !token.Icmp( "corona" ) ) {
@@ -3816,9 +3835,9 @@ void idMaterial::ParseMaterial( idLexer &src ) {
 			SetMaterialFlag( MF_NEED_CURRENT_RENDER );
 			continue;
 		}
-		else if ( !token.Icmp( "skipClip" ) || !token.Icmp( "noseethru" ) ||
-				!token.Icmp( "lightWholeMesh" ) ) {
-			// Legacy Prey editor/authoring metadata with no runtime effect.
+		else if ( !token.Icmp( "skipClip" ) || !token.Icmp( "lightWholeMesh" ) ) {
+			// Retail Prey records these as MF_SKIPCLIP / MF_LIGHT_WHOLE_MESH, but
+			// neither PREY.exe nor the game library ever tests either flag.
 			continue;
 		}
 // jmarshall end
@@ -4107,33 +4126,60 @@ void idMaterial::ParseMaterial( idLexer &src ) {
 			newSrc.FreeSource();
 			continue;
 		}
-		// DECAL_MACRO for backwards compatibility with the preprocessor macros
-		else if ( !token.Icmp( "DECAL_MACRO" ) || !token.Icmp( "decal_alphatest_macro" ) ||
-				!token.Icmp( "scorch_macro" ) ) {
-			// polygonOffset
-			SetMaterialFlag( MF_POLYGONOFFSET );
-			polygonOffset = 1;
+		// Retail Prey's built-in material macros, matched case-insensitively and
+		// with the exact state PREY.exe applies for each one.
+		else if ( !token.Icmp( "DECAL_MACRO" ) || !token.Icmp( "DECAL_ALPHATEST_MACRO" ) ||
+				!token.Icmp( "SCORCH_MACRO" ) || !token.Icmp( "OVERLAY_MACRO" ) ) {
+			// the alpha-tested decal is the only one without a polygon offset
+			if ( token.Icmp( "DECAL_ALPHATEST_MACRO" ) ) {
+				SetMaterialFlag( MF_POLYGONOFFSET );
+				polygonOffset = 1;
+			}
 
-			// keep separately clipped decal geometry
-			surfaceFlags |= SURF_DISCRETE;
+			// keep separately clipped decal geometry that never spawns impacts
+			surfaceFlags |= SURF_DISCRETE | SURF_NOIMPACT;
 			contentFlags &= ~CONTENTS_SOLID;
 
-			// sort decal
 			sort = SS_DECAL;
-
-			// noShadows
 			SetMaterialFlag( MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT );
 			coverage = MC_TRANSLUCENT;
+			allowOverlays = false;
 			continue;
 		}
-		else if ( !token.Icmp( "overlay_macro" ) ) {
-			// Authored metadata; unlike decal macros this does not change coverage.
+		else if ( !token.Icmp( "GLASS_MACRO" ) ) {
+			SetMaterialFlag( MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT );
+			coverage = MC_TRANSLUCENT;
+			pd->forceOverlays = true;
+			sort = SS_MEDIUM;
+			contentFlags &= ~CONTENTS_OPAQUE;
+			surfaceFlags = ( surfaceFlags & ~SURF_TYPE_MASK ) | SURFTYPE_GLASS;
 			continue;
 		}
-		else if ( !token.Icmp( "skipClip" ) || !token.Icmp( "glass_macro" ) ||
-				!token.Icmp( "skybox_macro" ) || !token.Icmp( "seeThru" ) ||
-				!token.Icmp( "noSeeThru" ) ) {
-			// Legacy authoring macros whose declarations already contain stages.
+		else if ( !token.Icmp( "SKYBOX_MACRO" ) ) {
+			SetMaterialFlag( MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT | MF_NOSELFSHADOW );
+			surfaceFlags |= SURF_NOIMPACT | SURF_NOFRAGMENT;
+			allowOverlays = false;
+			coverage = MC_OPAQUE;
+			continue;
+		}
+		else if ( !token.Icmp( "SPRITE_MACRO" ) ) {
+			surfaceFlags |= SURF_DISCRETE;
+			contentFlags &= ~CONTENTS_SOLID;
+			SetMaterialFlag( MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT );
+			coverage = MC_TRANSLUCENT;
+			deform = DFRM_SPRITE;
+			cullType = CT_TWO_SIDED;
+			continue;
+		}
+		else if ( !token.Icmp( "EFFECT_MACRO" ) || !token.Icmp( "ALPHA_MACRO" ) ) {
+			// the effect macro is also non-solid; the alpha macro keeps its contents
+			if ( !token.Icmp( "EFFECT_MACRO" ) ) {
+				contentFlags &= ~CONTENTS_SOLID;
+			}
+			SetMaterialFlag( MF_NOSHADOWS | MF_NOSHADOWS_EXPLICIT );
+			surfaceFlags |= SURF_NOIMPACT;
+			coverage = MC_TRANSLUCENT;
+			cullType = CT_TWO_SIDED;
 			continue;
 		}
 		else if ( token == "{" ) {

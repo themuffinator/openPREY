@@ -803,7 +803,11 @@ into the new bodies.
 Concrete impls against the rewritten emitter internals: `ModifySound` (via
 hhSoundShaderParmsModifier), `GetSoundParms` (convert linear→dB on the way out),
 `CurrentAmplitude/CurrentVoiceAmplitude` (SSF_VOICEAMPLITUDE-filtered; re-derive from
-upstream's channel structure — `CurrentAmplitude` anchor `snd_local.h:438`),
+upstream's channel structure — `CurrentAmplitude` anchor `snd_local.h:438`;
+the per-channel queries read the sample's cached 60 Hz peak envelope on Doom 3's
+`FindAmplitude` curve, `atan(peak-to-peak / 32767) / 45°`, range 0–1.41, because the
+OpenAL voice has no VU meter and its `GetAmplitude()` is a constant 1, which held every
+jaw-flapping mouth open and brow lowered for the whole line),
 `CurrentShakeAmplitudeForPosition`, `PlaceListener(..., areaName)` +
 `RegisterLocation/ClearAreaLocations` (sound-area names feed WP4.1's sound-area
 virtuals — engine-side storage), SetSpiritWalkEffect/SetVoiceDucker no-ops for now
@@ -829,7 +833,7 @@ onto the new path (keep the cvar name working).
   values to free bits and static_assert no overlap.
 - ui-06: fonts path fallback `fonts/` (+ registration-order fix), `gui_smallFontLimit`
   0.10, Prey cursor materials + CURSOR_MENU (+CURSOR_COUNT), size 15 — validated
-  under the TTF/bitmap dual pipeline with `r_useTrueTypeFonts=0` by default (D10).
+  under the TTF/bitmap dual pipeline with `r_useTrueTypeFonts=1` by default (D10).
 - ui-07: side-slice half only (backgroundLeft/Right/Top/Bottom winvars +
   DrawBackgroundExpansionSlice) integrated with upstream's underlay system;
   matcanvasfill half is already upstream — drop.
@@ -878,7 +882,9 @@ a logged notice; TTF support is follow-up.
   (`Session_IsSupportedSaveGameName`), write gamename "Prey"; version policy: adopt
   upstream's live `SAVEGAME_VERSION=1834`. The generated staged-game payload stamp is
   SHA-256 `6b7bd1d91fd551e5f972dc1c3900c8483b58fb586f60dbdf7eab89bb48e7a7d7`
-  across 376 source files. The companion repository's framework-header value `114` is
+  across 376 source files. The game library's payload stamp follows the session's
+  payload version (5 since the merge through `b4d3fd700`) with the writing build's
+  native wire-ABI stamp; see `docs/dev/savegame-reliability.md`. The companion repository's framework-header value `114` is
   archival/non-runtime: that framework tree is neither staged nor compiled. Multi-gamedir
   search (fs_game → basepr → base) via
   `Session_BuildSaveGameSearchDirs` grafted into upstream's read path;
@@ -1176,7 +1182,7 @@ The mirror clip-plane workaround remains active and tracked in
 | Deferred item | Tracking |
 |---|---|
 | MVD / bots / repeater on Prey API | D9 gate markers; MultiViewDemo schema TODO |
-| ui-02 spline text under TTF | WP5.8 note; `r_useTrueTypeFonts=0` (D10) |
+| ui-02 spline text under TTF | Resolved: the effect draws with TTF glyphs and `r_useTrueTypeFonts=1` is the default (D10); awaiting a runtime capture, since no shipped GUI enables `splineIn` |
 | ModernGL / Vulkan Prey feature parity | D2; renderer-vk stubs from WP4.1 |
 | Nested BSE `SEG_EFFECT` spawning | D3; add a Prey-v7-compatible callback/spawn path and stock-FX runtime capture before enabling |
 | SetSpiritWalkEffect / SetVoiceDucker DSP | WP5.5 no-ops; TODO |

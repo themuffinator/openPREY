@@ -691,6 +691,9 @@ public:
 	virtual void			ResetVoiceChat();
 	virtual int				GetVoiceTalker() const;
 	virtual float			GetVoiceLevel() const;
+	virtual bool			StartLoadingMusic( const char* shaderName );
+	virtual void			StopLoadingMusic();
+	float					LoadingMusicGain() const;
 
 	//-------------------------
 
@@ -768,6 +771,8 @@ public:
 	bool						muted;
 	bool						focusMuted;
 	bool						musicMuted;
+	// the shader parms of the playing map-load music (StartLoadingMusic)
+	soundShaderParms_t			loadingMusicParms;
 	bool						needsRestart;
 
 	bool						insideLevelLoad;

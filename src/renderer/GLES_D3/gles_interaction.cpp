@@ -227,6 +227,11 @@ static void GLESD3_DrawInteraction( const drawInteraction_t *din ) {
 	glUniform4fv( program->uDiffuseColor, 1, din->diffuseColor.ToFloatPtr() );
 	glUniform4fv( program->uSpecularColor, 1, din->specularColor.ToFloatPtr() );
 
+	// retail Prey's specular model (r_correctspecular / r_normalizebumpmap)
+	float specularParms[4];
+	R_InteractionSpecularParms( din->specularExponent, din->specularBrightness, specularParms );
+	glUniform4fv( program->uSpecularParams, 1, specularParms );
+
 	// only the ambient variant declares uAmbientDir; -1 no-ops on the base
 	glUniform3fv( program->uAmbientDir, 1, gles_ambientDir );
 
@@ -370,6 +375,7 @@ static void GLESD3_CreateSingleDrawInteractions( const drawSurf_t *surf ) {
 		inter.diffuseColor.Zero();
 		inter.specularColor.Zero();
 		inter.flatDiffuseParams.Zero();
+		R_ResetInteractionSpecular( &inter );
 
 		// backEnd.lightScale keeps lightColor under tr.backEndRendererMaxLight
 		float lightColor[4];
@@ -425,6 +431,7 @@ static void GLESD3_CreateSingleDrawInteractions( const drawSurf_t *surf ) {
 					}
 					GLESD3_SetDrawInteraction( surfaceStage, surfaceRegs, &inter.specularImage,
 							inter.specularMatrix, inter.specularColor.ToFloatPtr() );
+					R_SetInteractionSpecularStage( &inter, surfaceStage );
 					inter.specularColor[0] *= lightColor[0];
 					inter.specularColor[1] *= lightColor[1];
 					inter.specularColor[2] *= lightColor[2];

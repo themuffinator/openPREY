@@ -5183,7 +5183,8 @@ void hhPlayer::Think( void ) {
 		headRenderEnt = NULL;
 	}
 
-	if ( gameLocal.isMultiplayer || g_showPlayerShadow.GetBool() ) {
+	// openPREY: g_showPlayerShadow decides in multiplayer too (see MP_PLAYERNOSHADOW_DEFAULT)
+	if ( g_showPlayerShadow.GetBool() ) {
 		renderEntity.suppressShadowInViewID	= 0;
 		if ( headRenderEnt ) {
 			headRenderEnt->suppressShadowInViewID = 0;

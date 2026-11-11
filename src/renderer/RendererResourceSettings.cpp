@@ -498,6 +498,7 @@ bool PrepareTarget(Attempt& a,const ir::Data& restore,const renderImagePolicy_t&
         auto& c=entry.content;
         if(c.scope==IPC_CACHE_PIXELS_ONLY){if(!SamePolicy(target,restore.policy))return Error(error,size,"Cache pixels cannot authorize a different source policy");continue;}
         R_ResolveImageDownsizePolicy(inputs,entry.name.c_str(),static_cast<textureUsage_t>(entry.usage),entry.allowDownSize,c.resolved);
+        R_ApplyImageHighResPolicy(inputs,entry.flags,c.resolved);
         idBinaryImage binary(entry.name.c_str());imageReductionResult_t reduction{};
         if(c.file.bytes>64ull*1024*1024||!R_LoadPrecompressedDDS(c.file.qpath,binary,nullptr,static_cast<textureUsage_t>(entry.usage),c.resolved,c.mipmaps,&reduction,&c.file)||
             !R_ImageReductionIsExact(c.resolved,reduction)||!binary.GetContentIdentity(c.binary)||!Check(a,error,size))

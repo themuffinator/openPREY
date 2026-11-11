@@ -179,7 +179,9 @@ Per-draw GPU blocks
 // a = (vertexColorModulate, vertexColorAdd, ambientLight, unused),
 // b = tangent-space ambient light direction (cube-quantized),
 // c = parallax for classic draws; data-layout bits and normal encoding for PBR,
-// d = native PBR mode, metallic scalar, roughness scalar, normal scale
+// d = native PBR mode, metallic scalar, roughness scalar, normal scale; on a
+//     classic draw x = 0 and yzw hold the enhanced-material tunables or, for a
+//     stock draw, the specular exponent, brightness and model flags
 typedef struct vkInteractionPush_s {
 	float			mvp[ 16 ];
 	float			a[ 4 ];
@@ -187,6 +189,15 @@ typedef struct vkInteractionPush_s {
 	float			c[ 4 ];
 	float			d[ 4 ];
 } vkInteractionPush_t;
+
+// Stock classic draws (neither enhanced nor native PBR) carry
+// R_InteractionSpecularParms in d.yzw: exponent, brightness, and flags
+// 1 = r_correctspecular, 2 = r_normalizebumpmap (stock_specular.glsl).
+static void VK_PackStockSpecularPush( const float specularParms[ 4 ], float d[ 4 ] ) {
+	d[ 1 ] = specularParms[ 0 ];
+	d[ 2 ] = specularParms[ 1 ];
+	d[ 3 ] = ( specularParms[ 2 ] > 0.5f ? 1.0f : 0.0f ) + ( specularParms[ 3 ] > 0.5f ? 2.0f : 0.0f );
+}
 
 // std140 mirror of the set-6 InteractionBlock (16 vec4 = 256 bytes, the
 // whole ring slice)
@@ -744,6 +755,7 @@ static void VK_ClassicInteraction_BuildBlocks(
 		break;
 	}
 	plan.push.a[2] = primitive.ambientLight ? 1.0f : 0.0f;
+	VK_PackStockSpecularPush( primitive.specularParms, plan.push.d );
 	plan.push.b[0] = 1.0f;
 	plan.push.b[1] =
 		( (float)(byte)( 255 * tr.ambientLightVector[1] ) / 255.0f )
@@ -3458,6 +3470,13 @@ static void VK_DrawSingleInteractionMode( const drawInteraction_t *din,
 		: enhanced ? idMath::ClampFloat( 0.0f, 1.0f, r_enhancedMaterialFresnel.GetFloat() ) : 0.0f;
 	push.d[ 3 ] = nativePBR ? pbr.normalScale
 		: enhanced ? idMath::ClampFloat( 0.5f, 2.0f, r_enhancedMaterialNormalScale.GetFloat() ) : 1.0f;
+	if ( !nativePBR && !enhanced ) {
+		// a stock classic draw carries retail Prey's specular model in d.yzw
+		// instead (stock_specular.glsl)
+		float specularParms[ 4 ];
+		R_InteractionSpecularParms( din->specularExponent, din->specularBrightness, specularParms );
+		VK_PackStockSpecularPush( specularParms, push.d );
+	}
 
 	// dynamic offsets consume in set order: set 6 interaction slice, then
 	// (shadowed only) set 7 binding 1 shadow slice
@@ -4739,6 +4758,7 @@ static void VK_CreateSingleDrawInteractions( const drawSurf_t *surf ) {
 		inter.diffuseColor[0] = inter.diffuseColor[1] = inter.diffuseColor[2] = inter.diffuseColor[3] = 0;
 		inter.specularColor[0] = inter.specularColor[1] = inter.specularColor[2] = inter.specularColor[3] = 0;
 		inter.flatDiffuseParams.Zero();
+		R_ResetInteractionSpecular( &inter );
 
 		float lightColor[4];
 
@@ -4799,6 +4819,7 @@ static void VK_CreateSingleDrawInteractions( const drawSurf_t *surf ) {
 					}
 					VK_SetDrawInteraction( surfaceStage, surfaceRegs, &inter.specularImage,
 											inter.specularMatrix, inter.specularColor.ToFloatPtr() );
+					R_SetInteractionSpecularStage( &inter, surfaceStage );
 					inter.specularColor[0] *= lightColor[0];
 					inter.specularColor[1] *= lightColor[1];
 					inter.specularColor[2] *= lightColor[2];

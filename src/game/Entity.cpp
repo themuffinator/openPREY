@@ -689,7 +689,9 @@ void idEntity::Spawn( void ) {
 		SetModel( temp );
 	}
 
-	if ( spawnArgs.GetString( "bind", "", &temp ) || spawnArgs.GetString( "old_bind", "", &temp ) ) {
+	// Retail never reads "old_bind": feedingtowera's designers renamed "bind" on 61
+	// dropship lights and props to keep them unbound, so honouring it changes that map.
+	if ( spawnArgs.GetString( "bind", "", &temp ) ) {
 		PostEventMS( &EV_SpawnBind, 0 );
 	}
 
@@ -2019,9 +2021,11 @@ bool idEntity::StartSoundShader( const idSoundShader *shader, const s_channelTyp
 ================
 idEntity::TrackScriptVoiceSilence
 
-Prey scripts use waitForSilence() on the entity that owns voice playback. Several
-retail maps wait on $player1, so this support must live on idEntity rather than
-only on Prey-specific animated-entity subclasses.
+Prey scripts use waitForSilence() on the entity that owns voice playback, most
+often $player1. Tracking happens on every entity's voice channel, but
+idThread::Event_WaitForSilence keeps retail's gate and only waits on entities
+that respond to EV_Thread_SetSilenceCallback (hhAnimatedEntity, which the
+player, all actors and AF attachments derive from).
 ================
 */
 void idEntity::TrackScriptVoiceSilence( const s_channelType channel, int length ) {
@@ -4528,8 +4532,7 @@ void idEntity::Event_SpawnBind( void ) {
 	int				animNum;
 	idAnimator		*parentAnimator;
 	bind = "";
-	if ( ( !spawnArgs.GetString( "bind", "", &bind ) || !bind[0] ) &&
-		 ( !spawnArgs.GetString( "old_bind", "", &bind ) || !bind[0] ) ) {
+	if ( !spawnArgs.GetString( "bind", "", &bind ) || !bind[0] ) {
 		return;
 	}
 

@@ -84,18 +84,55 @@ def validate_stock_bump_sampling_contract() -> None:
         (
             "vec4 bumpSample = texture(bumpMap, bumpTexCoord);",
             # r_enhancedMaterials replaces only the decode and the specular
-            # term (enhanced_material.glsl); the stock pair stays verbatim.
+            # term (enhanced_material.glsl); the stock pair is retail Prey's
+            # model (stock_specular.glsl).
             "vec3 localNormal = EnhancedMaterialActive() ? EnhancedLocalNormal(bumpSample)",
-            ": vec3(bumpSample.a, bumpSample.g, bumpSample.b) * 2.0 - 1.0;",
+            ": StockLocalNormal(bumpSample);",
             "float ndotl = max(dot(lightDir, localNormal), 0.0);",
             "vec3 specularSample = texture(specularMap, specularTexCoord).rgb;",
             "specularTerm = EnhancedSpecularTerm(halfAngle, SafeNormalize(vViewVector), localNormal, specularSample);",
-            "specularTerm = texture(specularTableMap, vec2(specularDot, 0.5)).r * 2.0;",
+            "specularTerm = StockSpecularTerm(halfAngle, lightDir, SafeNormalize(vViewVector), localNormal) * 2.0;",
             "vec3 specular = specularSample * inter.specularColor.rgb * specularTerm;",
             "outColor = vec4((diffuse + specular) * light * vVertexColor, 0.0);",
         ),
         "stock interaction fragment math",
     )
+
+    # r_normalizebumpmap renormalizes the stock decode; without it the
+    # DXT5/RXGB normal is used as sampled. r_correctspecular swaps the
+    # _specularTable ramp for pow( N.H, exponent ) * brightness on a per-pixel
+    # half angle (retail interactionNormBumpH.vfp).
+    stock = read("src/renderer/Vulkan/shaders/stock_specular.glsl")
+    require_order(
+        stock,
+        (
+            "vec3 localNormal = vec3(bumpSample.a, bumpSample.g, bumpSample.b) * 2.0 - 1.0;",
+            "return (StockSpecularFlags() & 2) != 0 ? SafeNormalize(localNormal) : localNormal;",
+            "if ((StockSpecularFlags() & 1) != 0) {",
+            "SafeNormalize(lightDir + viewDir)",
+            "return pow(ndoth, pc.d.y) * pc.d.z;",
+            "return texture(specularTableMap, vec2(specularDot, 0.5)).r;",
+        ),
+        "stock specular model",
+    )
+    for shader in ("interaction_shadow.frag", "interaction_shadow_point.frag"):
+        shadow = read(f"src/renderer/Vulkan/shaders/{shader}")
+        require_order(
+            shadow,
+            (
+                '#include "stock_specular.glsl"',
+                ": StockLocalNormal(bumpSample);",
+                "specularTerm = StockSpecularTerm(halfAngle, lightDir, SafeNormalize(vViewVector), localNormal) * 2.0;",
+            ),
+            f"{shader} stock specular model",
+        )
+    interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
+    for token in (
+        "static void VK_PackStockSpecularPush(",
+        "R_InteractionSpecularParms( din->specularExponent, din->specularBrightness, specularParms );",
+        "VK_PackStockSpecularPush( primitive.specularParms, plan.push.d );",
+    ):
+        require(interactions, token, "Vulkan stock specular push")
 
 
 def validate_interaction_decomposition() -> None:

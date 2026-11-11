@@ -169,35 +169,51 @@ static viewDef_t *R_PortalSubviewBySurface( drawSurf_t *drawSurf ) {
 	viewDef_t *parms = (viewDef_t *)R_FrameAlloc( sizeof( *parms ) );
 	*parms = *tr.viewDef;
 	parms->isSubview = true;
-	parms->isMirror = false;
+	// A portal is a rigid transform of the parent's axes, so the view keeps the
+	// parent's handedness: seen in a mirror it is still a mirrored view. Retail
+	// clears the flag here, which culls the wrong faces in that nested case.
+	parms->isMirror = tr.viewDef->isMirror;
 	parms->renderView.viewID = 0;
 	// Keep the retail-compatible unclipped workaround until mirror/portal clip
 	// behavior has been validated against the original renderer.
 	parms->numClipPlanes = 0;
 	R_TransformPortalSubview( portalEntity, *remoteRenderView, *parms );
 	R_SyncSubviewTime( parms );
+	R_ResetSubviewTemporalState( parms );
 	parms->initialViewAreaOrigin = remoteRenderView->vieworg;
 	return parms;
 }
 
+/*
+========================
+R_PortalSkyboxSubviewBySurface
+
+Prey's func_skybox_portal: the sky is a small scene elsewhere in the map, seen
+from the entity's remote camera with the viewer's own orientation. Retail
+PREY.exe (sub_4f02d0) builds this view for any view that sees a skyboxportal
+surface, a portal or mirror subview included; R_GenerateSubViews limits it to
+one per view.
+========================
+*/
 static viewDef_t *R_PortalSkyboxSubviewBySurface( drawSurf_t *drawSurf ) {
 	if ( drawSurf->space == NULL || drawSurf->space->entityDef == NULL ) {
 		return NULL;
 	}
 	const renderView_t *remoteRenderView = drawSurf->space->entityDef->parms.remoteRenderView;
-	if ( remoteRenderView == NULL || tr.SkyboxRenderedInFrame() || tr.viewDef->isSubview ) {
+	if ( remoteRenderView == NULL ) {
 		return NULL;
 	}
-	tr.RenderSkyboxInFrame();
 
 	viewDef_t *parms = (viewDef_t *)R_FrameAlloc( sizeof( *parms ) );
 	*parms = *tr.viewDef;
 	parms->isSubview = true;
-	parms->isMirror = false;
+	// same axes as the parent, so the same handedness (see the portal above)
+	parms->isMirror = tr.viewDef->isMirror;
 	parms->renderView.viewID = 0;
 	parms->renderView.vieworg = remoteRenderView->vieworg;
 	parms->renderView.viewaxis = tr.viewDef->renderView.viewaxis;
 	R_SyncSubviewTime( parms );
+	R_ResetSubviewTemporalState( parms );
 	parms->initialViewAreaOrigin = remoteRenderView->vieworg;
 	return parms;
 }
@@ -802,16 +818,26 @@ bool	R_GenerateSurfaceSubview( drawSurf_t *drawSurf ) {
 
 	scissor.Intersect( tr.viewDef->scissor );
 
-	if ( scissor.IsEmpty() ) {
-		// cropped out
+	const bool skyboxPortal = shader->GetSort() == SS_SUBVIEW
+		&& shader->GetSubviewClass() == SC_PORTAL_SKYBOX;
+
+	// cropped out; a skybox portal does not draw through its own rectangle
+	// (see below), so retail lets it through
+	if ( scissor.IsEmpty() && !skyboxPortal ) {
 		return false;
 	}
 
 	// see what kind of subview we are making
 	if ( shader->GetSort() != SS_SUBVIEW ) {
+		const float *regs = drawSurf->shaderRegisters;
 		const int stageCount = shader->GetNumStages();
 		for ( int i = 0 ; i < stageCount ; i++ ) {
 			const shaderStage_t	*stage = shader->GetStage( i );
+			// retail skips a stage its condition has switched off, so a screen
+			// that is turned off does not pay for its camera view
+			if ( regs != NULL && regs[ stage->conditionRegister ] == 0.0f ) {
+				continue;
+			}
 			switch ( stage->texture.dynamic ) {
 			case DI_REMOTE_RENDER:
 				R_RemoteRender( drawSurf, const_cast<textureStage_t *>(&stage->texture) );
@@ -855,7 +881,11 @@ bool	R_GenerateSurfaceSubview( drawSurf_t *drawSurf ) {
 		return false;
 	}
 
-	parms->scissor = scissor;
+	// One skybox view serves every skyboxportal surface the view can see, and a
+	// map caps its open sky with many of them. Retail therefore gives it the
+	// parent's whole scissor; cropped to the one surface that requested it, the
+	// sky reached only that surface's rectangle and the rest stayed black.
+	parms->scissor = skyboxPortal ? tr.viewDef->scissor : scissor;
 	parms->superView = tr.viewDef;
 	parms->subviewSurface = drawSurf;
 	if ( shader->GetSubviewClass() == SC_MIRROR ) {
@@ -875,33 +905,64 @@ generate it first.
 It is important to do this after all drawSurfs for the current
 view have been generated, because it may create a subview which
 would change tr.viewCount.
+
+Retail PREY.exe (sub_4f14e0) walks the surfaces three times, and the order is
+the order the views reach the framebuffer:
+
+  1. render-map stages (remote cameras, mirror and portal render maps), which
+     draw into a cropped corner and are captured to an image;
+  2. the skybox: the first skyboxportal surface that yields a view, and no
+     other, so the sky is drawn once and lies under everything else;
+  3. direct portals and mirrors, each over its own scissor rectangle.
+
+A single walk in sort order drew the sky after any portal sorted before it,
+and since the sky covers the whole view it wiped that portal out.
+
+As in retail, only render-map subviews count for the return value, which
+r_subviewOnly reads.
 ================
 */
-bool R_GenerateSubViews( void ) {
-	drawSurf_t		*drawSurf;
-	int				i;
-	bool			subviews;
-	const idMaterial		*shader;
+enum subviewPass_t {
+	SUBVIEW_PASS_RENDER_MAPS,
+	SUBVIEW_PASS_SKYBOX,
+	SUBVIEW_PASS_DIRECT
+};
 
+static subviewPass_t R_SubviewPassForMaterial( const idMaterial *shader ) {
+	if ( shader->GetSort() != SS_SUBVIEW ) {
+		return SUBVIEW_PASS_RENDER_MAPS;
+	}
+	return shader->GetSubviewClass() == SC_PORTAL_SKYBOX ? SUBVIEW_PASS_SKYBOX : SUBVIEW_PASS_DIRECT;
+}
+
+bool R_GenerateSubViews( void ) {
 	// for testing the performance hit
 	if ( r_skipSubviews.GetBool() ) {
 		return false;
 	}
 
-	subviews = false;
+	bool subviews = false;
 
-	// scan the surfaces until we either find a subview, or determine
-	// there are no more subview surfaces.
-	for ( i = 0 ; i < tr.viewDef->numDrawSurfs ; i++ ) {
-		drawSurf = tr.viewDef->drawSurfs[i];
-		shader = drawSurf->material;
+	// The list is captured first: the subviews rendered below replace
+	// tr.viewDef while they run, and restore it before returning.
+	drawSurf_t **drawSurfs = tr.viewDef->drawSurfs;
+	const int numDrawSurfs = tr.viewDef->numDrawSurfs;
 
-		if ( !shader || !shader->HasSubview() ) {
-			continue;
-		}
+	for ( int pass = SUBVIEW_PASS_RENDER_MAPS ; pass <= SUBVIEW_PASS_DIRECT ; pass++ ) {
+		for ( int i = 0 ; i < numDrawSurfs ; i++ ) {
+			drawSurf_t *drawSurf = drawSurfs[i];
+			const idMaterial *shader = drawSurf->material;
 
-		if ( R_GenerateSurfaceSubview( drawSurf ) ) {
-			subviews = true;
+			if ( !shader || !shader->HasSubview() || R_SubviewPassForMaterial( shader ) != pass ) {
+				continue;
+			}
+
+			const bool generated = R_GenerateSurfaceSubview( drawSurf );
+			if ( pass == SUBVIEW_PASS_RENDER_MAPS ) {
+				subviews |= generated;
+			} else if ( pass == SUBVIEW_PASS_SKYBOX && generated ) {
+				break;
+			}
 		}
 	}
 

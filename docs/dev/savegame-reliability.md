@@ -27,24 +27,75 @@ unified Prey GameLib owns the positional gameplay payload for both SP and MP.
 
 New gameplay payloads contain:
 
-- a format marker and version;
+- a format marker and payload version 5;
 - the engine build number;
 - a generated GameLib source-snapshot stamp and source-file count;
+- the wire-ABI stamp of the build that wrote the payload;
 - class-boundary sync markers;
 - a footer containing the final payload offset and object/script bookkeeping
-  counts.
+  counts;
+- the session's 16-byte integrity trailer (marker, version, protected length
+  and CRC-32), appended after the footer.
+
+The payload version is one number shared by the engine and the game library.
+The session frames the payload by it: from version 3 on it expects the wire-ABI
+stamp in the header and its own trailer after the footer, and the engine's GUI
+and sound records inside the payload use the encodings of that version. The
+session always writes the current framing, so the game library must stamp the
+version the session writes (`SESSION_OPENQ4_SAVEGAME_COMPATIBILITY_VERSION` in
+`src/framework/Session.cpp`, `OPENQ4_SAVEGAME_COMPATIBILITY_VERSION` in
+`src/game/gamesys/SaveGame.h`). When the two disagree, every staged save fails
+validation and none reaches disk: between the engine merge that brought in
+version 5 and the game library's move to it, the library still stamped
+version 2, and each save was rejected with `has invalid payload footer marker`.
+An upstream merge that raises the session's version needs the same change in
+the game library.
+
+Prey's game records are not portable. Bitfields, script storage and several
+structures are written as the compiler laid them out, so openPREY's version 5
+payload carries the exact stamp of the build that wrote it
+(`<os>-<compiler-abi>-<architecture>-<endian>-raw1`, for example
+`windows-msvcabi-x64-le-raw1`) instead of upstream's `le64-portable1`
+(`OPENQ4_SAVEGAME_GAME_RECORDS_ARE_PORTABLE` in
+`src/framework/SaveGameReleases.h`). A save loads only on the operating system,
+compiler ABI and architecture that wrote it. The engine and the game library
+each derive the stamp for themselves; if they ever disagreed on a platform,
+saves there would fail staged validation instead of being written unloadable.
 
 Save files are written to temporary paths and validated before the old save is
 backed up and the new group is committed. Loading performs the same payload
-preflight before `ExecuteMapChange`, so a truncated, stale, or source-incompatible
-payload cannot destroy the currently running map merely to report a compatibility
-error later.
+preflight before `ExecuteMapChange`, so a truncated or damaged payload, or one
+from another platform, cannot destroy the currently running map merely to
+report the error later.
 
-Legacy, unstamped payloads are accepted only when their build number exactly
-matches the running engine. Stamped payloads must match the format version, build,
-source stamp, source-file count, and footer structure. The source generator
-normalizes line endings before hashing, so equivalent Windows and Unix checkouts
-produce the same compatibility stamp.
+Two layers decide whether a payload loads:
+
+- The engine preflight, before map teardown, checks the payload version range,
+  the wire-ABI stamp, the trailer's length and CRC, and the footer. It records
+  build and source-snapshot differences but does not refuse on them.
+- The game library, once the saved map has loaded, requires its own payload
+  version, wire ABI, build number, source stamp and source-file count to match
+  exactly. On a mismatch it logs `Savegame payload is not compatible with this
+  openPREY build` and declines the restore, and the session starts the saved
+  map from its beginning with the save's persistent player data. A payload in
+  the earlier version 2 framing takes this path too: on Windows x64 it still
+  passes the engine preflight, which keeps upstream's version 2 reader, and the
+  game library then declines it.
+
+Checked on 10 November 2026 (Windows x64, build 2435) with variants of one
+fresh save: another platform's stamp, upstream's `le64-portable1` stamp and a
+flipped payload byte were each refused by the preflight with the running map
+left in place; the version 2 framing and a different build number each loaded
+the saved map and started it afresh.
+
+Unstamped payloads are accepted only when their build number exactly matches the
+running engine. The source generator normalizes line endings before hashing, so
+equivalent Windows and Unix checkouts produce the same compatibility stamp.
+
+[Savegame Compatibility Policy](savegame-compatibility-policy.md) is upstream
+openQ4's policy for its own save history. Its preflight mechanics apply here;
+its statements about portable version 5 saves and about reading versions 2 to 4
+describe openQ4's game libraries, not Prey's.
 
 ## Save Transaction and Crash Recovery
 
@@ -164,15 +215,18 @@ map teardown with the compatibility or integrity diagnostic.
 ## Compatibility and Residual Risk
 
 The gameplay payload remains a positional binary format. Sync markers and the
-footer make structural failures easier to reject and diagnose, but they are not a
-cryptographic whole-file integrity check. Source- or build-incompatible saves are
-intentionally rejected rather than guessed through; compatibility across arbitrary
-revisions is not promised.
+footer make structural failures easier to reject and diagnose, and the trailer's
+CRC-32 catches accidental damage; none of them is a cryptographic integrity
+check. Source- or build-incompatible saves are intentionally not restored rather
+than guessed through; compatibility across arbitrary revisions is not promised.
 
 Menu discovery validates the session header and aggregates saves from the active
 game directory, `basepr`, and the retail `base` directory. A save can therefore
-remain visible even when its gameplay payload is too old to load; selecting it
-produces a precise warning while the current map continues running.
+remain visible even when its gameplay payload cannot be restored. Selecting one
+that fails the engine preflight produces a precise warning while the current map
+continues running. Selecting one from another build of openPREY on the same
+platform passes the preflight, and the game library then starts its map afresh
+as described under [Save Pipeline](#save-pipeline).
 
 ## Validation
 
@@ -186,5 +240,7 @@ python tools/tests/savegame_durability.py
 
 Runtime validation should load the unified `game_<arch>` module, enter a real Prey
 map such as `game/roadhouse`, save, and load the newly written save. Confirm
-`Game Map Init SaveGame` without restore errors or sound assertions. A deliberately
-stale save should be rejected during engine preflight before game-map initialization.
+`Game Map Init SaveGame` without restore errors or sound assertions. A save with a
+damaged payload or another platform's stamp should be rejected during engine
+preflight, before game-map initialization; one stamped with another build should
+start its map afresh.

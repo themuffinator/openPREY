@@ -157,8 +157,8 @@ idCVar com_productionMode("com_productionMode", "0", CVAR_SYSTEM | CVAR_BOOL, "0
 idCVar gui_filter_pb( "gui_filter_pb", "0", CVAR_ARCHIVE | CVAR_SYSTEM | CVAR_BOOL, "filter PunkBuster-protected servers in browser" );
 idCVar g_subtitles( "g_subtitles", "1", CVAR_ARCHIVE | CVAR_GAME | CVAR_BOOL, "enable subtitle display" );
 idCVar com_profanity( "com_profanity", "0", CVAR_ARCHIVE | CVAR_SYSTEM | CVAR_BOOL, "0 censors profanity; 1 plays and displays uncensored dialogue" );
-idCVar r_correctspecular( "r_correctspecular", "1", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_BOOL, "toggle corrected specular calculations" );
-idCVar r_normalizebumpmap( "r_normalizebumpmap", "0", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_BOOL, "toggle bump-map normalization" );
+// r_correctspecular and r_normalizebumpmap drive the renderer's stock
+// interaction and are registered there (ClassicInteractionDomain.cpp).
 idCVar r_lowParticleDetail( "r_lowParticleDetail", "0", CVAR_ARCHIVE | CVAR_RENDERER | CVAR_BOOL, "reduce particle quality when non-zero" );
 idCVar s_musicvolume_dB( "s_musicvolume_dB", "-6", CVAR_ARCHIVE | CVAR_SOUND | CVAR_FLOAT, "music volume in decibels", -60.0f, 0.0f );
 idCVar s_reverse( "s_reverse", "0", CVAR_ARCHIVE | CVAR_SOUND | CVAR_BOOL, "reverse stereo channels" );

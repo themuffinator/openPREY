@@ -6,9 +6,12 @@
 // Quake 4 specific comes across unchanged; listed here so a later divergence
 // shows up as a diff rather than as a defect:
 //
-//   - bump decode: alpha=x, green=y, z rebuilt, no renormalization
+//   - bump decode: alpha=x, green=y, z rebuilt; renormalized only with
+//     r_normalizebumpmap (uSpecularParams.w)
 //   - specular through the REAL _specularTable ramp, x2 because the CPU-side
-//     ARB2 path doubles the specular env constant
+//     ARB2 path doubles the specular env constant; with r_correctspecular
+//     (uSpecularParams.z) retail Prey's pow( N.H, exponent ) * brightness
+//     from the material's specularExp instead, on a per-pixel half angle
 //   - projected light falloff and light projection sampled with textureProj
 //   - direction vectors normalized in-shader; no normalization cube map
 //   - additive ONE:ONE, alpha written as 0 like the GL reference
@@ -41,6 +44,9 @@ uniform sampler2D uSpecularMap;
 
 uniform vec4 uDiffuseColor;
 uniform vec4 uSpecularColor;
+// R_InteractionSpecularParms: x exponent, y brightness, z r_correctspecular,
+// w r_normalizebumpmap
+uniform vec4 uSpecularParams;
 
 #ifdef GLESD3_AMBIENT
 uniform vec3 uAmbientDir;
@@ -79,11 +85,14 @@ void main() {
     //
     // A normal quantised to exactly Z = 0 may decode a hair below zero and
     // take the rebuild branch; sqrt() returns ~0 there, which is the same
-    // answer. Still no renormalization on either side.
+    // answer. Neither side renormalizes unless r_normalizebumpmap asks.
     vec2 localNormalXY = vec2(bumpSample.a, bumpSample.g) * 2.0 - 1.0;
     float storedZ = bumpSample.b * 2.0 - 1.0;
     float rebuiltZ = sqrt(max(1.0 - dot(localNormalXY, localNormalXY), 0.0));
     vec3 localNormal = vec3(localNormalXY, storedZ < 0.0 ? rebuiltZ : storedZ);
+    if (uSpecularParams.w > 0.5) {
+        localNormal = SafeNormalize(localNormal);
+    }
 
     // An ambient light lights from a constant direction instead of from the
     // light origin, which is what keeps unlit corners off pure black. The two
@@ -108,9 +117,17 @@ void main() {
     // zero -- compiled out here rather than sampled and multiplied away
     vec3 specular = vec3(0.0);
 #else
-    vec3 halfAngle = SafeNormalize(vHalfAngleVector);
-    float specularDot = clamp(dot(halfAngle, localNormal), 0.0, 1.0);
-    float specularTerm = texture(uSpecularTableMap, vec2(specularDot, 0.5)).r * 2.0;
+    float specularTerm;
+    if (uSpecularParams.z > 0.5) {
+        // retail interactionNormBumpH.vfp: half angle rebuilt per pixel
+        vec3 halfAngle = SafeNormalize(lightDir + SafeNormalize(vViewVector));
+        float ndoth = max(clamp(dot(halfAngle, localNormal), 0.0, 1.0), 1.0e-6);
+        specularTerm = pow(ndoth, uSpecularParams.x) * uSpecularParams.y * 2.0;
+    } else {
+        vec3 halfAngle = SafeNormalize(vHalfAngleVector);
+        float specularDot = clamp(dot(halfAngle, localNormal), 0.0, 1.0);
+        specularTerm = texture(uSpecularTableMap, vec2(specularDot, 0.5)).r * 2.0;
+    }
     vec3 specular = texture(uSpecularMap, vSpecularTexCoord).rgb * uSpecularColor.rgb * specularTerm;
 #endif
 

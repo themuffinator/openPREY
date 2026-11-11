@@ -31,9 +31,11 @@ If you have questions concerning this license or the applicable additional terms
 #include "SoundSettings.h"
 #include "SoundMemoryTrim.h"
 #include "VoiceChat.h"
+#include "OpenAL/AL_LoadingMusic.h"
 #include "../framework/Session_local.h"
 
 extern idCVar g_subtitles;
+extern idCVar s_directStereo;
 extern idCVar s_volume_dB;
 extern idCVar s_musicvolume_dB;
 
@@ -48,6 +50,7 @@ idCVar ui_subtitles( "ui_subtitles", "0", CVAR_GUI | CVAR_ARCHIVE | CVAR_BOOL | 
 idCVar ui_subtitleScale( "ui_subtitleScale", "1", CVAR_GUI | CVAR_ARCHIVE | CVAR_FLOAT | CVAR_NOCHEAT, "subtitle text size", 1.0f, 2.0f );
 idCVar ui_subtitleBackground( "ui_subtitleBackground", "0.6", CVAR_GUI | CVAR_ARCHIVE | CVAR_FLOAT | CVAR_NOCHEAT, "subtitle backing opacity", 0.0f, 1.0f );
 idCVar ui_subtitleSpeakers( "ui_subtitleSpeakers", "1", CVAR_GUI | CVAR_ARCHIVE | CVAR_BOOL | CVAR_NOCHEAT, "show available subtitle speaker names" );
+idCVar s_logSubtitles( "s_logSubtitles", "0", CVAR_SOUND | CVAR_BOOL, "print SOUND_SUBTITLE whenever the Prey sound-shader subtitle queue changes: sound time, shader, cue, channel start and whether a hardware voice is playing it" );
 idCVar s_speakerFraction( "s_speakerFraction", "0.65", CVAR_ARCHIVE | CVAR_FLOAT, "speaker attenuation fraction" );
 idCVar s_radioChatterFraction( "s_radioChatterFraction", "0.9", CVAR_ARCHIVE | CVAR_FLOAT, "radio chatter attenuation fraction" );
 idCVar s_frequencyShift( "s_frequencyShift", "1", CVAR_BOOL, "enable sound shader frequency shift playback" );
@@ -911,6 +914,95 @@ void idSoundSystemLocal::Render()
 	// The sound system doesn't use game time or anything like that because the sounds are decoded in real time.
 	soundTime = Sys_Milliseconds();
 	settingsUpdate.completed = true;
+
+	if( SoundLoadingMusic_IsActive() )
+	{
+		SoundLoadingMusic_SetGain( LoadingMusicGain() );
+	}
+}
+
+/*
+========================
+idSoundSystemLocal::LoadingMusicGain
+
+The gain a global menu-world channel playing the shader would get (see
+idSoundChannel::UpdateVolume), so the load music keeps the level it had there.
+========================
+*/
+float idSoundSystemLocal::LoadingMusicGain() const
+{
+	const float masterVolume = idMath::ClampFloat( 0.0f, 16.0f, FLOAT_IS_NAN( s_volume.GetFloat() ) ? 0.0f : s_volume.GetFloat() );
+	float gain = loadingMusicParms.volume;
+	const bool music = ( loadingMusicParms.soundShaderFlags & SSF_MUSIC ) != 0 || loadingMusicParms.soundClass == SOUND_CLASS_MUSICAL;
+	if( music )
+	{
+		gain *= musicMuted ? 0.0f : idMath::ClampFloat( 0.0f, 1.0f, s_musicVolume.GetFloat() );
+	}
+	gain = FLOAT_IS_NAN( gain ) ? 0.0f : idMath::ClampFloat( 0.0f, 16.0f, gain );
+	return idMath::ClampFloat( 0.0f, 16.0f, gain * masterVolume );
+}
+
+/*
+========================
+idSoundSystemLocal::StartLoadingMusic
+========================
+*/
+bool idSoundSystemLocal::StartLoadingMusic( const char* shaderName )
+{
+	StopLoadingMusic();
+	if( shaderName == NULL || shaderName[0] == '\0' || s_noSound.GetBool() || hardware.GetOpenALContext() == NULL )
+	{
+		return false;
+	}
+	const idSoundShader* shader = declManager->FindSound( shaderName, false );
+	if( shader == NULL || shader->GetNumEntries() <= 0 )
+	{
+		return false;
+	}
+
+	// The same diversity StartSound draws: it picks the entry and, for a loop,
+	// the random start position retail gives every looping shader.
+	const float diversity = random.RandomFloat();
+	const int numEntries = shader->GetNumEntries();
+	const int choice = idMath::ClampInt( 0, numEntries - 1, static_cast<int>( diversity * numEntries ) );
+	if( shader->GetLeadin( choice ) != NULL )
+	{
+		// Leadin-then-loop pairs keep the world channel's sequencing.
+		return false;
+	}
+	idSoundSample* sample = shader->GetEntry( choice );
+	if( sample == NULL )
+	{
+		return false;
+	}
+	if( !sample->IsLoaded() )
+	{
+		sample->LoadResource();
+	}
+	if( !sample->IsLoaded() || sample->IsDefault() || !sample->IsStreamed() )
+	{
+		return false;
+	}
+
+	loadingMusicParms = *shader->GetParms();
+	const bool looping = ( loadingMusicParms.soundShaderFlags & SSF_LOOPING ) != 0;
+	const float startFraction = ( looping && ( loadingMusicParms.soundShaderFlags & SSF_NO_RANDOMSTART ) == 0 ) ? diversity : 0.0f;
+	ALint directChannelsMode = -1;
+	if( hardware.HasDirectChannels() )
+	{
+		directChannelsMode = s_directStereo.GetBool() ? hardware.GetDirectChannelsMode() : AL_FALSE;
+	}
+	return SoundLoadingMusic_Start( sample->GetStreamName(), LoadingMusicGain(), looping, startFraction, directChannelsMode );
+}
+
+/*
+========================
+idSoundSystemLocal::StopLoadingMusic
+========================
+*/
+void idSoundSystemLocal::StopLoadingMusic()
+{
+	SoundLoadingMusic_Stop();
 }
 
 /*
@@ -1429,18 +1521,23 @@ void idSoundSystemLocal::PrintMemInfo( MemInfo_t* mi )
 {
 }
 
+// Subtitle table handles are 1-based, as in retail Prey.exe (the lookup returns
+// position + 1): 0 means "no subtitles". soundShaderParms_t::subIndex is part of
+// the game ABI and the game zero-fills its per-entity override parms, so a
+// zero handle must never name a table, or every entity sound would inherit the
+// first parsed shader's transcript.
 int idSoundSystemLocal::GetSubtitleIndex( const char* soundName )
 {
 	for( int i = 0; i < soundSubtitleList.Num(); i++ )
 	{
 		if( idStr::Icmp( soundName, soundSubtitleList[i].soundName ) == 0 )
 		{
-			return i;
+			return i + 1;
 		}
 	}
 	soundSubtitleList_t list;
 	list.soundName = soundName != NULL ? soundName : "";
-	return soundSubtitleList.Append( list );
+	return soundSubtitleList.Append( list ) + 1;
 }
 
 void idSoundSystemLocal::SetSubtitleData( int subIndex, int subNum, const char* subText, float subTime, int subChannel )
@@ -1486,7 +1583,7 @@ soundSub_t* idSoundSystemLocal::GetSubtitle( int subIndex, int subNum )
 
 soundSubtitleList_t* idSoundSystemLocal::GetSubtitleList( int subIndex )
 {
-	return subIndex >= 0 && subIndex < soundSubtitleList.Num() ? &soundSubtitleList[subIndex] : NULL;
+	return subIndex > 0 && subIndex <= soundSubtitleList.Num() ? &soundSubtitleList[subIndex - 1] : NULL;
 }
 
 bool idSoundSystemLocal::SubtitleQueueContains( const soundSub_t* subtitle ) const
@@ -1543,7 +1640,7 @@ bool idSoundSystemLocal::AppendSubtitleForChannel( const idSoundChannel* channel
 	const bool voiceSubtitleChannel = channel != NULL &&
 		( channel->IsVoicePlayback() || channel->parms.soundClass == SOUNDCLASS_VOICE );
 	if( channel == NULL || channel->soundShader == NULL || channel->leadinSample == NULL ||
-		channel->parms.subIndex < 0 || channel->IsLooping() ||
+		channel->parms.subIndex <= 0 || channel->IsLooping() ||
 		( !voiceSubtitleChannel && DBtoLinearClamped( channel->volumeDB ) <= SOUND_SUBTITLE_AUDIBILITY_EPSILON ) )
 	{
 		return false;
@@ -1556,22 +1653,36 @@ bool idSoundSystemLocal::AppendSubtitleForChannel( const idSoundChannel* channel
 
 	const int currentTime = currentSoundWorld != NULL ? currentSoundWorld->GetSoundTime() : soundTime;
 	const float playedSeconds = Max( 0, currentTime - channel->startTime ) * 0.001f;
-	const soundSub_t* active = NULL;
-	int endTime = channel->endTime > 0 ? channel->endTime : channel->startTime + channel->leadinSample->LengthInMsec();
+	int activeIndex = -1;
 	for( int i = 0; i < list->subList.Num(); i++ )
 	{
-		const soundSub_t& subtitle = list->subList[i];
-		if( subtitle.subTime > playedSeconds )
+		if( list->subList[i].subTime > playedSeconds )
 		{
 			break;
 		}
-		active = &subtitle;
-		if( i + 1 < list->subList.Num() )
-		{
-			endTime = channel->startTime + idMath::FtoiFast( list->subList[i + 1].subTime * 1000.0f );
-		}
+		activeIndex = i;
 	}
-	if( active == NULL )
+	if( activeIndex < 0 )
+	{
+		return false;
+	}
+	const soundSub_t* active = &list->subList[activeIndex];
+	// A cue lasts until the next cue starts; the last one lasts as long as the
+	// channel. (This used to keep the previous cue's end for the last cue, so a
+	// shader's final line expired the moment it began.)
+	int endTime;
+	if( activeIndex + 1 < list->subList.Num() )
+	{
+		endTime = channel->startTime + idMath::FtoiFast( list->subList[activeIndex + 1].subTime * 1000.0f );
+	}
+	else
+	{
+		endTime = channel->endTime != 0 ? channel->endTime : channel->startTime + channel->leadinSample->LengthInMsec();
+	}
+	// A cue whose window has closed (a stopped channel marks endTime 1) must not
+	// be queued: the prune that follows would drop it and the next collection
+	// re-add it, flickering the caption every frame.
+	if( endTime <= currentTime )
 	{
 		return false;
 	}
@@ -1684,9 +1795,23 @@ bool idSoundSystemLocal::SyncSubtitleQueues()
 		return false;
 	}
 	sf_subtitleQueue.Clear();
+	const int logTime = currentSoundWorld != NULL ? currentSoundWorld->GetSoundTime() : soundTime;
+	if( s_logSubtitles.GetBool() && sb_subtitleQueue.Num() == 0 )
+	{
+		idLib::Printf( "SOUND_SUBTITLE time=%d clear\n", logTime );
+	}
 	for( int i = 0; i < sb_subtitleQueue.Num(); i++ )
 	{
-		sf_subtitleQueue.Append( sb_subtitleQueue[i].subtitle );
+		const queuedSubtitle_t& queued = sb_subtitleQueue[i];
+		sf_subtitleQueue.Append( queued.subtitle );
+		if( s_logSubtitles.GetBool() && queued.channel != NULL && queued.subtitle != NULL )
+		{
+			const idSoundChannel* channel = queued.channel;
+			idLib::Printf( "SOUND_SUBTITLE time=%d shader=%s sub=%d at=%.2f key=%s start=%d end=%d voice=%d volumeDB=%.1f\n",
+				logTime, channel->soundShader != NULL ? channel->soundShader->GetName() : "<none>", queued.subNum,
+				queued.subtitle->subTime, queued.subtitle->subText.c_str(), channel->startTime, queued.endTime,
+				channel->hardwareVoice != NULL ? 1 : 0, channel->volumeDB );
+		}
 	}
 	subtitleQueueChanged = false;
 	return true;

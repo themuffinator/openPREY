@@ -621,6 +621,7 @@ protected:
 	void					Event_CreateMissile( const char *jointname );
 	virtual		// HUMANHEAD: Made virtual	
 	void					Event_AttackMissile( const char *jointname, const idDict *projDef = NULL, int boneDir = 0); 		// HUMANHEAD added projdef as param
+	void					Event_ScriptAttackMissile( const char *jointname );	// openPREY: script binding for "attackMissile" ('s')
 	void					Event_FireMissileAtTarget( const char *jointname, const char *targetname );
 	void					Event_LaunchMissile( const idVec3 &muzzle, const idAngles &ang );
 	void					Event_AttackMelee( const char *meleeDefName );

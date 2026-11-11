@@ -12,10 +12,18 @@ Save game related helper classes.
 
 const int INITIAL_RELEASE_BUILD_NUMBER = 1262;
 const int OPENQ4_SAVEGAME_COMPATIBILITY_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'S' << 24 );
-const int OPENQ4_SAVEGAME_COMPATIBILITY_VERSION = 2;
+// The payload version is shared with the engine session, which frames the
+// payload and writes the GUI and sound records inside it. Version 5 is the one
+// the session writes: its header ends with a wire-ABI stamp, the session appends
+// an integrity trailer after the footer, and the engine's own records use that
+// version's encodings. Prey's game records keep their native layout, so the
+// stamp names the build family that wrote them (see SaveGame.cpp).
+const int OPENQ4_SAVEGAME_COMPATIBILITY_VERSION = 5;
 const int OPENQ4_SAVEGAME_SYNC_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'Y' << 24 );
 const int OPENQ4_SAVEGAME_FOOTER_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'F' << 24 );
 const int OPENQ4_SAVEGAME_FOOTER_VERSION = 1;
+const int OPENQ4_SAVEGAME_INTEGRITY_MAGIC = 'O' | ( 'Q' << 8 ) | ( '4' << 16 ) | ( 'I' << 24 );
+const int OPENQ4_SAVEGAME_INTEGRITY_VERSION = 1;
 
 #if defined( __has_include )
 #if __has_include( "openq4_savegame_compat_generated.h" )

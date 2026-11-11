@@ -1081,7 +1081,13 @@ idThread::Event_WaitForSilence
 ================
 */
 void idThread::Event_WaitForSilence( idEntity *ent, float plusOrMinusSeconds ) {
-	if ( ent ) {
+	// Retail only waits on entities that respond to the silence callback:
+	// hhAnimatedEntity and its subclasses, which include the player, every actor
+	// (idAFEntity_Base derives from hhAnimatedEntity) and AF attachments such as
+	// heads. Any other entity returns immediately. Voice tracking now lives on
+	// idEntity, but keep the retail gate so a wait on an entity that can never
+	// speak does not stall the thread forever.
+	if ( ent && ent->RespondsTo( EV_Thread_SetSilenceCallback ) ) {
 		if ( ent->SetSilenceCallbackForCurrentThread( plusOrMinusSeconds ) ) {
 			Pause();
 			waitingFor = ent->entityNumber;

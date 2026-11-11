@@ -1839,6 +1839,7 @@ typedef struct {
 	GLint			materialEnhanced;
 	GLint			materialNormalScale;
 	GLint			materialSpecularBoost;
+	GLint			stockSpecularParams;
 	GLint			materialFresnel;
 	GLint			shadowTexelSize;
 	GLint			shadowBias;
@@ -1961,6 +1962,7 @@ typedef struct {
 	GLint			materialEnhanced;
 	GLint			materialNormalScale;
 	GLint			materialSpecularBoost;
+	GLint			stockSpecularParams;
 	GLint			materialFresnel;
 	GLint			shadowBias;
 	GLint			shadowNormalBias;
@@ -2015,6 +2017,7 @@ typedef struct {
 	GLint			flatDiffuseParams;
 	GLint			materialNormalScale;
 	GLint			materialSpecularBoost;
+	GLint			stockSpecularParams;
 	GLint			materialFresnel;
 	GLint			stockInteraction;
 	GLint			ambientLight;
@@ -5417,6 +5420,7 @@ static bool RB_MaterialInteractionLoadProgram( void ) {
 	g_materialInteractionProgram.flatDiffuseParams = glGetUniformLocationARB( programObject, "uFlatDiffuseParams" );
 	g_materialInteractionProgram.materialNormalScale = glGetUniformLocationARB( programObject, "uMaterialNormalScale" );
 	g_materialInteractionProgram.materialSpecularBoost = glGetUniformLocationARB( programObject, "uMaterialSpecularBoost" );
+	g_materialInteractionProgram.stockSpecularParams = glGetUniformLocationARB( programObject, "uStockSpecularParams" );
 	g_materialInteractionProgram.materialFresnel = glGetUniformLocationARB( programObject, "uMaterialFresnel" );
 	g_materialInteractionProgram.celParams = glGetUniformLocationARB( programObject, "uCelParams" );
 	g_materialInteractionProgram.stockInteraction = glGetUniformLocationARB( programObject, "uStockInteraction" );
@@ -5550,6 +5554,7 @@ static const char *programBaseName = "glprogs/shadow_interaction";
 	g_shadowMapProgram.materialEnhanced = glGetUniformLocationARB( programObject, "uMaterialEnhanced" );
 	g_shadowMapProgram.materialNormalScale = glGetUniformLocationARB( programObject, "uMaterialNormalScale" );
 	g_shadowMapProgram.materialSpecularBoost = glGetUniformLocationARB( programObject, "uMaterialSpecularBoost" );
+	g_shadowMapProgram.stockSpecularParams = glGetUniformLocationARB( programObject, "uStockSpecularParams" );
 	g_shadowMapProgram.materialFresnel = glGetUniformLocationARB( programObject, "uMaterialFresnel" );
 	g_shadowMapProgram.celParams = glGetUniformLocationARB( programObject, "uCelParams" );
 	g_shadowMapProgram.shadowTexelSize = glGetUniformLocationARB( programObject, "uShadowTexelSize" );
@@ -5946,6 +5951,7 @@ static const char *programBaseName = "glprogs/shadow_point_interaction";
 	g_pointShadowMapProgram.materialEnhanced = glGetUniformLocationARB( programObject, "uMaterialEnhanced" );
 	g_pointShadowMapProgram.materialNormalScale = glGetUniformLocationARB( programObject, "uMaterialNormalScale" );
 	g_pointShadowMapProgram.materialSpecularBoost = glGetUniformLocationARB( programObject, "uMaterialSpecularBoost" );
+	g_pointShadowMapProgram.stockSpecularParams = glGetUniformLocationARB( programObject, "uStockSpecularParams" );
 	g_pointShadowMapProgram.materialFresnel = glGetUniformLocationARB( programObject, "uMaterialFresnel" );
 	g_pointShadowMapProgram.celParams = glGetUniformLocationARB( programObject, "uCelParams" );
 	g_pointShadowMapProgram.shadowBias = glGetUniformLocationARB( programObject, "uShadowBias" );
@@ -9493,6 +9499,7 @@ enum {
 	GLSL_INTERACTION_CACHE_MODEL_MATRIX_ROW_2,
 	GLSL_INTERACTION_CACHE_GLOBAL_LIGHT_ORIGIN,
 	GLSL_INTERACTION_CACHE_VERTEX_COLOR_PARAMS,
+	GLSL_INTERACTION_CACHE_STOCK_SPECULAR_PARAMS,
 	GLSL_INTERACTION_CACHE_SLOTS
 };
 typedef struct {
@@ -9603,6 +9610,14 @@ static void RB_MaterialInteractionSetEnhancementUniforms( const GLint normalScal
 	}
 }
 
+// uStockSpecularParams: retail Prey's stock specular model for this
+// interaction (R_InteractionSpecularParms); the enhanced branches ignore it
+static void RB_GLSLSetStockSpecularParams( const GLint location, const drawInteraction_t *din ) {
+	float parms[4];
+	R_InteractionSpecularParms( din->specularExponent, din->specularBrightness, parms );
+	RB_GLSLInteractionUniform4fv( location, GLSL_INTERACTION_CACHE_STOCK_SPECULAR_PARAMS, parms );
+}
+
 static void RB_GLSLMaterial_DrawInteraction( const drawInteraction_t *din ) {
 	RB_GLSLInteractionUniform4fv( g_materialInteractionProgram.localLightOrigin, GLSL_INTERACTION_CACHE_LOCAL_LIGHT_ORIGIN, din->localLightOrigin.ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_materialInteractionProgram.localViewOrigin, GLSL_INTERACTION_CACHE_LOCAL_VIEW_ORIGIN, din->localViewOrigin.ToFloatPtr() );
@@ -9618,6 +9633,7 @@ static void RB_GLSLMaterial_DrawInteraction( const drawInteraction_t *din ) {
 	RB_GLSLInteractionUniform4fv( g_materialInteractionProgram.specularMatrixT, GLSL_INTERACTION_CACHE_SPECULAR_MATRIX_T, din->specularMatrix[1].ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_materialInteractionProgram.diffuseColor, GLSL_INTERACTION_CACHE_DIFFUSE_COLOR, din->diffuseColor.ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_materialInteractionProgram.specularColor, GLSL_INTERACTION_CACHE_SPECULAR_COLOR, din->specularColor.ToFloatPtr() );
+	RB_GLSLSetStockSpecularParams( g_materialInteractionProgram.stockSpecularParams, din );
 	if ( g_materialInteractionProgram.flatDiffuseParams >= 0 ) {
 		glUniform4fvARB( g_materialInteractionProgram.flatDiffuseParams, 1, din->flatDiffuseParams.ToFloatPtr() );
 	}
@@ -9742,6 +9758,7 @@ static void RB_GLSLShadowMap_DrawInteraction( const drawInteraction_t *din ) {
 	RB_GLSLInteractionUniform4fv( g_shadowMapProgram.specularMatrixT, GLSL_INTERACTION_CACHE_SPECULAR_MATRIX_T, din->specularMatrix[1].ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_shadowMapProgram.diffuseColor, GLSL_INTERACTION_CACHE_DIFFUSE_COLOR, din->diffuseColor.ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_shadowMapProgram.specularColor, GLSL_INTERACTION_CACHE_SPECULAR_COLOR, din->specularColor.ToFloatPtr() );
+	RB_GLSLSetStockSpecularParams( g_shadowMapProgram.stockSpecularParams, din );
 	if ( g_shadowMapProgram.flatDiffuseParams >= 0 ) {
 		glUniform4fvARB( g_shadowMapProgram.flatDiffuseParams, 1, din->flatDiffuseParams.ToFloatPtr() );
 	}
@@ -9833,6 +9850,7 @@ static void RB_GLSLPointShadowMap_DrawInteraction( const drawInteraction_t *din 
 	// re-upload here (and its sqrt in R_ShadowMapPointFarDistance) was redundant.
 	RB_GLSLInteractionUniform4fv( g_pointShadowMapProgram.diffuseColor, GLSL_INTERACTION_CACHE_DIFFUSE_COLOR, din->diffuseColor.ToFloatPtr() );
 	RB_GLSLInteractionUniform4fv( g_pointShadowMapProgram.specularColor, GLSL_INTERACTION_CACHE_SPECULAR_COLOR, din->specularColor.ToFloatPtr() );
+	RB_GLSLSetStockSpecularParams( g_pointShadowMapProgram.stockSpecularParams, din );
 	if ( g_pointShadowMapProgram.flatDiffuseParams >= 0 ) {
 		glUniform4fvARB( g_pointShadowMapProgram.flatDiffuseParams, 1, din->flatDiffuseParams.ToFloatPtr() );
 	}
@@ -11124,6 +11142,7 @@ static void RB_ARB2_CreateCustomGLSLDrawInteractionsForSurface( const drawSurf_t
 			RB_ApplyFlatDiffuseStage( surf, &flatDiffuseImage,
 				inter.diffuseColor.ToFloatPtr(), inter.flatDiffuseParams );
 			inter.vertexColor = surfaceStage->vertexColor;
+			R_SetInteractionSpecularStage( &inter, surfaceStage );
 
 			RB_ARB2_DrawCustomGLSLInteractionStage( surfaceStage, surfaceRegs, &inter );
 		}
@@ -12985,6 +13004,11 @@ void	RB_ARB2_DrawInteraction( const drawInteraction_t *din ) {
 	RB_ARB2_SetVertexEnvParm( interactionParamBase + PP_DIFFUSE_MATRIX_T, din->diffuseMatrix[1].ToFloatPtr() );
 	RB_ARB2_SetVertexEnvParm( interactionParamBase + PP_SPECULAR_MATRIX_S, din->specularMatrix[0].ToFloatPtr() );
 	RB_ARB2_SetVertexEnvParm( interactionParamBase + PP_SPECULAR_MATRIX_T, din->specularMatrix[1].ToFloatPtr() );
+
+	// retail Prey's specular model selection, see R_InteractionSpecularParms
+	float specularParms[4];
+	R_InteractionSpecularParms( din->specularExponent, din->specularBrightness, specularParms );
+	RB_ARB2_SetFragmentEnvParm( 2, specularParms );
 
 	// testing fragment based normal mapping
 	if ( r_testARBProgram.GetBool() ) {
@@ -16280,6 +16304,7 @@ static void RB_SharedWorldInteractionGLLoadPrimitiveParameters(
 	};
 	RB_ARB2_SetFragmentEnvParm( 0, primitive.diffuseColor );
 	RB_ARB2_SetFragmentEnvParm( 1, specularColorX2 );
+	RB_ARB2_SetFragmentEnvParm( 2, primitive.specularParms );
 }
 
 static void RB_SharedWorldInteractionGLBeginInteractionState( void ) {

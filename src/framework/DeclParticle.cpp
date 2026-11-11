@@ -152,6 +152,11 @@ void idDeclParticle::GetStageBounds( idParticleStage *stage ) {
 idDeclParticle::ParseParms
 
 Parses a variable length list of parms on one line
+
+The lexer returns a leading minus sign as its own punctuation token. Retail
+Prey joins it with the number that follows, so shipped stages such as
+"distribution sphere 0.000 -1.000 -1.000" keep their signed values instead of
+overflowing the parm array and defaulting the whole particle.
 ================
 */
 void idDeclParticle::ParseParms( idLexer &src, float *parms, int maxParms ) {
@@ -166,6 +171,14 @@ void idDeclParticle::ParseParms( idLexer &src, float *parms, int maxParms ) {
 		if ( count == maxParms ) {
 			src.Error( "too many parms on line" );
 			return;
+		}
+		if ( token == "-" ) {
+			idToken number;
+			if ( !src.ReadTokenOnLine( &number ) ) {
+				src.Error( "no number after minus sign" );
+				return;
+			}
+			token = "-" + number;
 		}
 		token.StripQuotes();
 		parms[count] = atof( token );

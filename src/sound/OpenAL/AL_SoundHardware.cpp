@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "../snd_local.h"
 #include "../VoiceChat.h"
+#include "AL_LoadingMusic.h"
 #include "../SoundSettings.h"
 #if defined(USE_DOOMCLASSIC)
 	#include "../../../doomclassic/doom/i_sound.h"
@@ -2118,6 +2119,8 @@ void idSoundHardware_OpenAL::Shutdown()
 {
 	// Closing a paused device releases it; never reuse its extension pointer.
 	deviceResume = NULL;
+	// Its thread queues buffers on a source of this context.
+	SoundLoadingMusic_Stop();
 	SoundVoiceChat_Shutdown();
 	SoundSettings_DeviceDestroyed();
 	EndDeferredUpdates();

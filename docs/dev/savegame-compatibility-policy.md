@@ -2,6 +2,12 @@
 
 > **Development status:** This document describes the current source tree and its evidence, not the contents of the latest available 0.13.2 package. The 0.14.0 release was withdrawn. See [release status](../user/release-status.md).
 
+> **openPREY:** this is upstream openQ4's policy for its own save history, kept
+> for the engine preflight it describes. Prey saves follow
+> [Savegame Reliability](savegame-reliability.md#save-pipeline): payload version
+> 5 with the writing build's exact `raw1` stamp, restored only by the same build
+> of openPREY on the same platform.
+
 This policy defines which openQ4 single-player saves the current runtime may
 load. Reliability mechanisms and implementation detail are documented in
 [Savegame Reliability](savegame-reliability.md).

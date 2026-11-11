@@ -15,7 +15,7 @@ development-only fixture instead of shipping in `pak0.pk4`. Those guards are cov
 the packaging and staged-payload validators. A final clean-log Roadhouse audit then fixed
 the missing autosave label string, marked pre-map loading-music decl reads as legitimate
 level-load media, and repaired the renderer gameplay benchmark harness so it uses
-`g_skipCinematics` plus `exec_savepath` instead of non-existent autoexec cvars. The
+`g_autoSkipCinematics` plus `exec_savepath` instead of non-existent autoexec cvars. The
 supporting materials are six subsystem
 catalogs (137 dispositioned changes), a
 game/engine interface map, an upstream architecture survey, a port-history narrative, and a
@@ -126,7 +126,7 @@ upstream-first because they are pure Doom-3-era restorations with no Prey coupli
 | D7 | Game-dir name | **Executed:** `basepr` is the sole openPREY runtime namespace. Repo-authored runtime content is assembled from `content/basepr/`, and the unified game module installs beneath `.install/basepr/`. |
 | D8 | CI/release | **Executed for active validation and portable packaging:** `openprey-validation.yml` carries the current cross-platform validation architecture. The Windows x64 archive was produced, inspected, and launched successfully in isolation. Inherited release/signing/manual-publish lanes that still encode OpenQ4 or split-module assumptions are deliberately false-gated and remain a release-lane deferral. |
 | D9 | MVD / bots / repeater | **Executed as fixed compile-time gates:** `OPENPREY_ENABLE_MVD`, `OPENPREY_ENABLE_BOTS`, and `OPENPREY_ENABLE_REPEATER` are `0`; guarded sites carry `OPENPREY-GATED(D9)` markers and entry points are inert. Re-enablement remains design work against Prey's v7 API, not a hidden runtime option. |
-| D10 | TTF fonts | **Executed with bitmap-first behavior:** `r_useTrueTypeFonts` defaults to `0`; the retail bitmap-font spline path is implemented. The TTF spline variant explicitly no-ops/warns and remains deferred until focused credits-parity work is complete. |
+| D10 | TTF fonts | **Executed, TTF-first:** `r_useTrueTypeFonts` defaults to `1`, with the retail bitmaps as the fallback and as `r_useTrueTypeFonts 0`. The retail spline text effect draws with either font path, because it only repositions and fades glyph quads. Quake 4 face names requested by inherited engine code fold onto Prey's faces (`R_CanonicalFontName`). |
 
 ## 4. Phases
 

@@ -126,6 +126,7 @@ vec3 SafeNormalize(vec3 value) {
 }
 
 #include "enhanced_material.glsl"
+#include "stock_specular.glsl"
 
 vec3 ApplyFlatDiffuseSweep(vec3 diffuse, float localZ) {
     if (inter.flatDiffuseParams.x <= 0.0) {
@@ -669,7 +670,7 @@ void main() {
         return;
     }
     vec3 localNormal = EnhancedMaterialActive() ? EnhancedLocalNormal(bumpSample)
-        : vec3(bumpSample.a, bumpSample.g, bumpSample.b) * 2.0 - 1.0;
+        : StockLocalNormal(bumpSample);
 
     vec3 lightDir = (pc.a.z > 0.5) ? pc.b.xyz : SafeNormalize(vLightVector);
     float ndotl = max(dot(lightDir, localNormal), 0.0);
@@ -702,8 +703,7 @@ void main() {
         // shadow_interaction.fs InteractionSpecular: no legacy doubling.
         specularTerm = CelSpecularTerm(EnhancedSpecularTerm(halfAngle, SafeNormalize(vViewVector), localNormal, specularSample));
     } else {
-        float specularDot = clamp(dot(halfAngle, localNormal), 0.0, 1.0);
-        specularTerm = texture(specularTableMap, vec2(specularDot, 0.5)).r * 2.0;
+        specularTerm = StockSpecularTerm(halfAngle, lightDir, SafeNormalize(vViewVector), localNormal) * 2.0;
         specularTerm = CelSpecularTerm(specularTerm * 0.5) * 2.0;
     }
     vec3 specular = specularSample * inter.specularColor.rgb * specularTerm;

@@ -162,6 +162,7 @@ stays sharp while the bulk of texture memory still comes down.
 | `image_picmip` | `0` | Mip levels to drop from diffuse textures. `0` = full resolution. Each step halves the texture. |
 | `image_picmipFilter` | `1` | Which image paths `image_picmip` may reduce. `0` = every diffuse texture, `1` = `textures/*` (world surfaces), `2` = `models/*` (characters, weapons, props), `4` = any other namespace. Add values to combine. |
 | `image_picmipMinSize` | `32` | Reduction stops once a texture's longest axis reaches this size, so small textures never turn to mush. |
+| `image_useHighRes` | `1` | Loads textures that Prey materials mark `highres` at full size. `0` halves them, as the original game did below its highest quality setting. |
 | `image_downSize` | `0` | Enables the general texture size ceiling. |
 | `image_downSizeLimit` | `0` | That ceiling, in pixels. `0` = no limit. |
 | `image_downSizeBump` / `image_downSizeBumpLimit` | `0` / `256` | Separate ceiling for normal maps. |

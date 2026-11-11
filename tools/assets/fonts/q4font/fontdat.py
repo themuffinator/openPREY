@@ -91,6 +91,19 @@ class SourceFont:
 		return atlas[y0:y1, x0:x1].astype(np.float32) / 255.0
 
 
+def slot_stretch(glyph: SourceGlyph, shape: tuple[int, int]) -> tuple[float, float]:
+	"""How far the bitmap renderer stretches a glyph's atlas block on screen.
+
+	The renderer draws the block across the glyph's recorded image rect
+	(``width`` x ``height``), so a rect larger than the block it samples
+	stretches the ink. ``shape`` is the coverage block's (rows, columns).
+	"""
+	rows, columns = shape
+	stretch_x = glyph.width / columns if columns > 0 and glyph.width > 0 else 1.0
+	stretch_y = glyph.height / rows if rows > 0 and glyph.height > 0 else 1.0
+	return stretch_x, stretch_y
+
+
 def read_fontdat(path: Path) -> tuple[list[SourceGlyph], dict[str, float]]:
 	raw = path.read_bytes()
 	if len(raw) != FONTDAT_SIZE:

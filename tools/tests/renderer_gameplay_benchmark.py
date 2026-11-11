@@ -1279,7 +1279,7 @@ def common_args(
     append_set(args, "com_skipLoadingContinue", "1")
     append_set(args, "com_loadingContinueAutoAdvance", "1")
     append_set(args, "com_levelLoadModernization", "0")
-    append_set(args, "g_skipCinematics", "1")
+    append_set(args, "g_autoSkipCinematics", "1")
     append_set(args, "g_autoScreenshot", "0")
     append_set(args, "r_glTier", spec.tier)
     append_set(args, "r_renderer", spec.renderer)

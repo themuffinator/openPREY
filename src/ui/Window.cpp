@@ -4485,9 +4485,17 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 	idStr work;
 
 	if (rebuild) {
+		// A second definition under a name that already exists is parsed into the
+		// existing window. CleanUp resets the window to its constructed state, so
+		// its place in the tree has to be carried over: its parent still lists it
+		// as a child under its original id.
 		const idStr preservedWindowDefType = windowDefType;
+		idWindow *preservedParent = parent;
+		const int preservedChildID = childID;
 		CleanUp();
 		windowDefType = preservedWindowDefType;
+		parent = preservedParent;
+		childID = preservedChildID;
 	}
 
 	drawWin_t dwt;
@@ -4530,10 +4538,20 @@ bool idWindow::Parse( idParser *src, bool rebuild) {
 			token2 = token;
 			src->UnreadToken(&token);
 			drawWin_t *dw = FindChildByName(token2.c_str());
-			if (dw && dw->win) {
+			idWindow *redefined = dw != NULL ? dw->win : NULL;
+			if ( redefined != NULL && redefined != this && redefined->UsesSimpleWindowClipBehavior() ) {
+				// Retail turned a plain leaf window into an idSimpleWindow, which this
+				// lookup reports without a window, so a later definition under the same
+				// name made a second window rather than replacing the first. Stock
+				// scripts depend on it: guis/elevatorcall.gui draws two text lines both
+				// named "elevatortext". IsSimple no longer collapses such windows, so
+				// make the same choice here.
+				redefined = NULL;
+			}
+			if ( redefined != NULL ) {
 				SaveExpressionParseState();
-				dw->win->SetWindowDefType( childDefType.c_str() );
-				dw->win->Parse(src, rebuild);
+				redefined->SetWindowDefType( childDefType.c_str() );
+				redefined->Parse(src, rebuild);
 				RestoreExpressionParseState();
 			} else {
 				idWindow *win = new idWindow(dc, gui);

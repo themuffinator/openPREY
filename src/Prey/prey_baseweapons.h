@@ -205,7 +205,7 @@ class hhWeapon: public hhAnimatedEntity {
 		void				Event_SpawnFXAlongBone( idList<idStr>* fxParms );
 
 		void				Event_WeaponOutOfAltAmmo();
-		void				Event_AddToAltClip( int amount );
+		void				Event_AddToAltClip( float amount );
 		void				Event_AltAmmoInClip();
 		void				Event_AltAmmoAvailable();
 		void				Event_AltClipSize();
