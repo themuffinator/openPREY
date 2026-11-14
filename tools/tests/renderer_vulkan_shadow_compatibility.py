@@ -3246,9 +3246,28 @@ def validate_shadow_contact_and_gl_robustness_contract() -> None:
             "idVec3 away = clipPlanes[3].Normal();",
             "away.LengthSqr() <= 0.0f",
             "away = clipPlanes[2].Normal();",
-            "return determinant < 0.0;",
+            "return determinant > 0.0;",
         ),
-        "a projection is mirrored when S, T and the light's direction form a left-handed set",
+        "a projection is mirrored when S, T and the light's direction form a right-handed set; a camera's are left-handed",
+    )
+    # The sign is checked against the rasterizer's own rule, for an authored
+    # projector, a distant point light and a parallel light.
+    faces_self_test = braced_body(
+        projected_cpp,
+        "bool R_ShadowMapCasterFacesSelfTest(",
+        "caster face self-test",
+    )
+    require_order(
+        faces_self_test,
+        (
+            "!R_ShadowMapClipPlanesMirrorWinding( clipPlanes )",
+            "!R_ShadowMapLightFacingTriangleDrawsFront( clipPlanes, floorPoint, floorToLight )",
+            "R_ShadowMapBuildDistantPointClipPlanes( &light, clipPlanes, NULL )",
+            "R_ShadowMapLightFacingTriangleDrawsFront( clipPlanes, parms.origin, toDistantLight )",
+            "R_ShadowMapBuildParallelClipPlanes( &light, clipPlanes )",
+            "R_ShadowMapLightFacingTriangleDrawsFront( clipPlanes, parms.origin, toParallelLight )",
+        ),
+        "the handedness test is held to what the rasterizer does with a light-facing triangle",
     )
     light_mirror = braced_body(
         projected_cpp,

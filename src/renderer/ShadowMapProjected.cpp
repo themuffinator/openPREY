@@ -437,8 +437,14 @@ bool R_ShadowMapClipPlanesMirrorWinding( const idPlane clipPlanes[4] ) {
 		static_cast<double>( s.x ) * ( static_cast<double>( t.y ) * away.z - static_cast<double>( t.z ) * away.y )
 		- static_cast<double>( s.y ) * ( static_cast<double>( t.x ) * away.z - static_cast<double>( t.z ) * away.x )
 		+ static_cast<double>( s.z ) * ( static_cast<double>( t.x ) * away.y - static_cast<double>( t.y ) * away.x );
-	// a degenerate projection has no picture to mirror
-	return determinant < 0.0;
+	// A camera's right, up and view direction are a left-handed set (right
+	// cross up points back at the viewer), and that is the picture every face
+	// rule is written for: the main view, a cube face, and the axes
+	// idVec3::NormalVectors hands a parallel or distant point light. An
+	// authored projector is the mirrored one: R_SetLightProject runs T down the
+	// light image, which makes S, T and the target direction right-handed.
+	// A degenerate projection has no picture to mirror.
+	return determinant > 0.0;
 }
 
 bool R_ShadowMapLightMirrorsCasterWinding( const viewLight_t *vLight ) {
@@ -880,13 +886,49 @@ bool R_ShadowMapDistantPointProjectionSelfTest( void ) {
 	return true;
 }
 
+// The face the rasterizer reports, through a map's clip planes, for a small
+// triangle at 'point' whose front faces 'toLight': true for counter-clockwise,
+// the rasterizer's front face. This is the ground truth the handedness test
+// stands in for: an unmirrored map draws a light-facing triangle as a back
+// face, as the main view and a cube face do, and a mirrored map as a front
+// face.
+static bool R_ShadowMapLightFacingTriangleDrawsFront( const idPlane clipPlanes[4],
+		const idVec3 &point, const idVec3 &toLight ) {
+	idVec3 left, down;
+	toLight.NormalVectors( left, down );
+	// idPlane::FromPoints( p1, p2, p3 ) faces ( p1 - p2 ) x ( p3 - p2 ), and
+	// down x left is toLight
+	const idVec3 tri[3] = { point + down * 16.0f, point, point + left * 16.0f };
+	double clip[3][3];	// x, y, w
+	static const int rows[3] = { 0, 1, 3 };
+	for ( int vertex = 0; vertex < 3; ++vertex ) {
+		for ( int row = 0; row < 3; ++row ) {
+			const idPlane &plane = clipPlanes[ rows[row] ];
+			clip[vertex][row] = static_cast<double>( plane[0] ) * tri[vertex].x
+				+ static_cast<double>( plane[1] ) * tri[vertex].y
+				+ static_cast<double>( plane[2] ) * tri[vertex].z
+				+ static_cast<double>( plane[3] );
+		}
+	}
+	// the sign of the screen area of three points with positive w
+	const double area =
+		clip[0][0] * ( clip[1][1] * clip[2][2] - clip[2][1] * clip[1][2] )
+		- clip[0][1] * ( clip[1][0] * clip[2][2] - clip[2][0] * clip[1][2] )
+		+ clip[0][2] * ( clip[1][0] * clip[2][1] - clip[2][0] * clip[1][1] );
+	return area > 0.0;
+}
+
 // Which triangles a caster keeps, and the handedness test that picks the
-// face to discard. The projector is storage2's alarm light, the one the rule
-// was measured on: discarding the rasterizer's back face keeps the triangles
-// that face away from it.
+// face to discard. The handedness is checked against what the rasterizer does
+// with a triangle that faces the light, not against a remembered sign: the
+// sign was once the wrong way round for every projected map, so that open
+// geometry kept its light-facing triangles and a light shone through terrain
+// seen from behind (measured in Prey's lotaa and lotab, and with a projector,
+// a distant point light and a parallel light placed under lotaa's ground).
 bool R_ShadowMapCasterFacesSelfTest( void ) {
 	// lightProject as R_SetLightProject leaves it for light_right (-184 0 0),
-	// light_up (0 -144 -120), light_target (0 272 -312)
+	// light_up (0 -144 -120), light_target (0 272 -312): an authored projector
+	// at the origin, aimed forward and down
 	idPlane lightProject[4];
 	lightProject[0].SetNormal( idVec3( -1.1245f, 0.0f, 0.0f ) );
 	lightProject[1].SetNormal( idVec3( 0.0f, 0.8479f, 0.7066f ) );
@@ -895,20 +937,27 @@ bool R_ShadowMapCasterFacesSelfTest( void ) {
 	for ( int plane = 0; plane < 4; ++plane ) {
 		lightProject[plane][3] = 0.0f;
 	}
+	// a point on a floor in the beam, and the way from it to the lamp
+	const idVec3 floorPoint( 0.0f, 160.0f, -184.0f );
+	idVec3 floorToLight = -floorPoint;
+	floorToLight.Normalize();
 	idPlane clipPlanes[4];
 	R_ShadowMapBuildClipPlanes( lightProject, clipPlanes );
-	if ( R_ShadowMapClipPlanesMirrorWinding( clipPlanes ) ) {
-		return false;	// the reference projector
+	// an authored projector mirrors: its lit floor is a rasterizer front face
+	if ( !R_ShadowMapClipPlanesMirrorWinding( clipPlanes )
+			|| !R_ShadowMapLightFacingTriangleDrawsFront( clipPlanes, floorPoint, floorToLight ) ) {
+		return false;
 	}
 	// the same projector authored with its right vector the other way round
 	lightProject[0].SetNormal( idVec3( 1.1245f, 0.0f, 0.0f ) );
 	R_ShadowMapBuildClipPlanes( lightProject, clipPlanes );
-	if ( !R_ShadowMapClipPlanesMirrorWinding( clipPlanes ) ) {
+	if ( R_ShadowMapClipPlanesMirrorWinding( clipPlanes )
+			|| R_ShadowMapLightFacingTriangleDrawsFront( clipPlanes, floorPoint, floorToLight ) ) {
 		return false;
 	}
 
 	// distant point and parallel lights take their axes from NormalVectors,
-	// which hands back a left-handed pair
+	// which hands back a camera's left-handed set: neither mirrors
 	idRenderLightLocal lightDef;
 	memset( &lightDef.parms, 0, sizeof( lightDef.parms ) );
 	renderLight_t &parms = lightDef.parms;
@@ -926,14 +975,21 @@ bool R_ShadowMapCasterFacesSelfTest( void ) {
 		parms.lightCenter.Set( 2000.0f, -1200.0f, 1800.0f );
 		light.parallel = false;
 		light.globalLightOrigin = parms.origin + parms.lightCenter * parms.axis;
+		idVec3 toDistantLight = light.globalLightOrigin - parms.origin;
+		toDistantLight.Normalize();
 		if ( !R_ShadowMapBuildDistantPointClipPlanes( &light, clipPlanes, NULL )
-				|| !R_ShadowMapClipPlanesMirrorWinding( clipPlanes ) ) {
+				|| R_ShadowMapClipPlanesMirrorWinding( clipPlanes )
+				|| R_ShadowMapLightFacingTriangleDrawsFront( clipPlanes, parms.origin, toDistantLight ) ) {
 			return false;
 		}
 		parms.parallel = true;
 		light.parallel = true;
+		// a parallel light shines from the unrotated light_center direction
+		idVec3 toParallelLight = parms.lightCenter;
+		toParallelLight.Normalize();
 		if ( !R_ShadowMapBuildParallelClipPlanes( &light, clipPlanes )
-				|| !R_ShadowMapClipPlanesMirrorWinding( clipPlanes ) ) {
+				|| R_ShadowMapClipPlanesMirrorWinding( clipPlanes )
+				|| R_ShadowMapLightFacingTriangleDrawsFront( clipPlanes, parms.origin, toParallelLight ) ) {
 			return false;
 		}
 		projections += 2;

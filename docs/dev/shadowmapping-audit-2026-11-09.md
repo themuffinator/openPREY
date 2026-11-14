@@ -963,6 +963,78 @@ views above on both renderers; the fourteen scenarios on both back ends; the
 continuous-motion qualification; the in-engine self-tests; and the static
 tests that read the touched files.
 
+#### Correction, 14 November: the handedness was the wrong way round (openPREY)
+
+Found in PREY (2006), whose outdoor maps are lit by parallel lights: 28 of
+them cast shadows, most in the Land of the Ancients maps. With shadow maps on,
+the sun shone through canyon walls that stencil shadows.
+
+| Start view, default settings, pixels that differ from the stencil picture by more than 8 levels | Before | After |
+|---|---:|---:|
+| lotaa, OpenGL and Vulkan | 5.75% | 1.5% |
+| lotab, OpenGL | 12.4% | 1.6% |
+| lotab, Vulkan | not run | 1.9% |
+| lotad, OpenGL and Vulkan | not run | 1.1% |
+
+With `r_shadowMapCasterCulling 0` (both sides) lotaa and lotab differed by
+1.2% and 1.7% on OpenGL before the change, and with `1` by 2.1% and 1.8%: the
+automatic mode was the one that lost the shadow, and only under the sun. The
+four torches of lotaa, point lights, agreed in every mode.
+
+Start views lit by point lights only are where they were, after the change,
+OpenGL / Vulkan: feedingtowerb 0.21% / 0.31%, feedingtowerd 0.20% / 0.47%,
+biolabsa 0.52% / 0.50%, spherebrain 0.18% / 0.24%, harvestera 0.06% / 0.06%.
+In all eight views every shadow-casting light was mapped, none fell back to
+stencil, and switching to stencil and back gave the first picture again.
+
+**The test that decides it.** Three lights were spawned under lotaa's ground,
+which is one-sided terrain seen from behind: an authored projector aimed up, a
+point light whose centre is 3000 units below its box (the distant point
+projection) and a parallel light shining up. Under the stencil rule the ground
+faces away from each and blocks it, and stencil draws the view dark. A fourth,
+an ordinary point light, was the cube-map control. Pixels that differ from the
+stencil picture, each light alone, static cache off:
+
+| Light | Renderer | Automatic (2), before | Automatic (2), after | Both sides (0) | Mode 1, before / after |
+|---|---|---:|---:|---:|---:|
+| Projector | OpenGL | 32.1% | 0.35% | 0.35% | 0.35% / 31.9% |
+| Distant point | OpenGL | 34.2% | 3.48% | 3.48% | 3.48% / 33.3% |
+| Parallel | OpenGL | 29.2% | 0.28% | 0.28% | 0.28% / 29.1% |
+| Point (cube) | OpenGL | not run | 2.60% | 2.60% | not run / 37.1% |
+| Projector | Vulkan | not run | 0.35% | 0.35% | not run / 32.6% |
+| Distant point | Vulkan | not run | 3.48% | 3.48% | not run / 33.8% |
+| Parallel | Vulkan | not run | 0.28% | 0.28% | not run / 29.5% |
+| Point (cube) | Vulkan | not run | 0.43% | 0.43% | not run / 36.8% |
+
+Before, every projected map kept the triangles that face the light: the rule
+meant for sealed hulls, applied to open geometry, and the far shell to sealed
+hulls. Mode 1, which stores the light-facing shell, now fails this test on
+every class, as it should; before, it passed on the three projected ones.
+
+**Why.** A camera's right, up and view direction are a left-handed set: right
+cross up points back at the viewer. That is the picture in which the engine's
+winding makes a light-facing triangle the rasterizer's back face, in the main
+view and on a cube face. The pair `idVec3::NormalVectors` hands a parallel or
+distant point light is left-handed against the direction the light travels in
+the same way, so those maps are not mirrored. An authored projector is:
+`R_SetLightProject` runs T down the light image, its S, T and target are
+right-handed, and a triangle that faces it is the rasterizer's front face.
+`R_ShadowMapClipPlanesMirrorWinding` returned the opposite answer for all
+three. The paragraph above that names the left-handed sets as the mirrored
+ones, and the storage2 and arena measurements it cites, were not reproduced
+here: no Quake 4 view was run for this correction.
+
+`R_ShadowMapCasterFacesSelfTest` no longer restates the sign. It projects a
+triangle that faces the light through each kind of map and checks which face
+the rasterizer would report (`R_ShadowMapLightFacingTriangleDrawsFront`).
+
+**Left over.** The strips that remain in lotaa and lotab lie along shadow
+edges, and are there with both sides stored as well. On lotab's ground a
+shadow edge sits about 40 pixels from where stencil draws it. A stencil volume
+is projected from a point 100,000 units away and the map along exactly
+parallel rays; over the 800 or so units that shadow is thrown, the two differ
+by a few units. That is the likely cause and has not been measured.
+
 ### Receiver lighting on OpenGL
 
 Added on 11 November, from a figure in the section above: on OpenGL the test
