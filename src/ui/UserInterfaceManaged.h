@@ -143,6 +143,9 @@ void UI_ReloadForLevelLoad();
 // or its onBackAction when back is set, as a click on the window would, and
 // returns the command it issued. No device input is read or synthesized.
 bool UI_RunLegacyWindowAction( idUserInterface *gui, const char *windowName, bool back, idStr &command );
+// The same for the window's onActionRelease, the script a button runs when the
+// click lets go (Resume Game, the Controls Profiles buttons).
+bool UI_RunLegacyWindowActionRelease( idUserInterface *gui, const char *windowName, idStr &command );
 bool UI_StepLegacyFocus( idUserInterface *gui, int direction, idStr &report );
 bool UI_LegacyFocusWithin( idUserInterface *gui, const char *ancestorName, idStr &focusName, idRectangle &rect, float &viewHeight );
 // Whether a classic GUI defines the named window, visible or not.

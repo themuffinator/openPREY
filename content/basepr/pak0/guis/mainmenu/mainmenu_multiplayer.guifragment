@@ -191,7 +191,7 @@
 				}
 
 				windowDef Multiplayer_Settings_PlayerModelBG {
-					rect		10, 135, 550, 230
+					rect		10, 105, 550, 230	// OPENPREY: 30 u up, with the Game Key row gone
 
 					windowDef Multiplayer_Settings_PlayerModelCaption {
 						rect		10, 18, 150, 16
@@ -722,7 +722,7 @@
 				}
 
 				windowDef Multiplayer_SettingsBG {
-					rect			20, 20, 530, 115
+					rect			20, 20, 530, 85
 
 					buttonDef Multiplayer_Settings_PlayerName {
 						rect			0, 0, 530, 25
@@ -785,8 +785,12 @@
 						}
 					}
 
+					// OPENPREY: openPREY has no Game Key check (the engine's key state is
+					// always N/A) and no SetCDKey prompt, so Game Key Status is hidden and
+					// the rows below it move up a row.
 					buttonDef Multiplayer_Settings_CDKey {
 						rect			0, 60, 530, 25
+						visible			0
 						leftMat			"guis/assets/menu/textbar_corner.tga"
 						middleMat		"guis/assets/menu/textbarstrip.tga"
 						rightMat		"guis/assets/menu/textbar_invcorner.tga"
@@ -826,7 +830,7 @@
 					}
 					
 					buttonDef Multiplayer_Settings_Autoswitch {
-						rect			0, 90, 530, 25
+						rect			0, 60, 530, 25
 						leftMat			"guis/assets/menu/textbar_corner.tga"
 						middleMat		"guis/assets/menu/textbarstrip.tga"
 						rightMat		"guis/assets/menu/textbar_invcorner.tga"

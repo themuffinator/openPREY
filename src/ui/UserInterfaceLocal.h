@@ -117,10 +117,20 @@ public:
 	void						RecurseSetKeyBindingNames( idWindow *window );
 	idStr						&GetPendingCmd() { return pendingCmd; };
 	idStr						&GetReturnCmd() { return returnCmd; };
+	// Runs a named event on root and its children. A `set "cmd"` in a script
+	// that answers it raises the command on the answering window; with
+	// queueCommands set, the commands the event raises there are moved to the
+	// pending commands for the next HandleEvent to return. sender, the window
+	// whose script sent the event (NULL for the game or the session), keeps
+	// its own commands for that script's caller to return.
+	void						RunNamedEvent( idWindow *root, const char *eventName, idWindow *sender, bool queueCommands );
+	// HandleNamedEvent for an event a GUI script sends with `namedEvent`.
+	void						HandleScriptNamedEvent( const char *eventName, idWindow *sender, bool queueCommands );
 	void						SetLightColorVar( idWinVec4 *var ) { lightColorVar = var; }
-	// Engine-scripted validation: runs a window's onAction script, or its
-	// onBackAction when back is set, as a click on the window would.
-	bool						RunWindowAction( const char *windowName, bool back, idStr &command );
+	// Engine-scripted validation: runs one of a window's click scripts
+	// (idWindow::ON_ACTION, ON_ACTIONRELEASE or ON_BACKACTION) as a click on
+	// the window would.
+	bool						RunWindowAction( const char *windowName, int script, idStr &command );
 	// Steps the focus as a menu's Down (1) or Up (-1) arrow does, or leaves
 	// it (0), and reports the focused window: its name, its screen rectangle
 	// and whether it and every parent are shown.

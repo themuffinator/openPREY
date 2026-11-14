@@ -132,6 +132,7 @@ public:
 	bool				SendVoiceMessage( const idBitMsg &msg );
 
 	void				SendVersionCheck( bool fromMenu = false );
+	void				CancelVersionCheck( void );
 	// Legacy no-op in openQ4 (CD key auth removed).
 	bool				SendAuthCheck( const char *cdkey, const char *xpkey );
 

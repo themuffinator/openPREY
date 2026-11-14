@@ -1,3 +1,8 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>openPREY Interface Atlas</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -24,7 +29,7 @@
   --steel:#B3CCE6;   /* prey.text.nav */
   --hi:#E8F1FF;      /* hover white, slightly cool */
   --dim:#8798B0;
-  --faint:#57687E;
+  --faint:#6E819A;   /* smallest labels: 5:1 on the page ground, over the spec's 4.5:1 target */
   --line:rgba(179,198,226,.15);
   --plate:#6F86A1;   /* prey.plate.button */
   --core:#A4F9FE;    /* prey.portal.core */
@@ -35,7 +40,7 @@
   --f-mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
 }
 html{background:var(--space)}
-body{background:var(--space);color:var(--steel);font:500 17px/1.5 var(--f-prose)}
+body{margin:0;background:var(--space);color:var(--steel);font:500 17px/1.5 var(--f-prose)}
 .wrap{max-width:1180px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:28px 80px}
 a{color:var(--steel)}
 a:hover,a:focus-visible{color:var(--hi)}
@@ -44,7 +49,7 @@ svg :focus{outline:none}
 svg [tabindex]:focus-visible{outline:1.5px solid var(--rail);outline-offset:2px}
 
 /* page header */
-.top{display:grid;gap:14px;padding-block:6px 26px;border-bottom:1px solid var(--line)}
+.top{display:grid;gap:14px;padding-block:6px 18px}
 .eyebrow{font:500 11.5px/1.4 var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
 .mark{display:flex;flex-wrap:wrap;align-items:center;gap:6px 22px}
 .mark svg{width:min(100%,430px);height:auto;display:block}
@@ -53,18 +58,27 @@ svg [tabindex]:focus-visible{outline:1.5px solid var(--rail);outline-offset:2px}
 .note{margin:0;max-width:80ch;font:12.5px/1.6 var(--f-mono);color:var(--dim)}
 .legend{display:flex;flex-wrap:wrap;gap:6px 22px;font:12px/1.5 var(--f-mono);color:var(--dim)}
 .legend b{font-weight:500;color:var(--steel)}
-nav.toc{display:flex;flex-wrap:wrap;gap:4px 18px;font:400 13px/1.9 var(--f-display)}
-nav.toc a{color:var(--dim);text-decoration:none}
+/* the sheet list stays in view on a wide page and marks the sheet being read */
+nav.toc{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:0 20px;margin-inline:-16px;padding:9px 16px 8px;
+  background:rgba(4,6,10,.94);border-block:1px solid var(--line);font:400 15px/1.8 var(--f-display)}
+nav.toc a{color:var(--dim);text-decoration:none;white-space:nowrap}
 nav.toc a:hover,nav.toc a:focus-visible{color:var(--hi)}
+nav.toc a[aria-current="true"]{color:var(--hi);box-shadow:0 1.5px 0 var(--rail)}
+@media (max-width:900px){nav.toc{position:static}}
 
 /* sheets */
-section.sheet{display:grid;gap:16px;padding-block:44px 6px;scroll-margin-top:12px}
+.wrap{counter-reset:sheet}
+section.sheet{display:grid;gap:16px;padding-block:44px 6px;scroll-margin-top:52px;counter-increment:sheet}
+@media (max-width:900px){section.sheet{scroll-margin-top:12px}}
 section.sheet>*{min-width:0}
-.sh{display:grid;gap:4px}
+.sh{display:grid;gap:6px}
 .sh .ref{font:500 11px/1.4 var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
-.sh h2{margin:0;font:400 19px/1.3 var(--f-display);color:var(--steel);text-wrap:balance}
+.sh .ref::before{content:"Sheet " counter(sheet,decimal-leading-zero) " · ";color:var(--dim)}
+.sh h2{margin:0;font:400 clamp(22px,2.5vw,28px)/1.25 var(--f-display);color:var(--steel);text-wrap:balance;text-shadow:1.5px 1.5px 0 #000}
 .sp{margin:0;max-width:74ch;color:var(--steel)}
-h3.sub{margin:18px 0 0;font:400 15px/1.3 var(--f-display);color:var(--steel)}
+h3.sub{margin:22px 0 0;font:400 19px/1.3 var(--f-display);color:var(--steel);text-shadow:1.5px 1.5px 0 #000}
+/* a state label: what is specified here and not in the build */
+.tag{display:inline-block;margin-left:12px;padding:2px 8px;border:1px solid rgba(179,198,226,.4);font:500 11px/1.5 var(--f-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--steel);vertical-align:middle;text-shadow:none;white-space:nowrap}
 .frames{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr))}
 .frames figure{margin:0;display:grid;gap:6px;min-width:0}
 .frames svg{display:block;width:100%;height:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
@@ -112,12 +126,13 @@ h3.sub{margin:18px 0 0;font:400 15px/1.3 var(--f-display);color:var(--steel)}
 
 /* swatches */
 .sws{display:grid;gap:12px 18px;grid-template-columns:repeat(auto-fill,minmax(min(100%,230px),1fr))}
-.sw{display:grid;grid-template-columns:46px minmax(0,1fr);gap:11px;align-items:center}
+.sw{display:grid;grid-template-columns:46px minmax(0,1fr);gap:11px;align-items:start}
 .sw i{display:block;height:34px;position:relative;background:#000;border-radius:10px 0 0 2px;clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,0 100%)}
 .sw i::after{content:"";position:absolute;inset:0;background:var(--c);opacity:var(--a,1)}
 .sw span{display:grid;font:12px/1.4 var(--f-mono);color:var(--dim);min-width:0}
 .sw span b{font-weight:500;color:var(--steel);overflow-wrap:anywhere}
-.swh{margin:6px 0 0;font:500 11px/1.4 var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.swh{margin:28px 0 12px;padding-top:12px;border-top:1px solid var(--line);font:500 11px/1.4 var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.swh:first-child{margin-top:4px}
 
 /* type sheet */
 .spec{display:grid;gap:4px;padding-block:14px;border-bottom:1px solid var(--line)}
@@ -149,6 +164,32 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
 .rules li::marker{color:var(--faint)}
 
 </style>
+<style>
+.spin{animation:spin 900s linear infinite;transform-origin:320px 240px}
+.spinSlow{animation:spin 24s linear infinite}
+/* the scope's three lens layers: 0.015, -0.015 and -0.01 turns a second */
+.vein1{animation:spin 66.7s linear infinite;transform-origin:320px 240px}
+.vein2{animation:spin 66.7s linear infinite reverse;transform-origin:320px 240px}
+.vein3{animation:spin 100s linear infinite reverse;transform-origin:320px 240px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.sun{animation:sol 5.9s ease-in-out infinite}
+@keyframes sol{50%{opacity:.78}}
+.pulse{animation:pls .7s ease-in-out infinite}
+@keyframes pls{50%{opacity:.2}}
+/* Keeper glyphs flick between two colours on a 20 ms cycle; drawn at 40 ms, the fastest a 60 Hz page can show */
+.jit text{animation:jit .08s steps(1) infinite}
+@keyframes jit{50%{fill:#FF4D1A}}
+.navi{cursor:pointer}
+.navi .bar{opacity:.6;transition:transform calc(.2s * var(--slow,1)) linear,opacity calc(.2s * var(--slow,1)) linear}
+.navi .lbl{fill:#B3CCE6;fill-opacity:.9;transition:transform calc(.2s * var(--slow,1)) linear}
+.navi.hov .bar{opacity:1;transform:translateX(var(--bdx));transition-duration:calc(.15s * var(--slow,1))}
+.navi.hov .lbl{fill:#CCE6FF;fill-opacity:1;transform:translateX(var(--ldx));transition-duration:calc(.15s * var(--slow,1))}
+.rm .navi .bar,.rm .navi .lbl{transform:none!important;transition:none}
+@media (prefers-reduced-motion:reduce){.spin,.spinSlow,.sun,.pulse,.jit,.vein1,.vein2,.vein3{animation:none}}
+.rm .spin,.rm .spinSlow,.rm .sun,.rm .pulse,.rm .jit,.rm .vein1,.rm .vein2,.rm .vein3{animation:none}
+</style>
+</head>
+<body>
 
 <!-- shared definitions -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
@@ -173,16 +214,9 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
     <filter id="blur2" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2"/></filter>
     <!-- portal energy: grey noise laid over the rim gradient with an overlay blend -->
     <filter id="rimNoise" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency=".018 .045" numOctaves="4" seed="12"/><feColorMatrix type="matrix" values="1.6 0 0 0 -.3  1.6 0 0 0 -.3  1.6 0 0 0 -.3  0 0 0 0 1"/></filter>
-    <!-- the Sphere's plates: blue ice from #30455F to #8197BF -->
-    <filter id="ice" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency=".09" numOctaves="3" seed="4"/><feColorMatrix type="matrix" values=".95 0 0 0 -.2  1.05 0 0 0 -.17  1.1 0 0 0 -.05  0 0 0 0 1"/></filter>
-    <filter id="shellTex" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency=".04" numOctaves="4" seed="2"/><feColorMatrix type="matrix" values="1.2 0 0 0 -.1  1.2 0 0 0 -.1  1.2 0 0 0 -.1  0 0 0 0 1"/></filter>
-    <radialGradient id="plateLight"><stop offset="0" stop-color="#F4FBFF" stop-opacity=".95"/><stop offset=".3" stop-color="#BFD8F6" stop-opacity=".55"/><stop offset="1" stop-color="#5D86C2" stop-opacity="0"/></radialGradient>
     <filter id="clouds" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency=".011 .034" numOctaves="4" seed="9"/><feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 2.1 -0.9"/></filter>
     <radialGradient id="sphShell" cx=".46" cy=".42" r=".66"><stop offset="0" stop-color="#2F4149"/><stop offset=".5" stop-color="#16222A"/><stop offset="1" stop-color="#030506"/></radialGradient>
-    <radialGradient id="sphShade" cx=".42" cy=".36" r=".72"><stop offset="0" stop-color="#000" stop-opacity="0"/><stop offset=".62" stop-color="#000" stop-opacity=".18"/><stop offset="1" stop-color="#000" stop-opacity=".82"/></radialGradient>
     <radialGradient id="sunGlow"><stop offset="0" stop-color="#F2FBFF"/><stop offset=".18" stop-color="#BFE3FF" stop-opacity=".85"/><stop offset=".5" stop-color="#5E9BE0" stop-opacity=".25"/><stop offset="1" stop-color="#2F64DC" stop-opacity="0"/></radialGradient>
-    <!-- Earth: graded toward its limb (circle 683,2151 r 1780); clouds brightest at the limb -->
-    <radialGradient id="earthG" gradientUnits="userSpaceOnUse" cx="683" cy="2151" r="1780"><stop offset=".9" stop-color="#121A2A"/><stop offset=".955" stop-color="#3F5274"/><stop offset=".975" stop-color="#8495B2"/><stop offset=".99" stop-color="#C9D4E6"/><stop offset="1" stop-color="#EEF2F8"/></radialGradient>
     <radialGradient id="globeG" cx=".62" cy=".3" r=".8"><stop offset="0" stop-color="#EEF1F6"/><stop offset=".3" stop-color="#9FB2CF"/><stop offset=".7" stop-color="#2F4468"/><stop offset="1" stop-color="#0E1524"/></radialGradient>
     <radialGradient id="sceneG" cx=".5" cy=".42" r=".75"><stop offset="0" stop-color="#4A4136"/><stop offset=".5" stop-color="#241F1A"/><stop offset="1" stop-color="#0A0908"/></radialGradient>
     <symbol id="claw" viewBox="0 0 128 128" preserveAspectRatio="none">
@@ -196,7 +230,7 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
 
 <div class="wrap">
 <header class="top">
-  <div class="eyebrow">openPREY · visual specification 1.9 · 11 November 2026</div>
+  <div class="eyebrow">openPREY · visual specification 1.15 · 13 November 2026</div>
   <div class="mark">
     <svg id="hdrMark" viewBox="0 0 476 64" role="img" aria-label="PREY wordmark reconstruction"></svg>
     <h1>Interface Atlas</h1>
@@ -204,15 +238,15 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
   <p class="lede">The Prey interface drawn from its measurements: the portal front end, the steel-glass furniture, the HUD built from Tommy's own silhouette, and the alien consoles of the Sphere. Every measurement on this page comes from <code>docs/dev/prey-ui-visual-design.md</code>; example rows, names and scene dressing are placeholders.</p>
   <div class="legend"><span><b>1 u</b> one unit of the stock 640×480 canvas</span><span><b>1 u = 1.5 dp</b> at the 1280×720 reference</span><span><b>Faces</b> Prey's display, body and alien faces, as openPREY's traced TrueType reconstructions</span></div>
   <p class="note">Everything drawn here is an independent vector reconstruction; the page contains no retail art or captures. Its three Prey faces are the TrueType tracings openPREY ships in <code>content/basepr/pak0/fonts</code>, subset to Latin and embedded as WOFF by <code>tools/assets/fonts/embed_atlas_fonts.py</code>. Page prose (Saira Condensed) and captions (IBM Plex Mono) load from Google Fonts.</p>
-  <nav class="toc" aria-label="Sheets"><a href="#home">Home screen</a><a href="#brand">Brand</a><a href="#tokens">Tokens</a><a href="#type">Type</a><a href="#frame">Claw frame</a><a href="#plates">Plates</a><a href="#controls">Controls</a><a href="#hud">HUD</a><a href="#scope">Rifle scope</a><a href="#scoreboard">Scoreboard</a><a href="#devices">Devices</a><a href="#loading">Loading and credits</a></nav>
 </header>
+<nav class="toc" aria-label="Sheets"><a href="#home">Home screen</a><a href="#brand">Brand</a><a href="#tokens">Tokens</a><a href="#type">Type</a><a href="#frame">Claw frame</a><a href="#plates">Plates</a><a href="#controls">Controls</a><a href="#hud">HUD</a><a href="#scope">Rifle scope</a><a href="#scoreboard">Scoreboard</a><a href="#devices">Devices</a><a href="#loading">Loading and credits</a></nav>
 
 <section class="sheet" id="home">
   <div class="sh"><span class="ref">Spec §2 · §6 · §8 · §9 · §12</span><h2>Home screen</h2></div>
-  <p class="sp">The front end is a view through a portal onto the Sphere over Earth. openPREY draws both bodies in 3D and opens close on the Sphere's shell, then swings round it and pulls back until the frame lays over the stock painting: the same Sphere, the same plates, and Earth's limb in front of the Sphere's foot as the stock layers sort it. Switch to the stock 2006 backdrop to compare. Pick an entry on the arc to watch its page grow out of the bottom bar; choose <b>Return to Main Menu</b> or press Escape to send it back.</p>
+  <p class="sp">The front end is a view through a portal onto the Sphere over Earth. Section 12.2 of the specification makes both bodies 3D and opens close on the Sphere's shell, then swings round it and pulls back until the frame lays over the stock painting: the same Sphere, the same plates, and Earth's limb in front of the Sphere's foot as the stock layers sort it. That backdrop is specified and not yet built: openPREY draws the stock 2006 layers today, widened to the screen. Both are drawn here from one measured plate table, so switching between them moves nothing: at rest only their life differs. Pick an entry on the arc to watch its page grow out of the bottom bar; choose <b>Return to Main Menu</b> or press Escape to send it back.</p>
   <div class="stage"><svg id="homeSvg" viewBox="0 0 640 480" role="group" aria-label="Prey main menu reconstruction"></svg></div>
   <div class="ctl">
-    <div class="seg" role="group" aria-label="Backdrop"><span class="lbl">Backdrop</span><button class="pb" data-bd="3d" aria-pressed="true">openPREY 3D</button><button class="pb" data-bd="stock" aria-pressed="false">Stock 2006</button></div>
+    <div class="seg" role="group" aria-label="Backdrop"><span class="lbl">Backdrop</span><button class="pb" data-bd="3d" aria-pressed="true">3D, specified</button><button class="pb" data-bd="stock" aria-pressed="false">Stock 2006, as built</button></div>
     <div class="seg" role="group" aria-label="Aspect"><span class="lbl">Aspect</span><button class="pb" data-asp="1.3333" aria-pressed="true">4:3</button><button class="pb" data-asp="1.7778" aria-pressed="false">16:9</button><button class="pb" data-asp="2.3333" aria-pressed="false">21:9</button></div>
     <div class="seg" role="group" aria-label="Menu"><span class="lbl">Menu</span><button class="pb" data-ig="0" aria-pressed="true">Out of game</button><button class="pb" data-ig="1" aria-pressed="false">In game</button></div>
     <button class="pb" id="replay">Play the entrance</button>
@@ -226,7 +260,7 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
     <p class="cap"><b>Arc of hooks</b> bars at x 62, 65, 70, 78, 89, 105 u on a 27 u pitch, 19.5 u tall. Hover: label to <b>#CCE6FF</b> at once, bar 0.6 → 1.0 and 5 u toward the arc, label 6–9 u, all over 150 ms; leaving takes 200 ms.</p>
     <p class="cap"><b>Growth</b> small pages: bottom bar (180,438,450,32) → (180,200,376,270), 500 ms ease-in-out. Full pages: → (10,438,620,32) in 200 ms, then → (10,10,620,460) in 500 ms; the wordmark hides and the front portal swings out over 400 ms.</p>
   </div>
-  <h3 class="sub">The entrance</h3>
+  <h3 class="sub">The entrance<span class="tag">Spec §12.2 · not built</span></h3>
   <p class="sp">Out of game the menu opens 0.41 R above the Sphere's leading side, looking across its shell with the Sphere a little off-centre. Over 1200 ms the camera swings 38° round the Sphere on a curve while it pulls back, turning 35° to keep its aim, and comes to rest low over Earth. Speed peaks at 180 ms and falls away, and it is the Sphere's apparent radius that eases, so the move is quick at first and smooth to the end. Earth starts out of sight below; the camera crosses to Earth's side at 425 ms, and from 780 ms the limb rises into the frame in front of the Sphere. The frames show the backdrop alone.</p>
   <div class="frames" id="frames"></div>
   <div class="stage"><svg id="planSvg" viewBox="0 0 640 250" role="img" aria-label="The menu scene from above and from the side: the camera's curve from 1.41 to 4.93 Sphere radii round the Sphere, and Earth below with its limb nearer the rest camera than the Sphere"></svg></div>
@@ -251,7 +285,7 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
   <ul class="rules cap">
     <li>Ground project material in space black with portal light; keep the hawk the only warm element.</li>
     <li>Never condense "PREY", never set it in the body face, never recolour the hawk steel or olive.</li>
-    <li>Reconstruct the style; never reuse retail bitmaps. Quake 4 icons and splashes in <code>assets/</code> are upstream material and never ship in an openPREY package.</li>
+    <li>Reconstruct the style; never reuse retail bitmaps. <code>assets/</code> holds only openPREY's own marks; upstream Quake 4 icons, splashes and cinematics stay out of it and out of every package.</li>
   </ul>
 </section>
 
@@ -301,13 +335,13 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
 
 <section class="sheet" id="controls">
   <div class="sh"><span class="ref">Spec §6 · §7</span><h2>Controls</h2></div>
-  <p class="sp">Tabs, check boxes, radio segments, a slider, a sortable list and a dialog, in the Options page's own frame. Controls answer the pointer and the keyboard alike; the list heading's gold hover is the one warm colour in the front end. The Game Options list and the tab names beyond Controls and Video are examples.</p>
-  <div class="stage"><svg id="ctlSvg" viewBox="0 0 640 400" role="group" aria-label="Options page controls"></svg></div>
+  <p class="sp">The Options page at its stock size, 620×460 u. The Video tab is openPREY's own Video page, row for row; Controls shows stock binding rows. Game Options is an example that gathers a sortable list, radio segments and check boxes. Controls answer the pointer and the keyboard alike; the list heading's gold hover is the one warm colour in the front end.</p>
+  <div class="stage"><svg id="ctlSvg" viewBox="0 0 640 480" role="group" aria-label="Options page controls"></svg></div>
   <div class="ctl"><span class="seg"><span class="lbl">Edit field</span></span><label class="edit" for="nameField"><input id="nameField" maxlength="32" placeholder="Profile name" value="Tawodi" aria-label="Edit field"></label><button class="pb" id="dlgBtn">Open the Reset Defaults dialog</button></div>
   <div class="notes">
-    <p class="cap"><b>Top tabs</b> inactive opaque <b>#252831</b>; active <b>#7F95AA</b> → <b>#222A31</b> top to foot under a <b>#B3C6E2</b> rim. <b>Side tabs</b> inactive <b>#3E4C61</b> 0.45; active <b>#5A6E80</b> → <b>#222A31</b> with a <b>#A7BFD7</b> rim. Labels <b>#B5C9E3</b> 0.7, hover <b>#CCDEFA</b>, active white. <b>No seam</b> the active tab ends in <b>#222A31</b>, the page's fade begins in it at 0.93, and the <b>#BDCFE0</b> outline breaks across the active tab only. <b>Inactive tabs</b> stop at the outline, which runs whole beneath them.</p>
+    <p class="cap"><b>Top tabs</b> inactive opaque <b>#252831</b>; active <b>#7F95AA</b> → <b>#222A31</b> top to foot under a <b>#B3C6E2</b> rim. <b>Side tabs</b> inactive <b>#3E4C61</b> 0.45; active <b>#5A6E80</b> → <b>#222A31</b> with a <b>#A7BFD7</b> rim. Labels <b>#B5C9E3</b> 0.7, hover <b>#CCDEFA</b>, active white. <b>No seam</b> the active tab ends in <b>#222A31</b>, the page's fade begins in it at 0.93, and the <b>#BDCFE0</b> outline breaks across the active tab only. <b>Inactive tabs</b> stop at the outline, which runs whole beneath them. <b>Side tabs</b> share the column's 370 u, less a 40 u margin: six Video tabs 55 u tall.</p>
     <p class="cap"><b>Check box</b> 12×12 u, ground <b>#39424A</b>, cross <b>#ABC5DD</b>, 1 u border <b>#B8C9E6</b> → white on hover; label 8 u after the box. <b>Radio</b> 1 u <b>#CCDEFA</b> border, selected fill <b>#99ABC7</b> 0.7. <b>Slider</b> 100×16 u, dark rail, ring knob <b>#BBCDDE</b>.</p>
-    <p class="cap"><b>List</b> rows body face 0.25–0.34 <b>#A6BAD4</b>; selection <b>#A6BAD4</b> 0.30 with a <b>#B5C9E3</b> 0.7 outline; headings white, <em>#E6CC73</em> on hover in the server browser. <b>Dialog</b> Reset Defaults: 0.80 black scrim, 360×250 u claw frame.</p>
+    <p class="cap"><b>List</b> rows body face 0.25–0.34 <b>#A6BAD4</b>; selection <b>#A6BAD4</b> 0.30 with a <b>#B5C9E3</b> 0.7 outline; headings white, <em>#E6CC73</em> on hover in the server browser. <b>Dialog</b> Reset Defaults: 0.80 black scrim, 360×250 u claw frame at 142,100. <b>Video page</b> the stock Detect plate, 35 u tall; Quality Preset over the engine's nine presets; resolutions as the display reports them; Render Scale and Vertical Sync; Apply Changes 115×28 u.</p>
   </div>
 </section>
 
@@ -655,60 +689,7 @@ el("text", { x: 320, y: 470, "text-anchor": "middle", "font-family": MONO, "font
 L.shot.style.display = "none";
 const stars1 = el("g", {}, L.bd), stars2 = el("g", { class: "spin" }, L.bd);
 { const R = rnd(7); for (let i = 0; i < 360; i++) { const big = R() > .93; el("circle", { cx: (-300 + R() * 1240).toFixed(1), cy: (R() * 480).toFixed(1), r: (big ? .8 + R() * .7 : .3 + R() * .45).toFixed(2), fill: "#fff", "fill-opacity": (.22 + R() * .6).toFixed(2) }, i % 3 ? stars1 : stars2); } }
-/* the stock 2006 backdrop: two painted Sphere layers and Earth's limb, drawn flat */
-const stockG = el("g", {}, L.bd);
-/* Geometry from the stock layers: both Sphere layers span 165,30,384,388 u, so the globe is centred at
-   357,224.5 with a radius of about 184 u; the sun sits at its centre between the two layers. */
-const S = { cx: 357, cy: 224.5, r: 184 };
 const circleD = (cx, cy, r) => `M${cx - r} ${cy}A${r} ${r} 0 1 0 ${cx + r} ${cy}A${r} ${r} 0 1 0 ${cx - r} ${cy}Z`;
-function blob(pts) {
-  const m = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], n = pts.length, s = m(pts[n - 1], pts[0]);
-  let d = `M${s[0].toFixed(1)} ${s[1].toFixed(1)}`;
-  for (let i = 0; i < n; i++) { const p = pts[i], q = m(p, pts[(i + 1) % n]); d += `Q${p[0].toFixed(1)} ${p[1].toFixed(1)} ${q[0].toFixed(1)} ${q[1].toFixed(1)}`; }
-  return d + "Z";
-}
-{
-  const defs = el("defs", {}, hs);
-  const cp = el("clipPath", { id: "sphClip" }, defs); el("circle", { cx: S.cx, cy: S.cy, r: S.r }, cp);
-  const box = { x: S.cx - S.r, y: S.cy - S.r, width: 2 * S.r, height: 2 * S.r };
-  const mask = el("mask", { id: "plateMask", maskUnits: "userSpaceOnUse", ...box }, defs);
-  el("rect", { ...box, fill: "#000" }, mask);
-  el("circle", { cx: S.cx, cy: S.cy, r: S.r, fill: "url(#sphShell)" }, stockG);
-  el("rect", { ...box, filter: "url(#shellTex)", "clip-path": "url(#sphClip)", opacity: .5, style: "mix-blend-mode:overlay" }, stockG);
-  const outlines = el("g", { "clip-path": "url(#sphClip)" }, stockG), bio = el("g", { "clip-path": "url(#sphClip)" }, stockG);
-  const R = rnd(11); let made = 0, guard = 0;
-  /* plates: rounded irregular blobs, foreshortened toward the limb, an ice texture shows through them */
-  while (made < 96 && guard++ < 3000) {
-    const u = R() * 2 - 1, v = R() * 2 - 1, d = Math.hypot(u, v); if (d > .98) continue;
-    const ang = Math.atan2(v, u), fore = Math.sqrt(1 - d * d), size = (7 + R() * 20) * (.4 + .6 * fore);
-    const px = S.cx + u * S.r, py = S.cy + v * S.r, n = 7 + Math.floor(R() * 4), pts = [];
-    for (let k = 0; k < n; k++) {
-      const a = k / n * Math.PI * 2, rr = size * (.5 + R() * .6); let lx = Math.cos(a) * rr, ly = Math.sin(a) * rr;
-      const cr = Math.cos(ang), sr = Math.sin(ang), radial = (lx * cr + ly * sr) * (.25 + .75 * fore), tang = -lx * sr + ly * cr;
-      lx = radial * cr - tang * sr; ly = radial * sr + tang * cr; pts.push([px + lx, py + ly]);
-    }
-    const dpath = blob(pts);
-    if (R() < .05) { el("path", { d: dpath, fill: "#1F6043", stroke: "#4CD08E", "stroke-width": .9, "stroke-opacity": .85 }, bio); }
-    else { el("path", { d: dpath, fill: "#fff" }, mask); el("path", { d: dpath, fill: "none", stroke: "#060B0E", "stroke-width": 1.4 }, outlines); }
-    made++;
-  }
-  outlines.before(el("rect", { ...box, filter: "url(#ice)", mask: "url(#plateMask)" }, stockG));
-  el("circle", { cx: S.cx, cy: S.cy - 8, r: 96, fill: "url(#plateLight)", mask: "url(#plateMask)", style: "mix-blend-mode:screen" }, stockG);
-  el("circle", { cx: S.cx, cy: S.cy, r: S.r, fill: "url(#sphShade)" }, stockG);
-  el("circle", { cx: S.cx, cy: S.cy, r: S.r - .6, fill: "none", stroke: "#7F9DB8", "stroke-opacity": .22, "stroke-width": 1.2 }, stockG);
-  const sun = el("g", { class: "sun" }, stockG);
-  el("circle", { cx: S.cx, cy: S.cy, r: 30, fill: "url(#sunGlow)", style: "mix-blend-mode:screen" }, sun);
-  el("circle", { cx: S.cx, cy: S.cy, r: 3, fill: "#F6FCFF" }, sun);
-}
-/* Earth: its limb fitted to the stock frame is a circle centred at 683,2151 u, radius 1780 u */
-{
-  const E = { cx: 683, cy: 2151, r: 1780 };
-  const cp = el("clipPath", { id: "earthClip" }, el("defs", {}, hs)); el("circle", { cx: E.cx, cy: E.cy, r: E.r }, cp);
-  el("circle", { cx: E.cx, cy: E.cy, r: E.r, fill: "url(#earthG)" }, stockG);
-  el("rect", { x: -300, y: 330, width: 1240, height: 160, filter: "url(#clouds)", "clip-path": "url(#earthClip)", opacity: .5, class: "drift" }, stockG);
-  el("circle", { cx: E.cx, cy: E.cy, r: E.r + 3, fill: "none", stroke: "#6C9CE6", "stroke-opacity": .4, "stroke-width": 9, filter: "url(#blur2)" }, stockG);
-  el("circle", { cx: E.cx, cy: E.cy, r: E.r, fill: "none", stroke: "#E2EEFF", "stroke-opacity": .8, "stroke-width": 1.3 }, stockG);
-}
 /* ---------- the 3D backdrop (spec §12.2): the Sphere and Earth as lit bodies under one camera ----------
    World axes are the rest camera's: x toward the trailing edge, y up, z into the screen; one unit is the
    Sphere's radius R and the Sphere sits at the origin. The camera has a 30° vertical field of view, so a wider
@@ -813,9 +794,11 @@ const CLOUD_MODEL = (() => { const R = rnd(77), out = []; for (let i = 0; i < 96
 const PLATE_RAMP = [[18, 30, 54], [44, 67, 102], [94, 116, 158], [175, 197, 227]];   /* about #2C4366, the painted plates' mean; to #AFC5E3 */
 function plateRGB(b) { const x = Math.max(0, Math.min(.9999, b)) * 3, i = Math.floor(x), p = x - i, A0 = PLATE_RAMP[i], B0 = PLATE_RAMP[i + 1]; return `rgb(${Math.round(lerp(A0[0], B0[0], p))},${Math.round(lerp(A0[1], B0[1], p))},${Math.round(lerp(A0[2], B0[2], p))})`; }
 let sceneCount = 0;
-function makeScene(parent) {
+/* o.stars false leaves the sky to the caller; o.sun names a class for the sun flare */
+function makeScene(parent, o) {
+  o = o || {};
   const id = "scn" + (sceneCount++), g = el("g", {}, parent), defs = el("defs", {}, g), n1 = v => v.toFixed(1);
-  const starG = el("g", { fill: "#fff" }, g), stars = STAR_MODEL.map(st => ({ st, e: el("circle", { r: st.r, "fill-opacity": st.o }, starG), on: true }));
+  const starG = el("g", { fill: "#fff" }, g), stars = o.stars === false ? [] : STAR_MODEL.map(st => ({ st, e: el("circle", { r: st.r, "fill-opacity": st.o }, starG), on: true }));
   let starKey = "", earthFront = null;
   const eGrad = el("radialGradient", { id: id + "E", gradientUnits: "userSpaceOnUse" }, defs);
   [[.9, "#6E7E94"], [.935, "#7E8CA0"], [.965, "#78889B"], [.979, "#94A2C8"], [.986, "#D0D4E4"], [1, "#DBE0ED"]].forEach(([o, c]) => el("stop", { offset: o, "stop-color": c }, eGrad));
@@ -828,7 +811,7 @@ function makeScene(parent) {
   [[0, "#2F4551"], [.1, "#2A3D48"], [.24, "#17232A"], [.4, "#0F171B"], [.7, "#0B1013"], [.9, "#040608"], [1, "#010202"]].forEach(([o, c]) => el("stop", { offset: o, "stop-color": c }, sGrad));
   const sClip = el("path", {}, el("clipPath", { id: id + "SC" }, defs));
   const sphG = el("g", {}, g), sBody = el("path", { fill: `url(#${id}S)` }, sphG);
-  const sFlare = el("circle", { fill: "url(#sunGlow)", style: "mix-blend-mode:screen" }, sphG);
+  const sFlare = el("circle", { fill: "url(#sunGlow)", style: "mix-blend-mode:screen" }, sphG); if (o.sun) sFlare.setAttribute("class", o.sun);
   const sSurf = el("g", { "clip-path": `url(#${id}SC)`, "stroke-linejoin": "round" }, sphG);
   const layer = [1, 2, 0].map(() => el("g", {}, sSurf));   /* drawn back to front: craters, plates, bioluminescence */
   const order = { 2: layer[0], 0: layer[1], 1: layer[2] };
@@ -908,13 +891,21 @@ function makeScene(parent) {
   return { g, draw };
 }
 const scene3d = makeScene(L.bd);
+/* The stock 2006 backdrop is the painting the 3D rest frame recreates, so it is drawn from the same measured
+   table through the rest camera: the two backdrops coincide. What differs is their life: the painting's Sphere
+   never turns, its sun pulses, and its sky is the two stock star layers. */
+const stockScene = makeScene(L.bd, { stars: false, sun: "sun" }), stockG = stockScene.g;
 stockG.style.display = "none"; stars1.style.display = stars2.style.display = "none";   /* the 3D scene draws its own sky */
 /* e is the eased progress of the entrance: 0 on the shell, 1 at rest */
-function drawScene(e) { scene3d.draw(e >= 1 ? REST_CAM : camAt(e), spinAt(A.now - H.since), RM ? 0 : A.now / 1000 * SCN.drift, -H.e, 640 + H.e); }
-/* at rest the Sphere turns once in 240 s and Earth's clouds drift 1.5 u a second; redrawn 20 times a second while in view */
+function drawScene(e) {
+  const xLo = -H.e, xHi = 640 + H.e, secs = RM ? 0 : A.now / 1000;
+  if (H.mode === "stock") stockScene.draw(REST_CAM, SCN.face, secs * .33, xLo, xHi);
+  else scene3d.draw(e >= 1 ? REST_CAM : camAt(e), spinAt(A.now - H.since), secs * SCN.drift, xLo, xHi);
+}
+/* at rest the 3D Sphere turns once in 240 s and Earth's clouds drift 1.5 u a second; redrawn 20 times a second while in view */
 let sceneAt = -1e9, homeSeen = true;
 if ("IntersectionObserver" in window) new IntersectionObserver(es => { homeSeen = es[es.length - 1].isIntersecting; }).observe(hs);
-A.hooks.push(now => { if (H.mode !== "3d" || H.state === "opening" || RM || !homeSeen || now - sceneAt < 50) return; sceneAt = now; drawScene(1); });
+A.hooks.push(now => { if (H.state === "opening" || RM || !homeSeen || now - sceneAt < 50) return; sceneAt = now; drawScene(1); });
 
 /* The portal: its glow edge fitted to the stock frame is a circle centred at 404,192 u with radius 368 u.
    Inside that edge lies space; the bright core runs about 25 u outside it and blue energy fills the rest. */
@@ -944,8 +935,12 @@ function setRim(cx, cy, r, T) {
   rimHalf.setAttribute("width", r > 300 ? 3000 + cx : 7000);
   H.rim = { cx, cy, r };
 }
-const rimCx = () => 404 - H.e + H.rimShift;
-function setRimFinal() { setRim(rimCx(), 192, 368, 330); }
+/* As built (spec §3), the portal's view is the 4:3 view scaled up to the screen's width about the canvas
+   centre, so on a wider screen the rim is larger by rimK and keeps its place against the leading edge. */
+const rimK = () => (640 + 2 * H.e) / 640;
+const rimCx = () => 320 + (84 + H.rimShift) * rimK();
+const rimCy = () => 240 - 48 * rimK();
+function setRimFinal() { const k = rimK(); setRim(rimCx(), rimCy(), 368 * k, 330 * k); }
 setRimFinal();
 /* wordmark */
 wordmark(L.logo, 100, 55, 476, 37);
@@ -1225,8 +1220,9 @@ function playOpening() {
   }
   /* the stock AnimPortalIn. 100 ms: the portal grows from a point to a ring about the canvas height; 300 ms: its rim swings to the leading edge */
   setRim(320, 240, 0, 0);
-  tw(100, 200, p => setRim(320, 240, 165 * p, 12 + 80 * p), lin, "open");
-  tw(300, 200, p => setRim(lerp(320, rimCx(), p), lerp(240, 192, p), lerp(165, 368, p), lerp(92, 330, p)), lin, "open");
+  const k = rimK();
+  tw(100, 200, p => setRim(320, 240, 165 * k * p, (12 + 80 * p) * k), lin, "open");
+  tw(300, 200, p => setRim(lerp(320, rimCx(), p), lerp(240, rimCy(), p), lerp(165, 368, p) * k, lerp(92, 330, p) * k), lin, "open");
   at(500, () => { showUI(true); L.shot.style.display = "none"; H.state = "home"; tw(0, 100, p => L.bd.style.opacity = p, lin, "open"); }, "open");
   timeline(...seq(STOCK_TL));
   setCap("AnimPortalIn · " + (H.ingame ? "in game the portal tears open the frozen frame" : "the portal opens from a point") + "; at 500 ms the wordmark and arc appear, the backdrop fades in over 100 ms and the music starts.");
@@ -1237,8 +1233,8 @@ document.addEventListener("keydown", e => { if (e.key === "Escape" && H.state ==
 function leavePage() { if (H.state === "page" || H.state === "growing" || H.state === "closing") { cancel("page"); L.page.style.display = "none"; H.state = "home"; } }
 function restCaption() {
   $("#replay").textContent = entrance() ? "Play the entrance" : "Play the opening";
-  if (entrance()) { timeline(ENTR_TL, ENTR.T); setCap("openPREY main menu, out of game: the Sphere and Earth are 3D bodies at rest in the stock painting's places, Earth in front. Hover an entry to see the slide; pick one to open its page; Play the entrance replays the pull-back."); }
-  else { timeline(...seq(STOCK_TL)); setCap((H.mode === "3d" ? "In game the 3D backdrop waits at rest behind the stock portal opening. " : "Stock 2006 backdrop: two painted Sphere layers and Earth's limb. ") + "Hover an entry to see the slide; pick one to open its page; Play the opening replays AnimPortalIn."); }
+  if (entrance()) { timeline(ENTR_TL, ENTR.T); setCap("The 3D backdrop of §12.2, specified and not yet built, out of game: the Sphere and Earth are 3D bodies at rest in the stock painting's places, Earth in front. Hover an entry to see the slide; pick one to open its page; Play the entrance replays the pull-back."); }
+  else { timeline(...seq(STOCK_TL)); setCap((H.mode === "3d" ? "In game the 3D backdrop waits at rest behind the stock portal opening. " : "Stock 2006 backdrop, as openPREY draws it today: the painted Sphere and Earth's limb, drawn from the same measured plate table as the 3D rest frame, so the two coincide. ") + "Hover an entry to see the slide; pick one to open its page; Play the opening replays AnimPortalIn."); }
   tlStart = -1e9; tlHead.style.opacity = 0;
 }
 function setAspect(a) {
@@ -1247,7 +1243,7 @@ function setAspect(a) {
   if (H.state !== "opening") { setRimFinal(); drawScene(1); }
 }
 const press = (sel, b) => $$(sel).forEach(x => x.setAttribute("aria-pressed", x === b));
-$$("[data-asp]").forEach(b => b.addEventListener("click", () => { press("[data-asp]", b); setAspect(+b.dataset.asp); setCap("Aspect " + b.textContent + ": the camera keeps its 30° vertical field of view, so the backdrop reaches the edges; the rim stays on the leading edge, and the Sphere, wordmark and pages stay on the 4:3 canvas."); }));
+$$("[data-asp]").forEach(b => b.addEventListener("click", () => { press("[data-asp]", b); setAspect(+b.dataset.asp); setCap("Aspect " + b.textContent + ": the camera keeps its 30° vertical field of view, so the backdrop reaches the edges; the portal's view is the 4:3 view scaled to the screen's width, so the rim grows with it and keeps its place on the leading edge; the Sphere, wordmark and pages stay on the 4:3 canvas."); }));
 $$("[data-bd]").forEach(b => b.addEventListener("click", () => {
   press("[data-bd]", b); H.mode = b.dataset.bd; leavePage(); settle();
   stockG.style.display = stars1.style.display = stars2.style.display = H.mode === "stock" ? "" : "none"; scene3d.g.style.display = H.mode === "3d" ? "" : "none"; restCaption();
@@ -1310,7 +1306,7 @@ const FRAME_TIMES = [0, 180, 400, 700, 950, ENTR.T];
     const [sx, sy] = v.pt(marks[0].cam.C), [rx, ry] = v.pt(c1);
     note(sx - 6, sy - 8, "0 ms · start, 1.41 R", "end", "#B3CCE6"); note(rx - 4, ry + 16, "1200 ms · rest, 4.93 R", "start", "#B3CCE6");
     note(v.X(0), v.Y(0) + k + 14, "the Sphere", "middle", "#B3CCE6");
-    note(14, 26, "from above · each tick is the camera's aim", "start"); note(14, 222, "leading side up, trailing side down", "start", "#57687E");
+    note(14, 26, "from above · each tick is the camera's aim", "start"); note(14, 222, "leading side up, trailing side down", "start", "#6E819A");
   }
   /* elevation: Earth below, its limb nearer than the Sphere */
   {
@@ -1330,7 +1326,7 @@ const FRAME_TIMES = [0, 180, 400, 700, 950, ENTR.T];
     note(v.X(-2.9), 214, "Earth · radius 4.41 R", "middle", "#DBE0ED");
     note(334, 26, "from the side · Earth's limb lies in front of the Sphere", "start");
   }
-  note(8, 244, "both views to scale · 1 R = 44 u on this sheet · dots mark the six frames above", "start", "#57687E");
+  note(8, 244, "both views to scale · 1 R = 44 u on this sheet · dots mark the six frames above", "start", "#6E819A");
 }
 
 /* ---------- BRAND ---------- */
@@ -1340,7 +1336,7 @@ const FRAME_TIMES = [0, 180, 400, 700, 950, ENTR.T];
   wordmark(p, 0, 26, 476, 52);
   el("path", { d: "M0 92H476", stroke: "#57687E", "stroke-dasharray": "2 3" }, p);
   [["edge #AFFCFF", 70, "#AFFCFF"], ["streak #3380B1", 238, "#3380B1"], ["fill near black", 400, "#10233A"]].forEach(([s, x, c]) => { el("circle", { cx: x - 40, cy: 115, r: 4, fill: c }, p); el("text", { x: x - 32, y: 119, "font-family": MONO, "font-size": 11, fill: "#8798B0", text: s }, p); });
-  el("text", { x: 4, y: 140, "font-family": MONO, "font-size": 10, fill: "#57687E", text: "drawn here 476 × 52; in the menu 476 × 37 u · letters fill the middle 60% of the height" }, p);
+  el("text", { x: 4, y: 140, "font-family": MONO, "font-size": 10, fill: "#6E819A", text: "drawn here 476 × 52; in the menu 476 × 37 u · letters fill the middle 60% of the height" }, p);
 }
 function hawk(p, x, y, s, mode) {
   const g = el("g", { transform: `translate(${x} ${y}) scale(${s})` }, p);
@@ -1370,10 +1366,10 @@ function hawk(p, x, y, s, mode) {
 {
   /* [token, colour, alpha, use, second colour of a graded token] */
   const groups = [
-    ["Text", [["prey.text.nav", "#B3CCE6", .9, "navigation, frame titles"], ["prey.text.navHover", "#CCE6FF", 1, "hovered navigation and bottom bar"], ["prey.text.bottom", "#B3CCE6", 1, "bottom-bar actions"], ["prey.text.label", "#FFFFFF", .9, "setting labels, dialog body"], ["prey.text.value", "#B8C9E6", .9, "editable values"], ["prey.text.valueOff", "#B8C9E6", .4, "unavailable values"], ["prey.text.button", "#CCDEFA", 1, "button and radio labels"], ["prey.text.buttonOff", "#B5C9E3", .3, "unavailable buttons"], ["prey.text.tab", "#B5C9E3", .7, "inactive tab labels"], ["prey.text.tabHover", "#CCDEFA", 1, "hovered tab labels"], ["prey.text.hover", "#FFFFFF", 1, "hovered values, active tabs"], ["prey.text.list", "#A6BAD4", 1, "list rows"], ["prey.text.headingHover", "#E6CC73", 1, "hovered server-list heading"]]],
-    ["Furniture", [["prey.rail", "#B3C6E2", 1, "rails, claw rims, active top-tab rim"], ["prey.claw.body", "#3B4351", 1, "claw body, to #576272", "#576272"], ["prey.claw.socket", "#171B20", 1, "claw socket"], ["prey.frame.body", "#000000", .7, "frame body; 0.50 on the bottom bar"], ["prey.plate.button", "#6F86A1", .77, "button, 0.77 → 0.06"], ["prey.plate.buttonHover", "#6F86A1", .3, "hovered button, even fill"], ["prey.plate.row", "#546579", .77, "setting rows, group boxes"], ["prey.plate.title", "#5C6C81", .69, "title bars"], ["prey.plate.header", "#111A25", .6, "header bars"], ["prey.tab.top", "#252831", 1, "inactive top tab; active #7F95AA → #222A31"], ["prey.tab.side", "#3E4C61", .45, "inactive side tab; active #5A6E80 → #222A31"], ["prey.page.wash", "#4A5263", .1, "tab page body"], ["prey.separator", "#BDCFE0", 1, "tab page outline"], ["prey.list.wash", "#A6C4E6", .15, "list and edit field backing"], ["prey.list.selection", "#A6BAD4", .3, "selected list row"], ["prey.radio.active", "#99ABC7", .7, "selected segment"], ["prey.frame.picture", "#A7C4E8", 1, "picture frames"], ["prey.scroll", "#ADC5E3", 1, "scroll bar; thumb #BDD3F0", "#BDD3F0"], ["prey.slider", "#323C45", 1, "slider rail; knob #BBCDDE", "#BBCDDE"], ["prey.arc", "#859BAF", 1, "arc, to #9DB8D0; bars #9AB1CA", "#9DB8D0"], ["prey.scrim", "#000000", .8, "Reset Defaults scrim"]]],
+    ["Text", [["prey.text.nav", "#B3CCE6", .9, "navigation, frame titles"], ["prey.text.navHover", "#CCE6FF", 1, "hovered navigation and bottom bar"], ["prey.text.bottom", "#B3CCE6", 1, "bottom-bar actions"], ["prey.text.label", "#FFFFFF", .9, "setting labels, dialog body"], ["prey.text.value", "#B8C9E6", .9, "editable values"], ["prey.text.valueOff", "#B8C9E6", .4, "unavailable values"], ["prey.text.button", "#CCDEFA", 1, "button and radio labels"], ["prey.text.buttonOff", "#B5C9E3", .3, "unavailable buttons"], ["prey.text.tab", "#B5C9E3", .7, "inactive tab labels"], ["prey.text.tabHover", "#CCDEFA", 1, "hovered tab labels"], ["prey.text.hover", "#FFFFFF", 1, "hovered values, active tabs"], ["prey.text.list", "#A6BAD4", 1, "list rows"], ["prey.text.headingHover", "#E6CC73", 1, "hovered server-list heading"], ["prey.text.headingInk", "#262930", 1, "text on a heading band; in no stock screen"]]],
+    ["Furniture", [["prey.rail", "#B3C6E2", 1, "rails, claw rims, active top-tab rim"], ["prey.claw.body", "#3B4351", 1, "claw body, to #576272", "#576272"], ["prey.claw.socket", "#171B20", 1, "claw socket"], ["prey.frame.body", "#000000", .7, "frame body; 0.50 on the bottom bar"], ["prey.plate.button", "#6F86A1", .77, "button, 0.77 → 0.06"], ["prey.plate.buttonHover", "#6F86A1", .3, "hovered button, even fill"], ["prey.plate.row", "#546579", .77, "setting rows, group boxes"], ["prey.plate.title", "#5C6C81", .69, "title bars"], ["prey.plate.header", "#111A25", .6, "header bars"], ["prey.tab.top", "#252831", 1, "inactive top tab; active #7F95AA → #222A31"], ["prey.tab.side", "#3E4C61", .45, "inactive side tab; active #5A6E80 → #222A31"], ["prey.page.wash", "#4A5263", .1, "tab page body"], ["prey.separator", "#BDCFE0", 1, "tab page outline"], ["prey.list.wash", "#A6C4E6", .15, "list and edit field backing"], ["prey.list.selection", "#A6BAD4", .3, "selected list row"], ["prey.radio.active", "#99ABC7", .7, "selected segment"], ["prey.frame.picture", "#A7C4E8", 1, "picture frames"], ["prey.scroll", "#ADC5E3", 1, "scroll bar; thumb #BDD3F0", "#BDD3F0"], ["prey.slider", "#323C45", 1, "slider rail; knob #BBCDDE", "#BBCDDE"], ["prey.arc", "#859BAF", 1, "arc, to #9DB8D0; bars #9AB1CA", "#9DB8D0"], ["prey.scrim", "#000000", .8, "Reset Defaults scrim; confirmations 0.40–0.50"], ["prey.heading.band", "#61758C", 1, "heading band, 1 u #B5C9E3 border; in no stock screen"]]],
     ["World and brand", [["prey.space", "#000000", 1, "space; stars to #161616"], ["prey.portal.core", "#A4F9FE", 1, "portal core"], ["prey.portal.body", "#2F64DC", 1, "portal body"], ["prey.wordmark.edge", "#AFFCFF", 1, "wordmark edge"], ["prey.wordmark.streak", "#3380B1", 1, "wordmark streak"], ["prey.sphere.shell", "#0F171B", 1, "Sphere shell; lit rim #2A3D48", "#2A3D48"], ["prey.sphere.plate", "#2D4569", 1, "Sphere plates, to #AFC5E3", "#AFC5E3"], ["prey.sphere.bio", "#1F6043", 1, "bioluminescence"], ["prey.earth", "#A7B5CF", 1, "Earth, to #E8EAF0", "#E8EAF0"], ["prey.load.name", "#A6BFFF", .8, "loading level name"], ["prey.load.fill", "#5959FF", .65, "loading progress"], ["prey.hawk.edge", "#1BDDEF", 1, "hawk edge"], ["prey.hawk.body", "#5D0900", 1, "hawk body, to orange", "#FF9A2E"]]],
-    ["HUD", [["hud.ink", "#A0B2CA", 1, "line art, meters"], ["hud.well", "#1C242D", .5, "tile wells; meters black 0.36"], ["hud.health", "#990000", 1, "health figure"], ["hud.health.over", "#BFD9FF", 1, "above 100 health"], ["hud.spirit", "#4D66B3", 1, "spirit figure"], ["hud.ammo", "#8CA6CC", .73, "ammo fill"], ["hud.ammo.line", "#8CA1E6", 1, "weapon tile ammo lines"], ["hud.selector", "#4C5BD3", .15, "selected tile; rim #748DA8"], ["hud.icon.idle", "#BFBFBF", 1, "weapon icons"], ["hud.icon.empty", "#BF0D0D", 1, "empty weapon icons"], ["hud.danger", "#FF0000", 1, "low and empty"], ["hud.boss", "#A01800", 1, "boss and progress fill"], ["hud.crosshair", "#A5B7D9", .35, "crosshairs, inverting; locked #FF3C00"]]]
+    ["HUD", [["hud.ink", "#A0B2CA", 1, "line art, meters"], ["hud.well", "#1C242D", .5, "tile wells; meters black 0.36"], ["hud.health", "#990000", 1, "health figure"], ["hud.health.over", "#BFD9FF", 1, "above 100 health"], ["hud.spirit", "#4D66B3", 1, "spirit figure"], ["hud.ammo", "#8CA6CC", .73, "ammo fill"], ["hud.ammo.line", "#8CA1E6", 1, "weapon tile ammo lines"], ["hud.selector", "#4C5BD3", .15, "selected tile; rim #748DA8"], ["hud.icon.idle", "#BFBFBF", 1, "weapon icons"], ["hud.icon.empty", "#BF0D0D", 1, "empty weapon icons"], ["hud.danger", "#FF0000", 1, "low and empty"], ["hud.boss", "#A01800", 1, "boss and progress fill"], ["hud.crosshair", "#A5B7D9", .35, "crosshairs, inverting; locked #FF3C00"], ["hud.text", "#FFFFFF", 1, "tips, subtitles, autosave line"]]]
   ];
   const root = $("#swatches");
   for (const [name, list] of groups) {
@@ -1457,13 +1453,16 @@ function hawk(p, x, y, s, mode) {
 /* ---------- CONTROLS ---------- */
 {
   const p = $("#ctlSvg");
-  el("rect", { x: 0, y: 0, width: 640, height: 400, fill: "#070B11" }, p);
-  el("circle", { cx: 420, cy: 210, r: 230, fill: "url(#sphShell)", opacity: .4 }, p);
-  const fr = makeFrame(p, .7); fr.set(6, 6, 628, 388);
-  titleBar(p, 38, 14, 564, 24, "Options", false, .55);
-  const ctlPage = tabPage(p, 30, 64, 570, 300, 100);
-  topTabs(p, 130, 44, 470, 20, ["Controls", "Game Options", "Video", "Audio"], 2, i => showTop(i), ctlPage);
-  const sideHost = el("g", {}, p), contentHost = el("g", {}, p);
+  /* the Options page as scripted: frame 620x460 u at 10,10 with a 0.50 body; title bar at 32,8 and tab page
+     570x370 u at 25,55 inside it; side tabs from 40 u down the column */
+  el("rect", { x: 0, y: 0, width: 640, height: 480, fill: "#070B11" }, p);
+  el("circle", { cx: 420, cy: 250, r: 250, fill: "url(#sphShell)", opacity: .4 }, p);
+  const fr = makeFrame(p, .5); fr.set(10, 10, 620, 460);
+  titleBar(p, 42, 18, 556, 24, "Options", false, .55);
+  const ctlPage = tabPage(p, 35, 65, 570, 370, 100);
+  topTabs(p, 135, 45, 470, 20, ["Controls", "Game Options", "Video", "Audio"], 2, i => showTop(i), ctlPage);
+  /* page content is written with its header bar at 160,74 and moved to the page's place */
+  const sideHost = el("g", {}, p), contentHost = el("g", { transform: "translate(10 11)" }, p);
   const sets = {
     0: ["Movement", "Combat", "Weapons", "Look", "System", "MultiPrey", "Profiles"],
     1: ["Look", "Feel"],
@@ -1472,19 +1471,34 @@ function hawk(p, x, y, s, mode) {
   };
   function showTop(i) {
     sideHost.replaceChildren(); contentHost.replaceChildren();
-    sideTabs(sideHost, 30, 104, 100, 260, sets[i], 0, ctlPage); /* tabMargins 40, 0 */
+    sideTabs(sideHost, 35, 105, 100, 330, sets[i], 0, ctlPage); /* tabMargins 40, 0: the tabs share 330 u */
     const c = contentHost;
     if (i === 2) {
+      /* openPREY's Video page (spec §12.1), row for row: rows 400 u wide on a 30 u pitch below a 35 u Detect plate */
       headerBar(c, 160, 74, 400, 25, [["Video Settings", .5]]);
-      settingRow(c, 160, 108, 400, "Video Resolution", ["1920x1080", "2560x1440", "1280x720"]);
-      settingRow(c, 160, 138, 400, "Full Screen", ["No", "Yes"]);
-      const sr = el("g", { transform: "translate(160 168)" }, c);
+      const ad = el("g", { transform: "translate(160 114)" }, c);
+      el("path", { d: rowPath(400, 35), fill: "url(#gRow)", stroke: "#546579" }, ad); txt(ad, 100, 17.5 + em(.33) * BODY_CAP / 2, "Auto Detect Video Settings", em(.33), { fill: "#fff", op: .9 });
+      button(ad, 225, 5, 150, 25, "Detect");
+      settingRow(c, 160, 154, 400, "Quality Preset", ["Enhanced", "Quality", "Ultra", "Maximum", "Minimum", "Low Power", "Low", "Performance", "Balanced"]);
+      settingRow(c, 160, 184, 400, "Video Resolution", ["Desktop Native", "1920x1080", "2560x1440", "Custom"]);
+      settingRow(c, 160, 214, 400, "Full Screen", ["No", "Yes"]);
+      settingRow(c, 160, 244, 400, "Render Scale", ["100%", "125%", "150%", "200%", "10%", "25%", "50%", "75%", "85%"]);
+      settingRow(c, 160, 274, 400, "Vertical Sync", ["Yes", "No"]);
+      const sr = el("g", { transform: "translate(160 304)" }, c);
       el("path", { d: rowPath(400, 25), fill: "url(#gRow)", stroke: "#546579" }, sr); txt(sr, 100, 17.96, "Brightness", em(.33), { fill: "#fff", op: .9 });
       slider(sr, 250, 4.5, 100, 16, .55);
-      const cr = el("g", { transform: "translate(160 198)" }, c);
+      const cr = el("g", { transform: "translate(160 334)" }, c);
       el("path", { d: rowPath(400, 25), fill: "url(#gRow)", stroke: "#546579" }, cr); txt(cr, 100, 17.96, "Gamma", em(.33), { fill: "#fff", op: .9 });
       slider(cr, 250, 4.5, 100, 16, .4);
-      const q = el("g", { transform: "translate(170 236)" }, c);
+      button(c, 430, 389, 115, 28, "Apply Changes");
+    } else if (i === 0) {
+      headerBar(c, 160, 74, 400, 25, [["Action", .25], ["Key Assignment", .75]]);
+      [["Forward", "W"], ["Backward", "S"], ["Move Left", "A"], ["Move Right", "D"], ["Jump", "SPACE"]].forEach(([a, b], k) => settingRow(c, 160, 108 + k * 30, 400, a, [b], { hover: true }));
+      el("text", { x: 360, y: 280, "text-anchor": "middle", "font-family": MONO, "font-size": 8, fill: "#8798B0", text: "example bindings · hover or focus a key to see the value brighten" }, c);
+    } else if (i === 1) {
+      list(c);
+      /* stock radio segments and check boxes, gathered on this example page */
+      const q = el("g", { transform: "translate(170 318)" }, c);
       ["Low Quality", "Medium Quality", "High Quality"].forEach((s, k) => radio(q, k * 100, 0, 100, 20, s, k === 2));
       function radio(g, x, y, w, h, s, on) {
         const r = el("g", { tabindex: 0, role: "button", "aria-label": s, "aria-pressed": on }, g); r.style.cursor = "pointer";
@@ -1496,15 +1510,9 @@ function hawk(p, x, y, s, mode) {
         r.addEventListener("click", pick); r.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
         b.setAttribute("fill", on ? "#99ABC7" : "#000"); b.setAttribute("fill-opacity", on ? .7 : 0);
       }
-      const ck = el("g", { transform: "translate(170 272)" }, c);
-      [["Vertical Sync", true], ["Show FPS", false]].forEach(([s, on], k) => check(ck, k * 150, 0, s, on));
-      button(c, 440, 316, 120, 30, "Apply Changes");
-    } else if (i === 0) {
-      headerBar(c, 160, 74, 400, 25, [["Action", .25], ["Key Assignment", .75]]);
-      [["Forward", "W"], ["Backward", "S"], ["Move Left", "A"], ["Move Right", "D"], ["Jump", "SPACE"]].forEach(([a, b], k) => settingRow(c, 160, 108 + k * 30, 400, a, [b], { hover: true }));
-      el("text", { x: 360, y: 280, "text-anchor": "middle", "font-family": MONO, "font-size": 8, fill: "#8798B0", text: "example bindings · hover or focus a key to see the value brighten" }, c);
-    } else if (i === 1) {
-      list(c);
+      const ck = el("g", { transform: "translate(170 352)" }, c);
+      [["Example option", true], ["Another option", false]].forEach(([s, on], k) => check(ck, k * 150, 0, s, on));
+      el("text", { x: 360, y: 386, "text-anchor": "middle", "font-family": MONO, "font-size": 8, fill: "#8798B0", text: "example segments and check boxes · the chosen segment fills #99ABC7 at 0.70" }, c);
     } else {
       settingRow(c, 160, 84, 400, "Speaker Setup", ["Stereo", "4 Speaker", "5.1 Surround"]);
       settingRow(c, 160, 114, 400, "Reverse Channels", ["No", "Yes"]);
@@ -1569,16 +1577,19 @@ function hawk(p, x, y, s, mode) {
     el("text", { x: 360, y: 300, "text-anchor": "middle", "font-family": MONO, "font-size": 8, fill: "#8798B0", text: "example list · hover or focus a heading for the gold, press it to sort" }, c);
   }
   showTop(2);
-  /* dialog */
+  /* bottom title bar, 19 u tall at 32,432 in the frame */
+  { const t = titleBar(p, 42, 442, 556, 19, null, true), y = 9.5 + em(.36) * DISPLAY_CAP / 2; txt(t, 139, y, "Return to Main Menu", em(.36), { face: "display" }); txt(t, 417, y, "Reset to defaults", em(.36), { face: "display" }); }
+  /* dialog: the scrim covers the canvas; the 360x250 u frame stands at 142,100 */
   const dlg = el("g", { role: "dialog", "aria-label": "Reset Defaults" }, p); dlg.style.display = "none";
-  el("rect", { x: 0, y: 0, width: 640, height: 400, fill: "#000", "fill-opacity": .8 }, dlg);
-  const df = makeFrame(dlg, .7); df.set(142, 70, 360, 250);
-  txt(dlg, 320, 96, "Reset Defaults", em(.33), { fill: "#fff", op: .9 });
-  txt(dlg, 322, 120, "Choose the settings you want to reset to default values:", em(.25), { fill: "#fff", op: .9, shadow: false });
-  const dc = el("g", { transform: "translate(252 140)" }, dlg);
+  el("rect", { x: 0, y: 0, width: 640, height: 480, fill: "#000", "fill-opacity": .8 }, dlg);
+  const dlgIn = el("g", { transform: "translate(0 30)" }, dlg);
+  const df = makeFrame(dlgIn, .7); df.set(142, 70, 360, 250);
+  txt(dlgIn, 320, 96, "Reset Defaults", em(.33), { fill: "#fff", op: .9 });
+  txt(dlgIn, 322, 120, "Choose the settings you want to reset to default values:", em(.25), { fill: "#fff", op: .9, shadow: false });
+  const dc = el("g", { transform: "translate(252 140)" }, dlgIn);
   ["Controls", "Game Options", "Video Settings", "Audio Settings", "Reset all settings"].forEach((s, k) => check(dc, 0, k * 20, s, false));
-  button(dlg, 190, 262, 110, 30, "Reset", { onClick: () => { dlg.style.display = "none"; } });
-  button(dlg, 340, 262, 110, 30, "Cancel", { onClick: () => { dlg.style.display = "none"; } });
+  button(dlgIn, 190, 262, 110, 30, "Reset", { onClick: () => { dlg.style.display = "none"; } });
+  button(dlgIn, 340, 262, 110, 30, "Cancel", { onClick: () => { dlg.style.display = "none"; } });
   $("#dlgBtn").addEventListener("click", () => { dlg.style.display = ""; });
   document.addEventListener("keydown", e => { if (e.key === "Escape") dlg.style.display = "none"; });
 }
@@ -2112,31 +2123,22 @@ function flyCredits(lines, instant, key) {
   $("#credB").addEventListener("click", () => flyCredits(lines, false, "creditsSheet")); flyCredits(lines, true, "creditsSheet");
   titleBar(p, 42, 443, 556, 19, "Return to Main Menu", true);
 }
+/* ---------- the sheet list marks the sheet being read ---------- */
+if ("IntersectionObserver" in window) {
+  const sheets = [...document.querySelectorAll("section.sheet")];
+  const link = new Map([...document.querySelectorAll("nav.toc a")].map(a => [a.hash.slice(1), a]));
+  const inBand = new Set();
+  const io = new IntersectionObserver(entries => {
+    for (const e of entries) e.isIntersecting ? inBand.add(e.target) : inBand.delete(e.target);
+    const cur = sheets.find(sh => inBand.has(sh));
+    for (const [id, a] of link) {
+      if (cur && cur.id === id) a.setAttribute("aria-current", "true");
+      else a.removeAttribute("aria-current");
+    }
+  }, { rootMargin: "-22% 0px -68% 0px" });
+  sheets.forEach(sh => io.observe(sh));
+}
 })();
 </script>
-<style>
-.spin{animation:spin 900s linear infinite;transform-origin:320px 240px}
-.spinSlow{animation:spin 24s linear infinite}
-/* the scope's three lens layers: 0.015, -0.015 and -0.01 turns a second */
-.vein1{animation:spin 66.7s linear infinite;transform-origin:320px 240px}
-.vein2{animation:spin 66.7s linear infinite reverse;transform-origin:320px 240px}
-.vein3{animation:spin 100s linear infinite reverse;transform-origin:320px 240px}
-@keyframes spin{to{transform:rotate(360deg)}}
-.sun{animation:sol 5.9s ease-in-out infinite}
-@keyframes sol{50%{opacity:.78}}
-.drift{animation:drift 120s linear infinite alternate}
-@keyframes drift{to{transform:translateX(-40px)}}
-.pulse{animation:pls .7s ease-in-out infinite}
-@keyframes pls{50%{opacity:.2}}
-/* Keeper glyphs flick between two colours on a 20 ms cycle; drawn at 40 ms, the fastest a 60 Hz page can show */
-.jit text{animation:jit .08s steps(1) infinite}
-@keyframes jit{50%{fill:#FF4D1A}}
-.navi{cursor:pointer}
-.navi .bar{opacity:.6;transition:transform calc(.2s * var(--slow,1)) linear,opacity calc(.2s * var(--slow,1)) linear}
-.navi .lbl{fill:#B3CCE6;fill-opacity:.9;transition:transform calc(.2s * var(--slow,1)) linear}
-.navi.hov .bar{opacity:1;transform:translateX(var(--bdx));transition-duration:calc(.15s * var(--slow,1))}
-.navi.hov .lbl{fill:#CCE6FF;fill-opacity:1;transform:translateX(var(--ldx));transition-duration:calc(.15s * var(--slow,1))}
-.rm .navi .bar,.rm .navi .lbl{transform:none!important;transition:none}
-@media (prefers-reduced-motion:reduce){.spin,.spinSlow,.sun,.drift,.pulse,.jit,.vein1,.vein2,.vein3{animation:none}}
-.rm .spin,.rm .spinSlow,.rm .sun,.rm .drift,.rm .pulse,.rm .jit,.rm .vein1,.rm .vein2,.rm .vein3{animation:none}
-</style>
+</body>
+</html>

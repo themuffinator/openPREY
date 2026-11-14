@@ -1,14 +1,21 @@
 # openPREY UI Visual Design
 
-Specification version 1.13, 11 November 2026.
+Specification version 1.15, 13 November 2026.
 
 Status: reference survey and design contract. openPREY still renders the stock
 Prey GUIs; no replacement interface has been built. Sections 1 to 11 record
 what makes the Prey interface look and behave like Prey, so that fixes,
 widescreen work, new settings pages and any future vector replacement stay
-inside that identity. Section 12 covers openPREY's own additions, including
-the 3D main-menu backdrop and its entrance (section 12.2), which are specified
-here and not yet built.
+inside that identity. Section 12 covers openPREY's own additions.
+
+| Part | State |
+| --- | --- |
+| Stock survey (sections 1 to 11, Appendices A and B) | Measured from the retail archives, the art and engine captures |
+| Aspect expansion, loading screens and Video pages (section 12.1) | Built |
+| Rifle scope at any aspect (section 10.8) | Built in the legacy GUI with the stock art |
+| Alien-script translation (section 11.4) | Built |
+| 3D main-menu backdrop and entrance (section 12.2) | Specified, not built. The menu draws the stock layers |
+| Vector or retained-UI replacement (section 12.3) | Principles only |
 
 The companion [Interface Atlas](prey-ui/atlas/prey-interface-atlas.html) draws
 the measured components, screens and motion as editable vector
@@ -32,7 +39,9 @@ disagree about a Prey screen, this one governs.
 8. [Motion and sound](#8-motion-and-sound)
 9. [Screen composition](#9-screen-composition)
 10. [HUD and in-game overlays](#10-hud-and-in-game-overlays)
+    - [10.8 The rifle scope](#108-the-rifle-scope)
 11. [In-world device GUIs](#11-in-world-device-guis)
+    - [11.4 Type and the translation mechanic](#114-type-and-the-translation-mechanic)
 12. [openPREY additions and modern direction](#12-openprey-additions-and-modern-direction)
     - [12.2 The 3D backdrop and entrance](#122-the-3d-backdrop-and-entrance)
 13. [Project branding](#13-project-branding)
@@ -70,9 +79,9 @@ units and convert them last.
    renderer, resolution and the command used (Appendix A).
 
 The effective copy of a stock file is the one the virtual filesystem resolves
-last. openPREY's `pak0.pk4` and `pak1.pk4` in `basepr/` override eleven retail
-scripts; measure those from `content/basepr/pak0/`, everything else from the
-retail archives.
+last. openPREY's `pak0.pk4` and `pak1.pk4` in `basepr/` override thirteen
+retail scripts (section 12.1 names them); measure those from
+`content/basepr/pak0/`, everything else from the retail archives.
 
 ### Measuring stock sources
 
@@ -199,18 +208,23 @@ that drops one of them is not visually complete.
 ## 3. Coordinates, density and aspect expansion
 
 The stock grid is the 640x480 canvas. openPREY expands it to the screen's
-aspect: `gui::virtual_screen_x_expand` and `gui::virtual_screen_y_expand`
-report the extra canvas on each side, `gui::virtual_screen_diagonal` the
-diagonal of the whole screen in canvas units (the size of a square that
-covers the screen at any turn, which GUI expressions cannot work out without
-a square root), `screenalignx` and `screenaligny` pin a
-window to a screen edge, and `backgroundLeft`, `backgroundRight`,
-`backgroundTop` and `backgroundBottom` add edge slices that continue a
-full-screen menu background (section 12). Loading screens instead use the
-openQ4 method: the session composes the art and its `_left`, `_right`,
-`_top` and `_bottom` tiles in memory into one picture of the window's shape,
-and the GUI draws it with `matcanvasfill` when `gui::loading_bkgnd_canvasfill`
-is 1.
+aspect and gives GUI scripts these values and keys (section 12.1 says where
+each is used):
+
+| Name | Kind | Meaning |
+| --- | --- | --- |
+| `gui::virtual_screen_x_expand`, `gui::virtual_screen_y_expand` | GUI variable | The extra canvas on each side, in canvas units |
+| `gui::virtual_screen_diagonal` | GUI variable | The diagonal of the whole screen in canvas units: the side of a square that covers the screen at any turn. GUI expressions have no square root to work it out |
+| `screenalignx`, `screenaligny` | Window key | Pin a window to a screen edge |
+| `backgroundLeft`, `backgroundRight`, `backgroundTop`, `backgroundBottom` | Window key | Edge slices that continue a full-screen background beyond the canvas |
+| `naturalmatscale` | Window key | Holds a tiled material's density as its window widens |
+| `canvasfill` | `renderDef` key | Draws the model view across the whole expanded canvas, keeping the projection its rect defines |
+| `matcanvasfill` | Window key | Draws one picture across the whole screen |
+
+Loading screens use the openQ4 method: the session composes the art and its
+`_left`, `_right`, `_top` and `_bottom` tiles in memory into one picture of
+the window's shape, and the GUI draws it with `matcanvasfill` when
+`gui::loading_bkgnd_canvasfill` is 1.
 
 | Stock element | Source (u) | Reference (dp) |
 | --- | --- | --- |
@@ -248,8 +262,9 @@ Keep the following anchors under aspect expansion:
 - The navigation arc stays in the leading half of the 4:3 canvas; it does not
   slide to the screen edge.
 - The star field, Earth's limb and loading art fill the full screen width.
-  The 3D backdrop (section 12.2) does so by holding its vertical field of
-  view, so a wider screen sees more to each side.
+  The painted layers do so with edge slices (section 12.1); the 3D backdrop
+  of section 12.2 does so by holding its vertical field of view, so a wider
+  screen sees more to each side.
 - The bottom bar and full-screen page frames stay inside the 4:3 canvas.
   Widening them is an optional modern layout (section 12), not a stock
   behaviour.
@@ -613,9 +628,10 @@ separate focus state; a replacement uses the hover treatment plus a rim at full
 
 ### The stock opening
 
-`AnimPortalIn` (`guis/mainmenu.gui:121`) plays whenever the stock menu opens.
-openPREY keeps it for the menu opened in game and replaces it out of game with
-the entrance of section 12.2.
+`AnimPortalIn` (`guis/mainmenu.gui:126`) plays whenever the menu opens, out
+of game and in game, in the stock and in openPREY today. Section 12.2 keeps
+it for the menu opened in game and replaces it out of game with the entrance,
+once that is built.
 
 | Time | Event |
 | --- | --- |
@@ -682,8 +698,9 @@ after they appear, over 900 ms, to 0 or to white 0.7.
 | `guisounds_menu_connect` | Refreshing or filtering the server list |
 | `guisounds_menu_volumetick` | Volume slider |
 
-Use counts are for the retail main menu and `mpmain`; openPREY's two added
-video pages bring `clickin` to 127 and `tabflip` to 45.
+Use counts are for the retail main menu and `mpmain`. In openPREY's copies
+the three added Video pages bring `clickin` to 128 and `tabflip` to 46, and
+`tick` falls to 18 with the three Texture Quality segments (section 12.1).
 
 ### Reduced motion
 
@@ -696,12 +713,12 @@ brightens without sliding, and ambient rotation stops.
 
 | Screen | Composition |
 | --- | --- |
-| Home, out of game | Portal rim at the leading edge; stars, Sphere and sun, Earth's limb (the 3D bodies of section 12.2 in openPREY); wordmark; arc with New Game, Load Game, MultiPrey, Options, Exit (and Resume Game when a recent save exists); bottom bar with Updates, Credits, Mods |
+| Home, out of game | Portal rim at the leading edge; stars, Sphere and sun, Earth's limb (painted layers today, the 3D bodies of section 12.2 once built); wordmark; arc with New Game, Load Game, MultiPrey, Options, Exit (and Resume Game when a recent save exists); bottom bar with Updates, Credits, Mods |
 | Home, in game | Same backdrop; Resume Game, Quit Game, Save Game, Load Game, Options, Exit; bottom bar with Credits only |
 | New Game | Small frame: title bar "Start a New Game", heading "Choose Skill", Tommy's portrait (110x110 u), Normal and Cherokee buttons (Cherokee is the harder "wicked" mode, drawn at 0.30 and inert until unlocked; Casino appears after the Roadhouse), a description on hover, bottom title "Return to Main Menu" |
 | Load Game | Full page: a three-column list (Name, Date, Time) in a framed table beside a level-shot frame, Time Played, Load and Delete buttons |
 | Save Game | Full page: the same list, a captioned name field and one 145x25 u Save button |
-| MultiPrey | Full page with top tabs Player Settings, Create Server and Find Servers; Find Servers holds a server table (status icons, Server, Players, Ping, Type, Map), Quick Refresh, Refresh All, Internet/LAN segments, a details panel with side tabs, PunkBuster state, Join Game |
+| MultiPrey | Full page with top tabs Player Settings, Create Server and Find Servers; Player Settings has Player Name, Data Rate and Auto Weapon Switch rows over the player-model picker (openPREY hides the stock Game Key Status row); Find Servers holds a server table (status icons, Server, Players, Ping, Type, Map), Quick Refresh, Refresh All, Internet/LAN segments, a details panel with side tabs, PunkBuster state, Join Game |
 | Options | Full page with four top tabs (Controls, Game Options, Video, Audio). All but Audio have side tabs (Controls: Movement, Combat, Weapons, Look, System, MultiPrey, Profiles; Video: the stock Video, Advanced 1 and Advanced 2 pages plus openPREY's Display, Post FX and Advanced FX). Each page is a header bar, then setting rows on a 30 u pitch. Bottom title: Return to Main Menu, Reset to defaults. Apply Changes is a button on the Video page |
 | Exit / Quit Game | Small frame: "Are you sure?", Yes and No; Exit adds "Exit to Operating System" above the prompt |
 | Dialog: Reset Defaults | 0.80 black scrim; a 360x250 u claw frame with a centred title, explanation, five check boxes and two buttons |
@@ -722,10 +739,10 @@ wordmark except a full-screen page.
 
 Prey's HUD shows state through Tommy's body, not through numbers. There are no
 numerals for health or ammo: his silhouette fills with blood and spirit, ammo
-is a pair of slim meters, and the weapon bar appears only while switching. Tommy's equipment is
-drawn as steel-blue line art on dark translucent fills; red appears only for
-danger. The HUD GUIs are `guis/hud.gui` and its fragments in `guis/hud/`,
-`guis/mphud.gui`, `guis/scoreboard.gui` and `guis/cursor.gui`
+is a pair of slim meters, and the weapon bar appears only while switching.
+Tommy's equipment is drawn as steel-blue line art on dark translucent fills;
+red appears only for danger. The HUD GUIs are `guis/hud.gui` and its fragments
+in `guis/hud/`, `guis/mphud.gui`, `guis/scoreboard.gui` and `guis/cursor.gui`
 (`def/player.def:195-196`).
 
 ### 10.1 Single-player composition
@@ -852,7 +869,8 @@ The HUD plays no sound for weapon switches or pickups; the player entity plays
   and ribbed fins (`#F8F0C8`), a rotating compass dial, curved rung gauges for
   health (red to `#FFCC4D`), power (white to `#0099FF`) and velocity (green to
   red), red-orange claw crosshairs (`#FF2F00`) and alien-script status text in
-  `#FFFFF2`; the two low warnings are in the body face, `#FF3B1A`. The bone art shimmers on a 1000 ms `powersurge2` cycle.
+  `#FFFFF2`; the two low warnings are in the body face, `#FF3B1A`. The bone
+  art shimmers on a 1000 ms `powersurge2` cycle.
 - **Weapon-mounted GUIs** are drawn on the view models: the auto cannon's
   curved heat gauge, the Hider weapon's olive panel, the Soul Stripper's three
   canisters (plasma red-yellow, rail blue-white, sunbeam orange-cream, freeze
@@ -1069,8 +1087,9 @@ rust mean organic structure. Green and red keep their go and stop meanings.
 
 - Sphere devices write in the alien face; the Roadhouse writes in the body
   face. Status words run from 0.5 to 0.9, slogans from 1.0 to 2.0, keypad
-  keys at 1.4, keypad readouts at 1.8 and the code display at 3.8. Status words are mostly all
-  capitals ("FORCEFIELD ACTIVE"); case only shows after translation.
+  keys at 1.4, keypad readouts at 1.8 and the code display at 3.8. Status
+  words are mostly all capitals ("FORCEFIELD ACTIVE"); case only shows after
+  translation.
 - The alien face is case-insensitive, and its letter widths track the body
   face, so an alien string is 7–10% narrower than the same English string.
   Its digits are dotted round forms, unlike its letters.
@@ -1171,30 +1190,40 @@ square and scales with the canvas height, as the menu does.
 
 ### 12.1 Current additions
 
-openPREY's overrides in `content/basepr/pak0/` change eleven stock scripts.
-They extend the stock vocabulary rather than replace it:
+openPREY's overrides in `content/basepr/pak0/` change thirteen stock scripts:
+`mainmenu.gui` and its Options, MultiPrey and Mods fragments, `restart.gui`,
+`map/loading.gui`, `hud.gui` and its health, ammo, pickup and subtitle
+fragments, `subtitles.gui` and `weapons/sniperoverlay.gui`. `pak1` adds
+sixteen images, fifteen of them edge tiles. The overrides extend the stock
+vocabulary rather than replace it:
 
 - **Aspect expansion.** Wide and tall screens show more space rather than
-  black bars. The main menu draws the stock layers over black, as the stock
-  does: the star layers widen with the screen (`naturalmatscale` holds their
-  density), Earth continues through its window's edge slices
-  (`preymenu/earth_left`, `_right`, `_bottom`, whose materials repeat the
-  stock Earth stages so the drifting clouds run on across the join), and the
-  portal's view spans the screen (section 3; `canvasfill`, section 12.2).
-  `restart.gui` keeps the flat painting with its own edge slices
-  (`background_left`, `_right`, `_top`, `_bottom`). Every tile is generated
-  from the retail art by `tools/assets/generate_menu_backdrop_tiles.py`,
-  which continues each painting's Earth in polar strips about its disc so
-  the limb, glow and foreshortening carry on as painted; the side tiles are
-  the faithful ones, and the bottom tiles, seen only on screens taller than
-  4:3, are plainer. A colour fill over exactly the 4:3 canvas (the scrims
-  under dialogs, fades, `msg.gui`'s dimmed desktop) covers the expanded
-  canvas, so dialogs dim the whole screen. The loading screens
-  (`guis/map/loading.gui` and the session's fallback screen) compose the
-  levelshot or `guis/assets/loading/loading` with its `loading_left`/`_right`/
-  `_top`/`_bottom` tiles into one canvas-filling picture, as openQ4 does; the
-  composite is cached per source and window size. HUD groups and subtitles pin to screen
-  edges with `screenalignx` and `screenaligny`.
+  black bars.
+  - *Main menu.* The stock layers draw over black, as in the stock. The star
+    layers widen with the screen (`naturalmatscale` holds their density).
+    Earth continues through its window's edge slices (`preymenu/earth_left`,
+    `_right`, `_bottom`); their materials repeat the stock Earth stages, so
+    the drifting clouds run on across the join. The portal's view spans the
+    screen (section 3; `canvasfill`, section 12.2).
+  - *Death screen.* `restart.gui` keeps the flat painting with its own edge
+    slices (`background_left`, `_right`, `_top`, `_bottom`).
+  - *Edge tiles.* Every tile is generated from the retail art by
+    `tools/assets/generate_menu_backdrop_tiles.py`, which continues each
+    painting's Earth in polar strips about its disc, so the limb, glow and
+    foreshortening carry on as painted. The side tiles are the faithful
+    ones; the bottom tiles, seen only on screens taller than 4:3, are
+    plainer.
+  - *Colour fills.* A colour fill over exactly the 4:3 canvas (a dialog's
+    scrim, a fade, `msg.gui`'s dimmed desktop) covers the expanded canvas,
+    so dialogs dim the whole screen.
+  - *Loading screens.* `guis/map/loading.gui` and the session's fallback
+    screen compose the levelshot, or `guis/assets/loading/loading`, with its
+    `_left`, `_right`, `_top` and `_bottom` tiles into one picture that fills
+    the canvas, as openQ4 does. The composite is cached per source and
+    window size.
+  - *HUD and scope.* HUD groups and subtitles pin to screen edges with
+    `screenalignx` and `screenaligny` (section 10.1). The rifle scope's lens
+    covers the whole screen (section 10.8).
 - **Loading.** The level name comes from `gui::loading_levelname`, an optional
   author line sits under it (display face 0.3, `#D9D9FF` at 0.75), and
   per-map backgrounds can fill the canvas (`matcanvasfill`).
@@ -1219,23 +1248,28 @@ They extend the stock vocabulary rather than replace it:
     anti-aliasing, SSAO, bloom, HDR tone mapping, CRT, motion blur, colour
     saturation and contrast.
 
-  Six side tabs are 55 u tall (`textaligny 21`); the stock five were 66 u
-  (`textaligny 30`). A change that needs a video restart lights Apply Changes
-  on every page, as in the stock.
+  A side-tab column shares its height, less the 40 u margin, among its tabs:
+  the six Video tabs are 55 u tall (`textaligny 21`), where the stock three
+  were 110 u (`textaligny 30`). A change that needs a video restart lights
+  Apply Changes on every page, as in the stock.
 
 New pages and settings follow that precedent: build them from the stock plates,
 rows, tabs and faces, at stock sizes and colours, inside the claw frame.
 
 ### 12.2 The 3D backdrop and entrance
 
+**Status: specified, not built.** Until it is built the main menu draws the
+stock painted layers with the stock opening, as section 12.1 describes. This
+subsection is the design contract for the work and is written in the present
+tense, as the finished menu behaves. The Interface Atlas draws it to these
+numbers.
+
 openPREY's main menu draws the Sphere and Earth as lit 3D bodies under one
 camera, in place of the stock's painted layers. Out of game it opens close on
 the Sphere's shell, a little off-centre, then swings round the Sphere on a
 curve as it pulls away, quickly and smoothly, until the frame lays over the
 stock painting: the Sphere and Earth come to rest exactly where the 2D layers
-draw them, with Earth in front. This subsection is the design contract for
-that work, which is not yet built. The Interface Atlas draws it to these
-numbers.
+draw them, with Earth in front.
 
 The portal rim and its models, the wordmark, the arc, the bottom bar, every
 page and all of sections 4 to 7 stay stock. The star field stays the stock
@@ -1252,7 +1286,7 @@ measured from the stock art in its stock rectangles, on the 4:3 canvas.
 | Sun flare | Radius 32 at 357,224 | The stock `sol` window, 64x64 u at 325,192: 0.17 of the Sphere's radius. Additive, over the shell and under the plates |
 | Earth's limb | A circle of radius 1695 about 689,2069: through 99,480, 350,408 and 639,374 | The solid edge of `background2.tga` in its rectangle at 0,330 (640x150 u). Within 3 u |
 | Earth's glow | Fades out 45 u above the limb: 0.60 at 3 u, 0.35 at 10 u, 0.19 at 17 u, 0.09 at 28 u | The painting's halo |
-| Sorting | Earth in front of the Sphere | The stock draws stars, Sphere back, sun, Sphere front, then Earth (`guis/mainmenu.gui:299-323`), so Earth's limb and glow lie over the Sphere's foot: the Sphere's disc reaches y 408 where the limb beneath it stands at y 407 |
+| Sorting | Earth in front of the Sphere | The stock draws stars, Sphere back, sun, Sphere front, then Earth (`guis/mainmenu.gui:307-334`), so Earth's limb and glow lie over the Sphere's foot: the Sphere's disc reaches y 408 where the limb beneath it stands at y 407 |
 | Plates | 133, covering 17% of the disc | `background4.tga`. Each plate within 3 u of its painted place |
 | Green patches | Six, in three groups about 262,271, 455,303 and 426,352 | The shell layer |
 | Portal rim | Unchanged: glow edge on a circle of radius 368 about 404,192 | Appendix B |
@@ -1513,37 +1547,53 @@ Rules for project material:
   warm element.
 - The retail wordmark and box art belong to their owners. Project material
   reconstructs the style; it does not reuse the retail bitmaps.
-- `assets/icons/quake4.*`, `assets/splash/quake4_rt_bitmap_4001.bmp` and
-  `assets/cinematics/quake4-trailer-logo` are upstream Quake 4 material. Never
-  ship them in an openPREY package.
+- `assets/` holds only openPREY's own marks. The upstream Quake 4 icons,
+  splash and trailer logo were removed in `d39359088`; if a merge from
+  `openq4-upstream/main` brings them back, leave them out of `assets/` and
+  out of every package.
 
 ## 14. The Interface Atlas
 
 [`prey-ui/atlas/prey-interface-atlas.html`](prey-ui/atlas/prey-interface-atlas.html)
-is a single self-contained page of vector reconstructions: the home screen at
-several aspects with both backdrops (openPREY's 3D scene and the stock
-painting), the entrance in five frames with the scene in side elevation, the
-stock opening, hover and sub-menu growth, the brand marks, tokens, the three
-faces, the claw frame and every plate, the controls, the HUD, the rifle scope, the device
-families with the alien script's translation, loading and credits. Every
-measurement it draws comes from this document. Example rows, names and scene
-dressing are placeholders and are labelled as such.
+is a single self-contained page of vector reconstructions, drawn to this
+document's measurements. Its twelve sheets are numbered, and each names the
+sections it draws:
+
+| Sheet | Draws | Sections |
+| --- | --- | --- |
+| 01 Home screen | The home screen at 4:3, 16:9 and 21:9, out of game and in game, with both backdrops (the 3D scene of section 12.2 and the stock painting, drawn from one measured plate table so that they coincide at rest); the portal rim scaled to the screen's width; navigation hover; every page's growth from the bottom bar; the entrance on a timeline, in six frames and in plan and side elevation; the stock opening | 2, 3, 6, 8, 9, 12.2 |
+| 02 Brand | The wordmark's construction, the hawk in its spirit and flame treatments, the project name | 2, 13 |
+| 03 Tokens | Every colour token: text, furniture, world and brand, HUD | 4, 10.2 |
+| 04 Type | The three faces with their metrics, the alien script, the type ramp at 1 u to a pixel | 5 |
+| 05 Claw frame | The claw corner's construction and an assembled frame with its title bars | 6, Appendix B |
+| 06 Plates | Buttons at rest, hovered and unavailable; header bar, setting rows, group box, radio segments, title bars, picture frame | 6, 7 |
+| 07 Controls | The Options page at its stock size: top and side tabs joined to their page, openPREY's Video page row for row, stock binding rows, an example page of list, radio segments and check boxes, an edit field and the Reset Defaults dialog | 6, 7, 9, 12.1 |
+| 08 HUD | The single-player HUD with live gauges, weapon bar, pickups, damage arcs, tips, the eight crosshairs and the spirit walk | 10.1 to 10.5 |
+| 09 Rifle scope | The scope overlay: raising, zoom, heading and aspect | 10.8 |
+| 10 Scoreboard | Deathmatch and team layouts | 10.6 |
+| 11 Devices | A force-field console with its overlay stack and the translation reveal; one tile for each device family | 11 |
+| 12 Loading and credits | The loading screen and the credits' fly-in | 8, 9, 12.1 |
+
+Example rows, names and scene dressing are placeholders and are labelled as
+such. The home sheet labels the 3D backdrop as specified, not built.
 
 - It contains no retail art or captures. It draws in Prey's own three faces,
   as the TrueType tracings openPREY ships in `content/basepr/pak0/fonts`
   ([ttf-font-system.md](ttf-font-system.md)), subset to Latin and embedded as
   WOFF by `tools/assets/fonts/embed_atlas_fonts.py`; run that tool after any
   font rebuild. The same run refreshes the release package home and the web
-  faces under `assets/docs/fonts/` (section 13). Sizes follow the engine (a `textscale` of s is a 48 s u em),
-  and display text is lowered by the menu face's 6/48 em baseline lift. Only
-  page prose (Saira Condensed) and captions (IBM Plex Mono) load from Google
-  Fonts.
+  faces under `assets/docs/fonts/` (section 13). Sizes follow the engine (a
+  `textscale` of s is a 48 s u em), and display text is lowered by the menu
+  face's 6/48 em baseline lift. Only page prose (Saira Condensed) and
+  captions (IBM Plex Mono) load from Google Fonts.
 - Update it in the same change as this document whenever a measurement,
-  token or behaviour changes, and bump the version in both.
-- The file holds page content only; the artifact publisher supplies the
-  document wrapper. Opened from disk it therefore renders in quirks mode,
-  which is close enough for reference; the published copy is the standards-mode
-  rendering it is laid out for.
+  token or behaviour changes, and bump the version in both. The page's
+  header carries the version.
+- Keep the page's own text legible: the document's 4.5:1 contrast target
+  (section 4) applies to its captions and labels too.
+- The file is a complete standards-mode HTML document (doctype, `<head>` with
+  charset and viewport, `<body>`), so opened from disk it renders exactly as
+  the published copy does. Keep every `<style>` block in the head.
 - A published copy for sharing is kept as the "openPREY Interface Atlas"
   artifact; the tracked file is the source of truth.
 
@@ -1585,6 +1635,34 @@ are replaced by fixed values: zoom values 0.3, 0.7 and 1.0, yaw 0 and 40. One
 copy adds a mid-grey ground beneath the overlay, so that the lens and the
 multiplied reticle show. Each was started with `GuiEvent zoomIn` and captured
 at rest after 3.2 s; one more run was captured at about 150 and 450 ms.
+
+### Later captures
+
+Since 11 November 2026 a configuration file can drive the stock menu, so a
+capture no longer needs a private copy of `mainmenu.gui`:
+
+- `openq4_guiAction <window>` runs a window's `onAction`; with `release` it
+  runs `onActionRelease`, for the buttons that act on release (Resume Game,
+  the Profiles buttons, message-box buttons). Every ancestor of the window
+  must be visible, so switch to its tab first.
+- `openq4_guiSet <window>::<variable> <value>` sets a window variable:
+  `openq4_guiSet Options_TabContainer::activetab 2` shows the Video tab.
+  `openq4_guiSet gui::<key> <value>` sets a GUI state value, and
+  `openq4_guiGet` reads a window variable.
+- `openq4_guiCursor <x> <y>` places the pointer, which otherwise follows the
+  system mouse and is missing from an unattended capture.
+- `openq4_browser report`, `select` and `hover` read and drive the server
+  browser.
+
+Launch `.install/openPREY-client_x64.exe` in a window (`+set r_fullscreen 0`)
+with a private `fs_savepath` under `.tmp/<task>/` and `+set logFile 2` for a
+log. `wait` counts frames, and the menu draws several hundred a second: wait
+about 1500 before the first action and 3000 to outlast a two-second timeout.
+A fresh save path counts as a first launch, which detects a preset and
+overwrites renderer cvars given on the command line, so set those from the
+configuration file. A run that loads a map is muted with `s_volume 0`, not
+`s_noSound 1`, which several map scripts cannot survive
+([prey-subviews.md](prey-subviews.md)).
 
 ## Appendix B. Measured furniture
 
@@ -1639,57 +1717,108 @@ composition.
 
 ## Appendix C. Observations recorded during the survey
 
-These were seen while capturing and are recorded for follow-up; this document
-does not change them.
+These were seen while capturing and are recorded for follow-up. C.1 lists
+what is still open, C.2 what openPREY has since fixed and how each fix was
+checked, and C.3 slips in the retail data, which stay as shipped unless a
+change says otherwise (section 11.7). None of them changes a measurement in
+the sections above.
 
-- Open (front-end survey, 11 November 2026): the Reset Defaults dialog's Game
-  Options, Video and Audio boxes send `resetgame`, `resetvideo` and
-  `resetaudio`, which nothing handles (Controls and "Reset all settings"
-  work); which cvars each covers is still to be decided. The Controls
-  Profiles page's five commands are unhandled. MultiPrey's Game Key Status has
-  no value and `SetCDKey` no handler. Resume Game never shows: nothing sets
-  `gui::hasrecentsave` or handles `resumegame`. Updates says "Prey is up to
-  date" after two seconds whether or not a reply came. A long sound device
-  name still runs past the stock value column. The Mods list shows the
-  version from the build's base version, taken from upstream openQ4 tags
-  (0.13.2), and lists `basepr` itself.
-- The Earth layer's last texel column (`preymenu/background2.tga`) is brighter
-  than its neighbours. The stock hides it on the screen edge; under aspect
-  expansion the main menu's Earth window stops 1.5 texels short of it
-  (`matscalex 0.9985`) so it does not draw a line at the right slice's join.
+### C.1 Open
 
-- Fixed (`70b9d052a`): in openPREY's Options and MultiPrey pages, the four top
-  tab labels and the active side tab's label did not draw under OpenGL. They
-  were drawn, then covered by their own tab plates: `RB_STD_DrawView` split 2D
-  GUI views by material sort around the fog pass, so all `SS_GUI` text and
-  fills drew before any `SS_MEDIUM` image, and Prey's implicit `.tga` tab
-  plates are `SS_MEDIUM`. 2D views now draw in submission order, matching
-  retail and the Vulkan path. This also restores the tab labels in
-  `mpmain.gui` and `help.gui`, and text that sat under translucent plates
-  (setting labels, the bottom-bar "Return to Main Menu", the Action and Key
-  Assignment headings) now draws at full strength. The measurements in this
-  document come from retail scripts and art, not from those dimmed captures.
+- Front-end survey, 11 November 2026: a long sound device name still runs past
+  the stock value column. The Mods list shows the version from the build's
+  base version, taken from upstream openQ4 tags (0.13.2), and lists `basepr`
+  itself.
 - The Reset Defaults dialog's 0.80 scrim did not visibly darken the Options
   page beneath it in the capture. The scrim is a GUI fill drawn under image
   plates, so this is likely the same draw-order cause; it has not been
   rechecked since `70b9d052a`.
-- Fixed (uncommitted, `src/ui/Window.cpp`): `map game/feedingtowerb` stopped on
-  the map-start autosave with `idWindow::WriteToSaveGame: child 'elevatortext'
-  … 'guis/elevatorcall.gui' has an inconsistent parent`. The script defines two
-  text windows named `elevatortext`. Retail kept both, because a plain leaf
-  window became an `idSimpleWindow` that a later definition of the same name
-  could not replace; openPREY keeps every window as a full `idWindow`, so the
-  second definition was parsed into the first, which dropped the first text
-  line and cleared the window's parent pointer. A repeated name now makes a
-  second window where retail did, and a window that is redefined in place
-  keeps its parent and child id. The same rule applies to the first
-  `LoadListCap_Top` in the Load Game list and the first `bg_keeper2` in
-  `dialog_elhuit.gui`, which were being replaced the same way; those two have
-  not been checked in a capture.
-- Fixed (uncommitted, `src/game/gamesys/SaveGame.h`, `SaveGame.cpp` and
+- Applying a different performance preset while the menu is up
+  (`applyPerformancePreset balanced` from Enhanced, the command the Quality
+  Preset row runs) turns the main menu's backdrop white outside the 4:3 panel
+  and grey behind it until the next `vid_restart`. The Video reset avoids this
+  by applying only the detected preset, which is usually the current one.
+- openPREY's Post FX and Advanced FX pages sit on a 28 u row pitch with labels
+  at 0,0,200,25 and `textaligny 0`; stock pages use 30 u, 5,5,190,20 and −6.
+  Bring them to the stock pitch when they are next edited.
+- `hud/hud_lighter.guifragment` carries no `screenalign` keys, although the
+  health figures beside it are pinned to the bottom-left corner. On a wide
+  screen the lighter meter should therefore stay on the 4:3 canvas while the
+  figures move out; not yet checked in a capture.
+- The server browser's game-type tables are Quake 4's. Its game types,
+  `l_gameTypes` and `ServerBrowserGameType` in
+  `src/framework/async/ServerScan.cpp`, have no `deathmatch`. So a Prey
+  deathmatch server's type shows as the raw token "deathmatch", both in its
+  row and in `server_gameType` (seen in the server-details check of C.2). The
+  stock page's game-type filter (`MFS_FilterGametype`, `#str_20194`
+  "Any;Deathmatch;Team DM") sets `gui_filter_gameType` to 1 or 2, which
+  `IsFiltered` reads as `l_gameTypes`' "DM" and "Tourney". Neither matches
+  what a Prey server reports, so either choice hides every server. This is
+  read from the code and was not run. `RETAINED_CREATE_GAMETYPES`
+  (`src/framework/Session_menu.cpp`) offers the same twelve types.
+  `Session_GetLongMPGameTypeName` (`src/framework/Session.cpp`) still names
+  Quake 4's modes by `#str_41300` to `#str_41307`, which are Tommy's lines
+  too. They are unreachable for the same reason, and the first four can reuse
+  `#str_122046` to `#str_122049`.
+- The stock Find Servers page's players filter (`MFS_FilterPlayers`,
+  `#str_20197` "Show all;Hide full;Hide both") keeps Doom 3's values, where 2
+  hides full and empty servers. The engine reads `gui_filter_players` as Quake
+  4's two bits (`#str_200306`'s four choices), so "Hide both" hides only empty
+  servers.
+- A LAN scan lists a server once for each address that answers it. In the
+  server-details check of C.2, one dedicated server bound to `127.0.0.1:28004`
+  and `[::]:28004` came back six times: once on loopback and once per IPv6
+  link-local interface (`GetLANServers`' multicast sweep).
+- Startup logs warn about upstream Quake 4 front-end files
+  (`guis/arena_menu.gui`, `arena/openq4_campaign.cfg`,
+  `gfx/guis/mainmenu/level_edge_fade`) that do not exist in Prey.
+- `content/basepr/pak0` and `pak1` carry 640 GUI scripts and interface images
+  (123 scripts, 517 images) that are byte-identical to the retail files,
+  besides the 13 modified scripts and 16 new images, 15 of them edge tiles.
+
+### C.2 Fixed in openPREY
+
+Each entry names its commit, or is marked uncommitted where the fix was still
+in the working tree when version 1.14 was written. The engine entries are
+kept because the survey found them and the stock screens of sections 7 to 11
+depend on the behaviour they restore; `docs/dev/releases/unreleased.md`
+carries their summaries.
+
+- **Tab labels under OpenGL** (`70b9d052a`): in openPREY's Options and
+  MultiPrey pages, the four top tab labels and the active side tab's label did
+  not draw under OpenGL. They were drawn, then covered by their own tab
+  plates: `RB_STD_DrawView` split 2D GUI views by material sort around the fog
+  pass, so all `SS_GUI` text and fills drew before any `SS_MEDIUM` image, and
+  Prey's implicit `.tga` tab plates are `SS_MEDIUM`. 2D views now draw in
+  submission order, matching retail and the Vulkan path. This also restores
+  the tab labels in `mpmain.gui` and `help.gui`, and text that sat under
+  translucent plates (setting labels, the bottom-bar "Return to Main Menu",
+  the Action and Key Assignment headings) now draws at full strength. The
+  measurements in this document come from retail scripts and art, not from
+  those dimmed captures.
+- **The page outline under an active tab** (`2a032db7f`, `src/ui/Window.cpp`):
+  tab pages drew their `#BDCFE0` separator along all four edges
+  (`idWindow::DrawBorderAndCaption`), the edge under the active tab included,
+  which put a one-unit line between an active tab and its page, against the
+  rule of section 6. The separator now stops at the active tab's two ends.
+- **Repeated window names** (`src/ui/Window.cpp`): `map game/feedingtowerb`
+  stopped on the map-start autosave with `idWindow::WriteToSaveGame: child
+  'elevatortext' … 'guis/elevatorcall.gui' has an inconsistent parent`. The
+  script defines two text windows named `elevatortext`. Retail kept both,
+  because a plain leaf window became an `idSimpleWindow` that a later
+  definition of the same name could not replace; openPREY keeps every window
+  as a full `idWindow`, so the second definition was parsed into the first,
+  which dropped the first text line and cleared the window's parent pointer. A
+  repeated name now makes a second window where retail did, and a window that
+  is redefined in place keeps its parent and child id. The same rule applies
+  to the first `LoadListCap_Top` in the Load Game list and the first
+  `bg_keeper2` in `dialog_elhuit.gui`, which were being replaced the same way;
+  those two have not been checked in a capture.
+- **The autosave's payload version** (`9ef7412e2`;
+  `src/game/gamesys/SaveGame.h`, `SaveGame.cpp` and
   `src/framework/SaveGameReleases.h`): the same autosave did not reach disk.
-  The staged file was rejected with `has invalid payload footer marker`, and
-  a manual `savegame` failed the same way. The Prey game library stamped its
+  The staged file was rejected with `has invalid payload footer marker`, and a
+  manual `savegame` failed the same way. The Prey game library stamped its
   payload as compatibility version 2, while the engine appends the integrity
   trailer that it only expects on version 3 and later payloads, so it looked
   for the footer 16 bytes late. The library now stamps version 5, the version
@@ -1698,29 +1827,202 @@ does not change them.
   write their map-start autosave and a manual save, and `loadgame` restores
   them without save or GUI stream errors. See
   `docs/dev/savegame-reliability.md`.
-- `creditDef` lines in `mainmenu_creditcontent.guifragment` reuse names too
-  (`CreditWriting3` many times over). They carry scripts, so each repeat is
-  still parsed into the earlier window; the credits should be checked for
-  missing lines.
-- Startup logs warn about upstream Quake 4 front-end files
-  (`guis/arena_menu.gui`, `arena/openq4_campaign.cfg`,
-  `gfx/guis/mainmenu/level_edge_fade`) that do not exist in Prey.
-- `content/basepr/pak0` and `pak1` carry 642 GUI scripts and interface images
-  that are byte-identical to the retail files, besides the 11 modified scripts
-  and 13 new images, 12 of them edge slices.
-- `hud/hud_lighter.guifragment` carries no `screenalign` keys, although the
-  health figures beside it are pinned to the bottom-left corner. On a wide
-  screen the lighter meter should therefore stay on the 4:3 canvas while the
-  figures move out; not yet checked in a capture.
-- Tab pages draw their `#BDCFE0` separator along all four edges
-  (`idWindow::DrawBorderAndCaption`, `src/ui/Window.cpp:2549-2562`),
-  including the edge under the active tab. By the code, openPREY therefore
-  shows a one-unit line between an active tab and its page, against the rule
-  of section 6; this has not been confirmed in a capture. The fix is to leave
-  the separator out along the active tab's span.
-- openPREY's Post FX and Advanced FX pages sit on a 28 u row pitch with labels
-  at 0,0,200,25 and `textaligny 0`; stock pages use 30 u, 5,5,190,20 and −6.
-  Bring them to the stock pitch when they are next edited.
+- **Repeated names in the credits** (`2a032db7f`, `src/ui/Window.cpp`):
+  `creditDef` lines in `mainmenu_creditcontent.guifragment` reuse names too
+  (`CreditWriting3` twelve times over). They carry scripts, so each repeat was
+  still parsed into the earlier window, and only the last line of the Writing
+  section drew. Every repeated definition now makes its own window, as in
+  Prey's Doom 3 engine; a lookup by name finds the first. The full credits
+  have not been compared line by line with retail.
+- **Menu commands the engine ignored** (uncommitted,
+  `src/framework/Session_menu.cpp`; front-end survey, 11 November 2026): the
+  front-end commands that Prey's stock pages send and the engine ignored.
+  Retail `PREY.exe` 1.4 was read for each.
+  - Reset Defaults: `resetgame`, `resetvideo` and `resetaudio` now each
+    reset the cvars that their Options page shows, as listed in
+    `Session_ResetMainMenuCVars`. Retail reset every cvar flagged
+    `CVAR_GAME`, `CVAR_RENDERER` or `CVAR_SOUND`. In openPREY those flags also
+    cover the player name, server settings and developer cvars, so the reset
+    leaves those alone. After the Video reset the engine detects a preset, as
+    a first launch does (retail ran `setMachineSpec`). If a reset changes a
+    setting that needs a restart, Apply Changes lights. If it changes the
+    audio device, speakers, OpenAL or EAX, the sound system restarts.
+  - Controls > Profiles works as retail's did. Save As writes the bindings to
+    `<name>.binds` in the save path's game directory (`unbindall`, then
+    `bind` lines). Load runs only that file's binding commands, and Delete
+    removes the file. Path, wildcard, quote and command characters are dropped
+    from a profile name.
+  - MultiPrey > Player Settings no longer shows Game Key Status. openPREY has
+    no key check (its key state is always N/A) and no key prompt, so the row
+    is hidden. Auto Weapon Switch and the player-model block move up 30 u
+    (`mainmenu_multiplayer.guifragment`).
+  - Resume Game shows on the out-of-game menu while a loadable save exists,
+    and loads the newest save. Deleting the last save hides it again.
+  - Updates shows a waiting box ("Checking for updates...", with Cancel) until
+    a reply comes or two seconds pass. With no reply it now says that the
+    update server did not reply; it no longer says "Prey is up to date". The
+    version-reply prompt's missing `#str_104330` is now defined
+    (`src/framework/async/AsyncClient.cpp`, `strings/*_openprey.lang`).
+
+  Captures used `openq4_guiAction <window> release`, which runs a window's
+  `onActionRelease`. Resume Game, the Profiles buttons and the message box
+  buttons act on release.
+- **`onTabActivate` commands** (uncommitted, `src/ui/Window.cpp`): a tab's
+  `onTabActivate` command was never dispatched.
+  `idWindow::UpdateTabContainerState` ran the script, but the command stayed
+  on the tab window, and the tab's next `idWindow::Time` cleared it before it
+  could reach the GUI's pending commands. A click lost it the same way,
+  because the tab container returned an empty command once the tab changed.
+  The tab-flip sound, Player Settings' `modelscan`, Create Server's
+  `CheckUpdate ; MAPScan`, Find Servers' `UpdateServers ; CheckUpdate` and the
+  Profiles page's `scanforprofiles` were all lost. Now a tab switch moves the
+  commands that `onTabActivate` raises on the tab into the GUI's pending
+  commands, as timeline events' are, while the GUI is active. That includes a
+  named event that the tab answers itself, as Find Servers does. A click
+  returns them at once. The first tab state, set when the GUI initialises, is
+  not a switch: its script still runs, but its commands are dropped, so
+  opening a menu plays no tab-flip sound and starts no scan. `gui_debugScript
+  3` logs each queued command (`GUI: onTabActivate window=... queues "..."`).
+  Checked in the windowed client from `.install/` by switching tabs with
+  `openq4_guiSet <container>::activetab N`: the Options tabs, Controls >
+  Profiles, and MultiPrey's Player Settings and Create Server each played the
+  tab-flip sound (`s_showStartSound 1`), and Create Server sent its version
+  check. The click path was checked only by reading the code. The session
+  still lists profiles whenever the menu opens, because a menu reopened on the
+  Profiles tab does not switch to it.
+- **Commands raised through a script's `namedEvent`** (uncommitted,
+  `src/ui/GuiScript.cpp`): a command raised on another window through a
+  script's `namedEvent` was lost. A named event runs the script of each window
+  that answers it, and a `set "cmd"` there raises the command on the answering
+  window, whose next `idWindow::Time` cleared it. Opening MultiPrey runs
+  `namedEvent "Multiplayer_FindServers::ScanForServers"` from
+  `Multiplayer_AnimIn`, which raised `UpdateServers ; CheckUpdate` on
+  `Multiplayer_FindServers`. The unqualified form lost commands the same way:
+  Apply Changes on Options > Video runs `namedEvent "VidRestart"`, and
+  `Options_Video` raised `video restart`, so neither Apply Changes nor leaving
+  Options restarted the video mode. Now `Script_NamedEvent` queues the
+  commands that the event raises on the windows it reaches, as timeline
+  events' are, while the GUI is active. That covers the named window and its
+  children, or the whole GUI for the unqualified form. The sending window
+  keeps its own commands, which its script's caller returns. A window that
+  answers its own event, as Find Servers' `onTabActivate` does, therefore
+  sends them once. Commands already on a window before the event stay where
+  they were. `gui_debugScript 3` logs each queued command (`GUI: namedEvent
+  '...' window=... queues "..."`). Checked in the windowed client from
+  `.install/`. Opening MultiPrey (`openq4_guiAction MainOG_Title4`) queued
+  `UpdateServers ; CheckUpdate` from `Multiplayer_AnimIn`. Those ran before
+  its own `modelscan`, and the client sent its version check (`developer 1`).
+  Apply Changes (`openq4_guiAction OVN_ApplyChanges`) ran one `vid_restart`.
+  Switching back to the Find Servers tab queued its commands once, through
+  `onTabActivate` alone. The queueing now lives in
+  `idUserInterfaceLocal::RunNamedEvent`, which the next entry shares.
+- **World-GUI commands for events the game sends** (uncommitted,
+  `src/ui/UserInterface.cpp`): the commands that a world GUI raised for a
+  named event sent by the game were lost. `idEntity::CallNamedEvent`
+  (`src/game/EntityAdditions.cpp`) sends the event through
+  `idUserInterface::HandleNamedEvent`, then calls `HandleEvent( SE_NONE )` to
+  collect the commands, as Human Head's comment there expects. The commands
+  landed on the answering window, usually the Desktop, and the desktop's
+  `HandleEvent` clears its own `cmd` first, so the call returned nothing. Lost
+  were an AI-used console's `AIUse` (`activate ; play
+  console_generic_activate` on the alarm, forcefield, wallwalk, portal and
+  generic consoles, `spin` on the slots), `ScriptUse`
+  (`generic_unlock_1.gui`), `Death` (`noninteract_d.gui`), the roadhouse
+  games' `TurnOn` and `Update` (`reset`, `play console_game_gameover`), the
+  arcade game's `TurnOff` (`reset`) and the jukebox's `TurnOn`,
+  `TurnOnRoadhouse` and `TurnOff` (`turnon`, `turnoff`). In retail `PREY.exe`
+  1.4, `idUserInterfaceLocal::HandleNamedEvent` only runs the desktop's
+  `idWindow::RunNamedEvent`. That function clears the window's `cmd`, runs the
+  event on the window and its children, then appends what the window raised to
+  the GUI's pending commands, with no check that the GUI is active. Now
+  `HandleNamedEvent` queues the commands that the event raises on any window,
+  whether or not the GUI is active, as retail did. An entity GUI is active
+  only while the player points at it (`idPlayer::UpdateFocus`), and an AI uses
+  a console the player need not be looking at. Commands already on a window
+  before the event stay where they were; retail cleared them. The script
+  `namedEvent` (previous entry) goes through the same function, keeping its
+  sender exception and its active-GUI condition, so nothing is queued twice.
+  Of the shipped GUIs, only world GUIs answer a game-sent named event with a
+  command. No HUD fragment does, so nothing piles up on the HUD, whose
+  commands nothing reads, and the session's events to the menus raise none.
+  Checked in the windowed client from `.install/` with `gui_debugScript 3` and
+  `s_showStartSound 1`. On `game/harvesterb`, `script
+  "map_harvesterb::OutdoorBridgeCycle();"` sent `ScriptUse` to
+  `hrvBBridgeConsole`: `play console_generic_deactivate` was queued once and
+  the sound played once. On `game/roadhouse`, `ArcadeGamesTurnOff()` queued
+  the arcade game's `reset`, `JukeBoxPlayAbduction()` queued `turnon`, and
+  `UFOFlyBy1()` queued `turnoff` on both jukebox GUIs, after which the jukebox
+  stopped its track. No command was logged as not handled. Opening MultiPrey
+  and Apply Changes were checked again: one version check and one
+  `vid_restart`, and the menus queued nothing that the session sent.
+- **Server browser status strings** (uncommitted,
+  `content/basepr/pak0/strings/*_openprey.lang`): the server browser's status
+  line and progress notice (`idServerScan::UpdateBrowserStatus` and
+  `UpdateLoadProgress`) used Quake 4 string IDs that Prey's language files
+  lack. Retail Prey has no strings for them, because its browser showed no
+  scan status. During a scan the lookup warned "Unknown string id" every frame
+  for `#str_107298` and `#str_107736`, about 1,500 times in the first second
+  after MultiPrey opened. `#str_42861` (the idle count) and `#str_41502` (the
+  mod filter's "All") are five-digit IDs, which the lookup does not warn
+  about, so they showed as the bare ID. The English, French, Italian and
+  Spanish `*_openprey.lang` files now supply them under Quake 4's IDs:
+  `#str_107293`, `#str_107294` ("Scanned %d Prey servers"), `#str_107297`,
+  `#str_107298`, `#str_107736`, `#str_42861` and `#str_41502`. They also
+  supply the favorite labels `#str_200292` and `#str_200293`, which warned
+  when the scan published the selection. Checked in the windowed client from
+  `.install/`. Opening MultiPrey (`openq4_guiAction MainOG_Title4`) logged no
+  Unknown string id warnings, and `openq4_browser report` showed "Getting list
+  of servers...", "Scanning - Found: 0" and the filter "All". A LAN scan
+  (`openq4_guiSet gui::lanSet 1` before opening) showed "Scanning for LAN
+  servers...", then "Scanned 0 Prey servers" and "Showing 0 out of 0 servers".
+  No server answered, so "Scanning %d/%d: %s" and the LAN's "Scanning - Found:
+  %s" with a server name were not shown.
+- **Server detail strings** (uncommitted,
+  `src/framework/async/ServerScan.cpp`,
+  `content/basepr/pak0/strings/*_openprey.lang`): a listed or selected
+  server's details looked up Quake 4 string IDs that Prey's files lack, or
+  that mean something else in them. The tooltip's settings labels
+  (`idServerScan::GetServerDetails`) warned "Unknown string id": Map, Yes and
+  No (`#str_107702` to `#str_107704`), Time Limit (`#str_107659`), Pure
+  (`#str_107662`), Team Damage (`#str_107664`), Auto Balance Teams
+  (`#str_107666`) and Allow Spectators (`#str_104254`). The English, French,
+  Italian and Spanish `*_openprey.lang` files now supply them under those IDs,
+  in Prey's mixed case: retail Prey writes the same terms "Yes", "Time Limit",
+  "Team Damage" and "Allow Spectators" (`#str_20125`, `#str_20154`,
+  `#str_20151`, `#str_04254`). The selected server's `server_passworded` used
+  Quake 4's "PASSWORD ENABLED" (`#str_200933`); it now uses retail's own
+  `#str_41114`, "PASSWORD REQUIRED", which retail `PREY.exe` 1.4 sets for the
+  stock page's "Passworded:" row. Quake 4's players-filter choices
+  (`#str_200306`) are named only in a comment, so no lookup ever asked for
+  them. Several game-type and limit labels collided with Prey's own IDs. Duel,
+  Clan Arena, Freeze Tag and Red Rover (`#str_41300` to `#str_41303`) and
+  Round Limit (`#str_41404`) are Tommy's subtitle lines in retail's
+  `strings/english001.lang`. DeadZone's Control Time (`#str_122008`) is
+  openPREY's own "Post Anti-Aliasing". The DeadZone type (`#str_42860`) is a
+  five-digit ID that Prey lacks, so it showed bare. The code now names them by
+  openPREY IDs: `#str_122046` to `#str_122049` for the four types,
+  `#str_122050` Round Limit, `#str_122051` Control Time, and the existing
+  `#str_122001` for DeadZone. None of these types can come from a Prey server.
+  Prey's game library offers only `singleplayer`, `deathmatch` and `Team DM`
+  (`si_gameTypeArgs`), and the cvar's value list turns any other value into
+  `singleplayer`. Retail's filter likewise offers only "Any;Deathmatch;Team
+  DM" (`#str_20194`). The Quake 4 rows stay, as upstream has them, but they
+  can still show as the retained Join page's game-type filter names
+  (`idServerScan::GameTypeFilterName`). Checked in the windowed client from
+  `.install/` against `.install/openPREY-ded_x64.exe` on `game/dmshuttle1`
+  (`net_ip 127.0.0.1`, `si_usePass 1`). After `openq4_guiSet gui::lanSet 1`,
+  `openq4_guiAction MainOG_Title4`, `openq4_browser select 0`, `openq4_browser
+  hover 0` and `openq4_browser report`, the client's `qconsole.log` held no
+  Unknown string id lines. The selection read "PASSWORD REQUIRED". The tooltip
+  read "Map: Shuttle 1", "Time Limit: 10", "Frag Limit: 10", "Team Damage:
+  No", "Auto Balance Teams: No", "Pure: Yes" and "Allow Spectators: Yes".
+
+### C.3 Retail data
+
+- The Earth layer's last texel column (`preymenu/background2.tga`) is brighter
+  than its neighbours. The stock hides it on the screen edge; under aspect
+  expansion the main menu's Earth window stops 1.5 texels short of it
+  (`matscalex 0.9985`) so it does not draw a line at the right slice's join.
 - Retail authoring slips: `matcolor "1 1sd 0 1"` on the blackjack Stay hover
   (`guis/roadhouse/blackjack.gui:289`); `COLOR_BRIGHTORANGE_INVIS` defined
   with alpha 1.00 (`guis/hunterhand.gui:19`); bet-arrow hover tints a window
@@ -1728,13 +2030,84 @@ does not change them.
   `guis/biolabs/droid_recharge.gui:448`; the multiplayer weapon bar sits about
   39 u left of centre; the red team heading is 14 u tall and the blue 15 u;
   the out-of-game Load Game entry sets its own `forecolor` on hover, so its
-  label never brightens (`guis/mainmenu.gui:514`); Save Game re-enables its
+  label never brightens (`guis/mainmenu.gui:531`); Save Game re-enables its
   navigation entry with `noEvents "0"` where the other pages set `"1"`
   (`guis/mainmenu/mainmenu_savegame.guifragment:36`).
 - Retail references `guis/countdown.gui` and `guis/crane.gui`
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.15, 13 November 2026
+
+A second pass, which checks every path and line citation in the document
+against the repository and the retail archives, and the atlas against the
+pages it draws.
+
+- Section 13 no longer forbids shipping Quake 4 icons, a splash and a
+  trailer logo that left `assets/` in `d39359088`; the rule now covers a
+  merge that brings them back. Every other repository path the document
+  names exists, and every line citation falls inside its file.
+- Appendix A records how captures are driven since 11 November: the
+  `openq4_gui*` and `openq4_browser` commands, the frame-counting `wait`,
+  the first-launch preset and the `s_noSound` trap.
+- The contents list sections 10.8 and 11.4, which other documents cite.
+
+The Interface Atlas corrects three drawings that had drifted from this
+document:
+
+- Its stock backdrop was an approximation with random plates, a Sphere
+  184 u in radius about 357,224.5 and Earth's limb on the glow's circle.
+  It is now drawn from the measured plate table through the rest camera,
+  as the 3D rest frame is, so switching backdrops moves nothing (section
+  12.2, rest composition).
+- Its portal rim kept its 4:3 size on wide screens. It now grows with the
+  screen's width about the canvas centre, as section 3 describes the
+  build.
+- Its Controls sheet showed a shortened Options page whose Video tab mixed
+  openPREY's six side tabs with the stock Texture Quality segments. It is
+  now the page at its stock size, with a 0.50 body, the six tabs 55 u
+  tall and openPREY's Video page row for row (section 12.1); the radio
+  segments and check boxes move to an example page.
+
+Its faint captions inside drawings take the 4.5:1 colour, and its brand
+rules follow section 13.
+
+### Version 1.14, 13 November 2026
+
+An editorial pass that checks the document against the repository and the
+retail archives; no measurement of the stock interface changes.
+
+- State: the header gains a table of what is built and what is only
+  specified. Sections 3, 8, 9 and 12.2 no longer describe the 3D backdrop and
+  its entrance as if they were in the build; section 12.2 opens with its
+  status.
+- Counts, recounted against the retail archives: openPREY overrides thirteen
+  stock scripts, not eleven, and adds sixteen images (sections 1 and 12.1,
+  Appendix C); `clickin` is used 128 times and `tabflip` 46 in openPREY's
+  copies, and `tick` 18 (section 8).
+- Side tabs: the stock Video page had three side tabs 110 u tall, not five
+  at 66 u (section 12.1). The engine shares a column's height, less its
+  margin, among its tabs.
+- Section 3 lists the aspect-expansion values and keys in a table, with
+  `naturalmatscale`, `canvasfill` and `matcanvasfill`. Section 12.1's
+  aspect-expansion entry is split by screen.
+- Line references into openPREY's `guis/mainmenu.gui` follow the rebuilt
+  backdrop (sections 8 and 12.2, Appendix C).
+- Section 14 lists the atlas's twelve sheets with the sections each draws,
+  the Scoreboard sheet among them, and corrects the entrance to six frames.
+- Appendix C is sorted into open observations, fixes and retail slips. Two
+  entries that version 1.13 had already fixed are marked so (the tab page's
+  outline under the active tab, and the credits' repeated window names), and
+  the two fixes committed in `9ef7412e2` and `2a032db7f` no longer read as
+  uncommitted.
+
+The Interface Atlas numbers its sheets, keeps its sheet list in view while
+scrolling and marks the sheet being read, enlarges its headings, raises its
+faintest text to the 4.5:1 target, separates the token groups, adds the three
+tokens its sheet had left out (`prey.text.headingInk`, `prey.heading.band`
+and `hud.text`), and labels the 3D backdrop and entrance as specified, not
+built.
 
 ### Version 1.13, 11 November 2026
 

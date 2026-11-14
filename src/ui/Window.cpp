@@ -2070,7 +2070,11 @@ const char *idWindow::HandleEvent(const sysEvent_t *event, bool *updateVisuals) 
 						}
 						UpdateTabContainerState( true );
 						if ( previousTab != activeTabIndex ) {
-							return "";
+							// The click returns the new tab's onTabActivate
+							// commands, which wait in the pending commands.
+							gui->GetReturnCmd() = gui->GetPendingCmd();
+							gui->GetPendingCmd().Clear();
+							return gui->GetReturnCmd();
 						}
 					}
 				}
@@ -4521,6 +4525,9 @@ void idWindow::UpdateTabContainerState( bool runActivateScript ) {
 	if ( tabContainerInitialized && requested == activeTabIndex ) {
 		return;
 	}
+	// The first state, set as the GUI is initialised, shows a tab without
+	// switching to it.
+	const bool tabSwitch = tabContainerInitialized;
 	activeTabIndex = requested;
 	tabContainerInitialized = true;
 	idWinVar *activeTabVar = GetWinVarByName( "activetab", false );
@@ -4562,7 +4569,25 @@ void idWindow::UpdateTabContainerState( bool runActivateScript ) {
 		}
 	}
 	if ( activeTab != NULL && runActivateScript ) {
+		// openPREY: onTabActivate raises its commands (set "cmd", or a named
+		// event the tab answers) in the tab's own cmd, which the tab's next
+		// Time() cleared unread: no tab-flip sound, modelscan, MAPScan or
+		// scanforprofiles. Queue them as a timeline event's are, for the GUI's
+		// next HandleEvent to return, on a switch while the GUI is active.
+		activeTab->cmd = "";
 		activeTab->RunScript( ON_TABACTIVATE );
+		if ( tabSwitch && gui != NULL && gui->Active() && activeTab->cmd.Length() ) {
+			if ( gui_debugScript.GetInteger() > 2 ) {
+				common->Printf( "GUI: onTabActivate window=%s queues \"%s\" (gui=%s)\n",
+					activeTab->GetName(), activeTab->cmd.c_str(), gui->GetSourceFile() );
+			}
+			idStr &pendingCmd = gui->GetPendingCmd();
+			if ( pendingCmd.Length() ) {
+				pendingCmd += " ; ";
+			}
+			pendingCmd += activeTab->cmd;
+		}
+		activeTab->cmd = "";
 	}
 }
 

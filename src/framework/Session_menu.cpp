@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "NativeInputDispatch.h"
 #include "Session_local.h"
+#include "CVarDefaults.h"
 #include "PreyGameCompat.h"
 #include "NativeInputPublications.h"
 #include "../ui/Rectangle.h"
@@ -500,6 +501,7 @@ static const float MAINMENU_CORPSE_TIME_PRESET_VALUES[] = {
 
 static bool ApplyMainMenuSettingsScrollPage( idUserInterface *gui, const char *pageName, bool requireVisiblePage );
 static void SyncMainMenuSettingsScrollPages( idUserInterface *gui );
+static void Session_ScanControlProfiles( idUserInterface *gui );
 
 static int MenuControllerAbs( int value ) {
 	return value < 0 ? -value : value;
@@ -3977,6 +3979,10 @@ void idSessionLocal::SetSaveGameGuiVars( void ) {
 	}
 	guiActive->DeleteStateVar( va("loadgame_item_%i", fileList.Num()) );
 	guiActive->SetStateInt( "loadgame_listdef_count", fileList.Num() );
+	// OPENPREY: Resume Game follows the list, so deleting the last save hides it.
+	if ( guiActive == guiMainMenu ) {
+		guiMainMenu->SetStateBool( "hasrecentsave", !mapSpawned && fileList.Num() > 0 );
+	}
 
 	guiActive->SetStateString( "loadgame_sel_0", "-1" );
 	guiActive->SetStateString( "loadgame_shot", "gfx/guis/loadscreens/generic" );
@@ -4114,12 +4120,27 @@ void idSessionLocal::SetMainMenuGuiVars( bool refreshCatalogs ) {
 		guiMainMenu->SetKeyBindingNames();
 		PopulateMainMenuAudioDeviceChoices( guiMainMenu );
 		PopulateMainMenuDisplayChoices( guiMainMenu );
+		// OPENPREY: the Profiles tab asks for scanforprofiles when it is
+		// switched to, but a menu reopened on that tab does not switch to it,
+		// so list the profiles here too (Appendix C of
+		// docs/dev/prey-ui-visual-design.md).
+		Session_ScanControlProfiles( guiMainMenu );
 	}
 
 	// flag for in-game menu
 	const char *inGameState = mapSpawned ? ( IsMultiplayer() ? "2" : "1" ) : "0";
 	guiMainMenu->SetStateString( "inGame", inGameState );
 	guiMainMenu->SetStateString( "ingame", inGameState );
+	// OPENPREY: retail shows Resume Game on the out-of-game menu while a
+	// loadable save exists; resumegame loads the newest.
+	bool hasRecentSave = false;
+	if ( !mapSpawned ) {
+		idStrList saves;
+		idList<fileTIME_T> times;
+		GetSaveGameList( saves, times );
+		hasRecentSave = saves.Num() > 0;
+	}
+	guiMainMenu->SetStateBool( "hasrecentsave", hasRecentSave );
 	// the in-game Difficulty page opens on the difficulty being played
 	guiMainMenu->SetStateInt( "currentSkill", idMath::ClampInt( 0, 4, cvarSystem->GetCVarInteger( "g_skill" ) ) );
 
@@ -4597,6 +4618,266 @@ static bool Session_ConnectToTypedAddress( const char *text, idStr &error ) {
 	connectArgs.AppendArg( Sys_NetAdrToString( address ) );
 	cmdSystem->BufferCommandArgs( CMD_EXEC_NOW, connectArgs );
 	return true;
+}
+
+/*
+==============
+Session_ResetMainMenuCVars
+
+OPENPREY: the Reset Defaults dialog's Game Options, Video and Audio boxes
+(resetgame, resetvideo, resetaudio). Retail PREY.exe reset every cvar carrying
+CVAR_GAME, CVAR_RENDERER or CVAR_SOUND; here each box resets the cvars its
+Options page shows, so the player name, server settings, developer cvars and
+other unlisted state keep their values. Keep these lists in step with the
+`cvar` keys under Options_GameOptions, Options_Video and Options_Audio in
+guis/mainmenu/mainmenu_options.guifragment.
+==============
+*/
+static const char *const MAINMENU_RESET_GAME_CVARS[] = {
+	// Look
+	"g_decals", "g_showHud", "ui_showGun", "g_subtitles", "com_profanity", "g_crosshair", "g_useDDA",
+	// Feel
+	"m_pitch", "m_smooth", "sensitivity", "in_freelook", "in_toggleZoom"
+};
+
+static const char *const MAINMENU_RESET_VIDEO_CVARS[] = {
+	// Video (r_mode and the custom size stand behind Video Resolution)
+	"com_performancePreset", "r_mode", "r_fullscreen", "r_screenFraction", "r_swapInterval",
+	"r_brightness", "r_gamma",
+	// Display
+	"r_renderApi", "r_screen", "r_fullscreenDesktop", "r_borderless", "r_displayRefresh", "com_maxfps",
+	"r_multiScreen", "r_windowWidth", "r_windowHeight", "r_customWidth", "r_customHeight",
+	// Advanced 1 and 2
+	"r_skipNewAmbient", "r_shaderLevel", "r_shadows", "r_useShadowMap", "r_skipSpecular", "r_skipBump",
+	"r_correctspecular", "r_normalizebumpmap", "r_skipGlowOverlay", "r_useFastSkinning", "image_anisotropy",
+	// Post FX and Advanced FX
+	"r_multiSamples", "r_postAA", "r_ssao", "r_bloom", "r_bloomIntensity", "r_crt", "r_hdrToneMap",
+	"r_hdrExposure", "r_motionBlur", "r_msaaAlphaToCoverage", "r_ssaoRadius", "r_ssaoIntensity",
+	"r_bloomRadius", "r_hdrWhitePoint", "r_hdrSaturation", "r_hdrContrast", "r_crtAmount", "r_crtChromatic"
+};
+
+// The video cvars whose rows light Apply Changes (NeedVidRestart) when changed.
+static const char *const MAINMENU_RESET_VIDEO_RESTART_CVARS[] = {
+	"r_mode", "r_customWidth", "r_customHeight", "r_fullscreen", "r_screen", "r_fullscreenDesktop",
+	"r_borderless", "r_displayRefresh", "r_multiScreen", "r_windowWidth", "r_windowHeight", "r_multiSamples"
+};
+
+static const char *const MAINMENU_RESET_AUDIO_CVARS[] = {
+	"s_volume_dB", "s_musicvolume_dB", "g_levelloadmusic", "s_useOpenAL", "s_numberOfSpeakers",
+	"s_reverse", "s_deviceName", "s_useEAXReverb"
+};
+
+// The audio cvars the sound system reads only when it starts.
+static const char *const MAINMENU_RESET_AUDIO_RESTART_CVARS[] = {
+	"s_useOpenAL", "s_numberOfSpeakers", "s_deviceName", "s_useEAXReverb"
+};
+
+#define MAINMENU_RESET_COUNT( list ) static_cast<int>( sizeof( list ) / sizeof( list[0] ) )
+
+static void Session_ResetMainMenuCVars( const char *const *names, int count ) {
+	for ( int i = 0; i < count; i++ ) {
+		idStr value;
+		if ( cvarSystem->Find( names[ i ] ) != NULL && CVar_ReadDefault( names[ i ], value ) ) {
+			cvarSystem->SetCVarString( names[ i ], value.c_str() );
+		}
+	}
+}
+
+static void Session_SnapshotMainMenuCVars( const char *const *names, int count, idStrList &values ) {
+	values.Clear();
+	for ( int i = 0; i < count; i++ ) {
+		values.Append( cvarSystem->GetCVarString( names[ i ] ) );
+	}
+}
+
+static bool Session_MainMenuCVarsChanged( const char *const *names, int count, const idStrList &values ) {
+	for ( int i = 0; i < count && i < values.Num(); i++ ) {
+		if ( values[ i ].Cmp( cvarSystem->GetCVarString( names[ i ] ) ) != 0 ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void Session_ResetMainMenuGameOptions( idUserInterface *gui ) {
+	Session_ResetMainMenuCVars( MAINMENU_RESET_GAME_CVARS, MAINMENU_RESET_COUNT( MAINMENU_RESET_GAME_CVARS ) );
+	if ( gui != NULL ) {
+		gui->HandleNamedEvent( "cvar read game" );
+		gui->StateChanged( common->GetPresentationTime() );
+	}
+}
+
+static void Session_ResetMainMenuVideo( idUserInterface *gui ) {
+	idStrList before;
+	Session_SnapshotMainMenuCVars( MAINMENU_RESET_VIDEO_RESTART_CVARS, MAINMENU_RESET_COUNT( MAINMENU_RESET_VIDEO_RESTART_CVARS ), before );
+	Session_ResetMainMenuCVars( MAINMENU_RESET_VIDEO_CVARS, MAINMENU_RESET_COUNT( MAINMENU_RESET_VIDEO_CVARS ) );
+	// A first launch applies the preset it detects (retail ran setMachineSpec
+	// here). Where detection cannot read the machine it changes nothing, and
+	// the default preset the reset selected is applied instead.
+	idCVar *presetCVar = cvarSystem->Find( "com_performancePreset" );
+	if ( presetCVar != NULL ) {
+		presetCVar->ClearModified();
+	}
+	cmdSystem->BufferCommandText( CMD_EXEC_NOW, "autoDetectPerformancePreset\n" );
+	if ( presetCVar == NULL || !presetCVar->IsModified() ) {
+		cmdSystem->BufferCommandText( CMD_EXEC_NOW, "applyPerformancePreset\n" );
+	}
+	if ( gui == NULL ) {
+		return;
+	}
+	gui->SetStateInt( "com_machineSpec", com_machineSpec.GetInteger() );
+	gui->HandleNamedEvent( "cvar read render" );
+	RefreshMainMenuPerformancePresetGuiVars( gui );
+	if ( Session_MainMenuCVarsChanged( MAINMENU_RESET_VIDEO_RESTART_CVARS, MAINMENU_RESET_COUNT( MAINMENU_RESET_VIDEO_RESTART_CVARS ), before ) ) {
+		// As the stock rows do: Apply Changes lights, and leaving Options restarts.
+		gui->HandleNamedEvent( "NeedVidRestart" );
+	}
+}
+
+static void Session_ResetMainMenuAudio( idUserInterface *gui ) {
+	idStrList before;
+	Session_SnapshotMainMenuCVars( MAINMENU_RESET_AUDIO_RESTART_CVARS, MAINMENU_RESET_COUNT( MAINMENU_RESET_AUDIO_RESTART_CVARS ), before );
+	Session_ResetMainMenuCVars( MAINMENU_RESET_AUDIO_CVARS, MAINMENU_RESET_COUNT( MAINMENU_RESET_AUDIO_CVARS ) );
+	if ( Session_MainMenuCVarsChanged( MAINMENU_RESET_AUDIO_RESTART_CVARS, MAINMENU_RESET_COUNT( MAINMENU_RESET_AUDIO_RESTART_CVARS ), before ) ) {
+		cmdSystem->BufferCommandText( CMD_EXEC_NOW, "s_restart\n" );
+	}
+	if ( gui != NULL ) {
+		gui->HandleNamedEvent( "cvar read sound" );
+		Session_RefreshMainMenuAudioState( gui );
+	}
+}
+
+#undef MAINMENU_RESET_COUNT
+
+/*
+==============
+Session_ControlProfile*
+
+OPENPREY: Controls > Profiles, as retail PREY.exe kept it. A profile is
+"<name>.binds" in the game directory of the save path and holds the key
+bindings as `unbindall` followed by `bind` lines (idKeyInput::WriteBindings,
+retail's writebindings). Loading runs only those binding commands, so a
+profile cannot carry anything else into the console.
+==============
+*/
+static const char *const CONTROL_PROFILE_EXTENSION = ".binds";
+static const int CONTROL_PROFILE_NAME_CHARS = 32;	// the name field's maxchars
+
+// A profile name is also its file name: path, wildcard, quote and command
+// characters are dropped, as are surrounding spaces.
+static bool Session_ControlProfileName( const char *text, idStr &name ) {
+	name.Clear();
+	for ( const char *c = text != NULL ? text : ""; *c != '\0' && name.Length() < CONTROL_PROFILE_NAME_CHARS; c++ ) {
+		const unsigned char ch = static_cast<unsigned char>( *c );
+		if ( ch < 32 || ch == 127 || strchr( "\\/:*?\"<>|.;%$", ch ) != NULL ) {
+			continue;
+		}
+		name.Append( static_cast<char>( ch ) );
+	}
+	name.StripLeading( ' ' );
+	name.StripTrailing( ' ' );
+	return name.Length() > 0;
+}
+
+static idStr Session_SelectedControlProfile( idUserInterface *gui ) {
+	if ( gui == NULL ) {
+		return "";
+	}
+	const int selected = gui->State().GetInt( "profileList_sel_0", "-1" );
+	idStr name;
+	if ( selected < 0 || !Session_ControlProfileName( gui->State().GetString( va( "profileList_item_%i", selected ) ), name ) ) {
+		return "";
+	}
+	return name;
+}
+
+static void Session_ScanControlProfiles( idUserInterface *gui ) {
+	if ( gui == NULL ) {
+		return;
+	}
+	idStrList names;
+	idFileList *files = fileSystem->ListFiles( "", CONTROL_PROFILE_EXTENSION );
+	if ( files != NULL ) {
+		for ( int i = 0; i < files->GetNumFiles(); i++ ) {
+			idStr file = files->GetFile( i );
+			file.StripLeading( '/' );
+			file.StripFileExtension();
+			idStr name;
+			// Only names a profile could have been saved under, once each.
+			if ( Session_ControlProfileName( file.c_str(), name ) && name.Cmp( file ) == 0 && names.FindIndex( name ) < 0 ) {
+				names.Append( name );
+			}
+		}
+		fileSystem->FreeFileList( files );
+	}
+	names.Sort();
+	for ( int i = 0; i < names.Num(); i++ ) {
+		gui->SetStateString( va( "profileList_item_%i", i ), names[ i ].c_str() );
+	}
+	gui->DeleteStateVar( va( "profileList_item_%i", names.Num() ) );
+	gui->SetStateInt( "profileList_sel_0", -1 );
+	gui->StateChanged( common->GetPresentationTime() );
+}
+
+static void Session_SaveControlProfile( idUserInterface *gui ) {
+	idStr name;
+	if ( gui == NULL || !Session_ControlProfileName( gui->State().GetString( "saveProfileName" ), name ) ) {
+		return;
+	}
+	const idStr fileName = name + CONTROL_PROFILE_EXTENSION;
+	idFile *file = fileSystem->OpenFileWrite( fileName.c_str() );
+	if ( file == NULL ) {
+		common->Warning( "Couldn't write control profile '%s'", fileName.c_str() );
+		return;
+	}
+	idKeyInput::WriteBindings( file );
+	fileSystem->CloseFile( file );
+	common->Printf( "Saved control profile '%s'\n", name.c_str() );
+	gui->SetStateString( "saveProfileName", "" );
+	gui->StateChanged( common->GetPresentationTime() );
+}
+
+static void Session_LoadControlProfile( idUserInterface *gui ) {
+	const idStr name = Session_SelectedControlProfile( gui );
+	if ( name.IsEmpty() ) {
+		return;
+	}
+	const idStr fileName = name + CONTROL_PROFILE_EXTENSION;
+	void *buffer = NULL;
+	if ( fileSystem->ReadFile( fileName.c_str(), &buffer ) < 0 || buffer == NULL ) {
+		common->Warning( "Couldn't read control profile '%s'", fileName.c_str() );
+		return;
+	}
+	const idStr text = static_cast<const char *>( buffer );
+	fileSystem->FreeFile( buffer );
+	for ( int start = 0; start < text.Length(); ) {
+		int end = text.Find( '\n', start );
+		if ( end < 0 ) {
+			end = text.Length();
+		}
+		const idStr line = text.Mid( start, end - start );
+		start = end + 1;
+		idCmdArgs args( line.c_str(), false );
+		if ( args.Argc() == 0 ) {
+			continue;
+		}
+		const char *command = args.Argv( 0 );
+		if ( !idStr::Icmp( command, "bind" ) || !idStr::Icmp( command, "unbind" ) || !idStr::Icmp( command, "unbindall" ) ) {
+			cmdSystem->BufferCommandArgs( CMD_EXEC_NOW, args );
+		}
+	}
+	common->Printf( "Loaded control profile '%s'\n", name.c_str() );
+	gui->SetKeyBindingNames();
+	gui->StateChanged( common->GetPresentationTime() );
+}
+
+static void Session_DeleteControlProfile( idUserInterface *gui ) {
+	const idStr name = Session_SelectedControlProfile( gui );
+	if ( name.IsEmpty() ) {
+		return;
+	}
+	fileSystem->RemoveFile( ( name + CONTROL_PROFILE_EXTENSION ).c_str() );
+	common->Printf( "Deleted control profile '%s'\n", name.c_str() );
 }
 
 /*
@@ -5113,6 +5394,61 @@ void idSessionLocal::HandleMainMenuCommands( const char *menuCommand ) {
 			continue;
 		}
 
+		// OPENPREY: the dialog's Game Options, Video and Audio boxes. Each
+		// resets the cvars its Options page shows (Session_ResetMainMenuCVars).
+		if ( !idStr::Icmp( cmd, "resetgame" ) ) {
+			Session_ResetMainMenuGameOptions( guiMainMenu );
+			continue;
+		}
+		if ( !idStr::Icmp( cmd, "resetvideo" ) ) {
+			Session_ResetMainMenuVideo( guiMainMenu );
+			continue;
+		}
+		if ( !idStr::Icmp( cmd, "resetaudio" ) ) {
+			Session_ResetMainMenuAudio( guiMainMenu );
+			continue;
+		}
+
+		// OPENPREY: Controls > Profiles (Session_ControlProfile*). The page
+		// sends scanforprofiles itself after a save or delete.
+		if ( !idStr::Icmp( cmd, "scanforprofiles" ) ) {
+			Session_ScanControlProfiles( guiActive ? guiActive : guiMainMenu );
+			continue;
+		}
+		if ( !idStr::Icmp( cmd, "updateProfileInfo" ) ) {
+			// As retail: the selected profile's name goes into the name field.
+			idUserInterface *profileGui = guiActive ? guiActive : guiMainMenu;
+			profileGui->SetStateString( "saveProfileName", Session_SelectedControlProfile( profileGui ).c_str() );
+			profileGui->StateChanged( common->GetPresentationTime() );
+			continue;
+		}
+		if ( !idStr::Icmp( cmd, "saveProfile" ) ) {
+			Session_SaveControlProfile( guiActive ? guiActive : guiMainMenu );
+			continue;
+		}
+		if ( !idStr::Icmp( cmd, "loadProfile" ) ) {
+			Session_LoadControlProfile( guiActive ? guiActive : guiMainMenu );
+			continue;
+		}
+		if ( !idStr::Icmp( cmd, "deleteProfile" ) ) {
+			Session_DeleteControlProfile( guiActive ? guiActive : guiMainMenu );
+			continue;
+		}
+
+		// OPENPREY: Resume Game, shown out of game while a save exists
+		// (gui::hasrecentsave), loads the newest save, as retail did.
+		if ( !idStr::Icmp( cmd, "resumegame" ) ) {
+			idStrList saves;
+			idList<fileTIME_T> times;
+			idStrList saveDirs;
+			GetSaveGameList( saves, times, &saveDirs );
+			if ( times.Num() > 0 ) {
+				const int newest = times[ 0 ].index;
+				LoadGame( saves[ newest ], newest < saveDirs.Num() ? saveDirs[ newest ].c_str() : NULL );
+			}
+			continue;
+		}
+
 
 		if ( !idStr::Icmp( cmd, "bind" ) ) {
 			if ( args.Argc() - icmd >= 2 ) {
@@ -5431,6 +5767,12 @@ void idSessionLocal::HandleMainMenuCommands( const char *menuCommand ) {
 
 		if ( !idStr::Icmp( cmd, "CheckUpdate2" ) ) {
 			idAsyncNetwork::client.SendVersionCheck( true );
+			continue;
+		}
+
+		// OPENPREY: Cancel on the Updates waiting box.
+		if ( !idStr::Icmp( cmd, "cancelUpdateCheck" ) ) {
+			idAsyncNetwork::client.CancelVersionCheck();
 			continue;
 		}
 

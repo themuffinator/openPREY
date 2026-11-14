@@ -407,7 +407,17 @@ void Script_Transition(idWindow *window, idList<idGSWinVar> *src) {
 
 /*
 =========================
-Script_EvalRegs
+Script_NamedEvent
+
+openPREY: a `set "cmd"` raised on another window by the event was lost; that
+window's next idWindow::Time cleared it. Opening MultiPrey lost Find Servers'
+"UpdateServers ; CheckUpdate", and Options' Apply Changes lost
+"video restart". While the GUI is active, idUserInterfaceLocal::RunNamedEvent
+queues the commands the event raises, as a timeline event's are, for the GUI's
+next HandleEvent to return. The sending window keeps its own, which its own
+script's caller returns, so a window that answers its own event dispatches
+them once. When the game sent the named event whose script sends this one,
+that outer event queues the commands even while the GUI is inactive.
 =========================
 */
 // jmarshall - Quake 4 gui implementation
@@ -422,11 +432,15 @@ void Script_NamedEvent(idWindow* window, idList<idGSWinVar>* src) {
 			window && window->GetGui() ? window->GetGui()->GetSourceFile() : "<null>");
 	}
 
+	idUserInterfaceLocal *gui = window ? window->GetGui() : NULL;
+	idWindow *desktop = gui ? gui->GetDesktop() : NULL;
+	const bool queueCommands = desktop != NULL && gui->Active();
+
 	int p = idStr::FindText(parm->c_str(), "::");
 	if (p <= 0)
 	{
-		if ( window && window->GetGui() ) {
-			window->GetGui()->HandleNamedEvent( parm->c_str() );
+		if ( gui ) {
+			gui->HandleScriptNamedEvent( parm->c_str(), window, queueCommands );
 		} else if ( window ) {
 			window->RunNamedEvent( parm->c_str() );
 		}
@@ -437,14 +451,18 @@ void Script_NamedEvent(idWindow* window, idList<idGSWinVar>* src) {
 		idStr varName = parmStr.Mid(p + 2, parmStr.Length() - (p + 2));
 
 		drawWin_t* childWindow = NULL;
-		if ( window && window->GetGui() && window->GetGui()->GetDesktop() ) {
-			childWindow = window->GetGui()->GetDesktop()->FindChildByName( windowName );
+		if ( desktop ) {
+			childWindow = desktop->FindChildByName( windowName );
 		} else if ( window ) {
 			childWindow = window->FindChildByName( windowName );
 		}
-		if (childWindow)
+		if (childWindow && childWindow->win)
 		{
-			childWindow->win->RunNamedEvent(varName);
+			if ( gui ) {
+				gui->RunNamedEvent( childWindow->win, varName, window, queueCommands );
+			} else {
+				childWindow->win->RunNamedEvent( varName );
+			}
 		}
 		else
 		{

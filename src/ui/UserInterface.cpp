@@ -756,7 +756,7 @@ bool idUserInterfaceLocal::SetPresentationValue( const char *name, const char *v
 // Only a window a click could reach qualifies: it and every ancestor must be
 // visible and accept events. The command comes back instead of being queued,
 // so the caller dispatches it as the click's own HandleEvent result would be.
-bool idUserInterfaceLocal::RunWindowAction( const char *windowName, bool back, idStr &command ) {
+bool idUserInterfaceLocal::RunWindowAction( const char *windowName, int script, idStr &command ) {
 	evaluatedHudValid = false;
 	command.Clear();
 	if ( desktop == NULL || windowName == NULL || windowName[ 0 ] == '\0' ) {
@@ -773,7 +773,7 @@ bool idUserInterfaceLocal::RunWindowAction( const char *windowName, bool back, i
 		}
 	}
 	window->cmd = "";
-	if ( !window->RunScript( back ? idWindow::ON_BACKACTION : idWindow::ON_ACTION ) ) {
+	if ( !window->RunScript( script ) ) {
 		return false;
 	}
 	command = window->cmd;
@@ -787,7 +787,16 @@ bool UI_RunLegacyWindowAction( idUserInterface *gui, const char *windowName, boo
 		command.Clear();
 		return false;
 	}
-	return legacy->RunWindowAction( windowName, back, command );
+	return legacy->RunWindowAction( windowName, back ? idWindow::ON_BACKACTION : idWindow::ON_ACTION, command );
+}
+
+bool UI_RunLegacyWindowActionRelease( idUserInterface *gui, const char *windowName, idStr &command ) {
+	idUserInterfaceLocal *legacy = dynamic_cast<idUserInterfaceLocal *>( gui );
+	if ( legacy == NULL ) {
+		command.Clear();
+		return false;
+	}
+	return legacy->RunWindowAction( windowName, idWindow::ON_ACTIONRELEASE, command );
 }
 
 bool idUserInterfaceLocal::StepFocus( int direction, idStr &report ) {
@@ -1502,13 +1511,102 @@ const char *idUserInterfaceLocal::HandleEvent( const sysEvent_t *event, int _tim
 	return "";
 }
 
+/*
+==============
+Named event commands
+
+openPREY: a `set "cmd"` in a script that answers a named event raises the
+command on the answering window, often the Desktop, and nothing read it
+there: idWindow::HandleEvent clears its own window's command first, and
+idWindow::Time clears the others. Retail Prey's idWindow::RunNamedEvent moved
+what each window raised to the GUI's pending commands, which is how
+idEntity::CallNamedEvent collects them with HandleEvent( SE_NONE ): AI-used
+consoles, the roadhouse games and the jukebox answer their events with
+commands. Commands already on a window are set aside for the event and put
+back after it, and the sender keeps its own.
+==============
+*/
+struct namedEventCommands_t {
+	idWindow *	window;
+	idStr		saved;
+};
+
+// Sets aside the commands already on root and its children, other than the
+// sender's, so that only those the event raises are queued.
+static void NamedEvent_HoldCommands( idWindow *root, idWindow *sender, idList<namedEventCommands_t> &held ) {
+	if ( root != sender && root->cmd.Length() ) {
+		namedEventCommands_t &entry = held.Alloc();
+		entry.window = root;
+		entry.saved = root->cmd;
+		root->cmd.Clear();
+	}
+	const int count = root->GetChildCount();
+	for ( int i = 0; i < count; i++ ) {
+		if ( idWindow *child = root->GetChild( i ) ) {
+			NamedEvent_HoldCommands( child, sender, held );
+		}
+	}
+}
+
+static void NamedEvent_QueueCommands( idWindow *root, idWindow *sender, const char *eventName, idStr &pendingCmd ) {
+	if ( root != sender && root->cmd.Length() ) {
+		if ( gui_debugScript.GetInteger() > 2 ) {
+			common->Printf( "GUI: namedEvent '%s' window=%s queues \"%s\" (caller=%s gui=%s)\n",
+				eventName, root->GetName(), root->cmd.c_str(), sender != NULL ? sender->GetName() : "<none>",
+				root->GetGui() != NULL ? root->GetGui()->GetSourceFile() : "<null>" );
+		}
+		if ( pendingCmd.Length() ) {
+			pendingCmd += " ; ";
+		}
+		pendingCmd += root->cmd;
+		root->cmd.Clear();
+	}
+	const int count = root->GetChildCount();
+	for ( int i = 0; i < count; i++ ) {
+		if ( idWindow *child = root->GetChild( i ) ) {
+			NamedEvent_QueueCommands( child, sender, eventName, pendingCmd );
+		}
+	}
+}
+
+void idUserInterfaceLocal::RunNamedEvent( idWindow *root, const char *eventName, idWindow *sender, bool queueCommands ) {
+	if ( root == NULL ) {
+		return;
+	}
+	if ( !queueCommands ) {
+		root->RunNamedEvent( eventName );
+		return;
+	}
+	idWindow *const runDesktop = desktop;
+	idList<namedEventCommands_t> held;
+	NamedEvent_HoldCommands( root, sender, held );
+	root->RunNamedEvent( eventName );
+	// A script that reloaded the GUI (consoleCmd "reloadGuis") freed root and
+	// the windows held here.
+	if ( desktop != runDesktop ) {
+		return;
+	}
+	NamedEvent_QueueCommands( root, sender, eventName, pendingCmd );
+	for ( int i = 0; i < held.Num(); i++ ) {
+		held[ i ].window->cmd = held[ i ].saved;
+	}
+}
+
 void idUserInterfaceLocal::HandleNamedEvent ( const char* eventName ) {
+	// The game or the session sent it: the commands it raises wait for the
+	// GUI's next HandleEvent whether or not the GUI is active, as retail's did.
+	// An entity GUI is active only while the player points at it, and
+	// CallNamedEvent collects the commands at once.
+	HandleScriptNamedEvent( eventName, NULL, true );
+}
+
+void idUserInterfaceLocal::HandleScriptNamedEvent( const char *eventName, idWindow *sender, bool queueCommands ) {
 	evaluatedHudValid = false;
 	// The stock interface's Remastered pickup lines read their slots in the event.
 	if ( !idStr::Icmp( eventName, "itemPickup" ) ) {
 		PublishLegacyPickup();
 	}
-	desktop->RunNamedEvent( eventName );
+	RunNamedEvent( desktop, eventName, sender, queueCommands );
 	// The Remastered layout answers the same events as the stock windows,
 	// including those sent before its first frame, which it replays.
 	if ( !remastered ) {

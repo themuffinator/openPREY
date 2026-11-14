@@ -5208,22 +5208,26 @@ static void Session_OpenQ4GuiGet_f( const idCmdArgs &args ) {
 	common->Printf( "GUI_VALUE %s=%s\n", args.Argv( 1 ), value.c_str() );
 }
 
-// Runs a classic GUI window's onAction (or onBackAction with "back") and
-// dispatches the command it issues, as a click on the window would, so a
-// harness can drive a menu without device input.
+// Runs a classic GUI window's onAction (or onBackAction with "back", or
+// onActionRelease with "release") and dispatches the command it issues, as a
+// click on the window would, so a harness can drive a menu without device input.
 static void Session_OpenQ4GuiAction_f( const idCmdArgs &args ) {
 	idUserInterface *gui = session->GetActiveGUI();
 	const bool back = args.Argc() == 3 && !idStr::Icmp( args.Argv( 2 ), "back" );
-	if ( gui == NULL || ( args.Argc() != 2 && !back ) ) {
-		common->Printf( "usage: openq4_guiAction <window> [back] with an active classic GUI\n" );
+	const bool release = args.Argc() == 3 && !idStr::Icmp( args.Argv( 2 ), "release" );
+	if ( gui == NULL || ( args.Argc() != 2 && !back && !release ) ) {
+		common->Printf( "usage: openq4_guiAction <window> [back|release] with an active classic GUI\n" );
 		return;
 	}
 	idStr command;
-	if ( !UI_RunLegacyWindowAction( gui, args.Argv( 1 ), back, command ) ) {
-		common->Printf( "openq4_guiAction: %s has no reachable %s\n", args.Argv( 1 ), back ? "onBackAction" : "onAction" );
+	const bool ran = release ? UI_RunLegacyWindowActionRelease( gui, args.Argv( 1 ), command ) :
+		UI_RunLegacyWindowAction( gui, args.Argv( 1 ), back, command );
+	const char *script = back ? "onBackAction" : release ? "onActionRelease" : "onAction";
+	if ( !ran ) {
+		common->Printf( "openq4_guiAction: %s has no reachable %s\n", args.Argv( 1 ), script );
 		return;
 	}
-	common->Printf( "GUI_ACTION %s%s cmd=%s\n", args.Argv( 1 ), back ? " back" : "", command.c_str() );
+	common->Printf( "GUI_ACTION %s%s cmd=%s\n", args.Argv( 1 ), back ? " back" : release ? " release" : "", command.c_str() );
 	if ( command.Length() ) {
 		sessLocal.DispatchCommand( gui, command.c_str() );
 	}
@@ -11330,7 +11334,7 @@ void idSessionLocal::Init() {
 	cmdSystem->AddCommand( "GuiEvent", Session_GuiEvent_f, CMD_FL_SYSTEM, "sends a named event to the active gui" );
 	cmdSystem->AddCommand( "openq4_guiSet", Session_OpenQ4GuiSet_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "sets an existing active GUI variable for engine-scripted layout validation" );
 	cmdSystem->AddCommand( "openq4_guiGet", Session_OpenQ4GuiGet_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "reports an existing active GUI variable for engine-scripted layout validation" );
-	cmdSystem->AddCommand( "openq4_guiAction", Session_OpenQ4GuiAction_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "runs a classic GUI window's onAction, or onBackAction with back, as a click would, for engine-scripted validation" );
+	cmdSystem->AddCommand( "openq4_guiAction", Session_OpenQ4GuiAction_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "runs a classic GUI window's onAction, or onBackAction with back, or onActionRelease with release, as a click would, for engine-scripted validation" );
 	cmdSystem->AddCommand( "openq4_guiFocus", Session_OpenQ4GuiFocus_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "steps a classic GUI's focus as a menu's arrow key does (next, previous) and reports the focused window, for engine-scripted validation" );
 	cmdSystem->AddCommand( "openq4_guiCursor", Session_OpenQ4GuiCursor_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "places a classic GUI's pointer at x y of its 640x480 canvas without device input, for engine-scripted validation" );
 	cmdSystem->AddCommand( "openq4_browser", Session_OpenQ4Browser_f, CMD_FL_SYSTEM | CMD_FL_CHEAT, "reports and exercises main-menu server-browser operations for engine-scripted validation" );

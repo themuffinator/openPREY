@@ -2974,6 +2974,13 @@ void idAsyncClient::SendVersionCheck( bool fromMenu ) {
 		return;
 	}
 
+	// OPENPREY: the menu's Updates button shows that it is waiting, with a
+	// Cancel button (cancelUpdateCheck), until a reply or the timeout below.
+	if ( fromMenu ) {
+		session->MessageBox( MSG_ABORT, common->GetLanguageDict()->GetString( "#str_122044" ),
+			common->GetLanguageDict()->GetString( "#str_04837" ), false, "cancelUpdateCheck" );
+	}
+
 	InitPort();
 	msg.Init( msgBuf, sizeof( msgBuf ) );
 	msg.WriteShort( CONNECTIONLESS_MESSAGE_ID );
@@ -2995,6 +3002,18 @@ void idAsyncClient::SendVersionCheck( bool fromMenu ) {
 
 /*
 ==================
+idAsyncClient::CancelVersionCheck
+
+OPENPREY: the waiting box's Cancel. The check runs on, but its outcome is
+no longer shown unless a newer version replies.
+==================
+*/
+void idAsyncClient::CancelVersionCheck( void ) {
+	showUpdateMessage = false;
+}
+
+/*
+==================
 idAsyncClient::HandleDownloads
 ==================
 */
@@ -3004,13 +3023,19 @@ void idAsyncClient::HandleDownloads( void ) {
 		// timing out on no reply
 		updateState = UPDATE_DONE;
 		if ( showUpdateMessage ) {
-			session->MessageBox( MSG_OK, common->GetLanguageDict()->GetString ( "#str_04839" ), common->GetLanguageDict()->GetString ( "#str_04837" ), true );
+			// OPENPREY: silence is not "up to date" (#str_04839): the master
+			// may be unreachable or not know this build. Say that no reply came.
 			showUpdateMessage = false;
+			sessLocal.StopBox();
+			session->MessageBox( MSG_OK, common->GetLanguageDict()->GetString ( "#str_122045" ), common->GetLanguageDict()->GetString ( "#str_04837" ), true );
 		}
-		common->DPrintf( "No update available\n" );
+		common->DPrintf( "No reply to the version check\n" );
 	} else if ( backgroundDownload.completed ) {
 		// only enter these if the download slot is free
 		if ( updateState == UPDATE_READY ) {
+			if ( showUpdateMessage ) {
+				sessLocal.StopBox();	// the menu check's waiting box
+			}
 			const bool openReleasePage = session->MessageBox( MSG_YESNO, updateMSG,
 				common->GetLanguageDict()->GetString( "#str_04330" ), true, "yes" )[ 0 ] != '\0';
 			updateState = UPDATE_DONE;

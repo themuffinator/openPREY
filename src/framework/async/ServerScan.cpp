@@ -132,7 +132,10 @@ static idStr ServerBrowserEndpoint( const netadr_t &adr ) {
 // The limit each public game type ends on, as the game's descriptor table
 // flags it (mp/GameTypes.cpp: GTF_CAPTURELIMIT, GTF_ROUNDLIMIT, DeadZone's
 // control time; every other public type GTF_FRAGLIMIT): the label and the
-// serverinfo key the browser's details name it by.
+// serverinfo key the browser's details name it by. Prey's game reports only
+// "deathmatch" and "Team DM" (si_gameTypeArgs); the Quake 4 types keep their
+// rows, labelled by openPREY's own strings, because Quake 4's #str_41xxx IDs
+// are subtitle lines in Prey's string table.
 static void ServerBrowserMatchLimit( const char *type, const char *&label, const char *&key ) {
 	static const char *capture[] = { "CTF", "One Flag CTF", "Arena CTF", "Arena One Flag CTF" };
 	static const char *rounds[] = { "Clan Arena", "Freeze Tag", "Red Rover" };
@@ -146,12 +149,12 @@ static void ServerBrowserMatchLimit( const char *type, const char *&label, const
 	}
 	for ( int i = 0; i < static_cast<int>( sizeof( rounds ) / sizeof( rounds[0] ) ); ++i ) {
 		if ( !idStr::Icmp( type, rounds[i] ) ) {
-			label = "#str_41404";
+			label = "#str_122050";
 			key = "si_roundLimit";
 		}
 	}
 	if ( !idStr::Icmp( type, "DeadZone" ) ) {
-		label = "#str_122008";
+		label = "#str_122051";
 		key = "si_controlTime";
 	}
 }
@@ -160,7 +163,7 @@ static const char *ServerBrowserGameType( const char *type ) {
 	static const char *tokens[] = { "DM", "Tourney", "Team DM", "CTF", "Arena CTF", "DeadZone",
 		"Duel", "Clan Arena", "Freeze Tag", "Red Rover", "One Flag CTF", "Arena One Flag CTF" };
 	static const char *labels[] = { "#str_107679", "#str_107676", "#str_107677", "#str_107678",
-		"#str_107681", "#str_42860", "#str_41300", "#str_41301", "#str_41302", "#str_41303",
+		"#str_107681", "#str_122001", "#str_122046", "#str_122047", "#str_122048", "#str_122049",
 		"#str_107680", "#str_107682" };
 	for ( int i = 0; i < static_cast<int>( sizeof( tokens ) / sizeof( tokens[0] ) ); ++i ) {
 		if ( !idStr::Icmp( type, tokens[i] ) ) {
@@ -620,7 +623,8 @@ void idServerScan::GUIUpdateSelected( void ) {
 		}
 		m_pGUI->SetStateString( "browser_levelshot", levelshot );
 		m_pGUI->SetStateString( "server_gameType", ServerBrowserText( ServerBrowserGameType( server.serverInfo.GetString( "si_gameType" ) ) ).c_str() );
-		m_pGUI->SetStateString( "server_passworded", server.serverInfo.GetBool( "si_usePass" ) ? common->GetLanguageDict()->GetString( "#str_200933" ) : "" );
+		// retail Prey's own text for its "Passworded:" row
+		m_pGUI->SetStateString( "server_passworded", server.serverInfo.GetBool( "si_usePass" ) ? common->GetLanguageDict()->GetString( "#str_41114" ) : "" );
 		m_pGUI->SetStateString( "favoriteStatus", common->GetLanguageDict()->GetString( IsFavorite( server.adr ) ? "#str_200293" : "#str_200292" ) );
 	}
 	m_pGUI->StateChanged( common->GetPresentationTime() );
@@ -802,13 +806,15 @@ void idServerScan::UpdateBrowserStatus() {
 ================
 idServerScan::UpdateLoadProgress
 
-The scan's progress as retail's browser showed it under the list: a new
+The scan's progress as Quake 4's browser showed it under the list: a new
 list's request ("Getting list of servers...") or the LAN's sweep ("Scanning
 for LAN servers..."), then the server that answered last with the count of
 listed servers heard from or given up on ("Scanning %d/%d: %s"; on the LAN,
 "Scanning - Found: %s" across its reply window), and once the scan completes,
-how many it covered ("Scanned %d Quake 4 Servers") on a full bar. A refresh
-says nothing until a server answers, as retail's did.
+how many it covered ("Scanned %d Prey servers") on a full bar. A refresh
+says nothing until a server answers, as Quake 4's did. Retail Prey's language
+files have none of these strings; openPREY's *_openprey.lang files supply
+them under Quake 4's IDs.
 ================
 */
 void idServerScan::UpdateLoadProgress() {
