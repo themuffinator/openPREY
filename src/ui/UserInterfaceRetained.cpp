@@ -265,7 +265,11 @@ bool SessionMenuCommand(const std::string& command) {
         "mpRail","mpSettingsControls","mpSettingsGame","mpSettingsSystem","mpMatch","mpMatchSelect","mpSummaryChat",
         "mpAdminPass","mpAdminSelect","mpAdminKick","mpAdminBan","mpAdminSwitch","mpAdminBans","mpAdminBanPick","mpAdminUnban",
         "mpAdminApply","mpAdminConsole","mpRefereeLogin","mpSettingsName","mpSettingsClan",
-        "arenaRestart","arenaLeave"};
+        "arenaRestart","arenaLeave",
+        // openPREY: New Game's skill frame and Prey's menu sounds (Session_menu.cpp).
+        "newGameNormal","newGameWicked","newGameCasino",
+        "soundClick","soundCancel","soundTick","soundSlideInSmall","soundSlideOutSmall",
+        "soundSlideIn","soundSlideOut","soundTabFlip","videoDetect","videoApply"};
 	return commands.contains(command);
 }
 
@@ -332,7 +336,9 @@ bool SessionMenuValueCommand(const std::string& command) {
 		"createBuying","createBots","createBotSkill",
 		"audioVolume","audioMusic","audioDialogue","audioBackend","audioDevice","audioEax","audioSpeakers","audioHrtf",
 		"audioSubtitles","audioSubtitleSize","audioSubtitleBackground","audioSubtitleSpeakers",
-		"gameGunPosition","gameForceModel","gameCrosshair","gameCorpseTime","gameLanguage"};
+		"gameGunPosition","gameForceModel","gameCrosshair","gameCorpseTime","gameLanguage",
+		// openPREY: the Options page's Video tab (Session_menu.cpp).
+		"videoMode","videoMonitor","videoRefresh","videoMaxFps","videoPreset","videoFullscreen"};
 	return commands.contains(command);
 }
 
@@ -390,7 +396,28 @@ const PlayerSetting* FindPlayerSetting(const std::string& cvar) {
 		{"vr_moveDirection",{0,0,1,true,{},{0,1}}},{"vr_roomScale",{0,0,1,true,{},{0,1}}},{"vr_aimLaser",{0,0,2,true,{},{0,1,2}}},
 		{"vr_hapticStrength",{2,0,0,false,{"0","0.5","1"}}},{"vr_twoHanded",{0,0,1,true,{},{0,1}}},
 		{"vr_comfortVignette",{2,0,0,false,{"0","0.5","1"}}},{"vr_physicalCrouch",{0,0,1,true,{},{0,1}}},
-		{"vr_playSpace",{0,0,2,true,{},{0,1,2}}}};
+		{"vr_playSpace",{0,0,2,true,{},{0,1,2}}},
+		// openPREY: Prey's Options page, Game Options tab (guis/menu/settings.rui),
+		// beside the settings above that it shares with Quake 4's.
+		{"g_showHud",{1}},{"g_subtitles",{1}},{"com_profanity",{1}},{"g_useDDA",{1}},
+		// Its Audio tab; the rows the sound system acts on are session verbs.
+		{"g_levelloadmusic",{1}},{"s_reverse",{1}},
+		// Its Video tab, page by page. The lists the session builds, the
+		// preset, Full Screen and Apply Changes are session verbs.
+		{"r_screenFraction",{0,10,200,true,{},{10,25,50,75,85,100,125,150,200}}},{"r_swapInterval",{0,0,1,true,{},{0,1}}},
+		{"r_brightness",{0,0.5,2,false}},{"r_gamma",{0,0.5,2,false}},
+		{"r_renderApi",{2,0,0,false,{"best","gl","vulkan"}}},{"r_fullscreenDesktop",{1}},{"r_borderless",{1}},{"r_multiScreen",{0,0,1,true,{},{0,1}}},
+		{"r_windowWidth",{0,320,16384,true}},{"r_windowHeight",{0,240,16384,true}},
+		{"r_customWidth",{0,320,16384,true}},{"r_customHeight",{0,240,16384,true}},
+		{"r_skipNewAmbient",{1}},{"r_shaderLevel",{0,0,3,true,{},{0,1,2,3}}},{"r_shadows",{1}},{"r_useShadowMap",{1}},
+		{"r_skipSpecular",{1}},{"r_skipBump",{1}},{"r_correctspecular",{1}},{"r_normalizebumpmap",{1}},
+		{"r_skipGlowOverlay",{2,0,0,false,{"0","1"}}},{"r_useFastSkinning",{1}},{"image_anisotropy",{0,1,16,true,{},{1,2,4,8,16}}},
+		{"r_multiSamples",{0,0,16,true,{},{0,2,4,8,16}}},{"r_postAA",{0,0,4,true,{},{0,1,2,3,4}}},{"r_ssao",{1}},{"r_bloom",{1}},
+		{"r_bloomIntensity",{0,0,2,false}},{"r_crt",{1}},{"r_hdrToneMap",{1}},{"r_hdrExposure",{0,0.25,3,false}},{"r_motionBlur",{1}},
+		{"r_msaaAlphaToCoverage",{1}},{"r_ssaoRadius",{0,4,256,false}},{"r_ssaoIntensity",{0,0,4,false}},
+		{"r_bloomRadius",{0,0.1,8,false}},{"r_hdrWhitePoint",{0,1,16,false}},{"r_hdrSaturation",{0,0,2,false}},
+		{"r_hdrContrast",{0,0.5,3,false}},{"r_crtAmount",{0,0,1,false}},{"r_crtChromatic",{0,0,8,false}},
+		{"g_crosshair",{0,0,8,true,{},{0,1,2,3,4,5,6,7,8}}}};
 	const auto found = settings.find(cvar);
 	return found == settings.end() ? nullptr : &found->second;
 }

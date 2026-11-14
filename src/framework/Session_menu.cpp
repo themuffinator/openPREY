@@ -5468,6 +5468,11 @@ void idSessionLocal::HandleMainMenuCommands( const char *menuCommand ) {
 					channel = atoi( snd );
 					snd = args.Argv( icmd++ );
 				}
+				// openPREY: the retained screens' session code names Quake
+				// 4's selection cue; Prey's press sound answers it.
+				if ( !snd.Icmp( "main_menu_selection" ) ) {
+					snd = "guisounds_menu_clickin";
+				}
 				menuSoundWorld->PlayShaderDirectly( snd, channel );
 
 			}
@@ -7385,7 +7390,8 @@ static const int RETAINED_MOD_ROWS = 32;
 static const char *const RETAINED_DEMO_FILTERS[] = { "all", "mvd", "render", "legacy", "incomplete" };
 static const int RETAINED_DEMO_FILTER_COUNT = sizeof( RETAINED_DEMO_FILTERS ) / sizeof( RETAINED_DEMO_FILTERS[0] );
 static const int RETAINED_LOAD_ROWS = 64;
-static const char *const RETAINED_LOAD_GENERIC_SHOT = "gfx/guis/loadscreens/generic";
+// openPREY: Prey's loading picture, where Quake 4 had gfx/guis/loadscreens/generic.
+static const char *const RETAINED_LOAD_GENERIC_SHOT = "guis/assets/loading/loading";
 // Multiplayer levelshots precache on idle front-end frames: none until the
 // title has presented for this long, then as many a frame as fit this long
 // (at least one).
@@ -7394,7 +7400,15 @@ static const int RETAINED_LEVELSHOT_FRAME_MSEC = 4;
 // The stock choreography shows a page 550 ms after its activation and a
 // home-state pop-up at once (specification section 8); the retained screen
 // covers the legacy departure for that long before the page takes over.
-static const int RETAINED_PAGE_HANDOFF_MSEC = 550;
+// openPREY: a Prey page presents at once and grows from the bottom bar itself
+// (section 8 of the Prey visual specification), so the hand-off takes no time.
+static const int RETAINED_PAGE_HANDOFF_MSEC = 0;
+// openPREY: Back on a page shrinks it into the bottom bar first, 500 ms down
+// and 200 ms across, and then the home takes the screen
+// (idSessionLocal::LeaveRetainedPage).
+static const int RETAINED_PAGE_LEAVE_MSEC = 700;
+static idUserInterface *retainedPageLeaving = NULL;
+static int retainedPageLeaveAt = 0;
 static const int RETAINED_POPUP_HANDOFF_MSEC = 200;
 // Returning to the game releases the paused view's soft focus over 250 ms,
 // as the modal backdrop does (section 4).
@@ -7419,23 +7433,49 @@ typedef enum {
 
 typedef struct retainedHandoff_s {
 	const char *			request;
-	const char *			window;		// the legacy home button whose action opens the page
+	const char *			window;		// the named event of guis/mainmenu.gui that opens the stock page
 	retainedHandoffKind_t	kind;
 } retainedHandoff_t;
 
+// openPREY: the retained home is the navigation over Prey's stock portal
+// backdrop (docs/dev/prey-ui-visual-design.md, section 12.5). A page it has
+// no retained document for is the stock page: guis/mainmenu.gui opens it on
+// one of these named events and grows it from the bottom bar as it always
+// did, so every hand-off is in place and the home simply stops covering the
+// menu while the page is up (Session_RetainedStockMenuAtHome). New Game, Mods,
+// Exit and Quit Game are frames of the home documents themselves, and a page
+// with a retained document (Load Game, Save Game, Credits) presents that
+// instead (BeginRetainedPage); its entry here answers only where the document
+// cannot present.
 static const retainedHandoff_t RETAINED_HANDOFFS[] = {
-	{ "singlePlayer",	"main_b_newgame",		RETAINED_HANDOFF_PAGE },
-	{ "loadGame",		"main_b_loadgame",		RETAINED_HANDOFF_PAGE },
-	{ "saveGame",		"main_b_savegame",		RETAINED_HANDOFF_PAGE },
-	{ "multiplayer",	"main_b_multiplayer",	RETAINED_HANDOFF_PAGE },
-	{ "settings",		"main_b_settings",		RETAINED_HANDOFF_PAGE },
-	{ "credits",		"main_b_credits",		RETAINED_HANDOFF_PAGE },
-	{ "restartLevel",	"main_b_difficulty",	RETAINED_HANDOFF_PAGE },
-	{ "mods",			"main_b_mods",			RETAINED_HANDOFF_POPUP },
-	// The update check opens no pop-up: its answer comes as a message box
-	// over the home, up to 2 s later (idAsyncClient::HandleDownloads).
-	{ "updates",		"main_b_updates",		RETAINED_HANDOFF_IN_PLACE },
+	{ "loadGame",		"retainedPage_loadGame",	RETAINED_HANDOFF_IN_PLACE },
+	{ "saveGame",		"retainedPage_saveGame",	RETAINED_HANDOFF_IN_PLACE },
+	{ "multiplayer",	"retainedPage_multiplayer",	RETAINED_HANDOFF_IN_PLACE },
+	{ "settings",		"retainedPage_settings",	RETAINED_HANDOFF_IN_PLACE },
+	{ "credits",		"retainedPage_credits",		RETAINED_HANDOFF_IN_PLACE },
+	// The update check opens no page: its answer comes as a message box over
+	// the home, up to 2 s later (idAsyncClient::HandleDownloads).
+	{ "updates",		"retainedPage_updates",		RETAINED_HANDOFF_IN_PLACE },
 };
+
+// openPREY: whether the stock menu, not a document of the home's own, answers
+// this request.
+static bool Session_RetainedHomeHandsOff( const char *request ) {
+	for ( int i = 0; i < static_cast<int>( sizeof( RETAINED_HANDOFFS ) / sizeof( RETAINED_HANDOFFS[0] ) ); ++i ) {
+		if ( !idStr::Icmp( request, RETAINED_HANDOFFS[i].request ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// openPREY: Prey's stock menu hides its navigation (Main_Menu) the moment a
+// page starts to grow or the opening portal starts, and shows it again when
+// the page is back in the bottom bar or the portal is open. The retained home
+// covers the menu exactly while that navigation would show.
+static bool Session_RetainedStockMenuAtHome( idUserInterface *menu ) {
+	return MainMenuWindowStateIsNonZero( menu, "Main_Menu::visible" );
+}
 
 // Legacy pop-ups drawn over the home state keep the framing bands at home.
 static bool Session_RetainedHomePopup( idUserInterface *gui ) {
@@ -7454,9 +7494,13 @@ static bool Session_RetainedHomePopup( idUserInterface *gui ) {
 // without them presents as the mod made it.
 static const char *Session_RetainedHomeMissingPage( idUserInterface *menu ) {
 	for ( int i = 0; i < static_cast<int>( sizeof( RETAINED_HANDOFFS ) / sizeof( RETAINED_HANDOFFS[0] ) ); ++i ) {
-		if ( !UI_LegacyWindowExists( menu, RETAINED_HANDOFFS[i].window ) ) {
+		if ( !UI_LegacyNamedEventExists( menu, RETAINED_HANDOFFS[i].window ) ) {
 			return RETAINED_HANDOFFS[i].window;
 		}
+	}
+	// openPREY: the home covers the menu by its navigation's visibility.
+	if ( !UI_LegacyWindowExists( menu, "Main_Menu" ) ) {
+		return "Main_Menu";
 	}
 	return NULL;
 }
@@ -7878,27 +7922,31 @@ void idSessionLocal::UpdateRetainedHome() {
 	}
 	const bool context = Session_RetainedScreensEnabled() && guiMainMenu != NULL && guiActive == guiMainMenu &&
 		guiTest == NULL && !RetainedUI_IsOpen() && ( !mapSpawned || !IsMultiplayer() );
-	if ( context && !MainMenuWindowStateIsNonZero( guiMainMenu, "desktop::video_check" ) ) {
-		const bool atHome = MainMenuWindowStateEqualsInt( guiMainMenu, "desktop::curr", 0 ) &&
-			MainMenuWindowStateEqualsInt( guiMainMenu, "desktop::active", 0 );
-		// Back on a legacy page: the page is leaving for the home state.
-		returning = !MainMenuWindowStateEqualsInt( guiMainMenu, "desktop::curr", 0 ) &&
-			MainMenuWindowStateIsNonZero( guiMainMenu, "desktop::active" ) &&
-			MainMenuWindowStateEqualsInt( guiMainMenu, "desktop::dest", 0 );
-		fromPopup = returning && Session_RetainedHomePopup( guiMainMenu );
-		const bool handoff = guiRetainedHome != NULL && now < retainedHandoffUntil;
-		if ( atHome || returning || handoff ) {
-			// The paused game's screen or the title; each loads on first use.
-			// After Kane's stroggification the pause takes the Strogg family,
-			// and the Marine pause stands in when that cannot present.
-			if ( mapSpawned && RetainedPauseIsStrogg() ) {
-				want = RetainedHomeDocument( guiRetainedPauseStrogg, RETAINED_PAUSE_STROGG_GUI );
-			}
-			if ( want == NULL ) {
-				want = mapSpawned ? RetainedHomeDocument( guiRetainedPause, RETAINED_PAUSE_GUI ) :
-					RetainedHomeDocument( guiRetainedTitle, RETAINED_TITLE_GUI );
-			}
+	// openPREY: the home is the paused game's navigation or the title's, over
+	// the stock menu's own backdrop (DrawRetainedHome). Each loads on first
+	// use. While one can present, the stock menu leaves its navigation and
+	// bottom bar undrawn (gui::retainedHome), through its own pages too, so
+	// the two never show together; the home covers the menu while the stock
+	// navigation would show (Session_RetainedStockMenuAtHome). Prey has no
+	// second pause family and no page that leaves through a home state, so
+	// `returning` and `fromPopup` stay false.
+	idUserInterface *home = NULL;
+	if ( context ) {
+		home = mapSpawned ? RetainedHomeDocument( guiRetainedPause, RETAINED_PAUSE_GUI ) :
+			RetainedHomeDocument( guiRetainedTitle, RETAINED_TITLE_GUI );
+		// A page the home is handing off to presents from this home on the
+		// same or the next frame (UpdateRetainedPage), after the stock menu
+		// has already hidden its navigation for it.
+		if ( home != NULL && ( Session_RetainedStockMenuAtHome( guiMainMenu ) || retainedPagePending != NULL ) ) {
+			want = home;
 		}
+	}
+	fromPopup = returning && Session_RetainedHomePopup( guiMainMenu );
+	// A retained page stands over the stock menu too (DrawRetainedPageHome).
+	const bool ownsNavigation = home != NULL || RetainedPageActive();
+	if ( guiMainMenu != NULL && guiMainMenu->State().GetBool( "retainedHome" ) != ownsNavigation ) {
+		guiMainMenu->SetStateBool( "retainedHome", ownsNavigation );
+		guiMainMenu->StateChanged( now );
 	}
 	if ( mapSpawned ) {
 		retainedJoinReturn = false;
@@ -8040,16 +8088,15 @@ void idSessionLocal::RetainedHomeFrameEvent() {
 void idSessionLocal::DrawRetainedHome( int presentationTime ) {
 	// The legacy menu keeps its timelines, music and hand-off choreography
 	// running unseen; only the retained screen reaches the output.
-	UI_RunTimeEvents( guiMainMenu, presentationTime );
-	if ( ( guiRetainedHome == guiRetainedPause || guiRetainedHome == guiRetainedPauseStrogg ) && mapSpawned &&
-		!com_skipGameDraw.GetBool() && GetLocalClientNum() >= 0 ) {
-		// The paused view stays behind the pause screen, under its scrim.
-		// Prey's v7 idGame::Draw takes no menu-pause flag.
-		if ( !game->Draw( GetLocalClientNum() ) ) {
-			renderSystem->SetColor( colorBlack );
-			renderSystem->DrawStretchPic( 0, 0, 640, 480, 0, 0, 1, 1, declManager->FindMaterial( "_white" ) );
-		}
-	}
+	// openPREY: the stock menu draws beneath the home. Its portal, star field,
+	// Sphere, Earth and wordmark are Prey's backdrop (section 12.5 of
+	// docs/dev/prey-ui-visual-design.md), in a game the frozen frame the
+	// portal tears open as well, and its timelines and music run as they do
+	// alone. It leaves its navigation and bottom bar undrawn while
+	// gui::retainedHome is set, and its pointer while the home draws its own.
+	guiMainMenu->SetPresentationValue( "desktop::hideCursor", "1", false );
+	guiMainMenu->Redraw( presentationTime );
+	guiMainMenu->SetPresentationValue( "desktop::hideCursor", "0", false );
 	guiRetainedHome->Redraw( presentationTime );
 }
 
@@ -8291,6 +8338,27 @@ void idSessionLocal::ShowSaveRestoreFailure( const char *saveName ) {
 
 void idSessionLocal::HandleRetainedSessionRequest( idUserInterface *gui, const char *request ) {
 #ifndef ID_DEDICATED
+	// openPREY: Prey's menu sounds (section 8 of the Prey visual
+	// specification), which a document's event names beside what it does.
+	if ( request != NULL && gui != NULL && !idStr::Icmpn( request, "sound", 5 ) ) {
+		static const char *const sounds[][2] = {
+			{ "soundClick",			"guisounds_menu_clickin" },
+			{ "soundCancel",		"guisounds_menu_cancel" },
+			{ "soundTick",			"guisounds_menu_tick" },
+			{ "soundSlideInSmall",	"guisounds_menu_slideinsmall" },
+			{ "soundSlideOutSmall",	"guisounds_menu_slideoutsmall" },
+			{ "soundSlideIn",		"guisounds_menu_slidein" },
+			{ "soundSlideOut",		"guisounds_menu_slideout" },
+			{ "soundTabFlip",		"guisounds_menu_tabflip" },
+		};
+		for ( int i = 0; i < static_cast<int>( sizeof( sounds ) / sizeof( sounds[0] ) ); ++i ) {
+			if ( !idStr::Icmp( request, sounds[i][0] ) ) {
+				// The grow and shrink sounds take the stock menu's second channel.
+				HandleMainMenuCommands( va( "play %s%s", i >= 3 && i <= 6 ? "2 " : "", sounds[i][1] ) );
+				return;
+			}
+		}
+	}
 	// The retained AUDIO and GAME OPTIONS pages' verbs, while they present.
 	if ( request != NULL && gui != NULL && gui == guiRetainedAudio ) {
 		if ( gui == guiActive ) {
@@ -8364,7 +8432,7 @@ void idSessionLocal::HandleRetainedSessionRequest( idUserInterface *gui, const c
 	if ( gui != NULL && request != NULL && gui == guiRetainedCredits ) {
 		// The Credits page's one verb, Back, while it presents.
 		if ( gui == guiActive && !idStr::Icmp( request, "creditsBack" ) ) {
-			ReturnRetainedPage();
+			LeaveRetainedPage( gui );	// openPREY: the page shrinks into the bar first
 		}
 		return;
 	}
@@ -8415,16 +8483,19 @@ void idSessionLocal::HandleRetainedSessionRequest( idUserInterface *gui, const c
         HandleMainMenuCommands( "play main_menu_selection" );
         if ( !idStr::Icmp( request, "deathRestart" ) ) HandleRestartMenuCommands( "restart" );
         else if ( !idStr::Icmp( request, "deathLoad" ) ) {
-            // LOAD GAME leaves for the title and opens the retained Load Game
-            // page there, as the title's own LOAD GAME does; the stock page
-            // where that cannot present.
-            HandleRestartMenuCommands( "disconnect mainmenu" );
-            UpdateRetainedHome();
-            if ( !BeginRetainedPage( "loadGame" ) && guiMainMenu != NULL ) {
-                guiMainMenu->HandleNamedEvent( "fromRestart_toLoad" );
+            // openPREY: Prey's death screen loads the newest save, as the
+            // stock button's loadlastsave does, and restarts the level when
+            // there is none or it cannot be loaded.
+            idStrList fileList;
+            idList<fileTIME_T> fileTimes;
+            GetSaveGameList( fileList, fileTimes );
+            if ( fileTimes.Num() == 0 || !LoadGame( fileList[ fileTimes[0].index ].c_str() ) ) {
+                MoveToNewMap( mapSpawnData.serverInfo.GetString( "si_map" ) );
             }
         }
-        else if ( !idStr::Icmp( request, "deathMenu" ) ) HandleRestartMenuCommands( "disconnect mainmenu" );
+        // openPREY: Main Menu opens the menu as the stock button does; the
+        // level is already unloaded.
+        else if ( !idStr::Icmp( request, "deathMenu" ) ) HandleRestartMenuCommands( "mainmenu" );
         else if ( !idStr::Icmp( request, "quit" ) ) common->Quit();
         return;
     }
@@ -8492,11 +8563,26 @@ void idSessionLocal::HandleRetainedSessionRequest( idUserInterface *gui, const c
 		}
 		return;
 	}
+	// openPREY: New Game's skill frame. Normal, Cherokee (the harder mode a
+	// finished game unlocks) and Casino (the Roadhouse's games, once it is
+	// finished) start the game as the stock buttons do: the choice goes on the
+	// stock menu's state, where startGame reads it.
+	if ( !idStr::Icmpn( request, "newGame", 7 ) && guiRetainedHome == guiRetainedTitle ) {
+		const bool wicked = !idStr::Icmp( request, "newGameWicked" );
+		const bool casino = !idStr::Icmp( request, "newGameCasino" );
+		if ( ( wicked && !cvarSystem->GetCVarBool( "g_nightmare" ) ) || ( casino && !cvarSystem->GetCVarBool( "g_roadhouseCompleted" ) ) ) {
+			return;
+		}
+		guiMainMenu->SetStateBool( "wicked", wicked );
+		guiMainMenu->SetStateBool( "casino", casino );
+		HandleMainMenuCommands( "play guisounds_menu_clickin; startgame game/roadhouse" );
+		return;
+	}
 	// MODS opens the title's own dialog with the installed mods; the pause has
 	// no MODS. A row selects its mod, and LOAD MOD restarts the engine into it
 	// as the stock LOAD MOD does.
-	if ( !idStr::Icmp( request, "mods" ) && guiRetainedHome == guiRetainedTitle ) {
-		HandleMainMenuCommands( "play main_menu_selection" );
+	if ( !idStr::Icmp( request, "mods" ) && guiRetainedHome == guiRetainedTitle && !Session_RetainedHomeHandsOff( "mods" ) ) {
+		// openPREY: the title's link has played Prey's click already.
 		PublishRetainedMods( guiRetainedHome );
 		guiRetainedHome->HandleNamedEvent( "modsModalShow" );
 		return;
@@ -8526,11 +8612,16 @@ void idSessionLocal::HandleRetainedSessionRequest( idUserInterface *gui, const c
 		if ( idStr::Icmp( request, handoff.request ) ) {
 			continue;
 		}
+		// openPREY: the stock menu opens its own page on the event; the home
+		// stops covering it once its navigation hides (UpdateRetainedHome).
+		// The page's sounds and commands come through the stock menu's frame.
 		idStr command;
-		if ( !UI_RunLegacyWindowAction( guiMainMenu, handoff.window, false, command ) ) {
+		if ( !UI_LegacyNamedEventExists( guiMainMenu, handoff.window ) ) {
 			common->Warning( "retained UI: '%s' is unavailable from the current menu", request );
 			return;
 		}
+		HandleMainMenuCommands( "play guisounds_menu_clickin" );
+		guiMainMenu->HandleNamedEvent( handoff.window );
 		const bool popup = handoff.kind == RETAINED_HANDOFF_POPUP;
 		if ( handoff.kind != RETAINED_HANDOFF_IN_PLACE ) {
 			retainedHandoffUntil = now + ( popup ? RETAINED_POPUP_HANDOFF_MSEC : RETAINED_PAGE_HANDOFF_MSEC );
@@ -8549,6 +8640,145 @@ void idSessionLocal::HandleRetainedSessionRequest( idUserInterface *gui, const c
 	common->Warning( "retained UI: unhandled session request '%s'", request );
 #endif
 }
+
+/*
+===============
+Session_PublishPreyOptionsAudio
+
+openPREY: what the retained Options page's Audio tab shows that no CVar state
+gives it (guis/menu/settings.rui). The two volume sliders run 0 to 100 over
+the stock sliders' 0 to 1, which the stock control maps onto decibels
+(idSliderWindow, volumeslider); the device list is the one the stock page
+offers, with the device in use chosen. The sound system's own state (openal,
+supportsEax, eax) reaches the page as the stock menu's keys, through the
+"sound" menu commands (Session_RefreshMainMenuAudioState).
+===============
+*/
+#ifndef ID_DEDICATED
+static float Session_PreyVolumeFromDB( float db ) {
+	return db <= -60.0f ? 0.0f : ( db >= 0.0f ? 1.0f : idMath::Pow( 2.0f, db * ( 1.0f / 6.0f ) ) );
+}
+
+static float Session_PreyVolumeToDB( float volume ) {
+	return volume <= 0.0f ? -60.0f : ( volume >= 1.0f ? 0.0f : idMath::Log( volume ) * ( 6.0f / 0.693147181f ) );
+}
+
+static void Session_PublishPreyOptionsAudio( idUserInterface *page ) {
+	if ( page == NULL ) {
+		return;
+	}
+	page->SetStateInt( "audio.volume", idMath::ClampInt( 0, 100,
+		idMath::Ftoi( Session_PreyVolumeFromDB( cvarSystem->GetCVarFloat( "s_volume_dB" ) ) * 100.0f + 0.5f ) ) );
+	page->SetStateInt( "audio.music", idMath::ClampInt( 0, 100,
+		idMath::Ftoi( Session_PreyVolumeFromDB( cvarSystem->GetCVarFloat( "s_musicvolume_dB" ) ) * 100.0f + 0.5f ) ) );
+	idStr names, values;
+	BuildMainMenuAudioDeviceChoices( names, values );
+	idStrList nameList, valueList;
+	Session_ChoiceListItems( names.c_str(), nameList );
+	Session_ChoiceListItems( values.c_str(), valueList );
+	const int count = Min( nameList.Num(), RETAINED_AUDIO_DEVICES );
+	int device = 0;
+	for ( int i = 0; i < RETAINED_AUDIO_DEVICES; ++i ) {
+		page->SetStateString( va( "audio.device.%d.label", i ),
+			i < count ? Session_RetainedPlayerText( nameList[ i ].c_str(), 128, 1 ).c_str() : "" );
+		if ( i < count && i < valueList.Num() && !valueList[ i ].Icmp( cvarSystem->GetCVarString( "s_deviceName" ) ) ) {
+			device = i;
+		}
+	}
+	page->SetStateInt( "audio.device.count", count );
+	page->SetStateInt( "audio.device", device );
+	page->StateChanged( common->GetPresentationTime() );
+}
+
+/*
+===============
+Session_PublishPreyOptionsVideo
+
+openPREY: what the retained Options page's Video tab shows that no CVar state
+gives it. The resolution, monitor, refresh-rate and frame-limit lists are the
+stock page's (SetMainMenuVideoGuiVars builds them as text for its choices),
+each as rows of labels with the entry in use chosen. `applied` publishes what
+is in effect: Full Screen's value, which waits for Apply Changes as the stock
+row does, and the settings a video restart takes, which the page compares
+with the CVars to light Apply Changes. The rendering API the process started
+with stays, since that change needs the game restarted.
+===============
+*/
+static const int PREY_VIDEO_MODES = 48;
+static const int PREY_VIDEO_MONITORS = 8;
+static const int PREY_VIDEO_REFRESH = 24;
+static const int PREY_VIDEO_MAXFPS = 16;
+// The Quality Preset row's values, in the stock choice's order.
+static const char *const PREY_VIDEO_PRESETS[] = {
+	"minimum", "lowpower", "low", "performance", "balanced", "enhanced", "quality", "ultra", "maximum"
+};
+static const int PREY_VIDEO_PRESET_COUNT = sizeof( PREY_VIDEO_PRESETS ) / sizeof( PREY_VIDEO_PRESETS[0] );
+// The settings a change of which takes a video restart (the stock rows that
+// raise NeedVidRestart), beside Full Screen and the preset.
+static const char *const PREY_VIDEO_RESTART_CVARS[] = {
+	"r_mode", "r_customWidth", "r_customHeight", "r_screen", "r_fullscreenDesktop", "r_borderless", "r_displayRefresh",
+	"r_multiScreen", "r_windowWidth", "r_windowHeight", "r_multiSamples"
+};
+
+static void Session_PublishPreyChoiceList( idUserInterface *page, const char *prefix, int rows, const idStr &names,
+		const idStr &values, const char *current ) {
+	idStrList nameList, valueList;
+	Session_ChoiceListItems( names.c_str(), nameList );
+	Session_ChoiceListItems( values.c_str(), valueList );
+	const int count = Min( nameList.Num(), rows );
+	int selected = 0;
+	for ( int i = 0; i < rows; ++i ) {
+		page->SetStateString( va( "%s.%d.label", prefix, i ),
+			i < count ? Session_RetainedPlayerText( nameList[ i ].c_str(), 128, 1 ).c_str() : "" );
+		if ( i < count && i < valueList.Num() && !valueList[ i ].Icmp( current ) ) {
+			selected = i;
+		}
+	}
+	page->SetStateInt( va( "%s.count", prefix ), count );
+	page->SetStateInt( prefix, selected );
+}
+
+static void Session_PublishPreyOptionsVideo( idUserInterface *page, bool applied ) {
+	if ( page == NULL ) {
+		return;
+	}
+	SetMainMenuVideoGuiVars( page );		// display_mode_choice, the resolution in use
+	SetMainMenuQualityGuiVars( page );		// r_shaderLevelUnavailable
+	idStr names, values;
+	idList<mainMenuDisplayModeOption_t> modes;
+	BuildMainMenuDisplayModeChoices( modes, &names, &values );
+	Session_PublishPreyChoiceList( page, "video.mode", PREY_VIDEO_MODES, names, values, "" );
+	int displayCount = 0;
+	BuildMainMenuDisplayChoices( names, values, displayCount );
+	Session_PublishPreyChoiceList( page, "video.monitor", PREY_VIDEO_MONITORS, names, values, cvarSystem->GetCVarString( "r_screen" ) );
+	BuildMainMenuRefreshChoices( names, values );
+	Session_PublishPreyChoiceList( page, "video.refresh", PREY_VIDEO_REFRESH, names, values, cvarSystem->GetCVarString( "r_displayRefresh" ) );
+	BuildMainMenuFrameLimitChoices( names, values );
+	Session_PublishPreyChoiceList( page, "video.maxfps", PREY_VIDEO_MAXFPS, names, values, cvarSystem->GetCVarString( "com_maxfps" ) );
+	int preset = 0;
+	for ( int i = 0; i < PREY_VIDEO_PRESET_COUNT; ++i ) {
+		if ( !idStr::Icmp( PREY_VIDEO_PRESETS[ i ], cvarSystem->GetCVarString( "com_performancePreset" ) ) ) {
+			preset = i;
+		}
+	}
+	page->SetStateInt( "video.preset", preset );
+	static idStr startedWithApi;
+	static bool haveStartedWithApi = false;
+	if ( !haveStartedWithApi ) {
+		startedWithApi = cvarSystem->GetCVarString( "r_renderApi" );
+		haveStartedWithApi = true;
+	}
+	page->SetStateString( "applied.r_renderApi", startedWithApi.c_str() );
+	if ( applied ) {
+		page->SetStateBool( "video.fullscreen", cvarSystem->GetCVarBool( "r_fullscreen" ) );
+		for ( int i = 0; i < static_cast<int>( sizeof( PREY_VIDEO_RESTART_CVARS ) / sizeof( PREY_VIDEO_RESTART_CVARS[0] ) ); ++i ) {
+			page->SetStateInt( va( "applied.%s", PREY_VIDEO_RESTART_CVARS[ i ] ), cvarSystem->GetCVarInteger( PREY_VIDEO_RESTART_CVARS[ i ] ) );
+		}
+		page->SetStateString( "applied.com_performancePreset", cvarSystem->GetCVarString( "com_performancePreset" ) );
+	}
+	page->StateChanged( common->GetPresentationTime() );
+}
+#endif
 
 /*
 ===============
@@ -8571,7 +8801,8 @@ bool idSessionLocal::BeginRetainedPage( const char *request ) {
 	const bool strogg = !settings && guiRetainedHome != NULL && guiRetainedHome == guiRetainedPauseStrogg;
 	if ( ( !saving && !restarting && !credits && !multiplayer && !settings && idStr::Icmp( request, "loadGame" ) ) ||
 			guiRetainedHome == NULL ||
-			guiActive != guiMainMenu || ( ( credits || multiplayer ) && mapSpawned ) ||
+			// openPREY: Prey's in-game menu offers Credits too.
+			guiActive != guiMainMenu || ( multiplayer && mapSpawned ) ||
 			( ( saving || restarting ) && ( !mapSpawned || IsMultiplayer() ) ) ) {
 		return false;
 	}
@@ -8634,6 +8865,11 @@ bool idSessionLocal::BeginRetainedPage( const char *request ) {
 		for ( int i = 0; i < RETAINED_SETTINGS_SECTION_COUNT; i++ ) {
 			page->SetStateBool( va( "from_%s", RETAINED_SETTINGS_SECTIONS[ i ].section ), false );
 		}
+		// openPREY: the Audio tab's sound-system state and its lists.
+		Session_RefreshMainMenuAudioState( page );
+		Session_PublishPreyOptionsAudio( page );
+		// And the Video tab's lists, with what is in effect now.
+		Session_PublishPreyOptionsVideo( page, true );
 		page->StateChanged( common->GetPresentationTime() );
 	} else {
 		PublishRetainedLoadPage( page, 0, NULL );
@@ -8643,6 +8879,10 @@ bool idSessionLocal::BeginRetainedPage( const char *request ) {
 	retainedPageAt = retainedHandoffUntil;
 	guiRetainedHome->HandleNamedEvent( va( "carry_%s", request ) );
 	guiRetainedHome->HandleNamedEvent( "depart" );
+	// openPREY: the stock menu dresses its backdrop for a full-screen page, as
+	// its own pages do: the wordmark hides and the portal's view swings in.
+	guiMainMenu->HandleNamedEvent( "retainedCover_page" );
+	retainedPageLeaving = NULL;
 	HandleMainMenuCommands( "play main_menu_selection" );
 	return true;
 #else
@@ -8661,6 +8901,16 @@ bool idSessionLocal::RetainedPageActive() const {
 // abandons it.
 void idSessionLocal::UpdateRetainedPage() {
 #ifndef ID_DEDICATED
+	// openPREY: a page that was asked to leave returns once it has shrunk
+	// into the bottom bar; anything else taking the screen first abandons it.
+	if ( retainedPageLeaving != NULL ) {
+		if ( guiActive != retainedPageLeaving ) {
+			retainedPageLeaving = NULL;
+		} else if ( common->GetPresentationTime() >= retainedPageLeaveAt ) {
+			retainedPageLeaving = NULL;
+			ReturnRetainedPage();
+		}
+	}
 	if ( retainedPagePending == NULL ) {
 		return;
 	}
@@ -8693,12 +8943,44 @@ void idSessionLocal::ReturnRetainedPage() {
 	if ( !RetainedPageActive() || guiMainMenu == NULL ) {
 		return;
 	}
-	HandleMainMenuCommands( "play main_menu_selection" );
+	// openPREY: the stock menu's navigation is the home's cue to cover it
+	// (Session_RetainedStockMenuAtHome); its backdrop has been coming back
+	// since the page started to leave (LeaveRetainedPage).
+	retainedPageLeaving = NULL;
+	guiMainMenu->SetPresentationValue( "Main_Menu::visible", "1", false );
 	SetGUI( guiMainMenu, NULL );
 	retainedPageReturn = true;
 	UpdateRetainedHome();
 	retainedPageReturn = false;
 	retainedPageHome = NULL;
+#endif
+}
+
+/*
+===============
+idSessionLocal::LeaveRetainedPage
+
+openPREY: Back on a retained page. The page shrinks into the bottom bar on its
+"pageLeave" event while the stock menu brings the wordmark and the portal's
+view back, as a stock page's own leaving does, and the home takes the screen
+when the page is in the bar (UpdateRetainedPage). With reduced motion the home
+returns at once.
+===============
+*/
+void idSessionLocal::LeaveRetainedPage( idUserInterface *page ) {
+#ifndef ID_DEDICATED
+	if ( page == NULL || page != guiActive || !RetainedPageActive() || guiMainMenu == NULL || retainedPageLeaving == page ) {
+		return;
+	}
+	guiMainMenu->HandleNamedEvent( "retainedCover_home" );
+	if ( cvarSystem->GetCVarBool( "ui_retainedReducedMotion" ) ) {
+		ReturnRetainedPage();
+		return;
+	}
+	page->HandleNamedEvent( "pageLeave" );
+	PumpApplicationActions( page );
+	retainedPageLeaving = page;
+	retainedPageLeaveAt = common->GetPresentationTime() + RETAINED_PAGE_LEAVE_MSEC;
 #endif
 }
 
@@ -8754,6 +9036,15 @@ title.
 */
 void idSessionLocal::DrawRetainedPageHome( int presentationTime ) {
 #ifndef ID_DEDICATED
+	// openPREY: a Prey page stands over the stock menu's backdrop, in a game
+	// too, as the home does (DrawRetainedHome). The home that handed off has
+	// hidden its navigation and draws nothing.
+	if ( guiMainMenu != NULL ) {
+		guiMainMenu->SetPresentationValue( "desktop::hideCursor", "1", false );
+		guiMainMenu->Redraw( presentationTime );
+		guiMainMenu->SetPresentationValue( "desktop::hideCursor", "0", false );
+		return;
+	}
 	if ( mapSpawned && !com_skipGameDraw.GetBool() && GetLocalClientNum() >= 0 ) {
 		if ( !game->Draw( GetLocalClientNum() ) ) {
 			renderSystem->SetColor( colorBlack );
@@ -8918,6 +9209,13 @@ void idSessionLocal::PublishRetainedLoadRows( idUserInterface *gui ) {
 		gui->SetStateString( va( "%s.row%d.context", list, row ), context.c_str() );
 		gui->SetStateString( va( "%s.row%d.name", list, row ), name.c_str() );
 		gui->SetStateString( va( "%s.row%d.location", list, row ), location.c_str() );
+		// openPREY: the stock list's Date and Time columns.
+		idStr date, time;
+		if ( index < retainedLoadSlots.Num() ) {
+			Session_RetainedSaveStamp( retainedLoadTimes[ index ], date, time );
+		}
+		gui->SetStateString( va( "%s.row%d.date", list, row ), date.c_str() );
+		gui->SetStateString( va( "%s.row%d.time", list, row ), time.c_str() );
 	}
 	gui->SetStateInt( va( "%s.count", list ), retainedLoadSlots.Num() );
 	gui->SetStateInt( va( "%s.first", list ), retainedLoadFirst );
@@ -8970,7 +9268,7 @@ void idSessionLocal::HandleRetainedLoadRequest( idUserInterface *gui, const char
 	if ( RefreshRetainedSaveList( gui, request ) ) return;
 	const int count = retainedLoadSlots.Num();
 	if ( !idStr::Icmp( request, "loadBack" ) ) {
-		ReturnRetainedPage();
+		LeaveRetainedPage( gui );
 		return;
 	}
 	if ( !idStr::Icmpn( request, "loadSelect", 10 ) ) {
@@ -9133,7 +9431,7 @@ void idSessionLocal::HandleRetainedSaveRequest( idUserInterface *gui, const char
 	if ( RefreshRetainedSaveList( gui, request ) ) return;
 	const int count = retainedLoadSlots.Num();
 	if ( !idStr::Icmp( request, "saveBack" ) ) {
-		ReturnRetainedPage();
+		LeaveRetainedPage( gui );
 		return;
 	}
 	if ( !idStr::Icmpn( request, "saveSelect", 10 ) ) {
@@ -9179,7 +9477,11 @@ void idSessionLocal::HandleRetainedSaveRequest( idUserInterface *gui, const char
 			gui->HandleNamedEvent( "overwriteModalShow" );
 			return;
 		}
-		RetainedSaveGame( gui, name.c_str() );
+		// openPREY: a saved game closes the menu, as the stock page's does
+		// (saveGameOk).
+		if ( RetainedSaveGame( gui, name.c_str() ) ) {
+			ExitMenu();
+		}
 		return;
 	}
 	if ( !idStr::Icmp( request, "saveOverwrite" ) ) {
@@ -9188,7 +9490,9 @@ void idSessionLocal::HandleRetainedSaveRequest( idUserInterface *gui, const char
 		if ( retainedSaveTarget.Length() > 0 ) {
 			const idStr target = retainedSaveTarget;
 			retainedSaveTarget.Clear();
-			RetainedSaveGame( gui, target.c_str() );
+			if ( RetainedSaveGame( gui, target.c_str() ) ) {
+				ExitMenu();
+			}
 		}
 		return;
 	}
@@ -9252,7 +9556,18 @@ void idSessionLocal::OpenRestartMenu() {
 	if ( Session_RetainedScreensEnabled() && guiRetainedRestartMenu == NULL ) {
 		guiRetainedRestartMenu = FindRetainedGui( RETAINED_RESTARTMENU_GUI, true, false );
 	}
-	if ( Session_RetainedScreensEnabled() && guiRetainedRestartMenu != NULL ) {
+	// openPREY: the retained death screen is the frame and its buttons over
+	// the stock screen's backdrop, wordmark and fade from black, which
+	// guis/restart.gui keeps drawing beneath it (idSessionLocal::Draw) while it
+	// leaves its own frame and buttons undrawn (gui::retainedHome).
+	const bool retained = Session_RetainedScreensEnabled() && guiRetainedRestartMenu != NULL && guiRestartMenu != NULL;
+	if ( guiRestartMenu != NULL ) {
+		guiRestartMenu->SetStateBool( "retainedHome", retained );
+		guiRestartMenu->StateChanged( common->GetPresentationTime() );
+	}
+	if ( retained ) {
+		// The stock screen starts its fade when it is activated.
+		guiRestartMenu->Activate( true, common->GetPresentationTime() );
 		SetGUI( guiRetainedRestartMenu, NULL );
 		return;
 	}
@@ -9490,7 +9805,10 @@ idUserInterface *idSessionLocal::RetainedSettingsPage() {
 		return NULL;
 	}
 	// Quietly, as a home screen over a main menu without its routes.
-	if ( !UI_LegacyNamedEventExists( guiMainMenu, "openSettingsPage" ) ) {
+	// openPREY: the Options page opens the stock page, on a tab it has not
+	// rebuilt, through the stock menu's retainedPage_settings events.
+	if ( !UI_LegacyNamedEventExists( guiMainMenu, "retainedPage_settings" ) ||
+			!UI_LegacyNamedEventExists( guiMainMenu, "retainedPage_settingsReset" ) ) {
 		if ( retainedStock.FindIndex( RETAINED_SETTINGSPAGE_GUI ) < 0 ) {
 			common->DPrintf( "retained UI: the main menu has no route to its settings screen, so it presents its own instead of '%s'\n",
 				RETAINED_SETTINGSPAGE_GUI );
@@ -9554,6 +9872,136 @@ no further request.
 void idSessionLocal::HandleRetainedSettingsPageRequest( idUserInterface *gui, const char *request ) {
 #ifndef ID_DEDICATED
 	if ( retainedSettingsDest != 0 || retainedSubpageFrom != NULL || guiMainMenu == NULL ) {
+		return;
+	}
+	// openPREY: Prey's Options is one page of tabs (section 12.5 of the Prey
+	// visual specification). Back shrinks it into the bar. A tab it has not
+	// rebuilt, and Reset to defaults, open the stock Options page on that tab:
+	// the stock menu takes the screen and grows its own page, and the home
+	// covers it again when that page has closed (UpdateRetainedHome).
+	{
+		static const char *const stockTabs[][2] = {
+			{ "settingsControls",	"0" },
+			{ "settingsDefaults",	"1" },
+		};
+		if ( !idStr::Icmp( request, "settingsBack" ) ) {
+			LeaveRetainedPage( gui );
+			return;
+		}
+		for ( int i = 0; i < static_cast<int>( sizeof( stockTabs ) / sizeof( stockTabs[0] ) ); ++i ) {
+			if ( idStr::Icmp( request, stockTabs[i][0] ) ) {
+				continue;
+			}
+			retainedPageLeaving = NULL;
+			retainedPageHome = NULL;
+			SetGUI( guiMainMenu, NULL );
+			guiMainMenu->SetPresentationValue( "Options_TabContainer::activetab", stockTabs[i][1], false );
+			guiMainMenu->HandleNamedEvent( !idStr::Icmp( request, "settingsDefaults" ) ? "retainedPage_settingsReset" : "retainedPage_settings" );
+			UpdateRetainedHome();
+			return;
+		}
+		// The Audio tab's rows that the sound system has to act on: each
+		// carries its value, sets what the stock control sets and then runs
+		// the stock control's own "sound" command, which restarts the sound
+		// system where the stock page does and may answer with a message box.
+		{
+			const idCmdArgs args( request, false );
+			const char *verb = args.Argv( 0 );
+			const int value = args.Argc() > 1 ? atoi( args.Argv( 1 ) ) : 0;
+			bool audio = true;
+			if ( !idStr::Icmp( verb, "audioVolume" ) ) {
+				cvarSystem->SetCVarFloat( "s_volume_dB", Session_PreyVolumeToDB( idMath::ClampInt( 0, 100, value ) / 100.0f ) );
+				HandleMainMenuCommands( "play guisounds_menu_volumetick" );
+			} else if ( !idStr::Icmp( verb, "audioMusic" ) ) {
+				cvarSystem->SetCVarFloat( "s_musicvolume_dB", Session_PreyVolumeToDB( idMath::ClampInt( 0, 100, value ) / 100.0f ) );
+			} else if ( !idStr::Icmp( verb, "audioBackend" ) ) {
+				HandleMainMenuCommands( "sound system" );
+			} else if ( !idStr::Icmp( verb, "audioSpeakers" ) ) {
+				if ( value == 2 || value == 6 ) {
+					cvarSystem->SetCVarInteger( "s_numberOfSpeakers", value );
+					HandleMainMenuCommands( "sound speakers" );
+				}
+			} else if ( !idStr::Icmp( verb, "audioDevice" ) ) {
+				idStr names, values;
+				BuildMainMenuAudioDeviceChoices( names, values );
+				idStrList valueList;
+				Session_ChoiceListItems( values.c_str(), valueList );
+				if ( value >= 0 && value < valueList.Num() ) {
+					cvarSystem->SetCVarString( "s_deviceName", valueList[ value ].c_str() );
+					HandleMainMenuCommands( "sound device" );
+				}
+			} else if ( !idStr::Icmp( verb, "audioEax" ) ) {
+				cvarSystem->SetCVarBool( "s_useEAXReverb", value != 0 );
+				HandleMainMenuCommands( "sound eax" );
+			} else {
+				audio = false;
+			}
+			if ( audio ) {
+				// A message box may have taken the screen; the page still reads.
+				Session_RefreshMainMenuAudioState( gui );
+				Session_PublishPreyOptionsAudio( gui );
+				return;
+			}
+			// The Video tab's rows that are lists the session builds, or that
+			// run a stock menu command. An index names an entry of the list as
+			// it is built now, as the stock choice's value does.
+			bool video = true, applied = false;
+			idStr names, values;
+			idStrList valueList;
+			if ( !idStr::Icmp( verb, "videoMode" ) ) {
+				gui->SetStateInt( "display_mode_choice", value );
+				HandleMainMenuCommands( "applyDisplayModeChoice" );
+			} else if ( !idStr::Icmp( verb, "videoMonitor" ) ) {
+				int displayCount = 0;
+				BuildMainMenuDisplayChoices( names, values, displayCount );
+				Session_ChoiceListItems( values.c_str(), valueList );
+				if ( value >= 0 && value < valueList.Num() ) {
+					cvarSystem->SetCVarString( "r_screen", valueList[ value ].c_str() );
+					HandleMainMenuCommands( "refreshDisplayChoices" );
+				}
+			} else if ( !idStr::Icmp( verb, "videoRefresh" ) ) {
+				BuildMainMenuRefreshChoices( names, values );
+				Session_ChoiceListItems( values.c_str(), valueList );
+				if ( value >= 0 && value < valueList.Num() ) {
+					cvarSystem->SetCVarString( "r_displayRefresh", valueList[ value ].c_str() );
+				}
+			} else if ( !idStr::Icmp( verb, "videoMaxFps" ) ) {
+				BuildMainMenuFrameLimitChoices( names, values );
+				Session_ChoiceListItems( values.c_str(), valueList );
+				if ( value >= 0 && value < valueList.Num() ) {
+					cvarSystem->SetCVarString( "com_maxfps", valueList[ value ].c_str() );
+				}
+			} else if ( !idStr::Icmp( verb, "videoPreset" ) ) {
+				if ( value >= 0 && value < PREY_VIDEO_PRESET_COUNT ) {
+					HandleMainMenuCommands( va( "applyPerformancePreset %s", PREY_VIDEO_PRESETS[ value ] ) );
+				}
+			} else if ( !idStr::Icmp( verb, "videoFullscreen" ) ) {
+				// Held on the page until Apply Changes, as the stock row holds it.
+				gui->SetStateBool( "video.fullscreen", value != 0 );
+			} else if ( !idStr::Icmp( verb, "videoDetect" ) ) {
+				HandleMainMenuCommands( "play guisounds_menu_clickin ; autoDetectPerformancePreset" );
+			} else if ( !idStr::Icmp( verb, "videoApply" ) ) {
+				cvarSystem->SetCVarBool( "r_fullscreen", gui->State().GetBool( "video.fullscreen" ) );
+				cmdSystem->BufferCommandText( CMD_EXEC_NOW, "vid_restart\n" );
+				// The restart can normalise the request (a display that went
+				// away, a mode the device refused): the rows show what is now
+				// in effect.
+				applied = true;
+			} else {
+				video = false;
+			}
+			if ( video ) {
+				Session_PublishPreyOptionsVideo( gui, applied );
+				if ( applied ) {
+					// The restart rebuilt the page's view, which dropped the
+					// focus: the page puts it back on the tab it shows.
+					gui->HandleNamedEvent( "videoApplied" );
+					PumpApplicationActions( gui );
+				}
+				return;
+			}
+		}
+		common->Warning( "retained UI: unhandled Options request '%s'", request );
 		return;
 	}
 	if ( !idStr::Icmp( request, "settingsBack" ) ) {

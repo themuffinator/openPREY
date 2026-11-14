@@ -10578,6 +10578,13 @@ void idSessionLocal::Draw() {
 			// A retained page over the home that handed off to it.
 			DrawRetainedPageHome( presentationTime );
 		}
+		if ( guiRetainedRestartMenu != NULL && guiActive == guiRetainedRestartMenu && guiRestartMenu != NULL ) {
+			// openPREY: the retained death screen stands over the stock one's
+			// backdrop, wordmark and fade (idSessionLocal::OpenRestartMenu).
+			guiRestartMenu->SetPresentationValue( "Desktop::hideCursor", "1", false );
+			guiRestartMenu->Redraw( presentationTime );
+			guiRestartMenu->SetPresentationValue( "Desktop::hideCursor", "0", false );
+		}
 		if ( guiRetainedHome != NULL && guiActive == guiMainMenu ) {
 			// ui_retained: the retained title or pause screen covers the legacy
 			// menu while it rests at home or hands a page over.

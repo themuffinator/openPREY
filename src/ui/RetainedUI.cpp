@@ -176,7 +176,12 @@ public:
 		// Preserve the engine's numeric value and avoid raising the libc++
 		// requirement to its newer floating-point from_chars implementation.
 		if (!(cvar->GetFlags() & (CVAR_FLOAT | CVAR_INTEGER | CVAR_BOOL))) return false;
-		const double number = (cvar->GetFlags() & CVAR_INTEGER) ? static_cast<double>(cvar->GetInteger()) : static_cast<double>(cvar->GetFloat());
+		// openPREY: a float CVar reads as the decimal it is set to. Widened
+		// from its 32-bit value, 1.1 reads as 1.10000002, just off a slider's
+		// 0.1 grid, and stepping down from there only snaps back to 1.1, so
+		// Prey's Brightness, Gamma and effect sliders could never go down.
+		const double number = (cvar->GetFlags() & CVAR_INTEGER) ? static_cast<double>(cvar->GetInteger()) :
+			(cvar->GetFlags() & CVAR_FLOAT) ? atof(cvar->GetString()) : static_cast<double>(cvar->GetFloat());
 		if (!std::isfinite(number)) return false;
 		value = number; return true;
 	}
@@ -1081,7 +1086,9 @@ private:
 	int reducedBlurWidth=0, reducedBlurHeight=0;
 	static std::string FontFamily(const std::string& family) {
 		// The faces a document may name; anything else draws in Chain.
-		static const char* const faces[] = {"marine","lowpixel","profont","r_strogg","strogg"};
+		// openPREY: "menu" is Prey's display face and "alien" its Hider script;
+		// Chain folds onto Prey's body face (R_CanonicalFontName).
+		static const char* const faces[] = {"marine","lowpixel","profont","r_strogg","strogg","menu","alien"};
 		for (const char* face : faces) if (family == face) return face;
 		return "chain";
 	}

@@ -408,6 +408,7 @@ public:
 	bool				BeginRetainedPage( const char *request );
 	void				UpdateRetainedPage();
 	void				ReturnRetainedPage();
+	void				LeaveRetainedPage( idUserInterface *page );	// openPREY: Back on a page shrinks it first
 	void				ReturnRetainedSinglePlayerHome();
 	void				DrawRetainedPageHome( int presentationTime );
 	void				PublishRetainedLoadPage( idUserInterface *gui, int select, const char *error );

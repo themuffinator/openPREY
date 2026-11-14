@@ -1,12 +1,15 @@
 # openPREY UI Visual Design
 
-Specification version 1.15, 13 November 2026.
+Specification version 1.16, 14 November 2026.
 
-Status: reference survey and design contract. openPREY still renders the stock
-Prey GUIs; no replacement interface has been built. Sections 1 to 11 record
-what makes the Prey interface look and behave like Prey, so that fixes,
-widescreen work, new settings pages and any future vector replacement stay
-inside that identity. Section 12 covers openPREY's own additions.
+Status: reference survey and design contract. openPREY renders the stock Prey
+GUIs by default. A first vector replacement, the home screen's navigation, its
+small frames, the Load Game, Save Game and Credits pages, the death screen and
+three tabs of Options, is built for the retained interface and presents while
+`ui_retained` is 1 (section 12.5). Sections 1 to 11 record what makes the Prey
+interface look and behave like Prey, so that fixes, widescreen work, new
+settings pages and every further replacement stay inside that identity.
+Section 12 covers openPREY's own additions.
 
 | Part | State |
 | --- | --- |
@@ -15,7 +18,7 @@ inside that identity. Section 12 covers openPREY's own additions.
 | Rifle scope at any aspect (section 10.8) | Built in the legacy GUI with the stock art |
 | Alien-script translation (section 11.4) | Built |
 | 3D main-menu backdrop and entrance (section 12.2) | Specified, not built. The menu draws the stock layers |
-| Vector or retained-UI replacement (section 12.3) | Principles only |
+| Vector or retained-UI replacement (sections 12.3 and 12.5) | Home navigation, bottom bar, New Game, Mods, Exit, Quit Game, Load Game, Save Game, Credits, the death screen and Options' Game Options, Video and Audio tabs built behind `ui_retained`; MultiPrey, the rest of Options, the message boxes and loading are still the stock ones |
 
 The companion [Interface Atlas](prey-ui/atlas/prey-interface-atlas.html) draws
 the measured components, screens and motion as editable vector
@@ -44,6 +47,7 @@ disagree about a Prey screen, this one governs.
     - [11.4 Type and the translation mechanic](#114-type-and-the-translation-mechanic)
 12. [openPREY additions and modern direction](#12-openprey-additions-and-modern-direction)
     - [12.2 The 3D backdrop and entrance](#122-the-3d-backdrop-and-entrance)
+    - [12.5 The retained navigation](#125-the-retained-navigation)
 13. [Project branding](#13-project-branding)
 14. [The Interface Atlas](#14-the-interface-atlas)
 - [Appendix A. Survey method](#appendix-a-survey-method)
@@ -1519,6 +1523,324 @@ Any future vector or retained-UI replacement of the Prey front end must:
 - An entrance that plays every time the menu regains focus, or that cannot be
   skipped.
 
+### 12.5 The retained navigation
+
+**Status: built, off by default.** `ui_retained 1` selects it; `ui_retained 0`
+(the default) presents the stock menu unchanged. It is the first replacement
+made to section 12.3, in the manner of openQ4's retained menus: documents for
+the retained interface ([document format](ui/document-format.md)), generated
+by a script from this specification and committed.
+
+| Document | Presents | Holds |
+| --- | --- | --- |
+| `guis/menu/title.rui` | Home, out of game | The arc of hooks with Resume Game (while a save exists), New Game, Load Game, MultiPrey, Options and Exit; the bottom bar with Updates, Credits and Mods; the New Game, Mods and Exit frames |
+| `guis/menu/pause.rui` | Home, in a single-player game | Resume Game, Quit Game, Save Game, Load Game, Options and Exit; the bottom bar with Credits; the Quit Game and Exit frames |
+| `guis/menu/loadgame.rui` | Load Game, from either home | The saves table (Name, Date, Time), the selected save's picture, date, time and Time Played, Load and Delete, and their confirmations |
+| `guis/menu/savegame.rui` | Save Game, from the pause | The saves table, the name field, Save, the overwrite confirmation and the refusal notice |
+| `guis/menu/restartmenu.rui` | The death screen | The frame with Load, Restart and Main Menu and the line under each that says what it does |
+| `guis/menu/credits.rui` | Credits, from either home | The stock credits sheet rising through the page |
+| `guis/menu/settings.rui` | Options, from either home | The four top tabs, Game Options' two pages, Video's six and the Audio page of setting rows |
+
+`tools/ui/build_retained_screens.py` writes them from the measurements of
+sections 3 to 8 and the Interface Atlas's constructions; `--check` reports a
+stale document, and the Meson test `openprey-retained-screens` runs it. Edit
+the generator, never the documents.
+
+#### What is replaced and what is kept
+
+The home documents draw only the navigation. The stock menu keeps drawing
+beneath them, so the portal and its opening, the star field, the Sphere,
+Earth, the wordmark, the music and, in a game, the frozen frame the portal
+tears open are the stock menu's own (section 12.3, rule 1; section 12.4
+forbids replacing the backdrop with a picture). Section 12.2's 3D backdrop,
+when it is built in `guis/mainmenu.gui`, appears under the retained navigation
+without a change here.
+
+- `guis/mainmenu.gui` leaves its navigation and bottom bar undrawn while
+  `gui::retainedHome` is 1. The session sets it whenever a home document can
+  present, through the stock pages too, so the stock and retained navigation
+  never show together.
+- The session covers the stock menu with the home document exactly while the
+  stock navigation would show (`Main_Menu::visible`): from the end of the
+  portal opening at 500 ms, and whenever no stock page is up. The home fades
+  in over 100 ms with the backdrop.
+- New Game, Mods, Exit and Quit Game are frames of the home documents. They
+  grow from the bottom bar as section 8 records, and the navigation and
+  bottom bar hide while one is open.
+- Load Game, Save Game and Credits are documents of their own (below).
+- Options is a document of its own with one tab rebuilt so far (below).
+- MultiPrey and the update check are still the stock menu's. The home asks
+  the session for one, the session sends `guis/mainmenu.gui` a
+  `retainedPage_*` named event, and the stock page grows from the same
+  bottom-bar rectangle; the home stops covering the menu until the page is
+  back in the bar. A retained document for MultiPrey takes the request
+  instead once it exists at the path the session already looks for
+  (`guis/menu/multiplayer.rui`); that session route is inherited from openQ4
+  and has not been run with a Prey document.
+- The death screen is a document of its own (below).
+- The message boxes, the loading screen, the in-game multiplayer menu and a
+  multiplayer game's Escape menu are the stock GUIs.
+
+#### Construction
+
+Everything is vector geometry in the tokens of section 4; the only bitmaps are
+Tommy's three New Game portraits, which are pictures, not furniture.
+
+- **Canvas.** 720 dp spans the view's height; the stock 4:3 canvas is the
+  central 960 dp (1 u = 1.5 dp), so the navigation stays in the leading half
+  of the 4:3 canvas and the frames on the central axis at every aspect
+  (section 3). Checked at 4:3, 16:9 and 21:9.
+- **Arc and bars.** The Atlas's arc path, with its shaded edge, highlight and
+  25 rivets, and six hook bars at the stock steps (section 6). An entry's
+  target is its whole 27 u pitch (section 3).
+- **Frames.** The claw corner is the Atlas's silhouette with its socket and a
+  rim cut to the body by a mask; a frame is four mirrored corners, the 1.5 u
+  rails between them and a black body inset 25 u at each end. The home bottom
+  bar draws the lower pair only.
+- **Buttons.** The 3-slice outline with the graded plate at rest and the even
+  rollover plate when lit.
+- **Type.** The display face for navigation, titles and bottom bars, the body
+  face for buttons and prompts, at the stock `textscale` values. The retained
+  interface draws the traced faces 6% smaller than the stock atlases at the
+  same em, so the generator raises sizes by that much (`FONT_FIT`). It places
+  each label so that its capitals land where the stock window draws them: in
+  a stock window the centre of the capitals lies 0.84 em (display) or 0.76 em
+  (body) below the window's top plus `textaligny`; in a retained line it lies
+  0.21 em (display) or 0.05 em (body) below the line's centre. These figures
+  were measured from stock and retained captures at 1280x720.
+
+#### Interaction, motion and sound
+
+- Hover and focus follow section 7. Focus is the hover treatment plus the
+  rim at full `prey.rail`: the hook bar redrawn in it for a navigation entry,
+  the outline for a button, a hairline under a bottom-bar action. While the
+  pointer leads, only the entry under it is lit.
+- The arrow keys and a controller step down the arc and wrap through the
+  bottom bar; in a frame they step between its buttons and its bottom action.
+  Back closes a frame, resumes the game from the pause and opens Exit from
+  the title.
+- A navigation entry slides toward the arc over 150 ms and returns over
+  200 ms; buttons and bottom-bar actions change at once. A frame grows from
+  the bottom bar (180,438,450,32) to 180,200,376,270 over 500 ms with the even
+  ease-in-out and shrinks the same way; its upper claws and top rail arrive in
+  the first 60 ms, since a frame no taller than its corners has none. Its
+  contents keep their places and are uncovered as it grows.
+- A New Game skill shows its portrait and description while it is lit, as the
+  stock rollovers do. Cherokee is drawn unavailable until `g_nightmare` is
+  set; Casino appears once `g_roadhouseCompleted` is.
+- Sounds are the stock ones, named by the documents' events: `clickin` on a
+  press, `cancel` on No, `slideinsmall` and `slideoutsmall` as a frame grows
+  and shrinks.
+- With reduced motion (`ui_retainedReducedMotion`) the retained interface
+  applies the end of each move at once.
+
+#### Load Game and Save Game
+
+Each is the stock page rebuilt at the stock rectangles (section 9): the
+620x460 u claw frame with its title bars, the Name, Date and Time headings in
+white on `prey.list.wash` cells, the column boxes, the two picture frames
+round the headings and the list, the scroll bar, and 3-slice buttons. Load
+Game sits on the `prey.page.wash` page with the level-shot frame, the save's
+date and time, Time Played (shown when the save records it) and Load and
+Delete; Save Game has the name field on `prey.list.wash`, its caption and
+Save.
+
+- **Presenting.** The home asks the session for the page
+  (`idSessionLocal::BeginRetainedPage`), which fills it with the saves and
+  presents it at once over the stock menu's backdrop. The stock menu dresses
+  that backdrop as it does for its own full pages on `retainedCover_page`: the
+  wordmark hides and the portal's view swings in over 400 ms.
+- **Growth.** The page widens from the bottom bar to the full-width bar in
+  200 ms and rises to 10,10,620,460 in 500 ms (section 8); the title bar and
+  the upper claws appear as the rise starts. Back shrinks it the same way,
+  the wordmark and portal come back on the stock timing
+  (`retainedCover_home`), and the home takes the screen when the page is in
+  the bar, 700 ms later (`idSessionLocal::LeaveRetainedPage`). With reduced
+  motion the home returns at once.
+- **The list.** Rows are 20 u high in `prey.text.list`; the session fills 64
+  at a time, newest first, with each save's name, date and time
+  (`PublishRetainedLoadRows`), and Previous Saves and Next Saves rows turn the
+  list when there are more. A press selects a row (`guisounds_menu_tick`):
+  the selected row carries `prey.list.selection` and its outline, the pointer
+  turns a row's text white, and focus adds an outline at full `prey.rail`.
+  Accept on the selected row loads it on Load Game and moves to the name
+  field on Save Game.
+- **Asking first.** Delete always asks, and Load asks in a game, with the
+  stock confirmations: a 0.40 black scrim over the whole screen and a
+  360x140 u claw frame at 142,132 that appears and disappears at once.
+  Cancel holds the focus. Saving over an existing save asks the same way and
+  names the save; a save the session refuses, or a save that cannot be
+  loaded or deleted, says why.
+- **After saving** the menu closes and the game resumes, as the stock page
+  does.
+
+Differences from the stock pages: the stock list's double-click to load is
+Accept on the selected row; the confirmations for Load and Delete do not name
+the save; and Load Game does not repeat the save's description beside its
+picture.
+
+#### Mods
+
+A small frame of the title, grown from the bottom bar like New Game: the list
+of installed mods on a white 0.10 ground (270x130 u at 51,59, rows 16 u high
+at 0.25 with the name and version in the stock columns), its scroll bar, and
+Load MOD (100x25 u at 221,200). The session fills the list and opens the
+frame on the title's Mods request, with the running mod selected
+(`idSessionLocal::PublishRetainedMods`). A press selects a mod; Accept on the
+selected mod, or Load MOD, restarts the engine into it as the stock button
+does. The list holds 32 mods.
+
+#### Credits
+
+A full page like Load Game, reached from either home. Its window (620x400 u
+at 0,31 in the frame) shows the stock credits sheet, 5300 u tall, rising at
+the stock rate. The generator reads the 169 credits, two banners and three
+pictures from the stock script openPREY carries
+(`guis/mainmenu/mainmenu_creditcontent.guifragment`): each one's rectangle,
+`textscale` and string key. The document holds those numbers and keys only.
+
+- **The head.** The wordmark fades in from 700 ms to 0.90 over 1 s, the first
+  banner from 1700 ms, the studio mark from 3500 ms, and the second banner
+  and its mark from 28 s and 29 s, as `Credits_AnimIn` times them.
+- **The roll.** The sheet starts to rise at 2700 ms and takes 130 s; then the
+  whole sequence starts again. It keeps this timing under reduced motion,
+  because the roll is the page's content.
+- **Credits.** Each appears when it has risen to canvas y 350, as the stock
+  `creditDef` does. Headings (`#CCDEFA`) and names (`#99ADC7` at 0.88) appear
+  in place; each of the 50 titles (`#D1E3FC`) flies in from x 1000 u to its
+  place over 500 ms with the even ease-in-out.
+
+Differences from the stock page: the retained interface has no shear, so a
+title flies in upright; the stock fade 18 s after a credit appears is left
+out, since a credit has left the window by then; and the hidden buttons and
+their bonus panel are not carried over.
+
+#### Options
+
+A full page on the Options page's 0.50 body, with the stock tab furniture
+(section 6) as vectors: four top tabs at 125,35 (117.5x20 u each), the
+570x370 u tab page at 25,55 with its wash, its shading from the top and from
+the leading edge of the inner page, and its `prey.separator` outline, and a
+100 u column of side tabs that share the height below a 40 u margin. The
+active tab and its page are one surface: the outline is drawn in runs, and
+the run beside or under a tab shows only while that tab is inactive.
+
+**Game Options, Video and Audio are rebuilt; Controls is the stock page's.**
+Choosing Controls, or Reset to defaults, opens the stock Options page on that
+tab (with the Reset Defaults dialog up for the last), and closing it returns
+to the home. The stock page is complete, so nothing is out of reach while the
+rest is rebuilt. The page opens on Game Options, the first tab it holds.
+
+- **Rows from the stock script.** The generator reads Game Options' side
+  tabs, headings and rows from `guis/mainmenu/mainmenu_options.guifragment`:
+  each row's rectangle, label, setting, choices and slider range. A row is
+  the graded `prey.plate.row` plate with its label centred in the leading
+  half and its value in the trailing half.
+- **Choices.** The value shows the current option, named from the stock
+  choice string. Left and Right cycle it, as a click cycles the stock
+  control; Accept or a click unfolds a list across the row, black with the
+  `prey.separator` outline, 18 u a row, with each option under the value. The
+  list is the retained control's addition.
+- **Sliders.** The stock 100x16 u rail with its tick dots and ring knob
+  (`prey.slider`), and the number after it, which the stock does not show.
+- **Settings change at once**, as the stock controls' do, through the
+  engine's list of settings a page may change (`FindPlayerSetting`), which
+  bounds each one to the values its stock control offers.
+- **Video.** The six side tabs of section 12.1 (Video, Display, Advanced 1,
+  Advanced 2, Post FX, Advanced FX), each 55 u tall, with their rows read
+  from the stock script like the others:
+  - *Plain settings* (most choices and every slider) change at once.
+  - *Lists the session builds.* Video Resolution, Monitor, Refresh Rate and
+    Frame Rate Limit show what the selected display reports, as the stock
+    rows do; the row sends the entry's index and the session applies it with
+    the stock menu command. A list shows eight entries and scrolls the rest.
+  - *Quality Preset* applies the preset through the stock command; *Detect*
+    loads the recommended one. The Detect plate is the group box: rounded, a
+    horizontal `prey.plate.row` fade with its rim.
+  - *Window Size and Custom Resolution* are two number fields either side of
+    an "x", on `prey.list.wash`, taking 320 to 16384 across and 240 to 16384
+    down.
+  - *Full Screen* is held on the page until Apply Changes, as the stock row
+    is; every other row writes its setting when it changes.
+  - *Apply Changes* sits on every page and is lit while a setting that takes
+    a video restart differs from what is in effect: the resolution, the
+    monitor, Fullscreen Mode, Borderless Window, Refresh Rate, Span All
+    Monitors, either size, MSAA Samples, the preset or Full Screen. Changing
+    one back puts it out again, where the stock button stays lit once
+    anything has touched it. It restarts the video system; the page comes
+    back with the focus on the side tab it shows.
+  - *Rendering API* takes the game restarted: while the choice differs from
+    the API the process started with, the stock dialog's line shows at the
+    foot of the Display page.
+  - *Shader Detail* is drawn at 0.40 and takes no input while shader programs
+    are off or the Vulkan backend is active (section 12.1).
+- **Audio.** One page with no side tabs, as in the stock. Its rows are read
+  from the stock script like the others, with these differences in how they
+  act:
+  - *Volume.* Effect Volume and Music Volume run 0 to 100 in steps of 5 over
+    the stock sliders' 0 to 1, and the session maps them onto decibels as the
+    stock `volumeslider` does (`6 log2 v`, silence at 0). The effect slider
+    plays `guisounds_menu_volumetick`.
+  - *Rows the sound system acts on.* Sound System, Speaker Setup, Sound Device
+    and EAX send the session a verb with their value; it sets what the stock
+    control sets and runs the stock control's own `sound` command, which
+    restarts the sound system where the stock page does and may answer with
+    the stock message box.
+  - *Sound Device.* The list is the session's, as the stock page's is: up to
+    16 devices with the one in use chosen. A name too long for the value
+    column ends in an ellipsis, and the list gives names the row's width.
+  - *What shows and what dims.* The software-mixing rows (Speaker Setup,
+    Reverse Channels) show while OpenAL is off and the OpenAL rows (Sound
+    Device, EAX) while it is on, each under its own heading. Sound System is
+    drawn at 0.40 and takes no input unless a mixer choice is offered, and
+    EAX likewise unless the device supports it, as the stock page dims them.
+    The EAX mark shows while EAX is in use.
+- **Feedback.** The plate is unchanged; the value turns white under the
+  pointer or focus, and focus adds the plate's outline at full `prey.rail`.
+  A tab's label turns `prey.text.tabHover`; a tab change plays
+  `guisounds_menu_tabflip`.
+
+#### The death screen
+
+The 280x220 u claw frame at 172,184 with its two empty title bars and the
+Load, Restart and Main Menu buttons (150x30 u, 0.40), over the stock screen's
+backdrop. As with the home, `guis/restart.gui` keeps drawing beneath the
+document: its painting with the edge slices, the wordmark and its fade from
+black are the stock screen's own, and it leaves its frame and buttons undrawn
+while `gui::retainedHome` is 1 (`idSessionLocal::OpenRestartMenu`).
+
+- The frame's body stops 20 u inside each end here, not 25 (`margins 20, 20,
+  7, 0`).
+- The document arrives with the stock fade: nothing for 100 ms, then to full
+  over 1000 ms.
+- Each button has a line under it that says what it does (0.28, white 0.70),
+  which fades in over 400 ms while the button is lit and out again, as the
+  stock rollover does. The focus opens on Load, so its line shows on arrival.
+- Load loads the newest save and Restart the level's restart slot, as the
+  stock buttons do; either restarts the level when there is nothing to load.
+  Main Menu opens the menu.
+- The stock buttons' labels dim to white 0.50 once the pointer has left
+  them; the retained ones return to `prey.text.button`.
+
+#### Not yet built
+
+- Controller prompts in the bottom title bar, and text that scales with the
+  interface's text size without leaving its plates (section 12.3, rule 5).
+- Options' Controls tab and its Reset Defaults dialog, which open the stock
+  page for now, the stock Audio page's sound-driver notice (the engine never
+  raises it), the Advanced 2 page's driver box, whose button opens a web
+  page, and the crosshair's picture beside its
+  name.
+- MultiPrey, the message boxes and the loading screen. Each is a document
+  for the generator and, where the session has no route for it, a session
+  verb.
+- The pause publishes Quake 4's difficulty names (`#str_200014` and the like)
+  for a line the Prey pause does not show, so opening the pause logs an
+  unknown string id.
+- The hook bars and the arc are the Atlas's reconstructions and are lighter
+  than the stock art: the stock hook is about 15 u wide where the vector one
+  is 11 u, and the stock arc carries a socket where each bar joins it.
+
 ## 13. Project branding
 
 openPREY's own marks live in `assets/`:
@@ -2037,6 +2359,22 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.16, 14 November 2026
+
+- Section 12.5 is new: the retained navigation, the first replacement built
+  to section 12.3. It records what the home documents replace and what the
+  stock menu keeps drawing, how the two hand over, the construction, and the
+  measured relation between stock and retained text (size and the place of
+  the capitals). It also records the retained Load Game and Save Game pages:
+  how they present over the stock backdrop, grow and leave, how the list
+  behaves and where they differ from the stock pages, and the retained death
+  screen over the stock one's backdrop and fade, the Mods frame, and the
+  retained Credits page laid out from the stock credits script, and the
+  Options page with its tab furniture and the rows of its Game Options,
+  Video and Audio tabs read from the stock script. The status paragraph and
+  table at the head say what is built.
+- The Interface Atlas takes the version; no drawing changed.
 
 ### Version 1.15, 13 November 2026
 

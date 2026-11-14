@@ -105,6 +105,46 @@ windowDef desktop {
 		}
 	}
 
+	// The retained home's hand-offs (idSessionLocal::HandleRetainedSessionRequest):
+	// each opens the stock page as its own navigation entry does.
+	onNamedEvent retainedPage_loadGame {
+		resetTime "Loadgame_AnimIn" "0" ;
+	}
+	onNamedEvent retainedPage_saveGame {
+		resetTime "Savegame_AnimIn" "0" ;
+	}
+	onNamedEvent retainedPage_multiplayer {
+		resetTime "Multiplayer_AnimIn" "0" ;
+	}
+	onNamedEvent retainedPage_settings {
+		resetTime "Options_AnimIn" "0" ;
+	}
+	// Reset to defaults on the retained Options page: the stock page with its
+	// Reset Defaults dialog up.
+	onNamedEvent retainedPage_settingsReset {
+		resetTime "Options_AnimIn" "0" ;
+		resetTime "AnimResetDefaults_Up" "0" ;
+	}
+	onNamedEvent retainedPage_credits {
+		resetTime "Credits_AnimIn" "0" ;
+	}
+	onNamedEvent retainedPage_updates {
+		set "cmd" "CheckUpdate2" ;
+	}
+	// A retained full-screen page (guis/menu/loadgame.rui, savegame.rui) stands
+	// over this menu's backdrop, which dresses for it as for a stock page: the
+	// wordmark hides and the portal's view swings in, and both come back as
+	// the page leaves (Retained_CoverHome). The session shows Main_Menu again
+	// when the page is back in the bottom bar.
+	onNamedEvent retainedCover_page {
+		set "Main_Logo::visible" "0" ;
+		set "Main_Menu::visible" "0" ;
+		transition "PortalModelFront::viewOffset" "-43 7 0 0" "-15 7 0 0" "400" ;
+	}
+	onNamedEvent retainedCover_home {
+		resetTime "Retained_CoverHome" "0" ;
+	}
+
 	onNamedEvent saveGameOverwrite {
 		resetTime "AnimOverwriteSaveGame_Up" "0" ;
 	}
@@ -190,6 +230,18 @@ windowDef desktop {
 		}
 		onTime 320000 {		// Music is 318 seconds long
 			resetTime "0" ;
+		}
+	}
+
+	// A retained page leaving: the stock pages' own timing (see Loadgame_AnimOut).
+	windowDef Retained_CoverHome {
+		rect		0, 0, 0, 0
+		noTime		1
+		onTime 0 {
+			set "Main_Logo::visible" "1" ;
+		}
+		onTime 300 {
+			transition "PortalModelFront::viewOffset" "-15 7 0 0" "-43 7 0 0" "400" ;
 		}
 	}
 
@@ -380,9 +432,13 @@ windowDef desktop {
 		}
 
 		// Menu used when starting fresh or out of game
+		// gui::retainedHome: the retained home (guis/menu/title.rui, pause.rui)
+		// draws the navigation and the bottom bar over this menu's backdrop,
+		// so the stock ones stay undrawn; its pages open on the
+		// retainedPage_* events below.
 		windowDef Main_Menu_OutOfGame {
 			rect		0, 0, 640, 480
-			visible		("gui::ingame" == 0)
+			visible		("gui::ingame" == 0 && "gui::retainedHome" == 0)
 
 			windowDef MainOG_BarCurve {
 				rect		50, 102, 150, 362
@@ -610,7 +666,7 @@ windowDef desktop {
 		// Menu used when already in a game
 		windowDef Main_Menu_InGame {
 			rect		0, 0, 640, 480
-			visible		("gui::ingame" != 0)
+			visible		("gui::ingame" != 0 && "gui::retainedHome" == 0)
 
 			windowDef MainIG_BarCurve {
 				rect		50, 102, 150, 362
@@ -833,6 +889,7 @@ windowDef desktop {
 
 		superWindowDef Main_Bottom {
 			rect		180, 438, 450, 32
+			visible		("gui::retainedHome" == 0)
 			matcolor	1, 1, 1, 0.5
 			backcolor	0, 0, 0, 0
 			cornerMat	"guis/assets/menu/window_cornerUL"

@@ -272,6 +272,8 @@ if get_option('build_native_tests')
   test('openq4-bse-particle-order', bse_particle_order_test, timeout: 30)
   test('openq4-vulkan-material-sources', py,
     args: [files('tools/build/vulkan_material_sources.py'), '--check'], timeout: 30)
+  test('openprey-retained-screens', py,
+    args: [files('tools/ui/build_retained_screens.py'), '--check'], timeout: 30)
   test('openq4-vulkan-material-cache', py,
     args: [files('tools/tests/renderer_vulkan_material_cache.py')], timeout: 60)
   openq4_editor_document_test = executable(

@@ -51,7 +51,11 @@ windowDef Desktop {
 		noevents	1
 	}
 
+	// gui::retainedHome: the retained death screen (guis/menu/restartmenu.rui)
+	// draws the frame and its buttons over this screen's backdrop, wordmark
+	// and fade, so the stock ones stay undrawn (idSessionLocal::OpenRestartMenu).
 	superWindowDef main {
+		visible		("gui::retainedHome" == 0)
 		rect		172, 184, 280, 220
 		matcolor	1, 1, 1, 0.7
 		backcolor	0, 0, 0, 0
@@ -81,6 +85,7 @@ windowDef Desktop {
 	}
 
 	buttonDef LastSaveGame {
+		visible		("gui::retainedHome" == 0)
 		rect		237, 230, 150, 30
 		text		"#str_20260"
 		textscale	0.4
@@ -112,6 +117,7 @@ windowDef Desktop {
 	}
 	
 	windowDef LastSaveGame2 {
+		visible		("gui::retainedHome" == 0)
 		rect	192, 260, 240, 20
 		forecolor 1, 1, 1, 0
 		textscale	0.28
@@ -121,6 +127,7 @@ windowDef Desktop {
 	}
 
 	buttonDef Restart {
+		visible		("gui::retainedHome" == 0)
 		rect		237, 280, 150, 30
 		text		"#str_20643"
 		textscale	0.4
@@ -152,6 +159,7 @@ windowDef Desktop {
 	}
 	
 	windowDef Restart2 {
+		visible		("gui::retainedHome" == 0)
 		rect	192, 310, 240, 20
 		forecolor 1, 1, 1, 0
 		textscale	0.28
@@ -161,6 +169,7 @@ windowDef Desktop {
 	}
 	
 	buttonDef MainMenu {
+		visible		("gui::retainedHome" == 0)
 		rect	237, 330, 150, 30
 		text	"#str_20644"
 		textscale	0.4
@@ -192,6 +201,7 @@ windowDef Desktop {
 	}
 	
 	windowDef MainMenu2 {
+		visible		("gui::retainedHome" == 0)
 		rect	192, 360, 240, 20
 		forecolor 1, 1, 1, 0
 		textscale	0.28
