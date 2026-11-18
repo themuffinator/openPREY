@@ -52,6 +52,8 @@ bool ValidProperty(const std::string& name, const Value& value) {
 		} else if (colours.contains(name)) valid = value.type == ValueType::Colour;
 		else if (auto entry = keywords.find(name); entry != keywords.end()) valid = value.type == ValueType::Keyword && entry->second.contains(value.text);
 		else if (name == "opacity" || name == "backdrop-saturate" || name == "backdrop-streak") valid = value.type == ValueType::Number && value.data[0] >= 0 && value.data[0] <= 1;
+		else if (name == "backdrop-dither" || name == "backdrop-glitch") valid = value.type == ValueType::Number && value.data[0] >= 0 && value.data[0] <= 1;
+		else if (name == "backdrop-glitch-phase") valid = value.type == ValueType::Number && value.data[0] >= 0 && value.data[0] <= 65536;
 		else if (name == "flex-grow" || name == "flex-shrink") valid = value.type == ValueType::Number && value.data[0] >= 0;
 		else if (name == "image-offset-x" || name == "image-offset-y") valid = value.type == ValueType::Number;
 		else if (name == "image-scale-x" || name == "image-scale-y") valid = value.type == ValueType::Number && value.data[0] > 0;
@@ -68,6 +70,34 @@ std::string BackdropFilterCss(const Value* blur, const Value* saturate, const Va
 	std::string css = blurs ? "blur("+blur->Css()+")" : "";
 	if (desaturates) css += std::string(css.empty() ? "" : " ")+"saturate("+saturate->Css()+")";
 	if (streaks) css += std::string(css.empty() ? "" : " ")+"streak("+streak->Css()+")";
+	return css;
+}
+int BackdropFaultIndex(const std::string& name) {
+	if (name.size() < 15 || name[0] != 'b' || !name.starts_with("backdrop-")) return -1;
+	return name == "backdrop-dither" ? 0 : name == "backdrop-glitch" ? 1 : name == "backdrop-glitch-phase" ? 2 : -1;
+}
+std::string BackdropFaultCss(const Node& node) {
+	const Value* values[3] = {};
+	bool any = false;
+	for (const auto* name : {"backdrop-dither","backdrop-glitch","backdrop-glitch-phase"})
+		if (const auto found = node.properties.find(name); found != node.properties.end()) {
+			values[BackdropFaultIndex(name)] = &found->second; any = true;
+		}
+	if (!any) return {};
+	std::string css = "glitch(";
+	for (int i = 0; i < 3; ++i) { if (i) css += ' '; css += values[i] ? values[i]->Css() : "0"; }
+	return css+")";
+}
+std::string NodeBackdropFilterCss(const Node& node) {
+	const auto blur = node.properties.find("backdrop-blur"), saturate = node.properties.find("backdrop-saturate");
+	const auto streak = node.properties.find("backdrop-streak");
+	std::string css;
+	if (blur != node.properties.end() || saturate != node.properties.end() || streak != node.properties.end()) {
+		css = BackdropFilterCss(blur != node.properties.end() ? &blur->second : nullptr,
+			saturate != node.properties.end() ? &saturate->second : nullptr, streak != node.properties.end() ? &streak->second : nullptr);
+		if (css == "none") css.clear();
+	}
+	if (const auto fault = BackdropFaultCss(node); !fault.empty()) { if (!css.empty()) css += ' '; css += fault; }
 	return css;
 }
 bool ValidImageSource(const std::string& source) {
@@ -444,7 +474,9 @@ private:
 	}
 	Expression ReadExpression(const Json::Value& value, const std::string& path, unsigned depth = 0, bool allowPresentation = false,
 		std::optional<size_t> inputType = std::nullopt) {
-		Require(depth <= 32 && ++expressionCount <= 65536,value,path,"Expression node/depth budget exceeded");
+		// 131072 nodes: Join Game's rows, whose cells each bind for the text
+		// size, a tall view and the list's tiles, hold about 75,000.
+		Require(depth <= 32 && ++expressionCount <= 131072,value,path,"Expression node/depth budget exceeded");
 		Expression result;
 		if (value.isNumeric()) result.literal = Numeric(value,path,-1000000000000.0,1000000000000.0);
 		else if (value.isBool()) result.literal = value.asBool();
@@ -697,7 +729,7 @@ private:
 				Fields(value,at,{"op","control","extensions"}); step.op = EventOp::Focus;
 				step.target = Id(value["control"],at+"/control");
 				const auto* node = model.FindNode(step.target);
-				Require(node && node->control,value["control"],at+"/control","An event can focus only a declared control");
+				Require(node && node->control && node->control->focusable,value["control"],at+"/control","An event can focus only a declared control that can take the focus");
 			} else if (op == "if") {
 				Fields(value,at,{"op","condition","then","else","extensions"}); step.op = EventOp::If;
 				step.condition = ReadExpression(value["condition"],at+"/condition",0,true);
@@ -1232,7 +1264,7 @@ private:
 			const auto& control = value["control"]; const auto p = path+"/control";
 			Require(control.isObject() && control["role"].isString(),control,p,"Expected a semantic control role");
 			const auto role = control["role"].asString();
-			if (role == "button") Fields(control,p,{"role","action","event","label","enabled","states","navigation","detail","context","prompt","extensions"});
+			if (role == "button") Fields(control,p,{"role","action","event","input","focusable","label","enabled","states","navigation","detail","context","prompt","extensions"});
 			else if (role == "toggle") Fields(control,p,{"role","action","label","enabled","states","navigation","value","mixed","parts","extensions"});
 			else if (role == "slider") Fields(control,p,{"role","action","label","enabled","states","navigation","value","minimum","maximum","step","decimals","orientation","parts","extensions"});
 			else if (role == "choice") Fields(control,p,{"role","action","label","enabled","states","navigation","value","context","parts","visibleRows","options","optionCount","scrollbar","placementBounds","extensions"});
@@ -1241,9 +1273,25 @@ private:
 			else if (role == "scrollbar") Fields(control,p,{"role","label","enabled","states","navigation","viewport","orientation","lineStep","minimumThumb","parts","extensions"});
             else Require(false,control["role"],p+"/role","Supported roles are button, toggle, slider, choice, number, text and scrollbar");
 			result.control.emplace(); auto& parsed = *result.control;
-			Require(role == "scrollbar" || control.isMember("action") != control.isMember("event"),control,p,"Controls require exactly one action or event");
-			if (control.isMember("action")) parsed.action = Id(control["action"],p+"/action");
-			else if (role != "scrollbar") parsed.event = EventName(control["event"],p+"/event");
+			// A prompt button (section 13.4) replays a menu input in place of an
+			// action or event, and never takes the focus.
+			if (control.isMember("focusable")) {
+				Require(control["focusable"].isBool(),control["focusable"],p+"/focusable","Expected a Boolean");
+				parsed.focusable = control["focusable"].asBool();
+				Require(parsed.focusable || !control.isMember("navigation"),control,p,"A control that cannot take the focus has no navigation");
+			}
+			if (control.isMember("input")) {
+				Require(control["input"] == "accept" || control["input"] == "back",control["input"],p+"/input","Expected accept or back");
+				Require(!control.isMember("action") && !control.isMember("event"),control,p,"A control with an input has no action or event");
+				Require(!parsed.focusable,control,p,"A control with an input cannot take the focus");
+				Require(!control.isMember("detail") && !control.isMember("context") && !control.isMember("prompt") && !control.isMember("navigation"),
+					control,p,"A control with an input names no detail, context, prompt or navigation");
+				parsed.input = control["input"] == "accept" ? ControlInput::Accept : ControlInput::Back;
+			} else {
+				Require(role == "scrollbar" || control.isMember("action") != control.isMember("event"),control,p,"Controls require exactly one action or event");
+				if (control.isMember("action")) parsed.action = Id(control["action"],p+"/action");
+				else if (role != "scrollbar") parsed.event = EventName(control["event"],p+"/event");
+			}
 			parsed.label = ControlLabel(control["label"],p+"/label");
 			if (control.isMember("context")) {
 				parsed.context = ReadExpression(control["context"],p+"/context");
@@ -1734,7 +1782,7 @@ private:
 			const auto& value = sourceNode["modal"]; const auto p = path+"/modal";
 			Require(!ancestorControl,value,p,"A modal cannot be nested inside a semantic control");
 			const auto* focus = model.FindNode(node.modal->initialFocus);
-			Require(focus && focus->control && Descendant(focus->id,node.id),value["initialFocus"],p+"/initialFocus","Initial focus must be a control inside this modal");
+			Require(focus && focus->control && focus->control->focusable && Descendant(focus->id,node.id),value["initialFocus"],p+"/initialFocus","Initial focus must be a control inside this modal");
 			std::vector<const Node*> pending;
 			for (const auto& child : node.children) pending.push_back(&child);
 			while (!pending.empty()) {
@@ -1782,6 +1830,7 @@ private:
 			for (const auto& [name,target] : node.control->navigation) {
 				const auto* next = model.FindNode(target);
 				Require(next && next->control,value["navigation"][name],p+"/navigation/"+name,"Navigation target must be a control in this document");
+				Require(next->control->focusable,value["navigation"][name],p+"/navigation/"+name,"Navigation target must be able to take the focus");
 			}
 		}
 		for (size_t i = 0; i < node.children.size(); ++i)
@@ -1930,16 +1979,10 @@ void MarkupNode(const Node& node, std::string& output) {
 	// when the button itself participates in normal document flow.
 	if (node.control) output += "position:relative;";
 	if (node.mask) output += "mask-image:q4-mask(alpha);";
-	const auto blur = node.properties.find("backdrop-blur"), saturate = node.properties.find("backdrop-saturate");
-	const auto streak = node.properties.find("backdrop-streak");
-	if (blur != node.properties.end() || saturate != node.properties.end() || streak != node.properties.end()) {
-		const auto css = BackdropFilterCss(blur != node.properties.end() ? &blur->second : nullptr,
-			saturate != node.properties.end() ? &saturate->second : nullptr, streak != node.properties.end() ? &streak->second : nullptr);
-		if (css != "none") { output += "backdrop-filter:"; output += css; output += ';'; }
-	}
+	if (const auto css = NodeBackdropFilterCss(node); !css.empty()) { output += "backdrop-filter:"; output += css; output += ';'; }
 	for (const auto& [name,value] : node.properties) if (name != "text") {
 		if (name == "opacity") { if (value.data[0] < 1) { output += "filter:opacity("; output += value.Css(); output += ");"; } }
-		else if (name == "backdrop-blur" || name == "backdrop-saturate" || name == "backdrop-streak") continue; // Folded into backdrop-filter.
+		else if (name == "backdrop-blur" || name == "backdrop-saturate" || name == "backdrop-streak" || BackdropFaultIndex(name) >= 0) continue; // Folded into backdrop-filter.
 		else if (name == "image") { if (!HasImageCoordinates(node)) { output += "decorator:"; output += ImageDecorator(node,value.text); output += ';'; } }
 		else if (name == "image-offset-x" || name == "image-offset-y" || name == "image-scale-x" || name == "image-scale-y") continue;
 		else if (name == "image-fit" || name == "image-align-x" || name == "image-align-y" || name == "image-blend") continue; // Folded into the decorator.
@@ -2092,7 +2135,7 @@ const Json::Value* detail::ResolveDocumentSource(const Json::Value& root, const 
 // The parsed tree is a load-time intermediate: the model copies what it keeps,
 // and a tree of a large document costs several times its source. An edit
 // parses the retained source again to find the span it replaces.
-struct Document::Impl { std::string source; DocumentModel model; };
+struct Document::Impl { std::string source; DocumentModel model; std::string identityPath, identity; };
 Document::Document() : impl(std::make_unique<Impl>()) {}
 Document::~Document() = default;
 Document::Document(Document&&) noexcept = default;
@@ -2116,6 +2159,17 @@ bool Document::Load(const std::string& source, std::vector<Diagnostic>& diagnost
 	}
 	impl = std::move(candidate);
 	return true;
+}
+const std::string& Document::SnapshotIdentity(const std::string& sourcePath) const {
+	if (impl->identity.empty() || impl->identityPath != sourcePath) {
+		Json::Value identity(Json::objectValue);
+		identity["version"] = 1; identity["id"] = impl->model.id;
+		identity["path"] = sourcePath; identity["source"] = impl->source;
+		Json::StreamWriterBuilder writer; writer["indentation"] = ""; writer["precision"] = 17;
+		impl->identity = Json::writeString(writer,identity);
+		impl->identityPath = sourcePath;
+	}
+	return impl->identity;
 }
 bool Document::ReplaceValue(const std::string& pointer, const std::string& replacement, std::vector<Diagnostic>& diagnostics) {
 	diagnostics.clear();

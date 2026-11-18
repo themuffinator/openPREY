@@ -383,7 +383,7 @@ static void GLESD3_VerifyCurrentRenderContents( idImage *sceneImage, int width, 
 	const int sampleY = backEnd.viewDef->viewport.y1 + height / 2;
 
 	byte fromFramebuffer[4] = { 0, 0, 0, 0 };
-	glBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
+	glBindFramebuffer( GL_READ_FRAMEBUFFER, (GLuint)R_DefaultFramebufferHandle() );
 	glReadPixels( sampleX, sampleY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fromFramebuffer );
 
 	byte fromImage[4] = { 0, 0, 0, 0 };
@@ -661,6 +661,7 @@ static void RB_GLESD3_T_FillDepthBuffer( const drawSurf_t *surf, glesProgram_t *
 
 	if ( surf->space != backEnd.currentSpace ) {
 		backEnd.currentSpace = surf->space;
+		RB_SetSurfaceWinding( backEnd.currentSpace );
 	}
 	float mvp[ 16 ];
 	myGlMultMatrix( surf->space->modelViewMatrix, backEnd.viewDef->projectionMatrix, mvp );
@@ -816,6 +817,7 @@ void RB_GLESD3_FillDepthBuffer( drawSurf_t **drawSurfs, int numDrawSurfs ) {
 	glStencilFunc( GL_ALWAYS, 1, 255 );
 
 	backEnd.currentSpace = NULL;
+	RB_SetSurfaceWinding( backEnd.currentSpace );
 	for ( int i = 0; i < numDrawSurfs; i++ ) {
 		if ( drawSurfs[i]->material == NULL || drawSurfs[i]->material->SuppressInSubview() ) {
 			continue;
@@ -1344,6 +1346,7 @@ static void RB_GLESD3_T_RenderShaderPasses( const drawSurf_t *surf ) {
 	// the modelview changes per space; the projection is fixed for the view
 	if ( surf->space != backEnd.currentSpace ) {
 		backEnd.currentSpace = surf->space;
+		RB_SetSurfaceWinding( backEnd.currentSpace );
 	}
 	float mvp[ 16 ];
 	myGlMultMatrix( surf->space->modelViewMatrix, backEnd.viewDef->projectionMatrix, mvp );
@@ -1660,6 +1663,7 @@ int RB_GLESD3_DrawShaderPasses( drawSurf_t **drawSurfs, int numDrawSurfs,
 	RB_LogComment( "---------- RB_GLESD3_DrawShaderPasses ----------\n" );
 
 	backEnd.currentSpace = NULL;
+	RB_SetSurfaceWinding( backEnd.currentSpace );
 
 	int i;
 	for ( i = 0; i < numDrawSurfs; i++ ) {

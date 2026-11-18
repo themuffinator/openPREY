@@ -108,4 +108,17 @@
 	"#str_231525"	"%s"
 	"#str_231533"	"%s · %s"
 	"#str_231535"	"%s %s"
+	// the in-game updater (src/framework/Updater.cpp), from openQ4
+	"#str_232501"	"openPREY %s est à jour."
+	"#str_232502"	"Cette version de développement (%s) est au moins aussi récente que la dernière version d'openPREY, %s."
+	"#str_232503"	"openPREY %s est disponible (vous avez %s).\n\nLe télécharger maintenant (%s) ? openPREY se ferme pour l'installer, puis redémarre."
+	"#str_232504"	"openPREY %s est disponible (vous avez %s).\n\nOuvrir sa page de téléchargement ?"
+	"#str_232505"	"openPREY n'a pas pu rechercher de mises à jour. Vérifiez votre connexion Internet.\n\nOuvrir plutôt la page des versions dans votre navigateur ?"
+	"#str_232506"	"Mise à jour d'openPREY vers %s"
+	"#str_232507"	"La mise à jour n'a pas pu être téléchargée ou vérifiée. openPREY %s reste inchangé.\n\nOuvrir plutôt la page de téléchargement ?"
+	"#str_232508"	"La mise à jour a été annulée. Rien n'a été modifié."
+	"#str_232509"	"openPREY %s est prêt à être installé. openPREY va se fermer, installer la mise à jour et redémarrer."
+	"#str_232510"	"openPREY a été mis à jour en version %s."
+	"#str_232511"	"openPREY %s n'a pas pu être installé. openPREY %s reste inchangé.\n\nOuvrir la page de téléchargement pour l'installer vous-même ?"
+	"#str_232512"	"openPREY n'a pas pu redémarrer après la mise à jour. Lancez-le depuis son dossier."
 }

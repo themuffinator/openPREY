@@ -292,6 +292,12 @@ typedef struct viewLight_s {
 	// usable volume.
 	int						shadowMapIncompleteMapMask;
 	int						shadowMapIncompleteStencilMask;
+	// Receiver ownerships a stencil volume would have shadowed in this view
+	// and does not, because the light is going to render shadow maps: the
+	// volume exists and was not linked, or was never built. A back end that
+	// finds nothing to cast in a pass reads it to tell a map that failed
+	// from a light with nothing to shadow.
+	int						shadowMapElidedStencilMask;
 	// A hybrid receiver samples the partial map while stencil supplies the
 	// casters absent from it. This mask is narrower than either completeness
 	// mask: it records only ownership for which at least one required caster
@@ -1015,6 +1021,7 @@ public:
 	virtual void			UnCrop();
 	virtual void			GetCardCaps( bool &oldCard, bool &nv10or20 );
 	virtual bool			UploadImage( const char *imageName, const byte *data, int width, int height );
+	virtual bool			UploadImageRegion( const char *imageName, const byte *data, int x, int y, int width, int height, int rowPitch );
 
 
 	virtual idImage*		CreateImage(const char* name, idImageOpts* opts, textureFilter_t textureFilter);
@@ -1506,6 +1513,11 @@ extern idCVar r_rendererSharedWorldInteraction;	// opt-in backend-neutral whole-
 extern idCVar r_rendererSharedWorldFogBlend;	// opt-in backend-neutral whole-view fog/blend ownership
 extern idCVar r_rendererSharedSubview;	// opt-in backend-neutral direct/capture special-subview ownership
 extern idCVar r_rendererSharedDeform;	// opt-in backend-neutral material-deform ownership
+extern idCVar r_rendererSharedFaultInject;	// diagnostic: selected shared domains decline at their backend boundary
+const int SHARED_FAULT_INJECT_SUBVIEW = 1;
+const int SHARED_FAULT_INJECT_SPECIAL_FRAME = 2;
+const int SHARED_FAULT_INJECT_CINEMATIC_POST = 4;
+const int SHARED_FAULT_INJECT_DETAIL = 9000;	// failure detail recorded for an injected decline
 extern idCVar r_vkShadowFallbackTest;	// diagnostic-only forced Vulkan unshadowed receiver fallback
 extern idCVar r_rendererModernLightingParity;	// diagnostic override forcing lighting-ownership parity contracts proven
 extern idCVar r_rendererModernAutoPromote;	// allow gated default modern-visible promotion
@@ -1563,6 +1575,7 @@ extern idCVar r_ttfFontDebug;			// 1 = dump each TrueType glyph atlas to fs_save
 extern idCVar r_useShadowMap;			// 1 = use a simple shadow-map path for projected and point lights when supported
 extern idCVar r_shadowMapCSM;			// 1 = use projected-light cascaded shadow maps when shadow maps are enabled
 extern idCVar r_shadowMapHashedAlpha;		// 1 = use hashed alpha testing for perforated shadow-map casters when available
+extern idCVar r_shadowMapCharacterSelfShadow;	// 1 = animated characters ignore their materials' noSelfShadow under shadow-mapped lights
 extern idCVar r_shadowMapTranslucentMoments;	// 1 = accumulate experimental translucent shadow moments for blended casters
 extern idCVar r_shadowMapTranslucentDensity;	// density scale applied when resolving translucent shadow moments
 extern idCVar r_shadowMapTranslucentMinAlpha;	// minimum per-stage alpha considered by translucent shadow moments
@@ -1860,6 +1873,8 @@ void	GL_ClearStateDelta( void );
 void	GL_State( int stateVector );
 void	GL_TexEnv( int env );
 void	GL_Cull( int cullType );
+// openQ4: the front face for a surface space, turned for a reflected one
+void	RB_SetSurfaceWinding( const viewEntity_t *space );
 
 const int GLS_SRCBLEND_ZERO						= 0x00000001;
 const int GLS_SRCBLEND_ONE						= 0x0;
@@ -2316,6 +2331,11 @@ void RB_ApplyFlatDiffuseStage( const drawSurf_t *surf, idImage **diffuseImage, f
 const shaderStage_t *RB_SetLightTexture( const idRenderLightLocal *light );
 
 void RB_DrawView( const void *data );
+// True when the active GL target is one a shared classic domain may draw into:
+// the window, or the renderer's own scene target that the classic walker is
+// drawing the same view into. Game-owned feedback targets and every other
+// render texture keep the complete classic path (REN-01).
+bool RB_SharedDomainTargetAllowed( void );
 bool RB_DrawSharedGuiView( const viewDef_t *viewDef );
 bool RB_DrawSharedInWorldGuiView( const viewDef_t *viewDef );
 bool RB_DrawSharedCinematicRootView( const viewDef_t *viewDef );
@@ -2331,6 +2351,7 @@ bool RB_UnderwaterViewAvailable( void );
 void RB_DetermineLightScale( void );
 void RB_STD_LightScale( void );
 void RB_HDRPrintGfxInfo( void );
+bool RB_FrameClearColor( float color[4] );
 void RB_BeginDrawingView (void);
 
 /*

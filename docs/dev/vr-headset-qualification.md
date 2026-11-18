@@ -47,6 +47,7 @@ here: it waits on the AND-05 distribution decision.
 | 1.6 | Set **VR Mode** to Disabled, then back to Enabled. | Desktop play is unchanged while off; VR returns when on. |
 | 1.7 | Step aside, turn, and use the headset's own recenter (for example hold the Meta button). | You end up at the origin facing forward in one clean step: no jump, slide or second correction a moment later. |
 | 1.8 | Resize and maximize the desktop window during VR gameplay, then set **VR Mode** to Disabled. | The mirror fills the window at each size; the flat view afterwards fits the window. |
+| 1.9 | Load the runtime with another application or a heavy desktop task while in VR gameplay, so the compositor stalls for a moment. | The session survives a short stall (the console may say a swapchain image was waited for again); only a stall of more than a second returns VR to the desktop. |
 
 ## 2. Refresh, latency and frame cost (VR-02, VR-04)
 
@@ -68,6 +69,17 @@ here: it waits on the AND-05 distribution decision.
 | 3.6 | Cycle every weapon, including the Awakening weapons in `q4xbase`. | Every gun sits in the hand at full size, gripped where its own model holds it. |
 | 3.7 | Aim at a mark with the controller tilted well down, then in turn: click the weapon-hand stick, load a quick save, leave a vehicle, and sit through a cutscene. Fire at the mark after each. In multiplayer, repeat after a respawn and a teleporter. | Shots keep landing on the laser dot; it never ends up a fixed angle above or below them. |
 | 3.8 | Squeeze the off-hand grip away from the gun, turn the weapon hand towards a weapon on the wheel and let go. | The wheel highlights the weapon you point towards and switches to it. |
+| 3.9 | Hold the gun close to your chest, at arm's length, overhead and across your body. Watch the weapon arm. | A forearm and an upper arm join your shoulder to the hand on the grip at every reach, bending at the elbow; no gap, kink or stray second forearm. |
+| 3.10 | Move the off hand about freely, then squeeze its grip on the foregrip, release, and reload. | The off hand follows its controller; it goes to the gun for the two-handed grip and for the reload, and comes back without a snap. |
+| 3.11 | Cycle every weapon, including the Awakening weapons in `q4xbase`, looking at both arms. | Every gun keeps both arms attached; a gun whose model has no arms of its own shows the character's own hands instead. |
+| 3.12 | Switch **Weapon Hand** to left and look at both hands. | The character's own (simpler) hands hold the gun and follow the right controller; no modelled right hand sits on a left arm. |
+| 3.13 | Put the gun hand behind a door frame, a crate and a wall corner. | The gun is hidden by what the hand is behind, at the depth both eyes agree on. |
+| 3.14 | On Valve Index controllers, hold both controllers normally without squeezing. | No weapon switch, no weapon wheel and no two-handed grip until you squeeze. |
+| 3.15 | On Valve Index controllers, squeeze the left trackpad firmly, then rest a thumb on it without pressing. | The firm squeeze toggles the flashlight; a resting thumb does nothing. |
+| 3.16 | On HTC Vive wands, press each trackpad up, down, left, right and in the middle; then rest a thumb on the right pad without pressing. | Right: up crouches, down jumps, left and right turn, the middle recentres when held. Left: up toggles the flashlight, down reloads, the middle runs. A resting thumb on the right pad neither turns nor changes weapon; the left pad walks as before. |
+| 3.17 | On Windows Mixed Reality controllers, press each touchpad in its upper and lower half; click both thumbsticks. | Upper half: crouch (right), flashlight (left). Lower half: jump (right), reload (left). The thumbstick clicks keep their own actions. |
+| 3.18 | With a mirror or your shadow in view, point the gun straight up, then straight down, rolling your wrist. | Your character in the mirror or shadow keeps facing one way; it no longer spins on the spot. |
+| 3.19 | Set **Weapon Hand** to Left. Hold each gun close to your face, turn it, and let go of it with the right hand and take hold again. | A left hand grips each gun as the right hand did, the right hand supports it and follows its controller when free; no arm is dark, see-through or inside out, and the gun's displays read the right way round. |
 
 ## 4. Body, space and movement (VR-02, VR-03)
 
@@ -80,6 +92,13 @@ here: it waits on the AND-05 distribution decision.
 | 4.5 | With room scale on, walk into a wall and around a crate. | The character stops at the wall; walking around the crate does not drift the view from the body. |
 | 4.6 | Walk with the stick (both **Walk Direction** settings), snap-turn and smooth-turn. | Movement follows the chosen direction; turning is comfortable; the comfort vignette darkens only while the stick moves or turns you. |
 | 4.7 | In multiplayer, walk in the room and around the arena with a flat client watching. | The flat client sees you move once (no doubled movement) and your own view does not correct back. |
+| 4.8 | With room scale on, take a few slow steps about the room, in single player and in multiplayer, watching a nearby edge. | The view glides with your head while the character follows: no shimmer or step back each moment, and in multiplayer the comfort vignette stays open. |
+| 4.9 | Look down at yourself standing, then at your feet. | A chest, belt, legs and feet stand under you at your own size, feet on the floor where yours are; looking down does not show the inside of the collar. |
+| 4.10 | Glance left and right, then turn your whole body, then walk with the stick while looking sideways. | The body stays put for a glance, comes round when you turn, and faces the way you walk; it never follows the gun hand. |
+| 4.11 | Bend your knees slowly into a full crouch and stand again. | The knees bend with you and the feet stay planted; the chest never rises into view or sinks through the floor. |
+| 4.12 | Stand 30 cm to one side of where you recentred and snap-turn several times; repeat with smooth turning. | The world turns about your head: no sideways slide with each turn. |
+| 4.13 | Start VR with the headset lying on the desk, then put it on and hold the weapon-hand stick in for a second. | The view is at your character's height and facing forwards after the hold (the controllers buzz); `vr_standingHeight` did not take a height from the desk. |
+| 4.14 | With the gun hanging at your side pointing well off to one side, start a level, load a save and step through a teleporter. | You face the way the level intends each time, whatever the hand does. |
 
 ## 5. Vehicles, cinematics and transitions (VR-02)
 
@@ -89,6 +108,9 @@ here: it waits on the AND-05 distribution decision.
 | 5.2 | Watch a cinematic and a loading screen. | They play on the floating screen at a comfortable distance. |
 | 5.3 | Die, respawn, and load a save. | Each transition is free of flashes or a view stuck at the wrong height. |
 | 5.4 | Snap-turn several times, then finish a level, and separately load a save. | The next level starts facing the way its start faces, and the save loads facing the way it was saved, not turned by the earlier snap turns. |
+| 5.5 | Save in the walker's seat facing somewhere other than straight ahead, load the save, and look around. | The view loads facing the way you saved, along the walker's sights; nothing swings round after the load. |
+| 5.6 | Climb onto an open gun (airdefense1's anti-aircraft gun) and look down and around. | Your character stands at the controls under you, hands on the handles, at your height; no body sits inside the walker or the hovertank. |
+| 5.7 | In multiplayer on someone else's server, with the gun hanging well off to one side, respawn and go through a teleporter. | You face the way the spawn point or teleporter sends you, whatever the hand does. |
 
 ## 6. Menus, HUD and screens in the world (VR-01, VR-02)
 
@@ -98,6 +120,7 @@ here: it waits on the AND-05 distribution decision.
 | 6.2 | Read the HUD, objective text and a terminal screen. | Text is sharp and readable at the default HUD distance and width. |
 | 6.3 | In single player, point the weapon hand at a door panel and a lift call screen and pull the trigger. | The cursor sits where the laser meets the screen and the screen responds. |
 | 6.4 | In multiplayer, look at the objective markers in CTF (`mp/q4ctf1`). | Markers sit at HUD depth, follow your head and stay inside the HUD. |
+| 6.5 | In multiplayer, hit another player (or `testHudOverlays`) and watch the damage number. | The number rises from the player you hit, not below or beside them. |
 
 ## 7. Temporal anti-aliasing by eye (VR-05)
 

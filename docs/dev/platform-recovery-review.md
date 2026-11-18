@@ -356,6 +356,136 @@ the boarding heading, 150.7; with it, along the new heading, 105.7, on both
 renderers. The m07 race itself was not re-run: its October harness and
 Awakening mirror no longer exist, and the smoke exercises the same path.
 
+### The player's own body in the headset (17 November 2026)
+
+`vr_body` (0 none, 1 legs and torso, 2 with arms; default 2) shows the player a
+body under the tracked head. The solver is `src/framework/VRBody.h`, on the
+model-free geometry in `VRMathCore.h` (`VR_SolveTwoBone`, `VR_BodyYawFollow`,
+`VR_NeckFromHead`, `VR_BodyScale`, `VR_BodySetback`, `VR_HeadingDegrees`,
+covered by `VRMathCoreTest.cpp`); both game modules call it from the draw pass
+(`BeginVRBody`, the view weapon's `PoseVRArms`, `FinishVRBody` inside
+`PreparePlayerSceneForRender`), never from a tic.
+
+- **A second render entity, not the third-person model shown.** The model
+  everyone else sees leans with the aim, turns with the weapon hand's yaw and
+  holds its arms where its animation puts them; it still serves mirrors,
+  shadows and other players unchanged. The body in the eyes is another entity
+  of the same model with `allowSurfaceInViewID` set to the player's view, no
+  shadow, and its own joints. The renderer treats such an entity like the view
+  weapon (no cel ink, no flat-diffuse tint), which suits it.
+- **Trunk.** The pelvis, spine, shoulders and collar are the model's ragdoll
+  rest pose (`af_pose`: upright, square), scaled so the model's neck joint
+  reaches the player's neck (0.867 for the marine, who stands taller than the
+  68-unit camera) and hung from a neck point 8 cm behind and 7.5 cm below the
+  tracked eyes. A scale folded into a joint's rotation scales what is skinned
+  to it; a rotation of zero folds a part away.
+- **Heading.** The torso's yaw lives in the tracking space, so snap and smooth
+  turns carry it; within 55 degrees of the head's heading it stays put, beyond
+  that it follows, and while the player walks it lines up at 240 degrees a
+  second. The head's heading comes from its forward and up axes together, so
+  it holds while the player looks at their feet.
+- **Setback.** A chest in the marine's armour reaches about 8 units ahead of
+  the spine, further than the eyes above it, so a body under the eyes showed
+  the inside of its own collar and never its feet. The body stands 10 cm
+  behind the neck point and eases to 26 cm as the head tips from about 25 to
+  65 degrees down.
+- **Legs.** The feet are the animation's (scaled); thigh and shin are a
+  two-bone reach from the trunk's hip to the animated ankle, bent towards the
+  animated knee, so standing, squatting to a real crouch and the crouch
+  animation are one continuous motion.
+- **Arms.** Every stock view model, and The Awakening's two new ones (core
+  cannon, goob gun), carries the same forearms and hands on one rig:
+  `lft_shldr`/`lft_elbo`/`lft_wrst` and, mirrored with the first joint axis
+  reversed, `rt_elbo`/`rt_wrst`; some guns hang the left wrist on the gun
+  itself. Each forearm swings about its wrist until its elbow end meets an
+  elbow solved from the body's shoulder; the model's own forearm folds away
+  inside it. The weapon hand stays as animated. The support hand follows the
+  off controller, held as the mirror image of how the weapon hand holds its
+  own, and blends back to the animation in the two-handed grip and while the
+  weapon is not ready (reload, raise, lower). With no view weapon drawn, or the
+  weapon in the left hand (the modelled hands would be the wrong ones), the
+  model's own forearms and hands reach the controllers and the view model's
+  arm surfaces are hidden. Aimed by the head, the gun rides with the view and
+  only legs and torso are drawn.
+- **The held gun's depth.** `weaponDepthHackInViewID` is cleared while the
+  weapon hand aims: the squashed depth range drew the gun over anything more
+  than about 15 cm from the eye, at a stereo depth that said otherwise, and
+  would have drawn it over the body.
+
+Evidence on the simulated runtime (OpenGL unless noted; no headset): left-eye
+captures at scripted head and hand poses (level, 45/70/85 degrees down, reach,
+two-handed, squat, crouch, left-handed, torso only, and the body stood ahead
+with `vr_bodyAhead`) show the chest, legs and feet under the head and both arms
+joined at the elbow. A numeric probe reads the `vr_debug 2` traces: with the
+head 0.3 m off centre a 45 degree snap turn turns the body 45.0 degrees and
+moves the drawn head 0.00 units (about 9 before), and `setviewpos` with the
+weapon hand 70 degrees aside leaves the head facing the asked 150.7 degrees
+(80.7 before). What a headset must still judge is in checklist rows 3.9 to
+3.14 and 4.9 to 4.14.
+
+### The audit's leads, second round (17 November 2026)
+
+- **Controllers.** Two actions join the set: `trackpad` (vector) and
+  `trackpad_click`, bound on Vive wands and Windows Mixed Reality controllers.
+  `ApplyTrackpadRegions` turns a pressed pad into the buttons those
+  controllers lack, by the region `VR_TrackpadRegion` reads when the press
+  begins and keeps until it ends: up the secondary button, down the primary.
+  A profile without a stick click of its own (the Vive wand, whose pad is its
+  stick) also takes the centre as the stick's click and, on the weapon hand,
+  left and right as turns, and its weapon-hand pad acts only while pressed.
+  Index binds `input/trackpad/force` on the left hand to the secondary button;
+  a float bound to a boolean action is thresholded by the runtime.
+- **Recovery.** A timed-out `xrWaitSwapchainImage` leaves its image acquired
+  and still to be waited for, so `AcquireImages` waits again, up to ten times
+  100 ms, before the session is retired. `CheckOptional` handles the calls VR
+  can do without: a lost session or instance still goes to `Check`, anything
+  else, `XR_ERROR_RUNTIME_FAILURE` included, is reported (the first eight
+  times) and the call's service goes without.
+- **Multiplayer facing.** The server owns `deltaViewAngles` and sets a facing
+  from the usercmd, which a tracked hand turns. When a client's snapshot
+  carries a new delta yaw, the client turns its body by the angle between hand
+  and head (`idVRSystem::TurnBody`, game API 60, about the head as a stick turn
+  is), so its next usercmds face the head there. A listen server's own player
+  still turns its delta directly. The server's frozen views (weapon wheel,
+  cinematic, Arena lock) now hold a VR client's delta as that client does,
+  recognising it by `BUTTON_VRAIM`: otherwise each would have changed the
+  delta and turned the body again.
+- **Smaller ones.** `VR_ModelYawFollow` holds the third-person model's heading
+  from 55 degrees of aim pitch and fully past 80; `SetViewAngles` and a new
+  server facing let it take the new yaw at once. A hand-held muzzle is traced
+  from the hand and stopped short of a wall, and a projectile's way is cleared
+  from the hand rather than from the body's box. `VR_RoomScaleCatchUp` caps a
+  single-player room-scale step at 5 m/s. The comfort vignette is centred on
+  the head's forward as each eye sees it. An exposed seat (`driverVisible`,
+  so the driver is not hidden) draws the player model's own animated pose with
+  its neck under the tracked head and no arm solving (`vrBodySeated`).
+
+Evidence on the simulated runtime (no headset): the native math test covers
+the three new functions; `openxr_lifecycle.py` covers one timeout, which now
+keeps the session, and a second of them, which retires it;
+`openxr_lifecycle_runtime.py` passes with `xrWaitSwapchainImage:2:timeout`
+(session kept) and `xrGetCurrentInteractionProfile:1:failure` (VR carries on),
+and still retires the session or instance for `session` and `runtime` faults;
+`openxr_vr_controller_profiles_smoke.py` presses every control on Touch,
+Index, Vive and WMR profiles and each reaches its key, a resting Vive thumb
+none, a pressed right pad side a 45 degree turn. A dedicated server with a VR
+client whose gun hand is 50 degrees off its head: after each of two respawns
+the client turned its body 50.0 degrees and the head faced the server's
+facing exactly (0.0 and 90.0). Left-eye captures show the character's hand on
+airdefense1's anti-aircraft gun handle with `vr_body 2` and none with
+`vr_body 0`.
+
+A left-handed hold with the view model's own hands was tried and taken out.
+The rigs are mirror images: in the machinegun's symmetric bind every right
+arm joint's partner sits at its reflection, and its axes are the reflected
+ones with the wrist's first axis reversed and every other joint's three
+reversed; every view model's weight offsets agree. A hold that mirrored each
+joint onto its partner across the barrel, carried the left hand's extra
+fingers on their parents and placed the gun by the mirrored grip still drew
+the hands off the grip with stretched mesh between them in airdefense1
+captures, where the gun hangs small and cluttered; it needs a capture that
+frames the view model closely before another attempt.
+
 ## Android selection and package matrix
 
 | Variant | Selected ABI/API/render scope | Distribution and prerequisite |
@@ -1777,3 +1907,144 @@ Evidence (reports, logs, captures, traces and APK hashes) is under
 - an audible check and controller, mouse and keyboard input, which need the
   player;
 - a Mali GPU and an API 24-floor device, which are unavailable for now.
+
+## Meta Quest flavor integration, 12 November 2026
+
+The archived Quest change (`65aa9bd88`) is integrated for AND-05 on the current
+renderer and OpenXR path, with the headset services it lacked, and checked on
+the diagnostic emulator against the test runtime. No headset was available, so
+nothing here qualifies a Quest.
+
+**Loader and session.** Meson builds the Khronos loader (1.1.65) with
+`XR_OS_ANDROID`, jnipp, the Android JNI wrappers and `android_utilities.cpp`
+for the Quest flavor (`-Dandroid_headset=true`) and the diagnostic x86_64
+emulator only; phones never link it. `Sys_AndroidJavaHandles` hands OpenXR the
+Java VM and a global reference to the activity for `xrInitializeLoaderKHR` and
+`XR_KHR_android_create_instance`. The Android loader reads no environment, so
+`vr_runtimeJson` reaches it as an `XR_EXT_loader_init_properties` property;
+only the emulator check sets it. The session binds the GLES module's EGL
+context through `XR_KHR_opengl_es_enable`, and swapchains carry the ES image
+type.
+
+**Presentation.** The GLES module presents with the OpenGL presentation code,
+and GLES_D3's scene present and render check now honour the redirected default
+target. An sRGB swapchain image is written with `GL_EXT_sRGB_write_control`
+off or, without it, through a draw that decodes the engine's gamma-encoded
+pixels. Review of the archived draw found it left the GLES program cache and
+texture unit 0 believing their earlier state, so the next frame could skip
+binding its program or texture; the draw now invalidates both and the GL state
+cache.
+
+**Headset services (new).** Where the runtime lists them, the engine chooses
+the refresh rate (`XR_FB_display_refresh_rate`, `vr_refreshRate`: the fastest
+offered rate at or below the request), holds the CPU and GPU level
+(`XR_EXT_performance_settings`, `vr_performanceLevel`, sustained high by
+default), logs thermal reports and shows them in `vr_status`, and names the
+frame thread (`XR_KHR_android_thread_settings`). `VR_ChooseRefreshRate` and
+`VR_PerformanceSettingsLevel` are covered by the native VR maths test, and the
+lifecycle harness checks that a lost session or instance drops their state.
+
+**Package.** Gradle `-Popenq4Quest=true` packages the Quest stage as
+`com.darkmatter.openq4.quest` under `builddir/android-apk-quest/`. Its manifest
+is generated from the phone manifest: head tracking, the OpenXR permissions
+and runtime-broker queries, the supported headsets, focus awareness, the 2D
+category on setup, and the Quest VR and Khronos immersive categories on the
+game. A build carrying the `openq4-headset` marker starts with `vr_enable 1`,
+the touch controls and window mirror off and the window landscape; setup hides
+the touch Controls page. The test runtime now builds for Android (GLES
+swapchains), offers the refresh-rate and performance extensions on request and
+scripts thermal reports. Only the emulator's debug APK may carry it
+(`-Popenq4XrTestRuntime`), and `verify_payload` admits it by its exact bytes.
+
+**Builds.** NDK r30 builds in WSL of build 2398 (HEAD `6cf523a01` plus this
+change, with other sessions' uncommitted edits held at their base):
+
+- the x86_64 emulator stage with OpenXR, packaged as a debug APK with the test
+  runtime;
+- the arm64-v8a Quest stage (variant `quest`, the marker, the seven libraries,
+  no test runtime), packaged as a release APK (versionCode 14001, API 24 to
+  35) and signed with a one-day throwaway rehearsal key.
+  `verify_android_apk.py --variant quest` passes its certificate, manifest,
+  16 KiB ELF/ZIP alignment and exact payload checks.
+
+**Emulator VR check.** `android_emulator_smoke.py --mode vr` on the API 35
+x86_64 AVD (SwiftShader, OpenGL ES 3.0). The test runtime offered 72, 90 and
+120 Hz, starting at 72, and performance levels.
+
+- The engine found the ES runtime with both services, held the CPU and GPU at
+  sustained high and asked for 90 Hz; the headset reported 90 Hz (was 72).
+  The session ran 640x704 eyes and a 1920x1080 virtual screen on the STAGE
+  space with the Touch controller profile.
+- SwiftShader has no `GL_EXT_sRGB_write_control`, so the decoding draw ran.
+- In Air Defense 1 both eyes are lit and differ by the eye offset, a scripted
+  30-degree head turn moves the view, and the HUD is on the virtual screen.
+- The scripted GPU thermal warning reached the log and `vr_status`; setting
+  `vr_refreshRate 72` in play asked again and the headset changed to 72 Hz.
+- Quitting closed the session and destroyed the instance.
+
+Also passing: `android_build.py` (20 tests, three new), `openxr_vr_contract.py`,
+`openxr_lifecycle.py`, the native VR maths test, and the Android host storage,
+interface, save path, setup and touch checks, on HEAD plus this change.
+
+**Found, not changed.** At quit, after BSE shutdown, Android's HWUI worker
+threads abort on a destroyed mutex (`FORTIFY: pthread_mutex_lock called on a
+destroyed mutex`, SIGABRT in `hwuiTask1`), although the activity manager
+records a clean exit. The 8 and 9 November emulator runs, without VR, show the
+same abort, so it predates this change. Fixed on 13 November; see
+[Android quit abort](#android-quit-abort-13-november-2026).
+
+Evidence (the run's logs, report and captures, the Quest manifest dump and
+verifier output, the rehearsal certificate and APK hashes) is under
+`.tmp/android-evidence/2026-11-12-and05/` in the main checkout. Not qualified,
+and needing a headset: the Adreno sRGB write path, Horizon OS's launch from
+the setup panel into VR, controller and menu interaction, comfort, recovery
+across the system menu, boundary and sleep, sustained refresh and thermal
+budgets, installation and asset import on the headset, and the distribution
+decision.
+
+## Android quit abort, 13 November 2026
+
+Every Android quit since at least 8 November, with or without VR, ended in an
+abort just after the engine's `BSE Shutdown` banner: `FORTIFY:
+pthread_mutex_lock called on a destroyed mutex` in `hwuiTask0` and `hwuiTask1`,
+then SIGABRT and a crash dump. The activity manager still recorded `EXIT_SELF`
+with status 0, because the engine's thread usually finished exiting first.
+
+**Cause.** `Posix_Exit` ended the process with `exit()` once shutdown was done.
+`exit()` runs the static destructors of every library in the process,
+Android's own included. HWUI, Android's UI renderer, keeps its worker pool
+(`android::uirenderer::CommonPool`) in a function-local static and never joins
+its two detached worker threads. The pool's destructor wakes the workers and
+then destroys their mutex; they lock it again, and bionic aborts. openQ4 owns
+neither the object nor the threads. The 12 November APK reproduced it on the
+API 35 emulator, quitting from the main menu:
+
+- the destroyed mutex (`0x781e83e02ab8`) is in `libhwui.so`'s `.bss`, at
+  `0xc02ab8` from its load address;
+- in that library, `CommonPool::instance()` builds the pool at `0xc02aa0` and
+  registers its destructor with `__cxa_atexit`, `CommonPool::post` locks
+  `0xc02ab8`, and `~CommonPool` notifies the workers' condition variable before
+  destroying the mutex at offset `0x18`;
+- a thread dump of the running game shows both `hwuiTask` threads in
+  `CommonPool`'s worker lambda, waiting on that condition variable.
+
+**Fix.** On Android, `Posix_Exit` now flushes stdio and ends the process with
+`_exit()`, keeping the exit status. By then common shutdown has closed the log,
+configuration and saves, the fatal-error breadcrumb has been written with
+`write()`, and a fatal error's console wait has already finished. Nothing
+openQ4 needs is left to a destructor at that point. Desktop POSIX builds still
+use `exit()`. The emulator
+smoke now fails if logcat shows a libc abort or FORTIFY failure in any thread of
+the engine's processes, so the exit record alone can no longer hide one.
+`android_build.py` pins both the Android exit and the logcat check.
+
+**Check.** NDK r30 x86_64 build of HEAD `6613b645b` plus this change (other
+sessions' uncommitted edits held at their base), as emulator debug APK
+`f7b8c214…daaba3`. `android_emulator_smoke.py --mode sp` passes on the same AVD
+with the new check: after `BSE Shutdown` the process exits 31 ms later with no
+libc abort, and the activity manager records `EXIT_SELF` with status 0. Run on
+the capture from the old APK, the check reports its two FORTIFY lines and the
+SIGABRT. `android_build.py` and the other checks that read `posix_main.cpp`
+pass. Evidence (the old APK's maps, thread dump, logcat and `libhwui`
+disassembly, and the fixed run's report and logs) is under
+`.tmp/android-evidence/2026-11-13-quit-abort/` in the main checkout.

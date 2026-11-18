@@ -74,6 +74,7 @@ idCVar				idAsyncNetwork::serverRemoteConsolePassword( "net_serverRemoteConsoleP
 idCVar				idAsyncNetwork::serverAllowLegacyRcon( "net_serverAllowLegacyRcon", "0", CVAR_SYSTEM | CVAR_BOOL | CVAR_NOCHEAT, "allow the insecure legacy plaintext rcon protocol" );
 idCVar				idAsyncNetwork::clientPrediction( "net_clientPrediction", "16", CVAR_SYSTEM | CVAR_INTEGER | CVAR_NOCHEAT, "additional client side prediction in milliseconds (legacy value 16 follows one exact base tic)" );
 idCVar				idAsyncNetwork::clientMaxPrediction( "net_clientMaxPrediction", "1000", CVAR_SYSTEM | CVAR_INTEGER | CVAR_NOCHEAT, "maximum number of milliseconds a client can predict ahead of server." );
+idCVar				idAsyncNetwork::clientPredictionMargin( "net_clientPredictionMargin", "1", CVAR_SYSTEM | CVAR_BOOL | CVAR_NOCHEAT, "after a frame longer than net_clientPrediction covers, predict further ahead for a while so commands still reach the server in time (0: the target alone)" );
 idCVar				idAsyncNetwork::clientUsercmdBackup( "net_clientUsercmdBackup", "5", CVAR_SYSTEM | CVAR_INTEGER | CVAR_NOCHEAT, "number of usercmds to resend" );
 idCVar				idAsyncNetwork::clientRemoteConsoleAddress( "net_clientRemoteConsoleAddress", "localhost", CVAR_SYSTEM | CVAR_NOCHEAT, "remote console address" );
 idCVar				idAsyncNetwork::clientRemoteConsolePassword( "net_clientRemoteConsolePassword", "", CVAR_SYSTEM | CVAR_NOCHEAT | CVAR_PRIVATE | CVAR_CASE_SENSITIVE, "private remote console password" );
@@ -246,8 +247,31 @@ bool idAsyncNetwork::GetMasterAddress( int index, netadr_t &adr ) {
 		}
 		masters[ index ].resolved = true;
 	}
+	// openQ4: a lookup that failed stays failed until RetryMasterAddresses. From the
+	// second call on it used to be handed out as a good address, so a server whose
+	// name service was not up at launch sent "heartbeats" to nowhere until restart.
+	if ( masters[ index ].address.type == NA_BAD ) {
+		return false;
+	}
 	adr = masters[ index ].address;
 	return true;
+}
+
+/*
+==================
+idAsyncNetwork::RetryMasterAddresses
+
+Lets the next GetMasterAddress look up again each master whose lookup failed.
+A lookup can block, and GetMasterAddress runs for every out-of-band packet a
+client reads, so the retry is asked for only where a pause does not show.
+==================
+*/
+void idAsyncNetwork::RetryMasterAddresses( void ) {
+	for ( int index = 0; index < MAX_MASTER_SERVERS; index++ ) {
+		if ( masters[ index ].resolved && masters[ index ].address.type == NA_BAD ) {
+			masters[ index ].resolved = false;
+		}
+	}
 }
 
 /*
@@ -491,6 +515,30 @@ void idAsyncNetwork::AbandonDeferredDedicatedSpawn( void ) {
 
 /*
 ==================
+Net_LeaveAwakening
+
+Multiplayer never runs on The Awakening. When it is mounted, or queued for the
+next restart, as the game itself or as the base beneath a mod, this queues the
+game directories multiplayer uses instead: openQ4's own game in place of the
+expansion, a player's mod kept without the expansion beneath it. True when the
+caller must reload the engine for that.
+==================
+*/
+static bool Net_LeaveAwakening( void ) {
+    const bool expansionGame = !idStr::Icmp( fileSystem->GetActiveGameDir(), "q4xbase" ) ||
+        !idStr::Icmp( cvarSystem->GetCVarString( "fs_game" ), "q4xbase" );
+    if ( !expansionGame && !FS_AwakeningActive() && idStr::Icmp( cvarSystem->GetCVarString( "fs_game_base" ), "q4xbase" ) ) {
+        return false;
+    }
+    if ( expansionGame ) {
+        cvarSystem->SetCVarString( "fs_game", OPENQ4_GAMEDIR );
+    }
+    cvarSystem->SetCVarString( "fs_game_base", "" );
+    return true;
+}
+
+/*
+==================
 idAsyncNetwork::SpawnServer_f
 
 With net_serverDedicated 1, a client showing a window turns itself into a
@@ -512,13 +560,10 @@ void idAsyncNetwork::SpawnServer_f( const idCmdArgs &args ) {
 	}
 	const bool holdDedicatedAcrossReload = serverDedicated.GetInteger() == 1 && renderSystem->IsOpenGLRunning();
 
-    if ( !idStr::Icmp( fileSystem->GetActiveGameDir(), "q4xbase" ) ||
-         !idStr::Icmp( cvarSystem->GetCVarString( "fs_game" ), "q4xbase" ) ) {
+    if ( Net_LeaveAwakening() ) {
         const idStr requestedGameType = cvarSystem->GetCVarString( "si_gameType" );
         common->StartupVariable( "si_gameType", true );
         cvarSystem->SetCVarString( "si_gameType", requestedGameType.c_str() );
-        cvarSystem->SetCVarString( "fs_game", OPENQ4_GAMEDIR );
-        cvarSystem->SetCVarString( "fs_game_base", "" );
         if ( !idStr::Icmp( cvarSystem->GetCVarString( "si_gameType" ), "singleplayer" ) )
             cvarSystem->SetCVarString( "si_gameType", "DM" );
         cvarSystem->SetCVarString( "com_nextGameModule", "game_mp" );
@@ -655,13 +700,10 @@ static idStr Net_AddressArgument( const idCmdArgs &args ) {
 
 void idAsyncNetwork::Connect_f( const idCmdArgs &args ) {
 
-    if ( !idStr::Icmp( fileSystem->GetActiveGameDir(), "q4xbase" ) ||
-         !idStr::Icmp( cvarSystem->GetCVarString( "fs_game" ), "q4xbase" ) ) {
+    if ( Net_LeaveAwakening() ) {
         const idStr requestedGameType = cvarSystem->GetCVarString( "si_gameType" );
         common->StartupVariable( "si_gameType", true );
         cvarSystem->SetCVarString( "si_gameType", requestedGameType.c_str() );
-        cvarSystem->SetCVarString( "fs_game", OPENQ4_GAMEDIR );
-        cvarSystem->SetCVarString( "fs_game_base", "" );
         if ( !idStr::Icmp( cvarSystem->GetCVarString( "si_gameType" ), "singleplayer" ) )
             cvarSystem->SetCVarString( "si_gameType", "DM" );
         cvarSystem->SetCVarString( "com_nextGameModule", "game_mp" );

@@ -89,6 +89,12 @@ const int SHADERPARM_BEAM_END_Y		= 9;
 const int SHADERPARM_BEAM_END_Z		= 10;
 const int SHADERPARM_BEAM_WIDTH		= 11;
 
+// openQ4 _CONEBEAM models: the end point and end width use the _beam slots,
+// RGBA is the colour at the apex, and these two take slots the model owns.
+// Materials drawn on a cone beam should not read parms 6 or 7.
+const int SHADERPARM_CONEBEAM_START_WIDTH	= 6;	// width at the apex
+const int SHADERPARM_CONEBEAM_REACH		= 7;	// 0..1: the beam's length as a fraction of its full reach
+
 const int SHADERPARM_SPRITE_WIDTH		= 8;
 const int SHADERPARM_SPRITE_HEIGHT		= 9;
 
@@ -820,6 +826,13 @@ public:
 		(void)axis;
 	}
 #endif
+
+	// Render demo v14, between two recorded frames, without disturbing what the
+	// recording goes on to write: first the level, as a segment start writes
+	// it; then, once the caller has written the record that ends the level's
+	// load, every definition playback holds at this point. Last, so the
+	// interface's other entries stay where they are.
+	virtual void			WriteDemoKeyframe( bool definitions ) = 0;
 };
 
 #endif /* !__RENDERWORLD_H__ */

@@ -45,9 +45,13 @@ If you have questions concerning this license or the applicable additional terms
 #include "RenderDoc.h"
 #include "ParallelJobSystem.h"
 #include "LevelEditor.h"
+#include "Updater.h"
+#include "openq4_build_id_generated.h"
 #include "DurableFile.h"
 #include "SettingsPersistence.h"
 #include "PerformancePreset.h"
+#include "PerformancePresetCheck.h"
+#include "SessionPresetCheck.h"
 #include "CVarAssignmentCapture.h"
 #include "InitializationPresentation.h"
 #include <atomic>
@@ -131,6 +135,7 @@ idCVar com_machineSpec( "com_machineSpec", "-1", CVAR_INTEGER | CVAR_ARCHIVE | C
 const char *com_performancePresetArgs[] = { "minimum", "lowpower", "low", "performance", "balanced", "enhanced", "quality", "ultra", "maximum", NULL };
 static const char *com_performancePresetValueStrings[] = { "balanced", "minimum", "lowpower", "low", "performance", "enhanced", "quality", "ultra", "maximum", NULL };
 idCVar com_performancePreset( "com_performancePreset", "balanced", CVAR_ARCHIVE | CVAR_SYSTEM, "coherent system performance preset: minimum, lowpower (both without shadows), low, performance, balanced, enhanced, quality, ultra, maximum (everything on, no frame-rate target)", com_performancePresetValueStrings, idCmdSystem::ArgCompletion_String<com_performancePresetArgs> );
+idCVar com_performancePresetCheck( "com_performancePresetCheck", "", CVAR_ARCHIVE | CVAR_SYSTEM | CVAR_NOCHEAT, "the performance preset system version this configuration last checked; a different version shows the system check before the main menu (see performancePresetCheck)" );
 idCVar com_purgeAll( "com_purgeAll", "0", CVAR_BOOL | CVAR_ARCHIVE | CVAR_SYSTEM, "purge everything between level loads" );
 idCVar com_WriteSingleDeclFile( "com_WriteSingleDeclFile", "0", CVAR_SYSTEM | CVAR_BOOL, "write a packed decl file after startup or map loads; use com_singleDeclFileWriteMode for compatibility or exact-retail game-type coverage" );
 idCVar com_preciseTic( "com_preciseTic", "1", CVAR_BOOL|CVAR_SYSTEM, "run one game tick every async thread update" );
@@ -196,6 +201,7 @@ idCVar com_product_lang_ext( "com_product_lang_ext", "1", CVAR_INTEGER | CVAR_SY
 idCVar r_skipGlowOverlay( "r_skipGlowOverlay", "0", CVAR_ARCHIVE | CVAR_RENDERER, "skip glow overlays when non-zero" );
 static idCVar r_borderlessDefaultMigrated( "r_borderlessDefaultMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for legacy bordered window defaults" );
 static idCVar net_rateDefaultMigrated( "net_rateDefaultMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the legacy 25600 B/s network rate caps" );
+static idCVar ui_autoSwitchDefaultMigrated( "ui_autoSwitchDefaultMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the smart weapon switch default" );
 static idCVar vr_weaponOffsetDefaultMigrated( "vr_weaponOffsetDefaultMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_BOOL, "one-time migration flag for the VR weapon offsets that held weapons replaced" );
 static idCVar s_audioDefaultsMigrated( "s_audioDefaultsMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER, "number of one-time audio default migrations already applied" );
 static idCVar r_preyDefaultsMigrated( "r_preyDefaultsMigrated", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER, "number of one-time openPREY renderer default migrations already applied" );
@@ -324,6 +330,28 @@ static void Common_MigrateLegacyVRWeaponOffsets( void ) {
 		cvarSystem->SetCVarFloat( "vr_weaponOffsetZ", 0.0f, CVAR_ARCHIVE );
 	}
 	vr_weaponOffsetDefaultMigrated.SetBool( true );
+}
+
+/*
+==================
+Common_MigrateLegacyAutoSwitchDefault
+
+ui_autoSwitch was Quake 4's on/off switch and every profile archived its
+default, 1, which now means "always switch". Smart switching (2) is the new
+default, so the exact old default moves to it, once. 0 was a deliberate choice
+and is left alone; so is anything set after this runs.
+==================
+*/
+static void Common_MigrateLegacyAutoSwitchDefault( void ) {
+	if ( ui_autoSwitchDefaultMigrated.GetBool() ) {
+		return;
+	}
+	const char *autoSwitch = cvarSystem->GetCVarString( "ui_autoSwitch" );
+	if ( autoSwitch != NULL && idStr::Cmp( autoSwitch, "1" ) == 0 ) {
+		common->Printf( "Migrating legacy weapon switch config: ui_autoSwitch 1 -> 2 (smart)\n" );
+		cvarSystem->SetCVarInteger( "ui_autoSwitch", 2, CVAR_ARCHIVE );
+	}
+	ui_autoSwitchDefaultMigrated.SetBool( true );
 }
 
 /*
@@ -1534,7 +1562,12 @@ void idCommonLocal::VPrintf( const char *fmt, va_list args ) {
 #endif
 
 	// logFile
-	if ( com_logFile.GetInteger() && !logFileFailed && fileSystem->IsInitialized() ) {
+	// Each thread writes one print at a time to the log. A print made while
+	// writing the log (idFile_Permanent::Write reports a failed write with
+	// Printf) reaches the console only: written to the failing log, it failed
+	// and printed again, recursing until the stack overflowed (#219).
+	static thread_local bool writingLog = false;
+	if ( com_logFile.GetInteger() && !logFileFailed && !writingLog && fileSystem->IsInitialized() ) {
 		static bool recursing;
 
 		if ( !logFile && !recursing ) {
@@ -1579,8 +1612,22 @@ void idCommonLocal::VPrintf( const char *fmt, va_list args ) {
 			Printf( "log file '%s' opened on %s\n", fileNameToOpen, asctime( newtime ) );
 		}
 		if ( logFile ) {
-			logFile->Write( msg, idLib::SizeToInt( strlen( msg ), "idCommonLocal::VPrintf log message" ) );
-			logFile->Flush();	// ForceFlush doesn't help a whole lot
+			const int length = idLib::SizeToInt( strlen( msg ), "idCommonLocal::VPrintf log message" );
+			writingLog = true;
+			const bool written = logFile->Write( msg, length ) == length;
+			if ( written ) {
+				logFile->Flush();	// ForceFlush doesn't help a whole lot
+			}
+			writingLog = false;
+			if ( !written ) {
+				// A full or vanished disk: stop logging for this session rather
+				// than fail on every later print.
+				idFile *failedLog = logFile;
+				logFile = NULL;
+				logFileFailed = true;
+				fileSystem->CloseFile( failedLog );
+				Printf( "Log file write failed; logging stopped for this session\n" );
+			}
 		}
 	}
 
@@ -2074,6 +2121,16 @@ void idCommonLocal::Quit( void ) {
 			WriteConfiguration();
 		}
 #endif
+		// openQ4: a multiplayer map can carry its own settings (mapdb.txt). They go
+		// into archived cvars while the map runs and are taken back when the server
+		// stops, but the configuration is written from the frame loop, and a quit
+		// has no frame after the stop: the file kept the map's values, and the next
+		// launch read them as the operator's own on every map. Stop the server while
+		// the configuration can still be written.
+		if ( idAsyncNetwork::server.IsActive() ) {
+			idAsyncNetwork::server.Kill();
+			WriteConfiguration();
+		}
 		Shutdown();
 	}
 
@@ -3702,7 +3759,10 @@ bool Common_CapturePerformancePresetSignals(openq4::PerformancePresetSignals& ou
  signals.arm64=Common_HostCpuIsArm64();
 #if defined( __ANDROID__ )
  signals.mobile=true;
+#elif defined( __linux__ )
+ signals.linuxHost=true;
 #endif
+ signals.appleGpu=RendererIsAppleGpu(config.renderer_string);
 #if defined( USE_SDL3 )
  // Unlike the legacy platform getters, SDL reports 0 on query failure instead
  // of inventing 512/1024/2048 MiB. Use one observation on all supported hosts.
@@ -3753,6 +3813,7 @@ static bool Common_DetectPerformancePreset( openQ4PerformancePreset_t &preset, i
   case Reason::Shared:policy="shared-memory GPU budget";break;
   case Reason::Resolution:policy="drawable resolution budget";break;
   case Reason::Cpu:policy="limited or unknown CPU concurrency";break;
+  case Reason::ArmBoard:policy="ARM board power budget";break;
   default:break;
  }
  reason=va("%s; GPU=%s, RAM=%d MiB, dedicated VRAM=%d MiB (0=unknown/shared), drawable=%dx%d, CPUs=%d, scene scale=%d%%, post AA=%d, display=%d Hz (0=unknown), frame cap=%d",
@@ -3913,6 +3974,145 @@ static bool Common_ApplyStartupPerformancePreset(
 static const char *commonCommandCompletionMatch = NULL;
 static bool commonCommandCompletionFound = false;
 
+/*
+==============================================================================
+The system check (PerformancePresetCheck.h). com_performancePresetCheck holds
+the preset system version this configuration last checked: the first launch's
+detection records it, as does any answer to the check. The session asks
+Common_PerformancePresetCheckDue before the main menu first opens.
+==============================================================================
+*/
+
+static int Common_PerformancePresetTier( const char *name ) {
+	const auto &presets = openq4::PerformancePresets();
+	for ( int i = 0; i < OPENQ4_PERFORMANCE_PRESET_COUNT; ++i ) {
+		if ( name != NULL && idStr::Icmp( presets[i].name, name ) == 0 ) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+// The settings applying `preset` would change: each target whose live value differs.
+static int Common_PerformancePresetDifferences( const openQ4PerformancePreset_t &preset ) {
+	openq4::PerformancePresetAssignments expansion;
+	std::string error;
+	if ( !openq4::ExpandPerformancePreset( preset, expansion, error ) ) {
+		return OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT;
+	}
+	int differences = 0;
+	for ( const auto &assignment : expansion ) {
+		const idCVar *cvar = cvarSystem->Find( assignment.key );
+		if ( cvar == NULL ) {
+			++differences;
+		} else if ( const auto number = std::get_if<int>( &assignment.value ) ) {
+			differences += cvar->GetInteger() != *number;
+		} else {
+			differences += idStr::Icmp( cvar->GetString(), std::get<std::string>( assignment.value ).c_str() ) != 0;
+		}
+	}
+	return differences;
+}
+
+static bool Common_DetectPerformancePresetCheck( openq4::PerformancePresetCheck &check, openQ4PerformancePreset_t &resolved, std::string &error ) {
+	openq4::PerformancePresetSignals signals;
+	if ( !Common_CapturePerformancePresetSignals( signals, error ) ) {
+		return false;
+	}
+	const auto detected = openq4::DetectPerformancePreset( signals );
+	if ( !openq4::ResolveDetectedPerformancePreset( detected, resolved ) ) {
+		error = "detected profile is unavailable";
+		return false;
+	}
+	openq4::PerformancePresetCheck found;
+	found.stored = com_performancePresetCheck.GetString();
+	found.version = openq4::PerformancePresetSystemVersion();
+	found.neverChecked = found.stored.empty();
+	found.current = com_performancePreset.GetString();
+	found.recommended = resolved.name;
+	found.currentTier = Common_PerformancePresetTier( com_performancePreset.GetString() );
+	found.recommendedTier = Common_PerformancePresetTier( resolved.name );
+	found.differences = Common_PerformancePresetDifferences( resolved );
+	found.matches = found.differences == 0;
+	const auto &config = renderSystem->GetGLConfig();
+	found.adapter = config.renderer_string != NULL ? config.renderer_string : "";
+	found.gpuClass = signals.gpuClass;
+	found.reason = detected.reason;
+	found.systemRamMB = detected.systemRamMB;
+	found.videoRamMB = detected.videoRamMB;
+	found.logicalCpus = signals.logicalCpus;
+	found.drawableWidth = signals.drawableWidth;
+	found.drawableHeight = signals.drawableHeight;
+	found.displayRefreshHz = signals.displayRefreshHz;
+	found.screenFraction = resolved.screenFraction;
+	found.maxFps = resolved.maxFps;
+	found.postAA = resolved.postAA;
+	idStr reason;
+	openQ4PerformancePreset_t again;
+	if ( Common_DetectPerformancePreset( again, reason ) ) {
+		found.summary = reason.c_str();
+	}
+	check = std::move( found );
+	error.clear();
+	return true;
+}
+
+bool Common_PerformancePresetCheckDue() {
+#ifdef ID_DEDICATED
+	return false;
+#else
+	if ( cvarSystem->GetCVarBool( "net_serverDedicated" ) || com_editorActive || com_skipRenderer.GetBool() ) {
+		return false;
+	}
+	// A pending settings recovery owns the display and preset fields first.
+	if ( UI_SettingsStartupActive() || UI_SettingsRecoveryPending() ) {
+		return false;
+	}
+	return idStr::Cmp( com_performancePresetCheck.GetString(), openq4::PerformancePresetSystemVersion().c_str() ) != 0;
+#endif
+}
+
+bool Common_DescribePerformancePresetCheck( openq4::PerformancePresetCheck &check, std::string &error ) {
+	openQ4PerformancePreset_t resolved;
+	return Common_DetectPerformancePresetCheck( check, resolved, error );
+}
+
+void Common_RecordPerformancePresetCheck( const char *answer ) {
+	const std::string version = openq4::PerformancePresetSystemVersion();
+	common->Printf( "Performance preset check: recorded version %s (was '%s'; %s)\n", version.c_str(),
+		com_performancePresetCheck.GetString(), answer != NULL ? answer : "recorded" );
+	com_performancePresetCheck.SetString( version.c_str() );
+}
+
+void Common_ClearPerformancePresetCheck() {
+	com_performancePresetCheck.SetString( "" );
+}
+
+bool Common_ApplyPerformancePresetCheck( bool &changed, std::string &error ) {
+	changed = false;
+	openq4::PerformancePresetCheck check;
+	openQ4PerformancePreset_t resolved;
+	if ( !Common_DetectPerformancePresetCheck( check, resolved, error ) ) {
+		common->Printf( "Performance preset check: detection unavailable (%s); settings were preserved\n", error.c_str() );
+		return false;
+	}
+	if ( !Common_ApplyPerformancePreset( resolved, true ) ) {
+		error = "the detected preset did not apply; settings were preserved";
+		common->Printf( "Performance preset check: %s\n", error.c_str() );
+		return false;
+	}
+	changed = check.differences > 0;
+	// The detection observed this device; record what it reported, as the
+	// first launch does.
+	if ( check.videoRamMB > 0 ) {
+		com_videoRam.SetInteger( check.videoRamMB );
+	}
+	common->Printf( "Performance preset check: applied '%s' (%d setting%s changed; %s)\n", resolved.name,
+		check.differences, check.differences == 1 ? "" : "s", check.summary.c_str() );
+	Common_RecordPerformancePresetCheck( "applied the recommendation" );
+	return true;
+}
+
 static void Common_CommandCompletionFindCallback( const char *name ) {
 	if ( commonCommandCompletionMatch != NULL && idStr::Icmp( name, commonCommandCompletionMatch ) == 0 ) {
 		commonCommandCompletionFound = true;
@@ -4029,8 +4229,10 @@ static bool Common_CheckPerformancePresetTargetsArchived( const char *presetName
 	return passed;
 }
 
+// A preset names one sample count on every renderer: the Vulkan renderer draws
+// at most 8, so no preset asks for more (FPS-05). 16 stays a manual OpenGL choice.
 static bool Common_PerformancePresetMultiSamplesAreValid( int samples ) {
-	return samples == 0 || samples == 2 || samples == 4 || samples == 8 || samples == 16;
+	return samples == 0 || samples == 2 || samples == 4 || samples == 8;
 }
 
 static bool Common_PerformancePresetBenchmarkNameIsValid( const char *name ) {
@@ -4108,11 +4310,12 @@ static bool Common_ValidatePerformancePresetIntent( const openQ4PerformancePrese
 	// tier maps them, and the stencil tiers keep the inert default.
 	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapPointLights", preset.shadowMapPointLights, Common_PerformancePresetIsNamed( preset, "enhanced" ) ? 0 : 1 );
 	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_crt", preset.crt, 0 );
-	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_useLightGrid", preset.useLightGrid, 1 );
-	// Only the two tiers below the documented minimum hardware draw no shadows;
-	// Low restores the stencil shadows every tier above it keeps.
+	// Only the two tiers below the documented minimum hardware draw no shadows
+	// and skip the light-grid indirect pass; Low restores both, and every tier
+	// above it keeps them.
 	const bool shadowlessTier = Common_PerformancePresetIsNamed( preset, "minimum" ) || Common_PerformancePresetIsNamed( preset, "lowpower" );
 	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadows", preset.shadows, shadowlessTier ? 0 : 1 );
+	passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_useLightGrid", preset.useLightGrid, shadowlessTier ? 0 : 1 );
 
 	if ( shadowlessTier || Common_PerformancePresetIsNamed( preset, "low" ) ) {
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "com_maxfps", preset.maxFps, shadowlessTier ? 30 : 60 );
@@ -4201,7 +4404,7 @@ static bool Common_ValidatePerformancePresetIntent( const openQ4PerformancePrese
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "com_machineSpec", preset.machineSpec, 3 );
 		passed &= Common_PerformancePresetCheckBenchmarkPreset( preset, "high-end" );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_screenFraction", preset.screenFraction, 100 );
-		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_multiSamples", preset.multiSamples, 16 );
+		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_multiSamples", preset.multiSamples, 8 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "image_anisotropy", preset.anisotropy, 16 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_postAA", preset.postAA, 3 );
 		passed &= Common_PerformancePresetCheckExpectedInt( preset, "r_shadowMapSize", preset.shadowMapSize, 4096 );
@@ -4271,6 +4474,7 @@ static bool Common_ValidatePerformancePresetProgression( void ) {
 		passed &= Common_PerformancePresetCheckNonDecreasingBudget( previousPreset, preset, "image_downSizeLimit", previousPreset.downSizeLimit, preset.downSizeLimit );
 		passed &= Common_PerformancePresetCheckNonDecreasingBudget( previousPreset, preset, "s_maxSoundsPerShader", previousPreset.maxSoundsPerShader, preset.maxSoundsPerShader );
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadows", previousPreset.shadows, preset.shadows );
+		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_useLightGrid", previousPreset.useLightGrid, preset.useLightGrid );
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_useShadowMap", previousPreset.useShadowMap, preset.useShadowMap );
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadowMapSize", previousPreset.shadowMapSize, preset.shadowMapSize );
 		passed &= Common_PerformancePresetCheckNonDecreasingInt( previousPreset, preset, "r_shadowMapPointSize", previousPreset.shadowMapPointSize, preset.shadowMapPointSize );
@@ -4478,6 +4682,50 @@ static bool Common_ValidatePerformancePresetApplied( const openQ4PerformancePres
 	return passed;
 }
 
+// Synthetic machines for the platform ceilings, so a self-test on any host
+// covers the small boards and Apple Silicon it is not running on.
+static bool Common_ValidatePerformancePresetPlatformCeilings( void ) {
+	openq4::PerformancePresetSignals board;
+	board.arm64 = board.linuxHost = true;
+	board.gpuClass = RendererGpuClass::Integrated;
+	board.systemRamMB = 16384;
+	board.modernEffects = board.postAAAvailable = true;
+	board.logicalCpus = 8;
+	board.drawableWidth = 1920;
+	board.drawableHeight = 1080;
+	board.displayRefreshHz = 144;
+	struct platformCase_t {
+		const char *label;
+		openq4::PerformancePresetSignals signals;
+		const char *preset;
+		int maxFps;
+	};
+	platformCase_t cases[] = {
+		{ "16 GiB ARM board", board, "performance", 60 },
+		{ "Raspberry Pi", board, "lowpower", 30 },
+		{ "Apple Silicon on Asahi Linux", board, "balanced", 144 },
+		{ "Apple Silicon on macOS", board, "balanced", 144 },
+		{ "Windows on ARM", board, "balanced", 144 },
+	};
+	cases[1].signals.raspberryPi = true;
+	cases[1].signals.systemRamMB = 8058;
+	cases[1].signals.logicalCpus = 4;
+	cases[2].signals.appleGpu = true;
+	cases[3].signals.appleGpu = true;
+	cases[3].signals.linuxHost = false;
+	cases[4].signals.linuxHost = false;
+	bool passed = true;
+	for ( const platformCase_t &entry : cases ) {
+		const openq4::PerformancePresetDetection detected = openq4::DetectPerformancePreset( entry.signals );
+		if ( detected.preset == NULL || idStr::Icmp( detected.preset->name, entry.preset ) != 0 || detected.maxFps != entry.maxFps ) {
+			common->Printf( "PerformancePreset self-test failed: %s detected '%s' at %d Hz, expected '%s' at %d Hz\n", entry.label,
+				detected.preset != NULL ? detected.preset->name : "", detected.maxFps, entry.preset, entry.maxFps );
+			passed = false;
+		}
+	}
+	return passed;
+}
+
 static void Com_PerformancePresetSelfTest_f( const idCmdArgs &args ) {
 	bool passed = true;
 
@@ -4520,6 +4768,7 @@ static void Com_PerformancePresetSelfTest_f( const idCmdArgs &args ) {
 		common->Printf( "PerformancePreset self-test failed: memory telemetry sanitizer returned an unexpected value\n" );
 		passed = false;
 	}
+	passed &= Common_ValidatePerformancePresetPlatformCeilings();
 
 	openQ4PerformancePresetCVarBackup_t backups[OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT];
 	const int savedModifiedFlags = cvarSystem->GetModifiedFlags();
@@ -5127,7 +5376,22 @@ void Com_ReloadEngine_f( const idCmdArgs &args ) {
 		// close: the reload leaves it as it is.
 	}
 	com_preserveStartupRecoveryLog = com_logFile.GetInteger() != 0;
-	commonLocal.ShutdownGame( true );
+	// A reload the menus ask for (entering or leaving the Awakening campaign,
+	// loading a mod) keeps the game window, as a game-module swap does. A
+	// replacement window is not always given the focus: Windows refuses it once
+	// the pointer has passed over another program while the old window was gone,
+	// and the menus of an unfocused window ignore the mouse. A change of
+	// rendering API or device still builds its window afresh.
+	struct preserveWindowScope_t {
+		explicit preserveWindowScope_t( bool preserve ) { GLimp_PreserveWindowOnShutdown( preserve ); }
+		~preserveWindowScope_t() { GLimp_PreserveWindowOnShutdown( false ); }
+	};
+	{
+		const bool preserveWindow = menu && idAsyncNetwork::serverDedicated.GetInteger() != 1 &&
+			renderSystem != NULL && renderSystem->IsOpenGLRunning() && !R_RendererModule_SelectionReloadPending();
+		preserveWindowScope_t preserveWindowScope( preserveWindow );
+		commonLocal.ShutdownGame( true );
+	}
 	if ( !R_RendererModule_FinishSelectionReload() ) {
 		common->FatalError( "renderer selection reload could not retire the previous module" );
 		return;
@@ -5614,6 +5878,71 @@ static bool Common_ResolveLanguageSelection( const idStr &requestedLanguage, con
 idCommonLocal::InitLanguageDict
 ===============
 */
+/*
+===============
+Common_LoadLanguageFileLayers
+
+A mod that ships a string table under the same name as one beneath it (a copy of
+english_openq4.lang taken from an older openQ4, say) replaces that whole file in
+the search path, and every string its copy leaves out disappears: newer menus
+then show raw #str_ ids. As idDeclManagerLocal::LoadDeclFileLayers does for decl
+files, the copies the mod shadows are read first, from their own directories
+(retail, the openQ4 runtime, then fs_game_base), and the mod's copy last, so its
+strings win and only the ones it lacks come from below. A table no mod
+directory holds loads as before.
+===============
+*/
+static bool Common_IsLanguageModDir( const char *gameDir ) {
+	return gameDir != NULL && gameDir[0] != '\0' && idStr::Icmp( gameDir, BASE_GAMEDIR ) && idStr::Icmp( gameDir, OPENQ4_GAMEDIR );
+}
+
+static bool Common_DirHoldsLanguageFile( const char *fileName, const char *gameDir ) {
+	idFile *copy = fileSystem->OpenFileRead( fileName, false, gameDir );
+	if ( copy == NULL ) {
+		return false;
+	}
+	fileSystem->CloseFile( copy );
+	return true;
+}
+
+static void Common_LoadLanguageFileLayers( idLangDict &dict, const char *fileName ) {
+	const char *topGameDir = cvarSystem->GetCVarString( "fs_game" );
+	const char *modBaseDir = cvarSystem->GetCVarString( "fs_game_base" );
+	const char *modDir = NULL;
+	if ( Common_IsLanguageModDir( topGameDir ) && Common_DirHoldsLanguageFile( fileName, topGameDir ) ) {
+		modDir = topGameDir;
+	} else if ( Common_IsLanguageModDir( modBaseDir ) && idStr::Icmp( modBaseDir, topGameDir ) &&
+			Common_DirHoldsLanguageFile( fileName, modBaseDir ) ) {
+		// the mod leaves the table to its base; layer beneath the base's copy
+		modDir = modBaseDir;
+		modBaseDir = "";
+	}
+
+	if ( modDir != NULL ) {
+		// lowest first: each later copy's strings take precedence
+		const char *lowerDirs[] = { BASE_GAMEDIR, OPENQ4_GAMEDIR, modBaseDir };
+		const int numLowerDirs = (int)( sizeof( lowerDirs ) / sizeof( lowerDirs[0] ) );
+		for ( int i = 0; i < numLowerDirs; i++ ) {
+			const char *gameDir = lowerDirs[i];
+			if ( gameDir[0] == '\0' || !idStr::Icmp( gameDir, modDir ) ) {
+				continue;
+			}
+			// fs_game_base may name the runtime or retail directory itself
+			bool alreadyLayered = false;
+			for ( int j = 0; j < i; j++ ) {
+				if ( !idStr::Icmp( lowerDirs[j], gameDir ) ) {
+					alreadyLayered = true;
+				}
+			}
+			if ( !alreadyLayered && Common_DirHoldsLanguageFile( fileName, gameDir ) ) {
+				dict.Load( fileName, false, gameDir );
+			}
+		}
+	}
+
+	dict.Load( fileName, false );
+}
+
 void idCommonLocal::InitLanguageDict( bool applyStartupSysLang, bool allowAutoLanguageSelect ) {
 	idStr fileName;
 	languageDict.Clear();
@@ -5694,13 +6023,12 @@ void idCommonLocal::InitLanguageDict( bool applyStartupSysLang, bool allowAutoLa
 		idStrList englishLangList = langList;
 		FilterLangList( &englishLangList, "english" );
 		for ( int i = 0; i < englishLangList.Num(); i++ ) {
-			languageDict.Load( englishLangList[i], false );
+			Common_LoadLanguageFileLayers( languageDict, englishLangList[i] );
 		}
 	}
 
 	for( int i = 0; i < currentLangList.Num(); i++ ) {
-		//common->Printf("%s\n", currentLangList[i].c_str());
-		languageDict.Load( currentLangList[i], false );
+		Common_LoadLanguageFileLayers( languageDict, currentLangList[i] );
 	}
 
 	fileSystem->FreeFileList(langFiles);
@@ -6416,6 +6744,7 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "execMachineSpec", Com_ExecMachineSpec_f, CMD_FL_SYSTEM, "execs the appropriate config files and sets cvars based on com_machineSpec" );
 	cmdSystem->AddCommand( "applyPerformancePreset", Com_ApplyPerformancePreset_f, CMD_FL_SYSTEM, "applies the selected openPREY performance preset", idCmdSystem::ArgCompletion_String<com_performancePresetArgs> );
 	cmdSystem->AddCommand( "autoDetectPerformancePreset", Com_AutoDetectPerformancePreset_f, CMD_FL_SYSTEM, "detects and applies a conservative openPREY performance preset" );
+	cmdSystem->AddCommand( "performancePresetCheck", Session_PresetCheck_f, CMD_FL_SYSTEM, "reports the performance preset system version and the system check, opens or answers the check, or clears its record" );
 	cmdSystem->AddCommand( "performancePresetSelfTest", Com_PerformancePresetSelfTest_f, CMD_FL_SYSTEM, "validates openPREY performance preset commands and cvar mappings" );
 	cmdSystem->AddCommand( "jobsStats", Com_JobsStats_f, CMD_FL_SYSTEM, "prints bounded job-service scheduling and timing counters" );
 	cmdSystem->AddCommand( "jobsSelfTest", Com_JobsSelfTest_f, CMD_FL_SYSTEM, "validates job execution, dependencies, deterministic fallback, and metrics" );
@@ -6490,6 +6819,24 @@ void idCommonLocal::InitCommands( void ) {
 
 /*
 =================
+Common_SettingsRecoveryFatal
+
+A recovery that cannot finish stops every later start the same way. Name the
+journal so a player can delete it: the configuration it guards keeps the last
+saved settings (an unconfirmed choice never reaches it).
+=================
+*/
+static void Common_SettingsRecoveryFatal( const char *stage, const std::string &reason ) {
+	std::string journal, lock, pathError;
+	if ( Common_SettingsPersistencePaths( journal, lock, pathError ) ) {
+		common->FatalError( "Settings %s recovery failed: %s. Recovery data was retained. Delete %s to start with your last saved settings.",
+			stage, reason.c_str(), journal.c_str() );
+	}
+	common->FatalError( "Settings %s recovery failed: %s. Recovery data was retained.", stage, reason.c_str() );
+}
+
+/*
+=================
 idCommonLocal::InitRenderSystem
 =================
 */
@@ -6501,7 +6848,7 @@ void idCommonLocal::InitRenderSystem( void ) {
 	if ( UI_SettingsStartupActive() ) {
 		std::string recoveryError;
 		if ( !UI_SettingsInitializeDisplay( recoveryError ) ) {
-			FatalError( "Settings display recovery failed: %s. Recovery data was retained.", recoveryError.c_str() );
+			Common_SettingsRecoveryFatal( "display", recoveryError );
 			return;
 		}
 	} else renderSystem->InitOpenGL();
@@ -7015,6 +7362,8 @@ void idCommonLocal::Frame( void ) {
 		// its listen server is active, idSessionLocal::Frame is intentionally not
 		// called by the ordinary multiplayer branch below.
 		arenaCampaign.Frame();
+		// Report a finished update check or install once the title is idle.
+		Updater_Frame();
 #endif
 		Common_MarkFrameWork(openq4::FrameWorkPhase::Commands);
 
@@ -7935,8 +8284,12 @@ void idCommonLocal::Init( int argc, const char **argv, const char *cmdline ) {
 		}
 
 		if ( !AddStartupCommands() ) {
-			// if the user didn't give any commands, run default action
-			session->StartMenu( true );
+			// if the user didn't give any commands, run default action: the
+			// main menu, after the system check when the presets have changed
+			// since this configuration last checked (SessionPresetCheck.h)
+			if ( !Session_StartPresetCheck() ) {
+				session->StartMenu( true );
+			}
 		}
 
 		if ( com_WriteSingleDeclFile.GetBool() ) {
@@ -8056,8 +8409,12 @@ void idCommonLocal::InitGame( void ) {
 	openQ4_NormalizeGameTypeForModule( pendingGameModule.c_str() );
 	const idStr pendingGameType = cvarSystem->GetCVarString( "si_gameType" );
 
+    // Multiplayer never mounts The Awakening: neither as the game nor as the
+    // base beneath a mod, which keeps its place on top.
     if ( pendingGameModule == "game_mp" && !idStr::Icmp( cvarSystem->GetCVarString( "fs_game" ), "q4xbase" ) ) {
         cvarSystem->SetCVarString( "fs_game", OPENQ4_GAMEDIR );
+        cvarSystem->SetCVarString( "fs_game_base", "" );
+    } else if ( pendingGameModule == "game_mp" && !idStr::Icmp( cvarSystem->GetCVarString( "fs_game_base" ), "q4xbase" ) ) {
         cvarSystem->SetCVarString( "fs_game_base", "" );
     }
 	// initialize the file system
@@ -8249,6 +8606,7 @@ void idCommonLocal::InitGame( void ) {
 	Common_MigrateLegacyBorderlessWindowDefault();
 	Common_MigrateLegacyNetworkRateCaps();
 	Common_MigrateLegacyVRWeaponOffsets();
+	Common_MigrateLegacyAutoSwitchDefault();
 	Common_MigrateLegacyAudioDefaults();
 	Common_MigratePreyRendererDefaults();	// OPENPREY
 
@@ -8256,7 +8614,7 @@ void idCommonLocal::InitGame( void ) {
 	Sys_DoPreferences();
 	std::string settingsRecoveryError;
 	if ( !UI_SettingsStartup( settingsRecoveryError ) ) {
-		FatalError( "Settings startup recovery failed: %s. Recovery data was retained.", settingsRecoveryError.c_str() );
+		Common_SettingsRecoveryFatal( "startup", settingsRecoveryError );
 		return;
 	}
 
@@ -8272,6 +8630,7 @@ void idCommonLocal::InitGame( void ) {
 
 	// init async network
 	idAsyncNetwork::Init();
+	Updater_Init();
 
 #ifdef	ID_DEDICATED
 	idAsyncNetwork::server.InitPort();
@@ -8337,6 +8696,9 @@ void idCommonLocal::InitGame( void ) {
 		cmdSystem->BufferCommandText( CMD_EXEC_NOW, "vid_restart\ns_restart\n" );
 		cmdSystem->ExecuteCommandBuffer();
 		startupPresetReady = true;
+		// This detection is the system check: a new configuration starts on the
+		// current presets, so the check has nothing to offer it.
+		Common_RecordPerformancePresetCheck( "first launch" );
 	}
 	if ( sysDetect && startupPresetReady && !startupRecovery ) {
 		file = fileSystem->OpenFileWrite( CONFIG_SPEC );

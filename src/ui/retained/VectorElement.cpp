@@ -40,14 +40,51 @@ bool SameCompilation(const std::array<double,12>& current, const std::array<doub
 	return true;
 }
 }
+namespace {
+VectorCompileBatch* deferredCompilations = nullptr;
+}
+void DeferVectorCompilations(VectorCompileBatch* batch) { deferredCompilations = batch; }
+size_t VectorCompileBatch::Paths() const {
+	size_t count = 0;
+	for (const auto& request : requests) count += request.paths ? request.paths->size() : 0;
+	return count;
+}
+void VectorCompileBatch::Run(size_t index) {
+	auto& request = requests[index];
+	for (const auto& path : *request.paths) {
+		VectorMesh result; std::string error;
+		if (!TessellatePath(path,request.options,result,error)) { request.errors.push_back("Vector "+request.element+"/"+error); continue; }
+		if (!result.indices.empty()) { request.meshes.push_back(std::move(result)); request.blends.push_back(path.blend); }
+	}
+	request.compiled = true;
+}
+size_t VectorCompileBatch::Install() {
+	size_t installed = 0;
+	for (auto& request : requests) {
+		const auto owner = request.owner.lock();
+		if (!owner || !*owner || !request.compiled) continue;
+		auto& geometry = **owner;
+		// Drawn, compiled or reconfigured since: the element has its own.
+		if (geometry.compileGeneration != request.generation || geometry.valid || geometry.renderReady || !geometry.cache.empty()) continue;
+		if (geometry.host) for (const auto& error : request.errors) geometry.host->Log(true,error);
+		VectorGeometry::Compilation fresh; fresh.signature = request.signature;
+		fresh.meshes = std::move(request.meshes); fresh.blends = std::move(request.blends);
+		geometry.cache.push_back(std::move(fresh));
+		++installed;
+	}
+	requests.clear();
+	return installed;
+}
 void VectorGeometry::Configure(const std::vector<VectorPath>& source, Host& owner, RuntimeStatistics& measurements) {
 	paths = source; host = &owner; statistics = &measurements;
+	sharedPaths.reset(); ++compileGeneration;
 	replayMask.reset();
 	cache.clear(); valid = renderReady = false;
 	hitGeometry.clear(); hitPrepared = hitValid = hitArea = false;
 }
 void VectorGeometry::CopyArtworkFrom(const VectorGeometry& source) {
 	paths = source.paths; host = source.host; statistics = source.statistics; linearMasks=source.linearMasks; multiply = {}; coverage = {};
+	self.reset(); sharedPaths.reset(); ++compileGeneration;
 	replayMask.reset();
 	cache.clear(); valid = renderReady = false;
 	hitGeometry.clear(); hitPrepared = hitValid = hitArea = false;
@@ -63,6 +100,7 @@ void VectorElement::CopyArtworkFrom(const VectorElement& source) {
 	coordinatesImage=source.coordinatesImage; additiveImage=source.additiveImage; imageSource=source.imageSource;
 	imageCoordinates=std::make_shared<ImageCoordinates>(*source.imageCoordinates); imageSampling=source.imageSampling;
 	replayOpacity=source.replayOpacity ? std::make_shared<float>(*source.replayOpacity) : nullptr;
+	backdropFault=source.backdropFault ? std::make_shared<std::array<float,3>>(*source.backdropFault) : nullptr;
 	replayText=source.replayText;
 	imageTexture={}; imageGeometry={};
 }
@@ -120,7 +158,11 @@ bool VectorGeometry::HitTest(Rml::Element& element, Rml::Vector2f point) {
 void VectorGeometry::Render(Rml::Element& element, bool inheritOpacity) {
 	auto* manager = element.GetRenderManager();
 	if (paths.empty() || !host || !manager || !element.GetContext()) return;
-	++statistics->vectorElements;
+	// A frame drawn out of sight gathers the compilations of elements that have
+	// never drawn; one that has keeps what it has.
+	auto* const deferred = deferredCompilations;
+	if (deferred && (valid || renderReady || !cache.empty())) return;
+	if (!deferred) ++statistics->vectorElements;
 	const float density = element.GetContext()->GetDensityIndependentPixelRatio();
 	const auto size = element.GetBox().GetSize(Rml::BoxArea::Border);
 	if (density <= 0 || size.x <= 0 || size.y <= 0) return;
@@ -128,7 +170,9 @@ void VectorGeometry::Render(Rml::Element& element, bool inheritOpacity) {
 	const auto state = manager->GetState();
 	const auto viewport = manager->GetViewport();
 	const double opacity = inheritOpacity ? std::clamp(static_cast<double>(element.GetComputedValues().opacity()),0.0,1.0) : 1;
-	if (opacity<=0) return;
+	// An element faded out at rest (a focus glow) compiles out of sight too:
+	// its first fade-in then finds its meshes.
+	if (opacity<=0 && !deferred) return;
 	const std::array<float,6> inputs{density,size.x,size.y,offset.x,offset.y,float(opacity)};
 	const auto drawCached=[&] {
 		const auto& entry=cache.front();
@@ -258,26 +302,44 @@ void VectorGeometry::Render(Rml::Element& element, bool inheritOpacity) {
 	if (sliding && !state.scissor_region.Valid()) {
 		// The view's region slides across a moving element, and each new block
 		// would recompile it (a scrolling data layer several views tall). Its
-		// own box does not move in this space: cover that instead, while it is
-		// no larger than a few views, and keep the phases' compilations.
+		// own box does not move in this space: cover that as well, while the
+		// two are no larger than a few views, and keep the phases' compilations.
+		// The view's region stays covered: a path may draw outside its box (a
+		// framing band reaches far past the view so a dock slide never shows
+		// its end), and the box alone cut the band where it had slid from.
 		const auto& t = options.transform;
 		const double xs[4] = {t.tx,t.tx+t.a*options.widthDp,t.tx+t.c*options.heightDp,t.tx+t.a*options.widthDp+t.c*options.heightDp};
 		const double ys[4] = {t.ty,t.ty+t.b*options.widthDp,t.ty+t.d*options.heightDp,t.ty+t.b*options.widthDp+t.d*options.heightDp};
 		const VectorPixelBounds own{lower(*std::min_element(xs,xs+4)),lower(*std::min_element(ys,ys+4)),
 			upper(*std::max_element(xs,xs+4)),upper(*std::max_element(ys,ys+4))};
-		const double ownArea = double(own.right-own.left)*double(own.bottom-own.top);
 		const bool outgrows = own.left < cachedBounds.left || own.top < cachedBounds.top || own.right > cachedBounds.right ||
 			own.bottom > cachedBounds.bottom;
-		if (outgrows && ownArea <= 4.0*std::max(1.0,double(viewport.x)*double(viewport.y))) cachedBounds = own;
+		const VectorPixelBounds both{std::min(own.left,cachedBounds.left),std::min(own.top,cachedBounds.top),
+			std::max(own.right,cachedBounds.right),std::max(own.bottom,cachedBounds.bottom)};
+		const double bothArea = double(both.right-both.left)*double(both.bottom-both.top);
+		if (outgrows && bothArea <= 4.0*std::max(1.0,double(viewport.x)*double(viewport.y))) cachedBounds = both;
 	}
 	if (localMesh) cachedBounds = {}; // Final clipping belongs to the render manager.
 	else options.pixelBounds = cachedBounds;
 	// Fully transparent geometry adds nothing under any blend: neither
 	// tessellate nor submit it (a HUD keeps many faded nodes at zero).
-	if (opacity <= 0) return;
+	if (opacity <= 0 && !deferred) return;
 	std::array<double,12> signature{options.widthDp,options.heightDp,options.transform.a,options.transform.b,
 		options.transform.c,options.transform.d,options.transform.tx,options.transform.ty,
 		static_cast<double>(cachedBounds.left),static_cast<double>(cachedBounds.top),static_cast<double>(cachedBounds.right),static_cast<double>(cachedBounds.bottom)};
+	if (deferred) {
+		// The compilation the element's first presented frame makes at rest,
+		// with this signature and these options; nothing is submitted, and the
+		// element keeps the state of one that has never drawn.
+		previousX = previousY = 0; localScale = 0;
+		if (!self) self = std::make_shared<VectorGeometry*>(this);
+		if (!sharedPaths) sharedPaths = std::make_shared<const std::vector<VectorPath>>(paths);
+		VectorCompileBatch::Request request;
+		request.owner = self; request.generation = compileGeneration; request.paths = sharedPaths;
+		request.options = options; request.signature = signature; request.element = element.GetId();
+		deferred->requests.push_back(std::move(request));
+		return;
+	}
 	// An element that moved by translation alone since its last render (a
 	// scrolling trace, a sliding group) would compile for a new sub-pixel phase
 	// every frame. While it moves it compiles at quarter-pixel phases, keeps
@@ -594,6 +656,12 @@ void VectorElement::Configure(const Node& node, Host& owner, RuntimeStatistics& 
 	if (node.model) (*imageCoordinates)[3]=-1; // Engine targets have their origin at the lower edge.
 	for (const auto* property : {"image-offset-x","image-offset-y","image-scale-x","image-scale-y"})
 		if (const auto found=node.properties.find(property);found!=node.properties.end()) SetImageCoordinate(property,found->second.data[0]);
+	backdropFault.reset();
+	for (const auto* property : {"backdrop-dither","backdrop-glitch","backdrop-glitch-phase"})
+		if (const auto found=node.properties.find(property);found!=node.properties.end()) {
+			if (!backdropFault) backdropFault=std::make_shared<std::array<float,3>>(std::array<float,3>{0,0,0});
+			SetBackdropFault(BackdropFaultIndex(property),float(found->second.data[0]));
+		}
 }
 namespace {
 class VectorMask final : public Rml::Decorator {

@@ -713,6 +713,24 @@ typedef struct vkSceneScaleState_s {
 	idHashIndex rectRestoreHash;
 } vkSceneScaleState_t;
 
+// A shared classic domain may own work in a 3D view drawn straight to the
+// window, into the backend-owned scene target, or into the game's forward
+// scene target, provided it is at native size: there the view's viewport,
+// scissors and projection are exactly the sealed records. A scaled scene
+// rewrites those rectangles, and the multisampled window stand-in resolves on
+// its own terms; those views keep the classic walker. The target itself is
+// checked by VK_Exec_SharedInteractionTargetReady (REN-01).
+static bool VK_SharedDomainSceneAllowed( const vkSceneScaleState_t &state ) {
+	if ( state.windowMultisample ) {
+		return false;
+	}
+	if ( !state.active ) {
+		return true;
+	}
+	return state.targetWidth == state.nativeWidth
+		&& state.targetHeight == state.nativeHeight;
+}
+
 // Shared-domain preflight is allowed to populate the ordinary geometry rings,
 // but it has not taken framebuffer ownership yet. Snapshot the bounded upload
 // state so any later rejection can return the established classic walker to
@@ -741,6 +759,18 @@ bool VK_Exec_ActiveLowerOrigin() {
 
 VkFrontFace VK_Exec_CanonicalFrontFace() {
 	return VK_Exec_ActiveLowerOrigin() ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+}
+
+// a surface placed by a reflection (vk_ExecutorHooks.h, vkSurfaceWinding_t)
+bool VK_Exec_SurfaceMirrored( const drawSurf_t *drawSurf ) {
+	if ( drawSurf == NULL || drawSurf->space == NULL ) {
+		return false;
+	}
+	const float *m = drawSurf->space->modelMatrix;
+	const float determinant = m[0] * ( m[5] * m[10] - m[6] * m[9] )
+		- m[1] * ( m[4] * m[10] - m[6] * m[8] )
+		+ m[2] * ( m[4] * m[9] - m[5] * m[8] );
+	return determinant < 0.0f;
 }
 
 /*
@@ -5070,22 +5100,43 @@ bool VK_Exec_ActiveTargetHasStencil( void ) {
 		&& vkExec.activePipelineTarget.stencilFormat != VK_FORMAT_UNDEFINED;
 }
 
-// Shared interaction ownership is intentionally limited to the primary
-// swapchain scope.  Keep the executor's private attachment and pending-effect
-// state behind one fail-closed query so the interaction consumer cannot
-// mistake an offscreen render texture for the main framebuffer.
+// Shared classic domains draw where the classic 3D walker draws: the primary
+// swapchain scope, the backend-owned scene target (HDR, temporal AA,
+// screen-space effects), or the game's forward scene target that it binds as
+// its own _currentRender feedback source. Pipelines are keyed by the active
+// target, so both owners bind the same variants. Every other render texture
+// (post-pass targets, VR eyes, the multisampled window stand-in, subview
+// captures) keeps the classic path, as does a pending special-effects resolve.
+// Keep the executor's private attachment state behind this one fail-closed
+// query (REN-01).
 bool VK_Exec_SharedInteractionTargetReady( void ) {
-	return vkExec.frameOpen && vkExec.mainScopeOpen
-		&& vkExec.cmd != VK_NULL_HANDLE
-		&& vkExec.activeRenderTexture == NULL
-		&& vkExec.activeColorEntries[ 0 ] == NULL
-		&& vkExec.activeDepthEntry == NULL
-		&& vkExec.pendingSpecialEffectsView == NULL
-		&& vkExec.pendingSpecialEffectsMask == 0
-		&& vkExec.pendingSpecialEffectsSource == NULL
-		&& !vkExec.pendingSpecialEffectsNeedsResolve
-		&& VK_Exec_PipelineTargetsMatch( vkExec.activePipelineTarget,
-			VK_Exec_SwapchainPipelineTarget() );
+	if ( !vkExec.frameOpen || !vkExec.mainScopeOpen
+			|| vkExec.cmd == VK_NULL_HANDLE
+			|| vkExec.pendingSpecialEffectsView != NULL
+			|| vkExec.pendingSpecialEffectsMask != 0
+			|| vkExec.pendingSpecialEffectsSource != NULL
+			|| vkExec.pendingSpecialEffectsNeedsResolve ) {
+		return false;
+	}
+	if ( vkExec.activeRenderTexture == NULL ) {
+		return backEnd.renderTexture == NULL
+			&& backEnd.feedbackRenderTexture == NULL
+			&& vkExec.activeColorEntries[ 0 ] == NULL
+			&& vkExec.activeDepthEntry == NULL
+			&& VK_Exec_PipelineTargetsMatch( vkExec.activePipelineTarget,
+				VK_Exec_SwapchainPipelineTarget() );
+	}
+	if ( vkExec.temporalSceneRenderTexture != NULL
+			&& vkExec.activeRenderTexture == vkExec.temporalSceneRenderTexture ) {
+		return backEnd.renderTexture == NULL
+			&& backEnd.feedbackRenderTexture == NULL
+			&& vkExec.temporalScenePendingComposite;
+	}
+	// The game's forward scene target, which it binds as its own _currentRender
+	// feedback source and composites itself.
+	return backEnd.renderTexture != NULL
+		&& backEnd.renderTexture == backEnd.feedbackRenderTexture
+		&& vkExec.activeRenderTexture == backEnd.renderTexture;
 }
 
 void VK_Exec_ClearRenderTarget( bool clearColor, bool clearDepth, float depthValue,
@@ -5232,14 +5283,6 @@ static bool VK_TemporalPresentation_HDRCaptureInFrame( const viewDef_t *view ) {
 		&& view->viewport.y2 < (int)VK_Exec_DefaultExtent().height;
 }
 
-// Every opt-in shared adapter that the 3D walk gates on a native scene.
-static bool VK_TemporalPresentation_SharedAdapterRequested( void ) {
-	return r_rendererSharedWorldAmbient.GetBool()
-		|| r_rendererSharedWorldInteraction.GetBool()
-		|| r_rendererSharedInWorldGui.GetBool()
-		|| r_rendererSharedCinematicPost.GetBool()
-		|| r_rendererSharedWorldFogBlend.GetBool();
-}
 
 static bool VK_TemporalPresentation_BackendSceneRequested(
 		const viewDef_t *rootView, int &targetWidth, int &targetHeight ) {
@@ -5265,22 +5308,11 @@ static bool VK_TemporalPresentation_BackendSceneRequested(
 			&& !R_TemporalPresentation_ScreenSpaceEffectsRequested() ) {
 		return false;
 	}
-	// The shared classic adapters own only the swapchain: each preflight
-	// rejects an offscreen target, and the 3D walk skips them outright while
-	// a scene target is active. Leave their views native when nothing else
-	// needs the target (scaling, temporal AA, screen-space effects, an HDR
-	// scene, MSAA or a PBR preview), or no shared adapter could ever draw.
-	const bool knownCapture = presentation.captureFrozen
-		|| presentation.captureForcedNative
-		|| ( rootView != NULL && rootView->temporalCaptureFrame );
-	if ( VK_TemporalPresentation_SharedAdapterRequested() && !sceneScaled
-			&& !( presentation.temporalAARequested && !knownCapture )
-			&& !AdvancedScreenSpaceCore_Requested( presentation.advancedScreenSpace )
-			&& !VK_PostProcess_HDRSceneRequested() && r_multiSamples.GetInteger() <= 1
-			&& !VK_HDRScene_PreviewRequested( rootView ) ) {
-		return false;
-	}
-	// Keep other native-size scenes in the same lower-origin attachment
+	// The shared classic adapters draw into this backend-owned target at
+	// native size (VK_SharedDomainSceneAllowed), so a shared domain no longer
+	// moves its view back onto the swapchain: that changed the orientation of
+	// the classic work beside it and broke same-settings parity (REN-01).
+	// Keep native-size scenes in the same lower-origin attachment
 	// convention as scaled/HDR scenes and OpenGL. Reversing the viewport on
 	// the swapchain changes interpolation rounding even when the projected
 	// coverage agrees; radial shadow references can cross a depth threshold
@@ -6407,6 +6439,11 @@ bool VK_Exec_CopyRender( idImage *image, int x, int y, int width, int height,
 	// surface. Matching-format captures in GL row order can resolve directly.
 	// Otherwise resolve into single-sample scratch of the source's own format
 	// before the converting/flipping blit (a resolve can do neither).
+	if ( sourceEntry != NULL && sourceEntry->samples != VK_SAMPLE_COUNT_1_BIT ) {
+		// FPS-05: every copy out of a multisampled target is a resolve.
+		extern void R_CountMSAAResolve( bool depth );
+		R_CountMSAAResolve( copyDepth );
+	}
 	VkImage blitSource = sourceImage;
 	uint32_t blitSourceLayer = sourceLayer;
 	const bool directColorResolve = !copyDepth && sourceEntry != NULL
@@ -7632,18 +7669,19 @@ bool RB_RequestSavePreview() {
 	return true;
 }
 
-void RB_QueueSavePreview() {
-	if ( vkSavePreview.state != 1 || !vkExec.frameOpen || VK_Exec_DefaultColorImage() == VK_NULL_HANDLE ) return;
+// The host buffer a requested preview is read into, for an image of this
+// format and size. The request counts as failed from here until the copy is
+// recorded.
+static bool VK_PrepareSavePreview( VkFormat previewFormat, int width, int height ) {
 	vkSavePreview.state = -1;
-	vkSavePreview.width = (int)VK_Exec_DefaultExtent().width;
-	vkSavePreview.height = (int)VK_Exec_DefaultExtent().height;
+	vkSavePreview.width = width;
+	vkSavePreview.height = height;
 	const int64 pixels = (int64)vkSavePreview.width * vkSavePreview.height;
-	if ( pixels <= 0 || pixels > 33554432 ) return;
-	const VkFormat previewFormat = VK_Exec_DefaultColorFormat();
+	if ( pixels <= 0 || pixels > 33554432 ) return false;
 	vkSavePreview.bgra = previewFormat == VK_FORMAT_B8G8R8A8_UNORM ||
 		previewFormat == VK_FORMAT_B8G8R8A8_SRGB;
 	if ( !vkSavePreview.bgra && previewFormat != VK_FORMAT_R8G8B8A8_UNORM &&
-		previewFormat != VK_FORMAT_R8G8B8A8_SRGB ) return;
+		previewFormat != VK_FORMAT_R8G8B8A8_SRGB ) return false;
 	VkBufferCreateInfo buffer = {};
 	buffer.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	buffer.size = (VkDeviceSize)pixels * 4;
@@ -7653,17 +7691,21 @@ void RB_QueueSavePreview() {
 	allocation.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 	VmaAllocationInfo mapped = {};
 	if ( vmaCreateBuffer( vkCtx.allocator, &buffer, &allocation, &vkSavePreview.buffer,
-		&vkSavePreview.allocation, &mapped ) != VK_SUCCESS ) return;
+		&vkSavePreview.allocation, &mapped ) != VK_SUCCESS ) return false;
 	vkSavePreview.mapped = mapped.pMappedData;
-	VK_Exec_EndMainRendering();
-	VK_Exec_TransitionSwapchain( VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );
+	return true;
+}
+
+// Records the copy of an image waiting in TRANSFER_SRC_OPTIMAL into the
+// prepared buffer, made visible to the host when this frame's slot retires.
+static void VK_RecordSavePreviewCopy( VkCommandBuffer cmd, VkImage image ) {
 	VkBufferImageCopy copy = {};
 	copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	copy.imageSubresource.layerCount = 1;
 	copy.imageExtent.width = vkSavePreview.width;
 	copy.imageExtent.height = vkSavePreview.height;
 	copy.imageExtent.depth = 1;
-	vkCmdCopyImageToBuffer( vkExec.cmd, VK_Exec_DefaultColorImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	vkCmdCopyImageToBuffer( cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		vkSavePreview.buffer, 1, &copy );
 	VkBufferMemoryBarrier2 barrier = {};
 	barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
@@ -7679,10 +7721,37 @@ void RB_QueueSavePreview() {
 	dependency.bufferMemoryBarrierCount = 1;
 	dependency.pBufferMemoryBarriers = &barrier;
 	if ( r_vkResourceProfile.GetBool() ) { ++vkResourceProfile.barriers; }
-	vkCmdPipelineBarrier2( vkExec.cmd, &dependency );
-	VK_Exec_TransitionSwapchain( VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL );
+	vkCmdPipelineBarrier2( cmd, &dependency );
 	vkSavePreview.slot = vkExec.frameSlot;
 	vkSavePreview.state = 2;
+}
+
+void RB_QueueSavePreview() {
+	if ( vkSavePreview.state != 1 || !vkExec.frameOpen || VK_Exec_DefaultColorImage() == VK_NULL_HANDLE ) return;
+	if ( !VK_PrepareSavePreview( VK_Exec_DefaultColorFormat(),
+		(int)VK_Exec_DefaultExtent().width, (int)VK_Exec_DefaultExtent().height ) ) return;
+	VK_Exec_EndMainRendering();
+	VK_Exec_TransitionSwapchain( VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );
+	VK_RecordSavePreviewCopy( vkExec.cmd, VK_Exec_DefaultColorImage() );
+	VK_Exec_TransitionSwapchain( VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL );
+}
+
+/*
+====================
+VK_QueueSavePreviewFromImage
+
+A VR frame's preview is its left eye, whatever the desktop mirror shows
+(vr_mirror 0 leaves the window black, 2 shows only the HUD).
+vk_VRPresentation.cpp calls this at the swap while the eye waits in
+TRANSFER_SRC_OPTIMAL for its copy into the runtime's image; the window's
+own readback at submission then finds the request taken.
+====================
+*/
+bool VK_QueueSavePreviewFromImage( VkCommandBuffer cmd, VkImage image, VkFormat format, int width, int height ) {
+	if ( vkSavePreview.state != 1 || !vkExec.frameOpen || cmd == VK_NULL_HANDLE || image == VK_NULL_HANDLE ) return false;
+	if ( !VK_PrepareSavePreview( format, width, height ) ) return false;
+	VK_RecordSavePreviewCopy( cmd, image );
+	return true;
 }
 
 static void VK_ConsumeSavePreview( int slot ) {
@@ -12030,8 +12099,19 @@ static void VK_Exec_DrawRVSpecialEffects( const viewDef_t *viewDef ) {
 		return;
 	}
 	const int activeMask = vkExec.pendingSpecialEffectsMask;
-	const bool sharedSpecialFrame = r_rendererSharedSpecialFrame.GetBool()
+	bool sharedSpecialFrame = r_rendererSharedSpecialFrame.GetBool()
 		&& R_ClassicSpecialFrameDomain_FindRavenEffectsView( viewDef ) != NULL;
+	if ( sharedSpecialFrame && !R_ClassicSpecialFrameDomain_ReadyForBackend( viewDef,
+			CLASSIC_SPECIAL_FRAME_SCOPE_RAVEN_EFFECTS,
+			CLASSIC_SPECIAL_FRAME_BACKEND_VULKAN ) ) {
+		// As on OpenGL: the established effect executor runs, and the
+		// command is accounted a named classic fallback, never owned (REN-01).
+		R_ClassicSpecialFrameDomain_RecordBackendFallback( viewDef,
+			CLASSIC_SPECIAL_FRAME_SCOPE_RAVEN_EFFECTS,
+			CLASSIC_SPECIAL_FRAME_BACKEND_VULKAN,
+			CLASSIC_SPECIAL_FRAME_FAILURE_BACKEND_NOT_READY, 0 );
+		sharedSpecialFrame = false;
+	}
 	vkExec.pendingSpecialEffectsView = NULL;
 	vkExec.pendingSpecialEffectsMask = 0;
 	vkExec.pendingSpecialEffectsSource = NULL;
@@ -13624,21 +13704,18 @@ static bool VK_ClassicGui_DrawOwnedViewForScope( const viewDef_t *viewDef,
 			CLASSIC_GUI_DOMAIN_FAILURE_BACKEND_REJECTED,
 			VK_CLASSIC_GUI_REJECT_VIEW_MUTATION );
 	}
-	if ( vkExec.activeRenderTexture != NULL || vkExec.activeColorEntries[ 0 ] != NULL
-			|| vkExec.activeDepthEntry != NULL || backEnd.renderTexture != NULL
-			|| backEnd.feedbackRenderTexture != NULL ) {
+	// Root 2D views draw to the swapchain only; in-world GUI also follows its
+	// 3D view into the scene target the classic walker uses (REN-01).
+	if ( !inWorld && ( backEnd.renderTexture != NULL
+			|| backEnd.feedbackRenderTexture != NULL
+			|| vkExec.activeRenderTexture != NULL
+			|| vkExec.activeColorEntries[ 0 ] != NULL
+			|| vkExec.activeDepthEntry != NULL ) ) {
 		return VK_ClassicGui_Fail( viewDef,
 			CLASSIC_GUI_DOMAIN_FAILURE_BACKEND_REJECTED,
 			VK_CLASSIC_GUI_REJECT_OFFSCREEN_TARGET );
 	}
-	if ( !vkExec.frameOpen || !vkExec.mainScopeOpen
-			|| vkExec.cmd == VK_NULL_HANDLE
-			|| vkExec.pendingSpecialEffectsView != NULL
-			|| vkExec.pendingSpecialEffectsMask != 0
-			|| vkExec.pendingSpecialEffectsSource != NULL
-			|| vkExec.pendingSpecialEffectsNeedsResolve
-			|| !VK_Exec_PipelineTargetsMatch( vkExec.activePipelineTarget,
-				VK_Exec_SwapchainPipelineTarget() ) ) {
+	if ( !VK_Exec_SharedInteractionTargetReady() ) {
 		return VK_ClassicGui_Fail( viewDef,
 			CLASSIC_GUI_DOMAIN_FAILURE_BACKEND_NOT_READY,
 			VK_CLASSIC_GUI_REJECT_RENDER_SCOPE );
@@ -14403,7 +14480,7 @@ static bool VK_ClassicWorldAmbient_Preflight( const viewDef_t *viewDef ) {
 	if ( viewDef->isSubview || viewDef->isMirror || viewDef->isXraySubview
 			|| viewDef->isEditor || viewDef->superView != NULL
 			|| viewDef->subviewSurface != NULL || viewDef->numClipPlanes != 0
-			|| viewDef->renderWorld == NULL || viewDef->viewLights != NULL
+			|| viewDef->renderWorld == NULL
 			|| viewDef->renderView.viewID < 0
 			|| ( viewDef->renderFlags & ~allowedRenderFlags ) != 0
 			|| viewDef->numOutlineDrawSurfs != 0
@@ -14434,21 +14511,7 @@ static bool VK_ClassicWorldAmbient_Preflight( const viewDef_t *viewDef ) {
 			}
 		}
 	}
-	if ( vkExec.activeRenderTexture != NULL || vkExec.activeColorEntries[ 0 ] != NULL
-			|| vkExec.activeDepthEntry != NULL || backEnd.renderTexture != NULL
-			|| backEnd.feedbackRenderTexture != NULL ) {
-		return VK_ClassicWorldAmbient_Fail( viewDef,
-			CLASSIC_WORLD_AMBIENT_FAILURE_BACKEND_REJECTED,
-			VK_CLASSIC_WORLD_AMBIENT_REJECT_OFFSCREEN_TARGET );
-	}
-	if ( !vkExec.frameOpen || !vkExec.mainScopeOpen
-			|| vkExec.cmd == VK_NULL_HANDLE
-			|| vkExec.pendingSpecialEffectsView != NULL
-			|| vkExec.pendingSpecialEffectsMask != 0
-			|| vkExec.pendingSpecialEffectsSource != NULL
-			|| vkExec.pendingSpecialEffectsNeedsResolve
-			|| !VK_Exec_PipelineTargetsMatch( vkExec.activePipelineTarget,
-				VK_Exec_SwapchainPipelineTarget() ) ) {
+	if ( !VK_Exec_SharedInteractionTargetReady() ) {
 		return VK_ClassicWorldAmbient_Fail( viewDef,
 			CLASSIC_WORLD_AMBIENT_FAILURE_BACKEND_NOT_READY,
 			VK_CLASSIC_WORLD_AMBIENT_REJECT_RENDER_SCOPE );
@@ -15138,6 +15201,7 @@ typedef struct vkDepthFillState_s {
 
 static bool VK_Exec_FillDepthSurface( VkCommandBuffer cmd, int slot, const viewDef_t *viewDef,
 		const drawSurf_t *drawSurf, int fbHeight, vkDepthFillState_t &fill ) {
+	vkSurfaceWinding_t winding( cmd, drawSurf );
 	const idMaterial *shader = drawSurf->material;
 	const srfTriangles_t *tri = drawSurf->geo;
 	if ( shader == NULL || tri == NULL || !shader->IsDrawn() ) {
@@ -15578,7 +15642,7 @@ void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 	// other framebuffer-affecting command.  A failed preflight leaves the
 	// established Vulkan world walker completely untouched.
 	const bool sharedWorldAmbientOwned =
-		!sceneScaleState.active && r_rendererSharedWorldAmbient.GetBool()
+		VK_SharedDomainSceneAllowed( sceneScaleState ) && r_rendererSharedWorldAmbient.GetBool()
 		&& VK_ClassicWorldAmbient_Preflight( viewDef );
 	// GL bottom-left viewport -> Vulkan negative-height viewport
 	const int vpX = viewDef->viewport.x1;
@@ -15747,7 +15811,7 @@ void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 	// walker untouched.
 	vkGpuPhaseScope lightTiming( cmd, VK_GPU_PHASE_WORLD_LIGHTS, profileMainView );
 	const bool sharedWorldInteractionOwned =
-		!sceneScaleState.active && r_rendererSharedWorldInteraction.GetBool()
+		VK_SharedDomainSceneAllowed( sceneScaleState ) && r_rendererSharedWorldInteraction.GetBool()
 		&& VK_ClassicInteraction_Preflight( viewDef );
 	if ( sharedWorldInteractionOwned ) {
 		VK_ClassicInteraction_DrawOwnedView( viewDef );
@@ -15775,7 +15839,7 @@ void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 	// R_RenderGuiSurf output sorts before the regular world ambient ranges.
 	// Commit its sealed subset at that exact boundary; on rejection the normal
 	// walker below retains every source drawSurf unchanged.
-	if ( !sceneScaleState.active && r_rendererSharedInWorldGui.GetBool() ) {
+	if ( VK_SharedDomainSceneAllowed( sceneScaleState ) && r_rendererSharedInWorldGui.GetBool() ) {
 		(void)VK_ClassicGui_DrawOwnedInWorldView( viewDef );
 	}
 
@@ -15788,7 +15852,7 @@ void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 		}
 	}
 	const classicCinematicPostDomainView_t *sharedAuthoredPostView =
-		!sceneScaleState.active && r_rendererSharedCinematicPost.GetBool()
+		VK_SharedDomainSceneAllowed( sceneScaleState ) && r_rendererSharedCinematicPost.GetBool()
 			? R_ClassicCinematicPostDomain_FindAuthoredPostView( viewDef )
 			: NULL;
 	// A prior member may already have rolled back this complete special-view
@@ -15841,7 +15905,7 @@ void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 			compositionTiming.End();
 			vkGpuPhaseScope fogTiming( cmd, VK_GPU_PHASE_WORLD_FOG, profileMainView );
 			const bool sharedFogBlendOwned =
-				!sceneScaleState.active && r_rendererSharedWorldFogBlend.GetBool()
+				VK_SharedDomainSceneAllowed( sceneScaleState ) && r_rendererSharedWorldFogBlend.GetBool()
 				&& VK_ClassicFogBlend_Preflight( viewDef );
 			if ( sharedFogBlendOwned ) {
 				VK_ClassicFogBlend_DrawOwnedView( viewDef );
@@ -16001,6 +16065,7 @@ void VK_GuiExecutor_Draw3DView( const viewDef_t *viewDef ) {
 					continue;
 				}
 				VK_Exec_SetSurfScissor( cmd, viewDef, drawSurf, fbHeight );
+				vkSurfaceWinding_t winding( cmd, drawSurf );
 
 				if ( drawSurf->space != currentSpace ) {
 					currentSpace = drawSurf->space;

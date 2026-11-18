@@ -78,8 +78,8 @@ def main() -> None:
         'static const char LEGACY_DEMO_MAGIC[] = "OpenPrey RDEMO";',
         "sizeof( DEMO_MAGIC ) == sizeof( INTERIM_DEMO_MAGIC )",
         "sizeof( DEMO_MAGIC ) == sizeof( LEGACY_DEMO_MAGIC )",
-        "memcmp( magicBuffer, INTERIM_DEMO_MAGIC, magicLen ) == 0",
-        "memcmp( magicBuffer, LEGACY_DEMO_MAGIC, magicLen ) == 0",
+        "memcmp( magicBuffer, INTERIM_DEMO_MAGIC, DEMO_MAGIC_LENGTH ) == 0",
+        "memcmp( magicBuffer, LEGACY_DEMO_MAGIC, DEMO_MAGIC_LENGTH ) == 0",
     )
     forbid(
         demo_path,

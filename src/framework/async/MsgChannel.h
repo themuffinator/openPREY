@@ -56,7 +56,10 @@ class idMsgChannel {
 public:
 					idMsgChannel();
 
-	void			Init( const netadr_t adr, const int id );
+					// key is the connect challenge both ends hold; every packet carries a tag made
+					// with it, and one without the tag is ignored.
+	void			Init( const netadr_t adr, const int id, const int key = 0 );
+	int				GetKey( void ) const { return key; }
 	void			Shutdown( void );
 	void			ResetRate( void );
 
@@ -87,6 +90,11 @@ public:
 					// Returns true if the channel is ready to send new data based on the maximum rate.
 	bool			ReadyToSend( const int time ) const;
 
+					// Returns true if the next fragment of the message under way may follow now:
+					// the rest of a message goes out at once while its debt stays within
+					// burstMsec of the outgoing rate.
+	bool			ReadyToSendFragment( const int time, const int burstMsec ) const;
+
 					// Sends an unreliable message, in order and without duplicates.
 	int				SendMessage( idPort &port, const int time, const idBitMsg &msg );
 
@@ -111,8 +119,17 @@ public:
 					// the sequence number of the message.
 	bool			Process( const netadr_t from, int time, idBitMsg &msg, int &sequence );
 
+					// True when the last packet Process refused carried this connection's tag
+					// but could not be read: the other end, or someone who guessed the tag,
+					// sent a broken packet, not a late or repeated one.
+	bool			LastPacketMalformed( void ) const { return lastPacketMalformed; }
+
 					// Sends a reliable message, in order and without duplicates.
 	bool			SendReliableMessage( const idBitMsg &msg );
+
+					// Bytes the outgoing reliable queue can still take; a message of n bytes
+					// needs n plus its 8-byte queue header.
+	int				GetReliableSpaceLeft( void ) const { return reliableSend.GetSpaceLeft(); }
 
 					// Returns true if a new reliable message is available and stores the message.
 	bool			GetReliableMessage( idBitMsg &msg );
@@ -122,6 +139,8 @@ public:
 private:
 	netadr_t		remoteAddress;	// address of remote host
 	int				id;				// our identification used instead of port number
+	int				key;			// the connect challenge packets are tagged with
+	bool			lastPacketMalformed;
 	int				maxRate;		// maximum number of bytes that may go out per second
 	idCompressor *	compressor;		// compressor used for data compression
 
@@ -166,6 +185,8 @@ private:
 	idMsgQueue		reliableReceive;
 
 private:
+	int				ReliableSendSize( const int dataBytes ) const;
+	int				ReliablePrefixSize( const int budget ) const;
 	bool			WriteMessageData( idBitMsg &out, const idBitMsg &msg );
 	bool			ReadMessageData( idBitMsg &out, const idBitMsg &msg );
 

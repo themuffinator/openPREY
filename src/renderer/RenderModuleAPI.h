@@ -110,7 +110,15 @@
 // 35 - renderExport_t appends TryDisplayTransition: a strict display request
 //      applied to the running device, without the teardown TryDeviceRestart
 //      performs.
-#define RENDER_API_VERSION			35
+// 36 - idRenderSystem appends UploadImageRegion: one rectangle of a
+//      single-level RGBA8 image that CreateImage allocated or UploadImage
+//      shaped (the retained interface's coverage atlas uploads only the tiles
+//      it placed). Upstream openQ4 numbers this 35.
+// 37 - idFileSystem appends GetFileOrigin: the image loader skips the
+//      game's precomputed image-program results when an input comes from
+//      outside the shipped packs (a stale module would call past the
+//      vtable). Upstream openQ4 numbers this 36.
+#define RENDER_API_VERSION			37
 #define RENDER_API_ENTRY_POINT		"GetRenderAPI"
 
 class idSys;

@@ -343,7 +343,10 @@ Any mod selected with fs_game runs on top of the openQ4 runtime directory
 (baseoq4), which carries the engine's own runtime content and the fallback
 game modules, so it is searched below the mod without being named. fs_game_base
 remains free for an intermediate base, for instance a mod built on the
-Awakening expansion: fs_game mymod, fs_game_base q4xbase
+Awakening expansion: fs_game mymod, fs_game_base q4xbase. That base is mounted
+only for single player; a mod's mod.json "campaign" key can ask for it
+("awakening") or refuse it ("quake4"), and fs_awakeningActive reports whether
+the expansion is in the search path (see idFileSystemLocal::Startup).
 
 =============================================================================
 */
@@ -1697,7 +1700,7 @@ typedef struct searchpath_s {
 #define BINARY_CONFIG "binary.conf"
 #define ADDON_CONFIG "addon.conf"
 
-// Protocol 2.41 identifies compatible game code with the official 1.4.2
+// openQ4's network protocol identifies compatible game code with the official 1.4.2
 // q4base/game300.pk4 checksum. openQ4 never loads executable code from that
 // archive; the unchanged value is a platform-independent wire token for a
 // module that FindDLL resolved from the trusted package/module roots.
@@ -1849,6 +1852,8 @@ public:
 	virtual bool			GeneratedCacheReadsEnabled( generatedCacheKind_t kind ) const;
 	virtual bool			GeneratedCacheWritesEnabled( generatedCacheKind_t kind ) const;
 	virtual bool			TakePureImageCacheEviction( void );
+	virtual fsFileOrigin_t	GetFileOrigin( const char *relativePath );
+	bool					IsShippedPack( const pack_t *pak ) const;
 	virtual idFile *		GetNewFileMemory( void );
 	virtual idFile *		GetNewFilePermanent( void );
 	virtual idFile *		OpenFileReadFlags( const char *relativePath, int searchFlags, pack_t **foundInPak = NULL, bool allowCopyFiles = true, const char* gamedir = NULL );
@@ -1911,6 +1916,7 @@ private:
 	static idCVar			fs_homepath;
 	static idCVar			fs_savepath;
 	static idCVar			fs_awakeningpath;
+	static idCVar			fs_awakeningActive;
 	static idCVar			fs_cachepath;
 	static idCVar			fs_cdpath;
 	static idCVar			fs_devpath;
@@ -2017,6 +2023,8 @@ private:
 	bool					ValidateConfiguredGameDir( const char *gameDir, idStr *reason = NULL );
 	bool					NormalizeMapPath( const char *mapName, idStr &relativePath ) const;
 	bool					AddonPackProvidesMap( const pack_t *pak, const char *relativeMapPath ) const;
+	bool					PackHasFile( const pack_t *pak, const char *relativePath ) const;
+	bool					IsOpenQ4CorePackCopy( const pack_t *pak ) const;
 	void					FreePack( pack_t *pack ) const;
 	void					StageStartupAddonPaks( void );
 
@@ -2039,6 +2047,7 @@ idCVar	idFileSystemLocal::fs_savepath( "fs_savepath", "", CVAR_SYSTEM | CVAR_INI
 // purged savepath costs the player their config and saves.
 idCVar	idFileSystemLocal::fs_cachepath( "fs_cachepath", "", CVAR_SYSTEM | CVAR_INIT, "regenerable cache directory for the generated/ tree; empty uses fs_savepath" );
 idCVar idFileSystemLocal::fs_awakeningpath( "fs_awakeningpath", "", CVAR_SYSTEM | CVAR_ARCHIVE, "optional Awakening content root (containing q4xbase), mounted only for its single-player campaign" );
+idCVar idFileSystemLocal::fs_awakeningActive( "fs_awakeningActive", "0", CVAR_SYSTEM | CVAR_ROM | CVAR_BOOL, "1 while The Awakening's content is mounted, as the game (fs_game q4xbase) or as the base under a mod (fs_game_base q4xbase)" );
 idCVar	idFileSystemLocal::fs_cdpath( "fs_cdpath", "", CVAR_SYSTEM | CVAR_INIT, "" );
 idCVar	idFileSystemLocal::fs_devpath( "fs_devpath", "", CVAR_SYSTEM | CVAR_INIT, "optional highest-priority loose development-content root" );
 idCVar	idFileSystemLocal::fs_game( "fs_game", OPENQ4_GAMEDIR, CVAR_SYSTEM | CVAR_INIT | CVAR_SERVERINFO, "mod path" );
@@ -4707,7 +4716,8 @@ static bool FS_ModManifestKeyIsKnown( const idStr &key ) {
 		   !key.Icmp( "website" ) ||
 		   !key.Icmp( "author" ) ||
 		   !key.Icmp( "requiredopenPREYVersion" ) ||
-		   !key.Icmp( "requiredopenQ4Version" );
+		   !key.Icmp( "requiredopenQ4Version" ) ||
+		   !key.Icmp( "campaign" );
 }
 
 /*
@@ -4829,6 +4839,7 @@ static bool FS_ParseModManifest( const char *jsonText, idModInfo &modInfo, idStr
 	modInfo.website.Clear();
 	modInfo.author.Clear();
 	modInfo.requiredopenQ4Version.Clear();
+	modInfo.campaign.Clear();
 	modInfo.listLabel.Clear();
 
 	if ( jsonText == NULL ) {
@@ -4894,6 +4905,14 @@ static bool FS_ParseModManifest( const char *jsonText, idModInfo &modInfo, idStr
 				sawRequiredopenPREYVersion = true;
 			} else if ( !key.Icmp( "requiredopenQ4Version" ) ) {
 				legacyRequiredVersion = value;
+			} else if ( !key.Icmp( "campaign" ) ) {
+				// Optional: the single-player campaign the mod plays over.
+				if ( value.Icmp( "awakening" ) && value.Icmp( "quake4" ) ) {
+					errorOut = va( "field 'campaign' must be \"awakening\" or \"quake4\", not \"%s\"", value.c_str() );
+					return false;
+				}
+				modInfo.campaign = value;
+				modInfo.campaign.ToLower();
 			}
 		} else if ( !FS_SkipJsonValue( cursor, errorOut ) ) {
 			errorOut = va( "invalid value for '%s': %s", key.c_str(), errorOut.c_str() );
@@ -5715,6 +5734,17 @@ void idFileSystemLocal::AddGameDirectory( const char *path, const char *dir ) {
 		if ( !pak ) {
 			continue;
 		}
+		// openQ4's own packs belong only in baseoq4. A copy of its core pack in
+		// any other folder, usually a mod's, outranks the current one and hides
+		// every newer menu, string and shader behind the copy's old ones (#219),
+		// so it is skipped.
+		if ( idStr::Icmp( dir, OPENQ4_GAMEDIR ) && FS_ParseNumberedPakName( pakfiles[ i ].c_str(), numberedPak ) &&
+			 numberedPak.digitCount == 1 && IsOpenQ4CorePackCopy( pak ) ) {
+			common->Warning( "Ignoring %s: it is a copy of openQ4's own content pack, which belongs only in the %s folder. It can be deleted.",
+				pakfile.c_str(), OPENQ4_GAMEDIR );
+			FreePack( pak );
+			continue;
+		}
 		// insert the pak after the directory it comes from
 		search = new searchpath_t;
 		search->dir = NULL;
@@ -5848,11 +5878,8 @@ bool idFileSystemLocal::AddonPackProvidesMap( const pack_t *pak, const char *rel
 		return false;
 	}
 
-	const int hash = HashFileName( relativeMapPath );
-	for ( const fileInPack_t *pakFile = pak->hashTable[ hash ]; pakFile; pakFile = pakFile->next ) {
-		if ( !FilenameCompare( pakFile->name, relativeMapPath ) ) {
-			return true;
-		}
+	if ( PackHasFile( pak, relativeMapPath ) ) {
+		return true;
 	}
 
 	if ( !pak->addon_info ) {
@@ -5872,6 +5899,39 @@ bool idFileSystemLocal::AddonPackProvidesMap( const pack_t *pak, const char *rel
 	}
 
 	return false;
+}
+
+/*
+================
+idFileSystemLocal::PackHasFile
+================
+*/
+bool idFileSystemLocal::PackHasFile( const pack_t *pak, const char *relativePath ) const {
+	if ( !pak || !relativePath || !relativePath[0] ) {
+		return false;
+	}
+
+	const int hash = HashFileName( relativePath );
+	for ( const fileInPack_t *pakFile = pak->hashTable[ hash ]; pakFile; pakFile = pakFile->next ) {
+		if ( !FilenameCompare( pakFile->name, relativePath ) ) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+================
+idFileSystemLocal::IsOpenQ4CorePackCopy
+
+True for a copy of openQ4's own core pack (pak0.pk4 in baseoq4) from any
+release. Every one carries openQ4's defaults config at its root and openQ4's
+English string table; a mod that overrides one of them has no reason to carry
+both.
+================
+*/
+bool idFileSystemLocal::IsOpenQ4CorePackCopy( const pack_t *pak ) const {
+	return PackHasFile( pak, "openq4_defaults.cfg" ) && PackHasFile( pak, "strings/english_openq4.lang" );
 }
 
 /*
@@ -6825,22 +6885,20 @@ void idFileSystemLocal::Startup( void ) {
 		common->Printf( "restarting filesystem with %d addon pak file(s) to include\n", addonChecksums.Num() );
 	}
 
-	// Awakening is a single-player campaign, never a multiplayer/base overlay.
-    if ( !idStr::Icmp( fs_game_base.GetString(), "q4xbase" ) ) fs_game_base.SetString( "" );
+	// The Awakening is a single-player campaign. It mounts as the game itself
+	// (fs_game q4xbase) or as the base beneath a mod (fs_game <mod>,
+	// fs_game_base q4xbase), never for multiplayer or a dedicated server.
 #ifdef ID_DEDICATED
     const bool awakeningAllowed = false;
 #else
     const bool awakeningAllowed = !idStr::Icmp( cvarSystem->GetCVarString( "si_gameType" ), "singleplayer" ) &&
         idStr::Icmp( cvarSystem->GetCVarString( "com_nextGameModule" ), "game_mp" );
 #endif
-    if ( !awakeningAllowed && !idStr::Icmp( fs_game.GetString(), "q4xbase" ) ) fs_game.SetString( OPENQ4_GAMEDIR );
+    if ( !awakeningAllowed ) {
+        if ( !idStr::Icmp( fs_game_base.GetString(), "q4xbase" ) ) fs_game_base.SetString( "" );
+        if ( !idStr::Icmp( fs_game.GetString(), "q4xbase" ) ) fs_game.SetString( OPENQ4_GAMEDIR );
+    }
     idStr invalidReason;
-	if ( fs_game_base.GetString()[ 0 ] &&
-		 idStr::Icmp( fs_game_base.GetString(), BASE_GAMEDIR ) &&
-		 !ValidateConfiguredGameDir( fs_game_base.GetString(), &invalidReason ) ) {
-		common->Warning( "Ignoring fs_game_base '%s': %s", fs_game_base.GetString(), invalidReason.c_str() );
-		fs_game_base.SetString( "" );
-	}
 
 	if ( fs_game.GetString()[ 0 ] &&
 		 idStr::Icmp( fs_game.GetString(), BASE_GAMEDIR ) &&
@@ -6858,6 +6916,47 @@ void idFileSystemLocal::Startup( void ) {
 		// empty fs_game also drops the openQ4 runtime underlay (strings, GUIs,
 		// staged overrides), leaving a half-working game and serverinfo.
 		fs_game.SetString( OPENQ4_GAMEDIR );
+	}
+
+	// The mod.json of a mod may name the campaign it plays over: "awakening" mounts
+	// the expansion beneath it, "quake4" keeps it off. Without the key the mod
+	// plays over whichever campaign the player chose (fs_game_base).
+	// The note is reported once the search path, and with it the log, exists.
+	idStr campaignNote;
+	bool campaignNoteIsWarning = false;
+	const char *modGame = fs_game.GetString();
+	const bool gameIsMod = modGame[ 0 ] && idStr::Icmp( modGame, BASE_GAMEDIR ) &&
+		idStr::Icmp( modGame, OPENQ4_GAMEDIR ) && idStr::Icmp( modGame, "q4xbase" );
+	if ( gameIsMod ) {
+		idModInfo modInfo;
+		if ( GetModInfo( modGame, modInfo ) ) {
+			if ( !modInfo.campaign.Icmp( "awakening" ) && awakeningAllowed && !fs_game_base.GetString()[ 0 ] ) {
+				campaignNote = va( "Mod '%s' plays over The Awakening (mod.json campaign); mounting q4xbase beneath it", modGame );
+				fs_game_base.SetString( "q4xbase" );
+			} else if ( !modInfo.campaign.Icmp( "awakening" ) && awakeningAllowed && idStr::Icmp( fs_game_base.GetString(), "q4xbase" ) ) {
+				campaignNote = va( "Mod '%s' asks for The Awakening, but fs_game_base '%s' was set; keeping it", modGame, fs_game_base.GetString() );
+				campaignNoteIsWarning = true;
+			} else if ( !modInfo.campaign.Icmp( "quake4" ) && !idStr::Icmp( fs_game_base.GetString(), "q4xbase" ) ) {
+				campaignNote = va( "Mod '%s' plays over Quake 4 only (mod.json campaign); not mounting q4xbase", modGame );
+				fs_game_base.SetString( "" );
+			}
+		}
+	} else if ( !idStr::Icmp( fs_game_base.GetString(), "q4xbase" ) ) {
+		// The expansion beneath no mod is the game itself: the openQ4 runtime
+		// must stay below it, not above.
+		fs_game.SetString( "q4xbase" );
+		fs_game_base.SetString( "" );
+		if ( !ValidateConfiguredGameDir( "q4xbase", &invalidReason ) ) {
+			common->Warning( "Ignoring fs_game_base 'q4xbase': %s", invalidReason.c_str() );
+			fs_game.SetString( OPENQ4_GAMEDIR );
+		}
+	}
+
+	if ( fs_game_base.GetString()[ 0 ] &&
+		 idStr::Icmp( fs_game_base.GetString(), BASE_GAMEDIR ) &&
+		 !ValidateConfiguredGameDir( fs_game_base.GetString(), &invalidReason ) ) {
+		common->Warning( "Ignoring fs_game_base '%s': %s", fs_game_base.GetString(), invalidReason.c_str() );
+		fs_game_base.SetString( "" );
 	}
 
 	// File writes should use the selected game directory even while search paths
@@ -6882,6 +6981,11 @@ void idFileSystemLocal::Startup( void ) {
 	if ( fs_game_base.GetString()[0] &&
 		 idStr::Icmp( fs_game_base.GetString(), BASE_GAMEDIR ) ) {
 		SetupGameDirectories( fs_game_base.GetString() );
+		// fs_awakeningpath content sits at the layer of the expansion, under the mod
+		if ( !idStr::Icmp( fs_game_base.GetString(), "q4xbase" ) ) {
+			const idStr externalRoot = FS_AwakeningRoot();
+			if ( externalRoot.Length() ) AddGameDirectory( externalRoot, "q4xbase" );
+		}
 	}
 
 	// fs_game override
@@ -6895,6 +6999,15 @@ void idFileSystemLocal::Startup( void ) {
         const idStr externalRoot = FS_AwakeningRoot();
         if ( externalRoot.Length() ) AddGameDirectory( externalRoot, "q4xbase" );
     }
+	fs_awakeningActive.SetBool( !idStr::Icmp( fs_game.GetString(), "q4xbase" ) || !idStr::Icmp( fs_game_base.GetString(), "q4xbase" ) );
+	if ( fs_awakeningActive.GetBool() ) {
+		common->Printf( "The Awakening mounted: fs_game '%s', fs_game_base '%s'\n", fs_game.GetString(), fs_game_base.GetString() );
+	}
+	if ( campaignNoteIsWarning ) {
+		common->Warning( "%s", campaignNote.c_str() );
+	} else if ( campaignNote.Length() ) {
+		common->Printf( "%s\n", campaignNote.c_str() );
+	}
 
 	idStr openQ4PakErrors;
 	bool onlyClientPacks = false;
@@ -7184,7 +7297,7 @@ bool idFileSystemLocal::UpdateGamePakChecksums( void ) {
 		return false;
 	}
 
-	// Protocol 2.41 defines Windows, Linux and macOS as OS IDs 0..2. The
+	// The network protocol defines Windows, Linux and macOS as OS IDs 0..2. The
 	// compatibility token is deliberately platform-independent; executable
 	// bytes remain outside the downloadable/pure-PK4 path.
 	for ( int os = 0; os <= 2; ++os ) {
@@ -7307,7 +7420,7 @@ can be:
   wrong order - if the pak order doesn't match, means some stuff could have been loaded from somewhere else
 server referenced files are prepended to the list if possible ( that doesn't break pureness )
 Game code:
-  protocol 2.41 carries the official q4base/game300.pk4 checksum as a
+  the network protocol carries the official q4base/game300.pk4 checksum as a
   compatibility token, but openQ4 resolves executable modules only from its
   trusted package/module roots and never from a server-selected PK4
 =====================
@@ -7446,6 +7559,52 @@ bool idFileSystemLocal::TakePureImageCacheEviction( void ) {
 	// is cleared.
 	loadedImageCacheFromDir = false;
 	return true;
+}
+
+/*
+=====================
+idFileSystemLocal::IsShippedPack
+
+A retail Quake 4 PK4 in the base game directory whose checksum matches the
+official one, or one of openQ4's own runtime packs in its own directory.
+=====================
+*/
+bool idFileSystemLocal::IsShippedPack( const pack_t *pak ) const {
+	if ( pak == NULL ) {
+		return false;
+	}
+	idStr name = pak->pakFilename;
+	name.StripPath();
+	const officialPk4Info_t *official = FindOfficialPk4Info( name.c_str() );
+	if ( official != NULL && (unsigned int)pak->checksum == official->checksum && IsBaseGamePack( pak ) ) {
+		return true;
+	}
+	return FS_FindOpenQ4PackTableEntry( name.c_str() ) != NULL && IsGameDirPack( pak, OPENQ4_GAMEDIR );
+}
+
+/*
+=====================
+idFileSystemLocal::GetFileOrigin
+
+Resolves relativePath exactly as a read would, without reading it or marking
+its pak referenced, and reports whether the winning copy ships with the game.
+=====================
+*/
+fsFileOrigin_t idFileSystemLocal::GetFileOrigin( const char *relativePath ) {
+	if ( !searchPaths || relativePath == NULL || relativePath[0] == '\0' ) {
+		return FS_FILE_ORIGIN_NOT_FOUND;
+	}
+	pack_t *pak = NULL;
+	packMemberProbe_t probe;
+	idFile *loose = OpenFileReadSearch( relativePath, FSFLAG_SEARCH_DIRS | FSFLAG_SEARCH_PAKS | FSFLAG_PURE_NOREF, &pak, false, NULL, &probe );
+	if ( loose != NULL ) {
+		CloseFile( loose );
+		return FS_FILE_ORIGIN_ADDED;
+	}
+	if ( !probe.found || pak == NULL ) {
+		return FS_FILE_ORIGIN_NOT_FOUND;
+	}
+	return IsShippedPack( pak ) ? FS_FILE_ORIGIN_SHIPPED : FS_FILE_ORIGIN_ADDED;
 }
 
 /*
@@ -7782,7 +7941,7 @@ bool idFileSystemLocal::FileAllowedFromDir( const char *path ) {
 		return true;
 	}
 	// screen shots
-	if ( strstr( path, "screenshots" ) == path && l >= 4 && !strcmp( path + l - 4, ".tga" ) ) {
+	if ( strstr( path, "screenshots" ) == path && l >= 4 && ( !strcmp( path + l - 4, ".tga" ) || !strcmp( path + l - 4, ".png" ) ) ) {
 		return true;
 	}
 	// objective tgas
@@ -8083,7 +8242,9 @@ idFile *idFileSystemLocal::OpenFileReadSearch( const char *relativePath, int sea
 
 	hash = HashFileName( relativePath );
 
-    const bool protectCampaignNavigation = !gameFolder.Icmp( "q4xbase" ) &&
+    // The expansion's own menus never replace openQ4's navigation, whether it is
+    // the game or the base beneath a mod (a mod's own menus still apply).
+    const bool protectCampaignNavigation = fs_awakeningActive.GetBool() &&
         ( !idStr::Icmp( relativePath, "default.cfg" ) || !idStr::Icmp( relativePath, "guis/mainmenu.gui" ) ||
           !idStr::Icmp( relativePath, "guis/arena_menu.gui" ) || !idStr::Icmp( relativePath, "guis/campaign_menu.gui" ) ||
           !idStr::Icmpn( relativePath, "guis/menu/", 10 ) );

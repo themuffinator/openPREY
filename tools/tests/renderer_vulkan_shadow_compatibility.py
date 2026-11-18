@@ -1522,16 +1522,30 @@ def validate_csm_atlas_and_receiver_contract() -> None:
             "const int atlasDiv = idMath::ClampInt( 1, 2, light.projectedState.atlasDiv );",
             "const int blockSize = light.tileSize * atlasDiv;",
             "VK_ShadowMap_AllocTileBlock( blockSize, tileX, tileY )",
+            "VK_ShadowMap_SetProjectedPassRects( light, pass, tileX, tileY,",
+            "? 1.0f / (float)blockSize : light.invAtlasSize[ 0 ] );",
+        ),
+        "projected cascade block allocation",
+    )
+    # one placement for a pass's own block and for the block of a pass that
+    # shares the LOCAL pass's resident tile
+    require_order(
+        braced_body(shadow_map, "static void VK_ShadowMap_SetProjectedPassRects(", "projected cascade rects"),
+        (
+            "pass.tileX = tileX;",
+            "pass.tileY = tileY;",
+            "pass.invMapSize = invMapSize;",
+            "const int atlasDiv = idMath::ClampInt( 1, 2, light.projectedState.atlasDiv );",
             "const int cascadeCount = idMath::ClampInt( 1, SHADOWMAP_PROJECTED_MAX_CASCADES, light.projectedState.cascadeCount );",
             "for ( int cascadeIndex = 0 ; cascadeIndex < cascadeCount ; cascadeIndex++ )",
             "const int cascadeX = cascadeIndex % atlasDiv;",
             "const int cascadeY = cascadeIndex / atlasDiv;",
             "const int cascadeTileX = tileX + cascadeX * light.tileSize;",
             "const int cascadeTileY = tileY + cascadeY * light.tileSize;",
-            "pass.atlasRects[ cascadeIndex ][ 0 ] = (float)cascadeTileX * invAtlas;",
-            "pass.atlasRects[ cascadeIndex ][ 1 ] = (float)( cascadeTileY + light.tileSize ) * invAtlas;",
-            "pass.atlasRects[ cascadeIndex ][ 2 ] = (float)( cascadeTileX + light.tileSize ) * invAtlas;",
-            "pass.atlasRects[ cascadeIndex ][ 3 ] = (float)cascadeTileY * invAtlas;",
+            "pass.atlasRects[ cascadeIndex ][ 0 ] = (float)cascadeTileX * invMapSize;",
+            "pass.atlasRects[ cascadeIndex ][ 1 ] = (float)( cascadeTileY + light.tileSize ) * invMapSize;",
+            "pass.atlasRects[ cascadeIndex ][ 2 ] = (float)( cascadeTileX + light.tileSize ) * invMapSize;",
+            "pass.atlasRects[ cascadeIndex ][ 3 ] = (float)cascadeTileY * invMapSize;",
         ),
         "projected 1x1/2x2 cascade tile placement",
     )
@@ -1999,9 +2013,10 @@ def validate_shadow_filtering_contract() -> None:
         ),
         "shared projected shadow filter policy",
     )
-    # Modern GL receivers have no blocker search and filter with one fixed
-    # kernel. PCSS-lite's effective radius bounds the classic search, not the
-    # blur: as an 8-texel kernel it shadowed unoccluded grazing walls.
+    # pcfKernel stays the contact radius. PCSS-lite's effective radius bounds
+    # the blocker search, not the blur: as an 8-texel fixed kernel it shadowed
+    # unoccluded grazing walls. Modern GL receivers filter from their own
+    # filter record, as the classic shader and Vulkan do.
     planner = read("src/renderer/ModernShadowPlanner.cpp")
     require_compact(
         planner,
@@ -2012,6 +2027,28 @@ def validate_shadow_filtering_contract() -> None:
     )
     if "projectedFilterSettings.effectiveFilterRadius" in planner:
         raise AssertionError("Modern GL receivers must not filter with the PCSS search bound")
+    require_order(
+        read("src/renderer/ModernClusteredLighting.cpp"),
+        (
+            "R_ShadowMapProjectedFilterSettings( src.viewLight )",
+            "dst.projectedFilter[1] = static_cast<float>( filter.filterTaps + 32 * filter.filterMode );",
+            "dst.projectedFilter[2] = pcss ? filter.pcssLightRadius : 0.0f;",
+            "dst.projectedFilter[3] = pcss ? filter.pcssMaxRadius : 0.0f;",
+            "memcpy( dst.filterParams, src.projectedFilter, sizeof( dst.filterParams ) );",
+        ),
+        "modern GL projected filter record",
+    )
+    require_order(
+        read("src/renderer/ModernGLShaderLibrary.cpp"),
+        (
+            "float ModernClusterProjectedEffectiveRadius(",
+            "float ModernClusterProjectedPCSSRadius(",
+            "if (blockerCount <= 0.0) { return 0.0; }",
+            "mat2 rotation = ModernClusterProjectedRotation(descriptor, tileTexel, depth);",
+            "float filterRadius = ModernClusterProjectedPCSSRadius(",
+        ),
+        "modern GL PCSS-lite projected receivers",
+    )
 
     interactions = read("src/renderer/Vulkan/vk_Interactions.cpp")
     shadow_slice = braced_body(
@@ -2498,13 +2535,24 @@ def validate_projected_footprint_bias_contract() -> None:
             r'"float ModernClusterShadowFootprintBias(ModernClusterShadowDescriptor descriptor, int cascadeIndex, vec3 normal, vec3 lightDir) {\n"',
             r'"    float depthPerUnit = min(length(vec3(shadowMatrix[0].z, shadowMatrix[1].z, shadowMatrix[2].z)), 1.0);\n"',
             r'"    float bias = ModernClusterShadowReceiverBias(descriptor, cascadeIndex, normal, lightDir, depth) + tapBias;\n"',
+            r'"    float footprintBias = ModernClusterShadowFootprintBias(descriptor, cascadeIndex, normal, lightDir);\n"',
             r'"    float shadow = ModernClusterCompareProjected(descriptor, uv, depth, cascadeIndex, normal, lightDir, 0.0);\n"',
-            r'"        float tapBias = ModernClusterShadowFootprintBias(descriptor, cascadeIndex, normal, lightDir) * radius * 0.70710678;\n"',
+            r'"        float tapBias = footprintBias * filterRadius;\n"',
         ),
         "modern GL projected footprint bias",
     )
-    if modern.count("depth, cascadeIndex, normal, lightDir, tapBias);") != 4:
-        raise AssertionError("Every modern GL projected PCF tap must carry the footprint bias")
+    # The PCSS-lite blocker search applies it per probe too.
+    require(
+        modern,
+        "if (d < compareDepth - length(o) * searchBias) { blockerDepth += d; blockerCount += 1.0; }",
+        "modern GL PCSS blocker-search footprint bias",
+    )
+    for tap_index in range(1, 13):
+        require(
+            modern,
+            f"depth, cascadeIndex, normal, lightDir, length(o{tap_index}) * tapBias);",
+            f"modern GL projected tap o{tap_index} footprint bias",
+        )
 
 
 def point_receiver_settings(
@@ -4958,15 +5006,17 @@ def validate_exact_static_cache_and_admission_contract() -> None:
     )
     require_compact(
         cache_pass_kind,
-        """vLight->localShadowMapCasters == NULL
-            && vLight->localShadowMapDynamicCasters == NULL
-            && vLight->localTranslucentShadowMapCasters == NULL""",
+        """R_ShadowMapOwnershipsShareResidentDepth(
+                vLight->localShadowMapCasters != NULL,
+                vLight->localTranslucentShadowMapCasters != NULL,
+                vLight->localShadowMapDynamicCasters != NULL,
+                VK_ShadowMap_ComposesLocalCasters( vLight ) )""",
         "canonicalization across every local caster class",
     )
     require_order(
         cache_pass_kind,
         (
-            "vLight->localTranslucentShadowMapCasters == NULL",
+            "R_ShadowMapOwnershipsShareResidentDepth(",
             "return VK_SHADOW_RECEIVER_GLOBAL;",
             "return requestedPass;",
         ),
@@ -5329,10 +5379,8 @@ def validate_exact_static_cache_and_admission_contract() -> None:
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );""",
             "if ( haveCacheHits )",
             "haveCacheCopies && atlasLayout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL",
-            # a hit read where it lives moves nothing; the others are restored
-            "if ( pass.residentSet != VK_NULL_HANDLE ) {",
-            """VK_ShadowMap_TransitionProjectedEntry( cmd, cache,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );""",
+            # the hits that are not read where they live are restored first
+            "|| pass.residentSet != VK_NULL_HANDLE",
             "continue;",
             """VK_ShadowMap_TransitionProjectedEntry( cmd, cache,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );""",
@@ -5341,6 +5389,12 @@ def validate_exact_static_cache_and_admission_contract() -> None:
                 vkShadow.atlasImage,
                 pass.tileX, pass.tileY,
                 VK_ShadowMap_ProjectedBlockSize( light ) );""",
+            # a hit read where it lives moves nothing, and is settled after the copies
+            "|| pass.residentSet == VK_NULL_HANDLE",
+            "continue;",
+            """VK_ShadowMap_TransitionProjectedEntry( cmd,
+                vkShadow.projectedCache[ pass.cacheEntry ],
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );""",
             "VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL",
             "vkShadow.atlasLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;",
         ),
@@ -5872,11 +5926,11 @@ def validate_fail_closed_target_and_stencil_behavior() -> None:
     )
     require_compact(
         frontend,
-        """const bool suppressDynamicShadowVolume =
+        """const bool suppressRegeneratedShadowVolume =
             surfaceCanCastStencilShadowVolume && shadowLODAdmitted &&
             ( surfaceCanCastDedicatedShadowMap ||
                 surfaceCanCastTranslucentShadowMap ) &&
-            entityModelIsDynamic &&
+            volumeIsRegenerated &&
             !forcePointEmitterStencilGeneration &&
             R_ShadowMapLightWillUseShadowMaps( lightDef );""",
         "point-emitter volume probe before dynamic elision",
@@ -6196,17 +6250,20 @@ def validate_dynamic_caster_composition_contract() -> None:
         "static cache admission",
     )
     # Dynamics compose, so they must not defeat or invalidate the cache --
-    # except while the opt-in shared stream can own the view, whose sealed
-    # allowCacheReuse forbids a composed hit on both backends, and for a
-    # point cube that cannot compose, which regenerates instead.
+    # except for a point cube that cannot compose, which regenerates instead.
+    # The opt-in shared stream consumes the composed passes (allowCacheCompose),
+    # so its switch must not change the rule: while it did, classic Vulkan
+    # regenerated what it otherwise composed and its frame moved by a level.
     require_compact(
         cacheable,
         """const bool dynamicsDefeatCache = haveDynamicCasters
-            && ( r_rendererSharedWorldInteraction.GetBool()
-                || ( pointLight
-                    && !VK_ShadowMap_PointComposeAvailable() ) );""",
+            && pointLight && !VK_ShadowMap_PointComposeAvailable();""",
         "dynamics keep the cache unless the light cannot compose",
     )
+    if "r_rendererSharedWorldInteraction" in cacheable:
+        raise AssertionError(
+            "The shared interaction switch must not change classic static cacheability"
+        )
     require_compact(
         cacheable,
         """if ( dynamicsDefeatCache ) {
@@ -6236,9 +6293,7 @@ def validate_dynamic_caster_composition_contract() -> None:
         (
             """const bool pointRegenerates = pointLight
                 && !VK_ShadowMap_PointComposeAvailable();""",
-            """if ( haveDynamicCasters
-                && ( pointRegenerates
-                    || r_rendererSharedWorldInteraction.GetBool() ) ) {""",
+            "if ( haveDynamicCasters && pointRegenerates ) {",
             "if ( history != NULL && pointRegenerates",
         ),
         "the admission estimate predicts the same cacheability the walk decides",
@@ -6320,9 +6375,8 @@ def validate_dynamic_caster_composition_contract() -> None:
     )
     require_compact(
         available,
-        """return r_shadowMapPointCompose.GetBool()
-            && !r_rendererSharedWorldInteraction.GetBool();""",
-        "the sealed shared stream never composes a point cube",
+        "return r_shadowMapPointCompose.GetBool();",
+        "a point cube composes whether or not the sealed stream may own the view",
     )
     create_cube = braced_body(
         shadow_map,
@@ -6411,11 +6465,11 @@ def validate_dynamic_caster_composition_contract() -> None:
         render,
         (
             "if ( pointFreshCount > 0 || pointComposeCount > 0 ) {",
-            "const bool composePass = !classicCommit && pass.composeDynamic;",
+            "const bool composePass = pass.composeDynamic;",
             """if ( pass.cacheHit && !composePass ) {
                 continue;
             }""",
-            "const bool renderCube = !pass.cacheHit;",
+            "const bool renderCube = !pass.cacheHit && !pass.sharesStatic;",
             # the static chains alone are published ...
             """drawCubeFaces( *cube, VK_ATTACHMENT_LOAD_OP_CLEAR,
                 composePass ? VK_SHADOW_CHAINS_STATIC_ONLY
@@ -7837,7 +7891,7 @@ def validate_vulkan_receiver_scan_contract() -> None:
     create = braced_body(interaction, "void idInteraction::CreateInteraction(", "interaction creation")
     require_order(create, ("R_ShadowMapNoteEntityModel( entityDef, model );",
                            "buildModel = model;", "R_InvalidateShadowMapReceiverScan( lightDef );",
-                           "const bool suppressDynamicShadowVolume =", "buildModel = NULL;",
+                           "const bool suppressRegeneratedShadowVolume =", "buildModel = NULL;",
                            "R_InvalidateShadowMapReceiverScan( lightDef );", "MakeEmpty();"),
                   "interaction creation brackets its slots with the build model")
 
@@ -8117,11 +8171,15 @@ def validate_point_cache_parity_and_receiver_cost_contract() -> None:
     require_order(
         gl_pass_kind,
         (
-            "vLight->localShadowMapCasters != NULL",
-            "return passKind;",
-            "vLight->localShadowMapDynamicCasters == NULL",
-            "return SHADOWMAP_PASS_GLOBAL;",
-            "!RB_ShadowMapPointComposeAvailable()",
+            "const bool bakesDynamics = vLight->localShadowMapDynamicCasters != NULL",
+            "&& R_ClassifyShadowMapLight( vLight ).pointLight",
+            "&& !RB_ShadowMapPointComposeAvailable();",
+            "return R_ShadowMapOwnershipsShareResidentDepth(",
+            "vLight->localShadowMapCasters != NULL,",
+            "vLight->localTranslucentShadowMapCasters != NULL,",
+            "vLight->localShadowMapDynamicCasters != NULL,",
+            "!bakesDynamics )",
+            "? SHADOWMAP_PASS_GLOBAL : passKind;",
         ),
         "composed ownerships share one static entry",
     )
@@ -8153,10 +8211,51 @@ def validate_point_cache_parity_and_receiver_cost_contract() -> None:
         "live caster window")
     dynamic = braced_body(interaction, "static bool R_ShadowMapCasterIsDynamic(",
         "live caster classification")
-    require(dynamic, "const int recentFrame = tr.frameCount - R_ShadowMapDynamicCasterFrames();",
+    require(dynamic, "const int recentFrame = R_ShadowMapLiveCasterSinceFrame();",
         "live caster window spans a game tic at any display rate")
     require(read("src/renderer/RenderSystem.cpp"), "R_ShadowMapBeginFrame( Sys_Milliseconds() );",
         "live caster window follows rendered frames")
+    # The window is counted in frames from a frame time that drops at once on
+    # a fast frame, so it can grow by several frames between two frames. Taken
+    # afresh each frame as "this frame less the window", a caster that had
+    # just aged out was live again for a frame or two, and each visit took it
+    # out of its lights' static maps and put it back. The frame a change must
+    # postdate therefore never moves back.
+    if "tr.frameCount - R_ShadowMapDynamicCasterFrames()" in interaction:
+        raise AssertionError("The live caster window must be read through R_ShadowMapLiveCasterSinceFrame")
+    classification_cpp = read("src/renderer/ShadowMapClassification.cpp")
+    require_order(
+        braced_body(classification_cpp, "int R_ShadowMapAdvanceLiveCasterSince(", "live caster window latch"),
+        (
+            "const int fromWindow = frame - windowFrames;",
+            "if ( frame < updatedFrame ) {",
+            "return fromWindow;",
+            "return Max( liveSince, fromWindow );",
+        ),
+        "the oldest live frame never moves back, except when the frame counter starts again",
+    )
+    require_order(
+        braced_body(classification_cpp, "void R_ShadowMapBeginFrame(", "live caster window per frame"),
+        (
+            "R_ShadowMapUpdateFrameWindows( nowMsec );",
+            "shadowMapLiveCasterSinceFrame = R_ShadowMapAdvanceLiveCasterSince(",
+            "tr.frameCount, shadowMapDynamicCasterFrames );",
+            "shadowMapLiveCasterUpdatedFrame = tr.frameCount;",
+        ),
+        "the latch advances once a frame, from the window of that frame",
+    )
+    require_order(
+        braced_body(classification_cpp, "bool R_ShadowMapCachePolicySelfTest(", "cache policy self-test"),
+        (
+            "liveSince = R_ShadowMapAdvanceLiveCasterSince( liveSince, updated, frame, 15 );",
+            "if ( liveSince != 985 ) {",
+            "const int next = R_ShadowMapAdvanceLiveCasterSince( liveSince, updated, frame, 30 );",
+            "if ( next < liveSince || next != Max( 985, frame - 30 ) ) {",
+            "R_ShadowMapAdvanceLiveCasterSince( liveSince, updated, 1041, 4 ) != 1037",
+            "R_ShadowMapAdvanceLiveCasterSince( liveSince, updated, 10, 30 ) != -20",
+        ),
+        "the latch is exercised by the in-engine self-test",
+    )
     require(read("src/renderer/ModernShadowPlanner.cpp"), "R_ShadowMapCachePolicySelfTest()",
         "cache policy self-test runs with the shadow diagnostics")
 
@@ -8298,6 +8397,17 @@ def validate_stencil_elision_contract() -> None:
 
     # Dynamic volumes are left out by the entity's own model, and come back
     # when the light returns to stencil.
+    #
+    # So are the volumes under a light that moves. Every interaction of such
+    # a light is built again each time it moves, static geometry included,
+    # and under a shadow map none of those volumes is drawn: storage2's
+    # spinning alarm lights built 27 a frame. The mark is the engine's own
+    # (lightHasMoved, which also drops the light's prelight), not the moving
+    # window: a light that settles keeps the surfaces it was given, and they
+    # are built again with volumes if it returns to stencil.
+    #
+    # A static model under a light that never moved keeps its volumes. They
+    # are built once and make that light's stencil fallback instant.
     create = braced_body(interaction, "void idInteraction::CreateInteraction(", "interaction creation")
     require_order(
         create,
@@ -8306,12 +8416,25 @@ def validate_stencil_elision_contract() -> None:
             """const bool entityModelIsDynamic =
                 entityDef->parms.hModel != NULL &&
                 entityDef->parms.hModel->IsDynamicModel() != DM_STATIC;""",
-            "if ( suppressDynamicShadowVolume ) {",
+            """const bool volumeIsRegenerated =
+                entityModelIsDynamic || lightDef->lightHasMoved;""",
+            "if ( suppressRegeneratedShadowVolume ) {",
             "interactionGenerated = true;",
             "shadowVolumesSuppressed = true;",
             "} else if ( sint->shadowStencilEligible ) {",
         ),
-        "a dynamic model's volumes are left out while its light renders shadow maps",
+        "volumes that are regenerated with their interaction are left out while the light renders shadow maps",
+    )
+    update_light = braced_body(read("src/renderer/RenderWorld.cpp"), "void idRenderWorldLocal::UpdateLightDef(",
+                               "light update")
+    require_order(
+        update_light,
+        (
+            "light->lightHasMoved = true;",
+            "light->lastMovedFrameNum = tr.frameCount;",
+            "R_FreeLightDefDerivedData( light );",
+        ),
+        "a light that moves is marked before its interactions are freed",
     )
     if "model->IsDynamicModel() != DM_STATIC" in create:
         raise AssertionError(
@@ -8336,6 +8459,108 @@ def validate_stencil_elision_contract() -> None:
                             ("void idInteraction::FreeSurfaces(", "freed surfaces")):
         require(braced_body(interaction, marker, context), "shadowVolumesSuppressed",
                 f"{context} forgets suppressed volumes")
+
+    # A receiver pass with nothing to cast is not a map that failed. Both
+    # back ends used to send its light to the stencil fallback: OpenGL marked
+    # it, let it go after the clean views and marked it again, for as long as
+    # the light was in view; Vulkan marked it in every view and never let it
+    # go. Restoring volume generation helps only where stencil has a volume
+    # for that ownership: one linked in this view, or one the front end left
+    # out because the light was going to render shadow maps. The front end
+    # records the second per receiver ownership, and a noSelfShadow caster's
+    # volume counts for global receivers only.
+    require(read("src/renderer/tr_local.h"), "int\t\t\t\t\t\tshadowMapElidedStencilMask;",
+            "view lights carry the ownerships whose stencil volumes were left out")
+    require_order(
+        active,
+        (
+            """const bool volumeElidedForShadowMaps =
+                shadowTris != NULL &&
+                !shadowMapCasterOnly &&
+                R_ShadowMapLightWillUseShadowMaps( lightDef );""",
+            """const bool volumeSuppressedForShadowMaps =
+                shadowTris == NULL &&
+                shadowVolumesSuppressed &&
+                sint->shadowStencilEligible &&
+                !sint->shadowStencilUsesPrelight;""",
+            "if ( volumeElidedForShadowMaps || volumeSuppressedForShadowMaps ) {",
+            "vLight->shadowMapElidedStencilMask |= shadowReceiverMask;",
+        ),
+        "a volume left out for the map is recorded for the ownerships it would have shadowed",
+    )
+    empty_rule = braced_body(classification, "bool R_ShadowMapEmptyPassNeedsStencil(", "empty pass rule")
+    require_order(
+        empty_rule,
+        (
+            "if ( globalVolumesLinked ) {",
+            "return true;",
+            "if ( localVolumesLinked && ( receiverMask & SHADOWMAP_RECEIVER_MASK_GLOBAL ) != 0 ) {",
+            "return true;",
+            "return ( elidedStencilMask & receiverMask ) != 0;",
+        ),
+        "global volumes shadow both ownerships, local ones the global receivers only",
+    )
+    require_order(
+        braced_body(classification, "bool R_ShadowMapEmptyPassHasStencilVolumes(", "empty pass rule for a view light"),
+        (
+            "vLight->globalShadows != NULL, vLight->localShadows != NULL,",
+            "vLight->shadowMapElidedStencilMask, receiverMask );",
+        ),
+        "the rule reads the view light's linked chains and its left-out mask",
+    )
+    for case in ("R_ShadowMapEmptyPassNeedsStencil( false, false, 0, local )",
+                 "R_ShadowMapEmptyPassNeedsStencil( false, false, global, local )",
+                 "!R_ShadowMapEmptyPassNeedsStencil( false, false, global, global )",
+                 "!R_ShadowMapEmptyPassNeedsStencil( false, true, 0, global )",
+                 "R_ShadowMapEmptyPassNeedsStencil( true, false, 0, local )"):
+        require(selftest, case, "the self-test covers the empty pass rule")
+    gl_run = braced_body(read("src/renderer/draw_arb2.cpp"), "static void RB_ShadowMapRunPass(",
+                         "GL shadow-map pass")
+    require_order(
+        gl_run,
+        (
+            "if ( !haveOpaqueCasters && !haveStencilShadowSurfs && !haveTranslucentCasters ) {",
+            """if ( R_ShadowMapEmptyPassHasStencilVolumes( vLight,
+                    passKind == SHADOWMAP_PASS_LOCAL
+                        ? SHADOWMAP_RECEIVER_MASK_LOCAL
+                        : SHADOWMAP_RECEIVER_MASK_GLOBAL ) ) {""",
+            "RB_ShadowMapMarkStencilFallbackSticky( vLight );",
+            "RB_ShadowMapPassReport( vLight, passKind, pointLight, SHADOWMAP_PASS_RESULT_NO_SHADOW_SURFS,",
+            # a pass with volumes and no map caster is the stencil-only light, and stays held
+            "if ( !haveOpaqueCasters && !haveTranslucentCasters ) {",
+            "RB_ShadowMapMarkStencilFallbackSticky( vLight );",
+        ),
+        "OpenGL holds a light for an empty pass only where stencil has a volume",
+    )
+    empty_branch = gl_run[gl_run.index("if ( !haveOpaqueCasters && !haveStencilShadowSurfs && !haveTranslucentCasters ) {"):
+                          gl_run.index("if ( !haveOpaqueCasters && !haveTranslucentCasters ) {")]
+    if "R_ShadowMapLightWillUseShadowMaps" in empty_branch:
+        raise AssertionError("An empty pass must not be marked on the light's intent to map alone")
+    vk_shadow = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    require_order(
+        vk_shadow,
+        (
+            """const bool passStencilVolumes[ VK_SHADOW_RECEIVER_PASS_COUNT ] = {
+                R_ShadowMapEmptyPassHasStencilVolumes( vLight, SHADOWMAP_RECEIVER_MASK_LOCAL ),
+                R_ShadowMapEmptyPassHasStencilVolumes( vLight, SHADOWMAP_RECEIVER_MASK_GLOBAL )
+            };""",
+            """if ( ( passNeeded[ VK_SHADOW_RECEIVER_LOCAL ] && passStencilVolumes[ VK_SHADOW_RECEIVER_LOCAL ] )
+                    || ( passNeeded[ VK_SHADOW_RECEIVER_GLOBAL ] && passStencilVolumes[ VK_SHADOW_RECEIVER_GLOBAL ] ) ) {
+                VK_ShadowMap_MarkStencilFallbackSticky( vLight );
+            }""",
+        ),
+        "Vulkan holds a light without map casters only where stencil has a volume",
+    )
+    held = """if ( !passHasCasters[ passIndex ] ) {
+                if ( passStencilVolumes[ passIndex ] ) {
+                    VK_ShadowMap_MarkStencilFallbackSticky( vLight );
+                }
+                continue;
+            }"""
+    if compact(vk_shadow).count(compact(held)) != 2:
+        raise AssertionError("Both Vulkan ownership loops must hold an empty pass only where stencil has a volume")
+    if compact("if ( !passHasCasters[ passIndex ] ) { VK_ShadowMap_MarkStencilFallbackSticky( vLight );") in compact(vk_shadow):
+        raise AssertionError("A Vulkan pass without casters must not mark its light unconditionally")
 
     # The map and the stencil volume agree on which casters LOD admitted: a
     # surface with a volume is always a map caster. The map may hold more (a
@@ -9018,9 +9243,48 @@ def validate_static_signature_view_independence_contract() -> None:
             "hash = R_ShadowMapHashInt( hash, entityDef->lastModifiedFrameNum );",
             "hash = R_ShadowMapHashInt( hash, entityDef->dynamicModelFrameCount );",
             "hash = R_ShadowMapHashFloat( hash, entityDef->modelMatrix[i] );",
-            "vLight->shadowMapCasterSignature = hash;",
         ),
         "what a static caster contributes to the signature",
+    )
+    # Nor does it follow the order the casters arrive in. They reach a light
+    # in the order their entities are walked, R_SortViewEntities orders
+    # entities that share a model by the address the frame gave each view
+    # entity, and two such casters change places as the camera moves. Chained
+    # into one running hash, the same set of casters then had another
+    # signature and every map of a still light rendered again. Each caster is
+    # hashed from the same start, its bits are spread, and the results are
+    # added: a sum is the same in any order.
+    require_order(
+        record,
+        (
+            "int hash = static_cast<int>( 2166136261u );",
+            "hash = R_ShadowMapHashInt( hash, entityDef != NULL ? entityDef->index : -1 );",
+            "hash = R_ShadowMapHashFloat( hash, entityDef->modelMatrix[i] );",
+            "unsigned int mixed = static_cast<unsigned int>( hash );",
+            "mixed *= 0x85ebca6bu;",
+            "mixed *= 0xc2b2ae35u;",
+            "vLight->shadowMapCasterSignature = static_cast<int>(",
+            "static_cast<unsigned int>( vLight->shadowMapCasterSignature ) + mixed );",
+        ),
+        "the static signature is a sum of per-caster hashes",
+    )
+    chained = [
+        line.strip() for line in record.splitlines()
+        if "shadowMapCasterSignature" in line and "+ mixed" not in line
+        and "vLight->shadowMapCasterSignature = static_cast<int>(" not in line
+        and not line.strip().startswith("//")
+    ]
+    if chained:
+        raise AssertionError(
+            "A caster's hash must not start from the light's running signature: " + chained[0]
+        )
+    require_order(
+        read("src/renderer/tr_light.cpp"),
+        (
+            "const size_t leftEntityKey = reinterpret_cast<size_t>( left );",
+            "qsort( sortedEntities, count, sizeof( sortedEntities[0] ), R_QsortViewEntitiesByModel );",
+        ),
+        "the entity order the signature must not depend on",
     )
     hashed = [line for line in record.splitlines() if "Hash" in line and "expandedCaster" in line]
     if hashed:
@@ -9143,6 +9407,216 @@ def validate_receiver_stock_lighting_parity_contract() -> None:
             ": vec3(bumpSample.a, bumpSample.g, bumpSample.b) * 2.0 - 1.0;",
             f"{name}: the stock normal as stored",
         )
+
+
+def validate_shared_static_cube_contract() -> None:
+    """One resident entry holds the static depth of both ownerships of a light.
+
+    The LOCAL map of a light takes its global casters, the GLOBAL map its local
+    (noSelfShadow) ones as well. A resident cache entry holds static depth only:
+    live casters are drawn over a copy of it in each view. So the two entries
+    are the same whenever no local caster is static, which is the ordinary case
+    of a character standing in a light. OpenGL has always kept one entry then.
+    Vulkan kept one for each ownership, rendered both when the static depth
+    changed, and gave the LOCAL entry another name each time a character walked
+    into the light or out of it.
+
+    The rule is one function for both back ends. On Vulkan the GLOBAL pass of
+    such a light owns no entry: it names the LOCAL pass's, which that pass
+    restores, reads in place or publishes in the same view, and composes over a
+    copy: in a scratch cube for a point light, in an atlas block for a projected
+    one.
+    """
+    classification = read("src/renderer/ShadowMapClassification.cpp")
+    rule = braced_body(classification, "bool R_ShadowMapOwnershipsShareResidentDepth(", "shared resident depth rule")
+    require_order(
+        rule,
+        (
+            "if ( localStaticCasters || localTranslucentCasters ) {",
+            "return false;",
+            "return !localDynamicCasters || dynamicsComposed;",
+        ),
+        "the ownerships share an entry while no local caster is drawn into it",
+    )
+    selftest = braced_body(classification, "bool R_ShadowMapCachePolicySelfTest(", "shared policy self-test")
+    for case in ("R_ShadowMapOwnershipsShareResidentDepth( false, false, false, false )",
+                 "R_ShadowMapOwnershipsShareResidentDepth( false, false, true, true )",
+                 "!R_ShadowMapOwnershipsShareResidentDepth( false, false, true, false )",
+                 "!R_ShadowMapOwnershipsShareResidentDepth( true, false, false, true )",
+                 "!R_ShadowMapOwnershipsShareResidentDepth( false, true, false, true )"):
+        require(selftest, case, "the self-test covers the shared resident depth rule")
+
+    header = read("src/renderer/Vulkan/vk_ShadowMap.h")
+    require(header, "bool\t\t\t\tsharesStatic;", "a pass can name another pass's resident cube")
+    vk = read("src/renderer/Vulkan/vk_ShadowMap.cpp")
+    composes = braced_body(vk, "static bool VK_ShadowMap_ComposesLocalCasters(", "which lights share a cube")
+    require_order(
+        composes,
+        (
+            "vLight->localShadowMapDynamicCasters == NULL ) {",
+            "return false;",
+            "return !R_ClassifyShadowMapLight( vLight ).pointLight",
+            "|| VK_ShadowMap_PointComposeAvailable();",
+        ),
+        "a light that composes its live local casters: a projected one always, a point one while it may",
+    )
+    share = braced_body(vk, "static bool VK_ShadowMap_SharePointStaticCube(", "sharing the LOCAL cube")
+    require_order(
+        share,
+        (
+            "light.passes[ VK_SHADOW_RECEIVER_LOCAL ];",
+            "!VK_ShadowMap_ComposesLocalCasters( light.vLight )",
+            # no static or translucent local caster: both ownerships have the one identity
+            "VK_SHADOW_RECEIVER_LOCAL ) != VK_SHADOW_RECEIVER_GLOBAL",
+            "!owner.valid",
+            "owner.resourcePass != VK_SHADOW_RECEIVER_LOCAL",
+            "!( owner.cacheHit || owner.cacheUpdate )",
+            "light.tileSize != vkShadow.pointCubeFaceSize",
+            "return false;",
+            "pass.resourcePass = VK_SHADOW_RECEIVER_GLOBAL;",
+            "pass.sharesStatic = true;",
+            "pass.cacheHit = owner.cacheHit;",
+            "pass.cacheEntry = owner.cacheEntry;",
+            "pass.cacheSignature = owner.cacheSignature;",
+            "if ( !VK_ShadowMap_ClaimPointComposeTarget( pass, frameSlot ) ) {",
+            "return false;",
+            "return true;",
+        ),
+        "the GLOBAL pass names the LOCAL pass's cube and takes a scratch cube for its copy",
+    )
+    if "cacheUpdate = true" in share or "VK_ShadowMap_AllocPointCacheEntry" in share:
+        raise AssertionError("A pass that shares a cube must not publish or allocate one")
+    # the LOCAL pass is prepared first, then aliased, then shared, and only then scheduled alone
+    require_order(
+        vk,
+        (
+            "VK_ShadowMap_AliasPass( entry, receiverPass, VK_SHADOW_RECEIVER_LOCAL );",
+            """if ( receiverPass == VK_SHADOW_RECEIVER_GLOBAL
+                    && VK_ShadowMap_SharePointStaticCube( entry ) ) {
+                continue;
+            }""",
+            """VK_ShadowMap_SchedulePass(
+                            vLight, viewDef, receiverPass,
+                            stencilFallbackAvailable,
+                            true, pointSize, 1, 1 );""",
+        ),
+        "a point light's GLOBAL pass shares before it is scheduled on its own",
+    )
+    # A projected light does the same with its atlas block for the copy.
+    share_tile = braced_body(vk, "static bool VK_ShadowMap_ShareProjectedStaticTile(", "sharing the LOCAL tile")
+    require_order(
+        share_tile,
+        (
+            "light.passes[ VK_SHADOW_RECEIVER_LOCAL ];",
+            "!VK_ShadowMap_ComposesLocalCasters( light.vLight )",
+            "VK_SHADOW_RECEIVER_LOCAL ) != VK_SHADOW_RECEIVER_GLOBAL",
+            "!owner.valid",
+            "!( owner.cacheHit || owner.cacheUpdate )",
+            "return false;",
+            "if ( !VK_ShadowMap_AllocTileBlock(",
+            "return false;",
+            "pass.resourcePass = VK_SHADOW_RECEIVER_GLOBAL;",
+            "pass.sharesStatic = true;",
+            "pass.cacheHit = owner.cacheHit;",
+            "pass.cacheEntry = owner.cacheEntry;",
+            "pass.composeDynamic = true;",
+            "VK_ShadowMap_SetProjectedPassRects( light, pass, tileX, tileY,",
+            "light.invAtlasSize[ 0 ] );",
+            "return true;",
+        ),
+        "the GLOBAL pass names the LOCAL pass's tile and takes an atlas block for its copy",
+    )
+    if "cacheUpdate = true" in share_tile or "residentSet =" in share_tile:
+        raise AssertionError("A pass that shares a tile neither publishes one nor reads one in place")
+    require_order(
+        vk,
+        (
+            """if ( receiverPass == VK_SHADOW_RECEIVER_GLOBAL
+                    && VK_ShadowMap_ShareProjectedStaticTile( entry ) ) {
+                continue;
+            }""",
+            """VK_ShadowMap_SchedulePass(
+                            vLight, viewDef, receiverPass,
+                            stencilFallbackAvailable, false,""",
+        ),
+        "a projected light's GLOBAL pass shares before it is scheduled on its own",
+    )
+    render_atlas = braced_body(vk, "bool VK_ShadowMap_RenderAtlas(", "Vulkan shadow map recording")
+    require_order(
+        render_atlas,
+        (
+            # counted as a composed pass, not a fresh one, in a view where the LOCAL pass publishes
+            "if ( pass.sharesStatic ) {",
+            "if ( !owner.valid || !owner.cacheUpdate",
+            "|| owner.cacheEntry != pass.cacheEntry",
+            "projectedComposeCount++;",
+            "projectedFreshCount++;",
+            # the fresh scope neither clears nor renders its block
+            "if ( !pass.valid || pass.cacheHit || pass.sharesStatic || pass.resourcePass != p ) continue;",
+            """if ( !pass.valid || pass.cacheHit || pass.sharesStatic
+                    || pass.resourcePass
+                        != receiverPass ) {
+                continue;
+            }""",
+            # it is restored by a copy, from an entry that was resident or was published above
+            """if ( !pass.valid
+                    || !( pass.cacheHit || pass.sharesStatic )
+                    || pass.resourcePass
+                        != (vkShadowReceiverPass_t)passIndex""",
+            "haveCacheCopies = true;",
+            "VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL );",
+            "VK_ShadowMap_CopyDepthTile( cmd,",
+            "vkShadow.atlasImage,",
+            "pass.tileX, pass.tileY,",
+            """if ( !pass.valid
+                    || !( pass.cacheHit || pass.sharesStatic )
+                    || pass.residentSet != VK_NULL_HANDLE""",
+            "VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL );",
+            "cache.image, 0, 0,",
+            # and only then are the entries read in place given the layout their receivers sample
+            """if ( !pass.valid || !pass.cacheHit
+                    || pass.residentSet == VK_NULL_HANDLE""",
+            "VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL );",
+            "GL SHADOWMAP_RENDER_COMPOSE_DYNAMIC (draw_arb2.cpp): every cached",
+        ),
+        "a sharing projected pass is restored before its light's in-place entry is settled",
+    )
+    # It renders no static face: the LOCAL pass left the cube rendered or resident.
+    require(vk, "const bool renderCube = !pass.cacheHit && !pass.sharesStatic;",
+            "a sharing pass does not render the resident cube again")
+    invalidate = braced_body(vk, "static void VK_ShadowMap_InvalidatePassResource(", "pass invalidation")
+    require_order(
+        invalidate,
+        (
+            # its own failure leaves the owner's cube alone
+            "if ( !owner.sharesStatic && owner.cacheEntry >= 0",
+            "VK_ShadowMap_ClearPointEntryMetadata(",
+            "if ( pass.valid && pass.resourcePass == resourcePass ) {",
+            # and the owner's failure takes it along
+            """if ( pass.valid && pass.sharesStatic
+                    && resourcePass == VK_SHADOW_RECEIVER_LOCAL ) {
+                pass.valid = false;
+            }""",
+        ),
+        "a sharing pass neither clears the owner's entry nor outlives it",
+    )
+    estimate = braced_body(vk, "static bool VK_ShadowMap_EstimateUpdateCost(", "update cost estimate")
+    require_order(
+        estimate,
+        (
+            "&& !VK_ShadowMap_HasLocalCasters( vLight )",
+            """if ( receiverPass == VK_SHADOW_RECEIVER_GLOBAL && cacheable
+                    && VK_ShadowMap_ComposesLocalCasters( vLight )""",
+            "continue;",
+            "cost++;",
+        ),
+        "a shared GLOBAL map is not counted as a second render",
+    )
+    for label in ('"reuse+compose+shared"', '"shared+compose"'):
+        require(vk, label, "the report names a pass that shares the LOCAL cube")
+    movers = read("tools/tests/renderer_shadow_mapping_movers.py")
+    require(movers, '("reuse", "publish", "scratch", "alias", "shared")',
+            "the mover scenarios accept a shared GLOBAL pass as mapped")
 
 
 def validate_moving_light_cache_bypass_contract() -> None:
@@ -9484,12 +9958,16 @@ def validate_resident_projected_sampling_contract() -> None:
         "static VkDescriptorSet VK_ShadowMap_ProjectedEntryResidentSet(",
         "the resident tile's descriptor set for this frame",
     )
+    if "vkClassicShadowTransaction.active" in resident_set:
+        raise AssertionError(
+            "The sealed shared stream must read an exact projected hit in place, as classic does"
+        )
     require_order(
         resident_set,
         (
             "!r_vkShadowSampleResident.GetBool()",
-            # the sealed stream and the overlay address the atlas
-            "vkClassicShadowTransaction.active",
+            # the overlay addresses the atlas; the sealed stream reads the
+            # resident tile in place as the classic receivers do
             "r_shadowMapDebugOverlay.GetBool()",
             "entry.image == VK_NULL_HANDLE",
             "entry.sampleView == VK_NULL_HANDLE",
@@ -9536,14 +10014,12 @@ def validate_resident_projected_sampling_contract() -> None:
             "if ( residentSet == VK_NULL_HANDLE",
             "&& !VK_ShadowMap_AllocTileBlock( blockSize, tileX, tileY ) ) {",
             "pass.composeDynamic = ( pass.cacheHit || pass.cacheUpdate )",
-            "pass.tileX = tileX;",
-            "pass.tileY = tileY;",
             "pass.residentSet = residentSet;",
             "vkShadow.residentPasses++;",
             # the rects address the image that is sampled
-            "const float invAtlas = residentSet != VK_NULL_HANDLE",
-            "? 1.0f / (float)blockSize : light.invAtlasSize[ 0 ];",
-            "pass.invMapSize = invAtlas;",
+            "VK_ShadowMap_SetProjectedPassRects( light, pass, tileX, tileY,",
+            "residentSet != VK_NULL_HANDLE",
+            "? 1.0f / (float)blockSize : light.invAtlasSize[ 0 ] );",
         ),
         "an in-place pass holds no atlas block and addresses its own image",
     )
@@ -9685,6 +10161,7 @@ def main() -> None:
     validate_depth_only_point_cube_contract()
     validate_static_cutout_caster_contract()
     validate_static_signature_view_independence_contract()
+    validate_shared_static_cube_contract()
     validate_moving_light_cache_bypass_contract()
     validate_stencil_fallback_release_contract()
     validate_receiver_stock_lighting_parity_contract()

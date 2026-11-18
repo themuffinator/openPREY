@@ -41,6 +41,7 @@
 #include "vk_ExecutorHooks.h"
 
 void VK_PostProcess_ApplyBackBuffer( void );
+bool VK_QueueSavePreviewFromImage( VkCommandBuffer cmd, VkImage image, VkFormat format, int width, int height );
 
 // The window's back-buffer passes for the VR target the frame is leaving.
 static void VK_VR_FinishTarget( void ) {
@@ -622,6 +623,13 @@ bool RB_VR_PresentFrame( void ) {
 		}
 	}
 
+	// a checkpoint's preview is the left eye, whatever the mirror shows; a
+	// frame without one (a menu) leaves it to the window's readback
+	if ( used[1] ) {
+		const vkVRTarget_t &left = vkVRTargets[1];
+		VK_QueueSavePreviewFromImage( cmd, left.color, left.format, left.width, left.height );
+	}
+
 	const vkVRTarget_t *mirror = NULL;
 	if ( tr.vrFrame.mirror == RENDER_VR_MIRROR_EYE && used[1] ) {
 		mirror = &vkVRTargets[1];
@@ -660,6 +668,10 @@ idRenderTexture *R_GetDefaultRenderTarget( void ) {
 }
 
 unsigned int R_DefaultFramebufferHandle( void ) {
+	return 0;
+}
+
+int R_DefaultRenderTargetSamples( void ) {
 	return 0;
 }
 

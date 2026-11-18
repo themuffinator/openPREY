@@ -46,6 +46,11 @@ cache (sixteen at most) against forty cubes in view.
 | **Vulkan copied every reused projected map into the view's atlas**, each view, only to sample it there. The copy serves a view that has moving casters to draw over the map and nothing else. With static cutouts it was the largest shadow phase left in convoy2's start view: 0.54 ms for eleven maps, ten of which had nothing live. | **Fixed (Vulkan).** A reused map with no moving caster is read where it lives. See "Resident projected tiles on Vulkan" below. |
 | **A light's cached maps were rendered again whenever a static caster's stencil volume entered or left the view.** The signature that names the cached depth hashed, for each static caster, whether the view also saw that caster's volume. It flips as the player walks past, and the depth does not change. On a walk through hub2 one light with 77 static casters re-rendered both of its cubes nine times in five seconds for it. | **Fixed, both backends.** The signature no longer carries that bit; about half of the maps rendered fresh on a walk were for it. See "Walking" below. |
 | **Which still casters a map held followed the camera too.** The shadow LOD admitted an entity's shadow within 768 units and dropped it beyond, in the static map as anywhere, and a model's first snapshot counted as the model moving for a quarter of a second. Each change rendered the light's maps again. | **Fixed, both backends.** A static caster of a still light is in the map at any distance, and a first snapshot is not motion. See "Static membership" below. |
+| **A still light's maps were rendered again when two of its casters changed places in the list.** The signature chained every static caster into one running hash, in the order the casters reached the light. That order follows the view: entities are sorted by model and, within one model, by where the frame's memory happened to put them, so two door frames or two crates of one model change places as the camera moves. The casters and the depth they write are the same, and the signature was another. In the airdefense1 arena every map rendered fresh on two short walks was for this: 8 and 8 on Vulkan, 8 and 20 on OpenGL. | **Fixed, both backends.** Each caster is hashed by itself and the hashes are added up. See "Caster order and the live window" below. |
+| **A caster that had just come to rest could count as moving again.** A caster is live while it has changed within the frames of a quarter second, and that number of frames comes from a frame time that drops at once on a fast frame. When the frame rate rose the window grew by several frames in one step, and a door that had left it a frame earlier was inside it again: out of its lights' static maps and back in, each a change of signature. | **Fixed, both backends.** The oldest frame that still counts as recent never moves back. See "Caster order and the live window" below. |
+| **On Vulkan a light with a character in it kept two resident maps of the same static depth.** A cached map holds static depth, and a light's two receiver ownerships differ only in the `noSelfShadow` casters, which in the ordinary case are the characters and are live. OpenGL kept one cache entry for both; Vulkan kept one each, rendered both when the static depth changed, and rendered the LOCAL one again each time a character walked into the light or out of it. | **Fixed (Vulkan).** The GLOBAL pass composes over a copy of the LOCAL pass's resident map. Two or three cubes fewer where a point light's local casters are only characters, and half the resident tiles of hub2's and medlabs's spotlights. See "One static cube for both ownerships" and the section after it below. |
+| **A light that moves built the stencil volumes of everything it touches, every frame, and drew none of them.** All of a moving light's interactions are built again each time it moves. A dynamic model's volumes were already left out under a mapped light; a static model's were not, on the reasoning that they are built once. Under a moving light they are built every frame: 27 a view in storage2's alarm room, a quarter of the time that view spent building interactions. | **Fixed, both backends.** Volumes under a light that has moved are left out with the dynamic models'. See "Static volumes under mapped lights" below. |
+| Under a light that has never moved, the stencil volumes of static models are built although the light renders shadow maps: about 7 ms and 4 MiB for all of hub2, 5 to 10 parts in a hundred of the work of building interactions. | **By design.** They are built once and make the light's stencil fallback instant; without them every return to stencil would build the light's interactions again whole. See "Static volumes under mapped lights" below. |
 | **GL timer queries ran in every shadow phase of every light**, whether or not anything read them. A view with more phases than the 64 query slots polled all 64 unfinished queries for each further phase. | **Fixed.** Queries are issued only while `r_shadowMapReport` or `r_shadowMapDebugOverlay` is on. This alone was about half of the OpenGL CPU frame in hub2. |
 | **The point receiver's per-texel path was the common path.** Each of the nine taps compared four texels against their own point on the receiver plane, with a cube-face selection each: 36 comparisons that read a four-by-four block of texels. | **Fixed, both backends.** The default kernel (nine fixed taps, one texel radius, hardware comparison) is one pass over the sixteen texels with the same weights, or nine plain bilinear lookups where the bias covers the block. Other tap counts, radii and the rotated mode keep the tap-by-tap path. 1.6 to 2.6 ms of GPU in hub2 against the old path, in two launches. |
 | **Receivers filtered shadows for fragments the light does not reach** (outside the falloff, turned away). | **Fixed, both backends**, in the stock-material path. The PBR variants still sample first. |
@@ -76,7 +81,10 @@ cache (sixteen at most) against forty cubes in view.
 |---|---|
 | **Quality and Ultra give the projected atlas four cells** (2048 cells in 4096, 4096 in 8192) while Enhanced has sixteen. A light with local casters takes two. OpenGL re-renders the overflow every view; Vulkan marks the light for stencil permanently and can draw it unshadowed for a frame. convoy2's start view does this: up to four projected lights, five lights sent to stencil for good and one drawn unshadowed. | **Fixed, both backends.** A tile size per light, assigned per view. See "Atlas tile sizes" below. No preset changed. |
 | Vulkan: cascades in an 8192 atlas always fail (one CSM block is the whole atlas). | **Open**; no preset uses it. |
+| On Vulkan a crowded view's spotlights are cut down as if every map needed an atlas block, though maps read where they live need none. | **By design.** The fit cuts lights in one stock view of fifteen, to half size and never less, and at sixteen poses there the picture is the same as with every light at full size: the cut lamps cast no shadow in view. Following the cache instead would make the size, which is part of the cache key, depend on what is cached. See "The tile-size fit and maps read in place" below. |
+| OpenGL's projected cache is its atlas, four full maps at Quality and Ultra, where Vulkan keeps eight resident beside its atlas. A view crowded with spotlights evicts on OpenGL what Vulkan keeps: turning in convoy2's start view renders 45 maps fresh against 19. | **By design.** The atlas fills in one stock view of ten, and there the difference is a hundredth of a millisecond a view; eight maps would take a second atlas, 64 MiB at Quality and 256 MiB at Ultra. See "OpenGL's projected cache and its atlas" below. |
 | The stencil-fallback flag on a light was never cleared: one failed map pass cost the light its volume elision for the rest of the level. | **Fixed, both backends.** A light leaves the fallback after 240 views without another failure. See "Leaving the stencil fallback" below. |
+| **A light with nothing to cast was sent to the stencil fallback.** A receiver pass that found no caster for its map was treated as a map that had failed. OpenGL marked the light, released it after 240 clean views and marked it again, for as long as it was in view; Vulkan marked it in every view and never released it. Such a light has nothing for stencil to draw either. Found by the openD3 session on Doom 3's hell1; no stock Quake 4 view tried shows it. | **Fixed, both backends.** A pass with nothing to cast holds its light only where stencil has a volume for it. See "A pass with nothing to cast" below. |
 | OpenGL point cubes carry a colour cube the default receiver never samples: half their memory. The opt-in modern executor still reads it. | **Fixed.** Cubes are depth only while nothing samples the colour. See "Depth-only point cubes on OpenGL" below. At 512 the cache holds 64 cubes in 384 MiB, as on Vulkan; it held 42 in 504 MiB. |
 | Vulkan hub2: one light (`lights/squarelight1`) logs "required shadow resource unavailable" once and falls back; OpenGL maps it. | **Open**, present before this round. |
 | Vulkan's scratch cube pool only grows. A view takes a scratch cube for each uncached or composed point pass, up to 512 of them, and none is released until the cube size changes. A noclip walk out of the airdefense1 arena into the void, from where every area is visible, mapped 289 point lights in one view and left 2.0 GB resident at Quality's 512 faces. The cache has a memory bound; this pool had none. | **Fixed (Vulkan).** The pool has the cache's memory figure again as its ceiling, and gives back what recent views did not need. See "Scratch cube pool" below. |
@@ -1109,7 +1117,19 @@ and the pictures agree:
 
 OpenGL and Vulkan differ from each other in 5 to 14 pixels of these captures.
 The one or two levels on OpenGL do not follow the filter (the same with one
-tap) or the translucent receiver setting; their cause was not found.
+tap) or the translucent receiver setting.
+
+**Corrected on 17 November: none of those pixels is PBR.** The counts above
+cover the whole frame outside the translucent station, and the laboratory
+room around the stations is a classic material. Captured again with an
+ownership mask (`r_pbrDebug 7`, one pixel eroded at the edges), the 175,000
+pixels of the PBR stations are never brighter mapped than unshadowed, with
+the projector mapped or the point light too; every brighter pixel is on the
+room. That is the stock-path difference recorded above (the ARB program's
+normalization cube, 0.996 of unit length), by design. The same room drawn
+with `r_pbrMaterials 0` shows it on the stations as well, and the modern
+OpenGL path, which draws the room with exact vectors, shows no pixel brighter
+anywhere (see "Modern OpenGL receivers and PCSS-lite" below).
 
 One station is lighter whenever shadows are on, on both renderers and under
 stencil as much as under maps: the translucent one. That is the ownership
@@ -1125,6 +1145,559 @@ touched files. The enhanced-material branch of the receivers reads the same
 as the classic shader's; the PBR branch was not compared with its unshadowed
 counterpart.
 
+### Modern OpenGL receivers and PCSS-lite
+
+Added on 17 November. The modern OpenGL path (the opt-in modern visible frame,
+`ModernGLShaderLibrary.cpp`) filtered projected shadows with a fixed five-tap
+box at the contact radius: no blocker search, no rotation, and a kernel unlike
+the classic shader's and Vulkan's. Since the October fix for grazing-wall acne
+it had used the contact radius because the PCSS-lite search bound, as a fixed
+kernel, shadowed walls nothing occludes.
+
+- **The shadow descriptor carries the projected filter.** One `vec4` appended
+  to the GPU record (`filterParams`: contact radius, taps + 32 x mode, PCSS
+  search and maximum radii, both zero unless the mode is 2), filled from
+  `R_ShadowMapProjectedFilterSettings` like the other two receivers. 64 UBO
+  records are now exactly 32 KiB.
+- **The modern receiver runs the classic kernel.** Rotation by a hash of the
+  texel within the tile, the 1/5/9/13-tap sets with the balanced five-tap
+  ring, the per-tap footprint bias, and under PCSS-lite the blocker search
+  (`ModernClusterProjectedPCSSRadius`, the classic `ProjectedPCSSRadius` with
+  its footprint bias per probe). The atlas guard and the receiver-plane bias
+  use the effective radius, as the classic shader does. `pcfKernel` stays the
+  contact radius.
+
+PBR laboratory, overview camera, OpenGL, every light mapped. Widening the PCSS
+radii to 16 texels against the defaults (4 and 8) is the control: a receiver
+without a blocker search cannot respond to it.
+
+| Pixels changed by more than two levels | Modern, before | Modern, after | Classic receivers |
+|---|---:|---:|---:|
+| PCSS radii widened to 16 | 0 | 9,601 | 9,813 |
+| PCF radius widened to 8 (mode 1) | 17,192 | 29,315 | 22,129 |
+
+The widened penumbrae fall on the same pixels on both paths (84% overlap) and
+change them in the same direction in 99.7% of them. At the default radii the
+modern picture with PCSS-lite and with plain PCF differ in 52 pixels; the
+kernel itself moved 7,700 pixels against the old box. Four room patches no
+station can shadow are identical to the unshadowed capture on the modern path
+before and after (mean and maximum difference 0).
+
+**A laboratory gap found on the way.** Under the laboratory's settings the
+modern path did not own any shadowed frame before or after this change ("PBR
+did not own the visible frame"): the first-run preset leaves point lights on
+stencil, and a view with a stencil-shadow pass falls back to the classic path
+(blocker `pass=stencilShadow`, reason `missingVertexBuffer`). The figures above
+set `r_shadowMapPointLights 1`. The laboratory's modern shadow controls need
+the same setting to test the modern receivers at all.
+Vulkan was not rebuilt or captured for this change; its receivers are
+untouched.
+
+### Caster order and the live window
+
+Added on 11 November, for the open item "the world's own geometry joins and
+leaves a light's casters area by area as the player moves", which had been
+seen on hub2's two moving lights and not measured on still ones. A temporary
+front-end diagnostic compared, for every light, the static casters of one
+main view with those of the next, and wherever the signature of a light that
+holds still had changed it named the casters gained, lost or altered and the
+rule that had turned a lost one away.
+
+The walks themselves gave the first answer before the diagnostic had named
+anything: lights whose signature changed with no caster gained or lost.
+
+- **The same casters in another order.** The signature was one running hash:
+  each static caster was hashed on top of the result of the one before it.
+  Casters reach a light in the order the view's entities are walked, and
+  `R_SortViewEntities` orders them by model and, within a model, by the
+  address the frame's allocator gave each view entity. Two entities that
+  share a model therefore change places as the camera moves and others enter
+  the view. Nothing in a map depends on the order its casters are drawn in.
+  Each caster is now hashed from the same start, its bits are spread, and the
+  results are added (`R_RecordShadowMapCaster`); a sum is the same in any
+  order. The cache keys carry the static caster count beside the signature,
+  so nothing reads a zero sum as "no caster".
+
+With the sum in place the diagnostic reported sixteen changes of signature on
+still lights over hub2's -y walk, 300 steps. They were of three kinds, and
+only the last is the item as it was written.
+
+- **A caster at rest counted as moving again.** `R_ShadowMapCasterIsDynamic`
+  asked whether the caster had changed since "this frame less the window",
+  and the window is a quarter second's worth of frames at the smoothed frame
+  time, which follows a fast frame at once and a slow one gradually. One
+  fast frame lengthened the window by several frames, so the limit moved
+  back: a door static at frame 953 was live at 955 and static at 956, in
+  the maps of three lights. Six of the sixteen changes. The limit is now
+  kept from frame to frame and only advances
+  (`R_ShadowMapLiveCasterSinceFrame`); a window that shrinks is followed at
+  once, and a frame counter that starts again starts the limit again.
+- **Doors that move.** A door is live from the frame it starts to open until
+  a quarter second after it stops, and the static map is rendered without it
+  and then with it. Nine of the sixteen: the two leaves of one lift door,
+  under three lights. That is the composition rule doing its work: the
+  door's shadow is drawn over the stored map each frame while it moves.
+- **An area joining.** Once, a still light gained fifteen casters in a single
+  view when that door opened: surfaces of the world model of the area behind
+  it, and two light fixtures there. A caster in an area that no chain of
+  open portals connects
+  to the view is left out of the map (`R_ShadowMapEntityTouchesConnectedArea`):
+  nothing in that area can be seen, and a light by a door would otherwise
+  draw the room behind it into every map. When the door opens the room can
+  be seen and its casters are needed. Apart from that door, no still light
+  on the walk gained or lost a surface of the world.
+
+So the world does not join a still light's casters area by area as the player
+walks. It joins when a door connects an area, the map needs it then, and it
+costs one render of that light's maps at that moment. Not changed.
+
+Maps rendered fresh, Quality, the old signature against the sum in separate
+launches of one build, with the live window as it was:
+
+| Walk | Vulkan | OpenGL | Views that rendered any, Vulkan | OpenGL |
+|---|---:|---:|---:|---:|
+| hub2, +x, 300 steps | 18 to 18 | 15 to 15 | 2 to 2 | 5 to 5 |
+| hub2, -y, 300 steps | 63 to 57 | 37 to 31 | 20 to 19 | 15 to 14 |
+| airdefense1 arena, -x, 120 steps | 8 to 0 | 8 to 0 | 2 to 0 | 2 to 0 |
+| airdefense1 arena, +y, 120 steps | 8 to 0 | 20 to 0 | 2 to 0 | 5 to 0 |
+
+The kept limit took the diagnostic's count on hub2's -y walk from sixteen
+changes to ten. It does not show in fresh maps on these walks. Vulkan's
+counts did not move, most likely because its cache still held the map of the
+signature a light came back to. OpenGL's hub2 +x walk gave 15, 15, 14 and 16
+in four launches (the old signature, the sum, the sum with the limit, and
+the final build), which is the spread of that walk and not a difference:
+OpenGL's walks are not the same views from launch to launch. The change is
+kept for what it removes, a caster at rest classed as moving, and not for a
+figure. What is left on the two hub2 walks is first renders of lights
+entering the view, the doors, and the one area.
+
+The final build, one launch of each walk: Vulkan 18, 57, 0 and 0; OpenGL 16,
+31, 0 and 0.
+
+Nothing here changes a picture. A map is rendered again less often; what it
+holds is what it held.
+
+Checked for this change, on the final build with the diagnostic and its
+switches removed: the walks above; the fourteen scenarios on both back ends;
+the continuous-motion qualification, eight cases; the in-engine self-tests on
+both renderers, which now exercise the kept limit; and the static tests that
+read the touched files. The qualification's OpenGL image case failed once, at
+a pose where two captures of the same frozen frame differed from each other,
+while other tests were compiling on the machine; run alone it passed. Of 72
+static tests 64 pass, four need arguments and two were stopped at four
+minutes. Two fail for reasons outside this change: `validation_hardening.py`
+(a test added on 11 November is not wired into the push workflow) and
+`ui_choice_scroll_runtime.py` (its native extract links against libraries of
+another build type). No frame-time figure, for the reason given under
+"Walking".
+
+### Static volumes under mapped lights
+
+Added on 11 November, for the open item "static-world volumes are still built
+once for every mapped light and kept for the fallback". A temporary counter
+timed every stencil volume built for a static model under a light that was
+going to render shadow maps, and a switch left those volumes out the way a
+dynamic model's are.
+
+Quality, the volumes of static models built under mapped lights:
+
+| | Vulkan | OpenGL |
+|---|---:|---:|
+| hub2, loading and settling | 924 to 1,244 volumes, 6.3 to 9.2 ms | 1,226 volumes, 5.6 ms |
+| hub2, a 1,200 unit walk | 165 and 602 more, 0.9 to 1.5 ms | 165 more, 0.6 ms |
+| hub2, the worst single view | 0.7 ms | 0.4 ms |
+| hub2, memory they hold | 3.3 to 4.2 MiB | 4.0 MiB |
+| airdefense1 arena, loading and settling | 160 volumes, 2.6 ms | 159 volumes, 4.7 ms |
+| airdefense1 arena, a 480 unit walk | none | none |
+
+Building the interactions these volumes belong to took 76 to 126 ms in the
+same hub2 launches and 43 to 49 ms in the arena, so the volumes are 5 to 10
+parts in a hundred of work that is itself done once, when a light and a
+surface first meet. What they hold is index lists: the vertex program shares
+the surface's own vertices. On the walks 155 of 165 and 331 of 602 were world
+surfaces under a prelit light, which retail never builds, because the baked
+prelight stands for them, and which a mapped light needs surface by surface.
+
+With the switch on nothing else moved: the -y walk rendered the same 57 fresh
+maps in two launches each way. (A fifth launch, switch on, rendered 589: two
+projected lights drew a fresh map in every view of it and some 27 static
+surfaces were built again each view. That is the picture of two lights that
+move, the case of the second point below, and it did not come back in four
+further launches.)
+
+- **Under a light that has never moved the volumes stay.** Leaving them out
+  would save about 7 ms and 4 MiB a level. It would cost, each time a light
+  returned to stencil (a map that failed, an atlas that cannot hold the view,
+  which sends every atlas light of that view back at once, an update budget,
+  a receiver that needs stencil), building every interaction of that light
+  again whole, light surfaces as well as volumes: the work of which the
+  volumes are a twentieth to a tenth. And a subview, which under the default
+  policy draws a light whose cached map it cannot reuse from the stored
+  volumes, would have to render that light's map instead.
+- **Under a light that moves they are no longer built.** Every interaction
+  of such a light is built again each time it moves, static geometry
+  included, so its volumes were built every frame, and under a map none was
+  drawn. storage2's alarm room built 27 a view for its spinning lights, 54 of
+  the 214 microseconds a view spent building interactions. They are left out
+  now with the dynamic models' (`volumeIsRegenerated` in
+  `idInteraction::CreateInteraction`), by the engine's own mark for a light
+  that has moved (`lightHasMoved`, which also drops its prelight) and not by
+  the moving window, so that a light which settles keeps what it was given.
+  If such a light returns to stencil its surfaces are built again with their
+  volumes, by the rule that already did this for dynamic models. A subview
+  that sees a moving light needs that light's map now, where static geometry
+  alone could be drawn from volumes before.
+- **A static model that moves under still lights is left as it is.** A lift
+  in hub2 builds 7 or 8 volumes a view while it travels, 40 to 45
+  microseconds. An entity carries no mark of having moved, only of having
+  been touched recently, which every entity has when a level starts.
+
+storage2's alarm room after the change, 340 frames on each renderer: no
+stencil volume built in any frame, against 21 a frame with
+`r_shadowMapSkipStencilShadows 0`. With the lights frozen at nine moments and
+the room then switched from shadow maps to stencil, which is the rebuild, the
+two pictures differ in 0 to 77 pixels on Vulkan and 3 to 7 on OpenGL, and the
+stencil picture differs from the unshadowed one in up to 37,000: the volumes
+are there when they are asked for.
+
+Checked for this change, with the counter and its switch removed: the figures
+of the last paragraph; the fourteen scenarios on both back ends; the
+continuous-motion qualification, eight cases; the in-engine self-tests on
+both renderers; and the static tests that read the touched files. One
+scenario failed once: `door-portal` on Vulkan published the flashlight's map
+in the very view of its first cached capture, where the check wants a reuse,
+while the other scenarios were running one after another on a busy machine;
+run alone it passed twice. Of 68 static tests 61 pass, four need arguments
+and one was stopped at four minutes. The two that fail are the two of the
+last round, for the same reasons outside this change
+(`validation_hardening.py`, `ui_choice_scroll_runtime.py`). No frame-time
+figure: the counts are exact, and 54 microseconds a view is below what a
+frame time on this machine can show.
+
+### A pass with nothing to cast
+
+Added on 11 November, from a report by the openD3 session, which runs this
+renderer on Doom 3. On hell1 three point lights have receivers and no caster
+the map accepts, and each of them was sent to the stencil fallback, left it
+after 240 views and was sent back, for as long as it was in view.
+
+A light renders one map for each kind of receiver it has. Both back ends
+treated a receiver pass that found no caster as a map that had failed:
+
+- **OpenGL** marked the light whenever the front end had expected it to map
+  (`RB_ShadowMapRunPass`). Marked, the light builds its stencil volumes
+  again; nothing asks for them, so after the clean views it is released, the
+  front end expects a map again, and the next view marks it.
+- **Vulkan** marked it in every view, whatever the front end expected
+  (three places in `VK_ShadowMap_PrepareViewLights`). Each mark restarts the
+  count of clean views, so the light never left the fallback.
+
+Restoring volume generation helps only if there is a volume to restore. By
+the time a back end runs, the front end has already marked the light for
+every caster that stencil could draw and the map does not hold, in the same
+view. What arrives with an empty pass is a light that stencil has nothing
+for either: no caster at all; a point light whose only caster is its own
+fixture; casters that neither representation draws, by distance or behind a
+closed door; or, as on hell1, casters and receivers that are all
+`noSelfShadow`, whose volumes shadow other receivers and never each other.
+
+- **The front end now records what it left out.** For each receiver
+  ownership, whether a stencil volume would have shadowed it in this view
+  and does not because the light is going to map: a volume that exists and
+  was not linked, or one that was not built
+  (`viewLight_t::shadowMapElidedStencilMask`, set in
+  `idInteraction::AddActiveInteraction`). A `noSelfShadow` caster counts for
+  global receivers only.
+- **An empty pass holds its light only where stencil has a volume for that
+  ownership**, linked in this view or left out
+  (`R_ShadowMapEmptyPassHasStencilVolumes`, one rule for both back ends).
+  The pass is drawn unshadowed, as before, and the light stays a mapped
+  light. A light that has volumes and no map caster is a stencil light, as
+  before, and is held for as long as that lasts.
+
+What the wrong mark cost is small and never showed in a picture: a marked
+light builds and links stencil volumes for whatever moving thing enters it,
+which a mapped light does not, and it wrote a line to the developer log at
+each turn of the cycle.
+
+No stock Quake 4 view tried shows the case: no light is marked in the start
+views of ten levels on OpenGL, in four of them on Vulkan, or on six walks on
+either renderer. It was reproduced with a temporary switch in the front end
+that gave every light of hub2's start view nothing to cast, the camera
+still, 750 views:
+
+| | OpenGL | Vulkan |
+|---|---:|---:|
+| Before: lights marked | 13, 57 times | 13, once each |
+| Before: lights released | 11, 44 times, and marked again | none |
+| After: lights marked | none | none |
+
+The other direction was checked with a second switch that hid the casters
+from OpenGL's back end only, so that the front end had left volumes out:
+twelve lights were marked once and held, and thirteen passes were drawn with
+stencil shadows. A view from outside the airdefense1 arena, where Vulkan runs
+out of shadow resources, marks 162 lights before and after.
+
+Checked for this change, with both switches removed: no light marked in four
+start views on each renderer, and the 162 from outside the arena; the
+fourteen scenarios on both back ends, all passing; the continuous-motion
+qualification, eight cases; the in-engine self-tests on both renderers,
+which now exercise the rule; and the static tests that read the touched
+files. The qualification's Vulkan image case failed once, at a pose where
+two captures of the same frozen frame differed from each other, while
+another session's test client was running; run alone it passed. Of 51 static
+tests 45 pass, four need arguments, one was stopped at four minutes and one
+fails for a reason outside this change (`ui_choice_scroll_runtime.py`). Not
+checked here: Doom 3's hell1, which is the openD3 session's to confirm.
+
+### OpenGL's projected cache and its atlas
+
+Added on 11 November, for the open item "the OpenGL projected cache is the
+atlas, four full tiles at Quality and Ultra, so it holds one crowded view and
+nothing of the view just left". On OpenGL a cached projected map lives in the
+atlas and is sampled there, and a map that is not cached is drawn into one
+scratch tile; Vulkan keeps eight maps' worth resident beside its atlas.
+
+Ten start views, Quality, the view turning through full circles for twelve
+seconds, point lights left on stencil so that every pass counted is an atlas
+pass:
+
+| Level | Most atlas passes in a view | OpenGL: maps rendered fresh | OpenGL: evictions | OpenGL: atlas cells used, of 64 | Vulkan: maps rendered fresh |
+|---|---:|---:|---:|---:|---:|
+| convoy2 | 10 | 45 | 12 | 64 | 19 |
+| hub2 | 4 | 2 | 0 | 32 | 3 |
+| medlabs | 4 | 0 | 0 | 32 | 1 |
+| convoy1 | 2 | 1 | 0 | 16 | 2 |
+| building_b | 2 | 2 | 0 | 32 | 2 |
+| network1 | 2 | 2 | 0 | 32 | 2 |
+| storage1, putra, waste, mcc_landing | 0 | 0 | 0 | 0 | 0 |
+
+The atlas fills in one view of the ten, the one that led to the tile sizes:
+convoy2's start, with up to ten atlas passes. There OpenGL evicts twelve
+times and renders 45 maps fresh in 38 of its 746 views, where Vulkan renders
+19. In the other nine it is half full at most, nothing is evicted, and the
+two renderers render the same handful of first maps.
+
+What the 26 extra maps cost: a convoy2 view that renders a fresh projected
+map spends 0.39 ms of processor time and 0.14 ms of graphics-card time on
+map rendering, against 0.13 and 0.02 ms in a view that renders none. That is
+about a quarter of a millisecond of processor time and a tenth of
+graphics-card time a map, some 7 ms and 3 ms in all over twelve seconds of
+turning, or a hundredth of a millisecond a view.
+
+Holding eight maps on OpenGL would take a second atlas of the same size, 64
+MiB at Quality and 256 MiB at Ultra, with every cached tile carrying which
+of the two it is in: the cache, the receivers' binding, the prepared pass of
+the shared interaction stream and the debug overlay all name the one atlas
+today. That is not worth a hundredth of a millisecond in one view. Left as
+it is. A level that did crowd its spotlights can be given sixteen maps'
+worth today with `r_shadowMapAtlasSize 8192`, which also lets the front end
+keep more lights at full size.
+
+Checked: the counts above, one launch a level on each renderer. No code
+changed.
+
+### The tile-size fit and maps read in place
+
+Added on 11 November, for the open item "on Vulkan a projected light's tile
+size is fitted as if every map of the view needed an atlas block". The front
+end sizes a crowded view's atlas lights so that one block for each of their
+passes fits the atlas (`R_ShadowMapAssignAtlasTiles`). Vulkan reads a cached
+map with nothing live in it where it lives and takes no block for it, so in
+a settled view most of the atlas the fit made room in stays empty, and the
+lights could have kept their size.
+
+Where the fit cuts anything, Vulkan, Quality, fifteen start views with the
+view turning for twelve seconds:
+
+| Level | Most atlas passes in a view | Atlas lights cut below 2048 |
+|---|---:|---|
+| convoy2 | 10 | in 29 of 75 reports: 163 light-reports at 1024, 38 at 2048, none smaller |
+| hub2, medlabs, storage2 | 4 | never |
+| convoy1, building_b, network1 | 2 | never |
+| hub1 | 1 | never |
+| airdefense1 (two views), airdefense2, waste, putra, storage1, mcc_landing | 0 | never |
+
+One view of fifteen, the one the tile sizes were made for. Its passes are
+served as the item says: of 273 passes in those reports 242 were read in
+place, 27 composed over a copy and 4 rendered.
+
+What the cut costs there was looked for in pictures: time frozen, point
+lights left on stencil so that only atlas lights are mapped, the fit's
+picture against the same view with `r_shadowMapAtlasSize 8192`, which keeps
+every light at 2048.
+
+| convoy2, from the start position | Pixels that differ at all |
+|---|---:|
+| Eight directions at eye level, fit against every light at 2048 | 0 in all eight |
+| Four directions looking 25 and 50 degrees down, the same | 0 in seven, 1 pixel by one level in one |
+| The same sixteen poses, fit against every light at 256 | 0 in fifteen, 1 pixel in one |
+| OpenGL, one pose, fit against 256 | 0 |
+| hub2's start view for comparison, 2048 against 1024 | 56,381, of them 5,196 by more than 24 levels |
+
+The lamps the fit cuts cast nothing that can be seen from there. Isolated
+one at a time on OpenGL, five of six shadow no pixel at all and the sixth 34
+pixels by less than 8 levels: they are small spotlights in wire caps whose
+light volumes reach the view and whose shadows do not. hub2 shows what a
+halved map costs a light whose shadows are in view, and it is the order of
+the fit, smallest lights first, that keeps such a light at full size.
+
+Letting Vulkan's lights keep their size would also need more than a
+different count. A map that is not cached yet is rendered into an atlas
+block and copied to its resident image, so the first view of a crowded place
+needs a block for every pass whatever the cache holds, and the size is part
+of the cache key: a fit that followed the cache would render at one size,
+find the maps cached, choose another size and miss. The resident images
+would have to become render targets (they are created as copy targets), or
+first renders be spread over several views with lights unshadowed
+meanwhile. Not worth doing for a difference no stock view shows. Left as it
+is.
+
+Checked: the counts and pictures above. No code changed.
+
+### One static cube for both ownerships
+
+Added on 12 November, for the open item "one static cube for both ownerships
+of a composed Vulkan light, as on OpenGL". A light keeps a map for each kind
+of receiver: the LOCAL map, for receivers that do not shadow themselves,
+holds the light's global casters, and the GLOBAL map holds the local
+(`noSelfShadow`) casters as well. The cache keeps static depth only; live
+casters are drawn over a copy of it in each view. So the two cached maps are
+the same whenever no local caster is static, which is the ordinary case of a
+character standing in a light: its skin is `noSelfShadow`, and it moves.
+
+OpenGL has kept one cache entry for both in that state all along. Vulkan did
+so only for a light with no local caster at all. With a character in it a
+point light kept two resident cubes holding the same static depth, rendered
+both when that depth changed, and gave the LOCAL cube another name each time
+the character walked in or out, so that it was rendered again.
+
+- **One rule for both back ends** says when the two ownerships hold the same
+  resident depth (`R_ShadowMapOwnershipsShareResidentDepth`): no static and
+  no translucent local caster, and any live local casters composed.
+  OpenGL's `RB_ShadowMapCachePassKind` is that rule now, unchanged in what
+  it decides.
+- **On Vulkan the GLOBAL pass of such a point light owns no cube.** It names
+  the resident cube the LOCAL pass has restored, or is publishing in the
+  same view, takes a scratch cube and composes its live casters over a copy
+  (`VK_ShadowMap_SharePointStaticCube`, `vkShadowPassState_t::sharesStatic`).
+  The LOCAL pass runs first within the light, so the cube is rendered and
+  back in its sampled layout before the copy. If the LOCAL pass fails the
+  sharing pass goes with it; if the sharing pass fails the cube stays.
+- **Projected lights were not included at first.** See "One resident tile
+  for both ownerships of a projected light" below.
+
+Vulkan, Quality, the view turning for twelve seconds, reports every tenth
+view. A paired light is one whose two passes are both served from the cache
+without one aliasing the other:
+
+| Level | Paired point lights in a view, most | Of those light-reports, sharing now | Resident point cubes, most: before, after | Point maps rendered fresh: before, after |
+|---|---:|---:|---:|---:|
+| medlabs | 4 | 49 of 263 | 15, 13 | 112, 103 |
+| network1 | 9 | 115 of 236 | 28, 25 | 3, 1 |
+| hub2 | 8 | 0 of 147 | 47, 47 | 8, 8 |
+| airdefense1 arena | 5 | 0 of 184 | 12, 12 | 1, 0 |
+
+The lights that do not share have a static `noSelfShadow` caster as well as
+the live ones: scenery with that material is common in hub2 and the arena,
+and there the two maps really differ. Where the local casters are only
+characters, two or three cubes go, 6 MiB each at Quality's 512 faces. A
+second launch with the change gave 104 fresh maps in medlabs, 3 in network1
+and 2 in the arena, so only medlabs's figure is outside a launch's spread.
+The cube counts are the most a run reached: network1 gave 25, 25 and 24 in
+three more launches with the change, and medlabs 13 and, with the validation
+layers on, 15.
+
+The picture cannot be compared with time frozen in the usual way, because a
+frozen caster stops being live within a quarter second and the light leaves
+the state. In network1 time was frozen and both forms captured inside that
+quarter second, two lights sharing in one capture and none in the other: no
+pixel differs, against 160,000 between shadows and none. With time frozen for
+longer, hub2, the arena, medlabs and network1 are identical too. The
+validation layers reported nothing over 1,873 sharing passes in medlabs and
+network1, five of them composed over a cube published in the same view.
+
+Checked for this change, on the final build with the comparison switch
+removed: the validation layers again, silent over 156 sharing passes; the
+fourteen scenarios on both back ends, all passing; the continuous-motion
+qualification, eight cases, all passing; the in-engine self-tests on both
+renderers, which now exercise the shared rule; and the static tests that
+read the touched files. Of 67 static tests 63 pass, two need arguments and
+one is the scenario runner itself, stopped after four minutes. The one that
+fails does so for a reason outside this change (`validation_hardening.py`:
+a test added on 12 November is not wired into local validation). OpenGL's
+rule is unchanged in what it decides and was not measured again.
+
+### One resident tile for both ownerships of a projected light
+
+Added later on 12 November: what the last section did for point cubes, for
+the tiles of projected, parallel and distant point lights on Vulkan. The
+state is the same, a light whose `noSelfShadow` casters are all live, and so
+is the rule (`R_ShadowMapOwnershipsShareResidentDepth`). Such a light kept
+two resident tiles of the same static depth; it keeps one.
+
+- **The GLOBAL pass names the LOCAL pass's tile** and takes an atlas block,
+  into which the tile is copied and over which its live casters are drawn
+  (`VK_ShadowMap_ShareProjectedStaticTile`). In a view where the LOCAL pass
+  publishes the tile, the copy follows the publication, as it does for any
+  light restored in the view another light published in.
+- **The LOCAL pass often reads its tile where it lives**, which the copy must
+  not disturb: a tile is a copy source in one layout and sampled in another.
+  The restore phase therefore makes every copy first and only then gives the
+  tiles that are read in place the layout their receivers sample
+  (`VK_ShadowMap_RenderAtlas`). Before, the two were done light by light,
+  which was right while no tile had two users.
+- **The front end's fit is unchanged.** The sharing pass still takes its
+  atlas block, so the view asks for what it asked for.
+
+Vulkan, Quality, the view turning for twelve seconds, a tile for each
+ownership against one:
+
+| Level | Paired atlas lights, light-reports | Of those, sharing | Resident tiles, most: before, after | Resident maps' worth, most: before, after |
+|---|---:|---:|---:|---:|
+| hub2 | 71 | 71 | 4, 2 | 6.00, 3.00 |
+| medlabs | 79 | 79 | 4, 2 | 4.00, 2.00 |
+| convoy1 | 1 | 1 | 2, 1 | 4.00, 2.00 |
+| convoy2 | 72 | 24 | 15, 14 | 8.00, 8.00 |
+| building_b | 29 | 0 | 2, 2 | 4.00, 4.00 |
+| network1 | 24 | 0 | 2, 2 | 4.00, 3.00 |
+
+A full-size map is 16 MiB at Quality and 64 MiB at Ultra, so hub2 holds 32
+to 48 MiB less (a second launch with the change reached 4.00 maps' worth)
+and medlabs 32. The count of maps' worth includes images idle records keep,
+which is why it is not twice the tiles and why network1's moved with nothing
+shared. convoy2's cache is full either way; there the
+tile that is no longer doubled leaves room for another light's. The lights
+that do not share have static `noSelfShadow` casters, as with the cubes.
+
+The picture, with time frozen and both forms captured inside the quarter
+second in which the casters are still live:
+
+| View | Shared against a tile each | Shared against shared, just published |
+|---|---:|---:|
+| medlabs, one light sharing | 0 pixels | 0 pixels |
+| convoy2, one light sharing | 0 outside the player's weapon | 0 outside the player's weapon |
+
+In convoy2 the player's own weapon was still coming to rest after the freeze
+in two launches of three, in either form: 21,000 pixels in a box at the
+bottom of the view, and nothing outside it. hub2, where both spotlights
+share, could not be used: objects in view keep moving for several frames
+after the freeze, and two captures of the same form differ there.
+
+The validation layers reported nothing over 492 sharing passes in hub2,
+medlabs and convoy2, six of them restored from a tile published in the same
+view, through two flushes of the cache and a change of form in each of two
+of the launches.
+
+Checked for this change, on the final build with the comparison switch
+removed: the validation layers again, silent over 151 sharing tile passes in
+hub2 and medlabs and 107 sharing cube passes in network1; the fourteen
+scenarios on both back ends, all passing; the continuous-motion
+qualification, eight cases, all passing; the in-engine self-tests on both
+renderers; and the 54 static tests that read the touched files, all passing.
+OpenGL is not touched.
+
 ## Presets
 
 Unchanged. Enhanced keeps point lights on stencil: mapping them still costs
@@ -1138,29 +1711,21 @@ whether Enhanced can now map point lights on Vulkan.
 
 1. Fullscreen budgets for the three tiers, on the reference machine with
    nothing else running. Every change of this round moved what they cost.
-2. The world's own geometry joins and leaves a light's casters area by area
-   as the player moves (seen on the two moving lights of hub2; not measured on
-   still ones).
-3. Static-world volumes are still built once for every mapped light and kept
-   for the fallback. Leaving them out too would need the same rebuild on
-   return, for every surface the light touches.
-4. The OpenGL projected cache is the atlas, four full tiles at Quality and
-   Ultra, so it holds one crowded view and nothing of the view just left.
-   Vulkan holds eight maps' worth.
-5. On Vulkan a projected light's tile size is fitted as if every map of the
-   view needed an atlas block. Maps read where they live need none, so a
-   crowded view could keep more of its lights at full size. The fit decides
-   the cache key, so it must not follow what happens to be cached.
-6. One static cube for both ownerships of a composed Vulkan light, as on
-   OpenGL. Measured on a walk: 4 of 24 fresh maps and up to ten resident
-   cubes. It needs a resident entry two passes of a view can share.
-7. On OpenGL a mapped light draws a PBR receiver one level brighter, two at
-   most, than the same light unshadowed, in up to a tenth of the view. Not
-   the filter and not the translucent setting; Vulkan is exact. Invisible,
-   and unexplained.
+2. The PBR laboratory's modern OpenGL shadow controls leave point lights on
+   stencil, so the modern path never owns their frames (see "Modern OpenGL
+   receivers and PCSS-lite"). The earlier item here, PBR receivers one or two
+   levels brighter under a map on OpenGL, was the classic room around the
+   stations; the PBR pixels are exact (see "The PBR branch").
+3. A static model that moves under still lights (a lift, a door) builds its
+   volumes again each frame it moves, 40 to 45 microseconds a view in hub2.
+   Leaving them out needs a mark on the entity for having moved.
 
 Set aside after measurement: cube faces the view cannot see (see "Static
-cutout casters").
+cutout casters"); the stencil volumes of static models under lights that have
+never moved (see "Static volumes under mapped lights"); a projected cache for
+OpenGL beyond its atlas (see "OpenGL's projected cache and its atlas"); a
+tile-size fit on Vulkan that leaves out maps read in place (see "The
+tile-size fit and maps read in place").
 
 Outside the shadow system, found in passing: `idMaterial::ConstantRegisters()`
 is NULL for every material, so every surface evaluates its registers every

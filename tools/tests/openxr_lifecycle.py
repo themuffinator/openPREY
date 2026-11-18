@@ -31,6 +31,8 @@ constexpr int VR_NUM_EYES=2, VR_NUM_HANDS=2, VR_INPUT_CRITICAL_SECTION=2;
 constexpr int VR_SYSTEM_RETRY_MSEC=3000;
 constexpr uint32_t VR_MAX_SWAPCHAIN_IMAGES=64;
 constexpr XrDuration VR_IMAGE_WAIT_NSEC=100000000;
+constexpr int VR_IMAGE_WAIT_ATTEMPTS=10;
+constexpr bool VR_GL_IS_ES=false;  // Android swapchains carry the OpenGL ES image type
 template<class T> struct idList : std::vector<T> {
     int Num() const { return static_cast<int>(this->size()); }
     void Clear() { this->clear(); }
@@ -75,7 +77,7 @@ struct Runtime {
     int failAcquireAt=0,failWaitAt=0,failReleaseAt=0,failEnumerateAt=0,enumerates=0;
     XrResult failure=XR_ERROR_SESSION_LOST;
     uint32_t count=3,secondCount=3,index=0;
-    bool failCreate=false,zeroImage=false,persistentReleaseFailure=false;
+    bool failCreate=false,zeroImage=false,persistentReleaseFailure=false,persistentWaitFailure=false;
     uintptr_t nextHandle=50;
     ImageQueue& Get(XrSwapchain chain) {
         auto found=chains.find(chain);
@@ -116,7 +118,8 @@ XRAPI_ATTR XrResult XRAPI_CALL xrAcquireSwapchainImage(XrSwapchain chain,const X
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrWaitSwapchainImage(XrSwapchain chain,const XrSwapchainImageWaitInfo*) {
     auto& q=rt.Get(chain); assert(q.acquired && !q.waited);
-    if(++rt.waitCalls==rt.failWaitAt) return rt.failure;
+    ++rt.waitCalls;
+    if(rt.waitCalls==rt.failWaitAt || (rt.persistentWaitFailure && rt.waitCalls>=rt.failWaitAt)) return rt.failure;
     q.waited=true; return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrReleaseSwapchainImage(XrSwapchain chain,const XrSwapchainImageReleaseInfo*) {
@@ -156,6 +159,12 @@ public:
     PFN_xrGetOpenGLGraphicsRequirementsKHR getGLRequirements=nullptr;
     void *getVulkanRequirements=nullptr,*createVulkanInstance=nullptr,*getVulkanDevice=nullptr,*createVulkanDevice=nullptr;
     XrInstance vulkanCreator=XR_NULL_HANDLE,vulkanRestartFor=XR_NULL_HANDLE;
+    // optional runtime services (refresh rate, performance levels, Android thread hints)
+    void *enumerateRefreshRates=handle<void*>(4),*getRefreshRate=handle<void*>(5),*requestRefreshRate=handle<void*>(6);
+    void *setPerformanceLevel=handle<void*>(7),*setAndroidThread=handle<void*>(8);
+    float refreshRate=90.0f;
+    bool refreshRateRequested=true;
+    int thermalLevel[2]={XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT,XR_PERF_SETTINGS_NOTIF_LEVEL_IMPAIRED_EXT};
     int graphicsApi=VR_GRAPHICS_OPENGL;
     bool haveLocalFloor=false,haveEGL=false;
     bool frameOpen=true,frameShouldRender=true,rendererReady=true;
@@ -163,6 +172,8 @@ public:
     bool focusLost=false,spaceChangePending=true;
     XrDuration frameDisplayPeriod=11111111;
     bool inputValid=true,bodyYawValid=true,twoHanded=true,runtimeStopped=false;
+    bool bodyYawFromHead=false,bodyYawResetPending=true,recenterHeld=true;
+    int recenterHoldMsec=1;
     bool pointerOnScreen=false,physicalCrouch=false,roomScaleWalking=false,roomScaleStickIdle=true;
     bool aimLocalValid[2]={};
     int hands[2]={};
@@ -177,7 +188,7 @@ public:
     bool Check(XrResult,const char*);
     bool CheckFrame(XrResult,const char*);
     bool RecoverIfNeeded();
-    void DestroySession(); void DestroyInstance(); void ReleaseRendererImages();
+    void DestroySession(); void DestroyInstance(); void ReleaseRendererImages(); void ReleaseInput();
     bool CreateSwapchain(swapchain_t&,int,int);
     void DestroySwapchain(swapchain_t&);
     bool ResizeScreenSwapchain(); bool AcquireImages(); void ReleaseImages();
@@ -221,11 +232,25 @@ void run(const std::string& test) {
         app.heldKeys[0]=4;app.heldKeys[5]=7;
         app.DestroySession(); app.DestroySession();
         assert(!app.pointerOnScreen && !app.physicalCrouch && !app.roomScaleWalking);
+        // a closed session leaves nothing held and takes its next facing from the head
+        assert(!app.inputValid && !app.twoHanded && !app.recenterHeld && app.recenterHoldMsec==0);
+        assert(!app.bodyYawValid && app.bodyYawFromHead && !app.bodyYawResetPending);
         assert(app.moveForward==0 && app.moveRight==0 && app.hands[0]==0 && !app.aimLocalValid[0]);
         assert(pointerLeaves==1 && keyReleases==2);
-    } else if(test=="wait_loss" || test=="wait_timeout" || test=="wait_error") {
+    } else if(test=="wait_timeout") {
+        // a compositor hitch: the image is waited for again, and the frame goes on
+        rt.failWaitAt=2; rt.failure=XR_TIMEOUT_EXPIRED;
+        assert(app.AcquireImages()); assert(!app.RecoverIfNeeded());
+        assert(rt.waitCalls==4 && rt.session);
+        app.ReleaseImages(); assert(rt.releaseCalls==3);
+    } else if(test=="wait_timeout_persistent") {
+        // a second of timeouts on one image retires the session, releasing nothing
+        rt.failWaitAt=2; rt.failure=XR_TIMEOUT_EXPIRED; rt.persistentWaitFailure=true;
+        assert(!app.AcquireImages()); app.RecoverIfNeeded();
+        assert(rt.waitCalls==1+VR_IMAGE_WAIT_ATTEMPTS && rt.releaseCalls==0 && !rt.session);
+    } else if(test=="wait_loss" || test=="wait_error") {
         rt.failWaitAt=2;
-        rt.failure=test=="wait_timeout" ? XR_TIMEOUT_EXPIRED : test=="wait_error" ? XR_ERROR_CALL_ORDER_INVALID : XR_ERROR_SESSION_LOST;
+        rt.failure=test=="wait_error" ? XR_ERROR_CALL_ORDER_INVALID : XR_ERROR_SESSION_LOST;
         assert(!app.AcquireImages()); app.RecoverIfNeeded();
         assert(rt.waitCalls==2 && rt.releaseCalls==0 && !rt.session);
     } else if(test=="release_loss" || test=="release_error") {
@@ -281,11 +306,17 @@ void run(const std::string& test) {
         // the session had the controllers: single player pauses on their loss,
         // and a space move the lost session announced is forgotten with it
         assert(app.focusLost && !app.spaceChangePending && app.frameDisplayPeriod==0);
+        // the lost session's refresh rate and thermal reports belong to it
+        assert(app.refreshRate==0.0f && !app.refreshRateRequested
+            && app.thermalLevel[0]==XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT && app.thermalLevel[1]==XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT);
         assert(!app.RecoverIfNeeded());
     } else throw std::runtime_error("unknown case");
     app.DestroyInstance(); app.DestroyInstance();
     assert(rt.chains.empty() && rt.destroySessions==1 && rt.destroyInstances==1);
     assert(!app.frameOpen && !app.inputValid && !app.sessionRunning);
+    // an instance's optional services leave with it
+    assert(app.enumerateRefreshRates==nullptr && app.requestRefreshRate==nullptr
+        && app.setPerformanceLevel==nullptr && app.setAndroidThread==nullptr);
 }
 int main(int argc,char** argv) {
     try {
@@ -294,7 +325,7 @@ int main(int argc,char** argv) {
     } catch(const std::exception& e) { std::fprintf(stderr,"XR lifecycle: %s\n",e.what()); return 1; }
 }
 '''
-CASES = ("normal", "teardown", "input_teardown", "partial_acquire", "wait_loss", "wait_timeout", "wait_error",
+CASES = ("normal", "teardown", "input_teardown", "partial_acquire", "wait_loss", "wait_timeout", "wait_timeout_persistent", "wait_error",
          "release_loss", "release_error", "index_large", "index_end", "resize_loss", "resize_failure",
          "count_large", "count_zero", "count_changed", "image_zero", "instance_loss", "session_pending",
          "vulkan_images")
@@ -302,7 +333,7 @@ CASES = ("normal", "teardown", "input_teardown", "partial_acquire", "wait_loss",
 
 def source() -> str:
     code = (ROOT / "src/sys/openxr/OpenXRSystem.cpp").read_text(encoding="utf-8")
-    methods = ["bool Check", "void DestroySession", "void ReleaseRendererImages", "void DestroyInstance", "bool CreateSwapchain",
+    methods = ["bool Check", "void DestroySession", "void ReleaseInput", "void ReleaseRendererImages", "void DestroyInstance", "bool CreateSwapchain",
                "void DestroySwapchain", "bool ResizeScreenSwapchain", "bool AcquireImages", "void ReleaseImages"]
     result = SUPPORT
     for method in methods:

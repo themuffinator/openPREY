@@ -1,6 +1,7 @@
 // Copyright (C) 2026 DarkMatter Productions. GPL-3.0-or-later.
 #pragma once
 #include <array>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -77,6 +78,11 @@ struct PerformancePresetSignals {
  // legacyRenderer means insufficient classic material/texture capability,
  // not merely an API version that lacks optional modern post effects.
  bool explicitLowPower=false, raspberryPi=false, steamDeck=false, arm64=false, legacyRenderer=false, mobile=false;
+ // A desktop Linux host (not Android, which reports mobile) and an Apple GPU
+ // by its active-renderer name. With arm64 they tell a small ARM board, whose
+ // GPU openQ4 cannot rank, from Apple Silicon (macOS or Asahi Linux) and from
+ // Windows on ARM; see PerformancePresetIsArmBoard.
+ bool linuxHost=false, appleGpu=false;
  int systemRamMB=0, videoRamMB=0;
  RendererGpuClass gpuClass=RendererGpuClass::Unknown;
  bool modernEffects=false, postAAAvailable=false;
@@ -85,7 +91,15 @@ struct PerformancePresetSignals {
  int displayRefreshHz=0;
 };
 enum class PerformancePresetReason { ExplicitLowPower, RaspberryPi, SteamDeck, Mobile, LegacyRenderer,
- Software, Virtual, LowMemory, ModestMemory, Dedicated, Shared, Unknown, Resolution, Cpu };
+ Software, Virtual, LowMemory, ModestMemory, Dedicated, Shared, Unknown, Resolution, Cpu, ArmBoard };
+// An ARM board: an arm64 desktop Linux host whose GPU is not discrete and not
+// Apple's. Rockchip/Mali, Allwinner, Amlogic, MediaTek, Qualcomm and NVIDIA
+// Jetson boards all land here without a name list, so a board openQ4 has never
+// seen still gets the ceiling. The Raspberry Pi is one, with its own stricter hint.
+constexpr bool PerformancePresetIsArmBoard(const PerformancePresetSignals& signals) noexcept{
+ return signals.arm64&&signals.linuxHost&&!signals.mobile&&!signals.appleGpu&&
+  signals.gpuClass!=RendererGpuClass::Discrete;
+}
 // Verified dedicated memory of the active GPU, as capacity classes. Each floor
 // is 15/16 of the nominal size, because drivers report a little less than the
 // card's label (an 8 GiB card reports 7956-8188 MiB).
@@ -108,7 +122,8 @@ struct PerformancePresetDetection {
  int screenFraction=100, postAA=0, scenePixelBudget=0;
  // A first launch presents at the display's rate rather than the tier's
  // manual-choice cap (FPS-02); the tier's cap when the rate is unknown. A
- // power-limited device (phone, Deck, Pi, explicit request) keeps the lower.
+ // power-limited device (phone, Deck, Pi, ARM board, explicit request) keeps
+ // the lower.
  int maxFps=0;
 };
 inline constexpr int PerformancePresetUnknownSystemRamMB=0;
@@ -121,6 +136,27 @@ inline constexpr int PerformancePresetMaxDisplayRefreshHz=1000;
 int SanitizePerformancePresetMemoryMB(int raw,int fallback,int maximum) noexcept;
 PerformancePresetDetection DetectPerformancePreset(const PerformancePresetSignals&) noexcept;
 bool ResolveDetectedPerformancePreset(const PerformancePresetDetection&,PerformancePreset&) noexcept;
+
+// The preset system's version (docs/dev/ui/performance-presets.md, "Preset
+// system version"). A configuration records the version it last checked in
+// com_performancePresetCheck; a different version brings up the system check
+// before the main menu, so a player whose settings came from older presets is
+// offered the current recommendation.
+//
+// The fingerprint moves by itself with any change to the presets: it hashes
+// every preset's expansion (each target and value, in order) and the
+// detector's answer for a fixed matrix of machines, so a new tier, a changed
+// value or a moved detection threshold all change it. Bump the revision for a
+// change the fingerprint cannot see, such as a new detection signal read from
+// the live device, that should still ask players to check again.
+inline constexpr int PerformancePresetSystemRevision = 1;
+// FNV-1a 32 over the preset expansions and the detection matrix; computed
+// once. Pure: no engine state, the same on every host and build.
+std::uint32_t PerformancePresetSystemFingerprint() noexcept;
+// "<revision>.<fingerprint as 8 lower-case hex digits>", e.g. "1.0a1b2c3d".
+std::string PerformancePresetSystemVersion();
+// The number of machines the fingerprint's detection matrix asks about.
+int PerformancePresetFingerprintMachines() noexcept;
 } // namespace openq4
 
 // Engine-private observation, implemented by Common. No setters, commands,

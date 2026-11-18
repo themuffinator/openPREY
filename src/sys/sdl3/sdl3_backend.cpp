@@ -44,6 +44,7 @@ along with Doom 3 Source Code.  If not, see <http://www.gnu.org/licenses/>.
 #include "../../framework/Console.h"
 #include "../../framework/FileSystem.h"
 #include "../../framework/licensee.h"
+#include "openq4_build_id_generated.h"
 #include "../../framework/Session.h"
 #include "../../ui/RetainedUI.h"
 #include "../../ui/Rectangle.h"
@@ -7621,7 +7622,12 @@ static bool SDL3_WindowServices_ApplyScreenParmsStrict(const renderWindowRequest
 	}
 	if (request->restorePlacement) { x = request->windowX; y = request->windowY; }
 	else if (!SDL3_UseAbsoluteWindowPlacement()) x = y = SDL_WINDOWPOS_CENTERED_DISPLAY(display);
-	if (!SDL_SetWindowPosition(s_sdlWindow,x,y)) return SDL3_StrictWindowFailure("Cannot place the window on the requested display",error,errorSize,true);
+	// Native Wayland refuses to move a toplevel ("cannot position non-popup
+	// windows") after SDL has recorded the requested display, which the next
+	// fullscreen entry uses. The compositor owns windowed placement there, so the
+	// refusal is the expected outcome, not a failed apply.
+	if (!SDL_SetWindowPosition(s_sdlWindow,x,y) && SDL3_UseAbsoluteWindowPlacement())
+		return SDL3_StrictWindowFailure("Cannot place the window on the requested display",error,errorSize,true);
 	if (parms.fullScreen && !spannedDesktop) {
 		if (!SDL_SetWindowFullscreen(s_sdlWindow,true)) return SDL3_StrictWindowFailure("Cannot enter the requested fullscreen mode",error,errorSize,true);
 	} else if (!SDL_SetWindowSize(s_sdlWindow,targetWidth,targetHeight)) {

@@ -139,8 +139,24 @@ bool ValidImageSource(const std::string& source);
 // sigma) and `backdrop-saturate` (0..1), or its speed streak `backdrop-streak`
 // (0..1, The Awakening's speeder blur); "none" when none applies.
 std::string BackdropFilterCss(const Value* blur, const Value* saturate, const Value* streak = nullptr);
+struct Node;
+// A node's signal fault, RmlUi's `glitch(<dither> <strength> <phase>)` in the
+// same backdrop-filter: `backdrop-dither` (0..1, an ordered dither of the
+// view beneath), `backdrop-glitch` (0..1, a digital fault over it) and
+// `backdrop-glitch-phase` (the fault's arrangement, a new one at each whole
+// number). Empty unless the node declares one. The filter stands at any
+// values, none included: they animate as paint, never as style.
+std::string BackdropFaultCss(const Node& node);
+// A node's whole authored backdrop-filter: its soft focus or streak, then its
+// signal fault. Empty when it has none.
+std::string NodeBackdropFilterCss(const Node& node);
+// The index of a signal fault property in dither, strength, phase order; -1
+// for any other name.
+int BackdropFaultIndex(const std::string& name);
 enum class ControlState { Default, Hover, Focus, Pressed, Disabled };
 enum class ControlRole { Button, Toggle, Slider, Choice, Number, Scrollbar };
+// The menu input an unfocusable prompt button replays (Control::input).
+enum class ControlInput { None, Accept, Back };
 struct ToggleSpec {
 	std::optional<Expression> mixed;
 	std::string checkedPart, mixedPart;
@@ -223,6 +239,13 @@ struct Control {
 	// focus (section 13.4): a localization key, or a string expression whose
 	// result is one. Without it the bar keeps its own verb.
 	std::optional<Expression> prompt;
+	// Buttons only: a prompt-bar entry the mouse can click (section 13.4). An
+	// unfocusable button never takes the focus, from navigation, a press or a
+	// program; the pointer lights, presses and activates it. One with an
+	// `input` in place of an action or event replays that menu input, Accept
+	// on the focused control or Back, as its key would.
+	bool focusable = true;
+	ControlInput input = ControlInput::None;
 };
 // A document's detail card (section 7's hover card). While the pointer moved
 // last, the control it is over is the subject; otherwise the focused control
@@ -371,6 +394,12 @@ public:
 	// shared by copies: a runtime starts from a copy of it instead of
 	// evaluating every binding again. Empty for a document never loaded.
 	const State& InitialState() const;
+	// The document as an instance snapshot names it, for one source path: a
+	// compact JSON object of its version, id, path and whole source. Encoded
+	// once and shared by copies, so the worker that parses a prefetched
+	// document encodes it too: escaping a 5 MB source took the main thread
+	// several milliseconds of every page load. Not for concurrent callers.
+	const std::string& SnapshotIdentity(const std::string& sourcePath) const;
 	// Derived layout only. Text is inserted via Runtime's escaped/localized
 	// text API; neither translation strings nor extensions become markup.
 	std::string BuildMarkup() const;

@@ -150,6 +150,13 @@ typedef enum {
 	FIND_ADDON
 } findFile_t;
 
+// Where the file a read would open comes from (idFileSystem::GetFileOrigin).
+typedef enum {
+	FS_FILE_ORIGIN_NOT_FOUND,
+	FS_FILE_ORIGIN_SHIPPED,		// a verified retail Quake 4 PK4 or one of openQ4's own packs
+	FS_FILE_ORIGIN_ADDED		// anything else: a loose file, a mod's or texture pack's PK4
+} fsFileOrigin_t;
+
 // Typed scheduling records used by the learned, per-map preload manifest.
 // These values are part of the engine/game and renderer-module ABI; append new
 // values instead of reordering existing ones.
@@ -235,6 +242,9 @@ struct idModInfo {
 	idStr					website;
 	idStr					author;
 	idStr					requiredopenQ4Version;
+	// mod.json "campaign": "awakening" when the mod plays only over The
+	// Awakening, "quake4" when only over Quake 4; empty when it plays over either.
+	idStr					campaign;
 	idStr					listLabel;
 };
 
@@ -474,9 +484,26 @@ public:
 	// must then call renderSystem->ReloadGeneratedCacheImages() or, if that
 	// fails, restart as for PURE_RESTART. Both stay unreadable while pure.
 	virtual bool			TakePureImageCacheEviction( void ) = 0;
+	// Appended for RENDER_API_VERSION 36. Whether the file a read of
+	// relativePath would open ships with the game: a member of a retail
+	// Quake 4 PK4 whose checksum matches, or of one of openQ4's own packs.
+	// Quake 4's precomputed image-program results are only valid while every
+	// input still comes from there.
+	virtual fsFileOrigin_t	GetFileOrigin( const char *relativePath ) = 0;
 };
 
 extern idFileSystem *		fileSystem;
+
+// Whether The Awakening's content is mounted: as the game (fs_game q4xbase) or
+// as the base beneath a single-player mod (fs_game <mod>, fs_game_base
+// q4xbase). The filesystem sets the read-only
+// fs_awakeningActive each time it starts, so this answers for the search path in
+// use, never for a pending fs_game change, and the engine, game and renderer
+// modules all ask it the same way. GetActiveGameDir() still names the directory
+// written to, which is the mod's when one runs.
+ID_INLINE bool FS_AwakeningActive( void ) {
+	return cvarSystem != NULL && cvarSystem->GetCVarBool( "fs_awakeningActive" );
+}
 
 // Reports a missing or mismatched client-only openQ4 content pack that
 // filesystem startup found, now that the string tables can localize it. Call

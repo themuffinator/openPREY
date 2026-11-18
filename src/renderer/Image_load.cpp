@@ -371,7 +371,7 @@ static const char *R_FindMissingQ4StockImageFallback( const char *imageName ) {
 	// The recovered tactical trooper material misspells its own texture folder.
 	// Keep the authored source first and salt the generated cache exactly as for
 	// the retail fallbacks below, so an installed correction takes precedence.
-	if ( idStr::Icmp( fileSystem->GetActiveGameDir(), "q4xbase" ) == 0 ) {
+	if ( FS_AwakeningActive() ) {
 		if ( canonicalName.Icmp( "textures/common/white" ) == 0 ) {
 			return "gfx/guis/white.tga";
 		}
@@ -1120,9 +1120,18 @@ void idImage::ActuallyLoadImage( bool fromBackEnd ) {
 	idStr preferredDDSName;
 	ID_TIME_T preferredDDSFileTime = FILE_NOT_FOUND_TIMESTAMP;
 	bool preferredDDSPrecompressed = false;
+	bool retailResultSuperseded = false;
 	bool preferredDDSImage = !explicitDDSImage &&
 		cubeFiles == CF_2D &&
-		R_ResolvePreferredDDSImageSource( retailSourceName.c_str(), preferredDDSName, &preferredDDSFileTime, true, &preferredDDSPrecompressed );
+		R_ResolvePreferredDDSImageSource( retailSourceName.c_str(), preferredDDSName, &preferredDDSFileTime, true, &preferredDDSPrecompressed, &retailResultSuperseded );
+	if ( retailResultSuperseded && !preferredDDSImage && usage == TD_BUMP && glConfig.textureCompressionAvailable ) {
+		// A texture pack replaced an input of a bump map the game ships
+		// precomputed, so it is built again here. Store it the way the game's
+		// own is stored, DXT5 with X in alpha (RXGB), not as RGBA8: a 2K pack
+		// would otherwise add about 21 MB per bump map.
+		opts.format = FMT_DXT5;
+		opts.colorFormat = CFM_NORMAL_DXT5;
+	}
 	if ( preferredDDSImage && !fileSystem->InProductionMode() ) {
 		ID_TIME_T originalSourceTime = FILE_NOT_FOUND_TIMESTAMP;
 		{
@@ -1855,6 +1864,11 @@ bool idImage::CopyFramebuffer( int x, int y, int imageWidth, int imageHeight,
 	}
 
 	const bool readingFromRenderTexture = ( backEnd.renderTexture != NULL ) && ( backEnd.renderTexture->GetNumColorImages() > 0 );
+	// A window view's multisampled stand-in (draw_common.cpp) is read like a
+	// multisampled render texture: glCopyTexSubImage2D cannot read it, a blit
+	// resolves it.
+	const bool readingFromMultisampledStandIn = !readingFromRenderTexture
+		&& R_DefaultFramebufferHandle() != 0 && R_DefaultFramebufferSamples() > 1;
 	const GLenum readAttachment = GL_COLOR_ATTACHMENT0;
 	bool needsStorageResize = ( opts.width != imageWidth ) || ( opts.height != imageHeight );
 
@@ -1889,7 +1903,8 @@ bool idImage::CopyFramebuffer( int x, int y, int imageWidth, int imageHeight,
 	opts.width = imageWidth;
 	opts.height = imageHeight;
 
-	if ( readingFromRenderTexture && ( GLEW_EXT_framebuffer_blit || GLEW_ARB_framebuffer_object || GLEW_VERSION_3_0 ) ) {
+	if ( ( readingFromRenderTexture || readingFromMultisampledStandIn )
+			&& ( GLEW_EXT_framebuffer_blit || GLEW_ARB_framebuffer_object || GLEW_VERSION_3_0 ) ) {
 		GLint previousReadFbo = 0;
 		GLint previousDrawFbo = 0;
 		GLint previousReadBuffer = GL_BACK;
@@ -1916,7 +1931,8 @@ bool idImage::CopyFramebuffer( int x, int y, int imageWidth, int imageHeight,
 			glTexParameterf( textureTarget, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
 		}
 
-		glBindFramebuffer( GL_READ_FRAMEBUFFER, backEnd.renderTexture->GetDeviceHandle() );
+		glBindFramebuffer( GL_READ_FRAMEBUFFER, readingFromRenderTexture
+			? backEnd.renderTexture->GetDeviceHandle() : R_DefaultFramebufferHandle() );
 		glReadBuffer( readAttachment );
 
 		glBindFramebuffer( GL_DRAW_FRAMEBUFFER, copyFbo );
@@ -1932,6 +1948,16 @@ bool idImage::CopyFramebuffer( int x, int y, int imageWidth, int imageHeight,
 		}
 
 		glBlitFramebuffer( x, y, x + sourceWidth, y + sourceHeight, 0, 0, imageWidth, imageHeight, GL_COLOR_BUFFER_BIT, GL_LINEAR );
+		{
+			// FPS-05: a blit out of a multisampled target is a resolve.
+			extern void R_CountMSAAResolve( bool depth );
+			const int sourceSamples = readingFromRenderTexture
+				? backEnd.renderTexture->GetColorImage( 0 )->GetOpts().numMSAASamples
+				: readingFromMultisampledStandIn ? 2 : 0;
+			if ( sourceSamples > 1 ) {
+				R_CountMSAAResolve( false );
+			}
+		}
 		if ( scissorWasEnabled ) {
 			glScissor( previousScissorBox[0], previousScissorBox[1], previousScissorBox[2], previousScissorBox[3] );
 			glEnable( GL_SCISSOR_TEST );
@@ -2122,6 +2148,10 @@ bool idImage::CopyDepthbuffer( int x, int y, int imageWidth, int imageHeight,
 		}
 
 		glBlitFramebuffer( x, y, x + sourceWidth, y + sourceHeight, 0, 0, imageWidth, imageHeight, GL_DEPTH_BUFFER_BIT, GL_NEAREST );
+		if ( sourceDepthIsMSAA ) {
+			extern void R_CountMSAAResolve( bool depth );
+			R_CountMSAAResolve( true );	// FPS-05
+		}
 
 		if ( scissorWasEnabled ) {
 			glScissor( previousScissorBox[0], previousScissorBox[1], previousScissorBox[2], previousScissorBox[3] );

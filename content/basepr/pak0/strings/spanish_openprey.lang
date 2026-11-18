@@ -108,4 +108,17 @@
 	"#str_231525"	"%s"
 	"#str_231533"	"%s · %s"
 	"#str_231535"	"%s %s"
+	// the in-game updater (src/framework/Updater.cpp), from openQ4
+	"#str_232501"	"openPREY %s está actualizado."
+	"#str_232502"	"Esta compilación de desarrollo (%s) es igual o más reciente que la última versión de openPREY, %s."
+	"#str_232503"	"openPREY %s está disponible (tienes %s).\n\n¿Descargarlo ahora (%s)? openPREY se cierra para instalarlo y después vuelve a iniciarse."
+	"#str_232504"	"openPREY %s está disponible (tienes %s).\n\n¿Abrir su página de descarga?"
+	"#str_232505"	"openPREY no pudo buscar actualizaciones. Comprueba tu conexión a Internet.\n\n¿Abrir en su lugar la página de versiones en el navegador?"
+	"#str_232506"	"Actualizando openPREY a %s"
+	"#str_232507"	"No se pudo descargar o verificar la actualización. openPREY %s no ha cambiado.\n\n¿Abrir en su lugar la página de descarga?"
+	"#str_232508"	"Se canceló la actualización. No se ha cambiado nada."
+	"#str_232509"	"openPREY %s está listo para instalarse. openPREY se cerrará, lo instalará y volverá a iniciarse."
+	"#str_232510"	"openPREY se ha actualizado a %s."
+	"#str_232511"	"No se pudo instalar openPREY %s. openPREY %s no ha cambiado.\n\n¿Abrir la página de descarga para instalarlo tú mismo?"
+	"#str_232512"	"openPREY no pudo volver a iniciarse tras actualizarse. Inícialo desde su carpeta."
 }

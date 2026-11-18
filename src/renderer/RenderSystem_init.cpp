@@ -275,7 +275,73 @@ const char *r_multiSamplesArgs[] = { "0", "2", "4", "8", "16", NULL };
 idCVar r_inhibitFragmentProgram( "r_inhibitFragmentProgram", "0", CVAR_RENDERER | CVAR_BOOL, "ignore the fragment program extension" );
 idCVar r_glDriver( "r_glDriver", "", CVAR_RENDERER, "\"opengl32\", etc." );
 idCVar r_useLightPortalFlow( "r_useLightPortalFlow", "1", CVAR_RENDERER | CVAR_BOOL, "use a more precise area reference determination" );
+// Where multisample textures are missing (Apple's OpenGL 2.1 context) the
+// window is the only MSAA there is, so that platform keeps it by default.
+#if defined( __APPLE__ )
+#define R_GL_WINDOW_MULTISAMPLE_DEFAULT "1"
+#else
+#define R_GL_WINDOW_MULTISAMPLE_DEFAULT "0"
+#endif
+idCVar r_glWindowMultisample( "r_glWindowMultisample", R_GL_WINDOW_MULTISAMPLE_DEFAULT, CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL,
+	"OpenGL: 0 = the window is single-sample and 3D views are multisampled in render targets, so r_multiSamples applies to the running renderer; 1 = the window itself is created with r_multiSamples samples, and an MSAA change needs a renderer restart. Read when the renderer starts; OpenGL ES always uses 1" );
+// Latched when the device creates its window.
+static bool r_windowCarriesMultisampling = false;
+bool R_WindowCarriesMultisampling( void ) {
+	return r_windowCarriesMultisampling;
+}
+int R_WindowMultiSamplesForNewDevice( void );
+
 idCVar r_multiSamples( "r_multiSamples", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "MSAA sample count: 0 = off, 2/4/8/16 = supported quality steps", 0, 16, idCmdSystem::ArgCompletion_String<r_multiSamplesArgs> );
+idCVar r_multiSamplesEffective( "r_multiSamplesEffective", "-1", CVAR_RENDERER | CVAR_ROM | CVAR_INTEGER,
+	"samples the last main scene drew with (-1 before one has drawn); below r_multiSamples where the renderer clamps it" );
+
+/*
+====================
+R_PublishMainSceneSamples / R_CountMSAAResolve
+
+FPS-05: the sample count the main scene actually drew with, for the settings
+page and gfxInfo, written only when it changes; and the copies out of a
+multisampled target each frame (each one a full resolve), which gfxInfo
+reports for the last complete frame.
+====================
+*/
+void R_PublishMainSceneSamples( int samples ) {
+	samples = samples > 1 ? samples : 0;
+	if ( r_multiSamplesEffective.GetInteger() != samples ) {
+		r_multiSamplesEffective.SetInteger( samples );
+	}
+}
+
+static int rbMSAAResolveFrame = -1;
+static int rbMSAAResolves[2] = { 0, 0 };		// this frame: colour, depth
+static int rbMSAAResolvesLast[2] = { -1, -1 };	// the last complete frame
+
+void R_CountMSAAResolve( bool depth ) {
+	if ( rbMSAAResolveFrame != backEnd.frameCount ) {
+		if ( rbMSAAResolveFrame == backEnd.frameCount - 1 ) {
+			rbMSAAResolvesLast[0] = rbMSAAResolves[0];
+			rbMSAAResolvesLast[1] = rbMSAAResolves[1];
+		} else {
+			// frames in between had none
+			rbMSAAResolvesLast[0] = rbMSAAResolvesLast[1] = 0;
+		}
+		rbMSAAResolves[0] = rbMSAAResolves[1] = 0;
+		rbMSAAResolveFrame = backEnd.frameCount;
+	}
+	rbMSAAResolves[depth ? 1 : 0]++;
+}
+
+static void R_MSAAResolvesLastFrame( int &color, int &depth ) {
+	if ( rbMSAAResolveFrame < 0 || backEnd.frameCount - rbMSAAResolveFrame > 1 ) {
+		color = depth = 0;	// none for over a frame
+	} else if ( rbMSAAResolveFrame == backEnd.frameCount - 1 ) {
+		color = rbMSAAResolves[0];
+		depth = rbMSAAResolves[1];
+	} else {
+		color = rbMSAAResolvesLast[0];
+		depth = rbMSAAResolvesLast[1];
+	}
+}
 idCVar r_postAA( "r_postAA", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "post AA mode: 0 = off, 1 = SMAA 1x medium, 2 = SMAA 1x high, 3 = SMAA 1x ultra, 4 = SMAA 1x colour-edge prototype", 0, 4, idCmdSystem::ArgCompletion_Integer<0,4> );
 idCVar r_postAAStatePoisonTest( "r_postAAStatePoisonTest", "0", CVAR_RENDERER | CVAR_BOOL, "intentionally dirty GL texture/client state before SMAA post-AA draws for validation" );
 idCVar r_pbrMaterials( "r_pbrMaterials", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "draw explicitly PBR-authored materials as PBR; 0 keeps their classic stages. Stock materials are never PBR" );
@@ -320,7 +386,7 @@ idCVar r_ssaoMaxDistance( "r_ssaoMaxDistance", "220.0", CVAR_RENDERER | CVAR_ARC
 idCVar r_ssaoSamples( "r_ssaoSamples", "20", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "number of SSAO spiral samples", 4, 32, idCmdSystem::ArgCompletion_Integer<4,32> );
 idCVar r_ssaoDebug( "r_ssaoDebug", "0", CVAR_RENDERER | CVAR_BOOL, "visualize SSAO only" );
 idCVar r_ssaoResolution( "r_ssaoResolution", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
-	"Vulkan SSAO resolution: 0 automatic (full at the maximum r_ssaoSamples, half below), 1 full, 2 half", 0, 2,
+	"SSAO resolution: 0 automatic (full at the maximum r_ssaoSamples, half below), 1 full, 2 half", 0, 2,
 	idCmdSystem::ArgCompletion_Integer<0,2> );
 
 /*
@@ -331,6 +397,7 @@ Automatic keeps the maximum sample count (Ultra's 32) at full resolution and
 draws lower counts, such as Quality's 20, at half resolution: at native
 1440p the full-resolution pass was the largest single GPU cost of the Quality
 frame. The performance presets own r_ssaoSamples, so they select this too.
+Both renderers read it (OpenGL since FPS-04).
 ====================
 */
 bool R_SSAOHalfResolution() {
@@ -432,6 +499,7 @@ idCVar r_ttfFontDebug( "r_ttfFontDebug", "0", CVAR_RENDERER | CVAR_BOOL, "dump e
 idCVar r_useShadowMap( "r_useShadowMap", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use shadow maps for projected, parallel and point lights when supported; 0 draws the stencil shadow volumes retail used" );
 idCVar r_shadowMapCSM( "r_shadowMapCSM", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use projected-light cascaded shadow maps when shadow maps are enabled" );
 idCVar r_shadowMapHashedAlpha( "r_shadowMapHashedAlpha", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use hashed alpha testing for perforated shadow-map casters when supported" );
+idCVar r_shadowMapCharacterSelfShadow( "r_shadowMapCharacterSelfShadow", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "under shadow-mapped lights, animated characters shadow themselves, each other and props although their materials say noSelfShadow; 0 keeps the original rule" );
 idCVar r_shadowMapTranslucentMoments( "r_shadowMapTranslucentMoments", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "accumulate experimental translucent shadow moments for blended casters" );
 idCVar r_shadowMapTranslucentDensity( "r_shadowMapTranslucentDensity", "1.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "density scale applied when resolving translucent shadow moments", 0.0f, 8.0f );
 idCVar r_shadowMapTranslucentMinAlpha( "r_shadowMapTranslucentMinAlpha", "0.02", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "minimum per-stage alpha considered by translucent shadow moments", 0.0f, 1.0f );
@@ -587,6 +655,25 @@ idCVar r_renderer( "r_renderer", "best", CVAR_RENDERER | CVAR_ARCHIVE, "hardware
 idCVar r_actualRenderer( "r_actualRenderer", "UNINITIALIZED", CVAR_RENDERER | CVAR_ROM, "actual active renderer backend after request/fallback selection" );
 idCVar r_glTier( "r_glTier", "auto", CVAR_RENDERER | CVAR_ARCHIVE, "OpenGL renderer tier: auto, legacy, gl33, gl41, gl43, gl45, gl46", r_glTierArgs, idCmdSystem::ArgCompletion_String<r_glTierArgs> );
 idCVar r_glesContext( "r_glesContext", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_ARCHIVE, "request an OpenGL ES 3.0 context instead of desktop GL; bring-up aid for the Android GLES backend, on desktop this needs an EGL/GLES translation layer (ANGLE)" );
+
+/*
+==================
+R_WindowMultiSamplesForNewDevice
+
+The samples a new window is asked for, and the latch for the device that owns
+it. An OpenGL ES window always carries them: its targets may not be
+multisampled textures. Desktop OpenGL carries them only where
+r_glWindowMultisample says so.
+==================
+*/
+int R_WindowMultiSamplesForNewDevice( void ) {
+#if defined( __ANDROID__ )
+	r_windowCarriesMultisampling = true;
+#else
+	r_windowCarriesMultisampling = r_glesContext.GetBool() || r_glWindowMultisample.GetBool();
+#endif
+	return r_windowCarriesMultisampling ? r_multiSamples.GetInteger() : 0;
+}
 idCVar r_glCoreProfileFirst( "r_glCoreProfileFirst", "0", CVAR_RENDERER | CVAR_BOOL, "with a forced r_glTier, try core-profile contexts before the compatibility fallback; needed to reach the modern path on drivers that cap compatibility below 3.3 (macOS caps it at 2.1), diagnostic only" );
 idCVar r_vkValidation( "r_vkValidation", "0", CVAR_RENDERER | CVAR_BOOL, "enable Vulkan validation layers for the Vulkan renderer module and rendererVkProbe" );
 idCVar r_vkSampleLocations( "r_vkSampleLocations", "1", CVAR_RENDERER | CVAR_BOOL, "use lower-left standard MSAA locations when supported; read at Vulkan initialization" );
@@ -628,6 +715,7 @@ idCVar r_rendererSharedWorldInteraction( "r_rendererSharedWorldInteraction", "0"
 idCVar r_rendererSharedWorldFogBlend( "r_rendererSharedWorldFogBlend", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "execute the complete classic fog/blend light phase in an eligible 3D view from a backend-neutral sealed stream; any unsupported view uses the complete classic path" );
 idCVar r_rendererSharedSubview( "r_rendererSharedSubview", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "execute eligible direct mirror and capture-backed remote-camera, mirror, reflection, refraction, and x-ray subview transactions from backend-neutral sealed records; nested child trees commit atomically at their outermost special view, while 2D/cubemap color and depth captures retain exact type, aspect, and face; unsupported subviews use the complete classic path" );
 idCVar r_rendererSharedDeform( "r_rendererSharedDeform", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "enable optional, default-off backend-neutral material-deform ownership; incomplete or unsupported work retains the complete classic path" );
+idCVar r_rendererSharedFaultInject( "r_rendererSharedFaultInject", "0", CVAR_RENDERER | CVAR_INTEGER | CVAR_CHEAT, "qualification diagnostic: make the selected shared classic domains decline at their backend boundary with a named fallback, so the complete classic path runs (1 = subview, 2 = render-demo/Raven special frame, 4 = cinematic/authored post)", 0, 7, idCmdSystem::ArgCompletion_Integer<0,7> );
 idCVar r_rendererModernLightingParity( "r_rendererModernLightingParity", "0", CVAR_RENDERER | CVAR_INTEGER, "diagnostic override forcing modern lighting-ownership parity contracts proven for bring-up capture: 1 = interaction, 2 = fog/blend, 4 = light grid, 8 = shadow receivers; 0 keeps every unproven domain on the ARB2 bridge", 0, 15, idCmdSystem::ArgCompletion_Integer<0,15> );
 idCVar r_rendererModernAutoPromote( "r_rendererModernAutoPromote", "0", CVAR_RENDERER | CVAR_BOOL, "allow r_glTier auto and r_renderer best to request the guarded modern visible path after promotion evidence and sign-off; off keeps ARB2 default" );
 idCVar r_rendererPromotionEvidence( "r_rendererPromotionEvidence", "", CVAR_RENDERER, "Phase 8 validation evidence token required with r_rendererModernAutoPromote before automatic modern visible promotion" );
@@ -2110,7 +2198,7 @@ static bool R_CreateOpenGLContext( bool legacyPolicy, bool forceWindow, char *er
 		glConfig.vidHeight = parms.height;
 		parms.borderless = !parms.hiddenWindow && !parms.fullScreen && r_borderless.GetBool();
 		parms.displayHz = r_displayRefresh.GetInteger();
-		parms.multiSamples = r_multiSamples.GetInteger();
+		parms.multiSamples = R_WindowMultiSamplesForNewDevice();
 		parms.stereo = false;
 		if ( !legacyPolicy && r_recoverableWindowRequest != NULL ) {
 			const renderWindowParms_t &requested = r_recoverableWindowRequest->parms;
@@ -2294,6 +2382,14 @@ static bool R_InitOpenGLInternal( bool legacyPolicy, bool forceWindow, char *err
 	R_GLDebugOutput_FlushMessages();
 
 	R_RendererUpload_Init( glConfig.backendCaps );
+
+	// A single-sample window leaves MSAA to multisample textures. A context
+	// without them (an old driver, a 2.1 context) then draws without MSAA, and
+	// the player needs to know which setting brings it back.
+	if ( !r_windowCarriesMultisampling && r_multiSamples.GetInteger() > 1 && glTexImage2DMultisample == NULL ) {
+		common->Printf( "^3r_multiSamples %d has no effect: this OpenGL context has no multisample textures and its window is single-sample. Set r_glWindowMultisample 1 and restart the renderer to multisample the window instead^0\n",
+			r_multiSamples.GetInteger() );
+	}
 	R_GpuSkinning_ContractInit( glConfig.backendCaps );
 
 	// allocate the vertex array range or vertex objects
@@ -2825,6 +2921,22 @@ bool VK_GLStubs_ConsumeReadPixelsFailure( void );
 bool VK_Device_DrawableSize( int &width, int &height );
 #endif
 
+/*
+====================
+r_screenshotFormat
+
+The file format of automatically named screenshots. Explicit names choose by
+extension: "screenshot shots/view.png" always writes PNG. TGA stays the
+default because capture harnesses read screenshots/shot<n>.tga.
+====================
+*/
+idCVar r_screenshotFormat( "r_screenshotFormat", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER,
+		"file format of automatically named screenshots: 0 = TGA, 1 = PNG (compressed by image_pngCompressionLevel)", 0, 1 );
+
+static const char *R_ScreenshotExtension() {
+	return r_screenshotFormat.GetInteger() == 1 ? ".png" : ".tga";
+}
+
 // TakeScreenshot's verdict for the commands that report "Wrote".
 static bool r_screenshotCaptureFailed = false;
 
@@ -3055,6 +3167,18 @@ void idRenderSystemLocal::TakeScreenshot( int width, int height, const char *fil
 		return;
 	}
 
+	if ( idStr( fileName ).CheckExtension( ".png" ) ) {
+		// RGB rows come bottom-up from glReadPixels
+		if ( !R_WritePNG( fileName, buffer + 18, width, height, 3, true,
+				strstr( fileName, "viewnote" ) ? "fs_cdpath" : "fs_savepath" ) ) {
+			r_screenshotCaptureFailed = true;
+			common->Warning( "TakeScreenshot: could not write %s", fileName );
+		}
+		R_StaticFree( buffer );
+		takingScreenshot = false;
+		return;
+	}
+
 	// fill in the header (this is vertically flipped, which glReadPixels emits)
 	buffer[2] = 2;		// uncompressed type
 	buffer[12] = width & 255;
@@ -3096,7 +3220,7 @@ from the beginning, because recording demo avis can involve
 thousands of shots
 ================== 
 */  
-void R_ScreenshotFilename( int &lastNumber, const char *base, idStr &fileName ) {
+void R_ScreenshotFilename( int &lastNumber, const char *base, idStr &fileName, const char *extension = ".tga" ) {
 	int	a,b,c,d, e;
 
 	bool restrict = cvarSystem->GetCVarBool( "fs_restrict" );
@@ -3120,7 +3244,7 @@ void R_ScreenshotFilename( int &lastNumber, const char *base, idStr &fileName ) 
 		e = frac;
 
 		char suffix[16];
-		idStr::snPrintf( suffix, sizeof( suffix ), "%i%i%i%i%i.tga", a, b, c, d, e );
+		idStr::snPrintf( suffix, sizeof( suffix ), "%i%i%i%i%i%s", a, b, c, d, e, extension );
 		fileName = base;
 		fileName += suffix;
 		if ( lastNumber == 99999 ) {
@@ -3962,8 +4086,11 @@ screenshot
 screenshot [filename]
 screenshot [width] [height]
 screenshot [width] [height] [samples]
-screenshot image <imageName> screenshots/<name>.tga
-================== 
+screenshot image <imageName> screenshots/<name>.tga|.png
+==================
+
+Automatically named shots use r_screenshotFormat; an explicit filename picks
+the format by its extension (.png writes PNG, anything else TGA).
 */ 
 #define	MAX_BLENDS	256	// to keep the accumulation in shorts
 void R_ScreenShot_f( const idCmdArgs &args ) {
@@ -3971,13 +4098,13 @@ void R_ScreenShot_f( const idCmdArgs &args ) {
 	idStr checkname;
 	if ( args.Argc() >= 2 && !idStr::Icmp( args.Argv( 1 ), "image" ) ) {
 		if ( args.Argc() != 4 ) {
-			common->Printf( "usage: screenshot image <imageName> screenshots/<name>.tga\n" );
+			common->Printf( "usage: screenshot image <imageName> screenshots/<name>.tga|.png\n" );
 			return;
 		}
 		idStr path( args.Argv( 3 ) );
 		if ( path.Icmpn( "screenshots/", 12 ) != 0 || path.Find( ".." ) >= 0
-				|| path.Find( ':' ) >= 0 || path.Find( '\\' ) >= 0 || !path.CheckExtension( ".tga" ) ) {
-			common->Printf( "screenshot image: use screenshots/<name>.tga\n" );
+				|| path.Find( ':' ) >= 0 || path.Find( '\\' ) >= 0 || ( !path.CheckExtension( ".tga" ) && !path.CheckExtension( ".png" ) ) ) {
+			common->Printf( "screenshot image: use screenshots/<name>.tga or screenshots/<name>.png\n" );
 			return;
 		}
 		idImage *image = globalImages->GetImage( args.Argv( 2 ) );
@@ -3992,7 +4119,7 @@ void R_ScreenShot_f( const idCmdArgs &args ) {
 		}
 		const int width = image->GetUploadWidth(), height = image->GetUploadHeight();
 		if ( pixels.Num() != width * height * 4
-				|| !R_WriteTGA( path.c_str(), pixels.Ptr(), width, height, true ) ) {
+				|| !R_WriteImageFile( path.c_str(), pixels.Ptr(), width, height, true ) ) {
 			common->Printf( "screenshot image: write failed\n" );
 			return;
 		}
@@ -4017,7 +4144,7 @@ void R_ScreenShot_f( const idCmdArgs &args ) {
 		width = glConfig.vidWidth;
 		height = glConfig.vidHeight;
 		blends = 1;
-		R_ScreenshotFilename( lastNumber, "screenshots/shot", checkname );
+		R_ScreenshotFilename( lastNumber, "screenshots/shot", checkname, R_ScreenshotExtension() );
 		break;
 	case 2:
 		width = glConfig.vidWidth;
@@ -4029,7 +4156,7 @@ void R_ScreenShot_f( const idCmdArgs &args ) {
 		width = atoi( args.Argv( 1 ) );
 		height = atoi( args.Argv( 2 ) );
 		blends = 1;
-		R_ScreenshotFilename( lastNumber, "screenshots/shot", checkname );
+		R_ScreenshotFilename( lastNumber, "screenshots/shot", checkname, R_ScreenshotExtension() );
 		break;
 	case 4:
 		width = atoi( args.Argv( 1 ) );
@@ -4041,7 +4168,7 @@ void R_ScreenShot_f( const idCmdArgs &args ) {
 		if ( blends > MAX_BLENDS ) {
 			blends = MAX_BLENDS;
 		}
-		R_ScreenshotFilename( lastNumber, "screenshots/shot", checkname );
+		R_ScreenshotFilename( lastNumber, "screenshots/shot", checkname, R_ScreenshotExtension() );
 		break;
 	default:
 		common->Printf( "usage: screenshot\n       screenshot <filename>\n       screenshot <width> <height>\n       screenshot <width> <height> <blends>\n" );
@@ -4787,7 +4914,10 @@ static void R_GfxInfoPrintAAState( void ) {
 #ifdef OPENQ4_RENDERER_VK_MODULE
 		extern int VK_PostProcess_SceneSamples( void );
 		effectiveMSAA = VK_PostProcess_SceneSamples();
-		msaaReason = effectiveMSAA > 1 ? "vulkan-scene" : "vulkan-scene-single-sample";
+		// The Vulkan renderer draws at most 8 samples (VK_Image_SelectSampleCount),
+		// fewer where the device offers fewer for the scene's formats.
+		msaaReason = effectiveMSAA <= 1 ? "vulkan-scene-single-sample"
+			: effectiveMSAA < requestedMSAA ? "vulkan-clamp" : "vulkan-scene";
 #else
 		if ( modernVisiblePost ) {
 			const modernGLExecutorStats_t &modern = R_ModernGLExecutor_Stats();
@@ -4865,6 +4995,13 @@ static void R_GfxInfoPrintAAState( void ) {
 		screenFraction,
 		supersamplingText,
 		r_resolutionScaleMode.GetInteger() );
+	// Each copy out of a multisampled target resolves every sample of the
+	// copied rectangle (FPS-05). A frame with post-processing resolves the
+	// scene for bloom/tone map, SSAO depth and presentation.
+	int colorResolves = 0, depthResolves = 0;
+	R_MSAAResolvesLastFrame( colorResolves, depthResolves );
+	common->Printf( "Renderer AA: MSAA resolves last frame: color=%d depth=%d (scene samples %d)\n",
+		colorResolves, depthResolves, effectiveMSAA );
 }
 
 
@@ -5065,6 +5202,42 @@ void GfxInfo_f( const idCmdArgs &args ) {
 			guiDomain.backend[CLASSIC_GUI_DOMAIN_BACKEND_GL].fallbackViews,
 			guiDomain.backend[CLASSIC_GUI_DOMAIN_BACKEND_VULKAN].ownedViews,
 			guiDomain.backend[CLASSIC_GUI_DOMAIN_BACKEND_VULKAN].fallbackViews );
+		// Name each view's outcome, as the world domains do, so a fallback
+		// is attributable without a debugger.
+		for ( int viewIndex = 0; viewIndex < R_ClassicGuiDomain_NumViews();
+				++viewIndex ) {
+			const classicGuiDomainView_t *view =
+				R_ClassicGuiDomain_ViewByIndex( viewIndex );
+			if ( view == NULL ) {
+				continue;
+			}
+			common->Printf(
+				"Renderer shared classic GUI view[%d]: scene=%d scope=%s ready=%d failure=%s detail=%d guiPass=%s surface=%d stage=%d surfaces=%d/%d passes=%d GL=%d/%s/%d/%d+%d VK=%d/%s/%d/%d+%d\n",
+				viewIndex,
+				view->scenePacketIndex,
+				view->scope == CLASSIC_GUI_DOMAIN_SCOPE_IN_WORLD ? "world" : "root",
+				view->ready ? 1 : 0,
+				ClassicGuiDomainFailure_Name( view->failure ),
+				view->failureDetail,
+				MaterialResourceGuiPassFailure_Name( view->guiPassFailure ),
+				view->failureSourceSurfaceIndex,
+				view->failureSourceStageIndex,
+				view->drawableSurfaceCount,
+				view->sourceSurfaceCount,
+				view->drawablePassCount,
+				view->backendOutcome[CLASSIC_GUI_DOMAIN_BACKEND_GL],
+				ClassicGuiDomainFailure_Name(
+					view->backendFailure[CLASSIC_GUI_DOMAIN_BACKEND_GL] ),
+				view->backendFailureDetail[CLASSIC_GUI_DOMAIN_BACKEND_GL],
+				view->backendDrawnPasses[CLASSIC_GUI_DOMAIN_BACKEND_GL],
+				view->backendNoopPasses[CLASSIC_GUI_DOMAIN_BACKEND_GL],
+				view->backendOutcome[CLASSIC_GUI_DOMAIN_BACKEND_VULKAN],
+				ClassicGuiDomainFailure_Name(
+					view->backendFailure[CLASSIC_GUI_DOMAIN_BACKEND_VULKAN] ),
+				view->backendFailureDetail[CLASSIC_GUI_DOMAIN_BACKEND_VULKAN],
+				view->backendDrawnPasses[CLASSIC_GUI_DOMAIN_BACKEND_VULKAN],
+				view->backendNoopPasses[CLASSIC_GUI_DOMAIN_BACKEND_VULKAN] );
+		}
 	}
 	{
 		const classicCinematicPostDomainStats_t &cinematicPost =
@@ -6024,7 +6197,8 @@ void R_VidRestart_f( const idCmdArgs &args ) {
 		}
 		parms.borderless = !parms.hiddenWindow && !parms.fullScreen && r_borderless.GetBool();
 		parms.displayHz = r_displayRefresh.GetInteger();
-		parms.multiSamples = r_multiSamples.GetInteger();
+		// the window keeps the samples its device gave it
+		parms.multiSamples = r_windowCarriesMultisampling ? r_multiSamples.GetInteger() : 0;
 		parms.stereo = false;
 		if ( !GLimp_SetScreenParms( parms ) ) {
 			common->Printf( "^3vid_restart partial failed, retrying full restart\n" );

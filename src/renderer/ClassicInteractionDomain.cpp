@@ -495,6 +495,30 @@ static bool MaterialRequestsClassicDeform( const drawSurf_t *drawSurf ) {
 		&& drawSurf->material->Deform() != DFRM_NONE;
 }
 
+// srfTriangles_t::deformedSurface marks generated-model topology whose index
+// data belongs to the source surface: every CPU-skinned MD5 surface (each
+// character and the viewmodel), posed MD5R output and liquids. It does not
+// mean GPU posing. Those ambient caches already hold the final-pose idDrawVert
+// stream, which the classic interaction, receiver and caster programs draw
+// exactly like static geometry (issue #73; RB_SurfaceUsesGPUPosedGeometry).
+// Only primitive-batch MD5R and GPU-palette skinning move vertices on the GPU;
+// the geometry checks refuse both separately.
+static bool GeneratedTopologyIsPosed( const drawSurf_t *drawSurf ) {
+	const srfTriangles_t *tri = drawSurf != NULL ? drawSurf->geo : NULL;
+	if ( tri == NULL || !tri->deformedSurface
+			|| MaterialRequestsClassicDeform( drawSurf ) ) {
+		return false;
+	}
+#if defined( _MD5R_SUPPORT ) || defined( Q4SDK_MD5R )
+	const srfTriangles_t *ambientTri = tri->ambientSurface != NULL
+		? tri->ambientSurface : tri;
+	if ( tri->primBatchMesh != NULL || ambientTri->primBatchMesh != NULL ) {
+		return false;
+	}
+#endif
+	return true;
+}
+
 static int DeformContractFailureDetail( const drawSurf_t *drawSurf,
 		const drawPacket_t *packet = NULL ) {
 	const classicDeformRecord_t *record = packet != NULL
@@ -1093,6 +1117,7 @@ static std::uint64_t HashShadowMapPass(
 	HashBool( hash, pass.hasAlphaCasters );
 	HashBool( hash, pass.hasTranslucentCasters );
 	HashBool( hash, pass.allowCacheReuse );
+	HashBool( hash, pass.allowCacheCompose );
 	HashBool( hash, pass.allowCacheUpdate );
 	HashBool( hash, pass.allowScratch );
 	HashBool( hash, pass.hashedAlpha );
@@ -1418,12 +1443,18 @@ static bool ValidateShadowPacket( const idScenePacketFrame &packetFrame,
 	const srfTriangles_t *tri = drawSurf->geo;
 	const srfTriangles_t *casterTri = !stencilPacket
 		&& tri->ambientSurface != NULL ? tri->ambientSurface : tri;
+	// A mapped caster draws its ambient stream, so posed generated topology
+	// (a CPU-skinned character) casts exactly like static geometry.
+	const bool posedTopology = !stencilPacket
+		&& GeneratedTopologyIsPosed( drawSurf )
+		&& geometry.deformMode == GEOMETRY_DEFORM_SURFACE;
 	if ( !packet.hasGeometry || geometry.legacyGeometry == NULL
 			|| ( geometry.deformMode != GEOMETRY_DEFORM_NONE
-				&& !admittedMaterialDeform )
+				&& !admittedMaterialDeform && !posedTopology )
 			|| ( geometry.skinningMode != GEOMETRY_SKINNING_NONE
 				&& geometry.skinningMode != GEOMETRY_SKINNING_CPU )
-			|| geometry.hasPrimBatchMesh || tri->deformedSurface
+			|| geometry.hasPrimBatchMesh
+			|| ( tri->deformedSurface && !posedTopology )
 			|| casterTri == NULL || casterTri->numVerts <= 0
 			|| casterTri->numIndexes <= 0 || casterTri->numIndexes % 3 != 0
 			|| instance.weaponDepthHack || instance.modelDepthHack != 0.0f
@@ -1975,6 +2006,11 @@ static bool PrepareMappedShadowChain(
 				caster.alphaStageCount++;
 				drawableAlphaStage = true;
 			}
+			// No sealed stage (all inactive, or zero alpha scale) seals no range:
+			// the opaque-depth fallback and the empty no-op both carry -1.
+			if ( caster.alphaStageCount == 0 ) {
+				caster.firstAlphaStage = -1;
+			}
 		}
 		caster.disposition = coverage != MC_PERFORATED
 				|| !activeAlphaStage || drawableAlphaStage
@@ -2265,7 +2301,14 @@ static bool BuildShadowMapPasses(
 			: ( classification.pointLight
 				? CLASSIC_INTERACTION_SHADOW_POINT
 				: CLASSIC_INTERACTION_SHADOW_PROJECTED );
-		pass.lightClass = classification.lightClass;
+		// The pass class names the map form both backends draw. A distant
+		// point light (its centre far outside its radius) renders into a
+		// projected frustum fitted from the source, not a cube, exactly as
+		// classic does (R_ClassifyShadowMapLight); only a cube is POINT.
+		pass.lightClass = classification.pointLight
+			? SHADOWMAP_LIGHT_POINT
+			: ( classification.lightClass == SHADOWMAP_LIGHT_POINT
+				? SHADOWMAP_LIGHT_PROJECTED : classification.lightClass );
 		pass.receiverMask = receiverMask;
 		pass.mappedCasterCount = mappedCasterCount;
 		pass.supplementCasterCount = supplementCount;
@@ -2345,6 +2388,16 @@ static bool BuildShadowMapPasses(
 		}
 		pass.allowCacheReuse = r_shadowMapStaticCache.GetBool()
 			&& !pass.hasDynamicCasters && !pass.hasAlphaCasters
+			&& ( classification.cascadeCount == 1
+				|| r_shadowMapCacheCSM.GetBool() );
+		// Classic keeps a pass with live casters cached: the resident entry
+		// holds its static depth and each view draws the live chains over a
+		// copy of it. A backend whose sealed stream shares classic's physical
+		// schedule (Vulkan) consumes that composition, so the light's maps,
+		// tiles and in-place reads stay exactly classic's; OpenGL's sealed
+		// executor never composes and redraws the whole plan.
+		pass.allowCacheCompose = r_shadowMapStaticCache.GetBool()
+			&& pass.hasDynamicCasters && !pass.hasAlphaCasters
 			&& ( classification.cascadeCount == 1
 				|| r_shadowMapCacheCSM.GetBool() );
 		pass.allowCacheUpdate = true;
@@ -2544,9 +2597,12 @@ static bool ValidateDrawPacket( const idScenePacketFrame &packetFrame,
 		}
 		admittedMaterialDeform = true;
 	}
+	const bool posedTopology = GeneratedTopologyIsPosed( drawSurf )
+		&& geometry.deformMode == GEOMETRY_DEFORM_SURFACE;
 	if ( ( geometry.deformMode != GEOMETRY_DEFORM_NONE
-				&& !admittedMaterialDeform )
-			|| ( drawSurf->geo != NULL && drawSurf->geo->deformedSurface ) ) {
+				&& !admittedMaterialDeform && !posedTopology )
+			|| ( drawSurf->geo != NULL && drawSurf->geo->deformedSurface
+				&& !posedTopology ) ) {
 		SetError( error, CLASSIC_INTERACTION_FAILURE_DEFORM,
 			geometry.deformMode, -1, packetIndex, lightOrdinal, receiverOrdinal );
 		return false;
@@ -2720,7 +2776,8 @@ static bool ValidateSurfaceMaterial( const drawPacket_t &packet,
 	}
 	if ( ( material->Deform() != DFRM_NONE
 			&& !r_rendererSharedDeform.GetBool() )
-			|| ( drawSurf.geo != NULL && drawSurf.geo->deformedSurface ) ) {
+			|| ( drawSurf.geo != NULL && drawSurf.geo->deformedSurface
+				&& !GeneratedTopologyIsPosed( &drawSurf ) ) ) {
 		SetError( error, CLASSIC_INTERACTION_FAILURE_DEFORM,
 			material->Deform(), -1, -1, lightOrdinal, receiverOrdinal );
 		return false;
@@ -3652,9 +3709,14 @@ static bool R_ClassicInteractionDomain_PrepareView(
 				|| light.receiverShadowMode[
 					CLASSIC_INTERACTION_RECEIVER_GLOBAL ]
 					== CLASSIC_INTERACTION_SHADOW_HYBRID;
+			const int mappedPassIndex = light.shadowMapPassIndex[
+				CLASSIC_INTERACTION_RECEIVER_LOCAL ] >= 0
+				? light.shadowMapPassIndex[ CLASSIC_INTERACTION_RECEIVER_LOCAL ]
+				: light.shadowMapPassIndex[ CLASSIC_INTERACTION_RECEIVER_GLOBAL ];
 			view.shadowMode = anyHybrid
 				? CLASSIC_INTERACTION_SHADOW_HYBRID
-				: ( light.pointLight
+				: ( domain.shadowMapPasses[ mappedPassIndex ].lightClass
+						== SHADOWMAP_LIGHT_POINT
 					? CLASSIC_INTERACTION_SHADOW_POINT
 					: CLASSIC_INTERACTION_SHADOW_PROJECTED );
 		}
@@ -3823,6 +3885,7 @@ static bool R_ClassicInteractionDomain_PrepareView(
 			view.shadowLightCount++;
 		}
 		bool mappedLight = false;
+		bool mappedPointCube = false;
 		for ( int receiver = CLASSIC_INTERACTION_RECEIVER_LOCAL;
 				receiver <= CLASSIC_INTERACTION_RECEIVER_GLOBAL; ++receiver ) {
 			const int passIndex = light.shadowMapPassIndex[ receiver ];
@@ -3837,6 +3900,7 @@ static bool R_ClassicInteractionDomain_PrepareView(
 			const classicInteractionDomainShadowMapPass_t &mapPass =
 				domain.shadowMapPasses[ passIndex ];
 			if ( mapPass.lightClass == SHADOWMAP_LIGHT_POINT ) {
+				mappedPointCube = true;
 				view.pointShadowMapPassCount++;
 			} else {
 				view.projectedShadowMapPassCount++;
@@ -3846,7 +3910,7 @@ static bool R_ClassicInteractionDomain_PrepareView(
 			}
 		}
 		if ( mappedLight ) {
-			if ( light.pointLight ) {
+			if ( mappedPointCube ) {
 				view.pointShadowLightCount++;
 			} else {
 				view.projectedShadowLightCount++;

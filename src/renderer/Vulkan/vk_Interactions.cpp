@@ -95,6 +95,7 @@ static idCVar r_vkPBRBakedFailureAfter( "r_vkPBRBakedFailureAfter", "0", CVAR_RE
 #include "volk.h"
 
 #include "VulkanDevice.h"
+#include "vk_ExecutorHooks.h"
 #include "vk_Image.h"
 #include "vk_PBRProbes.h"
 #include "vk_HDRScene.h"
@@ -814,12 +815,19 @@ static bool VK_ClassicInteraction_BuildMappedShadowBlock(
 		return true;
 	}
 
-	if ( physicalLight.pointLight || atlasSet == VK_NULL_HANDLE
+	// The view's atlas, or the resident tile itself when the shadow pass left
+	// an exact hit to be read where it lives, exactly as the classic receiver
+	// binds it (VK_Inter_SelectShadowMode): sampling the same depth through
+	// an atlas copy rounds the filtered lookups differently.
+	const bool residentMap = physicalPass.residentSet != VK_NULL_HANDLE
+		&& physicalPass.invMapSize > 0.0f;
+	if ( physicalLight.pointLight
+			|| ( !residentMap && atlasSet == VK_NULL_HANDLE )
 			|| !mapPass.projected.state.valid ) {
 		return false;
 	}
 	plan.mappedShadowMode = 1;
-	plan.sets[ 7 ] = atlasSet;
+	plan.sets[ 7 ] = residentMap ? physicalPass.residentSet : atlasSet;
 	vkShadowBlock_t &block = plan.projectedShadowBlock;
 	memset( &block, 0, sizeof( block ) );
 	const shadowMapProjectedLightState_t &projected =
@@ -870,8 +878,10 @@ static bool VK_ClassicInteraction_BuildMappedShadowBlock(
 	block.biasParams[ 1 ] = mapPass.projected.normalBias;
 	block.biasParams[ 2 ] = mapPass.projected.cascadeBlend;
 	block.biasParams[ 3 ] = static_cast<float>( cascadeCount );
-	block.texelSize[ 0 ] = physicalLight.invAtlasSize[ 0 ];
-	block.texelSize[ 1 ] = physicalLight.invAtlasSize[ 1 ];
+	block.texelSize[ 0 ] = residentMap
+		? physicalPass.invMapSize : physicalLight.invAtlasSize[ 0 ];
+	block.texelSize[ 1 ] = residentMap
+		? physicalPass.invMapSize : physicalLight.invAtlasSize[ 1 ];
 	block.texelSize[ 2 ] = Max( 0.0f, r_shadowMapTexelBiasScale.GetFloat() );
 	block.filterParams[ 0 ] = mapPass.projected.filter.filterRadius;
 	block.filterParams[ 1 ] = static_cast<float>(
@@ -1153,9 +1163,9 @@ bool VK_ClassicInteraction_Preflight( const viewDef_t *viewDef ) {
 					light->receiverShadowMode[ receiverIndex ] );
 		}
 	}
-	if ( backEnd.renderTexture != NULL
-			|| backEnd.feedbackRenderTexture != NULL
-			|| !VK_Exec_SharedInteractionTargetReady() ) {
+	// The window, the backend scene target or the game's forward scene target
+	// (VK_Exec_SharedInteractionTargetReady); any other target stays classic.
+	if ( !VK_Exec_SharedInteractionTargetReady() ) {
 		return VK_ClassicInteraction_Fail( viewDef,
 			CLASSIC_INTERACTION_FAILURE_BACKEND_REJECTED,
 			VK_CLASSIC_INTERACTION_REJECT_OFFSCREEN_TARGET );
@@ -4647,6 +4657,7 @@ static void VK_CreateSingleDrawInteractions( const drawSurf_t *surf ) {
 	drawInteraction_t	inter;
 
 	const bool preparing = vkPBRTransparentView.preparing;
+	vkSurfaceWinding_t winding( interPass.cmd, surf, !preparing );
 	if ( !preparing && vkPBRTransparentView.ready
 			&& VK_PBRTransparentFindSurface( surf ) != NULL ) {
 		// The whole native contribution was sealed before the light loop.
@@ -6496,9 +6507,7 @@ bool VK_ClassicFogBlend_Preflight( const viewDef_t *viewDef ) {
 			CLASSIC_FOG_BLEND_FAILURE_BACKEND_REJECTED,
 			VK_CLASSIC_FOG_BLEND_REJECT_COUNTS );
 	}
-	if ( backEnd.renderTexture != NULL
-			|| backEnd.feedbackRenderTexture != NULL
-			|| !VK_Exec_SharedInteractionTargetReady() ) {
+	if ( !VK_Exec_SharedInteractionTargetReady() ) {
 		return VK_ClassicFogBlend_Fail( viewDef,
 			CLASSIC_FOG_BLEND_FAILURE_BACKEND_REJECTED,
 			VK_CLASSIC_FOG_BLEND_REJECT_OFFSCREEN_TARGET );
@@ -6883,6 +6892,7 @@ Documented Phase G2 gaps (mirroring the interaction walk):
 */
 static void VK_T_BasicFog( const drawSurf_t *surf ) {
 	const srfTriangles_t *tri = surf->geo;
+	vkSurfaceWinding_t winding( interPass.cmd, surf );
 
 	if ( tri == NULL || R_TriHasPrimBatchMesh( tri ) || tri->ambientCache == NULL ) {
 		interPass.fogSkipCount++;
@@ -7054,6 +7064,7 @@ rides the push block. Shares VK_T_BasicFog's prim-batch/cache-less gaps.
 */
 static void VK_T_BlendLight( const drawSurf_t *surf ) {
 	const srfTriangles_t *tri = surf->geo;
+	vkSurfaceWinding_t winding( interPass.cmd, surf );
 
 	if ( tri == NULL || R_TriHasPrimBatchMesh( tri ) || tri->ambientCache == NULL ) {
 		interPass.fogSkipCount++;

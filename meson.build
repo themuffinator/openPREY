@@ -130,6 +130,7 @@ version_iteration = get_option('version_iteration').strip()
 version_base_override = get_option('version_base_override').strip()
 openal_root_override = get_option('openal_root_override').strip()
 generated_version_header_path = meson.current_build_dir() / 'openq4_version_generated.h'
+generated_build_id_header_path = meson.current_build_dir() / 'openq4_build_id_generated.h'
 version_metadata_command = [
   py,
   meson.project_source_root() / 'tools' / 'build' / 'openq4_version.py',
@@ -149,19 +150,31 @@ if version_iteration != ''
   version_metadata_command += ['--iteration', version_iteration]
 endif
 version_metadata_result = run_command(
-  version_metadata_command + ['--header-out', generated_version_header_path],
+  version_metadata_command + [
+    '--header-out', generated_version_header_path,
+    '--build-id-header-out', generated_build_id_header_path,
+  ],
   check: true,
 )
 
 # Git metadata changes whenever HEAD or the worktree changes, without changing
 # meson.build. Re-run the lightweight generator for every build invocation;
-# write_if_changed keeps downstream recompilation limited to real version
-# changes. The configure-time invocation above ensures the header also exists
-# before a backend performs its first dependency scan.
+# write_if_changed keeps downstream recompilation limited to real changes. The
+# configure-time invocation above ensures both headers also exist before a
+# backend performs its first dependency scan.
+#
+# The output is split so a commit does not recompile the whole tree:
+# openq4_version_generated.h holds only the release version and is safe to
+# include everywhere (licensee.h, precompiled.h); openq4_build_id_generated.h
+# holds the Git SHA, dirty flag, commit count and date, and only the few files
+# that print or compare those include it.
 generated_version_header = custom_target(
   'openq4_version_generated',
-  output: 'openq4_version_generated.h',
-  command: version_metadata_command + ['--header-out', '@OUTPUT@'],
+  output: ['openq4_version_generated.h', 'openq4_build_id_generated.h'],
+  command: version_metadata_command + [
+    '--header-out', '@OUTPUT0@',
+    '--build-id-header-out', '@OUTPUT1@',
+  ],
   depend_files: files('tools/build/openq4_version.py'),
   build_always_stale: true,
   build_by_default: true,
@@ -323,6 +336,37 @@ if get_option('build_native_tests')
     include_directories: root_include_dir, install: false,
   )
   test('openq4-crc32', openq4_crc32_test, timeout: 30)
+
+  # PNG/zlib codec: fixtures compressed by CPython's zlib, and the native test's
+  # encoder output decoded again by the script's independent reader
+  openq4_png_fixtures = custom_target(
+    'openq4-png-fixtures', input: files('tools/tests/png_codec.py'),
+    output: 'PngFixtures.inc',
+    command: [py, '@INPUT@', '--generate-native', '@OUTPUT@'],
+  )
+  openq4_png_codec_test = executable(
+    'openq4-png-codec-test', [files('tools/tests/native/PngCodecTest.cpp'), openq4_png_fixtures],
+    include_directories: root_include_dir, install: false,
+  )
+  test('openq4-png-codec', py,
+    args: [files('tools/tests/png_codec.py'), '--run', openq4_png_codec_test, meson.project_build_root() / 'png-codec-test'],
+    depends: openq4_png_codec_test, timeout: 300)
+
+  # BC7 decoder: seeded blocks for every mode against digests from two
+  # independent decoders (tools/tests/bc7_reference.py)
+  openq4_bc7_codec_test = executable(
+    'openq4-bc7-codec-test', files('tools/tests/native/Bc7CodecTest.cpp'),
+    include_directories: root_include_dir, install: false,
+  )
+  test('openq4-bc7-codec', openq4_bc7_codec_test, timeout: 60)
+
+  # Render demo block container: the codec, the stream of blocks cut at any
+  # byte or damaged anywhere, and the timeline its headers alone give
+  openq4_demo_block_codec_test = executable(
+    'openq4-demo-block-codec-test', files('tools/tests/native/DemoBlockCodecTest.cpp'),
+    include_directories: root_include_dir, install: false,
+  )
+  test('openq4-demo-block-codec', openq4_demo_block_codec_test, timeout: 300)
 
 
   dict_identity_source = custom_target(
@@ -905,6 +949,15 @@ if build_engine or get_option('build_native_tests')
     endif
   endif
   if get_option('build_native_tests')
+    # The in-game updater's core: versions, the signed manifest, asset names,
+    # the plan hand-off, hashing and zip extraction (fixtures from
+    # tools/tests/update_core_fixtures.py).
+    openq4_update_core_test = executable('openq4-update-core-test',
+      files('tools/tests/native/UpdateCoreTest.cpp'),
+      include_directories: root_include_dir,
+      dependencies: jsoncpp_project.get_variable('jsoncpp_dep'), install: false)
+    test('openq4-update-core', openq4_update_core_test,
+      args: [meson.project_build_root() / 'update-core-test'], timeout: 60)
     openq4_ui_scroll_geometry_test = executable('openq4-ui-scroll-geometry-test',
       files('tools/tests/native/UiScrollGeometryTest.cpp'),
       dependencies: openq4_retained_dep, install: false)
@@ -2195,18 +2248,23 @@ if build_engine
   client_deps += jsoncpp_project.get_variable('jsoncpp_dep')
   if host_system == 'windows'
     client_deps += openq4_windows_text_store_dep
+    # The updater's HTTPS transport (sys/win32/win_update.cpp).
+    client_deps += cc.find_library('winhttp', required: true)
   endif
 endif
 
 # OpenXR virtual reality (docs/dev/archive/2026-10-18/plans/2026-10-02-openxr-vr.md). The Khronos
 # loader links statically into the SDL3 client on Windows and Linux, built from
 # the pinned SDK against the jsoncpp subproject above; nothing ships beside the
-# executable and dedicated servers never see it.
+# executable and dedicated servers never see it. On Android only the Meta Quest
+# headset flavor (android_headset) and the diagnostic x86_64 emulator, which
+# checks it against the test runtime, carry it: phones have no OpenXR runtime.
 openxr_option = get_option('openxr')
+openxr_android = host_system == 'android' and (get_option('android_headset') or host_cpu_family == 'x86_64')
 build_openxr = build_engine and use_sdl3_backend and not openxr_option.disabled() \
-  and (host_system == 'windows' or host_system == 'linux')
+  and (host_system == 'windows' or host_system == 'linux' or openxr_android)
 if openxr_option.enabled() and not build_openxr
-  error('openxr requires the SDL3 client on Windows or Linux.')
+  error('openxr requires the SDL3 client on Windows or Linux, or the Android Quest flavor or emulator.')
 endif
 openxr_loader_dep = disabler()
 openxr_headers_dep = disabler()
@@ -2691,6 +2749,14 @@ if build_engine
     client_engine_cpp_args += ['-DOPENQ4_OPENXR=1']
   endif
 
+  # The in-game updater (manifest, verification, staging and its HTTPS
+  # transport) is client-only too; win_update.cpp, globbed for both, compiles
+  # to nothing in the dedicated server.
+  openq4_engine_sources += files('src/updater/UpdateCore.cpp')
+  if host_system != 'windows'
+    openq4_engine_sources += files('src/sys/posix/posix_update.cpp')
+  endif
+
   bse_library = static_library(
     'openprey_bse',
     bse_sources,
@@ -2845,6 +2911,40 @@ if build_engine
       install: true,
       install_dir: install_root_dir,
     )
+  endif
+
+  # openQ4-updater swaps in an update the client downloaded and staged, once
+  # the client has exited (Windows cannot replace a running program), then
+  # starts the client again. It has no network access and links nothing from
+  # the engine. macOS and Android packages are updated as a whole instead.
+  if host_system in ['windows', 'linux']
+    updater_helper_deps = []
+    updater_helper_cpp_args = []
+    updater_helper_link_args = []
+    if host_system == 'windows'
+      updater_helper_deps += windows_shell_dep
+    else
+      # The same hardening the release verifier requires of every shipped binary.
+      updater_helper_cpp_args += linux_compile_hardening_args
+      updater_helper_link_args += linux_link_hardening_args
+    endif
+    updater_helper_exe = executable(
+      meson.project_name() + '-updater_' + binary_arch,
+      files('src/updater/UpdateHelper.cpp'),
+      dependencies: updater_helper_deps,
+      cpp_args: updater_helper_cpp_args,
+      link_args: updater_helper_link_args,
+      pie: linux_executable_pie,
+      win_subsystem: 'windows',
+      install: true,
+      install_dir: install_root_dir,
+    )
+    if get_option('build_native_tests')
+      test('openq4-updater-helper-apply', py,
+        args: [files('tools/tests/updater_helper_apply.py'), '--helper', updater_helper_exe,
+          '--scratch', meson.project_build_root() / 'updater-helper-test'],
+        depends: updater_helper_exe, timeout: 300)
+    endif
   endif
 
   dedicated_engine_cpp_args = engine_cpp_args
@@ -3516,20 +3616,32 @@ endif
 # through XR_RUNTIME_JSON, so no system runtime registration is touched. It is a
 # test fixture, never installed or packaged.
 if build_openxr
-  openxr_test_runtime_gl_deps = host_system == 'windows' \
-    ? [cc.find_library('opengl32', required: true)] : [dependency('gl', required: true)]
+  if host_system == 'windows'
+    openxr_test_runtime_gl_deps = [cc.find_library('opengl32', required: true)]
+  elif host_system == 'android'
+    # OpenGL ES swapchains for the GLES renderer (XR_KHR_opengl_es_enable)
+    openxr_test_runtime_gl_deps = [cc.find_library('GLESv3', required: true), cc.find_library('EGL', required: true),
+      cc.find_library('log', required: true)]
+  else
+    openxr_test_runtime_gl_deps = [dependency('gl', required: true)]
+  endif
+  # Android loads lib*.so files only. The emulator VR check packs it into a
+  # diagnostic APK (Gradle -Popenq4XrTestRuntime=<this library>); a stage or a
+  # distributable APK never carries it (verify_android_apk.py).
+  openxr_test_runtime_prefix = host_system == 'android' ? 'lib' : ''
   openxr_test_runtime = shared_module(
     'openq4-xr-test-runtime',
     files('tools/tests/openxr/OpenXRTestRuntime.cpp'),
     # XR_KHR_vulkan_enable2 through the application's loader: headers only
     include_directories: include_directories('src/external/vulkan/include'),
     dependencies: [openxr_headers_dep] + openxr_test_runtime_gl_deps,
-    name_prefix: '',
+    name_prefix: openxr_test_runtime_prefix,
     gnu_symbol_visibility: 'hidden',
     install: false,
   )
   openxr_test_runtime_manifest = configuration_data()
-  openxr_test_runtime_manifest.set('LIBRARY', 'openq4-xr-test-runtime.' + (host_system == 'windows' ? 'dll' : 'so'))
+  openxr_test_runtime_manifest.set('LIBRARY', openxr_test_runtime_prefix + 'openq4-xr-test-runtime.'
+    + (host_system == 'windows' ? 'dll' : 'so'))
   configure_file(
     input: 'tools/tests/openxr/openq4_xr_test_runtime.json.in',
     output: 'openq4_xr_test_runtime.json',

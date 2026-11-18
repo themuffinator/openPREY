@@ -114,7 +114,7 @@ struct idCVarStub {
 	const char *GetString() const { return text; }
 };
 static idCVarStub fs_restrict, fs_debug, fs_copyfiles, fs_savepath, fs_cdpath, fs_basepath;
-static idCVarStub fs_caseSensitiveOS, fs_cacheLooseDirectories{ 1 };
+static idCVarStub fs_caseSensitiveOS, fs_cacheLooseDirectories{ 1 }, fs_awakeningActive;
 
 struct CommonStub {
 	void FatalError( const char *, ... ) { throw std::runtime_error( "FatalError" ); }

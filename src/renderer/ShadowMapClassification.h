@@ -166,6 +166,16 @@ static const int SHADOWMAP_DYNAMIC_CASTER_MAX_FRAMES = 500;
 // Called once per rendered frame with a millisecond clock.
 void R_ShadowMapBeginFrame( int nowMsec );
 int R_ShadowMapDynamicCasterFrames( void );
+// The oldest frame a caster's last change may date from and still count as
+// live: the current frame less the window, except that it never moves back.
+// The window is counted in frames from a frame time that drops at once on a
+// fast frame, so it can grow by several frames from one frame to the next.
+// Taken afresh each frame, a caster that had just aged out of it was live
+// again for a frame or two, and each such visit took the caster out of its
+// lights' static maps and put it back: two renders of every one of them.
+int R_ShadowMapLiveCasterSinceFrame( void );
+// The pure form, for the self-test.
+int R_ShadowMapAdvanceLiveCasterSince( int liveSince, int updatedFrame, int frame, int windowFrames );
 // The light's shape changed within the last two game tics' worth of frames:
 // it is moving, and every view of it needs a new map.
 int R_ShadowMapMovingLightFramesFor( float frameMsec );
@@ -174,6 +184,28 @@ bool R_ShadowMapLightIsMoving( const idRenderLightLocal *lightDef, int frame );
 // published a map that the next view could not use, copied it and drew the
 // live casters over the copy.
 bool R_ShadowMapMovingLightSkipsCache( const viewLight_t *vLight, int frame );
+// A receiver pass that finds no caster for its map has failed only if stencil
+// has something to draw for it: a volume linked in this view, or one the
+// front end left out because the light was going to render shadow maps
+// (viewLight_t::shadowMapElidedStencilMask). A light whose casters are all
+// turned away has neither, and sending it to the stencil fallback restores
+// nothing: OpenGL marked it, let it go after the clean views, and marked it
+// again for as long as it was in view, and Vulkan never let it go.
+// receiverMask is SHADOWMAP_RECEIVER_MASK_LOCAL or _GLOBAL.
+bool R_ShadowMapEmptyPassHasStencilVolumes( const viewLight_t *vLight, int receiverMask );
+// The pure form, for the self-test. Global volumes shadow both ownerships,
+// local ones the global receivers only.
+bool R_ShadowMapEmptyPassNeedsStencil( bool globalVolumesLinked, bool localVolumesLinked,
+	int elidedStencilMask, int receiverMask );
+// Whether the LOCAL and GLOBAL ownerships of a light hold the same resident
+// depth, so that one cache entry can serve both. The LOCAL map takes the
+// global casters and the GLOBAL map the local ones as well. A resident entry
+// holds static depth, so the two are the same whenever no local caster is
+// drawn into it: none exists, or the ones that do are all live and are drawn
+// over a copy of the entry in each view (dynamicsComposed). A local caster
+// that is static or translucent makes them different maps.
+bool R_ShadowMapOwnershipsShareResidentDepth( bool localStaticCasters, bool localTranslucentCasters,
+	bool localDynamicCasters, bool dynamicsComposed );
 // The pure form, for the self-test: the window in frames for a smoothed frame
 // interval in milliseconds.
 int R_ShadowMapDynamicCasterFramesFor( float frameMsec );

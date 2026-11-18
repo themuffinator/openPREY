@@ -85,6 +85,8 @@ typedef struct vrFrameState_s {
 
 	int						aimLaser;		// vrAimLaser_t
 	bool					roomScale;		// the body walks after the head (vr_roomScale)
+	bool					twoHanded;		// the off hand holds the gun's foregrip (vr_twoHanded)
+	int						body;			// vrBody_t: the player's own body in the eyes (vr_body)
 } vrFrameState_t;
 
 // What the usercmd generator applies for one tic while VR drives input.
@@ -141,7 +143,13 @@ public:
 	// Room scale: the body walked after the head by this horizontal distance
 	// in tracking space (engine axes, game units). The tracking origin moves
 	// with it, so every pose read afterwards is that much nearer the origin.
-	virtual void			ShiftTrackingOrigin( const idVec3 &trackingDelta ) = 0;
+	// True when it moved: in multiplayer only a room-scale walk's tics move it.
+	virtual bool			ShiftTrackingOrigin( const idVec3 &trackingDelta ) = 0;
+
+	// Turns the tracking space, and the usercmd yaw with it, by yawDegrees
+	// about the head (game API 60): a multiplayer client turns the head onto
+	// a facing the server set from the weapon hand's usercmd.
+	virtual void			TurnBody( float yawDegrees ) = 0;
 };
 
 extern idVRSystem *			vrSystem;
@@ -164,6 +172,12 @@ bool						VR_HasInputFocus( void );
 
 ===============================================================================
 */
+
+// The heading of a tracked pose in its own space, in degrees: where a head or
+// a body faces, steady even while it points at the floor (VR_HeadingDegrees).
+ID_INLINE float VR_PoseHeading( const vrPose_t &pose ) {
+	return VR_HeadingDegrees( VR_Vec3( pose.axis[0].x, pose.axis[0].y, pose.axis[0].z ), VR_Vec3( pose.axis[2].x, pose.axis[2].y, pose.axis[2].z ) );
+}
 
 ID_INLINE idMat3 VR_TrackingAxis( float trackingYaw ) {
 	return idAngles( 0.0f, trackingYaw, 0.0f ).ToMat3();
@@ -380,17 +394,24 @@ ID_INLINE void VR_DrawAimMarker( const renderView_t &view, const vrAimMarker_t &
 
 	While the stick moves the player or turns them smoothly, each eye darkens
 	towards its edges, where the eye notices motion the body does not feel,
-	around a clear centre on the eye's own axis; both eyes' axes are parallel,
-	so the pair fuses at infinity. strength is 0..1: at 1 the clear centre
-	narrows to 60 degrees across and the edge goes black.
+	around a clear centre where the head looks (forward, a world direction):
+	the same direction in both eyes, so the pair fuses at infinity even on a
+	headset whose displays are canted outwards, where each eye's own axis
+	points somewhere else. strength is 0..1: at 1 the clear centre narrows to
+	60 degrees across and the edge goes black.
 
 ===============================================================================
 */
-ID_INLINE void VR_DrawComfortVignette( const renderView_t &view, float strength, const idMaterial *material ) {
+ID_INLINE void VR_DrawComfortVignette( const renderView_t &view, const idVec3 &forward, float strength, const idMaterial *material ) {
 	if ( material == NULL || strength <= 0.01f ) {
 		return;
 	}
 	strength = Min( strength, 1.0f );
+	// the head's forward in this eye's tangents: 0, 0 for an eye looking where
+	// the head does
+	const vrEyeTangent_t centre = VR_EyeTangent( view, view.vieworg + forward * 1024.0f );
+	const float cx = centre.inFront ? centre.x : 0.0f;
+	const float cy = centre.inFront ? centre.y : 0.0f;
 	// tangents of the angle off the eye's axis: where the darkening starts, how
 	// far it ramps, and an outer edge beyond any lens's corner
 	const float clear = idMath::Tan( DEG2RAD( 58.0f - 28.0f * strength ) );
@@ -410,10 +431,10 @@ ID_INLINE void VR_DrawComfortVignette( const renderView_t &view, float strength,
 			float s1, c1;
 			idMath::SinCos( idMath::TWO_PI * static_cast<float>( i ) / static_cast<float>( segments ), s1, c1 );
 			// counter-clockwise in tangent space, which the 2D pass keeps
-			const idVec2 a = VR_EyeCanvasPoint( view, inner * c0, inner * s0 );
-			const idVec2 b = VR_EyeCanvasPoint( view, outer * c0, outer * s0 );
-			const idVec2 c = VR_EyeCanvasPoint( view, outer * c1, outer * s1 );
-			const idVec2 d = VR_EyeCanvasPoint( view, inner * c1, inner * s1 );
+			const idVec2 a = VR_EyeCanvasPoint( view, cx + inner * c0, cy + inner * s0 );
+			const idVec2 b = VR_EyeCanvasPoint( view, cx + outer * c0, cy + outer * s0 );
+			const idVec2 c = VR_EyeCanvasPoint( view, cx + outer * c1, cy + outer * s1 );
+			const idVec2 d = VR_EyeCanvasPoint( view, cx + inner * c1, cy + inner * s1 );
 			renderSystem->DrawStretchTri( a, b, c, vec2_origin, vec2_origin, vec2_origin, material );
 			renderSystem->DrawStretchTri( a, c, d, vec2_origin, vec2_origin, vec2_origin, material );
 			s0 = s1;
@@ -422,5 +443,7 @@ ID_INLINE void VR_DrawComfortVignette( const renderView_t &view, float strength,
 	}
 	renderSystem->SetColor4( 1.0f, 1.0f, 1.0f, 1.0f );
 }
+
+#include "VRBody.h"
 
 #endif /* !__VRSYSTEM_H__ */

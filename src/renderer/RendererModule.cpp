@@ -1717,6 +1717,10 @@ void R_RendererModule_UseSavedSelectionOnReload() {
 	rm_selectionReloadPending = true;
 }
 
+bool R_RendererModule_SelectionReloadPending() {
+	return rm_selectionReloadPending;
+}
+
 bool R_RendererModule_FinishSelectionReload() {
 	if (!rm_selectionReloadPending) return true;
 	if (!RM_AllowImageModuleChange()) return false;
@@ -1738,6 +1742,15 @@ void R_RendererModule_SyncConfiguration() {
 		rm_state.moduleExport.SyncConfiguration();
 	}
 }
+
+// The inventory the last probe of an unloaded Vulkan module took. A probe
+// loads the module, creates a Vulkan instance across every GPU and unloads it
+// again: 300 to 550 ms of the main thread on a hybrid laptop, which every open
+// of the DISPLAY page paid on OpenGL. The GPUs do not change with the screen
+// that asks, so the page reads this (R_RendererModule_RecentRenderingDevices);
+// applying a GPU choice still probes afresh, and that probe refreshes it.
+static bool rm_recentDevicesValid = false;
+static renderDeviceCatalog_t rm_recentDevices{};
 
 bool R_RendererModule_QueryRenderingDevices(renderDeviceCatalog_t& output) {
 	output = {};
@@ -1764,7 +1777,18 @@ bool R_RendererModule_QueryRenderingDevices(renderDeviceCatalog_t& output) {
 	}
 	RM_UnloadModuleBinary(handle,completions);
 	if (!ok) output = {};
+	rm_recentDevicesValid = ok;
+	rm_recentDevices = output;
 	return ok;
+}
+
+bool R_RendererModule_RecentRenderingDevices(renderDeviceCatalog_t& output) {
+	// A live Vulkan module answers from its own instance, as cheaply as this.
+	if (rm_recentDevicesValid && !(rm_state.interfacesPublished && rm_state.status.activeApi==RENDER_MODULE_API_VULKAN)) {
+		output = rm_recentDevices;
+		return true;
+	}
+	return R_RendererModule_QueryRenderingDevices(output);
 }
 
 // stand-ins for a module's device self-test, driving RM_ExportDeviceReady

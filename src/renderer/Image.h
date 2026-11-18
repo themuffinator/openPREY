@@ -414,6 +414,11 @@ bool R_IsMutableRenderImage( const idImage *image );
 bool	R_WriteTGA(const char* filename, const byte* data, int width, int height, bool flipVertical = false, const char* basePath = "fs_savepath");
 // data is in top-to-bottom raster order unless flipVertical is set
 
+// data is RGB (channels 3) or RGBA (channels 4); see ImageTools.h
+bool	R_WritePNG(const char* filename, const byte* data, int width, int height, int channels = 4, bool flipVertical = false, const char* basePath = "fs_savepath");
+// data is RGBA; PNG for a .png filename, otherwise TGA
+bool	R_WriteImageFile(const char* filename, const byte* data, int width, int height, bool flipVertical = false, const char* basePath = "fs_savepath");
+
 
 
 class idImageManager {
@@ -603,7 +608,9 @@ IMAGEFILES
 
 void R_LoadImage(const char* name, byte** pic, int* width, int* height, ID_TIME_T* timestamp, bool makePowerOf2);
 void R_LoadImageForUsage(const char* name, byte** pic, int* width, int* height, ID_TIME_T* timestamp, bool makePowerOf2, textureUsage_t usage);
-bool R_ResolvePreferredDDSImageSource(const char* name, idStr& ddsName, ID_TIME_T* timestamp, bool allowPrecompressedDDS, bool* precompressedDDS);
+// retailResultSuperseded: set when Quake 4's own progimg/ result was passed over
+// because one of the program's inputs comes from outside the shipped packs.
+bool R_ResolvePreferredDDSImageSource(const char* name, idStr& ddsName, ID_TIME_T* timestamp, bool allowPrecompressedDDS, bool* precompressedDDS, bool* retailResultSuperseded = NULL);
 // enables per-candidate DDS probe memoization for the duration of a level
 // load; disabling also clears all memoized probe results
 void R_SetDDSProbeCacheActive(bool active);

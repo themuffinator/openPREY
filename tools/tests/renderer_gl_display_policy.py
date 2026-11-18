@@ -52,8 +52,13 @@ static void *s_glWindow=(void*)1,*s_glContext=(void*)1;
 static const char* R_GLVideoError(){return "injected";}
 static bool SDL3_EnsureGLContextCurrent(const char*){return contextOkay;}
 using GLenum=unsigned;using GLuint=unsigned;using GLint=int;using GLboolean=bool;
-// no VR frame: the window is the default framebuffer (RenderTexture.h); 0x0405 is GL_BACK
-static GLuint R_DefaultFramebufferHandle(){return 0;}
+// no VR frame: the window is the default framebuffer (RenderTexture.h); 0x0405 is GL_BACK.
+// standInSamples >= 0 puts a stand-in with that many samples in the window's place.
+static int standInSamples=-1;
+static bool windowCarries=true;
+static GLuint R_DefaultFramebufferHandle(){return standInSamples>=0?7u:0u;}
+int R_DefaultRenderTargetSamples(){return standInSamples>1?standInSamples:0;}
+bool R_WindowCarriesMultisampling(){return windowCarries;}
 static GLenum R_DefaultColorBuffer(){return 0x0405u;}
 GL_CONSTANTS
 enum {TT_2D,TT_CUBIC,FMT_DEPTH,FMT_DEPTH_STENCIL,FMT_RGBA16F,TF_LINEAR,TF_NEAREST,TR_CLAMP,TD_DEFAULT,TD_DEPTH};
@@ -69,6 +74,9 @@ struct idImage {
     bool IsFileBacked()const{return false;}
     bool CopyDepthbuffer(int,int,int,int,int=0);
 };
+// FPS-05: CopyDepthbuffer counts a resolve out of a multisampled target.
+static int msaaResolves=0;
+void R_CountMSAAResolve(bool){++msaaResolves;}
 struct RenderTexture {
     idImage* depth=nullptr;int width=1280,height=720;
     idImage* GetDepthImage(){return depth;}int GetDeviceHandle(){return 9;}
@@ -109,7 +117,7 @@ static bool R_TemporalPresentation_ScreenSpaceEffectsRequested(){return effects;
 static bool R_ModernGLExecutor_ModernVisibleRequestedForPost(){return modern;}
 static idImage sceneColor,sceneDepth,*rbSceneColorImage=nullptr,*rbSceneDepthStencilImage=nullptr;
 static RenderTexture sceneTexture,*rbSceneRenderTexture=nullptr;
-static int rbSceneRenderTextureSamples=0,rbBackendTemporalHistoryFrame=0;
+static int rbSceneRenderTextureSamples=0,rbBackendTemporalHistoryFrame=0,rbSceneRenderTargetClearedFrame=0;
 static bool rbBackendTemporalHistoryValid=true;
 struct Images {
     idImage* ScratchImage(const char* name,const idImageOpts* opts,int,int,int){
@@ -170,6 +178,23 @@ int main(){
     R_DisplayPresentationParameters(4,1,-1,0);blits=copies=readPixels=0;
     assert(!depthCopy.CopyDepthbuffer(0,0,32,32));assert(!blits&&!copies&&!readPixels);
     assert(RB_EnsureSceneRenderTexture(&view));assert(sceneColor.opts.numMSAASamples==0);
+    {
+        // A window that carries no samples leaves the count to the setting, which the
+        // views' render targets follow; the setting itself is never written.
+        const int archived=r_multiSamples.value;
+        windowCarries=false;r_multiSamples.value=4;R_DisplayPresentationParameters(0,1,-1,RDP_PARAMETER_SAMPLES);
+        assert(R_DefaultFramebufferSamples()==0 && R_ViewFramebufferSamples()==4);
+        assert(RB_EnsureSceneRenderTexture(&view));assert(sceneColor.opts.numMSAASamples==4);
+        r_multiSamples.value=1;assert(R_ViewFramebufferSamples()==0);
+        // a VR stand-in stays single-sample whatever the setting
+        r_multiSamples.value=4;standInSamples=0;assert(R_ViewFramebufferSamples()==0);standInSamples=-1;
+        // unknown window samples still authorize nothing
+        R_DisplayPresentationParameters(0,1,-1,0);assert(R_ViewFramebufferSamples()==-1);
+        assert(RB_EnsureSceneRenderTexture(&view));assert(sceneColor.opts.numMSAASamples==0);
+        // a window that does carry samples keeps its own count, not the setting's
+        windowCarries=true;R_DisplayPresentationParameters(2,1,-1,RDP_PARAMETER_SAMPLES);assert(R_ViewFramebufferSamples()==2);
+        r_multiSamples.value=archived;R_DisplayPresentationParameters(4,1,-1,0);
+    }
     SDL3_RecordDisplayParameters();R_DisplayPresentationShutdown();
     assert(!depthCopy.CopyDepthbuffer(0,0,32,32));assert(RB_EnsureSceneRenderTexture(&view));assert(sceneColor.opts.numMSAASamples==0);
 #else
@@ -184,6 +209,12 @@ int main(){
     glConfig.isInitialized=false;assert(R_DefaultFramebufferSamples()==-1);
     assert(!depthCopy.CopyDepthbuffer(0,0,32,32));assert(RB_EnsureSceneRenderTexture(&view));assert(sceneColor.opts.numMSAASamples==0);
 #endif
+    assert(!r_multiSamples.writes);
+    // A stand-in for the window reports its own samples, whatever the window has:
+    // a VR eye is single-sample, a window view multisampled.
+    standInSamples=0;assert(R_DefaultFramebufferSamples()==0 && R_ViewFramebufferSamples()==0);
+    standInSamples=8;assert(R_DefaultFramebufferSamples()==8 && R_ViewFramebufferSamples()==8);
+    standInSamples=-1;
     assert(!r_multiSamples.writes);
 }
 '''
@@ -205,6 +236,20 @@ def main():
     for signature in ('bool GLimp_Init(', 'void GLimp_Shutdown('):
         body = function_body(gl, signature)
         assert 's_strictSwapIntervalActive = false;' in body
+    # The renderer's scene target starts every frame from the window's r_clear
+    # color: a 3D view clears only depth and stencil, and pixels no surface
+    # covers otherwise carried the last composite into bloom again (frozen
+    # render-demo playback brightened frame by frame). The first view of the
+    # frame clears it, before an imported portal-sky backdrop draws into it.
+    backend = (ROOT / 'src/renderer/tr_backend.cpp').read_text(encoding='utf-8')
+    assert 'RB_FrameClearColor( c )' in function_body(backend, 'static void\tRB_SetBuffer(')
+    frame_clear = function_body(draw, 'static void RB_BeginSceneRenderTargetFrame(')
+    assert 'rbSceneRenderTargetClearedFrame == backEnd.frameCount' in frame_clear
+    assert 'RB_FrameClearColor( color )' in frame_clear and 'glClear( GL_COLOR_BUFFER_BIT );' in frame_clear
+    assert 'rbSceneRenderTargetClearedFrame = -1;' in scene
+    view = function_body(draw, 'void\tRB_STD_DrawView( void )')
+    assert view.index('backEnd.renderTexture->MakeCurrent();') < view.index('RB_BeginSceneRenderTargetFrame();') \
+        < view.index('RB_DrawPortalSkyBackdrop( portalSkyBackdrop );')
     compiler = next((path for name in ('clang++', 'g++', 'c++') if (path := shutil.which(name))), None)
     if not compiler:
         raise RuntimeError('C++ compiler required')

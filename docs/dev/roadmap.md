@@ -20,15 +20,15 @@ multiplayer and audio are furthest along among the unfinished workstreams. Full
 campaign progression, physical-device qualification, rendering performance and the
 UI toolkit/editor/corpus remain major completion gates.
 
-| Progress measure, 8 November 2026 | Current result | Meaning |
+| Progress measure, 15 November 2026 | Current result | Meaning |
 | --- | --- | --- |
-| Formally closed roadmap tasks | **36 / 125 (28.8%)** | **89 remain open**. Counts all stable top-level task checkboxes, including Q4-01 through Q4-09 and FPS-01 through FPS-09, not partial substeps. |
-| Estimated category progress | **19 categories: 3 at 100%, 14 partial, 2 at 0%** | Governance (GOV), engine loading (CORE) and developer map tools (TOOL) are complete; the detailed estimates follow. |
+| Formally closed roadmap tasks | **40 / 149 (26.8%)** | **109 remain open**. Counts all stable top-level task checkboxes, including Q4-01 through Q4-09 and FPS-01 through FPS-09, not partial substeps. |
+| Estimated category progress | **20 categories: 3 at 100%, 15 partial, 2 at 0%** | Governance (GOV), engine loading (CORE) and developer map tools (TOOL) are complete; the detailed estimates follow. |
 | UI active requirements | **0 / 312 verified; 117 partial, 195 pending** | Excludes 40 superseded rows from the 352-row register. |
 | UI corpus and final gates | **0 / 358 migration variants accepted; 0 / 7 final gates accepted** | Working screens and passing checkpoint validators do not grant product acceptance. |
 | Quality frame-time reference | **Gate still failing** | Recorded Vulkan reference: 8.76 ms mean, 13.80 ms p99, 24.08 ms maximum against **every frame <=6.67 ms**. Later prototype runs do not close it. |
 | Ultra frame rate at 2560x1440 | **91-188 fps on GL, 96-188 fps on Vulkan, on the reference laptop; every tier meets its refresh class** | FPS-02 re-tiered the presets to refresh classes (Enhanced 144/90, Quality 100/60, Ultra 75/45 average/1% low) and all three meet them in every scene on both backends; the previous everything-on Ultra (19-58 fps on GL) is now the Maximum preset with no frame-rate target. Budgets are in [`performance-budgets.json`](performance-budgets.json). See the FPS category and the [performance report](performance-report.md). |
-| Release acceptance | **0 / 4 REL tasks closed** | Current-source progress is unreleased; 0.13.2 remains the available release under the recorded release-status policy. |
+| Release acceptance | **0 / 4 REL tasks closed** | 0.14.1 (November 2026) is the available release. It shipped ahead of these gates, which stay open for final-package acceptance; later source progress is unreleased. |
 
 ### Category completion estimates
 
@@ -52,15 +52,16 @@ exact; the estimate column is deliberately approximate.
 | [Governance and baseline evidence](#governance-and-baseline-evidence) — GOV | **100%** | 3 / 3 | Maintain evidence/default alignment as later changes land. |
 | [High refresh presentation and input](#high-refresh-presentation-and-input) — HF | **80%** | 6 / 8 | Reference pacing, physical latency and visual motion review. |
 | [Vulkan rendering](#vulkan-rendering) — VK | **70%** | 1 / 7 | Driver breadth, visible pacing, material/HDR/capture combinations and resource soaks. |
-| [Modern rendering engine](#modern-rendering-engine) — REN | **50%** | 0 / 8 | Domain promotion, aggregate lighting ownership and combined-effect/performance qualification. |
+| [Vulkan ray tracing](#vulkan-ray-tracing) — RT | **0%** | 0 / 7 | Scope, budget and licence decisions, acceleration structures, hybrid effects, path tracing, denoising and qualification. |
+| [Modern rendering engine](#modern-rendering-engine) — REN | **60%** | 2 / 8 | Aggregate lighting ownership, combined-effect/performance qualification and platform breadth. |
 | [Frame-rate recovery and performance budgets](#frame-rate-recovery-and-performance-budgets) — FPS | **30%** | 2 / 9 | Preset re-tiering, shadow-map/post/MSAA cost, equal-settings regressions, hitches and the release gate. |
-| [Virtual reality](#virtual-reality) — VR | **75%** | 4 / 6 | Real-headset gameplay, comfort and frame budgets; Quest waits on AND-05. |
-| [Android and mobile rendering](#android-and-mobile-rendering) — AND | **66%** | 1 / 5 | Device/lifecycle breadth, setup upgrades, mobile UI qualification and Quest. |
+| [Virtual reality](#virtual-reality) — VR | **75%** | 4 / 6 | Real-headset gameplay, comfort and frame budgets; standalone Quest needs a headset (AND-05). |
+| [Android and mobile rendering](#android-and-mobile-rendering) — AND | **70%** | 1 / 5 | Device/lifecycle breadth, setup upgrades, mobile UI qualification and Quest on a headset. |
 | [iOS, iPadOS and visionOS](#ios-ipados-and-visionos) — IOS | **5%** | 0 / 6 | Adoption decisions, patch integration, platform builds and hardware acceptance. |
 | [New user interface](#new-user-interface) — UI | **30%** | 1 / 11 | Production toolkit/editor, full source-bound migration, input/accessibility and seven gates. |
 | [Retail compatibility and campaigns](#retail-quake-4-compatibility-and-campaigns) — Q4 | **75%** | 1 / 9 | Full playthroughs, effect parity, broader restore graphs, platform/save evidence and campaign-demo breadth. |
-| [Enhanced rigid-body and ragdoll physics](#rigid-body-and-ragdoll-physics) — PHYS | **0%** | 0 / 6 | Measured baseline, enhanced solvers, behavior preservation and integration. |
-| [Multiplayer, bots, Arena and demos](#multiplayer-bots-arena-and-demos) — MP | **80%** | 3 / 9 | Human play, physical workflows and deferred peer qualification; retain MP-02's accepted timing caveat. |
+| [Enhanced rigid-body and ragdoll physics](#rigid-body-and-ragdoll-physics) — PHYS | **90%** | 3 / 6 | CPU overruns on two of five workloads per platform (bounds proposed as exceptions, not accepted; `sp-ragdolls` on Linux now 65 %); the full Linux pass repeated on the build with exact math (cut short on 17 November); a windowed review in motion and the default decision. |
+| [Multiplayer, bots, Arena and demos](#multiplayer-bots-arena-and-demos) — MP | **55%** | 3 / 26 | Human play, physical workflows and deferred peer qualification; the 15 November reference-parity items (casual match flow, pools, modifiers, HUD, spectating, identity, moderation, discovery, movement), the demo container, workflow, storage and robustness items, MP-25 splitscreen and MP-26 Horde; retain MP-02's accepted timing caveat. |
 | [Audio and voice](#audio-and-voice) — AUD | **80%** | 0 / 7 | Listening/microphone/device checks, mobile memory and dialogue/subtitle coverage. |
 | [Desktop platforms](#desktop-platforms-and-packaging) — PLAT | **55%** | 0 / 5 | Deck/ARM64/macOS physical signoff and package/device lifecycle breadth. |
 | [Packaging improvements](#pkg-completion-checkpoints) — PKG | **10%** | 0 / 6 | Update archives, pack split/trim, overlays and delta delivery. |
@@ -179,7 +180,7 @@ The #209 entry was separately refreshed from GitHub and its supplied maps on
 | [#185: GOG offline installation on macOS](https://github.com/themuffinator/openQ4/issues/185) | PLAT-04/REL-01: provide extraction/path guidance and qualify the reporter's installer/package combination; do not imply that openQ4 imports Windows installers. |
 | [#186: subtitles](https://github.com/themuffinator/openQ4/issues/186) | AUD-07/UI-02/UI-04: define supported dialogue text, timing, localization and accessible display coverage. |
 | [#187: dialogue volume](https://github.com/themuffinator/openQ4/issues/187) | AUD-06/UI-01: independent spoken-dialogue gain with real mixer classification and persistent settings. |
-| [#173: high-DPI menu cursor PR](https://github.com/themuffinator/openQ4/pull/173) | UI-02/PLAT-05: preserve controller-to-mouse handoff and console ownership; requalify against current routing. |
+| [#173: high-DPI menu cursor PR](https://github.com/themuffinator/openQ4/pull/173) | UI-02/PLAT-05: the widescreen clamp half landed on main on 16 November, credited to the contributor: a menu's cursor bounds no longer depend on the aspect mode of the GUI drawn last. The absolute-position routing was not taken: it conflicts with #207 and its zero-delta motion breaks the controller-to-mouse handoff. Remaining: requalify Retina sticking against current routing, keeping a non-zero motion signal and explicit console ownership. |
 | [#180: GUI save migration PR](https://github.com/themuffinator/openQ4/pull/180) | Q4-05/Q4-07/UI-09: landed on main in `2677fb87b` (29 October) and closed on 31 October; main's push verification at `b9c663758` passed on every platform. Contributor Linux restore/update evidence is retained; Windows, macOS and ARM64 historical-save qualification remains a distinct gate. |
 | [#189: medic approach watchdog PR](https://github.com/themuffinator/openQ4/pull/189) | Q4-02: bounded stall recovery, SP/MP parity, restore behavior and normal heal/progression regression; does not by itself prove #184 resolved. Merged on 31 October in `fcaaeb198`, with the `release-completion.md` conflict resolved by keeping both entries. The SP and MP objects compile cleanly on Windows, the watchdog contract passes, and main's push verification at `f0a86b0ec` passed all eight jobs. |
 | [#190: numeric clipboard harness PR](https://github.com/themuffinator/openQ4/pull/190) | CORE-04/GOV-02: mock-interface fix merged; the subsequent atlas math-include fix passes locally. Complete fresh CI without suppressing checks; neither fixture fix alone qualifies the full product. |
@@ -190,6 +191,7 @@ The #209 entry was separately refreshed from GitHub and its supplied maps on
 | [#203: complete push-payload history](https://github.com/themuffinator/openQ4/pull/203) / [#205: packaged saves rejected as build 1](https://github.com/themuffinator/openQ4/issues/205) | REL-01/Q4-05/GOV-02: source review approved at `e178a61b`; the exact build-history regression and all three shallow-checkout negative controls pass on Windows. Main's payloads at `b9c663758` passed CI but still used a single-commit checkout, so they also report build 1 (the real count is 1905). #203 merged on 31 October in `18117f896`. #205 closed on 31 October: the Windows x64 payload from push verification at `f0a86b0ec` (artifact 13033914500) reports build 1920. In SP on `game/airdefense1`, its save committed with header build 1920, format 4, and loaded back into gameplay in a fresh profile. The replacement was linked from #168, #170, #183, #184 and #192. The Linux, macOS and Windows ARM64 payloads were not loaded. |
 | [#204: missing music in signed macOS 0.14.000](https://github.com/themuffinator/openQ4/issues/204) | PLAT-04/AUD-01: the report uses MacSourcePorts' signed build of withdrawn 0.14.0. The reporter recalls music and console ambience also missing in 0.13.2; their log has been requested. Their Hannibal opaque-window report matches the portal fade-distance fix `d361e62ea`, and the briefing-hologram decal report is to be filed separately. Signing does not establish a later engine revision. Preserve saves and package separation in any comparison; 0.13.2 cannot read format-4 saves. |
 | [#209: airdefense1/core1 excessive compile time](https://github.com/themuffinator/openQ4/issues/209) | CORE-05: the compile-time fix is on `main` since 6 November but in no Windows test build yet. Profiling the supplied maps against the retail packages found passes that scanned per-plane curve groups, crowded vertex bins or growing triangle lists once per triangle. With indexes and tails, the supplied `airdefense1` compiles in 4-5 minutes and `core1` in about 3, and six stock maps give byte-identical `.proc` and AAS output. The rebuilt `airdefense1` loads, renders and navigates in SP. The reporter's later logs predate that fix (their `walker` 4,046 s and `putra` 12,376 s of dmap; current source 83 s and 370 s). Their `walker` road streaks, reproduced on stock `walker`, were seams between consecutive patches welded by optimize grouping; fixed locally on 9 November, not yet published. A black sky (likely an `hidef2kbc72` cube map) and a slow `putra` load await reporter details. Keep open for confirmation on a published build. Separate from #181. See [compile time on dense patches](dmap-compilation.md#compile-time-on-dense-patches-6-november-2026) and [texture seams](dmap-compilation.md#texture-seams-between-consecutive-patches-9-november-2026). |
+| [#217: hidef2k mod black helmets](https://github.com/themuffinator/openQ4/issues/217) | Q4-01: two causes. On the reporter's `J:` install, loose source textures make about 1,050 packed replacements look stale, so `airdefense1` loads 17.5 GB uncompressed against 3.5 GB from a copy of the same packs on `M:`; the reporter is finding them. On main since 17 November, BC7 files feed image programs (CPU decode, bit-exact against two reference decoders over 32,000 blocks) and `downsize(x, N)` takes `x`'s own DDS ahead of the stock `progimg/` result, so a pack's character, weapon and monster textures show; checked on GL and Vulkan with a BC7 test pack. Also on main since 17 November (render API 36): Quake 4's `progimg/` result is set aside when any input of the program resolves outside the shipped packs (`idFileSystem::GetFileOrigin`: retail PK4s by checksum, openQ4's own packs), and the rebuilt bump map is stored as DXT5 RXGB rather than RGBA8. A stock `airdefense1` load sets aside none of its 270 bump maps; with the test pack only the helmet's, whose cached DXT5 decodes to the pack's normal (X in alpha, Z in blue). |
 | [rebelancap/openQ4-ios: iPhone, iPad and Apple Vision Pro port](https://github.com/rebelancap/openQ4-ios) | IOS-01 through IOS-06: a tested external port (v1.1.0), pinned to withdrawn `v0.14.000` as patches over a pristine upstream; porting from it is preferred. Integrate shared fixes on main first, then the Apple targets, crediting its author. Its user reports do not qualify the integrated build. |
 | [26 October main verification](https://github.com/themuffinator/openQ4/actions/runs/40277373140) | GOV-02/CORE-04/PLAT-04: Windows x64, Linux x64/ARM64 and three macOS jobs passed. Windows ARM64 has the failures above; macOS Intel Metal timed out in renderer-foundation self-tests. The Windows payload subsequently proved unable to save because its shallow checkout produced build 1 (#205). Preserve those failures; passing CI did not qualify packaged save/load or the failed targets. |
 | [29 October main verification](https://github.com/themuffinator/openQ4/actions/runs/40951670759) | GOV-02/CORE-04/PLAT-04: all eight push-verification jobs passed at `b9c663758`, including Windows ARM64 (305/305 native tests) and the Intel macOS OpenGL route. Its payloads still report build 1 (#205), so this run does not qualify packaged save/load. |
@@ -202,13 +204,13 @@ The #209 entry was separately refreshed from GitHub and its supplied maps on
 | High refresh | Rendering is decoupled from exact 60 Hz scheduling. Camera, view weapon, eligible world transforms and skeletons interpolate; local multiplayer body presentation, ordinary joint modifiers, clock-phase correction and weapon GUI, muzzle-flash and flashlight lights are aligned. Alternate views, client debris and active ragdoll poses share the clock, and opt-in late look turns the drawn view toward unapplied input. Remote actors and the recorded exclusions in the [presentation owners contract](presentation-owners.md) remain separate work. |
 | Game time | Ordinary game code advances in 16 ms steps. Network game timestamps deliberately use that same clock while scheduling uses the exact 60 Hz ladder. Do not apply a global 16-to-16.667 ms conversion as a presentation fix. |
 | Vulkan | Stable supported on Windows x64 following the October NVIDIA/Intel qualification; experimental on Linux and macOS. The user-requested 28 October GPU policy makes fresh desktop `best` prefer compatible high-performance Vulkan hardware with OpenGL fallback; saved explicit choices persist. Android keeps GLES. This does not expand hardware qualification. Historical failed runs remain evidence for their specific builds and conditions. |
-| Modern rendering | Native GL/Vulkan PBR is default-on for authored PBR materials; stock materials stay classic. Shared classic rendering domains exist but remain default-off. Aggregate modern-visible lighting still has `MODERN_LIGHTING_PARITY_PROVEN_DOMAINS=0`; these are different promotion decisions. |
+| Modern rendering | Native GL/Vulkan PBR is default-on for authored PBR materials; stock materials stay classic. Shared classic rendering domains are qualified individually on Windows GL/Vulkan (REN-01) and remain default-off. Aggregate modern-visible lighting still has `MODERN_LIGHTING_PARITY_PROVEN_DOMAINS=0`; these are different promotion decisions. |
 | Temporal rendering | Automatic TAAU supports subnative bilinear/bicubic scaling and dynamic resolution on eligible desktop GL/Vulkan paths; crop/nearest modes are excluded, and VR takes only explicit per-eye TAA (`r_temporalAA 1`), without dynamic resolution. Rigid, skinned and first-person weapon motion vectors and reactive effect coverage exist. Dynamic resolution and GPU skinning remain opt-in. GLES has no temporal resolve. |
-| VR | The active source implements PC OpenXR on OpenGL (GLX/WGL, and EGL on Wayland) and Vulkan, headset submission without desktop presentation, stereo, tracked input, room scale, standing/seated play spaces, crouch, two-handed aiming, world-GUI pointing, per-eye TAA, haptics, comfort controls and vehicle views, all qualified on the simulated runtime. Quest standalone waits on AND-05; real-headset qualification remains open ([checklist](vr-headset-qualification.md)). |
-| Android | Experimental ARM64/API 24+ GLES3 client, SDLActivity host, in-tree game modules, signed APK/release verification and dependency licensing are implemented. Onboarding/import/export, touch, the per-orientation touch layout editor, the background suspension save and multiplayer resume are integrated with scoped S25/emulator evidence. Physical device/lifecycle breadth stays open under AND-01 through AND-05. |
+| VR | The active source implements PC OpenXR on OpenGL (GLX/WGL, and EGL on Wayland) and Vulkan, headset submission without desktop presentation, stereo, tracked input, room scale, standing/seated play spaces, crouch, two-handed aiming, world-GUI pointing, per-eye TAA, haptics, comfort controls and vehicle views, all qualified on the simulated runtime. A standalone Meta Quest flavor (AND-05) is integrated and checked on the emulator's simulated headset; real-headset qualification remains open ([checklist](vr-headset-qualification.md)). |
+| Android | Experimental ARM64/API 24+ GLES3 client, SDLActivity host, in-tree game modules, signed APK/release verification and dependency licensing are implemented. Onboarding/import/export, touch, the per-orientation touch layout editor, the background suspension save and multiplayer resume are integrated with scoped S25/emulator evidence. A Meta Quest flavor (OpenXR on the GLES renderer) is integrated with emulator evidence only. Physical device/lifecycle breadth stays open under AND-01 through AND-05. |
 | UI | Many retained screens and HUDs now run by default. The register preserves 352 rows, 312 active requirements and 40 superseded rows. UI-10 reconciled retail/base/Awakening mounts to 358 source/include-bound variants; all remain unaccepted for migration. Historical hashes and invalidated inventory acceptance are preserved. |
 | Retail and Awakening | Canonical SP/MP sources and BSE are in-tree. Awakening is additive SP content under `q4xbase`, not a separate multiplayer module. Retail decl/BSE audits, stock transition chains and selected Awakening-state probes have scoped evidence; full playthroughs remain open. Saves now write portable v5 with Windows/Linux cross-load evidence while retaining legacy readers; other target qualification remains Q4-06/Q4-07. |
-| Multiplayer | Dual-stack networking, pure asset checks and bounded rcon2 exist. Actual MP defaults are `net_mpLagCompensation 0` and `net_mpPredictMode 0`. Clients advertise bounded remote extrapolation, and server rewind subtracts it from the displayed pose age; the coupled implementation and remaining peer qualification are recorded under MP-07. Retail 2.85 interoperability is outside the current openQ4 2.41 protocol contract. |
+| Multiplayer | Dual-stack networking, pure asset checks and bounded rcon2 exist. Actual MP defaults are `net_mpLagCompensation 0` and `net_mpPredictMode 0`. Clients advertise bounded remote extrapolation, and server rewind subtracts it from the displayed pose age; the coupled implementation and remaining peer qualification are recorded under MP-07. Retail 2.85 interoperability is outside the current openQ4 2.42 protocol contract. |
 | Platforms | Windows x64 and Linux x64/Steam Deck are first-class platform targets; macOS arm64 and Linux ARM64 are previews; Windows ARM64 and Android are experimental. iOS, iPadOS and visionOS run only in an external port pinned to withdrawn `v0.14.000`; integration is IOS-01 through IOS-06. Renderer tiers are separate from platform tiers. |
 | Foundations and tools | The bounded job service, worker DDS prefetch, generated-cache experiments, native dmap/AAS commands, save-format compatibility readers and experimental map workspace already exist. Their remaining scope is defined below. |
 
@@ -217,10 +219,10 @@ The #209 entry was separately refreshed from GitHub and its supplied maps on
 | Stage | Work to conduct | Exit condition |
 | --- | --- | --- |
 | 1. Establish the current baseline — complete | GOV-01 through GOV-03, HF-01/HF-02, Q4-01, UI-10; scope/recovery review for VR-01/VR-06 and AND-01 | Current-source ownership, clocks, compatibility inventory, tests and evidence identities agree. [Closure evidence](baseline-evidence.md) retains reproduced failures and later-stage qualification limits. |
-| 2. Close product gaps — in progress | UI-01/UI-02 plus the first UI-06 editor round trip, UI-07 measurements and UI-09 toolkit work, then UI-03/UI-04 at accepted scope; Q4-02 through Q4-05/Q4-07/Q4-08, MP-01 through MP-09 and AUD-01 through AUD-07; selected VR-01 and AND-01/AND-03 scope; preserve completed VR-06 | Required player flows work through the intended UI and runtime; remaining unsupported cases are explicit and fail safely. |
+| 2. Close product gaps — in progress | UI-01/UI-02 plus the first UI-06 editor round trip, UI-07 measurements and UI-09 toolkit work, then UI-03/UI-04 at accepted scope; Q4-02 through Q4-05/Q4-07/Q4-08, MP-01 through MP-09, MP-12, MP-17 through MP-22, MP-24 and AUD-01 through AUD-07; selected VR-01 and AND-01/AND-03 scope; preserve completed VR-06 | Required player flows work through the intended UI and runtime; remaining unsupported cases are explicit and fail safely. |
 | 3. Improve motion and rendering — in progress | Preserve closed HF-03 through HF-06 and VK-03; finish HF-07/HF-08, remaining VK-01 through VK-07 scope, REN-01 through REN-08 and FPS-01 through FPS-09 | Visible gameplay meets declared correctness, latency and frame-time budgets with rollback paths intact. |
-| 4. Complete tools and broader quality | Remaining UI-06 scope, CORE-01 through CORE-06, PHYS-01 through PHYS-06, STEAM-01 through STEAM-05, IOS-01 through IOS-04, remaining P2 items (TOOL-01 through TOOL-04 closed 6 November 2026) | Authoring and runtime workloads meet their stated completion gates; optimizations are justified by measurements. |
-| 5. Qualify packages and promote scope | PLAT-01 through PLAT-05, PKG-01 through PKG-05, STEAM-06, IOS-05/IOS-06, REL-01 through REL-04, UI-07/UI-08/UI-11, VR-02, AND-02 and selected AND-05 scope | Exact release packages pass the selected platform, device, gameplay, visual and human acceptance matrix. |
+| 4. Complete tools and broader quality | Remaining UI-06 scope, CORE-01 through CORE-06, PHYS-01 through PHYS-06, STEAM-01 through STEAM-05, IOS-01 through IOS-04, remaining P2 items, including MP-10, MP-11, MP-13 through MP-16, MP-23, MP-25, MP-26 and RT-01 through RT-06 (TOOL-01 through TOOL-04 closed 6 November 2026) | Authoring and runtime workloads meet their stated completion gates; optimizations are justified by measurements. |
+| 5. Qualify packages and promote scope | PLAT-01 through PLAT-05, PKG-01 through PKG-05, STEAM-06, IOS-05/IOS-06, REL-01 through REL-04, UI-07/UI-08/UI-11, VR-02, RT-07, AND-02 and selected AND-05 scope | Exact release packages pass the selected platform, device, gameplay, visual and human acceptance matrix. |
 
 Independent workstreams may proceed together. GPU/renderer optimization depends on
 the current timing and workload baseline; UI cutover depends on its complete
@@ -235,7 +237,7 @@ to a final project-wide phase. Important dependencies are:
 | --- | --- |
 | Full UI migration/cutover | UI-10 refreshed inventory and resolved scope; a real SYSTEM editor round trip and RmlUi decision at `GATE-003`; shared toolkit/editor qualification at `GATE-004`; UI-11 evidence-controlled acceptance. Working screens may continue to improve before full-product acceptance. |
 | Remote-player smoothing or lag-compensation promotion | HF-01 and MP-07 must define the displayed remote pose, extrapolation and server rewind together. Do not enable both corrections independently. |
-| Quest VR integration | VR-01's PC Vulkan/EGL integration and VR-06 lifecycle are in place; AND-01's flavor-aware package checks are in place; the standalone flavor's Gradle side, installation and distribution decision are AND-05. PC headset qualification (VR-02) can proceed independently. |
+| Quest VR integration | VR-01's PC Vulkan/EGL integration and VR-06 lifecycle are in place; AND-01's flavor-aware package checks are in place; the standalone flavor is integrated (AND-05, 12 November), and its headset qualification and distribution decision remain AND-05. PC headset qualification (VR-02) can proceed independently. |
 | Android sustained operation | AND-02 includes AUD-03/CORE-03 aggregate memory and cancellation behavior, not only renderer FPS. |
 | Modern-renderer promotion | Each REN-01 shared-domain gate is separate from REN-02 aggregate visible-lighting ownership. Keep their defaults and rollback decisions independent. |
 | Preset re-tiering (FPS-02) | FPS-01's recorded budgets first; the FPS-03, FPS-04 and FPS-05 cost reductions decide what each tier can afford. HF-07's Quality floor and FPS-02's Ultra budget are measured by the same suite on the same reference machine; neither is qualified from a hidden or windowed capture. |
@@ -244,6 +246,12 @@ to a final project-wide phase. Important dependencies are:
 | Steam integration (STEAM-02 through STEAM-06) | STEAM-01's app-identity, licence and distribution decision first. Joining and invites use MP-08's interoperability contract and the existing MP join flow. Steam absent or disabled always runs the unchanged path. |
 | iOS and visionOS (IOS-02 through IOS-06) | IOS-01's patch inventory and build, layout and distribution decisions first. Shared fixes land through IOS-02, with regression evidence on the existing platforms, before the Apple targets build on them. visionOS stereo shares the VR stereo front end (VR-01/VR-06). Device qualification needs Apple hardware this project does not have. |
 | Portable saves (Q4-06) | Q4-05's restore validation and Q4-07's historical readers stay authoritative for existing saves. Cross-platform qualification on a target follows that target's platform evidence (PLAT/AND), and the stages run in their listed order. |
+| Casual match flow, moderation and ranking (MP-12, MP-17, MP-18) | MP-17's identity decision before bans keyed to identity, reconnect restoration and ratings; casual timeouts and votes reuse the managed `MatchTime()` pause and proposal pipeline rather than a second one. Address bans, flood control and the inactivity policy need no identity. |
+| Demo container, workflow, storage and robustness (MP-21 through MP-24) | MP-21's container and registry before MP-22's client recording and MP-23's MVD compression; MP-24's fixtures accompany every format change. MP-05 stays closed at its selected scope, and every version a release wrote keeps its reader. |
+| Multiplayer splitscreen (MP-25) | Multiplayer only: the single-player game and the Awakening campaign never gain local players. Each local player is an ordinary client on the wire, so MP-08's protocol, MP-17's identity, MP-18's per-client caps and MP-22's client recording apply per player without a second path. Per-viewport HUD and menus build on the retained interface (UI-03/UI-04/UI-09); per-viewport cost is measured against FPS-01's budgets before any preset enables effects in splitscreen. |
+| Horde (MP-26) | Monster snapshot state is a protocol change: it follows MP-08's packet budget and MP-21's registry and keeps every older demo playable. Wildcard waves reuse MP-14's modifier layer, maps and presets go through MP-13 and MP-14, bots as fighters build on MP-09, and Horde stays unranked under MP-17. The stock Quake 4 roster only; Awakening content stays scoped to its campaign. |
+| Vulkan ray tracing (RT-02 through RT-07) | RT-01's hardware, budget, licence and translation decisions first. Ray tracing builds on VK-03 admission, VK-06 resource counters and the existing TAAU, motion vectors and GPU skinning paths; RT-06 follows the VK-05/VK-07 capture and HDR work and VR-01 stereo. `r_rayTracing 0` always runs the unchanged Vulkan path, and no other renderer depends on it. |
+| Server discovery (MP-19) | A decision on a project-controlled master or list service before the Internet source can be qualified on a fresh install; Steam lobbies and matchmaking remain STEAM/OPT-09. |
 
 ## Governance and baseline evidence
 
@@ -657,6 +665,18 @@ and untested drivers remain open, with no tolerance or support-tier change.
   layers logged nothing in any of the 102 Vulkan runs. This does not cover
   later Vulkan back-end commits on main, AMD, VK-02 pacing or the VK-04 image
   gates.
+  Progress, 16 November: device loss under video-memory pressure (#217, #231:
+  an uncompressed 16 GB texture pack on a 12 GB NVIDIA card) now degrades
+  instead of wedging. Mipmapped material textures give up top levels as the
+  device-local heap passes 80/90/97% of `r_vkTextureMemoryLimit` (default 90%
+  of the `VK_EXT_memory_budget` budget), and retry one level smaller on an
+  out-of-memory result. A blocked device takes no new images or staging,
+  refused staging is freed at once, and a level load stops decoding until the
+  queued restart. Verified on the RTX 4060 laptop with a 7.8 GB test pack under
+  `r_vkTextureMemoryLimit 2500` and with the presentation-failure drill during
+  a load, through to the next-launch OpenGL fallback. The NVIDIA desktop loss
+  itself and an unlimited oversubscription run were not reproduced; reporter
+  confirmation on the original hardware remains open.
 - [ ] **VK-02 — P1, investigation and qualification: visible presentation pacing.**
   Reproduce the hybrid-adapter/power-state conditions using current foreground
   windowed workloads and unchanged budgets. Separate host scheduling, fence waits,
@@ -901,6 +921,144 @@ and untested drivers remain open, with no tolerance or support-tier change.
   4x, and the weapon depth hack's depth view is within one level. At 4x, lit
   geometry edges still differ in up to 20 pixels, by up to 8 levels.
 
+## Vulkan ray tracing
+
+Sources: [Vulkan device selection](vulkan-device-selection.md),
+[authored programs](vulkan-material-programs.md), [HDR](vulkan-hdr.md),
+[GPU skinning](gpu-skinning-modernization.md), [capability matrix](engine-capability-matrix.md),
+`src/renderer/Vulkan/` (`VulkanBringup.cpp`, `vk_Backend.cpp`, `vk_Interactions.cpp`,
+`vk_ShadowMap.cpp`, `vk_PostProcess.cpp`) and the Quake II RTX (Q2RTX) renderer as
+the external design reference.
+
+Requested 15 November 2026. Quake II RTX showed that a classic id Tech game can be
+rendered with real-time ray-traced lighting, shadows, reflections, refraction and
+indirect light from its original assets. This work brings that class of rendering
+to openQ4's Vulkan renderer: first ray-traced effects on top of the existing
+rasterized frame, then a full path-traced mode. The current Vulkan baseline
+(Vulkan 1.3 with dynamic rendering, synchronization2, timeline semaphores,
+descriptor indexing, buffer device addresses and VMA) already provides most of the
+device features ray tracing builds on. Every item honors five product rules:
+
+1. **Opt-in and isolated.** An archived CVar (proposed `r_rayTracing`: `0` off,
+   `1` hybrid effects, `2` path tracing; default `0`) with localized Settings rows
+   in the retained and stock interfaces selects the mode. Value `0` runs the
+   current Vulkan renderer unchanged, with byte-identical captures. OpenGL, GLES,
+   dedicated servers and devices without the required extensions are never
+   affected; they show the rows as unavailable instead of failing.
+2. **Stock assets only.** The ray tracer reads shipped Quake 4 materials, lights,
+   models and maps as authored. Emitters, roughness and translucency are derived
+   from existing material stages, light shaders and textures by engine rules, not
+   from replacement or per-map content. Authored PBR materials keep their
+   meaning. Any table of derived material properties ships with the executable.
+3. **Presentation only.** Ray tracing never changes simulation, collision,
+   network protocol, pure checks, saves or demos. Multiplayer clients may use it
+   freely; a server never needs it, and render demos replay identically with it
+   on or off apart from the image.
+4. **Capability-gated and recoverable.** Ray tracing requires
+   `VK_KHR_acceleration_structure` with `VK_KHR_ray_query` (hybrid) and, where
+   chosen, `VK_KHR_ray_tracing_pipeline`. Missing extensions, allocation
+   failure, device loss or a driver refusal fall back to the rasterized path for
+   that session with one log line, following VK-03's bounded admission and
+   cleanup rules. Platforms whose drivers lack these extensions (current
+   MoltenVK, most Android GPUs) are out of scope until they gain them.
+5. **Measured and licensed.** Each mode declares its reference hardware and
+   frame-time budget before promotion, using the FPS suite. Q2RTX and any
+   NVIDIA, AMD or Intel denoiser, light-sampling or upscaling SDK are reviewed
+   file by file for GPLv3 compatibility before code is ported; incompatible code
+   is reimplemented from published techniques, and proprietary SDKs stay
+   optional decisions. Credits follow the attribution rules.
+
+### RT completion checkpoints
+
+**Estimate: 0%; 0/7 tasks closed (15 November 2026).** Scope only; no ray-tracing
+code exists. The Vulkan 1.3 device baseline, motion vectors, TAAU, HDR scene
+targets and GPU skinning compute paths are existing dependencies, not credited
+RT progress.
+
+| Task / state | Completed points and evidence | Remaining completion subpoints |
+| --- | --- | --- |
+| RT-01 — Decision pending | Product rules, mode CVar and capability gate proposed. | Reference hardware and budgets, Q2RTX/SDK licence review, material/light translation rules, Settings contract and reference scenes. |
+| RT-02 — Not started | Vulkan 1.3 baseline with buffer device addresses and VMA exists. | Extension admission and fallback; BLAS/TLAS for world, entities, skinned and deformed surfaces; memory budgets and lifetime across map change, restart and device loss. |
+| RT-03 — Not started | Shadow maps, stencil shadows and SSAO provide the rasterized references. | Ray-traced shadows for interaction lights, ambient occlusion and reflections on the raster frame, each with its own fallback. |
+| RT-04 — Not started | Specified only. | Path-traced mode: id Tech 4 lights and derived emitters, sky, indirect bounces, translucency, water and glass, with raster overlays for GUIs, particles and the view weapon. |
+| RT-05 — Not started | TAAU, motion vectors and reactive coverage exist. | Light sampling, temporal and spatial denoising, reconstruction with TAAU and dynamic resolution, and an open upscaler. |
+| RT-06 — Not started | Specified only. | Captures, HDR, subviews and mirrors, VR stereo, render demos, BSE, MP and the Settings UI in all language tables. |
+| RT-07 — Not started | Specified only. | Budgets on reference hardware from at least two vendors, image review against classic, SP/Awakening/MP coverage, Linux, soaks and the availability decision. |
+
+### RT task evidence and acceptance
+
+- [ ] **RT-01 — P2, decision: scope, budgets and translation contract.** Choose
+  the reference ray-tracing hardware (at least one NVIDIA RTX device and one AMD
+  RDNA 2 or later or Intel Arc device), the reference SP and MP scenes and the
+  frame-time budget for each mode at declared resolutions. Record the minimum
+  extension and feature set. Review Q2RTX and every candidate SDK for licence
+  compatibility and record what may be ported, what must be reimplemented and
+  the credits owed. Define the rules that translate stock content: interaction
+  stages (diffuse, bump, specular) to a physically based approximation, light
+  shaders with projection and falloff images, fog and blend lights, `noShadows`
+  and suppression flags, alpha-tested and translucent stages, additive and glow
+  stages as emitters, and the sky. Define the CVar and Settings contract and
+  where hybrid effects replace rather than add to raster ones. Close when the
+  contract is recorded in a ray-tracing reference doc and the reference scenes
+  have classic captures.
+- [ ] **RT-02 — P2, implementation: device admission and acceleration
+  structures.** Admit the RT-01 extensions without changing device choice for
+  `r_rayTracing 0`, and fall back cleanly when any step fails. Build bottom-level
+  structures for the world (per area or per model), static and moving entities,
+  skinned meshes (reusing the GPU skinning compute output, or CPU-skinned
+  vertices when it refuses) and deformed or animated surfaces, with refit or
+  rebuild chosen per surface, and a top-level structure per view. Bound memory
+  with compaction and budgets reported through VK-06's resource counters.
+  Structures survive or rebuild correctly across map change, `vid_restart`,
+  renderer reload and device loss. Gate: the stock maps build without failures
+  or leaks across a five-cycle soak, and `r_rayTracing 0` captures stay
+  byte-identical.
+- [ ] **RT-03 — P2, implementation: hybrid ray-traced effects.** In mode `1`,
+  using ray queries from the rasterized frame: ray-traced shadows for
+  interaction lights that honor light projection, falloff, shadow flags and
+  alpha-tested casters; ray-traced ambient occlusion; and reflections on
+  surfaces the RT-01 rules mark reflective, including authored PBR materials.
+  Each effect has a developer CVar and falls back to its raster equivalent.
+  Gate: the reference scenes show no missing, detached or light-leaking shadows
+  against the classic reference, view-weapon and subview cases included, within
+  the RT-01 budget.
+- [ ] **RT-04 — P3, implementation: path-traced mode.** In mode `2`, replace
+  rasterized lighting with a path tracer in the manner of Q2RTX: primary
+  visibility, direct light from every id Tech 4 light type and from derived
+  emissive surfaces, sky and environment light, a bounded number of indirect
+  bounces, and refraction and reflection through glass, water and other
+  translucent materials. Material expressions, scrolling and animated stages
+  and remote-camera textures evaluate as in the raster path. GUIs, BSE
+  particles, decals, the view weapon's depth hack and post effects that the
+  path tracer cannot own are composited from the raster path with correct
+  depth. Gate: every stock SP and MP map renders without missing surfaces,
+  black materials or uncovered pixels on the reference hardware.
+- [ ] **RT-05 — P2, implementation: sampling, denoising and reconstruction.**
+  Importance sampling for many lights and emitters (for example a ReSTIR-style
+  reservoir scheme), a temporal and spatial denoiser that separates direct,
+  indirect and specular signals, and reconstruction through the existing TAAU,
+  motion vectors and dynamic resolution. Provide at least one upscaler with a
+  GPLv3-compatible licence; vendor upscalers remain optional decisions. Gate:
+  the reference scenes meet the RT-01 budget without visible smearing, ghosting
+  on moving actors and the view weapon, or fireflies, in windowed review at play
+  speed.
+- [ ] **RT-06 — P2, integration: the rest of the renderer and the product.**
+  Screenshots, `envshot`, tiled and multisampled captures (VK-07), HDR output
+  and exposure (VK-05), mirrors and remote cameras, VR stereo with per-eye cost
+  (VR-01), render demos and capture determinism, BSE effects, light-grid packs
+  and multiplayer views work in each mode or fall back explicitly. Settings rows
+  follow the [UI visual design](ui-visual-design.md), use `#str_*` entries in
+  every language table and report why a mode is unavailable. The capability
+  matrix and player documentation describe the modes and their requirements.
+- [ ] **RT-07 — P2, qualification and decision: availability.** On the RT-01
+  reference hardware, under Windows x64 and Linux x64, run the FPS suite, the
+  reference scenes, stock SP progression samples including Awakening `q4xbase`,
+  MP with bots, and a long-session soak in each mode. Review images against
+  classic at play speed. Decide whether each mode is offered as experimental or
+  supported, and whether any preset enables mode `1`; `0` stays the default and
+  a supported fallback. Update the capability matrix, platform support and
+  release notes with the decision.
+
 ## Modern rendering engine
 
 Sources: [modernization history](archive/2026-10-18/idtech5-modernization-roadmap.md),
@@ -911,16 +1069,16 @@ Sources: [modernization history](archive/2026-10-18/idtech5-modernization-roadma
 
 ### REN completion checkpoints
 
-**Estimate: 55%; 1/8 tasks closed.** PBR, temporal features and shared rendering
-domains already exist. Aggregate modern lighting still has
+**Estimate: 60%; 2/8 tasks closed.** PBR, temporal features and qualified shared
+rendering domains exist (REN-01). Aggregate modern lighting still has
 `MODERN_LIGHTING_PARITY_PROVEN_DOMAINS=0`; neither feature presence nor domain
 diagnostics establish whole-frame ownership or production performance.
 
 | Task / state | Completed points and evidence | Remaining completion subpoints |
 | --- | --- | --- |
-| REN-01 — Partial | Shared classic GUI/world/interaction/fog/deform/subview/post domains have scoped implementations and contracts. | Qualify each on fresh GL/Vulkan packages: executed ownership, matching appearance, zero-commit rollback, human review and platform breadth. |
+| REN-01 — Closed | All nine shared classic domains own stock (and, for subview forms stock content never authors, validation-room) views on a fresh GL/Vulkan package under the default preset, with 4x MSAA and with the post chain off: byte-identical to classic, visible content controls, named zero-commit rollback. They now draw into the scene target the classic walker uses. Defaults stay off. | Human appearance review of the retained captures and physical Linux/macOS/Android runs belong to platform qualification; default promotion is a separate owner decision. |
 | REN-02 — Partial | Shared material/light contracts and corridors provide foundations; the remaining decline reasons are inventoried. | Inventory remaining semantics; finish coherent lit-frame composition, visible ownership, full fallback and measured benefit before parity promotion. |
-| REN-03 — Partial | Point/projected/CSM and hybrid shadow paths, caches and Vulkan translucent moments exist. A continuous-motion stock tour passes at default, cascaded and constrained budgets on GL/Vulkan with bounded slots and retained light; receivers after motion match a fresh render, as do moving doors, cutout and translucent casters under camera motion; static/live composition and cutout-alpha audits done (GL now falls back to stencil like Vulkan). The 9 November [stencil-parity audit](shadowmapping-audit-2026-11-09.md) fixed prelight-only (`noDynamicShadows`) lights losing their shadows, `noSelfShadow` world geometry no longer shadowing `noSelfShadow` receivers under prelit lights, the one-sided five-tap kernel and the packed-depth wrap at the far envelope. | Physical platforms; the audit's open parity items (casters outside an off-centre light's box, cascade range end, images for the two fixed rules). |
+| REN-03 — Partial | Point/projected/CSM and hybrid shadow paths, caches and Vulkan translucent moments exist. A continuous-motion stock tour passes at default, cascaded and constrained budgets on GL/Vulkan with bounded slots and retained light; receivers after motion match a fresh render, as do moving doors, cutout and translucent casters under camera motion; static/live composition and cutout-alpha audits done (GL now falls back to stencil like Vulkan). The opt-in modern OpenGL receivers filter projected shadows with the classic kernel and PCSS-lite blocker search since 17 November; a widened PCSS radius now softens the same pixels as the classic receivers (84% overlap), where before it changed none. The 9 November [stencil-parity audit](shadowmapping-audit-2026-11-09.md) fixed prelight-only (`noDynamicShadows`) lights losing their shadows, `noSelfShadow` world geometry no longer shadowing `noSelfShadow` receivers under prelit lights, the one-sided five-tap kernel and the packed-depth wrap at the far envelope. | Physical platforms; the audit's open parity items (casters outside an off-centre light's box, cascade range end, images for the two fixed rules). |
 | REN-04 — Partial | Exact vectors, TAAU and dynamic resolution; cumulative resolve counters and a GL/Vulkan runtime gate (cuts, capture, pause, restart, failed presents, mirrors, stale timing, scale recovery, SMAA rollback). Mirror/remote-view, withheld-present and capture-depth gaps fixed. | Human review of visual stability; physical Linux/macOS/Android. |
 | REN-05 — Partial | Authored PBR, animated/MD5R models, box probes and indirect-only SSAO have scoped evidence. SSAO parity controls repaired after half-resolution SSAO, with a matched half-resolution control; the Intel residual is reproduced and explicitly bounded; skin substitutions and a mixed PBR/classic model on packed MD5R match CPU skinning. | lavapipe residual, mods authored outside the laboratory, physical Linux/Apple fallback. |
 | REN-06 — Partial | Probe admission decided (RGBA8/sRGB/generated RGBA16F; compressed, oversized and authored HDR excluded); cold misses filter on a background job and publish within the 4 ms budget on both backends; froxel/SSR/SSGI pass individually and together with byte-exact master-off rollback on GL/Vulkan. | Re-bake of the cropped bundled grids (owner decision); broader authored scenes. |
@@ -929,7 +1087,7 @@ diagnostics establish whole-frame ownership or production performance.
 
 ### REN task evidence and acceptance
 
-- [ ] **REN-01 — P1, qualification: promote shared classic domains individually.**
+- [x] **REN-01 — P1, qualification: promote shared classic domains individually.**
   Finish fresh-package GL/Vulkan acceptance for root GUI, in-world GUI, ambient,
   interaction, fog/blend, deform, subview, cinematic/post and special-frame owners.
   Cover stock fixed cameras, mapped/stencil/hybrid lights, dynamic/cutout casters,
@@ -937,6 +1095,48 @@ diagnostics establish whole-frame ownership or production performance.
   targets, `_currentDepth`, root post and render-demo/Raven effects. Require
   nonzero executed ownership, same-backend classic parity, visible effect deltas,
   complete zero-commit rollback and human/platform evidence for each domain.
+  Completed 13 November 2026 on Windows x64 OpenGL and Vulkan.
+  `renderer_shared_domain_qualification.py` runs each domain on a fixed stock
+  pose (or, for subview forms no stock material authors, a validation room
+  compiled into the run's save path) from a freshly built package, under the
+  default preset, with 4x MSAA and with the post chain off. Each check requires
+  owned views on the active backend and none on the other, a frame
+  byte-identical to classic (alone and with every domain on), a visible
+  content control and a named zero-commit rollback. The final run, from a
+  fresh package built from the change set, passed 98 of 99 domain checks in 87
+  runs (RTX 4060 Laptop GPU). The one failure was classic flicker: OpenGL
+  stencil shadows under 4x MSAA flipped isolated pixels between two classic
+  frames. The cause is NVIDIA's OpenGL driver, which shades overlapping draws
+  into a 4x or 8x multisampled target slightly differently from frame to
+  frame with an identical command stream; the harness now serializes classic
+  OpenGL draws (`r_glSerializeDraws`, validation only) and the combination
+  passes. OpenGL render-demo playback under
+  the default preset, left out of that run, now passes: the renderer's scene
+  target starts every frame cleared, so uncovered pixels no longer carry the
+  last frame's bloom.
+  Under the default presets nothing had ever been owned. Fixed: the adapters
+  refused every render target, though the classic walker draws the view into
+  the renderer's own scene target or the game's forward target (both
+  backends); Vulkan moved a view to the swapchain whenever a domain was on,
+  which changed the classic work beside it by up to 18 levels; dense views
+  overflowed the 1024 per-frame geometry records; every stock in-world GUI was
+  refused for its mirrored GUI transform; the ambient domain refused any lit
+  view; the interaction domain refused every CPU-skinned character (it read
+  `deformedSurface` as GPU posing, the misreading classic fixed in #73) and
+  every distant point light's projected map (labelled a cube); Vulkan batched
+  the HUD with the final scene composite; and Raven fallbacks were miscounted.
+  Stock-content boundaries, by design: the retained HUD's backdrop blur,
+  ambient views with decals/BSE/post surfaces, cubemap and depth subview
+  targets (no producer) and wall-clock GUI video parity. The all-mapped scene
+  ran with the static shadow cache off until 14 November, when its two gaps
+  closed: classic Vulkan no longer regenerates composed maps under the
+  interaction switch (the sealed stream composes and reads resident hits
+  like classic), and OpenGL's sealed cache records carry classic's light
+  class, so a distant point light's cached pass is owned. The
+  defaults stay off: promotion is an owner decision on the
+  [evidence](renderer-validation-matrix.md#shared-classic-domain-qualification-ren-01).
+  Human appearance review and physical Linux/macOS/Android runs belong to
+  platform qualification (PLAT), as for REN-08.
 - [ ] **REN-02 — P2, implementation and qualification: finish aggregate modern
   lit-frame ownership.** Inventory the remaining material/light semantics against
   implemented shared corridors; finish coherent whole-frame lighting and
@@ -1014,7 +1214,21 @@ diagnostics establish whole-frame ownership or production performance.
   turns. The gameplay benchmark's `shadow-translucent-medlabs` candidate
   remains unusable (it falls back for shadow geometry before translucent
   moments, stationary too). See [movers, cutouts and translucents](renderer-validation-matrix.md#continuous-motion-shadow-tour-6-november-2026-ren-03).
-  Remaining: physical-platform breadth.
+  Weapon lights, 17 November (#235, #236): muzzle flashes, classic flashes and
+  the light segments of weapon, monster and vehicle effects now follow
+  `g_dynamicLightShadows` (on from Quality up), and explosion effects with no
+  light of their own get a classic flash. The firer's body and gun, a
+  projectile's own model and whatever an explosion starts inside are kept out
+  of those shadows. A storage2 probe shows them mapped on both backends and
+  drawn by the stencil path on Balanced, with no self-occlusion. See
+  [weapon-light shadows](release-completion.md#weapon-fire-and-explosions-cast-shadows-235-236-17-november-2026).
+  Character self-shadows, 17 November (#238): `r_shadowMapCharacterSelfShadow`
+  (off by default) lets skinned models ignore noSelfShadow ownership under
+  shadow-mapped lights; verified on both backends, stencil unchanged. See
+  [character self-shadows](release-completion.md#characters-can-shadow-themselves-238-17-november-2026).
+  Remaining: physical-platform breadth; combat-crowd cost of weapon-light
+  shadows on Quality (FPS-03). The DISPLAY page's IMAGE QUALITY tab has a
+  Character Self-Shadows row (17 November).
 - [ ] **REN-04 — P1, qualification: temporal AA and dynamic resolution.** Exercise
   existing rigid/skinned/weapon exact vectors and reactive surfaces through
   interpolation, disocclusion, pause, cuts, failed presents, capture, multiple
@@ -1515,22 +1729,24 @@ reference hardware can hold at its declared frame rate rather than every maximum
 
 ### FPS completion checkpoints
 
-**Estimate: 30%; 2/9 tasks closed.** The suite, the two baselines, the per-feature
+**Estimate: 40%; 4/9 tasks closed.** The suite, the two baselines, the per-feature
 cost attribution and the declared per-scenario budgets exist on the reference machine
 (the RTX 4060 Laptop). Enhanced, Quality and Ultra are re-tiered to refresh classes and
-meet them on both backends; the previous Ultra is the Maximum preset. No structural
-optimization has landed.
+meet them on both backends; the previous Ultra is the Maximum preset. Structural work has
+started: FPS-03 is partial, FPS-04 closed the post-processing chain with declared
+per-scene budgets on both backends, and FPS-05 fixed one MSAA policy that draws the same
+image on both backends.
 
 | Task / state | Completed points and evidence | Remaining subpoints / closure boundary |
 | --- | --- | --- |
 | FPS-01 — Closed | Suite (nine scripted stock-map scenarios, per-frame traces, cold/warm passes, toggle ladders, attribution, hitch events, transitions, idle-launch retry), 0.13.2 and current baselines on both backends, report with the settings/code split; the RTX 4060 Laptop named the reference machine; 42 budgets (7 scenarios x Ultra/Quality/Enhanced x OpenGL/Vulkan, warm mean and p99) declared from 126 launches of 94e0b14ec in `docs/dev/performance-budgets.json` and report section 10; `budgets` and `check` subcommands. | Budgets redeclared by FPS-02 (report section 11); the gate itself is FPS-09. |
 | FPS-02 — Closed | Refresh classes declared at 2560x1440 on the reference machine (Enhanced 144/90, Quality 100/60, Ultra 75/45 fps average/1% low); candidates screened on both backends; the three recipes rebuilt (point cubes 512 or stencil, MSAA 0/2/4, no cascades or motion blur below Maximum); `maximum` added as the everything-on preset without a frame-rate claim; detected starts capped at the display refresh; the startup banner reports the bootstrap and the detected profile with corrected video memory; Vulkan point-policy admission fixed; 42 budgets redeclared from 126 launches, every tier inside its class in every scene. | Closed. |
 | FPS-03 — Partial | Point-light cube maps identified as the dominant shadow cost; static caching and importance budgets already exist. FPS-02 sized the tiers around them: 512 cubes at Quality and Ultra, stencil point shadows at Enhanced, 2048 only at Maximum. The Vulkan light scan no longer keeps the stencil volumes of non-prelit mapped lights, including lights with an interaction left unbuilt in the view (identical images, CPU-neutral on the stock scenes). The point cube cache holds a whole view on both backends (64 slots within a memory bound, no eviction of cubes in use); OpenGL composes moving and cutout casters over cached static cubes; the default nine-tap point filter reads its sixteen texels once; receivers skip unlit fragments; the OpenGL timer queries run only for the report. In hub2 at Quality on OpenGL the shadow-mapped frame fell from 12.0 to 6.6 ms of GPU and 11.8 to 5.2 ms of CPU (hidden-window probe). Since then (10 November): Vulkan composes over cached cubes too, mapped lights shed their stencil front-end work, each projected light takes a tile size that lets a crowded view fit, the projected cache is bounded by memory, OpenGL cubes are depth only, cutouts that cannot change are cached, and Vulkan reads unchanged projected maps where they live. | Fullscreen tier budgets, including whether Enhanced can map point lights; one static cube for both ownerships of a composed Vulkan light; static-world volumes, still built once per mapped light. Per-face cube culling was measured and set aside. |
-| FPS-04 — Not started | SSAO, motion blur, HDR tone map, bloom and SMAA priced per scene on both backends (the chain is 10-14 ms per frame at 16 samples on OpenGL, 4-6 ms at 8 samples on Vulkan). | Half-resolution SSAO on OpenGL, pass merging, MSAA-aware resolves, tone-map cost. |
-| FPS-05 — Not started | 16x MSAA measured as the largest single Ultra cost on OpenGL; the Vulkan backend found to clamp the preset's 16 samples to the device's 8, so the two backends render different Ultra images. FPS-02's Ultra uses 4x MSAA with SMAA ultra, which both backends honour; only Maximum still requests 16. | Sample-count policy per tier, resolve cost, one sample count on both backends, MSAA 4 + SMAA as the Ultra candidate. |
+| FPS-04 — Closed | OpenGL now draws SSAO at half resolution below 32 samples (Quality, Enhanced) with Vulkan's two passes, blends it into the multisampled scene instead of copying the scene, and reads the scene once for bloom and the tone map; at Ultra it resolves the scene twice a frame instead of four times, like Vulkan. Hidden-window GPU ladders in five scenes on both backends: the OpenGL Ultra frame 0.4-0.7 ms shorter and its chain 0.7-1.1 ms cheaper, OpenGL Quality SSAO 0.4-0.55 ms cheaper; per-scene Ultra chain budgets (1.5-5.0 ms) and per-pass shares of the 13.3 ms Ultra frame declared and met on both backends, where four of five old OpenGL chains were over. Pictures unchanged within one level; PBR laboratory SSAO controls 10/10 on both. [Report section 12](performance-report.md#12-post-processing-chain-fps-04). | Closed. Outside the gate: bloom's full-resolution first level and Ultra's SSAO resolution, a user decision. OpenGL's SSAO depth copies were cut afterwards ([report section 12.8](performance-report.md#128-opengls-ssao-depth-copies-follow-up): hub2 and storage2 0.6-1.05 ms faster on OpenGL, pictures unchanged). |
+| FPS-05 — Closed | Sample counts 0/2/4/8/16, the LDR target and SMAA/TAA alternatives priced at Ultra on both backends in five scenes (hidden-window GPU ladders): 16x on OpenGL costs 6.0-10.9 ms over 4x and Vulkan never draws more than 8, 8x costs 0.75-2.5 ms over 4x, 4x + SMAA is within -0.7..+0.3 ms of SMAA alone on OpenGL and 0.6-1.6 ms on Vulkan. Policy: Ultra 4x + SMAA ultra (confirmed), Quality 2x, Enhanced none, Maximum 8x instead of a 16x request, so every preset draws one image on both renderers; no preset asks for more than 8 (self-test); the count does not change with resolution. `gfxInfo` names the Vulkan clamp and the resolves per frame, `r_multiSamplesEffective` holds the drawn count, and the settings menu's MSAA row names the trade-off and the clamp in twelve languages. [Report section 13](performance-report.md#13-msaa-and-the-hdr-scene-target-fps-05). | Closed. |
 | FPS-06 — Not started | Equal-settings deltas attributed: in storage2 the retained HUD's layer composition (17 two-dimensional views and 34 render-target commands per frame against the classic HUD's 7 and 17; about 0.4 ms of main-thread time); on Vulkan the soft-particle depth capture (1.3 ms in airdefense1). The 2 October build equals 0.13.2 and the 15 October build carries the storage2 step, bracketing the 8 October retained-HUD commit (bisection); interpolation, light grid, reverb, portal cull and the five new Vulkan backend features cost nothing measurable. | Bisection pass 2 for the remainder, the retained HUD composed in one pass, the Vulkan soft-particle capture made cheap, closure within 3% average and 10% p99 of 0.13.2 on every suite scene on both backends. |
 | FPS-07 — Not started | Hitch classes recorded: 2-3 s cold draw stalls at Ultra, periodic 100 ms hub2 frames, a 393 ms storage2 frame, first-use events. | Attribution per class, fixes or declared budgets, clean first-use catalog on both backends. |
-| FPS-08 — Not started | HF-07 attribution: the Quality frame is CPU-bound on one thread; Vulkan render-thread stage 1 landed and gains nothing at the GPU-bound Ultra (within 0.4 ms, longer tails). Constant material registers restored on both renderers (they were never marked constant, so every surface evaluated its registers every view): 69-87% of register set-ups now take the parse-time block, saving 5-22 µs per frame in hub2, convoy2 and the airdefense1 arena, which whole-frame timings cannot resolve; see [Constant material registers](material-constant-registers.md). | Front-end and submission cost, stage 2 overlap, game-tic cost; shared with HF-07 and REN-07. |
+| FPS-08 — Not started | The Awakening's outdoor battle ([report section 14](performance-report.md#14-the-awakenings-outdoor-battle-fps-08-evidence-17-november-2026)): game 22% and drawing 33% of the process; two exact clip-world fixes (contents gathered by mask, sector contents refreshed lazily) cut about 10% of game time, and one-pass light-interaction cull bits (bit-identical, natively tested) cut that renderer work by about 30%. HF-07 attribution: the Quality frame is CPU-bound on one thread; Vulkan render-thread stage 1 landed and gains nothing at the GPU-bound Ultra (within 0.4 ms, longer tails). Constant material registers restored on both renderers (they were never marked constant, so every surface evaluated its registers every view): 69-87% of register set-ups now take the parse-time block, saving 5-22 µs per frame in hub2, convoy2 and the airdefense1 arena, which whole-frame timings cannot resolve; see [Constant material registers](material-constant-registers.md). | Front-end and submission cost, stage 2 overlap, game-tic cost; shared with HF-07 and REN-07. |
 | FPS-09 — Not started | Prevention plan written (report section 9). | Suite in the release checklist, budgets as gates, cvar-default diff and attribution checks in CI. |
 
 ### FPS task evidence and acceptance
@@ -1614,6 +1830,11 @@ optimization has landed.
   on Quality and Ultra by memory and resolution class (Maximum stays manual).
   The reference laptop still detects Enhanced. The larger classes are policy
   derived from this item's measurements, not measured on such cards.
+  Follow-up, 17 November (#233): ARM64 Linux boards without a discrete or Apple
+  GPU are capped at Performance, as the Steam Deck is, and Minimum and Low Power
+  drop the light grid and, through their 30 Hz cap, automatic temporal AA; see
+  [ARM boards and the low-power floor](ui/performance-presets.md#arm-boards-and-the-low-power-floor-17-november-2026).
+  Model-suite coverage only: no ARM board ran it.
 - [ ] **FPS-03 — P1, implementation: shadow-map cost.** In hub2 the shadow maps are 33 of
   the current Ultra's 54 ms per frame and 30 ms of that is point lights: a point light
   with any moving caster in range re-renders all six cube faces every frame, because
@@ -1763,10 +1984,23 @@ optimization has landed.
   grew, to 512 cubes: one view from outside a level left 2.0 GB resident. It now has
   the cache's memory figure again as its ceiling (85 cubes at Quality) and releases
   what no view has needed for five seconds: 1.1 GB at that view, 0.6 GB ten seconds
-  after it. Remaining, in order:
-  the fullscreen budgets, including whether Enhanced can map point lights; and
-  static-world volumes, which are still built once per mapped light for the
-  fallback. (A light that moves now draws its maps directly instead of publishing
+  after it. Remaining:
+  the fullscreen budgets, including whether Enhanced can map point lights.
+  (Static volumes under mapped lights were measured on 11 November: about 7 ms
+  and 4 MiB for all of hub2, built once, and kept so the stencil fallback stays
+  instant. Under a light that moves they were built every frame, 27 a view in
+  storage2's alarm room, and are now left out with the dynamic models'.)
+  (A receiver pass with nothing to cast no longer sends its light to the stencil
+  fallback: OpenGL cycled such a light in and out every 240 views and Vulkan never
+  released it. Found by the openD3 session on Doom 3's hell1; no stock Quake 4 view
+  tried shows it, so it was reproduced with a temporary switch and is pinned by
+  the shared rule's self-test.)
+  (On Vulkan a light whose only `noSelfShadow` casters are live, a character
+  standing in it, now keeps one resident map for both receiver ownerships, as
+  OpenGL does: two or three point cubes fewer in medlabs and network1, half the
+  resident spotlight tiles in hub2 and medlabs, and the LOCAL map is no longer
+  rendered again each time a character walks in or out.)
+  (A light that moves now draws its maps directly instead of publishing
   each one to the cache, copying it and composing over the copy: 560 passes on one
   hub2 route, `r_shadowMapCacheMovingLights`.) (A light whose map failed once now stops building its stencil volumes
   again after 240 views without another failure, `r_shadowMapStencilFallbackViews`;
@@ -1777,8 +2011,15 @@ optimization has landed.
   storage2's alarm lights had been blocked by a one-sided floor.) (OpenGL's
   shadow receivers no longer normalize the stock normal-map sample, which lit
   every raised edge harder under a shadow map than without one; OpenGL now
-  agrees with stencil as closely as Vulkan does.)
-- [ ] **FPS-04 — P1, implementation: post-processing chain cost.** Price and reduce the
+  agrees with stencil as closely as Vulkan does.) (A still light's maps are no
+  longer rendered again when two of its casters change places in the view's
+  entity order, or when a rising frame rate makes a caster at rest count as moving
+  again: the static signature is a sum of per-caster hashes and the oldest frame
+  that counts as recent never moves back. On two walks in the airdefense1 arena
+  every fresh map was for the order, 8 and 8 on Vulkan and 8 and 20 on OpenGL,
+  and none is left. The world's geometry joins a still light's casters only when
+  a door connects an area, which the map needs.)
+- [x] **FPS-04 — P1, implementation: post-processing chain cost.** Price and reduce the
   screen-space passes the current Ultra adds: SSAO (full resolution on OpenGL; the
   half-resolution path exists only on Vulkan and only below 32 samples), motion blur
   (16 samples), the HDR tone map (3 ms in airdefense1 at 16x MSAA), bloom (5 mips) and
@@ -1788,7 +2029,45 @@ optimization has landed.
   resolve, and set the sample counts per tier. Close when the post chain at the
   re-tiered Ultra costs less than a declared budget per scene on both backends and the
   feature ladders show each pass within its share.
-- [ ] **FPS-05 — P1, decision and implementation: MSAA and the HDR scene target.** The
+  Closed 12 November 2026. FPS-02 had already taken motion blur and 16-sample MSAA out of
+  Ultra, so the chain left to price was SSAO, bloom, the tone map and SMAA. Vulkan already
+  did what this item asked of OpenGL; OpenGL now does the same. SSAO follows
+  `r_ssaoResolution` on both renderers (automatic: full resolution at Ultra's 32 samples,
+  half below, so Quality and Enhanced draw the two half-resolution passes of
+  `VK_Post_DrawSSAOHalf`, `RB_DrawSSAOHalf` on OpenGL). The classic SSAO pass writes only
+  its factor and the blend unit multiplies it into every sample of the multisampled scene,
+  instead of resolving the scene into `_currentRender` first; native PBR's occlusion
+  field, the full-resolution debug view and `r_glSSAOReferenceComposition 1` (a validation
+  switch) keep the copy. The bloom/tone-map composite no longer resolves the finished scene
+  a second time: every later reader in the view takes its own copy. At Ultra the OpenGL
+  chain resolves the scene twice a frame instead of four times, as Vulkan does; these are
+  the merged scene reads and MSAA-aware resolves. Sample counts per tier stay as FPS-02 set
+  them (SSAO 32/20/12, bloom 5 levels, SMAA ultra/high/high, motion blur Maximum only); the
+  price list below is their justification. Measured on the reference laptop with in-launch
+  GPU ladders in hidden 2560x1440 windows (`rendererBenchmarkCapture` GPU time, toggles
+  against neighbouring base windows), hub2, storage2, the Air Defense 1 arena, Air Defense
+  1 and convoy1: the OpenGL Ultra frame is 0.4-0.7 ms of GPU shorter, its chain 0.7-1.1 ms
+  cheaper (hub2 3.71 to 2.63 ms), and OpenGL Quality's SSAO 0.4-0.55 ms cheaper. Declared
+  Ultra budgets for the whole chain, the worse backend plus 25%: hub2 3.3, storage2 5.0,
+  arena 2.4 (combat and effects), Air Defense 1 1.7 and convoy1 1.5 ms. Per-pass shares
+  of the 13.3 ms Ultra class frame: SSAO 22.5% (3.0 ms), tone map 7.5% (1.0), bloom 6%
+  (0.8), SMAA 4.5% (0.6). Every scene and pass is inside them on both backends; before
+  this change four of the five OpenGL chains, the OpenGL tone map (1.17 ms in storage2)
+  and bloom (0.83 ms in convoy1) were over. The vehicle level was not priced. The
+  fullscreen ladders of the same toggles lost the foreground in six of 30 launches on the
+  shared machine; where they held they agree in order of cost, and the Vulkan hub2 chain
+  was 3.66 ms of a 7.7 ms frame. Pictures: multiply composition matches the copy within
+  one level on at most 439 pixels per pose; half resolution matches full within one level
+  at the 99th percentile, and the PBR laboratory's matched control now holds OpenGL to
+  Vulkan's limits (2.07 levels mean, +0.02 bias, 1.1% more darkened pixels; the SSAO
+  controls pass 10/10 on both renderers). Outside the gate: bloom's full-resolution
+  first level (a look change) and Ultra's SSAO resolution (the user's choice, about 1 ms).
+  See [report section 12](performance-report.md#12-post-processing-chain-fps-04).
+  Follow-up, 13 November 2026: OpenGL's SSAO world-depth snapshot is drawn into a depth
+  target of its own and resolved where SSAO reads it, and the finished depth is copied
+  once per view; hub2 and storage2 are 0.6-1.05 ms faster at Quality and Ultra, outdoor
+  poses unchanged ([report section 12.8](performance-report.md#128-opengls-ssao-depth-copies-follow-up)).
+- [x] **FPS-05 — P1, decision and implementation: MSAA and the HDR scene target.** The
   Ultra recipe requests 16 samples; OpenGL renders them on this GPU (`GL_MAX_SAMPLES` 32)
   into an RGBA16F target at 2560x1440, where MSAA 4 alone doubles the airdefense1 frame
   rate, while the Vulkan backend clamps the request to the device's 8 colour samples
@@ -1801,6 +2080,29 @@ optimization has landed.
   Close when the chosen Ultra sample count is justified by the measurements in the
   report, both backends honour it or report the clamp, and the settings menu names the
   trade-off.
+  Closed 13 November 2026. FPS-02 had already moved Ultra to 4x; this item priced every
+  count and fixed the policy. In-launch GPU ladders in hidden 2560x1440 windows at the five
+  reference poses (`rendererBenchmarkCapture` GPU time against neighbouring Ultra base
+  windows; both backends rebuild the scene target on an `r_multiSamples` change): OpenGL draws
+  16 samples at 2.0-2.5 times the 4x frame (6.0-10.9 ms more) while the Vulkan renderer never
+  draws more than 8 (`VK_Image_SelectSampleCount`), so the old Maximum was two images; 8x
+  costs 0.75-1.7 ms over 4x on OpenGL and 1.8-2.5 ms on Vulkan; 4x + SMAA ultra is within
+  -0.7 to +0.3 ms of SMAA alone on OpenGL (SMAA works harder without MSAA) and 0.6-1.6 ms on
+  Vulkan; TAA alone costs what SMAA alone does; the LDR target saves 0.1-1.3 ms but clips
+  the highlights the tone map and bloom need, so tone-mapping tiers keep RGBA16F. Policy:
+  Ultra keeps 4x + SMAA ultra, Quality 2x + SMAA high, Enhanced SMAA high without MSAA, and
+  Maximum asks for 8x instead of 16x, the most the Vulkan renderer draws, so every preset
+  draws one image on both renderers; the presets self-test refuses a preset above 8. The
+  count does not change with resolution (MSAA scales with the pixel count; render scale or
+  a lower tier is the lever above 2560x1440). 16x stays a manual OpenGL choice. Visible:
+  `gfxInfo` reports `reason=vulkan-clamp` and a line of the last frame's resolves (each
+  copy out of a multisampled target), `r_multiSamplesEffective` (read-only) holds the count
+  the last main scene drew with, and the settings menu's MSAA row carries a note naming the
+  trade-off and, where the renderer draws fewer samples than applied, a line naming the
+  count, in all twelve languages. Checked: captures of the page on Vulkan at a 16x request
+  (the clamp line names 8x) and OpenGL (no line), the presets self-test on both, the new
+  `msaa_status` case of `ui_settings_service.py`. See
+  [report section 13](performance-report.md#13-msaa-and-the-hdr-scene-target-fps-05).
 - [ ] **FPS-06 — P1, investigation and implementation: equal-settings regressions.** At
   the 0.13.2 settings the current build is slower than 0.13.2 on OpenGL by a constant
   1.0-1.2 ms per frame in storage2 (0.9-1.0 ms of it in the draw phase, in every window
@@ -1838,6 +2140,20 @@ optimization has landed.
   and the level transition. Close when each class is attributed in the report, fixed or
   given a declared budget, and the hitch scenario shows no frame above a declared ceiling
   outside level loads on both backends.
+  Progress, 17 November (multiplayer): a player or bot arriving with a model
+  nobody had used yet had its declaration, head, skin and images read from
+  disk mid-match, on the server and on every client that could see them, and
+  the first fall of a match read its damage definition the same way. A
+  six-bot match logged 53 such loads; it now logs none, with every player
+  model loaded with the map (`g_precachePlayerModels`) at no measurable cost
+  in load time ([measured](mp-audit-2026-11-17.md#measured)).
+  Second round, 17 November ([second round](mp-audit-2026-11-17.md#second-round)): multiplayer
+  `FindEntityDef` answers from a per-map cache; item timers collect their
+  items once a send instead of three passes over every entity slot a
+  recipient; an item whose model does not move keeps its PVS areas instead of
+  dropping them every tic; the local HUD is published once a frame, not once
+  a prediction pass; entities that are neither networked nor map entities
+  skip the snapshot PVS test. None of these was measured.
 - [ ] **FPS-08 — P2, implementation: CPU-side renderer and game cost.** The HF-07
   attribution found the Quality frame CPU-bound on one thread (tic, scene front end and
   Vulkan recording in turn); the render-thread prototype's first stage gained 0.5 ms
@@ -1874,10 +2190,10 @@ and AND-05.
 | Task / state | Completed points and evidence | Remaining completion subpoints |
 | --- | --- | --- |
 | VR-01 — Closed (PC scope) | Vulkan (runtime-created device), desktop-independent submission, Wayland EGL and SP world-GUI pointing integrated at render API 32 with VR-06's guarantees; GL/Vulkan SP/MP/menu smokes, the Vulkan fault matrix and Linux Wayland/X11 bindings pass on the simulated runtime. | Quest standalone moved to AND-05 by decision; physical headsets are VR-02. |
-| VR-02 — Partial | GL and Vulkan stereo, tracking/input, room scale, play spaces, aiming, haptics, world GUIs, per-eye TAA and comfort controls provide the testable implementation; the [headset checklist](vr-headset-qualification.md) is ready to run. | Run the checklist on each available PC runtime/headset: combat, refresh/latency, controls, collision, vehicles, HUD/world-GUI readability and recovery. |
+| VR-02 — Partial | GL and Vulkan stereo, tracking/input, room scale, play spaces, aiming, haptics, world GUIs, per-eye TAA, comfort controls and (17 November) the player's own body with arms that reach the hands (`vr_body`) provide the testable implementation; the [headset checklist](vr-headset-qualification.md) is ready to run. | Run the checklist on each available PC runtime/headset: combat, refresh/latency, controls, collision, vehicles, HUD/world-GUI readability and recovery. |
 | VR-03 — Closed | STAGE/LOCAL_FLOOR/LOCAL selection with warned fallback, floor-referenced standing height, recentering, calibration and live seated/standing changes pass natively and on the simulated runtime (GL/Vulkan). | Physical body alignment is checklist section 4 (VR-02). |
 | VR-04 — Partial | `openxr_vr_stereo_cost.py` records flat/stereo/warm-stereo CPU, build, submit and GPU tails, now at a chosen preset (`--preset quality`); the simulated baselines on this GPU are recorded below. Uploads, dynamic geometry, remote cameras, cached static shadow maps and (8 November) world-GUI quads are shared between the eyes; culling, lights, draws, mirror/reflection/refraction/x-ray maps and dynamic shadow composition stay per eye. `openxr_vr_stereo_share_smoke.py` proves both by work count on OpenGL and Vulkan. | Headset tails against the refresh budgets (checklist 2.2), and sharing work where those tails show a view-independent cost. |
-| VR-05 — Closed (approved scope) | Decision: per-eye TAA only. Each eye has its own view identity, history images, motion vectors and resets in the SP game chain and both backends' own temporal scenes; dynamic resolution stays off in VR. SP/MP GL/Vulkan pass the simulated-runtime smoke. | Headset comfort is checklist section 7; hand presence and physical-object interaction need their own designs. |
+| VR-05 — Closed (approved scope) | Decision: per-eye TAA only. Each eye has its own view identity, history images, motion vectors and resets in the SP game chain and both backends' own temporal scenes; dynamic resolution stays off in VR. SP/MP GL/Vulkan pass the simulated-runtime smoke. | Headset comfort is checklist section 7. Hand presence arrived with the body (VR-02, 17 November); physical-object interaction needs its own design. |
 | VR-06 — Closed | Active GL teardown/ownership repair passes native failure cases and simulated-runtime SP/MP gameplay. | Carry guarantees into VR-01 backends; physical controller/headset validation remains VR-02. |
 
 ### VR task evidence and acceptance
@@ -1905,8 +2221,8 @@ and AND-05.
   per-eye TAA smokes, the Vulkan fault matrix (windowless included) and Linux
   native-Wayland Vulkan/EGL and X11 Vulkan/GLX runs pass on the simulated
   runtime; see the [integration evidence](platform-recovery-review.md#vulkan-egl-and-world-gui-xr-integration-6-november-2026).
-  Quest (`65aa9bd88`) is not integrated: by decision it waits on AND-05's
-  distribution decision. Physical headsets remain VR-02.
+  Quest (`65aa9bd88`) was left to AND-05 by decision and is integrated there
+  (12 November). Physical headsets remain VR-02.
   9 November: the review missed two fixes on that branch. The off-axis culling
   planes fix (`ea85bdd7b`) is restored in `3a40f705c`; without it the eyes lost
   near terrain and wreckage on both renderers
@@ -1931,13 +2247,97 @@ and AND-05.
   saves starting turned by earlier snap turns; a weapon wheel the hand could
   not steer under the retained interface; the runtime's recentre applied
   before its change time; no pause when the headset loses focus; zoom that
-  snapped; and a mirror that ignored window resizes. Verified leads left for
-  the headset run or a later round: room-scale steps against the interpolated
-  eye (up to one tic's walk of shimmer), a save made in a vehicle seat loading
-  with an arbitrary seat facing, the multiplayer comfort vignette firing on
-  real room-scale steps, multiplayer damage numbers projected from the right
-  eye, render demos recorded in VR storing both eyes' 2D, and checkpoint
-  thumbnails capturing the desktop mirror.
+  snapped; and a mirror that ignored window resizes.
+  11 November: six leads that audit verified are fixed
+  ([release record](release-completion.md#vr-room-scale-steps-without-a-stutter-vehicle-saves-that-load-facing-forward-and-damage-numbers-on-their-targets-11-november-2026)):
+  the interpolated eye carries the room-scale step the tracking space already
+  took (`ShiftTrackingOrigin` reports whether it took it; up to a tic's walk
+  of shimmer before, both game modules); a seat restored from a save faces the
+  vehicle's eye once VR drives the usercmd again; multiplayer's vignette
+  leaves a room-scale step's speed out; multiplayer damage numbers project
+  through the HUD layer, not the right eye; a demo recorded in VR writes the
+  left eye's views and none of the eyes' 2D; and a checkpoint preview reads
+  the left eye, not the desktop mirror. The play-space and multiplayer smokes
+  check each one, and each check fails on a build with its fix switched off.
+  The audit's last lead is fixed the same day: an OpenGL frame whose
+  virtual-screen copy failed, or that reached no target, stayed marked
+  presented, so the engine submitted images it never wrote. It now submits no
+  layer, as Vulkan; the test runtime's `imageFill:<n>:unbound` fault breaks
+  the screen's images for `openxr_lifecycle_runtime.py`, which failed before
+  the fix.
+  17 November: the player's own body in the headset, and a third audit
+  ([release record](release-completion.md#your-own-body-in-vr-and-a-headset-audit-17-november-2026)).
+  `vr_body` (default 2) draws a second render entity of the player model in
+  the player's own view only, posed on every draw by `src/framework/VRBody.h`
+  in both game modules: the model's rest-pose trunk, scaled to the game's eye
+  height, hangs from the neck under the tracked head and turns after the
+  head's heading in the tracking space; the legs keep the animation's feet
+  and bend to the pelvis; each arm meets the view weapon's own forearm at an
+  elbow solved from shoulder to wrist, so the gun keeps Raven's hands, and the
+  support hand follows its controller except in the two-handed grip and while
+  the weapon is busy. The stock view models and The Awakening's two new ones
+  share one arm rig (checked by reading every model's joints; the expansion's
+  were not probed in game). The audit, three independent readings of the
+  engine, game and renderer sides, led to these fixes: a held gun no longer
+  depth-hacked over the world; facing resets and VR's takeover of an untracked
+  view face the head, not the weapon hand; frozen views no longer re-anchor
+  the world to the hand; turns pivot about the head; input released when the
+  runtime stops a session; Valve Index grip bound to its force; recentre from
+  the controller, on first focus and at each level, with no standing height
+  learned below a metre; head-aimed shots and the water line taken at the
+  tracked head; a comfort vignette fixed to the lens under zoom and open
+  while paused; the fallback liquid wash drawn into the eyes; motion blur off
+  in eye views; per-frame flashlight placement in the hand; and haptics for
+  the lightning gun and gauntlet. `vr_bodyAhead` stands the body ahead of the
+  player for inspection. Audit leads left open, none blocking the checklist:
+  missing buttons on Vive wand, Index and WMR profiles (no flashlight or
+  jump on some); the comfort vignette centred on each eye's own axis, which
+  canted displays would not fuse; one 100 ms swapchain wait ending the
+  session, and any `XR_ERROR_RUNTIME_FAILURE` from an optional call stopping
+  VR until `vr_restart` (both pinned by the fault matrix); the third-person
+  model's yaw spinning while the gun points near the vertical (mirrors and
+  shadows only, now that the body in the eyes has its own heading); the
+  projectile launch clearance assuming a muzzle inside the body's box; a
+  room-scale catch-up walked in one tic after a pause; multiplayer facing
+  resets, which the server sets from the hand's usercmd; no body in vehicle
+  seats; and a left-handed hold that uses the model's simpler hands. The
+  setting is **Your Body** on the Virtual Reality tab, in all twelve
+  language tables, on the stock and the retained pages.
+  The same day a second round took those leads
+  ([release record](release-completion.md#vr-controllers-with-fewer-buttons-steadier-sessions-and-the-audits-other-leads-17-november-2026)):
+  Index's left trackpad force is the flashlight, and Vive wands and Windows
+  Mixed Reality controllers press their touchpads by region
+  (`VR_TrackpadRegion`), proven per profile by
+  `openxr_vr_controller_profiles_smoke.py` (the test runtime reports a chosen
+  profile, `OPENQ4_XR_TEST_PROFILE`); a swapchain wait that times out is made
+  again for up to a second; optional calls (haptics, the profile's name,
+  refresh rate, performance levels, thread hints) go through `CheckOptional`,
+  so a runtime failure there no longer stops VR; the comfort vignette centres
+  on the head's forward in both eyes; the third-person model holds its heading
+  past 55 degrees of aim pitch (`VR_ModelYawFollow`); a hand-held muzzle and a
+  projectile's way are cleared from the hand; a single-player room-scale
+  catch-up walks at no more than 5 m/s (`VR_RoomScaleCatchUp`); a multiplayer
+  client turns its body onto a facing the server set from the hand
+  (`idVRSystem::TurnBody`, game API 60), and the server holds a VR client's
+  delta through frozen views as the client does; and an exposed seat shows the
+  seat's own pose under the head (`vrBodySeated`). The model heading others
+  see still comes from the aim, held near the vertical, not from the head,
+  which the server never learns.
+  Left-handed hold, 17 November 2026: the view model's own arms now hold a
+  gun in the left hand, drawn by an entity of their own as the mirror image
+  of the right-handed hold across the gun's upright barrel plane
+  (`rvWeapon::GetVRArmsMirror`, `VRBody_MirrorPlacement`); the gun stays as
+  modelled and sits in the left hand by the mirrored grip. The earlier
+  attempt mirrored partner joints by name, which only the machinegun's rig
+  allows: the other rigs hang the left wrist on the gun or number their
+  fingers differently, and an offline skinning check stretched their arms up
+  to 24 times. A reflected model winds the other way round on screen, which
+  the legacy GL passes (`RB_SetSurfaceWinding`, at each surface-space change)
+  and the Vulkan per-surface passes (`vkSurfaceWinding_t`) now honour, as the
+  modern GL executor did by `negativeScale`; before, both drew such a model
+  inside out. `openxr_vr_hold_closeup.py` frames every gun's hold close up,
+  right- and left-handed, through the test runtime's new `lens` command, and
+  sets each left-handed capture, flipped back, beside the right-handed one.
 - [x] **VR-03 — P2, implementation: standing space and floor calibration.** Define
   LOCAL/STAGE/floor behavior, recentering, seated/standing transitions and safe
   fallback when a runtime lacks stage space. Validate crouch/body alignment and
@@ -2015,9 +2415,10 @@ Sources: [Android build and packaging](android-build.md),
 
 ### AND completion checkpoints
 
-**Estimate: 66%; 1/5 tasks closed.** Onboarding, touch and several lifecycle
+**Estimate: 70%; 1/5 tasks closed.** Onboarding, touch and several lifecycle
 repairs are already integrated; they are not all still archived. S25 and emulator
 checks are bounded evidence, not the complete Adreno/Mali/API/lifecycle matrix.
+The Quest flavor is integrated, with emulator and test-runtime evidence only.
 
 | Task / state | Completed points and evidence | Remaining completion subpoints |
 | --- | --- | --- |
@@ -2025,7 +2426,7 @@ checks are bounded evidence, not the complete Adreno/Mali/API/lifecycle matrix.
 | AND-02 — Partial | The device harness and S25 (Adreno 830, API 36) campaign pass cold and warm: real level transitions, save/load, audio residency, storage, thermal and per-model budgets. | S25 sustain and multiplayer phases; audible and gamepad/mouse/keyboard checks; Mali and API-floor devices. |
 | AND-03 — Partial | Verified package repair/import, localized setup, settings return, control/interface setup and save/log export implemented; scoped device round trips pass. | Release-signing continuity; cloud/removable providers; interrupted-process recovery; physical setup/accessibility and upgrade matrix. |
 | AND-04 — Partial | Touch presets, UI/text sizing, an opt-in portrait orientation, retained safe areas, HUD safe-area and thumb-deck positioning and the per-orientation layout editor exist. | Device-based presets and GLES limits; keyboard/touch targets, human-finger portrait play, the weapon control over the portrait readouts, stock GUIs in portrait, cutouts/gesture bars/folds/multi-window qualification. |
-| AND-05 — Not integrated | Quest recovery sources are identified under VR-01/AND-01; the archived Quest change (`65aa9bd88`) moved here from VR-01 on 6 November, on top of the integrated PC Vulkan/EGL XR path. | Dedicated verified flavor, installation/assets, stereo/controller UI, comfort/session recovery and sustained thermal/refresh budgets; distribution decision. |
+| AND-05 — Partial | The archived Quest change (`65aa9bd88`) is integrated with refresh-rate, performance-level, thermal and frame-thread services; the `-Popenq4Quest` release APK with its generated headset manifest passes `verify_android_apk.py --variant quest`, and the emulator plays Air Defense 1 in stereo on the test runtime (12 November). | On a headset: installation/assets, stereo gameplay, controller/UI interaction, comfort, session recovery and sustained thermal/refresh budgets; distribution decision. |
 
 ### AND task evidence and acceptance
 
@@ -2140,6 +2541,11 @@ checks are bounded evidence, not the complete Adreno/Mali/API/lifecycle matrix.
   per-model limits. Still open: the phone's sustain and multiplayer phases
   (interrupted), audible and gamepad/mouse/keyboard checks, and Mali and
   API-floor hardware.
+  [Quit abort fixed](platform-recovery-review.md#android-quit-abort-13-november-2026)
+  (13 November): quitting through `exit()` ran libhwui's static destructors,
+  which destroyed the HWUI worker pool's mutex under its threads and aborted
+  every quit. Android now leaves with `_exit()` once shutdown is done, and the
+  emulator smoke fails on any native abort in the engine's process.
 - [ ] **AND-03 — P1, implementation and qualification: player setup and upgrades.**
   Finish scoped-storage onboarding, retail-pak validation, localized insufficient
   space/extraction/retry messages, accessible logs and save backup/export. Validate
@@ -2240,6 +2646,20 @@ checks are bounded evidence, not the complete Adreno/Mali/API/lifecycle matrix.
   Decide sideload/store packaging policy. Keep emulator/test-runtime results
   separate from headset support and x86_64 emulator builds separate from publication.
   Require AND-01's flavor-aware package verification and VR-06 lifecycle tests.
+  Integrated 12 November ([evidence](platform-recovery-review.md#meta-quest-flavor-integration-12-november-2026)):
+  the archived change's Android loader, ES session binding and GLES
+  presentation sit on the current renderer, and its sRGB decode draw now
+  invalidates the GLES program and texture caches. Where the runtime offers
+  them, the engine also chooses the refresh rate (`vr_refreshRate`), holds the
+  CPU/GPU level (`vr_performanceLevel`), reports thermal limits and names the
+  frame thread. Gradle `-Popenq4Quest=true` packages `com.darkmatter.openq4.quest`
+  with a manifest generated from the phone's, and its release APK passes
+  `verify_android_apk.py --variant quest`. On the x86_64 AVD the test runtime,
+  which only the emulator's debug APK may carry, runs Air Defense 1 in stereo
+  with a head turn, the 90 Hz request, sustained-high levels and a thermal
+  report (`android_emulator_smoke.py --mode vr`). This is emulator evidence
+  only: every qualification point above still needs a headset, and the
+  packaging policy a decision.
 
 ## iOS, iPadOS and visionOS
 
@@ -2570,10 +2990,14 @@ Completion must advance through the existing dependencies:
   both back ends, and Vulkan applies an MSAA change as a transition, so no
   Performance Preset restarts Vulkan's device.
   Remaining, in order: a focused Keep under borderless and exclusive
-  fullscreen, and any Keep on OpenGL (the test window had no focus);
-  OpenGL's MSAA Apply (a single-sample window with the direct 3D views
-  through a multisampled target, as Vulkan has; the record lists what it
-  touches); and an image reload spread across frames.
+  fullscreen, and any Keep on OpenGL (the test window had no focus); and an
+  image reload spread across frames.
+  OpenGL's window is single-sample by default now (`r_glWindowMultisample`,
+  1 on Apple): 3D views drawn straight to it go through a multisampled
+  stand-in, so an MSAA change is a transition there too and no preset
+  restarts OpenGL. At 4x the view-capture sequence matches the multisampled
+  window (eleven of twelve images exactly); Intel, AMD, a visible window and
+  the classic `renderDef` pages were not run.
   OpenGL now resizes its upload stream on the running device, so a preset
   restarts OpenGL only when it changes MSAA.
   Stage 4, the same day: a changed `image_ignoreHighQuality` re-parses the
@@ -2763,6 +3187,15 @@ Completion must advance through the existing dependencies:
   bound, and the stock menus step their focus as a page reads and scroll a
   settings page to it ([key glyphs and focus](ui/key-bind-glyphs.md)). This
   does not migrate or accept a GUI either.
+  Progress, 17 November: while The Awakening runs, the retained pause and its
+  Load Game, Save Game and Restart Level pages take the expansion's own family
+  (visual specification 1.40 to 1.45): horned, frosted bands that close in as
+  the menu opens and glide between levels, blade-ended plates with the lens,
+  snow and haze ([The Awakening's pause](ui/retained-screens.md#17-november-2026-the-awakenings-pause),
+  `FLOW-071`), and so do its SETTINGS page and the CONTROLS, GAME OPTIONS,
+  DISPLAY and AUDIO categories. Remaining: the objectives display's frames,
+  tab and list scrolling, a page scrolling out on Back, the high-contrast and
+  power-saving variants, and acceptance captures.
 - [ ] **UI-05 — P1, decision and qualification: resolve visual policy conflicts.**
   Reconcile SP/MP hit-marker defaults with visual specification section 14.7 and
   other recorded deviations before acceptance. Preserve editable vector framing,
@@ -2883,6 +3316,21 @@ Completion must advance through the existing dependencies:
   including ABA changes and restoration. The production kick choice freezes that
   catalog through dispatch. Native and GL/Vulkan gameplay checks pass; full
   toolkit and device/platform acceptance remain open.
+  Progress, 13 November: [menu sounds](ui/menu-sounds.md) now come from one
+  semantic cue stream and one router instead of 78 per-request session plays.
+  A device event that moves the lit control or option ticks
+  (`main_menu_mouseover`), and every completed press, value cycle, list or edit
+  opened or closed, and Back selects (`main_menu_selection`). There is at most
+  one sound per input event, played in the session's playing world. Value
+  sliders stay silent, as retail's did. In a level the settings sub-pages
+  now keep the menu world playing instead of the paused game's. Native
+  interaction, runtime and adapter tests pass, and device-free OpenGL engine
+  checks on the title, the `airdefense1` pause and settings pages and a DM
+  Welcome card log one sound per step in the right world. The single-player
+  loading screen's `load_screen_ready` and `load_screen_click`, silent under
+  both interfaces, now play once each from the session's continue gate.
+  `MOT-006` acceptance still needs physical-device sound counters and a
+  listening review.
 - [x] **UI-10 — P0, investigation and implementation: refresh effective scope and
   source inventory.** Completed retail/base/Awakening inventory:
   264/276/324 effective paths, 358 distinct source/include-bound variants, 18
@@ -2950,7 +3398,7 @@ historical saves and recovering safely from damage.
 | Q4-06 — Partial; optional P3 | Raw inventory and field codecs restored; v5 portable stamp/encoding implemented; Windows/Linux bidirectional stock/Awakening cross-loads pass. | Confirm outstanding CI/Apple codec runs; macOS and another ARM64 runtime cross-load/resave directions; publish player migration guidance with accepted scope. |
 | Q4-07 — Partial | Original-writer Windows corpus substantially qualified; v2 stamp reporting repaired; exact HiDef fixture investigated. | Resolve #123 against the reporter's actual GUI/content; other ABIs; recover/reproduce absent stage-two artifacts before claiming independently reviewable acceptance. |
 | Q4-08 — Partial | Durable commit/recovery implemented; 56 process-interruption points, locked-file failure and NTFS/ext4/WSL 9p checks recorded. | APFS result, removable/network filesystems and actual power-cut behavior; retain measured CRC/sync costs and last-valid-save preservation. |
-| Q4-09 — Partial | Render demo v11: one recording spans levels, save loads, death reloads and restarts as self-contained segments; gameplay-only frames; level loads, continuous timeline and level markers in playback; campaign-aware library and gate; whole retained HUD and in-world screens recorded. Render demo v12 predicts animated-entity joints exactly, a quarter smaller. Render demo v13 records every frame at the played frame rate instead of 30 Hz. Windows checks pass with stock and Awakening content: GL recording, GL and Vulkan playback. | Vulkan recording, Linux and macOS, a long multi-level session with seek timing and file size, the 2D, sound and effect records that now dominate the size, the masked retained HUD groups that replay unmasked, and local sounds already playing at a segment start. |
+| Q4-09 — Partial | Render demo v11: one recording spans levels, save loads, death reloads and restarts as self-contained segments; gameplay-only frames; level loads, continuous timeline and level markers in playback; campaign-aware library and gate; whole retained HUD and in-world screens recorded. Render demo v12 predicts animated-entity joints exactly, a quarter smaller. Render demo v13 records every frame at the played frame rate instead of 30 Hz. Render demo v14 carries the stream in checked, packed blocks with keyframes: 40% of v13's size, files past 2 GiB, seeks in about a second, and playback of what is intact of a cut or damaged file. Windows checks pass with stock and Awakening content: GL recording, GL and Vulkan playback. | Vulkan recording, Linux and macOS, a session that is really hours long, a multiplayer recording in the block container, a listening pass, a smaller exact joint coding (joints are now most of a recording), the masked retained HUD groups that replay unmasked, and local sounds already playing at a segment start. |
 
 Completion substeps must keep three forms of evidence distinct:
 
@@ -3154,6 +3602,8 @@ Completion substeps must keep three forms of evidence distinct:
   occupied marine cover. Script checks now report failures in release builds.
   A third pass replaces M04's constant global siren and computer alarm loops
   with quieter, localized reminders, preserving console shutoff and old saves.
+  Its pacing revision 2 (17 November) restores a steady siren rhythm after
+  playtesting found the reminders too sparse and faint.
   A fourth pass makes the security override one-time and prevents late camera
   destruction from starting an early or duplicate turret-room door hack.
   Fitted camera bounds remove the upper cell door overlap that blocked startup.
@@ -3208,6 +3658,34 @@ Completion substeps must keep three forms of evidence distinct:
   late-mission audit and runtime limits.
   Normal combat, complete traversal and timed extraction remain qualification
   requirements; focused script callbacks do not close this work item.
+  Silent names, 14 November: content that names a dialogue key, radio sound or
+  joint which does not exist fails without a warning, so the earlier reviews did
+  not reach it. Seventeen scripted lines now play the recordings their scripts
+  meant, the nine radio calls of the M06 cannon defence among them; the Tank and
+  the Retch see from their heads, where they saw from their feet; the Tank's
+  rockets flash and the opening dropships light both thrusters. The tables,
+  evidence and limits are in the
+  [mission audit](awakening-missions.md#silent-names--14-november-2026). Hidden
+  input-free probes measure each correction against `g_awakeningContentRepairs 0`.
+  Scene timing with the restored lines and the look of the two effects have not
+  been reviewed by ear or eye, and the playthroughs remain.
+  A second pass the same day sorted the 376 recorded lines the alpha never plays
+  (most are earlier takes of lines that do play) and restored what has a
+  provable place: Cryofac's three music cues, which named tracks under the wrong
+  mission number, Navajas's six charge-setting lines there, whose sound
+  declarations name a folder that does not exist, the radio marine's reply in
+  M06's Renner scene, three more replies from M04's Fox marines, and three
+  replies in Cryofac through script revision 4. The races' unused chatter has
+  no recoverable placement and stays out. See [the second pass](awakening-missions.md#replies-the-scenes-stop-short-of--14-november-2026).
+  Missing voice lines, 16 November: the Pain Lord's three tube marines play
+  stand-in screams from installed recordings, and Darnell's undeclared m08 radio
+  line no longer beeps (both m08 lines are recorded and still to be restored, as
+  are m01's 23 "+use" replies a key slip turns into beeps). m01's 29 draft radio calls (words known, no audio,
+  draft script runs nowhere) are placed at the shipped battle's scenes through
+  `m01_radio.script`, gated on their content. Open: voicing them (25 anonymous
+  squad lines, 3 Markswell), and the 100 draft lines whose scenes the shipped
+  maps lack. See the [register](awakening-missing-voice-lines.md) and the
+  [voice generation breakdown](voice-generation-breakdown.md).
 - [ ] **Q4-05 — P1, decision and implementation: save failure recovery.** Preserve
   approved v2/v3/v4 compatibility readers, the v5 portable reader and corruption
   checks. Explicit recovery after semantic object-restore failure is implemented
@@ -3605,11 +4083,31 @@ Completion substeps must keep three forms of evidence distinct:
   animated entity took a freed handle with the same joint count (v12 too);
   playback now starts a fresh joint history at every raw record, and both
   reproductions play in full.
-  Remaining: Vulkan recording, Linux and macOS, a long session with measured seek
-  times (rewinds replay from the start) and size, the 2D model, sound and effect
-  records that now make up most of a recording, the retained HUD's masked
-  groups, which replay without their masks, and local sounds already playing when
-  a segment starts.
+  Render demo v14 (14 November 2026) replaces the single LZW stream with a
+  container of checked blocks
+  ([block container](multiview-demos.md#block-container-keyframes-and-large-files-v14-14-november-2026)).
+  Each block carries its own checksums and its place on the timeline and is
+  packed in two stages, long-range matches against the last 2 MiB and then
+  DEFLATE, on a worker thread. An 82-second, two-level recording at 60 frames a
+  second is 56.9 MB where the same stream as LZW is 140.0 MB. A keyframe every
+  ten seconds gives each level further ways in, which playback in order skips:
+  seeks that took 1.7 to 5.1 s by replay take 0.6 to 1.1 s, and none loads a
+  level it does not land in. A recording killed mid-flight plays every frame
+  that reached the disk and is listed with its length; one flipped bit costs
+  the frames up to the next keyframe (83 of 4,913 in the test) instead of the
+  rest of the file; a recording ends itself cleanly before the disk fills or
+  at a size limit; and a 2.35 GiB test file opens, lists and seeks beyond the
+  2 GiB mark, where no demo could be opened before. Effects that playback
+  learns of late are now shown in full flow rather than from their opening
+  burst. A native test runs the container without the engine (2,264
+  truncations, 400 bit flips, hostile payloads), and the v11 to v13 recordings
+  still play every frame on OpenGL and Vulkan.
+  Remaining: Vulkan recording, Linux and macOS, a session that is really hours
+  long (the 2 GiB check used a synthetic file), a multiplayer recording in the
+  block container, a listening pass (every run was silent), a smaller exact
+  coding of animated entities' joints, which are now most of a recording, the
+  retained HUD's masked groups, which replay without their masks, and local
+  sounds already playing when a segment starts.
 
 ## Rigid-body and ragdoll physics
 
@@ -3641,22 +4139,54 @@ is also cheaper to run. Every item honors three product rules:
 
 ### PHYS completion checkpoints
 
-**Estimate: 0%; 0/6 tasks closed.** The legacy physics engine, recent AF restore
-hardening and presentation interpolation are not implementation of the proposed
-enhanced solver. The product rules below are requirements, not current features.
+**Estimate: 90%; 3/6 tasks closed (17 November 2026).** PHYS-01, PHYS-04 and
+PHYS-05 are closed. The enhanced solver is implemented behind
+`g_enhancedPhysics` (default `0`) with its Settings row, telemetry, workloads
+and harnesses, and legacy mode still replays the pre-solver binary's workload
+digests exactly.
+
+The third round (16 November) ended with the same build passing on Windows
+and failing three checks on Linux. The fourth (17 November) found that
+neither was the enhanced solver. **The Linux and macOS builds of idlib
+compiled approximate square roots and trigonometry (`_FAST_MATH`) where
+Windows compiles the exact ones.** A one-unit difference in the last place of
+an animation quaternion moved the right knee joint by 5e-7, which flipped the
+frame the ragdoll's thigh bone gets at load by a quarter turn, which pointed
+the knee's limit sideways against every pose a map stores: placed ragdolls
+blew apart at up to 1,600 units/s when a level started, in legacy mode too.
+`_FAST_MATH` is now off everywhere and a CI test holds it off. The third
+failure, a rocket splash on resting corpses, was the test's staging: each
+mode had killed and settled its own corpses, and enhanced ones lay closer to
+the blast. The envelope now hits both modes from one saved scene. With both
+changes the three Linux checks pass, and the rigid-body stack workloads
+produce the same state digests on Linux and Windows in both modes.
+
+**What keeps PHYS-02 and PHYS-03 open is processor time.** With the map's own
+ragdolls at rest enhanced costs more than legacy on two of the five
+single-player workloads on each platform: 3 % and 24 % on Windows, 65 % and
+34 % on Linux (2 to 54 ms over a workload), and less or the same on the
+others (75 % less on the sloped stacks). Bounds that would cover the third
+round's figures are written into the [physics reference's
+budgets](physics-reference.md#budgets-and-tolerances) as proposed exceptions
+for the project owner; they are not accepted, and the Linux ragdoll figure has
+since grown past its proposed bound. **The default stays `0`.** The user asked
+for the round to be wrapped up before the full Linux pass had been repeated on
+the corrected build, so that repeat is open too. Each open point is in the
+[physics reference](physics-reference.md#known-defects-and-what-was-tried);
+the evidence is in [its Evidence section](physics-reference.md#evidence).
 
 | Task / state | Completed points and evidence | Remaining completion subpoints |
 | --- | --- | --- |
-| PHYS-01 — Not started | Proposed workloads and preservation rules specified. | Record legacy CPU distributions, defect reproductions and impulse envelope; set budgets/tolerances and the CVar/localized UI contract. |
-| PHYS-02 — Not started | Legacy rigid-body code available as baseline. | Semi-implicit integration, persistent contacts/warm starting, friction, island sleeping and selective swept collision; prove budgets and stable energy. |
-| PHYS-03 — Not started | Legacy AF code/stock definitions available as baseline. | Warm-started constraint solver, stable limits/penetration recovery, authored self-collision/sleeping and animation-velocity handoff. |
-| PHYS-04 — Not started | No accepted enhanced-mode behavior envelope or runtime evidence. | Executable impulse guards and telemetry; light/heavy hit tests; stock/Awakening actors, moveables and scripted progression without behavior breakage. |
-| PHYS-05 — Not started | Existing save/network/demo/presentation contracts constrain integration. | Cross-mode saves, server-authoritative mode, demo parity, transient/versioned state and dedicated-safe interpolation. |
-| PHYS-06 — Not started | Default remains legacy; no promotion evidence. | Windows/Linux and one ARM64 matched workloads, worst-frame/visual acceptance, explicit default decision and upgrade-preserved fallback. |
+| PHYS-01 — Closed (16 November 2026) | Contract recorded: one archived option with a localized Settings row on both interfaces (12 languages), committed at map load, servers publish `si_enhancedPhysics`. Legacy CPU distributions on the reference workloads with a per-frame noise floor, the legacy impulse envelope per damage path, and the budgets and tolerances (pooled stagings, the joint-stretch rule) in the [physics reference](physics-reference.md). `physics_defects.py` stages all seven defect classes in stock maps in both modes: legacy shows resting jitter (1,767 sleeps and 1,757 wakes on the sloped stacks) and joint stretch (85 units, visible for 42 frames); twitching, sliding corpses, limbs stuck in walls and tunnelling up to 9,000 units/s did not reproduce as legacy defects and are recorded as such. | None. New repros belong to the item whose gate they test. |
+| PHYS-02 — Partial | Semi-implicit rigid bodies with persistent warm-started contacts, sleeping after a ten-step quiet window and selective sweeps. Contact gaps come exactly from the collision model's contact features. Friction is calibrated against legacy on flat-floor shoves (three times the authored contact friction); impacts are frictionless and rebound by the body's bouncyness, on a contact the body already had only against fixed geometry. A body that has not moved since it was created rests by the legacy test, so placed pickups stay put (Network 1, Core 2 and Storage 2). Legacy replay identical. Native test: no energy gain, settled stacks, no tunnelling through a 2-unit wall, impacts slide and rebound; no tunnelling in 18 map launches. Blasted and shoved crates and barrels pass every class on the crater and on a flat floor (on Linux too, on the third round's build); shoves of 4,000 to 40,000 on a flat floor end 0.7x to 1.2x as far as legacy's. From 17 November the stack workloads give the same state digests and step counts on Linux and Windows in both modes. CPU with the map's own ragdolls at rest: 75 to 78 % below legacy on the sloped stacks on both platforms (1,667 wakes against 11). Stills of the stacks reviewed side by side. | CPU budget: `sp-flatstacks` costs 24 % (2.8 ms) more than legacy on Windows and 34 % (4.1 ms) on Linux, because legacy rests a placed stack on its first step (164 moving steps against 425 on both platforms); `sp-explosion` costs 3 % (2.2 ms) more on Windows with a first-step frame 0.9 ms worse, and the same as legacy on Linux. Either fix these or have the proposed exceptions accepted. Visible inside the gates: a body knocked loose on the crater's slope travels about half as far as legacy's, and which sloped stack survives a knock differs. A windowed review in motion. |
+| PHYS-03 — Partial | Warm-started PGS on the legacy constraint matrix with an exact-LCP fallback (0.6 ms of a 58 ms workload), bounded recovery, quiet-figure sleeping, death-pose velocity inheritance, an energy guard that keeps the figure's momentum, frictionless impacts and no figure bounce (as legacy). Round two: joints pulled apart close by position only through the tree solve, the surface that stops a body joins its contacts, and position-only motion is solved against every contact and swept on its own. Round three: exact contact gaps, so an edge-on-edge contact acts at the ledge and not at the limb's end; bodies a map places inside static geometry are not pushed out of it; a slow body is swept along a two-unit chord every eight steps. All seven defect repros pass on Windows: joints 37 units apart for 22 frames after a Dark Matter splash against legacy's 85 for 42; no joint pierced in 18 corpses killed against a wall; the placed marine lying across a ledge edge sinks 1.0 unit with no joint pierced (7.9 units and two joints before). On Linux, on the build with exact math, the three repros that were repeated pass with Windows's numbers: the placed marine sinks 1.0 unit and stays on its ledge, joints are 33 units apart for 12 frames against legacy's 58 for 28, and the sloped stacks sleep 22 times and wake 11 against 1,768 and 1,757. Windows ragdoll CPU 15 % below legacy on the noise floor. Stills of ragdolls at play distance reviewed side by side. | CPU budget on Linux x64: `sp-ragdolls` costs 65 % (54 ms) more than legacy on the build with exact math. The three staged corpses take 534 moving steps to settle against legacy's 336 there, and 340 against 332 on Windows; why enhanced settles so differently on the two platforms when legacy no longer does is not found. The `mp-frags` bot round cost 24 % more than legacy on Linux before the math fix and was not repeated after it. The other four defect repros were not repeated on Linux after the fix. A windowed review in motion. |
+| PHYS-04 — Closed (17 November 2026) | Impulse guard and telemetry. `physics_envelope.py`, both modes hit from one saved scene, passes momentum and all ten hit classes on Strogg marine corpses (rocket and grenade splash median 141 / 110 units, Dark Matter splash 211 / 183, largest 526 / 525) and, each mode from its own start and judged on the bodies the blast reached, on The Awakening's `m01_stranarus_trench2`; crates and barrels pass all nine classes on Air Defense 1's crater and on Hangar Perimeter's flat floor, and six flat-floor shoves; multiplayer player corpses pass ten of eleven classes at three repeats and the eleventh at six (a still-falling class decided by which mode draws a spawn point where the corpse tumbles down the map). `physics_coverage.py` passes all nine cases: Air Defense 1's six hanging lights, Putra's 21 and client debris. `physics_campaign.py`: the 31-stage stock campaign chain completes in both modes on the retail packs (62 of 62 loads, a save and a load on every map, no errors, 1,675 bodies, 11 pierced joints after settling in each mode) and six scripted set pieces match legacy. The three checks that failed on Linux on 16 November pass there on the build with exact math: the placed marine stays on its ledge (sinks 1.0 unit; legacy 0), the rocket splash on resting corpses reads 150 / 125 units at the median and the Dark Matter splash 222 / 293, and Putra's lights stretch 1.3 units against 0.8, as on Windows. | None open. Recorded limits: the debris sample is one piece; vehicles keep the legacy step by design and were exercised only by the chain; the multiplayer scene has to run on an otherwise idle machine and was last run on the third round's build; on Linux only the three failed checks have run since the math fix (PHYS-06). |
+| PHYS-05 — Closed (16 November 2026) | `physics_integration.py` passes all seven checks on Windows x64 and Linux x64: saves load across modes both ways and in their own mode; clients follow a listen server's mode both ways; an MVD recorded on an enhanced server plays to its end in enhanced mode on a legacy client; a legacy client follows an enhanced dedicated server. A Linux x64 dedicated server and an AArch64 one under emulation run a seven-bot round in both modes without a renderer and without errors. The campaign chain saves and loads on all 31 stock maps in each mode. `presentation_look_runtime.py` at 240 Hz passes ragdoll, debris and death-camera interpolation in both modes (97-100 % of posed figure frames blended between steps in enhanced, 94-96 % in legacy, on the third round's build); both steps still run once per game tic. The first run found offline MVD playback failing in 0.14.1 (`spawn_entnum 4095 out of range`), fixed in `RegisterEntity`. | None. A physical 240/360 Hz display remains HF-07/HF-08's gate, not this item's. |
+| PHYS-06 — Partial | Reference workloads repeated in both modes on Windows x64 (five runs, per-frame noise floor, third round's build) and Linux x64 (three runs, on the build with exact math), with the map's own ragdolls at rest, with CPU distributions, worst frames, step counts and failures recorded; the solver test passes on six x64 and AArch64 builds, and an AArch64 dedicated server ran the bot round in both modes under `qemu-aarch64` (third round). The envelope, defect, coverage, set-piece and campaign harnesses ran on Windows on current sources and the retail packs. The fourth round found and removed the cause of every Linux-only failure (approximate math in the Linux and macOS builds of idlib). Stills of combat, explosions and stacks were reviewed side by side. **Decision, 17 November 2026: `g_enhancedPhysics` stays `0`**, because the CPU budget is missed on two workloads per platform and no windowed review in motion has been made. `0` remains the supported fallback, an upgraded profile keeps its saved choice, and the [capability matrix](engine-capability-matrix.md), user guide and release notes record the decision. | Repeat the decision once PHYS-02 and PHYS-03 close, and accept or reject the proposed CPU exceptions. In-game, windowed visual checks of combat, explosions and set pieces in motion (every round so far reviewed stills). Repeat the full Linux pass on the build with exact math: only the rested CPU workloads and three targeted checks ran before the round was wrapped up. Re-measure the Windows CPU tables and the campaign walk's timings on current sources (the walk's timings of 17 November were taken on an oversubscribed machine and are not usable). macOS and Android after the math change. ARM64 beyond an emulated dedicated server. |
 
 ### PHYS task evidence and acceptance
 
-- [ ] **PHYS-01 — P2, investigation and decision: legacy baseline and enhanced
+- [x] **PHYS-01 — P2, investigation and decision: legacy baseline and enhanced
   contract.** Measure legacy rigid-body and AF costs (`af_showTimings`,
   `rb_showTimings`, the CPU sampler) on fixed workloads: a combat-heavy SP scene
   with several ragdolls, an explosion clearing moveables and debris, an MP
@@ -3687,7 +4217,7 @@ enhanced solver. The product rules below are requirements, not current features.
   motion. Keep reading stock AF defs as authored: masses, limits and contact
   friction keep their meaning, with no replacement assets. Gate on the PHYS-01
   ragdoll workloads meeting their CPU budgets and the defect repros resolved.
-- [ ] **PHYS-04 — P1 for promotion, qualification: behavior preservation and
+- [x] **PHYS-04 — P1 for promotion, qualification: behavior preservation and
   the impulse guard.** Prove enhanced mode keeps the PHYS-01 envelope. Every
   external impulse delivers the same linear momentum as legacy, distributed
   over the bodies it hits by their masses. A per-hit velocity change is
@@ -3702,7 +4232,7 @@ enhanced solver. The product rules below are requirements, not current features.
   constrained bodies, moveables, debris, and Awakening `q4xbase` content.
   Scripted AF set pieces, vehicles and trigger-driven moveables must complete
   their progression in the Q4-02 campaign chain with the switch on.
-- [ ] **PHYS-05 — P1 for promotion, integration: saves, multiplayer, demos and
+- [x] **PHYS-05 — P1 for promotion, integration: saves, multiplayer, demos and
   presentation.** Saves load in either mode and survive switching between
   them. Enhanced-only state is either rebuilt on load or written in a
   versioned block that legacy reads ignore, coordinated with Q4-05/Q4-06. In
@@ -3744,10 +4274,22 @@ human qualification checklists, because automated
 fixtures never synthesize input. Each such gate stays open until its checklist
 result is recorded.
 
+Reference comparison, 15 November: the multiplayer offering was compared with
+Quake II Rerelease and Muff Mode, CPMA and Q4MAX
+([record](competitive-match-reference-audit.md#reference-comparison-against-quake-ii-rerelease-muff-mode-cpma-and-q4max-15-november-2026)). MP-12 through MP-20 take the
+gaps in features and play experience; MP-21 through MP-24 take the demo
+format's standardization, backward compatibility, robustness and storage
+efficiency. They add scope. They close nothing and reopen nothing that MP-01
+through MP-11 recorded, and casual servers keep their current behaviour until
+an option is turned on.
+
 ### MP completion checkpoints
 
-**Estimate: 80%; 3/9 tasks closed.** Most systems work and have substantial local
-evidence. MP-02's final long-match/catalog safety checks pass, with its timing
+**Estimate: 55%; 3/26 tasks closed.** The eleven original tasks stand where
+they were (80% against their own scope); the 15 November comparison added
+thirteen items that are mostly unstarted, MP-25 (splitscreen, added the
+same day) and MP-26 (Horde, added the same day) are not started. Most shipped systems work and have
+substantial local evidence. MP-02's final long-match/catalog safety checks pass, with its timing
 contention caveat accepted for closeout; controlled timing remains unqualified.
 Simulated networking does not close physical peers. The 28 October
 WAN/cross-architecture deferral remains in effect and does not promote
@@ -3773,6 +4315,11 @@ Completion substeps:
   outcomes, including interruption and slot reuse, rather than only command paths.
 - **Peer breadth:** retain current local results; reopen deferred WAN/architecture
   qualification only within selected scope and preserve explicit unsupported cases.
+- **Reference parity:** land the casual match flow, map pools, modifiers, HUD
+  options, live spectating, identity, moderation and discovery items in their
+  dependency order; each keeps casual defaults unchanged until enabled.
+- **Demo format:** one container and its registry first, then client recording
+  and compression, with the robustness fixtures carried through every change.
 
 ### MP task evidence and acceptance
 
@@ -4402,7 +4949,7 @@ Completion substeps:
   distinct from cryptographic module verification or anti-cheat; standard builds
   do not enable direct asset downloading. Document clear rejection of unsupported
   protocols: retail 2.85 interoperability is a separate future scope decision,
-  not a version-number change to openQ4 2.41 or a prerequisite for retail assets.
+  not a version-number change to openQ4 2.42 or a prerequisite for retail assets.
   Progress, 18 October: fixed command-argument ownership during list growth and
   reload replay, which dropped the baseline client's `connect` command. The
   retail ledger
@@ -4528,6 +5075,677 @@ Completion substeps:
   now sits 60% of the way from skill 1's, giving 83 ± 11, 72 ± 14, 57 ± 9 and
   60 ± 10, consistent with even spacing ([evidence](mp-bots.md#skill-levels-1-november-2026)).
   Remaining: play against people, and retuning the curve from what that shows.
+- [ ] **MP-10 — P2, implementation and qualification: buying rules and the
+  buy card.** A buying server sells by Quake 4's rules or The Awakening's as
+  one option (Create Server, vote, admin), and the buy menu presents in the new
+  interface's in-match card construction ([reference](mp-buying.md)). Gates:
+  `mp_buying_rules_contract.py`, `openq4-ui-retained-buy`, the retained gate's
+  buy-card case and `capture_buy_menu.py` on OpenGL and Vulkan, with a remote
+  client building the modded weapon from the snapshot; then real keyboard and
+  controller purchases and the mods judged in play.
+  Progress, 13 November: the expansion's buy menu was a prototype (prices in
+  its labels, two mods with no def, items that need its content). Its catalog
+  now lives in `buyCatalog` with retail's items priced by the content, its
+  prices and cash awards in code, four mods the base content defines, the Dark
+  Matter Gun and FC Armor Regen. Mods travel in the player snapshot, survive a
+  buying mode's death and never give a clipless weapon a reload. The match
+  rules' buying mask now covers the four CTF modes, which had kept a buying
+  CTF match in warmup. Remaining: hands-on play and the UI register's FLOW-010
+  acceptance with a visual-spec record of the card's detail-column reasons.
+  Progress, 17 November ([audit](mp-audit-2026-11-17.md#gameplay)): a buy
+  from a bind or the buy card is no longer lost on a remote client (it went
+  through the event path that drops outside a new frame); the Chain Lightning
+  Mod chains in multiplayer, to opponents in play and never to its owner or
+  team mates; FC Armor Regen no longer ends with a burst of lost armour; the
+  Ammo Regen rune leaves a weapon arena's unlimited ammunition alone. None of
+  these was run in play. Still open: the Bounce Shot and Burst Fire
+  projectiles are single-player definitions with no physics sync, so a remote
+  client draws them flying straight; and Classic armour bought at 100 points
+  costs credits for nothing.
+  Second round, 17 November ([second round](mp-audit-2026-11-17.md#second-round)): both closed.
+  `projectile_hyperblaster_bounce1_mp` and `projectile_rocket_homing_mp` send
+  their physics with the weapons' multiplayer tuning, and a Classic armour
+  purchase that would add nothing is refused before it is charged (bots value
+  Classic armour by what it adds, MP-11). A remote-client capture of each mod
+  is still owed.
+- [ ] **MP-11 — P2, implementation and qualification: Classic multiplayer ruleset.**
+  A Quake 2 inspired ruleset over the stock maps and weapons
+  ([player guide](../user/classic-ruleset.md)), selected by `si_ruleset` and
+  latched at map load on server and clients. Weapon, ammo and item numbers are
+  an overlay on the shipped entity definitions (`src/mpgame/mp/ClassicRules.cpp`),
+  applied before anything spawns and reverted when the map unloads, so no
+  replacement content ships and the stock ruleset is untouched. The armour
+  tier, hook state and double-jump window ride the snapshot only on Classic
+  maps; the hook's pull runs in the player physics so the owner predicts it.
+  Gates: a person plays Classic DM and CTF with real input, judges the hook,
+  the stair double jump and the weapon balance on the stock maps, and the
+  findings are folded back into the overlay.
+  Progress, 13 November: implemented and checked on Windows/Vulkan with a
+  listen server, bots and a connected client: overlay applied on both ends,
+  blaster spawns, Quake 2 armour conversion, mega health drain, hook pull on
+  the host and a predicted remote client, Create Server Rules tab. Remaining:
+  real-input play, bot hook use, Classic pickup names and an armour-tier HUD tint.
+  Progress, 14 November: the multiplayer armour icon takes the tier's colour
+  (green jacket, yellow combat, red body) on the Remastered and stock HUDs;
+  `guis/hud.gui` keeps its earlier layout as save revision `hud_r4`, and The
+  Awakening's generated HUD leaves the tint out. Remaining: real-input play,
+  bot hook use and Classic pickup names.
+  Progress, 14 November (hook): bots take hook shortcuts (`rvBot::UpdateHook`,
+  `hookUse` trait, `bot_grapple`): a corner further along the route in sight,
+  well short of the route in a straight line or a climb, with a world bite over
+  it that the body can follow; two or three pulls a minute with four skill-5 bots
+  on q4dm1, landing over the corner. The hook anchors to movers, lets go on
+  teleport, flies by a function of the throw so every end draws it smoothly,
+  and has stock throw/bite/reel/release sounds. The overlay now rebuilds the
+  engine's entityDef dictionaries through the engine's own `FreeData`/`Parse`;
+  editing them with game-module `idDict` code had corrupted the engine's string
+  pool, and the client crashed on quit after every Classic map.
+  `mp_classic_grapple_contract.py` pins all of it. Remaining: real-input play
+  and Classic pickup names.
+  Progress, 14 November (bot hook): one bite search for any landing (a ceiling
+  over it, points above it, points just past it); fall rescues back over the
+  last floor or a nearby corner when the navmesh proves a fall into nothing or
+  128+ units down unsafe; a stalled route tries the hook on its nearest corners;
+  carriers and withdrawing bots may turn from a fight to throw; a pull that
+  arrived allows the next after 0.3 s; `hookUse` scaled by style; `bot_debugNav 2`
+  draws the plan; `mp_bot_audit.py` counts hook events and `--min-hook-pulls`
+  gates them. Six skill-4 bots, 120 s: q4dm1 (all modes) 8 and 6 pulls, no misses,
+  no world deaths; q4ctf1 26 pulls (2 rescues, 1 unstick). q4ctf5's open
+  walkways give the hook nothing to hold, so it planned two rescues and made
+  no pulls there.
+
+- [ ] **MP-12 — P1, implementation: casual match flow and voting parity.** Bring
+  to every server what exists today only inside a managed match, or not at all,
+  measured against Muff Mode, CPMA and Q4MAX
+  ([comparison](competitive-match-reference-audit.md#reference-comparison-against-quake-ii-rerelease-muff-mode-cpma-and-q4max-15-november-2026)).
+  Team timeouts and a technical pause on casual Duel, Team DM, CTF and round
+  servers through the managed `MatchTime()` primitive, with a per-side budget
+  and a resume countdown; captain and operator team locks; a spectator lock
+  (`g_spectatorLock`); pause on a player's disconnect (`g_pauseOnDisconnect`);
+  an inactivity policy that warns, moves to spectators and then drops, and
+  never fires in a paused match; an intermission that shows the final
+  scoreboard, an awards reel and the next map before the cycle advances; and a
+  forfeit from the console. One vote surface with the names Quake players type
+  (`callvote`/`cv`): `map`, `nextmap`, `restart`, `gametype`, `ruleset`,
+  `modifier`, `preset`, `timelimit`, `scorelimit`, `roundlimit`, `overtime`,
+  `shuffle`, `balance`, `cointoss`, `random`, `kick`, `mute`, `readyall` and
+  `timeout`, each a typed operation through the managed pipeline's validation,
+  with a pass percentage, a per-map vote limit, a spectator-vote policy and the
+  existing cooldown, each disableable from `si_voteFlags`. Casual behaviour is
+  unchanged until a server turns an option on. Gates: asset-free contracts for
+  every new operation and vote, a live smoke with three humans on OpenGL and
+  Vulkan (timeout, pause on disconnect, inactivity, intermission, each vote),
+  the Create Server and Match Control rows localized in every language, and the
+  [competitive matches guide](../user/competitive-matches.md) and
+  [server setup guide](../user/server-setup.md) updated.
+  Progress, 15 November: the first implementation round. Votes: `callvote`,
+  `cv` and `vote yes|no` reach the inherited packed vote, which gains
+  `nextmap`, `shuffle`, `balance`, `scorelimit` (the limit the mode scores
+  by), `roundlimit`, `ruleset q4|classic`, `instagib`, `overtime`,
+  `cointoss`, `random` (a map that supports the mode, drawn when the vote
+  passes) and `readyall` (only in a warmup that waits for ready players);
+  the flag word is a long on all three vote messages. `g_votePercent` (51,
+  the inherited majority) decides the pass, and a vote fails as soon as the
+  undecided could not carry it; `g_voteLimit` caps a connection's calls per
+  map; `si_spectatorVote` admits spectators, never bots. Timeouts: the
+  rules core no longer confines a timeout budget to managed matches, the
+  casual import takes `si_timeouts`/`si_timeoutLength` in team modes, an
+  active human on a side may call and end its own timeout through the
+  typed operation path (`timeout`, `timein`), the host, a referee or the
+  dedicated console may `pause`, a casual server announces the pause and
+  the resumption in the centre of the screen, and clients now move their
+  HUD clock origin with a frozen frame, which managed pauses needed too.
+  Policies, all off by default: `si_spectatorLock` (1 keeps spectators out
+  of live play, 2 keeps players in), `g_inactivity` (warn at half time, then
+  spectators, or a drop when the server has none; bots and paused play
+  never count) and `g_pauseOnDisconnect` (a technical pause with an expiry
+  when a playing human leaves a live team match; the abort check runs when
+  it ends). `mp_casual_match_flow_contract.py` pins all of it, the vote
+  security and electorate contracts and the player-targets fixture follow
+  the wider flag word, and `mp_casual_flow_smoke.py` plays it on a hidden
+  listen server: on 15 November (OpenGL, q4dm1, two paused bots) it passed all eleven checkpoints: a coin-toss vote, a team timeout that expired into the resume countdown and back to play, a second ended early by `timein`, a refused third with the server reason printed at the console, a `roundlimit 5` vote once the cooldown (game time, which the pauses hold) had passed, `si_spectatorLock 2` holding the host in play, and `g_inactivity` moving it to spectators, which ended the match as abandoned with no human left. Deferred to the next round: casual team locks
+  (locks are lobby-only and casual servers have no captains), the console
+  forfeit (it needs a side-consent transport), the intermission awards reel
+  and next-map announcement, the `mute` vote (MP-18's text mute) and the
+  `modifier`/`preset`/`arena` votes (MP-14's layer) and MP-16's
+  `spectatorchat` vote (`si_voteFlags` bits from 20 are reserved for them), Duel
+  casual timeouts, and Vulkan, dedicated, remote-client and real-input runs.
+  Progress, 17 November ([audit](mp-audit-2026-11-17.md#match-flow-votes-and-pauses)):
+  nine defects fixed. The idle drop no longer deletes a player inside its own
+  think; a casual server keeps a limit changed by a vote, at the console or
+  by hosting again (the rules import laid the first values back at every map
+  start), and a joining client's own settings are left alone; a player who is
+  eliminated or on the scoreboard can vote; `si_spectatorLock` holds someone
+  who connects with `ui_autoJoin`; `g_pauseOnDisconnect` is one pause a side
+  a match, ends when the player is back, lets them back in under the lock and
+  ignores kicks and idle drops; the stock vote menu obeys `g_voteLimit` and
+  the next-map switch. The idle drop, the kept limit and the client's
+  settings were [run](mp-audit-2026-11-17.md#checked); the electorate, the
+  lock and the disconnect pause are covered by their contracts only.
+- [ ] **MP-13 — P2, implementation: map pools, rotation and the player queue.**
+  Replace the `si_mapCycle` string and `mapcycle.scriptcfg` with one structured
+  map database (Muff Mode `mapdb.json`, CPMA `map_cfgdir`): for each stock or
+  installed map, the modes it supports, its player-count bounds and an optional
+  per-map configuration applied at load and reverted at unload; maps discovered
+  rather than listed. A rotation that respects the bounds and the current
+  player count; a player queue (`mymap`, one entry a player, consumed at the
+  next change); an end-of-match pick from three candidates or a next-map vote;
+  and the series pool, the Create Server catalogue, the Vote and Admin pages,
+  the browser filters and the bots' map checks read the same database. Gates:
+  a contract that every menu, filter and vote enumerates the database and
+  nothing else; a dedicated-server rotation smoke over bounds, queue and pick
+  with bots; the [server setup guide](../user/server-setup.md) updated.
+  Progress, 15 November: the database and everything in the game module that
+  lists maps. `mpMapDatabase` (`src/mpgame/mp/MapDatabase.*`) is a bounded core
+  with no engine dependency: entries discovered from mapDefs (none listed),
+  gametype masks, player bounds (a mapDef's `minPlayers`/`maxPlayers`, else
+  two to four for tourney arenas and four or more for maps with no
+  free-for-all mode), rotation/vote/queue flags and up to sixteen settings a
+  map. The server's `mapdb.txt` (`g_mapDatabase`) overrides them and may list
+  the rotation; a file with an error is refused whole, by line. The rotation
+  (`g_mapRotation`: stay, in order, shuffled, or the legacy `g_mapCycle`
+  script) passes over maps outside their bounds and ignores the bounds rather
+  than stall; `si_mapCycle` remains the rotation's list. The queue (`mymap`,
+  one entry a player, `g_mapQueue`) is played first, then the end-of-match
+  pick from three candidates (`mappick`, `g_mapPick`), then the rotation. The
+  engine asks the game before it reads the server info for a map change
+  (`idGame::ValidateServerSettings`, unused until now), so a map's settings
+  are in force from its first frame and the previous map's are back; a map
+  may not set the map, gametype, pool, purity, slots, name or a password. A
+  casual session imports its rules from the settings once and mirrors them
+  back at every map start, which overwrote a map's own frag limit in the
+  first live run; the database now has that import repeated whenever it
+  changed a setting (`InvalidateCasualRulesImport`), and managed matches take
+  no per-map settings. The
+  server publishes `si_nextMap` and `si_mapPick`. Map votes (both forms), the
+  retained Vote and Admin pages, the stock map lists, the implicit series
+  pool, `PickMap`, the server card's next map and rotation and
+  `MultiplayerResolveMapDecl` read the database; nothing in `src/mpgame`
+  enumerates map decls outside it except the developer levelshot helper.
+  `GAME_RELIABLE_MESSAGE_MAPDB` carries the two player requests, flood-gated
+  to one a second. `mp_map_database_contract.py` pins all of it and executes
+  the core alone (tokens, bounds, rotation, shuffle, queue, pick, nineteen
+  malformed override files, a full database); `mp_map_rotation_smoke.py`
+  runs a pure dedicated server with two bots and one client through bounds,
+  per-map settings, a refused vote, the queue and the pick (44 checks, pass
+  on Windows x64)
+  ([release record](release-completion.md#one-list-of-maps-a-rotation-that-fits-the-server-a-map-queue-and-a-pick-15-november-2026)).
+  Bots have no per-map list to convert: the navmesh is built from collision
+  on any map. Remaining: the Create Server catalogue, its levelshot list and
+  its map-cycle field are engine code with their own mapDef filter
+  (`Session_menu.cpp`), and the gametype table they would need lives in the
+  game module; the queue and the pick are chat and console only, with no
+  retained page and no row in the UI register; the server card's wording in
+  the hash-bound menus specification still says `si_mapCycle`; the browser
+  has no map filter to convert; shuffle and the legacy script mode are
+  covered by the core harness and by reading, not by a live run; nobody has
+  played it, and only Windows x64 has run the smoke.
+  Progress, 17 November ([audit](mp-audit-2026-11-17.md#rulesets-the-map-database-presets-and-buying)):
+  the rotation, the prediction and the pick use the game type set for the
+  next map; a player who was a client and then hosts gets their `mapdb.txt`
+  on the first map; map votes ask the database, so a `modes` override counts;
+  the shuffle's recent window follows the rotation's size; a queued map is
+  not taken twice by a slow frame; a quit puts a map's own settings back
+  before the configuration is saved; a byte order mark no longer fails the
+  file. Covered by the map database contract, not by a run. Open: the
+  database's publish still does a full `rescanSI`, and `ServerAdvance` is not
+  gated for managed matches.
+  Second round, 17 November ([second round](mp-audit-2026-11-17.md#second-round)): both closed. The
+  database publishes its two keys with the new engine command `publishSI`,
+  and a managed match stays on its map at the end of its review instead of
+  having the rotation rewrite `si_map`. `mp_map_rotation_smoke.py` passes on
+  the build, the client reading the next map and the pick from the server info.
+- [ ] **MP-14 — P2, decision and implementation: rulesets, modifiers and presets.**
+  Muff Mode layers Instagib, Quad Hog, Vampiric Damage, Weapons Frenzy and
+  NadeFest over any mode and names 58 presets; CPMA composes modes from
+  `modes/*.cfg`. openQ4 has `si_instagib` over any mode, `si_ruleset` (stock or
+  Classic) and eight managed profiles. Define one modifier layer in the rules
+  core, each modifier a replicated flag with its own HUD and browser label:
+  Quad Hog (one quad, the carrier scores), Vampiric Damage, Weapons Frenzy
+  (fast respawns and regenerating ammo), a single-weapon arena family built
+  from Quake 4's own weapons, a Last Man Standing round mode on the Clan Arena
+  state, and self-damage, knockback and fall-damage scales with weapon-respawn
+  and powerup switches. Named presets (`si_preset`: a compiled table plus
+  `presets/<name>.cfg`) set gametype, ruleset, modifiers and limits atomically
+  at a match boundary, votable and selectable in Create Server. OPT-05 kept
+  factories and rulesets outside scope; MP-11 has since shipped a ruleset, so
+  this item records the decision in its place. Overload, Harvester, Domination
+  and Attack & Defend stay reserved under OPT-05. Gates: each modifier has a
+  contract, a bot run and a predicted remote-client run on OpenGL and Vulkan;
+  presets round-trip through vote, Create Server and `si_matchRules`; the
+  browser and join card show the active modifiers; a person plays each
+  modifier once with real input.
+  Progress, 15 November: the layer, the scales and the presets are built
+  ([reference](mp-modifiers.md), [player guide](../user/server-setup.md#modifiers-and-presets)).
+  Decision recorded there: modifiers are rows of one table latched in
+  `idMultiplayerGame::SetGameType` on every peer, never game types, and a
+  preset is allow-listed typed data that is parsed and never executed.
+  Instagib moved into the layer unchanged. New: Quad Hog (Deathmatch, one
+  server-spawned quad, only frags by or on its carrier score), Vampiric
+  Damage, Weapons Frenzy, ten weapon arenas, `si_powerups`, `si_selfDamage`,
+  `si_knockback`, `si_fallDamage`, `si_weaponRespawn`, `si_preset` with eleven
+  built-in presets and `presets/<name>.cfg`, the `modifier`, `weaponArena`,
+  `preset` and `listPresets` commands, `si_modifiers` for the browser, and
+  Create Server's Modifiers tab in twelve languages.
+  Evidence (Windows, OpenGL, hidden listen servers on stock maps with skill-4
+  bots, `mp_modifiers_smoke.py`): Quad Hog on `mp/q4dm1` spawned two quads, bots
+  took the quad five times, once from where the hog fell, and a quad nobody
+  reached was taken back after 20 s; of 23 frags the 12 by or on the hog scored,
+  and the final scores add up to those 12. Vampiric Team Deathmatch: 130 hits
+  healed their attacker for 975 health in all, none across a team, the highest
+  health was 166 of the 200 cap, and the map had no health pickup.
+  `preset rocketarena` restarted the match with all four players holding the
+  rocket launcher and gauntlet with unlimited ammo, no weapon, ammo or powerup
+  pickups and the stock health and armour; `si_instagib 1` set by hand cleared
+  `si_preset`; `preset standard` brought the stock pickups back; under Weapons
+  Frenzy an idle player's machinegun ammo went from 100 to 300; a preset file
+  with a forbidden setting was refused whole with its line number, and
+  `presets/friday.cfg` loaded as "Vampiric Team Deathmatch (Lightning Gun)".
+  `preset instactf` on `mp/q4ctf1` kept both flags, left no pickups and held its
+  capture limit of 8 through the restart. A second client joining a Vampiric
+  rocket arena without powerups, and one joining Quad Hog, latched the same
+  modifiers and title as the host, populated the same pickups, saw every
+  player's loadout and saw the Quad Damage on the hog; neither log reported an
+  entity disagreement. `mp_modifiers_contract.py` runs the shipped
+  `Modifiers.cpp` and `Presets.cpp` against doubles (the resolve rules, token
+  round trips over every combination, preset drift, preset files and the
+  commands), and `server_browser_contract.py` reads a modified server's reply,
+  hostile text included. In a capture of Create Server the Modifiers tab dimmed Quad Hog outside
+  Deathmatch; choosing Rocket Arena set `si_preset`, the arena, `si_powerups 0`
+  and both percentages and dimmed Weapons Frenzy, and Standard put them back;
+  the native retained-screens test passes its multiplayer pages with the tab's
+  checks. Not exercised in play: the three
+  percentages and `si_weaponRespawn` (contract only), Vulkan, a dedicated
+  server, the browser against a live modified server, and real input.
+  Remaining: `callvote modifier` and `callvote preset` (MP-12 owns the vote
+  surface and builds on this item's validators); match-rules fields for the
+  ruleset, modifiers and scales, so presets round-trip through
+  `si_matchRules`; Last Man Standing on the Clan Arena state; a scoreboard
+  marker for the hog; the Modifiers tab's caption size and its UI register
+  record; Vulkan and dedicated-server runs, the percentages in play, and a
+  person playing each modifier with real input.
+  Progress, 17 November ([audit](mp-audit-2026-11-17.md#rulesets-the-map-database-presets-and-buying)):
+  changing `si_ruleset` on a running map (a passed ruleset vote, `preset
+  classic`) hung the server in a restart loop; it now loads the map again
+  once, which was run. A preset whose game type the map cannot play moves to
+  a map that can, or is refused when none is installed.
+- [ ] **MP-15 — P2, implementation: competitive HUD and client options.** CPMA's
+  SuperHUD, Q4MAX's HUD scripts and Muff Mode's client commands set the
+  expectation. openQ4 already has crosshair size, colour, custom art, animation
+  and hit flash, the hit marker and damage numbers under `g_hitFeedback`,
+  brightskins with outlines and rimlights, forced models, the lagometer, the
+  speed and input displays, four HUD layouts and the stock awards. Add: chat
+  tokens expanded on the sender (`#h`, `#a`, `#w`, `#l`, `#n`: health, armour,
+  weapon and ammo, location, nearby teammates); hit sounds by damage bucket
+  from a selectable set, with the armour variant kept; a weapon preference
+  order for auto-switch and empty-weapon fallback; the ammo count beside the
+  crosshair; the target's name and status under the crosshair for teammates; a
+  team overlay with location names and the weapon carried (the Competitive
+  layout shows health and armour only); a server item-timer policy with a
+  third state that lets players see the timers; a frag line and match/local
+  clocks; and a cosmetic-parity policy for what a server may restrict
+  (brightskin intensity, forced models), enforced where the snapshot is
+  written. Element placement goes through the retained HUD and its editor
+  (UI-06), not a second scripting format. Gates: every element in the
+  Remastered, Minimal, Competitive and Classic layouts with register rows under
+  UI-11, captures on OpenGL and Vulkan at 4:3 and 16:9, localization, and a
+  person judging hit sounds and tokens in play.
+  *State, 15 November 2026:* the game side of every item above is in, with
+  the timer list, crosshair ammunition and time of day drawn in all four
+  layouts and team locations in the Competitive list
+  ([player guide](../user/multiplayer-client-options.md),
+  [record](release-completion.md#chat-tokens-hit-tones-a-weapon-order-item-timers-and-team-locations-mp-15-15-november-2026)).
+  Cosmetic limits are applied by each client's game module on the server's
+  instruction: a snapshot carries nothing cosmetic to withhold, so the
+  item-timer list and team info are what is enforced where the message is
+  written. The frag line and the match clock were already stock. Still open:
+  the human judgement, menu rows, register rows and spec text, 4:3 captures,
+  a team list outside Competitive, and editor placement under UI-06.
+  Progress, 17 November ([audit](mp-audit-2026-11-17.md#client-options-chat-and-spectating)):
+  item timers clear with the restart in place at a match's start and at each
+  round; `say_team` tokens are not expanded when the line will go to
+  everyone; a long `say` is cut instead of ending the client; a player cannot
+  be named `server`; the team list gives an eliminated player their own team
+  only. Contracts only; not run.
+  Second round, 17 November ([second round](mp-audit-2026-11-17.md#second-round)): item timers build
+  their list once a send.
+- [ ] **MP-16 — P2, implementation: live spectating and casting.** Give live
+  spectators what MVD playback already has: follow by name from a named list,
+  auto-follow of the killer, the leader, a powerup carrier or a flag carrier
+  with manual override, first- and third-person follow views and a chase camera
+  (also offered as the death camera), and a free-camera speed setting; a
+  casual broadcaster role (both teams' vitals and timers) without a managed
+  profile; a typed live event stream (the match journal's events as they
+  happen) for overlay tools; and a votable spectator chat policy
+  (`g_spectatorChat`, mute spectators). Multi-POV live views, delayed
+  broadcast and relay transport remain OPT-04 decisions. Gates: recipient
+  filtering holds for every new camera (byte-level checks as in MP-01), a live
+  smoke on OpenGL and Vulkan, the event stream consumed by a sample overlay in
+  `tools/`, and the [competitive matches guide](../user/competitive-matches.md)
+  updated.
+  Progress, 15 November: everything but the vote. *Follow:* `follow <name>`
+  resolves a name to a slot on the client (the wire still carries slot and
+  spawn id), `followlist` prints the list, and `follow auto <mode>` asks the
+  server to move the camera. The server keeps one chooser per spectator
+  (`mpDemoAutoTrack`, now shared with MVD playback and extended with leader,
+  powerup and flag modes) and offers it only players `CanSpectatorFollow`
+  allows that spectator that frame, so auto-follow reaches nobody a manual
+  choice could not; a manual choice, attack or jump hands the camera back.
+  *Views:* `g_spectatorFollowView` (first, third, chase), `g_chaseCameraRange`
+  and `g_chaseCameraHeight`, and `g_deathCamera`, are presentation on the
+  client: a following spectator's snapshot is built from the followed
+  player's position whichever view draws it. `ui_spectatorSpeed` (25 to 300
+  percent) travels in userinfo so the predicted free camera and the server's
+  agree. *Caster:* with `g_casterAccess 1` outside a managed match a
+  spectator takes the broadcaster's audience with `caster on`
+  (`ServerRequestCasterRole`, the operator path's own target rule); it is
+  withdrawn when the policy goes off, a managed match begins, the caster
+  joins the game or the slot changes hands. It adds no disclosure rule: the
+  grant is `MPMatchDisclosureBuildGrant`'s broadcaster branch, without item
+  timing outside managed matches (casual spectators, casters included, get
+  item timers from MP-15's `si_itemTimers`). The client shows the disclosed
+  team-vital rows in the match
+  panel. *Stream:* `g_matchEventStream 1` writes one JSON object a line to
+  `match-events/live.ndjson` ([reference](mp-live-event-stream.md)); the match
+  journal is managed-only and has no kill, flag or score events, so the
+  stream is built from scoreboard state on whichever end writes it, and
+  `tools/overlay/match_overlay.py` consumes it. *Chat:* a spectator whose
+  all-chat is kept from players (`g_spectatorChat 0`, live play) is told so,
+  once a minute at most. Three defects found on the way are fixed: a casual
+  spectator carried the side of their last `ui_team`, so in team modes they
+  could follow only that team; a broadcaster who joined a casual game stayed
+  an inactive broadcaster in the session and kept both sides' vitals while
+  playing; and a follow request made between frames was dropped whenever
+  the last prediction pass was a re-run (`idEntity::ClientSendRequestEvent`).
+  Evidence: `mp_match_spectator_follow_contract.py` (production follow,
+  auto-follow and caster request paths against the real disclosure policy),
+  `mp_spectator_casting_contract.py` (grant and every withdrawal against the
+  real session, eight failing controls), `mp_live_event_stream_contract.py`
+  (schema, overlay replay, ten failing controls), `mvd_navigation_contract.py`
+  (the new modes), and `mp_spectator_casting_smoke.py`: a host, three bots
+  and a remote spectator in a live Team DM match, read from both ends, on
+  OpenGL and Vulkan. Recipient filtering is checked on the wire there: the
+  remote client's accepted match view holds no vitals before the grant, four
+  after it and none after withdrawal, and every camera it holds is one the
+  server reports as allowed. Remaining: the `spectatorchat` vote, which
+  waits for MP-12's vote set (bit 22 is reserved for it); a caster HUD panel
+  and a menu page for the named list under UI-11 (the vitals reuse the
+  managed context panel's rows); the three new modes in MVD playback's
+  `demo_autoTrack`; real-input play; other platforms.
+  Progress, 17 November ([audit](mp-audit-2026-11-17.md#client-options-chat-and-spectating)):
+  an eliminated team member is no longer sent every opponent's position and
+  vitals, and can follow their own team mates (they could follow nobody); a
+  free camera with nobody to follow stays where it is instead of jumping to a
+  spawn point; team chat reaches the whole team and spectator-only chat only
+  those who chose to watch. Contracts only; the spectator smoke was not
+  re-run. Open: the chase and death cameras' clip trace.
+  Second round, 17 November ([second round](mp-audit-2026-11-17.md#second-round)): the chase and death
+  cameras clip their raised focus before pulling back, so a low ceiling no
+  longer holds the camera inside it. Not yet looked at by eye.
+- [ ] **MP-17 — P1, decision and implementation: player identity, persistence
+  and ranking.** `com_guid` is read-only and never written, so GUID bans do
+  nothing and no feature can recognise a returning player; the archived plan
+  rejected counterfeit identity from names or addresses. Decide and build an
+  opt-in identity: a client-generated key pair whose public key signs a server
+  challenge, no account and no network service, optionally bound to a Steam
+  identity under STEAM-02; the server stores a hash and a player can reset the
+  key. On it: reconnect restoration on every server (team, score, seat, Duel
+  queue place and, in round modes, the round's inventory; Muff Mode restores by
+  social id and offers `ghost <code>` as the fallback); working bans (MP-18); a
+  local player profile with match history; a per-gametype skill rating (Muff
+  Mode uses Elo with K 48 for a player's first 20 rated matches, then 32); an
+  awards reel and a `stats` command with accuracy at the end of any match;
+  casual-server match exports in the managed schema-v2 JSON plus a readable
+  summary and a catalogue; and an opt-in local ranking table on the server.
+  Nothing is uploaded. Gates: the key protocol reviewed against replay and
+  slot-reuse (the MP-01 identity guards), rating fixtures against a known
+  sequence, reconnect smokes across every mode, privacy notes in the
+  [server security guide](../user/server-security.md).
+- [ ] **MP-18 — P1, implementation: server administration and moderation.**
+  openQ4 has rcon2, the Admin page's kick, ban and team switch, the PBKDF2
+  referee, voice mute and `si_motd`; its bans are keyed to a GUID that is never
+  sent, and there is no address ban, text mute, flood control, inactivity
+  policy or admin log. Add: bans by identity (MP-17) and by address with prefix
+  lengths for IPv4 and IPv6, with expiry and reasons, migrating `banlist.txt`;
+  text-chat mute by slot and by vote; chat and command flood protection; the
+  per-address connection cap left open by the netcode audit; a name policy
+  (reserved names, length, control characters, a name already in use by a
+  connected player); a kick/ban log and an NDJSON match log for casual
+  servers; an admin role between referee and rcon for a listen host or a
+  trusted admin (Muff Mode `admin <password>`), using the match pipeline's
+  capabilities and never the file system; graceful shutdown (announce, finish
+  the match, stop); and `status` output that shows identity and address.
+  Gates: `network_security.py` pins the caps and policies, an asset-free
+  contract per command, a dedicated smoke over ban, mute, flood and shutdown,
+  and the [server security guide](../user/server-security.md) updated.
+- [ ] **MP-19 — P1, decision and implementation: server discovery.** `net_master0`
+  defaults to id's `q4master.idsoftware.com:27650`; the name resolves today,
+  but no openQ4 evidence shows it listing openQ4 servers and the project does
+  not control it. Decide and provide a discovery path the project controls: an
+  openQ4 master (heartbeat and query protocol documented, IPv4 and IPv6,
+  several masters, operator-run instances) with an HTTPS server-list fallback
+  the browser can read; the browser adds recent servers, region/ping sorting
+  and persistence; friends and recent-player lists stay local. Steam lobbies
+  remain STEAM/OPT-09. Gates: a fresh install on Windows, Linux and macOS lists
+  a test server from the Internet source; a master outage falls back and says
+  so; `server-setup.md` and `multiplayer-networking.md` updated.
+- [ ] **MP-20 — P1, qualification and implementation: movement parity and a
+  ProMode-style option.** Qualify openQ4's player movement against retail 1.4.2
+  on the stock multiplayer maps (strafe jumps, crouch slides, ramp and jump-pad
+  flights, stairs and the known trick jumps), frame-exact at `si_fps 30` and
+  bounded at 60 and 90 with HF-01's clocks, through `in_movementProbe` scripts
+  and the retail binary on the same inputs
+  (the [retail baseline ledger](retail-baseline-ledger.md) records the retail runs). Then an optional
+  movement ruleset in the MP-14 layer: air control, double jumps everywhere,
+  ramp-jump boost, faster weapon switches and an armour-system choice (CPMA's
+  CPM lineage), as `pm_` server cvars the bots read (MP-09). Gates: a recorded
+  parity table per map and tick rate with any divergence named and fixed or
+  accepted; the option's physics predicted on a remote client without
+  corrections; a person plays both rulesets with real input.
+- [ ] **MP-21 — P1, decision and implementation: one demo container and a
+  compatibility registry.** Two streams, two containers today: MVD 1.3 writes
+  CRC-checked records with no compression and its own index and keyframe
+  directory; render demos v14 write the `OQ4B` block container (long-range
+  matches and DEFLATE, a CRC per block, a timeline from headers alone, 64-bit
+  files; [design](multiview-demos.md#block-container-keyframes-and-large-files-v14-14-november-2026)).
+  Standardize on the block container for every stream (MVD, render and
+  MP-22's client network demo) with one header, trailer, timeline and keyframe
+  directory; one `demoConvert` that turns any readable historical file into the
+  current container without changing its playback, replacing `compressDemo`;
+  and one format registry document listing every version a release has
+  written with its reader status. Backward compatibility: every version a
+  shipped release wrote keeps its reader and golden fixtures (complete,
+  interrupted, truncated, corrupt, unknown optional, unknown required, older
+  and newer minor), forward compatibility by optional records, and the
+  [update policy](multiview-demos.md#update-policy) as written; MVD 1.0 to 1.3
+  stay readable. Cross-platform byte-identical reads of every fixture on
+  Windows, Linux, macOS and ARM64 in CI. MP-05 stays closed at its selected
+  scope. Gates: the registry, the fixtures in `tools/tests`, the converter
+  round-tripping each fixture, and a play-through of a converted file of each
+  kind on OpenGL and Vulkan.
+- [ ] **MP-22 — P1, implementation: the player's demo workflow.** A player who
+  is not hosting cannot record a match today; only the server writes an MVD,
+  and a render demo keeps the local view at ten times the size. Add
+  client-side recording on any server: a network demo (received snapshots and
+  the player's own commands) in the MP-21 container, started by `record`, by
+  autoaction (`ui_autoAction demo ss stats`, driven by the countdown-to-live
+  edge, stopped at the result) or by a server's `si_autoAction`, named by
+  `MPBuildMatchBasename`; playback from the recorded point of view with the
+  same deck as MVD and follow of what the recording carried. Complete the
+  deck: a named player list, reverse scrubbing from keyframes, frame-accurate
+  stepping, `timeDemo` for MVD and network demos (benchmark and determinism
+  checks the FPS items can use), video and image export (a PNG sequence with
+  WAV, optional pipe to an external encoder) in place of the unfinished AVI
+  path, generated thumbnails and library metadata (players, map, mode, result,
+  markers; searchable), and a content-mismatch message that names the pak.
+  Retail `.demo` and `.netdemo` files stay Legacy unless a reader is decided
+  here. Gates: a client records on a cheats-off dedicated server and plays it
+  back on OpenGL and Vulkan, the deck features each have a fixture, export
+  verified frame-exact against captures, and the
+  [demos guide](../user/multiview-demos.md) updated.
+- [ ] **MP-23 — P2, measured optimization: demo storage efficiency.** MVD is
+  written uncompressed; the render container reaches 4.78:1 on its stream and
+  the v12 joint predictor cut 24.5%. Budgets first: MVD bytes a minute for a
+  12-player CTF match and a Duel, render demo MB/s at 60 frames a second on a
+  busy and a quiet level, with a `demoStats` command reporting the split by
+  record category. Then MVD through the block codec; field encodings in the
+  snapshot (varint and zigzag deltas against the baseline as v12 does for
+  joints, packed PVS words); keyframe cost held under 2% of the file; render
+  demo 2D, sound and effect encodings (28%, 21% and 13% of the uncompressed
+  stream); window and anchor tuning; ratios compared with xz as the ceiling;
+  and the recording thread's CPU per block held so that recording adds no
+  measurable frame time (HF-02's budget). Targets: MVD at least 3:1 against
+  today's 1.3 bytes, render demos at most 0.5 MB/s on the busy level at 60
+  frames a second, both byte-exact against uncompressed playback. Gates: the
+  measurements recorded in [multiview demos](multiview-demos.md), the native
+  codec test extended to each encoding, and `compressDemo`/`demoConvert`
+  reproducing the ratios on the fixtures.
+  Noted 17 November: MVD snapshots are paced in milliseconds against the
+  16 ms game clock, which gives 15 a second where the default asks for 20.
+  Matching the request makes recordings about a third larger, so it is a
+  decision for this item ([audit](mp-audit-2026-11-17.md#engine-network-layer)).
+  Decided 17 November: record the 20 a second asked for. Snapshots are paced
+  on the frames' real times; recordings grow by about a third
+  ([second round](mp-audit-2026-11-17.md#second-round)).
+- [ ] **MP-24 — P1, qualification: demo robustness and platform breadth.** The
+  render container has native coverage of 416 header flips, 2,264 truncations
+  and hostile payloads; MVD has 2,032 cut points through `mvdRecover` and a
+  CRC per record. Close the gaps with one fuzz and mutation harness for every
+  reader (both containers, every record type, hostile lengths, duplicate and
+  out-of-order records, directories that lie about offsets) under time and
+  memory bounds: playback never crashes or fatals, always reports the offset,
+  and keeps a hostile-file corpus under `tools/tests`. Give MVD what render
+  demos have: worker-thread writing with at most half a second lost to a
+  crash, 64-bit files past 2 GiB (revisit the 1,024 MB default), and a real
+  hours-long recording of each kind. Qualify recording and playback on a
+  cheats-off dedicated server, under CPU load with no frame-time hitch
+  (measured), on Vulkan, Linux, macOS and ARM64 for both kinds, the same file
+  played on two platforms giving identical state checksums (the float-text and
+  FP-flag traps), and a person listening to a recorded demo once. Gates: the
+  harness in CI, the recordings and checksums recorded in
+  [multiview demos](multiview-demos.md), and the platform rows in the
+  [capability matrix](engine-capability-matrix.md).
+- [ ] **MP-25 — P2, implementation: multiplayer splitscreen for up to four
+  local players.** Multiplayer only; the single-player game, the Awakening
+  campaign and SP Arena gain no local players. Today a game has one local
+  client (`idAsyncServer::localClientNum`), the SDL3 backend opens one gamepad
+  and replaces it when another connects, and the renderer, HUD and sound
+  listener assume one full-screen player view. Deliver a splitscreen that
+  plays as well as a single view:
+  - **Session and network:** one to four local players, each an ordinary
+    client with its own client number, user info, name, model, team and
+    usercmd stream, on a listen server, against bots, or joining a remote or
+    dedicated server (one connection carrying every local player or one
+    each, decided and documented against MP-08's packet budget; per-address
+    server limits count them correctly). Prediction, rewind and snapshots
+    per local player; a server option to refuse or cap guests; scoreboards,
+    votes, chat and team balance treat each as a player; a guest's identity
+    and stats follow MP-17.
+  - **Input and profiles:** every connected gamepad open at once (SDL3
+    instance ids, hot-plug and reconnect without reassigning a seat),
+    keyboard and mouse as one seat, a press-a-button-to-join lobby that binds
+    a device to a seat, per-seat bindings, sensitivity, inversion, aim assist
+    and rumble, guest profiles saved with the host's, and menu ownership (a
+    player's pause menu opens for their seat only).
+  - **Layouts and rendering:** full, two-way (horizontal or vertical, chosen
+    by aspect and resolution), three-way and four-way grids, a safe area per
+    viewport, field of view corrected for each viewport's aspect; one render
+    view per seat with its own subviews (mirrors, remote cameras), weapon
+    model, view effects, damage and death views, and screen-space post
+    effects confined to its rectangle on OpenGL and Vulkan; culling, shadow
+    and light caches shared across seats where it is safe; per-layout
+    resolution scale and effect presets so four seats hold the refresh class
+    FPS-02 sets for the active tier, measured, not assumed.
+  - **HUD, menus and text:** the retained HUD laid out per viewport at a
+    readable scale (crosshair, ammunition, chat, centerprints, kill feed, hit
+    markers, item timers, follow and spectator panels), a shared scoreboard
+    and intermission, per-seat notices, localized strings for every new
+    label, and the stock interface either supported or explicitly refused
+    while splitscreen is active.
+  - **Audio:** one listener per seat mixed into the output (nearest listener
+    or summed with gain limits, decided here), per-seat announcer and hit
+    tones without doubling shared world sounds, and voice chat routed per
+    seat.
+  - **Spectating and demos:** a local player can spectate or follow while the
+    others play; MVD and MP-22 client demos record each seat and play back one
+    viewport or the whole layout.
+  Gates: an asset-free contract for seat assignment, hot-plug and layout
+  selection; a native test for per-viewport views and listener mixing; two-,
+  three- and four-seat smokes against bots on a listen server and joining a
+  dedicated server on OpenGL and Vulkan, with captures of each layout at
+  16:9, 21:9 and 4:3; per-layout frame-time budgets recorded against FPS-01;
+  Windows, Linux and Steam Deck runs; people playing each layout with real
+  controllers through a [human qualification checklist](mp-human-qualification.md)
+  entry; and a splitscreen player guide in `docs/user/`.
+- [ ] **MP-26 — P2, implementation: Horde, a co-operative wave mode against
+  Quake 4's Strogg.** Reference: Muff Mode's Horde for the Quake II Rerelease
+  (MMREX, `DarkMatter-Productions/MuffMode`: `mm_horde*`, the
+  configuration reference's Horde sections, the level design guide's spawn
+  anchors and `horde-nav-format-design.md`), adapted to Quake 4 rather than
+  copied. Today the multiplayer module compiles Quake 4's AI, AAS and monster
+  classes (`src/mpgame/ai/`, registered in `Class.cpp`), but `idAI` and
+  `idActor` write no snapshot state, so a client never sees a monster, and no
+  multiplayer mode spawns one. Deliver Horde as a new multiplayer mode in
+  `game_mp`, not a single-player co-op path:
+  - **Monsters on the wire:** decide and implement how a monster reaches a
+    client (snapshot state for position, animation, health, attachments,
+    effects and death; ragdolls and gibs as client-side presentation; monster
+    projectiles through the existing projectile path), within MP-08's packet
+    budget and a protocol bump that keeps older demos playable. Derive the
+    live-monster cap from a measured snapshot cost instead of a guess (Muff
+    Mode caps its alive count to keep client buffers from overflowing).
+    Monsters need lag compensation for hit-scan (MP-07's rewind) and stay out
+    of client prediction.
+  - **Wave director:** a point budget per wave that grows, then tapers past a
+    content peak; scaling by fighter count and map size; spawn pacing with
+    bursts and rests; an alive cap; unlock waves for each Strogg type with
+    featured first spawns; roster variety that widens over the run;
+    champions (health, damage and speed multipliers with a visible marker);
+    themed waves; scheduled boss waves from named profiles (Quake 4's large
+    Strogg: Gladiator, Heavy Hover Tank, Harvester, Network Guardian and the
+    like, chosen for what fits a multiplayer arena); optional wildcard waves
+    that reuse MP-14's modifier layer where they overlap; finite runs set by
+    the round limit and an endless run.
+  - **Where monsters come from:** typed spawn anchors (`info_horde_spawn`,
+    flying and boss variants) with wave range, weight, cooldown and an
+    optional class key, a minimum distance from fighters, and fallbacks to
+    player spawns; a decision, made here with a measured check, on whether
+    single-player maps can host Horde (their monster placements reused as
+    anchors, as Muff Mode does) or Horde stays on multiplayer maps and
+    community maps. Every map the mode lists has the AAS sizes its roster
+    needs; a map without them is refused or limited to the types it can
+    path, never run with monsters stuck in place.
+  - **AI for a crowd of players:** target choice spread across fighters
+    (load, threat, finishability and reachability), periodic retargeting,
+    pursuit that does not give up when sight is lost, stall recovery that
+    retargets and then relocates a stranded monster, medics and other
+    support roles kept, and per-frame budgets for path and reachability
+    queries.
+  - **Players, lives and rewards:** lives per wave, eliminated players
+    spectating until a rally (kills earn a team mate back with brief
+    protection) or the next wave; defeat when every fighter is down or the
+    server empties; drops from kills with richer drops from champions and
+    bosses; kill-streak momentum and a flawless-wave bonus; slower non-weapon
+    item respawns; powerup timers paused between waves; bots (MP-09) as
+    fighters that target monsters and survive waves.
+  - **Presentation and hosting:** a wave and remaining-monster readout and
+    end-of-wave notices in the retained HUD and the stock HUD, a marker on
+    the last few monsters, a Horde scoreboard and intermission, the mode in
+    Create Server with its options, localized strings for every new label,
+    and announcer lines. Horde is unranked (no MP-17 rating, no awards reel)
+    and gets its own MP-13 map-database entries and an MP-14 preset; the
+    managed competitive pipeline does not offer it.
+  - **Demos:** MVD and MP-22 client demos record and play back waves,
+    monsters and bosses, with MP-24 fixtures for the new records.
+  Gates: an asset-free contract for the director (budgets, unlocks, scaling,
+  boss schedule, endless taper) with fixed seeds; a native test of monster
+  snapshot encoding and the alive cap against MP-08's budget; a dedicated
+  smoke where bots clear a finite run and lose an endless one on two stock
+  maps, with a remote client seeing every monster, on OpenGL and Vulkan; a
+  measured frame-time and bandwidth record at the alive cap; MVD playback of
+  a boss wave; Windows and Linux runs; people playing a run together with
+  real input through a [human qualification checklist](mp-human-qualification.md)
+  entry; and a Horde section in a player guide and the server setup guide.
 
 ## Audio and voice
 
@@ -4538,18 +5756,21 @@ Sources: [audio implementation and remaining limits](audio-modernization.md),
 
 **Estimate: 80%; 0/7 tasks closed.** Open checkboxes here predominantly reflect
 qualification debt rather than missing core implementations. However, mobile
-memory bounds and full subtitle coverage are substantive outstanding scope, not
-automatically satisfied by a listening pass.
+memory bounds are substantive outstanding scope, not automatically satisfied by
+a listening pass. Subtitles now cover nearly every campaign line from installed data
+(lip-sync transcripts, helmet-radio copies and shader script lines); caption
+packs, which openQ4 supports but does not ship, correct or translate them, and
+the non-verbal remainder is marked for players rather than counted as covered.
 
 | Task / state | Completed points and evidence | Remaining completion subpoints |
 | --- | --- | --- |
-| AUD-01 — Partial | 54 emitter/OpenAL distance measurements validate current map-unit curves; no speculative unit conversion needed. | Human retail comparison on real speakers/headphones. |
+| AUD-01 — Partial | 54 emitter/OpenAL distance measurements validate current map-unit curves; no speculative unit conversion needed. A rendered retail/openQ4 comparison harness is implemented; openQ4's rendered half follows the authored curve within 0.6 dB and is silent at and beyond the maximum. | One focused run of the retail half (retail mutes itself while unfocused) passing the comparison. |
 | AUD-02 — Partial | Simulated endpoint recovery, scene-clock save/load repair, Linux checks and repeated-map audio residency evidence exist. | Physical endpoint loss/hotplug, audible pause/cinematics, long sessions and target-OS breadth including macOS. |
 | AUD-03 — Partial | Aggregate payload budgets/backpressure, bounded compressed streaming, recycled-source fix and exactly-once low-memory trim implemented; Windows/Linux measurements recorded. | Real mobile OS low-memory callbacks, device/provider process-memory budgets, thermal/loading/cancellation behavior and device breadth. |
-| AUD-04 — Partial | Center routing, HRTF/stereo fallback, live layout changes and mod wet-send rolloff measured with loopback audio. | Physical surround outputs and real endpoint/layout transitions; preserve positional mix and stock zero-rolloff behavior. |
+| AUD-04 — Partial | Center routing, HRTF/stereo fallback, live layout changes and mod wet-send rolloff measured with loopback audio; real-device harness passes on real stereo endpoints, including a forced layout and a mid-line device switch. | Run `audio_surround_endpoint.py` on a real 5.1/7.1 endpoint and listen on speakers; preserve positional mix and stock zero-rolloff behavior. |
 | AUD-05 — Partial | Consent/PTT/capture pipeline, codec/transport/moderation and bounded playback pass multi-process Windows/Linux and clock/loss tests. | Physical microphone/capture hotplug, independent-machine clocks and OS/device breadth. Existing 1:59:29 run is not a two-hour pass; cancelled rerun is not silently reinstated. |
 | AUD-06 — Partial | Localized dialogue gain, complete installed-reference routing audit, extensive scripted-scene mute/save checks and a 42-map progression sweep with fights (1,052 kills, no mute leak) exist. | Ordered human play, including `walker` past the step where the probe player dies, and physical listening/device checks; retain effects/music separation. |
-| AUD-07 — Partial | Playback-driven captions, fallback/mapping policy, portrait overlap, real save/load checks and the fight-gated scene corpus (1,546 distinct lines across retained reports, no untranscribed cue) implemented. | Missing transcripts remain explicit; ordered human play and physical stereo-HUD readability. Installed transcripts are English only. Available mappings do not mean every line is captioned. |
+| AUD-07 — Partial | Implementation complete: playback-driven captions, fallback/mapping policy, authored caption-pack declarations, an optional marker for untranscribed speech, a reading hold after a line ends, portrait overlap, real save/load checks and the fight-gated scene corpus (1,546 distinct lines across retained reports, no untranscribed cue). | Qualification only: ordered human play and physical stereo-HUD readability. Installed text is English only. Lines without a lip-sync transcript show their shader's script line, and helmet-radio copies their dry line's transcript (#221); only non-verbal sounds and multiplayer announcers show the marker unless a caption pack supplies text. |
 
 ### AUD task evidence and acceptance
 
@@ -4572,6 +5793,20 @@ automatically satisfied by a listening pass.
   October 22 audit: the remaining gate is human listening on real speakers or
   headphones against retail. The measured distance-curve audit is complete;
   keep this item open until that listening pass is recorded.
+  November 13: the listening pass becomes a measured comparison of what each
+  game renders. `sound_distance_retail_compare.py` runs retail 1.4.2 and openQ4
+  on the same three shaders, nine distances and two passes, and writes each mix
+  to a WAV through OpenAL Soft. Nothing plays aloud. openQ4 must follow retail and
+  the authored curve within 1 dB beyond the minimum distance (2 dB inside it, where
+  retail's OpenAL path keeps a point source), and both must be silent at and beyond
+  the maximum. Retail's OpenAL output is a fair reference: 1.4.2 sets rolloff 0 and
+  sends its shared channel volume as the gain. The listener sits in Hangar 1's
+  portal-sky room, with the four map sounds that reach it removed. The openQ4 half
+  passes (within 0.6 dB, silent at and beyond the maximum). Retail selects no sound
+  world while it is not the active application, and faking focus would be
+  synthetic input. The retail half therefore waits for a person to focus its window,
+  and it has not run focused yet. Close this item when it passes.
+  [Rendered comparison](audio-modernization.md#rendered-retail-comparison-13-november-2026).
 - [ ] **AUD-02 — P1, qualification: physical device and timing lifecycle.** Test
   default/selected endpoint loss and return, hotplug, pause/resume/slow motion,
   cinematics, map/restart and long sessions on target OSes. Verify audible output,
@@ -4730,6 +5965,19 @@ automatically satisfied by a listening pass.
   now fall off exactly as a mono source's do (half at twice the minimum
   distance, a quarter at four times) with standard and EAX reverb, and stock
   presets are unchanged. Physical surround devices remain open.
+  November 13: `audio_surround_endpoint.py` qualifies placement and transitions
+  on real output devices: stock gameplay through WASAPI (or PulseAudio/PipeWire),
+  measured from each device's own loopback in its own layout, with no wave
+  writer. On two real stereo endpoints all 19 checks pass. The automatic layout
+  matches the device, dialogue stays balanced and positional sound follows its
+  side. A forced 5.1 that the stereo device refused leaves the line un-routed
+  and audible. A switch between devices mid-line reopens in place, silences the
+  old device and plays on the new one within 40 ms of the scene clock. The
+  centre branch checks exclusive centre dialogue and a silent LFE, but no
+  centre-capable device was available, so it ran only on synthetic data. The
+  remaining gate is one run of that harness on a 5.1/7.1 endpoint, plus
+  listening on speakers; real endpoint loss and hotplug stay with AUD-02.
+  [Real-endpoint evidence](audio-voice-evidence.md#real-playback-endpoints-13-november-2026).
 - [ ] **AUD-05 — P1, implementation: functional multiplayer voice.** Capture,
   codec, transport and playback are implemented with explicit microphone consent,
   push-to-talk, local-only testing, connection-scoped mute, server moderation and
@@ -4981,11 +6229,13 @@ remain narrower than final-package physical-device signoff.
 
 ### PKG completion checkpoints
 
-**Estimate: 85%; 4/6 tasks closed (6 November 2026).** PKG-01 to PKG-04 are
+**Estimate: 92%; 4/6 tasks closed (16 November 2026).** PKG-01 to PKG-04 are
 implemented and proven on local candidates; their release-workflow steps first
-run with the next release. PKG-05 needs that release's measurements; PKG-06 is
-decided as a planned updater not yet started. Evidence:
-[implementation status](content-pack-distribution.md#implementation-status-6-november-2026).
+run with the next release. PKG-05 needs that release's measurements; PKG-06's
+updater is implemented (#227), its key generated and the signing secret set;
+it waits for an in-place update between two signed releases. Evidence:
+[implementation status](content-pack-distribution.md#implementation-status-6-november-2026),
+[updater](content-pack-distribution.md#implementation-16-november-2026).
 
 | Task / state | Completed points and evidence | Remaining completion subpoints |
 | --- | --- | --- |
@@ -4994,7 +6244,7 @@ decided as a planned updater not yet started. Evidence:
 | PKG-03 — Complete | Software DXT decode for renderers without S3TC; 51/51 packs accepted with every area resident on GL, GL software decode and Vulkan; atlases and `core2` metadata trimmed (pak1 267.5 → 96.4 MB); `waste` re-baked; loadscreen format decided: keep TGA + DDS. | None. |
 | PKG-04 — Complete | Content generations, overlays pak3–pak9 rebuilt from changed files with the base kept byte-identical from the generation's blobs, size budget, generation bump folding; one-file fix shipped as a verified 153 KB overlay. | None. |
 | PKG-05 — Implemented, measurement open | Installer downloads only missing or different bulk packs, SHA-256 and release URL compiled in; AppImages embed `gh-releases-zsync` information and publish `.zsync`; itch.io declined. | Measure update downloads for each channel on the next release (maintainer decision, 6 November). |
-| PKG-06 — Decided: plan an updater; optional P3 | Constraints recorded: signed manifest, compiled release URL, platform HTTPS client, helper-process replacement, per-user installs, Sparkle for macOS, whole-APK Android. | Implement the updater under those constraints. |
+| PKG-06 — Implemented, first in-place update open | In-game updater under the recorded constraints (#227): Ed25519-signed `openq4-update.json` with the key compiled in, compiled release URL, WinHTTP / system libcurl, staged `.update/` swapped by `openQ4-updater` after exit with backup and rollback, per-user installs only; macOS, AppImage, Flatpak, Snap, Android and development builds get the release page. Native, helper and manifest-tool tests. | Key generated and `OPENQ4_UPDATE_SIGNING_KEY` set (16 November). Update the first signed release in place to the next one on Windows and Linux (only builds carrying the key trust it). |
 
 ### PKG task evidence and acceptance
 
@@ -5045,8 +6295,15 @@ decided as a planned updater not yet started. Evidence:
   6 November 2026: plan an in-game updater, built under the recorded
   constraints (signed manifest and compiled release URL, platform HTTPS client,
   helper-process replacement, per-user installs, Sparkle deltas on macOS,
-  whole-APK Android). Bulk sources stay in Git with this decision. Remaining:
-  the updater implementation.
+  whole-APK Android). Bulk sources stay in Git with this decision. Implemented
+  16 November 2026 for #227 ([design](content-pack-distribution.md#implementation-16-november-2026)):
+  the Updates button and a startup check in release builds read the latest
+  release's signed manifest; Windows and Linux installs download, verify, stage
+  and hand over to `openQ4-updater`, which swaps the files after the game exits
+  and restarts it. The key was generated and its workflow secret set on
+  16 November. Remaining exit: updating the first signed release in place to
+  the next one on Windows and Linux, since only builds carrying the key trust
+  its signatures.
 
 ## Steam integration
 
@@ -5496,9 +6753,9 @@ do not establish an accepted delivery scope for these ambitions. To advance one:
 | --- | --- |
 | OPT-01 | Higher authoritative simulation rates: separate physics/script/prediction/demo/content design after HF-01 through HF-07; do not change tick rate to claim higher FPS. |
 | OPT-02 | GPU skinning promotion for animation-heavy content: batch GL dispatches/persist source buffers and prove benefit. Current stock workloads did not justify default promotion. |
-| OPT-03 | True HDR10/scRGB output, sparse/virtual textures, broad GPU-driven/async-compute work, background shader compilation, shadowed light-injected volumetrics and world-space GI: require measured need, target content/hardware and classic rollback. |
-| OPT-04 | Live relay/delayed broadcast, multi-POV/multi-window audio, compression/export, persistent competitive identity/web/brackets: separate security, capacity, backpressure and reconnect designs. Forced client screenshots remain rejected. |
-| OPT-05 | Overload/Harvester/Domination/Attack and Defend: keep unavailable until authoritative objectives/scoring, networking, bots and UI exist. Race/factories/rulesets remain outside accepted current scope. |
+| OPT-03 | True HDR10/scRGB output, sparse/virtual textures, broad GPU-driven/async-compute work, background shader compilation, shadowed light-injected volumetrics and raster world-space GI: require measured need, target content/hardware and classic rollback. Ray-traced shadows, reflections, indirect light and path tracing moved to RT-01 through RT-07 on 15 November 2026. |
+| OPT-04 | Live relay/delayed broadcast, multi-POV/multi-window audio and web/brackets: separate security, capacity, backpressure and reconnect designs. Forced client screenshots remain rejected. Demo compression and export moved to MP-23/MP-22 and persistent identity to MP-17 on 15 November 2026. |
+| OPT-05 | Overload/Harvester/Domination/Attack and Defend: keep unavailable until authoritative objectives/scoring, networking, bots and UI exist. Race remains outside accepted scope; rulesets, modifiers and presets moved to MP-11/MP-14 on 15 November 2026. |
 | OPT-06 | Awakening's unreachable grapple/concussion/tether/gravgun/compass content: explicit content-completion project, not a blocker for the integrated SP campaign. No expansion multiplayer module. |
 | OPT-07 | HDR audio, ducking, geometric obstruction and reverb editing: optional authored-mix changes after retail audio qualification. |
 | OPT-08 | Additional idTech titles, wholesale SP/MP source unification, broad third-party feature ports and extra cosmetic color syntax: require a product/maintenance decision, source/license review and concrete benefit; the old TODO is not an implementation mandate. |
@@ -5560,7 +6817,7 @@ Completion order for the selected release:
   in the shared release-status policy, player status page and historical notes;
   exclude them from version/changelog baselines without deleting evidence.
   Reconciliation on 23 October 2026 restores 0.13.2 as latest and marks 0.14.0
-  withdrawn. Update
+  withdrawn; 0.14.1 replaced 0.13.2 as the latest release in November 2026. Update
   this roadmap, UI acceptance registers, support/capability matrices and curated
   release notes together. State hardware/backend exclusions, upgrade/reinstall
   requirements and opt-in defaults. Use the existing renderer promotion token,

@@ -2,10 +2,13 @@
 #pragma once
 #include "Vector.h"
 #include "Hud.h"
+#include "VectorCompile.h"
 #include <RmlUi/Core/Element.h>
 #include <RmlUi/Core/Geometry.h>
 #include <RmlUi/Core/Decorator.h>
 #include <RmlUi/Core/Texture.h>
+#include <cstdint>
+#include <memory>
 
 namespace openq4::ui {
 class Host;
@@ -47,7 +50,13 @@ public:
 	bool HitTest(Rml::Element& element, Rml::Vector2f outputPoint);
 	bool HasHitArea(Rml::Element& element);
 private:
+	friend class VectorCompileBatch;
 	bool PrepareHitGeometry(Rml::Element& element, Rml::Vector2f& origin);
+	// What a deferred compilation names: this geometry while it lives, its
+	// paths as they were, and their generation (a reconfiguration drops it).
+	std::shared_ptr<VectorGeometry*> self;
+	std::shared_ptr<const std::vector<VectorPath>> sharedPaths;
+	std::uint64_t compileGeneration = 0;
 	std::vector<VectorMesh> hitGeometry;
 	std::array<double,6> hitSignature{};
 	bool hitPrepared = false, hitValid = false, hitArea = false;
@@ -89,6 +98,11 @@ public:
 	void SetCanonicalText(const std::string& text);
 	bool SetImageSource(const std::string& source);
 	void SetImageCoordinate(const std::string& property, double value);
+	// A signal fault's live values (dither, strength, phase), which its
+	// compiled backdrop filter and any recorded frame read as they draw:
+	// animating one changes paint only, never style. Null on other nodes.
+	void SetBackdropFault(int index, float value) { if (backdropFault && index>=0 && index<3) (*backdropFault)[size_t(index)]=value; }
+	std::shared_ptr<const std::array<float,3>> BackdropFault() const { return backdropFault; }
 	// Isolated opacity changes paint only. Canonical presentation callers can
 	// resolve this element's non-inherited filter without updating the tree.
 	bool SetPresentationOpacity(const std::string& filter, float density, Rml::Vector2f dimensions);
@@ -127,6 +141,7 @@ private:
 	std::shared_ptr<ImageCoordinates> imageCoordinates=std::make_shared<ImageCoordinates>(ImageCoordinates{0,0,1,1});
 	ImageSamplingInterface* imageSampling=nullptr;
 	std::shared_ptr<float> replayOpacity;
+	std::shared_ptr<std::array<float,3>> backdropFault;
 	bool replayText=false;
 	std::array<double,11> imageSignature{};
 	Rml::Texture imageTexture;

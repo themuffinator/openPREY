@@ -37,7 +37,12 @@ DOOM III gold:	33
 1.3 patch:		40
 1.3.1:			41
 */
-const int ASYNC_PROTOCOL_MINOR		= 41;
+// openQ4: 42 (15 November 2026) keys every channel packet with the connect challenge, uses
+// one fragment size for both address families, reports how early commands arrive, and in
+// the game's snapshots replaces the hit-confirm bit with a counter, sends other players'
+// velocity in 16 bits, a projectile's launch direction in 48 and an entity's check tag in 8.
+// The game reads multiview demos recorded with 41 (idGameLocal::IsDemoProtocolCompatible).
+const int ASYNC_PROTOCOL_MINOR		= 42;
 const int ASYNC_PROTOCOL_VERSION	= ( ASYNC_PROTOCOL_MAJOR << 16 ) + ASYNC_PROTOCOL_MINOR;
 #define MAJOR_VERSION(v) ( v >> 16 )
 
@@ -67,6 +72,7 @@ const int GAME_INIT_ID_MAP_LOAD		= -2;
 #include "MsgChannel.h"
 #include "AsyncServer.h"
 #include "ServerScan.h"
+#include "PredictionMargin.h"
 #include "AsyncClient.h"
 #include "MultiViewDemo.h"
 
@@ -165,6 +171,8 @@ public:
 	static bool				GetMasterAddress( int index, netadr_t &adr );
 							// get the hardcoded idnet master, equivalent to GetMasterAddress( 0, .. )
 	static netadr_t			GetMasterAddress( void );
+							// look up again, at the next request, the masters that failed to resolve
+	static void				RetryMasterAddresses( void );
 	
 	static void				GetNETServers( );
 	
@@ -193,6 +201,7 @@ public:
 	static idCVar			serverAllowLegacyRcon;			// explicit plaintext compatibility opt-in
 	static idCVar			clientPrediction;				// how many additional milliseconds the clients runs ahead
 	static idCVar			clientMaxPrediction;			// max milliseconds into the future a client can run prediction
+	static idCVar			clientPredictionMargin;			// predict further after long frames (PredictionMargin.h)
 	static idCVar			clientUsercmdBackup;			// how many usercmds the client sends from previous frames
 	static idCVar			clientRemoteConsoleAddress;		// remote console address
 	static idCVar			clientRemoteConsolePassword;	// remote console password

@@ -134,6 +134,41 @@ static bool RB_EnsurePackedRenderTriangleCaches( const srfTriangles_t *tri, bool
 
 /*
 ================
+r_glSerializeDraws
+
+Validation only. NVIDIA's OpenGL driver shades consecutive draws that cover
+the same pixels of a 4x or 8x multisampled target nondeterministically: with
+a byte-identical command stream (same draws, parameters, vertices and
+textures), a frozen frame differs from the previous one by a level or two at
+a few pixels along triangle edges. Coverage and depth are reproducible; the
+interpolated attributes, and so every texture lookup, are not. Single-sample
+and 2x targets and Vulkan on the same GPU are unaffected, and NVIDIA's own
+forum has the same report for D3D9 and D3D11 with no fix ("MSAA rendering
+bug", https://forums.developer.nvidia.com/t/msaa-rendering-bug/205029).
+Back-to-back draws of the same surface, which every multi-stage material
+makes, are the common case.
+
+Waiting for each classic draw to complete before the next is issued keeps
+such frames byte-identical. A texture barrier is not enough on this driver
+(no better than nothing in 40-frame trials), and a per-draw glFlush only
+masks it under light load. That much stalling is far too costly for a
+one-level difference nobody sees, so it is off for players; the image
+comparisons that need reproducible frames (renderer_shared_domain_qualification.py)
+turn it on.
+================
+*/
+idCVar r_glSerializeDraws( "r_glSerializeDraws", "0", CVAR_RENDERER | CVAR_BOOL,
+	"validation: wait for each classic OpenGL draw to finish before the next, so frozen multisampled frames are reproducible on drivers that shade overlapping draws nondeterministically" );
+
+void RB_SerializeDrawForValidation( void ) {
+	if ( r_glSerializeDraws.GetBool() ) {
+		glFinish();
+	}
+}
+
+
+/*
+================
 RB_DrawElementsWithCounters
 ================
 */
@@ -176,6 +211,7 @@ void RB_DrawElementsWithCounters( const srfTriangles_t *tri ) {
 						GL_INDEX_TYPE,
 						tri->indexes );
 	}
+	RB_SerializeDrawForValidation();
 }
 
 /*
@@ -210,6 +246,7 @@ void RB_DrawShadowElementsWithCounters( const drawSurf_t *surf, int numIndexes )
 						GL_INDEX_TYPE,
 						tri->indexes );
 	}
+	RB_SerializeDrawForValidation();
 }
 
 
@@ -371,6 +408,7 @@ void RB_RenderDrawSurfListWithFunction( drawSurf_t **drawSurfs, int numDrawSurfs
 	const drawSurf_t		*drawSurf;
 
 	backEnd.currentSpace = NULL;
+	RB_SetSurfaceWinding( backEnd.currentSpace );
 
 	for (i = 0  ; i < numDrawSurfs ; i++ ) {
 		drawSurf = drawSurfs[i];
@@ -398,6 +436,8 @@ void RB_RenderDrawSurfListWithFunction( drawSurf_t **drawSurfs, int numDrawSurfs
 		}
 
 		// render it
+		// the winding for this surface's space, before it draws
+		RB_SetSurfaceWinding( drawSurf->space );
 		triFunc_( drawSurf );
 
 		if ( drawSurf->space->weaponDepthHack || drawSurf->space->modelDepthHack != 0.0f ) {
@@ -406,6 +446,7 @@ void RB_RenderDrawSurfListWithFunction( drawSurf_t **drawSurfs, int numDrawSurfs
 
 		backEnd.currentSpace = drawSurf->space;
 	}
+	RB_SetSurfaceWinding( NULL );
 }
 
 /*
@@ -422,6 +463,7 @@ void RB_RenderDrawSurfListWithFunctionIgnoreScissor( drawSurf_t **drawSurfs, int
 	const drawSurf_t *drawSurf;
 
 	backEnd.currentSpace = NULL;
+	RB_SetSurfaceWinding( backEnd.currentSpace );
 
 	for ( i = 0; i < numDrawSurfs; i++ ) {
 		drawSurf = drawSurfs[i];
@@ -438,6 +480,8 @@ void RB_RenderDrawSurfListWithFunctionIgnoreScissor( drawSurf_t **drawSurfs, int
 			RB_EnterModelDepthHack( drawSurf->space->modelDepthHack );
 		}
 
+		// the winding for this surface's space, before it draws
+		RB_SetSurfaceWinding( drawSurf->space );
 		triFunc_( drawSurf );
 
 		if ( drawSurf->space->weaponDepthHack || drawSurf->space->modelDepthHack != 0.0f ) {
@@ -446,6 +490,7 @@ void RB_RenderDrawSurfListWithFunctionIgnoreScissor( drawSurf_t **drawSurfs, int
 
 		backEnd.currentSpace = drawSurf->space;
 	}
+	RB_SetSurfaceWinding( NULL );
 }
 
 /*
@@ -458,6 +503,7 @@ void RB_RenderDrawSurfChainWithFunction( const drawSurf_t *drawSurfs,
 	const drawSurf_t		*drawSurf;
 
 	backEnd.currentSpace = NULL;
+	RB_SetSurfaceWinding( backEnd.currentSpace );
 
 	for ( drawSurf = drawSurfs ; drawSurf ; drawSurf = drawSurf->nextOnLight ) {
 		// change the matrix if needed
@@ -483,6 +529,8 @@ void RB_RenderDrawSurfChainWithFunction( const drawSurf_t *drawSurfs,
 		}
 
 		// render it
+		// the winding for this surface's space, before it draws
+		RB_SetSurfaceWinding( drawSurf->space );
 		triFunc_( drawSurf );
 
 		if ( drawSurf->space->weaponDepthHack || drawSurf->space->modelDepthHack != 0.0f ) {
@@ -491,6 +539,7 @@ void RB_RenderDrawSurfChainWithFunction( const drawSurf_t *drawSurfs,
 
 		backEnd.currentSpace = drawSurf->space;
 	}
+	RB_SetSurfaceWinding( NULL );
 }
 
 /*
@@ -926,6 +975,7 @@ void RB_CreateSingleDrawInteractionsFiltered( const drawSurf_t *surf, void (*Dra
 	// change the matrix and light projection vectors if needed
 	if ( surf->space != backEnd.currentSpace ) {
 		backEnd.currentSpace = surf->space;
+		RB_SetSurfaceWinding( backEnd.currentSpace );
 		glLoadMatrixf( surf->space->modelViewMatrix );
 	}
 

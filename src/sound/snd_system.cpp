@@ -52,6 +52,7 @@ idCVar ui_subtitleScale( "ui_subtitleScale", "1", CVAR_GUI | CVAR_ARCHIVE | CVAR
 idCVar ui_subtitleBackground( "ui_subtitleBackground", "0.6", CVAR_GUI | CVAR_ARCHIVE | CVAR_FLOAT | CVAR_NOCHEAT, "subtitle backing opacity", 0.0f, 1.0f );
 idCVar ui_subtitleSpeakers( "ui_subtitleSpeakers", "1", CVAR_GUI | CVAR_ARCHIVE | CVAR_BOOL | CVAR_NOCHEAT, "show available subtitle speaker names" );
 idCVar s_logSubtitles( "s_logSubtitles", "0", CVAR_SOUND | CVAR_BOOL, "print SOUND_SUBTITLE whenever the Prey sound-shader subtitle queue changes: sound time, shader, cue, channel start and whether a hardware voice is playing it" );
+idCVar ui_subtitleUntranscribed( "ui_subtitleUntranscribed", "1", CVAR_GUI | CVAR_ARCHIVE | CVAR_BOOL | CVAR_NOCHEAT, "mark spoken dialogue that has no transcript instead of leaving it blank" );
 idCVar s_speakerFraction( "s_speakerFraction", "0.65", CVAR_ARCHIVE | CVAR_FLOAT, "speaker attenuation fraction" );
 idCVar s_radioChatterFraction( "s_radioChatterFraction", "0.9", CVAR_ARCHIVE | CVAR_FLOAT, "radio chatter attenuation fraction" );
 idCVar s_frequencyShift( "s_frequencyShift", "1", CVAR_BOOL, "enable sound shader frequency shift playback" );
@@ -422,9 +423,13 @@ static void ListActiveSubtitles_f( const idCmdArgs& args ) {
 	const int count = world ? world->GetSubtitles(cues, 2) : 0;
 	idLib::Printf("Subtitles: %d\n", count);
 	for (int i = 0; i < count; ++i) {
-		idLib::Printf("Subtitle shader=%s emitter=%d speaker=%d time=%d duration=%d radio=%d textBytes=%d\n",
+		// source: installed lip-sync text, an authored subtitle/ declaration, the
+		// installed shader's script line, or none (speech without a transcript,
+		// listed while ui_subtitleUntranscribed is set).
+		idLib::Printf("Subtitle shader=%s emitter=%d speaker=%d time=%d duration=%d radio=%d textBytes=%d source=%s\n",
 			cues[i].shader, cues[i].emitterIndex, cues[i].speakerId, cues[i].timeMsec,
-			cues[i].durationMsec, cues[i].radio ? 1 : 0, idStr::Length(cues[i].text));
+			cues[i].durationMsec, cues[i].radio ? 1 : 0, cues[i].text ? idStr::Length(cues[i].text) : 0,
+			!cues[i].transcribed ? "none" : cues[i].authored ? "authored" : cues[i].script ? "script" : "installed");
 	}
 }
 

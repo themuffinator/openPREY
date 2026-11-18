@@ -8,8 +8,8 @@
 
 	One OpenXR session drives presentation, tracking and controller input:
 
-	- The session binds to the renderer's OpenGL context
-	  (idRenderSystem::GetVRGraphicsBinding). It opens after the renderer
+	- The session binds to the renderer's OpenGL, OpenGL ES (Android) or
+	  Vulkan device (idRenderSystem::GetVRGraphicsBinding). It opens after the renderer
 	  reports a live device and closes before the device is destroyed, so a
 	  vid_restart or renderer shutdown never pulls a context out from under
 	  the runtime.
@@ -44,6 +44,9 @@
 #define XR_USE_GRAPHICS_API_OPENGL
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+#if defined( __ANDROID__ )
+#include "../android/android_public.h"
+#endif
 
 // The Xlib OpenGL binding, declared without X11 or GLX headers. The layout is
 // XrGraphicsBindingOpenGLXlibKHR's: Display *, VisualID (uint32_t),
@@ -145,6 +148,66 @@ typedef struct vrEGLGraphicsBinding_s {
 	void *					context;
 } vrEGLGraphicsBinding_t;
 
+// Android (Meta Quest and other standalone headsets), declared without JNI or
+// EGL headers. The Android loader finds runtimes through the application's
+// Java context, so it is initialized first with the Java VM and the activity
+// (XR_KHR_loader_init_android: XrLoaderInitInfoAndroidKHR's layout), and the
+// instance names them again (XR_KHR_android_create_instance:
+// XrInstanceCreateInfoAndroidKHR's layout, which is the same). The GLES
+// renderer binds its EGL display, config and context through
+// XR_KHR_opengl_es_enable (XrGraphicsBindingOpenGLESAndroidKHR's layout); its
+// requirements and swapchain images have the OpenGL structures' layouts, so
+// the OpenGL path serves both with the ES structure types.
+#define VR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME	"XR_KHR_android_create_instance"
+#define VR_OPENGL_ES_ENABLE_EXTENSION_NAME		"XR_KHR_opengl_es_enable"
+
+typedef struct vrAndroidJavaHandles_s {
+	XrStructureType			type;
+	const void *			next;
+	void *					applicationVM;
+	void *					applicationActivity;
+} vrAndroidJavaHandles_t;
+
+typedef struct vrGLESAndroidGraphicsBinding_s {
+	XrStructureType			type;
+	const void *			next;
+	void *					display;
+	void *					config;
+	void *					context;
+} vrGLESAndroidGraphicsBinding_t;
+
+#if defined( __ANDROID__ )
+static const bool VR_GL_IS_ES = true;
+#else
+static const bool VR_GL_IS_ES = false;
+#endif
+
+// Optional runtime services, used when the runtime offers them (Meta Quest
+// does, standalone and over Link): XR_FB_display_refresh_rate lets the
+// player choose the headset's refresh rate (vr_refreshRate);
+// XR_EXT_performance_settings sets the CPU and GPU levels the headset holds
+// (vr_performanceLevel) and reports thermal limits. On a standalone headset
+// XR_KHR_android_thread_settings tells the runtime which thread carries the
+// frame, declared without JNI headers: XrAndroidThreadTypeKHR is a 32-bit enum.
+#define VR_REFRESH_RATE_EXTENSION_NAME			"XR_FB_display_refresh_rate"
+#define VR_PERFORMANCE_SETTINGS_EXTENSION_NAME	"XR_EXT_performance_settings"
+#define VR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME	"XR_KHR_android_thread_settings"
+static const int32_t VR_ANDROID_THREAD_TYPE_APPLICATION_MAIN = 1;
+static const int32_t VR_ANDROID_THREAD_TYPE_RENDERER_MAIN = 3;
+typedef XrResult ( XRAPI_PTR *vrSetAndroidApplicationThread_t )( XrSession session, int32_t threadType, uint32_t threadId );
+static const int VR_MAX_REFRESH_RATES = 32;
+
+#if defined( __ANDROID__ )
+#include <unistd.h>		// gettid
+#endif
+
+idCVar vr_refreshRate( "vr_refreshRate", "0", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_FLOAT,
+	"headset refresh rate in Hz, on headsets that let a game choose it (Meta Quest): the fastest offered rate up to this; "
+	"0 keeps the headset's own", 0.0f, 360.0f );
+idCVar vr_performanceLevel( "vr_performanceLevel", "3", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_INTEGER,
+	"CPU and GPU clocks the headset holds, on headsets that let a game choose them (Meta Quest): 0 the headset decides, "
+	"1 power savings, 2 sustained low, 3 sustained high (0 applies from the next vr_restart)", 0, 3 );
+
 #ifndef GL_SRGB8_ALPHA8
 #define GL_SRGB8_ALPHA8		0x8C43
 #endif
@@ -173,7 +236,11 @@ static const int VR_SYSTEM_RETRY_MSEC = 3000;
 static const int VR_RESTART_PENDING_MSEC = 60000;
 static const int VR_INPUT_CRITICAL_SECTION = CRITICAL_SECTION_TWO;
 static const uint32_t VR_MAX_SWAPCHAIN_IMAGES = 64;
-static const XrDuration VR_IMAGE_WAIT_NSEC = 100000000; // 100 ms, then recover on the desktop
+// One swapchain image wait is 100 ms. A compositor that stalls longer (a
+// hitch, a runtime busy with another application) has not lost the session:
+// the wait is repeated, up to a second in all, before VR returns to the desktop.
+static const XrDuration VR_IMAGE_WAIT_NSEC = 100000000;
+static const int VR_IMAGE_WAIT_ATTEMPTS = 10;
 
 enum vrActionId_t {
 	VR_ACTION_AIM_POSE,
@@ -186,25 +253,31 @@ enum vrActionId_t {
 	VR_ACTION_SECONDARY,
 	VR_ACTION_MENU,
 	VR_ACTION_HAPTIC,
+	// a touchpad pressed by region (VR_TrackpadRegion): the buttons that
+	// Vive wands and Windows Mixed Reality controllers lack
+	VR_ACTION_TRACKPAD,
+	VR_ACTION_TRACKPAD_CLICK,
 	VR_ACTION_COUNT
 };
 
 static const char *const vrActionNames[VR_ACTION_COUNT] = {
 	"aim_pose", "grip_pose", "trigger", "squeeze", "thumbstick",
-	"thumbstick_click", "primary", "secondary", "menu", "haptic"
+	"thumbstick_click", "primary", "secondary", "menu", "haptic",
+	"trackpad", "trackpad_click"
 };
 
 // localized action names are shown by runtime binding editors
 static const char *const vrActionLocalizedNames[VR_ACTION_COUNT] = {
 	"#str_230100", "#str_230101", "#str_230102", "#str_230103", "#str_230104",
-	"#str_230105", "#str_230106", "#str_230107", "#str_230108", "#str_230109"
+	"#str_230105", "#str_230106", "#str_230107", "#str_230108", "#str_230109",
+	"#str_230111", "#str_230112"
 };
 
 static const XrActionType vrActionTypes[VR_ACTION_COUNT] = {
 	XR_ACTION_TYPE_POSE_INPUT, XR_ACTION_TYPE_POSE_INPUT, XR_ACTION_TYPE_FLOAT_INPUT,
 	XR_ACTION_TYPE_FLOAT_INPUT, XR_ACTION_TYPE_VECTOR2F_INPUT, XR_ACTION_TYPE_BOOLEAN_INPUT,
 	XR_ACTION_TYPE_BOOLEAN_INPUT, XR_ACTION_TYPE_BOOLEAN_INPUT, XR_ACTION_TYPE_BOOLEAN_INPUT,
-	XR_ACTION_TYPE_VIBRATION_OUTPUT
+	XR_ACTION_TYPE_VIBRATION_OUTPUT, XR_ACTION_TYPE_VECTOR2F_INPUT, XR_ACTION_TYPE_BOOLEAN_INPUT
 };
 
 // One suggested binding: an action and the path under /user/hand/<hand>.
@@ -238,32 +311,44 @@ static const vrBinding_t vrTouchBindings[] = {
 };
 
 // Index has no menu button outside the reserved system button, so the left
-// B button opens the menu.
+// B button opens the menu, and pressing hard on the left trackpad is the left
+// controller's second button (the flashlight).
 static const vrBinding_t vrIndexBindings[] = {
 	VR_BOTH_HANDS( VR_ACTION_AIM_POSE, "input/aim/pose" ),
 	VR_BOTH_HANDS( VR_ACTION_GRIP_POSE, "input/grip/pose" ),
 	VR_BOTH_HANDS( VR_ACTION_TRIGGER, "input/trigger/value" ),
-	VR_BOTH_HANDS( VR_ACTION_SQUEEZE, "input/squeeze/value" ),
+	// squeeze/value reads the fingers wrapped round the grip and is full before
+	// anyone squeezes: merely holding the controllers would switch weapons and
+	// hold the weapon wheel open. The force is the squeeze itself.
+	VR_BOTH_HANDS( VR_ACTION_SQUEEZE, "input/squeeze/force" ),
 	VR_BOTH_HANDS( VR_ACTION_THUMBSTICK, "input/thumbstick" ),
 	VR_BOTH_HANDS( VR_ACTION_THUMBSTICK_CLICK, "input/thumbstick/click" ),
 	VR_BOTH_HANDS( VR_ACTION_PRIMARY, "input/a/click" ),
 	{ VR_ACTION_SECONDARY, VR_HAND_RIGHT, "input/b/click" },
+	{ VR_ACTION_SECONDARY, VR_HAND_LEFT, "input/trackpad/force" },
 	{ VR_ACTION_MENU, VR_HAND_LEFT, "input/b/click" },
 	VR_BOTH_HANDS( VR_ACTION_HAPTIC, "output/haptic" ),
 };
 
+// A wand has a trackpad, a menu button, a grip and a trigger. The pad is the
+// stick, and pressed by region it is the buttons the wand lacks
+// (ApplyTrackpadRegions): up crouches (right) or toggles the flashlight
+// (left), down jumps (right) or reloads (left).
 static const vrBinding_t vrViveBindings[] = {
 	VR_BOTH_HANDS( VR_ACTION_AIM_POSE, "input/aim/pose" ),
 	VR_BOTH_HANDS( VR_ACTION_GRIP_POSE, "input/grip/pose" ),
 	VR_BOTH_HANDS( VR_ACTION_TRIGGER, "input/trigger/value" ),
 	VR_BOTH_HANDS( VR_ACTION_SQUEEZE, "input/squeeze/click" ),
 	VR_BOTH_HANDS( VR_ACTION_THUMBSTICK, "input/trackpad" ),
-	VR_BOTH_HANDS( VR_ACTION_THUMBSTICK_CLICK, "input/trackpad/click" ),
+	VR_BOTH_HANDS( VR_ACTION_TRACKPAD, "input/trackpad" ),
+	VR_BOTH_HANDS( VR_ACTION_TRACKPAD_CLICK, "input/trackpad/click" ),
 	{ VR_ACTION_MENU, VR_HAND_LEFT, "input/menu/click" },
 	{ VR_ACTION_SECONDARY, VR_HAND_RIGHT, "input/menu/click" },
 	VR_BOTH_HANDS( VR_ACTION_HAPTIC, "output/haptic" ),
 };
 
+// The touchpad, pressed, is the face buttons Windows Mixed Reality controllers
+// lack: its upper half the secondary button, the rest the primary.
 static const vrBinding_t vrMotionControllerBindings[] = {
 	VR_BOTH_HANDS( VR_ACTION_AIM_POSE, "input/aim/pose" ),
 	VR_BOTH_HANDS( VR_ACTION_GRIP_POSE, "input/grip/pose" ),
@@ -271,7 +356,8 @@ static const vrBinding_t vrMotionControllerBindings[] = {
 	VR_BOTH_HANDS( VR_ACTION_SQUEEZE, "input/squeeze/click" ),
 	VR_BOTH_HANDS( VR_ACTION_THUMBSTICK, "input/thumbstick" ),
 	VR_BOTH_HANDS( VR_ACTION_THUMBSTICK_CLICK, "input/thumbstick/click" ),
-	VR_BOTH_HANDS( VR_ACTION_PRIMARY, "input/trackpad/click" ),
+	VR_BOTH_HANDS( VR_ACTION_TRACKPAD, "input/trackpad" ),
+	VR_BOTH_HANDS( VR_ACTION_TRACKPAD_CLICK, "input/trackpad/click" ),
 	{ VR_ACTION_MENU, VR_HAND_LEFT, "input/menu/click" },
 	{ VR_ACTION_SECONDARY, VR_HAND_RIGHT, "input/menu/click" },
 	VR_BOTH_HANDS( VR_ACTION_HAPTIC, "output/haptic" ),
@@ -318,7 +404,8 @@ public:
 	virtual bool			GetUsercmdInput( float otherYawDelta, float currentYaw, vrUsercmdInput_t &input );
 	virtual void			DrawMenuPointer( void );
 	virtual void			Vibrate( int hand, float amplitude, int durationMsec );
-	virtual void			ShiftTrackingOrigin( const idVec3 &trackingDelta );
+	virtual bool			ShiftTrackingOrigin( const idVec3 &trackingDelta );
+	virtual void			TurnBody( float yawDegrees );
 
 	void					RequestRestart( void ) { restartRequested = true; }
 	void					RequestRecenter( void ) { recenterRequested = true; }
@@ -350,11 +437,19 @@ private:
 		bool				primary;
 		bool				secondary;
 		bool				menu;
+		// a touchpad pressed by region (VR_ACTION_TRACKPAD); stickClickBound says
+		// whether the profile has a stick click of its own, which a Vive wand,
+		// whose pad is its stick, lacks
+		bool				padActive;
+		float				padX, padY;
+		bool				padClick;
+		bool				stickClickBound;
 	};
 
 	// lifecycle
 	enum recovery_t { RECOVERY_NONE, RECOVERY_SESSION, RECOVERY_INSTANCE };
 	bool					Check( XrResult result, const char *what );
+	bool					CheckOptional( XrResult result, const char *what );
 	bool					CheckFrame( XrResult result, const char *what );
 	bool					RecoverIfNeeded( void );
 	bool					CreateInstance( void );
@@ -376,6 +471,9 @@ private:
 	bool					CreateBaseSpace( void );
 	void					UpdateStageBounds( void );
 	void					ReleaseRendererImages( void );
+	void					ApplyRefreshRate( void );
+	void					ApplyPerformanceLevel( void );
+	void					RegisterFrameThread( void );
 
 	// per frame
 	void					LocateFrame( XrTime time );
@@ -384,6 +482,7 @@ private:
 	void					UpdateKey( int slot, int key, bool down );
 	bool					MenuMode( void ) const;
 	bool					OffHandOnForegrip( int weaponHand ) const;
+	void					ApplyTrackpadRegions( int weaponHand );
 	void					ApplyTwoHandedAim( int weaponHand );
 	void					UpdateMenuPointer( int weaponHand, bool menu );
 	void					AnchorScreen( void );
@@ -417,6 +516,15 @@ private:
 	vrCreateVulkanInstance_t createVulkanInstance;
 	vrGetVulkanDevice_t		getVulkanDevice;
 	vrCreateVulkanDevice_t	createVulkanDevice;
+	// optional runtime services; NULL when the runtime does not offer them
+	PFN_xrEnumerateDisplayRefreshRatesFB enumerateRefreshRates;	// XR_FB_display_refresh_rate
+	PFN_xrGetDisplayRefreshRateFB getRefreshRate;
+	PFN_xrRequestDisplayRefreshRateFB requestRefreshRate;
+	PFN_xrPerfSettingsSetPerformanceLevelEXT setPerformanceLevel;	// XR_EXT_performance_settings
+	vrSetAndroidApplicationThread_t setAndroidThread;	// XR_KHR_android_thread_settings
+	float					refreshRate;		// the headset's refresh rate as last reported, Hz; 0 unknown
+	bool					refreshRateRequested;	// this session asked for a rate (vr_refreshRate)
+	int						thermalLevel[2];	// last XrPerfSettingsNotificationLevelEXT, CPU then GPU
 	int						graphicsApi;		// vrGraphicsApi_t of the session
 	// the Vulkan objects this instance's runtime created for the renderer; a
 	// session binds only to a device the runtime made
@@ -491,7 +599,13 @@ private:
 	handInput_t				hands[VR_NUM_HANDS];
 	bool					inputValid;
 	bool					bodyYawValid;
+	// The next usercmd takes the body's yaw afresh. From a view that was not
+	// tracked (a new map, a loaded save, the mouse) the head takes its facing;
+	// after a recentre nothing moved, so the aim keeps its own.
+	bool					bodyYawFromHead;
+	bool					bodyYawResetPending;	// a recentre: taken up with the poses it changed (SyncInput)
 	float					bodyYaw;
+	float					headLocalYaw;
 	float					aimLocalYaw;
 	float					aimLocalPitch;
 	float					moveForward;
@@ -503,6 +617,15 @@ private:
 	int						roomScaleWalkMsec;	// when the head last walked the body through the usercmd
 	bool					roomScaleWalking;	// a usercmd walk is under way (VR_RoomScaleWalkInput)
 	bool					physicalCrouch;		// the tracked head crouched (VR_PhysicalCrouch)
+	int						recenterHoldMsec;	// when the weapon-hand stick was pressed in, 0 while it is up
+	bool					recenterHeld;		// that press already recentred
+	int						trackpadRegion[VR_NUM_HANDS];	// vrPadRegion_t of a pressed touchpad, taken as the press began
+	bool					focusedOnce;		// this session has had the controllers
+	XrVector3f				lastHeadPosition;	// where the head last was, for a runtime that loses its position
+	bool					lastHeadPositionValid;
+
+	void					ReleaseInput( void );
+	void					ShiftOrigin( const idVec3 &horizontal );
 };
 
 static idVRSystemOpenXR *	vrOpenXR = NULL;
@@ -590,6 +713,14 @@ idVRSystemOpenXR::idVRSystemOpenXR( void ) {
 	createVulkanInstance = NULL;
 	getVulkanDevice = NULL;
 	createVulkanDevice = NULL;
+	enumerateRefreshRates = NULL;
+	getRefreshRate = NULL;
+	requestRefreshRate = NULL;
+	setPerformanceLevel = NULL;
+	setAndroidThread = NULL;
+	refreshRate = 0.0f;
+	refreshRateRequested = false;
+	thermalLevel[0] = thermalLevel[1] = XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT;
 	graphicsApi = VR_GRAPHICS_NONE;
 	vulkanInstance = NULL;
 	vulkanPhysicalDevice = NULL;
@@ -661,8 +792,17 @@ idVRSystemOpenXR::idVRSystemOpenXR( void ) {
 	memset( hands, 0, sizeof( hands ) );
 	inputValid = false;
 	bodyYawValid = false;
+	bodyYawFromHead = true;
+	bodyYawResetPending = false;
 	bodyYaw = 0.0f;
+	headLocalYaw = 0.0f;
 	aimLocalYaw = aimLocalPitch = 0.0f;
+	recenterHoldMsec = 0;
+	recenterHeld = false;
+	trackpadRegion[VR_HAND_LEFT] = trackpadRegion[VR_HAND_RIGHT] = VR_PAD_NONE;
+	focusedOnce = false;
+	memset( &lastHeadPosition, 0, sizeof( lastHeadPosition ) );
+	lastHeadPositionValid = false;
 	moveForward = moveRight = 0.0f;
 	snapTurn.latched = false;
 	memset( heldKeys, 0, sizeof( heldKeys ) );
@@ -766,6 +906,16 @@ void idVRSystemOpenXR::PrintStatus( void ) const {
 		} else {
 			common->Printf( "  refresh: not reported yet\n" );
 		}
+		if ( requestRefreshRate != NULL ) {
+			common->Printf( "  refresh rate choice: vr_refreshRate %g, headset reports %.0f Hz%s\n", vr_refreshRate.GetFloat(),
+				refreshRate, refreshRateRequested ? "" : " (its own choice)" );
+		}
+		if ( setPerformanceLevel != NULL ) {
+			const char *const levels[3] = { "normal", "warning", "impaired" };
+			const int cpu = thermalLevel[0] >= XR_PERF_SETTINGS_NOTIF_LEVEL_IMPAIRED_EXT ? 2 : thermalLevel[0] >= XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT ? 1 : 0;
+			const int gpu = thermalLevel[1] >= XR_PERF_SETTINGS_NOTIF_LEVEL_IMPAIRED_EXT ? 2 : thermalLevel[1] >= XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT ? 1 : 0;
+			common->Printf( "  performance: vr_performanceLevel %d, CPU %s, GPU %s\n", vr_performanceLevel.GetInteger(), levels[cpu], levels[gpu] );
+		}
 		common->Printf( "  interaction profile: %s\n", interactionProfile.Length() ? interactionProfile.c_str() : "<none>" );
 		const char *const baseName = baseSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "STAGE"
 			: baseSpaceType == VR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR ? "LOCAL_FLOOR" : "LOCAL";
@@ -817,6 +967,38 @@ bool idVRSystemOpenXR::Check( XrResult result, const char *what ) {
 	return false;
 }
 
+/*
+====================
+idVRSystemOpenXR::CheckOptional
+
+A call VR can play without: haptics, the controller profile's name, a
+headset's refresh rate or performance levels, thread hints. Its failure is
+reported and the call's service goes without, but only a lost session or
+instance retires anything: XR_ERROR_RUNTIME_FAILURE from such a call ended VR
+until vr_restart.
+====================
+*/
+bool idVRSystemOpenXR::CheckOptional( XrResult result, const char *what ) {
+	if ( result == XR_ERROR_SESSION_LOST || result == XR_SESSION_LOSS_PENDING || result == XR_ERROR_INSTANCE_LOST ) {
+		return Check( result, what );
+	}
+	if ( XR_SUCCEEDED( result ) ) {
+		return true;
+	}
+	// haptics fail on every shot when they fail at all: say so a few times
+	static int reported = 0;
+	if ( reported < 8 ) {
+		char name[XR_MAX_RESULT_STRING_SIZE];
+		name[0] = '\0';
+		if ( instance == XR_NULL_HANDLE || xrResultToString( instance, result, name ) != XR_SUCCESS ) {
+			idStr::snPrintf( name, sizeof( name ), "%d", static_cast<int>( result ) );
+		}
+		common->Warning( "OpenXR: %s failed: %s (VR goes on without it)%s", what, name,
+			++reported == 8 ? "; further failures of optional calls go unreported" : "" );
+	}
+	return false;
+}
+
 bool idVRSystemOpenXR::CheckFrame( XrResult result, const char *what ) {
 	if ( Check( result, what ) ) {
 		return true;
@@ -859,17 +1041,89 @@ XrPath idVRSystemOpenXR::Path( const char *text ) {
 	return path;
 }
 
+#if defined( __ANDROID__ )
+idCVar vr_runtimeJson( "vr_runtimeJson", "", CVAR_SYSTEM,
+	"development: an OpenXR runtime manifest the Android loader uses instead of the system's runtime (set before VR first starts)" );
+
+/*
+====================
+VR_InitializeAndroidLoader
+
+The Android loader finds the runtime through the application's Java context,
+so it is initialized before any other OpenXR call. vr_runtimeJson hands it a
+runtime manifest instead (the headset-free test runtime): Android has no
+environment for XR_RUNTIME_JSON, so it travels as a loader property.
+====================
+*/
+static bool VR_InitializeAndroidLoader( void ) {
+	// initialized again when vr_runtimeJson changes: a config can set it after
+	// the command line's vr_enable already started VR once without a runtime
+	static bool initialized = false;
+	static idStr initializedWith;
+	static bool warned = false;
+	if ( initialized && initializedWith == vr_runtimeJson.GetString() ) {
+		return true;
+	}
+	vrAndroidJavaHandles_t loaderInfo;
+	memset( &loaderInfo, 0, sizeof( loaderInfo ) );
+	loaderInfo.type = XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR;
+	PFN_xrVoidFunction function = NULL;
+	if ( !Sys_AndroidJavaHandles( &loaderInfo.applicationVM, &loaderInfo.applicationActivity )
+			|| XR_FAILED( xrGetInstanceProcAddr( XR_NULL_HANDLE, "xrInitializeLoaderKHR", &function ) ) || function == NULL ) {
+		if ( !warned ) {
+			common->Warning( "OpenXR: the Android loader cannot be initialized; VR stays off" );
+			warned = true;
+		}
+		return false;
+	}
+	const idStr runtimeJson = vr_runtimeJson.GetString();
+	XrLoaderInitPropertyValueEXT property;
+	property.name = "XR_RUNTIME_JSON";
+	property.value = runtimeJson.c_str();
+	XrLoaderInitInfoPropertiesEXT properties;
+	memset( &properties, 0, sizeof( properties ) );
+	properties.type = XR_TYPE_LOADER_INIT_INFO_PROPERTIES_EXT;
+	properties.propertyValueCount = 1;
+	properties.propertyValues = &property;
+	if ( runtimeJson.Length() > 0 ) {
+		loaderInfo.next = &properties;
+		common->Printf( "OpenXR: the loader uses the runtime manifest %s\n", runtimeJson.c_str() );
+	}
+	const XrResult result = reinterpret_cast<PFN_xrInitializeLoaderKHR>( function )(
+		reinterpret_cast<const XrLoaderInitInfoBaseHeaderKHR *>( &loaderInfo ) );
+	if ( XR_FAILED( result ) ) {
+		if ( !warned ) {
+			common->Warning( "OpenXR: xrInitializeLoaderKHR failed (%d); VR stays off", static_cast<int>( result ) );
+			warned = true;
+		}
+		return false;
+	}
+	initialized = true;
+	initializedWith = runtimeJson;
+	return true;
+}
+#endif
+
 /*
 ====================
 idVRSystemOpenXR::CreateInstance
 ====================
 */
 bool idVRSystemOpenXR::CreateInstance( void ) {
+#if defined( __ANDROID__ )
+	if ( !VR_InitializeAndroidLoader() ) {
+		return false;
+	}
+#endif
 	uint32_t extensionCount = 0;
 	XrResult result = xrEnumerateInstanceExtensionProperties( NULL, 0, &extensionCount, NULL );
 	if ( XR_FAILED( result ) || extensionCount == 0 || extensionCount > 4096 ) {
 		if ( !startFailureLogged ) {
+#if defined( __ANDROID__ )
+			common->Warning( "OpenXR: this device has no OpenXR runtime (%d); VR needs a standalone headset such as Meta Quest", static_cast<int>( result ) );
+#else
 			common->Warning( "OpenXR: no runtime is available (%d); install and activate one (SteamVR, Meta Quest Link, Monado...)", static_cast<int>( result ) );
+#endif
 			startFailureLogged = true;
 		}
 		return false;
@@ -890,30 +1144,57 @@ bool idVRSystemOpenXR::CreateInstance( void ) {
 	bool haveVulkan = false;
 	bool haveEGLBinding = false;
 	bool haveLocalFloorExtension = false;
+	bool haveAndroidInstance = false;
+	bool haveRefreshRate = false;
+	bool havePerformanceSettings = false;
+	bool haveAndroidThreads = false;
+	// on Android the OpenGL path is OpenGL ES, the GLES renderer's, and the
+	// only renderer: Android builds have neither a Vulkan renderer nor a
+	// desktop OpenGL context on EGL
+	const char *const openGLExtension = VR_GL_IS_ES ? VR_OPENGL_ES_ENABLE_EXTENSION_NAME : XR_KHR_OPENGL_ENABLE_EXTENSION_NAME;
 	for ( int i = 0; XR_SUCCEEDED( result ) && i < extensions.Num(); i++ ) {
-		if ( idStr::Cmp( extensions[i].extensionName, XR_KHR_OPENGL_ENABLE_EXTENSION_NAME ) == 0 ) {
+		const char *const name = extensions[i].extensionName;
+		if ( idStr::Cmp( name, VR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME ) == 0 ) {
+			haveAndroidInstance = true;
+		} else if ( idStr::Cmp( name, openGLExtension ) == 0 ) {
 			haveOpenGL = true;
-		} else if ( idStr::Cmp( extensions[i].extensionName, VR_VULKAN_ENABLE2_EXTENSION_NAME ) == 0 ) {
-			haveVulkan = true;
-		} else if ( idStr::Cmp( extensions[i].extensionName, VR_EGL_ENABLE_EXTENSION_NAME ) == 0 ) {
-			haveEGLBinding = true;
-		} else if ( idStr::Cmp( extensions[i].extensionName, VR_LOCAL_FLOOR_EXTENSION_NAME ) == 0 ) {
+		} else if ( idStr::Cmp( name, VR_VULKAN_ENABLE2_EXTENSION_NAME ) == 0 ) {
+			haveVulkan = !VR_GL_IS_ES;
+		} else if ( idStr::Cmp( name, VR_EGL_ENABLE_EXTENSION_NAME ) == 0 ) {
+			haveEGLBinding = !VR_GL_IS_ES;
+		} else if ( idStr::Cmp( name, VR_LOCAL_FLOOR_EXTENSION_NAME ) == 0 ) {
 			haveLocalFloorExtension = true;
+		} else if ( idStr::Cmp( name, VR_REFRESH_RATE_EXTENSION_NAME ) == 0 ) {
+			haveRefreshRate = true;
+		} else if ( idStr::Cmp( name, VR_PERFORMANCE_SETTINGS_EXTENSION_NAME ) == 0 ) {
+			havePerformanceSettings = true;
+		} else if ( idStr::Cmp( name, VR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME ) == 0 ) {
+			haveAndroidThreads = VR_GL_IS_ES;
 		}
 	}
 	if ( !haveOpenGL && !haveVulkan ) {
 		if ( !startFailureLogged ) {
 			common->Warning( "OpenXR: the active runtime supports neither OpenGL (%s) nor Vulkan (%s); VR stays off",
-				XR_KHR_OPENGL_ENABLE_EXTENSION_NAME, VR_VULKAN_ENABLE2_EXTENSION_NAME );
+				openGLExtension, VR_VULKAN_ENABLE2_EXTENSION_NAME );
+			startFailureLogged = true;
+		}
+		return false;
+	}
+	if ( VR_GL_IS_ES && !haveAndroidInstance ) {
+		if ( !startFailureLogged ) {
+			common->Warning( "OpenXR: the active runtime lacks %s; VR stays off", VR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME );
 			startFailureLogged = true;
 		}
 		return false;
 	}
 
-	const char *enabledExtensions[4];
+	const char *enabledExtensions[10];
 	uint32_t enabledCount = 0;
+	if ( VR_GL_IS_ES ) {
+		enabledExtensions[enabledCount++] = VR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME;
+	}
 	if ( haveOpenGL ) {
-		enabledExtensions[enabledCount++] = XR_KHR_OPENGL_ENABLE_EXTENSION_NAME;
+		enabledExtensions[enabledCount++] = openGLExtension;
 		// an OpenGL context on EGL (native Wayland) binds through it
 		if ( haveEGLBinding ) {
 			enabledExtensions[enabledCount++] = VR_EGL_ENABLE_EXTENSION_NAME;
@@ -926,6 +1207,15 @@ bool idVRSystemOpenXR::CreateInstance( void ) {
 	if ( haveLocalFloorExtension ) {
 		enabledExtensions[enabledCount++] = VR_LOCAL_FLOOR_EXTENSION_NAME;
 	}
+	if ( haveRefreshRate ) {
+		enabledExtensions[enabledCount++] = VR_REFRESH_RATE_EXTENSION_NAME;
+	}
+	if ( havePerformanceSettings ) {
+		enabledExtensions[enabledCount++] = VR_PERFORMANCE_SETTINGS_EXTENSION_NAME;
+	}
+	if ( haveAndroidThreads ) {
+		enabledExtensions[enabledCount++] = VR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME;
+	}
 	XrInstanceCreateInfo createInfo;
 	memset( &createInfo, 0, sizeof( createInfo ) );
 	createInfo.type = XR_TYPE_INSTANCE_CREATE_INFO;
@@ -936,6 +1226,15 @@ bool idVRSystemOpenXR::CreateInstance( void ) {
 	createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
 	createInfo.enabledExtensionCount = enabledCount;
 	createInfo.enabledExtensionNames = enabledExtensions;
+#if defined( __ANDROID__ )
+	vrAndroidJavaHandles_t androidInfo;
+	memset( &androidInfo, 0, sizeof( androidInfo ) );
+	androidInfo.type = XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR;
+	if ( !Sys_AndroidJavaHandles( &androidInfo.applicationVM, &androidInfo.applicationActivity ) ) {
+		return false;
+	}
+	createInfo.next = &androidInfo;
+#endif
 	if ( !Check( xrCreateInstance( &createInfo, &instance ), "xrCreateInstance" ) ) {
 		instance = XR_NULL_HANDLE;
 		return false;
@@ -959,7 +1258,9 @@ bool idVRSystemOpenXR::CreateInstance( void ) {
 
 	PFN_xrVoidFunction function = NULL;
 	if ( haveOpenGL ) {
-		if ( !Check( xrGetInstanceProcAddr( instance, "xrGetOpenGLGraphicsRequirementsKHR", &function ), "xrGetInstanceProcAddr( xrGetOpenGLGraphicsRequirementsKHR )" ) ) {
+		// xrGetOpenGLESGraphicsRequirementsKHR fills a structure of the same layout
+		const char *const requirementsName = VR_GL_IS_ES ? "xrGetOpenGLESGraphicsRequirementsKHR" : "xrGetOpenGLGraphicsRequirementsKHR";
+		if ( !Check( xrGetInstanceProcAddr( instance, requirementsName, &function ), requirementsName ) ) {
 			DestroyInstance();
 			return false;
 		}
@@ -984,9 +1285,41 @@ bool idVRSystemOpenXR::CreateInstance( void ) {
 			return false;
 		}
 	}
-	common->Printf( "OpenXR: runtime %s (%s%s%s%s)\n", runtimeName.c_str(), getGLRequirements != NULL ? "OpenGL" : "",
+	// optional services: a runtime that lists one and cannot resolve its
+	// functions simply goes without it
+	if ( instance != XR_NULL_HANDLE && recovery == RECOVERY_NONE ) {
+		if ( haveRefreshRate ) {
+			PFN_xrVoidFunction enumerate = NULL, get = NULL, request = NULL;
+			if ( CheckOptional( xrGetInstanceProcAddr( instance, "xrEnumerateDisplayRefreshRatesFB", &enumerate ), "xrEnumerateDisplayRefreshRatesFB" )
+					&& CheckOptional( xrGetInstanceProcAddr( instance, "xrGetDisplayRefreshRateFB", &get ), "xrGetDisplayRefreshRateFB" )
+					&& CheckOptional( xrGetInstanceProcAddr( instance, "xrRequestDisplayRefreshRateFB", &request ), "xrRequestDisplayRefreshRateFB" )
+					&& enumerate != NULL && get != NULL && request != NULL ) {
+				enumerateRefreshRates = reinterpret_cast<PFN_xrEnumerateDisplayRefreshRatesFB>( enumerate );
+				getRefreshRate = reinterpret_cast<PFN_xrGetDisplayRefreshRateFB>( get );
+				requestRefreshRate = reinterpret_cast<PFN_xrRequestDisplayRefreshRateFB>( request );
+			}
+		}
+		if ( havePerformanceSettings ) {
+			function = NULL;
+			if ( CheckOptional( xrGetInstanceProcAddr( instance, "xrPerfSettingsSetPerformanceLevelEXT", &function ), "xrPerfSettingsSetPerformanceLevelEXT" ) ) {
+				setPerformanceLevel = reinterpret_cast<PFN_xrPerfSettingsSetPerformanceLevelEXT>( function );
+			}
+		}
+		if ( haveAndroidThreads ) {
+			function = NULL;
+			if ( CheckOptional( xrGetInstanceProcAddr( instance, "xrSetAndroidApplicationThreadKHR", &function ), "xrSetAndroidApplicationThreadKHR" ) ) {
+				setAndroidThread = reinterpret_cast<vrSetAndroidApplicationThread_t>( function );
+			}
+		}
+		if ( recovery != RECOVERY_NONE ) {
+			return false;
+		}
+	}
+	common->Printf( "OpenXR: runtime %s (%s%s%s%s)%s%s%s\n", runtimeName.c_str(), getGLRequirements != NULL ? ( VR_GL_IS_ES ? "OpenGL ES" : "OpenGL" ) : "",
 		haveEGL ? " on GLX or EGL" : "",
-		getGLRequirements != NULL && getVulkanRequirements != NULL ? ", " : "", getVulkanRequirements != NULL ? "Vulkan" : "" );
+		getGLRequirements != NULL && getVulkanRequirements != NULL ? ", " : "", getVulkanRequirements != NULL ? "Vulkan" : "",
+		requestRefreshRate != NULL ? ", refresh rate choice" : "", setPerformanceLevel != NULL ? ", performance levels" : "",
+		setAndroidThread != NULL ? ", thread hints" : "" );
 	systemUnavailableLogged = false;
 	nextSystemRetryTime = 0;
 	return true;
@@ -1007,6 +1340,11 @@ void idVRSystemOpenXR::DestroyInstance( void ) {
 	createVulkanInstance = NULL;
 	getVulkanDevice = NULL;
 	createVulkanDevice = NULL;
+	enumerateRefreshRates = NULL;
+	getRefreshRate = NULL;
+	requestRefreshRate = NULL;
+	setPerformanceLevel = NULL;
+	setAndroidThread = NULL;
 	// the renderer keeps its Vulkan objects; they belong to no runtime now
 	vulkanCreator = XR_NULL_HANDLE;
 	vulkanRestartFor = XR_NULL_HANDLE;
@@ -1256,7 +1594,11 @@ bool idVRSystemOpenXR::CreateSession( void ) {
 	if ( !renderSystem->GetVRGraphicsBinding( binding ) ) {
 		static bool warned = false;
 		if ( !warned ) {
+#if defined( __ANDROID__ )
+			common->Warning( "OpenXR: the OpenGL ES renderer has no EGL context to share with the runtime; VR stays off" );
+#else
 			common->Warning( "OpenXR: VR needs the OpenGL or the Vulkan renderer (r_renderApi gl or vulkan); VR stays off" );
+#endif
 			warned = true;
 		}
 		return false;
@@ -1268,6 +1610,8 @@ bool idVRSystemOpenXR::CreateSession( void ) {
 	createInfo.systemId = systemId;
 #if defined( _WIN32 )
 	XrGraphicsBindingOpenGLWin32KHR win32Binding;
+#elif defined( __ANDROID__ )
+	vrGLESAndroidGraphicsBinding_t glesBinding;
 #else
 	vrXlibGraphicsBinding_t xlibBinding;
 	vrEGLGraphicsBinding_t eglBinding;
@@ -1309,7 +1653,7 @@ bool idVRSystemOpenXR::CreateSession( void ) {
 	} else {
 		XrGraphicsRequirementsOpenGLKHR requirements;
 		memset( &requirements, 0, sizeof( requirements ) );
-		requirements.type = XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_KHR;
+		requirements.type = VR_GL_IS_ES ? XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_ES_KHR : XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_KHR;
 		if ( getGLRequirements == NULL ) {
 			static bool warned = false;
 			if ( !warned ) {
@@ -1319,7 +1663,7 @@ bool idVRSystemOpenXR::CreateSession( void ) {
 			}
 			return false;
 		}
-		if ( binding.kind == RENDER_VR_BINDING_EGL && !haveEGL ) {
+		if ( binding.kind == RENDER_VR_BINDING_EGL && !haveEGL && !VR_GL_IS_ES ) {
 			static bool warned = false;
 			if ( !warned ) {
 				common->Warning( "OpenXR: the OpenGL renderer runs on EGL (native Wayland) and the active runtime cannot bind it (%s); "
@@ -1333,7 +1677,7 @@ bool idVRSystemOpenXR::CreateSession( void ) {
 		}
 		const XrVersion contextVersion = XR_MAKE_VERSION( binding.glMajor, binding.glMinor, 0 );
 		if ( contextVersion < requirements.minApiVersionSupported ) {
-			common->Warning( "OpenXR: the runtime needs OpenGL %u.%u, the renderer's context is %d.%d; VR stays off",
+			common->Warning( "OpenXR: the runtime needs OpenGL%s %u.%u, the renderer's context is %d.%d; VR stays off", VR_GL_IS_ES ? " ES" : "",
 				static_cast<unsigned>( XR_VERSION_MAJOR( requirements.minApiVersionSupported ) ),
 				static_cast<unsigned>( XR_VERSION_MINOR( requirements.minApiVersionSupported ) ),
 				binding.glMajor, binding.glMinor );
@@ -1345,6 +1689,16 @@ bool idVRSystemOpenXR::CreateSession( void ) {
 		win32Binding.hDC = static_cast<HDC>( binding.wglDC );
 		win32Binding.hGLRC = static_cast<HGLRC>( binding.wglContext );
 		createInfo.next = &win32Binding;
+#elif defined( __ANDROID__ )
+		if ( binding.kind != RENDER_VR_BINDING_EGL ) {
+			return false;
+		}
+		memset( &glesBinding, 0, sizeof( glesBinding ) );
+		glesBinding.type = XR_TYPE_GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR;
+		glesBinding.display = binding.eglDisplay;
+		glesBinding.config = binding.eglConfig;
+		glesBinding.context = binding.eglContext;
+		createInfo.next = &glesBinding;
 #else
 		if ( binding.kind == RENDER_VR_BINDING_EGL ) {
 			memset( &eglBinding, 0, sizeof( eglBinding ) );
@@ -1473,9 +1827,27 @@ bool idVRSystemOpenXR::CreateSession( void ) {
 		}
 	}
 
+	// the headset's refresh rate, clocks and frame thread, where the runtime
+	// lets a game choose them
+	refreshRate = 0.0f;
+	refreshRateRequested = false;
+	thermalLevel[0] = thermalLevel[1] = XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT;
+	RegisterFrameThread();
+	ApplyPerformanceLevel();
+	ApplyRefreshRate();
+	if ( recovery != RECOVERY_NONE ) {
+		return false;
+	}
+
 	recenterRequested = true;
 	screenAnchored = false;
+	Sys_EnterCriticalSection( VR_INPUT_CRITICAL_SECTION );
 	bodyYawValid = false;
+	bodyYawFromHead = true;
+	bodyYawResetPending = false;
+	Sys_LeaveCriticalSection( VR_INPUT_CRITICAL_SECTION );
+	focusedOnce = false;
+	lastHeadPositionValid = false;
 	common->Printf( "OpenXR: session created, eyes %dx%d (recommended %dx%d), virtual screen %dx%d\n",
 		eyeWidth, eyeHeight, recommendedEyeWidth, recommendedEyeHeight, screenWidth, screenHeight );
 	return true;
@@ -1487,21 +1859,14 @@ void idVRSystemOpenXR::DestroySession( void ) {
 	// release failure must not recursively enter teardown.
 	frameOpen = false;
 	frameShouldRender = false;
+	ReleaseInput();
 	Sys_EnterCriticalSection( VR_INPUT_CRITICAL_SECTION );
-	inputValid = false;
 	bodyYawValid = false;
-	moveForward = moveRight = 0.0f;
-	physicalCrouch = false;
-	roomScaleWalking = false;
-	roomScaleStickIdle = true;
-	memset( hands, 0, sizeof( hands ) );
+	bodyYawFromHead = true;
+	bodyYawResetPending = false;
 	memset( &frame, 0, sizeof( frame ) );
 	Sys_LeaveCriticalSection( VR_INPUT_CRITICAL_SECTION );
 	memset( aimLocalValid, 0, sizeof( aimLocalValid ) );
-	if ( pointerOnScreen ) {
-		pointerOnScreen = false;
-		Sys_PostVRPointer( false, 0.0f, 0.0f );
-	}
 	ReleaseRendererImages();
 	DestroyActions();
 	for ( int i = 0; i < VR_NUM_EYES; i++ ) {
@@ -1530,11 +1895,39 @@ void idVRSystemOpenXR::DestroySession( void ) {
 	frameDisplayPeriod = 0;
 	spaceChangePending = false;
 	interactionProfile.Clear();
+	refreshRate = 0.0f;
+	refreshRateRequested = false;
+	thermalLevel[0] = thermalLevel[1] = XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT;
+}
 
+/*
+====================
+idVRSystemOpenXR::ReleaseInput
+
+The controllers no longer drive anything: the stick's movement stops, every
+key they hold is released and the menu pointer goes. A session that ends, or
+that the runtime stops, must not leave the player running and firing.
+====================
+*/
+void idVRSystemOpenXR::ReleaseInput( void ) {
+	Sys_EnterCriticalSection( VR_INPUT_CRITICAL_SECTION );
+	inputValid = false;
+	moveForward = moveRight = 0.0f;
+	physicalCrouch = false;
+	roomScaleWalking = false;
+	roomScaleStickIdle = true;
+	memset( hands, 0, sizeof( hands ) );
+	Sys_LeaveCriticalSection( VR_INPUT_CRITICAL_SECTION );
+	if ( pointerOnScreen ) {
+		pointerOnScreen = false;
+		Sys_PostVRPointer( false, 0.0f, 0.0f );
+	}
 	for ( int i = 0; i < 16; i++ ) {
 		UpdateKey( i, heldKeys[i], false );
 	}
 	twoHanded = false;
+	recenterHoldMsec = 0;
+	recenterHeld = false;
 }
 
 /*
@@ -1628,6 +2021,101 @@ void idVRSystemOpenXR::UpdateStageBounds( void ) {
 
 /*
 ====================
+idVRSystemOpenXR::ApplyRefreshRate
+
+XR_FB_display_refresh_rate: the fastest rate the headset offers up to
+vr_refreshRate (VR_ChooseRefreshRate). Setting 0 again after a request
+returns the headset to its own rate. The runtime confirms a change with an
+event, which updates refreshRate.
+====================
+*/
+void idVRSystemOpenXR::ApplyRefreshRate( void ) {
+	vr_refreshRate.ClearModified();
+	if ( session == XR_NULL_HANDLE || enumerateRefreshRates == NULL || requestRefreshRate == NULL ) {
+		return;
+	}
+	if ( refreshRate <= 0.0f && getRefreshRate != NULL ) {
+		float current = 0.0f;
+		if ( CheckOptional( getRefreshRate( session, &current ), "xrGetDisplayRefreshRateFB" ) && current > 0.0f ) {
+			refreshRate = current;
+		}
+	}
+	uint32_t count = 0;
+	float rates[VR_MAX_REFRESH_RATES];
+	if ( !CheckOptional( enumerateRefreshRates( session, 0, &count, NULL ), "xrEnumerateDisplayRefreshRatesFB" )
+			|| count == 0 || count > static_cast<uint32_t>( VR_MAX_REFRESH_RATES )
+			|| !CheckOptional( enumerateRefreshRates( session, count, &count, rates ), "xrEnumerateDisplayRefreshRatesFB" )
+			|| count == 0 || count > static_cast<uint32_t>( VR_MAX_REFRESH_RATES ) ) {
+		return;
+	}
+	const float chosen = VR_ChooseRefreshRate( vr_refreshRate.GetFloat(), rates, static_cast<int>( count ) );
+	if ( chosen <= 0.0f && !refreshRateRequested ) {
+		return;		// the headset keeps its own rate
+	}
+	// 0 asks the runtime to choose again
+	if ( CheckOptional( requestRefreshRate( session, chosen ), "xrRequestDisplayRefreshRateFB" ) ) {
+		refreshRateRequested = chosen > 0.0f;
+		if ( chosen > 0.0f ) {
+			common->Printf( "OpenXR: asked the headset for %.0f Hz\n", chosen );
+		} else {
+			common->Printf( "OpenXR: the headset chooses its refresh rate again\n" );
+		}
+	}
+}
+
+/*
+====================
+idVRSystemOpenXR::ApplyPerformanceLevel
+
+XR_EXT_performance_settings: the clocks vr_performanceLevel asks for, for
+the CPU and the GPU. 0 asks for nothing, which leaves a level set earlier in
+the session until the next one.
+====================
+*/
+void idVRSystemOpenXR::ApplyPerformanceLevel( void ) {
+	vr_performanceLevel.ClearModified();
+	const int level = VR_PerformanceSettingsLevel( vr_performanceLevel.GetInteger() );
+	if ( session == XR_NULL_HANDLE || setPerformanceLevel == NULL || level < 0 ) {
+		return;
+	}
+	const XrPerfSettingsDomainEXT domains[2] = { XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_DOMAIN_GPU_EXT };
+	bool applied = true;
+	for ( int i = 0; i < 2; i++ ) {
+		applied = CheckOptional( setPerformanceLevel( session, domains[i], static_cast<XrPerfSettingsLevelEXT>( level ) ),
+			"xrPerfSettingsSetPerformanceLevelEXT" ) && applied;
+	}
+	if ( applied ) {
+		common->Printf( "OpenXR: headset CPU and GPU held at %s\n",
+			level == XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT ? "sustained high"
+			: level == XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT ? "sustained low" : "power savings" );
+	}
+}
+
+/*
+====================
+idVRSystemOpenXR::RegisterFrameThread
+
+XR_KHR_android_thread_settings: on a standalone headset the thread that
+creates the session runs the game and submits every GLES frame, so the
+runtime schedules it as both the application's and the renderer's main
+thread.
+====================
+*/
+void idVRSystemOpenXR::RegisterFrameThread( void ) {
+#if defined( __ANDROID__ )
+	if ( session == XR_NULL_HANDLE || setAndroidThread == NULL ) {
+		return;
+	}
+	const uint32_t thread = static_cast<uint32_t>( gettid() );
+	if ( CheckOptional( setAndroidThread( session, VR_ANDROID_THREAD_TYPE_APPLICATION_MAIN, thread ), "xrSetAndroidApplicationThreadKHR" )
+			&& CheckOptional( setAndroidThread( session, VR_ANDROID_THREAD_TYPE_RENDERER_MAIN, thread ), "xrSetAndroidApplicationThreadKHR" ) ) {
+		common->Printf( "OpenXR: thread %u carries the frame\n", thread );
+	}
+#endif
+}
+
+/*
+====================
 idVRSystemOpenXR::ReleaseRendererImages
 
 Before swapchains are destroyed: OpenXR requires every submitted graphics
@@ -1698,7 +2186,8 @@ bool idVRSystemOpenXR::CreateSwapchain( swapchain_t &swapchain, int width, int h
 		idList<XrSwapchainImageOpenGLKHR> images;
 		images.SetNum( static_cast<int>( imageCount ) );
 		for ( int i = 0; i < images.Num(); i++ ) {
-			images[i].type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR;
+			// XrSwapchainImageOpenGLESKHR has the same layout
+			images[i].type = VR_GL_IS_ES ? XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR : XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR;
 			images[i].next = NULL;
 			images[i].image = 0;
 		}
@@ -1991,11 +2480,11 @@ void idVRSystemOpenXR::PollEvents( void ) {
 				memset( &state, 0, sizeof( state ) );
 				state.type = XR_TYPE_INTERACTION_PROFILE_STATE;
 				const XrPath hand = vr_leftHanded.GetBool() ? handPaths[VR_HAND_LEFT] : handPaths[VR_HAND_RIGHT];
-				if ( session != XR_NULL_HANDLE && hand != XR_NULL_PATH && Check( xrGetCurrentInteractionProfile( session, hand, &state ), "xrGetCurrentInteractionProfile" )
+				if ( session != XR_NULL_HANDLE && hand != XR_NULL_PATH && CheckOptional( xrGetCurrentInteractionProfile( session, hand, &state ), "xrGetCurrentInteractionProfile" )
 						&& state.interactionProfile != XR_NULL_PATH ) {
 					char path[XR_MAX_PATH_LENGTH];
 					uint32_t length = 0;
-					if ( Check( xrPathToString( instance, state.interactionProfile, sizeof( path ), &length, path ), "xrPathToString" ) ) {
+					if ( CheckOptional( xrPathToString( instance, state.interactionProfile, sizeof( path ), &length, path ), "xrPathToString" ) ) {
 						interactionProfile = path;
 					}
 				}
@@ -2017,6 +2506,25 @@ void idVRSystemOpenXR::PollEvents( void ) {
 							frameDisplayTime > 0 ? static_cast<double>( pending->changeTime - frameDisplayTime ) * 1.0e-6 : 0.0 );
 					}
 				}
+				break;
+			}
+			case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: {
+				const XrEventDataDisplayRefreshRateChangedFB *changed = reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB *>( &event );
+				refreshRate = changed->toDisplayRefreshRate;
+				common->Printf( "OpenXR: the headset refreshes at %.0f Hz (was %.0f)\n", changed->toDisplayRefreshRate, changed->fromDisplayRefreshRate );
+				break;
+			}
+			case XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT: {
+				// the headset's thermal limits: a warning means the runtime may soon
+				// lower the clocks, impaired that it already has
+				const XrEventDataPerfSettingsEXT *perf = reinterpret_cast<const XrEventDataPerfSettingsEXT *>( &event );
+				const int domain = perf->domain == XR_PERF_SETTINGS_DOMAIN_GPU_EXT ? 1 : 0;
+				thermalLevel[domain] = static_cast<int>( perf->toLevel );
+				const char *const levelName = perf->toLevel >= XR_PERF_SETTINGS_NOTIF_LEVEL_IMPAIRED_EXT ? "impaired"
+					: perf->toLevel >= XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT ? "warning" : "normal";
+				const char *const subName = perf->subDomain == XR_PERF_SETTINGS_SUB_DOMAIN_THERMAL_EXT ? "thermal"
+					: perf->subDomain == XR_PERF_SETTINGS_SUB_DOMAIN_RENDERING_EXT ? "rendering" : "compositing";
+				common->Printf( "OpenXR: headset %s %s level %s\n", domain == 1 ? "GPU" : "CPU", subName, levelName );
 				break;
 			}
 			default:
@@ -2049,6 +2557,13 @@ void idVRSystemOpenXR::HandleSessionState( XrSessionState state ) {
 		}
 		case XR_SESSION_STATE_FOCUSED:
 			sessionFocused = true;
+			// The session's first recentre is taken from the first tracked frame,
+			// which a headset still lying on a desk can supply. The first time the
+			// runtime hands over the controllers, recentre again.
+			if ( !focusedOnce ) {
+				focusedOnce = true;
+				recenterRequested = true;
+			}
 			break;
 		case XR_SESSION_STATE_VISIBLE:
 		case XR_SESSION_STATE_SYNCHRONIZED:
@@ -2059,6 +2574,9 @@ void idVRSystemOpenXR::HandleSessionState( XrSessionState state ) {
 		case XR_SESSION_STATE_STOPPING:
 			focusLost = focusLost || sessionFocused;
 			sessionFocused = false;
+			// no frame follows to release what the controllers hold: a runtime
+			// that takes focus and stops in one batch left it all held
+			ReleaseInput();
 			if ( sessionRunning ) {
 				Check( xrEndSession( session ), "xrEndSession" );
 				sessionRunning = false;
@@ -2150,11 +2668,15 @@ void idVRSystemOpenXR::LocateFrame( XrTime time ) {
 	if ( viewCount == VR_NUM_EYES && ( viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT ) != 0 ) {
 		viewsValid = true;
 		if ( ( viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT ) == 0 ) {
-			// orientation-only tracking: keep the eyes on a fixed head position
+			// Orientation-only tracking: the eyes stay where the head last was,
+			// half an eye distance to either side of it along the head's own
+			// right. Along the play space's, the eyes swapped as the head turned
+			// round, and a head placed at the space's origin stood on the floor.
+			const XrVector3f centre = lastHeadPositionValid ? lastHeadPosition : recenterPose.position;
 			for ( int i = 0; i < VR_NUM_EYES; i++ ) {
-				views[i].pose.position.x = ( i == 0 ? -0.032f : 0.032f );
-				views[i].pose.position.y = 0.0f;
-				views[i].pose.position.z = 0.0f;
+				const vrVec3_t side = VR_RotateVector( VR_QuatNormalize( VR_FromXrQuat( views[i].pose.orientation ) ),
+					VR_Vec3( i == 0 ? -0.032f : 0.032f, 0.0f, 0.0f ) );
+				views[i].pose.position = VR_ToXrVec( VR_Add( VR_FromXrVec( centre ), side ) );
 			}
 		}
 	}
@@ -2167,7 +2689,10 @@ void idVRSystemOpenXR::LocateFrame( XrTime time ) {
 	}
 	const bool headValid = ( head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT ) != 0;
 	if ( headValid && ( head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT ) == 0 ) {
-		head.pose.position.x = head.pose.position.y = head.pose.position.z = 0.0f;
+		head.pose.position = lastHeadPositionValid ? lastHeadPosition : recenterPose.position;
+	} else if ( headValid ) {
+		lastHeadPosition = head.pose.position;
+		lastHeadPositionValid = true;
 	}
 
 	if ( ( recenterRequested || calibrateRequested ) && headValid ) {
@@ -2195,9 +2720,11 @@ void idVRSystemOpenXR::LocateFrame( XrTime time ) {
 		recenterRequested = false;
 		calibrateRequested = false;
 		screenAnchored = false;
-		Sys_EnterCriticalSection( VR_INPUT_CRITICAL_SECTION );
-		bodyYawValid = false;
-		Sys_LeaveCriticalSection( VR_INPUT_CRITICAL_SECTION );
+		// The body's yaw is taken again so that the aim stays where it was, but
+		// only once this frame's aim is known in the recentred space: a usercmd
+		// built in between would take it from the old aim and turn the world by
+		// the recentre (SyncInput).
+		bodyYawResetPending = true;
 		if ( vr_debug.GetInteger() > 0 ) {
 			common->Printf( "OpenXR: recentred at ( %.2f %.2f %.2f ), origin height %.2f m\n", head.pose.position.x, head.pose.position.y,
 				head.pose.position.z, recenterPose.position.y );
@@ -2261,6 +2788,65 @@ bool idVRSystemOpenXR::OffHandOnForegrip( int weaponHand ) const {
 	return VR_OffHandOnForegrip( VR_Vec3( rear.origin.x, rear.origin.y, rear.origin.z ),
 		VR_Vec3( aim.axis[0].x, aim.axis[0].y, aim.axis[0].z ),
 		VR_Vec3( front.origin.x, front.origin.y, front.origin.z ), vr_worldScale.GetFloat() );
+}
+
+/*
+====================
+idVRSystemOpenXR::ApplyTrackpadRegions
+
+Vive wands and Windows Mixed Reality controllers have a touchpad where other
+controllers have buttons. Pressed, the pad is a button by where the thumb is
+(VR_TrackpadRegion), taken when the press starts and kept until it ends: up is
+the secondary button, down the primary. On a Windows Mixed Reality controller
+every other place is the primary as well. A Vive wand's pad is also its stick:
+there the centre is the stick's click, the weapon hand's pad turns only while
+pressed left or right (a thumb resting on it would page weapons and turn the
+player), and the off hand's touch walks as a stick does.
+====================
+*/
+void idVRSystemOpenXR::ApplyTrackpadRegions( int weaponHand ) {
+	for ( int hand = 0; hand < VR_NUM_HANDS; hand++ ) {
+		handInput_t &input = hands[hand];
+		const bool padIsStick = input.padActive && !input.stickClickBound;
+		if ( padIsStick && hand == weaponHand ) {
+			input.stickX = input.stickY = 0.0f;
+		}
+		if ( !input.padActive || !input.padClick ) {
+			trackpadRegion[hand] = VR_PAD_NONE;
+			continue;
+		}
+		if ( trackpadRegion[hand] == VR_PAD_NONE ) {
+			trackpadRegion[hand] = VR_TrackpadRegion( input.padX, input.padY, padIsStick ? 0.5f : 0.0f );
+			if ( vr_debug.GetInteger() > 0 ) {
+				common->Printf( "OpenXR: %s touchpad pressed, region %d\n", hand == VR_HAND_LEFT ? "left" : "right", trackpadRegion[hand] );
+			}
+		}
+		switch ( trackpadRegion[hand] ) {
+			case VR_PAD_UP:
+				input.secondary = true;
+				break;
+			case VR_PAD_DOWN:
+				input.primary = true;
+				break;
+			case VR_PAD_LEFT:
+			case VR_PAD_RIGHT:
+				if ( padIsStick && hand == weaponHand ) {
+					input.stickX = trackpadRegion[hand] == VR_PAD_RIGHT ? 1.0f : -1.0f;
+				} else if ( padIsStick ) {
+					input.stickClick = true;
+				} else {
+					input.primary = true;
+				}
+				break;
+			default:
+				if ( padIsStick ) {
+					input.stickClick = true;
+				} else {
+					input.primary = true;
+				}
+				break;
+		}
+	}
 }
 
 // Two hands on the gun: the weapon hand's aim keeps its origin and roll and
@@ -2399,6 +2985,7 @@ void idVRSystemOpenXR::SyncInput( float frameSeconds ) {
 				return;
 			}
 			hands[hand].stickClick = boolState.isActive && boolState.currentState;
+			hands[hand].stickClickBound = boolState.isActive != XR_FALSE;
 			getInfo.action = actions[VR_ACTION_PRIMARY];
 			if ( !CheckFrame( xrGetActionStateBoolean( session, &getInfo, &boolState ), "xrGetActionStateBoolean( primary )" ) ) {
 				return;
@@ -2414,11 +3001,27 @@ void idVRSystemOpenXR::SyncInput( float frameSeconds ) {
 				return;
 			}
 			hands[hand].menu = boolState.isActive && boolState.currentState;
+
+			getInfo.action = actions[VR_ACTION_TRACKPAD];
+			if ( !CheckFrame( xrGetActionStateVector2f( session, &getInfo, &vectorState ), "xrGetActionStateVector2f( trackpad )" ) ) {
+				return;
+			}
+			hands[hand].padActive = vectorState.isActive != XR_FALSE;
+			if ( vectorState.isActive ) {
+				hands[hand].padX = vectorState.currentState.x;
+				hands[hand].padY = vectorState.currentState.y;
+			}
+			getInfo.action = actions[VR_ACTION_TRACKPAD_CLICK];
+			if ( !CheckFrame( xrGetActionStateBoolean( session, &getInfo, &boolState ), "xrGetActionStateBoolean( trackpad )" ) ) {
+				return;
+			}
+			hands[hand].padClick = boolState.isActive && boolState.currentState;
 		}
 	}
 
 	const int weaponHand = vr_leftHanded.GetBool() ? VR_HAND_LEFT : VR_HAND_RIGHT;
 	const int offHand = 1 - weaponHand;
+	ApplyTrackpadRegions( weaponHand );
 	const handInput_t &weapon = hands[weaponHand];
 	const handInput_t &off = hands[offHand];
 	const bool menu = MenuMode();
@@ -2463,6 +3066,23 @@ void idVRSystemOpenXR::SyncInput( float frameSeconds ) {
 	UpdateKey( VR_SLOT_LEFT_SECONDARY, K_JOY5, hands[VR_HAND_LEFT].secondary );
 	UpdateKey( VR_SLOT_MENU, K_JOY7, hands[VR_HAND_LEFT].menu || hands[VR_HAND_RIGHT].menu );
 	UpdateKey( VR_SLOT_WEAPON_STICK_CLICK, K_JOY14, weapon.stickClick );
+	// The weapon-hand stick held in for a second recentres: the only way to do
+	// it without a keyboard, which a player in a headset cannot see.
+	if ( !weapon.stickClick || menu ) {
+		recenterHoldMsec = 0;
+		recenterHeld = false;
+	} else if ( recenterHoldMsec == 0 ) {
+		recenterHoldMsec = Sys_Milliseconds();
+	} else if ( !recenterHeld && Sys_Milliseconds() - recenterHoldMsec >= 1000 ) {
+		recenterHeld = true;
+		recenterRequested = true;
+		Vibrate( VR_HAND_LEFT, 0.5f, 60 );
+		Vibrate( VR_HAND_RIGHT, 0.5f, 60 );
+		if ( recovery != RECOVERY_NONE ) {
+			return;
+		}
+		common->Printf( "OpenXR: recentred from the controller\n" );
+	}
 	UpdateKey( VR_SLOT_OFF_STICK_CLICK, K_JOY13, off.stickClick );
 
 	float turn = 0.0f;
@@ -2551,15 +3171,36 @@ void idVRSystemOpenXR::SyncInput( float frameSeconds ) {
 	Sys_EnterCriticalSection( VR_INPUT_CRITICAL_SECTION );
 	inputValid = sessionRunning && sessionFocused;
 	physicalCrouch = crouching;
+	if ( bodyYawResetPending ) {
+		bodyYawResetPending = false;
+		// a yaw still waiting to be taken from the head (a new level, which
+		// recentres too) keeps waiting for the head
+		if ( bodyYawValid ) {
+			bodyYawValid = false;
+			bodyYawFromHead = false;
+		}
+	}
+	const bool turned = bodyYawValid && turn != 0.0f;
 	if ( bodyYawValid ) {
 		bodyYaw = VR_NormalizeDegrees180( bodyYaw + turn );
 	}
+	headLocalYaw = frame.head.valid ? VR_PoseHeading( frame.head ) : localYaw;
 	aimLocalYaw = localYaw;
 	aimLocalPitch = localPitch;
 	moveForward = forwardMove;
 	moveRight = rightMove;
 	frame.bodyYaw = bodyYaw;
 	Sys_LeaveCriticalSection( VR_INPUT_CRITICAL_SECTION );
+
+	// A turn of the stick turns the tracking space, and the space turns about
+	// its origin, the body. A head that stands off it (a lean, a step the body
+	// has not followed) swung round that origin with every turn: a 45 degree
+	// snap moved the view sideways by three quarters of the offset. Move the
+	// origin with the turn so that the head is the pivot.
+	if ( turned && frame.head.valid ) {
+		const idVec3 head( frame.head.origin.x, frame.head.origin.y, 0.0f );
+		ShiftOrigin( head - head * idAngles( 0.0f, -turn, 0.0f ).ToMat3() );
+	}
 }
 
 bool idVRSystemOpenXR::GetUsercmdInput( float otherYawDelta, float currentYaw, vrUsercmdInput_t &input ) {
@@ -2570,8 +3211,13 @@ bool idVRSystemOpenXR::GetUsercmdInput( float otherYawDelta, float currentYaw, v
 		return false;
 	}
 	if ( !bodyYawValid ) {
-		// keep the current aim continuous when VR takes over
-		bodyYaw = VR_NormalizeDegrees180( currentYaw - aimLocalYaw );
+		// When VR takes over a view that was not tracked, that view is where the
+		// player was facing, and the head takes it: taken by the aim, a gun
+		// hanging at the player's side started the level pointing down the
+		// corridor with the player facing the wall. After a recentre nothing
+		// in the world moved, and the aim keeps its own yaw.
+		bodyYaw = VR_NormalizeDegrees180( currentYaw - ( bodyYawFromHead ? headLocalYaw : aimLocalYaw ) );
+		bodyYawFromHead = false;
 		bodyYawValid = true;
 	} else {
 		// the mouse, keys or a gamepad turned this tic: that turns the body
@@ -2599,7 +3245,13 @@ takes the yaw again from the zeroed angles, as when VR first took over input.
 void idVRSystemOpenXR::ResetBodyYaw( void ) {
 	Sys_EnterCriticalSection( VR_INPUT_CRITICAL_SECTION );
 	bodyYawValid = false;
+	bodyYawFromHead = true;
+	bodyYawResetPending = false;
 	Sys_LeaveCriticalSection( VR_INPUT_CRITICAL_SECTION );
+	// A level starts from where the player stands and faces now: the front
+	// they recentred to a level ago, and the steps they have taken since,
+	// are the last level's.
+	recenterRequested = true;
 }
 
 /*
@@ -2646,10 +3298,20 @@ bool idVRSystemOpenXR::AcquireImages( void ) {
 		memset( &waitInfo, 0, sizeof( waitInfo ) );
 		waitInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
 		waitInfo.timeout = VR_IMAGE_WAIT_NSEC;
-		if ( !CheckFrame( xrWaitSwapchainImage( chain.handle, &waitInfo ), "xrWaitSwapchainImage" ) ) {
+		// A timeout leaves the image acquired and still to be waited for, so
+		// the wait may simply be made again: a compositor's hitch costs a
+		// frame, not the session.
+		XrResult waited = xrWaitSwapchainImage( chain.handle, &waitInfo );
+		for ( int attempt = 1; waited == XR_TIMEOUT_EXPIRED && attempt < VR_IMAGE_WAIT_ATTEMPTS; attempt++ ) {
+			if ( attempt == 1 ) {
+				common->Printf( "OpenXR: swapchain image not ready after 100 ms; waiting again\n" );
+			}
+			waited = xrWaitSwapchainImage( chain.handle, &waitInfo );
+		}
+		if ( !CheckFrame( waited, "xrWaitSwapchainImage" ) ) {
 			// A timeout is a positive OpenXR status, but never grants image
-			// access. Cancel through session destruction instead of releasing
-			// an image that has not successfully completed its wait.
+			// access. Past the last attempt, cancel through session destruction
+			// instead of releasing an image that has not completed its wait.
 			return false;
 		}
 		chain.acquiredIndex = index;
@@ -2787,20 +3449,65 @@ idVRSystemOpenXR::ShiftTrackingOrigin
 
 The recentre pose (a heading and a position in LOCAL space) moves by the
 distance the body walked, horizontally only, and the poses already handed
-out for this frame move with it, so the camera stays on the head.
+out for this frame move with it, so the camera stays on the head. Returns
+whether it moved, which the game needs to know: the eye it draws is a tic
+behind the body, and has to carry the part of a taken step it has not
+covered yet.
 ====================
 */
-void idVRSystemOpenXR::ShiftTrackingOrigin( const idVec3 &trackingDelta ) {
+bool idVRSystemOpenXR::ShiftTrackingOrigin( const idVec3 &trackingDelta ) {
 	const float unitsPerMetre = vr_worldScale.GetFloat();
 	if ( !sessionRunning || unitsPerMetre <= 0.0f || !VR_IsFinite( VR_Vec3( trackingDelta.x, trackingDelta.y, trackingDelta.z ) ) ) {
-		return;
+		return false;
 	}
 	// In multiplayer the local player reports every tic's movement; only a
 	// room-scale walk's, or its coast to a stop, belongs to the tracking space.
 	if ( idAsyncNetwork::IsActive() && ( !roomScaleStickIdle || Sys_Milliseconds() - roomScaleWalkMsec > 400 ) ) {
+		return false;
+	}
+	ShiftOrigin( idVec3( trackingDelta.x, trackingDelta.y, 0.0f ) );
+	return true;
+}
+
+/*
+====================
+idVRSystemOpenXR::TurnBody
+
+Turns the tracking space by yawDegrees, about the head, as a turn of the
+stick does. A multiplayer server sets the player's facing from the weapon
+hand's usercmd yaw; the client turns the body by the angle between hand and
+head, so the head faces where the server meant (idPlayer::ReadFromSnapshot).
+====================
+*/
+void idVRSystemOpenXR::TurnBody( float yawDegrees ) {
+	if ( !sessionRunning || !( yawDegrees > -360.0f && yawDegrees < 360.0f ) || yawDegrees == 0.0f ) {
 		return;
 	}
-	const idVec3 horizontal( trackingDelta.x, trackingDelta.y, 0.0f );
+	Sys_EnterCriticalSection( VR_INPUT_CRITICAL_SECTION );
+	// a yaw still to be taken from the head will face the head anyway
+	const bool turned = bodyYawValid;
+	if ( turned ) {
+		bodyYaw = VR_NormalizeDegrees180( bodyYaw + yawDegrees );
+		frame.bodyYaw = bodyYaw;
+	}
+	const bool headValid = frame.head.valid;
+	const idVec3 head( frame.head.origin.x, frame.head.origin.y, 0.0f );
+	Sys_LeaveCriticalSection( VR_INPUT_CRITICAL_SECTION );
+	if ( turned && headValid ) {
+		ShiftOrigin( head - head * idAngles( 0.0f, -yawDegrees, 0.0f ).ToMat3() );
+	}
+	if ( vr_debug.GetInteger() > 0 ) {
+		common->Printf( "OpenXR: body turned %.1f degrees%s\n", yawDegrees, turned ? "" : " (facing still to come from the head)" );
+	}
+}
+
+// The tracking origin moves by this much of the tracking space (engine axes,
+// game units), and every pose already located this frame with it.
+void idVRSystemOpenXR::ShiftOrigin( const idVec3 &horizontal ) {
+	const float unitsPerMetre = vr_worldScale.GetFloat();
+	if ( unitsPerMetre <= 0.0f || !VR_IsFinite( VR_Vec3( horizontal.x, horizontal.y, 0.0f ) ) ) {
+		return;
+	}
 	const vrVec3_t xr = VR_Scale( VR_EngineToXrDirection( VR_Vec3( horizontal.x, horizontal.y, 0.0f ) ), 1.0f / unitsPerMetre );
 	const vrVec3_t local = VR_RotateVector( VR_QuatNormalize( VR_FromXrQuat( recenterPose.orientation ) ), xr );
 	recenterPose.position.x += local.x;
@@ -2842,7 +3549,7 @@ void idVRSystemOpenXR::Vibrate( int hand, float amplitude, int durationMsec ) {
 	vibration.duration = static_cast<XrDuration>( Min( durationMsec, 2000 ) ) * 1000000;
 	vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
 	vibration.amplitude = strength;
-	Check( xrApplyHapticFeedback( session, &info, reinterpret_cast<const XrHapticBaseHeader *>( &vibration ) ), "xrApplyHapticFeedback" );
+	CheckOptional( xrApplyHapticFeedback( session, &info, reinterpret_cast<const XrHapticBaseHeader *>( &vibration ) ), "xrApplyHapticFeedback" );
 }
 
 /*
@@ -2921,6 +3628,16 @@ void idVRSystemOpenXR::BeginFrame( void ) {
 		vr_standingHeight.ClearModified();
 		recenterRequested = true;
 	}
+	// the headset's refresh rate and clocks follow the settings between frames
+	if ( vr_refreshRate.IsModified() ) {
+		ApplyRefreshRate();
+	}
+	if ( vr_performanceLevel.IsModified() ) {
+		ApplyPerformanceLevel();
+	}
+	if ( RecoverIfNeeded() ) {
+		return;
+	}
 
 	XrFrameWaitInfo waitInfo;
 	memset( &waitInfo, 0, sizeof( waitInfo ) );
@@ -2967,6 +3684,8 @@ void idVRSystemOpenXR::BeginFrame( void ) {
 	frame.weaponPitch = vr_weaponPitch.GetFloat();
 	frame.aimLaser = idMath::ClampInt( VR_AIM_LASER_OFF, VR_AIM_LASER_BEAM, vr_aimLaser.GetInteger() );
 	frame.roomScale = vr_roomScale.GetBool();
+	frame.twoHanded = twoHanded;
+	frame.body = idMath::ClampInt( VR_BODY_OFF, VR_BODY_FULL, vr_body.GetInteger() );
 
 	if ( !frameShouldRender || !ResizeScreenSwapchain() || !AcquireImages() ) {
 		RecoverIfNeeded();

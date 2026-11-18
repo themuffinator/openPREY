@@ -314,6 +314,42 @@ private:
 	Rml::PropertyId value = Rml::PropertyId::Invalid;
 };
 
+// The signal fault's RmlUi filter, `glitch(<dither> <strength> <phase>)` in a
+// backdrop-filter. The numbers are the authored ones; the element's own live
+// values, which animate without a style change, are what is drawn.
+using FaultValues = std::array<float,3>;
+class GlitchFilter final : public Rml::Filter {
+public:
+	explicit GlitchFilter(const FaultValues& authored) : authored(authored) {}
+	Rml::CompiledFilter CompileFilter(Rml::Element* element) const override {
+		return element->GetRenderManager()->CompileFilter("glitch",Rml::Dictionary{
+			{"dither",Rml::Variant(authored[0])},{"strength",Rml::Variant(authored[1])},{"phase",Rml::Variant(authored[2])},
+			{"element",Rml::Variant(static_cast<void*>(element))}});
+	}
+private:
+	FaultValues authored;
+};
+class GlitchFilterInstancer final : public Rml::FilterInstancer {
+public:
+	GlitchFilterInstancer() {
+		ids[0] = RegisterProperty("dither","0").AddParser("number").GetId();
+		ids[1] = RegisterProperty("strength","0").AddParser("number").GetId();
+		ids[2] = RegisterProperty("phase","0").AddParser("number").GetId();
+		RegisterShorthand("filter","dither, strength, phase",Rml::ShorthandType::FallThrough);
+	}
+	Rml::SharedPtr<Rml::Filter> InstanceFilter(const Rml::String&, const Rml::PropertyDictionary& properties) override {
+		FaultValues authored{};
+		for (size_t i = 0; i < 3; ++i) {
+			const Rml::Property* property = properties.GetProperty(ids[i]);
+			if (!property) return nullptr;
+			authored[i] = property->Get<float>();
+		}
+		return Rml::MakeShared<GlitchFilter>(authored);
+	}
+private:
+	std::array<Rml::PropertyId,3> ids{Rml::PropertyId::Invalid,Rml::PropertyId::Invalid,Rml::PropertyId::Invalid};
+};
+
 // A canonical leaf keeps the same isolated opacity semantics as RmlUi's
 // opacity filter. The owner also supplies the live value for frame replay.
 class LeafOpacityFilter final : public Rml::Filter {
@@ -349,6 +385,8 @@ struct Filter {
 	// or the speed streak's strength.
 	float blur = 0, saturation = 1, streak = 0;
 	bool backdrop = false;
+	// The signal fault's dither, strength and phase, read as it draws.
+	std::shared_ptr<const FaultValues> fault;
 	std::shared_ptr<const std::vector<RecordedDraw>> recording;
 	std::shared_ptr<const float> opacitySource;
 	bool textOpacity=false;
@@ -412,9 +450,12 @@ public:
 		std::vector<std::uint32_t> backdrops;
 		for (const auto& command:frameCommands) if (command.backdrop) {
 			const auto& clip=command.clip;
-			if (command.opacity==1 && command.streak==0 && clip.x<=0 && clip.y<=0 &&
-				clip.x+clip.width>=viewportWidth && clip.y+clip.height>=viewportHeight &&
-				host.CanSoftenBackdropDirect(command.blur,command.saturation,command.backdropRegion)) {
+			const bool whole=command.opacity==1 && command.streak==0 && clip.x<=0 && clip.y<=0 &&
+				clip.x+clip.width>=viewportWidth && clip.y+clip.height>=viewportHeight;
+			// A fault at rest draws nothing and needs no target.
+			if (command.fault && command.streak==0 ? FaultAtRest(*command.fault) ||
+					(whole && host.CanGlitchBackdropDirect(command.backdropRegion)) :
+				whole && host.CanSoftenBackdropDirect(command.blur,command.saturation,command.backdropRegion)) {
 				backdrops.push_back(0); continue;
 			}
 			const auto slot=AllocateSlot(true);
@@ -434,6 +475,17 @@ public:
 		for (auto& command:frameCommands) {
 			if (command.backdrop) {
 				const auto slot=backdrops[backdropIndex++];
+				if (command.fault && command.streak==0) {
+					const FaultValues fault=*command.fault;
+					if (!slot && FaultAtRest(fault)) { ++statistics.layerElisions; continue; }
+					const bool drawn=!slot ? host.GlitchBackdropDirect(fault[0],fault[1],fault[2],command.backdropRegion) :
+						!FaultAtRest(fault) && host.GlitchBackdrop(slot,fault[0],fault[1],fault[2],command.backdropRegion);
+					if (drawn) ++statistics.backdropComposites; else ++statistics.backdropFallbacks;
+					if (slot) { host.CompositeLayer(slot,0,command.opacity,command.clip); ++statistics.layerPushes; }
+					else ++statistics.layerElisions;
+					++statistics.layerComposites;
+					continue;
+				}
 				const bool drawn=!slot ? host.SoftenBackdropDirect(command.blur,command.saturation,command.backdropRegion) :
 					command.streak>0 ? host.StreakBackdrop(slot,command.streak,command.backdropRegion) :
 					host.SoftenBackdrop(slot,command.blur,command.saturation,command.backdropRegion);
@@ -815,6 +867,28 @@ public:
 				return reinterpret_cast<Rml::CompiledFilterHandle>(filter);
 			}
 		}
+		// The signal fault (backdrop-filter: glitch()): drawn by the host from
+		// its element's live values, or the authored ones where it keeps none.
+		if (name == "glitch") {
+			FaultValues authored{};
+			const char* names[3] = {"dither","strength","phase"};
+			bool finite = true;
+			for (size_t i = 0; i < 3; ++i) {
+				const auto found = parameters.find(names[i]);
+				authored[i] = found != parameters.end() ? found->second.Get<float>() : 0;
+				finite = finite && std::isfinite(authored[i]);
+			}
+			if (finite) {
+				auto* filter = new Filter; filter->backdrop = true;
+				const auto owner = parameters.find("element");
+				auto* element = owner != parameters.end() ? static_cast<Rml::Element*>(owner->second.Get<void*>()) : nullptr;
+				if (element && (element->GetTagName()=="q4-node" || element->GetTagName()=="q4-vector"))
+					filter->fault = static_cast<VectorElement*>(element)->BackdropFault();
+				if (!filter->fault) filter->fault = std::make_shared<const FaultValues>(FaultValues{
+					std::clamp(authored[0],0.f,1.f),std::clamp(authored[1],0.f,1.f),std::max(authored[2],0.f)});
+				return reinterpret_cast<Rml::CompiledFilterHandle>(filter);
+			}
+		}
 		// Soft focus (backdrop-filter: blur() saturate()): drawn by the host.
 		const auto sigma = parameters.find("sigma");
 		if ((name == "blur" && sigma != parameters.end()) || (name == "saturate" && value != parameters.end())) {
@@ -861,27 +935,39 @@ public:
 		// A host that cannot leaves the layer transparent: nothing changes, and
 		// the document's scrim fallback stands in.
 		float blur = 0, saturation = 1, streak = 0; bool backdrop = false;
+		std::shared_ptr<const FaultValues> fault;
 		for (auto handle : filters) {
 			const auto* filter = reinterpret_cast<const Filter*>(handle);
 			if (filter && filter->backdrop) {
 				backdrop = true; blur = std::max(blur,filter->blur); saturation = std::min(saturation,filter->saturation);
 				streak = std::max(streak,filter->streak);
+				if (filter->fault) fault = filter->fault;
 			}
 		}
 		if (backdrop) {
-			// A streak takes the backdrop; soft focus applies otherwise.
+			// A streak takes the backdrop, then a signal fault; soft focus
+			// applies otherwise.
 			const Bounds region = ClipBounds();
 			if (auto* target = Find(destination)) {
 				// An otherwise empty backdrop layer is one replayable operation.
 				// Its pixels are captured afresh each frame, never frozen. Any
 				// additional artwork or nested composition invalidates recording.
 				target->backdrop=recordFrame && !source && mode==Rml::BlendMode::Blend && target->pending && target->draws.empty();
-				target->blur=blur; target->saturation=saturation; target->streak=streak;
+				target->blur=blur; target->saturation=saturation; target->streak=streak; target->fault=fault;
 				target->backdropRegion=region;
 				Materialize(*target,target->backdrop);
 			}
-			if (!failed && !source && destination && ActiveLayer(destination) && mode == Rml::BlendMode::Blend && region.width > 0 && region.height > 0 &&
-				(streak > 0 ? host.StreakBackdrop(Slot(destination),streak,region) : host.SoftenBackdrop(Slot(destination),blur,saturation,region)))
+			const bool drawable = !failed && !source && destination && ActiveLayer(destination) && mode == Rml::BlendMode::Blend &&
+				region.width > 0 && region.height > 0;
+			if (fault && streak <= 0) {
+				// At rest the layer stays transparent: the view is unchanged.
+				const FaultValues values = *fault;
+				if (drawable && FaultAtRest(values)) return;
+				if (drawable && host.GlitchBackdrop(Slot(destination),values[0],values[1],values[2],region)) ++statistics.backdropComposites;
+				else ++statistics.backdropFallbacks;
+				return;
+			}
+			if (drawable && (streak > 0 ? host.StreakBackdrop(Slot(destination),streak,region) : host.SoftenBackdrop(Slot(destination),blur,saturation,region)))
 				++statistics.backdropComposites;
 			else ++statistics.backdropFallbacks;
 			return;
@@ -1011,7 +1097,7 @@ public:
 		}
 		if (recordFrame && layer.backdrop && !destination && maskFilters.empty()) {
 			FrameCommand command; command.backdrop=true; command.opacity=opacity; command.clip=clip;
-			command.blur=layer.blur; command.saturation=layer.saturation; command.streak=layer.streak;
+			command.blur=layer.blur; command.saturation=layer.saturation; command.streak=layer.streak; command.fault=layer.fault;
 			command.backdropRegion=layer.backdropRegion;
 			frameCommands.push_back(std::move(command));
 		} else if (recordFrame && !layer.pending) InvalidateFrame();
@@ -1054,7 +1140,10 @@ public:
 private:
 	struct FrameCommand { RecordedDraw draw; std::vector<Rml::Vector2f> imageFractions; std::vector<std::array<float,4>> baseColours;
 		std::uint32_t slot=0; float opacity=1; Bounds clip;
-		bool backdrop=false, directOpacity=false; float blur=0, saturation=1, streak=0; Bounds backdropRegion; };
+		bool backdrop=false, directOpacity=false; float blur=0, saturation=1, streak=0; Bounds backdropRegion;
+		std::shared_ptr<const FaultValues> fault; };
+	// A fault with neither a dither nor a strength shows the view as it is.
+	static bool FaultAtRest(const FaultValues& fault) { return !(fault[0] > 0) && !(fault[1] > 0); }
 	std::shared_ptr<const ImageCoordinates> imageSampling;
 	std::vector<FrameCommand> frameCommands;
 	bool frameValid=false, recordFrame=false;
@@ -1174,6 +1263,7 @@ private:
 		std::vector<RecordedDraw> draws; // Recorded while pending, replayed into the target.
 		bool backdrop=false;
 		float blur=0, saturation=1, streak=0;
+		std::shared_ptr<const FaultValues> fault;
 		Bounds backdropRegion;
 	};
 	Layer* Find(Rml::LayerHandle handle) {
@@ -1714,6 +1804,7 @@ struct Services {
 	Rml::ElementInstancerGeneric<HudElement> hudInstancer;
 	std::unique_ptr<VectorMaskInstancer> maskInstancer;
 	std::unique_ptr<StreakFilterInstancer> streakInstancer;
+	std::unique_ptr<GlitchFilterInstancer> glitchInstancer;
 	std::unique_ptr<LeafOpacityFilterInstancer> leafOpacityInstancer;
 	InlineProperties inlineProperties; // The canonical load's parsed property templates.
 	bool initialized = false;
@@ -1746,12 +1837,14 @@ struct Services {
 		initialized = true;
 		maskInstancer = std::make_unique<VectorMaskInstancer>();
 		streakInstancer = std::make_unique<StreakFilterInstancer>();
+		glitchInstancer = std::make_unique<GlitchFilterInstancer>();
 		leafOpacityInstancer = std::make_unique<LeafOpacityFilterInstancer>();
 		Rml::Factory::RegisterElementInstancer("q4-vector",&vectorInstancer);
 		Rml::Factory::RegisterElementInstancer("q4-node",&vectorInstancer);
 		Rml::Factory::RegisterElementInstancer("q4-hud",&hudInstancer);
 		Rml::Factory::RegisterDecoratorInstancer("q4-mask",maskInstancer.get());
 		Rml::Factory::RegisterFilterInstancer("streak",streakInstancer.get());
+		Rml::Factory::RegisterFilterInstancer("glitch",glitchInstancer.get());
 		Rml::Factory::RegisterFilterInstancer("q4-opacity",leafOpacityInstancer.get());
 		return true;
 	}
@@ -1760,6 +1853,7 @@ struct Services {
 		if (initialized) Rml::Shutdown();
 		maskInstancer.reset();
 		streakInstancer.reset();
+		glitchInstancer.reset();
 		Rml::SetRenderInterface(nullptr);
 		Rml::SetFileInterface(nullptr);
 		Rml::SetSystemInterface(nullptr);
@@ -1847,7 +1941,6 @@ struct Runtime::Impl {
 	}
 	// Immutable, JSON-escaped identity, rebuilt with each document replacement.
 	// HUD source can be several MiB; checkpoints must not escape it every time.
-	std::string snapshotDocumentIdentity;
 	Motion motion;
 	State state;
 	struct StateSource { std::string id, cvar, view; size_t type; };
@@ -1901,6 +1994,25 @@ struct Runtime::Impl {
 	// presses, the keyboard or controller once a menu input or a program's
 	// focus arrives. The interaction shows focus only while they lead.
 	void SetPointerNavigation(bool pointer) { pointerNavigation = pointer; interaction.SetPointerPresentation(pointer); }
+	// The control the menu shows lit (section 13.4): the one under the pointer
+	// while the pointer leads, else the focus, and within an open list its
+	// highlighted option. Empty while nothing is lit.
+	std::string LitTarget() const {
+		const auto id = pointerNavigation ? interaction.Hovered() : interaction.Focused();
+		if (id.empty()) return {};
+		const auto widget = interaction.Widget(id);
+		return widget && widget->popupOpen ? id+'\n'+widget->highlight : id;
+	}
+	// A device event that moved the lit control from `before` sounds Focus
+	// once (visual section 8). A pointer entering a scrollbar does not: it
+	// is grabbed, not browsed.
+	void CueLit(const std::string& before, bool pointer) {
+		const auto after = LitTarget();
+		if (after.empty() || after == before) return;
+		const auto node = after.substr(0,after.find('\n'));
+		if (pointer && interaction.Role(node) == ControlRole::Scrollbar) return;
+		interaction.CueFocus(node);
+	}
 	// The detail card (DocumentModel::detail): its subject, whether the pointer
 	// chose it, and the card's last placement relative to its containing block.
 	std::string detailSubject;
@@ -2051,20 +2163,14 @@ struct Runtime::Impl {
 		// when the button itself participates in normal document flow.
 		if (node.control) templates.Declare(properties,"position",relative);
 		if (node.mask) templates.DeclareEffect(properties,"mask-image","q4-mask(alpha)");
-		const auto blur = node.properties.find("backdrop-blur"), saturate = node.properties.find("backdrop-saturate");
-		const auto streak = node.properties.find("backdrop-streak");
-		if (blur != node.properties.end() || saturate != node.properties.end() || streak != node.properties.end()) {
-			const auto css = BackdropFilterCss(blur != node.properties.end() ? &blur->second : nullptr,
-				saturate != node.properties.end() ? &saturate->second : nullptr, streak != node.properties.end() ? &streak->second : nullptr);
-			if (css != "none") templates.DeclareEffect(properties,"backdrop-filter",css);
-		}
+		if (const auto css = NodeBackdropFilterCss(node); !css.empty()) templates.DeclareEffect(properties,"backdrop-filter",css);
 		for (const auto& [name,value] : node.properties) {
 			// The same cases as the derived markup's, told apart by their
 			// first letter before any comparison.
 			const char first = name.empty() ? 0 : name[0];
 			if (first == 't' && name == "text") continue;
 			if (first == 'o' && name == "opacity") { if (value.data[0] < 1) templates.DeclareEffect(properties,"filter","opacity("+value.Css()+")"); }
-			else if (first == 'b' && name.starts_with("backdrop-") && (name == "backdrop-blur" || name == "backdrop-saturate" || name == "backdrop-streak")) continue; // Folded into backdrop-filter.
+			else if (first == 'b' && name.starts_with("backdrop-") && (name == "backdrop-blur" || name == "backdrop-saturate" || name == "backdrop-streak" || BackdropFaultIndex(name) >= 0)) continue; // Folded into backdrop-filter.
 			else if (first == 'i' && name == "image") { if (!HasImageCoordinates(node)) templates.DeclareEffect(properties,"decorator",ImageDecorator(node,value.text)); }
 			else if (first == 'i' && name.starts_with("image-") && (name == "image-offset-x" || name == "image-offset-y" || name == "image-scale-x" || name == "image-scale-y")) continue;
 			else if (first == 'i' && name.starts_with("image-") && (name == "image-fit" || name == "image-align-x" || name == "image-align-y" || name == "image-blend")) continue; // Folded into the decorator.
@@ -2726,6 +2832,10 @@ struct Runtime::Impl {
 		const Rml::Vector2f point(pointerX,pointerY);
 		std::map<Rml::Element*,bool> checked;
 		const auto allowed = [&](Rml::Element* element) {
+			// A prompt-bar entry (an unfocusable button) outside the input scope,
+			// or faded out, lets the pointer through: a bar left under a page or
+			// a dialog never covers that page's own controls.
+			bool prompt = false, scoped = true; float opacity = 1;
 			for (auto* ancestor = element; ancestor && ancestor != document; ancestor = ancestor->GetParentNode()) {
 				if (ancestor->GetTagName() != "q4-node" && ancestor->GetTagName() != "q4-vector") continue;
 				// Popup parts have live visibility owned by the widget view; their
@@ -2735,8 +2845,13 @@ struct Runtime::Impl {
 				auto [entry,inserted] = checked.emplace(ancestor,false);
 				if (inserted) entry->second = static_cast<VectorElement*>(ancestor)->AllowsMaskedPoint(point);
 				if (!entry->second) return false;
+				opacity *= ancestor->GetComputedValues().opacity();
+				if (!prompt && canonical) {
+					const auto* node = canonical->Model().FindNode(ancestor->GetId());
+					if (node && node->control && !node->control->focusable) { prompt = true; scoped = interaction.AllowsNode(node->id); }
+				}
 			}
-			return true;
+			return !prompt || (scoped && opacity > .01f);
 		};
 		return context->GetElementAtPoint(point,nullptr,document,allowed);
 	}
@@ -2919,6 +3034,14 @@ struct Runtime::Impl {
 				static_cast<VectorElement*>(element)->SetImageCoordinate(key.second,value.data[0]);
 				input.Set(keyPointer,animated,owned,element); return current();
 			}
+			// A signal fault's values are its element's live paint inputs: the
+			// compiled filter and any recorded frame read them as they draw.
+			if (const int fault = key.second[0]=='b' ? BackdropFaultIndex(key.second) : -1; fault >= 0) {
+				auto* element=input.element ? input.element : CanonicalElement(key.first);
+				if (!element) { complete=false; return true; }
+				static_cast<VectorElement*>(element)->SetBackdropFault(fault,float(value.data[0]));
+				input.Set(keyPointer,animated,owned,element); return current();
+			}
 			const bool opacity = key.second == "opacity";
 			// A decorative leaf beside canonical buttons can replay its isolated
 			// fade. Owned widgets, interactive ancestry and compound groups keep
@@ -2981,6 +3104,14 @@ struct Runtime::Impl {
 				};
 				const auto blur = present("backdrop-blur"), saturate = present("backdrop-saturate"), streak = present("backdrop-streak");
 				string = BackdropFilterCss(blur ? &*blur : nullptr,saturate ? &*saturate : nullptr,streak ? &*streak : nullptr);
+				// The node's signal fault stands in the same filter at any values.
+				const auto dither = present("backdrop-dither"), glitch = present("backdrop-glitch"), phase = present("backdrop-glitch-phase");
+				if (dither || glitch || phase) {
+					std::string fault = "glitch(";
+					fault += dither ? dither->Css() : "0"; fault += ' '; fault += glitch ? glitch->Css() : "0"; fault += ' ';
+					fault += phase ? phase->Css() : "0"; fault += ')';
+					string = string == "none" ? fault : string+" "+fault;
+				}
 			} else {
 				// The load builds an authored value as the pass formats it here,
 				// an opacity below one as its filter; text and images it leaves to
@@ -3256,7 +3387,7 @@ void Runtime::Shutdown() {
 	impl->hud = nullptr;
 	impl->paintDirty=true;
 	impl->changedProjections.clear();
-	impl->canonical.reset(); impl->snapshotDocumentIdentity.clear(); impl->documentFontCss.clear(); impl->inlineAuthored=false; impl->inlineOverridden.clear();
+	impl->canonical.reset(); impl->documentFontCss.clear(); impl->inlineAuthored=false; impl->inlineOverridden.clear();
 	impl->appliedInputs.clear(); impl->deferredInputs.clear(); impl->inputKeys.clear(); impl->indexedKeys = nullptr; impl->motion.Reset(DocumentModel{});
 	impl->state = {}; impl->stateSources.clear(); impl->appliedStateRevision = 0; impl->stateError.clear();
 	impl->interaction.Reset({}); impl->controls.clear(); impl->pointerPresent = impl->pointerNavigation = false;
@@ -3283,7 +3414,7 @@ void Runtime::CloseDocument() {
 	if (impl->backend) impl->backend->renderer.InvalidateFrame();
 	impl->paintDirty=true;
 	impl->changedProjections.clear();
-	impl->canonical.reset(); impl->snapshotDocumentIdentity.clear(); impl->documentFontCss.clear(); impl->inlineAuthored=false; impl->inlineOverridden.clear();
+	impl->canonical.reset(); impl->documentFontCss.clear(); impl->inlineAuthored=false; impl->inlineOverridden.clear();
 	impl->appliedInputs.clear(); impl->deferredInputs.clear(); impl->inputKeys.clear(); impl->indexedKeys = nullptr; impl->motion.Reset(DocumentModel{});
 	impl->state = {}; impl->stateSources.clear(); impl->appliedStateRevision = 0; impl->stateError.clear();
 	impl->interaction.Reset({}); impl->controls.clear(); impl->pointerPresent = impl->pointerNavigation = false;
@@ -3326,11 +3457,9 @@ bool Runtime::LoadDocument(const Document& document, const std::string& sourcePa
 }
 bool Runtime::LoadCanonical(std::unique_ptr<Document> candidate, const std::string& sourcePath, std::vector<Diagnostic>& diagnostics) {
 	if (!Mutate() || !Initialize()) return false;
-	Json::Value identity(Json::objectValue);
-	identity["version"] = 1; identity["id"] = candidate->Model().id;
-	identity["path"] = sourcePath; identity["source"] = candidate->Source();
-	Json::StreamWriterBuilder identityWriter; identityWriter["indentation"] = ""; identityWriter["precision"] = 17;
-	std::string snapshotIdentity = Json::writeString(identityWriter,identity);
+	// Encoded at load, as always (a prefetched document's worker already did),
+	// so a later save never pays for it.
+	candidate->SnapshotIdentity(sourcePath);
 	{
 		ContextClock clock(*impl->services,impl->time,impl->strictPreparation?&impl->preparationFailed:nullptr);
 		// The document is built from the model, each node's element with its
@@ -3355,7 +3484,6 @@ bool Runtime::LoadCanonical(std::unique_ptr<Document> candidate, const std::stri
 		impl->stateSources.push_back({id,declaration.cvar,declaration.view,declaration.initial.index()});
 	impl->canonical = std::move(candidate);
 	impl->sourcePath = sourcePath;
-	impl->snapshotDocumentIdentity = std::move(snapshotIdentity);
 	// The build mapped every node to its element, so the load resolves each
 	// node without a search.
 	std::vector<const Node*> nodes{&impl->canonical->Model().root};
@@ -3559,7 +3687,7 @@ bool Runtime::SaveSnapshot(std::string& snapshot, std::string& error, double sec
 		}
 		Json::StreamWriterBuilder writer; writer["indentation"] = ""; writer["precision"] = 17;
 		const std::string dynamic = Json::writeString(writer,root);
-		const auto& identity = impl->snapshotDocumentIdentity;
+		const auto& identity = impl->canonical->SnapshotIdentity(impl->sourcePath);
 		constexpr std::size_t prefixBytes = sizeof("{\"document\":")-1;
 		if (identity.size() > MaxSnapshotBytes-prefixBytes || dynamic.size() > MaxSnapshotBytes-prefixBytes-identity.size()) {
 			error = "Instance snapshot exceeds the 128 MiB limit"; return false;
@@ -4124,6 +4252,7 @@ bool Runtime::SetText(const std::string& id, const std::string& text) {
 	return true;
 }
 bool Runtime::IsLoaded() const { return impl->document != nullptr; }
+void Runtime::InvalidatePaint() { impl->paintDirty = true; }
 RuntimeStatistics Runtime::Statistics() const {
 	auto statistics = impl->Stats();
 	if (impl->services) {
@@ -4136,6 +4265,7 @@ RuntimeStatistics Runtime::Statistics() const {
 void Runtime::PointerMove(float x, float y, double seconds) {
     if(!Mutate())return;
 
+	const auto lit = impl->LitTarget();
 	impl->SetPointerNavigation(true);
 	impl->pointerPresent = std::isfinite(x) && std::isfinite(y);
 	impl->windowPointerX = x; impl->windowPointerY = y;
@@ -4144,7 +4274,11 @@ void Runtime::PointerMove(float x, float y, double seconds) {
 	if (!impl->touchPointer && impl->pointerPresent) impl->detailPin.clear();
 	if (std::isfinite(seconds) && seconds >= 0) impl->time = std::max(impl->time,seconds);
 	impl->MoveTouch();
-	if(!impl->UpdateInteraction(seconds,false,true))return; impl->Feedback(seconds);
+	if(!impl->UpdateInteraction(seconds,false,true))return;
+	// A mouse finding another control sounds; a finger lands rather than
+	// browses, and a held button is dragging or pressing, not browsing.
+	if (!impl->touchPointer && !impl->interaction.PointerHeld()) impl->CueLit(lit,true);
+	impl->Feedback(seconds);
 }
 void Runtime::PointerButton(bool down, double seconds) {
     if(!Mutate())return;
@@ -4171,12 +4305,13 @@ void Runtime::PointerWheel(int rows, double seconds) {
 		// Keep this selection through layout and subsequent wheel events. The
 		// stationary pointer must not reselect its old row on the next frame;
 		// an actual pointer move or button event restores pointer navigation.
+		const auto lit = impl->LitTarget();
 		impl->SetPointerNavigation(false);
         const auto* node=impl->canonical->Model().FindNode(id);
         const auto* choice=node&&node->control?std::get_if<ChoiceSpec>(&node->control->widget):nullptr;
         if(choice&&choice->scrollbar) {
             if(impl->valueView.ChoiceScrollFresh(id,impl->interaction))impl->interaction.ChoiceScrollPulse(id,rows>0?ScrollStep::LineForward:ScrollStep::LineBackward);
-        } else impl->interaction.NavigationPulse(rows > 0 ? MenuInput::Down : MenuInput::Up);
+        } else { impl->interaction.NavigationPulse(rows > 0 ? MenuInput::Down : MenuInput::Up); impl->CueLit(lit,false); }
 		impl->Feedback(seconds); return;
 	}
 	if (!impl->pointerPresent || !impl->context || !impl->document || impl->pointerX < 0 || impl->pointerY < 0 ||
@@ -4216,8 +4351,12 @@ void Runtime::MenuAction(MenuInput input, bool down, double seconds) {
 	if (down && input != MenuInput::Back && !impl->interaction.CapturedPointerControl().empty()) impl->interaction.Cancel();
 	if (down) { impl->pendingFocus.clear(); impl->fling = {}; impl->detailPin.clear(); }
 	const auto before = impl->interaction.Focused();
+	const auto lit = impl->LitTarget();
 	impl->SetPointerNavigation(false); if(!impl->UpdateInteraction(seconds,false,true))return;
 	if (!down || !impl->PageList(input)) impl->interaction.Input(input,down);
+	// A navigation press that moves the lit control or option sounds Focus;
+	// Accept and Back answer through their activations instead.
+	if (down && input != MenuInput::Accept && input != MenuInput::Back) impl->CueLit(lit,false);
 	impl->ApplyScrollCommands(); impl->Feedback(seconds);
 	if (impl->interaction.Focused() != before) impl->RevealFocus();
 }
@@ -4520,6 +4659,10 @@ std::vector<ControlAction> Runtime::TakeActions() {
 
 	if (impl->interaction.Overflowed()) impl->host.Log(true,"Retained control action queue overflow");
 	return impl->interaction.TakeActions();
+}
+std::vector<ControlCue> Runtime::TakeCues() {
+    if(!Mutate())return {};
+	return impl->interaction.TakeCues();
 }
 
 } // namespace openq4::ui

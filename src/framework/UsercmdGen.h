@@ -68,6 +68,10 @@ const int BUTTON_QUICKCHAT = BIT(12);
 // VR: the command's angles are a tracked aim's (the weapon hand's, or the
 // head's). Its pitch is absolute, so the game keeps no pitch offset on it.
 const int BUTTON_VRAIM = BIT(13);
+// The Classic multiplayer ruleset's grappling hook is held out (_hook). The
+// game fires it on the press and the player physics pulls only while it is
+// held. Prey's game has no hook; the bit is reserved past BUTTON_VRAIM.
+const int BUTTON_HOOK = BIT(14);
 
 // usercmd_t->impulse commands
 const int IMPULSE_0				= 0;			// weap 0

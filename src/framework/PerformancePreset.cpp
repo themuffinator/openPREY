@@ -9,20 +9,24 @@ static const std::array<PerformancePreset,PerformancePresetCount> Presets{{
 	// The three bottom recipes are for hardware at and below the documented
 	// minimum (4 GiB RAM, a 1 GiB ARB2-class GPU). Lowering resolution alone left
 	// every rendering feature in place, so the two lowest also draw no shadows:
-	// no shadow volumes are built, submitted or filled.
+	// no shadow volumes are built, submitted or filled. They also skip the
+	// light-grid indirect pass, an openQ4 addition to retail lighting that costs a
+	// full-screen pass, a depth copy and the map's grid atlases in shared memory.
+	// Their 30 Hz cap also stands automatic temporal AA down (r_temporalAA 2):
+	// a 75% scene is stretched rather than reconstructed from history.
 	//
 	// Minimum is the floor: software and limited renderers, 2 GiB systems.
 	{ "minimum", 0, "low",
 		50, 0, 0, 30,
 		1, 512, 1, 1, 1, 1,
-		0, 512, 1, 0, 0, 0, 0, 0, 1, 8, 3,
+		0, 512, 1, 0, 0, 0, 0, 0, 0, 8, 3,
 		0, 1, 24, 512, 1, 1, 0, 0, 2048, 4, 1, 4, 0, 1, 0 },
 	// Low Power is the battery and small-board recipe: Raspberry Pi, low-memory
 	// phones and an explicit power request. No shadows, 30 Hz.
 	{ "lowpower", 0, "low",
 		75, 0, 0, 30,
 		1, 1024, 1, 1, 1, 1,
-		0, 512, 1, 0, 0, 0, 0, 0, 1, 8, 3,
+		0, 512, 1, 0, 0, 0, 0, 0, 0, 8, 3,
 		0, 1, 32, 512, 1, 1, 0, 0, 2048, 4, 1, 4, 0, 1, 0 },
 	// Low is the documented minimum PC: the original stencil shadows at 60 Hz,
 	// with Low Power's reduced scene and texture sizes.
@@ -79,11 +83,13 @@ static const std::array<PerformancePreset,PerformancePresetCount> Presets{{
 		0, 1, 48, 512, 13, 9, 2, 0, 8192, 32, 5, 8, 0, 1, 1 },
 	// Maximum requests every supported quality maximum and carries no frame-rate
 	// target (FPS-02): it is the choice for players who want everything on.
-	// Hardware clamps MSAA. Render scale stays native. CRT and exposure/strength
+	// MSAA is 8 samples, the most the Vulkan renderer draws, so Maximum is one
+	// image on both renderers (FPS-05); 16 stays a manual choice for OpenGL.
+	// Render scale stays native. CRT and exposure/strength
 	// controls are artistic preferences, not quality levels; experimental
 	// rendering modes stay opt-in.
 	{ "maximum", 3, "high-end",
-		100, 16, 3, 240,
+		100, 8, 3, 240,
 		16, 0, 0, 0, 1, 0,
 		1, 4096, 0, 1, 1, 1, 1, 0, 1, 32, 4,
 		0, 1, 48, 2048, 13, 13, 2, 1, 16384, 32, 5, 16, 1, 1, 1 }
@@ -267,6 +273,12 @@ PerformancePresetDetection DetectPerformancePreset(const PerformancePresetSignal
  if(signals.raspberryPi&&tier>LowPower){tier=LowPower;result.reason=Reason::RaspberryPi;}
  if(signals.steamDeck&&tier>Performance){tier=Performance;result.reason=Reason::SteamDeck;}
  if(signals.mobile&&tier>Performance){tier=Performance;result.reason=Reason::Mobile;}
+ // An ARM board's GPU has no capacity signal and no name list that keeps up
+ // with new boards. RK3588's Mali-G610 is a mid-range phone GPU, the class
+ // phones already get Performance for, so every board gets the handheld ceiling.
+ // The Pi's own hint above is stricter; Apple and discrete GPUs are not boards.
+ const bool armBoard=PerformancePresetIsArmBoard(signals);
+ if(armBoard&&tier>Performance){tier=Performance;result.reason=Reason::ArmBoard;}
  // Reduce the recommendation for the actual drawable, independently of the
  // currently selected render scale. Never change window size or display mode.
  // Each resolution class above 1440p costs one tier, so an 8 GiB card is
@@ -291,7 +303,7 @@ PerformancePresetDetection DetectPerformancePreset(const PerformancePresetSignal
  // 120 Hz phone or a 90 Hz handheld stays at Performance's 60.
  result.maxFps=result.preset->maxFps;
  if(signals.displayRefreshHz>=PerformancePresetMinDisplayRefreshHz&&signals.displayRefreshHz<=PerformancePresetMaxDisplayRefreshHz){
-  const bool powerLimited=signals.explicitLowPower||signals.raspberryPi||signals.steamDeck||signals.mobile;
+  const bool powerLimited=signals.explicitLowPower||signals.raspberryPi||signals.steamDeck||signals.mobile||armBoard;
   if(!powerLimited||signals.displayRefreshHz<result.maxFps)result.maxFps=signals.displayRefreshHz;
  }
  result.postAA=(signals.postAAAvailable||signals.modernEffects)?result.preset->postAA:0;
@@ -324,5 +336,99 @@ bool ResolveDetectedPerformancePreset(const PerformancePresetDetection& detectio
  auto resolved=*detection.preset;
  resolved.screenFraction=detection.screenFraction;resolved.postAA=detection.postAA;resolved.maxFps=detection.maxFps;
  output=resolved;return true;
+}
+
+namespace {
+struct Fnv1a {
+ std::uint32_t value=2166136261u;
+ void Byte(unsigned char byte) noexcept{value^=byte;value*=16777619u;}
+ void Text(const char* text) noexcept{for(;text&&*text;++text)Byte(static_cast<unsigned char>(*text));Byte(0);}
+ void Number(long long number) noexcept{
+  // Little-endian 64-bit, so the hash is the same on every host.
+  const auto bits=static_cast<unsigned long long>(number);
+  for(int i=0;i<8;++i)Byte(static_cast<unsigned char>(bits>>(8*i)));
+ }
+};
+// Every machine shape the detector distinguishes: each GPU class, the video
+// and system memory bands either side of their thresholds, the resolution
+// classes, CPU concurrency, a known and unknown refresh and the modern-effects
+// split, then each platform ceiling on three common machines.
+template<typename Visit> int VisitFingerprintMachines(Visit&& visit) {
+ static constexpr RendererGpuClass classes[]={RendererGpuClass::Unknown,RendererGpuClass::Integrated,
+  RendererGpuClass::Discrete,RendererGpuClass::Virtual,RendererGpuClass::Software};
+ static constexpr int vram[]={0,512,1024,2048,4096,PerformancePresetVram8GiB,PerformancePresetVram12GiB,
+  PerformancePresetVram16GiB,PerformancePresetVram24GiB};
+ static constexpr int ram[]={0,2048,4096,8192,16384};
+ static constexpr int sizes[][2]={{0,0},{1280,720},{1920,1080},{2560,1440},{3840,2160}};
+ static constexpr int cpus[]={2,8};
+ static constexpr int refresh[]={0,144};
+ int machines=0;
+ for(const auto gpu:classes)for(const int video:vram)for(const int memory:ram)for(const auto& size:sizes)
+  for(const int threads:cpus)for(const int hertz:refresh)for(int effects=0;effects<2;++effects){
+   PerformancePresetSignals signals;
+   signals.gpuClass=gpu;signals.videoRamMB=video;signals.systemRamMB=memory;
+   signals.drawableWidth=size[0];signals.drawableHeight=size[1];
+   signals.logicalCpus=threads;signals.displayRefreshHz=hertz;
+   signals.modernEffects=signals.postAAAvailable=effects!=0;
+   visit(signals);++machines;
+  }
+ PerformancePresetSignals common[3];
+ common[0].gpuClass=RendererGpuClass::Discrete;common[0].videoRamMB=PerformancePresetVram8GiB;common[0].systemRamMB=16384;
+ common[0].drawableWidth=2560;common[0].drawableHeight=1440;
+ common[1].gpuClass=RendererGpuClass::Integrated;common[1].systemRamMB=16384;common[1].drawableWidth=1920;common[1].drawableHeight=1080;
+ common[2].gpuClass=RendererGpuClass::Integrated;common[2].systemRamMB=PerformancePresetMobileFlagshipRamMB+2048;
+ common[2].drawableWidth=2400;common[2].drawableHeight=1080;
+ for(auto& machine:common){machine.logicalCpus=8;machine.modernEffects=machine.postAAAvailable=true;}
+ for(int flag=0;flag<7;++flag)for(const auto& machine:common)for(const int hertz:{0,90}){
+  auto signals=machine;signals.displayRefreshHz=hertz;
+  switch(flag){
+   case 0:signals.explicitLowPower=true;break;
+   case 1:signals.raspberryPi=true;break;
+   case 2:signals.steamDeck=true;break;
+   case 3:signals.arm64=signals.linuxHost=true;break; // An ARM board.
+   case 4:signals.legacyRenderer=true;break;
+   case 5:signals.arm64=signals.linuxHost=signals.appleGpu=true;break; // Asahi Linux.
+   default:signals.mobile=true;break;
+  }
+  visit(signals);++machines;
+ }
+ return machines;
+}
+std::uint32_t ComputeFingerprint() noexcept {
+ Fnv1a hash;
+ hash.Number(PerformancePresetCount);hash.Number(PerformancePresetTargetCount);
+ for(const auto& preset:Presets){
+  PerformancePresetAssignments expansion;std::string error;
+  if(!ExpandPerformancePreset(preset,expansion,error)){hash.Text("unexpandable");hash.Text(preset.name);continue;}
+  for(const auto& assignment:expansion){
+   hash.Text(assignment.key);
+   if(const auto number=std::get_if<int>(&assignment.value))hash.Number(*number);
+   else hash.Text(std::get<std::string>(assignment.value).c_str());
+  }
+ }
+ VisitFingerprintMachines([&hash](const PerformancePresetSignals& signals){
+  const auto found=DetectPerformancePreset(signals);
+  hash.Text(found.preset?found.preset->name:"");
+  hash.Number(static_cast<int>(found.reason));
+  hash.Number(found.systemRamMB);hash.Number(found.videoRamMB);hash.Number(found.screenFraction);
+  hash.Number(found.postAA);hash.Number(found.scenePixelBudget);hash.Number(found.maxFps);
+ });
+ return hash.value;
+}
+}
+std::uint32_t PerformancePresetSystemFingerprint() noexcept {
+ static const std::uint32_t fingerprint=ComputeFingerprint();
+ return fingerprint;
+}
+int PerformancePresetFingerprintMachines() noexcept {
+ return VisitFingerprintMachines([](const PerformancePresetSignals&){});
+}
+std::string PerformancePresetSystemVersion() {
+ static constexpr char digits[]="0123456789abcdef";
+ const std::uint32_t fingerprint=PerformancePresetSystemFingerprint();
+ std::string version=std::to_string(PerformancePresetSystemRevision);
+ version+='.';
+ for(int shift=28;shift>=0;shift-=4)version+=digits[(fingerprint>>shift)&0xF];
+ return version;
 }
 } // namespace openq4

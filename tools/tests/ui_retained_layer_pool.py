@@ -56,6 +56,7 @@ struct Host {
     struct Layer {idRenderTexture* target=nullptr;const idMaterial* material=nullptr;const idMaterial* maskMaterial=nullptr;int width=0,height=0;};
     std::vector<Layer> layers;
     idRenderTexture* boundTarget=nullptr;
+    idRenderTexture* warmTarget=nullptr;bool warming=false;
     int viewportWidth=1280,viewportHeight=720;
     std::vector<openq4::ui::Vertex> drawn;std::uintptr_t drawnMaterial=0;
     void Draw(const std::vector<openq4::ui::Vertex>& vertices,const std::vector<int>& indices,std::uintptr_t material){
@@ -112,7 +113,15 @@ int main(){
         assert(near(v.x,mask[i].x) && near(v.y,mask[i].y) && near(v.u,mask[i].x/1280) && near(v.v,1-mask[i].y/720));
         assert(near(v.r,mask[i].a*.5f) && near(v.g,v.r) && near(v.b,v.r) && near(v.a,v.r));
     }
-    std::puts("retained layer pool: mixed viewport preservation, exact shared byte budget, failure isolation and GL-order composites passed");
+    // A page drawn out of sight: its view's target (null) is the hidden one,
+    // composites included, and the view's own again once it is done.
+    idRenderTexture hidden;const int viewBinds=renderer.defaultBinds;
+    host.warmTarget=&hidden;host.warming=true;
+    host.BindTarget(nullptr,true);assert(renderer.bound==&hidden && renderer.defaultBinds==viewBinds);
+    host.CompositeLayer(2,0,.5f,{100,200,300,50});assert(renderer.bound==&hidden && renderer.defaultBinds==viewBinds);
+    host.EndLayer(0);assert(renderer.bound==&hidden);
+    host.warming=false;host.BindTarget(nullptr);assert(renderer.bound==nullptr && renderer.defaultBinds==viewBinds+1);
+    std::puts("retained layer pool: mixed viewport preservation, exact shared byte budget, failure isolation, GL-order composites and out-of-sight warm targets passed");
 }
 '''
 
@@ -162,11 +171,12 @@ static bool RetainedAtlasActive(){return ui_retainedAtlas.GetBool();}
 struct Host {
     int viewportWidth=1280,viewportHeight=720;
     bool rasterNewMeshes=true;
+    bool warming=false;
     struct AtlasPage {bool dirty=false;const idMaterial* material=nullptr;const idMaterial* multiplyMaterial=nullptr;std::uint64_t lastFrame=0;int references=0;};
     std::vector<AtlasPage> atlasPages;
     unsigned rasterDraws=0,rasterSavedVertices=0;
     std::uint64_t RenderFrame()const{return 1;}
-    template<class... T>void CacheRaster(T&&...){assert(false && "atlas disabled in indexed mesh fixture");}
+    template<class... T>void QueueRaster(T&&...){assert(false && "atlas disabled in indexed mesh fixture");}
 '''
 DRAW_MAIN = r'''
 };
@@ -281,8 +291,10 @@ Renderer* renderSystem=&renderer;
 struct Declarations {
     idMaterial backdrop{"_retainedBlur/backdrop"},scratch{"_retainedBlur/scratch"},streak{"_retainedBlur/streak"};
     idMaterial reducedScratch{"_retainedBlur/reducedScratch"},reducedResult{"_retainedBlur/reducedResult"};
+    idMaterial glitch{"_retainedBlur/glitch"},glitchWindow{"_retainedBlur/glitchWindow"};
     const idMaterial* FindMaterial(const char* name){
-        for(idMaterial* material:{&backdrop,&scratch,&streak,&reducedScratch,&reducedResult}) if(std::string(name)==material->name) return material;
+        for(idMaterial* material:{&backdrop,&scratch,&streak,&reducedScratch,&reducedResult,&glitch,&glitchWindow})
+            if(std::string(name)==material->name) return material;
         return nullptr;
     }
 } declarations;
@@ -294,7 +306,9 @@ struct Host {
     struct Layer {idRenderTexture* target=nullptr;int width=0,height=0;};
     std::vector<Layer> layers;
     idRenderTexture* boundTarget=nullptr;
-    std::vector<int> atlasPages;
+    std::vector<int> atlasPages,atlasImages,rasterBatches,queuedRasters,finishedRasters;
+    unsigned long long lastAtlasUpload=0;
+    idRenderTexture* warmTarget=nullptr;int warmWidth=0,warmHeight=0;bool warming=false;
     int viewportWidth=1600,viewportHeight=900;
     float viewportX=160,viewportY=90;
     int captureWidth=1920,captureHeight=1080;
@@ -303,6 +317,8 @@ struct Host {
     const idMaterial* blurBackdropMaterial=nullptr;
     const idMaterial* blurScratchMaterial=nullptr;
     const idMaterial* blurStreakMaterial=nullptr;
+    const idMaterial* blurGlitchMaterial=nullptr;
+    const idMaterial* blurGlitchWindowMaterial=nullptr;
     const idMaterial* linearMaskMaterial=nullptr;
     bool backdropCreated=false;
     int blurWidth=0,blurHeight=0;
@@ -398,6 +414,46 @@ int main(){
     host.blurStreakMaterial=nullptr;declarations.streak.state=DS_DEFAULTED;renderer.calls.clear();
     assert(!host.StreakBackdrop(3,.5f,region) && Count("draw")==0 && !host.blurStreakMaterial && host.SoftenBackdrop(3,4,.9f,region));
     declarations.streak.state=1;
+    // The signal fault copies the view out of the window capture as the streak
+    // does, then draws it through the fault into the destination layer: the
+    // dither, strength and phase in parm0..2, the dither's cell (one pixel of
+    // a 540-line view, whole) in parm3 and the view's size in the tangent.
+    renderer.calls.clear();
+    assert(!host.GlitchBackdrop(3,0,0,0,region) && !host.GlitchBackdrop(3,1.5f,0,0,region) && !host.GlitchBackdrop(3,.5f,NAN,0,region) &&
+        !host.GlitchBackdrop(3,.5f,.5f,-1,region) && !host.GlitchBackdrop(2,.5f,.5f,0,region) && renderer.calls.empty());
+    assert(host.GlitchBackdrop(3,.6f,.25f,7,region));
+    std::vector<Call> fault;
+    for(const auto& call:renderer.calls) if(call.op!="image") fault.push_back(call);
+    assert(fault.size()==streakOrder.size());
+    for(size_t i=0;i<streakOrder.size();++i) assert(fault[i].op==streakOrder[i]);
+    assert(fault[0].target==nullptr && fault[1].name=="_retainedBackdrop" && fault[2].target==host.blurScratch &&
+        fault[4].material==&declarations.backdrop && fault[6].target==&destination && fault[8].material==&declarations.glitch &&
+        renderer.bound==&destination);
+    assert(fault[4].vertices[0].tangents[0].x==1 && fault[4].vertices[0].tangents[0].y==0);
+    assert(Near(fault[7].parms[0],.6f) && Near(fault[7].parms[1],.25f) && fault[7].parms[2]==7 && fault[7].parms[3]==2 && fault[9].parms[0]==1);
+    const auto& torn=fault[8].vertices;
+    assert(Near(torn[0].xyz.x,100*sx) && Near(torn[0].xyz.y,200*sy) && Near(torn[2].xyz.x,400*sx) && Near(torn[2].xyz.y,300*sy));
+    assert(Near(torn[0].st.x,100/1600.f) && Near(torn[0].st.y,1-200/900.f) && Near(torn[2].st.x,400/1600.f) &&
+        Near(torn[2].st.y,1-300/900.f));
+    for(const auto& vertex:torn) assert(vertex.tangents[0].x==1600 && vertex.tangents[0].y==900);
+    // Only a full-view fault over ready targets may finish on the base surface.
+    const openq4::ui::Bounds wholeView{0,0,1600,900};
+    renderer.calls.clear();
+    assert(host.CanGlitchBackdropDirect(wholeView) && !host.CanGlitchBackdropDirect(region) && renderer.calls.empty());
+    assert(host.GlitchBackdropDirect(.6f,.4f,3,wholeView) && Count("capture")==1 && Count("draw")==2 && renderer.bound==nullptr);
+    ui_retainedDirectBackdrop.enabled=false;renderer.calls.clear();
+    assert(!host.GlitchBackdropDirect(.6f,.4f,3,wholeView) && renderer.calls.empty());ui_retainedDirectBackdrop.enabled=true;
+    // Where the view is the whole window the fault reads the capture itself:
+    // one pass, and no copy.
+    host.viewportX=host.viewportY=0;host.captureWidth=1600;host.captureHeight=900;renderer.calls.clear();
+    assert(host.GlitchBackdropDirect(.6f,0,0,wholeView) && Count("capture")==1 && Count("draw")==1);
+    for(const auto& call:renderer.calls) if(call.op=="draw") assert(call.target==nullptr && call.material==&declarations.glitchWindow);
+    host.viewportX=160;host.viewportY=90;host.captureWidth=1920;host.captureHeight=1080;
+    // A defaulted fault material fails openly and leaves soft focus working.
+    host.blurGlitchMaterial=host.blurGlitchWindowMaterial=nullptr;declarations.glitchWindow.state=DS_DEFAULTED;renderer.calls.clear();
+    assert(!host.GlitchBackdrop(3,.6f,0,0,region) && Count("draw")==0 && Count("capture")==0 && !host.blurGlitchMaterial &&
+        !host.CanGlitchBackdropDirect(wholeView) && host.SoftenBackdrop(3,4,.9f,region));
+    declarations.glitchWindow.state=1;
     // A region past the view is clamped to it, reach included.
     renderer.calls.clear();
     assert(host.SoftenBackdrop(3,4,.9f,{-50,-50,1700,1000}) && renderer.images.size()==2 && renderer.targets.size()==1);
@@ -473,7 +529,7 @@ int main(){
     assert(Count("draw")==2);
     reduced.ClearLayers();
     assert(!reduced.reducedBlurScratch && !reduced.reducedBlurResult && !reduced.reducedBlurMaterial && !reduced.reducedBlurResolve);
-    std::puts("retained soft focus and speed streak: capture, separable passes, the view copy, regions, GL row order, target lifetime and a reset with no renderer passed");
+    std::puts("retained soft focus, speed streak and signal fault: capture, separable passes, the view copy, the whole-window read, regions, GL row order, target lifetime and a reset with no renderer passed");
 }
 '''
 
@@ -482,7 +538,8 @@ def main():
     source=(ROOT/'src/ui/RetainedUI.cpp').read_text()
     source_text=source
     bodies=[function_body(source,signature).replace(' override','') for signature in (
-        'void BindTarget(','bool BeginLayer(','void CompositeLayer(','void CompositeMaskedLayer(','void MaskLayer(','void DrawLayer(')]
+        'void BindTarget(','bool BeginLayer(','void CompositeLayer(','void CompositeMaskedLayer(','void MaskLayer(','void DrawLayer(',
+        'void EndLayer(')]
     # The Vulkan executor's side of the row-order contract the composites rely on.
     executor=(ROOT/'src/renderer/Vulkan/vk_GuiExecutor.cpp').read_text(encoding='utf-8')
     assert 'vkExec.activePipelineTarget.lowerOrigin = true;' in function_body(executor,'bool VK_Exec_SetRenderTarget('),\
@@ -511,7 +568,8 @@ def main():
         soft=Path(temp)/'soft.cpp';softBinary=Path(temp)/'soft.exe'
         soft_bodies=[function_body(source_text,signature).replace(' override','') for signature in (
             'void BindTarget(','bool SoftenBackdrop(','bool CanSoftenBackdropDirect(','bool SoftenBackdropDirect(','bool DrawSoftenedBackdrop(',
-            'bool StreakBackdrop(','bool EnsureBlurTargets(','bool EnsureReducedBlurTargets(','void DrawBlurPass(','void ClearLayers(','void Reset(')]
+            'bool StreakBackdrop(','bool GlitchBackdrop(','bool CanGlitchBackdropDirect(','bool GlitchBackdropDirect(','bool DrawGlitchedBackdrop(',
+            'bool EnsureBlurTargets(','bool EnsureReducedBlurTargets(','void DrawBlurPass(','void ClearLayers(','void Reset(')]
         atlas_constants='\n'.join(line for line in source_text.splitlines() if 'static constexpr int Atlas' in line)
         soft.write_text(SOFT_SUPPORT+atlas_constants+'\n'+'\n'.join(soft_bodies)+SOFT_MAIN,encoding='utf-8')
         subprocess.run([compiler,'-std=c++17',str(soft),'-o',str(softBinary)],check=True)

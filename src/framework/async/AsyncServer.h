@@ -154,6 +154,29 @@ typedef struct serverClient_s {
 	int					gameInitSequence;
 	int					gameFrame;
 	int					gameTime;
+	// openQ4: the connect reply left the server info to the game-init message
+	// (OutOfBandReply.h); the client passed the pure checks before connecting.
+	bool				deferredServerInfo;
+	// openQ4: the game has begun this client since it connected; it begins once.
+	bool				gameBegun;
+	// the least time, in milliseconds, by which a command of this client's arrived before
+	// the server needed it since the last snapshot (COMMAND_SLACK_NONE for none)
+	int					commandSlack;
+	int					lastGameInitTime;		// when the last game-init message left
+	// allowances for what a client may make the server send on or run
+	// (CLIENT_USERINFO_BUDGET_BYTES, CLIENT_GAME_MESSAGE_BURST)
+	int					userInfoBudget;
+	int					userInfoBudgetTime;
+	int					gameMessageBudget;
+	int					gameMessageBudgetTime;
+	int					gameMessagesDiscarded;
+	// openQ4: packets carrying this client's tag that could not be read, counted
+	// over CLIENT_MALFORMED_WINDOW_MSEC (CLIENT_MALFORMED_MAX drops the client)
+	int					malformedCount;
+	int					malformedWindowStart;
+	// openQ4: the other clients whose user info this client has still to be sent,
+	// one bit a slot: a join sends what its reliable queue can take a frame
+	unsigned int		pendingUserInfo;
 
 	idMsgChannel		channel;
 	int					lastConnectTime;
@@ -175,6 +198,10 @@ typedef struct serverClient_s {
 	int					statsSnapshotsSent;
 	int					statsSnapshotBytes;
 	int					statsSendsRefusedByRate;
+	// openQ4: frames run on a repeated command because this client's own had not
+	// come, and the first frame of the run in progress (-1 for none).
+	int					statsLateUsercmds;
+	int					lateUsercmdsFrom;
 	oq4voice::Mailbox	voiceMailbox;
 
 	char				guid[12];  // Even Balance - M. Quinn
@@ -272,6 +299,7 @@ private:
 	bool				serverReloadingEngine;		// flip-flop to not loop over when net_serverReloadEngine is on
 
 	bool				noRconOutput;				// for default rcon response when command is silent
+	bool				rconCommandExecuted;		// the remote console packet in hand ran a command
 	bool				rcon2VerifierInitialized;
 	bool				rcon2VerifierValid;
 	byte				rcon2Salt[16];
@@ -293,6 +321,7 @@ private:
 
 	void				PrintOOB( const netadr_t to, int opcode, const char *string );
 	void				DuplicateUsercmds( int frame, int time );
+	void				CountLateUsercmds( int frame );
 	void				ClearClient( int clientNum );
 	void				InitClient( int clientNum, int clientId, int clientRate );
 // jmarshall
@@ -305,6 +334,8 @@ private:
 	void				SendPrintToClient( int clientNum, const char *string );
 	void				SendUserInfoBroadcast( int userInfoNum, const idDict &info, bool sendToAll = false );
 	void				SendUserInfoToClient( int clientNum, int userInfoNum, const idDict &info );
+	void				SendPendingUserInfo( int clientNum, int reserveBytes );
+	void				NoteMalformedPacket( int clientNum );
 	void				SendSyncedCvarsBroadcast( const idDict &cvars );
 	void				SendSyncedCvarsToClient( int clientNum, const idDict &cvars );
 	void				SendApplySnapshotToClient( int clientNum, int sequence );
@@ -328,6 +359,8 @@ private:
 	int					ValidateChallenge( const netadr_t from, int challenge, int clientId );	// returns -1 if validate failed
 	bool				AllowConnectionlessResponse( const netadr_t from, bool infoResponse );
 	bool				RefreshRcon2Verifier( void );
+	bool				RconLimitIsPenalised( const rconRateLimit_t &limit ) const;
+	int					RconRateSlot( const netadr_t from, bool allocate );
 	bool				AllowRconChallenge( const netadr_t from );
 	bool				AllowRconProofAttempt( const netadr_t from );
 	void				RecordRconFailure( const netadr_t from );

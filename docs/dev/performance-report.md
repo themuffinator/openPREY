@@ -1363,6 +1363,388 @@ Against FPS-01, hub2 at Ultra on OpenGL went from 19 to 91 fps.
 - **Maximum is not budgeted.** It carries no frame-rate claim; section 10.1 records what
   it cost at 94e0b14ec, and the FPS-03 to FPS-05 work lowers that cost.
 
+## 12. Post-processing chain (FPS-04)
+
+FPS-04 priced the screen-space passes of the re-tiered presets on both backends, cut the
+OpenGL chain down to what the Vulkan chain already did, and declared a per-scene budget for
+the chain at Ultra. The passes are SSAO, bloom, the HDR tone map and SMAA; motion blur is
+Maximum only since FPS-02.
+
+### 12.1 What changed (OpenGL)
+
+Vulkan already blended SSAO into the multisampled scene target, drew it at half
+resolution below 32 samples, and read the scene once for bloom and the tone map. OpenGL
+did none of the three:
+
+- **Half-resolution SSAO.** `r_ssaoResolution` (automatic by default) now applies to both
+  renderers. Below the maximum sample count (Quality's 20, Enhanced's 12) the occlusion is
+  drawn for the even pixel of each 2x2 block into a half-size target and upsampled with
+  depth-aware weights, the same two passes as Vulkan (`RB_DrawSSAOHalf` in
+  `draw_common.cpp`, modes 3 and 4 of `glprogs/ssao.fs`). Ultra's 32 samples stay at full
+  resolution, the user's decision of 5 November.
+- **SSAO without a scene copy.** The occlusion is a scalar factor. The classic pass now
+  writes it alone and the blend unit multiplies it into every sample of the scene target,
+  instead of resolving the whole 2x or 4x multisampled RGBA16F scene into `_currentRender`
+  first. The occlusion-field path of native PBR views, the full-resolution debug view and
+  the new validation switch `r_glSSAOReferenceComposition 1` keep the copy.
+- **One scene read for bloom and the tone map.** The composite resolved the scene into
+  `_currentRender` a second time after writing it. Every later reader in the view already
+  takes its own copy (authored post-process surfaces, the cel ink, the underwater pass,
+  materials that need the current render, presentation), so the copy was dropped and the
+  flag marked stale.
+- The SSAO normal is reconstructed only once the distance fade keeps a pixel, which leaves
+  the result unchanged.
+
+At Ultra the OpenGL chain therefore resolves the multisampled scene twice a frame (bloom
+input and presentation) instead of four times, the same as Vulkan.
+
+### 12.2 Method
+
+Feature costs come from in-launch toggle ladders in hidden 2560x1440 windows: windows of
+4 s with a 360 degree view sweep at the scene's reference pose, each toggle read against
+the mean of its two neighbouring base windows, and the per-frame GPU time of
+`rendererBenchmarkCapture` (timestamp queries, microseconds) as the measure. This is the
+shadow audit's configuration method; it is immune to the window focus that fullscreen
+launches depend on (section 12.6). The chain toggle turns SSAO, bloom, the tone map and
+SMAA off together, which also releases the scene target, so it exceeds the sum of the
+four single toggles. The arena row is the Air Defense 1 battlefield pose shared by the
+combat and effects scenarios, without their spawned waves.
+
+Builds: `fps04-base` (`main` 4f67e7fa3) and `fps04-head` (the same with the FPS-04
+change), debugoptimized with `b_ndebug=true`, measured one after the other on the
+reference laptop with every peer session idle.
+
+### 12.3 Ultra
+
+GPU milliseconds per frame. Base is the mean of the six base windows; the passes are
+savings when turned off.
+
+| Build | Scene | GPU frame | SSAO | Bloom | Tone map | SMAA | Whole chain |
+|---|---|---:|---:|---:|---:|---:|---:|
+| OpenGL before | hub2 | 7.34 | 2.11 | 0.42 | 0.91 | 0.28 | 3.71 |
+| OpenGL after | hub2 | 6.61 | 1.80 | 0.57 | 0.62 | 0.44 | 2.63 |
+| Vulkan | hub2 | 6.81 | 0.93 | 0.43 | 0.46 | 0.38 | 1.61 |
+| OpenGL before | storage2 | 7.80 | 2.59 | 0.77 | 1.17 | 0.47 | 4.66 |
+| OpenGL after | storage2 | 7.37 | 2.75 | 0.53 | 0.67 | 0.24 | 4.00 |
+| Vulkan | storage2 | 7.96 | 2.57 | 0.43 | 0.76 | 0.37 | 3.61 |
+| OpenGL before | arena | 7.38 | 1.25 | 0.41 | 0.77 | 0.18 | 2.55 |
+| OpenGL after | arena | 6.95 | 0.85 | 0.60 | 0.73 | 0.48 | 1.65 |
+| Vulkan | arena | 7.24 | 1.17 | 0.49 | 0.53 | 0.40 | 1.86 |
+| OpenGL before | airdefense1 | 6.48 | 0.96 | 0.47 | 0.54 | 0.42 | 2.09 |
+| OpenGL after | airdefense1 | 5.86 | 0.19 | 0.10 | 0.23 | 0.23 | 1.35 |
+| Vulkan | airdefense1 | 6.24 | 0.23 | 0.30 | 0.26 | 0.25 | 1.06 |
+| OpenGL before | convoy1 | 7.30 | 1.35 | 0.83 | 0.48 | 0.39 | 1.76 |
+| OpenGL after | convoy1 | 6.73 | 0.41 | 0.41 | 0.45 | 0.29 | 0.77 |
+| Vulkan | convoy1 | 6.59 | 0.76 | 0.40 | 0.32 | 0.17 | 1.18 |
+
+- **The OpenGL Ultra frame is 0.4-0.7 ms of GPU shorter in every scene** and its chain
+  0.7-1.1 ms cheaper. The base windows varied by 0.2-0.7 ms within a launch, except in
+  storage2 (1.8 ms), whose scripted lights change the scene mid-launch on both builds.
+- **SSAO is the largest pass everywhere.** Storage2's near walls give it the widest pixel
+  radius, 2.6-2.75 ms on both backends at full resolution. Where the camera looks across
+  open ground it costs 0.2-1.2 ms.
+- **OpenGL's full-resolution SSAO still costs up to twice Vulkan's in hub2** (1.80 against
+  0.93 ms). The shader is the same. The difference lies outside it, most likely in
+  OpenGL's depth copies for SSAO (the world-only snapshot and the final depth), which half
+  resolution does not shrink (section 12.4); it was not measured separately.
+
+### 12.4 Quality and the half-resolution pass
+
+The same ladder with only SSAO and the whole chain toggled:
+
+| Scene | OpenGL SSAO before / after | OpenGL chain before / after | OpenGL GPU frame before / after | Vulkan SSAO / chain |
+|---|---:|---:|---:|---:|
+| hub2 | 1.42 / 1.01 | 2.20 / 2.10 | 6.17 / 6.00 | 0.11 / 0.76 |
+| storage2 | 1.33 / 0.80 | 2.55 / 2.19 | 5.74 / 5.34 | 0.38 / 1.30 |
+| arena | 0.53 / 0.00 | 1.57 / 1.20 | 6.46 / 6.25 | 0.13 / 0.64 |
+| airdefense1 | 0.25 / 0.03 | 1.35 / 0.90 | 5.92 / 5.72 | 0.14 / 0.74 |
+| convoy1 | 0.62 / 0.13 | 1.34 / 0.96 | 6.90 / 6.71 | 0.12 / 0.56 |
+
+Half resolution takes 0.4-0.55 ms off SSAO where it has work to do and the OpenGL Quality
+frame is 0.2-0.4 ms shorter. Its remaining 0.8-1.0 ms in hub2 and storage2 against
+Vulkan's 0.1-0.4 ms sits outside the occlusion shader, most likely in the depth copies
+named above: the next lever, recorded under section 12.7 and taken in section 12.8. Enhanced (12 samples) takes the same half-resolution path; it was not priced.
+
+### 12.5 Declared budgets and shares
+
+Declared for the Ultra preset on the reference machine at 2560x1440, on both backends,
+in the GPU time of section 12.2: the worse backend's whole-chain cost plus 25 %, rounded
+up to 0.1 ms.
+
+| Scene | Whole-chain budget | OpenGL after | Vulkan | OpenGL before |
+|---|---:|---:|---:|---:|
+| hub2 | 3.3 | 2.63 | 1.61 | 3.71 (over) |
+| storage2 | 5.0 | 4.00 | 3.61 | 4.66 |
+| arena (combat, effects) | 2.4 | 1.65 | 1.86 | 2.55 (over) |
+| airdefense1 | 1.7 | 1.35 | 1.06 | 2.09 (over) |
+| convoy1 | 1.5 | 0.77 | 1.18 | 1.76 (over) |
+
+Each pass has a share of the Ultra refresh-class frame (13.3 ms, section 11.1) that it
+may not exceed in any of these scenes, on either backend:
+
+| Pass | Share of 13.3 ms | Ceiling | Highest after FPS-04 | Highest before (OpenGL) |
+|---|---:|---:|---|---|
+| SSAO | 22.5 % | 3.0 ms | 2.75 storage2, OpenGL | 2.59 storage2 |
+| Tone map | 7.5 % | 1.0 ms | 0.76 storage2, Vulkan | 1.17 storage2 (over) |
+| Bloom | 6 % | 0.8 ms | 0.60 arena, OpenGL | 0.83 convoy1 (over) |
+| SMAA ultra | 4.5 % | 0.6 ms | 0.48 arena, OpenGL | 0.47 storage2 |
+
+The whole chain may take at most 37.5 % of the class frame (storage2) and 25 % elsewhere.
+Every scene and pass is inside its budget on both backends after FPS-04; before it, four
+of the five OpenGL chains, its tone map and its bloom were over. The vehicle level
+(walker) was not priced: its whole Ultra frame is 5.3-5.8 ms (section 11.6.1).
+
+### 12.6 Fullscreen ladders
+
+The same toggles ran fullscreen through `performance_suite.py run --toggle` (`fps04-*` in
+the appendix): Ultra on OpenGL for both builds and on Vulkan, and Quality on OpenGL.
+Six of the 30 launches lost the foreground part-way, which pins a window at exactly
+60 Hz without idling the GPU, so the suite's idle check did not catch it; shell calls of
+other sessions on the shared machine are the likely cause. Where the launches held, the
+Vulkan Ultra ladders were steady (hub2 base windows 7.69-7.76 ms): the chain was 3.66 ms
+of the hub2 frame (SSAO 1.84, bloom 0.63, tone map 0.69, SMAA 0.50) and 2.89 ms in the
+effects wave. Fullscreen frame-interval deltas run 1.4-2 times the hidden GPU deltas of
+section 12.3, in the same order of passes; they also carry CPU and presentation effects
+that a GPU timer does not see, and the two regimes run the GPU at different loads. The
+budgets are stated in the hidden GPU measure only, and the fullscreen frame-rate budgets
+of section 11 remain the frame-rate gate. The OpenGL Quality ladders
+held; their base windows put the after build 0.4-0.5 ms faster outdoors (Air Defense 1,
+convoy1) and within 0.1 ms in hub2, storage2 and the combat wave (the before build's effects
+launch drifted too far to read).
+
+### 12.7 Pictures, and what is left
+
+- **Composition.** Frozen captures at the reference poses of hub2, storage2, the arena,
+  Air Defense 1 and convoy1, multiply composition against `r_glSSAOReferenceComposition 1`
+  in the same launch: at most one level of difference, on 0-439 pixels of 1.93 million.
+- **Half resolution.** The PBR laboratory's matched control (`ssao-classic-half`) now
+  holds OpenGL to Vulkan's limits: the occlusion debug view differs from full resolution by
+  2.07 levels on average with a +0.02 bias and darkens 1.1 % more classic pixels, against
+  Vulkan's 2.07, +0.02 and 1.2 %. The SSAO laboratory controls pass 10/10 on OpenGL with
+  and without the modern visible path and on Vulkan. Final frames at the five poses differ
+  from full resolution by at most one level at the 99th percentile on both renderers.
+- **Not changed:** bloom draws its first level at full resolution on both backends
+  (three full-size passes); starting the pyramid at half size would change the glow and is
+  left to a decision. Ultra's full-resolution SSAO is the user's choice; half resolution
+  would save about 1 ms there. OpenGL's SSAO depth copies, the largest OpenGL-only cost
+  left in the chain, were priced and cut afterwards (section 12.8).
+
+### 12.8 OpenGL's SSAO depth copies (follow-up)
+
+The 0.8-1.0 ms that OpenGL's half-resolution SSAO still cost in hub2 and storage2 was
+almost all one depth copy. OpenGL takes its world-only depth snapshot in a depth fill of
+its own before the prepass: the world surfaces are drawn into the scene's multisampled
+depth, resolved into `_ssaoWorldDepth`, and the depth is cleared again. Vulkan draws the
+world first in its own prepass and copies between the phases.
+
+**Price list** (hidden 2560x1440 window, 2x MSAA at Quality and 4x at Ultra, in-launch
+toggles read as GPU frame time; per-copy timestamps proved useless here, because a
+blit's window absorbs the backlog of the work queued before it):
+
+- The snapshot's resolve costs 0.5-1.0 ms of GPU frame time in hub2 and storage2; the
+  world fill and the clear around it about 0.1 ms. In Air Defense 1, the arena and convoy1,
+  where a portal-sky backdrop view draws into the same scene target first, the same
+  resolve costs nothing measurable.
+- The finished-depth copy SSAO takes for its foreground test, the light grid's
+  `_currentDepth` copy after the prepass and the other finished-depth copies cost about
+  0.1 ms or less each. Outdoors one light-grid copy per frame costs about 0.3 ms even with
+  SSAO off; it is not an SSAO cost (lead below).
+- Copying the multisampled depth unresolved, sample for sample, costs almost nothing.
+  The resolve itself is cheap where the snapshot's first reader needs it, and expensive
+  early in the frame or after the scene's depth has been read before the prepass ended.
+
+**What changed:**
+
+- With a multisampled scene target the snapshot is drawn into a depth target of its
+  own, of the scene depth's format, size and sample count, with the scene's colour image
+  attached but never written, so alpha-to-coverage covers exactly the samples it covered
+  before. The snapshot's first reader (the native-PBR occlusion field, or SSAO itself)
+  resolves it. The samples and the resolve are those of the old path, so the picture does
+  not change. The target costs one depth buffer: about 29 MB at 1440p with 2x MSAA and
+  59 MB with 4x.
+- A view drawn after another 3D view into the same scene target in the same frame (a
+  portal-sky backdrop) keeps the snapshot in the scene's depth: there the old resolve is
+  free and the second target would cost 0.2-0.3 ms.
+- The finished depth is copied once per view for far-depth preservation, SSAO and the cel
+  world ink, which used to copy it two or three times when all were active.
+- `r_glSSAOReferenceSnapshot 1` restores the old in-scene snapshot for comparisons.
+
+A Vulkan-style snapshot between the prepass's phases was tried first and dropped: reading
+the scene's depth halfway through the prepass made the frame 0.2-0.7 ms dearer outdoors.
+
+**Result** (GPU ms per frame, the default path against `r_glSSAOReferenceSnapshot 1` in the
+same launch, three alternating rounds; negative is faster):
+
+| Scene | Quality | Ultra |
+|---|---:|---:|
+| hub2 | -1.05 | -1.03 |
+| storage2 | -0.59 | -0.57 |
+| arena | +0.01 | -0.02 |
+| airdefense1 | -0.07 | -0.09 |
+| convoy1 | -0.05 | -0.04 |
+
+OpenGL's half-resolution SSAO at Quality now costs 0.2-0.4 ms in hub2 and storage2, as
+Vulkan's 0.1-0.4 ms does; its full-resolution Ultra SSAO in hub2 1.1 ms, against 1.80 ms
+before and Vulkan's 0.93 ms. Frozen captures at the five reference poses on OpenGL Quality and Ultra, the default path against `r_glSSAOReferenceSnapshot 1` in the same launch, are identical in the final frame and the occlusion debug view (at most three pixels by one level, on the outdoor poses, where both settings take the same path). The PBR laboratory's SSAO controls pass 10/10 on OpenGL with and without the modern visible path.
+
+**Leads:** the outdoor light-grid copy (about 0.3 ms with SSAO off in Air Defense 1, the arena
+and convoy1, absent indoors), and why the in-scene resolve is free after a portal-sky
+backdrop view, which this measurement only exploits.
+
+## 13. MSAA and the HDR scene target (FPS-05)
+
+FPS-05 measured the sample counts, the HDR scene target and the post-AA alternatives at the
+Ultra preset on both backends, fixed one sample-count policy so that a preset draws the same
+image on both, and made the effective count and its resolves visible.
+
+### 13.1 Method
+
+The FPS-04 method (section 12.2): in-launch toggle ladders in hidden 2560x1440 windows at the
+five reference poses, a 360 degree sweep per 4 s window, `rendererBenchmarkCapture` GPU time,
+each configuration against the mean of its neighbouring Ultra base windows (4x MSAA, SMAA
+ultra, RGBA16F target). Both backends rebuild the scene target on the first frame after an
+`r_multiSamples` or `r_hdrSceneTarget` change, so every count is measured in one launch.
+Runtime `fps05-base` (`main` 6d3f1a566), measured with every peer session holding off. The
+base windows varied by 0.03-0.46 ms within a launch, except storage2 (2.1-2.6 ms), whose
+scripted lights change the scene mid-launch.
+
+### 13.2 Results
+
+GPU milliseconds per frame. "LDR target" is `r_hdrSceneTarget 0` (RGBA8) with the rest of
+Ultra unchanged.
+
+**OpenGL**
+
+| Configuration | hub2 | storage2 | arena | airdefense1 | convoy1 |
+|---|---:|---:|---:|---:|---:|
+| 0x + SMAA | 6.71 | 7.41 | 6.69 | 5.82 | 6.27 |
+| 2x + SMAA | 5.51 | 6.76 | 6.41 | 5.92 | 6.40 |
+| **4x + SMAA (Ultra)** | 6.03 | 7.50 | 6.88 | 5.88 | 6.55 |
+| 8x + SMAA | 7.23 | 9.22 | 8.12 | 6.99 | 7.30 |
+| 16x + SMAA | 14.12 | 18.39 | 16.15 | 11.91 | 13.90 |
+| 4x, no SMAA | 5.61 | 7.06 | 6.54 | 5.84 | 6.42 |
+| No AA | 5.88 | 6.93 | 5.93 | 5.77 | 5.98 |
+| TAA only | 6.71 | 7.76 | 6.34 | 5.70 | 6.52 |
+| 4x + SMAA, LDR target | 5.49 | 6.30 | 6.10 | 5.67 | 6.31 |
+| 0x + SMAA, LDR target | 5.94 | 6.72 | 6.28 | 5.83 | 6.21 |
+
+**Vulkan**
+
+| Configuration | hub2 | storage2 | arena | airdefense1 | convoy1 |
+|---|---:|---:|---:|---:|---:|
+| 0x + SMAA | 5.86 | 7.22 | 6.06 | 5.61 | 5.73 |
+| 2x + SMAA | 6.08 | 7.73 | 6.34 | 5.90 | 6.13 |
+| **4x + SMAA (Ultra)** | 6.82 | 8.82 | 7.22 | 6.17 | 6.51 |
+| 8x + SMAA | 8.64 | 11.34 | 9.58 | 8.16 | 8.81 |
+| 16x request (draws 8x) | 8.65 | 11.42 | 9.61 | 8.14 | 9.05 |
+| 4x, no SMAA | 6.40 | 8.55 | 6.83 | 5.96 | 6.37 |
+| No AA | 5.68 | 6.37 | 6.02 | 5.49 | 5.75 |
+| TAA only | 6.02 | 7.47 | 6.21 | 5.83 | 6.13 |
+| 4x + SMAA, LDR target | 6.34 | 7.49 | 6.69 | 6.08 | 6.11 |
+| 0x + SMAA, LDR target | 5.74 | 5.82 | 5.89 | 5.56 | 5.05 |
+
+- **16 samples are the outlier.** OpenGL draws them (`GL_MAX_SAMPLES` 32) at 2.0-2.5 times the
+  4x frame, 6.0-10.9 ms more, more than the whole post chain of section 12. The Vulkan renderer
+  never draws more than 8 (`VK_Image_SelectSampleCount`), so a 16x request costs exactly what 8x
+  does there: the old Maximum drew two different images.
+- **8x costs 0.75-1.7 ms over 4x on OpenGL and 1.8-2.5 ms on Vulkan**, for edges SMAA ultra
+  already smooths.
+- **4x with SMAA costs little over SMAA alone.** On OpenGL it is within -0.7 to +0.3 ms of 0x +
+  SMAA: SMAA works harder without MSAA (0.5-0.8 ms on its own in the indoor scenes, 0.1-0.4 at
+  4x), so in hub2 4x is cheaper than none. On Vulkan 4x costs 0.6-1.6 ms over SMAA alone.
+- **TAA alone costs what SMAA alone does** (within 0.4 ms either way on both backends) and
+  replaces the geometric smoothing with temporal accumulation; it stays the choice for scaled
+  rendering (`r_temporalAA 2`), not a tier default.
+- **The LDR target saves 0.1-1.3 ms at 4x** but clips the highlights bloom and the tone map are
+  built on, so every tier that tone maps keeps the RGBA16F target (`r_hdrSceneTarget` follows
+  the preset's tone map).
+
+### 13.3 Policy
+
+| Preset | MSAA | Post AA | Why |
+|---|---:|---|---|
+| Minimum, Low Power, Low, Performance | 0 | as FPS-02 | no post chain; unchanged |
+| Balanced | 2x | SMAA medium | unchanged |
+| Enhanced | 0 | SMAA high | FPS-02's choice; MSAA was its largest optional cost |
+| Quality | 2x | SMAA high | on OpenGL often cheaper than SMAA alone (SMAA has fewer edges left); 0.2-0.5 ms over it on Vulkan |
+| **Ultra** | **4x** | SMAA ultra | within 0.3 ms of SMAA alone on OpenGL and 0.6-1.6 ms on Vulkan; 8x costs 0.75-2.5 ms more for little |
+| **Maximum** | **8x** (was a 16x request) | SMAA ultra | the most the Vulkan renderer draws, so Maximum is one image on both renderers; 16x on OpenGL cost 6-11 ms over 4x |
+
+No preset asks for more than 8 samples; the presets self-test enforces it. 16x stays a manual
+choice in the settings menu for OpenGL, and Vulkan reports drawing it at 8x. The count does not
+change with resolution: MSAA's cost scales with the pixel count like the rest of the frame, the
+tier classes are declared at 2560x1440 (section 11.1), and render scale or a lower tier is the
+lever above that.
+
+### 13.4 Visibility
+
+- `gfxInfo` names the clamp on Vulkan (`reason=vulkan-clamp` where it draws fewer samples than
+  asked; OpenGL already reported `gl-max-clamp`) and adds a line with the resolves of the last
+  complete frame, each copy out of a multisampled target (`MSAA resolves last frame: color=1
+  depth=3` at Ultra on both backends since FPS-04 and its follow-up).
+- `r_multiSamplesEffective` (read-only) holds the count the last main scene drew with.
+- The settings menu's MSAA row now carries a note naming the trade-off (each step up costs frame
+  time; Ultra uses 4x with SMAA; Vulkan draws at most 8x) and, where the renderer draws fewer
+  samples than applied, a line naming the count it draws, in all twelve languages.
+
+## 14. The Awakening's outdoor battle (FPS-08 evidence), 17 November 2026
+
+The first Awakening mission's landing-zone battle (`m01_stranarus_trench1`,
+reached with `g_autoSkipCinematics 1` and a teleport to 160 160) was reported as
+very slow. Hidden-window probes on the reference laptop, `.tmp/m01-polish/`:
+
+- **Ultra, 2560x1440, GL:** about 27 ms a frame (frame interval 29-47 ms,
+  spikes near 90 ms): about 7 ms game, 20 ms drawing (`profileFrameWork`,
+  developer off). Ultra's class (75/45) is not met; this scene is not in the suite.
+- **With the AI frozen** (`ai_freeze 1`) the same view takes about 16 ms with
+  shadows on or off, and the point-cube cache size makes no measurable
+  difference: the battle, not the map, costs the frame. 476 light definitions
+  and 44,259 interactions; 80-90 lights in view in the open trench. The share
+  of shadow-casting lights matches retail outdoor maps (35% `noshadows` against
+  22-44% in airdefense1, convoy1, mcc_landing and hub1).
+- **Shadows are not the battle's cost:** about 35 shadowed lights a view,
+  about 26 of them cache hits; about ten fresh passes at 0.1-0.15 ms of GPU each.
+- **CPU samples** (Visual Studio collector, xperf): drawing about 33% of the
+  process, game 22%, the OpenGL driver 17%. In the game module,
+  `idClip::ClipModelsTouchingBounds` and `idClipModel::Unlink` took about 48%.
+  Interaction creation for animated models (`R_CreateLightTris`,
+  `R_CalcInteractionCullBits`) took about 12% of the process.
+
+Three changes with the same results, each with a switch to compare (`g_clipFastQueries 0` for the
+first two):
+
+1. `idClip::Contents` gathered every clip model (`-1`) and filtered by its
+   content mask afterwards, defeating the sector contents test for every point
+   query: openQ4's liquid probes for each projectile, physics particle and AI,
+   every frame. It now gathers by the mask. Its share of trace gathering fell
+   from about 58% to 8%.
+2. `idClipModel::Unlink` rescanned every link in a sector for each sector a
+   moving model left. It now marks the sector's contents summary stale (still a
+   superset), and a query that would scan the sector refreshes it first.
+   `Unlink` fell from about 516k samples to 13k (plus 86k of refreshes).
+
+3. `R_CalcInteractionCullBits` tested each vertex of a surface against every
+   light-frustum plane crossing it in a separate `Dot` + `CmpLT` pass, so an
+   animated character in a light's corner was read up to six times per light,
+   every frame. On x64, while the SSE2 SIMD processor is active, the kernel in
+   `src/rendergeo/InteractionCullBits.h` reads each vertex once and evaluates
+   the same planes with the same arithmetic in the same order: the bits are
+   identical. `tools/tests/interaction_cull_bits_test.py` compiles the engine's
+   own `Dot` and `CmpLT` code as the reference and compares 2.49 million
+   vertices over every skip mask and vertex counts 0-52, including vertices
+   placed on the epsilon (a one-rounding change to the sum order fails it).
+   In the battle the cull-bit work fell from 25.3% to about 17% of the
+   renderer's samples. `r_cullBitsOnePass 0` restores the per-plane passes.
+
+Changes 1 and 2 cut about 10% of game-module time in the battle. Wall-clock A/B windows
+were not usable: with `notarget` the spawners keep adding enemies nobody kills,
+and other sessions loaded the machine to 100%, so the evidence is CPU-sample
+shares from two runs. The remaining clip cost is ordinary movement traces
+(projectile and monster slide moves, ground contacts). Not done: animated
+models still rebuild every light interaction every frame (`R_CreateLightTris`
+about 4% of the process after change 3), the driver's submission cost, and the
+4-5% spent in OpenAL mixing.
+
 ## Appendix: artifacts
 
 Everything below lives in the repository's ignored `.tmp/` tree on the measurement machine;
@@ -1383,6 +1765,8 @@ and paks; SHA-256 of `openQ4-client_x64.exe`):
 | `perf-bisect-834564945` | `main` at 834564945 (2 October), pass 1 | `93b50504578f6b2172897b0164b3355799b819c725e2460406b0c5e9b26e14af` |
 | `perf-bisect-156ced3fd` | `main` at 156ced3fd (15 October), pass 2, client-only staging | `32dc13aafe9d1776034e5afdf244cff31cd35040037dce49fafa6426805235fd` |
 | `perf-ref` | `main` 94e0b14ec, debugoptimized, b_ndebug, staged from `.install` (the FPS-01 reference runtime, section 10) | `44064cda370395a79c14a2e899647027ad113283d7c03e155e24f476ed2efd4b` |
+| `fps04-base` | `main` 4f67e7fa3, debugoptimized, b_ndebug (worktree `.tmp/wt-fps03`, build `.tmp/fps03-build`), section 12 before | `dae2d0d55c0babff9064667b285829213f67534567772c700ea3096eac7497e7` (renderer-gl `a088d314...`) |
+| `fps04-head` | the same with the FPS-04 change, section 12 after | `986ba61998357430ca29b3385dd668857b43eda196f9d6027d682bfde3ced8c4` (renderer-gl `fb407391...`) |
 
 `perf-bisect-56a74bd48` (22 October) was built but not measured before the chain was paused.
 The renderer and game modules of `perf-head` carry PDB paths into `.tmp/perf-build-head`,
@@ -1432,6 +1816,9 @@ launches follow it in the order of its `summary.jsonl`):
 | `.tmp/perf-suite/screen3-gl`, `screen3-vk` | three candidates (`perf-ref`) | gl, vk | the same five | 15 each | 2026-11-09 01:29, 01:51 | section 11.2 |
 | `.tmp/perf-suite/fps02-gl` | ultra/quality/enhanced (`perf-head`, FPS-02 build) | gl | the seven timed scenarios | 63 | 2026-11-09 02:38 | section 11.6, FPS-02 reference run |
 | `.tmp/perf-suite/fps02-vk` | ultra/quality/enhanced (`perf-head`, FPS-02 build) | vk | the seven timed scenarios | 63 | 2026-11-09 04:02 | section 11.6 |
+| `.tmp/perf-suite/fps04-ultra-gl`, `fps04-ultra-vk`, `fps04-quality-gl` | head/base (`fps04-head`, `fps04-base`) | gl, vk, gl | the six multi-pass timed scenarios, toggle ladders | 12, 6, 12 | 2026-11-12 19:49, 20:29, 20:50 | section 12.6; six launches lost the foreground |
+| `.tmp/fps03-close/price/` | before/after (`fps04-base`, `fps04-head`) | gl, vk | hub2, storage2, arena, airdefense1, convoy1, hidden GPU ladders | 30 | 2026-11-12 21:11 | sections 12.3-12.5 (`pricesummary.py`) |
+| `.tmp/fps03-close/img/` | before/after | gl, vk | the same five poses, frozen captures | 20 | 2026-11-12 18:58 | section 12.7 (`imgsummary.py`) |
 
 **Chain scripts and kits** (`.tmp/perf/`): `phase2.sh` and `phase3.sh` with their step
 scripts (`run_matrix.sh`, `run_toggles.sh`, `run_msaa.sh`, `run_default.sh`,

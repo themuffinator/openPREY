@@ -643,7 +643,12 @@ static bool R_ShadowMapCasterIsDynamic( const idRenderEntityLocal *entityDef, co
 	// entity the game updates once a tic is untouched on the frames between
 	// tics whenever the display outruns the tic rate, and a one-frame window
 	// then moved it into the static set and back every tic.
-	const int recentFrame = tr.frameCount - R_ShadowMapDynamicCasterFrames();
+	//
+	// The frame a change must postdate never moves back
+	// (R_ShadowMapLiveCasterSinceFrame): asked afresh as the current frame
+	// less the window, a caster that had aged out was live again whenever the
+	// frame rate rose and the window grew.
+	const int recentFrame = R_ShadowMapLiveCasterSinceFrame();
 	if ( entityDef->lastModifiedFrameNum >= recentFrame ) {
 		return true;
 	}
@@ -690,7 +695,15 @@ static void R_RecordShadowMapCaster( viewLight_t *vLight,
 	if ( dynamicCaster ) {
 		return;
 	}
-	int hash = ( vLight->shadowMapCasterSignature != 0 ) ? vLight->shadowMapCasterSignature : static_cast<int>( 2166136261u );
+	// Each caster is hashed by itself and the hashes are added up. Casters
+	// reach a light in the order their entities are walked, and that order
+	// follows the view: R_SortViewEntities sorts by model and then by the
+	// address this frame happened to give each view entity, so two casters
+	// that share a model change places as the camera moves. The depth they
+	// write does not depend on the order, and chained into one running hash
+	// it did: a still light with still casters rendered its maps again for
+	// nothing. A sum does not care which caster came first.
+	int hash = static_cast<int>( 2166136261u );
 	hash = R_ShadowMapHashInt( hash, entityDef != NULL ? entityDef->index : -1 );
 	hash = R_ShadowMapHashInt( hash, shader != NULL ? static_cast<int>( shader->Coverage() ) : -1 );
 	hash = R_ShadowMapHashString( hash, shader != NULL ? shader->GetName() : NULL );
@@ -726,7 +739,18 @@ static void R_RecordShadowMapCaster( viewLight_t *vLight,
 			hash = R_ShadowMapHashFloat( hash, entityDef->modelMatrix[i] );
 		}
 	}
-	vLight->shadowMapCasterSignature = hash;
+	// spread the bits before adding, so that two casters differing in one
+	// field do not cancel against two others differing the same way
+	unsigned int mixed = static_cast<unsigned int>( hash );
+	mixed ^= mixed >> 16;
+	mixed *= 0x85ebca6bu;
+	mixed ^= mixed >> 13;
+	mixed *= 0xc2b2ae35u;
+	mixed ^= mixed >> 16;
+	// Unsigned, so the sum wraps. Nothing reads zero as "no static caster":
+	// the cache keys carry the static caster count beside the signature.
+	vLight->shadowMapCasterSignature = static_cast<int>(
+		static_cast<unsigned int>( vLight->shadowMapCasterSignature ) + mixed );
 }
 
 static void R_RecordShadowMapRejectedCaster( viewLight_t *vLight, const shadowMapCasterRejectReason_t reason ) {
@@ -1955,19 +1979,32 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 			interactionGenerated = true;
 		}
 
-		// Dynamic-model volumes are regenerated every time the entity
-		// animates, so they are left out while the light renders shadow maps.
+		// A volume that is thrown away with its interaction is left out while
+		// the light renders shadow maps. That is every volume of a dynamic
+		// model, which is regenerated each time the entity animates, and
+		// every volume under a light that moves, whose interactions are all
+		// built again each time it does. lightHasMoved is the engine's own
+		// mark for such a light, the one that drops its prelight. storage2's
+		// alarm lights built 27 volumes a frame this way and drew none.
 		// AddActiveInteraction builds the surfaces again, with their volumes,
-		// once the light returns to stencil. Static volumes are built once
-		// and kept so the per-light stencil fallback stays instant.
-		const bool suppressDynamicShadowVolume =
+		// once the light returns to stencil.
+		//
+		// The volumes of a static model under a light that has never moved
+		// are built once and kept, so that the light's stencil fallback stays
+		// instant. They are cheap: about 7 ms and 4 MiB of index lists for
+		// all of hub2, 5 to 10 parts in a hundred of what building its
+		// interactions takes, and leaving them out would mean building each
+		// interaction again whole when the light returned to stencil.
+		const bool volumeIsRegenerated =
+			entityModelIsDynamic || lightDef->lightHasMoved;
+		const bool suppressRegeneratedShadowVolume =
 			surfaceCanCastStencilShadowVolume && shadowLODAdmitted &&
 			( surfaceCanCastDedicatedShadowMap ||
 				surfaceCanCastTranslucentShadowMap ) &&
-			entityModelIsDynamic &&
+			volumeIsRegenerated &&
 			!forcePointEmitterStencilGeneration &&
 			R_ShadowMapLightWillUseShadowMaps( lightDef );
-		if ( suppressDynamicShadowVolume ) {
+		if ( suppressRegeneratedShadowVolume ) {
 			// shadow ownership stays with this interaction even without volumes
 			interactionGenerated = true;
 			shadowVolumesSuppressed = true;
@@ -2079,6 +2116,38 @@ static bool R_PotentiallyInsideInfiniteShadow( const srfTriangles_t *occluder,
 
 	// the view is definitely not inside the projected shadow
 	return false;
+}
+
+/*
+==================
+R_InteractionMaterialNoSelfShadow
+
+Whether a surface keeps its material's noSelfShadow ownership in this light:
+a noSelfShadow receiver catches no shadow from noSelfShadow casters, and a
+noSelfShadow caster's shadow reaches only ordinary receivers.  Quake 4 marks
+its characters this way so the original stencil shadows never drew faceted
+self-shadows across their low-polygon bodies.
+
+openQ4 (#238): with r_shadowMapCharacterSelfShadow, a skinned model (a
+character, creature or animated machine) is treated as an ordinary caster and
+receiver under a light drawn with shadow maps, whose filtered edges hold up on
+those bodies.  It then shadows itself, other characters and noSelfShadow
+props.  Stencil-shadowed lights keep the original rule, and so does an entity
+that asks for noSelfShadow itself: the players' bodies and their view and
+world weapons, whose shadows would otherwise fall on the view weapon.
+==================
+*/
+static bool R_InteractionMaterialNoSelfShadow( const idRenderEntityLocal *entityDef, const idMaterial *material,
+		bool shadowMapped ) {
+	if ( !material->TestMaterialFlag( MF_NOSELFSHADOW ) ) {
+		return false;
+	}
+	if ( shadowMapped && r_shadowMapCharacterSelfShadow.GetBool() &&
+		 entityDef->parms.joints != NULL && entityDef->parms.numJoints > 0 &&
+		 !entityDef->parms.noSelfShadow ) {
+		return false;
+	}
+	return true;
 }
 
 /*
@@ -2205,9 +2274,10 @@ void idInteraction::AddActiveInteraction( void ) {
 	}
 	dynamicModelFrameCount = entityDef->dynamicModelFrameCount;
 
-	// These surfaces were built without their dynamic volumes for a light that
-	// was going to render shadow maps. An entity that has stopped animating
-	// keeps them, so build them again once the light returns to stencil for
+	// These surfaces were built without their volumes for a light that was
+	// going to render shadow maps. An entity that has stopped animating keeps
+	// them, and so does every entity under a light that has stopped moving,
+	// so build them again once the light returns to stencil for
 	// every view: the sticky fallback, an update budget, a receiver that needs
 	// stencil. A subview policy alone is not such a return. There the missing
 	// volumes already make the map required, and rebuilding would repeat for
@@ -2390,7 +2460,8 @@ void idInteraction::AddActiveInteraction( void ) {
 					}
 
 					const idMaterial *surfaceShader = sint->shader;
-					const bool materialNoSelfShadow = surfaceShader->TestMaterialFlag( MF_NOSELFSHADOW );
+					const bool materialNoSelfShadow = R_InteractionMaterialNoSelfShadow(
+						entityDef, surfaceShader, shadowMapCasterPolicyActive );
 					const materialCoverage_t surfaceCoverage = surfaceShader->Coverage();
 					const idMaterial *shader = surfaceShader;
 					R_GlobalShaderOverride( &shader );
@@ -2445,7 +2516,7 @@ void idInteraction::AddActiveInteraction( void ) {
 		// whether a surface casts or locally routes its shadows. The static world
 		// under a prelit light is the exception retail makes: global ownership.
 		const bool materialNoSelfShadow = !prelightOwnsShadows
-			&& shadowShader->TestMaterialFlag( MF_NOSELFSHADOW );
+			&& R_InteractionMaterialNoSelfShadow( entityDef, shadowShader, shadowMapCasterPolicyActive );
 		const int shadowReceiverMask = materialNoSelfShadow
 			? SHADOWMAP_RECEIVER_MASK_GLOBAL
 			: ( SHADOWMAP_RECEIVER_MASK_LOCAL | SHADOWMAP_RECEIVER_MASK_GLOBAL );
@@ -2607,6 +2678,20 @@ void idInteraction::AddActiveInteraction( void ) {
 			shadowTris != NULL &&
 			!shadowMapCasterOnly &&
 			R_ShadowMapLightWillUseShadowMaps( lightDef );
+		// A volume this view goes without because the light is going to render
+		// shadow maps: one that exists and is not linked, or one that was left
+		// out when the surfaces were built. A back end that then finds nothing
+		// to cast in a receiver pass knows from this that the map has failed;
+		// without it the light simply has nothing to shadow there
+		// (R_ShadowMapEmptyPassHasStencilVolumes).
+		const bool volumeSuppressedForShadowMaps =
+			shadowTris == NULL &&
+			shadowVolumesSuppressed &&
+			sint->shadowStencilEligible &&
+			!sint->shadowStencilUsesPrelight;
+		if ( volumeElidedForShadowMaps || volumeSuppressedForShadowMaps ) {
+			vLight->shadowMapElidedStencilMask |= shadowReceiverMask;
+		}
 		bool mapMissingNeedsVisibleVolume = false;
 		bool mappedCasterNeedsVisibleFallbackVolume = false;
 

@@ -17,9 +17,11 @@
 #include "../sys/KeyEventMetadata.h"
 #include "application/SettingsTransaction.h"
 #include "../framework/ParallelJobSystem.h"
+#include "retained/VectorCompile.h"
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -257,6 +259,7 @@ bool SessionMenuCommand(const std::string& command) {
         "joinSourceLan","joinClearSort","joinSortFavorite","joinSortLocked","joinSortName","joinSortPing","joinSortPlayers",
         "joinSortGameType","joinSortMap","joinSortDedicated","joinSortRepeater","joinFavorite","joinModPrevious","joinModNext",
         "joinFilterFull","joinFilterEmpty","joinFilterPassword","joinGameTypePrevious","joinGameTypeNext","joinClearFilters",
+        "msgLeft","msgRight","msgMid","presetCheckApply","presetCheckKeep","presetCheckLater",
         "noticeAction0","noticeAction1","noticeAction2","audioBack","gameBack","controlsBind","controlsClear","controlsBack","controlsTouchLayout",
         "settingsBack","settingsControls","settingsGame","settingsDisplay","settingsAudio","settingsDefaults",
         "joinConnect","joinSearch","joinSearchClear","joinSortNext",
@@ -264,7 +267,7 @@ bool SessionMenuCommand(const std::string& command) {
         "mpSelectPlayer","mpMute","mpFriend","mpWelcomeAction","mpVoteYes","mpVoteNo","mpCallVote",
         "mpRail","mpSettingsControls","mpSettingsGame","mpSettingsSystem","mpMatch","mpMatchSelect","mpSummaryChat",
         "mpAdminPass","mpAdminSelect","mpAdminKick","mpAdminBan","mpAdminSwitch","mpAdminBans","mpAdminBanPick","mpAdminUnban",
-        "mpAdminApply","mpAdminConsole","mpRefereeLogin","mpSettingsName","mpSettingsClan",
+        "mpAdminApply","mpAdminConsole","mpRefereeLogin","mpSettingsName","mpSettingsClan","mpBuy",
         "arenaRestart","arenaLeave",
         // openPREY: New Game's skill frame and Prey's menu sounds (Session_menu.cpp).
         "newGameNormal","newGameWicked","newGameCasino",
@@ -276,6 +279,22 @@ bool SessionMenuCommand(const std::string& command) {
 bool SessionMenuPlayerCommand(const std::string& command) {
 	return command == "mpSelectPlayer" || command == "mpMute" || command == "mpFriend" ||
 		command == "mpAdminSelect" || command == "mpAdminKick" || command == "mpAdminBan" || command == "mpAdminSwitch";
+}
+
+// The buy card's purchase: the item's place in the game's catalog.
+bool SessionMenuBuyCommand(const std::string& command) {
+	return command == "mpBuy";
+}
+
+// Freeze the item when its plate is chosen, as the player rows freeze theirs.
+std::optional<std::string> SessionMenuBuyRequest(const ActionInvocation& invocation) {
+	const auto command = invocation.arguments.find("command"), item = invocation.arguments.find("item");
+	if (invocation.arguments.size() != 2 || command == invocation.arguments.end() || item == invocation.arguments.end() ||
+		!std::holds_alternative<std::string>(command->second) || !SessionMenuBuyCommand(std::get<std::string>(command->second)) ||
+		!std::holds_alternative<double>(item->second)) return {};
+	const double index = std::get<double>(item->second);
+	if (!std::isfinite(index) || index < 0 || index >= 64 || std::floor(index) != index) return {};
+	return std::get<std::string>(command->second)+" "+std::to_string(static_cast<int>(index));
 }
 
 bool SessionMenuSaveCommand(const std::string& command) {
@@ -333,9 +352,12 @@ bool SessionMenuValueCommand(const std::string& command) {
 		"createGameType","createLan","createDedicated","createAutoBalance","createFragLimit","createCaptureLimit","createControlTime",
 		"createTimeLimit","createMaxPlayers","createMinPlayers","createVoting","createTeamDamage","createTourneyLimit","createUsePass",
 		"createServerMods","createWeaponStay","createPure","createRate","createReady","createSpectators","createWarmup","createVoice",
-		"createBuying","createBots","createBotSkill",
+		"createBuying","createBots","createBotSkill","createShuffle","createOvertime","createMercy","createRoundLimit",
+		"createRuleset","createGrapple","createInstagib",
+		"createQuadHog","createVampiric","createFrenzy","createWeaponArena","createPowerups","createSelfDamage","createKnockback",
+		"createFallDamage","createWeaponRespawn","createPreset",
 		"audioVolume","audioMusic","audioDialogue","audioBackend","audioDevice","audioEax","audioSpeakers","audioHrtf",
-		"audioSubtitles","audioSubtitleSize","audioSubtitleBackground","audioSubtitleSpeakers",
+		"audioSubtitles","audioSubtitleSize","audioSubtitleBackground","audioSubtitleSpeakers","audioSubtitleUntranscribed",
 		"gameGunPosition","gameForceModel","gameCrosshair","gameCorpseTime","gameLanguage",
 		// openPREY: the Options page's Video tab (Session_menu.cpp).
 		"videoMode","videoMonitor","videoRefresh","videoMaxFps","videoPreset","videoFullscreen"};
@@ -343,8 +365,10 @@ bool SessionMenuValueCommand(const std::string& command) {
 }
 
 // The player settings a retained page may change ("settings.player.set"):
-// the multiplayer card's Settings and Voice pages and the GAME OPTIONS page
-// (tools/ui/retained_game.py). Each takes what its stock control offers: a
+// the multiplayer card's Settings and Voice pages, the GAME OPTIONS page
+// (tools/ui/retained_game.py) and the CONTROLS page's MOUSE and
+// CONTROLLER tabs (tools/ui/retained_controls.py), whose rows the stock GAME
+// OPTIONS page held. Each takes what its stock control offers: a
 // slider's range (whole numbers for an integer setting), a Boolean, or one
 // of a list's values, as text (which pages read back as the setting's text,
 // so a float list matches exactly) or as numbers.
@@ -359,6 +383,8 @@ const PlayerSetting* FindPlayerSetting(const std::string& cvar) {
 		"1 0.1 0.85","1 1 1"};
 	static const std::map<std::string,PlayerSetting> settings = {
 		{"ui_handicap",{0,1,100,true}},
+		// Join Game's list view: rows or tiles.
+		{"ui_browserView",{0,0,1,true,{},{0,1}}},
 		{"cl_player_outline_enemy",{2,0,0,false,levels}},{"cl_player_outline_team",{2,0,0,false,levels}},
 		{"cl_player_rimlight_enemy",{2,0,0,false,levels}},{"cl_player_rimlight_team",{2,0,0,false,levels}},
 		{"cl_player_brightskin_enemy",{2,0,0,false,levels}},{"cl_player_brightskin_team",{2,0,0,false,levels}},
@@ -368,8 +394,9 @@ const PlayerSetting* FindPlayerSetting(const std::string& cvar) {
 		{"s_voiceChatSend",{1}},{"s_voiceChatReceive",{1}},{"s_voiceChatEcho",{1}},
 		{"s_voiceChatCapture",{1}},{"s_voiceChatTest",{1}},
 		{"s_voiceVolume",{0,0,1}},{"s_micInputLevel",{0,0,10}},
-		// The GAME OPTIONS page, in its order.
-		{"in_freeLook",{1}},{"ui_autoReload",{1}},{"ui_autoSwitch",{1}},{"in_toggleZoom",{1}},{"pm_zoomedSlow",{0,1,100,true}},
+		// The stock GAME OPTIONS page, in its order (mouse and controller
+		// now on CONTROLS).
+		{"in_freeLook",{1}},{"ui_autoReload",{1}},{"ui_autoSwitch",{0,0,2,true,{},{0,1,2}}},{"in_toggleZoom",{1}},{"pm_zoomedSlow",{0,1,100,true}},
 		{"g_decals",{1}},{"ui_showGun",{1}},{"g_simpleItems",{0,0,3,true,{},{0,1,2,3}}},
 		{"g_mpFlatOpponentWeapons",{0,0,1,true,{},{0,1}}},{"m_pitch",{2,0,0,false,{"0.022","-0.022"}}},{"m_smooth",{0,1,8,true}},
 		{"sensitivity",{0,0.01,30,false}},{"m_cpi",{0,0,32000,false}},{"m_filter",{0,0,31,true}},{"cl_mouseAccel",{0,-5,5,false}},
@@ -388,15 +415,15 @@ const PlayerSetting* FindPlayerSetting(const std::string& cvar) {
 		{"ui_hudWidth",{0,0,2,true,{},{0,1,2}}},{"ui_hudSafeInset",{0,0,10,false}},{"g_objectivesToggle",{1}},
 		{"ui_hudOpacity",{0,0.25,1,false}},{"ui_hudDamageDirection",{1}},{"ui_hudPickups",{1}},{"ui_hudWeaponStrip",{1}},
 		{"ui_reducedFlashing",{1}},{"ui_retainedOpaqueBacking",{1}},{"g_corpseSink",{0,0,2,true,{},{0,1,2}}},{"con_allowConsole",{0,0,1,true,{},{0,1}}},
-		{"g_autoSkipCinematics",{1}},{"ui_cinematicShake",{0,0,1,false}},
+		{"r_screenshotFormat",{0,0,1,true,{},{0,1}}},{"g_autoSkipCinematics",{1}},{"ui_cinematicShake",{0,0,1,false}},{"g_screenShake",{0,0,1,false}},{"g_enhancedPhysics",{1}},
 		{"cl_gunfov",{0,0,179,false}},{"cl_gunfov_adjust",{0,0,1,true,{},{0,1}}},
-		{"cl_gun_x",{0,-5,5,false}},{"cl_gun_y",{0,-5,5,false}},{"cl_gun_z",{0,-5,5,false}},{"g_weaponMuzzleKick",{1}},
+		{"cl_gun_x",{0,-5,5,false}},{"cl_gun_y",{0,-5,5,false}},{"cl_gun_z",{0,-5,5,false}},{"g_weaponMuzzleKick",{1}},{"g_viewKick",{0,0,1,false}},
 		{"vr_enable",{0,0,1,true,{},{0,1}}},{"vr_aimMode",{0,0,1,true,{},{1,0}}},{"vr_leftHanded",{0,0,1,true,{},{0,1}}},
 		{"vr_turnMode",{0,0,1,true,{},{0,1}}},{"vr_snapTurnAngle",{0,30,90,true,{},{30,45,60,90}}},
 		{"vr_moveDirection",{0,0,1,true,{},{0,1}}},{"vr_roomScale",{0,0,1,true,{},{0,1}}},{"vr_aimLaser",{0,0,2,true,{},{0,1,2}}},
 		{"vr_hapticStrength",{2,0,0,false,{"0","0.5","1"}}},{"vr_twoHanded",{0,0,1,true,{},{0,1}}},
 		{"vr_comfortVignette",{2,0,0,false,{"0","0.5","1"}}},{"vr_physicalCrouch",{0,0,1,true,{},{0,1}}},
-		{"vr_playSpace",{0,0,2,true,{},{0,1,2}}},
+		{"vr_playSpace",{0,0,2,true,{},{0,1,2}}},{"vr_body",{0,0,2,true,{},{0,1,2}}},
 		// openPREY: Prey's Options page, Game Options tab (guis/menu/settings.rui),
 		// beside the settings above that it shares with Quake 4's.
 		{"g_showHud",{1}},{"g_subtitles",{1}},{"com_profanity",{1}},{"g_useDDA",{1}},
@@ -479,6 +506,10 @@ bool ValidOperation(const Action& action) {
 			return action.arguments.size() == 3 && index != action.arguments.end() && index->second.type == 0 &&
 				generation != action.arguments.end() && generation->second.type == 0;
 		}
+		if (literal && SessionMenuBuyCommand(std::get<std::string>(expression.literal))) {
+			const auto item = action.arguments.find("item");
+			return action.arguments.size() == 2 && item != action.arguments.end() && item->second.type == 0;
+		}
 		if (literal && SessionMenuPlayerCommand(std::get<std::string>(expression.literal))) {
 			const auto client = action.arguments.find("client"), identity = action.arguments.find("identity");
 			return action.arguments.size() == 3 && client != action.arguments.end() && client->second.type == 0 &&
@@ -535,6 +566,11 @@ bool ValidInvocation(const ActionInvocation& invocation, std::string& error) {
 			SessionMenuSaveCommand(std::get<std::string>(command->second))) {
 			if (SessionMenuSaveRequest(invocation)) return true;
 			error = "Invalid save catalog identity: "+invocation.action; return false;
+		}
+		if (command != invocation.arguments.end() && std::holds_alternative<std::string>(command->second) &&
+			SessionMenuBuyCommand(std::get<std::string>(command->second))) {
+			if (SessionMenuBuyRequest(invocation)) return true;
+			error = "Invalid buy catalog item: "+invocation.action; return false;
 		}
 		if (command != invocation.arguments.end() && std::holds_alternative<std::string>(command->second) &&
 			SessionMenuPlayerCommand(std::get<std::string>(command->second))) {
@@ -646,7 +682,7 @@ bool ValidateApplication(const DocumentModel& model, std::string& error) {
 				!std::holds_alternative<ScrollSpec>(control.widget)) {
 				error = "Scrollbar has invalid application output: " + node->id; return false;
 			}
-		} else if (node->control && (node->control->event.empty() ? !model.actions.contains(node->control->action) :
+		} else if (node->control && node->control->input == ControlInput::None && (node->control->event.empty() ? !model.actions.contains(node->control->action) :
 			!model.events.contains(PresentationAliasKey(node->control->event)))) {
 			error = "Control has no typed application action or event: " + node->id; return false;
 		}
@@ -813,6 +849,46 @@ struct idUserInterfaceRetained::Impl {
 			it = sessionNumbers.erase(it);
 		}
 	}
+	// A cue from an event this adapter ran itself: a shortcut's onTab* or
+	// onSecondary, or a swipe. The runtime cannot see those.
+	std::optional<ControlCue::Kind> shortcutCue;
+	// The stock menu sounds (visual section 8), at most one per input event:
+	// main_menu_selection when anything was activated, else main_menu_mouseover
+	// when the lit control moved. A tap that both lands and activates, or a
+	// key that lights a control as it cycles it, sounds its activation alone.
+	// They play in the world the session has playing, so the in-game
+	// multiplayer menus sound over the match as the stock ones did, on the
+	// local channel the session's play command uses: a selection cuts short
+	// the tick before it, and the music is untouched.
+	void PlayCues() {
+		auto* runtime = RuntimeView();
+		if (!runtime) return;
+		auto cues = runtime->TakeCues();
+		if (shortcutCue) cues.push_back({*shortcutCue,{}});
+		shortcutCue.reset();
+		if (cues.empty()) return;
+		const auto chosen = std::find_if(cues.begin(),cues.end(),[](const ControlCue& cue) { return cue.kind == ControlCue::Kind::Activate; });
+		const auto& cue = chosen != cues.end() ? *chosen : cues.front();
+		const bool activate = cue.kind == ControlCue::Kind::Activate;
+		const char* shader = activate ? "main_menu_selection" : "main_menu_mouseover";
+		idSoundWorld* world = soundSystem != NULL ? soundSystem->GetPlayingSoundWorld() : NULL;
+#if defined(HUMANHEAD)
+		// openPREY: PREY declares neither stock cue. Its documents name the menu sound
+		// each event plays (soundClick, soundTick and the rest, Session_menu.cpp), as
+		// retail PREY's GUIs do, so the stream stays silent rather than play a
+		// default sound beside them.
+		const bool playStockCue = false;
+#else
+		const bool playStockCue = true;
+#endif
+		if (world && playStockCue) world->PlayShaderDirectly(shader,1);
+		if (cvarSystem->GetCVarBool("ui_retainedTrace")) {
+			const char* playing = !world ? "none" : world == soundSystem->GetSoundWorldFromId(SOUNDWORLD_MENU) ? "menu" :
+				world == soundSystem->GetSoundWorldFromId(SOUNDWORLD_GAME) ? "game" : "other";
+			common->Printf("RETAINED_GUI_SOUND path=%s cue=%s node=%s shader=%s world=%s cues=%u\n",
+				path.c_str(),activate ? "activate" : "focus",cue.node.c_str(),shader,playing,static_cast<unsigned>(cues.size()));
+		}
+	}
 	bool interactive = true, interactiveSet = false, unique = false, active = false;
 	bool suspended = false, close = false, worldReported = false;
 	// openq4_retainedGui pointer placed the cursor: it shows although the
@@ -821,6 +897,9 @@ struct idUserInterfaceRetained::Impl {
 	bool unavailable = false;
 	bool drawSucceeded = false;
 	bool initialized = false;
+	// Drawn for presentation at least once; prepared ahead of that, out of
+	// sight (UI_RetainedWarm), and how far: compilations gathered, installed.
+	bool presented = false, warmed = false, warmGathered = false, warmInstalled = false;
 	bool settingsFields = false, settingsClosePending = false;
 	std::uint64_t settingsOwner = UI_SettingsCreateOwner();
 	float cursorX = 320, cursorY = 240;
@@ -1029,6 +1108,28 @@ struct idUserInterfaceRetained::Impl {
 			if (promptApplication.contains(id)) DirtyApplication(id.c_str());
 		}
 	}
+	// The viewport the document draws in. A view-height canvas (title, pause
+	// and loading screens) follows the view height instead of display density;
+	// the safety fit is irrelevant to it.
+	bool DocumentViewport(Viewport& viewport) const {
+		if (!RetainedUI_DefaultViewport(viewport)) return false;
+		if (document.Model().canvasHeight > 0) {
+			viewport.canvasHeight = static_cast<float>(document.Model().canvasHeight); viewport.fitScale = 1;
+			viewport.canvasMinWidth = static_cast<float>(document.Model().canvasMinWidth);
+		}
+		return true;
+	}
+	// After a frame: the writes of the timeline completion programs it ran,
+	// and the detail subject it settled on, for the session to describe.
+	void PublishFrame() {
+		auto* runtime = RuntimeView();
+		if (!runtime) return;
+		PublishWrites(runtime->TakeCompletionWrites());
+		if (document.Model().detail) {
+			StateValue subject;
+			if (runtime->GetStateValue(document.Model().detail->state,subject)) PublishWrites({{document.Model().detail->state,subject}});
+		}
+	}
 	bool RunEvent(const std::string& name) {
 		// A click can detach a field after Prepare. Programs must see its fresh
 		// local draft status before deciding whether Back may close the page.
@@ -1147,7 +1248,10 @@ struct idUserInterfaceRetained::Impl {
 		if (control || alt) return false;
 		const auto widget = RuntimeView()->GetWidgetState(RuntimeView()->FocusedControl());
 		if (widget && widget->role == ControlRole::Number && widget->number && widget->number->active) return false;
-		RunEvent(name); return true;
+		// A shortcut presses the button it stands for; paging lists only moves
+		// the focus between them.
+		if (RunEvent(name)) shortcutCue = key == K_JOY16 || key == K_JOY15 ? ControlCue::Kind::Focus : ControlCue::Kind::Activate;
+		return true;
 	}
 	bool TextCommandKey(int key, bool down, bool repeated, const openq4::KeyEventMetadata* metadata) {
 		auto* runtime = RuntimeView();
@@ -1248,23 +1352,30 @@ size_t idUserInterfaceRetained::Size() { return sizeof(*this)+sizeof(Impl)+impl-
 int idUserInterfaceRetained::NumTransitions() { return static_cast<int>(impl->document.Model().timelines.size()); }
 
 // The parse UI_RetainedPrefetchDocuments made of this source, if it made one.
-bool UI_RetainedTakePrefetched(const std::string& path, const std::string& source, Document& document);
+bool UI_RetainedTakePrefetched(const std::string& path, int size, std::string& source, ID_TIME_T& stamp, Document& document);
 
 bool idUserInterfaceRetained::InitFromFile(const char* qpath, bool rebuild, bool cache) {
 	if (!UI_IsRetainedPath(qpath)) return false;
 	const std::string path(qpath);
 	if (path.find("..") != std::string::npos || path.find(':') != std::string::npos || path[0] == '/' || path[0] == '\\') return false;
-	void* data = nullptr; ID_TIME_T stamp = 0;
+	ID_TIME_T stamp = 0;
 	const int expectedSize = fileSystem->ReadFile(path.c_str(),nullptr);
 	if (expectedSize <= 0 || expectedSize > 16*1024*1024) return false;
-	const int size = fileSystem->ReadFile(path.c_str(),&data,&stamp);
-	if (size < 0 || !data) return false;
-	if (size > 16*1024*1024) { fileSystem->FreeFile(data); return false; }
-	const std::string source(static_cast<const char*>(data),static_cast<size_t>(size));
-	fileSystem->FreeFile(data);
 	Document candidate; std::vector<Diagnostic> diagnostics; std::string error;
 	const int loadStarted = Sys_Milliseconds();
-	const bool prefetched = UI_RetainedTakePrefetched(path,source,candidate);
+	// A worker that parsed the document read it too, from the file as it is now
+	// (UI_RetainedTakePrefetched): the load takes its bytes rather than
+	// inflating the whole document again on this thread.
+	std::string source;
+	const bool prefetched = UI_RetainedTakePrefetched(path,expectedSize,source,stamp,candidate);
+	if (!prefetched) {
+		void* data = nullptr;
+		const int size = fileSystem->ReadFile(path.c_str(),&data,&stamp);
+		if (size < 0 || !data) return false;
+		if (size > 16*1024*1024) { fileSystem->FreeFile(data); return false; }
+		source.assign(static_cast<const char*>(data),static_cast<size_t>(size));
+		fileSystem->FreeFile(data);
+	}
 	if (!prefetched && !candidate.Load(source,diagnostics)) {
 		for (const auto& diagnostic : diagnostics) common->Warning("retained GUI %s:%u:%u %s: %s",path.c_str(),
 			static_cast<unsigned>(diagnostic.line),static_cast<unsigned>(diagnostic.column),diagnostic.pointer.c_str(),diagnostic.message.c_str());
@@ -1617,8 +1728,9 @@ const char* idUserInterfaceRetained::HandleEvent(const sysEvent_t* event, int ti
 	}
 	// A swipe across a tab strip runs onTabPrevious or onTabNext, as Q and E do.
 	for (const auto& name : impl->RuntimeView()->TakeGestureEvents())
-		if (impl->RuntimeView()->HasEvent(name)) impl->RunEvent(name);
+		if (impl->RuntimeView()->HasEvent(name) && impl->RunEvent(name)) impl->shortcutCue = ControlCue::Kind::Activate;
 	impl->CollectActions();
+	impl->PlayCues();
 	if (updateVisuals) *updateVisuals = true;
 	return impl->close || !impl->actions.empty() ? ActionMarker : "";
 }
@@ -1648,13 +1760,7 @@ void idUserInterfaceRetained::Redraw(int time, bool useAspectCorrection) {
 		return;
 	}
 	Viewport viewport;
-	if (!RetainedUI_DefaultViewport(viewport) || !impl->Prepare()) return;
-	// A view-height canvas (title, pause and loading screens) follows the view
-	// height instead of display density; the safety fit is irrelevant to it.
-	if (impl->document.Model().canvasHeight > 0) {
-		viewport.canvasHeight = static_cast<float>(impl->document.Model().canvasHeight); viewport.fitScale = 1;
-		viewport.canvasMinWidth = static_cast<float>(impl->document.Model().canvasMinWidth);
-	}
+	if (!impl->DocumentViewport(viewport) || !impl->Prepare()) return;
 	if (!impl->initialized) {
 		if (!impl->RuntimeView()->HasEvent("onInit") || impl->RunEvent("onInit")) impl->initialized = true;
 	}
@@ -1662,14 +1768,8 @@ void idUserInterfaceRetained::Redraw(int time, bool useAspectCorrection) {
 	impl->PublishPromptGlyphs();
 	const bool drawn = RetainedUI_DrawViewRoot(impl->view,viewport);
 	impl->drawSucceeded = drawn;
-	// Timeline completion programs run inside the frame; publish their writes.
-	if (auto* runtime = impl->RuntimeView()) impl->PublishWrites(runtime->TakeCompletionWrites());
-	// The detail subject the frame settled on, for the session to describe.
-	if (auto* runtime = impl->RuntimeView(); runtime && impl->document.Model().detail) {
-		StateValue subject;
-		if (runtime->GetStateValue(impl->document.Model().detail->state,subject))
-			impl->PublishWrites({{impl->document.Model().detail->state,subject}});
-	}
+	impl->presented = true;
+	impl->PublishFrame();
 	// The frame read the bound state back; settle the number fields it answers.
 	impl->SettleSessionNumbers();
 	if (drawn && impl->active && impl->interactive) {
@@ -1763,7 +1863,8 @@ bool idUserInterfaceRetained::DispatchApplicationActions(const char* command, bo
 			// Validated again at resolution; the session maps the verb itself.
 			const auto& command = std::get<std::string>(invocation.arguments.at("command"));
 			const auto request = SessionMenuPlayerCommand(command) ? SessionMenuPlayerRequest(invocation) :
-				SessionMenuSaveCommand(command) ? SessionMenuSaveRequest(invocation) : std::optional<std::string>(command);
+				SessionMenuSaveCommand(command) ? SessionMenuSaveRequest(invocation) :
+				SessionMenuBuyCommand(command) ? SessionMenuBuyRequest(invocation) : std::optional<std::string>(command);
 			const bool accepted = request && impl->sessionRequests.size() < 64;
 			if (accepted) impl->sessionRequests.push_back(*request);
 			else impl->Error(request ? "Session menu request queue exceeded 64 requests" : "Invalid session target identity");
@@ -2275,6 +2376,16 @@ bool UI_RetainedDiagnostic(idUserInterface* gui, const idCmdArgs& args) {
 		// it, without a device: hover follows, and it shows in a capture.
 		owner.SetCursor(static_cast<float>(atof(args.Argv(2))),static_cast<float>(atof(args.Argv(3))));
 		impl.pointerPlaced = true; impl.Pointer(); okay = true;
+	} else if (verb == "click" && args.Argc() == 2) {
+		// A left-button press and release where the cursor stands, through the
+		// path a mouse's takes, without a device: a prompt or a control under
+		// the cursor answers as it would to the mouse.
+		const double now = RetainedUI_PresentationTime();
+		for (const bool down : {true,false}) {
+			impl.Pointer(); impl.input.Pointer(K_MOUSE1,down,now);
+			impl.input.Advance(now); impl.ApplyInput();
+		}
+		impl.CollectActions(true); impl.PlayCues(); okay = true;
 	} else if (verb == "menu" && args.Argc() == 4 && (!idStr::Cmp(args.Argv(3),"0") || !idStr::Cmp(args.Argv(3),"1"))) {
 		const std::map<std::string,MenuInput> inputs = {{"next",MenuInput::Next},{"previous",MenuInput::Previous},
 			{"up",MenuInput::Up},{"down",MenuInput::Down},{"left",MenuInput::Left},{"right",MenuInput::Right},{"accept",MenuInput::Accept},{"back",MenuInput::Back},
@@ -2320,6 +2431,8 @@ bool UI_RetainedDiagnostic(idUserInterface* gui, const idCmdArgs& args) {
 		unsigned sentinel = 0;
 		okay = owner.ReadFromSaveGame(&save) && save.ReadUnsignedInt(sentinel) == 4 && sentinel == 0x53454e54 && save.Tell() == save.Length();
 	}
+	// A device-free verb sounds as the input it stands for would.
+	impl.PlayCues();
 	common->Printf("RETAINED_GUI_OPERATION %s %s\n",verb.c_str(),okay ? "passed" : "failed");
 	return okay;
 }
@@ -2371,20 +2484,158 @@ int UI_RetainedStateNames(idUserInterface* gui, const char* prefix, std::vector<
 }
 
 namespace {
-// A document a load will ask for, parsed on a worker meanwhile. The job reads
-// only its entry, and the entry's job is its last member, so destroying an
-// entry first cancels or waits for the parse.
+// One page's gathered vector compilations, compiled on the job workers in
+// interleaved slices. The job list is the last member: destroying the batch
+// cancels or waits for its slices first, and each slice writes only its own
+// requests. Install, on this thread, then hands the meshes over.
+struct WarmCompile {
+	idUserInterface* gui = nullptr; // Compared only: the page may have gone.
+	std::string path;
+	openq4::ui::VectorCompileBatch batch;
+	struct Slice { openq4::ui::VectorCompileBatch* batch; size_t first, stride; };
+	std::vector<Slice> slices;
+	std::chrono::steady_clock::time_point started;
+	std::unique_ptr<idJobList> job;
+};
+std::unique_ptr<WarmCompile> warmCompile;
+void CompileWarmSlice(const idJobContext& context) {
+	const auto& slice = *static_cast<const WarmCompile::Slice*>(context.data);
+	for (size_t i = slice.first; i < slice.batch->Size(); i += slice.stride) {
+		if (context.IsCancellationRequested()) return;
+		slice.batch->Run(i);
+	}
+}
+double WarmMilliseconds(std::chrono::steady_clock::time_point started) {
+	return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+}
+}
+
+bool UI_RetainedWarm(idUserInterface* gui, bool& finished) {
+	finished = false;
+	const auto found = std::find(diagnosticViews.begin(),diagnosticViews.end(),gui);
+	if (found == diagnosticViews.end() || !cvarSystem->GetCVarBool("ui_retainedWarm")) { finished = true; return false; }
+	auto& impl = *(*found)->impl;
+	// A page that is up, already drew, or has an onInit program still to run
+	// (its first presented frame runs it) is left alone.
+	if (impl.active || impl.presented || impl.warmed || !impl.Prepare() ||
+		(!impl.initialized && impl.RuntimeView()->HasEvent("onInit"))) {
+		if (warmCompile && warmCompile->gui == gui) {
+			// Presented while it compiled: the page made its own; the slices end.
+			warmCompile.reset();
+		}
+		finished = true; return false;
+	}
+	// One page's compilations at a time. Another page's still compiling (the
+	// session moved on before they finished) are installed first; that page,
+	// if it went, takes nothing.
+	if (warmCompile && warmCompile->gui != gui) {
+		if (!warmCompile->job->TryWait()) return true;
+		warmCompile->job->Wait();
+		const auto installed = warmCompile->batch.Install();
+		common->DPrintf("retained GUI %s preparing: installed %u compilations after the page it rested on changed\n",warmCompile->path.c_str(),
+			static_cast<unsigned>(installed));
+		warmCompile.reset();
+		return true;
+	}
+	Viewport viewport;
+	if (!impl.DocumentViewport(viewport)) { finished = true; return false; }
+	if (!impl.warmGathered) {
+		// A hidden frame tessellates nothing: it queues what the page's first
+		// presented frame would compile, for the workers.
+		impl.warmGathered = true;
+		auto compile = std::make_unique<WarmCompile>();
+		compile->gui = gui; compile->path = impl.path; compile->started = std::chrono::steady_clock::now();
+		impl.PublishPromptGlyphs();
+		const bool gathered = RetainedUI_GatherViewCompilations(impl.view,viewport,compile->batch);
+		impl.PublishFrame();
+		const double gatherMs = WarmMilliseconds(compile->started);
+		const size_t requests = compile->batch.Size();
+		if (!gathered || requests == 0) { impl.warmInstalled = true; return true; }
+		// Interleaved slices, so each worker gets a share of large and small
+		// elements alike.
+		const size_t slices = requests < 16 ? requests : 16;
+		compile->slices.resize(slices);
+		compile->job = jobSystem.CreateJobList("retained-vector-compile",static_cast<int>(slices));
+		bool added = compile->job != nullptr;
+		for (size_t i = 0; i < slices && added; ++i) {
+			compile->slices[i] = {&compile->batch,i,slices};
+			added = compile->job->AddJob(CompileWarmSlice,&compile->slices[i]);
+		}
+		const idJobSubmitResult submitted = added ? compile->job->Submit() : idJobSubmitResult::INVALID_STATE;
+		if (submitted != idJobSubmitResult::ACCEPTED && submitted != idJobSubmitResult::EXECUTED_SYNCHRONOUSLY) {
+			// No workers: nothing gained over the page's own first frame.
+			impl.warmInstalled = true; return true;
+		}
+		common->DPrintf("retained GUI %s preparing: gathered %u compilations (%u paths) in %.1f ms\n",impl.path.c_str(),
+			static_cast<unsigned>(requests),static_cast<unsigned>(compile->batch.Paths()),gatherMs);
+		warmCompile = std::move(compile);
+		return true;
+	}
+	if (!impl.warmInstalled) {
+		if (!warmCompile || warmCompile->gui != gui) { impl.warmInstalled = true; return true; }
+		if (!warmCompile->job->TryWait()) return true;
+		warmCompile->job->Wait();
+		const auto started = std::chrono::steady_clock::now();
+		const auto installed = warmCompile->batch.Install();
+		common->DPrintf("retained GUI %s preparing: compiled on the workers within %.1f ms, installed %u in %.1f ms\n",impl.path.c_str(),
+			WarmMilliseconds(warmCompile->started),static_cast<unsigned>(installed),WarmMilliseconds(started));
+		warmCompile.reset();
+		impl.warmInstalled = true;
+		return true;
+	}
+	// The compiled artwork converted, its layers drawn, all out of sight: the
+	// frame that presents the page finds them made.
+	impl.warmed = true;
+	const auto started = std::chrono::steady_clock::now();
+	impl.PublishPromptGlyphs();
+	const bool drawn = RetainedUI_WarmViewRoot(impl.view,viewport);
+	impl.PublishFrame();
+	common->DPrintf("retained GUI %s prepared: hidden frame in %.1f ms\n",impl.path.c_str(),WarmMilliseconds(started));
+	finished = true;
+	return drawn;
+}
+
+bool UI_RetainedEndWarm() {
+	return !warmCompile && RetainedUI_EndWarm();
+}
+
+idUserInterface* UI_RetainedLoaded(const char* path) {
+	if (path == nullptr) return nullptr;
+	for (auto* view : diagnosticViews)
+		if (!view->IsUniqued() && !idStr::Icmp(view->impl->path.c_str(),path) && view->impl->Prepare()) return view;
+	return nullptr;
+}
+
+namespace {
+// A document a load will ask for, read and parsed on a worker meanwhile. The
+// file opens here, on the main thread: the open walks the shared search paths
+// and pak handles. Reading the opened file (a pk4 member inflates as it reads)
+// touches only its own handle, as a streamed sound's decode does, so the
+// worker reads it. The job reads only its entry, and the entry's job is its
+// last member, so destroying an entry first cancels or waits for the work;
+// the file closes after it, back on the main thread.
 struct PrefetchedDocument {
+	~PrefetchedDocument() { job.reset(); if (file != nullptr) fileSystem->CloseFile(file); }
 	std::string path, source;
+	// What the file was when it opened: its length and content stamp, which a
+	// load compares before it takes the source in place of reading it.
+	int size = 0;
+	ID_TIME_T contentStamp = FILE_NOT_FOUND_TIMESTAMP;
+	idFile* file = nullptr;
 	Document document;
 	std::vector<Diagnostic> diagnostics;
-	bool loaded = false;
+	bool read = false, loaded = false;
 	std::unique_ptr<idJobList> job;
 };
 std::vector<std::unique_ptr<PrefetchedDocument>> prefetchedDocuments;
 void ParsePrefetchedDocument(const idJobContext& context) {
 	auto& entry = *static_cast<PrefetchedDocument*>(context.data);
-	if (!context.IsCancellationRequested()) entry.loaded = entry.document.Load(entry.source,entry.diagnostics);
+	if (context.IsCancellationRequested()) return;
+	entry.source.resize(static_cast<size_t>(entry.size));
+	entry.read = entry.file->Read(entry.source.data(),entry.size) == entry.size;
+	if (entry.read && !context.IsCancellationRequested()) entry.loaded = entry.document.Load(entry.source,entry.diagnostics);
+	// What the view's load would otherwise encode on the main thread.
+	if (entry.loaded && !context.IsCancellationRequested()) entry.document.SnapshotIdentity(entry.path);
 }
 }
 
@@ -2397,17 +2648,20 @@ void UI_RetainedPrefetchDocuments( const char *const *paths, int count ) {
 				std::any_of( prefetchedDocuments.begin(), prefetchedDocuments.end(), [&]( const auto &entry ) { return entry->path == path; } ) ) {
 			continue;
 		}
-		// The file system stays on this thread; the worker gets the bytes.
-		void *data = nullptr;
-		const int size = fileSystem->ReadFile( path, &data );
-		if ( size <= 0 || data == nullptr || size > 16 * 1024 * 1024 ) {
-			if ( data != nullptr ) fileSystem->FreeFile( data );
+		// The open stays on this thread; the worker reads the opened file. A
+		// frame that starts several parses (SETTINGS leads to four pages, 13 MB
+		// of documents) no longer inflates them all before it draws.
+		ID_TIME_T contentStamp = FILE_NOT_FOUND_TIMESTAMP;
+		const int size = fileSystem->ReadFileContentStamp( path, nullptr, &contentStamp );
+		if ( size <= 0 || size > 16 * 1024 * 1024 ) {
 			continue;
 		}
 		auto entry = std::make_unique<PrefetchedDocument>();
 		entry->path = path;
-		entry->source.assign( static_cast<const char *>( data ), static_cast<size_t>( size ) );
-		fileSystem->FreeFile( data );
+		entry->size = size;
+		entry->contentStamp = contentStamp;
+		entry->file = fileSystem->OpenFileRead( path );
+		if ( entry->file == nullptr || entry->file->Length() != size ) continue;
 		entry->job = jobSystem.CreateJobList( "retained-document-parse", 1 );
 		if ( !entry->job || !entry->job->AddJob( ParsePrefetchedDocument, entry.get() ) ) continue;
 		const idJobSubmitResult submitted = entry->job->Submit();
@@ -2416,20 +2670,29 @@ void UI_RetainedPrefetchDocuments( const char *const *paths, int count ) {
 	}
 }
 
-bool UI_RetainedTakePrefetched(const std::string& path, const std::string& source, Document& document) {
+bool UI_RetainedTakePrefetched(const std::string& path, int size, std::string& source, ID_TIME_T& stamp, Document& document) {
 	const auto found = std::find_if(prefetchedDocuments.begin(),prefetchedDocuments.end(),[&](const auto& entry) { return entry->path == path; });
 	if (found == prefetchedDocuments.end()) return false;
 	const auto entry = std::move(*found);
 	prefetchedDocuments.erase(found);
-	// A parse that failed, or of a source that has changed since, is made again
-	// by the load, which reports its diagnostics.
-	if (!entry->job->Wait() || !entry->loaded || entry->source != source) return false;
+	// A parse that failed, or of a source that has changed since (another
+	// length or content stamp: a pk4 member's CRC, a loose file's time), is
+	// made again by the load from the file as it is, which reports its
+	// diagnostics.
+	ID_TIME_T contentStamp = FILE_NOT_FOUND_TIMESTAMP;
+	if (!entry->job->Wait() || !entry->read || !entry->loaded || size != entry->size ||
+		fileSystem->ReadFileContentStamp(path.c_str(),nullptr,&contentStamp) != size ||
+		contentStamp == FILE_NOT_FOUND_TIMESTAMP || contentStamp != entry->contentStamp) return false;
+	fileSystem->ReadFile(path.c_str(),nullptr,&stamp);
+	source = std::move(entry->source);
 	document = std::move(entry->document);
 	return true;
 }
 
 void UI_RetainedPrefetchClear() {
 	prefetchedDocuments.clear();
+	// A page's compilations still held go with them: its page may go too.
+	warmCompile.reset();
 }
 
 namespace {
@@ -2470,6 +2733,12 @@ std::vector<const char*> GameplayDocuments(bool multiplayer) {
 }
 }
 
+bool UI_RetainedPrefetchReady( const char *path ) {
+	if (path == nullptr) return false;
+	const auto found = std::find_if(prefetchedDocuments.begin(),prefetchedDocuments.end(),[&](const auto& entry) { return entry->path == path; });
+	return found != prefetchedDocuments.end() && (*found)->job->TryWait();
+}
+
 bool UI_RetainedPrefetched( const char *path ) {
 	return path != nullptr && std::any_of(prefetchedDocuments.begin(),prefetchedDocuments.end(),[&](const auto& entry) { return entry->path == path; });
 }
@@ -2490,6 +2759,7 @@ void UI_RetainedSettleGameplayDocuments( bool multiplayer ) {
 
 #else
 void UI_RetainedPrefetchDocuments( const char *const *, int ) {}
+bool UI_RetainedPrefetchReady( const char * ) { return false; }
 void UI_RetainedPrefetchClear() {}
 void UI_RetainedPrefetchGameplayDocuments( bool ) {}
 void UI_RetainedSettleGameplayDocuments( bool ) {}

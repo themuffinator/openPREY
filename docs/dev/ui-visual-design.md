@@ -1,6 +1,6 @@
 # openQ4 UI Visual Design
 
-Specification version 1.39, 9 November 2026 (1.38 on 5 November, 1.37 on 3 November, 1.36 and 1.35 on 1 November, 1.29 to 1.34 on 31 October, 1.28 on 26 October, 1.27 on 25 October, 1.26 on 24 October, 1.25 on 23 October, 1.24 on 21 October, 1.22 on 11 October, 1.19 on 7 October, 1.15 and 1.16 earlier that day, 1.14 on 1 October, 1.10 to 1.13 the same day, 1.7 to
+Specification version 1.46, 17 November 2026 (1.45 earlier that day, 1.40 to 1.44 on 13 November, 1.39 on 9 November, 1.38 on 5 November, 1.37 on 3 November, 1.36 and 1.35 on 1 November, 1.29 to 1.34 on 31 October, 1.28 on 26 October, 1.27 on 25 October, 1.26 on 24 October, 1.25 on 23 October, 1.24 on 21 October, 1.22 on 11 October, 1.19 on 7 October, 1.15 and 1.16 earlier that day, 1.14 on 1 October, 1.10 to 1.13 the same day, 1.7 to
 1.9 on 29 September, 1.6 on 28 September, 1.4 and 1.5 on 27 September, 1.1 to
 1.3 on 26 September, 1.0 on 8 September 2026). Status:
 implementation target; the replacement has not shipped. Applies to every
@@ -32,6 +32,38 @@ artwork, so two overlapping captions also stay clear of the picture.
 Version 1.28 adds objective points of interest to the multiplayer HUD: flag
 bases, assault points and Dead Zone zones marked in the world, with distance as
 their only text, on the desktop and on the stereo VR HUD plane.
+
+Version 1.40 adds The Awakening's in-game menu family. While the expansion's
+campaign runs, the single-player pause menu and the screens it opens keep the
+Marine frame and take a glacial palette, frost on the framing bands and snow
+behind the instruments, after the 0.14.1 Awakening Edition release artwork.
+Version 1.41 gives the family its own frames, shaped after the Valkaryne:
+blade ends on its plates, talons on the bands' steps and the dialog's chamfer,
+and a lens around the focused marker. Version 1.42 reshapes the main frames
+themselves: the bands' steps become horns, and the level block and dialogs
+take horned corners.
+
+Version 1.43 shows the title's backdrop as a display signal: its pictures are
+dimmed and stepped through an ordered dither, and brief signal faults replace
+the stock cross-fade when a picture changes. Faults also mark the menu
+opening, leaving for a page and coming home (section 13.8).
+
+Version 1.44 gives the Remastered weapon strip motion: it opens and closes
+instead of cutting, one ring travels between the slots, a refused choice
+shakes the ring red, and a tick marks the weapon a quick switch returns to.
+The Strogg strip, after stroggification, has its own character (section 14.5).
+
+Version 1.45 makes The Awakening's frames move as one through every menu
+level. Every small step on the bands becomes an even 30-degree flank, so the
+horns are their only accents; the bands close in as the menu opens and glide
+between levels on one jolt-free curve; each level scrolls out and the next
+scrolls in the same way; and the rime line catches the light while an edge
+travels (sections 6 and 8).
+
+Version 1.46 scrolls the Remastered loading screen's frame into view: the
+levelshot shows first, then the top and bottom bands sweep in from beyond the
+view's edges, lock into place with the furniture they carry trailing them, and
+their inner edges flash orange as they seat (section 14.17).
 
 Version 1.1 added measured references from a survey of the effective retail
 GUI scripts, interface art, fonts and materials, and corrected anatomy that did
@@ -206,6 +238,7 @@ screens. Do not introduce them or carry them into the replacement:
 | Family | Identity | Required fidelity |
 | --- | --- | --- |
 | Marine menus | Olive/black plates, orange focus, yellow values, Marine title face | Stepped/notched bands, open cut plates, triangular markers, additive light, original scene imagery |
+| Awakening menus | The Valkaryne's black armour in glacial light: horned bands and panels, blade-ended plates, a lens around the focused marker, ice rails and values, frost on the bands, snow behind the instruments, a frame that glides between levels | Marine positions, type and opacity; the Awakening motion of section 8; the Valkaryne frames of section 6; the Awakening tokens; frost on the framing bands only; the Marine family everywhere outside the running expansion campaign |
 | Marine HUD | Tactical overlays, bright critical values, compact instruments | Weapon/ammo/health/armor hierarchy, sheared gauges, feedback and original spatial relationships |
 | Strogg HUD and terminals | Original alien glyphs, mechanical paths and family colors | Each source's geometry and animation; never generic Marine panels |
 | World terminals | Local device panel and in-world illumination | Surface mapping, interaction targets, stateful scripts and intended viewing distance |
@@ -230,6 +263,7 @@ family tokens; individual terminals and vehicles still need per-source entries.
 | Family (sources) | Measured palette | Type (stock `textscale`) | Geometry and motion |
 | --- | --- | --- | --- |
 | Marine menus (`mainmenu`, `mpmain`, `buymenu`, `restart`, `msg`, `netmenu`) | Section 4 Marine tokens | Marine, Lowpixel; Profont for tabular detail | Section 6 vocabulary; section 8 choreography |
+| Awakening menus (an openQ4 design after the Valkaryne's model and glow maps, `models/monsters/valkaryne`, and the 0.14.1 Awakening Edition release artwork) | Section 4 Awakening tokens; measured from her: armour black, reactor lenses `#FF8E00`, eyes `#0799D2` | As Marine menus | Marine positions and the stock choreography's order and timing; Valkaryne frames, frost, snow and haze (section 6); the Awakening motion and `frost.grow` (section 8) |
 | Marine HUD (`hud`) | Readouts `#DDEBC3`; gauge track `#B3D06E` at 20% and fill at 35% (50% in multiplayer) over black 50%; icons `#A8A360` at 60%; weapon render `#C7BD78` at 40%; weapon name `#B0C891`; selected weapon `#FF8000` in a `#B2CC80` ring; low health `#FF4C00` | Chain 0.50 numerals and 0.32 reserve, trailing-aligned; Marine 0.25 weapon name, 0.20 pickup and radio labels | Rounded gauge plates with a stepped foot, trailing-anchored notched fills, ten-cell armor fill, 0.22 shear about each element's center; EKG; 2 Hz low-health rim (section 14) |
 | Strogg HUD (`hud_strogg`) | Readouts `#FCFFC8`; gauge fill `#FF9000` at 20–35%; icons `#FFCC00` at 60%; selected weapon `#FFCC00`, others `#F59512` at 60%, ring `#F2AD0B` | R_Strogg for all HUD text, 0.12–0.50; numerals 0.50 and unsheared | 30–33° shoulders and small notches; 0.22 backward shear; masked grain over each gauge; low health below 25% |
 | Multiplayer (`mphud`, `scoreboard`, `summary`, `mpmsgmode`, the multiplayer parts of `hud`) | Marine team `#6AA42B`; Strogg team `#FF7B04`; spectators `#999999`; notices `#FFFF8D`; team names and team chat `#AAE355` and `#FF8E00`; deathmatch and Tourney headers `#8B964B`; your Tourney arena `#5EB987` at 40%, finished arenas `#3E57B7`; health icon `#F7C004` and armor icon `#FA2B05`, both at 80% (the stock define names are swapped); ammo fill in the weapon's color | Lowpixel 0.16–0.50; Chain 0.50 gauge numerals; Marine for the chat line's SEND and the summary tabs | Score slabs fading to a sheared cut, team-tinted header bands, faction emblems, award medals; drop-shadowed text over the match (section 14.9) |
@@ -361,6 +395,61 @@ is white at reduced alpha.
 
 Olive-tinted light plates are white art multiplied by `marine.olive`; dark
 plates are black art with `marine.rail.dark` rails. Both rest at 40%.
+
+### Awakening tokens
+
+The Awakening's in-game menus (section 13.7) are an openQ4 design, not a
+measurement of expansion art. Their palette comes from the 0.14.1 Awakening
+Edition release artwork. The glacial cyan of its plate rim and version figure,
+the white of its lettering, the deep ice of its plate body and its frost, snow
+and haze colors are that artwork's own values. The others are sampled from it
+and set to the luminance of the Marine token they stand in for, so every
+opacity in this section applies to them unchanged.
+
+| Token | sRGB hex | Stands in for | Use |
+| --- | --- | --- | --- |
+| `awakening.rail` | `#78DEFF` | `marine.rail.dark` | Rails of dark plates |
+| `awakening.value` | `#78DEFF`, alpha 0.80 | `marine.value` | Setting values, slider ticks and thumb, key names, editable values; the campaign's name in the pause title; objective headings in the level block |
+| `awakening.glacier` | `#289EB7` | `marine.olive`, `marine.marker` | The tint of light plates, markers, header bands and separators |
+| `awakening.rail.card` | `#3AAAC4` | `marine.rail.card` | Card and tooltip frame rail |
+| `awakening.rim` | `#2098BB`, alpha 0.37 falling linearly to 0 across 19 u | `marine.rim` | Rim light outside framing band edges |
+| `awakening.rime` | `#EBFAFF`, alpha 0.45 | New | The crisp 0.5 u line on the bands' inner edges, over the rim light |
+| `awakening.glow` | `#1E6B85` peak | `marine.glow` | Additive backdrop light band |
+| `awakening.glow.modal` | `#154C5E` peak | `marine.glow.modal` | Additive glow field behind modals |
+| `awakening.deep` | `#040E1A` | Black | Dark plate bodies, card bodies at 0.94, the modal silhouette at 0.70, field and list troughs at 0.90 |
+| `awakening.surface.panel` | `#061420`, alpha 0.88 | `surface.panel` | Solid readable backing |
+| `awakening.plinth` | `#1B4656`, alpha 0.30 | `marine.plinth` | Plinth under the secondary links |
+| `awakening.picture` | `#17414F` | `#414624` | The 1 u picture frame |
+| `awakening.check` | `#0F6F8C` | `marine.check` | Filled square of a set check or radio box |
+| `awakening.sort` | `#45B2CC` | `marine.sort` | Sortable column hover highlight |
+| `awakening.text` | `#EEF8FF` | White | Labels at 0.80, titles at 0.50, headings and disabled labels at 0.40 |
+| `awakening.text.secondary` | `#A9C9D6` | `text.secondary` | Supporting information |
+| `awakening.text.tertiary` | `#7E99A5` | `text.tertiary` | Nonessential metadata |
+| `awakening.frost` | `#D1EDFF` | New | Frost crystals and rime; the reticle grid at 4% |
+| `awakening.snow` | `#EBF6FF` | New | Snow flakes |
+| `awakening.haze` | `#AAD7F0` | New | The low haze |
+
+The family keeps `marine.orange` for hover, focus and selection, with
+`marine.list` and `marine.progress`, and keeps the status colors,
+`marine.scrim` and `modal.softfocus`. Orange is its one warm color. It marks
+only the control the player is on, and no frost, snow or haze is drawn over
+it. It is also the Valkaryne's: the bright rings of her reactor lenses
+measure `#FF8E00` in her glow maps, a step from `marine.orange`, and the lens
+of section 6 is drawn in it. Her eyes, `#0799D2`, are the only cold light on
+her and sit inside the family's ice. Almost all of her armour map is black,
+as the bands are. Keeping orange for interaction alone is why the level
+block's objective headings take `awakening.value`
+where the objectives family uses `#FF8000`. Blue and orange also stay apart
+under the common color-vision deficiencies. Team colors, faction marks and the
+weapon and item color code are unchanged.
+
+Light plates are white art multiplied by `awakening.glacier`; dark plates are
+`awakening.deep` art with `awakening.rail` rails. Both rest at 40%. The
+framing bands stay opaque black. Composited over the level block's card,
+labels at 0.80 reach about 11:1, values 8:1, focused orange 7:1, tertiary
+text 6:1, titles at 0.50 5:1 and headings at 0.40 3.6:1; the title at 0.50
+over the lit field reaches about 4:1. The 40% and 50% roles are large text and
+remain the first to measure, as in the Marine family.
 
 ### Opacity
 
@@ -928,6 +1017,154 @@ Stock details that openQ4 reuses:
 | Swatch | A small square with a chipped corner | Color choices, spinner tiles |
 | Picture frame | A 1 u `#414624` border over black 0.60 | Save, server and map previews |
 
+### Valkaryne frames
+
+The Awakening family (section 13.7) shapes its frames after the Valkaryne,
+the expansion's final enemy, measured from her model and glow maps
+(`models/monsters/valkaryne`). Her armour is black and almost unlit. Each of
+her four legs and both melee arms ends in a blade that sweeps to a point,
+the arms' as scythes. Her back carries swept over- and underplates. Five
+large reactor lenses of concentric rings glow orange on her torso, and her
+eyes are the only cold light on her. The frames take three devices from her
+and one curve to cut them with. No position, pitch or hit area of the Marine
+family changes, and no picture of her is drawn.
+
+- **The sweep.** A circular arc of 30 degrees that leaves one edge at
+  45 degrees and reaches the other at 15. A sweep `c` high is `1.73c` long on
+  a radius of `3.86c`. It always hollows the frame it cuts: it bows into the
+  frame, never out of it, so the frame keeps a 15-degree point. It is the
+  only curve that cuts a frame.
+- **Blade.** An open plate's trailing end is one sweep from its top edge down
+  to its rail, in place of the stock dissolve: 42 u long on a 24.4 u
+  navigation plate. The rail runs to the point and the swept edge carries no
+  rail, so the plate stays open. The fill thins toward the point, to no less
+  than 0.45 of its strength. Navigation and section plates, action buttons
+  and the plinth end in blades. A separator inside a card is a needle, 1.2 u
+  (about 2 dp) thick at its leading end and tapering to a point at its
+  trailing end.
+- **Horns on the bands.** Every 45-degree step of 24 u or more in a band
+  becomes a horn. The thicker side's edge runs on past the step to a point,
+  and one sweep as high as the step cuts back from the point to the other
+  level, which it meets at 45 degrees. A horn is 1.73 times as long as its
+  step is high. The top band's riser becomes one horn pointing to the
+  trailing edge: its point stands at 376.5 u on the 103.8 u line, 61 u past
+  the foot of the stock riser and 14 u above the level block's corner. The
+  bottom band's raised section ends in two horns pointing outward along the
+  400.4 u line, as her legs spread: 52 u long to a point at -50.2 u on the
+  leading side, and 75 u long to a point at 419.9 u on the trailing side,
+  12 u under the level block. A horn keeps its place on the 4:3 canvas at
+  every aspect, as the step it replaces does.
+- **Horned corners.** A card and a modal end in a horn at the top-trailing
+  corner, in place of the card's major cut there and the modal's square
+  corner. The top edge runs on to the corner, a sweep 8 u high cuts back
+  beneath it, and a 45-degree line returns to the trailing edge: a 90-degree
+  bite 13.9 u deep that closes 21.9 u below the top, inside a card's header.
+  The modal's bottom edge also runs on to its lower-leading corner under the
+  chamfer: a sweep 9.3 u high, the chamfer's height over 2.73, rises from the
+  corner to the chamfer, which continues above it. The rail and the black
+  frame trace every horn. A card's lower-leading cut and the minor cuts stay.
+- **Flanks.** A step under 24 u takes no sweep, which reads as a rounded
+  corner at that size, and no taper of its own: every one is a straight
+  30-degree flank, 1.73 times as long as it is high, so the bands read as one
+  even rhythm with the horns as their only accents. Both flanks of each of
+  the top band's three pockets run at 30 degrees about the stock 36 u seat,
+  15.8 u long where the stock's run 10.2 u, so the seats, the 97 u pitch and
+  the crumbs keep their places. The lone steps keep their thinner corner: the
+  top band's 14.1 u step at -297.9 u, whose foot moves 10.2 u toward the
+  trailing edge, and the bottom band's two 9.1 u steps at -222.5 u and
+  582.7 u. On a sub-page the top band's step is the 30-degree flank between
+  the crumb and the title.
+- **Fullers.** One 0.5 u line in `awakening.glacier` runs from each band
+  horn's point back along the middle of its blade, at 7.5 degrees to the
+  edge and as long as the horn, 0.50 at the point and fading out. Frost lies
+  over it.
+- **Lens.** The focused control's marker stands in a lens in `marine.orange`:
+  a ring of 6.6 u radius, 0.9 u wide at 0.90; a ring of 9.4 u radius, 0.45 u
+  wide at 0.45; and an additive halo 13 u in radius, 0.35 at its center. It
+  appears and leaves with the stock focus response and takes the place of
+  section 13.8's focus light. Nothing else in the family is round. High
+  contrast keeps the two rings at 1.00 and drops the halo.
+- **What is not drawn.** A sweep that bows out of its frame, which reads as
+  a rounded corner; a horn whose throat is rounded, which reads as a
+  knuckle; a row of small sweeps, which reads as a scalloped edge; two
+  angles on one pocket, which read as a saw; her crown of spikes; any
+  picture of her.
+
+### Frost, snow and haze
+
+The Awakening family (section 13.7) grows frost on its framing bands, lets
+snow fall behind its instruments and lays a low haze over the softened view.
+All three are editable vector geometry generated from a seed, never bitmaps.
+Ice branches at 60 degrees. With the frames' 45-degree cuts and 15-degree
+points, every angle the family draws is a multiple of 15 degrees. The release
+artwork's 13-degree slant, frosted-glass lift, rime grain, lens flare and
+icicles are not part of the family.
+
+- **Where frost grows.** Only on the framing bands, which are opaque black and
+  hold no content. Frost is fixed to the view: it grows from seeds on the
+  view's top and bottom edges and at its four corners, and each band's
+  silhouette masks it, horns included, at full strength up to 6 u inside the
+  band's inner edge and falling to nothing at the edge. A moving band covers
+  or uncovers it; it
+  never travels with the band. Frost never lies on a plate, a card, a dialog,
+  text or the view.
+- **Carved slots.** Each screen carves the text and controls standing in its
+  bands out of the frost: the prompt bar, titles and crumbs, and Back. A slot
+  is the item's box with 6 u clear around it, feathered over a further 6 u. A
+  transient item in a band, such as a notice, brings an opaque black backing
+  with the same margin.
+- **Seeds.** Along each of the two edges the seeds stand 12 u apart at a
+  corner, widening to 48 u from 200 u away: the spacing is `48 - 36w` u with
+  `w = (1 - d / 200)²`, `d` the distance to the nearer corner and `w` zero
+  beyond 200 u, each spacing varied by up to 30% either way. Three more seeds
+  stand on each corner, heading 20, 45 and 70 degrees from the edge, give or
+  take 8 degrees.
+- **A crystal.** A trunk leaves its seed in 3 u steps. Its heading starts on
+  the inward normal, give or take 28.6 degrees, and wanders 6.9 degrees a step
+  (both normal deviations). An edge trunk is 20–75 u long, scaled by
+  `0.55 + 0.45w`, so 11–41 u in mid-span, and 0.75–1.6 u wide at its seed; a
+  corner trunk is 45–75 u long and 1.1–1.6 u wide. A crystal thins by 3% a
+  step to a floor of 0.5 u and ends in a point. At each step it has a 28%
+  chance of one branch to either side at 60 degrees, give or take 8.6 degrees,
+  25–50% as long as its parent and 70% as wide as the parent is there.
+  Branches branch in turn to four levels below the trunk, and none is shorter
+  than 2 u. Each branch takes one opacity between 0.59 and 0.98.
+- **Paint.** Branches are filled, tapered ribbons in `awakening.frost` at
+  0.80, over an additive halo of the same shapes blurred by 1.5 u at 0.50.
+  A rime wash in `awakening.frost` lies under them: 0.10 at the view's top and
+  bottom edges falling to nothing 14 u in, and 0.16 at each corner falling to
+  nothing 90 u away. The rime line, 0.5 u of `awakening.rime` and never
+  thinner than one physical pixel, traces each band's inner edge over its rim
+  light.
+- **Determinism and cost.** The seed is 1414, the artwork's. A view of a given
+  size always grows the same frost, so captures compare. The atlas sheet's
+  generator is the reference. Frost is generated when a document is built or
+  the view's size changes, never per frame, and then stands as stationary
+  artwork: about 740 branches at 4:3, 860 at 16:9 and 1,160 at 21:9 and
+  wider.
+- **Snow.** Round flakes in `awakening.snow` in two depths: far flakes of
+  0.3–0.8 u radius at 0.24–0.59, 0.6 to every 1,000 square u of the view, and
+  near flakes of 0.9–1.8 u radius at 0.31–0.78, blurred by 0.7 u, 0.1 to
+  every 1,000 square u. That is about 215 flakes at 4:3 and 290 at 16:9. Snow
+  falls above the backdrop layers and behind every plate, card and band, so
+  no flake crosses text. Section 8 gives its motion.
+- **Haze.** A straight-alpha wash of `awakening.haze` under the light band:
+  nothing above 55% of the view's height, rising linearly to 0.14 at the
+  bottom edge.
+- **Accessibility and power.** Reduced motion shows the frost complete and
+  the snow still. High contrast removes the frost, rime wash, snow and haze
+  and keeps the rime line at 1.00 as a rail. The Phone profile's power saving
+  removes the snow.
+
+The editable [Awakening menu atlas sheet](ui/atlas/awakening-menu.html) draws
+the pause menu, a page (Save Game, Settings), a sub-page (Controls), a
+detail page and the confirmation at 4:3, 16:9, 21:9 and 32:9 beside the
+Marine family, with every level reached and left through its transitions,
+the opening replayed and both at a quarter of their speed, the layers
+switchable and the carved slots outlined, and the constructions of the
+sweep, blade, horn, flank, lens, frost crystal and band motion. `tools/ui/update_design_atlas.py` merges it into the full
+atlas.
+
 ## 7. Components and interaction states
 
 Controls declare default, hover, keyboard/gamepad focus, pressed, selected/
@@ -1045,6 +1282,12 @@ presented frame.
 | `title.carry` | 500 ms, or 300 ms going deeper | With `frame.dock`, or `frame.step` going deeper: the activated label travels into the title slot and scales to the title size (openQ4) |
 | `frame.step` | 300 ms | `accel(150, 150)`; only the top band moves one notch pitch (97 u) toward the trailing edge as a page opens a sub-page, from 50 ms, and back at once on Back; the bottom band stays docked (openQ4) |
 | `title.crumb` | 150 ms | Linear; going deeper, the page title rises 7 u into the top band's thin span, steps down to 80% of its size and dims to 0.40 as the parent in the path; on Back it returns over the last 150 ms of `frame.step`, once the step has passed back under it (openQ4) |
+| `frost.grow` | 900 ms | Cubic ease-out, `1 - (1 - t)³`; as an Awakening menu opens, the crystal front leaves every seed at one speed and the longest root-to-tip path finishes at 900 ms; it starts with `menu.fade`, and nothing plays on close (openQ4) |
+| `frame.glide` | As the move it replaces | Cubic (0.65, 0, 0.35, 1); The Awakening's one curve for bands, levels and carried titles, in place of `accel(a, d)` and the linear page sweep (Awakening motion, openQ4) |
+| `frame.close` | 400 ms | Cubic (0.16, 1, 0.3, 1); an Awakening menu's bands close in from 30 u beyond their places with `menu.fade` (openQ4) |
+| `level.arrive` | 250 ms | Cubic (0.16, 1, 0.3, 1), opacity over the first 150 ms; an Awakening level scrolls in its last 32 u from the side the menu travels from (openQ4) |
+| `rime.catch` | With the move | An Awakening band's rime line from 0.45 to 0.90 at 1 u per ms and back as it settles (openQ4) |
+| `list.scroll` | 150 ms | `frame.glide`; an Awakening list that runs past its edge scrolls by whole rows (openQ4) |
 
 These are authored defaults. Story-driven timing, terminal sequences, weapon
 reticles and scripted effects remain faithful to sources. Marine menu screen
@@ -1160,6 +1403,63 @@ their motion legible at every size and refresh rate.
 - **Sound.** `main_menu_selection` plays once at activation; nothing plays
   during motion.
 
+### Awakening motion
+
+The Awakening family (section 13.7) keeps the stock choreography's order,
+start times and durations, so a level changes as quickly as a Marine one, and
+changes how things travel, so that the frame and the levels move as one at
+every menu level: the pause, a page, a sub-page and a detail page.
+
+- **The glide.** Everything that travels, bands, levels and the carried
+  title, follows one curve, `frame.glide`, cubic (0.65, 0, 0.35, 1), in
+  place of `accel(a, d)` and the linear page sweep. It starts and settles
+  without a jolt and peaks at 2.9 times its mean speed.
+- **Opening.** With `menu.fade` the bands close in from 30 u beyond their
+  places, the top band from above and the bottom band with its prompt bar
+  from below, over 400 ms (`frame.close`), while the frost grows
+  (`frost.grow`). Input works from the first frame. Closing is the stock's.
+- **Docking.** Going to a page (`frame.dock`) the bottom band leads from
+  50 ms over 500 ms and the top band follows from 90 ms over 460 ms, so the
+  two arrive together at 550 ms. Back mirrors it from the first frame: the
+  bottom band over 500 ms, the top band from 40 ms over 460 ms.
+- **Stepping.** Each level below a page moves only the top band, one notch
+  pitch, 97 u, from 50 ms over 300 ms (`frame.step`); Back moves it from the
+  first frame over 300 ms, or over 150–300 ms when it reverses a step in
+  flight. Its 30-degree flank stands between the crumbs as the path's
+  separator (section 6).
+- **Level scroll.** Going deeper, the departing level scrolls 640 u toward
+  the trailing edge on the glide, from 50 ms over 500 ms with the bands when
+  it leaves the pause and from 0 ms over 300 ms between pages, fading over
+  250 ms or 150 ms. The arriving level scrolls in its last 32 u from the
+  leading side as it fades in (`level.arrive`), starting as the departing
+  level clears: at 500 ms from the pause and at 300 ms between pages. Back
+  scrolls the departing level 640 u toward the leading edge over 300 ms on
+  the glide, fading over 150 ms, and the parent arrives from 32 u on the
+  trailing side at 450 ms (the pause) or 250 ms (a page). Deeper, everything
+  travels toward the trailing edge; on Back, toward the leading edge. An
+  arriving level's controls take input from its first frame.
+- **Titles.** The carried label (`title.carry`) and the crumb
+  (`title.crumb`) keep their stock timing and take the glide. A title leaves
+  at once on Back, as the stock's does.
+- **Rime catch.** A moving band's rime line brightens with its speed, from
+  0.45 at rest to 0.90 at 1 u per ms, and returns as it settles
+  (`rime.catch`): 0.90 through the middle of a dock, about 0.86 at the middle
+  of a step and 0.66 as the opening starts. Keys at the start, middle and end
+  of each move, eased in and out, are close enough. Nothing else on a band
+  flares or pulses.
+- **Frost.** Frost belongs to the view (section 6): a moving band slides
+  beneath it, uncovering and covering it, and each level carves its own
+  titles, crumbs and prompts out of it when it arrives.
+- **Within a level.** The frame stands still. Tabs scroll their rows
+  sideways in strip order with `page.leave` and `page.enter`: toward the
+  leading edge for a later tab, toward the trailing edge for an earlier one.
+  A list that runs past its edge scrolls by whole rows over 150 ms
+  (`list.scroll`); a step that arrives mid-scroll retargets from the current
+  offset.
+- **Reduced motion.** Bands and levels are placed at once and content
+  cross-fades within 80 ms, as in the stock choreography; the rime line stays
+  at rest.
+
 ### Translation and transmission
 
 The stock plays three different rune-to-readable translations and one
@@ -1216,7 +1516,8 @@ drops slides, flashes, bursts and jolts.
 
 | Stock loop | Measured | Treatment |
 | --- | --- | --- |
-| Backdrop levelshots | Cross-fade over 2000 ms every 5000 ms, four images | Decorative |
+| Backdrop levelshots | Cross-fade over 2000 ms every 5000 ms, four images | Decorative. The stock menus keep the cross-fade; the Remastered title changes its pictures through the title signal instead (section 13.8) |
+| Title signal slips (openQ4) | Five a 25 s loop, 70–120 ms each at 0.18–0.30 | Decorative; reduced motion and reduced flashing remove them |
 | Static grain | Scrolls 1 texture width and 5 texture heights per second at 2.4% | Decorative |
 | Animated gear | One turn per 10 s | Decorative |
 | Terminal scanlines | Drift 0.2 texture heights per second | Decorative |
@@ -1229,6 +1530,7 @@ drops slides, flashes, bursts and jolts.
 | Loading status | 100% to 50% over 500 ms, back over 200 ms | Decorative |
 | Weapon display states | Hyperblaster random flicker 68–100%, low pulse at 3 Hz and RELOAD at 2 Hz; nailgun empty 100–40% at 2 Hz; rocket cells 80–100% at 3 Hz; railgun flicker 92–100% | Decorative; alarms where they mark low or empty |
 | Vehicle warnings | Hull and shield 60% × 100–50% at 2 Hz; electric damage a 1 Hz sawtooth 70–30%; hits an additive edge flash over 500 ms | Alarm |
+| Snow in The Awakening's menus (openQ4) | Far flakes fall at 6 u/s and near flakes at 14 u/s, each varied by up to 20%, along the release artwork's 13-degree line toward the leading edge (0.23 u sideways for each u fallen), swaying 2–4 u over 5–9 s and wrapping at the view's edges | Decorative |
 
 Alarms keep their stock cadence, all at or below 3 Hz, and always pair with a
 static cue. Reduced motion stops decorative loops and replaces alarm pulses
@@ -1812,6 +2114,33 @@ and parallax off.
     them. The focused plate runs the scan bar under its label, and the level
     block takes a chamfered frame with the masked grain. Input works from the
     first frame, and reduced motion shows the translated labels at once.
+  - **The Awakening.** While the expansion's campaign is the running game,
+    with its content active and whether or not a mod is loaded over it, the
+    single-player pause menu and every screen it opens over the paused game
+    take the Awakening family: Save, Load, Restart Level, Objectives, the
+    settings pages and their confirmations. No position, pitch, type,
+    opacity or sound of the Marine pause changes, and its choreography keeps
+    the stock order and timing in the Awakening motion of section 8: the
+    bands close in as it opens and glide between levels, and each level
+    scrolls out as the next scrolls in. Its frames
+    become the Valkaryne frames of section 6: the bands' 45-degree steps
+    become horns, the level block and a confirmation end in horned corners,
+    the navigation plates, the plinth and the action buttons end in blades,
+    and the focused control's marker stands in the lens. The section 4
+    Awakening tokens replace the Marine colors.
+    The bands' inner edges gain the rime line, frost grows on the bands with
+    `frost.grow`, and snow falls behind the instruments over the low haze
+    (sections 6 and 8). The backdrop light band is `awakening.glow` at the
+    pause's strength and the reticle grid `awakening.frost` at 4%. The title
+    reads GAME PAUSED at 0.50 and then, 8 u on, the campaign's name
+    (`#str_230040`) in `awakening.value` at 0.80, as the artwork sets its
+    version figure in ice beside its white label. Hover, focus and selection
+    stay `marine.orange`. A confirmation is the stock modal with
+    `awakening.glow.modal` behind an `awakening.deep` silhouette inside the
+    black frame. Input works from the first frame. The title screen, the
+    multiplayer menus, the HUD and the Classic layout keep their own
+    families, and a Strogg player's pause under The Awakening is the Strogg
+    pause, unchanged.
   - **Arena.** A single-player Arena Campaign match pauses like a story level,
     so Escape opens the single-player pause frame in place of the multiplayer
     Escape menu. MATCH PAUSED replaces GAME PAUSED; Resume, Restart Match,
@@ -1934,6 +2263,38 @@ and parallax off.
   darkening blend (section 4). A rim light follows its outline at 0.20, and a
   glint 12% of the outline long runs around it every 9 s. Reduced motion keeps
   only the rim.
+- **Title signal.** The Remastered title shows its backdrop as a display
+  signal (openQ4). The controls, bands, reticle grid, emblem and wordmark are
+  never dithered or faulted.
+  - *Dimming.* Black at 0.30 covers the levelshots, beneath the vignette and
+    the additive light band, so the band keeps its strength and the menu
+    leads.
+  - *Dither.* Over the pictures and their light, beneath the grid, an ordered
+    8x8 Bayer dither steps each pixel's brightness between six levels evenly
+    spaced in its square root, mixed in at 0.60. It keeps the hue and a flat
+    area's mean brightness and leaves black and white alone. Its cell is one
+    pixel of a 540-line view, in whole pixels.
+  - *Fault.* Over the pictures, beneath the dither: a few wide bands and
+    many thin rows tear sideways, square blocks 24 across hold as a 3x3
+    mosaic of themselves, and the red and blue channels part, further in a
+    torn row. Torn rows lift by at most 15% and held blocks by 8%. Through a
+    fault the arrangement changes every 55 ms; between faults nothing is
+    drawn.
+  - *Picture changes.* Every 5000 ms, in place of the cross-fade. The fault
+    starts 120 ms before the cut, peaks at 0.85 60 ms after it and is at rest
+    by 520 ms. Meanwhile the next picture shows at 0.40 by 60 ms and 0.80 by
+    220 ms, and holds by 420 ms, never falling back.
+  - *Menu moves.* A second fault resolves from 0.85 to rest over the 250 ms
+    `menu.fade` as the menu opens. It breaks up as the bands leave for a
+    page, peaking at 0.85 at 400 ms and at rest by the hand-off at 550 ms.
+    As they dock home it rises to 0.70 by 120 ms and is at rest by 480 ms.
+  - *Slips.* Between picture changes the signal slips five times a loop
+    (section 8).
+  - *Settings.* Reduced motion keeps the dimming and the dither, holds one
+    picture and drops every fault. A fault changes faster than 3 Hz, so
+    reduced flashing also drops the faults; it keeps the dither and the
+    stepped picture changes. A renderer that cannot read the composed view
+    back, like one without soft focus, shows the pictures dimmed only.
 - **Title continuity.** Activating a navigation item carries its label into the
   screen-title slot, where it becomes the path title, within the stock
   choreography timings.
@@ -2257,6 +2618,40 @@ has no plates for them. This thirteen-weapon scope applies to the `q4xbase`
 single-player campaign. Multiplayer keeps its own Quake 4 roster; the former
 requirement for expansion multiplayer ammunition, accuracy and summary rows is
 superseded by the project's single-player expansion policy.
+
+#### Remastered motion
+
+The Remastered strip keeps the stock constructions above and moves quickly and
+quietly between them: every move is over within 240 ms. `easeOut` below is
+the cubic Bézier (0.25, 1, 0.5, 1) and `easeIn` (0.5, 0, 0.75, 0).
+
+| Moment | Marine | Strogg, after stroggification |
+| --- | --- | --- |
+| Open | Rises 4 u to rest with `easeOut` over 140 ms, fading in over 110 ms | Tunes in about the row's middle from 103% wide and 30% tall with `easeOut` over 140 ms, fading in over 90 ms; a 0.9 u #FFCC00 hairline reaching 8 u past the end plates sweeps down through the row over 150 ms, at most 0.55 |
+| Close | Sinks 3 u with `easeIn`, fading out | Collapses to 102% wide and 35% tall with `easeIn`, fading out |
+| Change | The ring travels from the slot it left with `easeOut`; the pending icon settles from 116% over 150 ms; the name slides in 4 u from the side the ring came from, from 0.30 over 130 ms | The ring travels, stretching up to 22% wider at 45% of the way; on landing an #FFCC00 outline of the ring grows to 145% while fading from 0.80 over 220 ms; the name slips in 3 u, then 1.2 u back, in hard 40 ms steps from 0.45 to full over 120 ms |
+| Refusal | The ring shakes −2.5, +2.0, −1.2 and +0.6 u, settling by 190 ms | The ring jumps +2.2, −1.8 (106% wide) and +1.0 u in hard 35 ms steps, settling by 140 ms |
+| Return tick | A 9 × 1.5 u bar leaning with the plates, 1.7 u below the plate, in the ring color at 0.75 | A 5.6 u upward chevron of 1.3 u stroke below the plate, in the ring color |
+
+The strip opens in the frame of a change or refusal and closes 1000 ms after
+the latest one over 150 ms, or over 90 ms on firing. Both start from wherever
+the strip is, so a change during the close turns it back. One ring serves the
+pending weapon. It travels over 100 ms plus 6 ms per slot, at most 170 ms
+(Strogg 10 ms longer), only along a strip already on screen whose weapon count
+has not changed; otherwise it lands at once. A refusal is a weapon key for a
+weapon the player does not carry or that is out of ammunition, or a next or
+previous weapon that leaves the choice unchanged. It opens the strip if
+needed, shakes the ring, and overlays the ring in red (#E0442E, Strogg
+#FF3A1A) that holds 70 ms (Strogg 50 ms) and is gone by 240 ms. An empty
+weapon that was refused throbs its prohibition sign from 135% over 180 ms. The
+return tick marks the weapon a quick switch returns to: the one in hand while
+a change is pending, otherwise the previous weapon, never the pending one.
+Multiplayer's strip moves as the Marine one.
+
+Reduced motion opens and closes the strip with fades of at most 80 ms and
+lands every travel, shake, throb, impulse and sweep at once; the ring, the
+red refusal, the prohibition sign and the tick stay. The classic strip
+(`ui_retained 0`) keeps the stock behavior.
 
 ### 14.6 Weapon wheel
 
@@ -3288,6 +3683,20 @@ keeps.
   only their straight spans to the view's edges. The top band anchors to the top
   edge and the bottom band to the bottom, and the corner brackets and the dot
   matrix move out with the view's corners.
+- **Entrance.** Each load presents the levelshot alone, the bands parked past
+  the view's edges with the furniture they carry: the top band with the
+  leading bracket, the dot matrix and the identity, the bottom band with the
+  lower brackets, the progress and the tips or arsenal. Once that first frame
+  is up, which builds the view and uploads the levelshot, the frame scrolls in.
+  The top band travels 120 u down and the bottom band 140 u up, each
+  decelerating hard (cubic 0.16, 1, 0.3, 1) for 300 ms to pass its seat by
+  2.5 u, then easing back over 100 ms; the bottom band starts 40 ms after the
+  top. Each band's furniture trails it by 70 ms and seats at 320 ms without
+  passing it. As each band locks, its inner edge lights in #E06C00 with a
+  #FFC070 core, peaking at 290 ms and gone 300 ms later, and the objectives
+  plate and server card fade in from 260 to 460 ms. The entrance takes 630 ms
+  and plays while the level loads. Reduced motion seats the frame at once,
+  unlit, and fades the cards in over 80 ms.
 - **Identity.** The level name trails at the top. Beneath it, on the stock
   message line, run the mission and difficulty in single player, or the game
   type and map in multiplayer.
@@ -4137,6 +4546,156 @@ catalogue obligations, including `ART-035`, remain authoring/artwork requirement
 they do not authorize or require a new gameplay mode. This scope correction
 accepts no GUI, artwork, platform or behavior. Hit-feedback defaults and the other
 UI-05 qualification remain open.
+
+### Version 1.40: The Awakening's in-game menus
+
+The product owner asked for an in-game menu theme for The Awakening after the
+icy release artwork made for the 0.14.1 Awakening Edition. Section 2 adds the
+Awakening menus family, section 4 its tokens, section 6 its frost, snow and
+haze, section 8 `frost.grow` and the snow loop, and section 13.7 the pause
+pattern that uses them.
+
+| Subject | From the artwork | In the menus |
+| --- | --- | --- |
+| Color | Glacial cyan `#78DEFF` on the plate's rim and the version figure, white `#EEF8FF` lettering, a deep ice `#040E1A` plate body | Rails and values, labels, and the bodies of dark plates, cards and the modal silhouette; the remaining tokens are sampled from the artwork at the luminance of the Marine token each replaces |
+| Edge | A crisp rim over a soft glow around the plate | The rime line over the bands' rim light |
+| Frost | Branching crystals creeping in from the edges and corners | The same construction, in units, on the framing bands only, carved around their text |
+| Snow and haze | Two depths of flakes and a haze in the lower part of the frame | The same, behind the instruments, falling along the artwork's slant |
+| Slant | A 13-degree shear on the plate and tagline | Not taken: furniture keeps 45-degree cuts and no shear |
+| Frosted glass, grain, flare | A lifted, desaturated frame edge with rime grain; a flare on the wordmark's slab | Not taken: they would grey the view behind the menu |
+| Interaction | None in a still image | `marine.orange`, the family's one warm color |
+
+The editable atlas sheet `ui/atlas/awakening-menu.html` carries the reference
+generator. This version curates the family; no screen is built from it yet.
+The register does not hold this scope: a revision must append the family's
+requirements before any of it can be accepted, and nothing is accepted.
+
+### Version 1.41: Valkaryne frames
+
+The product owner asked that the family's frames change too, and that the
+Valkaryne's design shape the interface into one whole. Version 1.40 had kept
+every Marine frame and changed only light and ornament. Section 6 now adds
+the Valkaryne frames, measured from her model and glow maps, and sections 2,
+4 and 13.7 follow.
+
+| From the Valkaryne | In the menus |
+| --- | --- |
+| Black, almost unlit armour | The opaque black bands, and `awakening.deep` plates, cards and dialog body |
+| Legs and scythe arms that sweep to a point | The sweep, one 30-degree arc from 45 to 15 degrees; blade ends on plates, buttons and the plinth; needle rules |
+| Hooked legs and scythes, spread as she stands | Talons at the foot of every 45-degree step of 24 u or more: one on the top band's riser, two spread under the bottom band's raised section, one on the modal's chamfer |
+| Swept over- and underplates | The spines etched from each band talon |
+| Five orange reactor lenses, `#FF8E00` | The lens around the focused marker, in `marine.orange`; it replaces the focus light |
+| Cyan eyes, `#0799D2`, her only cold light | The family's ice, already taken from the artwork |
+
+Two trials are recorded so they are not repeated: sweeps on the corner cuts
+of cards and dialogs read as rounded corners, and rows of small sweeps on the
+bands' risers read as scalloped edges. Closed panels keep straight 45-degree
+cuts. Her model and textures were rendered for reference outside the
+repository; nothing extracted from them is tracked. The register still does
+not hold this scope, and nothing is accepted.
+
+### Version 1.42: horns on the main frames
+
+Version 1.41's talons were a third as high as the steps they stood on and
+left the bands, the level block and the dialog looking like the Marine
+family's; the product owner asked for the main frames themselves to change.
+Section 6 replaces the talons and their spines with horns, tapers and
+fullers, and sections 2 and 13.7 follow.
+
+| Frame | Version 1.41 | Version 1.42 |
+| --- | --- | --- |
+| Top band | The stock riser with a talon 11.8 u high at its foot | The riser becomes a horn 61 u long, its point at 376.5 u; the band before each pocket tapers to a point at 15 degrees |
+| Bottom band | The stock ramps with talons 10.1 and 14.4 u high | The raised section ends in two horns, 52 and 75 u long, pointing outward |
+| Card | The stock card | A horn at the top-trailing corner, closing inside the header |
+| Modal | A talon 8.4 u high at the foot of the chamfer | A horn at the top-trailing corner; the bottom edge runs on to the lower-leading corner under the chamfer |
+| Rule | Talons on steps of 24 u or more; everything else straight | Horns on steps of 24 u or more and on panel corners; smaller steps taper straight at 15 degrees; every sweep hollows its frame |
+
+The register still does not hold this scope, and nothing is accepted.
+
+### Version 1.43: the title's signal
+
+The product owner asked for the new interface's main menu background to gain
+a dither and sci-fi digital glitch effects and transitions that are
+interesting but not distracting, then for a slight dimming. Section 13.8 adds
+the title signal and section 8 its slips. The stock measurement stays in
+section 8's table, where the stock menus keep it.
+
+| Subject | Version 1.42 | Version 1.43 |
+| --- | --- | --- |
+| Pictures | The levelshots at full strength under the light band | Black at 0.30 over them, beneath the vignette and light band |
+| Texture | None over the pictures | An ordered 8x8 Bayer dither at 0.60 over the pictures and their light, beneath the reticle grid |
+| Picture change | The stock cross-fade over 2000 ms every 5000 ms | A signal fault over 640 ms about the cut, peaking at 0.85, while the next picture steps in by 420 ms |
+| Menu moves | Bands and content only | A fault as the menu opens, as the bands leave for a page and as they dock home |
+| Between changes | Still | Five brief slips a loop |
+| Reduced motion | One picture, no cross-fade | One picture and the dither, no fault |
+| Reduced flashing | No change | No fault; the dither and the stepped picture changes stay |
+
+Register revision 23 supersedes `MOT-011`, whose levelshot cross-fade the
+title no longer reproduces, by `MOT-017`. It carries every other loop and
+alarm unchanged and sends the Remastered title's picture changes to the
+signal. It also appends `MOT-018` for the signal itself. Both are pending,
+and nothing is accepted.
+
+### Version 1.44: the weapon strip's motion
+
+The product owner asked for an interesting but subtle refinement of the new
+interface's weapon strip, with a Strogg variant after stroggification and
+quick, subtle transitions for opening, closing, a refused choice and a change
+of weapon. Section 14.5 adds the strip's Remastered motion; the stock strip's
+measurement stays as recorded.
+
+| Subject | Version 1.43 | Version 1.44 |
+| --- | --- | --- |
+| Opening | In the frame of the change, without motion | Marine rises 4 u over 140 ms; Strogg tunes in about its row with a sweeping hairline |
+| Closing | At once, 1000 ms after the last change or on firing | Over 150 ms after the hold, 90 ms on firing; Marine sinks, Strogg collapses |
+| Ring | A ring on each pending plate | One ring travelling from the slot it left; the Strogg ring stretches and sends an impulse |
+| Refusal | Nothing | The ring shakes (Strogg in hard steps) and flashes red; an empty weapon's sign throbs |
+| Quick switch | Not shown | A tick under the weapon it returns to |
+| Reduced motion | Not applicable | Fades only; the ring, the red, the sign and the tick stay |
+
+Register revision 24 supersedes `FLOW-032`, which closed the strip at once on
+firing, by `FLOW-070`, carrying every construction and timing rule and adding
+the motion, the refusal and the tick. It is pending, and nothing is accepted.
+
+### Version 1.45: Awakening transitions
+
+The product owner asked for elegant transitions in The Awakening's menu
+design, particularly for the top and bottom frames, considering the menu
+levels and the scroll between them, and then for the family to be built.
+Section 6 evens the bands' small steps, section 8 adds the Awakening motion,
+and sections 2 and 13.7 follow.
+
+| Subject | Version 1.44 | Version 1.45 |
+| --- | --- | --- |
+| Small steps | Pockets tapering at 15 degrees on the leading side and stepping at 45 on the trailing side; the other 9 u steps at 45 degrees | Every step under 24 u a straight 30-degree flank, both sides of a pocket alike |
+| Opening | Bands at home under `menu.fade` | Bands close in from 30 u over 400 ms, easing out |
+| Band moves | `accel(a, d)`, both bands together | One jolt-free curve; to and from a page the bottom band leads and the top band follows 40 ms later, arriving together |
+| Level change | The departing level sweeps out; the next appears in place | The departing level scrolls out on the same curve; the next scrolls in its last 32 u from the side the menu travels from |
+| Edges in motion | Unchanged | The rime line brightens with the band's speed |
+| Tabs and lists | Sibling pages slide; lists jump | Rows scroll sideways in strip order; lists scroll by whole rows over 150 ms |
+
+The atlas sheet now reaches all four levels and the confirmation through
+these transitions.
+
+### Version 1.46: the loading screen's entrance
+
+The product owner asked for a quick and interesting scroll transition that
+brings the level loading screens' top and bottom framing into view. Section
+14.17 adds the entrance to the Remastered loading screen; the stock screens
+and Classic are unchanged.
+
+| Subject | Version 1.45 | Version 1.46 |
+| --- | --- | --- |
+| First frame | The whole screen at once | The levelshot alone, the frame parked past the top and bottom edges |
+| Bands | In place | Scroll in 120 u and 140 u, decelerating hard over 300 ms, pass their seat by 2.5 u and lock back over 100 ms; the bottom band 40 ms after the top |
+| Furniture | In place | Rides with its band, trailing it by 70 ms, seated at 320 ms |
+| Inner edges | The spill only | Light in #E06C00 with a #FFC070 core as each band locks, gone 300 ms later |
+| Objectives and server card | In place | Fade in from 260 to 460 ms |
+| Reduced motion | Not applicable | The frame seats at once, unlit; the cards fade in over 80 ms |
+
+Register revision 26 appends `FLOW-072` for the entrance; `FLOW-047` keeps
+the rest of the loading screens unchanged. It is pending, and nothing is
+accepted.
 
 ### Version 1.39: the Awakening chaingun turret
 

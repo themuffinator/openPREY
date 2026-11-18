@@ -150,6 +150,12 @@ int Session_RenderDemoFramesToMS( int frames, int userCmdHz );
 // has none (Session.cpp).
 idStr Session_LevelDisplayName( const char *map, const char *entityFilter );
 
+#ifndef ID_DEDICATED
+// True for a save made on a level of the campaign not running, which a mod's
+// shared save folder can hold (Session.cpp).
+bool Session_SaveMapFromOtherCampaign( const char *map );
+#endif
+
 // False, with the player-facing reason, when a campaign render demo was
 // recorded in another game directory than the active one (Session_demo.cpp).
 bool Session_RenderDemoContentMatches( const char *path, idStr &reason );
@@ -350,6 +356,10 @@ public:
 	// workers, while the stock menus load.
 	void				PrefetchRetainedScreens();
 	void				PrefetchRetainedNextPages();
+	// Out of sight, while the page on screen rests: loads the pages it leads
+	// to whose parse has finished, then prepares each that has never
+	// presented (UI_RetainedWarm), one step a frame, before the page draws.
+	void				WarmRetainedPages();
 	void				PrepareRetainedLevel( const char *mapPath, bool multiplayer );
 	// As a map change begins, starts parsing the level's retained documents on
 	// the job system's workers: the pages PrepareRetainedLevel loads, and the
@@ -421,6 +431,9 @@ public:
 	// Marine pause hands off to it the same way. RetainedPageActive is true
 	// while either page presents.
 	bool				RetainedPageActive() const;
+	// A retained page one of those pages leads to: a settings sub-page, or the
+	// Arena, Create Server, Join Game or Demos page.
+	bool				RetainedChildPageActive() const;
 	void				PublishRetainedSavePage( idUserInterface *gui, int select );
 	void				PublishRetainedSaveSelection( idUserInterface *gui, bool name );
 	void				HandleRetainedSaveRequest( idUserInterface *gui, const char *request );
@@ -734,6 +747,7 @@ public:
 	idUserInterface *	guiRetainedTitle;
 	idUserInterface *	guiRetainedPause;
 	idUserInterface *	guiRetainedPauseStrogg;	// the Strogg family's pause
+	idUserInterface *	guiRetainedPauseAwakening;	// The Awakening's pause, while its campaign runs
 	int					retainedPauseStrogg;	// this level's player is Strogg (-1: not asked yet)
 	ID_TIME_T			retainedNewestSave;		// when the newest save was written (0: none)
 	idUserInterface *	guiRetainedReleasing;	// a closed pause screen releasing the softened view
@@ -750,6 +764,12 @@ public:
 	int                     wipeFadeStarted = 0, wipeFadeDuration = 0;
 	retainedSubpage_t	retainedSubpageKind;	// the sub-page the change goes to or comes back from
 	bool				retainedHomeReturning;
+	// WarmRetainedPages: the page on screen and its focused control when they
+	// last changed, when it counts as resting, and whether its leads are done.
+	const idUserInterface *retainedWarmShown;
+	idStr				retainedWarmFocus;
+	int					retainedWarmFrom;
+	bool				retainedWarmDone;
 	bool				retainedHomeUnderMessage;	// a stock message box covers the presented home
 	bool				retainedJoinReturn;		// a join from Join Game is under way: a return finds its list
 	// The Load Game page: its document (NULL until it first loads), the home
@@ -780,14 +800,27 @@ public:
 	idUserInterface *	guiRetainedLoadStrogg;
 	idUserInterface *	guiRetainedSaveStrogg;
 	idUserInterface *	guiRetainedRestartStrogg;
+	// The same pages in The Awakening's family, which its pause hands off to.
+	idUserInterface *	guiRetainedLoadAwakening;
+	idUserInterface *	guiRetainedSaveAwakening;
+	idUserInterface *	guiRetainedRestartAwakening;
+	// The settings pages in The Awakening's family: the SETTINGS page and its
+	// categories load in it while the Awakening pause is the home behind them
+	// (SyncRetainedSettingsFamily); FindRetainedGui reads the family's copy.
+	bool				retainedSettingsAwakening;
+	void				SyncRetainedSettingsFamily();
+	const char *		RetainedFamilyPath( const char *path ) const;
+	bool				IsRetainedPause( const idUserInterface *gui ) const {
+		return gui != NULL && ( gui == guiRetainedPause || gui == guiRetainedPauseStrogg || gui == guiRetainedPauseAwakening );
+	}
 	bool				IsRetainedLoadPage( const idUserInterface *gui ) const {
-		return gui != NULL && ( gui == guiRetainedLoad || gui == guiRetainedLoadStrogg );
+		return gui != NULL && ( gui == guiRetainedLoad || gui == guiRetainedLoadStrogg || gui == guiRetainedLoadAwakening );
 	}
 	bool				IsRetainedSavePage( const idUserInterface *gui ) const {
-		return gui != NULL && ( gui == guiRetainedSave || gui == guiRetainedSaveStrogg );
+		return gui != NULL && ( gui == guiRetainedSave || gui == guiRetainedSaveStrogg || gui == guiRetainedSaveAwakening );
 	}
 	bool				IsRetainedRestartPage( const idUserInterface *gui ) const {
-		return gui != NULL && ( gui == guiRetainedRestart || gui == guiRetainedRestartStrogg );
+		return gui != NULL && ( gui == guiRetainedRestart || gui == guiRetainedRestartStrogg || gui == guiRetainedRestartAwakening );
 	}
 	// The Demos page (NULL until it first loads): the library entries its
 	// filter shows (indices into demoLibrary, newest first), the first one
@@ -805,11 +838,13 @@ public:
 	idUserInterface *	guiRetainedEscape;
 	idUserInterface *	guiRetainedWelcome;
 	idUserInterface *	guiRetainedSummary;
+	idUserInterface *	guiRetainedBuy;
 	// The single-player Arena's pause card.
 	idUserInterface *	guiRetainedArenaPause;
 	idUserInterface *	guiRetainedMultiplayer;
 	idUserInterface *	retainedMultiplayerTarget;		// the game GUI the cover was last decided for
 	bool				retainedMultiplayerSummary;		// the card covers the summary
+	bool				retainedMultiplayerBuy;			// the card covers the buy menu
 	bool				retainedSummaryTyping;
 	int					retainedSummaryCaret;			// a byte offset into the stock summary's chattext
 	bool				retainedMultiplayerWelcome;
@@ -917,7 +952,9 @@ public:
 	idUserInterface *	guiSubtitles;
 	idUserInterface *	guiSave;
 	
-	idUserInterface *	guiMsg;
+	idUserInterface *	guiMsg;						// the message box in use: one of the two below
+	idUserInterface *	guiMsgStock;				// guis/msg.gui
+	idUserInterface *	guiMsgRetained;				// the retained pop-up (NULL until a box needs it)
 	idUserInterface *	guiMsgRestore;				// store the calling GUI for restore
 	idStr				msgFireBack[ 2 ];
 	bool				msgRunning;
@@ -1079,6 +1116,13 @@ public:
 	double				renderDemoRecordLastFrameClockUS;	// when it was drawn, real time
 	int					renderDemoRecordLastFrameDraw;	// renderDemoDrawSerial it was drawn on
 	int					renderDemoDrawSerial;			// counts idSessionLocal::Draw calls
+	// A recording ends itself, with its summary, when a block cannot be
+	// written, the disk runs low (demo_recordMinFreeMB) or it reaches
+	// demo_recordMaxSizeMB.
+	int					renderDemoRecordHealthMsec;		// when the disk was last looked at
+	// Keyframes: every demo_recordKeyframeSeconds of recorded time a level
+	// gains a second way in, so a seek replays seconds, not the level.
+	int64				renderDemoRecordKeyframeUS;		// the timeline at the last level start or keyframe
 
 	// Playback of a v11 recording. Its timeline is the time of its recorded
 	// frames, so it runs on across levels whose game clocks restart: each v13
@@ -1100,6 +1144,15 @@ public:
 	int					renderDemoPlaySegment;		// the segment playing, or -1
 	idStr				renderDemoPlayMap;			// the playing segment's map
 	bool				renderDemoLevelLoadOpen;	// a segment's media load is open
+	// A v14 recording's block headers say where its levels and keyframes
+	// begin, whether or not it was stopped cleanly, so a seek opens the file
+	// at the last of them before its target instead of replaying everything
+	// before it, and playback carries on from the next one after a damaged
+	// block.
+	demoTimeline_t		renderDemoPlayTimeline;
+	bool				renderDemoPlayTimelineValid;
+	int					renderDemoSeekJumpEntry;		// the timeline entry a pending seek opens, or -1
+	int					renderDemoSeekStartedMsec;		// when the seek in progress was asked for
 
 	bool				IsRenderDemoRecording() const { return renderDemoRecordState != RENDER_DEMO_RECORD_IDLE; }
 	bool				OpenRenderDemoRecordFile();
@@ -1118,6 +1171,11 @@ public:
 	double				RenderDemoCaptureStepUS() const;
 	void				EndRenderDemoRecordFrame();
 	bool				SeekRenderDemoSegment( int direction );
+	int					RenderDemoTimelineEntryAt( int timeMS ) const;
+	bool				JumpRenderDemoToEntry( int timelineEntry );
+	bool				ResumeRenderDemoAfterDamage();
+	void				CheckRenderDemoRecordHealth();
+	void				WriteRenderDemoKeyframe();
 	idStr				RenderDemoSegmentLabel() const;
 
 	idUserInterface *	GetActiveMenu();
@@ -1132,6 +1190,7 @@ public:
 	void				HandleIntroMenuCommands( const char *menuCommand );
 	void				HandleRestartMenuCommands( const char *menuCommand );
 	void				HandleMsgCommands( const char *menuCommand );
+	void				SelectMessageBox( bool retained );
 	void				HandleNoteCommands( const char *menuCommand );
 	void				GetSaveGameList( idStrList &fileList, idList<fileTIME_T> &fileTimes, idStrList *gameDirs = NULL );
 	void				TakeNotes( const char * p, bool extended = false );

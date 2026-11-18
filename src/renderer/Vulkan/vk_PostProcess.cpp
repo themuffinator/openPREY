@@ -903,6 +903,11 @@ static void VK_Post_SynchronizeHDRExposure( const viewDef_t *viewDef, bool scene
 	vkHDR.sceneFloat = sceneFloat;
 	vkHDR.sceneLinear = sceneLinear;
 	vkHDR.sceneSamples = sceneSamples;
+	{
+		// FPS-05: the count the scene draws with, for the settings page.
+		extern void R_PublishMainSceneSamples( int samples );
+		R_PublishMainSceneSamples( sceneSamples );
+	}
 	vkHDR.width = width;
 	vkHDR.height = height;
 	vkHDR.renderWorld = viewDef->renderWorld;
@@ -2353,6 +2358,12 @@ static void VK_Post_CopyVec3( float out[ 4 ], const idVec3 &value ) {
 // Returns true when it drew into the scene.
 static bool VK_Post_MotionBlur( const viewDef_t *viewDef, idRenderTexture *sceneTarget ) {
 	if ( !r_motionBlur.GetBool() ) {
+		VK_Post_ResetMotionBlurHistory();
+		return false;
+	}
+	// A headset's eyes are two views a frame with one camera history between
+	// them, and a head turn smeared across a lens is what no headset wants.
+	if ( viewDef != NULL && viewDef->renderView.asymmetricFov ) {
 		VK_Post_ResetMotionBlurHistory();
 		return false;
 	}
