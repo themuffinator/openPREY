@@ -144,22 +144,25 @@ static void SyncVolumeCompatibilityCVars()
 	SyncVolumeAliasCVars( s_musicVolume, s_musicvolume_dB );
 }
 
+// The sound's share of the controller rumble; gameplay pulses (weapon fire,
+// hits) are mixed on top by Sys_UpdateJoystickRumble, so a quiet frame no
+// longer cancels them.
 static void Sound_UpdateControllerRumble( float amplitude )
 {
 	if( !s_controllerRumble.GetBool() )
 	{
-		Sys_SetJoystickRumble( 0.0f, 0.0f, 0 );
+		Sys_UpdateJoystickRumble( 0.0f, 0.0f, 0 );
 		return;
 	}
 
 	const float strength = idMath::ClampFloat( 0.0f, 1.0f, amplitude );
 	if( strength <= SOUND_RUMBLE_STOP_THRESHOLD )
 	{
-		Sys_SetJoystickRumble( 0.0f, 0.0f, 0 );
+		Sys_UpdateJoystickRumble( 0.0f, 0.0f, 0 );
 		return;
 	}
 
-	Sys_SetJoystickRumble( strength, strength * SOUND_RUMBLE_HIGH_MOTOR_SCALE, SOUND_RUMBLE_DURATION_MSEC );
+	Sys_UpdateJoystickRumble( strength, strength * SOUND_RUMBLE_HIGH_MOTOR_SCALE, SOUND_RUMBLE_DURATION_MSEC );
 }
 
 /*
@@ -199,6 +202,31 @@ void RestartSound_f( const idCmdArgs& args )
 {
 	idLib::Printf( "Sound System Restart...\n" );
 	soundSystemLocal.Restart();
+}
+
+/*
+========================
+Sound_PurgeSamplesForRemount
+========================
+*/
+void Sound_PurgeSamplesForRemount( void )
+{
+	// A campaign remount changed the search path: a sample of the same name
+	// may now come from another file. Free them all; each loads again from
+	// the new search path when it next plays (idSoundEmitter loads unloaded
+	// samples) or when a level references it.
+	soundSystemLocal.FinishSampleDecodes( true );
+	int purged = 0;
+	for( int i = 0; i < soundSystemLocal.samples.Num(); i++ )
+	{
+		idSoundSample* sample = soundSystemLocal.samples[i];
+		if( sample->IsLoaded() || sample->IsDecoding() )
+		{
+			sample->FreeData();
+			purged++;
+		}
+	}
+	common->Printf( "%d sound samples freed for the campaign switch\n", purged );
 }
 
 /*
@@ -2654,7 +2682,8 @@ void idSoundReverb::PrintInfo() const
 	{
 		const int area = slotToArea[slot];
 		const int effect = area >= 0 ? EffectForArea( const_cast<idSoundReverb*>( this ), area ) : -1;
-		common->Printf( "  [%d]%s area %d %s\n", slot, slot == primarySlot ? "*" : " ", area,
-			effect >= 0 ? effects[effect].name.c_str() : "-" );
+		common->Printf( "  [%d]%s area %d %s%s\n", slot, slot == primarySlot ? "*" : " ", area,
+			effect >= 0 ? effects[effect].name.c_str() : "-",
+			soundSystemLocal.hardware.IsReverbSlotIdle( slot ) ? " (idle: no voice feeds it)" : "" );
 	}
 }

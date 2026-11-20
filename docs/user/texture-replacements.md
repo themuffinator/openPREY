@@ -64,8 +64,8 @@ The retail `progimg/` tree is probed **last**, so a user replacement always wins
 Set `image_usePrecompressedTextures` before loading a map:
 
 - `0` disables automatic DDS replacements entirely, including your own packs.
-- `1` (default) uses any supported DDS replacement — DXT1, DXT5, RXGB and BC7 — and also reuses the stock `progimg/` files shipped in the PREY (2006) PK4s. **This is the right setting for a BC7 pack.**
-- `2` uses only BC7/BPTC replacements and ignores DXT/RXGB data, including the stock `progimg/` tree. Use this only if you specifically want everything else to come from the uncompressed sources.
+- `1` (default) uses any supported DDS replacement — DXT1, DXT5, RXGB, BC7, BC6H, BC4 and BC5 (see [Other formats](#other-formats)) — and also reuses the stock `progimg/` files shipped in the PREY (2006) PK4s. **This is the right setting for a BC7 pack.**
+- `2` uses only BC7, BC6H, BC4 and BC5 replacements and ignores DXT/RXGB data, including the stock `progimg/` tree. Use this only if you specifically want everything else to come from the uncompressed sources.
 
 BC7 requires a renderer with BPTC support. Run `gfxInfo` and look for the BC7/BPTC capability line if a pack is not being selected.
 DXT/RXGB files fall back to CPU decoding when direct texture-compression upload is unavailable. A BC7 file on a renderer without BPTC support is uploaded uncompressed rather than failing the load.
@@ -84,6 +84,16 @@ Texture arrays, cube maps, volume textures, invalid dimensions, and truncated de
 Write BC7 normal maps the ordinary way: X, Y, Z in RGB, alpha unused. That is what `texconv`, NVTT, Compressonator and `bc7enc` all produce by default, and it is what openPREY expects.
 
 > **Changed:** earlier openPREY builds incorrectly forced BC7 bump maps into the DXT5nm/RXGB channel layout, which required encoding with `bc7enc -r2a`. A pack authored that way will now render with flat lighting and must be re-encoded without `-r2a`. Only DXT5 and true `RXGB` files use the alpha-swizzled layout; that convention exists because DXT5 gives alpha its own higher-precision interpolator, and BC7 has no such limitation.
+
+## Other formats
+
+Besides DXT1, DXT5/RXGB and BC7, single 2D DDS textures in these formats load, with a classic FourCC or a DX10 header:
+
+| Format | FourCC | DX10 `DXGI_FORMAT_` | How it loads |
+| --- | --- | --- | --- |
+| BC4 | `ATI1`, `BC4U` | `BC4_UNORM` | decoded, as greyscale |
+| BC5 | `ATI2`, `BC5U` | `BC5_UNORM` | decoded, as a normal map (Z rebuilt) |
+| BC6H (HDR) | `BC6H` | `BC6H_UF16`, `BC6H_SF16`, `BC6H_TYPELESS` | as it is where BPTC is supported, else decoded to 16-bit floating point |
 
 ## Troubleshooting
 

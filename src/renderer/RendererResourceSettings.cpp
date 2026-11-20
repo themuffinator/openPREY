@@ -32,10 +32,15 @@ constexpr size_t MaxMaterialBytes = 256 * 1024;
 constexpr size_t MaxSourceBytes = 32 * 1024 * 1024;
 constexpr const char* DependencyNames[] = {
     "image_picmip", "image_picmipFilter", "image_picmipMinSize", "image_filter", "image_anisotropy",
-    "image_useETC2", "image_highQualityCompression", "image_writeGeneratedImages",
+    "image_useETC2", "image_useCompression", "image_useNormalCompression",
+    "image_highQualityCompression", "image_writeGeneratedImages",
     "com_productionMode", "com_makingBuild", "com_SingleDeclFile"
 };
 constexpr size_t NumDependencies = sizeof(DependencyNames) / sizeof(DependencyNames[0]);
+// openPREY: upstream added two names here without growing the recovery record,
+// so recording the last two wrote past the end of its array.
+static_assert(NumDependencies == std::tuple_size<decltype(openq4::imageRecovery::Data::dependencies)>::value,
+    "the image recovery record must hold one dependency per DependencyNames entry");
 
 
 struct ImageProof {

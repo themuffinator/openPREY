@@ -21,6 +21,7 @@ SUPPORT=r'''
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <thread>
 #include <vector>
 #include "RendererConsumedPolicy.h"
 using byte=unsigned char;using uint32=uint32_t;using int64=int64_t;using ID_TIME_T=int64_t;
@@ -34,7 +35,7 @@ void* Mem_Alloc(size_t bytes){if(++allocCalls==failAt){if(throwAllocation)throw 
 void Mem_Free(void*p){if(!p)return;TEST(allocations.erase(p)==1);std::free(p);}
 void* R_StaticAlloc(size_t n){return Mem_Alloc(n);}void R_StaticFree(void*p){Mem_Free(p);}
 struct idMath {static float Pow(float a,float b){return std::pow(a,b);}static byte Ftob(float x){return byte(std::clamp(x,0.f,255.f));}};
-enum textureFormat_t{FMT_NONE,FMT_DXT1,FMT_DXT5,FMT_BC7,FMT_RGBA8,FMT_SRGBA8,FMT_OTHER,FMT_ETC2_RGB8,FMT_ETC2_RGBA8,FMT_EAC_RG11,FMT_LUM8,FMT_INT8,FMT_ALPHA,FMT_L8A8,FMT_RGB565};
+enum textureFormat_t{FMT_NONE,FMT_DXT1,FMT_DXT5,FMT_BC7,FMT_BC6H_UF16,FMT_BC6H_SF16,FMT_RGBA8,FMT_SRGBA8,FMT_OTHER,FMT_ETC2_RGB8,FMT_ETC2_RGBA8,FMT_EAC_RG11,FMT_LUM8,FMT_INT8,FMT_ALPHA,FMT_L8A8,FMT_RGB565};
 enum textureColor_t{CFM_DEFAULT,CFM_NORMAL_DXT5,CFM_YCOCG_DXT5,CFM_GREEN_ALPHA};enum {TT_2D=1,TT_CUBIC=2};
 using textureUsage_t=int;enum {TD_DEFAULT,TD_BUMP,TD_FONT,TD_LIGHT,TD_PBR_COLOR};
 const int MAX_BINARY_IMAGE_DIMENSION=32768,MAX_BINARY_IMAGE_LEVELS=32,MAX_BINARY_IMAGE_DATA_SIZE=1<<30;
@@ -76,6 +77,8 @@ struct FileSystem{idFile file;bool missing=false;int open=0;idFile*OpenFileRead(
 FileSystem*fileSystem=&fs;
 struct Caps{bool textureCompressionAvailable=true,bptcTextureCompressionAvailable=true;}caps;
 const Caps&ImageTools_GetCompressionCaps(){return caps;}
+// BC6H without BPTC decodes to RGBA16F (Image_files.cpp); these fixtures carry no BC6H
+static bool R_LoadBC6HAsHalfFloat(idBinaryImage&,const byte*,const int*,int,int,int,bool){TEST(false);return false;}
 static imageDownsizePolicy_t livePolicy{};static int policyReads=0;
 void R_GetImageDownsizePolicy(const char*,textureUsage_t,bool,imageDownsizePolicy_t&out){++policyReads;out=livePolicy;}
 struct idDxtEncoder{void Fill(const byte*src,byte*dst,int w,int h,int d){if(++encodeCalls==failEncodeAt)throw std::runtime_error("encoder refusal");TEST(w>=4&&h>=4&&w%4==0&&h%4==0);for(int i=0;i<w*h*4;++i)TEST(src[i]==src[i%4]);memset(dst,src[0],size_t(w)*h/d);}
@@ -168,7 +171,18 @@ static void Assembly2D(){
  }
  {std::vector<byte>src(16,77);idBinaryImage im;auto f=FMT_DXT5;auto c=CFM_YCOCG_DXT5;failConversion=true;try{im.Load2DFromMemory(2,2,src.data(),2,f,c,false,false);TEST(false);}catch(const std::runtime_error&e){TEST(std::string(e.what())=="conversion failure");}TEST(allocations.empty()&&im.images.empty()&&f==FMT_DXT5&&c==CFM_YCOCG_DXT5);failConversion=false;}
 }
-int main(){try{Filters();DDSLoads();TEST(allocations.empty());RawLoads();FaceLoads();Cubes();TEST(allocations.empty());Assembly();Assembly2D();TEST(allocations.empty());printf("Image exact reduction: %d checks passed\n",checks);return 0;}catch(const std::exception&e){fprintf(stderr,"FAILED %s (%d checks)\n",e.what(),checks);return 1;}}
+// R_EncodeBlockLevel bands a level across threads; each band must write the bytes one pass would.
+// (No TEST inside the encoder: it runs on worker threads and the counter is not atomic.)
+static void BandedEncode(){
+ auto encode=[](const byte*s,byte*d,int w,int h,int bpb){for(int by=0;by<h/4;++by)for(int bx=0;bx<w/4;++bx){uint32_t v=2166136261u;for(int y=0;y<4;++y)for(int x=0;x<16;++x)v=(v^s[(size_t(by*4+y)*w+bx*4)*4+x])*16777619u;for(int k=0;k<bpb;++k)d[(size_t(by)*(w/4)+bx)*bpb+k]=byte(v>>(8*(k&3)))^byte(k);}};
+ for(auto d:std::vector<std::vector<int>>{{4,4},{512,512},{1024,512},{2048,64},{516,1028},{2048,2048},{4096,260}})for(int bpb:{8,16}){
+  int w=d[0],h=d[1];auto src=Pixels(w,h,w^h);std::vector<byte>one(size_t(w/4)*(h/4)*bpb,0xcd),banded(one.size(),0xab);
+  encode(src.data(),one.data(),w,h,bpb);
+  R_EncodeBlockLevel(src.data(),banded.data(),w,h,bpb,[&](const byte*s,byte*o,int bw,int bh){encode(s,o,bw,bh,bpb);});
+  TEST(one==banded);
+ }
+}
+int main(){try{Filters();DDSLoads();BandedEncode();TEST(allocations.empty());RawLoads();FaceLoads();Cubes();TEST(allocations.empty());Assembly();Assembly2D();TEST(allocations.empty());printf("Image exact reduction: %d checks passed\n",checks);return 0;}catch(const std::exception&e){fprintf(stderr,"FAILED %s (%d checks)\n",e.what(),checks);return 1;}}
 '''
 
 def main():
@@ -191,7 +205,7 @@ def main():
  dds+='\n'+re.search(r'typedef bool \(\*imageDDSPrefetchTake_t\)\([^;]*;',image_h)[0]
  dds+='\n'+files[files.index('static imageDDSPrefetchTake_t ddsPrefetchTake'):files.index('/*\n=============\nR_LoadPrecompressedDDS')]
  dds+='\n'+method(files,'bool R_LoadPrecompressedDDS(').replace('const imageFileContent_t* expected )','const imageFileContent_t* expected = nullptr )')+'\n'+method(files,'bool R_LoadCubeImages(')
- assembly='\n'.join(method(binary,s) for s in ['void idBinaryImage::Clear(', 'static void R_PadRGBAImageTo4x4Blocks(', 'static void PadImageTo4x4(', 'void idBinaryImage::Load2DFromOwnedCompressedData(', 'bool idBinaryImage::Load2DFromMemory(', 'bool idBinaryImage::LoadCubeFromMemory('])
+ assembly='\n'.join(method(binary,s) for s in ['void idBinaryImage::Clear(', 'static void R_PadRGBAImageTo4x4Blocks(', 'static void PadImageTo4x4(', 'void idBinaryImage::Load2DFromOwnedCompressedData(', 'template< typename encode_t >', 'bool idBinaryImage::Load2DFromMemory(', 'bool idBinaryImage::LoadCubeFromMemory('])
  actual=method(load,'void idImage::ActuallyLoadImage(');assert 'consumedLoad.Reduction(consumedReduction);' in actual
  assert 'if ( !loadedPrecompressedDDS && exactDecodedReduction )' in actual
  assert 'R_ApplyImageDownsizePolicy( precompressedDownsizePolicy' not in actual
@@ -207,7 +221,7 @@ def main():
  shutil.copyfile(ROOT/'src/imagetools/SRGB.h',out/'SRGB.h')
  code=SUPPORT+cpu+assembly+dds+MAIN;cases=[('actual',code,False)]
  if a.mutations:
-  for tag,old,new in [('impossible-authored-levels','if (authoredLevels > maxLevels) return false;','if (false) return false;'),('dds-target-twice','result.requestedWidth = width; result.requestedHeight = height;','result.requestedWidth = Max(1,width>>1); result.requestedHeight = Max(1,height>>1);'),('dds-unreached-exact','? IR_EXACT : IR_INSUFFICIENT_MIPS','? IR_EXACT : IR_EXACT'),('cube-partial-success','if (!candidates[i]) return false;','if (!candidates[i]) break;'),('cube-size-early','byte *candidates[6]{};','size = scaledSize; byte *candidates[6]{};'),('mip-leak','if (value) Mem_Free(value);','(void)value;'),('cube-partial-binary','if (!complete) image.Clear();','(void)complete;'),('resample-hidden-clamp','const size_t outputBytes =','if (outwidth > 4096) outwidth = 4096; const size_t outputBytes ='),('resample-narrow-numerator','(uint64_t(inwidth) << 16)','uint64_t(inwidth * 65536)'),('dds-output-before-read','if ( cname == NULL','if (reduction) *reduction = {}; if ( cname == NULL'),('cube-null-face',' || (pics && !pics[i])',''),('2d-mip-null','if (!shrunk) return false;','if (false) return false;'),('2d-owned-leak','if (owned) Mem_Free((void*)pic);','(void)owned;'),('2d-publish-early','if ( textureFormat != FMT_SRGBA8 ) { textureFormat = FMT_RGBA8; }','if ( textureFormat != FMT_SRGBA8 ) { textureFormat = FMT_RGBA8; } textureFormatOutput = textureFormat;')]:
+  for tag,old,new in [('impossible-authored-levels','if (authoredLevels > maxLevels) return false;','if (false) return false;'),('dds-target-twice','result.requestedWidth = width; result.requestedHeight = height;','result.requestedWidth = Max(1,width>>1); result.requestedHeight = Max(1,height>>1);'),('dds-unreached-exact','? IR_EXACT : IR_INSUFFICIENT_MIPS','? IR_EXACT : IR_EXACT'),('cube-partial-success','if (!candidates[i]) return false;','if (!candidates[i]) break;'),('cube-size-early','byte *candidates[6]{};','size = scaledSize; byte *candidates[6]{};'),('mip-leak','if (value) Mem_Free(value);','(void)value;'),('cube-partial-binary','if (!complete) image.Clear();','(void)complete;'),('resample-hidden-clamp','const size_t outputBytes =','if (outwidth > 4096) outwidth = 4096; const size_t outputBytes ='),('resample-narrow-numerator','(uint64_t(inwidth) << 16)','uint64_t(inwidth * 65536)'),('dds-output-before-read','if ( cname == NULL','if (reduction) *reduction = {}; if ( cname == NULL'),('cube-null-face',' || (pics && !pics[i])',''),('2d-mip-null','if (!shrunk) return false;','if (false) return false;'),('2d-owned-leak','if (owned) Mem_Free((void*)pic);','(void)owned;'),('band-offset','dst + (size_t)firstRow * blocksWide * bytesPerBlock','dst + (size_t)firstRow * blocksWide * 8'),('2d-publish-early','if ( textureFormat != FMT_SRGBA8 ) { textureFormat = FMT_RGBA8; }','if ( textureFormat != FMT_SRGBA8 ) { textureFormat = FMT_RGBA8; } textureFormatOutput = textureFormat;')]:
    assert old in code,tag;cases.append((tag,code.replace(old,new,1),True))
  records=[];status='failed'
  try:

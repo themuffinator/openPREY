@@ -37,7 +37,8 @@ struct Data {
     unsigned direction=0;
     std::string attempt{""};
     renderImagePolicy_t policy{};
-    std::array<Dependency,11> dependencies;
+    // One per DependencyNames entry (RendererResourceSettings.cpp, which asserts it).
+    std::array<Dependency,13> dependencies;
     std::vector<Image> images=std::vector<Image>(size_t{0});
     std::vector<Material> materials=std::vector<Material>(size_t{0});
 };

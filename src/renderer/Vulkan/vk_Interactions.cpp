@@ -866,9 +866,11 @@ static bool VK_ClassicInteraction_BuildMappedShadowBlock(
 	for ( int cascadeIndex = 0;
 			cascadeIndex < SHADOWMAP_PROJECTED_MAX_CASCADES;
 			++cascadeIndex ) {
+		// < 0: per unit of the receiver's light depth (interaction_shadow.vert)
 		block.normalOffsetWorld[ cascadeIndex ] =
-			projected.worldTexelSize[ cascadeIndex ]
-				* mapPass.projected.normalOffsetScale;
+			R_ShadowMapProjectedNormalOffsetWorld( projected, cascadeIndex,
+				mapPass.projected.normalOffsetScale,
+				mapPass.projected.distantNormalOffsetDepth );
 	}
 	block.viewDepthRow[ 0 ] = -primitive.modelViewMatrix[ 2 ];
 	block.viewDepthRow[ 1 ] = -primitive.modelViewMatrix[ 6 ];
@@ -883,6 +885,7 @@ static bool VK_ClassicInteraction_BuildMappedShadowBlock(
 	block.texelSize[ 1 ] = residentMap
 		? physicalPass.invMapSize : physicalLight.invAtlasSize[ 1 ];
 	block.texelSize[ 2 ] = Max( 0.0f, r_shadowMapTexelBiasScale.GetFloat() );
+	block.texelSize[ 3 ] = static_cast<float>( projected.wholeLightCascade + 1 );
 	block.filterParams[ 0 ] = mapPass.projected.filter.filterRadius;
 	block.filterParams[ 1 ] = static_cast<float>(
 		mapPass.projected.filter.filterTaps );
@@ -3825,9 +3828,10 @@ static int VK_Inter_WriteShadowSlice( const viewEntity_t *space ) {
 	for ( int cascadeIndex = 0 ;
 			cascadeIndex < SHADOWMAP_PROJECTED_MAX_CASCADES ;
 			cascadeIndex++ ) {
+		// < 0: per unit of the receiver's light depth (interaction_shadow.vert)
 		block.normalOffsetWorld[ cascadeIndex ] =
-				projected.worldTexelSize[ cascadeIndex ]
-				* normalOffsetScale;
+				R_ShadowMapProjectedNormalOffsetWorld( projected, cascadeIndex,
+				normalOffsetScale, r_shadowMapDistantNormalOffsetDepth.GetBool() );
 	}
 
 	// Column-major matrix row 2 negated, so dot(localPosition,row) is the
@@ -3849,6 +3853,7 @@ static int VK_Inter_WriteShadowSlice( const viewEntity_t *space ) {
 	block.texelSize[ 0 ] = residentMap ? passState->invMapSize : state->invAtlasSize[ 0 ];
 	block.texelSize[ 1 ] = residentMap ? passState->invMapSize : state->invAtlasSize[ 1 ];
 	block.texelSize[ 2 ] = Max( 0.0f, r_shadowMapTexelBiasScale.GetFloat() );
+	block.texelSize[ 3 ] = static_cast<float>( projected.wholeLightCascade + 1 );
 	const shadowMapProjectedFilterSettings_t filterSettings =
 			R_ShadowMapProjectedFilterSettings( state->vLight );
 	block.filterParams[ 0 ] = filterSettings.filterRadius;

@@ -319,6 +319,8 @@ rvSegment::~rvSegment() {
 
 	mParticles = NULL;
 	mUsedHead = NULL;
+	mUsedTail = NULL;
+	mUsedCount = 0;
 	mFreeHead = NULL;
 }
 
@@ -430,6 +432,8 @@ void rvSegment::Init(rvBSE* effect, const rvDeclEffect* effectDecl, int segmentT
 	mLoopParticleCount = 0;
 	mParticles = NULL;
 	mUsedHead = NULL;
+	mUsedTail = NULL;
+	mUsedCount = 0;
 	mFreeHead = NULL;
 	mActiveCount = 0;
 	mLastTime = time;
@@ -947,6 +951,8 @@ bool rvSegment::HandleLight(rvBSE* effect, rvSegmentTemplate* st, float time) {
 		expired->SetNext(mFreeHead);
 		mFreeHead = expired;
 		mUsedHead = NULL;
+		mUsedTail = NULL;
+		mUsedCount = 0;
 		mActiveCount = 0;
 		return false;
 	}
@@ -1053,6 +1059,7 @@ void rvSegment::Render(rvBSE* effect, const renderEffect_s* owner, idRenderModel
 	const bool linkedStrip = (particleType == PTYPE_LINKED || particleType == PTYPE_ORIENTEDLINKED);
 	const bool depthSort = st->GetDepthSort() && !linkedStrip;
 	const bool inverseOrder = st->GetInverseDrawOrder();
+	const int prefetchBytes = bse_particlePrefetch.GetBool() ? BSE_ParticleTypeSize(mParticleType) : 0;
 
 	auto renderParticle = [&](rvParticle* p) -> bool {
 		if (!p) {
@@ -1087,6 +1094,11 @@ void rvSegment::Render(rvBSE* effect, const renderEffect_s* owner, idRenderModel
 
 	if (!depthSort && !inverseOrder) {
 		for (rvParticle* p = mUsedHead; p; p = p->GetNext()) {
+			// One ahead: following the next particle's link to fetch two ahead
+			// waits on that link and measured slower.
+			if (prefetchBytes > 0 && p->GetNext()) {
+				BSE_PrefetchBytes(p->GetNext(), prefetchBytes);
+			}
 			if (!renderParticle(p)) {
 				break;
 			}
@@ -1096,6 +1108,9 @@ void rvSegment::Render(rvBSE* effect, const renderEffect_s* owner, idRenderModel
 		idList<openq4::bse::DrawParticle<rvParticle>> drawList;
 		drawList.SetGranularity(64);
 		for (rvParticle* p = mUsedHead; p; p = p->GetNext()) {
+			if (prefetchBytes > 0 && p->GetNext()) {
+				BSE_PrefetchBytes(p->GetNext(), prefetchBytes);
+			}
 			drawList.Append({p, depthSort ? p->UpdateViewDist(view[0]) : 0.0f,
 				static_cast<std::size_t>(drawList.Num())});
 		}
@@ -1107,6 +1122,9 @@ void rvSegment::Render(rvBSE* effect, const renderEffect_s* owner, idRenderModel
 
 		if (inverseOrder) {
 			for (int i = drawCount - 1; i >= 0; --i) {
+				if (prefetchBytes > 0 && i >= 2) {
+					BSE_PrefetchBytes(drawList[i - 2].particle, prefetchBytes);
+				}
 				if (!renderParticle(drawList[i].particle)) {
 					break;
 				}
@@ -1114,6 +1132,9 @@ void rvSegment::Render(rvBSE* effect, const renderEffect_s* owner, idRenderModel
 		}
 		else {
 			for (int i = 0; i < drawCount; ++i) {
+				if (prefetchBytes > 0 && i + 2 < drawCount) {
+					BSE_PrefetchBytes(drawList[i + 2].particle, prefetchBytes);
+				}
 				if (!renderParticle(drawList[i].particle)) {
 					break;
 				}
