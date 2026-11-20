@@ -347,6 +347,7 @@
   "load.row63.date": {"type": "string", "initial": ""},
   "load.row63.time": {"type": "string", "initial": ""},
   "loadModal.visible": {"type": "boolean", "initial": false},
+  "soft_focus": {"type": "boolean", "initial": false, "cvar": "ui_retainedSoftFocus"},
   "deleteModal.visible": {"type": "boolean", "initial": false}
  },
  "actions": {
@@ -3142,10 +3143,28 @@
    "value": {"op": "select", "args": [{"op": "!=", "args": [{"state": "load.error"}, ""]}, "block", "none"]}
   },
   {
+   "id": "loadModal-softfocus.display",
+   "node": "loadModal-softfocus",
+   "property": "display",
+   "value": {
+    "op": "select",
+    "args": [{"op": "&&", "args": [{"state": "soft_focus"}, {"state": "loadModal.visible"}]}, "block", "none"]
+   }
+  },
+  {
    "id": "loadModal.display",
    "node": "loadModal",
    "property": "display",
    "value": {"op": "select", "args": [{"state": "loadModal.visible"}, "block", "none"]}
+  },
+  {
+   "id": "deleteModal-softfocus.display",
+   "node": "deleteModal-softfocus",
+   "property": "display",
+   "value": {
+    "op": "select",
+    "args": [{"op": "&&", "args": [{"state": "soft_focus"}, {"state": "deleteModal.visible"}]}, "block", "none"]
+   }
   },
   {
    "id": "deleteModal.display",
@@ -25226,6 +25245,21 @@
     },
     "children": [
      {
+      "id": "loadModal-softfocus",
+      "type": "group",
+      "properties": {
+       "position": {"type": "keyword", "value": "absolute"},
+       "left": {"type": "length", "value": 0, "unit": "dp"},
+       "top": {"type": "length", "value": 0, "unit": "dp"},
+       "width": {"type": "length", "value": 100, "unit": "%"},
+       "height": {"type": "length", "value": 100, "unit": "%"},
+       "display": {"type": "keyword", "value": "none"},
+       "backdrop-blur": {"type": "length", "value": 7.5, "unit": "dp"},
+       "backdrop-saturate": {"type": "number", "value": 0.8},
+       "pointer-events": {"type": "keyword", "value": "none"}
+      }
+     },
+     {
       "id": "loadModal-scrim",
       "type": "group",
       "properties": {
@@ -25871,6 +25905,21 @@
      "display": {"type": "keyword", "value": "none"}
     },
     "children": [
+     {
+      "id": "deleteModal-softfocus",
+      "type": "group",
+      "properties": {
+       "position": {"type": "keyword", "value": "absolute"},
+       "left": {"type": "length", "value": 0, "unit": "dp"},
+       "top": {"type": "length", "value": 0, "unit": "dp"},
+       "width": {"type": "length", "value": 100, "unit": "%"},
+       "height": {"type": "length", "value": 100, "unit": "%"},
+       "display": {"type": "keyword", "value": "none"},
+       "backdrop-blur": {"type": "length", "value": 7.5, "unit": "dp"},
+       "backdrop-saturate": {"type": "number", "value": 0.8},
+       "pointer-events": {"type": "keyword", "value": "none"}
+      }
+     },
      {
       "id": "deleteModal-scrim",
       "type": "group",

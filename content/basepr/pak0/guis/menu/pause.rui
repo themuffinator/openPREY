@@ -21,7 +21,8 @@
   "quitgame.visible": {"type": "boolean", "initial": false},
   "exit.visible": {"type": "boolean", "initial": false},
   "pointer_x": {"type": "number", "initial": 0},
-  "pointer_y": {"type": "number", "initial": 0}
+  "pointer_y": {"type": "number", "initial": 0},
+  "soft_focus": {"type": "boolean", "initial": false, "cvar": "ui_retainedSoftFocus"}
  },
  "actions": {
   "soundClick": {"operation": "session.menu", "arguments": {"command": "soundClick"}},
@@ -104,6 +105,15 @@
    "value": {
     "op": "select",
     "args": [{"op": "||", "args": [{"state": "page.open"}, {"state": "home.released"}]}, "none", "block"]
+   }
+  },
+  {
+   "id": "frames-softfocus.display",
+   "node": "frames-softfocus",
+   "property": "display",
+   "value": {
+    "op": "select",
+    "args": [{"op": "&&", "args": [{"state": "soft_focus"}, {"state": "page.open"}]}, "block", "none"]
    }
   }
  ],
@@ -507,6 +517,22 @@
      ]
     },
     {
+     "node": "frames-softfocus",
+     "property": "backdrop-blur",
+     "keys": [
+      {"atMs": 0, "value": {"type": "length", "value": 0, "unit": "dp"}, "easing": [0.455, 0.03, 0.515, 0.955]},
+      {"atMs": 500, "value": {"type": "length", "value": 7.5, "unit": "dp"}}
+     ]
+    },
+    {
+     "node": "frames-softfocus",
+     "property": "backdrop-saturate",
+     "keys": [
+      {"atMs": 0, "value": {"type": "number", "value": 1}, "easing": [0.455, 0.03, 0.515, 0.955]},
+      {"atMs": 500, "value": {"type": "number", "value": 0.8}}
+     ]
+    },
+    {
      "node": "quitgame-upper",
      "property": "opacity",
      "keys": [{"atMs": 0, "value": {"type": "number", "value": 0}}, {"atMs": 60, "value": {"type": "number", "value": 1}}]
@@ -547,6 +573,22 @@
      "keys": [
       {"atMs": 0, "value": {"type": "length", "value": 405.0, "unit": "dp"}, "easing": [0.455, 0.03, 0.515, 0.955]},
       {"atMs": 500, "value": {"type": "length", "value": 48.0, "unit": "dp"}}
+     ]
+    },
+    {
+     "node": "frames-softfocus",
+     "property": "backdrop-blur",
+     "keys": [
+      {"atMs": 0, "value": {"type": "length", "value": 7.5, "unit": "dp"}, "easing": [0.455, 0.03, 0.515, 0.955]},
+      {"atMs": 500, "value": {"type": "length", "value": 0, "unit": "dp"}}
+     ]
+    },
+    {
+     "node": "frames-softfocus",
+     "property": "backdrop-saturate",
+     "keys": [
+      {"atMs": 0, "value": {"type": "number", "value": 0.8}, "easing": [0.455, 0.03, 0.515, 0.955]},
+      {"atMs": 500, "value": {"type": "number", "value": 1}}
      ]
     },
     {
@@ -983,6 +1025,22 @@
      ]
     },
     {
+     "node": "frames-softfocus",
+     "property": "backdrop-blur",
+     "keys": [
+      {"atMs": 0, "value": {"type": "length", "value": 0, "unit": "dp"}, "easing": [0.455, 0.03, 0.515, 0.955]},
+      {"atMs": 500, "value": {"type": "length", "value": 7.5, "unit": "dp"}}
+     ]
+    },
+    {
+     "node": "frames-softfocus",
+     "property": "backdrop-saturate",
+     "keys": [
+      {"atMs": 0, "value": {"type": "number", "value": 1}, "easing": [0.455, 0.03, 0.515, 0.955]},
+      {"atMs": 500, "value": {"type": "number", "value": 0.8}}
+     ]
+    },
+    {
      "node": "exit-upper",
      "property": "opacity",
      "keys": [{"atMs": 0, "value": {"type": "number", "value": 0}}, {"atMs": 60, "value": {"type": "number", "value": 1}}]
@@ -1023,6 +1081,22 @@
      "keys": [
       {"atMs": 0, "value": {"type": "length", "value": 405.0, "unit": "dp"}, "easing": [0.455, 0.03, 0.515, 0.955]},
       {"atMs": 500, "value": {"type": "length", "value": 48.0, "unit": "dp"}}
+     ]
+    },
+    {
+     "node": "frames-softfocus",
+     "property": "backdrop-blur",
+     "keys": [
+      {"atMs": 0, "value": {"type": "length", "value": 7.5, "unit": "dp"}, "easing": [0.455, 0.03, 0.515, 0.955]},
+      {"atMs": 500, "value": {"type": "length", "value": 0, "unit": "dp"}}
+     ]
+    },
+    {
+     "node": "frames-softfocus",
+     "property": "backdrop-saturate",
+     "keys": [
+      {"atMs": 0, "value": {"type": "number", "value": 0.8}, "easing": [0.455, 0.03, 0.515, 0.955]},
+      {"atMs": 500, "value": {"type": "number", "value": 1}}
      ]
     },
     {
@@ -2493,6 +2567,21 @@
    "color": {"type": "color", "value": [1.0, 1.0, 1.0, 0.9]}
   },
   "children": [
+   {
+    "id": "frames-softfocus",
+    "type": "group",
+    "properties": {
+     "position": {"type": "keyword", "value": "absolute"},
+     "left": {"type": "length", "value": 0, "unit": "dp"},
+     "top": {"type": "length", "value": 0, "unit": "dp"},
+     "width": {"type": "length", "value": 100, "unit": "%"},
+     "height": {"type": "length", "value": 100, "unit": "%"},
+     "display": {"type": "keyword", "value": "none"},
+     "backdrop-blur": {"type": "length", "value": 0, "unit": "dp"},
+     "backdrop-saturate": {"type": "number", "value": 1},
+     "pointer-events": {"type": "keyword", "value": "none"}
+    }
+   },
    {
     "id": "stage",
     "type": "group",

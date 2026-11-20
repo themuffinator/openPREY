@@ -640,6 +640,31 @@ SMALL_FRAME = (180, 200, 376, 270)   # New Game, Exit, Quit Game
 RETURN_KEY = "#str_20018"            # Return to Main Menu
 
 
+SOFT_FOCUS_BLUR = 5 * U        # prey.softfocus: a 5 u Gaussian of the screen beneath a pop-up (section 4)
+SOFT_FOCUS_SATURATION = 0.8
+FRAMES_SOFT_FOCUS = "frames-softfocus"
+
+
+def soft_focus_layer(doc: Document, ident: str, shown, blur: float, saturation: float) -> dict:
+    """A full-screen soft focus (prey.softfocus): the screen beneath,
+    blurred and a little desaturated. As the first layer of the screen it
+    softens everything beneath, and it costs no pass while hidden. Where the
+    renderer has no soft focus (ui_retainedSoftFocus is 0) it is never drawn,
+    and a pop-up keeps only what the stock one had."""
+    doc.state.setdefault("soft_focus", {"type": "boolean", "initial": False, "cvar": "ui_retainedSoftFocus"})
+    layer = group(ident, {**FULL, "display": keyword("none"), "backdrop-blur": length(blur),
+                          "backdrop-saturate": number(saturation), **PASSIVE})
+    doc.bind(ident, "display", {"op": "select", "args": [{"op": "&&", "args": [{"state": "soft_focus"}, shown]}, "block", "none"]})
+    return layer
+
+
+def frames_soft_focus(doc: Document) -> dict:
+    """The home's soft focus behind its small frames (New Game, Mods, Exit,
+    Quit Game): shown while a frame is open, it ramps in with the frame's
+    growth and out with its shrinking (small_frame)."""
+    return soft_focus_layer(doc, FRAMES_SOFT_FOCUS, {"state": "page.open"}, 0, 1)
+
+
 def small_frame(doc: Document, ident: str, title_key: str, title_scale: float, title_ty: float,
                 contents: list[dict], *, focus: str, origin: str) -> dict:
     """A small sub-menu frame that grows out of the bottom bar (section 8):
@@ -657,11 +682,19 @@ def small_frame(doc: Document, ident: str, title_key: str, title_scale: float, t
         (ax, ay, aw, ah), (cx, cy, cw, ch) = a, b
         return [track(ident, prop, [(0, ul(start), EASE_IN_OUT), (GROW_MS, ul(end))])
                 for prop, start, end in (("left", ax, cx), ("top", ay, cy), ("width", aw, cw), ("height", ah, ch))]
+
+    def soften(on: bool) -> list:
+        # The screen beneath comes into soft focus as the frame grows and
+        # out of it as the frame shrinks (frames_soft_focus).
+        blur, tint = (length(0), length(SOFT_FOCUS_BLUR)), (number(1), number(SOFT_FOCUS_SATURATION))
+        order = (lambda pair: pair) if on else (lambda pair: pair[::-1])
+        return [track(FRAMES_SOFT_FOCUS, "backdrop-blur", [(0, order(blur)[0], EASE_IN_OUT), (GROW_MS, order(blur)[1])]),
+                track(FRAMES_SOFT_FOCUS, "backdrop-saturate", [(0, order(tint)[0], EASE_IN_OUT), (GROW_MS, order(tint)[1])])]
     # The upper claws and the top rail belong to a frame taller than its
     # corners: they arrive as the growth starts and leave as it ends.
-    doc.timeline(f"{ident}Enter", GROW_MS, grow(BOTTOM_BAR, SMALL_FRAME) + [
+    doc.timeline(f"{ident}Enter", GROW_MS, grow(BOTTOM_BAR, SMALL_FRAME) + soften(True) + [
         track(f"{ident}-upper", "opacity", [(0, number(0)), (60, number(1))])])
-    doc.timeline(f"{ident}Leave", GROW_MS, grow(SMALL_FRAME, BOTTOM_BAR) + [
+    doc.timeline(f"{ident}Leave", GROW_MS, grow(SMALL_FRAME, BOTTOM_BAR) + soften(False) + [
         track(f"{ident}-upper", "opacity", [(0, number(1)), (GROW_MS - 60, number(1)), (GROW_MS, number(0))])],
         complete=f"{ident}Hidden")
     doc.events[f"{ident}Show"] = [
@@ -891,7 +924,7 @@ def home_document(ident: str, in_game: bool) -> dict:
                             "margin-left": length(-CANVAS_W * U / 2), "width": ul(CANVAS_W), "height": ul(CANVAS_H)},
                   [home, *frames])
     root = group("screen", {**FULL, "font-family": font(BODY), "font-size": length(EM * 0.33 * U),
-                            "color": colour(TEXT_LABEL)}, [stage])
+                            "color": colour(TEXT_LABEL)}, [frames_soft_focus(doc), stage])
     return doc.build(root)
 
 
@@ -1031,6 +1064,13 @@ def page_document(doc: Document, page: dict, dialogs: list[dict]) -> dict:
     return doc.build(root)
 
 
+def soft_focus(doc: Document, ident: str) -> dict:
+    """A dialog's soft focus, under its stock scrim, which still darkens the
+    screen as the stock dialog does. The dialog appears and disappears at
+    once, and so does its soft focus."""
+    return soft_focus_layer(doc, f"{ident}-softfocus", {"state": f"{ident}.visible"}, SOFT_FOCUS_BLUR, SOFT_FOCUS_SATURATION)
+
+
 def dialog(doc: Document, ident: str, message, buttons: list[tuple], *, scrim: float = 0.4, detail: str | None = None) -> dict:
     """A confirmation (section 9): a black scrim over the whole screen and a
     360x140 u claw frame at 142,132 with a message and buttons. It appears
@@ -1060,7 +1100,7 @@ def dialog(doc: Document, ident: str, message, buttons: list[tuple], *, scrim: f
                                      "margin-left": length(-CANVAS_W * U / 2), "width": ul(CANVAS_W), "height": ul(CANVAS_H)},
                   [frame])
     veil = group(f"{ident}-scrim", {**FULL, "background-color": colour([0, 0, 0, scrim])})
-    node = group(ident, {**FULL, "display": keyword("none")}, [veil, stage],
+    node = group(ident, {**FULL, "display": keyword("none")}, [soft_focus(doc, ident), veil, stage],
                  modal={"initialFocus": names[-1], "back": f"{ident}Hide"})
     doc.bind(ident, "display", {"op": "select", "args": [{"state": f"{ident}.visible"}, "block", "none"]})
     return node
@@ -2335,7 +2375,7 @@ def reset_dialog(doc: Document) -> dict:
                                      "margin-left": length(-CANVAS_W * U / 2), "width": ul(CANVAS_W), "height": ul(CANVAS_H)},
                   [frame])
     veil = group(f"{ident}-scrim", {**FULL, "background-color": colour([0, 0, 0, 0.8])})
-    node = group(ident, {**FULL, "display": keyword("none")}, [veil, stage], modal={"initialFocus": names[1], "back": f"{ident}No"})
+    node = group(ident, {**FULL, "display": keyword("none")}, [soft_focus(doc, ident), veil, stage], modal={"initialFocus": names[1], "back": f"{ident}No"})
     doc.bind(ident, "display", {"op": "select", "args": [{"state": f"{ident}.visible"}, "block", "none"]})
     return node
 

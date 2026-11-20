@@ -324,6 +324,7 @@ one place, and from sampled interface art (Appendix B).
 | `prey.slider` | rail `#323C45` with `#94B2CC` ticks, knob `#BBCDDE` | Sliders |
 | `prey.arc` | `#859BAF` to `#9DB8D0`; bars `#9AB1CA` | Navigation arc and bars |
 | `prey.scrim` | `#000000` at 0.80 (Reset Defaults); 0.40–0.50 (confirmations); 0.60 (`msg`) | Dialog overlay |
+| `prey.softfocus` | A 5 u (7.5 dp) Gaussian blur at 0.80 saturation of the screen beneath, under any scrim | Retained pop-ups (openPREY; section 12.5); in no stock screen |
 
 ### World and brand
 
@@ -1625,6 +1626,15 @@ Tommy's three New Game portraits, which are pictures, not furniture.
   ease-in-out and shrinks the same way; its upper claws and top rail arrive in
   the first 60 ms, since a frame no taller than its corners has none. Its
   contents keep their places and are uncovered as it grows.
+- Pop-ups soften the screen behind them in `prey.softfocus`: the backdrop,
+  or the paused game, behind a frame, and the page behind a dialog. A frame's
+  soft focus comes in as it grows and goes as it shrinks, on the same 500 ms
+  ease. A dialog's arrives and leaves with it at once, beneath its stock
+  scrim, which still darkens the screen as the stock dialog does. Where the
+  renderer cannot blur the screen (`ui_retainedSoftFocus` is 0, as on GLES
+  or with the opaque-backing option) a pop-up has only what the stock one
+  had. The stock screens soften nothing; this is the retained interface's
+  addition.
 - A New Game skill shows its portrait and description while it is lit, as the
   stock rollovers do. Cherokee is drawn unavailable until `g_nightmare` is
   set; Casino appears once `g_roadhouseCompleted` is.
@@ -2394,6 +2404,9 @@ carries their summaries.
 
 ### Version 1.17, 20 November 2026
 
+- Section 4 adds `prey.softfocus`, and section 12.5 has the retained
+  pop-ups soften the screen behind them: the home's frames as they grow,
+  and every dialog beneath its stock scrim.
 - Section 12.5: Options' Controls tab and the Reset Defaults dialog are
   rebuilt, so every tab of Options is the retained page's. It records the
   binding rows and how a key is taken, the Profiles page, and the dialog

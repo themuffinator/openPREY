@@ -309,7 +309,8 @@
   "reset.choice2": {"type": "boolean", "initial": false},
   "reset.choice3": {"type": "boolean", "initial": false},
   "reset.choice4": {"type": "boolean", "initial": false},
-  "resetModal.visible": {"type": "boolean", "initial": false}
+  "resetModal.visible": {"type": "boolean", "initial": false},
+  "soft_focus": {"type": "boolean", "initial": false, "cvar": "ui_retainedSoftFocus"}
  },
  "actions": {
   "controlsBind": {"operation": "session.menu", "arguments": {"command": "controlsBind"}},
@@ -3472,6 +3473,15 @@
      },
      {"state": "reset.choice4"}
     ]
+   }
+  },
+  {
+   "id": "resetModal-softfocus.display",
+   "node": "resetModal-softfocus",
+   "property": "display",
+   "value": {
+    "op": "select",
+    "args": [{"op": "&&", "args": [{"state": "soft_focus"}, {"state": "resetModal.visible"}]}, "block", "none"]
    }
   },
   {
@@ -76187,6 +76197,21 @@
      "display": {"type": "keyword", "value": "none"}
     },
     "children": [
+     {
+      "id": "resetModal-softfocus",
+      "type": "group",
+      "properties": {
+       "position": {"type": "keyword", "value": "absolute"},
+       "left": {"type": "length", "value": 0, "unit": "dp"},
+       "top": {"type": "length", "value": 0, "unit": "dp"},
+       "width": {"type": "length", "value": 100, "unit": "%"},
+       "height": {"type": "length", "value": 100, "unit": "%"},
+       "display": {"type": "keyword", "value": "none"},
+       "backdrop-blur": {"type": "length", "value": 7.5, "unit": "dp"},
+       "backdrop-saturate": {"type": "number", "value": 0.8},
+       "pointer-events": {"type": "keyword", "value": "none"}
+      }
+     },
      {
       "id": "resetModal-scrim",
       "type": "group",

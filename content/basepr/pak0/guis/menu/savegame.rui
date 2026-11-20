@@ -341,6 +341,7 @@
   "save.row63.date": {"type": "string", "initial": ""},
   "save.row63.time": {"type": "string", "initial": ""},
   "overwriteModal.visible": {"type": "boolean", "initial": false},
+  "soft_focus": {"type": "boolean", "initial": false, "cvar": "ui_retainedSoftFocus"},
   "noticeModal.visible": {"type": "boolean", "initial": false}
  },
  "actions": {
@@ -3067,6 +3068,15 @@
    "value": {"state": "save.target"}
   },
   {
+   "id": "overwriteModal-softfocus.display",
+   "node": "overwriteModal-softfocus",
+   "property": "display",
+   "value": {
+    "op": "select",
+    "args": [{"op": "&&", "args": [{"state": "soft_focus"}, {"state": "overwriteModal.visible"}]}, "block", "none"]
+   }
+  },
+  {
    "id": "overwriteModal.display",
    "node": "overwriteModal",
    "property": "display",
@@ -3083,6 +3093,15 @@
    "node": "noticeModal-message",
    "property": "text",
    "value": {"state": "save.notice"}
+  },
+  {
+   "id": "noticeModal-softfocus.display",
+   "node": "noticeModal-softfocus",
+   "property": "display",
+   "value": {
+    "op": "select",
+    "args": [{"op": "&&", "args": [{"state": "soft_focus"}, {"state": "noticeModal.visible"}]}, "block", "none"]
+   }
   },
   {
    "id": "noticeModal.display",
@@ -24688,6 +24707,21 @@
     },
     "children": [
      {
+      "id": "overwriteModal-softfocus",
+      "type": "group",
+      "properties": {
+       "position": {"type": "keyword", "value": "absolute"},
+       "left": {"type": "length", "value": 0, "unit": "dp"},
+       "top": {"type": "length", "value": 0, "unit": "dp"},
+       "width": {"type": "length", "value": 100, "unit": "%"},
+       "height": {"type": "length", "value": 100, "unit": "%"},
+       "display": {"type": "keyword", "value": "none"},
+       "backdrop-blur": {"type": "length", "value": 7.5, "unit": "dp"},
+       "backdrop-saturate": {"type": "number", "value": 0.8},
+       "pointer-events": {"type": "keyword", "value": "none"}
+      }
+     },
+     {
       "id": "overwriteModal-scrim",
       "type": "group",
       "properties": {
@@ -25383,6 +25417,21 @@
      "display": {"type": "keyword", "value": "none"}
     },
     "children": [
+     {
+      "id": "noticeModal-softfocus",
+      "type": "group",
+      "properties": {
+       "position": {"type": "keyword", "value": "absolute"},
+       "left": {"type": "length", "value": 0, "unit": "dp"},
+       "top": {"type": "length", "value": 0, "unit": "dp"},
+       "width": {"type": "length", "value": 100, "unit": "%"},
+       "height": {"type": "length", "value": 100, "unit": "%"},
+       "display": {"type": "keyword", "value": "none"},
+       "backdrop-blur": {"type": "length", "value": 7.5, "unit": "dp"},
+       "backdrop-saturate": {"type": "number", "value": 0.8},
+       "pointer-events": {"type": "keyword", "value": "none"}
+      }
+     },
      {
       "id": "noticeModal-scrim",
       "type": "group",
