@@ -321,6 +321,7 @@ class Document:
         self.bindings: list = []
         self.symbols: dict = {}
         self.timelines: list = []
+        self.key_rows: list = []      # each binding row's binding, in row order (bind_row)
 
     def bind(self, node: str, prop: str, value) -> None:
         self.bindings.append({"id": f"{node}.{prop}", "node": node, "property": prop, "value": value})
@@ -1271,12 +1272,13 @@ def load_game_document() -> dict:
     return page_document(doc, page, dialogs)
 
 
-def name_field(doc: Document, box) -> dict:
-    """The save's name (SG_Description): a text field on prey.list.wash,
-    white throughout as the stock field is. Accept or typing opens it and
-    Enter saves under the name; focus draws its outline in prey.rail."""
+def name_field(doc: Document, box, *, ident: str = "save-name", state: str = "save.name", action: str = "rename",
+               key: str = "#str_20128") -> dict:
+    """The save's name (SG_Description), or a profile's: a text field on
+    prey.list.wash, white throughout as the stock field is. Accept or typing
+    opens it and Enter writes `state` through `action`; focus draws its
+    outline in prey.rail."""
     x, y, w, h = box
-    ident = "save-name"
     parts = {part: f"{ident}-{part}" for part in ("viewport", "text", "selection", "caret", "composition", "validation")}
     em = EM * 0.33
     line = {**absolute(0, -CAP_LINE[BODY] * em, 4096 / U, h), "font-family": font(BODY), "font-size": length(em * U * FONT_FIT),
@@ -1296,7 +1298,7 @@ def name_field(doc: Document, box) -> dict:
     ids = doc.states(ident, {state: [(f"{ident}-rim", "opacity", number(on))] for state, on in
                              (("default", 0), ("hover", 0.5), ("focus", 1), ("pressed", 1), ("disabled", 0))}, enter=1, leave=1)
     return group(ident, absolute(x, y, w, h), [box_fill(f"{ident}-wash", (0, 0, w, h), LIST_WASH), rim, viewport, validation],
-                 control={"role": "text", "label": "#str_20128", "action": "rename", "value": {"state": "save.name"},
+                 control={"role": "text", "label": key, "action": action, "value": {"state": state},
                           "maxBytes": 32, "parts": parts, "states": ids})
 
 
@@ -1542,10 +1544,9 @@ OPTIONS_SOURCE = ROOT / "content" / "basepr" / "pak0" / "guis" / "mainmenu" / "m
 OPTIONS_BOOK = (25, 55, 570, 370)        # the tab page, in the frame (Options_TabContainer less its 20 u of tabs)
 OPTIONS_TOP_TABS = (125, 35, 470, 20)    # tabMargins 100, 0: the four top tabs share what is left
 OPTIONS_SIDE_W, OPTIONS_SIDE_MARGIN = 100, 40   # the side-tab column; its tabs share the height below this margin
-# The top tabs in order: label, the session verb that opens the stock page
-# there (None for a tab this document holds), and that tab's stock window.
-OPTIONS_TABS = (("#str_20210", "settingsControls", None), ("#str_20262", None, "Options_GameOptions"),
-                ("#str_20280", None, "Options_Video"), ("#str_20310", None, "Options_Audio"))
+# The top tabs in order: label and that tab's stock window.
+OPTIONS_TABS = (("#str_20210", "Options_Controls"), ("#str_20262", "Options_GameOptions"),
+                ("#str_20280", "Options_Video"), ("#str_20310", "Options_Audio"))
 VIDEO_TAB, AUDIO_TAB = 2, 3
 AUDIO_DEVICES = 16                       # RETAINED_AUDIO_DEVICES in the session
 OPTION_ROWS = 8                          # a choice's list shows this many options and scrolls the rest
@@ -1691,8 +1692,23 @@ def stock_rows(children: list, offset=(0.0, 0.0), section: str | None = None) ->
         own, parts = script_blocks(body)
         setting = next(((k, b) for k, _, b in parts if k in ("choiceDef", "sliderDef")), None)
         edits = [script_blocks(b)[0] for k, _, b in parts if k == "editDef"]
+        binds = [script_blocks(b)[0] for k, _, b in parts if k == "bindDef"]
         x, y, w, h = script_rect(own)
         place = (x + offset[0], y + offset[1], w, h)
+        if binds:
+            # A binding row (Controls): the action's caption and the field
+            # that shows and takes its keys.
+            caption = script_blocks(next(b for k, _, b in parts if k == "windowDef"))[0]
+            rows.append({"kind": "bind", "rect": place, "label": script_value(caption, "text"), "label_rect": script_rect(caption),
+                         "label_ty": float(script_value(caption, "textaligny") or 0), "control_rect": script_rect(binds[0]),
+                         "control_ty": float(script_value(binds[0], "textaligny") or 0), "bind": script_value(binds[0], "bind"),
+                         "section": section, "cvar": None})
+            continue
+        if kind == "windowDef" and name.endswith("_HelpScreen"):
+            # The line at the foot of a Controls page.
+            headings.append({"kind": "note", "rect": place, "key": script_value(own, "text"), "section": section,
+                             "scale": float(script_value(own, "textscale")), "ty": float(script_value(own, "textaligny") or 0)})
+            continue
         if setting is None and edits:
             # A size: two number fields either side of an "x".
             caption = script_blocks(next(b for k, _, b in parts if k == "windowDef" and script_value(script_blocks(b)[0], "text")))[0]
@@ -1714,7 +1730,11 @@ def stock_rows(children: list, offset=(0.0, 0.0), section: str | None = None) ->
         if setting is None:
             if "text_titlebar" in own:
                 x, y, w, h = script_rect(own)
-                headings.append({"rect": (x + offset[0], y + offset[1], w, h), "key": script_value(own, "text"), "section": section})
+                # Its heading is its own text, or (Controls) its child windows' texts.
+                labels = [(script_value(o, "text"), script_rect(o), float(script_value(o, "textaligny") or 0))
+                          for o in (script_blocks(b)[0] for k, _, b in parts if k == "windowDef") if script_value(o, "text")]
+                headings.append({"kind": "heading", "rect": (x + offset[0], y + offset[1], w, h), "key": script_value(own, "text"),
+                                 "labels": labels, "section": section})
             elif kind == "windowDef" and name.startswith("OA_Suboptions_"):
                 x, y, _, _ = script_rect(own)
                 more_headings, more_rows = stock_rows(parts, (offset[0] + x, offset[1] + y), name.rsplit("_", 1)[1].lower())
@@ -1771,9 +1791,14 @@ def stock_options(tab: str) -> dict:
         page_own, page_children = script_blocks(next(b for k, _, b in side_children if k == "windowDef"))
         px, py, pw, ph = script_rect(page_own)
         headings, rows = stock_rows(page_children)
+        # The line at the foot of a Controls page sits beside the page window.
+        notes, _ = stock_rows([child for child in side_children if child[1].endswith("_HelpScreen")], (-px, -py))
+        headings += notes
         result["sides"].append({"name": name, "key": script_value(side_own, "text"),
                                 "ty": float(script_value(side_own, "textaligny") or 0),
-                                "page": (tx + px, ty + py, pw, ph), "headings": headings, "rows": rows})
+                                "page": (tx + px, ty + py, pw, ph), "headings": headings, "rows": rows,
+                                # Every window of the page by name, for a page built by hand (Profiles).
+                                "windows": {n: (k, b) for k, n, b in page_children}})
     return result
 
 
@@ -1784,16 +1809,21 @@ def row_d(w: float, h: float) -> str:
     return f"M{e * .06} {t}H{w - e * .8}C{w - e * .38} {t} {w - e * .24} {h * .45} {w - e * .25} {b}H{e * .65}Z"
 
 
-def header_bar(ident: str, box, key: str) -> list[dict]:
+def header_bar(ident: str, box, key: str | None, labels=()) -> list[dict]:
     """A section header bar: rounded slanted ends, prey.plate.header, with
-    its heading in the display face at 0.45."""
+    its heading in the display face at 0.45: its own `key` across the bar,
+    or `labels` (key, rect in the bar, textaligny), as the Controls pages
+    head their two columns."""
     x, y, w, h = box
     e = h * 0.5
     d = (f"M{e * .5} 0H{w - e * .5}Q{w - e * .04} 0 {w - e * .08} {h * .3}L{w - e * .75} {h}H{e * .75}"
          f"L{e * .08} {h * .3}Q{e * .04} 0 {e * .5} 0Z")
+    texts = label(f"{ident}-text", key, (x, y, w, h), DISPLAY, 0.45, TEXT_NAV, shadow=True, ty=-3) if key else []
+    for index, (part, (lx, ly, lw, lh), lty) in enumerate(labels):
+        texts += label(f"{ident}-text{index}", part, (x + lx, y + ly, lw, lh), DISPLAY, 0.45, TEXT_NAV, shadow=True, ty=lty)
     return [vector(ident, {**absolute(x, y, w, h), **PASSIVE}, [
                 svg("bar", d, fill=solid(rgb("#111A25", 0.6)), stroke=stroke(solid(rgb("#6D7F95")), 1 * U, join="round"))]),
-            *label(f"{ident}-text", key, (x, y, w, h), DISPLAY, 0.45, TEXT_NAV, shadow=True, ty=-3)]
+            *texts]
 
 
 def setting_states(doc: Document, ident: str, value_node: str) -> dict:
@@ -2056,8 +2086,258 @@ def page_row(doc: Document, row: dict, origin, tag: str) -> tuple[dict, str]:
                                       {"op": "action", "action": doc.session("videoApply")}]
         return button(doc, ident, row["label"], (origin[0] + x, origin[1] + y, w, h), event=f"{ident}Pick", scale=0.33,
                       enabled=video_dirty()), ident
+    if row["kind"] == "bind":
+        node = bind_row(doc, row, origin)
+        return node, node["id"]
     node = setting_row(doc, f"opt_{row['cvar'].lower()}", row, origin)
     return node, node["id"]
+
+
+# ------------------------------------------------------------ Options: Controls
+
+SESSION_SOURCE = ROOT / "src" / "framework" / "Session_menu.cpp"
+CONTROLS_CAPTURE = "controls.capture"     # the binding row waiting for a key, or -1 (the session's)
+PROFILES_SIDE = "Options_Controls_Profiles"
+PROFILE_ROWS = 32                         # RETAINED_PROFILE_ROWS in the session: the profiles the list holds
+PROFILE_ROW_H = 19                        # u: a row of the stock list at textscale 0.30
+
+
+def bind_row(doc: Document, row: dict, origin) -> dict:
+    """A binding row at its stock place: the setting row's plate, the
+    action's caption in the leading half and its keys in the trailing half,
+    named as the language names them and joined into a list, or the stock
+    word for none (idUserInterfaceRetained::SetKeyBindingNames). Accept asks
+    the session to wait for a key (controlsBind); while it waits the keys
+    read "Press any key..." and the next key pressed binds, as the stock
+    field takes it (idSessionLocal::RetainedControlsKey). The session reads
+    the row from the focused control's id, controls_bind_<n>, whose n is
+    the action's place in PREY_CONTROLS_BINDINGS."""
+    index = len(doc.key_rows)
+    doc.key_rows.append(row["bind"])
+    ident, state = f"controls_bind_{index}", f"controls.{index}.keys"
+    doc.state[state] = {"type": "string", "initial": "", "keyBinding": row["bind"]}
+    x, y, w, h = row["rect"]
+    d = row_d(w, h)
+    size = {**absolute(0, 0, w, h), **PASSIVE}
+    value = bound(doc, label(f"{ident}-value", PLACEHOLDER, row["control_rect"], BODY, 0.33, TEXT_VALUE, shadow=True,
+                             ty=row["control_ty"], overflow=keyword("hidden"), **ELLIPSIS), state)
+    children = [
+        vector(f"{ident}-plate", dict(size), [svg("plate", d, fill=linear([0, 0], [w * U, 0], [
+            (0, rgb(PLATE_ROW, 0.77)), (1, rgb(PLATE_ROW, 0.06))]), stroke=stroke(solid(rgb(PLATE_ROW)), 1 * U, join="round"))]),
+        vector(f"{ident}-rim", {**size, "opacity": number(0)}, [svg("rim", d, stroke=stroke(solid(RAIL), 1.5 * U, join="round"))]),
+        *label(f"{ident}-label", row["label"], row["label_rect"], BODY, 0.33, TEXT_LABEL, shadow=True, ty=row["label_ty"]),
+        *value,
+    ]
+    return group(ident, {**absolute(origin[0] + x, origin[1] + y, w, h), "opacity": number(1)}, children,
+                 control={"role": "button", "label": row["label"], "action": "controlsBind",
+                          "states": setting_states(doc, ident, f"{ident}-value")})
+
+
+def session_controls_bindings() -> list[str]:
+    """PREY_CONTROLS_BINDINGS as the session lists them."""
+    source = SESSION_SOURCE.read_text(encoding="utf-8")
+    found = re.search(r"PREY_CONTROLS_BINDINGS\[\]\s*=\s*\{(.*?)\};", source, re.S)
+    if not found:
+        raise SystemExit(f"{SESSION_SOURCE.relative_to(ROOT).as_posix()}: PREY_CONTROLS_BINDINGS not found")
+    return re.findall(r'"([^"]*)"', found.group(1))
+
+
+def profile_row(doc: Document, index: int, width: float) -> dict:
+    """One saved profile in the stock list, in prey.text.list. A press
+    selects it and puts its name in the field, as the stock list does
+    (updateProfileInfo); Accept on the selected profile loads it, as the
+    stock list's Enter does."""
+    ident, item = f"profile-{index}", f"profileList_item_{index}"
+    doc.state[item] = {"type": "string", "initial": ""}
+    selected = {"op": "==", "args": [{"state": "profileList_sel_0"}, index]}
+    whole = (0, 0, width, PROFILE_ROW_H)
+    band = shown_when(doc, box_fill(f"{ident}-selected", whole, LIST_SELECTION, border=LIST_OUTLINE), selected)
+    rim = box_fill(f"{ident}-rim", whole, [0, 0, 0, 0], border=RAIL, opacity=number(0))
+    name = bound(doc, label(f"{ident}-name", PLACEHOLDER, (4, 0, width - 8, PROFILE_ROW_H), BODY, 0.30, TEXT_LIST, align="left",
+                            centre=True, overflow=keyword("hidden"), **ELLIPSIS), item)
+
+    def lit(tint: list[float], rim_on: float) -> list:
+        return [(f"{ident}-name", "color", colour(tint)), (f"{ident}-rim", "opacity", number(rim_on))]
+    ids = doc.states(ident, {"default": lit(TEXT_LIST, 0), "hover": lit(TEXT_HOVER, 0), "focus": lit(TEXT_HOVER, 1),
+                             "pressed": lit(TEXT_HOVER, 1), "disabled": lit(rgb("#A6BAD4", 0.3), 0)}, enter=1, leave=1)
+    event = f"profileRow{index}"
+    doc.events[event] = [{"op": "if", "condition": selected, "then": [{"op": "call", "event": "profileLoadRequested"}], "else": [
+        {"op": "action", "action": "soundTick"},
+        {"op": "setState", "values": {"profileList_sel_0": index}},
+        {"op": "action", "action": "profileSelect"}]}]
+    row = group(ident, {"position": keyword("relative"), "display": keyword("none"), "width": ul(width),
+                        "height": ul(PROFILE_ROW_H), "flex-shrink": number(0)}, [band, rim, *name],
+                control=control(PLACEHOLDER, ids, event=event))
+    doc.bind(ident, "display", {"op": "select", "args": [{"op": "<", "args": [index, {"state": "profiles.count"}]}, "block", "none"]})
+    return row
+
+
+def profiles_page(doc: Document, side: dict, origin) -> tuple[list[dict], str]:
+    """Controls > Profiles, at the stock places: what profiles are for, the
+    saved profiles in a list on a black 0.50 ground in a picture frame with
+    its scroll bar, the name to store under, and Delete, Load and Save As.
+    The session lists the profiles (scanforprofiles) when the side tab is
+    chosen and when the page opens; Delete and Load act on the selected
+    profile and Save As stores the bindings under the name, as the stock
+    buttons do (Session_ControlProfile*)."""
+    windows = side["windows"]
+    ox, oy = origin
+
+    def own(name: str) -> str:
+        return script_blocks(windows[name][1])[0]
+
+    def place(box) -> tuple:
+        return (ox + box[0], oy + box[1], box[2], box[3])
+
+    def text_of(name: str, face_tint, align: str = "center") -> list[dict]:
+        part = own(name)
+        return label(f"profiles-{name[4:].lower()}", script_value(part, "text"), place(script_rect(part)), BODY,
+                     float(script_value(part, "textscale")), face_tint, align=align, shadow=True,
+                     ty=float(script_value(part, "textaligny") or 0))
+
+    doc.state.update({"profileList_sel_0": {"type": "number", "initial": -1}, "profiles.count": {"type": "number", "initial": 0},
+                      "saveProfileName": {"type": "string", "initial": ""},
+                      "ui.numberDraftsPending": {"type": "boolean", "initial": False}})
+    for verb in ("profileSelect", "profileLoad", "profileSave", "profileDelete", "soundTick"):
+        doc.session(verb)
+    click = doc.session("soundClick")
+    doc.actions["profileRename"] = {"input": "string", "operation": "ui.state.set",
+                                    "arguments": {"key": "saveProfileName", "value": {"input": "value"}, "event": "profileNameEntered"}}
+    doc.actions["editProfileName"] = {"operation": "ui.numberDrafts.focus", "arguments": {}}
+    doc.events["profileNameEntered"] = [{"op": "action", "action": click}, {"op": "action", "action": "profileSave"}]
+    doc.events["profileLoadRequested"] = [{"op": "action", "action": click}, {"op": "action", "action": "profileLoad"}]
+    doc.events["profileDeleteRequested"] = [{"op": "action", "action": click}, {"op": "action", "action": "profileDelete"}]
+    # A name typed but not entered takes the focus back, where Enter stores under it.
+    doc.events["profileSaveRequested"] = [{"op": "action", "action": click}, {"op": "if", "condition": {"state": "ui.numberDraftsPending"},
+                                          "then": [{"op": "action", "action": "editProfileName"}],
+                                          "else": [{"op": "action", "action": "profileSave"}]}]
+    ground_own, ground_parts = script_blocks(windows["OCP_ProfileListBG"][1])
+    ground = place(script_rect(ground_own))
+    lx, ly, lw, lh = script_rect(script_blocks(next(b for k, _, b in ground_parts if k == "listDef"))[0])
+    list_w = lw - 16                       # the stock list keeps 16 u at its trailing edge for its scroll bar
+    column = group("profiles-column", {"position": keyword("relative"), "display": keyword("flex"),
+                                       "flex-direction": keyword("column")}, [profile_row(doc, index, list_w) for index in range(PROFILE_ROWS)])
+    field_box = place(script_rect(own("OCP_ProfileNameEdit")))
+    chosen = {"op": ">=", "args": [{"state": "profileList_sel_0"}, 0]}
+    buttons = []
+    for name, event, enabled in (("OCP_Delete", "profileDeleteRequested", chosen), ("OCP_Load", "profileLoadRequested", chosen),
+                                 ("OCP_Save", "profileSaveRequested", {"op": "||", "args": [
+                                     {"op": "!=", "args": [{"state": "saveProfileName"}, ""]}, {"state": "ui.numberDraftsPending"}]})):
+        part = own(name)
+        buttons.append(button(doc, f"profile_{name[4:].lower()}", script_value(part, "text"), place(script_rect(part)), event=event,
+                              scale=float(script_value(part, "textscale")), enabled=enabled))
+    nodes = [
+        *text_of("OCP_ProfilesDescription", TEXT_BUTTON),
+        *text_of("OCP_ExistingProfiles", TEXT_LABEL, "left"),
+        box_fill("profiles-ground", ground, [0, 0, 0, 0.5]),
+        picture_frame("profiles-frame", ground),
+        group("profiles-list", {**absolute(ground[0] + lx, ground[1] + ly, list_w, lh), "overflow": keyword("auto")}, [column]),
+        scrollbar(doc, "profiles_scroll", "profiles-list", (ground[0] + lx + list_w, ground[1] + ly, 16, lh), "#str_41166",
+                  step=PROFILE_ROW_H),
+        *text_of("OCP_ProfileNameEdit_text", TEXT_LABEL, "left"),
+        picture_frame("profile-name-frame", field_box),
+        name_field(doc, field_box, ident="profile-name", state="saveProfileName", action="profileRename", key="#str_41167"),
+        *buttons,
+    ]
+    return nodes, "profile-name"
+
+
+# ------------------------------------------------------- Options: Reset Defaults
+
+RESET_SOURCE = ROOT / "content" / "basepr" / "pak0" / "guis" / "mainmenu" / "mainmenu_overlays.guifragment"
+CHECK_GROUND, CHECK_EDGE, CHECK_CROSS = rgb("#39424A"), rgb("#B8C9E6", 0.9), rgb("#ABC5DD")   # checkbox.tga, CHECKBOX_BORDERCOLOR
+
+
+def check_box(doc: Document, ident: str, key: str, box, caption_box, state: str) -> dict:
+    """A check box with its caption (section 6): the 12 u ground with its
+    border, the cross while it is ticked. The pointer whitens the border, as
+    the stock hover border does, and focus adds an outline at full
+    prey.rail. A press, or Accept, ticks or clears it. `box` and
+    `caption_box` are the stock windows' rects; the control spans both."""
+    bx, by, bw, bh = box
+    cx, cy, cw, ch = caption_box
+    left, top = bx, min(by, cy)
+    right, foot = max(bx + bw, cx + cw), max(by + bh, cy + ch)
+    at = (bx - left, by - top)
+    square = f"M0.5 0.5H{bw - .5}V{bh - .5}H0.5Z"
+    ground = vector(f"{ident}-box", {**absolute(*at, bw, bh), **PASSIVE}, [
+        svg("ground", square, fill=solid(CHECK_GROUND), stroke=stroke(solid(CHECK_EDGE), 1 * U))])
+    lit_edge = vector(f"{ident}-hot", {**absolute(*at, bw, bh), "opacity": number(0), **PASSIVE}, [
+        svg("edge", square, stroke=stroke(solid(TEXT_HOVER), 1 * U))])
+    cross = vector(f"{ident}-cross", {**absolute(*at, bw, bh), "opacity": number(0), **PASSIVE}, [
+        svg("a", f"M2.6 2.6L{bw - 2.6} {bh - 2.6}", stroke=stroke(solid(CHECK_CROSS), 2.6 * U)),
+        svg("b", f"M{bw - 2.6} 2.6L2.6 {bh - 2.6}", stroke=stroke(solid(CHECK_CROSS), 2.6 * U))])
+    doc.bind(f"{ident}-cross", "opacity", {"op": "select", "args": [{"state": state}, 1, 0]})
+    rim = vector(f"{ident}-rim", {**absolute(at[0] - 2, at[1] - 2, bw + 4, bh + 4), "opacity": number(0), **PASSIVE}, [
+        svg("rim", f"M0.5 0.5H{bw + 3.5}V{bh + 3.5}H0.5Z", stroke=stroke(solid(RAIL), 1 * U))])
+    caption = label(f"{ident}-label", key, (cx - left, cy - top, cw, ch), BODY, 0.25, TEXT_LABEL, align="left")
+
+    def lit(hot: float, rim_on: float) -> list:
+        return [(f"{ident}-hot", "opacity", number(hot)), (f"{ident}-rim", "opacity", number(rim_on))]
+    ids = doc.states(ident, {"default": lit(0, 0), "hover": lit(1, 0), "focus": lit(1, 1), "pressed": lit(1, 1),
+                             "disabled": lit(0, 0)}, enter=1, leave=1)
+    event = f"{ident}Toggle"
+    doc.events[event] = [{"op": "action", "action": doc.session("soundTick")},
+                         {"op": "setState", "values": {state: {"op": "!", "args": [{"state": state}]}}}]
+    return group(ident, absolute(left, top, right - left, foot - top), [ground, lit_edge, cross, rim, *caption],
+                 control=control(key, ids, event=event))
+
+
+def reset_dialog(doc: Document) -> dict:
+    """Reset Defaults (section 9): a 0.80 black scrim over the whole screen
+    and the stock 360x250 u claw frame at 142,100 with its title, its line,
+    five check boxes and Reset and Cancel, read from the stock overlay
+    (Overlay_ResetDefaults). It appears and disappears at once, with every
+    box clear. Reset is lit while a box is ticked and resets what is ticked
+    as the stock button does (settingsResetApply); Cancel only closes it, and
+    holds the focus on arrival."""
+    source = re.sub(r"//[^\n]*", "", RESET_SOURCE.read_text(encoding="latin-1"))
+    found = re.search(r"superWindowDef\s+RD\s*\{", source)
+    depth, end = 1, found.end()
+    while depth:
+        depth += {"{": 1, "}": -1}.get(source[end], 0)
+        end += 1
+    frame_own, parts = script_blocks(source[found.end():end - 1])
+    windows = {name: script_blocks(body)[0] for _, name, body in parts}
+    fx, fy, fw, fh = script_rect(frame_own)
+    ident = "resetModal"
+    choices = [f"reset.choice{index}" for index in range(5)]
+    for state in choices:
+        doc.state[state] = {"type": "boolean", "initial": False}
+    doc.state[f"{ident}.visible"] = {"type": "boolean", "initial": False}
+    doc.events[f"{ident}Show"] = [{"op": "action", "action": doc.session("soundClick")},
+                                  {"op": "setState", "values": {f"{ident}.visible": True, **{state: False for state in choices}}}]
+    doc.events[f"{ident}Hide"] = [{"op": "setState", "values": {f"{ident}.visible": False}}]
+    doc.events[f"{ident}Yes"] = [{"op": "call", "event": f"{ident}Hide"}, {"op": "action", "action": doc.session("soundClick")},
+                                 {"op": "action", "action": doc.session("settingsResetApply")}]
+    doc.events[f"{ident}No"] = [{"op": "action", "action": doc.session("soundCancel")}, {"op": "call", "event": f"{ident}Hide"}]
+
+    def text_window(name: str, ident_text: str, *, wrap: bool = False) -> list[dict]:
+        part = windows[name]
+        align = {"0": "left", "1": "center", "2": "right"}[script_value(part, "textalign") or "0"]
+        return label(ident_text, script_value(part, "text"), script_rect(part), BODY, float(script_value(part, "textscale")),
+                     TEXT_LABEL, align=align, wrap=wrap, ty=float(script_value(part, "textaligny") or 0))
+    contents = [*text_window("RDTitleText", f"{ident}-title"), *text_window("RDText", f"{ident}-message", wrap=True)]
+    for index, state in enumerate(choices):
+        box = script_rect(windows[f"RDChoice{index + 1}"])
+        caption = windows[f"RDTitle{index + 1}"]
+        contents.append(check_box(doc, f"reset_choice{index}", script_value(caption, "text"), box, script_rect(caption), state))
+    ticked = {"state": choices[0]}
+    for state in choices[1:]:
+        ticked = {"op": "||", "args": [ticked, {"state": state}]}
+    names = (f"{ident}_yes", f"{ident}_no")
+    for name, window, event in ((names[0], "RDResetBtnText", f"{ident}Yes"), (names[1], "RDCancelBtnText", f"{ident}No")):
+        part = windows[window]
+        contents.append(button(doc, name, script_value(part, "text"), script_rect(part), event=event,
+                               scale=float(script_value(part, "textscale")), enabled=ticked if name == names[0] else None))
+    frame = group(f"{ident}-frame", absolute(fx, fy, fw, fh), [*frame_parts(doc, f"{ident}-frame", 0.7, 1), *contents])
+    stage = group(f"{ident}-stage", {"position": keyword("absolute"), "top": length(0), "left": length(50, "%"),
+                                     "margin-left": length(-CANVAS_W * U / 2), "width": ul(CANVAS_W), "height": ul(CANVAS_H)},
+                  [frame])
+    veil = group(f"{ident}-scrim", {**FULL, "background-color": colour([0, 0, 0, 0.8])})
+    node = group(ident, {**FULL, "display": keyword("none")}, [veil, stage], modal={"initialFocus": names[1], "back": f"{ident}No"})
+    doc.bind(ident, "display", {"op": "select", "args": [{"state": f"{ident}.visible"}, "block", "none"]})
+    return node
 
 
 def tab_face(ident: str, box, d: str, paint: dict, tint: list[float], key: str, scale: float, *, rim_d: str | None = None,
@@ -2103,8 +2383,9 @@ def line(ident: str, box) -> dict:
 
 def options_document() -> dict:
     """Options (section 9): the full page on its 0.50 body, the four top
-    tabs, and the tabs rebuilt so far: Game Options with its side tabs, and
-    Audio. Each row changes its setting at once, as the stock controls do.
+    tabs with their pages (Controls, Game Options and Video with their side
+    tabs, Audio on one page) and the Reset Defaults dialog. Each row changes
+    its setting or binding at once, as the stock controls do.
     An active tab and its page are one surface: the page's outline breaks
     across the active tab and runs whole along every inactive one
     (section 6)."""
@@ -2142,8 +2423,13 @@ def options_document() -> dict:
     doc.state["applied.com_performancePreset"] = {"type": "string", "initial": ""}
     doc.state["cv.r_fullscreen"] = {"type": "boolean", "initial": False, "cvar": "r_fullscreen"}
 
-    held = [index for index, (_, verb, _) in enumerate(OPTIONS_TABS) if verb is None]
-    doc.state["tab.top"] = {"type": "number", "initial": held[0]}
+    # The Controls tab: the row waiting for a key, the session's verbs on the
+    # focused row, and the west face button, which clears it as Delete does.
+    doc.state[CONTROLS_CAPTURE] = {"type": "number", "initial": -1}
+    doc.session("controlsBind")
+    doc.events["onSecondary"] = [{"op": "action", "action": doc.session("controlsClear")}]
+
+    doc.state["tab.top"] = {"type": "number", "initial": 0}     # the stock page opens on Controls
     flip = doc.session("soundTabFlip")
     bx, by, bw, bh = OPTIONS_BOOK
     tx, ty, tw_all, th = OPTIONS_TOP_TABS
@@ -2167,17 +2453,11 @@ def options_document() -> dict:
     top_off = f"M0 {th - .5}C3 {th - .5} 4 0 11 0H{tw - 3}L{tw - 1} {th - .5}Z"
     active_paint = linear([0, 0], [0, th * U], [(0, rgb("#7F95AA")), (0.5, rgb("#3E4C5A")), (1, rgb(PAGE_SHADE))])
     tabs, books, first_focus, side_first = [], [], {}, {}
-    for index, (key, verb, source) in enumerate(OPTIONS_TABS):
+    for index, (key, source) in enumerate(OPTIONS_TABS):
         ident, box = f"tab_top{index}", (tx + index * tw, ty, tw, th + 1)
         faces = (tab_face(f"{ident}-idle", box, top_off, solid(rgb("#252831")), TAB_TEXT, key, 0.28),
                  tab_face(f"{ident}-active", box, top_on, active_paint, TEXT_HOVER, key, 0.28, rim_d=top_rim, rim_tint=RAIL))
         under = line(f"book-top{index}", (tx + index * tw, by, tw, 1))
-        if verb is not None:
-            # Not rebuilt yet: the stock page opens on this tab.
-            doc.events[f"{ident}Pick"] = [{"op": "action", "action": flip}, {"op": "action", "action": doc.session(verb)}]
-            contents.append(under)
-            tabs.append(tab_button(doc, ident, box, key, faces, f"{ident}Pick", False))
-            continue
         chosen = {"op": "==", "args": [{"state": "tab.top"}, index]}
         contents.append(shown_when(doc, under, {"op": "!", "args": [chosen]}))
         tabs.append(tab_button(doc, ident, box, key, faces, f"{ident}Pick", chosen))
@@ -2204,6 +2484,9 @@ def options_document() -> dict:
             origin = (bx + side["page"][0], by + side["page"][1])
             built = [page_row(doc, row, origin, f"{index}_{number_of}") for row in side["rows"]]
             rows, focusable = [node for node, _ in built], [target for _, target in built]
+            if side["name"] == PROFILES_SIDE:
+                nodes, target = profiles_page(doc, side, origin)
+                rows, focusable = rows + nodes, focusable + [target]
             side_first.setdefault(index, []).append(focusable[0])
             if side["name"] == "Options_Video_Display":
                 # A change of rendering API takes the game restarted: the
@@ -2216,9 +2499,14 @@ def options_document() -> dict:
             heads = []
             for at, heading in enumerate(side["headings"]):
                 hx, hy, hw, hh = heading["rect"]
+                place = (origin[0] + hx, origin[1] + hy, hw, hh)
+                if heading["kind"] == "note":
+                    parts = label(f"note{index}-{number_of}-{at}", heading["key"], place, BODY, heading["scale"], TEXT_LABEL,
+                                  shadow=True, ty=heading["ty"])
+                else:
+                    parts = header_bar(f"head{index}-{number_of}-{at}", place, heading["key"], heading["labels"])
                 heads.append(group(f"head{index}-{number_of}-{at}-box", {**absolute(0, 0, FULL_FRAME[2], FULL_FRAME[3]), **PASSIVE},
-                                   header_bar(f"head{index}-{number_of}-{at}", (origin[0] + hx, origin[1] + hy, hw, hh),
-                                              heading["key"])))
+                                   parts))
             # The Audio tab's two sets of sub-options show by the sound system in use.
             for node, item in [*zip(rows, side["rows"]), *zip(heads, side["headings"])]:   # zip stops before the notice
                 if item["section"] in OPTION_SECTIONS:
@@ -2235,6 +2523,9 @@ def options_document() -> dict:
                           tab_face(f"{ident_side}-active", side_box, side_on, side_paint, TEXT_HOVER, side["key"], 0.33,
                                    rim_d=side_rim, rim_tint=rgb("#A7BFD7"), ty=side["ty"]))
             doc.events[f"{ident_side}Pick"] = [{"op": "action", "action": flip}, {"op": "setState", "values": {side_state: number_of}}]
+            if side["name"] == PROFILES_SIDE:
+                # As the stock tab's onTabActivate: list the profiles afresh.
+                doc.events[f"{ident_side}Pick"].append({"op": "action", "action": doc.session("profileScan")})
             side_tabs.append(tab_button(doc, ident_side, side_box, side["key"], side_faces, f"{ident_side}Pick", picked))
             # The divider beside this tab shows while another is the active one.
             book.append(shown_when(doc, line(f"book{index}-divider{number_of}", (inner_x, side_box[1], 1, sh)),
@@ -2261,11 +2552,16 @@ def options_document() -> dict:
     for name in VIDEO_RESTART:
         live = doc.state.setdefault(f"cv.{name}", {"type": "number", "initial": 0, "cvar": name})
         doc.state[f"applied.{name}"] = {"type": live["type"], "initial": live["initial"]}
-    reset = link(doc, "page_reset", "#str_20209", (32 + 270, 432, 280, 19), action=doc.session("settingsDefaults"), scale=0.36, ty=-6)
+    # The session binds each row's action by the row's place in its own list.
+    if doc.key_rows != session_controls_bindings():
+        raise SystemExit("settings.rui: PREY_CONTROLS_BINDINGS in src/framework/Session_menu.cpp must list the Controls rows' "
+                         "bindings in order: " + ", ".join(f'"{binding}"' for binding in doc.key_rows))
+    dialogs = [reset_dialog(doc)]
+    reset = link(doc, "page_reset", "#str_20209", (32 + 270, 432, 280, 19), event="resetModalShow", scale=0.36, ty=-6)
     # The top tabs come after the tab pages, whose boxes would take their hits.
     page = full_page(doc, "#str_20208", [*contents, *books, *tabs], "settingsBack",
-                     [{"op": "focus", "control": first_focus[held[0]]}], alpha=0.5, back_scale=0.36, foot=(reset,))
-    return page_document(doc, page, [])
+                     [{"op": "focus", "control": first_focus[0]}], alpha=0.5, back_scale=0.36, foot=(reset,))
+    return page_document(doc, page, dialogs)
 
 
 # ------------------------------------------------------------ the death screen
@@ -2348,17 +2644,22 @@ def render(document: dict) -> str:
 
 
 def check_ids(name: str, document: dict) -> None:
-    """Node IDs are unique within a document, and every timeline, binding and
-    focus target names a node that exists."""
-    seen: set[str] = set()
+    """Node IDs are unique within a document, every timeline, binding and
+    focus target names a node that exists, and a bound style property has a
+    base value on its node, which the loader requires."""
+    seen: dict[str, dict] = {}
 
     def walk(node: dict) -> None:
         if node["id"] in seen:
             raise SystemExit(f"{name}: duplicate node id {node['id']!r}")
-        seen.add(node["id"])
+        seen[node["id"]] = node
         for child in node.get("children", ()):
             walk(child)
     walk(document["root"])
+    for binding in document.get("bindings", ()):
+        node = seen.get(binding["node"])
+        if node is not None and binding["property"] != "enabled" and binding["property"] not in node["properties"]:
+            raise SystemExit(f"{name}: binding {binding['id']!r} has no base value for {binding['property']!r}")
     for timeline in document["timelines"]:
         for item in timeline["tracks"]:
             if item["node"] not in seen:

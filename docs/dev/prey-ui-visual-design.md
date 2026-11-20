@@ -1,11 +1,11 @@
 # openPREY UI Visual Design
 
-Specification version 1.16, 14 November 2026.
+Specification version 1.17, 20 November 2026.
 
 Status: reference survey and design contract. openPREY renders the stock Prey
 GUIs by default. A first vector replacement, the home screen's navigation, its
 small frames, the Load Game, Save Game and Credits pages, the death screen and
-three tabs of Options, is built for the retained interface and presents while
+Options with all four tabs, is built for the retained interface and presents while
 `ui_retained` is 1 (section 12.5). Sections 1 to 11 record what makes the Prey
 interface look and behave like Prey, so that fixes, widescreen work, new
 settings pages and every further replacement stay inside that identity.
@@ -18,7 +18,7 @@ Section 12 covers openPREY's own additions.
 | Rifle scope at any aspect (section 10.8) | Built in the legacy GUI with the stock art |
 | Alien-script translation (section 11.4) | Built |
 | 3D main-menu backdrop and entrance (section 12.2) | Specified, not built. The menu draws the stock layers |
-| Vector or retained-UI replacement (sections 12.3 and 12.5) | Home navigation, bottom bar, New Game, Mods, Exit, Quit Game, Load Game, Save Game, Credits, the death screen and Options' Game Options, Video and Audio tabs built behind `ui_retained`; MultiPrey, the rest of Options, the message boxes and loading are still the stock ones |
+| Vector or retained-UI replacement (sections 12.3 and 12.5) | Home navigation, bottom bar, New Game, Mods, Exit, Quit Game, Load Game, Save Game, Credits, the death screen and Options (every tab and the Reset Defaults dialog) built behind `ui_retained`; MultiPrey, the message boxes and loading are still the stock ones |
 
 The companion [Interface Atlas](prey-ui/atlas/prey-interface-atlas.html) draws
 the measured components, screens and motion as editable vector
@@ -1539,7 +1539,7 @@ by a script from this specification and committed.
 | `guis/menu/savegame.rui` | Save Game, from the pause | The saves table, the name field, Save, the overwrite confirmation and the refusal notice |
 | `guis/menu/restartmenu.rui` | The death screen | The frame with Load, Restart and Main Menu and the line under each that says what it does |
 | `guis/menu/credits.rui` | Credits, from either home | The stock credits sheet rising through the page |
-| `guis/menu/settings.rui` | Options, from either home | The four top tabs, Game Options' two pages, Video's six and the Audio page of setting rows |
+| `guis/menu/settings.rui` | Options, from either home | The four top tabs, Controls' seven pages, Game Options' two, Video's six and the Audio page, and the Reset Defaults dialog |
 
 `tools/ui/build_retained_screens.py` writes them from the measurements of
 sections 3 to 8 and the Interface Atlas's constructions; `--check` reports a
@@ -1568,7 +1568,7 @@ without a change here.
   grow from the bottom bar as section 8 records, and the navigation and
   bottom bar hide while one is open.
 - Load Game, Save Game and Credits are documents of their own (below).
-- Options is a document of its own with one tab rebuilt so far (below).
+- Options is a document of its own (below).
 - MultiPrey and the update check are still the stock menu's. The home asks
   the session for one, the session sends `guis/mainmenu.gui` a
   `retainedPage_*` named event, and the stock page grows from the same
@@ -1725,11 +1725,33 @@ the leading edge of the inner page, and its `prey.separator` outline, and a
 active tab and its page are one surface: the outline is drawn in runs, and
 the run beside or under a tab shows only while that tab is inactive.
 
-**Game Options, Video and Audio are rebuilt; Controls is the stock page's.**
-Choosing Controls, or Reset to defaults, opens the stock Options page on that
-tab (with the Reset Defaults dialog up for the last), and closing it returns
-to the home. The stock page is complete, so nothing is out of reach while the
-rest is rebuilt. The page opens on Game Options, the first tab it holds.
+**Every tab is rebuilt**, and so is the Reset Defaults dialog. The page opens
+on Controls, as the stock page does.
+
+- **Controls.** The stock page's seven side tabs (Movement, Combat, Weapons,
+  Look, System, MultiPrey and Profiles), 47 u tall each. A binding page's
+  header bar with its two headings (Action, Key Assignment), its rows and the
+  line at its foot are read from the stock script. A row is the setting
+  row's plate with the action in the leading half and its keys in the
+  trailing half in `prey.text.value`: named as the language names them,
+  joined with a middle dot, or `<empty>`.
+  - *Binding.* Accept or a click waits for a key, and the keys read "Press
+    any key...". The next key pressed joins the action's keys, two of each
+    device family, as the stock field binds them, and plays
+    `guisounds_menu_tick`. Escape, Start or Back cancel; Backspace or Delete
+    clear the row. Out of a wait, Delete, Backspace or the west face button
+    clears the focused row. The session takes the key
+    (`idSessionLocal::RetainedControlsKey`) and knows each row by its place in
+    `PREY_CONTROLS_BINDINGS`. The generator refuses to write the page while
+    that list differs from the stock script's rows.
+  - *Profiles.* At the stock places: what profiles are for, the saved
+    profiles in a list on a black 0.50 ground in a picture frame with its
+    scroll bar (32 at most), the name field, and Delete, Load and Save As. A
+    press selects a profile and puts its name in the field; Accept on the
+    selected one loads it. Delete and Load are lit while a profile is
+    selected, Save As while there is a name. They act as the stock buttons do
+    (Appendix C.2). The list is read again when the tab is chosen and when
+    the page opens.
 
 - **Rows from the stock script.** The generator reads Game Options' side
   tabs, headings and rows from `guis/mainmenu/mainmenu_options.guifragment`:
@@ -1795,6 +1817,18 @@ rest is rebuilt. The page opens on Game Options, the first tab it holds.
     drawn at 0.40 and takes no input unless a mixer choice is offered, and
     EAX likewise unless the device supports it, as the stock page dims them.
     The EAX mark shows while EAX is in use.
+- **Reset Defaults.** Reset to defaults on the bottom bar opens the stock
+  dialog, rebuilt from the stock overlay (`Overlay_ResetDefaults`): a 0.80
+  black scrim, the 360x250 u claw frame at 142,100, its title and line, five
+  check boxes (Controls, Game Options, Video Settings, Audio Settings, Reset
+  all settings), and Reset and Cancel. It appears and disappears at once,
+  with every box clear and the focus on Cancel. A check box is the 12 u
+  ground with its border and the cross while it is ticked; the pointer
+  whitens the border and focus adds an outline in `prey.rail`. Reset is lit
+  while a box is ticked and resets what is ticked as the stock button does;
+  Reset all settings resets every part and every setting (`cvar_restart`).
+  The page shows the result at once, and a video setting that takes a
+  restart lights Apply Changes.
 - **Feedback.** The plate is unchanged; the value turns white under the
   pointer or focus, and focus adds the plate's outline at full `prey.rail`.
   A tab's label turns `prey.text.tabHover`; a tab change plays
@@ -1826,11 +1860,9 @@ while `gui::retainedHome` is 1 (`idSessionLocal::OpenRestartMenu`).
 
 - Controller prompts in the bottom title bar, and text that scales with the
   interface's text size without leaving its plates (section 12.3, rule 5).
-- Options' Controls tab and its Reset Defaults dialog, which open the stock
-  page for now, the stock Audio page's sound-driver notice (the engine never
-  raises it), the Advanced 2 page's driver box, whose button opens a web
-  page, and the crosshair's picture beside its
-  name.
+- The stock Audio page's sound-driver notice (the engine never raises it),
+  the Advanced 2 page's driver box, whose button opens a web page, and the
+  crosshair's picture beside its name.
 - MultiPrey, the message boxes and the loading screen. Each is a document
   for the generator and, where the session has no route for it, a session
   verb.
@@ -2359,6 +2391,16 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.17, 20 November 2026
+
+- Section 12.5: Options' Controls tab and the Reset Defaults dialog are
+  rebuilt, so every tab of Options is the retained page's. It records the
+  binding rows and how a key is taken, the Profiles page, and the dialog
+  with its check boxes. The page now opens on Controls, as the stock page
+  does. The status paragraph, the table at the head and "Not yet built"
+  follow.
+- The Interface Atlas takes the version; no drawing changed.
 
 ### Version 1.16, 14 November 2026
 

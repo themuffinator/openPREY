@@ -272,7 +272,9 @@ bool SessionMenuCommand(const std::string& command) {
         // openPREY: New Game's skill frame and Prey's menu sounds (Session_menu.cpp).
         "newGameNormal","newGameWicked","newGameCasino",
         "soundClick","soundCancel","soundTick","soundSlideInSmall","soundSlideOutSmall",
-        "soundSlideIn","soundSlideOut","soundTabFlip","videoDetect","videoApply"};
+        "soundSlideIn","soundSlideOut","soundTabFlip","videoDetect","videoApply",
+        // openPREY: the Options page's Controls > Profiles and Reset Defaults.
+        "profileScan","profileSelect","profileLoad","profileSave","profileDelete","settingsResetApply"};
 	return commands.contains(command);
 }
 

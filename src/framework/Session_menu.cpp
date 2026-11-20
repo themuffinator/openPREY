@@ -386,6 +386,26 @@ static const char *const RETAINED_CONTROLS_BINDINGS[] = {
 	"emote cheer", "emote taunt", "emote grab_a", "_voicechat"
 };
 static const int RETAINED_CONTROLS_ROWS = sizeof( RETAINED_CONTROLS_BINDINGS ) / sizeof( RETAINED_CONTROLS_BINDINGS[0] );
+// openPREY: the Options page's Controls tab binds Prey's actions, in the order
+// of its rows (the stock page's side tabs in turn). bind_row in
+// tools/ui/build_retained_screens.py names each row by its place here and
+// refuses to write the page while this list differs.
+static const char *const PREY_CONTROLS_BINDINGS[] = {
+	"_forward", "_back", "_moveLeft", "_moveRight", "_moveUp", "_moveDown", "_strafe",
+	"_attack", "_attackAlt", "_impulse15", "_impulse14", "_impulse16", "_impulse54", "_impulse25",
+	"_impulse1", "_impulse2", "_impulse3", "_impulse4", "_impulse5", "_impulse6", "_impulse7",
+	"_left", "_right", "_lookUp", "_lookDown", "_mlook", "_impulse18", "_zoom",
+	"savegame quick", "loadgame quick", "screenshot", "togglehelp",
+	"clientMessageMode", "clientMessageMode 1", "_impulse20", "_impulse22", "_impulse17", "_impulse28", "_impulse29", "_impulse19"
+};
+static const int PREY_CONTROLS_ROWS = sizeof( PREY_CONTROLS_BINDINGS ) / sizeof( PREY_CONTROLS_BINDINGS[0] );
+// The Profiles page's list holds this many profiles (PROFILE_ROWS in the generator).
+static const int RETAINED_PROFILE_ROWS = 32;
+// The binding rows of openQ4's CONTROLS page, or of Prey's Options page.
+static const char *const *Session_RetainedControlsBindings( bool prey, int &rows ) {
+	rows = prey ? PREY_CONTROLS_ROWS : RETAINED_CONTROLS_ROWS;
+	return prey ? PREY_CONTROLS_BINDINGS : RETAINED_CONTROLS_BINDINGS;
+}
 // The retained SETTINGS page (tools/ui/retained_settings_page.py): its
 // sections, each with its verb and the stock settings screen's panel
 // (desktop::dest) that stands in where its page cannot open; the screen
@@ -3266,7 +3286,9 @@ void idSessionLocal::ReturnRetainedControls() {
 idSessionLocal::PublishRetainedControls
 
 Each row's keys, as the language names them and joins a list, or the stock
-page's word for none; the row waiting for a key says so instead.
+page's word for none; the row waiting for a key says so instead. The page is
+openQ4's CONTROLS page or, in openPREY, the Options page, whose Controls tab
+holds Prey's binding rows.
 ===============
 */
 void idSessionLocal::PublishRetainedControls( idUserInterface *gui ) {
@@ -3274,14 +3296,19 @@ void idSessionLocal::PublishRetainedControls( idUserInterface *gui ) {
 	if ( gui == NULL ) {
 		return;
 	}
+	const bool prey = gui == guiRetainedSettingsPage;
+	int rows = 0;
+	Session_RetainedControlsBindings( prey, rows );
 	gui->SetKeyBindingNames();
-	if ( retainedControlsCapture >= 0 && retainedControlsCapture < RETAINED_CONTROLS_ROWS ) {
+	if ( retainedControlsCapture >= 0 && retainedControlsCapture < rows ) {
 		gui->SetStateString( va( "controls.%d.keys", retainedControlsCapture ),
 			common->GetLanguageDict()->GetString( "#str_07000" ) );
 	}
 	gui->SetStateInt( "controls.capture", retainedControlsCapture );
-	// TOUCH LAYOUT: the built-in touch controls' editor lives in the Android setup.
-	gui->SetStateBool( "controls.touchLayout", Session_AndroidSetupAvailable() );
+	if ( !prey ) {
+		// TOUCH LAYOUT: the built-in touch controls' editor lives in the Android setup.
+		gui->SetStateBool( "controls.touchLayout", Session_AndroidSetupAvailable() );
+	}
 	gui->StateChanged( common->GetPresentationTime() );
 #endif
 }
@@ -3298,20 +3325,22 @@ return from setup.
 ===============
 */
 #ifndef ID_DEDICATED
-// The CONTROLS page's focused binding row, or -1 when another control has focus.
-static int Session_RetainedControlsRow( idUserInterface *gui ) {
+// The page's focused binding row, below `rows`, or -1 when another control has focus.
+static int Session_RetainedControlsRow( idUserInterface *gui, int rows ) {
 	const std::string focus = UI_RetainedFocusedControl( gui );
 	static const char prefix[] = "controls_bind_";
 	if ( focus.compare( 0, sizeof( prefix ) - 1, prefix ) != 0 ) {
 		return -1;
 	}
 	const int row = atoi( focus.c_str() + sizeof( prefix ) - 1 );
-	return row >= 0 && row < RETAINED_CONTROLS_ROWS && focus == va( "%s%d", prefix, row ) ? row : -1;
+	return row >= 0 && row < rows && focus == va( "%s%d", prefix, row ) ? row : -1;
 }
 #endif
 
 void idSessionLocal::HandleRetainedControlsRequest( idUserInterface *gui, const char *request ) {
 #ifndef ID_DEDICATED
+	int rows = 0;
+	const char *const *bindings = Session_RetainedControlsBindings( gui != NULL && gui == guiRetainedSettingsPage, rows );
 	if ( !idStr::Icmp( request, "controlsBack" ) ) {
 		ReturnRetainedControls();
 		return;
@@ -3327,7 +3356,7 @@ void idSessionLocal::HandleRetainedControlsRequest( idUserInterface *gui, const 
 	if ( !bind && !clear ) {
 		return;
 	}
-	const int row = Session_RetainedControlsRow( gui );
+	const int row = Session_RetainedControlsRow( gui, rows );
 	if ( row < 0 ) {
 		return;
 	}
@@ -3335,7 +3364,7 @@ void idSessionLocal::HandleRetainedControlsRequest( idUserInterface *gui, const 
 		retainedControlsCapture = row;
 		retainedControlsCaptured = -1;
 	} else {
-		idKeyInput::UnbindBinding( RETAINED_CONTROLS_BINDINGS[ row ] );
+		idKeyInput::UnbindBinding( bindings[ row ] );
 		if ( guiMainMenu != NULL ) {
 			guiMainMenu->SetKeyBindingNames();
 		}
@@ -3353,29 +3382,36 @@ the stock binding field does: Escape, Start or Back cancel, Backspace or
 Delete clear the row, any other key joins its keys (at most two of each device
 family, idKeyInput::BindForMenu). The key's release and characters are its own. Out of
 a wait, Delete or Backspace on a binding row clears it; on the device tabs'
-rows they reach the page.
+rows they reach the page. openPREY's Options page takes keys the same way
+on its Controls tab, with Prey's menu sound.
 ===============
 */
 bool idSessionLocal::RetainedControlsKey( const sysEvent_t *event ) {
 #ifdef ID_DEDICATED
 	return false;
 #else
-	if ( event == NULL || guiRetainedControls == NULL || guiActive != guiRetainedControls ) {
+	if ( event == NULL || guiActive == NULL || ( guiActive != guiRetainedControls && guiActive != guiRetainedSettingsPage ) ) {
 		return false;
 	}
+	idUserInterface *page = guiActive;
+	const bool prey = page == guiRetainedSettingsPage;
+	int rows = 0;
+	const char *const *bindings = Session_RetainedControlsBindings( prey, rows );
+	const char *sound = prey ? "play guisounds_menu_tick" : "play main_menu_selection";
 	if ( event->evType == SE_KEY && !event->evValue2 && event->evValue == retainedControlsCaptured ) {
 		retainedControlsCaptured = -1;
 		return true;
 	}
-	if ( retainedControlsCapture < 0 ) {
+	if ( retainedControlsCapture < 0 || retainedControlsCapture >= rows ) {
+		retainedControlsCapture = -1;
 		// Only a binding row's: the MOUSE and CONTROLLER rows' typed
 		// numbers take Delete and Backspace as text.
 		if ( event->evType == SE_KEY && event->evValue2 && ( event->evValue == K_DEL || event->evValue == K_BACKSPACE ) &&
-			Session_RetainedControlsRow( guiRetainedControls ) >= 0 ) {
+			Session_RetainedControlsRow( page, rows ) >= 0 ) {
 			// The page never sees this key, so the clear sounds here; the
 			// page sounds its own presses, the controller's clear included.
-			HandleMainMenuCommands( "play main_menu_selection" );
-			HandleRetainedControlsRequest( guiRetainedControls, "controlsClear" );
+			HandleMainMenuCommands( sound );
+			HandleRetainedControlsRequest( page, "controlsClear" );
 			return true;
 		}
 		return false;
@@ -3388,7 +3424,7 @@ bool idSessionLocal::RetainedControlsKey( const sysEvent_t *event ) {
 		return false;
 	}
 	const int key = event->evValue;
-	const char *binding = RETAINED_CONTROLS_BINDINGS[ retainedControlsCapture ];
+	const char *binding = bindings[ retainedControlsCapture ];
 	if ( key == K_BACKSPACE || key == K_DEL ) {
 		idKeyInput::UnbindBinding( binding );
 	} else if ( key != K_ESCAPE && key != K_JOY7 && key != K_JOY8 ) {
@@ -3399,8 +3435,8 @@ bool idSessionLocal::RetainedControlsKey( const sysEvent_t *event ) {
 	}
 	retainedControlsCapture = -1;
 	retainedControlsCaptured = key;
-	HandleMainMenuCommands( "play main_menu_selection" );
-	PublishRetainedControls( guiRetainedControls );
+	HandleMainMenuCommands( sound );
+	PublishRetainedControls( page );
 	return true;
 #endif
 }
@@ -4886,6 +4922,28 @@ static void Session_ScanControlProfiles( idUserInterface *gui ) {
 	gui->SetStateInt( "profileList_sel_0", -1 );
 	gui->StateChanged( common->GetPresentationTime() );
 }
+
+#ifndef ID_DEDICATED
+// The Options page's Profiles list: the stock scan, which ends the stock
+// list by deleting the item after the last, and how many it found. The
+// retained page declares its first RETAINED_PROFILE_ROWS items, so the
+// ending item comes back empty and the count says where the list ends.
+static void Session_PublishRetainedProfiles( idUserInterface *gui ) {
+	if ( gui == NULL ) {
+		return;
+	}
+	Session_ScanControlProfiles( gui );
+	int count = 0;
+	while ( gui->State().FindKey( va( "profileList_item_%i", count ) ) != NULL ) {
+		count++;
+	}
+	if ( count < RETAINED_PROFILE_ROWS ) {
+		gui->SetStateString( va( "profileList_item_%i", count ), "" );
+	}
+	gui->SetStateInt( "profiles.count", Min( count, RETAINED_PROFILE_ROWS ) );
+	gui->StateChanged( common->GetPresentationTime() );
+}
+#endif
 
 static void Session_SaveControlProfile( idUserInterface *gui ) {
 	idStr name;
@@ -9309,6 +9367,12 @@ bool idSessionLocal::BeginRetainedPage( const char *request ) {
 		Session_PublishPreyOptionsAudio( page );
 		// And the Video tab's lists, with what is in effect now.
 		Session_PublishPreyOptionsVideo( page, true );
+		// The Controls tab's bindings, no row waiting for a key, and the
+		// saved profiles.
+		retainedControlsCapture = -1;
+		retainedControlsCaptured = -1;
+		PublishRetainedControls( page );
+		Session_PublishRetainedProfiles( page );
 		page->StateChanged( common->GetPresentationTime() );
 	} else {
 		PublishRetainedLoadPage( page, 0, NULL );
@@ -10312,29 +10376,70 @@ void idSessionLocal::HandleRetainedSettingsPageRequest( idUserInterface *gui, co
 		return;
 	}
 	// openPREY: Prey's Options is one page of tabs (section 12.5 of the Prey
-	// visual specification). Back shrinks it into the bar. A tab it has not
-	// rebuilt, and Reset to defaults, open the stock Options page on that tab:
-	// the stock menu takes the screen and grows its own page, and the home
-	// covers it again when that page has closed (UpdateRetainedHome).
+	// visual specification), every tab of the stock page and its Reset
+	// Defaults dialog rebuilt. Back shrinks it into the bar.
 	{
-		static const char *const stockTabs[][2] = {
-			{ "settingsControls",	"0" },
-			{ "settingsDefaults",	"1" },
-		};
 		if ( !idStr::Icmp( request, "settingsBack" ) ) {
 			LeaveRetainedPage( gui );
 			return;
 		}
-		for ( int i = 0; i < static_cast<int>( sizeof( stockTabs ) / sizeof( stockTabs[0] ) ); ++i ) {
-			if ( idStr::Icmp( request, stockTabs[i][0] ) ) {
-				continue;
+		// The Controls tab's binding rows: Accept waits for a key, which
+		// RetainedControlsKey takes, and the west face button clears.
+		if ( !idStr::Icmp( request, "controlsBind" ) || !idStr::Icmp( request, "controlsClear" ) ) {
+			HandleRetainedControlsRequest( gui, request );
+			return;
+		}
+		// Controls > Profiles, as the stock page's commands act on it
+		// (Session_ControlProfile*). Saving and deleting list the profiles
+		// again, as the stock buttons ask; loading shows the new bindings.
+		if ( !idStr::Icmp( request, "profileScan" ) ) {
+			Session_PublishRetainedProfiles( gui );
+			return;
+		}
+		if ( !idStr::Icmp( request, "profileSelect" ) ) {
+			gui->SetStateString( "saveProfileName", Session_SelectedControlProfile( gui ).c_str() );
+			gui->StateChanged( common->GetPresentationTime() );
+			return;
+		}
+		if ( !idStr::Icmp( request, "profileLoad" ) ) {
+			Session_LoadControlProfile( gui );
+			guiMainMenu->SetKeyBindingNames();
+			PublishRetainedControls( gui );
+			return;
+		}
+		if ( !idStr::Icmp( request, "profileSave" ) || !idStr::Icmp( request, "profileDelete" ) ) {
+			if ( !idStr::Icmp( request, "profileSave" ) ) {
+				Session_SaveControlProfile( gui );
+			} else {
+				Session_DeleteControlProfile( gui );
 			}
-			retainedPageLeaving = NULL;
-			retainedPageHome = NULL;
-			SetGUI( guiMainMenu, NULL );
-			guiMainMenu->SetPresentationValue( "Options_TabContainer::activetab", stockTabs[i][1], false );
-			guiMainMenu->HandleNamedEvent( !idStr::Icmp( request, "settingsDefaults" ) ? "retainedPage_settingsReset" : "retainedPage_settings" );
-			UpdateRetainedHome();
+			Session_PublishRetainedProfiles( gui );
+			return;
+		}
+		// Reset Defaults' Reset: each ticked part to its defaults, or with
+		// "Reset all settings" ticked every part and every setting, as the
+		// stock dialog's button does. The page then shows what is set now;
+		// a video setting reset waits for Apply Changes.
+		if ( !idStr::Icmp( request, "settingsResetApply" ) ) {
+			static const char *const resets[] = { "resetbindings", "resetgame", "resetvideo", "resetaudio" };
+			const bool all = gui->State().GetBool( "reset.choice4" );
+			idStr commands;
+			for ( int i = 0; i < static_cast<int>( sizeof( resets ) / sizeof( resets[0] ) ); i++ ) {
+				if ( all || gui->State().GetBool( va( "reset.choice%d", i ) ) ) {
+					commands += va( "%s ; ", resets[i] );
+				}
+			}
+			if ( all ) {
+				commands += "exec cvar_restart";
+			}
+			if ( commands.IsEmpty() ) {
+				return;
+			}
+			HandleMainMenuCommands( commands.c_str() );
+			PublishRetainedControls( gui );
+			Session_RefreshMainMenuAudioState( gui );
+			Session_PublishPreyOptionsAudio( gui );
+			Session_PublishPreyOptionsVideo( gui, false );
 			return;
 		}
 		// The Audio tab's rows that the sound system has to act on: each
