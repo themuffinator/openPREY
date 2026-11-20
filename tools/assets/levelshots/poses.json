@@ -1,0 +1,532 @@
+{
+ "schema": 1,
+ "comment": "Loading-screen recaptures: each retail Prey loading screen's recovered camera (x y z pitch yaw roll; fovX 90), the staging its capture needs, and whether the set ships in content/basepr/pak2. tools/assets/levelshots/levelshots.py reads this; docs/dev/levelshot-capture.md explains it.",
+ "sets": {
+  "biolabsa": {
+   "map": "game/biolabsa",
+   "camera": [
+    -4668.0,
+    -1956.0,
+    76.25,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 895,
+    "median_px": 0.453,
+    "similarity": 0.947
+   },
+   "status": "shipped"
+  },
+  "biolabsb": {
+   "map": "game/biolabsb",
+   "camera": [
+    -386.0,
+    -894.0,
+    76.25,
+    0.0,
+    90.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1651,
+    "median_px": 0.364,
+    "similarity": 0.935
+   },
+   "status": "shipped"
+  },
+  "feedingtowerb": {
+   "map": "game/feedingtowerb",
+   "camera": [
+    -1792.0,
+    -2984.0,
+    364.25,
+    0.0,
+    180.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1441,
+    "median_px": 0.378,
+    "similarity": 0.96
+   },
+   "status": "shipped"
+  },
+  "feedingtowerc": {
+   "map": "game/feedingtowerc",
+   "camera": [
+    -63.0,
+    -1032.0,
+    340.25,
+    0.0,
+    180.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 2168,
+    "median_px": 0.367,
+    "similarity": 0.959
+   },
+   "status": "shipped"
+  },
+  "feedingtowerd": {
+   "map": "game/feedingtowerd",
+   "camera": [
+    4752.0,
+    5096.0,
+    -723.75,
+    0.0,
+    270.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 2049,
+    "median_px": 0.395,
+    "similarity": 0.991
+   },
+   "status": "shipped"
+  },
+  "girlfriendx": {
+   "map": "game/girlfriendx",
+   "camera": [
+    8518.0,
+    -6616.0,
+    7684.25,
+    0.0,
+    90.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1692,
+    "median_px": 0.324,
+    "similarity": 0.906
+   },
+   "status": "shipped"
+  },
+  "harvestera": {
+   "map": "game/harvestera",
+   "camera": [
+    11984.0,
+    -8288.0,
+    -899.75,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1333,
+    "median_px": 0.398,
+    "similarity": 0.98
+   },
+   "status": "shipped"
+  },
+  "harvesterb": {
+   "map": "game/harvesterb",
+   "camera": [
+    12608.0,
+    -416.0,
+    3580.25,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 877,
+    "median_px": 0.371,
+    "similarity": 0.61
+   },
+   "status": "shipped"
+  },
+  "keeperfortress": {
+   "map": "game/keeperfortress",
+   "camera": [
+    84.0,
+    -160.0,
+    -46.75,
+    0.0,
+    90.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1897,
+    "median_px": 0.31,
+    "similarity": 0.917
+   },
+   "status": "shipped",
+   "note": "Window glass distortion; correct in every tile since the ARB loader fix for off-axis projections."
+  },
+  "lotaa": {
+   "map": "game/lotaa",
+   "camera": [
+    2090.25,
+    360.5,
+    365.25,
+    0.0,
+    200.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 597,
+    "median_px": 0.291,
+    "similarity": 0.265
+   },
+   "status": "shipped",
+   "note": "Retail shows the spirit-walk arrival effect over the view, a scripted screen overlay that tiles cannot continue; the set shows the scene beneath it."
+  },
+  "lotab": {
+   "map": "game/lotab",
+   "camera": [
+    -447.5,
+    791.094,
+    341.583,
+    0.0,
+    270.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1620,
+    "median_px": 0.458,
+    "similarity": 0.915
+   },
+   "status": "shipped",
+   "note": "The canyon's sky is orange in play (the portal sky as openPREY draws it); retail's loading art shows it pale blue."
+  },
+  "lotad": {
+   "map": "game/lotad",
+   "camera": [
+    1440.0,
+    1047.75,
+    368.134,
+    0.0,
+    270.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1650,
+    "median_px": 0.41,
+    "similarity": 0.906
+   },
+   "status": "shipped"
+  },
+  "salvage": {
+   "map": "game/salvage",
+   "camera": [
+    72.0,
+    -7779.75,
+    -627.75,
+    0.0,
+    359.933,
+    0.0
+   ],
+   "solve": {
+    "inliers": 503,
+    "median_px": 0.428,
+    "similarity": 0.664
+   },
+   "commands": [
+    "noclip\nsetviewpos -400 -7780 -600 0",
+    "script \"$func_door_20.close();\""
+   ],
+   "after": 12000,
+   "status": "shipped",
+   "note": "func_door_20 opens as the player spawns beside it; the capture moves the player away and shuts it, as retail shows it."
+  },
+  "salvageboss": {
+   "map": "game/salvageboss",
+   "camera": [
+    324.0,
+    -420.0,
+    836.25,
+    0.0,
+    90.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1912,
+    "median_px": 0.347,
+    "similarity": 0.9
+   },
+   "status": "shipped"
+  },
+  "shuttlea": {
+   "map": "game/shuttlea",
+   "camera": [
+    -75536.0,
+    -2000.0,
+    -955.75,
+    0.0,
+    90.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 2099,
+    "median_px": 0.305,
+    "similarity": 0.921
+   },
+   "status": "shipped"
+  },
+  "shuttleb": {
+   "map": "game/shuttleb",
+   "camera": [
+    23592.0,
+    1344.0,
+    23468.25,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1641,
+    "median_px": 0.294,
+    "similarity": 0.825
+   },
+   "status": "shipped"
+  },
+  "spherebrain": {
+   "map": "game/spherebrain",
+   "camera": [
+    -2368.0,
+    -64.0,
+    -83.75,
+    0.217,
+    90.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1625,
+    "median_px": 0.412,
+    "similarity": 0.989
+   },
+   "status": "shipped"
+  },
+  "spindleb": {
+   "map": "game/spindleb",
+   "camera": [
+    -8116.0,
+    23712.0,
+    -10715.75,
+    0.0,
+    180.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1516,
+    "median_px": 0.349,
+    "similarity": 0.883
+   },
+   "status": "shipped"
+  },
+  "superportal": {
+   "map": "game/superportal",
+   "camera": [
+    5600.0,
+    -1868.0,
+    576.25,
+    0.0,
+    225.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1656,
+    "median_px": 0.386,
+    "similarity": 0.997
+   },
+   "status": "shipped"
+  },
+  "dmescher": {
+   "map": "game/dmescher",
+   "camera": [
+    5643.158,
+    -1986.837,
+    -1456.75,
+    -31.109,
+    187.578,
+    86.061
+   ],
+   "solve": {
+    "inliers": 1556,
+    "median_px": 0.312,
+    "similarity": 0.863
+   },
+   "status": "shipped"
+  },
+  "dmescher2": {
+   "map": "game/dmescher2",
+   "camera": [
+    -1519.75,
+    -1495.5,
+    33.904,
+    -34.324,
+    65.197,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1600,
+    "median_px": 0.367,
+    "similarity": 0.856
+   },
+   "status": "shipped"
+  },
+  "dmsphere": {
+   "map": "game/dmsphere",
+   "camera": [
+    363.0,
+    268.25,
+    849.25,
+    -31.134,
+    215.931,
+    0.0
+   ],
+   "solve": {
+    "inliers": 2150,
+    "median_px": 0.276,
+    "similarity": 0.907
+   },
+   "status": "shipped"
+  },
+  "dmroadhouse": {
+   "map": "game/dmroadhouse",
+   "camera": [
+    -16.91,
+    3217.589,
+    182.75,
+    -12.445,
+    320.254,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1079,
+    "median_px": 0.41,
+    "similarity": 0.828
+   },
+   "status": "shipped"
+  },
+  "dmplanes_4": {
+   "map": "game/dmplanes_4",
+   "camera": [
+    -61.113,
+    529.0,
+    -415.103,
+    57.089,
+    323.679,
+    0.0
+   ],
+   "solve": {
+    "inliers": 2283,
+    "median_px": 0.233,
+    "similarity": 0.977
+   },
+   "status": "shipped"
+  },
+  "dmtunnelrat_8": {
+   "map": "game/dmtunnelrat_8",
+   "camera": [
+    -206.379,
+    -1162.354,
+    120.134,
+    -14.521,
+    23.93,
+    180.0
+   ],
+   "solve": {
+    "inliers": 1560,
+    "median_px": 0.27,
+    "similarity": 0.919
+   },
+   "status": "shipped"
+  },
+  "spindlea": {
+   "map": "game/spindlea",
+   "camera": [
+    -9172.0,
+    -3856.0,
+    -30971.75,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1582,
+    "median_px": 0.311,
+    "similarity": 0.672
+   },
+   "status": "held",
+   "note": "The energy spill (fx/starenergyspill.fx) draws far brighter than retail and hides the four orange forcefield beams."
+  },
+  "dmshuttle1": {
+   "map": "game/dmshuttle1",
+   "camera": [
+    -14323.334,
+    26658.583,
+    -11139.25,
+    -52.93,
+    229.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 613,
+    "median_px": 0.484,
+    "similarity": 0.611
+   },
+   "status": "held",
+   "note": "The Earth window draws black, and the hexagonal glow panels draw brighter and coarser than retail."
+  },
+  "dmshuttle2": {
+   "map": "game/dmshuttle2",
+   "camera": [
+    -2697.151,
+    -939.583,
+    702.658,
+    58.185,
+    35.848,
+    0.0
+   ],
+   "solve": {
+    "inliers": 698,
+    "median_px": 0.29,
+    "similarity": 0.683
+   },
+   "status": "held",
+   "note": "The hexagonal glow panels draw brighter and coarser than retail."
+  },
+  "dmwallwalk2": {
+   "map": "game/dmwallwalk2",
+   "camera": [
+    1018.5,
+    -2822.25,
+    -172.5,
+    8.469,
+    312.0,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1438,
+    "median_px": 0.29,
+    "similarity": 0.871
+   },
+   "status": "held",
+   "note": "The hexagonal glow panels draw brighter and coarser than retail."
+  },
+  "dmgravitylab_6": {
+   "map": "game/dmgravitylab_6",
+   "status": "held",
+   "note": "Unsolved: the star field on nearby geometry gives a consistent but wrong solve."
+  },
+  "dmtopillogical_4": {
+   "map": "game/dmtopillogical_4",
+   "status": "held",
+   "note": "Unsolved: the hexagonal glow panels that dominate the shot do not match."
+  },
+  "dmsalvagewalk": {
+   "map": "game/dmsalvagewalk",
+   "status": "held",
+   "note": "Unsolved: the hexagonal glow panels that dominate the shot do not match."
+  },
+  "feedingtowera": {
+   "map": "game/feedingtowera",
+   "status": "held",
+   "note": "Unsolved: the shot is dominated by the green light-ray effect."
+  }
+ }
+}

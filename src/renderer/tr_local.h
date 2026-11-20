@@ -2425,6 +2425,9 @@ void	R_ARB2_Init( void );
 void	RB_ARB2_DrawInteractions( void );
 void	RB_ARB2_DrawShaderInteraction( const drawInteraction_t *din, const shaderStage_t *surfaceStage,
 			const float *surfaceRegs, const float lightColor[4] );
+// OPENPREY: true while draw_arb2.cpp writes a light's shadow-map visibility for
+// surfaces whose own Prey ARB interaction program cannot sample the map.
+bool	RB_ShadowMapVisibilityMaskPassActive( void );
 void	RB_ResetARB2InteractionHandoffBreadcrumb( void );
 void	RB_ResetAppleGL21RouteCounters( void );
 void	RB_ReportAppleGL21RouteCounters( void );

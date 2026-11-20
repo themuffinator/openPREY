@@ -48,7 +48,7 @@ This file describes project goals, rules, and workflow expectations for anyone w
 - `.install/` is the runtime package root used by local staging and `fs_cdpath` overlays.
 - Keep executables in `.install/`.
 - Keep game modules and staged content in `.install/basepr/`.
-- Keep repo-authored runtime content under `content/basepr/pak0/` and `content/basepr/pak1/`; keep development-only fixtures under `content/basepr/dev/`.
+- Keep repo-authored runtime content under `content/basepr/pak0/` and `content/basepr/pak1/`, and the recaptured loadscreens under `content/basepr/pak2/` (`docs/dev/levelshot-capture.md`); keep development-only fixtures under `content/basepr/dev/`.
 - Avoid shipping build-only artifacts (for example import libs) in `.install/`.
 
 **Stable Test Executable Paths**

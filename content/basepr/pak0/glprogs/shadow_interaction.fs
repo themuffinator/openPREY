@@ -46,6 +46,7 @@ uniform float uShadowCascadeBlend;
 // index + 1 of the cascade that holds the light's whole map, 0 = none
 uniform float uShadowWholeLightCascade;
 uniform float uShadowDebugMode;
+uniform float uShadowVisibilityMask;
 uniform float uShadowReceiverDebugReason;
 uniform float uTranslucentShadowEnabled;
 uniform float uTranslucentShadowDensity;
@@ -1058,6 +1059,16 @@ void main() {
 			abs( dFdx( vShadowCoord1.z ) ) + abs( dFdy( vShadowCoord1.z ) ),
 			abs( dFdx( vShadowCoord2.z ) ) + abs( dFdy( vShadowCoord2.z ) ),
 			abs( dFdx( vShadowCoord3.z ) ) + abs( dFdy( vShadowCoord3.z ) ) );
+	}
+
+	// OPENPREY: the visibility pass for receivers drawn by their own Prey ARB
+	// interaction program, which cannot sample the map: the light's filtered
+	// visibility goes to destination alpha, and that program's additive
+	// contribution is then scaled by it (draw_arb2.cpp).
+	if ( uShadowVisibilityMask > 0.5 ) {
+		vec3 translucentVisibility = SampleTranslucentShadow();
+		gl_FragColor = vec4( 0.0, 0.0, 0.0, SampleShadow().x * dot( translucentVisibility, vec3( 1.0 / 3.0 ) ) );
+		return;
 	}
 
 	vec3 light = vec3( ndotl );

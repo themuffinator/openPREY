@@ -1871,6 +1871,7 @@ typedef struct {
 	GLint			shadowCascadeBlend;
 	GLint			shadowWholeLightCascade;
 	GLint			shadowDebugMode;
+	GLint			shadowVisibilityMask;	// OPENPREY
 	GLint			shadowReceiverDebugReason;
 	GLint			translucentShadowEnabled;
 	GLint			translucentShadowDensity;
@@ -1984,6 +1985,7 @@ typedef struct {
 	GLint			shadowFilterTaps;
 	GLint			shadowFilterMode;
 	GLint			shadowDebugMode;
+	GLint			shadowVisibilityMask;	// OPENPREY
 	GLint			shadowReceiverDebugReason;
 	GLint			pointShadowTexelScale;
 	GLint			pointShadowDepthMode;
@@ -5637,6 +5639,7 @@ static const char *programBaseName = "glprogs/shadow_interaction";
 	g_shadowMapProgram.shadowCascadeBlend = glGetUniformLocationARB( programObject, "uShadowCascadeBlend" );
 	g_shadowMapProgram.shadowWholeLightCascade = glGetUniformLocationARB( programObject, "uShadowWholeLightCascade" );
 	g_shadowMapProgram.shadowDebugMode = glGetUniformLocationARB( programObject, "uShadowDebugMode" );
+	g_shadowMapProgram.shadowVisibilityMask = glGetUniformLocationARB( programObject, "uShadowVisibilityMask" );
 	g_shadowMapProgram.shadowReceiverDebugReason = glGetUniformLocationARB( programObject, "uShadowReceiverDebugReason" );
 	g_shadowMapProgram.translucentShadowEnabled = glGetUniformLocationARB( programObject, "uTranslucentShadowEnabled" );
 	g_shadowMapProgram.translucentShadowDensity = glGetUniformLocationARB( programObject, "uTranslucentShadowDensity" );
@@ -6024,6 +6027,7 @@ static const char *programBaseName = "glprogs/shadow_point_interaction";
 	g_pointShadowMapProgram.shadowFilterTaps = glGetUniformLocationARB( programObject, "uShadowFilterTaps" );
 	g_pointShadowMapProgram.shadowFilterMode = glGetUniformLocationARB( programObject, "uShadowFilterMode" );
 	g_pointShadowMapProgram.shadowDebugMode = glGetUniformLocationARB( programObject, "uShadowDebugMode" );
+	g_pointShadowMapProgram.shadowVisibilityMask = glGetUniformLocationARB( programObject, "uShadowVisibilityMask" );
 	g_pointShadowMapProgram.shadowReceiverDebugReason = glGetUniformLocationARB( programObject, "uShadowReceiverDebugReason" );
 	g_pointShadowMapProgram.pointShadowTexelScale = glGetUniformLocationARB( programObject, "uPointShadowTexelScale" );
 	g_pointShadowMapProgram.pointShadowDepthMode = glGetUniformLocationARB( programObject, "uPointShadowDepthMode" );
@@ -10534,6 +10538,74 @@ static bool RB_SurfaceNeedsShadowMapReceiverFallback( const drawSurf_t *surf ) {
 	return RB_SurfaceShadowMapReceiverFallbackReason( surf ) != SHADOWMAP_RECEIVER_FALLBACK_NONE;
 }
 
+/*
+OPENPREY: shadow-map visibility for Prey's own interaction programs.
+
+A surface drawn by a Prey ARB interaction program (skin, cloth, hair,
+parallax, masked) cannot sample a shadow map, so it used to keep the light's
+stencil volumes on every mapped frame. Instead, once the light's map is ready,
+the receiver program runs over those surfaces in a visibility pass that writes
+only destination alpha: the same filtered (and translucent-tinted) visibility
+the stock receivers multiply their light by. The surfaces' own programs then
+draw with their additive blend's source factor turned to destination alpha,
+so their contribution is scaled exactly as a mapped receiver's is. Destination
+alpha carries nothing between passes (the depth fill masks it and every
+interaction adds into it), so a light pass may use it.
+
+Only additive program stages can be scaled that way, and only geometry the
+receiver program can draw; any other fallback surface keeps the stencil
+volumes and stays counted as a receiver fallback.
+*/
+extern idCVar r_shadowMapProgramReceivers;
+static bool g_shadowMapVisibilityMaskPass = false;
+static bool g_shadowMapDestinationAlphaModulate = false;
+
+bool RB_ShadowMapVisibilityMaskPassActive( void ) {
+	return g_shadowMapVisibilityMaskPass;
+}
+
+// The blend a fallback receiver's stage draws with while its visibility is in
+// destination alpha.
+static int RB_ShadowMapModulatedStateBits( const int stateBits ) {
+	if ( !g_shadowMapDestinationAlphaModulate
+		|| ( stateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) != ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
+		return stateBits;
+	}
+	return ( stateBits & ~GLS_SRCBLEND_BITS ) | GLS_SRCBLEND_DST_ALPHA;
+}
+
+static bool RB_SurfaceProgramStagesAdditive( const drawSurf_t *surf ) {
+	const int stageCount = surf->material->GetNumStages();
+	for ( int stageIndex = 0; stageIndex < stageCount; stageIndex++ ) {
+		const shaderStage_t *stage = surf->material->GetStage( stageIndex );
+		if ( stage == NULL || stage->lighting != SL_INTERACTION
+			|| surf->shaderRegisters[stage->conditionRegister] == 0.0f ) {
+			continue;
+		}
+		if ( ( stage->drawStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) != ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE ) ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool RB_SurfaceShadowMapMaskableProgramReceiver( const drawSurf_t *surf ) {
+	return r_shadowMapProgramReceivers.GetBool()
+		&& RB_SurfaceShadowMapReceiverFallbackReason( surf ) == SHADOWMAP_RECEIVER_FALLBACK_INTERACTION_PROGRAM
+		&& !RB_SurfaceUsesGPUPosedGeometry( surf )
+		&& RB_SurfaceProgramStagesAdditive( surf );
+}
+
+// a fallback receiver the visibility pass cannot cover
+static bool RB_SurfaceNeedsStencilReceiverFallback( const drawSurf_t *surf ) {
+	return RB_SurfaceNeedsShadowMapReceiverFallback( surf ) && !RB_SurfaceShadowMapMaskableProgramReceiver( surf );
+}
+
+static bool RB_ShadowMapVisibilityMaskStageFilter( const shaderStage_t *surfaceStage, const float *surfaceRegs ) {
+	(void)surfaceRegs;
+	return surfaceStage != NULL && surfaceStage->lighting == SL_INTERACTION;
+}
+
 // Filter for the partial mask-failure fallback: eligible receivers whose
 // vertex caches could not be prepared this frame (the prepare call is
 // idempotent, so re-evaluating it here selects exactly the surfaces the
@@ -11808,12 +11880,18 @@ static bool RB_GLSLShadowMap_CreateDrawInteractions( const drawSurf_t *surf ) {
 		return false;
 	}
 
-	GL_State( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHMASK | backEnd.depthFunc );
+	// OPENPREY: the visibility pass writes destination alpha only
+	GL_State( g_shadowMapVisibilityMaskPass
+		? ( GLS_COLORMASK | GLS_DEPTHMASK | backEnd.depthFunc )
+		: ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHMASK | backEnd.depthFunc ) );
 
 	glDisable( GL_VERTEX_PROGRAM_ARB );
 	glDisable( GL_FRAGMENT_PROGRAM_ARB );
 	glUseProgramObjectARB( g_shadowMapProgram.programObject );
 	RB_GLSLInteractionUniformCacheInvalidate();
+	if ( g_shadowMapProgram.shadowVisibilityMask >= 0 ) {
+		glUniform1fARB( g_shadowMapProgram.shadowVisibilityMask, g_shadowMapVisibilityMaskPass ? 1.0f : 0.0f );
+	}
 	const shadowMapProjectedFilterSettings_t filterSettings = R_ShadowMapProjectedFilterSettings( backEnd.vLight );
 
 	if ( g_shadowMapProgram.bumpMap >= 0 ) {
@@ -12008,8 +12086,10 @@ static bool RB_GLSLShadowMap_CreateDrawInteractions( const drawSurf_t *surf ) {
 		if ( RB_SurfaceUsesWrappedCustomGLSLShadowReceiver( surf ) ) {
 			debugWrappedCustomCount++;
 		}
-		if ( fallbackReason != SHADOWMAP_RECEIVER_FALLBACK_NONE
-			&& ( !receiverDebugMode || fallbackReason == SHADOWMAP_RECEIVER_FALLBACK_INVALID_SURFACE ) ) {
+		if ( g_shadowMapVisibilityMaskPass
+			? !RB_SurfaceShadowMapMaskableProgramReceiver( surf )
+			: ( fallbackReason != SHADOWMAP_RECEIVER_FALLBACK_NONE
+				&& ( !receiverDebugMode || fallbackReason == SHADOWMAP_RECEIVER_FALLBACK_INVALID_SURFACE ) ) ) {
 			debugSkippedCount++;
 			continue;
 		}
@@ -12027,7 +12107,8 @@ static bool RB_GLSLShadowMap_CreateDrawInteractions( const drawSurf_t *surf ) {
 		glVertexAttribPointerARB( 8, 2, GL_FLOAT, false, sizeof( idDrawVert ), RB_DrawVertAttributePointer( ac, DRAWVERT_ST_OFFSET ) );
 		glVertexPointer( 3, GL_FLOAT, sizeof( idDrawVert ), RB_DrawVertAttributePointer( ac, DRAWVERT_XYZ_OFFSET ) );
 
-		const drawInteractionStageFilter_t stageFilter = ( receiverDebugMode && fallbackReason != SHADOWMAP_RECEIVER_FALLBACK_NONE ) ? NULL : RB_ShadowMapReceiverStageFilter;
+		const drawInteractionStageFilter_t stageFilter = g_shadowMapVisibilityMaskPass ? RB_ShadowMapVisibilityMaskStageFilter
+			: ( receiverDebugMode && fallbackReason != SHADOWMAP_RECEIVER_FALLBACK_NONE ) ? NULL : RB_ShadowMapReceiverStageFilter;
 		RB_SetCelInteractionUniform( g_shadowMapProgram.celParams, surf );
 		RB_CreateSingleDrawInteractionsFiltered( surf, RB_GLSLShadowMap_DrawInteraction, stageFilter );
 	}
@@ -12081,12 +12162,18 @@ static bool RB_GLSLPointShadowMap_CreateDrawInteractions( const drawSurf_t *surf
 		return false;
 	}
 
-	GL_State( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHMASK | backEnd.depthFunc );
+	// OPENPREY: the visibility pass writes destination alpha only
+	GL_State( g_shadowMapVisibilityMaskPass
+		? ( GLS_COLORMASK | GLS_DEPTHMASK | backEnd.depthFunc )
+		: ( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHMASK | backEnd.depthFunc ) );
 
 	glDisable( GL_VERTEX_PROGRAM_ARB );
 	glDisable( GL_FRAGMENT_PROGRAM_ARB );
 	glUseProgramObjectARB( g_pointShadowMapProgram.programObject );
 	RB_GLSLInteractionUniformCacheInvalidate();
+	if ( g_pointShadowMapProgram.shadowVisibilityMask >= 0 ) {
+		glUniform1fARB( g_pointShadowMapProgram.shadowVisibilityMask, g_shadowMapVisibilityMaskPass ? 1.0f : 0.0f );
+	}
 	const int pointFaceSize = g_pointShadowMapRenderTexture != NULL
 		? Max( 1, g_pointShadowMapRenderTexture->GetWidth() )
 		: RB_ShadowMapPointSizeValue();
@@ -12263,8 +12350,10 @@ static bool RB_GLSLPointShadowMap_CreateDrawInteractions( const drawSurf_t *surf
 		if ( RB_SurfaceUsesWrappedCustomGLSLShadowReceiver( surf ) ) {
 			pointDebugWrappedCustomCount++;
 		}
-		if ( fallbackReason != SHADOWMAP_RECEIVER_FALLBACK_NONE
-			&& ( !pointReceiverDebugMode || fallbackReason == SHADOWMAP_RECEIVER_FALLBACK_INVALID_SURFACE ) ) {
+		if ( g_shadowMapVisibilityMaskPass
+			? !RB_SurfaceShadowMapMaskableProgramReceiver( surf )
+			: ( fallbackReason != SHADOWMAP_RECEIVER_FALLBACK_NONE
+				&& ( !pointReceiverDebugMode || fallbackReason == SHADOWMAP_RECEIVER_FALLBACK_INVALID_SURFACE ) ) ) {
 			pointDebugSkippedCount++;
 			continue;
 		}
@@ -12309,7 +12398,8 @@ static bool RB_GLSLPointShadowMap_CreateDrawInteractions( const drawSurf_t *surf
 		glVertexAttribPointerARB( 8, 2, GL_FLOAT, false, sizeof( idDrawVert ), RB_DrawVertAttributePointer( ac, DRAWVERT_ST_OFFSET ) );
 		glVertexPointer( 3, GL_FLOAT, sizeof( idDrawVert ), RB_DrawVertAttributePointer( ac, DRAWVERT_XYZ_OFFSET ) );
 
-		const drawInteractionStageFilter_t stageFilter = ( pointReceiverDebugMode && fallbackReason != SHADOWMAP_RECEIVER_FALLBACK_NONE ) ? NULL : RB_ShadowMapReceiverStageFilter;
+		const drawInteractionStageFilter_t stageFilter = g_shadowMapVisibilityMaskPass ? RB_ShadowMapVisibilityMaskStageFilter
+			: ( pointReceiverDebugMode && fallbackReason != SHADOWMAP_RECEIVER_FALLBACK_NONE ) ? NULL : RB_ShadowMapReceiverStageFilter;
 		RB_SetCelInteractionUniform( g_pointShadowMapProgram.celParams, surf );
 		RB_CreateSingleDrawInteractionsFiltered( surf, RB_GLSLPointShadowMap_DrawInteraction, stageFilter );
 	}
@@ -12802,9 +12892,33 @@ static void RB_ShadowMapTrackWrappedCustomGLSLReceivers( const viewLight_t *vLig
 	}
 }
 
-static void RB_ShadowMapDrawReceiverFallbacks( const viewLight_t *vLight, const shadowMapPassKind_t passKind, const drawSurf_t *primaryShadowSurfs, const drawSurf_t *secondaryShadowSurfs, const drawSurf_t *interactions, const bool drawInteractions = true ) {
+// OPENPREY: the receivers a mapped pass left to the stencil volumes, with their
+// fallback reasons; once the visibility pass has shadowed the Prey program
+// receivers from the map, they are not among them.
+static int RB_CountShadowMapStencilReceiverSurfaces( const drawSurf_t *surf, int *reasons, const bool programReceiversMasked ) {
+	if ( !programReceiversMasked ) {
+		return RB_CountShadowMapReceiverFallbackSurfaces( surf, reasons );
+	}
+	for ( int i = 0; i < SHADOWMAP_RECEIVER_FALLBACK_COUNT; i++ ) {
+		reasons[i] = 0;
+	}
+	int count = 0;
+	for ( ; surf != NULL; surf = surf->nextOnLight ) {
+		if ( !RB_SurfaceNeedsStencilReceiverFallback( surf ) ) {
+			continue;
+		}
+		const shadowMapReceiverFallbackReason_t reason = RB_SurfaceShadowMapReceiverFallbackReason( surf );
+		count++;
+		if ( reason >= 0 && reason < SHADOWMAP_RECEIVER_FALLBACK_COUNT ) {
+			reasons[reason]++;
+		}
+	}
+	return count;
+}
+
+static void RB_ShadowMapDrawReceiverFallbacks( const viewLight_t *vLight, const shadowMapPassKind_t passKind, const drawSurf_t *primaryShadowSurfs, const drawSurf_t *secondaryShadowSurfs, const drawSurf_t *interactions, const bool drawInteractions = true, const bool programReceiversMasked = false ) {
 	int receiverFallbackReasons[SHADOWMAP_RECEIVER_FALLBACK_COUNT];
-	const int receiverFallbackSurfaces = RB_CountShadowMapReceiverFallbackSurfaces( interactions, receiverFallbackReasons );
+	const int receiverFallbackSurfaces = RB_CountShadowMapStencilReceiverSurfaces( interactions, receiverFallbackReasons, programReceiversMasked );
 	if ( receiverFallbackSurfaces <= 0 ) {
 		return;
 	}
@@ -12844,8 +12958,95 @@ static void RB_ShadowMapDrawReceiverFallbacks( const viewLight_t *vLight, const 
 	}
 	shadowMapTimedPhase_t timedPhase;
 	RB_ShadowMapBeginTimedPhase( timedPhase, vLight, passKind, SHADOWMAP_TIMING_RECEIVER_FALLBACK );
-	RB_ShadowMapStencilFallbackFiltered( primaryShadowSurfs, secondaryShadowSurfs, interactions, RB_SurfaceNeedsShadowMapReceiverFallback );
+	RB_ShadowMapStencilFallbackFiltered( primaryShadowSurfs, secondaryShadowSurfs, interactions,
+		programReceiversMasked ? RB_SurfaceNeedsStencilReceiverFallback : RB_SurfaceNeedsShadowMapReceiverFallback );
 	RB_ShadowMapEndTimedPhase( timedPhase );
+}
+
+// OPENPREY: whether this pass's Prey program receivers can take the light's
+// map. The pass must draw into a target with real destination alpha.
+static bool RB_ShadowMapProgramReceiversMaskable( const drawSurf_t *interactions ) {
+	if ( !r_shadowMapProgramReceivers.GetBool()
+		|| !RB_DrawSurfChainHasFilteredSurface( interactions, RB_SurfaceShadowMapMaskableProgramReceiver ) ) {
+		return false;
+	}
+	GLint alphaBits = 0;
+	glGetIntegerv( GL_ALPHA_BITS, &alphaBits );
+	if ( alphaBits < 8 && RB_ShadowMapVerboseReport() ) {
+		common->Printf( "SM program-receivers light=%d alphaBits=%d path=stencil-volumes\n",
+			RB_ShadowMapLightIndex( backEnd.vLight ), alphaBits );
+	}
+	return alphaBits >= 8;
+}
+
+// OPENPREY: the visibility pass and the program receivers it scales (see
+// RB_ShadowMapModulatedStateBits). The light's map is bound and current.
+// False leaves every program receiver to the stencil volumes, and nothing of
+// them has been drawn.
+static bool RB_ShadowMapDrawVisibilityMaskedReceivers( const viewLight_t *vLight, const bool pointLight, const drawSurf_t *interactions ) {
+	if ( !RB_ShadowMapProgramReceiversMaskable( interactions ) ) {
+		return false;
+	}
+	const int stockPrepareFailures = g_shadowMapMaskPrepareFailures;
+	g_shadowMapVisibilityMaskPass = true;
+	const bool masked = pointLight
+		? RB_GLSLPointShadowMap_CreateDrawInteractions( interactions )
+		: RB_GLSLShadowMap_CreateDrawInteractions( interactions );
+	g_shadowMapVisibilityMaskPass = false;
+	const int maskPrepareFailures = g_shadowMapMaskPrepareFailures;
+	g_shadowMapMaskPrepareFailures = stockPrepareFailures;
+	if ( !masked || maskPrepareFailures > 0 ) {
+		// a receiver without its visibility would draw unshadowed: alpha
+		// written so far is harmless, nothing of theirs has been lit yet
+		if ( RB_ShadowMapVerboseReport() ) {
+			common->Printf( "SM program-receivers light=%d type=%s visibility-pass=%s prepareFailed=%d path=stencil-volumes\n",
+				RB_ShadowMapLightIndex( vLight ), pointLight ? "point" : "projected",
+				masked ? "drawn" : "not-drawn", maskPrepareFailures );
+		}
+		return false;
+	}
+
+	glStencilFunc( GL_ALWAYS, 128, 255 );
+	g_shadowMapDestinationAlphaModulate = true;
+	RB_DrawMaterialInteractionsFiltered( interactions, RB_SurfaceShadowMapMaskableProgramReceiver );
+	g_shadowMapDestinationAlphaModulate = false;
+
+	if ( r_shadowMapReport.GetInteger() >= 2 && g_shadowMapReportThisFrame ) {
+		int maskedSurfaces = 0;
+		for ( const drawSurf_t *surf = interactions; surf != NULL; surf = surf->nextOnLight ) {
+			if ( RB_SurfaceShadowMapMaskableProgramReceiver( surf ) ) {
+				maskedSurfaces++;
+			}
+		}
+		common->Printf( "SM program-receivers light=%d type=%s mapped=%d path=shadowmap-visibility\n",
+			RB_ShadowMapLightIndex( vLight ), pointLight ? "point" : "projected", maskedSurfaces );
+	}
+	return true;
+}
+
+// OPENPREY: a mapped pass's fallback receivers: the Prey program receivers
+// through the visibility pass, and only what it cannot cover through the
+// light's stencil volumes. A hybrid pass already relies on stencil supplements
+// for part of its map, so its program receivers keep the volumes as well.
+static void RB_ShadowMapDrawMappedReceiverFallbacks( const viewLight_t *vLight, const shadowMapPassKind_t passKind, const bool pointLight, const bool hybrid, const drawSurf_t *primaryShadowSurfs, const drawSurf_t *secondaryShadowSurfs, const drawSurf_t *interactions ) {
+	const bool programReceiversMasked = !hybrid
+		&& RB_ShadowMapDrawVisibilityMaskedReceivers( vLight, pointLight, interactions );
+	if ( RB_ShadowMapVerboseReport() ) {
+		// name what the stencil volumes still shadow, and why
+		for ( const drawSurf_t *surf = interactions; surf != NULL; surf = surf->nextOnLight ) {
+			if ( programReceiversMasked ? !RB_SurfaceNeedsStencilReceiverFallback( surf ) : !RB_SurfaceNeedsShadowMapReceiverFallback( surf ) ) {
+				continue;
+			}
+			common->Printf( "SM stencil-receiver %s[%d] material='%s' reason=%s hybrid=%d programMasked=%d gpuPosed=%d additive=%d\n",
+				RB_ShadowMapPassName( passKind ), RB_ShadowMapLightIndex( vLight ),
+				surf->material != NULL ? surf->material->GetName() : "<none>",
+				RB_ShadowMapReceiverFallbackReasonName( RB_SurfaceShadowMapReceiverFallbackReason( surf ) ),
+				hybrid ? 1 : 0, programReceiversMasked ? 1 : 0,
+				RB_SurfaceUsesGPUPosedGeometry( surf ) ? 1 : 0,
+				( surf->material != NULL && surf->shaderRegisters != NULL && RB_SurfaceProgramStagesAdditive( surf ) ) ? 1 : 0 );
+		}
+	}
+	RB_ShadowMapDrawReceiverFallbacks( vLight, passKind, primaryShadowSurfs, secondaryShadowSurfs, interactions, true, programReceiversMasked );
 }
 
 static int RB_ShadowMapReceiverMaskForPass(
@@ -12999,7 +13200,10 @@ static void RB_ShadowMapRunPass( const viewLight_t *vLight, shadowMapPassKind_t 
 		return;
 	}
 
-	if ( !RB_DrawSurfChainHasFilteredSurface( interactions, RB_SurfaceEligibleForShadowMapReceiver ) ) {
+	// OPENPREY: stock receivers drawn by the receiver program; a pass with none
+	// still renders its map when its Prey program receivers can take it
+	const bool stockMapReceivers = RB_DrawSurfChainHasFilteredSurface( interactions, RB_SurfaceEligibleForShadowMapReceiver );
+	if ( !stockMapReceivers && ( deferReceiverDraw || !RB_ShadowMapProgramReceiversMaskable( interactions ) ) ) {
 		RB_ShadowMapDrawReceiverFallbacks( vLight, passKind, primaryShadowSurfs, secondaryShadowSurfs, interactions, !deferReceiverDraw );
 		RB_ShadowMapPassReport( vLight, passKind, pointLight, SHADOWMAP_PASS_RESULT_RECEIVER_FALLBACK, primaryCasters, secondaryCasters, tertiaryCasters, quaternaryCasters, primaryShadowSurfs, secondaryShadowSurfs, interactions );
 		return;
@@ -13093,9 +13297,9 @@ static void RB_ShadowMapRunPass( const viewLight_t *vLight, shadowMapPassKind_t 
 			RB_ShadowMapPrepareMappedReceiverStencil(
 				vLight, passKind, hybrid );
 		const bool maskOk = receiverStencilReady
-			&& ( pointLight
+			&& ( !stockMapReceivers || ( pointLight
 				? RB_GLSLShadowMap_CreateDrawInteractionsWithPBR( interactions, true )
-				: RB_GLSLShadowMap_CreateDrawInteractionsWithPBR( interactions, false ) );
+				: RB_GLSLShadowMap_CreateDrawInteractionsWithPBR( interactions, false ) ) );
 		const float cacheReuseMilliseconds = RB_ShadowMapEndTimedPhase( cacheReuseTimer );
 		g_shadowMapStats.cpuMaskMilliseconds += cacheReuseMilliseconds;
 		if ( maskOk ) {
@@ -13108,7 +13312,7 @@ static void RB_ShadowMapRunPass( const viewLight_t *vLight, shadowMapPassKind_t 
 				primaryCasters, secondaryCasters, tertiaryCasters, quaternaryCasters,
 				primaryShadowSurfs, secondaryShadowSurfs, interactions );
 			RB_ShadowMapTrackWrappedCustomGLSLReceivers( vLight, passKind, interactions );
-			RB_ShadowMapDrawReceiverFallbacks( vLight, passKind, primaryShadowSurfs, secondaryShadowSurfs, interactions );
+			RB_ShadowMapDrawMappedReceiverFallbacks( vLight, passKind, pointLight, hybrid, primaryShadowSurfs, secondaryShadowSurfs, interactions );
 			if ( g_shadowMapMaskPrepareFailures > 0 ) {
 				// light only the surfaces the mask pass skipped; everything
 				// else was already drawn additively by the mapped pass
@@ -13197,9 +13401,9 @@ static void RB_ShadowMapRunPass( const viewLight_t *vLight, shadowMapPassKind_t 
 				RB_ShadowMapPrepareMappedReceiverStencil(
 					vLight, passKind, hybrid );
 			maskOk = receiverStencilReady
-				&& ( pointLight
+				&& ( !stockMapReceivers || ( pointLight
 					? RB_GLSLShadowMap_CreateDrawInteractionsWithPBR( interactions, true )
-					: RB_GLSLShadowMap_CreateDrawInteractionsWithPBR( interactions, false ) );
+					: RB_GLSLShadowMap_CreateDrawInteractionsWithPBR( interactions, false ) ) );
 			const float maskMilliseconds = RB_ShadowMapEndTimedPhase( maskTimer );
 			g_shadowMapStats.cpuMaskMilliseconds += maskMilliseconds;
 		}
@@ -13232,7 +13436,7 @@ static void RB_ShadowMapRunPass( const viewLight_t *vLight, shadowMapPassKind_t 
 			g_shadowMapStats.mappedGlobalPasses++;
 		}
 		RB_ShadowMapTrackWrappedCustomGLSLReceivers( vLight, passKind, interactions );
-		RB_ShadowMapDrawReceiverFallbacks( vLight, passKind, primaryShadowSurfs, secondaryShadowSurfs, interactions );
+		RB_ShadowMapDrawMappedReceiverFallbacks( vLight, passKind, pointLight, hybrid, primaryShadowSurfs, secondaryShadowSurfs, interactions );
 		if ( g_shadowMapMaskPrepareFailures > 0 ) {
 			// light only the surfaces the mask pass skipped; everything else
 			// was already drawn additively by the mapped pass
@@ -13480,7 +13684,7 @@ void RB_ARB2_DrawShaderInteraction( const drawInteraction_t *din, const shaderSt
 		interactionColor[component] = stageColor[component] * lightColor[component];
 	}
 
-	GL_State( surfaceStage->drawStateBits | GLS_DEPTHMASK | backEnd.depthFunc );
+	GL_State( RB_ShadowMapModulatedStateBits( surfaceStage->drawStateBits | GLS_DEPTHMASK | backEnd.depthFunc ) );
 	RB_ARB2_SetVertexEnvParm( PP_LIGHT_ORIGIN, din->localLightOrigin.ToFloatPtr() );
 	RB_ARB2_SetVertexEnvParm( PP_VIEW_ORIGIN, din->localViewOrigin.ToFloatPtr() );
 	RB_ARB2_SetVertexEnvParm( PP_LIGHT_PROJECT_S, din->lightProjection[0].ToFloatPtr() );
@@ -13587,7 +13791,7 @@ void RB_ARB2_CreateDrawInteractions( const drawSurf_t *surf ) {
 	const drawSurf_t *firstSurf = surf;
 
 	// perform setup here that will be constant for all interactions
-	GL_State( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHMASK | backEnd.depthFunc );
+	GL_State( RB_ShadowMapModulatedStateBits( GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE | GLS_DEPTHMASK | backEnd.depthFunc ) );
 
 	// other passes write the same env registers directly, so the value cache
 	// is only trustworthy within this batch
@@ -18389,6 +18593,34 @@ void R_LoadARBProgram( int progIndex ) {
 		return;
 	}
 	end[3] = 0;
+
+	// OPENPREY: Prey's distortion programs (heathaze, heatHazeWithMask(AndVertex),
+	// refraction, distort, liquid, membrane) scale the deform by the projection
+	// distance as the dot of ( 1, 0, z, 1 ) with projection row 0, which is the
+	// row's scale term only while the projection is symmetric. An off-axis
+	// projection (a levelshot's side tiles, a VR eye) also adds its shift times
+	// the view depth there, and the deform swelled to a smear. The scale term
+	// alone is what the program means, and the same value in a symmetric view.
+	idStr offAxisSafeSource;
+	if ( prog.target == GL_VERTEX_PROGRAM_ARB ) {
+		static const char *deformScaleLine = "R1, R0, state.matrix.projection.row[0];";
+		offAxisSafeSource = start;
+		const int scaleAt = offAxisSafeSource.Find( deformScaleLine );
+		if ( scaleAt > 0 && offAxisSafeSource.Find( "state.matrix.modelview.row[2]" ) >= 0 ) {
+			int opAt = scaleAt - 1;
+			while ( opAt > 0 && ( offAxisSafeSource[opAt] == ' ' || offAxisSafeSource[opAt] == '\t' ) ) {
+				opAt--;
+			}
+			if ( opAt >= 2 && idStr::Icmpn( offAxisSafeSource.c_str() + opAt - 2, "DP4", 3 ) == 0 ) {
+				const int lineEnd = scaleAt + idStr::Length( deformScaleLine );
+				offAxisSafeSource = offAxisSafeSource.Left( opAt - 2 )
+					+ "MUL R1, R0.x, state.matrix.projection.row[0].x;"
+					+ offAxisSafeSource.Right( offAxisSafeSource.Length() - lineEnd );
+				start = const_cast<char *>( offAxisSafeSource.c_str() );
+			}
+		}
+	}
+
 	prog.interactionProgram = R_ARBProgramSourceUsesInteractionInputs( prog.target, start );
 	prog.sourceScanned = true;
 

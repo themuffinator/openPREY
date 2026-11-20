@@ -35,6 +35,7 @@ uniform float uShadowFilterRadius;
 uniform float uShadowFilterTaps;
 uniform float uShadowFilterMode;
 uniform float uShadowDebugMode;
+uniform float uShadowVisibilityMask;
 uniform float uShadowReceiverDebugReason;
 uniform float uPointShadowTexelScale;
 uniform float uPointShadowDepthMode;
@@ -660,6 +661,15 @@ void main() {
     vec3 receiverNormal = cross(dFdx(vPointShadowVector), dFdy(vPointShadowVector));
     receiverNormal *= inversesqrt(max(dot(receiverNormal, receiverNormal), 1.0e-20));
     gPointReceiverPlane = vec4(receiverNormal, dot(receiverNormal, vPointShadowVector) / max(uPointShadowFar, 1.0));
+	// OPENPREY: the visibility pass for receivers drawn by their own Prey ARB
+	// interaction program, which cannot sample the map: the light's filtered
+	// visibility goes to destination alpha, and that program's additive
+	// contribution is then scaled by it (draw_arb2.cpp).
+	if ( uShadowVisibilityMask > 0.5 ) {
+		vec3 translucentVisibility = SamplePointTranslucentShadow();
+		gl_FragColor = vec4( 0.0, 0.0, 0.0, SamplePointShadow() * dot( translucentVisibility, vec3( 1.0 / 3.0 ) ) );
+		return;
+	}
 #ifdef OPENQ4_PBR
 	vec3 pbrShadow = vec3( 1.0 ) * SamplePointShadow() * SamplePointTranslucentShadow();
 	if ( ShadowVisualDebugMode() ) {

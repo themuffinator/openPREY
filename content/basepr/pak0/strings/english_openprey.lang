@@ -115,6 +115,7 @@
 	"#str_231535"	"%s %s"
 	"#str_231701"	"core runtime content"
 	"#str_231702"	"interface artwork"
+	"#str_231703"	"loadscreens"
 	// the in-game updater (src/framework/Updater.cpp), from openQ4
 	"#str_232501"	"openPREY %s is up to date."
 	"#str_232502"	"This development build (%s) is as new as the latest openPREY release, %s, or newer."

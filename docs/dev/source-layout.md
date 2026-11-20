@@ -11,7 +11,7 @@ parts a script can check; the rest is review guidance.
 | `src/` | Engine, game and tool sources |
 | `src/external/` | Vendored third-party code, kept in its upstream layout |
 | `subprojects/` | Meson wraps, with openQ4 patches under `subprojects/packagefiles/<project>/` |
-| `content/baseoq4/` | Authored runtime overrides, packed into `pak0`/`pak1` |
+| `content/basepr/` | Authored runtime overrides, packed into `pak0` (core content) and `pak1` (interface artwork), and the client-only loadscreens of `pak2` (`docs/dev/levelshot-capture.md`) |
 | `assets/` | Packaging and branding inputs: icons, splash, desktop entries, cinematics, documentation images |
 | `tools/` | Build, packaging, debugging, test, validation and asset scripts |
 | `docs/dev/`, `docs/user/` | Developer and player documentation; superseded plans live in `docs/dev/archive/` |

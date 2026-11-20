@@ -526,6 +526,7 @@ idCVar r_shadowMapPCSSLightRadius( "r_shadowMapPCSSLightRadius", "4.0", CVAR_REN
 idCVar r_shadowMapPCSSMaxRadius( "r_shadowMapPCSSMaxRadius", "8.0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_FLOAT, "projected PCSS-lite maximum filter radius in shadow texels", 0.0f, 16.0f );
 idCVar r_shadowMapPointHighPrecision( "r_shadowMapPointHighPrecision", "0", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "store point-light shadow depth in an fp16 color cubemap instead of packed RGBA8 depth. The packed path quantizes finer (1.5e-5 vs 4.9e-4 near the far envelope) at half the memory, and the default hardware-compare path samples the depth cubemap directly, so this only affects the manual fallback. OpenGL only: the Vulkan backend always stores native depth, which quantizes finer than either colour format" );
 idCVar r_shadowMapPointLights( "r_shadowMapPointLights", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shadow-map point lights when r_useShadowMap is enabled; disabled falls back to stencil shadows for point lights. Point lights are the dominant light class in Quake 4 content, so disabling this makes r_useShadowMap nearly a no-op" );
+idCVar r_shadowMapProgramReceivers( "r_shadowMapProgramReceivers", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "shadow surfaces drawn by Prey's own ARB interaction programs (skin, cloth, hair, parallax, masked) from the light's shadow map, through a destination-alpha visibility pass; 0 keeps the light's stencil volumes for them" );
 idCVar r_shadowMapPointSize( "r_shadowMapPointSize", "512", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "point-light cube face resolution; separate from r_shadowMapSize because a cube costs six faces of color+depth storage per cached light", 128, 2048, idCmdSystem::ArgCompletion_Integer<128,2048> );
 idCVar r_shadowMapAtlasSize( "r_shadowMapAtlasSize", "4096", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_INTEGER, "edge size of the shared projected-light shadow atlas; cached lights occupy r_shadowMapSize-sized cells inside it (CSM lights use a 2x2 cell block)", 2048, 16384, idCmdSystem::ArgCompletion_Integer<2048,16384> );
 idCVar r_shadowMapPointDepthCompare( "r_shadowMapPointDepthCompare", "1", CVAR_RENDERER | CVAR_ARCHIVE | CVAR_BOOL, "use hardware comparison sampling for point-light depth cubemaps when GLSL 1.30 support is available" );
@@ -3757,7 +3758,8 @@ static bool R_GetDefaultLevelShotBaseName( idStr &baseName ) {
 		return false;
 	}
 
-	baseName = va( "gfx/guis/loadscreens/%s", mapName.c_str() );
+	// OPENPREY: Prey keeps a map's loading art at guis/assets/loading/<map>.
+	baseName = va( "guis/assets/loading/%s", mapName.c_str() );
 	return true;
 }
 
@@ -3774,7 +3776,7 @@ static void R_NormalizeLevelShotBaseName( idStr &baseName ) {
 	}
 
 	if ( baseName.Find( "/", false ) < 0 && baseName.Find( ":", false ) < 0 ) {
-		baseName = va( "gfx/guis/loadscreens/%s", baseName.c_str() );
+		baseName = va( "guis/assets/loading/%s", baseName.c_str() );
 	}
 }
 
@@ -3874,6 +3876,8 @@ void R_LevelShot_f( const idCmdArgs &args ) {
 	idTempArray<byte> bottomTile( size * size * 4 );
 
 	console->Close();
+	// brackets the tile views in a log with the "Wrote" line below
+	common->Printf( "Capturing levelshot %s\n", baseName.c_str() );
 
 	const bool previousSuppressLevelshotViewModels = tr.suppressLevelshotViewModels;
 	tr.suppressLevelshotViewModels = true;

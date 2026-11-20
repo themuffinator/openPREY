@@ -30,6 +30,18 @@
         "guis/assets/guicursor_arrow.tga",
         "guis/assets/guicursor_menu.tga"
       ]
+    },
+    {
+      "name": "pak2.pk4",
+      "source": "content/basepr/pak2",
+      "contents": "loadscreens",
+      "contents_string": "#str_231703",
+      "client_only": true,
+      "bulk": true,
+      "required_files": [
+        "guis/assets/loading/biolabsa.tga",
+        "dds/guis/assets/loading/biolabsa.dds"
+      ]
     }
   ]
 }

@@ -1230,7 +1230,10 @@ vocabulary rather than replace it:
     screen compose the levelshot, or `guis/assets/loading/loading`, with its
     `_left`, `_right`, `_top` and `_bottom` tiles into one picture that fills
     the canvas, as openQ4 does. The composite is cached per source and
-    window size.
+    window size. The levelshot is the map's own loading art,
+    `guis/assets/loading/<map>`, as retail shows it; `pak2` carries
+    recaptures of 25 of them with their tiles, taken at the retail cameras
+    (`docs/dev/levelshot-capture.md`).
   - *HUD and scope.* HUD groups and subtitles pin to screen edges with
     `screenalignx` and `screenaligny` (section 10.1). The rifle scope's lens
     covers the whole screen (section 10.8).

@@ -1939,6 +1939,27 @@ static bool Session_FileExistsInSearchPaths( const char *path ) {
 	return ( fileSystem->ReadFile( path, NULL, NULL ) != -1 );
 }
 
+/*
+OPENPREY: a map's loading picture. Retail Prey's loading screen shows
+guis/assets/loading/<map>.tga, and its menus the separate pictures under
+loading/thumbs/ that FindMapScreenshot answers with; without this step a
+single-player level loaded over the generic art and a multiplayer level over
+its 512 menu thumb. A mapDef's loadimage still comes first (the callers read it).
+*/
+static void Session_FindMapLoadingImage( const char *mapPath, char *buf, int len ) {
+	idStr mapName = ( mapPath != NULL ) ? mapPath : "";
+	mapName.BackSlashesToSlashes();
+	mapName.StripPath();
+	mapName.StripFileExtension();
+	if ( mapName.Length() > 0 ) {
+		idStr::snPrintf( buf, len, "guis/assets/loading/%s.tga", mapName.c_str() );
+		if ( Session_FileExistsInSearchPaths( buf ) ) {
+			return;
+		}
+	}
+	fileSystem->FindMapScreenshot( mapPath, buf, len );
+}
+
 static void Session_NormalizeMapDeclPath( const char *mapPath, idStr &normalizedPath ) {
 	normalizedPath = ( mapPath != NULL ) ? mapPath : "";
 	normalizedPath.BackSlashesToSlashes();
@@ -7413,15 +7434,15 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 				Session_FileExistsInSearchPaths( "gfx/guis/loadscreens/e3_load.tga" ) ) {
 			loadingBackground = "gfx/guis/loadscreens/e3_load";
 		} else {
-			// Match MP levelshot fallback behavior (including addon extraction).
+			// The map's loading art, else the MP levelshot fallback (including addon extraction).
 			char screenshot[ MAX_STRING_CHARS ];
-			fileSystem->FindMapScreenshot( spawnMapPath, screenshot, MAX_STRING_CHARS );
+			Session_FindMapLoadingImage( spawnMapPath, screenshot, MAX_STRING_CHARS );
 			loadingBackground = screenshot;
 		}
 	} else {
-		// Keep non-mapDef paths consistent with MP levelshot handling.
+		// Keep non-mapDef paths consistent with the mapDef path.
 		char screenshot[ MAX_STRING_CHARS ];
-		fileSystem->FindMapScreenshot( spawnMapPath, screenshot, MAX_STRING_CHARS );
+		Session_FindMapLoadingImage( spawnMapPath, screenshot, MAX_STRING_CHARS );
 		loadingBackground = screenshot;
 	}
 
@@ -7706,7 +7727,7 @@ idStr idSessionLocal::RetainedPauseShot( const char *mapPath, const char *entity
 		}
 	}
 	char screenshot[ MAX_STRING_CHARS ];
-	fileSystem->FindMapScreenshot( mapPath, screenshot, sizeof( screenshot ) );
+	Session_FindMapLoadingImage( mapPath, screenshot, sizeof( screenshot ) );
 	candidates.Append( screenshot );
 	for ( int i = 0; i < candidates.Num(); ++i ) {
 		if ( candidates[i].Length() > 0 && UI_RetainedImageSource( candidates[i].c_str() ) && Session_ImageInstalled( candidates[i].c_str() ) ) {
