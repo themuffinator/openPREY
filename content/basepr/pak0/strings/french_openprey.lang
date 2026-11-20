@@ -107,6 +107,7 @@
 	"#str_231426"	"Sauvegardes suivantes"
 	"#str_231525"	"%s"
 	"#str_231533"	"%s · %s"
+	"#str_231534"	"%d,%d s"
 	"#str_231535"	"%s %s"
 	// the in-game updater (src/framework/Updater.cpp), from openQ4
 	"#str_232501"	"openPREY %s est à jour."

@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.18, 20 November 2026.
+Specification version 1.19, 20 November 2026.
 
 Status: reference survey and design contract. openPREY renders the stock Prey
 GUIs by default. A first vector replacement, the home screen's navigation, its
@@ -1664,7 +1664,11 @@ Save.
   (`idSessionLocal::BeginRetainedPage`), which fills it with the saves and
   presents it at once over the stock menu's backdrop. The stock menu dresses
   that backdrop as it does for its own full pages on `retainedCover_page`: the
-  wordmark hides and the portal's view swings in over 400 ms.
+  wordmark hides and the portal's view swings in over 400 ms. While the home
+  rests (500 ms with the focus unchanged) the pages it leads to are prepared
+  out of sight, so the first open does not compile their artwork: the title
+  prepares Load Game, Options and Credits, the pause Options, Save Game,
+  Load Game and Credits (`idSessionLocal::WarmRetainedPages`).
 - **Growth.** The page widens from the bottom bar to the full-width bar in
   200 ms and rises to 10,10,620,460 in 500 ms (section 8); the title bar and
   the upper claws appear as the rise starts. Back shrinks it the same way,
@@ -1848,6 +1852,11 @@ on Controls, as the stock page does.
   pointer or focus, and focus adds the plate's outline at full `prey.rail`.
   A tab's label turns `prey.text.tabHover`; a tab change plays
   `guisounds_menu_tabflip`.
+- **Keys.** The arrow keys and a controller step to the nearest control that
+  way, except where the page names the step: Up from a page's first control
+  reaches its own top tab (the nearest was often a neighbour, Video from
+  Audio's first row), and Return to Main Menu and Reset to defaults step to
+  each other and stop at the bottom bar's ends.
 
 #### The death screen
 
@@ -1881,9 +1890,6 @@ while `gui::retainedHome` is 1 (`idSessionLocal::OpenRestartMenu`).
 - MultiPrey, the message boxes and the loading screen. Each is a document
   for the generator and, where the session has no route for it, a session
   verb.
-- The pause publishes Quake 4's difficulty names (`#str_200014` and the like)
-  for a line the Prey pause does not show, so opening the pause logs an
-  unknown string id.
 - The hook bars and the arc are the Atlas's reconstructions and are lighter
   than the stock art: the stock hook is about 15 u wide where the vector one
   is 11 u, and the stock arc carries a socket where each bar joins it.
@@ -2406,6 +2412,17 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.19, 20 November 2026
+
+- Section 12.5, Options: Up from a page's first control reaches its own top
+  tab, and the bottom bar's two actions stop at its ends.
+- Section 12.5, Load Game and Save Game: which pages the title and the pause
+  prepare while they rest; Save Game and Credits joined.
+- Section 12.5, "Not yet built": the pause names Prey's difficulties (Normal,
+  Cherokee) instead of Quake 4's ranks, so it no longer logs an unknown
+  string id.
+- The Interface Atlas takes the version; no drawing changed.
 
 ### Version 1.18, 20 November 2026
 

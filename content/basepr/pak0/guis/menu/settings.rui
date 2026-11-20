@@ -21965,7 +21965,8 @@
                 "focus": "controls_bind_0.focus",
                 "pressed": "controls_bind_0.pressed",
                 "disabled": "controls_bind_0.disabled"
-               }
+               },
+               "navigation": {"up": "tab_top0"}
               }
              },
              {
@@ -23416,7 +23417,8 @@
                 "focus": "controls_bind_7.focus",
                 "pressed": "controls_bind_7.pressed",
                 "disabled": "controls_bind_7.disabled"
-               }
+               },
+               "navigation": {"up": "tab_top0"}
               }
              },
              {
@@ -24867,7 +24869,8 @@
                 "focus": "controls_bind_14.focus",
                 "pressed": "controls_bind_14.pressed",
                 "disabled": "controls_bind_14.disabled"
-               }
+               },
+               "navigation": {"up": "tab_top0"}
               }
              },
              {
@@ -26318,7 +26321,8 @@
                 "focus": "controls_bind_21.focus",
                 "pressed": "controls_bind_21.pressed",
                 "disabled": "controls_bind_21.disabled"
-               }
+               },
+               "navigation": {"up": "tab_top0"}
               }
              },
              {
@@ -27769,7 +27773,8 @@
                 "focus": "controls_bind_28.focus",
                 "pressed": "controls_bind_28.pressed",
                 "disabled": "controls_bind_28.disabled"
-               }
+               },
+               "navigation": {"up": "tab_top0"}
               }
              },
              {
@@ -28686,7 +28691,8 @@
                 "focus": "controls_bind_32.focus",
                 "pressed": "controls_bind_32.pressed",
                 "disabled": "controls_bind_32.disabled"
-               }
+               },
+               "navigation": {"up": "tab_top0"}
               }
              },
              {
@@ -33184,7 +33190,8 @@
                 "focus": "profile-name.focus",
                 "pressed": "profile-name.pressed",
                 "disabled": "profile-name.disabled"
-               }
+               },
+               "navigation": {"up": "tab_top0"}
               }
              },
              {
@@ -35678,7 +35685,8 @@
                 "thumb": "opt_g_decals-scroll-thumb",
                 "lineStep": 27.0,
                 "minimumThumb": 24
-               }
+               },
+               "navigation": {"up": "tab_top1"}
               }
              },
              {
@@ -38676,7 +38684,8 @@
                 "thumb": "opt_g_usedda-scroll-thumb",
                 "lineStep": 27.0,
                 "minimumThumb": 24
-               }
+               },
+               "navigation": {"up": "tab_top1"}
               }
              },
              {
@@ -41499,7 +41508,8 @@
                   "pressed": "video_detect.pressed",
                   "disabled": "video_detect.disabled"
                  },
-                 "action": "videoDetect"
+                 "action": "videoDetect",
+                 "navigation": {"up": "tab_top2", "down": "opt_com_performancepreset"}
                 }
                }
               ]
@@ -42419,7 +42429,8 @@
                 "thumb": "opt_com_performancepreset-scroll-thumb",
                 "lineStep": 27.0,
                 "minimumThumb": 24
-               }
+               },
+               "navigation": {"up": "video_detect"}
               }
              },
              {
@@ -49479,7 +49490,8 @@
                 "thumb": "opt_r_renderapi-scroll-thumb",
                 "lineStep": 27.0,
                 "minimumThumb": 24
-               }
+               },
+               "navigation": {"up": "tab_top2"}
               }
              },
              {
@@ -56606,7 +56618,8 @@
                 "thumb": "opt_r_skipnewambient-scroll-thumb",
                 "lineStep": 27.0,
                 "minimumThumb": 24
-               }
+               },
+               "navigation": {"up": "tab_top2"}
               }
              },
              {
@@ -60196,7 +60209,8 @@
                 "thumb": "opt_r_skipglowoverlay-scroll-thumb",
                 "lineStep": 27.0,
                 "minimumThumb": 24
-               }
+               },
+               "navigation": {"up": "tab_top2"}
               }
              },
              {
@@ -62121,7 +62135,8 @@
                 "thumb": "opt_r_multisamples-scroll-thumb",
                 "lineStep": 27.0,
                 "minimumThumb": 24
-               }
+               },
+               "navigation": {"up": "tab_top2"}
               }
              },
              {
@@ -66179,7 +66194,8 @@
                 "thumb": "opt_r_msaaalphatocoverage-scroll-thumb",
                 "lineStep": 27.0,
                 "minimumThumb": 24
-               }
+               },
+               "navigation": {"up": "tab_top2"}
               }
              },
              {
@@ -71403,7 +71419,8 @@
               "fill": "opt_s_volume_db-fill",
               "thumb": "opt_s_volume_db-thumb",
               "value": "opt_s_volume_db-value"
-             }
+             },
+             "navigation": {"up": "tab_top3"}
             }
            },
            {
@@ -76088,7 +76105,8 @@
             "pressed": "page_back.pressed",
             "disabled": "page_back.disabled"
            },
-           "action": "settingsBack"
+           "action": "settingsBack",
+           "navigation": {"left": "page_back", "right": "page_reset"}
           }
          },
          {
@@ -76177,7 +76195,8 @@
             "pressed": "page_reset.pressed",
             "disabled": "page_reset.disabled"
            },
-           "event": "resetModalShow"
+           "event": "resetModalShow",
+           "navigation": {"left": "page_back", "right": "page_reset"}
           }
          }
         ]

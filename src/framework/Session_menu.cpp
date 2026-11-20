@@ -12327,14 +12327,17 @@ unique instance each open and is left alone.
 static const int RETAINED_WARM_DELAY_MSEC = 500;
 void idSessionLocal::WarmRetainedPages() {
 #ifndef ID_DEDICATED
-	static const char *const leads[][5] = {
-		{ RETAINED_TITLE_GUI, RETAINED_SINGLEPLAYER_GUI, RETAINED_SETTINGSPAGE_GUI, RETAINED_MPPAGE_GUI, RETAINED_LOADGAME_GUI },
-		{ RETAINED_PAUSE_GUI, RETAINED_SETTINGSPAGE_GUI, RETAINED_LOADGAME_GUI, NULL, NULL },
-		{ RETAINED_PAUSE_STROGG_GUI, RETAINED_SETTINGSPAGE_GUI, NULL, NULL, NULL },
-		{ RETAINED_SINGLEPLAYER_GUI, RETAINED_CAMPAIGNS_GUI, RETAINED_ARENA_GUI, NULL, NULL },
-		{ RETAINED_CAMPAIGNS_GUI, RETAINED_SKILL_GUI, RETAINED_CHAPTERS_GUI, NULL, NULL },
-		{ RETAINED_SETTINGSPAGE_GUI, RETAINED_CONTROLS_GUI, RETAINED_GAME_GUI, RETAINED_AUDIO_GUI, NULL },
-		{ RETAINED_MPPAGE_GUI, RETAINED_CREATE_SERVER_GUI, RETAINED_JOIN_GAME_GUI, RETAINED_DEMOS_GUI, NULL }
+	// openPREY: Prey's pause also leads to SAVE GAME and CREDITS, and its
+	// title to CREDITS. They load with the level or the title, but presented
+	// unprepared: SAVE GAME's first open compiled its artwork in that frame.
+	static const char *const leads[][7] = {
+		{ RETAINED_TITLE_GUI, RETAINED_SINGLEPLAYER_GUI, RETAINED_SETTINGSPAGE_GUI, RETAINED_MPPAGE_GUI, RETAINED_LOADGAME_GUI, RETAINED_CREDITS_GUI, NULL },
+		{ RETAINED_PAUSE_GUI, RETAINED_SETTINGSPAGE_GUI, RETAINED_SAVEGAME_GUI, RETAINED_LOADGAME_GUI, RETAINED_CREDITS_GUI, NULL, NULL },
+		{ RETAINED_PAUSE_STROGG_GUI, RETAINED_SETTINGSPAGE_GUI, NULL, NULL, NULL, NULL, NULL },
+		{ RETAINED_SINGLEPLAYER_GUI, RETAINED_CAMPAIGNS_GUI, RETAINED_ARENA_GUI, NULL, NULL, NULL, NULL },
+		{ RETAINED_CAMPAIGNS_GUI, RETAINED_SKILL_GUI, RETAINED_CHAPTERS_GUI, NULL, NULL, NULL, NULL },
+		{ RETAINED_SETTINGSPAGE_GUI, RETAINED_CONTROLS_GUI, RETAINED_GAME_GUI, RETAINED_AUDIO_GUI, NULL, NULL, NULL },
+		{ RETAINED_MPPAGE_GUI, RETAINED_CREATE_SERVER_GUI, RETAINED_JOIN_GAME_GUI, RETAINED_DEMOS_GUI, NULL, NULL, NULL }
 	};
 	if ( !Session_RetainedScreensEnabled() || guiActive == NULL || guiTest != NULL || insideExecuteMapChange ) {
 		return;
@@ -12360,7 +12363,7 @@ void idSessionLocal::WarmRetainedPages() {
 		if ( idStr::Icmp( shown->Name(), leads[ i ][ 0 ] ) != 0 ) {
 			continue;
 		}
-		for ( int next = 1; next < 5; ++next ) {
+		for ( int next = 1; next < static_cast<int>( sizeof( leads[ i ] ) / sizeof( leads[ i ][ 0 ] ) ); ++next ) {
 			const char *page = leads[ i ][ next ];
 			if ( page == NULL || retainedStock.FindIndex( page ) >= 0 ) {
 				continue;

@@ -223,7 +223,7 @@ typedef enum {
 // lines, never read as a #str_ key.
 idStr Session_RetainedPlayerText( const char *text, int maxBytes, int maxLines );
 
-// A difficulty's localized name (g_skill 0-4) and a play time in seconds as
+// A difficulty's localized name (Prey's g_wicked: 0 Normal, else Cherokee) and a play time in seconds as
 // the retained screens show them (Session.cpp).
 const char *Session_SkillName( int skill );
 idStr Session_RetainedPlayTime( int seconds );

@@ -998,8 +998,22 @@ def picture_frame(ident: str, box) -> dict:
         {"id": "frame", "commands": commands, "stroke": stroke(solid(PICTURE_FRAME), 1.4 * U, join="round")}])
 
 
+def navigate(nodes: list[dict], ident: str, **directions: str) -> None:
+    """Author `directions` on the control `ident`, found among `nodes` and
+    their subtrees. A control that names itself is an edge; a target that is
+    hidden falls back to the nearest control that way."""
+    pending = list(nodes)
+    while pending:
+        node = pending.pop()
+        if node.get("id") == ident and "control" in node:
+            node["control"].setdefault("navigation", {}).update(directions)
+            return
+        pending += node.get("children", [])
+    raise SystemExit(f"navigate: no control '{ident}'")
+
+
 def full_page(doc: Document, title_key: str, contents: list[dict], back: str, focus: list[dict], *, alpha: float = 0.7,
-              back_scale: float = 0.40, foot: tuple = ()) -> dict:
+              back_scale: float = 0.40, foot: tuple = (), back_navigation: dict | None = None) -> dict:
     """A full-screen page's frame (section 8). As the session presents the
     page it widens from the bottom bar to the full-width bar over 200 ms and
     then rises to 620x460 u at 10,10 over 500 ms with the even ease-in-out;
@@ -1054,7 +1068,8 @@ def full_page(doc: Document, title_key: str, contents: list[dict], back: str, fo
             *label("page-title", title_key, (32, 8, 556, 24), DISPLAY, 0.55, TEXT_NAV, shadow=True, ty=-8)]),
         title_bar("page-foot-bar", (32, 432, 556, 19), inverted=True),
         *contents,
-        link(doc, "page_back", RETURN_KEY, (32 + 8, 432, 250, 19), action=back, scale=back_scale, ty=-6),
+        link(doc, "page_back", RETURN_KEY, (32 + 8, 432, 250, 19), action=back, scale=back_scale, ty=-6,
+             **({"navigation": back_navigation} if back_navigation else {})),
         *foot,
     ])
     return group("page", {**absolute(bx, by, bw, bh), "overflow": keyword("hidden")}, [*parts, inner])
@@ -2530,6 +2545,15 @@ def options_document() -> dict:
                 nodes, target = profiles_page(doc, side, origin)
                 rows, focusable = rows + nodes, focusable + [target]
             side_first.setdefault(index, []).append(focusable[0])
+            # Up from a page's first control reaches its own top tab. The
+            # nearest tab that way was often a neighbour: from Audio's first
+            # row it was Video, from Controls' it was Game Options.
+            navigate(rows, focusable[0], up=f"tab_top{index}")
+            if focusable[0] == "video_detect":
+                # Detect sits at its plate's trailing end, so from the row
+                # below it the nearest control up was the Game Options tab.
+                navigate(rows, focusable[1], up="video_detect")
+                navigate(rows, "video_detect", down=focusable[1])
             if side["name"] == "Options_Video_Display":
                 # A change of rendering API takes the game restarted: the
                 # stock dialog's line, while the choice differs from the API
@@ -2599,10 +2623,14 @@ def options_document() -> dict:
         raise SystemExit("settings.rui: PREY_CONTROLS_BINDINGS in src/framework/Session_menu.cpp must list the Controls rows' "
                          "bindings in order: " + ", ".join(f'"{binding}"' for binding in doc.key_rows))
     dialogs = [reset_dialog(doc)]
-    reset = link(doc, "page_reset", "#str_20209", (32 + 270, 432, 280, 19), event="resetModalShow", scale=0.36, ty=-6)
+    # The bottom bar's two actions step to each other and stop at its ends:
+    # Right from Reset to defaults found the Audio tab at the top.
+    reset = link(doc, "page_reset", "#str_20209", (32 + 270, 432, 280, 19), event="resetModalShow", scale=0.36, ty=-6,
+                 navigation={"left": "page_back", "right": "page_reset"})
     # The top tabs come after the tab pages, whose boxes would take their hits.
     page = full_page(doc, "#str_20208", [*contents, *books, *tabs], "settingsBack",
-                     [{"op": "focus", "control": first_focus[0]}], alpha=0.5, back_scale=0.36, foot=(reset,))
+                     [{"op": "focus", "control": first_focus[0]}], alpha=0.5, back_scale=0.36, foot=(reset,),
+                     back_navigation={"left": "page_back", "right": "page_reset"})
     return page_document(doc, page, dialogs)
 
 

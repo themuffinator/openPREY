@@ -111,6 +111,7 @@
 	"#str_231426"	"Next Saves"
 	"#str_231525"	"%s"
 	"#str_231533"	"%s · %s"
+	"#str_231534"	"%d.%d s"
 	"#str_231535"	"%s %s"
 	"#str_231701"	"core runtime content"
 	"#str_231702"	"interface artwork"

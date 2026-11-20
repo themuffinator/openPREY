@@ -3157,18 +3157,20 @@ static void Session_DrawLevelshotBounds() {
 	renderSystem->SetUseUIViewportFor2D( previousUIViewportMode );
 }
 
-// A difficulty's localized name, as the retained screens show it: the names
-// the difficulty pages give, Warlord the fifth (the Arena's NIGHTMARE is
-// another ladder's).
+// A difficulty's localized name, as the retained screens show it. openPREY:
+// Prey has no ranks, only Normal and Cherokee (g_wicked, the harder mode a
+// finished game unlocks), named as the New Game frame names them; `skill` is
+// that flag, so any nonzero value is Cherokee. Quake 4's rank names are not
+// in Prey's strings (each lookup logged an unknown string id), and its fifth,
+// #str_41117, is a television line in Prey.
 const char *Session_SkillName( int skill ) {
-	static const char *skills[] = { "#str_200014", "#str_200015", "#str_200016", "#str_200017", "#str_41117" };
-	return common->GetLanguageDict()->GetString( skills[ idMath::ClampInt( 0, 4, skill ) ] );
+	return common->GetLanguageDict()->GetString( skill != 0 ? "#str_41158" : "#str_20206" );
 }
 
 // The current difficulty's name, as the retained pause and loading screens
 // show it.
 static const char *Session_GetSkillName( void ) {
-	return Session_SkillName( cvarSystem->GetCVarInteger( "g_skill" ) );
+	return Session_SkillName( cvarSystem->GetCVarBool( "g_wicked" ) ? 1 : 0 );
 }
 
 // A play time as the retained screens show it: hours, minutes and seconds.
