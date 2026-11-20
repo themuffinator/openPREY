@@ -6,6 +6,8 @@
 	#define THERMOMETER_HEIGHT	60
 	windowDef lighterThermometer {
 		rect		74, 402, THERMOMETER_WIDTH, THERMOMETER_HEIGHT
+		screenalignx	left		// openPREY: stays beside the health figure under aspect expansion
+		screenaligny	bottom
 		visible		("gui::lightertemp" > 0)
 
 		windowDef lighterThermometerWhite {
@@ -33,12 +35,16 @@
 	}
 	windowDef lighter {
 		rect		85, 432, 30, 30
+		screenalignx	left
+		screenaligny	bottom
 		background	"guis/assets/hud/zippo"
 		matcolor	1, 1, 1, 0.85
 		visible		"gui::lighter"
 	}
 	windowDef lighterflame {
 		rect		85, 418, 40, 40
+		screenalignx	left
+		screenaligny	bottom
 		background	"guis/assets/hud/lighter"
 		visible		"gui::lighter"
 	}

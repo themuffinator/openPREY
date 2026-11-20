@@ -131,6 +131,12 @@ def absolute(left=None, top=None, width=None, height=None, right=None, bottom=No
 FULL = {"position": keyword("absolute"), "left": length(0), "top": length(0),
         "width": length(100, "%"), "height": length(100, "%")}
 PASSIVE = {"pointer-events": keyword("none")}
+# The stock 4:3 canvas centred on the screen: the classic backdrop expands
+# its canvas about the centre on both axes (section 3), so a stage pinned to
+# the top would part from the wordmark and the Sphere on a screen taller than 4:3.
+STAGE = {"position": keyword("absolute"), "left": length(50, "%"), "top": length(50, "%"),
+         "margin-left": length(-CANVAS_W * U / 2), "margin-top": length(-CANVAS_H * U / 2),
+         "width": ul(CANVAS_W), "height": ul(CANVAS_H)}
 
 
 # ------------------------------------------------------------------ geometry
@@ -920,8 +926,7 @@ def home_document(ident: str, in_game: bool) -> dict:
 
     # The stock 4:3 canvas, centred: the navigation stays in its leading half
     # and the frames on the central axis at every aspect (section 3).
-    stage = group("stage", {"position": keyword("absolute"), "top": length(0), "left": length(50, "%"),
-                            "margin-left": length(-CANVAS_W * U / 2), "width": ul(CANVAS_W), "height": ul(CANVAS_H)},
+    stage = group("stage", STAGE,
                   [home, *frames])
     root = group("screen", {**FULL, "font-family": font(BODY), "font-size": length(EM * 0.33 * U),
                             "color": colour(TEXT_LABEL)}, [frames_soft_focus(doc), stage])
@@ -1057,8 +1062,7 @@ def full_page(doc: Document, title_key: str, contents: list[dict], back: str, fo
 
 def page_document(doc: Document, page: dict, dialogs: list[dict]) -> dict:
     """The page on the stock 4:3 canvas, centred, under its dialogs."""
-    stage = group("stage", {"position": keyword("absolute"), "top": length(0), "left": length(50, "%"),
-                            "margin-left": length(-CANVAS_W * U / 2), "width": ul(CANVAS_W), "height": ul(CANVAS_H)}, [page])
+    stage = group("stage", STAGE, [page])
     root = group("screen", {**FULL, "font-family": font(BODY), "font-size": length(EM * 0.33 * U),
                             "color": colour(TEXT_LABEL)}, [stage, *dialogs])
     return doc.build(root)
@@ -1096,8 +1100,7 @@ def dialog(doc: Document, ident: str, message, buttons: list[tuple], *, scrim: f
         plates.append(button(doc, names[index], key, (*spots[index], 80, 25), event=event, scale=0.33,
                              navigation={"left": other, "right": other, "up": names[index], "down": names[index]}))
     frame = group(f"{ident}-frame", absolute(142, 132, 360, 140), [*frame_parts(doc, f"{ident}-frame", 0.7, 1), *text_nodes, *plates])
-    stage = group(f"{ident}-stage", {"position": keyword("absolute"), "top": length(0), "left": length(50, "%"),
-                                     "margin-left": length(-CANVAS_W * U / 2), "width": ul(CANVAS_W), "height": ul(CANVAS_H)},
+    stage = group(f"{ident}-stage", STAGE,
                   [frame])
     veil = group(f"{ident}-scrim", {**FULL, "background-color": colour([0, 0, 0, scrim])})
     node = group(ident, {**FULL, "display": keyword("none")}, [soft_focus(doc, ident), veil, stage],
@@ -2371,8 +2374,7 @@ def reset_dialog(doc: Document) -> dict:
         contents.append(button(doc, name, script_value(part, "text"), script_rect(part), event=event,
                                scale=float(script_value(part, "textscale")), enabled=ticked if name == names[0] else None))
     frame = group(f"{ident}-frame", absolute(fx, fy, fw, fh), [*frame_parts(doc, f"{ident}-frame", 0.7, 1), *contents])
-    stage = group(f"{ident}-stage", {"position": keyword("absolute"), "top": length(0), "left": length(50, "%"),
-                                     "margin-left": length(-CANVAS_W * U / 2), "width": ul(CANVAS_W), "height": ul(CANVAS_H)},
+    stage = group(f"{ident}-stage", STAGE,
                   [frame])
     veil = group(f"{ident}-scrim", {**FULL, "background-color": colour([0, 0, 0, 0.8])})
     node = group(ident, {**FULL, "display": keyword("none")}, [soft_focus(doc, ident), veil, stage], modal={"initialFocus": names[1], "back": f"{ident}No"})
@@ -2646,8 +2648,7 @@ def death_document() -> dict:
     doc.timeline("deathOpen", DEATH_FADE_AT + DEATH_FADE_MS, [track("death", "opacity", [
         (0, number(0)), (1, number(0)), (DEATH_FADE_AT, number(0)), (DEATH_FADE_AT + DEATH_FADE_MS, number(1))])])
     doc.events["onActivate"] = [{"op": "playTimeline", "timeline": "deathOpen"}, {"op": "focus", "control": names[0]}]
-    stage = group("stage", {"position": keyword("absolute"), "top": length(0), "left": length(50, "%"),
-                            "margin-left": length(-CANVAS_W * U / 2), "width": ul(CANVAS_W), "height": ul(CANVAS_H)}, [death])
+    stage = group("stage", STAGE, [death])
     root = group("screen", {**FULL, "font-family": font(BODY), "font-size": length(EM * 0.33 * U),
                             "color": colour(TEXT_LABEL)}, [stage])
     return doc.build(root)

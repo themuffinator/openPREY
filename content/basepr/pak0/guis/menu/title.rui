@@ -9038,9 +9038,10 @@
     "type": "group",
     "properties": {
      "position": {"type": "keyword", "value": "absolute"},
-     "top": {"type": "length", "value": 0, "unit": "dp"},
      "left": {"type": "length", "value": 50, "unit": "%"},
+     "top": {"type": "length", "value": 50, "unit": "%"},
      "margin-left": {"type": "length", "value": -480.0, "unit": "dp"},
+     "margin-top": {"type": "length", "value": -360.0, "unit": "dp"},
      "width": {"type": "length", "value": 960.0, "unit": "dp"},
      "height": {"type": "length", "value": 720.0, "unit": "dp"}
     },

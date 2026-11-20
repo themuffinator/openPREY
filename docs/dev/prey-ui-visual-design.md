@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.17, 20 November 2026.
+Specification version 1.18, 20 November 2026.
 
 Status: reference survey and design contract. openPREY renders the stock Prey
 GUIs by default. A first vector replacement, the home screen's navigation, its
@@ -272,6 +272,11 @@ Keep the following anchors under aspect expansion:
 - The bottom bar and full-screen page frames stay inside the 4:3 canvas.
   Widening them is an optional modern layout (section 12), not a stock
   behaviour.
+- The 4:3 canvas is centred on both axes. On a screen taller than 4:3 the
+  stock backdrop expands above and below the canvas, so a retained document
+  centres its 4:3 stage vertically too (`STAGE` in
+  `tools/ui/build_retained_screens.py`); a stage pinned to the top would part
+  the navigation and frames from the wordmark and the Sphere.
 
 ## 4. Colour, alpha and light
 
@@ -769,8 +774,8 @@ in `guis/hud/`, `guis/mphud.gui`, `guis/scoreboard.gui` and `guis/cursor.gui`
 
 The groups are edge clusters: health and lighter at the bottom left, ammo at
 the bottom right, pickups down the right edge, weapons and the boss bar at the
-top centre. Under aspect expansion openPREY pins the health figures to the
-bottom-left corner, the ammo meters and the pickup column to the bottom-right
+top centre. Under aspect expansion openPREY pins the health figures and the
+lighter to the bottom-left corner, the ammo meters and the pickup column to the bottom-right
 and subtitles to the bottom edge (`screenalignx`, `screenaligny`). Keep every
 cluster on its edge or corner and the crosshair, damage arcs and tips on the
 true centre.
@@ -2401,6 +2406,15 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.18, 20 November 2026
+
+- Section 3: the 4:3 canvas is centred on both axes, so on a screen taller
+  than 4:3 a retained document's stage stays with the stock backdrop's
+  wordmark and Sphere instead of the top edge.
+- Section 10.1: the lighter is pinned to the bottom-left corner with the
+  health figures.
+- The Interface Atlas takes the version; no drawing changed.
 
 ### Version 1.17, 20 November 2026
 
