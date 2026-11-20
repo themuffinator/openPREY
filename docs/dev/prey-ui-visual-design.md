@@ -15,6 +15,7 @@ Section 12 covers openPREY's own additions.
 | --- | --- |
 | Stock survey (sections 1 to 11, Appendices A and B) | Measured from the retail archives, the art and engine captures |
 | Aspect expansion, loading screens and Video pages (section 12.1) | Built |
+| Initializing screen (section 12.6) | Built behind `ui_retained`: the energy ball, beam, flare and wordmark over a drifting nebula |
 | Rifle scope at any aspect (section 10.8) | Built in the legacy GUI with the stock art |
 | Alien-script translation (section 11.4) | Built |
 | 3D main-menu backdrop and entrance (section 12.2) | Specified, not built. The menu draws the stock layers |
@@ -48,6 +49,7 @@ disagree about a Prey screen, this one governs.
 12. [openPREY additions and modern direction](#12-openprey-additions-and-modern-direction)
     - [12.2 The 3D backdrop and entrance](#122-the-3d-backdrop-and-entrance)
     - [12.5 The retained navigation](#125-the-retained-navigation)
+    - [12.6 The initializing screen](#126-the-initializing-screen)
 13. [Project branding](#13-project-branding)
 14. [The Interface Atlas](#14-the-interface-atlas)
 - [Appendix A. Survey method](#appendix-a-survey-method)
@@ -1942,6 +1944,97 @@ nothing of the stock screen draws beneath it.
   than the stock art: the stock hook is about 15 u wide where the vector one
   is 11 u, and the stock arc carries a socket where each bar joins it.
 
+### 12.6 The initializing screen
+
+**Status: built, off by default.** While the engine starts it repaints one
+screen between its startup steps (`RetainedUI_DrawInitialization` in
+`src/ui/RetainedUI.cpp`). With `ui_retained 1` that screen is the retained
+document `guis/loading/initialization.rui`; with `ui_retained 0` the engine
+keeps its fallback, the stock loading painting with its characters and a line
+of console text. The retained screen does not use the painting or any other
+retail picture, and draws no characters: it is portal light in space, the
+cool register of section 2 alone.
+
+`tools/ui/build_retained_initialization.py` writes the document, and
+`tools/ui/initialization_textures.py` paints its nine textures into
+`content/basepr/pak1/guis/assets/initialization/` from fixed seeds. `--check`
+reports either as stale (the Meson test `openprey-retained-initialization`);
+edit the generators, never their output.
+
+#### Composition
+
+Lengths are dp on the retained 720 dp canvas, from the screen's centre, y
+down. Everything sits on the vertical axis through the centre, so every
+aspect keeps it; the scene is drawn on a 3200x1800 dp stage, so it runs
+full-bleed from 4:3 to 32:9.
+
+| Layer | Place | Construction |
+| --- | --- | --- |
+| Space | Full bleed | A near-black field, `#010207` to `#040915` downward |
+| Nebula | 2000x1000 dp about the centre | Two added textures. The far one is rolling gas: violet (`#5B2EA6` to `#7A2FA8`) to the upper left, teal (`#1497B8` to `#1FB9A6`) to the right, blue between and in a bridge over the wordmark, cut by dark dust lanes, lit pale where it is densest and scattering a soft glow; it carries a faint dust of unresolved stars. The near one is finer bright wisps. The middle of the lower half stays dark for the energy and the status line, and both fade to nothing before their edge |
+| Stars | The stage | 300 sharp diamonds, 0.55 to 1.9 dp, white to pale blue, which hold still, and eleven bright stars with a halo and a cross of lens spikes |
+| Energy ball | 0, 128 | An orb 56 dp in radius: an inside of plasma filaments wrapped on a sphere, hot at its heart, under a bright limb with a short corona. Spiralling plasma in two layers at its heart, four loops of plasma on tilted orbits (radius 68 to 102 dp), two ray bursts, a pale core, and a `prey.portal.body` halo (720 dp) that lights the space about it |
+| Beam | From the ball up off the screen | Three vertical bands, glow (180 dp), body (40 dp) and core (9 dp), each a horizontal gradient to `prey.portal.core` and white, added. A mask keeps it full to the flare and fades it out above |
+| Flare | 0, -148 | A bloom, a faint lens ring (radius 182 dp), seven rays, a fine burst, a hot centre, and three horizontal streaks: wide (2600x90 dp, `prey.wordmark.streak`), core (1900x16 dp, `#CFF6FF`) and hot (860x6 dp, white) |
+| Wordmark | On the flare, 700 dp wide, capitals 54 dp | `PREY` traced from the menu face and widened 1.6 times, as the Interface Atlas draws it: a dark fill (`#16304C` through `#010204` to `#10243A`, top to foot), a 1.5 dp `prey.wordmark.edge` outline and a soft cyan glow |
+| Status line | Centred on 262 | The startup step in the body face, 20 dp, `prey.text.nav` at 0.9, 1.5 dp tracking |
+| Progress rule | Top at 292 | Seven 34x2 dp segments on a 40 dp pitch, `prey.text.nav` at 0.16, lit to 0.85 as steps complete, and a spark of portal light on the current one |
+
+The step comes from the message: `#str_04343` (Loading) is step 0 and Prey's
+six startup steps, `#str_04346` (sound) to `#str_04351` (menus), are 1 to 6.
+
+#### Motion
+
+- **At rest.** Space drifts: the far nebula turns 1.2 degrees and swells 4%
+  over 96 s, the near wisps the other way over 70 s, so the layers part
+  against each other. The bright stars twinkle on periods of 2.9 to 5.2 s.
+  The ball breathes and flickers (0.94 to 4.2 s cycles); its inside turns
+  once in 14 s, its heart's plasma in 9 and 6.5 s and its rays in 26 and
+  41 s, in opposite senses, and each plasma loop runs round its orbit in
+  2.7 to 5.6 s. Pulses of energy climb the beam on
+  five unequal cycles (2.3 to 5.3 s) and the beam's bands shimmer. The
+  flare's streaks breathe and its rays sway. A glint crosses the lettering
+  every 9 s.
+- **Steps.** A new step's line fades and rises 7 dp into place over 320 ms;
+  the marker glides to its segment over 440 ms and the segments it passes
+  fill in turn, 70 ms apart.
+- **Entrance (1.4 s).** The first frame is black and pays for the
+  document's creation; the entrance then plays from the start. The black
+  lifts over 220 ms while space eases back from 110%. The ball ignites from
+  a point, overshoots to 116% at 300 ms and settles by 620 ms. From 220 ms
+  the beam shoots up out of it behind a bright front, which strikes the
+  flare at about 420 ms: the flare flashes and stretches out to either side
+  (118% at about 720 ms, at rest by 960 ms), the wordmark appears in 120 ms
+  under the flash's peak, the status line and rule rise into place by about
+  1 s, and the first glint crosses the lettering from 1.15 s.
+- **Reduced motion** (`ui_retainedReducedMotion`) shows the rest pose at
+  once: no entrance, loops, pulses, marker or glint.
+
+#### Cost
+
+The screen repaints while the engine loads, so it must be cheap to build.
+Soft light is drawn as textured quads (four vertices each) that scale and
+turn without being compiled again; a vector gradient that soft subdivides
+into thousands of triangles. Only edges that must stay sharp are vectors,
+and they hold still or move in ways that keep their compilation: the beam's
+bands are plain triangles, the sharp stars stay out of the entrance's zoom,
+and the wordmark rests at an opacity of 0.002 rather than 0 before it
+appears, so that it compiles in the veiled first frame, and then appears in
+120 ms rather than fading, since every frame of a fade compiles its glow
+again. No light passes through a zero scale (a light at rest between
+appearances is held at 0.001): a degenerate transform sent an earlier
+draft's gradient subdivision into a loop.
+
+The engine repaints the screen on a pace of its own (60 Hz on a smoothed
+frame cost, within half the time during the entrance and a fifth after it).
+Measured on 20 November 2026 (windowed OpenGL at 1280x720, on a machine
+shared with other runs): about 110 repaints in a start of 4.5 to 6 s, 0.7
+to 1.3 s of it repainting; frames at rest build in 3 to 7 ms and entrance
+frames in up to 20 ms, about 60,000 vertices at rest, most of them the
+wordmark's antialiased letters and glow. The stock fallback repaints three
+times. The first three startup steps (sound, network, renderer) run before
+the screen can draw, so the rule moves from step 0 straight to step 4.
+
 ## 13. Project branding
 
 openPREY's own marks live in `assets/`:
@@ -2472,6 +2565,13 @@ carries their summaries.
   drawn at 4:3.
 - The Interface Atlas takes the version and draws the progress outline as
   traced.
+
+### Version 1.20, 20 November 2026
+
+- Section 12.6 is new: the retained initializing screen, with its
+  composition, motion, entrance and cost. The status table at the head
+  lists it.
+- The Interface Atlas takes the version; no drawing changed.
 
 ### Version 1.19, 20 November 2026
 

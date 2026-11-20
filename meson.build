@@ -287,6 +287,9 @@ if get_option('build_native_tests')
     args: [files('tools/build/vulkan_material_sources.py'), '--check'], timeout: 30)
   test('openprey-retained-screens', py,
     args: [files('tools/ui/build_retained_screens.py'), '--check'], timeout: 30)
+  # Repaints the initializing screen's textures from their seeds: about a minute.
+  test('openprey-retained-initialization', py,
+    args: [files('tools/ui/build_retained_initialization.py'), '--check'], timeout: 300)
   test('openq4-vulkan-material-cache', py,
     args: [files('tools/tests/renderer_vulkan_material_cache.py')], timeout: 60)
   openq4_editor_document_test = executable(

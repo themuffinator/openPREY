@@ -2212,9 +2212,11 @@ bool RetainedUI_DrawInitialization(const char* message) {
 	const auto oldMessage = previous.find("message");
 	const bool changed = oldMessage == previous.end() || oldMessage->second != openq4::ui::StateValue(std::string(message));
 	if (changed) {
+		// openPREY: Prey's six startup steps are #str_04346 (sound) to
+		// #str_04351 (menus); #str_04343 (loading) is step 0.
 		int step = 0;
 		for (int i=0; i<6; ++i) {
-			if (!idStr::Icmp(message,common->GetLanguageDict()->GetString(va("#str_%d",104346+i)))) step=i+1;
+			if (!idStr::Icmp(message,common->GetLanguageDict()->GetString(va("#str_%05d",4346+i)))) step=i+1;
 		}
 		if (!initializationView->runtime->SetState({{"message",std::string(message)}, {"step",double(step)}},error,PresentationTime())) return false;
 		openq4::ui::Runtime::EventEffects effects;
