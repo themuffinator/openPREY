@@ -27,8 +27,8 @@ generic key art (its retail `roadhouse.tga` is byte-identical to
 `loading.tga`), so pak2 carries the generic art's four tiles under its name;
 git stores them once.
 
-pak2 holds 25 of retail's 33 in-game loading screens and the roadhouse tiles:
-254 files, 197 MB compressed.
+pak2 holds 32 of retail's 33 in-game loading screens and the roadhouse tiles:
+324 files, 269 MB compressed.
 
 ## How the engine uses it
 
@@ -58,12 +58,16 @@ The capture pins live in `tools/assets/levelshots/capture.py`:
   view takes a stencil path.
 - No screen-space post effects (`r_temporalAA`, MSAA, post AA, bloom, SSAO,
   HDR tone mapping, motion blur, CRT all 0) and no light grid: Prey had none.
+  Prey's own glow overlay stays on at retail's defaults (`r_glowStrength 0.5`,
+  `r_glowAlpha 0.55`, `r_glowAlphaChange 0.85`, `r_glowSteps 8`).
   Antialiasing comes from rendering each 4:3 source at 1.4 times the tile
   height (1912x1434) and area-averaging it down.
-- A 2560x1440 hidden window. A hidden window cannot be larger than the desktop,
-  and a source larger than the window is rendered in sub-frustum regions,
-  which breaks screen-copy effects such as window glass and heat haze; the
-  capture fails if the source was not rendered in one pass.
+- A 2560x1440 hidden window; a hidden window cannot be larger than the
+  desktop. A source larger than the window is rendered in sub-frustum regions
+  and matches a one-pass render of it (see the renderer changes below), so
+  supersampling is no longer capped by the window. The shipped sets were
+  captured at 1.4x in one pass, and the capture fails if its source is not
+  that 1912x1434, so a recapture reproduces them.
 - OpenGL, muted rather than silent (`s_volume 0` with OpenAL Soft's null
   backend): lights whose materials read sound stay lit, and map scripts do not
   loop on zero-length sounds.
@@ -93,6 +97,73 @@ The capture pins live in `tools/assets/levelshots/capture.py`:
   projection. A side tile's shift (and a VR eye's asymmetry) added its shift
   times the view depth and smeared the glass. The ARB loader rewrites that
   line to the scale term, which is the same value in a symmetric view.
+- **Beams face the view again** (`spindlea`'s forcefield beams). Retail's
+  `.beam` model builds a view-independent ribbon, three rows of nodes on the
+  beam's local X with the side rows on Y, and the beam materials'
+  `deform beam` turns it to the viewer. openPREY's model built the ribbon
+  facing the view already, so the deform turned it edge-on and every beam
+  with that deform vanished. `hhRenderModelBeam` now builds retail's
+  template, from `PREY.exe` 1.4 (`Model_hhBeam.cpp`).
+- **The glow overlay follows retail** (`spindlea`'s energy spill, and the
+  orange haze around its beams). Retail renders the `glowStage` passes into
+  a 256x256 corner, blurs there with taps weighted alpha squared, and
+  stretches the result over the view; the full-size blur with alpha-weighted
+  taps drew the spill as an opaque white burst over the beams
+  (`RB_STD_GlowOverlay`, `draw_common.cpp`). The same blur drew the
+  multiplayer maps' hexagonal wall-walk panels (`textures/special/wallwalk`,
+  whose additive stage is a `glowStage`) as thick white outlines that read as
+  a hexagon twice the size; with the overlay off the pattern already matched.
+  openPREY draws the glow-only view at full size, so the depth later passes
+  read stays intact, and box-reduces it to the 256x256 image by repeated
+  halving. The overlay is skipped when nothing in the view has a glow stage.
+  Measured at `dmshuttle2`'s camera, the panels' mean colour is within 2 of
+  retail's in every channel; it was two to three times brighter.
+- **The glow includes the sky's glow stages** (`dmshuttle1`'s window). Retail's
+  glow view is a full re-render, so its skybox subview draws its own glow
+  stages too; there, the light cones around the Earth tint the stars teal.
+  The glow pass now draws the view's skybox subview's glow stages first
+  (`viewDef_t::skyboxSubview`, set by `R_GenerateSubViews`), and the view's
+  own depth fill keeps them only behind its skyboxportal surfaces.
+- **Fog lights fog only lit surfaces** (`dmshuttle1`'s Earth window). A black
+  fog light (`fogs/basicfog`, `_color 0 0 0`) encloses the sky portal brush
+  above the window. Retail creates a light's interaction with a surface only
+  if the surface has lighting stages, fog and blend lights included
+  (`idInteraction::CreateInteraction` in `PREY.exe` 1.4, Doom 3's rule).
+  openPREY used Quake 4's rule for fog and blend lights, `ReceivesFog()`,
+  which also takes ambient-only surfaces, so the fog painted the
+  skyboxportal surface black over the sky (`Interaction.cpp`). The window
+  frame, which is lit, still fogs black, as in retail.
+- **A region-split source matches a one-pass render.** A source larger than
+  the window is drawn as regions (each with a 64-pixel guard band), every one
+  its own narrower sub-frustum of the 4:3 view. Two things in a region
+  followed the region rather than the view:
+  - *Shadow cascades.* Cascaded maps (here the parallel lights) were fitted to
+    the region's frustum, so a region's cascades had smaller crops, finer
+    texels and different biases, and a surface shadowed in a one-pass render
+    could come out lit. In `keeperfortress` at `84 -160 -46.75 0 90 0` the
+    room light (`light_4962`) lit a wall panel behind the corridor's glass
+    and a wedge of the window frame, which looked like broken glass
+    refraction and a bright polygon at the glass's lower edge. The screen
+    copy (`_currentRender`) and its texture coordinates were correct
+    throughout. A region now fits its cascades to its whole tile
+    (`R_ShadowMapGetViewExtents`, from `tr_levelshotRegionScale` and
+    `tr_levelshotTileShift`), so it renders the tile's own shadow maps.
+  - *The distortion deform.* The rewritten scale term grows with a region's
+    narrower field of view, which an offset in the region's own 0..1 screen
+    units wants, but the programs clamp it (`MIN R1, R1, 0.02`) and apply one
+    value to both axes. The loader now takes the scale back to the whole
+    view's before the clamp and divides it by the region's share of the width
+    and of the height after it (`program.local[8]`, identity outside
+    regions).
+
+  Checked with `r_levelshotSupersample 2` and `levelshot 512` at that
+  camera: a 1365x1024 source in an 800x600 window (nine regions) against the
+  same source in one pass at 2560x1440. Every tile differs from the one-pass
+  render by no more than two one-pass launches differ from each other (mean
+  0.32 against 0.51 for the centre tile; a creature moving behind the right
+  tile's glass is the largest difference between launches). Before the fix
+  the region-split centre tile differed in 2.7% of its pixels by more than 40
+  levels.
 
 ## Recovering a retail camera
 
@@ -110,11 +181,18 @@ until it settles. Seeds:
    map entities, scored by PnP inliers. The multiplayer shots, taken from
    vantage points, were all found this way.
 
-A solve is accepted at a sub-pixel median reprojection error (0.23 to 0.46 px
+A solve is accepted at a sub-pixel median reprojection error (0.22 to 0.48 px
 here) and a gradient similarity of at least 0.3 between the retail art and a
 render at the solved camera, which rejects a rotation-only fit to distant sky.
 Solved cameras sit on clean values (a start's eye height, whole degrees) and
 are snapped to them.
+
+Where most of a shot is sky or effect, the features that remain decide the
+fit. `dmgravitylab_6`'s nebula sky fills most of its frame and gave fits with
+the right orientation at the wrong place (similarity 0.05 to 0.19); matched
+only on the structure (the lattice tower and hex panel on the left, the
+bridge and the walkway on the right), cube faces from 120 entities found it
+at 0.21 px and similarity 0.98.
 
 ## The sets
 
@@ -141,6 +219,7 @@ whether the set ships.
 | shuttlea | `-75536 -2000 -955.75 0 90 0` | 0.31 | none | none |
 | shuttleb | `23592 1344 23468.25 0 0 0` | 0.29 | none | the hanging creature at the right reads brighter |
 | spherebrain | `-2368 -64 -83.75 0.217 90 0` | 0.41 | none | none |
+| spindlea | `-9172 -3856 -30971.75 0 0 0` | 0.31 | none | none beyond the energy spill's moving particles |
 | spindleb | `-8116 23712 -10715.75 0 180 0` | 0.35 | none | two red lamps on the left are lit |
 | superportal | `5600 -1868 576.25 0 225 0` | 0.39 | none | none |
 | dmescher | `5643.16 -1986.84 -1456.75 -31.109 187.578 86.061` | 0.31 | none | a wall-walk view, rolled 86 degrees |
@@ -149,24 +228,29 @@ whether the set ships.
 | dmroadhouse | `-16.91 3217.59 182.75 -12.445 320.254 0` | 0.41 | none | none |
 | dmplanes_4 | `-61.113 529 -415.103 57.089 323.679 0` | 0.23 | none | none |
 | dmtunnelrat_8 | `-206.379 -1162.35 120.134 -14.521 23.93 180` | 0.27 | none | none |
+| dmshuttle1 | `-14323.334 26658.583 -11139.25 -52.93 229 0` | 0.48 | none | the Earth model turns with game time, so it shows a different face |
+| dmshuttle2 | `-2697.151 -939.583 702.658 58.185 35.848 0` | 0.29 | none | the floor under the light shaft reads darker |
+| dmwallwalk2 | `1018.5 -2822.25 -172.5 8.469 312 0` | 0.29 | none | a small orange wall lamp at the top right is lit |
+| dmtopillogical_4 | `492.661 202.75 258.83 19 188.232 0` | 0.22 | deathmatch session, player moved behind the camera | none |
+| dmsalvagewalk | `3195.136 6297.669 -203.406 -16.393 282.619 0` | 0.29 | none | none |
+| dmgravitylab_6 | `-1184 790.584 475.75 12.76 207.722 0` | 0.21 | none | none |
 
 Multiplayer maps are captured in a single-player session (`devmap` with
-`si_gameType singleplayer`); retail's shots show no players.
+`si_gameType singleplayer`); retail's shots show no players. A map without an
+`info_player_start` cannot run as single-player (`No info_player_start on
+map`, every probe black): its set names a `gameType` in `poses.json`, which
+`solve` and `capture` pass as `si_gameType`, and moves the listen server's
+player out of the view (`dmtopillogical_4`).
 
 ### Held back
 
 These keep their retail art (centre only, no tiles). A set is held back when
-an engine rendering difference, not the scene or its timing, changes the
-picture; each can be captured again from `poses.json` once that is fixed.
+its camera cannot be recovered, or when an engine rendering difference, not
+the scene or its timing, changes the picture.
 
 | Set | Why |
 | --- | --- |
-| spindlea | Camera solved (0.31 px). The energy spill (`fx/starenergyspill.fx`) draws far brighter than retail at every moment and hides the four orange forcefield beams. |
-| dmshuttle1 | Camera solved (0.48 px). The Earth window draws black, and the hexagonal glow panels draw brighter and coarser than retail. |
-| dmshuttle2, dmwallwalk2 | Cameras solved (0.29 px). The hexagonal glow panels draw brighter and coarser than retail. |
-| dmtopillogical_4, dmsalvagewalk | No solve: the same hexagonal panels dominate the shot and do not match. |
-| dmgravitylab_6 | No solve: the star field on nearby geometry gives a consistent but wrong fit (similarity 0.05). |
-| feedingtowera | No solve: the shot is dominated by the green light-ray effect. |
+| feedingtowera | No solve. The shot looks into machinery through dark struts, with green light rays across it. With the rays masked out of the retail art, no search found a camera above 6 inliers: the generic search, cube faces from 150 map entities, a dense grid around the map's teal `lightbeam` emitters, and the player's own view, ahead and up, through the opening ride. |
 | loading, roadhouse | Key art; the generic tiles in pak1 (and their copies for roadhouse) widen it. |
 
 ## Making them again

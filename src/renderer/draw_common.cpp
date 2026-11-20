@@ -10034,6 +10034,23 @@ SHADER PASSES
 
 /*
 ==================
+RB_SetDistortionRegionLocal
+
+The levelshot region scale the rewritten distortion vertex programs read
+(draw_arb2.cpp, ARB_DISTORTION_REGION_LOCAL), for the bound vertex program.
+==================
+*/
+static_assert( ARB_DISTORTION_REGION_LOCAL >= MAX_VERTEX_PARMS, "the region scale must not share a material vertexParm" );
+
+void RB_SetDistortionRegionLocal( void ) {
+	const float scaleX = tr_levelshotRegionScaleX > 0.0f ? tr_levelshotRegionScaleX : 1.0f;
+	const float scaleY = tr_levelshotRegionScaleY > 0.0f ? tr_levelshotRegionScaleY : 1.0f;
+	const float parm[4] = { scaleX, 1.0f / scaleX, 1.0f / scaleY, 0.0f };
+	glProgramLocalParameter4fvARB( GL_VERTEX_PROGRAM_ARB, ARB_DISTORTION_REGION_LOCAL, parm );
+}
+
+/*
+==================
 RB_SetProgramEnvironment
 
 Sets variables that can be used by all vertex programs
@@ -12176,6 +12193,8 @@ void RB_STD_T_RenderShaderPasses( const drawSurf_t *surf ) {
 					RB_ARB2_LoadMD5RMVPMatrix( surf );
 					RB_ARB2_LoadMD5RProjectionMatrix();
 					RB_ARB2_LoadMD5RModelViewMatrix( surf );
+				} else {
+					RB_SetDistortionRegionLocal();
 				}
 				vertexProgramEnabled = true;
 			}
@@ -12633,8 +12652,31 @@ static void RB_GlowSetScreenRect( void ) {
 	backEnd.currentScissor = backEnd.viewDef->scissor;
 }
 
-static void RB_GlowBeginScreenPass( void ) {
-	RB_GlowSetScreenRect();
+/*
+Retail Prey (1.4 PREY.exe) renders its glow view as a separate command cropped
+to 256x256 in the corner of the back buffer, blurs it there one 256th of the
+view per tap, and stretches the result over the view in RB_DrawGlowOverlay.
+The glow is therefore a soft, low-resolution haze whose reach scales with the
+view. Here the glow-only stages are drawn at full size (the depth they test
+against stays the view's own) and box-filtered down to that 256x256 image.
+*/
+static const int GLOW_IMAGE_SIZE = 256;
+
+// Viewport and scissor for a width x height rect at the view's origin, where
+// the glow image is reduced and blurred (the composite overwrites it).
+static void RB_GlowSetCornerRect( int width, int height ) {
+	const int viewportX = tr.viewportOffset[0] + backEnd.viewDef->viewport.x1;
+	const int viewportY = tr.viewportOffset[1] + backEnd.viewDef->viewport.y1;
+	glViewport( viewportX, viewportY, width, height );
+	glScissor( viewportX, viewportY, width, height );
+}
+
+static void RB_GlowBeginScreenPass( int cornerWidth = 0, int cornerHeight = 0 ) {
+	if ( cornerWidth > 0 && cornerHeight > 0 ) {
+		RB_GlowSetCornerRect( cornerWidth, cornerHeight );
+	} else {
+		RB_GlowSetScreenRect();
+	}
 	glMatrixMode( GL_MODELVIEW );
 	glPushMatrix();
 	glLoadIdentity();
@@ -12671,12 +12713,14 @@ static void RB_GlowDrawScreenQuad( float offsetX, float offsetY ) {
 	glEnd();
 }
 
-static void RB_GlowCopyViewToImage( idImage *image ) {
+static void RB_GlowCopyViewToImage( idImage *image, int width = 0, int height = 0 ) {
 	if ( image == NULL ) {
 		return;
 	}
-	const int width = backEnd.viewDef->viewport.x2 - backEnd.viewDef->viewport.x1 + 1;
-	const int height = backEnd.viewDef->viewport.y2 - backEnd.viewDef->viewport.y1 + 1;
+	if ( width <= 0 || height <= 0 ) {
+		width = backEnd.viewDef->viewport.x2 - backEnd.viewDef->viewport.x1 + 1;
+		height = backEnd.viewDef->viewport.y2 - backEnd.viewDef->viewport.y1 + 1;
+	}
 	if ( width > 0 && height > 0 ) {
 		image->CopyFramebuffer(
 			tr.viewportOffset[0] + backEnd.viewDef->viewport.x1,
@@ -12696,20 +12740,38 @@ static void RB_GlowDrawImage( idImage *image, int stateBits, float colorScale ) 
 	RB_GlowDrawScreenQuad( 0.0f, 0.0f );
 }
 
-static void RB_GlowBlurPass( idImage *sourceImage, idImage *captureImage, bool horizontal ) {
+// Reduces image (width x height, the glow-only view) to targetWidth x
+// targetHeight in the view's corner by repeated bilinear halving, each step a
+// 2x2 box filter, so every source pixel contributes as it would to the mip
+// level a 256x256 render samples.
+static void RB_GlowReduceImage( idImage *image, int width, int height, int targetWidth, int targetHeight ) {
+	while ( width > targetWidth || height > targetHeight ) {
+		width = width > targetWidth * 2 ? ( width + 1 ) / 2 : targetWidth;
+		height = height > targetHeight * 2 ? ( height + 1 ) / 2 : targetHeight;
+		RB_GlowBeginScreenPass( width, height );
+		RB_GlowDrawImage( image, GLS_DEPTHFUNC_ALWAYS | GLS_SRCBLEND_ONE | GLS_DSTBLEND_ZERO, 1.0f );
+		RB_GlowCopyViewToImage( image, width, height );
+		RB_GlowEndScreenPass();
+	}
+}
+
+// Retail's blur, one pass per axis on the reduced image: the source copied at
+// full weight, then each tap pair at +-step texels drawn with
+// glColor4f( a, a, a, a ) under a SRC_ALPHA, ONE blend, so a tap adds a*a of
+// the source; a starts at r_glowAlpha and is scaled by r_glowAlphaChange.
+static void RB_GlowBlurPass( idImage *sourceImage, idImage *captureImage, bool horizontal, int width, int height ) {
 	if ( sourceImage == NULL || captureImage == NULL ) {
 		return;
 	}
 	const int steps = idMath::ClampInt( 0, 256, r_glowSteps.GetInteger() );
 	const float startAlpha = idMath::ClampFloat( 0.0f, 8.0f, r_glowAlpha.GetFloat() );
 	const float alphaChange = idMath::ClampFloat( 0.0f, 8.0f, r_glowAlphaChange.GetFloat() );
-	const int blurExtent = horizontal ? sourceImage->GetUploadWidth() : sourceImage->GetUploadHeight();
-	const float blurStep = 1.0f / (float)Max( 1, blurExtent );
+	const float blurStep = 1.0f / (float)Max( 1, horizontal ? width : height );
 
-	RB_GlowBeginScreenPass();
+	RB_GlowBeginScreenPass( width, height );
 	GL_SelectTexture( 0 );
 	sourceImage->Bind();
-	GL_State( GLS_DEPTHFUNC_ALWAYS | GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ZERO );
+	GL_State( GLS_DEPTHFUNC_ALWAYS | GLS_SRCBLEND_ONE | GLS_DSTBLEND_ZERO );
 	glColor4f( 1, 1, 1, 1 );
 	RB_GlowDrawScreenQuad( 0, 0 );
 	if ( steps > 1 && startAlpha > 0.0f ) {
@@ -12719,18 +12781,43 @@ static void RB_GlowBlurPass( idImage *sourceImage, idImage *captureImage, bool h
 			const float offset = blurStep * (float)step;
 			const float x = horizontal ? offset : 0.0f;
 			const float y = horizontal ? 0.0f : offset;
-			glColor4f( 1, 1, 1, alpha );
+			glColor4f( alpha, alpha, alpha, alpha );
 			RB_GlowDrawScreenQuad( x, y );
 			RB_GlowDrawScreenQuad( -x, -y );
 			alpha *= alphaChange;
 		}
 	}
 	glColor4f( 1, 1, 1, 1 );
-	RB_GlowCopyViewToImage( captureImage );
+	RB_GlowCopyViewToImage( captureImage, width, height );
 	RB_GlowEndScreenPass();
 }
 
-static void RB_STD_DrawGlowView( void ) {
+static bool RB_GlowViewHasGlowStages( const viewDef_t *viewDef ) {
+	for ( int i = 0; viewDef->drawSurfs != NULL && i < viewDef->numDrawSurfs; i++ ) {
+		const drawSurf_t *surf = viewDef->drawSurfs[i];
+		const idMaterial *material = surf != NULL ? surf->material : NULL;
+		if ( material == NULL ) {
+			continue;
+		}
+		for ( int stage = 0; stage < material->GetNumStages(); stage++ ) {
+			if ( material->GetStage( stage )->glowStage ) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// The skybox portal view drawn under the view, if it belongs to this view.
+static const viewDef_t *RB_GlowSkyboxSubview( const viewDef_t *viewDef ) {
+	const viewDef_t *sky = viewDef->skyboxSubview;
+	if ( sky == NULL || sky->superView != viewDef || sky->drawSurfs == NULL || sky->numDrawSurfs <= 0 ) {
+		return NULL;
+	}
+	return sky;
+}
+
+static void RB_STD_DrawGlowView( const viewDef_t *sourceView ) {
 	drawSurf_t **drawSurfs = (drawSurf_t **)&backEnd.viewDef->drawSurfs[0];
 	const int numDrawSurfs = backEnd.viewDef->numDrawSurfs;
 	if ( drawSurfs == NULL || numDrawSurfs <= 0 ) {
@@ -12740,6 +12827,26 @@ static void RB_STD_DrawGlowView( void ) {
 	RB_BeginDrawingView();
 	glClearColor( 0, 0, 0, 1 );
 	glClear( GL_COLOR_BUFFER_BIT );
+
+	// Retail's glow view is a full re-render, so its skybox subview draws its
+	// own glowStage stages first (game/dmshuttle1's light cones tint the sky
+	// through the window). The view's depth fill below keeps the colour behind
+	// its skyboxportal surfaces and paints the rest black, as in the scene.
+	const viewDef_t *sky = RB_GlowSkyboxSubview( sourceView );
+	if ( sky != NULL ) {
+		const viewDef_t *glowView = backEnd.viewDef;
+		viewDef_t skyGlowView = *sky;
+		skyGlowView.isGlowView = true;
+		skyGlowView.viewport = glowView->viewport;
+		skyGlowView.scissor = glowView->scissor;
+		backEnd.viewDef = &skyGlowView;
+		RB_BeginDrawingView();
+		RB_STD_FillDepthBuffer( (drawSurf_t **)sky->drawSurfs, sky->numDrawSurfs );
+		glStencilFunc( GL_ALWAYS, 128, 255 );
+		RB_STD_DrawShaderPasses( (drawSurf_t **)sky->drawSurfs, sky->numDrawSurfs );
+		backEnd.viewDef = glowView;
+		RB_BeginDrawingView();
+	}
 	RB_STD_FillDepthBuffer( drawSurfs, numDrawSurfs );
 	glStencilFunc( GL_ALWAYS, 128, 255 );
 	RB_STD_DrawShaderPasses( drawSurfs, numDrawSurfs );
@@ -12747,6 +12854,11 @@ static void RB_STD_DrawGlowView( void ) {
 
 static void RB_STD_GlowOverlay( void ) {
 	if ( !RB_GlowEnabledForCurrentView() ) {
+		return;
+	}
+	const viewDef_t *skyboxSubview = RB_GlowSkyboxSubview( backEnd.viewDef );
+	if ( !RB_GlowViewHasGlowStages( backEnd.viewDef )
+			&& ( skyboxSubview == NULL || !RB_GlowViewHasGlowStages( skyboxSubview ) ) ) {
 		return;
 	}
 	RB_LogComment( "---------- RB_STD_GlowOverlay ----------\n" );
@@ -12757,13 +12869,18 @@ static void RB_STD_GlowOverlay( void ) {
 	const viewDef_t *savedView = backEnd.viewDef;
 	const int savedDepthFunc = backEnd.depthFunc;
 	backEnd.viewDef = &glowView;
-	RB_STD_DrawGlowView();
+	RB_STD_DrawGlowView( savedView );
 	backEnd.viewDef = savedView;
 	backEnd.depthFunc = savedDepthFunc;
 
+	const int viewWidth = backEnd.viewDef->viewport.x2 - backEnd.viewDef->viewport.x1 + 1;
+	const int viewHeight = backEnd.viewDef->viewport.y2 - backEnd.viewDef->viewport.y1 + 1;
+	const int glowWidth = idMath::ClampInt( 1, GLOW_IMAGE_SIZE, viewWidth );
+	const int glowHeight = idMath::ClampInt( 1, GLOW_IMAGE_SIZE, viewHeight );
 	RB_GlowCopyViewToImage( globalImages->glowScreenImage );
-	RB_GlowBlurPass( globalImages->glowScreenImage, globalImages->glowCompositeImage, true );
-	RB_GlowBlurPass( globalImages->glowCompositeImage, globalImages->glowCompositeImage, false );
+	RB_GlowReduceImage( globalImages->glowScreenImage, viewWidth, viewHeight, glowWidth, glowHeight );
+	RB_GlowBlurPass( globalImages->glowScreenImage, globalImages->glowCompositeImage, true, glowWidth, glowHeight );
+	RB_GlowBlurPass( globalImages->glowCompositeImage, globalImages->glowCompositeImage, false, glowWidth, glowHeight );
 	RB_GlowBeginScreenPass();
 	RB_GlowDrawImage( globalImages->accumImage, GLS_DEPTHFUNC_ALWAYS | GLS_SRCBLEND_ONE | GLS_DSTBLEND_ZERO, 1.0f );
 	RB_GlowDrawImage( globalImages->glowCompositeImage, GLS_DEPTHFUNC_ALWAYS | GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE, r_glowStrength.GetFloat() );

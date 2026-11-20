@@ -476,6 +476,10 @@ typedef struct viewDef_s {
 
 	struct viewDef_s *	superView;				// never go into an infinite subview loop 
 	struct drawSurf_s *	subviewSurface;
+	// the skybox portal view drawn under this one, set by R_GenerateSubViews;
+	// the glow overlay redraws its glowStage stages, as retail Prey's glow
+	// view, a full re-render, regenerated its subviews
+	const struct viewDef_s *skyboxSubview;
 
 	// drawSurfs are the visible surfaces of the viewEntities, sorted
 	// by the material sort parameter
@@ -1320,6 +1324,17 @@ extern bool					tr_levelshotProjectionShiftActive;
 bool R_ViewFovTangentsValid( const renderView_t &renderView );
 extern float				tr_levelshotProjectionShiftX;
 extern float				tr_levelshotProjectionShiftY;
+// A levelshot region's width and height as fractions of its tile's; 1 outside regions.
+extern float				tr_levelshotRegionScaleX;
+extern float				tr_levelshotRegionScaleY;
+// The levelshot tile's own shift, which a region's shift above replaces.
+extern float				tr_levelshotTileShiftX;
+extern float				tr_levelshotTileShiftY;
+// The program.local the rewritten distortion vertex programs (draw_arb2.cpp) read
+// the region scale from: ( scaleX, 1 / scaleX, 1 / scaleY, 0 ). Above every
+// material vertexParm (MAX_VERTEX_PARMS).
+static const int			ARB_DISTORTION_REGION_LOCAL = 8;
+void RB_SetDistortionRegionLocal( void );
 
 #ifdef OPENQ4_RENDERER_MODULE
 int R_RendererGetTimeGroupTime( int timeGroup, int fallbackTime );

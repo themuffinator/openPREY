@@ -892,6 +892,9 @@ bool	R_GenerateSurfaceSubview( drawSurf_t *drawSurf ) {
 		parms->isMirror = ( ( (int)parms->isMirror ^ (int)tr.viewDef->isMirror ) != 0 );
 	}
 	R_RenderView( parms );
+	if ( skyboxPortal ) {
+		tr.viewDef->skyboxSubview = parms;
+	}
 	return true;
 }
 
@@ -936,6 +939,9 @@ static subviewPass_t R_SubviewPassForMaterial( const idMaterial *shader ) {
 }
 
 bool R_GenerateSubViews( void ) {
+	// a subview starts as a copy of its parent; its own sky is set below
+	tr.viewDef->skyboxSubview = NULL;
+
 	// for testing the performance hit
 	if ( r_skipSubviews.GetBool() ) {
 		return false;

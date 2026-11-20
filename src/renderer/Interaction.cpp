@@ -51,12 +51,14 @@ static const double SHADOW_LOD_MAX_FRAME_DELAY = 1000.0;
 static const int SHADOW_LOD_RETAIL_RAND_MASK = 0x7fff;
 
 static bool R_SurfaceShaderCreatesLightTris( const idMaterial *surfaceShader, const idMaterial *lightShader ) {
-	// Retail Quake 4 uses `noFog` / ReceivesFog() for fog and blend lights
-	// instead of the normal lighting-stage contract.
-	if ( lightShader->IsFogLight() || lightShader->IsBlendLight() ) {
-		return surfaceShader->ReceivesFog();
-	}
-
+	// Retail Prey keeps Doom 3's rule for every light, fog and blend lights
+	// included: only a surface with lighting stages gets light tris
+	// (idInteraction::CreateInteraction in PREY.exe 1.4 tests numAmbientStages
+	// against numStages and nothing else; the renderer never reads noFog).
+	// Quake 4's ReceivesFog() rule also fogged ambient-only surfaces, such as
+	// a skyboxportal brush, so a black fog around game/dmshuttle1's sky portal
+	// blacked out its Earth window.
+	(void)lightShader;
 	return surfaceShader->ReceivesLighting();
 }
 
@@ -1904,7 +1906,6 @@ void idInteraction::CreateInteraction( const idRenderModel *model ) {
 			continue;
 		}
 
-		// Fog and blend lights follow the separate `noFog` interaction path.
 		if ( R_SurfaceShaderCreatesLightTris( shader, lightShader ) ) {
 			if ( tri->ambientViewCount == tr.viewCount ) {
 				R_CreateInteractionLightTris( entityDef, lightDef, sint );

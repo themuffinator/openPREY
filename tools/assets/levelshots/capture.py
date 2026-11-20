@@ -3,7 +3,7 @@
 capture: boots each set's map, removes Talon, runs the set's staging commands,
 then runs `levelshot 1024 <camera> 90` with shadow maps for every light. The
 tiles' own views must show no stencil shadow path (r_shadowMapReport 3) and
-no region split, or the capture is reported as failed.
+come from the pinned source size, or the capture is reported as failed.
 
 stage: copies the shipped sets into content/basepr/pak2 in Prey's layout:
   guis/assets/loading/<set>{,_left,_right,_top,_bottom}.tga   the compositor's sources
@@ -25,10 +25,10 @@ TABLE = HERE / "poses.json"
 FINAL = harness.WORK / "final"
 PAK2 = harness.ROOT / "content" / "basepr" / "pak2"
 VARIANTS = ("", "_left", "_right", "_top", "_bottom")
-# A hidden window cannot exceed the desktop (2560x1440 on the capture machine),
-# and a source larger than the window is split into regions, which breaks
-# screen-copy effects (glass, haze). 1.4x supersampling keeps the 4:3 source of
-# a 1024 tile (1912x1434) inside it.
+# A hidden window cannot exceed the desktop (2560x1440 on the capture machine).
+# A source larger than it is split into regions, which match a one-pass render
+# (docs/dev/levelshot-capture.md); the shipped sets were captured at 1.4x
+# (1912x1434, one pass), and SOURCE pins that so a recapture reproduces them.
 WINDOW = (2560, 1440)
 SOURCE = "1912x1434"
 # Shadow maps for every light class at the Ultra recipe, point lights included,
@@ -43,6 +43,9 @@ PIN_CVARS = (
     ("r_shadowMapTranslucentReceivers", "1"), ("r_levelshotSupersample", "1.4"),
     ("r_temporalAA", "0"), ("r_multiSamples", "0"), ("r_postAA", "0"), ("r_bloom", "0"), ("r_ssao", "0"),
     ("r_hdrToneMap", "0"), ("r_motionBlur", "0"), ("r_crt", "0"), ("r_useLightGrid", "0"),
+    # Prey's glow overlay at retail's defaults
+    ("r_skipGlowOverlay", "0"), ("r_glowStrength", "0.5"), ("r_glowAlpha", "0.55"),
+    ("r_glowAlphaChange", "0.85"), ("r_glowSteps", "8"),
     ("image_anisotropy", "16"), ("image_downSize", "0"), ("image_picmip", "0"), ("r_screenFraction", "100"),
 )
 PINS = tuple(a for k, v in PIN_CVARS for a in ("+set", k, v)) + ("+set", "com_performancePresetCheck", "done")
@@ -74,7 +77,8 @@ def capture(slot: str, name: str, log=print) -> bool:
     x, y, z, p, yw, r = entry["camera"]
     game = harness.slot_game(slot)
     shutil.rmtree(game / "guis" / "assets" / "loading", ignore_errors=True)
-    with harness.Client(slot, map_name, extra=PINS, stage=STAGE_PINS, window=WINDOW) as cl:
+    with harness.Client(slot, map_name, extra=PINS, stage=STAGE_PINS, window=WINDOW,
+                        game_type=entry.get("gameType", "singleplayer")) as cl:
         removed = remove_talon(cl) if not map_name.startswith("dm") else []
         for cmd in entry.get("commands", []):
             cl.run(cmd, settle=0.5)
@@ -86,7 +90,7 @@ def capture(slot: str, name: str, log=print) -> bool:
     views = text[begin:text.find("Wrote ", begin)] if begin >= 0 else ""
     problems = []
     if f"from {SOURCE} " not in text:
-        problems.append("the source was not rendered in one pass")
+        problems.append(f"the source was not {SOURCE}")
     problems += [line for line in views.splitlines() if any(s in line for s in STENCIL_LINES)][:3]
     if problems:
         log(f"{name}: FAILED {problems}")

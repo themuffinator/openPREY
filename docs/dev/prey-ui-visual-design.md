@@ -1232,7 +1232,7 @@ vocabulary rather than replace it:
     the canvas, as openQ4 does. The composite is cached per source and
     window size. The levelshot is the map's own loading art,
     `guis/assets/loading/<map>`, as retail shows it; `pak2` carries
-    recaptures of 25 of them with their tiles, taken at the retail cameras
+    recaptures of 32 of them with their tiles, taken at the retail cameras
     (`docs/dev/levelshot-capture.md`).
   - *HUD and scope.* HUD groups and subtitles pin to screen edges with
     `screenalignx` and `screenaligny` (section 10.1). The rifle scope's lens

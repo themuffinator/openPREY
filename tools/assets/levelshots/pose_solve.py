@@ -199,11 +199,11 @@ def _score_probe(args):
     return sol["inliers"] if sol else 0
 
 
-def solve_map(slot, map_name, name=None, log=print, min_similarity=0.3):
+def solve_map(slot, map_name, name=None, log=print, min_similarity=0.3, game_type="singleplayer"):
     """The retail camera of one loading screen, or None."""
     name = name or map_name
     points, nstarts = seed_points(map_name)
-    with harness.Client(slot, map_name) as cl:
+    with harness.Client(slot, map_name, game_type=game_type) as cl:
         for k, (x, y, z, ang) in enumerate(points[:min(nstarts, 16)]):
             sol = refine(cl, name, (x, y, z + 64.0, 0.0, ang, 0.0), tag=f"start{k}")
             if sol and sol["inliers"] > 150 and sol["err"] < 1.5 and sol["similarity"] >= min_similarity:

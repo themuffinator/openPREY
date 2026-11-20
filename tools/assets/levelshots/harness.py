@@ -92,7 +92,7 @@ def retail(name: str, size=(W, H)) -> Image.Image:
 class Client:
     """A running client that serves request files until closed."""
 
-    def __init__(self, slot, map_name, extra=(), stage="", window=(W, H), boot_timeout=300):
+    def __init__(self, slot, map_name, extra=(), stage="", window=(W, H), boot_timeout=300, game_type="singleplayer"):
         self.slot, self.map = slot, map_name
         self.game = _setup(slot)
         self.req = self.game / "lsq" / "req.txt"
@@ -116,9 +116,15 @@ class Client:
                 "+set", "s_volume", "0", "+set", "s_muteUnfocused", "0", "+set", "s_constantAmplitude", "1",
                 "+set", "r_swapInterval", "0", "+set", "com_skipLoadingContinue", "1",
                 *extra,
-                "+set", "si_gameType", "singleplayer", "+devmap", f"game/{map_name}", "+exec", "lsq_boot.cfg"]
+                "+set", "si_gameType", game_type, "+devmap", f"game/{map_name}", "+exec", "lsq_boot.cfg"]
         self.p = subprocess.Popen(args, cwd=str(INSTALL), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.request("after 2000\n", timeout=boot_timeout)
+        try:
+            self.request("after 2000\n", timeout=boot_timeout)
+        except BaseException:
+            # a constructor that raises never reaches close(); don't leave the client running
+            self.p.kill()
+            self.p.wait()
+            raise
 
     def request(self, text, timeout=300):
         tmp = self.req.with_suffix(".tmp")

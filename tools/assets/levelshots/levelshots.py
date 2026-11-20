@@ -28,8 +28,10 @@ def main(argv):
         return 0
     slot, names = argv[2], argv[3:]
     if cmd == "solve":
+        sets = capture.table()
         for m in names:
-            sol = pose_solve.solve_map(slot, m)
+            # a map without an info_player_start runs only as multiplayer
+            sol = pose_solve.solve_map(slot, m, game_type=sets.get(m, {}).get("gameType", "singleplayer"))
             if sol:
                 print(json.dumps({m: {"camera": pose_solve.snap(sol["pose"]), "solve": {
                     "inliers": sol["inliers"], "median_px": round(sol["err"], 3),

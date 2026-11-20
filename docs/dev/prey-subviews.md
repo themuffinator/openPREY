@@ -111,9 +111,10 @@ All seven cases matched between OpenGL and Vulkan on 11 November 2026.
 
 ## Known gaps
 
-- Glow stages are far brighter on OpenGL than on Vulkan (portal rings, lamps,
-  Talon). This is the glow overlay, not the subview paths, and is not addressed
-  here.
+- Glow stages differ between OpenGL and Vulkan (portal rings, lamps, Talon).
+  OpenGL's glow overlay follows retail since 20 November 2026 (a 256x256
+  image, taps weighted alpha squared, and the portal sky's glow stages
+  included; `levelshot-capture.md`); Vulkan's still blurs at full size.
 - With `r_skipPostProcess 1`, a sky drawn as the main view (camera inside the sky
   scene) is brighter on OpenGL than on Vulkan for the same reason.
 - Mirror and portal clip planes remain disabled, as above.

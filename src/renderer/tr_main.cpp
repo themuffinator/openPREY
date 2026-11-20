@@ -923,6 +923,10 @@ void R_TransposeGLMatrix( const float in[16], float out[16] ) {
 bool tr_levelshotProjectionShiftActive = false;
 float tr_levelshotProjectionShiftX = 0.0f;
 float tr_levelshotProjectionShiftY = 0.0f;
+float tr_levelshotRegionScaleX = 1.0f;
+float tr_levelshotRegionScaleY = 1.0f;
+float tr_levelshotTileShiftX = 0.0f;
+float tr_levelshotTileShiftY = 0.0f;
 levelshotDepthCapture_t tr_levelshotDepthCapture = { NULL, 0, 0, false };
 
 /*

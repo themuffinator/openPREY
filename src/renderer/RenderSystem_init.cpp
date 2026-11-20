@@ -3472,6 +3472,9 @@ static void R_CaptureLevelShotTileRGBA( int width, int height, int blends, const
 	const bool previousDisableLevelshotEntityCulling = tr.disableLevelshotEntityCulling;
 	tr_levelshotProjectionShiftActive = true;
 	tr.disableLevelshotEntityCulling = true;
+	// what a region's view-fitted passes (shadow cascades) fit instead of the region
+	tr_levelshotTileShiftX = projectionShiftX;
+	tr_levelshotTileShiftY = projectionShiftY;
 
 	const int guard = LEVELSHOT_REGION_GUARD;
 	if ( width <= glConfig.vidWidth && height <= glConfig.vidHeight ) {
@@ -3512,6 +3515,8 @@ static void R_CaptureLevelShotTileRGBA( int width, int height, int blends, const
 				regionView.fov_y = RAD2DEG( 2.0f * idMath::ATan( halfY * tanY ) );
 				tr_levelshotProjectionShiftX = 0.5f * ( left + right ) / halfX;
 				tr_levelshotProjectionShiftY = 0.5f * ( top + bottom ) / halfY;
+				tr_levelshotRegionScaleX = halfX;
+				tr_levelshotRegionScaleY = halfY;
 
 				idTempArray<byte> region( regionWidth * regionHeight * 4 );
 				R_CaptureTiledPixelsRGBA( regionWidth, regionHeight, blends, &regionView, region.Ptr() );
@@ -3527,6 +3532,10 @@ static void R_CaptureLevelShotTileRGBA( int width, int height, int blends, const
 	tr_levelshotProjectionShiftActive = false;
 	tr_levelshotProjectionShiftX = 0.0f;
 	tr_levelshotProjectionShiftY = 0.0f;
+	tr_levelshotRegionScaleX = 1.0f;
+	tr_levelshotRegionScaleY = 1.0f;
+	tr_levelshotTileShiftX = 0.0f;
+	tr_levelshotTileShiftY = 0.0f;
 }
 
 /*

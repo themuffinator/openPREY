@@ -18601,9 +18601,20 @@ void R_LoadARBProgram( int progIndex ) {
 	// projection (a levelshot's side tiles, a VR eye) also adds its shift times
 	// the view depth there, and the deform swelled to a smear. The scale term
 	// alone is what the program means, and the same value in a symmetric view.
+	//
+	// A levelshot region is a slice of a larger view with its own, narrower
+	// projection, so its scale term grows by the slice's share of the view.
+	// The deform is an offset in the slice's own 0..1 screen units, which wants
+	// exactly that growth, but the program clamps it (MIN R1, R1, 0.02) first,
+	// and applies one value to both axes while the slice's share of the
+	// width and of the height differ. So the scale is taken back to the whole
+	// view's before the clamp and divided by each axis's share after it, from
+	// program.local[ARB_DISTORTION_REGION_LOCAL] ( 1, 1, 1 outside regions ).
 	idStr offAxisSafeSource;
+	bool distortionRegionScaled = false;
 	if ( prog.target == GL_VERTEX_PROGRAM_ARB ) {
 		static const char *deformScaleLine = "R1, R0, state.matrix.projection.row[0];";
+		static const char *deformClampLine = "R1, R1, 0.02;";
 		offAxisSafeSource = start;
 		const int scaleAt = offAxisSafeSource.Find( deformScaleLine );
 		if ( scaleAt > 0 && offAxisSafeSource.Find( "state.matrix.modelview.row[2]" ) >= 0 ) {
@@ -18613,9 +18624,24 @@ void R_LoadARBProgram( int progIndex ) {
 			}
 			if ( opAt >= 2 && idStr::Icmpn( offAxisSafeSource.c_str() + opAt - 2, "DP4", 3 ) == 0 ) {
 				const int lineEnd = scaleAt + idStr::Length( deformScaleLine );
-				offAxisSafeSource = offAxisSafeSource.Left( opAt - 2 )
-					+ "MUL R1, R0.x, state.matrix.projection.row[0].x;"
-					+ offAxisSafeSource.Right( offAxisSafeSource.Length() - lineEnd );
+				const int clampAt = offAxisSafeSource.Find( deformClampLine, true, lineEnd );
+				int clampOpAt = clampAt - 1;
+				while ( clampOpAt > lineEnd && ( offAxisSafeSource[clampOpAt] == ' ' || offAxisSafeSource[clampOpAt] == '\t' ) ) {
+					clampOpAt--;
+				}
+				distortionRegionScaled = clampAt > lineEnd && clampOpAt >= lineEnd + 2
+					&& idStr::Icmpn( offAxisSafeSource.c_str() + clampOpAt - 2, "MIN", 3 ) == 0;
+				idStr rewritten = offAxisSafeSource.Left( opAt - 2 ) + "MUL R1, R0.x, state.matrix.projection.row[0].x;";
+				if ( distortionRegionScaled ) {
+					const int clampEnd = clampAt + idStr::Length( deformClampLine );
+					rewritten += va( "\nMUL R1, R1, program.local[%d].x;", ARB_DISTORTION_REGION_LOCAL );
+					rewritten += offAxisSafeSource.Mid( lineEnd, clampEnd - lineEnd );
+					rewritten += va( "\nMUL R1, R1, program.local[%d].yzyz;", ARB_DISTORTION_REGION_LOCAL );
+					rewritten += offAxisSafeSource.Right( offAxisSafeSource.Length() - clampEnd );
+				} else {
+					rewritten += offAxisSafeSource.Right( offAxisSafeSource.Length() - lineEnd );
+				}
+				offAxisSafeSource = rewritten;
 				start = const_cast<char *>( offAxisSafeSource.c_str() );
 			}
 		}
@@ -18754,6 +18780,11 @@ void R_LoadARBProgram( int progIndex ) {
 
 	prog.valid = true;
 	prog.sceneDepthReject = hazeDepthReject;
+	if ( distortionRegionScaled ) {
+		// the whole view's own scale until a levelshot region sets it
+		const float wholeView[4] = { 1.0f, 1.0f, 1.0f, 0.0f };
+		glProgramLocalParameter4fvARB( prog.target, ARB_DISTORTION_REGION_LOCAL, wholeView );
+	}
 	if ( programText == start ) {
 		common->Printf( "\n" );
 	} else {

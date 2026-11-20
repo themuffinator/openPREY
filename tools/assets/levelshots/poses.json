@@ -451,8 +451,7 @@
     "median_px": 0.311,
     "similarity": 0.672
    },
-   "status": "held",
-   "note": "The energy spill (fx/starenergyspill.fx) draws far brighter than retail and hides the four orange forcefield beams."
+   "status": "shipped"
   },
   "dmshuttle1": {
    "map": "game/dmshuttle1",
@@ -469,8 +468,8 @@
     "median_px": 0.484,
     "similarity": 0.611
    },
-   "status": "held",
-   "note": "The Earth window draws black, and the hexagonal glow panels draw brighter and coarser than retail."
+   "status": "shipped",
+   "note": "The Earth model turns with game time, so the face it shows differs from retail."
   },
   "dmshuttle2": {
    "map": "game/dmshuttle2",
@@ -487,8 +486,8 @@
     "median_px": 0.29,
     "similarity": 0.683
    },
-   "status": "held",
-   "note": "The hexagonal glow panels draw brighter and coarser than retail."
+   "status": "shipped",
+   "note": "The floor under the light shaft reads darker than retail."
   },
   "dmwallwalk2": {
    "map": "game/dmwallwalk2",
@@ -505,28 +504,70 @@
     "median_px": 0.29,
     "similarity": 0.871
    },
-   "status": "held",
-   "note": "The hexagonal glow panels draw brighter and coarser than retail."
+   "status": "shipped",
+   "note": "A small orange wall lamp at the top right is lit."
   },
   "dmgravitylab_6": {
    "map": "game/dmgravitylab_6",
-   "status": "held",
-   "note": "Unsolved: the star field on nearby geometry gives a consistent but wrong solve."
+   "status": "shipped",
+   "note": "Solved with retail matched only on the structure: the nebula sky fills most of the frame and gave consistent but wrong fits.",
+   "camera": [
+    -1184.0,
+    790.584,
+    475.75,
+    12.76,
+    207.722,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1138,
+    "median_px": 0.212,
+    "similarity": 0.981
+   }
   },
   "dmtopillogical_4": {
    "map": "game/dmtopillogical_4",
-   "status": "held",
-   "note": "Unsolved: the hexagonal glow panels that dominate the shot do not match."
+   "gameType": "deathmatch",
+   "camera": [
+    492.661,
+    202.75,
+    258.83,
+    19.0,
+    188.232,
+    0.0
+   ],
+   "solve": {
+    "inliers": 2360,
+    "median_px": 0.218,
+    "similarity": 0.995
+   },
+   "commands": [
+    "noclip\nsetviewpos 960 416 -248 270"
+   ],
+   "status": "shipped",
+   "note": "The map has only deathmatch spawns, so it is captured as a deathmatch listen server with the player moved behind the camera."
   },
   "dmsalvagewalk": {
    "map": "game/dmsalvagewalk",
-   "status": "held",
-   "note": "Unsolved: the hexagonal glow panels that dominate the shot do not match."
+   "camera": [
+    3195.136,
+    6297.669,
+    -203.406,
+    -16.393,
+    282.619,
+    0.0
+   ],
+   "solve": {
+    "inliers": 1583,
+    "median_px": 0.294,
+    "similarity": 0.991
+   },
+   "status": "shipped"
   },
   "feedingtowera": {
    "map": "game/feedingtowera",
    "status": "held",
-   "note": "Unsolved: the shot is dominated by the green light-ray effect."
+   "note": "Unsolved. The shot looks into machinery through dark struts with green light rays; with the rays masked, the generic search, cube faces from 150 entities, a dense grid around the map's teal lightbeam emitters, and the player's own view through the opening ride (looking ahead and up) found no camera above 6 inliers."
   }
  }
 }
