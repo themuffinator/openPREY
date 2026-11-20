@@ -1426,7 +1426,7 @@ are derived data with no source in any pak, and the lock refuses those files
 too. One a stray reference loaded is purged rather than reloaded; should
 anything bind it again, its load is refused and the image defaults. The
 session's own wide loading screen is an in-memory scratch image
-(_expandedLoadingBackground_<w>x<h>), composed from reads the lock admits, and
+(_expandedLoadingBackground_<n>_<w>x<h>), composed from reads the lock admits, and
 is left alone.
 ===============
 */

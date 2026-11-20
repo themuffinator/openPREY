@@ -1,12 +1,12 @@
 # openPREY UI Visual Design
 
-Specification version 1.19, 20 November 2026.
+Specification version 1.21, 20 November 2026.
 
 Status: reference survey and design contract. openPREY renders the stock Prey
 GUIs by default. A first vector replacement, the home screen's navigation, its
-small frames, the Load Game, Save Game and Credits pages, the death screen and
-Options with all four tabs, is built for the retained interface and presents while
-`ui_retained` is 1 (section 12.5). Sections 1 to 11 record what makes the Prey
+small frames, the Load Game, Save Game and Credits pages, the death screen,
+Options with all four tabs and the level loading screen, is built for the
+retained interface and presents while `ui_retained` is 1 (section 12.5). Sections 1 to 11 record what makes the Prey
 interface look and behave like Prey, so that fixes, widescreen work, new
 settings pages and every further replacement stay inside that identity.
 Section 12 covers openPREY's own additions.
@@ -18,7 +18,7 @@ Section 12 covers openPREY's own additions.
 | Rifle scope at any aspect (section 10.8) | Built in the legacy GUI with the stock art |
 | Alien-script translation (section 11.4) | Built |
 | 3D main-menu backdrop and entrance (section 12.2) | Specified, not built. The menu draws the stock layers |
-| Vector or retained-UI replacement (sections 12.3 and 12.5) | Home navigation, bottom bar, New Game, Mods, Exit, Quit Game, Load Game, Save Game, Credits, the death screen and Options (every tab and the Reset Defaults dialog) built behind `ui_retained`; MultiPrey, the message boxes and loading are still the stock ones |
+| Vector or retained-UI replacement (sections 12.3 and 12.5) | Home navigation, bottom bar, New Game, Mods, Exit, Quit Game, Load Game, Save Game, Credits, the death screen, Options (every tab and the Reset Defaults dialog) and the level loading screen built behind `ui_retained`; MultiPrey and the message boxes are still the stock ones |
 
 The companion [Interface Atlas](prey-ui/atlas/prey-interface-atlas.html) draws
 the measured components, screens and motion as editable vector
@@ -1229,11 +1229,14 @@ vocabulary rather than replace it:
   - *Loading screens.* `guis/map/loading.gui` and the session's fallback
     screen compose the levelshot, or `guis/assets/loading/loading`, with its
     `_left`, `_right`, `_top` and `_bottom` tiles into one picture that fills
-    the canvas, as openQ4 does. The composite is cached per source and
-    window size. The levelshot is the map's own loading art,
-    `guis/assets/loading/<map>`, as retail shows it; `pak2` carries
-    recaptures of 32 of them with their tiles, taken at the retail cameras
-    (`docs/dev/levelshot-capture.md`).
+    the canvas, as openQ4 does. A picture without both of the tiles its
+    window needs is drawn at 4:3 instead; stretching its edge columns
+    smeared it. The composite is cached per source and window size. The
+    session finds the picture as retail does (`levelshot-capture.md`): a
+    save's own screenshot when a save is loading, else the map's loading art
+    `guis/assets/loading/<map>`, else that art from an addon pak, else the
+    generic picture. `pak2` carries recaptures of 32 of them with their
+    tiles, taken at the retail cameras.
   - *HUD and scope.* HUD groups and subtitles pin to screen edges with
     `screenalignx` and `screenaligny` (section 10.1). The rifle scope's lens
     covers the whole screen (section 10.8).
@@ -1549,6 +1552,7 @@ by a script from this specification and committed.
 | `guis/menu/restartmenu.rui` | The death screen | The frame with Load, Restart and Main Menu and the line under each that says what it does |
 | `guis/menu/credits.rui` | Credits, from either home | The stock credits sheet rising through the page |
 | `guis/menu/settings.rui` | Options, from either home | The four top tabs, Controls' seven pages, Game Options' two, Video's six and the Audio page, and the Reset Defaults dialog |
+| `guis/loading/loading.rui` | Every level load, in place of `guis/map/loading.gui` | The level's art across the screen, the name band with the level's name and author line, the objectives panel, the progress bar in its claw-ended outline and the loader's phase |
 
 `tools/ui/build_retained_screens.py` writes them from the measurements of
 sections 3 to 8 and the Interface Atlas's constructions; `--check` reports a
@@ -1587,8 +1591,11 @@ without a change here.
   (`guis/menu/multiplayer.rui`); that session route is inherited from openQ4
   and has not been run with a Prey document.
 - The death screen is a document of its own (below).
-- The message boxes, the loading screen, the in-game multiplayer menu and a
-  multiplayer game's Escape menu are the stock GUIs.
+- The loading screen is a document of its own (below). A map's own
+  `guis/map/<map>.gui`, and a mod's own copy of the stock screen, still
+  present instead.
+- The message boxes, the in-game multiplayer menu and a multiplayer game's
+  Escape menu are the stock GUIs.
 
 #### Construction
 
@@ -1883,6 +1890,45 @@ while `gui::retainedHome` is 1 (`idSessionLocal::OpenRestartMenu`).
 - The stock buttons' labels dim to white 0.50 once the pointer has left
   them; the retained ones return to `prey.text.button`.
 
+#### The loading screen
+
+Retail Prey loads every level under one screen, `guis/map/loading.gui`
+(`idSessionLocal::LoadLoadingGui` in `PREY.exe` 1.4); the session presents
+`guis/loading/loading.rui` in its place. The document draws what openPREY's
+override of that screen draws (section 12.1), at its measurements, and
+nothing of the stock screen draws beneath it.
+
+- **Art.** The session sets the picture (`loading_levelshot`) as section
+  12.1 finds it. With both tiles the window needs it is the composed
+  picture, drawn across the whole screen; otherwise the 4:3 picture is drawn
+  on the centred 4:3 canvas over black (`loading_bkgnd_canvasfill`).
+- **Name band.** Black 0.55, 35 u high at 10 u from the screen's top and
+  across its whole width; the level's name centred on it in the display face
+  at 0.6, `prey.load.name`, with the engine shadow. The author line (display
+  0.3, `#D9D9FF` at 0.75) shows only for a map that has one.
+- **Objectives.** The panel (430x74 u at 20,348, black 0.45) with the
+  objectives in the display face at 0.28, shown only for a map that has
+  them.
+- **Progress.** The fill (256x12 u at 192,455, `prey.load.fill`) grows with
+  the load under the outline, whose wash darkens it as the stock windows
+  stack. The outline is `bottombar.tga` traced as vectors at 304x30 u: a
+  black 0.40 wash between two claw ends, each a steel hook
+  (`#617186` at 0.91 with a `#97B2D7` rim) on a black 0.72 outline, pierced
+  by an oval; along the foot a rail of four bands (black 0.78, `#AECCF4`
+  0.82, `#5D6D82` 0.81, black 0.65); on it five groups of three rivets,
+  47.5 u apart.
+- **Phase.** Where the stock screen kept its status line, commented out,
+  beside the bar at 474,445: the loader's phase (Map, World, Assets,
+  Finishing, then Load Time) in the body face at 0.28 and, under it, its
+  count (assets loaded of the total, then the load time) at 0.25, both
+  right-aligned, `#BFD1FF` at 0.72 and 0.50.
+- **Placement.** The name band and author line keep to the screen's top and
+  the objectives, bar and phase to its foot on a screen taller than 4:3, as
+  the stock windows do with `screenaligny`; the objectives, bar and phase
+  stay on the 4:3 canvas's columns.
+- **Motion.** None but the fill, as in the stock. A multiplayer join that
+  holds the screen over the match fades it out over 250 ms.
+
 #### Not yet built
 
 - Controller prompts in the bottom title bar, and text that scales with the
@@ -1890,9 +1936,8 @@ while `gui::retainedHome` is 1 (`idSessionLocal::OpenRestartMenu`).
 - The stock Audio page's sound-driver notice (the engine never raises it),
   the Advanced 2 page's driver box, whose button opens a web page, and the
   crosshair's picture beside its name.
-- MultiPrey, the message boxes and the loading screen. Each is a document
-  for the generator and, where the session has no route for it, a session
-  verb.
+- MultiPrey and the message boxes. Each is a document for the generator
+  and, where the session has no route for it, a session verb.
 - The hook bars and the arc are the Atlas's reconstructions and are lighter
   than the stock art: the stock hook is about 15 u wide where the vector one
   is 11 u, and the stock arc carries a socket where each bar joins it.
@@ -2415,6 +2460,18 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.21, 20 November 2026
+
+- Section 12.5 adds the retained level loading screen
+  (`guis/loading/loading.rui`), with the progress outline traced from
+  `bottombar.tga`; the status table at the head and the list of what is not
+  yet built follow.
+- Section 12.1: the loading picture is found as retail finds it, a save's
+  screenshot first, and a picture without the tiles its window needs is
+  drawn at 4:3.
+- The Interface Atlas takes the version and draws the progress outline as
+  traced.
 
 ### Version 1.19, 20 November 2026
 

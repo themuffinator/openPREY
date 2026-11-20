@@ -230,7 +230,7 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
 
 <div class="wrap">
 <header class="top">
-  <div class="eyebrow">openPREY · visual specification 1.19 · 20 November 2026</div>
+  <div class="eyebrow">openPREY · visual specification 1.21 · 20 November 2026</div>
   <div class="mark">
     <svg id="hdrMark" viewBox="0 0 476 64" role="img" aria-label="PREY wordmark reconstruction"></svg>
     <h1>Interface Atlas</h1>
@@ -2085,11 +2085,25 @@ scoreboard("dm");
   txt(p, 320, 57, "Example author line", em(.3), { face: "display", fill: "#D9D9FF", op: .75 });
   const clip = el("rect", { x: 192, y: 455, width: 0, height: 12 }, el("clipPath", { id: "ldClip" }, el("defs", {}, p)));
   el("rect", { x: 192, y: 455, width: 256, height: 12, fill: "#5959FF", "fill-opacity": .65, "clip-path": "url(#ldClip)" }, p);
-  const bar = el("g", {}, p);
-  /* the rails bracket the 256x12 u fill; the outline's rectangle is 304x30 u at 168,443 */
-  el("path", { d: "M183 453.5H457M183 468.5H457", stroke: "#B0CEF7", "stroke-width": 1.2, fill: "none" }, bar);
-  [[176, 458], [464, 458]].forEach(([x, y]) => { el("circle", { cx: x, cy: y, r: 8, fill: "#2B313B", stroke: "#B3C6E2", "stroke-width": 2 }, bar); el("circle", { cx: x, cy: y, r: 3.5, fill: "#14171B" }, bar); });
-  for (let i = 1; i < 5; i++) el("path", { d: `M${184 + i * 54} 468.5h8`, stroke: "#B0CEF7", "stroke-width": 2.2 }, bar);
+  /* bottombar.tga traced (spec 12.5): the outline is 304x30 u at 168,443, a wash between two claw ends,
+     a four-band rail along its foot and five groups of three rivets; the claw ends mirror */
+  const bar = el("g", { transform: "translate(168 443)" }, p);
+  const clawOutline = [[7.4,3.8],[17,3.8],[19.3,7.6],[24.1,7.6],[25.5,9.8],[25.5,13.6],[24.3,16.4],[24.3,17.4],[25.1,19.6],[27.6,21.6],[28.4,21.7],[28.4,28.1],[12.7,28.1],[10.3,26.2],[9.2,24.3],[5,21.5],[3.8,20.6],[2.4,18.3],[1.8,16.5],[1.8,11.7],[3,8.9],[5.1,6]];
+  const clawSteel = [[4.8,7.9],[6.3,6.6],[8,5.7],[9.5,4.4],[14.8,4.2],[17,4.75],[17.8,6],[18.7,8.5],[19.9,9.4],[23.5,9.4],[24.3,10.7],[24.3,11.8],[23.1,13.5],[23.1,15.5],[22.5,16.2],[23.1,17.3],[23.1,19.3],[25.2,22.6],[26.4,23.5],[27.7,23.5],[28.4,24.8],[28.4,27.1],[12.7,27.1],[11.5,26.2],[10.4,24.3],[8.6,23.4],[5.9,21],[4.2,19.6],[3,18.3],[2.4,16.5],[2.4,13.5],[3,12.7],[3,10.7],[3.8,9.4],[4.7,9.2]];
+  const poly = (pts, m) => "M" + pts.map(([x, y]) => `${m ? 304 - x : x} ${y}`).join("L") + "Z";
+  const oval = (cx, cy, rx, ry) => `M${cx - rx} ${cy}a${rx} ${ry} 0 1 0 ${2 * rx} 0a${rx} ${ry} 0 1 0 ${-2 * rx} 0Z`;
+  [[22.4, 281.6, 10.3, 24.38, "#000", .4], [28.4, 275.6, 23.44, 25.31, "#000", .78], [28.4, 275.6, 25.31, 26.25, "#AECCF4", .82],
+   [28.4, 275.6, 26.25, 27.19, "#5D6D82", .81], [28.4, 275.6, 27.19, 28.13, "#000", .65]].forEach(([x0, x1, y0, y1, f, o]) =>
+    el("rect", { x: x0, y: y0, width: x1 - x0, height: y1 - y0, fill: f, "fill-opacity": o }, bar));
+  for (let g = 0; g < 5; g++) for (let r = -1; r <= 1; r++) {
+    const x = 57 + 47.5 * g + 6.23 * r;
+    el("rect", { x: x - 2.1, y: 21.4, width: 4.2, height: 6.7, rx: 1.8, fill: "#000", "fill-opacity": .72 }, bar);
+    el("rect", { x: x - 1.2, y: 22.9, width: 2.4, height: 3.6, rx: 1.1, fill: "#6F84A0", "fill-opacity": .8 }, bar);
+  }
+  [false, true].forEach(m => {
+    el("path", { d: poly(clawOutline, m), fill: "#000", "fill-opacity": .72 }, bar);
+    el("path", { d: poly(clawSteel, m) + oval(m ? 304 - 13.05 : 13.05, 14.5, 4.15, 5.1), "fill-rule": "evenodd", fill: "#617186", "fill-opacity": .91, stroke: "#97B2D7", "stroke-opacity": .85, "stroke-width": .6, "stroke-linejoin": "round" }, bar);
+  });
   const run = () => { cancel("load"); clip.setAttribute("width", 0); tw(0, RM ? 0 : 3200, q => clip.setAttribute("width", (256 * q).toFixed(1)), q => 1 - Math.pow(1 - q, 1.6), "load"); };
   $("#loadB").addEventListener("click", run); clip.setAttribute("width", 159);
 }

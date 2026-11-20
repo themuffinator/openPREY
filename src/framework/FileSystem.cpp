@@ -9744,7 +9744,6 @@ gfx/guis/loadscreens/<map>.tga, one extracted from an addon, or the generic one.
 ===============
 */
 void idFileSystemLocal::FindMapScreenshot( const char *path, char *buf, int len ) {
-	idFile	*file;
 	idStr	mapname = path;
 
 	// a mapDef is named by its map's path under maps/, without the extension
@@ -9775,26 +9774,42 @@ void idFileSystemLocal::FindMapScreenshot( const char *path, char *buf, int len 
 
 	idStr::snPrintf( buf, len, "gfx/guis/loadscreens/%s.tga", mapname.c_str() );
 	if ( ReadFile( buf, NULL, NULL ) == -1 ) {
-		// try to extract from an addon
-		file = OpenFileReadFlags( buf, FSFLAG_SEARCH_ADDONS );
-		if ( file ) {
-			// save it out to an addon splash directory, unless an earlier
-			// launch already did: the same size, written since the addon
-			int dlen = file->Length();
-			const ID_TIME_T addonTime = file->Timestamp();
-			idStr::snPrintf( buf, len, "guis/assets/splash/addon/%s.tga", mapname.c_str() );
-			ID_TIME_T extractedTime = FILE_NOT_FOUND_TIMESTAMP;
-			if ( ReadFile( buf, NULL, &extractedTime ) == dlen && extractedTime != FILE_NOT_FOUND_TIMESTAMP && extractedTime >= addonTime ) {
-				CloseFile( file );
-				return;
-			}
-			char *data = new char[ dlen ];
-			file->Read( data, dlen );
-			CloseFile( file );
-			WriteFile( buf, data, dlen );
-			delete[] data;
-		} else {
+		// try to extract from an addon, into an addon splash directory
+		const idStr addonPath = buf;
+		idStr::snPrintf( buf, len, "guis/assets/splash/addon/%s.tga", mapname.c_str() );
+		if ( !FS_ExtractAddonFile( addonPath.c_str(), buf ) ) {
 			idStr::Copynz( buf, "gfx/guis/loadscreens/generic.tga", len );
 		}
 	}
+}
+
+/*
+===============
+FS_ExtractAddonFile
+
+A file an addon pak (one not mounted until its map is played) holds, copied to
+extractedPath under fs_savepath so a menu or loading screen can show it before
+the pak mounts, as retail does with an addon map's levelshot. An earlier copy is
+kept when it has the same size and was written since the addon.
+===============
+*/
+bool FS_ExtractAddonFile( const char *relativePath, const char *extractedPath ) {
+	idFile *file = fileSystemLocal.OpenFileReadFlags( relativePath, FSFLAG_SEARCH_ADDONS );
+	if ( file == NULL ) {
+		return false;
+	}
+	const int length = file->Length();
+	const ID_TIME_T addonTime = file->Timestamp();
+	ID_TIME_T extractedTime = FILE_NOT_FOUND_TIMESTAMP;
+	if ( fileSystemLocal.ReadFile( extractedPath, NULL, &extractedTime ) == length &&
+			extractedTime != FILE_NOT_FOUND_TIMESTAMP && extractedTime >= addonTime ) {
+		fileSystemLocal.CloseFile( file );
+		return true;
+	}
+	char *data = new char[ length ];
+	const int read = file->Read( data, length );
+	fileSystemLocal.CloseFile( file );
+	const bool written = read == length && fileSystemLocal.WriteFile( extractedPath, data, length ) == length;
+	delete[] data;
+	return written;
 }

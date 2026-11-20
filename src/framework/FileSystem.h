@@ -525,6 +525,11 @@ ID_INLINE bool FS_AwakeningActive( void ) {
 // a failure at once.
 void						FS_RaiseDeferredContentPackFailure( void );
 
+// Copies relativePath out of an addon pak that is not mounted to extractedPath
+// under fs_savepath, unless an up-to-date copy is already there. False when no
+// addon holds it or the copy could not be written.
+bool						FS_ExtractAddonFile( const char *relativePath, const char *extractedPath );
+
 /*
 ================================================
 idFileLocal is a FileStream wrapper that automatically closes a file when the

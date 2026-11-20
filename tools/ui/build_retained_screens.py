@@ -9,7 +9,8 @@ The documents are the Prey front end's navigation rebuilt as vectors for the
 retained interface (docs/dev/ui/document-format.md), drawn to the measurements
 of docs/dev/prey-ui-visual-design.md and its Interface Atlas. Section 12.5 of
 that specification describes what they replace and how the session presents
-them. They are committed under content/basepr/pak0/guis/menu/ and present only
+them. They are committed under content/basepr/pak0/guis/menu/ (the loading
+screen under guis/loading/) and present only
 while ui_retained is 1.
 
 Every length below is authored in stock units (u), the 640x480 canvas every
@@ -27,7 +28,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-OUT = ROOT / "content" / "basepr" / "pak0" / "guis" / "menu"
+OUT = ROOT / "content" / "basepr" / "pak0" / "guis"
 
 HEADER = (
     "// Copyright (C) 2026 DarkMatter Productions. GPL-3.0-or-later.\n"
@@ -2682,16 +2683,177 @@ def death_document() -> dict:
     return doc.build(root)
 
 
+# ------------------------------------------------------------------ loading
+# guis/map/loading.gui, the one screen retail Prey loads every level under
+# (section 9), as openPREY's override draws it (section 12.1).
+
+LOAD_NAME = rgb("#A6BFFF", 0.8)              # prey.load.name
+LOAD_AUTHOR = rgb("#D9D9FF", 0.75)
+LOAD_FILL = rgb("#5959FF", 0.65)             # prey.load.fill
+LOAD_OBJECTIVES = [0.86, 0.9, 1.0, 0.82]
+LOAD_STATUS = [0.75, 0.82, 1.0, 0.72]        # the stock's commented-out status line, as openPREY's override draws it
+LOAD_COUNT = [0.75, 0.82, 1.0, 0.5]
+LOAD_HANDOFF_MS = 250                        # RETAINED_LOADING_HANDOFF_MSEC in the session
+
+# The progress outline, bottombar.tga (512x32 texels drawn at 304x30 u),
+# traced in the outline's own units: a wash between two claw ends, a rail
+# along its foot and five groups of three rivets on it. The claw ends mirror.
+OUTLINE_W, OUTLINE_H = 304, 30
+BAR_CLAW_OUTLINE = [(7.4, 3.8), (17.0, 3.8), (19.3, 7.6), (24.1, 7.6), (25.5, 9.8), (25.5, 13.6), (24.3, 16.4),
+                    (24.3, 17.4), (25.1, 19.6), (27.6, 21.6), (28.4, 21.7), (28.4, 28.1), (12.7, 28.1), (10.3, 26.2),
+                    (9.2, 24.3), (5.0, 21.5), (3.8, 20.6), (2.4, 18.3), (1.8, 16.5), (1.8, 11.7), (3.0, 8.9), (5.1, 6.0)]
+BAR_CLAW_STEEL = [(4.8, 7.9), (6.3, 6.6), (8.0, 5.7), (9.5, 4.4), (14.8, 4.2), (17.0, 4.75), (17.8, 6.0), (18.7, 8.5),
+                  (19.9, 9.4), (23.5, 9.4), (24.3, 10.7), (24.3, 11.8), (23.1, 13.5), (23.1, 15.5), (22.5, 16.2),
+                  (23.1, 17.3), (23.1, 19.3), (25.2, 22.6), (26.4, 23.5), (27.7, 23.5), (28.4, 24.8), (28.4, 27.1),
+                  (12.7, 27.1), (11.5, 26.2), (10.4, 24.3), (8.6, 23.4), (5.9, 21.0), (4.2, 19.6), (3.0, 18.3),
+                  (2.4, 16.5), (2.4, 13.5), (3.0, 12.7), (3.0, 10.7), (3.8, 9.4), (4.7, 9.2)]
+BAR_CLAW_HOLE = (13.05, 14.5, 4.15, 5.1)     # an ellipse through the steel: centre and radii
+BAR_RAIL = [(10.3, 24.38, [0, 0, 0, 0.4]),   # each band's top, foot and colour
+            (23.44, 25.31, [0, 0, 0, 0.78]),
+            (25.31, 26.25, rgb("#AECCF4", 0.82)),
+            (26.25, 27.19, rgb("#5D6D82", 0.81)),
+            (27.19, 28.13, [0, 0, 0, 0.65])]
+BAR_RIVET_GROUPS = [57.0 + 47.5 * index for index in range(5)]
+BAR_RIVET_PITCH = 6.23
+BAR_STEEL = rgb("#617186", 0.91)
+BAR_STEEL_RIM = rgb("#97B2D7", 0.85)
+BAR_OUTLINE = [0, 0, 0, 0.72]
+
+
+def bar_points(points, mirror: bool) -> str:
+    """Path data for a claw end's points, the right end mirrored."""
+    placed = [((OUTLINE_W - x) if mirror else x, y) for x, y in points]
+    return "M" + "L".join(f"{x:g} {y:g}" for x, y in placed) + "Z"
+
+
+def rounded_d(x: float, y: float, w: float, h: float, r: float) -> str:
+    k = r * 0.5523
+    return (f"M{x + r} {y}H{x + w - r}C{x + w - r + k} {y} {x + w} {y + r - k} {x + w} {y + r}V{y + h - r}"
+            f"C{x + w} {y + h - r + k} {x + w - r + k} {y + h} {x + w - r} {y + h}H{x + r}"
+            f"C{x + r - k} {y + h} {x} {y + h - r + k} {x} {y + h - r}V{y + r}C{x} {y + r - k} {x + r - k} {y} {x + r} {y}Z")
+
+
+def progress_outline(ident: str, box) -> dict:
+    """bottombar.tga as vectors (section 6, Progress bar)."""
+    paths = []
+    inner_left, inner_right = 28.4, OUTLINE_W - 28.4
+    for index, (top, foot, tint) in enumerate(BAR_RAIL):
+        left, right = (inner_left - 6, inner_right + 6) if index == 0 else (inner_left, inner_right)
+        paths.append(svg(f"rail-{index}", f"M{left} {top}H{right}V{foot}H{left}Z", fill=solid(tint)))
+    for group_index, centre in enumerate(BAR_RIVET_GROUPS):
+        for offset in (-1, 0, 1):
+            x = centre + offset * BAR_RIVET_PITCH
+            ident_rivet = f"rivet-{group_index}-{offset + 1}"
+            paths.append(svg(f"{ident_rivet}-outline", rounded_d(x - 2.1, 21.4, 4.2, 6.7, 1.8), fill=solid([0, 0, 0, 0.72])))
+            paths.append(svg(f"{ident_rivet}-steel", rounded_d(x - 1.2, 22.9, 2.4, 3.6, 1.1), fill=solid(rgb("#6F84A0", 0.8))))
+    cx, cy, rx, ry = BAR_CLAW_HOLE
+    for side, mirror in (("left", False), ("right", True)):
+        hole_x = (OUTLINE_W - cx) if mirror else cx
+        paths.append(svg(f"claw-{side}-outline", bar_points(BAR_CLAW_OUTLINE, mirror), fill=solid(BAR_OUTLINE)))
+        steel = svg(f"claw-{side}-steel", bar_points(BAR_CLAW_STEEL, mirror) + ellipse_d(hole_x, cy, rx, ry),
+                    fill=solid(BAR_STEEL), stroke=stroke(solid(BAR_STEEL_RIM), 0.6 * U, minimum=1, join="round"))
+        steel["fillRule"] = "evenodd"
+        paths.append(steel)
+    return vector(ident, {**absolute(*box), **PASSIVE}, paths)
+
+
+def foot_column(ident: str, children: list) -> dict:
+    """The 4:3 canvas's column pinned to the screen's foot, as the stock
+    windows are with screenaligny bottom: on a screen taller than 4:3 the
+    progress bar stays at the foot, as the name band stays at the top."""
+    return group(ident, {"position": keyword("absolute"), "left": length(50, "%"), "margin-left": length(-CANVAS_W * U / 2),
+                         "width": ul(CANVAS_W), "height": ul(CANVAS_H), "bottom": length(0), **PASSIVE}, children)
+
+
+def full_width(nodes: list[dict]) -> list[dict]:
+    """Labels centred across the whole screen, as the stock 640 u windows
+    are across the 4:3 canvas; a shadow keeps its 1 u offset."""
+    for node in nodes:
+        shadow = node["id"].endswith("-shadow")
+        node["properties"]["left"] = ul(1) if shadow else length(0)
+        node["properties"]["width"] = length(100, "%")
+    return nodes
+
+
+def loading_document() -> dict:
+    """The level loading screen (sections 9 and 12.1): the level's art over
+    the whole screen, a 0.55 black band at the top with the level's name, the
+    author line under it, the objectives panel, and the progress bar in its
+    claw-ended outline, with the loader's phase beside it. The session sets
+    the art (`loading_levelshot`): a save's screenshot, the map's loading art
+    or the generic painting, composed with its edge tiles into one picture of
+    the window's shape when it has them (`loading_bkgnd_canvasfill`)."""
+    doc = Document("openprey.loading")
+    doc.state.update({
+        "map_loading": {"type": "number", "initial": 0},
+        "loading_levelshot": {"type": "string", "initial": ""},
+        "loading_bkgnd_canvasfill": {"type": "number", "initial": 0},
+        "loading_levelname": {"type": "string", "initial": ""},
+        "loading_author": {"type": "string", "initial": ""},
+        "loading_objectives": {"type": "string", "initial": ""},
+        "loading_phase": {"type": "string", "initial": ""},
+        "loading_count": {"type": "string", "initial": ""},
+        "loading_mp": {"type": "boolean", "initial": False},
+        "loading_intro": {"type": "boolean", "initial": False},
+        "loading_ready": {"type": "boolean", "initial": False},
+    })
+    wide = {"op": "==", "args": [{"state": "loading_bkgnd_canvasfill"}, 1]}
+    shots = []
+    for ident, place, shown in (("shot-wide", FULL, wide), ("shot-stage", STAGE, {"op": "!", "args": [wide]})):
+        shot = picture(ident, RETAINED_GENERIC_SHOT, {**place, **PASSIVE})
+        doc.bind(ident, "image", {"state": "loading_levelshot"})
+        shots.append(shown_when(doc, shot, shown))
+    band = group("name-band", {**absolute(0, 10, None, 35), "width": length(100, "%"),
+                               "background-color": colour([0, 0, 0, 0.55]), **PASSIVE})
+    name = full_width(bound(doc, label("level-name", PLACEHOLDER, (0, 10, CANVAS_W, 30), DISPLAY, 0.6, LOAD_NAME,
+                                       shadow=True, ty=-5), "loading_levelname"))
+    author = shown_when(doc, group("author", {**absolute(0, 0, None, 70), "width": length(100, "%"), **PASSIVE},
+                                   full_width(bound(doc, label("author-name", PLACEHOLDER, (0, 40, CANVAS_W, 20), DISPLAY, 0.3,
+                                                               LOAD_AUTHOR, shadow=True, ty=-2), "loading_author"))),
+                        {"op": "!=", "args": [{"state": "loading_author"}, ""]})
+    objectives = shown_when(doc, group("objectives", absolute(0, 0, CANVAS_W, CANVAS_H), [
+        box_fill("objectives-back", (20, 348, 430, 74), [0, 0, 0, 0.45]),
+        *bound(doc, label("objectives-text", PLACEHOLDER, (32, 356, 406, 58), DISPLAY, 0.28, LOAD_OBJECTIVES,
+                          align="left", shadow=True, wrap=True), "loading_objectives"),
+    ]), {"op": "!=", "args": [{"state": "loading_objectives"}, ""]})
+    # The fill is clipped to the level's progress and lies under the outline,
+    # whose wash darkens it, as the stock windows stack.
+    fill_clip = group("progress-clip", {**absolute(192, 455, 0, 12), "overflow": keyword("hidden"), **PASSIVE}, [
+        box_fill("progress-fill", (0, 0, 256, 12), LOAD_FILL)])
+    doc.bind("progress-clip", "width", {"op": "*", "args": [{"op": "clamp", "args": [{"state": "map_loading"}, 0, 1]}, 256 * U]})
+    status = [
+        *bound(doc, label("load-phase", PLACEHOLDER, (474, 443, 146, 14), BODY, 0.28, LOAD_STATUS, align="right",
+                          shadow=True), "loading_phase"),
+        *bound(doc, label("load-count", PLACEHOLDER, (474, 457, 146, 12), BODY, 0.25, LOAD_COUNT, align="right",
+                          shadow=True), "loading_count"),
+    ]
+    head = group("head", {**absolute(0, 0, None, CANVAS_H), "width": length(100, "%"), **PASSIVE}, [band, *name, author])
+    foot = foot_column("foot", [objectives, fill_clip, progress_outline("progress-outline", (168, 443, OUTLINE_W, OUTLINE_H)), *status])
+    # A multiplayer join can hold the screen over the match and hand off with
+    # a fade (idSessionLocal::FadeRetainedLoadingHold); a new load presents it
+    # whole again. The levelshot is up from the first frame.
+    doc.timeline("present", 1, [track("screen", "opacity", [(0, number(1)), (1, number(1))])])
+    doc.timeline("handoff", LOAD_HANDOFF_MS, [track("screen", "opacity", [(0, number(1)), (LOAD_HANDOFF_MS, number(0))])])
+    doc.events["present"] = [{"op": "playTimeline", "timeline": "present"}]
+    doc.events["frameIn"] = [{"op": "playTimeline", "timeline": "present"}]
+    doc.events["handoff"] = [{"op": "playTimeline", "timeline": "handoff"}]
+    root = group("screen", {**FULL, "background-color": colour([0, 0, 0, 1]), "opacity": number(1),
+                            "font-family": font(BODY), "font-size": length(EM * 0.33 * U), "color": colour(TEXT_LABEL)},
+                 [*shots, head, foot])
+    return doc.build(root)
+
+
 # -------------------------------------------------------------------- output
 
 DOCUMENTS = {
-    "title.rui": lambda: home_document("openprey.title", in_game=False),
-    "pause.rui": lambda: home_document("openprey.pause", in_game=True),
-    "loadgame.rui": load_game_document,
-    "savegame.rui": save_game_document,
-    "restartmenu.rui": death_document,
-    "credits.rui": credits_document,
-    "settings.rui": options_document,
+    "menu/title.rui": lambda: home_document("openprey.title", in_game=False),
+    "menu/pause.rui": lambda: home_document("openprey.pause", in_game=True),
+    "menu/loadgame.rui": load_game_document,
+    "menu/savegame.rui": save_game_document,
+    "menu/restartmenu.rui": death_document,
+    "menu/credits.rui": credits_document,
+    "menu/settings.rui": options_document,
+    "loading/loading.rui": loading_document,
 }
 
 

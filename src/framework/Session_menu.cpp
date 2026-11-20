@@ -12206,8 +12206,10 @@ idUserInterface *idSessionLocal::SelectRetainedLoadingGui( idUserInterface *lega
 		return legacy;
 	}
 	// Only the stock loading screens are replaced; a map's own GUI stays, and
-	// so does a mod's own copy of a stock one.
+	// so does a mod's own copy of a stock one. openPREY: Prey loads every level
+	// under one screen, guis/map/loading.gui.
 	static const char *stockScreens[] = {
+		"guis/map/loading.gui",
 		"guis/loading/generic.gui", "guis/loading/splevel.gui", "guis/loading/mplevel.gui", "guis/loading/intro.gui"
 	};
 	bool stock = false;

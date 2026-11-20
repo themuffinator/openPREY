@@ -1940,13 +1940,17 @@ static bool Session_FileExistsInSearchPaths( const char *path ) {
 }
 
 /*
-OPENPREY: a map's loading picture. Retail Prey's loading screen shows
-guis/assets/loading/<map>.tga, and its menus the separate pictures under
-loading/thumbs/ that FindMapScreenshot answers with; without this step a
-single-player level loaded over the generic art and a multiplayer level over
-its 512 menu thumb. A mapDef's loadimage still comes first (the callers read it).
+OPENPREY: a map's loading picture, found as retail Prey finds it
+(idFileSystemLocal::FindMapScreenshot in PREY.exe 1.4, asked for the loading
+art rather than the menu thumb): guis/assets/loading/<map>.tga; else that
+picture in an addon pak, copied to guis/assets/loading/addon/<map>.tga with any
+_left, _right, _top and _bottom tiles beside it; else the generic
+guis/assets/loading/loading.tga. The menus' pictures under loading/thumbs/
+(FindMapScreenshot) are never the loading art. A mapDef's loadimage and a save's
+screenshot come first (the callers read them).
 */
 static void Session_FindMapLoadingImage( const char *mapPath, char *buf, int len ) {
+	static const char *const tiles[] = { "_left", "_right", "_top", "_bottom" };
 	idStr mapName = ( mapPath != NULL ) ? mapPath : "";
 	mapName.BackSlashesToSlashes();
 	mapName.StripPath();
@@ -1956,8 +1960,44 @@ static void Session_FindMapLoadingImage( const char *mapPath, char *buf, int len
 		if ( Session_FileExistsInSearchPaths( buf ) ) {
 			return;
 		}
+		idStr::snPrintf( buf, len, "guis/assets/loading/addon/%s.tga", mapName.c_str() );
+		if ( FS_ExtractAddonFile( va( "guis/assets/loading/%s.tga", mapName.c_str() ), buf ) ) {
+			for ( int i = 0; i < static_cast<int>( sizeof( tiles ) / sizeof( tiles[0] ) ); i++ ) {
+				FS_ExtractAddonFile( va( "guis/assets/loading/%s%s.tga", mapName.c_str(), tiles[i] ),
+					va( "guis/assets/loading/addon/%s%s.tga", mapName.c_str(), tiles[i] ) );
+			}
+			return;
+		}
 	}
-	fileSystem->FindMapScreenshot( mapPath, buf, len );
+	idStr::Copynz( buf, "guis/assets/loading/loading.tga", len );
+}
+
+/*
+OPENPREY: the picture a save is loading under. Retail Prey shows the save's own
+screenshot, savegames/<save>.tga, when there is one, read again since a newer
+save under the same name replaces it (idSessionLocal::LoadLoadingGui in
+PREY.exe 1.4); otherwise the map's loading art.
+*/
+static bool Session_FindSaveLoadingImage( idFile *saveFile, idStr &image ) {
+	if ( saveFile == NULL ) {
+		return false;
+	}
+	image = saveFile->GetName();
+	image.BackSlashesToSlashes();
+	const int savegames = image.Find( "savegames/", false );
+	if ( savegames > 0 ) {
+		image = image.Right( image.Length() - savegames );
+	}
+	image.SetFileExtension( ".tga" );
+	if ( idStr::Icmpn( image.c_str(), "savegames/", 10 ) != 0 || fileSystem->ReadFile( image.c_str(), NULL, NULL ) <= 0 ) {
+		return false;
+	}
+	idMaterial *material = const_cast<idMaterial *>( declManager->FindMaterial( image.c_str() ) );
+	if ( material != NULL ) {
+		material->ReloadImages( false );
+	}
+	UI_RetainedReloadImage( image.c_str() );
+	return true;
 }
 
 static void Session_NormalizeMapDeclPath( const char *mapPath, idStr &normalizedPath ) {
@@ -2585,9 +2625,11 @@ this build never names those files (see FS_IsGeneratedLoadscreenPath).
 #define SESSION_LOADING_BACKGROUND_IMAGE	"_expandedLoadingBackground"
 
 struct sessionLoadingBackground_t {
-	// SESSION_LOADING_BACKGROUND_IMAGE_<w>x<h>, empty while none is held. The
+	// SESSION_LOADING_BACKGROUND_IMAGE_<n>_<w>x<h>, empty while none is held. The
 	// size is part of the name because the retained interface keeps an image's
 	// dimensions by its name, and a picture of another shape must not reuse them.
+	// <n> counts compositions: a GUI that drew the last picture under the same
+	// name kept showing it (the startup painting over the first level's art).
 	idStr			imageName;
 	idList<byte>	pixels;				// RGBA, top row first, exactly as uploaded
 	int				width = 0;
@@ -2702,6 +2744,12 @@ static bool Session_PrepareExpandedLoadingBackground( const idStr &backgroundPat
 	if ( expandVertically ) {
 		hasTop = Session_ResolveSiblingImageFilePath( resolvedCenterPath, "_top", resolvedTopPath );
 		hasBottom = Session_ResolveSiblingImageFilePath( resolvedCenterPath, "_bottom", resolvedBottomPath );
+	}
+	// openPREY: only a picture with both tiles its window needs widens. Stretching
+	// the art's edge columns across the rest smeared it; a picture without tiles
+	// (a save's screenshot, an addon map's art) is drawn at 4:3 instead.
+	if ( ( expandHorizontally && !( hasLeft && hasRight ) ) || ( expandVertically && !( hasTop && hasBottom ) ) ) {
+		return false;
 	}
 
 	byte *centerPic = NULL;
@@ -2885,7 +2933,8 @@ static bool Session_PrepareExpandedLoadingBackground( const idStr &backgroundPat
 	}
 
 	sessionLoadingBackground_t &background = sessionLoadingBackground;
-	const idStr name = va( SESSION_LOADING_BACKGROUND_IMAGE "_%dx%d", outputWidth, outputHeight );
+	static int compositions = 0;
+	const idStr name = va( SESSION_LOADING_BACKGROUND_IMAGE "_%d_%dx%d", ++compositions, outputWidth, outputHeight );
 	if ( background.imageName.Icmp( name ) != 0 ) {
 		Session_ReleaseLoadingBackground( true );
 	}
@@ -7428,7 +7477,10 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 
 		loadGuiOverride = mapDef->GetString( "loadgui", "" );
 		const char *loadImage = mapDef->GetString( "loadimage", "" );
-		if ( loadImage[0] ) {
+		idStr saveImage;
+		if ( loadingSaveGame && Session_FindSaveLoadingImage( savegameFile, saveImage ) ) {
+			loadingBackground = saveImage;
+		} else if ( loadImage[0] ) {
 			loadingBackground = loadImage;
 		} else if ( idStr::Icmp( loadGuiOverride, "guis/loading/intro.gui" ) == 0 &&
 				Session_FileExistsInSearchPaths( "gfx/guis/loadscreens/e3_load.tga" ) ) {
@@ -7441,9 +7493,14 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 		}
 	} else {
 		// Keep non-mapDef paths consistent with the mapDef path.
-		char screenshot[ MAX_STRING_CHARS ];
-		Session_FindMapLoadingImage( spawnMapPath, screenshot, MAX_STRING_CHARS );
-		loadingBackground = screenshot;
+		idStr saveImage;
+		if ( loadingSaveGame && Session_FindSaveLoadingImage( savegameFile, saveImage ) ) {
+			loadingBackground = saveImage;
+		} else {
+			char screenshot[ MAX_STRING_CHARS ];
+			Session_FindMapLoadingImage( spawnMapPath, screenshot, MAX_STRING_CHARS );
+			loadingBackground = screenshot;
+		}
 	}
 
 	idStr expandedLoadingBackground;

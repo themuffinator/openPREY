@@ -7,15 +7,13 @@ windowDef Desktop {
 	nocursor	1
 	menugui		1
 
-	onTime 0 {
-		if ( "gui::loading_bkgnd" == "" ) {
-			set "gui::loading_bkgnd" "guis/assets/loading/loading"
-		}
-	}
-
-	// In a window that is not 4:3 the session composes the art and its
-	// _left/_right/_top/_bottom tiles into one picture of the window's shape
-	// and sets loading_bkgnd_canvasfill; otherwise the 4:3 art is drawn alone.
+	// The session always sets loading_bkgnd: a save's screenshot, the map's
+	// guis/assets/loading/<map> art or the generic loading picture. A default
+	// set here would always win, since GUI expressions compare as numbers and
+	// any image name equals "". In a window that is not 4:3 the session
+	// composes the art and its _left/_right/_top/_bottom tiles into one
+	// picture of the window's shape and sets loading_bkgnd_canvasfill;
+	// otherwise the 4:3 art is drawn alone.
 	windowDef BackgroundWide {
 		rect		( 0 - "gui::virtual_screen_x_expand" ), ( 0 - "gui::virtual_screen_y_expand" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 480 + ( "gui::virtual_screen_y_expand" * 2 ) )
 		visible		( "gui::loading_bkgnd_canvasfill" == 1 )

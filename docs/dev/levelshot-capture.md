@@ -32,17 +32,36 @@ pak2 holds 32 of retail's 33 in-game loading screens and the roadhouse tiles:
 
 ## How the engine uses it
 
-- **Loading art lookup.** Retail Prey's loading screen shows
-  `guis/assets/loading/<map>.tga`, and its menus the separate pictures under
-  `loading/thumbs/`. openPREY's `FindMapScreenshot` answers for the menus, so
-  single-player levels loaded over the generic art and multiplayer levels over
-  their 512 menu thumb. `Session_FindMapLoadingImage` (`Session.cpp`) now
-  restores the retail step for the loading screen and the retained pause shot;
-  a mapDef's `loadimage` still comes first.
+- **Loading art lookup.** Retail Prey loads every level under
+  `guis/map/loading.gui` and picks its picture in this order
+  (`idSessionLocal::LoadLoadingGui` and `idFileSystemLocal::FindMapScreenshot`
+  in `PREY.exe` 1.4, the latter asked for the loading art rather than the menu
+  thumb):
+  1. when a save is loading, the save's own screenshot,
+     `savegames/<save>.tga`, read again since a newer save may have replaced it;
+  2. `guis/assets/loading/<map>.tga`;
+  3. that picture from an addon pak that is not mounted yet, copied to
+     `guis/assets/loading/addon/<map>.tga` under `fs_savepath`;
+  4. the generic `guis/assets/loading/loading.tga`.
+
+  The menus' pictures under `loading/thumbs/` are never the loading art.
+  `Session_FindSaveLoadingImage` and `Session_FindMapLoadingImage`
+  (`Session.cpp`) follow that order for the stock screen, the retained screen
+  (`guis/loading/loading.rui`, `prey-ui-visual-design.md` section 12.5) and
+  the retained pause shot. openPREY adds a mapDef's `loadimage` after the save
+  (no retail mapDef has one), and copies an addon map's `_left`, `_right`,
+  `_top` and `_bottom` tiles beside its picture.
 - **Wide and tall windows.** The session composes the centre and its tiles
   into one picture of the window's shape (`Session_EnsureExpandedLoadingBackground`,
-  `prey-ui-visual-design.md` section 12.1). Maps without tiles keep the 4:3
-  retail art.
+  `prey-ui-visual-design.md` section 12.1), named afresh for each
+  composition. A picture without both of the tiles its window needs (a save's
+  screenshot, `feedingtowera`, most addon art) is drawn at 4:3; its edge
+  columns were stretched across the rest before.
+- **The stock screen's default.** openPREY's `guis/map/loading.gui` set the
+  generic picture in `onTime 0` whenever `gui::loading_bkgnd` equalled `""`.
+  GUI expressions compare as numbers, so every image name equalled `""` and
+  the stock screen always showed the generic picture. The session sets the
+  picture on every load, and the default is gone.
 - **`levelshot`** writes `guis/assets/loading/<map>` by default, Prey's path
   (it wrote openQ4's `gfx/guis/loadscreens/`), and logs `Capturing levelshot`
   before its tile views so a log can be read for exactly those views.
