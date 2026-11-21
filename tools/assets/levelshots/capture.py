@@ -3,7 +3,8 @@
 capture: boots each set's map, removes Talon, runs the set's staging commands,
 then runs `levelshot 1024 <camera> 90` with shadow maps for every light. The
 tiles' own views must show no stencil shadow path (r_shadowMapReport 3) and
-come from the pinned source size, or the capture is reported as failed.
+come from the pinned source size, or the capture is reported as failed. A set
+with a "scene" captures in a staged copy of another map instead (scene.py).
 
 stage: copies the shipped sets into content/basepr/pak2 in Prey's layout:
   guis/assets/loading/<set>{,_left,_right,_top,_bottom}.tga   the compositor's sources
@@ -19,6 +20,7 @@ from pathlib import Path
 from PIL import Image
 
 import harness
+import scene
 
 HERE = Path(__file__).resolve().parent
 TABLE = HERE / "poses.json"
@@ -73,10 +75,11 @@ def capture(slot: str, name: str, log=print) -> bool:
     if "camera" not in entry:
         log(f"{name}: no camera in poses.json")
         return False
-    map_name = entry["map"].split("/", 1)[1]
     x, y, z, p, yw, r = entry["camera"]
     game = harness.slot_game(slot)
     shutil.rmtree(game / "guis" / "assets" / "loading", ignore_errors=True)
+    # a scene set loads its staged copy of another map; the levelshot is named after the map loaded
+    map_name = scene.prepare(slot, entry["scene"]) if "scene" in entry else entry["map"].split("/", 1)[1]
     with harness.Client(slot, map_name, extra=PINS, stage=STAGE_PINS, window=WINDOW,
                         game_type=entry.get("gameType", "singleplayer")) as cl:
         removed = remove_talon(cl) if not map_name.startswith("dm") else []
@@ -100,7 +103,7 @@ def capture(slot: str, name: str, log=print) -> bool:
     dest.mkdir(parents=True)
     for v in VARIANTS:
         for ext in (".tga", ".dds"):
-            shutil.move(str(src / f"{name}{v}{ext}"), dest / f"{name}{v}{ext}")
+            shutil.move(str(src / f"{map_name}{v}{ext}"), dest / f"{name}{v}{ext}")
     # a side-by-side with retail for review
     cmp = Image.new("RGB", (1024, 384))
     cmp.paste(harness.retail(name, (512, 384)), (0, 0))

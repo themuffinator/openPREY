@@ -1240,7 +1240,7 @@ vocabulary rather than replace it:
     session finds the picture as retail does (`levelshot-capture.md`): a
     save's own screenshot when a save is loading, else the map's loading art
     `guis/assets/loading/<map>`, else that art from an addon pak, else the
-    generic picture. `pak2` carries recaptures of 32 of them with their
+    generic picture. `pak2` carries recaptures of all 33 with their
     tiles, taken at the retail cameras.
   - *HUD and scope.* HUD groups and subtitles pin to screen edges with
     `screenalignx` and `screenaligny` (section 10.1). The rifle scope's lens

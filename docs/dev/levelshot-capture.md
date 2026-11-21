@@ -27,8 +27,8 @@ generic key art (its retail `roadhouse.tga` is byte-identical to
 `loading.tga`), so pak2 carries the generic art's four tiles under its name;
 git stores them once.
 
-pak2 holds 32 of retail's 33 in-game loading screens and the roadhouse tiles:
-324 files, 269 MB compressed.
+pak2 holds all 33 of retail's in-game loading screens and the roadhouse tiles:
+334 files, 275 MB compressed.
 
 ## How the engine uses it
 
@@ -253,6 +253,7 @@ whether the set ships.
 | dmtopillogical_4 | `492.661 202.75 258.83 19 188.232 0` | 0.22 | deathmatch session, player moved behind the camera | none |
 | dmsalvagewalk | `3195.136 6297.669 -203.406 -16.393 282.619 0` | 0.29 | none | none |
 | dmgravitylab_6 | `-1184 790.584 475.75 12.76 207.722 0` | 0.21 | none | none |
+| feedingtowera | `326.7 -41.8 68.3 -62.2 359.8 0` | 0.39 | a staged copy of roadhouse, frozen at 43.4 s ([scenes](#scenes)) | retail's haze in the lower left is greener |
 
 Multiplayer maps are captured in a single-player session (`devmap` with
 `si_gameType singleplayer`); retail's shots show no players. A map without an
@@ -269,8 +270,42 @@ the scene or its timing, changes the picture.
 
 | Set | Why |
 | --- | --- |
-| feedingtowera | No solve. The shot looks into machinery through dark struts, with green light rays across it. With the rays masked out of the retail art, no search found a camera above 6 inliers: the generic search, cube faces from 150 map entities, a dense grid around the map's teal `lightbeam` emitters, and the player's own view, ahead and up, through the opening ride. |
 | loading, roadhouse | Key art; the generic tiles in pak1 (and their copies for roadhouse) widen it. |
+
+### Scenes
+
+`feedingtowera`'s picture is not of feedingtowera. It is the end of
+roadhouse: from the bar, the view looks up through the torn-off roof's frame
+at the ship, as the ship's grab light swings onto Tommy. No level reaches that
+moment with the camera free, so the set captures it in a staged copy of
+roadhouse. Its `scene` entry in `poses.json` names the map to copy, entity key
+edits, and a staging script (`tools/assets/levelshots/scene.py`):
+
+- The copy, `levelshot_feedingtowera`, is written from the user's own retail
+  pak into the slot's savepath: the `.map` with the edits applied, and the
+  `.proc`, `.cm` and `.aas48` unchanged. No retail data is redistributed.
+- The level's own script runs as usual. Prey compiles every map script at
+  startup, and the copy keeps the worldspawn's `call map_roadhouse::main`.
+  The staging function is added as one more `call` key.
+- `rhEndLevel` becomes an `info_null`, so the level does not end.
+- The staging function stands the player in the bar and starts
+  `map_roadhouse::AbductionStart`. Standing there, he trips the ship's entry
+  as the level does, and the grab lights later aim at him. The bar placement
+  also matters for the ship: entities outside the player's PVS do not think.
+  With the player elsewhere, the lights bound to the ship went dormant and
+  kept the positions the ship's 1024-unit setup lift had given them, so the
+  hull rendered unlit.
+- At 43.4 s of game time the function sets `g_stopTime 1`. Frames at the
+  capture settings are slow enough to step past the moment, and the rays
+  sweep quickly: similarity to retail is 0.94 at 43.4 s and 0.73 half a
+  second later. The set's `after` gates the levelshot on that time, once the
+  world has stopped.
+
+The camera was solved with the green rays masked out of the retail art. The
+roof frame (near) and the ship (far) solve to the same camera independently,
+which places the ship at its final height. A scan of game time at that camera
+then found retail's moment. `capture` loads the scene and names the tiles
+after the set.
 
 ## Making them again
 

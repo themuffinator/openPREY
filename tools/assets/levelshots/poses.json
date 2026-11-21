@@ -566,8 +566,34 @@
   },
   "feedingtowera": {
    "map": "game/feedingtowera",
-   "status": "held",
-   "note": "Unsolved. The shot looks into machinery through dark struts with green light rays; with the rays masked, the generic search, cube faces from 150 entities, a dense grid around the map's teal lightbeam emitters, and the player's own view through the opening ride (looking ahead and up) found no camera above 6 inliers."
+   "scene": {
+    "from": "game/roadhouse",
+    "name": "levelshot_feedingtowera",
+    "edit": {
+     "rhEndLevel": {
+      "classname": "info_null",
+      "nextMap": null
+     }
+    },
+    "call": "levelshot_scene::stage",
+    "script": "namespace levelshot_scene {\n\tvoid stage() {\n\t\tsys.wait( 1 );\n\t\t$player1.setOrigin( '368 -100 0' );\n\t\tthread map_roadhouse::AbductionStart();\n\t\twhile ( sys.getTime() < 43.4 ) {\n\t\t\tsys.waitFrame();\n\t\t}\n\t\tsys.setcvar( \"g_stopTime\", \"1\" );\n\t}\n}"
+   },
+   "camera": [
+    326.7,
+    -41.8,
+    68.3,
+    -62.2,
+    359.8,
+    0.0
+   ],
+   "after": 43400,
+   "solve": {
+    "inliers": 73,
+    "median_px": 0.39,
+    "similarity": 0.949
+   },
+   "status": "shipped",
+   "note": "The end of roadhouse, not feedingtowera: the ship over the torn-off roof as its grab light swings onto Tommy. Captured in a staged copy of roadhouse (scene): the player stands in the bar, so the ship's lights stay awake and he trips the ship's entry as the level does; the level does not end, and game time stops at 43.4 s, retail's moment. Solved with the rays masked; the roof frame and the ship agree on the camera, and similarity 0.949 is with the rays at that moment."
   }
  }
 }
