@@ -274,7 +274,9 @@ bool SessionMenuCommand(const std::string& command) {
         "soundClick","soundCancel","soundTick","soundSlideInSmall","soundSlideOutSmall",
         "soundSlideIn","soundSlideOut","soundTabFlip","videoDetect","videoApply",
         // openPREY: the Options page's Controls > Profiles and Reset Defaults.
-        "profileScan","profileSelect","profileLoad","profileSave","profileDelete","settingsResetApply"};
+        "profileScan","profileSelect","profileLoad","profileSave","profileDelete","settingsResetApply",
+        // openPREY: the MultiPrey page's player name and model, and its filters.
+        "mpPreyName","mpPreyModel","joinApplyFilters"};
 	return commands.contains(command);
 }
 
@@ -398,7 +400,8 @@ const PlayerSetting* FindPlayerSetting(const std::string& cvar) {
 		{"s_voiceVolume",{0,0,1}},{"s_micInputLevel",{0,0,10}},
 		// The stock GAME OPTIONS page, in its order (mouse and controller
 		// now on CONTROLS).
-		{"in_freeLook",{1}},{"ui_autoReload",{1}},{"ui_autoSwitch",{0,0,2,true,{},{0,1,2}}},{"in_toggleZoom",{1}},{"pm_zoomedSlow",{0,1,100,true}},
+		// openPREY: Prey's ui_autoSwitch is a Boolean, where Quake 4's took 0 to 2.
+		{"in_freeLook",{1}},{"ui_autoReload",{1}},{"ui_autoSwitch",{1}},{"in_toggleZoom",{1}},{"pm_zoomedSlow",{0,1,100,true}},
 		{"g_decals",{1}},{"ui_showGun",{1}},{"g_simpleItems",{0,0,3,true,{},{0,1,2,3}}},
 		{"g_mpFlatOpponentWeapons",{0,0,1,true,{},{0,1}}},{"m_pitch",{2,0,0,false,{"0.022","-0.022"}}},{"m_smooth",{0,1,8,true}},
 		{"sensitivity",{0,0.01,30,false}},{"m_cpi",{0,0,32000,false}},{"m_filter",{0,0,31,true}},{"cl_mouseAccel",{0,-5,5,false}},
@@ -446,7 +449,14 @@ const PlayerSetting* FindPlayerSetting(const std::string& cvar) {
 		{"r_msaaAlphaToCoverage",{1}},{"r_ssaoRadius",{0,4,256,false}},{"r_ssaoIntensity",{0,0,4,false}},
 		{"r_bloomRadius",{0,0.1,8,false}},{"r_hdrWhitePoint",{0,1,16,false}},{"r_hdrSaturation",{0,0,2,false}},
 		{"r_hdrContrast",{0,0.5,3,false}},{"r_crtAmount",{0,0,1,false}},{"r_crtChromatic",{0,0,8,false}},
-		{"g_crosshair",{0,0,8,true,{},{0,1,2,3,4,5,6,7,8}}}};
+		{"g_crosshair",{0,0,8,true,{},{0,1,2,3,4,5,6,7,8}}},
+		// Its MultiPrey page: Player Settings' data rate, Create Server's
+		// advanced rows that are not Create Server verbs, and Find Servers'
+		// filters (the players filter as the browser reads it: 1 hides full
+		// servers, 3 full and empty ones).
+		{"net_clientMaxRate",{0,0,0,true,{},{24000,32000,16000}}},{"net_serverReloadEngine",{0,0,1,true,{},{0,1}}},
+		{"g_runMapCycle",{1}},{"gui_filter_gameType",{0,0,2,true,{},{0,1,2}}},{"gui_filter_password",{0,0,2,true,{},{0,1,2}}},
+		{"gui_filter_players",{0,0,3,true,{},{0,1,3}}},{"gui_filter_idle",{0,0,1,true,{},{0,1}}}};
 	const auto found = settings.find(cvar);
 	return found == settings.end() ? nullptr : &found->second;
 }

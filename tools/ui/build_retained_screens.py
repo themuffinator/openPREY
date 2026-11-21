@@ -1332,16 +1332,17 @@ def load_game_document() -> dict:
 
 
 def name_field(doc: Document, box, *, ident: str = "save-name", state: str = "save.name", action: str = "rename",
-               key: str = "#str_20128", max_bytes: int = 32, masked: bool = False) -> dict:
+               key: str = "#str_20128", max_bytes: int = 32, masked: bool = False, wash: bool = True,
+               tint: list[float] = TEXT_HOVER, scale: float = 0.33) -> dict:
     """The save's name (SG_Description), or a profile's: a text field on
     prey.list.wash, white throughout as the stock field is. Accept or typing
     opens it and Enter writes `state` through `action`; focus draws its
     outline in prey.rail."""
     x, y, w, h = box
     parts = {part: f"{ident}-{part}" for part in ("viewport", "text", "selection", "caret", "composition", "validation")}
-    em = EM * 0.33
+    em = EM * scale
     line = {**absolute(0, -CAP_LINE[BODY] * em, 4096 / U, h), "font-family": font(BODY), "font-size": length(em * U * FONT_FIT),
-            "line-height": ul(h), "color": colour(TEXT_HOVER), "white-space": keyword("pre"), "text-align": keyword("left")}
+            "line-height": ul(h), "color": colour(tint), "white-space": keyword("pre"), "text-align": keyword("left")}
     def paint(part: str, wide: float, tall: float, tint: list[float]) -> dict:
         return group(parts[part], {"position": keyword("absolute"), "left": length(0), "top": length(0), "width": length(wide),
                                    "height": length(tall), "background-color": colour(tint), "display": keyword("block"),
@@ -1356,7 +1357,8 @@ def name_field(doc: Document, box, *, ident: str = "save-name", state: str = "sa
     rim = box_fill(f"{ident}-rim", (0, 0, w, h), [0, 0, 0, 0], border=RAIL, opacity=number(0))
     ids = doc.states(ident, {state: [(f"{ident}-rim", "opacity", number(on))] for state, on in
                              (("default", 0), ("hover", 0.5), ("focus", 1), ("pressed", 1), ("disabled", 0))}, enter=1, leave=1)
-    return group(ident, absolute(x, y, w, h), [box_fill(f"{ident}-wash", (0, 0, w, h), LIST_WASH), rim, viewport, validation],
+    return group(ident, absolute(x, y, w, h), [box_fill(f"{ident}-wash", (0, 0, w, h), LIST_WASH if wash else [0, 0, 0, 0]), rim,
+                                               viewport, validation],
                  control={"role": "text", "label": key, "action": action, "value": {"state": state},
                           "maxBytes": max_bytes, "parts": parts, "states": ids, **({"masked": True} if masked else {})})
 
@@ -1980,8 +1982,11 @@ def setting_row(doc: Document, ident: str, row: dict, origin) -> dict:
         vector(f"{ident}-plate", dict(size), [svg("plate", d, fill=linear([0, 0], [w * U, 0], [
             (0, rgb(PLATE_ROW, 0.77)), (1, rgb(PLATE_ROW, 0.06))]), stroke=stroke(solid(rgb(PLATE_ROW)), 1 * U, join="round"))]),
         vector(f"{ident}-rim", {**size, "opacity": number(0)}, [svg("rim", d, stroke=stroke(solid(RAIL), 1.5 * U, join="round"))]),
-        *label(f"{ident}-label", row["label"], row["label_rect"], BODY, 0.33, TEXT_LABEL, shadow=True, ty=row["label_ty"]),
+        *label(f"{ident}-label", row["label"], row["label_rect"], BODY, row.get("label_scale", 0.33), TEXT_LABEL, shadow=True,
+               ty=row["label_ty"], align=row.get("label_align", "center")),
     ]
+    if row.get("plain"):     # a filter row: no plate, as the stock filters are bare text; focus outlines it
+        children = [box_fill(f"{ident}-rim", (0, 0, w, h), [0, 0, 0, 0], border=RAIL, opacity=number(0)), *children[2:]]
     cx, cy, cw, ch = row["control_rect"]
     spec = {"label": row["label"], "action": setting["action"], "value": {"state": setting["state"]}}
     if row["kind"] == "choice":
@@ -2001,8 +2006,8 @@ def setting_row(doc: Document, ident: str, row: dict, origin) -> dict:
             choices = OPTION_CHOICES.get(row["cvar"].lower(), row["choices"])
             entries = [((choices, index), typed(index)) for index in range(count)]
         # A row taller than the stock 25 u seats its value in the middle.
-        value = label(f"{ident}-value", PLACEHOLDER, (cx, cy, cw, ch), BODY, 0.33, TEXT_VALUE, centre=ch > 30,
-                      overflow=keyword("hidden"), **ELLIPSIS)
+        value = label(f"{ident}-value", PLACEHOLDER, (cx, cy, cw, ch), BODY, row.get("value_scale", 0.33), TEXT_VALUE,
+                      centre=ch > 30, align=row.get("value_align", "center"), overflow=keyword("hidden"), **ELLIPSIS)
         # Names the session supplies (sound devices) can be long: their list
         # gives them the row's width, where a stock list sits under the value.
         named = any(isinstance(caption, dict) for caption, _ in entries)
@@ -2044,15 +2049,25 @@ def setting_row(doc: Document, ident: str, row: dict, origin) -> dict:
     return node
 
 
-def number_field(doc: Document, ident: str, label_key: str, cvar: str, box, minimum: int, maximum: int) -> dict:
+def number_field(doc: Document, ident: str, label_key: str, cvar: str | None, box, minimum: int, maximum: int, *,
+                 verb: tuple | None = None) -> dict:
     """A typed whole number (the stock editDef of a size row): a field on
     prey.list.wash in prey.text.value. Accept or typing opens it and Enter
-    commits it; focus draws its outline in prey.rail."""
+    commits it; focus draws its outline in prey.rail. `verb` is (state,
+    session verb) for a number the session takes and publishes instead of
+    a CVar the page sets."""
     x, y, w, h = box
-    name, kind = OPTION_SETTINGS[cvar.lower()]
-    state, action = f"cv.{name}", f"set.{name}"
-    doc.state[state] = {"type": "number", "initial": 0, "cvar": name}
-    doc.actions[action] = {"input": "number", "operation": "settings.player.set", "arguments": {"cvar": name, "value": {"input": "value"}}}
+    if verb is None:
+        name, kind = OPTION_SETTINGS[cvar.lower()]
+        state, action = f"cv.{name}", f"set.{name}"
+        doc.state[state] = {"type": "number", "initial": 0, "cvar": name}
+        doc.actions[action] = {"input": "number", "operation": "settings.player.set",
+                               "arguments": {"cvar": name, "value": {"input": "value"}}}
+    else:
+        state, action = verb
+        doc.state.setdefault(state, {"type": "number", "initial": 0})
+        doc.actions[action] = {"input": "number", "operation": "session.menuValue",
+                               "arguments": {"command": action, "value": {"input": "value"}}}
     parts = {part: f"{ident}-{part}" for part in ("viewport", "text", "selection", "caret", "composition", "validation")}
     em = EM * 0.33
     typed = {**absolute(0, -CAP_LINE[BODY] * em, 4096 / U, h), "font-family": font(BODY), "font-size": length(em * U * FONT_FIT),
@@ -2635,6 +2650,593 @@ def options_document() -> dict:
     return page_document(doc, page, dialogs)
 
 
+# ------------------------------------------------------------ MultiPrey
+# The stock MultiPrey page (guis/mainmenu/mainmenu_multiplayer.guifragment):
+# the full page with three top tabs, Player Settings, Create Server (its Create
+# and Advanced side tabs) and Find Servers (the server list over the Selected
+# Server, Filters and IP Connect tabs). Every rect below is the stock window's,
+# in the page frame; the session publishes what the page shows
+# (idSessionLocal::PublishRetainedMultiPrey) and takes its verbs
+# (HandleRetainedMultiPreyRequest): Create Server's and Find Servers' are the
+# Create Server and Join Game pages' own.
+
+MP_BOOK = OPTIONS_BOOK                       # the tab pages: Multiplayer_TabContainer less its 20 u of tabs
+MP_TABS = (("#str_20136", "settings"), ("#str_20142", "create"), ("#str_20171", "find"))
+MP_FIND_TAB = 2                              # the stock page opens on Find Servers (activetab 2)
+MP_MODELS, MP_MODELS_PAGE = 30, 15           # the player definition's models, and a portrait page's
+MP_MAP_ROWS = 64                             # RETAINED_CREATE_MAP_ROWS in the session
+MP_SERVER_ROWS = 64                          # RETAINED_JOIN_ROWS in the session
+MP_SERVER_ROW_H = 16                         # u: a server row
+MP_MAP_ROW_H = 16                            # u: a map row at the stock list's textscale
+MP_NAME_BYTES = 40                           # Multiplayer_Settings_PlayerNameEdit's maxchars
+MP_TEXT_VALUE = rgb("#B8C9E6", 0.9)          # EDITABLE_FORECOLOR
+MP_DIM = 0.2                                 # MODELLIST_DARKCOLOR: a portrait at rest is drawn at 0.8
+MP_TAB_SCALE = 0.33                          # the page's tabDefs keep the default textscale
+
+# Create Server's rows the session acts on, by the row's name: the verb, the
+# state the session publishes (create.*) and its kind.
+for _name, _kind in (("lan", "number"), ("gametype", "number"), ("teamdamage", "boolean"), ("warmup", "boolean"),
+                     ("spectators", "boolean"), ("dedicated", "boolean"), ("usepass", "boolean"), ("servermods", "boolean"),
+                     ("pure", "boolean"), ("rate", "number")):
+    _verb = {"lan": "createLan", "gametype": "createGameType", "teamdamage": "createTeamDamage", "warmup": "createWarmup",
+             "spectators": "createSpectators", "dedicated": "createDedicated", "usepass": "createUsePass",
+             "servermods": "createServerMods", "pure": "createPure", "rate": "createRate"}[_name]
+    OPTION_VERBS[f"create.{_name}"] = {"verb": _verb, "state": f"create.{_name}", "kind": _kind}
+# The settings the page changes directly, as the Options rows do.
+OPTION_SETTINGS.update({
+    "net_clientmaxrate": ("net_clientMaxRate", "number"), "ui_autoswitch": ("ui_autoSwitch", "boolean"),
+    "net_serverreloadengine": ("net_serverReloadEngine", "number"), "g_runmapcycle": ("g_runMapCycle", "boolean"),
+    "gui_filter_gametype": ("gui_filter_gameType", "number"), "gui_filter_password": ("gui_filter_password", "number"),
+    "gui_filter_players": ("gui_filter_players", "number"), "gui_filter_idle": ("gui_filter_idle", "number"),
+})
+
+
+def mp_row(rect, label_key, label_rect, control_rect, cvar, *, choices=None, values=None, label_align="left",
+           value_align="right", plain=False, scale=0.33) -> dict:
+    """A stock row of the MultiPrey page as setting_row reads it."""
+    return {"kind": "choice", "rect": rect, "label": label_key, "label_rect": label_rect, "label_ty": 0.0,
+            "control_rect": control_rect, "cvar": cvar, "choices": choices, "values": values, "section": None,
+            "label_align": label_align, "value_align": value_align, "plain": plain, "label_scale": scale, "value_scale": scale}
+
+
+def mp_plate(ident: str, w: float, h: float) -> dict:
+    """A setting row's plate (textbar_corner, textbarstrip, textbar_invcorner)."""
+    return vector(f"{ident}-plate", {**absolute(0, 0, w, h), **PASSIVE}, [svg("plate", row_d(w, h), fill=linear([0, 0], [w * U, 0], [
+        (0, rgb(PLATE_ROW, 0.77)), (1, rgb(PLATE_ROW, 0.06))]), stroke=stroke(solid(rgb(PLATE_ROW)), 1 * U, join="round"))])
+
+
+def mp_text_row(doc: Document, ident: str, box, label_key: str, label_rect, field_rect, state: str, verb: str, max_bytes: int,
+                *, label_align: str = "left", masked: bool = False) -> dict:
+    """A row whose value is typed (the stock editDef on a setting row): the
+    plate, the caption and the field, drawn on the plate in the value's tint.
+    Enter writes `state` and asks the session to take it (`verb`)."""
+    x, y, w, h = box
+    doc.state.setdefault(state, {"type": "string", "initial": ""})
+    doc.session(verb)
+    entered = f"{verb}Entered"
+    doc.actions[f"enter.{state}"] = {"input": "string", "operation": "ui.state.set",
+                                     "arguments": {"key": state, "value": {"input": "value"}, "event": entered}}
+    doc.events[entered] = [{"op": "action", "action": verb}]
+    field = name_field(doc, field_rect, ident=f"{ident}-field", state=state, action=f"enter.{state}", key=label_key,
+                       max_bytes=max_bytes, masked=masked, wash=False, tint=MP_TEXT_VALUE)
+    return group(ident, absolute(x, y, w, h), [mp_plate(ident, w, h), *label(f"{ident}-label", label_key, label_rect, BODY, 0.33,
+                                                                            TEXT_LABEL, shadow=True, align=label_align), field])
+
+
+def mp_number_row(doc: Document, ident: str, box, label_key: str, field_rect, state: str, verb: str, low: int, high: int) -> dict:
+    """Frag Limit, Time Limit and Max Players: a typed whole number at the
+    trailing end of the row, which the session checks and publishes."""
+    x, y, w, h = box
+    field = number_field(doc, f"{ident}-field", label_key, None, field_rect, low, high, verb=(state, verb))
+    field["children"][0]["properties"]["background-color"] = colour([0, 0, 0, 0])
+    return group(ident, absolute(x, y, w, h), [mp_plate(ident, w, h), *label(f"{ident}-label", label_key, (10, 0, 200, h), BODY, 0.33,
+                                                                            TEXT_LABEL, shadow=True, align="left"), field])
+
+
+def mp_side_tabs(doc: Document, prefix: str, column, sides: list[tuple], state: str, margin: float,
+                 ty: float | None = None) -> tuple[list[dict], list[dict]]:
+    """A column of side tabs joined to the page beside it (section 6), as the
+    Options page draws its own: the tabs share the column's height below
+    `margin`. Returns the furniture (dividers) and the tabs."""
+    cx, cy, cw, ch = column
+    sh = (ch - margin) / len(sides)
+    side_on = f"M9 1.5H{cw + .6}V{sh - 1.5}H0V10.5Z"
+    side_rim = f"M{cw} 1.5H9L0 10.5V{sh - 1.5}H{cw}"
+    side_off = f"M9 1.5H{cw - .5}V{sh - 1.5}H0V10.5Z"
+    paint = linear([0, 0], [cw * U, 0], [(0, rgb("#5A6E80")), (0.55, rgb("#3B4854")), (1, rgb(PAGE_SHADE))])
+    furniture = [line(f"{prefix}-divider-head", (cx + cw, cy, 1, margin))] if margin else []
+    tabs = []
+    for index, (key, events) in enumerate(sides):
+        ident = f"{prefix}_side{index}"
+        box = (cx, cy + margin + index * sh, cw + 1, sh)
+        picked = {"op": "==", "args": [{"state": state}, index]}
+        faces = (tab_face(f"{ident}-idle", box, side_off, solid(rgb("#3E4C61", 0.45)), TAB_TEXT, key, 0.33, ty=ty),
+                 tab_face(f"{ident}-active", box, side_on, paint, TEXT_HOVER, key, 0.33, rim_d=side_rim, rim_tint=rgb("#A7BFD7"),
+                          ty=ty))
+        doc.events[f"{ident}Pick"] = [{"op": "action", "action": doc.session("soundTabFlip")},
+                                     {"op": "setState", "values": {state: index}}, *events]
+        tabs.append(tab_button(doc, ident, box, key, faces, f"{ident}Pick", picked))
+        furniture.append(shown_when(doc, line(f"{prefix}-divider{index}", (cx + cw, box[1], 1, sh)), {"op": "!", "args": [picked]}))
+    return furniture, tabs
+
+
+def mp_top_tabs(doc: Document, prefix: str, book, tabs_box, keys: list[str], state: str, events: list[list]) -> tuple[list, list]:
+    """Tabs along the top of a page (section 6), the page's outline running
+    whole under every inactive one, as the Options page's."""
+    bx, by, bw, bh = book
+    tx, ty, tw_all, th = tabs_box
+    tw = tw_all / len(keys)
+    top_on = f"M0 {th}C3 {th} 4 0 11 0H{tw - 3}L{tw - 1} {th}V{th + .6}H0Z"
+    top_rim = f"M0 {th}C3 {th} 4 0 11 0H{tw - 3}L{tw - 1} {th}"
+    top_off = f"M0 {th - .5}C3 {th - .5} 4 0 11 0H{tw - 3}L{tw - 1} {th - .5}Z"
+    paint = linear([0, 0], [0, th * U], [(0, rgb("#7F95AA")), (0.5, rgb("#3E4C5A")), (1, rgb(PAGE_SHADE))])
+    furniture = [line(f"{prefix}-right", (bx + bw - 1, by, 1, bh)), line(f"{prefix}-foot", (bx, by + bh - 1, bw, 1)),
+                 line(f"{prefix}-left", (bx, by, 1, bh))]
+    if tx > bx:
+        furniture.append(line(f"{prefix}-top-lead", (bx, by, tx - bx, 1)))
+    if tx + tw_all < bx + bw:
+        furniture.append(line(f"{prefix}-top-trail", (tx + tw_all, by, bx + bw - tx - tw_all, 1)))
+    tabs = []
+    for index, key in enumerate(keys):
+        ident, box = f"{prefix}_tab{index}", (tx + index * tw, ty, tw, th + 1)
+        chosen = {"op": "==", "args": [{"state": state}, index]}
+        faces = (tab_face(f"{ident}-idle", box, top_off, solid(rgb("#252831")), TAB_TEXT, key, MP_TAB_SCALE),
+                 tab_face(f"{ident}-active", box, top_on, paint, TEXT_HOVER, key, MP_TAB_SCALE, rim_d=top_rim, rim_tint=RAIL))
+        furniture.append(shown_when(doc, line(f"{prefix}-top{index}", (tx + index * tw, by, tw, 1)), {"op": "!", "args": [chosen]}))
+        doc.events[f"{ident}Pick"] = [{"op": "action", "action": doc.session("soundTabFlip")},
+                                     {"op": "setState", "values": {state: index}}, *events[index]]
+        tabs.append(tab_button(doc, ident, box, key, faces, f"{ident}Pick", chosen))
+    return furniture, tabs
+
+
+def mp_page_shade(ident: str, box) -> list[dict]:
+    """A tab page's wash and its shading from the top (fadebg_top)."""
+    x, y, w, h = box
+    shade = [(0, rgb(PAGE_SHADE, 0.93)), (0.125, rgb(PAGE_SHADE, 0.81)), (0.25, rgb(PAGE_SHADE, 0.64)),
+             (0.5, rgb(PAGE_SHADE, 0.28)), (0.75, rgb(PAGE_SHADE, 0.06)), (1, rgb(PAGE_SHADE, 0))]
+    return [box_fill(f"{ident}-wash", box, PAGE_WASH),
+            vector(f"{ident}-shade", {**absolute(x, y, w, h / 4), **PASSIVE}, [
+                svg("shade", f"M0 0H{w}V{h / 4}H0Z", fill=linear([0, 0], [0, h / 4 * U], shade))])]
+
+
+def mp_settings_page(doc: Document) -> tuple[list[dict], str]:
+    """Player Settings: the name, data rate and weapon switch rows, the
+    chosen model's portrait and name, and the 30 models' portraits on two
+    numbered tabs. A portrait chooses its model."""
+    px, py = MP_BOOK[0], MP_BOOK[1]
+    rows_x, rows_y = px + 20, py + 20
+    nodes = []
+    doc.state["mp.name"] = {"type": "string", "initial": ""}
+    name = mp_text_row(doc, "mp_name", (rows_x, rows_y, 530, 25), "#str_20138", (0, 0, 265, 25), (265, 0, 265, 25), "mp.name",
+                       "mpPreyName", MP_NAME_BYTES, label_align="center")
+    nodes.append(name)
+    for ident, y, key, cvar, choices, values in (
+            ("opt_net_clientmaxrate", 30, "#str_20139", "net_clientMaxRate", "#str_20140", ["24000", "32000", "16000"]),
+            ("opt_ui_autoswitch", 60, "#str_20273", "ui_autoSwitch", "#str_20152", None)):
+        row = mp_row((0, y, 530, 25), key, (0, 0, 265, 25), (265 + TEXT_INSET + 2, 0, 263, 25), cvar, choices=choices,
+                     values=values, label_align="center", value_align="left")
+        nodes.append(setting_row(doc, ident, row, (rows_x, rows_y)))
+    # The model: its portrait in a picture frame and its name under it.
+    mx, my = px + 10, py + 105
+    doc.state["mp_currentmodelportrait"] = {"type": "string", "initial": ""}
+    doc.state["mp_currentmodelname"] = {"type": "string", "initial": ""}
+    portrait = picture("mp-model", "guis/assets/menu/questionmark", {**absolute(mx + 10, my + 35, 128, 128), **PASSIVE}, fit="fill")
+    doc.bind("mp-model", "image", {"state": "mp_currentmodelportrait"})
+    nodes += [*label("mp-model-caption", "#str_20137", (mx + 10, my + 18, 150, 16), BODY, 0.33, TEXT_LABEL, align="left",
+                     shadow=True, ty=-6),
+              portrait, picture_frame("mp-model-frame", (mx + 9, my + 34, 130, 130)),
+              *bound(doc, label("mp-model-name", PLACEHOLDER, (mx, my + 165, 148, 20), BODY, 0.4, MP_TEXT_VALUE, shadow=True, ty=-5),
+                     "mp_currentmodelname")]
+    # The portraits, fifteen to a numbered page.
+    gx, gy, gw, gh = mx + 200, my + 10, 318, 210
+    doc.state["mp.pick"] = {"type": "number", "initial": -1}
+    doc.state["mp.models.page"] = {"type": "number", "initial": 0}
+    doc.session("mpPreyModel")
+    pages_box = (gx, gy + 20, gw, gh - 20)
+    furniture, tabs = mp_top_tabs(doc, "mp_models", pages_box, (gx + 120, gy, gw - 120, 20), ["#str_21001", "#str_21002"], "mp.models.page",
+                                  [[], []])
+    nodes += [box_fill("mp-models-wash", pages_box, PAGE_WASH), *furniture]
+    click = doc.session("soundClick")
+    for page in range(MP_MODELS // MP_MODELS_PAGE):
+        cells = []
+        for slot in range(MP_MODELS_PAGE):
+            index = page * MP_MODELS_PAGE + slot
+            ident = f"mp_portrait{index}"
+            doc.state[f"mp_modelportrait{index}"] = {"type": "string", "initial": ""}
+            doc.state[f"mp_modelname{index}"] = {"type": "string", "initial": ""}
+            box = (gx + 6 + 62 * (slot % 5), gy + 25 + 61 * (slot // 5), 58, 58)
+            image_node = picture(f"{ident}-image", "guis/assets/menu/questionmark", {**absolute(0, 0, 58, 58), **PASSIVE})
+            doc.bind(f"{ident}-image", "image", {"state": f"mp_modelportrait{index}"})
+            veil = box_fill(f"{ident}-veil", (0, 0, 58, 58), [0, 0, 0, MP_DIM], opacity=number(1))
+            current = shown_when(doc, box_fill(f"{ident}-current", (0, 0, 58, 58), [0, 0, 0, 0], border=PICTURE_FRAME),
+                                 {"op": "==", "args": [{"state": "cv.ui_modelNum"}, str(index)]})
+            rim = box_fill(f"{ident}-rim", (0, 0, 58, 58), [0, 0, 0, 0], border=RAIL, opacity=number(0))
+
+            def lit(veil_on: float, rim_on: float) -> list:
+                return [(f"{ident}-veil", "opacity", number(veil_on)), (f"{ident}-rim", "opacity", number(rim_on))]
+            ids = doc.states(ident, {"default": lit(1, 0), "hover": lit(0, 0), "focus": lit(0, 1), "pressed": lit(0, 1),
+                                     "disabled": lit(1, 0)}, enter=1, leave=1)
+            doc.events[f"{ident}Pick"] = [{"op": "action", "action": click}, {"op": "setState", "values": {"mp.pick": index}},
+                                         {"op": "action", "action": "mpPreyModel"}]
+            cell = group(ident, absolute(*box), [image_node, veil, current, rim],
+                         control=control(PLACEHOLDER, ids, event=f"{ident}Pick"))
+            cells.append(shown_when(doc, cell, {"op": "!=", "args": [{"state": f"mp_modelportrait{index}"}, ""]}))
+        nodes.append(shown_when(doc, group(f"mp-models-page{page}", {**absolute(0, 0, FULL_FRAME[2], FULL_FRAME[3])}, cells),
+                                {"op": "==", "args": [{"state": "mp.models.page"}, page]}))
+    doc.state["cv.ui_modelNum"] = {"type": "string", "initial": "", "cvar": "ui_modelNum"}
+    nodes += tabs
+    return nodes, "mp_name-field"
+
+
+def mp_list_row(doc: Document, ident: str, width: float, height: float, cells: list[tuple], selected, event: str,
+                shown) -> dict:
+    """A row of a list on this page: its cells (ident, state, x, w, align),
+    the selection band while `selected`, and the pointer and focus as the
+    saves list shows them."""
+    whole = (0, 0, width, height)
+    band = shown_when(doc, box_fill(f"{ident}-selected", whole, LIST_SELECTION, border=LIST_OUTLINE), selected)
+    rim = box_fill(f"{ident}-rim", whole, [0, 0, 0, 0], border=RAIL, opacity=number(0))
+    nodes, names = [], []
+    for cell, state, x, w, align in cells:
+        if state is None:
+            continue
+        made = bound(doc, label(f"{ident}-{cell}", PLACEHOLDER, (x, 0, w, height), BODY, 0.25, TEXT_LIST, align=align, centre=True,
+                                overflow=keyword("hidden"), **ELLIPSIS), state)
+        nodes += made
+        names.append(made[-1]["id"])
+
+    def lit(tint: list[float], rim_on: float) -> list:
+        return [(name, "color", colour(tint)) for name in names] + [(f"{ident}-rim", "opacity", number(rim_on))]
+    ids = doc.states(ident, {"default": lit(TEXT_LIST, 0), "hover": lit(TEXT_HOVER, 0), "focus": lit(TEXT_HOVER, 1),
+                             "pressed": lit(TEXT_HOVER, 1), "disabled": lit(rgb("#A6BAD4", 0.3), 0)}, enter=1, leave=1)
+    row = group(ident, {"position": keyword("relative"), "display": keyword("none"), "width": ul(width), "height": ul(height),
+                        "flex-shrink": number(0)}, [band, rim, *nodes], control=control(PLACEHOLDER, ids, event=event))
+    doc.bind(ident, "display", {"op": "select", "args": [shown, "block", "none"]})
+    return row
+
+
+def mp_create_page(doc: Document) -> tuple[list[dict], str]:
+    """Create Server: the Create and Advanced side tabs. Create names the
+    server, shows the chosen map's picture over the map list and the rows
+    beside them; Advanced has the password, remote console, map cycle and
+    rate rows. Create on either starts the server, as the stock page's does.
+    PunkBuster, a discontinued service, has no row."""
+    px, py = MP_BOOK[0], MP_BOOK[1]
+    column = (px + 25, py + 10, 80, 350)
+    inner = (px + 105, py + 10, 440, 350)
+    doc.state["create.side"] = {"type": "number", "initial": 0}
+    furniture, tabs = mp_side_tabs(doc, "create", column, [("#str_20143", []), ("#str_20160", [])], "create.side", 40,
+                                   ty=19)
+    ix, iy, iw, ih = inner
+    nodes = [line("create-inner-top", (ix, iy, iw, 1)), line("create-inner-right", (ix + iw - 1, iy, 1, ih)),
+             line("create-inner-foot", (ix, iy + ih - 1, iw, 1)), *furniture]
+    click = doc.session("soundClick")
+    doc.events["createRequested"] = [{"op": "action", "action": click}, {"op": "action", "action": doc.session("createStart")}]
+
+    # Create.
+    name = mp_text_row(doc, "create_name", (ix + 20, iy + 10, 400, 24), "#str_20144", (10, 0, 130, 24), (140, 0, 260, 24),
+                       "create.name", "createName", 24)
+    cx, cy = ix + 20, iy + 32
+    # The chosen map's picture, Game Map and the map list.
+    doc.state["create.shot"] = {"type": "string", "initial": ""}
+    for key in ("map_count", "map_first"):
+        doc.state[f"create.{key}"] = {"type": "number", "initial": 0}
+    for key in ("map_selected", "pick"):
+        doc.state[f"create.{key}"] = {"type": "number", "initial": -1}
+    shot = picture("create-shot", RETAINED_GENERIC_SHOT, {**absolute(cx, cy + 9, 170, 120), "background-color": colour([0, 0, 0, 1]),
+                                                          **PASSIVE}, fit="cover")
+    doc.bind("create-shot", "image", {"state": "create.shot"})
+    doc.session("createMap")
+    rows = []
+    for index in range(MP_MAP_ROWS):
+        doc.state[f"create.map{index}"] = {"type": "string", "initial": ""}
+        at = {"op": "+", "args": [{"state": "create.map_first"}, index]}
+        doc.events[f"createMap{index}Pick"] = [{"op": "action", "action": "soundTick"},
+                                              {"op": "setState", "values": {"create.pick": index}}, {"op": "action", "action": "createMap"}]
+        rows.append(mp_list_row(doc, f"map-{index}", 150, MP_MAP_ROW_H, [("name", f"create.map{index}", 3, 145, "left")],
+                                {"op": "==", "args": [at, {"state": "create.map_selected"}]}, f"createMap{index}Pick",
+                                {"op": "<", "args": [at, {"state": "create.map_count"}]}))
+    doc.session("soundTick")
+    column_node = group("create-maps-column", {"position": keyword("relative"), "display": keyword("flex"),
+                                              "flex-direction": keyword("column")}, rows)
+    map_list = [box_fill("create-maps-wash", (cx, cy + 155, 170, 155), [0, 0, 0, 0.5]),
+                picture_frame("create-maps-frame", (cx, cy + 155, 170, 155)),
+                group("create-maps", {**absolute(cx + 2, cy + 159, 150, 146), "overflow": keyword("auto")}, [column_node]),
+                scrollbar(doc, "create_maps_scroll", "create-maps", (cx + 153, cy + 156, 16, 152), "#str_20146", MP_MAP_ROW_H)]
+    normal = [name, shot, picture_frame("create-shot-frame", (cx, cy + 9, 170, 120)),
+              *label("create-map-title", "#str_20146", (cx, cy + 133, 170, 25), BODY, 0.33, TEXT_LABEL, align="left", shadow=True),
+              *map_list]
+    choices = [("lan", "#str_20147", "#str_20148"), ("gametype", "#str_20149", "#str_20150"), ("teamdamage", "#str_20151", "#str_20152")]
+    for at, (field, key, options) in enumerate(choices):
+        row = mp_row((0, 9 + 27 * at, 220, 24), key, (10, 0, 200, 24), (80, 0, 115, 24), f"create.{field}", choices=options)
+        normal.append(setting_row(doc, f"create_{field}", row, (cx + 180, cy)))
+    for at, (field, key, verb, low, high, box) in enumerate((
+            ("fraglimit", "#str_20153", "createFragLimit", 1, 999, (172, 0, 40, 24)),
+            ("timelimit", "#str_20154", "createTimeLimit", 0, 60, (172, 0, 40, 24)),
+            ("maxplayers", "#str_20155", "createMaxPlayers", 1, 32, (172, 0, 40, 24)))):
+        normal.append(mp_number_row(doc, f"create_{field}", (cx + 180, cy + 9 + 27 * (3 + at), 220, 24), key, box,
+                                    f"create.{field}", verb, low, high))
+    for at, (field, key) in enumerate((("warmup", "#str_20156"), ("spectators", "#str_20157"), ("dedicated", "#str_20158"))):
+        row = mp_row((0, 9 + 27 * (6 + at), 220, 24), key, (10, 0, 200, 24), (80, 0, 115, 24), f"create.{field}", choices="#str_20152")
+        normal.append(setting_row(doc, f"create_{field}", row, (cx + 180, cy)))
+    normal.append(button(doc, "create_go", "#str_20143", (cx + 280, cy + 280, 120, 30), event="createRequested", scale=0.35))
+
+    # Advanced.
+    ax, ay = ix + 10, iy + 32
+    advanced = [*header_bar("create-advanced-head", (ix + 10, iy + 15, 420, 28), "#str_20161")]
+    for at, spec in enumerate((
+            ("usepass", "#str_20162", "choice", "create.usepass", "#str_20152"),
+            ("password", "#str_20163", "text", "create.password", "createPassword", 16, True),
+            ("rconpassword", "#str_20164", "text", "create.rconpassword", "createRconPassword", 16, True),
+            ("reload", "#str_20165", "choice", "net_serverReloadEngine", "#str_20152"),
+            ("servermods", "#str_20166", "choice", "create.servermods", "#str_20152"),
+            ("cyclescript", "#str_41025", "choice", "g_runMapCycle", "#str_20152"),
+            ("mapcycle", "#str_20167", "text", "create.mapcycle", "createMapCycle", 200, False),
+            ("pure", "#str_20168", "choice", "create.pure", "#str_20152"),
+            ("rate", "#str_20169", "choice", "create.rate", "#str_20170"))):
+        field, key, kind = spec[:3]
+        box = (0, 25 + 27 * at, 420, 24)
+        if kind == "choice":
+            row = mp_row(box, key, (10, 0, 250, 24), (270, 0, 130, 24), spec[3], choices=spec[4])
+            advanced.append(setting_row(doc, f"create_{field}", row, (ax, ay)))
+        else:
+            advanced.append(mp_text_row(doc, f"create_{field}", (ax + box[0], ay + box[1], 420, 24), key, (10, 0, 250, 24),
+                                        (270, 0, 130, 24), spec[3], spec[4], spec[5], masked=spec[6]))
+    advanced.append(button(doc, "create_go2", "#str_20143", (ax + 290, ay + 280, 120, 30), event="createRequested", scale=0.35))
+    nodes.append(shown_when(doc, group("create-normal", absolute(0, 0, FULL_FRAME[2], FULL_FRAME[3]), normal),
+                            {"op": "==", "args": [{"state": "create.side"}, 0]}))
+    nodes.append(shown_when(doc, group("create-advanced", absolute(0, 0, FULL_FRAME[2], FULL_FRAME[3]), advanced),
+                            {"op": "==", "args": [{"state": "create.side"}, 1]}))
+    doc.events["create_side0Pick"].append({"op": "focus", "control": "create_name-field"})
+    doc.events["create_side1Pick"].append({"op": "focus", "control": "create_usepass"})
+    return nodes + tabs, "create_side0"
+
+
+MP_FIND_COLUMNS = (   # header rect, key, sort verb, the row's cell (state field, x, w, align)
+    ((7, 7, 13, 25), None, None, None),
+    ((22, 7, 13, 25), None, None, None),
+    ((37, 7, 13, 25), None, "joinSortLocked", None),
+    ((52, 7, 198, 25), "#str_20172", "joinSortName", ("name", 50, 194, "left")),
+    ((252, 7, 67, 25), "#str_20173", "joinSortPlayers", ("players", 248, 65, "left")),
+    ((321, 7, 38, 25), "#str_20174", "joinSortPing", ("ping", 317, 36, "left")),
+    ((361, 7, 95, 25), "#str_20175", "joinSortGameType", ("type", 357, 93, "left")),
+    ((458, 7, 106, 25), "#str_20176", "joinSortMap", ("map", 454, 88, "left")),
+)
+LOCK_D = "M3 6V4.2C3 2.4 4.2 1.2 6 1.2C7.8 1.2 9 2.4 9 4.2V6M1.8 6H10.2V11.4H1.8Z"   # the stock lock icon, traced
+
+
+def mp_find_page(doc: Document) -> tuple[list[dict], str]:
+    """Find Servers: the server list with its sortable headings, Quick
+    Refresh, Refresh All and the Internet and LAN source, over the Selected
+    Server tab (Summary, Details and Players of the chosen server), Filters
+    and IP Connect. A row chooses its server; Accept on the chosen one, or
+    Join Game, joins it."""
+    px, py = MP_BOOK[0], MP_BOOK[1]
+    place = lambda box: (px + box[0], py + box[1], box[2], box[3])
+    black = [0, 0, 0, 1]
+    for key, kind, initial in (("count", "number", 0), ("listed", "number", 0), ("first", "number", 0), ("selected", "number", -1),
+                               ("pick", "number", -1), ("detail", "number", -1), ("sort", "number", 0), ("ascending", "boolean", True),
+                               ("lan", "boolean", False), ("scanning", "boolean", False)):
+        doc.state[f"join.{key}"] = {"type": kind, "initial": initial}
+    for key in ("notice", "status", "shot", "address", "addressError", "clientip",
+                *[f"sel.{field}" for field in ("name", "map", "type", "players", "address", "password")],
+                *[f"sel.player{index}" for index in range(8)]):
+        doc.state[f"join.{key}"] = {"type": "string", "initial": ""}
+    tick, click = doc.session("soundTick"), doc.session("soundClick")
+    nodes = []
+    # The headings sort by their column, as the stock buttons do.
+    for index, (box, key, verb, _) in enumerate(MP_FIND_COLUMNS):
+        head = place(box)
+        cell = [box_fill(f"find-head{index}", head, LIST_WASH, border=black)]
+        if key:
+            cell += label(f"find-head{index}-text", key, (head[0] + 3, head[1], head[2] - 3, head[3]), BODY, 0.33, TEXT_HOVER,
+                          align="left", shadow=True, ty=-2)
+        if index == 2:
+            cell.append(vector("find-head-lock", {**absolute(head[0] + 0.5, head[1] + 6, 12, 13), **PASSIVE}, [
+                svg("lock", LOCK_D, stroke=stroke(solid(rgb("#E0C060")), 1 * U, join="round"))]))
+        if verb:
+            doc.events[f"{verb}Pick"] = [{"op": "action", "action": tick}, {"op": "action", "action": doc.session(verb)}]
+            rim = box_fill(f"find_head{index}-rim", (0, 0, head[2], head[3]), [0, 0, 0, 0], border=RAIL, opacity=number(0))
+            ids = doc.states(f"find_head{index}", {state: [(f"find_head{index}-rim", "opacity", number(on))] for state, on in
+                                                   (("default", 0), ("hover", 0.5), ("focus", 1), ("pressed", 1), ("disabled", 0))},
+                             enter=1, leave=1)
+            nodes.append(group(f"find-head{index}-box", {**absolute(0, 0, FULL_FRAME[2], FULL_FRAME[3]), **PASSIVE}, cell))
+            nodes.append(group(f"find_head{index}", absolute(*head), [rim], control=control(key or "#str_20188", ids,
+                                                                                           event=f"{verb}Pick")))
+        else:
+            nodes += cell
+    for index, (box, _, _, _) in enumerate(MP_FIND_COLUMNS):
+        x, _, w, _ = box
+        nodes.append(box_fill(f"find-box{index}", place((x, 34, w if index < 7 else 92, 173)), LIST_WASH, border=black))
+    # The rows.
+    doc.session("joinPick")
+    doc.session("joinServer")
+    rows = []
+    for index in range(MP_SERVER_ROWS):
+        for field in ("name", "ping", "players", "type", "map"):
+            doc.state[f"join.row{index}.{field}"] = {"type": "string", "initial": ""}
+        doc.state[f"join.row{index}.lock"] = {"type": "boolean", "initial": False}
+        at = {"op": "+", "args": [{"state": "join.first"}, index]}
+        selected = {"op": "==", "args": [at, {"state": "join.selected"}]}
+        doc.events[f"server{index}Pick"] = [{"op": "if", "condition": selected, "then": [{"op": "call", "event": "joinRequested"}],
+                                             "else": [{"op": "action", "action": tick},
+                                                      {"op": "setState", "values": {"join.pick": index, "join.detail": index}},
+                                                      {"op": "action", "action": "joinPick"}]}]
+        doc.events[f"joinFocus{index}"] = [{"op": "focus", "control": f"server-{index}"}]
+        cells = [(cell[0], f"join.row{index}.{cell[0]}", cell[1], cell[2], cell[3]) for _, _, _, cell in MP_FIND_COLUMNS if cell]
+        row = mp_list_row(doc, f"server-{index}", 543, MP_SERVER_ROW_H, cells, selected, f"server{index}Pick",
+                          {"op": "<", "args": [at, {"state": "join.count"}]})
+        row["children"].append(shown_when(doc, vector(f"server-{index}-lock", {**absolute(33.5, 2, 12, 13), **PASSIVE}, [
+            svg("lock", LOCK_D, stroke=stroke(solid(rgb("#E0C060")), 1 * U, join="round"))]), {"state": f"join.row{index}.lock"}))
+        rows.append(row)
+    doc.events["joinRowsReveal"] = []
+    newer = pager_row(doc, "join-newer", "#str_231425", doc.session("joinNewer"), 543, 0.25,
+                      {"op": ">", "args": [{"state": "join.first"}, 0]})
+    older = pager_row(doc, "join-older", "#str_231426", doc.session("joinOlder"), 543, 0.25,
+                      {"op": "<", "args": [{"op": "+", "args": [{"state": "join.first"}, MP_SERVER_ROWS]}, {"state": "join.count"}]})
+    column_node = group("find-column", {"position": keyword("relative"), "display": keyword("flex"),
+                                       "flex-direction": keyword("column")}, [newer, *rows, older])
+    nodes.append(group("find-list", {**absolute(*place((5, 38, 543, 169))), "overflow": keyword("auto")}, [column_node]))
+    nodes.append(scrollbar(doc, "find_scroll", "find-list", place((548, 34, 16, 173)), "#str_20171", MP_SERVER_ROW_H))
+    # While the list is empty, the scan's notice says why.
+    nodes.append(shown_when(doc, group("find-notice", {**absolute(*place((60, 100, 440, 40))), **PASSIVE}, bound(doc, label(
+        "find-notice-text", PLACEHOLDER, (0, 0, 440, 40), BODY, 0.28, TEXT_VALUE, wrap=True, shadow=True), "join.notice")),
+        {"op": "==", "args": [{"state": "join.count"}, 0]}))
+    # Quick Refresh, Refresh All and the source.
+    doc.events["joinRefreshPick"] = [{"op": "action", "action": doc.session("soundClick")}, {"op": "action", "action": doc.session("joinRefresh")}]
+    doc.events["joinNewListPick"] = [{"op": "action", "action": click}, {"op": "action", "action": doc.session("joinNewList")}]
+    nodes.append(button(doc, "find_refresh", "#str_20177", place((10, 209, 120, 24)), event="joinRefreshPick", scale=0.3))
+    nodes.append(button(doc, "find_refreshall", "#str_20178", place((135, 209, 120, 24)), event="joinNewListPick", scale=0.3))
+    nodes += label("find-source-title", "#str_20179", place((255, 209, 145, 24)), BODY, 0.28, TEXT_LABEL, align="right", shadow=True,
+                   ty=-2)
+    for index, (key, verb, on) in enumerate((("#str_20180", "joinSourceInternet", False), ("#str_20181", "joinSourceLan", True))):
+        ident, box = f"find_source{index}", place((405 + 69 * index, 210, 70, 20))
+        chosen = {"op": "==", "args": [{"state": "join.lan"}, on]}
+        doc.events[f"{ident}Pick"] = [{"op": "action", "action": click}, {"op": "action", "action": doc.session(verb)}]
+        band = shown_when(doc, box_fill(f"{ident}-on", (0, 0, 70, 20), rgb("#A6BAD4", 0.55)), chosen)
+        rim = box_fill(f"{ident}-rim", (0, 0, 70, 20), [0, 0, 0, 0], border=RAIL, opacity=number(0))
+        text_nodes = label(f"{ident}-label", key, (0, 0, 70, 20), BODY, 0.28, TEXT_BUTTON, shadow=True, ty=-2)
+
+        def lit(tint: list[float], rim_on: float, ident=ident) -> list:
+            return [(f"{ident}-label", "color", colour(tint)), (f"{ident}-rim", "opacity", number(rim_on))]
+        ids = doc.states(ident, {"default": lit(TEXT_BUTTON, 0), "hover": lit(TEXT_HOVER, 0), "focus": lit(TEXT_HOVER, 1),
+                                 "pressed": lit(TEXT_HOVER, 1), "disabled": lit(TEXT_BUTTON_OFF, 0)}, enter=1, leave=1)
+        nodes.append(group(ident, absolute(*box), [box_fill(f"{ident}-box", (0, 0, 70, 20), [0, 0, 0, 0.6], border=SEPARATOR),
+                                                   band, rim, *text_nodes], control=control(key, ids, event=f"{ident}Pick")))
+
+    # The tabs below: Selected Server, Filters and IP Connect.
+    bx, by = px + 9, py + 235
+    lower = (bx, by + 20, 553, 106)
+    doc.state["find.tab"] = {"type": "number", "initial": 0}
+    furniture, tabs = mp_top_tabs(doc, "find_lower", lower, (bx + 120, by, 433, 20), ["#str_20182", "#str_20192", "#str_20201"],
+                                  "find.tab", [[], [], []])
+    nodes += [*mp_page_shade("find-lower", lower), *furniture]
+    chosen_server = {"op": ">=", "args": [{"state": "join.selected"}, 0]}
+    doc.events["joinRequested"] = [{"op": "if", "condition": chosen_server, "then": [
+        {"op": "action", "action": click}, {"op": "action", "action": "joinServer"}]}]
+
+    def join_button(ident: str, origin) -> dict:
+        return button(doc, ident, "#str_20190", (origin[0] + 315, origin[1] + 68, 120, 28), event="joinRequested", scale=0.33,
+                      enabled=chosen_server)
+    # Selected Server: its side tabs and their pages.
+    sx, sy = bx + 2, by + 20
+    doc.state["find.side"] = {"type": "number", "initial": 0}
+    side_furniture, side_tabs = mp_side_tabs(doc, "find", (sx, sy, 103, 106), [("#str_20183", []), ("#str_41121", []),
+                                                                               ("#str_20173", [])], "find.side", 0)
+    ox, oy = sx + 103, sy
+    info = lambda ident, state, box, scale=0.28, tint=MP_TEXT_VALUE: bound(doc, label(
+        ident, PLACEHOLDER, (ox + box[0], oy + box[1], box[2], box[3]), BODY, scale, tint, align="left", shadow=True,
+        overflow=keyword("hidden"), **ELLIPSIS), state)
+    shot = picture("find-shot", RETAINED_GENERIC_SHOT, {**absolute(ox + 4, oy + 8, 115, 92), **PASSIVE}, fit="cover")
+    doc.bind("find-shot", "image", {"state": "join.shot"})
+    summary = [
+        shown_when(doc, group("find-none", {**absolute(ox + 4, oy + 8, 115, 92), **PASSIVE},
+                               label("find-none-text", "#str_20184", (0, 6, 115, 80), BODY, 0.33, TEXT_LABEL, wrap=True, shadow=True)),
+                   {"op": "!", "args": [chosen_server]}),
+        shown_when(doc, shot, chosen_server),
+        picture_frame("find-shot-frame", (ox + 4, oy + 8, 115, 92)),
+        *info("find-sel-name", "join.sel.name", (120, 8, 190, 22), 0.33, TEXT_LABEL),
+        *info("find-sel-map", "join.sel.map", (120, 33, 190, 18)),
+        *info("find-sel-type", "join.sel.type", (120, 48, 190, 18)),
+        *info("find-sel-players", "join.sel.players", (120, 63, 190, 18)),
+        join_button("find_join0", (ox, oy)),
+    ]
+    details = [*info("find-det-name", "join.sel.name", (10, 3, 428, 18), 0.3, TEXT_LABEL)]
+    for at, (key, state) in enumerate((("#str_20185", "join.sel.address"), ("#str_20186", "join.sel.map"),
+                                       ("#str_20187", "join.sel.type"), ("#str_20188", "join.sel.password"),
+                                       ("#str_20191", "join.sel.players"))):
+        details += label(f"find-det{at}-title", key, (ox + 10, oy + 20 + 15 * at, 115, 15), BODY, 0.25, TEXT_LABEL, align="left",
+                         shadow=True)
+        details += info(f"find-det{at}", state, (125, 20 + 15 * at, 180, 15), 0.25)
+    details.append(join_button("find_join1", (ox, oy)))
+    players = [box_fill("find-players-a", (ox + 20, oy + 15, 140, 80), [0, 0, 0, 0.3], border=SEPARATOR),
+               box_fill("find-players-b", (ox + 159, oy + 15, 140, 80), [0, 0, 0, 0.3], border=SEPARATOR)]
+    for index in range(8):
+        players += info(f"find-player{index}", f"join.sel.player{index}",
+                        (25 + 139 * (index // 4), 25 + 15 * (index % 4), 130, 14), 0.25)
+    players += label("find-players-title", "#str_20191", (ox + 310, oy + 15, 130, 25), BODY, 0.3, TEXT_LABEL, shadow=True)
+    players += info("find-players-limit", "join.sel.players", (340, 40, 70, 20), 0.3)
+    players.append(join_button("find_join2", (ox, oy)))
+    side_pages = [shown_when(doc, group(f"find-side{index}", {**absolute(0, 0, FULL_FRAME[2], FULL_FRAME[3])}, page),
+                             {"op": "==", "args": [{"state": "find.side"}, index]})
+                  for index, page in enumerate((summary, details, players))]
+    selected_tab = [*side_furniture, *side_pages, *side_tabs]
+    # Filters: the stock rows, bare on the page, and Apply Filters.
+    fx, fy = bx + 5, by + 20
+    filters = []
+    for at, (cvar, key, options, values) in enumerate((
+            ("gui_filter_gameType", "#str_20193", "#str_20194", None),
+            ("gui_filter_password", "#str_20163", "#str_20195", None),
+            # Hide both hides full and empty servers, as the browser reads the CVar.
+            ("gui_filter_players", "#str_20196", "#str_20197", ["0", "1", "3"]),
+            ("gui_filter_idle", "#str_20198", "#str_20199", None))):
+        row = mp_row((0, 5 + 15 * at, 300, 15), key, (0, 0, 150, 15), (150, 0, 150, 15), cvar, choices=options, values=values,
+                     value_align="left", plain=True, scale=0.25)
+        filters.append(setting_row(doc, f"opt_{cvar.lower()}", row, (fx + 50, fy + 10)))
+    doc.events["joinApplyFiltersPick"] = [{"op": "action", "action": click}, {"op": "action", "action": doc.session("joinApplyFilters")}]
+    filters.append(button(doc, "find_filters_apply", "#str_20200", (fx + 415, fy + 68, 120, 28), event="joinApplyFiltersPick",
+                          scale=0.33))
+    # IP Connect: the address, typed, and Connect to IP; a refusal says why
+    # in place of the instructions.
+    doc.state["ui.numberDraftsPending"] = {"type": "boolean", "initial": False}
+    doc.actions["enter.join.address"] = {"input": "string", "operation": "ui.state.set",
+                                         "arguments": {"key": "join.address", "value": {"input": "value"}, "event": "joinAddressEntered"}}
+    doc.actions["editAddress"] = {"operation": "ui.numberDrafts.focus", "arguments": {}}
+    connect = doc.session("joinConnect")
+    doc.events["joinAddressEntered"] = [{"op": "action", "action": click}, {"op": "action", "action": connect}]
+    doc.events["joinConnectPick"] = [{"op": "if", "condition": {"state": "ui.numberDraftsPending"},
+                                      "then": [{"op": "action", "action": "editAddress"}],
+                                      "else": [{"op": "action", "action": click}, {"op": "action", "action": connect}]}]
+    error = {"op": "!=", "args": [{"state": "join.addressError"}, ""]}
+    address = name_field(doc, (fx + 202, fy + 72, 146, 20), ident="find-address", state="join.address", action="enter.join.address",
+                         key="#str_20201", max_bytes=99, tint=TEXT_HOVER, scale=0.3, wash=False)
+    connect_tab = [
+        shown_when(doc, group("find-ip-help", {**absolute(fx + 100, fy + 10, 350, 50), **PASSIVE},
+                              label("find-ip-help-text", "#str_20202", (0, 0, 350, 50), BODY, 0.28, TEXT_LABEL, wrap=True, shadow=True)),
+                   {"op": "!", "args": [error]}),
+        shown_when(doc, group("find-ip-error", {**absolute(fx + 60, fy + 10, 430, 50), **PASSIVE}, bound(doc, label(
+            "find-ip-error-text", PLACEHOLDER, (0, 0, 430, 50), BODY, 0.26, TEXT_LABEL, wrap=True, shadow=True), "join.addressError")),
+            error),
+        box_fill("find-ip-box", (fx + 200, fy + 70, 150, 25), [0, 0, 0, 0.4]),
+        box_fill("find-ip-field", (fx + 202, fy + 72, 146, 20), [0, 0, 0, 0.6]),
+        address,
+        button(doc, "find_ip_connect", "#str_20203", (fx + 415, fy + 68, 120, 28), event="joinConnectPick", scale=0.33,
+               enabled={"op": "||", "args": [{"op": "!=", "args": [{"state": "join.address"}, ""]}, {"state": "ui.numberDraftsPending"}]}),
+    ]
+    for index, page in enumerate((selected_tab, filters, connect_tab)):
+        nodes.append(shown_when(doc, group(f"find-lower{index}", {**absolute(0, 0, FULL_FRAME[2], FULL_FRAME[3])}, page),
+                                {"op": "==", "args": [{"state": "find.tab"}, index]}))
+    doc.events["find_lower_tab0Pick"].append({"op": "focus", "control": "find_side0"})
+    doc.events["find_lower_tab1Pick"].append({"op": "focus", "control": "opt_gui_filter_gametype"})
+    doc.events["find_lower_tab2Pick"].append({"op": "focus", "control": "find-address"})
+    return nodes + tabs, "find_refreshall"
+
+
+def multiprey_document() -> dict:
+    """MultiPrey (section 9): the full page, its three top tabs and their
+    pages. The page opens on Find Servers, as the stock page does, which
+    asks for a new list of servers; choosing Find Servers again asks again."""
+    doc = Document("openprey.multiplayer")
+    for name in ("from_create", "from_join", "from_demos", "from_setup"):    # the session clears these on arrival
+        doc.state[name] = {"type": "boolean", "initial": False}
+    doc.state["tab.top"] = {"type": "number", "initial": MP_FIND_TAB}
+    settings_nodes, settings_first = mp_settings_page(doc)
+    create_nodes, create_first = mp_create_page(doc)
+    find_nodes, find_first = mp_find_page(doc)
+    firsts = [settings_first, create_first, find_first]
+    furniture, tabs = mp_top_tabs(doc, "book", MP_BOOK, (MP_BOOK[0], 35, MP_BOOK[2], 20), [key for key, _ in MP_TABS], "tab.top",
+                                  [[{"op": "focus", "control": firsts[0]}], [{"op": "focus", "control": firsts[1]}],
+                                   [{"op": "action", "action": doc.session("joinNewList")}, {"op": "focus", "control": firsts[2]}]])
+    books = [shown_when(doc, group(f"book{index}", {**absolute(0, 0, FULL_FRAME[2], FULL_FRAME[3])}, nodes),
+                        {"op": "==", "args": [{"state": "tab.top"}, index]})
+             for index, nodes in enumerate((settings_nodes, create_nodes, find_nodes))]
+    contents = [*mp_page_shade("book", MP_BOOK), *furniture, *books, *tabs]
+    page = full_page(doc, "#str_20135", contents, "multiplayerBack",
+                     [{"op": "setState", "values": {"tab.top": MP_FIND_TAB}}, {"op": "focus", "control": find_first}],
+                     alpha=0.5, back_scale=0.4)
+    return page_document(doc, page, [])
+
+
 # ------------------------------------------------------------ the death screen
 
 DEATH_FADE_AT, DEATH_FADE_MS = 100, 1000   # the stock screen's fade from black (guis/restart.gui, Open)
@@ -2957,6 +3559,7 @@ DOCUMENTS = {
     "menu/settings.rui": options_document,
     "loading/loading.rui": loading_document,
     "menu/msgbox.rui": message_box_document,
+    "menu/multiplayer.rui": multiprey_document,
 }
 
 

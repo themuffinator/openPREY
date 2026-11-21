@@ -471,6 +471,10 @@ public:
 	idUserInterface *	RetainedMultiplayerPage();
 	bool				OpenRetainedMultiplayerPage( const char *section = NULL );
 	void				HandleRetainedMultiplayerPageRequest( idUserInterface *gui, const char *request );
+	// openPREY: Prey's MultiPrey page (guis/menu/multiplayer.rui): Player
+	// Settings, Create Server and Find Servers on one page.
+	void				PublishRetainedMultiPrey( idUserInterface *page );
+	bool				HandleRetainedMultiPreyRequest( idUserInterface *gui, const char *request );
 	void				UpdateRetainedMultiplayerPage();
 	bool				OpenRetainedPlayerSetup( idUserInterface *gui );
 	bool				PublishRetainedPlayerSetup( idUserInterface *gui, bool rebuild = false );

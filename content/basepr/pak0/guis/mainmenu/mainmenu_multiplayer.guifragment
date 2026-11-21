@@ -1059,7 +1059,7 @@
 									}
 									choiceDef MCS_ServerTypeEdit {
 										rect		80, 0, 115, 24
-										gui			"server_type"
+										cvar		"net_menulanserver"	// OPENPREY: was gui "server_type", which nothing read
 										choices		"#str_20148"
 										choiceType	0
 										textscale	0.33
@@ -1311,7 +1311,7 @@
 									choiceDef MCS_DedicatedEdit {
 										rect		80, 0, 115, 24
 										choices		"#str_20152"
-										gui			"dedicated"
+										cvar		"net_serverMenuDedicated"	// OPENPREY: was gui "dedicated", which nothing read
 										choiceType	0
 										textalign	2
 										textscale	0.33

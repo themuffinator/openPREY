@@ -109,6 +109,13 @@ idCVar ui_browserView( "ui_browserView", "0", CVAR_GUI | CVAR_INTEGER | CVAR_ARC
 idCVar ui_hudSafeInset( "ui_hudSafeInset", "0", CVAR_GUI | CVAR_FLOAT | CVAR_ARCHIVE, "retained status bar safe inset in percent of viewport", 0.0f, 10.0f );
 idCVar ui_retainedCaptureLoadFade( "ui_retainedCaptureLoadFade", "0", CVAR_GUI | CVAR_BOOL | CVAR_NOCHEAT, "diagnostic: use the engine screenshot command to capture the middle and end of the retained loading fade" );
 
+// openPREY: Create Server's Server Type and Dedicated. StartMenuServer reads
+// these, as Quake 4's menu binds them; Prey's stock page kept them in GUI
+// keys the session never read, so it binds these CVars now, and so does the
+// retained MultiPrey page (createLan, createDedicated).
+idCVar net_menulanserver( "net_menulanserver", "0", CVAR_GUI | CVAR_BOOL | CVAR_ARCHIVE, "Create Server's server type: 0 Internet, 1 LAN" );
+idCVar net_serverMenuDedicated( "net_serverMenuDedicated", "0", CVAR_GUI | CVAR_BOOL | CVAR_ARCHIVE, "Create Server starts a dedicated server" );
+
 static bool Session_RetainedScreensEnabled( void ) {
 #ifdef ID_DEDICATED
 	return false;
@@ -7476,9 +7483,9 @@ static const int RETAINED_SETTINGSPAGE_LEAVE_MSEC = 500;
 // are the stock choice's, in its order (mp_create_val4's values).
 static const char *const RETAINED_CREATE_SERVER_GUI = "guis/menu/createserver.rui";
 static const int RETAINED_CREATE_MAP_ROWS = 64;
+// openPREY: Prey's two (MCS_GameTypeEdit's values in mainmenu_multiplayer.guifragment).
 static const char *const RETAINED_CREATE_GAMETYPES[] = {
-	"DM", "Tourney", "Team DM", "CTF", "Arena CTF", "DeadZone", "Duel", "Clan Arena", "Freeze Tag", "Red Rover", "One Flag CTF",
-	"Arena One Flag CTF"
+	"Deathmatch", "Team DM"
 };
 static const int RETAINED_CREATE_GAMETYPE_COUNT = static_cast<int>( sizeof( RETAINED_CREATE_GAMETYPES ) / sizeof( RETAINED_CREATE_GAMETYPES[0] ) );
 // Each setting the page offers: the verb its control asks with
@@ -7502,7 +7509,7 @@ static const retainedCreateSetting_t RETAINED_CREATE_SETTINGS[] = {
 	{ "createCaptureLimit",	"capturelimit",	"si_captureLimit",			1, 999,	false },
 	{ "createControlTime",	"controltime",	"si_controlTime",			1, 999,	false },
 	{ "createTimeLimit",	"timelimit",	"si_timeLimit",				0, 60,	false },
-	{ "createMaxPlayers",	"maxplayers",	"si_maxPlayers",			1, 16,	false },
+	{ "createMaxPlayers",	"maxplayers",	"si_maxPlayers",			1, 32,	false },	// openPREY: Prey's MAX_CLIENTS
 	{ "createMinPlayers",	"minplayers",	"si_minPlayers",			1, 16,	false },
 	{ "createVoting",		"voting",		"si_allowVoting",			0, 1,	true },
 	{ "createTeamDamage",	"teamdamage",	"si_teamDamage",			0, 1,	true },
@@ -9355,6 +9362,7 @@ bool idSessionLocal::BeginRetainedPage( const char *request ) {
 		page->SetStateBool( "from_demos", false );
 		page->SetStateBool( "from_setup", false );
 		Session_PublishMultiplayerSummaries( page, this );
+		PublishRetainedMultiPrey( page );
 		page->StateChanged( common->GetPresentationTime() );
 	} else if ( settings ) {
 		// From the home the page starts on CONTROLS.
@@ -10128,7 +10136,9 @@ idUserInterface *idSessionLocal::RetainedMultiplayerPage() {
 		return NULL;
 	}
 	// Quietly, as a home screen over a main menu without its pages.
-	if ( !Session_RetainedMultiplayerRoutes( guiMainMenu ) ) {
+	// openPREY: Prey's MultiPrey page holds all three of its tabs and opens
+	// no stock page, so it needs no routes into the stock menu.
+	if ( false && !Session_RetainedMultiplayerRoutes( guiMainMenu ) ) {
 		if ( retainedStock.FindIndex( RETAINED_MPPAGE_GUI ) < 0 ) {
 			common->DPrintf( "retained UI: the main menu has no routes to its Multiplayer pages, so it presents its own instead of '%s'\n",
 				RETAINED_MPPAGE_GUI );
@@ -10196,6 +10206,10 @@ a stock page. A page or a change of level under way takes no further request.
 void idSessionLocal::HandleRetainedMultiplayerPageRequest( idUserInterface *gui, const char *request ) {
 #ifndef ID_DEDICATED
 	if ( retainedMpPageDest != 0 || retainedSubpageFrom != NULL || guiMainMenu == NULL ) {
+		return;
+	}
+	// openPREY: Prey's MultiPrey page holds the stock page's three tabs.
+	if ( HandleRetainedMultiPreyRequest( gui, request ) ) {
 		return;
 	}
 	if ( !idStr::Icmpn(request,openq4::ui::PlayerSetupRequestPrefix,sizeof(openq4::ui::PlayerSetupRequestPrefix)-1) ) {
@@ -11403,6 +11417,26 @@ void idSessionLocal::PublishRetainedJoinGame( idUserInterface *gui ) {
 		UI_RetainedPrecacheImage( retainedJoinShot.c_str() );
 	}
 	gui->SetStateString( "join.shot", chosen >= 0 ? retainedJoinShot.c_str() : RETAINED_LOAD_GENERIC_SHOT );
+	// openPREY: the chosen server as Prey's Selected Server tab shows it: its
+	// name, map, game type, players and address, whether it asks for a
+	// password, and the first eight players' names.
+	{
+		const networkServer_t *server = chosen >= 0 ? &servers[ chosen ] : NULL;
+		const idDict *info = server != NULL ? &server->serverInfo : NULL;
+		gui->SetStateString( "join.sel.name", info != NULL ? Session_RetainedPlayerText( info->GetString( "si_name" ), 96, 1 ).c_str() : "" );
+		gui->SetStateString( "join.sel.map", info != NULL ? Session_RetainedPlayerText( info->GetString( "si_mapName" ), 64, 1 ).c_str() : "" );
+		gui->SetStateString( "join.sel.type", info != NULL ?
+			Session_RetainedPlayerText( idServerScan::MatchTypeName( *info ).c_str(), 64, 1 ).c_str() : "" );
+		gui->SetStateString( "join.sel.players", server != NULL ? va( "%d/%d", idMath::ClampInt( 0, MAX_ASYNC_CLIENTS, server->clients ),
+			idMath::ClampInt( 0, MAX_ASYNC_CLIENTS, info->GetInt( "si_maxPlayers" ) ) ) : "" );
+		gui->SetStateString( "join.sel.address", server != NULL ? Sys_NetAdrToString( server->adr ) : "" );
+		gui->SetStateString( "join.sel.password", info == NULL ? "" :
+			common->GetLanguageDict()->GetString( info->GetBool( "si_usePass" ) ? "#str_107703" : "#str_107704" ) );
+		for ( int i = 0; i < 8; ++i ) {
+			gui->SetStateString( va( "join.sel.player%d", i ), server != NULL && i < Min( server->clients, MAX_ASYNC_CLIENTS ) ?
+				Session_RetainedPlayerText( server->nickname[ i ], 64, 1 ).c_str() : "" );
+		}
+	}
 	gui->SetStateBool( "join.favorite", chosen >= 0 && servers.IsFavoriteServer( chosen ) );
 	gui->SetStateString( "join.mod", guiMainMenu != NULL ?
 		Session_RetainedPlayerText( guiMainMenu->State().GetString( "filterMod" ), 64, 1 ).c_str() : "" );
@@ -11450,7 +11484,10 @@ the focus changes.
 */
 void idSessionLocal::UpdateRetainedJoinGame() {
 #ifndef ID_DEDICATED
-	if ( guiRetainedJoin == NULL || guiActive != guiRetainedJoin ) {
+	// openPREY: Prey's MultiPrey page holds the server browser too.
+	idUserInterface *join = guiRetainedJoin != NULL && guiActive == guiRetainedJoin ? guiRetainedJoin :
+		guiRetainedMpPage != NULL && guiActive == guiRetainedMpPage ? guiRetainedMpPage : NULL;
+	if ( join == NULL ) {
 		return;
 	}
 	// The list's view changed: the tiles' levelshots are published with the rows.
@@ -11458,10 +11495,10 @@ void idSessionLocal::UpdateRetainedJoinGame() {
 	const bool viewChanged = ui_browserView.GetInteger() != viewPublished;
 	viewPublished = ui_browserView.GetInteger();
 	if ( viewChanged || idAsyncNetwork::client.serverList.GetRevision() != retainedJoinRevision ) {
-		PublishRetainedJoinGame( guiRetainedJoin );
-	} else if ( guiRetainedJoin->State().GetInt( "join.detail", "-1" ) != retainedJoinDetailRow ) {
-		PublishRetainedJoinDetail( guiRetainedJoin );
-		guiRetainedJoin->StateChanged( common->GetPresentationTime() );
+		PublishRetainedJoinGame( join );
+	} else if ( join->State().GetInt( "join.detail", "-1" ) != retainedJoinDetailRow ) {
+		PublishRetainedJoinDetail( join );
+		join->StateChanged( common->GetPresentationTime() );
 	}
 #endif
 }
@@ -11869,6 +11906,88 @@ void idSessionLocal::HandleRetainedJoinGameRequest( idUserInterface *gui, const 
 		return;
 	}
 	common->Warning( "retained UI: unhandled Join Game request '%s'", request );
+#endif
+}
+
+/*
+===============
+idSessionLocal::PublishRetainedMultiPrey
+
+openPREY: what Prey's MultiPrey page shows as it opens, gathered as the stock
+page's arrival gathers it: the player's name and the player models with their
+portraits (modelscan), Create Server's settings and the chosen game type's
+maps, and the server browser as InitServerBrowser leaves it, with a new list
+asked of the source the stock menu keeps (gui::lanSet), as the stock Find
+Servers tab asks on arrival.
+===============
+*/
+void idSessionLocal::PublishRetainedMultiPrey( idUserInterface *page ) {
+#ifndef ID_DEDICATED
+	page->SetStateString( "mp.name", cvarSystem->GetCVarString( "ui_name" ) );
+	Session_ScanPlayerModels( page, common->GetPresentationTime() );
+	// Any levelshot the idle frames have not read yet, so browsing the maps
+	// never loads one.
+	PrecacheRetainedLevelshots( true );
+	PublishRetainedCreateServer( page );
+	PublishRetainedCreateMaps( page, true );
+	page->SetStateString( "join.address", "" );
+	page->SetStateString( "join.addressError", "" );
+	retainedJoinFirst = -1;
+	page->SetStateString( "join.clientip", Session_LocalAddressText().c_str() );
+	Session_ScanServers( guiMainMenu != NULL && guiMainMenu->State().GetBool( "lanSet" ), true );
+	PublishRetainedJoinGame( page );
+#endif
+}
+
+/*
+===============
+idSessionLocal::HandleRetainedMultiPreyRequest
+
+openPREY: the MultiPrey page's verbs. Player Settings names the player (its
+text, at most the stock field's 40 bytes) and chooses a model by its place in
+the player definition (mp.pick), as the stock portraits do; Create Server's
+verbs and Find Servers' are the Create Server and Join Game pages' own
+(HandleRetainedCreateServerRequest, HandleRetainedJoinGameRequest), on this
+page; Apply Filters lists the servers again through the filter CVars the
+filter rows set. Back, from any tab, shrinks the page into the bottom bar.
+A join that fails returns to the title, as the stock page's does. False for
+a verb the page does not have.
+===============
+*/
+bool idSessionLocal::HandleRetainedMultiPreyRequest( idUserInterface *gui, const char *request ) {
+#ifndef ID_DEDICATED
+	if ( !idStr::Icmp( request, "multiplayerBack" ) || !idStr::Icmp( request, "createBack" ) || !idStr::Icmp( request, "joinBack" ) ) {
+		LeaveRetainedPage( gui );
+		return true;
+	}
+	if ( !idStr::Icmp( request, "mpPreyName" ) ) {
+		const idStr name = Session_RetainedCreateText( gui, "mp.name", 40 );
+		cvarSystem->SetCVarString( "ui_name", name.c_str() );
+		gui->SetStateString( "mp.name", cvarSystem->GetCVarString( "ui_name" ) );
+		gui->StateChanged( common->GetPresentationTime() );
+		return true;
+	}
+	if ( !idStr::Icmp( request, "mpPreyModel" ) ) {
+		Session_SelectPlayerModel( gui, common->GetPresentationTime(), gui->State().GetInt( "mp.pick", "-1" ) );
+		return true;
+	}
+	if ( !idStr::Icmp( request, "joinApplyFilters" ) ) {
+		idAsyncNetwork::client.serverList.ApplyFilter();
+		PublishRetainedJoinGame( gui );
+		return true;
+	}
+	if ( !idStr::Icmpn( request, "create", 6 ) ) {
+		HandleRetainedCreateServerRequest( gui, request );
+		return true;
+	}
+	if ( !idStr::Icmpn( request, "join", 4 ) ) {
+		HandleRetainedJoinGameRequest( gui, request );
+		retainedJoinReturn = false;
+		return true;
+	}
+	return false;
+#else
+	return false;
 #endif
 }
 
