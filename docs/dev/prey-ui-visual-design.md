@@ -1,12 +1,14 @@
 # openPREY UI Visual Design
 
-Specification version 1.23, 21 November 2026.
+Specification version 1.24, 21 November 2026.
 
 Status: reference survey and design contract. openPREY renders the stock Prey
-GUIs by default. A first vector replacement, the home screen's navigation, its
-small frames, the Load Game, Save Game and Credits pages, the death screen,
-Options with all four tabs, the system check and the level loading screen, is built for the
-retained interface and presents while `ui_retained` is 1 (section 12.5). Sections 1 to 11 record what makes the Prey
+GUIs by default. A vector replacement of every front-end screen, the home
+screen's navigation and frames, every page, the death screen, the system
+check, the loading screen, MultiPrey, the message boxes and the multiplayer
+cards, is built for the retained interface and presents while `ui_retained`
+is 1 (section 12.5); the initializing screen and the 3D menu backdrop are on
+whatever it says (sections 12.6 and 12.2). Sections 1 to 11 record what makes the Prey
 interface look and behave like Prey, so that fixes, widescreen work, new
 settings pages and every further replacement stay inside that identity.
 Section 12 covers openPREY's own additions.
@@ -15,11 +17,11 @@ Section 12 covers openPREY's own additions.
 | --- | --- |
 | Stock survey (sections 1 to 11, Appendices A and B) | Measured from the retail archives, the art and engine captures |
 | Aspect expansion, loading screens and Video pages (section 12.1) | Built |
-| Initializing screen (section 12.6) | Built behind `ui_retained`: the energy ball, beam, flare and wordmark over a drifting nebula |
+| Initializing screen (section 12.6) | Built and always on: the energy ball, beam, flare and wordmark over a drifting nebula |
 | Rifle scope at any aspect (section 10.8) | Built in the legacy GUI with the stock art |
 | Alien-script translation (section 11.4) | Built |
-| 3D main-menu backdrop and entrance (section 12.2) | Specified, not built. The menu draws the stock layers |
-| Vector or retained-UI replacement (sections 12.3 and 12.5) | Home navigation, bottom bar, New Game, Mods, Exit, Quit Game, Load Game, Save Game, Credits, the death screen, Options (every tab and the Reset Defaults dialog), the system check and the level loading screen built behind `ui_retained`; MultiPrey and the message boxes are still the stock ones |
+| 3D main-menu backdrop and entrance (section 12.2) | Built, on by default (`ui_menuScene`); the stock layers where it cannot draw |
+| Vector or retained-UI replacement (sections 12.3 and 12.5) | Home navigation, bottom bar, New Game, Mods, Exit, Quit Game, Load Game, Save Game, Credits, the death screen, Options (every tab and the Reset Defaults dialog), the system check, the level loading screen, MultiPrey, the message boxes (the download progress box included), the connecting screen, and the multiplayer Escape menu and chat line built behind `ui_retained`. No front-end menu presents stock; the HUD does |
 
 The companion [Interface Atlas](prey-ui/atlas/prey-interface-atlas.html) draws
 the measured components, screens and motion as editable vector
@@ -1610,8 +1612,10 @@ by a script from this specification and committed.
 | `guis/menu/presetcheck.rui` | The system check, before the main menu | The claw frame with the detected hardware, the nine presets as a ladder (recommended lit, current outlined), the recommendation's scale and frame cap, Apply Recommended (Continue when nothing would change), Keep Current and Ask Me Next Time |
 | `guis/loading/loading.rui` | Every level load, in place of `guis/map/loading.gui` | The level's art across the screen, the name band with the level's name and author line, the objectives panel, the progress bar in its claw-ended outline and the loader's phase |
 | `guis/menu/multiplayer.rui` | MultiPrey, from the title | Player Settings, Create Server (Create and Advanced) and Find Servers (the server list, Selected Server, Filters and IP Connect) |
-| `guis/menu/msgbox.rui` | Every message box the session raises, in place of `guis/msg.gui` | The box with its title, message, a prompt's field and up to three buttons, and the wait box |
+| `guis/menu/msgbox.rui` | Every message box the session raises, in place of `guis/msg.gui`, the download progress box included | The box with its title, message, a prompt's field or a progress bar, and up to three buttons, and the wait box |
 | `guis/menu/mp_escape.rui` | A multiplayer match's Escape menu, over `guis/mpmain.gui` | The status bar with Ready, the Chat, Player, Vote and Call Vote tabs, and Main Menu, Spectate and Disconnect |
+| `guis/menu/mp_chat.rui` | A multiplayer match's chat line, over `guis/mpmsgmode.gui` | The Global and Team tabs and the line being typed |
+| `guis/menu/connecting.rui` | The client connecting to a server, in place of `guis/netmenu.gui` | The frame with its title, the client's status and Cancel |
 
 `tools/ui/build_retained_screens.py` writes them from the measurements of
 sections 3 to 8 and the Interface Atlas's constructions; `--check` reports a
@@ -1656,10 +1660,11 @@ the entrance, when `Main_Menu` shows.
 - The loading screen is a document of its own (below). A map's own
   `guis/map/<map>.gui`, and a mod's own copy of the stock screen, still
   present instead.
-- The message boxes are a document of their own (below), except the
-  download progress box, which keeps the stock screen.
-- A multiplayer match's Escape menu is covered by a card (below); the game
-  keeps its stock menu beneath.
+- The message boxes are a document of their own (below), the download
+  progress box included.
+- A multiplayer match's Escape menu and its chat line are covered by cards
+  (below); the game keeps its stock GUIs beneath.
+- The connecting screen is a document of its own (below).
 
 #### Construction
 
@@ -2053,7 +2058,15 @@ the left, middle and right buttons (85x22 u at 0.25). The wait box has the
 stock title and the foot bar. The screen beneath goes into soft focus. The
 first control there takes the focus: a prompt's field, the lone button, or
 the trailing one of two; Back answers with that button, and a wait has no
-answer. The download progress box keeps the stock screen.
+answer.
+
+The download progress box (`idSessionLocal::DownloadProgressBox`, a server's
+packs or the updater) is the same box with Cancel and a progress bar where a
+prompt's field would be: a 260x12 u bar on black 0.50 in the box's outline,
+filled with `prey.load.fill` as the loading screen's is, by the session's
+percentage (`visible_progress`, `progress`). The message reads the amount,
+rate and time left. Prey's stock box has no bar: its download box showed the
+message alone, and the session's `progress` went unread.
 
 #### The multiplayer menu
 
@@ -2084,6 +2097,38 @@ card each frame, sends each card verb to `idMultiplayerGame::HandleGuiCommands`
 as the stock window's command, with what that command reads set on the stock
 menu first, and hides the stock windows and pointer while the card covers
 them. No game code changes.
+
+#### The chat line
+
+A match's one-line chat prompt (`clientMessageMode`, `guis/mpmsgmode.gui`)
+presents under `guis/menu/mp_chat.rui`, a card like the Escape menu's: the
+stock prompt rebuilt at its rectangles, over the running match with no scrim.
+Global and Team are top tabs (260x15 u from 230,420, at 0.25) on the opaque
+400x40 u page at 90,435, which hides the Ready tip as the stock page does,
+and the field is the stock 380x20 u at 100,445 on black in its `#B3CCE6`
+outline, white text, 80 bytes.
+
+- The card opens on the channel the game opened the prompt on (`messagemode`:
+  `clientMessageMode 1` is Team) with the field focused; a tab changes it
+  (`guisounds_menu_tabflip`).
+- Enter sends the line as the stock field's `chatmessage` on the chosen
+  channel, and the game closes the prompt as it does after a stock line. An
+  empty line closes it without saying anything; Back closes it.
+- The session hides the stock prompt and its pointer while the card covers
+  it (`MessageMode::visible`), and shows them again when it stops.
+
+#### The connecting screen
+
+While the client challenges and connects to a server
+(`idAsyncClient::ConnectToServer`, and the wait for a pure server's packs)
+the session presents `guis/menu/connecting.rui` in place of
+`guis/netmenu.gui` (`idSessionLocal::ConnectingScreen`): the stock screen
+rebuilt, the 400x160 u claw frame at 120,120 with a 0.70 body over the stock
+screen's white 0.20 wash on black, its title bar with "Connecting to Server"
+in the display face at 0.4, the client's status (`status`, white at 0.25) and
+Cancel (120x25 u). Cancel, or Back, answers as the stock button's abort,
+through the client's own handler, and the menu returns. A mod's own
+`netmenu.gui` presents instead.
 
 #### The system check
 
@@ -2125,10 +2170,8 @@ coordinates, so the retained document is the stock screen redrawn.
 - The stock Audio page's sound-driver notice (the engine never raises it),
   the Advanced 2 page's driver box, whose button opens a web page, and the
   crosshair's picture beside its name.
-- The download progress box (`guis/msg.gui` with its progress bar), the
-  in-match chat line (`guis/mpmsgmode.gui`) and the connecting screen
-  (`guis/netmenu.gui`). The multiplayer scoreboard, spectate and chat
-  overlays are HUD (section 10) rather than menus.
+- The multiplayer scoreboard, spectate and chat overlays, which are HUD
+  (section 10) rather than menus, and the HUD itself.
 - The hook bars and the arc are the Atlas's reconstructions and are lighter
   than the stock art: the stock hook is about 15 u wide where the vector one
   is 11 u, and the stock arc carries a socket where each bar joins it.
@@ -2757,6 +2800,20 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.24, 21 November 2026
+
+- Section 12.5: the chat line (`guis/menu/mp_chat.rui`, a card over
+  `guis/mpmsgmode.gui`) and the connecting screen
+  (`guis/menu/connecting.rui`, in place of `guis/netmenu.gui`) are built, and
+  the download progress box is the retained message box with a progress bar,
+  which Prey's stock box lacked. The document table, "What is replaced and
+  what is kept" and "Not yet built" follow; no front-end menu presents stock
+  any more.
+- The status paragraph and table at the head catch up with versions 1.22 and
+  1.23: the initializing screen is always on, the 3D backdrop is built, and
+  MultiPrey and the message boxes are retained.
+- The Interface Atlas takes the version; no drawing changed.
 
 ### Version 1.23, 21 November 2026
 
