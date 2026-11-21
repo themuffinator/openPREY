@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.25, 21 November 2026.
+Specification version 1.26, 21 November 2026.
 
 Status: reference survey and design contract. openPREY renders the stock Prey
 GUIs by default. A vector replacement of every front-end screen, the home
@@ -206,7 +206,7 @@ that drops one of them is not visually complete.
 | --- | --- | --- |
 | Front end (`mainmenu`, `restart`, `netmenu`, `msg`) | Steel glass in a portal over space | Portal opening and rim, Sphere backdrop, arc of hooks, claw frames, growth from the bar |
 | In-game multiplayer menu (`mpmain`) | The front-end vocabulary without the portal | Tabs, 3-slice buttons, chat and status rows |
-| Loading (`map/loading`) | Full-bleed level art, name band, bar progress | Top name band, claw-ended progress bar, level art per map |
+| Loading (`map/loading`) | Full-bleed level art, name notch, bar progress | Name notch hung from the top edge, claw-ended progress bar, level art per map |
 | Help and key reference (`help`) | Six tabs, each tinting its page its own colour | Keyboard map, binding rows, tab colours |
 | Credits (`mainmenu_credit*`, `credits`) | Wordmark, sheared fly-in lines | Shear and slide choreography, heading/title/name colours |
 | Single-player HUD (`hud`) | Section 10 | Section 10 |
@@ -251,7 +251,7 @@ the window's shape, and the GUI draws it with `matcanvasfill` when
 | Button (3-slice) | 80–170 x 22–30; most are 100–125 x 25–30 | 120–255 x 33–45 |
 | Side-tab column / page (Options) | 100 / 470x370 | 150 / 705x555 |
 | Dialog frame: Reset Defaults / confirmations | 360x250 at 142,100 / 360x140 at 142,132 | 540x375 / 540x210 |
-| Loading name band / progress outline | 640x35 at 0,10 / 304x30 at 168,443 | 960x52.5 / 456x45 |
+| Loading name notch / progress outline | Fitted to the name, at least 290x64 centred at the top edge / 304x30 at 168,443 | At least 435x96 / 456x45 |
 
 Stock hit strips do not fill their pitch: the navigation strips are 20 u high
 on a 27 u pitch. A replacement makes the whole pitch the target, with the 30 u
@@ -363,7 +363,7 @@ one place, and from sampled interface art (Appendix B).
 | Setting row plate | Leading fill 0.77 → trailing 0.06 | Stable; the value text turns white |
 | Inactive / active tab | Side 0.45 / 1.00; top 1.00 / 1.00 | Hover tints the plate with `hoverMatColor` 0.7 grey and the label to `#CCDEFA` |
 | Dialog scrim | Black over the whole canvas: 0.80 (Reset Defaults), 0.40–0.50 (confirmations) | Appears and disappears at once |
-| Loading name band | 0.55 black | Stable |
+| Loading name notch | Black, 0.68 at the top edge to 0.50 at the foot | Stable |
 
 ### Light and composition modes
 
@@ -612,6 +612,7 @@ exceptions.
 end and a slim rail with small rivet groups between them. Only the loading
 screen uses it, as the progress outline (304x30 u) around a 256x12 u fill.
 Despite its name it is not the home bottom bar, which is a claw frame.
+openPREY also bends it into the loading screen's name notch (section 12.1).
 
 ## 7. Components and interaction states
 
@@ -739,7 +740,7 @@ brightens without sliding, and ambient rotation stops.
 | Dialog: confirmations | Load, delete, overwrite, restart-required and PunkBuster notices: 0.40–0.50 black scrim; a 360x140 u claw frame at 142,132 with a message and buttons |
 | Credits | Full page: the wordmark, then sheared fly-in credit lines |
 | Mods | Small frame: a list and Load MOD |
-| Loading | Level art across the screen, a 0.55 black name band at the top with the level name in the display face, an objectives panel (430x74 u at 20,348, black 0.45, text 0.28), a status line (0.40) and a claw-ended progress bar at the foot |
+| Loading | Level art across the screen, the level name in the display face in a notch hung from the top edge (section 12.1), an objectives panel (430x74 u at 20,348, black 0.45, text 0.28), a status line (0.40) and a claw-ended progress bar at the foot |
 | Death (`restart`) | The star field alone, fading in from black over 1 s: no Sphere, Earth or portal. The wordmark at 60,80 (510x35 u) and a 280x220 u frame at 172,184 with Load, Restart and Main Menu buttons (150x30 u, 0.40) |
 | Connecting (`netmenu`) | A small frame titled "Connecting to Server" with Cancel |
 | In-game multiplayer (`mpmain`) | Status row, top tabs, a chat panel with Say Global, Go to Main Menu and Disconnect buttons; no portal |
@@ -1237,9 +1238,9 @@ vocabulary rather than replace it:
     the canvas, as openQ4 does. A picture without both of the tiles its
     window needs is drawn at 4:3 instead; stretching its edge columns
     smeared it. The composite is cached per source and window size. The
-    session finds the picture as retail does (`levelshot-capture.md`): a
-    save's own screenshot when a save is loading, else the map's loading art
-    `guis/assets/loading/<map>`, else that art from an addon pak, else the
+    session finds the picture as retail does (`levelshot-capture.md`), except
+    that a save's preview screenshot is never the backdrop: the map's loading
+    art `guis/assets/loading/<map>`, else that art from an addon pak, else the
     generic picture. `pak2` carries recaptures of all 33 with their
     tiles, taken at the retail cameras.
   - *HUD and scope.* HUD groups and subtitles pin to screen edges with
@@ -1248,6 +1249,55 @@ vocabulary rather than replace it:
 - **Loading.** The level name comes from `gui::loading_levelname`, an optional
   author line sits under it (display face 0.3, `#D9D9FF` at 0.75), and
   per-map backgrounds can fill the canvas (`matcanvasfill`).
+- **Name notch.** The stock screen's 0.55 black band across the screen (640x35
+  u at 0,10) is replaced by a notch hung from the top edge and fitted to the
+  name. It is the progress bar's outline bent round the name, so the loading
+  screen's top and foot are one family:
+  - *Shape.* A black body (0.68 at the edge to 0.50 at the foot) whose sides
+    slant inward 0.5 u per unit of drop, as the top title bar's ends do, and
+    round into the foot (radius 9 u) as a button's leading end does. The foot
+    lies 37 u below the edge; at the edge each side turns outward through a
+    concave shoulder (radius 7 u).
+  - *Frame.* The progress outline's four-band rail (black 0.78, `#AECCF4`
+    0.82, `#5D6D82` 0.81, black 0.65; 4.7 u, the black edge toward the body)
+    runs from each claw 6 u along the top edge, through the shoulder, down the
+    side and along the foot. The outline's claw ends, turned over so their
+    ears hang down, bolt it to the edge beside each shoulder. Five groups of
+    three rivets sit on the foot, the end groups 12 u in from its straight run
+    and the rest evenly between.
+  - *Fit.* The foot's straight run is the name's width plus 16 u each side and
+    never under 168 u, so the notch is at least 290x64 u. The name sits 7 u
+    higher than on the band (its window at 0,3); the author line follows, at
+    0,46.
+  - *Construction.* `tools/ui/loading_notch.py` holds the numbers. It writes
+    the stock screen's three pieces (`guis/assets/loading/namenotch_end`,
+    mirrored for the trailing end, `namenotch_mid` stretched between them and
+    `namenotch_rivets`), which `map/loading.gui` places from the name
+    window's measured `textwidth`; the retained screen draws the same shapes
+    as one vector the layout sizes round the name.
+  - *Intro.* Once the loading screen's first frame is up (the session's
+    `frameIn`), the notch lowers into view closed, its two ends meeting at
+    the centre as a clasp, and opens to fit the name; its rivets set and the
+    name and author line appear once it is open. The progress bar, its phase
+    and the objectives fade in meanwhile. From the first frame, in ms:
+
+    | Part | Span | Easing |
+    | --- | --- | --- |
+    | Lowers from 64 u above the edge | 0–300 | Ease-out cubic (0.33, 1, 0.68, 1) |
+    | Opens from the ends meeting | 200–560 | Ease-in-out cubic (0.65, 0, 0.35, 1) |
+    | Name and author line fade in | 460–720 | Ease-out quadratic (0.5, 1, 0.89, 1) |
+    | Rivets fade in | 520–680 | Ease-out quadratic |
+    | Progress bar, phase and objectives fade in | 100–500 | Ease-out quadratic |
+
+    The table is `loading_notch.INTRO`. The retained screen plays it as a
+    timeline, opening the frame by its anchors (from the centre less the end
+    pieces out to its box), so it needs no measured width; the stock screen
+    cannot time its own motion, so the session publishes each part's eased
+    progress before every redraw (`idSessionLocal::PublishLoadingIntro`,
+    the `loading_notch_*` and `loading_*_fade` states). Load-time frames come
+    from the loader's pacifier, so after the first 250 ms (`com_minLoadingGuiMsec`)
+    the motion is as smooth as the load lets it be. Reduced motion
+    (`ui_retainedReducedMotion`) shows the screen whole at once.
 - **Video settings.** Six side tabs, built from stock setting rows, choices,
   sliders and edit fields:
   - *Video* keeps the stock Detect plate and replaces the three Texture
@@ -1652,7 +1702,7 @@ by a script from this specification and committed.
 | `guis/menu/credits.rui` | Credits, from either home | The stock credits sheet rising through the page |
 | `guis/menu/settings.rui` | Options, from either home | The four top tabs, Controls' seven pages, Game Options' two, Video's six and the Audio page, and the Reset Defaults dialog |
 | `guis/menu/presetcheck.rui` | The system check, before the main menu | The claw frame with the detected hardware, the nine presets as a ladder (recommended lit, current outlined), the recommendation's scale and frame cap, Apply Recommended (Continue when nothing would change), Keep Current and Ask Me Next Time |
-| `guis/loading/loading.rui` | Every level load, in place of `guis/map/loading.gui` | The level's art across the screen, the name band with the level's name and author line, the objectives panel, the progress bar in its claw-ended outline and the loader's phase |
+| `guis/loading/loading.rui` | Every level load, in place of `guis/map/loading.gui` | The level's art across the screen, the name notch with the level's name, the author line, the objectives panel, the progress bar in its claw-ended outline and the loader's phase |
 | `guis/menu/multiplayer.rui` | MultiPrey, from the title | Player Settings, Create Server (Create and Advanced) and Find Servers (the server list, Selected Server, Filters and IP Connect) |
 | `guis/menu/msgbox.rui` | Every message box the session raises, in place of `guis/msg.gui`, the download progress box included | The box with its title, message, a prompt's field or a progress bar, and up to three buttons, and the wait box |
 | `guis/menu/mp_escape.rui` | A multiplayer match's Escape menu, over `guis/mpmain.gui` | The status bar with Ready, the Chat, Player, Vote and Call Vote tabs, and Main Menu, Spectate and Disconnect |
@@ -2013,10 +2063,13 @@ nothing of the stock screen draws beneath it.
   12.1 finds it. With both tiles the window needs it is the composed
   picture, drawn across the whole screen; otherwise the 4:3 picture is drawn
   on the centred 4:3 canvas over black (`loading_bkgnd_canvasfill`).
-- **Name band.** Black 0.55, 35 u high at 10 u from the screen's top and
-  across its whole width; the level's name centred on it in the display face
-  at 0.6, `prey.load.name`, with the engine shadow. The author line (display
-  0.3, `#D9D9FF` at 0.75) shows only for a map that has one.
+- **Name notch.** The notch of section 12.1, one vector in a centred row:
+  its padding holds the end pieces and 16 u of clear foot beyond the name and
+  `min-width` the shortest foot, so the layout sizes it round the name and
+  its shapes follow the width. The level's name sits in it in the display
+  face at 0.6, `prey.load.name`, with the engine shadow, where the stock
+  window at 0,3 draws it. The author line (display 0.3, `#D9D9FF` at 0.75, at
+  0,46) shows only for a map that has one.
 - **Objectives.** The panel (430x74 u at 20,348, black 0.45) with the
   objectives in the display face at 0.28, shown only for a map that has
   them.
@@ -2033,12 +2086,13 @@ nothing of the stock screen draws beneath it.
   Finishing, then Load Time) in the body face at 0.28 and, under it, its
   count (assets loaded of the total, then the load time) at 0.25, both
   right-aligned, `#BFD1FF` at 0.72 and 0.50.
-- **Placement.** The name band and author line keep to the screen's top and
+- **Placement.** The name notch and author line keep to the screen's top and
   the objectives, bar and phase to its foot on a screen taller than 4:3, as
   the stock windows do with `screenaligny`; the objectives, bar and phase
   stay on the 4:3 canvas's columns.
-- **Motion.** None but the fill, as in the stock. A multiplayer join that
-  holds the screen over the match fades it out over 250 ms.
+- **Motion.** The intro of section 12.1 (the notch lowers, closed, and
+  opens; the name, rivets and foot fade in) and the fill. A multiplayer join
+  that holds the screen over the match fades it out over 250 ms.
 
 #### MultiPrey
 
@@ -2842,6 +2896,19 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.26, 21 November 2026
+
+- Section 12.1: the loading screen's name band becomes a name notch hung
+  from the top edge and fitted to the name, built from the progress outline
+  (claw ends, rail and rivets) with the top title bar's slant and a button's
+  rounded foot; the name and author line move up with it. It has an intro:
+  it lowers into view closed and opens to fit the name, and the progress bar
+  fades in. Sections 2, 3, 4, 6, 9 and 12.5 follow. `tools/ui/loading_notch.py` holds its construction
+  for both screens.
+- Section 12.1: a save loads under its map's loading art; its preview
+  screenshot is never the loading picture.
+- The Interface Atlas draws the notch and takes the version.
 
 ### Version 1.25, 21 November 2026
 

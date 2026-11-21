@@ -38,18 +38,20 @@ pak2 holds all 33 of retail's in-game loading screens and the roadhouse tiles:
   in `PREY.exe` 1.4, the latter asked for the loading art rather than the menu
   thumb):
   1. when a save is loading, the save's own screenshot,
-     `savegames/<save>.tga`, read again since a newer save may have replaced it;
+     `savegames/<save>.tga`;
   2. `guis/assets/loading/<map>.tga`;
   3. that picture from an addon pak that is not mounted yet, copied to
      `guis/assets/loading/addon/<map>.tga` under `fs_savepath`;
   4. the generic `guis/assets/loading/loading.tga`.
 
   The menus' pictures under `loading/thumbs/` are never the loading art.
-  `Session_FindSaveLoadingImage` and `Session_FindMapLoadingImage`
-  (`Session.cpp`) follow that order for the stock screen, the retained screen
-  (`guis/loading/loading.rui`, `prey-ui-visual-design.md` section 12.5) and
-  the retained pause shot. openPREY adds a mapDef's `loadimage` after the save
-  (no retail mapDef has one), and copies an addon map's `_left`, `_right`,
+  openPREY drops step 1: a save's preview screenshot is never the loading
+  backdrop, so a save loads under its map's loading art like any other load.
+  `Session_FindMapLoadingImage` (`Session.cpp`) follows steps 2 to 4 for the
+  stock screen, the retained screen (`guis/loading/loading.rui`,
+  `prey-ui-visual-design.md` section 12.5) and the retained pause shot.
+  openPREY adds a mapDef's `loadimage` ahead of them (no retail mapDef has
+  one), and copies an addon map's `_left`, `_right`,
   `_top` and `_bottom` tiles beside its picture.
 - **Wide and tall windows.** The session composes the centre and its tiles
   into one picture of the window's shape (`Session_EnsureExpandedLoadingBackground`,

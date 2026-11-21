@@ -7,7 +7,7 @@ windowDef Desktop {
 	nocursor	1
 	menugui		1
 
-	// The session always sets loading_bkgnd: a save's screenshot, the map's
+	// The session always sets loading_bkgnd: the map's
 	// guis/assets/loading/<map> art or the generic loading picture. A default
 	// set here would always win, since GUI expressions compare as numbers and
 	// any image name equals "". In a window that is not 4:3 the session
@@ -33,17 +33,88 @@ windowDef Desktop {
 		noclip		1
 	}
 
-	windowDef FriendlyBack {
-		rect		0, 10, 640, 35
+	// The name notch (prey-ui-visual-design.md, section 12.1): the progress
+	// outline hung from the top edge and bent round the level's name, drawn
+	// from tools/ui/loading_notch.py's pieces. Its foot runs the name's width
+	// plus 16 u each side, never under 168 u, so the pieces read the width
+	// NameMeasure measures (its text is the name, drawn clear). The expression
+	// parser groups subtraction from the right (a - b - c is a - (b - c)), so
+	// no rect chains two. The session plays the intro through the
+	// loading_notch_* and loading_*_fade states (idSessionLocal::
+	// PublishLoadingIntro): the notch lowers into view closed, its ends
+	// meeting at the centre, and opens; the rivets set, the name shows and
+	// the foot fades in.
+	windowDef NameMeasure {
+		rect		0, 3, 640, 30
 		screenaligny top
-		background	"textures/gfx/colors/white"
-		matcolor	0.0, 0.0, 0, 0.55
+		forecolor	0, 0, 0, 0
+		text		"gui::loading_levelname"
+		textscale	0.6
+		textalign	1
+		font		"fonts/menu"
+	}
+
+	windowDef NotchLead {
+		rect		259.011 - ( 84 + ( "NameMeasure::textwidth" / 2 + 16 - 84 ) * ( "NameMeasure::textwidth" / 2 + 16 > 84 ) ) * "gui::loading_notch_open", ( "gui::loading_notch_drop" - 1 ) * 64, 60.989, 64
+		screenaligny top
+		background	"guis/assets/loading/namenotch_end"
+		matcolor	1, 1, 1, 1
+	}
+
+	windowDef NotchMiddle {
+		rect		320 - ( 84 + ( "NameMeasure::textwidth" / 2 + 16 - 84 ) * ( "NameMeasure::textwidth" / 2 + 16 > 84 ) ) * "gui::loading_notch_open", ( "gui::loading_notch_drop" - 1 ) * 64, ( 84 + ( "NameMeasure::textwidth" / 2 + 16 - 84 ) * ( "NameMeasure::textwidth" / 2 + 16 > 84 ) ) * 2 * "gui::loading_notch_open", 64
+		screenaligny top
+		background	"guis/assets/loading/namenotch_mid"
+		matcolor	1, 1, 1, 1
+	}
+
+	windowDef NotchTrail {
+		rect		320 + ( 84 + ( "NameMeasure::textwidth" / 2 + 16 - 84 ) * ( "NameMeasure::textwidth" / 2 + 16 > 84 ) ) * "gui::loading_notch_open", ( "gui::loading_notch_drop" - 1 ) * 64, 60.989, 64
+		screenaligny top
+		background	"guis/assets/loading/namenotch_end"
+		matcolor	1, 1, 1, 1
+		matscalex	-1
+	}
+
+	windowDef NotchRivets0 {
+		rect		304 - ( ( 84 + ( "NameMeasure::textwidth" / 2 + 16 - 84 ) * ( "NameMeasure::textwidth" / 2 + 16 > 84 ) ) - 12 ), 29, 32, 16
+		screenaligny top
+		background	"guis/assets/loading/namenotch_rivets"
+		matcolor	1, 1, 1, "gui::loading_notch_rivets"
+	}
+
+	windowDef NotchRivets1 {
+		rect		304 - ( ( 84 + ( "NameMeasure::textwidth" / 2 + 16 - 84 ) * ( "NameMeasure::textwidth" / 2 + 16 > 84 ) ) - 12 ) * 0.5, 29, 32, 16
+		screenaligny top
+		background	"guis/assets/loading/namenotch_rivets"
+		matcolor	1, 1, 1, "gui::loading_notch_rivets"
+	}
+
+	windowDef NotchRivets2 {
+		rect		304, 29, 32, 16
+		screenaligny top
+		background	"guis/assets/loading/namenotch_rivets"
+		matcolor	1, 1, 1, "gui::loading_notch_rivets"
+	}
+
+	windowDef NotchRivets3 {
+		rect		304 + ( ( 84 + ( "NameMeasure::textwidth" / 2 + 16 - 84 ) * ( "NameMeasure::textwidth" / 2 + 16 > 84 ) ) - 12 ) * 0.5, 29, 32, 16
+		screenaligny top
+		background	"guis/assets/loading/namenotch_rivets"
+		matcolor	1, 1, 1, "gui::loading_notch_rivets"
+	}
+
+	windowDef NotchRivets4 {
+		rect		304 + ( ( 84 + ( "NameMeasure::textwidth" / 2 + 16 - 84 ) * ( "NameMeasure::textwidth" / 2 + 16 > 84 ) ) - 12 ), 29, 32, 16
+		screenaligny top
+		background	"guis/assets/loading/namenotch_rivets"
+		matcolor	1, 1, 1, "gui::loading_notch_rivets"
 	}
 
 	windowDef FriendlyName {
-		rect		0, 10, 640, 30
+		rect		0, 3, 640, 30
 		screenaligny top
-		forecolor	0.65, 0.75, 1, 0.8
+		forecolor	0.65, 0.75, 1, 0.8 * "gui::loading_name_fade"
 		text		"gui::loading_levelname"
 		textscale	0.6
 		textalign	1
@@ -53,10 +124,10 @@ windowDef Desktop {
 	}
 
 	windowDef AuthorName {
-		rect		0, 40, 640, 20
+		rect		0, 46, 640, 20
 		screenaligny top
 		visible		"gui::loading_author_visible"
-		forecolor	0.85, 0.85, 1, 0.75
+		forecolor	0.85, 0.85, 1, 0.75 * "gui::loading_name_fade"
 		text		"gui::loading_author"
 		textscale	0.3
 		textalign	1
@@ -70,14 +141,14 @@ windowDef Desktop {
 		screenaligny bottom
 		visible		"gui::loading_objectives_visible"
 		background	"textures/gfx/colors/white"
-		matcolor	0.0, 0.0, 0.0, 0.45
+		matcolor	0.0, 0.0, 0.0, 0.45 * "gui::loading_foot_fade"
 	}
 
 	windowDef Objectives {
 		rect		32, 356, 406, 58
 		screenaligny bottom
 		visible		"gui::loading_objectives_visible"
-		forecolor	0.86, 0.9, 1.0, 0.82
+		forecolor	0.86, 0.9, 1.0, 0.82 * "gui::loading_foot_fade"
 		text		"gui::loading_objectives"
 		textscale	0.28
 		textalign	0
@@ -94,20 +165,20 @@ windowDef Desktop {
 		windowDef ProgressBarFill {
 			rect		0, 0, 256, 12
 			background	"textures/gfx/colors/white"
-			matcolor	0.35, 0.35, 1, 0.65
+			matcolor	0.35, 0.35, 1, 0.65 * "gui::loading_foot_fade"
 		}
 	}
 	windowDef baroutline {
 		rect		168, 443, 304, 30
 		screenaligny bottom
 		background	"guis/assets/menu/bottombar"
-		matcolor	1, 1, 1, 1
+		matcolor	1, 1, 1, "gui::loading_foot_fade"
 	}
 
 	windowDef LoadingText {
 		rect		474, 445, 146, 20
 		screenaligny bottom
-		forecolor	0.75, 0.82, 1.0, 0.72
+		forecolor	0.75, 0.82, 1.0, 0.72 * "gui::loading_foot_fade"
 		text		"gui::loading_message"
 		textscale	0.4
 		textalign	2

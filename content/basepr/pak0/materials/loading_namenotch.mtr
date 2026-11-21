@@ -1,0 +1,32 @@
+// The loading screen's name notch (guis/map/loading.gui), written by
+// tools/ui/loading_notch.py. Clamped so the pieces meet without bleeding.
+
+guis/assets/loading/namenotch_end
+{
+	sort			gui
+	clamp
+	{
+		blend blend
+		map guis/assets/loading/namenotch_end.tga
+	}
+}
+
+guis/assets/loading/namenotch_mid
+{
+	sort			gui
+	clamp
+	{
+		blend blend
+		map guis/assets/loading/namenotch_mid.tga
+	}
+}
+
+guis/assets/loading/namenotch_rivets
+{
+	sort			gui
+	clamp
+	{
+		blend blend
+		map guis/assets/loading/namenotch_rivets.tga
+	}
+}

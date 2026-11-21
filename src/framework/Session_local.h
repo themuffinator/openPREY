@@ -635,6 +635,7 @@ public:
 	void				ClearWipe();
 
 	void				ShowLoadingGui();
+	void				PublishLoadingIntro( int presentationTime );
 	void				ShowSubtitle( const idStrList& lines );
 	void				HideSubtitle() const;
 
@@ -884,6 +885,9 @@ public:
 	float				retainedPointerX;		// the home screen's last published pointer
 	float				retainedPointerY;
 	bool				retainedLoadingActive;
+	// When the loading screen's first frame was up (frameIn), starting its
+	// intro; 0 while it waits for that frame.
+	int					loadingIntroStartMsec;
 	int					retainedLoadingPhase;
 	int					retainedLoadingLoaded;
 	int					retainedLoadingTotal;

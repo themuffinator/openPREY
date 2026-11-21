@@ -294,6 +294,9 @@ if get_option('build_native_tests')
     args: [files('tools/build/vulkan_material_sources.py'), '--check'], timeout: 30)
   test('openprey-retained-screens', py,
     args: [files('tools/ui/build_retained_screens.py'), '--check'], timeout: 30)
+  # The loading screen's name notch textures (stock screen), from their construction.
+  test('openprey-loading-notch', py,
+    args: [files('tools/ui/loading_notch.py'), '--check'], timeout: 120)
   # Repaints the initializing screen's textures from their seeds: about a minute.
   test('openprey-retained-initialization', py,
     args: [files('tools/ui/build_retained_initialization.py'), '--check'], timeout: 300)

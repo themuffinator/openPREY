@@ -28,6 +28,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loading_notch as notch  # noqa: E402  (the loading screen's name notch, shared with its stock textures)
 OUT = ROOT / "content" / "basepr" / "pak0" / "guis"
 
 HEADER = (
@@ -3816,14 +3818,123 @@ def full_width(nodes: list[dict]) -> list[dict]:
     return nodes
 
 
+def notch_point(fraction: float, offset: float, y: float) -> list:
+    """A loading_notch point in dp: `offset` u from the leading edge, or from
+    `fraction` of the notch's width."""
+    x = round(offset * U, 2) if fraction == 0 else {"fraction": fraction, "dp": round(offset * U, 2)}
+    return [x, round(y * U, 2)]
+
+
+def notch_paths(shape_list: list[dict]) -> list[dict]:
+    """loading_notch shapes as vector paths."""
+    paths = []
+    for shape in shape_list:
+        commands = []
+        for ring in shape["rings"]:
+            for index, point in enumerate(ring):
+                commands.append({"id": f"p{len(commands)}", "op": "move" if index == 0 else "line",
+                                 "points": [notch_point(*point)]})
+            commands.append({"id": f"p{len(commands)}", "op": "close"})
+        fill = shape["fill"]
+        if isinstance(fill, tuple):
+            _, y0, y1, c0, c1 = fill
+            fill = linear([0, y0 * U], [0, y1 * U], [(0, c0), (1, c1)])
+        else:
+            fill = solid(fill)
+        path = {"id": shape["id"], "commands": commands, "fill": fill}
+        if len(shape["rings"]) > 1:
+            path["fillRule"] = "evenodd"
+        if shape["stroke"] is not None:
+            tint, width = shape["stroke"]
+            path["stroke"] = stroke(solid(tint), width * U, minimum=1, join="round")
+        paths.append(path)
+    return paths
+
+
+def name_notch(doc: Document) -> tuple[dict, list]:
+    """The name notch (section 12.1, tools/ui/loading_notch.py), hung from
+    the screen's top edge, centred on it and wrapped round the level's name:
+    its padding holds the end pieces and the clear foot beyond the name, so
+    the layout sizes it to the name, never under the shortest foot, and the
+    shapes follow its width.
+
+    It opens from the centre without knowing that width: the frame is one
+    vector anchored inside the box, whose leading and trailing anchors start
+    at the centre less END (a percentage of the box with a margin in dp) and
+    run out to the box's edges on one curve. The end pieces hold their shape
+    (their points are measured from the frame's edges) and the foot stretches
+    between them, so the closed notch is the two ends meeting. The rivets
+    lie over the whole box and set once it is open. Returns the row and its
+    intro rows for `intro_tracks`: (part, node, property, parked, open)."""
+    end = round(notch.END * U, 2)
+    frame = vector("notch-frame", {
+        "position": keyword("absolute"), "top": length(0), "height": length(100, "%"),
+        "left": length(50, "%"), "right": length(50, "%"), "margin-left": length(-end), "margin-right": length(-end),
+        **PASSIVE}, notch_paths(notch.shapes(rivets=False, steps=8)))
+    rivets = vector("notch-rivets", {**absolute(0, 0), "width": length(100, "%"), "height": length(100, "%"),
+                                     "opacity": number(0), **PASSIVE}, notch_paths(notch.rivet_shapes(steps=8)))
+    # The name as the stock window draws it at 0,3 (640x30, textaligny -5):
+    # one line whose box starts `top` u down, on a line the window's height.
+    em = EM * 0.6
+    top = 3 - 5 + (CAP_STOCK[DISPLAY] - CAP_LINE[DISPLAY]) * em - 30 / 2
+    face = {"font-family": font(DISPLAY), "font-size": length(em * U * FONT_FIT), "line-height": ul(30),
+            "white-space": keyword("nowrap"), "text-align": keyword("center"), **PASSIVE}
+    name = group("level-name-line", {"position": keyword("relative"), "display": keyword("block"),
+                                     "opacity": number(0), **PASSIVE}, [
+        {"id": "level-name-shadow", "type": "text", "properties": {
+            "text": text(PLACEHOLDER), "position": keyword("relative"), "left": ul(1), "top": ul(1),
+            "display": keyword("block"), **face, "color": colour(SHADOW)}},
+        {"id": "level-name", "type": "text", "properties": {
+            "text": text(PLACEHOLDER), **absolute(0, 0), "width": length(100, "%"), **face, "color": colour(LOAD_NAME)}},
+    ])
+    bound(doc, name["children"], "loading_levelname")
+    side = notch.END + notch.NAME_PAD
+    box = group("name-notch", {
+        "position": keyword("relative"), "display": keyword("block"), "box-sizing": keyword("border-box"),
+        "height": ul(notch.BOX_H), "min-width": ul(2 * notch.END + notch.FOOT_MIN),
+        "padding-left": ul(side), "padding-right": ul(side), "padding-top": ul(top),
+        "flex-grow": number(0), "flex-shrink": number(0), **PASSIVE}, [frame, rivets, name])
+    row = group("name-row", {**absolute(0, 0, None, notch.BOX_H), "width": length(100, "%"),
+                             "display": keyword("flex"), "flex-direction": keyword("row"),
+                             "justify-content": keyword("center"), "align-items": keyword("flex-start"),
+                             "transform": transform(0, -notch.BOX_H), **PASSIVE}, [box])
+    rows = [
+        ("drop", "name-row", "transform", transform(0, -notch.BOX_H), transform(0, 0)),
+        ("open", "notch-frame", "left", length(50, "%"), length(0, "%")),
+        ("open", "notch-frame", "right", length(50, "%"), length(0, "%")),
+        ("open", "notch-frame", "margin-left", length(-end), length(0)),
+        ("open", "notch-frame", "margin-right", length(-end), length(0)),
+        ("rivets", "notch-rivets", "opacity", number(0), number(1)),
+        ("name", "level-name-line", "opacity", number(0), number(1)),
+    ]
+    return row, rows
+
+
+def intro_tracks(rows) -> tuple[list, list]:
+    """The park (every part where the intro starts, at once) and the intro
+    (each part over its span of loading_notch.INTRO) for
+    (part, node, property, parked, open) rows."""
+    park, intro = [], []
+    for part, node, prop, parked, opened in rows:
+        start, finish, easing = notch.INTRO[part]
+        park.append(track(node, prop, [(0, parked), (1, parked)]))
+        keys = [(0, parked)] if start == 0 else [(0, parked), (start, parked)]
+        keys[-1] = (keys[-1][0], parked, easing)
+        keys.append((finish, opened))
+        if finish < notch.INTRO_MS:
+            keys.append((notch.INTRO_MS, opened))
+        intro.append(track(node, prop, keys))
+    return park, intro
+
+
 def loading_document() -> dict:
     """The level loading screen (sections 9 and 12.1): the level's art over
-    the whole screen, a 0.55 black band at the top with the level's name, the
+    the whole screen, the level's name in a notch hung from the top edge, the
     author line under it, the objectives panel, and the progress bar in its
     claw-ended outline, with the loader's phase beside it. The session sets
-    the art (`loading_levelshot`): a save's screenshot, the map's loading art
-    or the generic painting, composed with its edge tiles into one picture of
-    the window's shape when it has them (`loading_bkgnd_canvasfill`)."""
+    the art (`loading_levelshot`): the map's loading art or the generic
+    painting, composed with its edge tiles into one picture of the window's
+    shape when it has them (`loading_bkgnd_canvasfill`)."""
     doc = Document("openprey.loading")
     doc.state.update({
         "map_loading": {"type": "number", "initial": 0},
@@ -3844,12 +3955,9 @@ def loading_document() -> dict:
         shot = picture(ident, RETAINED_GENERIC_SHOT, {**place, **PASSIVE})
         doc.bind(ident, "image", {"state": "loading_levelshot"})
         shots.append(shown_when(doc, shot, shown))
-    band = group("name-band", {**absolute(0, 10, None, 35), "width": length(100, "%"),
-                               "background-color": colour([0, 0, 0, 0.55]), **PASSIVE})
-    name = full_width(bound(doc, label("level-name", PLACEHOLDER, (0, 10, CANVAS_W, 30), DISPLAY, 0.6, LOAD_NAME,
-                                       shadow=True, ty=-5), "loading_levelname"))
-    author = shown_when(doc, group("author", {**absolute(0, 0, None, 70), "width": length(100, "%"), **PASSIVE},
-                                   full_width(bound(doc, label("author-name", PLACEHOLDER, (0, 40, CANVAS_W, 20), DISPLAY, 0.3,
+    author = shown_when(doc, group("author", {**absolute(0, 0, None, 76), "width": length(100, "%"),
+                                              "opacity": number(0), **PASSIVE},
+                                   full_width(bound(doc, label("author-name", PLACEHOLDER, (0, 46, CANVAS_W, 20), DISPLAY, 0.3,
                                                                LOAD_AUTHOR, shadow=True, ty=-2), "loading_author"))),
                         {"op": "!=", "args": [{"state": "loading_author"}, ""]})
     objectives = shown_when(doc, group("objectives", absolute(0, 0, CANVAS_W, CANVAS_H), [
@@ -3868,15 +3976,23 @@ def loading_document() -> dict:
         *bound(doc, label("load-count", PLACEHOLDER, (474, 457, 146, 12), BODY, 0.25, LOAD_COUNT, align="right",
                           shadow=True), "loading_count"),
     ]
-    head = group("head", {**absolute(0, 0, None, CANVAS_H), "width": length(100, "%"), **PASSIVE}, [band, *name, author])
+    notch_row, notch_rows = name_notch(doc)
+    head = group("head", {**absolute(0, 0, None, CANVAS_H), "width": length(100, "%"), **PASSIVE}, [notch_row, author])
     foot = foot_column("foot", [objectives, fill_clip, progress_outline("progress-outline", (168, 443, OUTLINE_W, OUTLINE_H)), *status])
+    foot["properties"]["opacity"] = number(0)
+    park, intro = intro_tracks([*notch_rows,
+                                ("name", "author", "opacity", number(0), number(1)),
+                                ("foot", "foot", "opacity", number(0), number(1))])
     # A multiplayer join can hold the screen over the match and hand off with
     # a fade (idSessionLocal::FadeRetainedLoadingHold); a new load presents it
-    # whole again. The levelshot is up from the first frame.
-    doc.timeline("present", 1, [track("screen", "opacity", [(0, number(1)), (1, number(1))])])
+    # whole again, its framing parked. The levelshot is up from the first
+    # frame; once it is (frameIn), the notch lowers into view and opens and
+    # the foot fades in (section 12.1).
+    doc.timeline("present", 1, [track("screen", "opacity", [(0, number(1)), (1, number(1))]), *park])
+    doc.timeline("intro", notch.INTRO_MS, intro)
     doc.timeline("handoff", LOAD_HANDOFF_MS, [track("screen", "opacity", [(0, number(1)), (LOAD_HANDOFF_MS, number(0))])])
     doc.events["present"] = [{"op": "playTimeline", "timeline": "present"}]
-    doc.events["frameIn"] = [{"op": "playTimeline", "timeline": "present"}]
+    doc.events["frameIn"] = [{"op": "playTimeline", "timeline": "intro"}]
     doc.events["handoff"] = [{"op": "playTimeline", "timeline": "handoff"}]
     root = group("screen", {**FULL, "background-color": colour([0, 0, 0, 1]), "opacity": number(1),
                             "font-family": font(BODY), "font-size": length(EM * 0.33 * U), "color": colour(TEXT_LABEL)},

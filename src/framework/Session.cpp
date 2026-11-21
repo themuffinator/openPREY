@@ -1963,8 +1963,10 @@ art rather than the menu thumb): guis/assets/loading/<map>.tga; else that
 picture in an addon pak, copied to guis/assets/loading/addon/<map>.tga with any
 _left, _right, _top and _bottom tiles beside it; else the generic
 guis/assets/loading/loading.tga. The menus' pictures under loading/thumbs/
-(FindMapScreenshot) are never the loading art. A mapDef's loadimage and a save's
-screenshot come first (the callers read them).
+(FindMapScreenshot) are never the loading art. A mapDef's loadimage comes first
+(the callers read it). Retail shows a loading save's own screenshot,
+savegames/<save>.tga, instead (idSessionLocal::LoadLoadingGui); openPREY never
+does: a save loads under its map's loading art like any other load.
 */
 static void Session_FindMapLoadingImage( const char *mapPath, char *buf, int len ) {
 	static const char *const tiles[] = { "_left", "_right", "_top", "_bottom" };
@@ -1987,34 +1989,6 @@ static void Session_FindMapLoadingImage( const char *mapPath, char *buf, int len
 		}
 	}
 	idStr::Copynz( buf, "guis/assets/loading/loading.tga", len );
-}
-
-/*
-OPENPREY: the picture a save is loading under. Retail Prey shows the save's own
-screenshot, savegames/<save>.tga, when there is one, read again since a newer
-save under the same name replaces it (idSessionLocal::LoadLoadingGui in
-PREY.exe 1.4); otherwise the map's loading art.
-*/
-static bool Session_FindSaveLoadingImage( idFile *saveFile, idStr &image ) {
-	if ( saveFile == NULL ) {
-		return false;
-	}
-	image = saveFile->GetName();
-	image.BackSlashesToSlashes();
-	const int savegames = image.Find( "savegames/", false );
-	if ( savegames > 0 ) {
-		image = image.Right( image.Length() - savegames );
-	}
-	image.SetFileExtension( ".tga" );
-	if ( idStr::Icmpn( image.c_str(), "savegames/", 10 ) != 0 || fileSystem->ReadFile( image.c_str(), NULL, NULL ) <= 0 ) {
-		return false;
-	}
-	idMaterial *material = const_cast<idMaterial *>( declManager->FindMaterial( image.c_str() ) );
-	if ( material != NULL ) {
-		material->ReloadImages( false );
-	}
-	UI_RetainedReloadImage( image.c_str() );
-	return true;
 }
 
 static void Session_NormalizeMapDeclPath( const char *mapPath, idStr &normalizedPath ) {
@@ -4607,6 +4581,7 @@ void idSessionLocal::Clear() {
 	retainedHandoffUntil = 0;
 	retainedPointerX = retainedPointerY = 0.0f;
 	retainedLoadingActive = false;
+	loadingIntroStartMsec = 0;
 	retainedLoadingPhase = 0;
 	retainedLoadingLoaded = retainedLoadingTotal = -1;
 	retainedLoadingTip = -1;
@@ -5076,6 +5051,85 @@ void idSessionLocal::CompleteWipe() {
 
 /*
 ================
+Session_LoadingIntroPart
+
+OPENPREY: one part of the loading screen's intro at `elapsed` ms, 0 to 1 on
+its cubic Bezier easing. The table is tools/ui/loading_notch.py's INTRO,
+which the retained screen plays as a timeline; keep the two in step.
+================
+*/
+struct loadingIntroPart_t {
+	const char *	state;
+	int				startMsec;
+	int				endMsec;
+	float			x1, y1, x2, y2;
+};
+
+static const loadingIntroPart_t LOADING_INTRO_PARTS[] = {
+	{ "loading_notch_drop",   0,   300, 0.33f, 1.0f, 0.68f, 1.0f },	// lowers into view, closed
+	{ "loading_notch_open",   200, 560, 0.65f, 0.0f, 0.35f, 1.0f },	// opens to fit the name
+	{ "loading_notch_rivets", 520, 680, 0.5f,  1.0f, 0.89f, 1.0f },
+	{ "loading_name_fade",    460, 720, 0.5f,  1.0f, 0.89f, 1.0f },	// the name and the author line
+	{ "loading_foot_fade",    100, 500, 0.5f,  1.0f, 0.89f, 1.0f },	// the progress bar, phase and objectives
+};
+
+static float Session_CubicBezierEase( const loadingIntroPart_t &part, float x ) {
+	// Solve the curve's x(t) = x by bisection (x(t) rises monotonically for
+	// control points in 0..1), then return y(t).
+	const auto at = []( float a, float b, float t ) {
+		const float u = 1.0f - t;
+		return 3.0f * u * u * t * a + 3.0f * u * t * t * b + t * t * t;
+	};
+	float lo = 0.0f, hi = 1.0f, t = x;
+	for ( int i = 0; i < 24; ++i ) {
+		t = 0.5f * ( lo + hi );
+		if ( at( part.x1, part.x2, t ) < x ) {
+			lo = t;
+		} else {
+			hi = t;
+		}
+	}
+	return at( part.y1, part.y2, t );
+}
+
+/*
+================
+idSessionLocal::PublishLoadingIntro
+
+OPENPREY: the stock loading screen cannot time its own motion, so the session
+gives guis/map/loading.gui each part of the intro (section 12.1) before every
+redraw: each part's eased progress from the first frame. Reduced motion shows
+the screen whole at once.
+================
+*/
+void idSessionLocal::PublishLoadingIntro( int presentationTime ) {
+	if ( guiLoading == NULL || retainedLoadingActive ) {
+		return;
+	}
+	const bool whole = cvarSystem->GetCVarBool( "ui_retainedReducedMotion" );
+	if ( loadingIntroStartMsec <= 0 ) {
+		// A load that never reaches ShowLoadingGui still plays it; frameIn
+		// starts it again once the first frame is up.
+		loadingIntroStartMsec = Max( 1, presentationTime );
+	}
+	const int elapsed = Max( 0, presentationTime - loadingIntroStartMsec );
+	for ( int i = 0; i < static_cast<int>( sizeof( LOADING_INTRO_PARTS ) / sizeof( LOADING_INTRO_PARTS[0] ) ); ++i ) {
+		const loadingIntroPart_t &part = LOADING_INTRO_PARTS[i];
+		float value = 0.0f;
+		if ( whole ) {
+			value = 1.0f;
+		} else {
+			const float x = idMath::ClampFloat( 0.0f, 1.0f,
+				static_cast<float>( elapsed - part.startMsec ) / static_cast<float>( part.endMsec - part.startMsec ) );
+			value = x <= 0.0f ? 0.0f : ( x >= 1.0f ? 1.0f : Session_CubicBezierEase( part, x ) );
+		}
+		guiLoading->SetStateFloat( part.state, value );
+	}
+	guiLoading->StateChanged( presentationTime );
+}
+
+/*
+================
 idSessionLocal::ShowLoadingGui
 ================
 */
@@ -5091,6 +5145,7 @@ void idSessionLocal::ShowLoadingGui() {
 	// levelshot, and its cost must not eat the motion. Every path out of here
 	// plays it, so the framing can never stay parked.
 	const auto frameIn = [this]() {
+		loadingIntroStartMsec = Max( 1, common->GetPresentationTime() );
 		if ( retainedLoadingActive && guiLoading != NULL ) {
 			guiLoading->HandleNamedEvent( "frameIn" );
 		}
@@ -7413,10 +7468,7 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 
 		loadGuiOverride = mapDef->GetString( "loadgui", "" );
 		const char *loadImage = mapDef->GetString( "loadimage", "" );
-		idStr saveImage;
-		if ( loadingSaveGame && Session_FindSaveLoadingImage( savegameFile, saveImage ) ) {
-			loadingBackground = saveImage;
-		} else if ( loadImage[0] ) {
+		if ( loadImage[0] ) {
 			loadingBackground = loadImage;
 		} else if ( idStr::Icmp( loadGuiOverride, "guis/loading/intro.gui" ) == 0 &&
 				Session_FileExistsInSearchPaths( "gfx/guis/loadscreens/e3_load.tga" ) ) {
@@ -7429,14 +7481,9 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 		}
 	} else {
 		// Keep non-mapDef paths consistent with the mapDef path.
-		idStr saveImage;
-		if ( loadingSaveGame && Session_FindSaveLoadingImage( savegameFile, saveImage ) ) {
-			loadingBackground = saveImage;
-		} else {
-			char screenshot[ MAX_STRING_CHARS ];
-			Session_FindMapLoadingImage( spawnMapPath, screenshot, MAX_STRING_CHARS );
-			loadingBackground = screenshot;
-		}
+		char screenshot[ MAX_STRING_CHARS ];
+		Session_FindMapLoadingImage( spawnMapPath, screenshot, MAX_STRING_CHARS );
+		loadingBackground = screenshot;
 	}
 
 	idStr expandedLoadingBackground;
@@ -7469,6 +7516,8 @@ void idSessionLocal::LoadLoadingGui( const char *mapName ) {
 	const bool retainedLoading = guiLoading != legacyLoading;
 
 	if ( guiLoading ) {
+		// A new load parks the intro until its first frame is up (frameIn).
+		loadingIntroStartMsec = 0;
 		guiLoading->SetStateFloat( "map_loading", 0.0f );
 		guiLoading->SetStateString( "loading_bkgnd", loadingBackground.c_str() );
 		guiLoading->SetStateInt( "loading_bkgnd_canvasfill", loadingBackgroundCanvasFill ? 1 : 0 );
@@ -10742,6 +10791,7 @@ void idSessionLocal::Draw() {
 
 	if ( insideExecuteMapChange ) {
 		if ( guiLoading ) {
+			PublishLoadingIntro( presentationTime );
 			guiLoading->Redraw( presentationTime );
 		}
 		if ( guiActive == guiMsg ) {
