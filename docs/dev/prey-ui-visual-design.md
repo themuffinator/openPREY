@@ -1,11 +1,11 @@
 # openPREY UI Visual Design
 
-Specification version 1.21, 20 November 2026.
+Specification version 1.22, 21 November 2026.
 
 Status: reference survey and design contract. openPREY renders the stock Prey
 GUIs by default. A first vector replacement, the home screen's navigation, its
 small frames, the Load Game, Save Game and Credits pages, the death screen,
-Options with all four tabs and the level loading screen, is built for the
+Options with all four tabs, the system check and the level loading screen, is built for the
 retained interface and presents while `ui_retained` is 1 (section 12.5). Sections 1 to 11 record what makes the Prey
 interface look and behave like Prey, so that fixes, widescreen work, new
 settings pages and every further replacement stay inside that identity.
@@ -19,7 +19,7 @@ Section 12 covers openPREY's own additions.
 | Rifle scope at any aspect (section 10.8) | Built in the legacy GUI with the stock art |
 | Alien-script translation (section 11.4) | Built |
 | 3D main-menu backdrop and entrance (section 12.2) | Specified, not built. The menu draws the stock layers |
-| Vector or retained-UI replacement (sections 12.3 and 12.5) | Home navigation, bottom bar, New Game, Mods, Exit, Quit Game, Load Game, Save Game, Credits, the death screen, Options (every tab and the Reset Defaults dialog) and the level loading screen built behind `ui_retained`; MultiPrey and the message boxes are still the stock ones |
+| Vector or retained-UI replacement (sections 12.3 and 12.5) | Home navigation, bottom bar, New Game, Mods, Exit, Quit Game, Load Game, Save Game, Credits, the death screen, Options (every tab and the Reset Defaults dialog), the system check and the level loading screen built behind `ui_retained`; MultiPrey and the message boxes are still the stock ones |
 
 The companion [Interface Atlas](prey-ui/atlas/prey-interface-atlas.html) draws
 the measured components, screens and motion as editable vector
@@ -1554,6 +1554,7 @@ by a script from this specification and committed.
 | `guis/menu/restartmenu.rui` | The death screen | The frame with Load, Restart and Main Menu and the line under each that says what it does |
 | `guis/menu/credits.rui` | Credits, from either home | The stock credits sheet rising through the page |
 | `guis/menu/settings.rui` | Options, from either home | The four top tabs, Controls' seven pages, Game Options' two, Video's six and the Audio page, and the Reset Defaults dialog |
+| `guis/menu/presetcheck.rui` | The system check, before the main menu | The claw frame with the detected hardware, the nine presets as a ladder (recommended lit, current outlined), the recommendation's scale and frame cap, Apply Recommended (Continue when nothing would change), Keep Current and Ask Me Next Time |
 | `guis/loading/loading.rui` | Every level load, in place of `guis/map/loading.gui` | The level's art across the screen, the name band with the level's name and author line, the objectives panel, the progress bar in its claw-ended outline and the loader's phase |
 
 `tools/ui/build_retained_screens.py` writes them from the measurements of
@@ -1593,6 +1594,12 @@ without a change here.
   (`guis/menu/multiplayer.rui`); that session route is inherited from openQ4
   and has not been run with a Prey document.
 - The death screen is a document of its own (below).
+- The system check (`docs/dev/ui/performance-presets.md`, "System check") is
+  a document of its own. It is drawn over the stock check's backdrop and
+  wordmark, which the session keeps drawing beneath it, as under the death
+  screen; the stock `guis/presetcheck.gui` leaves its own dialog undrawn
+  while `gui::retainedHome` is set. Both are described under the system
+  check below.
 - The loading screen is a document of its own (below). A map's own
   `guis/map/<map>.gui`, and a mod's own copy of the stock screen, still
   present instead.
@@ -1931,6 +1938,39 @@ nothing of the stock screen draws beneath it.
 - **Motion.** None but the fill, as in the stock. A multiplayer join that
   holds the screen over the match fades it out over 250 ms.
 
+#### The system check
+
+Shown before the main menu when the performance presets have changed since
+the configuration last checked them (`docs/dev/ui/performance-presets.md`,
+"System check"). It is one dialog in both interfaces, at the same stock
+coordinates, so the retained document is the stock screen redrawn.
+
+- **Backdrop.** The death screen's: the static menu backdrop
+  (`guis/assets/menu/background_*`) and the wordmark, here at 190,14,260,18
+  above the frame. The stock screen draws it; the retained document draws
+  over it, with `prey.softfocus` and a 0.50 scrim beneath its frame.
+- **Frame.** The claw frame at 100,50,440,392 with a 0.70 body. Its title is
+  centred at the frame's top; the question under it, in the body face at
+  0.25, takes up to three lines.
+- **Readout.** Two section header bars (Detected Hardware, Performance
+  Preset) with their names in the display face at 0.33. Under the first,
+  five rows: the name in `prey.text.label`, the value from x 150 in
+  `prey.text.value`. Under the second, the nine presets as a ladder of
+  12 u cells, Minimum leading, each `prey.list.wash` a little stronger than
+  the last; the recommended cell is filled in `prey.text.button` and the
+  current one outlined in white with a marker under it, with the two end
+  names under the ends. Then Recommended (in `prey.text.button` at 0.30)
+  with its render scale and frame cap, Current, and a line naming
+  Options > Video as the place to change it later.
+- **Actions.** Apply Recommended (Continue when nothing would change) and
+  Keep Current as 170x25 u 3-slice buttons, and Ask Me Next Time under them
+  as a bottom bar's action in the display face. Focus opens on the first;
+  Left and Right step between the buttons and Down reaches the action.
+  Escape or Back is Ask Me Next Time. While the recommendation applies, the
+  three give way to "Applying settings..." until the renderer and sound have
+  restarted.
+- **Sounds.** `clickin` on Apply and Keep, `cancel` on Ask Me Next Time.
+
 #### Not yet built
 
 - Controller prompts in the bottom title bar, and text that scales with the
@@ -2249,11 +2289,6 @@ the sections above.
   page beneath it in the capture. The scrim is a GUI fill drawn under image
   plates, so this is likely the same draw-order cause; it has not been
   rechecked since `70b9d052a`.
-- Applying a different performance preset while the menu is up
-  (`applyPerformancePreset balanced` from Enhanced, the command the Quality
-  Preset row runs) turns the main menu's backdrop white outside the 4:3 panel
-  and grey behind it until the next `vid_restart`. The Video reset avoids this
-  by applying only the detected preset, which is usually the current one.
 - openPREY's Post FX and Advanced FX pages sit on a 28 u row pitch with labels
   at 0,0,200,25 and `textaligny 0`; stock pages use 30 u, 5,5,190,20 and −6.
   Bring them to the stock pitch when they are next edited.
@@ -2299,6 +2334,16 @@ in the working tree when version 1.14 was written. The engine entries are
 kept because the survey found them and the stock screens of sections 7 to 11
 depend on the behaviour they restore; `docs/dev/releases/unreleased.md`
 carries their summaries.
+
+- **The backdrop after a live preset change** (rechecked 21 November 2026,
+  `6624aa1fc` and later): applying a different performance preset while the
+  menu was up (`applyPerformancePreset balanced` from Enhanced, the command
+  the Quality Preset row runs) turned the main menu's backdrop white outside
+  the 4:3 panel and grey behind it until the next `vid_restart`. Balanced,
+  Minimum, Ultra and Enhanced applied in turn over the stock menu, and steps
+  of the retained Quality Preset row and Detect, now leave it as it was. The
+  commit that fixed it was not identified; the renderer-reload fixes merged
+  from openQ4 (`966d8ae6f`) are the likeliest.
 
 - **Tab labels under OpenGL** (`70b9d052a`): in openPREY's Options and
   MultiPrey pages, the four top tab labels and the active side tab's label did
@@ -2553,6 +2598,15 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.22, 21 November 2026
+
+- Section 12.5 adds the system check (`guis/menu/presetcheck.rui`) and its
+  stock counterpart `guis/presetcheck.gui`, both new: a subsection describes
+  them, and the document table and status table at the head list the
+  retained one.
+- Appendix C: the white backdrop after a live preset change no longer
+  reproduces and moves from C.1 to C.2.
 
 ### Version 1.21, 20 November 2026
 

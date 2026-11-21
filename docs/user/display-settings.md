@@ -9,12 +9,12 @@ This guide covers openPREY's display and window settings: the renderer, performa
 
 openPREY starts with PREY's own menus (`ui_retained 0`), which openPREY extends. **Options -> Video** has these tabs:
 
-- The first tab sets the resolution (`r_mode`, from PREY's fixed list), fullscreen, brightness and gamma, and has the **Low / Medium / High** quality choices and **Recommended** (Auto-Detect).
+- The first tab sets the resolution, fullscreen, render scale, vertical sync, brightness and gamma, and has **Auto Detect** and the **Quality Preset** row, which offers all nine presets.
 - The two advanced tabs set shader detail, shadows, specular and bump maps, vertical sync, anti-aliasing (`r_multiSamples`), glow overlays, particle detail, fast skinning and anisotropy.
 - openPREY's **Post FX** tab adds MSAA samples, post anti-aliasing, SSAO, bloom, the CRT filter, HDR tone mapping and exposure.
 - openPREY's **Advanced FX** tab tunes them: MSAA alpha coverage, SSAO radius and intensity, bloom radius, HDR white point, saturation and contrast, and CRT strength and chromatic aberration.
 
-Everything else on this page is a console setting. The `Settings -> System` page that openQ4 players know, with Rendering Backend, Rendering Device, Performance Preset and display sizing controls, belongs to the retained interface (`ui_retained 1`). That interface is inherited from openQ4 and hasn't been checked with PREY.
+Everything else on this page is a console setting. The retained interface (`ui_retained 1`) rebuilds these same **Options -> Video** pages; openQ4's `Settings -> System` page isn't used in openPREY.
 
 ## Quick Start
 
@@ -26,8 +26,8 @@ Everything else on this page is a console setting. The `Settings -> System` page
 ## Video Options in the PREY Menu
 
 PREY's own menu holds these settings under **Options -> Video**, on six side
-tabs. The `Settings -> System` page described in the rest of this guide is the
-upstream retained interface; the cvars and behaviour are the same.
+tabs. The retained interface (`ui_retained 1`) draws the same tabs and rows,
+with the same cvars and behaviour.
 
 | Tab | Rows |
 |---|---|
@@ -104,7 +104,9 @@ Anything else is rejected with a warning, and openPREY uses the platform default
 
 The `com_performancePreset` cvar stores the selected preset. Run `applyPerformancePreset [name]` from the console to apply one. Without a name it reapplies the stored `com_performancePreset`; if that value is invalid, openPREY falls back to `balanced`. Unknown names are rejected without changing the current preset.
 
-The quality choices on the first **Options -> Video** tab use the same recipes: **Low** applies `low`, **Medium** applies `performance` and **High** applies `balanced`. **Recommended** runs `autoDetectPerformancePreset`. These keep your display mode and VSync preference. `execMachineSpec` also maps the legacy `com_machineSpec` classes onto these presets.
+The first **Options -> Video** tab uses the same recipes. **Quality Preset** applies the chosen preset at once (`applyPerformancePreset <name>`), and **Detect** runs `autoDetectPerformancePreset`. Both keep your display mode and VSync preference, and the other tabs' rows show the new values straight away. The legacy `video low|medium|high|ultra|recommended` menu commands apply `low`, `performance`, `balanced`, `ultra` and the detected preset, and `execMachineSpec` maps the legacy `com_machineSpec` classes onto these presets.
+
+Every way of applying a preset (the menu, the console commands, `execMachineSpec`, the first launch's detection and the system check) also sets PREY's own quality settings to match the tier: Shader Detail (`r_shaderLevel`), glow overlays, high quality specular, bumpmap sharpening, fast skinning, and shadow maps for point lights.
 
 | Preset | Display and AA | Texture and audio profile | Intended use |
 |---|---|---|---|
@@ -130,7 +132,17 @@ Storing `com_performancePreset` alone doesn't reapply a profile. Select the pres
 
 Performance presets write video, texture-allocation, texture-sampling and audio backend cvars. Anisotropy is capped to what the active GPU supports. Run `vid_restart` after applying one so renderer, texture and sampler changes take effect, and `s_restart` if you want speaker, EAX and emitter-budget changes to rebuild the sound backend immediately.
 
-In the retained interface (`ui_retained 1`), choose the preset on **Settings > Display** and press **Apply Changes**. That restarts the renderer once and, when the speaker layout or reverb setting changed, the sound device. A preset that changes anti-aliasing asks you to keep or revert. High-quality texture flags and the per-sound sample limit fully change when the game next starts; the page tells you when your changes include one of them.
+In both interfaces a preset lights **Apply Changes** on **Options -> Video**; pressing it, or leaving Options, restarts the renderer once.
+
+### System check
+
+When an update changes the presets or how openPREY picks one, the next start shows a **System Check** screen before the main menu. It lists the graphics card, memory, processor and display openPREY found, and shows the recommended preset next to your current one on a ladder of all nine. You have three choices:
+
+- **Apply Recommended** switches to the recommended preset, briefly restarts the renderer and sound, then opens the menu. It reads **Continue** when your settings already match.
+- **Keep Current** leaves your settings alone. You won't be asked again until the presets change.
+- **Ask Me Next Time** (or Escape) also leaves your settings alone, and asks again at the next start.
+
+A new install never sees the screen, because the first launch already picks a preset for your hardware. Starting with any startup command, such as `+map` or `+exec`, skips the check. In the console, `performancePresetCheck` shows the preset version and the current recommendation, `performancePresetCheck open` shows the screen from the main menu, and `performancePresetCheck reset` makes the next start ask again.
 
 ### Auto-Detect
 

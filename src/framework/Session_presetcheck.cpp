@@ -30,11 +30,17 @@ namespace {
 
 const char *const RETAINED_PRESET_CHECK_GUI = "guis/menu/presetcheck.rui";
 const char *const STOCK_PRESET_CHECK_GUI = "guis/presetcheck.gui";
+// OPENPREY: Prey's strings. The Quality Preset row's nine names, and where the
+// row lives in both interfaces: Options > Video.
+const char *const PRESET_TIER_NAMES = "#str_122026";
+const char *const PRESET_MENU_NAME = "#str_20208";
+const char *const PRESET_PAGE_NAME = "#str_20280";
 
 enum class PresetCheckStage { Idle, Showing, Applying };
 
 struct PresetCheckScreen {
 	idUserInterface *gui = NULL;
+	idUserInterface *backdrop = NULL;   // OPENPREY: the stock screen, drawn beneath the retained one
 	bool retained = false;
 	bool playIntro = true;      // the main menu plays its intro after a startup check
 	PresetCheckStage stage = PresetCheckStage::Idle;
@@ -45,13 +51,13 @@ const char *Localized( const char *key ) {
 	return common->GetLanguageDict()->GetString( key );
 }
 
-// The localized name of preset tier `tier` (#str_229977 lists all nine in
-// PerformancePresets() order), or Custom for a selection outside them.
+// The localized name of preset tier `tier` (PRESET_TIER_NAMES lists all nine
+// in PerformancePresets() order), or Custom for a selection outside them.
 idStr PresetTierName( int tier ) {
 	if ( tier < 0 || tier >= openq4::PerformancePresetCount ) {
 		return Localized( "#str_232024" );
 	}
-	idStr names = Localized( "#str_229977" );
+	idStr names = Localized( PRESET_TIER_NAMES );
 	int start = 0;
 	for ( int index = 0; index <= tier; ++index ) {
 		int end = names.Find( ';', start );
@@ -121,10 +127,11 @@ void Publish( idUserInterface *gui, const openq4::PerformancePresetCheck &check,
 	gui->SetStateString( "check_detail", check.maxFps > 0 ?
 		va( Localized( "#str_232020" ), check.screenFraction, check.maxFps ) :
 		va( Localized( "#str_232021" ), check.screenFraction ) );
-	// Where the choice lives afterwards, in the menu's own words: SETTINGS >
-	// DISPLAY in the retained interface, SETTINGS > SYSTEM in the stock one.
-	gui->SetStateString( "check_footer", va( Localized( "#str_232023" ), Localized( "#str_200009" ),
-		Localized( retained ? "#str_229900" : "#str_200085" ) ) );
+	// Where the choice lives afterwards, in the menu's own words: Options >
+	// Video in both of Prey's interfaces.
+	(void)retained;
+	gui->SetStateString( "check_footer", va( Localized( "#str_232023" ), Localized( PRESET_MENU_NAME ),
+		Localized( PRESET_PAGE_NAME ) ) );
 	gui->SetStateInt( "check_currentTier", check.currentTier );
 	gui->SetStateInt( "check_recommendedTier", check.recommendedTier );
 	gui->SetStateBool( "check_matches", check.matches );
@@ -232,12 +239,24 @@ bool Session_StartPresetCheck( bool force ) {
 		gui = sessLocal.FindRetainedGui( RETAINED_PRESET_CHECK_GUI, true, false );
 		retained = gui != NULL;
 	}
+	// OPENPREY: the stock screen is also the retained one's backdrop (the static
+	// menu backdrop and the wordmark), which leaves its own dialog undrawn while
+	// gui::retainedHome is set, as guis/restart.gui does under the death screen.
+	idUserInterface *stock = uiManager->FindGui( STOCK_PRESET_CHECK_GUI, true, false, true );
 	if ( gui == NULL ) {
-		gui = uiManager->FindGui( STOCK_PRESET_CHECK_GUI, true, false, true );
+		gui = stock;
 	}
 	if ( gui == NULL ) {
 		common->Warning( "Performance preset check: '%s' could not be loaded; the main menu opens instead", STOCK_PRESET_CHECK_GUI );
 		return false;
+	}
+	idUserInterface *backdrop = retained ? stock : NULL;
+	if ( backdrop != NULL ) {
+		backdrop->SetStateBool( "retainedHome", true );
+		backdrop->StateChanged( common->GetPresentationTime() );
+		backdrop->Activate( true, common->GetPresentationTime() );
+	} else if ( stock != NULL ) {
+		stock->SetStateBool( "retainedHome", false );
 	}
 	common->Printf( "PRESET_CHECK show ui=%s stored='%s' version=%s current=%s recommended=%s differences=%d (%s)\n",
 		retained ? "retained" : "stock", check.stored.c_str(), check.version.c_str(), check.current.c_str(),
@@ -247,12 +266,22 @@ bool Session_StartPresetCheck( bool force ) {
 	// was; the startup check hands over to the menu's intro.
 	presetCheck.playIntro = !force || sessLocal.guiActive == NULL;
 	presetCheck.gui = gui;
+	presetCheck.backdrop = backdrop;
 	presetCheck.retained = retained;
 	presetCheck.stage = PresetCheckStage::Showing;
 	console->Close();
 	sessLocal.SetPlayingSoundWorld( sessLocal.menuSoundWorld );
 	sessLocal.SetGUI( gui, retained ? NULL : StockCommand );
 	return true;
+#endif
+}
+
+idUserInterface *Session_PresetCheckBackdrop( const idUserInterface *active ) {
+#ifdef ID_DEDICATED
+	(void)active;
+	return NULL;
+#else
+	return active != NULL && presetCheck.stage != PresetCheckStage::Idle && active == presetCheck.gui ? presetCheck.backdrop : NULL;
 #endif
 }
 

@@ -1,0 +1,589 @@
+// Copyright (C) 2026 DarkMatter Productions. GPL-3.0-or-later.
+// The system check for Prey's stock interface (docs/dev/ui/performance-presets.md
+// "System check"): shown before the main menu when the performance presets have
+// changed since this configuration last checked them. The session publishes
+// every value below already localized (src/framework/Session_presetcheck.cpp)
+// and takes the answers presetCheckApply, presetCheckKeep and presetCheckLater.
+//
+// The backdrop and wordmark are the death screen's (guis/restart.gui); the
+// dialog is the stock claw frame with the Video page's heading bands and the
+// stock buttons (docs/dev/prey-ui-visual-design.md, sections 6 and 9). Under
+// ui_retained 1 the session draws guis/menu/presetcheck.rui over this screen and
+// sets gui::retainedHome, which leaves the dialog undrawn.
+
+#include "guis/mainmenu/menucolors.guifragment"
+
+windowDef Desktop {
+	rect		0, 0, 640, 480
+	backcolor	0, 0, 0, 1
+	menugui		1
+
+	// Back asks again at the next start; it changes no setting.
+	onESC {
+		if ( "gui::check_busy" == 0 && "gui::retainedHome" == 0 ) {
+			set "cmd" "play guisounds_menu_cancel ; presetCheckLater" ;
+		}
+	}
+
+	windowDef PC_Backdrop {
+		rect		0, 0, 640, 480
+		noclip		1
+		noevents	1
+		backcolor	0, 0, 0, 0
+		matcolor	1, 1, 1, 1
+		background	"guis/assets/menu/background_center"
+		backgroundLeft	"guis/assets/menu/background_left"
+		backgroundRight	"guis/assets/menu/background_right"
+		backgroundTop	"guis/assets/menu/background_top"
+		backgroundBottom "guis/assets/menu/background_bottom"
+	}
+
+	windowDef PC_Logo {
+		rect		190, 14, 260, 18
+		background	"guis/assets/menu/prey"
+		matcolor	1, 1, 1, 1
+		noevents	1
+	}
+
+	// The dialog: a confirmation's 0.5 scrim and the claw frame grown to the readout.
+	windowDef PC_Dialog {
+		rect		0, 0, 640, 480
+		visible		("gui::retainedHome" == 0)
+
+		windowDef PC_Scrim {
+			rect		( 0 - "gui::virtual_screen_x_expand" ), ( 0 - "gui::virtual_screen_y_expand" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 480 + ( "gui::virtual_screen_y_expand" * 2 ) )
+			backcolor	0, 0, 0, 0.5
+			noclip		1
+			noevents	1
+		}
+
+		superWindowDef PC_Frame {
+			rect		100, 50, 440, 392
+			cornerMat	"guis/assets/menu/window_cornerUL"
+			topMat		"guis/assets/menu/window_top"
+			background	"_black"
+			matcolor	1, 1, 1, 0.7
+			margins		25, 25, 1, 0	// left, right, top, bottom
+			cornerSize	38, 32
+			edgeSize	4, 4
+			noevents	1
+		}
+
+		windowDef PC_Contents {
+			rect		100, 50, 440, 392
+			windowDef PC_Title {
+				rect		20, 12, 400, 20
+				text		"#str_232000"
+				textscale	0.33
+				textalign	1
+				nowrap		1
+				forecolor	STATIC_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_Body {
+				rect		30, 38, 380, 42
+				text		"gui::check_body"
+				textscale	0.25
+				textalign	1
+				forecolor	STATIC_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			buttonDef PC_HardwareHeading {
+				rect		20, 84, 400, 22
+				leftMat		"guis/assets/menu/text_titlebar_corner.tga"
+				middleMat	"guis/assets/menu/text_titlebarstrip.tga"
+				noevents	1
+				forecolor	HEADING_FORECOLOR_DARK_COMMA
+				font		"fonts/menu"
+				text		"#str_232025"
+				textalign	1
+				textaligny	-3
+				textscale	0.33
+				shadow		1
+			}
+			windowDef PC_GpuName {
+				rect		30, 110, 114, 15
+				text		"#str_232004"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	STATIC_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_GpuValue {
+				rect		150, 110, 260, 15
+				text		"gui::check_gpu"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	EDITABLE_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_VramName {
+				rect		30, 125, 114, 15
+				text		"#str_232005"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	STATIC_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_VramValue {
+				rect		150, 125, 260, 15
+				text		"gui::check_vram"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	EDITABLE_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_RamName {
+				rect		30, 140, 114, 15
+				text		"#str_232006"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	STATIC_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_RamValue {
+				rect		150, 140, 260, 15
+				text		"gui::check_ram"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	EDITABLE_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_CpuName {
+				rect		30, 155, 114, 15
+				text		"#str_232007"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	STATIC_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_CpuValue {
+				rect		150, 155, 260, 15
+				text		"gui::check_cpu"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	EDITABLE_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_DisplayName {
+				rect		30, 170, 114, 15
+				text		"#str_232008"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	STATIC_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_DisplayValue {
+				rect		150, 170, 260, 15
+				text		"gui::check_display"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	EDITABLE_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			buttonDef PC_PresetHeading {
+				rect		20, 192, 400, 22
+				leftMat		"guis/assets/menu/text_titlebar_corner.tga"
+				middleMat	"guis/assets/menu/text_titlebarstrip.tga"
+				noevents	1
+				forecolor	HEADING_FORECOLOR_DARK_COMMA
+				font		"fonts/menu"
+				text		"#str_232026"
+				textalign	1
+				textaligny	-3
+				textscale	0.33
+				shadow		1
+			}
+			// The nine presets, Minimum leading, each a little brighter than the last: the
+			// recommended one lit, the current one outlined with a marker under it.
+			windowDef PC_Tier0 {
+				rect		30.0, 222, 38.67, 12
+				backcolor	0.65, 0.77, 0.9, 0.1
+				noevents	1
+			}
+			windowDef PC_Tier0_Lit {
+				rect		30.0, 222, 38.67, 12
+				visible		( "gui::check_recommendedTier" == 0 )
+				backcolor	0.8, 0.87, 0.98, 0.85
+				noevents	1
+			}
+			windowDef PC_Tier0_Current {
+				rect		30.0, 222, 38.67, 12
+				visible		( "gui::check_currentTier" == 0 )
+				bordersize	1
+				bordercolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier0_Marker {
+				rect		47.34, 236, 4, 3
+				visible		( "gui::check_currentTier" == 0 )
+				backcolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier1 {
+				rect		72.67, 222, 38.67, 12
+				backcolor	0.65, 0.77, 0.9, 0.125
+				noevents	1
+			}
+			windowDef PC_Tier1_Lit {
+				rect		72.67, 222, 38.67, 12
+				visible		( "gui::check_recommendedTier" == 1 )
+				backcolor	0.8, 0.87, 0.98, 0.85
+				noevents	1
+			}
+			windowDef PC_Tier1_Current {
+				rect		72.67, 222, 38.67, 12
+				visible		( "gui::check_currentTier" == 1 )
+				bordersize	1
+				bordercolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier1_Marker {
+				rect		90.0, 236, 4, 3
+				visible		( "gui::check_currentTier" == 1 )
+				backcolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier2 {
+				rect		115.34, 222, 38.67, 12
+				backcolor	0.65, 0.77, 0.9, 0.15
+				noevents	1
+			}
+			windowDef PC_Tier2_Lit {
+				rect		115.34, 222, 38.67, 12
+				visible		( "gui::check_recommendedTier" == 2 )
+				backcolor	0.8, 0.87, 0.98, 0.85
+				noevents	1
+			}
+			windowDef PC_Tier2_Current {
+				rect		115.34, 222, 38.67, 12
+				visible		( "gui::check_currentTier" == 2 )
+				bordersize	1
+				bordercolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier2_Marker {
+				rect		132.68, 236, 4, 3
+				visible		( "gui::check_currentTier" == 2 )
+				backcolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier3 {
+				rect		158.01, 222, 38.67, 12
+				backcolor	0.65, 0.77, 0.9, 0.175
+				noevents	1
+			}
+			windowDef PC_Tier3_Lit {
+				rect		158.01, 222, 38.67, 12
+				visible		( "gui::check_recommendedTier" == 3 )
+				backcolor	0.8, 0.87, 0.98, 0.85
+				noevents	1
+			}
+			windowDef PC_Tier3_Current {
+				rect		158.01, 222, 38.67, 12
+				visible		( "gui::check_currentTier" == 3 )
+				bordersize	1
+				bordercolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier3_Marker {
+				rect		175.34, 236, 4, 3
+				visible		( "gui::check_currentTier" == 3 )
+				backcolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier4 {
+				rect		200.68, 222, 38.67, 12
+				backcolor	0.65, 0.77, 0.9, 0.2
+				noevents	1
+			}
+			windowDef PC_Tier4_Lit {
+				rect		200.68, 222, 38.67, 12
+				visible		( "gui::check_recommendedTier" == 4 )
+				backcolor	0.8, 0.87, 0.98, 0.85
+				noevents	1
+			}
+			windowDef PC_Tier4_Current {
+				rect		200.68, 222, 38.67, 12
+				visible		( "gui::check_currentTier" == 4 )
+				bordersize	1
+				bordercolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier4_Marker {
+				rect		218.02, 236, 4, 3
+				visible		( "gui::check_currentTier" == 4 )
+				backcolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier5 {
+				rect		243.35, 222, 38.67, 12
+				backcolor	0.65, 0.77, 0.9, 0.225
+				noevents	1
+			}
+			windowDef PC_Tier5_Lit {
+				rect		243.35, 222, 38.67, 12
+				visible		( "gui::check_recommendedTier" == 5 )
+				backcolor	0.8, 0.87, 0.98, 0.85
+				noevents	1
+			}
+			windowDef PC_Tier5_Current {
+				rect		243.35, 222, 38.67, 12
+				visible		( "gui::check_currentTier" == 5 )
+				bordersize	1
+				bordercolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier5_Marker {
+				rect		260.69, 236, 4, 3
+				visible		( "gui::check_currentTier" == 5 )
+				backcolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier6 {
+				rect		286.02, 222, 38.67, 12
+				backcolor	0.65, 0.77, 0.9, 0.25
+				noevents	1
+			}
+			windowDef PC_Tier6_Lit {
+				rect		286.02, 222, 38.67, 12
+				visible		( "gui::check_recommendedTier" == 6 )
+				backcolor	0.8, 0.87, 0.98, 0.85
+				noevents	1
+			}
+			windowDef PC_Tier6_Current {
+				rect		286.02, 222, 38.67, 12
+				visible		( "gui::check_currentTier" == 6 )
+				bordersize	1
+				bordercolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier6_Marker {
+				rect		303.35, 236, 4, 3
+				visible		( "gui::check_currentTier" == 6 )
+				backcolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier7 {
+				rect		328.69, 222, 38.67, 12
+				backcolor	0.65, 0.77, 0.9, 0.275
+				noevents	1
+			}
+			windowDef PC_Tier7_Lit {
+				rect		328.69, 222, 38.67, 12
+				visible		( "gui::check_recommendedTier" == 7 )
+				backcolor	0.8, 0.87, 0.98, 0.85
+				noevents	1
+			}
+			windowDef PC_Tier7_Current {
+				rect		328.69, 222, 38.67, 12
+				visible		( "gui::check_currentTier" == 7 )
+				bordersize	1
+				bordercolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier7_Marker {
+				rect		346.02, 236, 4, 3
+				visible		( "gui::check_currentTier" == 7 )
+				backcolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier8 {
+				rect		371.36, 222, 38.67, 12
+				backcolor	0.65, 0.77, 0.9, 0.3
+				noevents	1
+			}
+			windowDef PC_Tier8_Lit {
+				rect		371.36, 222, 38.67, 12
+				visible		( "gui::check_recommendedTier" == 8 )
+				backcolor	0.8, 0.87, 0.98, 0.85
+				noevents	1
+			}
+			windowDef PC_Tier8_Current {
+				rect		371.36, 222, 38.67, 12
+				visible		( "gui::check_currentTier" == 8 )
+				bordersize	1
+				bordercolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_Tier8_Marker {
+				rect		388.69, 236, 4, 3
+				visible		( "gui::check_currentTier" == 8 )
+				backcolor	1, 1, 1, 0.9
+				noevents	1
+			}
+			windowDef PC_TierLow {
+				rect		30, 238, 190.0, 13
+				text		"gui::check_tierLow"
+				textscale	0.2
+				textalign	0
+				nowrap		1
+				forecolor	EDITABLE_FORECOLOR_GRAYED_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_TierHigh {
+				rect		220.0, 238, 190.0, 13
+				text		"gui::check_tierHigh"
+				textscale	0.2
+				textalign	2
+				nowrap		1
+				forecolor	EDITABLE_FORECOLOR_GRAYED_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_RecommendedName {
+				rect		30, 256, 114, 17
+				text		"#str_232010"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	STATIC_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_RecommendedValue {
+				rect		150, 256, 260, 17
+				text		"gui::check_recommended"
+				textscale	0.3
+				textalign	0
+				nowrap		1
+				forecolor	BUTTON_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_Detail {
+				rect		150, 273, 260, 14
+				text		"gui::check_detail"
+				textscale	0.22
+				textalign	0
+				nowrap		1
+				forecolor	EDITABLE_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_CurrentName {
+				rect		30, 288, 114, 16
+				text		"#str_232009"
+				textscale	0.25
+				textalign	0
+				nowrap		1
+				forecolor	STATIC_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_CurrentValue {
+				rect		150, 288, 260, 16
+				text		"gui::check_current"
+				textscale	0.28
+				textalign	0
+				nowrap		1
+				forecolor	EDITABLE_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			windowDef PC_Footer {
+				rect		30, 308, 380, 14
+				text		"gui::check_footer"
+				textscale	0.22
+				textalign	1
+				nowrap		1
+				forecolor	EDITABLE_FORECOLOR_GRAYED_COMMA
+				shadow		1
+				noevents	1
+			}
+			// While the renderer restarts with the new preset, the choices give way to this.
+			windowDef PC_Busy {
+				rect		30, 334, 380, 20
+				visible		("gui::check_busy" == 1)
+				text		"#str_232022"
+				textscale	0.33
+				textalign	1
+				nowrap		1
+				forecolor	STATIC_FORECOLOR_COMMA
+				shadow		1
+				noevents	1
+			}
+			buttonDef PC_Apply {
+				rect			45, 332, 170, 25
+				visible			("gui::check_busy" == 0)
+				text			"gui::check_primary"
+				textscale		0.33
+				textalign		1
+				textaligny		0
+				shadow			1
+				forecolor		BUTTON_FORECOLOR_COMMA
+				hoverColor		BUTTON_HOVERCOLOR_COMMA
+				leftMat			"guis/assets/menu/button/corner"
+				middleMat		"guis/assets/menu/button/strip"
+				leftHoverMat	"guis/assets/menu/button/rollover_corner"
+				middleHoverMat	"guis/assets/menu/button/rollover_strip"
+				rightMat		"guis/assets/menu/button/invcorner"
+				rightHoverMat	"guis/assets/menu/button/rollover_invcorner"
+				edgeWidth		12
+				onAction {
+					set	"cmd" "play guisounds_menu_clickin ; presetCheckApply" ;
+				}
+			}
+			buttonDef PC_Keep {
+				rect			225, 332, 170, 25
+				visible			("gui::check_busy" == 0)
+				text			"#str_232012"
+				textscale		0.33
+				textalign		1
+				textaligny		0
+				shadow			1
+				forecolor		BUTTON_FORECOLOR_COMMA
+				hoverColor		BUTTON_HOVERCOLOR_COMMA
+				leftMat			"guis/assets/menu/button/corner"
+				middleMat		"guis/assets/menu/button/strip"
+				leftHoverMat	"guis/assets/menu/button/rollover_corner"
+				middleHoverMat	"guis/assets/menu/button/rollover_strip"
+				rightMat		"guis/assets/menu/button/invcorner"
+				rightHoverMat	"guis/assets/menu/button/rollover_invcorner"
+				edgeWidth		12
+				onAction {
+					set	"cmd" "play guisounds_menu_clickin ; presetCheckKeep" ;
+				}
+			}
+			// The quiet choice under the two, as a bottom bar's action.
+			buttonDef PC_Later {
+				rect		120, 362, 200, 18
+				visible		("gui::check_busy" == 0)
+				font		"fonts/menu"
+				text		"#str_232013"
+				textscale	0.25
+				textalign	1
+				textaligny	-2
+				shadow		1
+				forecolor	SUBMENU_BOTTOMBAR_FORECOLOR_COMMA
+				hoverColor	SUBMENU_BOTTOMBAR_HOVERCOLOR_COMMA
+				onAction {
+					set	"cmd" "play guisounds_menu_cancel ; presetCheckLater" ;
+				}
+			}
+		}
+	}
+}

@@ -2683,6 +2683,156 @@ def death_document() -> dict:
     return doc.build(root)
 
 
+# ------------------------------------------------------------- system check
+# The screen before the main menu that offers the detected performance preset
+# whenever the preset system has changed since the configuration last checked
+# it (docs/dev/ui/performance-presets.md, "System check";
+# src/framework/Session_presetcheck.cpp). It is the stock guis/presetcheck.gui's
+# dialog, drawn over that screen's backdrop and wordmark, which the session
+# keeps drawing beneath it with its own dialog undrawn (gui::retainedHome).
+# The session publishes every value already localized:
+#
+#     check_body, check_primary         the question, and the first action's label
+#     check_gpu, check_vram, check_ram, check_cpu, check_display
+#     check_recommended, check_detail, check_current, check_footer
+#     check_tierLow, check_tierHigh     the ladder's two end names
+#     check_recommendedTier, check_currentTier   ladder cells, -1 for none
+#     check_matches, check_busy         nothing would change; the apply is restarting
+#
+# and the actions answer with presetCheckApply, presetCheckKeep and
+# presetCheckLater (also Back).
+
+CHECK_FRAME = (100, 50, 440, 392)        # PC_Frame in guis/presetcheck.gui
+CHECK_MARGIN, CHECK_VALUE_X = 30, 150    # the readout's leading margin and value column, in the frame
+CHECK_TIERS = 9                          # openq4::PerformancePresetCount
+CHECK_LADDER_Y, CHECK_CELL_H, CHECK_CELL_GAP = 222, 12, 4
+CHECK_STRINGS = ("check_body", "check_primary", "check_gpu", "check_vram", "check_ram", "check_cpu", "check_display",
+                 "check_recommended", "check_detail", "check_current", "check_footer", "check_tierLow", "check_tierHigh")
+CHECK_HARDWARE = (("gpu", "#str_232004"), ("vram", "#str_232005"), ("ram", "#str_232006"), ("cpu", "#str_232007"),
+                  ("display", "#str_232008"))
+CHECK_SCRIM = 0.5                        # a confirmation's (prey.scrim)
+
+
+def check_row(doc: Document, ident: str, key: str, state: str, y: float, *, scale: float = 0.25,
+              tint: list[float] = TEXT_VALUE, height: float = 15) -> list[dict]:
+    """A readout row: its name in prey.text.label, the session's value after
+    it in the value column."""
+    width = CHECK_FRAME[2] - 2 * CHECK_MARGIN
+    name = label(f"{ident}-name", key, (CHECK_MARGIN, y, CHECK_VALUE_X - CHECK_MARGIN - 6, height), BODY, 0.25, TEXT_LABEL,
+                 align="left", shadow=True, overflow=keyword("hidden"))
+    value = bound(doc, label(f"{ident}-value", PLACEHOLDER, (CHECK_VALUE_X, y, CHECK_MARGIN + width - CHECK_VALUE_X, height),
+                             BODY, scale, tint, align="left", shadow=True, overflow=keyword("hidden"), **ELLIPSIS), state)
+    return [*name, *value]
+
+
+def check_heading(ident: str, key: str, y: float) -> list[dict]:
+    """A readout section's heading: the section header bar of the Video page
+    (text_titlebar), its name in the display face."""
+    width = CHECK_FRAME[2] - 2 * CHECK_MARGIN
+    box = (CHECK_MARGIN - 10, y, width + 20, 22)
+    return [*header_bar(ident, box, None), *label(f"{ident}-text", key, box, DISPLAY, 0.33, TEXT_NAV, shadow=True, ty=-3)]
+
+
+def check_ladder(doc: Document) -> list[dict]:
+    """The nine presets, Minimum leading, each cell prey.list.wash a little
+    stronger than the last: the recommended one lit in prey.text.button, the
+    current one outlined in white with a marker under it, and the two end
+    names under the ends."""
+    width = CHECK_FRAME[2] - 2 * CHECK_MARGIN
+    cell_w = round((width - (CHECK_TIERS - 1) * CHECK_CELL_GAP) / CHECK_TIERS, 2)
+    y, h = CHECK_LADDER_Y, CHECK_CELL_H
+    nodes = []
+    for tier in range(CHECK_TIERS):
+        x = round(CHECK_MARGIN + tier * (cell_w + CHECK_CELL_GAP), 2)
+        nodes.append(box_fill(f"check-tier{tier}", (x, y, cell_w, h), rgb("#A6C4E6", round(0.10 + 0.025 * tier, 3))))
+        nodes.append(shown_when(doc, box_fill(f"check-tier{tier}-lit", (x, y, cell_w, h), rgb("#CCDEFA", 0.85)),
+                                {"op": "==", "args": [{"state": "check_recommendedTier"}, tier]}))
+        nodes.append(shown_when(doc, box_fill(f"check-tier{tier}-current", (x, y, cell_w, h), [0, 0, 0, 0], border=[1, 1, 1, 0.9]),
+                                {"op": "==", "args": [{"state": "check_currentTier"}, tier]}))
+        nodes.append(shown_when(doc, box_fill(f"check-tier{tier}-marker", (round(x + cell_w / 2 - 2, 2), y + h + 2, 4, 3),
+                                              [1, 1, 1, 0.9]),
+                                {"op": "==", "args": [{"state": "check_currentTier"}, tier]}))
+    ends = y + h + 4
+    nodes += bound(doc, label("check-tier-low", PLACEHOLDER, (CHECK_MARGIN, ends, width / 2, 13), BODY, 0.2, rgb("#B8C9E6", 0.4),
+                              align="left", shadow=True), "check_tierLow")
+    nodes += bound(doc, label("check-tier-high", PLACEHOLDER, (CHECK_MARGIN + width / 2, ends, width / 2, 13), BODY, 0.2,
+                              rgb("#B8C9E6", 0.4), align="right", shadow=True), "check_tierHigh")
+    return nodes
+
+
+def preset_check_document() -> dict:
+    """The system check (above): a confirmation's scrim and soft focus, and
+    the claw frame grown to the readout, with the same rows, ladder and
+    actions as guis/presetcheck.gui. It stands until the session replaces it
+    with the main menu, so it has no leave of its own."""
+    doc = Document("openprey.presetcheck")
+    for name in CHECK_STRINGS:
+        doc.state[name] = {"type": "string", "initial": ""}
+    for name in ("check_recommendedTier", "check_currentTier"):
+        doc.state[name] = {"type": "number", "initial": -1}
+    for name in ("check_matches", "check_busy"):
+        doc.state[name] = {"type": "boolean", "initial": False}
+    click, cancel = doc.session("soundClick"), doc.session("soundCancel")
+    doc.events["checkPickApply"] = [{"op": "action", "action": click}, {"op": "action", "action": doc.session("presetCheckApply")}]
+    doc.events["checkPickKeep"] = [{"op": "action", "action": click}, {"op": "action", "action": doc.session("presetCheckKeep")}]
+    doc.events["checkPickLater"] = [{"op": "action", "action": cancel}, {"op": "action", "action": doc.session("presetCheckLater")}]
+    doc.events["presetCheckApplying"] = [{"op": "setState", "values": {"check_busy": True}}]
+    doc.events["onActivate"] = [{"op": "focus", "control": "check_apply"}]
+    # Back asks again next time rather than keeping the settings.
+    doc.events["onBack"] = [{"op": "call", "event": "checkPickLater"}]
+
+    width = CHECK_FRAME[2] - 2 * CHECK_MARGIN
+    idle = {"op": "!", "args": [{"state": "check_busy"}]}
+    contents = [*label("check-title", "#str_232000", (20, 12, CHECK_FRAME[2] - 40, 20), BODY, 0.33, TEXT_LABEL, shadow=True),
+                *bound(doc, label("check-body", PLACEHOLDER, (CHECK_MARGIN, 38, width, 42), BODY, 0.25, TEXT_LABEL, wrap=True,
+                                  shadow=True), "check_body"),
+                *check_heading("check-hardware", "#str_232025", 84)]
+    y = 110
+    for ident, key in CHECK_HARDWARE:
+        contents += check_row(doc, f"check-{ident}", key, f"check_{ident}", y)
+        y += 15
+    contents += check_heading("check-preset", "#str_232026", 192)
+    contents += check_ladder(doc)
+    contents += check_row(doc, "check-recommended", "#str_232010", "check_recommended", 256, scale=0.3, tint=TEXT_BUTTON, height=17)
+    contents += bound(doc, label("check-detail", PLACEHOLDER, (CHECK_VALUE_X, 273, CHECK_MARGIN + width - CHECK_VALUE_X, 14), BODY,
+                                 0.22, TEXT_VALUE, align="left", shadow=True, overflow=keyword("hidden")), "check_detail")
+    contents += check_row(doc, "check-current", "#str_232009", "check_current", 288, scale=0.28, height=16)
+    contents += bound(doc, label("check-footer", PLACEHOLDER, (CHECK_MARGIN, 308, width, 14), BODY, 0.22, rgb("#B8C9E6", 0.4),
+                                 shadow=True, overflow=keyword("hidden")), "check_footer")
+    # While the renderer restarts with the new preset, the choices give way to this.
+    contents.append(shown_when(doc, group("check-busy", {**absolute(CHECK_MARGIN, 334, width, 20), **PASSIVE},
+                                          label("check-busy-text", "#str_232022", (0, 0, width, 20), BODY, 0.33, TEXT_LABEL,
+                                                shadow=True)), {"state": "check_busy"}))
+    apply_button = button(doc, "check_apply", PLACEHOLDER, (45, 332, 170, 25), event="checkPickApply", scale=0.33,
+                          navigation={"left": "check_keep", "right": "check_keep", "up": "check_apply", "down": "check_later"})
+    for node in walk(apply_button):
+        if node["id"] in ("check_apply-label", "check_apply-label-shadow"):
+            doc.bind(node["id"], "text", {"state": "check_primary"})
+    keep_button = button(doc, "check_keep", "#str_232012", (225, 332, 170, 25), event="checkPickKeep", scale=0.33,
+                         navigation={"left": "check_apply", "right": "check_apply", "up": "check_keep", "down": "check_later"})
+    # The quiet choice under the two, as a bottom bar's action.
+    later = link(doc, "check_later", "#str_232013", (120, 362, 200, 18), event="checkPickLater", scale=0.25, ty=-2,
+                 navigation={"up": "check_apply", "down": "check_later", "left": "check_later", "right": "check_later"})
+    contents += [shown_when(doc, node, idle) for node in (apply_button, keep_button, later)]
+
+    frame = group("check-frame", absolute(*CHECK_FRAME), [*frame_parts(doc, "check-frame", 0.7, 1), *contents])
+    doc.state["check.visible"] = {"type": "boolean", "initial": True}
+    root = group("screen", {**FULL, "font-family": font(BODY), "font-size": length(EM * 0.33 * U),
+                            "color": colour(TEXT_LABEL)}, [
+        soft_focus(doc, "check"),
+        group("check-scrim", {**FULL, "background-color": colour([0, 0, 0, CHECK_SCRIM]), **PASSIVE}),
+        group("stage", STAGE, [frame]),
+    ])
+    return doc.build(root)
+
+
+def walk(node: dict):
+    """`node` and every node in its subtree."""
+    yield node
+    for child in node.get("children", ()):
+        yield from walk(child)
+
+
 # ------------------------------------------------------------------ loading
 # guis/map/loading.gui, the one screen retail Prey loads every level under
 # (section 9), as openPREY's override draws it (section 12.1).
@@ -2853,6 +3003,7 @@ DOCUMENTS = {
     "menu/restartmenu.rui": death_document,
     "menu/credits.rui": credits_document,
     "menu/settings.rui": options_document,
+    "menu/presetcheck.rui": preset_check_document,
     "loading/loading.rui": loading_document,
 }
 

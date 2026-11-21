@@ -32,6 +32,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "NativeInputDispatch.h"
 #include "Session_local.h"
 #include "PreyGameCompat.h"
+#include "SessionPresetCheck.h"
 #include "NativeInputPublications.h"
 #include "ArenaCampaign.h"
 #include "BuildVersion.h"
@@ -10863,6 +10864,13 @@ void idSessionLocal::Draw() {
 		if ( RetainedPageActive() ) {
 			// A retained page over the home that handed off to it.
 			DrawRetainedPageHome( presentationTime );
+		}
+		if ( idUserInterface *presetBackdrop = Session_PresetCheckBackdrop( guiActive ) ) {
+			// openPREY: the retained system check stands over the stock one's
+			// backdrop (Session_StartPresetCheck).
+			presetBackdrop->SetPresentationValue( "Desktop::hideCursor", "1", false );
+			presetBackdrop->Redraw( presentationTime );
+			presetBackdrop->SetPresentationValue( "Desktop::hideCursor", "0", false );
 		}
 		if ( guiRetainedRestartMenu != NULL && guiActive == guiRetainedRestartMenu && guiRestartMenu != NULL ) {
 			// openPREY: the retained death screen stands over the stock one's
