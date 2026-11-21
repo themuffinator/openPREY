@@ -1555,6 +1555,9 @@ by a script from this specification and committed.
 | `guis/menu/credits.rui` | Credits, from either home | The stock credits sheet rising through the page |
 | `guis/menu/settings.rui` | Options, from either home | The four top tabs, Controls' seven pages, Game Options' two, Video's six and the Audio page, and the Reset Defaults dialog |
 | `guis/loading/loading.rui` | Every level load, in place of `guis/map/loading.gui` | The level's art across the screen, the name band with the level's name and author line, the objectives panel, the progress bar in its claw-ended outline and the loader's phase |
+| `guis/menu/multiplayer.rui` | MultiPrey, from the title | Player Settings, Create Server (Create and Advanced) and Find Servers (the server list, Selected Server, Filters and IP Connect) |
+| `guis/menu/msgbox.rui` | Every message box the session raises, in place of `guis/msg.gui` | The box with its title, message, a prompt's field and up to three buttons, and the wait box |
+| `guis/menu/mp_escape.rui` | A multiplayer match's Escape menu, over `guis/mpmain.gui` | The status bar with Ready, the Chat, Player, Vote and Call Vote tabs, and Main Menu, Spectate and Disconnect |
 
 `tools/ui/build_retained_screens.py` writes them from the measurements of
 sections 3 to 8 and the Interface Atlas's constructions; `--check` reports a
@@ -1584,20 +1587,18 @@ without a change here.
   bottom bar hide while one is open.
 - Load Game, Save Game and Credits are documents of their own (below).
 - Options is a document of its own (below).
-- MultiPrey and the update check are still the stock menu's. The home asks
-  the session for one, the session sends `guis/mainmenu.gui` a
-  `retainedPage_*` named event, and the stock page grows from the same
-  bottom-bar rectangle; the home stops covering the menu until the page is
-  back in the bar. A retained document for MultiPrey takes the request
-  instead once it exists at the path the session already looks for
-  (`guis/menu/multiplayer.rui`); that session route is inherited from openQ4
-  and has not been run with a Prey document.
+- MultiPrey is a document of its own (below).
+- The update check opens no page: the home asks the session, the session
+  sends `guis/mainmenu.gui` its `retainedPage_updates` event, and the answer
+  comes as a message box.
 - The death screen is a document of its own (below).
 - The loading screen is a document of its own (below). A map's own
   `guis/map/<map>.gui`, and a mod's own copy of the stock screen, still
   present instead.
-- The message boxes, the in-game multiplayer menu and a multiplayer game's
-  Escape menu are the stock GUIs.
+- The message boxes are a document of their own (below), except the
+  download progress box, which keeps the stock screen.
+- A multiplayer match's Escape menu is covered by a card (below); the game
+  keeps its stock menu beneath.
 
 #### Construction
 
@@ -1931,6 +1932,98 @@ nothing of the stock screen draws beneath it.
 - **Motion.** None but the fill, as in the stock. A multiplayer join that
   holds the screen over the match fades it out over 250 ms.
 
+#### MultiPrey
+
+A full page like Options, reached from the title, which needs no route into
+the stock menu: the session fills it (`idSessionLocal::PublishRetainedMultiPrey`)
+and takes its verbs (`HandleRetainedMultiPreyRequest`). It opens on Find
+Servers, as the stock page does, and asks for a new list of servers. The
+three top tabs (190x20 u each at 25,35, at the stock tabs' default 0.33) join
+the 570x370 u tab page as Options' do.
+
+- **Player Settings.** The name, data rate and weapon switch rows at the
+  stock places (530x25 u, the label centred in the leading half, the value in
+  the trailing half); the chosen model's portrait (128 u, in a picture
+  frame) and name; and the 30 models' portraits on two numbered tabs, five
+  across and three down (58 u on a 62 u pitch), drawn at 0.8 at rest and in
+  full under the pointer or focus, the chosen one outlined. A portrait
+  chooses its model (`ui_modelNum`). A data rate the stock choices do not
+  offer (openPREY's default, 128000) shows as its number.
+- **Create Server.** The stock Create and Advanced side tabs (80 u wide,
+  sharing 310 u below a 40 u margin) beside the 440x350 u inner page. Create
+  names the server and shows the chosen map's picture (170x120 u) over Game
+  Map and the map list, beside Server Type, Game Type, Team Damage, Frag
+  Limit, Time Limit, Max Players, Do Warmup, Allow Spectators and Dedicated
+  (220x24 u rows, the values right-aligned as the stock choices are).
+  Advanced has its heading bar and the password, remote console, reload,
+  server-side mods, map cycle, pure and rate rows. Create on either starts
+  the server as the stock button does (`StartMenuServer`, with its warnings).
+  The verbs are the Create Server page's (`HandleRetainedCreateServerRequest`),
+  which offer Prey's two game types and up to 32 players. Server Type and
+  Dedicated bind `net_menulanserver` and `net_serverMenuDedicated`, which the
+  stock page now binds too: it kept them in GUI keys nothing read.
+- **Find Servers.** The server list with its column headings (each sorts its
+  column; the lock column sorts by password), the passworded servers' lock,
+  Quick Refresh, Refresh All and the Internet and LAN source; while the list
+  is empty the scan's notice stands in it. Under it the Selected Server tab
+  (Summary with the map's picture, Details with the address, map, game type,
+  password and players, and Players with the first eight names), the Filters
+  tab with the stock filter rows and Apply Filters, and IP Connect with its
+  field and Connect to IP; a refused address says why in place of the
+  instructions. A row chooses its server, and Accept on the chosen one, or
+  Join Game, joins it. The verbs are the Join Game page's
+  (`HandleRetainedJoinGameRequest`); a join that fails returns to the title.
+
+Differences from the stock page: PunkBuster, a discontinued service, has no
+row, column or filter; the game column's mod icons are not drawn; and the
+players filter's Hide both hides full and empty servers, as the browser reads
+the setting, where the stock choice wrote the value that hides empty ones only.
+
+#### Message boxes
+
+The session's pop-up for every notice, question, prompt and wait
+(`idSessionLocal::MessageBox`) is `guis/menu/msgbox.rui`, which takes the
+stock box's state under the stock names (`title`, `message`, `visible_*`,
+`left`, `mid`, `right`, `str_entry`) and answers with the session verbs
+`msgLeft`, `msgMid` and `msgRight`. It is the stock box rebuilt: the
+320x140 u claw frame at 160,170 over a 0.60 black scrim, the title bar, the
+message in its 1 u outline (`#B3CCE6` at 0.9), a prompt's field under it, and
+the left, middle and right buttons (85x22 u at 0.25). The wait box has the
+stock title and the foot bar. The screen beneath goes into soft focus. The
+first control there takes the focus: a prompt's field, the lone button, or
+the trailing one of two; Back answers with that button, and a wait has no
+answer. The download progress box keeps the stock screen.
+
+#### The multiplayer menu
+
+A match's Escape menu (`guis/mpmain.gui`) presents under
+`guis/menu/mp_escape.rui`, the stock menu rebuilt at its rectangles (the box
+at 70,110): the status bar (350x25 u) with Ready or Not Ready while the match
+warms up, else Game in Progress; the Chat, Player, Vote and Call Vote tabs
+(at 0.25) over the 500x230 u page; and Main Menu, Spectate (or Play) and
+Disconnect. Like the stock menu it draws over the running match with no
+scrim, and each opening starts on Chat with the field ready, or on Vote while
+a vote is in progress.
+
+- **Chat.** The twelve newest lines (colour codes removed), the say mode
+  (Global or Team, which a press toggles) and the line being typed; Enter
+  sends it and keeps the menu open.
+- **Player.** The chosen model and its portraits on two side tabs, the
+  weapon switch, the team (Red or Blue, in team games) and the name.
+- **Vote.** The vote in progress with Yes and No, or that it is registered,
+  and when it expires; or that none is in progress.
+- **Call Vote.** Eight side tabs: Restart Now, Time Limit, Frag Limit, Game
+  Type, Kick Player, Change Map (the map list beside the chosen map's
+  picture), Next Match and Spectators. Each page's Call Vote is lit while the
+  server allows that vote and none is in progress.
+
+Prey's game module keeps its stock menu and draws it itself, so the session
+answers for the game: it copies what the game sets on the stock menu onto the
+card each frame, sends each card verb to `idMultiplayerGame::HandleGuiCommands`
+as the stock window's command, with what that command reads set on the stock
+menu first, and hides the stock windows and pointer while the card covers
+them. No game code changes.
+
 #### Not yet built
 
 - Controller prompts in the bottom title bar, and text that scales with the
@@ -1938,8 +2031,10 @@ nothing of the stock screen draws beneath it.
 - The stock Audio page's sound-driver notice (the engine never raises it),
   the Advanced 2 page's driver box, whose button opens a web page, and the
   crosshair's picture beside its name.
-- MultiPrey and the message boxes. Each is a document for the generator
-  and, where the session has no route for it, a session verb.
+- The download progress box (`guis/msg.gui` with its progress bar), the
+  in-match chat line (`guis/mpmsgmode.gui`) and the connecting screen
+  (`guis/netmenu.gui`). The multiplayer scoreboard, spectate and chat
+  overlays are HUD (section 10) rather than menus.
 - The hook bars and the arc are the Atlas's reconstructions and are lighter
   than the stock art: the stock hook is about 15 u wide where the vector one
   is 11 u, and the stock arc carries a socket where each bar joins it.
