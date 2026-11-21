@@ -19,6 +19,8 @@
   "visible_right": {"type": "boolean", "initial": false},
   "visible_mid": {"type": "boolean", "initial": false},
   "visible_entry": {"type": "boolean", "initial": false},
+  "visible_progress": {"type": "boolean", "initial": false},
+  "progress": {"type": "number", "initial": 0},
   "ui.numberDraftsPending": {"type": "boolean", "initial": false},
   "soft_focus": {"type": "boolean", "initial": false, "cvar": "ui_retainedSoftFocus"}
  },
@@ -133,6 +135,21 @@
    "value": {"state": "message"}
   },
   {"id": "msg-message.text", "node": "msg-message", "property": "text", "value": {"state": "message"}},
+  {
+   "id": "msg-progress-clip.width",
+   "node": "msg-progress-clip",
+   "property": "width",
+   "value": {
+    "op": "*",
+    "args": [{"op": "clamp", "args": [{"op": "/", "args": [{"state": "progress"}, 100]}, 0, 1]}, 387.0]
+   }
+  },
+  {
+   "id": "msg-progress.display",
+   "node": "msg-progress",
+   "property": "display",
+   "value": {"op": "select", "args": [{"state": "visible_progress"}, "block", "none"]}
+  },
   {"id": "msg-title-shadow.text", "node": "msg-title-shadow", "property": "text", "value": {"state": "title"}},
   {"id": "msg-title.text", "node": "msg-title", "property": "text", "value": {"state": "title"}},
   {
@@ -1306,6 +1323,65 @@
            },
            "navigation": {"down": "msg_left", "up": "msg-entry"}
           }
+         }
+        ]
+       },
+       {
+        "id": "msg-progress",
+        "type": "group",
+        "properties": {
+         "position": {"type": "keyword", "value": "absolute"},
+         "left": {"type": "length", "value": 0.0, "unit": "dp"},
+         "top": {"type": "length", "value": 0.0, "unit": "dp"},
+         "width": {"type": "length", "value": 480.0, "unit": "dp"},
+         "height": {"type": "length", "value": 210.0, "unit": "dp"},
+         "pointer-events": {"type": "keyword", "value": "none"},
+         "display": {"type": "keyword", "value": "none"}
+        },
+        "children": [
+         {
+          "id": "msg-progress-back",
+          "type": "group",
+          "properties": {
+           "position": {"type": "keyword", "value": "absolute"},
+           "left": {"type": "length", "value": 45.0, "unit": "dp"},
+           "top": {"type": "length", "value": 141.0, "unit": "dp"},
+           "width": {"type": "length", "value": 390.0, "unit": "dp"},
+           "height": {"type": "length", "value": 18.0, "unit": "dp"},
+           "background-color": {"type": "color", "value": [0, 0, 0, 0.5]},
+           "pointer-events": {"type": "keyword", "value": "none"},
+           "border-width": {"type": "length", "value": 1.5, "unit": "dp"},
+           "border-color": {"type": "color", "value": [0.702, 0.8, 0.902, 0.9]},
+           "box-sizing": {"type": "keyword", "value": "border-box"}
+          }
+         },
+         {
+          "id": "msg-progress-clip",
+          "type": "group",
+          "properties": {
+           "position": {"type": "keyword", "value": "absolute"},
+           "left": {"type": "length", "value": 46.5, "unit": "dp"},
+           "top": {"type": "length", "value": 142.5, "unit": "dp"},
+           "width": {"type": "length", "value": 0.0, "unit": "dp"},
+           "height": {"type": "length", "value": 15.0, "unit": "dp"},
+           "overflow": {"type": "keyword", "value": "hidden"},
+           "pointer-events": {"type": "keyword", "value": "none"}
+          },
+          "children": [
+           {
+            "id": "msg-progress-fill",
+            "type": "group",
+            "properties": {
+             "position": {"type": "keyword", "value": "absolute"},
+             "left": {"type": "length", "value": 0.0, "unit": "dp"},
+             "top": {"type": "length", "value": 0.0, "unit": "dp"},
+             "width": {"type": "length", "value": 387.0, "unit": "dp"},
+             "height": {"type": "length", "value": 15.0, "unit": "dp"},
+             "background-color": {"type": "color", "value": [0.349, 0.349, 1.0, 0.65]},
+             "pointer-events": {"type": "keyword", "value": "none"}
+            }
+           }
+          ]
          }
         ]
        },

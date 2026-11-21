@@ -305,6 +305,10 @@ static const char *const RETAINED_ARENA_PAUSE_GUI = "guis/menu/arena_pause.rui";
 // The buy card (section 14.18) covers the game's buy menu, and buys through
 // the game ("retained buy <index>", the item's place in the game's catalog).
 static const char *const RETAINED_MP_BUY_GUI = "guis/menu/mp_buy.rui";
+// openPREY: the chat line's card, which covers the game's guis/mpmsgmode.gui,
+// and the connecting screen, the client's guis/netmenu.gui retained.
+static const char *const RETAINED_MP_CHAT_GUI = "guis/menu/mp_chat.rui";
+static const char *const RETAINED_CONNECTING_GUI = "guis/menu/connecting.rui";
 static const int RETAINED_MP_BUY_ITEMS = 20;
 
 #ifndef ID_DEDICATED
@@ -6962,6 +6966,7 @@ const char* idSessionLocal::MessageBox( msgBoxType_t type, const char *message, 
 
 	guiMsg->SetStateString( "visible_entry", "0" );
 	guiMsg->SetStateString( "visible_cdkey", "0" );
+	guiMsg->SetStateString( "visible_progress", "0" );	// openPREY: the download box's bar
 	switch ( type ) {
 		case MSG_INFO:
 			guiMsg->SetStateString( "mid", "" );
@@ -7119,6 +7124,46 @@ void idSessionLocal::RunTimedMessageBoxPacingTest( int durationMsec, bool networ
 
 /*
 =================
+idSessionLocal::ConnectingScreen
+
+openPREY: the screen the client shows while it challenges and connects
+(idAsyncClient::ConnectToServer and the pure wait). Where the retained
+screens present it is guis/menu/connecting.rui, which takes the stock
+screen's "status" under the same name and answers Cancel with the stock
+button's abort; otherwise, for a mod's own netmenu.gui, or once the document
+has failed, `stock`.
+=================
+*/
+#ifndef ID_DEDICATED
+static bool Session_ModSuppliesFile( const char *path );
+#endif
+
+idUserInterface *idSessionLocal::ConnectingScreen( idUserInterface *stock ) {
+#ifndef ID_DEDICATED
+	if ( guiRetainedConnecting != NULL && UI_RetainedViewFailed( guiRetainedConnecting ) ) {
+		common->Warning( "retained UI: '%s' stopped drawing; the stock screen presents instead", RETAINED_CONNECTING_GUI );
+		retainedStock.AddUnique( RETAINED_CONNECTING_GUI );
+		guiRetainedConnecting = NULL;
+	}
+	if ( !Session_RetainedScreensEnabled() || retainedStock.FindIndex( RETAINED_CONNECTING_GUI ) >= 0 ) {
+		return stock;
+	}
+	if ( Session_ModSuppliesFile( "guis/netmenu.gui" ) ) {
+		retainedStock.AddUnique( RETAINED_CONNECTING_GUI );
+		return stock;
+	}
+	if ( guiRetainedConnecting == NULL ) {
+		guiRetainedConnecting = FindRetainedGui( RETAINED_CONNECTING_GUI, true, false );
+	}
+	if ( guiRetainedConnecting != NULL ) {
+		return guiRetainedConnecting;
+	}
+#endif
+	return stock;
+}
+
+/*
+=================
 idSessionLocal::DownloadProgressBox
 =================
 */
@@ -7131,21 +7176,26 @@ void idSessionLocal::DownloadProgressBox( backgroundDownload_t *bgl, const char 
 	if ( !BoxDialogSanityCheck() ) {
 		return;
 	}
-	SelectMessageBox( false );	// the progress bar is the stock box's
+	// openPREY: the retained box draws the progress bar (visible_progress);
+	// Prey's stock box shows the message alone.
+	SelectMessageBox( true );
 
 	guiMsg->SetStateString( "visible_msgbox", "1" );
+	guiMsg->SetStateString( "visible_progress", "1" );
+	guiMsg->SetStateString( "progress", "0" );
 	guiMsg->SetStateString( "visible_waitbox", "0" );
 
 	guiMsg->SetStateString( "visible_entry", "0" );
 	guiMsg->SetStateString( "visible_cdkey", "0" );
 
-	guiMsg->SetStateString( "mid", "Cancel" );
+	guiMsg->SetStateString( "mid", common->GetLanguageDict()->GetString( "#str_04340" ) );
 	guiMsg->SetStateString( "visible_mid", "1" );
 	guiMsg->SetStateString( "visible_left", "0" );
 	guiMsg->SetStateString( "visible_right", "0" );
 
 	guiMsg->SetStateString( "title", title );
 	guiMsg->SetStateString( "message", "Connecting.." );
+	guiMsg->StateChanged( common->GetPresentationTime() );
 
 	guiMsgRestore = guiActive;
 	openq4::NativeInputBeforeSessionChange();
@@ -7156,6 +7206,7 @@ void idSessionLocal::DownloadProgressBox( backgroundDownload_t *bgl, const char 
 		while ( msgRunning ) {
 			common->GUIFrame( true, false );
 			if ( bgl->completed ) {
+				guiMsg->SetStateString( "visible_progress", "0" );
 				openq4::NativeInputBeforeSessionChange();
 				guiActive = guiMsgRestore;
 				guiMsgRestore = NULL;
@@ -7207,12 +7258,14 @@ void idSessionLocal::DownloadProgressBox( backgroundDownload_t *bgl, const char 
 					guiMsg->SetStateString( "progress", "0" );
 				}
 				guiMsg->SetStateString( "message", sMsg.c_str() );
+				guiMsg->StateChanged( common->GetPresentationTime() );
 			}
 		}
 		// abort was used - tell the downloader and wait till final stop
 		bgl->url.status = DL_ABORTING;
 		guiMsg->SetStateString( "title", "Aborting.." );
 		guiMsg->SetStateString( "visible_mid", "0" );
+		guiMsg->StateChanged( common->GetPresentationTime() );
 		// continue looping
 		guiMsgRestore = guiActive;
 		openq4::NativeInputBeforeSessionChange();
@@ -8856,6 +8909,14 @@ void idSessionLocal::HandleRetainedSessionRequest( idUserInterface *gui, const c
 	// The system check's answers (Session_presetcheck.cpp).
 	if ( request != NULL && Session_PresetCheckOwns( gui ) ) {
 		Session_PresetCheckRequest( gui, request );
+		return;
+	}
+	// openPREY: the retained connecting screen's Cancel answers as the stock
+	// button's abort, through the client's own handler (ConnectingScreen).
+	if ( request != NULL && gui != NULL && gui == guiRetainedConnecting ) {
+		if ( gui == guiActive && !idStr::Icmp( request, "netAbort" ) && guiHandle != NULL ) {
+			guiHandle( "abort" );
+		}
 		return;
 	}
 	// The retained message box's buttons answer as the stock box's commands.
@@ -12843,9 +12904,16 @@ static bool Session_IsBuyMenu( idUserInterface *gui ) {
 	return gui != NULL && gui->State().GetBool( "gameDraw" ) && !idStr::Icmp( gui->Name(), "guis/buymenu.gui" );
 }
 
+// openPREY: the game's chat line (clientMessageMode), which the chat card
+// covers.
+static bool Session_IsChatLine( idUserInterface *gui ) {
+	return gui != NULL && gui->State().GetBool( "gameDraw" ) && !idStr::Icmp( gui->Name(), "guis/mpmsgmode.gui" );
+}
+
 // A game GUI a multiplayer card covers.
 static bool Session_IsCoveredGameGui( idUserInterface *gui ) {
-	return Session_IsGameMenu( gui ) || Session_IsGameSummary( gui ) || Session_IsArenaPause( gui ) || Session_IsBuyMenu( gui );
+	return Session_IsGameMenu( gui ) || Session_IsGameSummary( gui ) || Session_IsArenaPause( gui ) || Session_IsBuyMenu( gui ) ||
+		Session_IsChatLine( gui );
 }
 
 bool idSessionLocal::RetainedMultiplayerCovers() const {
@@ -13049,16 +13117,18 @@ void idSessionLocal::UpdateRetainedMultiplayer() {
 		// The Arena's pause menu takes its own card, and so does the buy menu.
 		const bool arena = Session_IsArenaPause( guiActive );
 		const bool buy = Session_IsBuyMenu( guiActive );
+		// openPREY: and so does the chat line.
+		const bool chat = Session_IsChatLine( guiActive );
 		bool welcome = false;
-		if ( !summary && !arena && !buy ) {
+		if ( !summary && !arena && !buy && !chat ) {
 			guiActive->SetStateBool( "mp.welcome", false );
 			PreyGame_HandleMainMenuCommands( "retainedMultiplayerVariant", guiActive );
 			welcome = guiActive->State().GetBool( "mp.welcome" );
 		}
-		const char *path = arena ? RETAINED_ARENA_PAUSE_GUI : summary ? RETAINED_MP_SUMMARY_GUI : buy ? RETAINED_MP_BUY_GUI :
-			welcome ? RETAINED_MP_WELCOME_GUI : RETAINED_MP_ESCAPE_GUI;
-		idUserInterface *&document = arena ? guiRetainedArenaPause : summary ? guiRetainedSummary : buy ? guiRetainedBuy :
-			welcome ? guiRetainedWelcome : guiRetainedEscape;
+		const char *path = chat ? RETAINED_MP_CHAT_GUI : arena ? RETAINED_ARENA_PAUSE_GUI : summary ? RETAINED_MP_SUMMARY_GUI :
+			buy ? RETAINED_MP_BUY_GUI : welcome ? RETAINED_MP_WELCOME_GUI : RETAINED_MP_ESCAPE_GUI;
+		idUserInterface *&document = chat ? guiRetainedChat : arena ? guiRetainedArenaPause : summary ? guiRetainedSummary :
+			buy ? guiRetainedBuy : welcome ? guiRetainedWelcome : guiRetainedEscape;
 		// Whatever keeps the stock menu below keeps it for this opening (a
 		// card still waiting for its pages, a fallback, an Arena Campaign
 		// match); the next opening asks again.
@@ -13068,7 +13138,8 @@ void idSessionLocal::UpdateRetainedMultiplayer() {
 		if ( !enabled || retainedStock.FindIndex( path ) >= 0 ) {
 			return;
 		}
-		const char *stockGui = arena ? "guis/arena_pause.gui" : summary ? "guis/summary.gui" : buy ? "guis/buymenu.gui" : "guis/mpmain.gui";
+		const char *stockGui = chat ? "guis/mpmsgmode.gui" : arena ? "guis/arena_pause.gui" : summary ? "guis/summary.gui" :
+			buy ? "guis/buymenu.gui" : "guis/mpmain.gui";
 		if ( Session_ModSuppliesFile( stockGui ) ) {
 			common->DPrintf( "retained UI: the mod supplies its own '%s', so it presents instead of '%s'\n", stockGui, path );
 			retainedStock.Append( path );
@@ -13088,7 +13159,18 @@ void idSessionLocal::UpdateRetainedMultiplayer() {
 		card->SetStateInt( "mp.protocol", 0 );
 		card->SetStateBool( "mp.cover_allowed", false );
 		PreyGame_HandleMainMenuCommands( "retainedMultiplayerCover", card );
-		if ( !summary && !arena && !buy ) {
+		if ( chat ) {
+			// openPREY: the session answers for Prey's game module here too:
+			// the card types the line on the channel the game opened the stock
+			// prompt on, and sends it as the stock field does. Prey's game draws
+			// the prompt itself (idMultiplayerGame::Draw), so the card hides it.
+			card->SetStateInt( "mp.protocol", RETAINED_MP_PROTOCOL );
+			card->SetStateBool( "mp.cover_allowed", true );
+			card->SetStateInt( "mp.chat.mode", guiActive->State().GetInt( "messagemode" ) != 0 ? 1 : 0 );
+			card->SetStateString( "mp.chat.text", "" );
+			guiActive->SetPresentationValue( "MessageMode::visible", "0", false );
+			guiActive->SetPresentationValue( "Desktop::hideCursor", "1", false );
+		} else if ( !summary && !arena && !buy ) {
 			// openPREY: the session answers for Prey's game module, which keeps
 			// its stock menu: the card shows that menu's state and sends its
 			// commands (Session_MirrorPreyGameMenu).
@@ -13189,6 +13271,9 @@ void idSessionLocal::RetireRetainedMultiplayer( bool release ) {
 	if ( retainedMultiplayerTarget != NULL && Session_IsGameMenu( retainedMultiplayerTarget ) ) {
 		// openPREY: the stock menu the card hid (see UpdateRetainedMultiplayer).
 		retainedMultiplayerTarget->SetPresentationValue( "BoxParent::visible", "1", false );
+		retainedMultiplayerTarget->SetPresentationValue( "Desktop::hideCursor", "0", false );
+	} else if ( retainedMultiplayerTarget != NULL && Session_IsChatLine( retainedMultiplayerTarget ) ) {
+		retainedMultiplayerTarget->SetPresentationValue( "MessageMode::visible", "1", false );
 		retainedMultiplayerTarget->SetPresentationValue( "Desktop::hideCursor", "0", false );
 	}
 	// The summary's chat field stops typing with its card.
@@ -13390,6 +13475,36 @@ void idSessionLocal::HandleRetainedMultiplayerRequest( idUserInterface *gui, con
 			return;
 		}
 		HandleGameMenuReturn( game->HandleGuiCommands( arenaCommand ) );
+		if ( !Session_IsCoveredGameGui( guiActive ) ) {
+			RetireRetainedMultiplayer( guiActive == NULL && mapSpawned );
+		}
+		return;
+	}
+	if ( Session_IsChatLine( guiActive ) ) {
+		// openPREY: the chat card. Its line goes out as the stock field's
+		// chatmessage, on the channel the card's tabs chose, and Back closes
+		// the prompt; the game closes it after a line, as the stock does.
+		idUserInterface *prompt = guiActive;
+		idStr chatCommand;
+		if ( !idStr::Icmp( request, "mpClose" ) ) {
+			chatCommand = "close";
+		} else if ( !idStr::Icmp( request, "mpPreyChat" ) ) {
+			const idStr text = Session_RetainedCreateText( gui, "mp.chat.text", 80 );
+			gui->SetStateString( "mp.chat.text", "" );
+			gui->StateChanged( common->GetPresentationTime() );
+			// An empty line closes the prompt rather than saying nothing.
+			if ( text.Length() == 0 ) {
+				chatCommand = "close";
+			} else {
+				prompt->SetStateString( "chattext", text.c_str() );
+				prompt->SetStateInt( "messagemode", gui->State().GetInt( "mp.chat.mode" ) != 0 ? 1 : 0 );
+				chatCommand = "chatmessage";
+			}
+		} else {
+			common->Warning( "retained UI: unhandled chat line request '%s'", request );
+			return;
+		}
+		HandleGameMenuReturn( game->HandleGuiCommands( chatCommand.c_str() ) );
 		if ( !Session_IsCoveredGameGui( guiActive ) ) {
 			RetireRetainedMultiplayer( guiActive == NULL && mapSpawned );
 		}

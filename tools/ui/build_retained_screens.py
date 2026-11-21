@@ -3891,7 +3891,10 @@ def loading_document() -> dict:
 # a 1 u outline, a prompt's field and up to three buttons. The session fills
 # it through state under the stock names and reads the answer back as the
 # verbs msgLeft, msgRight and msgMid (HandleRetainedSessionRequest). The
-# download progress box and the CD key box keep the stock screen.
+# download progress box (idSessionLocal::DownloadProgressBox) is this box
+# with a progress bar under its message (visible_progress, progress 0 to
+# 100); Prey's stock box draws no bar, only the message. The CD key box keeps
+# the stock screen (Prey asks for no key).
 
 MSG_BOX = (160, 170, 320, 140)
 MSG_BORDER = rgb("#B3CCE6", 0.9)              # DIALOGBOX_BORDERCOLOR
@@ -3903,8 +3906,10 @@ def message_box_document() -> dict:
     doc = Document("openprey.msgbox")
     for name in ("title", "message", "left", "right", "mid", "str_entry"):
         doc.state[name] = {"type": "string", "initial": ""}
-    for name in ("visible_msgbox", "visible_waitbox", "visible_left", "visible_right", "visible_mid", "visible_entry"):
+    for name in ("visible_msgbox", "visible_waitbox", "visible_left", "visible_right", "visible_mid", "visible_entry",
+                 "visible_progress"):
         doc.state[name] = {"type": "boolean", "initial": False}
+    doc.state["progress"] = {"type": "number", "initial": 0}
     doc.state["ui.numberDraftsPending"] = {"type": "boolean", "initial": False}
     for verb in ("msgLeft", "msgRight", "msgMid"):
         doc.session(verb)
@@ -3965,8 +3970,17 @@ def message_box_document() -> dict:
         box_fill("msg-entry-border", (30, 90, 260, 20), [0, 0, 0, 0], border=MSG_BORDER), field]), {"state": "visible_entry"})
     # A prompt's message stops above its field.
     message_nodes = message("msg", (30, 30, 260, 61))
+    # The download's progress, where a prompt's field would be: the loading
+    # screen's fill (prey.load.fill) in the box's 1 u outline, growing with
+    # the session's percentage.
+    fill = group("msg-progress-clip", {**absolute(31, 95, 0, 10), "overflow": keyword("hidden"), **PASSIVE}, [
+        box_fill("msg-progress-fill", (0, 0, 258, 10), LOAD_FILL)])
+    doc.bind("msg-progress-clip", "width", {"op": "*", "args": [{"op": "clamp", "args": [
+        {"op": "/", "args": [{"state": "progress"}, 100]}, 0, 1]}, 258 * U]})
+    progress = shown_when(doc, group("msg-progress", {**absolute(0, 0, 320, 140), **PASSIVE}, [
+        box_fill("msg-progress-back", (30, 94, 260, 12), [0, 0, 0, 0.5], border=MSG_BORDER), fill]), {"state": "visible_progress"})
     box = group("msg-box", absolute(*MSG_BOX), [*frame_parts(doc, "msg-box", 0.7, 1), *title("msg", PLACEHOLDER, "title"),
-                                                 *message_nodes, entry, *plates])
+                                                 *message_nodes, entry, progress, *plates])
     wait = group("wait-box", absolute(*MSG_BOX), [*frame_parts(doc, "wait-box", 0.7, 1), *title("wait", MSG_WAIT_KEY, None),
                                                   title_bar("wait-foot-bar", (30, 115, 260, 19), inverted=True),
                                                   *message("wait", (30, 30, 260, 81))])
@@ -3977,6 +3991,85 @@ def message_box_document() -> dict:
     scrim = group("msg-scrim", {**FULL, "background-color": colour([0, 0, 0, 0.6]), **PASSIVE})
     root = group("screen", {**FULL, "font-family": font(BODY), "font-size": length(EM * 0.25 * U), "color": colour(TEXT_LABEL)},
                  [soft, scrim, stage])
+    return doc.build(root)
+
+
+# ------------------------------------------------------------ the chat line
+
+# guis/mpmsgmode.gui, the one-line chat prompt a multiplayer match opens over
+# the game (clientMessageMode): the stock tab container at 90,420 (400x55 u)
+# with Global and Team tabs 15 u tall from 140 u in, and on the 400x40 u page
+# under them a 380x20 u field on black in a 0.7,0.8,0.9 outline. The game
+# keeps the stock GUI; the session covers it with this document as it covers
+# the game's menu with mp_escape.rui, sets the channel from the stock
+# "messagemode" and sends the line as the stock field's chatmessage
+# (idSessionLocal::HandleRetainedMultiplayerRequest).
+
+CHAT_BOOK = (90, 435, 400, 40)
+CHAT_TABS = (230, 420, 260, 15)
+CHAT_FIELD = (100, 445, 380, 20)
+
+
+def chat_document() -> dict:
+    doc = Document("openprey.mpchat")
+    for name in ("mp.protocol", "mp.revision", "mp.chat.mode"):
+        doc.state[name] = {"type": "number", "initial": 0}
+    doc.state["mp.cover_allowed"] = {"type": "boolean", "initial": False}
+    doc.state["mp.chat.text"] = {"type": "string", "initial": ""}
+    for verb in ("mpClose", "mpPreyChat"):
+        doc.session(verb)
+    field_box = CHAT_FIELD
+    furniture, tabs = mp_top_tabs(doc, "chat", CHAT_BOOK, CHAT_TABS, ["#str_20600", "#str_20601"], "mp.chat.mode",
+                                  [[{"op": "focus", "control": "chat-field"}]] * 2, scale=0.25)
+    doc.actions["enter.mp.chat.text"] = {"input": "string", "operation": "ui.state.set",
+                                         "arguments": {"key": "mp.chat.text", "value": {"input": "value"}, "event": "chatEntered"}}
+    doc.events["chatEntered"] = [{"op": "action", "action": "mpPreyChat"}]
+    field = name_field(doc, field_box, ident="chat-field", state="mp.chat.text", action="enter.mp.chat.text", key="#str_20249",
+                       max_bytes=80, wash=False, tint=TEXT_HOVER, scale=0.25)
+    navigate([field], "chat-field", up="chat_tab0")
+    # The stock page is opaque (0.29,0.32,0.39), so it hides the Ready tip it
+    # may draw over.
+    nodes = [box_fill("chat-book-back", CHAT_BOOK, [0.29, 0.32, 0.39, 1]), *mp_page_shade("chat-book", CHAT_BOOK), *furniture,
+             box_fill("chat-field-box", field_box, [0, 0, 0, 1], border=rgb("#B3CCE6")), field, *tabs]
+    # Each opening starts on the channel the game asked for, typing.
+    doc.events["open"] = [{"op": "focus", "control": "chat-field"}]
+    doc.events["release"] = []
+    doc.events["onBack"] = [{"op": "action", "action": "mpClose"}]
+    stage = group("stage", STAGE, [group("page", {**FULL}, nodes)])
+    root = group("screen", {**FULL, "font-family": font(BODY), "font-size": length(EM * 0.25 * U), "color": colour(TEXT_LABEL)}, [stage])
+    return doc.build(root)
+
+
+# ------------------------------------------------------- the connecting screen
+
+# guis/netmenu.gui, which the client shows while it challenges and connects
+# to a server (idAsyncClient::ConnectToServer): a white 0.20 wash over the
+# whole screen, the 400x160 u claw frame at 120,120 with a 0.70 body, its
+# title bar (#str_20603, the display face at 0.4), the client's status in a
+# 320x80 u box and Cancel (120x25 u). The client sets "status"; Cancel, and
+# Back, answer as the stock button's abort (idSessionLocal::ConnectingScreen).
+
+NET_BOX = (120, 120, 400, 160)
+
+
+def connecting_document() -> dict:
+    doc = Document("openprey.connecting")
+    doc.state["status"] = {"type": "string", "initial": ""}
+    abort, cancel = doc.session("netAbort"), doc.session("soundCancel")
+    doc.events["netCancelPick"] = [{"op": "action", "action": cancel}, {"op": "action", "action": abort}]
+    doc.events["onBack"] = [{"op": "call", "event": "netCancelPick"}]
+    doc.events["onActivate"] = [{"op": "focus", "control": "net_cancel"}]
+    title = [title_bar("net-title-bar", (40, 7, 320, 20)),
+             *label("net-title", "#str_20603", (40, 7, 320, 20), DISPLAY, 0.4, TEXT_NAV, shadow=True, ty=-5)]
+    status = bound(doc, label("net-status", PLACEHOLDER, (40, 40, 320, 80), BODY, 0.25, TEXT_HOVER, align="left", wrap=True,
+                              overflow=keyword("hidden")), "status")
+    cancel_button = button(doc, "net_cancel", "#str_20328", (140, 125, 120, 25), event="netCancelPick", scale=0.25,
+                           navigation={"left": "net_cancel", "right": "net_cancel", "up": "net_cancel", "down": "net_cancel"})
+    box = group("net-box", absolute(*NET_BOX), [*frame_parts(doc, "net-box", 0.7, 1), *title, *status, cancel_button])
+    stage = group("stage", STAGE, [box])
+    wash = group("net-wash", {**FULL, "background-color": colour([0.2, 0.2, 0.2, 1]), **PASSIVE})
+    root = group("screen", {**FULL, "font-family": font(BODY), "font-size": length(EM * 0.25 * U), "color": colour(TEXT_LABEL)},
+                 [wash, stage])
     return doc.build(root)
 
 
@@ -4001,6 +4094,8 @@ DOCUMENTS = {
     "menu/msgbox.rui": message_box_document,
     "menu/multiplayer.rui": multiprey_document,
     "menu/mp_escape.rui": card_document,
+    "menu/mp_chat.rui": chat_document,
+    "menu/connecting.rui": connecting_document,
 }
 
 

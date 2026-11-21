@@ -278,7 +278,9 @@ bool SessionMenuCommand(const std::string& command) {
         // openPREY: the MultiPrey page's player name and model, and its filters.
         "mpPreyName","mpPreyModel","joinApplyFilters",
         // openPREY: the in-game multiplayer card's stock commands.
-        "mpPreySpectate","mpPreyReady","mpPreyTeam","mpPreyChat","mpPreyMap","mpPreyMapScan"};
+        "mpPreySpectate","mpPreyReady","mpPreyTeam","mpPreyChat","mpPreyMap","mpPreyMapScan",
+        // openPREY: the connecting screen's Cancel.
+        "netAbort"};
 	return commands.contains(command);
 }
 

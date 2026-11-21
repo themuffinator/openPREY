@@ -586,6 +586,10 @@ public:
 	virtual const char *MessageBox( msgBoxType_t type, const char *message, const char *title = NULL, bool wait = false, const char *fire_yes = NULL, const char *fire_no = NULL, bool network = false  );
 	virtual void		StopBox( void );
 	virtual void		DownloadProgressBox( backgroundDownload_t *bgl, const char *title, int progress_start = 0, int progress_end = 100 );
+	// openPREY: the screen a client shows while it connects: the retained
+	// guis/menu/connecting.rui where the retained screens present, else `stock`
+	// (guis/netmenu.gui).
+	idUserInterface *	ConnectingScreen( idUserInterface *stock );
 	virtual void		SetPlayingSoundWorld();
 	void				SetPlayingSoundWorld( idSoundWorld *soundWorld );
 	void				UpdateSoundWorldFocus();
@@ -858,6 +862,9 @@ public:
 	idUserInterface *	guiRetainedBuy;
 	// The single-player Arena's pause card.
 	idUserInterface *	guiRetainedArenaPause;
+	// openPREY: the chat line's card (guis/menu/mp_chat.rui), which covers the
+	// game's guis/mpmsgmode.gui as the Escape card covers its menu.
+	idUserInterface *	guiRetainedChat;
 	idUserInterface *	guiRetainedMultiplayer;
 	idUserInterface *	retainedMultiplayerTarget;		// the game GUI the cover was last decided for
 	bool				retainedMultiplayerSummary;		// the card covers the summary
@@ -972,6 +979,7 @@ public:
 	idUserInterface *	guiMsg;						// the message box in use: one of the two below
 	idUserInterface *	guiMsgStock;				// guis/msg.gui
 	idUserInterface *	guiMsgRetained;				// the retained pop-up (NULL until a box needs it)
+	idUserInterface *	guiRetainedConnecting;		// the retained connecting screen (NULL until a connect needs it)
 	idUserInterface *	guiMsgRestore;				// store the calling GUI for restore
 	idStr				msgFireBack[ 2 ];
 	bool				msgRunning;

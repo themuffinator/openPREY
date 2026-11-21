@@ -4577,6 +4577,7 @@ void idSessionLocal::Clear() {
 	guiRetainedEscape = guiRetainedWelcome = guiRetainedMultiplayer = NULL;
 	guiRetainedSummary = guiRetainedArenaPause = retainedMultiplayerTarget = NULL;
 	guiRetainedBuy = NULL;
+	guiRetainedChat = NULL;
 	retainedMultiplayerSummary = false;
 	retainedMultiplayerBuy = false;
 	retainedSummaryTyping = false;
@@ -4661,6 +4662,7 @@ idSessionLocal::idSessionLocal() {
 		= guiRestartMenu = guiLoading = guiGameOver = guiActive \
 		= guiTest = guiMsg = guiMsgRestore = guiTakeNotes = guiDemoMenu = guiSubtitles = guiSave = NULL;
 	guiMsgStock = guiMsgRetained = NULL;
+	guiRetainedConnecting = NULL;
 	guiDemoList = NULL;
 	
 	menuSoundWorld = NULL;
@@ -11634,6 +11636,7 @@ void idSessionLocal::Init() {
 		// when it is first needed (SelectMessageBox).
 		guiMsgStock = guiMsg = uiManager->FindGui( "guis/msg.gui", true, false, true );
 		guiMsgRetained = NULL;
+		guiRetainedConnecting = NULL;
 		guiTakeNotes = uiManager->FindGui( "guis/takeNotes.gui", true, false, true );
 		guiIntro = uiManager->FindGui( "guis/intro.gui", true, false, true );
 		guiSubtitles = uiManager->CheckGui( "guis/subtitles.gui" ) ? uiManager->FindGui( "guis/subtitles.gui", true, false, true ) : NULL;

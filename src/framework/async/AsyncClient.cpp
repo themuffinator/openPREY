@@ -467,7 +467,7 @@ bool idAsyncClient::InitPort( void ) {
 		}
 	}
 	// maintain it valid between connects and ui manager reloads
-	guiNetMenu = uiManager->FindGui( "guis/netmenu.gui", true, false, true );
+	guiNetMenu = sessLocal.ConnectingScreen( uiManager->FindGui( "guis/netmenu.gui", true, false, true ) );
 
 	return true;
 }
@@ -577,8 +577,9 @@ void idAsyncClient::ConnectToServer( const netadr_t adr ) {
 
 	active = true;
 
-	guiNetMenu = uiManager->FindGui( "guis/netmenu.gui", true, false, true );
+	guiNetMenu = sessLocal.ConnectingScreen( uiManager->FindGui( "guis/netmenu.gui", true, false, true ) );
 	guiNetMenu->SetStateString( "status", va( common->GetLanguageDict()->GetString( "#str_06749" ), Sys_NetAdrToString( adr ) ) );
+	guiNetMenu->StateChanged( com_frameTime );
 	session->SetGUI( guiNetMenu, HandleGuiCommand );
 }
 
@@ -1550,7 +1551,7 @@ void idAsyncClient::ProcessUnreliableServerMessage( const idBitMsg &msg ) {
 			//cvarSystem->SetCVarBool( "ui_chat", false );
 
 			if ( pureWait ) {
-				guiNetMenu = uiManager->FindGui( "guis/netmenu.gui", true, false, true );
+				guiNetMenu = sessLocal.ConnectingScreen( uiManager->FindGui( "guis/netmenu.gui", true, false, true ) );
 				session->SetGUI( guiNetMenu, HandleGuiCommand );
 				session->MessageBox( MSG_ABORT, common->GetLanguageDict()->GetString ( "#str_04317" ), common->GetLanguageDict()->GetString ( "#str_04318" ), false, "pure_abort" );
 			} else {
@@ -2347,6 +2348,7 @@ void idAsyncClient::ProcessPrintMessage( const netadr_t from, const idBitMsg &ms
 		}
 	}
 	guiNetMenu->SetStateString( "status", string );
+	guiNetMenu->StateChanged( com_frameTime );
 	// openQ4: a server sends a denial or a bad-challenge notice only in answer to a
 	// connection request. An out-of-band packet needs nothing but the server's address
 	// on it, so past the handshake these are printed and not obeyed: one forged packet
@@ -2357,6 +2359,7 @@ void idAsyncClient::ProcessPrintMessage( const netadr_t from, const idBitMsg &ms
 			retpass = session->MessageBox( MSG_PROMPT, common->GetLanguageDict()->GetString ( "#str_04321" ), string, true, "passprompt_ok" );
 			ClearPendingPackets();
 			guiNetMenu->SetStateString( "status",  common->GetLanguageDict()->GetString ( "#str_04322" ));
+			guiNetMenu->StateChanged( com_frameTime );
 			if ( retpass ) {
 				// #790
 				cvarSystem->SetCVarString( "password", "" );
@@ -2870,6 +2873,7 @@ void idAsyncClient::SetupConnection( void ) {
 			serverAddress = connectCandidates[ failover.index ];
 			if ( guiNetMenu != NULL ) {
 				guiNetMenu->SetStateString( "status", va( common->GetLanguageDict()->GetString( "#str_06749" ), Sys_NetAdrToString( serverAddress ) ) );
+				guiNetMenu->StateChanged( com_frameTime );
 			}
 			connectInfoRequests = 0;
 			connectProtocolKnown = false;
