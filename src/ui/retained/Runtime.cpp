@@ -1958,6 +1958,10 @@ struct Runtime::Impl {
 	bool focusLayoutVisible = false;
 	std::vector<std::string> controls;
 	std::vector<Rml::Element*> layoutWidgets;
+	// Number and text fields: an editor's caret blinks.
+	std::vector<std::pair<Rml::Element*,std::string>> editableWidgets;
+	// Whether the last layout found shown widgets not at rest (WidgetsAtRest).
+	bool widgetsLive = false;
 	float pointerX = 0, pointerY = 0;
 	float windowPointerX = 0, windowPointerY = 0;
 	bool pointerPresent = false;
@@ -2883,6 +2887,21 @@ struct Runtime::Impl {
         std::string error;scrollLayoutDirty|=scrollView.Sync(interaction,viewport.DpRatio(),false,error);
         if(!error.empty())host.Log(true,error);
     }
+	// Whether the shown widgets can stand as the last frame left them. Their
+	// inputs (readbacks, availability, focus, pointer parts, scrolling) raise
+	// the interaction and scroll flags, and a frame with any of them raised
+	// keeps the full style/layout walk. A number field paints its caret from
+	// time, and an open list or a drag is a gesture in progress. A page
+	// leaving any of these is not at rest until one more full pass.
+	bool WidgetsAtRest() const {
+		const auto visible=[](const auto* element){return element->IsVisible(true);};
+		if (std::none_of(layoutWidgets.begin(),layoutWidgets.end(),visible)) return true;
+		return !interactionLayoutDirty && !scrollLayoutDirty && !preserveRestoredScroll && pendingFocus.empty() &&
+			focusLayoutId==interaction.Focused() && interaction.OpenPopup().empty() &&
+			interaction.CapturedPointerControl().empty() && fling.container.empty() && !touch.pressed &&
+			std::none_of(editableWidgets.begin(),editableWidgets.end(),[&](const auto& widget){
+				return interaction.HasEditor(widget.second) && widget.first->IsVisible(true);});
+	}
     bool UpdateInteraction(double seconds = -1, bool freshLayout = false, bool refreshPopup = false) {
 		if (!document || viewport.width<=0 || viewport.height<=0) return false;
         if (!canonical) return true; // Valid legacy RML has no canonical interaction work.
@@ -3389,7 +3408,7 @@ void Runtime::Shutdown() {
 	impl->ReleaseModelScenes();
 	impl->canonicalElements.clear();
 	impl->boundsElements.clear();
-	impl->inputBranches={}; impl->modalBranches={}; impl->interactionAncestors.clear(); impl->elementIndex.clear(); impl->layoutWidgets.clear();
+	impl->inputBranches={}; impl->modalBranches={}; impl->interactionAncestors.clear(); impl->elementIndex.clear(); impl->layoutWidgets.clear(); impl->editableWidgets.clear(); impl->widgetsLive=false;
 	impl->hud = nullptr;
 	impl->paintDirty=true;
 	impl->changedProjections.clear();
@@ -3411,7 +3430,7 @@ void Runtime::CloseDocument() {
 
 	impl->sourcePath.clear();
 	impl->boundsElements.clear();
-	impl->inputBranches={}; impl->modalBranches={}; impl->interactionAncestors.clear(); impl->elementIndex.clear(); impl->layoutWidgets.clear();
+	impl->inputBranches={}; impl->modalBranches={}; impl->interactionAncestors.clear(); impl->elementIndex.clear(); impl->layoutWidgets.clear(); impl->editableWidgets.clear(); impl->widgetsLive=false;
 	impl->hud = nullptr;
 	impl->valueView.Reset();
 	impl->scrollView.Reset();impl->scrollLayoutDirty=impl->preserveRestoredScroll=false;
@@ -3500,6 +3519,7 @@ bool Runtime::LoadCanonical(std::unique_ptr<Document> candidate, const std::stri
 		if (node->control) {
 			impl->controls.push_back(node->id);
 			if (node->control->role!=ControlRole::Button && element) impl->layoutWidgets.push_back(element);
+			if (node->control->role==ControlRole::Number && element) impl->editableWidgets.emplace_back(element,node->id);
 		}
 		if (element) {
 			// Canonical subtrees preserve paint order when opacity crosses 1 and
@@ -4056,10 +4076,12 @@ bool Runtime::Layout(const Viewport& viewport,double seconds) {
 		!impl->interaction.HasAuthoredModals() && !impl->pointerPresent;
 	// Canonical buttons receive feedback through explicit presentation values,
 	// just like HUD artwork. A resting button menu has no native CSS animation
-	// or editor caret that requires a style/layout walk on every frame. Keep
-	// interaction and widget settling below independent of this decision.
-	const bool explicitLayout=impl->canonical && std::none_of(impl->layoutWidgets.begin(),impl->layoutWidgets.end(),
-		[](const auto* element){return element->IsVisible(true);});
+	// or editor caret that requires a style/layout walk on every frame, and
+	// neither has a page whose widgets are at rest. Keep interaction and
+	// widget settling below independent of this decision.
+	const bool atRest=impl->canonical && impl->WidgetsAtRest();
+	const bool explicitLayout=atRest && !impl->widgetsLive;
+	impl->widgetsLive=impl->canonical && !atRest;
 	const bool layoutUpdated=!explicitLayout || viewportChanged || impl->presentationDirty;
 	if (layoutUpdated) {
 		++impl->Stats().layoutUpdates;
@@ -4155,8 +4177,7 @@ bool Runtime::Frame(const Viewport& viewport, double seconds) {
 	}
 	const auto updated = statistics.Now();
 	impl->backend->renderer.BeginFrame(viewport.width,viewport.height);
-	const bool replayCandidate=impl->host.CanReplayFrames() && impl->canonical && !impl->paintDirty &&
-		std::none_of(impl->layoutWidgets.begin(),impl->layoutWidgets.end(),[](const auto* element){return element->IsVisible(true);});
+	const bool replayCandidate=impl->host.CanReplayFrames() && impl->canonical && !impl->paintDirty && !impl->widgetsLive;
 	bool projectionMatches=true;
 	if (replayCandidate && !impl->changedProjections.empty()) {
 		impl->context->GetRootElement()->UpdateGeometryForProjection();
@@ -4466,6 +4487,8 @@ bool Runtime::AcknowledgeControlProposal(const std::string& id, std::uint64_t to
 		impl->ReadStateSources();
 		if (!impl->stateError.empty()) accepted = false;
 	}
+	// A settled or refused proposal changes what its widget shows.
+	impl->interactionLayoutDirty=true;
 	return impl->interaction.AcknowledgeProposal(id,token,accepted);
 }
 bool Runtime::BeginNumberEdit(const std::string& id,std::string& error,double seconds) {
@@ -4548,6 +4571,14 @@ bool Runtime::CancelNumberEdit(const std::string& id,NumberEditIdentity expected
 bool Runtime::QueryNumberDrafts(NumberDraftSummary& out,std::string& error,double seconds) {
     if(!Mutate())return false;
 
+	// The host asks on every prepare. Drafts live in editors alone, so with
+	// none open the answer reads no layout: refreshing every control's
+	// bounds for it would also cost a resting page its full pass each frame.
+	if (impl->canonical && std::isfinite(seconds) && seconds >= 0 && !impl->interaction.HasEditors()) {
+		impl->ReadStateSources();
+		if (!impl->stateError.empty()) { error = impl->stateError; return false; }
+		return impl->interaction.QueryNumberDrafts(out,error);
+	}
 	if (!impl->PrepareNumberEdit(seconds,error)) return false;
 	return impl->interaction.QueryNumberDrafts(out,error);
 }

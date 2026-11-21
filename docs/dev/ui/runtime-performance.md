@@ -239,7 +239,10 @@ and both renderer modules were built/staged before the final gameplay profiles.
 `onInit`, the `open` timeline and a four-second settle, then timed 60 Hz frames
 on its view-height canvas, with each declared CVar source at its type's default.
 It reports frame, update, render and tessellation times, paths compiled, draw
-calls, submitted vertices, and layers pushed and elided:
+calls, submitted vertices, and layers pushed and elided; the medians of the
+presentation phases (`sources`, `motion`, `apply`, `layout`), the layout
+passes, interaction refreshes, motion inputs and replays per frame; and the
+first frame's update, tessellation, paths and geometry compiles (`cold_*`):
 
 ```powershell
 & builddir/openq4-retained-ui-benchmark.exe --screen content/baseoq4/pak0/guis/menu/title.rui 240 1280 720
@@ -1361,6 +1364,62 @@ machine ran lighter than for the table above, where the Escape card measured
 | `mp_welcome.rui` | 0.26 ms | 0.18 ms |
 | `joingame.rui` | 0.52 ms | 0.51 ms |
 | `title.rui` | 1.10 ms | 1.00 ms |
+
+### Pages of settled widgets
+
+21 November 2026. A page of buttons stopped laying out at rest on
+31 October, but any shown toggle, slider, list, number field or scroll bar
+still held its page to a full style and layout walk, two interaction
+refreshes and no frame replay on every frame. In Prey that is MultiPrey,
+the in-game multiplayer menu, Save Game, Load Game and every Options tab.
+
+`Runtime::Impl::WidgetsAtRest` now decides it. Shown widgets are at rest
+unless something that changes what they show has happened: a readback,
+availability, focus or pointer change (the interaction flag), a scroll
+(the scroll flag), a restored scroll, a pending focus, an open list, a
+captured drag, a fling, a touch press, or a number or text field holding an
+editor, whose caret blinks. A page at rest takes the same path as a page of
+buttons: no layout, no interaction refresh, and the recorded frame replays.
+A page that leaves any of those conditions takes one more full pass
+(`widgetsLive`) before it rests. A proposal's acknowledgement now raises the
+interaction flag, since it changes what its widget shows.
+
+In the client the page still never rested: the session asks
+`Runtime::QueryNumberDrafts` on every prepare of a document with number
+fields, and the query refreshed every control's bounds first, which also
+raised the interaction flag. Drafts live in editors alone, so with no
+editor open the query now reads the state sources and answers without
+touching layout.
+
+`openq4-retained-ui-benchmark --screen`, 1920x1080, Windows x64 release,
+best of three runs of 300 frames, frame p50 (the before column ran while
+other builds loaded the machine):
+
+| Document | Before | After | Layout passes per frame |
+| --- | ---: | ---: | --- |
+| `multiplayer.rui` | 2.12 ms | 0.039 ms | 1 → 0 |
+| `mp_escape.rui` | 0.22 ms | 0.002 ms | 1 → 0 |
+| `savegame.rui` | 0.20 ms | 0.016 ms | 1 → 0 |
+| `loadgame.rui` | 0.27 ms | 0.017 ms | 1 → 0 |
+
+The client (`builddir`, debug, 1280x720, `ui_retainedProfile 300`) on
+MultiPrey's Find Servers page: retained CPU p50 7.35 → 0.20 ms, frame
+interval 28.0 → 4.2 ms, layout passes 1 → 0 per frame and replays 0 → 1.
+Player Settings and the Options tabs measure the same. With Auto Weapon
+Switch's list open the page takes its full pass every frame (7.6 ms in this
+build); stepping the choice wrote `ui_autoSwitch` 1 → 0 and stepping Mouse
+Sensitivity wrote 5 → 5.5, each painted while the page rested again.
+
+`UiValueRuntimeTest` (`WidgetsAtRest`) pins the rest, the repaint from an
+outside readback, a slider following its readback, a list held open and
+the extra pass after it closes. `UiNumberRuntimeTest`
+(`CaretBlinksOnRestingPage`) pins a field without an editor at rest and an
+open editor's caret blinking.
+
+Tried and left: deferring hidden branches (`Context::Update(true)`) on
+widget pages too. A document's first frame was up to 25 % cheaper, but a
+settings tab's first frame paid up to 4 ms more, since its hidden page's
+style work then lands when it is shown.
 
 ## Startup preload
 
