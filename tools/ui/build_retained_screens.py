@@ -1332,7 +1332,7 @@ def load_game_document() -> dict:
 
 
 def name_field(doc: Document, box, *, ident: str = "save-name", state: str = "save.name", action: str = "rename",
-               key: str = "#str_20128") -> dict:
+               key: str = "#str_20128", max_bytes: int = 32, masked: bool = False) -> dict:
     """The save's name (SG_Description), or a profile's: a text field on
     prey.list.wash, white throughout as the stock field is. Accept or typing
     opens it and Enter writes `state` through `action`; focus draws its
@@ -1358,7 +1358,7 @@ def name_field(doc: Document, box, *, ident: str = "save-name", state: str = "sa
                              (("default", 0), ("hover", 0.5), ("focus", 1), ("pressed", 1), ("disabled", 0))}, enter=1, leave=1)
     return group(ident, absolute(x, y, w, h), [box_fill(f"{ident}-wash", (0, 0, w, h), LIST_WASH), rim, viewport, validation],
                  control={"role": "text", "label": key, "action": action, "value": {"state": state},
-                          "maxBytes": 32, "parts": parts, "states": ids})
+                          "maxBytes": max_bytes, "parts": parts, "states": ids, **({"masked": True} if masked else {})})
 
 
 def save_game_document() -> dict:
@@ -2843,6 +2843,108 @@ def loading_document() -> dict:
     return doc.build(root)
 
 
+# --------------------------------------------------------- the message box
+# guis/msg.gui, the session's pop-up for every notice, question, prompt and
+# wait (idSessionLocal::MessageBox): the stock box is the 320x140 u claw
+# frame at 160,170 over a 0.60 black scrim, with a title bar, the message in
+# a 1 u outline, a prompt's field and up to three buttons. The session fills
+# it through state under the stock names and reads the answer back as the
+# verbs msgLeft, msgRight and msgMid (HandleRetainedSessionRequest). The
+# download progress box and the CD key box keep the stock screen.
+
+MSG_BOX = (160, 170, 320, 140)
+MSG_BORDER = rgb("#B3CCE6", 0.9)              # DIALOGBOX_BORDERCOLOR
+MSG_WAIT_KEY = "#str_20602"                   # the wait box's title
+MSG_ENTRY_BYTES = 63                          # a password or an address
+
+
+def message_box_document() -> dict:
+    doc = Document("openprey.msgbox")
+    for name in ("title", "message", "left", "right", "mid", "str_entry"):
+        doc.state[name] = {"type": "string", "initial": ""}
+    for name in ("visible_msgbox", "visible_waitbox", "visible_left", "visible_right", "visible_mid", "visible_entry"):
+        doc.state[name] = {"type": "boolean", "initial": False}
+    doc.state["ui.numberDraftsPending"] = {"type": "boolean", "initial": False}
+    for verb in ("msgLeft", "msgRight", "msgMid"):
+        doc.session(verb)
+    click, cancel = doc.session("soundClick"), doc.session("soundCancel")
+    # The stock buttons act on release with no sound of their own; the
+    # retained box plays Prey's click, and cancel on the way out.
+    doc.events["msgPickLeft"] = [{"op": "action", "action": click}, {"op": "if", "condition": {"state": "ui.numberDraftsPending"},
+                                  "then": [{"op": "action", "action": "editEntry"}], "else": [{"op": "action", "action": "msgLeft"}]}]
+    doc.events["msgPickMid"] = [{"op": "action", "action": click}, {"op": "action", "action": "msgMid"}]
+    doc.events["msgPickRight"] = [{"op": "action", "action": cancel}, {"op": "action", "action": "msgRight"}]
+    # Back answers as the stock box's cursor stood: the trailing button of
+    # two, or the lone one; a wait has no answer.
+    doc.events["onBack"] = [{"op": "if", "condition": {"state": "visible_waitbox"}, "then": [], "else": [
+        {"op": "if", "condition": {"state": "visible_right"}, "then": [{"op": "call", "event": "msgPickRight"}],
+         "else": [{"op": "if", "condition": {"state": "visible_mid"}, "then": [{"op": "call", "event": "msgPickMid"}]}]}]}]
+    # The first control there takes the focus: a prompt's field, the lone
+    # button, or the trailing one of two.
+    doc.events["onActivate"] = [{"op": "if", "condition": {"state": "visible_entry"}, "then": [{"op": "focus", "control": "msg-entry"}],
+                                 "else": [{"op": "if", "condition": {"state": "visible_mid"}, "then": [{"op": "focus", "control": "msg_mid"}],
+                                           "else": [{"op": "if", "condition": {"state": "visible_right"},
+                                                     "then": [{"op": "focus", "control": "msg_right"}]}]}]}]
+    doc.events["Prompt"] = [{"op": "setState", "values": {"str_entry": ""}}, {"op": "focus", "control": "msg-entry"}]
+    # Entering the prompt's text writes it, then answers OK.
+    doc.actions["enterEntry"] = {"input": "string", "operation": "ui.state.set",
+                                 "arguments": {"key": "str_entry", "value": {"input": "value"}, "event": "msgEntered"}}
+    doc.actions["editEntry"] = {"operation": "ui.numberDrafts.focus", "arguments": {}}
+    doc.events["msgEntered"] = [{"op": "action", "action": "msgLeft"}]
+
+    def title(ident: str, key: str, state: str | None) -> list[dict]:
+        nodes = label(f"{ident}-title", key if state is None else PLACEHOLDER, (30, 7, 260, 20), BODY, 0.25, TEXT_NAV,
+                      shadow=True, ty=-1 if state is None else 0, overflow=keyword("hidden"))
+        if state:
+            bound(doc, nodes, state)
+        return [title_bar(f"{ident}-title-bar", (30, 7, 260, 20)), *nodes]
+
+    def message(ident: str, box) -> list[dict]:
+        x, y, w, h = box
+        return [box_fill(f"{ident}-message-box", box, [0, 0, 0, 0], border=MSG_BORDER),
+                *bound(doc, label(f"{ident}-message", PLACEHOLDER, (x + 2, y + 2, w - 4, h - 4), BODY, 0.25, TEXT_LABEL,
+                                  align="left", wrap=True, shadow=True, overflow=keyword("hidden")), "message")]
+
+    names = {"left": "msg_left", "mid": "msg_mid", "right": "msg_right"}
+    spots = {"left": 30, "mid": 118, "right": 205}
+    # A hidden neighbour falls back to the nearest button that way.
+    steps = {"left": ("msg_right", "msg_mid"), "mid": ("msg_left", "msg_right"), "right": ("msg_mid", "msg_left")}
+    plates = []
+    for side, event in (("left", "msgPickLeft"), ("mid", "msgPickMid"), ("right", "msgPickRight")):
+        plate = button(doc, names[side], PLACEHOLDER, (spots[side], 114, 85, 22), event=event, scale=0.25,
+                       navigation={"left": steps[side][0], "right": steps[side][1], "up": "msg-entry", "down": names[side]})
+        for node in walk(plate):
+            if node["id"] in (f"{names[side]}-label", f"{names[side]}-label-shadow"):
+                doc.bind(node["id"], "text", {"state": side})
+        plates.append(shown_when(doc, plate, {"state": f"visible_{side}"}))
+    field = name_field(doc, (30, 90, 260, 20), ident="msg-entry", state="str_entry", action="enterEntry", key="#str_04321",
+                       max_bytes=MSG_ENTRY_BYTES)
+    navigate([field], "msg-entry", down="msg_left", up="msg-entry")
+    entry = shown_when(doc, group("msg-entry-row", absolute(0, 0, 320, 140), [
+        box_fill("msg-entry-border", (30, 90, 260, 20), [0, 0, 0, 0], border=MSG_BORDER), field]), {"state": "visible_entry"})
+    # A prompt's message stops above its field.
+    message_nodes = message("msg", (30, 30, 260, 61))
+    box = group("msg-box", absolute(*MSG_BOX), [*frame_parts(doc, "msg-box", 0.7, 1), *title("msg", PLACEHOLDER, "title"),
+                                                 *message_nodes, entry, *plates])
+    wait = group("wait-box", absolute(*MSG_BOX), [*frame_parts(doc, "wait-box", 0.7, 1), *title("wait", MSG_WAIT_KEY, None),
+                                                  title_bar("wait-foot-bar", (30, 115, 260, 19), inverted=True),
+                                                  *message("wait", (30, 30, 260, 81))])
+    stage = group("stage", STAGE, [shown_when(doc, box, {"state": "visible_msgbox"}),
+                                   shown_when(doc, wait, {"op": "&&", "args": [{"state": "visible_waitbox"},
+                                                                               {"op": "!", "args": [{"state": "visible_msgbox"}]}]})])
+    soft = soft_focus_layer(doc, "msg-softfocus", {"state": "soft_focus"}, SOFT_FOCUS_BLUR, SOFT_FOCUS_SATURATION)
+    scrim = group("msg-scrim", {**FULL, "background-color": colour([0, 0, 0, 0.6]), **PASSIVE})
+    root = group("screen", {**FULL, "font-family": font(BODY), "font-size": length(EM * 0.25 * U), "color": colour(TEXT_LABEL)},
+                 [soft, scrim, stage])
+    return doc.build(root)
+
+
+def walk(node: dict):
+    yield node
+    for child in node.get("children", ()):
+        yield from walk(child)
+
+
 # -------------------------------------------------------------------- output
 
 DOCUMENTS = {
@@ -2854,6 +2956,7 @@ DOCUMENTS = {
     "menu/credits.rui": credits_document,
     "menu/settings.rui": options_document,
     "loading/loading.rui": loading_document,
+    "menu/msgbox.rui": message_box_document,
 }
 
 
