@@ -13344,7 +13344,11 @@ static void RB_ShadowMapRunPass( const viewLight_t *vLight, shadowMapPassKind_t 
 			g_shadowMapStats.fallbackGlobalPasses++;
 		}
 		RB_ShadowMapPassReport( vLight, passKind, pointLight, SHADOWMAP_PASS_RESULT_SCHEDULED_SKIP, primaryCasters, secondaryCasters, tertiaryCasters, quaternaryCasters, primaryShadowSurfs, secondaryShadowSurfs, interactions );
-		RB_ShadowMapMarkStencilFallbackSticky( vLight );
+		// A budget or subview policy chose stencil, which it may only do when
+		// the stencil represents every caster of this ownership (mapRequired is
+		// false), and the front end keeps the volumes whenever such a policy is
+		// active (R_ShadowMapLightWillUseShadowMaps). Nothing failed, so the
+		// light is not held on volumes for later views, as on Vulkan.
 		if ( !deferReceiverDraw ) {
 			RB_ShadowMapStencilFallback( vLight, passKind, primaryShadowSurfs, secondaryShadowSurfs, interactions );
 		}
@@ -17875,10 +17879,21 @@ void RB_ARB2_DrawInteractions( void ) {
 				&& vLight->globalInteractions != NULL ) {
 				// The translucent chain drove GLOBAL map preparation because the
 				// opaque chain has no map-capable receiver. Draw that opaque fallback
-				// subset now, before the ordered translucent phase below.
-				RB_ShadowMapDrawReceiverFallbacks( vLight,
-					SHADOWMAP_PASS_GLOBAL, vLight->globalShadows,
-					vLight->localShadows, vLight->globalInteractions );
+				// subset now, before the ordered translucent phase below. When the
+				// map is ready its Prey program receivers take it through the
+				// visibility pass, as on a mapped pass of their own; through the
+				// stencil volumes alone they found the volumes left out for the
+				// map, drew unshadowed and held the light on volumes.
+				if ( g_shadowMapGlobalPassMapped != SHADOWMAP_GLOBAL_MAPPED_NONE ) {
+					RB_ShadowMapDrawMappedReceiverFallbacks( vLight,
+						SHADOWMAP_PASS_GLOBAL, classification.pointLight,
+						g_shadowMapGlobalPassHybrid, vLight->globalShadows,
+						vLight->localShadows, vLight->globalInteractions );
+				} else {
+					RB_ShadowMapDrawReceiverFallbacks( vLight,
+						SHADOWMAP_PASS_GLOBAL, vLight->globalShadows,
+						vLight->localShadows, vLight->globalInteractions );
+				}
 			}
 
 			if ( !r_skipTranslucent.GetBool() ) {
