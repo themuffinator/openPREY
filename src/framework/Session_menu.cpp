@@ -2403,7 +2403,12 @@ void idSessionLocal::StartMenu( bool playIntro ) {
 		SetGUI( NULL, NULL );
 		return;
 	}
-	const bool shouldPlayIntro = playIntro && !com_skipLogoVideos.GetBool();
+	// openPREY: playIntro is the main menu's own opening out of game (the 3D
+	// backdrop's entrance, docs/dev/prey-ui-visual-design.md section 12.2),
+	// not a logo video, so com_skipLogoVideos leaves it alone. The opening
+	// brings the screen up from black itself; the session's blackout covers
+	// only noIntro.
+	const bool shouldPlayIntro = playIntro;
 	if ( guiSystem != NULL && ( guiActive == guiSystem || guiMsgRestore == guiSystem ) ) {
 		ReturnSystemSettings();
 		return;
@@ -2446,8 +2451,8 @@ void idSessionLocal::StartMenu( bool playIntro ) {
 	const int introStart = Sys_Milliseconds();
 	guiMainMenu->HandleNamedEvent( shouldPlayIntro ? "playIntro" : "noIntro" );
 	const int introMsec = Sys_Milliseconds() - introStart;
-	menuIntroBlackoutActive = true;
-	menuIntroBlackoutAwaitMenuMusic = shouldPlayIntro;
+	menuIntroBlackoutActive = !shouldPlayIntro;
+	menuIntroBlackoutAwaitMenuMusic = false;
 	menuIntroBlackoutFadeStart = -1;
 	fallbackMenuStartTime = -1;
 	if ( !shouldPlayIntro ) {

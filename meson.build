@@ -290,6 +290,9 @@ if get_option('build_native_tests')
   # Repaints the initializing screen's textures from their seeds: about a minute.
   test('openprey-retained-initialization', py,
     args: [files('tools/ui/build_retained_initialization.py'), '--check'], timeout: 300)
+  # The main menu's 3D backdrop: meshes, textures, material and renderDef.
+  test('openprey-menu-scene', py,
+    args: [files('tools/assets/generate_menu_scene.py'), '--check'], timeout: 300)
   test('openq4-vulkan-material-cache', py,
     args: [files('tools/tests/renderer_vulkan_material_cache.py')], timeout: 60)
   openq4_editor_document_test = executable(

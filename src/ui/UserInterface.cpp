@@ -1504,9 +1504,21 @@ const char *idUserInterfaceLocal::HandleEvent( const sysEvent_t *event, int _tim
 			cursorY + static_cast<float>( event->evValue2 ) );
 	}
 
+	// openPREY: while gui::skipOnInput names a named event, the first key,
+	// button or click runs it instead of reaching the windows. The main menu's
+	// 3D entrance skips to rest this way (guis/mainmenu.gui, skipIntro).
+	if ( desktop && event->evType == SE_KEY && event->evValue2 == 1 ) {
+		const idStr skip = state.GetString( "skipOnInput", "" );
+		if ( skip.Length() ) {
+			state.Set( "skipOnInput", "" );
+			HandleNamedEvent( skip.c_str() );
+			return "";
+		}
+	}
+
 	if ( desktop ) {
 		return desktop->HandleEvent( event, updateVisuals );
-	} 
+	}
 
 	return "";
 }

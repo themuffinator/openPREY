@@ -122,7 +122,7 @@ grows from a point.
 ================
 */
 static bool RenderWindowResolveCanvasView( idDeviceContext *dc, const idRectangle &drawRect,
-		float forceAspectWidth, float forceAspectHeight, renderView_t &view ) {
+		float forceAspectWidth, float forceAspectHeight, renderView_t &view, float fovY = 0.0f ) {
 	if ( dc == NULL || drawRect.w <= 0.0f || drawRect.h <= 0.0f ) {
 		return false;
 	}
@@ -142,8 +142,9 @@ static bool RenderWindowResolveCanvasView( idDeviceContext *dc, const idRectangl
 	}
 
 	// A 90 degree horizontal field puts a tangent of 1 at the rect's sides;
-	// GUI y runs down, a frustum's up.
-	const float unitsPerTangent = drawRect.w * 0.5f;
+	// GUI y runs down, a frustum's up. openPREY: "fovY" puts tan( fovY / 2 )
+	// at the rect's top and bottom instead.
+	const float unitsPerTangent = fovY > 0.0f ? drawRect.h * 0.5f / idMath::Tan( DEG2RAD( fovY ) * 0.5f ) : drawRect.w * 0.5f;
 	const float centreX = drawRect.x + drawRect.w * 0.5f;
 	const float centreY = drawRect.y + drawRect.h * 0.5f;
 	const float tanLeft = ( clipX - centreX ) / unitsPerTangent;
@@ -202,6 +203,73 @@ static void RenderWindowApplyPreviewEffects( renderEntity_t &renderEntity, const
 	renderEntity.brightSkinColor = brightSkin;
 	renderEntity.outlineWidth = idMath::ClampFloat( 0.0f, 6.0f, width );
 	renderEntity.outlineFlags = 0;
+}
+
+/*
+================
+The scene camera (openPREY)
+
+The main menu's 3D backdrop (docs/dev/prey-ui-visual-design.md, section 12.2)
+draws the Sphere and Earth under one camera that opens close on the Sphere and
+swings round it as it pulls back to the rest frame. A renderDef describes the
+curve with these keys, in its world's units:
+
+	orbitCenter		the body the camera circles
+	orbitFrom/To	the camera's direction from it (xyz) and distance (w) at the
+					start and at rest
+	orbitAimFrom/To	the point it looks at, at the start and at rest
+	orbitShape		the body's radius, the move's length in ms, and the stock
+					interpolator's acceleration and deceleration fractions
+	orbitPlay		set nonzero to start the move; orbitSkip to end it at once
+
+One eased progress e drives it. The direction swings along the great arc,
+the body's apparent radius falls geometrically (so sqrt( d * d - R * R )
+does), and the aim moves in a straight line; world up stays up, so the camera
+never rolls. Before a move, after it, and under reduced motion the camera is
+at rest.
+
+"sceneKey" names the GUI state the window keeps: <key>_ok (the scene can
+draw), <key>_motion (motion is allowed), <key>_moving, and <key>_x and
+<key>_y, the shift in canvas units of a point at infinity since the rest
+frame, which slides the 2D star layers with the camera's heading.
+================
+*/
+idCVar ui_menuScene( "ui_menuScene", "1", CVAR_GUI | CVAR_BOOL | CVAR_ARCHIVE,
+	"the main menu's backdrop: 1 the 3D Sphere and Earth, 0 the stock painting (takes effect when the menu loads)" );
+idCVar ui_menuSceneProbe( "ui_menuSceneProbe", "-1", CVAR_GUI | CVAR_INTEGER | CVAR_NOCHEAT,
+	"diagnostic: hold the main menu's 3D backdrop camera this many ms into its entrance, for screenshots; -1 off", -1, 100000 );
+
+static bool RenderWindowReducedMotion() {
+	return cvarSystem->GetCVarBool( "ui_retainedReducedMotion" );
+}
+
+// The stock GUI interpolator's acceleration and deceleration as a progress map.
+static float RenderWindowAccelDecel( float p, float accel, float decel ) {
+	p = idMath::ClampFloat( 0.0f, 1.0f, p );
+	accel = idMath::ClampFloat( 0.0f, 1.0f, accel );
+	decel = idMath::ClampFloat( 0.0f, 1.0f - accel, decel );
+	const float v = 1.0f / ( 1.0f - ( accel + decel ) * 0.5f );
+	if ( accel > 0.0f && p < accel ) {
+		return v * p * p / ( 2.0f * accel );
+	}
+	if ( decel > 0.0f && p > 1.0f - decel ) {
+		return 1.0f - v * ( 1.0f - p ) * ( 1.0f - p ) / ( 2.0f * decel );
+	}
+	return v * ( p - accel * 0.5f );
+}
+
+// Rows forward, left and up, looking along `forward` with world z up.
+static idMat3 RenderWindowLookAxis( const idVec3 &forward ) {
+	idVec3 f = forward;
+	if ( f.Normalize() <= 0.0f ) {
+		return mat3_identity;
+	}
+	idVec3 left = idVec3( 0.0f, 0.0f, 1.0f ).Cross( f );
+	if ( left.Normalize() <= 1e-6f ) {
+		left.Set( 0.0f, 1.0f, 0.0f );
+	}
+	const idVec3 up = f.Cross( left );
+	return idMat3( f, left, up );
 }
 
 }
@@ -268,6 +336,30 @@ void idRenderWindow::CommonInit() {
 
 	updateAnimation = true;
 	canvasFill = false;
+
+	fovY = 0.0f;
+	for ( int i = 0; i < MAX_RENDERWINDOW_MODELS; ++i ) {
+		modelRotateN[i].Zero();
+		modelSpin[i].Zero();
+		modelFacing[i].Zero();
+		modelOwnRotate[i] = false;
+	}
+	sceneOrigin.Zero();
+	sceneAxis.Identity();
+	orbitCenter.Zero();
+	orbitFrom.Zero();
+	orbitTo.Zero();
+	orbitAimFrom.Zero();
+	orbitAimTo.Zero();
+	orbitShape = idVec4( 1.0f, 1000.0f, 0.0f, 0.0f );
+	orbitPlay = 0.0f;
+	orbitSkip = 0.0f;
+	sceneKey = "";
+	orbitEnabled = false;
+	orbitStarted = false;
+	orbitArmed = false;
+	orbitStart = 0;
+	restTime = -1;
 }
 
 void idRenderWindow::BuildAnimation( int time ) {
@@ -331,6 +423,22 @@ void idRenderWindow::UpdateRenderVars() {
 	brightSkinColor.Update();
 	outlineWidth.Update();
 	customShader.Update();
+
+	fovY.Update();
+	for ( int i = 0; i < MAX_RENDERWINDOW_MODELS; ++i ) {
+		modelRotateN[i].Update();
+		modelSpin[i].Update();
+		modelFacing[i].Update();
+	}
+	orbitCenter.Update();
+	orbitFrom.Update();
+	orbitTo.Update();
+	orbitAimFrom.Update();
+	orbitAimTo.Update();
+	orbitShape.Update();
+	orbitPlay.Update();
+	orbitSkip.Update();
+	sceneKey.Update();
 }
 
 void idRenderWindow::PreRender() {
@@ -405,7 +513,7 @@ void idRenderWindow::PreRender() {
 		}
 
 		RenderWindowEnsurePreviewBounds( worldEntity[i] );
-		worldEntity[i].axis = baseAxis;
+		worldEntity[i].axis = modelOwnRotate[i] ? ModelAxis( i, 0 ) : baseAxis;
 		RenderWindowInitShaderParms( worldEntity[i] );
 		RenderWindowApplyPreviewEffects( worldEntity[i], RenderWindowVec4( outlineColor ), outlineWidth, RenderWindowVec4( rimlightColor ), RenderWindowVec4( brightSkinColor ) );
 		if ( customShader.Length() && idStr::Icmp( customShader.c_str(), "NONE" ) != 0 ) {
@@ -489,6 +597,24 @@ void idRenderWindow::Render( int time ) {
 			}
 		}
 
+		if ( modelOwnRotate[i] && ( !worldEntity[0].joints || !jointName[i].Length() ) ) {
+			worldEntity[i].axis = ModelAxis( i, time );
+			if ( modelFacing[i].y() > 0.0f ) {
+				// A billboard on the orbited body's camera side, sized against
+				// the body's apparent radius: tan = size * R / sqrt( d * d - R * R ).
+				const idVec3 centre = orbitCenter.ToVec3();
+				idVec3 toCamera = sceneOrigin - centre;
+				const float d = toCamera.Normalize();
+				const float radius = Max( 1e-3f, orbitShape.x() );
+				const float lift = modelFacing[i].x();
+				if ( d > radius && d > lift ) {
+					const float half = modelFacing[i].y() * radius * ( d - lift ) / idMath::Sqrt( d * d - radius * radius );
+					worldEntity[i].origin = centre + toCamera * lift;
+					worldEntity[i].axis = sceneAxis * half;
+				}
+			}
+		}
+
 		RenderWindowApplyPreviewEffects( worldEntity[i], RenderWindowVec4( outlineColor ), outlineWidth, RenderWindowVec4( rimlightColor ), RenderWindowVec4( brightSkinColor ) );
 		if ( modelDef[i] != -1 ) {
 			world->UpdateEntityDef( modelDef[i], &worldEntity[i] );
@@ -506,24 +632,192 @@ void idRenderWindow::Draw( int time, float x, float y ) {
 	}
 
 	UpdateRenderVars();
+	if ( orbitEnabled ) {
+		// The move starts, or ends, on the frame its key is set.
+		const int length = Max( 1, idMath::Ftoi( orbitShape.y() ) );
+		// The first frame of a move pays for the scene's first draw (its images
+		// and the menu's own first frame), which took a third of a second; the
+		// clock starts on the frame after, and the GUI hears <key>_start then
+		// so its own timeline keeps step with the camera.
+		bool startEvent = false;
+		if ( orbitPlay != 0.0f ) {
+			if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+				common->Printf( "MENU_SCENE play at=%d\n", time );
+			}
+			orbitPlay = 0.0f;
+			orbitStarted = true;
+			orbitArmed = true;
+			orbitStart = time;
+			restTime = time + length;
+		} else if ( orbitArmed ) {
+			orbitArmed = false;
+			orbitStart = time;
+			restTime = time + length;
+			startEvent = true;
+		}
+		if ( orbitSkip != 0.0f ) {
+			if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+				common->Printf( "MENU_SCENE skip at=%d armed=%d started=%d\n", time, orbitArmed ? 1 : 0, orbitStarted ? 1 : 0 );
+			}
+			orbitSkip = 0.0f;
+			orbitArmed = false;
+			startEvent = false;
+			if ( orbitStarted && time < orbitStart + length ) {
+				orbitStart = time - length;
+				restTime = time;
+			}
+		}
+		if ( startEvent && sceneKey.Length() && gui != NULL ) {
+			gui->HandleNamedEvent( va( "%s_start", sceneKey.c_str() ) );
+		}
+	}
+	if ( restTime < 0 ) {
+		restTime = time;
+	}
 	PreRender();
-	Render( time );
+	sceneOrigin = viewOffset.ToVec3();
+	sceneAxis.Identity();
+	if ( orbitEnabled ) {
+		ResolveOrbitView( time, sceneOrigin, sceneAxis );
+	}
+	// Reduced motion holds the scene: no turn, and its materials' time stands.
+	const bool still = orbitEnabled && RenderWindowReducedMotion();
+	Render( still ? 0 : time );
 
 	memset( &refdef, 0, sizeof( refdef ) );
-	refdef.vieworg = viewOffset.ToVec3();
-	refdef.viewaxis.Identity();
+	refdef.vieworg = sceneOrigin;
+	refdef.viewaxis = sceneAxis;
 	refdef.shaderParms[0] = 1.0f;
 	refdef.shaderParms[1] = 1.0f;
 	refdef.shaderParms[2] = 1.0f;
 	refdef.shaderParms[3] = 1.0f;
-	if ( !canvasFill || !RenderWindowResolveCanvasView( dc, drawRect, forceAspectWidth, forceAspectHeight, refdef ) ) {
+	const float sceneFovY = fovY;
+	if ( !canvasFill || !RenderWindowResolveCanvasView( dc, drawRect, forceAspectWidth, forceAspectHeight, refdef, sceneFovY ) ) {
 		if ( !RenderWindowResolveViewport( dc, drawRect, refdef.x, refdef.y, refdef.width, refdef.height, refdef.fov_y ) ) {
 			return;
 		}
-		refdef.fov_x = 90.0f;
+		if ( sceneFovY > 0.0f ) {
+			refdef.fov_y = sceneFovY;
+			refdef.fov_x = 2.0f * RAD2DEG( idMath::ATan( idMath::Tan( DEG2RAD( sceneFovY ) * 0.5f ) * drawRect.w / Max( 1.0f, drawRect.h ) ) );
+		} else {
+			refdef.fov_x = 90.0f;
+		}
 	}
-	refdef.time = time;
+	refdef.time = still ? 0 : time;
+	PublishSceneState( time, orbitEnabled ? &refdef.viewaxis : NULL );
+	if ( orbitEnabled && orbitStarted && time <= orbitStart + idMath::Ftoi( orbitShape.y() ) + 100 &&
+			cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
+		common->Printf( "MENU_SCENE t=%d e=%.3f cam=%.1f %.1f %.1f\n", time - orbitStart, OrbitProgress( time ),
+			refdef.vieworg.x, refdef.vieworg.y, refdef.vieworg.z );
+	}
 	world->RenderScene( &refdef );
+}
+
+/*
+================
+idRenderWindow::ModelAxis
+
+A model with its own rotation (modelRotateN), turned about its local spin
+axis once in modelSpinN's w seconds from when the camera rests.
+================
+*/
+idMat3 idRenderWindow::ModelAxis( int model, int time ) const {
+	const idMat3 base = RenderWindowRotationToAxis( modelRotateN[model] );
+	const idVec4 &spin = modelSpin[model];
+	if ( spin.w <= 0.0f || restTime < 0 || time <= restTime || RenderWindowReducedMotion() || ui_menuSceneProbe.GetInteger() >= 0 ) {
+		return base;
+	}
+	idVec3 spinAxis = spin.ToVec3();
+	if ( spinAxis.Normalize() <= 0.0f ) {
+		return base;
+	}
+	const float seconds = static_cast<float>( time - restTime ) * 0.001f;
+	const float degrees = idMath::AngleNormalize360( seconds / spin.w * 360.0f );
+	return idRotation( vec3_origin, spinAxis, degrees ).ToMat3() * base;
+}
+
+float idRenderWindow::OrbitProgress( int time ) const {
+	const float length = Max( 1.0f, orbitShape.y() );
+	if ( ui_menuSceneProbe.GetInteger() >= 0 ) {
+		return RenderWindowAccelDecel( static_cast<float>( ui_menuSceneProbe.GetInteger() ) / length, orbitShape.z(), orbitShape.w() );
+	}
+	if ( !orbitStarted || RenderWindowReducedMotion() ) {
+		return 1.0f;
+	}
+	const float p = static_cast<float>( time - orbitStart ) / length;
+	return RenderWindowAccelDecel( p, orbitShape.z(), orbitShape.w() );
+}
+
+bool idRenderWindow::ResolveOrbitView( int time, idVec3 &origin, idMat3 &axis ) const {
+	const float e = OrbitProgress( time );
+	const idVec3 centre = orbitCenter.ToVec3();
+	idVec3 from = orbitFrom.ToVec3();
+	idVec3 to = orbitTo.ToVec3();
+	if ( from.Normalize() <= 0.0f || to.Normalize() <= 0.0f ) {
+		return false;
+	}
+	const float radius = Max( 1e-3f, orbitShape.x() );
+	const float q0 = idMath::Sqrt( Max( 1e-6f, orbitFrom.w() * orbitFrom.w() / ( radius * radius ) - 1.0f ) );
+	const float q1 = idMath::Sqrt( Max( 1e-6f, orbitTo.w() * orbitTo.w() / ( radius * radius ) - 1.0f ) );
+	const float q = q0 * idMath::Pow( q1 / q0, e );
+	const float distance = radius * idMath::Sqrt( 1.0f + q * q );
+
+	const float arc = idMath::ACos( idMath::ClampFloat( -1.0f, 1.0f, from * to ) );
+	idVec3 direction = to;
+	if ( arc > 1e-4f ) {
+		const float k = idMath::Sin( arc );
+		direction = from * ( idMath::Sin( ( 1.0f - e ) * arc ) / k ) + to * ( idMath::Sin( e * arc ) / k );
+	}
+	origin = centre + direction * distance;
+	const idVec3 aim = orbitAimFrom.ToVec3() + ( orbitAimTo.ToVec3() - orbitAimFrom.ToVec3() ) * e;
+	axis = RenderWindowLookAxis( aim - origin );
+	return true;
+}
+
+bool idRenderWindow::SceneAvailable() {
+	if ( !ui_menuScene.GetBool() || renderModelManager == NULL ) {
+		return false;
+	}
+	for ( int i = 0; i < MAX_RENDERWINDOW_MODELS; ++i ) {
+		if ( !modelName[i].Length() ) {
+			continue;
+		}
+		idRenderModel *model = renderModelManager->CheckModel( modelName[i].c_str() );
+		if ( model == NULL || model->IsDefaultModel() ) {
+			return false;
+		}
+	}
+	return modelName[0].Length() > 0;
+}
+
+void idRenderWindow::PublishSceneState( int time, const idMat3 *viewAxis ) {
+	if ( !sceneKey.Length() || gui == NULL ) {
+		return;
+	}
+	const char *key = sceneKey.c_str();
+	gui->SetStateBool( va( "%s_motion", key ), !RenderWindowReducedMotion() );
+	gui->SetStateBool( va( "%s_moving", key ), orbitEnabled && OrbitProgress( time ) < 1.0f );
+	float shiftX = 0.0f;
+	float shiftY = 0.0f;
+	if ( viewAxis != NULL && fovY > 0.0f ) {
+		// The rest camera's axes, and this frame's heading in them.
+		idVec3 restDirection = orbitTo.ToVec3();
+		restDirection.Normalize();
+		const idVec3 restOrigin = orbitCenter.ToVec3() + restDirection * orbitTo.w();
+		const idMat3 rest = RenderWindowLookAxis( orbitAimTo.ToVec3() - restOrigin );
+		const idVec3 &forward = ( *viewAxis )[0];
+		const float right = -( forward * rest[1] );
+		const float up = forward * rest[2];
+		const float ahead = forward * rest[0];
+		const float yaw = idMath::ATan( right, ahead );
+		const float pitch = idMath::ATan( up, idMath::Sqrt( right * right + ahead * ahead ) );
+		// Canvas units per unit of tangent: the 480 u canvas spans fovY.
+		const float focal = 240.0f / idMath::Tan( DEG2RAD( fovY ) * 0.5f );
+		shiftX = -focal * idMath::Tan( yaw );
+		shiftY = focal * idMath::Tan( pitch );
+	}
+	gui->SetStateFloat( va( "%s_x", key ), shiftX );
+	gui->SetStateFloat( va( "%s_y", key ), shiftY );
 }
 
 void idRenderWindow::RefreshForLevelLoad() {
@@ -599,6 +893,15 @@ void idRenderWindow::DrawModelScene( int time, float fov, int width, int height 
 
 void idRenderWindow::PostParse() {
 	idWindow::PostParse();
+	sceneKey.Update();
+	if ( sceneKey.Length() && gui != NULL ) {
+		// Whether the menu draws this scene or its stock painting is decided as
+		// it loads: a hidden renderDef never draws to find out.
+		gui->SetStateBool( va( "%s_ok", sceneKey.c_str() ), SceneAvailable() );
+		gui->SetStateBool( va( "%s_motion", sceneKey.c_str() ), !RenderWindowReducedMotion() );
+		gui->SetStateFloat( va( "%s_x", sceneKey.c_str() ), 0.0f );
+		gui->SetStateFloat( va( "%s_y", sceneKey.c_str() ), 0.0f );
+	}
 }
 
 idWinVar *idRenderWindow::GetWinVarByName( const char *_name, bool fixup, drawWin_t **owner ) {
@@ -652,6 +955,38 @@ idWinVar *idRenderWindow::GetWinVarByName( const char *_name, bool fixup, drawWi
 
 	if ( idStr::Icmp( _name, "modelOrigin" ) == 0 ) {
 		return &modelOrigin;
+	}
+	for ( int i = 1; i < MAX_RENDERWINDOW_MODELS; ++i ) {
+		if ( idStr::Icmp( _name, va( "modelRotate%d", i ) ) == 0 ) {
+			modelOwnRotate[i] = true;
+			return &modelRotateN[i];
+		}
+		if ( idStr::Icmp( _name, va( "modelSpin%d", i ) ) == 0 ) {
+			modelOwnRotate[i] = true;
+			return &modelSpin[i];
+		}
+		if ( idStr::Icmp( _name, va( "modelFacing%d", i ) ) == 0 ) {
+			modelOwnRotate[i] = true;
+			return &modelFacing[i];
+		}
+	}
+	if ( idStr::Icmp( _name, "fovY" ) == 0 ) {
+		return &fovY;
+	}
+	if ( idStr::Icmp( _name, "sceneKey" ) == 0 ) {
+		return &sceneKey;
+	}
+	if ( idStr::Icmpn( _name, "orbit", 5 ) == 0 ) {
+		idWinVar *orbitVars[] = { &orbitCenter, &orbitFrom, &orbitTo, &orbitAimFrom, &orbitAimTo, &orbitShape, &orbitPlay, &orbitSkip };
+		const char *orbitNames[] = { "orbitCenter", "orbitFrom", "orbitTo", "orbitAimFrom", "orbitAimTo", "orbitShape", "orbitPlay", "orbitSkip" };
+		for ( int i = 0; i < 8; ++i ) {
+			if ( idStr::Icmp( _name, orbitNames[i] ) == 0 ) {
+				if ( i == 2 ) {
+					orbitEnabled = true;
+				}
+				return orbitVars[i];
+			}
+		}
 	}
 	if ( idStr::Icmp( _name, "modelRotate" ) == 0 ) {
 		return &modelRotate;

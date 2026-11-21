@@ -32,6 +32,7 @@ windowDef desktop {
 	menugui			1
 	float inSubmenu	0
 	float inModal	0
+	float introPlaying	0
 
 	// The portal's view spans the screen's width: on a wider screen it is the
 	// 4:3 view scaled up about the canvas centre, so the rim stays on the
@@ -67,10 +68,35 @@ windowDef desktop {
 	onDeactivate {
 	}
 
+	// openPREY: out of game the 3D backdrop (MenuScene) opens close on the
+	// Sphere and pulls back to rest (AnimSceneIntro); without it the stock
+	// opening plays. In game, noIntro keeps the stock opening over the frozen
+	// frame, and the backdrop it reveals is the 3D one, at rest.
 	onNamedEvent playIntro {
 		set "desktop::mapexists" "0" ;
 		resetTime "Anim_ResetMainMenuButtons" "0";
-		resetTime "AnimPortalIn" "0" ;
+		if ( "gui::menuscene_ok" == 1 ) {
+			resetTime "AnimSceneIntro" "0" ;
+		} else {
+			resetTime "AnimPortalIn" "0" ;
+		}
+	}
+
+	// Any key, button or click during the entrance skips to rest at once
+	// (gui::skipOnInput, idUserInterfaceLocal::HandleEvent); reduced motion
+	// skips it before it shows.
+	onNamedEvent skipIntro {
+		if ( "desktop::introPlaying" == 1 ) {
+			set "desktop::introPlaying" "0" ;
+			set "gui::skipOnInput" "" ;
+			set "MenuScene::orbitSkip" "1" ;
+			transition "SceneFade::backcolor" "0 0 0 0" "0 0 0 0" "1" ;
+			set "PortalModelFront::visible" "1" ;
+			transition "PortalModelFront::viewOffset" "-43 7 0 0" "-43 7 0 0" "1" ;
+			set "Main_Logo::visible" "1" ;
+			transition "Main_Logo::matcolor" "1 1 1 1" "1 1 1 1" "1" ;
+			set "Main_Menu::visible" "1" ;
+		}
 	}
 	
 	onNamedEvent noIntro {
@@ -220,6 +246,97 @@ windowDef desktop {
 		}
 	}
 
+	// openPREY: the 3D backdrop's entrance (docs/dev/prey-ui-visual-design.md
+	// section 12.2). The camera opens close on the Sphere and swings round it
+	// to rest over 1200 ms (MenuScene's orbit); the backdrop fades up from
+	// black in 150 ms, the portal rim swings in from 700 ms as it does when a
+	// full page closes, and the wordmark, arc and bottom bar arrive from
+	// 1000 ms, taking input from then.
+	windowDef AnimSceneIntro {
+		rect		0, 0, 0, 0
+		noTime		1
+
+		onTime 0 {
+			set "desktop::inSubmenu" "0" ;
+			set "desktop::introPlaying" "1" ;
+			set "gui::skipOnInput" "skipIntro" ;
+
+			set "Main_Portal::visible" "1" ;
+			set "Main_Logo::visible" "0" ;
+			set "Main_Menu::visible" "0" ;
+
+			set "QuitGame_Menu::visible" "0" ;
+			set "Newgame_Menu::visible" "0" ;
+			set "Loadgame_Menu::visible" "0" ;
+			set "Savegame_Menu::visible" "0" ;
+			set "Multiplayer_Menu::visible" "0" ;
+			set "Options_Menu::visible" "0" ;
+			set "Exit_Menu::visible" "0" ;
+			set "Credits_Menu::visible" "0" ;
+			set "Mods_Menu::visible" "0" ;
+
+			set "Overlay_ResetDefaults::visible" "0" ;
+			set "Overlay_LoadGameConfirmation::visible" "0" ;
+			set "Overlay_DeleteSaveGame::visible" "0" ;
+			set "Overlay_OverwriteSaveGame::visible" "0" ;
+			set "Overlay_MustRestart::visible" "0" ;
+
+			set "ScreenShotBackground::visible" "0" ;
+			set "PortalModel::visible" "0" ;
+			set "PortalModelFront::visible" "0" ;
+			set "PortalModelFront::viewOffset" "-15 7 0 0" ;
+			set "Background::visible" "1" ;
+			set "Main_Logo::matcolor" "1 1 1 0" ;
+
+			// The backdrop draws its first frame under black; the camera's clock
+			// and AnimSceneTimeline start on the next (menuscene_start).
+			set "SceneFade::backcolor" "0 0 0 1" ;
+			set "MenuScene::orbitPlay" "1" ;
+			resetTime "Anim_MenuMusic" "0" ;
+
+			if ( "gui::menuscene_motion" == 0 ) {
+				namedEvent "skipIntro" ;
+			}
+		}
+		// No later events here: the menu's clock is stale when playIntro
+		// arrives (StartMenu), so this window's first frame runs every event
+		// already due. AnimSceneTimeline starts from the backdrop's own clock.
+	}
+
+	onNamedEvent menuscene_start {
+		if ( "desktop::introPlaying" == 1 ) {
+			resetTime "AnimSceneTimeline" "0" ;
+		}
+	}
+
+	windowDef AnimSceneTimeline {
+		rect		0, 0, 0, 0
+		noTime		1
+
+		onTime 0 {
+			transition "SceneFade::backcolor" "0 0 0 1" "0 0 0 0" "150" ;
+		}
+		onTime 700 {
+			if ( "desktop::introPlaying" == 1 ) {
+				set "PortalModelFront::visible" "1" ;
+				transition "PortalModelFront::viewOffset" "-15 7 0 0" "-43 7 0 0" "400" ;
+			}
+		}
+		onTime 1000 {
+			if ( "desktop::introPlaying" == 1 ) {
+				set "Main_Logo::visible" "1" ;
+				transition "Main_Logo::matcolor" "1 1 1 0" "1 1 1 1" "200" ;
+				set "Main_Menu::visible" "1" ;
+			}
+		}
+		onTime 1200 {
+			if ( "desktop::introPlaying" == 1 ) {
+				set "desktop::introPlaying" "0" ;
+				set "gui::skipOnInput" "" ;
+			}
+		}
+	}
+
 	windowDef Anim_MenuMusic {
 		rect		0,0,0,0
 		visible		0
@@ -356,36 +473,85 @@ windowDef desktop {
 			// The stock layers draw over black. Under aspect expansion the star
 			// field widens with the screen (naturalmatscale holds its density) and
 			// Earth continues through its own edge slices.
+			//
+			// openPREY: the stars lie at infinity, so they turn with the 3D
+			// backdrop's camera (gui::menuscene_x and _y, 0 at rest). Copies of
+			// the field beside and above it cover what the turn uncovers; at rest
+			// only the first shows, exactly where the stock draws it.
 			windowDef Stars {
-				rect		( 0 - "gui::virtual_screen_x_expand" ), ( -80 - "gui::virtual_screen_y_expand" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 640 + ( "gui::virtual_screen_y_expand" * 2 ) )
+				rect		( ( 0 - "gui::virtual_screen_x_expand" ) + "gui::menuscene_x" ), ( ( -80 - "gui::virtual_screen_y_expand" ) + "gui::menuscene_y" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 640 + ( "gui::virtual_screen_y_expand" * 2 ) )
 				background	"guis/assets/menu/preymenu/stars"
 				naturalmatscale 1
 				matscalex 1
 				matscaley 1
 			}
-			windowDef SphereBack {
-				rect		165, 30, 384, 388
-				background	"guis/assets/menu/preymenu/sphereback"
-			}
-			windowDef SphereSun {
-				rect		325, 192, 64, 64
-				background	"guis/assets/menu/preymenu/sol"
-			}
-			windowDef SphereFront {
-				rect		165, 30, 384, 388
-				background	"guis/assets/menu/preymenu/spherefront"
-			}
-			windowDef Earth {
-				rect		0, 330, 640, 150
-				background	"guis/assets/menu/preymenu/earth"
-				backgroundLeft	"guis/assets/menu/preymenu/earth_left"
-				backgroundRight	"guis/assets/menu/preymenu/earth_right"
-				backgroundBottom "guis/assets/menu/preymenu/earth_bottom"
-				// The art's last texel column is brighter than its neighbours. On a
-				// 4:3 screen it sits on the screen edge; on a wider one it would draw
-				// a hairline where the right slice joins, so stop 1.5 texels short.
-				matscalex 0.9985
+			windowDef StarsTrailing {
+				rect		( ( 640 + "gui::virtual_screen_x_expand" ) + "gui::menuscene_x" ), ( ( -80 - "gui::virtual_screen_y_expand" ) + "gui::menuscene_y" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 640 + ( "gui::virtual_screen_y_expand" * 2 ) )
+				background	"guis/assets/menu/preymenu/stars"
+				naturalmatscale 1
+				matscalex 1
 				matscaley 1
+				visible		( "gui::menuscene_moving" == 1 )
+			}
+			windowDef StarsAbove {
+				rect		( ( 0 - "gui::virtual_screen_x_expand" ) + "gui::menuscene_x" ), ( ( -720 - ( "gui::virtual_screen_y_expand" * 3 ) ) + "gui::menuscene_y" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 640 + ( "gui::virtual_screen_y_expand" * 2 ) )
+				background	"guis/assets/menu/preymenu/stars"
+				naturalmatscale 1
+				matscalex 1
+				matscaley 1
+				visible		( "gui::menuscene_moving" == 1 )
+			}
+			windowDef StarsTrailingAbove {
+				rect		( ( 640 + "gui::virtual_screen_x_expand" ) + "gui::menuscene_x" ), ( ( -720 - ( "gui::virtual_screen_y_expand" * 3 ) ) + "gui::menuscene_y" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 640 + ( "gui::virtual_screen_y_expand" * 2 ) )
+				background	"guis/assets/menu/preymenu/stars"
+				naturalmatscale 1
+				matscalex 1
+				matscaley 1
+				visible		( "gui::menuscene_moving" == 1 )
+			}
+
+			// openPREY: the Sphere and Earth as lit 3D bodies (section 12.2 of
+			// docs/dev/prey-ui-visual-design.md), when the scene can draw.
+#include "guis/mainmenu/mainmenu_scene.guifragment"
+
+			// The stock painting, where the scene cannot draw (ui_menuScene 0,
+			// or its models are missing).
+			windowDef PaintedBackdrop {
+				rect		0, 0, 640, 480
+				noclip		1
+				visible		( "gui::menuscene_ok" == 0 )
+
+				windowDef SphereBack {
+					rect		165, 30, 384, 388
+					background	"guis/assets/menu/preymenu/sphereback"
+				}
+				windowDef SphereSun {
+					rect		325, 192, 64, 64
+					background	"guis/assets/menu/preymenu/sol"
+				}
+				windowDef SphereFront {
+					rect		165, 30, 384, 388
+					background	"guis/assets/menu/preymenu/spherefront"
+				}
+				windowDef Earth {
+					rect		0, 330, 640, 150
+					background	"guis/assets/menu/preymenu/earth"
+					backgroundLeft	"guis/assets/menu/preymenu/earth_left"
+					backgroundRight	"guis/assets/menu/preymenu/earth_right"
+					backgroundBottom "guis/assets/menu/preymenu/earth_bottom"
+					// The art's last texel column is brighter than its neighbours. On a
+					// 4:3 screen it sits on the screen edge; on a wider one it would draw
+					// a hairline where the right slice joins, so stop 1.5 texels short.
+					matscalex 0.9985
+					matscaley 1
+				}
+			}
+
+			// The entrance fades the backdrop up from black (AnimSceneIntro).
+			windowDef SceneFade {
+				rect		( 0 - "gui::virtual_screen_x_expand" ), ( 0 - "gui::virtual_screen_y_expand" ), ( 640 + ( "gui::virtual_screen_x_expand" * 2 ) ), ( 480 + ( "gui::virtual_screen_y_expand" * 2 ) )
+				backcolor	0, 0, 0, 0
+				noEvents	1
 			}
 		}
 		

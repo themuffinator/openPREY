@@ -57,6 +57,13 @@ private:
 
 	void CommonInit();
 	void FreeModelJoints();
+	// openPREY: the scene camera and bodies of the main menu's 3D backdrop
+	// (docs/dev/prey-ui-visual-design.md section 12.2), in RenderWindow.cpp.
+	idMat3 ModelAxis( int model, int time ) const;
+	float OrbitProgress( int time ) const;
+	bool ResolveOrbitView( int time, idVec3 &origin, idMat3 &axis ) const;
+	void PublishSceneState( int time, const idMat3 *viewAxis );
+	bool SceneAvailable();
 	virtual bool ParseInternalVar( const char *name, idParser *src );
 	void Render( int time );
 	void UpdateRenderVars();
@@ -97,6 +104,30 @@ private:
 	// "canvasfill": draw the scene across the whole canvas, aspect expansion
 	// included, keeping the projection the rect defines (RenderWindow.cpp).
 	bool canvasFill;
+
+	// openPREY scene keys (RenderWindow.cpp, "The scene camera"). fovY: a
+	// vertical field of view in degrees across the rect, 0 for the stock 90
+	// degree horizontal one. modelRotateN/modelSpinN: a model's own rotation
+	// and its turn about a local axis (xyz) once in w seconds, counted from
+	// when the camera comes to rest. orbit*: the camera's curve.
+	idWinFloat fovY;
+	idWinVec4 modelRotateN[MAX_RENDERWINDOW_MODELS];
+	idWinVec4 modelSpin[MAX_RENDERWINDOW_MODELS];
+	// modelFacingN: x lifts the model from orbitCenter toward the camera and
+	// y sizes it against the orbited body's apparent radius; the model then
+	// faces the camera (a billboard: the Sphere's sun flare).
+	idWinVec4 modelFacing[MAX_RENDERWINDOW_MODELS];
+	bool modelOwnRotate[MAX_RENDERWINDOW_MODELS];
+	idVec3 sceneOrigin;
+	idMat3 sceneAxis;
+	idWinVec4 orbitCenter, orbitFrom, orbitTo, orbitAimFrom, orbitAimTo, orbitShape;
+	idWinFloat orbitPlay, orbitSkip;
+	idWinStr sceneKey;
+	bool orbitEnabled;
+	bool orbitStarted;
+	bool orbitArmed;
+	int orbitStart;
+	int restTime;
 };
 
 #endif // __RENDERWINDOW_H
