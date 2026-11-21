@@ -3694,7 +3694,18 @@ static void Common_SetPreyPresetExtra( const char *name, int value, int defaultV
 	cvar->SetInteger( value );
 }
 
-static void Common_ApplyPreyPerformancePresetExtras( const char *presetName, bool firstLaunch = false ) {
+// The cvars and values the extras set for `presetName`. `tableOwned` marks the
+// two the shared table sets too (point-light and stencil shadow maps), which
+// the extras override and which only a launch option holds on a first launch.
+struct openPREYPresetExtraTarget_t {
+	const char *name;
+	int value;
+	int defaultValue;
+	bool tableOwned;
+};
+static const int OPENPREY_PRESET_EXTRA_TARGET_MAX = 8;
+
+static int Common_PreyPerformancePresetExtraTargets( const char *presetName, openPREYPresetExtraTarget_t targets[OPENPREY_PRESET_EXTRA_TARGET_MAX] ) {
 	const openPREYPresetExtras_t &full = OPENPREY_PRESET_EXTRAS_FULL;
 	const openPREYPresetExtras_t *extras = &full;
 	for ( int i = 0; i < (int)( sizeof( OPENPREY_PRESET_EXTRAS ) / sizeof( OPENPREY_PRESET_EXTRAS[0] ) ); ++i ) {
@@ -3703,36 +3714,45 @@ static void Common_ApplyPreyPerformancePresetExtras( const char *presetName, boo
 			break;
 		}
 	}
-	Common_SetPreyPresetExtra( "r_skipNewAmbient", 0, 0, firstLaunch );
-	Common_SetPreyPresetExtra( "r_shaderLevel", extras->shaderLevel, full.shaderLevel, firstLaunch );
-	Common_SetPreyPresetExtra( "r_skipGlowOverlay", extras->skipGlowOverlay, full.skipGlowOverlay, firstLaunch );
-	Common_SetPreyPresetExtra( "r_correctspecular", extras->correctSpecular, full.correctSpecular, firstLaunch );
-	Common_SetPreyPresetExtra( "r_normalizebumpmap", extras->normalizeBumpmap, full.normalizeBumpmap, firstLaunch );
-	Common_SetPreyPresetExtra( "r_useFastSkinning", extras->fastSkinning, full.fastSkinning, firstLaunch );
-
+	int count = 0;
+	targets[count++] = { "r_skipNewAmbient", 0, 0, false };
+	targets[count++] = { "r_shaderLevel", extras->shaderLevel, full.shaderLevel, false };
+	targets[count++] = { "r_skipGlowOverlay", extras->skipGlowOverlay, full.skipGlowOverlay, false };
+	targets[count++] = { "r_correctspecular", extras->correctSpecular, full.correctSpecular, false };
+	targets[count++] = { "r_normalizebumpmap", extras->normalizeBumpmap, full.normalizeBumpmap, false };
+	targets[count++] = { "r_useFastSkinning", extras->fastSkinning, full.fastSkinning, false };
 	// Shadow maps mean point lights here. The shared table's Enhanced recipe
 	// leaves them on stencil volumes, which suits Quake 4's forty-light halls;
 	// in Prey all 602 lights of feedingtowerb are point lights (four of them
-	// parallel), so that recipe turned shadow maps on and mapped nothing. This
-	// one is set by the table itself, so only a launch option counts as the
-	// player's own value on a first launch.
-	if ( !firstLaunch || !Common_HasStartupVariable( "r_shadowMapPointLights" ) ) {
-		idCVar *pointLights = cvarSystem->Find( "r_shadowMapPointLights" );
-		if ( pointLights != NULL ) {
-			pointLights->SetBool( true );
-		}
-	}
-
+	// parallel), so that recipe turned shadow maps on and mapped nothing.
+	targets[count++] = { "r_shadowMapPointLights", 1, 1, true };
 	// Shadow maps are openPREY's shadow technique on every recipe that draws
 	// shadows, not only from Enhanced up as in the shared table: Prey's stencil
 	// volumes are the retail fallback, used per light when a map cannot be
 	// built. Each recipe keeps the table's map size, filter and update budget.
-	// As above, only a launch option counts as the player's own value on a
-	// first launch, because the table has just set this cvar itself.
-	if ( extras->shadowMaps && ( !firstLaunch || !Common_HasStartupVariable( "r_useShadowMap" ) ) ) {
-		idCVar *shadowMaps = cvarSystem->Find( "r_useShadowMap" );
-		if ( shadowMaps != NULL ) {
-			shadowMaps->SetBool( true );
+	if ( extras->shadowMaps ) {
+		targets[count++] = { "r_useShadowMap", 1, 1, true };
+	}
+	return count;
+}
+
+static void Common_ApplyPreyPerformancePresetExtras( const char *presetName, bool firstLaunch = false ) {
+	openPREYPresetExtraTarget_t targets[OPENPREY_PRESET_EXTRA_TARGET_MAX];
+	const int count = Common_PreyPerformancePresetExtraTargets( presetName, targets );
+	for ( int i = 0; i < count; ++i ) {
+		const openPREYPresetExtraTarget_t &target = targets[i];
+		if ( !target.tableOwned ) {
+			Common_SetPreyPresetExtra( target.name, target.value, target.defaultValue, firstLaunch );
+			continue;
+		}
+		// The table has just set this cvar itself, so only a launch option
+		// counts as the player's own value on a first launch.
+		if ( firstLaunch && Common_HasStartupVariable( target.name ) ) {
+			continue;
+		}
+		idCVar *cvar = cvarSystem->Find( target.name );
+		if ( cvar != NULL ) {
+			cvar->SetInteger( target.value );
 		}
 	}
 }
@@ -4001,21 +4021,44 @@ static int Common_PerformancePresetTier( const char *name ) {
 }
 
 // The settings applying `preset` would change: each target whose live value differs.
+// OPENPREY: as the menu and console apply it, so Prey's own quality cvars count
+// too, and the two shadow-map cvars they override are compared with their values.
 static int Common_PerformancePresetDifferences( const openQ4PerformancePreset_t &preset ) {
 	openq4::PerformancePresetAssignments expansion;
 	std::string error;
 	if ( !openq4::ExpandPerformancePreset( preset, expansion, error ) ) {
 		return OPENQ4_PERFORMANCE_PRESET_TOUCHED_CVAR_COUNT;
 	}
+	openPREYPresetExtraTarget_t extras[OPENPREY_PRESET_EXTRA_TARGET_MAX];
+	const int extraCount = Common_PreyPerformancePresetExtraTargets( preset.name, extras );
+	bool extraCounted[OPENPREY_PRESET_EXTRA_TARGET_MAX] = {};
 	int differences = 0;
 	for ( const auto &assignment : expansion ) {
 		const idCVar *cvar = cvarSystem->Find( assignment.key );
+		int extra = -1;
+		for ( int i = 0; i < extraCount; ++i ) {
+			if ( idStr::Icmp( extras[i].name, assignment.key ) == 0 ) {
+				extra = i;
+				break;
+			}
+		}
+		if ( extra >= 0 ) {
+			extraCounted[extra] = true;
+		}
 		if ( cvar == NULL ) {
 			++differences;
+		} else if ( extra >= 0 ) {
+			differences += cvar->GetInteger() != extras[extra].value;
 		} else if ( const auto number = std::get_if<int>( &assignment.value ) ) {
 			differences += cvar->GetInteger() != *number;
 		} else {
 			differences += idStr::Icmp( cvar->GetString(), std::get<std::string>( assignment.value ).c_str() ) != 0;
+		}
+	}
+	for ( int i = 0; i < extraCount; ++i ) {
+		const idCVar *cvar = cvarSystem->Find( extras[i].name );
+		if ( !extraCounted[i] && cvar != NULL ) {
+			differences += cvar->GetInteger() != extras[i].value;
 		}
 	}
 	return differences;
@@ -4108,6 +4151,7 @@ bool Common_ApplyPerformancePresetCheck( bool &changed, std::string &error ) {
 		common->Printf( "Performance preset check: %s\n", error.c_str() );
 		return false;
 	}
+	Common_ApplyPreyPerformancePresetExtras( resolved.name );	// OPENPREY: as the menu applies it
 	changed = check.differences > 0;
 	// The detection observed this device; record what it reported, as the
 	// first launch does.

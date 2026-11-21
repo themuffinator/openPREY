@@ -11,6 +11,9 @@ class idCmdArgs;
 // At startup, in place of the main menu: presents the check and returns true
 // when it is due (or `force`d), else false and the caller opens the menu.
 bool Session_StartPresetCheck( bool force = false );
+// OPENPREY: the stock screen to draw beneath `active` when it is the retained
+// check (its backdrop, with the stock dialog left undrawn), else NULL.
+idUserInterface *Session_PresetCheckBackdrop( const idUserInterface *active );
 // Whether `gui` is the retained check, whose verbs come here.
 bool Session_PresetCheckOwns( const idUserInterface *gui );
 // The retained check's verbs: presetCheckApply, presetCheckKeep, presetCheckLater.
