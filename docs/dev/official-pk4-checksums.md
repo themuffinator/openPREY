@@ -10,7 +10,7 @@ openPREY now tracks two known official Prey base pack layouts:
 2. Consolidated naming seen in legacy digital distributions (`pak_data`, `pak_sound`, `pak_en_v`, `pak_en_t`).
 
 Both required sets are checked against the checksums below. The optional packs
-remain presence-only (see "Optional packs" below).
+remain presence-only (see "Additional Official PK4s" below).
 
 ## Capture Method
 
