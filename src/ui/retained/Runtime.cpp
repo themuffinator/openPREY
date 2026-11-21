@@ -2313,11 +2313,17 @@ struct Runtime::Impl {
 	void CollectInputEligibility(const InteractionBranch& branch, bool inherited = true) {
 		if (!branch.node) return;
 		const auto& node=*branch.node;
-		const auto display = PresentedProperty({node.id,"display"});
-		const auto events = PresentedProperty({node.id,"pointer-events"});
-		auto* element = branch.element;
-		const bool maskArea = !node.mask || (element && static_cast<VectorElement*>(element)->HasMaskArea());
-		const bool allowed = inherited && maskArea && (!display || display->text != "none") && (!events || events->text != "none");
+		// Under a branch that already refuses input nothing is allowed, so
+		// skip the property lookups: a large document's hidden pages (the
+		// MultiPrey page's other tabs) cost most of a debug frame otherwise.
+		bool allowed = false;
+		if (inherited) {
+			const auto display = PresentedProperty({node.id,"display"});
+			const auto events = PresentedProperty({node.id,"pointer-events"});
+			auto* element = branch.element;
+			const bool maskArea = !node.mask || (element && static_cast<VectorElement*>(element)->HasMaskArea());
+			allowed = maskArea && (!display || display->text != "none") && (!events || events->text != "none");
+		}
 		if (node.control) inputAllowed[node.id] = allowed;
 		for (const auto& child : branch.children) CollectInputEligibility(child,allowed);
 	}
