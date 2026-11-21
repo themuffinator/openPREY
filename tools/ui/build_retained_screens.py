@@ -1953,8 +1953,12 @@ def row_setting(doc: Document, row: dict) -> dict:
         if "cvar" in via:
             declared["cvar"] = via["cvar"]
         doc.state[state] = declared
-        doc.actions[via["verb"]] = {"input": kind, "operation": "session.menuValue",
-                                    "arguments": {"command": via["verb"], "value": {"input": "value"}}}
+        if via.get("local"):     # a value the page keeps until a verb sends it
+            doc.actions[via["verb"]] = {"input": kind, "operation": "ui.state.set",
+                                        "arguments": {"key": state, "value": {"input": "value"}}}
+        else:
+            doc.actions[via["verb"]] = {"input": kind, "operation": "session.menuValue",
+                                        "arguments": {"command": via["verb"], "value": {"input": "value"}}}
         return {"state": state, "action": via["verb"], "kind": kind, **via}
     name, kind = OPTION_SETTINGS[cvar]
     state, action = f"cv.{name}", f"set.{name}"
@@ -2063,6 +2067,10 @@ def number_field(doc: Document, ident: str, label_key: str, cvar: str | None, bo
         doc.state[state] = {"type": "number", "initial": 0, "cvar": name}
         doc.actions[action] = {"input": "number", "operation": "settings.player.set",
                                "arguments": {"cvar": name, "value": {"input": "value"}}}
+    elif verb[1] is None:     # a number the page keeps until a verb sends it
+        state, action = verb[0], f"set.{verb[0]}"
+        doc.state.setdefault(state, {"type": "number", "initial": 0})
+        doc.actions[action] = {"input": "number", "operation": "ui.state.set", "arguments": {"key": state, "value": {"input": "value"}}}
     else:
         state, action = verb
         doc.state.setdefault(state, {"type": "number", "initial": 0})
@@ -2734,7 +2742,7 @@ def mp_number_row(doc: Document, ident: str, box, label_key: str, field_rect, st
 
 
 def mp_side_tabs(doc: Document, prefix: str, column, sides: list[tuple], state: str, margin: float,
-                 ty: float | None = None) -> tuple[list[dict], list[dict]]:
+                 ty: float | None = None, scale: float = 0.33) -> tuple[list[dict], list[dict]]:
     """A column of side tabs joined to the page beside it (section 6), as the
     Options page draws its own: the tabs share the column's height below
     `margin`. Returns the furniture (dividers) and the tabs."""
@@ -2750,8 +2758,8 @@ def mp_side_tabs(doc: Document, prefix: str, column, sides: list[tuple], state: 
         ident = f"{prefix}_side{index}"
         box = (cx, cy + margin + index * sh, cw + 1, sh)
         picked = {"op": "==", "args": [{"state": state}, index]}
-        faces = (tab_face(f"{ident}-idle", box, side_off, solid(rgb("#3E4C61", 0.45)), TAB_TEXT, key, 0.33, ty=ty),
-                 tab_face(f"{ident}-active", box, side_on, paint, TEXT_HOVER, key, 0.33, rim_d=side_rim, rim_tint=rgb("#A7BFD7"),
+        faces = (tab_face(f"{ident}-idle", box, side_off, solid(rgb("#3E4C61", 0.45)), TAB_TEXT, key, scale, ty=ty),
+                 tab_face(f"{ident}-active", box, side_on, paint, TEXT_HOVER, key, scale, rim_d=side_rim, rim_tint=rgb("#A7BFD7"),
                           ty=ty))
         doc.events[f"{ident}Pick"] = [{"op": "action", "action": doc.session("soundTabFlip")},
                                      {"op": "setState", "values": {state: index}}, *events]
@@ -2760,7 +2768,8 @@ def mp_side_tabs(doc: Document, prefix: str, column, sides: list[tuple], state: 
     return furniture, tabs
 
 
-def mp_top_tabs(doc: Document, prefix: str, book, tabs_box, keys: list[str], state: str, events: list[list]) -> tuple[list, list]:
+def mp_top_tabs(doc: Document, prefix: str, book, tabs_box, keys: list[str], state: str, events: list[list],
+                scale: float = MP_TAB_SCALE) -> tuple[list, list]:
     """Tabs along the top of a page (section 6), the page's outline running
     whole under every inactive one, as the Options page's."""
     bx, by, bw, bh = book
@@ -2780,8 +2789,8 @@ def mp_top_tabs(doc: Document, prefix: str, book, tabs_box, keys: list[str], sta
     for index, key in enumerate(keys):
         ident, box = f"{prefix}_tab{index}", (tx + index * tw, ty, tw, th + 1)
         chosen = {"op": "==", "args": [{"state": state}, index]}
-        faces = (tab_face(f"{ident}-idle", box, top_off, solid(rgb("#252831")), TAB_TEXT, key, MP_TAB_SCALE),
-                 tab_face(f"{ident}-active", box, top_on, paint, TEXT_HOVER, key, MP_TAB_SCALE, rim_d=top_rim, rim_tint=RAIL))
+        faces = (tab_face(f"{ident}-idle", box, top_off, solid(rgb("#252831")), TAB_TEXT, key, scale),
+                 tab_face(f"{ident}-active", box, top_on, paint, TEXT_HOVER, key, scale, rim_d=top_rim, rim_tint=RAIL))
         furniture.append(shown_when(doc, line(f"{prefix}-top{index}", (tx + index * tw, by, tw, 1)), {"op": "!", "args": [chosen]}))
         doc.events[f"{ident}Pick"] = [{"op": "action", "action": doc.session("soundTabFlip")},
                                      {"op": "setState", "values": {state: index}}, *events[index]]
@@ -3237,6 +3246,286 @@ def multiprey_document() -> dict:
     return page_document(doc, page, [])
 
 
+# ------------------------------------------------- the in-game multiplayer menu
+# Prey's in-game multiplayer menu (guis/mpmain.gui) as its card: the status
+# bar, the Chat, Player, Vote and Call Vote tabs and the three buttons under
+# them, at the stock rectangles (BoxParent at 70,110). The game keeps its
+# stock menu; the session copies its state onto the card and answers the
+# card's verbs with the stock menu's commands (Session_MirrorPreyGameMenu,
+# HandleRetainedMultiplayerRequest). Like the stock menu it draws over the
+# running match with no scrim.
+
+CARD_BOX = (70, 110, 500, 315)
+CARD_BOOK = (0, 50, 500, 230)              # MainTabs less its 20 u of tabs, in the box
+CARD_CHAT_LINES = 12                       # the newest lines the session publishes (mp.chat0..)
+CARD_MAPS = 64                             # PREY_MP_MAPS in the session
+CARD_MODELS = 30                           # PREY_MP_MODELS
+CARD_KICK = 32                             # PREY_MP_KICK
+TEAM_RED, TEAM_BLUE = rgb("#B23A4A"), rgb("#3640C8")   # the stock radios' team colours
+# Call Vote's side tabs: their label, the game's vote index (vote_flags_t)
+# and what each page asks for.
+CARD_VOTES = (("#str_20581", 0), ("#str_20154", 1), ("#str_20153", 2), ("#str_20149", 3), ("#str_20586", 4),
+              ("#str_20588", 5), ("#str_20591", 7), ("#str_20593", 6))
+for _name, _kind in (("gametype", "number"), ("kick", "number")):
+    OPTION_VERBS[f"mp.vote.{_name}"] = {"verb": f"set.mp.vote.{_name}", "state": f"mp.vote.{_name}", "kind": _kind, "local": True}
+
+
+def card_document() -> dict:
+    doc = Document("openprey.mpmenu")
+    for name in ("mp.protocol", "mp.revision"):
+        doc.state[name] = {"type": "number", "initial": 0}
+    doc.state["mp.cover_allowed"] = {"type": "boolean", "initial": False}
+    for name in ("readyon", "teamon", "team", "activevote", "registeredvote", "callvote", "si_spectators", "mp.chat.count",
+                 "mp.map.count", "mp.kick.count", "mp.chat.mode", "card.tab", "card.vote", "card.models"):
+        doc.state[name] = {"type": "number", "initial": 0}
+    for name in ("mp.map.selected", "mp.map.pick", "mp.pick"):
+        doc.state[name] = {"type": "number", "initial": -1}
+    for name in ("ui_ready", "votetime", "vote", "spectext", "current_levelshot", "mp_currentmodelportrait", "mp_currentmodelname",
+                 "mp.name", "mp.chat.text"):
+        doc.state[name] = {"type": "string", "initial": ""}
+    for index in range(8):
+        doc.state[f"vote{index}"] = {"type": "number", "initial": 0}
+    doc.state["mp.vote.index"] = {"type": "number", "initial": -1}
+    doc.state["mp.vote.timelimit"] = {"type": "number", "initial": 10}
+    doc.state["mp.vote.fraglimit"] = {"type": "number", "initial": 10}
+    for verb in ("mpClose", "mpMainMenu", "mpDisconnect", "mpPreySpectate", "mpPreyReady", "mpPreyTeam", "mpVoteYes", "mpVoteNo",
+                 "mpPreyModel", "mpPreyMap", "mpCallVote", "mpPreyName", "mpPreyChat"):
+        doc.session(verb)
+    click, tick, flip = doc.session("soundClick"), doc.session("soundTick"), doc.session("soundTabFlip")
+    bx, by = CARD_BOX[0], CARD_BOX[1]
+    at = lambda box: (bx + box[0], by + box[1], box[2], box[3])
+    ox, oy = bx + CARD_BOOK[0], by + CARD_BOOK[1]
+    book = lambda box: (ox + box[0], oy + box[1], box[2], box[3])
+    nodes = []
+
+    def press(ident: str, verb: str, *, sound: str = click, before: list | None = None) -> str:
+        doc.events[f"{ident}Pick"] = [*(before or []), {"op": "action", "action": sound}, {"op": "action", "action": verb}]
+        return f"{ident}Pick"
+
+    # The status bar: Ready or Not Ready while the match warms up, else Game in Progress.
+    nodes += [box_fill("card-status", at((0, 0, 350, 25)), [0, 0, 0, 0.5]), picture_frame("card-status-frame", at((0, 0, 350, 25))),
+              *label("card-status-title", "#str_20567", at((0, 0, 140, 20)), BODY, 0.33, TEXT_LABEL, align="right", shadow=True)]
+    ready_on = {"op": "!=", "args": [{"state": "readyon"}, 0]}
+    nodes.append(shown_when(doc, group("card-status-off", {**absolute(*at((145, 0, 190, 20))), **PASSIVE}, label(
+        "card-status-off-text", "#str_20568", (0, 0, 190, 20), BODY, 0.33, [1, 1, 1, 0.4], align="left")), {"op": "!", "args": [ready_on]}))
+    rim = box_fill("card_ready-rim", (0, 0, 190, 20), [0, 0, 0, 0], border=RAIL, opacity=number(0))
+    value = bound(doc, label("card_ready-value", PLACEHOLDER, (0, 0, 190, 20), BODY, 0.33, rgb("#B3CCE6", 0.8), align="left"), "ui_ready")
+    ids = doc.states("card_ready", {state: [("card_ready-value", "color", colour(tint)), ("card_ready-rim", "opacity", number(on))]
+                                    for state, tint, on in (("default", rgb("#B3CCE6", 0.8), 0), ("hover", rgb("#CCDEFA"), 0),
+                                                            ("focus", rgb("#CCDEFA"), 1), ("pressed", TEXT_HOVER, 1),
+                                                            ("disabled", rgb("#B3CCE6", 0.3), 0))}, enter=1, leave=1)
+    nodes.append(shown_when(doc, group("card_ready", absolute(*at((145, 0, 190, 20))), [rim, *value],
+                                       control=control("#str_20567", ids, event=press("card_ready", "mpPreyReady"))), ready_on))
+
+    # The tab pages.
+    pages = []
+    # Chat: the newest lines, the say mode and the line being typed.
+    chat = [box_fill("chat-wash", book((10, 20, 480, 170)), [0, 0, 0, 0.5]), picture_frame("chat-frame", book((10, 20, 480, 170)))]
+    for index in range(CARD_CHAT_LINES):
+        doc.state[f"mp.chat{index}"] = {"type": "string", "initial": ""}
+        chat += bound(doc, label(f"chat-line{index}", PLACEHOLDER, book((14, 24 + 13.5 * index, 472, 13.5)), BODY, 0.25, TEXT_LABEL,
+                                 align="left", centre=True, overflow=keyword("hidden"), **ELLIPSIS), f"mp.chat{index}")
+    mode_rim = box_fill("chat_mode-rim", (0, 0, 80, 20), [0, 0, 0, 0], border=RAIL, opacity=number(0))
+    team = {"op": "!=", "args": [{"state": "mp.chat.mode"}, 0]}
+    say = [shown_when(doc, group("chat-say-global", {**FULL, **PASSIVE}, label("chat-say-global-text", "#str_20600", (0, 0, 80, 20), BODY,
+                                                                              0.25, MP_TEXT_VALUE, align="right")), {"op": "!", "args": [team]}),
+           shown_when(doc, group("chat-say-team", {**FULL, **PASSIVE}, label("chat-say-team-text", "#str_20601", (0, 0, 80, 20), BODY,
+                                                                            0.25, MP_TEXT_VALUE, align="right")), team)]
+    ids = doc.states("chat_mode", {state: [("chat_mode-rim", "opacity", number(on))] for state, on in
+                                   (("default", 0), ("hover", 0.5), ("focus", 1), ("pressed", 1), ("disabled", 0))}, enter=1, leave=1)
+    doc.events["chatModePick"] = [{"op": "action", "action": tick}, {"op": "setState", "values": {"mp.chat.mode": {
+        "op": "select", "args": [team, 0, 1]}}}]
+    chat.append(group("chat_mode", absolute(*book((10, 195, 80, 20))), [mode_rim, *say], control=control("#str_20249", ids, event="chatModePick")))
+    chat += label("chat-toggle", "#str_20570", book((10, 208, 80, 20)), BODY, 0.2, TEXT_LABEL, align="right")
+    doc.actions["enter.mp.chat.text"] = {"input": "string", "operation": "ui.state.set",
+                                         "arguments": {"key": "mp.chat.text", "value": {"input": "value"}, "event": "chatEntered"}}
+    doc.events["chatEntered"] = [{"op": "action", "action": "mpPreyChat"}]
+    chat += [box_fill("chat-field-box", book((100, 200, 390, 20)), [0, 0, 0, 0.5], border=PICTURE_FRAME),
+             name_field(doc, book((100, 200, 390, 20)), ident="chat-field", state="mp.chat.text", action="enter.mp.chat.text",
+                        key="#str_20249", max_bytes=80, wash=False, tint=TEXT_LABEL, scale=0.25)]
+    pages.append((chat, "chat-field"))
+
+    # Player: the model, its portraits on two pages, weapon switch, team and name.
+    player = [box_fill("player-bg", book((10, 10, 190, 166)), [0, 0, 0, 0.5]),
+              *label("player-caption", "#str_20137", book((30, 10, 120, 16)), BODY, 0.33, TEXT_LABEL, align="left", shadow=True, ty=-4),
+              picture("player-model", "guis/assets/menu/questionmark", {**absolute(*book((30, 30, 120, 120))), **PASSIVE}),
+              picture_frame("player-model-frame", book((29, 29, 122, 122))),
+              *bound(doc, label("player-model-name", PLACEHOLDER, book((20, 152, 140, 16)), BODY, 0.33, MP_TEXT_VALUE, shadow=True),
+                     "mp_currentmodelname")]
+    doc.bind("player-model", "image", {"state": "mp_currentmodelportrait"})
+    furniture, tabs = mp_side_tabs(doc, "models", book((170, 10, 30, 166)), [("#str_21001", []), ("#str_21002", [])], "card.models", 0,
+                                   scale=0.33)
+    player += [box_fill("models-wash", book((200, 10, 272, 166)), PAGE_WASH), *furniture]
+    for page in range(2):
+        cells = []
+        for slot in range(15):
+            index = page * 15 + slot
+            if index >= CARD_MODELS:
+                break
+            ident = f"model{index}"
+            doc.state[f"mp_modelportrait{index}"] = {"type": "string", "initial": ""}
+            doc.state[f"mp_modelname{index}"] = {"type": "string", "initial": ""}
+            image_node = picture(f"{ident}-image", "guis/assets/menu/questionmark", {**absolute(0, 0, 50, 50), **PASSIVE})
+            doc.bind(f"{ident}-image", "image", {"state": f"mp_modelportrait{index}"})
+            veil = box_fill(f"{ident}-veil", (0, 0, 50, 50), [0, 0, 0, MP_DIM], opacity=number(1))
+            rim = box_fill(f"{ident}-rim", (0, 0, 50, 50), [0, 0, 0, 0], border=RAIL, opacity=number(0))
+            ids = doc.states(ident, {state: [(f"{ident}-veil", "opacity", number(v)), (f"{ident}-rim", "opacity", number(r))]
+                                     for state, v, r in (("default", 1, 0), ("hover", 0, 0), ("focus", 0, 1), ("pressed", 0, 1),
+                                                         ("disabled", 1, 0))}, enter=1, leave=1)
+            event = press(ident, "mpPreyModel", before=[{"op": "setState", "values": {"mp.pick": index}}])
+            cell = group(ident, absolute(*book((205 + 53 * (slot % 5), 15 + 53 * (slot // 5), 50, 50))), [image_node, veil, rim],
+                         control=control(PLACEHOLDER, ids, event=event))
+            cells.append(shown_when(doc, cell, {"op": "!=", "args": [{"state": f"mp_modelportrait{index}"}, ""]}))
+        player.append(shown_when(doc, group(f"models-page{page}", {**FULL}, cells), {"op": "==", "args": [{"state": "card.models"}, page]}))
+    player += tabs
+    switch = mp_row((0, 0, 160, 40), "#str_20273", (0, 5, 160, 20), (0, 20, 160, 20), "ui_autoSwitch", choices="#str_20152",
+                    label_align="center", value_align="center", plain=True, scale=0.28)
+    player += [box_fill("player-switch-box", book((10, 180, 160, 40)), [0, 0, 0, 0.5], border=PICTURE_FRAME),
+               setting_row(doc, "opt_ui_autoswitch", switch, book((10, 180, 0, 0))[:2])]
+    team_on = {"op": "!=", "args": [{"state": "teamon"}, 0]}
+    player += label("player-team-title", "#str_20572", book((150, 180, 150, 20)), BODY, 0.28, TEXT_LABEL, align="right", shadow=True)
+    for index, (key, tint) in enumerate((("#str_20573", TEAM_RED), ("#str_20574", TEAM_BLUE))):
+        ident = f"team{index}"
+        mine = {"op": "&&", "args": [team_on, {"op": "==", "args": [{"state": "team"}, index]}]}
+        fill = box_fill(f"{ident}-fill", (0, 0, 70, 16), [*tint[:3], 1.0], border=PICTURE_FRAME, opacity=number(0.35))
+        doc.bind(f"{ident}-fill", "opacity", {"op": "select", "args": [mine, 1.0, 0.35]})
+        rim = box_fill(f"{ident}-rim", (0, 0, 70, 16), [0, 0, 0, 0], border=RAIL, opacity=number(0))
+        ids = doc.states(ident, {state: [(f"{ident}-rim", "opacity", number(on))] for state, on in
+                                 (("default", 0), ("hover", 0.5), ("focus", 1), ("pressed", 1), ("disabled", 0))}, enter=1, leave=1)
+        node = group(ident, absolute(*book((310 + 70 * index, 180, 70, 16))), [fill, rim, *label(f"{ident}-label", key, (0, 0, 70, 16),
+                                                                                             BODY, 0.28, TEXT_LABEL, shadow=True)],
+                     control=control(key, ids, event=press(ident, "mpPreyTeam", sound=tick)))
+        doc.bind(ident, "enabled", {"op": "&&", "args": [team_on, {"op": "!", "args": [mine]}]})
+        player.append(node)
+    player += label("player-name-title", "#str_20138", book((150, 200, 150, 20)), BODY, 0.28, TEXT_LABEL, align="right", shadow=True)
+    doc.actions["enter.mp.name"] = {"input": "string", "operation": "ui.state.set",
+                                    "arguments": {"key": "mp.name", "value": {"input": "value"}, "event": "nameEntered"}}
+    doc.events["nameEntered"] = [{"op": "action", "action": "mpPreyName"}]
+    player += [box_fill("player-name-box", book((310, 202, 140, 16)), [0, 0, 0, 0.5], border=PICTURE_FRAME),
+               name_field(doc, book((310, 202, 140, 16)), ident="player-name", state="mp.name", action="enter.mp.name",
+                          key="#str_20138", max_bytes=40, wash=False, tint=MP_TEXT_VALUE, scale=0.28)]
+    pages.append((player, "model0"))
+
+    # Vote: the vote in progress and the ballot.
+    active = {"op": "!=", "args": [{"state": "activevote"}, 0]}
+    registered = {"op": "!=", "args": [{"state": "registeredvote"}, 0]}
+    ballot = [*label("vote-title", "#str_20579", book((50, 70, 120, 20)), BODY, 0.33, TEXT_LABEL, align="right", shadow=True),
+              button(doc, "vote_yes", "#str_20125", book((180, 70, 40, 20)), event=press("vote_yes", "mpVoteYes"), scale=0.33),
+              button(doc, "vote_no", "#str_20126", book((230, 70, 40, 20)), event=press("vote_no", "mpVoteNo"), scale=0.33)]
+    vote = [shown_when(doc, group("vote-none", {**FULL, **PASSIVE}, label("vote-none-text", "#str_20576", book((0, 0, 500, 230)), BODY,
+                                                                          0.33, TEXT_LABEL, shadow=True)), {"op": "!", "args": [active]}),
+            shown_when(doc, group("vote-active", {**FULL}, [
+                *bound(doc, label("vote-description", PLACEHOLDER, book((50, 30, 300, 20)), BODY, 0.33, TEXT_LABEL, shadow=True), "vote"),
+                shown_when(doc, group("vote-registered", {**FULL, **PASSIVE}, label("vote-registered-text", "#str_20578",
+                                                                                   book((50, 70, 300, 20)), BODY, 0.33, TEXT_LABEL,
+                                                                                   shadow=True)), registered),
+                shown_when(doc, group("vote-ballot", {**FULL}, ballot), {"op": "!", "args": [registered]}),
+                *label("vote-expires", "#str_20577", book((150, 210, 195, 20)), BODY, 0.33, TEXT_LABEL, align="right", shadow=True),
+                *bound(doc, label("vote-time", PLACEHOLDER, book((350, 210, 45, 20)), BODY, 0.33, MP_TEXT_VALUE, align="left", shadow=True),
+                       "votetime")]), active)]
+    pages.append((vote, "vote_yes"))
+
+    # Call Vote: eight side tabs; each page's Call Vote is lit while the
+    # server allows that vote and none is in progress.
+    furniture, tabs = mp_side_tabs(doc, "votes", book((0, 0, 91, 230)), [(key, []) for key, _ in CARD_VOTES], "card.vote", 0,
+                                   scale=0.25)
+    call = [*furniture]
+    px, py = ox + 90, oy
+    page_at = lambda box: (px + box[0], py + box[1], box[2], box[3])
+    for number_of, (key, index) in enumerate(CARD_VOTES):
+        allowed = {"op": "&&", "args": [{"op": "!=", "args": [{"state": f"vote{index}"}, 0]}, {"op": "!", "args": [active]}]}
+        content = []
+        if index in (0, 7):
+            content += label(f"call{index}-message", "#str_20582" if index == 0 else "#str_20592", page_at((20, 70, 280, 20)), BODY, 0.33,
+                             TEXT_LABEL, shadow=True)
+        elif index in (1, 2):
+            state = "mp.vote.timelimit" if index == 1 else "mp.vote.fraglimit"
+            content += label(f"call{index}-title", "#str_20583" if index == 1 else "#str_20584", page_at((20, 70, 110, 20)), BODY, 0.33,
+                             TEXT_LABEL, align="right", shadow=True)
+            content.append(number_field(doc, f"call{index}-field", key, None, page_at((140, 70, 50, 20)), 0 if index == 1 else 1,
+                                        60 if index == 1 else 999, verb=(state, None)))
+        elif index in (3, 4):
+            if index == 3:
+                row = mp_row((0, 0, 280, 20), "#str_20585", (0, 0, 110, 20), (120, 0, 150, 20), "mp.vote.gametype", choices="#str_20150",
+                             label_align="right", value_align="left", plain=True)
+            else:
+                row = mp_row((0, 0, 280, 20), "#str_20587", (0, 0, 110, 20), (120, 0, 150, 20), "mp.vote.kick", label_align="right",
+                             value_align="left", plain=True)
+                OPTION_VERBS["mp.vote.kick"]["entries"] = [({"state": f"mp.kick{slot}"}, slot) for slot in range(CARD_KICK)]
+                OPTION_VERBS["mp.vote.kick"]["count"] = {"state": "mp.kick.count"}
+                for slot in range(CARD_KICK):
+                    doc.state[f"mp.kick{slot}"] = {"type": "string", "initial": ""}
+            content.append(setting_row(doc, f"call{index}-choice", row, page_at((20, 70, 0, 0))[:2]))
+        elif index == 5:
+            content += label("call5-title", "#str_20590", page_at((20, 20, 140, 20)), BODY, 0.33, TEXT_LABEL, align="left", shadow=True)
+            rows = []
+            for slot in range(CARD_MAPS):
+                doc.state[f"mp.map{slot}"] = {"type": "string", "initial": ""}
+                pick = press(f"map{slot}", "mpPreyMap", sound=tick, before=[{"op": "setState", "values": {"mp.map.pick": slot}}])
+                rows.append(mp_list_row(doc, f"map-{slot}", 120, 14, [("name", f"mp.map{slot}", 3, 115, "left")],
+                                        {"op": "==", "args": [{"state": "mp.map.selected"}, slot]}, pick,
+                                        {"op": "<", "args": [slot, {"state": "mp.map.count"}]}))
+            column_node = group("call5-column", {"position": keyword("relative"), "display": keyword("flex"),
+                                                 "flex-direction": keyword("column")}, rows)
+            content += [box_fill("call5-wash", page_at((20, 42, 140, 155)), [0, 0, 0, 0.5]), picture_frame("call5-frame", page_at((20, 42, 140, 155))),
+                        group("call5-list", {**absolute(*page_at((22, 45, 120, 149))), "overflow": keyword("auto")}, [column_node]),
+                        scrollbar(doc, "call5_scroll", "call5-list", page_at((143, 43, 16, 153)), "#str_20590", 14),
+                        *label("call5-none", "#str_20589", page_at((180, 22, 200, 160)), BODY, 0.33, TEXT_LABEL, shadow=True)]
+            shot = picture("call5-shot", RETAINED_GENERIC_SHOT, {**absolute(*page_at((180, 22, 200, 160))), **PASSIVE}, fit="cover")
+            doc.bind("call5-shot", "image", {"state": "current_levelshot"})
+            content += [shown_when(doc, shot, {"op": "!=", "args": [{"state": "current_levelshot"}, ""]}),
+                        picture_frame("call5-shot-frame", page_at((180, 22, 200, 160)))]
+        else:
+            content += label("call6-title", "#str_20596", page_at((20, 70, 110, 20)), BODY, 0.33, TEXT_LABEL, align="right", shadow=True)
+            allow = {"op": "==", "args": [{"state": "si_spectators"}, 0]}
+            content += [box_fill("call6-box", page_at((140, 70, 150, 20)), [0, 0, 0, 0.5], border=PICTURE_FRAME),
+                        shown_when(doc, group("call6-allow", {**FULL, **PASSIVE}, label("call6-allow-text", "#str_20594", page_at((144, 70, 146, 20)),
+                                                                                        BODY, 0.33, MP_TEXT_VALUE, align="left")), allow),
+                        shown_when(doc, group("call6-deny", {**FULL, **PASSIVE}, label("call6-deny-text", "#str_20595", page_at((144, 70, 146, 20)),
+                                                                                       BODY, 0.33, MP_TEXT_VALUE, align="left")),
+                                   {"op": "!", "args": [allow]})]
+        event = press(f"call{index}", "mpCallVote", before=[{"op": "setState", "values": {"mp.vote.index": index}}])
+        content.append(button(doc, f"call{index}_go", "#str_20580", page_at((260, 190, 140, 24)), event=event, scale=0.33, enabled=allowed))
+        call.append(shown_when(doc, group(f"call-page{number_of}", {**FULL}, content), {"op": "==", "args": [{"state": "card.vote"}, number_of]}))
+    # No vote may be called: the stock page's notice over the pages.
+    blocked = {"op": "||", "args": [active, {"op": "==", "args": [{"state": "callvote"}, 0]}]}
+    call.append(shown_when(doc, group("call-blocked", {**absolute(*book((81, 1, 318, 228))), "background-color": colour(PAGE_WASH)}, [
+        shown_when(doc, group("call-blocked-vote", {**FULL, **PASSIVE}, label("call-blocked-vote-text", "#str_20597", (0, 40, 318, 30), BODY,
+                                                                              0.33, TEXT_LABEL, shadow=True)), active),
+        shown_when(doc, group("call-blocked-none", {**FULL, **PASSIVE}, label("call-blocked-none-text", "#str_20565", (0, 40, 318, 30), BODY,
+                                                                              0.33, TEXT_LABEL, shadow=True)), {"op": "!", "args": [active]})]),
+        blocked))
+    call += tabs
+    pages.append((call, "votes_side0"))
+
+    furniture, tabs = mp_top_tabs(doc, "card", book((0, 0, 500, 230)), (ox + 91, oy - 20, 409, 20),
+                                  ["#str_20249", "#str_20662", "#str_20575", "#str_20580"], "card.tab",
+                                  [[{"op": "focus", "control": first}] for _, first in pages], scale=0.25)
+    nodes += [*mp_page_shade("card-book", book((0, 0, 500, 230))), *furniture]
+    for index, (content, _) in enumerate(pages):
+        nodes.append(shown_when(doc, group(f"card-page{index}", {**FULL}, content), {"op": "==", "args": [{"state": "card.tab"}, index]}))
+    nodes += tabs
+    # Main Menu, Spectate (or Play) and Disconnect.
+    nodes.append(button(doc, "card_main", "#str_20598", at((5, 285, 160, 26)), event=press("card_main", "mpMainMenu"), scale=0.33))
+    spectate = button(doc, "card_spectate", PLACEHOLDER, at((172, 285, 160, 26)), event=press("card_spectate", "mpPreySpectate"), scale=0.33)
+    for node in walk(spectate):
+        if node["id"] in ("card_spectate-label", "card_spectate-label-shadow"):
+            doc.bind(node["id"], "text", {"state": "spectext"})
+    nodes += [spectate, button(doc, "card_disconnect", "#str_20599", at((338, 285, 160, 26)), event=press("card_disconnect", "mpDisconnect"),
+                               scale=0.33)]
+    # Each opening starts on Chat with the field ready, or on Vote while a
+    # vote is in progress, as the stock menu's onActivate does.
+    doc.events["open"] = [{"op": "setState", "values": {"card.tab": {"op": "select", "args": [{"op": "==", "args": [
+        {"state": "callvote"}, 2]}, 2, 0]}}},
+        {"op": "if", "condition": {"op": "==", "args": [{"state": "callvote"}, 2]}, "then": [{"op": "focus", "control": "vote_yes"}],
+         "else": [{"op": "focus", "control": "chat-field"}]}]
+    doc.events["release"] = []
+    doc.events["onBack"] = [{"op": "action", "action": "mpClose"}]
+    stage = group("stage", STAGE, [group("page", {**FULL}, nodes)])   # a choice unfolds within the page
+    root = group("screen", {**FULL, "font-family": font(BODY), "font-size": length(EM * 0.33 * U), "color": colour(TEXT_LABEL)}, [stage])
+    return doc.build(root)
+
+
 # ------------------------------------------------------------ the death screen
 
 DEATH_FADE_AT, DEATH_FADE_MS = 100, 1000   # the stock screen's fade from black (guis/restart.gui, Open)
@@ -3560,6 +3849,7 @@ DOCUMENTS = {
     "loading/loading.rui": loading_document,
     "menu/msgbox.rui": message_box_document,
     "menu/multiplayer.rui": multiprey_document,
+    "menu/mp_escape.rui": card_document,
 }
 
 

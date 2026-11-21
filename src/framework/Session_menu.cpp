@@ -12972,6 +12972,10 @@ void idSessionLocal::ClearRetainedLoadingHold() {
 	retainedLoadingHoldFading = false;
 }
 
+#ifndef ID_DEDICATED
+static bool Session_MirrorPreyGameMenu( idUserInterface *menu, idUserInterface *card );
+#endif
+
 /*
 ===============
 idSessionLocal::UpdateRetainedMultiplayer
@@ -13079,6 +13083,25 @@ void idSessionLocal::UpdateRetainedMultiplayer() {
 		card->SetStateInt( "mp.protocol", 0 );
 		card->SetStateBool( "mp.cover_allowed", false );
 		PreyGame_HandleMainMenuCommands( "retainedMultiplayerCover", card );
+		if ( !summary && !arena && !buy ) {
+			// openPREY: the session answers for Prey's game module, which keeps
+			// its stock menu: the card shows that menu's state and sends its
+			// commands (Session_MirrorPreyGameMenu).
+			card->SetStateInt( "mp.protocol", RETAINED_MP_PROTOCOL );
+			card->SetStateBool( "mp.cover_allowed", true );
+			// What the stock menu's opening asks the game for: the player
+			// models (its Initialize window) and the maps (Change Map).
+			(void)game->HandleGuiCommands( "ModelScan" );
+			(void)game->HandleGuiCommands( "MAPScan" );
+			card->SetStateString( "mp.name", cvarSystem->GetCVarString( "ui_name" ) );
+			card->SetStateString( "mp.chat.text", "" );
+			Session_MirrorPreyGameMenu( guiActive, card );
+			// Prey's game draws its menu itself, over the match
+			// (idMultiplayerGame::Draw): the card hides the stock windows and
+			// pointer while it covers them.
+			guiActive->SetPresentationValue( "BoxParent::visible", "0", false );
+			guiActive->SetPresentationValue( "Desktop::hideCursor", "1", false );
+		}
 		if ( card->State().GetInt( "mp.protocol" ) != RETAINED_MP_PROTOCOL ) {
 			common->DPrintf( "retained UI: the game module does not answer the multiplayer card's protocol %d; the stock menu presents\n",
 				RETAINED_MP_PROTOCOL );
@@ -13127,6 +13150,11 @@ void idSessionLocal::UpdateRetainedMultiplayer() {
 	}
 	// The game writes only what changed, under a new revision.
 	PreyGame_HandleMainMenuCommands( "retainedMultiplayerState", guiRetainedMultiplayer );
+	if ( !retainedMultiplayerSummary && !retainedMultiplayerBuy && Session_IsGameMenu( guiActive ) &&
+			Session_MirrorPreyGameMenu( guiActive, guiRetainedMultiplayer ) ) {
+		// openPREY: what the game changed on its stock menu.
+		guiRetainedMultiplayer->SetStateInt( "mp.revision", guiRetainedMultiplayer->State().GetInt( "mp.revision" ) + 1 );
+	}
 	const int revision = guiRetainedMultiplayer->State().GetInt( "mp.revision" );
 	if ( revision != retainedMultiplayerRevision ) {
 		retainedMultiplayerRevision = revision;
@@ -13153,6 +13181,11 @@ void idSessionLocal::RetireRetainedMultiplayer( bool release ) {
 	}
 	const int now = common->GetPresentationTime();
 	guiRetainedMultiplayer = NULL;
+	if ( retainedMultiplayerTarget != NULL && Session_IsGameMenu( retainedMultiplayerTarget ) ) {
+		// openPREY: the stock menu the card hid (see UpdateRetainedMultiplayer).
+		retainedMultiplayerTarget->SetPresentationValue( "BoxParent::visible", "1", false );
+		retainedMultiplayerTarget->SetPresentationValue( "Desktop::hideCursor", "0", false );
+	}
 	// The summary's chat field stops typing with its card.
 	retainedSummaryTyping = false;
 	retainedMultiplayerSummary = false;
@@ -13183,6 +13216,102 @@ void idSessionLocal::RetainedMultiplayerFrameEvent() {
 		DispatchCommand( card, cmd );
 	}
 }
+
+// openPREY: Prey's in-game multiplayer menu (guis/mpmain.gui) under its card,
+// guis/menu/mp_escape.rui. Prey's game module publishes nothing for a card:
+// the session copies what the game sets on its stock menu onto the card each
+// frame (UpdateMainGui, StartMenu, ModelScan, MAPScan and the chat history),
+// and answers the card's verbs with the stock menu's own commands
+// (HandleRetainedMultiplayerRequest).
+#ifndef ID_DEDICATED
+static const int PREY_MP_CHAT_LINES = 50;		// MAX_HISTORY_LIST in the game
+static const int PREY_MP_CHAT_SHOWN = 12;		// the newest lines the card shows
+static const int PREY_MP_MAPS = 64;
+static const int PREY_MP_MODELS = 30;
+static const int PREY_MP_VOTES = 8;				// VOTE_COUNT in the game
+static const int PREY_MP_KICK = 32;
+
+static bool Session_MirrorPreyState( idUserInterface *menu, idUserInterface *card, const char *from, const char *to ) {
+	const char *value = menu->State().GetString( from );
+	if ( !idStr::Cmp( card->State().GetString( to ), value ) ) {
+		return false;
+	}
+	card->SetStateString( to, value );
+	return true;
+}
+
+static bool Session_MirrorPreyCount( idUserInterface *card, const char *key, int count ) {
+	if ( card->State().FindKey( key ) != NULL && card->State().GetInt( key ) == count ) {
+		return false;
+	}
+	card->SetStateInt( key, count );
+	return true;
+}
+
+// The stock menu's state on the card; true when anything changed.
+static bool Session_MirrorPreyGameMenu( idUserInterface *menu, idUserInterface *card ) {
+	if ( menu == NULL || card == NULL ) {
+		return false;
+	}
+	bool changed = false;
+	static const char *const keys[] = {
+		"readyon", "ui_ready", "teamon", "team", "activevote", "registeredvote", "votetime", "vote", "callvote", "spectext",
+		"si_spectators", "current_levelshot", "mp_currentmodelportrait", "mp_currentmodelname"
+	};
+	for ( int i = 0; i < static_cast<int>( sizeof( keys ) / sizeof( keys[0] ) ); ++i ) {
+		changed |= Session_MirrorPreyState( menu, card, keys[i], keys[i] );
+	}
+	for ( int i = 0; i < PREY_MP_VOTES; ++i ) {
+		changed |= Session_MirrorPreyState( menu, card, va( "vote%d", i ), va( "vote%d", i ) );
+	}
+	for ( int i = 0; i < PREY_MP_MODELS; ++i ) {
+		changed |= Session_MirrorPreyState( menu, card, va( "mp_modelportrait%d", i ), va( "mp_modelportrait%d", i ) );
+		changed |= Session_MirrorPreyState( menu, card, va( "mp_modelname%d", i ), va( "mp_modelname%d", i ) );
+	}
+	// The chat history and the map list are the game's list GUIs on the menu;
+	// the card shows the newest chat lines, oldest first.
+	int lines = 0;
+	while ( lines < PREY_MP_CHAT_LINES && menu->State().FindKey( va( "chatHistory_item_%d", lines ) ) != NULL ) {
+		++lines;
+	}
+	const int first = Max( 0, lines - PREY_MP_CHAT_SHOWN );
+	for ( int i = 0; i < PREY_MP_CHAT_SHOWN; ++i ) {
+		idStr line = first + i < lines ? menu->State().GetString( va( "chatHistory_item_%d", first + i ) ) : "";
+		line.RemoveColors();
+		if ( idStr::Cmp( card->State().GetString( va( "mp.chat%d", i ) ), line.c_str() ) ) {
+			card->SetStateString( va( "mp.chat%d", i ), line.c_str() );
+			changed = true;
+		}
+	}
+	changed |= Session_MirrorPreyCount( card, "mp.chat.count", lines - first );
+	int maps = 0;
+	while ( maps < PREY_MP_MAPS && menu->State().FindKey( va( "mapList_item_%d", maps ) ) != NULL ) {
+		changed |= Session_MirrorPreyState( menu, card, va( "mapList_item_%d", maps ), va( "mp.map%d", maps ) );
+		++maps;
+	}
+	changed |= Session_MirrorPreyCount( card, "mp.map.count", maps );
+	changed |= Session_MirrorPreyCount( card, "mp.map.selected", menu->State().GetInt( "mapList_sel_0", "-1" ) );
+	// The players a kick may name: "\"<client> - <name>\";..." (StartMenu).
+	idStrList kicks;
+	idStr::Split( menu->State().GetString( "kickChoices" ), kicks, ';', '"' );
+	int kickCount = 0;
+	for ( int i = 0; i < kicks.Num() && kickCount < PREY_MP_KICK; ++i ) {
+		idStr name = kicks[i];
+		name.StripLeading( '"' );
+		name.StripTrailing( '"' );
+		if ( name.Length() == 0 ) {
+			continue;
+		}
+		if ( idStr::Cmp( card->State().GetString( va( "mp.kick%d", kickCount ) ), name.c_str() ) ) {
+			card->SetStateString( va( "mp.kick%d", kickCount ), name.c_str() );
+			changed = true;
+		}
+		++kickCount;
+	}
+	changed |= Session_MirrorPreyCount( card, "mp.kick.count", kickCount );
+	return changed;
+}
+#endif
 
 void idSessionLocal::HandleGameMenuReturn( const char *cmd ) {
 	if ( !cmd ) {
@@ -13258,6 +13387,97 @@ void idSessionLocal::HandleRetainedMultiplayerRequest( idUserInterface *gui, con
 		HandleGameMenuReturn( game->HandleGuiCommands( arenaCommand ) );
 		if ( !Session_IsCoveredGameGui( guiActive ) ) {
 			RetireRetainedMultiplayer( guiActive == NULL && mapSpawned );
+		}
+		return;
+	}
+	if ( Session_IsGameMenu( guiActive ) && !retainedMultiplayerSummary && !retainedMultiplayerBuy ) {
+		// openPREY: Prey's card. Each verb is the stock menu's own command,
+		// with what that command reads set on the stock menu first, as its
+		// windows set it (guis/mpmain.gui).
+		idUserInterface *menu = guiActive;
+		idStr preyCommand;
+		if ( !idStr::Icmp( request, "mpClose" ) ) {
+			preyCommand = "close";
+		} else if ( !idStr::Icmp( request, "mpMainMenu" ) ) {
+			preyCommand = "main";
+		} else if ( !idStr::Icmp( request, "mpDisconnect" ) ) {
+			preyCommand = "disconnect";
+		} else if ( !idStr::Icmp( request, "mpPreySpectate" ) ) {
+			preyCommand = "spectate";
+		} else if ( !idStr::Icmp( request, "mpPreyReady" ) ) {
+			preyCommand = "readytoggle";
+		} else if ( !idStr::Icmp( request, "mpPreyTeam" ) ) {
+			preyCommand = "teamtoggle";
+		} else if ( !idStr::Icmp( request, "mpVoteYes" ) ) {
+			preyCommand = "voteyes";
+		} else if ( !idStr::Icmp( request, "mpVoteNo" ) ) {
+			preyCommand = "voteno";
+		} else if ( !idStr::Icmp( request, "mpPreyModel" ) ) {
+			const int model = gui->State().GetInt( "mp.pick", "-1" );
+			if ( model < 0 || model >= PREY_MP_MODELS ) {
+				return;
+			}
+			preyCommand = va( "click_modelList %d", model );
+		} else if ( !idStr::Icmp( request, "mpPreyName" ) ) {
+			cvarSystem->SetCVarString( "ui_name", Session_RetainedCreateText( gui, "mp.name", 40 ).c_str() );
+			gui->SetStateString( "mp.name", cvarSystem->GetCVarString( "ui_name" ) );
+			gui->StateChanged( common->GetPresentationTime() );
+			return;
+		} else if ( !idStr::Icmp( request, "mpPreyChat" ) ) {
+			const idStr text = Session_RetainedCreateText( gui, "mp.chat.text", 80 );
+			gui->SetStateString( "mp.chat.text", "" );
+			gui->StateChanged( common->GetPresentationTime() );
+			if ( text.Length() == 0 ) {
+				return;
+			}
+			menu->SetStateString( "chattext", text.c_str() );
+			menu->SetStateInt( "messagemode", gui->State().GetInt( "mp.chat.mode" ) != 0 ? 1 : 0 );
+			preyCommand = "chatmessage";
+		} else if ( !idStr::Icmp( request, "mpPreyMap" ) ) {
+			const int row = gui->State().GetInt( "mp.map.pick", "-1" );
+			if ( row < 0 || row >= gui->State().GetInt( "mp.map.count" ) ) {
+				return;
+			}
+			menu->SetStateInt( "mapList_sel_0", row );
+			preyCommand = "click_maplist";
+		} else if ( !idStr::Icmp( request, "mpPreyMapScan" ) ) {
+			preyCommand = "MAPScan";
+		} else if ( !idStr::Icmp( request, "mpCallVote" ) ) {
+			// The vote's index is the game's vote_flags_t; the value is what
+			// the stock page's field or choice holds.
+			const int index = gui->State().GetInt( "mp.vote.index", "-1" );
+			if ( index < 0 || index >= PREY_MP_VOTES ) {
+				return;
+			}
+			idStr value;
+			if ( index == 1 ) {
+				value = va( "%d", gui->State().GetInt( "mp.vote.timelimit" ) );
+			} else if ( index == 2 ) {
+				value = va( "%d", gui->State().GetInt( "mp.vote.fraglimit" ) );
+			} else if ( index == 3 ) {
+				value = va( "%d", idMath::ClampInt( 0, 1, gui->State().GetInt( "mp.vote.gametype" ) ) );
+			} else if ( index == 4 ) {
+				const int kick = gui->State().GetInt( "mp.vote.kick", "-1" );
+				if ( kick < 0 || kick >= gui->State().GetInt( "mp.kick.count" ) ) {
+					return;
+				}
+				value = va( "%d", kick );
+			}
+			menu->SetStateInt( "voteIndex", index );
+			menu->SetStateString( "str_voteValue", value.c_str() );
+			preyCommand = "callVote";
+		} else {
+			common->Warning( "retained UI: unhandled multiplayer request '%s'", request );
+			return;
+		}
+		const char *answer = game->HandleGuiCommands( preyCommand.c_str() );
+		if ( answer == NULL || idStr::Icmp( answer, "continue" ) ) {
+			HandleGameMenuReturn( answer );
+		}
+		if ( !Session_IsCoveredGameGui( guiActive ) ) {
+			RetireRetainedMultiplayer( guiActive == NULL && mapSpawned );
+		} else if ( Session_MirrorPreyGameMenu( guiActive, gui ) ) {
+			gui->StateChanged( common->GetPresentationTime() );
 		}
 		return;
 	}

@@ -276,7 +276,9 @@ bool SessionMenuCommand(const std::string& command) {
         // openPREY: the Options page's Controls > Profiles and Reset Defaults.
         "profileScan","profileSelect","profileLoad","profileSave","profileDelete","settingsResetApply",
         // openPREY: the MultiPrey page's player name and model, and its filters.
-        "mpPreyName","mpPreyModel","joinApplyFilters"};
+        "mpPreyName","mpPreyModel","joinApplyFilters",
+        // openPREY: the in-game multiplayer card's stock commands.
+        "mpPreySpectate","mpPreyReady","mpPreyTeam","mpPreyChat","mpPreyMap","mpPreyMapScan"};
 	return commands.contains(command);
 }
 
