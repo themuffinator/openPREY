@@ -1836,6 +1836,100 @@ static bool SoundSample_ProbeOggStream( idFile* file, int& channels, int& rate, 
 	return opened;
 }
 
+/*
+========================
+SoundSample_DecodeOggWithVorbisFile
+
+openPREY: stb_vorbis cannot open every stream libvorbis wrote. It has no floor
+type 0 (VORBIS_feature_not_supported), and retail Prey ships one sample that
+uses it, sound/elements/mepowerup01.ogg. libvorbisfile reads every Vorbis
+stream, so it decodes such a file whole. The PCM is reserved against
+s_decodeMemoryMB on top of reserveBase like stb_vorbis's own whole decode, and
+a clean end short of the declared length is padded with silence. Returns the
+PCM from AllocBuffer, or NULL.
+========================
+*/
+static short* SoundSample_DecodeOggWithVorbisFile( const byte* data, const int length, const char* name, SoundSampleDecodeReservation& reservation,
+	const uint64 reserveBase, int& channels, int& sampleRate, unsigned int& frames )
+{
+	channels = 0;
+	sampleRate = 0;
+	frames = 0;
+	if( data == NULL || length <= 0 )
+	{
+		return NULL;
+	}
+	oggMemoryStream_t memoryStream = { data, static_cast<size_t>( length ), 0 };
+	const ov_callbacks callbacks = { OggMemoryRead, OggMemorySeek, OggMemoryClose, OggMemoryTell };
+	OggVorbis_File vorbisFile;
+	memset( &vorbisFile, 0, sizeof( vorbisFile ) );
+	if( ov_open_callbacks( &memoryStream, &vorbisFile, NULL, 0, callbacks ) != 0 )
+	{
+		return NULL;
+	}
+	const vorbis_info* info = ov_info( &vorbisFile, -1 );
+	const ogg_int64_t totalFrames = ov_pcm_total( &vorbisFile, -1 );
+	const int streamChannels = info != NULL ? info->channels : 0;
+	const int streamRate = info != NULL ? static_cast<int>( info->rate ) : 0;
+	const uint64 bytesPerFrame = static_cast<uint64>( streamChannels ) * sizeof( short );
+	if( ov_streams( &vorbisFile ) != 1 || streamChannels < 1 || streamChannels > 2 || streamRate <= 0 || totalFrames <= 0 ||
+		static_cast<uint64>( totalFrames ) * bytesPerFrame > static_cast<uint64>( idMath::INT_MAX ) )
+	{
+		ov_clear( &vorbisFile );
+		return NULL;
+	}
+	const uint64 capacityBytes = static_cast<uint64>( totalFrames ) * bytesPerFrame;
+	short* pcm = reservation.Grow( reserveBase + capacityBytes ) ?
+		static_cast<short*>( AllocBuffer( static_cast<int>( capacityBytes ), name ) ) : NULL;
+	if( pcm == NULL )
+	{
+		ov_clear( &vorbisFile );
+		return NULL;
+	}
+	uint64 offset = 0;
+	int holeRetries = 0;
+	bool reachedEof = false;
+	while( offset < capacityBytes )
+	{
+		int logicalBitstream = -1;
+		const long chunk = ov_read( &vorbisFile, reinterpret_cast<char*>( pcm ) + offset, static_cast<int>( capacityBytes - offset ),
+			Swap_IsBigEndian() ? 1 : 0, 2, 1, &logicalBitstream );
+		if( chunk == OV_HOLE )
+		{
+			if( ++holeRetries > OGG_MAX_HOLE_RETRIES )
+			{
+				break;
+			}
+			continue;
+		}
+		if( chunk == 0 )
+		{
+			reachedEof = true;
+			break;
+		}
+		if( chunk < 0 || static_cast<uint64>( chunk ) % bytesPerFrame != 0 )
+		{
+			break;
+		}
+		offset += static_cast<uint64>( chunk );
+	}
+	ov_clear( &vorbisFile );
+	if( reachedEof && offset > 0 && offset < capacityBytes )
+	{
+		memset( reinterpret_cast<byte*>( pcm ) + offset, 0, static_cast<size_t>( capacityBytes - offset ) );
+		offset = capacityBytes;
+	}
+	if( offset == 0 )
+	{
+		FreeBuffer( pcm );
+		return NULL;
+	}
+	channels = streamChannels;
+	sampleRate = streamRate;
+	frames = static_cast<unsigned int>( offset / bytesPerFrame );
+	return pcm;
+}
+
 bool idSoundSample_OpenAL::LoadOggStream( const idStr& filename )
 {
 	// Loading metadata/envelopes must not consume the live-voice pool: a newly
@@ -2102,8 +2196,13 @@ bool idSoundSample_OpenAL::BeginOggLoad( const idStr& filename, idSoundSampleDec
 			decodedBytes > static_cast<uint64>( s_streamThresholdKB.GetInteger() ) * 1024 ) {
 			timestamp = fileIn->Timestamp();
 			const bool streamed = BeginOggStreamEnvelope( filename, fileIn, channels, rate, frames, asyncDecode ) || LoadOggStream( filename );
+			if( streamed ) return true;
 			// A stream with no positioned page at all cannot seek: decode it whole.
-			if( streamed || frames != 0 ) return streamed;
+			// openPREY: so does one stb_vorbis cannot open (floor 0), which only
+			// libvorbisfile reads; the stream decoders are stb_vorbis.
+			int probeChannels = 0, probeRate = 0;
+			unsigned int probeFrames = 0;
+			if( frames != 0 && SoundSample_ProbeOggStream( fileIn, probeChannels, probeRate, probeFrames ) ) return false;
 			FreeData();
 		}
 	}
@@ -2198,8 +2297,24 @@ bool idSoundSample_OpenAL::BeginOggLoad( const idStr& filename, idSoundSampleDec
 	stb_vorbis* vorbis = arena ? stb_vorbis_open_memory( fileData, fileLen, &vorbisError, &alloc ) : NULL;
 	if( vorbis == NULL )
 	{
+		// openPREY: libvorbisfile reads what stb_vorbis cannot open (floor 0).
+		int vfChannels = 0, vfRate = 0;
+		unsigned int vfFrames = 0;
+		short* pcm = SoundSample_DecodeOggWithVorbisFile( fileData, fileLen, GetName(), reservation,
+			static_cast<uint64>( fileLen ) + SoundVorbisStream::ArenaBytes, vfChannels, vfRate, vfFrames );
 		FreeBuffer( fileData );
-		idLib::Warning( "LoadOgg( %s ) : failed to open Ogg Vorbis (stb_vorbis error %d)", filename.c_str(), vorbisError );
+		if( pcm != NULL )
+		{
+			if( s_debugHardware.GetBool() )
+			{
+				idLib::Printf( "LoadOgg( %s ) : stb_vorbis error %d; libvorbisfile decoded %u frames, %d Hz, %d channels\n",
+					filename.c_str(), vorbisError, vfFrames, vfRate, vfChannels );
+			}
+			buffers.SetNum( 1 );
+			buffers[0].buffer = pcm;
+			return FinishOggLoad( vfChannels, vfRate, vfFrames );
+		}
+		idLib::Warning( "LoadOgg( %s ) : failed to open Ogg Vorbis (stb_vorbis error %d; libvorbisfile could not decode it either)", filename.c_str(), vorbisError );
 		FreeData();
 		return false;
 	}

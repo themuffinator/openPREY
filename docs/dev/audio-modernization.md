@@ -410,6 +410,17 @@ page at all keeps the bounded full decode. The one-hour limit on streamed tracks
 gone; the bound is the int-sized PCM bookkeeping, about three hours of 48 kHz
 stereo.
 
+**Streams stb_vorbis cannot open.** stb_vorbis has no Vorbis floor type 0
+(`VORBIS_feature_not_supported`, error 4). One retail Prey sample uses it:
+`sound/elements/mepowerup01.ogg` in `pak003.pk4`, the power-up speaker in
+`game/feedingtowerd` (1 of 2,707 retail Oggs, openPREY issue #39). Its PCM is
+over `s_streamThresholdKB`, but the stream decoders are stb_vorbis, so stream
+selection now sends a file that stb_vorbis cannot open to the whole decode
+instead of failing without a message. There `SoundSample_DecodeOggWithVorbisFile`
+decodes it with libvorbisfile, reserved against `s_decodeMemoryMB` like the
+stb_vorbis decode. Only a file that libvorbisfile cannot read either warns and
+falls back to the default sound.
+
 **Envelope pass off the main thread.** During a level load a streamed track's
 compressed bytes go to a job worker, which fills the 60 Hz envelope sized before
 submission (`BeginOggStreamEnvelope`); the full pass had cost the main thread a tenth
