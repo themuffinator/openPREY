@@ -107,6 +107,27 @@ KNOWN_RETAIL_UPPERCASE_ASSET_PATHS = frozenset(
     }
 )
 
+# The reverb files retail Prey ships (pak000.pk4, or pak_data.pk4), with no
+# efxs/default.efx. The other maps (deathwalk1-3 and the multiplayer maps) have
+# none, so "sound: missing efxs/<map>.efx and efxs/default.efx" is expected for
+# them and a failure only for a map listed here.
+KNOWN_RETAIL_REVERB_MAPS = frozenset(
+    {
+        "biolabsa", "biolabsb", "feedingtowera", "feedingtowerb", "feedingtowerc",
+        "feedingtowerd", "girlfriendx", "harvestera", "harvesterb", "keeperfortress",
+        "lotaa", "lotab", "lotad", "roadhouse", "salvage", "salvageboss", "shuttlea",
+        "shuttleb", "spherebrain", "spindlea", "spindleb", "superportal",
+    }
+)
+MISSING_REVERB_PATTERN = re.compile(r"^sound: missing efxs/([^ ]+)\.efx and efxs/default\.efx$")
+
+# Startup's hardware report spells unknown values "(0=unknown/shared)"; it is
+# information, not a missing asset.
+PERFORMANCE_REPORT_PREFIXES = (
+    "first-launch performance preset ",
+    "detected performance profile ",
+)
+
 
 @dataclass(frozen=True)
 class MapEntry:
@@ -603,6 +624,13 @@ def classify_issue_family(signature: str) -> tuple[str, str]:
         return "Physics spawn warning", "warning"
     if "convertlwotomodelsurfaces" in lower:
         return "Model conversion warning", "warning"
+    reverb = MISSING_REVERB_PATTERN.match(lower)
+    if reverb is not None:
+        if reverb.group(1) in KNOWN_RETAIL_REVERB_MAPS:
+            return "Shipped map reverb file missing", "missing"
+        return "Map without a retail reverb file", "notice"
+    if lower.startswith(PERFORMANCE_REPORT_PREFIXES):
+        return "Performance preset report", "notice"
     return "Other issue-like console line", severity_for(signature)
 
 
