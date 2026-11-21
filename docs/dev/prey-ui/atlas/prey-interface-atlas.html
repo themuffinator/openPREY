@@ -230,7 +230,7 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
 
 <div class="wrap">
 <header class="top">
-  <div class="eyebrow">openPREY · visual specification 1.21 · 20 November 2026</div>
+  <div class="eyebrow">openPREY · visual specification 1.22 · 21 November 2026</div>
   <div class="mark">
     <svg id="hdrMark" viewBox="0 0 476 64" role="img" aria-label="PREY wordmark reconstruction"></svg>
     <h1>Interface Atlas</h1>
@@ -243,7 +243,7 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
 
 <section class="sheet" id="home">
   <div class="sh"><span class="ref">Spec §2 · §6 · §8 · §9 · §12</span><h2>Home screen</h2></div>
-  <p class="sp">The front end is a view through a portal onto the Sphere over Earth. Section 12.2 of the specification makes both bodies 3D and opens close on the Sphere's shell, then swings round it and pulls back until the frame lays over the stock painting: the same Sphere, the same plates, and Earth's limb in front of the Sphere's foot as the stock layers sort it. That backdrop is specified and not yet built: openPREY draws the stock 2006 layers today, widened to the screen. Both are drawn here from one measured plate table, so switching between them moves nothing: at rest only their life differs. Pick an entry on the arc to watch its page grow out of the bottom bar; choose <b>Return to Main Menu</b> or press Escape to send it back.</p>
+  <p class="sp">The front end is a view through a portal onto the Sphere over Earth. Section 12.2 of the specification makes both bodies 3D and opens close on the Sphere's shell, then swings round it and pulls back until the frame lays over the stock painting: the same Sphere, the same plates, and Earth's limb in front of the Sphere's foot as the stock layers sort it. openPREY draws that backdrop (ui_menuScene; with 0, or where it cannot draw, the stock 2006 layers, widened to the screen). Both are drawn here from one measured plate table, so switching between them moves nothing: at rest only their life differs. Pick an entry on the arc to watch its page grow out of the bottom bar; choose <b>Return to Main Menu</b> or press Escape to send it back.</p>
   <div class="stage"><svg id="homeSvg" viewBox="0 0 640 480" role="group" aria-label="Prey main menu reconstruction"></svg></div>
   <div class="ctl">
     <div class="seg" role="group" aria-label="Backdrop"><span class="lbl">Backdrop</span><button class="pb" data-bd="3d" aria-pressed="true">3D, specified</button><button class="pb" data-bd="stock" aria-pressed="false">Stock 2006, as built</button></div>
@@ -260,7 +260,7 @@ select{background:#0d131b;color:var(--steel);border:1px solid var(--plate);font:
     <p class="cap"><b>Arc of hooks</b> bars at x 62, 65, 70, 78, 89, 105 u on a 27 u pitch, 19.5 u tall. Hover: label to <b>#CCE6FF</b> at once, bar 0.6 → 1.0 and 5 u toward the arc, label 6–9 u, all over 150 ms; leaving takes 200 ms.</p>
     <p class="cap"><b>Growth</b> small pages: bottom bar (180,438,450,32) → (180,200,376,270), 500 ms ease-in-out. Full pages: → (10,438,620,32) in 200 ms, then → (10,10,620,460) in 500 ms; the wordmark hides and the front portal swings out over 400 ms.</p>
   </div>
-  <h3 class="sub">The entrance<span class="tag">Spec §12.2 · not built</span></h3>
+  <h3 class="sub">The entrance<span class="tag">Spec §12.2 · built</span></h3>
   <p class="sp">Out of game the menu opens 0.41 R above the Sphere's leading side, looking across its shell with the Sphere a little off-centre. Over 1200 ms the camera swings 38° round the Sphere on a curve while it pulls back, turning 35° to keep its aim, and comes to rest low over Earth. Speed peaks at 180 ms and falls away, and it is the Sphere's apparent radius that eases, so the move is quick at first and smooth to the end. Earth starts out of sight below; the camera crosses to Earth's side at 425 ms, and from 780 ms the limb rises into the frame in front of the Sphere. The frames show the backdrop alone.</p>
   <div class="frames" id="frames"></div>
   <div class="stage"><svg id="planSvg" viewBox="0 0 640 250" role="img" aria-label="The menu scene from above and from the side: the camera's curve from 1.41 to 4.93 Sphere radii round the Sphere, and Earth below with its limb nearer the rest camera than the Sphere"></svg></div>
@@ -1233,7 +1233,7 @@ document.addEventListener("keydown", e => { if (e.key === "Escape" && H.state ==
 function leavePage() { if (H.state === "page" || H.state === "growing" || H.state === "closing") { cancel("page"); L.page.style.display = "none"; H.state = "home"; } }
 function restCaption() {
   $("#replay").textContent = entrance() ? "Play the entrance" : "Play the opening";
-  if (entrance()) { timeline(ENTR_TL, ENTR.T); setCap("The 3D backdrop of §12.2, specified and not yet built, out of game: the Sphere and Earth are 3D bodies at rest in the stock painting's places, Earth in front. Hover an entry to see the slide; pick one to open its page; Play the entrance replays the pull-back."); }
+  if (entrance()) { timeline(ENTR_TL, ENTR.T); setCap("The 3D backdrop of §12.2, out of game: the Sphere and Earth are 3D bodies at rest in the stock painting's places, Earth in front. Hover an entry to see the slide; pick one to open its page; Play the entrance replays the pull-back."); }
   else { timeline(...seq(STOCK_TL)); setCap((H.mode === "3d" ? "In game the 3D backdrop waits at rest behind the stock portal opening. " : "Stock 2006 backdrop, as openPREY draws it today: the painted Sphere and Earth's limb, drawn from the same measured plate table as the 3D rest frame, so the two coincide. ") + "Hover an entry to see the slide; pick one to open its page; Play the opening replays AnimPortalIn."); }
   tlStart = -1e9; tlHead.style.opacity = 0;
 }

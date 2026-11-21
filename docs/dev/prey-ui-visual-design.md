@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.21, 20 November 2026.
+Specification version 1.22, 21 November 2026.
 
 Status: reference survey and design contract. openPREY renders the stock Prey
 GUIs by default. A first vector replacement, the home screen's navigation, its
@@ -1211,7 +1211,8 @@ vocabulary rather than replace it:
 
 - **Aspect expansion.** Wide and tall screens show more space rather than
   black bars.
-  - *Main menu.* The stock layers draw over black, as in the stock. The star
+  - *Main menu.* The 3D backdrop of section 12.2 draws the Sphere and Earth;
+    where it cannot, the stock layers draw over black, as in the stock. The star
     layers widen with the screen (`naturalmatscale` holds their density).
     Earth continues through its window's edge slices (`preymenu/earth_left`,
     `_right`, `_bottom`); their materials repeat the stock Earth stages, so
@@ -1276,11 +1277,10 @@ rows, tabs and faces, at stock sizes and colours, inside the claw frame.
 
 ### 12.2 The 3D backdrop and entrance
 
-**Status: specified, not built.** Until it is built the main menu draws the
-stock painted layers with the stock opening, as section 12.1 describes. This
-subsection is the design contract for the work and is written in the present
-tense, as the finished menu behaves. The Interface Atlas draws it to these
-numbers.
+**Status: built, on by default** (`ui_menuScene 1`; 0 keeps the stock
+painting). This subsection is the design contract, written as the menu
+behaves; "As built" below records how the engine and the generator meet it
+and where they differ. The Interface Atlas draws it to these numbers.
 
 openPREY's main menu draws the Sphere and Earth as lit 3D bodies under one
 camera, in place of the stock's painted layers. Out of game it opens close on
@@ -1429,7 +1429,7 @@ the first frames.
 
 | Case | Behaviour |
 | --- | --- |
-| Menu opened in game (`noIntro`) | The stock `AnimPortalIn` over the frozen frame (section 8). At 500 ms the 3D backdrop, already at rest, fades in over 100 ms. No camera move |
+| Menu opened in game (`noIntro`) | The stock `AnimPortalIn` over the frozen frame (section 8). At 500 ms the 3D backdrop, already at rest, appears with the rest of the backdrop, as the stock layers did. No camera move |
 | Returning from a page | No entrance. Full-screen pages still swing the portal out and back |
 | Reduced motion | The backdrop appears at rest, Earth in front: no entrance, turn or cloud drift |
 | Scene unavailable | If the models do not load or a renderer cannot draw the scene, the stock painted layers draw at their stock rectangles with the stock opening. The menu never shows a bare star field |
@@ -1443,48 +1443,101 @@ limb at each side. The Sphere stays at 357,222 in canvas units. Earth's limb
 continues along the same curve and leaves the trailing edge near y 373 on
 16:9 and y 378 on 21:9.
 
-#### Engine notes
+#### As built
 
-`renderDef` (`src/ui/RenderWindow.cpp`) already gives a GUI a private render
-world with up to three models and five lights, and its `viewOffset`,
-`modelOrigin` and `modelRotate` accept `transition`. The stock menu uses it
-for the portal. The scene needs four things it lacks:
+**The scene.** One `renderDef`, `MenuScene`, in the stock `Background`
+window between the star layers and the portal's front model
+(`guis/mainmenu/mainmenu_scene.guifragment`, included by
+`guis/mainmenu.gui`). Its three models are static ASE meshes at 64 units to
+R, in `content/basepr/pak1/models/menu/scene/`:
 
-1. **Field of view.** A `renderDef` draws with a fixed 90° horizontal field
-   of view; the scene needs 30° vertical. The retained-UI entry
-   `DrawModelScene` already takes one. `canvasfill 1` already draws a
-   `renderDef` across the whole expanded canvas through an off-axis frustum
-   that keeps the projection its rect defines; the portal uses it.
-2. **A camera that turns.** A `renderDef` moves its camera with `viewOffset`
-   and always looks along one axis. The curve needs a view axis as well.
-3. **Independent bodies.** Models after the first share the first model's
-   origin and rotation. The Sphere turns while Earth holds, so either each
-   model takes its own origin and rotation, or Earth's offset is built into
-   its mesh and the Sphere's turn is animated in its material.
-4. **The curve.** A `transition` eases one value in a straight line. The
-   camera's arc, its geometric pull-back and its aim need driving per frame
-   from code, or a new interpolation mode.
+| Model | Holds | Moves |
+| --- | --- | --- |
+| `backdrop.ase` | The shell, Earth, its cloud deck and its glow | Never |
+| `surface.ase` | The plates with their dark rims, the green patches, and the craters | Turns once in 240 s about the Sphere's tilted axis, from rest (`modelSpin1`) |
+| `sun.ase` | One quad for the sun flare | Kept on the shell's camera side and sized to 0.17 of the Sphere's apparent radius every frame (`modelFacing2`) |
 
-Draw both bodies in one scene with depth testing, so that Earth hides the
-Sphere's foot at rest and the order is right throughout the move. The star
-layers are 2D windows today: either draw the stars in the scene as a sky, or
-slide the stock layers by the camera's heading, so that they turn with the
-camera and come to rest unmoved.
+`tools/assets/generate_menu_scene.py` writes the meshes, their textures
+(`content/basepr/pak1/guis/assets/menu/scene/`), the material file
+(`materials/menu_scene.mtr`) and the renderDef fragment from the Interface
+Atlas's scene: its numbers and its seeded generator are ported, and the
+measured plate and patch tables are read from the atlas page itself, so the
+two cannot drift apart. `--check` reports a stale output (Meson test
+`openprey-menu-scene`). Nothing comes from the retail archives; the plate
+table is measurements, and the sun flare's material repeats the stock `sol`
+stages over the installed art at run time.
 
-The stock script records two more constraints (`guis/mainmenu.gui:17-20`).
-Keep the scene in one `renderDef`: several share their lights and wash each
-other out. Use static meshes: animated ones are clipped early by the near
-plane. At the start the shell passes 0.41 R from the camera, so scale the
-scene until that distance clears the near clip plane.
+**Appearance.** Every surface is unlit; the scene has no light.
 
-The models and materials are new openPREY work under `content/basepr/pak0/`,
-placed as `docs/dev/source-layout.md` directs. Build the Sphere's front face
-from the stock painting as seen from the rest camera, so that every plate
-lands where it is painted, and author the far side to match. Whether its
-textures are projected from the installed art or redrawn is a licensing
-decision for `LICENSING.md`, not for this document; the Interface Atlas uses
-measurements only. Author the Sphere's colour map for the opening frame:
-2048x1024 with a tiling detail layer.
+- **The shell's light.** Graded by each point's angle from the point that
+  faces the key light, on a sphere whose pole faces the light, so the shell
+  does not turn and its light stays put.
+- **The plates.** Each plate and patch is a fan of small triangles just above
+  the shell, coloured per vertex over a tiling ice texture laid flat on it at
+  a random offset. The craters darken the shell by multiplying it.
+- **Earth.** Its colour, its cloud deck and its glow are graded per vertex by
+  how far from the limb the rest camera draws that vertex, so each band keeps
+  its depth all along the limb. The camera is at rest, or nearly, whenever
+  Earth is in view. The cloud deck scrolls 1.5 u a second along the limb.
+
+**The renderDef's new keys** (`src/ui/RenderWindow.cpp`, "The scene camera").
+
+- `fovY`: a vertical field of view across the rect. `canvasfill` keeps it out
+  to the screen's edges.
+- `orbitCenter`, `orbitFrom`, `orbitTo`, `orbitAimFrom`, `orbitAimTo` and
+  `orbitShape`: the camera's curve. `orbitPlay` starts the move and
+  `orbitSkip` ends it.
+- `modelRotateN`, `modelSpinN` and `modelFacingN`: a model's own rotation,
+  its timed turn, and the billboard.
+- `sceneKey`: names the GUI state the window keeps. `<key>_ok` says whether
+  the scene can draw; it is decided as the menu loads, from `ui_menuScene`
+  and whether the models load. `<key>_motion` says whether motion is
+  allowed, `<key>_moving` whether the move is running, and `<key>_x` and
+  `<key>_y` give the stars' shift in canvas units.
+
+**The stars.** The stock `Stars` window slides by the camera's heading.
+Three copies of it, beside and above, cover what the slide uncovers while
+the camera moves. At rest the first is exactly where the stock draws it,
+and the copies are hidden.
+
+**Timing.** The scene's first frame cost a third of a second in testing. So
+the camera's clock starts on the frame after it, and the window then sends
+the menu `menuscene_start`. That event starts `AnimSceneTimeline` (the fade,
+the rim at 700 ms, the wordmark and arc at 1000 ms), which keeps the menu's
+timeline in step with the camera. The menu's own clock is stale when
+`playIntro` arrives, so `AnimSceneIntro` has no later events.
+
+**Input.** While `gui::skipOnInput` names an event, the first key, button or
+click runs it instead of reaching the windows
+(`idUserInterfaceLocal::HandleEvent`). The entrance sets it to `skipIntro`.
+
+**Opening the menu.** `idSessionLocal::StartMenu` used to send `playIntro`
+only while `com_skipLogoVideos` was 0, and it defaults to 1. The menu
+therefore always opened with `noIntro`, behind a blackout that waited for a
+music command openPREY's menu never sends. Now the opening plays out of game
+and brings the screen up from black itself; the session's 350 ms blackout
+covers only `noIntro`.
+
+**Diagnostics.** `ui_menuSceneProbe <ms>` holds the camera that far into the
+entrance, and the Sphere on its painted face, for screenshots.
+`ui_retainedTrace 1` logs the curve (`MENU_SCENE t= e= cam=`).
+
+**Measured** (20 and 21 November 2026, windowed OpenGL):
+
+- At rest the Sphere is centred at 355.5,222.7 with radius 185.7. Earth's
+  limb passes 355,407, 601,376 and 691,373.
+- The progress `e` was 0.485 at 406 ms and 0.797 at 700 ms; the table gives
+  0.477 at 400 ms and 0.796 at 700 ms.
+- The first frame shows plates and the sun, and covers the screen at 4:3,
+  16:9 and 21:9.
+
+**Differences from the contract.**
+
+- The plates and patches are flat-coloured shards with an ice texture, as
+  the atlas draws them, not the painted ice of the stock art.
+- The atlas's thin highlight on the shell's outline is not drawn.
+- The menu's wordmark fades in over 200 ms. Its arc and bottom bar, like the
+  retained home, appear at 1000 ms without a fade.
 
 #### Acceptance
 
@@ -1570,9 +1623,10 @@ The home documents draw only the navigation. The stock menu keeps drawing
 beneath them, so the portal and its opening, the star field, the Sphere,
 Earth, the wordmark, the music and, in a game, the frozen frame the portal
 tears open are the stock menu's own (section 12.3, rule 1; section 12.4
-forbids replacing the backdrop with a picture). Section 12.2's 3D backdrop,
-when it is built in `guis/mainmenu.gui`, appears under the retained navigation
-without a change here.
+forbids replacing the backdrop with a picture). Section 12.2's 3D backdrop
+is built in `guis/mainmenu.gui` and appears under the retained navigation
+without a change here: out of game the home covers the menu from 1000 ms into
+the entrance, when `Main_Menu` shows.
 
 - `guis/mainmenu.gui` leaves its navigation and bottom bar undrawn while
   `gui::retainedHome` is 1. The session sets it whenever a home document can
@@ -2196,7 +2250,7 @@ sections it draws:
 | 12 Loading and credits | The loading screen and the credits' fly-in | 8, 9, 12.1 |
 
 Example rows, names and scene dressing are placeholders and are labelled as
-such. The home sheet labels the 3D backdrop as specified, not built.
+such. The home sheet labels the 3D backdrop as built.
 
 - It contains no retail art or captures. It draws in Prey's own three faces,
   as the TrueType tracings openPREY ships in `content/basepr/pak0/fonts`
@@ -2658,6 +2712,29 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.22, 21 November 2026
+
+- Section 12.2 is built and on by default (`ui_menuScene`). Its engine
+  notes become "As built": the generator, the renderDef's new keys, how the
+  stars slide, the deferred clock, skipping on input, the session's opening,
+  the diagnostics, measurements and the differences from the contract. The
+  in-game variant shows the backdrop with the rest of the backdrop rather than
+  fading it in. Sections 12.1 and 12.5 follow.
+- Section 12.6: the initializing screen is the retained document whatever
+  `ui_retained` says, and the session's fallback screen carries it on until a
+  menu or map takes over. The stock painting is no longer drawn there.
+- Section 12.5: the MultiPrey page (`guis/menu/multiplayer.rui`: Player
+  Settings, Create Server with Create and Advanced, Find Servers with
+  Selected Server, Filters and IP Connect), the message box
+  (`guis/menu/msgbox.rui`, every box but the download progress) and a
+  multiplayer match's Escape menu (`guis/menu/mp_escape.rui`, the session
+  mirroring Prey's stock `mpmain.gui` and sending its commands) are built;
+  the update check answers through the message box. Create Server's Server
+  Type and Dedicated now bind `net_menulanserver` and
+  `net_serverMenuDedicated`, on the stock page too. "Not yet built" now lists
+  the download progress box, the chat line and the connecting screen.
+- The Interface Atlas takes the version and labels the 3D backdrop as built.
 
 ### Version 1.21, 20 November 2026
 
