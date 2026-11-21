@@ -17,9 +17,13 @@
 				model1		"models/menu/scene/surface.ase"
 				modelSpin1	0.0000, 0.3420, 0.9397, 240.0000
 				model2		"models/menu/scene/sun.ase"
-				modelFacing2	64.0640, 0.17, 0, 0
-				lightOrigin	100000, 0, 0, 0
-				lightColor	0, 0, 0, 0
+				modelFacing2	0, 0.17, 0, 0
+				lightOrigin0	-465.6872, -80.5997, -761.2195, 0.0000
+				lightColor0	0.6000, 0.6600, 0.7400, 0.0000
+				lightRadius0	1920.0, 1920.0, 1920.0, 0
+				lightOrigin1	-98.6375, 3.9069, -9.7990, 0.0000
+				lightColor1	0.5600, 0.6000, 0.6400, 0.0000
+				lightRadius1	73.6, 73.6, 73.6, 0
 				orbitCenter	0, 0, 0, 0
 				orbitFrom	-0.7631, 0.6403, -0.0872, 90.2933
 				orbitTo		-0.9990, 0.0396, -0.0192, 315.2237

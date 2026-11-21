@@ -85,6 +85,8 @@ private:
 	idStr needUpdate;
 	idWinVec4 lightOrigin[MAX_RENDERWINDOW_LIGHTS];
 	idWinVec4 lightColor[MAX_RENDERWINDOW_LIGHTS];
+	// openPREY: a light's radius (light_radius), 0 for the stock default.
+	idWinVec4 lightRadius[MAX_RENDERWINDOW_LIGHTS];
 	idWinVec4 modelOrigin;
 	idWinVec4 modelRotate;
 	idWinVec4 viewOffset;

@@ -3,26 +3,30 @@
 """The main menu's 3D backdrop: the Sphere and Earth of section 12.2 of
 docs/dev/prey-ui-visual-design.md, as meshes, textures and a material file.
 
-The scene is the Interface Atlas's (docs/dev/prey-ui/atlas/
-prey-interface-atlas.html) made solid. Its numbers, its seeded random
-generator and its measured plate table are read or ported from the atlas, so
-the menu and the sheet that specifies it draw the same Sphere: the rest frame
-lays over the stock painting, every painted plate is cast from the rest
-camera onto the Sphere at its painted place, and the far side is filled with
-clusters in the same manner. Nothing comes from the retail archives; the
-plate table is a set of measurements, not art. The sun flare reuses the stock
-`sol` stages at run time.
+The scene reinterprets the stock painting in 3D. The Sphere is what the
+painting shows: a hollow shell of dark wet rock, holed all over, through whose
+gaps the lit ice of its inside wall shows, with a small sun hanging inside it.
+Its gaps lie where the painting has them: the Interface Atlas's measured table
+of the painting's gaps, read from the atlas page, is cast from the rest camera
+onto the shell, and the far side is holed in the same manner from the atlas's
+seeded generator. Every Sphere texture is raster art painted here from fixed
+seeds (fractal noise, Voronoi ice); nothing is drawn as vector shapes.
+
+Earth is the game's own: its material shows Prey's outro Earth map
+(textures/outro/earthcomp4096) and the Sphere's sun the stock `sol` stages,
+both read from the installed game at run time. Nothing from the retail
+archives is written here.
 
 Outputs (edit this script, never them; --check reports any that is stale):
 
 | File | Holds |
 | --- | --- |
-| pak1 models/menu/scene/backdrop.ase | The static bodies: the Sphere's shell, Earth, its cloud deck and its glow |
-| pak1 models/menu/scene/surface.ase | The Sphere's plates, green patches and craters, which turn |
-| pak1 models/menu/scene/sun.ase | The sun flare's quad, a billboard the renderDef keeps on the shell |
-| pak1 guis/assets/menu/scene/*.tga | The shell's light, the plates' ice, Earth's colour, clouds and glow |
-| pak0 materials/menu_scene.mtr | Their materials: all unlit |
-| pak0 guis/mainmenu/mainmenu_scene.guifragment | The renderDef with the camera's curve |
+| pak1 models/menu/scene/backdrop.ase | Earth, its limb haze and its glow, which never move |
+| pak1 models/menu/scene/surface.ase | The Sphere's shell and its inside wall, which turn |
+| pak1 models/menu/scene/sun.ase | The sun's quad, a billboard the renderDef keeps at the Sphere's centre |
+| pak1 guis/assets/menu/scene/*.tga | The shell's rock and gaps, its green glows, the inside ice, Earth's haze and glow |
+| pak0 materials/menu_scene.mtr | Their materials |
+| pak0 guis/mainmenu/mainmenu_scene.guifragment | The renderDef: camera curve, models and lights |
 
 Frames: the atlas's (x toward the trailing edge, y up, z into the screen, one
 unit the Sphere's radius R) become the engine's (x forward, y left, z up) at
@@ -40,7 +44,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
+from scipy.spatial import cKDTree
 
 ROOT = Path(__file__).resolve().parents[2]
 ATLAS = ROOT / "docs/dev/prey-ui/atlas/prey-interface-atlas.html"
@@ -64,8 +69,13 @@ TILT = math.radians(20.0)
 TURN_SECONDS = 240.0
 ENTRANCE_MS = 1200
 ACCEL, DECEL = 0.15, 0.85
-SUN_SIZE = 0.17                  # the flare's radius against the Sphere's
+SUN_SIZE = 0.17                  # the sun's radius against the Sphere's
 CLOUD_DRIFT = 1.5                # u a second along the limb
+INSIDE = 0.955                   # the inside wall's radius against the shell's
+
+# Earth's turn: the point beneath the rest camera, and north toward the limb.
+EARTH_SUBCAMERA = (-38.0, -150.0)   # latitude, longitude in degrees: the cloudy South Pacific
+EARTH_MAP = "textures/outro/earthcomp4096"
 
 
 # ---------------------------------------------------------------- vectors
@@ -150,8 +160,9 @@ class Scene:
 
 
 def sphere_model(scene):
-    """The atlas's SPHERE_MODEL: each part is (kind, centre, ring, tone) in the
-    body frame; kind 0 a plate, 1 a green patch, 2 a crater."""
+    """The atlas's SPHERE_MODEL: each part is (kind, centre, ring, tone, painted) in the
+    body frame. Kind 0 is a gap through the shell (the atlas calls the ice seen
+    through it a plate), 1 a green patch, 2 a crater."""
     R = rnd(1906)
     out = []
 
@@ -171,7 +182,7 @@ def sphere_model(scene):
             x = math.cos(a) * rr * long_
             y = math.sin(a) * rr / long_
             pts.append(lift(n, t, cx + x * cr - y * sr, cy + x * sr + y * cr))
-        out.append((kind, lift(n, t, cx, cy), pts, R()))
+        out.append((kind, lift(n, t, cx, cy), pts, R(), False))
 
     def anywhere():
         a = R() * 2 - 1
@@ -214,7 +225,7 @@ def sphere_model(scene):
             ex = math.cos(t) * a * j
             ey = math.sin(t) * max(b, 0.9) * j
             pts.append(cast(x + ex * cr - ey * sr, y + ex * sr + ey * cr))
-        out.append((kind, cast(x, y), pts, R()))
+        out.append((kind, cast(x, y), pts, R(), True))
 
     for entry in atlas_table("STOCK_PLATES"):
         painted(0, entry)
@@ -266,28 +277,202 @@ def hex_rgb(code):
     return np.array([int(code[i:i + 2], 16) for i in (0, 2, 4)], dtype=np.float64)
 
 
-def ramp(stops, t):
-    """Linear interpolation through (offset, '#rrggbb' or (r, g, b), alpha) stops."""
-    t = float(np.clip(t, stops[0][0], stops[-1][0]))
-    for (o0, c0, a0), (o1, c1, a1) in zip(stops, stops[1:]):
-        if t <= o1:
-            p = 0.0 if o1 == o0 else (t - o0) / (o1 - o0)
-            c0 = hex_rgb(c0) if isinstance(c0, str) else np.asarray(c0, float)
-            c1 = hex_rgb(c1) if isinstance(c1, str) else np.asarray(c1, float)
-            return c0 + (c1 - c0) * p, a0 + (a1 - a0) * p
-    last = stops[-1]
-    return (hex_rgb(last[1]) if isinstance(last[1], str) else np.asarray(last[1], float)), last[2]
+def ramp_array(stops, t):
+    """Per-element linear interpolation through (offset, '#rrggbb') stops."""
+    offsets = np.array([o for o, _ in stops])
+    colours = np.array([hex_rgb(c) for _, c in stops])
+    t = np.clip(t, offsets[0], offsets[-1])
+    return np.stack([np.interp(t, offsets, colours[:, k]) for k in range(3)], axis=-1)
 
 
-PLATE_RAMP = [(18, 30, 54), (44, 67, 102), (94, 116, 158), (175, 197, 227)]
+# ---------------------------------------------------------------- raster noise
+
+class Noise3:
+    """Value noise in three dimensions on a hashed lattice, quintic smoothing.
+    Sampling directions on the sphere gives seamless, pole-free textures."""
+
+    def __init__(self, seed):
+        gen = np.random.Generator(np.random.PCG64(seed))
+        self.perm = gen.permutation(256).astype(np.int64)
+        self.values = gen.random(256)
+
+    def _hash(self, x, y, z):
+        p = self.perm
+        return self.values[p[(p[(p[x & 255] + y) & 255] + z) & 255]]
+
+    def __call__(self, pts):
+        x, y, z = pts[..., 0], pts[..., 1], pts[..., 2]
+        xi, yi, zi = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64), np.floor(z).astype(np.int64)
+        fx, fy, fz = x - xi, y - yi, z - zi
+        u = fx * fx * fx * (fx * (fx * 6 - 15) + 10)
+        v = fy * fy * fy * (fy * (fy * 6 - 15) + 10)
+        w = fz * fz * fz * (fz * (fz * 6 - 15) + 10)
+        out = 0.0
+        for dx in (0, 1):
+            wx = u if dx else 1 - u
+            for dy in (0, 1):
+                wy = v if dy else 1 - v
+                for dz in (0, 1):
+                    wz = w if dz else 1 - w
+                    out = out + wx * wy * wz * self._hash(xi + dx, yi + dy, zi + dz)
+        return out
+
+    def fbm(self, pts, octaves, scale, gain=0.5, ridged=False):
+        total, amp, norm_ = 0.0, 1.0, 0.0
+        for o in range(octaves):
+            n = self(pts * scale * (2 ** o) + o * 17.31)
+            if ridged:
+                n = 1 - np.abs(n * 2 - 1)
+            total = total + n * amp
+            norm_ += amp
+            amp *= gain
+        return total / norm_
 
 
-def plate_rgb(b):
-    x = max(0.0, min(0.9999, b)) * 3
-    i = int(math.floor(x))
-    p = x - i
-    a, c = np.array(PLATE_RAMP[i], float), np.array(PLATE_RAMP[i + 1], float)
-    return a + (c - a) * p
+def equirect_dirs(width, height):
+    """Body-frame directions for an equirectangular texture whose pole is the
+    Sphere's spin axis (body y): u runs round the axis, v from the top pole."""
+    lon = (np.arange(width) + 0.5) / width * 2 * math.pi - math.pi
+    lat = math.pi / 2 - (np.arange(height) + 0.5) / height * math.pi
+    lon, lat = np.meshgrid(lon, lat)
+    return np.stack([np.cos(lat) * np.sin(lon), np.sin(lat), np.cos(lat) * np.cos(lon)], axis=-1)
+
+
+def equirect_uv(d):
+    d = norm(d)
+    lon = math.atan2(d[0], d[2])
+    lat = math.asin(max(-1.0, min(1.0, d[1])))
+    return (lon + math.pi) / (2 * math.pi), (math.pi / 2 - lat) / math.pi
+
+
+def polygon_mask(parts, kinds, width, height, grow=1.0):
+    """The parts' outlines rasterised onto an equirectangular mask (body
+    frame), supersampled four times and filtered down."""
+    ss = 4
+    image = Image.new("L", (width * ss, height * ss), 0)
+    draw = ImageDraw.Draw(image)
+    for kind, centre, ring, *_ in parts:
+        if kind not in kinds:
+            continue
+        pts = []
+        for p in ring:
+            q = norm(centre + (np.asarray(p) - centre) * grow)
+            u, v = equirect_uv(q)
+            pts.append([u * width * ss, v * height * ss])
+        pts = np.array(pts)
+        cu, _ = equirect_uv(centre)
+        cx = cu * width * ss
+        # keep the outline on the centre's side of the seam
+        pts[:, 0] = np.where(pts[:, 0] - cx > width * ss / 2, pts[:, 0] - width * ss, pts[:, 0])
+        pts[:, 0] = np.where(cx - pts[:, 0] > width * ss / 2, pts[:, 0] + width * ss, pts[:, 0])
+        for shift in (-width * ss, 0, width * ss):
+            draw.polygon([(float(x + shift), float(y)) for x, y in pts], fill=255)
+    return np.asarray(image.resize((width, height), Image.LANCZOS), dtype=np.float64) / 255.0
+
+
+def blur(field, radius):
+    image = Image.fromarray(np.clip(field * 255, 0, 255).astype(np.uint8))
+    return np.asarray(image.filter(ImageFilter.GaussianBlur(radius)), dtype=np.float64) / 255.0
+
+
+def smoothstep(e0, e1, x):
+    t = np.clip((x - e0) / (e1 - e0), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+# ---------------------------------------------------------------- the Sphere
+
+SHELL_SIZE = (2048, 1024)
+INSIDE_SIZE = (2048, 1024)
+
+
+def shell_textures(parts, scene):
+    """The shell: wet dark rock with relief, organic gaps (alpha 0, cut by the
+    material's alpha test) with raised lips, shallow craters, and green glows.
+    On the face the rest camera sees, the gaps are the painting's, cast from
+    the atlas's table; elsewhere they are cut from warped noise in the same
+    manner, and the two meet across a band about the face's edge. Returns the
+    RGBA rock (its luminance is also the shell's height map) and the additive
+    green glow map."""
+    w, h = SHELL_SIZE
+    dirs = equirect_dirs(w, h)
+    n = Noise3(9001)
+    painted = [p for p in parts if p[0] == 0 and p[4]]
+    gaps = blur(polygon_mask(painted, {0}, w, h, grow=1.0), 2.0)
+    # Gaps elsewhere: blobs from domain-warped noise, about as much of the
+    # shell as the painted face shows.
+    warp = np.stack([Noise3(101 + k).fbm(dirs, 3, 4.0) - 0.5 for k in range(3)], axis=-1)
+    blobs = Noise3(303).fbm(dirs + warp * 0.22, 4, 7.0)
+    cut = np.quantile(blobs, 0.75)
+    blobs = smoothstep(cut - 0.03, cut + 0.03, blobs)
+    face = turn_matrix(0.0).T @ norm(scene.cam_rest)
+    facing = dirs @ face
+    weight = smoothstep(math.cos(math.radians(78)), math.cos(math.radians(62)), facing)
+    field = weight * gaps + (1 - weight) * blobs
+    rough = n.fbm(dirs, 4, 9.0) - 0.5
+    edge = field + rough * 0.35
+    hole = edge > 0.5
+    soft = blur(hole.astype(np.float64), 6.0)
+    lip = smoothstep(0.0, 0.25, soft) * (1 - smoothstep(0.35, 0.5, soft))
+    craters = blur(polygon_mask(parts, {2}, w, h), 3.0)
+    green = blur(polygon_mask(parts, {1}, w, h, grow=1.1), 1.2)
+
+    # Rock: broad swells, ridged veins and fine grit, with the lips raised and
+    # the crater floors sunk.
+    swell = n.fbm(dirs, 3, 2.5)
+    veins = Noise3(77).fbm(dirs, 6, 9.0, ridged=True)
+    ripples = Noise3(91).fbm(dirs, 4, 40.0, ridged=True)
+    grit = Noise3(5).fbm(dirs, 3, 140.0)
+    height = 0.34 * swell + 0.30 * veins ** 2 + 0.16 * ripples + 0.14 * grit + 0.12 * lip - 0.25 * craters
+    height = (height - height.min()) / (height.max() - height.min())
+
+    stops = [(0.0, "#0A0F13"), (0.35, "#1B262D"), (0.6, "#33434C"), (0.85, "#5A6C76"), (1.0, "#7F929C")]
+    rgb = ramp_array(stops, height)
+    # a cold blue cast in the hollows, as the painting's shell has
+    rgb = rgb * (1 - 0.12 * (1 - height))[..., None] + np.array([6, 12, 20]) * (1 - height)[..., None]
+    # the gaps' edges are in shadow, as the painting draws them
+    rgb = rgb * (1 - 0.7 * smoothstep(0.0, 0.3, soft) * (1 - smoothstep(0.42, 0.5, soft)))[..., None]
+    rgba = np.zeros((h, w, 4), np.uint8)
+    rgba[..., :3] = np.clip(np.round(rgb), 0, 255)
+    # Alpha is a soft ramp across each gap's edge, not a step: filtered and
+    # alpha-tested at 0.5 it cuts a smooth edge however close the camera comes.
+    rgba[..., 3] = np.round(np.clip(0.5 - (edge - 0.5) / 0.12, 0, 1) * 255)
+
+    glow = np.zeros((h, w, 4), np.uint8)
+    g = np.clip(green * (0.75 + 0.5 * Noise3(41).fbm(dirs, 3, 30.0)), 0, 1)
+    glow[..., :3] = np.round(np.stack([g * 16, g * 96, g * 54], axis=-1))
+    glow[..., 3] = 255
+    glow = np.asarray(Image.fromarray(glow).resize((w // 2, h // 2), Image.LANCZOS))
+    return rgba, glow
+
+
+def inside_texture():
+    """The inside wall: blue ice in faceted crystals, bright along their
+    seams and glittering, as the painting shows it through the gaps."""
+    w, h = INSIDE_SIZE
+    dirs = equirect_dirs(w, h).reshape(-1, 3)
+    gen = np.random.Generator(np.random.PCG64(2718))
+    seeds = gen.normal(size=(2600, 3))
+    seeds /= np.linalg.norm(seeds, axis=1)[:, None]
+    tree = cKDTree(seeds)
+    dist, index = tree.query(dirs, k=2)
+    cell = gen.random(len(seeds))[index[:, 0]]
+    edge = 1 - smoothstep(0.0, 0.01, dist[:, 1] - dist[:, 0])
+    # Crystal faces catch the light unevenly: a shade across each face.
+    tilt = gen.normal(size=(len(seeds), 3))[index[:, 0]]
+    facet = 0.5 + 0.5 * np.tanh(np.sum((dirs - seeds[index[:, 0]]) * tilt, axis=1) * 25.0)
+    cloud = Noise3(31).fbm(dirs, 4, 3.0)
+    streaks = Noise3(47).fbm(dirs * np.array([1.0, 3.5, 1.0]), 4, 6.0, ridged=True) ** 3
+    grain = Noise3(11).fbm(dirs, 2, 90.0)
+    sparkle = smoothstep(0.74, 0.80, Noise3(17).fbm(dirs, 2, 260.0))
+    value = (0.12 + 0.16 * cell + 0.14 * facet + 0.38 * cloud + 0.32 * streaks
+             + 0.08 * grain + 0.12 * edge + 0.5 * sparkle)
+    stops = [(0.0, "#050B17"), (0.3, "#10244A"), (0.55, "#264A8A"), (0.8, "#5B86CF"), (1.0, "#DCE8FA")]
+    rgb = ramp_array(stops, np.clip(value, 0, 1)).reshape(h, w, 3)
+    out = np.zeros((h, w, 4), np.uint8)
+    out[..., :3] = np.clip(np.round(rgb), 0, 255)
+    out[..., 3] = 255
+    return out
 
 
 # ---------------------------------------------------------------- meshes
@@ -295,13 +480,11 @@ def plate_rgb(b):
 class Mesh:
     def __init__(self, name, material):
         self.name, self.material = name, material
-        self.verts, self.uvs, self.faces, self.colours = [], [], [], []
+        self.verts, self.uvs, self.faces = [], [], []
 
-    def vertex(self, position, uv, colour=None):
+    def vertex(self, position, uv):
         self.verts.append(np.asarray(position, float))
         self.uvs.append((float(uv[0]), float(uv[1])))
-        if colour is not None:
-            self.colours.append(tuple(float(c) for c in colour))
         return len(self.verts) - 1
 
     def face(self, a, b, c, outward):
@@ -312,7 +495,7 @@ class Mesh:
         self.faces.append((a, b, c))
 
 
-def write_ase(path, meshes):
+def write_ase(meshes):
     materials = []
     for mesh in meshes:
         if mesh.material not in materials:
@@ -344,16 +527,7 @@ def write_ase(path, meshes):
         out.write("\t\t}\n\t\t*MESH_NUMTVFACES %d\n\t\t*MESH_TFACELIST {\n" % len(mesh.faces))
         for i, (a, b, c) in enumerate(mesh.faces):
             out.write("\t\t\t*MESH_TFACE %d\t%d\t%d\t%d\n" % (i, a, b, c))
-        out.write("\t\t}\n")
-        if mesh.colours:
-            out.write("\t\t*MESH_NUMCVERTEX %d\n\t\t*MESH_CVERTLIST {\n" % len(mesh.colours))
-            for i, (r, g, b) in enumerate(mesh.colours):
-                out.write("\t\t\t*MESH_VERTCOL %d\t%.4f\t%.4f\t%.4f\n" % (i, r, g, b))
-            out.write("\t\t}\n\t\t*MESH_NUMCVFACES %d\n\t\t*MESH_CFACELIST {\n" % len(mesh.faces))
-            for i, (a, b, c) in enumerate(mesh.faces):
-                out.write("\t\t\t*MESH_CFACE %d\t%d\t%d\t%d\n" % (i, a, b, c))
-            out.write("\t\t}\n")
-        out.write("\t}\n\t*MATERIAL_REF %d\n}\n" % materials.index(mesh.material))
+        out.write("\t\t}\n\t}\n\t*MATERIAL_REF %d\n}\n" % materials.index(mesh.material))
     return out.getvalue().encode("ascii")
 
 
@@ -365,168 +539,30 @@ def grid(mesh, rows, cols, position, uv, outward):
             a, b, d, e = index[r][c], index[r][c + 1], index[r + 1][c], index[r + 1][c + 1]
             mid = (mesh.verts[a] + mesh.verts[e]) * 0.5
             out = outward(mid)
-            mesh.face(a, b, e, out)
-            mesh.face(a, e, d, out)
+            if np.linalg.norm(mesh.verts[a] - mesh.verts[b]) > 1e-6:
+                mesh.face(a, b, e, out)
+            if np.linalg.norm(mesh.verts[d] - mesh.verts[e]) > 1e-6:
+                mesh.face(a, e, d, out)
 
 
-# ---------------------------------------------------------------- the Sphere
-
-SHELL_STOPS = [(0.0, "#2F4551", 1), (0.1, "#2A3D48", 1), (0.24, "#17232A", 1), (0.4, "#0F171B", 1),
-               (0.7, "#0B1013", 1), (0.9, "#040608", 1), (1.0, "#010202", 1)]
-
-
-def shell_texture():
-    """The shell's light by its angle from the point facing the key light. The
-    atlas grades the shell from that point out to 1.8 apparent radii; on the
-    sphere that is a chord of 2 sin( angle / 2 ) radii."""
-    width = 512
-    pixels = np.zeros((4, width, 4), np.uint8)
-    for x in range(width):
-        angle = (x + 0.5) / width * math.pi
-        rgb, _ = ramp(SHELL_STOPS, 2 * math.sin(angle / 2) / 1.8)
-        pixels[:, x, :3] = np.round(rgb)
-        pixels[:, x, 3] = 255
-    return pixels
-
-
-def shell_mesh(scene):
-    """A sphere of radius R whose pole faces the key light, so the shell's
-    light is a function of latitude alone."""
-    mesh = Mesh("shell", f"{MODEL_DIR}/shell")
-    pole = scene.light
-    t1 = norm(np.cross(pole, [0.0, 1.0, 0.0]))
-    t2 = np.cross(pole, t1)
-    rows, cols = 65, 129
+def sphere_meshes():
+    """The shell (outward, radius R) and the inside wall (inward, a little
+    smaller), both mapped round the Sphere's spin axis, in the body frame at
+    its painted face; the renderDef turns them."""
+    world = turn_matrix(0.0)
+    rows, cols = 97, 193
 
     def direction(r, c):
-        lat = r / (rows - 1) * math.pi
-        lon = c / (cols - 1) * 2 * math.pi
-        return pole * math.cos(lat) + (t1 * math.cos(lon) + t2 * math.sin(lon)) * math.sin(lat)
+        lat = math.pi / 2 - r / (rows - 1) * math.pi
+        lon = c / (cols - 1) * 2 * math.pi - math.pi
+        return np.array([math.cos(lat) * math.sin(lon), math.sin(lat), math.cos(lat) * math.cos(lon)])
 
-    grid(mesh, rows, cols, lambda r, c: to_engine(direction(r, c)),
-         lambda r, c: (r / (rows - 1), 0.5), lambda p: p)
-    return mesh
-
-
-ICE_MEAN = 0.8            # the ice texture's mean, which vertex colours divide out
-ICE_REPEAT = 0.06         # Sphere radii to one repeat of the ice texture
-
-
-def ice_texture():
-    """The plates' tiling detail: fractal value noise with fine cracks, about
-    ICE_MEAN on average, brightening to 1 and darkening to about 0.55."""
-    size = 512
-    gen = np.random.Generator(np.random.PCG64(4242))
-
-    def octave(cells):
-        lattice = gen.random((cells, cells))
-        x = np.arange(size) * cells / size
-        x0 = np.floor(x).astype(int)
-        f = x - x0
-        f = f * f * (3 - 2 * f)
-        a = lattice[np.ix_(x0 % cells, x0 % cells)]
-        b = lattice[np.ix_(x0 % cells, (x0 + 1) % cells)]
-        c = lattice[np.ix_((x0 + 1) % cells, x0 % cells)]
-        d = lattice[np.ix_((x0 + 1) % cells, (x0 + 1) % cells)]
-        fy, fx = f[:, None], f[None, :]
-        return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy
-
-    noise = sum(octave(c) * w for c, w in ((4, 0.45), (8, 0.25), (16, 0.15), (32, 0.1), (64, 0.05)))
-    cracks = np.minimum(np.abs(octave(6) - 0.5), np.abs(octave(12) - 0.5) * 1.3)
-    crack = np.clip(1 - cracks / 0.012, 0, 1)
-    value = 0.55 + 0.45 * np.clip((noise - noise.min()) / (noise.max() - noise.min()), 0, 1) ** 1.3
-    value = value * (1 - 0.35 * crack) + 0.25 * np.clip(noise - 0.62, 0, 1)
-    value = value * (ICE_MEAN / value.mean())
-    pixels = np.zeros((size, size, 4), np.uint8)
-    pixels[..., :3] = np.round(np.clip(value, 0, 1) * 255)[..., None]
-    pixels[..., 3] = 255
-    return pixels
-
-
-def surface_meshes(parts):
-    """The plates, green patches and craters as fans of small triangles just
-    above the shell. The plates and patches, with their rims beneath them,
-    are one blended surface: each polygon's colour is its vertices' colour
-    over the tiling ice texture, laid flat on the polygon at a random offset.
-    The craters are a second surface that darkens the shell (a multiply)."""
-    mesh = Mesh("surface", f"{MODEL_DIR}/surface")
-    craters = Mesh("craters", f"{MODEL_DIR}/craters")
-    R = rnd(31)
-    state = {}
-
-    def expand(centre, ring, amount):
-        out = []
-        for p in ring:
-            tangent = p - centre * (p @ centre)
-            out.append(norm(p + norm(tangent) * amount))
-        return out
-
-    def fan(target, centre, ring, altitude, colour, steps=3):
-        k = len(ring)
-        shared = {}
-        t1 = norm(np.cross([0.0, 1.0, 0.0] if abs(centre[1]) < 0.9 else [1.0, 0.0, 0.0], centre))
-        t2 = np.cross(centre, t1)
-        offset = (R(), R())
-
-        def uv_of(w):
-            return (offset[0] + (w @ t1) / ICE_REPEAT, offset[1] + (w @ t2) / ICE_REPEAT)
-        mesh = target
-
-        def point(i, s, t):
-            # A spoke's points are shared by the triangles either side of it:
-            # (i, s, 0) lies on spoke i, and (i, 0, t) on spoke i + 1.
-            if s == 0 and t == 0:
-                key = "centre"
-            elif s == 0:
-                key = ((i + 1) % k, t)
-            elif t == 0:
-                key = (i, s)
-            else:
-                key = (i, s, t)
-            if key not in shared:
-                w = norm(centre * (steps - s - t) + ring[i] * s + ring[(i + 1) % k] * t)
-                shared[key] = mesh.vertex(to_engine(w * altitude), uv_of(w), colour)
-            return shared[key]
-
-        for i in range(k):
-            rows = {}
-            for s in range(steps + 1):
-                for t in range(steps + 1 - s):
-                    rows[s, t] = point(i, s, t)
-            for s in range(steps):
-                for t in range(steps - s):
-                    p0, p1, p2 = rows[s, t], rows[s + 1, t], rows[s, t + 1]
-                    mesh.face(p0, p1, p2, mesh.verts[p0])
-                    if t + s + 1 < steps:
-                        mesh.face(p1, rows[s + 1, t + 1], p2, mesh.verts[p1])
-
-    world = turn_matrix(0.0)
-    light = norm(LIGHT)
-    shell = hex_rgb("#0F171B")
-
-    def lit(rgb):
-        """A colour as the vertex carries it: the ice texture's mean divided out."""
-        return tuple(float(np.clip(v / 255.0 / ICE_MEAN, 0, 1)) for v in rgb)
-
-    layers = {k: [] for k in range(5)}
-    for kind, centre, ring, tone in parts:
-        c = world @ centre
-        r = [world @ p for p in ring]
-        lam = max(0.0, c @ light)
-        if kind == 2:
-            # 0.3 * lam black over the shell, as the atlas draws a crater
-            layers[0].append((craters, c, r, (1 - 0.3 * lam,) * 3))
-        elif kind == 0:
-            layers[1].append((mesh, c, expand(c, r, 0.003), lit(hex_rgb("#05090C"))))
-            layers[2].append((mesh, c, r, lit(plate_rgb(0.3 + 0.08 * lam + (tone - 0.5) * 0.26))))
-        else:
-            rim = hex_rgb("#4CD08E") * 0.55 + shell * 0.45
-            layers[3].append((mesh, c, expand(c, r, 0.004), lit(rim)))
-            layers[4].append((mesh, c, r, lit(hex_rgb("#20724F" if lam > 0.6 else "#145D3C"))))
-    for layer in range(5):
-        for target, c, r, colour in layers[layer]:
-            fan(target, c, r, 1.0015 + 0.0003 * layer, colour)
-    return [craters, mesh]
+    uv = lambda r, c: (c / (cols - 1), r / (rows - 1))
+    shell = Mesh("shell", f"{MODEL_DIR}/shell")
+    grid(shell, rows, cols, lambda r, c: to_engine(world @ direction(r, c)), uv, lambda p: p)
+    inside = Mesh("inside", f"{MODEL_DIR}/inside")
+    grid(inside, rows, cols, lambda r, c: to_engine(world @ direction(r, c) * INSIDE), uv, lambda p: -p)
+    return [shell, inside]
 
 
 def sun_mesh():
@@ -564,27 +600,50 @@ class EarthFrame:
         return self.scene.earth + d * r
 
 
-def calibrate_depth(scene, earth):
-    """Canvas units below the limb for each theta, measured along the phi whose
-    limb point the rest camera draws at x 350 (the stock limb passes 350,408)."""
-    target = 350.0
+class Geography:
+    """Earth's own frame: the point beneath the rest camera at
+    EARTH_SUBCAMERA, north toward the limb the camera sees."""
+
+    def __init__(self, earth):
+        lat0, lon0 = (math.radians(v) for v in EARTH_SUBCAMERA)
+        a, up = earth.axis, earth.up
+        self.north = math.sin(lat0) * a + math.cos(lat0) * up
+        equator = norm(a - self.north * (a @ self.north))
+        east = np.cross(self.north, equator)
+        # longitude lon0 at `equator`: the prime meridian lies lon0 west of it
+        self.prime = equator * math.cos(lon0) - east * math.sin(lon0)
+        self.east = np.cross(self.north, self.prime)
+
+    def uv(self, d):
+        d = norm(d)
+        lat = math.asin(max(-1.0, min(1.0, d @ self.north)))
+        lon = math.atan2(d @ self.east, d @ self.prime)
+        return (lon + math.pi) / (2 * math.pi), (math.pi / 2 - lat) / math.pi
+
+
+def calibrate_phi(scene, earth):
+    """The phi whose limb point the rest camera draws at x 350 (the stock
+    limb passes 350,408)."""
     best = None
     for phi in np.linspace(-EARTH_PHI, EARTH_PHI, 4001):
         x, y = scene.project(earth.point(earth.limb, phi))
-        if math.isfinite(x) and 0 < y < 480 and (best is None or abs(x - target) < best[0]):
-            best = (abs(x - target), phi)
-    phi = best[1]
-    limb_y = scene.project(earth.point(earth.limb, phi))[1]
-
-    def depth(theta):
-        return scene.project(earth.point(theta, phi))[1] - limb_y
-    return phi, depth
+        if math.isfinite(x) and 0 < y < 480 and (best is None or abs(x - 350.0) < best[0]):
+            best = (abs(x - 350.0), phi)
+    return best[1]
 
 
-EARTH_STOPS = [(0.0, "#DBE0ED", 1), (24.0, "#D0D4E4", 1), (36.0, "#94A2C8", 1), (59.0, "#78889B", 1),
-               (110.0, "#7E8CA0", 1), (170.0, "#6E7E94", 1)]
 GLOW = [(0.0, 0.75), (3.0, 0.60), (10.0, 0.35), (17.0, 0.19), (28.0, 0.09), (45.0, 0.0)]
+# Earth's air, added over the map: white at the limb, blue beneath it.
+HAZE = [(0.0, (0.86, 0.88, 0.95)), (8.0, (0.62, 0.68, 0.82)), (22.0, (0.36, 0.44, 0.62)),
+        (45.0, (0.16, 0.22, 0.36)), (120.0, (0.06, 0.09, 0.16)), (400.0, (0.03, 0.05, 0.09))]
 EARTH_PHI = math.radians(100.0)
+HAZE_DEPTH = 400.0
+GLOW_SPAN = (-50.0, 50.0)
+# The model loader welds texture coordinates closer than r_slopTexCoord (0.001).
+# Earth's rings near the limb are closer than that across a whole-globe map,
+# so its coordinates (and the haze's) are written this many times larger and
+# the materials scale them back.
+UV_SPREAD = 1000.0
 
 
 def glow_at(units):
@@ -601,33 +660,16 @@ def theta_rings(limb, below, above, count):
     return [limb + (above if v > 0 else below) * (abs(v) ** 2.2) * (1 if v > 0 else -1) for v in s]
 
 
-def limb_circle(scene, earth):
-    """The circle the rest camera draws Earth's limb on (the stock one has
-    radius 1695 about 689,2069), through three limb points."""
-    (ax, ay), (bx, by), (qx, qy) = [scene.project(earth.point(earth.limb, phi)) for phi in (-0.5, -0.2, 0.05)]
-    dd = 2 * (ax * (by - qy) + bx * (qy - ay) + qx * (ay - by))
-    cx = ((ax * ax + ay * ay) * (by - qy) + (bx * bx + by * by) * (qy - ay) + (qx * qx + qy * qy) * (ay - by)) / dd
-    cy = ((ax * ax + ay * ay) * (qx - bx) + (bx * bx + by * by) * (ax - qx) + (qx * qx + qy * qy) * (bx - ax)) / dd
-    return cx, cy, math.hypot(ax - cx, ay - cy)
-
-
-EARTH_DEPTH = 400.0      # canvas units of Earth's colour texture beneath the limb
-CLOUD_DEPTH = 120.0      # and of its cloud deck
-GLOW_SPAN = (-50.0, 50.0)
-
-
 def earth_meshes(scene):
-    """Earth, its cloud deck and its glow. Each is graded by how far beneath
-    (or above) the limb the rest camera draws its vertex, measured radially
-    from the limb circle as the atlas grades it, so the bands keep their
-    depth all along the limb. The camera is at rest, or nearly, whenever
-    Earth is in view."""
+    """Earth, its haze and its glow. Earth carries the outro's map in its own
+    frame. The haze and the glow are graded by how far beneath (or above) the
+    limb the rest camera draws each vertex, so each band keeps its depth all
+    along the limb; the camera is at rest, or nearly, whenever Earth is in view."""
     earth = EarthFrame(scene)
-    circle = limb_circle(scene, earth)
-    phi_cal, depth = calibrate_depth(scene, earth)
+    geo = Geography(earth)
+    phi_cal = calibrate_phi(scene, earth)
     cols = 193
     phis = np.linspace(-EARTH_PHI, EARTH_PHI, cols)
-    # The limb as the rest camera draws it, finely.
     limb_xy = np.array([scene.project(earth.point(earth.limb, phi))
                         for phi in np.linspace(-EARTH_PHI, EARTH_PHI, 4001)])
     limb_xy = limb_xy[np.isfinite(limb_xy).all(axis=1)]
@@ -641,46 +683,36 @@ def earth_meshes(scene):
         """Canvas units from the drawn limb: positive over Earth, negative above it."""
         x, y = scene.project(point)
         if not math.isfinite(x):
-            return EARTH_DEPTH
+            return HAZE_DEPTH
         distance = float(np.min(np.hypot(limb_xy[:, 0] - x, limb_xy[:, 1] - y)))
         return distance if hits_earth(point) else -distance
 
     def v_of(point, lo, hi):
         return float(np.clip((beneath(point) - lo) / (hi - lo), 0.0, 1.0))
 
-    # The body: theta from beneath the camera to a little past the limb.
+    outward = lambda p: p - to_engine(scene.earth)
     rings = theta_rings(earth.limb, earth.limb, math.radians(8.0), 61)
     body = Mesh("earth", f"{MODEL_DIR}/earth")
     grid(body, len(rings), cols, lambda r, c: to_engine(earth.point(rings[r], phis[c])),
-         lambda r, c: (c / (cols - 1), v_of(earth.point(min(rings[r], earth.limb), phis[c]), 0.0, EARTH_DEPTH)),
-         lambda p: p - to_engine(scene.earth))
-    texture = np.zeros((1024, 4, 4), np.uint8)
+         lambda r, c: tuple(v * UV_SPREAD for v in geo.uv(earth.point(rings[r], phis[c]) - scene.earth)), outward)
+
+    haze = Mesh("haze", f"{MODEL_DIR}/haze")
+    haze_r = EARTH_R * 1.0004
+    grid(haze, len(rings), cols, lambda r, c: to_engine(earth.point(rings[r], phis[c], haze_r)),
+         lambda r, c: (0.5 * UV_SPREAD, UV_SPREAD * v_of(earth.point(min(rings[r], earth.limb), phis[c]), 0.0, HAZE_DEPTH)), outward)
+    haze_tex = np.zeros((1024, 4, 4), np.uint8)
+    offsets = [o for o, _ in HAZE]
     for y in range(1024):
-        rgb, _ = ramp(EARTH_STOPS, (y + 0.5) / 1024 * EARTH_DEPTH)
-        texture[y, :, :3] = np.round(rgb)
-        texture[y, :, 3] = 255
+        d = (y + 0.5) / 1024 * HAZE_DEPTH
+        rgb = [np.interp(d, offsets, [c[k] for _, c in HAZE]) for k in range(3)]
+        haze_tex[y, :, :3] = np.round(np.array(rgb) * 255)
+        haze_tex[y, :, 3] = 255
 
-    # The cloud deck: streaks laid along the limb, down to CLOUD_DEPTH beneath it.
-    deck_r = EARTH_R * 1.0003
-    deck_frame = EarthFrame(scene, deck_r)
-    lo = earth.limb
-    while depth(lo) < CLOUD_DEPTH * 1.6:
-        lo -= math.radians(0.05)
-    deck_rings = [lo + (deck_frame.limb - lo) * (i / 30) ** 0.7 for i in range(31)]
-    clouds = Mesh("clouds", f"{MODEL_DIR}/clouds")
-    repeat = 5.0
-    grid(clouds, len(deck_rings), cols, lambda r, c: to_engine(deck_frame.point(deck_rings[r], phis[c])),
-         lambda r, c: ((phis[c] + EARTH_PHI) / (2 * EARTH_PHI) * repeat,
-                       v_of(deck_frame.point(min(deck_rings[r], deck_frame.limb), phis[c]), 0.0, CLOUD_DEPTH)),
-         lambda p: p - to_engine(scene.earth))
-    cloud_tex, drift = cloud_texture(repeat)
-
-    # The glow: a shell above Earth, bright by how far from the limb the rest
-    # camera draws each point, out and in (section 12.2's profile).
+    # The glow: a shell above Earth, its rings placed by drawn distance above
+    # the limb, every 2.5 u through the glow's span (near its own limb the
+    # shell's angle barely moves its drawn place).
     halo = EarthFrame(scene, EARTH_R + 0.16)
-    # Near its own limb the shell's angle barely moves its drawn place, so
-    # its rings are placed by drawn distance above Earth's limb, every 2.5 u
-    # through the glow's span, then out to the shell's limb.
+
     def ring_at(above):
         lo, hi = 0.0, halo.limb
         for _ in range(60):
@@ -695,61 +727,22 @@ def earth_meshes(scene):
                                                    halo.limb + math.radians(0.5)]
     glow = Mesh("glow", f"{MODEL_DIR}/glow")
     grid(glow, len(halo_rings), cols, lambda r, c: to_engine(halo.point(halo_rings[r], phis[c])),
-         lambda r, c: (c / (cols - 1), 1.0 - v_of(halo.point(min(halo_rings[r], halo.limb), phis[c]),
-                                                -GLOW_SPAN[1], -GLOW_SPAN[0])),
-         lambda p: p - to_engine(scene.earth))
+         lambda r, c: (0.5, 1.0 - v_of(halo.point(min(halo_rings[r], halo.limb), phis[c]),
+                                     -GLOW_SPAN[1], -GLOW_SPAN[0])), outward)
     glow_tex = np.zeros((512, 4, 4), np.uint8)
     colour = hex_rgb("#E4ECFA")
     for y in range(512):
         above = GLOW_SPAN[0] + (y + 0.5) / 512 * (GLOW_SPAN[1] - GLOW_SPAN[0])
         glow_tex[y, :, :3] = np.round(colour * glow_at(above))
         glow_tex[y, :, 3] = 255
-    return [body, clouds, glow], texture, cloud_tex, glow_tex, drift, earth, circle
 
-
-def cloud_texture(repeat):
-    """The atlas's CLOUD_MODEL streaks: white strokes along the limb, deeper
-    ones longer and wider, on one tile of the deck that repeats `repeat`
-    times round its 200 degrees. Rows run from the limb down to CLOUD_DEPTH."""
-    R = rnd(77)
-    width, height = 1024, 128
-    span = 2 * EARTH_PHI / repeat
-    units_per_radian = 1695.0          # the stock limb circle's radius
-    tile_units = span * units_per_radian
-    alpha = np.zeros((height, width), np.float64)
-    xs = np.arange(width)[None, :]
-    ys = np.arange(height)[:, None]
-    rows_per_unit = height / CLOUD_DEPTH
-    for _ in range(int(96 * tile_units / (28.8 / 180 * math.pi * units_per_radian))):
-        dp = R() ** 1.7
-        at, d = R(), 3 + 104 * dp
-        length = 26 + R() * 130
-        w = (0.5 + dp * 7) * (0.5 + R())
-        opacity = 0.07 + R() * 0.2
-        cx = at * width
-        cy = d * rows_per_unit
-        half_len = length / 2 / tile_units * width
-        half_w = max(0.6, w / 2 * rows_per_unit)
-        for shift in (-width, 0, width):
-            dx = (xs - cx - shift) / half_len
-            dy = (ys - cy) / half_w
-            stroke = np.clip(1 - dx * dx, 0, 1) ** 0.5 * np.exp(-dy * dy * 1.6)
-            alpha = 1 - (1 - alpha) * (1 - stroke * opacity)
-    pixels = np.zeros((height, width, 4), np.uint8)
-    pixels[..., :3] = 255
-    pixels[..., 3] = np.round(np.clip(alpha, 0, 1) * 255)
-    drift = CLOUD_DRIFT / tile_units   # tile widths a second
-    return pixels, drift
-
-
-def sun_and_flare_check(scene):
-    """The rest frame's checks against section 12.2's targets."""
-    lines = []
-    cx, cy = scene.project(np.zeros(3))
-    d = scene.d1
-    r = FOCAL / math.sqrt(d * d - 1)
-    lines.append(f"Sphere at rest: centre {cx:.1f},{cy:.1f} radius {r:.1f} (target 357,222 r 186)")
-    return lines
+    # Earth turns under its clouds at CLOUD_DRIFT along the limb: in map
+    # widths a second at the limb's latitude.
+    limb_point = earth.point(earth.limb, phi_cal) - scene.earth
+    limb_lat = math.asin(norm(limb_point) @ geo.north)
+    radians_per_second = CLOUD_DRIFT / 1695.0 / max(0.2, math.cos(limb_lat))
+    drift = radians_per_second / (2 * math.pi)
+    return [body, haze, glow], haze_tex, glow_tex, drift, earth
 
 
 # ---------------------------------------------------------------- outputs
@@ -763,34 +756,52 @@ def tga(pixels):
 def material_text(drift):
     return f"""// Generated by tools/assets/generate_menu_scene.py; do not edit.
 // The main menu's 3D backdrop (docs/dev/prey-ui-visual-design.md section
-// 12.2). Every surface is unlit: the key light is baked into the shell's
-// texture, the plates are self-lit as the painting shows them, and Earth's
-// limb, cloud deck and glow are graded for the rest camera, which is where
-// the camera is whenever Earth is in view.
+// 12.2). The Sphere is a hollow shell of lit rock, cut by its gaps (alpha
+// test), over an inside wall of ice that the sun inside it lights; Earth is
+// the game's own map, under its air and its glow.
 
+// The shell: lit by the renderDef's key light (from below, Earth's side) and
+// its fill (from the front), relief from its own luminance, wet sheen, and
+// the green glows. A faint ambient keeps its dark side from going black.
 {MODEL_DIR}/shell
 {{
 	noShadows
+	noSelfShadow
+	bumpmap heightmap( {TEXTURE_DIR}/shell, 9 )
 	{{
+		blend diffusemap
 		map {TEXTURE_DIR}/shell.tga
-		clamp
-		linear
+		alphatest 0.5
+	}}
+	{{
+		blend specularmap
+		map {TEXTURE_DIR}/shell.tga
+		rgb 0.45
+	}}
+	{{
+		blend add
+		map {TEXTURE_DIR}/shell.tga
+		rgb 0.035
+		alphatest 0.5
+	}}
+	{{
+		blend add
+		map {TEXTURE_DIR}/shell_glow.tga
 	}}
 }}
 
-{MODEL_DIR}/earth
+// The inside wall, lit evenly by the sun at the centre: unlit.
+{MODEL_DIR}/inside
 {{
 	noShadows
 	{{
-		map {TEXTURE_DIR}/earth.tga
-		clamp
-		linear
+		map {TEXTURE_DIR}/inside.tga
+		rgb 0.9
 	}}
 }}
 
-// The stock sun flare's stage (guis/assets/menu/preymenu/sol), on a billboard
-// the renderDef keeps on the shell's camera side: over the shell, under the
-// plates.
+// The stock sun (guis/assets/menu/preymenu/sol) on a billboard the renderDef
+// keeps at the Sphere's centre: seen only through the gaps.
 {MODEL_DIR}/sun
 {{
 	noShadows
@@ -800,48 +811,36 @@ def material_text(drift):
 		blend add
 		map models/mapobjects/skybox/sun1.tga
 		rotate time*0.01
-		rgb solsurge[time*0.17]*1
+		rgb solsurge[time*0.17]*1.0
 		linear
 		clamp
 	}}
 }}
 
-// The craters darken the shell before the plates draw over it.
-{MODEL_DIR}/craters
+// Prey's outro Earth map, shown unlit; it turns at {CLOUD_DRIFT:g} u a second along the limb.
+{MODEL_DIR}/earth
 {{
 	noShadows
-	translucent
-	sort 3.5
 	{{
-		blend filter
-		map _white
-		vertexColor
+		map {EARTH_MAP}
+		rgb 1.12
+		scale {1 / UV_SPREAD:g}, {1 / UV_SPREAD:g}
+		scroll time*{drift:.7f}, 0
+		highres
 	}}
 }}
 
-// Each plate's colour is its vertices', over the tiling ice.
-{MODEL_DIR}/surface
-{{
-	noShadows
-	translucent
-	sort medium
-	{{
-		blend blend
-		map {TEXTURE_DIR}/ice.tga
-		vertexColor
-	}}
-}}
-
-// Drifts {CLOUD_DRIFT:g} u a second along the limb.
-{MODEL_DIR}/clouds
+{MODEL_DIR}/haze
 {{
 	noShadows
 	translucent
 	sort close
 	{{
-		blend blend
-		map {TEXTURE_DIR}/clouds.tga
-		scroll time*{drift:.6f}, 0
+		blend add
+		map {TEXTURE_DIR}/haze.tga
+		scale {1 / UV_SPREAD:g}, {1 / UV_SPREAD:g}
+		clamp
+		linear
 	}}
 }}
 
@@ -860,6 +859,10 @@ def material_text(drift):
 """
 
 
+KEY_COLOUR = (0.60, 0.66, 0.74)
+SPILL_COLOUR = (0.56, 0.60, 0.64)
+
+
 def fragment_text(scene):
     def vec(v, w=0.0):
         return "%.4f, %.4f, %.4f, %.4f" % (v[0], v[1], v[2], w)
@@ -867,6 +870,14 @@ def fragment_text(scene):
     spin_axis = to_engine(turn_matrix(0.0) @ np.array([0.0, 1.0, 0.0]), 1.0)
     from_dir = to_engine(scene.start_dir, 1.0)
     to_dir = to_engine(scene.n1, 1.0)
+    # The key light from below, on Earth's side, and a soft fill from the
+    # front and a little above: far enough to fall nearly evenly on the Sphere.
+    key = to_engine(scene.light * 14.0)
+    # The sun's light spilling out of the gaps: a small light just outside
+    # the shell's centre that brightens the face about the sun.
+    fill = to_engine(norm(scene.n1 + np.array([0.0, -0.08, 0.0])) * 1.55)
+    spill_radius = 1.15 * SCALE
+    radius = 30.0 * SCALE
     return f"""// Generated by tools/assets/generate_menu_scene.py; do not edit.
 // The main menu's 3D backdrop (docs/dev/prey-ui-visual-design.md section
 // 12.2): the Sphere and Earth under one camera with a 30 degree vertical
@@ -886,9 +897,13 @@ def fragment_text(scene):
 				model1		"{MODEL_DIR}/surface.ase"
 				modelSpin1	{vec(spin_axis, TURN_SECONDS)}
 				model2		"{MODEL_DIR}/sun.ase"
-				modelFacing2	{SCALE * 1.001:.4f}, {SUN_SIZE}, 0, 0
-				lightOrigin	100000, 0, 0, 0
-				lightColor	0, 0, 0, 0
+				modelFacing2	0, {SUN_SIZE}, 0, 0
+				lightOrigin0	{vec(key)}
+				lightColor0	{vec(KEY_COLOUR)}
+				lightRadius0	{radius:.1f}, {radius:.1f}, {radius:.1f}, 0
+				lightOrigin1	{vec(fill)}
+				lightColor1	{vec(SPILL_COLOUR)}
+				lightRadius1	{spill_radius:.1f}, {spill_radius:.1f}, {spill_radius:.1f}, 0
 				orbitCenter	0, 0, 0, 0
 				orbitFrom	{vec(from_dir, scene.d0 * SCALE)}
 				orbitTo		{vec(to_dir, scene.d1 * SCALE)}
@@ -902,26 +917,31 @@ def fragment_text(scene):
 def build():
     scene = Scene()
     parts = sphere_model(scene)
-    shell = shell_mesh(scene)
-    surface = surface_meshes(parts)
-    earth_parts, earth_tex, cloud_tex, glow_tex, drift, earth, depth = earth_meshes(scene)
+    shell_rgba, shell_glow = shell_textures(parts, scene)
+    earth_parts, haze_tex, glow_tex, drift, earth = earth_meshes(scene)
     files = {
-        PAK1 / MODEL_DIR / "backdrop.ase": write_ase(None, [shell] + earth_parts),
-        PAK1 / MODEL_DIR / "surface.ase": write_ase(None, surface),
-        PAK1 / MODEL_DIR / "sun.ase": write_ase(None, [sun_mesh()]),
-        PAK1 / TEXTURE_DIR / "shell.tga": tga(shell_texture()),
-        PAK1 / TEXTURE_DIR / "ice.tga": tga(ice_texture()),
-        PAK1 / TEXTURE_DIR / "earth.tga": tga(earth_tex),
-        PAK1 / TEXTURE_DIR / "clouds.tga": tga(cloud_tex),
+        PAK1 / MODEL_DIR / "backdrop.ase": write_ase(earth_parts),
+        PAK1 / MODEL_DIR / "surface.ase": write_ase(sphere_meshes()),
+        PAK1 / MODEL_DIR / "sun.ase": write_ase([sun_mesh()]),
+        PAK1 / TEXTURE_DIR / "shell.tga": tga(shell_rgba),
+        PAK1 / TEXTURE_DIR / "shell_glow.tga": tga(shell_glow),
+        PAK1 / TEXTURE_DIR / "inside.tga": tga(inside_texture()),
+        PAK1 / TEXTURE_DIR / "haze.tga": tga(haze_tex),
         PAK1 / TEXTURE_DIR / "glow.tga": tga(glow_tex),
         PAK0 / "materials/menu_scene.mtr": material_text(drift).encode("ascii"),
         PAK0 / "guis/mainmenu/mainmenu_scene.guifragment": fragment_text(scene).encode("ascii"),
     }
-    report = sun_and_flare_check(scene)
+    cx, cy = scene.project(np.zeros(3))
+    report = [f"Sphere at rest: centre {cx:.1f},{cy:.1f} radius {scene.r1:.1f} (target 357,222 r 186)"]
     limb = [scene.project(earth.point(earth.limb, phi)) for phi in np.linspace(-0.6, 0.1, 8)]
     report.append("Earth's limb at rest: " + " ".join(f"{x:.0f},{y:.0f}" for x, y in limb if -300 < x < 950))
-    report.append(f"parts {len(parts)}, surface vertices {sum(len(m.verts) for m in surface)}")
+    gaps = sum(1 for p in parts if p[0] == 0)
+    report.append(f"gaps {gaps}, gap coverage {1 - shell_rgba[..., 3].mean() / 255:.1%} of the shell")
     return files, report
+
+
+# Outputs earlier versions wrote that this one does not.
+RETIRED = [PAK1 / TEXTURE_DIR / name for name in ("shell_light.tga", "ice.tga", "earth.tga", "clouds.tga", "surface.tga")]
 
 
 def main(argv):
@@ -930,22 +950,23 @@ def main(argv):
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
     files, report = build()
-    stale = []
-    for path, data in files.items():
-        if not path.exists() or path.read_bytes() != data:
-            stale.append(path)
-            if not args.check:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
+    stale = [path for path in files if not path.exists() or path.read_bytes() != files[path]]
+    retired = [path for path in RETIRED if path.exists()]
     if args.verbose:
         print("\n".join(report))
-    if args.check and stale:
-        for path in stale:
+    if args.check:
+        for path in stale + retired:
             print(f"stale: {path.relative_to(ROOT).as_posix()}", file=sys.stderr)
-        print("run tools/assets/generate_menu_scene.py", file=sys.stderr)
-        return 1
-    if not args.check:
-        print(f"wrote {len(stale)} of {len(files)} files")
+        if stale or retired:
+            print("run tools/assets/generate_menu_scene.py", file=sys.stderr)
+            return 1
+        return 0
+    for path in stale:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(files[path])
+    for path in retired:
+        path.unlink()
+    print(f"wrote {len(stale)} of {len(files)} files, removed {len(retired)}")
     return 0
 
 

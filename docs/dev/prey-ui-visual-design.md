@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.24, 21 November 2026.
+Specification version 1.25, 21 November 2026.
 
 Status: reference survey and design contract. openPREY renders the stock Prey
 GUIs by default. A vector replacement of every front-end screen, the home
@@ -1303,16 +1303,16 @@ measured from the stock art in its stock rectangles, on the 4:3 canvas.
 | Element | Target | Source and tolerance |
 | --- | --- | --- |
 | Sphere | Radius 186, centred at 357,222 | The painted disc of `background3.tga` in its rectangle at 165,30 (384x388 u). Outline within 2 u |
-| Sun flare | Radius 32 at 357,224 | The stock `sol` window, 64x64 u at 325,192: 0.17 of the Sphere's radius. Additive, over the shell and under the plates |
+| Sun | Radius 32 at 357,224 | The stock `sol` window, 64x64 u at 325,192: 0.17 of the Sphere's radius. It hangs inside the hollow Sphere, between its back and front layers: additive, seen only through the gaps |
 | Earth's limb | A circle of radius 1695 about 689,2069: through 99,480, 350,408 and 639,374 | The solid edge of `background2.tga` in its rectangle at 0,330 (640x150 u). Within 3 u |
 | Earth's glow | Fades out 45 u above the limb: 0.60 at 3 u, 0.35 at 10 u, 0.19 at 17 u, 0.09 at 28 u | The painting's halo |
 | Sorting | Earth in front of the Sphere | The stock draws stars, Sphere back, sun, Sphere front, then Earth (`guis/mainmenu.gui:307-334`), so Earth's limb and glow lie over the Sphere's foot: the Sphere's disc reaches y 408 where the limb beneath it stands at y 407 |
-| Plates | 133, covering 17% of the disc | `background4.tga`. Each plate within 3 u of its painted place |
+| Gaps | 133, covering 17% of the disc | The holes in `background3.tga`, through which `background4.tga` shows the ice of the inside wall (the atlas's table calls them plates). Each gap within 3 u of its painted place |
 | Green patches | Six, in three groups about 262,271, 455,303 and 426,352 | The shell layer |
 | Portal rim | Unchanged: glow edge on a circle of radius 368 about 404,192 | Appendix B |
 
 Laid over a capture of the stock menu at the same aspect, the rest frame shows
-no doubled edge: the Sphere's outline, Earth's limb and the plates coincide
+no doubled edge: the Sphere's outline, Earth's limb and the gaps coincide
 with the painting. The arc, the navigation and the wordmark therefore sit over
 the Sphere exactly as they do in the stock menu.
 
@@ -1345,26 +1345,35 @@ hold. At rest the camera does not move: no drift, sway or shake.
 
 #### Appearance
 
-Build both bodies to reproduce the painting from the rest camera.
+Build both bodies to reproduce the painting from the rest camera, as raster
+art: textures on lit and unlit surfaces, never flat vector shapes.
 
-- **The Sphere's shell.** Near black over most of its face (`#0B1013` to
-  `#0F171B`), brightening to `#2A3D48` in a rim along the lower limb, with a
-  black crown: the light comes from below. Shallow craters; no specular
-  highlight.
-- **The plates.** Angular shards of blue ice, typically 16x6 u at rest and up
-  to 33x16 u, in loose clusters. They are self-lit: the painting shows them
-  equally bright (`prey.sphere.plate`, about `#2C4366`, with highlights toward
-  `#AFC5E3`) on the lit and the dark side. Each sits where it is painted. The
-  green patches (`#145D3C` to `#20724F`) do too.
+- **The Sphere is hollow.** The painting is two layers: a shell of dark wet
+  rock holed all over (`background3.tga`), and behind it the lit ice of the
+  inside of the far wall (`background4.tga`), which shows only through the
+  gaps, as in the game's own hollow alien forms. Build it that way: a shell
+  cut by its gaps and an inside wall beneath it, so the gaps show depth as the
+  camera moves.
+- **The shell.** Near black over most of its face (`#0B1013` to `#0F171B`),
+  brightening to `#2A3D48` in a rim along the lower limb, with a black crown:
+  the light comes from below. Relief and a wet sheen; each gap has a slight
+  lip. The green patches (`#145D3C` to `#20724F`) glow on it.
+- **The gaps and the ice.** Organic, rounded holes, typically 16x6 u at rest
+  and up to 33x16 u, each where it is painted. Through them the inside wall:
+  faceted blue ice (`prey.sphere.plate`, about `#2C4366`, with highlights
+  toward `#AFC5E3`) that glitters, as bright on the lit side as the dark,
+  because the sun inside lights it.
+- **The sun.** A small glowing light inside the Sphere, at its centre, seen
+  only through the gaps: the stock `sol`.
 - **The far side.** The painting shows one face, and the entrance looks at
-  the Sphere from 38° round it. Author the rest of the Sphere in the same
+  the Sphere from 38° round it. Hole the rest of the shell in the same
   manner, at the same density, so neither the entrance nor the turn reveals a
   bare or different surface.
-- **Earth.** A white band about 25 u deep along the limb (`#DBE0ED` to
-  `#D0D4E4`), blue-grey beneath it (`#94A2C8` to `#78889B`) under cloud, and
-  the glow above the limb, which lies over the Sphere's foot.
-- **The stock light layers stay.** Stars remain additive; the sun flare
-  brightens the shell beneath it.
+- **Earth.** It must look like Earth: oceans, land and weather, with a white
+  band about 25 u deep along the limb (`#DBE0ED` to `#D0D4E4`) where the air
+  is thickest, bluer beneath it, and the glow above the limb, which lies over
+  the Sphere's foot.
+- **The stock light layers stay.** Stars remain additive.
 
 #### The entrance
 
@@ -1420,9 +1429,9 @@ the first frames.
   Earth's surface.
 - **Stars.** They turn with the camera, 35° across the screen over the move,
   fastest at the start, and stand still at rest.
-- **First frame.** The camera opens over the plates of the Sphere's leading
-  side with the sun flare in view, so the first frame shows ice and veins
-  rather than bare shell. It covers the whole screen up to 21:9.
+- **First frame.** The camera opens over the gaps of the Sphere's leading
+  side with the sun in view through them, so the first frame shows ice through
+  the shell rather than bare rock. It covers the whole screen up to 21:9.
 - **Input.** Any key, button or click during the entrance skips to rest at
   once. The entrance never holds input for more than 1000 ms.
 - **Sound.** The music carries the move; there is no effect.
@@ -1455,32 +1464,60 @@ R, in `content/basepr/pak1/models/menu/scene/`:
 
 | Model | Holds | Moves |
 | --- | --- | --- |
-| `backdrop.ase` | The shell, Earth, its cloud deck and its glow | Never |
-| `surface.ase` | The plates with their dark rims, the green patches, and the craters | Turns once in 240 s about the Sphere's tilted axis, from rest (`modelSpin1`) |
-| `sun.ase` | One quad for the sun flare | Kept on the shell's camera side and sized to 0.17 of the Sphere's apparent radius every frame (`modelFacing2`) |
+| `backdrop.ase` | Earth, its limb haze and its glow | Never |
+| `surface.ase` | The Sphere's shell (radius R, facing out) and its inside wall (0.955 R, facing in), both mapped round the spin axis | Turns once in 240 s about the Sphere's tilted axis, from rest (`modelSpin1`) |
+| `sun.ase` | One quad for the sun | Kept at the Sphere's centre, facing the camera, and sized to 0.17 of the Sphere's apparent radius every frame (`modelFacing2`) |
 
 `tools/assets/generate_menu_scene.py` writes the meshes, their textures
 (`content/basepr/pak1/guis/assets/menu/scene/`), the material file
 (`materials/menu_scene.mtr`) and the renderDef fragment from the Interface
 Atlas's scene: its numbers and its seeded generator are ported, and the
-measured plate and patch tables are read from the atlas page itself, so the
-two cannot drift apart. `--check` reports a stale output (Meson test
-`openprey-menu-scene`). Nothing comes from the retail archives; the plate
-table is measurements, and the sun flare's material repeats the stock `sol`
-stages over the installed art at run time.
+measured tables of the painting's gaps and green patches are read from the
+atlas page itself, so the two cannot drift apart. `--check` reports a stale
+output (Meson test `openprey-menu-scene`). The Sphere's textures are raster
+art the script paints from fixed seeds; Earth's map and the sun are the
+game's own, read from the installed game at run time. Nothing from the retail
+archives is written to the repository.
 
-**Appearance.** Every surface is unlit; the scene has no light.
+**The Sphere.** Hollow, as the painting is.
 
-- **The shell's light.** Graded by each point's angle from the point that
-  faces the key light, on a sphere whose pole faces the light, so the shell
-  does not turn and its light stays put.
-- **The plates.** Each plate and patch is a fan of small triangles just above
-  the shell, coloured per vertex over a tiling ice texture laid flat on it at
-  a random offset. The craters darken the shell by multiplying it.
-- **Earth.** Its colour, its cloud deck and its glow are graded per vertex by
-  how far from the limb the rest camera draws that vertex, so each band keeps
-  its depth all along the limb. The camera is at rest, or nearly, whenever
-  Earth is in view. The cloud deck scrolls 1.5 u a second along the limb.
+- **The shell** is a 2048x1024 rock texture: fractal swells, ridged veins,
+  ripples and grit, with shallow craters. Its luminance is also its height
+  map. Its alpha holds the gaps as a soft ramp across each edge, so the alpha
+  test cuts a smooth edge even in the entrance's close-up. On the face the
+  rest camera sees, the gaps are the painting's, cast from the atlas's table;
+  elsewhere they are cut from domain-warped noise at the same density, and
+  the two meet in a band about the face's edge. The gaps' edges are shaded
+  dark, as painted. The green patches glow on it from a second, additive map.
+- **The shell is lit.** The renderDef has two lights with set radii
+  (`lightRadiusN`). The key light comes from below, on Earth's side. A small
+  spill light just outside the shell's centre brightens the face about the
+  sun, as light from inside does in the painting. Because the lighting is
+  real, it stays put while the Sphere turns. A faint ambient stage keeps the
+  dark side from going black, and a specular stage gives the wet sheen.
+- **The inside wall** is unlit faceted ice: Voronoi crystals with shaded
+  faces, streaks and glitter, evenly bright, because the sun lights it from
+  the centre. It shows only through the gaps. Being a real surface a little
+  inside the shell, it shifts behind the gaps as the camera moves.
+- **The sun** is the stock `sol` stage on its billboard at the centre. It is
+  depth-tested, so it shows only through the gaps, between the shell and the
+  far inside wall.
+
+**Earth.** Prey's outro Earth map (`textures/outro/earthcomp4096`: oceans,
+land, ice and cloud) on Earth's sphere, unlit. Earth is turned so the
+cloudy South Pacific lies beneath the rest camera, with north toward the
+limb. It turns 1.5 u a second along the limb.
+
+An additive haze over it whitens the limb and blues the disc beneath, and
+the glow lies above the limb. Both are graded per vertex by how far from the
+limb the rest camera draws that vertex, so each band keeps its depth all
+along the limb; the camera is at rest, or nearly, whenever Earth is in view.
+
+The model loader welds texture coordinates closer than `r_slopTexCoord`
+(0.001), and Earth's rings near the limb are closer than that across a
+whole-globe map. So Earth's and the haze's coordinates are written a
+thousand times larger and scaled back in their materials; welded, they
+broke the map into bricks.
 
 **The renderDef's new keys** (`src/ui/RenderWindow.cpp`, "The scene camera").
 
@@ -1491,6 +1528,8 @@ stages over the installed art at run time.
   `orbitSkip` ends it.
 - `modelRotateN`, `modelSpinN` and `modelFacingN`: a model's own rotation,
   its timed turn, and the billboard.
+- `lightRadiusN`: a light's radius (its `light_radius`), so a renderDef can
+  light a scene larger than the stock default.
 - `sceneKey`: names the GUI state the window keeps. `<key>_ok` says whether
   the scene can draw; it is decided as the menu loads, from `ui_menuScene`
   and whether the models load. `<key>_motion` says whether motion is
@@ -1530,13 +1569,16 @@ entrance, and the Sphere on its painted face, for screenshots.
   limb passes 355,407, 601,376 and 691,373.
 - The progress `e` was 0.485 at 406 ms and 0.797 at 700 ms; the table gives
   0.477 at 400 ms and 0.796 at 700 ms.
-- The first frame shows plates and the sun, and covers the screen at 4:3,
-  16:9 and 21:9.
+- The first frame shows the ice through the gaps and the sun, and covers the
+  screen at 4:3, 16:9 and 21:9.
 
 **Differences from the contract.**
 
-- The plates and patches are flat-coloured shards with an ice texture, as
-  the atlas draws them, not the painted ice of the stock art.
+- The Interface Atlas still draws the Sphere's gaps as flat ice shards over
+  the shell (its sheet 01); the menu draws them as holes into a hollow
+  Sphere, as the painting has them.
+- Earth's limb band comes from its haze over the map, not the painting's
+  exact colours.
 - The atlas's thin highlight on the shell's outline is not drawn.
 - The menu's wordmark fades in over 200 ms. Its arc and bottom bar, like the
   retained home, appear at 1000 ms without a fade.
@@ -1546,7 +1588,7 @@ entrance, and the Sphere on its painted face, for screenshots.
 A build meets this subsection when:
 
 1. At rest on a 4:3 canvas the Sphere's outline is within 2 u of radius 186
-   about 357,222, Earth's limb within 3 u of the stock circle, and each plate
+   about 357,222, Earth's limb within 3 u of the stock circle, and each gap
    within 3 u of its painted place. Laid over a capture of the stock menu,
    the rest frame shows no doubled edge.
 2. At rest Earth is in front of the Sphere: its limb and glow cover the
@@ -1555,7 +1597,7 @@ A build meets this subsection when:
 3. The entrance lasts 1200 ms to within one frame. At 180, 400 and 700 ms the
    Sphere's radius is within 5% of the table and the camera's heading within
    2°.
-4. The first visible frame shows plates and covers the screen at 4:3, 16:9
+4. The first visible frame shows the ice through the gaps and covers the screen at 4:3, 16:9
    and 21:9.
 5. Input skips the entrance, and the menu takes input by 1000 ms.
 6. The menu opened in game plays the stock opening with no camera move.
@@ -2800,6 +2842,18 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.25, 21 November 2026
+
+- Section 12.2 reinterprets the Sphere and Earth from the stock painting. The
+  Sphere is hollow: a lit rock shell cut by gaps (the measured "plates" are
+  its gaps), an inside wall of ice seen through them, and the sun inside at
+  its centre, seen only through the gaps. All of it is raster art; nothing is
+  drawn as vector shapes. Earth is the game's own outro map under a limb haze
+  and its glow. "Appearance", the rest-composition table and "As built"
+  follow, and `renderDef` gains `lightRadiusN`. The Interface Atlas's
+  drawing of the Sphere is not yet redrawn.
+- The Interface Atlas takes the version.
 
 ### Version 1.24, 21 November 2026
 

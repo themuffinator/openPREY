@@ -306,6 +306,7 @@ void idRenderWindow::CommonInit() {
 	for ( int i = 0; i < MAX_RENDERWINDOW_LIGHTS; ++i ) {
 		lightOrigin[i] = idVec4( -128.0f, 0.0f, 0.0f, 1.0f );
 		lightColor[i] = idVec4( 1.0f, 1.0f, 1.0f, 1.0f );
+		lightRadius[i].Zero();
 		lightDefs[i] = -1;
 		useLight[i] = false;
 		memset( &rLights[i], 0, sizeof( rLights[i] ) );
@@ -413,6 +414,7 @@ void idRenderWindow::UpdateRenderVars() {
 	for ( int i = 0; i < MAX_RENDERWINDOW_LIGHTS; ++i ) {
 		lightOrigin[i].Update();
 		lightColor[i].Update();
+		lightRadius[i].Update();
 	}
 
 	modelOrigin.Update();
@@ -460,6 +462,9 @@ void idRenderWindow::PreRender() {
 		spawnArgs.Set( "name", va( "light_%d", i ) );
 		spawnArgs.Set( "origin", lightOrigin[i].ToVec3().ToString() );
 		spawnArgs.Set( "_color", lightColor[i].ToVec3().ToString() );
+		if ( lightRadius[i].ToVec3() != vec3_origin ) {
+			spawnArgs.Set( "light_radius", lightRadius[i].ToVec3().ToString() );
+		}
 		gameEdit->ParseSpawnArgsToRenderLight( &spawnArgs, &rLights[i] );
 		lightDefs[i] = world->AddLightDef( &rLights[i] );
 	}
@@ -950,6 +955,10 @@ idWinVar *idRenderWindow::GetWinVarByName( const char *_name, bool fixup, drawWi
 		if ( idStr::Icmp( _name, va( "lightColor%d", i ) ) == 0 ) {
 			useLight[i] = true;
 			return &lightColor[i];
+		}
+		if ( idStr::Icmp( _name, va( "lightRadius%d", i ) ) == 0 ) {
+			useLight[i] = true;
+			return &lightRadius[i];
 		}
 	}
 

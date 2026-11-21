@@ -854,6 +854,11 @@ const idRegEntry idWindow::RegisterVars[] = {
 	{ "lightColor3", idRegister::VEC4 },
 	{ "lightOrigin4", idRegister::VEC4 },
 	{ "lightColor4", idRegister::VEC4 },
+	{ "lightRadius0", idRegister::VEC4 },
+	{ "lightRadius1", idRegister::VEC4 },
+	{ "lightRadius2", idRegister::VEC4 },
+	{ "lightRadius3", idRegister::VEC4 },
+	{ "lightRadius4", idRegister::VEC4 },
 	// openPREY: the renderDef's scene camera and bodies (RenderWindow.cpp).
 	{ "fovY", idRegister::FLOAT },
 	{ "sceneKey", idRegister::STRING },
