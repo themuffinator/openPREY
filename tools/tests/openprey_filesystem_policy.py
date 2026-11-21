@@ -59,8 +59,19 @@ def validate_pk4_policy(source: str) -> None:
     resolver_probe = function_body(source, "static bool FS_HasGameFilesAtGameDirPath(")
     misplaced = function_body(source, "bool idFileSystemLocal::FindMisplacedOfficialPaks(")
 
-    for name in ("pak000.pk4", "pak001.pk4", "pak002.pk4", "pak003.pk4", "pak004.pk4"):
-        require(source, f'"{name}"', "classic Prey PK4 catalog")
+    # The 3-CD set, the same install patched to 1.4 and a Steam install agree
+    # (docs/dev/prey-rebase/official-pk4-checksums.md).
+    for name, checksum in (
+        ("pak000.pk4", "0x7dc00ede"),
+        ("pak001.pk4", "0xd06647b1"),
+        ("pak002.pk4", "0x57dce443"),
+        ("pak003.pk4", "0x263006fe"),
+        ("pak004.pk4", "0xcc075380"),
+    ):
+        require(source, f'{{ "{name}",\t\t\t\t{checksum},', f"classic Prey PK4 catalog {name}")
+    # Patches replace optional packs, so they stay presence-only.
+    for name in ("pak005.pk4", "pak006.pk4", "pak020.pk4", "pak040.pk4", "game00.pk4", "game01.pk4", "game02.pk4", "game03.pk4"):
+        require(source, f'{{ "{name}",\t\t\t\t0,', f"presence-only optional PK4 {name}")
     for name, checksum in (
         ("pak_data.pk4", "0xbe295ead"),
         ("pak_sound.pk4", "0xe0c27ee2"),

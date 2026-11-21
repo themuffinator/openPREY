@@ -444,13 +444,14 @@ typedef struct {
 } officialPk4Info_t;
 
 static officialPk4Info_t officialPk4s[] = {
-	// Prey CD/DVD layout. Checksums remain presence-only until clean retail
-	// samples for every disc/patch variant have been catalogued.
-	{ "pak000.pk4",				0,			false,	true },
-	{ "pak001.pk4",				0,			false,	true },
-	{ "pak002.pk4",				0,			false,	true },
-	{ "pak003.pk4",				0,			false,	true },
-	{ "pak004.pk4",				0,			false,	true },
+	// Prey CD/DVD layout. The 3-CD set's discs, the same install patched to 1.4
+	// and a Steam install carry identical pak000-pak004 (issues #36 and #37);
+	// official-pk4-checksums.md records the samples.
+	{ "pak000.pk4",				0x7dc00ede,	false,	true },
+	{ "pak001.pk4",				0xd06647b1,	false,	true },
+	{ "pak002.pk4",				0x57dce443,	false,	true },
+	{ "pak003.pk4",				0x263006fe,	false,	true },
+	{ "pak004.pk4",				0xcc075380,	false,	true },
 
 	// Consolidated layout used by legacy digital distributions.
 	{ "pak_data.pk4",			0xbe295ead,	false,	true },
@@ -458,9 +459,11 @@ static officialPk4Info_t officialPk4s[] = {
 	{ "pak_en_v.pk4",			0x952b910e,	false,	true },
 	{ "pak_en_t.pk4",			0x6625f12d,	false,	true },
 
-	// Known optional patch and game media. The gameXX packs are not assumed to
-	// be binary-only: unlike Quake 4's game000 family, their contents have not
-	// yet been verified across all Prey releases.
+	// Known optional patch and game media, presence-only: patches replace some
+	// of them (game00.pk4 has a disc and a 1.4 variant), and installs at an
+	// earlier patch level have not been catalogued. The gameXX packs are not
+	// assumed to be binary-only: unlike Quake 4's game000 family, their contents
+	// have not yet been verified across all Prey releases.
 	{ "pak005.pk4",				0,			false,	true },
 	{ "pak006.pk4",				0,			false,	true },
 	{ "pak020.pk4",				0,			false,	true },

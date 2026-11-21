@@ -73,7 +73,7 @@ conservative validation states unless that evidence directly exercises them.
 | `corelibs-25-maya-exporter-signature` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `FW-01` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `FW-02` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
-| `FW-03` | PORTED | IMPLEMENTED | PARTIAL-RUNTIME-CHECKED | Digital retail assets passed. A synthetic numbered-pak layout reached the menu; genuine CD-era checksum capture remains TODO-PK4-CLASSIC. |
+| `FW-03` | PORTED | IMPLEMENTED | RUNTIME-CHECKED | Digital retail assets passed. Classic pak000-pak004 checksums were captured from a 3-CD install (on disc and patched to 1.4) and a Steam install, which agree, and are now enforced (`official-pk4-checksums.md`); optional packs stay presence-only. |
 | `FW-04` | PORTED | IMPLEMENTED | RUNTIME-CHECKED | Neutral-directory launch auto-discovered the installed retail Prey asset root and reached the stock menu. |
 | `FW-05` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
 | `FW-06` | PORTED | IMPLEMENTED | VALIDATION-PENDING | Rebased implementation is present; final automated and retail-runtime matrix evidence has not yet been recorded. |
@@ -193,7 +193,6 @@ conservative validation states unless that evidence directly exercises them.
 | TODO-RENDER-BACKENDS | Prey feature parity for ModernGL and Vulkan; legacy GL/ARB2 is the first target. | Backend-specific material, interaction, portal, spirit, glow, and beam captures from the engine `screenshot` command. |
 | TODO-BSE-NESTED-EFFECTS | Nested BSE `SEG_EFFECT` spawning is gated; the core BSE subsystem itself is active. | Add a Prey-v7-compatible callback/spawn path and validate stock nested FX with engine logs and screenshots. |
 | TODO-SOUND-DSP | `SetSpiritWalkEffect` and `SetVoiceDucker` are compatibility no-ops. | Implement DSP behavior or document a permanent compatibility no-op with audio tests. |
-| TODO-PK4-CLASSIC | Classic-layout retail PK4 checksum values are not yet independently captured. | Record hashes from a verified CD-era install and add checksum tests without weakening unknown-layout startup. |
 | TODO-MIRROR-CLIP | Retail mirror clip-plane math parity. | Add the planned comparison fixture and renderer capture evidence. |
 | TODO-RELEASE-LANES | Inherited ARM64/macOS/signing/manual-publish fixtures, plus the legacy Linux sanitizer and native-Wayland workflow jobs, are manual-only and false-gated because they still encode OpenQ4 lane identities or split-module assumptions. | Rebuild lanes around the in-tree game library, `basepr`, one `game_<arch>` module, and openPREY payload/signing identities before removing the gates. Platform-independent sanitizer source invariants remain active separately. |
 | TODO-UPSTREAM-PRS | Generic Doom 3/idTech 4 compatibility changes suitable for upstreaming. | Split title-neutral commits and submit them upstream after openPREY runtime validation. |
