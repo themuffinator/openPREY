@@ -1,7 +1,9 @@
 # TrueType font system
 
-openPREY can render scalable TrueType faces reconstructed from Prey (2006)'s
-retail bitmap fonts. The renderer rasterises those same letterforms at the
+openPREY renders GUI, HUD and console text from scalable TrueType faces. The
+menu, alien and console faces are reconstructed from Prey (2006)'s retail
+bitmap fonts; the default face is Talon, drawn for openPREY (see
+[Talon](#talon-the-default-face)). The renderer rasterises them at the
 display's resolution instead of magnifying the fixed 12/24/48-pixel atlases.
 The original bitmap path remains available as the compatibility fallback.
 
@@ -10,9 +12,9 @@ The original bitmap path remains available as the compatibility fallback.
 The generated files live in `content/basepr/pak0/fonts/` and use the names that
 the renderer resolves after a GUI requests a font.
 
-| File | GUI / engine consumer | Retail source |
+| File | GUI / engine consumer | Source |
 | --- | --- | --- |
-| `english.ttf` | `fonts` (the default UI/HUD face) | `fonts/english/fontImage_48.dat` and five atlas pages |
+| `english.ttf` | `fonts` (the default UI/HUD face) | Talon, drawn in `tools/assets/fonts/talon/`; no retail source |
 | `menu.ttf` | `fonts/menu` | `fonts/english/menu/fontImage_48.dat` and five atlas pages |
 | `alien.ttf` | `fonts/alien` | `fonts/english/alien/fontImage_48.dat` and three atlas pages |
 | `bigchars.ttf` | `textures/bigchars` (console and loading text) | `textures/gfx/bigchars.tga` |
@@ -22,6 +24,12 @@ their base symbol rather than mixing the retail alien alphabet with donor
 scripts. The other three faces carry the extended Latin, Greek, Cyrillic,
 Arabic, Hebrew, punctuation and HUD-symbol coverage supplied by the shared
 generator.
+
+`english.ttf` is licensed under the SIL Open Font License 1.1
+([LICENSES/OFL-1.1.txt](../../LICENSES/OFL-1.1.txt)): Talon is openPREY's own
+drawing, and its glyphs for the scripts it does not draw are derived from the
+Noto fonts, which are under the same licence. The traced faces keep the
+attribution to the retail bitmap fonts in their name tables.
 
 ## Rebuild process
 
@@ -56,14 +64,25 @@ python tools/assets/fonts/build_openprey_fonts.py `
 ```
 
 Pass `--faces english,menu,alien,bigchars` to rebuild a selected subset. The
-output must contain all four files before a runtime package is made.
+output must contain all four files before a runtime package is made. Talon
+needs no retail extraction, so the default face alone rebuilds with:
 
-The current `english.ttf`, `menu.ttf` and `alien.ttf` are build 1.100
-(10 November 2026; `menu.ttf` regenerated 11 November 2026 with the image-rect
-stretch described under Pipeline). Against the retail 48-point coverage of
-every traced slot, as the bitmap path draws it, their mean
-intersection-over-union is 0.976, 0.974 and 0.966, and every advance still
-matches its `.dat` record exactly. The menu figure is measured against each
+```powershell
+python tools/assets/fonts/build_openprey_fonts.py --faces english `
+  --donors .tmp/fontdonors --output content/basepr/pak0/fonts
+```
+
+Talon's construction needs [Shapely](https://pypi.org/project/shapely/) 2.x
+besides FontTools, NumPy and Pillow. The build is deterministic: rebuilding
+from the same sources gives the same bytes.
+
+`english.ttf` is Talon build 2.000 (21 November 2026). The current `menu.ttf`
+and `alien.ttf` are build 1.100 (10 November 2026; `menu.ttf` regenerated
+11 November 2026 with the image-rect stretch described under Pipeline).
+Against the retail 48-point coverage of every traced slot, as the bitmap path
+draws it, their mean intersection-over-union is 0.974 and 0.966, and every
+advance still matches its `.dat` record exactly. The traced default face it
+replaced, build 1.100, scored 0.976. The menu figure is measured against each
 atlas block stretched over its image rect; the earlier menu build, traced 1:1,
 scores 0.61 on that measure because its letters were 3 units short and lifted
 off the baseline. `bigchars.ttf` remains build
@@ -111,6 +130,56 @@ atlas's `@font-face` block, so the atlas always draws what the engine ships.
 6. `bigchars` is traced from its 16×16 source grid and forced to one-cell
    advances, matching the console's existing fixed-cell indexing.
 
+## Talon, the default face
+
+Talon replaced the traced retail default face on 21 November 2026. The retail
+face was condensed and heavy, with counters so narrow that small HUD text
+clogged; its tracing inherited that. Talon keeps the retail layout and the
+Prey look, and fixes legibility:
+
+- **Two sources.** Impact gives the condensed frame, the very tall x-height
+  (0.80 of the capital height), straight-sided bowls and terminals cut square
+  to an axis. The PREY wordmark gives the bowls: superellipse corners
+  (exponent 2.6) with a large outer radius around a tight inner one, softly
+  rounded outer corners where a stroke turns (E, F, L, P, R, B, D), R's
+  straight diagonal leg and the straight spines of S, s, 2, 3 and 5. No
+  outline is traced from either.
+- **Lighter and more open.** Stems are 0.19 of the capital height (retail
+  face 0.215, Impact 0.26) and a line of text carries 12% less ink than the
+  retail face. The counter of `o` is 2.3 times as wide.
+- **Same set width.** Across the stock menu labels Talon sets 1.2% narrower
+  than the retail face at equal capital height, so retail GUI rects keep
+  fitting and centred labels land on the same pixels.
+- **Shapes that cannot be confused.** `l` has a tail and `1` a flag; `O` is an
+  oval and `0` a squared slot; figures are tabular (one advance for all ten).
+
+Its own drawings cover ASCII, the Latin-1 and Windows-1252 letters and
+symbols, the combining accents, Greek, and the Russian and Ukrainian Cyrillic
+letters (lower-case Cyrillic drawn as small capitals, as grotesques do). The
+shared pipeline then composes the accented letters of Latin-1 and Latin
+Extended, Greek and Cyrillic from Talon's letters and marks, builds stroked
+letters and the remaining Latin-1 symbols from its parts, draws the HUD
+shapes at its weight, and takes what is left (IPA, the rarer Cyrillic, Arabic,
+Hebrew) from Noto at Talon's weight and width. The face covers exactly the
+code points the traced face did.
+
+### Construction
+
+`tools/assets/fonts/talon/glyphs.py` draws every glyph on a 1000-unit grid
+(capital height 700, x-height 560, ascender 730, descender −150, stems 132
+and 124) from the parts in `geometry.py`: superellipse bowls, soft turns, and
+straight strokes clipped flat. Shapely combines the parts as polygons, so
+curves are sampled densely; `to_path` then finds each run of samples that came
+from a curve (outline turning less than 14° per vertex along short edges),
+fits it with cubic Béziers under fixed end tangents, converts those to
+quadratics within 0.4 units, and leaves straight runs and corners as lines.
+`TalonFaceBuilder` in `build_openprey_fonts.py` hands the drawn glyphs and
+marks to the shared `FaceBuilder` in place of a retail trace. The line box
+stays the retail face's (ascender 1920, descender at least 299 font units).
+
+At runtime nothing about the face is special: `R_TTFFitSlotsToRetail` fits
+it to the retail 12, 24 and 48 point slots like any other face.
+
 ## Runtime
 
 `src/renderer/tr_fontTTF.cpp` loads a requested face from `fonts/*.ttf`, builds
@@ -149,10 +218,11 @@ exist (always, for a Prey install):
   em against its 24), so it is rasterised that much finer to stay sharp.
 
 Widths and advances are not fitted. With `r_ttfFontDebug 1` the log reports each
-slot's fit; the current faces give english 0.970 / 1.031 / 1.000 and menu
-0.662 / 0.834 / 1.000 at 12 / 24 / 48 point. On the main menu and the opening
-caption at 1440x1080, TTF and bitmap text start and end on the same pixel rows,
-or one row apart where antialiasing differs. A face with no retail `.dat` behind
+slot's fit; the current faces give english (Talon) 1.071 / 1.071 / 1.000 and
+menu 0.662 / 0.834 / 1.000 at 12 / 24 / 48 point. The traced default face
+Talon replaced gave 0.970 / 1.031 / 1.000. With that face, on the main menu and
+the opening caption at 1440x1080, TTF and bitmap text started and ended on the
+same pixel rows, or one row apart where antialiasing differed. A face with no retail `.dat` behind
 it stays a uniform rescale under the `ttf/` name.
 
 The console and loading paths do not use `RegisterFont`; they directly slice

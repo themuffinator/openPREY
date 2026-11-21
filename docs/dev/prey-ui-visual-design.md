@@ -1,6 +1,6 @@
 # openPREY UI Visual Design
 
-Specification version 1.26, 21 November 2026.
+Specification version 1.27, 21 November 2026.
 
 Status: reference survey and design contract. openPREY renders the stock Prey
 GUIs by default. A vector replacement of every front-end screen, the home
@@ -406,18 +406,20 @@ body behind the text rather than recolouring the text.
 ## 5. Typography and language
 
 Prey ships three faces in `fonts/english/` (each in 12, 24 and 48-point
-atlases). openPREY ships scalable TrueType tracings of them in
-`content/basepr/pak0/fonts/` (`menu.ttf`, `english.ttf`, `alien.ttf`; see
-[ttf-font-system.md](ttf-font-system.md)); the retail atlases themselves stay
-out of Git. Use the tracings for any replacement or reference drawing; their
-advances match the retail records exactly.
+atlases). openPREY ships scalable TrueType faces in
+`content/basepr/pak0/fonts/` (see [ttf-font-system.md](ttf-font-system.md)):
+`menu.ttf` and `alien.ttf` are tracings of the retail display and alien
+faces, whose advances match the retail records exactly, and `english.ttf` is
+Talon, openPREY's own body face, which replaced the tracing of the retail body
+face. The retail atlases themselves stay out of Git. Use the shipped faces for
+any replacement or reference drawing.
 
 ### Faces
 
 | Face (path) | Character | Stock use |
 | --- | --- | --- |
 | Display (`fonts/menu`) | Very wide extended geometric face; lower case renders as small capitals | Main navigation, frame titles, bottom bars, loading level name |
-| Body (`fonts/english`, internal name `prey`) | Condensed, heavy, squared curves, very tall x-height | Setting rows, values, buttons, lists, dialogs, help, HUD text |
+| Body (`fonts/english`, internal name `prey`) | Retail: condensed, heavy, squared curves, very tall x-height. openPREY ships Talon in its place: Impact's condensed frame with the wordmark's superellipse bowls, a step lighter and twice as open | Setting rows, values, buttons, lists, dialogs, help, HUD text |
 | Alien (`fonts/alien`) | The Hider script: one stem per glyph built from dots, bars, hooks and rings, every glyph at full cell height | Untranslated device GUIs (section 11) |
 
 Measured from glyph ink in the 48-point atlases:
@@ -427,6 +429,11 @@ Measured from glyph ink in the 48-point atlases:
 | Display | 0.375 | 0.72 | 2.0 (H), 2.6 (M) | Baseline sits 6 texels above the cell foot |
 | Body | 0.69 | 0.82 | 0.58 | Space 0.30 of cap height |
 | Alien | 0.71 (full cell) | 1.0 | 0.55 | No distinct lower case |
+
+Talon, measured from its outlines: cap height 0.70 of the em, x-height 0.80
+of the cap, H advance 0.61 of the cap height, stem 0.19 of the cap height
+(retail body face 0.215), space 0.31 of the cap height, figures tabular. At
+equal cap height it sets 1.2% narrower than the retail body face.
 
 Compare faces by cap height: at the same `textscale` the body face's capitals
 are 1.8 times taller than the display face's.
@@ -1779,7 +1786,10 @@ Tommy's three New Game portraits, which are pictures, not furniture.
 - **Type.** The display face for navigation, titles and bottom bars, the body
   face for buttons and prompts, at the stock `textscale` values. The retained
   interface draws the traced faces 6% smaller than the stock atlases at the
-  same em, so the generator raises sizes by that much (`FONT_FIT`). It places
+  same em, so the generator raises sizes by that much (`FONT_FIT`). Talon's
+  capitals are 2% taller per em than the traced body face's they replaced,
+  so retained body text now draws about 2% larger than stock; `FONT_FIT` was
+  measured before the change and is unchanged. It places
   each label so that its capitals land where the stock window draws them: in
   a stock window the centre of the capitals lies 0.84 em (display) or 0.76 em
   (body) below the window's top plus `textaligny`; in a retained line it lies
@@ -2384,7 +2394,7 @@ openPREY's own marks live in `assets/`:
 | README banner | `assets/docs/img/banner.png` | "open" in a white geometric sans beside "PREY" in dark navy extended capitals, over the Sphere and the glowing spirit hawk |
 | Release package home | `assets/release/README.html` | The `README.html` at the root of every package: the portal rim, Sphere and Earth's limb behind the hawk and wordmark, the arc of hooks as its section menu, the home bottom bar for its documentation links, and claw-cornered frames with setting-row plates and 3-slice buttons for its content |
 | Project overview and documentation portal | `assets/docs/README.html`; `SITE_CSS` in `tools/build/generate_release_docs.py` | The same vocabulary for the repository overview page and every packaged documentation page; side columns are tab containers whose links are side tabs |
-| Web faces | `assets/docs/fonts/openprey-{menu,default}.woff` | The display and body tracings, subset for the pages above by `tools/assets/fonts/embed_atlas_fonts.py`; the release home embeds them so it works offline from an unpacked archive |
+| Web faces | `assets/docs/fonts/openprey-{menu,default}.woff` | The display tracing and Talon, subset for the pages above by `tools/assets/fonts/embed_atlas_fonts.py`; the release home embeds them so it works offline from an unpacked archive |
 | Consoles | `kConsole*Color` in `src/framework/Console.cpp`, `S_COLOR_CONSOLE` in `src/idlib/Str.cpp`, `src/sys/sys_console_theme.h` | In-game console: black field (`prey.space`), text, edge and accents in `prey.portal.core` `#A4F9FE`, selection `prey.portal.body` `#2F64DC`, version `#6D7F95`. System console (Win32 and SDL): dark slate from `prey.sphere.shell`, never black: window `#0F171B`, log `#172229`, input `#121B21`, buttons `#1F2D36`/`#2A3D48`, borders `#2A3D48`/`#4A6F84`, text `#A4F9FE`, secondary text `#7F95AA`; the fatal-error strip keeps its red-orange |
 
 Rules for project material:
@@ -2431,8 +2441,9 @@ sections it draws:
 Example rows, names and scene dressing are placeholders and are labelled as
 such. The home sheet labels the 3D backdrop as built.
 
-- It contains no retail art or captures. It draws in Prey's own three faces,
-  as the TrueType tracings openPREY ships in `content/basepr/pak0/fonts`
+- It contains no retail art or captures. It draws in the three faces
+  openPREY ships in `content/basepr/pak0/fonts` (the display and alien
+  tracings and Talon)
   ([ttf-font-system.md](ttf-font-system.md)), subset to Latin and embedded as
   WOFF by `tools/assets/fonts/embed_atlas_fonts.py`; run that tool after any
   font rebuild. The same run refreshes the release package home and the web
@@ -2896,6 +2907,16 @@ carries their summaries.
   (`def/consoles.def:497,534`), which are not in the archives.
 
 ## Appendix D. Change record
+
+### Version 1.27, 21 November 2026
+
+- Section 5: the body face is Talon, drawn for openPREY, in place of the
+  tracing of the retail body face: Impact's condensed frame and tall
+  x-height with the wordmark's superellipse bowls, stems 0.19 of the cap
+  height against 0.215, counters about twice as open, and the same set width
+  within 1.2%. Its measurements join the face table; section 12.5 notes that
+  retained body text draws about 2% larger under the unchanged `FONT_FIT`.
+- Section 13: the web faces and the Interface Atlas embed Talon.
 
 ### Version 1.26, 21 November 2026
 

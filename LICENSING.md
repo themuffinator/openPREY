@@ -7,6 +7,7 @@ not make every component GPL-licensed or permit relicensing SDK-derived code.
 | --- | --- |
 | Engine and engine-authored support code (everything under `src/` outside the game trees below) | [GNU GPL version 3](LICENSE), retained per-file notices and the applicable [Doom 3](LICENSES/DOOM-3-ADDITIONAL-TERMS.txt) or [Doom 3 BFG](LICENSES/DOOM-3-BFG-ADDITIONAL-TERMS.txt) Additional Terms |
 | SDK-derived game library in `src/game/`, `src/Prey/` and `src/preyengine/`, including openPREY's additions to it such as the multiplayer bots | [Prey Software Development Kit Limited Use License Agreement](LICENSES/PREY-SDK-EULA.rtf), with original notices and any explicit per-file third-party terms preserved |
+| Talon, the default UI and HUD face (`content/basepr/pak0/fonts/english.ttf`), and its web subsets (`assets/docs/fonts/openprey-default.woff` and the copies embedded in the documentation pages) | [SIL Open Font License 1.1](LICENSES/OFL-1.1.txt); its glyphs for scripts Talon does not draw are derived from the Noto fonts under the same licence |
 | Third-party dependencies | Their own retained licences; see [dependency notices](LICENSES/), the individual source trees and the Meson wraps |
 | Retail Prey content | Not included or relicensed; users supply their own content |
 

@@ -1,4 +1,4 @@
-"""Embed openPREY's traced Prey faces into the Interface Atlas and the release pages.
+"""Embed openPREY's shipped faces into the Interface Atlas and the release pages.
 
 Usage:
     python tools/assets/fonts/embed_atlas_fonts.py
@@ -59,6 +59,9 @@ UNICODES = (
 
 def packed(path: Path) -> bytes:
     font = TTFont(path)
+    # Keep the shipped face's fixed timestamp, so an unchanged face packs to the
+    # same bytes and a rerun rewrites only the faces that changed.
+    font.recalcTimestamp = False
     options = subset.Options()
     options.flavor = "woff"
     options.layout_features = ["kern"]
