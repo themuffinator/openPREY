@@ -3053,20 +3053,6 @@ void idSessionLocal::SetMainMenuBackgroundMontageGuiVars( void ) {
 	guiMainMenu->SetStateInt( "menu_bg_count", numMenuBackgrounds );
 }
 
-static const idMaterial *Session_FindFirstResolvedMaterial( const char * const *materialNames, int materialCount ) {
-	const idMaterial *fallback = NULL;
-	for ( int i = 0; i < materialCount; i++ ) {
-		const idMaterial *material = declManager->FindMaterial( materialNames[i], true );
-		if ( fallback == NULL ) {
-			fallback = material;
-		}
-		if ( material != NULL && material->GetState() != DS_DEFAULTED ) {
-			return material;
-		}
-	}
-	return fallback;
-}
-
 static idUserInterface *Session_FindFallbackLoadingGui() {
 	static const char *fallbackGuiPaths[] = {
 		"guis/map/loading.gui",
@@ -3105,84 +3091,15 @@ void idSessionLocal::PrimeMainMenuGuiResources( void ) {
 }
 
 static void Session_DrawFallbackLoadingScreen() {
-	const float virtualWidth = static_cast<float>( SCREEN_WIDTH );
-	const float virtualHeight = static_cast<float>( SCREEN_HEIGHT );
-	float splashX = 0.0f;
-	float splashY = 0.0f;
-	float splashW = virtualWidth;
-	float splashH = virtualHeight;
-	float correctedX = 0.0f;
-	float correctedY = 0.0f;
-	float correctedW = virtualWidth;
-	float correctedH = virtualHeight;
-	float textScaleX = 1.0f;
-	float textScaleY = 1.0f;
-
-	float viewportWidth = static_cast<float>( engineWindowState.uiViewportWidth );
-	float viewportHeight = static_cast<float>( engineWindowState.uiViewportHeight );
-	if ( viewportWidth <= 0.0f || viewportHeight <= 0.0f ) {
-		viewportWidth = static_cast<float>( engineWindowState.vidWidth );
-		viewportHeight = static_cast<float>( engineWindowState.vidHeight );
-	}
-
-	if ( viewportWidth > 0.0f && viewportHeight > 0.0f ) {
-		const float scaleX = viewportWidth / virtualWidth;
-		const float scaleY = viewportHeight / virtualHeight;
-		const float uniformPhysicalScale = ( scaleX < scaleY ) ? scaleX : scaleY;
-		const float drawWidth = virtualWidth * uniformPhysicalScale;
-		const float drawHeight = virtualHeight * uniformPhysicalScale;
-		const float virtualPerPhysicalX = virtualWidth / viewportWidth;
-		const float virtualPerPhysicalY = virtualHeight / viewportHeight;
-
-		textScaleX = uniformPhysicalScale * virtualPerPhysicalX;
-		textScaleY = uniformPhysicalScale * virtualPerPhysicalY;
-		correctedX = ( viewportWidth - drawWidth ) * 0.5f * virtualPerPhysicalX;
-		correctedY = ( viewportHeight - drawHeight ) * 0.5f * virtualPerPhysicalY;
-		correctedW = virtualWidth * textScaleX;
-		correctedH = virtualHeight * textScaleY;
-	}
-
-	if ( cvarSystem->GetCVarBool( "ui_aspectCorrection" ) ) {
-		splashX = correctedX;
-		splashY = correctedY;
-		splashW = correctedW;
-		splashH = correctedH;
-	}
-
+	// openPREY: the screen between startup and the menu, and whenever nothing
+	// else draws, is the initializing screen carried on: the retained document
+	// as the last startup step left it (RetainedUI_DrawInitialization). It
+	// replaces the stock loading painting; black is left only for a document
+	// that cannot draw.
 	renderSystem->SetColor( colorBlack );
 	renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 1, 1, declManager->FindMaterial( "_white" ) );
-
-	static const char *splashMaterialCandidates[] = {
-		"guis/assets/loading/loading",
-		"gfx/guis/loadscreens/generic",
-		"gfx/splashScreen",
-		"gfx/splashscreen"
-	};
-	const idMaterial *splashMaterial = Session_FindFirstResolvedMaterial(
-		splashMaterialCandidates,
-		static_cast<int>( sizeof( splashMaterialCandidates ) / sizeof( splashMaterialCandidates[0] ) ) );
-	if ( splashMaterial ) {
-		renderSystem->SetColor( colorWhite );
-		// As the level loading screen does: in a window that is not 4:3, draw the
-		// picture composed from the art and its _left/_right/_top/_bottom tiles
-		// across the whole canvas instead of the 4:3 art between black bars.
-		idStr expandedImage;
-		const idMaterial *expandedMaterial = NULL;
-		if ( cvarSystem->GetCVarBool( "ui_aspectCorrection" ) &&
-			Session_EnsureExpandedLoadingBackground( splashMaterial->GetName(), expandedImage ) ) {
-			expandedMaterial = declManager->FindMaterial( expandedImage.c_str() );
-			if ( expandedMaterial != NULL && expandedMaterial->TestMaterialFlag( MF_DEFAULTED ) ) {
-				expandedMaterial = NULL;
-			}
-		}
-		if ( expandedMaterial != NULL ) {
-			const_cast<idMaterial *>( expandedMaterial )->SetSort( SS_GUI );
-			renderSystem->DrawStretchPic( 0, 0, virtualWidth, virtualHeight, 0, 0, 1, 1, expandedMaterial );
-		} else {
-			renderSystem->DrawStretchPic( splashX, splashY, splashW, splashH, 0, 0, 1, 1, splashMaterial );
-		}
-	}
-
+	renderSystem->SetColor( colorWhite );
+	RetainedUI_DrawInitialization( NULL );
 	renderSystem->SetColor( colorWhite );
 }
 

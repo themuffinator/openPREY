@@ -7045,50 +7045,6 @@ static int Common_CountVisibleSmallChars( const char *string ) {
 	return count;
 }
 
-static const idMaterial *Common_FindFirstResolvedMaterial( const char * const *materialNames, int materialCount ) {
-	const idMaterial *fallback = NULL;
-	for ( int i = 0; i < materialCount; i++ ) {
-		const char *materialName = materialNames[i];
-		if ( materialName == NULL || materialName[0] == '\0' ) {
-			continue;
-		}
-
-		const idMaterial *material = declManager->FindMaterial( materialName, true );
-		if ( fallback == NULL ) {
-			fallback = material;
-		}
-		if ( material != NULL && material->GetState() != DS_DEFAULTED ) {
-			return material;
-		}
-	}
-	return fallback;
-}
-
-static void Common_DrawLoadingExpansionSlice( const idMaterial *material, const float splashX, const float splashY,
-	const float splashW, const float splashH, const float expansionSize, const float baseExtent,
-	const bool vertical, const bool trailingEdge ) {
-	if ( material == NULL || expansionSize <= 0.0f || baseExtent <= 0.0f ) {
-		return;
-	}
-
-	const float fraction = idMath::ClampFloat( 0.0f, 1.0f, expansionSize / baseExtent );
-	if ( fraction <= 0.0f ) {
-		return;
-	}
-
-	if ( vertical ) {
-		if ( trailingEdge ) {
-			renderSystem->DrawStretchPic( splashX, splashY + splashH, splashW, expansionSize, 0.0f, 0.0f, 1.0f, fraction, material );
-		} else {
-			renderSystem->DrawStretchPic( splashX, splashY - expansionSize, splashW, expansionSize, 0.0f, 1.0f - fraction, 1.0f, 1.0f, material );
-		}
-	} else if ( trailingEdge ) {
-		renderSystem->DrawStretchPic( splashX + splashW, splashY, expansionSize, splashH, 0.0f, 0.0f, fraction, 1.0f, material );
-	} else {
-		renderSystem->DrawStretchPic( splashX - expansionSize, splashY, expansionSize, splashH, 1.0f - fraction, 0.0f, 1.0f, 1.0f, material );
-	}
-}
-
 /*
 =================
 Common_SmallCharCellForCodePoint
@@ -7186,7 +7142,8 @@ struct InitializationScope {
 		if ( !initializationActive ) return;
 		initializationActive = false;
 		initializationMessage.Clear();
-		RetainedUI_EndInitialization();
+		// openPREY: the screen stays up: the session's fallback screen carries
+		// it on until a menu or a map takes over and ends it (idSessionLocal::Draw).
 		if ( cvarSystem->GetCVarBool( "ui_retainedTrace" ) ) {
 			common->Printf( "INITIALIZATION_PRESENTATION frames=%d drawMsec=%.3f maxGapMsec=%.3f maxHookGapMsec=%.3f totalMsec=%.3f\n",
 				initializationFrames, initializationDrawMsec, initializationMaxGap, initializationMaxHookGap,
@@ -7264,10 +7221,6 @@ void idCommonLocal::PrintLoadingMessage( const char *msg ) {
 
 	const float virtualWidth = static_cast<float>( SCREEN_WIDTH );
 	const float virtualHeight = static_cast<float>( SCREEN_HEIGHT );
-	float splashX = 0.0f;
-	float splashY = 0.0f;
-	float splashW = virtualWidth;
-	float splashH = virtualHeight;
 	float correctedX = 0.0f;
 	float correctedY = 0.0f;
 	float correctedW = virtualWidth;
@@ -7297,58 +7250,18 @@ void idCommonLocal::PrintLoadingMessage( const char *msg ) {
 		correctedH = virtualHeight * textScaleY;
 	}
 
-	if ( cvarSystem->GetCVarBool( "ui_aspectCorrection" ) ) {
-		splashX = correctedX;
-		splashY = correctedY;
-		splashW = correctedW;
-		splashH = correctedH;
-	}
-
+	// openPREY: the retained document is the initializing screen; this is only
+	// what shows if it cannot draw (a mod without it): the step on black. The
+	// stock loading painting is no longer drawn here.
 	renderSystem->SetColor( colorBlack );
 	renderSystem->DrawStretchPic( 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, 1, 1, declManager->FindMaterial( "_white" ) );
-	renderSystem->SetColor( colorWhite );
-	static const char *splashMaterialCandidates[] = {
-		"guis/assets/loading/loading",
-		"gfx/guis/loadscreens/generic",
-		"gfx/splashScreen",
-		"gfx/splashscreen"
-	};
-	const idMaterial *splashMaterial = Common_FindFirstResolvedMaterial(
-		splashMaterialCandidates,
-		static_cast<int>( sizeof( splashMaterialCandidates ) / sizeof( splashMaterialCandidates[0] ) ) );
-	if ( splashMaterial != NULL ) {
-		if ( idStr::IcmpPath( splashMaterial->GetName(), "guis/assets/loading/loading" ) == 0 ) {
-			static const char *edgeMaterialNames[] = {
-				"guis/assets/loading/loading_left",
-				"guis/assets/loading/loading_right",
-				"guis/assets/loading/loading_top",
-				"guis/assets/loading/loading_bottom"
-			};
-			const idMaterial *edgeMaterials[4];
-			for ( int i = 0; i < 4; i++ ) {
-				edgeMaterials[i] = Common_FindFirstResolvedMaterial( &edgeMaterialNames[i], 1 );
-			}
-
-			const float xExpand = splashX > 0.0f ? splashX : 0.0f;
-			const float yExpand = splashY > 0.0f ? splashY : 0.0f;
-			if ( xExpand > 0.0f ) {
-				Common_DrawLoadingExpansionSlice( edgeMaterials[0], splashX, splashY, splashW, splashH, xExpand, splashW, false, false );
-				Common_DrawLoadingExpansionSlice( edgeMaterials[1], splashX, splashY, splashW, splashH, xExpand, splashW, false, true );
-			} else if ( yExpand > 0.0f ) {
-				Common_DrawLoadingExpansionSlice( edgeMaterials[2], splashX, splashY, splashW, splashH, yExpand, splashH, true, false );
-				Common_DrawLoadingExpansionSlice( edgeMaterials[3], splashX, splashY, splashW, splashH, yExpand, splashH, true, true );
-			}
-		}
-		renderSystem->DrawStretchPic( splashX, splashY, splashW, splashH, 0, 0, 1, 1, splashMaterial );
-	}
 
 	const int charCount = Common_CountVisibleSmallChars( msg );
 	const float charWidth = SMALLCHAR_WIDTH * textScaleX;
 	const float charHeight = SMALLCHAR_HEIGHT * textScaleY;
 	const float textWidth = charCount * charWidth;
 	const float textX = correctedX + ( correctedW - textWidth ) * 0.5f;
-	const float textY = correctedY + 410.0f * textScaleY +
-		( cvarSystem->GetCVarBool( "ui_aspectCorrection" ) ? splashY : 0.0f );
+	const float textY = correctedY + 410.0f * textScaleY;
 	Common_DrawScaledSmallString( textX, textY, charWidth, charHeight, msg,
 		idVec4( 0.65f, 0.75f, 1.0f, 0.8f ), true, declManager->FindMaterial( "textures/bigchars", false ) );
 	renderSystem->SetColor( idVec4( 1.0f, 1.0f, 1.0f, 1.0f ) );

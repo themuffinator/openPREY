@@ -1946,14 +1946,24 @@ nothing of the stock screen draws beneath it.
 
 ### 12.6 The initializing screen
 
-**Status: built, off by default.** While the engine starts it repaints one
+**Status: built, always on.** While the engine starts it repaints one
 screen between its startup steps (`RetainedUI_DrawInitialization` in
-`src/ui/RetainedUI.cpp`). With `ui_retained 1` that screen is the retained
-document `guis/loading/initialization.rui`; with `ui_retained 0` the engine
-keeps its fallback, the stock loading painting with its characters and a line
-of console text. The retained screen does not use the painting or any other
-retail picture, and draws no characters: it is portal light in space, the
-cool register of section 2 alone.
+`src/ui/RetainedUI.cpp`): the retained document
+`guis/loading/initialization.rui`, whatever `ui_retained` says, since the
+screen has no stock counterpart to choose. The stock loading painting with its
+characters, which the engine drew here before, is gone; a document that cannot
+draw (a mod without it) leaves only the startup step in console text on black.
+The retained screen does not use the painting or any other retail picture, and
+draws no characters: it is portal light in space, the cool register of section
+2 alone.
+
+The screen outlives startup. Between the last step and the menu, and whenever
+nothing else draws (no menu, no map), the session's fallback screen
+(`Session_DrawFallbackLoadingScreen`) carries it on as the last step left it,
+with its status line and loops running, so the hand-off to the menu shows no
+change of screen; it used to draw the stock painting without text. The session
+ends it when a menu or a map takes over. A fallback that starts with no screen
+up shows it with every step done and no status line.
 
 `tools/ui/build_retained_initialization.py` writes the document, and
 `tools/ui/initialization_textures.py` paints its nine textures into

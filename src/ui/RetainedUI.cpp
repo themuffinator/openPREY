@@ -2172,17 +2172,22 @@ void RetainedUI_EndInitialization() {
 bool RetainedUI_CanUpdateInitialization() {
 	return std::this_thread::get_id() == editThread && !editCallDepth && !editWorkDepth &&
 		!resourcesRefreshing && !editDraining && initializationView && !initializationView->failed &&
-		cvarSystem->GetCVarBool("ui_retained") && !ui_retainedReducedMotion.GetBool() &&
+		!ui_retainedReducedMotion.GetBool() &&
 		renderSystem && renderSystem->IsOpenGLRunning();
 }
+// openPREY: the initializing screen is always this retained document; it has
+// no stock counterpart for ui_retained to choose. A NULL message carries the
+// screen on as the last step left it, for the session's fallback screen
+// between startup and the menu (Session_DrawFallbackLoadingScreen); a screen
+// that starts that way shows every step done and no status line.
 bool RetainedUI_DrawInitialization(const char* message) {
-	if (!cvarSystem->GetCVarBool("ui_retained")) { RetainedUI_EndInitialization(); return false; }
 	static int failedGeneration = -1;
 	const int generation = renderSystem->GetVideoRestartCount();
 	if (failedGeneration == generation) return false;
 	static bool drawing = false;
 	if (drawing) return false;
 	struct Guard { bool& flag; Guard(bool& f):flag(f){flag=true;} ~Guard(){flag=false;} } guard(drawing);
+	const bool fresh = !initializationView;
 	if (!initializationView) {
 		const char* path = "guis/loading/initialization.rui";
 		void* bytes = nullptr; const int size = fileSystem->ReadFile(path,&bytes);
@@ -2210,12 +2215,15 @@ bool RetainedUI_DrawInitialization(const char* message) {
 	std::string error;
 	const auto& previous = initializationView->runtime->GetState();
 	const auto oldMessage = previous.find("message");
-	const bool changed = oldMessage == previous.end() || oldMessage->second != openq4::ui::StateValue(std::string(message));
+	const bool carried = message == nullptr;
+	if (carried && fresh) message = "";
+	const bool changed = message != nullptr &&
+		(oldMessage == previous.end() || oldMessage->second != openq4::ui::StateValue(std::string(message)));
 	if (changed) {
 		// openPREY: Prey's six startup steps are #str_04346 (sound) to
 		// #str_04351 (menus); #str_04343 (loading) is step 0.
-		int step = 0;
-		for (int i=0; i<6; ++i) {
+		int step = carried ? 6 : 0;
+		for (int i=0; i<6 && !carried; ++i) {
 			if (!idStr::Icmp(message,common->GetLanguageDict()->GetString(va("#str_%05d",4346+i)))) step=i+1;
 		}
 		if (!initializationView->runtime->SetState({{"message",std::string(message)}, {"step",double(step)}},error,PresentationTime())) return false;
