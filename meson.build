@@ -231,6 +231,13 @@ foreach version_line : version_metadata_result.stdout().strip().split('\n')
   endif
 endforeach
 
+# A tree without git history (GitHub's "Download ZIP", an exported tree) has no
+# commit count, so it builds as build 0. Its saves load only in that same build.
+if openq4_commit_count == '0'
+  warning('No git history found: this build is numbered 0. Its savegames load only in this exact build. ' +
+    'Clone the repository with git (full history) for a numbered build.')
+endif
+
 build_engine = get_option('build_engine')
 build_games = get_option('build_games')
 build_game_sp = get_option('build_game_sp')
