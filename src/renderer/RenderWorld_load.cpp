@@ -1549,6 +1549,7 @@ void idRenderWorldLocal::FreeWorld() {
 		doublePortals = NULL;
 		numInterAreaPortals = 0;
 	}
+	FreeGamePortals();
 
 	if ( areaNodes ) {
 		R_StaticFree( areaNodes );

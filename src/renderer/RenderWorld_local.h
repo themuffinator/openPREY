@@ -58,6 +58,22 @@ typedef struct doublePortal_s {
 	struct doublePortal_s *	nextFoggedPortal;
 } doublePortal_t;
 
+// Prey's game portals (RegisterGamePortals): one-way links from the area of
+// an entity with a remote camera (cameraTarget, portalTarget, a portal_buddy)
+// to its target's area. Only the game's PVS and connected-area flood follow
+// them, through NumPortalsInArea/GetPortal; every renderer flood walks the
+// real portal chains and never sees them. Retail PREY.exe keeps them in a
+// separate array (sub_4d4a90 builds it) with handles after the real portals.
+typedef struct gamePortal_s {
+	int						areas[2];		// source area, destination area
+	int						blockingBits;	// open (0) for a camera, PS_BLOCK_ALL for a portal pair until it opens
+	idWinding				srcWinding;		// 64 unit square at each end, across axis[1] and axis[2]
+	idWinding				dstWinding;
+	idVec3					src;
+	idVec3					dst;
+	idStr					name;			// the source entity, for FindGamePortal
+} gamePortal_t;
+
 typedef struct lightGridPoint_s {
 	idVec3					origin;
 	float					visibilityMeanDistance;
@@ -252,6 +268,9 @@ public:
 	doublePortal_t *		doublePortals;
 	int						numInterAreaPortals;
 
+	// handles numInterAreaPortals + 1 + index
+	idList<gamePortal_t *>	gamePortals;
+
 	idList<idRenderModel *>	localModels;
 	idRenderWorldMD5RProcData *	md5rProcData;
 
@@ -389,6 +408,16 @@ public:
 	qhandle_t				FindPortal( const idBounds &b ) const;
 	void					SetPortalState( qhandle_t portal, int blockingBits );
 	int						GetPortalState( qhandle_t portal );
+
+	// Prey game portals (RenderWorld_portals.cpp)
+	virtual qhandle_t		FindGamePortal( const char *name );
+	virtual void			RegisterGamePortals( idMapFile *mapFile );
+	virtual void			DrawGamePortals( int mode, const idMat3 &viewAxis );
+	virtual idVec3			GetGamePortalSrc( qhandle_t handle );
+	virtual idVec3			GetGamePortalDst( qhandle_t handle );
+	virtual bool			IsGamePortal( qhandle_t handle );
+	gamePortal_t *			GamePortalForHandle( qhandle_t handle ) const;
+	void					FreeGamePortals( void );
 	bool					AreasAreConnected( int areaNum1, int areaNum2, portalConnection_t connection );
 	void					FloodConnectedAreas( portalArea_t *area, int portalAttributeIndex );
 	idScreenRect &			GetAreaScreenRect( int areaNum ) const { return areaScreenRect[areaNum]; }

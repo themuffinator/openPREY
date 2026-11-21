@@ -1704,6 +1704,30 @@ void R_ReloadGLSLPrograms_f( const idCmdArgs &args ) {
 void R_LoadARBProgramsForStartup( void ) {
 }
 
+// Every parsed material's authored programs compile now, behind the loading
+// screen. Compiled on first draw, the flash overlay of game/feedingtowera's
+// mirror (textures/sfx/scanburn, screenprocess.vfp) stalled its frame for
+// 650-840 ms: glslang's process setup plus the pair's compile.
+void R_PrecacheLevelMaterialPrograms( void ) {
+	R_RenderThread_Sync( "material program precache" );
+	const int start = Sys_Milliseconds();
+	int materials = 0, programs = 0;
+	const int numMaterials = declManager->GetNumDecls( DECL_MATERIAL );
+	for ( int i = 0; i < numMaterials; i++ ) {
+		const idDecl *decl = declManager->DeclByIndex( DECL_MATERIAL, i, false );
+		if ( decl == NULL || decl->GetState() != DS_PARSED ) {
+			continue;
+		}
+		const int ready = VK_MaterialPrograms_Precache( static_cast<const idMaterial *>( decl ) );
+		if ( ready > 0 ) {
+			materials++;
+			programs += ready;
+		}
+	}
+	common->Printf( "Vulkan: %d authored program stages of %d materials ready in %d msec\n",
+			programs, materials, Sys_Milliseconds() - start );
+}
+
 void R_ReportShaderPrograms_f( const idCmdArgs &args ) {
 	R_RenderThread_Sync( "material program stats" );
 	const bool detailed = args.Argc() < 2 || idStr::Icmp( args.Argv( 1 ), "summary" ) != 0;

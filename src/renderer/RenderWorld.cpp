@@ -1332,6 +1332,12 @@ int idRenderWorldLocal::NumPortalsInArea( int areaNum ) {
 	for ( portal = area->portals ; portal ; portal = portal->next ) {
 		count++;
 	}
+	// Prey game portals leaving this area follow the real ones (retail sub_4c4340)
+	for ( int i = 0 ; i < gamePortals.Num() ; i++ ) {
+		if ( gamePortals[i]->areas[0] == areaNum ) {
+			count++;
+		}
+	}
 	return count;
 }
 
@@ -1359,6 +1365,21 @@ exitPortal_t idRenderWorldLocal::GetPortal( int areaNum, int portalNum ) {
 			ret.w = portal->w;
 			ret.blockingBits = portal->doublePortal->blockingBits;
 			ret.portalHandle = portal->doublePortal - doublePortals + 1;
+			return ret;
+		}
+		count++;
+	}
+	for ( int i = 0 ; i < gamePortals.Num() ; i++ ) {
+		const gamePortal_t *gamePortal = gamePortals[i];
+		if ( gamePortal->areas[0] != areaNum ) {
+			continue;
+		}
+		if ( count == portalNum ) {
+			ret.areas[0] = gamePortal->areas[0];
+			ret.areas[1] = gamePortal->areas[1];
+			ret.w = &gamePortal->srcWinding;
+			ret.blockingBits = gamePortal->blockingBits;
+			ret.portalHandle = numInterAreaPortals + 1 + i;
 			return ret;
 		}
 		count++;

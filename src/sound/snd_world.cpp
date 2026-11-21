@@ -1308,6 +1308,12 @@ void idSoundWorldLocal::ResolveOrigin( const int stackDepth, const soundPortalTr
 	for( int p = 0; p < numPortals; p++ )
 	{
 		exitPortal_t re = renderWorld->GetPortal( soundArea, p );
+		// Prey game portals link a camera's area for the game's PVS; sound
+		// does not travel them here
+		if( renderWorld->IsGamePortal( re.portalHandle ) )
+		{
+			continue;
+		}
 
 		float occlusionDistance = 0;
 

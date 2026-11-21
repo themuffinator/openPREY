@@ -50,8 +50,70 @@ Two deliberate differences from retail:
 - A portal or skybox view inherits `isMirror` from its parent. Both keep the
   parent's axes or rotate them rigidly, so a view nested in a mirror is still
   mirrored. Retail clears the flag, which culls the wrong faces in that case.
-- Mirrors and portals stay unclipped (`numClipPlanes = 0`). The retail clip-side
-  maths has not been reconstructed.
+- A skybox or remote-camera view clears the clip plane it copied from its
+  parent. Retail's skybox view keeps it, but a mirror or portal's plane means
+  nothing at another camera.
+
+## The clip plane
+
+A mirror or portal camera sits behind its surface. The mirror camera is the
+viewer's reflection. The portal camera is behind the exit by the viewer's
+distance from the entrance. Whatever lies between that camera and the surface
+must not draw: the wall the exit is set in, the room behind a mirror, a body
+standing at the target. Retail gives both views one clip plane:
+
+| View | Plane (positive side visible) | Retail |
+|---|---|---|
+| Mirror | The mirror's own plane, facing the viewer | `sub_4f0b30`, as in Doom 3 |
+| Direct portal | Through the remote camera's origin, normal along its `viewaxis[0]` | `sub_4f05d0` |
+
+Doom 3 clipped only its depth fill, with an alpha-tested texgen that no
+programmable pass honours. `R_SetupObliqueNearPlane` (`tr_main.cpp`) makes the
+plane the projection's near plane instead (an oblique frustum, after Lengyel).
+That clips every pass of both backends with no shader change. Three things
+follow from it:
+
+- **Depth is no longer a function of eye z alone.** `viewDef->obliqueNearPlane`
+  marks such a view. Light rectangles keep their whole 0..1 depth-bounds range
+  there.
+- **Shadow volumes are always capped there.** A volume drawn without caps
+  relies on a near plane at the eye. An oblique plane cuts volumes far from the
+  eye.
+- **A camera on the visible side keeps the ordinary projection.** Retail's gate
+  admits a viewer up to 16 units behind a portal, which puts its camera in
+  front of the exit plane.
+
+`r_skipSubviewClip 1` (cheat) draws both views unclipped, for comparisons.
+Unclipped, the glow portal in `game/shuttlea` showed a body standing behind its
+exit, and the spawned lotab portal below showed the player model at its target.
+
+## Game portals
+
+Prey links the area of every entity with a remote camera to its target's area,
+for the game's PVS only. The render world builds these "game portals" as each
+map loads (`RegisterGamePortals` in `RenderWorld_portals.cpp`, retail
+`sub_4d4a90`). Without them an entity in a camera's area is outside the
+player's PVS and stays dormant: it never thinks and never presents a model. In
+`game/feedingtowerb`, the giant hunter that the mini asteroid's skybox shows
+(the area of `biosky`) never walked into view.
+
+- **What qualifies:** a spawned entity (its entityDef has a `spawnclass`)
+  without `noportal`. It names a `cameraTarget`, a `portalTarget`
+  (`info_portalflow`), or, for a monster with `portal 1`, a `portal_buddy`.
+- **How they link:** from the area of the entity's origin to the area of the
+  target's origin, one way. A portal pair (`portal_buddy`) links both ways
+  unless `portal_noTeleport` is set, and starts closed. Camera links start open.
+- **What they look like to callers:** `NumPortalsInArea` and `GetPortal` list
+  them after the area's real portals, with a 64-unit square at the source as
+  their winding. Their handles follow the real portals' handles (`IsGamePortal`,
+  `FindGamePortal`, `SetPortalState`).
+- **Who follows them:** the game's `idPVS` and its connected-area test. No
+  renderer flood does: the view, light and connected-area floods walk the real
+  portal chains. openPREY's sound propagation and reverb skip them too.
+  Retail's game-portal sound areas are not implemented.
+
+`g_showGamePortals -1` draws them all and `g_showGamePortals n` the n-th, as
+in retail. `developer 1` lists them as the map loads.
 
 ## What each backend guarantees
 
@@ -101,13 +163,16 @@ and SSAO paths are where the two backends differ. Use `noclip` and
 | Glow portal opened at runtime | `game/shuttlea` | `trigger object_glowportal_totower`, then `setviewpos -70640 14042 9554 0` |
 | Portal with world geometry behind it | `game/lotab` | `setviewpos -447 791 341 180`, then `spawn object_portal startActive 1 cameraTarget info_player_start_5 origin "-527 791 330"` |
 | Sky inside a portal, sky around it | `game/lotab` | `setviewpos 400 800 760 90`, then the same `spawn` with `origin "400 880 760"` |
+| Mirror swap and fade | `game/feedingtowera` | Let the slab ride play from the start (player bound, about 60 s at `com_maxfps 60`). `MirrorFlash` swaps the direct mirror for the fading render-map mirror and reveals the hunters behind it. Watch `com_speeds 1` for a long frame |
+| Portal clip plane | `game/shuttlea` | The glow portal above, from 60 to 500 units back and at 25 and 45 degrees. Compare with `r_skipSubviewClip 1`: unclipped, a body behind the exit draws across the view |
+| Game portal PVS link | `game/feedingtowerb` | `setviewpos 10844 -5184 3412 0` on the mini asteroid, then `script "map_feedingtowerb::HugeHunterRun();"`. The giant hunter walks into the sky view, uses the console and opens a portal |
 
 Do not launch these runs with `s_noSound 1`. Several map scripts wait on a
 sound's length, and a zero length turns the wait into a runaway loop that drops
 the map (`game/feedingtowera`) or a cinematic that never ends
 (`game/roadhouse`). Mute with `+set s_volume 0` instead.
 
-All seven cases matched between OpenGL and Vulkan on 11 November 2026.
+All seven cases matched between OpenGL and Vulkan on 11 November 2026. The last three were added on 21 November 2026 with the clip plane and game portals.
 
 ## Known gaps
 
@@ -117,4 +182,3 @@ All seven cases matched between OpenGL and Vulkan on 11 November 2026.
   included; `levelshot-capture.md`); Vulkan's still blurs at full size.
 - With `r_skipPostProcess 1`, a sky drawn as the main view (camera inside the sky
   scene) is brighter on OpenGL than on Vulkan for the same reason.
-- Mirror and portal clip planes remain disabled, as above.

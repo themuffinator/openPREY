@@ -851,6 +851,7 @@ static idCVar r_temporalAADefaultMigrated( "r_temporalAADefaultMigrated", "0", C
 extern idCVar r_temporalAA;
 idCVar r_frontBuffer( "r_frontBuffer", "0", CVAR_RENDERER | CVAR_BOOL, "draw to front buffer for debugging" );
 idCVar r_skipSubviews( "r_skipSubviews", "0", CVAR_RENDERER | CVAR_INTEGER, "1 = don't render any gui elements on surfaces" );
+idCVar r_skipSubviewClip( "r_skipSubviewClip", "0", CVAR_RENDERER | CVAR_BOOL | CVAR_CHEAT, "1 = draw mirror and portal views without their clip plane (diagnostic)" );
 idCVar r_skipParticles( "r_skipParticles", "0", CVAR_RENDERER | CVAR_INTEGER, "1 = skip all particle systems", 0, 1, idCmdSystem::ArgCompletion_Integer<0,1> );
 idCVar r_subviewOnly( "r_subviewOnly", "0", CVAR_RENDERER | CVAR_BOOL, "1 = don't render main view, allowing subviews to be debugged" );
 idCVar r_shadows( "r_shadows", "1", CVAR_RENDERER | CVAR_BOOL  | CVAR_ARCHIVE, "enable shadows" );
@@ -6878,6 +6879,8 @@ void idRenderSystemLocal::EndLevelLoad( void ) {
 	session->BeginLoadingAssetQueue( pendingImageLoads );
 	globalImages->EndLevelLoad();
 	session->EndLoadingAssetQueue();
+
+	R_PrecacheLevelMaterialPrograms();
 
 	if ( r_forceLoadImages.GetBool() ) {
 		RB_ShowImages();

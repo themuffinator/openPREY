@@ -31,6 +31,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "tr_local.h"
 #include "../sound/sound.h"
+#include "../framework/declEntityDef.h"
 
 static ID_INLINE idSoundEmitter *R_GetPortalShaderSoundEmitter( idSoundEmitter *referenceSound, int soundEmitterHandle ) {
 	if ( referenceSound != NULL ) {
@@ -1149,7 +1150,7 @@ NumPortals
 ==============
 */
 int idRenderWorldLocal::NumPortals( void ) const {
-	return numInterAreaPortals;
+	return numInterAreaPortals + gamePortals.Num();
 }
 
 /*
@@ -1243,6 +1244,28 @@ void		idRenderWorldLocal::SetPortalState( qhandle_t portal, int blockTypes ) {
 		return;
 	}
 
+	// A game portal only gates the game's PVS: no render-side connectivity
+	// changes with it (retail sub_4d13b0 floods nothing).
+	gamePortal_t *gamePortal = GamePortalForHandle( portal );
+	if ( gamePortal != NULL ) {
+		if ( gamePortal->blockingBits == blockTypes ) {
+			return;
+		}
+		gamePortal->blockingBits = blockTypes;
+		if ( session->writeDemo ) {
+			session->writeDemo->WriteInt( DS_RENDER );
+			session->writeDemo->WriteInt( DC_SET_PORTAL_STATE );
+			session->writeDemo->WriteInt( portal );
+			session->writeDemo->WriteInt( blockTypes );
+		}
+		return;
+	}
+	// Above the real portals is the game's range. A demo replays the world
+	// without the game, so its recorded game-portal states have nothing to set.
+	if ( portal > numInterAreaPortals && gamePortals.Num() == 0 ) {
+		return;
+	}
+
 	if ( portal < 1 || portal > numInterAreaPortals ) {
 		common->Error( "SetPortalState: bad portal number %i", portal );
 	}
@@ -1279,11 +1302,260 @@ int		idRenderWorldLocal::GetPortalState( qhandle_t portal ) {
 		return 0;
 	}
 
+	const gamePortal_t *gamePortal = GamePortalForHandle( portal );
+	if ( gamePortal != NULL ) {
+		return gamePortal->blockingBits;
+	}
+
 	if ( portal < 1 || portal > numInterAreaPortals ) {
 		common->Error( "GetPortalState: bad portal number %i", portal );
 	}
 
 	return doublePortals[portal-1].blockingBits;
+}
+
+/*
+==============================================================================
+
+Prey game portals
+
+==============================================================================
+*/
+
+/*
+==============
+idRenderWorldLocal::GamePortalForHandle
+==============
+*/
+gamePortal_t *idRenderWorldLocal::GamePortalForHandle( qhandle_t handle ) const {
+	const int index = handle - numInterAreaPortals - 1;
+	if ( index < 0 || index >= gamePortals.Num() ) {
+		return NULL;
+	}
+	return gamePortals[index];
+}
+
+/*
+==============
+idRenderWorldLocal::FreeGamePortals
+==============
+*/
+void idRenderWorldLocal::FreeGamePortals( void ) {
+	gamePortals.DeleteContents( true );
+}
+
+/*
+==============
+R_GamePortalEntityDict
+
+An entity's keys over its entityDef's, as the game will spawn it.
+==============
+*/
+static void R_GamePortalEntityDict( const idMapEntity *mapEnt, idDict &dict ) {
+	dict.Clear();
+	const char *classname = mapEnt->epairs.GetString( "classname" );
+	if ( classname[0] != '\0' ) {
+		const idDecl *decl = declManager->FindType( DECL_ENTITYDEF, classname, false );
+		if ( decl != NULL && decl->GetState() != DS_DEFAULTED ) {
+			dict = static_cast<const idDeclEntityDef *>( decl )->dict;
+		}
+	}
+	dict.Copy( mapEnt->epairs );
+}
+
+/*
+==============
+R_GamePortalAxis
+==============
+*/
+static idMat3 R_GamePortalAxis( const idDict &dict ) {
+	if ( dict.FindKey( "rotation" ) != NULL ) {
+		return dict.GetMatrix( "rotation", "1 0 0 0 1 0 0 0 1" );
+	}
+	return idAngles( dict.GetFloat( "pitch" ), dict.GetFloat( "angle" ), dict.GetFloat( "roll" ) ).ToMat3();
+}
+
+/*
+==============
+R_GamePortalTarget
+
+The entity a map entity links its area to, or NULL (retail sub_4d2650): a
+spawned entity, not opted out with noportal, naming a cameraTarget, or a
+portal monster's portal_buddy, or an info_portalflow's portalTarget.
+==============
+*/
+static const char *R_GamePortalTarget( const idDict &dict, idMapFile *mapFile ) {
+	if ( dict.GetInt( "noportal" ) != 0 || dict.GetString( "spawnclass" )[0] == '\0' ) {
+		return NULL;
+	}
+	const char *target = dict.GetString( "cameraTarget" );
+	if ( dict.GetInt( "portal" ) != 0 && dict.FindKey( "portal_buddy" ) != NULL ) {
+		target = dict.GetString( "portal_buddy" );
+	}
+	if ( dict.FindKey( "portalTarget" ) != NULL ) {
+		target = dict.GetString( "portalTarget" );
+	}
+	if ( target[0] == '\0' || mapFile->FindEntity( target ) == NULL ) {
+		return NULL;
+	}
+	return target;
+}
+
+/*
+==============
+R_GamePortalWinding
+
+A 64 unit square through origin across axis[1] and axis[2].
+==============
+*/
+static void R_GamePortalWinding( const idVec3 &origin, const idMat3 &axis, idWinding &w ) {
+	const idVec3 right = axis[1] * 32.0f;
+	const idVec3 up = axis[2] * 32.0f;
+	w.SetNumPoints( 4 );
+	w[0] = idVec5( origin + right + up, idVec2( 0.0f, 0.0f ) );
+	w[1] = idVec5( origin + right - up, idVec2( 0.0f, 0.0f ) );
+	w[2] = idVec5( origin - right - up, idVec2( 0.0f, 0.0f ) );
+	w[3] = idVec5( origin - right + up, idVec2( 0.0f, 0.0f ) );
+}
+
+/*
+==============
+idRenderWorldLocal::RegisterGamePortals
+
+Called by the game as each map loads, after the world and before its PVS is
+built (retail sub_4d4a90). Without these links an entity standing in a
+remote camera's area is outside the player's PVS and stays dormant: in
+game/feedingtowerb the hunter that the mini asteroid's sky shows (the area
+of biosky) never walked and never drew.
+==============
+*/
+void idRenderWorldLocal::RegisterGamePortals( idMapFile *mapFile ) {
+	FreeGamePortals();
+	if ( mapFile == NULL || numPortalAreas <= 0 ) {
+		return;
+	}
+
+	idDict dict, targetDict;
+	for ( int i = 0 ; i < mapFile->GetNumEntities() ; i++ ) {
+		const idMapEntity *mapEnt = mapFile->GetEntity( i );
+		R_GamePortalEntityDict( mapEnt, dict );
+		const char *targetName = R_GamePortalTarget( dict, mapFile );
+		if ( targetName == NULL ) {
+			continue;
+		}
+		const idStr target = targetName;
+		R_GamePortalEntityDict( mapFile->FindEntity( target ), targetDict );
+
+		idVec3 src = dict.GetVector( "origin" );
+		const idMat3 srcAxis = R_GamePortalAxis( dict );
+		const idVec3 dst = targetDict.GetVector( "origin" );
+		const idMat3 dstAxis = R_GamePortalAxis( targetDict );
+
+		// a portal pair links both ways and starts closed until it opens
+		const bool pair = target.Icmp( dict.GetString( "portal_buddy" ) ) == 0;
+		if ( pair ) {
+			src += srcAxis[2] * dict.GetFloat( "offset_portal" );
+		}
+
+		const int srcArea = PointInArea( src );
+		const int dstArea = PointInArea( dst );
+		if ( srcArea < 0 ) {
+			common->Warning( "Entity '%s' has bad portal source (%s)", dict.GetString( "name" ), src.ToString() );
+			continue;
+		}
+		if ( dstArea < 0 ) {
+			common->Warning( "Entity '%s' has bad portal target '%s' (%s)", dict.GetString( "name" ), target.c_str(), dst.ToString() );
+			continue;
+		}
+
+		const int directions = pair && dict.GetInt( "portal_noTeleport" ) == 0 ? 2 : 1;
+		for ( int direction = 0 ; direction < directions ; direction++ ) {
+			gamePortal_t *gamePortal = new gamePortal_t;
+			gamePortal->src = direction == 0 ? src : dst;
+			gamePortal->dst = direction == 0 ? dst : src;
+			gamePortal->areas[0] = direction == 0 ? srcArea : dstArea;
+			gamePortal->areas[1] = direction == 0 ? dstArea : srcArea;
+			gamePortal->blockingBits = pair ? PS_BLOCK_ALL : PS_BLOCK_NONE;
+			R_GamePortalWinding( gamePortal->src, direction == 0 ? srcAxis : dstAxis, gamePortal->srcWinding );
+			R_GamePortalWinding( gamePortal->dst, direction == 0 ? dstAxis : srcAxis, gamePortal->dstWinding );
+			gamePortal->name = direction == 0 ? dict.GetString( "name" ) : targetDict.GetString( "name" );
+			gamePortals.Append( gamePortal );
+		}
+	}
+
+	common->Printf( "%d game portals\n", gamePortals.Num() );
+	if ( com_developer.GetBool() ) {
+		for ( int i = 0 ; i < gamePortals.Num() ; i++ ) {
+			common->Printf( "  GamePortal: area %d -> %d (%s)\n", gamePortals[i]->areas[0], gamePortals[i]->areas[1], gamePortals[i]->name.c_str() );
+		}
+	}
+}
+
+/*
+==============
+idRenderWorldLocal::FindGamePortal
+==============
+*/
+qhandle_t idRenderWorldLocal::FindGamePortal( const char *name ) {
+	if ( name == NULL ) {
+		return 0;
+	}
+	for ( int i = 0 ; i < gamePortals.Num() ; i++ ) {
+		if ( gamePortals[i]->name.Icmp( name ) == 0 ) {
+			return numInterAreaPortals + 1 + i;
+		}
+	}
+	return 0;
+}
+
+/*
+==============
+idRenderWorldLocal::IsGamePortal
+==============
+*/
+bool idRenderWorldLocal::IsGamePortal( qhandle_t handle ) {
+	return GamePortalForHandle( handle ) != NULL;
+}
+
+/*
+==============
+idRenderWorldLocal::GetGamePortalSrc / GetGamePortalDst
+==============
+*/
+idVec3 idRenderWorldLocal::GetGamePortalSrc( qhandle_t handle ) {
+	const gamePortal_t *gamePortal = GamePortalForHandle( handle );
+	return gamePortal != NULL ? gamePortal->src : vec3_origin;
+}
+
+idVec3 idRenderWorldLocal::GetGamePortalDst( qhandle_t handle ) {
+	const gamePortal_t *gamePortal = GamePortalForHandle( handle );
+	return gamePortal != NULL ? gamePortal->dst : vec3_origin;
+}
+
+/*
+==============
+idRenderWorldLocal::DrawGamePortals
+
+g_showGamePortals: each portal's source square, an arrow to its target while
+it is open, and its areas. A negative mode draws them all, mode n only the
+n-th.
+==============
+*/
+void idRenderWorldLocal::DrawGamePortals( int mode, const idMat3 &viewAxis ) {
+	for ( int i = 0 ; i < gamePortals.Num() ; i++ ) {
+		if ( mode > 0 && i != mode - 1 ) {
+			continue;
+		}
+		const gamePortal_t *gamePortal = gamePortals[i];
+		const bool open = ( gamePortal->blockingBits & PS_BLOCK_VIEW ) == 0;
+		const idVec4 &color = open ? colorGreen : colorRed;
+		DebugWinding( color, gamePortal->srcWinding, vec3_origin, mat3_identity );
+		if ( open ) {
+			DebugArrow( color, gamePortal->src, gamePortal->dst, 16 );
+		}
+		DrawText( va( "%d -> %d %s", gamePortal->areas[0], gamePortal->areas[1], gamePortal->name.c_str() ),
+			gamePortal->src + viewAxis[2] * 40.0f, 0.25f, color, viewAxis );
+	}
 }
 
 /*

@@ -97,6 +97,16 @@ retain the existing built-in default only while every candidate source is
 absent. Source selection is cached until an explicit shader reload or device
 shutdown. A complete pair retains the shared filesystem search order.
 
+Programs compile at level load, not on first draw. At the end of
+`idRenderSystemLocal::EndLevelLoad`, `R_PrecacheLevelMaterialPrograms` passes
+every parsed material to `VK_MaterialPrograms_Precache`. That compiles the
+authored GLSL and translated ARB pairs the material's stages would draw with,
+using the same native-family test as the draw path. The first compile also pays
+for glslang's process setup. Done on first draw, the flash overlay at
+`game/feedingtowera`'s mirror (`textures/sfx/scanburn`, `screenprocess.vfp`)
+froze its frame for 650 to 840 ms. OpenGL's implementation is empty: it loads a
+material's ARB programs while the material parses.
+
 OpenGL reload invalidates parsed material stages and the engine's material GLSL
 stages. Failed attempts are cached in the current GL context, so a broken file
 does not compile again on every draw. Explicit reload or a new context retries

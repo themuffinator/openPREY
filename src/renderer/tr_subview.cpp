@@ -174,9 +174,13 @@ static viewDef_t *R_PortalSubviewBySurface( drawSurf_t *drawSurf ) {
 	// clears the flag here, which culls the wrong faces in that nested case.
 	parms->isMirror = tr.viewDef->isMirror;
 	parms->renderView.viewID = 0;
-	// Keep the retail-compatible unclipped workaround until mirror/portal clip
-	// behavior has been validated against the original renderer.
-	parms->numClipPlanes = 0;
+	// The camera sits behind the exit by the viewer's distance from the
+	// entrance. Retail (sub_4f05d0) clips the view at the remote camera,
+	// facing the way it looks, so the wall behind the exit and the rooms past
+	// it do not draw over what the portal shows (R_SetupObliqueNearPlane).
+	parms->numClipPlanes = r_skipSubviewClip.GetBool() ? 0 : 1;
+	parms->clipPlanes[0].SetNormal( remoteRenderView->viewaxis[0] );
+	parms->clipPlanes[0].FitThroughPoint( remoteRenderView->vieworg );
 	R_TransformPortalSubview( portalEntity, *remoteRenderView, *parms );
 	R_SyncSubviewTime( parms );
 	R_ResetSubviewTemporalState( parms );
@@ -212,6 +216,9 @@ static viewDef_t *R_PortalSkyboxSubviewBySurface( drawSurf_t *drawSurf ) {
 	parms->renderView.viewID = 0;
 	parms->renderView.vieworg = remoteRenderView->vieworg;
 	parms->renderView.viewaxis = tr.viewDef->renderView.viewaxis;
+	// A portal or mirror's clip plane is in its own world; at the sky camera
+	// it would cut the sky at random.
+	parms->numClipPlanes = 0;
 	R_SyncSubviewTime( parms );
 	R_ResetSubviewTemporalState( parms );
 	parms->initialViewAreaOrigin = remoteRenderView->vieworg;
@@ -410,10 +417,13 @@ static viewDef_t *R_MirrorViewBySurface( drawSurf_t *drawSurf ) {
 
 	R_LocalPointToGlobal( drawSurf->space->modelMatrix, viewOrigin, parms->initialViewAreaOrigin );
 
-	// Keep mirrors unclipped for retail Prey parity while the dedicated clip
-	// behavior remains an explicitly tracked validation gap.
-	parms->numClipPlanes = 0;
-	
+	// set the mirror clip plane, as Doom 3 and retail (sub_4f0b30) do: what
+	// lies behind the mirror must not draw in front of the reflection
+	parms->numClipPlanes = r_skipSubviewClip.GetBool() ? 0 : 1;
+	parms->clipPlanes[0] = -camera.axis[0];
+
+	parms->clipPlanes[0][3] = -( camera.origin * parms->clipPlanes[0].Normal() );
+
 	return parms;
 }
 
@@ -470,6 +480,8 @@ static void R_RemoteRender( drawSurf_t *surf, textureStage_t *stage ) {
 
 	parms->renderView = *surf->space->entityDef->parms.remoteRenderView;
 	parms->renderView.viewID = 0;	// clear to allow player bodies to show up, and suppress view weapons
+	// a camera elsewhere: a parent mirror's or portal's clip plane is not its own
+	parms->numClipPlanes = 0;
 	R_SyncSubviewTime( parms );
 	R_ResetSubviewTemporalState( parms );
 	parms->initialViewAreaOrigin = parms->renderView.vieworg;

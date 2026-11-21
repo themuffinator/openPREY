@@ -466,6 +466,10 @@ typedef struct viewDef_s {
 	int					numClipPlanes;			// mirrors will often use a single clip plane
 	idPlane				clipPlanes[MAX_CLIP_PLANES];		// in world space, the positive side
 												// of the plane is the visible side
+	// R_SetupProjection moved the near plane onto clipPlanes[0]: depth is no
+	// longer a function of eye z alone, so nothing may derive it from
+	// projectionMatrix[10] and [14] (depth bounds, linearised depth).
+	bool				obliqueNearPlane;
 	idScreenRect		viewport;				// in real pixels and proper Y flip
 
 	idScreenRect		scissor;
@@ -1768,6 +1772,7 @@ const float RB_PLAYER_RIMLIGHT_MAX_FLOOR = 1.0f;
 extern idCVar r_playerRimlightPower;	// player rimlight falloff exponent
 extern idCVar r_playerRimlightFloor;	// player rimlight floor, keeps a sliver of colour on camera-facing surfaces
 extern idCVar r_skipSubviews;			// 1 = don't render any mirrors / cameras / etc
+extern idCVar r_skipSubviewClip;		// 1 = mirror and portal views keep no clip plane
 extern idCVar r_skipGuiShaders;			// 1 = don't render any gui elements on surfaces
 extern idCVar r_skipParticles;			// 1 = don't render any particles
 extern idCVar r_skipUpdates;			// 1 = don't accept any entity or light updates, making everything static
@@ -2465,6 +2470,9 @@ bool	RB_ARB2_DrawPreparedPackedMD5RStageBatches( const srfTriangles_t *tri );
 bool	RB_ARB2_DrawPreparedPackedMD5RDirectBatches( const srfTriangles_t *tri );
 void	R_ReloadARBPrograms_f( const idCmdArgs &args );
 void	R_LoadARBProgramsForStartup( void );
+// End of level load: compile the material programs a backend would otherwise
+// compile on first draw (Vulkan's authored GLSL and translated ARB pairs).
+void	R_PrecacheLevelMaterialPrograms( void );
 void	R_ReportShaderPrograms_f( const idCmdArgs &args );
 
 // Stable identities for the stock ARB newStage program families.  Vulkan

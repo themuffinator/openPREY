@@ -18888,6 +18888,17 @@ void R_LoadARBProgramsForStartup( void ) {
 
 /*
 ==================
+R_PrecacheLevelMaterialPrograms
+
+OpenGL loads a material's ARB programs while the material parses, so the
+level has nothing left to compile here.
+==================
+*/
+void R_PrecacheLevelMaterialPrograms( void ) {
+}
+
+/*
+==================
 R_ReloadARBPrograms_f
 
 An explicit reload is also a validation command: attempt every registered

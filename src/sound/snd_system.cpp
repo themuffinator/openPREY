@@ -2546,7 +2546,7 @@ void idSoundReverb::Update( idSoundWorldLocal* world )
 		for( int p = 0; p < numPortals; p++ )
 		{
 			const exitPortal_t exitPortal = renderWorld->GetPortal( listener.area, p );
-			if( exitPortal.w == NULL )
+			if( exitPortal.w == NULL || renderWorld->IsGamePortal( exitPortal.portalHandle ) )
 			{
 				continue;
 			}
